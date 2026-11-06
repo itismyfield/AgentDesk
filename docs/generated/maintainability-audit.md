@@ -90,9 +90,9 @@ Files under src/server/routes/ that mix raw SQL, json!() shaping, and crate::ser
 | warn | `src/server/routes/review_verdict/verdict_route.rs` |  | route file mixes SQL (5), json!() (20), and crate::services calls (5) |
 | warn | `src/server/routes/stats.rs` |  | route file mixes SQL (26), json!() (7), and crate::services calls (1) |
 
-## Service/server backflow (`service_server_backflow`)
+## Server-layer backflow (`service_server_backflow`)
 
-Files under src/services/ that reference crate::server or super::server server-layer modules.
+Production modules outside server/cli/launch/bootstrap that reference crate::server server-layer modules, and any use of the removed agentdesk_runtime_root alias.
 
 _No findings._
 

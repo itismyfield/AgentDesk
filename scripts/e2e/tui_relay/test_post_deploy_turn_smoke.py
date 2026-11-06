@@ -641,8 +641,11 @@ class RuntimeQueueWaitingInputs(unittest.TestCase):
                            ("retained_inputs", [{"input": attempt, "reason": "composer_refused"}])):
             with self.subTest(key=key):
                 self.assertEqual(len(self.violations({**self.snapshot, key: value})), 1)
-        unsettled = [{**self.snapshot["admission_binds"][0], "at": {"kind": "queued", "index": 0, "item": "d"}}]
+        unsettled = [{**self.snapshot["admission_binds"][0], "at": {"kind": "attempt"}}]
         self.assertEqual(len(self.violations({**self.snapshot, "admission_binds": unsettled})), 1)
+        # A queued bind waits only through its item; without one it is what a cleared queue leaves (#7796).
+        cleared = [{**self.snapshot["admission_binds"][0], "at": {"kind": "queued", "index": 0, "item": "d"}}]
+        self.assertEqual(self.violations({**self.snapshot, "admission_binds": cleared}), [])
 
     def test_unknown_shapes_stay_nonempty(self):
         unknown = {

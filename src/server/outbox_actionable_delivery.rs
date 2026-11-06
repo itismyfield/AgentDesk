@@ -8,7 +8,7 @@
 //! announce credential/runtime failure. Informational rows never enter this
 //! fallback path.
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use super::PendingMessageOutboxRow;
 use crate::services::discord::health::HealthRegistry;
@@ -72,14 +72,28 @@ async fn deliver_with_bot(
         Err(error) => return ("400 Bad Request", error.to_string()),
     };
     if row.source == "headless_turn" {
-        let stored: Result<Option<serde_json::Value>, _> = sqlx::query_scalar(
-            "SELECT output_origin FROM message_outbox WHERE id=$1 AND target=$2 AND content=$3",
+        let stored = sqlx::query(
+            "SELECT output_origin, to_jsonb(m)->'body_census' AS body_census
+             FROM message_outbox m WHERE id=$1 AND target=$2 AND content=$3",
         )
         .bind(row.id)
         .bind(&row.target)
         .bind(&row.content)
         .fetch_one(pg_pool)
         .await;
+        let stored = match stored {
+            Ok(row) => row,
+            Err(_) => {
+                // Observation projection failure must not replace the original authority lookup.
+                match sqlx::query("SELECT output_origin FROM message_outbox WHERE id=$1 AND target=$2 AND content=$3")
+                    .bind(row.id).bind(&row.target).bind(&row.content).fetch_one(pg_pool).await {
+                    Ok(row) => row,
+                    Err(error) => return ("503 Service Unavailable", error.to_string()),
+                }
+            }
+        };
+        options.body_census = stored.try_get("body_census").ok().flatten();
+        let stored = stored.try_get::<Option<serde_json::Value>, _>("output_origin");
         options.output_origin = match stored {
             Ok(Some(stamp)) => match serde_json::from_value(stamp) {
                 Ok(origin) => Some(origin),
@@ -88,6 +102,17 @@ async fn deliver_with_bot(
             Ok(None) => None,
             Err(error) => return ("503 Service Unavailable", error.to_string()),
         };
+    } else {
+        options.body_census = sqlx::query_scalar::<_, Option<serde_json::Value>>(
+            "SELECT to_jsonb(m)->'body_census' FROM message_outbox m WHERE id=$1 AND target=$2 AND content=$3",
+        )
+        .bind(row.id)
+        .bind(&row.target)
+        .bind(&row.content)
+        .fetch_one(pg_pool)
+        .await
+        .ok()
+        .flatten();
     }
     let (correlation_id, semantic_event_id) = row.delivery_ids();
     let content = delivery_content(&row.content, &row.source, row.reason_code.as_deref());

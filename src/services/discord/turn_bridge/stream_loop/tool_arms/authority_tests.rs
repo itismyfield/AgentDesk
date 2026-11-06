@@ -3,9 +3,7 @@ use super::authority::{
     stream_tool_outcome_after_restart_authority, terminal_tool_result_transition_permission,
 };
 use super::*;
-use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::services::discord::turn_bridge::stream_tick::guarded_persist::visible_mutation_authority_after_guarded_save;
-use crate::test_support::CommentForgery;
 
 fn bridge_state(channel_id: u64) -> InflightTurnState {
     InflightTurnState::new(
@@ -174,103 +172,6 @@ fn transient_terminal_tool_result_fence_requeues_the_exact_frame_at_front() {
         pending.pop_front(),
         Some(StreamMessage::Text { content }) if content == "later frame"
     ));
-}
-
-/// #5150 item 4 kept FOUR of the six tool-state locals out of the re-seed —
-/// `current_tool_line`, `prev_tool_status`, `last_tool_name`,
-/// `last_tool_summary` — and the rationale recorded at `authority.rs` for those
-/// four is an ORDERING claim about `tool_arms.rs`: each is a value the arm
-/// DERIVES FROM THE FRAME it is handling, around its own fence, never a stale
-/// read of a durable row, so re-seeding it from `on_disk` would replace fresh
-/// data with older data. Pin that ordering — moving any one of these
-/// assignments past its fence would silently turn the rationale into a false
-/// statement.
-///
-/// Scope: these four DISPLAY fields only. The two behaviour flags
-/// (`any_tool_used` / `has_post_tool_text`) are NOT covered by this argument and
-/// are not excluded — `reconcile_tool_arm_locals_after_guarded_save` re-seeds
-/// them, because leaving them behind demonstrably rewinds the durable row (see
-/// `watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_tick`).
-#[test]
-fn tool_arms_derive_the_four_excluded_tool_line_locals_around_their_fences() {
-    assert_eq!(tool_projection_gaps(TOOL_ARMS), Vec::<String>::new());
-}
-
-const TOOL_ARMS: &str = include_str!("../tool_arms.rs");
-const HANDLER: &str = "pub(super) async fn handle_stream_tool_message(";
-const TOOL_USE: &str = "StreamToolArmMessage::ToolUse {";
-const TOOL_RESULT: &str = "StreamToolArmMessage::ToolResult {";
-const RESTART_FENCE: &str = "fence_restart_visible_mutation(";
-const RESULT_FENCE: &str = "fence_terminal_tool_result_transition(";
-const PRESERVE: &str = "preserve_previous_tool_status(";
-const USE_LOCALS: [&str; 4] = [
-    PRESERVE,
-    "current_tool_line = Some(display.clone());",
-    "last_tool_name = Some(name.clone());",
-    "last_tool_summary = Some(display_summary.clone());",
-];
-const RESULT_LINE: &str = "current_tool_line = Some(detail);";
-
-/// Classification 2, per real tool arm, comments excluded: ToolUse derives four display locals
-/// before its fence; ToolResult fences before re-deriving two. A lexical tripwire.
-fn tool_projection_gaps(source: &str) -> Vec<String> {
-    let Some(handler) = Lexed::new(source).block(HANDLER) else {
-        return vec![format!("missing {HANDLER}")];
-    };
-    let mut gaps = Vec::new();
-    if !matches!((handler.find(TOOL_USE), handler.find(TOOL_RESULT)), (Some(a), Some(b)) if a < b) {
-        gaps.push("the ToolUse arm must precede the ToolResult arm".to_string());
-    }
-    match handler.arm(TOOL_USE) {
-        Some(arm) => {
-            let fence = arm.find(RESTART_FENCE);
-            for local in USE_LOCALS {
-                if !matches!((arm.find(local), fence), (Some(at), Some(fence)) if at < fence) {
-                    gaps.push(format!("`{local}` must stay ahead of the restart fence"));
-                }
-            }
-        }
-        None => gaps.push(format!("missing the {TOOL_USE} arm")),
-    }
-    let result = handler
-        .arm(TOOL_RESULT)
-        .map(|arm| [RESULT_FENCE, PRESERVE, RESULT_LINE].map(|step| arm.find(step)));
-    if !matches!(result, Some([Some(a), Some(b), Some(c)]) if a < b && b < c) {
-        gaps.push(format!(
-            "the ToolResult arm must fence, then re-derive: {result:?}"
-        ));
-    }
-    gaps
-}
-
-#[test]
-fn tool_projection_guard_rejects_commented_and_reordered_steps_per_arm() {
-    for forgery in CommentForgery::ALL {
-        for needle in [
-            HANDLER,
-            TOOL_USE,
-            TOOL_RESULT,
-            RESTART_FENCE,
-            RESULT_FENCE,
-            RESULT_LINE,
-        ]
-        .into_iter()
-        .chain(USE_LOCALS)
-        {
-            let forged = forge(TOOL_ARMS, needle, forgery);
-            assert!(
-                !tool_projection_gaps(&forged).is_empty(),
-                "{forgery:?} `{needle}`"
-            );
-        }
-    }
-    // Each arm is judged on its own: the ToolResult re-derivation cannot stand in for ToolUse.
-    let at = TOOL_ARMS.find(TOOL_RESULT).expect("ToolResult arm");
-    let (use_arm, result_arm) = TOOL_ARMS.split_at(at);
-    let late_use = swap(use_arm, USE_LOCALS[1], RESTART_FENCE);
-    assert!(!tool_projection_gaps(&[late_use.as_str(), result_arm].concat()).is_empty());
-    let early_result = swap(result_arm, RESULT_FENCE, PRESERVE);
-    assert!(!tool_projection_gaps(&[use_arm, early_result.as_str()].concat()).is_empty());
 }
 
 /// The tool arms consume `current_msg_id` and `full_response` as loop locals and

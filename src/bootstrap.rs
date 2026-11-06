@@ -8,6 +8,7 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     crate::logging::init_tracing()?;
 
     let runtime_root = crate::config::runtime_root();
+    crate::services::legacy_body_census::start();
     if let Some(root) = runtime_root.as_ref() {
         crate::runtime_layout::ensure_runtime_layout(root)
             .map_err(|error| anyhow::anyhow!("Failed to prepare runtime layout: {error}"))?;
@@ -97,11 +98,18 @@ pub(crate) async fn prepare_and_install_boot_snapshots(
     config: &crate::config::Config,
     pool: Option<&sqlx::PgPool>,
 ) -> Result<()> {
-    crate::config::validate_config(config)?;
-    let candidate = crate::config::session_hosts::BootSessionHosts::from_config(config)?;
-    let selection = prepare_session_hosts_boot(candidate, pool).await;
-    crate::services::session_host::policy::boot_grants::prepare(selection.hosts()).await;
-    install_boot_snapshots(config, selection)
+    crate::services::legacy_body_census::ensure_ready_with(config.cluster.instance_id.as_deref())
+        .await;
+    let result = async {
+        crate::config::validate_config(config)?;
+        let candidate = crate::config::session_hosts::BootSessionHosts::from_config(config)?;
+        let selection = prepare_session_hosts_boot(candidate, pool).await;
+        crate::services::session_host::policy::boot_grants::prepare(selection.hosts()).await;
+        install_boot_snapshots(config, selection)
+    }
+    .await;
+    crate::services::legacy_body_census::record_selection(config, result.is_ok()).await;
+    result
 }
 
 /// The dcserver preserves its static-validation failure contract before starting HTTP or intake.

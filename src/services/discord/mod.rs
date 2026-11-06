@@ -96,6 +96,7 @@ mod restart_mode;
 mod scheduled_turn;
 // Execution receipts of every row-removing ending, and settlement of rows kept marked.
 mod receipt_settle;
+pub(crate) use receipt_settle::settle_v2_drops;
 // #1074: session identity parsing SSoT (legacy + namespaced session_key forms).
 pub(crate) mod restart_report;
 mod router;
@@ -189,6 +190,8 @@ pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
 pub(crate) use tui_prompt_relay::input_notice_content;
+#[cfg(unix)]
+pub(crate) use tui_prompt_relay::rehydration::observer_binding_published;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
 pub(crate) mod replay_policy;
@@ -656,7 +659,7 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
     {
         return;
     }
-    let version = crate::agentdesk_runtime_root()
+    let version = crate::config::runtime_root()
         .map(|root| root.join("restart_pending"))
         .and_then(|marker| {
             let version = fs::read_to_string(&marker).unwrap_or_default();
@@ -1275,8 +1278,6 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             placeholder_live_events: Arc::new(
                 placeholder_live_events::PlaceholderLiveEvents::default(),
             ),
-            placeholder_live_events_enabled: false,
-            status_panel_v2_enabled: false,
             two_message_panel_enabled: false,
         },
         queued: QueuedPlaceholderState {
@@ -2161,16 +2162,6 @@ async fn idle_queue_take_next_soft_if_ready(
     }
 
     mailbox_take_next_automatic_intervention(shared, provider, channel_id).await
-}
-
-#[cfg(test)]
-mod queued_dequeue_dispatch_guard_wiring_tests {
-    mod source_guard_tests;
-
-    #[test]
-    fn dequeue_uses_preservation_aware_stale_dispatch_guard() {
-        source_guard_tests::assert_dequeue_guard();
-    }
 }
 
 pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(

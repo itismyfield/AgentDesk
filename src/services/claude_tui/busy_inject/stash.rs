@@ -16,6 +16,17 @@ pub(in crate::services::claude_tui) fn submit(
     timing: &Timing,
     stash: bool,
 ) -> Outcome {
+    submit_with_start(pane, nonce, text, timing, stash, || {})
+}
+
+pub(in crate::services::claude_tui) fn submit_with_start(
+    pane: &Pane,
+    nonce: &str,
+    text: &str,
+    timing: &Timing,
+    stash: bool,
+    on_first_key: impl FnOnce(),
+) -> Outcome {
     let session = pane.target().trim_start_matches('=').trim_end_matches(':');
     if crate::services::tui_input::writer_lease::admits("tmux", session).is_err() {
         return Outcome::NotSent(Veto::LockContended);
@@ -47,6 +58,11 @@ pub(in crate::services::claude_tui) fn submit(
                 return Outcome::NotSent(Veto::LockContended);
             }
         }
+        // A stop that took the writer token's first-key gate leaves the pane without a key.
+        if !super::super::guarded_outcome::first_key() {
+            return Outcome::NotSent(Veto::LockContended);
+        }
+        on_first_key();
         if stash {
             owner_input::keyed();
             if pane

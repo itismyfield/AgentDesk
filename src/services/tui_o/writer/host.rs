@@ -206,6 +206,13 @@ impl Readiness {
         locked(&self.hosted).contains_key(&channel)
     }
 
+    /// Whether the channel's running writer obeys `gate`, so only that gate can retire it.
+    pub(crate) fn hosted_under(&self, channel: u64, gate: &Arc<OwnershipGate>) -> bool {
+        let live = locked(&self.live);
+        live.get(&channel)
+            .is_some_and(|live| Arc::ptr_eq(&live.gate, gate))
+    }
+
     fn track(
         &self,
         channel: u64,

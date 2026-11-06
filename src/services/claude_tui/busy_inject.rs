@@ -24,6 +24,32 @@ enum TurnGate {
     BusyOnly,
     AnyTurn,
 }
+
+/// Who answers the turn the input reaches, set apart from whether it may be pasted at all.
+#[derive(Clone, Copy)]
+enum Answer {
+    /// A pending Discord prompt is recorded, so the caller's own reader answers it.
+    Declared,
+    /// Nothing is declared: the transcript row the input produces decides the answerer.
+    FromRow,
+}
+
+/// How one entry pastes: its turn gate, its answer declaration and whether a screen that cannot
+/// be read, or one in copy mode, holds the input instead of pasting blind.
+#[derive(Clone, Copy)]
+struct Policy {
+    gate: TurnGate,
+    answer: Answer,
+    screen_proven: bool,
+}
+
+impl Policy {
+    const BUSY_ONLY: Self = Self {
+        gate: TurnGate::BusyOnly,
+        answer: Answer::FromRow,
+        screen_proven: false,
+    };
+}
 pub(crate) use receipt::exact as exact_receipt;
 pub(crate) use receipt::pasted_inner;
 #[cfg(test)]
@@ -63,6 +89,10 @@ pub(crate) enum Veto {
     NotBusy,
     TranscriptUnavailable,
     LoadFailed,
+    /// The owned entry could not read the screen, so it cannot tell whether Enter submits.
+    ScreenUnread,
+    /// The pane is in copy mode, where Enter copies instead of submitting.
+    CopyMode,
 }
 
 /// An actual tmux write failed; no observation failure can produce this result.
@@ -86,6 +116,8 @@ pub(crate) struct Report {
     pub outcome: Outcome,
     /// What `confirm` checks once the paste and Enter were sent.
     sent: Option<Sent>,
+    /// The owned entry pasted over a composer whose text it could not prove parked.
+    pub draft_unproven: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,6 +133,7 @@ impl Report {
         Self {
             outcome: Outcome::NotSent(veto),
             sent: None,
+            draft_unproven: false,
         }
     }
 }
@@ -294,6 +327,7 @@ fn human_input_text(record: &serde_json::Value, prompt_only: bool) -> Option<(St
 }
 
 /// Bounded tmux calls against one session; the program is injectable for tests.
+#[derive(Clone)]
 pub(crate) struct Pane {
     program: PathBuf,
     target: String,
@@ -342,6 +376,22 @@ impl Pane {
             .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// `Gone` only on tmux's own word that the pane died or its session is missing.
+    #[cfg(unix)]
+    pub(crate) fn lost(&self) -> Screen {
+        use crate::services::platform::tmux::{SessionPresence, classify_has_session_output};
+        let dead = self.ok(&["display-message", "-p", "-t", &self.target, "#{pane_dead}"]);
+        if dead.as_deref().map(str::trim) == Some("1") {
+            return Screen::Gone;
+        }
+        match self.run(&["has-session", "-t", &self.target]) {
+            Ok(out) if classify_has_session_output(&out) == SessionPresence::Missing => {
+                Screen::Gone
+            }
+            _ => Screen::Unknown,
+        }
+    }
+
     pub(crate) fn capture(&self) -> Option<String> {
         self.ok(&[
             "capture-pane",
@@ -366,7 +416,30 @@ pub(in crate::services::claude_tui) fn before_paste(
     pane: &Pane,
     stash_allowed: bool,
 ) -> Result<bool, Veto> {
-    before_paste_by(pane, listed(stash_allowed))
+    before_paste_by(pane, listed(stash_allowed), false).map(|seen| seen.park)
+}
+
+/// One read of a held pane by the owned entry's own screen check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Screen {
+    /// Enter would submit now.
+    Ready,
+    /// The screen still refuses keys.
+    Blocked,
+    /// tmux reports the pane dead or its session missing.
+    Gone,
+    /// A read failed; it proves neither a submit nor the pane's end.
+    Unknown,
+}
+
+/// Whether Enter would submit on the pane now, by the owned entry's own screen read.
+#[cfg(unix)]
+pub(crate) fn screen_submits(pane: &Pane) -> Screen {
+    match before_paste_by(pane, None, true) {
+        Ok(_) => Screen::Ready,
+        Err(Veto::PaneUnavailable) => pane.lost(),
+        Err(_) => Screen::Blocked,
+    }
 }
 
 /// Which draft one capture lets C-s park; `None` parks nothing.
@@ -378,7 +451,14 @@ fn listed(stash_allowed: bool) -> Park {
     stash_allowed.then_some(screen::parkable)
 }
 
-fn before_paste_by(pane: &Pane, park: Park) -> Result<bool, Veto> {
+/// What the screen allows before a paste: whether C-s parks a draft, and whether the owned entry
+/// saw composer text it can neither park nor prove empty.
+struct Seen {
+    park: bool,
+    unproven: bool,
+}
+
+fn before_paste_by(pane: &Pane, park: Park, screen_proven: bool) -> Result<Seen, Veto> {
     #[cfg(unix)]
     if epoch::observe(pane.target().trim_start_matches('=').trim_end_matches(':')).is_err() {
         return Err(Veto::PaneUnavailable);
@@ -390,12 +470,35 @@ fn before_paste_by(pane: &Pane, park: Park) -> Result<bool, Veto> {
         return Err(Veto::PaneUnavailable);
     }
     let Some(capture) = pane.capture() else {
-        return Ok(false);
+        return match screen_proven {
+            true => Err(Veto::ScreenUnread),
+            false => Ok(Seen {
+                park: false,
+                unproven: false,
+            }),
+        };
     };
     if modal(&capture) {
         return Err(Veto::Modal);
     }
-    Ok(park.is_some_and(|park| park(&capture)))
+    if screen_proven {
+        let at = [
+            "display-message",
+            "-p",
+            "-t",
+            pane.target(),
+            "#{pane_in_mode}",
+        ];
+        // Only a read `0` proves Enter submits; an unread mode is held like an unread screen.
+        match pane.ok(&at).map(|mode| mode.trim().to_string()).as_deref() {
+            Some("0") => {}
+            Some("1") => return Err(Veto::CopyMode),
+            _ => return Err(Veto::ScreenUnread),
+        }
+    }
+    let park = park.is_some_and(|park| park(&capture));
+    let unproven = screen_proven && !park && ownership::draft_unproven(&capture);
+    Ok(Seen { park, unproven })
 }
 
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
@@ -448,45 +551,71 @@ fn inject_locked(
     text: &str,
     timing: &Timing,
     park: Park,
-    turn_gate: TurnGate,
+    policy: Policy,
 ) -> Report {
-    let park = match before_paste_by(pane, park) {
-        Ok(park) => park,
-        Err(veto) => return Report::not_sent(veto),
-    };
-    if matches!(turn_gate, TurnGate::BusyOnly)
-        && !crate::services::tui_turn_state::observe_claude_jsonl_turn_state(request.transcript)
-            .is_busy()
-    {
-        return Report::not_sent(Veto::NotBusy);
-    }
-    let Ok(offset) = std::fs::metadata(request.transcript).map(|meta| meta.len()) else {
-        return Report::not_sent(Veto::TranscriptUnavailable);
-    };
-    if let Err(error) = crate::services::tui_input::human_frame::history::register(
-        ("claude", request.session, request.nonce, request.author),
-        request.transcript,
-        offset,
-        text,
-    ) {
-        tracing::warn!(%error, "busy frame ledger registration failed");
-        return Report::not_sent(Veto::LoadFailed);
-    }
-    let outcome = stash::submit(pane, request.nonce, text, timing, park);
-    let report = Report {
-        outcome,
-        sent: (outcome == Outcome::Injected).then(|| Sent {
-            offset,
-            text: text.to_string(),
-            parked: park,
-        }),
-    };
-    if matches!(report.outcome, Outcome::NotSent(_)) {
-        crate::services::tui_input::human_frame::history::withdraw(
-            request.nonce,
+    use super::host_input::{InputRefusal, InputRun, StopCause};
+    use crate::services::tui_input::submission::Refusal;
+
+    super::guarded_outcome::receipt(request.session, text);
+    let report = (|| {
+        let Seen { park, unproven } = match before_paste_by(pane, park, policy.screen_proven) {
+            Ok(seen) => seen,
+            Err(veto) => return Report::not_sent(veto),
+        };
+        if matches!(policy.gate, TurnGate::BusyOnly)
+            && !crate::services::tui_turn_state::observe_claude_jsonl_turn_state(request.transcript)
+                .is_busy()
+        {
+            return Report::not_sent(Veto::NotBusy);
+        }
+        let Ok(offset) = std::fs::metadata(request.transcript).map(|meta| meta.len()) else {
+            return Report::not_sent(Veto::TranscriptUnavailable);
+        };
+        if let Err(error) = crate::services::tui_input::human_frame::history::register(
+            ("claude", request.session, request.nonce, request.author),
             request.transcript,
+            offset,
+            text,
+        ) {
+            tracing::warn!(%error, "busy frame ledger registration failed");
+            return Report::not_sent(Veto::LoadFailed);
+        }
+        let outcome = stash::submit_with_start(
+            pane,
+            request.nonce,
+            text,
+            timing,
+            park,
+            super::guarded_outcome::begin,
         );
-    }
+        let report = Report {
+            outcome,
+            sent: (outcome == Outcome::Injected).then(|| Sent {
+                offset,
+                text: text.to_string(),
+                parked: park,
+            }),
+            draft_unproven: unproven && !matches!(outcome, Outcome::NotSent(_)),
+        };
+        if matches!(report.outcome, Outcome::NotSent(_)) {
+            crate::services::tui_input::human_frame::history::withdraw(
+                request.nonce,
+                request.transcript,
+            );
+        }
+        report
+    })();
+    let result = match report.outcome {
+        Outcome::Injected => InputRun::Applied,
+        Outcome::NotSent(_) => {
+            InputRun::Refused(InputRefusal::Composer(Refusal::CaptureUnavailable))
+        }
+        Outcome::Failed(error) => InputRun::Indeterminate {
+            confirmed: 0,
+            cause: StopCause::Send(format!("busy input write failed: {error:?}")),
+        },
+    };
+    super::guarded_outcome::finish(&result);
     report
 }
 

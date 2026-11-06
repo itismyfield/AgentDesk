@@ -51,11 +51,40 @@ impl Drop for LegacySend {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum ClaimReason {
+    EmptySelection,
+    NonMember,
+    Unselected,
+    NoCandidate,
+    PendingReleased,
+    Released,
+    Deferred,
+    NoClaim,
+    OwnedByO,
+    OwnedHeld,
+    IdentityHeld,
+}
+
+impl Adoption {
+    pub(crate) fn claim_reason(self) -> ClaimReason {
+        match self {
+            Self::Pending => ClaimReason::PendingReleased,
+            Self::Released => ClaimReason::Released,
+            Self::Deferred => ClaimReason::Deferred,
+            Self::Committed => ClaimReason::OwnedByO,
+            Self::Held => ClaimReason::OwnedHeld,
+        }
+    }
+}
+
 /// A body claim's answer: whether O owns the channel and, when Legacy sends, that send.
 #[derive(Debug)]
 pub(crate) struct BodyClaimed {
     pub(crate) owned: bool,
     pub(crate) send: Option<LegacySend>,
+    pub(crate) reason: ClaimReason,
 }
 
 /// A sends snapshot taken before reading the binding log; order is local to this candidate.
@@ -211,7 +240,7 @@ impl Candidate {
     /// Whether O owns the channel for a placement, which carries no body; a pending adoption is
     /// released first. A placement is not a Legacy send, so it is not counted.
     pub(in crate::services::tui_o) fn claim(&self, channel: u64) -> bool {
-        self.take(channel).owned()
+        self.take(channel).0.owned()
     }
 
     /// Whether O owns the channel for a body Legacy would otherwise send, releasing a pending
@@ -226,7 +255,7 @@ impl Candidate {
         channel: u64,
         origin: &'static std::panic::Location<'static>,
     ) -> BodyClaimed {
-        let state = self.take(channel);
+        let (state, reason) = self.take(channel);
         let owned = state.owned();
         #[cfg(test)]
         if !owned {
@@ -242,24 +271,29 @@ impl Candidate {
         });
         let (started, finished) = self.sends();
         let mark = self.turn_mark();
-        tracing::info!(channel, owned, started, finished, %origin,
+        tracing::info!(channel, owned, started, finished, ?reason, %origin,
             mark_present = mark.is_some(), mark_order = mark.map(|m| m.order),
             mark_used = mark.is_some_and(|m| m.order == self.baseline_order.load(Ordering::SeqCst)),
             mark_seq = mark.map(|m| m.seq), mark_sends = ?mark.map(|m| m.sends),
             "[tui_o] body claim");
         drop(state);
-        BodyClaimed { owned, send }
+        BodyClaimed {
+            owned,
+            send,
+            reason,
+        }
     }
 
-    fn take(&self, channel: u64) -> MutexGuard<'_, Adoption> {
+    fn take(&self, channel: u64) -> (MutexGuard<'_, Adoption>, ClaimReason) {
         let mut state = self.lock();
+        let reason = state.claim_reason();
         if *state == Adoption::Pending {
             *state = Adoption::Released;
             #[cfg(test)]
             body_check::note_release(self);
             tracing::info!(channel, "[tui_o] Legacy took the channel before O adoption");
         }
-        state
+        (state, reason)
     }
 
     /// Legacy body sends this channel started and finished so far; callers hold the state lock.

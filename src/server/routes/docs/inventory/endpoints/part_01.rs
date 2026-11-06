@@ -34,7 +34,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                         "shadow": "compiled_default",
                         "authority": "compiled_default"
                     },
-                    "warning_count": 1
+                    "warning_count": 0,
+                    "configuration_warnings": []
                 },
                 "intake_routing": {
                     "mode": "disabled",
@@ -116,14 +117,14 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "observation_failures": ["latest_postgres_migration_missing"]
                 },
                 "delivery_record_rollout": {
-                    "shadow_enabled": true,
+                    "shadow_enabled": false,
                     "authority_enabled": true,
-                    "mode": "shadow_and_authority",
+                    "mode": "authority_only",
                     "dedup_authority": "durable_delivery_record_frontier",
                     "same_turn_backward_write_enforcement": "enforcing",
                     "flag_source": {
-                        "shadow": "env_override",
-                        "authority": "env_override"
+                        "shadow": "compiled_default",
+                        "authority": "compiled_default"
                     },
                     "warning_count": 0,
                     "configuration_warnings": []

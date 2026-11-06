@@ -1,4 +1,6 @@
 use super::*;
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::BodySite;
 #[path = "tmux_watcher/cancel_handoff.rs"]
 pub(in crate::services::discord) mod cancel_handoff;
 use crate::services::discord::InflightTurnState;
@@ -950,7 +952,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // empty/TUI-gated and placeholderless fresh sends remain legacy.
         let cutover_short_replace = task_notification_kind.is_none()
             && terminal_send::watcher_short_replace_cutover_decision(
-                shared.ui.status_panel_v2_enabled,
                 relay_decision.should_tag_monitor_origin,
                 &watcher_provider,
                 &direct_terminal_response,
@@ -1953,12 +1954,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             )
         {
             match watcher_completion_chrome_with_timeout(
-                crate::services::discord::http::edit_channel_message(
-                    &http,
-                    channel_id,
-                    placeholder,
-                    &finalized,
-                ),
+                watcher_body_source(inflight_before_relay.as_ref(), source_authority)
+                    .reason(crate::services::tui_o::channel_policy::ClaimReason::NoClaim)
+                    .observe(
+                        BodySite::WatcherTerminal,
+                        BodyOffer::body(!finalized.trim().is_empty()),
+                        crate::services::discord::http::edit_channel_message(
+                            &http,
+                            channel_id,
+                            placeholder,
+                            &finalized,
+                        ),
+                    ),
             )
             .await
             {
@@ -2566,3 +2573,25 @@ pub(in crate::services::discord) use self::tests::streaming_harness_tests::cance
 #[cfg(test)]
 #[path = "tmux_watcher/o_evidence_tests.rs"]
 pub(in crate::services::discord) mod o_evidence_tests;
+
+// Attribute only the saved owner of this frame; read identity is copied from its existing proof.
+fn watcher_body_source(
+    state: Option<&InflightTurnState>,
+    authority: WatcherSourceAuthority,
+) -> BodySource {
+    let file = match authority.source_file {
+        #[cfg(unix)]
+        crate::services::cluster::stream_relay::SourceFileIdentity::Unix { dev, ino } => {
+            Some((dev, ino))
+        }
+        _ => None,
+    };
+    state
+        .map(BodySource::from_state)
+        .unwrap_or_else(BodySource::inherited)
+        .read_source(
+            file,
+            authority.generation_mtime_ns,
+            authority.reset_incarnation,
+        )
+}

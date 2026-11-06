@@ -1053,6 +1053,25 @@ fn get_dispatch_status(state: &AppState, dispatch_id: &Option<String>) -> Option
     .flatten()
 }
 
+/// The `from_status` of the card's latest audit row into `to_status`; retention keeps that row.
+pub(crate) async fn prior_status_into_pg(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    to_status: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT from_status
+         FROM kanban_audit_logs
+         WHERE card_id = $1 AND to_status = $2
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1",
+    )
+    .bind(card_id)
+    .bind(to_status)
+    .fetch_optional(pool)
+    .await
+}
+
 fn resolve_rework_resume_target(
     state: &AppState,
     card_id: &str,
@@ -1080,20 +1099,11 @@ fn resolve_rework_resume_target(
             .unwrap_or((None, None));
 
             let prior_status = if let Some(to_status) = legacy_to_status_owned.as_deref() {
-                sqlx::query_scalar::<_, String>(
-                    "SELECT from_status
-                     FROM kanban_audit_logs
-                     WHERE card_id = $1 AND to_status = $2
-                     ORDER BY created_at DESC, id DESC
-                     LIMIT 1",
-                )
-                .bind(&card_id_owned)
-                .bind(to_status)
-                .fetch_optional(&bridge_pool)
-                .await
-                .map_err(|error| {
-                    format!("load postgres prior resume status for {card_id_owned}: {error}")
-                })?
+                prior_status_into_pg(&bridge_pool, &card_id_owned, to_status)
+                    .await
+                    .map_err(|error| {
+                        format!("load postgres prior resume status for {card_id_owned}: {error}")
+                    })?
             } else {
                 None
             }

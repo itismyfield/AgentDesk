@@ -423,12 +423,8 @@ async fn maybe_recover_completed_stale_leak(
     // NB: the bridge appends a turn-time `review_dispatch_warning` before
     // formatting; that guard is turn-lifecycle-only, so stale-leak recovery
     // intentionally delivers just the answer body.
-    let Some(delivery_text) = render_leak_recovery_delivery(
-        &state.full_response,
-        start,
-        shared.ui.status_panel_v2_enabled,
-        provider,
-    ) else {
+    let Some(delivery_text) = render_leak_recovery_delivery(&state.full_response, start, provider)
+    else {
         return false;
     };
     // `split_message` is the authoritative limit (its effective cap is below
@@ -599,36 +595,51 @@ async fn maybe_recover_completed_stale_leak(
     }
     // Claimed only here, before the first edit or post; a confirm-only pass reads the adoption.
     // The claimed send stays counted until this pass returns, past its last chunk.
-    let _legacy_send = if confirmed_chunks < chunks.len() {
+    let (_legacy_send, census_reason) = if confirmed_chunks < chunks.len() {
         let claimed = crate::services::tui_o::cutover::o_owns_tui_output_for_channel_reserving(
             channel_id.get(),
             kind,
         );
-        let (owned, send) = match claimed {
-            Ok(claimed) => (Ok(claimed.owned), claimed.send),
-            Err(error) => (Err(error), None),
+        let (owned, send, reason) = match claimed {
+            Ok(claimed) => (Ok(claimed.owned), claimed.send, claimed.reason),
+            Err(error) => (
+                Err(error),
+                None,
+                crate::services::tui_o::channel_policy::ClaimReason::IdentityHeld,
+            ),
         };
         if o_holds(owned) {
             return false;
         }
-        send
+        (send, reason)
     } else {
-        None
+        (
+            None,
+            crate::services::tui_o::channel_policy::ClaimReason::NoClaim,
+        )
     };
+    let census =
+        discord::outbound::body_census::BodySource::from_state(&state).reason(census_reason);
     let mut wrote_any_chunk = false;
     if confirmed_chunks == 0 {
         // Edit the original placeholder to chunk 0. If Discord commits the edit
         // but the client observes an error/crash, the next pass derives
         // `confirmed_chunks == 1` from the live message and continues with chunk
         // 1. No fallback send is used for the first chunk.
-        if discord::http::edit_channel_message(
-            http.as_ref(),
-            channel_id,
-            current_msg_id,
-            &chunks[0],
-        )
-        .await
-        .is_err()
+        if census
+            .clone()
+            .observe(
+                crate::services::tui_o::cutover::BodySite::HealthRecovery,
+                discord::outbound::body_census::BodyOffer::Recovered,
+                discord::http::edit_channel_message(
+                    http.as_ref(),
+                    channel_id,
+                    current_msg_id,
+                    &chunks[0],
+                ),
+            )
+            .await
+            .is_err()
         {
             return false;
         }
@@ -647,7 +658,15 @@ async fn maybe_recover_completed_stale_leak(
     }
 
     for (chunk_index, chunk) in chunks.iter().enumerate().skip(confirmed_chunks) {
-        match discord::http::send_channel_message(http.as_ref(), channel_id, chunk).await {
+        match census
+            .clone()
+            .observe(
+                crate::services::tui_o::cutover::BodySite::HealthRecovery,
+                discord::outbound::body_census::BodyOffer::Recovered,
+                discord::http::send_channel_message(http.as_ref(), channel_id, chunk),
+            )
+            .await
+        {
             Ok(message) => {
                 if let Err(error) = leak_recovery_record_confirmed_chunk(
                     &ledger_identity,
@@ -1082,17 +1101,14 @@ mod stall_watchdog_pure_tests {
         // A blank/whitespace tail formats to empty -> no delivery, never a
         // placeholder post or empty notice.
         let provider = ProviderKind::Claude;
-        assert_eq!(render_leak_recovery_delivery("", 0, false, &provider), None);
-        assert_eq!(
-            render_leak_recovery_delivery("   \n  ", 0, false, &provider),
-            None
-        );
+        assert_eq!(render_leak_recovery_delivery("", 0, &provider), None);
+        assert_eq!(render_leak_recovery_delivery("   \n  ", 0, &provider), None);
     }
 
     #[test]
     fn render_returns_formatted_real_answer() {
         let provider = ProviderKind::Claude;
-        let out = render_leak_recovery_delivery("실제 답변입니다", 0, false, &provider)
+        let out = render_leak_recovery_delivery("실제 답변입니다", 0, &provider)
             .expect("real answer should render");
         assert!(out.contains("실제 답변입니다"));
     }
@@ -4974,10 +4990,10 @@ mod o_stale_leak_cut_tests {
     }
 
     /// Records the first `confirmed` chunks of the turn's recovery as already delivered.
-    fn seed_ledger(state: &InflightTurnState, v2: bool, confirmed: usize) -> usize {
+    fn seed_ledger(state: &InflightTurnState, confirmed: usize) -> usize {
         let (start, end) = leak_recovery_unrelayed_range(&state.full_response, 0).unwrap();
         let text =
-            render_leak_recovery_delivery(&state.full_response, start, v2, &ProviderKind::Claude);
+            render_leak_recovery_delivery(&state.full_response, start, &ProviderKind::Claude);
         let chunks = crate::services::discord::formatting::split_message(&text.unwrap());
         let identity =
             LeakRecoveryLedgerIdentity::new(&ProviderKind::Claude, state, start, end, &chunks);
@@ -5007,11 +5023,10 @@ mod o_stale_leak_cut_tests {
         state.silent_turn = case == "pending-silent";
         crate::services::discord::inflight::save_inflight_state(&state).unwrap();
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let v2 = shared.ui.status_panel_v2_enabled;
         // A prior pass delivered every chunk (or only the first) but stopped before the offset.
         match case {
-            "pending-confirmed" => assert_eq!(seed_ledger(&state, v2, usize::MAX), 1),
-            "pending-resend" => assert!(seed_ledger(&state, v2, 1) > 1),
+            "pending-confirmed" => assert_eq!(seed_ledger(&state, usize::MAX), 1),
+            "pending-resend" => assert!(seed_ledger(&state, 1) > 1),
             _ => {}
         }
         shared
@@ -5158,3 +5173,6 @@ mod retirement_await_tests;
 
 #[cfg(test)]
 mod legacy_send_tests;
+
+#[cfg(all(test, unix))]
+pub(crate) use carried_turn_close::before_carried_archive_for_tests;

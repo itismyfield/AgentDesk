@@ -20,6 +20,7 @@ async fn drive(
     channel: ChannelId,
     body: String,
     tool: Option<String>,
+    transport: Option<Arc<dyn TurnGateway>>,
 ) -> History {
     let mut inflight = InflightTurnState::new(
         provider.clone(),
@@ -43,7 +44,8 @@ async fn drive(
         direct: true,
         ..Default::default()
     });
-    let gateway_dyn: Arc<dyn TurnGateway> = gateway.clone();
+    let recording_gateway = transport.is_none();
+    let gateway_dyn: Arc<dyn TurnGateway> = transport.unwrap_or_else(|| gateway.clone());
     let (mut body, mut sent, mut confirmed, mut current) = (body, 0, 0, MessageId::new(18));
     let now = tokio::time::Instant::now();
     let (mut spin, mut panel_text, mut panel_edit, mut panel_dirty) =
@@ -132,7 +134,9 @@ async fn drive(
         refresh_streaming_response(&context, &mut tick, &mut dirty, rolled, "⠋", claim).await,
         ControlFlow::Continue(())
     );
-    assert!(dirty);
+    if recording_gateway {
+        assert!(dirty);
+    }
     let sends = gateway.sends.lock().unwrap().clone();
     let edits = gateway.edits.lock().unwrap().clone();
     History {
@@ -163,7 +167,7 @@ async fn retired_bridge_rollover_raw_history_uses_minimal_anchor_with_legacy_bud
             let body = unit.repeat(1990 / unit.encode_utf16().count());
             let old_plan = {
                 let budget = build_bridge_single_message_panel_status_block(
-                    &shared, channel, &provider, START, "⠋", None, None, &body,
+                    &shared, channel, &provider, START, "⠋", &body,
                 );
                 assert!(
                     budget.len()
@@ -184,7 +188,7 @@ async fn retired_bridge_rollover_raw_history_uses_minimal_anchor_with_legacy_bud
                 "fixture distinguishes rich budget from visible spinner"
             );
             assert!(old_plan.split_at < body.len() && old_plan.split_at > body.len() / 2);
-            let history = drive(shared, &provider, channel, body.clone(), None).await;
+            let history = drive(shared, &provider, channel, body.clone(), None, None).await;
             assert_eq!(
                 history.offset, old_plan.split_at,
                 "actual rollover must retain rich legacy budget"
@@ -226,27 +230,16 @@ async fn retired_bridge_empty_and_tool_only_raw_edits_use_minimal_anchor() {
         .into_iter()
         .enumerate()
     {
-        for (variant, (v2, tool)) in [
-            (false, None),
-            (true, None),
-            (false, Some("⚙ Bash …")),
-            (true, Some("⚙ Bash …")),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (variant, tool) in [None, Some("⚙ Bash …")].into_iter().enumerate() {
             let channel = ChannelId::new(8_071_880 + index as u64 * 10 + variant as u64);
-            let mut shared = six_tool_fixture(crate::config::ToolActivityDisplay::Summary, channel);
-            Arc::get_mut(&mut shared)
-                .unwrap()
-                .ui
-                .status_panel_v2_enabled = v2;
+            let shared = six_tool_fixture(crate::config::ToolActivityDisplay::Summary, channel);
             let history = drive(
                 shared,
                 &provider,
                 channel,
                 String::new(),
                 tool.map(str::to_owned),
+                None,
             )
             .await;
             assert!(history.sends.is_empty());
@@ -260,4 +253,65 @@ async fn retired_bridge_empty_and_tool_only_raw_edits_use_minimal_anchor() {
             assert_eq!(history.state.current_msg_len, history.last_edit.len());
         }
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_rollover_records_the_freeze_and_restored_body_but_not_the_anchor() {
+    use crate::services::discord::outbound::raw_output::tests as observation;
+    use crate::services::tui_o::repost::io::tests::{CHANNEL, Mock, reply};
+    if observation::isolated(
+        concat!(
+            module_path!(),
+            "::failed_rollover_records_the_freeze_and_restored_body_but_not_the_anchor"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    let journal = observation::journal().await;
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _o = test_override::force_channels(&[]);
+    let mock = Mock::start(vec![
+        observation::message(9906),
+        reply("403 Forbidden", &[], r#"{"code":50013,"message":"denied"}"#),
+        observation::message(9906),
+        observation::message(9906),
+    ])
+    .await;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let gateway =
+        crate::services::discord::tui_prompt_relay::bridge_gateway::terminal_notice_test_gateway(
+            Arc::new(observation::client(&mock)),
+            shared.clone(),
+        );
+    let _history = drive(
+        shared,
+        &ProviderKind::Claude,
+        ChannelId::new(CHANNEL),
+        "assistant answer ".repeat(200),
+        None,
+        Some(gateway),
+    )
+    .await;
+    observation::flushed().await;
+    let recorded: Vec<serde_json::Value> = std::fs::read_to_string(journal)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|row: &serde_json::Value| row["kind"] == "target")
+        .collect();
+    assert!(recorded.iter().any(|row| row["census"]["site"] == "W14a"));
+    assert!(recorded.iter().any(|row| row["census"]["site"] == "W14b"));
+    for event in &recorded {
+        assert_eq!(event["op"], "EDIT");
+        assert_eq!(event["census"]["output_class"], "LegacyBody");
+    }
+    assert_eq!(
+        recorded.len(),
+        mock.requests()
+            .iter()
+            .filter(|(request, _)| request.ends_with("/messages/18"))
+            .count()
+            * 2
+    );
 }

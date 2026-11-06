@@ -432,6 +432,8 @@ impl Future for Yields {
 }
 
 struct DriverGateway {
+    #[cfg(unix)]
+    published_census: Arc<Mutex<Vec<serde_json::Value>>>,
     chain_locally: bool,
     direct: bool,
     marker: Arc<AtomicBool>,
@@ -480,6 +482,8 @@ impl TurnGateway for DriverGateway {
         let yields = self.yields_per_call;
         let completed = Arc::clone(&self.completed_publications);
         let bodies = self.published_bodies.clone();
+        #[cfg(unix)]
+        let census = self.published_census.clone();
         let body = _content.to_owned();
         let failed = self.replace == ReplaceBehaviour::FailedPost
             || (self.replace == ReplaceBehaviour::FailSecondPostOnce
@@ -497,6 +501,11 @@ impl TurnGateway for DriverGateway {
                 return Err("driver POST failed".into());
             }
             let index = completed.fetch_add(1, Ordering::Release);
+            #[cfg(unix)]
+            census.lock().unwrap().push(
+                crate::services::discord::outbound::current_census()
+                    .unwrap_or(serde_json::Value::Null),
+            );
             bodies.lock().unwrap().push(body);
             Ok(MessageId::new(DRIVER_FALLBACK_ANCHOR_MSG_ID + index as u64))
         })
@@ -626,6 +635,8 @@ const DRIVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Owns everything the driven future borrows for the length of a run.
 struct TerminalDeliveryDriver {
+    #[cfg(unix)]
+    published_census: Arc<Mutex<Vec<serde_json::Value>>>,
     shared: Arc<SharedData>,
     gateway: Arc<dyn TurnGateway>,
     marker: Arc<AtomicBool>,
@@ -705,7 +716,11 @@ impl TerminalDeliveryDriver {
         let completed_publications = Arc::new(AtomicUsize::new(0));
         let published_bodies = Arc::new(Mutex::new(Vec::new()));
         let body_check = Arc::new(std::sync::OnceLock::new());
+        #[cfg(unix)]
+        let published_census = Arc::new(Mutex::new(Vec::new()));
         let gateway: Arc<dyn TurnGateway> = Arc::new(DriverGateway {
+            #[cfg(unix)]
+            published_census: published_census.clone(),
             chain_locally: true,
             direct: true,
             marker: Arc::clone(&marker),
@@ -718,6 +733,8 @@ impl TerminalDeliveryDriver {
         });
 
         Self {
+            #[cfg(unix)]
+            published_census,
             shared,
             gateway,
             marker,
@@ -1323,6 +1340,8 @@ async fn o_delegated_tui_body_is_cut_on_every_gateway_and_alarmed_only_without_a
         let case = format!("selected={selected} direct={direct} taking={taking}");
         let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
         driver.gateway = Arc::new(DriverGateway {
+            #[cfg(unix)]
+            published_census: driver.published_census.clone(),
             chain_locally: true,
             direct,
             marker: driver.marker.clone(),

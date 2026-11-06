@@ -195,6 +195,32 @@ fn file_id(_meta: &std::fs::Metadata) -> [u64; 2] {
     [0, 0]
 }
 
+/// Attempts whose caller set up its own reader before the paste, kept for this process: who
+/// answers a row is read from the attempt that took it, never from matching text.
+static READERS: std::sync::Mutex<std::collections::VecDeque<[String; 3]>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+const READERS_KEPT: usize = 1024;
+
+/// Records (`reads`) or drops whether attempt `id` has a reader of its own.
+pub(crate) fn declare_reader(provider: &str, session: &str, id: &str, reads: bool) {
+    let key = [provider.to_string(), session.to_string(), id.to_string()];
+    let mut readers = READERS.lock().unwrap_or_else(|error| error.into_inner());
+    readers.retain(|kept| *kept != key);
+    if reads {
+        if readers.len() >= READERS_KEPT {
+            readers.pop_front();
+        }
+        readers.push_back(key);
+    }
+}
+
+pub(crate) fn has_reader(provider: &str, session: &str, id: &str) -> bool {
+    let readers = READERS.lock().unwrap_or_else(|error| error.into_inner());
+    readers
+        .iter()
+        .any(|[p, s, i]| p == provider && s == session && i == id)
+}
+
 pub(crate) fn register(
     (provider, session, id, author): (&str, &str, &str, &str),
     transcript: &Path,
@@ -499,6 +525,331 @@ fn observed_at_checked(
     } else {
         ObservedAttempt::None
     })
+}
+
+/// Who took a native row that carries a registered frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RowOwner {
+    /// A non-meta user row: the attempt opened its own turn.
+    User(String),
+    /// A queued command the running turn took for the attempt.
+    Command(String),
+    /// No attempt registered before the row carries it.
+    None,
+    /// The transcript cannot be read now, so nothing is decided.
+    Unread,
+}
+
+/// One row that took a frame: its byte offset, uuid, class hashes and whether it is a user row.
+struct Taken {
+    offset: u64,
+    uuid: String,
+    hashes: Vec<String>,
+    user: bool,
+}
+
+/// The rows after `from` that take a human frame: non-meta user rows and queued prompt commands.
+fn taken_rows(path: &Path, file: [u64; 2], from: u64) -> Option<Vec<Taken>> {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let mut handle = std::fs::File::open(path).ok()?;
+    (file_id(&handle.metadata().ok()?) == file).then_some(())?;
+    handle.seek(SeekFrom::Start(from)).ok()?;
+    let mut reader = std::io::BufReader::new(handle);
+    let (mut rows, mut line, mut at) = (Vec::new(), Vec::new(), from);
+    while reader.read_until(b'\n', &mut line).ok()? > 0 {
+        let offset = at;
+        at += line.len() as u64;
+        let record: serde_json::Value = match line.ends_with(b"\n") {
+            true => serde_json::from_slice(&line).unwrap_or_default(),
+            false => serde_json::Value::Null,
+        };
+        line.clear();
+        let text = match record["type"].as_str() {
+            Some("user")
+                if record["isMeta"] != true
+                    && !crate::services::tui_o::shadow::identity::record_is_compact_summary(
+                        &record,
+                    ) =>
+            {
+                match &record["message"]["content"] {
+                    serde_json::Value::String(text) => Some(text.clone()),
+                    serde_json::Value::Array(blocks) => blocks
+                        .iter()
+                        .map(|block| (block["type"] == "text").then(|| block["text"].as_str()))
+                        .collect::<Option<Option<Vec<_>>>>()
+                        .flatten()
+                        .map(|texts| texts.join("\n")),
+                    _ => None,
+                }
+            }
+            Some("attachment") if record["attachment"]["type"] == "queued_command" => {
+                record["attachment"]["prompt"].as_str().map(str::to_string)
+            }
+            _ => None,
+        };
+        if let (Some(text), Some(uuid)) = (text, record["uuid"].as_str()) {
+            rows.push(Taken {
+                offset,
+                uuid: uuid.into(),
+                hashes: class_hashes(&text),
+                user: record["type"] == "user",
+            });
+        }
+    }
+    Some(rows)
+}
+
+/// The attempt `row` took: a receipt's own row, else same-frame rows paired with attempts in
+/// registration order, read afresh each time so rescans and later identical inputs agree.
+pub(crate) fn row_owner(provider: &str, session: &str, prompts: &[String], row: &str) -> RowOwner {
+    let Ok(store) = path().and_then(|path| readable(&path)) else {
+        return RowOwner::Unread;
+    };
+    let hashes: Vec<_> = prompts.iter().flat_map(|p| class_hashes(p)).collect();
+    owner_in(&store, (provider, session), &hashes, row)
+}
+
+/// A queue-owned Discord registration remains proof after its display fields are compacted.
+pub(crate) fn discord_owner_attempt(
+    session: &str,
+    native_session: &str,
+    transcript: &Path,
+    id: &str,
+) -> Result<bool, String> {
+    Ok(discord_stop_entries(session, native_session, transcript)?
+        .iter()
+        .any(|entry| entry.id == id))
+}
+
+fn discord_stop_entries(
+    session: &str,
+    native_session: &str,
+    transcript: &Path,
+) -> Result<Vec<Entry>, String> {
+    let raw = std::fs::read(path()?).map_err(|error| error.to_string())?;
+    let value = compat::parse(&raw)?;
+    if !compat::envelope(&value)? {
+        return serde_json::from_value::<Store>(value)
+            .map(|_| Vec::new())
+            .map_err(|error| error.to_string());
+    }
+    let snapshot: compat::HistoryV2 =
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+    let file = file_id(&std::fs::metadata(transcript).map_err(|error| error.to_string())?);
+    let mut entries: Vec<_> = snapshot
+        .live
+        .into_iter()
+        .zip(value["live"].as_array().into_iter().flatten())
+        .map(|(entry, bound)| (entry, &bound["registration"]))
+        .collect();
+    for passive in &snapshot.passive {
+        if passive["state"] == "abandoned" || passive["entry"].is_null() {
+            continue;
+        }
+        let entry: Entry =
+            serde_json::from_value(passive["entry"].clone()).map_err(|error| error.to_string())?;
+        entries.push((entry, &passive["registration"]));
+    }
+    let mut accepted = Vec::new();
+    for (entry, registration) in entries {
+        let key = &registration["key"];
+        let identity = &key["identity"];
+        let discord_key = |value: &serde_json::Value| {
+            value
+                .as_u64()
+                .is_some_and(crate::services::tui_input::input_key::is_discord_key)
+        };
+        if entry.provider != "claude"
+            || entry.session != session
+            || entry.path != transcript
+            || entry.file != file
+            || entry.append.is_some()
+            || key["attempt"]["nonce"].as_str() != Some(entry.id.as_str())
+            || registration["frame"]["class_hash"].as_str() != Some(entry.class_hash.as_str())
+            || !discord_key(&identity["primary"])
+            || !identity["sources"].as_array().is_some_and(|sources| {
+                !sources.is_empty()
+                    && sources
+                        .iter()
+                        .all(|source| discord_key(&source["message_id"]))
+            })
+        {
+            continue;
+        }
+        let source: v2::Source = serde_json::from_value(registration["source"].clone())
+            .map_err(|error| error.to_string())?;
+        source.validate(key)?;
+        if source.provider == "claude"
+            && source.target["owner"] == session
+            && source.session_id == native_session
+            && source.transcript == transcript
+            && source.file == file
+            && source.offset == entry.offset
+        {
+            accepted.push(entry);
+        }
+    }
+    accepted.sort_by_key(|entry| entry.offset);
+    Ok(accepted)
+}
+
+/// Enqueue positions pair once with exact, source-bound Discord registrations, never body text alone.
+pub(crate) fn discord_enqueue_owners(
+    session: &str,
+    native_session: &str,
+    transcript: &Path,
+    opener_end: u64,
+    enqueues: &[(u64, String)],
+    reserved: &[String],
+) -> Result<Vec<RowOwner>, String> {
+    let entries: Vec<_> = discord_stop_entries(session, native_session, transcript)?
+        .into_iter()
+        .filter(|entry| entry.offset >= opener_end && !reserved.contains(&entry.id))
+        .collect();
+    let mut by_frame = std::collections::BTreeMap::<String, Vec<usize>>::new();
+    for (index, (_, body)) in enqueues.iter().enumerate() {
+        by_frame.entry(hash(body.trim())).or_default().push(index);
+    }
+    let mut registered = std::collections::BTreeMap::<&str, Vec<&Entry>>::new();
+    for entry in &entries {
+        registered
+            .entry(entry.class_hash.as_str())
+            .or_default()
+            .push(entry);
+    }
+    let mut owners = vec![RowOwner::None; enqueues.len()];
+    for (frame_hash, indexes) in by_frame {
+        let last = indexes
+            .iter()
+            .map(|index| enqueues[*index].0)
+            .max()
+            .unwrap_or(0);
+        let Some(registered) = registered.get(frame_hash.as_str()) else {
+            continue;
+        };
+        let candidates: Vec<_> = registered
+            .iter()
+            .copied()
+            .filter(|entry| entry.offset <= last)
+            .collect();
+        let Some(first) = candidates.first() else {
+            continue;
+        };
+        let queued: Vec<_> = indexes
+            .into_iter()
+            .filter(|index| enqueues[*index].0 >= first.offset)
+            .collect();
+        // Extra identical inputs or reservations make an absorption's owner unknowable.
+        if candidates.len() != queued.len()
+            || candidates
+                .windows(2)
+                .any(|pair| pair[0].offset == pair[1].offset)
+            || candidates
+                .iter()
+                .zip(&queued)
+                .any(|(entry, index)| entry.offset > enqueues[*index].0)
+        {
+            for index in queued {
+                owners[index] = RowOwner::Unread;
+            }
+            continue;
+        }
+        for (entry, index) in candidates.into_iter().zip(queued) {
+            owners[index] = RowOwner::Command(entry.id.clone());
+        }
+    }
+    Ok(owners)
+}
+
+fn owner_in(
+    store: &Store,
+    (provider, session): (&str, &str),
+    hashes: &[String],
+    row: &str,
+) -> RowOwner {
+    let same = |entry: &&Entry| {
+        entry.append.is_none()
+            && entry.provider == provider
+            && entry.session == session
+            && hashes.contains(&entry.class_hash)
+    };
+    let mut files: Vec<(&Path, [u64; 2])> = Vec::new();
+    for entry in store.entries.iter().filter(same) {
+        if !files.contains(&(entry.path.as_path(), entry.file)) {
+            files.push((entry.path.as_path(), entry.file));
+        }
+    }
+    for (path, file) in files {
+        let mut entries: Vec<&Entry> = (store.entries.iter().filter(same))
+            .filter(|entry| entry.path == path && entry.file == file)
+            .collect();
+        entries.sort_by_key(|entry| entry.offset);
+        let from = entries.first().map_or(0, |entry| entry.offset);
+        let Some(rows) = taken_rows(path, file, from) else {
+            return RowOwner::Unread;
+        };
+        let Some(this) = rows.iter().find(|taken| taken.uuid == row) else {
+            continue;
+        };
+        return match pair(&entries, &rows, row) {
+            Some(entry) if this.user => RowOwner::User(entry.id.clone()),
+            Some(entry) => RowOwner::Command(entry.id.clone()),
+            None => RowOwner::None,
+        };
+    }
+    RowOwner::None
+}
+
+/// The entry that took `row`: the one whose receipt names it, else the earliest free entry each
+/// earlier unreceipted row did not take.
+fn pair<'a>(entries: &[&'a Entry], rows: &[Taken], row: &str) -> Option<&'a Entry> {
+    let receipt = |entry: &Entry, uuid: &str| {
+        (entry.events.iter()).any(|event| {
+            matches!(event.kind.as_str(), "user" | "command") && event.row.as_deref() == Some(uuid)
+        })
+    };
+    if let Some(entry) = entries.iter().find(|entry| receipt(entry, row)) {
+        return Some(entry);
+    }
+    // An entry a receipt paired with another row takes no other row.
+    let mut free: Vec<&Entry> = (entries.iter().copied())
+        .filter(|entry| !rows.iter().any(|taken| receipt(entry, &taken.uuid)))
+        .collect();
+    for taken in rows
+        .iter()
+        .filter(|taken| !entries.iter().any(|e| receipt(e, &taken.uuid)))
+    {
+        let at = free.iter().position(|entry| {
+            entry.offset <= taken.offset && taken.hashes.contains(&entry.class_hash)
+        });
+        let Some(at) = at else {
+            continue;
+        };
+        let entry = free.remove(at);
+        if taken.uuid == row {
+            return Some(entry);
+        }
+    }
+    None
+}
+
+/// The row attempt `id` took in its transcript as [`row_owner`] pairs them, and whether that row
+/// is a user row.
+pub(crate) fn attempt_row(provider: &str, session: &str, id: &str) -> Option<(u64, bool)> {
+    let store = path().and_then(|path| readable(&path)).ok()?;
+    let entry = store.entries.iter().find(|entry| entry.id == id)?;
+    let hashes = [entry.class_hash.clone()];
+    let rows = taken_rows(&entry.path, entry.file, entry.offset)?;
+    rows.into_iter()
+        .filter(|taken| taken.hashes.contains(&entry.class_hash))
+        .find_map(
+            |taken| match owner_in(&store, (provider, session), &hashes, &taken.uuid) {
+                RowOwner::User(owner) | RowOwner::Command(owner) if owner == id => {
+                    Some((taken.offset, taken.user))
+                }
+                _ => None,
+            },
+        )
 }
 
 pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {

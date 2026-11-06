@@ -10,8 +10,23 @@ use crate::services::session_host::herdr_socket_rig_tests::{PROVIDER, SHELL};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+#[test]
+fn rr_intake_live_guard_restores_snapshot_under_the_runtime_root_lock() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let previous = crate::config_live_reload::current();
+    {
+        let _live = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
+        crate::config_live_reload::install(crate::config::Config::default());
+    }
+    let restored = crate::config_live_reload::current();
+    assert_eq!(restored.is_some(), previous.is_some());
+    if let (Some(previous), Some(restored)) = (previous, restored) {
+        assert!(Arc::ptr_eq(&previous, &restored));
+    }
+}
+
 struct IntakeGate {
-    previous: crate::config::Config,
+    _live: crate::config_live_reload::TestLiveGuard,
     trace: crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace,
     _namespace: crate::services::platform::tmux::session_inventory::tests::ChannelNamespace,
     _confirmed: crate::services::tui_o::turn_mode::TestConfirmation,
@@ -21,11 +36,8 @@ impl IntakeGate {
     fn configure(case: &Case) -> Self {
         crate::config::test_env_lock::assert_shared_test_env_lock_held();
         let root = crate::config::runtime_root().unwrap();
-        let previous = crate::config_live_reload::current()
-            .map(|config| (*config).clone())
-            .unwrap_or_default();
         let gate = Self {
-            previous,
+            _live: crate::config_live_reload::test_live_guard_after_shared_test_env_lock(),
             trace:
                 crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace::new(
                     CHANNEL,
@@ -98,12 +110,6 @@ impl IntakeGate {
             .await;
         });
         gate
-    }
-}
-
-impl Drop for IntakeGate {
-    fn drop(&mut self) {
-        crate::config_live_reload::install(self.previous.clone());
     }
 }
 
@@ -942,8 +948,12 @@ fn rr_post_cas_successor_or_activity_keeps_n1_hold_without_cleanup_pg() {
 mod clear_tests;
 #[path = "root_replaced_recovery_tests/legacy_clear_tests.rs"]
 mod legacy_clear_tests;
+#[path = "root_replaced_recovery_tests/policy_tests.rs"]
+mod policy_tests;
 #[path = "root_replaced_recovery_tests/recheck_tests.rs"]
 mod recheck_tests;
+#[path = "root_replaced_recovery_tests/wake_tests.rs"]
+mod wake_tests;
 
 #[test]
 fn rr_retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries_pg() {

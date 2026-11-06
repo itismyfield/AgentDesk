@@ -36,6 +36,7 @@ async fn operator_resume_latest_legacy_posted_does_not_reblock_old_rejection() {
         LedgerEntry::Posted {
             serial: 1,
             msg_id: 200,
+            confirmation: None,
         },
     ] {
         channel.append_ledger(entry).unwrap();

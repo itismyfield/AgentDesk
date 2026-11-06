@@ -1,5 +1,8 @@
 //! Provider-output guard for the watcher raw rollover edit seam.
 
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::BodySite;
+
 use super::StreamingStatusTickContext;
 use crate::services::provider_output_guard::{
     ProviderOutputVerdict, inspect_provider_streaming_output, inspect_provider_streaming_rollover,
@@ -96,13 +99,18 @@ pub(super) async fn guard_rollover(
         WatcherRolloverAction::Hold => false,
         WatcherRolloverAction::SendSafe(body) => {
             super::rate_limit_wait(ctx.shared, ctx.channel_id).await;
-            let _ = crate::services::discord::http::edit_channel_message(
-                ctx.http,
-                ctx.channel_id,
-                message_id,
-                body,
-            )
-            .await;
+            let _ = BodySource::inherited()
+                .observe(
+                    BodySite::WatcherProviderGuard,
+                    BodyOffer::Body,
+                    crate::services::discord::http::edit_channel_message(
+                        ctx.http,
+                        ctx.channel_id,
+                        message_id,
+                        body,
+                    ),
+                )
+                .await;
             false
         }
     }
@@ -175,26 +183,5 @@ mod tests {
             &mut codex
         ));
         assert_eq!(codex, "codex body");
-    }
-
-    #[test]
-    fn invariant_4371_common_edit_and_initial_send_share_guarded_payload() {
-        let source = include_str!("streaming_status_tick.rs");
-        let common_tick = source
-            .split("let mut display_text = build_watcher_streaming_edit_text")
-            .nth(1)
-            .expect("common display-text seam");
-        assert!(
-            common_tick.contains("guard_streaming_frame"),
-            "common tick must classify before either Discord write"
-        );
-        assert!(
-            common_tick.contains("edit_channel_message(&http, channel_id, msg_id, &display_text)"),
-            "existing-message edit must use the guarded selection"
-        );
-        assert!(
-            common_tick.contains("send_channel_message(&http, channel_id, &display_text)"),
-            "initial send must use the same guarded selection"
-        );
     }
 }

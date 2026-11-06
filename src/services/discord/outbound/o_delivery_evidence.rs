@@ -12,7 +12,11 @@ use crate::services::tui_o::{
 use crate::services::{discord::SharedData, provider::ProviderKind};
 use futures::StreamExt;
 use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 use tokio::time::Instant;
 
 pub(in crate::services::discord) use super::o_delivery_manifest::BodyProducer;
@@ -26,6 +30,105 @@ pub(super) struct EpisodeCovered {
     pub posted_ms: u64,
 }
 
+struct SharedRead {
+    task: Option<tokio::task::JoinHandle<()>>,
+    result: tokio::sync::oneshot::Receiver<Option<Vec<u64>>>,
+}
+
+impl Drop for SharedRead {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+#[derive(Default)]
+struct SharedReads {
+    pending: Mutex<HashMap<usize, SharedRead>>,
+    ready: Arc<tokio::sync::Notify>,
+    poll: bool,
+}
+
+impl SharedReads {
+    fn candidates(
+        &self,
+        pool: &sqlx::PgPool,
+        position: usize,
+        key: PieceKey,
+        sender: u64,
+        payload: String,
+        deadline: Instant,
+    ) -> Option<Vec<u64>> {
+        let mut reads = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(read) = reads.get_mut(&position) {
+            match read.result.try_recv() {
+                Ok(result) => {
+                    if let Some(task) = read.task.take() {
+                        task.abort();
+                    }
+                    return result;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    if let Some(task) = read.task.take() {
+                        task.abort();
+                    }
+                    if !self.poll {
+                        return None;
+                    }
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return None,
+            }
+        }
+        // New pieces can advance immediately; only another read of a finished piece waits for a poll.
+        if reads.values().filter(|read| read.task.is_some()).count() < 8 {
+            let (done, result) = tokio::sync::oneshot::channel();
+            let (pool, ready) = (pool.clone(), Arc::clone(&self.ready));
+            let task = tokio::spawn(async move {
+                let result = tokio::time::timeout_at(
+                    deadline,
+                    delivery_candidates(&pool, &key, sender, &payload),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok);
+                let found = result.as_ref().is_some_and(|ids| !ids.is_empty());
+                let _ = done.send(result);
+                if found {
+                    ready.notify_one();
+                }
+            });
+            reads.insert(
+                position,
+                SharedRead {
+                    task: Some(task),
+                    result,
+                },
+            );
+        }
+        None
+    }
+
+    fn forget(&self, position: usize) {
+        drop(
+            self.pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&position),
+        );
+    }
+}
+
+// These results belong only to this immutable manifest lookup, including its final source check.
+#[derive(Default)]
+struct Verification {
+    exact: HashMap<usize, u64>,
+    shared: Option<SharedReads>,
+}
+
 async fn verify<P: DiscordPort>(
     pool: Option<&sqlx::PgPool>,
     port: &P,
@@ -33,6 +136,7 @@ async fn verify<P: DiscordPort>(
     sent: usize,
     deadline: Instant,
     local: Option<&delivery_evidence::LocalEvidence>,
+    progress: &mut Verification,
 ) -> Option<u64> {
     if plan.version != crate::services::tui_o::shadow::IDENTITY_VERSION
         || !plan.body.is_char_boundary(sent)
@@ -45,54 +149,87 @@ async fn verify<P: DiscordPort>(
     let required: Vec<_> = plan
         .pieces
         .iter()
-        .filter(|piece| piece.body_end > sent)
-        .cloned()
+        .enumerate()
+        .filter(|(_, piece)| piece.body_end > sent)
+        .map(|(position, piece)| (position, piece.clone()))
         .collect();
     if required.is_empty() {
         return None;
     }
-    let checks = required.into_iter().map(|piece| async move {
-        let mut ids = Vec::new();
-        if let Some(local) = &local
-            && let Some((_, record)) = local.latest_piece(&piece.key, piece.index)
-            && record.payload == piece.payload
-            && let Some(PieceOutcome::Posted(id)) = record.outcome
-        {
-            ids.push(id);
-        }
-        for &id in &ids {
-            if let Some(time) = exact(port, channel, id, &piece.payload, deadline).await {
-                return Some(time);
+    let pending: Vec<_> = required
+        .iter()
+        .filter(|(position, _)| !progress.exact.contains_key(position))
+        .cloned()
+        .collect();
+    let shared_reads = progress.shared.as_ref();
+    let checks = pending.into_iter().map(|(position, piece)| async move {
+        let proof = async {
+            let mut ids = Vec::new();
+            if let Some(local) = &local
+                && let Some((_, record)) = local.latest_piece(&piece.key, piece.index)
+                && record.payload == piece.payload
+                && let Some(PieceOutcome::Posted(id)) = record.outcome
+            {
+                if local.confirmed_post(&piece.key, piece.index, port.bot_id()) == Some(id) {
+                    return u64::try_from(MessageId::new(id).created_at().timestamp_millis()).ok();
+                }
+                ids.push(id);
             }
-        }
-        ids.clear();
-        if let (Some(pool), Some(key)) = (pool, PieceKey::new(piece.key.clone(), piece.index))
-            && let Ok(Ok(shared)) = tokio::time::timeout_at(
-                deadline,
-                delivery_candidates(pool, &key, port.bot_id(), &piece.payload),
-            )
-            .await
-        {
-            ids.extend(shared);
-        }
-        ids.sort_unstable();
-        ids.dedup();
-        for id in ids {
-            if Instant::now() >= deadline {
-                return None;
+            for &id in &ids {
+                if let Some(time) = exact(port, channel, id, &piece.payload, deadline).await {
+                    return Some(time);
+                }
             }
-            if let Some(time) = exact(port, channel, id, &piece.payload, deadline).await {
-                return Some(time);
+            ids.clear();
+            if let (Some(pool), Some(key)) = (pool, PieceKey::new(piece.key.clone(), piece.index)) {
+                // A slow shared read must not hold the next local receipt snapshot behind it.
+                let shared = match shared_reads {
+                    Some(reads) => reads.candidates(
+                        pool,
+                        position,
+                        key,
+                        port.bot_id(),
+                        piece.payload.clone(),
+                        deadline,
+                    ),
+                    None => tokio::time::timeout_at(
+                        deadline,
+                        delivery_candidates(pool, &key, port.bot_id(), &piece.payload),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok),
+                };
+                ids.extend(shared.unwrap_or_default());
             }
+            ids.sort_unstable();
+            ids.dedup();
+            for id in ids {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                if let Some(time) = exact(port, channel, id, &piece.payload, deadline).await {
+                    return Some(time);
+                }
+            }
+            None
         }
-        None
-    });
-    let results: Vec<_> = futures::stream::iter(checks)
-        .buffer_unordered(8)
-        .collect()
         .await;
-    results
-        .into_iter()
+        (position, proof)
+    });
+    let checks = futures::stream::iter(checks).buffer_unordered(8);
+    futures::pin_mut!(checks);
+    while let Some((position, proof)) = checks.next().await {
+        if let Some(posted_ms) = proof {
+            progress.exact.insert(position, posted_ms);
+            if let Some(reads) = &progress.shared {
+                reads.forget(position);
+            }
+        }
+    }
+    required
+        .iter()
+        .map(|(position, _)| progress.exact.get(position).copied())
         .collect::<Option<Vec<_>>>()?
         .into_iter()
         .max()
@@ -144,9 +281,17 @@ pub(super) async fn episode<P: DiscordPort>(
     .await
     .ok()
     .flatten()?;
-    verify(pool, port, plan, 0, deadline, local.1.as_deref())
-        .await
-        .map(|posted_ms| EpisodeCovered { posted_ms })
+    verify(
+        pool,
+        port,
+        plan,
+        0,
+        deadline,
+        local.1.as_deref(),
+        &mut Verification::default(),
+    )
+    .await
+    .map(|posted_ms| EpisodeCovered { posted_ms })
 }
 
 type LocalSnapshot = (
@@ -266,6 +411,14 @@ pub(in crate::services::discord) async fn tail(
     let bot = bot.id.get();
     let port = GatewayPort::new(Arc::clone(http), bot);
     let mut local = None;
+    let mut progress = Verification {
+        shared: Some(SharedReads {
+            poll: true,
+            ..SharedReads::default()
+        }),
+        ..Verification::default()
+    };
+    let mut next_poll = Instant::now();
     loop {
         if Instant::now() >= deadline {
             return unavailable(
@@ -304,6 +457,7 @@ pub(in crate::services::discord) async fn tail(
                 frame.sent,
                 deadline,
                 local.as_ref().and_then(|snapshot| snapshot.1.as_deref()),
+                &mut progress,
             ),
         )
         .await
@@ -320,10 +474,15 @@ pub(in crate::services::discord) async fn tail(
                 unavailable(&frame, "source_changed_or_expired", began, None)
             };
         }
-        let pause = deadline
-            .saturating_duration_since(Instant::now())
-            .min(std::time::Duration::from_secs(1));
-        tokio::time::sleep(pause).await;
+        if let Some(reads) = &mut progress.shared {
+            if reads.poll {
+                next_poll = deadline.min(Instant::now() + std::time::Duration::from_secs(1));
+            }
+            tokio::select! {
+                _ = tokio::time::sleep_until(next_poll) => reads.poll = true,
+                _ = reads.ready.notified() => reads.poll = false,
+            }
+        }
     }
 }
 
@@ -402,17 +561,10 @@ pub(in crate::services::discord) async fn headless_outbox(
     .await
     .ok()?
     .ok()?;
-    let formatted = if shared.ui.status_panel_v2_enabled {
-        crate::services::discord::formatting::format_for_discord_with_status_panel(
-            frame.body,
-            frame.provider,
-        )
-    } else {
-        crate::services::discord::formatting::format_for_discord_with_provider(
-            frame.body,
-            frame.provider,
-        )
-    };
+    let formatted = crate::services::discord::formatting::format_for_discord_with_status_panel(
+        frame.body,
+        frame.provider,
+    );
     let bodies = [frame.body, formatted.as_str()];
     if !rows
         .iter()

@@ -31,6 +31,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct StreamingStatusTickC
     pub(in crate::services::discord::tmux::tmux_watcher) watcher_provider: &'a ProviderKind,
     pub(in crate::services::discord::tmux::tmux_watcher) tmux_session_name: &'a String,
     pub(in crate::services::discord::tmux::tmux_watcher) output_path: &'a String,
+    pub(in crate::services::discord::tmux::tmux_watcher) source_authority: WatcherSourceAuthority,
     pub(in crate::services::discord::tmux::tmux_watcher) turn_delivered: &'a Arc<AtomicBool>,
     pub(in crate::services::discord::tmux::tmux_watcher) host: &'a HostSnapshot,
 }

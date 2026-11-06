@@ -1,7 +1,11 @@
 //! Identity of the native user turn an Escape targets.
 
+use crate::services::discord::inflight::{self, InflightEpisodePin, InflightTurnIdentity};
+use crate::services::provider::native_stop::NativeUserPin;
+use crate::services::provider::{CancelToken, ProviderKind};
 use std::io::{BufRead, Seek};
 use std::path::Path;
+use std::sync::{Arc, Weak};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ClaudeStopTurnIdentity {
@@ -11,6 +15,131 @@ pub(super) struct ClaudeStopTurnIdentity {
     user_line_end: u64,
     user_line_hash: u64,
     user_entry_id: Option<String>,
+    pinned: Option<PinnedTurn>,
+}
+
+/// The token whose own native input the identity is.
+#[derive(Clone)]
+struct PinnedTurn {
+    token: Weak<CancelToken>,
+    channel: u64,
+    pin: NativeUserPin,
+    birth: Result<Option<InflightEpisodePin>, String>,
+}
+
+impl PartialEq for PinnedTurn {
+    fn eq(&self, other: &Self) -> bool {
+        self.channel == other.channel
+            && self.pin == other.pin
+            && self.birth == other.birth
+            && Weak::ptr_eq(&self.token, &other.token)
+    }
+}
+
+impl Eq for PinnedTurn {}
+
+impl std::fmt::Debug for PinnedTurn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PinnedTurn")
+            .field("session", &self.pin.tmux_session)
+            .field("channel", &self.channel)
+            .finish()
+    }
+}
+
+type BirthRow = (InflightTurnIdentity, Option<String>);
+
+fn capture_birth(
+    channel: u64,
+    expected: &Result<Option<BirthRow>, String>,
+) -> Result<Option<InflightEpisodePin>, String> {
+    let row = inflight::load_inflight_state_read_only_result(&ProviderKind::Claude, channel)?;
+    let current = row.as_ref().map(|row| {
+        (
+            InflightTurnIdentity::from_state(row),
+            row.turn_nonce.clone(),
+        )
+    });
+    if expected.as_ref().map_err(Clone::clone)? != &current {
+        return Err("native birth changed during stop admission".into());
+    }
+    Ok(row.as_ref().map(InflightEpisodePin::from_state))
+}
+
+struct ChildAuthority<'a> {
+    token: &'a CancelToken,
+    restored: bool,
+    persisted: Option<Vec<String>>,
+}
+
+impl ChildAuthority<'_> {
+    fn registered(&self, id: &str) -> bool {
+        if self.restored {
+            self.persisted
+                .as_ref()
+                .is_some_and(|ids| ids.iter().any(|kept| kept == id))
+        } else {
+            self.token.native_stop.is_busy_child(id)
+        }
+    }
+
+    fn ledger(&self) -> bool {
+        !self.restored
+    }
+}
+
+impl PinnedTurn {
+    fn authority<'a>(&self, token: &'a CancelToken) -> Result<ChildAuthority<'a>, String> {
+        let current =
+            inflight::load_inflight_state_read_only_result(&ProviderKind::Claude, self.channel)?;
+        let (root, persisted) = match (&self.birth, current) {
+            (Ok(None), None) => (false, None),
+            (Ok(Some(birth)), Some(row))
+                if birth.is_same_episode_as(&InflightEpisodePin::from_state(&row))
+                    && row.provider == "claude"
+                    && row.channel_id == self.channel
+                    && row.turn_nonce.as_deref() == token.turn_nonce()
+                    && row
+                        .tmux_session_name
+                        .as_deref()
+                        .is_none_or(|session| session == self.pin.tmux_session)
+                    && row
+                        .output_path
+                        .as_deref()
+                        .is_none_or(|path| path == self.pin.output_path)
+                    && row
+                        .session_id
+                        .as_deref()
+                        .is_none_or(|sid| sid == self.pin.session_id) =>
+            {
+                row.native_stop_child_proof(&self.pin)
+                    .map_err(str::to_owned)?
+            }
+            _ => return Err("native birth no longer matches the stopped turn".into()),
+        };
+        let restored = token.native_stop.receipt_sink().has_restored_input();
+        if !root {
+            if restored {
+                return Err("restored native root has no current birth proof".into());
+            }
+            if !crate::services::claude_tui::input::revalidate_native_pin(&self.pin) {
+                return Err("native root has no current live source proof".into());
+            }
+        }
+        Ok(ChildAuthority {
+            token,
+            restored,
+            persisted,
+        })
+    }
+}
+
+/// What a row after the pinned input says about whether the pinned turn is still the one running.
+enum Later {
+    Neutral,
+    BusyChild(String),
+    Other,
+    Undecided,
 }
 
 impl ClaudeStopTurnIdentity {
@@ -18,8 +147,341 @@ impl ClaudeStopTurnIdentity {
         latest_claude_user_turn_identity(Path::new(output_path))
     }
 
+    /// The token's verified native input; later rows must be neutral or its own busy inputs.
+    pub(super) fn pinned(
+        pin: &NativeUserPin,
+        token: &Arc<CancelToken>,
+        channel: u64,
+        expected: &Result<Option<BirthRow>, String>,
+    ) -> Self {
+        Self {
+            output_path: pin.output_path.clone(),
+            file_identity: pin.source_file,
+            user_line_start: pin.range.0,
+            user_line_end: pin.range.1,
+            user_line_hash: 0,
+            user_entry_id: Some(pin.uuid.clone()),
+            pinned: Some(PinnedTurn {
+                token: Arc::downgrade(token),
+                channel,
+                pin: pin.clone(),
+                birth: capture_birth(channel, expected),
+            }),
+        }
+    }
+
     pub(super) fn still_current(&self) -> bool {
-        latest_claude_user_turn_identity(Path::new(&self.output_path)).as_ref() == Some(self)
+        match &self.pinned {
+            Some(pinned) => self.pinned_still_current(pinned),
+            None => {
+                latest_claude_user_turn_identity(Path::new(&self.output_path)).as_ref()
+                    == Some(self)
+            }
+        }
+    }
+
+    /// Rebuilds pairing from the root so an earlier enqueue survives every stop recheck.
+    fn pinned_still_current(&self, pinned: &PinnedTurn) -> bool {
+        let Some(token) = pinned.token.upgrade() else {
+            return false;
+        };
+        let Ok(authority) = pinned.authority(&token) else {
+            return false;
+        };
+        let Ok(metadata) = std::fs::metadata(&self.output_path) else {
+            return false;
+        };
+        input_rows(
+            Path::new(&self.output_path),
+            self.file_identity,
+            &pinned.pin.tmux_session,
+            &pinned.pin.session_id,
+            self.user_line_end,
+            metadata.len(),
+            Some(&authority),
+        )
+        .is_ok_and(|(_, clean)| clean)
+            && pinned.authority(&token).is_ok_and(|now| {
+                now.restored == authority.restored && now.persisted == authority.persisted
+            })
+    }
+}
+
+/// All human inputs after the opener must belong to durable Discord busy attempts.
+pub(super) fn owned_input_rows(
+    path: &Path,
+    source_file: (u64, u64),
+    session: &str,
+    native_session: &str,
+    opener_end: u64,
+    end: u64,
+) -> Result<(bool, bool), String> {
+    input_rows(
+        path,
+        source_file,
+        session,
+        native_session,
+        opener_end,
+        end,
+        None,
+    )
+}
+
+struct QueuedInput {
+    offset: u64,
+    body: String,
+    command: bool,
+    absorbed: bool,
+    withdrawn: bool,
+}
+
+impl QueuedInput {
+    fn ran(&self) -> bool {
+        self.command || self.absorbed
+    }
+}
+
+fn input_rows(
+    path: &Path,
+    source_file: (u64, u64),
+    session: &str,
+    native_session: &str,
+    opener_end: u64,
+    end: u64,
+    authority: Option<&ChildAuthority<'_>>,
+) -> Result<(bool, bool), String> {
+    use crate::services::tui_input::human_frame::history::{self, RowOwner};
+    use crate::services::tui_o::writer::input_facts::{QueueRecord, classify_queued_record};
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if transcript_file_identity(&metadata) != source_file
+        || opener_end > end
+        || metadata.len() < end
+    {
+        return Err("owned-input transcript source changed".into());
+    }
+    file.seek(std::io::SeekFrom::Start(opener_end))
+        .map_err(|error| error.to_string())?;
+    let mut reader = std::io::BufReader::new(file);
+    let (mut line, mut offset) = (Vec::new(), opener_end);
+    let (mut owned, mut clean) = (false, true);
+    let (mut queued, mut reserved) = (Vec::<QueuedInput>::new(), Vec::new());
+    while offset < end {
+        let start = offset;
+        line.clear();
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|error| error.to_string())?;
+        offset += read as u64;
+        if read == 0 || offset > end || !line.ends_with(b"\n") {
+            return Err("owned-input transcript record incomplete".into());
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let record = serde_json::from_slice(&line).map_err(|error| error.to_string())?;
+        let later = if let Some(boundary) = row_boundary(&record, native_session) {
+            boundary
+        } else {
+            match classify_queued_record(&record) {
+                Some(QueueRecord::Enqueue(body)) => {
+                    queued.push(QueuedInput {
+                        offset: start,
+                        body,
+                        command: false,
+                        absorbed: false,
+                        withdrawn: false,
+                    });
+                    Later::Neutral
+                }
+                Some(QueueRecord::Absorbed(body)) => {
+                    let at = queued
+                        .iter()
+                        .position(|input| {
+                            input.body == body
+                                && input.command
+                                && !input.absorbed
+                                && !input.withdrawn
+                        })
+                        .or_else(|| {
+                            queued.iter().position(|input| {
+                                input.body == body && !input.ran() && !input.withdrawn
+                            })
+                        });
+                    let Some(at) = at else {
+                        return Err("Claude absorption has no corresponding enqueue".into());
+                    };
+                    queued[at].absorbed = true;
+                    Later::Neutral
+                }
+                Some(QueueRecord::Human(body)) => {
+                    queued_command(&mut queued, body).unwrap_or_else(|| {
+                        later_row(&record, authority, session, native_session, path)
+                    })
+                }
+                Some(QueueRecord::Command(body))
+                    if record["attachment"]["commandMode"] == "prompt"
+                        && record["attachment"]["origin"]["kind"].as_str().is_none() =>
+                {
+                    queued_command(&mut queued, body).unwrap_or_else(|| {
+                        later_row(&record, authority, session, native_session, path)
+                    })
+                }
+                Some(QueueRecord::Withdraw(body) | QueueRecord::Delivered(body)) => {
+                    if let Some(input) = queued
+                        .iter_mut()
+                        .find(|input| input.body == body && !input.ran() && !input.withdrawn)
+                    {
+                        input.withdrawn = true;
+                    }
+                    Later::Neutral
+                }
+                Some(QueueRecord::WithdrawAll) => {
+                    for input in &mut queued {
+                        if !input.ran() {
+                            input.withdrawn = true;
+                        }
+                    }
+                    Later::Neutral
+                }
+                None if record["type"] == "queue-operation" => Later::Undecided,
+                _ => later_row(&record, authority, session, native_session, path),
+            }
+        };
+        match later {
+            Later::Neutral => {}
+            Later::BusyChild(id) => {
+                owned = true;
+                reserved.push(id);
+            }
+            Later::Other => clean = false,
+            Later::Undecided => return Err("owned-input row ownership unreadable".into()),
+        }
+    }
+    if queued.iter().any(QueuedInput::ran) {
+        let enqueues: Vec<_> = queued
+            .iter()
+            .map(|input| (input.offset, input.body.clone()))
+            .collect();
+        let owners = history::discord_enqueue_owners(
+            session,
+            native_session,
+            path,
+            opener_end,
+            &enqueues,
+            &reserved,
+        )?;
+        for (input, owner) in queued.iter().zip(owners) {
+            if !input.ran() {
+                continue;
+            }
+            match owner {
+                RowOwner::Command(id)
+                    if authority.is_none_or(|scope| scope.registered(&id) || scope.ledger()) =>
+                {
+                    owned = true;
+                }
+                RowOwner::Command(_) => clean = false,
+                RowOwner::Unread => return Err("Claude absorption owner is ambiguous".into()),
+                RowOwner::None | RowOwner::User(_) => clean = false,
+            }
+        }
+    }
+    Ok((owned, clean))
+}
+
+fn queued_command(queued: &mut [QueuedInput], body: String) -> Option<Later> {
+    let at = queued
+        .iter()
+        .position(|input| {
+            input.body == body && input.absorbed && !input.command && !input.withdrawn
+        })
+        .or_else(|| {
+            queued
+                .iter()
+                .position(|input| input.body == body && !input.ran() && !input.withdrawn)
+        })?;
+    queued[at].command = true;
+    Some(Later::Neutral)
+}
+
+fn row_boundary(record: &serde_json::Value, native_session: &str) -> Option<Later> {
+    if record["isSidechain"] == true {
+        return Some(Later::Neutral);
+    }
+    if !record.is_object() || record["type"].as_str().is_none() {
+        return Some(Later::Undecided);
+    }
+    record
+        .get("sessionId")
+        .is_some_and(|id| id.as_str() != Some(native_session))
+        .then_some(Later::Other)
+}
+
+/// A later user opens another turn; only an exact registered busy command joins this one.
+fn later_row(
+    record: &serde_json::Value,
+    authority: Option<&ChildAuthority<'_>>,
+    session: &str,
+    native_session: &str,
+    transcript: &Path,
+) -> Later {
+    use crate::services::tui_input::human_frame::history::{self, RowOwner};
+    if let Some(boundary) = row_boundary(record, native_session) {
+        return boundary;
+    }
+    if record["type"] == "user"
+        && crate::services::tui_o::shadow::identity::record_is_compact_summary(record)
+    {
+        return Later::Neutral;
+    }
+    // A tool result's envelope may carry hook context beside it; that text is no new input.
+    let blocks = record["message"]["content"]
+        .as_array()
+        .into_iter()
+        .flatten();
+    if record["type"] == "user"
+        && blocks
+            .into_iter()
+            .any(|block| block["type"] == "tool_result")
+    {
+        return Later::Neutral;
+    }
+    if record["type"] == "user" && record["isMeta"] != true {
+        return Later::Other;
+    }
+    let command = &record["attachment"];
+    if record["type"] != "attachment"
+        || command["type"] != "queued_command"
+        || command["origin"]["kind"]
+            .as_str()
+            .is_some_and(|kind| kind != "human")
+    {
+        return Later::Neutral;
+    }
+    match command["commandMode"].as_str() {
+        Some("prompt") => {}
+        Some(_) => return Later::Neutral,
+        None => return Later::Undecided,
+    }
+    let (Some(prompt), Some(row)) = (command["prompt"].as_str(), record["uuid"].as_str()) else {
+        return Later::Other;
+    };
+    match history::row_owner("claude", session, &[prompt.to_string()], row) {
+        RowOwner::Command(id) | RowOwner::User(id)
+            if authority.is_some_and(|scope| scope.registered(&id)) =>
+        {
+            Later::BusyChild(id)
+        }
+        RowOwner::Command(id) if authority.is_none_or(|scope| scope.ledger()) => {
+            match history::discord_owner_attempt(session, native_session, transcript, &id) {
+                Ok(true) => Later::BusyChild(id),
+                Ok(false) => Later::Other,
+                Err(_) => Later::Undecided,
+            }
+        }
+        RowOwner::Unread => Later::Undecided,
+        _ => Later::Other,
     }
 }
 
@@ -89,6 +551,7 @@ fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentit
             user_line_end: offset,
             user_line_hash: hasher.finish(),
             user_entry_id,
+            pinned: None,
         });
     }
 }

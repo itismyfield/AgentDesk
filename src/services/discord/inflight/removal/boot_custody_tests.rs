@@ -533,3 +533,38 @@ async fn custody_flush_failure_is_recopied_by_the_next_boot() {
     assert_eq!(row["sha256"].as_str(), Some(digest.as_str()));
     assert_eq!(copy_of(&episode, "row"), Some(bytes));
 }
+
+// Contract: a transcript whose dev a reboot renumbered is the file the last copy holds, so a boot
+// adds nothing; a new inode at that path is copied again, flagged changed, and supersedes it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_renumbered_transcript_is_not_recopied_but_a_replaced_one_is() {
+    use crate::services::tui_o::shadow::capture::renumber;
+    let env = Env::new();
+    set_test_tmux_alive_override(Some(&[PANE]));
+    let (out, offset) = transcript(&env, "renumbered.jsonl", "old\n", "turn\n");
+    let mut state = tui_direct_row(5_997_111, &out, offset);
+    state.set_restart_mode(InflightRestartMode::DrainRestart);
+    (state.born_generation, state.restart_generation) = (G - 3, Some(G - 1));
+    env.seed(&state, 0);
+    assert_eq!(boot().await.kept, 1);
+    let first = tree(&custody_root(&env));
+    assert!(!first.is_empty());
+
+    let reboot = renumber::shift(&out, 1 << 40);
+    assert_eq!(boot().await.kept, 1);
+    assert_eq!(tree(&custody_root(&env)), first, "a renumbered dev");
+    drop(reboot);
+
+    let aside = out.with_extension("aside");
+    fs::rename(&out, &aside).unwrap();
+    fs::copy(&aside, &out).unwrap();
+    assert_eq!(boot().await.kept, 1);
+    let (_, last) = entries(&episodes(&env)[&5_997_111]).pop().unwrap();
+    assert_eq!(last["source_changed"], true, "a new inode: {last}");
+    assert!(last["supersedes"].is_array(), "{last}");
+    assert_eq!(
+        copy_of(&episodes(&env)[&5_997_111], "transcript"),
+        Some(b"turn\nturn\n".to_vec())
+    );
+}

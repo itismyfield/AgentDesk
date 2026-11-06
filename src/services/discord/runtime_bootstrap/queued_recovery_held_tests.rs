@@ -591,3 +591,45 @@ fn retries_back_off_to_a_quarter_hour() {
     let secs: Vec<u64> = (0..7).map(|n| backoff(n).as_secs()).collect();
     assert_eq!(secs, [5, 15, 60, 300, 900, 900, 900]);
 }
+
+/// Restored cards the boot could not install go to the stale-card cleanup, and that cleanup still
+/// asks who owns each card: only a card no live input owns is deleted.
+#[test]
+fn uninstalled_restored_cards_reach_cleanup_and_a_live_owner_keeps_its_card() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (c, d) = (6_709_705_u64, 6_709_706_u64);
+    let root = root(&[c, d]);
+    let shared = root.shared.clone();
+    let (lone, spare) = (ChannelId::new(c), ChannelId::new(d));
+    let m = |id: u64| MessageId::new(6_709_900 + id);
+    // Each queued head already owns a newer card in memory, while its file still names an old one.
+    let (q, p, p2) = (m(1), m(2), m(3));
+    save_queue(&shared, lone, &[item(q.get())]);
+    shared.insert_queued_placeholder_locked(lone, q, p2);
+    save_rows(&shared, lone, &[(q, p)]);
+    // Here a cardless queued input V can still take the old card over.
+    let (r, pr, pr2, v) = (m(11), m(12), m(13), m(14));
+    save_queue(&shared, spare, &[item(r.get()), item(v.get())]);
+    shared.insert_queued_placeholder_locked(spare, r, pr2);
+    save_rows(&shared, spare, &[(r, pr)]);
+    runtime().block_on(async {
+        let (stale, held) = boot(&shared, async {}).await;
+        assert_eq!(held.len(), 0, "both queue files merge");
+        let recorder = Recorder::default();
+        let delete =
+            super::super::super::queued_placeholders::delete_stale_queued_placeholder_cards_with;
+        delete(&recorder, &shared, &stale).await;
+        assert_eq!(
+            recorder.deleted(),
+            [p],
+            "only the old card no live input owns is deleted: {stale:?}"
+        );
+        assert_eq!(mapped(&shared, lone, q), Some(p2));
+        assert_eq!(mapped(&shared, spare, r), Some(pr2));
+        assert_eq!(
+            mapped(&shared, spare, v),
+            Some(pr),
+            "the live input took the old card"
+        );
+    });
+}

@@ -64,7 +64,6 @@ fn submit(
     readiness: PromptReadinessKind,
     cancel: Option<&CancelToken>,
 ) -> Result<(), SubmissionError> {
-    guarded_outcome::receipt(session, prompt);
     let request = Request {
         session,
         prompt,
@@ -147,6 +146,7 @@ fn run(
         if !authority.admits(session) {
             return InputRun::Refused(InputRefusal::IdentityMismatch);
         }
+        guarded_outcome::receipt(session, request.prompt);
         if cancel_requested(request.cancel) {
             return InputRun::Cancelled { confirmed: 0 };
         }
@@ -160,6 +160,10 @@ fn run(
         };
         if authority.claim(session).is_err() {
             return refused(Refusal::SubmissionFence);
+        }
+        // A stop that took the writer token's gate first leaves the pane without a key.
+        if !guarded_outcome::first_key() {
+            return InputRun::Cancelled { confirmed: 0 };
         }
         guarded_outcome::begin();
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt(

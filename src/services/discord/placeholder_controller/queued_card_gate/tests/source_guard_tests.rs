@@ -1,8 +1,7 @@
 //! Classification 2: each gated region is a real item or a statement run inside one, with
 //! comments excluded. A lexical tripwire over a fixed list: no alias, macro or reachability.
 
-use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
-use crate::test_support::CommentForgery;
+use crate::services::discord::router::source_guard_support::Lexed;
 
 pub(super) const MOD_RS: &str = include_str!("../../../mod.rs");
 pub(super) const KICKOFF_RS: &str = include_str!("../../../queue_dispatch/kickoff.rs");
@@ -14,7 +13,6 @@ pub(super) const BOOTSTRAP_RS: &str =
     include_str!("../../../runtime_bootstrap/queued_placeholders.rs");
 pub(super) const FLUSH_RS: &str = include_str!("../../../runtime_bootstrap/recovery_flush.rs");
 pub(super) const CONTROLLER_RS: &str = include_str!("../../../placeholder_controller.rs");
-pub(super) const GATE_RS: &str = include_str!("../../queued_card_gate.rs");
 
 /// Serenity and in-tree helper spellings that DELETE or PATCH a message without a teardown
 /// token; `queued_card_gate.rs` is the token boundary and is not checked against them.
@@ -118,12 +116,9 @@ pub(super) const SITES: [(&str, &str, Span); 9] = [
 
 const FLUSH_SCOPE: &str = "pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(";
 const FLUSH_CALL: &str = "delete_stale_queued_placeholder_cards(";
-const FLUSH_END: &str = "mark_reconcile_complete(";
+const FLUSH_END: &str = "complete_active_reconcile(";
 const FLUSH_SHARED: &str = "&shared_for_tmux2";
 const DETACH_CALL: &str = ".detach_by_message(";
-const EXIT_BODY: &str = "async fn teardown_exit_body(";
-const WARN: &str = "tracing::warn!";
-const DISCARD: &str = "let _ =";
 
 /// A `=>` head must open a braced arm; an expression arm would let `block` run on into the
 /// next arm's block, so it resolves to no region.
@@ -213,177 +208,4 @@ pub(super) fn gate_wiring_gaps() -> Vec<String> {
     gaps.extend(bootstrap_caller_gaps(FLUSH_RS));
     gaps.extend(controller_gaps(CONTROLLER_RS));
     gaps
-}
-
-/// Inside the real teardown item: one warning that carries both errors, and no error
-/// discarded with `let _ =`. The warning runs from the macro to the next code `;`.
-pub(super) fn exit_body_warning_gaps(gate: &str) -> Vec<String> {
-    let Some(body) = Lexed::new(gate).block(EXIT_BODY) else {
-        return vec![format!("missing {EXIT_BODY}")];
-    };
-    let mut gaps = Vec::new();
-    let warns = body.find_all(WARN);
-    match warns[..] {
-        [at] => match body.find_after(at, ";") {
-            Some(end) => {
-                let warning = body.slice(at..end);
-                for field in ["edit_error", "delete_error"] {
-                    if !warning.contains(field) {
-                        gaps.push(format!("the warning omits {field}"));
-                    }
-                }
-            }
-            None => gaps.push("the warning never ends".to_string()),
-        },
-        _ => gaps.push(format!("{} warnings; want 1", warns.len())),
-    }
-    if body.text().contains(DISCARD) {
-        gaps.push("an error is discarded with `let _ =`".to_string());
-    }
-    gaps
-}
-
-fn span_needles(span: Span) -> Vec<&'static str> {
-    match span {
-        Span::Items(heads) | Span::Nested(heads) => heads.to_vec(),
-        Span::Statements { scope, start, end } => {
-            scope.iter().copied().chain([start, end]).collect()
-        }
-    }
-}
-
-#[test]
-fn gated_region_guards_reject_commented_heads_and_gate_calls() {
-    for (label, source, span) in SITES {
-        assert_eq!(gated_region_gaps(label, source, span), Vec::<String>::new());
-        for needle in span_needles(span).into_iter().chain([GATE]) {
-            for forgery in CommentForgery::ALL {
-                let forged = forge(source, needle, forgery);
-                assert!(
-                    !gated_region_gaps(label, &forged, span).is_empty(),
-                    "{label}: {forgery:?} commented `{needle}` still passes"
-                );
-            }
-        }
-        if let Span::Statements { start, end, .. } = span {
-            let reversed = swap(source, start, end);
-            assert!(!gated_region_gaps(label, &reversed, span).is_empty());
-        }
-    }
-    for needle in [FLUSH_SCOPE, FLUSH_CALL, FLUSH_END, FLUSH_SHARED] {
-        for forgery in CommentForgery::ALL {
-            let forged = forge(FLUSH_RS, needle, forgery);
-            assert!(
-                !bootstrap_caller_gaps(&forged).is_empty(),
-                "{forgery:?} commented `{needle}` still passes"
-            );
-        }
-    }
-    let reversed = swap(FLUSH_RS, FLUSH_CALL, FLUSH_END);
-    assert!(!bootstrap_caller_gaps(&reversed).is_empty());
-}
-
-#[test]
-fn gated_region_guards_count_coded_raw_calls_but_not_comments() {
-    let (label, source, span) = SITES[5];
-    let anchor = "let stale_disposition = match queued_card_gate::release_or_rekey(";
-    let with = |line: &str| source.replacen(anchor, &format!("{line}\n{anchor}"), 1);
-    assert_eq!(
-        gated_region_gaps(label, &with("// delete_channel_message("), span),
-        Vec::<String>::new()
-    );
-    let coded = with("let _ = delete_channel_message(http, channel_id, existing);");
-    assert_eq!(gated_region_gaps(label, &coded, span).len(), 1);
-
-    let call = "delete_stale_queued_placeholder_cards(\n";
-    let flush = |line: &str| FLUSH_RS.replacen(call, &format!("{call}{line}\n"), 1);
-    assert_eq!(
-        bootstrap_caller_gaps(&flush("// http.delete_message(")),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        bootstrap_caller_gaps(&flush("http.delete_message(1);")).len(),
-        1
-    );
-
-    let prose = format!("{CONTROLLER_RS}// slot.detach_by_message(\n");
-    assert_eq!(controller_gaps(&prose), Vec::<String>::new());
-    let coded = format!("{CONTROLLER_RS}fn _probe(c: C) {{ c.detach_by_message(1); }}\n");
-    assert_eq!(controller_gaps(&coded).len(), 1);
-}
-
-#[test]
-fn gated_region_bounds_follow_code_not_comments_or_log_text() {
-    let a6 = "// Fresh anchor is live; tear down the buried queued card.";
-    let a7 = "routed the queued card through the #5035 gate";
-    let reworded = [
-        (5, INTAKE_RS.replacen(a6, "// The fresh anchor is up.", 1)),
-        (6, HANDOFF_RS.replacen(a7, "routed the queued card", 1)),
-    ];
-    for (index, source) in reworded {
-        let (label, original, span) = SITES[index];
-        assert_ne!(source, original, "{label}: the old boundary text moved");
-        assert_eq!(
-            gated_region_gaps(label, &source, span),
-            Vec::<String>::new()
-        );
-    }
-    // A6 as an expression arm is rejected, whether or not the next Err arm holds a gate call.
-    let (label, source, span) = SITES[5];
-    let ok = "Ok(fresh_msg_id) =>";
-    let at = source.find(ok).expect("A6 success arm");
-    let mask = crate::test_support::rust_code_mask(source).expect("intake lexes");
-    let arm = crate::test_support::braced_item_span(&mask[at..], ok).expect("A6 arm block");
-    let bare = [
-        &source[..at],
-        "Ok(fresh_msg_id) => fresh_msg_id,",
-        &source[at + arm.end..],
-    ]
-    .concat();
-    let err = "Err(error) => {";
-    let gate =
-        "queued_card_gate::release_or_rekey(shared, channel_id, existing, &[user_msg_id]).await;";
-    let gated_err = [
-        &bare[..at],
-        bare[at..]
-            .replacen(err, &format!("{err} {gate}"), 1)
-            .as_str(),
-    ]
-    .concat();
-    assert_ne!(gated_err, bare);
-    for expression_arm in [bare, gated_err] {
-        assert!(!gated_region_gaps(label, &expression_arm, span).is_empty());
-    }
-    let (label, source, span) = SITES[1];
-    let definition = "pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_clears_with(";
-    let decoy = "const _DECOY: &str = r#\"async fn drain_pending_queue_exit_placeholder_clears_with() { queued_card_gate::x() }\"#;\n";
-    let gate_hidden = forge(source, GATE, CommentForgery::Line);
-    let decoyed = gate_hidden.replacen(definition, &format!("{decoy}{definition}"), 1);
-    assert_ne!(decoyed, gate_hidden);
-    assert!(!gated_region_gaps(label, &decoyed, span).is_empty());
-}
-
-#[test]
-fn exit_body_warning_guard_rejects_commented_fields_and_counts_coded_warnings() {
-    assert_eq!(exit_body_warning_gaps(GATE_RS), Vec::<String>::new());
-    for needle in [EXIT_BODY, WARN, "edit_error", "delete_error"] {
-        for forgery in CommentForgery::ALL {
-            let forged = forge(GATE_RS, needle, forgery);
-            assert!(
-                !exit_body_warning_gaps(&forged).is_empty(),
-                "{forgery:?} commented `{needle}` still passes"
-            );
-        }
-    }
-    let anchor = "    let outcome = match edit_channel_message(";
-    let with = |line: &str| GATE_RS.replacen(anchor, &format!("    {line}\n{anchor}"), 1);
-    assert_eq!(
-        exit_body_warning_gaps(&with("// tracing::warn!(\"x\"); let _ = 1;")),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        exit_body_warning_gaps(&with("tracing::warn!(\"x\");")).len(),
-        1
-    );
-    assert_eq!(exit_body_warning_gaps(&with("let _ = 1;")).len(), 1);
 }

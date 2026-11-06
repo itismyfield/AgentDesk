@@ -335,6 +335,13 @@ pub(in crate::services::discord) async fn mailbox_clear_channel(
     let handle = shared.mailbox(channel_id);
     let persistence = queue_persistence_context(shared, provider, channel_id);
     let cleared = handle.clear_or_refused(persistence).await;
+    super::receipt_settle::settle_v2_drops(
+        shared.pg_pool.as_ref(),
+        &handle,
+        provider.as_str(),
+        channel_id,
+    )
+    .await;
     settle_clear(
         shared,
         channel_id,

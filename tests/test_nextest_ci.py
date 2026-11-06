@@ -11,6 +11,9 @@ import posixpath
 import random
 import re
 import sys
+import subprocess
+import hashlib
+import shutil
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -648,10 +651,11 @@ class VerifyArchive(Fixture):
         self.assertFalse((self.dir / "rec/worker.json").exists())
 
     def test_cli_retry_override_in_environment_is_refused(self):
-        with mock.patch.dict(os.environ, {"NEXTEST_RETRIES": "3"}):
-            rc, err = self.verify()
-        self.assertEqual(rc, 1)
-        self.assertIn("NEXTEST_RETRIES is set", err)
+        for name in nci.FORBIDDEN_ENV:
+            with self.subTest(name=name), mock.patch.dict(os.environ, {name: "3"}):
+                rc, err = self.verify()
+                self.assertEqual(rc, 1)
+                self.assertIn(f"{name} is set", err)
 
 
 def source_losses(removed=None, ignored=None, present=None):
@@ -668,7 +672,7 @@ class BaseDiff(Fixture):
         self.write("justify.txt", rows)
         self.write("source-removed.json", source or source_losses())
         return self.run_cli("base-diff", "--plan", self.dir / "plan/plan.json", "--baseline", self.dir / baseline,
-                            "--comparison-base-sha", base_sha, "--justifications", self.dir / "justify.txt",
+                            "--head-sha", SHA, "--head-run-id", "7", "--comparison-base-sha", base_sha, "--justifications", self.dir / "justify.txt",
                             "--source-removed", self.dir / "source-removed.json", "--json-out", self.dir / "diff.json")
 
     def test_baseline_from_another_sha_or_missing_is_refused(self):
@@ -1027,7 +1031,7 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         summary = self.dir / "summary.md"
         summary.write_text("")
         full = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "PR_HEAD_SHA": head,
-                "GITHUB_REPOSITORY": "o/r", "GITHUB_WORKSPACE": str(self.repo), "GITHUB_STEP_SUMMARY": str(summary),
+                "GITHUB_SHA": head, "GITHUB_RUN_ID": "7", "GITHUB_REPOSITORY": "o/r", "GITHUB_WORKSPACE": str(self.repo), "GITHUB_STEP_SUMMARY": str(summary),
                 "CARGO_LOG": str(self.dir / "cargo.log"), "BASE_LIST": str(self.dir / "base-list.json"),
                 "GH_RUNS": "[]", "GH_ARTIFACTS": str(self.dir / "artifacts"), "CARGO_FAIL": "", **env}
         full.pop("GITHUB_OUTPUT", None)
@@ -1108,6 +1112,20 @@ class BaseDiffScript(ScriptRepo):
         rc, out, summary, _ = self.run_script(head, CARGO_FAIL="1")
         self.assertNotEqual(rc, 0)
         self.assertNotIn("against the fallback base plan", summary)
+
+    def test_head_plan_of_another_sha_or_run_is_refused_without_a_rebuild(self):
+        head = self.head_plan(["m::a", "m::b"])
+        baseline = self.baseline(["m::a"])
+        for env, needle in (({"GITHUB_SHA": "c" * 40}, f"expected {'c' * 40} run 7"),
+                            ({"GITHUB_RUN_ID": "8"}, f"expected {head} run 8")):
+            with self.subTest(env=env):
+                (self.dir / "cargo.log").unlink(missing_ok=True)
+                self.sp.run(["rm", "-rf", str(self.dir / "nextest/base")], check=True)
+                self.git("worktree", "prune")
+                rc, out, summary, cargo = self.run_script(head, **self.main_success(baseline), **env)
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"ERROR head plan is {head} run 7, {needle}", out)
+                self.assertNotIn("archive", cargo)
 
     def test_windows_only_source_removal_needs_a_row(self):
         head = self.head_plan(["m::a"], lib="#[test]\nfn a() {}\n")
@@ -1655,6 +1673,24 @@ mod tests {
         self.assertEqual(problems, [])
         self.assertIn("h::tests::via_child", pg)
 
+    def test_a_fixture_named_in_a_nested_use_group_makes_the_test_pg(self):
+        self.tree({"src/lib.rs": "mod db;\nmod support;\nmod out;\nmod relay;\n",
+                   "src/out.rs": "pub fn seal() {}\n#[cfg(test)]\npub mod tests {\n"
+                                 "    pub fn fixture() { TestPostgresDb::create(); }\n    pub fn revoke() {}\n}\n",
+                   "src/relay.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn nested() {\n"
+                                   "        use crate::out::{\n            self,\n            tests::{fixture, revoke},\n        };\n"
+                                   "        fixture();\n        revoke();\n        out::seal();\n    }\n"
+                                   "    #[test]\n    fn renamed() {\n        use crate::out::{tests::{fixture as open}};\n"
+                                   "        open();\n    }\n"
+                                   "    #[test]\n    fn module_self() {\n        use crate::out::{tests::{self as fx}};\n"
+                                   "        fx::fixture();\n    }\n"
+                                   "    #[test]\n    fn sibling_only() {\n        use crate::out::{self, tests::{revoke}};\n"
+                                   "        revoke();\n        out::seal();\n    }\n}\n"})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertLessEqual({"relay::tests::nested", "relay::tests::renamed", "relay::tests::module_self"}, set(pg))
+        self.assertNotIn("relay::tests::sibling_only", pg)
+
     def test_impl_helpers_follow_pg_references_and_preserve_local_item_boundaries(self):
         self.tree({"src/lib.rs": "#[cfg(test)]\nmod fixtures;\n",
                    "src/fixtures.rs": """fn open() { TestPostgresDb::new(); }
@@ -1891,6 +1927,188 @@ fn opaque() { run(&pick()); }
         rc, err = self.cli("classify", "--json-out", self.root / "out.json")
         self.assertEqual(rc, 1)
         self.assertIn("unresolved-external-test-module", err)
+
+
+
+
+class CensusEvidence(Fixture):
+    def evidence_fixture(self, outcome="pass"):
+        raw = json.loads((ROOT / "scripts/tui_o_body_probes.json").read_text())
+        names = set()
+        for group in ("probes", "transport_probes", "claim_probes"):
+            for index, row in enumerate(raw[group]):
+                if not row["verified_by"]:
+                    row["verified_by"] = [f"fixture::{group}_{index}"]
+                names.update(row["verified_by"])
+        self.write("scripts/tui_o_body_probes.json", raw)
+        shutil.copyfile(ROOT / "Cargo.lock", self.dir / "Cargo.lock")
+        self.write(".gitignore", "*\n!Cargo.lock\n!.gitignore\n!scripts/\n!scripts/tui_o_body_probes.json\n")
+        for argv in (["init", "-q"], ["add", "."], ["-c", "user.name=Evidence Test", "-c",
+                     "user.email=evidence@example.invalid", "commit", "-qm", "fixture"]):
+            subprocess.run(["git", "-C", str(self.dir), *argv], check=True, capture_output=True)
+        head = subprocess.check_output(["git", "-C", str(self.dir), "rev-parse", "HEAD"], text=True).strip()
+        binary = self.dir / "test-binary"
+        binary.write_bytes(b"actual fixture test binary")
+        with contextlib.chdir(self.dir), mock.patch.dict(os.environ):
+            # This synthetic worker has its own plan, independent of the enclosing nextest test.
+            for name in nci.FORBIDDEN_ENV:
+                os.environ.pop(name, None)
+            plan = self.plan_ok(sorted(names), sha=head, workers=1, mode="all-once")
+            doc = json.loads((self.dir / "list.json").read_text())
+            doc["rust-suites"][BIN]["binary-path"] = str(binary)
+            self.write("list.json", doc)
+            # Re-run the real planning entry with binary metadata present.
+            args = ["plan", "--universe", self.dir / "list.json", "--archive", self.archive,
+                    "--workers", 1, "--sha", head, "--scope", "linux-lib", "--run-id", "7",
+                    "--base-config", self.dir / "base.toml", "--retry-policy", self.dir / "empty.toml",
+                    "--retry-mode", "all-once", "--output", self.dir / "plan"]
+            args += [x for k, v in BUILD.items() for x in (k, v)]
+            self.assertEqual(self.run_cli(*args)[0], 0)
+            plan = json.loads((self.dir / "plan/plan.json").read_text())
+            rc, err = self.run_cli("verify-archive", "--plan", self.dir / "plan/plan.json",
+                "--worker", 0, "--archive", self.archive, "--config", self.dir / "plan/worker-0.toml",
+                "--sha", head, "--run-id", "7", "--record", self.dir / "results/worker-0")
+            self.assertEqual(rc, 0, err)
+            cases = [(name, "", 0.1) for name in sorted(names)]
+            if outcome != "pass":
+                name, _, seconds = cases[0]
+                body = {"skip":"<skipped/>", 'retry':'<flakyFailure time="0.1"/>', "fail":"<failure/>"}.get(outcome, "")
+                cases[0] = (name, body, seconds)
+                if outcome == "missing":
+                    cases.pop(0)
+            self.write("results/worker-0/exit-code", "0")
+            self.write("results/worker-0/junit.xml", junit(cases))
+        self.head, self.names = head, names
+        return plan
+
+    def evidence_audit(self):
+        output = self.dir / "github-output"
+        output.write_text("")
+        with contextlib.chdir(self.dir), mock.patch.dict(os.environ, {
+            "GITHUB_OUTPUT":str(output), "GITHUB_RUN_ID":"7", "GITHUB_RUN_ATTEMPT":"1"}):
+            rc, verdict, err = self.audit()
+        emitted = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        self.assertIn("census_evidence_dir", emitted, err)
+        directory = Path(emitted["census_evidence_dir"])
+        self.evidence_directory = directory
+        return rc, directory, json.loads((directory / "legacy_body_census-test-evidence.json").read_text())
+
+    def test_execution_and_identity_are_required_for_census_artifacts(self):
+        for outcome in ("pass", "skip", "missing", "retry", "fail"):
+            with self.subTest(outcome=outcome):
+                # A separate checkout keeps every case independent, including output files.
+                case = CensusEvidence()
+                case.setUp()
+                try:
+                    case.evidence_fixture(outcome)
+                    rc, directory, proof = case.evidence_audit()
+                    if outcome in ("skip", "missing", "fail"):
+                        self.assertNotEqual(rc, 0)
+                        self.assertEqual(proof.get("available"), False)
+                        continue
+                    self.assertEqual(rc, 0)
+                    identity = json.loads((directory / "legacy_body_census-test-identity.json").read_text())
+                    self.assertEqual(proof["build_sha"], case.head)
+                    self.assertEqual(proof["binary_sha256"], hashlib.sha256(b"actual fixture test binary").hexdigest())
+                    self.assertEqual(set(proof["required_test_ids"]), case.names)
+                    sys.path.insert(0, str(ROOT / "scripts"))
+                    import check_tui_o_writer_census as census
+                    result = census.body_probe_snapshot(case.dir, proof, identity)
+                    self.assertEqual(result["coverage"], outcome == "pass")
+                finally:
+                    case.doCleanups()
+
+    def test_packaging_and_native_verifier_round_trip(self):
+        for ambient in ({}, {name: "1" for name in nci.FORBIDDEN_ENV}):
+            with self.subTest(ambient=bool(ambient)), mock.patch.dict(os.environ, ambient):
+                case = CensusEvidence()
+                case.setUp()
+                try:
+                    bundle = case.packaged_fixture()
+                    self.assertTrue(bundle["proof"]["tests"])
+                finally:
+                    case.doCleanups()
+
+    def packaged_fixture(self):
+        self.evidence_fixture()
+        _, directory, proof = self.evidence_audit()
+        self.write("Cargo.toml", '[package]\nname="agentdesk"\nversion="1.2.3"\n')
+        self.write("scripts/runtime-assets.txt", "policies\n")
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import package_release as packaging
+        from tests.test_package_release import ReleasePackagingTests
+        binary = self.dir / "release-binary"
+        header = bytearray(64)
+        header[:6] = b"\x7fELF\x02\x01"
+        header[18] = 62
+        binary.write_bytes(header)
+        with mock.patch.dict(os.environ, {"AGENTDESK_CENSUS_EVIDENCE_DIR":str(directory),
+             "AGENTDESK_CENSUS_CI_RUN_ID":"7", "AGENTDESK_CENSUS_CI_RUN_ATTEMPT":"1"}):
+            archive = packaging.package(self.dir, binary, "x86_64-unknown-linux-gnu", self.dir / "dist", False)
+        files = ReleasePackagingTests.read_archive(self, archive)
+        prefix = "agentdesk-linux-x86_64/runtime/"
+        self.assertIn(prefix + "legacy_body_census-test-evidence.json", files)
+        packaged = json.loads(files[prefix + "legacy_body_census-test-evidence.json"])
+        self.assertEqual(packaged, proof)
+        return {"raw":(self.dir / "scripts/tui_o_body_probes.json").read_text(),
+                "proof":packaged, "identity":json.loads(files[prefix + "legacy_body_census-test-identity.json"]),
+                "source":json.loads(files[prefix + "release-source.json"]),
+                "files":{name.removeprefix(prefix):value.decode() for name, value in files.items() if name.startswith(prefix)},
+                "runtime_binary":binary.read_bytes().hex()}
+
+    def test_packaging_failure_is_optional_and_stale_identity_is_not_carried(self):
+        self.packaged_fixture()
+        import package_release as packaging
+        from tests.test_package_release import ReleasePackagingTests
+        directory = self.evidence_directory
+        original = {p:p.read_bytes() for p in directory.iterdir()}
+        environment = {"AGENTDESK_CENSUS_EVIDENCE_DIR":str(directory),
+                       "AGENTDESK_CENSUS_CI_RUN_ID":"7", "AGENTDESK_CENSUS_CI_RUN_ATTEMPT":"1"}
+        for case in ("missing", "build_sha", "dependency_hash", "census_hash", "ci_run_id", "ci_run_attempt", "write-error"):
+            for p, raw in original.items():
+                p.write_bytes(raw)
+            if case == "missing":
+                (directory / "legacy_body_census-test-evidence.json").unlink()
+            elif case != "write-error":
+                for kind in ("identity", "evidence"):
+                    p = directory / f"legacy_body_census-test-{kind}.json"
+                    doc = json.loads(p.read_text())
+                    doc[case] = "other"
+                    p.write_text(json.dumps(doc))
+            with self.subTest(case=case), mock.patch.dict(os.environ, environment):
+                # Failure is confined to optional proof copying, after normal source reads.
+                original_write = Path.write_bytes
+                def write(path, data):
+                    if case == "write-error" and path.name == "legacy_body_census-test-identity.json":
+                        raise OSError("fixture evidence I/O failure")
+                    return original_write(path, data)
+                with mock.patch.object(Path, "write_bytes", write):
+                    archive = packaging.package(self.dir, self.dir / "release-binary", "x86_64-unknown-linux-gnu", self.dir / "dist", False)
+                files = ReleasePackagingTests.read_archive(self, archive)
+                source = json.loads(files["agentdesk-linux-x86_64/runtime/release-source.json"])
+                self.assertEqual(source["legacy_body_census"]["available"], False)
+        for p, raw in original.items():
+            p.write_bytes(raw)
+        with contextlib.chdir(self.dir), mock.patch.dict(os.environ, {
+            "GITHUB_OUTPUT":str(self.dir / "github-output"), "GITHUB_RUN_ID":"7", "GITHUB_RUN_ATTEMPT":"2"}):
+            self.assertEqual(self.audit()[0], 0)
+        output = (self.dir / "github-output").read_text().splitlines()[-1].split("=",1)[1]
+        self.assertEqual(json.loads((Path(output) / "legacy_body_census-test-evidence.json").read_text())["available"], False)
+        with contextlib.chdir(self.dir), mock.patch.object(nci.tempfile, "mkdtemp", side_effect=OSError("full")):
+            self.assertEqual(self.audit()[0], 0)
+
+    def test_stale_source_and_dependency_cannot_emit_positive_evidence(self):
+        self.evidence_fixture()
+        for relative in ("Cargo.lock", "scripts/tui_o_body_probes.json"):
+            original = (self.dir / relative).read_bytes()
+            (self.dir / relative).write_bytes(original + b"\n")
+            with self.subTest(relative=relative):
+                self.assertEqual(self.evidence_audit()[2].get("available"), False)
+            (self.dir / relative).write_bytes(original)
+        subprocess.run(["git", "-C", str(self.dir), "-c", "user.name=Evidence Test", "-c",
+                        "user.email=evidence@example.invalid", "commit", "--allow-empty", "-qm", "new head"],
+                       check=True, capture_output=True)
+        self.assertEqual(self.evidence_audit()[2].get("available"), False)
 
 
 if __name__ == "__main__":

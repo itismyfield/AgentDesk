@@ -10,19 +10,43 @@ pub(in crate::services::discord) mod budget;
 mod destructive_commit;
 mod finalizer_identity;
 mod host_locator;
+pub(in crate::services::discord) use host_locator::PersistedHostLocator;
 mod host_recovery_guard;
 #[cfg(test)]
 pub(in crate::services::discord) use host_recovery_guard::keyed_tests::{
     seed_session_row, seed_session_row_hashed, seed_session_row_keyed,
 };
 pub(in crate::services::discord) use host_recovery_guard::{
-    KeyedTeardown, clear_channel_session, keyed_teardown, teardown_for_lookup,
+    KeyedTeardown, clear_channel_session, keyed_is_legacy_tmux, keyed_teardown, teardown_for_lookup,
 };
 #[cfg(unix)]
 pub(in crate::services::discord) use host_recovery_guard::{marker_witness, with_inflight_row};
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
+mod native_stop_pin;
+#[cfg(unix)]
+pub(in crate::services::discord) use native_stop_pin::BusyNativeInput;
+pub(in crate::services::discord) use native_stop_pin::{
+    bind_native_stop_pin, historical_input_verified, record_native_busy_child,
+    restore_native_stop_pin,
+};
+#[cfg(all(test, unix))]
+#[path = "inflight/native_stop_busy_tests.rs"]
+mod native_stop_busy_tests;
+#[cfg(all(test, unix))]
+#[path = "inflight/native_stop_pin/retry_tests.rs"]
+mod native_stop_pin_retry_tests;
+#[cfg(test)]
+#[path = "inflight/native_stop_pin/serde_tests.rs"]
+mod native_stop_pin_serde_tests;
+#[cfg(all(test, unix))]
+#[path = "inflight/native_stop_pin/tests.rs"]
+mod native_stop_pin_tests;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use native_stop_pin::{
+    native_pin_observation_count, wait_native_pin_observations,
+};
 pub(crate) mod read_only_owner_snapshot;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 mod terminal_receipt_stamp;
@@ -50,6 +74,7 @@ mod circuit_evidence_tests;
 mod circuit_removal;
 mod episode_guard;
 mod managed_submission;
+pub(in crate::services::discord) mod row_removed;
 mod store;
 pub(super) use circuit_removal::InflightDeleteRequest;
 use circuit_removal::handoff_before_discard_locked;
@@ -550,7 +575,7 @@ pub(crate) fn remove_inflight_row_for_policy_op(path: &Path) -> PolicyOpRemoveOu
     }
     #[cfg(test)]
     policy_op_unlink_hook::before(path);
-    match fs::remove_file(path).map(|()| sync_removed(path)) {
+    match crate::services::discord::inflight::row_removed::unlink(path, || fs::remove_file(path)) {
         Ok(()) => Outcome::Removed,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Outcome::Missing,
         Err(error) => Outcome::Io(error.to_string()),
@@ -616,6 +641,7 @@ fn bump_save_generation_for_write(
     }
     super::relay_recovery::circuit_evidence::carry_forward(existing.as_ref(), state)?;
     managed_submission::carry_forward(existing.as_ref(), state);
+    native_stop_pin::carry_forward(existing.as_ref(), state);
     state.carry_before_start_receipt_from(existing.as_ref())?;
     let existing_generation = existing
         .map(|existing| existing.save_generation)
@@ -788,6 +814,79 @@ fn set_inflight_restart_mode_under_lock(
         Ok(json) if store::publish_row(path, &json).is_ok() => Marked,
         _ => Failed,
     }
+}
+
+/// Consumes a refused readoption's old marker without claiming the row or refreshing its age.
+pub(in crate::services::discord) fn consume_stale_restart_marker_if_identity_unchanged(
+    provider: &ProviderKind,
+    expected: &InflightTurnState,
+    current_generation: u64,
+) -> GuardedSaveOutcome {
+    use GuardedSaveOutcome::*;
+    let identity = InflightTurnIdentity::from_state(expected);
+    if identity.is_unnameable() {
+        return Unnameable;
+    }
+    let Some(root) = inflight_runtime_root() else {
+        return IoError;
+    };
+    let path = inflight_state_path(&root, provider, expected.channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return IoError;
+    };
+    let data = match fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return RowAbsent,
+        Err(_) => return IoError,
+    };
+    let Ok(mut state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return IoError;
+    };
+    if !identity.matches_state(&state)
+        || state.turn_nonce != expected.turn_nonce
+        || state.born_generation != expected.born_generation
+        || state.channel_id != expected.channel_id
+        || state.provider != expected.provider
+        || state.request_owner_user_id != expected.request_owner_user_id
+    {
+        return SuccessorOwned;
+    }
+    let marker_generation = state.restart_generation.unwrap_or(state.born_generation);
+    if state.provider != provider.as_str()
+        || state.user_msg_id == 0
+        || state.request_owner_user_id == 0
+        || state.request_owner_user_id
+            == super::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+        || state.rebind_origin
+        || expected.rebind_origin
+        || state.readopted_from_inflight
+        || expected.readopted_from_inflight
+        || state.restart_mode.is_none()
+        || state.restart_mode != expected.restart_mode
+        || state.restart_generation != expected.restart_generation
+        || marker_generation == 0
+        || marker_generation >= current_generation
+        || receipt_protected_path(&path)
+    {
+        return AuthorityPinned;
+    }
+    state.clear_restart_mode();
+    if bump_save_generation_for_write(&path, &mut state).is_err() {
+        return IoError;
+    }
+    let Ok(json) = serde_json::to_string_pretty(&state) else {
+        return IoError;
+    };
+    if store::publish_row(&path, &json).is_err() {
+        return IoError;
+    }
+    tracing::info!(
+        provider = provider.as_str(),
+        channel_id = state.channel_id,
+        user_msg_id = state.user_msg_id,
+        "restart marker consumed: readoption refused"
+    );
+    Saved
 }
 
 /// Load a single inflight state by provider + channel_id (returns None if missing).
@@ -1891,18 +1990,10 @@ mod stall_recovery_tests {
         );
     }
 
-    /// #3933 (release-path coverage): under authority-ON — the live release config
-    /// (`AGENTDESK_DELIVERY_RECORD_AUTHORITY=1`) — the LEGITIMATE Gemini/Qwen
-    /// `RetryBoundary` reset (`full_response` cleared + `response_sent_offset`→0 for
-    /// the SAME turn identity to re-stream) must NOT be enforce-skipped, so the
-    /// re-streamed answer survives. Before the `is_legitimate_full_reset` carve-out
-    /// the coarse guard returned `false` here and dropped the body live. Since
-    /// #5071 T1 S8-2 the compiled default is authority-ON, so this path is the
-    /// default one; the per-thread seam force stays for determinism against a
-    /// developer-shell `=0`.
+    /// The Gemini/Qwen `RetryBoundary` reset (empty body, `response_sent_offset`→0,
+    /// same turn) must not be enforce-skipped, so the re-streamed answer survives.
     #[test]
     fn authority_on_permits_legit_retry_reset_3933() {
-        use crate::services::discord::outbound::delivery_record as dr;
         // Share the panic-hook serialization the other tripwire tests use.
         let _serialized = monotonic_3358_test_mutex()
             .lock()
@@ -1923,8 +2014,6 @@ mod stall_recovery_tests {
         let provider = ProviderKind::Claude;
         let path = inflight_state_path(temp.path(), &provider, channel_id);
 
-        // Force authority-ON for THIS thread only (the release config).
-        let _authority = dr::authority_test_seam::force(true);
         let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             validate_inflight_state_for_save(
                 temp.path(),
@@ -1963,13 +2052,12 @@ mod stall_recovery_tests {
 
     /// #3933 (release-path coverage): a GENUINE stale-snapshot backward regression
     /// — a NON-EMPTY body moving the frontier back for the SAME turn — must STILL
-    /// be enforce-skipped under authority-ON. The reset carve-out must not weaken
+    /// be enforce-skipped. The reset carve-out must not weaken
     /// the real guard, so the committed answer already on disk survives untouched.
     /// The skipped case is exactly what the #3933 tripwire relaxation exempts, so
     /// this runs cleanly (no panic) even in debug builds.
     #[test]
     fn authority_on_still_skips_nonempty_stale_backward_write_3933() {
-        use crate::services::discord::outbound::delivery_record as dr;
         let temp = TempDir::new().unwrap();
         let channel_id = 39_330_102;
         let committed_body = "the full committed answer";
@@ -1989,7 +2077,6 @@ mod stall_recovery_tests {
         let provider = ProviderKind::Claude;
         let path = inflight_state_path(temp.path(), &provider, channel_id);
 
-        let _authority = dr::authority_test_seam::force(true);
         assert!(
             !validate_inflight_state_for_save(
                 temp.path(),
@@ -3586,17 +3673,8 @@ mod stall_recovery_tests {
 
     #[test]
     fn validate_save_records_backward_last_offset_violation_same_identity() {
-        // #3017 I6 OBSERVE-ONLY on the save path: a backward last_offset for
-        // the same turn identity records a `last_offset_monotonic` violation
-        // (and trips the debug_assert) but does NOT skip the write — a legit
-        // fresh-turn reset must still be able to persist.
-        //
-        // Force authority OFF so this test pins the original observe-only
-        // branch regardless of a release-like process env. Authority ON is the
-        // #3416 enforce branch: the same violation is recorded, then the write is
-        // skipped and #3933 intentionally relaxes the debug tripwire.
-        let _authority =
-            crate::services::discord::outbound::delivery_record::authority_test_seam::force(false);
+        // A same-turn backward last_offset with an empty body matches the full-reset
+        // signature: the write is permitted, so the violation trips the debug_assert.
         let temp = TempDir::new().unwrap();
         let mut existing = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
         existing.last_offset = 300;
@@ -3650,47 +3728,6 @@ mod stall_recovery_tests {
             "src/services/discord/inflight.rs:test",
         );
         assert!(permitted);
-    }
-
-    #[test]
-    fn validate_save_records_backward_response_sent_offset_violation_same_identity() {
-        // #3154 OBSERVE-ONLY on the save path: a backward response_sent_offset
-        // for the SAME turn identity records a `response_sent_offset_monotonic`
-        // violation (and trips the debug_assert) but does NOT skip the write —
-        // mirrors the last_offset_monotonic precedent.
-        //
-        // Force authority OFF so this test pins the original observe-only
-        // branch regardless of a release-like process env. Authority ON is the
-        // #3416 enforce branch: the same violation is recorded, then the write is
-        // skipped and #3933 intentionally relaxes the debug tripwire.
-        let _authority =
-            crate::services::discord::outbound::delivery_record::authority_test_seam::force(false);
-        let temp = TempDir::new().unwrap();
-        let mut existing = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
-        existing.full_response = "hello world".to_string();
-        existing.response_sent_offset = 8;
-        save_inflight_state_in_root(temp.path(), &existing).unwrap();
-
-        let provider = ProviderKind::Claude;
-        let path = inflight_state_path(temp.path(), &provider, 321);
-
-        // Same identity (user_msg_id + turn_start_offset) but a backward
-        // response_sent_offset → records a violation. The debug_assert fires in
-        // debug builds; catch the panic so we can assert observability fired.
-        let mut backward = existing.clone();
-        backward.response_sent_offset = 3;
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            validate_inflight_state_for_save(
-                temp.path(),
-                &path,
-                &backward,
-                "src/services/discord/inflight.rs:test",
-            );
-        }));
-        // In debug builds the debug_assert fires; in release it returns.
-        // Either way the invariant record was emitted before the assert.
-        assert!(result.is_err() || cfg!(not(debug_assertions)));
     }
 
     #[test]
@@ -3773,39 +3810,26 @@ mod stall_recovery_tests {
 
     #[test]
     fn authority_guard_distinguishes_legit_reset_from_stale_regression_3933() {
-        // #3933 (supersedes the #3860-era "would suppress" doc-guard): under
-        // authority-ON the enforce guard MUST tell apart the LEGITIMATE Gemini/Qwen
-        // RetryBoundary reset (turn_bridge/retry_state.rs clears `full_response` and
-        // rewinds rso→0 for the SAME identity to re-stream) from a genuine
-        // stale-snapshot backward regression (a non-empty body moving the frontier
-        // back). The release runs AGENTDESK_DELIVERY_RECORD_AUTHORITY=1, so the old
-        // coarse guard dropped the re-streamed body live; the `is_legitimate_full_reset`
-        // signal carves the reset out while keeping the real regression blocked.
+        // The guard tells the Gemini/Qwen RetryBoundary reset apart from a genuine
+        // stale-snapshot backward regression (a non-empty body moving back).
         use crate::services::discord::outbound::delivery_record as dr;
-        // authority ON + same-turn backward move + legit reset signature → PERMIT
-        // (the retry reset persists and the re-streamed body survives).
+        // Same-turn backward move + legit reset signature → PERMIT.
         assert!(!dr::authority_blocks_backward_inflight_write(
-            true, false, true, true
+            false, true, true
         ));
         assert!(!dr::authority_blocks_backward_inflight_write(
-            true, true, false, true
+            true, false, true
         ));
-        // authority ON + same-turn backward move + NON-reset (non-empty body) → BLOCK
-        // (a genuine stale-snapshot regression stays suppressed).
+        // Same-turn backward move + NON-reset (non-empty body) → BLOCK.
         assert!(dr::authority_blocks_backward_inflight_write(
-            true, false, true, false
+            false, true, false
         ));
         assert!(dr::authority_blocks_backward_inflight_write(
-            true, true, false, false
+            true, false, false
         ));
-        // authority OFF (an explicit `=0` rollback since the #5071 T1 S8-2 flip)
-        // → never blocks, reset flag irrelevant.
+        // Fully monotonic → not blocked (forward writes pass).
         assert!(!dr::authority_blocks_backward_inflight_write(
-            false, false, true, false
-        ));
-        // authority ON but fully monotonic → not blocked (forward writes pass).
-        assert!(!dr::authority_blocks_backward_inflight_write(
-            true, true, true, false
+            true, true, false
         ));
     }
 
@@ -4522,6 +4546,81 @@ mod stall_recovery_tests {
     pub(super) fn stale_override_test_mutex() -> &'static std::sync::Mutex<()> {
         static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         M.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn stale_preservation_log_does_not_claim_unconfirmed_tmux_alive() {
+        #[derive(Clone, Default)]
+        struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Logs {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                super::set_test_tmux_alive_override(None);
+            }
+        }
+        let _guard = stale_override_test_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _reset = Reset;
+        super::set_test_tmux_alive_override(Some(&[]));
+        let _root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+        crate::logging::test_capture::pin_callsite_interest();
+        for mode in [None, Some(InflightRestartMode::DrainRestart)] {
+            let mut state = InflightTurnState::new(
+                ProviderKind::Codex,
+                7770,
+                None,
+                7,
+                42,
+                43,
+                "hello".into(),
+                None,
+                Some("AgentDesk-codex-unconfirmed-7770".into()),
+                None,
+                None,
+                0,
+            );
+            state.runtime_kind_unknown_on_disk = true;
+            state.restart_mode = mode;
+            state.restart_generation = Some(7);
+            let logs = Logs::default();
+            let writer = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || writer.clone())
+                .finish();
+            let result = tracing::subscriber::with_default(subscriber, || {
+                super::stale_removal_reason(&state, super::DRAIN_RESTART_MAX_AGE_SECS + 1, 7)
+            });
+            assert!(
+                result.is_none(),
+                "unconfirmed host must be preserved: {mode:?}"
+            );
+            let text = String::from_utf8(logs.0.lock().unwrap_or_else(|p| p.into_inner()).clone())
+                .unwrap();
+            assert!(
+                text.contains("inflight stale-age"),
+                "missing log for {mode:?}: {text}"
+            );
+            assert!(
+                !text.contains("still alive"),
+                "unconfirmed tmux cannot be claimed alive: {text}"
+            );
+        }
     }
 
     /// 2026-05-26 adk-cdx incident regression: a DrainRestart inflight whose
@@ -6098,8 +6197,8 @@ mod recovery_relay_attempts_tests {
     /// identity (turn_bridge/retry_state.rs) to re-stream the turn. If the marker
     /// then resurrected an older frontier the re-streamed body would be
     /// suppressed (or double-relayed). The RMW marker re-reads the FRESH on-disk
-    /// row, so the legitimate rso=0 reset is preserved verbatim — independent of
-    /// the AGENTDESK_DELIVERY_RECORD_AUTHORITY guard (this path bypasses it).
+    /// row, so the legitimate rso=0 reset is preserved verbatim — the same-turn
+    /// backward-write guard does not apply (this path bypasses it).
     #[test]
     fn restart_marker_preserves_legitimate_frontier_reset_3860() {
         let temp = TempDir::new().unwrap();

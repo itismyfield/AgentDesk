@@ -528,7 +528,7 @@ async fn receive_hook(
     // via the query string — exactly the REQ-001 fallback. Including the
     // provider in the key keeps Claude and Codex isolated even when they share
     // a tmux session name.
-    if !should_drop_broadcast && crate::services::claude_tui::hook_registry::registry_enabled() {
+    if !should_drop_broadcast {
         if let Some(key) = crate::services::claude_tui::hook_registry::RegistryKey::new(
             &event.provider,
             Some(event.session_id.as_str()),

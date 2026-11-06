@@ -41,6 +41,8 @@ pub(super) struct Registration {
     timing: &'static busy_inject::Timing,
     /// The provider's observer of the AI turn an idle submit starts; returns once that turn ends.
     until_done: Option<UntilDone>,
+    /// Only a successfully settled write may attach its native input to this birth episode.
+    native_pin_submitted: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Reads an idle submit's AI turn to its end on the turn's sender and returns its outcome.
@@ -48,7 +50,8 @@ pub(super) type UntilDone = Box<dyn FnOnce() -> Result<(), String> + Send>;
 
 impl Registration {
     /// A front's registration read from what its turn observes: host verdict, tmux spawn marker or
-    /// Bound Herdr row, live transcript. Without a live execution it is Absent, whatever `busy`.
+    /// Bound Herdr row, live transcript. Without a live execution under the channel's account it is
+    /// Absent, whatever `busy`.
     pub(super) fn observed(
         mailbox: ChannelMailboxHandle,
         (provider, origin, busy): (&str, InputOrigin, bool),
@@ -63,7 +66,7 @@ impl Registration {
         // A pane kept after its process exited is no live execution; an unknown answer refuses.
         let alive = match host {
             TurnHost::Tmux => match crate::services::platform::tmux::pane_liveness(session) {
-                PaneLiveness::Live => true,
+                PaneLiveness::Live => !other_account(provider, session),
                 PaneLiveness::DeadOrAbsent => false,
                 PaneLiveness::ProbeError => return Err("NotSent(\"pane_unobserved\")".into()),
             },
@@ -110,8 +113,20 @@ impl Registration {
             clock: std::sync::Arc::new(|| chrono::Utc::now().timestamp_millis().max(0) as u64),
             timing: &busy_inject::TIMING,
             until_done,
+            native_pin_submitted: None,
         })
     }
+}
+
+/// A tmux pane under another account than its channel's: no execution of this channel, so its
+/// driver replaces it as the live path does, and nothing is written into it.
+fn other_account(provider: &str, session: &str) -> bool {
+    let Some(kind) = ProviderKind::from_str(provider) else {
+        return false;
+    };
+    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(kind, session);
+    let matches = crate::services::tmux_common::tmux_session_auth_profile_matches;
+    overlay.is_ok_and(|overlay| !matches(session, &overlay.profile_id))
 }
 
 /// A Bound Herdr row's gated pane, its physical writer `socket#pane` and its attempt target.
@@ -133,6 +148,7 @@ pub(in crate::services::discord) fn owner_drive(
     (mailbox, pool): (ChannelMailboxHandle, Option<sqlx::PgPool>),
     (provider, channel): (ProviderKind, u64),
     idle: Handoff,
+    runtime: Option<Shared>,
 ) -> std::sync::Arc<Drive> {
     let (busy, owed) = (
         mailbox.clone(),
@@ -140,21 +156,63 @@ pub(in crate::services::discord) fn owner_drive(
     );
     let drains = pool.clone();
     let handoff: Handoff = std::sync::Arc::new(move |front| {
-        let (mailbox, pool, provider, idle) =
-            (busy.clone(), pool.clone(), provider.clone(), idle.clone());
+        let (mailbox, pool, provider, idle, runtime) = (
+            busy.clone(),
+            pool.clone(),
+            provider.clone(),
+            idle.clone(),
+            runtime.clone(),
+        );
         Box::pin(async move {
-            match mailbox.has_active_turn().await {
+            use crate::services::discord::queue_io::input_ingress as ingress;
+            let original = front.clone();
+            let synthetic = synthetic(&mailbox, &front).await;
+            let result = match mailbox.has_active_turn().await {
                 // A routine, scheduled or HTTP start completes only on its own turn.
-                Ok(true) if synthetic(&mailbox, &front).await => {
-                    Err("NotSent(\"synthetic_waits_idle\")".into())
+                Ok(true) if synthetic => Err("NotSent(\"synthetic_waits_idle\")".into()),
+                Ok(true) => {
+                    let transition = runtime.as_ref().map(|shared| {
+                        shared
+                            .session_transition_lock(ChannelId::new(channel))
+                            .try_lock_owned()
+                    });
+                    if let Some(hold) = runtime
+                        .as_ref()
+                        .and_then(|shared| ingress::ingress_hold(shared, false))
+                    {
+                        let reason = match hold {
+                            ingress::Hold::RestartRecovery => "restart_recovery",
+                            _ => "upload_materialization_failed",
+                        };
+                        Err(effect::unsent(reason.into()))
+                    } else if matches!(transition, Some(Err(_))) {
+                        Err(effect::unsent("session_transition_busy".into()))
+                    } else {
+                        hand_busy(
+                            (mailbox, pool),
+                            provider.clone(),
+                            (channel, front),
+                            runtime.clone(),
+                        )
+                        .await
+                    }
                 }
-                Ok(true) => hand_busy((mailbox, pool), provider, (channel, front)).await,
                 Ok(false) => idle(front).await,
                 Err(unreachable) => Err(format!("{unreachable:?}")),
+            };
+            if !synthetic
+                && let (Some(shared), Err(error)) = (&runtime, &result)
+                && error != "NotSent(\"owner_start_failed\")"
+                && let Some(hold) = ingress::Hold::from_refusal(error)
+            {
+                ingress::handoff_held(shared, &provider, ChannelId::new(channel), &original, hold)
+                    .await;
             }
+            #[cfg(test)]
+            tests::idle::observe_root_recovery_handoff(channel, original.1.message_id, &result);
+            result
         })
     });
-    let recheck = std::time::Duration::from_secs(5);
     let settled: Option<Owed> = drains.map(|pool| {
         let settled: Owed = std::sync::Arc::new(move || {
             let (pool, (mailbox, provider)) = (pool.clone(), owed.clone());
@@ -168,11 +226,12 @@ pub(in crate::services::discord) fn owner_drive(
         });
         settled
     });
+    #[cfg(test)]
+    let settled = tests::idle::observe_settlement(channel, settled);
     std::sync::Arc::new(Drive {
         mailbox,
         channel,
         handoff,
-        recheck,
         settled,
     })
 }
@@ -192,32 +251,101 @@ pub(in crate::services::discord) async fn hand_busy(
     (mailbox, pool): (ChannelMailboxHandle, Option<sqlx::PgPool>),
     provider: ProviderKind,
     (channel, front): (u64, Front),
+    runtime: Option<Shared>,
 ) -> Result<(), String> {
-    let unobserved = || "NotSent(\"busy_turn_unobserved\")".to_string();
     let row = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel)
         .ok_or_else(unobserved)?;
     let session = row.tmux_session_name.clone().ok_or_else(unobserved)?;
     let key = row.session_key.as_deref();
     let host = crate::services::turn_host::for_turn(pool.as_ref(), &provider, channel, key).await;
-    let live = (row.output_path.as_deref()).map(|path| (path, row.session_id.as_deref()));
+    // Claude's prelaunch row has no transcript until its observer hands it back. Its live pane
+    // already has the binding that the idle observer used before submitting the first input.
+    let binding = (provider == ProviderKind::Claude
+        && matches!(&host, TurnHost::Tmux)
+        && row.output_path.is_none())
+    .then(|| crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&session))
+    .flatten()
+    .filter(|binding| {
+        binding.runtime_kind == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+    });
+    let output = row
+        .output_path
+        .as_deref()
+        .or_else(|| binding.as_ref().map(|binding| binding.output_path.as_str()));
+    let native = binding
+        .as_ref()
+        .and_then(|binding| binding.session_id.as_deref())
+        .or(row.session_id.as_deref());
+    let live = output.map(|path| (path, native));
     let at = (&host, session.as_str(), live);
     let kind = (provider.as_str(), InputOrigin::Discord, true);
-    let owner = Registration::observed(mailbox.clone(), kind, at, &front.1, None)?;
+    let owner =
+        Registration::observed(mailbox.clone(), kind, at, &front.1, None).map_err(|error| {
+            if effect::surely_unsent(&error) {
+                error
+            } else {
+                effect::unsent(format!("busy_source_unavailable: {error}"))
+            }
+        })?;
     if owner.phase != target::Phase::Busy {
         return Err(unobserved());
     }
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
+    // The running turn's token learns the attempt before its paste can land a row.
+    let active = mailbox.cancel_token().await.ok().flatten();
+    if let (Some(active), Some(attempt)) = (active, owner.attempt["nonce"].as_str())
+        && active
+            .turn_nonce()
+            .is_some_and(|nonce| row.turn_nonce.as_deref() == Some(nonce))
+        && !active.native_stop.is_completed()
+    {
+        crate::services::discord::inflight::record_native_busy_child(&row, &active, attempt);
+    }
+    let (settled, answer) = tokio::sync::oneshot::channel();
+    let thread = paste_busy(
+        (pool, provider, runtime),
+        (channel, session, host),
+        claim,
+        owner,
+        settled,
+    )
+    .await;
+    match (answer.await, thread) {
+        (Ok(settlement), _) => settlement,
+        (Err(_), Some(thread)) => thread.await.map_err(|error| error.to_string())?,
+        (Err(_), None) => Err(unobserved()),
+    }
+}
+
+fn unobserved() -> String {
+    "NotSent(\"busy_turn_unobserved\")".to_string()
+}
+
+/// Runs the busy effect for a claimed front on a blocking thread that answers `settled` once the
+/// input settled; a body that cannot be built answers there too and starts no thread.
+async fn paste_busy(
+    (pool, provider, runtime): (Option<sqlx::PgPool>, ProviderKind, Option<Shared>),
+    (channel, session, host): (u64, String, TurnHost),
+    claim: FrontClaim,
+    owner: Registration,
+    settled: Settled,
+) -> Option<tokio::task::JoinHandle<Result<(), String>>> {
     let mut bodies = Vec::new();
-    for item in std::iter::once(&front.1).chain(claim.followers()) {
-        bodies.push(super::super::input_payload::busy_body(channel, item, pool.as_ref()).await?);
+    for item in std::iter::once(&claim.front().1).chain(claim.followers()) {
+        match super::super::input_payload::busy_body(channel, item, pool.as_ref()).await {
+            Ok(body) => bodies.push(body),
+            Err(error) => {
+                let _ = settled.send(Err(error));
+                return None;
+            }
+        }
     }
     let payload = bodies.join("\n\n");
-    let (settled, answer) = tokio::sync::oneshot::channel();
-    let thread = tokio::task::spawn_blocking(move || {
+    Some(tokio::task::spawn_blocking(move || {
         let turn = StreamingTurn {
             pool: pool.as_ref(),
-            shared: None,
+            shared: runtime.as_ref(),
             provider: &provider,
             prompt: &payload,
             session_id: None,
@@ -243,24 +371,72 @@ pub(in crate::services::discord) async fn hand_busy(
             submission: None,
         };
         execute_front(turn, std::sync::mpsc::channel().0, claim, owner, settled)
-    });
-    match answer.await {
-        Ok(settlement) => settlement,
-        Err(_) => thread.await.map_err(|error| error.to_string())?,
-    }
+    }))
 }
 
 /// A front the drive granted and the owner claimed, carried by value to the turn that starts it,
 /// with the drive's answer once that input settled.
 pub(in crate::services::discord) struct OwnerTurn {
     mailbox: ChannelMailboxHandle,
+    runtime: Option<Shared>,
     claim: FrontClaim,
     settled: Settled,
+    /// Where the front came from, read from the provenance its admission kept.
+    origin: InputOrigin,
+    refusal: std::sync::Arc<Mutex<Option<crate::services::turn_host::HerdrRefusal>>>,
 }
 
 impl OwnerTurn {
+    pub(super) fn mailbox(&self) -> &ChannelMailboxHandle {
+        &self.mailbox
+    }
+    pub(super) fn claim(&self) -> &FrontClaim {
+        &self.claim
+    }
+    pub(in crate::services::discord) fn refused(
+        &self,
+        refusal: crate::services::turn_host::HerdrRefusal,
+    ) {
+        *self.refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(refusal);
+    }
+
     pub(in crate::services::discord) fn front(&self) -> &Front {
         self.claim.front()
+    }
+
+    /// No effect began: leave the original at the owner's front until another real wake.
+    pub(in crate::services::discord) fn defer_before_submit(self, reason: &str) {
+        let _ = self.settled.send(Err(effect::unsent(reason.into())));
+    }
+
+    /// A pane running a turn AgentDesk did not start takes the claimed front now, through the busy
+    /// entry; the row the input produces decides who answers, and the drive hears its settlement.
+    pub(in crate::services::discord) async fn into_busy_pane(
+        self,
+        (pool, provider): (Option<sqlx::PgPool>, ProviderKind),
+        (channel, session, key): (u64, String, Option<String>),
+        (transcript, session_id): (String, Option<String>),
+    ) {
+        let OwnerTurn {
+            mailbox,
+            runtime,
+            claim,
+            settled,
+            origin,
+            ..
+        } = self;
+        let for_turn = crate::services::turn_host::for_turn;
+        let host = for_turn(pool.as_ref(), &provider, channel, key.as_deref()).await;
+        let live = Some((transcript.as_str(), session_id.as_deref()));
+        let kind = (provider.as_str(), origin, true);
+        let at = (&host, session.as_str(), live);
+        let owner = match Registration::observed(mailbox, kind, at, &claim.front().1, None) {
+            Ok(owner) if owner.phase == target::Phase::Busy => owner,
+            Ok(_) => return drop(settled.send(Err(unobserved()))),
+            Err(error) => return drop(settled.send(Err(error))),
+        };
+        let at = (channel, session, host);
+        let _ = paste_busy((pool, provider, runtime), at, claim, owner, settled).await;
     }
 }
 
@@ -274,11 +450,29 @@ fn drive(shared: &Shared, channel: ChannelId) -> std::sync::Arc<Drive> {
         Box::pin(start_idle(std::sync::Arc::clone(&starts), channel, front))
     });
     let at = (shared.mailbox(channel), shared.pg_pool.clone());
-    owner_drive(at, (shared.provider.clone(), channel.get()), idle)
+    owner_drive(
+        at,
+        (shared.provider.clone(), channel.get()),
+        idle,
+        Some(shared.clone()),
+    )
 }
 
 /// Wakes the channel's owner drive.
 pub(in crate::services::discord) fn wake(shared: &Shared, channel: ChannelId) {
+    #[cfg(test)]
+    crate::services::discord::queue_io::cancel_backstop_test_support::record_owner_wake(channel);
+    #[cfg(test)]
+    if crate::services::discord::queue_io::cancel_backstop_test_support::run_owner_wake_for_tests(
+        channel,
+    ) {
+        return;
+    }
+    crate::services::discord::queue_io::input_owner::drive::wake(drive(shared, channel));
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn wake_drive_for_test(shared: &Shared, channel: ChannelId) {
     crate::services::discord::queue_io::input_owner::drive::wake(drive(shared, channel));
 }
 
@@ -340,6 +534,88 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
     }
 }
 
+/// Why a start waits unclaimed: a later event wakes it, or a read of its pane's native turn does.
+enum Wait {
+    Go,
+    Event,
+    Watch(crate::services::discord::queue_io::input_owner::held_watch::ScreenProbe),
+}
+
+/// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
+/// or the channel pane the start would take runs a native Claude turn.
+async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
+    use crate::services::discord::inflight::{TurnSource, load_inflight_state_read_only};
+    use crate::services::discord::turn_presence::activity::{Activity, activity_now};
+    let (provider, id) = (&shared.provider, channel.get());
+    let rest = crate::services::discord::recovery_engine::herdr_row_end::owner::holds_rest;
+    let row = load_inflight_state_read_only(provider, id)
+        .is_some_and(|row| row.turn_source != TurnSource::Managed);
+    if row || rest(provider, id) {
+        return Wait::Event;
+    }
+    if crate::services::tui_o::turn_mode::transcript_turns(id) {
+        let busy = activity_now(shared, provider, channel).await.activity != Activity::Idle;
+        return if busy { Wait::Event } else { Wait::Go };
+    }
+    native_turn(shared, channel, context).await
+}
+
+/// The channel's own Claude pane running a turn now, read as the start's execution reads it, with
+/// a read of that turn's end; a labelled or process start takes another pane or none.
+async fn native_turn(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
+    use busy_inject::Screen;
+    let named = |value: &Value, key: &str| value[key].as_str().is_some_and(|s| !s.is_empty());
+    let metadata = &context["metadata"];
+    let snapshot = "scheduled_snapshot_session_label";
+    let elsewhere = named(context, "synthetic_label")
+        || named(context, snapshot)
+        || named(metadata, snapshot)
+        || metadata["execution_mode"] == "process";
+    if elsewhere || shared.provider != ProviderKind::Claude {
+        return Wait::Go;
+    }
+    let (dir, session_id, name) = {
+        let core = shared.core.lock().await;
+        let Some(session) = core.sessions.get(&channel) else {
+            return Wait::Go;
+        };
+        let name = session.channel_name.clone();
+        (
+            session.current_path.clone(),
+            session.session_id.clone(),
+            name,
+        )
+    };
+    let hint = context["channel_name_hint"].as_str().map(str::to_string);
+    let Some(name) = name.or(hint) else {
+        return Wait::Go;
+    };
+    let tmux = shared.provider.build_tmux_session_name(&name);
+    let read = move || {
+        match crate::services::platform::tmux::pane_liveness(&tmux) {
+            PaneLiveness::Live => {}
+            PaneLiveness::DeadOrAbsent => return Screen::Gone,
+            // A pane that could not be read is not gone; the watch reads it again.
+            PaneLiveness::ProbeError => return Screen::Unknown,
+        }
+        let resolve = super::super::tui_followup::claude_followup_transcript;
+        match resolve(dir.as_deref(), session_id.as_deref(), Some(&tmux)) {
+            Some(path)
+                if crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&path)
+                    .is_busy() =>
+            {
+                Screen::Blocked
+            }
+            Some(_) => Screen::Ready,
+            None => Screen::Unknown,
+        }
+    };
+    match read() {
+        Screen::Blocked => Wait::Watch(Box::new(read)),
+        _ => Wait::Go,
+    }
+}
+
 /// An idle channel's front: the owner claims it, then a queued start presenting that claim runs
 /// it; the drive hears the input's settlement, never the AI turn's.
 async fn start_idle(
@@ -360,13 +636,47 @@ async fn start_idle(
         None => Ok(None),
     };
     let kept = kept.map_err(effect::unsent)?;
+    crate::services::discord::herdr_terminate::root_replaced::preclaim::before_idle(
+        &shared,
+        &shared.provider,
+        channel,
+    )
+    .await?;
+    // A start waits unclaimed behind a turn it did not start; that turn's idle wakes the owner.
+    let wait = match &kept {
+        Some(context) => start_waits(&shared, channel, context).await,
+        None => Wait::Go,
+    };
+    if let Wait::Watch(read) = wait {
+        crate::services::discord::queue_io::input_owner::held_watch::arm(channel.get(), read);
+        let held = front.clone();
+        let held = mailbox
+            .v2_request(move |slot| slot.as_mut().ok_or("V2 not adopted")?.hold_front(&held));
+        if let Err(error) = held.await {
+            tracing::warn!(channel_id = channel.get(), %error, "start hold unwatched");
+        }
+        return Err("NotSent(\"synthetic_waits_idle\")".into());
+    }
+    if let Wait::Event = wait {
+        return Err("NotSent(\"synthetic_waits_idle\")".into());
+    }
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
     let (settled, answer) = tokio::sync::oneshot::channel();
+    let origin = match kept.as_ref().map(|context| context["origin"].as_str()) {
+        None => InputOrigin::Discord,
+        Some(Some("headless")) => InputOrigin::HttpStart,
+        Some(_) => InputOrigin::Routine,
+    };
+    let failed = super::start_failure::Failure::claimed(&mailbox, &claim);
+    let refusal = std::sync::Arc::new(Mutex::new(None));
     let owner = OwnerTurn {
         mailbox,
+        runtime: Some(shared.clone()),
         claim,
         settled,
+        origin,
+        refusal: refusal.clone(),
     };
     let now = (std::time::SystemTime::now(), std::time::Instant::now());
     let restore = crate::services::turn_orchestrator::pending_queue_item_to_intervention;
@@ -378,6 +688,11 @@ async fn start_idle(
             .pending_uploads
             .extend(item.pending_uploads.iter().cloned());
     }
+    #[cfg(test)]
+    let owner = match tests::idle::root_recovery_launch(channel, owner, &intervention.text) {
+        Ok(owner) => owner,
+        Err(result) => return result,
+    };
     let owner_name = crate::services::discord::queue_dispatch::kickoff::queued_owner_name;
     let name = owner_name(deps.http, intervention.author_id).await;
     let at = (shared.provider.clone(), channel);
@@ -399,6 +714,25 @@ async fn start_idle(
             started.map(drop).map_err(|error| error.to_string())
         }
     };
+    let typed = refusal.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(refusal) = typed
+        && let Some(kind) = super::start_failure::confirmed(&refusal)
+    {
+        if failed
+            .commit(
+                kind,
+                refusal.to_string(),
+                Ok(None),
+                Some(shared.clone()),
+                channel,
+                None,
+            )
+            .await?
+            .is_some()
+        {
+            return Err("NotSent(\"owner_start_failed\")".into());
+        }
+    }
     match (answer.await, started) {
         (Ok(settlement), _) => settlement,
         (Err(_), Err(error)) => Err(format!("NotSent({error:?})")),
@@ -406,8 +740,23 @@ async fn start_idle(
     }
 }
 
-/// An owner front's turn: its registration is read from this turn's own host and pane, and an
-/// idle pane's AI turn is read on this turn's sender until it ends.
+#[cfg(test)]
+pub(in crate::services::discord) async fn start_idle_for_test(
+    shared: Shared,
+    channel: ChannelId,
+    front: Front,
+) -> Result<(), String> {
+    start_idle(shared, channel, front).await
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) use tests::idle::{
+    RootRecoveryDriveEvent, claimed_root_recovery_launch, install_root_recovery_drive_probe,
+    install_root_recovery_launch,
+};
+
+/// An owner front's turn, registered from this turn's own host and pane: a running Claude pane
+/// takes it through the busy entry, an idle pane's AI turn is read on this turn's sender.
 pub(super) fn execute_owned(
     turn: StreamingTurn<'_>,
     sender: std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
@@ -416,21 +765,99 @@ pub(super) fn execute_owned(
     use crate::services::platform::tmux::pane_liveness;
     let OwnerTurn {
         mailbox,
+        runtime,
         claim,
         settled,
+        origin,
+        ..
     } = owner;
+    let turn = StreamingTurn {
+        shared: turn.shared.or(runtime.as_ref()),
+        ..turn
+    };
     let session = turn.tmux_session_name.unwrap_or_default();
-    let live = matches!(turn.host, TurnHost::Tmux) && pane_liveness(session) == PaneLiveness::Live;
-    let observer = live.then(|| observer(&turn, &sender)).flatten();
-    let kind = (turn.provider.as_str(), InputOrigin::Discord, false);
-    let at = (turn.host, session, None);
-    match Registration::observed(mailbox, kind, at, &claim.front().1, observer) {
+    let live = matches!(turn.host, TurnHost::Tmux)
+        && pane_liveness(session) == PaneLiveness::Live
+        && !other_account(turn.provider.as_str(), session);
+    let running = live.then(|| running_transcript(&turn, session)).flatten();
+    let registered = match &running {
+        Some(transcript) => {
+            let kind = (turn.provider.as_str(), origin, true);
+            let at = (
+                turn.host,
+                session,
+                Some((transcript.as_str(), turn.session_id)),
+            );
+            Registration::observed(mailbox, kind, at, &claim.front().1, None).map(|mut owner| {
+                owner.until_done = busy_observer(&turn, &sender, &mut owner);
+                owner
+            })
+        }
+        None => {
+            let observer = live.then(|| observer(&turn, &sender)).flatten();
+            let kind = (turn.provider.as_str(), origin, false);
+            let at = (turn.host, session, None);
+            Registration::observed(mailbox, kind, at, &claim.front().1, observer)
+        }
+    };
+    match registered {
         Ok(owner) => execute_front(turn, sender, claim, owner, settled),
         Err(error) => {
             let _ = settled.send(Err(error.clone()));
             Err(error)
         }
     }
+}
+
+/// The transcript of a Claude tmux pane whose turn is running now, resolved by the pane's identity.
+fn running_transcript(turn: &StreamingTurn<'_>, session: &str) -> Option<String> {
+    (*turn.provider == ProviderKind::Claude).then_some(())?;
+    let dir = Some(turn.working_dir).filter(|dir| !dir.is_empty());
+    let resolve = super::super::tui_followup::claude_followup_transcript;
+    let path = resolve(dir, turn.session_id, Some(session))?;
+    let state = crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&path);
+    state.is_busy().then(|| path.display().to_string())
+}
+
+/// The reader of a busy paste's answer, from the row its attempt takes to that turn's end.
+fn busy_observer(
+    turn: &StreamingTurn<'_>,
+    sender: &std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
+    owner: &mut Registration,
+) -> Option<UntilDone> {
+    let nonce = owner.attempt["nonce"].as_str()?;
+    let frame = busy_inject::frame("discord", &owner.author, &owner.name, nonce, turn.prompt);
+    let at = (
+        turn.tmux_session_name?,
+        nonce,
+        frame.as_str(),
+        turn.channel_id,
+    );
+    let cancel = std::sync::Arc::clone(&turn.cancel);
+    let submitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    owner.native_pin_submitted = Some(submitted.clone());
+    let proof = crate::services::discord::inflight::BusyNativeInput::capture(
+        at.0,
+        nonce,
+        &frame,
+        &owner.transcript,
+        &owner.attempt["source"],
+        submitted,
+        cancel.clone(),
+    );
+    let on_native_user = Box::new(move |offset| {
+        if let Some(proof) = proof {
+            proof.adopt(offset);
+        }
+    });
+    let observe = crate::services::claude_tui::hosting::busy_owner_observer;
+    observe(
+        at,
+        &owner.transcript,
+        sender.clone(),
+        cancel,
+        on_native_user,
+    )
 }
 
 /// The provider's own observer of the AI turn an idle submit starts, set up before that submit.
@@ -456,7 +883,7 @@ fn observer(
 
 /// The drive's answer for one front: its local settlement, never its AI completion.
 pub(super) type Settled = tokio::sync::oneshot::Sender<Result<(), String>>;
-type Reply = std::sync::Arc<dyn Fn(&Result<(), String>) + Send + Sync>;
+pub(super) type Reply = std::sync::Arc<dyn Fn(&Result<(), String>) + Send + Sync>;
 
 fn reply_once(settled: Option<Settled>) -> Reply {
     let slot = Mutex::new(settled);
@@ -510,11 +937,17 @@ pub(super) fn execute_front(
     settled: Settled,
 ) -> Result<(), String> {
     let reply = reply_once(Some(settled));
-    let result = match take_owned(&turn, Some(claim), owner, reply.clone()) {
+    let failure = super::start_failure::Failure::claimed(&owner.mailbox, &claim);
+    let watch =
+        crate::services::discord::inflight::row_removed::watch(turn.provider, turn.channel_id);
+    let context = turn.clone();
+    let inside = failure.guard_reply(reply.clone());
+    let result = match take_owned(&turn, Some(claim), owner, inside) {
         Some(Taken::Done(result)) => result,
         Some(Taken::Launch(guard)) => guard.finish(super::drive(turn, sender)),
         None => Err("NotSent(\"not_owned\")".into()),
     };
+    let result = failure.finish(&context, watch, result);
     reply(&result);
     result
 }
@@ -573,12 +1006,26 @@ fn take_owned(
         }
         _ => None,
     };
-    let result = run(turn, route, registration, front);
+    let declared = until_done.is_some();
+    // Only the Claude tmux writers consult the first-key gate, so only there does a stop prove no key.
+    let gate = matches!(route, target::Route::ClaudeIdle | target::Route::ClaudeBusy)
+        .then(|| turn.cancel.native_stop.receipt_sink());
+    let native_pin_submitted = registration.native_pin_submitted.clone();
+    let result = run(turn, (route, declared), registration, front);
+    if result.is_ok()
+        && let Some(submitted) = native_pin_submitted
+    {
+        submitted.store(true, std::sync::atomic::Ordering::Release);
+    }
     reply(&result);
     let result = match (result, until_done) {
         (Ok(()), Some(until_done)) => until_done(),
-        // A write that may have landed starts an AI turn, so the capacity is held to its end too.
-        (Err(error), Some(until_done)) if !effect::surely_unsent(&error) => {
+        // A write that may have landed starts an AI turn, so the capacity is held to its end too;
+        // a stop that took the Claude writer's gate before its first key started none.
+        (Err(error), Some(until_done))
+            if !effect::surely_unsent(&error)
+                && !gate.as_ref().is_some_and(|gate| gate.stopped_before_key()) =>
+        {
             until_done().and(Err(error))
         }
         (result, _) => result,
@@ -645,9 +1092,10 @@ fn codex_herdr_frame(prompt: &str) -> Result<String, String> {
     Ok(typed.collect())
 }
 
+/// Writes the prepared input on `route`; `declared` says a reader set up before the write answers it.
 fn run(
     turn: &StreamingTurn<'_>,
-    route: target::Route,
+    (route, declared): (target::Route, bool),
     r: Registration,
     front: Option<FrontClaim>,
 ) -> Result<(), String> {
@@ -671,16 +1119,28 @@ fn run(
                 nonce,
                 text: turn.prompt.into(),
                 timing: r.timing,
+                declared,
+                draft_notice: draft_notice(turn, &r.sources),
+                cancel: turn.cancel.clone(),
             }
             .leaf(),
         ),
-        target::Route::ClaudeIdle => (turn.prompt.into(), effect::idle_claude(session()?.into())),
+        target::Route::ClaudeIdle => (
+            turn.prompt.into(),
+            effect::idle_claude(
+                busy_inject::Pane::with_program(session()?, r.program),
+                session()?.into(),
+                turn.channel_id,
+                turn.cancel.clone(),
+            ),
+        ),
         target::Route::CodexIdle => (
             codex_herdr_frame(turn.prompt)
                 .map_err(|error| format!("NotSent(\"invalid_prompt: {error}\")"))?,
             effect::idle_codex(
                 busy_inject::Pane::with_program(session()?, r.program),
                 session()?.into(),
+                turn.channel_id,
             ),
         ),
         target::Route::ClaudeHerdrBusy => {
@@ -705,11 +1165,12 @@ fn run(
             )
         }
         target::Route::CodexBusy | target::Route::CodexHerdrBusy => {
-            // Main's busy preparation: the open model turn the paste is aimed at, read up front.
+            // A readable rollout supplies a diagnostic turn, not permission to deliver.
             use crate::services::codex_tui::busy_inject::{TIMING, TurnVerdict, read_turn};
             let target_turn = match read_turn(&r.transcript) {
                 Some(TurnVerdict::KnownModelTurn(turn)) => turn,
-                other => return Err(format!("NotSent(\"busy_turn: {other:?}\")")),
+                Some(_) => String::new(),
+                None => return Err("NotSent(\"busy_turn: transcript unavailable\")".into()),
             };
             let frame = busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt);
             let input = CodexInput {
@@ -746,12 +1207,78 @@ fn run(
         target::Route::HerdrIdle => return Err("NotSent(\"idle_unowned\")".into()),
         target::Route::Held(reason) => return Err(format!("NotSent({reason:?})")),
     };
+    let busy = matches!(
+        route,
+        target::Route::ClaudeBusy
+            | target::Route::ClaudeHerdrBusy
+            | target::Route::CodexBusy
+            | target::Route::CodexHerdrBusy
+    );
+    let mut sources = Vec::new();
+    if busy {
+        if let Some(claim) = front.as_ref() {
+            for original in std::iter::once(&claim.front().1).chain(claim.followers()) {
+                let ids = match original.source_message_ids.as_slice() {
+                    [] => std::slice::from_ref(&original.message_id),
+                    ids => ids,
+                };
+                sources.extend_from_slice(ids);
+            }
+        } else {
+            sources.extend(r.sources.iter().filter_map(|id| id.parse::<u64>().ok()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        sources.retain(|id| {
+            crate::services::discord::reaction_lifecycle::is_real_discord_message_id_value(*id)
+                && seen.insert(*id)
+        });
+    }
     let prepared = PreparedPayload {
         frame,
         sources: r.sources,
         attempt: r.attempt,
     };
-    submit((&r.mailbox, r.clock), front, prepared, leaf)
+    submit((&r.mailbox, r.clock), front, prepared, leaf)?;
+    if busy && let Some(shared) = turn.shared {
+        tokio::runtime::Handle::current().block_on(async {
+            use crate::services::discord::turn_view_reconciler::{
+                TurnViewIdentity, TurnViewTarget,
+            };
+            for message in sources {
+                let target = TurnViewTarget::intake_user_message(
+                    ChannelId::new(turn.channel_id),
+                    poise::serenity_prelude::MessageId::new(message),
+                );
+                shared
+                    .turn_view_reconciler
+                    .note_confirmed_injection(
+                        shared,
+                        turn.provider,
+                        target,
+                        TurnViewIdentity::IntakeShared,
+                    )
+                    .await;
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Posts the original's one notice that a draft beside its paste may not be kept; the outbox key
+/// is the original's, so a later attempt of it posts nothing.
+fn draft_notice(turn: &StreamingTurn<'_>, sources: &[String]) -> Option<effect::DraftNotice> {
+    let pool = turn.pool?.clone();
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
+    let (provider, channel) = (turn.provider.as_str().to_string(), turn.channel_id);
+    let sources = sources.to_vec();
+    Some(Box::new(move || {
+        runtime.spawn(async move {
+            let post = crate::services::discord::queue_io::retained_notice::draft_unproven;
+            if let Err(error) = post(&pool, &provider, channel, &sources).await {
+                tracing::warn!(channel_id = channel, %error, "draft notice not enqueued");
+            }
+        });
+    }))
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use crate::services::claude_tui::input::submission::tests::{events, renderer_wit
 use crate::services::discord::queue_io::input_owner::admission::{
     AdmissionTicket, TurnBind, admit, exact_turn,
 };
-use crate::services::discord::queue_io::input_owner::drive::{Front, claim_turn};
+use crate::services::discord::queue_io::input_owner::drive::{Drive, Front, Handoff, claim_turn};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 use crate::services::turn_orchestrator::{ChannelMailboxRegistry, PendingQueueItem};
@@ -30,6 +30,10 @@ static OWNER_TIMING: Timing = Timing {
     confirm_window: Duration::from_millis(500),
     confirm_poll: Duration::from_millis(10),
 };
+
+type Answer = tokio::sync::oneshot::Sender<Result<(), String>>;
+/// The handoffs a rig's drive made, each waiting for this thread's answer.
+pub(super) type Inbox = std::sync::mpsc::Receiver<(Front, Answer)>;
 
 pub(super) struct Rig {
     pub(super) f: Fixture,
@@ -57,8 +61,9 @@ fn rig(name: &str, channel: u64, mode: &str, before: String, transcript: &str) -
     owned(f, name, channel, renderer, "claude")
 }
 
-/// An owner with one admitted original over the `provider` pane in session `name`. Its tmux fails a
-/// load on `fail-load`, respawns after the step in `swap-after`, and runs `after-<step>` once.
+/// An owner with one admitted original over the `provider` pane in session `name`. Its tmux fails
+/// loads while `fail-load` stays (once if it has content), `fail-dead`'s pane read, respawns on
+/// `swap-after`, runs `after-<step>`.
 pub(super) fn owned(
     f: Fixture,
     name: &str,
@@ -79,7 +84,9 @@ pub(super) fn owned(
     fs::create_dir_all(&dir).unwrap();
     let script = format!(
         "#!/bin/sh\nd='{dir}'\nprintf '%s\\n' \"$*\" >> \"$d/trace\"\n\
-         case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || exit 1 ;; esac\n\
+         case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || {{ [ ! -s \"$d/fail-load\" ] || rm \"$d/fail-load\"; exit 1; }} ;; esac\n\
+         case \"$*\" in *pane_dead*) [ ! -f \"$d/before-read\" ] || {{ sh \"$d/before-read\"; rm \"$d/before-read\"; }} ;; esac\n\
+         case \"$*\" in *pane_dead*) [ ! -f \"$d/fail-dead\" ] || {{ rm \"$d/fail-dead\"; exit 1; }} ;; esac\n\
          case \"$*\" in *paste-buffer*) [ ! -f \"$d/before-paste\" ] || {{ sh \"$d/before-paste\" || printf 'before-paste rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-paste\"; }} ;; esac\n\
          case \"$*\" in *send-keys*Enter*) [ ! -f \"$d/before-Enter\" ] || {{ sh \"$d/before-Enter\" || printf 'before-Enter rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-Enter\"; }} ;; esac\n\
          '{shim}' \"$@\"; rc=$?\ncase \"$*\" in *load-buffer*) step=load ;; *paste-buffer*) step=paste ;; *C-s*) step=C-s ;; *send-keys*Enter*) step=Enter ;; *) step= ;; esac\n\
@@ -310,6 +317,7 @@ impl Rig {
             timing: &OWNER_TIMING,
             // The rig's AI turn ends as soon as it is read.
             until_done: Some(Box::new(|| Ok(()))),
+            native_pin_submitted: None,
         }
     }
 
@@ -392,6 +400,46 @@ impl Rig {
         assert!(matches!(self.bind(), TurnBind::Settled(turn) if turn.attempt == self.nonce));
     }
 
+    /// The owner's drive on this rig, whose every handoff this thread answers through `serve`.
+    pub(super) fn drive(&self) -> (Arc<Drive>, Inbox) {
+        let (fronts, inbox) = std::sync::mpsc::channel::<(Front, Answer)>();
+        let fronts = std::sync::Mutex::new(fronts);
+        let handoff: Handoff = Arc::new(move |front| {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            let sent = fronts.lock().unwrap().send((front, reply));
+            Box::pin(async move {
+                sent.map_err(|e| e.to_string())?;
+                answer.await.map_err(|e| e.to_string())?
+            })
+        });
+        let drive = Drive {
+            mailbox: self.mailbox.clone(),
+            channel: self.channel,
+            handoff,
+            settled: None,
+        };
+        (Arc::new(drive), inbox)
+    }
+
+    pub(super) fn wake(&self, drive: &Arc<Drive>) {
+        let _entered = self.runtime.enter();
+        crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+    }
+
+    /// Runs the next handoff the drive makes within `secs` through this rig's turn; `None` when it
+    /// made none.
+    pub(super) fn serve(
+        &self,
+        inbox: &Inbox,
+        (provider, phase): &(ProviderKind, target::Phase),
+        secs: u64,
+    ) -> Option<Result<(), String>> {
+        let (front, reply) = inbox.recv_timeout(Duration::from_secs(secs)).ok()?;
+        let result = self.handoff(front, provider.clone(), *phase, &self.transcript());
+        let _ = reply.send(result.clone());
+        Some(result)
+    }
+
     /// The original back in custody with the owner's not-sent proof, and no key sent.
     pub(super) fn held_not_sent(&self, reason: &str) {
         let snapshot = self.snapshot();
@@ -401,6 +449,15 @@ impl Rig {
         let why = retained[0]["reason"]["reason"].as_str().unwrap_or_default();
         assert!(why.contains(reason), "{why}");
         assert_eq!(retained[0]["input"]["original"]["text"], PROMPT);
+        assert!(self.events().is_empty(), "no key: {:?}", self.events());
+    }
+
+    /// The original kept at the queue front for the next wake with no attempt bound, and no key sent.
+    pub(super) fn waits_not_sent(&self) {
+        let snapshot = self.snapshot();
+        assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+        assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+        assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
         assert!(self.events().is_empty(), "no key: {:?}", self.events());
     }
 
@@ -660,6 +717,38 @@ fn owner_idle_claude_holds_a_modal_front_until_the_modal_is_gone() {
     rig.delivered();
 }
 
+/// A modal on an idle pane holds the front and leaves the pane's read with the held watch: nothing
+/// is handed on while it stays, its closing wakes the drive to deliver once, a later wake nothing.
+#[test]
+fn a_closing_modal_wakes_the_drive_to_deliver_its_held_front_once() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let modal = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel\n";
+    let rig = rig("oi-watch", 7_272_551, "normal", modal.into(), IDLE);
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let idle = (ProviderKind::Claude, target::Phase::Idle);
+    let held = rig.serve(&inbox, &idle, 10);
+    assert_eq!(held, Some(Err("NotSent(\"Modal\")".into())));
+    assert_eq!(
+        rig.serve(&inbox, &idle, 5),
+        None,
+        "an open modal hands nothing on"
+    );
+    let pane = format!("={}:", rig.name);
+    rig.f.tmux(&["send-keys", "-t", &pane, "C-u"]);
+    wait("modal-closed", || rig.events() == ["clear"]);
+    rig.f.tmux(&["clear-history", "-t", &pane]);
+    assert_eq!(rig.serve(&inbox, &idle, 15), Some(Ok(())));
+    assert_eq!(rig.events(), ["clear", "paste", "Enter"]);
+    rig.delivered();
+    rig.wake(&drive);
+    assert_eq!(
+        rig.serve(&inbox, &idle, 3),
+        None,
+        "a later wake hands on nothing"
+    );
+}
+
 /// A legacy draft guard does not stop the owner's transaction: the guard is legacy state.
 #[test]
 fn legacy_guard_value_does_not_block_owner_a() {
@@ -700,17 +789,100 @@ fn owner_busy_claude_enter_ends_the_transaction_with_or_without_receipt() {
     assert!(alerts.is_empty(), "{alerts:?}");
 }
 
-/// A load that never became a buffer sends nothing and proves it: the original and its ticket
-/// stay with the owner.
+/// A failed buffer load or a transcript missing at the pane read sends no key and holds the front
+/// with its ticket; only that cause clearing wakes the drive, which pastes and enters once.
 #[test]
-fn load_failed_is_definitely_not_submitted() {
+fn a_failed_load_or_a_missing_transcript_holds_the_front_until_it_clears() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let rig = rig("ob-load", 7_272_507, "normal", view("", false), BUSY);
-    rig.mark("fail-load", "");
-    let result = rig.dispatch(ProviderKind::Claude, target::Phase::Busy, &rig.transcript());
-    assert_eq!(result, Err("NotSent(\"LoadFailed\")".into()));
-    rig.held_not_sent("load_failed");
-    assert_eq!(rig.bind(), TurnBind::NotArmed);
+    for (name, channel, load) in [("ob-load", 7_272_507, true), ("ob-gone", 7_272_549, false)] {
+        let rig = rig(name, channel, "normal", view("", false), BUSY);
+        let transcript = rig.transcript();
+        let hidden = transcript.with_extension("hidden");
+        match load {
+            true => rig.mark("fail-load", ""),
+            false => {
+                let hide = format!("mv '{}' '{}'", transcript.display(), hidden.display());
+                rig.mark("before-read", &hide);
+            }
+        }
+        let (drive, inbox) = rig.drive();
+        rig.wake(&drive);
+        let busy = (ProviderKind::Claude, target::Phase::Busy);
+        let reasons = [
+            "NotSent(\"LoadFailed\")",
+            "NotSent(\"TranscriptUnavailable\")",
+        ];
+        let held = rig.serve(&inbox, &busy, 10);
+        assert_eq!(
+            held,
+            Some(Err(reasons[usize::from(!load)].into())),
+            "{name}"
+        );
+        rig.waits_not_sent();
+        assert_eq!(rig.bind(), TurnBind::NotArmed, "{name}");
+        let stays = rig.serve(&inbox, &busy, 6);
+        assert_eq!(
+            stays, None,
+            "{name}: nothing is handed on while the cause stays"
+        );
+        let dir = rig.f.root.path().join(format!("{name}-owner"));
+        match load {
+            true => fs::remove_file(dir.join("fail-load")).unwrap(),
+            false => fs::rename(&hidden, &transcript).unwrap(),
+        }
+        assert_eq!(rig.serve(&inbox, &busy, 15), Some(Ok(())), "{name}");
+        let events = rig.events();
+        let count = |key: &str| events.iter().filter(|e| *e == key).count();
+        assert_eq!(
+            (count("paste"), count("Enter")),
+            (1, 1),
+            "{name}: {events:?}"
+        );
+        rig.delivered();
+    }
+}
+
+/// A busy pane's buffer that fails to load once is a cause the watch reads: its first look after the
+/// hold wakes the drive, which pastes and enters once.
+#[test]
+fn a_busy_buffer_that_fails_to_load_once_is_pasted_once_without_another_wake() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("ob-load-once", 7_272_598, "normal", view("", false), BUSY);
+    rig.mark("fail-load", "once");
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let busy = (ProviderKind::Claude, target::Phase::Busy);
+    let held = rig.serve(&inbox, &busy, 10);
+    assert_eq!(held, Some(Err("NotSent(\"LoadFailed\")".into())));
+    assert_eq!(rig.serve(&inbox, &busy, 15), Some(Ok(())));
+    let events = rig.events();
+    let count = |key: &str| events.iter().filter(|e| *e == key).count();
+    assert_eq!((count("paste"), count("Enter")), (1, 1), "{events:?}");
+    rig.delivered();
+}
+
+/// A frame ledger refusal is no cause a read sees: the front is held with no watch, so no probe runs
+/// and nothing is handed on while the busy turn lasts.
+#[test]
+fn a_busy_ledger_refusal_holds_the_front_without_a_watch() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("ob-ledger", 7_272_599, "normal", view("", false), BUSY);
+    // The transcript shrinks below the attempt's observed offset, so the ledger refuses the frame.
+    let cut = format!("printf '{{}}\\n' > '{}'", rig.transcript().display());
+    rig.mark("before-read", &cut);
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let busy = (ProviderKind::Claude, target::Phase::Busy);
+    let held = rig.serve(&inbox, &busy, 10);
+    assert_eq!(held, Some(Err("NotSent(\"LoadFailed\")".into())));
+    rig.waits_not_sent();
+    assert_eq!(rig.serve(&inbox, &busy, 12), None, "no watch hands it on");
+    let trace = rig.f.root.path().join("ob-ledger-owner/trace");
+    let trace = fs::read_to_string(trace).unwrap_or_default();
+    assert!(
+        !trace.contains("load-buffer"),
+        "no load ran or was probed: {trace}"
+    );
 }
 
 /// The pane's process replaced before ready sends nothing and proves it; after C-s it is a stash
@@ -726,7 +898,7 @@ fn pane_pid_swap_stages_map_to_not_sent_or_write_uncertain() {
         &rig_ready.transcript(),
     );
     assert_eq!(result, Err("NotSent(\"PaneUnavailable\")".into()));
-    rig_ready.held_not_sent("owner_refused");
+    rig_ready.waits_not_sent();
     for (name, channel, step, reached, outcome) in [
         (
             "ps-cs",
@@ -856,6 +1028,7 @@ fn prepared_before_launch(rig: &Rig) -> Registration {
         clock: Arc::new(|| 10_000),
         timing: &OWNER_TIMING,
         until_done: None,
+        native_pin_submitted: None,
     }
 }
 
@@ -1197,7 +1370,7 @@ fn a_busy_front_is_written_into_the_pane_its_running_turn_names() {
     let rig = rig("hb-busy", 7_272_521, "normal", view("", false), BUSY);
     let hand = |front: Front| {
         let owner = (rig.mailbox.clone(), None);
-        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front));
+        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front), None);
         rig.runtime.block_on(handed)
     };
     let unobserved = Err("NotSent(\"busy_turn_unobserved\")".to_string());
@@ -1236,7 +1409,7 @@ fn a_busy_front_carries_its_uploads_and_reply_into_the_pane() {
     running_row(&rig, &rig.name);
     let hand = |front: Front| {
         let owner = (rig.mailbox.clone(), None);
-        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front));
+        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front), None);
         rig.runtime.block_on(handed)
     };
     assert_eq!(hand(rig.granted_front()), Ok(()));
@@ -1285,7 +1458,7 @@ fn consecutive_input_goes_into_a_busy_turn_as_one_prompt() {
     running_row(rig, &rig.name);
     let hand = |front: Front| {
         let owner = (rig.mailbox.clone(), None);
-        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front));
+        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front), None);
         rig.runtime.block_on(handed)
     };
     assert_eq!(hand(rig.granted_front()), Ok(()));
@@ -1356,7 +1529,7 @@ fn an_idle_channel_hands_its_front_to_the_turn_start() {
             Box::pin(async { Err("left queued".into()) })
         });
     let owner = (rig.mailbox.clone(), None);
-    let drive = owner_drive(owner, (ProviderKind::Claude, rig.channel), idle);
+    let drive = owner_drive(owner, (ProviderKind::Claude, rig.channel), idle, None);
     let _entered = rig.runtime.enter();
     crate::services::discord::queue_io::input_owner::drive::wake(drive);
     for _ in 0..200 {
@@ -1370,6 +1543,127 @@ fn an_idle_channel_hands_its_front_to_the_turn_start() {
     assert_eq!(fronts.len(), 1, "one look while the front stays put");
     assert_eq!(fronts[0].1.text, PROMPT);
     assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
+}
+
+/// Copy mode holds a busy pane's front through 25 virtual seconds, a failed pane read and repeated
+/// reads of that screen; once only the pane leaves copy mode, the front is pasted once.
+#[test]
+fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
+    use std::sync::mpsc;
+    use tokio::sync::oneshot;
+    type Ask = (Front, oneshot::Sender<Result<(), String>>);
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("hold-watch", 7_272_523, "normal", view("", false), BUSY);
+    let target = format!("={}:", rig.name);
+    rig.f.tmux(&["copy-mode", "-t", &target]);
+    let trace = rig.f.root.path().join(format!("{}-owner/trace", rig.name));
+    let mode_reads = || {
+        let trace = fs::read_to_string(&trace).unwrap_or_default();
+        trace
+            .lines()
+            .filter(|line| line.contains("#{pane_in_mode}"))
+            .count()
+    };
+    // The drive runs on virtual time in its own thread; this thread runs each handoff on the rig.
+    let (asks, asked) = mpsc::channel::<Ask>();
+    let idle: crate::services::discord::queue_io::input_owner::drive::Handoff =
+        Arc::new(move |front: Front| {
+            let asks = asks.clone();
+            Box::pin(async move {
+                let (answer, answered) = oneshot::channel();
+                asks.send((front, answer)).map_err(|e| e.to_string())?;
+                answered.await.map_err(|e| e.to_string())?
+            })
+        });
+    let drive = owner_drive(
+        (rig.mailbox.clone(), None),
+        (ProviderKind::Claude, rig.channel),
+        idle,
+        None,
+    );
+    let (mailbox, (said, heard)) = (rig.mailbox.clone(), mpsc::channel());
+    let ((held, on_hold), (left, on_left)) = (oneshot::channel(), oneshot::channel::<()>());
+    let driver = std::thread::spawn(move || {
+        let paused = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        paused.block_on(async move {
+            let items = || async {
+                let json = mailbox.v2_request(|s| s.as_ref().unwrap().json()).await;
+                json.unwrap()["items"].clone()
+            };
+            crate::services::discord::queue_io::input_owner::drive::wake(drive);
+            on_hold.await.unwrap();
+            tokio::time::sleep(Duration::from_secs(25)).await;
+            said.send(items().await).unwrap();
+            if on_left.await.is_err() {
+                return;
+            }
+            // Real time too: the paste runs on the rig's own thread.
+            for _ in 0..3_000 {
+                if items().await == json!([]) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            said.send(items().await).unwrap();
+        });
+    });
+    let (mut handed, mut seen, mut since) = (0, Vec::new(), None);
+    let (mut held, mut left) = (Some(held), Some(left));
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while seen.len() < 2 && std::time::Instant::now() < deadline {
+        if let Ok((front, answer)) = asked.recv_timeout(Duration::from_millis(10)) {
+            handed += 1;
+            let transcript = rig.transcript();
+            let result = rig.handoff(
+                front,
+                ProviderKind::Claude,
+                target::Phase::Busy,
+                &transcript,
+            );
+            if held.is_some() {
+                rig.mark("fail-dead", "");
+            }
+            let _ = answer.send(result);
+            if let Some(held) = held.take() {
+                since = Some(mode_reads());
+                held.send(()).unwrap();
+            }
+        }
+        if let Ok(items) = heard.try_recv() {
+            seen.push(items);
+        }
+        // The watch met the failed read, then read the unchanged screen three times.
+        let failed = !rig
+            .f
+            .root
+            .path()
+            .join(format!("{}-owner/fail-dead", rig.name))
+            .exists();
+        let read = failed && since.is_some_and(|since| mode_reads() >= since + 3);
+        if seen.len() == 1
+            && read
+            && let Some(left) = left.take()
+        {
+            assert_eq!(handed, 1, "the same screen hands nothing");
+            assert!(rig.events().is_empty(), "{:?}", rig.events());
+            assert_eq!(seen[0][0]["text"], PROMPT);
+            rig.f.tmux(&["send-keys", "-t", &target, "-X", "cancel"]);
+            left.send(()).unwrap();
+        }
+    }
+    assert!(
+        left.take().is_none(),
+        "the watch never read the held screen"
+    );
+    driver.join().unwrap();
+    assert_eq!(seen.get(1), Some(&json!([])), "{}", rig.snapshot());
+    assert_eq!(handed, 2);
+    assert_eq!(rig.events(), ["paste", "Enter"]);
 }
 
 /// An owner idle turn binds its fresh cancel token to the pane it submits into, as the warm
@@ -1394,8 +1688,11 @@ fn an_owner_idle_turn_binds_its_cancel_token_to_its_pane() {
         let mailbox = rig.mailbox.clone();
         let owner = OwnerTurn {
             mailbox,
+            runtime: None,
             claim,
             settled,
+            origin: InputOrigin::Discord,
+            refusal: Default::default(),
         };
         let mut bound = None;
         let _ = rig.with_turn(&provider, Some(&rig.name), |turn, sender| {
@@ -1447,6 +1744,7 @@ async fn a_busy_channel_leaves_a_start_for_its_own_turn() {
             (mailbox.clone(), None),
             (ProviderKind::Claude, channel),
             idle,
+            None,
         );
         let front = mailbox.v2_request(|slot| {
             let owner = slot.as_mut().ok_or("no owner")?;
@@ -1476,6 +1774,9 @@ mod not_sent;
 
 #[path = "owner_provenance_tests.rs"]
 mod provenance;
+
+#[path = "owner_input_idle_tests.rs"]
+pub(super) mod idle;
 
 /// One input admitted, granted and claimed on `channel`'s own owner, carried as the turn the drive's
 /// idle start hands over; the receiver hears that input's settlement.
@@ -1510,8 +1811,11 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
     let (settled, answer) = tokio::sync::oneshot::channel();
     let owner = OwnerTurn {
         mailbox,
+        runtime: None,
         claim,
         settled,
+        origin: InputOrigin::Discord,
+        refusal: Default::default(),
     };
     (owner, answer)
 }
@@ -1565,4 +1869,218 @@ fn a_failed_injection_hook_has_an_explicit_diagnostic() {
     assert!(message.contains("fixture hook-timeout"), "{message}");
     assert!(message.contains("after-Enter rc=1"), "{message}");
     assert_eq!(rig.events(), ["paste", "Enter"]);
+}
+
+#[test]
+fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig(
+        "b2-idle-dispatch",
+        7_212_802,
+        "normal",
+        view("", false),
+        IDLE,
+    );
+    let path = rig.transcript();
+    let past = json!({"type":"user","uuid":"past","sessionId":"receipt-sid","message":{"role":"user","content":PROMPT}});
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{past}"
+    )
+    .unwrap();
+    let before = fs::metadata(&path).unwrap().len();
+    fs::write(rig.renderer.join("native-sid"), "receipt-sid").unwrap();
+    fs::write(rig.renderer.join("native-uuid"), "dispatch-idle-a").unwrap();
+    tui_prompt_dedupe::register_tmux_runtime_binding(
+        &rig.name,
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("receipt-sid".into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let claim = rig.claim(&rig.granted_front()).unwrap();
+    let registration = rig.registration(
+        &ProviderKind::Claude,
+        target::Phase::Idle,
+        &path,
+        Execution::LocalTui,
+    );
+    let (settled, _) = tokio::sync::oneshot::channel();
+    let mut written_token = None;
+    let result = rig.with_turn(&ProviderKind::Claude, Some(&rig.name), |turn, sender| {
+        written_token = Some(turn.cancel.clone());
+        execute_front(turn, sender, claim, registration, settled)
+    });
+    assert_eq!(result, Ok(()));
+    wait("native user append", || {
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("dispatch-idle-a")
+    });
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{{\"type\":\"system\",\"subtype\":\"stop_hook_summary\"}}"
+    )
+    .unwrap();
+    let token = written_token.unwrap();
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    crate::services::session_backend::read_claude_tui_output_file_until_result_with_harvest(
+        &path.display().to_string(),
+        0,
+        sender,
+        Some(token.clone()),
+        crate::services::provider::SessionProbe::process(|| true),
+    )
+    .unwrap();
+    let pin = token
+        .native_stop
+        .receipt_sink()
+        .observed()
+        .expect("dispatch must forward the actual turn's receipt")
+        .unwrap();
+    assert_eq!(pin.uuid, "dispatch-idle-a");
+    assert_eq!(
+        pin.range.0, before,
+        "reader/prelaunch offset cannot borrow the past input"
+    );
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    rig.delivered();
+    assert_eq!(
+        CancelToken::new().native_stop.receipt_sink().observed(),
+        None,
+        "new recovery/direct tokens have no submitted receipt"
+    );
+    tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+}
+
+#[path = "owner_input_rollback_tests.rs"]
+mod rollback;
+
+#[path = "owner_input_parent_tests.rs"]
+mod parent;
+
+#[path = "owner_start_failure_tests.rs"]
+mod start_failure;
+
+#[path = "owner_input_stop_gate_tests.rs"]
+mod stop_gate;
+
+type BusySubmissionObservation = (Result<(), String>, bool, Vec<bool>, Vec<String>);
+
+/// Runs the actual pump/leaf/settlement and records the write flag at answer-observer entry.
+fn actual_busy_submission_guard(
+    name: &str,
+    channel: u64,
+    fail_pattern: Option<&str>,
+) -> BusySubmissionObservation {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let rig = rig(name, channel, "normal", view("", false), BUSY);
+    if let Some(pattern) = fail_pattern {
+        let tail = format!(
+            "'{}' \"$@\"; rc=$?",
+            rig.f.root.path().join("tmux").display()
+        );
+        let script = fs::read_to_string(&rig.program).unwrap();
+        assert_eq!(script.matches(&tail).count(), 1);
+        let refused = format!("case \"$*\" in *{pattern}*) exit 1 ;; esac\n{tail}");
+        fs::write(&rig.program, script.replacen(&tail, &refused, 1)).unwrap();
+    }
+    let submitted = Arc::new(AtomicBool::new(false));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let (flag, reads) = (submitted.clone(), observed.clone());
+    let transcript = rig.transcript();
+    let mut owner = rig.registration(
+        &ProviderKind::Claude,
+        target::Phase::Busy,
+        &transcript,
+        Execution::LocalTui,
+    );
+    owner.native_pin_submitted = Some(submitted.clone());
+    owner.until_done = Some(Box::new(move || {
+        reads.lock().unwrap().push(flag.load(Ordering::Acquire));
+        Ok(())
+    }));
+    let claim = rig.claim(&rig.granted_front()).unwrap();
+    let (settled, answer) = tokio::sync::oneshot::channel();
+    let result = rig.with_turn(&ProviderKind::Claude, Some(&rig.name), |turn, sender| {
+        execute_front(turn, sender, claim, owner, settled)
+    });
+    assert_eq!(
+        rig.runtime.block_on(answer).unwrap(),
+        result,
+        "the actual drive hears its local write settlement"
+    );
+    if result.is_ok() {
+        rig.delivered();
+    } else {
+        rig.uncertain();
+    }
+    let reads = observed.lock().unwrap().clone();
+    (
+        result,
+        submitted.load(Ordering::Acquire),
+        reads,
+        rig.events(),
+    )
+}
+
+#[test]
+fn busy_native_pin_uncertain_writes_still_observe_answers_without_arming() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (name, channel, pattern, detail, events) in [
+        (
+            "pin-paste-uncertain",
+            7_807_701,
+            "paste-buffer",
+            "paste_failed",
+            vec![],
+        ),
+        (
+            "pin-enter-uncertain",
+            7_807_702,
+            "send-keys*Enter",
+            "enter_failed",
+            vec!["paste"],
+        ),
+    ] {
+        let (result, armed, observed, actual_events) =
+            actual_busy_submission_guard(name, channel, Some(pattern));
+        assert_eq!(result, Err(format!("WriteUncertain({detail:?})")), "{name}");
+        assert!(
+            !armed,
+            "{name}: a possibly written input is not Submitted proof"
+        );
+        assert_eq!(
+            observed,
+            [false],
+            "{name}: the original answer observer still runs once with adoption disarmed"
+        );
+        assert_eq!(
+            actual_events, events,
+            "{name}: no retry after a possibly applied write"
+        );
+    }
+}
+
+#[test]
+fn busy_native_pin_submitted_write_arms_before_its_answer_observer() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (result, armed, observed, events) =
+        actual_busy_submission_guard("pin-submitted", 7_807_703, None);
+    assert_eq!(result, Ok(()));
+    assert!(armed);
+    assert_eq!(
+        observed,
+        [true],
+        "the same actual path arms only its successful local settlement"
+    );
+    assert_eq!(events, ["paste", "Enter"]);
 }

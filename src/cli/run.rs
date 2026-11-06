@@ -1,9 +1,15 @@
 use anyhow::Result;
 
 use super::args::{
-    AgentHandoffChannelKindArg, AutoQueueAction, CardAction, Commands, ConfigAction,
-    DispatchAction, DoctorProfileArg, IntakeOutboxAction, MigrateAction, MonitoringAction,
-    PhaseAction, QueryAction, ReportProvider, ShowAction,
+    ActivityArgs, AddmcptoolArgs, AdvanceArgs, AgentHandoffChannelKindArg, ApiArgs,
+    AutoQueueAction, CardAction, CardsArgs, CherryMergeArgs, ClaudeHookRelayArgs,
+    CodexHookRelayArgs, CodexTmuxWrapperArgs, Commands, ConfigAction, DcserverArgs, DiagArgs,
+    DiscordSenddmArgs, DiscordSendfileArgs, DiscordSendmessageArgs, DispatchAction, DocsArgs,
+    DoctorArgs, DoctorProfileArg, ForceKillArgs, GithubSyncArgs, IntakeOutboxAction, IsmcptoolArgs,
+    MigrateAction, MonitoringAction, PhaseAction, PhaseArgs, QueryAction, QueryArgs,
+    QwenTmuxWrapperArgs, ReportProvider, RestartDcserverArgs, ResumeArgs, ReviewDecisionArgs,
+    ReviewRecoverTargetArgs, ReviewVerdictArgs, SendArgs, SendToAgentArgs, ShowAction,
+    TerminationsArgs, TmuxWrapperArgs,
 };
 
 fn agent_handoff_channel_kind(
@@ -64,64 +70,64 @@ fn command_supports_json(command: &Commands) -> bool {
     match command {
         // JSON emitters (always print structured JSON) + dual-mode commands
         // that honour a `--json` toggle.
-        Commands::Send { .. }
-        | Commands::SendToAgent { .. }
-        | Commands::ReviewVerdict { .. }
-        | Commands::ReviewDecision { .. }
-        | Commands::ReviewRecoverTarget { .. }
-        | Commands::Docs { .. }
+        Commands::Send(_)
+        | Commands::SendToAgent(_)
+        | Commands::ReviewVerdict(_)
+        | Commands::ReviewDecision(_)
+        | Commands::ReviewRecoverTarget(_)
+        | Commands::Docs(_)
         | Commands::AutoQueue { .. }
-        | Commands::ForceKill { .. }
+        | Commands::ForceKill(_)
         | Commands::TurnLease(..)
-        | Commands::GithubSync { .. }
+        | Commands::GithubSync(_)
         | Commands::Monitoring { .. }
         | Commands::Discord { .. }
         | Commands::Card { .. }
-        | Commands::CherryMerge { .. }
+        | Commands::CherryMerge(_)
         | Commands::Status
-        | Commands::Cards { .. }
+        | Commands::Cards(_)
         | Commands::Dispatch(..)
-        | Commands::Resume { .. }
-        | Commands::Advance { .. }
+        | Commands::Resume(_)
+        | Commands::Advance(_)
         | Commands::Queue
-        | Commands::Query { .. }
-        | Commands::Phase { .. }
+        | Commands::Query(_)
+        | Commands::Phase(_)
         | Commands::Agents
-        | Commands::Diag { .. }
+        | Commands::Diag(_)
         | Commands::Config { .. }
-        | Commands::Api { .. }
-        | Commands::Terminations { .. }
-        | Commands::Doctor { .. }
+        | Commands::Api(_)
+        | Commands::Terminations(_)
+        | Commands::Doctor(_)
         | Commands::ProviderCli(..)
         | Commands::Health
         | Commands::MachineCompare
-        | Commands::Activity { .. }
+        | Commands::Activity(_)
         | Commands::BuildInfo => true,
 
         // Text-only / operational commands — no JSON output path.
-        Commands::Dcserver { .. }
+        Commands::Dcserver(_)
         | Commands::Init
         | Commands::Reconfigure
         | Commands::EmitLaunchdPlist(..)
-        | Commands::RestartDcserver { .. }
-        | Commands::DiscordSendfile { .. }
-        | Commands::DiscordSendmessage { .. }
-        | Commands::DiscordSenddm { .. }
+        | Commands::RestartDcserver(_)
+        | Commands::DiscordSendfile(_)
+        | Commands::DiscordSendmessage(_)
+        | Commands::DiscordSenddm(_)
         | Commands::IntakeOutbox { .. }
-        | Commands::ClaudeHookRelay { .. }
-        | Commands::CodexHookRelay { .. }
+        | Commands::ClaudeHookRelay(_)
+        | Commands::CodexHookRelay(_)
         | Commands::ResetTmux
-        | Commands::Ismcptool { .. }
-        | Commands::Addmcptool { .. }
+        | Commands::Ismcptool(_)
+        | Commands::Addmcptool(_)
         | Commands::Deploy
         | Commands::Migrate { .. }
         | Commands::ReleaseMigratePostgres
         | Commands::Herdr(..)
         | Commands::Show { .. } => false,
 
-        Commands::TmuxWrapper { .. }
-        | Commands::CodexTmuxWrapper { .. }
-        | Commands::QwenTmuxWrapper { .. } => false,
+        Commands::TmuxWrapper(_) | Commands::CodexTmuxWrapper(_) | Commands::QwenTmuxWrapper(_) => {
+            false
+        }
     }
 }
 
@@ -139,7 +145,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         ));
     }
     match command {
-        Commands::Dcserver { token } => {
+        Commands::Dcserver(DcserverArgs { token }) => {
             let token = token.or_else(|| std::env::var("AGENTDESK_TOKEN").ok());
             super::handle_dcserver(token);
             Ok(())
@@ -155,42 +161,42 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         Commands::EmitLaunchdPlist(args) => {
             exit_for_cli(super::init::handle_emit_launchd_plist(&args))
         }
-        Commands::RestartDcserver {
+        Commands::RestartDcserver(RestartDcserverArgs {
             report_channel_id,
             report_provider,
             report_message_id,
-        } => exit_for_cli(
+        }) => exit_for_cli(
             build_restart_report_context(report_channel_id, report_provider, report_message_id)
                 .and_then(super::handle_restart_dcserver),
         ),
-        Commands::DiscordSendfile { path, channel, key } => {
+        Commands::DiscordSendfile(DiscordSendfileArgs { path, channel, key }) => {
             super::handle_discord_sendfile(&path, channel, &key);
             Ok(())
         }
-        Commands::DiscordSendmessage {
+        Commands::DiscordSendmessage(DiscordSendmessageArgs {
             channel,
             message,
             key,
-        } => {
+        }) => {
             super::handle_discord_sendmessage(&message, channel, key.as_deref());
             Ok(())
         }
-        Commands::DiscordSenddm { user, message, key } => {
+        Commands::DiscordSenddm(DiscordSenddmArgs { user, message, key }) => {
             super::handle_discord_senddm(&message, user, key.as_deref());
             Ok(())
         }
-        Commands::Send {
+        Commands::Send(SendArgs {
             target,
             source,
             bot,
             content,
-        } => exit_for_cli(super::direct::run_async(super::direct::cmd_send(
+        }) => exit_for_cli(super::direct::run_async(super::direct::cmd_send(
             &target,
             source.as_deref(),
             bot.as_deref(),
             &content,
         ))),
-        Commands::SendToAgent {
+        Commands::SendToAgent(SendToAgentArgs {
             from_agent_id,
             to_agent_id,
             message,
@@ -198,7 +204,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             no_prefix,
             expect_reply,
             start_turn,
-        } => exit_for_cli(super::direct::run_async(super::direct::cmd_send_to_agent(
+        }) => exit_for_cli(super::direct::run_async(super::direct::cmd_send_to_agent(
             &from_agent_id,
             &to_agent_id,
             &message,
@@ -207,14 +213,14 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             expect_reply,
             start_turn,
         ))),
-        Commands::ReviewVerdict {
+        Commands::ReviewVerdict(ReviewVerdictArgs {
             dispatch_id,
             verdict,
             notes,
             feedback,
             provider,
             commit,
-        } => exit_for_cli(super::direct::run_async(super::direct::cmd_review_verdict(
+        }) => exit_for_cli(super::direct::run_async(super::direct::cmd_review_verdict(
             &dispatch_id,
             &verdict,
             notes.as_deref(),
@@ -222,12 +228,12 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             provider.as_deref(),
             commit.as_deref(),
         ))),
-        Commands::ReviewDecision {
+        Commands::ReviewDecision(ReviewDecisionArgs {
             card_id,
             decision,
             comment,
             dispatch_id,
-        } => exit_for_cli(super::direct::run_async(
+        }) => exit_for_cli(super::direct::run_async(
             super::direct::cmd_review_decision(
                 &card_id,
                 &decision,
@@ -235,20 +241,20 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
                 dispatch_id.as_deref(),
             ),
         )),
-        Commands::ReviewRecoverTarget {
+        Commands::ReviewRecoverTarget(ReviewRecoverTargetArgs {
             dispatch_id,
             card_id,
             target_commit,
             worktree_path,
             reason,
-        } => exit_for_cli(super::client::cmd_review_recover_target(
+        }) => exit_for_cli(super::client::cmd_review_recover_target(
             dispatch_id.as_deref(),
             card_id.as_deref(),
             target_commit.as_deref(),
             worktree_path.as_deref(),
             reason.as_deref(),
         )),
-        Commands::Docs { category, flat } => exit_for_cli(super::direct::run_async(
+        Commands::Docs(DocsArgs { category, flat }) => exit_for_cli(super::direct::run_async(
             super::direct::cmd_docs(category.as_deref(), flat),
         )),
         Commands::AutoQueue { action } => exit_for_cli(match action {
@@ -291,11 +297,13 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             )),
         }),
         Commands::TurnLease(args) => exit_for_json_cli(super::turn_lease::run(args)),
-        Commands::ForceKill { session_key, retry } => exit_for_cli(super::direct::run_async(
-            super::direct::cmd_force_kill(&session_key, retry),
-        )),
-        Commands::Diag { identifier } => exit_for_cli(super::client::cmd_diag(&identifier, json)),
-        Commands::GithubSync { repo } => exit_for_cli(super::direct::run_async(
+        Commands::ForceKill(ForceKillArgs { session_key, retry }) => exit_for_cli(
+            super::direct::run_async(super::direct::cmd_force_kill(&session_key, retry)),
+        ),
+        Commands::Diag(DiagArgs { identifier }) => {
+            exit_for_cli(super::client::cmd_diag(&identifier, json))
+        }
+        Commands::GithubSync(GithubSyncArgs { repo }) => exit_for_cli(super::direct::run_async(
             super::direct::cmd_github_sync(repo.as_deref()),
         )),
         Commands::Monitoring { action } => exit_for_cli(match action {
@@ -390,18 +398,18 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
                 super::direct::run_async(super::direct::cmd_card_status(&card_ref, repo.as_deref()))
             }
         }),
-        Commands::CherryMerge {
+        Commands::CherryMerge(CherryMergeArgs {
             branch,
             close_issue,
-        } => exit_for_cli(super::direct::cmd_cherry_merge(&branch, close_issue)),
-        Commands::TmuxWrapper {
+        }) => exit_for_cli(super::direct::cmd_cherry_merge(&branch, close_issue)),
+        Commands::TmuxWrapper(TmuxWrapperArgs {
             output_file,
             input_fifo,
             prompt_file,
             cwd,
             input_mode,
             claude_cmd,
-        } => {
+        }) => {
             let mode = match input_mode {
                 super::args::InputModeArg::Pipe => crate::services::tmux_wrapper::InputMode::Pipe,
                 #[cfg(unix)]
@@ -417,7 +425,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             );
             Ok(())
         }
-        Commands::CodexTmuxWrapper {
+        Commands::CodexTmuxWrapper(CodexTmuxWrapperArgs {
             output_file,
             input_fifo,
             prompt_file,
@@ -432,7 +440,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             add_dirs,
             input_mode,
             compact_token_limit,
-        } => {
+        }) => {
             let mode = match input_mode {
                 super::args::InputModeArg::Pipe => crate::services::tmux_wrapper::InputMode::Pipe,
                 #[cfg(unix)]
@@ -464,7 +472,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             );
             Ok(())
         }
-        Commands::QwenTmuxWrapper {
+        Commands::QwenTmuxWrapper(QwenTmuxWrapperArgs {
             output_file,
             input_fifo,
             prompt_file,
@@ -475,7 +483,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             fresh_session,
             cwd,
             input_mode,
-        } => {
+        }) => {
             let mode = match input_mode {
                 super::args::InputModeArg::Pipe => crate::services::tmux_wrapper::InputMode::Pipe,
                 #[cfg(unix)]
@@ -495,23 +503,23 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             );
             Ok(())
         }
-        Commands::ClaudeHookRelay {
+        Commands::ClaudeHookRelay(ClaudeHookRelayArgs {
             endpoint,
             provider,
             event,
             session_id,
-        } => exit_for_cli(crate::services::claude_tui::hook_relay::run_cli(
+        }) => exit_for_cli(crate::services::claude_tui::hook_relay::run_cli(
             &endpoint,
             &provider,
             &event,
             &session_id,
         )),
-        Commands::CodexHookRelay {
+        Commands::CodexHookRelay(CodexHookRelayArgs {
             endpoint,
             provider,
             event,
             session_id,
-        } => exit_for_cli(crate::services::claude_tui::hook_relay::run_cli(
+        }) => exit_for_cli(crate::services::claude_tui::hook_relay::run_cli(
             &endpoint,
             &provider,
             &event,
@@ -521,11 +529,11 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             super::utils::handle_reset_tmux();
             Ok(())
         }
-        Commands::Ismcptool { tools } => {
+        Commands::Ismcptool(IsmcptoolArgs { tools }) => {
             super::utils::handle_ismcptool(&tools);
             Ok(())
         }
-        Commands::Addmcptool { tools } => {
+        Commands::Addmcptool(AddmcptoolArgs { tools }) => {
             super::utils::handle_addmcptool(&tools);
             Ok(())
         }
@@ -537,7 +545,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
                 exit_for_cli(invoke)
             }
         }
-        Commands::Cards { status } => {
+        Commands::Cards(CardsArgs { status }) => {
             let invoke = super::client::cmd_cards(status.as_deref(), json);
             if json {
                 exit_for_json_cli(invoke)
@@ -562,17 +570,17 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
                 !args.no_activate,
             ),
         }),
-        Commands::Resume {
+        Commands::Resume(ResumeArgs {
             card_id,
             force,
             reason,
-        } => exit_for_cli(super::client::cmd_resume(
+        }) => exit_for_cli(super::client::cmd_resume(
             &card_id,
             force,
             reason.as_deref(),
         )),
         Commands::Agents => exit_for_cli(super::client::cmd_agents()),
-        Commands::Advance { issue_number } => {
+        Commands::Advance(AdvanceArgs { issue_number }) => {
             let invoke = super::client::cmd_advance(&issue_number, json);
             if json {
                 exit_for_json_cli(invoke)
@@ -588,12 +596,12 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
                 exit_for_cli(invoke)
             }
         }
-        Commands::Query {
+        Commands::Query(QueryArgs {
             action,
             filters,
             agent,
             limit,
-        } => {
+        }) => {
             let section = match action {
                 Some(QueryAction::Queue) => super::query::QuerySection::Queue,
                 Some(QueryAction::Dispatches) => super::query::QuerySection::Dispatches,
@@ -611,7 +619,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
                 exit_for_cli(invoke)
             }
         }
-        Commands::Phase { action, detailed } => {
+        Commands::Phase(PhaseArgs { action, detailed }) => {
             // Default + explicit `status` are identical for now; PhaseAction
             // is left as a Subcommand so future verbs (`watch`, `clear`) can
             // attach without breaking call sites.
@@ -634,15 +642,15 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             ConfigAction::Audit { dry_run } => super::client::cmd_config_audit(dry_run),
             ConfigAction::SyncMcp => super::client::cmd_config_sync_mcp(),
         }),
-        Commands::Api { method, path, body } => {
+        Commands::Api(ApiArgs { method, path, body }) => {
             exit_for_cli(super::client::cmd_api(&method, &path, body.as_deref()))
         }
-        Commands::Terminations {
+        Commands::Terminations(TerminationsArgs {
             card_id,
             dispatch_id,
             session,
             limit,
-        } => {
+        }) => {
             let invoke = super::client::cmd_terminations(
                 card_id.as_deref(),
                 dispatch_id.as_deref(),
@@ -656,13 +664,13 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
                 exit_for_cli(invoke)
             }
         }
-        Commands::Doctor {
+        Commands::Doctor(DoctorArgs {
             fix,
             allow_restart,
             repair_sqlite_cache,
             allow_remote,
             profile,
-        } => {
+        }) => {
             let profile = match profile {
                 Some(DoctorProfileArg::Quick) => {
                     Some(super::doctor::contract::DoctorProfile::Quick)
@@ -700,12 +708,12 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         Commands::Herdr(command) => exit_for_cli(super::herdr::run(command)),
         Commands::Health => exit_for_cli(super::client::cmd_health(json)),
         Commands::MachineCompare => exit_for_cli(super::client::cmd_machine_compare(json)),
-        Commands::Activity {
+        Commands::Activity(ActivityArgs {
             since,
             until,
             repo,
             no_agentdesk,
-        } => exit_for_cli(super::client::cmd_activity(
+        }) => exit_for_cli(super::client::cmd_activity(
             &since,
             until.as_deref(),
             repo.as_deref(),
@@ -831,9 +839,9 @@ mod exit_json_tests {
         // The 5 dual-mode commands.
         assert!(command_supports_json(&Commands::Status));
         assert!(command_supports_json(&Commands::Queue));
-        assert!(command_supports_json(&Commands::Advance {
+        assert!(command_supports_json(&Commands::Advance(AdvanceArgs {
             issue_number: "42".to_string(),
-        }));
+        })));
         // A representative always-JSON command.
         assert!(command_supports_json(&Commands::Agents));
     }

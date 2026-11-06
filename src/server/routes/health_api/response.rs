@@ -66,7 +66,7 @@ async fn assemble(
     let release_source = crate::services::release_source::health_json(detailed);
 
     let dashboard_ok = state.config.cluster.runtime_profile.modules().dashboard && {
-        let dashboard_dir = crate::cli::agentdesk_runtime_root()
+        let dashboard_dir = crate::config::runtime_root()
             .map(|r| r.join("dashboard/dist"))
             .unwrap_or_else(|| std::path::PathBuf::from("dashboard/dist"));
         dashboard_dir.join("index.html").exists()
@@ -75,7 +75,7 @@ async fn assemble(
     // ENOSPC silently breaks inflight state writes and tool buffers, so surface free
     // disk on the runtime partition for the dashboard and `agentdesk doctor` to warn on.
     let disk_probe_path =
-        crate::cli::agentdesk_runtime_root().unwrap_or_else(|| std::path::PathBuf::from("/"));
+        crate::config::runtime_root().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let disk_snapshot = disk_monitor::probe(&disk_probe_path);
 
     let outbox_stats = initial.outbox.ok().flatten();
@@ -263,6 +263,11 @@ async fn assemble(
         json["resident_loops"] = crate::services::resident_loops::health_json();
         json["release_source"] = release_source;
         json["boot_incarnation"] = serde_json::json!(boot_incarnation());
+        json["legacy_body_census"] = if detailed {
+            crate::services::legacy_body_census::detail_json()
+        } else {
+            crate::services::legacy_body_census::health_json()
+        };
         attach_runtime_profile(&mut json, &state.config);
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
@@ -334,6 +339,7 @@ async fn assemble(
             "recovery_duration": 0.0,
             "degraded_reasons": serde_json::Value::Array(degraded_reasons),
             "boot_incarnation": boot_incarnation(),
+            "legacy_body_census": if detailed { crate::services::legacy_body_census::detail_json() } else { crate::services::legacy_body_census::health_json() },
         });
         if !worker_restart_flapping.is_empty() {
             json["worker_restart_flapping"] = serde_json::Value::Array(worker_restart_flapping);
@@ -379,8 +385,7 @@ async fn assemble(
 /// Random once per process, so a changed value proves the server restarted.
 /// Detail-only: `public_health_json` does not allowlist it.
 fn boot_incarnation() -> &'static str {
-    static INCARNATION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    INCARNATION.get_or_init(|| uuid::Uuid::new_v4().to_string())
+    &crate::services::process_boot::initialize().id
 }
 
 #[cfg(test)]

@@ -7,6 +7,8 @@ mod agents_setup;
 mod agents_turn_deliver;
 mod agents_turn_target;
 pub mod analytics;
+#[cfg(test)]
+mod api_transport_tests;
 pub mod auth;
 pub mod auto_queue;
 pub mod automation_candidates;
@@ -734,6 +736,7 @@ pub(super) fn api_router_with_dashboard_access(
     compose_api_router(state.clone())
         .with_state(state)
         .layer(axum::Extension(access))
+        .layer(tower_http::compression::CompressionLayer::new())
 }
 
 fn compose_api_router(state: AppState) -> ApiRouter {

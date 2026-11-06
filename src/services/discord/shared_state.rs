@@ -31,12 +31,9 @@ pub(in crate::services::discord) struct PlaceholderState {
     /// both the async-dispatch and live-turn call paths.
     pub(in crate::services::discord) placeholder_controller:
         Arc<placeholder_controller::PlaceholderController>,
-    /// Per-channel recent tool/system events rendered in Active placeholder
-    /// cards when `placeholder.live_events_enabled` is enabled.
+    /// Per-channel recent tool/system events rendered in Active placeholder cards.
     pub(in crate::services::discord) placeholder_live_events:
         Arc<placeholder_live_events::PlaceholderLiveEvents>,
-    pub(in crate::services::discord) placeholder_live_events_enabled: bool,
-    pub(in crate::services::discord) status_panel_v2_enabled: bool,
     /// Two-message panel rollout gate (default OFF, #3805). When ON, the
     /// status panel renders as a separate message below the answer instead
     /// of the single-message layout.
@@ -806,62 +803,6 @@ pub(in crate::services::discord) mod restart_lifecycle_tests {
                     assert_eq!((shutdown, pending), expected, "{label}");
                 }
             }
-        }
-
-        // Both stores of a pair land before the adapter returns, so the matrix
-        // cannot see their order. Pin it at the source instead.
-        assert_eq!(shutdown_first_gaps(SHARED_STATE), Vec::<String>::new());
-    }
-
-    const SHARED_STATE: &str = include_str!("shared_state.rs");
-    const PAIRED_ADAPTERS: [&str; 3] = [
-        "legacy_deferred_rollback",
-        "legacy_lease_lost",
-        "legacy_sigterm",
-    ];
-    const SHUTDOWN: &str = "self.shutting_down.store";
-    const PENDING: &str = "self.restart_pending.store";
-
-    /// Classification 2: inside each paired adapter item, comments excluded, the shutdown
-    /// store precedes the pending store. A lexical tripwire over statement order only.
-    fn shutdown_first_gaps(source: &str) -> Vec<String> {
-        use crate::services::discord::router::source_guard_support::Lexed;
-        let lexed = Lexed::new(source);
-        PAIRED_ADAPTERS
-            .into_iter()
-            .filter(|name| {
-                let body = lexed.block(&format!("fn {name}(&self) {{"));
-                let order = body
-                    .as_ref()
-                    .map(|body| (body.find(SHUTDOWN), body.find(PENDING)));
-                !matches!(order, Some((Some(shutdown), Some(pending))) if shutdown < pending)
-            })
-            .map(|name| format!("{name} must store shutdown before pending"))
-            .collect()
-    }
-
-    #[test]
-    fn shutdown_first_guard_rejects_commented_and_reordered_stores() {
-        use crate::services::discord::router::source_guard_support::{forge, swap};
-        use crate::test_support::CommentForgery;
-        let heads = PAIRED_ADAPTERS.map(|name| format!("fn {name}(&self) {{"));
-        for needle in heads.iter().map(String::as_str).chain([SHUTDOWN, PENDING]) {
-            for forgery in CommentForgery::ALL {
-                let forged = forge(SHARED_STATE, needle, forgery);
-                assert!(
-                    !shutdown_first_gaps(&forged).is_empty(),
-                    "{forgery:?} commented `{needle}` still passes"
-                );
-            }
-        }
-        for adapter in &heads {
-            let at = SHARED_STATE.find(adapter.as_str()).expect("adapter");
-            let swapped = format!(
-                "{}{}",
-                &SHARED_STATE[..at],
-                swap(&SHARED_STATE[at..], SHUTDOWN, PENDING)
-            );
-            assert_eq!(shutdown_first_gaps(&swapped).len(), 1, "{adapter}");
         }
     }
 

@@ -20,7 +20,7 @@ pub(crate) struct Pending {
 }
 
 pub(crate) fn pending(ledger: &LedgerState) -> Option<Pending> {
-    (0..ledger.next_serial()).find_map(|serial| {
+    ledger.budget_roots(0).find_map(|serial| {
         let root = ledger.piece(serial)?;
         if ledger.excluded(&root.unit_key).is_some()
             || root.local_retry != Some(LocalRetryMark::Budget)

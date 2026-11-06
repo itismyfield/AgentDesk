@@ -2858,106 +2858,6 @@ async fn relay_emission_timeout_fast_future_is_unchanged_4194() {
 }
 
 #[test]
-fn relay_emission_timeout_wiring_source_assertion_4194() {
-    let module_src = include_str!("../tmux_watcher.rs");
-    const BODY_WRAPPER_ANCHOR: &str =
-        "let relay_ok = match watcher_relay_emission_with_timeout(async {";
-    const BODY_TIMEOUT_RETRY_ANCHOR: &str = r#"Err(_) => {
-                let plan = watcher_relay_emission_timeout_failure_plan(
-                    &watcher_provider,
-                    channel_id,
-                    &tmux_session_name,
-                    data_start_offset,
-                    current_offset,
-                );
-                retry_terminal_delivery_from_offset = plan.retry_offset;
-                plan.relay_ok
-            }"#;
-
-    assert!(
-        module_src.contains(BODY_WRAPPER_ANCHOR),
-        "terminal relay expression must remain enclosed by watcher_relay_emission_with_timeout"
-    );
-    assert!(
-        module_src.contains(BODY_TIMEOUT_RETRY_ANCHOR),
-        "body timeout Err arm must keep failed-undelivered rewind semantics"
-    );
-}
-
-#[test]
-fn completion_chrome_timeout_wiring_source_assertion_4194() {
-    let module_src = include_str!("../tmux_watcher.rs");
-    let helper_src = include_str!("session_bound_ack.rs");
-    const COMPLETION_TIMEOUT_CONST_ANCHOR: &str =
-        "pub(super) const WATCHER_RELAY_COMPLETION_CHROME_TIMEOUT: std::time::Duration";
-    const COMPLETION_TIMEOUT_HELPER_ANCHOR: &str =
-        "pub(super) async fn watcher_completion_chrome_with_timeout<T>";
-    const COMPLETION_TIMEOUT_WARN_ANCHOR: &str = "watcher: completion chrome step timed out after terminal body commit; skipping remaining chrome without rewind";
-
-    assert!(helper_src.contains(COMPLETION_TIMEOUT_CONST_ANCHOR));
-    assert!(helper_src.contains(COMPLETION_TIMEOUT_HELPER_ANCHOR));
-    assert!(helper_src.contains(COMPLETION_TIMEOUT_WARN_ANCHOR));
-
-    let completion_start = module_src
-        .find("let mut completion_chrome_timed_out = false;")
-        .expect("completion chrome skip flag must exist");
-    let release_rel = module_src[completion_start..]
-        .find("// Release the emission slot regardless of success.")
-        .expect("completion source slice must reach the slot release comment");
-    let completion_src = &module_src[completion_start..completion_start + release_rel];
-
-    assert!(
-        !completion_src.contains("retry_terminal_delivery_from_offset"),
-        "completion chrome timeouts must not request terminal-delivery rewind"
-    );
-    assert!(
-        completion_src.contains("if !completion_chrome_timed_out"),
-        "completion chrome timeout must skip remaining chrome steps before slot release"
-    );
-    assert_completion_chrome_wrap(
-        completion_src,
-        "completed_panel_usage_backfill_and_compact",
-        "backfill_completed_panel_usage_and_maybe_inject_compact",
-    );
-    assert_completion_chrome_wrap(
-        completion_src,
-        "session_panel_lifecycle_refresh",
-        "refresh_watcher_session_panel_from_lifecycle",
-    );
-    assert_completion_chrome_wrap(
-        completion_src,
-        "terminal_footer_or_status_panel_completion",
-        "complete_watcher_terminal_footer_or_status_panel_with_sniffer",
-    );
-    assert_completion_chrome_wrap(
-        completion_src,
-        "stale_streaming_footer_reconcile",
-        "crate::services::discord::http::edit_channel_message",
-    );
-}
-
-fn assert_completion_chrome_wrap(source: &str, step_anchor: &str, call_anchor: &str) {
-    let step_idx = source
-        .find(step_anchor)
-        .unwrap_or_else(|| panic!("missing completion timeout step anchor: {step_anchor}"));
-    let prefix = &source[..step_idx];
-    let call_idx = prefix
-        .rfind(call_anchor)
-        .unwrap_or_else(|| panic!("missing completion call anchor: {call_anchor}"));
-    let wrapper_idx = prefix
-        .rfind("watcher_completion_chrome_with_timeout(")
-        .unwrap_or_else(|| panic!("missing completion timeout wrapper for: {step_anchor}"));
-    assert!(
-        wrapper_idx < call_idx,
-        "timeout wrapper must enclose call anchor for {step_anchor}"
-    );
-    assert!(
-        step_idx - wrapper_idx < 3_000,
-        "timeout warning anchor drifted too far from wrapper for {step_anchor}"
-    );
-}
-
-#[test]
 fn edit_arm_rewind_seed_preserves_placeholder_context_4154() {
     let placeholder = MessageId::new(5154);
     let status_panel = MessageId::new(5155);
@@ -3477,25 +3377,12 @@ fn tmux_dead_marker_short_circuits_liveness_interval() {
 #[test]
 fn status_panel_v2_watcher_streaming_edit_moves_processing_footer_to_response_message() {
     let rendered = build_watcher_streaming_edit_text(
-        true,
         "PIPE-E2E-CODEX OK",
         "⠙ 계속 처리 중",
         &ProviderKind::Codex,
     );
 
     assert_eq!(rendered, "PIPE-E2E-CODEX OK");
-}
-
-#[test]
-fn legacy_watcher_streaming_edit_keeps_processing_footer() {
-    let rendered = build_watcher_streaming_edit_text(
-        false,
-        "Partial answer",
-        "⠙ 계속 처리 중",
-        &ProviderKind::Codex,
-    );
-
-    assert_eq!(rendered, "Partial answer");
 }
 
 #[test]

@@ -4,6 +4,9 @@
 //! `tmux_watcher.rs` root. Long-chunk helpers live in `terminal_long_chunks.rs`;
 //! the shared heartbeat adapter lives in `controller_heartbeat.rs`.
 
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::BodySite;
+
 use std::sync::Arc;
 
 use super::*;
@@ -52,7 +55,6 @@ pub(in crate::services::discord) fn watcher_short_replace_cutover(
 /// [`watcher_short_replace_cutover`].
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn watcher_short_replace_cutover_decision(
-    status_panel_v2_enabled: bool,
     should_tag_monitor_origin: bool,
     provider: &ProviderKind,
     direct_terminal_response: &str,
@@ -62,17 +64,10 @@ pub(in crate::services::discord) fn watcher_short_replace_cutover_decision(
     session_bound_fallback_uses_full_body: bool,
     tui_completion_gate_required: bool,
 ) -> bool {
-    let formatted = if status_panel_v2_enabled {
-        crate::services::discord::formatting::format_for_discord_with_status_panel(
-            direct_terminal_response,
-            provider,
-        )
-    } else {
-        crate::services::discord::formatting::format_for_discord_with_provider(
-            direct_terminal_response,
-            provider,
-        )
-    };
+    let formatted = crate::services::discord::formatting::format_for_discord_with_status_panel(
+        direct_terminal_response,
+        provider,
+    );
     let formatted = if should_tag_monitor_origin {
         crate::services::discord::prepend_monitor_auto_turn_origin(&formatted)
     } else {
@@ -243,46 +238,51 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
             end,
         )
     };
-    let outcome = toc::deliver_turn_output_with_fallback_revalidation(
-        gateway,
-        toc::TurnOutputCtx {
-            turn,
-            lease_key,
-            owner: RelayOwnerKind::Watcher,
-            holder,
-            lease: &**cell,
-            channel_id,
-            placeholder_controller: &shared.ui.placeholder_controller,
-            placeholder: toc::PlaceholderSlot::Active {
-                message_id: msg_id,
-                key: PlaceholderKey {
-                    provider: provider.clone(),
+    let outcome = BodySource::inherited()
+        .observe(
+            BodySite::WatcherShortController,
+            BodyOffer::Body,
+            toc::deliver_turn_output_with_fallback_revalidation(
+                gateway,
+                toc::TurnOutputCtx {
+                    turn,
+                    lease_key,
+                    owner: RelayOwnerKind::Watcher,
+                    holder,
+                    lease: &**cell,
                     channel_id,
-                    message_id: msg_id,
+                    placeholder_controller: &shared.ui.placeholder_controller,
+                    placeholder: toc::PlaceholderSlot::Active {
+                        message_id: msg_id,
+                        key: PlaceholderKey {
+                            provider: provider.clone(),
+                            channel_id,
+                            message_id: msg_id,
+                        },
+                    },
+                    body: relay_text,
+                    send_range: (start, end),
+                    // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops (no
+                    // placeholder transition), matching the legacy edit-in-place.
+                    plan: toc::OutputPlan::Replace {
+                        lifecycle: PlaceholderLifecycle::Active,
+                    },
+                    // #2757: the watcher NEVER deletes the original on edit-fail fallback
+                    // (the conditional-delete predicate is const-false). PreserveAlways is
+                    // byte-identical; `DeleteIfProvenStale` stays dormant.
+                    edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
+                    fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
+                    // B2 (single-holder, §5.2): a lost acquire is another holder's range → do
+                    // NOT re-send. Mirrors the legacy `watcher_lease_b2_skip` arm.
+                    acquire_failure_mode: toc::AcquireFailureMode::Transient,
+                    advance: Some(&advance),
+                    heartbeat: Some(&heartbeat),
+                    body_claim,
                 },
-            },
-            body: relay_text,
-            send_range: (start, end),
-            // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops (no
-            // placeholder transition), matching the legacy edit-in-place.
-            plan: toc::OutputPlan::Replace {
-                lifecycle: PlaceholderLifecycle::Active,
-            },
-            // #2757: the watcher NEVER deletes the original on edit-fail fallback
-            // (the conditional-delete predicate is const-false). PreserveAlways is
-            // byte-identical; `DeleteIfProvenStale` stays dormant.
-            edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
-            fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
-            // B2 (single-holder, §5.2): a lost acquire is another holder's range → do
-            // NOT re-send. Mirrors the legacy `watcher_lease_b2_skip` arm.
-            acquire_failure_mode: toc::AcquireFailureMode::Transient,
-            advance: Some(&advance),
-            heartbeat: Some(&heartbeat),
-            body_claim,
-        },
-        Some(&revalidate_after_edit_failure),
-    )
-    .await;
+                Some(&revalidate_after_edit_failure),
+            ),
+        )
+        .await;
 
     let outcome = match outcome {
         toc::RevalidatedDeliveryOutcome::Delivery(outcome) => outcome,
@@ -436,25 +436,26 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
         provider.clone(),
         None,
     );
-    let result = deliver_short_replace_via_controller(
-        &gateway,
-        shared,
-        provider,
-        channel_id,
-        tmux_session_name,
-        msg_id,
-        relay_text,
-        delivered_body,
-        cell,
-        turn,
-        lease_key,
-        instance_id,
-        source_authority,
-        range.0,
-        range.1,
-        body_claim,
-    )
-    .await;
+    let result = watcher_body_source(inflight_before_relay, source_authority)
+        .scope(deliver_short_replace_via_controller(
+            &gateway,
+            shared,
+            provider,
+            channel_id,
+            tmux_session_name,
+            msg_id,
+            relay_text,
+            delivered_body,
+            cell,
+            turn,
+            lease_key,
+            instance_id,
+            source_authority,
+            range.0,
+            range.1,
+            body_claim,
+        ))
+        .await;
     if let WatcherShortReplaceResult::AlreadyCommittedAfterEditFailure { edit_error } = result {
         committed_placeholder_cleanup::reconcile_already_committed_after_edit_failure(
             committed_placeholder_cleanup::CommittedEditFailureReconcileCtx {
@@ -671,14 +672,12 @@ mod tests {
     use super::*;
     use poise::serenity_prelude::ChannelId;
 
-    /// Legacy test name retained: an invalid/missing captured generation must
-    /// remain a complete no-op even when the shadow flag is OFF. The flag controls
-    /// telemetry only; durable authority still fails closed on identity.
+    /// Legacy test name retained: an invalid/missing captured generation is a
+    /// complete no-op; durable authority fails closed on identity.
     #[test]
     fn watcher_long_chunk_delivery_off_is_noop_3610d() {
         let temp = tempfile::TempDir::new().expect("temp runtime root");
         let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
-        let _shadow = dr::shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(556_677_889);
         // Does not panic; missing generation → writes nothing.
@@ -710,7 +709,6 @@ mod tests {
     fn watcher_long_chunk_delivery_none_anchor_is_noop_3610d() {
         let temp = tempfile::TempDir::new().expect("temp runtime root");
         let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
-        let _shadow = dr::shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(112_233_445);
         super::super::terminal_long_chunks::record_watcher_terminal_delivery(

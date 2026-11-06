@@ -20,9 +20,7 @@ pub(super) async fn update_existing_panel(
     let tmux_session_name = ctx.tmux_session_name;
     let single_message_panel_footer_mode = turn.single_message_panel_footer_mode;
     let status_panel_started_at = turn.status_panel_started_at;
-    if shared.ui.status_panel_v2_enabled
-        && (single_message_panel_footer_mode || status_panel_msg_id.is_some())
-    {
+    if single_message_panel_footer_mode || status_panel_msg_id.is_some() {
         // #3055: re-derive this turn's session lifecycle panel
         // line on the throttled status tick, matching bridge
         // behavior and avoiding stale per-channel snapshots.
@@ -37,9 +35,7 @@ pub(super) async fn update_existing_panel(
         )
         .await;
     }
-    if watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
-        && let Some(status_msg_id) = status_panel_msg_id
-    {
+    if let Some(status_msg_id) = status_panel_msg_id {
         let panel_text = shared.ui.placeholder_live_events.render_status_panel(
             channel_id,
             &watcher_provider,

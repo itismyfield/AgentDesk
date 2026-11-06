@@ -15,7 +15,6 @@ fn replay(
 ) -> [String; 2] {
     let mut shared = crate::services::discord::make_shared_data_for_tests();
     let ui = &mut Arc::get_mut(&mut shared).expect("unshared fixture").ui;
-    ui.status_panel_v2_enabled = true;
     ui.placeholder_live_events = Arc::new(PlaceholderLiveEvents::with_tool_activity_display(mode));
     let channel = ChannelId::new(7132);
     let mut buffer: String = records.iter().map(|record| format!("{record}\n")).collect();

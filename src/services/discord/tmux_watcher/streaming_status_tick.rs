@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::discord::http::{edit_channel_message, send_channel_message};
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send_at};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -140,7 +140,6 @@ pub(super) async fn update_streaming_status_tick(
             }
         }
 
-        // @persist-order-guard-start #4104
         // Persist every throttled parsed snapshot, even without a Discord edit: a
         // long tool hold must not leave the durable row at its initial empty state.
         // Silent turns suppress rendering, not durable state; the helper validates
@@ -177,7 +176,8 @@ pub(super) async fn update_streaming_status_tick(
         // Headless silent trigger (metadata.silent=true): skip both
         // status-panel and streaming-chunk edits to keep the channel
         // at zero bytes for the assistant turn.
-        let streaming_silent_turn = legacy_state::streaming_silent_turn(ctx);
+        let (streaming_silent_turn, census_source) =
+            legacy_state::streaming_source(ctx, turn_identity_for_panel.as_ref());
         if streaming_silent_turn {
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
@@ -381,8 +381,7 @@ pub(super) async fn update_streaming_status_tick(
                 tool_state.current_tool_line.as_deref(),
                 task_notification_kind,
             );
-        if watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
-            && status_panel_msg_id.is_none()
+        if status_panel_msg_id.is_none()
             && has_visible_streaming_work
             // #3805 P2 (PR-C): under the two-message flag, defer panel
             // creation until the answer placeholder exists so the panel
@@ -432,7 +431,6 @@ pub(super) async fn update_streaming_status_tick(
                 status_panel_msg_id = Some(persisted);
             } else if watcher_should_create_separate_status_panel(
                 single_message_panel_footer_mode,
-                shared.ui.status_panel_v2_enabled,
                 status_panel_msg_id.is_some(),
                 panel_eligible_turn,
             ) && !watcher_external_input_turn_abandoned(
@@ -454,12 +452,18 @@ pub(super) async fn update_streaming_status_tick(
                 let panel_seed =
                     crate::services::discord::formatting::build_processing_status_block(indicator);
                 rate_limit_wait(&shared, channel_id).await;
-                match crate::services::discord::http::send_channel_message(
-                    &http,
-                    channel_id,
-                    &panel_seed,
-                )
-                .await
+                match census_source
+                    .clone()
+                    .observe(
+                        BodySite::WatcherStreaming,
+                        BodyOffer::NonBody,
+                        crate::services::discord::http::send_channel_message(
+                            &http,
+                            channel_id,
+                            &panel_seed,
+                        ),
+                    )
+                    .await
                 {
                     Ok(panel_msg) => {
                         preregister_watcher_two_message_panel_orphan(
@@ -752,32 +756,61 @@ pub(super) async fn update_streaming_status_tick(
             };
             let visible_status =
                 crate::services::discord::footer_retirement::visible_anchor(&status_block);
-            if !guard_rollover(ctx, msg_id, raw_current_portion, &plan.frozen_chunk).await {
+            if !census_source
+                .clone()
+                .reason(crate::services::tui_o::channel_policy::ClaimReason::NoClaim)
+                .scope(guard_rollover(
+                    ctx,
+                    msg_id,
+                    raw_current_portion,
+                    &plan.frozen_chunk,
+                ))
+                .await
+            {
                 break;
             }
             let freeze = || async {
                 rate_limit_wait(&shared, channel_id).await;
-                crate::services::discord::http::edit_channel_message(
-                    &http,
-                    channel_id,
-                    msg_id,
-                    &plan.frozen_chunk,
-                )
-                .await
+                BodySource::inherited()
+                    .observe(
+                        BodySite::WatcherStreaming,
+                        BodyOffer::Body,
+                        crate::services::discord::http::edit_channel_message(
+                            &http,
+                            channel_id,
+                            msg_id,
+                            &plan.frozen_chunk,
+                        ),
+                    )
+                    .await
             };
-            let Ok(BodySend::Sent(frozen)) = claim_then_send(Some(body_claim), freeze).await else {
+            let Ok(BodySend::Sent(frozen)) = census_source
+                .clone()
+                .scope(claim_then_send_at(
+                    BodySite::WatcherStreaming,
+                    Some(body_claim),
+                    freeze,
+                ))
+                .await
+            else {
                 commit_streaming_status_tick_state!();
                 return StreamingStatusTickOutcome::Fallthrough;
             };
             match frozen {
                 Ok(_) => {
                     rate_limit_wait(&shared, channel_id).await;
-                    match crate::services::discord::http::send_channel_message(
-                        &http,
-                        channel_id,
-                        visible_status,
-                    )
-                    .await
+                    match census_source
+                        .clone()
+                        .observe(
+                            BodySite::WatcherStreaming,
+                            BodyOffer::NonBody,
+                            crate::services::discord::http::send_channel_message(
+                                &http,
+                                channel_id,
+                                visible_status,
+                            ),
+                        )
+                        .await
                     {
                         Ok(message) => {
                             // #3871: `msg_id` is now a FROZEN prefix — record it for terminal full-body dedup.
@@ -811,14 +844,23 @@ pub(super) async fn update_streaming_status_tick(
                                 error
                             );
                             rate_limit_wait(&shared, channel_id).await;
-                            if crate::services::discord::http::edit_channel_message(
-                                &http,
-                                channel_id,
-                                msg_id,
-                                &plan.display_snapshot,
-                            )
-                            .await
-                            .is_ok()
+                            if census_source
+                                .clone()
+                                .reason(
+                                    crate::services::tui_o::channel_policy::ClaimReason::NoClaim,
+                                )
+                                .observe(
+                                    BodySite::WatcherStreaming,
+                                    BodyOffer::Body,
+                                    crate::services::discord::http::edit_channel_message(
+                                        &http,
+                                        channel_id,
+                                        msg_id,
+                                        &plan.display_snapshot,
+                                    ),
+                                )
+                                .await
+                                .is_ok()
                             {
                                 last_edit_text = plan.display_snapshot;
                             }
@@ -896,7 +938,6 @@ pub(super) async fn update_streaming_status_tick(
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
-        // @persist-order-guard-end #4104
         let mut display_text = build_watcher_streaming_edit_text_with_session_banner(
             &shared,
             channel_id,
@@ -919,17 +960,30 @@ pub(super) async fn update_streaming_status_tick(
                 match placeholder_msg_id {
                     Some(msg_id) => {
                         rate_limit_wait(&shared, channel_id).await;
-                        let edit = edit_channel_message(&http, channel_id, msg_id, &display_text);
+                        let edit = BodySource::inherited().observe(
+                            BodySite::WatcherStreaming,
+                            BodyOffer::body(!raw_current_portion.trim().is_empty()),
+                            edit_channel_message(&http, channel_id, msg_id, &display_text),
+                        );
                         edit.await.ok().map(|_| msg_id)
                     }
-                    None => send_channel_message(&http, channel_id, &display_text)
+                    None => BodySource::inherited()
+                        .observe(
+                            BodySite::WatcherStreaming,
+                            BodyOffer::body(!raw_current_portion.trim().is_empty()),
+                            send_channel_message(&http, channel_id, &display_text),
+                        )
                         .await
                         .ok()
                         .map(|msg| msg.id),
                 }
             };
             let claim = (!raw_current_portion.trim().is_empty()).then_some(body_claim);
-            let Ok(BodySend::Sent(written)) = claim_then_send(claim, write).await else {
+            let Ok(BodySend::Sent(written)) = census_source
+                .clone()
+                .scope(claim_then_send_at(BodySite::WatcherStreaming, claim, write))
+                .await
+            else {
                 commit_streaming_status_tick_state!();
                 return StreamingStatusTickOutcome::Fallthrough;
             };

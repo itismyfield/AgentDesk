@@ -23,7 +23,7 @@ impl SupervisedWorkerRegistry {
 
     pub(crate) async fn run_boot_only_steps(&self) -> Result<()> {
         for step in BOOT_ONLY_STEPS {
-            if step.id == BootStepId::DrainStartupHooks
+            if step.id == BootStepId::RecordServerBoot
                 && !self.config.cluster.runtime_profile.modules().hub_services
             {
                 continue;
@@ -38,8 +38,8 @@ impl SupervisedWorkerRegistry {
                 BootStepId::RefreshMemoryHealth => {
                     super::super::refresh_memory_health_for_startup().await;
                 }
-                BootStepId::DrainStartupHooks => {
-                    self.engine.drain_startup_hooks();
+                BootStepId::RecordServerBoot => {
+                    self.engine.record_server_boot();
                 }
             }
         }
@@ -382,10 +382,6 @@ impl SupervisedWorkerRegistry {
 
                 #[cfg(unix)]
                 {
-                    if !self.config.cluster.session_bound_relay_enabled {
-                        self.log_skip(spec, "cluster.session_bound_relay_enabled=false");
-                        return Ok(None);
-                    }
                     let shutdown = self.shutdown.clone();
                     // Worker-local: tmux is host-scoped, so every node supervises
                     // its own relays. No leader gating — peer hosts can't observe

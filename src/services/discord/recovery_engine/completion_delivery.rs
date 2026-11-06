@@ -7,7 +7,27 @@
 //! module-local visibility required by the new child-module boundary.
 
 use super::*;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, IdentityError, claim_then_send};
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::{
+    BodyClaim, BodySend, BodySite, IdentityError, claim_then_send_at,
+};
+
+pub(super) const RECOVERY_NEUTRAL_NOTICE: &str = "ℹ️ 이전 실행은 종료됐거나 입력 가능한 상태지만, 이전 요청의 완료 여부는 확인하지 못했습니다. 요청을 자동으로 다시 실행하지는 않았습니다.";
+
+// Only the exact registered notice masks a body; a saved partial before it still counts.
+async fn registered_notice<T>(
+    source: BodySource,
+    site: BodySite,
+    text: &str,
+    next: impl std::future::Future<Output = T>,
+) -> T {
+    let next = Box::pin(next);
+    if text == RECOVERY_NEUTRAL_NOTICE {
+        source.observe(site, BodyOffer::NonBody, next).await
+    } else {
+        next.await
+    }
+}
 
 pub(super) fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bool {
     relay_ok
@@ -197,14 +217,24 @@ async fn relay_recovery_terminal_notice_with_capture(
             context
         }
     });
-    let outcome = relay_recovered_body_to_placeholder(
-        http,
-        shared,
-        channel_id,
-        super::inflight::opt_message_id(state.current_msg_id),
+    let relay = BodySource::from_state(state).observe(
+        BodySite::RecoveryNotice,
+        BodyOffer::recovered(carries_body(state, text)),
+        relay_recovered_body_to_placeholder(
+            http,
+            shared,
+            channel_id,
+            super::inflight::opt_message_id(state.current_msg_id),
+            text,
+            recovery_context.as_ref(),
+            claim,
+        ),
+    );
+    let outcome = registered_notice(
+        BodySource::from_state(state),
+        BodySite::RecoveryNotice,
         text,
-        recovery_context.as_ref(),
-        claim,
+        relay,
     )
     .await?;
     let BodySend::Sent(outcome) = outcome else {
@@ -245,7 +275,10 @@ fn o_owns_recovery_body(
 
 /// Whether `text` carries the turn's answer: blank text and the empty-response notice (the O
 /// marker) do not.
-fn carries_body(state: &super::inflight::InflightTurnState, text: &str) -> bool {
+pub(in crate::services::discord) fn carries_body(
+    state: &super::inflight::InflightTurnState,
+    text: &str,
+) -> bool {
     !text.trim().is_empty()
         && text != RECOVERED_WITHOUT_TEXT
         && text != interrupted_recovery_message(state, "")
@@ -287,16 +320,27 @@ pub(super) async fn relay_recovery_body_to_placeholder(
         Some(marker) => (marker, None),
         None => (text, recovery_context),
     };
-    let relay = relay_recovered_body_to_placeholder(
-        http,
-        shared,
-        channel_id,
-        placeholder,
-        text,
-        recovery_context,
-        claim,
+    let relay = BodySource::from_state(state).observe(
+        BodySite::RecoveryNotice,
+        BodyOffer::recovered(marker.is_none() && carries_body(state, text)),
+        relay_recovered_body_to_placeholder(
+            http,
+            shared,
+            channel_id,
+            placeholder,
+            text,
+            recovery_context,
+            claim,
+        ),
     );
-    match relay.await {
+    match registered_notice(
+        BodySource::from_state(state),
+        BodySite::RecoveryNotice,
+        text,
+        relay,
+    )
+    .await
+    {
         Ok(BodySend::Sent(outcome)) => outcome,
         // O took the channel since the peek; the retry shows its marker instead.
         Ok(BodySend::OwnedByO) | Err(_) => RecoveryRelayOutcome::TransientFailure,
@@ -336,6 +380,20 @@ pub(super) async fn relay_recovery_body_notice(
         .await
 }
 
+/// Only the worktree-refusal producers use this nonbody envelope; delivery remains at the caller.
+pub(super) async fn observe_worktree_recovery_refusal<T>(
+    state: &super::inflight::InflightTurnState,
+    notice: impl std::future::Future<Output = T>,
+) -> T {
+    BodySource::from_state(state)
+        .observe(
+            BodySite::RecoveredTerminal,
+            BodyOffer::NonBody,
+            Box::pin(notice),
+        )
+        .await
+}
+
 /// Deliver the recovered terminal text to Discord: edit the placeholder in
 /// place when one was anchored, else (`placeholder == None`, e.g. TUI-direct —
 /// `MessageId::new(0)` would panic) send a NEW message. Only `Delivered` lets
@@ -353,16 +411,23 @@ pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_place
     text: &str,
     recovery_context: Option<&RecoveryDeliveryContext>,
 ) -> RecoveryRelayOutcome {
-    let relay = relay_recovered_body_to_placeholder(
-        http,
-        shared,
-        channel_id,
-        placeholder,
-        text,
-        recovery_context,
-        None,
+    let source = recovery_context
+        .map(|context| context.census.clone())
+        .unwrap_or_else(BodySource::inherited);
+    let relay = source.clone().observe(
+        BodySite::RecoveredTerminal,
+        BodyOffer::recovered(!text.trim().is_empty() && text != RECOVERED_WITHOUT_TEXT),
+        relay_recovered_body_to_placeholder(
+            http,
+            shared,
+            channel_id,
+            placeholder,
+            text,
+            recovery_context,
+            None,
+        ),
     );
-    match relay.await {
+    match registered_notice(source, BodySite::RecoveredTerminal, text, relay).await {
         Ok(BodySend::Sent(outcome)) => outcome,
         Ok(BodySend::OwnedByO) | Err(_) => RecoveryRelayOutcome::TransientFailure,
     }
@@ -446,7 +511,16 @@ pub(in crate::services::discord) async fn relay_recovered_body_to_placeholder(
                     recovery_context,
                 )
             };
-            match claim_then_send(claim, replace).await? {
+            match recovery_context
+                .map(|context| context.census.clone())
+                .unwrap_or_else(BodySource::inherited)
+                .scope(claim_then_send_at(
+                    BodySite::RecoveredTerminal,
+                    claim,
+                    replace,
+                ))
+                .await?
+            {
                 BodySend::Sent(delivery) => delivery,
                 BodySend::OwnedByO => return Ok(BodySend::OwnedByO),
             }
@@ -609,9 +683,6 @@ where
         }
     }
 
-    if !shared.ui.status_panel_v2_enabled {
-        return RecoveryCompletionOutcome::Emitted;
-    }
     // #2427 D wire: explicit completion signal — most recovery paths
     // already call `clear_inflight_state` unconditionally; this is a
     // safety net for any branch that emits TurnCompleted without doing
@@ -625,12 +696,8 @@ where
     );
     let started_at_unix = super::inflight::parse_started_at_unix(&state.started_at)
         .unwrap_or_else(|| chrono::Utc::now().timestamp());
-    let Some(status_msg_id) = recovery_status_panel::completion_target(
-        shared.ui.status_panel_v2_enabled,
-        state,
-        provider,
-        channel_id,
-    ) else {
+    let Some(status_msg_id) = recovery_status_panel::completion_target(state, provider, channel_id)
+    else {
         return RecoveryCompletionOutcome::Emitted;
     };
 

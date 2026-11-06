@@ -1007,10 +1007,32 @@ pub(in crate::services::discord) mod rename_fault {
 /// rename and parent sync failures stay apart; read-only because a writable open fails `EISDIR`.
 #[cfg(not(windows))]
 pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    use parent_sync_probe as fs;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty());
     fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all()
+}
+
+/// Test stand-in for `fs` in `fsync_parent_dir`: while armed, records each directory it synced.
+#[cfg(all(test, not(windows)))]
+pub(crate) mod parent_sync_probe {
+    use std::path::{Path, PathBuf};
+    thread_local! {
+        pub(crate) static SYNCED: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(crate) struct File(std::fs::File, PathBuf);
+    impl File {
+        pub(crate) fn open(dir: &Path) -> std::io::Result<Self> {
+            Ok(Self(std::fs::File::open(dir)?, dir.to_path_buf()))
+        }
+        pub(crate) fn sync_all(&self) -> std::io::Result<()> {
+            self.0.sync_all()?;
+            SYNCED.with(|synced| synced.borrow_mut().as_mut().map(|s| s.push(self.1.clone())));
+            Ok(())
+        }
+    }
 }
 
 /// No directory flush on Windows: `Ok` means only that the rename is visible,
@@ -1087,7 +1109,6 @@ impl<'a> AtomicWriteContext<'a> {
 mod generation_allocation_tests {
     use super::*;
 
-    mod source_guard_tests;
     use std::sync::Arc;
     use tracing_subscriber::fmt::writer::MakeWriter;
 
@@ -1347,17 +1368,6 @@ mod generation_allocation_tests {
             GenerationAllocationRoute::ParentSyncFailed,
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        use source_guard_tests::{RUNTIME_STORE, once_cell_gaps};
-        assert_eq!(once_cell_gaps(RUNTIME_STORE), Vec::<String>::new());
-    }
-
-    /// Bounded lexical architecture pin for the literal `cfg(not(test))` reader block.
-    /// It catches reconstruction or field detachment inside that block, but does not claim
-    /// semantic coverage for aliases, macros, or a reader moved outside these source bounds.
-    #[test]
-    fn production_binding_lexically_returns_the_stored_allocation_whole() {
-        use source_guard_tests::{RUNTIME_STORE, binding_gaps};
-        assert_eq!(binding_gaps(RUNTIME_STORE), Vec::<String>::new());
     }
 
     #[test]
@@ -1520,13 +1530,6 @@ mod generation_allocation_tests {
                 GenerationAllocationRoute::AdvancedWithSyncedRename,
             );
         }
-    }
-
-    /// Lexical tripwire only: synonyms, moved text, and rewrites remain review work.
-    #[test]
-    fn epoch_provenance_surface_makes_no_survival_claim() {
-        use source_guard_tests::{RUNTIME_STORE, provenance_claim_gaps};
-        assert_eq!(provenance_claim_gaps(RUNTIME_STORE), Vec::<String>::new());
     }
 }
 

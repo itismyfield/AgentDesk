@@ -175,9 +175,8 @@ DEPLOY_LOCK_TIMEOUT_SECS="$(python3 "$SCRIPT_DIR/build_token.py" --validate-depl
 DEPLOY_MKDIR_LOCK_DIR=""
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
-CODESIGN_KEYCHAIN_PW_FILE="${AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE:-}"
-CODESIGN_KEYCHAIN_NAME="${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-agentdesk-codesign.keychain}"
-CODESIGN_KEYCHAIN_UNLOCKED=0
+CODESIGN_KEYCHAIN_OP_REF="${AGENTDESK_CODESIGN_KEYCHAIN_OP_REF:-}"
+CODESIGN_KEYCHAIN_NAME="${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-$HOME/Library/Keychains/login.keychain-db}"
 RESOLVED_RELEASE_SIGNING_MODE=""
 DASHBOARD_SOURCE=""
 STAGED_BINARY=""
@@ -227,6 +226,9 @@ DEPLOY_SSH_CONNECT_TIMEOUT="${AGENTDESK_DEPLOY_SSH_CONNECT_TIMEOUT:-10}"
 # SSH/API pressure without making a completed peer wait long for recognition.
 DEPLOY_PEER_VERDICT_TIMEOUT_SECS="${AGENTDESK_DEPLOY_PEER_VERDICT_TIMEOUT_SECS:-1800}"
 DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS="${AGENTDESK_DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS:-5}"
+# Peer legs wait this long for the runtime to boot before requesting a restart;
+# a standby can sit out the 90s gateway yield grace first, so allow twice that.
+DEPLOY_PEER_BOOT_WAIT_SECS="${AGENTDESK_DEPLOY_PEER_BOOT_WAIT_SECS:-180}"
 
 # Parse flags non-destructively into shell vars + env so that the lock-acquire
 # re-exec (lockf/flock pass-through) and the detached-helper tmux script both
@@ -286,25 +288,25 @@ if [ "${AGENTDESK_DEPLOY_LOCK_HELD:-0}" != "1" ]; then
 fi
 
 _unlock_codesign_keychain_if_configured() {
-    [ "$CODESIGN_KEYCHAIN_UNLOCKED" = "1" ] && return 0
-    [ -n "$CODESIGN_KEYCHAIN_PW_FILE" ] || return 0
-    if [ ! -r "$CODESIGN_KEYCHAIN_PW_FILE" ]; then
-        echo "⚠ Codesign keychain pw file not readable: $CODESIGN_KEYCHAIN_PW_FILE — continuing without explicit unlock"
+    if security show-keychain-info "$CODESIGN_KEYCHAIN_NAME" >/dev/null 2>&1; then
         return 0
     fi
-    command -v security >/dev/null 2>&1 || return 0
-    local pw
-    if ! pw=$(cat "$CODESIGN_KEYCHAIN_PW_FILE"); then
-        echo "⚠ Failed to read codesign keychain pw file"
+    if [ -z "$CODESIGN_KEYCHAIN_OP_REF" ] || ! command -v agent-op >/dev/null 2>&1; then
+        echo "⚠ Codesign keychain unlock unavailable (host-local OP_REF or agent-op missing) — codesign may fail in non-GUI sessions"
         return 0
     fi
-    if security unlock-keychain -p "$pw" "$CODESIGN_KEYCHAIN_NAME" 2>/dev/null; then
+    if (
+        set +x
+        set -o pipefail
+        # security prefers /dev/tty; detach it while preserving the password pipe.
+        agent-op read "$CODESIGN_KEYCHAIN_OP_REF" |
+            python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+                security unlock-keychain "$CODESIGN_KEYCHAIN_NAME"
+    ) >/dev/null 2>&1; then
         echo "▸ Unlocked codesign keychain: $CODESIGN_KEYCHAIN_NAME"
-        CODESIGN_KEYCHAIN_UNLOCKED=1
     else
         echo "⚠ Failed to unlock codesign keychain $CODESIGN_KEYCHAIN_NAME — codesign may fail in non-GUI sessions"
     fi
-    unset pw
 }
 
 sign_binary_with_fallback() {
@@ -312,8 +314,6 @@ sign_binary_with_fallback() {
     local identity="${CODESIGN_IDENTITY:--}"
     local signature_details=""
     local current_authority=""
-
-    _unlock_codesign_keychain_if_configured
 
     if [ -z "$identity" ]; then
         if [ "$ALLOW_ADHOC_RELEASE_SIGN" = "1" ]; then
@@ -372,6 +372,7 @@ sign_binary_with_fallback() {
         codesign -f -s "$identity" --identifier "$BUNDLE_ID" "$target"
     else
         RESOLVED_RELEASE_SIGNING_MODE="developer-id"
+        _unlock_codesign_keychain_if_configured
         codesign -f -s "$identity" --options runtime --identifier "$BUNDLE_ID" "$target"
     fi
 
@@ -1616,7 +1617,6 @@ _deploy_peer_env_prelude() {
     for name in \
         AGENTDESK_CODESIGN_IDENTITY \
         AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN \
-        AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE \
         AGENTDESK_CODESIGN_KEYCHAIN_NAME \
         AGENTDESK_DEPLOY_ALL_NODES \
         AGENTDESK_DEPLOY_DELAY_SECS \
@@ -1625,6 +1625,7 @@ _deploy_peer_env_prelude() {
         AGENTDESK_DEPLOY_HEALTH_RETRIES \
         AGENTDESK_DEPLOY_PEERS \
         AGENTDESK_DEPLOY_PEERS_FILE \
+        AGENTDESK_DEPLOY_PEER_BOOT_WAIT_SECS \
         AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP \
         AGENTDESK_DEPLOY_SKIP_FRESHNESS \
         AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS \
@@ -2563,7 +2564,7 @@ export AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=$(printf '%q' "${AGENTDESK_RES
 export AGENTDESK_POST_DEPLOY_SMOKE_SCOPE=$(printf '%q' "$POST_DEPLOY_SMOKE_SCOPE")
 export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:-}")
 export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-}")
-export AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE:-}")
+export AGENTDESK_CODESIGN_KEYCHAIN_OP_REF=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_OP_REF:-}")
 export AGENTDESK_CODESIGN_KEYCHAIN_NAME=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-}")
 export AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR=$(printf '%q' "${AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR:-}")
 export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
@@ -2659,6 +2660,14 @@ fi
 # unstamped after the new code rolls out. If the release API is unreachable
 # the gate skips itself (recovery deploys must not be false-blocked).
 REL_PORT="$(_resolve_release_server_port)"
+# A peer leg can land while its runtime is still booting; a booting API is not
+# an unreachable one, so wait for boot instead of skipping the gate.
+if [ "$DEPLOY_PEER_INVOCATION" = "1" ]; then
+    _peer_boot_rc=0
+    wait_for_release_runtime_boot "release" "$REL_PORT" "$PLIST_REL" \
+        "$DEPLOY_PEER_BOOT_WAIT_SECS" || _peer_boot_rc=$?
+    [ "$_peer_boot_rc" != "1" ] || exit 1
+fi
 if ! curl -sf --max-time 3 "http://127.0.0.1:${REL_PORT}/api/health" > /dev/null 2>&1; then
     echo "▸ [gate] Release API not reachable on :${REL_PORT} — skipping zero-inflight check"
 else
@@ -2764,26 +2773,35 @@ if _binary_would_revert_o_ledger "$SOURCE_BINARY"; then
     exit 1
 fi
 
-# Rebuild dashboard so deploy never ships a stale dist.
+# Rebuild dashboard unless a newer deployed build is known.
 echo "▸ [timing] phase=release-binary seconds=$((SECONDS - BINARY_PHASE_STARTED)) transferred=$PEER_BINARY_ACCEPTED"
 DASHBOARD_PHASE_STARTED="$SECONDS"
-echo "▸ Building dashboard..."
-(cd "$REPO/dashboard" && npm run build --silent)
-echo "▸ [timing] phase=dashboard-build seconds=$((SECONDS - DASHBOARD_PHASE_STARTED))"
-STAGING_PHASE_STARTED="$SECONDS"
+. "$SCRIPT_DIR/lib/dashboard_build_commit.sh"
+KEEP_DEPLOYED_DASHBOARD=0
+if _dashboard_build_commit keep "$REPO" "$ADK_REL/dashboard/dist"; then
+    KEEP_DEPLOYED_DASHBOARD=1
+    STAGING_PHASE_STARTED="$SECONDS"
+else
+    echo "▸ Building dashboard..."
+    DASHBOARD_BUILD_COMMIT="$(_dashboard_build_commit capture "$REPO")" || DASHBOARD_BUILD_COMMIT=""
+    (cd "$REPO/dashboard" && npm run build --silent)
+    _dashboard_build_commit write "$DASHBOARD_BUILD_COMMIT" "$REPO/dashboard/dist" 2>/dev/null || echo "⚠ dashboard build commit not recorded"
+    echo "▸ [timing] phase=dashboard-build seconds=$((SECONDS - DASHBOARD_PHASE_STARTED))"
+    STAGING_PHASE_STARTED="$SECONDS"
 
-# Re-resolve after fresh build (source path may have changed).
-if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
-    echo "✗ Dashboard build succeeded but dist not found — aborting"
-    exit 1
+    # Re-resolve after fresh build (source path may have changed).
+    if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
+        echo "✗ Dashboard build succeeded but dist not found — aborting"
+        exit 1
+    fi
+
+    # Stage dashboard before stopping release so missing dist never causes downtime.
+    echo "▸ Staging dashboard..."
+    mkdir -p "$ADK_REL/dashboard"
+    DIST_STAGED="$ADK_REL/dashboard/dist.new"
+    rm -rf "$DIST_STAGED"
+    cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 fi
-
-# Stage dashboard before stopping release so missing dist never causes downtime.
-echo "▸ Staging dashboard..."
-mkdir -p "$ADK_REL/dashboard"
-DIST_STAGED="$ADK_REL/dashboard/dist.new"
-rm -rf "$DIST_STAGED"
-cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 
 # Stage agent prompt files atomically (source-of-truth: Obsidian vault, private).
 # See docs/source-of-truth.md.
@@ -3419,6 +3437,14 @@ fi
 _capture_deploy_preexisting_reader_alarms
 AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1
 export AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS
+# A peer runtime restarted while this leg built (another node's restart can hand
+# it the gateway) acknowledges restart_pending only after it boots.
+if [ "$DEPLOY_PEER_INVOCATION" = "1" ]; then
+    _peer_boot_rc=0
+    wait_for_release_runtime_boot "release" "$REL_PORT" "$PLIST_REL" \
+        "$DEPLOY_PEER_BOOT_WAIT_SECS" || _peer_boot_rc=$?
+    [ "$_peer_boot_rc" != "1" ] || exit 1
+fi
 # `$ADK_REL` is the sole canonical restart-marker root; `$ADK_REL/runtime` is not one.
 if ! request_restart_drain_mode_or_fail \
     "release" "$PLIST_REL" "$REL_PORT" "$ADK_REL" "deploy-release"; then
@@ -3623,19 +3649,21 @@ else
 fi
 
 # Atomic swap: old → .old, staged → dist, cleanup
-if [ ! -d "$DIST_STAGED" ]; then
-    echo "⚠ Dashboard staging dir missing ($DIST_STAGED) — re-staging from source"
-    cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
+if [ "$KEEP_DEPLOYED_DASHBOARD" != 1 ]; then
+    if [ ! -d "$DIST_STAGED" ]; then
+        echo "⚠ Dashboard staging dir missing ($DIST_STAGED) — re-staging from source"
+        cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
+    fi
+    rm -rf "$ADK_REL/dashboard/dist.old"
+    if [ -d "$ADK_REL/dashboard/dist" ]; then
+        mv "$ADK_REL/dashboard/dist" "$ADK_REL/dashboard/dist.old"
+    fi
+    if ! mv "$DIST_STAGED" "$ADK_REL/dashboard/dist"; then
+        echo "✗ Dashboard swap failed — restoring from backup"
+        [ -d "$ADK_REL/dashboard/dist.old" ] && mv "$ADK_REL/dashboard/dist.old" "$ADK_REL/dashboard/dist"
+    fi
+    rm -rf "$ADK_REL/dashboard/dist.old"
 fi
-rm -rf "$ADK_REL/dashboard/dist.old"
-if [ -d "$ADK_REL/dashboard/dist" ]; then
-    mv "$ADK_REL/dashboard/dist" "$ADK_REL/dashboard/dist.old"
-fi
-if ! mv "$DIST_STAGED" "$ADK_REL/dashboard/dist"; then
-    echo "✗ Dashboard swap failed — restoring from backup"
-    [ -d "$ADK_REL/dashboard/dist.old" ] && mv "$ADK_REL/dashboard/dist.old" "$ADK_REL/dashboard/dist"
-fi
-rm -rf "$ADK_REL/dashboard/dist.old"
 
 rm -rf "$ADK_REL/skills.old"
 [ -d "$ADK_REL/skills" ] && mv "$ADK_REL/skills" "$ADK_REL/skills.old"

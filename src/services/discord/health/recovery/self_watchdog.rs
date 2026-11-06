@@ -95,7 +95,7 @@ fn spawn_watchdog_thread(
 
 fn capture_dump() -> Result<(), String> {
     let pid = std::process::id();
-    let dump_dir = crate::agentdesk_runtime_root()
+    let dump_dir = crate::config::runtime_root()
         .map(|root| root.join("logs"))
         .unwrap_or_else(std::env::temp_dir);
     std::fs::create_dir_all(&dump_dir).map_err(|error| error.to_string())?;

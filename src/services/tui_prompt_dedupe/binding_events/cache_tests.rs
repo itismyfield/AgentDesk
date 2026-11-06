@@ -168,3 +168,57 @@ fn equal_length_external_rewrite_is_detected_by_mtime() {
     assert_eq!(fs::metadata(&path).unwrap().len(), before.len());
     assert_eq!(read_log::<Counted>(&path).unwrap().records[0].0.seq, 2);
 }
+
+#[test]
+fn strict_read_parses_a_log_again_only_when_its_bytes_change() {
+    let dir = tempfile::tempdir().unwrap();
+    set_test_root(Some(dir.path()));
+    let path = log_path(7572).unwrap().unwrap();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut writer = Writer::default();
+    append(&mut writer, &path, 1);
+    let builds = || crate::utils::parsed_bytes::BUILDS.with(Cell::get);
+    let seqs = || {
+        let read = records_strict(7572).unwrap();
+        read.map(|records| records.iter().map(|r| r.seq).collect::<Vec<_>>())
+    };
+    let start = builds();
+    for _ in 0..5 {
+        assert_eq!(seqs(), Ok(vec![1]));
+    }
+    assert_eq!(builds() - start, 1, "an unchanged log is parsed once");
+
+    append(&mut writer, &path, 2);
+    assert_eq!(seqs(), Ok(vec![1, 2]), "the writer's own append");
+    let published = fs::read(&path).unwrap();
+
+    let before = fs::metadata(&path).unwrap();
+    let rewritten = String::from_utf8(published.clone()).unwrap();
+    fs::write(&path, rewritten.replace("\"seq\":2", "\"seq\":9")).unwrap();
+    filetime::set_file_mtime(
+        &path,
+        filetime::FileTime::from_last_modification_time(&before),
+    )
+    .unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().len(), before.len());
+    let gap = CorruptKind::SeqGap {
+        expected: 2,
+        found: 9,
+    };
+    assert_eq!(
+        seqs(),
+        Err(Corrupt { line: 2, kind: gap }),
+        "in-place rewrite"
+    );
+
+    let replacement = path.with_extension("replacement");
+    fs::write(&replacement, &published).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    assert_eq!(seqs(), Ok(vec![1, 2]), "a replaced log");
+
+    forget_channel_for_tests(7572);
+    let start = builds();
+    assert_eq!(seqs(), Ok(vec![1, 2]));
+    assert_eq!(builds() - start, 1, "a restart parses the log again");
+    set_test_root(None);
+}

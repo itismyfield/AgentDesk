@@ -1,4 +1,4 @@
-//! V2 owner foundation, reachable through the mailbox only in tests until admission is wired.
+//! The V2 input owner the mailbox actor holds for a channel's queue file.
 use super::v2_types::*;
 use super::{HeadPhase, PendingQueueItem, QueueIdentity};
 #[cfg(test)]
@@ -10,10 +10,12 @@ mod attempt;
 mod commit;
 pub(crate) mod control;
 mod migration;
+pub(crate) mod origin;
 pub(crate) mod projection;
 mod retained;
 pub(crate) mod source_admission;
 mod sources;
+pub(crate) mod start_failure;
 pub(crate) use attempt::AttemptRef;
 pub(crate) use commit::Fault;
 #[cfg(test)]
@@ -34,6 +36,12 @@ pub(crate) struct Owner {
     front_claim: Option<Front>,
     /// The current claim's process-unique number: another owner's or an earlier claim never reserves.
     claim_number: u64,
+    /// The front a refusal before any key returned to wait for a real wake; never persisted.
+    held: Option<u64>,
+    /// Diagnostic identity and successful commit count for this adoption; neither authorizes writes.
+    incarnation: uuid::Uuid,
+    last_success_sequence: u64,
+    starts: start_failure::Starts,
 }
 
 /// The owner's unattempted front as the drive hands it on: its slot's ticket and the original.
@@ -62,6 +70,7 @@ impl Owner {
                 retained_inputs: vec![],
                 terminal_identities: vec![],
                 namespace: Some(namespace),
+                owed_drop_receipts: Vec::new(),
             },
         };
         let mut owner = Self {
@@ -73,7 +82,11 @@ impl Owner {
             unacknowledged: Vec::new(),
             front_grant: None,
             front_claim: None,
+            held: None,
             claim_number: 0,
+            incarnation: uuid::Uuid::new_v4(),
+            last_success_sequence: 0,
+            starts: start_failure::Starts::default(),
         };
         // A restored bootstrap is possibly sent; missing deadline never proves NotSent.
         let mut restored = owner.snapshot.clone();
@@ -153,10 +166,12 @@ impl Owner {
         if !front_holds(&next.items, &head) {
             return Err("unit members differ from the queue front".into());
         }
+        let reset: Vec<_> = head.members().cloned().collect();
         next.head_injection = Some(head);
         next.bind_reserved();
         // A reserve that did not commit leaves the drive's right in place, so the drive stops.
         self.commit(next)?;
+        self.reset_start_failures(&reset);
         self.revoke_front();
         Ok(key)
     }
@@ -238,7 +253,7 @@ impl Owner {
     /// The unattempted queue front, named by the ticket bound to its slot; a migrated or partly
     /// admitted front has none and still runs, without settling any ticket.
     pub(crate) fn front(&self) -> Option<Front> {
-        if self.snapshot.head_injection.is_some() {
+        if self.snapshot.head_injection.is_some() || self.starts.closing.is_some() {
             return None;
         }
         let original = self.snapshot.items.first()?.clone();
@@ -272,11 +287,16 @@ impl Owner {
         let head = soft(head.clone(), now, instant);
         let merges =
             |item: &&PendingQueueItem| head.merges_with(&soft((*item).clone(), now, instant));
-        items.take_while(merges).cloned().collect()
+        items
+            .take_while(merges)
+            .take_while(|item| self.retry_member(self.snapshot.items.first().expect("front"), item))
+            .cloned()
+            .collect()
     }
 
     /// Lets one owner claim presenting exactly this front start a turn.
     pub(crate) fn grant_front(&mut self, front: &Front) -> Result<(), String> {
+        self.held = None;
         match self.front() {
             Some(now) if is_front(&now, front) => {
                 self.front_grant = Some(now);
@@ -336,6 +356,22 @@ impl Owner {
     }
 
     /// Whether the drive's right on the front is still neither spent by a reserve nor revoked.
+    /// Whether the last handoff of `message` was held to wait for a real wake; read once.
+    pub(crate) fn take_held(&mut self, message: u64) -> bool {
+        self.held.take() == Some(message)
+    }
+
+    /// Holds the granted front unclaimed, as a refusal before any key does, so a read of its cause
+    /// wakes the drive; the grant is withdrawn.
+    pub(crate) fn hold_front(&mut self, front: &Front) -> Result<(), String> {
+        if !self.front().is_some_and(|now| is_front(&now, front)) {
+            return Err("not the owner's unattempted front".into());
+        }
+        self.front_grant = None;
+        self.held = Some(front.1.message_id);
+        Ok(())
+    }
+
     pub(crate) fn front_outstanding(&self) -> bool {
         self.front_grant.is_some() || self.front_claim.is_some()
     }

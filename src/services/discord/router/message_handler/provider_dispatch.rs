@@ -20,6 +20,10 @@ use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
 #[cfg(unix)]
 mod owner_input;
 #[cfg(unix)]
+pub(in crate::services::discord) mod start_failure;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use owner_input::hand_busy;
+#[cfg(unix)]
 pub(in crate::services::discord) use owner_input::{
     OwnerTurn, admit_start as owner_admit_start, recover as owner_recover, wake as owner_wake,
 };
@@ -37,6 +41,7 @@ impl OwnerTurn {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct StreamingTurn<'a> {
     pub pool: Option<&'a sqlx::PgPool>,
     /// The bot whose channel lease a Herdr turn takes to resolve an unplaced launch.
@@ -191,6 +196,10 @@ pub(in crate::services::discord) static CLAUDE_LEGACY_PROBE: std::sync::Mutex<
     Option<(u64, ClaudeLegacyProbe)>,
 > = std::sync::Mutex::new(None);
 #[cfg(test)]
+pub(in crate::services::discord) static CLAUDE_LEGACY_DONE: std::sync::Mutex<
+    Option<(u64, String)>,
+> = std::sync::Mutex::new(None);
+#[cfg(test)]
 fn claude_legacy_probe(channel: u64) -> Option<Result<(), String>> {
     let mut slot = CLAUDE_LEGACY_PROBE.lock().unwrap();
     if !slot.as_ref().is_some_and(|(probed, _)| *probed == channel) {
@@ -257,6 +266,22 @@ pub(super) fn producer_error(
 }
 
 pub(super) fn execute(
+    turn: StreamingTurn<'_>,
+    start: ReplayStart,
+    sender: Sender<StreamMessage>,
+    owner: Option<OwnerTurn>,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        start_failure::run(turn, start, sender, owner)
+    }
+    #[cfg(not(unix))]
+    {
+        execute_inner(turn, start, sender, owner)
+    }
+}
+
+fn execute_inner(
     turn: StreamingTurn<'_>,
     start: ReplayStart,
     sender: Sender<StreamMessage>,
@@ -370,6 +395,19 @@ fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), S
                         );
                         #[cfg(test)]
                         if let Some(result) = claude_legacy_probe(turn.channel_id) {
+                            if result.is_ok() {
+                                let mut done = CLAUDE_LEGACY_DONE.lock().unwrap();
+                                if done
+                                    .as_ref()
+                                    .is_some_and(|(channel, _)| *channel == turn.channel_id)
+                                {
+                                    let (_, result) = done.take().unwrap();
+                                    let _ = sender.send(StreamMessage::Done {
+                                        result,
+                                        session_id: Some("start-failure-fixture".into()),
+                                    });
+                                }
+                            }
                             return result;
                         }
                         claude::execute_command_streaming(

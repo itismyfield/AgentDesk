@@ -52,7 +52,14 @@ async fn adopt_local(
         SpawnNonceMarker, observe_spawn_nonce_marker,
     };
     let mut tx = pool.begin().await?;
+    let custody_wait = std::time::Instant::now();
     custody::lock(&mut tx, id).await?;
+    tracing::debug!(
+        provider = id.provider(),
+        channel_id = id.raw_channel_id(),
+        custody_wait_ms = custody_wait.elapsed().as_millis(),
+        "fallback adoption custody acquired"
+    );
     if owner_record::read_latest_owner_in_tx(&mut tx, id)
         .await?
         .is_some()

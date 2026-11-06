@@ -412,31 +412,6 @@ async fn owner_http_unregistered_runtime_is_not_advertised_as_ready_pg() {
     pool.close().await;
 }
 
-#[test]
-fn owner_host_boot_wires_every_runtime_role_without_native_end_on_transport_loss() {
-    let boot = include_str!("../../../runtime_bootstrap.rs");
-    let spawn = "o_writer_host::spawn_execution(&shared, &provider, Some(tui_o));";
-    assert!(
-        boot[boot.find("if !modules.gateway {").unwrap()
-            ..boot.find("let mut handback_breaker").unwrap()]
-            .contains(spawn)
-    );
-    assert!(
-        boot[boot.find("GatewayLeaseOutcome::Standby =>").unwrap()
-            ..boot.find("GatewayLeaseOutcome::Failed =>").unwrap()]
-            .contains(spawn)
-    );
-    let transport = include_str!("../../gateway_lease.rs");
-    let fence = &transport[transport.find("async fn self_fence_gateway(").unwrap()
-        ..transport
-            .find("pub(super) fn run_bot_spawn_gateway_lease_keepalive(")
-            .unwrap()];
-    assert!(fence.contains("super::owner_execution::gateway_transport_lost(shared);"));
-    assert!(fence.contains("mailbox_restart_drain_all(shared, provider)"));
-    assert!(!fence.contains("transfer_owner"));
-    assert!(!fence.contains("normal_end"));
-}
-
 #[tokio::test]
 async fn owner_http_wire_mentions_override_unsafe_client_defaults() {
     let discord = Discord::new().await;

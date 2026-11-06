@@ -511,7 +511,7 @@ pub(super) async fn attempt_clean_standby_promotion(
     }
 
     drop(lease);
-    let Some(root) = crate::agentdesk_runtime_root() else {
+    let Some(root) = crate::config::runtime_root() else {
         unfence_runtimes(&runtimes);
         STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
         return false;

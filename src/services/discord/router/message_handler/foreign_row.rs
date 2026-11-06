@@ -58,19 +58,24 @@ pub(super) async fn admit_headless(
     )))
 }
 
-/// Intake turn: a marked row is recorded and removed first; on a foreign row, releases the claim
-/// and front-requeues the prompt to start once after it clears. `Ok(false)` stops before spawn.
+/// Intake turn: a marked row is recorded and removed, then `create` runs once more under the claim.
+/// A foreign row releases the claim and front-requeues the prompt. `Ok(false)` stops before spawn.
 pub(super) async fn admit(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    state: &InflightTurnState,
+    state: &mut InflightTurnState,
     cancel_token: &Arc<CancelToken>,
-    created: Result<(), CreateNewInflightError>,
+    mut create: impl FnMut(&mut InflightTurnState) -> Result<(), CreateNewInflightError>,
 ) -> Result<bool, String> {
+    let mut created = create(state);
+    if matches!(created, Err(CreateNewInflightError::AlreadyExists))
+        && receipt_settle::settle_marked_row(shared, provider, state.channel_id).await
+    {
+        created = create(state);
+    }
     if !held_by_another_turn(created, provider, state) {
         return Ok(true);
     }
-    receipt_settle::settle_marked_row(shared, provider, state.channel_id).await;
     let reason = "foreign_row_start_deferred";
     if defer_unstarted_turn(shared, provider, state, cancel_token, true, reason).await {
         return Ok(false);
@@ -96,7 +101,6 @@ mod tests {
 
     const PROMPT: &str = "iMessage: are you there?";
 
-    /// The kickoff's dequeue, then what intake does from its claim to the row create verdict.
     async fn promote_and_admit(
         shared: &Arc<SharedData>,
         channel: ChannelId,
@@ -104,6 +108,20 @@ mod tests {
         sources: &[MessageId],
         retry: MessageId,
         text: &str,
+    ) -> (Arc<CancelToken>, Result<bool, String>) {
+        let create =
+            |state: &mut InflightTurnState| inflight::save_inflight_state_create_new(state);
+        promote_and_admit_with(shared, (channel, message), sources, retry, text, create).await
+    }
+
+    /// The kickoff's dequeue, then what intake does from its claim to the row create verdict.
+    async fn promote_and_admit_with(
+        shared: &Arc<SharedData>,
+        (channel, message): (ChannelId, MessageId),
+        sources: &[MessageId],
+        retry: MessageId,
+        text: &str,
+        create: impl FnMut(&mut InflightTurnState) -> Result<(), CreateNewInflightError>,
     ) -> (Arc<CancelToken>, Result<bool, String>) {
         let provider = shared.provider.clone();
         let taken = idle_queue_take_next_soft_if_ready(shared, &provider, channel).await;
@@ -131,8 +149,7 @@ mod tests {
         state.source_message_ids = sources.iter().map(|id| id.get()).collect();
         state.busy_followup_retry_user_msg_id = retry.get();
         state.set_followup_requeue_context(None, false, false, Vec::new(), true);
-        let created = inflight::save_inflight_state_create_new(&state);
-        let verdict = admit(shared, &provider, &state, &token, created).await;
+        let verdict = admit(shared, &provider, &mut state, &token, create).await;
         (token, verdict)
     }
 
@@ -324,74 +341,89 @@ mod tests {
         assert_eq!(left, [(0, kept.clone(), text.clone()), (1, kept, text)]);
     }
 
-    const INTAKE_TURN: &str = include_str!("intake_turn.rs");
-    const CREATE: &str =
-        "let row = save_intake_inflight(codex_seed.as_ref(), &mut inflight_state);";
-    const ADMIT: &str = "let admitted = super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await;\n        if !matches!(admitted, Ok(true)) {";
-
-    fn compact(text: &str) -> String {
-        text.split_whitespace().collect()
-    }
-
-    /// Classification 2: create → admit → verdict → provider → bridge, as written without
-    /// whitespace or comments; the counts pin one production create and the builder test's direct one.
-    fn row_admission_gaps(source: &str) -> Vec<String> {
-        use crate::services::discord::router::source_guard_support::Lexed;
-        let src = Lexed::new(source).compact();
-        // Split so the bridge entry-site census does not count this file as a caller.
-        let bridge = ["spawn_turn_", "bridge("].concat();
-        let (create, admit) = (compact(CREATE), compact(ADMIT));
-        let chain = [
-            create.as_str(),
-            admit.as_str(),
-            "turn_teardown_clearance::for_turn(",
-            "spawn_blocking(move||",
-            &bridge,
-        ];
-        let mut gaps = Vec::new();
-        let mut from = src.find(&create).unwrap_or(src.text().len());
-        for anchor in chain {
-            match src.find_after(from, anchor) {
-                Some(at) => from = at,
-                None => gaps.push(format!("{anchor} missing after the previous anchor")),
-            }
-        }
-        let adjacent = src.find(&create).zip(src.find(&admit));
-        if !adjacent.is_some_and(|(c, a)| c + create.len() == a) {
-            gaps.push("the foreign-row verdict must directly follow the row create".into());
-        }
-        if src.count("save_intake_inflight(") != 1
-            || src.count("save_inflight_state_create_new(") != 1
-        {
-            gaps.push("intake must keep one production row create".into());
-        }
-        gaps
-    }
-
-    #[test]
-    fn intake_judges_its_row_create_before_any_provider_or_bridge_spawn() {
-        assert_eq!(row_admission_gaps(INTAKE_TURN), Vec::<String>::new());
-    }
-
-    #[test]
-    fn row_admission_guard_rejects_commented_and_separated_steps() {
-        use crate::services::discord::router::source_guard_support::forge;
-        use crate::test_support::CommentForgery;
-        let bridge = ["spawn_turn_", "bridge("].concat();
-        let admit = "let admitted = super::foreign_row::admit(";
-        let teardown = "turn_teardown_clearance::for_turn(";
-        let spawn = "tokio::task::spawn_blocking(move || {";
-        for needle in [CREATE, admit, teardown, spawn, &bridge] {
-            for forgery in CommentForgery::ALL {
-                let forged = forge(INTAKE_TURN, needle, forgery);
-                assert!(forged.contains(needle));
-                assert!(
-                    !row_admission_gaps(&forged).is_empty(),
-                    "{forgery:?} commented `{needle}` still passes"
+    /// A marked row whose receipt still fails to record, or a successor's row written between the
+    /// settle and the retried create, still refuses: that row stays, the prompt is requeued once.
+    #[tokio::test]
+    async fn a_marked_row_left_unsettled_or_taken_by_a_successor_still_refuses() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        for (channel, blocked) in [(6_245_601, true), (6_245_602, false)] {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_millis(50))
+                .connect_lazy("postgres://agentdesk@127.0.0.1:1/blocked")
+                .unwrap();
+            let shared = crate::services::discord::make_shared_data_for_tests_with_storage(
+                blocked.then_some(pool),
+            );
+            let provider = shared.provider.clone();
+            let (channel, message) = (ChannelId::new(channel), MessageId::new(channel + 1));
+            let row = |user_msg_id| {
+                let mut row = InflightTurnState::new(
+                    provider.clone(),
+                    channel.get(),
+                    None,
+                    7,
+                    user_msg_id,
+                    0,
+                    "earlier".into(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
                 );
-            }
+                row.turn_nonce = Some(format!("turn-{user_msg_id}"));
+                row
+            };
+            let mut marked = row(9);
+            marked.input_origin_ids = vec!["G-unsettled".into()];
+            marked.terminal_receipt = Some(inflight::TerminalReceiptStamp {
+                outcome: crate::db::turns::TerminalOutcome::Completed,
+                confirmed_at: chrono::Utc::now(),
+            });
+            inflight::save_inflight_state_create_new(&marked).unwrap();
+            let waiting = queued(message, &[message]);
+            let enqueued = mailbox_enqueue_intervention(&shared, &provider, channel, waiting);
+            assert!(enqueued.await.enqueued);
+            let mut creates = 0;
+            let create = |state: &mut InflightTurnState| {
+                creates += 1;
+                if creates == 2 && !blocked {
+                    inflight::save_inflight_state_create_new(&row(77)).unwrap();
+                }
+                inflight::save_inflight_state_create_new(state)
+            };
+            let (token, verdict) = promote_and_admit_with(
+                &shared,
+                (channel, message),
+                &[message],
+                message,
+                PROMPT,
+                create,
+            )
+            .await;
+            let snapshot = mailbox_snapshot(&shared, channel).await;
+            let kept = inflight::load_inflight_state_read_only(&provider, channel.get())
+                .map(|row| (row.user_msg_id, row.terminal_receipt.is_some()));
+            let case = if blocked { "unsettled" } else { "successor" };
+            assert_eq!(
+                (
+                    verdict,
+                    snapshot.cancel_token.is_none(),
+                    token.cancelled.load(Ordering::Relaxed),
+                    queued_ids(&snapshot.intervention_queue),
+                    kept,
+                    creates,
+                ),
+                (
+                    Ok(false),
+                    true,
+                    true,
+                    vec![message.get()],
+                    Some(if blocked { (9, true) } else { (77, false) }),
+                    if blocked { 1 } else { 2 },
+                ),
+                "{case}: no spawn, claim released, prompt requeued, row kept, at most one retry"
+            );
         }
-        let separated = INTAKE_TURN.replacen(admit, &format!("let _ = 0;\n{admit}"), 1);
-        assert!(!row_admission_gaps(&separated).is_empty());
     }
 }

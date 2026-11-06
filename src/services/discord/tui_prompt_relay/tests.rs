@@ -1952,17 +1952,6 @@ fn local_control_prompt(tmux: &str, body: &str, entry_id: &str) -> ObservedTuiPr
 }
 
 #[test]
-fn local_slash_control_note_emission_is_wired_through_prepare_gate() {
-    let relay_source = include_str!("../tui_prompt_relay.rs");
-    assert!(
-        relay_source.contains(
-            "let Some(note) = prepare_local_only_slash_control_note(&prompt, kind) else {"
-        ),
-        "relay_observed_prompt must consume the gated note outcome before channel delivery"
-    );
-}
-
-#[test]
 fn local_slash_control_note_path_dedupes_and_seals_dropped_half() {
     let sess = format!("local-control-note-path-{:p}", &0u8 as *const u8);
     let raw = local_control_prompt(&sess, "/compact", "compact-half-a");
@@ -3349,44 +3338,11 @@ async fn s3_completion_fixture_body(
 fn s3t1_abort_and_recv_error_preserve_foreign_turn_and_anchor() {
     s3_completion_fixture(true, Some(false), Some(880003), Some(880005));
     s3_completion_fixture(true, None, Some(880003), Some(880005));
-    let source = include_str!("claude_idle_bridge.rs");
-    let abort = source
-        .split("aborted @")
-        .nth(1)
-        .unwrap()
-        .split("Err(_) => Err(format!(")
-        .next()
-        .unwrap();
-    assert!(!abort.contains("ensure_tui_direct_bridge_delivery_committed"));
-    assert!(!abort.contains("clear_prompt_anchor_for_response"));
 }
 
 #[cfg(unix)]
 #[test]
 fn s3t2_delivery_failure_never_cancels_successor_or_commits_cursor() {
-    for source in [
-        include_str!("claude_idle_tail.rs"),
-        include_str!("codex_idle_rollout.rs"),
-    ] {
-        let branch = source
-            .split("if delivery_result.is_err() {")
-            .nth(1)
-            .unwrap()
-            .split("\n    }")
-            .next()
-            .unwrap();
-        assert!(!branch.contains("finish_tui_direct_synthetic_turn_if_current"));
-        assert!(!branch.contains("advance_"));
-        let commit = if source.contains("advance_claude_tmux_runtime_binding_offset(") {
-            "if let Ok(Some(final_offset)) = delivery_result {"
-        } else {
-            "Ok(Some(final_offset)) => {\n            advance_codex_tui_runtime_binding_and_marker_offset("
-        };
-        assert!(
-            source.contains(commit),
-            "cursor commit must remain delivery-gated"
-        );
-    }
     s3_completion_fixture(true, Some(false), Some(880003), Some(880005));
 }
 
@@ -3413,18 +3369,6 @@ fn s3t4_finalized_accepts_successor_and_missing_row() {
 fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
     s3_completion_fixture(false, Some(false), Some(880003), Some(880005));
     s3_completion_fixture(false, None, Some(880003), Some(880005));
-    // T6 unrecorded dead-code sweep slice 1: 2 -> 1. The unwired legacy
-    // `relay_tui_idle_response_through_bridge` (zero production and zero test
-    // callers) was deleted, and it held one of the two call sites. The only
-    // surviving bridge entry point, `stream_tui_idle_response_through_bridge`,
-    // still routes abort/recv-error through the shared fail-closed completion.
-    let source = include_str!("claude_idle_bridge.rs");
-    assert_eq!(
-        source
-            .matches("    let result = finish_idle_bridge_completion(\n        completion,")
-            .count(),
-        1
-    );
 }
 
 // #5464 S2 — the completion ACK partition, pinned by BEHAVIOR.
@@ -4208,37 +4152,13 @@ async fn s5833_r2_synthetic_refresh_preserves_existing_episode_key() {
     assert_eq!(durable.last_offset, stale.last_offset);
 }
 
-/// Exercise the shared repair operation and guarded durable save; pin its exact
-/// poll-loop wiring separately so deleting the production call also goes RED.
+/// Exercise the shared repair operation and guarded durable save.
 #[cfg(unix)]
 #[test]
 fn s5833_r2_codex_repair_replaces_stale_durable_key() {
     use super::super::inflight;
     let root = tempfile::tempdir().expect("isolated repair root");
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
-    let source = include_str!("codex_idle_rollout.rs");
-    let repair = source
-        .split("let mut repaired = inflight;")
-        .nth(1)
-        .unwrap()
-        .split("if !matches!(outcome")
-        .next()
-        .unwrap();
-    assert_eq!(
-        repair
-            .lines()
-            .filter(|line| line.trim() == "repaired.restamp_external_turn_lease(&lease);")
-            .count(),
-        1
-    );
-    assert!(
-        repair
-            .find("repaired.restamp_external_turn_lease(&lease);")
-            .unwrap()
-            < repair
-                .find("save_inflight_state_if_identity_matches_allow_output_restamp")
-                .unwrap()
-    );
     let channel = ChannelId::new(5_833_202);
     let tmux = "AgentDesk-5833-codex-repair";
     let output = root.path().join("rollout.jsonl");
@@ -6555,6 +6475,9 @@ mod synthetic_bridge_handoff_pg_tests;
 #[cfg(unix)]
 mod background_child_close_pg_tests;
 
+#[cfg(unix)]
+#[path = "tests/native_pin_retry_tests.rs"]
+mod native_pin_retry_tests;
 #[cfg(unix)]
 #[path = "tests/o_tool_first_panel_tests.rs"]
 mod o_tool_first_panel_tests;

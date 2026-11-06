@@ -259,23 +259,27 @@ fn owner_herdr_busy_codex_pastes_and_enters_once() {
     assert!(pane.ledger_free());
 }
 
-/// A moved model turn and a person's draft are refused before any key: the original goes back to
-/// custody as known not sent, with no ledger row left.
+/// Model turn observations and a person's draft do not veto an owned delivery.
 #[test]
-fn owner_herdr_busy_codex_refuses_a_moved_turn_or_a_draft_before_any_key() {
+fn owner_herdr_busy_codex_delivers_a_moved_turn_or_a_draft_once() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    for (channel, draft, target_turn, reason) in [
-        (7_272_542, "", "01b-another-turn", "TurnChanged"),
-        (7_272_543, "a person's draft", T, "ComposerUnread"),
+    for (channel, draft, target_turn) in [
+        (7_272_542, "", "01b-another-turn"),
+        (7_272_543, "a person's draft", ""),
     ] {
         let pane = Pane::start(channel);
         pane.rig.answer("pane.read", screen(draft));
         let (completion, snapshot) = pane.attempt(target_turn);
-        assert_eq!(completion, Completion::NotSent(reason.into()), "{snapshot}");
-        assert!(pane.rig.sends().is_empty(), "{:?}", pane.rig.sends());
-        let retained = &snapshot["retained_inputs"];
-        assert_eq!(retained[0]["disposition"], "known_not_sent", "{snapshot}");
-        assert!(pane.ledger_free(), "{reason}");
+        assert_eq!(completion, Completion::Submitted, "{snapshot}");
+        let sends = pane.rig.sends();
+        assert_eq!(sends.len(), 2, "{sends:?}");
+        assert_eq!(
+            sends[0]["text"],
+            format!("\u{1b}[200~{}\u{1b}[201~", pane.frame())
+        );
+        assert_eq!(sends[1]["keys"], json!(["enter"]));
+        assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+        assert!(pane.ledger_free());
     }
 }
 
@@ -349,7 +353,7 @@ fn owner_ready_refusal_pins_the_physical_pane_and_sends_nothing() {
         Arc::new(|_| Ok(())),
         || leaf(pane.frame()),
     );
-    assert_eq!(completion, Ok(Completion::NotSent("LockContended".into())));
+    assert_eq!(completion, Ok(Completion::Held("LockContended".into())));
     assert_eq!(
         *pinned.lock().unwrap(),
         [format!("herdr:{}", pane.physical())]
@@ -365,8 +369,10 @@ fn codex_adapter_panic_emits_one_owned_alert() {
     let pane = Pane::start(7_272_546);
     let (completion, events) =
         crate::services::observability::events::test_capture::capture_sync(|| {
-            pane.input(T)
-                .run(|_, _| panic!("injected busy adapter panic"))
+            pane.input(T).run(
+                |_, _| panic!("injected busy adapter panic"),
+                || Screen::Unknown,
+            )
         });
     assert_eq!(
         completion,
@@ -385,9 +391,10 @@ fn codex_adapter_panic_emits_one_owned_alert() {
     assert!(pane.rig.sends().is_empty());
 }
 
-/// A real Codex Modal veto holds the same admission; the drive's timer retries the actual adapter.
+/// A real Codex Modal veto holds the same admission with no timer; the next wake retries the
+/// actual adapter.
 #[test]
-fn a_codex_modal_is_retried_by_the_drive_without_another_wake() {
+fn a_codex_modal_is_retried_by_the_drive_on_its_next_wake() {
     use crate::services::discord::queue_io::input_owner::drive::{self, Drive, Handoff};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -450,11 +457,10 @@ fn a_codex_modal_is_retried_by_the_drive_without_another_wake() {
             mailbox: mailbox.clone(),
             channel: pane.channel,
             handoff,
-            recheck: Duration::from_millis(50),
             settled: None,
         });
         runtime.block_on(async {
-            drive::wake(drive);
+            drive::wake(drive.clone());
             let deadline = Instant::now() + Duration::from_secs(20);
             while !refused.load(Ordering::SeqCst) {
                 assert!(
@@ -475,6 +481,7 @@ fn a_codex_modal_is_retried_by_the_drive_without_another_wake() {
             assert!(pane.rig.sends().is_empty());
             assert!(pane.ledger_free());
             pane.rig.answer("pane.read", screen(""));
+            drive::wake(drive);
             loop {
                 let done = mailbox
                     .v2_request(|s| s.as_ref().unwrap().json())
@@ -503,13 +510,11 @@ fn a_codex_modal_is_retried_by_the_drive_without_another_wake() {
     });
 }
 
-/// A real gate refusal after keyed remains Unknown through both clear and checked purge.
 #[test]
-fn keyed_then_herdr_gate_refused_stays_owned_through_clear_and_purge() {
-    use crate::services::turn_orchestrator::QueuePersistenceContext;
+fn a_pre_write_herdr_gate_refusal_has_no_unknown_attempt() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let pane = Arc::new(Pane::start(7_272_549));
+    let pane = Arc::new(Pane::start(7_676_160));
     let _registry = pane.rig.registry_on_this_thread();
     pane.rig.answer("pane.read", screen(""));
     pane.with_owner(|runtime, mailbox, prepared| {
@@ -518,9 +523,47 @@ fn keyed_then_herdr_gate_refused_stays_owned_through_clear_and_purge() {
         let counted = calls.clone();
         let clock: super::super::Clock = Arc::new(move || {
             if counted.fetch_add(1, Ordering::SeqCst) == 1 {
-                // Ready has pinned the original provider; start succeeds before the gate rechecks it.
                 replacement.rig.run_provider(&replacement.context, true);
             }
+            10_000
+        });
+        let result = runtime
+            .block_on(pump::submit(&mailbox, prepared, clock, pane.leaf(T)))
+            .unwrap();
+        assert_eq!(result, Completion::NotSent("PaneUnavailable".into()));
+        assert!(calls.load(Ordering::SeqCst) >= 2);
+        assert!(pane.rig.sends().is_empty());
+        let snapshot = runtime
+            .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
+            .unwrap();
+        assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+        assert_eq!(
+            snapshot["items"].as_array().unwrap().len()
+                + snapshot["retained_inputs"].as_array().unwrap().len(),
+            1,
+            "{snapshot}"
+        );
+        if let Some(kept) = snapshot["retained_inputs"].as_array().unwrap().first() {
+            assert_eq!(kept["disposition"], "known_not_sent", "{snapshot}");
+        }
+    });
+}
+
+/// A paste with no acknowledgement remains Unknown through clear and checked purge.
+#[test]
+fn a_possible_herdr_paste_stays_owned_through_clear_and_purge() {
+    use crate::services::turn_orchestrator::QueuePersistenceContext;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pane = Arc::new(Pane::start(7_272_549));
+    let _registry = pane.rig.registry_on_this_thread();
+    pane.rig.answer("pane.read", screen(""));
+    pane.rig.leave_sends_unanswered(true);
+    pane.with_owner(|runtime, mailbox, prepared| {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let clock: super::super::Clock = Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
             10_000
         });
         let completion = runtime
@@ -531,18 +574,18 @@ fn keyed_then_herdr_gate_refused_stays_owned_through_clear_and_purge() {
             .unwrap();
         assert_eq!(
             before["head_injection"]["phase"], "unknown",
-            "keyed prevents a false not-sent proof: {before}"
+            "an attempted paste prevents a false not-sent proof: {before}"
         );
         assert_eq!(
             completion,
-            Completion::WriteUncertain("unproven: PaneUnavailable".into()),
-            "the actual gate refused the replaced provider"
+            Completion::WriteUncertain("paste_failed".into()),
+            "the actual paste was attempted without an acknowledgement"
         );
         assert!(
             calls.load(Ordering::SeqCst) >= 2,
             "the refusal followed ready and start"
         );
-        assert!(pane.rig.sends().is_empty());
+        assert_eq!(pane.rig.sends().len(), 1);
         runtime.block_on(async {
             assert_eq!(before["retained_inputs"], json!([]));
             let context = QueuePersistenceContext::new(

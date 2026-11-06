@@ -40,6 +40,7 @@ Left out: Codex (4f §4 leaf has the same read-before-key shape), cold Bootstrap
 6. `HeldNotDropped`: an input held for a passing reason (modal, unreadable) is not dropped from the line.
 7. `BusyInputLands`: an input sent while Claude was busy reached this turn or the next one.
 8. `NoDeadlock`: a waiting input can always move. The only end state is a quiet channel with every input admitted.
+9. `StoppedBeforeKey`: an input a user stop took before the drive's first key never reaches the pane or Claude (checked by the `InputPathStop*` configs).
 
 ## Results, `InputPath.cfg`
 
@@ -131,6 +132,43 @@ All rules hold: NoDuplicate, NoSilentLoss, DraftSafe, OneExecutor, Fifo, HeldNot
 | `BackstopMayHaveSent = FALSE` | backstop for a MayHaveSent head | NoDeadlock |
 
 Command for a mutant: copy `InputPathClean.cfg`, change the constant, and run the command below with that config.
+
+## Stop before the first key (#7754)
+
+Code: branch `feat/i7754-stop-gate` on main `75726b3b1` (r3). `StopBeforeKey(k)` is a user stop while the drive holds an input in `reserved`, `direct` or `stash`, before `ArmAndKey`. The writer token's gate is NoKeyYet (`provider/native_stop.rs` `ReceiptSink`): the stop takes it under the cancel decision (`StopCancel::decide` -> `State::admit`), main cancels, and the writer's first-key check (`claude_tui/input/submission.rs` `run`, after the fence claim) ends `Cancelled{0}`. The claimed attempt yields no not-sent proof (`claude_tui/owner_input.rs` `capture_scope`), so the owner settles it WriteUncertain: the head is Unknown and never resent. The transition is enabled in every InputPath config, so the existing rules (DraftSafe, NoDuplicate and the rest) are checked again with it.
+
+The drive's writer is either route the owner picks for the pane: `ClaudeIdle` (`submission::run`) or, when the pane's transcript is busy, `ClaudeBusy` (`busy_inject::inject_owned` -> `stash::submit`). Both consume the same gate before their first key, so the model's one writer stands for both. `busyNoGate` removes the gate from the busy writer only, read as a stop while `prov` is busy.
+
+After the stop the writer may still end on a refusal that records a not-sent proof: a failed buffer load (`stash::submit` -> `owner_input::load_failed`), a refused ready check (`owner_input::ready_payload`) or a hold (`preparation_held`). The leaf then records the stop (`owner_input::stop_took_gate`), so `capture_scope` builds no proof and the stop's Unknown settlement stands. `proofOverStop` lets the proof win instead.
+
+| Config | Constants | Distinct states | Rules that break | Path |
+|---|---|---|---|---|
+| `InputPathStopGate.cfg` | clean constants, `Mut = "none"` | 26,694 | none | - |
+| `InputPathStopNoGate.cfg` | `Mut = "noKeyGate"`: the writer never sees the gate and keys on | (stops at the first break) | StoppedBeforeKey | Arrive, DriveTakesFront, Prepare, StopBeforeKey, ArmAndKey, Paste: the stopped input is in the composer |
+| `InputPathStopBusyNoGate.cfg` | `Mut = "busyNoGate"`: the busy-pane writer never sees the gate | (stops at the first break) | StoppedBeforeKey | Arrive, DriveTakesFront, Prepare, StopBeforeKey, ArmAndKey, Paste with `prov = "busy"`: the stopped input is pasted into the running turn |
+| `InputPathStopProofOverStop.cfg` | `Mut = "proofOverStop"`: after the stop the writer ends on a refusal whose not-sent proof outranks the stop | (stops at the first break) | StoppedBeforeKey | Arrive, DriveTakesFront, StopBeforeKey (refused), DriveTakesFront, Prepare, ArmAndKey, Paste: the stopped input is kept as not sent and resent |
+| `InputPathStopNotSent.cfg` | `Mut = "cancelledNotSent"`: `Cancelled{0}` kept at the front as NotSent | (stops at the first break) | StoppedBeforeKey | Arrive, DriveTakesFront, StopBeforeKey, DriveTakesFront, Prepare, ArmAndKey, Paste: the stopped input is resent |
+
+`InputPath.cfg` and `InputPathClean.cfg` keep their rows in `expected.tsv` with the transition enabled.
+
+## Stop liveness (#7795)
+
+`LiveSpec` adds weak fairness on `Next` to `Spec`. Two properties ride on the stop-before-key configs:
+
+- `StoppedLeaves`: an input a stop took before its first key eventually leaves the line, retained unconfirmed, or has reached Claude once.
+- `StopUnblocks`: after that stop the head is released and every drive is idle.
+
+The `*Live` configs reuse the stop configs' constants and check only these two properties; the safety rules stay with the configs above.
+
+| Config | Constants | Properties that break |
+|---|---|---|
+| `InputPathStopGateLive.cfg` | clean constants, `Mut = "none"` | none |
+| `InputPathStopNoGateLive.cfg` | `Mut = "noKeyGate"` | StoppedLeaves |
+| `InputPathStopNotSentLive.cfg` | `Mut = "cancelledNotSent"` | StoppedLeaves |
+| `InputPathStopBusyNoGateLive.cfg` | `Mut = "busyNoGate"` | StoppedLeaves |
+| `InputPathStopProofOverStopLive.cfg` | `Mut = "proofOverStop"` | StoppedLeaves |
+
+In each mutant the stopped input stays in line, and the drive can take and hold it again forever while the pane reads as unread; `StopUnblocks` still holds because the head is released.
 
 ## Counterexamples replayed against the code and the 4f design
 

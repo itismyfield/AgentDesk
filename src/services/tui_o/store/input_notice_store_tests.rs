@@ -138,6 +138,7 @@ fn input_notice_origin_survives_read_only_observer_for_legacy_and_current_prepar
             .append_ledger(LedgerEntry::Posted {
                 serial: 0,
                 msg_id: 200,
+                confirmation: None,
             })
             .unwrap();
         let expected = channel

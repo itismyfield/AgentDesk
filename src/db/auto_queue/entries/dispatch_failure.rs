@@ -220,12 +220,14 @@ mod tests {
         run_status: &str,
         retry_count: i64,
     ) {
-        sqlx::query("INSERT INTO auto_queue_runs (id, status) VALUES ($1, $2)")
-            .bind(run_id)
-            .bind(run_status)
-            .execute(pool)
-            .await
-            .expect("seed run");
+        crate::db::status_check_migration_tests::execute_with_status_check_lifted(
+            pool,
+            "auto_queue_runs",
+            &format!(
+                "INSERT INTO auto_queue_runs (id, status) VALUES ('{run_id}', '{run_status}')"
+            ),
+        )
+        .await;
         sqlx::query(
             "INSERT INTO auto_queue_entries (id, run_id, agent_id, status, retry_count)
              VALUES ($1, $2, 'agent-1', 'dispatched', $3)",

@@ -167,10 +167,12 @@ pub(in crate::services::discord) async fn drain_dispatched_queue_markers(
         .await;
     }
     for source_generation in source_message_generations {
-        if source_generation.message_id == head_message_id {
-            continue;
-        }
         for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
+            if emoji == queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
+                && source_generation.message_id == head_message_id
+            {
+                continue;
+            }
             note_removed_queued_generation(
                 shared,
                 http,
@@ -470,6 +472,7 @@ mod tests {
         .await;
         assert!(persisted_path(channel_id, source).exists());
         let ops_after_queue = shared.turn_view_reconciler.ops().len();
+        let persisted_before = std::fs::read(persisted_path(channel_id, source)).unwrap();
 
         drain_dispatched_queue_markers(
             &shared,
@@ -480,13 +483,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            shared.turn_view_reconciler.ops().len(),
-            ops_after_queue,
-            "stale dispatch drain must not touch a newer queued marker"
-        );
         assert!(
-            persisted_path(channel_id, source).exists(),
+            shared.turn_view_reconciler.ops()[ops_after_queue..]
+                .iter()
+                .all(|op| !op.add && op.emoji == '📥'),
+            "stale dispatch drain may remove legacy marks but must preserve the newer queue marker"
+        );
+        assert_eq!(
+            std::fs::read(persisted_path(channel_id, source)).unwrap(),
+            persisted_before,
             "stale dispatch drain must preserve newer persisted queued state"
         );
     }
@@ -525,9 +530,19 @@ mod tests {
         .await;
 
         let ops = shared.turn_view_reconciler.ops();
-        assert_eq!(ops.len(), ops_after_queue.len() + 2);
         assert!(!ops[1].add && ops[1].emoji == '📬');
         assert!(ops[2].add && ops[2].emoji == '⏳');
+        let mut visible = Vec::new();
+        for op in ops.iter().filter(|op| op.target.message_id == head) {
+            if op.add {
+                if !visible.contains(&op.emoji) {
+                    visible.push(op.emoji);
+                }
+            } else {
+                visible.retain(|emoji| *emoji != op.emoji);
+            }
+        }
+        assert_eq!(visible, ['⏳'], "pending survives legacy marker cleanup");
         assert!(persisted_path(channel_id, head).exists());
         assert_eq!(
             ops.iter().filter(|op| op.add && op.emoji == '⏳').count(),
@@ -539,6 +554,49 @@ mod tests {
         )
         .expect("parse pending state");
         assert_eq!(persisted["applied"], "pending");
+
+        use turn_view_reconciler::{TurnViewDelivery, TurnViewReconciler};
+        let mut retry_shared = crate::services::discord::make_shared_data_for_tests();
+        Arc::get_mut(&mut retry_shared)
+            .expect("unshared test fixture")
+            .turn_view_reconciler = TurnViewReconciler::with_test_deliveries(vec![
+            TurnViewDelivery::Delivered,
+            TurnViewDelivery::Delivered,
+            TurnViewDelivery::Failed,
+            TurnViewDelivery::Delivered,
+        ]);
+        let retry_head = MessageId::new(head.get() + 1);
+        turn_view_reconciler::note_intake_queue_marker_added(
+            &retry_shared,
+            &http,
+            channel_id,
+            retry_head,
+            61,
+            queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+            "test_seed_retry_queued",
+        )
+        .await;
+        let path = persisted_path(channel_id, retry_head);
+        let queued_before = std::fs::read(&path).expect("queued state before failed start");
+        drain_dispatched_queue_markers(
+            &retry_shared,
+            &http,
+            channel_id,
+            retry_head,
+            &[SourceMessageQueuedGeneration::new(retry_head, 61)],
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(&path).expect("failed start must keep queued state"),
+            queued_before
+        );
+        let ops = retry_shared.turn_view_reconciler.ops();
+        assert!(ops[2].add && ops[2].emoji == '⏳');
+        assert!(ops[3].add && ops[3].emoji == '📬');
+        assert!(
+            ops[4..].iter().all(|op| op.add || op.emoji != '📬'),
+            "drain must preserve the queue marker restored after start delivery failed"
+        );
     }
 
     #[tokio::test]
@@ -561,12 +619,15 @@ mod tests {
         .await;
 
         let ops = shared.turn_view_reconciler.ops();
-        assert_eq!(
+        assert!(
             ops.iter()
-                .filter(|op| op.target.message_id == head && !op.add && op.emoji == '📬')
-                .count(),
-            1,
-            "v1 dispatch promotion must remove the legacy queue marker exactly once"
+                .any(|op| op.target.message_id == head && !op.add && op.emoji == '📬'),
+            "v1 dispatch promotion must remove the legacy queue marker"
+        );
+        assert!(
+            ops.iter()
+                .all(|op| op.target.message_id != head || op.emoji != '⏳' || op.add),
+            "legacy drain must preserve the promoted pending marker"
         );
         assert_eq!(
             ops.iter()
@@ -617,12 +678,15 @@ mod tests {
         .await;
 
         let ops = shared.turn_view_reconciler.ops();
-        assert_eq!(
+        assert!(
             ops.iter()
-                .filter(|op| op.target.message_id == head && !op.add && op.emoji == '📬')
-                .count(),
-            1,
-            "v1 idle kickoff must remove the legacy queue marker exactly once"
+                .any(|op| op.target.message_id == head && !op.add && op.emoji == '📬'),
+            "v1 idle kickoff must remove the legacy queue marker"
+        );
+        assert!(
+            ops.iter()
+                .all(|op| op.target.message_id != head || op.emoji != '⏳' || op.add),
+            "legacy drain must preserve the kickoff pending marker"
         );
         assert_eq!(
             ops.iter()

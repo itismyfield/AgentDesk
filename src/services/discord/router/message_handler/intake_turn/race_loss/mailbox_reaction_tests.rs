@@ -109,8 +109,8 @@ async fn busy_tui_wrapper_merged_success_uses_plus_without_fallback() {
     )
     .await;
 
-    assert_eq!(reaction_add_count(&shared, message_id, '➕'), 1);
-    assert_eq!(mailbox_add_count(&shared, message_id), 0);
+    assert_eq!(reaction_add_count(&shared, message_id, '➕'), 0);
+    assert_eq!(mailbox_add_count(&shared, message_id), 1);
     assert!(
         crate::services::discord::outbound::reaction_control::take_test_reply_deliveries()
             .is_empty(),
@@ -177,7 +177,7 @@ async fn standalone_without_start_attempt_adds_mailbox_once() {
         &http,
         channel_id,
         message_id,
-        crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+        false,
         None,
         "race_loss_message_queued",
     )
@@ -218,7 +218,7 @@ async fn matching_start_rollback_and_imperative_add_coalesce_without_double_mail
         &http,
         channel_id,
         message_id,
-        crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+        false,
         Some(attempt),
         "race_loss_message_queued",
     )
@@ -286,7 +286,7 @@ async fn stale_start_attempt_repairs_mailbox_from_live_queue_truth() {
         &http,
         channel_id,
         message_id,
-        crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+        false,
         Some(stale_attempt),
         "race_loss_message_queued",
     )
@@ -455,7 +455,7 @@ async fn recently_finalized_message_requeued_in_live_mailbox_repairs_mailbox_mar
         &http,
         channel_id,
         message_id,
-        crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+        false,
         None,
         "race_loss_message_queued",
     )

@@ -1124,7 +1124,6 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
         );
         assert!(fx.take_calls().is_empty());
     });
-    source_guard_tests::act7_slash_stop_enters_through_run_slash_stop();
 }
 
 /// A cold stop alone is no proof and holds; after the executor's no-attempt exit the exit seal
@@ -1296,9 +1295,6 @@ fn act7_each_stop_reason_preserves_delivery_and_settlement_axes() {
             .contains("요청은 유지")
     );
 }
-
-#[path = "codex_stop_source_guard_tests.rs"]
-mod source_guard_tests;
 
 #[path = "codex_stop_delivery_cut_tests.rs"]
 pub(super) mod cut;

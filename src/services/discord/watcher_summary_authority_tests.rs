@@ -17,11 +17,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new(channel: u64, active: bool) -> Self {
-        let mut shared = crate::services::discord::make_shared_data_for_tests();
-        Arc::get_mut(&mut shared)
-            .unwrap()
-            .ui
-            .status_panel_v2_enabled = true;
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(channel);
         let state = row(channel, 11, "watcher-await-original");
         let summary = LiveSummary::watcher(

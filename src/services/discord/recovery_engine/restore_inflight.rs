@@ -56,6 +56,19 @@ mod replay_hold;
 mod replay_decision;
 use replay_decision::observe_restore_inflight_snapshot;
 
+async fn restore_admitted_native_stop_pin(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+) {
+    let snapshot = super::mailbox_snapshot(shared, ChannelId::new(state.channel_id)).await;
+    if snapshot.active_user_message_id.map(|id| id.get())
+        == Some(state.effective_finalizer_turn_id())
+        && let Some(token) = snapshot.cancel_token
+    {
+        super::inflight::restore_native_stop_pin(state, &token);
+    }
+}
+
 pub(in crate::services::discord) async fn restore_inflight_turns(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -747,6 +760,7 @@ pub(in crate::services::discord) async fn restore_inflight_states(
 
                 let finish_mailbox_on_completion =
                     reregister_active_turn_from_inflight(shared, &state).await;
+                restore_admitted_native_stop_pin(shared, &state).await;
 
                 // Spawn the tmux watcher immediately rather than deferring to
                 // restore_tmux_watchers(): the "watcher will adopt" approach raced
@@ -1840,16 +1854,20 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                             None,
                             shared.restart.current_generation,
                         );
-                        let relay_ok = relay_recovered_terminal_text_to_placeholder(
-                            http,
-                            shared,
-                            channel_id,
-                            current_msg_id,
-                            &format!("❌ {error}\nmain workspace fallback blocked."),
-                            recovery_context.as_ref(),
-                        )
-                        .await
-                        .delivered();
+                        let relay_ok =
+                            super::completion_delivery::observe_worktree_recovery_refusal(
+                                &state,
+                                relay_recovered_terminal_text_to_placeholder(
+                                    http,
+                                    shared,
+                                    channel_id,
+                                    current_msg_id,
+                                    &format!("❌ {error}\nmain workspace fallback blocked."),
+                                    recovery_context.as_ref(),
+                                ),
+                            )
+                            .await
+                            .delivered();
                         if should_advance_recovery_dispatch_after_relay(relay_ok) {
                             super::turn_bridge::fail_dispatch_with_retry(
                                 shared.api_port,
@@ -1905,6 +1923,22 @@ pub(in crate::services::discord) async fn restore_inflight_states(
 
             let finish_mailbox_on_completion =
                 reregister_active_turn_from_inflight(shared, &state).await;
+            if !finish_mailbox_on_completion
+                && super::runtime::readopt_marker_eligible_real_user(&state)
+                && crate::services::tui_o::cutover::boot_ownership()
+                    .into_iter()
+                    .any(|(channel, _, owner)| {
+                        channel == state.channel_id
+                            && owner.is_some_and(|owner| owner.peek().owned())
+                    })
+            {
+                let _ = inflight::consume_stale_restart_marker_if_identity_unchanged(
+                    provider,
+                    &state,
+                    shared.restart.current_generation,
+                );
+            }
+            restore_admitted_native_stop_pin(shared, &state).await;
 
             // #4380 backstop: `reregister_active_turn_from_inflight` stamps
             // `readopted_from_inflight`, which the watcher-yield escape hatch honours
@@ -1914,7 +1948,9 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             // so the loss is observable/recoverable instead of a silent wedge. No-op
             // on the normal path (marker present).
             #[cfg(unix)]
-            super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id);
+            if finish_mailbox_on_completion || state.restart_mode.is_none() {
+                super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id);
+            }
 
             let output_path = match restore_codex_rollout_output_path(provider, &state, output_path)
             {
@@ -2101,13 +2137,16 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     None,
                     shared.restart.current_generation,
                 );
-                let relay_ok = relay_recovered_terminal_text_to_placeholder(
-                    http,
-                    shared,
-                    channel_id,
-                    current_msg_id,
-                    &format!("❌ {error}\nmain workspace fallback blocked."),
-                    recovery_context.as_ref(),
+                let relay_ok = super::completion_delivery::observe_worktree_recovery_refusal(
+                    &state,
+                    relay_recovered_terminal_text_to_placeholder(
+                        http,
+                        shared,
+                        channel_id,
+                        current_msg_id,
+                        &format!("❌ {error}\nmain workspace fallback blocked."),
+                        recovery_context.as_ref(),
+                    ),
                 )
                 .await
                 .delivered();
@@ -2138,6 +2177,8 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             &tmux_session_name,
             "recovery kickoff",
         );
+
+        super::inflight::restore_native_stop_pin(&state, &cancel_token);
 
         {
             let seed = crate::services::discord::scheduled_turn::channel_session_seed(

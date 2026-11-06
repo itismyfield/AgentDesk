@@ -1,23 +1,27 @@
 use super::*;
 use crate::config::TestRuntimeRootGuard;
-use crate::services::provider::{CancelToken, ProviderKind};
+#[cfg(unix)]
+use crate::services::provider::CancelToken;
+use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::Intervention;
 #[cfg(unix)]
 use crate::services::turn_orchestrator::checked_purge::ExpectedQueue;
 use crate::services::turn_orchestrator::pending_queue_persistence::{
     pending_queue_item_to_intervention, save_channel_pending_dispatch_marker,
 };
 #[cfg(unix)]
-use crate::services::turn_orchestrator::queued_head::compat;
 use crate::services::turn_orchestrator::queued_head::{
-    PersistedHeadInjection, canonical_item, mend::HeadAttempt, snapshot_json,
+    PersistedHeadInjection, canonical_item, compat, mend::HeadAttempt, snapshot_json,
 };
+#[cfg(unix)]
 use crate::services::turn_orchestrator::{
-    ActiveTurnKind, ChannelMailboxHandle, Intervention, TurnAdmissionOrder,
-    registry_purge::MailboxPurgeOutcome,
+    ActiveTurnKind, ChannelMailboxHandle, TurnAdmissionOrder, registry_purge::MailboxPurgeOutcome,
 };
+#[cfg(unix)]
 use poise::serenity_prelude::MessageId;
 use serde_json::json;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::sync::Arc;
 
 const NAMESPACE: &str = "projection";
@@ -57,6 +61,7 @@ fn seed(channel: u64, raw: &str) -> PathBuf {
 }
 
 /// A legacy envelope; `attempted` records a head that may have been sent.
+#[cfg(unix)]
 fn envelope(items: Vec<PendingQueueItem>, attempted: bool) -> String {
     let head = attempted.then(|| {
         let original = items[0].clone();
@@ -91,6 +96,7 @@ fn run(work: impl std::future::Future<Output = ()>) {
 }
 
 /// A V2 owner adopted on `channel` whose queue is `items`, plus one retained input when asked.
+#[cfg(unix)]
 async fn owned(
     registry: &ChannelMailboxRegistry,
     channel: u64,
@@ -123,6 +129,7 @@ async fn owned(
 }
 
 /// Arms the first queued item as the attempted head.
+#[cfg(unix)]
 async fn attempt_head(handle: &ChannelMailboxHandle) {
     handle
         .v2_request(|slot| {
@@ -157,6 +164,7 @@ async fn attempt_head(handle: &ChannelMailboxHandle) {
         .unwrap();
 }
 
+#[cfg(unix)]
 async fn queued(handle: &ChannelMailboxHandle) -> (Vec<u64>, bool) {
     handle
         .v2_request(|slot| {
@@ -168,6 +176,7 @@ async fn queued(handle: &ChannelMailboxHandle) -> (Vec<u64>, bool) {
         .unwrap()
 }
 
+#[cfg(unix)]
 #[test]
 fn boot_plan_orders_phases_adopts_metadata_only_and_holds_what_does_not_migrate() {
     let _root = TestRuntimeRootGuard::new();
@@ -246,6 +255,7 @@ fn boot_plan_orders_phases_adopts_metadata_only_and_holds_what_does_not_migrate(
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_retained_only_mailbox_the_registry_dropped_is_readopted_with_its_notice() {
     let _root = TestRuntimeRootGuard::new();
@@ -291,6 +301,7 @@ fn a_retained_only_mailbox_the_registry_dropped_is_readopted_with_its_notice() {
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn a_v2_owner_lets_persisted_claims_past_retained_inputs_only() {
     let _root = TestRuntimeRootGuard::new();
@@ -351,6 +362,7 @@ fn a_v2_owner_lets_persisted_claims_past_retained_inputs_only() {
 
 /// Only the front the owner granted by exact ticket and original may start a turn; a claim naming
 /// a source it holds never does, and a claim it never admitted keeps V1's order.
+#[cfg(unix)]
 #[test]
 fn a_v2_owner_starts_only_its_granted_front_and_never_a_held_source() {
     let _root = TestRuntimeRootGuard::new();
@@ -425,6 +437,7 @@ fn a_v2_owner_starts_only_its_granted_front_and_never_a_held_source() {
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn a_foreign_legacy_file_under_a_v2_owner_is_never_hydrated_or_requeued_into_v1() {
     let _root = TestRuntimeRootGuard::new();
@@ -488,6 +501,7 @@ fn a_foreign_legacy_file_under_a_v2_owner_is_never_hydrated_or_requeued_into_v1(
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn a_requeue_under_a_v2_owner_is_refused_in_any_namespace_without_a_prior_claim() {
     let _root = TestRuntimeRootGuard::new();
@@ -789,6 +803,7 @@ fn a_v2_checked_purge_keeps_every_member_of_a_reserved_unit() {
 
 /// Ensure adopts a queue file once: the same file and namespace keep the owner and its grant, and
 /// another file or namespace refuses.
+#[cfg(unix)]
 #[test]
 fn ensure_adopts_once_and_refuses_another_identity() {
     let _root = TestRuntimeRootGuard::new();

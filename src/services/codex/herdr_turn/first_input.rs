@@ -16,6 +16,7 @@ pub(super) fn submit(
     write(at, cancel, turn.prompt, || {
         gate(&current_record(turn, runtime, nonce)?)
     })
+    .map_err(SubmissionError::into_legacy)
 }
 
 /// The first prompt through the owner waiting on this thread: it reserves the frame on the
@@ -69,16 +70,34 @@ fn write(
     cancel: Option<&CancelToken>,
     prompt: &str,
     target: impl FnOnce() -> Result<HerdrTarget, String>,
-) -> Result<Option<Submitted>, String> {
-    let plan = plan_prompt_submit(prompt)?;
+) -> Result<Option<Submitted>, SubmissionError> {
+    let owned = crate::services::claude_tui::owner_input::active();
+    let plan = if owned {
+        crate::services::codex_tui::input::owned_prompt_plan(prompt)?
+    } else {
+        plan_prompt_submit(prompt)?
+    };
     // Opened before the prompt, so a fast hook cannot land unseen.
-    let logged = subscribe_binding_events(channel)
-        .map_err(|error| format!("herdr turn: binding log unavailable: {error}"))?;
+    let logged = subscribe_binding_events(channel).map_err(|error| {
+        if owned {
+            crate::services::claude_tui::owner_input::vetoed("binding_log_unavailable");
+        }
+        format!("herdr turn: binding log unavailable: {error}")
+    })?;
     let target = target()?;
-    empty_composer(&target, cancel)?;
+    let draft = if owned {
+        owned_composer(&target, cancel)?
+    } else {
+        empty_composer(&target, cancel)?;
+        false
+    };
     crate::services::tui_prompt_dedupe::register_provider_session("codex", logical, logical);
     crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(logical, channel);
-    hold(nonce)?;
+    hold(nonce).inspect_err(|_| {
+        if owned {
+            crate::services::claude_tui::owner_input::vetoed("hold_unavailable");
+        }
+    })?;
     #[cfg(test)]
     crate::services::provider::herdr_before_start::test_input_boundary(cancel);
     let run = observed_input(cancel, nonce, || None, || run_herdr(&target, &plan, cancel))?;
@@ -90,15 +109,25 @@ fn write(
             ) {
                 release_closed_hold(logical, nonce);
             }
+            if owned {
+                return Err(owned_hold("input_closed"));
+            }
             return Ok(None);
         }
     };
     if run.run != InputRun::Applied {
         if composer_untouched(&run) {
             warn_release(logical, release_hold(nonce));
+            if owned {
+                crate::services::claude_tui::owner_input::first_key_held("herdr_input_untouched");
+                return Err(owned_hold("gate_refused"));
+            }
         }
         legacy_result(run.run)?;
         return Ok(None);
+    }
+    if draft {
+        crate::services::codex_tui::input::notify_owned_draft(channel);
     }
     Ok(Some(Submitted { target, logged }))
 }

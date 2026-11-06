@@ -59,17 +59,13 @@ impl TurnViewReconciler {
         identity: &ResolvedIdentity,
         source: &'static str,
     ) -> TurnViewDelivery {
-        let mut removed = Vec::new();
         for emoji in reactions {
             let delivery = self
                 .apply_reaction(shared, target, *emoji, false, identity, source)
                 .await;
             if !delivery.delivered() {
-                self.compensate_reaction_ops(shared, target, identity, source, &removed)
-                    .await;
                 return delivery;
             }
-            removed.push((*emoji, false));
         }
         TurnViewDelivery::Delivered
     }

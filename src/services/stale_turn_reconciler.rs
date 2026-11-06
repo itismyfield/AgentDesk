@@ -310,7 +310,7 @@ fn channel_inflight_observation(session_key: &str, provider: &str) -> InflightOb
     let Some(db_provider) = ProviderKind::from_str(provider) else {
         return InflightObservation::Unknown;
     };
-    if identity.host != crate::services::platform::hostname_short() {
+    if identity.host != crate::services::platform::session_host_label() {
         return InflightObservation::Unknown;
     }
     let Some((tmux_provider, _)) = identity.provider_and_channel() else {
@@ -727,7 +727,7 @@ fn independent_tmux_liveness(session_key: &str, provider: &str) -> IndependentLi
     let Some(identity) = SessionIdentity::parse(session_key) else {
         return IndependentLiveness::RemoteOrInvalid;
     };
-    if identity.host != crate::services::platform::hostname_short() {
+    if identity.host != crate::services::platform::session_host_label() {
         return IndependentLiveness::RemoteOrInvalid;
     }
     let Some(db_provider) = ProviderKind::from_str(provider) else {

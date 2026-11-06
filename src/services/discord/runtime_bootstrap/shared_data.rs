@@ -22,11 +22,7 @@ pub(super) struct ProcessLifecycleCounters {
 
 /// #3479 Item 3: UI feature gates for the live-placeholder / status-panel surface.
 pub(super) struct UiFeatureFlags {
-    pub(super) placeholder_live_events_enabled: bool,
-    pub(super) status_panel_v2_enabled: bool,
-    /// #3805 P2: two-message panel rollout gate (default OFF). Scaffolding —
-    /// copied into shared UI state alongside `status_panel_v2_enabled` but not
-    /// read by any path in PR-A.
+    /// Two-message panel rollout gate (default OFF).
     pub(super) two_message_panel_enabled: bool,
 }
 
@@ -69,14 +65,13 @@ pub(super) fn run_bot_build_shared_data(
         pg_pool,
         engine,
     } = services;
+    crate::engine::ops::turn_ops::set_global_health_registry(&health_registry);
     let ProcessLifecycleCounters {
         global_active,
         global_finalizing,
         shutdown_remaining,
     } = counters;
     let UiFeatureFlags {
-        placeholder_live_events_enabled,
-        status_panel_v2_enabled,
         two_message_panel_enabled,
     } = flags;
     let RestoredSessionState {
@@ -116,8 +111,6 @@ pub(super) fn run_bot_build_shared_data(
             placeholder_live_events: Arc::new(
                 crate::services::discord::placeholder_live_events::PlaceholderLiveEvents::with_tool_activity_display(crate::config::runtime_config().placeholder.tool_activity_display),
             ),
-            placeholder_live_events_enabled,
-            status_panel_v2_enabled,
             two_message_panel_enabled,
         },
         // #3038 S1: wrapped verbatim at the first-member position (evaluation-order preserved).
@@ -185,9 +178,7 @@ pub(super) fn run_bot_build_shared_data(
         overrides: SessionOverrideState {
             model_overrides: {
                 let map = dashmap::DashMap::new();
-                for (channel_id, model) in restored_model_overrides {
-                    map.insert(*channel_id, model.clone());
-                }
+                restore_model_overrides(&map, restored_model_overrides);
                 map
             },
             fast_mode_channels: {
@@ -262,4 +253,72 @@ pub(super) fn run_bot_build_shared_data(
         readopted_mailbox_ledger:
             crate::services::discord::readopted_mailbox_ledger::ReadoptedMailboxLedger::default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct RestoreRegistry(Option<Arc<health::HealthRegistry>>);
+
+    impl Drop for RestoreRegistry {
+        fn drop(&mut self) {
+            let restored = self
+                .0
+                .take()
+                .unwrap_or_else(|| Arc::new(health::HealthRegistry::new()));
+            crate::engine::ops::turn_ops::set_global_health_registry(&restored);
+            runtime_store::set_process_generation_for_tests(None);
+        }
+    }
+
+    #[test]
+    fn shared_data_publishes_runtime_registry_without_policy_engine() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _restore = RestoreRegistry(crate::engine::ops::turn_ops::health_registry());
+        let registry = Arc::new(health::HealthRegistry::new());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let shared = run_bot_build_shared_data(
+            DiscordBotSettings::default(),
+            &ProviderKind::Claude,
+            RuntimeServices {
+                initial_skills: Vec::new(),
+                token_hash: "registry-bootstrap".to_owned(),
+                api_port: 9,
+                health_registry: registry.clone(),
+                pg_pool: None,
+                engine: None,
+            },
+            ProcessLifecycleCounters {
+                global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+            },
+            UiFeatureFlags {
+                two_message_panel_enabled: false,
+            },
+            RestoredSessionState {
+                model_overrides: &[],
+                node_overrides: &[],
+                fast_mode_channels: &[],
+                fast_mode_reset_entries: &[],
+                fast_mode_reset_channels: &[],
+                codex_goals_channels: &[],
+                codex_goals_reset_channels: &[],
+            },
+        );
+        assert!(shared.policy.engine.is_none());
+        let published = crate::engine::ops::turn_ops::health_registry()
+            .expect("runtime registry must be published without a policy engine");
+        assert!(Arc::ptr_eq(&published, &registry));
+        let shared_registry = shared
+            .health_registry
+            .upgrade()
+            .expect("caller retains its registry while the runtime lives");
+        assert!(Arc::ptr_eq(&shared_registry, &registry));
+    }
 }

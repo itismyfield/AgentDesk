@@ -1682,6 +1682,74 @@ _release_runtime_is_serving() {
     [ "$rc" != "7" ]
 }
 
+# Prints absent, booting or up. A booting runtime has bound its port but has not
+# registered a provider yet, so its restart-marker poller cannot acknowledge.
+_release_runtime_boot_state() {
+    local port="$1" body="" rc=0 reasons
+    body=$(curl -s --max-time 3 \
+        "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" 2>/dev/null) || rc=$?
+    if [ "$rc" = "7" ]; then
+        printf 'absent\n'
+        return 0
+    fi
+    if [ -z "$body" ] || [ -z "$(_health_json_status "$body" || true)" ]; then
+        printf 'booting\n'
+        return 0
+    fi
+    reasons=$(_health_json_reasons "$body" || true)
+    case ",${reasons}," in
+        *,no_providers_registered,*)
+            # A leader-only node stays provider-less once its startup doctor skips.
+            if ! _health_json_unhealthy_only_no_provider_runtimes "$body"; then
+                printf 'booting\n'
+                return 0
+            fi
+            ;;
+    esac
+    printf 'up\n'
+}
+
+# Waits at most max_wait seconds for the runtime to finish booting. Returns 0
+# when up, 2 when no runtime is running, 1 when it is still booting at the deadline.
+wait_for_release_runtime_boot() {
+    local scope="$1" port="$2" label="$3" max_wait="$4"
+    local started="$SECONDS" state="" announced=0
+    case "$max_wait" in
+        ''|*[!0-9]*)
+            echo "✗ [gate] ${scope} invalid runtime boot wait: ${max_wait}" >&2
+            return 1
+            ;;
+    esac
+    if [ -z "$port" ]; then
+        echo "✗ [gate] ${scope} runtime boot wait needs the release port" >&2
+        return 1
+    fi
+    while :; do
+        state=$(_release_runtime_boot_state "$port")
+        if [ "$state" = "up" ]; then
+            [ "$announced" = 0 ] \
+                || echo "▸ [gate] ${scope} runtime on :${port} finished booting after $((SECONDS - started))s"
+            return 0
+        fi
+        if [ "$state" = "absent" ] && [ "$(_launchd_job_state "$label")" = "not running" ]; then
+            echo "▸ [gate] ${scope} runtime is not running on :${port}; nothing is booting"
+            return 2
+        fi
+        [ $((SECONDS - started)) -lt "$max_wait" ] || break
+        if [ "$announced" = 0 ]; then
+            echo "▸ [gate] ${scope} runtime on :${port} is ${state}; waiting up to ${max_wait}s before requesting a restart"
+            announced=1
+        fi
+        sleep 1
+    done
+    if [ "$state" = "absent" ]; then
+        echo "⚠ [gate] ${scope} runtime never bound :${port} within ${max_wait}s; proceeding as a stopped runtime" >&2
+        return 2
+    fi
+    echo "✗ [gate] ${scope} runtime on :${port} was still booting after ${max_wait}s; no restart was requested" >&2
+    return 1
+}
+
 wait_for_restart_persistence_or_fail() {
   local scope="$1"
   local runtime_root="$2"
@@ -1737,15 +1805,17 @@ _foreign_active_turns_or_empty() {
   local exempt_csv="$2"
   local origin
   origin="$(_health_origin_header "$port")"
-  curl -fsS --max-time 5 -H "$origin" "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/sessions" 2>/dev/null \
+  curl -fsS --max-time 5 -H "$origin" "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/sessions?restart_gate=1" 2>/dev/null \
     | python3 -c '
-import json, os, sys
+import json, os, subprocess, sys
 try:
     data = json.loads(sys.stdin.read())
 except Exception:
     sys.exit(0)
 items = data.get("sessions") if isinstance(data, dict) else data
 exempt = {c.strip() for c in os.environ.get("EXEMPT_CSV", "").split(",") if c.strip()}
+tmux_sessions = None
+tmux_probed = False
 for s in items or []:
     status = str(s.get("status", "")).lower()
     if status not in {"turn_active", "turn_busy", "active"}:
@@ -1756,6 +1826,22 @@ for s in items or []:
         continue
     if any(cid and cid in key for cid in exempt):
         continue
+    # Only API-confirmed local tmux rows may be disproven by a local snapshot.
+    owner = s.get("owner")
+    if s.get("restart_gate_local_tmux") is True and isinstance(owner, dict) and owner.get("is_local") is True:
+        if not tmux_probed:
+            tmux_probed = True
+            try:
+                probe_env = {k: v for k, v in os.environ.items() if k not in {"TMUX", "TMUX_PANE"}}
+                probe = subprocess.run(["tmux", "-u", "list-sessions", "-F", "#{session_name}"],
+                                       capture_output=True, text=True, timeout=5, env=probe_env)
+                if probe.returncode == 0:
+                    tmux_sessions = set(probe.stdout.splitlines())
+            except (OSError, UnicodeError, subprocess.TimeoutExpired):
+                pass
+        name = key.rpartition(":")[2] if ":" in key else ""
+        if name and tmux_sessions is not None and name not in tmux_sessions:
+            continue
     print(key or chan or "<unknown>")
 ' 2>/dev/null \
     || true

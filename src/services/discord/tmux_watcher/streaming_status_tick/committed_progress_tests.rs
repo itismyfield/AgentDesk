@@ -17,9 +17,6 @@ mod native_collector_tests;
 #[path = "footer_retirement_raw_tests.rs"]
 mod footer_retirement_raw_tests;
 
-#[path = "source_guard_tests.rs"]
-mod source_guard_tests;
-
 const WARN_EVENT: &str = "watcher_stream_progress_terminal_rejected";
 const PANEL_CHILD_ENV: &str = "AGENTDESK_5191_PANEL_FIXTURE_CHILD";
 const COMMITTED_BODY: &str = "완료된 응답 A";
@@ -157,6 +154,7 @@ fn wrapper_patch(fx: &Fixture, identity: Option<&InflightTurnIdentity>,
 }
 
 struct Recorder {
+    fail_next_post: Arc<AtomicBool>,
     calls: Arc<Mutex<Vec<(String, String)>>>,
     bodies: Arc<Mutex<Vec<String>>>,
     visible: Arc<Mutex<std::collections::BTreeMap<u64, String>>>,
@@ -195,6 +193,8 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
     use axum::http::{Method, StatusCode, Uri};
     use axum::response::IntoResponse;
     use axum::{Json, Router, routing::any};
+    let fail_next_post = Arc::new(AtomicBool::new(false));
+    let captured_fail = fail_next_post.clone();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = calls.clone();
     let bodies = Arc::new(Mutex::new(Vec::new()));
@@ -211,6 +211,7 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
         let (recorded, channel_text, bodies) =
             (recorded.clone(), channel_text.clone(), captured_bodies.clone());
         let body_check = captured_check.clone();
+        let fail_next_post = captured_fail.clone();
         let (visible, terminal_gate, next_id) =
             (captured_visible.clone(), captured_gate.clone(), next_id.clone());
         async move {
@@ -236,6 +237,9 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
                             "message": "Must be 2000 or fewer in length."}]}}
                     }))).into_response();
                 }
+            }
+            if method == Method::POST && fail_next_post.swap(false, Ordering::AcqRel) {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"code":50035,"message":"fixture rejects placeholder POST"}))).into_response();
             }
             if cycle && method == Method::POST
                 && payload["content"].as_str().is_some_and(|body| body.contains("ADK5833-final")) {
@@ -267,7 +271,7 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
             .build(),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Recorder { calls, bodies, visible, terminal_gate, check, http, server: server.abort_handle() }
+    Recorder { fail_next_post, calls, bodies, visible, terminal_gate, check, http, server: server.abort_handle() }
 }
 
 #[rustfmt::skip]
@@ -301,7 +305,7 @@ async fn run_tick(
     fx: &Fixture,
     delivered: bool,
 ) -> StreamingStatusTickOutcome {
-    run_tick_body(locals, rec, shared, fx, delivered, TRAILING_BODY).await
+    run_tick_body(locals, rec, shared, fx, delivered, TRAILING_BODY, WatcherToolState::new()).await
 }
 
 #[rustfmt::skip]
@@ -312,16 +316,20 @@ async fn run_tick_body(
     fx: &Fixture,
     delivered: bool,
     body: &str,
+    tools: WatcherToolState,
 ) -> StreamingStatusTickOutcome {
     locals.last = tokio::time::Instant::now()
         - crate::services::discord::status_update_interval()
         - Duration::from_millis(1);
-    let tools = WatcherToolState::new();
     let delivered_flag = Arc::new(AtomicBool::new(delivered));
     let full = body.to_string();
     let ctx = StreamingStatusTickContext {
         http: &rec.http, shared, channel_id: fx.channel, watcher_provider: &fx.provider,
         tmux_session_name: &fx.tmux, output_path: &fx.output_path,
+        source_authority: WatcherSourceAuthority {
+            source_file: crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&std::fs::File::open(&fx.output_path).unwrap()),
+            generation_mtime_ns: 1, reset_incarnation: 0, source_stamp: None,
+        },
         turn_delivered: &delivered_flag, host: &HostSnapshot::new(WatchHost::Legacy),
     };
     let turn = StreamingStatusTickTurn {
@@ -416,18 +424,23 @@ fn legacy_tick_observes_actual_progress() {
     let fx = seed_row(guard.root.path(), 6_325, false, true);
     let before = fx.row_bytes();
     capture_warns(async {
-        let mut shared = crate::services::discord::make_shared_data_for_tests();
-        Arc::get_mut(&mut shared)
-            .unwrap()
-            .ui
-            .status_panel_v2_enabled = true;
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let rec = recorder(fx.channel, false).await;
         let mut locals = tick_locals(&fx, None);
         let observation = crate::services::discord::inflight::o_seed_observation::Guard::new(
             &fx.provider,
             fx.channel.get(),
         );
-        run_tick_body(&mut locals, &rec, &shared, &fx, false, TRAILING_BODY).await;
+        run_tick_body(
+            &mut locals,
+            &rec,
+            &shared,
+            &fx,
+            false,
+            TRAILING_BODY,
+            WatcherToolState::new(),
+        )
+        .await;
         let seen = observation.raw_process_snapshot();
         assert!(
             seen.writable_inflight_load_calls > 0,
@@ -473,7 +486,6 @@ fn legacy_tick_with_legacy_ownership_emits_long_body() {
     capture_warns(async {
         let mut shared = crate::services::discord::make_shared_data_for_tests();
         let ui = &mut Arc::get_mut(&mut shared).unwrap().ui;
-        ui.status_panel_v2_enabled = true;
         ui.two_message_panel_enabled = true;
         assert_eq!(
             crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
@@ -491,7 +503,16 @@ fn legacy_tick_with_legacy_ownership_emits_long_body() {
             &fx.provider,
             fx.channel.get(),
         );
-        run_tick_body(&mut locals, &rec, &shared, &fx, false, &body).await;
+        run_tick_body(
+            &mut locals,
+            &rec,
+            &shared,
+            &fx,
+            false,
+            &body,
+            WatcherToolState::new(),
+        )
+        .await;
         assert!(
             rec.total() > 0,
             "the same Legacy transport fixture emits real HTTP"
@@ -598,12 +619,6 @@ fn terminal_outcome_logged_at_wrapper() {
         );
     });
     assert!(saved.is_empty(), "Saved emits no rejection WARN");
-}
-
-#[test]
-fn progress_caller_uses_actual_terminal_outcome() {
-    // The runtime tick tests are authoritative; this only pins the wiring.
-    source_guard_tests::assert_progress_wiring();
 }
 
 /// Two expired ticks on a terminal-committed row: no republication at all.
@@ -723,7 +738,16 @@ fn o_delegated_rollover_tick_writes_no_body() {
                     crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
                 )])
             });
-            run_tick_body(&mut locals, &rec, &shared, &fx, false, &body).await;
+            run_tick_body(
+                &mut locals,
+                &rec,
+                &shared,
+                &fx,
+                false,
+                &body,
+                WatcherToolState::new(),
+            )
+            .await;
             let body_writes = rec
                 .bodies
                 .lock()
@@ -783,7 +807,16 @@ fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
             let rec = recorder(fx.channel, true).await;
             rec.check.set(check.clone()).unwrap();
             let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
-            run_tick_body(&mut locals, &rec, &shared, &fx, false, body).await;
+            run_tick_body(
+                &mut locals,
+                &rec,
+                &shared,
+                &fx,
+                false,
+                body,
+                WatcherToolState::new(),
+            )
+            .await;
             check.assert_settled();
             assert_eq!(check.adoption(), expected, "{body:?}");
             let shown = rec.bodies.lock().unwrap().clone();
@@ -796,7 +829,16 @@ fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
         let _bound = test_override::bind_claude_tui_session(&fx.tmux, &fx.output_path);
         let rec = recorder(fx.channel, true).await;
         let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
-        run_tick_body(&mut locals, &rec, &shared, &fx, false, BODY).await;
+        run_tick_body(
+            &mut locals,
+            &rec,
+            &shared,
+            &fx,
+            false,
+            BODY,
+            WatcherToolState::new(),
+        )
+        .await;
         let shown_before = rec.bodies.lock().unwrap().len();
         assert!(shown_before > 0, "the first tick shows the body with O off");
         let _pending = test_override::force_candidates(&[(
@@ -805,7 +847,16 @@ fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
         )]);
         let check = BodyCheck::watch(fx.channel.get(), BODY);
         locals.spin = 0;
-        run_tick_body(&mut locals, &rec, &shared, &fx, false, BODY).await;
+        run_tick_body(
+            &mut locals,
+            &rec,
+            &shared,
+            &fx,
+            false,
+            BODY,
+            WatcherToolState::new(),
+        )
+        .await;
         assert_eq!(
             rec.bodies.lock().unwrap().len(),
             shown_before,
@@ -866,6 +917,40 @@ fn active_silent_progress_is_durable() {
     });
 }
 
+/// A tick that holds on a running tool and skips the Discord edit still leaves the
+/// tool evidence on disk, so recovery after a restart sees the tool hold.
+#[test]
+fn tool_hold_tick_without_discord_edit_persists_tool_evidence() {
+    const TOOL_LINE: &str = "⚙ Bash: `ls`";
+    let (_lock, guard) = isolate_root();
+    capture_warns(async {
+        let fx = seed_row(guard.root.path(), 14, false, true);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let rec = recorder(fx.channel, true).await;
+        let mut locals = tick_locals(&fx, None);
+        let mut tools = WatcherToolState::new();
+        tools.current_tool_line = Some(TOOL_LINE.to_string());
+        tools.any_tool_used = true;
+        assert_eq!(
+            run_tick_body(&mut locals, &rec, &shared, &fx, false, TRAILING_BODY, tools).await,
+            CONTINUE
+        );
+        assert_eq!(
+            rec.total(),
+            0,
+            "the tool-hold tick edits nothing on Discord"
+        );
+        let row = crate::services::discord::inflight::load_inflight_state_read_only(
+            &fx.provider,
+            fx.channel.get(),
+        )
+        .expect("row on disk");
+        assert_eq!(row.current_tool_line.as_deref(), Some(TOOL_LINE));
+        assert!(row.any_tool_used, "the durable row records the tool hold");
+        assert_eq!(row.full_response, TRAILING_BODY);
+    });
+}
+
 async fn bridge_cleanup_variant(guard: &RootGuard, case: u64, delete_ok: bool, restored: bool) {
     let fx = seed_row(guard.root.path(), case, true, false);
     let shared = crate::services::discord::make_shared_data_for_tests();
@@ -920,9 +1005,7 @@ async fn panel_parity_variant(guard: &RootGuard, case: u64, terminal: bool) {
         "separate-panel mode must be pinned by the parent"
     );
     let fx = seed_row(guard.root.path(), case, terminal, false);
-    let mut shared = crate::services::discord::make_shared_data_for_tests();
-    let ui = &mut Arc::get_mut(&mut shared).unwrap().ui;
-    ui.status_panel_v2_enabled = true;
+    let shared = crate::services::discord::make_shared_data_for_tests();
     let before = fx.row_bytes();
     let rec = recorder(fx.channel, true).await;
     let mut locals = tick_locals(&fx, None);

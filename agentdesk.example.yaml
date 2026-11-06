@@ -311,10 +311,7 @@ review:
   max_rounds: 3
 
 placeholder:
-  # Discord placeholder/status-panel UI 플래그입니다. 기본값은 live_events_enabled=true,
-  # status_panel_v2_enabled=true, two_message_panel_enabled=false입니다. 패널 롤아웃/롤백 때 조정하세요.
-  live_events_enabled: true
-  status_panel_v2_enabled: true
+  # Discord status-panel UI 플래그입니다. 기본값은 two_message_panel_enabled=false입니다.
   two_message_panel_enabled: false
 
 runtime:

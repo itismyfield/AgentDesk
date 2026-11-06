@@ -250,12 +250,10 @@ mod utils;
 #[cfg(test)]
 mod high_risk_recovery;
 
-// Re-export for crate-level access (used by services::discord::mod.rs)
-pub(crate) use cli::agentdesk_runtime_root;
-
 use anyhow::{Context, Result};
 
 pub fn run_from_args() -> Result<()> {
+    services::process_boot::initialize();
     // A failure-marker handoff restarts this executable as a short-lived writer.
     // Dispatch it before Clap so no public/hidden CLI surface is needed and the
     // writer can outlive the one-shot hook relay process that launched it.

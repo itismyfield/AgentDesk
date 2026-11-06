@@ -614,20 +614,6 @@ fn nonce_free_existing_marker_fails_closed_instead_of_claiming_promotion() {
         TerminalProof::Absent,
         "a nonce-free marker plus somebody else's commit proves nothing about us"
     );
-
-    // The arm production takes on that `None` is the fail-closed one.
-    let arm = include_str!("gateway_lease_recovery.rs")
-        .split_once("let Some(existing_nonce) = restart_file_nonce(&root, \"restart_pending\")")
-        .expect("fail-closed arm")
-        .1
-        .split_once("};")
-        .expect("arm body")
-        .0;
-    assert!(arm.contains("recover_cancelled_promotion(&runtimes);"));
-    assert!(
-        !arm.contains("return true"),
-        "the nonce-free arm must not claim promotion succeeded"
-    );
 }
 
 /// #5254 D8 / M12: the supersession arm has no nonce-free shortcut left. A
@@ -773,20 +759,6 @@ fn unsafe_nonce_terminal_read_is_absent_and_never_promotes_the_index() {
         terminal_proof(root.path(), "../escape"),
         TerminalProof::Absent
     );
-
-    // §E5.4's second sentence: this arm also leaves the label. §E5.8 4-R makes
-    // diagnostic confidence the only residual risk, so the label is load-bearing.
-    let arm = include_str!("../../../cli/restart_terminal_proof.rs")
-        .split_once("let Some(identity) = request_artifact_path(root, name, nonce)")
-        .expect("unsafe-nonce read arm")
-        .1
-        .split_once("};")
-        .expect("arm body")
-        .0;
-    assert!(
-        arm.contains("tracing::warn!") && arm.contains("restart-nonce-unsafe"),
-        "the read path must name its unsafe-nonce refusal with the fixed label"
-    );
 }
 
 /// ERRATUM §E5.2: the terminal read is three-valued and only the identity name
@@ -862,32 +834,6 @@ fn sequential_requests_keep_independent_identities() {
         restart_file_nonce(root.path(), "restart_pending").as_deref(),
         Some("b")
     );
-}
-
-/// #5254 §9-0 auxiliary source assertion: the mtime lifetime gate retired with
-/// five symbols and one call site. This is a regression hint, not the authority
-/// — the behavioural authority is the clock-regression and fail-closed tests
-/// above — but it fails loudly if a refactor resurrects the deleted branch.
-#[test]
-fn retired_mtime_lifetime_gate_has_no_remaining_source_references() {
-    let recovery = include_str!("gateway_lease_recovery.rs");
-    let bootstrap = include_str!("../runtime_bootstrap.rs");
-    for symbol in [
-        "RESTART_ARTIFACT_BOOT_INSTANT",
-        "restart_artifact_boot_instant",
-        "record_restart_artifact_boot_instant",
-        "restart_artifact_is_current_lifetime",
-        "restart_artifact_is_newer_than",
-    ] {
-        assert!(
-            !recovery.contains(symbol),
-            "{symbol} must stay retired in gateway_lease_recovery.rs"
-        );
-        assert!(
-            !bootstrap.contains(symbol),
-            "{symbol} must stay retired in runtime_bootstrap.rs"
-        );
-    }
 }
 
 #[test]

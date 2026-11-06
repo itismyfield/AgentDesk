@@ -532,6 +532,7 @@ async fn run_postlude_for_owner(
         accumulated_output_tokens: 0,
         accumulated_memory_input_tokens: 0,
         accumulated_memory_output_tokens: 0,
+        input_not_submitted: false,
         transport_error: output.provider_failure,
         provider_failure: output.provider_failure,
         api_friction_reports: Vec::new(),
@@ -553,11 +554,7 @@ async fn run_postlude_for_owner(
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_runs_postlude_without_footer_or_status_mutation_5521() {
     for footer in [false, true] {
-        let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
-        Arc::get_mut(&mut driver.shared)
-            .unwrap()
-            .ui
-            .status_panel_v2_enabled = true;
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
         let _mailbox = driver.shared.mailbox(ChannelId::new(DRIVER_CHANNEL_ID));
         let (mut ctx, state, source) = receipt_parts(&driver, ProviderKind::Codex);
         ctx.entry_was_rowless = true;
@@ -1356,6 +1353,12 @@ async fn o_delegated_foreign_custody_follows_destination_membership() {
             "{name}: a held identity keeps the custody for retry"
         );
         assert_eq!(driver.completed_publications(), posts, "{name}");
+        let observed = driver.published_census.lock().unwrap();
+        assert_eq!(observed.len(), posts);
+        for tag in observed.iter() {
+            assert_eq!(tag["site"], "W13", "{name}");
+            assert_eq!(tag["output_class"], "RecoveredLegacyBody", "{name}");
+        }
         if posts == 0 {
             assert!(driver.observations().is_empty(), "{name}: no Discord write");
         }
@@ -1447,7 +1450,7 @@ async fn complete_then_late_o_body(o_channel: bool) -> (Option<u64>, Vec<DriverC
     let _separate = SeparatePanel;
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
     let ui = &mut Arc::get_mut(&mut driver.shared).expect("fresh driver").ui;
-    (ui.status_panel_v2_enabled, ui.two_message_panel_enabled) = (true, true);
+    ui.two_message_panel_enabled = true;
     (
         driver.inflight.runtime_kind,
         driver.inflight.status_message_id,

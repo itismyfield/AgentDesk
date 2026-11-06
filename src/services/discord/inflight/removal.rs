@@ -5,6 +5,8 @@ use super::store::InflightStateFileLock;
 use super::*;
 use std::collections::HashMap;
 use std::path::Path;
+#[cfg(test)]
+mod restart_marker_lifetime_tests;
 mod restore_failure;
 use restore_failure::RestoreFailure;
 
@@ -372,7 +374,9 @@ pub(super) fn invalidate_stale_generation_in_root(
             "invalidate_stale_generation_boot",
             &path,
         );
-        if fs::remove_file(&path).map(|()| sync_removed(&path)).is_ok() {
+        if crate::services::discord::inflight::row_removed::unlink(&path, || fs::remove_file(&path))
+            .is_ok()
+        {
             // Only emit observability when called via the env wrapper —
             // raw `_in_root` calls are unit tests and we want to keep
             // them deterministic.
@@ -482,7 +486,7 @@ pub(super) fn stale_removal_reason(
                     && tmux_pane_alive_for_stale_check(name, state)
                 {
                     tracing::info!(
-                        "  ⚠ inflight stale-age ({age_secs}s > {max_age}s) overridden — tmux pane '{name}' still alive (channel {})",
+                        "  ⚠ inflight stale-age ({age_secs}s > {max_age}s) overridden — session '{name}' not confirmed dead (channel {})",
                         state.channel_id
                     );
                     return None;
@@ -500,7 +504,7 @@ pub(super) fn stale_removal_reason(
                     && tmux_pane_alive_for_stale_check(name, state)
                 {
                     tracing::info!(
-                        "  ⚠ inflight stale-age ({age_secs}s > {INFLIGHT_MAX_AGE_SECS}s) overridden — tmux pane '{name}' still alive (channel {})",
+                        "  ⚠ inflight stale-age ({age_secs}s > {INFLIGHT_MAX_AGE_SECS}s) overridden — session '{name}' not confirmed dead (channel {})",
                         state.channel_id
                     );
                     return None;
@@ -942,8 +946,6 @@ mod input_fence_reaper_tests;
 mod loader_gate_observation_tests {
     use super::*;
 
-    mod source_guard_tests;
-
     fn row(channel_id: u64, born_generation: u64, tmux: Option<&str>) -> InflightTurnState {
         let mut state = InflightTurnState::new(
             ProviderKind::Claude,
@@ -1205,17 +1207,6 @@ mod loader_gate_observation_tests {
         for (index, (route, generation, stale, _, _)) in route_cases().into_iter().enumerate() {
             assert_public_loader_pair(&inflight_root, index, allocation(generation, route), stale);
         }
-    }
-
-    /// Lexical tripwire only: aliases or helper extraction can evade it. The
-    /// route-complete execution test above is the semantic proof.
-    #[test]
-    fn observation_labels_and_allocation_only_evaluation_api_are_exact() {
-        use source_guard_tests::{REAPER, REMOVAL, SCOPED, loader_gate_gaps};
-        assert_eq!(
-            loader_gate_gaps(REMOVAL, SCOPED, REAPER),
-            Vec::<String>::new()
-        );
     }
 }
 

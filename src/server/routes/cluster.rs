@@ -438,8 +438,7 @@ pub async fn upsert_issue_spec(
 ///
 /// E5 (#2412) augments each entry with a `relay_frames_received` field
 /// sourced from the supervisor-owned [`RelayProducerRegistry`], so operators
-/// can confirm the session-bound relay is no longer a zero-frame path after
-/// `cluster.session_bound_relay_enabled` was flipped on. A field of `0` on a
+/// can confirm the session-bound relay is not a zero-frame path. A field of `0` on a
 /// session that should be producing output is the canonical signal that the
 /// producer wiring regressed.
 pub async fn list_sessions(

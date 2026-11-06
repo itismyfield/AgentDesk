@@ -1818,6 +1818,8 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
         .block_on(short_controller::deliver_short_replace_via_controller(
             &gateway,
             short_controller::SinkShortReplaceCtx {
+                census_source:
+                    crate::services::discord::outbound::body_census::BodySource::inherited(),
                 shared: &shared,
                 provider: &provider,
                 channel,
@@ -1887,6 +1889,8 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
         .block_on(short_controller::deliver_short_replace_via_controller(
             &gateway2,
             short_controller::SinkShortReplaceCtx {
+                census_source:
+                    crate::services::discord::outbound::body_census::BodySource::inherited(),
                 shared: &shared2,
                 provider: &provider,
                 channel,
@@ -2024,6 +2028,8 @@ fn sink_short_controller_post_reset_is_landed_stale_without_replacement_poison_4
         .block_on(short_controller::deliver_short_replace_via_controller(
             &gateway,
             short_controller::SinkShortReplaceCtx {
+                census_source:
+                    crate::services::discord::outbound::body_census::BodySource::inherited(),
                 shared: &shared,
                 provider: &provider,
                 channel,
@@ -2234,26 +2240,6 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
         raw_body, relay_text,
         "the regression pin needs formatted/raw divergence"
     );
-    let module_src = include_str!("../session_relay_sink.rs");
-    let relay_format_src = include_str!("relay_format.rs");
-    assert!(
-        relay_format_src.contains("let raw_response_text = delivery.response_text.clone();"),
-        "session sink must preserve raw response bytes before Discord formatting"
-    );
-    assert!(
-        relay_format_src.contains("format_for_discord_with_provider(&raw_response_text"),
-        "session sink must format from the preserved raw body, not derive raw from formatted text"
-    );
-    assert!(
-        relay_format_src.contains("format_for_discord_with_status_panel(&raw_response_text"),
-        "session sink status-panel formatting must also use the preserved raw body"
-    );
-    assert!(
-        module_src.contains(
-            "relay_text: &relay_text,\n                        delivered_fingerprint_body: &raw_response_text,"
-        ),
-        "session sink production cut-over call must thread the raw pre-format body into the fingerprint slot"
-    );
 
     let gen_path = crate::services::tmux_common::session_temp_path(session, "generation");
     std::fs::create_dir_all(std::path::Path::new(&gen_path).parent().unwrap())
@@ -2305,6 +2291,8 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
         .block_on(short_controller::deliver_short_replace_via_controller(
             &gateway,
             short_controller::SinkShortReplaceCtx {
+                census_source:
+                    crate::services::discord::outbound::body_census::BodySource::inherited(),
                 shared: &shared,
                 provider: &provider,
                 channel,
@@ -2339,6 +2327,89 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
         .contains(&user_msg_id),
         "sink controller must settle the lease-pinned nonzero inbound id"
     );
+}
+
+/// Delivers one fenced terminal frame carrying `body` through `RelaySink::deliver`
+/// onto the active inflight's placeholder; the fake gateway confirms the edit.
+async fn deliver_placeholder_terminal_through_sink(
+    channel_id: u64,
+    body: &str,
+) -> (
+    Result<RelaySinkOutcome, RelaySinkError>,
+    Arc<super::super::SharedData>,
+    String,
+    usize,
+) {
+    let binding = matched(&channel_id.to_string());
+    let session = binding.expected_session_name.clone();
+    let generation = crate::services::tmux_common::session_temp_path(&session, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&generation).parent().unwrap()).unwrap();
+    std::fs::write(&generation, b"1").expect("generation marker");
+    let started_at = "2026-11-06T00:00:00Z";
+    let mut inflight =
+        inflight_with_identity_offset(channel_id, &session, 702, started_at, Some(0));
+    inflight.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+    inflight.current_msg_id = 88_702;
+    super::super::inflight::save_inflight_state(&inflight).expect("persist inflight");
+    let registry = Arc::new(HealthRegistry::new());
+    let shared = super::super::make_shared_data_for_tests();
+    registry
+        .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
+        .await;
+    let gateway = Arc::new(ShortReplaceFakeGateway {
+        outcome: super::super::formatting::ReplaceLongMessageOutcome::EditedOriginal,
+        ok: true,
+        replace_calls: std::sync::atomic::AtomicUsize::new(0),
+        on_replace: None,
+    });
+    let mut sink = SessionBoundDiscordRelaySink::new(registry);
+    sink.test_gateway = Some(gateway.clone());
+    let text = serde_json::to_string(body).unwrap();
+    let payload = format!(
+        "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":{text}}}]}}}}\n\
+         {{\"type\":\"result\",\"result\":{text}}}\n"
+    );
+    let mut terminal = terminal_frame_offset(&binding, &payload, 1, 256, 702, started_at, Some(0));
+    terminal.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(&session));
+    let outcome = sink.deliver(&terminal).await;
+    let calls = gateway.replace_calls.load(Ordering::SeqCst);
+    (outcome, shared, session, calls)
+}
+
+// The production sink entry must record the watcher duplicate fingerprint from the
+// raw terminal body, not from the Discord-formatted relay text.
+#[tokio::test]
+async fn sink_deliver_records_raw_body_fingerprint_for_watcher_duplicate_refusal() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+    let channel_id = 44_281;
+    let raw_body = "# heading\nbody";
+    let formatted =
+        formatting::format_for_discord_with_status_panel(raw_body, &ProviderKind::Claude);
+    assert_ne!(
+        formatted, raw_body,
+        "the fixture needs formatted/raw divergence"
+    );
+
+    let (outcome, _shared, session, calls) =
+        deliver_placeholder_terminal_through_sink(channel_id, raw_body).await;
+
+    assert_eq!(
+        outcome.expect("delivery"),
+        RelaySinkOutcome::TerminalDelivered
+    );
+    assert_eq!(calls, 1, "one placeholder replace");
+    let channel = ChannelId::new(channel_id);
+    assert!(
+        dr::recent_delivered_content_matches(&ProviderKind::Claude, channel, &session, raw_body),
+        "the watcher's raw-body duplicate lookup refuses a re-relay"
+    );
+    assert!(
+        !dr::recent_delivered_content_matches(&ProviderKind::Claude, channel, &session, &formatted),
+        "the formatted relay text is not the recorded fingerprint"
+    );
+    crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
 }
 
 #[test]
@@ -2433,39 +2504,36 @@ fn controller_skips_empty_body_so_cutover_gate_keeps_it_legacy() {
     );
 }
 
-#[test]
-fn structural_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path() {
-    let module_src = include_str!("../session_relay_sink.rs");
+// An answer that sanitises to an empty body stays on the legacy replace path through
+// the production sink entry: it is delivered and the relay offset advances.
+#[tokio::test]
+async fn sink_deliver_keeps_sanitised_empty_body_on_legacy_path_and_advances() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+    let channel_id = 44_282;
+    // An echoed hidden prompt block is dropped whole by the response sanitizer.
+    let raw_body = "[Memory Recall Ownership]\n\
+                    AgentDesk owns automatic turn-recall decisions, including intentional skips.";
+    assert_eq!(
+        formatting::format_for_discord_with_status_panel(raw_body, &ProviderKind::Claude),
+        "",
+        "the fixture body must sanitise to empty"
+    );
 
-    let assignment = format!("let {} = ", "cutover_short_replace");
-    let gate_start = module_src
-        .find(&assignment)
-        .expect("session sink cutover gate assignment");
-    let gate_src = &module_src[gate_start
-        ..gate_start
-            + module_src[gate_start..]
-                .find(';')
-                .expect("session sink cutover gate terminator")];
+    let (outcome, shared, _session, calls) =
+        deliver_placeholder_terminal_through_sink(channel_id, raw_body).await;
 
-    assert!(
-        gate_src.contains(&format!("{}.is_some()", "cutover_range")),
-        "A2b cutover_range=None / NoRange must stay on the legacy no-advance path"
+    assert_eq!(
+        outcome.expect("legacy delivery"),
+        RelaySinkOutcome::TerminalDelivered
     );
-    assert!(
-        gate_src.contains(&format!("&& !{}.is_empty()", "relay_text")),
-        "A2b empty-body must stay legacy because controller Skipped would not advance"
+    assert_eq!(calls, 1, "the legacy replace reaches transport once");
+    assert_eq!(
+        shared.committed_relay_offset(ChannelId::new(channel_id)),
+        256
     );
-    assert!(
-        gate_src.contains("SessionBoundTerminalDeliveryRoute::PlaceholderEdit(_)"),
-        "A2b controller path is limited to anchored placeholder edits"
-    );
-    assert!(
-        module_src.contains(&format!(
-            "{}.filter(|_| {})",
-            "cutover_range", "cutover_short_replace"
-        )),
-        "A2b controller branch must require both the ordered range and cutover gate"
-    );
+    crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
 }
 
 #[allow(dead_code)] // #3034: test helper superseded by `inflight_with_identity_offset`.

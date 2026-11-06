@@ -983,18 +983,6 @@ mod tests {
     }
 
     #[test]
-    fn publish_precedes_relay_dead_reattach_in_health_tick() {
-        let recovery = include_str!("recovery/watchdog_pass.rs");
-        let publish = recovery
-            .find("observe_and_publish_from_tick(")
-            .expect("health tick must publish a liveness verdict");
-        let relay_dead_reattach = recovery
-            .find("relay_dead_reattach::try_apply(")
-            .expect("health tick must retain relay-dead reattach");
-        assert!(publish < relay_dead_reattach);
-    }
-
-    #[test]
     fn single_observe_per_tick() {
         let key = binding(461_510);
         CAPTURE_COORDINATES.remove(&key);

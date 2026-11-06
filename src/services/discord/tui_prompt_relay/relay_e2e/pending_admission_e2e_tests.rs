@@ -16,7 +16,6 @@ const MESSAGE: u64 = 940_487_400_051_910;
 const WINNER: u64 = MESSAGE + 1;
 const PENDING: &str = "%E2%8F%B3";
 const QUEUED: &str = "%F0%9F%93%AC";
-const MERGED: &str = "%E2%9E%95";
 const DEADLINE: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Debug)]
@@ -426,7 +425,7 @@ async fn merged_runtime_refusal_has_only_plus_effects() {
         snapshot.intervention_queue[0].source_message_ids,
         [MessageId::new(MESSAGE - 1), MessageId::new(MESSAGE)]
     );
-    probe.assert_queue_only(MERGED);
+    probe.assert_queue_only(QUEUED);
     assert!(h.provider_inputs().is_empty());
 }
 

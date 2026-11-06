@@ -421,21 +421,14 @@ pub(super) async fn handle_race_loss_enqueue(
     let mut queued_marker_notified = false;
     let routed_to_thread = channel_id != original_channel_id;
     if !routed_to_thread && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref()) {
-        // #1190 follow-up: merged messages get ➕ so the user can tell
-        // them apart from standalone queue head entries (📬).
-        let emoji = if enqueue_outcome.merged {
-            '➕'
-        } else {
-            '📬'
-        };
-        queued_marker_notified =
-            emoji == crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION;
+        let emoji = crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION;
+        queued_marker_notified = !enqueue_outcome.merged;
         mailbox_reaction::note_queue_pending(
             shared,
             http,
             channel_id,
             user_msg_id,
-            emoji,
+            enqueue_outcome.merged,
             turn_start_attempt,
             "race_loss_message_queued",
         )

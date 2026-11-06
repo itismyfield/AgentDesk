@@ -39,11 +39,13 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         for filename in (
             "generate_inventory_docs.py", "giant_file_progress.py", "ratchet_admission.py",
             "generate_env_reference.py", "generate_cli_reference.py", "check_hotfile_ratchet.py",
-            "audit_maintainability.py", "rust_lex.py",
+            "audit_maintainability.py", "rust_lex.py", "rust_cfg.py", "rust_production.py",
         ):
             shutil.copy2(ROOT / "scripts" / filename, scripts / filename)
         shutil.copytree(ROOT / "scripts/audit_maintainability", scripts / "audit_maintainability",
                         ignore=shutil.ignore_patterns("__pycache__"))
+        (scripts / "ci").mkdir()
+        shutil.copy2(ROOT / "scripts/ci/rust_test_sources.py", scripts / "ci/rust_test_sources.py")
         tree = ast.parse((scripts / "generate_inventory_docs.py").read_text())
         purposes = next(ast.literal_eval(node.value) for node in tree.body
                         if isinstance(node, ast.Assign)
@@ -117,7 +119,18 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         cls.git_at(cls.template, "config", "user.name", "Deadline Fixture")
         cls.git_at(cls.template, "config", "user.email", "fixture@example.invalid")
         cls.git_at(cls.template, "add", "-A")
-        cls.git_at(cls.template, "commit", "-qm", "fixture baseline")
+        cls.git_at(cls.template, "commit", "-qm", "fixture sources")
+        source_sha = cls.git_at(cls.template, "rev-parse", "HEAD")
+        result = cls.command_at(cls.template, [
+            sys.executable, "scripts/audit_maintainability/checks/module_layer_baseline.py",
+            "--input-sha", source_sha, "--output", "target/fixture-baseline.json",
+        ])
+        if result.returncode:
+            raise AssertionError(result.stdout + result.stderr)
+        baseline = "scripts/audit_maintainability/baselines/generated/module_layers.json"
+        shutil.copy2(cls.template / "target/fixture-baseline.json", cls.template / baseline)
+        cls.git_at(cls.template, "add", baseline)
+        cls.git_at(cls.template, "commit", "-qm", "fixture module-layer baseline")
         cls.base = cls.git_at(cls.template, "rev-parse", "HEAD")
 
     @classmethod

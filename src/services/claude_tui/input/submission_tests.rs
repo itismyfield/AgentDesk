@@ -57,9 +57,14 @@ impl ScriptedTmux {
         let script = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/argv"
+if [ "$2" = "$(cat "$d/hold" 2>/dev/null)" ] && [ ! -f "$d/held" ]; then
+  touch "$d/held"; n=0
+  while [ ! -f "$d/go" ] && [ $n -lt 1000 ]; do sleep 0.01; n=$((n + 1)); done
+fi
 case "$2" in
-display-message) for last do :; done; case "$last" in '#{pane_dead}') echo 0 ;; *) echo 1 ;; esac ;;
+display-message) for last do :; done; case "$last" in '#{pane_dead}'|'#{pane_in_mode}') echo 0 ;; *) echo 1 ;; esac ;;
 capture-pane) cat "$d/screen" ;;
+list-panes) if [ -f "$d/pane_model" ]; then if [ -f "$d/dead" ]; then echo 1; else echo 0; fi; fi ;;
 load-buffer|paste-buffer|send-keys)
   n=$(cat "$d/sent" 2>/dev/null || echo 0); echo $((n + 1)) > "$d/sent"
   for last do :; done
@@ -70,7 +75,8 @@ load-buffer|paste-buffer|send-keys)
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["managed_submission"]["phase"])' "$(cat "$d/row")" >> "$d/phases"
   fi
   [ "$(cat "$d/fail" 2>/dev/null)" != "$n" ] || exit 1
-  if [ "$key" = Enter ] && [ -f "$d/on_enter" ]; then cat "$d/on_enter" >> "$(cat "$d/on_enter_target")"; fi ;;
+  if [ "$key" = Enter ] && [ -f "$d/on_enter" ]; then cat "$d/on_enter" >> "$(cat "$d/on_enter_target")"; fi
+  if [ "$key" = Enter ] && [ -f "$d/die_on_enter" ]; then touch "$d/dead"; fi ;;
 esac
 exit 0
 "#
@@ -87,6 +93,12 @@ exit 0
 
     pub(crate) fn show(&self, screen: &str) {
         fs::write(self.dir.path().join("screen"), screen).unwrap();
+    }
+
+    /// Holds the first `subcommand` call until `go` exists; `held` appears once it waits.
+    pub(crate) fn hold_first(&self, subcommand: &str) -> (PathBuf, PathBuf) {
+        fs::write(self.dir.path().join("hold"), subcommand).unwrap();
+        (self.dir.path().join("held"), self.dir.path().join("go"))
     }
 
     /// Fails the `n`-th payload write, counted from 0.
@@ -127,6 +139,27 @@ exit 0
             .filter(|argv| argv.split(' ').any(|arg| arg == target))
             .filter_map(|argv| argv.split(' ').nth(1).map(str::to_string))
             .collect()
+    }
+
+    pub(crate) fn die_on_enter(&self) {
+        fs::write(self.dir.path().join("pane_model"), "1").unwrap();
+        fs::write(self.dir.path().join("die_on_enter"), "1").unwrap();
+    }
+
+    pub(crate) fn set_dead(&self, dead: bool) {
+        let flag = self.dir.path().join("dead");
+        fs::write(self.dir.path().join("pane_model"), "1").unwrap();
+        if dead {
+            fs::write(flag, "1").unwrap();
+        } else {
+            if flag.exists() {
+                fs::remove_file(flag).unwrap();
+            }
+            let die = self.dir.path().join("die_on_enter");
+            if die.exists() {
+                fs::remove_file(die).unwrap();
+            }
+        }
     }
 
     pub(crate) fn clear(&self) {
@@ -211,9 +244,29 @@ def render(name):
     os.write(1, ('\x1b[?2004h\x1b[2J\x1b[32;1H' + (root/name).read_text().replace('\n','\r\n')).encode())
 def event(name):
     with (root/'events').open('a') as out: out.write(name+'\n')
+def transcript():
+    return pathlib.Path((root/'record-path').read_text()) if (root/'record-path').exists() else root/'transcript'
 def record(content):
-    with (root/'transcript').open('a') as out:
-        out.write(json.dumps({'type':'user','message':{'content':content}})+'\n')
+    with transcript().open('a') as out:
+        row = {'type':'user','message':{'content':content}}
+        if (root/'native-sid').exists():
+            row.update(sessionId=(root/'native-sid').read_text(), uuid=(root/'native-uuid').read_text())
+        if (root/'queued-row').exists():
+            row.update(type='attachment', attachment={'type':'queued_command','prompt':content,
+                'commandMode':'prompt','origin':{'kind':'human'},'humanTurn':True})
+            row.pop('message', None)
+            if isinstance(content,str) and content.startswith('foreign '): row['uuid'] += '-foreign'
+        out.write(json.dumps(row)+'\n')
+def queue_record(operation, content, suffix, native_uuid=None):
+    row={'type':'queue-operation','operation':operation,'content':content}
+    if operation == 'remove': row['reason']='absorbed_mid_turn'
+    if (root/'native-sid').exists():
+        row.update(sessionId=(root/'native-sid').read_text(), uuid=(native_uuid or (root/'native-uuid').read_text())+'-'+suffix)
+    with transcript().open('a') as out: out.write(json.dumps(row)+'\n')
+def absorb_foreign(where):
+    content='foreign absorbed '+where
+    queue_record('enqueue',content,'foreign-'+where+'-enqueue')
+    queue_record('remove',content,'foreign-'+where+'-absorbed')
 render('before')
 (root/'ready').write_text('ready')
 if mode == 'fresh':
@@ -221,6 +274,7 @@ if mode == 'fresh':
     render('empty')
     (root/'composer-ready').write_text('ready')
 pending = b''
+held_queue = []
 while True:
     chunk = os.read(0, 65536)
     with (root/'received').open('ab') as out: out.write(chunk)
@@ -246,10 +300,42 @@ while True:
         if mode == 'swallow' and not (root/'swallowed').exists():
             (root/'swallowed').write_text('1'); pending=b''; continue
         body=(root/'body').read_text()
+        if (root/'unabsorbed').exists():
+            row={'type':'queue-operation','operation':'enqueue','content':body}
+            if (root/'native-sid').exists(): row['sessionId']=(root/'native-sid').read_text()
+            with transcript().open('a') as out: out.write(json.dumps(row)+'\n')
+            pending=b''; render('after'); continue
+        if (root/'foreign-absorbed-before').exists(): absorb_foreign('before')
+        if (root/'queue-mode').exists():
+            queue_mode=(root/'queue-mode').read_text()
+            batch=[(body,(root/'native-uuid').read_text())]
+            if (root/'defer-two-enqueues').exists():
+                held_queue.extend(batch)
+                if len(held_queue) < 2:
+                    render('after'); pending=b''; continue
+                batch=held_queue[:]; held_queue.clear()
+            for item,native_uuid in batch:
+                queue_record('enqueue',item,'enqueue',native_uuid)
+                if (root/'duplicate-enqueue').exists(): queue_record('enqueue',item,'duplicate-enqueue',native_uuid)
+                if queue_mode == 'command-before': record(item)
+                queue_record('remove',item,'absorbed',native_uuid)
+                if queue_mode == 'command-after': record(item)
+                if (root/'duplicate-absorption').exists(): queue_record('remove',item,'duplicate-absorbed',native_uuid)
+            if (root/'foreign-absorbed-after').exists(): absorb_foreign('after')
+            (root/'queue-recorded').write_text('done')
+            render('after'); pending=b''; continue
+        if (root/'compact-before-command').exists():
+            row={'type':'user','isCompactSummary':True,'message':{'content':body}}
+            if (root/'native-sid').exists(): row.update(sessionId=(root/'native-sid').read_text(),uuid=(root/'native-uuid').read_text()+'-summary')
+            with transcript().open('a') as out: out.write(json.dumps(row)+'\n')
+        if (root/'foreign-before').exists(): record('foreign before expected')
+        if (root/'foreign-same').exists(): body += '\nforeign input on the same row'
         if mode == 'foreign': record('foreign before expected')
         if mode == 'wrapped': record('\n\n<pasted_content id="a17f">\n'+body+'\n</pasted_content id="a17f">\n')
         elif mode == 'mixed': record([{'type':'text','text':body},{'type':'tool_result','content':'x'}])
         else: record(body)
+        if (root/'foreign-after').exists(): record('foreign after expected')
+        if (root/'foreign-absorbed-after').exists(): absorb_foreign('after')
         if (root/'draft-stash').exists(): (root/'draft-stash').rename(root/'draft-bytes')
         if (root/'draft-stash-chip').exists(): (root/'draft-stash-chip').rename(root/'draft-chip')
         render('after'); pending=b''
@@ -1029,4 +1115,32 @@ pub(crate) async fn owner_retry_leaf(
     );
     assert!(ticket.lock().unwrap().is_some(), "B's real submit ticket");
     (identity, vec![received])
+}
+
+#[path = "first_key_gate_tests.rs"]
+mod first_key_gate;
+
+/// A warm write under `token`'s receipt sink on a scripted idle pane; with `stop`, a stop decides
+/// while the writer reads the composer, after its cancel check. Returns the payload writes.
+pub(crate) fn gated_warm_write(token: &Arc<CancelToken>, stop: bool) -> Vec<String> {
+    use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
+    let tmux = ScriptedTmux::new(&view("", false));
+    let stopper = stop.then(|| {
+        let (held, go) = tmux.hold_first("capture-pane");
+        let token = token.clone();
+        std::thread::spawn(move || {
+            wait("the writer reads the composer", || held.exists());
+            let decided = StopCancel::decide(Some(token), "!stop".into());
+            fs::write(go, "").unwrap();
+            matches!(decided, StopCancel::Published(_))
+        })
+    });
+    let sent = guarded_outcome::with_receipt_sink(Some(token), || {
+        super::super::send_warm_followup_owned("gated-warm", "gated question", None)
+    });
+    if let Some(stopper) = stopper {
+        assert!(stopper.join().unwrap(), "the stop published main's cancel");
+        assert!(sent.is_err(), "a stopped write reports no submit: {sent:?}");
+    }
+    tmux.sends()
 }

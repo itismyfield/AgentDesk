@@ -277,3 +277,73 @@ async fn owner_records_alone_answer_for_every_bound_channel_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// An origin still queued reads accepted, one its owner removed unrun reads the owed cancelled
+/// receipt before any database write, and a pool that cannot read the binding is 503, never 404.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_queued_origin_reads_accepted_then_its_owed_receipt_pg() {
+    use crate::services::turn_orchestrator::{ChannelMailboxRegistry, QueuePersistenceContext};
+    use poise::serenity_prelude::ChannelId;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = 7_340_601_u64;
+    let insert = crate::db::agents::insert_agent_channels_for_tests;
+    insert(&pool, "owed-agent", Some(&channel.to_string()), None).await;
+    let app = router_with(crate::config::Config::default(), Some(pool.clone()));
+    let uri = "/agents/owed-agent/input-result?origin_id=G-owed";
+
+    let persistence =
+        QueuePersistenceContext::new(&crate::services::provider::ProviderKind::Claude, "", None);
+    let (path, namespace) =
+        crate::services::turn_orchestrator::v2_queue(&persistence, ChannelId::new(channel))
+            .unwrap();
+    let handle = ChannelMailboxRegistry::default().handle(ChannelId::new(channel));
+    handle.v2_adopt(path, namespace).await.unwrap();
+    let id = 8_000_000_000_000_340_601_u64;
+    let original = serde_json::from_value(json!({"author_id":1,"message_id":id,
+        "source_message_ids":[id],"channel_id":channel,"queued_generation":5,"text":"start"}))
+    .unwrap();
+    let context = json!({"origin":"headless","metadata":{"human_input":{"origin_id":"G-owed"}}});
+    let admitted = handle.v2_admit_ticket_with_context(original, "t-owed".into(), context);
+    admitted.await.unwrap();
+    let (status, body) = local_get(&app, uri).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({"ok": true, "contract": "input-result-v1", "origin_id": "G-owed",
+            "agent_id": "owed-agent", "channel_id": channel.to_string(), "consumption": "accepted",
+            "execution_id": null, "turn_id": null, "terminal": null})
+    );
+
+    assert_eq!(
+        handle.clear(persistence).await.discarded_message_ids.len(),
+        1
+    );
+    let owed = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.owed_drops()));
+    let at = owed.await.unwrap()[0].at_ms as i64;
+    let at = chrono::DateTime::from_timestamp_millis(at).unwrap();
+    let (status, body) = local_get(&app, uri).await;
+    let execution = format!("discord:{channel}:{id}");
+    assert_eq!(
+        (status, &body["execution_id"]),
+        (StatusCode::OK, &json!(execution)),
+        "{body}"
+    );
+    assert_eq!(body["terminal"]["outcome"], "cancelled");
+    let confirmed = body["terminal"]["confirmed_at"].as_str().unwrap();
+    let confirmed = chrono::DateTime::parse_from_rfc3339(confirmed).unwrap();
+    assert_eq!(confirmed, at);
+
+    pool.close().await;
+    let (status, body) = local_get(&app, uri).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("input_result_unavailable")
+        )
+    );
+    db.drop().await;
+}

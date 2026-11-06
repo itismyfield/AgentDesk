@@ -17,6 +17,7 @@ use crate::services::discord::outbound::{
 use super::runtime::RoutineRunOutcome;
 use super::store::{ClaimedRoutineRun, RecoveredRoutineRun, RoutineRecord, RoutineStore};
 
+mod census;
 mod failure_alert;
 
 const RUN_LOG_SECTION_ORDER: [&str; 4] = ["started", "js_inputs", "js_action", "outcome"];
@@ -92,6 +93,9 @@ impl RoutineDiscordLogger {
         store: &RoutineStore,
         claimed: &ClaimedRoutineRun,
     ) -> RoutineDiscordLogStatus {
+        if super::legacy_body_census::applies(&claimed.script_ref) {
+            return RoutineDiscordLogStatus::skipped();
+        }
         let status = self
             .log_run_section(
                 store,
@@ -117,6 +121,9 @@ impl RoutineDiscordLogger {
         automation_inventory_count: usize,
         checkpoint: Option<&Value>,
     ) -> RoutineDiscordLogStatus {
+        if super::legacy_body_census::applies(&claimed.script_ref) {
+            return RoutineDiscordLogStatus::skipped();
+        }
         let status = self
             .log_run_section(
                 store,
@@ -148,6 +155,9 @@ impl RoutineDiscordLogger {
         prompt: Option<&str>,
         checkpoint_update: bool,
     ) -> RoutineDiscordLogStatus {
+        if super::legacy_body_census::applies(&claimed.script_ref) {
+            return RoutineDiscordLogStatus::skipped();
+        }
         let status = self
             .log_run_section(
                 store,
@@ -191,6 +201,13 @@ impl RoutineDiscordLogger {
                 .await;
             return status;
         };
+
+        if super::legacy_body_census::applies(&routine.script_ref) {
+            let status = self.log_census_outcome(store, &routine, outcome).await;
+            self.persist_run_log_status(store, &outcome.run_id, &status)
+                .await;
+            return status;
+        }
 
         let discord_log_warning = match store.get_run_discord_log_failure(&outcome.run_id).await {
             Ok(Some(failure)) => failure.error,

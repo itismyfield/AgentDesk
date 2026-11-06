@@ -1,0 +1,667 @@
+use super::*;
+#[path = "review_tests.rs"]
+mod review;
+#[path = "window_tests.rs"]
+mod window;
+use crate::services::process_boot::{self, Boot};
+use std::sync::{
+    Barrier,
+    atomic::{AtomicBool, Ordering},
+};
+
+fn boot() -> Boot {
+    Boot {
+        id: uuid::Uuid::new_v4().to_string(),
+        started_at_ms: chrono::Utc::now().timestamp_millis(),
+        monotonic: std::time::Instant::now(),
+    }
+}
+
+async fn open(root: &std::path::Path, boot: &Boot) -> Journal {
+    Journal::open(
+        root,
+        boot,
+        Some("doctor-123-456".into()),
+        Duration::from_secs(2),
+        Arc::new(|| {}),
+    )
+    .await
+}
+
+fn header(root: &std::path::Path, boot: &Boot) -> Value {
+    let raw = std::fs::read_to_string(
+        root.join("legacy_body_census")
+            .join(format!("{}.jsonl", boot.id)),
+    )
+    .unwrap();
+    serde_json::from_str(raw.lines().next().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn eager_identity_is_shared_with_header_before_any_sample() {
+    let root = tempfile::tempdir().unwrap();
+    let boot = process_boot::initialize().clone();
+    let before = chrono::Utc::now().timestamp_millis();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let journal = open(root.path(), &boot).await;
+    let written = header(root.path(), &boot);
+    assert_eq!(written["boot_id"], boot.id);
+    assert_eq!(written["doctor_boot_id"], "doctor-123-456");
+    assert_eq!(written["started_at_ms"], boot.started_at_ms);
+    assert!(written["started_at_ms"].as_i64().unwrap() <= before);
+    assert_eq!(written["census_hash"].as_str().unwrap().len(), 64);
+    assert_eq!(journal.snapshot()["status"], "INCONCLUSIVE");
+    assert_eq!(written["probe_coverage"], false);
+    assert_eq!(written["static_instrumentation"]["complete"], true);
+    assert_eq!(
+        written["static_instrumentation"]["manifest_error"],
+        Value::Null
+    );
+    assert_eq!(
+        written["static_instrumentation"]["census_hash"],
+        written["census_hash"]
+    );
+}
+
+#[tokio::test]
+async fn predecessor_links_a_boot_that_had_no_samples_or_end() {
+    for legacy_header in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let first = boot();
+        let old = open(root.path(), &first).await;
+        assert_eq!(old.snapshot()["status"], "INCONCLUSIVE");
+        assert!(
+            old.snapshot()["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("PREDECESSOR_UNKNOWN"))
+        );
+        let mut second = boot();
+        if legacy_header {
+            use sha2::{Digest, Sha256};
+            let path = root
+                .path()
+                .join("legacy_body_census")
+                .join(format!("{}.jsonl", first.id));
+            let mut lines: Vec<Value> = std::fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            lines[0]
+                .as_object_mut()
+                .unwrap()
+                .remove("static_instrumentation");
+            let raw: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            std::fs::write(path, raw).unwrap();
+            let pointer = json!({"boot_id":first.id,"header_digest":hex::encode(Sha256::digest(format!("{}\n", lines[0]).as_bytes()))});
+            std::fs::write(
+                root.path().join("legacy_body_census/HEAD"),
+                pointer.to_string(),
+            )
+            .unwrap();
+        }
+        second.started_at_ms = first.started_at_ms + 1;
+        let new = open(root.path(), &second).await;
+        assert_eq!(
+            header(root.path(), &second)["predecessor_boot_id"],
+            first.id
+        );
+        let epoch = json!({"boot_id":first.id,"started_at_ms":first.started_at_ms});
+        assert_eq!(header(root.path(), &first)["coverage_start"], epoch);
+        assert_eq!(header(root.path(), &second)["coverage_start"], epoch);
+        assert_eq!(
+            header(root.path(), &first)["static_instrumentation"].is_null(),
+            legacy_header
+        );
+        assert_eq!(
+            header(root.path(), &second)["static_instrumentation"]["complete"],
+            true
+        );
+        assert_eq!(new.snapshot()["journal_ready"], true);
+        assert!(
+            !new.snapshot()["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("PREDECESSOR_UNKNOWN"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn headerless_or_truncated_history_never_becomes_empty_success() {
+    for malformed in [
+        b"{\"kind\":\"checkpoint\"}\n".as_slice(),
+        b"{\"kind\":\"header\"",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("legacy_body_census");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{}.jsonl", uuid::Uuid::new_v4())),
+            malformed,
+        )
+        .unwrap();
+        let id = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        use sha2::{Digest, Sha256};
+        std::fs::write(
+            dir.join("HEAD"),
+            json!({"boot_id":id,"header_digest":hex::encode(Sha256::digest(malformed))})
+                .to_string(),
+        )
+        .unwrap();
+        let journal = open(root.path(), &boot()).await;
+        let state = journal.snapshot();
+        assert_eq!(state["status"], "INCONCLUSIVE");
+        assert_eq!(state["journal_invalid"], false);
+        assert!(
+            state["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r.as_str().unwrap().starts_with("HISTORY_"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn collection_failure_is_inconclusive_and_does_not_block_continuation() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("legacy_body_census"), "not a directory").unwrap();
+    let journal = open(root.path(), &boot()).await;
+    assert!(!journal.append(json!({"kind":"checkpoint"})).await);
+    assert_eq!(journal.snapshot()["status"], "INCONCLUSIVE");
+    assert_eq!(journal.snapshot()["journal_invalid"], true);
+}
+
+#[tokio::test]
+async fn blocked_writer_times_out_without_stalling_the_async_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let armed = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(Barrier::new(2));
+    let reached = Arc::new(AtomicBool::new(false));
+    let hook = {
+        let (armed, entered, release, reached) = (
+            armed.clone(),
+            entered.clone(),
+            release.clone(),
+            reached.clone(),
+        );
+        Arc::new(move || {
+            if armed.load(Ordering::SeqCst) {
+                reached.store(true, Ordering::SeqCst);
+                entered.notify_one();
+                release.wait();
+            }
+        }) as Arc<dyn Fn() + Send + Sync>
+    };
+    let journal = Journal::open(
+        root.path(),
+        &boot(),
+        Some("doctor".into()),
+        Duration::from_millis(40),
+        hook,
+    )
+    .await;
+    armed.store(true, Ordering::SeqCst);
+    let continuation = AtomicBool::new(false);
+    let append = async {
+        let ack = journal.append(json!({"kind":"checkpoint"})).await;
+        continuation.store(true, Ordering::SeqCst);
+        ack
+    };
+    let outcome = tokio::time::timeout(Duration::from_secs(1), async {
+        let (ack, ()) = tokio::join!(append, async {
+            entered.notified().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        });
+        ack
+    })
+    .await;
+    // Release even a timeout-removal mutant before making an assertion.
+    armed.store(false, Ordering::SeqCst);
+    if reached.load(Ordering::SeqCst) {
+        release.wait();
+    }
+    assert_eq!(outcome, Ok(false));
+    assert!(continuation.load(Ordering::SeqCst));
+    assert_eq!(journal.snapshot()["journal_invalid"], true);
+    assert!(
+        journal.snapshot()["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("WRITE_TIMEOUT"))
+    );
+}
+
+#[test]
+fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
+    use sha2::Digest;
+    let raw = include_str!("../../../scripts/tui_o_body_probes.json");
+    let actual = manifest::inspect(raw);
+    assert_eq!(actual["coverage"], false);
+    assert_eq!(actual["pending"], 0);
+    assert_eq!(actual["instrumentation_complete"], true);
+    let mut data: Value = serde_json::from_str(raw).unwrap();
+    for row in data["probes"].as_array_mut().unwrap() {
+        row["status"] = json!("VERIFIED");
+    }
+    for row in data["claim_probes"].as_array_mut().unwrap() {
+        row["status"] = json!("VERIFIED");
+    }
+    let complete = manifest::inspect(&serde_json::to_string(&data).unwrap());
+    assert_eq!(complete["coverage"], false);
+    assert_eq!(complete["instrumentation_complete"], true);
+    assert_ne!(actual["census_hash"], complete["census_hash"]);
+    data["probes"][0]["status"] = json!("PENDING_0b1");
+    assert_eq!(manifest::inspect(&data.to_string())["coverage"], false);
+    assert_eq!(
+        manifest::inspect(&data.to_string())["instrumentation_complete"],
+        false
+    );
+    assert_eq!(manifest::inspect("{}")["coverage"], false);
+    assert_eq!(manifest::inspect("not json")["coverage"], false);
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/legacy_body_census_evidence.json"
+    ))
+    .unwrap();
+    let mut base: Value = serde_json::from_str(raw).unwrap();
+    let mut names = std::collections::BTreeSet::new();
+    for group in ["probes", "transport_probes", "claim_probes"] {
+        for (index, row) in base[group].as_array_mut().unwrap().iter_mut().enumerate() {
+            // These synthetic IDs exercise the verifier, never certify production probes.
+            if row["verified_by"].as_array().unwrap().is_empty() {
+                row["verified_by"] = json!([format!("fixture::{group}_{index}")]);
+            }
+            for id in row["verified_by"].as_array().unwrap() {
+                names.insert(id.as_str().unwrap().to_owned());
+            }
+        }
+    }
+    let mut identity = fixture["identity"].clone();
+    identity["required_test_ids"] = json!(names);
+    identity["binary_sha256"] = fixture["binary_sha256"].clone();
+    for case in fixture["cases"].as_array().unwrap() {
+        let mut data = base.clone();
+        for edit in case["manifest_edits"].as_array().unwrap() {
+            *data.pointer_mut(edit[0].as_str().unwrap()).unwrap() = edit[1].clone();
+        }
+        let raw = data.to_string();
+        let mut proof = json!({"schema_version":1,"policy_version":1,"build_sha":fixture["identity"]["build_sha"],
+            "dependency_hash":fixture["identity"]["dependency_hash"],"census_hash":hex::encode(sha2::Sha256::digest(raw.as_bytes())),
+            "binary_sha256":fixture["binary_sha256"],"required_test_ids":names,
+            "tests":names.iter().map(|id|json!({"id":id,"executed":1,"failed":0,"skipped":0,"binary_sha256":fixture["binary_sha256"]})).collect::<Vec<_>>()});
+        for edit in case["edits"].as_array().unwrap() {
+            *proof.pointer_mut(edit[0].as_str().unwrap()).unwrap() = edit[1].clone();
+        }
+        let result = manifest::inspect_with_evidence(
+            &raw,
+            (case["missing"] != true).then_some(&proof),
+            Some(&identity),
+        );
+        assert_eq!(result["coverage"], case["coverage"], "{}", case["name"]);
+        assert_eq!(
+            result["evidence_linked"], case["linked"],
+            "{}",
+            case["name"]
+        );
+    }
+    #[cfg(unix)]
+    {
+        let script = "import json; from tests.test_nextest_ci import CensusEvidence; t=CensusEvidence(); t.setUp(); result=t.packaged_fixture(); t.doCleanups(); print(json.dumps(result))";
+        let output = std::process::Command::new("python3")
+            .args(["-c", script])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bundle: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("runtime")).unwrap();
+        let binary = dir.path().join("binary");
+        let bytes = hex::decode(bundle["runtime_binary"].as_str().unwrap()).unwrap();
+        std::fs::write(&binary, &bytes).unwrap();
+        for case in [
+            "valid",
+            "missing",
+            "wrong-head",
+            "wrong-binary",
+            "wrong-lock",
+            "stale-run",
+            "corrupt-proof",
+        ] {
+            for (name, value) in bundle["files"].as_object().unwrap() {
+                std::fs::write(
+                    dir.path().join("runtime").join(name),
+                    value.as_str().unwrap(),
+                )
+                .unwrap();
+            }
+            std::fs::write(&binary, &bytes).unwrap();
+            let source_path = dir.path().join("runtime/release-source.json");
+            let mut source = bundle["source"].clone();
+            let mut identity = bundle["identity"].clone();
+            let mut head = source["repo_head"].clone();
+            match case {
+                "missing" => {
+                    std::fs::remove_file(
+                        dir.path()
+                            .join("runtime/legacy_body_census-test-evidence.json"),
+                    )
+                    .unwrap();
+                }
+                "wrong-head" => head = json!("0".repeat(40)),
+                "wrong-binary" => std::fs::write(&binary, b"other build").unwrap(),
+                "wrong-lock" => {
+                    identity["dependency_hash"] = json!("0".repeat(64));
+                    let raw = identity.to_string();
+                    std::fs::write(
+                        dir.path()
+                            .join("runtime/legacy_body_census-test-identity.json"),
+                        &raw,
+                    )
+                    .unwrap();
+                    source["legacy_body_census"]["identity_sha256"] =
+                        json!(hex::encode(sha2::Sha256::digest(raw.as_bytes())));
+                }
+                "stale-run" => source["legacy_body_census"]["ci_run_id"] = json!("old"),
+                "corrupt-proof" => std::fs::write(
+                    dir.path()
+                        .join("runtime/legacy_body_census-test-evidence.json"),
+                    b"{}",
+                )
+                .unwrap(),
+                _ => {}
+            }
+            std::fs::write(&source_path, source.to_string()).unwrap();
+            let result =
+                manifest::packaged(dir.path(), bundle["raw"].as_str().unwrap(), &binary, &head);
+            assert_eq!(result["coverage"], case == "valid", "{case}");
+        }
+    }
+}
+
+#[test]
+fn journal_initialization_is_pinned_before_recovery_and_drain() {
+    let source = |path: &str, compiled: &str| {
+        assert!(!compiled.is_empty());
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+            .unwrap()
+    };
+    let lib = source("src/lib.rs", include_str!("../../lib.rs"));
+    let entry = lib.split("pub fn run_from_args()").nth(1).unwrap();
+    assert!(
+        entry.find("process_boot::initialize()").unwrap()
+            < entry.find("run_failure_marker_worker_from_env").unwrap()
+    );
+    let dcserver = source("src/cli/dcserver.rs", include_str!("../../cli/dcserver.rs"));
+    let pid = dcserver.find("// Write PID/version files").unwrap();
+    let later = &dcserver[pid..];
+    assert!(
+        later.find("dcserver.pid").unwrap() < later.find("legacy_body_census::start()").unwrap()
+    );
+    assert!(
+        later.find("std::env::remove_var(\"CLAUDECODE\")").unwrap()
+            < later.find("legacy_body_census::start()").unwrap()
+    );
+    assert!(
+        later.find("legacy_body_census::start()").unwrap()
+            < later.find("tokio::runtime::Runtime::new()").unwrap()
+    );
+    let bootstrap = source("src/bootstrap.rs", include_str!("../../bootstrap.rs"));
+    assert!(
+        bootstrap.find("legacy_body_census::start()").unwrap()
+            < bootstrap.find("load_runtime_config").unwrap()
+    );
+    let runtime_source = source(
+        "src/services/discord/runtime_bootstrap.rs",
+        include_str!("../discord/runtime_bootstrap.rs"),
+    );
+    let runtime = runtime_source
+        .split("pub(crate) async fn run_bot(")
+        .nth(1)
+        .unwrap();
+    let ready = runtime
+        .find("legacy_body_census::ensure_ready().await")
+        .unwrap();
+    for token in [
+        "run_bot_build_shared_data(",
+        "reap_inflight_rows_at_boot_blocking(",
+        "spawn_tui_prompt_relay(",
+        "run_bot_spawn_execution_runtime_tasks(",
+        "o_writer_host::spawn_execution(",
+    ] {
+        assert!(ready < runtime.find(token).unwrap(), "{token}");
+    }
+    let drain_source = source(
+        "src/server/outbox_worker.rs",
+        include_str!("../../server/outbox_worker.rs"),
+    );
+    let drain = drain_source
+        .split("pub(crate) async fn drain_message_outbox_once(")
+        .nth(1)
+        .unwrap();
+    assert!(
+        drain
+            .find("legacy_body_census::ensure_ready().await")
+            .unwrap()
+            < drain.find("drain_message_outbox_batch_once(").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn doctor_pid_mtime_is_preserved_as_a_distinct_identity() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("runtime")).unwrap();
+    std::fs::write(
+        root.path().join("runtime/dcserver.pid"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    let doctor = crate::cli::doctor::startup::current_boot_id_at(root.path()).unwrap();
+    let boot = boot();
+    let journal = Journal::open(
+        root.path(),
+        &boot,
+        None,
+        Duration::from_secs(2),
+        Arc::new(|| {}),
+    )
+    .await;
+    let written = header(root.path(), &boot);
+    assert_eq!(written["doctor_boot_id"], doctor);
+    assert_ne!(written["doctor_boot_id"], written["boot_id"]);
+    assert_eq!(journal.snapshot()["journal_ready"], true);
+}
+
+#[tokio::test]
+async fn unsampled_boot_child() {
+    assert!(uuid::Uuid::parse_str(&process_boot::initialize().id).is_ok());
+    let Ok(root) = std::env::var("ADK_I7651_CHILD_ROOT") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    std::fs::create_dir_all(root.join("runtime")).unwrap();
+    std::fs::write(
+        root.join("runtime/dcserver.pid"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    assert!(crate::config::snapshot().is_none());
+    start();
+    let config: crate::config::Config =
+        serde_json::from_value(json!({"server":{},"cluster":{"instance_id":"test-node"}})).unwrap();
+    crate::bootstrap::prepare_and_install_boot_snapshots(&config, None)
+        .await
+        .unwrap();
+    ensure_ready().await;
+    let written = header(root, process_boot::initialize());
+    assert_eq!(written["host"], "test-node");
+    assert!(
+        !health_json()["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("HOST_IDENTITY_UNKNOWN"))
+    );
+    std::process::exit(0);
+}
+
+#[test]
+fn two_processes_keep_unsampled_crash_boots_and_their_incarnations() {
+    let root = tempfile::tempdir().unwrap();
+    for _ in 0..2 {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                concat!(module_path!(), "::unsampled_boot_child").trim_start_matches("agentdesk::"),
+                "--nocapture",
+            ])
+            .env("ADK_I7651_CHILD_ROOT", root.path())
+            .env("AGENTDESK_ROOT_DIR", root.path())
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains("running 1 test"),
+            "child filter selected no test: {}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+    let headers: Vec<Value> = std::fs::read_dir(root.path().join("legacy_body_census"))
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "jsonl"))
+        .map(|entry| {
+            let raw = std::fs::read_to_string(entry.path()).unwrap();
+            serde_json::from_str(raw.lines().next().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(headers.len(), 2);
+    assert_ne!(headers[0]["boot_id"], headers[1]["boot_id"]);
+    let head: Value = serde_json::from_slice(
+        &std::fs::read(root.path().join("legacy_body_census/HEAD")).unwrap(),
+    )
+    .unwrap();
+    let current = headers
+        .iter()
+        .find(|header| header["boot_id"] == head["boot_id"])
+        .unwrap();
+    let predecessor = headers
+        .iter()
+        .find(|header| header["boot_id"] != head["boot_id"])
+        .unwrap();
+    assert_eq!(current["predecessor_boot_id"], predecessor["boot_id"]);
+}
+
+#[test]
+fn dangling_or_cyclic_predecessors_are_inconclusive() {
+    use std::collections::BTreeMap;
+    let ids: Vec<_> = (0..4).map(|_| uuid::Uuid::new_v4().to_string()).collect();
+    let anchor = json!({"boot_id":ids[0],"started_at_ms":1000});
+    let original: BTreeMap<_, _> = (0..3)
+        .map(|i| {
+            (
+                ids[i].clone(),
+                json!({
+                    "boot_id":ids[i],"started_at_ms":1000+i as i64,"coverage_start":anchor,
+                    "predecessor_boot_id":i.checked_sub(1).map(|n| &ids[n]),
+                }),
+            )
+        })
+        .collect();
+    for (case, expected) in [
+        ("valid", true),
+        ("same_time", true),
+        ("fork_skips_middle", false),
+        ("same_time_fork", false),
+        ("outside_boundary", true),
+        ("empty", false),
+        ("middle_missing", false),
+        ("cycle", false),
+        ("before_start", false),
+        ("after_end", false),
+        ("reversed_end", false),
+        ("wall_reversed", false),
+        ("anchor_missing", false),
+        ("anchor_reset", false),
+        ("boundary_missing", false),
+        ("boundary_equal_start", false),
+        ("boundary_wrong_id", false),
+        ("identity_alias", false),
+    ] {
+        let mut headers = original.clone();
+        let mut end = 1002;
+        let mut boundary = None;
+        match case {
+            "empty" => headers.clear(),
+            "middle_missing" => {
+                headers.remove(&ids[1]);
+            }
+            "cycle" => {
+                for row in headers.values_mut() {
+                    row["started_at_ms"] = json!(1000);
+                }
+                headers.get_mut(&ids[0]).unwrap()["predecessor_boot_id"] = json!(ids[2]);
+            }
+            "fork_skips_middle" => {
+                headers.get_mut(&ids[2]).unwrap()["predecessor_boot_id"] = json!(ids[0])
+            }
+            "same_time" | "same_time_fork" => {
+                for row in headers.values_mut() {
+                    row["started_at_ms"] = json!(1000);
+                }
+                end = 1000;
+                if case == "same_time_fork" {
+                    headers.get_mut(&ids[2]).unwrap()["predecessor_boot_id"] = json!(ids[0]);
+                }
+            }
+            "before_start" => headers.get_mut(&ids[1]).unwrap()["started_at_ms"] = json!(999),
+            "after_end" => headers.get_mut(&ids[2]).unwrap()["started_at_ms"] = json!(1003),
+            "reversed_end" => end = 999,
+            "wall_reversed" => headers.get_mut(&ids[2]).unwrap()["started_at_ms"] = json!(1000),
+            "anchor_missing" => {
+                headers.remove(&ids[0]);
+            }
+            "anchor_reset" => {
+                headers.get_mut(&ids[2]).unwrap()["coverage_start"] =
+                    json!({"boot_id":ids[2],"started_at_ms":1002})
+            }
+            "outside_boundary"
+            | "boundary_missing"
+            | "boundary_equal_start"
+            | "boundary_wrong_id" => {
+                headers.get_mut(&ids[0]).unwrap()["predecessor_boot_id"] = json!(ids[3]);
+                if case != "boundary_missing" {
+                    boundary = Some(
+                        json!({"boot_id":if case == "boundary_wrong_id" { &ids[2] } else { &ids[3] },"started_at_ms":if case == "boundary_equal_start" {1000} else {999}}),
+                    );
+                }
+            }
+            "identity_alias" => headers.get_mut(&ids[2]).unwrap()["boot_id"] = json!(ids[1]),
+            _ => {}
+        }
+        assert_eq!(
+            window::valid_chain(&headers, &anchor, end, boundary.as_ref(), &mut 0),
+            expected,
+            "{case}"
+        );
+    }
+}

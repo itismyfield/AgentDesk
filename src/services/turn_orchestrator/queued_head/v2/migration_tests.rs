@@ -1,7 +1,9 @@
 use super::*;
 use crate::config::TestRuntimeRootGuard;
+#[cfg(unix)]
 use crate::services::discord::runtime_store::durable_publish::flush_probe::{Plan, Step, Watch};
 use crate::services::provider::ProviderKind;
+#[cfg(unix)]
 use crate::services::turn_orchestrator::queued_head::{
     PersistedHeadInjection, canonical_item, compat, mend::HeadAttempt, parse_snapshot,
     snapshot_json,
@@ -32,6 +34,7 @@ fn seed(channel: u64, raw: &str) -> PathBuf {
     file
 }
 
+#[cfg(unix)]
 fn legacy_attempt() -> HeadAttempt {
     HeadAttempt {
         nonce: "legacy-nonce".into(),
@@ -42,6 +45,7 @@ fn legacy_attempt() -> HeadAttempt {
     }
 }
 
+#[cfg(unix)]
 fn envelope(items: Vec<PendingQueueItem>, attempted: bool) -> String {
     let head = attempted.then(|| {
         let original = items[0].clone();
@@ -69,6 +73,7 @@ fn adopt(file: &Path, channel: u64) -> Result<Owner, String> {
     Owner::adopt(file.to_path_buf(), format!("migration-{channel}"))
 }
 
+#[cfg(unix)]
 #[test]
 fn legacy_shapes_migrate_once_without_inventing_provenance() {
     let _root = TestRuntimeRootGuard::new();
@@ -131,6 +136,7 @@ fn legacy_shapes_migrate_once_without_inventing_provenance() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn legacy_terminal_window_starts_at_the_first_tick() {
     let _root = TestRuntimeRootGuard::new();
@@ -147,6 +153,7 @@ fn legacy_terminal_window_starts_at_the_first_tick() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn an_unchanged_tick_publishes_nothing() {
     let _root = TestRuntimeRootGuard::new();
@@ -217,6 +224,7 @@ fn adoption_forgets_the_ledger_entry_of_a_proven_unsent_paste() {
             admission_receipts: vec![],
             admission_sequence: 0,
             admission_binds: Vec::new(),
+            owed_drop_receipts: Vec::new(),
         };
         let file = seed(channel, &serde_json::to_string_pretty(&snapshot).unwrap());
         let register = || {

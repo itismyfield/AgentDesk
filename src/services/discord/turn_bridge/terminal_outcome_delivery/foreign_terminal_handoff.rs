@@ -140,7 +140,6 @@ pub(super) async fn handle_known_owner(
                 && optional_durable_current_msg_id_from_detached(ctx.current_msg_id).is_some();
             if o_panel
                 || should_delete_bridge_created_watcher_orphan_response(
-                    shared_owned.ui.status_panel_v2_enabled,
                     ctx.watcher_handoff_claim_outcome,
                     ctx.bridge_created_response_placeholder_msg_id,
                     ctx.current_msg_id,
@@ -458,6 +457,19 @@ pub(super) async fn resume_with_gateway(
     let provider = ProviderKind::from_str(&snapshot.provider).ok_or("unknown custody provider")?;
     let channel = ChannelId::new(snapshot.channel_id);
     let owner_channel = ChannelId::new(snapshot.watcher_owner_channel_id);
+    use crate::services::discord::outbound::body_census::BodyOffer;
+    // Old custody stores rendered notices and answers in the same optional field.
+    let mut census_offer = if snapshot.full_response.trim().is_empty()
+        && snapshot.delivery_body.is_some()
+    {
+        BodyOffer::Unknown
+    } else {
+        BodyOffer::recovered(
+            !response_portion_after_offset(&snapshot.full_response, snapshot.response_sent_offset)
+                .trim()
+                .is_empty(),
+        )
+    };
     if snapshot.delivery_body.is_none()
         && snapshot.full_response.trim().is_empty()
         && let Some(notice) = snapshot.empty_recovery_notice.as_deref()
@@ -474,6 +486,7 @@ pub(super) async fn resume_with_gateway(
                 inflight_state: &snapshot.local,
                 full_response: &snapshot.full_response,
             })?;
+        census_offer = BodyOffer::recovered(!recovered.trim().is_empty());
         snapshot.delivery_body = Some(terminal_delivery_response_after_offset(
             &recovered,
             0,
@@ -566,10 +579,16 @@ pub(super) async fn resume_with_gateway(
             // acknowledged prefix before another await, while the SAME source
             // lease and custody file lock remain held across the whole loop.
             let claim = crate::services::tui_o::cutover::BodyClaim::new(snapshot.channel_id, kind);
+            let census = crate::services::discord::outbound::body_census::BodySource::from_state(
+                &snapshot.local,
+            );
             let (snap, chunks) = (&mut *snapshot, &chunks);
             let post = move || async move {
                 for chunk in chunks.iter().skip(snap.delivery_receipts.len()) {
-                    let id = TurnGateway::send_message(gateway, channel, chunk).await?;
+                    let id = crate::services::discord::outbound::body_census::BodySource::inherited()
+                        .observe(crate::services::tui_o::cutover::BodySite::BridgeForeignTerminal,
+                            crate::services::discord::outbound::body_census::BodyOffer::Recovered,
+                            TurnGateway::send_message(gateway, channel, chunk)).await?;
                     if super::super::headless_delivery::is_synthetic_headless_message_id(id) {
                         return Err("terminal POST returned no real Discord receipt".into());
                     }
@@ -581,7 +600,18 @@ pub(super) async fn resume_with_gateway(
             };
             #[cfg(all(test, unix))]
             crate::services::discord::recovery_engine::o_settlement_tests::before_claim();
-            match crate::services::tui_o::cutover::claim_then_send(Some(claim), post).await {
+            match census
+                .observe(
+                    crate::services::tui_o::cutover::BodySite::BridgeForeignTerminal,
+                    census_offer,
+                    crate::services::tui_o::cutover::claim_then_send_at(
+                        crate::services::tui_o::cutover::BodySite::BridgeForeignTerminal,
+                        Some(claim),
+                        post,
+                    ),
+                )
+                .await
+            {
                 Ok(crate::services::tui_o::cutover::BodySend::Sent(posted)) => posted?,
                 // O took the channel since the peek: settle the custody as O's.
                 Ok(crate::services::tui_o::cutover::BodySend::OwnedByO) => {

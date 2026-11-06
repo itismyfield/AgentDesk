@@ -928,3 +928,11 @@ fn preserve_stop_unconfirmed_keeps_token_and_inflight() {
 
 #[path = "native_stop_contract_tests.rs"]
 mod native_contract;
+
+#[path = "native_stop_ownership_tests.rs"]
+pub(super) mod ownership;
+
+#[path = "native_stop_gate_tests.rs"]
+mod gate;
+#[path = "native_stop_identity_tests.rs"]
+mod identity;

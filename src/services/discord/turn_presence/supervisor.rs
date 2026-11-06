@@ -120,6 +120,51 @@ pub(in crate::services::discord) fn spawn(shared: Arc<SharedData>, provider: Pro
     });
 }
 
+/// An attachment's Busy read joins the existing stamped presence publication and effects.
+#[cfg(unix)]
+pub(in crate::services::discord) async fn observe_source_busy(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: u64,
+    tmux: &str,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    #[cfg(test)] root: Option<std::path::PathBuf>,
+) -> Option<bool> {
+    if !observes(provider, channel) {
+        return None;
+    }
+    let presence = lock(&PRESENCE).get(&channel)?.clone();
+    let effects = Arc::new(LiveEffects {
+        shared: shared.clone(),
+        provider: provider.clone(),
+    });
+    let waiting = effects.mailbox(channel).await;
+    let mut actions = Vec::new();
+    let busy = super::activity::with_busy_source(
+        provider,
+        channel,
+        tmux,
+        binding,
+        #[cfg(test)]
+        root,
+        |reading| {
+            actions = apply(
+                &mut lock(&presence),
+                channel,
+                Instant::now(),
+                reading,
+                waiting,
+                effects.agent_id(channel),
+            );
+        },
+    )?;
+    let supervisor = Supervisor::new(effects);
+    for action in actions {
+        supervisor.act(channel, &presence, action).await;
+    }
+    Some(busy)
+}
+
 /// The turn endpoint's `turn_presence` block, or `None` outside turn mode.
 pub(crate) fn status(channel: u64) -> Option<serde_json::Value> {
     if !crate::services::tui_o::turn_mode::transcript_turns(channel) {
@@ -220,6 +265,8 @@ impl Presence {
 enum Action {
     Typing(u64),
     Kickoff,
+    /// The idle transition of a channel whose input owner holds the queue wakes that owner.
+    WakeOwner,
     CheckHeld(u64),
     Notice(String),
     UnknownDrive,
@@ -238,11 +285,13 @@ trait Effects: Send + Sync + 'static {
         None
     }
     async fn read(&self, channel: u64) -> Reading;
-    /// Whether a mailbox token holds the channel, and its oldest waiting input.
-    async fn mailbox(&self, channel: u64) -> (bool, Option<u64>);
+    /// Whether a mailbox token holds the channel, its oldest waiting input, and whether an input
+    /// owner holds that queue.
+    async fn mailbox(&self, channel: u64) -> (bool, Option<u64>, bool);
     async fn typing(&self, channel: u64) -> Result<(), String>;
     fn idle(&self, channel: u64);
     fn kickoff(&self, channel: u64);
+    fn wake_owner(&self, channel: u64);
     async fn legacy_gate_blocked(&self, channel: u64) -> bool;
     /// The durable row's hold on the channel's queue, when a prior process's Herdr turn owns it.
     async fn row_hold(&self, _channel: u64) -> Option<&'static str> {
@@ -357,7 +406,7 @@ impl<E: Effects> Supervisor<E> {
                 continue;
             }
             let reading = self.effects.read(channel).await;
-            let (token, head) = self.effects.mailbox(channel).await;
+            let waiting = self.effects.mailbox(channel).await;
             // A judgment a later read or rebuild already moved past is never published.
             let published = reading
                 .publish_if_current(|| {
@@ -367,7 +416,7 @@ impl<E: Effects> Supervisor<E> {
                         channel,
                         now,
                         &reading,
-                        (token, head),
+                        waiting,
                         self.effects.agent_id(channel),
                     );
                     if reading.observed.activity == Activity::Idle {
@@ -401,7 +450,7 @@ impl<E: Effects> Supervisor<E> {
             let Some(generation) = generation else {
                 continue;
             };
-            let (token, _) = self.effects.mailbox(channel).await;
+            let (token, ..) = self.effects.mailbox(channel).await;
             let now = Instant::now();
             {
                 let mut guard = lock(&presence);
@@ -455,6 +504,7 @@ impl<E: Effects> Supervisor<E> {
                 tracing::info!(channel, "[turn_presence] kickoff channel={channel}");
                 self.effects.kickoff(channel);
             }
+            Action::WakeOwner => self.effects.wake_owner(channel),
             Action::CheckHeld(head) => {
                 let reason = match self.effects.row_hold(channel).await {
                     Some(reason) => reason,
@@ -537,10 +587,10 @@ fn apply(
     channel: u64,
     now: Instant,
     reading: &Reading,
-    mailbox: (bool, Option<u64>),
+    mailbox: (bool, Option<u64>, bool),
     agent: Option<String>,
 ) -> Vec<Action> {
-    let (token, head) = mailbox;
+    let (token, head, owned) = mailbox;
     let observed = reading.observed;
     let mut actions = Vec::new();
     let first = presence.observed_at.is_none();
@@ -582,19 +632,19 @@ fn apply(
         }
     }
     if observed.activity == Activity::Idle {
-        wake(presence, now, moved || first, token, head, &mut actions);
+        let at = (now, moved || first);
+        wake(presence, at, (token, head, owned), &mut actions);
     }
     actions
 }
 
 /// Level-triggered: an idle channel with a queue and no token is woken at once on the transition
-/// and every 30 seconds after; a head that two wakes did not move is looked into once.
+/// and every 30 seconds after; a head that two wakes did not move is looked into once. An owned
+/// queue is woken only on the transition: an unchanged Idle is no event.
 fn wake(
     presence: &mut Presence,
-    now: Instant,
-    turned_idle: bool,
-    token: bool,
-    head: Option<u64>,
+    (now, turned_idle): (Instant, bool),
+    (token, head, owned): (bool, Option<u64>, bool),
     actions: &mut Vec<Action>,
 ) {
     let Some(head) = head else {
@@ -611,14 +661,18 @@ fn wake(
     if wakes >= HELD_AFTER_WAKES && presence.queue_held.is_none() {
         actions.push(Action::CheckHeld(head));
     }
-    let due = presence
-        .last_kick_at
-        .is_none_or(|at| now.duration_since(at) >= WAKE_EVERY);
+    let due = !owned
+        && presence
+            .last_kick_at
+            .is_none_or(|at| now.duration_since(at) >= WAKE_EVERY);
     if !token && (turned_idle || due) {
         presence.last_kick_at = Some(now);
         presence.kickoffs_total += 1;
         presence.woken_head = Some((head, wakes + 1));
-        actions.push(Action::Kickoff);
+        actions.push(match owned {
+            true => Action::WakeOwner,
+            false => Action::Kickoff,
+        });
     }
     if let Some((reason, _, since)) = presence.queue_held
         && now.duration_since(since) >= HELD_NOTICE_AFTER
@@ -695,20 +749,35 @@ fn held_notice(reason: &str) -> String {
     crate::services::discord::session_notice::subtext("⚠️", &text)
 }
 
-/// The mailbox token and the oldest waiting input: queue head, in-memory reservation, then the
-/// on-disk pending marker a failed requeue can leave behind. Read only; kickoff decides the start.
+/// The mailbox token and the oldest waiting input, read without minting a mailbox: an owner's
+/// unattempted front, else queue head, reservation, then the on-disk marker a failed requeue left.
 async fn waiting_input(
     shared: &SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
-) -> (bool, Option<u64>) {
+) -> (bool, Option<u64>, bool) {
+    if let Some(mailbox) = shared.mailbox_peek(channel) {
+        let owner = mailbox.v2_request(|slot| {
+            Ok(slot
+                .as_ref()
+                .map(|owner| owner.front().map(|front| front.1.message_id)))
+        });
+        if let Ok(Some(front)) = owner.await {
+            let token = super::super::mailbox_snapshot(shared, channel).await;
+            return (token.cancel_token.is_some(), front, true);
+        }
+    }
     let snapshot = super::super::mailbox_snapshot(shared, channel).await;
     let head = snapshot.intervention_queue.first().map(|i| i.message_id);
     let waiting = head.or(snapshot.pending_user_dispatch).or_else(|| {
         let load = crate::services::turn_orchestrator::load_channel_pending_dispatch_marker;
         load(provider, &shared.token_hash, channel).map(|(marker, _)| marker.message_id)
     });
-    (snapshot.cancel_token.is_some(), waiting.map(|id| id.get()))
+    (
+        snapshot.cancel_token.is_some(),
+        waiting.map(|id| id.get()),
+        false,
+    )
 }
 
 struct LiveEffects {
@@ -754,7 +823,7 @@ impl Effects for LiveEffects {
         reading_now(&self.shared, &self.provider, ChannelId::new(channel)).await
     }
 
-    async fn mailbox(&self, channel: u64) -> (bool, Option<u64>) {
+    async fn mailbox(&self, channel: u64) -> (bool, Option<u64>, bool) {
         waiting_input(&self.shared, &self.provider, ChannelId::new(channel)).await
     }
 
@@ -772,6 +841,17 @@ impl Effects for LiveEffects {
             ChannelId::new(channel),
             "turn_presence_idle",
         );
+    }
+
+    fn wake_owner(&self, channel: u64) {
+        tracing::info!(channel, "[turn_presence] owner wake channel={channel}");
+        #[cfg(unix)]
+        crate::services::discord::router::message_handler::owner_wake(
+            &self.shared,
+            ChannelId::new(channel),
+        );
+        #[cfg(not(unix))]
+        self.kickoff(channel);
     }
 
     fn idle(&self, channel: u64) {

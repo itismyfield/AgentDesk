@@ -38,6 +38,7 @@ pub(crate) mod terminal_prepare_test {
 
 #[cfg(unix)]
 pub(in super::super) struct PinnedTerminalTransport<'a> {
+    pub(in super::super) census: crate::services::discord::outbound::body_census::BodySource,
     pub(in super::super) source: (&'a SharedData, &'a dyn TurnGateway, &'a ProviderKind),
     pub(in super::super) admitted: Option<&'a CodexRange>,
     pub(in super::super) target: (ChannelId, ChannelId, MessageId),
@@ -55,7 +56,8 @@ impl PinnedTerminalTransport<'_> {
         long: bool,
     ) -> (bool, bool, Option<MessageId>) {
         use crate::services::discord::formatting::ReplaceLongMessageOutcome as Replace;
-        use crate::services::tui_o::cutover::{BodySend, claim_then_send};
+        use crate::services::discord::outbound::body_census::BodyOffer;
+        use crate::services::tui_o::cutover::{BodySend, BodySite, claim_then_send_at};
         use LeaseOutcome::{NotDelivered, Unknown};
         use terminal_delivery::PinnedBridgeCommit::*;
         let (shared, gateway, provider) = self.source;
@@ -82,13 +84,37 @@ impl PinnedTerminalTransport<'_> {
                     self.trace.2,
                 )
             };
-            match claim_then_send(self.claim, send).await {
+            match self
+                .census
+                .clone()
+                .observe(
+                    BodySite::BridgePinnedTerminal,
+                    BodyOffer::Body,
+                    claim_then_send_at(BodySite::BridgePinnedTerminal, self.claim, send),
+                )
+                .await
+            {
                 Ok(BodySend::Sent(Ok((_, tail)))) => (tail, false, false),
                 Ok(_) | Err(_) => (None, true, false),
             }
         } else {
-            let send = || gateway.replace_message_with_outcome(channel, msg, body);
-            match claim_then_send(self.claim, send).await {
+            let send = || {
+                crate::services::discord::outbound::body_census::BodySource::inherited().observe(
+                    BodySite::BridgePinnedTerminal,
+                    BodyOffer::Body,
+                    gateway.replace_message_with_outcome(channel, msg, body),
+                )
+            };
+            match self
+                .census
+                .clone()
+                .observe(
+                    BodySite::BridgePinnedTerminal,
+                    BodyOffer::Body,
+                    claim_then_send_at(BodySite::BridgePinnedTerminal, self.claim, send),
+                )
+                .await
+            {
                 Ok(BodySend::Sent(Ok(Replace::EditedOriginal))) => (Some(msg), false, false),
                 Ok(BodySend::Sent(Ok(Replace::SentFallbackAfterEditFailure {
                     replacement_anchor,
@@ -166,20 +192,31 @@ pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
     // The source proof covers the full admitted body; recovery has already
     // formatted only the suffix not represented by frozen Discord prefixes.
     let long = terminal_delivery::terminal_delivery_should_send_new_chunks(true, text);
-    let (committed, _, receipt) = PinnedTerminalTransport {
-        source: (shared, gateway, &provider),
-        admitted: Some(&admitted),
-        target: (owner, channel, message),
-        payload: (
-            row.tmux_session_name.as_deref(),
-            text,
-            admitted.source.range,
-        ),
-        trace: (row.dispatch_id.as_deref(), row.session_key.as_deref(), None),
-        claim,
-    }
-    .deliver(pinned, long)
-    .await;
+    use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+    let (committed, _, receipt) = BodySource::from_state(row)
+        .observe(
+            crate::services::tui_o::cutover::BodySite::RecoveryNotice,
+            BodyOffer::recovered(crate::services::discord::recovery_engine::carries_body(
+                row, text,
+            )),
+            PinnedTerminalTransport {
+                census: crate::services::discord::outbound::body_census::BodySource::from_state(
+                    row,
+                ),
+                source: (shared, gateway, &provider),
+                admitted: Some(&admitted),
+                target: (owner, channel, message),
+                payload: (
+                    row.tmux_session_name.as_deref(),
+                    text,
+                    admitted.source.range,
+                ),
+                trace: (row.dispatch_id.as_deref(), row.session_key.as_deref(), None),
+                claim,
+            }
+            .deliver(pinned, long),
+        )
+        .await;
     committed
         && receipt.is_some_and(|anchor| {
             dr::confirmed_delivery_receipt_exists(
@@ -306,6 +343,7 @@ macro_rules! dispatch_pinned_terminal {
                 }
                 $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Pinned(pinned) => {
                     let transport = PinnedTerminalTransport {
+                        census: $crate::services::discord::outbound::body_census::BodySource::from_state(&$inflight),
                         source: ($shared.as_ref(), $gateway.as_ref(), &$provider),
                         admitted: $admitted,
                         target: ($owner, $channel, $message),
@@ -396,8 +434,6 @@ pub(in crate::services::discord::turn_bridge) struct StreamLoopContext {
     pub(in crate::services::discord::turn_bridge) provider: ProviderKind,
     pub(in crate::services::discord::turn_bridge) cancel_token:
         Arc<crate::services::provider::CancelToken>,
-    pub(in crate::services::discord::turn_bridge) user_text_owned: String,
-    pub(in crate::services::discord::turn_bridge) request_owner_name: String,
     pub(in crate::services::discord::turn_bridge) adk_session_key: Option<String>,
     pub(in crate::services::discord::turn_bridge) adk_session_name: Option<String>,
     pub(in crate::services::discord::turn_bridge) adk_session_info: Option<String>,

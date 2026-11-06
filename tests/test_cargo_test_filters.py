@@ -30,7 +30,7 @@ class CargoTestFilters(unittest.TestCase):
 
     def test_a_name_filter_or_expansion_in_any_of_the_three_workflows_fails(self) -> None:
         main_cmd = "cargo test --bins --test '*' -- --skip _pg --skip pg_ --skip postgres\n"
-        nightly_cmd = "cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres\n"
+        nightly_cmd = "cargo test --bins --examples --test '*' -- --skip _pg --skip pg_ --skip postgres\n"
         cases = (
             ("main filter before --", ".github/workflows/ci-main.yml", main_cmd,
              main_cmd.replace("--test '*' --", "--test '*' transition --"), "transition"),

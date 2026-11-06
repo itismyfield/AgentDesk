@@ -324,7 +324,7 @@ async fn status_pg(pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
     let command_provider_2 = pg_kv_value(pool, "onboarding_command_provider_2").await?;
 
     let completed = has_bots && agent_count > 0;
-    let runtime_root = crate::cli::agentdesk_runtime_root();
+    let runtime_root = crate::config::runtime_root();
     let completion_state = runtime_root
         .as_ref()
         .and_then(|root| load_onboarding_completion_state(root).ok().flatten());
@@ -372,7 +372,7 @@ async fn status_pg(pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
 }
 
 fn status_config() -> Result<serde_json::Value, String> {
-    let runtime_root = crate::cli::agentdesk_runtime_root();
+    let runtime_root = crate::config::runtime_root();
     let config = match runtime_root.as_ref() {
         Some(root) => load_onboarding_config(root)?,
         None => crate::config::Config::default(),
@@ -453,7 +453,7 @@ pub async fn draft_get(state: &AppState) -> AppResult<(StatusCode, Json<serde_js
         }
     } else {
         {
-            crate::cli::agentdesk_runtime_root()
+            crate::config::runtime_root()
                 .as_ref()
                 .and_then(|root| load_onboarding_config(root).ok())
                 .map(|config| config.discord.guild_id.is_some() && !config.agents.is_empty())
@@ -461,7 +461,7 @@ pub async fn draft_get(state: &AppState) -> AppResult<(StatusCode, Json<serde_js
         }
     };
 
-    let root = crate::cli::agentdesk_runtime_root()
+    let root = crate::config::runtime_root()
         .ok_or_else(|| AppError::internal("cannot determine runtime root"))?;
 
     let draft = load_onboarding_draft(&root)
@@ -487,7 +487,7 @@ pub async fn draft_get(state: &AppState) -> AppResult<(StatusCode, Json<serde_js
 /// PUT /api/onboarding/draft
 /// Persists the in-progress onboarding draft required to resume across browsers.
 pub async fn draft_put(body: OnboardingDraft) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    let root = crate::cli::agentdesk_runtime_root()
+    let root = crate::config::runtime_root()
         .ok_or_else(|| AppError::internal("cannot determine runtime root"))?;
 
     crate::runtime_layout::ensure_runtime_layout(&root).map_err(|error| {
@@ -513,7 +513,7 @@ pub async fn draft_put(body: OnboardingDraft) -> AppResult<(StatusCode, Json<ser
 /// DELETE /api/onboarding/draft
 /// Explicitly removes the in-progress onboarding draft.
 pub async fn draft_delete() -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    let root = crate::cli::agentdesk_runtime_root()
+    let root = crate::config::runtime_root()
         .ok_or_else(|| AppError::internal("cannot determine runtime root"))?;
 
     clear_onboarding_draft(&root).map_err(AppError::internal)?;
@@ -2138,7 +2138,7 @@ fn validate_complete_request(
 fn prepare_complete_runtime_root(
     ctx: &CompleteErrorContext<'_>,
 ) -> Result<PathBuf, (StatusCode, serde_json::Value)> {
-    let Some(root) = crate::cli::agentdesk_runtime_root() else {
+    let Some(root) = crate::config::runtime_root() else {
         return Err(ctx.error(
             StatusCode::INTERNAL_SERVER_ERROR,
             None,
@@ -2756,14 +2756,14 @@ mod role_map_retirement_tests {
 
     #[test]
     fn completion_persists_yaml_without_role_map_and_ignores_leftovers() {
-        let root = tempfile::tempdir().unwrap();
-        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
         let policy_dir = root.path().join("policies");
         std::fs::create_dir_all(&policy_dir).unwrap();
         std::fs::write(policy_dir.join("default-pipeline.yaml"), "name: fixture\nversion: 1\nstates: [{id: ready, label: Ready}]\ntransitions: [{from: ready, to: ready, type: free}]\n").unwrap();
         let mut config = crate::config::Config::default();
         config.policies.dir = policy_dir;
         let path = onboarding_config_path(root.path());
+        crate::config::test_env::assert_test_config_write_within_root(root.path(), &path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         crate::config::save_to_path(&path, &config).unwrap();
         let body: CompleteBody = serde_json::from_value(json!({
@@ -2833,6 +2833,35 @@ mod role_map_retirement_tests {
             "invalid JSON must stay untouched"
         );
     }
+    #[test]
+    fn completion_preserves_inherited_external_config_bytes() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = outside.path().join("sentinel.yaml");
+        std::fs::write(&sentinel, b"server: {}\n").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "services::onboarding::role_map_retirement_tests::completion_persists_yaml_without_role_map_and_ignores_leftovers",
+                "--exact",
+            ])
+            .env("AGENTDESK_ROOT_DIR", root.path())
+            .env("AGENTDESK_CONFIG", &sentinel)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "onboarding child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("test result: ok. 1 passed; 0 failed; 0 ignored;")
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"server: {}\n");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn yaml_conflicts_remain_when_legacy_json_is_invalid_pg() {
         let root = tempfile::tempdir().unwrap();

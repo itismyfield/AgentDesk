@@ -107,7 +107,6 @@ fn strip_headless_placeholder_artifacts(text: &str, provider: &ProviderKind) -> 
 fn headless_streaming_placeholder_cleanup_action(
     last_edit_text: &str,
     provider: &ProviderKind,
-    status_panel_v2_enabled: bool,
     single_message_panel_footer_mode: bool,
 ) -> HeadlessPlaceholderCleanupAction {
     if single_message_panel_footer_mode {
@@ -135,14 +134,10 @@ fn headless_streaming_placeholder_cleanup_action(
             };
         }
     }
-    let mut cleaned = if status_panel_v2_enabled {
-        super::formatting::format_for_discord_with_status_panel(last_edit_text, provider)
-    } else {
-        super::formatting::format_for_discord_with_provider(last_edit_text, provider)
-    };
-    if status_panel_v2_enabled {
-        cleaned = strip_headless_placeholder_artifacts(&cleaned, provider);
-    }
+    let cleaned = strip_headless_placeholder_artifacts(
+        &super::formatting::format_for_discord_with_status_panel(last_edit_text, provider),
+        provider,
+    );
     if cleaned.trim().is_empty() {
         HeadlessPlaceholderCleanupAction::Delete
     } else if cleaned == last_edit_text {
@@ -172,8 +167,7 @@ pub(super) async fn cleanup_headless_streaming_placeholder_after_delivery(
     match headless_streaming_placeholder_cleanup_action(
         last_edit_text,
         provider,
-        shared.ui.status_panel_v2_enabled,
-        super::bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled),
+        super::bridge_single_message_panel_footer_enabled(),
     ) {
         HeadlessPlaceholderCleanupAction::Delete => {
             if let Err(error) =
@@ -188,8 +182,10 @@ pub(super) async fn cleanup_headless_streaming_placeholder_after_delivery(
             }
         }
         HeadlessPlaceholderCleanupAction::Edit(cleaned) => {
-            if let Err(error) =
-                super::http::edit_channel_message(&http, channel_id, current_msg_id, &cleaned).await
+            if let Err(error) = super::super::outbound::body_census::forward(
+                super::http::edit_channel_message(&http, channel_id, current_msg_id, &cleaned),
+            )
+            .await
             {
                 tracing::warn!(
                     "[turn_bridge] failed to clean stale headless streaming placeholder {} in channel {}: {}",
@@ -277,6 +273,9 @@ pub(super) async fn enqueue_headless_delivery(
     arguments: HeadlessDeliveryArguments<'_>,
 ) -> HeadlessDeliveryOutcome {
     let runtime = arguments.into_runtime_arguments();
+    use crate::services::discord::outbound::body_census::BodyOffer;
+    use crate::services::tui_o::{channel_policy::ClaimReason, cutover::BodySite};
+    let body_source = runtime.body_source.clone().reason(ClaimReason::NoClaim);
     let HeadlessDeliveryRuntimeArguments {
         shared,
         channel_id,
@@ -314,7 +313,15 @@ pub(super) async fn enqueue_headless_delivery(
             }
         };
     if let Some(pool) = shared.pg_pool.as_ref() {
-        match enqueue_headless_turn_row(pool, runtime, output_origin.as_ref()).await {
+        match body_source
+            .clone()
+            .observe(
+                BodySite::BridgeHeadless,
+                BodyOffer::body(!content.trim().is_empty()),
+                enqueue_headless_turn_row(pool, runtime, output_origin.as_ref()),
+            )
+            .await
+        {
             Ok(crate::services::message_outbox::OutboxEnqueueOutcome::Enqueued {
                 id: outbox_id,
             }) => {
@@ -497,7 +504,13 @@ pub(super) async fn enqueue_headless_delivery(
             scope,
             None,
             content,
-            send_long_message_raw(&http, channel_id, content, shared),
+            body_source.observe(
+                BodySite::BridgeHeadless,
+                BodyOffer::body(!content.trim().is_empty()),
+                super::super::outbound::body_census::forward(send_long_message_raw(
+                    &http, channel_id, content, shared,
+                )),
+            ),
         )
         .await
         .map_err(|error| format!("headless direct delivery failed: {error}"))?;
@@ -576,13 +589,22 @@ pub(super) async fn enqueue_claimed_headless_delivery(
     claim: Option<crate::services::tui_o::cutover::BodyClaim<'_>>,
     arguments: HeadlessDeliveryArguments<'_>,
 ) -> HeadlessDeliveryOutcome {
-    use crate::services::tui_o::cutover::{BodySend, claim_then_send};
-    match claim_then_send(claim, || enqueue_headless_delivery(arguments)).await {
-        Ok(BodySend::Sent(outcome)) => outcome,
-        Ok(BodySend::OwnedByO) | Err(_) => HeadlessDeliveryOutcome::Ambiguous {
-            surfaced_error: Some("TUI output identity held".to_string()),
-        },
-    }
+    use crate::services::tui_o::cutover::{BodySend, BodySite, claim_then_send_at};
+    arguments
+        .body_source()
+        .scope(async {
+            match claim_then_send_at(BodySite::BridgeHeadless, claim, || {
+                enqueue_headless_delivery(arguments)
+            })
+            .await
+            {
+                Ok(BodySend::Sent(outcome)) => outcome,
+                Ok(BodySend::OwnedByO) | Err(_) => HeadlessDeliveryOutcome::Ambiguous {
+                    surfaced_error: Some("TUI output identity held".to_string()),
+                },
+            }
+        })
+        .await
 }
 
 #[cfg(test)]
@@ -677,7 +699,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "[Bash] /bin/zsh -lc 'cargo test'\n⠙ Processing...",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -689,7 +710,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "⠂ Processing...\n\n```\n[Bash] /bin/zsh -lc 'grep -n foo src/lib.rs'\n[Bash] /bin/zsh -lc \"sed -n '1,40p' src/lib.rs\"\n```",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -701,7 +721,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "partial answer\n\n⠙ Processing...",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -716,7 +735,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "partial answer\n\n⠙ 계속 처리 중",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -734,7 +752,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             &format!("partial answer\n\n{footer}"),
             &ProviderKind::Claude,
-            true,
             true,
         );
 

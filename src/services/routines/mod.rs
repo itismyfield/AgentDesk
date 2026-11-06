@@ -12,6 +12,7 @@ pub mod action;
 pub mod agent_executor;
 pub mod discord_log;
 pub mod fresh_session_reaper;
+mod legacy_body_census;
 pub mod loader;
 pub mod migrated;
 pub mod runtime;

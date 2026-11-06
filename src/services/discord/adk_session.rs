@@ -136,7 +136,7 @@ pub(in crate::services::discord) fn build_namespaced_session_key(
     provider: &ProviderKind,
     tmux_name: &str,
 ) -> String {
-    let hostname = crate::services::platform::hostname_short();
+    let hostname = crate::services::platform::session_host_label();
     format!(
         "{}/{}/{}:{}",
         provider.as_str(),
@@ -147,7 +147,7 @@ pub(in crate::services::discord) fn build_namespaced_session_key(
 }
 
 pub(in crate::services::discord) fn build_legacy_session_key(tmux_name: &str) -> String {
-    let hostname = crate::services::platform::hostname_short();
+    let hostname = crate::services::platform::session_host_label();
     format!("{}:{}", hostname, tmux_name)
 }
 
@@ -992,12 +992,8 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
     provider: &ProviderKind,
     tmux_session_name: &str,
 ) {
-    // #3262: the usage/window/threshold signal is needed by BOTH the v2 panel
-    // backfill AND the Claude `/compact` trigger. Compute it once, unconditionally
-    // — gating it behind `status_panel_v2_enabled` (as the original wire-in did)
-    // silently disabled auto-compact whenever the v2 panel was turned off. The
-    // trigger must run on every turn-completion (pane idle) regardless of the v2
-    // feature flag; only the panel `set_context_panel_usage` write stays v2-gated.
+    // One usage signal feeds both the panel Context line and the Claude `/compact`
+    // trigger, so it is computed once for every turn completion.
     let usage = crate::db::turns::TurnTokenUsage {
         input_tokens: state.accum_input_tokens,
         cache_create_tokens: state.accum_cache_create_tokens,
@@ -1023,13 +1019,9 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
     let ctx_cfg = fetch_context_thresholds(shared.pg_pool.as_ref()).await;
     let compact_pct = ctx_cfg.compact_pct_for(provider);
 
-    // v2-gated panel backfill: the Context line write legitimately needs a real
-    // usage signal — skip it when there is no occupancy (`occupied == 0`) or no
-    // resolvable window (`context_window == 0`). This guard belongs to the panel
-    // write ONLY; it must NOT gate the compact trigger below (#3262 issue #4: a
-    // post-compact drop to ~0 usage is exactly the re-arm signal the trigger
-    // needs, so a zero-usage turn-completion must still reach the trigger).
-    if occupied != 0 && context_window != 0 && shared.ui.status_panel_v2_enabled {
+    // The panel Context line needs real usage; this guard must not gate the compact
+    // trigger below, whose re-arm signal is a post-compact drop to ~0 usage.
+    if occupied != 0 && context_window != 0 {
         shared.ui.placeholder_live_events.set_context_panel_usage(
             channel_id,
             state.last_session_id.as_deref(),
@@ -1074,3 +1066,7 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "adk_session/host_label_tests.rs"]
+mod host_label_tests;

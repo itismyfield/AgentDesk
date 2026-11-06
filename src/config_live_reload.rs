@@ -306,12 +306,25 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
 #[cfg(test)]
 pub(crate) struct TestLiveGuard {
     previous: Option<Arc<Config>>,
-    _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+    _lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
+    before_restore: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+#[cfg(test)]
+impl TestLiveGuard {
+    pub(crate) fn on_before_restore(&mut self, observer: impl FnOnce() + Send + Sync + 'static) {
+        assert!(self.before_restore.is_none());
+        self.before_restore = Some(Box::new(observer));
+    }
 }
 
 #[cfg(test)]
 impl Drop for TestLiveGuard {
     fn drop(&mut self) {
+        crate::config::test_env_lock::assert_shared_test_env_lock_held();
+        if let Some(observer) = self.before_restore.take() {
+            observer();
+        }
         let lock = LIVE.get_or_init(|| RwLock::new(None));
         *lock
             .write()
@@ -329,7 +342,19 @@ pub(crate) fn test_live_guard(
     let previous = current();
     TestLiveGuard {
         previous,
-        _lock: lock,
+        _lock: Some(lock),
+        before_restore: None,
+    }
+}
+
+/// Capture LIVE while an enclosing fixture keeps the environment lock.
+#[cfg(test)]
+pub(crate) fn test_live_guard_after_shared_test_env_lock() -> TestLiveGuard {
+    crate::config::test_env_lock::assert_shared_test_env_lock_held();
+    TestLiveGuard {
+        previous: current(),
+        _lock: None,
+        before_restore: None,
     }
 }
 
@@ -340,6 +365,22 @@ mod late_live_reload_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guard_after_shared_lock_panics_without_lock() {
+        let panic = std::panic::catch_unwind(|| {
+            let _guard = test_live_guard_after_shared_test_env_lock();
+        })
+        .expect_err("the helper requires the shared environment lock");
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(
+            message,
+            Some("an *_after_shared_test_env_lock helper needs acquire_shared_test_env_lock first")
+        );
+    }
 
     /// Serializes tests that mutate/read the process-global [`LIVE`] snapshot so
     /// they do not race each other under the parallel test runner.
@@ -479,6 +520,31 @@ mod tests {
         let outcome = reload_from_path(&path);
         assert!(matches!(outcome, ReloadOutcome::Applied { .. }));
         assert_eq!(current().unwrap().server.port, 8799);
+    }
+
+    // Retired placeholder panel switches left in an edited file still reload, warn-free.
+    #[test]
+    fn reload_ignores_retired_placeholder_panel_switches() {
+        let _guard = global_test_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        write(
+            &path,
+            "server:\n  port: 8791\nplaceholder:\n  tool_activity_display: class\n",
+        );
+        install(crate::config::load_from_path(&path).unwrap());
+
+        write(
+            &path,
+            "server:\n  port: 8791\nplaceholder:\n  live_events_enabled: false\n  status_panel_v2_enabled: false\n  tool_activity_display: class\n",
+        );
+        let ReloadOutcome::Applied { restart_required } = reload_from_path(&path) else {
+            panic!("retired placeholder switches must not reject the reload");
+        };
+        assert!(restart_required.is_empty(), "{restart_required:?}");
+        let saved = serde_yaml::to_string(&*current().unwrap()).unwrap();
+        assert!(!saved.contains("live_events_enabled"), "{saved}");
+        assert!(!saved.contains("status_panel_v2_enabled"), "{saved}");
     }
 
     #[derive(Clone, Default)]
@@ -813,7 +879,15 @@ mod tests {
         );
 
         let mut placeholder = base.clone();
-        placeholder.placeholder.live_events_enabled = !base.placeholder.live_events_enabled;
+        placeholder.placeholder.tool_activity_display = match base.placeholder.tool_activity_display
+        {
+            crate::config::ToolActivityDisplay::Class => {
+                crate::config::ToolActivityDisplay::Summary
+            }
+            crate::config::ToolActivityDisplay::Summary => {
+                crate::config::ToolActivityDisplay::Class
+            }
+        };
         assert_eq!(
             restart_required_changes(&base, &placeholder),
             vec!["placeholder"]

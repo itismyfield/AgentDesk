@@ -178,6 +178,8 @@ fn publish_atomic_file(path: &Path, bytes: &[u8], label: &str) -> Result<(), Str
             .create_new(true)
             .open(&temp_path)
             .map_err(|err| format!("create {label} temp: {err}"))?;
+        #[cfg(test)]
+        let mut temp = tests::SyncProbe(&mut temp, &temp_path);
         temp.write_all(bytes)
             .map_err(|err| format!("write {label} temp: {err}"))?;
         sync_atomic_stage(label, "temp", || temp.sync_all())?;
@@ -1047,6 +1049,35 @@ mod tests {
         })
     }
 
+    thread_local! {
+        static SYNCED_TEMPS: std::cell::RefCell<Option<Vec<(u64, bool)>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// While armed, records the temp file's length and whether its temp name still exists each
+    /// time its own `sync_all` runs. Unarmed, it adds no I/O to the real sync.
+    pub(super) struct SyncProbe<'a>(pub(super) &'a mut std::fs::File, pub(super) &'a Path);
+
+    impl std::io::Write for SyncProbe<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.write(bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush()
+        }
+    }
+
+    impl SyncProbe<'_> {
+        pub(super) fn sync_all(&self) -> std::io::Result<()> {
+            self.0.sync_all()?;
+            SYNCED_TEMPS.with(|synced| {
+                if let Some(synced) = synced.borrow_mut().as_mut() {
+                    synced.push((self.0.metadata()?.len(), self.1.exists()));
+                }
+                Ok(())
+            })
+        }
+    }
+
     #[cfg(unix)]
     fn with_sync_fault<T>(label: &'static str, stage: &'static str, run: impl FnOnce() -> T) -> T {
         struct Reset;
@@ -1062,9 +1093,6 @@ mod tests {
 
     #[cfg(unix)]
     fn atomic_publication_preserves_all_five_consumers_on_sync_failure() {
-        // Fault injection proves error handling; this source oracle separately pins the syscalls.
-        let gaps = source_guard_tests::atomic_sync_gaps(source_guard_tests::ORDERED_QUEUE);
-        assert_eq!(gaps, Vec::<String>::new());
         for label in [
             "hook relay quarantine evidence",
             "hook relay queue sequence",
@@ -1138,6 +1166,67 @@ mod tests {
             Some(50)
         );
         assert_eq!(next_relay_queue_sequence(queue).unwrap(), 51);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_publication_syncs_the_fully_written_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("destination");
+        std::fs::write(&path, b"old").unwrap();
+        SYNCED_TEMPS.with(|synced| *synced.borrow_mut() = Some(Vec::new()));
+        let result = publish_atomic_file(&path, b"published", "ordered hook relay request");
+        let synced = SYNCED_TEMPS
+            .with(|synced| synced.borrow_mut().take())
+            .unwrap();
+        result.unwrap();
+        assert_eq!(
+            synced,
+            vec![(b"published".len() as u64, true)],
+            "the temp file is synced whole and before its rename"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"published");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_publication_syncs_the_parent_directory_it_renamed_into() {
+        use crate::services::discord::runtime_store::parent_sync_probe::SYNCED;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("destination");
+        std::fs::write(&path, b"old").unwrap();
+        SYNCED.with(|synced| *synced.borrow_mut() = Some(Vec::new()));
+        let result = publish_atomic_file(&path, b"published", "ordered hook relay request");
+        let synced = SYNCED.with(|synced| synced.borrow_mut().take()).unwrap();
+        result.unwrap();
+        assert_eq!(
+            synced,
+            vec![dir.path().to_path_buf()],
+            "the parent directory handle itself is synced"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"published");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_publication_flushes_the_parent_directory_after_rename() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("queue");
+        std::fs::create_dir(&parent).unwrap();
+        let path = parent.join("destination");
+        std::fs::write(&path, b"old").unwrap();
+        // Entries can still be created and renamed, but the directory cannot be opened to flush.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let result = publish_atomic_file(&path, b"published", "ordered hook relay request");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = result.expect_err("an unopenable parent must fail the directory flush");
+        assert!(
+            error.starts_with("sync ordered hook relay request parent:"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"published");
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 1);
     }
 
     const LOCK_HOLDER_PATH_ENV: &str = "AGENTDESK_RELAY_TEST_LOCK_HOLDER_PATH";
@@ -2526,8 +2615,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    mod source_guard_tests;
     #[cfg(unix)]
     mod too_early_tests;
     #[cfg(unix)]

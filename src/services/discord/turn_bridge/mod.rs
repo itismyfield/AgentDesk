@@ -79,15 +79,12 @@ use crate::services::agent_protocol::{StatusEvent, TaskNotificationKind};
 use crate::services::memory::{
     CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
-use crate::services::observability::session_inventory::{
-    format_child_inventory_progress, load_child_inventory_by_parent_key_pg,
-};
 use crate::services::provider::cancel_requested;
 use output_lifecycle::BridgeOutputOwner;
 pub(super) use panel_lifecycle::record_placeholder_live_event;
 use panel_lifecycle::{
-    child_progress_line, ensure_active_placeholder_card, first_request_line,
-    refresh_session_panel_line_from_lifecycle, refresh_task_panel_line_from_dispatch,
+    ensure_active_placeholder_card, refresh_session_panel_line_from_lifecycle,
+    refresh_task_panel_line_from_dispatch,
 };
 use response_delivery::{
     done_result_requires_full_terminal_replay, no_answer, push_transcript_event,
@@ -164,7 +161,7 @@ pub(crate) use tmux_runtime::tmux_runtime_paths;
 
 // Items used by spawn_turn_bridge from submodules
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
-use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
+use crate::db::session_status::{AWAITING_BG, AWAITING_USER, IDLE, TURN_ACTIVE};
 use bridge_entry_persist::bridge_stream_relay_suppressed;
 use bridge_entry_persist::unwind_and_notify;
 use completion_guard::complete_work_dispatch_on_turn_end;
@@ -209,8 +206,8 @@ use stale_resume::{
 };
 use status_panel::{
     bridge_epilogue_identity_guards_inflight_clear, migrate_separate_status_panel_to_footer,
-    record_status_panel_events, should_open_long_running_placeholder_controller,
-    status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
+    record_status_panel_events, status_panel_completion_ready_after_terminal_body,
+    status_panel_message_id_for_turn,
 };
 use terminal_delivery::{
     BridgeLeaseAcquire, bridge_delivery_lease_for_inflight, bridge_delivery_lease_key_for_inflight,
@@ -243,11 +240,13 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     initial_watcher_delivery_pin: Option<WatcherClaimIncarnation>,
 ) {
     use tracing::Instrument;
+    let bridge_lifetime = cancel_token.native_stop.register_bridge();
     let original_registration = super::live_bridge::retain_original(
         &bridge.provider,
         bridge.channel_id.get(),
         &cancel_token,
     );
+    super::inflight::bind_native_stop_pin(&bridge.inflight_state, &cancel_token);
     let bridge_turn_id = discord_turn_id(
         &bridge.provider,
         bridge.channel_id,
@@ -268,6 +267,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     #[cfg(all(test, unix))]
     let probe_channel = bridge.channel_id;
     let _bridge_task = super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
+        let _bridge_lifetime = bridge_lifetime;
         let _original_registration = original_registration;
         #[cfg(test)]
         #[cfg(unix)]
@@ -368,7 +368,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut active_background_child_session_ids: Vec<i64> = Vec::new();
         let (status_panel_started_at, footer_owner) = make_owner_now(user_msg_id);
         let single_message_panel_footer_mode =
-            bridge_single_message_panel_footer_enabled(shared_owned.ui.status_panel_v2_enabled);
+            bridge_single_message_panel_footer_enabled();
         let mut transport_error = false;
         let api_friction_reports = Vec::new();
         let mut transcript_events = Vec::<SessionTranscriptEvent>::new();
@@ -435,7 +435,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             bridge.reuse_status_panel_message,
         );
         let mut last_status_panel_text = String::new();
-        let mut status_panel_dirty = shared_owned.ui.status_panel_v2_enabled;
+        let mut status_panel_dirty = true;
         let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
         let turn_start = std::time::Instant::now();
         // #5707: observe after own clear; the unbounded prior window can overlap provider work.
@@ -513,16 +513,14 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             )
             .await;
         }
-        if shared_owned.ui.placeholder_live_events_enabled || shared_owned.ui.status_panel_v2_enabled {
-            if single_message_panel_footer_mode {
-                supersede_bridge_footer(shared_owned.as_ref(), channel_id, footer_owner).await;
-                shared_owned
-                    .ui
-                    .placeholder_live_events
-                    .clear_channel_preserving_footer_residuals(channel_id);
-            } else {
-                shared_owned.ui.placeholder_live_events.clear_channel(channel_id);
-            }
+        if single_message_panel_footer_mode {
+            supersede_bridge_footer(shared_owned.as_ref(), channel_id, footer_owner).await;
+            shared_owned
+                .ui
+                .placeholder_live_events
+                .clear_channel_preserving_footer_residuals(channel_id);
+        } else {
+            shared_owned.ui.placeholder_live_events.clear_channel(channel_id);
         }
         if single_message_panel_footer_mode {
             // #3560: authority is proven before touching the old Discord panel.
@@ -537,7 +535,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         maybe_create_bridge_separate_status_panel_response(
             shared_owned.ui.two_message_panel_enabled,
             single_message_panel_footer_mode,
-            shared_owned.ui.status_panel_v2_enabled,
             gateway.as_ref(),
             channel_id,
             SPINNER[0],
@@ -555,9 +552,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         )
         .await;
 
-        if shared_owned.ui.status_panel_v2_enabled
-            && let Some(dispatch_id) = dispatch_id.as_deref()
-        {
+        if let Some(dispatch_id) = dispatch_id.as_deref() {
             status_panel_dirty |= refresh_task_panel_line_from_dispatch(
                 shared_owned.as_ref(),
                 channel_id,
@@ -594,8 +589,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 channel_id,
                 provider: provider.clone(),
                 cancel_token: cancel_token.clone(),
-                user_text_owned: user_text_owned.clone(),
-                request_owner_name: request_owner_name.clone(),
                 adk_session_key: adk_session_key.clone(),
                 adk_session_name: adk_session_name.clone(),
                 adk_session_info: adk_session_info.clone(),
@@ -960,6 +953,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 accumulated_output_tokens,
                 accumulated_memory_input_tokens,
                 accumulated_memory_output_tokens,
+                input_not_submitted: stream_loop_output.tui_error_classification.input_not_submitted(),
                 transport_error, provider_failure: terminal_outcome_delivery_output.provider_failure,
                 api_friction_reports,
                 cancelled,

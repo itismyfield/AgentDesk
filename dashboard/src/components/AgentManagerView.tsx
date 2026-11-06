@@ -335,6 +335,7 @@ export default function AgentManagerView({
           form={form}
           departments={departments}
           isEdit={!!agentModal.editAgent}
+          agentId={agentModal.editAgent?.id}
           saving={saving}
           onSave={handleSaveAgent}
           onClose={() => setAgentModal({ open: false, editAgent: null })}

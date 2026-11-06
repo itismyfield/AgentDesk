@@ -330,6 +330,11 @@ pub(crate) fn records_strict(channel_id: u64) -> io::Result<Result<Vec<BindingEv
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error),
     };
+    let strict = crate::utils::parsed_bytes::reuse(&path, bytes, |bytes| Ok(strict_records(bytes)));
+    Ok(strict.map_err(io::Error::other)?.as_ref().clone())
+}
+
+fn strict_records(bytes: &[u8]) -> Result<Vec<BindingEvent>, Corrupt> {
     let complete = bytes
         .iter()
         .rposition(|b| *b == b'\n')
@@ -339,16 +344,16 @@ pub(crate) fn records_strict(channel_id: u64) -> io::Result<Result<Vec<BindingEv
     for (line, text) in (1..).zip(lines.filter(|l| !l.is_empty())) {
         let Ok(record) = serde_json::from_slice::<BindingEvent>(text) else {
             let kind = CorruptKind::Unparseable;
-            return Ok(Err(Corrupt { line, kind }));
+            return Err(Corrupt { line, kind });
         };
         if record.seq != line {
             let (expected, found) = (line, record.seq);
             let kind = CorruptKind::SeqGap { expected, found };
-            return Ok(Err(Corrupt { line, kind }));
+            return Err(Corrupt { line, kind });
         }
         records.push(record);
     }
-    Ok(Ok(records))
+    Ok(records)
 }
 
 /// The latest committed `seq` of `channel_id`, updated after every append. Read-only.
@@ -1081,6 +1086,7 @@ pub(crate) fn forget_channel_for_tests(channel_id: u64) {
         let mut logs = lock_logs();
         logs.remove(&path);
         read_cache::invalidate(&path);
+        crate::utils::parsed_bytes::forget(&path);
     }
 }
 

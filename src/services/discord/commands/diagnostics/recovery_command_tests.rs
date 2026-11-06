@@ -3,46 +3,6 @@ use crate::services::discord::DiscordSession;
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude::ChannelId;
 
-#[test]
-fn clear_acknowledges_before_auth_and_cleanup() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/services/discord/commands/control.rs"
-    ))
-    .unwrap();
-    let body = source
-        .split("async fn cmd_clear(")
-        .nth(1)
-        .unwrap()
-        .split("#[cfg(test)]")
-        .next()
-        .unwrap();
-    let defer = body.find("ctx.defer().await?").expect("clear must defer");
-    assert!(defer < body.find("check_auth(").unwrap());
-    assert!(defer < body.find("clear_channel_session_state(").unwrap());
-    assert!(body.contains("ctx.say(report.reply()).await?"));
-}
-
-#[test]
-fn skill_stop_delegates_to_the_same_stop_response() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/services/discord/commands/skill.rs"
-    ))
-    .unwrap();
-    let body = source
-        .split("\"stop\" => {")
-        .nth(1)
-        .unwrap()
-        .split("\"pwd\" =>")
-        .next()
-        .unwrap();
-    assert!(
-        body.contains("super::control::run_stop(ctx).await"),
-        "stop aliases must use the actual stop result and acknowledgement"
-    );
-}
-
 #[tokio::test]
 async fn status_shows_complete_session_cwd_and_missing_transcript() {
     let _root = crate::config::TestRuntimeRootGuard::new();

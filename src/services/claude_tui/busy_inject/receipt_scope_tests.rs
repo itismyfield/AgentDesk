@@ -69,6 +69,7 @@ fn a_late_row_reaches_the_sending_attempt_from_the_receipt_thread() {
             text: fa.clone(),
             parked: false,
         }),
+        draft_unproven: false,
     };
     let timing = Timing {
         lock_retries: &[],
@@ -141,6 +142,7 @@ fn receive(
             text: frame.to_string(),
             parked: false,
         }),
+        draft_unproven: false,
     };
     let timing = Timing {
         lock_retries: &[],

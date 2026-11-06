@@ -1,5 +1,5 @@
-//! A restarted owner settles a head whose window passed, projects its history, then posts the
-//! notices it owes. A projection failure is logged only: it holds nothing and confirms nothing.
+//! A restarted owner settles a head whose window passed, requeues proven-unsent retained inputs,
+//! projects its history, then posts the notices it owes. A projection failure is only logged.
 use crate::services::tui_input::human_frame::history::v2::Registry;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
@@ -16,6 +16,13 @@ pub(crate) async fn recover(
     handle
         .v2_request(move |slot| slot.as_mut().ok_or("no input owner")?.tick(now))
         .await?;
+    // Requeued before the notice drain, so an input requeued here never gets a resend ask.
+    handle
+        .v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no input owner")?;
+            owner.requeue_known_not_sent().map(drop)
+        })
+        .await?;
     let synced = handle
         .v2_request(move |slot| {
             slot.as_ref()
@@ -26,6 +33,7 @@ pub(crate) async fn recover(
     if let Err(error) = synced {
         tracing::warn!(%error, channel, "input owner history projection failed after restart");
     }
+    // The drain also settles the receipts a removal committed before the restart still owes.
     match pool {
         Some(pool) => super::notice::drain(pool, handle, provider, channel).await,
         None => Ok(0),
@@ -39,3 +47,7 @@ pub(crate) async fn settle_due(handle: &ChannelMailboxHandle) -> Result<Option<u
         .v2_request(|slot| Ok(slot.as_ref().and_then(|owner| owner.settle_due())))
         .await
 }
+
+#[cfg(all(test, unix))]
+#[path = "owed_drop_tests.rs"]
+mod owed_drop_tests;

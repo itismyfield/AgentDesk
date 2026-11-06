@@ -2,33 +2,13 @@
 
 use super::*;
 
-/// #3089 B3 / #3416 / #3933 (pure, testable): the same-turn monotonic guard's
-/// enforce decision. Returns `true` (block the backward inflight write) ONLY when
-/// the durable delivered-frontier authority is ON, a same-turn offset moved
-/// backward (`response_sent_offset` or `last_offset`), **and** the backward move
-/// is NOT a legitimate full reset. Authority OFF — since the #5071 T1 S8-2 flip
-/// that means an explicit `=0` rollback, no longer the compiled default → always
-/// `false` → the guard stays observe-only and the write proceeds byte-identically.
-/// Gated by the SAME flag as the read-authority flip so the single offset
-/// authority + its enforcement cut over atomically.
-///
-/// #3933: `is_legitimate_full_reset` carves the legitimate Gemini/Qwen
-/// `RetryBoundary` rewind (turn_bridge/retry_state.rs clears `full_response` and
-/// rewinds `response_sent_offset`→0 for the SAME turn identity to re-stream) out
-/// of the coarse backward-write skip. The release runs
-/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY=1`, so before this carve-out the enforce
-/// branch dropped the re-streamed body (live data loss). A genuine stale-snapshot
-/// backward regression carries a NON-EMPTY body, so it never matches the reset
-/// signature and stays blocked.
+/// Blocks a same-turn backward inflight write unless it is an empty-body `RetryBoundary` reset.
 pub(in crate::services::discord) fn authority_blocks_backward_inflight_write(
-    authority_enabled: bool,
     response_sent_offset_monotonic: bool,
     last_offset_monotonic: bool,
     is_legitimate_full_reset: bool,
 ) -> bool {
-    authority_enabled
-        && (!response_sent_offset_monotonic || !last_offset_monotonic)
-        && !is_legitimate_full_reset
+    (!response_sent_offset_monotonic || !last_offset_monotonic) && !is_legitimate_full_reset
 }
 
 /// Pure fusion (testable): the effective committed offset under the flip. The
@@ -109,7 +89,7 @@ pub(in crate::services::discord::outbound) fn current_generation_durable_frontie
 
 /// Path-based core (pure-ish, testable): the durable `delivered_frontier` END.
 /// This is the SINGLE durable frontier END reader; the env-resolved
-/// [`delivered_frontier_end_current_generation`] and the flag-gated
+/// [`delivered_frontier_end_current_generation`] and
 /// [`effective_committed_offset`] both funnel through it so the generation and
 /// EOF-bounds gating logic exists in exactly one place.
 pub(in crate::services::discord::outbound) fn current_generation_durable_frontier_end_at(
@@ -227,18 +207,7 @@ pub(in crate::services::discord) fn reanchor_current_generation_frontier(
     )
 }
 
-/// #3089 B2b: the effective "already-committed" offset the dedup/skip gates read.
-/// Flag ON (the compiled default since #5071 T1 S8-2) →
-/// `max(delivered_frontier.end, in_memory)` (I3: missing/malformed record →
-/// in-memory only, never assume delivered). Flag OFF (an explicit `=0` rollback)
-/// → the legacy in-memory `committed_relay_offset` verbatim, no record read. The
-/// fused answer holds ONLY when the durable frontier is from the CURRENT wrapper
-/// generation (#1270 guard — a stale prior-generation frontier is treated as
-/// `None`) and physically within the current transcript EOF (#4188 guard). The
-/// in-memory authority is the relay coord's `confirmed_end_offset` for
-/// `channel`; the durable record is keyed by `(provider, channel)`;
-/// `tmux_session_name` resolves the current generation watermark, while
-/// `current_transcript_eof` bounds the durable offset space.
+/// The dedup floor: `max(in-memory offset, current-generation durable END within EOF)`.
 pub(in crate::services::discord) fn effective_committed_offset(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
@@ -247,9 +216,6 @@ pub(in crate::services::discord) fn effective_committed_offset(
     current_transcript_eof: Option<u64>,
 ) -> u64 {
     let in_memory = shared.committed_relay_offset(channel);
-    if !delivery_record_authority_enabled() {
-        return in_memory;
-    }
     let durable_end = delivery_record_path(provider, channel.get()).and_then(|path| {
         current_generation_durable_frontier_end_at(
             &path,
@@ -260,26 +226,7 @@ pub(in crate::services::discord) fn effective_committed_offset(
     fuse_committed_offset(durable_end, in_memory)
 }
 
-/// #3593 (codex HIGH): the committed floor the synthetic-resume re-send dedup gate
-/// (`tmux_watcher.rs`, the non-reconciled `watcher_direct_fallback_intended` arm)
-/// reads — the `max` of [`effective_committed_offset`] and the FLAG-INDEPENDENT
-/// current-generation durable frontier ([`delivered_frontier_end_current_generation`]).
-///
-/// Why fuse here and not rely on `effective_committed_offset` alone: under
-/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY=OFF` — since the #5071 T1 S8-2 flip an
-/// explicit `=0` rollback rather than the default — `effective_committed_offset`
-/// returns ONLY the in-memory `committed_relay_offset`. On a restart / synthetic
-/// resume that in-memory value is reset to `0`, while the durable frontier still
-/// holds the current-generation high watermark (e.g. 443154). With the in-memory
-/// floor alone the gate would compute `range_already_committed(422855, 0) == false`
-/// and RE-POST the already-delivered body — the legacy #3520 new-message guard read
-/// the durable frontier flag-independently, so the new placeholder-path gate must
-/// too to be a TRUE superset of #3520 under BOTH authority states.
-///
-/// Safety (no over-suppression): `max` only RAISES the floor, and the durable reader
-/// is current-generation-only (#1270 guard → stale prior-generation frontier yields
-/// `0`), so after a pane reset/respawn a genuinely-NEW answer — whose `range_end`
-/// sits ABOVE both signals — is never wrongly suppressed.
+/// The re-send floor: [`effective_committed_offset`] raised by a current-generation durable read.
 pub(in crate::services::discord) fn committed_floor_for_resend_dedup(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,

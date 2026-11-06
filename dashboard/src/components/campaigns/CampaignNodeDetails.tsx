@@ -183,6 +183,7 @@ export default function CampaignNodeDetails({
               {node.benefit && `${tr("기대효과", "Benefit")}: ${node.benefit}`}
             </p>
           )}
+          {campaign.nodes_partial && <p role="status" className="campaign-muted">{tr("세부 내용과 검증 기록을 불러오는 중이에요…", "Loading details and verification records…")}</p>}
           {node.details && <p className="campaign-description">{node.details}</p>}
           {live && (
             <div className="campaign-live-detail">

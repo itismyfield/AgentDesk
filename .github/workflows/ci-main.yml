@@ -16,6 +16,7 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 10G
   SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_IDLE_TIMEOUT: "0"
   SCCACHE_GHA_RW_MODE: READ_WRITE
   POSTGRES_SERVICE_IMAGE: ${{ vars.AGENTDESK_POSTGRES_SERVICE_IMAGE }}
 
@@ -65,21 +66,23 @@ jobs:
         shell: bash
         env:
           BASH_ENV: /dev/null
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           NEXTEST_DIR="$RUNNER_TEMP/nextest"
-          mkdir -p "$NEXTEST_DIR"
+          mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"
           cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
           cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
-            --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
+            --extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
           python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"
           python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \
             --json-out "$NEXTEST_DIR/compare.json"
+          mapfile -t timings < <(bash scripts/ci/nextest-timings.sh "$RUNNER_TEMP/nextest-timings" 6)
           python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" \
             --archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \
             --rust-version 1.94.1 --nextest-version "$(cargo nextest --version | awk 'NR==1 {print $2}')" \
             --target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \
-            --build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan"
+            --build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan" "${timings[@]}"
           python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"
       - name: Upload nextest plan
         uses: actions/upload-artifact@v4
@@ -203,6 +206,7 @@ jobs:
           pattern: nextest-worker-*
           path: ${{ runner.temp }}/nextest-artifacts
       - name: Audit worker results
+        id: audit
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -217,6 +221,15 @@ jobs:
             --json-out "$RUNNER_TEMP/verdict.json" --summary-out "$RUNNER_TEMP/summary.md" || status=$?
           cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
+      - name: Upload census execution evidence
+        if: ${{ steps.audit.outputs.census_evidence_dir != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: legacy-body-census-test-evidence-${{ github.run_attempt }}
+          path: ${{ steps.audit.outputs.census_evidence_dir }}
+          if-no-files-found: warn
+          retention-days: 7
 
   lint:
     # The rest of `just check`: fmt, clippy (covers `cargo check`), policy JS, and

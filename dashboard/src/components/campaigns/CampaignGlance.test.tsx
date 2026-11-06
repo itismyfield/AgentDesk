@@ -25,7 +25,8 @@ it("emphasizes a blocker only on the cards that record one and falls back when g
       summary: "See running work at a glance", benefit: "Know what is stuck without opening logs", blocker: "Waiting for the relay freeze to lift", head_sha: "abc1234def", evidence: ["cargo test passed"] }),
     makeCampaignNode("bare", { status: "running", title: "#6264 shard script checks", issue_url: "https://github.com/o/r/issues/6264", stage: "부분 완료 · 잔여 확인" }),
   ]);
-  expect(card("described").textContent).toContain("See running work at a glance");
+  expect(card("described").querySelector("strong")?.textContent).toBe("dashboard glance");
+  expect(card("described").querySelector(".campaign-glance-summary")?.textContent).toBe("See running work at a glance");
   expect(card("described").textContent).toContain("Know what is stuck without opening logs");
   expect(card("described").querySelector(".campaign-glance-blocker")?.textContent).toContain("Waiting for the relay freeze to lift");
   expect(card("described").textContent).toContain("Review");
@@ -41,7 +42,7 @@ it("emphasizes a blocker only on the cards that record one and falls back when g
 it("counts waiting, done and skipped work and lists each status only when opened", async () => {
   const onOpen = await render([
     makeCampaignNode("run", { status: "running" }),
-    makeCampaignNode("wait-1"), makeCampaignNode("wait-2", { summary: "Second waiting gist" }),
+    makeCampaignNode("wait-1"), makeCampaignNode("wait-2", { title: "#7331 Mailbox lease settlement", summary: "Inherits #5951, #5996 4-consumer tests." }),
     makeCampaignNode("done", { status: "completed" }), makeCampaignNode("skip", { status: "skipped" }),
   ]);
   const chips = Array.from(container.querySelectorAll<HTMLButtonElement>(".campaign-glance-buckets button"));
@@ -51,7 +52,9 @@ it("counts waiting, done and skipped work and lists each status only when opened
   await act(async () => chips[0].click());
   const items = Array.from(container.querySelectorAll<HTMLButtonElement>(".campaign-glance-list button"));
   expect(items).toHaveLength(2);
-  expect(items[1].textContent).toContain("Second waiting gist");
+  // The compact list names the task; lineage notes in the summary stay in the details.
+  expect(items[1].textContent).toContain("#7331Mailbox lease settlement");
+  expect(items[1].textContent).not.toContain("Inherits");
   await act(async () => items[1].click());
   expect(onOpen).toHaveBeenCalledWith("wait-2");
   await act(async () => chips[0].click());
@@ -88,4 +91,16 @@ it.each([2, 3])("offers the mobile disclosure for %i active tasks", async (count
   expect(toggle.getAttribute("aria-expanded")).toBe("true");
   await act(async () => card(`active-${count - 1}`).click());
   expect(onOpen).toHaveBeenCalledWith(`active-${count - 1}`);
+});
+
+
+it("previews a long status list and reveals the rest inline instead of a nested scroll box", async () => {
+  await render(Array.from({ length: 12 }, (_, index) => makeCampaignNode(`done-${index}`, { status: "completed" })));
+  await act(async () => container.querySelector<HTMLButtonElement>(".campaign-glance-buckets button")!.click());
+  const rows = () => container.querySelectorAll(".campaign-glance-list button");
+  expect(rows()).toHaveLength(8);
+  const more = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "Show 4 more")!;
+  await act(async () => more.click());
+  expect(rows()).toHaveLength(12);
+  expect(more.getAttribute("aria-expanded")).toBe("true");
 });

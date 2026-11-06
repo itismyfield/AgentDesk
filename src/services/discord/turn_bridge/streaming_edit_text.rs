@@ -2,8 +2,8 @@
 //! the turn bridge.
 //!
 //! #3479 Phase-1 rank-4 extraction: byte-identical value-in/value-out helpers
-//! the relay streaming path and quiescence-gate consult — the status-panel vs
-//! legacy streaming-edit body composer, and the pre-submission / transport
+//! the relay streaming path and quiescence-gate consult — the status-panel
+//! streaming-edit body composer, and the pre-submission / transport
 //! TUI prompt-error predicates that decide whether to re-queue a follow-up or
 //! skip the quiescence gate. None touch `shared`/`http`/async IO; each is
 //! unit-tested. Moved verbatim from `turn_bridge/mod.rs` and re-exported there
@@ -12,20 +12,15 @@
 use super::*;
 
 pub(in crate::services::discord) fn build_turn_bridge_streaming_edit_text(
-    status_panel_v2_enabled: bool,
     current_portion: &str,
     status_block: &str,
     provider: &ProviderKind,
 ) -> String {
-    if status_panel_v2_enabled {
-        super::formatting::build_status_panel_streaming_edit_text(
-            current_portion,
-            status_block,
-            provider,
-        )
-    } else {
-        build_provider_streaming_placeholder_text(current_portion, status_block, provider)
-    }
+    super::formatting::build_status_panel_streaming_edit_text(
+        current_portion,
+        status_block,
+        provider,
+    )
 }
 
 pub(in crate::services::discord) fn bridge_streaming_rollover_should_skip(
@@ -64,10 +59,25 @@ pub(in crate::services::discord) fn bridge_streaming_edit_gate_open(
 /// requeue and quiescence behavior do not depend on the rendered text shape.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct TuiErrorClassification {
+    input_not_submitted: bool,
     pre_submission_prompt_error: bool,
     claude_followup_requeue_prompt_error: bool,
     claude_followup_busy_readiness_timeout: bool,
     transport_error_should_skip_quiescence: bool,
+}
+
+impl TuiErrorClassification {
+    pub(in crate::services::discord) fn not_submitted() -> Self {
+        Self {
+            input_not_submitted: true,
+            transport_error_should_skip_quiescence: true,
+            ..Self::default()
+        }
+    }
+
+    pub(in crate::services::discord) fn input_not_submitted(self) -> bool {
+        self.input_not_submitted
+    }
 }
 
 pub(in crate::services::discord) fn classify_raw_tui_error(
@@ -123,24 +133,12 @@ pub(in crate::services::discord) fn classify_raw_tui_error(
     };
 
     TuiErrorClassification {
+        input_not_submitted: false,
         pre_submission_prompt_error,
         claude_followup_requeue_prompt_error,
         claude_followup_busy_readiness_timeout,
         transport_error_should_skip_quiescence,
     }
-}
-
-fn build_provider_streaming_placeholder_text(
-    current_portion: &str,
-    status_block: &str,
-    provider: &ProviderKind,
-) -> String {
-    if current_portion.is_empty() {
-        return super::formatting::build_streaming_placeholder_text("", status_block);
-    }
-    let formatted =
-        super::formatting::format_for_discord_with_status_panel(current_portion, provider);
-    super::formatting::build_streaming_placeholder_text(&formatted, status_block)
 }
 
 pub(in crate::services::discord) fn bridge_pre_submission_tui_prompt_error(
@@ -321,7 +319,6 @@ mod streaming_edit_text_tests {
     #[test]
     fn status_panel_v2_streaming_edit_moves_processing_footer_to_response_message() {
         let rendered = build_turn_bridge_streaming_edit_text(
-            true,
             "E2E-CODEX-1-OK\n- Working on the backend now",
             "⠙ 계속 처리 중",
             &ProviderKind::Codex,
@@ -331,24 +328,11 @@ mod streaming_edit_text_tests {
     }
 
     #[test]
-    fn legacy_streaming_edit_keeps_processing_footer() {
-        let rendered = build_turn_bridge_streaming_edit_text(
-            false,
-            "Partial answer",
-            "⠙ 계속 처리 중",
-            &ProviderKind::Codex,
-        );
-
-        assert_eq!(rendered, "Partial answer");
-    }
-
-    #[test]
     fn legacy_streaming_edit_sanitizes_subagent_notification_3777() {
         let current_portion = r#"<subagent_notification>
 {"agent_path":"/tmp/agent","status":{"completed":"Read-only review complete.\n\nVERDICT: CLEAN"}}
 </subagent_notification>"#;
         let rendered = build_turn_bridge_streaming_edit_text(
-            false,
             current_portion,
             "⠙ 계속 처리 중",
             &ProviderKind::Codex,
@@ -375,7 +359,6 @@ mod streaming_edit_text_tests {
         assert!(bridge_streaming_rollover_should_skip(&current_portion));
 
         let rendered = build_turn_bridge_streaming_edit_text(
-            false,
             &current_portion,
             "⠙ 계속 처리 중",
             &ProviderKind::Codex,
@@ -396,7 +379,6 @@ mod streaming_edit_text_tests {
         assert!(bridge_streaming_rollover_should_skip(&current_portion));
 
         let rendered = build_turn_bridge_streaming_edit_text(
-            false,
             &current_portion,
             "⠙ 계속 처리 중",
             &ProviderKind::Codex,
@@ -411,7 +393,7 @@ mod streaming_edit_text_tests {
     #[test]
     fn status_panel_v2_empty_streaming_edit_keeps_placeholder() {
         let rendered =
-            build_turn_bridge_streaming_edit_text(true, "", "⠙ 계속 처리 중", &ProviderKind::Codex);
+            build_turn_bridge_streaming_edit_text("", "⠙ 계속 처리 중", &ProviderKind::Codex);
 
         assert_eq!(rendered, "⠋ 계속 처리 중");
     }

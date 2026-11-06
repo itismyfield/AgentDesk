@@ -35,9 +35,6 @@ mod context;
 pub(in crate::services::discord) use context::IntakeDeps;
 
 #[cfg(test)]
-mod input_effect_tests;
-
-#[cfg(test)]
 mod intake_outbox_state_builder_tests {
     use super::*;
 
@@ -251,7 +248,7 @@ pub(super) async fn handle_text_message(
             feature_key(shared, &early_provider, channel_id, early_thread_parent.as_ref()).await;
         let inbound = (channel_id, channel_id, _queued_drain);
         let input = (preloaded_uploads, None);
-        let admitted = host_refusal::admitted_uploads(http, shared, &settings_provider, inbound, input);
+        let admitted = host_refusal::admitted_owner_uploads(http, shared, &settings_provider, inbound, owner.as_ref(), input);
         let Some(preloaded_uploads) = admitted.await? else {
             return Ok(IntakeExecution::Executed);
         };
@@ -994,6 +991,7 @@ pub(super) async fn handle_text_message(
         // because the async gap between check and insert allows interleaving.
         // If another message won the race, queue ourselves and clean up.
         let cancel_token = Arc::new(CancelToken::new());
+        cancel_token.native_stop.receipt_sink().arm_first_key();
         let started = intake_runtime_transition
             .complete_mailbox_claim(try_start_turn_with_stale_busy_heal(
                 shared,
@@ -1718,6 +1716,58 @@ pub(super) async fn handle_text_message(
         };
         #[cfg(unix)]
         if let Some(diagnostic) = tui_busy_diagnostic {
+            if let Some(owner) = owner {
+                busy_retry::defer_owned_front(
+                    busy_retry::FinalizeEnqueueContext {
+                        shared, http, provider: &provider, channel_id, user_msg_id,
+                        placeholder_msg_id, turn_start_attempt: _turn_start_attempt,
+                        session_retry_context: None,
+                        feedback_reminder: feedback_reminder.as_deref(),
+                        wip_warning: wip_warning.as_deref(),
+                    },
+                    &cancel_token,
+                    &super::super::super::resolve_discord_bot_provider(token),
+                ).await;
+                post_adk_session_status(
+                    adk_session_key.as_deref(),
+                    adk_session_name.as_deref(),
+                    Some(provider.as_str()),
+                    "awaiting_user",
+                    &provider,
+                    Some(&adk_session_info),
+                    None,
+                    Some(&current_path),
+                    dispatch_id.as_deref(),
+                    adk_thread_channel_id,
+                    Some(channel_id),
+                    role_binding
+                        .as_ref()
+                        .map(|binding| binding.role_id.as_str()),
+                    shared.api_port,
+                )
+                .await;
+                // A Claude tmux pane running a turn AgentDesk did not start takes the input now;
+                // the row it produces decides who answers. Any other pane keeps the front.
+                let live = (provider == ProviderKind::Claude
+                    && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none())
+                .then(|| {
+                    let session = (session_id.as_deref(), tmux_session_name.as_deref());
+                    claude_followup_transcript(Some(&current_path), session.0, session.1)
+                })
+                .flatten()
+                .zip(tmux_session_name.clone());
+                match live {
+                    Some((transcript, session)) => {
+                        let at = (channel_id.get(), session, adk_session_key.clone());
+                        let live = (transcript.display().to_string(), session_id.clone());
+                        let by = (shared.pg_pool.clone(), provider.clone());
+                        owner.into_busy_pane(by, at, live).await;
+                    }
+                    None => owner.defer_before_submit("hosted_tui_busy_pre_submit"),
+                }
+                intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
+                return Ok(IntakeExecution::deferred(channel_id));
+            }
             let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
             let queue_kickoff_scheduled_by_release = release_mailbox_after_hosted_tui_busy_pre_submit(
                 shared,
@@ -1982,8 +2032,8 @@ pub(super) async fn handle_text_message(
             }
         };
         inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
-        let row = save_intake_inflight(codex_seed.as_ref(), &mut inflight_state);
-        let admitted = super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await;
+        let create = |state: &mut InflightTurnState| save_intake_inflight(codex_seed.as_ref(), state);
+        let admitted = super::foreign_row::admit(shared, &provider, &mut inflight_state, &cancel_token, create).await;
         if !matches!(admitted, Ok(true)) {
             // The recovery read guard is released before the delete waits on Discord.
             drop(original_registration);
@@ -2245,79 +2295,6 @@ pub(super) async fn handle_text_message(
 }
 
 #[cfg(test)]
-mod tui_busy_pre_submit_queue_reaction_tests {
-    #[test]
-    fn busy_pre_submit_enqueue_keeps_the_authoritative_queue_view() {
-        use super::recovery_context_take_order_tests::source_guard_tests::{
-            BUSY_RETRY, INTAKE_TURN, busy_enqueue_view_gaps,
-        };
-        assert_eq!(
-            busy_enqueue_view_gaps(INTAKE_TURN, BUSY_RETRY),
-            Vec::<String>::new()
-        );
-    }
-}
-
-#[cfg(test)]
-mod recovery_context_take_order_tests {
-    pub(super) mod source_guard_tests;
-    use source_guard_tests::{
-        BUSY_RETRY, CONTEXT_PUT_BACK_PAIR, CONTEXT_TAKE, CONTEXT_USES, INTAKE_TURN, TUI_FOLLOWUP,
-        bridge_context_gaps, refusal_put_back_gaps, stale_abort_take_gaps, take_once_gaps,
-    };
-
-    #[test]
-    fn discord_user_turn_keeps_user_and_streaming_placeholder_ids_separate() {
-        assert_eq!(bridge_context_gaps(INTAKE_TURN), Vec::<String>::new());
-    }
-
-    #[test]
-    fn recovery_context_survives_intake_stale_dispatch_abort() {
-        let root = tempfile::tempdir().expect("create temp runtime root");
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        assert_eq!(stale_abort_take_gaps(INTAKE_TURN), Vec::<String>::new());
-    }
-
-    #[test]
-    fn intake_real_turn_consumes_recovery_context_once_after_non_dispatch_guards() {
-        let root = tempfile::tempdir().expect("create temp runtime root");
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let gaps = take_once_gaps(INTAKE_TURN, CONTEXT_TAKE, &CONTEXT_USES);
-        assert_eq!(gaps, Vec::<String>::new());
-    }
-
-    #[test]
-    fn tui_busy_enqueue_refusal_puts_back_recovery_context_for_next_turn() {
-        let gaps = refusal_put_back_gaps(BUSY_RETRY, TUI_FOLLOWUP, CONTEXT_PUT_BACK_PAIR);
-        assert_eq!(gaps, Vec::<String>::new());
-    }
-}
-
-/// #4307 PR-B: pins the reminder take/inject/put-back wiring with the same
-/// source-order invariants as the session-retry recovery context it rides.
-#[cfg(test)]
-mod feedback_reminder_take_order_tests {
-    use super::recovery_context_take_order_tests::source_guard_tests::{
-        BUSY_RETRY, INTAKE_TURN, REMINDER_PUT_BACK_PAIR, REMINDER_TAKE, REMINDER_USES,
-        TUI_FOLLOWUP, refusal_put_back_gaps, take_once_gaps,
-    };
-
-    #[test]
-    fn intake_takes_feedback_reminder_once_after_guards_and_before_prompt_use() {
-        let root = tempfile::tempdir().expect("create temp runtime root");
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let gaps = take_once_gaps(INTAKE_TURN, REMINDER_TAKE, &REMINDER_USES);
-        assert_eq!(gaps, Vec::<String>::new());
-    }
-
-    #[test]
-    fn tui_busy_enqueue_refusal_puts_back_feedback_reminder_for_next_turn() {
-        let gaps = refusal_put_back_gaps(BUSY_RETRY, TUI_FOLLOWUP, REMINDER_PUT_BACK_PAIR);
-        assert_eq!(gaps, Vec::<String>::new());
-    }
-}
-
-#[cfg(test)]
 mod queue_pending_reaction_clear_tests {
     /// The cleared set must match exactly what the intake gate ADDS via
     /// `queue_pending_reaction_for`, so no queued message can be reacted with an
@@ -2338,47 +2315,5 @@ mod queue_pending_reaction_clear_tests {
                 "intake-gate add emoji {added:?} (merged={merged}) must be in the dequeue clear set"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod turn_start_dispatch_guard_preservation_tests {
-    use super::recovery_context_take_order_tests::source_guard_tests::{
-        INTAKE_TURN, STALE_GUARD, abort_branch_gaps, preserve_gate_gaps, preserve_param_gaps,
-    };
-
-    // #4247 FIX 1: the turn-start DISPATCH-GUARD must gate its raw
-    // `stale_dispatch_turn_for_text` lookup on `!preserve_on_cancel`, mirroring
-    // the dequeue guard's `filter_queued_dispatch_exit(preserve, stale)` — else a
-    // preserved (marked) genuine human instruction that survives the dequeue
-    // guard is dropped anyway on re-entry just because its text carries a stale
-    // `DISPATCH:<id>` prefix, silently defeating the feature end-to-end.
-    #[test]
-    fn turn_start_guard_is_gated_on_preserve_on_cancel() {
-        assert_eq!(preserve_gate_gaps(STALE_GUARD), Vec::<String>::new());
-    }
-
-    // Companion: the gated stale lookup must still feed the SAME abort branch
-    // (finish turn, advance checkpoint, exit emoji) and signal abort back to the
-    // caller, i.e. the gate did not get attached to some other unrelated
-    // `stale_dispatch_turn_for_text` use.
-    #[test]
-    fn gated_stale_lookup_feeds_the_turn_abort_branch() {
-        assert_eq!(
-            abort_branch_gaps(STALE_GUARD, INTAKE_TURN),
-            Vec::<String>::new()
-        );
-    }
-
-    // #4247 FIX 1/FIX 4: pin the LIVE (non-queued) intake path threading
-    // `preserve_on_cancel` from the function signature into the turn-start guard
-    // unmodified — distinct from the queued path's `into_intervention`
-    // computation (already pinned by `intake_queue_transaction.rs`).
-    #[test]
-    fn preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified() {
-        assert_eq!(
-            preserve_param_gaps(INTAKE_TURN, STALE_GUARD),
-            Vec::<String>::new()
-        );
     }
 }

@@ -13,11 +13,7 @@ pub(super) fn session_bound_relay_bodies(
     delivery: &super::SessionRelayDelivery,
 ) -> (String, String) {
     let raw_response_text = delivery.response_text.clone();
-    let formatted = if shared.ui.status_panel_v2_enabled {
-        formatting::format_for_discord_with_status_panel(&raw_response_text, provider)
-    } else {
-        formatting::format_for_discord_with_provider(&raw_response_text, provider)
-    };
+    let formatted = formatting::format_for_discord_with_status_panel(&raw_response_text, provider);
     let formatted = if matches!(
         delivery.task_notification_kind.as_ref(),
         Some(TaskNotificationKind::MonitorAutoTurn)

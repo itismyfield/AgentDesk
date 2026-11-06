@@ -231,21 +231,49 @@ impl Reading {
             return stamp.publish(watch, publish).await;
         }
         #[cfg(unix)]
-        if let Some(admission) = &self.admission
-            && !admission.current().await
-        {
-            return None;
-        }
+        let approval = if let Some(admission) = &self.admission {
+            match admission.current().await {
+                Ok(proof) => Some(proof),
+                Err(error) => {
+                    admission.report(Err(error));
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         let (Some(stamp), Some(watch)) = (&self.stamp, &self.watch) else {
             return Some(publish());
         };
         if !stamp.notice.current() {
+            #[cfg(unix)]
+            if let Some(admission) = &self.admission {
+                admission.superseded("notice_changed");
+            }
             return None;
         }
         let guard = lock(watch);
         let current = guard.key.as_ref() == Some(&stamp.key)
             && (guard.generation, guard.revision) == (stamp.generation, stamp.revision);
-        current.then(publish)
+        if !current {
+            #[cfg(unix)]
+            if let Some(admission) = &self.admission {
+                let field = if guard.key.as_ref() != Some(&stamp.key) {
+                    "watch_key"
+                } else if guard.generation != stamp.generation {
+                    "watch_generation"
+                } else {
+                    "watch_revision"
+                };
+                admission.superseded(field);
+            }
+            return None;
+        }
+        #[cfg(unix)]
+        if let (Some(admission), Some(proof)) = (&self.admission, approval) {
+            admission.report(Ok(proof));
+        }
+        Some(publish())
     }
 }
 
@@ -329,6 +357,82 @@ fn at(guard: &Watch, answer: Observed) -> Answer {
     } else {
         answer
     }
+}
+
+/// Publishes a current source's Busy witness before an older Idle reading can pass it.
+#[cfg(unix)]
+pub(super) fn with_busy_source(
+    provider: &ProviderKind,
+    channel: u64,
+    tmux: &str,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    #[cfg(test)] root: Option<std::path::PathBuf>,
+    publish: impl FnOnce(&Reading),
+) -> Option<bool> {
+    let shadow = match provider {
+        ProviderKind::Claude => ShadowProvider::Claude,
+        ProviderKind::Codex => ShadowProvider::Codex,
+        _ => return None,
+    };
+    crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
+        let current = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)?;
+        if (
+            current.runtime_kind,
+            &current.session_id,
+            &current.output_path,
+        ) != (
+            binding.runtime_kind,
+            &binding.session_id,
+            &binding.output_path,
+        ) {
+            return None;
+        }
+        let ports = LivePorts {
+            #[cfg(test)]
+            root,
+        };
+        let seq = ports.binding_seq(channel).ok()?;
+        let watch = lock(&WATCHES).get(&channel)?.clone();
+        let mut guard = lock(&watch);
+        let key = guard.key.as_ref()?;
+        if key.channel != channel
+            || key.provider != shadow
+            || key.session != tmux
+            || key.seq != seq
+            || !guard.notice.current()
+        {
+            return None;
+        }
+        let source = match &guard.outcome {
+            Outcome::Source { facts, .. } => &facts.binding().source,
+            Outcome::Tail(reader) => &reader.facts.binding().source,
+            _ => return None,
+        };
+        if binding.session_id.as_deref() != Some(source.session_id.as_str())
+            || std::path::Path::new(&binding.output_path) != source.path
+            || crate::services::tui_o::shadow::binding_reader::source_id_for(
+                &source.session_id,
+                &source.path,
+            )
+            .ok()
+            .as_ref()
+                != Some(source)
+        {
+            return None;
+        }
+        let busy = crate::services::tui_turn_state::observe_provider_jsonl_turn_state(
+            provider,
+            std::path::Path::new(&binding.output_path),
+        )
+        .is_busy();
+        if busy {
+            guard.revision += 1;
+            let (observed, stamp) = at(&guard, observed(Activity::Busy, "observer_source_busy"));
+            let reading = Reading::bound(observed, stamp, None, Some(tmux));
+            publish(&reading);
+        }
+        Some(busy)
+    })
 }
 
 /// A fresh judgment with the state it read, for publishers outside the effect points.

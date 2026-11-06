@@ -23,8 +23,7 @@ use crate::services::tmux_diagnostics::{
 };
 
 use super::formatting::{
-    ReplaceLongMessageOutcome, build_streaming_placeholder_text, format_tool_input,
-    plan_streaming_rollover, truncate_str,
+    ReplaceLongMessageOutcome, format_tool_input, plan_streaming_rollover, truncate_str,
 };
 use super::placeholder_cleanup::{PlaceholderCleanupOperation, PlaceholderCleanupOutcome};
 use super::placeholder_live_events::{
@@ -49,6 +48,8 @@ mod relay_decisions;
 #[path = "tmux/turn_lifecycle.rs"]
 mod turn_lifecycle;
 
+#[cfg(test)]
+pub(in crate::services::discord) use self::active_bridge_turn_guard_tests::restored_watcher_should_yield;
 pub(in crate::services::discord) use self::relay_decisions::sniff_background_agent_pending_for_completion;
 #[cfg(test)]
 use self::relay_decisions::watcher_should_yield_to_inflight_state;
@@ -1259,6 +1260,20 @@ mod active_bridge_turn_guard_tests {
     use std::ffi::OsString;
     use std::path::Path;
 
+    pub(in crate::services::discord) fn restored_watcher_should_yield(
+        state: &InflightTurnState,
+        tmux_session_name: &str,
+        data_start_offset: u64,
+        current_offset: u64,
+    ) -> bool {
+        watcher_should_yield_to_inflight_state(
+            Some(state),
+            tmux_session_name,
+            data_start_offset,
+            current_offset,
+        )
+    }
+
     struct EnvGuard {
         key: &'static str,
         previous: Option<OsString>,
@@ -1754,50 +1769,6 @@ mod watcher_stream_progress_tests {
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::{ChannelId, MessageId};
-
-    fn streaming_tick_persist_order_guard_4104() -> &'static str {
-        let source = include_str!("tmux_watcher/streaming_status_tick.rs");
-        source
-            .split_once("// @persist-order-guard-start #4104")
-            .and_then(|(_, guarded)| {
-                guarded
-                    .split_once("// @persist-order-guard-end #4104")
-                    .map(|(guarded, _)| guarded)
-            })
-            .expect("#4104 persist-order markers must delimit production code")
-    }
-
-    #[test]
-    fn streaming_tick_persists_tool_hold_without_requiring_discord_edit_4104() {
-        let guarded = streaming_tick_persist_order_guard_4104();
-        let hold_persist = guarded
-            .find("persist_watcher_stream_progress(")
-            .expect("tool-hold snapshot must be persisted before render decisions");
-        let render_gate = guarded
-            .find("let raw_current_portion =")
-            .expect("streaming tick render gate");
-
-        assert!(
-            hold_persist < render_gate,
-            "tool-hold persistence must precede the no-edit early return"
-        );
-    }
-
-    #[test]
-    fn streaming_tick_persists_silent_tool_hold_before_render_suppression_4104() {
-        let guarded = streaming_tick_persist_order_guard_4104();
-        let hold_persist = guarded
-            .find("persist_watcher_stream_progress(")
-            .expect("silent tool-hold snapshot must be persisted");
-        let silent_gate = guarded
-            .find("if streaming_silent_turn {")
-            .expect("silent rendering suppression gate");
-
-        assert!(
-            hold_persist < silent_gate,
-            "silent turns must persist tool-hold state before suppressing Discord rendering"
-        );
-    }
 
     #[test]
     fn persist_watcher_stream_progress_persists_tool_hold_witness() {

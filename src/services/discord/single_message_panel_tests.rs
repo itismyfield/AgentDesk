@@ -184,9 +184,8 @@ fn single_message_panel_flag_rejects_documented_optout_values() {
 
 #[test]
 fn footer_mode_requires_both_flags() {
-    assert!(!super::footer_mode_enabled(true, true));
-    assert!(!super::footer_mode_enabled(true, false));
-    assert!(!super::footer_mode_enabled(false, true));
+    assert!(!super::footer_mode_enabled(true));
+    assert!(!super::footer_mode_enabled(false));
 }
 
 #[test]

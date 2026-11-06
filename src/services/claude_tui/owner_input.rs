@@ -22,6 +22,8 @@ struct Scope {
     allowed: AtomicBool,
     known_before: AtomicBool,
     keyed: AtomicBool,
+    /// A stop took the writer token's first-key gate, so no earlier refusal asks for a resend.
+    stopped: AtomicBool,
     holder: crate::services::tui_input::writer_lease::Holder,
     /// A Herdr owner's physical writer `socket_path#pane_id`; `target.owner` stays the logical
     /// session history names.
@@ -37,6 +39,16 @@ fn current() -> Option<Arc<Scope>> {
 pub(crate) fn active() -> bool {
     current().is_some()
 }
+/// The original queue identity stays the same across execution and attempt changes.
+pub(crate) fn original_identity() -> Option<(u64, u64)> {
+    let scope = current()?;
+    let identity = &scope.target["_attempt"]["identity"];
+    Some((
+        identity["primary"].as_u64()?,
+        identity["queued_generation"].as_u64()?,
+    ))
+}
+
 pub(crate) fn epoch() -> Option<PaneEpoch> {
     #[cfg(unix)]
     return current().and_then(|s| {
@@ -93,11 +105,26 @@ pub(crate) fn keyed() {
     }
 }
 
+/// A stop took the writer token's first-key gate: the attempt settles unconfirmed, never resent.
+pub(crate) fn stop_took_gate() {
+    if let Some(scope) = current() {
+        scope.stopped.store(true, Ordering::SeqCst);
+    }
+}
+
 /// The text never became a tmux buffer, so no key followed.
 pub(crate) fn load_failed() {
     if let Some(scope) = current() {
         scope.refuse("load_failed".into());
     }
+}
+
+/// Whether this scope's leaf was refused because its text never became a tmux buffer.
+pub(crate) fn buffer_failed() -> bool {
+    current().is_some_and(|scope| {
+        let refused = scope.refused.lock().unwrap_or_else(|e| e.into_inner());
+        refused.as_ref().is_some_and(|r| r.reason == "load_failed")
+    })
 }
 
 /// The leaf's typed veto came before any key; a key already sent keeps it from proving unsent,
@@ -430,6 +457,7 @@ pub(crate) fn capture_scope<R>(
         allowed: AtomicBool::new(false),
         known_before: AtomicBool::new(false),
         keyed: AtomicBool::new(false),
+        stopped: AtomicBool::new(false),
         holder: Default::default(),
         writer: Mutex::new(None),
         epoch: Mutex::new(None),
@@ -452,23 +480,26 @@ pub(crate) fn capture_scope<R>(
     let result = submission_fence::with_scope(Some(scope.clone()), || {
         guarded_outcome::with_owner(Some(scope.clone()), run)
     });
+    // A stop that took the writer's gate outranks any refusal recorded before it.
+    let known_before =
+        scope.known_before.load(Ordering::SeqCst) && !scope.stopped.load(Ordering::SeqCst);
     let proof = (!scope.allowed.load(Ordering::SeqCst)
         && !scope.keyed.load(Ordering::SeqCst)
-        && scope.known_before.load(Ordering::SeqCst))
-    .then(|| scope.target.get("_attempt").cloned())
-    .flatten()
-    .map(|attempt| NotSentProof {
-        attempt,
-        reason: scope
-            .refused
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map_or_else(
-                || "preparation held before payload".into(),
-                |e| e.reason.clone(),
-            ),
-    });
+        && known_before)
+        .then(|| scope.target.get("_attempt").cloned())
+        .flatten()
+        .map(|attempt| NotSentProof {
+            attempt,
+            reason: scope
+                .refused
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map_or_else(
+                    || "preparation held before payload".into(),
+                    |e| e.reason.clone(),
+                ),
+        });
     (result, proof)
 }
 #[cfg(all(test, unix))]

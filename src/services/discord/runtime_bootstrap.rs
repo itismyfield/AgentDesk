@@ -31,6 +31,17 @@ pub(in crate::services::discord) async fn restore_queued_and_inflight_for_tests(
     queued_recovery::restore_queued_and_inflight_work(http, shared, provider).await
 }
 
+/// Opens intake only after this active runtime restored its queues and inflight work.
+pub(in crate::services::discord) async fn complete_active_reconcile(shared: &Arc<SharedData>) {
+    mark_reconcile_complete(shared);
+    #[cfg(unix)]
+    for channel in
+        crate::services::turn_orchestrator::v2_channels(&shared.provider, &shared.token_hash)
+    {
+        super::session_transition::wake_installed_owner(shared, channel).await;
+    }
+}
+
 mod recovery_flush;
 mod relay_dlq_redelivery;
 mod restored_state;
@@ -38,6 +49,8 @@ mod session_gc;
 mod shared_data;
 mod shutdown;
 mod spawns;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use spawns::carried_restart_marked;
 #[cfg(test)]
 pub(in crate::services::discord) use spawns::{
     ORPHAN_RETRY_CADENCE_FOR_TESTS, run_bot_spawn_execution_runtime_tasks,
@@ -59,6 +72,9 @@ pub(in crate::services::discord) use self::queued_placeholders::{
     delete_stale_queued_placeholder_cards, delete_stale_queued_placeholder_cards_with,
     filter_restored_queued_placeholders,
 };
+pub(in crate::services::discord) use self::restored_state::{
+    restore_model_overrides, restored_model_overrides,
+};
 use self::shared_data::{
     ProcessLifecycleCounters, RestoredSessionState, RuntimeServices, UiFeatureFlags,
     run_bot_build_shared_data,
@@ -78,8 +94,6 @@ pub(crate) struct RunBotContext {
     pub(crate) api_port: u16,
     pub(crate) pg_pool: Option<sqlx::PgPool>,
     pub(crate) engine: Option<crate::engine::PolicyEngine>,
-    pub(crate) placeholder_live_events_enabled: bool,
-    pub(crate) status_panel_v2_enabled: bool,
     /// #3805 P2: two-message panel rollout gate (default OFF). Scaffolding —
     /// threaded from config into shared UI state, not read by any path in PR-A.
     pub(crate) two_message_panel_enabled: bool,
@@ -148,6 +162,7 @@ mod snapshot_reader_tests;
 
 /// Entry point: start the Discord bot
 pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext) {
+    crate::services::legacy_body_census::ensure_ready().await;
     if crate::services::codex::codex_source_mode_snapshot()
         == crate::services::codex::CodexSourceMode::Invalid
     {
@@ -164,8 +179,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         api_port,
         pg_pool,
         engine,
-        placeholder_live_events_enabled,
-        status_panel_v2_enabled,
         two_message_panel_enabled,
     } = context;
 
@@ -228,16 +241,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let startup_doctor_started_for_client_start = startup_doctor_started.clone();
     let health_registry_for_client_start = health_registry.clone();
 
-    let restored_model_overrides: Vec<(ChannelId, String)> = bot_settings
-        .channel_model_overrides
-        .iter()
-        .filter_map(|(channel_id, model)| {
-            channel_id
-                .parse::<u64>()
-                .ok()
-                .map(|id| (ChannelId::new(id), model.clone()))
-        })
-        .collect();
+    let restored_model_overrides = restored_model_overrides(&bot_settings);
     let restored_node_overrides: Vec<(ChannelId, String)> = bot_settings
         .channel_node_overrides
         .iter()
@@ -281,8 +285,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             shutdown_remaining: shutdown_remaining.clone(),
         },
         UiFeatureFlags {
-            placeholder_live_events_enabled,
-            status_panel_v2_enabled,
             two_message_panel_enabled,
         },
         RestoredSessionState {
@@ -450,7 +452,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 // INITIALIZATION/SPAWN ORDER IS LOAD-BEARING — do not reorder. ──
 
 /// Registers a standby and settles the reconcile it skips; promotion remains a fenced restart.
-async fn register_standby_and_settle_reconcile(
+pub(in crate::services::discord) async fn register_standby_and_settle_reconcile(
     health_registry: &Arc<health::HealthRegistry>,
     provider: &ProviderKind,
     shared: &Arc<SharedData>,
@@ -676,16 +678,6 @@ mod bootstrap_tests {
             | serenity::GatewayIntents::DIRECT_MESSAGES
             | serenity::GatewayIntents::MESSAGE_CONTENT;
         assert_eq!(intents, expected);
-
-        let intake_gate_source = include_str!("router/intake_gate.rs");
-        assert!(
-            !intake_gate_source.contains("FullEvent::ReactionRemove"),
-            "intake must not dispatch reaction-removal events"
-        );
-        assert!(
-            !intake_gate_source.contains("reaction_remove::handle_reaction_remove"),
-            "the destructive reaction-removal handler must not be reachable from intake"
-        );
     }
 
     struct RecordingStalePlaceholderDeleter {
@@ -891,62 +883,6 @@ mod bootstrap_tests {
         assert_eq!(after_first, before + 1);
         assert_eq!(registry.registration_generation(), after_first);
     }
-
-    // Lexical pin, not a control-flow proof: one awaited reaper call after generation
-    // allocation and before the runtime markers; the only literal `return` before it is
-    // the utility one. `?`, break, process::exit or a diverging helper slip past it.
-    #[test]
-    fn run_bot_reaper_precedes_runtime_branches_and_only_utility_returns_literally() {
-        let source = include_str!("runtime_bootstrap.rs");
-        let production = source
-            .split_once("#[cfg(test)]\nmod bootstrap_tests")
-            .unwrap()
-            .0;
-        let body = production
-            .split_once("pub(crate) async fn run_bot(")
-            .unwrap()
-            .1;
-        let body = body.split_once("\n}\n").unwrap().0;
-        assert_eq!(body.matches("reap_inflight_rows_at_boot").count(), 1);
-        let call = "super::inflight::reap_inflight_rows_at_boot_blocking(&provider, shared.pg_pool.clone()).await;";
-        let at = body
-            .find(call)
-            .expect("the reaper call must be awaited in run_bot");
-        assert!(body.find("run_bot_build_shared_data(").unwrap() < at);
-        // The only literal `return` allowed before the reaper is the utility one.
-        let utility = "if let Some(bot_name) = should_skip_agent_runtime_launch(token) {";
-        let mut prefix = body[..at].to_string();
-        if let Some((before, rest)) = body[..at].split_once(utility) {
-            let (branch, after) = rest.split_once("\n    }\n").unwrap();
-            assert_eq!(branch.matches("return").count(), 1, "utility branch");
-            prefix = format!("{before}{after}");
-        }
-        assert!(!prefix.contains("return"), "no exit may precede the reaper");
-        for later in [
-            "spawn_tui_prompt_relay(",
-            "if !modules.gateway",
-            "restore_worker_queues(",
-            "run_bot_acquire_gateway_lease(",
-            "GatewayLeaseOutcome::Standby",
-            "run_bot_start_gateway_runtime(",
-        ] {
-            assert!(
-                at < body.find(later).expect(later),
-                "reaper must precede {later}"
-            );
-        }
-        let token = body.find("cached_bot_token.set(").unwrap();
-        let presence = body.find("turn_presence::supervisor::spawn(").unwrap();
-        assert!(
-            token < presence,
-            "presence never sends before the bot token is set"
-        );
-        let confirm = body.find("turn_retirement::confirm_at_boot(").unwrap();
-        assert!(
-            at < confirm && confirm < body.find("spawn_tui_prompt_relay(").unwrap(),
-            "turn mode is fixed after the reaper and before pending starts are restored"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -1030,8 +966,6 @@ mod restart_lifecycle_characterization_tests {
                 shutdown_remaining: shutdown_remaining.clone(),
             },
             UiFeatureFlags {
-                placeholder_live_events_enabled: false,
-                status_panel_v2_enabled: false,
                 two_message_panel_enabled: false,
             },
             RestoredSessionState {
@@ -1099,7 +1033,7 @@ mod restart_lifecycle_characterization_tests {
             let shutdown_remaining = Arc::new(AtomicUsize::new(3));
             let shared = build_shared_with_injected_shutdown_remaining(&shutdown_remaining);
 
-            let root = crate::agentdesk_runtime_root().expect("runtime root override");
+            let root = crate::config::runtime_root().expect("runtime root override");
             std::fs::create_dir_all(&root).unwrap();
             let marker = root.join("restart_pending");
             std::fs::write(

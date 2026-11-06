@@ -33,7 +33,7 @@ pub(crate) use self::status::{leader_only_worker_status_json, rate_limit_sync_ac
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BootStepId {
     RefreshMemoryHealth,
-    DrainStartupHooks,
+    RecordServerBoot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,9 +52,9 @@ const BOOT_ONLY_STEPS: [BootStepSpec; 2] = [
         order: 10,
     },
     BootStepSpec {
-        id: BootStepId::DrainStartupHooks,
-        name: "drain_startup_hooks",
-        responsibility: "Resume deferred startup hooks persisted before the previous shutdown",
+        id: BootStepId::RecordServerBoot,
+        name: "record_server_boot",
+        responsibility: "Stamp kv_meta server_boot_at for orphan recovery and policy boot checks",
         order: 20,
     },
 ];
@@ -384,10 +384,8 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 13] = [
         shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
         execution_scope: WorkerExecutionScope::WorkerLocal,
         health_owner: "watcher-supervisor tracing + per-relay metrics",
-        notes: "Epic #2285 / E3 (#2345), wired through E4 (#2411) and E5 (#2412). Gated by \
-                cluster.session_bound_relay_enabled (default true since E5); flipping the flag \
-                off restores the legacy watcher as the sole terminal delivery path. \
-                Worker-local because tmux is host-scoped — relays live next to the sessions \
+        notes: "Epic #2285 / E3 (#2345), wired through E4 (#2411) and E5 (#2412). Always \
+                started on Unix hosts. Worker-local because tmux is host-scoped — relays live next to the sessions \
                 they observe. Production wires a Discord RelaySink that parses provider JSONL \
                 frames and owns Discord terminal delivery for eligible session-bound inflight \
                 shapes (rebind-origin/adopted sessions and watcher-owned relays). The legacy \
@@ -549,6 +547,55 @@ mod leader_takeover_tests {
                 .is_some()
         );
         assert_eq!(registry.running.len(), 1);
+    }
+
+    /// A leftover retired `cluster.session_bound_relay_enabled` key loads, and the
+    /// session-bound relay supervisor still starts whatever its value.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn watcher_supervisor_starts_despite_retired_session_bound_relay_key() {
+        for value in ["false", "true"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("agentdesk.yaml");
+            crate::config::save_to_path(&path, &crate::config::Config::default()).unwrap();
+            let mut yaml = std::fs::read_to_string(&path).unwrap();
+            assert!(!yaml.contains("\ncluster:"), "default config omits cluster");
+            yaml.push_str(&format!(
+                "\ncluster:\n  session_bound_relay_enabled: {value}\n"
+            ));
+            std::fs::write(&path, yaml).unwrap();
+            let mut config = crate::config::load_from_path(&path)
+                .expect("retired session-bound relay key must not fail config load");
+            assert_eq!(config.cluster, crate::config::ClusterConfig::default());
+            config.policies.dir = dir.path().join("policies");
+            config.policies.hot_reload = false;
+            config.data.dir = dir.path().join("data");
+            std::fs::create_dir_all(&config.policies.dir).unwrap();
+            let engine = crate::engine::PolicyEngine::new_with_pg(&config, None).unwrap();
+            let mut registry = SupervisedWorkerRegistry::new(
+                config,
+                engine,
+                None,
+                None,
+                ClusterRuntime::for_test_with_leader(Arc::new(AtomicBool::new(false))),
+            );
+            // The spawned task never runs: nothing here yields to the runtime.
+            registry.shutdown.store(true, Ordering::Release);
+            let spec = WORKER_SPECS
+                .into_iter()
+                .find(|s| s.id == super::ServerWorkerId::WatcherSupervisor)
+                .unwrap();
+            assert!(registry.start_worker(spec, None).unwrap().is_none());
+            assert_eq!(
+                registry
+                    .running
+                    .iter()
+                    .map(|worker| worker.spec.id)
+                    .collect::<Vec<_>>(),
+                [super::ServerWorkerId::WatcherSupervisor],
+                "{value}: the supervisor must be registered"
+            );
+        }
     }
 
     /// **#5142 D-4 regression, verified on the spawned thread.**
