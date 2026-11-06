@@ -12,6 +12,9 @@ impl Current {
         let Some(((raw, named), checkpoint)) = logged.zip(checkpoint) else {
             return Self::Unknown;
         };
+        if checkpoint > raw.last().map_or(0, |event| event.seq) {
+            return Self::Unknown;
+        }
         if raw
             .iter()
             .enumerate()

@@ -360,8 +360,10 @@ where
                 actor.boot_previous_nonce = None;
                 actor.project_operator_resumes();
                 fresh = actor.persist_notice_evidence();
-                actor.writer.halt_cleared();
-                resumed.send_replace(true);
+                if !actor.writer.is_stopped() {
+                    actor.writer.halt_cleared();
+                    resumed.send_replace(true);
+                }
             }
         }
         actor.prepare_notices(&fresh).await;

@@ -173,7 +173,9 @@ impl<B: BindingEvents> Sources<B> {
             for index in 0..self.readers.len() {
                 if missing_reader(&self.readers[index]) {
                     if let Err(alarm) = self.cleanup_missing(writer, index, wall_now) {
-                        if !self.park_missing(writer, index, deriver.has_unsealed()) {
+                        if writer.store().io_failure().is_some()
+                            || !self.park_missing(writer, index, deriver.has_unsealed())
+                        {
                             return Err(alarm);
                         }
                     }

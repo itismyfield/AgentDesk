@@ -188,3 +188,6 @@ fn unresolved_applied_prefix_is_skipped_but_unapplied_suffix_is_unknown() {
         Current::Unknown
     ));
 }
+
+#[path = "current_repair_tests.rs"]
+mod repair;

@@ -20,6 +20,8 @@ mod late_binding;
 mod late_cleanup;
 #[path = "late_adopt_host_tests.rs"]
 mod late_host;
+#[path = "repair_io_tests.rs"]
+mod repair_io;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
 #[cfg(unix)]
 use chrono::{DateTime, TimeDelta};

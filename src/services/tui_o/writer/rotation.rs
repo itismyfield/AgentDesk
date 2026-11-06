@@ -24,10 +24,10 @@ use crate::services::tui_o::shadow::identity::{RecordFact, classify};
 use crate::services::tui_o::shadow::{
     CaptureBatch, CaptureOutcome, CaptureSource, MAX_READ_BYTES, ShadowProvider, SourceId, UnitKind,
 };
-use crate::services::tui_o::store::StoreError;
 use crate::services::tui_o::store::cleanup_witness::{CleanupWitness, WITNESS_REFRESH};
 use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink, Successor};
 use crate::services::tui_o::store::spool::{Cursor, SpoolFrame, source_key};
+use crate::services::tui_o::store::{ChannelStore, StoreError};
 
 /// A proven old source whose length holds this long after its successor's first record is retired.
 pub const RETIRE_QUIET: Duration = Duration::from_secs(10);
@@ -582,8 +582,10 @@ impl<B: BindingEvents> Sources<B> {
             event, &new,
         );
         // A source an earlier event of this batch attached is the stored name of its file now.
+        let old = old
+            .map(|source| self.bind_old(writer.store(), source))
+            .transpose()?;
         let mut stored = |source: &SourceId| self.names.bind_name(writer.store(), source);
-        let old = old.map(&mut stored).transpose()?;
         let parent_hint = parent_hint.map(&mut stored).transpose()?;
         let new = stored(&new)?;
         let (old, parent_hint) = (old.as_ref(), parent_hint.as_ref());
@@ -704,6 +706,47 @@ impl<B: BindingEvents> Sources<B> {
             }
             Some(_) => Ok(()),
         }
+    }
+
+    /// A parked predecessor may use only the alias its applied prefix already confirmed.
+    fn bind_old(
+        &mut self,
+        store: &ChannelStore,
+        source: &SourceId,
+    ) -> Result<SourceId, WriterAlarm> {
+        let parked = self.names.stored_name(store, source).filter(|stored| {
+            self.is_parked(stored) && stored.session_id.is_empty() && !source.session_id.is_empty()
+        });
+        if let (Some(stored), Some(checkpoint)) = (parked, self.checkpoint) {
+            let confirmed = self
+                .bindings
+                .binding_events_since(self.channel, 0)
+                .ok()
+                .and_then(|raw| {
+                    if checkpoint > raw.last().map_or(0, |event| event.seq)
+                        || raw
+                            .iter()
+                            .enumerate()
+                            .any(|(index, event)| event.seq != index as u64 + 1)
+                    {
+                        return None;
+                    }
+                    let mut applied = Names::new(self.provider);
+                    applied
+                        .read(store, raw, 0, Some(checkpoint))
+                        .ok()
+                        .flatten()
+                        .filter(|_| {
+                            applied.session(&stored) == source.session_id
+                                && applied.stored_name(store, source).as_ref() == Some(&stored)
+                        })
+                        .map(|_| stored)
+                });
+            if let Some(stored) = confirmed {
+                return Ok(stored);
+            }
+        }
+        self.names.bind_name(store, source)
     }
 
     fn unretire<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
