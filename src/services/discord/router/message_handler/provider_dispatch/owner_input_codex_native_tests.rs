@@ -135,6 +135,10 @@ async fn codex_start(id: u64, by: By, case: Rollout) {
     let key = key.await.expect("channel session key");
     discord::inflight::seed_session_row_keyed(&pool, &key, rig.channel.get(), None).await;
     let append = |rows: &str| {
+        // A step with no records only lets the watch read the pane again; its file may be gone.
+        if rows.is_empty() {
+            return;
+        }
         let mut file = fs::OpenOptions::new()
             .append(true)
             .open(&rig.transcript)

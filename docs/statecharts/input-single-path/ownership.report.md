@@ -311,17 +311,18 @@ Code: this PR on main `4a13d1d32`. The early, late and watch reads share one Cod
 | Code entry (file:line) | Model value range |
 |---|---|
 | `codex_observation.rs:52-67` `codex_native_end`: a verified-input block, no pane cwd, a missing or other-cwd bound rollout, a session id naming none, or only the cwd's newest rollout (no identity) is `Unknown`; the pane's binding, else its session id, names the one rollout read | `ev # "none"` only on a plain legacy start channel; anything but a named rollout reads `unknown` (as `nr = "unknown"` does) |
-| `rollout.rs:98-105` `read_native_end`, `:252-260` its end: the latest turn's own `task_complete`/`turn_aborted` is `Ended`; another turn's end keeps it `Open`; an unnamed end is `Unknown` until that turn's own end (`:391-404`); a malformed record or unidentified start (`:341-353`) is `Unknown` until an identified start; a torn last line (`:158-163`) is `Unknown`; no start in the whole file is `NoStart` (`:210-214`) | `ev \in {"open","other","unnamed","own","noStart"}`; `CodexForeignEnds` (another turn's or an unnamed end while open); `HumanStartsTurn`/`RowOpensTurn` open a turn (`open`); `TurnEnds` is its own end (`own`); no step leaves `noStart` but a start. A torn line is a read that cannot tell, as `ReadBreaks`/`ReadRecovers` |
-| `owner_input.rs:705-714` `codex_read`: `Ended` is `Ready`, `Open` is `Blocked`, `NoStart` and `Unknown` are `Unknown` | `CodexReads` feeds `View` (`DriveStartWaits`, `DriveStartClaims`, `DriveStartRuns`/`DriveStartLateHolds`) and `WatchSees` (`Reads = "idle"`); mutants `classifierIdle` (any end is idle, as the rollout classifier reads it) and `noStartEnded` |
+| `rollout.rs:98-105` `read_native_end`, `:252-260` its end: the latest turn's own `task_complete`/`turn_aborted` is `Ended`; another turn's end keeps it `Open`; an unnamed end is `Unknown` until a later own end of that turn, also after its own end (`:252-260`, `:391-406`); a malformed record or unidentified start (`:341-353`) is `Unknown` until an identified start; a torn last line (`:158-163`) is `Unknown`; no start in the whole file is `NoStart` (`:210-214`) | `ev \in {"open","other","unnamed","own","noStart"}`; `CodexForeignEnds` (another turn's or an unnamed end while open); `HumanStartsTurn`/`RowOpensTurn` open a turn (`open`); `TurnEnds` is its own end (`own`); `CodexUnnamedAfterOwn` then `CodexOwnEndResolves` (`own` → `ownUnnamed` → `resolved`, once a turn); no step leaves `noStart` but a start. A torn line is a read that cannot tell, as `ReadBreaks`/`ReadRecovers` |
+| `owner_input.rs:705-714` `codex_read`: `Ended` is `Ready`, `Open` is `Blocked`, `NoStart` and `Unknown` are `Unknown` | `CodexReads` feeds `View` (`DriveStartWaits`, `DriveStartClaims`, `DriveStartRuns`/`DriveStartLateHolds`) and `WatchSees` (`Reads = "idle"`); mutants `classifierIdle` (any end is idle, as the rollout classifier reads it), `noStartEnded` and `closedFirst` (an unnamed end after the own one reads as ended) |
 | `owner_input.rs:608-633` `start_target` and `:893-897` the late read now take Codex panes too | the same `A77` transitions; the claim's ghost `seen` is now `Proof`, what a correct read shows, so a mutant read cannot vouch for itself |
 | `entrypoints.rs:104-159` a failed Discord lookup of a channel name, with no fallback, is `Unnamed`; `owner_input.rs:596`, `:602`, `:636-646` hold the start unclaimed with a watch that names the pane again and then wakes the drive | not modelled: the model has one named pane |
 
 | Config | Before (slice B) | After |
 |---|---|---|
-| `A7772` | every rule holds, 471,844 states | every rule holds, 473,228 states |
+| `A7772` | every rule holds, 471,844 states | every rule holds, 474,120 states (473,228 before `ownUnnamed`) |
 | `A7772Live` | `NativeHeldRuns` holds, 471,844 states | `NativeHeldRuns` holds |
 | `A7772ClassifierIdle` | — | `EarlyClaimHasIdleProof`, `StartOwnTurn` break |
 | `A7772NoStartEnded` | — | `EarlyClaimHasIdleProof` breaks |
+| `A7772ClosedFirst` | — | `EarlyClaimHasIdleProof` breaks |
 | other `A7772*`, `A2b*`, `ConsumedWaiting*` | as in the slice B table | unchanged (`A2b`: 130,292 states) |
 
 - `InputOwnershipConsumedWaiting` keeps `ev` unchanged too (`CWFixed`); its configs reach the same results.
