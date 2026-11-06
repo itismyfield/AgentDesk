@@ -336,7 +336,11 @@ def expected_rows(text: str) -> dict[str, str]:
 
 def module_dependencies(text: str) -> set[str]:
     """Read EXTENDS lists and INSTANCE names, excluding strings and nested comments."""
-    token = re.compile(r'\\\*[^\n]*|\(\*|"(?:[^"\\]|\\.)*"|[A-Za-z0-9_]+|\S')
+    first_line = text.lstrip().partition("\n")[0].rstrip()
+    if not re.fullmatch(r"-{4,}[ \t]+MODULE[ \t]+[A-Za-z0-9_]+[ \t]+-{4,}", first_line):
+        raise CheckError("dependency selection requires a MODULE header on the first nonblank line; "
+                         "module preambles are not supported")
+    token = re.compile(r'\\\*[^\n]*|\(\*|"(?:[^"\\\n]|\\[^\n])*"|[A-Za-z0-9_]+|\S')
     word = re.compile(r"[A-Za-z0-9_]+\Z")
     tokens, pos = [], 0
     while match := token.search(text, pos):
@@ -349,6 +353,8 @@ def module_dependencies(text: str) -> set[str]:
                     raise CheckError("TLA+ block comment not closed")
                 depth += 1 if mark.group() == "(*" else -1
                 pos = mark.end()
+        elif value == '"':
+            raise CheckError("TLA+ string not closed on its line; cannot select dependencies safely")
         elif not value.startswith(('\\*', '"')):
             tokens.append(value)
     names = set()
@@ -394,7 +400,11 @@ def select_configs(root: Path, expected: dict[str, tuple[str, set[str]]],
     graph = {}
     for path in sources:
         dependencies = set()
-        for name in module_dependencies((root / path).read_text(encoding="utf-8")):
+        try:
+            names = module_dependencies((root / path).read_text(encoding="utf-8"))
+        except CheckError as error:
+            raise CheckError(f"{path}: {error}") from error
+        for name in names:
             local = path.with_name(f"{name}.tla")
             dependencies.update({local} if local in sources | changed_modules else by_name.get(name, set()))
         graph[path] = dependencies
@@ -413,20 +423,27 @@ def select_configs(root: Path, expected: dict[str, tuple[str, set[str]]],
     return sorted(selected)
 
 
-def git_selection(base: str, head: str) -> tuple[list[str], dict[str, str]]:
+def git_selection(base: str, head: str) -> tuple[list[str] | None, dict[str, str]]:
     def git(*arguments: str) -> str:
         result = subprocess.run(["git", "-C", str(REPO_ROOT), *arguments], capture_output=True, check=False)
         if result.returncode:
             raise CheckError(f"git selection failed: {result.stderr.decode('utf-8', errors='replace').strip()}")
         return result.stdout.decode("utf-8")
 
+    try:
+        comparison_base = git("merge-base", base, head).strip()
+        if not comparison_base:
+            raise CheckError("git merge-base returned no commit")
+    except (CheckError, OSError) as error:
+        print(f"FULL_FALLBACK: cannot determine PR merge-base; checking all configs: {error}", file=sys.stderr)
+        return None, {}
     # Disable rename detection to retain both the old and new dependency paths.
-    paths = git("diff", "--name-only", "--no-renames", "-z", f"{base}..{head}", "--").split("\0")
+    paths = git("diff", "--name-only", "--no-renames", "-z", f"{comparison_base}..{head}", "--").split("\0")
     expected_path = (STATECHARTS_PATH / "expected.tsv").as_posix()
     previous = {}
-    if expected_path in paths and git("ls-tree", "--name-only", base, "--", expected_path).strip():
-        text = git("show", f"{base}:{expected_path}")
-        parse_expected(text, f"{base}:expected.tsv")
+    if expected_path in paths and git("ls-tree", "--name-only", comparison_base, "--", expected_path).strip():
+        text = git("show", f"{comparison_base}:{expected_path}")
+        parse_expected(text, f"{comparison_base}:expected.tsv")
         previous = expected_rows(text)
     return [path for path in paths if path], previous
 
@@ -437,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jar", default=os.environ.get("TLA2TOOLS"), help="tla2tools.jar 1.7.4 (env TLA2TOOLS)")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--timeout", type=float, default=300.0, help="seconds per config")
-    parser.add_argument("--base", help="select configs affected by the git diff from this commit to --head")
+    parser.add_argument("--base", help="select configs changed from this commit's merge-base with --head")
     parser.add_argument("--head", default="HEAD", help="diff head (default HEAD); model files come from --root")
     parser.add_argument("--jobs", type=int, default=1, help="number of configs to check concurrently (default 1)")
     args = parser.parse_args(argv)

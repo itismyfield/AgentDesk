@@ -446,6 +446,10 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(self.select("docs/statecharts/shared/1Shared.tla"),
                          ["a/First.cfg", "a/Variant.cfg", "b/Second.cfg"])
 
+    def test_unclosed_strings_cannot_silently_hide_dependencies(self) -> None:
+        with self.assertRaisesRegex(tlc.CheckError, "string not closed"):
+            tlc.module_dependencies('---- MODULE M ----\nText == "')
+
     def test_local_module_takes_precedence_over_same_name_in_another_folder(self) -> None:
         self.write("c/Shared.tla", "---- MODULE Shared ----\n====\n")
         self.write("c/Other.tla", "---- MODULE Other ----\nEXTENDS Shared\n====\n")
@@ -539,6 +543,92 @@ class SelectionCliTest(unittest.TestCase):
             rc = tlc.main(["--root", str(self.root), "--jar", str(jar), "--base", self.base, *args])
         return rc, out.getvalue(), err.getvalue(), checked
 
+    def diverge_main(self) -> None:
+        checker = self.repo / "scripts/ci/statecharts_tlc.py"
+        checker.parent.mkdir(parents=True)
+        checker.write_text("baseline checker\n", encoding="utf-8")
+        (self.root / "M.tla").write_text("---- MODULE M ----\n====\n", encoding="utf-8")
+        self.commit()
+        ancestor = self.git("rev-parse", "HEAD").strip()
+        self.git("checkout", "-qb", "main-advanced")
+        checker.write_text("main-only checker change\n", encoding="utf-8")
+        (self.root / "M.tla").write_text("---- MODULE M ----\n\\* main-only model change\n====\n",
+                                         encoding="utf-8")
+        self.expected.write_text("M.cfg\tM\t-\nN.cfg\tN\tMainOnly\n", encoding="utf-8")
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.git("checkout", "-qb", "pr-head", ancestor)
+
+    def test_shared_module_change_reaches_main_and_preamble_quotes_fail_closed(self) -> None:
+        for preamble in ("", 'Quotation mark: "\n'):
+            with self.subTest(preamble=preamble):
+                (self.root / "M.tla").write_text(
+                    preamble + '---- MODULE M ----\nEXTENDS Shared\nVARIABLE x\n'
+                    'Init == x = "ok"\nNext == x\' = x\nInv == Valid(x)\n====\n', encoding="utf-8")
+                (self.root / "M.cfg").write_text(
+                    "INIT Init\nNEXT Next\nINVARIANT Inv\nCHECK_DEADLOCK FALSE\n", encoding="utf-8")
+                shared = self.root / "Shared.tla"
+                shared.write_text('---- MODULE Shared ----\nValid(v) == v = "ok"\n====\n', encoding="utf-8")
+                self.commit()
+                self.base = self.git("rev-parse", "HEAD").strip()
+                shared.write_text('---- MODULE Shared ----\nValid(v) == v = "bad"\n====\n', encoding="utf-8")
+                self.commit()
+                self.assertEqual(self.git("diff", "--name-only", f"{self.base}..HEAD").splitlines(),
+                                 ["docs/statecharts/Shared.tla"])
+                rc, out, err, checked = self.run_main()
+                if preamble:
+                    self.assertEqual(rc, 1)
+                    self.assertIn("M.tla", err)
+                    self.assertIn("MODULE header", err)
+                    self.assertIn("preamble", err)
+                    self.assertNotIn("NO_TARGETS", out)
+                    checked.assert_not_called()
+                else:
+                    self.assertEqual((rc, err), (0, ""))
+                    self.assertIn("Selected 1 configs", out)
+                    self.assertEqual([call.args[1] for call in checked.call_args_list], ["M.cfg"])
+
+    def test_document_only_pr_excludes_main_only_checker_and_model_changes(self) -> None:
+        self.diverge_main()
+        (self.root / "README.md").write_text("PR documentation only\n", encoding="utf-8")
+        self.commit()
+        rc, out, err, checked = self.run_main()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("Selected 0 configs", out)
+        self.assertIn("NO_TARGETS", out)
+        checked.assert_not_called()
+
+    def test_pr_cfg_change_excludes_main_only_checker_and_model_changes(self) -> None:
+        self.diverge_main()
+        (self.root / "M.cfg").write_text("INIT Init\nNEXT Next\n\\* PR change\n", encoding="utf-8")
+        self.commit()
+        rc, out, err, checked = self.run_main()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("Selected 1 configs", out)
+        self.assertEqual([call.args[1] for call in checked.call_args_list], ["M.cfg"])
+
+    def test_expected_rows_use_merge_base_and_exclude_main_only_row_changes(self) -> None:
+        self.diverge_main()
+        self.expected.write_text("M.cfg\tM\tPrOnly\nN.cfg\tN\t-\n", encoding="utf-8")
+        self.commit()
+        rc, out, err, checked = self.run_main()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("Selected 1 configs", out)
+        self.assertEqual([call.args[1] for call in checked.call_args_list], ["M.cfg"])
+        self.assertIn("| M.cfg | PrOnly | PrOnly |", out)
+
+    def test_shallow_history_without_merge_base_checks_all_instead_of_no_targets(self) -> None:
+        (self.root / "README.md").write_text("PR documentation only\n", encoding="utf-8")
+        self.commit()
+        (self.repo / ".git/shallow").write_text(self.git("rev-parse", "HEAD"), encoding="utf-8")
+        rc, out, err, checked = self.run_main()
+        self.assertEqual(rc, 0)
+        self.assertIn("FULL_FALLBACK", err)
+        self.assertIn("merge-base", err)
+        self.assertIn("Selected 2 configs", out)
+        self.assertNotIn("NO_TARGETS", out)
+        self.assertCountEqual([call.args[1] for call in checked.call_args_list], ["M.cfg", "N.cfg"])
+
     def test_cli_reads_base_expected_rows_and_preserves_broken_output(self) -> None:
         self.expected.write_text("M.cfg\tM\tKnown\nN.cfg\tN\t-\n", encoding="utf-8")
         self.commit()
@@ -599,12 +689,14 @@ class SelectionCliTest(unittest.TestCase):
         self.assertIn("NO_TARGETS", out)
         checked.assert_not_called()
 
-    def test_invalid_base_is_a_failure(self) -> None:
+    def test_unavailable_base_checks_all_with_an_explicit_fallback(self) -> None:
         self.base = "missing-base"
         rc, out, err, checked = self.run_main()
-        self.assertEqual(rc, 1)
-        self.assertIn("FAIL", err)
-        checked.assert_not_called()
+        self.assertEqual(rc, 0)
+        self.assertIn("FULL_FALLBACK", err)
+        self.assertIn("merge-base", err)
+        self.assertNotIn("NO_TARGETS", out)
+        self.assertCountEqual([call.args[1] for call in checked.call_args_list], ["M.cfg", "N.cfg"])
 
 
 class ProblemsTest(unittest.TestCase):
