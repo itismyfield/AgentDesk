@@ -1376,11 +1376,8 @@ mod tests {
         assert!(ops.iter().any(|op| {
             op.target.message_id == message_id
                 && op.add
-                && matches!(
-                    op.emoji,
-                    crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
-                        | crate::services::discord::queue_reactions::QUEUE_MERGED_PENDING_REACTION
-                )
+                && op.emoji
+                    == crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
         }));
         assert!(
             ops.iter().all(|op| op.identity == "intake"),

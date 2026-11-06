@@ -20,31 +20,29 @@ async fn inject(shared: &Arc<SharedData>, channel: u64, message: u64) {
 }
 
 async fn settled(shared: &SharedData, message: u64) {
-    for (emoji, add, assertion) in [
-        (
-            '⏳',
-            false,
-            "idle must remove each immediate injection hourglass",
-        ),
-        (
-            '✅',
-            true,
-            "idle must add a completion checkmark to each immediate injection",
-        ),
-    ] {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if shared.turn_view_reconciler.ops().iter().any(|op| {
-                    op.target.message_id.get() == message && op.emoji == emoji && op.add == add
-                }) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(1)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if shared
+                .turn_view_reconciler
+                .ops()
+                .iter()
+                .any(|op| op.target.message_id.get() == message && op.emoji == '✅' && op.add)
+            {
+                return;
             }
-        })
-        .await
-        .expect(assertion);
-    }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("idle must add a completion checkmark to each immediate injection");
+    assert!(
+        shared
+            .turn_view_reconciler
+            .ops()
+            .iter()
+            .all(|op| { op.target.message_id.get() != message || op.emoji != '➕' || op.add }),
+        "idle must preserve the immediate injection receipt"
+    );
 }
 
 fn supervisor(shared: &Arc<SharedData>, channels: &[u64]) -> (Arc<Fake>, Supervisor<Fake>) {
@@ -143,10 +141,7 @@ async fn idle_completes_only_its_injections_and_preserves_anchor_and_queue_lifec
         })
         .collect();
     changed.sort_unstable();
-    let mut expected: Vec<_> = ids[..2]
-        .iter()
-        .flat_map(|&id| [(a, id, '⏳', false), (a, id, '✅', true)])
-        .collect();
+    let mut expected: Vec<_> = ids[..2].iter().map(|&id| (a, id, '✅', true)).collect();
     expected.sort_unstable();
     assert_eq!(
         changed, expected,
@@ -175,7 +170,7 @@ async fn idle_completes_only_its_injections_and_preserves_anchor_and_queue_lifec
     settled(&shared, ids[2]).await;
     assert_eq!(
         reconciler.ops().len(),
-        before_b + 2,
+        before_b + 1,
         "the other channel retains its own list"
     );
     assert!(
@@ -202,7 +197,7 @@ async fn an_injection_mark_added_after_idle_publication_finishes_on_the_next_exi
     assert_eq!(shared.turn_view_reconciler.ops().len(), 1);
     supervisor.tick(Instant::now()).await;
     settled(&shared, message).await;
-    assert_eq!(shared.turn_view_reconciler.ops().len(), 3);
+    assert_eq!(shared.turn_view_reconciler.ops().len(), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -214,8 +209,6 @@ async fn idle_retries_each_failed_reaction_once_then_discards_the_list() {
             TurnViewDelivery::Failed,
             TurnViewDelivery::Failed,
             TurnViewDelivery::Delivered,
-            TurnViewDelivery::Failed,
-            TurnViewDelivery::Failed,
         ]);
     let channel = 7_269_004;
     let message = 1514500851761287341;
@@ -223,24 +216,17 @@ async fn idle_retries_each_failed_reaction_once_then_discards_the_list() {
     let (fake, supervisor) = supervisor(&shared, &[channel]);
     fake.set(channel, IDLE);
     supervisor.tick(Instant::now()).await;
-    settled(&shared, message).await;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while shared.turn_view_reconciler.ops().len() < 5 {
+        while shared.turn_view_reconciler.ops().len() < 3 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("each failed reaction gets its second and final attempt");
+    .expect("failed completion gets its second and final attempt");
     let ops = shared.turn_view_reconciler.ops();
     assert_eq!(
         ops.iter().map(|op| (op.emoji, op.add)).collect::<Vec<_>>(),
-        [
-            ('⏳', true),
-            ('⏳', false),
-            ('⏳', false),
-            ('✅', true),
-            ('✅', true)
-        ]
+        [('➕', true), ('✅', true), ('✅', true)]
     );
     supervisor.tick(Instant::now()).await;
     tokio::task::yield_now().await;
@@ -260,8 +246,6 @@ async fn idle_keeps_failed_removals_for_the_next_observation_without_marking_com
             TurnViewDelivery::Delivered,
             TurnViewDelivery::Failed,
             TurnViewDelivery::Failed,
-            TurnViewDelivery::Delivered,
-            TurnViewDelivery::Delivered,
         ]);
     let channel = 7_269_006;
     let message = 1514500851761287342;
@@ -270,50 +254,27 @@ async fn idle_keeps_failed_removals_for_the_next_observation_without_marking_com
     fake.set(channel, IDLE);
     supervisor.tick(Instant::now()).await;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while shared
-            .turn_view_reconciler
-            .pending_injected_count(ChannelId::new(channel))
-            != 1
-        {
+        while shared.turn_view_reconciler.ops().len() < 3 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("failed hourglass removal must remain pending for the next idle");
-    assert_eq!(
-        shared
-            .turn_view_reconciler
-            .ops()
-            .iter()
-            .map(|op| (op.emoji, op.add))
-            .collect::<Vec<_>>(),
-        [('⏳', true), ('⏳', false), ('⏳', false)],
-        "failed removal must not add a completion checkmark"
-    );
-    supervisor.tick(Instant::now()).await;
-    settled(&shared, message).await;
+    .expect("completion must stop after two failed attempts");
     assert_eq!(
         shared
             .turn_view_reconciler
             .pending_injected_count(ChannelId::new(channel)),
         0
     );
+    let ops = shared.turn_view_reconciler.ops();
     assert_eq!(
-        shared
-            .turn_view_reconciler
-            .ops()
-            .iter()
-            .map(|op| (op.emoji, op.add))
-            .collect::<Vec<_>>(),
-        [
-            ('⏳', true),
-            ('⏳', false),
-            ('⏳', false),
-            ('⏳', false),
-            ('✅', true)
-        ],
-        "the next idle must remove the hourglass before adding completion"
+        ops.iter().map(|op| (op.emoji, op.add)).collect::<Vec<_>>(),
+        [('➕', true), ('✅', true), ('✅', true)],
+        "failed completion must leave the injection receipt in place"
     );
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    assert_eq!(shared.turn_view_reconciler.ops(), ops);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -345,13 +306,13 @@ async fn idle_discards_permanently_failed_removals_without_marking_complete_or_r
             .turn_view_reconciler
             .pending_injected_count(ChannelId::new(channel)),
         0,
-        "permanent removal failure must be discarded before the next idle"
+        "permanent completion failure must be discarded before the next idle"
     );
     let ops = shared.turn_view_reconciler.ops();
     assert_eq!(
         ops.iter().map(|op| (op.emoji, op.add)).collect::<Vec<_>>(),
-        [('⏳', true), ('⏳', false)],
-        "permanent removal failure must not retry or add a completion checkmark"
+        [('➕', true), ('✅', true)],
+        "permanent completion failure must not retry or remove the injection receipt"
     );
     supervisor.tick(Instant::now()).await;
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -364,6 +325,6 @@ async fn idle_discards_permanently_failed_removals_without_marking_complete_or_r
     assert_eq!(
         shared.turn_view_reconciler.ops(),
         ops,
-        "the next idle must not retry a permanently failed removal"
+        "the next idle must not retry a permanently failed completion"
     );
 }

@@ -32,10 +32,7 @@ async fn rest(State(state): State<RestState>, request: Request<Body>) -> Respons
     if let Some((_, marker)) = path.split_once("/reactions/") {
         let marker = marker.trim_end_matches("/@me").to_string();
         if method == Method::PUT {
-            if matches!(marker.as_str(), "⏳" | "📥")
-                || marker.eq_ignore_ascii_case("%E2%8F%B3")
-                || marker.eq_ignore_ascii_case("%F0%9F%93%A5")
-            {
+            if marker == "➕" || marker.eq_ignore_ascii_case("%E2%9E%95") {
                 state.injected_puts.fetch_add(1, Ordering::SeqCst);
             }
             state.markers.lock().unwrap().insert(marker);

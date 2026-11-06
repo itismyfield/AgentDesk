@@ -17,9 +17,6 @@ mod native_collector_tests;
 #[path = "footer_retirement_raw_tests.rs"]
 mod footer_retirement_raw_tests;
 
-#[path = "source_guard_tests.rs"]
-mod source_guard_tests;
-
 const WARN_EVENT: &str = "watcher_stream_progress_terminal_rejected";
 const PANEL_CHILD_ENV: &str = "AGENTDESK_5191_PANEL_FIXTURE_CHILD";
 const COMMITTED_BODY: &str = "완료된 응답 A";
@@ -622,12 +619,6 @@ fn terminal_outcome_logged_at_wrapper() {
         );
     });
     assert!(saved.is_empty(), "Saved emits no rejection WARN");
-}
-
-#[test]
-fn progress_caller_uses_actual_terminal_outcome() {
-    // The runtime tick tests are authoritative; this only pins the wiring.
-    source_guard_tests::assert_progress_wiring();
 }
 
 /// Two expired ticks on a terminal-committed row: no republication at all.

@@ -156,6 +156,13 @@ impl ReceiptSink {
             *self.restored.lock().unwrap_or_else(|e| e.into_inner()) = Some(pin);
         }
     }
+    /// Restoration remains observable after the candidate becomes an accepted pin.
+    pub(crate) fn has_restored_input(&self) -> bool {
+        self.restored
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
     /// The pin a stop may target, rechecked against the live pane now; a failed check targets none.
     pub(crate) fn stop_pin(&self) -> Option<NativeUserPin> {
         let live = crate::services::claude_tui::input::revalidate_native_pin;

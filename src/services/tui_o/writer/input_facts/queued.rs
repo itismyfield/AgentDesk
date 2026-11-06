@@ -19,7 +19,7 @@ enum Stage {
 }
 
 /// What one record says about the queue.
-enum Record {
+pub(crate) enum Record {
     Enqueue(String),
     /// Removed without running (`remove` other than mid-turn absorption).
     Withdraw(String),
@@ -200,7 +200,7 @@ impl QueuedInputs {
     }
 }
 
-fn classify(value: &Value) -> Option<Record> {
+pub(crate) fn classify(value: &Value) -> Option<Record> {
     let text = |key: &str| value.get(key).and_then(body);
     match value["type"].as_str()? {
         "queue-operation" => match value["operation"].as_str()? {
