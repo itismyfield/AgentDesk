@@ -120,6 +120,127 @@ async fn a_live_pending_reply_with_an_upload_keeps_both_through_catch_up() {
     recover(7_272_502, Some("quoted line"), vec!["local asset ref"]).await;
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn boot_live_pending_auto_reset_catch_up_commits_once_and_preserves_metadata() {
+    use crate::services::discord::queue_io::input_owner::admission::{AdmissionState, status};
+    let fx = Fixture::new().await;
+    let channel = ChannelId::new(7_835_001);
+    let generation = crate::services::discord::runtime_store::generation_path().unwrap();
+    std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+    std::fs::write(generation, "7").unwrap();
+    let path = write_v2_queue(&fx, channel, id(1, 700));
+    let mut seed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    seed["items"] = serde_json::json!([]);
+    seed["namespace"] = serde_json::json!(format!("claude/{}", fx.shared.token_hash));
+    seed["terminal_identities"] = serde_json::json!([{
+        "identity":{"primary":id(1, 700).get(),"queued_generation":7,
+            "sources":[{"message_id":id(1, 700).get(),"queued_generation":7}]},
+        "settled_at_ms":chrono::Utc::now().timestamp_millis() as u64}]);
+    std::fs::write(&path, seed.to_string()).unwrap();
+    let http = Arc::new(serenity::Http::new("unit-test-token"));
+    let stale = crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests(
+        &http,
+        &fx.shared,
+        &fx.provider,
+    )
+    .await;
+    assert!(stale.is_empty());
+    let metadata = snapshot(&fx, channel).await["terminal_identities"].clone();
+    assert_eq!(metadata, seed["terminal_identities"]);
+    let (checkpoint, q) = (id(1, 600), id(2, 150));
+    let request = live_request(channel, q, Some("original quoted line"));
+    let watch = Watch::new(
+        &path,
+        Plan {
+            fail: vec![Step::ParentSync],
+            ..Default::default()
+        },
+    );
+    let intake = input_ingress::intake(
+        &fx.shared,
+        &fx.provider,
+        &request,
+        vec!["original local upload".into()],
+        false,
+        false,
+    )
+    .await;
+    let Some(Intake::Pending(pending)) = intake else {
+        panic!("live intake must leave a stored original");
+    };
+    drop(watch);
+    let before_reset = std::fs::read(&path).unwrap();
+    let runtime_root = path.ancestors().nth(4).unwrap();
+    let output = std::process::Command::new("python3")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "-c",
+            r#"
+import sys
+import types
+from pathlib import Path
+# Reset does not parse scenarios; keep this bridge independent of the optional YAML parser.
+sys.modules['yaml'] = types.ModuleType('yaml')
+sys.path.insert(0, 'scripts/e2e')
+from tui_relay.test_channel_reset import ResetServer, driver
+with ResetServer(sys.argv[2], herdr=True) as api:
+    driver.reset_channel_state(base_url=api.base_url, channel_id=api.channel,
+                               runtime_root=Path(sys.argv[1]), provider='claude')
+"#,
+        ])
+        .arg(runtime_root)
+        .arg(channel.get().to_string())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "reset failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before_reset,
+        "reset must preserve the owner's exact snapshot"
+    );
+    fx.seed_checkpoint(channel, checkpoint);
+    let api = StrictApi::new(&fx.shared).with_history(
+        channel,
+        vec![own_reply(channel, checkpoint), human(channel, q)],
+    );
+    fx.sweep(&api).await;
+    let state = snapshot(&fx, channel).await;
+    assert_eq!(
+        status(&fx.shared.mailbox(channel), &pending.0).await,
+        Ok(AdmissionState::Committed)
+    );
+    assert_eq!(state["admission_sequence"], 1);
+    let receipts = state["admission_receipts"].as_array().unwrap();
+    assert_eq!(receipts.len(), 1);
+    let items = state["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["message_id"], q.get());
+    assert!(
+        items[0]["reply_context"]
+            .as_str()
+            .unwrap()
+            .contains("original quoted line")
+    );
+    assert_eq!(
+        items[0]["pending_uploads"],
+        serde_json::json!(["original local upload"])
+    );
+    assert_eq!(state["terminal_identities"], metadata);
+    assert_eq!(api.enqueue_log(), vec![(q.get(), true, None)]);
+    fx.sweep(&api).await;
+    assert_eq!(
+        snapshot(&fx, channel).await,
+        state,
+        "a repeated catch-up cannot duplicate the original or ticket"
+    );
+}
+
 /// A V2 queue file as a forward binary leaves it, holding `held` queued for a V2-capable binary.
 fn write_v2_queue(fx: &Fixture, channel_id: ChannelId, held: MessageId) -> std::path::PathBuf {
     let path = crate::services::discord::runtime_store::discord_pending_queue_root()

@@ -73,6 +73,11 @@ input-single-path/InputOwnershipIdleMerge.cfg	InputOwnershipAdmission	-	-
 input-single-path/InputOwnershipMain.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoRetryRequired,NoSilentLoss,NoSilentLossObserved,NoTimedRetry,StartNotDropped	-
 input-single-path/InputOwnershipOwnerBusyMarked.cfg	InputOwnershipAdmission	-	-
 input-single-path/InputOwnershipOwnerBusyMarkedMutant.cfg	InputOwnershipAdmission	OwnerBusyKeepsMarked	-
+input-single-path/InputOwnershipReset.cfg	InputOwnershipReset	-	-
+input-single-path/InputOwnershipResetCatchUpRejected.cfg	InputOwnershipReset	-	PendingEventuallyAdmittedOnce
+input-single-path/InputOwnershipResetPending.cfg	InputOwnershipReset	-	-
+input-single-path/InputOwnershipResetPendingCatchUpRejected.cfg	InputOwnershipReset	-	PendingEventuallyAdmittedOnce
+input-single-path/InputOwnershipResetRawWriter.cfg	InputOwnershipReset	NoThirdPartyQueueWrites	-
 input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDropped,NoDeadlock,NoSilentLoss	-
 input-single-path/InputPathClean.cfg	InputPath	-	-
 input-single-path/InputPathStopBusyNoGate.cfg	InputPath	StoppedBeforeKey	-
