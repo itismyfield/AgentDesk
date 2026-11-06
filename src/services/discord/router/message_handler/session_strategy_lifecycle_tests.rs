@@ -727,6 +727,192 @@ fn codex_rollout_idle_state_allows_followup() {
 }
 
 #[cfg(unix)]
+const CODEX_COMPLETED_TURNS_WITH_LATE_ITEM: [&str; 8] = [
+    r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"old"}}"#,
+    r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"recent"}}"#,
+    r#"{"type":"event_msg","payload":{"type":"item_completed","turn_id":"recent","item":{"type":"UserMessage"}}}"#,
+    r#"{"type":"event_msg","payload":{"type":"item_completed","turn_id":"recent","item":{"type":"UserMessage"}}}"#,
+    r#"{"type":"event_msg","payload":{"type":"item_completed","turn_id":"recent","item":{"type":"Reasoning"}}}"#,
+    r#"{"type":"event_msg","payload":{"type":"item_completed","turn_id":"recent","item":{"type":"AgentMessage"}}}"#,
+    r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"recent"}}"#,
+    r#"{"type":"event_msg","payload":{"type":"item_completed","turn_id":"old","item":{"type":"CommandExecution"}}}"#,
+];
+
+#[cfg(unix)]
+fn assert_codex_late_item_followup(
+    lines: &[&str],
+    expected: crate::services::tui_turn_state::TuiTurnState,
+) {
+    use crate::services::tui_turn_state::{
+        TuiReadyState, jsonl_ready_for_input, observe_codex_jsonl_turn_state,
+    };
+    let cwd = tempfile::tempdir().unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let meta =
+        serde_json::json!({"type":"session_meta", "payload":{"id":"bound", "cwd":cwd.path()}});
+    std::fs::write(file.path(), format!("{meta}\n{}\n", lines.join("\n"))).unwrap();
+    let eof = file.as_file().metadata().unwrap().len();
+    let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        output_path: file.path().display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some("bound".to_owned()),
+        last_offset: eof,
+        relay_last_offset: None,
+    };
+    let followup_state = observe_codex_tui_rollout_state_for_cwd_with_sessions(
+        cwd.path().to_str(),
+        Some("bound"),
+        None,
+        Some(&binding),
+    );
+    let diagnostic = classify_claude_tui_followup_submission(
+        &HostedTuiPromptReadinessSnapshot::jsonl_authoritative(true),
+        "attached",
+        None,
+        "present",
+        followup_state,
+        "isolated-codex-fixture",
+    );
+    let actual = (
+        observe_codex_jsonl_turn_state(file.path()),
+        followup_state,
+        diagnostic.is_some(),
+        jsonl_ready_for_input(
+            &ProviderKind::Codex,
+            Some(binding.runtime_kind),
+            file.path(),
+            Some(eof),
+        ),
+    );
+    assert_eq!(
+        actual,
+        (
+            expected,
+            expected,
+            expected.is_busy(),
+            Some(TuiReadyState::from_turn_state(expected))
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_late_item_completed_turn_allows_followup() {
+    let mut lines = CODEX_COMPLETED_TURNS_WITH_LATE_ITEM;
+    for item in [
+        CODEX_COMPLETED_TURNS_WITH_LATE_ITEM[7],
+        r#"{"type":"event_msg","payload":{"type":"item_started","turn_id":"old"}}"#,
+        r#"{"type":"item.started","turn_id":"old","item":{"type":"command_execution"}}"#,
+        r#"{"type":"item.completed","turn_id":"old","item":{"type":"command_execution"}}"#,
+    ] {
+        lines[7] = item;
+        assert_codex_late_item_followup(
+            &lines,
+            crate::services::tui_turn_state::TuiTurnState::Idle,
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_late_item_active_turn_still_blocks_followup() {
+    let mut lines = CODEX_COMPLETED_TURNS_WITH_LATE_ITEM;
+    for item in [
+        r#"{"type":"event_msg","payload":{"type":"item_completed","turn_id":"active"}}"#,
+        r#"{"type":"item.started","turn_id":"active","item":{"type":"command_execution"}}"#,
+        r#"{"type":"item.completed","turn_id":"active","item":{"type":"command_execution"}}"#,
+        r#"{"type":"event_msg","payload":{"type":"item_completed"}}"#,
+        r#"{"type":"event_msg","payload":{"type":"item_completed","turn_id":" "}}"#,
+        r#"{"type":"event_msg","payload":{"type":"agent_reasoning","turn_id":"old"}}"#,
+        r#"{"type":"response_item","payload":{"type":"message","role":"assistant","turn_id":"old"}}"#,
+    ] {
+        lines[7] = item;
+        assert_codex_late_item_followup(
+            &lines,
+            crate::services::tui_turn_state::TuiTurnState::Streaming,
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_late_item_new_task_still_blocks_followup() {
+    for turn in ["new", "old"] {
+        let start = serde_json::json!({"type":"event_msg", "payload":{"type":"task_started", "turn_id":turn}}).to_string();
+        let mut lines = CODEX_COMPLETED_TURNS_WITH_LATE_ITEM.to_vec();
+        lines.push(&start);
+        assert_codex_late_item_followup(
+            &lines,
+            crate::services::tui_turn_state::TuiTurnState::Streaming,
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_late_item_preserves_prior_active_evidence() {
+    use crate::services::tui_turn_state::TuiTurnState;
+
+    for (evidence, expected) in [
+        (
+            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"new"}}"#,
+            TuiTurnState::Streaming,
+        ),
+        (
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            TuiTurnState::Streaming,
+        ),
+        (
+            r#"{"type":"response_item","payload":{"type":"message","role":"user"}}"#,
+            TuiTurnState::UserSubmitted,
+        ),
+        (
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant"}}"#,
+            TuiTurnState::Streaming,
+        ),
+    ] {
+        assert_codex_late_item_followup(
+            &[
+                CODEX_COMPLETED_TURNS_WITH_LATE_ITEM[0],
+                evidence,
+                CODEX_COMPLETED_TURNS_WITH_LATE_ITEM[7],
+            ],
+            expected,
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_late_item_completion_outside_window_still_blocks_followup() {
+    let padding = serde_json::json!({"type":"event_msg", "payload":{"type":"token_count", "padding":"x".repeat(70_000)}}).to_string();
+    assert_codex_late_item_followup(
+        &[
+            CODEX_COMPLETED_TURNS_WITH_LATE_ITEM[0],
+            &padding,
+            CODEX_COMPLETED_TURNS_WITH_LATE_ITEM[7],
+        ],
+        crate::services::tui_turn_state::TuiTurnState::Streaming,
+    );
+    let cut_complete = serde_json::json!({"type":"event_msg", "payload":{"type":"task_complete", "turn_id":"old", "padding":"x".repeat(70_000)}}).to_string();
+    assert_codex_late_item_followup(
+        &[&cut_complete, CODEX_COMPLETED_TURNS_WITH_LATE_ITEM[7]],
+        crate::services::tui_turn_state::TuiTurnState::Streaming,
+    );
+    let torn_complete = r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"old""#;
+    assert_codex_late_item_followup(
+        &[
+            CODEX_COMPLETED_TURNS_WITH_LATE_ITEM[6],
+            torn_complete,
+            CODEX_COMPLETED_TURNS_WITH_LATE_ITEM[7],
+        ],
+        crate::services::tui_turn_state::TuiTurnState::Streaming,
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn codex_rollout_user_submitted_blocks_followup() {
     // classify_claude_tui_followup_submission blocks when Codex rollout

@@ -26,12 +26,6 @@ pub(crate) fn inventory(provider: &str, limit: usize) -> Result<Vec<BindingConte
     for (index, entry) in entries.enumerate() {
         let entry = entry.map_err(|e| e.to_string())?;
         if index >= limit {
-            #[cfg(test)]
-            if std::env::var("ADK_CODEX_OBSERVATION_MUTANT")
-                .is_ok_and(|name| name == "context_budget")
-            {
-                break;
-            }
             return Err("context inventory entry budget exceeded".into());
         }
         let path = entry.path();

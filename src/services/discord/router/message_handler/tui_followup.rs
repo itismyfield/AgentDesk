@@ -5,10 +5,10 @@ mod busy_refusal_reply_tests;
 mod codex_observation;
 #[path = "tui_followup/nameless_gate.rs"]
 mod nameless_gate;
-#[cfg(unix)]
-pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd;
 #[cfg(all(test, unix))]
 pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd_with_sessions;
+#[cfg(unix)]
+pub(super) use codex_observation::{codex_native_end, observe_codex_tui_rollout_state_for_cwd};
 pub(in crate::services::discord) use nameless_gate::hosted_tui_promote_readiness_blocked;
 
 use super::*;

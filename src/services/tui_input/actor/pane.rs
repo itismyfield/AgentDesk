@@ -170,10 +170,6 @@ impl TmuxPane {
             Ok(output) if output.status.success() => {}
             // Unsuccessful paste can follow partial mutation; never infer absence from exit status.
             Ok(output) => {
-                #[cfg(test)]
-                if super::super::mutant("paste_not_sent") {
-                    return SendOutcome::NotSent(stderr_of(&output));
-                }
                 return SendOutcome::Indeterminate(stderr_of(&output));
             }
             Err(error) if error.may_have_effect() => {
@@ -208,10 +204,6 @@ fn stderr_of(output: &std::process::Output) -> String {
 }
 
 pub(crate) fn canonical(provider: ShadowProvider, text: &str) -> String {
-    #[cfg(test)]
-    if super::super::mutant("busy_raw_paste") {
-        return text.into();
-    }
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     match provider {
         ShadowProvider::Claude => text.replace('\t', "    "),
@@ -335,10 +327,6 @@ impl Pane for TmuxPane {
             self.pre_empty = false;
             result
         };
-        #[cfg(test)]
-        if super::super::mutant("shared_lock") {
-            return Some(callback());
-        }
         match provider {
             ShadowProvider::Claude => {
                 crate::services::claude_tui::composer_lock::try_with_composer_mutation_lock(

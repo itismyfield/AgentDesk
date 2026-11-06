@@ -330,7 +330,7 @@ pub(in crate::services::discord) enum CommandStop {
     Herdr(super::codex_stop_delivery::HerdrStop),
 }
 
-/// Historical unnamed-stop behavior, retained only for regression tests and mutations.
+/// Historical unnamed-stop behavior retained for regression tests.
 #[cfg(test)]
 pub(in crate::services::discord) async fn begin_command_stop(
     shared: &Arc<SharedData>,

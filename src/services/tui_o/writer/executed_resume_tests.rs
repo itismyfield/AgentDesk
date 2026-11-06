@@ -224,7 +224,10 @@ async fn deliver(
     let (_command_port, receiver) = actor::codex_submission::Port::new(1);
     let task = actor::codex_submission::spawning(receiver, || {
         actor::spawn_projecting(
-            &WriterConfig { enabled: true },
+            &WriterConfig {
+                enabled: true,
+                ..Default::default()
+            },
             None,
             writer,
             ShadowProvider::Codex,
@@ -517,7 +520,10 @@ async fn resume_companion_live_era_advances_past_exact_terminals_and_restarts_wi
         let (_commands, receiver) = actor::codex_submission::Port::new(1);
         actor::codex_submission::spawning(receiver, || {
             actor::spawn_projecting(
-                &WriterConfig { enabled: true },
+                &WriterConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
                 None,
                 writer,
                 ShadowProvider::Codex,

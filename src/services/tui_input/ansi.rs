@@ -41,19 +41,7 @@ impl<'a> Iterator for Pieces<'a> {
                     });
                 }
                 if let Some(rest) = after.strip_prefix(']').and_then(after_osc) {
-                    #[cfg(test)]
-                    if super::mutant("osc_as_text") {
-                        self.rest = after;
-                        return Some(Piece::Text(c));
-                    }
                     self.rest = rest;
-                    continue;
-                }
-                #[cfg(test)]
-                if let Some(body) = after.strip_prefix(']')
-                    && super::mutant("open_osc_dropped")
-                {
-                    self.rest = body.find(['\x1b', '\n']).map_or("", |at| &body[at..]);
                     continue;
                 }
             }

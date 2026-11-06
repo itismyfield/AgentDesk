@@ -22,6 +22,16 @@ fn fixture(name: &str) -> String {
 /// A pane that draws the bottom of a captured busy, or idle, Codex screen with the cursor in its
 /// empty composer; a paste is recorded and drawn in the composer, and each Enter is recorded.
 fn codex_renderer(f: &Fixture, name: &str, idle: bool) -> std::path::PathBuf {
+    codex_renderer_in(f, name, idle, None)
+}
+
+/// As `codex_renderer`, with the pane's process started in `dir` when given.
+pub(super) fn codex_renderer_in(
+    f: &Fixture,
+    name: &str,
+    idle: bool,
+    dir: Option<&Path>,
+) -> std::path::PathBuf {
     let root = f.root.path().join(name);
     fs::create_dir(&root).unwrap();
     // An idle pane is a captured idle Codex composer at 80 columns, drawn at the pane's bottom.
@@ -76,20 +86,13 @@ while True:
     .unwrap();
     let command = format!("python3 '{}' '{}'", script.display(), root.display());
     let height = ROWS.to_string();
-    let pane = f.tmux(&[
-        "new-session",
-        "-d",
-        "-P",
-        "-F",
-        "#{pane_id}",
-        "-s",
-        name,
-        "-x",
-        width,
-        "-y",
-        &height,
-        &command,
-    ]);
+    let mut session = vec!["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name];
+    let dir = dir.map(|dir| dir.display().to_string());
+    if let Some(dir) = dir.as_deref() {
+        session.extend(["-c", dir]);
+    }
+    session.extend(["-x", width, "-y", &height, &command]);
+    let pane = f.tmux(&session);
     f.tmux(&["set-window-option", "-t", &pane, "window-size", "manual"]);
     f.tmux(&["resize-window", "-t", &pane, "-x", width, "-y", &height]);
     wait("codex-renderer", || root.join("ready").exists());

@@ -66,7 +66,10 @@ where
     );
     let port = port.with_provider(provider);
     let projections = (stopped, resumed, watch::channel(None).0, Owing::default());
-    let config = WriterConfig { enabled: true };
+    let config = WriterConfig {
+        enabled: true,
+        ..Default::default()
+    };
     let task = transition_port::spawning(receiver, || {
         spawn_projecting(
             &config,
@@ -482,7 +485,10 @@ where
     let port = port.with_provider(ShadowProvider::Codex);
     let task = transition_port::spawning(receiver, || {
         spawn_projecting(
-            &WriterConfig { enabled: true },
+            &WriterConfig {
+                enabled: true,
+                ..Default::default()
+            },
             configured.then_some(ReaderConfig { dormant: false }),
             harness.writer(),
             ShadowProvider::Codex,

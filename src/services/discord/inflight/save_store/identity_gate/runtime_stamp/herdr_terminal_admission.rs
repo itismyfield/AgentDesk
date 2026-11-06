@@ -118,11 +118,7 @@ impl HerdrFrame {
             }
             let replayed = replay(&self.provider, &mut file, &start, meta.len(), actor);
             let replayed = replayed.ok_or_else(|| self.refuse("replay_missing", None, refused))?;
-            if replayed.start != self.source_start
-                && !crate::services::provider::herdr_before_start::mutant(
-                    "start_offset_no_strict_start",
-                )
-            {
+            if replayed.start != self.source_start {
                 return Err(self.refuse("source_start", Some(&replayed), refused));
             }
             if replayed.end != self.end {

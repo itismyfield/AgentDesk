@@ -181,13 +181,7 @@ async fn coldstop_mailbox_writer_and_snapshot_do_not_wait_for_input_lock() {
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let runtime = tokio::runtime::Handle::current();
     let stop_actor = actor.clone();
-    let stop_state = state.clone();
     let worker = std::thread::spawn(move || {
-        // The mutation simulates a forbidden lock in the actual writer's request path.
-        let _blocking = crate::services::provider::herdr_before_start::mutant(
-            "stop_writer_blocks_on_submission",
-        )
-        .then(|| stop_state.submission.lock().unwrap());
         let accepted = runtime
             .block_on(mailbox.admit_herdr_user_stop_if_current(stop_actor, "cold stop".into()));
         let snapshot = runtime.block_on(mailbox.snapshot());

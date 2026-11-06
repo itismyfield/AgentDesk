@@ -95,9 +95,7 @@ fn write(
         composer::run(&attached.target, &plan, cancel)
     })?
     else {
-        if !before_start::mutant("closed_release_callsite_removed_claude") {
-            before_start::release_claude_hold(logical, &held);
-        }
+        before_start::release_claude_hold(logical, &held);
         return Ok(None);
     };
     crate::services::tui_o::exact_submission::observe_untouched(matches!(
@@ -182,7 +180,7 @@ pub(super) fn observe(
         .cancel
         .as_deref()
         .is_some_and(CancelToken::is_completion_cleanup);
-    if unconfirmed && woken && !before_start::mutant("prb_woken_read_binds") {
+    if unconfirmed && woken {
         return Ok(());
     }
     // A Herdr turn hands off exactly where its terminal record ends, never past it.

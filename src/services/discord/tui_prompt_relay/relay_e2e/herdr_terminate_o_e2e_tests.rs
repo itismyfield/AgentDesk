@@ -1039,7 +1039,10 @@ impl Out {
             watch::channel(None).0,
             owing,
         );
-        let config = WriterConfig { enabled: true };
+        let config = WriterConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let provider = ShadowProvider::Codex;
         let task = actor::spawn_projecting(&config, None, writer, provider, bindings, watches);
         let task = task.expect("an enabled writer");

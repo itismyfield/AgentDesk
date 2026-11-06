@@ -9,6 +9,7 @@ the only legacy instance is an exempt immutable migration.
 
 from __future__ import annotations
 
+import collections
 import os
 import re
 import subprocess
@@ -159,6 +160,65 @@ def parse_added_lines(diff_text: str) -> list[AddedLine]:
     return added
 
 
+@dataclass(frozen=True)
+class RemovedLine:
+    path: str
+    line_no: int
+    text: str
+    rev: str | None  # the commit whose file holds the line; None when it could not be resolved
+
+
+def parse_removed_lines(diff_text: str) -> list[AddedLine]:
+    """Lines a diff removes, numbered in the old file."""
+    removed: list[AddedLine] = []
+    path: str | None = None
+    old_line: int | None = None
+    for raw in diff_text.splitlines():
+        if raw.startswith("--- a/"):
+            path = raw[6:]
+            continue
+        if raw.startswith("--- /dev/null"):
+            path = None
+            continue
+        if raw.startswith("@@"):
+            match = re.search(r"-(\d+)(?:,(\d+))?", raw)
+            old_line = int(match.group(1)) if match else None
+            continue
+        if path is None or old_line is None or raw.startswith(("+++", "---")):
+            continue
+        if raw.startswith("-"):
+            removed.append(AddedLine(path, old_line, raw[1:]))
+            old_line += 1
+        elif not raw.startswith("+"):
+            old_line += 1
+    return removed
+
+
+def old_side_rev(spec: list[str]) -> str | None:
+    """The commit on the old side of a ``diff_specs`` entry."""
+    if spec[0].endswith("...HEAD"):
+        result = run_git(["merge-base", spec[0][: -len("...HEAD")], "HEAD"])
+        return (result.stdout.strip() or None) if result.returncode == 0 else None
+    return "HEAD"
+
+
+def collect_removed_lines() -> list[RemovedLine]:
+    seen: set[tuple[str | None, str, int]] = set()
+    lines: list[RemovedLine] = []
+    for spec in diff_specs():
+        result = run_git(["diff", "--unified=0", "--no-ext-diff", *spec])
+        if result.returncode not in (0, 1):
+            print(result.stderr, file=sys.stderr)
+            sys.exit(result.returncode)
+        rev = old_side_rev(spec)
+        for removed in parse_removed_lines(result.stdout):
+            key = (rev, removed.path, removed.line_no)
+            if key not in seen:
+                seen.add(key)
+                lines.append(RemovedLine(removed.path, removed.line_no, removed.text, rev))
+    return lines
+
+
 def collect_added_lines() -> list[AddedLine]:
     seen: set[tuple[str, int, str]] = set()
     lines: list[AddedLine] = []
@@ -177,6 +237,7 @@ def collect_added_lines() -> list[AddedLine]:
         for path in untracked.stdout.splitlines():
             if not (
                 is_selected_production_path(path)
+                or is_mutant_hook_path(path)
                 or (path.startswith("migrations/postgres/") and path.endswith(".sql"))
             ):
                 continue
@@ -409,6 +470,106 @@ def audit_migration_integers(lines: list[AddedLine]) -> list[str]:
 
 
 
+# Test-policy rule 3: env-armed mutant switches are proved inside a lane and reverted, never committed.
+# A switch named without MUTANT/MUTATION and not reached through a hook fn is left to review.
+MUTANT_HOOK_ROOTS = ("src/", "tests/")
+MUTANT_ENV_RE = re.compile(r"[A-Z][A-Z0-9_]*(?:MUTANT|MUTATION)[A-Z0-9_]*")
+MUTANT_FN_DEF_RE = re.compile(r"\bfn\s+((?:[a-z0-9_]*_)?mutant(?:_[a-z0-9_]+)?)\s*[(<]")
+# Calls into the hooks main still carries; drop this rule once S4b1 lands and no hook remains to call.
+MUTANT_CALL_RE = re.compile(
+    r"\b((?:[a-z0-9_]*_)?mutant(?:_[a-z0-9_]+)?|behavior_mutation_enabled|parser_bypassed)\s*\("
+)
+# (path, env) pairs a committed test really arms; each row needs a one-line reason comment.
+MUTANT_HOOK_ALLOWED: frozenset[tuple[str, str]] = frozenset()
+MUTANT_HOOK_HINT = (
+    "test switches stay out of committed code (docs/agent-maintenance/test-policy.md rule 3): "
+    "prove the mutant in the lane, revert it, and inject the situation through an argument"
+)
+
+HookSnapshot = tuple[list[str], dict[int, list[tuple[str, str]]]]
+_HOOK_SNAPSHOTS: dict[tuple[str | None, str], HookSnapshot | None] = {}
+
+
+def is_mutant_hook_path(path: str) -> bool:
+    return path.endswith(".rs") and path.startswith(MUTANT_HOOK_ROOTS)
+
+
+def hook_occurrences(source: str) -> dict[int, list[tuple[str, str]]]:
+    """(kind, name) of every mutant env literal, hook fn and hook call, by line, lexed as one file."""
+    found: dict[int, list[tuple[str, str]]] = collections.defaultdict(list)
+    for text, lines in rust_string_literals(source):
+        if lines and MUTANT_ENV_RE.fullmatch(text):
+            found[lines[0]].append(("new mutant env", text))
+    for line_no, code in enumerate(strip_rust_non_code(source).splitlines(), start=1):
+        defined = MUTANT_FN_DEF_RE.findall(code)
+        found[line_no] += [("new mutant hook fn", name) for name in defined]
+        found[line_no] += [
+            ("new call to mutant hook", name)
+            for name in MUTANT_CALL_RE.findall(code)
+            if name not in defined
+        ]
+    return found
+
+
+def _hook_snapshot(rev: str | None, path: str) -> HookSnapshot | None:
+    """The file's lines and hook occurrences: the working tree when ``rev`` is None, else that commit."""
+    key = (rev, path)
+    if key not in _HOOK_SNAPSHOTS:
+        source: str | None = None
+        if rev is None:
+            try:
+                source = Path(path).read_text(encoding="utf-8")
+            except OSError:
+                pass
+        else:
+            shown = run_git(["show", f"{rev}:{path}"])
+            source = shown.stdout if shown.returncode == 0 else None
+        _HOOK_SNAPSHOTS[key] = None if source is None else (source.splitlines(), hook_occurrences(source))
+    return _HOOK_SNAPSHOTS[key]
+
+
+def _hooks_at(snapshot: HookSnapshot | None, line_no: int, text: str) -> list[tuple[str, str]] | None:
+    if snapshot is None or line_no > len(snapshot[0]) or snapshot[0][line_no - 1] != text:
+        return None
+    return snapshot[1].get(line_no, [])
+
+
+def audit_mutant_hooks(
+    lines: list[AddedLine], base_resolved: bool, removed: list[RemovedLine] | None = None
+) -> list[str]:
+    """Rules A (env literal), B (hook fn) and D (hook call), counted as net additions per file.
+
+    A removed line offsets an added one only when lexing the old file shows a real hook on it;
+    an unreadable old snapshot offsets nothing.
+    """
+    if not base_resolved:
+        return [
+            "mutant-hook audit found no diff base (AGENTDESK_AUDIT_BASE, origin/main, main, HEAD^); "
+            "set AGENTDESK_AUDIT_BASE instead of passing without the committed diff"
+        ]
+    offsets: collections.Counter[tuple[str, str, str]] = collections.Counter()
+    for gone in removed or []:
+        if not is_mutant_hook_path(gone.path) or gone.rev is None:
+            continue
+        for kind, name in _hooks_at(_hook_snapshot(gone.rev, gone.path), gone.line_no, gone.text) or []:
+            offsets[(gone.path, kind, name)] += 1
+    findings: list[str] = []
+    for added in lines:
+        if not is_mutant_hook_path(added.path):
+            continue
+        hooks = _hooks_at(_hook_snapshot(None, added.path), added.line_no, added.text)
+        if hooks is None:
+            hooks = hook_occurrences(added.text).get(1, [])
+        for kind, name in hooks:
+            if kind == "new mutant env" and (added.path, name) in MUTANT_HOOK_ALLOWED:
+                continue
+            if offsets[(added.path, kind, name)] > 0:
+                offsets[(added.path, kind, name)] -= 1
+                continue
+            findings.append(f"{added.path}:{added.line_no}: {kind} `{name}`; {MUTANT_HOOK_HINT}")
+    return findings
+
+
 # PostgreSQL 17 reads E'\v' as U+000B; 16 and older read it as the letter v.
 # Probing every printable ASCII `E'\c'` on 16 and 17 found no other difference.
 SQL_VERSION_DEPENDENT_ESCAPES = {"v": "U+000B on PostgreSQL 17, letter v on 16 and older; write \\x0b"}
@@ -618,7 +779,12 @@ def audit_sql_version_dependent_escapes(root: Path) -> tuple[list[str], int]:
 def main() -> int:
     lines = collect_added_lines()
     sql_findings, sql_files = audit_sql_version_dependent_escapes(Path("."))
-    findings = audit_unwrap_panic(lines) + audit_migration_integers(lines) + sql_findings
+    findings = (
+        audit_unwrap_panic(lines)
+        + audit_migration_integers(lines)
+        + audit_mutant_hooks(lines, merge_base() is not None, collect_removed_lines())
+        + sql_findings
+    )
     if findings:
         print("State/lint hardening audit failed:")
         for finding in findings:

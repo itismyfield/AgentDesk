@@ -1,10 +1,10 @@
 //! A sealed execution end proves only its recorded old-to-fresh edge, including after restore.
 
 use super::*;
-use crate::services::codex_tui::execution_end::{identity, mutant, producer};
+use crate::services::codex_tui::execution_end::{identity, producer};
 use crate::services::tmux_common;
 use crate::services::tui_o::store::ChannelStore;
-use crate::services::tui_o::store::codex_end::{CodexEnd, ContextSnapshot, EndBasis};
+use crate::services::tui_o::store::codex_end::{CodexEnd, ContextSnapshot};
 use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, SpawnNonceMarker, execution_context, observe_spawn_nonce_marker,
     stable_host_identity,
@@ -33,7 +33,7 @@ impl<B: BindingEvents> Sources<B> {
             .filter(|next| next.proof.is_none())
             .filter_map(|next| next.tmux_session.as_deref())
             .collect();
-        for pane in panes.into_iter().filter(|_| !mutant("consumer_retry_off")) {
+        for pane in panes {
             tmux_common::with_tmux_source_authority(pane, |authority| {
                 if let SpawnNonceMarker::Known(nonce) = observe_spawn_nonce_marker(pane) {
                     producer::retry_bound_candidate(self.channel, authority, &nonce);
@@ -50,11 +50,7 @@ impl<B: BindingEvents> Sources<B> {
         if !relevant {
             return Ok(());
         }
-        let durable = if mutant("consumer_unsynced") {
-            store.codex_ends()
-        } else {
-            store.durable_codex_ends()
-        };
+        let durable = store.durable_codex_ends();
         let records = match durable {
             Ok(records) => records,
             Err(reason) => {
@@ -87,12 +83,10 @@ impl<B: BindingEvents> Sources<B> {
                 next.proof = Some(edge.seal_seq);
             }
         }
-        if !mutant("consumer_proof_unwritten") {
-            writer
-                .store()
-                .write_rotation(&rotation)
-                .map_err(halted("Codex end rotation"))?;
-        }
+        writer
+            .store()
+            .write_rotation(&rotation)
+            .map_err(halted("Codex end rotation"))?;
         self.rotation = rotation;
         for edge in &proved {
             tracing::info!(
@@ -127,7 +121,6 @@ impl<B: BindingEvents> Sources<B> {
             && next.tmux_session.as_deref() == Some(record.tmux_session.as_str())
             && hop_seq > record.binding_seq
             && hop_seq <= seal.binding_seq
-            && (!mutant("consumer_same_seq") || hop_seq == seal.binding_seq)
             && self
                 .checkpoint
                 .is_some_and(|checkpoint| seal.binding_seq <= checkpoint))
@@ -152,7 +145,6 @@ impl<B: BindingEvents> Sources<B> {
             || record.provider != "codex"
             || stable_host_identity().as_deref() != Some(record.host.as_str())
             || record.owner_runtime_root != tmux_common::current_tmux_owner_marker()
-            || (mutant("consumer_explicit_clear_only") && record.basis != EndBasis::ExplicitClear)
         {
             return None;
         }
@@ -168,7 +160,7 @@ impl<B: BindingEvents> Sources<B> {
             .iter()
             .filter(|event| {
                 event.seq > record.binding_seq
-                    && (event.seq <= edge.seal_seq || mutant("consumer_whole_tail"))
+                    && event.seq <= edge.seal_seq
                     && event.tmux_session == record.tmux_session
             })
             .collect();

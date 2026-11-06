@@ -69,10 +69,7 @@ pub(in super::super) fn reached(cut: Cut, delivery: Option<Result<HerdrDelivery,
         }
     };
     // The child ends at the boundary itself, so nothing the stop does next is made durable.
-    let carry_on = crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant;
-    if let Some(exit) = exit
-        && !carry_on("cut_continues_after_boundary")
-    {
+    if let Some(exit) = exit {
         exit();
     }
 }

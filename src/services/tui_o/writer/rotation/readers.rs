@@ -47,7 +47,13 @@ impl<B: BindingEvents> Sources<B> {
         self.rotation = writer.store().rotation().map_err(halted("rotation"))?;
         let checkpoint = writer.store().binding_checkpoint();
         self.checkpoint = checkpoint.map_err(halted("binding checkpoint"))?;
-        if let Some(logged) = self.read_log(writer, 0)? {
+        let logged = self.read_log(writer, 0)?;
+        self.current = Current::of(logged.as_ref(), self.checkpoint);
+        self.view_tail = logged
+            .as_ref()
+            .and_then(|l| l.0.last())
+            .map_or(0, |e| e.seq);
+        if let Some(logged) = logged {
             let checkpoint = self.names.start(writer.store(), &logged, self.checkpoint)?;
             if let Some(checkpoint) = checkpoint {
                 self.restore_hops(writer, &logged.1, checkpoint)?;
@@ -95,16 +101,18 @@ impl<B: BindingEvents> Sources<B> {
                         }
                     });
             replay.map_err(halted("spool replay"))?;
-            let missing = self.reader_config.is_some()
-                && matches!(
-                    Fingerprint::path(&cursor.source),
-                    Err((SourceAnomalyKind::Missing, _))
-                );
+            let missing = matches!(
+                Fingerprint::path(&cursor.source),
+                Err((SourceAnomalyKind::Missing, _))
+            );
             let capture = match reopen(&cursor) {
                 Ok(capture) => Some(capture),
                 Err(Reopen::Unread(_)) if cursor.retired => None,
                 Err(Reopen::Unread(error))
                     if missing
+                        && (self.reader_config.is_some()
+                            || self.producer_absent
+                            || self.current.historical(&cursor.source))
                         && error.kind() == std::io::ErrorKind::NotFound
                         && matches!(
                             Fingerprint::path(&cursor.source),
@@ -158,7 +166,13 @@ impl<B: BindingEvents> Sources<B> {
         if self.reader_config.is_some() {
             for index in 0..self.readers.len() {
                 if missing_reader(&self.readers[index]) {
-                    self.cleanup_missing(writer, index, wall_now)?;
+                    if let Err(alarm) = self.cleanup_missing(writer, index, wall_now) {
+                        if writer.store().io_failure().is_some()
+                            || !self.park_missing(writer, index, deriver.has_unsealed())
+                        {
+                            return Err(alarm);
+                        }
+                    }
                     continue;
                 }
                 let reader = &mut self.readers[index];
@@ -195,6 +209,17 @@ impl<B: BindingEvents> Sources<B> {
                         reader.capture = None;
                         reader.dormant = Some(now + DORMANT_POLL);
                     }
+                }
+            }
+        }
+        if self.reader_config.is_none() {
+            for index in 0..self.readers.len() {
+                if missing_reader(&self.readers[index])
+                    && !self.park_missing(writer, index, deriver.has_unsealed())
+                {
+                    return Err(halt(
+                        "source reopen: missing source still has a capture obligation",
+                    ));
                 }
             }
         }
@@ -239,6 +264,9 @@ impl<B: BindingEvents> Sources<B> {
             .collect();
         for index in 0..self.readers.len() {
             let reader = &self.readers[index];
+            if reader.parked {
+                continue;
+            }
             if let Some(until) = reader.watch_until {
                 if let Ok(fp) = Fingerprint::path(&reader.source) {
                     let through = writer
@@ -416,6 +444,36 @@ impl<B: BindingEvents> Sources<B> {
         Ok(())
     }
 
+    fn park_missing<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+        index: usize,
+        unsealed: bool,
+    ) -> bool {
+        let reader = &self.readers[index];
+        let store = writer.store();
+        let Some(cursor) = store.cursor(&reader.source) else {
+            return false;
+        };
+        let superseded = self.current.historical(&reader.source);
+        if cursor.retired
+            || reader.drain_to.is_some()
+            || !(superseded || self.producer_absent)
+            || (!superseded && unsealed)
+            || !matches!(
+                Fingerprint::path(&reader.source),
+                Err((SourceAnomalyKind::Missing, _))
+            )
+        {
+            return false;
+        }
+        tracing::warn!(channel = self.channel, path = %reader.source.path.display(),
+            captured_through = cursor.captured_through,
+            "[tui_o] missing source parked; later bytes cannot be recovered");
+        self.readers[index].parked = true;
+        true
+    }
+
     pub(super) fn cleanup_missing<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
@@ -585,6 +643,9 @@ impl<B: BindingEvents> Sources<B> {
         let captured: HashSet<String> = captured.map(|r| source_key(&r.source)).collect();
         let mut grew_back = Vec::new();
         for reader in &mut self.readers {
+            if reader.parked {
+                continue;
+            }
             let Some(capture) = reader.capture.as_ref() else {
                 continue;
             };

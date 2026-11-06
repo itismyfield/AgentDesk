@@ -49,10 +49,7 @@ fn capture_under(
         .map_err(|e| format!("binding log corrupt: {e}"))?
         .ok_or("pane source unsettled")?;
     let (source, binding_nonce) = (settled.source, settled.execution_nonce);
-    if context.launch_mode == "fresh"
-        && binding_nonce.as_deref() != Some(nonce.as_str())
-        && !super::mutant("nonce_unchecked")
-    {
+    if context.launch_mode == "fresh" && binding_nonce.as_deref() != Some(nonce.as_str()) {
         return Err("fresh source belongs to another execution".into());
     }
     let provider_root = super::identity::verify_source(&context, &source)?;

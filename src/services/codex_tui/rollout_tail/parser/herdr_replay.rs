@@ -11,7 +11,6 @@ use crate::services::agent_protocol::NativeTerminalKind;
 #[cfg(unix)]
 use crate::services::claude::herdr_turn::EndedTurn;
 use crate::services::provider::CancelToken;
-use crate::services::provider::herdr_before_start::mutant;
 
 /// A turn's first provider terminal as the live tail accepts it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +67,7 @@ fn replay(
     file.seek(SeekFrom::Start(start)).ok()?;
     file.take(want).read_to_end(&mut bytes).ok()?;
     // A file cut after its length was read reads short, and a short read is no read.
-    if bytes.len() as u64 != want && !mutant("prb_short_read_ok") {
+    if bytes.len() as u64 != want {
         return None;
     }
     let (tx, _rx) = std::sync::mpsc::channel();
@@ -86,10 +85,6 @@ fn replay(
         super::process_rollout_line_bytes(line, &sender, &mut state);
     }
     let mut partial = rest.to_vec();
-    if mutant("prb_codex_tail_end_past_file") && whole(&partial) {
-        partial.push(b'\n');
-        super::super::try_process_complete_partial_line(&mut partial, &sender, &mut state, &accept);
-    }
     take_whole_tail(&mut partial, (&sender, &mut state), &accept, || true);
     Some(state)
 }

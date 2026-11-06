@@ -22,11 +22,7 @@ impl Scope {
         Some(Self {
             root: crate::config::runtime_root()?,
             channel,
-            pane: if super::mutant("channel_only") {
-                String::new()
-            } else {
-                pane.to_owned()
-            },
+            pane: pane.to_owned(),
         })
     }
 }
@@ -79,7 +75,7 @@ struct Entry {
 
 impl Entry {
     fn valid(&self, id: &AttemptId) -> bool {
-        (self.epoch == id.token || super::mutant("epoch_removed"))
+        self.epoch == id.token
             && (self.active.contains_key(&id.token)
                 || self
                     .bound
@@ -171,9 +167,6 @@ impl AttemptGuard {
 
 /// Every exact-pane dispatch takes its ticket, even when it later resumes or is refused.
 pub(crate) fn begin(channel: Option<u64>, pane: Option<&str>) -> AttemptGuard {
-    if super::mutant("attempt_off") {
-        return AttemptGuard::new(None);
-    }
     let Some((channel, pane)) = channel.zip(pane).filter(|(c, p)| *c != 0 && !p.is_empty()) else {
         return AttemptGuard::new(None);
     };
@@ -185,27 +178,17 @@ pub(crate) fn begin(channel: Option<u64>, pane: Option<&str>) -> AttemptGuard {
         let token = registry.serial();
         let tracked = if let Some(entry) = registry.entry(&scope) {
             let overlapping = entry.active.values().any(|phase| *phase == Phase::MaySpawn);
-            if !super::mutant("adjacent_removed") {
-                if let Some(candidate) = &entry.candidate
-                    && !super::mutant("begin_discard_warn_removed")
-                {
-                    candidate.value.discarded(
-                        pane,
-                        "Bound:Discarded",
-                        "superseded by next attempt",
-                    );
-                }
-                entry.candidate = None;
-                entry.claims.clear();
+            if let Some(candidate) = &entry.candidate {
+                candidate
+                    .value
+                    .discarded(pane, "Bound:Discarded", "superseded by next attempt");
             }
+            entry.candidate = None;
+            entry.claims.clear();
             entry.epoch = token;
             entry.bound = None;
             entry.done = None;
-            let ticket = if super::mutant("chokepoint_removed") {
-                None
-            } else {
-                entry.ticket.take()
-            };
+            let ticket = entry.ticket.take();
             if !overlapping && let Some(ticket) = ticket {
                 entry.claims.insert(token, ticket);
             }
