@@ -501,7 +501,10 @@ async fn actual_driver_case(mode: &'static str) {
     );
     let task = actor::codex_submission::spawning(receiver, || {
         actor::spawn_projecting(
-            &WriterConfig { enabled: true },
+            &WriterConfig {
+                enabled: true,
+                ..Default::default()
+            },
             None,
             writer_over(&harness, harness.channel()),
             ShadowProvider::Codex,

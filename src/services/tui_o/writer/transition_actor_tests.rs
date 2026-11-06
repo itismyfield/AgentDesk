@@ -287,7 +287,10 @@ fn run_writer<A: AlarmSink + 'static>(
         published,
         Owing::default(),
     );
-    let config = WriterConfig { enabled: true };
+    let config = WriterConfig {
+        enabled: true,
+        ..Default::default()
+    };
     let bindings = Arc::clone(&chain.bindings);
     let spawn = || spawn_projecting(&config, readers, writer, provider, bindings, projections);
     let task = transition_port::spawning(receiver, spawn).unwrap();

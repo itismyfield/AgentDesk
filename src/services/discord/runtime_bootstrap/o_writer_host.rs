@@ -135,6 +135,34 @@ impl HostIo for GatewayHost {
         }
     }
 
+    async fn producer_absent(&self, channel: u64, provider: ShadowProvider) -> bool {
+        use crate::services::discord::turn_presence::activity::{self, Activity};
+        let provider = match provider {
+            ShadowProvider::Claude => ProviderKind::Claude,
+            ShadowProvider::Codex => ProviderKind::Codex,
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let reading =
+                    activity::reading_now(&self.shared, &provider, ChannelId::new(channel)).await;
+                #[cfg(test)]
+                let reading = fence_tests::producer_reading_for_tests(channel, reading);
+                if reading.observed.activity == Activity::Idle
+                    && reading.observed.reason == "no_session"
+                {
+                    if reading.publish_if_current(|| ()).await.is_some() {
+                        return true;
+                    }
+                } else if reading.observed.reason != "superseded" {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     fn execution_permit(&self, channel: u64) -> Option<Result<Arc<OwnerPermit>, String>> {
         self.execution.get(&channel).cloned()
     }
@@ -465,6 +493,58 @@ pub(super) mod test_host {
 #[cfg(test)]
 mod fence_tests {
     use super::*;
+    static SUPERSEDED_PRODUCERS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::BTreeSet<u64>>,
+    > = std::sync::LazyLock::new(Default::default);
+
+    static NON_ABSENT_PRODUCERS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::BTreeSet<u64>>,
+    > = std::sync::LazyLock::new(Default::default);
+
+    pub(super) struct NonAbsentProducerGuard(u64);
+    impl Drop for NonAbsentProducerGuard {
+        fn drop(&mut self) {
+            NON_ABSENT_PRODUCERS.lock().unwrap().remove(&self.0);
+        }
+    }
+
+    pub(super) fn force_producer_non_absent_for_tests(channel: u64) -> NonAbsentProducerGuard {
+        assert!(NON_ABSENT_PRODUCERS.lock().unwrap().insert(channel));
+        NonAbsentProducerGuard(channel)
+    }
+
+    pub(super) fn supersede_producer_once_for_tests(channel: u64) {
+        assert!(SUPERSEDED_PRODUCERS.lock().unwrap().insert(channel));
+    }
+
+    pub(super) fn producer_reading_for_tests(
+        channel: u64,
+        reading: crate::services::discord::turn_presence::activity::Reading,
+    ) -> crate::services::discord::turn_presence::activity::Reading {
+        use crate::services::discord::turn_presence::activity::{Activity, Observed, Reading};
+        if NON_ABSENT_PRODUCERS.lock().unwrap().contains(&channel) {
+            return Reading::unwatched_for_tests(
+                Observed {
+                    activity: Activity::Unknown,
+                    reason: "test_producer_non_absent",
+                },
+                None,
+                None,
+            );
+        }
+        if SUPERSEDED_PRODUCERS.lock().unwrap().remove(&channel) {
+            Reading::unwatched_for_tests(
+                Observed {
+                    activity: Activity::Unknown,
+                    reason: "superseded",
+                },
+                None,
+                None,
+            )
+        } else {
+            reading
+        }
+    }
     #[cfg(unix)]
     mod b1b_fresh_launch_tests;
     use crate::db::auto_queue::test_support::TestPostgresDb;

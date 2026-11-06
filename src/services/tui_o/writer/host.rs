@@ -54,6 +54,14 @@ pub trait HostIo: Send + Sync + 'static {
     {
         None
     }
+    /// Only a current absence observation permits parking the latest missing source.
+    fn producer_absent(
+        &self,
+        _channel: u64,
+        _provider: ShadowProvider,
+    ) -> impl Future<Output = bool> + Send {
+        std::future::ready(false)
+    }
     fn lease(&self) -> Self::Lease;
     /// A channel's writer stopped for good; the shared lease turns its verified episodes Unknown.
     fn writer_unavailable(&self, channel: u64) {
@@ -815,8 +823,6 @@ impl<I: HostIo> Hosted<'_, I> {
             };
             store = recovered;
             super::deliver::seed_last_posted(channel, store.ledger());
-            // Cleared before the next actor exists, so a halt it raises itself is never cleared.
-            alarms.halt_cleared(channel);
         }
     }
 
@@ -833,7 +839,7 @@ impl<I: HostIo> Hosted<'_, I> {
         let mut writer = unless_stopped(&self.stopping, hosted).await?;
         phase.finish("ok");
         writer.boot = boot;
-        let writer = writer.with_repost_stop(self.stopping.clone());
+        let mut writer = writer.with_repost_stop(self.stopping.clone());
         let (stop_tx, stop) = watch::channel(false);
         let (resumed_tx, resumed) = watch::channel(false);
         // Each start publishes its own count; the ended actor's closed one reads as `None`.
@@ -843,7 +849,27 @@ impl<I: HostIo> Hosted<'_, I> {
             published: owing.published.subscribe(),
             demand: owing.demand.clone(),
         };
-        let config = WriterConfig { enabled: true };
+        let store = writer.store();
+        let missing_source = store.cursors().any(|cursor| {
+            !cursor.retired
+                && matches!(
+                    crate::services::tui_o::shadow::capture::Fingerprint::path(&cursor.source),
+                    Err((
+                        crate::services::tui_o::shadow::SourceAnomalyKind::Missing,
+                        _
+                    ))
+                )
+        });
+        let producer_absent = missing_source
+            && unless_stopped(
+                &self.stopping,
+                self.io.producer_absent(channel, self.provider),
+            )
+            .await?;
+        let config = WriterConfig {
+            enabled: true,
+            producer_absent,
+        };
         let bindings = Arc::clone(&self.bindings);
         let watches = (stop, resumed_tx, unsettled_tx, owing);
         let readers = crate::services::tui_o::channel_policy::boot()

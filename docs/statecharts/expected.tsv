@@ -133,6 +133,16 @@ input-single-path/InputOwnershipEarlyRetainBefore.cfg	InputOwnership	FirstOpaque
 input-single-path/InputOwnershipReserveResetBefore.cfg	InputOwnership	ReserveResetsFailures	-
 input-single-path/InputOwnershipPolicyEarlyRemove.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipPolicyRowOnlyBefore.cfg	InputOwnership	RecoveryCreditPreserved	FailureEventuallyResolved
+tui-o-writer/WriterParkedAliasFixed.cfg	WriterParkedAlias	-	-
+tui-o-writer/WriterParkedAliasMain.cfg	WriterParkedAlias	HaltRepeatZero,NoHaltForConfirmedOld	FirstReplyExactlyOnce
+tui-o-writer/WriterReboundBirth.cfg	WriterRebound	ActiveLossVisible,CurrentNeverHistorical,UnknownNeedsAbsence,ReadyAfterFollow,ParkedReboundHalts	-
+tui-o-writer/WriterReboundCurrent.cfg	WriterRebound	-	-
+tui-o-writer/WriterWakeActiveLoss.cfg	WriterWake	-	-
+tui-o-writer/WriterWakeMain.cfg	WriterWake	NoQuietReboot	WaitingInputGetsFirstReply
+tui-o-writer/WriterWakePark.cfg	WriterWake	-	-
+tui-o-writer/WriterWakeSupersededMain.cfg	WriterWake	-	NewSourceGetsFirstReply
+tui-o-writer/WriterWakeSupersededPark.cfg	WriterWake	-	-
+tui-o-writer/WriterWakeUnsafeLoss.cfg	WriterWake	-	-
 turn-presence/TurnPresence.cfg	TurnPresence	-	-
 turn-presence/TurnPresenceMain.cfg	TurnPresence	NoProgressIdentityUnknown,NoProgressIdentityNotice	EventuallyStableBusy,PublicationContinues
 turn-presence/TurnPresenceM1.cfg	TurnPresence	NoProgressIdentityUnknown,NoProgressIdentityNotice	EventuallyStableBusy,PublicationContinues

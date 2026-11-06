@@ -47,6 +47,7 @@ use crate::services::tui_o::shadow::SourceId;
 #[serde(default)]
 pub struct WriterConfig {
     pub enabled: bool,
+    pub producer_absent: bool,
 }
 
 /// Reader policy selected explicitly by an engine caller; the default keeps FDs open.

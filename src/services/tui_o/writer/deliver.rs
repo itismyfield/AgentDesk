@@ -427,6 +427,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         self.alarms.raise(self.channel, alarm);
     }
 
+    pub fn halt_cleared(&self) {
+        self.alarms.halt_cleared(self.channel);
+    }
+
     pub fn waiting_cleared(&self) {
         self.alarms.waiting_cleared(self.channel);
     }

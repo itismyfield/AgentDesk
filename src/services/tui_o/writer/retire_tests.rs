@@ -1054,6 +1054,18 @@ async fn readers_s1a_unsafe_missing_never_retires() {
             .join("o_store")
             .join(CHANNEL.to_string())
             .join("cursor");
+        let retained = || {
+            let base = cursor_dir.parent().unwrap();
+            let mut files = std::collections::BTreeMap::new();
+            for directory in ["cursor", "spool"] {
+                for entry in std::fs::read_dir(base.join(directory)).unwrap() {
+                    let path = entry.unwrap().path();
+                    files.insert(path.clone(), std::fs::read(path).unwrap());
+                }
+            }
+            files
+        };
+        let retained_before = matches!(case, "no_witness" | "old_witness").then(&retained);
         let fault = (case == "retire_write").then(|| {
             crate::services::tui_o::store::fault::plant(
                 &cursor_dir,
@@ -1081,7 +1093,13 @@ async fn readers_s1a_unsafe_missing_never_retires() {
                 Ok(()) => reader_tend(&mut s, &mut w, at).await,
             }
         };
-        assert!(matches!(failed, Err(WriterAlarm::Halted { .. })), "{case}");
+        if matches!(case, "no_witness" | "old_witness") {
+            assert!(failed.is_ok(), "historical missing source may park: {case}");
+            assert!(s.is_parked(&old), "{case}");
+            assert_eq!(retained(), retained_before.unwrap(), "retained {case}");
+        } else {
+            assert!(matches!(failed, Err(WriterAlarm::Halted { .. })), "{case}");
+        }
         assert_eq!(w.store().cursor(&old).unwrap(), &before, "{case}");
         drop(fault);
         assert_eq!(h.channel().cursor(&old).unwrap(), &before, "durable {case}");
@@ -1535,7 +1553,10 @@ fn s1b_spawn_reader_actor(
     let (resumed, ready) = watch::channel(false);
     let unsettled = watch::channel(None).0;
     let task = actor::spawn_projecting(
-        &WriterConfig { enabled: true },
+        &WriterConfig {
+            enabled: true,
+            ..Default::default()
+        },
         Some(ReaderConfig { dormant: true }),
         harness.writer(),
         ShadowProvider::Claude,

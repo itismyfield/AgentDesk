@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::agent_protocol::{RuntimeHandoffKind, codex_payload_turn_id};
 use crate::services::provider::ProviderKind;
 
 const TURN_STATE_TAIL_BYTES: u64 = 64 * 1024;
@@ -279,9 +279,47 @@ pub(crate) fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
 }
 
 pub(crate) fn observe_codex_jsonl_turn_state(path: &Path) -> TuiTurnState {
-    observe_jsonl_turn_state(
-        path,
-        codex_envelope_turn_state,
+    let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
+        return TuiTurnState::Unknown;
+    };
+    let completed_turns: std::collections::HashSet<String> = window
+        .lines
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|json| {
+            if json.get("type")?.as_str()? != "event_msg" {
+                return None;
+            }
+            let payload = json.get("payload")?;
+            if payload.get("type")?.as_str()? != "task_complete" {
+                return None;
+            }
+            codex_payload_turn_id(payload).map(str::to_owned)
+        })
+        .collect();
+    observe_jsonl_window_turn_state(
+        &window,
+        |json| {
+            let item = match json.get("type").and_then(Value::as_str) {
+                Some("event_msg") => json.get("payload").filter(|payload| {
+                    matches!(
+                        payload.get("type").and_then(Value::as_str),
+                        Some("item_started" | "item_completed" | "item.started" | "item.completed")
+                    )
+                }),
+                Some("item.started" | "item.completed") => Some(json),
+                _ => None,
+            };
+            // Late items from a completed turn cannot prove another turn is busy.
+            // Only a matching completion in this same read window permits skipping.
+            if item
+                .and_then(codex_payload_turn_id)
+                .is_some_and(|turn_id| completed_turns.contains(turn_id))
+            {
+                return None;
+            }
+            codex_envelope_turn_state(json)
+        },
         |_| None,
         MalformedJsonlLinePolicy::ReturnUnknown,
         true,
@@ -304,6 +342,22 @@ fn observe_jsonl_turn_state(
     let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         return TuiTurnState::Unknown;
     };
+    observe_jsonl_window_turn_state(
+        &window,
+        classify,
+        classify_partial,
+        malformed_policy,
+        conservative_truncated,
+    )
+}
+
+fn observe_jsonl_window_turn_state(
+    window: &JsonlTailWindow,
+    classify: impl Fn(&Value) -> Option<TuiTurnState>,
+    classify_partial: fn(&str) -> Option<TuiTurnState>,
+    malformed_policy: MalformedJsonlLinePolicy,
+    conservative_truncated: bool,
+) -> TuiTurnState {
     // Nonempty, evidence-free truncated tails are conservative only for Codex.
     let truncated = conservative_truncated && !window.window_covers_file;
     // Empty truncated windows cannot prove idle for either provider.
