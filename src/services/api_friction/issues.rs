@@ -267,3 +267,122 @@ fn pattern_failure(pattern: &ApiFrictionPattern, error: String) -> ApiFrictionPa
         error,
     }
 }
+
+#[cfg(test)]
+mod retention_pg_tests {
+    use super::*;
+
+    async fn exec(pool: &PgPool, sql: &str) {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
+            .execute(pool)
+            .await
+            .unwrap_or_else(|err| panic!("fixture `{sql}`: {err}"));
+    }
+
+    async fn issue_url_of(pool: &PgPool, fingerprint: &str) -> Option<String> {
+        load_pattern_candidates_pg(pool, API_FRICTION_MIN_REPEAT_COUNT, DEFAULT_PATTERN_LIMIT)
+            .await
+            .expect("pattern candidates")
+            .into_iter()
+            .find(|pattern| pattern.fingerprint == fingerprint)
+            .and_then(|pattern| pattern.issue_url)
+    }
+
+    /// An issue row goes only when no event of its fingerprint is left and its last record is
+    /// a year old, so a friction that keeps recurring is never filed as a second issue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retention_keeps_the_issue_of_a_recurring_friction() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_api_friction_issue_retention",
+            "api friction issue retention",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        // `fp-recurring` was filed 400 days ago and its friction is still being reported.
+        exec(
+            &pool,
+            "INSERT INTO api_friction_issues (fingerprint, repo_id, endpoint, friction_type, title,
+                 body, issue_url, last_event_at, updated_at, created_at) VALUES
+             ('fp-gone', 'r', '/x', 't', 't', 'b', 'u-gone',
+                 NOW() - INTERVAL '400 days', NOW() - INTERVAL '400 days', NOW() - INTERVAL '400 days'),
+             ('fp-updated-only', 'r', '/x', 't', 't', 'b', 'u-upd',
+                 NULL, NOW() - INTERVAL '400 days', NOW() - INTERVAL '10 days'),
+             ('fp-recurring', 'r', '/x', 't', 't', 'b', 'u-recurring',
+                 NOW() - INTERVAL '400 days', NOW() - INTERVAL '400 days', NOW() - INTERVAL '400 days'),
+             ('fp-recent', 'r', '/x', 't', 't', 'b', 'u-recent',
+                 NOW() - INTERVAL '100 days', NOW() - INTERVAL '100 days', NOW() - INTERVAL '100 days'),
+             ('fp-last-event-new', 'r', '/x', 't', 't', 'b', 'u-new',
+                 NOW() - INTERVAL '10 days', NOW() - INTERVAL '400 days', NOW() - INTERVAL '400 days'),
+             ('fp-no-time', 'r', '/x', 't', 't', 'b', 'u-none', NULL, NULL, NULL);
+             INSERT INTO api_friction_events (id, fingerprint, endpoint, friction_type, summary,
+                 payload_json, created_at) VALUES
+             ('e1', 'fp-recurring', '/x', 't', 's', '{}'::jsonb, NOW() - INTERVAL '3 days'),
+             ('e2', 'fp-recurring', '/x', 't', 's', '{}'::jsonb, NOW() - INTERVAL '2 days')",
+        )
+        .await;
+        let before = issue_url_of(&pool, "fp-recurring").await;
+        assert_eq!(before.as_deref(), Some("u-recurring"));
+
+        let report =
+            crate::services::maintenance::jobs::db_retention::db_retention_job(&pool, false)
+                .await
+                .expect("retention pass");
+        assert_eq!(
+            issue_url_of(&pool, "fp-recurring").await,
+            before,
+            "the recurring friction's pattern still sees its issue"
+        );
+        // The friction recurs again; each processing pass still skips it instead of refiling.
+        for (round, id) in [(1, "e3"), (2, "e4")] {
+            exec(
+                &pool,
+                &format!(
+                    "INSERT INTO api_friction_events (id, fingerprint, endpoint, friction_type,
+                         summary, payload_json) VALUES ('{id}', 'fp-recurring', '/x', 't', 's',
+                         '{{}}'::jsonb)"
+                ),
+            )
+            .await;
+            let pattern = load_pattern_candidates_pg(&pool, 2, DEFAULT_PATTERN_LIMIT)
+                .await
+                .expect("pattern candidates")
+                .into_iter()
+                .find(|pattern| pattern.fingerprint == "fp-recurring")
+                .expect("recurring pattern");
+            // Checked before processing so a regression cannot reach the real GitHub call.
+            assert!(
+                pattern.issue_url.is_some(),
+                "pass {round}: the dedupe record is still there"
+            );
+            assert!(matches!(
+                process_pattern_issue_pg(&pool, pattern).await,
+                Ok(ApiFrictionPatternProcessResult::Skipped(_))
+            ));
+        }
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT fingerprint FROM api_friction_issues ORDER BY 1")
+                .fetch_all(&pool)
+                .await
+                .expect("issues left");
+        assert_eq!(
+            left,
+            [
+                "fp-last-event-new",
+                "fp-no-time",
+                "fp-recent",
+                "fp-recurring"
+            ]
+            .map(String::from),
+            "only year-old issues with no event left go"
+        );
+        assert!(
+            report
+                .summary()
+                .contains(&"api_friction_issues:delete=2".to_string()),
+            "the pass actually deleted the two eligible issues"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+}

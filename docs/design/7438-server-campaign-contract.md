@@ -75,14 +75,14 @@ F4는 #7272 S4 착지 뒤 진행한다. `auto_queue/**`, `phase_gate.rs`, review
 | NodeRun | run ID + node ID, stage, retry series, quality failures, review rounds, main/acceptance 사실 | 카드/이슈 종료와 독립 |
 | Attempt | run/node/series/stage/attempt ID, role/session binding, definition hash, base/head | append 이력; 취소·실패를 덮어쓰지 않음 |
 | Evidence | evidence ID + attempt ID, kind, binding, 원 증거/출처/수용 판정 | 제출은 주장, 채택은 서버 판정. 정의 변경으로 유효성만 바뀜 |
-| Event | run ID + 단조 sequence, command ID, typed event, observed_at | append-only, snapshot prune와 무관 |
+| Event | run ID + 단조 sequence, command ID, typed event, observed_at | append-only로 쓰고, 보존 잡(#7801)이 campaign별 최근 5,000행을 남긴다(현재 run의 행은 전부 유지). run/action 이력 snapshot도 같은 상한. snapshot prune와 무관 |
 | Action | action ID, run/node/attempt, kind, control version, 대상 host/gate identity, 상태, 외부 상관 ID/관측 | 전송 전 대상 영속화, intent부터 결과 대사까지 보존 |
 | Receipt | campaign ID + idempotency key, 정규화한 요청 fingerprint, status/body | 상태/events/actions와 같은 transaction, 실행 이력과 함께 보존 |
 
 F1은 위 레코드를 서버 전용 행으로 저장한다. 별도 DB/메시지 서비스/범용 event-sourcing 엔진은 만들지 않는다.
 조회 snapshot은 canonical 행에서 다시 만들 수 있다. Event는 감사/증분 전달용이며 실행 정본을 복제하는 별도 원장이 아니다.
 부모 정의 revision 삭제가 run/attempt/evidence/action/receipt를 cascade 삭제하지 않게 FK를 정한다.
-정의 삭제 및 실행 이력 GC는 이번 범위에 없다.
+실행 이력에는 #7801 개수 상한(위 Event 행)만 적용한다. 지운 구간보다 이른 `after` 로 events 를 읽으면 남은 가장 이른 행부터 받는다(틈을 알리지 않는다). 정의 삭제는 범위에 없다.
 
 `NodeDefinition`은 ID, 제목, 요구사항 이슈 링크, 수용조건(안정 ID·설명·검증 종류), 선행 ID,
 선택 그룹만 받는다. `status/stage/round/assignee/session/provider/evidence/head/auto_queue`
