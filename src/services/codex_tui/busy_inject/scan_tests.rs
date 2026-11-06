@@ -338,12 +338,15 @@ fn an_end_read_stops_at_the_latest_start() {
     );
 }
 
+/// A kind of end, the id the turn's own end names, its writer and an unnamed end of that kind.
+type EndCase = (&'static str, &'static str, fn(&str) -> String, String);
+
 /// An unnamed end after the turn's own end leaves its end unproven until another own end, by
 /// complete, abort or the root's id; the legacy verdict of the same records stays Unknown.
 #[test]
 fn an_unnamed_end_after_the_turns_own_is_resolved_only_by_a_later_own_end() {
     let rooted = event(serde_json::json!({"type":"task_started","turn_id":"t","root_turn_id":"r"}));
-    let ends: [(&str, &str, fn(&str) -> String, String); 3] = [
+    let ends: [EndCase; 3] = [
         (
             "complete",
             "t",
