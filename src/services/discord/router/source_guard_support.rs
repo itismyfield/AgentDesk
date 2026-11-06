@@ -175,7 +175,6 @@ pub(in crate::services::discord) fn forge(
         "no code occurrence of `{needle}` to forge"
     );
     let hidden = match forgery {
-        CommentForgery::Line => format!("// {needle}\n"),
         CommentForgery::NestedBlock => format!("/* outer /* {needle} */ */"),
     };
     let mut forged = source.to_string();

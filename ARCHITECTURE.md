@@ -1075,9 +1075,6 @@ src/
 │   │   │   ├── source_read_proof.rs
 │   │   │   ├── source_read_proof_tests.rs
 │   │   │   └── terminal_resolution.rs
-│   │   ├── watcher_supervisor/
-│   │   │   └── tests/
-│   │   │       └── source_guard_tests.rs
 │   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
@@ -1156,7 +1153,6 @@ src/
 │   │   │   └── producer.rs
 │   │   ├── input/
 │   │   │   ├── tests/
-│   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   └── startup_update_tests.rs
 │   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
