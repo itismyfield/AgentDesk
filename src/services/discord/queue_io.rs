@@ -104,7 +104,7 @@ pub(in crate::services::discord) async fn mailbox_cancel_queued_primary_message(
     let mailbox = shared.mailbox(channel_id);
     let result: CancelQueuedMessageResult = mailbox
         .cancel_queued_primary_message(
-            message_id,
+            crate::services::turn_orchestrator::QueuedCancelTarget::SingleSelection(message_id),
             queue_persistence_context(shared, provider, channel_id),
         )
         .await;

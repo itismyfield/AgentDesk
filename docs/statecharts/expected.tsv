@@ -21,6 +21,8 @@ host-migration/HostMigrationClean.cfg	HostMigration	-	-
 host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock	-
 input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-
+input-single-path/InputCancelSelectionLegacyGuarded.cfg	InputCancelSelection	LegacyFrontRemoved	-
+input-single-path/InputCancelSelectionNoRevoke.cfg	InputCancelSelection	FrontGrantRevoked	-
 input-single-path/InputNativeStop.cfg	InputNativeStop	-	-
 input-single-path/InputNativeStopAbsorptionBefore.cfg	InputNativeStop	NoForeignEscape,OwnInputStops	-
 input-single-path/InputNativeStopBefore.cfg	InputNativeStop	OwnInputStops	-

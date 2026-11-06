@@ -95,9 +95,9 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
             });
         }
         M::CancelQueuedPrimaryMessage {
-            message_id, reply, ..
+            message_id, reject_ambiguous, reply, ..
         } => {
-            let _ = reply.send(cancel(owner, message_id));
+            let _ = reply.send(cancel(owner, message_id, reject_ambiguous));
         }
         M::Clear {
             persistence,
@@ -203,11 +203,16 @@ fn requeued(owner: &mut Owner, pick: impl Fn(&RetainedInput) -> bool) -> Snapsho
 }
 
 /// Takes only the cancelled original; an unrelated retained input stays where it is.
-fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult {
-    if owner
-        .cancelable_primary_counts()
-        .get(&message_id.get())
-        .is_some_and(|count| *count > 1)
+fn cancel(
+    owner: &mut Owner,
+    message_id: MessageId,
+    reject_ambiguous: bool,
+) -> CancelQueuedMessageResult {
+    if reject_ambiguous
+        && owner
+            .cancelable_primary_counts()
+            .get(&message_id.get())
+            .is_some_and(|count| *count > 1)
     {
         return CancelQueuedMessageResult {
             removed: None,
