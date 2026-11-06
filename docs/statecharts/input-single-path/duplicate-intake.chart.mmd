@@ -1,0 +1,8 @@
+stateDiagram-v2
+    [*] --> Waiting: live or catch-up receives message
+    Waiting --> Queued: actor commits message ticket and original
+    Queued --> Queued: other path resumes the stored original
+    Queued --> Delivered: owner submits and settles once
+    Delivered --> Delivered: restart preserves committed ticket
+    Delivered --> Delivered: retry recognizes committed ticket
+    Delivered --> FalseWarning: before repair, retry hashes a rebuilt original

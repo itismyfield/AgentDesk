@@ -189,3 +189,20 @@ async fn grant(drive: &Drive, stalled: bool) -> Option<Front> {
 #[cfg(test)]
 #[path = "drive_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(crate) async fn grant_stalled_for_tests(
+    mailbox: ChannelMailboxHandle,
+    channel: u64,
+) -> Option<Front> {
+    grant(
+        &Drive {
+            mailbox,
+            channel,
+            handoff: Arc::new(|_| Box::pin(async { Ok(()) })),
+            settled: None,
+        },
+        true,
+    )
+    .await
+}

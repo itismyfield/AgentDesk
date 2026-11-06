@@ -23,14 +23,38 @@ struct Watch {
     message: u64,
     probe: Option<ScreenProbe>,
     running: bool,
+    #[cfg(test)]
+    completion: Option<tokio::sync::oneshot::Sender<Observation>>,
 }
 
 /// What one look decides for the hold it read.
-#[derive(Debug, PartialEq)]
-enum Verdict {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Verdict {
     Wake,
     Keep,
     End,
+}
+
+#[cfg(test)]
+pub(crate) struct Observation {
+    pub(crate) generation: u64,
+    pub(crate) verdict: Verdict,
+}
+
+#[cfg(test)]
+pub(crate) fn watch_observed(
+    drive: Arc<Drive>,
+    message: u64,
+) -> (u64, tokio::sync::oneshot::Receiver<Observation>) {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let generation = {
+        let mut all = watches();
+        let watch = all.entry(drive.channel).or_default();
+        watch.completion = Some(sender);
+        watch.generation + 1
+    };
+    watch(drive, message);
+    (generation, receiver)
 }
 
 /// A look's verdict from the pane read (`None` when the probe failed to run) and whether its front
@@ -89,6 +113,13 @@ pub(crate) fn watch(drive: Arc<Drive>, message: u64) {
             };
             if watch.generation != generation {
                 continue;
+            }
+            #[cfg(test)]
+            if let Some(completion) = watch.completion.take() {
+                let _ = completion.send(Observation {
+                    generation,
+                    verdict: look,
+                });
             }
             match look {
                 Verdict::Keep => watch.probe = probe,

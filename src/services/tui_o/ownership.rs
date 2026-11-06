@@ -147,12 +147,6 @@ impl OwnershipGate {
     }
 
     pub(crate) async fn execution_retired(&self) {
-        #[cfg(test)]
-        if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
-            "no-retire-stop",
-        ) {
-            std::future::pending::<()>().await;
-        }
         let mut updates = self.subscribe();
         loop {
             let retired = {

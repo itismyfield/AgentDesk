@@ -56,15 +56,6 @@ pub(crate) fn prepare(
         return Ok(None);
     }
     let generation = event.generation.to_string();
-    #[cfg(test)]
-    let generation =
-        if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
-            "notice-generation",
-        ) {
-            "0".into()
-        } else {
-            generation
-        };
     let key = fingerprint(&[
         "routing-transition-v1",
         event.identity.provider(),

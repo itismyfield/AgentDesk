@@ -38,11 +38,6 @@ const MAX_ACTIVE_QUEUE_FILES: usize = 4096;
 const MAX_QUARANTINE_FILES: usize = 256;
 const MAX_ORPHAN_RESPONSE_FILES: usize = 1024;
 
-#[cfg(test)]
-fn behavior_mutation_enabled(name: &str) -> bool {
-    std::env::var("AGENTDESK_HOOK_RELAY_TEST_MUTATION").is_ok_and(|value| value == name)
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct OrderedHookRelayRequest {
     request_id: String,
@@ -296,12 +291,6 @@ fn quarantine_path(queue_dir: &Path, path: &Path, error: &str) -> Result<PathBuf
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("unknown");
-    #[cfg(test)]
-    let original_name = if behavior_mutation_enabled("quarantine-filename-loss") {
-        "unknown"
-    } else {
-        original_name
-    };
     let quarantined_path = quarantine_dir.join(format!(
         "{}-{original_name}.corrupt",
         uuid::Uuid::new_v4().simple()
@@ -661,10 +650,6 @@ fn run_ordered_hook_relay_worker(request: OrderedHookRelayWorkerRequest) -> Resu
 }
 
 fn promote_ordered_hook_relay_ingress(queue_dir: &Path) -> Result<(), String> {
-    #[cfg(test)]
-    if behavior_mutation_enabled("promotion-omission") {
-        return Ok(());
-    }
     for ingress_path in queue_ingress_paths(queue_dir)? {
         let encoded = match std::fs::read(&ingress_path) {
             Ok(encoded) => encoded,
@@ -731,8 +716,6 @@ fn process_ordered_hook_relay_request(
         }
     };
     let expired = Utc::now() >= request.delivery_deadline;
-    #[cfg(test)]
-    let expired = expired && !behavior_mutation_enabled("post-transport-ttl");
     if expired {
         let error = format!(
             "ordered hook relay delivery expired at {} before transport",

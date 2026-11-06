@@ -248,11 +248,6 @@ impl OwnTurnCursor {
     fn read_on(&mut self, file: std::fs::File, consumed: u64) -> std::io::Result<()> {
         use std::io::{Read, Seek};
         let budget = OWN_TURN_POLL_BUDGET;
-        #[cfg(test)]
-        let budget = match herdr_interrupt_mutant("backstop_budget_ignored") {
-            true => u64::MAX,
-            false => budget,
-        };
         let mut file = file;
         let kept = self.partial.len();
         file.seek(std::io::SeekFrom::Start(consumed + kept as u64))?;
@@ -287,8 +282,6 @@ impl HerdrInterruptState {
         expected: Option<&str>,
     ) -> Option<CodexOwnTurn> {
         let start = self.turn_start.get()?;
-        #[cfg(test)]
-        let start = &identity_mutant(start, source);
         if source != start.source {
             return None;
         }
@@ -299,10 +292,6 @@ impl HerdrInterruptState {
             return None;
         }
         let mut cursor = self.own_turn.lock().unwrap_or_else(|e| e.into_inner());
-        #[cfg(test)]
-        if herdr_interrupt_mutant("backstop_cursor_restarts") {
-            *cursor = OwnTurnCursor::default();
-        }
         let (read, consumed) = *cursor.at.get_or_insert((identity, start.offset));
         if read != identity || meta.len() < consumed + cursor.partial.len() as u64 {
             // Another file, or this one cut short: the next poll reads again from the start.
@@ -315,28 +304,10 @@ impl HerdrInterruptState {
         let other = cursor.own.as_ref().zip(expected);
         if other.is_some_and(|(own, expected)| own.turn_id != expected) {
             // Not the turn the reader saw here: never cached, the next poll reads the start again.
-            #[cfg(test)]
-            if herdr_interrupt_mutant("backstop_mismatch_cursor_retained") {
-                return None;
-            }
             *cursor = OwnTurnCursor::default();
             return None;
         }
         cursor.over.then(|| cursor.own.clone()).flatten()
-    }
-}
-
-/// Test-only: any turn in the read transcript, from its first record.
-#[cfg(test)]
-fn identity_mutant(start: &HerdrTurnStart, source: &std::path::Path) -> HerdrTurnStart {
-    match herdr_interrupt_mutant("backstop_identity_skipped") {
-        true => HerdrTurnStart {
-            source: source.to_owned(),
-            file: None,
-            offset: 0,
-            ..start.clone()
-        },
-        false => start.clone(),
     }
 }
 
@@ -452,16 +423,10 @@ impl CancelToken {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if let Some(state) = slot.as_ref() {
-            #[cfg(test)]
-            if herdr_interrupt_mutant("prepare_reset") {
-                self.claude_interrupt_claim.store(0, Ordering::Release);
-            }
             return (state.owner == *owner).then(|| state.clone());
         }
         // A stop decided under this slot before it held a state cancelled a turn that wrote nothing.
         let cancelled = self.cancelled.load(Ordering::Acquire);
-        #[cfg(test)]
-        let cancelled = cancelled && !herdr_interrupt_mutant("prepare_ignores_cancel");
         if cancelled {
             return None;
         }
@@ -480,10 +445,6 @@ impl CancelToken {
                 live.retain(|turn| turn.strong_count() > 0);
                 !live.is_empty()
             });
-            #[cfg(test)]
-            if herdr_interrupt_mutant("index_single_slot") {
-                turns.retain(|(logical, _), _| *logical != owner.logical_key);
-            }
             let key = (owner.logical_key.clone(), nonce.to_owned());
             turns.entry(key).or_default().push(Arc::downgrade(&state));
         }
@@ -525,8 +486,6 @@ impl StopCancel {
             return Self::NotCurrent;
         };
         let settled = herdr_stop_settlement_available();
-        #[cfg(test)]
-        let settled = settled || herdr_interrupt_mutant("p2b_settlement_unchecked");
         let slot = settled.then(|| {
             token
                 .herdr_interrupt
@@ -540,21 +499,7 @@ impl StopCancel {
             return Self::Herdr(token.clone());
         }
         #[cfg(test)]
-        let slot = if herdr_interrupt_mutant("p2b_unlock_before_publish") {
-            drop(slot);
-            None
-        } else {
-            slot
-        };
-        #[cfg(test)]
         run_decide_hook();
-        #[cfg(test)]
-        let slot = if herdr_interrupt_mutant("p2b_unlock_after_hook") {
-            drop(slot);
-            None
-        } else {
-            slot
-        };
         token.publish_cancel(reason);
         #[cfg(test)]
         run_publish_hook();
@@ -593,11 +538,6 @@ pub(crate) fn herdr_stop_settlement_available() -> bool {
         return false;
     }
     cfg!(unix)
-}
-
-#[cfg(test)]
-pub(crate) fn herdr_interrupt_mutant(name: &str) -> bool {
-    std::env::var("ADK_P10_3_MUTANT").ok().as_deref() == Some(name)
 }
 
 /// A requested switch cannot enable Escape before provider-terminal settlement exists.

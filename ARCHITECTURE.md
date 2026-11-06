@@ -1281,6 +1281,7 @@ src/
 │   │   │   │   │   │   ├── negative_tests.rs
 │   │   │   │   │   │   └── source_boundary_tests.rs
 │   │   │   │   │   └── absent_launch_tests.rs
+│   │   │   │   ├── cancel_queued.rs
 │   │   │   │   ├── clear_count_tests.rs
 │   │   │   │   ├── clear_end_tests.rs
 │   │   │   │   ├── clear_entry_tests.rs
@@ -2139,6 +2140,7 @@ src/
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_busy_gate_tests.rs
 │   │   │   │   │   ├── owner_input_carried_restart_tests.rs
+│   │   │   │   │   ├── owner_input_codex_native_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
@@ -2232,6 +2234,8 @@ src/
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
 │   │   │   ├── gateway_runtime/
+│   │   │   │   ├── slash_command_tests/
+│   │   │   │   │   └── cancel_queued_tests.rs
 │   │   │   │   ├── command_guard.rs
 │   │   │   │   └── slash_command_tests.rs
 │   │   │   ├── intake_delivery_sweep/
@@ -2621,6 +2625,7 @@ src/
 │   │   │   │   ├── cold_start_incident_e2e_tests.rs
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
+│   │   │   │   ├── duplicate_intake_e2e_tests.rs
 │   │   │   │   ├── herdr_stop_activation_e2e_tests.rs
 │   │   │   │   ├── herdr_stop_activation_http_e2e_tests.rs
 │   │   │   │   ├── herdr_terminate_e2e_tests.rs

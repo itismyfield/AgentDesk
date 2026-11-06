@@ -230,10 +230,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         // Permission-aware P5 conversion takes source authority itself. Its prepared mapping is
         // accepted only with the final full-tail identity and scoped hop comparison below.
         let legacy_hops = if authority.is_some() && codex.is_some() {
-            #[cfg(test)]
-            if super::codex_retention::mutant("legacy_reentry") {
-                let _ = self.sources.legacy_candidates(&mut self.writer);
-            }
             prepared_legacy.ok_or("Codex legacy history was not prepared outside authority")?
         } else {
             self.sources.legacy_candidates(&mut self.writer)
@@ -283,12 +279,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .ok_or("the channel's POSTs in flight are not counted")?;
         let protected = self.verified.as_ref().map(super::super::owed::protected);
         let retry = usize::from(self.writer.has_local_retry());
-        #[cfg(test)]
-        let retry = if super::super::deliver::bo_mutant("owed_retry") {
-            0
-        } else {
-            retry
-        };
         Ok(Obligations {
             owed: self.owed.len() + retry + self.notice_debt_open(),
             prepared: usize::from(self.writer.store().ledger().unresolved().is_some()),

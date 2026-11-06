@@ -39,18 +39,6 @@ pub(crate) fn plan(
         .iter()
         .filter_map(|hop| Some((hop.judged.key.clone(), hop.judged.hop_seq?)))
         .collect();
-    #[cfg(test)]
-    let hop_seqs =
-        if std::env::var("AGENTDESK_OTRANSITION_MUTANT").is_ok_and(|m| m == "candidate_index") {
-            diagnostics
-                .candidates
-                .iter()
-                .enumerate()
-                .map(|(index, candidate)| (candidate.key.clone(), index as u64))
-                .collect()
-        } else {
-            hop_seqs
-        };
     diagnostics
         .candidates
         .iter()
@@ -187,10 +175,6 @@ async fn send(
 }
 
 fn codex_actor_error(reason: &'static str, suspended: bool) -> &'static str {
-    #[cfg(test)]
-    if std::env::var("AGENTDESK_BO_MUTANT").is_ok_and(|m| m == "codex_suspended") {
-        return reason;
-    }
     if suspended {
         "codex_suspended_sources"
     } else {
@@ -206,10 +190,6 @@ async fn codex_send(
     context: Context,
 ) -> Result<Reply, &'static str> {
     let send = send(ready, channel, port, operation, context);
-    #[cfg(test)]
-    if std::env::var("AGENTDESK_BO_MUTANT").is_ok_and(|m| m == "codex_inspect_timeout") {
-        return send.await;
-    }
     let budget = INSPECT_DEADLINE
         + crate::services::tui_o::writer::rotation::RETIRE_QUIET
         + Duration::from_secs(10);
@@ -251,11 +231,6 @@ async fn channel_sweep(
         let context = match resolve_codex_context(registry, Arc::clone(&shared), channel).await {
             Ok(context) => context,
             Err(unavailable) => {
-                #[cfg(test)]
-                if std::env::var("AGENTDESK_BO_MUTANT").is_ok_and(|m| m == "prepare_reason") {
-                    stats.skip("codex_context_unavailable");
-                    return Ok(());
-                }
                 let component = unavailable.component.as_str();
                 let reason = unavailable.reason;
                 tracing::info!(
@@ -292,11 +267,6 @@ async fn channel_sweep(
         }
         tracing::info!(channel, diagnostics = ?reply.diagnostics, execution = ?reply.execution,
             "[tui_o] Codex retention observation");
-        #[cfg(test)]
-        if codex_retention::mutant("producer_unwired") {
-            stats.skip("codex_inspect_only");
-            return Ok(());
-        }
         let diagnostics = reply
             .diagnostics
             .as_ref()

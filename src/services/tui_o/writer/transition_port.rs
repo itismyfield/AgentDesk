@@ -234,10 +234,6 @@ impl TransitionPort {
         mut self,
         provider: crate::services::tui_o::shadow::ShadowProvider,
     ) -> Self {
-        #[cfg(test)]
-        if super::deliver::bo_mutant("provider_wiring") {
-            return self;
-        }
         self.provider = Some(provider);
         self
     }

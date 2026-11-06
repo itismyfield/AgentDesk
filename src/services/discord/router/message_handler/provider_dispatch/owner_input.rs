@@ -573,7 +573,7 @@ enum Wait {
 }
 
 /// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
-/// or the pane the start would take runs a native Claude turn or cannot be read.
+/// or the pane the start would take runs a native turn, cannot be read or cannot be named yet.
 async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
     use crate::services::discord::inflight::{TurnSource, load_inflight_state_read_only};
     use crate::services::discord::turn_presence::activity::{Activity, activity_now};
@@ -591,40 +591,57 @@ async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
         }
         // The activity read the channel's own pane; a start bound for another pane reads that one.
         return match start_target(shared, channel, context).await {
-            Some(target) if !target.own_pane => native_wait(provider, target),
-            _ => Wait::Go,
+            Ok(Some(target)) if !target.own_pane => native_wait(provider, target),
+            Ok(_) => Wait::Go,
+            Err(_) => named_wait(shared, channel, context),
         };
     }
     match start_target(shared, channel, context).await {
-        Some(target) => native_wait(provider, target),
-        None => Wait::Go,
+        Ok(Some(target)) => native_wait(provider, target),
+        Ok(None) => Wait::Go,
+        Err(_) => named_wait(shared, channel, context),
     }
 }
 
 /// The pane a start's headless turn writes to and where its native turn is read from; `None` when
-/// that turn takes no pane, or for a provider whose native turn is not read here yet.
+/// that turn takes no pane, or for a provider whose native turn is not read here.
 async fn start_target(
     shared: &Shared,
     channel: ChannelId,
     context: &Value,
-) -> Option<NativeTarget> {
-    if shared.provider != ProviderKind::Claude {
-        return None;
+) -> Result<Option<NativeTarget>, super::super::headless_turn::Unnamed> {
+    if !matches!(shared.provider, ProviderKind::Claude | ProviderKind::Codex) {
+        return Ok(None);
     }
     let pane = super::super::headless_turn::owner_start_pane(shared, channel, context);
-    let (tmux, own_pane) = pane.await?;
+    let Some((tmux, own_pane)) = pane.await? else {
+        return Ok(None);
+    };
     let (dir, session_id) = {
         let core = shared.core.lock().await;
         let session = core.sessions.get(&channel);
         let dir = session.and_then(|session| session.current_path.clone());
         (dir, session.and_then(|session| session.session_id.clone()))
     };
-    Some(NativeTarget {
+    Ok(Some(NativeTarget {
         tmux,
         dir,
         session_id: session_id.filter(|_| own_pane),
         own_pane,
-    })
+    }))
+}
+
+/// A start whose pane is not named yet waits unclaimed; the watch names it again, and once named
+/// wakes the drive, whose next look reads that pane.
+fn named_wait(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
+    let (shared, context) = (shared.clone(), context.clone());
+    Wait::Watch(Box::new(move || {
+        let pane = super::super::headless_turn::owner_start_pane(&shared, channel, &context);
+        match tokio::runtime::Handle::current().block_on(pane) {
+            Ok(_) => Screen::Ready,
+            Err(_) => Screen::Unknown,
+        }
+    }))
 }
 
 /// A start's read of its own pane: a running or unreadable native turn holds it with a watch of
@@ -646,8 +663,8 @@ struct NativeTarget {
     own_pane: bool,
 }
 
-/// One read of a start's pane: gone (dead, absent or another account's), a running native Claude
-/// turn, an idle one, or unknown when the pane or its transcript cannot be read.
+/// One read of a start's pane: gone (dead, absent or another account's), a running native turn, an
+/// idle one, or unknown when the pane or its transcript cannot be read.
 fn native_read(provider: &ProviderKind, target: &NativeTarget) -> Screen {
     use crate::services::tui_turn_state::{TuiTurnState, observe_claude_jsonl_turn_state};
     match crate::services::platform::tmux::pane_liveness(&target.tmux) {
@@ -658,6 +675,9 @@ fn native_read(provider: &ProviderKind, target: &NativeTarget) -> Screen {
     }
     if other_account(provider.as_str(), &target.tmux) {
         return Screen::Gone;
+    }
+    if *provider == ProviderKind::Codex {
+        return codex_read(target);
     }
     let resolve = super::super::tui_followup::claude_followup_transcript;
     let (dir, session_id) = (target.dir.as_deref(), target.session_id.as_deref());
@@ -677,6 +697,18 @@ fn native_read(provider: &ProviderKind, target: &NativeTarget) -> Screen {
                 false => Screen::Unknown,
             }
         }
+    }
+}
+
+/// A live Codex pane is idle only once its rollout shows its latest turn's own end; a rollout with
+/// no start or with any end it cannot attribute proves no idle.
+fn codex_read(target: &NativeTarget) -> Screen {
+    use crate::services::codex_tui::busy_inject::NativeEnd;
+    let end = super::super::tui_followup::codex_native_end;
+    match end(&target.tmux, target.session_id.as_deref()) {
+        NativeEnd::Ended => Screen::Ready,
+        NativeEnd::Open => Screen::Blocked,
+        NativeEnd::NoStart | NativeEnd::Unknown => Screen::Unknown,
     }
 }
 
@@ -856,11 +888,11 @@ pub(super) fn execute_owned(
         ..turn
     };
     let session = turn.tmux_session_name.unwrap_or_default();
-    // A start never joins a running or unreadable native Claude turn: read once before it registers,
-    // it waits unsent with a watch of that pane.
+    // A start never joins a running or unreadable native turn: read once before it registers, it
+    // waits unsent with a watch of that pane.
     let synthetic = origin != InputOrigin::Discord
         && matches!(turn.host, TurnHost::Tmux)
-        && *turn.provider == ProviderKind::Claude;
+        && matches!(turn.provider, ProviderKind::Claude | ProviderKind::Codex);
     // Its idle or gone read is the pane it registers; no later read can turn it unobserved.
     let mut read = None;
     if synthetic {

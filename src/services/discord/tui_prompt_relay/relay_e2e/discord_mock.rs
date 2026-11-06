@@ -84,6 +84,9 @@ pub(in crate::services::discord) struct DiscordMockState {
     threads: Arc<Mutex<std::collections::HashMap<u64, u64>>>,
     /// Guild text channels a channel `GET` names, by channel id.
     named: Arc<Mutex<std::collections::HashMap<u64, String>>>,
+    /// Channels whose `GET` fails, and how many such `GET`s failed.
+    failing: Arc<Mutex<std::collections::HashSet<u64>>>,
+    failed_reads: Arc<AtomicUsize>,
     next_response_id: Arc<AtomicU64>,
     pub(super) admission_probe: Arc<Mutex<Option<Arc<super::pending_admission_e2e::EffectProbe>>>>,
 }
@@ -117,6 +120,8 @@ impl DiscordMockState {
             extra_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
             threads: Arc::new(Mutex::new(std::collections::HashMap::new())),
             named: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            failing: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            failed_reads: Arc::new(AtomicUsize::new(0)),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
             admission_probe: Arc::new(Mutex::new(None)),
         }
@@ -160,6 +165,19 @@ impl DiscordMockState {
     /// Answers a channel `GET` for `channel` without a name again.
     pub(in crate::services::discord) fn unname_channel(&self, channel: u64) {
         self.named.lock().expect("named channels").remove(&channel);
+    }
+
+    /// Fails every channel `GET` for `channel` until `heal_channel`.
+    pub(in crate::services::discord) fn fail_channel(&self, channel: u64) {
+        self.failing.lock().expect("failing").insert(channel);
+    }
+
+    pub(in crate::services::discord) fn heal_channel(&self, channel: u64) {
+        self.failing.lock().expect("failing").remove(&channel);
+    }
+
+    pub(in crate::services::discord) fn failed_channel_reads(&self) -> usize {
+        self.failed_reads.load(Ordering::SeqCst)
     }
 
     /// Answers `thread` as a guild thread under `parent`.
@@ -423,6 +441,15 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         .and_then(|id| id.parse::<u64>().ok());
     let channel_allowed = route_channel.is_some_and(|id| state.accepts_channel(id));
     let named = route_channel.and_then(|id| state.named.lock().expect("named").get(&id).cloned());
+    if method == Method::GET
+        && let Some(id) = route_channel
+        && path == format!("/api/v10/channels/{id}")
+        && state.failing.lock().expect("failing").contains(&id)
+    {
+        state.failed_reads.fetch_add(1, Ordering::SeqCst);
+        let failed = json!({"message": "channel lookup failed", "code": 0});
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(failed)).into_response();
+    }
     if method == Method::GET
         && let (Some(id), Some(name)) = (route_channel, named)
         && path == format!("/api/v10/channels/{id}")

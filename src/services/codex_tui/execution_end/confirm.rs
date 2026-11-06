@@ -36,7 +36,7 @@ impl Vacancy {
         self.pane == SessionPresence::Missing
             && self.managed_pid.is_none()
             && self.pid == ProcessIdentityProbe::GoneOrReused
-            && (self.pgid == ProcessGroupProbe::Gone || super::mutant("group_unchecked"))
+            && self.pgid == ProcessGroupProbe::Gone
     }
 }
 
@@ -94,7 +94,7 @@ fn confirm(capture: &CapturedOldExecution) -> Result<ConfirmedOldEnd, String> {
     }
     use binding_context::SpawnNonceMarker;
     match binding_context::observe_spawn_nonce_marker(&capture.record.tmux_session) {
-        SpawnNonceMarker::Absent if !super::mutant("absent_rejected") => {}
+        SpawnNonceMarker::Absent => {}
         SpawnNonceMarker::Known(nonce) if nonce == capture.record.execution_nonce => {}
         _ => return Err("spawn marker changed or unreadable".into()),
     }
@@ -126,9 +126,6 @@ fn confirm(capture: &CapturedOldExecution) -> Result<ConfirmedOldEnd, String> {
         return Err("pane binding moved after capture".into());
     }
     let mut record = old.clone();
-    if super::mutant("snapshot_normalized") {
-        record.context.provider_root = Some(record.provider_root.clone());
-    }
     record.ended_at = chrono::Utc::now();
     Ok(ConfirmedOldEnd(record))
 }
@@ -178,10 +175,6 @@ pub(super) fn replacement(
 }
 
 fn warn(capture: &CapturedOldExecution, reason: &str) {
-    if super::mutant("reason_removed") {
-        tracing::warn!("Codex clear end not recorded");
-        return;
-    }
     let vacancy = Vacancy::observe(capture);
     tracing::warn!(channel = capture.record.channel, pane = capture.record.tmux_session,
         pid = capture.pane_pid, pgid = capture.pgid, reason,

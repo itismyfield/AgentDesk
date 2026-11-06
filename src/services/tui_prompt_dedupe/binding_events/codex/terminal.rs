@@ -78,23 +78,12 @@ pub(super) fn settled_companions(records: &[Logged]) -> SettledCompanions {
             let closed = rejected
                 .get(&candidate.seq)
                 .is_some_and(|seq| *seq > candidate.seq && *seq < resolution.seq);
-            #[cfg(test)]
-            let same_nonce = same_nonce || mutant("companion_payload_only");
-            #[cfg(test)]
-            let same_payload = same_payload || mutant("companion_nonce_only");
-            #[cfg(test)]
-            let closed = closed || mutant("companion_without_terminal");
             if same_nonce && same_payload && closed {
                 settled.0.insert(candidate.seq);
             }
         }
     }
     settled
-}
-
-#[cfg(test)]
-fn mutant(name: &str) -> bool {
-    std::env::var("AGENTDESK_CODEX_SNAPSHOT_MUTANT").is_ok_and(|value| value == name)
 }
 
 pub(crate) fn terminal_pending_at_seq(channel: u64, seq: u64) -> io::Result<Option<u64>> {

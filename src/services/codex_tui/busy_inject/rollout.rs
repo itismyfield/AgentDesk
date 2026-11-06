@@ -26,6 +26,20 @@ pub(crate) struct TurnRead {
     pub verdict: TurnVerdict,
     pub reason: &'static str,
     pub bytes_read: u64,
+    pub end: NativeEnd,
+}
+
+/// The rollout's latest native turn as a gate that waits for its end reads it; only `Ended` is
+/// an end, from that turn's own `task_complete` or `turn_aborted`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeEnd {
+    Open,
+    Ended,
+    /// No turn start anywhere in the rollout.
+    NoStart,
+    /// An unnamed end, an unreadable record or start, a torn last line, a changed source or the
+    /// scan limit.
+    Unknown,
 }
 
 #[derive(Default)]
@@ -38,6 +52,10 @@ struct Open {
     compaction: bool,
     closed: bool,
     unreadable: bool,
+    /// An unnamed end that no later end of this turn's own resolved.
+    unnamed: bool,
+    /// A malformed record or an unidentified start; only a later identified start clears it.
+    invalid: bool,
 }
 
 /// Review mode as the window shows it; an entry without a name proves no review closed.
@@ -63,7 +81,7 @@ pub(crate) fn read_turn_detail(path: &Path) -> Option<TurnRead> {
     let read = (|| {
         let mut file = std::fs::File::open(path).ok()?;
         let metadata = file.metadata().ok()?;
-        scan(path, &mut file, &metadata, |_| {}).ok()
+        scan(path, &mut file, &metadata, |_| {}, false).ok()
     })();
     tracing::debug!(
         bytes_read = read.as_ref().map(|read| read.bytes_read),
@@ -74,6 +92,16 @@ pub(crate) fn read_turn_detail(path: &Path) -> Option<TurnRead> {
         "Codex turn scan"
     );
     read
+}
+
+/// The native end of the rollout's latest turn, read back only to that turn's start.
+pub(crate) fn read_native_end(path: &Path) -> NativeEnd {
+    let read = (|| {
+        let mut file = std::fs::File::open(path).ok()?;
+        let metadata = file.metadata().ok()?;
+        scan(path, &mut file, &metadata, |_| {}, true).ok()
+    })();
+    read.map_or(NativeEnd::Unknown, |read| read.end)
 }
 
 fn source_current(path: &Path, before: &std::fs::Metadata) -> bool {
@@ -95,6 +123,7 @@ fn scan(
     file: &mut std::fs::File,
     metadata: &std::fs::Metadata,
     mut after_block: impl FnMut(u64),
+    to_start: bool,
 ) -> std::io::Result<TurnRead> {
     let eof = metadata.len();
     let floor = eof.saturating_sub(MAX_SCAN_BYTES);
@@ -105,10 +134,13 @@ fn scan(
     let mut sealed = false;
     let mut latest_start = None;
     let mut review_seed = None;
+    // Bytes after the last newline: a record still being written.
+    let mut torn = false;
     let unknown = |reason, bytes_read| TurnRead {
         verdict: TurnVerdict::Unknown,
         reason,
         bytes_read,
+        end: NativeEnd::Unknown,
     };
     while at > floor {
         let begin = at.saturating_sub(SCAN_BLOCK_BYTES).max(floor);
@@ -124,6 +156,11 @@ fn scan(
             filled += read;
         }
         after_block(bytes_read);
+        if !sealed {
+            let tail = chunk.iter().rposition(|byte| *byte == b'\n');
+            let tail = &chunk[tail.map_or(0, |at| at + 1)..];
+            torn |= tail.iter().any(|byte| !byte.is_ascii_whitespace());
+        }
         let mut edge = chunk.len();
         for newline in (0..chunk.len())
             .rev()
@@ -150,7 +187,7 @@ fn scan(
         if at == floor && sealed {
             inspect_reverse(&[], &fragments, at, &mut latest_start, &mut review_seed);
         }
-        if latest_start.is_some() && review_seed.is_some() {
+        if latest_start.is_some() && (to_start || review_seed.is_some()) {
             break;
         }
     }
@@ -170,6 +207,11 @@ fn scan(
                 "turn_scan_limit"
             },
             bytes_read,
+            end: if at == 0 && !torn {
+                NativeEnd::NoStart
+            } else {
+                NativeEnd::Unknown
+            },
         });
     };
     // Join each block once; a JSON line spanning many blocks never causes repeated prepends.
@@ -198,6 +240,7 @@ fn scan(
             Err(_) => {
                 if let Some(open) = open.as_mut() {
                     open.unreadable = true;
+                    open.invalid = true;
                 }
             }
         }
@@ -206,6 +249,13 @@ fn scan(
         return Ok(unknown("turn_unknown", bytes_read));
     };
     let turn = open.turn.clone();
+    let end = if torn || open.invalid || open.unnamed {
+        NativeEnd::Unknown
+    } else if open.closed {
+        NativeEnd::Ended
+    } else {
+        NativeEnd::Open
+    };
     let (verdict, reason) = if open.unreadable {
         (TurnVerdict::Unknown, "malformed_record")
     } else if open.closed {
@@ -237,6 +287,7 @@ fn scan(
         verdict,
         reason,
         bytes_read,
+        end,
     })
 }
 
@@ -295,6 +346,7 @@ fn apply(record: &Value, open: &mut Option<Open>, review: &mut Review) {
             });
             *open = Some(next.unwrap_or(Open {
                 unreadable: true,
+                invalid: true,
                 ..Open::default()
             }));
         }
@@ -341,9 +393,16 @@ fn apply(record: &Value, open: &mut Option<Open>, review: &mut Review) {
             // An unnamed end may be this turn's, so the turn reads as Unknown.
             if let Some(open) = open.as_mut() {
                 match turn_id {
-                    Some(turn) if turn == open.turn || turn == open.root => open.closed = true,
+                    // The turn's own end resolves an unnamed one before it, not one after it.
+                    Some(turn) if turn == open.turn || turn == open.root => {
+                        open.closed = true;
+                        open.unnamed = false;
+                    }
                     Some(_) => {}
-                    None => open.unreadable = true,
+                    None => {
+                        open.unreadable = true;
+                        open.unnamed = true;
+                    }
                 }
             }
         }

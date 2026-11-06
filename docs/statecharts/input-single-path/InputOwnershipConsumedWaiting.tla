@@ -10,7 +10,7 @@ cwvars == <<vars, cw>>
 CWFixed == <<mode, src, natOwner, pend, reader, obsOk, route, plain, sentInto, win, rcv,
              userRow, twin, claim, lp, screen, draft, notices, timer, byTimer, timed,
              heldBy, watch, aged, twinPend, envLeft, stale, old, acct, leak, outside, observer,
-             nr, prov, seen>>
+             nr, ev, prov, seen>>
 
 CWInit ==
     /\ Init

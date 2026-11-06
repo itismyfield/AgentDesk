@@ -104,11 +104,7 @@ fn write(
     let run = match run {
         crate::services::provider::herdr_before_start::InputRun::Ran(run) => run,
         crate::services::provider::herdr_before_start::InputRun::Closed => {
-            if !crate::services::provider::herdr_before_start::mutant(
-                "closed_release_callsite_removed_codex_first",
-            ) {
-                release_closed_hold(logical, nonce);
-            }
+            release_closed_hold(logical, nonce);
             if owned {
                 return Err(owned_hold("input_closed"));
             }

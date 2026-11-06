@@ -658,13 +658,7 @@ async fn restart_preserves_execution_nonce_input_hold_pg() {
             "the turn nonce is not the execution's"
         );
         nonces.push(record.execution_nonce.clone());
-        let key =
-            match crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
-                "restart_hold_uses_turn_nonce",
-            ) {
-                true => turn,
-                false => record.execution_nonce,
-            };
+        let key = record.execution_nonce;
         hold(&key).unwrap();
         assert_eq!(input_holds().unwrap().len(), n + 1);
         std::fs::write(

@@ -95,45 +95,66 @@ async fn owner_start_context(
     context
 }
 
+/// A start whose pane its channel's name gives, while the lookup of that name failed.
+#[derive(Debug)]
+pub(in crate::services::discord) struct Unnamed;
+
 /// The tmux pane a kept start's headless turn takes, named as that turn names it, and whether it is
 /// the channel's own pane; `None` for a process routine or a provider with no managed pane.
 pub(in crate::services::discord) async fn owner_start_pane(
     shared: &Arc<SharedData>,
     channel: ChannelId,
     context: &serde_json::Value,
-) -> Option<(String, bool)> {
+) -> Result<Option<(String, bool)>, Unnamed> {
     let context = owner_start_context(shared, context).await;
     let metadata = Some(context["metadata"].clone()).filter(|m| !m.is_null());
     let hint = context["channel_name_hint"].as_str().map(str::to_owned);
     let channel_name = start_channel_name(shared, channel, hint).await;
     let label = context["synthetic_label"].as_str();
-    let named = channel_name.as_deref();
-    let pane = routine_tmux_session_name(&shared.provider, metadata.as_ref(), label, named)?;
-    let own = named.is_some_and(|name| shared.provider.build_tmux_session_name(name) == pane);
-    Some((pane, own))
+    let named = channel_name.as_ref().ok().and_then(Option::as_deref);
+    let provider = &shared.provider;
+    let Some(pane) = routine_tmux_session_name(provider, metadata.as_ref(), label, named) else {
+        let process = super::routine_metadata::routine_process_turn(metadata.as_ref());
+        let takes_pane = provider.uses_managed_tmux_backend() && !process;
+        return match channel_name {
+            Err(unnamed) if takes_pane => Err(unnamed),
+            _ => Ok(None),
+        };
+    };
+    let own = named.is_some_and(|name| provider.build_tmux_session_name(name) == pane);
+    Ok(Some((pane, own)))
 }
 
 /// The channel name a headless start names its pane by: the session's, else its hint, else the
-/// name Discord gives the channel, else its registered fallback.
+/// name Discord gives the channel, else its registered fallback; `Err` when Discord's lookup
+/// failed and no fallback names it.
 async fn start_channel_name(
     shared: &Arc<SharedData>,
     channel: ChannelId,
     hint: Option<String>,
-) -> Option<String> {
+) -> Result<Option<String>, Unnamed> {
     let named = {
         let data = shared.core.lock().await;
         let session = data.sessions.get(&channel);
         session.and_then(|session| session.channel_name.clone())
     };
     if let Some(name) = named.or(hint) {
-        return Some(name);
+        return Ok(Some(name));
     }
+    // A guild channel has the name `resolve_channel_category` gives it; any other has none.
     let looked_up = match shared.http.cached_serenity_ctx.get() {
-        Some(ctx) => resolve_channel_category(&ctx.http, None, channel).await.0,
-        None => None,
+        Some(ctx) => match channel.to_channel(&ctx.http).await {
+            Ok(serenity::model::channel::Channel::Guild(channel)) => Ok(Some(channel.name)),
+            Ok(_) => Ok(None),
+            Err(_) => Err(Unnamed),
+        },
+        None => Ok(None),
     };
     let registered = crate::services::discord::adk_session::registered_channel_fallback_name;
-    looked_up.or_else(|| registered(channel, &shared.provider))
+    match (looked_up, registered(channel, &shared.provider)) {
+        (Ok(Some(name)), _) | (_, Some(name)) => Ok(Some(name)),
+        (looked_up, None) => looked_up,
+    }
 }
 
 pub(in crate::services::discord) async fn start_headless_turn(

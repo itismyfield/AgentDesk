@@ -99,17 +99,12 @@ pub(super) fn watcher_backstop_turn_is_terminal(
             crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&tmux_session_name)
         });
     let herdr = herdr_hold.is_some();
-    #[cfg(test)]
-    let herdr = policy_mutant(herdr);
     let transcript = std::path::Path::new(&output_path);
     let signal = match herdr {
         true => {
             // Only the held turn's own start, in the hold's transcript, can prove its abort, and
             // only to a ledger key of this process generation.
             let current = ledger.filter(|key| key.generation == shared.restart.current_generation);
-            #[cfg(test)]
-            let current =
-                current.or(ledger.filter(|_| backstop_mutant("backstop_generation_skipped")));
             let held = held_turn(
                 inflight_state.as_ref(),
                 herdr_hold.as_ref(),
@@ -246,28 +241,12 @@ fn held_turn(
     ledger: Option<&TurnKey>,
 ) -> Option<Arc<crate::services::provider::cancel_token_claude_interrupt::HerdrInterruptState>> {
     let state = inflight_state?;
-    #[cfg(test)]
-    let unheld;
-    #[cfg(test)]
-    let hold = match hold {
-        None if backstop_mutant("backstop_off_changed") => {
-            unheld = (
-                state.tmux_session_name.clone()?,
-                output_path.to_owned(),
-                false,
-            );
-            Some(&unheld)
-        }
-        hold => hold,
-    };
     let (logical, hold_path, _) = hold?;
     let nonce = state
         .turn_nonce
         .as_deref()
         .filter(|nonce| !nonce.is_empty())?;
     let same_transcript = hold_path == output_path;
-    #[cfg(test)]
-    let same_transcript = same_transcript || backstop_mutant("backstop_identity_skipped");
     // A key without an episode, or of another episode or turn, proves nothing of this row's turn.
     let own_ledger_turn = ledger.is_some_and(|key| {
         key.episode.is_some()
@@ -275,26 +254,10 @@ fn held_turn(
             && key.user_msg_id != 0
             && key.user_msg_id == state.finalizer_turn_id
     });
-    #[cfg(test)]
-    let own_ledger_turn = own_ledger_turn || backstop_mutant("backstop_ledger_key_skipped");
     if !(same_transcript && own_ledger_turn) {
         return None;
     }
     crate::services::provider::cancel_token_claude_interrupt::herdr_turn(logical, nonce)
-}
-
-/// Test-only effect mutations of the backstop's Herdr policy.
-#[cfg(test)]
-pub(super) fn backstop_mutant(name: &str) -> bool {
-    crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(name)
-}
-
-#[cfg(test)]
-fn policy_mutant(herdr: bool) -> bool {
-    match herdr {
-        true => !backstop_mutant("backstop_policy_ignored"),
-        false => backstop_mutant("backstop_off_changed"),
-    }
 }
 
 fn delivery_confirmed_for_produced_end(
