@@ -27,10 +27,6 @@ impl ChannelStore {
         audit: TransitionCleanup,
         provider: ShadowProvider,
     ) -> Result<(), StoreError> {
-        #[cfg(test)]
-        if crate::services::tui_o::writer::actor::codex_retention::mutant("skip_store_write") {
-            return Ok(());
-        }
         self.mutate(|store| {
             let retention_valid = match provider {
                 ShadowProvider::Claude => audit.retention.is_none(),

@@ -25,8 +25,6 @@ fn clean(path: &Path) -> bool {
 
 fn checked(mut inputs: Inputs) -> Result<Snapshot, String> {
     let complete = matches!(inputs.coverage, Coverage::Ok(()));
-    #[cfg(test)]
-    let complete = complete || mutant("coverage");
     if !complete {
         return Err(match inputs.coverage {
             Coverage::Err(reason) => format!("coverage unknown: {reason}"),
@@ -163,8 +161,6 @@ fn checked(mut inputs: Inputs) -> Result<Snapshot, String> {
             if own {
                 // A fresh typed claim has no prior-nonce predecessor; later visits must link.
                 let linked = visited || context.launch_mode == "resume" || event.old.is_some();
-                #[cfg(test)]
-                let linked = linked || mutant("fresh_predecessor");
                 if linked
                     && latest
                         .as_ref()
@@ -223,20 +219,6 @@ fn checked(mut inputs: Inputs) -> Result<Snapshot, String> {
         (&a.path, &a.session_id, a.dev, a.ino).cmp(&(&b.path, &b.session_id, b.dev, b.ino))
     });
     held.dedup();
-    #[cfg(test)]
-    if mutant("latest_only") {
-        held = vec![current.clone()];
-    }
-    #[cfg(test)]
-    if mutant("full_tail") {
-        inputs.tail = 0;
-        inputs.log_digest.clear();
-    }
-    #[cfg(test)]
-    if mutant("context") {
-        inputs.context.first_prompt_digest = None;
-        inputs.context.created_at = chrono::DateTime::UNIX_EPOCH;
-    }
     Ok(Snapshot {
         target: inputs.target,
         context: inputs.context,
@@ -247,11 +229,6 @@ fn checked(mut inputs: Inputs) -> Result<Snapshot, String> {
         census_digest: inputs.census_digest,
         panes: inputs.panes,
     })
-}
-
-#[cfg(test)]
-fn mutant(name: &str) -> bool {
-    std::env::var("AGENTDESK_CODEX_SNAPSHOT_MUTANT").is_ok_and(|value| value == name)
 }
 
 #[cfg(test)]

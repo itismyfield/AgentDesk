@@ -12,7 +12,7 @@ use crate::services::process::{
 };
 use crate::services::provider::ProviderKind;
 use crate::services::tmux_common as tc;
-use crate::services::tui_o::store::clear_end::{self, Appended, ClearEnd, mutant};
+use crate::services::tui_o::store::clear_end::{self, Appended, ClearEnd};
 use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker};
 use crate::services::tui_prompt_dedupe::binding_events::{
     self as p5, BindingEvent, BindingTarget, SourceId,
@@ -40,9 +40,9 @@ pub(super) fn capture_for(
     tmux: &str,
     transition: &Option<OwnedMutexGuard<()>>,
 ) -> Option<Captured> {
-    let guarded = transition.is_some() || mutant("transition_unchecked");
-    let claude = matches!(provider, ProviderKind::Claude) || mutant("any_provider");
-    let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some() || mutant("off");
+    let guarded = transition.is_some();
+    let claude = matches!(provider, ProviderKind::Claude);
+    let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some();
     (guarded && claude && !herdr)
         .then(|| capture(channel, tmux))
         .flatten()
@@ -53,7 +53,7 @@ pub(super) async fn commit_confirmed(
     captured: Option<Captured>,
     (reset, unconfirmed): (bool, bool),
 ) {
-    let confirmed = (reset && !unconfirmed) || mutant("kill_unconfirmed_ok");
+    let confirmed = reset && !unconfirmed;
     if let Some(captured) = captured.filter(|_| confirmed) {
         commit(captured).await;
     }
@@ -131,9 +131,6 @@ fn process_group(pid: u32) -> Option<u32> {
 }
 
 fn vacant(captured: &Captured) -> bool {
-    if mutant("process_unchecked") {
-        return tmux::session_presence(&captured.tmux) == SessionPresence::Missing;
-    }
     tmux::session_presence(&captured.tmux) == SessionPresence::Missing
         && crate::services::session_backend::process_session_pid(&captured.tmux).is_none()
         && captured.identity.probe(captured.pane_pid) == ProcessIdentityProbe::GoneOrReused
@@ -167,9 +164,6 @@ async fn commit(captured: Captured) {
 }
 
 fn write_under(captured: &Captured) -> Result<Appended, String> {
-    if mutant("authority_nested") {
-        tc::with_tmux_source_authority(&captured.tmux, |_| ());
-    }
     if !vacant(captured) {
         return Err("pane not confirmed vacant".into());
     }
@@ -179,7 +173,7 @@ fn write_under(captured: &Captured) -> Result<Appended, String> {
     let events = events.ok_or("binding log unreadable")?;
     let moved = (events.iter())
         .any(|event| event.seq > captured.binding_seq && event.tmux_session == captured.tmux);
-    if moved && !mutant("rebind_unchecked") {
+    if moved {
         return Err("pane bound again after the capture".into());
     }
     let root = crate::config::runtime_root().ok_or("runtime root unavailable")?;
