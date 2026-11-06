@@ -57,7 +57,6 @@ pub(crate) fn braced_item_span(code: &str, signature: &str) -> Option<Range<usiz
     None
 }
 
-/// How a forgery test hides code: a nested block comment around it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CommentForgery {
     NestedBlock,

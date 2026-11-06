@@ -3,23 +3,8 @@ use std::str::FromStr;
 
 /// Stable domain statuses for intake outbox rows.
 ///
-/// The outbound status spelling returned by [`Self::as_str`] is defined by its
-/// wildcard-free exhaustive match. Classifications are defined only by the
-/// wildcard-free exhaustive matches in [`Self::is_open`] and
-/// [`Self::operator_retry`].
-///
 /// VALIDATES:
-/// - The compiler requires every added variant to be handled by those three
-///   exhaustive matches. Renaming a variant also invalidates direct references
-///   in [`Self::ALL`] and [`Self::from_str`].
 /// - In test builds, the `[Self; 9]` type of [`Self::ALL`] checks its cardinality.
-/// - Unit tests check [`Self::from_str`] against [`Self::as_str`], and
-///   [`Self::is_open`] against [`INTAKE_OUTBOX_OPEN_STATUSES_SQL`][open-statuses].
-///   They also check [`Self::ALL`] against the 0107 status CHECK body, every current
-///   [`Self::operator_retry`] classification, and that rejected input is
-///   preserved in [`UnknownIntakeStatus`]. The `Unknown` variant is the
-///   official terminal spelling; `UnknownIntakeStatus` represents rejected,
-///   unregistered spellings such as `future_status`.
 ///
 /// DOES NOT VALIDATE:
 /// - The compiler does not require [`Self::from_str`] to gain an arm for an
@@ -35,14 +20,10 @@ use std::str::FromStr;
 /// LIMITS:
 /// - No gate prevents replacing an exhaustive classification arm with `_ =>`;
 ///   preserving wildcard-free matches is a review convention.
-/// - [`Self::ALL`] members are compared with the 0107 CHECK domain, not with the
-///   enum declaration: a variant added to neither `ALL` nor the CHECK is not caught.
 /// - The migration-source test pins the CHECK domain while the PostgreSQL codec
 ///   test pins wire spelling. SQL string literals and direct writers outside
 ///   the typed coordinates remain possible, and typed rows do not replace the
 ///   database CHECK. SQLx decoding does not call [`Self::from_str`].
-///
-/// [open-statuses]: crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL
 #[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
 pub(crate) enum IntakeOutboxStatus {
