@@ -49,7 +49,9 @@ do the same thing?" If yes, do not write it.
 This is an authoring policy for humans and agents. Rule 3 is enforced on added
 lines by `scripts/audit_state_lint_hardening.py` for `*_MUTANT`/`*_MUTATION` env
 names and `*mutant` hook functions; a switch under another name is left to review.
-Existing rule 11 violations (about 350 `set_var` lines and 980
-`shared_test_env_lock()` uses in `src/`) are cleaned up in #7819.
+Existing process-global environment dependencies (raw counts in `src/`: about
+350 lines containing `set_var(` and 980 containing `shared_test_env_lock()`) are
+cleaned up in #7819. Reusing the shared `TestEnvVarGuard` stays allowed until a
+dependency is replaced by an injected value.
 Existing tests are cleaned up in the #7344 slices; do not bulk-rewrite them outside
 that work.
