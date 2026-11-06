@@ -183,21 +183,14 @@ pub(crate) async fn promote(
     }
     let closing: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND generation=$3 AND routing_cleanup IS NOT NULL)")
         .bind(id.provider()).bind(id.raw_channel_id()).bind(expected.map(|(_,g)|g)).fetch_one(&mut *tx).await?;
-    #[cfg(test)]
-    let closing = closing && !super::cleanup::tests::mutant("wait-control");
     if readiness == SwitchReadiness::Wait && closing {
         return Ok(false);
     }
     // A planned switch proves its home before it may retire, transfer or admit anything.
     let plan = super::plan::read_on_tx(&mut tx, &id, delivery).await?;
     if let Some(plan) = plan.as_ref() {
-        #[cfg(test)]
-        let unchecked = super::cleanup::tests::mutant("plan-proof");
-        #[cfg(not(test))]
-        let unchecked = false;
         if plan.target != target
-            || (!unchecked
-                && !super::snapshot::proof_holds_on_tx(&mut tx, &id, &plan.home_proof).await?)
+            || !super::snapshot::proof_holds_on_tx(&mut tx, &id, &plan.home_proof).await?
         {
             return Ok(false);
         }
@@ -235,22 +228,6 @@ pub(crate) async fn promote(
             .bind(id.provider()).bind(id.raw_channel_id()).bind(prior).execute(&mut *tx).await?;
     }
     let rebase = "UPDATE intake_outbox SET routing_wait_owner_generation=$3 WHERE provider=$1 AND channel_id=$2 AND routing_state='held'";
-    #[cfg(test)]
-    let rebase_storage = if super::cleanup::tests::mutant("rebase-clear-attachments") {
-        rebase.replace(
-            "SET routing_wait_owner_generation=$3",
-            "SET routing_wait_owner_generation=$3,attachment_refs='[]'",
-        )
-    } else if super::cleanup::tests::mutant("rebase-clear-reply") {
-        rebase.replace(
-            "SET routing_wait_owner_generation=$3",
-            "SET routing_wait_owner_generation=$3,reply_context=NULL",
-        )
-    } else {
-        rebase.to_owned()
-    };
-    #[cfg(test)]
-    let rebase = sqlx::AssertSqlSafe(rebase_storage);
     sqlx::query(rebase)
         .bind(id.provider())
         .bind(id.raw_channel_id())
@@ -259,13 +236,7 @@ pub(crate) async fn promote(
         .await?;
     // Retired inputs that now head the queue are re-planned by advance_pending before promotion.
     if let Some(plan) = plan.as_ref() {
-        #[cfg(test)]
-        let late = super::cleanup::tests::mutant("notice-at-admission");
-        #[cfg(not(test))]
-        let late = false;
-        if !late {
-            announce_on_tx(&mut tx, &id, plan, target, prior_generation, generation).await?;
-        }
+        announce_on_tx(&mut tx, &id, plan, target, prior_generation, generation).await?;
     }
     let head:Option<i64> = sqlx::query_scalar("SELECT id FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND routing_state='held' ORDER BY id LIMIT 1")
         .bind(id.provider()).bind(id.raw_channel_id()).fetch_optional(&mut *tx).await?;
@@ -284,12 +255,6 @@ pub(crate) async fn promote(
     if admitted.rows_affected() != 1 {
         return Ok(false);
     }
-    #[cfg(test)]
-    if let Some(plan) = plan.as_ref()
-        && super::cleanup::tests::mutant("notice-at-admission")
-    {
-        announce_on_tx(&mut tx, &id, plan, target, prior_generation, generation).await?;
-    }
     tx.commit().await?;
     Ok(true)
 }
@@ -303,15 +268,9 @@ async fn announce_on_tx(
     prior_generation: Option<i64>,
     generation: i64,
 ) -> Result<(), sqlx::Error> {
-    #[cfg(test)]
-    let skip = super::cleanup::tests::mutant("notice-skip");
-    #[cfg(not(test))]
-    let skip = false;
     // Input admitted to the owner that already held the channel is not a transition.
     let unchanged = prior_generation == Some(generation);
-    #[cfg(test)]
-    let unchanged = unchanged && !super::cleanup::tests::mutant("notice-same-owner");
-    if skip || unchanged {
+    if unchanged {
         return Ok(());
     }
     // An earlier event's home tells a /node change apart from a home that came back.
@@ -377,8 +336,6 @@ async fn retire_open_on_tx(
         let unstarted = old.status == IntakeOutboxStatus::Pending
             && old.claim_owner.is_none()
             && retiring.never_started;
-        #[cfg(test)]
-        let unstarted = unstarted && !super::cleanup::tests::mutant("pending");
         if unstarted {
             let receipt = match retiring.routing_receipt_id {
                 Some(receipt) => Some(receipt),

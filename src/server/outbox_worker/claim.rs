@@ -4,12 +4,6 @@ use crate::server::*;
 use crate::services::cluster::intake_router_hook::owner_record::event as routing;
 
 fn routing_reclaim_seconds() -> i64 {
-    #[cfg(test)]
-    if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
-        "notice-lease",
-    ) {
-        return MESSAGE_OUTBOX_CLAIM_STALE_SECS;
-    }
     routing::RECLAIM_SECONDS
 }
 

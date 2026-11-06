@@ -110,9 +110,6 @@ impl RetiredEnd {
         record: &HostedExecution,
         os: Arc<dyn ProcessOs>,
     ) -> Result<Self, ReturnEndRefusal> {
-        #[cfg(test)]
-        use crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant;
-
         if !matches!(
             HostedRecord::decode(serde_json::to_value(record).ok().as_ref()),
             HostedRecord::Known(ref known) if known.state == HostedState::Retired
@@ -143,13 +140,9 @@ impl RetiredEnd {
             .transport
             .server_witness()
             .map_err(|_| ReturnEndRefusal::ReadUnavailable)?;
-        let pane = view.read_execution_on_checked(&witness).map_err(|_| {
-            #[cfg(test)]
-            if mutant("retired-server-retry") {
-                return ReturnEndRefusal::ReadUnavailable;
-            }
-            ReturnEndRefusal::EndpointMismatch
-        })?;
+        let pane = view
+            .read_execution_on_checked(&witness)
+            .map_err(|_| ReturnEndRefusal::EndpointMismatch)?;
         Self::from_reads(record, pane, os.as_ref())
     }
 
