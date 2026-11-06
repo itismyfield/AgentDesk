@@ -2,6 +2,9 @@
 //! claimed, with a watch of that pane; when the pane reads idle it runs once as its own turn.
 use super::*;
 
+#[path = "owner_input_codex_native_tests.rs"]
+pub(super) mod codex;
+
 const PERMISSION_MODE: &str =
     "{\"type\":\"permission-mode\",\"permissionMode\":\"bypassPermissions\"}\n";
 const START_WAITS: &str = "NotSent(\"synthetic_waits_idle\")";
@@ -114,6 +117,8 @@ enum Read {
     Nameless,
     /// As `Nameless`, with only the channel's registered name to go by.
     Registered,
+    /// As `Nameless` on an idle pane, while Discord's lookup of the channel fails.
+    Unlooked,
 }
 
 async fn start_meets(id: u64, case: Read) {
@@ -123,7 +128,10 @@ async fn start_meets(id: u64, case: Read) {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let rig = IntakeRig::turn_start_stored(id, pool.clone(), ORIGIN).await;
-    let early = matches!(case, Read::Early | Read::Nameless | Read::Registered);
+    let early = matches!(
+        case,
+        Read::Early | Read::Nameless | Read::Registered | Read::Unlooked
+    );
     let key = discord::adk_session::build_adk_session_key(
         &rig.shared,
         rig.channel,
@@ -132,7 +140,7 @@ async fn start_meets(id: u64, case: Read) {
     );
     let key = key.await.expect("channel session key");
     discord::inflight::seed_session_row_keyed(&pool, &key, rig.channel.get(), None).await;
-    if matches!(case, Read::Nameless | Read::Registered) {
+    if matches!(case, Read::Nameless | Read::Registered | Read::Unlooked) {
         let mut core = rig.shared.core.lock().await;
         core.sessions.get_mut(&rig.channel).unwrap().channel_name = None;
     }
@@ -146,8 +154,12 @@ async fn start_meets(id: u64, case: Read) {
         fs::write(&config, yaml.replace(&bound, &named)).unwrap();
     }
     let native = rig.renderer.join("transcript");
+    if case == Read::Unlooked {
+        rig.mock.fail_channel(id);
+    }
     let initial = match case {
         Read::Armed => BUSY.to_string(),
+        Read::Unlooked => IDLE.to_string(),
         _ if early => format!("{IDLE}{PERMISSION_MODE}"),
         Read::ReadyTail => format!("{IDLE}{PERMISSION_MODE}"),
         _ => IDLE.to_string(),
@@ -164,6 +176,7 @@ async fn start_meets(id: u64, case: Read) {
     };
     let shim = Shim::install(&rig);
     match case {
+        Read::Unlooked => {}
         _ if early => shim.composer_busy(),
         Read::Late | Read::LateBusy => shim.park_second_read(),
         Read::ReadAgain => shim.fail_after_late_read(),
@@ -270,6 +283,9 @@ async fn start_meets(id: u64, case: Read) {
         let posted = (rig.mock.written_texts().len(), rig.mock.deleted().len());
         assert_eq!((started, posted), (false, (0, 0)), "{}", rig.trace.text());
     }
+    if case == Read::Unlooked {
+        assert!(rig.mock.failed_channel_reads() > 0, "no lookup failed");
+    }
     let state = rig.state().await;
     assert_eq!(state["items"].as_array().unwrap().len(), 1, "{state}");
     assert!(state["head_injection"].is_null(), "unattempted: {state}");
@@ -293,6 +309,7 @@ async fn start_meets(id: u64, case: Read) {
         .unwrap() = Some((rig.channel, completed));
     match case {
         Read::LateBusy => append(IDLE),
+        Read::Unlooked => rig.mock.heal_channel(id),
         _ => shim.composer_ready(),
     }
     runs_once(&rig, &pool, ORIGIN, &mut settled, bridge, append).await;
@@ -454,6 +471,16 @@ async fn a_start_naming_no_pane_waits_on_its_registered_pane_pg() {
         "a_start_naming_no_pane_waits_on_its_registered_pane_pg",
         7_772_109,
         Read::Registered,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_whose_pane_name_lookup_failed_waits_unclaimed_until_named_pg() {
+    native_read_pg(
+        "a_start_whose_pane_name_lookup_failed_waits_unclaimed_until_named_pg",
+        7_772_111,
+        Read::Unlooked,
     )
     .await;
 }

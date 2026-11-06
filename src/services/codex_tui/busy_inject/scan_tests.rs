@@ -60,7 +60,7 @@ fn pad_to(path: &Path, total: u64) {
 fn snapshot(path: &Path, after_block: impl FnMut(u64)) -> TurnRead {
     let mut file = File::open(path).unwrap();
     let metadata = file.metadata().unwrap();
-    scan(path, &mut file, &metadata, after_block).unwrap()
+    scan(path, &mut file, &metadata, after_block, false).unwrap()
 }
 
 #[test]
@@ -260,5 +260,80 @@ fn manual_compaction_requires_positive_fixture_evidence_and_obeys_its_end() {
     assert_eq!(
         read_turn(&path),
         Some(TurnVerdict::NonSteerable("shell".into()))
+    );
+}
+
+/// Only the latest turn's own complete or abort is its end; another turn's end, an unnamed or
+/// unreadable record, a torn last line or a rollout with no start proves none.
+#[test]
+fn a_native_end_is_only_the_latest_turns_own() {
+    let abort = |turn: &str| event(serde_json::json!({"type":"turn_aborted","turn_id":turn}));
+    let unnamed = event(serde_json::json!({"type":"task_complete"}));
+    let unrooted = event(serde_json::json!({"type":"task_started","turn_id":"t"}));
+    let meta = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\"}}\n";
+    let cases = [
+        ("open", model("t"), NativeEnd::Open),
+        ("own complete", model("t") + &ended("t"), NativeEnd::Ended),
+        ("own abort", model("t") + &abort("t"), NativeEnd::Ended),
+        (
+            "others' ends",
+            model("t") + &ended("u") + &abort("u"),
+            NativeEnd::Open,
+        ),
+        ("unnamed end", model("t") + &unnamed, NativeEnd::Unknown),
+        (
+            "unnamed, then own",
+            model("t") + &unnamed + &ended("t"),
+            NativeEnd::Ended,
+        ),
+        (
+            "malformed, then own",
+            model("t") + "{torn\n" + &ended("t"),
+            NativeEnd::Unknown,
+        ),
+        (
+            "unrooted start",
+            unrooted.clone() + &ended("t"),
+            NativeEnd::Unknown,
+        ),
+        (
+            "unrooted, then a start",
+            unrooted + &model("u"),
+            NativeEnd::Open,
+        ),
+        (
+            "torn new start",
+            model("t") + &ended("t") + &started("u")[..30],
+            NativeEnd::Unknown,
+        ),
+        ("meta only", meta.to_string(), NativeEnd::NoStart),
+        ("empty", String::new(), NativeEnd::NoStart),
+        (
+            "an end with no start",
+            meta.to_string() + &ended("t"),
+            NativeEnd::NoStart,
+        ),
+    ];
+    for (case, contents, expected) in cases {
+        let (_dir, path) = temporary(&contents);
+        assert_eq!(read_native_end(&path), expected, "{case}");
+    }
+}
+
+/// An end read stops at the latest turn's start, so a long rollout before it is not read again.
+#[test]
+fn an_end_read_stops_at_the_latest_start() {
+    let (_dir, path) = temporary("{}\n");
+    pad_to(&path, 4 * 1024 * 1024);
+    let turn = model("t") + &ended("t");
+    append(&path, &turn);
+    let mut file = File::open(&path).unwrap();
+    let metadata = file.metadata().unwrap();
+    let read = scan(&path, &mut file, &metadata, |_| {}, true).unwrap();
+    assert_eq!(read.end, NativeEnd::Ended);
+    assert!(
+        read.bytes_read <= turn.len() as u64 + BLOCK,
+        "{}",
+        read.bytes_read
     );
 }

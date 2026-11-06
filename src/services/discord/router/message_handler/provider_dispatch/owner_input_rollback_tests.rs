@@ -131,8 +131,10 @@ impl IntakeRig {
         origin: Option<&str>,
         screen: Option<String>,
     ) -> Self {
-        // A `turn/start` front is admitted when `start` is set, as a fresh routine's when it is true.
+        // A `turn/start` front is admitted when `start` is set, as a fresh routine's when it is true;
+        // a Codex start runs on its own Codex pane, and a fresh one is the routine executor's.
         let (start, fresh) = (start.is_some(), start == Some(true));
+        let codex = bot == ProviderKind::Codex && start;
         let trace = Trace::default();
         tracing_subscriber::fmt()
             .with_ansi(false)
@@ -151,6 +153,10 @@ impl IntakeRig {
                 serde_yaml::from_str("bots: {codex: {token: test-token, provider: codex}}")
                     .unwrap();
             yaml["agents"][0]["channels"]["claude"]["provider"] = "claude".into();
+            if codex {
+                let channel = format!("{{codex: {{id: '{id}', runtime: tui, provider: codex}}}}");
+                yaml["agents"][0]["channels"] = serde_yaml::from_str(&channel).unwrap();
+            }
             fs::write(path, serde_yaml::to_string(&yaml).unwrap()).unwrap();
             config = serde_yaml::from_value(yaml).unwrap();
         }
@@ -168,6 +174,9 @@ impl IntakeRig {
         );
         crate::config::session_hosts::install(&config).unwrap();
         crate::services::tui_o::channel_policy::install(&config).unwrap();
+        if codex {
+            crate::services::provider_hosting::install_provider_hosting_config(&config);
+        }
         let hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(
             "http://127.0.0.1:9".into(),
         );
@@ -193,20 +202,37 @@ impl IntakeRig {
             .unwrap();
         let channel = ChannelId::new(id);
         let label = format!("a1-rollback-{id}");
-        let name = ProviderKind::Claude.build_tmux_session_name(&label);
-        let renderer = renderer_with(
-            &f,
-            &name,
-            "normal",
-            screen.unwrap_or_else(|| view("", false)),
-            "",
-            PROMPT,
-        );
-        let proof = d1_execution_proof(&name, id);
-        let sid = proof.context.expected_native_session_id.as_deref().unwrap();
+        let pane = if codex {
+            bot.clone()
+        } else {
+            ProviderKind::Claude
+        };
+        let name = pane.build_tmux_session_name(&label);
         let workspace = f.root.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
+        let (renderer, sid) = match codex {
+            true => (
+                super::super::codex_tests::codex_renderer_in(&f, &name, true, Some(&workspace)),
+                native_read::codex::execution_proof(&name, id),
+            ),
+            false => {
+                let screen = screen.unwrap_or_else(|| view("", false));
+                let renderer = renderer_with(&f, &name, "normal", screen, "", PROMPT);
+                let proof = d1_execution_proof(&name, id);
+                (renderer, proof.context.expected_native_session_id.unwrap())
+            }
+        };
+        let sid = sid.as_str();
+        let home = f.root.path().join("codex-home");
+        if codex {
+            let guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+            env.push(guard("CODEX_HOME", &home));
+        }
         let transcript = match start && origin.is_none() {
+            // The rollout the pane's Codex session writes, named by its id.
+            _ if codex => home
+                .join("sessions/2026/11/06")
+                .join(format!("rollout-2026-11-06T00-00-00-{sid}.jsonl")),
             // Known only through the pane's binding, as when no idle observer can be built.
             true => f
                 .root
@@ -220,14 +246,21 @@ impl IntakeRig {
             )
             .unwrap(),
         };
-        if busy {
+        if codex {
+            fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+            fs::write(&transcript, native_read::codex::meta(sid, &workspace)).unwrap();
+        } else if busy {
             fs::create_dir_all(transcript.parent().unwrap()).unwrap();
             fs::write(&transcript, BUSY).unwrap();
         }
+        let kind = match codex {
+            true => crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+            false => crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        };
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
             &name,
             crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                runtime_kind: kind,
                 output_path: transcript.display().to_string(),
                 relay_output_path: None,
                 input_fifo_path: None,
@@ -282,7 +315,10 @@ impl IntakeRig {
                     label: None,
                     dm: None,
                 };
-                let context = provenance.json(&turn);
+                let context = match codex && fresh {
+                    true => native_read::codex::routine_context(origin),
+                    false => provenance.json(&turn),
+                };
                 admission::admit_with_context(&mailbox, &original, ticket, context).await
             }
         };

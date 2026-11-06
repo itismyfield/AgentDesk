@@ -221,7 +221,10 @@ async fn owned(shared: &Arc<SharedData>, context: Value) -> (String, Result<(), 
     let (original, ticket) = routine::synthetic_original(&turn, OWNED.get(), PROMPT, 1).unwrap();
     // The pane the start takes reads idle, as a live pane with its transcript does.
     let pane = crate::services::discord::router::message_handler::headless_turn::owner_start_pane;
-    let (tmux, _) = pane(shared, OWNED, &context).await.expect("a tmux pane");
+    let (tmux, _) = pane(shared, OWNED, &context)
+        .await
+        .unwrap()
+        .expect("a tmux pane");
     let transcript = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(
         transcript.path(),
