@@ -1378,7 +1378,8 @@ async fn retention_keeps_the_newest_campaign_rows_and_the_whole_current_run_pg()
     assert_eq!(resumed[0].sequence, 105);
     let old_actions: Vec<(String, i64)> = sqlx::query_as(
         "SELECT action_id, sequence FROM server_campaign_action_history
-         WHERE run_id = 'old-run' AND sequence <= 106 ORDER BY sequence, action_id",
+         WHERE campaign_id = 'campaign' AND run_id = 'old-run' AND sequence <= 106
+         ORDER BY sequence, action_id",
     )
     .fetch_all(&h.pool)
     .await
