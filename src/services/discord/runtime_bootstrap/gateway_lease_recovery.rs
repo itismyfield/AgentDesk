@@ -619,7 +619,12 @@ pub(super) async fn spawn_standby_gateway_retry(
                 return;
             }
             let diagnostics = &shared.restart.gateway_lease_diagnostics;
-            diagnostics.context(&pool, "standby", provider.as_str());
+            diagnostics.context(
+                &pool,
+                "standby",
+                provider.as_str(),
+                super::gateway_lease::discord_gateway_lock_id(&token_hash),
+            );
             match super::gateway_lease::try_acquire_observing_handback(
                 &pool,
                 &token_hash,

@@ -1263,19 +1263,21 @@ async fn gateway_observability_rejected_promotion_unlocks_before_record_pg() {
         let promotion =
             attempt_clean_standby_promotion(&fixture.runtimes[0], &ProviderKind::Claude, lease);
         tokio::pin!(promotion);
-        let blocked =
-            async {
-                loop {
-                    let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
-                 AND wait_event_type='Lock' AND query LIKE 'SELECT pg_advisory_unlock%')")
-                .fetch_one(&fixture.pool).await.unwrap();
-                    if waiting {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let blocked = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+                     AND wait_event_type='Lock' AND query LIKE 'SELECT pg_advisory_unlock%')",
+                )
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
                 }
-            };
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
         let (during, result) = tokio::select! {
             result = &mut promotion => (None, Some(result)),
             () = await_within(blocked, WAIT_CAP) => (

@@ -158,10 +158,12 @@ async fn yield_to_preferred_gateway(
         preference.yield_grace.as_secs()
     );
 
-    shared
-        .restart
-        .gateway_lease_diagnostics
-        .context(pool, "yield-wait", provider.as_str());
+    shared.restart.gateway_lease_diagnostics.context(
+        pool,
+        "yield-wait",
+        provider.as_str(),
+        discord_gateway_lock_id(token_hash),
+    );
     let deadline = tokio::time::Instant::now() + preference.yield_grace;
     while tokio::time::Instant::now() < deadline {
         if shared
@@ -212,7 +214,12 @@ async fn acquire_as_preferred_gateway(
     handback_breaker: &mut GatewayHandbackBreaker,
 ) -> Result<Option<GatewayLeaseAcquisition>, String> {
     let diagnostics = &shared.restart.gateway_lease_diagnostics;
-    diagnostics.context(pool, "preferred-poll", provider.as_str());
+    diagnostics.context(
+        pool,
+        "preferred-poll",
+        provider.as_str(),
+        discord_gateway_lock_id(token_hash),
+    );
     let waiter = GatewayWaiterGuard::new(provider.as_str());
     *shared
         .restart
@@ -436,7 +443,12 @@ pub(super) async fn run_bot_acquire_gateway_lease(
     match shared.pg_pool.as_ref() {
         Some(pool) => {
             let diagnostics = &shared.restart.gateway_lease_diagnostics;
-            diagnostics.context(pool, "startup", provider.as_str());
+            diagnostics.context(
+                pool,
+                "startup",
+                provider.as_str(),
+                discord_gateway_lock_id(token_hash),
+            );
             // #4351: honor the configured gateway owner before racing for the lock.
             let preference = gateway_preference().await;
             let acquired = match preference.as_ref() {
@@ -454,7 +466,12 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                     if !handback_breaker.suppressed() {
                         yield_to_preferred_gateway(pool, token_hash, pref, provider, shared).await;
                     }
-                    diagnostics.context(pool, "startup", provider.as_str());
+                    diagnostics.context(
+                        pool,
+                        "startup",
+                        provider.as_str(),
+                        discord_gateway_lock_id(token_hash),
+                    );
                     try_acquire_with_startup_orphan_reap(
                         pool,
                         token_hash,
@@ -498,7 +515,12 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                     GatewayLeaseOutcome::Proceed(Some(lease))
                 }
                 Ok(None) => {
-                    diagnostics.context(pool, "standby", provider.as_str());
+                    diagnostics.context(
+                        pool,
+                        "standby",
+                        provider.as_str(),
+                        discord_gateway_lock_id(token_hash),
+                    );
                     run_startup_diagnostic_after_reconcile_barrier(
                         startup_reconcile_remaining.clone(),
                         startup_doctor_started.clone(),
@@ -732,6 +754,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                 pool,
                 "reacquire",
                 provider_for_lease.as_str(),
+                discord_gateway_lock_id(&token_hash),
             );
             match try_acquire_observing_handback(
                 pool,

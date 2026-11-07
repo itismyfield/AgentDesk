@@ -68,7 +68,7 @@ async fn snapshot_only_classifies_current_short_circuit_free_pg() {
     let key = -914802601;
     let mut peer = hold(&pool, key).await;
     let diagnostics = Diagnostics::default();
-    diagnostics.context(&pool, "standby", "claude");
+    diagnostics.context(&pool, "standby", "claude", key);
     let actual = crate::db::postgres::AdvisoryLockLease::try_acquire_named_expiring_observed(
         &pool,
         key,
@@ -98,7 +98,7 @@ async fn snapshot_only_classifies_current_short_circuit_free_pg() {
     assert!(!view.results.contains_key(&LeaseResult::RefusedWhileFree));
 
     let yielding = Diagnostics::default();
-    yielding.context(&pool, "yield-wait", "claude");
+    yielding.context(&pool, "yield-wait", "claude", key);
     observe(&yielding, &pool, key, LeaseResult::Waiting, true).await;
     assert_eq!(
         yielding.projection().last_result,
@@ -133,7 +133,7 @@ async fn snapshot_only_classifies_current_short_circuit_free_pg() {
             .unwrap();
         connection.close().await.unwrap();
         let prepared = Diagnostics::default();
-        prepared.context(&pool, "yield-wait", "claude");
+        prepared.context(&pool, "yield-wait", "claude", key);
         observe(&prepared, &pool, key, LeaseResult::Waiting, true).await;
         let view = prepared.projection();
         sqlx::query("ROLLBACK PREPARED 'i7924_prepared_diagnostic'")
@@ -157,7 +157,7 @@ async fn snapshot_transition_pending_identity_and_new_streak_pg() {
     let (_capture, mut reader) = capture();
     let peer = hold(&pool, key).await;
     let diagnostics = Diagnostics::default();
-    diagnostics.context(&pool, "standby", "claude");
+    diagnostics.context(&pool, "standby", "claude", key);
     observe(&diagnostics, &pool, key, LeaseResult::Held, false).await;
     let first = diagnostics.projection().holder.unwrap();
     assert!(first.backend_start.is_some());
@@ -271,7 +271,7 @@ async fn snapshot_filters_database_bigint_namespace_and_exact_key_pg() {
         .await
         .unwrap();
     let diagnostics = Diagnostics::default();
-    diagnostics.context(&pool, "standby", "claude");
+    diagnostics.context(&pool, "standby", "claude", key);
     observe(&diagnostics, &pool, key, LeaseResult::Held, false).await;
     assert_eq!(diagnostics.projection().holder.unwrap().pid, Some(pid));
     actual.close().await.unwrap();
@@ -297,8 +297,9 @@ async fn snapshot_filters_database_bigint_namespace_and_exact_key_pg() {
 async fn snapshot_concurrency_and_cancellation_keep_reserved_budget_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let (fixture, pool) = database().await;
+    let key = 914802604;
     let diagnostics = Diagnostics::default();
-    diagnostics.context(&pool, "standby", "claude");
+    diagnostics.context(&pool, "standby", "claude", key);
     tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(
             observe(&diagnostics, &pool, 914802604, LeaseResult::Held, false),
@@ -322,7 +323,7 @@ async fn snapshot_concurrency_and_cancellation_keep_reserved_budget_pg() {
         .unwrap();
     let connection = saturated.acquire().await.unwrap();
     let cancelled = Diagnostics::default();
-    cancelled.context(&saturated, "standby", "claude");
+    cancelled.context(&saturated, "standby", "claude", key);
     assert!(
         tokio::time::timeout(
             Duration::from_millis(20),

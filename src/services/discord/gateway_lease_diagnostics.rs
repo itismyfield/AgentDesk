@@ -36,6 +36,7 @@ pub(in crate::services::discord) enum SnapshotStatus {
 #[derive(Clone, Debug, Default, Serialize)]
 pub(in crate::services::discord) struct Projection {
     pub provider: String,
+    pub advisory_key: Option<i64>,
     pub tries: u64,
     pub results: BTreeMap<LeaseResult, u64>,
     pub last_result: Option<LeaseResult>,
@@ -85,7 +86,7 @@ impl Diagnostics {
             .clone()
     }
 
-    pub fn context(&self, pool: &sqlx::PgPool, loop_state: &'static str, provider: &str) {
+    pub fn context(&self, pool: &sqlx::PgPool, loop_state: &'static str, provider: &str, key: i64) {
         let options = pool.connect_options();
         let target = format!(
             "{}:{}/{}",
@@ -94,7 +95,7 @@ impl Diagnostics {
             options.get_database().unwrap_or_default()
         );
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if state.view.pg_target != target {
+        if state.view.pg_target != target || state.view.advisory_key != Some(key) {
             state.revision += 1;
             state.pending = true;
             state.view.holder = None;
@@ -102,6 +103,7 @@ impl Diagnostics {
             state.view.snapshot_status = SnapshotStatus::Unknown;
         }
         state.view.provider = provider.to_owned();
+        state.view.advisory_key = Some(key);
         state.view.loop_state = loop_state;
         state.view.pg_target = target;
     }
@@ -127,6 +129,7 @@ impl Diagnostics {
         if result == LeaseResult::Acquired {
             tracing::info!(
                 provider = state.view.provider,
+                advisory_key = state.view.advisory_key,
                 last_result = "acquired",
                 pg_target = state.view.pg_target,
                 "GATEWAY-LEASE: PostgreSQL granted advisory"
@@ -185,7 +188,7 @@ impl Diagnostics {
         .await;
         {
             let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-            if state.view.pg_target != target {
+            if state.view.pg_target != target || state.view.advisory_key != Some(key) {
                 state.pending = true;
                 return;
             }
@@ -230,6 +233,7 @@ impl Diagnostics {
                     state.view.holder = None;
                     tracing::warn!(
                         provider = state.view.provider,
+                        advisory_key = state.view.advisory_key,
                         %error,
                         "GATEWAY-LEASE: holder snapshot unavailable"
                     );
@@ -250,6 +254,9 @@ impl Diagnostics {
         state.next_line = Some(now + MINUTE);
         let result = serde_json::to_value(state.view.last_result).unwrap_or_default();
         tracing::info!(
+            provider = state.view.provider,
+            advisory_key = state.view.advisory_key,
+            loop_state = state.view.loop_state,
             tries = state.view.tries,
             last_result = result.as_str().unwrap_or("unknown"),
             diagnostic = ?state.view,
@@ -262,6 +269,7 @@ impl Diagnostics {
         state.view.waiter_refreshed_at = Some(chrono::Utc::now().to_rfc3339());
         tracing::info!(
             provider = state.view.provider,
+            advisory_key = state.view.advisory_key,
             waiter_refreshed_at = state.view.waiter_refreshed_at,
             "GATEWAY-LEASE: waiter refresh completed"
         );

@@ -137,10 +137,28 @@ async fn gateway_observability_b_waiter_refresh_timestamp_pg() {
     held.unlock().await.unwrap();
     pool.close().await;
     fixture.drop().await;
+    let logs = observability_logs(reader);
     assert!(
-        observability_logs(reader).contains("waiter_refreshed_at="),
+        logs.contains("waiter_refreshed_at="),
         "log successful production waiter publication time"
     );
+    let waiting = logs
+        .lines()
+        .find(|line| line.contains("⏳ GATEWAY-LEASE"))
+        .unwrap();
+    for field in [
+        "tries=",
+        "last_result=",
+        "preferred-poll",
+        "holder:",
+        "pid:",
+        "backend_start:",
+        "provider=",
+        "advisory_key=",
+    ] {
+        assert!(waiting.contains(field), "missing {field}: {waiting}");
+    }
+    assert!(waiting.contains(&format!("advisory_key={}", discord_gateway_lock_id(token))));
 }
 
 #[test]
@@ -605,7 +623,12 @@ async fn gateway_observability_actual_try_error_and_setup_error_pg() {
         .await
         .unwrap();
     let diagnostics = Diagnostics::default();
-    diagnostics.context(&restricted, "standby", "claude");
+    diagnostics.context(
+        &restricted,
+        "standby",
+        "claude",
+        discord_gateway_lock_id("1234"),
+    );
     assert!(
         try_acquire_observing_handback(
             &restricted,
@@ -656,10 +679,12 @@ async fn gateway_observability_health_memory_only_pg() {
     let pool = fixture.connect_and_migrate().await;
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-    shared
-        .restart
-        .gateway_lease_diagnostics
-        .context(&pool, "standby", "claude");
+    shared.restart.gateway_lease_diagnostics.context(
+        &pool,
+        "standby",
+        "claude",
+        discord_gateway_lock_id("1234"),
+    );
     let lease = try_acquire_observing_handback(
         &pool,
         "1234",
@@ -682,6 +707,8 @@ async fn gateway_observability_health_memory_only_pg() {
     }
     if std::env::var_os("I7924_HEALTH_STATEMENT_AUDIT").is_some() {
         audit_health_statements(&registry, &pool).await;
+    } else {
+        eprintln!("HEALTH_MEMORY_ONLY statement_audit=NOT_REQUESTED");
     }
     pool.close().await;
     let snapshot = serde_json::to_value(health::build_health_snapshot(&registry).await).unwrap();
@@ -748,7 +775,7 @@ async fn gateway_observability_provider_key_identity_pg() {
         let shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let diagnostics = &shared.restart.gateway_lease_diagnostics;
-        diagnostics.context(&pool, "standby", "claude");
+        diagnostics.context(&pool, "standby", "claude", discord_gateway_lock_id(token));
         let lease = try_acquire_observing_handback(
             &pool,
             token,
@@ -808,7 +835,7 @@ async fn gateway_observability_c_different_pg_new_advisory_pg() {
         .unwrap()
         .unwrap();
     let diagnostics = Diagnostics::default();
-    diagnostics.context(&pool, "standby", "claude");
+    diagnostics.context(&pool, "standby", "claude", discord_gateway_lock_id(token));
     assert!(
         try_acquire_observing_handback(
             &pool,
@@ -823,7 +850,7 @@ async fn gateway_observability_c_different_pg_new_advisory_pg() {
     );
     let old = diagnostics.projection();
     assert!(old.holder.is_some());
-    diagnostics.context(&other, "startup", "claude");
+    diagnostics.context(&other, "startup", "claude", discord_gateway_lock_id(token));
     let (_capture, reader) = observability_capture();
     let second = try_acquire_observing_handback(
         &other,
