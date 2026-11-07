@@ -745,13 +745,14 @@ fn busy_hold_case(
     let texts = mock.written_texts();
     let notices: Vec<_> = texts
         .iter()
-        .filter(|t| t.ends_with("즉시주입 하지 못하고 메시지큐에 들어갔습니다"))
+        .filter(|t| t.as_str() == "큐에 들어갔습니다")
         .collect();
     let posts = mock
         .local_note_posts
         .load(std::sync::atomic::Ordering::SeqCst);
     if let Some(hold) = hold {
         assert_eq!(posts, 1, "one POST after repeated real refusals: {texts:?}");
+        assert!(!notices.is_empty(), "plain queue notice: {texts:?}");
         assert!(
             texts.contains(&hold.notice()),
             "the actual refusal is explained: {texts:?}"

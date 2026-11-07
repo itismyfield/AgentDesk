@@ -69,6 +69,7 @@ fn legacy_origin_absence_preserves_exact_source_and_queue_item_bytes() {
     let _root = Root::new();
     let source: PendingQueueSourceGeneration = serde_json::from_str(SOURCE).unwrap();
     assert_eq!(source.origin, None);
+    assert_eq!(source.origin_id, None);
     let encoded = serde_json::to_string(&source).unwrap();
     assert_eq!(encoded, SOURCE, "origin_none_exact_source_bytes_contract");
     assert_eq!(
@@ -81,6 +82,10 @@ fn legacy_origin_absence_preserves_exact_source_and_queue_item_bytes() {
     let (wall, instant) = clocks();
     let restored = pending_queue_item_to_intervention(item, wall, instant);
     assert_eq!(restored.source_message_queued_generations[0].origin, None);
+    assert_eq!(
+        restored.source_message_queued_generations[0].origin_id,
+        None
+    );
     let saved = pending_queue_item_from_intervention(
         &restored,
         ChannelId::new(CHANNEL),
@@ -109,6 +114,10 @@ fn old_queue_file_without_origin_loads_and_resaves_without_new_fields() {
     let queue = recovered.queues.remove(&channel).unwrap();
     assert_eq!(queue.len(), 1);
     assert_eq!(queue[0].source_message_queued_generations[0].origin, None);
+    assert_eq!(
+        queue[0].source_message_queued_generations[0].origin_id,
+        None
+    );
     save_channel_queue(&provider, "origin-old", channel, &queue, None).unwrap();
     let saved: Vec<PendingQueueItem> =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -125,8 +134,10 @@ fn mixed_source_merge_and_disk_recovery_keep_each_origin_and_upload() {
     let provider = ProviderKind::Claude;
     let channel = ChannelId::new(CHANNEL);
     let mut first = item(17, "first body", "attachment");
+    first.source_message_queued_generations[0].origin_id = Some("guid-first".into());
     first.pending_uploads = vec!["first.pdf".into()];
     let mut second = item(18, "second body", "voice");
+    second.source_message_queued_generations[0].origin_id = Some("guid-second".into());
     second.pending_uploads = vec!["second.wav".into()];
     let mut queue = Vec::new();
     assert!(enqueue_intervention(&mut queue, first, None).enqueued);
@@ -135,7 +146,10 @@ fn mixed_source_merge_and_disk_recovery_keep_each_origin_and_upload() {
     assert_eq!(queue.len(), 1);
     assert_eq!(
         origins(&queue[0]),
-        vec![(17, Some("attachment")), (18, Some("voice"))],
+        vec![
+            (17, Some("attachment"), Some("guid-first")),
+            (18, Some("voice"), Some("guid-second"))
+        ],
         "merging a new source cannot overwrite the original source's origin"
     );
     save_channel_queue(&provider, "origin-merge", channel, &queue, None).unwrap();
@@ -145,7 +159,10 @@ fn mixed_source_merge_and_disk_recovery_keep_each_origin_and_upload() {
     let restored = recovered.queues.remove(&channel).unwrap().remove(0);
     assert_eq!(
         origins(&restored),
-        vec![(17, Some("attachment")), (18, Some("voice"))],
+        vec![
+            (17, Some("attachment"), Some("guid-first")),
+            (18, Some("voice"), Some("guid-second"))
+        ],
         "source origins must survive both queue serialization directions"
     );
     assert_eq!(restored.text, "first body\nsecond body");
@@ -165,17 +182,24 @@ fn legacy_supplemented_source_has_no_fabricated_origin() {
     let mut item = old_item();
     item.source_message_ids.push(18);
     item.source_message_queued_generations[0].origin = Some("skill".into());
+    item.source_message_queued_generations[0].origin_id = Some("guid-known".into());
     let restored = pending_queue_item_to_intervention(item, wall, instant);
     assert_eq!(
         origins(&restored),
-        vec![(17, Some("skill")), (18, None)],
+        vec![(17, Some("skill"), Some("guid-known")), (18, None, None)],
         "an old missing source owner cannot borrow another source's origin"
     );
 }
 
-fn origins(item: &Intervention) -> Vec<(u64, Option<&str>)> {
+fn origins(item: &Intervention) -> Vec<(u64, Option<&str>, Option<&str>)> {
     item.source_message_queued_generations
         .iter()
-        .map(|source| (source.message_id.get(), source.origin.as_deref()))
+        .map(|source| {
+            (
+                source.message_id.get(),
+                source.origin.as_deref(),
+                source.origin_id.as_deref(),
+            )
+        })
         .collect()
 }
