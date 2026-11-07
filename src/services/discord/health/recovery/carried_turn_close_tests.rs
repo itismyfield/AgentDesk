@@ -882,6 +882,8 @@ mod cases {
         );
         row.readopted_from_inflight = false;
         row.native_stop_user_pin = None;
+        // The row names the session the pane still runs, so nothing proves its input superseded.
+        row.session_id = Some(fx.channel.get().to_string());
         let path = inflight::inflight_state_path(
             &inflight::inflight_runtime_root().unwrap(),
             &PROVIDER,
@@ -891,6 +893,58 @@ mod cases {
         fx.pass().await;
         fx.assert_kept("unadopted managed input has no verified native pin")
             .await;
+    }
+
+    /// An unproven managed row bound to the session the pane left closes once the pane's own
+    /// turn ended and O delivered it; its channel is told once, even when a pass is repeated.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unproven_input_of_a_superseded_session_closes_with_one_notice_pg() {
+        let fx = Fixture::new(7_896_201, 9_100_096_243_727_098_100, Options::default()).await;
+        let mut row = fx.row().unwrap();
+        row.managed_submission = Some(
+            serde_json::from_value(serde_json::json!({ "protocol": 1, "phase": "waiting" }))
+                .unwrap(),
+        );
+        row.readopted_from_inflight = false;
+        row.native_stop_user_pin = None;
+        row.session_id = Some("session-before-clear".to_string());
+        let file = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &PROVIDER,
+            fx.channel.get(),
+        );
+        std::fs::write(&file, serde_json::to_vec(&row).unwrap()).unwrap();
+        let told = || async {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM message_outbox
+                 WHERE reason_code = 'carried.unverified_closed' AND target = $1",
+            )
+            .bind(format!("channel:{}", fx.channel.get()))
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+            count
+        };
+        // The first pass's archive loses to a re-save, as a restart's rewrite would.
+        let resaved = file.clone();
+        on("archive", fx.channel.get(), move || {
+            let mut row: InflightTurnState =
+                serde_json::from_slice(&std::fs::read(&resaved).unwrap()).unwrap();
+            row.save_generation += 1;
+            std::fs::write(&resaved, serde_json::to_vec(&row).unwrap()).unwrap();
+        });
+        fx.pass().await;
+        assert!(fx.row().is_some(), "the lost archive keeps the row");
+        assert_eq!(
+            told().await,
+            1,
+            "the close told its channel before archiving"
+        );
+        fx.pass().await;
+        fx.assert_closed("the superseded session's input").await;
+        assert_eq!(fx.archive_count(), 1);
+        fx.pass().await;
+        assert_eq!(told().await, 1, "a repeated close tells the channel once");
     }
 
     #[tokio::test(flavor = "current_thread")]

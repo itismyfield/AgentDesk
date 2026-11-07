@@ -187,3 +187,93 @@ fn a_legacy_warm_submit_keys_only_through_its_tokens_first_key_gate() {
         tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
     }
 }
+
+/// `/clear`'s session is adopted only after the owner's observer was built: the submit's answer is
+/// read from the session the pane moved to, not the one the observer resolved before it.
+#[test]
+fn an_owner_observer_built_before_clear_adoption_reads_the_adopted_session() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::claude_tui::input::submission::tests::{ScriptedTmux, view};
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+    let _dedupe = tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    // Rotation tests clear the adopted-session map under their own lock; hold it so they wait.
+    let _rotations = tui_prompt_dedupe::lock_claude_session_rotations_for_tests();
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _tmux = ScriptedTmux::new(&view("", false));
+    let dir = tempfile::tempdir().unwrap();
+    let session = format!("AgentDesk-claude-clear-{}", uuid::Uuid::new_v4().simple());
+    let (before, after) = (
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let path = |sid: &str| dir.path().join(format!("{sid}.jsonl"));
+    let bind = |sid: &str| {
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            &session,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: path(sid).display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(sid.to_string()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        )
+    };
+    std::fs::write(
+        path(&before),
+        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+    )
+    .unwrap();
+    bind(&before);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(CancelToken::new());
+    let observe = owner_observer(
+        (&session, "after clear", 7_896_203),
+        (None, dir.path()),
+        sender,
+        cancel.clone(),
+    )
+    .expect("the observer resolves the pane's session before the submit");
+    // The clear's session is verified after the observer: the submitted input runs there.
+    let user = serde_json::json!({"type":"user","uuid":"clear-a","sessionId":after,
+        "message":{"role":"user","content":"after clear"}});
+    let answer = serde_json::json!({"type":"assistant","message":{"role":"assistant",
+        "content":[{"type":"text","text":"answered in the adopted session"}]}});
+    let stop = serde_json::json!({"type":"system","subtype":"stop_hook_summary"});
+    std::fs::write(path(&after), format!("{user}\n{answer}\n{stop}\n")).unwrap();
+    bind(&after);
+    tui_prompt_dedupe::record_hook_adopted_claude_session_id(&session, &after);
+    let (finished, done) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let result = observe();
+        let _ = finished.send(());
+        result
+    });
+    let ended = done
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .is_ok();
+    if !ended {
+        cancel
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let result = reader.join().unwrap();
+    tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+    tui_prompt_dedupe::forget_hook_adopted_claude_session_id(&session);
+    let text: String = receiver
+        .try_iter()
+        .filter_map(|message| match message {
+            StreamMessage::Text { content } => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        ended && text.contains("answered in the adopted session"),
+        "the observer must read the adopted session's answer: ended={ended}, text={text:?}"
+    );
+    assert_eq!(result, Ok(()));
+}

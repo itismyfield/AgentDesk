@@ -1,9 +1,11 @@
 -------------------- MODULE InputOwnershipConsumedWaiting --------------------
 \* The F ownership model, narrowed to consumed A, its restart, later native N and waiting B.
 \* A's input-notice debt has its own ledger; it never proves unfinished A output.
+\* ASessions: the session A's row names against the one the pane ended on ("old" after /clear).
 EXTENDS InputOwnership
 CONSTANTS RepairConsumedWaiting, ReadoptOutcomes, OutputOwners,
-          RepairBusyPinSupply, RepairOrphanOutcome, PinSources, NativeEnds, AStamps
+          RepairBusyPinSupply, RepairOrphanOutcome, PinSources, NativeEnds, AStamps,
+          RepairSupersededClose, ASessions
 VARIABLE cw
 
 cwvars == <<vars, cw>>
@@ -18,7 +20,7 @@ CWInit ==
     /\ old = "none" /\ obsOk /\ ~twin /\ ~twinPend /\ screen = "ok"
     /\ draft = "none" /\ ~stale /\ ~acct /\ row = "none" /\ ~ep /\ ~leak
     /\ \E owner \in OutputOwners, source \in PinSources,
-          ending \in NativeEnds, stamp \in AStamps :
+          ending \in NativeEnds, stamp \in AStamps, session \in ASessions :
          cw = [phase |-> "initial", outputOwner |-> owner,
               generation |-> 0, marker |-> FALSE, markerGeneration |-> 0,
               readopt |-> "pending", token |-> "none", aStarts |-> 0, consumed |-> FALSE,
@@ -31,6 +33,7 @@ CWInit ==
               pinSupplier |-> RepairBusyPinSupply, pinAttempted |-> FALSE, pinVerified |-> FALSE,
               nextNativeEnd |-> ending, nAborted |-> FALSE,
               unconfirmed |-> FALSE, attemptsB |-> 0,
+              aSession |-> session, told |-> 0, archiveLost |-> FALSE,
               odebt |-> [aOutput |-> 1, inputNotice |-> 20]]
 
 \* execute_owned's busy paste creates A's row; its settled owner identity is not a completion.
@@ -115,11 +118,13 @@ FinishReadoptedA ==
                          !.receiptOutcome = IF cw.ownStamp = "none" THEN "completed" ELSE cw.ownStamp]
     /\ UNCHANGED <<nat, inp, pastes, op, CWFixed>>
 
+\* An unproven A closes only when its row names a session the pane no longer runs.
+SupersededUnproven == RepairSupersededClose /\ cw.aSession = "old"
 CloseProof ==
     /\ cw.phase = "running" /\ cw.outputOwner = "owned"
     /\ row = "carried" /\ ~ep /\ cw.token = "none"
     /\ cw.nStarted /\ cw.consumed /\ cw.terminal /\ cw.captured /\ nat = "idle"
-    /\ (~RepairConsumedWaiting \/ cw.pinVerified)
+    /\ (~RepairConsumedWaiting \/ cw.pinVerified \/ SupersededUnproven)
     /\ cw.refusedB /\ cw.lock = "free" /\ ~cw.unconfirmed
     /\ IF RepairConsumedWaiting
        THEN cw.odebt.aOutput = 0
@@ -137,8 +142,20 @@ CommitReceiptA ==
                                  ELSE IF RepairOrphanOutcome THEN "completed"
                                  ELSE IF cw.nAborted THEN "cancelled" ELSE "completed"]
     /\ UNCHANGED <<row, ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
+\* An unproven close tells A's channel before archiving; the outbox key keeps a retry to one post.
+TellA ==
+    /\ cw.close = "committed" /\ ~cw.pinVerified /\ SupersededUnproven /\ row = "carried"
+    /\ cw' = [cw EXCEPT !.close = "told", !.told = IF Mut = "noNoticeDedupe" THEN @ + 1 ELSE 1]
+    /\ UNCHANGED <<row, ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
+\* A restart's re-save loses the archive once; the row stays for the next tick.
+ArchiveLost ==
+    /\ cw.close = "told" /\ ~cw.archiveLost
+    /\ cw' = [cw EXCEPT !.close = "idle", !.lock = "free", !.archiveLost = TRUE]
+    /\ UNCHANGED <<row, ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
 ArchiveA ==
-    /\ cw.close = "committed" /\ cw.receipt /\ row = "carried"
+    /\ \/ cw.close = "told"
+       \/ cw.close = "committed" /\ ~(SupersededUnproven /\ ~cw.pinVerified)
+    /\ cw.receipt /\ row = "carried"
     /\ cw.token = "none" /\ ~ep /\ nat = "idle" /\ ~cw.unconfirmed
     /\ row' = "none"
     /\ cw' = [cw EXCEPT !.close = "archived", !.lock = "free"]
@@ -198,7 +215,7 @@ CWNext == OwnerPastesA \/ BusyEffectReturns \/ SettleBusySubmission
           \/ ObserveBusyReceipt \/ SupplyBusyPin
           \/ ShutdownRestamps \/ SettleBoot \/ RestoreAlive
           \/ EndA \/ NativeStartsN \/ CaptureAndDeliverA \/ FinishReadoptedA
-          \/ CloseATick \/ CommitReceiptA \/ ArchiveA \/ KickoffB
+          \/ CloseATick \/ CommitReceiptA \/ TellA \/ ArchiveLost \/ ArchiveA \/ KickoffB
           \/ AdmitB \/ ClaimB \/ ForeignAdmission \/ NativeIdle
           \/ StartB \/ LateCloseA \/ HealthKeepsA \/ CWDone
 CWSpec == CWInit /\ [][CWNext]_cwvars
@@ -208,7 +225,8 @@ CWSpec == CWInit /\ [][CWNext]_cwvars
           /\ WF_cwvars(SettleBoot) /\ WF_cwvars(RestoreAlive) /\ WF_cwvars(EndA)
           /\ WF_cwvars(NativeStartsN) /\ WF_cwvars(CaptureAndDeliverA)
           /\ WF_cwvars(FinishReadoptedA) /\ WF_cwvars(CloseATick) /\ WF_cwvars(AdmitB)
-          /\ WF_cwvars(CommitReceiptA) /\ WF_cwvars(ArchiveA) /\ WF_cwvars(KickoffB)
+          /\ WF_cwvars(CommitReceiptA) /\ WF_cwvars(TellA) /\ WF_cwvars(ArchiveA)
+          /\ WF_cwvars(KickoffB)
           /\ WF_cwvars(ClaimB) /\ WF_cwvars(ForeignAdmission)
           /\ WF_cwvars(NativeIdle) /\ WF_cwvars(LateCloseA) /\ WF_cwvars(StartB)
 
@@ -231,7 +249,11 @@ NoCloseUnderBClaim == cw.token = "BClaim" => row = "carried" /\ cw.close = "idle
 PinEvidenceVerified == cw.pinVerified => cw.nativeReceipt /\ cw.writeSettled /\ cw.consumed
                                         /\ cw.nativeSource = "matching"
 ObserverFollowsEffect == cw.nativeReceipt => cw.effectReturned /\ cw.historySettled
-NoCloseWithoutPin == (RepairConsumedWaiting /\ cw.close # "idle") => cw.pinVerified
+NoCloseWithoutPin == (RepairConsumedWaiting /\ cw.close # "idle")
+                     => cw.pinVerified \/ SupersededUnproven
+UnprovenCloseToldOnce == cw.told <= 1
+    /\ ((cw.close \in {"archived", "done"} /\ ~cw.pinVerified /\ SupersededUnproven)
+        => cw.told = 1)
 OrphanAReceiptCompleted == (cw.receipt /\ cw.readopt = "refused" /\ cw.ownStamp = "none")
                            => cw.receiptOutcome = "completed"
 OwnStampRespected == (cw.receipt /\ cw.ownStamp # "none") => cw.receiptOutcome = cw.ownStamp

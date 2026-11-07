@@ -62,6 +62,10 @@ input-single-path/InputOwnershipConsumedWaitingInvalidPin.cfg	InputOwnershipCons
 input-single-path/InputOwnershipConsumedWaitingNonO.cfg	InputOwnershipConsumedWaiting	-	-
 input-single-path/InputOwnershipConsumedWaitingOutcomeBefore.cfg	InputOwnershipConsumedWaiting	OrphanAReceiptCompleted	-
 input-single-path/InputOwnershipConsumedWaitingPinSupplyBefore.cfg	InputOwnershipConsumedWaiting	-	PendingBEventuallyStarts
+input-single-path/InputOwnershipConsumedWaitingSupersededAfter.cfg	InputOwnershipConsumedWaiting	-	-
+input-single-path/InputOwnershipConsumedWaitingSupersededBefore.cfg	InputOwnershipConsumedWaiting	-	PendingBEventuallyStarts
+input-single-path/InputOwnershipConsumedWaitingSupersededNoDedupe.cfg	InputOwnershipConsumedWaiting	UnprovenCloseToldOnce	-
+input-single-path/InputOwnershipConsumedWaitingSupersededSameSession.cfg	InputOwnershipConsumedWaiting	-	PendingBEventuallyStarts
 input-single-path/InputOwnershipDuplicateIntake.cfg	InputOwnershipDuplicateIntake	-	-
 input-single-path/InputOwnershipDuplicateIntakeBefore.cfg	InputOwnershipDuplicateIntake	NoFalseWarning	-
 input-single-path/InputOwnershipF.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved	-
@@ -139,6 +143,8 @@ input-single-path/InputOwnershipEarlyRetainBefore.cfg	InputOwnership	FirstOpaque
 input-single-path/InputOwnershipReserveResetBefore.cfg	InputOwnership	ReserveResetsFailures	-
 input-single-path/InputOwnershipPolicyEarlyRemove.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipPolicyRowOnlyBefore.cfg	InputOwnership	RecoveryCreditPreserved	FailureEventuallyResolved
+input-single-path/ManagedObserverRebindAfter.cfg	ManagedObserverRebind	-	-
+input-single-path/ManagedObserverRebindBefore.cfg	ManagedObserverRebind	-	SubmittedEventuallyCloses
 tui-o-writer/WriterParkedAliasFixed.cfg	WriterParkedAlias	-	-
 tui-o-writer/WriterParkedAliasMain.cfg	WriterParkedAlias	HaltRepeatZero,NoHaltForConfirmedOld	FirstReplyExactlyOnce
 tui-o-writer/WriterReboundBirth.cfg	WriterRebound	ActiveLossVisible,CurrentNeverHistorical,UnknownNeedsAbsence,ReadyAfterFollow,ParkedReboundHalts	-
