@@ -62,12 +62,13 @@ async fn real_enqueue_keeps_pending_raw_and_reuses_the_source_after_restart() {
     let channel = 727_451;
     let (handle, path) = adopt(&shared, channel).await;
     let req = request(channel, 727_451_001);
-    let raw = crate::services::discord::router::input_payload::owned_original(
+    let mut raw = crate::services::discord::router::input_payload::owned_original(
         &req,
         false,
         vec!["local asset ref".into()],
         false,
     );
+    raw.source_message_queued_generations[0].origin_id = Some("guid-recovered".into());
     let watch = Watch::new(
         &path,
         Plan {
@@ -111,6 +112,10 @@ async fn real_enqueue_keeps_pending_raw_and_reuses_the_source_after_restart() {
     let state = snapshot(&handle).await;
     assert_eq!(state["items"].as_array().unwrap().len(), 1);
     assert_eq!(state["items"][0]["text"], req.user_text);
+    assert_eq!(
+        state["items"][0]["source_message_queued_generations"][0]["origin_id"],
+        "guid-recovered"
+    );
     assert_eq!(
         state["items"][0]["pending_uploads"],
         json!(["local asset ref"])

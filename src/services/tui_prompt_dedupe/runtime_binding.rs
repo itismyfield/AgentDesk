@@ -758,8 +758,6 @@ fn adopt_continuation(
     let payload_session_id = payload_session_id.trim();
     *skip = Some(AdoptSkip::PayloadNotUuid);
     let same = command_session_id == payload_session_id;
-    #[cfg(test)]
-    let same = same && !crate::services::claude_tui::source_verify::n2b_mutant("r5-ingress-start");
     if command_session_id.is_empty()
         || payload_session_id.is_empty()
         || same

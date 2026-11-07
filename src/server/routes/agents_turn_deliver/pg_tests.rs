@@ -11,6 +11,60 @@ use crate::services::discord::health::{
 use crate::services::provider::ProviderKind;
 
 #[tokio::test(flavor = "current_thread")]
+async fn different_origin_ids_accept_equal_text_inside_the_dedup_window_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = 7_896_401;
+    crate::db::agents::insert_agent_channels_for_tests(
+        &pool,
+        "equal-origin-agent",
+        Some(&channel.to_string()),
+        None,
+    )
+    .await;
+    let registry = Arc::new(HealthRegistry::new());
+    register_bot_auth_for_tests(&registry, "claude", channel, Some(100), vec![200], false).await;
+    seed_external_turn_row_for_tests(&ProviderKind::Claude, channel);
+    let app = router(Some(pool.clone()), Some(registry));
+    let mut turns = Vec::new();
+    for origin in ["equal-origin-first", "equal-origin-second"] {
+        let input = json!({"text":"한 번 더 확인해 줘", "author_discord_user_id":"200",
+            "source":"imessage", "origin_id":origin});
+        let (status, body) = deliver(&app, "equal-origin-agent", &input.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{origin}: {body}");
+        assert_eq!(body["delivery"], "queued", "{origin}: {body}");
+        turns.push(body["turn_id"].clone());
+    }
+    assert_ne!(turns[0], turns[1]);
+    let handle = crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(
+        poise::serenity_prelude::ChannelId::new(channel),
+    )
+    .unwrap();
+    let queue = handle.snapshot().await.intervention_queue;
+    assert_eq!(queue.len(), 2);
+    let origins: Vec<_> = queue
+        .iter()
+        .map(|item| {
+            item.source_message_queued_generations[0]
+                .origin_id
+                .as_deref()
+        })
+        .collect();
+    assert_eq!(
+        origins,
+        [Some("equal-origin-first"), Some("equal-origin-second")]
+    );
+    let without_origin = json!({"text":"한 번 더 확인해 줘", "author_discord_user_id":"200"});
+    let (status, body) = deliver(&app, "equal-origin-agent", &without_origin.to_string()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["detail"], "LastItemDedup", "{body}");
+    drop(app);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn an_external_tui_turn_row_is_busy_for_start_and_deliver_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let pg_db = TestPostgresDb::create().await;

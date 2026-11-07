@@ -251,11 +251,12 @@ mod herdr {
         /// Items this purge took out of the queue, then an unreserved dispatch marker's input.
         pub(crate) receipt: Vec<Intervention>,
         pub(crate) failed: Option<(PurgeStage, String)>,
-        pub(crate) queue_len_after: usize,
+        /// The depth measured where the purge stopped; `None` when no owner was there to measure.
+        pub(crate) queue_len_after: Option<usize>,
     }
 
     impl CheckedPurge {
-        fn stopped(stage: PurgeStage, reason: String, queue_len_after: usize) -> Self {
+        fn stopped(stage: PurgeStage, reason: String, queue_len_after: Option<usize>) -> Self {
             Self {
                 receipt: Vec::new(),
                 failed: Some((stage, reason)),
@@ -286,7 +287,7 @@ mod herdr {
         /// A closed actor's explicit answer, never an empty success.
         pub(in crate::services::turn_orchestrator) fn refuse_closed(self) -> &'static str {
             let reason = "the mailbox actor is purge-closed".to_string();
-            let _ = (self.reply).send(CheckedPurge::stopped(PurgeStage::Closed, reason, 0));
+            let _ = (self.reply).send(CheckedPurge::stopped(PurgeStage::Closed, reason, None));
             "PurgeQueueIfUnchanged"
         }
 
@@ -308,15 +309,30 @@ mod herdr {
         ) {
             use super::super::pending_queue_persistence::pending_queue_item_to_intervention;
             use super::V2PurgeStop as PurgeStop;
-            let (provider, token) = (&self.persistence.provider, &self.persistence.token_hash);
-            let checked = pending_queue_file_path(provider, token, channel_id)
-                .ok_or_else(|| "the request names no queue file".to_string())
-                .and_then(|path| self.expected.differs(state).map_or(Ok(path), Err))
-                .and_then(|path| Ok((path, self.expected.v2.ok_or("no V2 capture")?)));
-            let purge = match checked
-                .map(|(path, expected)| state.v2_purge_if_unchanged(&path, &expected))
-            {
-                Ok(Ok(drained)) => CheckedPurge {
+            let Self {
+                persistence,
+                expected,
+                reply,
+            } = self;
+            let (provider, token) = (&persistence.provider, &persistence.token_hash);
+            // A pending save is judged first, here at the purge: the candidate it published is
+            // input no path or capture comparison can count, and no depth may stand on it.
+            let checked = (state.v2_settled_len().map_err(PurgeStop::SaveUnknown)).and_then(|_| {
+                let path = pending_queue_file_path(provider, token, channel_id)
+                    .ok_or_else(|| PurgeStop::Refused("the request names no queue file".into()))?;
+                if let Some(changed) = expected.differs(state) {
+                    return Err(PurgeStop::Refused(changed));
+                }
+                let capture = expected
+                    .v2
+                    .ok_or(PurgeStop::Refused("no V2 capture".into()))?;
+                Ok((path, capture))
+            });
+            let purged =
+                checked.and_then(|(path, capture)| state.v2_purge_if_unchanged(&path, &capture));
+            let settled = state.v2_settled_len().ok().flatten();
+            let purge = match purged {
+                Ok(drained) => CheckedPurge {
                     receipt: (drained.into_iter())
                         .map(|item| {
                             let now = (SystemTime::now(), Instant::now());
@@ -324,22 +340,21 @@ mod herdr {
                         })
                         .collect(),
                     failed: None,
-                    queue_len_after: state.v2_len().unwrap_or_default(),
+                    queue_len_after: settled,
                 },
-                Err(reason) | Ok(Err(PurgeStop::Refused(reason))) => {
+                Err(PurgeStop::Refused(reason)) => {
                     tracing::warn!(%channel_id, %reason, "V2 checked purge refused; queue preserved");
-                    CheckedPurge::stopped(PurgeStage::Refused, reason, state.v2_len().unwrap_or(0))
+                    CheckedPurge::stopped(PurgeStage::Refused, reason, settled)
                 }
-                Ok(Err(PurgeStop::NotSaved(reason))) => {
-                    CheckedPurge::stopped(PurgeStage::NotSaved, reason, state.v2_len().unwrap_or(0))
+                Err(PurgeStop::NotSaved(reason)) => {
+                    CheckedPurge::stopped(PurgeStage::NotSaved, reason, settled)
                 }
-                Ok(Err(PurgeStop::SaveUnknown(reason))) => CheckedPurge::stopped(
-                    PurgeStage::SaveUnknown,
-                    reason,
-                    state.v2_len().unwrap_or(0),
-                ),
+                Err(PurgeStop::SaveUnknown(reason)) => {
+                    tracing::warn!(%channel_id, %reason, "V2 checked purge save unknown; depth unmeasured");
+                    CheckedPurge::stopped(PurgeStage::SaveUnknown, reason, None)
+                }
             };
-            let _ = self.reply.send(purge);
+            let _ = reply.send(purge);
         }
     }
 
@@ -434,9 +449,14 @@ mod herdr {
     ) -> CheckedPurge {
         let refused = |state: &ChannelMailboxState, reason: String| {
             tracing::warn!(%channel_id, %reason, "checked purge refused; mailbox preserved");
-            let len = state.intervention_queue.len();
+            let len = Some(state.intervention_queue.len());
             CheckedPurge::stopped(PurgeStage::Refused, reason, len)
         };
+        // A V2 capture answered here lost its owner since: nobody measured that queue.
+        if expected.v2.is_some() {
+            let reason = "the V2 owner left since the capture".to_string();
+            return CheckedPurge::stopped(PurgeStage::Refused, reason, None);
+        }
         // The namespace is compared first: the head fence adopts the namespace it is given.
         if let Err(error) = own_namespace(state, persistence) {
             return refused(state, error);
@@ -464,15 +484,15 @@ mod herdr {
                 return CheckedPurge {
                     receipt,
                     failed,
-                    queue_len_after: len,
+                    queue_len_after: Some(len),
                 };
             }
             state.intervention_queue = previous;
             log_queue_persistence_rollback("checked_purge", channel_id, persistence, &error);
             let stage = saved.map_or(PurgeStage::SaveUnknown, |_| PurgeStage::NotSaved);
-            return CheckedPurge::stopped(stage, error, state.intervention_queue.len());
+            return CheckedPurge::stopped(stage, error, Some(state.intervention_queue.len()));
         }
-        let queue_len_after = state.intervention_queue.len();
+        let queue_len_after = Some(state.intervention_queue.len());
         if let Some(marker) = marker {
             let (provider, token) = (&persistence.provider, &persistence.token_hash);
             if let Err(error) = remove_channel_pending_dispatch_marker(provider, token, channel_id)

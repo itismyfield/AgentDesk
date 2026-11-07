@@ -375,6 +375,70 @@ for want in "0 $RUNNER" "1 $RUNNER_REQUIRED" "1 $RUNNER_UNDECLARED" "1 $RUNNER_U
     fi
 done
 
+echo "§12 a mixed node proves standby separately for each provider"
+
+# Reconstructed from the settled failure reasons; no Claude role is asserted.
+MIXED_STANDBY=$(cat "$REPO_ROOT/tests/fixtures/health_mixed_standby_7908.json")
+for mode in jq fallback; do
+    if [ "$mode" = fallback ]; then
+        _health_json_has_jq() { return 1; }
+    elif ! command -v jq >/dev/null 2>&1; then
+        fail "jq is required to exercise both mixed-node readers"
+        continue
+    fi
+    expect_ready "$mode: a Codex standby verifies while the node is not all standby" "$MIXED_STANDBY"
+    for proof in '' 'claude:standby:complete:19' 'codex:worker:complete:19' \
+        'codex:gateway:complete:19' 'codex:standby:incomplete:19' \
+        'codex:standby:complete:0' 'codex:standby:complete:-1' \
+        'codex:standby:complete:01' 'codex:standby:complete:19x'; do
+        expect_blocked "$mode: standby reason without matching proof ($proof) blocks" \
+            "${MIXED_STANDBY/codex:standby:complete:19/$proof}"
+    done
+    for conflict in 'codex:worker:complete:19' 'codex:standby:incomplete:19' \
+        'codex:standby:complete:0'; do
+        for proofs in "codex:standby:complete:19\",\"$conflict" \
+            "$conflict\",\"codex:standby:complete:19"; do
+            expect_blocked "$mode: conflicting proof blocks in either order ($proofs)" \
+                "${MIXED_STANDBY/codex:standby:complete:19/$proofs}"
+        done
+    done
+    for blocker in 'provider:claude:gateway_standby' 'gateway_standby' \
+        'provider:codex:disconnected' 'provider:codex:reconcile_stalled' \
+        'provider:codex:restart_pending' 'some_future_reason'; do
+        expect_blocked "$mode: Codex proof does not waive $blocker" \
+            "${MIXED_STANDBY/provider:codex:gateway_standby/provider:codex:gateway_standby\",\"$blocker}"
+    done
+    for axis in server_up db dashboard; do
+        expect_blocked "$mode: $axis=false still blocks a proven standby" \
+            "${MIXED_STANDBY/\"$axis\": true/\"$axis\": false}"
+    done
+    expect_blocked "$mode: unhealthy still blocks a proven standby" \
+        "${MIXED_STANDBY/\"degraded\"/\"unhealthy\"}"
+    mixed_reconcile="${MIXED_STANDBY/provider:codex:gateway_standby/provider:codex:gateway_standby\",\"provider:claude:reconcile_in_progress}"
+    expect_ready "$mode: mixed standby respects allowed reconcile" "$mixed_reconcile"
+    if health_json_is_ready "$mixed_reconcile" 1 0 1 1 >/dev/null 2>&1; then
+        fail "$mode: standby proof waived disallowed reconcile"
+    else
+        pass "$mode: disallowed reconcile still blocks"
+    fi
+    if (
+        curl() { printf '%s' "$MIXED_STANDBY"; }
+        _kickstart_launchd_job_if_needed() { return 0; }
+        wait_for_http_service_health fixture 1 1 0 1 1 1 1
+    ) >/dev/null 2>&1; then
+        pass "$mode: the local deployment wait accepts the mixed standby"
+    else
+        fail "$mode: the local deployment wait refused the mixed standby"
+    fi
+    named=$(_health_json_deploy_blocking_reasons "$MIXED_STANDBY" \
+        "$(_health_json_deploy_nonblocking_ere_for_body "$MIXED_STANDBY" 1 1)")
+    if [ -z "$named" ]; then
+        pass "$mode: the timeout diagnostic agrees with the mixed standby verdict"
+    else
+        fail "$mode: the timeout diagnostic still names $named"
+    fi
+done
+
 if [ "$FAILURES" -gt 0 ]; then
     echo "$FAILURES failure(s)" >&2
     exit 1

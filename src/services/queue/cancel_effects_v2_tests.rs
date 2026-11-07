@@ -168,9 +168,17 @@ async fn a_stop_settle_on_either_side_of_the_purge_capture_resends_nothing() {
             let stopper = handle.clone();
             let settled = move || async move { settle(stopper).await.unwrap() };
             let stale = purge_v2(&handle, persistence.clone(), settled).await;
-            assert!(
-                matches!(stale, Some(None)),
-                "a capture the stop outdated purges nothing and reports no purge: {stale:?}"
+            let kept = (stale.as_ref().and_then(Option::as_ref)).map(|purge| {
+                (
+                    purge.queued_head_refused,
+                    purge.drained,
+                    purge.queue_len_after,
+                )
+            });
+            assert_eq!(
+                kept,
+                Some((true, 0, 2)),
+                "a capture the stop outdated purges nothing and answers only the kept depth: {stale:?}"
             );
             let owed = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.owed_drops()));
             assert!(
@@ -205,4 +213,208 @@ async fn a_stop_settle_on_either_side_of_the_purge_capture_resends_nothing() {
             "{case}: the stopped head stays in custody"
         );
     }
+}
+
+/// A cancel without a session names another queue file than the owner's, so its purge is refused;
+/// the depth the owner measured while refusing still answers it, as the kept count, never as empty.
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_v2_purge_answers_with_the_depth_the_owner_kept() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (n, queued) in [0u64, 2].into_iter().enumerate() {
+        let (provider, channel) = (ProviderKind::Claude, ChannelId::new(7_892_001 + n as u64));
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        let owned = QueuePersistenceContext::new(&provider, "owner-token", None);
+        let (path, namespace) = v2_queue(&owned, channel).unwrap();
+        handle.v2_adopt(path, namespace).await.unwrap();
+        for id in 0..queued {
+            let item = item(8_000_000_000_007_892_001 + id, channel.get());
+            let enqueued = handle.v2_request(move |slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                owner.enqueue_fixture(&item).map_err(|e| format!("{e:?}"))
+            });
+            assert_eq!(enqueued.await, Ok(true));
+        }
+        let target = TurnLifecycleTarget {
+            provider: Some(provider),
+            channel_id: Some(channel),
+            tmux_name: String::new(),
+        };
+        let purged = force_purge_channel_mailbox(None, &target, None).await;
+        let answered = purged.map(|counts| (counts.drained, counts.queue_len_after));
+        assert_eq!(
+            answered,
+            Some((0, Some(queued as usize))),
+            "queued {queued}: the refused purge drains nothing and answers the kept depth"
+        );
+        let front = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.front()));
+        assert_eq!(
+            front.await.unwrap().is_some(),
+            queued > 0,
+            "queued {queued}: kept"
+        );
+    }
+}
+
+/// An owner gone between the capture and the checked purge measured no depth, so the purge
+/// answers none rather than an empty queue.
+#[tokio::test(flavor = "current_thread")]
+async fn a_purge_whose_owner_left_after_the_capture_answers_no_depth() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (provider, channel) = (ProviderKind::Claude, ChannelId::new(7_892_101));
+    let handle = ChannelMailboxRegistry::default().handle(channel);
+    let persistence = QueuePersistenceContext::new(&provider, "", None);
+    let (path, namespace) = v2_queue(&persistence, channel).unwrap();
+    handle.v2_adopt(path, namespace).await.unwrap();
+    let queued = item(8_000_000_000_007_892_101, channel.get());
+    let enqueued = handle.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        owner.enqueue_fixture(&queued).map_err(|e| format!("{e:?}"))
+    });
+    assert_eq!(enqueued.await, Ok(true));
+    let leaver = handle.clone();
+    let left = move || async move {
+        let took = leaver.v2_request(|slot| Ok(slot.take().is_some())).await;
+        assert_eq!(took, Ok(true));
+    };
+    let purge = purge_v2(&handle, persistence, left).await;
+    assert!(
+        matches!(purge, Some(None)),
+        "no owner measured the queue, so no depth is answered: {purge:?}"
+    );
+}
+
+/// The owner's committed items and the items its queue file holds: a pending save shows as a
+/// published candidate the snapshot does not count.
+async fn committed_and_filed(
+    handle: &ChannelMailboxHandle,
+    path: &std::path::Path,
+) -> (usize, usize) {
+    let committed =
+        handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.snapshot.items.len()));
+    let filed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    (
+        committed.await.unwrap(),
+        filed["items"].as_array().map_or(0, Vec::len),
+    )
+}
+
+/// A save left pending before the cancel published a candidate the snapshot does not count: the
+/// sessionless purge and the cancel route answer no depth, and recovery keeps that one input.
+#[tokio::test(flavor = "current_thread")]
+async fn a_purge_on_an_owner_whose_last_save_is_pending_answers_no_depth() {
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    use crate::services::turn_cancel_queue_guard::{
+        CancelRemovalWitness, capture_queue_before_cancel_on, record_queue_loss_after_cancel,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (provider, channel) = (ProviderKind::Claude, ChannelId::new(7_892_201));
+    let handle = ChannelMailboxRegistry::default().handle(channel);
+    let owned = QueuePersistenceContext::new(&provider, "owner-token", None);
+    let (path, namespace) = v2_queue(&owned, channel).unwrap();
+    handle.v2_adopt(path.clone(), namespace).await.unwrap();
+    let input = item(8_000_000_000_007_892_201, channel.get());
+    let ticket = || "t-7892-201".to_string();
+    let plan = Plan {
+        fail: vec![Step::ParentSync],
+        ..Default::default()
+    };
+    let watch = Watch::new(&path, plan);
+    let admitted = handle.v2_admit_ticket(input.clone(), ticket()).await;
+    assert_eq!(format!("{admitted:?}"), "Err(Pending)");
+    drop(watch);
+    assert_eq!(
+        committed_and_filed(&handle, &path).await,
+        (0, 1),
+        "committed snapshot 0, published candidate 1"
+    );
+    let target = TurnLifecycleTarget {
+        provider: Some(provider),
+        channel_id: Some(channel),
+        tmux_name: String::new(),
+    };
+    // Even the owner's own namespace measures nothing while the save is unresolved.
+    let expected = handle.try_capture_v2().await.unwrap().unwrap();
+    let purge = handle.try_purge_queue_if_unchanged(owned.clone(), expected);
+    let purge = purge.await.unwrap();
+    let stage = purge.failed.as_ref().map(|(stage, _)| format!("{stage:?}"));
+    assert_eq!(
+        (
+            stage.as_deref(),
+            purge.queue_preserved(),
+            purge.queue_len_after
+        ),
+        (Some("SaveUnknown"), None, None),
+        "{:?}",
+        purge.failed
+    );
+    let capture = capture_queue_before_cancel_on(&handle).await;
+    let purged = force_purge_channel_mailbox(None, &target, None).await;
+    assert!(
+        purged.is_none(),
+        "a pending save is no confirmed depth: {purged:?}"
+    );
+    // The cancel route publishes the loss depth, else the purge depth: here neither.
+    let witness = CancelRemovalWitness::Purge(purged);
+    let reason = "queue_api_cancel_turn_force";
+    let loss = record_queue_loss_after_cancel(&target, &capture, None, witness, reason).await;
+    let remaining = (loss.queue_depth_after).or(purged.and_then(|counts| counts.queue_len_after));
+    assert_eq!(remaining, None, "queued_remaining stays null");
+    let recovered = handle.v2_admit_ticket(input.clone(), ticket()).await;
+    assert_eq!(format!("{recovered:?}"), "Ok(Queued)");
+    assert_eq!(committed_and_filed(&handle, &path).await, (1, 1));
+    let front = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.front()));
+    let front = front.await.unwrap().map(|(_, item)| item.message_id);
+    assert_eq!(
+        front,
+        Some(input.message_id),
+        "the one input survives, once"
+    );
+}
+
+/// A save that goes pending between the capture and the purge is judged at the purge, not at the
+/// capture: the sessionless purge answers no depth, and recovery keeps that one input.
+#[tokio::test(flavor = "current_thread")]
+async fn a_save_pending_since_the_capture_answers_no_depth() {
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (provider, channel) = (ProviderKind::Claude, ChannelId::new(7_892_202));
+    let handle = ChannelMailboxRegistry::default().handle(channel);
+    let owned = QueuePersistenceContext::new(&provider, "owner-token", None);
+    let (path, namespace) = v2_queue(&owned, channel).unwrap();
+    handle.v2_adopt(path.clone(), namespace).await.unwrap();
+    let input = item(8_000_000_000_007_892_202, channel.get());
+    let ticket = || "t-7892-202".to_string();
+    let (admitter, admitted_path, pending) = (handle.clone(), path.clone(), input.clone());
+    let admitted = move || async move {
+        let plan = Plan {
+            fail: vec![Step::ParentSync],
+            ..Default::default()
+        };
+        let watch = Watch::new(&admitted_path, plan);
+        let admitted = admitter.v2_admit_ticket(pending, ticket()).await;
+        assert_eq!(format!("{admitted:?}"), "Err(Pending)");
+        drop(watch);
+        assert_eq!(
+            committed_and_filed(&admitter, &admitted_path).await,
+            (0, 1),
+            "committed snapshot 0, published candidate 1"
+        );
+    };
+    let sessionless = QueuePersistenceContext::new(&provider, "", None);
+    let purge = purge_v2(&handle, sessionless, admitted).await;
+    assert!(
+        matches!(purge, Some(None)),
+        "the save pending at the purge measures no depth: {purge:?}"
+    );
+    let recovered = handle.v2_admit_ticket(input.clone(), ticket()).await;
+    assert_eq!(format!("{recovered:?}"), "Ok(Queued)");
+    assert_eq!(committed_and_filed(&handle, &path).await, (1, 1));
+    let front = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.front()));
+    let front = front.await.unwrap().map(|(_, item)| item.message_id);
+    assert_eq!(
+        front,
+        Some(input.message_id),
+        "the one input survives, once"
+    );
 }

@@ -219,12 +219,6 @@ fn launch_cause(
     } else {
         CauseSource::Observed
     };
-    #[cfg(test)]
-    if matches!(cause, CauseSource::Launch)
-        && crate::services::claude_tui::source_verify::n2b_mutant("clear-launch-observed")
-    {
-        return Some(CauseSource::Observed);
-    }
     Some(cause)
 }
 

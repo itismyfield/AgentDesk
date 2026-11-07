@@ -1256,6 +1256,18 @@ pub(crate) fn make_shared_data_for_tests() -> Arc<SharedData> {
 pub(super) fn make_shared_data_for_tests_with_storage(
     pg_pool: Option<sqlx::PgPool>,
 ) -> Arc<SharedData> {
+    make_shared_data_for_tests_with_barrier(
+        pg_pool,
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    )
+}
+
+/// One process's providers share `shutdown_remaining`; a test of that barrier injects it.
+#[cfg(test)]
+pub(super) fn make_shared_data_for_tests_with_barrier(
+    pg_pool: Option<sqlx::PgPool>,
+    shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
+) -> Arc<SharedData> {
     let tmux_relay_coords = Arc::new(dashmap::DashMap::new());
     Arc::new(SharedData {
         core: tokio::sync::Mutex::new(CoreState {
@@ -1304,7 +1316,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
             global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_remaining,
             shutdown_counted: std::sync::atomic::AtomicBool::new(false),
             shutdown_slot_consumed: std::sync::atomic::AtomicBool::new(false),
         },

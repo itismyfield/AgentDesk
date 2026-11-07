@@ -229,9 +229,6 @@ impl Fixture {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        if crate::services::claude_tui::source_verify::n2b_mutant("a2-watcher-current-thread") {
-            return tokio::spawn(future);
-        }
         self.watcher_runtime.0.as_ref().unwrap().spawn(future)
     }
     pub(super) async fn connect_and_migrate_fixture(id: u64, provider: ProviderKind) -> Self {
@@ -247,12 +244,6 @@ impl Fixture {
         eprintln!("A2_PREP migrate_start channel={id}");
         let mut rig = Rig::with_live_guard(id, false, false, live).await;
         eprintln!("A2_PREP migrate_done channel={id}");
-        if crate::services::claude_tui::source_verify::n2b_mutant("a2-prep-stall") {
-            eprintln!("A2_PREP forced_stall channel={id}");
-            loop {
-                std::thread::park();
-            }
-        }
         let registry = Arc::new(HealthRegistry::new());
         let root = rig.root.path();
         let config_path = crate::runtime_layout::config_file_path(root);

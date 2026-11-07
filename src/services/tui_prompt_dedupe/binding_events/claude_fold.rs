@@ -67,14 +67,10 @@ pub(super) fn reclaims(
     waiting: Option<Waiting>,
 ) -> bool {
     let prompt = event == Some(HookEventKind::UserPromptSubmit.as_str());
-    #[cfg(test)]
-    let prompt = prompt || (event.is_some() && super::n2b_mutant("r5-reclaim-any-event"));
     let Some(waiting) = waiting else {
         return false;
     };
     let later = matches!((published_at, waiting.published_at), (Some(t), Some(since)) if t > since);
-    #[cfg(test)]
-    let later = later || super::n2b_mutant("r5-reclaim-time-off");
     provider == "claude" && prompt && waiting.session != session && later
 }
 
@@ -98,11 +94,7 @@ pub(super) fn step(
     };
     // `old` is the pane's current source when the record was planned.
     let moved = (record.old.as_ref()).is_none_or(|old| old.session_id != source.session_id);
-    #[cfg(test)]
-    let moved = moved || super::n2b_mutant("supersede-same");
     let hooked = record.evidence.hook_event.is_some();
-    #[cfg(test)]
-    let hooked = hooked || super::n2b_mutant("supersede-nonhook");
     match (hooked, moved) {
         (false, _) => Step::Observe,
         (true, true) => Step::Switch,
@@ -110,8 +102,6 @@ pub(super) fn step(
         (true, false) => {
             let event = record.evidence.hook_event.as_deref();
             let session = source.session_id.as_str();
-            #[cfg(test)]
-            let repinned = repinned || super::n2b_mutant("r5-reclaim-first-pin");
             match repinned && reclaims(&record.provider, event, session, published_at, waiting) {
                 true => Step::Reclaim,
                 false => Step::Confirm,
@@ -155,9 +145,6 @@ pub(super) struct ClaudeFold {
     history: SourceHistory,
     /// Seq of the Pending record behind `history.awaiting`.
     awaiting_seq: Option<u64>,
-    /// The last superseded Pending and its time, for the mutation that resolves it at that time.
-    #[cfg(test)]
-    dropped: Option<(u64, DateTime<Utc>)>,
 }
 
 impl ClaudeFold {
@@ -172,9 +159,6 @@ impl ClaudeFold {
     ) {
         match record.execution_nonce.as_deref() {
             Some(nonce) if self.nonce.as_deref() != Some(nonce) => {
-                #[cfg(test)]
-                let fresh = !super::n2b_mutant("nonce");
-                #[cfg(not(test))]
                 let fresh = true;
                 if fresh {
                     *self = Self::default();
@@ -186,12 +170,6 @@ impl ClaudeFold {
             None => self.history.complete = false,
         }
         let at = published_at.unwrap_or(record.evidence.received_at);
-        #[cfg(test)]
-        let at = if super::n2b_mutant("recv") {
-            record.evidence.received_at
-        } else {
-            at
-        };
         let hooked = record.evidence.hook_event.is_some();
         let (source, valid) = match &record.new {
             BindingTarget::Rejected { .. } => return,
@@ -233,22 +211,10 @@ impl ClaudeFold {
             return;
         }
         // A Resolved of a Pending already superseded counts from its own time.
-        #[cfg(test)]
-        let at = match (&record.new, self.dropped) {
-            (BindingTarget::Resolved { pending_seq, .. }, Some((seq, then)))
-                if *pending_seq == seq && super::n2b_mutant("resolved-pair") =>
-            {
-                then
-            }
-            _ => at,
-        };
         match step {
             Step::Switch | Step::Resolve if hooked => self.adopt(session, pin, at, at),
             Step::Confirm => self.confirm(session, pin, at),
             Step::Reclaim => {
-                #[cfg(test)]
-                let leaves = !super::n2b_mutant("r5-reclaim-fold-off");
-                #[cfg(not(test))]
                 let leaves = true;
                 if let Some(waiting) = leaves.then(|| self.history.awaiting.take()).flatten() {
                     self.leave(waiting.session, (None, None), at);
@@ -277,10 +243,6 @@ impl ClaudeFold {
             self.leave(current.session, (current.pin, current.pinned_at), since);
         }
         let waiting = self.history.awaiting.take();
-        #[cfg(test)]
-        if let (Some(seq), Some(w)) = (self.awaiting_seq, waiting.as_ref()) {
-            self.dropped = Some((seq, w.since.unwrap_or(w.seen)));
-        }
         self.awaiting_seq = None;
         if let Some(waiting) = waiting.filter(|w| w.session != session) {
             self.leave(waiting.session, (None, None), since);
@@ -295,12 +257,6 @@ impl ClaudeFold {
             let current = self.history.current.as_mut().expect("current checked");
             (current.pin, current.pinned_at) = pin;
         } else {
-            #[cfg(test)]
-            if super::n2b_mutant("observed") {
-                if let Some(current) = self.history.current.take() {
-                    self.leave(current.session, (current.pin, current.pinned_at), seen);
-                }
-            }
             self.history.current = Some(visit(session, pin, None, seen));
         }
         self.history.left.remove(session);
@@ -334,8 +290,6 @@ impl ClaudeFold {
         if self.nonce.as_deref() == nonce {
             return self.history.clone();
         }
-        #[cfg(test)]
-        let tainted = tainted && !super::n2b_mutant("complete");
         SourceHistory {
             complete: nonce.is_some() && !tainted,
             ..SourceHistory::default()

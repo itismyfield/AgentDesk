@@ -95,10 +95,6 @@ fn input_reason(
     authority: &TmuxSourceAuthority<'_>,
     observation: &InflightObs,
 ) -> Option<FreshReason> {
-    #[cfg(test)]
-    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-pure") {
-        let _ = open_under(authority);
-    }
     if !observation.recheck(CANARY_CHANNEL, authority.session()) {
         return None;
     }
@@ -106,9 +102,6 @@ fn input_reason(
     if absent_open::read_nonce(authority.session()) == SpawnNonceMarker::Absent
         && read().ok().flatten().is_some_and(|mark| {
             let explicit = mark.origin == "explicit_clear";
-            #[cfg(test)]
-            let explicit =
-                explicit || crate::services::claude_tui::source_verify::n2b_mutant("b1b-origin");
             explicit && captured.seq <= mark.retired_through_seq && captured.nonce == mark.nonce
         })
     {
@@ -249,11 +242,6 @@ pub(crate) fn with_fresh_scope(
             .filter(|source| !allowed(source))
             .cloned()
             .collect();
-        #[cfg(test)]
-        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-proof") {
-            install(nonce, denied);
-            return Ok(true);
-        }
         let fold = binding_events::codex::read_ownership(&context)
             .map_err(|_| "fresh_evidence_missing")?;
         let proof = fold
@@ -293,10 +281,6 @@ pub(crate) fn with_fresh_scope(
         let changed = !denied.is_empty();
         if changed && !quiescent {
             return Err("new_root_waiting");
-        }
-        #[cfg(test)]
-        if !changed && crate::services::claude_tui::source_verify::n2b_mutant("b1b-empty-nonce") {
-            return Ok(false);
         }
         install(nonce, denied);
         Ok(changed)

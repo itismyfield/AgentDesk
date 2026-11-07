@@ -14,28 +14,14 @@ pub(crate) fn renumbered(
     pinned_at: Option<DateTime<Utc>>,
     (dev, ino): (u64, u64),
 ) -> bool {
-    #[cfg(test)]
-    if super::n2b_mutant("renumber-off") {
-        return false;
-    }
     let earlier_boot = pinned_at
         .zip(boot_time())
         .is_some_and(|(at, boot)| at < boot);
-    #[cfg(test)]
-    let earlier_boot = earlier_boot || super::n2b_mutant("renumber-ignore-boot");
-    #[cfg(test)]
-    if super::n2b_mutant("renumber-ignore-ino") {
-        return pin.dev != dev && earlier_boot;
-    }
     pin.ino == ino && pin.dev != dev && earlier_boot
 }
 
 /// `pin` under the device `file` was found on, which is what a re-pin records.
 pub(crate) fn under_new_device(pin: &SourceId, (dev, _): (u64, u64)) -> SourceId {
-    #[cfg(test)]
-    if super::n2b_mutant("renumber-return-old-pin") {
-        return pin.clone();
-    }
     SourceId { dev, ..pin.clone() }
 }
 

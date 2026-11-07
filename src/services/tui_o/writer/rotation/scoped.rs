@@ -36,10 +36,6 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     pub(super) fn resume_selected(&self, source: &SourceId) -> bool {
-        #[cfg(test)]
-        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-resume") {
-            return true;
-        }
         !self.suspension.contains(source)
     }
 
@@ -62,10 +58,6 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     pub(super) fn check_scoped_metadata(&self, store: &ChannelStore) -> Result<(), WriterAlarm> {
-        #[cfg(test)]
-        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-meta") {
-            return Ok(());
-        }
         if self.suspension.is_empty() {
             return Ok(());
         }

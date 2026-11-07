@@ -148,6 +148,18 @@ impl ChannelMailboxState {
         (self.queued_head.v2.as_ref()).map(|owner| owner.snapshot.items.len())
     }
 
+    /// The depth a checked purge may report: the committed items while the owner's last save is
+    /// settled. A save still pending published a candidate the snapshot does not count.
+    #[cfg(unix)]
+    pub(crate) fn v2_settled_len(&self) -> Result<Option<usize>, String> {
+        match self.queued_head.v2.as_ref() {
+            Some(owner) if owner.pending.is_some() => {
+                Err("the owner's last save is unresolved; recover before measuring".into())
+            }
+            _ => Ok(self.v2_len()),
+        }
+    }
+
     /// Discards the untried items only when `path` is the owner's file and it still holds `expected`;
     /// the attempted head, retained inputs and terminals stay, and only the owner's CAS writes.
     #[cfg(unix)]

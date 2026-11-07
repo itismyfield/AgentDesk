@@ -18,15 +18,6 @@ pub(super) fn retries(provider: &str, event: &str, error: &str) -> bool {
     let gateway = ["HTTP 502", "HTTP 503", "HTTP 504"];
     let transport =
         error.starts_with("post hook event:") || gateway.iter().any(|s| error.contains(s));
-    #[cfg(test)]
-    let (start, transport) = {
-        use crate::services::claude_tui::source_verify::n2b_mutant;
-        let start = (start && !n2b_mutant("drop")) || n2b_mutant("retry-any");
-        (
-            start,
-            transport || (n2b_mutant("retry-500") && error.contains("HTTP 500")),
-        )
-    };
     if !(start && transport) {
         return false;
     }
