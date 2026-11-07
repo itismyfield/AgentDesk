@@ -41,6 +41,161 @@ fn observability_breaker() -> GatewayHandbackBreaker {
 }
 
 #[tokio::test]
+async fn gateway_observability_snapshot_timeout_preserves_held_and_budget_pg() {
+    use sqlx::Connection;
+
+    let (_root, _live, _paths) = snapshot_root();
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let token = "discord_7465737467617465";
+    let key = discord_gateway_lock_id(token);
+    let held = try_acquire_discord_gateway_lease(&pool, token, &ProviderKind::Claude)
+        .await
+        .unwrap()
+        .unwrap();
+    // Only pooled diagnostics see this view; real lease tries use dedicated connections.
+    sqlx::raw_sql(
+        "CREATE SCHEMA diagnostic_timeout;
+         CREATE VIEW diagnostic_timeout.pg_locks AS
+         SELECT l.* FROM pg_catalog.pg_locks l
+         CROSS JOIN (SELECT pg_advisory_xact_lock(914802699)) barrier",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut blocker = sqlx::PgConnection::connect_with(&pool.connect_options())
+        .await
+        .unwrap();
+    let (_capture, reader) = observability_capture();
+    for block_query in [true, false] {
+        sqlx::query("SELECT pg_advisory_lock(914802699)")
+            .execute(&mut blocker)
+            .await
+            .unwrap();
+        let diagnostic_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("SET search_path = diagnostic_timeout, pg_catalog")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let mut connection = diagnostic_pool.acquire().await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        let occupied = if block_query {
+            drop(connection);
+            None
+        } else {
+            Some(connection)
+        };
+        let diagnostics = Diagnostics::default();
+        diagnostics.context(&diagnostic_pool, "standby", "claude", key);
+        let mut breaker = observability_breaker();
+        let started = std::time::Instant::now();
+        let (result, blocked) = tokio::join!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                try_acquire_observing_handback(
+                    &diagnostic_pool,
+                    token,
+                    &ProviderKind::Claude,
+                    &mut breaker,
+                    &diagnostics,
+                ),
+            ),
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while block_query {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                         WHERE pid = $1 AND wait_event = 'advisory'
+                           AND query LIKE 'SELECT l.pid,%')",
+                    )
+                    .bind(pid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if waiting {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }),
+        );
+        let elapsed = started.elapsed();
+        let first = serde_json::to_value(diagnostics.projection()).unwrap();
+        drop(occupied);
+        sqlx::query("SELECT pg_advisory_unlock(914802699)")
+            .execute(&mut blocker)
+            .await
+            .unwrap();
+        let retry = if result.is_ok() {
+            Some(
+                tokio::time::timeout(
+                    Duration::from_millis(300),
+                    try_acquire_observing_handback(
+                        &diagnostic_pool,
+                        token,
+                        &ProviderKind::Claude,
+                        &mut breaker,
+                        &diagnostics,
+                    ),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        diagnostic_pool.close().await;
+        blocked.expect("the real snapshot SELECT must reach the advisory lock wait");
+        assert!(
+            result
+                .expect("diagnostic timeout must return the real held result within 3s")
+                .unwrap()
+                .is_none()
+        );
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        assert_eq!(first["last_result"], "held");
+        assert_eq!(first["tries"], 1);
+        assert_eq!(first["results"]["held"], 1);
+        assert_eq!(first["snapshot_status"], "err");
+        assert_eq!(first["snapshot_attempts"], 1);
+        assert_eq!(first["snapshot_failures"], 1);
+        assert!(first["holder"].is_null());
+        assert!(retry.unwrap().unwrap().unwrap().is_none());
+        let next = serde_json::to_value(diagnostics.projection()).unwrap();
+        assert_eq!(next["tries"], 2);
+        assert_eq!(next["last_result"], "held");
+        assert_eq!(next["results"]["held"], 2);
+        assert!(next["results"]["err"].is_null());
+        assert!(next["results"]["refused_while_free"].is_null());
+        assert_eq!(next["snapshot_attempts"], 1, "timeout consumes the budget");
+        assert_eq!(next["snapshot_failures"], 1);
+        eprintln!(
+            "SNAPSHOT_TIMEOUT query_blocked={block_query} elapsed={elapsed:?} first={first} next={next}"
+        );
+    }
+    assert_eq!(
+        observability_logs(reader)
+            .matches("⏳ GATEWAY-LEASE: waiting for adoption")
+            .count(),
+        2,
+        "both timeout paths must reach the summary without duplicate minute lines"
+    );
+    blocker.close().await.unwrap();
+    held.unlock().await.unwrap();
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test]
 async fn gateway_observability_a_nonpreferred_held_try_pg() {
     let (root, _live, _paths) = snapshot_root();
     let mut config = crate::config::Config::default();

@@ -47,6 +47,7 @@ pub(in crate::services::discord) struct Projection {
     pub snapshot_at: Option<String>,
     pub snapshot_status: SnapshotStatus,
     pub snapshot_attempts: u64,
+    pub snapshot_failures: u64,
 }
 
 #[derive(Default)]
@@ -184,8 +185,10 @@ impl Diagnostics {
               LIMIT 1",
         )
         .bind(key)
-        .fetch_optional(pool)
-        .await;
+        .fetch_optional(pool);
+        let observed = tokio::time::timeout(Duration::from_secs(2), observed)
+            .await
+            .unwrap_or_else(|_| Err(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())));
         {
             let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             if state.view.pg_target != target || state.view.advisory_key != Some(key) {
@@ -228,6 +231,7 @@ impl Diagnostics {
                     }
                 }
                 Err(error) => {
+                    state.view.snapshot_failures += 1;
                     state.view.snapshot_status = SnapshotStatus::Err;
                     state.pending = true;
                     state.view.holder = None;
