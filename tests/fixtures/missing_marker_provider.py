@@ -55,8 +55,8 @@ try:
     rows = [
         {'type': 'user', 'sessionId': session, 'uuid': str(uuid.uuid4()),
          'message': {'role': 'user', 'content': prompt}},
-        {'type': 'assistant', 'sessionId': session, 'uuid': str(uuid.uuid4()),
-         'message': {'role': 'assistant', 'stop_reason': 'end_turn',
+        {'type': 'assistant', 'sessionId': session, 'uuid': str(uuid.uuid4()), 'apiBlockIndex': 0,
+         'message': {'id': str(uuid.uuid4()), 'role': 'assistant', 'stop_reason': 'end_turn',
                      'content': [{'type': 'text', 'text': 'Recovered managed execution reply.'}]}},
         {'type': 'system', 'subtype': 'turn_duration', 'sessionId': session},
         {'type': 'result', 'subtype': 'success', 'result': 'Recovered managed execution reply.', 'session_id': session},

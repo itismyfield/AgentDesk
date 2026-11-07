@@ -238,7 +238,6 @@ fn mm_retire_wakes_held_writer_and_normal_input_delivers_without_deadlock_pg() {
         plan.row.as_ref().map(|row| &row.record),
         Some(&HostedRecord::Known(record.clone()))
     );
-    eprintln!("MM_WRITER ready generation={generation} normal_input=Herdr retired_row=1");
 
     let home = root.join("claude-home");
     std::fs::create_dir_all(&home).unwrap();
