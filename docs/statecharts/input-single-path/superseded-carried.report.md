@@ -4,7 +4,7 @@ Code SHA: `b5e0f2115f` plus this repair. Models: `InputOwnershipConsumedWaiting.
 
 ## What the code does
 
-- `health/recovery/carried_turn_close.rs`: an earlier generation's managed row that was not readopted and has no verified native pin used to be kept forever (`unverified_carried_input`). It now closes when its `session_id` names a session other than the transcript the pane ended on (`ClosedBoundary.source`), after the same native end, O drain/capture, lock and receipt proof as every other carried close. Before archiving it enqueues one outbox notice keyed by the turn (`queue_io/retained_notice.rs`), so a repeated close posts once. A row naming the current session is still kept (#7828).
+- `health/recovery/carried_turn_close.rs`: an earlier generation's managed row that was not readopted and has no verified native pin used to be kept forever (`unverified_carried_input`). It now closes when its `session_id` names a session other than the one the binding names for the source the pane ended on (`ClosedBoundary.session`; an empty binding session keeps the row), after the same native end, O drain/capture, lock and receipt proof as every other carried close. Before archiving it enqueues one outbox notice keyed by the turn (`queue_io/retained_notice.rs`), so a repeated close posts once. A row naming the current session is still kept (#7828).
 - `claude_tui/hosting/warm_followup.rs`: `owner_observer` resolves its session before the submit. After the submit it now waits up to 10 s for either its own transcript to grow (read it as before) or the pane's verified session (hook adoption + runtime binding) to change (read that one from the submit's time).
 
 ## Entry points the models take their values from
@@ -14,7 +14,7 @@ Code SHA: `b5e0f2115f` plus this repair. Models: `InputOwnershipConsumedWaiting.
 | `row = "carried"` | busy paste row; shutdown restamp | `provider_isolation.rs:153-166`, inflight shutdown restamp |
 | `readopt` | restore readoption, O-only marker consumption | `recovery_engine/restore_inflight.rs:1922-1937` |
 | `pinVerified` | busy observer pin only | `warm_followup.rs` `busy_owner_observer`, `inflight/native_stop_pin.rs:463` |
-| `aSession` | row `session_id` vs `ClosedBoundary.source` | `carried_turn_close.rs` `session_superseded` |
+| `aSession` | row `session_id` vs `ClosedBoundary.session` (binding source session) | `carried_turn_close.rs` `session_superseded` |
 | `close`, `told` | carried close, outbox dedupe | `carried_turn_close.rs` `try_close`, `retained_notice.rs` `carried_unverified_closed` |
 | `adopt` | hook adoption after the transcript exists | `hook_server/adoption_retry.rs`, `tui_prompt_dedupe::record_hook_adopted_claude_session_id` |
 | `observer` | `owner_observer` build, `rebound_source` | `warm_followup.rs` |
