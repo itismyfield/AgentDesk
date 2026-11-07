@@ -4,7 +4,7 @@
   inventory  walk src/lib.rs through `mod`, `#[path]` and `include!`, keeping each test's cfg chain
   check      fail on test files no crate root reaches, missing module/include files, unreadable cfg and
              test-only `.join()`/`.recv()` waits without a cap; the allowlist may only lose rows against
-             --allowlist-base (HEAD^1: the PR base in CI; a base without the file counts its own violations)
+             --allowlist-base (HEAD^1: the PR base in CI; a base without the file accepts the approved first list only)
   compare    compare the source inventory for one platform with an unfiltered nextest list
   removed    per platform, tests a base checkout compiles that this tree no longer compiles, and tests
              runnable there that `#[ignore]` (plain or cfg_attr) now skips here; this tree must read
@@ -17,12 +17,12 @@ Nothing here runs cargo.
 import argparse
 from bisect import bisect_right
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
-import tempfile
 import tomllib
 
 
@@ -40,6 +40,8 @@ BOUNDED_CALLS = {"timeout", "timeout_at", "join_within", "recv_within", "await_w
 UNBOUNDED_WAITS = {"join": "thread join", "recv": "channel recv"}
 WAIT_HELPER = "src/test_support/wait.rs"
 WAIT_ALLOWLIST = "scripts/ci/test_wait_allowlist.txt"
+# sha256 of the approved first allowlist (sorted rows, one per line): a base without the file accepts only it.
+INITIAL_ALLOWLIST_SHA256 = "f99c677895ac3a69803ed59df4d538177ed5f7e72a9830b6b1091a1d4ae16640"
 WAIT_CALL = re.compile(r"\b(?:join|recv)\b")
 # After `#[cfg(test)]`, one of these starts an item or block whose gate is its `{...}` block (or ends at `;`);
 # anything else (a `let`, expression, field or parameter) stays gated to its own `;`, `,` or `)`.
@@ -681,7 +683,7 @@ def unbounded_waits(raw, tokens, whole_file):
     """(line, kind) of every test-only `.join()`/`.recv()` that no bounded call (BOUNDED_CALLS) encloses.
 
     Test-only code: the whole file, a `#![cfg(test)]` block, and what follows a `#[cfg(test)]` or test
-    attribute: an item's `{}` block, or a statement, parameter or field up to its own `;`, `,` or `)`."""
+    attribute: an item's or bare `{}` block, or a statement, parameter or field up to its own `;`, `,` or `)`."""
     found, parens, gated, depth, brackets, index = [], [], [], 0, 0, 0
     pending = None  # (kind, paren depth, brace depth) of a gate still waiting for its block or end
     while index < len(tokens):
@@ -705,7 +707,8 @@ def unbounded_waits(raw, tokens, whole_file):
                 while after < len(tokens) and attribute_span(tokens, after) is not None:
                     after = attribute_span(tokens, after)[1]
                 first = tokens[after] if after < len(tokens) else None
-                block = first is not None and first.kind == "ident" and first.value in BLOCK_WORDS
+                block = first is not None and (first.kind == "ident" and first.value in BLOCK_WORDS
+                                               or first.kind == "punct" and first.value == "{")
                 pending = ("block" if block else "span", len(parens), depth)
             index = end
             continue
@@ -809,9 +812,10 @@ def unbounded_wait_files(repo_root, inventory):
     return violations
 
 
-def test_wait_findings(repo_root, inventory):
+def test_wait_findings(repo_root, inventory, violations=None):
     """Test code waiting without a cap: new violations and allowlist rows whose file no longer needs one."""
-    violations = unbounded_wait_files(repo_root, inventory)
+    if violations is None:
+        violations = unbounded_wait_files(repo_root, inventory)
     allowed, found = wait_allowlist(repo_root)
     found += [f"unbounded wait allowlist: {rel} has no unbounded wait left; remove from {WAIT_ALLOWLIST}"
               for rel in allowed if rel not in violations]
@@ -824,42 +828,46 @@ def test_wait_findings(repo_root, inventory):
 
 
 def base_allowlist(repo_root, rev):
-    """Allowlist paths at git `rev`; where that tree has no allowlist yet, the files that wait without a cap in it."""
+    """Allowlist paths at git `rev`; None when the file does not exist there (its first introduction)."""
     result = subprocess.run(["git", "-C", str(repo_root), "show", f"{rev}:{WAIT_ALLOWLIST}"],
                             capture_output=True, text=True, check=False)
     if result.returncode:
         if "does not exist in" in result.stderr or "exists on disk, but not in" in result.stderr:
-            return base_tree_violations(repo_root, rev)
+            return None
         raise ValueError(result.stderr.strip() or f"git show {rev}:{WAIT_ALLOWLIST} failed")
     return {line.strip() for line in result.stdout.splitlines() if line.strip() and not line.startswith("#")}
 
 
-def base_tree_violations(repo_root, rev):
-    """Files with an unbounded wait in the tree at `rev`, read from a temporary `git archive` extraction."""
-    archive = subprocess.run(["git", "-C", str(repo_root), "archive", rev, "Cargo.toml", "src", "tests"],
-                             capture_output=True, check=False)
-    if archive.returncode:
-        raise ValueError(archive.stderr.decode().strip() or f"git archive {rev} failed")
-    with tempfile.TemporaryDirectory() as tmp:
-        subprocess.run(["tar", "-x", "-C", tmp], input=archive.stdout, check=True)
-        base = Path(tmp)
-        return set(unbounded_wait_files(base, lib_inventory(base)))
+def allowlist_digest(entries):
+    return hashlib.sha256(("\n".join(sorted(entries)) + "\n").encode()).hexdigest()
 
 
-def allowlist_growth(current, base):
-    """Rows the allowlist gained over `base`: it may only shrink, so each one is a problem."""
-    return [f"unbounded wait allowlist: {rel} is new against the base allowlist; the allowlist only shrinks, "
-            f"use test_support::wait instead" for rel in sorted(set(current) - base)]
+def allowlist_growth(current, base, violations, approved=None):
+    """Rows the allowlist may not hold: new ones against `base`, or, where the base has no allowlist yet,
+    anything but the approved first list, which must also equal the files that wait without a cap now."""
+    if base is not None:
+        return [f"unbounded wait allowlist: {rel} is new against the base allowlist; the allowlist only shrinks, "
+                f"use test_support::wait instead" for rel in sorted(set(current) - base)]
+    found = [f"unbounded wait allowlist: {rel} is listed but waits with a cap now; the first allowlist names "
+             f"exactly the files that wait without one" for rel in sorted(set(current) - set(violations))]
+    found += [f"unbounded wait allowlist: {rel} waits without a cap but is not listed; the first allowlist names "
+              f"exactly the files that wait without one" for rel in sorted(set(violations) - set(current))]
+    if allowlist_digest(current) != (approved or INITIAL_ALLOWLIST_SHA256):
+        found.append(f"unbounded wait allowlist: {len(current)} rows differ from the approved first allowlist "
+                     f"(sha256 {allowlist_digest(current)[:12]}); it cannot change in the PR that introduces it")
+    return found
 
 
-def check_findings(repo_root, allowlist_base="HEAD^1"):
+def check_findings(repo_root, allowlist_base="HEAD^1", approved=None):
     inv = lib_inventory(repo_root)
     found = [f"orphan test file: {path}" for path in orphans(repo_root, inv)]
     found += [f"missing source: {e}" for e in inv.errors]
     found += [f"unreadable: {u}" for u in inv.unreadable]
-    found += test_wait_findings(repo_root, inv)
+    violations = unbounded_wait_files(repo_root, inv)
+    found += test_wait_findings(repo_root, inv, violations)
     try:
-        found += allowlist_growth(wait_allowlist(repo_root)[0], base_allowlist(repo_root, allowlist_base))
+        found += allowlist_growth(wait_allowlist(repo_root)[0], base_allowlist(repo_root, allowlist_base),
+                                  violations, approved)
     except ValueError as exc:
         found.append(f"unbounded wait allowlist: base {allowlist_base} unreadable ({exc}); pass --allowlist-base")
     features = default_features(repo_root)

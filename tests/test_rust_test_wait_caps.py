@@ -92,6 +92,10 @@ REGION_CASES = {
     "a gate followed by another attribute": (
         "#[cfg(test)]\n#[derive(Default)]\npub struct Probe {\n    pub seen: u8,\n}\n"
         "pub fn production(rx: std::sync::mpsc::Receiver<u8>) {\n    rx.recv().unwrap();\n}\n", ()),
+    "a bare test-only block gates only itself": (
+        "pub fn production(h: std::thread::JoinHandle<()>) {\n    #[cfg(test)]\n    { let _only_test = 1; }\n    h.join();\n}\n", ()),
+    "a bare test-only block with a wait": (
+        "pub fn production(h: std::thread::JoinHandle<()>) {\n    #[cfg(test)]\n    { h.join(); }\n}\n", (3,)),
     "tokens inside stringify! are not code": (
         "pub fn production() -> &'static str {\n    stringify!(\n        #[test]\n        fn imagined() { h.join(); }\n    )\n}\n"
         "macro_rules! waits { ($h:expr) => { #[cfg(test)] fn t() { $h.join(); } }; }\n", (7,)),
@@ -164,12 +168,12 @@ class UnboundedWaitCheckTest(unittest.TestCase):
 
     def test_the_allowlist_only_shrinks_against_its_base(self):
         base = {"src/joins_tests.rs", "src/lib.rs"}
-        self.assertEqual(rts.allowlist_growth(["src/lib.rs"], base), [])
-        self.assertEqual(rts.allowlist_growth(["src/lib.rs", "src/late_tests.rs"], base),
+        self.assertEqual(rts.allowlist_growth(["src/lib.rs"], base, {}), [])
+        self.assertEqual(rts.allowlist_growth(["src/lib.rs", "src/late_tests.rs"], base, {}),
                          ["unbounded wait allowlist: src/late_tests.rs is new against the base allowlist; "
                           "the allowlist only shrinks, use test_support::wait instead"])
         # A row swapped for a new path keeps the row count and still fails.
-        self.assertEqual(len(rts.allowlist_growth(["src/lib.rs", "src/late_tests.rs"], {"src/lib.rs", "src/old.rs"})), 1)
+        self.assertEqual(len(rts.allowlist_growth(["src/lib.rs", "src/late_tests.rs"], {"src/lib.rs", "src/old.rs"}, {})), 1)
         # Through git: the committed allowlist is the base, a new violation plus its row fails the whole check.
         self.allowlist.write_text(ALLOW_ALL, encoding="utf-8")
         git(self.repo, "init", "-q")
@@ -184,7 +188,7 @@ class UnboundedWaitCheckTest(unittest.TestCase):
         self.assertIn("src/late_tests.rs is new against the base allowlist", found[0])
         self.assertTrue(any("unreadable" in line for line in rts.check_findings(self.repo, "no-such-rev")[1]))
 
-    def test_a_base_without_an_allowlist_counts_its_own_violations(self):
+    def test_a_base_without_an_allowlist_accepts_only_the_approved_first_list(self):
         # CI checks the PR's synthetic merge: HEAD^1 is the base (no allowlist yet), HEAD^2 the PR head.
         self.allowlist.unlink(missing_ok=True)
         (self.repo / "src/lib.rs").write_text(LIB.replace("mod joins_tests;\n", "mod joins_tests;\n#[cfg(test)]\nmod late_tests;\n"),
@@ -195,19 +199,38 @@ class UnboundedWaitCheckTest(unittest.TestCase):
                                   git(self.repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", message))
         commit("base without an allowlist")
         git(self.repo, "checkout", "-q", "-b", "pr")
-        self.allowlist.write_text(ALLOW_ALL + "src/late_tests.rs\n", encoding="utf-8")
+        # The PR caps late_tests.rs and lists exactly the files that still wait without a cap.
+        (self.repo / "src/late_tests.rs").write_text(JOINS.replace(".join().unwrap()", ".is_finished()"), encoding="utf-8")
+        approved = ALLOW_ALL
+        self.allowlist.write_text(approved, encoding="utf-8")
         commit("introduce the allowlist")
         git(self.repo, "checkout", "-q", "main")
         git(self.repo, "-c", "user.email=t@t", "-c", "user.name=t", "merge", "-q", "--no-ff", "--no-edit", "pr")
-        self.assertEqual(rts.check_findings(self.repo, "HEAD^1")[1], [])
-        # A violation that did not exist on the base cannot buy itself a row in the same PR.
+        digest = rts.allowlist_digest(approved.split())
+        self.assertEqual(rts.check_findings(self.repo, "HEAD^1", approved=digest)[1], [])
+        self.assertTrue(any("differ from the approved first allowlist" in line
+                            for line in rts.check_findings(self.repo, "HEAD^1", approved="0" * 64)[1]))
+        # Restoring a bare join the PR had capped, plus its row, is not the approved list either.
+        (self.repo / "src/late_tests.rs").write_text(JOINS, encoding="utf-8")
+        self.allowlist.write_text(approved + "src/late_tests.rs\n", encoding="utf-8")
+        found = rts.check_findings(self.repo, "HEAD^1", approved=digest)[1]
+        self.assertEqual(found, ["unbounded wait allowlist: 5 rows differ from the approved first allowlist "
+                                 f"(sha256 {rts.allowlist_digest(approved.split() + ['src/late_tests.rs'])[:12]}); "
+                                 "it cannot change in the PR that introduces it"])
+        # A violation that did not exist on the base cannot buy itself a row in the same PR either.
+        (self.repo / "src/late_tests.rs").write_text(JOINS.replace(".join().unwrap()", ".is_finished()"), encoding="utf-8")
         (self.repo / "src/lib.rs").write_text((self.repo / "src/lib.rs").read_text(encoding="utf-8")
                                               + "#[cfg(test)]\nmod added_tests;\n", encoding="utf-8")
         (self.repo / "src/added_tests.rs").write_text(JOINS, encoding="utf-8")
-        self.allowlist.write_text(ALLOW_ALL + "src/late_tests.rs\nsrc/added_tests.rs\n", encoding="utf-8")
-        found = rts.check_findings(self.repo, "HEAD^1")[1]
-        self.assertEqual(found, ["unbounded wait allowlist: src/added_tests.rs is new against the base allowlist; "
-                                 "the allowlist only shrinks, use test_support::wait instead"])
+        self.allowlist.write_text(approved + "src/added_tests.rs\n", encoding="utf-8")
+        found = rts.check_findings(self.repo, "HEAD^1", approved=digest)[1]
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("5 rows differ from the approved first allowlist", found[0])
+        # The first list must also name exactly the files that wait without a cap now.
+        self.allowlist.write_text(approved, encoding="utf-8")
+        found = rts.check_findings(self.repo, "HEAD^1", approved=digest)[1]
+        self.assertIn("unbounded wait allowlist: src/added_tests.rs waits without a cap but is not listed; "
+                      "the first allowlist names exactly the files that wait without one", found)
 
     def test_the_tree_passes_against_its_allowlist(self):
         try:
