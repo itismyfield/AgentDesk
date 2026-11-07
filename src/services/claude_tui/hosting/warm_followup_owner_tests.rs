@@ -409,9 +409,8 @@ fn a_rebind_pending_at_the_first_poll_is_followed_once_adopted() {
     assert!(asked.load(std::sync::atomic::Ordering::SeqCst) >= 2);
 }
 
-/// `/clear`'s session is adopted only after the rebind grace ran out and the observer began to
-/// read the old session, which holds no receipt of this submit: the answer is read once, from
-/// the session the pane moved to, and the turn ends.
+/// `/clear`'s session is adopted after the grace, while the observer reads the old session with
+/// no receipt of this submit: the answer is read once from the adopted session and the turn ends.
 #[test]
 fn an_owner_observer_moves_once_to_a_session_adopted_after_the_grace() {
     let pane = ClearedPane::new();
