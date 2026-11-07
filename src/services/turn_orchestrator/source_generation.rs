@@ -12,6 +12,7 @@ pub(crate) struct SourceMessageQueuedGeneration {
     pub(crate) route: Option<super::QueuedRoute>,
     /// Original intake origin; queue replay retains each source independently.
     pub(crate) origin: Option<String>,
+    pub(crate) origin_id: Option<String>,
 }
 
 impl SourceMessageQueuedGeneration {
@@ -26,6 +27,7 @@ impl SourceMessageQueuedGeneration {
             preserve_on_cancel: false,
             route: None,
             origin: None,
+            origin_id: None,
         }
     }
 
@@ -56,6 +58,8 @@ pub(crate) struct PendingQueueSourceGeneration {
     pub(crate) route: Option<super::QueuedRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) origin_id: Option<String>,
 }
 
 #[cfg(test)]

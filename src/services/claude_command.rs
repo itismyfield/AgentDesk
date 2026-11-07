@@ -23,10 +23,8 @@ use crate::services::platform::BinaryResolution;
 /// `resolve_provider_binary("claude")` now scrubs `resolved_path` /
 /// `canonical_path` / `exec_path` to `None` AND redacts the raw-path components
 /// embedded in the `attempts` diagnostics, so no raw Claude path is reachable
-/// through that seam (including by parsing `attempts`). The sole sanctioned
-/// raw-path seam is `binary_resolver::resolve_claude_binary_sealed`, consumed
-/// only by [`ClaudeBinary::resolve`] below; `FORBIDDEN_RAW_SPAWN` remains
-/// defense-in-depth.
+/// through that seam (including by parsing `attempts`). The sole raw-path seam,
+/// `binary_resolver::resolve_claude_binary_sealed`, needs a [`ClaudeSeal`] only this module builds.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ClaudeBinary {
     program: OsString,
@@ -36,6 +34,12 @@ impl std::fmt::Debug for ClaudeBinary {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("ClaudeBinary(..)")
     }
+}
+
+/// Proof that the caller is this module; the private field keeps every other module from
+/// building one, so only [`ClaudeBinary::resolve`] reaches the unscrubbed Claude resolver.
+pub(crate) struct ClaudeSeal {
+    _private: (),
 }
 
 impl ClaudeBinary {
@@ -50,7 +54,10 @@ impl ClaudeBinary {
         // `resolve_provider_binary("claude")` scrubs the raw path, so this
         // chokepoint uses the sealed resolver to obtain the unscrubbed
         // resolution that the guarded builder wraps.
-        let resolution = crate::services::platform::binary_resolver::resolve_claude_binary_sealed();
+        let resolution =
+            crate::services::platform::binary_resolver::resolve_claude_binary_sealed(ClaudeSeal {
+                _private: (),
+            });
         let binary = Self::from_resolution(&resolution)
             .ok_or_else(|| "Claude CLI not found. Is Claude CLI installed?".to_string())?;
         Ok((binary, resolution))
@@ -159,187 +166,5 @@ impl ClaudeCommandBuilder {
     /// Consume the builder and return the fully-guarded `Command`.
     pub(crate) fn into_command(self) -> Command {
         self.command
-    }
-}
-
-#[cfg(test)]
-mod chokepoint_guard_tests {
-    //! Text-heuristic chokepoint guard. It catches the raw-spawn spellings and
-    //! sealed-seam references below, but cannot detect raw spawns hidden by
-    //! renamed bindings. Those cases need an AST-based follow-up, in the same
-    //! family as the raw-spawn limitation self-disclosed below.
-
-    use std::path::{Path, PathBuf};
-
-    /// Exact crate-relative site permitted to define or apply the raw Claude
-    /// launch primitives. This is an authority, not a consumer exemption.
-    const DEFINITION_SITES: &[&str] = &["src/services/claude_command.rs"];
-
-    /// Defense-in-depth text guard for raw `Command::new(<claude binary var>)`
-    /// idioms. The primary defense is [`ClaudeBinary`]: its private path field
-    /// and deliberately absent `AsRef<OsStr>`/`Deref` implementations make a
-    /// resolved Claude binary unusable with `Command::new`, including through
-    /// aliases, re-bindings, helpers, and closures. This scan remains as a cheap
-    /// regression tripwire for raw string argv received at the public wrapper
-    /// boundary.
-    const FORBIDDEN_RAW_SPAWN: &[&str] = &[
-        "Command::new(claude_bin",
-        "Command::new(&claude_bin",
-        // Full-path `std::process::Command::new(...)` equivalents. A caller could
-        // otherwise dodge the bare-`Command::new(` literals above by spelling out
-        // the module path. This is a cheap breadth extension only; it does NOT
-        // close the class (a `let p = claude_bin; Command::new(p)` or a renamed
-        // binding still slips through). The by-construction (type/AST) promotion
-        // is tracked as the #4559 raw-spawn follow-up.
-        "std::process::Command::new(claude_bin",
-        "std::process::Command::new(&claude_bin",
-    ];
-
-    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_rs_files(&path, out);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                out.push(path);
-            }
-        }
-    }
-
-    fn crate_relative_path(file: &Path) -> Option<String> {
-        file.strip_prefix(env!("CARGO_MANIFEST_DIR"))
-            .ok()
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
-    }
-
-    /// All `.rs` files under the crate's `src/` tree. Scans the WHOLE crate (not
-    /// just `src/services`) because the gateway primitives are `pub(crate)` and
-    /// reachable from `src/cli` / `src/server` too — R-B's bypass was invoked via
-    /// a public CLI subcommand in `src/cli`.
-    fn crate_sources() -> Vec<PathBuf> {
-        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        collect_rs_files(&src_dir, &mut files);
-        assert!(
-            !files.is_empty(),
-            "guard scan found no source files under {}",
-            src_dir.display()
-        );
-        files
-    }
-
-    /// Read the crate's actual source set into the path/content entries the scanners consume.
-    fn crate_source_entries() -> Vec<(String, String)> {
-        crate_sources()
-            .into_iter()
-            .filter_map(|file| {
-                let relative_path = crate_relative_path(&file)?;
-                let contents = std::fs::read_to_string(file).ok()?;
-                Some((relative_path, contents))
-            })
-            .collect()
-    }
-
-    fn raw_spawn_violations(relative_path: &str, contents: &str) -> Vec<String> {
-        if DEFINITION_SITES.contains(&relative_path) {
-            return Vec::new();
-        }
-
-        FORBIDDEN_RAW_SPAWN
-            .iter()
-            .filter(|needle| contents.contains(**needle))
-            .map(|needle| format!("{relative_path} raw-spawns via `{needle}…)`"))
-            .collect()
-    }
-
-    fn scan_raw_spawn_sources<'a>(
-        sources: impl IntoIterator<Item = (&'a str, &'a str)>,
-    ) -> Vec<String> {
-        sources
-            .into_iter()
-            .flat_map(|(relative_path, contents)| raw_spawn_violations(relative_path, contents))
-            .collect()
-    }
-
-    /// Defense-in-depth regression tripwire for the specific raw-spawn spelling
-    /// R-B found. `ClaudeBinary` is the primary by-construction guard; this scan
-    /// stays intentionally narrow to catch an untyped wrapper-argv regression.
-    #[test]
-    fn claude_binaries_are_not_raw_spawned_outside_the_chokepoint() {
-        let sources = crate_source_entries();
-        let violations = scan_raw_spawn_sources(
-            sources
-                .iter()
-                .map(|(relative_path, contents)| (relative_path.as_str(), contents.as_str())),
-        );
-
-        assert!(
-            violations.is_empty(),
-            "Claude binary raw-spawned outside the chokepoint \
-             (build it with claude_command::ClaudeCommandBuilder instead):\n{}",
-            violations.join("\n")
-        );
-    }
-
-    /// #4627: crate-relative sites permitted to define or call the sealed
-    /// raw-path Claude resolver seam. The definition lives in `binary_resolver.rs`
-    /// and the sole caller is `ClaudeBinary::resolve` in `claude_command.rs`; every
-    /// other module must obtain Claude paths through the scrubbing generic
-    /// `resolve_provider_binary`.
-    const SEALED_CLAUDE_SEAM_SITES: &[&str] = &[
-        "src/services/platform/binary_resolver.rs",
-        "src/services/claude_command.rs",
-    ];
-
-    /// The sealed-seam symbol. Any crate-relative source outside
-    /// [`SEALED_CLAUDE_SEAM_SITES`] that names it is reaching around the scrubbing
-    /// generic resolver for a raw Claude path.
-    const SEALED_CLAUDE_SEAM_NEEDLE: &str = "resolve_claude_binary_sealed";
-
-    fn sealed_claude_seam_violations(relative_path: &str, contents: &str) -> Vec<String> {
-        if SEALED_CLAUDE_SEAM_SITES.contains(&relative_path) {
-            return Vec::new();
-        }
-        if contents.contains(SEALED_CLAUDE_SEAM_NEEDLE) {
-            vec![format!(
-                "{relative_path} references sealed Claude seam `{SEALED_CLAUDE_SEAM_NEEDLE}`"
-            )]
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn scan_sealed_claude_seam_sources<'a>(
-        sources: impl IntoIterator<Item = (&'a str, &'a str)>,
-    ) -> Vec<String> {
-        sources
-            .into_iter()
-            .flat_map(|(relative_path, contents)| {
-                sealed_claude_seam_violations(relative_path, contents)
-            })
-            .collect()
-    }
-
-    /// By-construction guard: the sealed raw-path Claude seam must be referenced
-    /// only by its definition site and the single sanctioned chokepoint caller.
-    #[test]
-    fn sealed_claude_seam_confined_to_chokepoint() {
-        let sources = crate_source_entries();
-        let violations = scan_sealed_claude_seam_sources(
-            sources
-                .iter()
-                .map(|(relative_path, contents)| (relative_path.as_str(), contents.as_str())),
-        );
-
-        assert!(
-            violations.is_empty(),
-            "the sealed Claude resolver seam leaked outside its sanctioned sites \
-             (obtain Claude paths through platform::resolve_provider_binary, which \
-             scrubs them):\n{}",
-            violations.join("\n")
-        );
     }
 }

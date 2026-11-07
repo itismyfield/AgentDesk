@@ -24,9 +24,9 @@ fn headless_status_and_turn_identity_pass_through_the_handoff_response() {
             provider: ProviderKind::Claude,
             content: "envelope".into(),
         };
-        let response = map_turn_start_result(&target, Ok(outcome))
-            .unwrap()
-            .to_value();
+        let response = map_turn_start_result(&target, Ok(outcome)).unwrap();
+        assert_eq!(response.channel_id_num, 111);
+        let response = response.to_value();
         assert_eq!(
             response,
             serde_json::json!({

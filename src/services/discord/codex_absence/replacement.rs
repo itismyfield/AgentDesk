@@ -68,10 +68,6 @@ impl Replacement {
         let (Some(channel), Some(token)) = (channel, token) else {
             return Ok(None);
         };
-        #[cfg(test)]
-        if crate::services::claude_tui::source_verify::n2b_mutant("c-replacement-off") {
-            return Ok(None);
-        }
         let key = (channel, tmux.to_owned());
         let state = state(&key);
         let mut phase = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -147,9 +143,6 @@ impl Probe {
 
     fn protected(&self, phase: &Phase) -> bool {
         let completed_gap = phase.completed && phase.generation != self.generation;
-        #[cfg(test)]
-        let completed_gap = completed_gap
-            && !crate::services::claude_tui::source_verify::n2b_mutant("c-probe-generation-off");
         (phase.active || completed_gap)
             && phase
                 .turn
@@ -165,9 +158,6 @@ impl Probe {
     pub(crate) fn cleanup(&self) -> Option<Cleanup> {
         let mut phase = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let protected = self.protected(&phase);
-        #[cfg(test)]
-        let protected =
-            protected && !crate::services::claude_tui::source_verify::n2b_mutant("c-cleanup-open");
         if protected || phase.cleanup {
             return None;
         }

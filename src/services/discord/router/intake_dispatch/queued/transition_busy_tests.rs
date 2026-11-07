@@ -65,6 +65,7 @@ fn item(id: u64) -> Intervention {
             preserve_on_cancel: true,
             route: None,
             origin: None,
+            origin_id: None,
         }],
         source_text_segments: vec![SourceMessageTextSegment {
             message_id: MessageId::new(id),

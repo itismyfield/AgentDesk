@@ -72,8 +72,6 @@ impl ClaudeHookSource {
     /// A resume or a prompt: the hooks that may bring the pane back to a session it left.
     fn may_return(&self) -> bool {
         let prompt = HookEventKind::from_path(&self.event) == HookEventKind::UserPromptSubmit;
-        #[cfg(test)]
-        let prompt = prompt && !n2b_mutant("ups-off");
         self.is_explicit_resume() || prompt
     }
 }
@@ -114,16 +112,8 @@ impl SourceHistory {
     fn bounds(&self, left: &Left) -> Vec<DateTime<Utc>> {
         let visits = [&self.current, &self.awaiting].into_iter().flatten();
         let visits = visits.map(|visit| visit.since.unwrap_or(visit.seen));
-        #[cfg(test)]
-        let visits = visits.filter(|_| !n2b_mutant("bound"));
         std::iter::once(left.left_at).chain(visits).collect()
     }
-}
-
-/// Test-only switch naming the one rule a mutation run disables.
-#[cfg(test)]
-pub(crate) fn n2b_mutant(name: &str) -> bool {
-    std::env::var("AGENTDESK_N2B_TEST_MUTATION").is_ok_and(|value| value == name)
 }
 
 /// A transcript a hook's check verified for the pane.
@@ -280,9 +270,6 @@ pub(crate) fn judge_pin(
         SourceFileIdentity::Unavailable => None,
     };
     let own = matches!(first, FirstRecord::Session(id) if id == session);
-    #[cfg(test)]
-    let renumbered_own = own || n2b_mutant("renumber-skip-first-record");
-    #[cfg(not(test))]
     let renumbered_own = own;
     match (pin, identity) {
         // A file rewritten or truncated in place keeps its inode, so its first record decides too.
@@ -370,21 +357,10 @@ pub(crate) fn verify_claude_source(
         }
         let known = (history.current.as_ref()).is_some_and(|current| current.session == bound);
         let proven = published.is_some() && history.complete && known;
-        #[cfg(test)]
-        let lax = n2b_mutant("incomplete-proof") && known && published.is_some();
-        #[cfg(test)]
-        let proven = proven || n2b_mutant("held") || lax;
-        #[cfg(test)]
-        let proven = proven && !n2b_mutant("refuse");
         if !proven {
             return PendingConflict;
         }
         let pinned_at = left.pinned_at;
-        #[cfg(test)]
-        let pinned_at = match n2b_mutant("renumber-left-at") {
-            true => Some(left.left_at),
-            false => pinned_at,
-        };
         return judged((left.pin.as_ref(), pinned_at), hook, seen, false);
     }
     let awaited = (history.awaiting.as_ref()).is_some_and(|waiting| waiting.session == session);
@@ -394,8 +370,6 @@ pub(crate) fn verify_claude_source(
         .filter_map(|v| v.since)
         .collect();
     let stale = published.is_some_and(|t| since.iter().any(|since| t < *since));
-    #[cfg(test)]
-    let stale = stale && !n2b_mutant("stale");
     if !awaited && stale {
         return Rejected(SourceRejection::Regression);
     }
@@ -403,23 +377,11 @@ pub(crate) fn verify_claude_source(
     // An in-session resume holds Claude's next input until its hooks end, so its start is a move.
     let start = HookEventKind::from_path(&hook.event) == HookEventKind::SessionStart;
     let background = start && matches!(hook.start_source.as_deref(), Some("startup" | "clear"));
-    #[cfg(test)]
-    let background = match hook.start_source.as_deref() {
-        Some("resume") => background || (start && n2b_mutant("r5-resume-background")),
-        Some("clear") => background && !n2b_mutant("r5-clear-proven"),
-        _ => background,
-    };
-    #[cfg(test)]
-    let background = background && !n2b_mutant("u10-off");
     match judged((None, None), hook, seen, false) {
         SourceVerdict::Rotate(_)
             if !awaited && background && published.is_some() && !since.is_empty() =>
         {
             // Refused, not Pending: a Pending would be resolved by its own retry once awaited.
-            #[cfg(test)]
-            if n2b_mutant("u10-pending") {
-                return SourceVerdict::Pending;
-            }
             Rejected(SourceRejection::UnprovenStart)
         }
         verdict => verdict,

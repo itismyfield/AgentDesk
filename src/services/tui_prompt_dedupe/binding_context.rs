@@ -65,7 +65,7 @@ pub(crate) fn stable_host_identity() -> Option<String> {
         .find(|id| !id.is_empty())
 }
 
-fn context_path(provider: &str, nonce: &str) -> io::Result<PathBuf> {
+pub(crate) fn context_path(provider: &str, nonce: &str) -> io::Result<PathBuf> {
     if !matches!(provider, "claude" | "codex")
         || nonce.len() != 32
         || !nonce.bytes().all(|b| b.is_ascii_hexdigit())

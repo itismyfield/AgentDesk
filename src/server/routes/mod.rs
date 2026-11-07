@@ -32,6 +32,9 @@ pub mod github_dashboard;
 pub mod health_api;
 pub mod home_metrics;
 pub mod hooks;
+mod imessage_input_notice;
+#[cfg(all(test, unix))]
+mod imessage_input_notice_tests;
 pub(crate) mod kakao_calendar;
 pub mod kanban;
 pub mod kanban_repos;

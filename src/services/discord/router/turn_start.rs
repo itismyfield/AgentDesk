@@ -77,6 +77,23 @@ pub(crate) struct HeadlessTurnReservation {
 }
 
 impl HeadlessTurnReservation {
+    /// Names a new iMessage admission before its reply episode binds; restored owner fronts keep their ID.
+    pub(in crate::services::discord) fn for_input(
+        self,
+        channel: ChannelId,
+        source: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+    ) -> Self {
+        use crate::services::discord::queue_io::input_owner::origin::InputOrigin;
+        match InputOrigin::imessage_identity(channel.get(), source, metadata) {
+            Some((message, _)) => Self {
+                user_msg_id: MessageId::new(message),
+                ..self
+            },
+            None => self,
+        }
+    }
+
     /// The start waits behind queued input, a dequeued head and an injection reservation.
     pub(in crate::services::discord) fn behind_queue(self) -> Self {
         let admission = TurnAdmissionOrder::BehindQueue;

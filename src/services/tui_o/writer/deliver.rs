@@ -201,6 +201,8 @@ impl<H> Drop for LeaseReturn<H> {
 }
 
 pub struct ChannelWriter<P, L, A> {
+    pub(super) notice_owners: crate::services::tui_input::human_frame::history::notice_owner::Batch,
+    pub(super) notice_pending: HashMap<(SourceId, u64, u64), String>,
     pub(super) boot: super::boot::Trace,
     pub(super) suspension: super::suspension::Suspension,
     channel: u64,
@@ -260,6 +262,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         };
         let posts = Some(with_in_flight(shared));
         let mut writer = Self {
+            notice_owners: Default::default(),
+            notice_pending: HashMap::new(),
             boot: super::boot::Trace::new(channel, None, 0, 0),
             suspension: super::suspension::Suspension::default(),
             channel,
@@ -351,10 +355,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     /// One re-post turn, after this poll's owed pieces; nothing without a turn or once stopped.
     pub(crate) async fn repost_turn(&mut self) {
         let allowed = self.suspension.is_empty();
-        #[cfg(test)]
-        let allowed = allowed
-            || crate::services::claude_tui::source_verify::n2b_mutant("b1b-repost")
-            || crate::services::claude_tui::source_verify::n2b_mutant("b1b-live-s");
         if !allowed {
             return;
         }
@@ -602,6 +602,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         let mut posts = self.posts.clone();
         let stops = self.repost_stops.clone();
         let boot = self.boot.clone();
+        let owners = &self.notice_owners;
         let store = &mut self.store;
         // The first poll of the request runs under the gate, so no request starts after a
         // transition; the rest runs outside the lock.
@@ -612,7 +613,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 {
                     return Err(Refusal::Later);
                 }
-                super::input_notices::admission::admit_notice(piece, store, |store| {
+                super::input_notices::admission::admit_notice(piece, store, Some(owners), |store| {
                     // The exact permit is checked first and its lock held through the first poll.
                     let mut start = || {
                         let prepared = || LedgerEntry::Prepared {
@@ -936,15 +937,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             .cursors()
             .filter(|cursor| !cursor.retired)
             .map(|cursor| cursor.source.clone())
-            .collect();
-        #[cfg(test)]
-        let sources: Arc<[SourceId]> = sources
-            .iter()
-            .filter(|source| {
-                !crate::services::claude_tui::source_verify::n2b_mutant("b1b-live-s")
-                    || !self.suspension.contains(source)
-            })
-            .cloned()
             .collect();
         Arc::new(move || {
             live.load(Ordering::SeqCst)

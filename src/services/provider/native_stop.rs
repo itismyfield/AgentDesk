@@ -118,28 +118,37 @@ impl ReceiptSink {
             self.notify(false);
             return Some(result);
         }
-        {
-            let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if input.applied && self.cached().is_none() {
-                let result = input
-                    .receipt
-                    .as_mut()
-                    .map_or(Err(()), |r| r.try_pin_native_user());
-                match result {
-                    Ok(Some(pin)) => {
-                        let _ = self.accepted.set(pin);
-                    }
-                    Err(()) => self.rejected.store(true, Ordering::Release),
-                    Ok(None) => {}
-                }
-                if self.cached().is_some() {
-                    input.receipt = None;
-                }
-            }
-        }
+        self.settle_pin();
         // Source and receipt locks are released before a callback takes the row lock.
         self.notify(false);
         self.cached()
+    }
+    /// The pin as `observe` would settle it, without running the persistence callback, for a
+    /// reader on another thread than the writer's bridge.
+    pub(crate) fn peek(&self) -> Option<Result<NativeUserPin, ()>> {
+        if self.cached().is_none() {
+            self.settle_pin();
+        }
+        self.cached()
+    }
+    fn settle_pin(&self) {
+        let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if input.applied && self.cached().is_none() {
+            let result = input
+                .receipt
+                .as_mut()
+                .map_or(Err(()), |r| r.try_pin_native_user());
+            match result {
+                Ok(Some(pin)) => {
+                    let _ = self.accepted.set(pin);
+                }
+                Err(()) => self.rejected.store(true, Ordering::Release),
+                Ok(None) => {}
+            }
+            if self.cached().is_some() {
+                input.receipt = None;
+            }
+        }
     }
     pub(crate) fn adopt(&self, pin: NativeUserPin) {
         {
@@ -279,6 +288,11 @@ impl State {
 
     pub(crate) fn observe_native_input(&self) -> Option<Result<NativeUserPin, ()>> {
         self.input.observe()
+    }
+
+    /// This token's settled input pin, leaving its persistence to the bridge's own observe.
+    pub(crate) fn peek_native_input(&self) -> Option<Result<NativeUserPin, ()>> {
+        self.input.peek()
     }
 
     /// Busy inputs stay with their running token until completion or drop.

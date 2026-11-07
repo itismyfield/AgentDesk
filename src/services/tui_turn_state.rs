@@ -154,6 +154,78 @@ pub(crate) fn observe_provider_jsonl_turn_state(
     }
 }
 
+/// Unix nanos of the newest stamped provider conversation record in `path`'s tail window.
+/// `None` is "no measurable output": unstamped records and the file mtime never stand in.
+pub(crate) fn latest_provider_record_unix_nanos(
+    provider: &ProviderKind,
+    path: &Path,
+) -> Option<i64> {
+    let window = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES).ok()?;
+    window
+        .lines
+        .iter()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|json| provider_record_is_conversation(provider, json))
+        .find_map(|json| {
+            ["/timestamp", "/payload/timestamp"]
+                .iter()
+                .filter_map(|pointer| json.pointer(pointer)?.as_str())
+                .find_map(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+                .and_then(|time| time.timestamp_nanos_opt())
+        })
+}
+
+/// Conversation and turn-lifecycle records only; housekeeping (`cost-state`, `mode`,
+/// `session_meta`, `token_count`, `thread_settings_applied`, ...) is not output.
+fn provider_record_is_conversation(provider: &ProviderKind, json: &Value) -> bool {
+    match provider {
+        ProviderKind::Claude => matches!(
+            claude_envelope_turn_state(json),
+            Some(TuiTurnState::Idle | TuiTurnState::Streaming | TuiTurnState::UserSubmitted)
+        ),
+        ProviderKind::Codex => match json.get("type").and_then(Value::as_str) {
+            Some("event_msg") => json
+                .pointer("/payload/type")
+                .and_then(Value::as_str)
+                .is_some_and(codex_event_is_conversation),
+            Some("response_item") => codex_response_item_turn_state(json).is_some(),
+            Some("item.started" | "item.completed" | "turn.completed") => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Codex `event_msg` payload types that carry a turn, message, reasoning or tool event.
+fn codex_event_is_conversation(payload_type: &str) -> bool {
+    matches!(
+        payload_type,
+        "task_started"
+            | "task_complete"
+            | "turn_aborted"
+            | "user_message"
+            | "agent_message"
+            | "agent_message_delta"
+            | "agent_reasoning"
+            | "agent_reasoning_delta"
+            | "agent_reasoning_raw_content"
+            | "agent_reasoning_raw_content_delta"
+            | "item_started"
+            | "item_completed"
+            | "exec_command_begin"
+            | "exec_command_output_delta"
+            | "exec_command_end"
+            | "mcp_tool_call_begin"
+            | "mcp_tool_call_end"
+            | "patch_apply_begin"
+            | "patch_apply_end"
+            | "web_search_begin"
+            | "web_search_end"
+            | "error"
+    )
+}
+
 pub(crate) fn provider_runtime_has_structured_jsonl_turn_state(
     provider: &ProviderKind,
     runtime_kind: Option<RuntimeHandoffKind>,

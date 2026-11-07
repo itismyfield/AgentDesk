@@ -60,10 +60,6 @@ impl TurnSummaryRun {
         if self.provider != ShadowProvider::Claude || self.source.as_deref() == Some(path) {
             return;
         }
-        #[cfg(test)]
-        if crate::services::claude_tui::source_verify::n2b_mutant("summary-channel-wide") {
-            return;
-        }
         // The first named transcript keeps what was derived before any transcript was named.
         if let Some(previous) = self.source.replace(path.to_owned()) {
             let resumed = self.parked.remove(path);
@@ -74,10 +70,6 @@ impl TurnSummaryRun {
     }
 
     pub(super) fn has_pending_projection_probe(&self) -> bool {
-        #[cfg(test)]
-        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-summary-open") {
-            return self.open.is_some();
-        }
         self.open
             .as_ref()
             .is_some_and(|turn| turn.first.is_some() && turn.eligible)

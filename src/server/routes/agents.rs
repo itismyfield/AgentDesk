@@ -661,8 +661,10 @@ pub async fn start_agent_turn(
     Path(id): Path<String>,
     Json(body): Json<StartAgentTurnBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let notice = super::imessage_input_notice::notice_line(body.source.as_deref(), &body.prompt);
     let prompt = body.prompt.trim();
     if prompt.is_empty() {
+        super::imessage_input_notice::not_echoed(notice.as_deref(), 0, "start", "empty_prompt");
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"ok": false, "error": "prompt is required"})),
@@ -670,7 +672,15 @@ pub async fn start_agent_turn(
     }
     let metadata = match super::agents_turn_target::start_metadata(body.metadata, body.origin_id) {
         Ok(metadata) => metadata,
-        Err(response) => return response,
+        Err(response) => {
+            super::imessage_input_notice::not_echoed(
+                notice.as_deref(),
+                0,
+                "start",
+                "invalid_target_or_metadata",
+            );
+            return response;
+        }
     };
 
     let provider_override = body
@@ -693,6 +703,12 @@ pub async fn start_agent_turn(
         .map(|s| s.to_string());
     let dm_user_id_num = if let Some(dm_user_id) = dm_user_id.as_deref() {
         if channel_override.is_some() || provider_override.is_some() {
+            super::imessage_input_notice::not_echoed(
+                notice.as_deref(),
+                0,
+                "start",
+                "invalid_dm_override",
+            );
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
@@ -704,6 +720,12 @@ pub async fn start_agent_turn(
         match dm_user_id.parse::<u64>().ok().filter(|id| *id > 0) {
             Some(id) => Some(id),
             None => {
+                super::imessage_input_notice::not_echoed(
+                    notice.as_deref(),
+                    0,
+                    "start",
+                    "invalid_dm_user",
+                );
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({
@@ -731,6 +753,12 @@ pub async fn start_agent_turn(
         .filter(|value| !value.is_empty())
         && metadata_agent_id != id.trim()
     {
+        super::imessage_input_notice::not_echoed(
+            notice.as_deref(),
+            0,
+            "start",
+            "agent_identity_mismatch",
+        );
         return (
             StatusCode::FORBIDDEN,
             Json(json!({
@@ -744,6 +772,7 @@ pub async fn start_agent_turn(
     }
 
     let Some(pool) = state.pg_pool_ref() else {
+        super::imessage_input_notice::not_echoed(notice.as_deref(), 0, "start", "pool_unavailable");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"ok": false, "error": "postgres pool unavailable"})),
@@ -762,7 +791,15 @@ pub async fn start_agent_turn(
     .await
     {
         Ok(target) => target,
-        Err(response) => return response,
+        Err(response) => {
+            super::imessage_input_notice::not_echoed(
+                notice.as_deref(),
+                0,
+                "start",
+                "invalid_target_or_metadata",
+            );
+            return response;
+        }
     };
     // A start the owner takes queues behind an external turn instead of refusing it.
     if dm_user_id_num.is_none()
@@ -774,10 +811,22 @@ pub async fn start_agent_turn(
         )
         .await
     {
+        super::imessage_input_notice::not_echoed(
+            notice.as_deref(),
+            channel_id_num,
+            "start",
+            "conflict",
+        );
         return conflict;
     }
 
     let Some(registry) = state.health_registry.as_deref() else {
+        super::imessage_input_notice::not_echoed(
+            notice.as_deref(),
+            channel_id_num,
+            "start",
+            "runtime_unavailable",
+        );
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"ok": false, "error": "discord runtime health registry unavailable"})),
@@ -812,15 +861,30 @@ pub async fn start_agent_turn(
         .await
     };
 
+    if start_result.is_err() {
+        super::imessage_input_notice::not_echoed(
+            notice.as_deref(),
+            channel_id_num,
+            "start",
+            "backend_error",
+        );
+    }
     match start_result {
-        Ok((turn_id, status)) => (
-            StatusCode::OK,
-            Json(json!({
-                "ok": true,
-                "turn_id": turn_id,
-                "status": status,
-            })),
-        ),
+        Ok((turn_id, status)) => {
+            if dm_user_id_num.is_none() {
+                super::imessage_input_notice::echo(
+                    pool,
+                    channel_id_num,
+                    &format!("turn:{turn_id}"),
+                    notice.as_deref(),
+                )
+                .await;
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"ok":true, "turn_id":turn_id, "status":status})),
+            )
+        }
         Err(crate::services::discord::HeadlessTurnStartError::Conflict(error)) => (
             StatusCode::CONFLICT,
             Json(json!({"ok": false, "error": error, "status": "conflict"})),
@@ -1015,10 +1079,23 @@ pub async fn agent_handoff(
     axum::extract::Path(to_agent_id): axum::extract::Path<String>,
     axum::Json(body): axum::Json<AgentHandoffBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let notice = super::imessage_input_notice::notice_line(body.source.as_deref(), &body.prompt);
     let Some(pool) = state.pg_pool_ref() else {
+        super::imessage_input_notice::not_echoed(
+            notice.as_deref(),
+            0,
+            "handoff",
+            "pool_unavailable",
+        );
         return pg_required_response();
     };
     let Some(registry) = state.health_registry.as_ref() else {
+        super::imessage_input_notice::not_echoed(
+            notice.as_deref(),
+            0,
+            "handoff",
+            "runtime_unavailable",
+        );
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error": "Discord not available (standalone mode)"})),
@@ -1029,7 +1106,15 @@ pub async fn agent_handoff(
         body.channel_kind.as_deref(),
     ) {
         Ok(channel_kind) => channel_kind,
-        Err(error) => return (error.status(), Json(error.body())),
+        Err(error) => {
+            super::imessage_input_notice::not_echoed(
+                notice.as_deref(),
+                0,
+                "handoff",
+                "invalid_channel_kind",
+            );
+            return (error.status(), Json(error.body()));
+        }
     };
 
     match crate::services::discord::agent_handoff::start_agent_handoff_turn(
@@ -1046,8 +1131,25 @@ pub async fn agent_handoff(
     )
     .await
     {
-        Ok(response) => (StatusCode::OK, Json(response.to_value())),
-        Err(error) => (error.status(), Json(error.body())),
+        Ok(response) => {
+            super::imessage_input_notice::echo(
+                pool,
+                response.channel_id_num,
+                &format!("turn:{}", response.turn_id),
+                notice.as_deref(),
+            )
+            .await;
+            (StatusCode::OK, Json(response.to_value()))
+        }
+        Err(error) => {
+            super::imessage_input_notice::not_echoed(
+                notice.as_deref(),
+                0,
+                "handoff",
+                "backend_error",
+            );
+            (error.status(), Json(error.body()))
+        }
     }
 }
 

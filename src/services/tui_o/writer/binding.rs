@@ -163,10 +163,6 @@ fn judged_from_p5(
             ));
         }
     };
-    #[cfg(test)]
-    let source_allowed = source_allowed
-        || std::env::var("AGENTDESK_N2B_TEST_MUTATION")
-            .is_ok_and(|mutation| mutation == "joint-metadata-consumer");
     let record = match event.new.clone() {
         p5::BindingTarget::Source(_) | p5::BindingTarget::Resolved { .. } if !source_allowed => {
             BindingRecord::Rejected {

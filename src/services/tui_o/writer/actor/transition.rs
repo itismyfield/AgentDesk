@@ -175,9 +175,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     /// Takes requests only once the sources are restored: at most one envelope and one step a poll.
     pub(super) async fn poll_transition(&mut self, resumed: bool, unsettled: &Unsettled) {
         let suspended = !self.writer.suspension.is_empty();
-        #[cfg(test)]
-        let suspended = suspended
-            && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-poll-transition");
         if suspended {
             if let Some(job) = self.transitions.job.take() {
                 debug_assert!(!job.apply);

@@ -120,10 +120,6 @@ impl Port {
     }
 
     pub(crate) fn sources_unsuspended(&self) -> bool {
-        #[cfg(test)]
-        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-submission") {
-            return true;
-        }
         self.suspension.is_empty()
     }
 
@@ -267,9 +263,6 @@ impl Receiver {
         let mut deny = None;
         let mut typed_failure = None;
         let suspended = !writer.suspension.is_empty();
-        #[cfg(test)]
-        let suspended = suspended
-            && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-submission-apply");
         let result = if suspended {
             Err(StoreError::Rejected("suspended_sources".into()))
         } else if !Arc::ptr_eq(&self.run, &request.run) {

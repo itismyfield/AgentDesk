@@ -233,6 +233,16 @@ async fn acquire_as_preferred_gateway(
                 {
                     return Ok(None);
                 }
+                // This wait holds the provider's shutdown-barrier slot, and only the
+                // standby path spawns the marker poller that can consume it.
+                if restart_request_is_pending() {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ⏭ GATEWAY-LEASE: {} stops waiting for the held lease — a restart request is pending; standing by so its marker poller can drain",
+                        provider.display_name()
+                    );
+                    return Ok(None);
+                }
                 // ~1 log/minute at a 5s poll: enough to see a stuck hand-off,
                 // quiet enough to leave running.
                 if attempts % 12 == 0 {
@@ -251,6 +261,13 @@ async fn acquire_as_preferred_gateway(
             Err(error) => return Err(error),
         }
     }
+}
+
+/// A restart request with a nonce is what the deferred-restart poller consumes;
+/// run_bot spawns that poller only after the lease outcome is settled.
+fn restart_request_is_pending() -> bool {
+    crate::config::runtime_root()
+        .is_some_and(|root| restart_file_nonce(&root, "restart_pending").is_some())
 }
 
 fn discord_gateway_lock_id(token_hash: &str) -> i64 {

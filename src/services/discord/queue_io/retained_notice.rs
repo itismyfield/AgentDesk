@@ -80,6 +80,34 @@ pub(crate) async fn draft_unproven(
     .map_err(|e| e.to_string())
 }
 
+/// The one notice a carried turn closed without proof its input ran owes; keyed by that turn, so
+/// a repeat close of the same row posts nothing more.
+pub(crate) async fn carried_unverified_closed(
+    pool: &sqlx::PgPool,
+    provider: &str,
+    channel: u64,
+    (turn, nonce): (u64, Option<&str>),
+) -> Result<i64, String> {
+    let stable =
+        serde_json::to_vec(&(provider, channel, turn, nonce)).map_err(|e| e.to_string())?;
+    let key = format!("carried-unverified:{:x}", Sha256::digest(stable));
+    let body = "⚠️ 재시작 전에 받은 입력이 처리됐는지 확인하지 못한 채 그 턴을 닫았습니다. 다음 입력은 계속 처리합니다. 답을 받지 못했다면 같은 내용을 다시 보내 주세요.";
+    let text = super::super::dispatch_policy::prepend_operational_alert_origin(body);
+    enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+        pool,
+        OutboxMessage {
+            target: &format!("channel:{channel}"),
+            content: &text,
+            bot: provider,
+            source: "retained_input_notice",
+            reason_code: Some("carried.unverified_closed"),
+            session_key: Some(&key),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 impl crate::services::turn_orchestrator::ChannelMailboxHandle {
     #[cfg(test)]
     pub(crate) fn v2_notice_is_non_turn(text: &str) -> bool {

@@ -17,25 +17,248 @@ fn fresh() -> Arc<CancelToken> {
     Arc::new(CancelToken::new())
 }
 
-/// Each Enter the pane records gets its AI turn: an answer, then the turn's end.
-fn answers(rig: &Rig) -> std::thread::JoinHandle<()> {
-    let (renderer, transcript) = (rig.renderer.clone(), rig.transcript());
-    std::thread::spawn(move || {
-        for n in 1..=2 {
-            let entered = || events(&renderer).iter().filter(|e| *e == "Enter").count() >= n;
-            let deadline = std::time::Instant::now() + Duration::from_secs(60);
-            while !entered() {
-                assert!(std::time::Instant::now() < deadline, "Enter {n} never came");
-                std::thread::sleep(Duration::from_millis(20));
+/// The thread answering each Enter. A turn read only ends on its answer, so the reads use its
+/// tokens: when it ends before the test is done, it cancels them and the test raises its panic.
+struct Answers {
+    thread: Option<std::thread::JoinHandle<()>>,
+    reads: Arc<std::sync::Mutex<Reads>>,
+    done: Option<Sender<()>>,
+    exited: std::sync::mpsc::Receiver<()>,
+}
+
+#[derive(Default)]
+struct Reads {
+    tokens: Vec<Arc<CancelToken>>,
+    ended: bool,
+    finished: bool,
+}
+
+/// Cancels every read still waiting on the answering thread once that thread is gone; dropping
+/// its sender tells the joining test that the thread has ended.
+struct CancelReadsOnExit {
+    reads: Arc<std::sync::Mutex<Reads>>,
+    _exit: Sender<()>,
+}
+
+impl Drop for CancelReadsOnExit {
+    fn drop(&mut self) {
+        let mut reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
+        reads.ended = true;
+        if !reads.finished {
+            for token in &reads.tokens {
+                token
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
             }
-            let mut file = fs::OpenOptions::new()
-                .append(true)
-                .open(&transcript)
-                .unwrap();
-            let answer = ASSISTANT.replace("{n}", &n.to_string());
-            writeln!(file, "{answer}\n{}", IDLE.trim_end()).unwrap();
         }
+    }
+}
+
+impl Answers {
+    /// A turn's token, cancelled at once if the answering thread has already ended.
+    fn token(&self) -> Arc<CancelToken> {
+        let token = fresh();
+        let mut reads = self.reads.lock().unwrap();
+        if reads.ended && !reads.finished {
+            token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        reads.tokens.push(token.clone());
+        token
+    }
+
+    /// Raises the answering thread's panic here once that thread has ended.
+    fn check(&mut self) {
+        if self.thread.as_ref().is_some_and(|t| t.is_finished()) {
+            self.join();
+        }
+    }
+
+    fn join(&mut self) {
+        self.reads.lock().unwrap().finished = true;
+        self.done.take();
+        let exited = self.exited.recv_timeout(Duration::from_secs(20));
+        let stuck = exited == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+        assert!(!stuck, "the answering thread never ended");
+        if let Some(Err(panic)) = self.thread.take().map(|t| t.join()) {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+/// Each Enter the pane records gets its AI turn: an answer, then the turn's end.
+fn answers(rig: &Rig) -> Answers {
+    use std::sync::mpsc::RecvTimeoutError;
+    let (renderer, transcript) = (rig.renderer.clone(), rig.transcript());
+    let reads = Arc::new(std::sync::Mutex::new(Reads::default()));
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    let (exit, exited) = std::sync::mpsc::channel();
+    let release = CancelReadsOnExit {
+        reads: reads.clone(),
+        _exit: exit,
+    };
+    let thread = std::thread::spawn(move || {
+        let _release = release;
+        // False once the test has ended; its own assertions then say why.
+        let until = |what: &str, ready: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            while !ready() {
+                assert!(std::time::Instant::now() < deadline, "{what} never came");
+                let waited = finished.recv_timeout(Duration::from_millis(20));
+                if waited != Err(RecvTimeoutError::Timeout) {
+                    return false;
+                }
+            }
+            true
+        };
+        for n in 1..=2 {
+            if !until(&format!("Enter {n}"), &|| enters(&renderer) >= n) {
+                return;
+            }
+            let recorded = || user_row_landed(&renderer, &transcript);
+            if !until(&format!("Enter {n}'s user row"), &recorded) {
+                return;
+            }
+            write_answer(&transcript, &n.to_string());
+        }
+        let read = finished.recv_timeout(Duration::from_secs(60));
+        assert!(
+            read != Err(RecvTimeoutError::Timeout),
+            "the last answer's turn read never ended"
+        );
+    });
+    Answers {
+        thread: Some(thread),
+        reads,
+        done: Some(done),
+        exited,
+    }
+}
+
+fn enters(renderer: &Path) -> usize {
+    events(renderer).iter().filter(|e| *e == "Enter").count()
+}
+
+/// Whether the pane wrote the user row of its last paste. Enter is recorded before that row; an
+/// answer ahead of it leaves the transcript ending Busy, so the turn's read never ends.
+fn user_row_landed(renderer: &Path, transcript: &Path) -> bool {
+    let body = fs::read_to_string(renderer.join("body")).unwrap();
+    let rows = fs::read_to_string(transcript).unwrap();
+    rows.lines().any(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .is_ok_and(|row| row["type"] == "user" && row["message"]["content"] == body)
     })
+}
+
+/// The AI turn's answer `n`, then the turn's end.
+fn write_answer(transcript: &Path, n: &str) {
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(transcript)
+        .unwrap();
+    let answer = ASSISTANT.replace("{n}", n);
+    writeln!(file, "{answer}\n{}", IDLE.trim_end()).unwrap();
+}
+
+/// An idle turn read on a scoped thread under a token the test holds. A turn the test did not
+/// join is cancelled and awaited for a bounded time; one that still runs ends the test process.
+struct ScopedTurn<'scope, T> {
+    reader: Option<std::thread::ScopedJoinHandle<'scope, T>>,
+    cancel: Arc<CancelToken>,
+    ended: std::sync::mpsc::Receiver<()>,
+    renderer: std::path::PathBuf,
+    enter: usize,
+}
+
+impl<'scope, T: Send + 'scope> ScopedTurn<'scope, T> {
+    fn spawn<'env>(
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        rig: &Rig,
+        turn: impl FnOnce(Arc<CancelToken>) -> T + Send + 'scope,
+    ) -> Self {
+        let (cancel, (done, ended)) = (fresh(), std::sync::mpsc::channel());
+        // Counted before the reader can send this turn's Enter.
+        let renderer = rig.renderer.clone();
+        let enter = enters(&renderer) + 1;
+        let token = cancel.clone();
+        let reader = scope.spawn(move || {
+            let result = turn(token);
+            let _ = done.send(());
+            result
+        });
+        Self {
+            reader: Some(reader),
+            cancel,
+            ended,
+            renderer,
+            enter,
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.reader
+            .as_ref()
+            .is_some_and(|reader| reader.is_finished())
+    }
+
+    fn recorded(&self, transcript: &Path) -> bool {
+        enters(&self.renderer) >= self.enter && user_row_landed(&self.renderer, transcript)
+    }
+
+    /// Answers `n` once the pane recorded this turn's Enter and the user row of its last paste. A
+    /// turn that ended first gets no answer: its panic, or this one, fails the test.
+    fn answer(&mut self, n: &str) {
+        use std::sync::mpsc::RecvTimeoutError;
+        let transcript = self.renderer.join("transcript");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !self.recorded(&transcript) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Enter {}'s user row never came",
+                self.enter
+            );
+            let waited = self.ended.recv_timeout(Duration::from_millis(20));
+            if waited != Err(RecvTimeoutError::Timeout) && !self.recorded(&transcript) {
+                if let Some(Err(panic)) = self.reader.take().map(|reader| reader.join()) {
+                    std::panic::resume_unwind(panic);
+                }
+                panic!("the turn ended before Enter {}'s user row", self.enter);
+            }
+        }
+        write_answer(&transcript, n);
+    }
+
+    fn join(mut self) -> T {
+        let waited = self.ended.recv_timeout(Duration::from_secs(60));
+        let timed_out = waited == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+        assert!(!timed_out, "the answered turn's read never ended");
+        match self.reader.take().map(|reader| reader.join()) {
+            Some(Ok(result)) => result,
+            Some(Err(panic)) => std::panic::resume_unwind(panic),
+            None => unreachable!("a turn is joined once"),
+        }
+    }
+}
+
+impl<T> Drop for ScopedTurn<'_, T> {
+    fn drop(&mut self) {
+        if self.reader.is_some() {
+            self.cancel
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+            let waited = self.ended.recv_timeout(Duration::from_secs(20));
+            if waited == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                // A scoped reader can be neither detached nor killed, and the scope would join it
+                // forever; ending the process fails the test instead. Output capture is bypassed.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "an idle turn's reader ignored its cancel for 20s; ending the test process"
+                );
+                std::process::exit(101);
+            }
+        }
+    }
 }
 
 /// The pane's runtime binding naming `session`, as the relay rehydrates it after each turn ends.
@@ -192,15 +415,10 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
     );
     row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
     save_inflight_state(&row).unwrap();
+    let at = (session.as_str(), elsewhere.path());
     std::thread::scope(|scope| {
-        let first = scope.spawn(|| {
-            idle_turn(
-                &rig,
-                (session.as_str(), elsewhere.path()),
-                fresh(),
-                first,
-                |_| None,
-            )
+        let mut first = ScopedTurn::spawn(scope, &rig, |cancel| {
+            idle_turn(&rig, at, cancel, first, |_| None)
         });
         struct CloseOnUnwind(std::path::PathBuf);
         impl Drop for CloseOnUnwind {
@@ -303,14 +521,8 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
         let busy_settled = on_settled.recv_timeout(Duration::from_secs(20));
         let before_end = rig.events();
         let kept = rig.snapshot();
-        writeln!(
-            file,
-            "{}\n{}",
-            ASSISTANT.replace("{n}", "A"),
-            IDLE.trim_end()
-        )
-        .unwrap();
-        let (result, _) = first.join().unwrap();
+        first.answer("A");
+        let (result, _) = first.join();
         assert_eq!(result, Ok(()), "A's observer completes once");
         println!(
             "BUSY_ARRIVAL merge={merge} B_settled={busy_settled:?} handoffs={:?}",
@@ -351,25 +563,13 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
                 .recv_timeout(Duration::from_secs(20))
                 .expect("B's one idle start after A ends");
             std::thread::scope(|scope| {
-                let next = scope.spawn(|| {
-                    idle_turn(
-                        &rig,
-                        (session.as_str(), elsewhere.path()),
-                        fresh(),
-                        next,
-                        |_| None,
-                    )
+                let mut next = ScopedTurn::spawn(scope, &rig, |cancel| {
+                    idle_turn(&rig, at, cancel, next, |_| None)
                 });
                 let _close = CloseOnUnwind(rig.transcript());
                 let settled = on_settled.recv_timeout(Duration::from_secs(20));
-                writeln!(
-                    file,
-                    "{}\n{}",
-                    ASSISTANT.replace("{n}", "B"),
-                    IDLE.trim_end()
-                )
-                .unwrap();
-                assert_eq!(next.join().unwrap().0, Ok(()));
+                next.answer("B");
+                assert_eq!(next.join().0, Ok(()));
                 assert!(settled.is_ok(), "B's idle submit settled once");
             });
             rig.runtime.block_on(rig.mailbox.finish_turn(
@@ -745,13 +945,14 @@ fn busy_hold_case(
     let texts = mock.written_texts();
     let notices: Vec<_> = texts
         .iter()
-        .filter(|t| t.ends_with("즉시주입 하지 못하고 메시지큐에 들어갔습니다"))
+        .filter(|t| t.as_str() == "큐에 들어갔습니다")
         .collect();
     let posts = mock
         .local_note_posts
         .load(std::sync::atomic::Ordering::SeqCst);
     if let Some(hold) = hold {
         assert_eq!(posts, 1, "one POST after repeated real refusals: {texts:?}");
+        assert!(!notices.is_empty(), "plain queue notice: {texts:?}");
         assert!(
             texts.contains(&hold.notice()),
             "the actual refusal is explained: {texts:?}"
@@ -843,25 +1044,14 @@ fn busy_hold_case(
             let front = idle_inbox
                 .recv_timeout(Duration::from_secs(20))
                 .expect("B starts once at A's boundary");
+            let at = (session.as_str(), elsewhere.path());
             std::thread::scope(|scope| {
-                let started = scope.spawn(|| {
-                    idle_turn(
-                        &rig,
-                        (session.as_str(), elsewhere.path()),
-                        fresh(),
-                        front,
-                        |_| None,
-                    )
+                let mut started = ScopedTurn::spawn(scope, &rig, |cancel| {
+                    idle_turn(&rig, at, cancel, front, |_| None)
                 });
                 let settled = settled_events.recv_timeout(Duration::from_secs(20));
-                writeln!(
-                    transcript,
-                    "{}\n{}",
-                    ASSISTANT.replace("{n}", "B"),
-                    IDLE.trim_end()
-                )
-                .unwrap();
-                assert_eq!(started.join().unwrap().0, Ok(()));
+                started.answer("B");
+                assert_eq!(started.join().0, Ok(()));
                 assert!(settled.is_ok(), "B's boundary input settled");
             });
             assert_eq!(rig.events().iter().filter(|e| *e == "paste").count(), 1);
@@ -1093,7 +1283,7 @@ fn an_idle_pane_takes_each_queued_front_once_through_its_own_observer() {
         .open(rig.transcript())
         .unwrap();
     writeln!(file, "{}", IDLE.trim_end()).unwrap();
-    let answering = answers(&rig);
+    let mut answering = answers(&rig);
     {
         let _entered = rig.runtime.enter();
         crate::services::discord::queue_io::input_owner::drive::wake(drive);
@@ -1104,7 +1294,9 @@ fn an_idle_pane_takes_each_queued_front_once_through_its_own_observer() {
         handed.push(front.1.text.clone());
         rehydrate(&rig, &session);
         let at = (session.as_str(), elsewhere.path());
-        let (result, sent) = idle_turn(&rig, at, fresh(), (front, settled), |_| None);
+        let cancel = answering.token();
+        let (result, sent) = idle_turn(&rig, at, cancel, (front, settled), |_| None);
+        answering.check();
         assert_eq!(result, Ok(()), "{handed:?}");
         said.extend(sent.into_iter().filter_map(|m| match m {
             StreamMessage::Text { content } => Some(content),
@@ -1114,7 +1306,7 @@ fn an_idle_pane_takes_each_queued_front_once_through_its_own_observer() {
             break;
         }
     }
-    answering.join().unwrap();
+    answering.join();
     assert_eq!(handed, [PROMPT, "second question"], "in order, each once");
     let events = rig.events();
     let count = |key: &str| events.iter().filter(|e| *e == key).count();
@@ -2018,6 +2210,7 @@ fn relaunch(
     rig: &Rig,
     (session, dir): (&str, &Path),
     sender: &Sender<StreamMessage>,
+    cancel: Arc<CancelToken>,
 ) -> ClaudeLegacyProbe {
     let (name, channel, transcript) = (rig.name.clone(), rig.channel, rig.transcript());
     let (real, socket) = (rig.f.real.clone(), rig.f.socket.clone());
@@ -2053,7 +2246,6 @@ fn relaunch(
         let source = json!({"kind":"pre_source","expected_session_id":null,
             "expected_transcript":null,"binding_watermark":null});
         let observe = crate::services::claude_tui::hosting::owner_observer;
-        let cancel = Arc::new(CancelToken::new());
         let at = (name.as_str(), PROMPT, channel);
         let until_done = observe(at, (Some(&session), &dir), sender, cancel).ok_or("unobserved")?;
         let path = transcript.display().to_string();
@@ -2102,7 +2294,7 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
         .open(rig.transcript())
         .unwrap();
     writeln!(file, "{}", IDLE.trim_end()).unwrap();
-    let answering = answers(&rig);
+    let mut answering = answers(&rig);
     {
         let _entered = rig.runtime.enter();
         crate::services::discord::queue_io::input_owner::drive::wake(drive);
@@ -2112,9 +2304,12 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
         handed.push(front.1.text.clone());
         rehydrate(&rig, &session);
         let at = (session.as_str(), elsewhere.path());
-        let first = handed.len() == 1;
-        let driver = |sender: &Sender<StreamMessage>| first.then(|| relaunch(&rig, at, sender));
-        let (result, sent) = idle_turn(&rig, at, fresh(), (front, settled), driver);
+        let (first, observed) = (handed.len() == 1, answering.token());
+        let driver =
+            |sender: &Sender<StreamMessage>| first.then(|| relaunch(&rig, at, sender, observed));
+        let cancel = answering.token();
+        let (result, sent) = idle_turn(&rig, at, cancel, (front, settled), driver);
+        answering.check();
         assert_eq!(result, Ok(()), "{handed:?}");
         assert!(
             CLAUDE_LEGACY_PROBE.lock().unwrap().is_none(),
@@ -2128,7 +2323,7 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
             break;
         }
     }
-    answering.join().unwrap();
+    answering.join();
     assert_eq!(handed, [PROMPT, "second question"], "in order, each once");
     let events = rig.events();
     let count = |key: &str| events.iter().filter(|e| *e == key).count();
@@ -2635,7 +2830,8 @@ pub(crate) fn root_recovery_launch(
             return Err(Err("recovery launch observer closed".into()));
         }
         return Err(tokio::task::block_in_place(|| {
-            result.recv().unwrap_or_else(|error| Err(error.to_string()))
+            let reply = result.recv_timeout(Duration::from_secs(60));
+            reply.unwrap_or_else(|error| Err(error.to_string()))
         }));
     }
     let launch = ROOT_RECOVERY_LAUNCH.with(|slot| {

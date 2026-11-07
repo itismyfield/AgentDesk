@@ -10,8 +10,6 @@ pub(crate) fn initial_fresh_refusal(channel: u64) -> Option<&'static str> {
         return Some("host_missing");
     };
     let owned = owned_now(&live.gate);
-    #[cfg(test)]
-    let owned = owned || crate::services::claude_tui::source_verify::n2b_mutant("b1b-host");
     if !owned {
         return Some("ownership_not_owned");
     }
@@ -28,10 +26,6 @@ pub(crate) fn initial_fresh_refusal(channel: u64) -> Option<&'static str> {
 }
 
 pub(super) fn hold_metadata(store: &ChannelStore) -> Option<&'static str> {
-    #[cfg(test)]
-    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-meta") {
-        return None;
-    }
     if !crate::services::tui_prompt_dedupe::clear_relaunch::fresh_scope_eligible(
         store.init().channel,
     ) {
@@ -51,18 +45,10 @@ pub(super) fn hold_metadata(store: &ChannelStore) -> Option<&'static str> {
             .cursors()
             .filter(|cursor| {
                 let suspended = selection.contains(&cursor.source);
-                #[cfg(test)]
-                let suspended = suspended
-                    && !crate::services::claude_tui::source_verify::n2b_mutant(
-                        "b1b-boot-scope-subtract",
-                    );
                 !cursor.retired && !suspended
             })
             .map(|cursor| cursor.source.clone()),
     );
-    #[cfg(test)]
-    let ordinary =
-        ordinary && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-boot-ordinary");
     if ordinary {
         return None;
     }
@@ -82,10 +68,6 @@ pub(super) fn hold_metadata(store: &ChannelStore) -> Option<&'static str> {
 }
 
 fn boot_reason(channel_ready: bool, terminal: &'static str) -> &'static str {
-    #[cfg(test)]
-    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-boot-gate-terminal") {
-        return terminal;
-    }
     if channel_ready {
         terminal
     } else {
@@ -104,12 +86,6 @@ pub(super) async fn wait_metadata(
     let channel = store.init().channel;
     let started = tokio::time::Instant::now();
     let grace = BOOT_GATE_GRACE;
-    #[cfg(test)]
-    let grace = if crate::services::claude_tui::source_verify::n2b_mutant("p2fu-grace-zero") {
-        Duration::ZERO
-    } else {
-        grace
-    };
     let mut wait = Duration::from_millis(250);
     let mut pending = false;
     let mut warned = false;
@@ -145,14 +121,6 @@ pub(super) async fn wait_metadata(
                 if pending {
                     alarms.resume_pending(channel, false);
                 }
-                #[cfg(test)]
-                if warned
-                    && crate::services::claude_tui::source_verify::n2b_mutant(
-                        "p2fu-terminal-reason",
-                    )
-                {
-                    return false;
-                }
                 hold(alarms, channel, reason);
                 return false;
             }
@@ -170,9 +138,6 @@ pub(super) async fn wait_metadata(
                 alarms.resume_pending(channel, false);
             }
             let clear = warned;
-            #[cfg(test)]
-            let clear =
-                clear && !crate::services::claude_tui::source_verify::n2b_mutant("p2fu-stop-clear");
             if clear {
                 alarms.halt_cleared(channel);
             }

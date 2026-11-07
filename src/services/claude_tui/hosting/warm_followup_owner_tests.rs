@@ -187,3 +187,224 @@ fn a_legacy_warm_submit_keys_only_through_its_tokens_first_key_gate() {
         tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
     }
 }
+
+/// What an in-CLI `/clear` appends to the session it leaves (Claude 2.1.316, production launch).
+fn clear_suffix() -> String {
+    const FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/hook_payload/claude-2.1.316.transcript-prefix.jsonl"
+    ));
+    let line = FIXTURE
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|row| row["case"] == "suffix_after_cli_clear")
+        .unwrap();
+    format!("{}\n", line["record"])
+}
+
+/// A live pane whose observer is built on session `before` while `after` may be adopted later.
+struct ClearedPane {
+    _dedupe: std::sync::MutexGuard<'static, ()>,
+    _rotations: std::sync::MutexGuard<'static, ()>,
+    _root: crate::config::TestRuntimeRootGuard,
+    tmux: crate::services::claude_tui::input::submission::tests::ScriptedTmux,
+    dir: tempfile::TempDir,
+    session: String,
+    before: String,
+    after: String,
+}
+
+impl ClearedPane {
+    fn new() -> Self {
+        use crate::services::claude_tui::input::submission::tests::{ScriptedTmux, view};
+        let dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        // Rotation tests clear the adopted-session map under their own lock; hold it so they wait.
+        let rotations =
+            crate::services::tui_prompt_dedupe::lock_claude_session_rotations_for_tests();
+        let root = crate::config::TestRuntimeRootGuard::new();
+        let pane = Self {
+            _dedupe: dedupe,
+            _rotations: rotations,
+            _root: root,
+            tmux: ScriptedTmux::new(&view("", false)),
+            dir: tempfile::tempdir().unwrap(),
+            session: format!("AgentDesk-claude-clear-{}", uuid::Uuid::new_v4().simple()),
+            before: uuid::Uuid::new_v4().to_string(),
+            after: uuid::Uuid::new_v4().to_string(),
+        };
+        // A live pane, so only a receipt, a rebind or the grace ends the observer's wait.
+        pane.tmux.set_dead(false);
+        let idle = "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n";
+        std::fs::write(pane.path(&pane.before), idle).unwrap();
+        pane.bind(&pane.before.clone());
+        pane
+    }
+
+    fn path(&self, sid: &str) -> std::path::PathBuf {
+        self.dir.path().join(format!("{sid}.jsonl"))
+    }
+
+    fn bind(&self, sid: &str) {
+        use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            &self.session,
+            TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                output_path: self.path(sid).display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(sid.to_string()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        )
+    }
+
+    /// One answered turn of `prompt` in session `sid`.
+    fn turn(sid: &str, prompt: &str, text: &str) -> String {
+        let user = serde_json::json!({"type":"user","uuid":format!("u-{sid}"),"sessionId":sid,
+            "message":{"role":"user","content":prompt}});
+        let answer = serde_json::json!({"type":"assistant","message":{"role":"assistant",
+            "content":[{"type":"text","text":text}]}});
+        let stop = serde_json::json!({"type":"system","subtype":"stop_hook_summary"});
+        format!("{user}\n{answer}\n{stop}\n")
+    }
+
+    /// Runs `observe` to its end (cancelled after 15 s) and returns what it relayed and how long.
+    fn read(
+        &self,
+        observe: Box<dyn FnOnce() -> Result<(), String> + Send>,
+        cancel: &std::sync::Arc<CancelToken>,
+        receiver: std::sync::mpsc::Receiver<StreamMessage>,
+    ) -> (Result<(), String>, String, std::time::Duration) {
+        let started = std::time::Instant::now();
+        let (finished, done) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result = observe();
+            let _ = finished.send(());
+            result
+        });
+        if done
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .is_err()
+        {
+            cancel
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let result = reader.join().unwrap();
+        let text = receiver
+            .try_iter()
+            .filter_map(|message| match message {
+                StreamMessage::Text { content } => Some(content),
+                _ => None,
+            })
+            .collect();
+        (result, text, started.elapsed())
+    }
+}
+
+impl Drop for ClearedPane {
+    fn drop(&mut self) {
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&self.session);
+        crate::services::tui_prompt_dedupe::forget_hook_adopted_claude_session_id(&self.session);
+    }
+}
+
+/// `/clear`'s session is adopted after the owner's observer was built and the old session took
+/// the clear's metadata: the submit's answer is read from the session the pane moved to.
+#[test]
+fn an_owner_observer_built_before_clear_adoption_reads_the_adopted_session() {
+    let pane = ClearedPane::new();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(CancelToken::new());
+    let observe = owner_observer(
+        (&pane.session, "after clear", 7_896_203),
+        (None, pane.dir.path()),
+        sender,
+        cancel.clone(),
+    )
+    .expect("the observer resolves the pane's session before the submit");
+    let mut old = std::fs::OpenOptions::new()
+        .append(true)
+        .open(pane.path(&pane.before))
+        .unwrap();
+    std::io::Write::write_all(&mut old, clear_suffix().as_bytes()).unwrap();
+    let answered = ClearedPane::turn(
+        &pane.after,
+        "after clear",
+        "answered in the adopted session",
+    );
+    std::fs::write(pane.path(&pane.after), answered).unwrap();
+    pane.bind(&pane.after.clone());
+    crate::services::tui_prompt_dedupe::record_hook_adopted_claude_session_id(
+        &pane.session,
+        &pane.after,
+    );
+    let (result, text, _) = pane.read(observe, &cancel, receiver);
+    assert!(
+        text.contains("answered in the adopted session"),
+        "the observer must read the adopted session's answer: {text:?}"
+    );
+    assert_eq!(result, Ok(()));
+}
+
+/// With no `/clear`, the submit's own receipt in the observer's session starts the read at once,
+/// from the observer's offset, without waiting out the rebind grace.
+#[test]
+fn an_owner_observer_reads_its_own_session_once_the_submit_receipt_lands_there() {
+    let pane = ClearedPane::new();
+    let frame = "own session input";
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(CancelToken::new());
+    let observe = owner_observer(
+        (&pane.session, frame, 7_896_205),
+        (None, pane.dir.path()),
+        sender,
+        cancel.clone(),
+    )
+    .expect("the observer resolves the pane's session before the submit");
+    let answered = ClearedPane::turn(&pane.before, frame, "answered in its own session");
+    pane.tmux
+        .on_enter(&pane.path(&pane.before), answered.trim_end());
+    let sent = guarded_outcome::with_receipt_sink(Some(&cancel), || {
+        crate::services::claude_tui::input::send_warm_followup_owned(&pane.session, frame, None)
+    });
+    assert!(sent.is_ok(), "{sent:?}");
+    let (result, text, took) = pane.read(observe, &cancel, receiver);
+    assert!(text.contains("answered in its own session"), "{text:?}");
+    assert_eq!(result, Ok(()));
+    assert!(took < REBIND_GRACE, "the receipt decides at once: {took:?}");
+}
+
+/// The rebind is asked again while the adoption is still pending; the old session growing with
+/// metadata alone never decides for it.
+#[test]
+fn a_rebind_pending_at_the_first_poll_is_followed_once_adopted() {
+    let pane = ClearedPane::new();
+    let observed = Resolution {
+        session_id: pane.before.clone(),
+        transcript_path: pane.path(&pane.before),
+        resume: true,
+    };
+    let mut old = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&observed.transcript_path)
+        .unwrap();
+    std::io::Write::write_all(&mut old, clear_suffix().as_bytes()).unwrap();
+    std::fs::write(pane.path(&pane.after), "").unwrap();
+    let adopted = Resolution {
+        session_id: pane.after.clone(),
+        transcript_path: pane.path(&pane.after),
+        resume: true,
+    };
+    let asked = std::sync::atomic::AtomicUsize::new(0);
+    let rebound = rebound_source(&pane.session, &observed, &CancelToken::new(), || {
+        let n = asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (n > 0).then(|| adopted.clone())
+    });
+    assert_eq!(rebound.map(|now| now.session_id), Some(pane.after.clone()));
+    assert!(asked.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+}
