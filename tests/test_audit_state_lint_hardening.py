@@ -370,6 +370,9 @@ class SourceTextGuardAuditTests(AuditRepoCase):
                 '    let text = std::fs::read_dir(root.join("src"));\n'
             ),
             "cwd-relative read": '    let text = std::fs::read_to_string("src/lib.rs");\n',
+            "split concat source path": (
+                '    let text = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/", "lib.rs"));\n'
+            ),
         }
         for name, body in reads.items():
             with self.subTest(name):
@@ -424,6 +427,36 @@ class SourceTextGuardAuditTests(AuditRepoCase):
                 ),
             }
         )
+
+    def test_split_fixture_paths_and_comment_only_crate_roots_pass(self) -> None:
+        self.assert_passes(
+            {
+                "src/owner/split_tests.rs": (
+                    "#[test]\nfn split() {\n"
+                    '    let _ = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/", "upstream.rs"));\n'
+                    "}\n"
+                ),
+                "src/owner/temp_tests.rs": (
+                    '// example: env!("CARGO_MANIFEST_DIR")\n'
+                    'const NOTE: &str = r#"env!("CARGO_MANIFEST_DIR")"#;\n'
+                    "#[test]\nfn temp() {\n"
+                    "    let tmp = tempfile::tempdir().unwrap();\n"
+                    '    let _ = (NOTE, tmp.path().join("src"));\n'
+                    "}\n"
+                ),
+            }
+        )
+
+    def test_root_tests_dir_and_the_lexer_file_are_checked(self) -> None:
+        lexer = "pub(crate) fn strip_rust_comments(text: &str) -> String {\n    text.to_string()\n}\n"
+        self.assert_passes({"src/test_support.rs": lexer})
+        cases = {
+            "tests/source.rs": 'const SOURCE: &str = include_str!("../src/lib.rs");\n#[test]\nfn new_guard() {}\n',
+            "src/test_support.rs": lexer + '#[test]\nfn new_guard() {\n    let _ = include_str!("lib.rs");\n}\n',
+        }
+        for path, text in cases.items():
+            with self.subTest(path):
+                self.assert_flagged({path: text}, f"{path}:")
 
     def test_a_row_naming_no_fn_fails(self) -> None:
         stale = "agentdesk gone::tests::removed_guard | direct | fixture reason\n"

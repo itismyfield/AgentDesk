@@ -581,7 +581,7 @@ SOURCE_GUARD_TOOLS = frozenset({"lexer", "direct", "include_str", "scanner"})
 SOURCE_GUARD_ROW_RE = re.compile(
     r"(\S+) ((?:[A-Za-z_][A-Za-z0-9_]*::)+([A-Za-z_][A-Za-z0-9_]*)) \| ([^|]*?) \| (.*)"
 )
-# The lexer's own file; every other file naming it reads source.
+# The lexer's own file may name it; its other source reads are still checked.
 SOURCE_LEXER_DEFINITION = "src/test_support.rs"
 SOURCE_LEXER_RE = re.compile(
     r"\b(?:strip_rust_comments|rust_code_mask|braced_item_span|source_guard_support)\b"
@@ -639,7 +639,8 @@ def load_source_guard_allowlist(path: Path = SOURCE_GUARD_ALLOWLIST) -> tuple[se
 def source_read_lines(source: str) -> dict[int, str]:
     """Lines whose code reads Rust source text, with the kind of read."""
     code = strip_rust_non_code(source)
-    tree_patterns = SOURCE_TREE_RES + (SOURCE_ROOTED_TREE_RES if SOURCE_ROOT_RE.search(source) else ())
+    rooted = any(not code[m.start()].isspace() for m in SOURCE_ROOT_RE.finditer(source))
+    tree_patterns = SOURCE_TREE_RES + (SOURCE_ROOTED_TREE_RES if rooted else ())
     found: dict[int, str] = {}
     for line_no, (raw, code_line) in enumerate(zip(source.splitlines(), code.splitlines()), start=1):
         lexer = SOURCE_LEXER_RE.search(code_line)
@@ -660,8 +661,9 @@ def source_read_lines(source: str) -> dict[int, str]:
                 if depth == 0:
                     end = idx
                     break
-        literals = [text for text, _ in rust_string_literals(source[opener.end() : end])]
-        if end is None or not any(t.endswith(".rs") and not SOURCE_FIXTURE_DIR_RE.search(t) for t in literals):
+        # Joined so a path split across `concat!` pieces is judged whole.
+        path = "".join(text for text, _ in rust_string_literals(source[opener.end() : end]))
+        if end is None or not path.endswith(".rs") or SOURCE_FIXTURE_DIR_RE.search(path):
             continue
         first, last = code.count("\n", 0, opener.start()) + 1, code.count("\n", 0, end) + 1
         for line_no in range(first, last + 1):
@@ -698,7 +700,7 @@ def audit_source_text_guards(lines: list[AddedLine], allowlist: Path = SOURCE_GU
     allowed, findings = load_source_guard_allowlist(allowlist)
     by_path: dict[str, list[AddedLine]] = collections.defaultdict(list)
     for added in lines:
-        if is_mutant_hook_path(added.path) and added.path != SOURCE_LEXER_DEFINITION:
+        if is_mutant_hook_path(added.path):
             by_path[added.path].append(added)
     for path, added_lines in sorted(by_path.items()):
         try:
@@ -712,11 +714,12 @@ def audit_source_text_guards(lines: list[AddedLine], allowlist: Path = SOURCE_GU
         for added in added_lines:
             current = added.line_no <= len(file_lines) and file_lines[added.line_no - 1] == added.text
             kind = reads.get(added.line_no) if current else source_read_lines(added.text).get(1)
-            if kind is None:
+            if kind is None or path == SOURCE_LEXER_DEFINITION and kind.startswith("source lexer"):
                 continue
             enclosing = [f for f in functions if current and f[0] <= added.line_no <= f[1]]
             test = next((name for *_, name, is_test in sorted(enclosing, reverse=True) if is_test), None)
-            test_code = test is not None or is_test_path(path) or is_test_region(path, added.line_no)
+            test_code = test is not None or is_test_path(path) or path.startswith("tests/")
+            test_code = test_code or is_test_region(path, added.line_no)
             if not test_code or test is None and hosts_guard or test in allowed:
                 continue
             owner = f"test `{test}`" if test else "code outside any allowlisted guard's file"
