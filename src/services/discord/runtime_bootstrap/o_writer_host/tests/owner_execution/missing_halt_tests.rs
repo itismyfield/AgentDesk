@@ -7,23 +7,25 @@ use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 type EventHook = Box<dyn FnMut(&str) + Send>;
+type HaltHook = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone, Default)]
 struct Log(
     Arc<std::sync::Mutex<Vec<u8>>>,
-    Arc<std::sync::Mutex<Option<(PathBuf, PathBuf)>>>,
+    Arc<std::sync::Mutex<Option<HaltHook>>>,
     Arc<std::sync::Mutex<Option<EventHook>>>,
 );
 impl Write for Log {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        // Runs before the line is counted, so a waiter that sees the halt also sees the hook's work.
+        if String::from_utf8_lossy(bytes).contains("writer stopped and stays stopped")
+            && let Some(hook) = self.1.lock().unwrap().take()
+        {
+            hook();
+        }
         self.0.lock().unwrap().extend_from_slice(bytes);
         if let Some(hook) = self.2.lock().unwrap().as_mut() {
             hook(&String::from_utf8_lossy(bytes));
-        }
-        if String::from_utf8_lossy(bytes).contains("writer stopped and stays stopped")
-            && let Some((from, to)) = self.1.lock().unwrap().take()
-        {
-            std::fs::rename(from, to).unwrap();
         }
         Ok(bytes.len())
     }
@@ -363,8 +365,16 @@ async fn scenario(role: &str, wake: Wake) {
             }
         }));
     }
+    // The halt is the last instant of Missing; the returned source then boots a normal actor.
+    let at_halt = Arc::new(std::sync::Mutex::new(None));
     if wake == Wake::EarlySource {
-        *log.1.lock().unwrap() = Some((saved.clone(), source.path.clone()));
+        let (store_root, kept, at_halt) =
+            (root.path().to_path_buf(), saved.clone(), at_halt.clone());
+        let source = source.clone();
+        *log.1.lock().unwrap() = Some(Box::new(move || {
+            *at_halt.lock().unwrap() = Some(retained_bytes(&store_root, channel, &source));
+            std::fs::rename(kept, &source.path).unwrap();
+        }));
     }
     if matches!(wake, Wake::RuntimeSource) || absent {
         std::fs::rename(&saved, &source.path).unwrap();
@@ -522,7 +532,17 @@ async fn scenario(role: &str, wake: Wake) {
             "unchanged observation must not boot an actor"
         );
     }
-    assert_eq!(retained_bytes(root.path(), channel, &source), original);
+    // That restarted actor may collect settled segments, so EarlySource compares the halt instant.
+    let halted = if wake == Wake::EarlySource {
+        at_halt
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the halt hook must have run")
+    } else {
+        retained_bytes(root.path(), channel, &source)
+    };
+    assert_eq!(halted, original);
     if matches!(wake, Wake::Stop | Wake::Retire | Wake::Replaced) {
         if wake == Wake::Retire {
             cutover::boot_snapshot()
