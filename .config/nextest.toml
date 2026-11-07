@@ -1,5 +1,3 @@
-experimental = ["wrapper-scripts"]
-
 # nextest profiles for the library test suite.
 # CI workers do not read this file directly: scripts/ci/nextest_ci.py plan copies it per worker,
 # swaps profile.ci default-filter for the worker's exact IDs and sets retries: one retry for every
@@ -39,11 +37,3 @@ test-group = "shared-fixture"
 [[profile.ci.overrides]]
 filter = 'test(=services::tui_o::writer::tests::actor::host_start::managed::restart_replay::restart_replay_host_settled_20000_posts_once_and_reports_first_post_ms)'
 success-output = "immediate"
-
-[scripts.wrapper.missing-marker-herdr]
-command = { command-line = "tests/fixtures/missing_marker_nextest.sh", relative-to = "workspace-root" }
-
-[[profile.ci.scripts]]
-filter = 'test(missing_marker_tests::)'
-platform = 'cfg(target_os = "linux")'
-run-wrapper = 'missing-marker-herdr'

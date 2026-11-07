@@ -94,31 +94,9 @@ impl HerdrTarget {
         if read_host_kind_marker(&self.0.logical_key) != HostKindMarker::Absent {
             return Err("marker is not confirmed absent".into());
         }
-        if self.0.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
-            let evidence = self
-                .0
-                .evidence
-                .as_ref()
-                .map_err(|why| format!("policy: {why:?}"))?;
-            let witness = self
-                .0
-                .transport
-                .server_witness()
-                .map_err(|why| format!("peer: {why:?}"))?;
-            let endpoint = crate::services::herdr_launch::HerdrLaunchEndpoint {
-                execution_node: self.0.endpoint.execution_node().into(),
-                config_key: self.0.endpoint.config_key().into(),
-                socket_addr: self.0.endpoint.socket_path().to_string_lossy().into_owned(),
-                herdr_session: self.0.endpoint.herdr_session().into(),
-            };
-            return ExistingMutationPermit::issue(&endpoint, &self.0.nonce, witness, evidence)
-                .map(|permit| permit.witness().clone())
-                .map_err(|why| format!("policy: {why:?}"));
-        }
-        match (self.0.read_restore)(self.0.transport.as_ref(), &self.0.endpoint) {
-            RestoreResume::Off { witness } => Ok(witness),
-            other => Err(format!("restore: {other:?}")),
-        }
+        self.0
+            .policy_witness(Mutation::Terminate)
+            .map_err(|why| format!("policy: {why:?}"))
     }
 
     /// `HerdrPaneView::ended` of a reading of this target's pane; on a server that replaced the

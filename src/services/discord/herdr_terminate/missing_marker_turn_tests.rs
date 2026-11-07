@@ -168,10 +168,7 @@ fn mm_retire_presence_then_normal_input_finds_source_pg() {
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let _bin = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_CLAUDE_PATH",
-        &bin,
-    );
+    let _bin = case.native_binary(&bin);
     let state = HookServerState::new_with_claude_projects_root(home.join("projects"));
     let (url, server) = case.rt.block_on(async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

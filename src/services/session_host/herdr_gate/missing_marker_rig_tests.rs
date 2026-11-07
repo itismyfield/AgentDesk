@@ -25,9 +25,12 @@ pub(crate) fn child(name: &str, module: &str) -> bool {
         .prefix("adk-mm-")
         .tempdir()
         .unwrap();
-    let bin = std::env::var_os("ADK_TEST_HERDR_BIN")
-        .expect("ADK_TEST_HERDR_BIN required; CI installs the pinned real server");
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = std::process::Command::new("bash")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/missing_marker_nextest.sh"
+        ))
+        .arg(std::env::current_exe().unwrap())
         .args([
             "--exact",
             &format!(
@@ -37,7 +40,6 @@ pub(crate) fn child(name: &str, module: &str) -> bool {
             "--nocapture",
         ])
         .env("ADK_MM_CHILD", name)
-        .env("ADK_TEST_HERDR_BIN", bin)
         .env("ADK_TEST_HERDR_ROOT", scratch.path())
         .env("ADK_TEST_HERDR_PIDS", scratch.path().join("pids.log"))
         .output()
@@ -71,6 +73,18 @@ pub(crate) struct Case {
 }
 
 impl Case {
+    pub(crate) fn native_binary(&self, path: &std::path::Path) -> crate::config::TestEnvVarGuard {
+        crate::config::test_env_lock::assert_shared_test_env_lock_held();
+        assert_eq!(
+            crate::config::runtime_root().as_deref(),
+            Some(self._root.path())
+        );
+        crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CLAUDE_PATH",
+            path,
+        )
+    }
+
     pub(crate) fn new() -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let mut server = real::Real::start(&real::Scratch::from_env(), "missing-marker");
