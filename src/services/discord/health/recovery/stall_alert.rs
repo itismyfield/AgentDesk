@@ -121,6 +121,49 @@ pub(super) async fn notify_suspected_stall_without_cleanup(
     channel_id: ChannelId,
     inflight: Option<&discord::inflight::InflightTurnState>,
 ) {
+    let mention = owner_mention(inflight);
+    let content = format!(
+        "⚠️ 스톨 의심: 이 세션이 오래 응답이 없어 보입니다{mention}. 워치독은 더 이상 자동 종료하지 않습니다 — 실제로 멈췄다면 취소해 주시고, 정상 작업 중이면 무시하세요. (채널 {channel_id})"
+    );
+    let reason_code = STALL_WATCHDOG_MENTION_REASON_CODE.to_string();
+    let page = (
+        (content.as_str(), reason_code),
+        STALL_WATCHDOG_MENTION_COOLDOWN_SECS,
+    );
+    enqueue_stall_page(shared, provider, channel_id, inflight, page).await;
+}
+
+/// One page per O-owned turn the watchdog judges unclosed, naming the turn and why it reads so.
+pub(super) async fn notify_unclosed_o_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    inflight: Option<&discord::inflight::InflightTurnState>,
+    (turn, age_secs, why): (u64, u64, &str),
+) {
+    let mention = owner_mention(inflight);
+    let content = format!(
+        "⚠️ 턴 미종료 의심{mention}: {why}. 턴 {turn}이 {}분째 열려 있습니다. 워치독은 자동 종료하지 않습니다 — 답을 이미 받았다면 취소해 주세요. 이 턴에는 다시 알리지 않습니다. (채널 {channel_id})",
+        age_secs / 60
+    );
+    let reason_code = format!("{STALL_WATCHDOG_MENTION_REASON_CODE}:{turn}");
+    let page = (
+        (content.as_str(), reason_code),
+        UNCLOSED_TURN_PAGE_DEDUPE_SECS,
+    );
+    enqueue_stall_page(shared, provider, channel_id, inflight, page).await;
+}
+
+/// Turn ids never repeat; a week outlives any turn the watchdog could still judge.
+const UNCLOSED_TURN_PAGE_DEDUPE_SECS: i64 = 7 * 24 * 3600;
+
+async fn enqueue_stall_page(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    inflight: Option<&discord::inflight::InflightTurnState>,
+    ((content, reason_code), dedupe_secs): ((&str, String), i64),
+) {
     let Some(pool) = shared.pg_pool.as_ref() else {
         tracing::warn!(
             "  [stall-watchdog] #4460 suspected stall on channel {} (provider={}) but no pg_pool — skipping mention (never terminating)",
@@ -130,10 +173,6 @@ pub(super) async fn notify_suspected_stall_without_cleanup(
         return;
     };
 
-    let mention = owner_mention(inflight);
-    let content = format!(
-        "⚠️ 스톨 의심: 이 세션이 오래 응답이 없어 보입니다{mention}. 워치독은 더 이상 자동 종료하지 않습니다 — 실제로 멈췄다면 취소해 주시고, 정상 작업 중이면 무시하세요. (채널 {channel_id})"
-    );
     // `channel:` is the established manual-outbound target contract. The
     // worker combines it with a provider DM session key to select the Claude or
     // Codex bot; public sessions intentionally keep the configured notify bot.
@@ -143,13 +182,13 @@ pub(super) async fn notify_suspected_stall_without_cleanup(
         pool,
         crate::services::message_outbox::OutboxMessage {
             target: &target,
-            content: &content,
+            content,
             bot: crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
             source: "stall_watchdog",
-            reason_code: Some(STALL_WATCHDOG_MENTION_REASON_CODE),
+            reason_code: Some(&reason_code),
             session_key: session_key.as_deref(),
         },
-        STALL_WATCHDOG_MENTION_COOLDOWN_SECS,
+        dedupe_secs,
     )
     .await
     {
@@ -160,7 +199,7 @@ pub(super) async fn notify_suspected_stall_without_cleanup(
         ),
         Ok(false) => tracing::debug!(
             "  [stall-watchdog] #4460 suspected stall alert suppressed by cooldown ({}s) on channel {}",
-            STALL_WATCHDOG_MENTION_COOLDOWN_SECS,
+            dedupe_secs,
             channel_id,
         ),
         Err(error) => tracing::warn!(
@@ -501,5 +540,58 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// An unclosed O turn pages its owner once, naming the turn and the reason; a later pass over
+    /// the same turn adds nothing, and the next unclosed turn pages again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pg_an_unclosed_o_turn_pages_once_per_turn_with_its_reason() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_stall_watchdog_unclosed_turn",
+            "stall watchdog unclosed turn page tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let shared = discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let provider = ProviderKind::Claude;
+        let (channel, owner) = (44_610, 343_742_347_365_974_026);
+        let row = inflight_fixture(&provider, channel, owner, "AgentDesk-claude-adk-cc", true);
+        let why = "O가 이 턴의 답을 다 보냈는데 턴이 닫히지 않았습니다";
+        for turn in [1_568_364_968_263_557_225, 1_568_364_968_263_557_225, 7] {
+            let page = (turn, 3_014, why);
+            notify_unclosed_o_turn(
+                &shared,
+                &provider,
+                ChannelId::new(channel),
+                Some(&row),
+                page,
+            )
+            .await;
+        }
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT content, session_notice->>'content' FROM message_outbox
+              WHERE source = 'stall_watchdog' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load unclosed turn pages");
+        assert_eq!(rows.len(), 2, "one page per turn: {rows:?}");
+        let (content, shown) = &rows[0];
+        assert!(content.contains(why) && content.contains("턴 1568364968263557225이 50분째"));
+        assert!(
+            shown
+                .as_deref()
+                .is_some_and(|shown| shown.contains(&format!("<@{owner}>")))
+        );
+        assert!(rows[1].0.contains("턴 7이"), "{rows:?}");
     }
 }

@@ -29,7 +29,10 @@ fn eligible(message: OutboxMessage<'_>) -> bool {
             | ("adopt_fence_forward_notice", Some("adopt.fence_forward"))
             | ("boot_custody_notice", Some("boot_custody.notice"))
             | ("stall_watchdog", Some("stall_watchdog_suspected_stall"))
-    )
+    ) || (message.source == "stall_watchdog"
+        && message
+            .reason_code
+            .is_some_and(|code| code.starts_with("stall_watchdog_suspected_stall:")))
 }
 
 fn channel_target(target: &str) -> Option<String> {

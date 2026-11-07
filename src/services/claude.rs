@@ -2030,6 +2030,7 @@ pub(crate) fn read_claude_tui_transcript_until_done(
     session_id: &str,
     hook_rx: tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
     hook_events_after: chrono::DateTime<chrono::Utc>,
+    leave: Option<Box<dyn Fn() -> bool + Send>>,
 ) -> Result<(ReadOutputResult, ReadHarvestStats), String> {
     let stop_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_seen_for_probe = stop_seen.clone();
@@ -2039,8 +2040,11 @@ pub(crate) fn read_claude_tui_transcript_until_done(
     let expected_session_id_for_result = expected_session_id.clone();
     let tmux_name_alive = tmux_session_name.to_string();
     let transcript_path_for_ready = std::path::PathBuf::from(transcript_path);
+    // A caller's `leave` ends the read as the pane's death would, without probing the pane.
     let probe = SessionProbe::new(
-        move || tmux_live_pane_bool(&tmux_name_alive),
+        move || {
+            !leave.as_ref().is_some_and(|leave| leave()) && tmux_live_pane_bool(&tmux_name_alive)
+        },
         move || {
             log_claude_tui_hook_relay_failures(&expected_session_id);
             claude_tui_stop_hook_seen_or_ready_with_probe(

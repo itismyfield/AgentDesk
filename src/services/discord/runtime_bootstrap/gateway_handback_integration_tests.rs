@@ -4,6 +4,7 @@ use super::gateway_lease::{
 };
 use super::*;
 use crate::db::postgres;
+use crate::test_support::wait::{WAIT_CAP, join_within};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -670,7 +671,7 @@ async fn deferred_rollback_racing_backend_exit_preserves_another_waiter_pg() {
     barrier.wait().await;
     running.manager.shutdown_all().await;
     running.ended().await;
-    rollback.join().unwrap();
+    join_within(rollback, WAIT_CAP);
     assert!(
         fixture.publish_waiter().await,
         "backend exit and rollback release only their own reference"
