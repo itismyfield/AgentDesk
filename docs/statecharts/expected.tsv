@@ -163,3 +163,4 @@ tui-o-writer/WriterMissingHaltPresence.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltNonce.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltBinding.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltEarly.cfg	WriterMissingHalt	-	-
+tui-o-writer/WriterMissingHaltMetadata.cfg	WriterMissingHalt	-	-

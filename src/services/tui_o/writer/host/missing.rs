@@ -8,18 +8,19 @@ type Binding = Option<(SourceId, String)>;
 #[derive(Default)]
 pub(super) struct Observation {
     retry: bool,
+    start_absent: bool,
     producer: Option<ProducerObservation>,
     binding: Option<Binding>,
 }
 impl Observation {
     pub(super) async fn read<I: HostIo>(host: &Hosted<'_, I>) -> Self {
         Self {
-            retry: false,
             binding: binding(host),
             producer: host
                 .io
                 .producer_observation(host.channel, host.provider)
                 .await,
+            ..Self::default()
         }
     }
     pub(super) fn absent(&self) -> bool {
@@ -32,7 +33,8 @@ impl Observation {
             let next = Self::read(host).await;
             if !self.retry || (next.producer.is_some() && next.binding.is_some()) {
                 self.retry = false;
-                return self.record(next);
+                self.start_absent = self.record(next);
+                return self.start_absent;
             }
             tracing::debug!(
                 channel = host.channel,
@@ -59,12 +61,15 @@ impl Observation {
         &mut self,
         host: &Hosted<'_, I>,
         cause: &StopCause,
-        known: &[SourceId],
+        known: &[(SourceId, bool)],
     ) -> Option<ChannelStore> {
         let WriterAlarm::HaltedMissingSource { source, .. } = &cause.alarm else {
             return None;
         };
         if cause.io.is_some() {
+            return None;
+        }
+        if self.start_absent && known.iter().any(|(id, present)| id == source && *present) {
             return None;
         }
         let wait = async {
@@ -86,7 +91,7 @@ impl Observation {
                         Some(old) => old.as_ref().is_none_or(|(old_source, old_nonce)| {
                             old_source != source || (!nonce.is_empty() && old_nonce != nonce)
                         }),
-                        None => !known.contains(source),
+                        None => !known.iter().any(|(id, _)| id == source),
                     },
                 );
                 self.record(next);

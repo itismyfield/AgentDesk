@@ -57,13 +57,14 @@ pub struct ReaderConfig {
 }
 
 /// Stable producer evidence; observation revisions and repeated publications are not identities.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ProducerPresence {
     Absent,
     Present,
+    #[default]
     Unknown,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProducerObservation {
     pub presence: ProducerPresence,
     pub incarnation: Option<String>,

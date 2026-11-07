@@ -181,6 +181,7 @@ enum Wake {
     InterruptedPresence,
     EarlySource,
     RuntimeSource,
+    AbsentRuntime,
     Stop,
     Retire,
     Replaced,
@@ -247,7 +248,19 @@ async fn scenario(role: &str, wake: Wake) {
         owner_node: "mac-a".into(),
         runtime_root: root.path().display().to_string(),
     };
-    let row = record(&owner, "orphan-execution", HostedState::Pending);
+    let mut row = record(&owner, "orphan-execution", HostedState::Pending);
+    if wake == Wake::AbsentRuntime {
+        row.state = HostedState::Retired;
+        let endpoint = crate::config::session_hosts::herdr_endpoint(channel).unwrap();
+        row.location = Some(HostedLocation {
+            host: "herdr".into(),
+            execution_node: endpoint.execution_node,
+            endpoint_config_key: endpoint.key,
+            socket_addr: endpoint.socket_path.display().to_string(),
+            named_session: endpoint.herdr_session,
+            pane_id: "orphan-pane".into(),
+        });
+    }
     let key = crate::services::discord::adk_session::build_namespaced_session_key(
         &shared.token_hash,
         &ProviderKind::Claude,
@@ -267,7 +280,14 @@ async fn scenario(role: &str, wake: Wake) {
         serenity::ChannelId::new(channel),
     )
     .await;
-    assert_eq!(reading.observed.activity, Activity::Unknown);
+    assert_eq!(
+        reading.observed.activity,
+        if wake == Wake::AbsentRuntime {
+            Activity::Idle
+        } else {
+            Activity::Unknown
+        }
+    );
     assert!(reading.publish_if_current(|| ()).await.is_some());
     let saved = root.path().join("source-kept");
     let (store, era, source) = missing_store_with(root.path(), channel, |path| {
@@ -305,7 +325,7 @@ async fn scenario(role: &str, wake: Wake) {
     if wake == Wake::EarlySource {
         *log.1.lock().unwrap() = Some((saved.clone(), source.path.clone()));
     }
-    if wake == Wake::RuntimeSource {
+    if matches!(wake, Wake::RuntimeSource | Wake::AbsentRuntime) {
         std::fs::rename(&saved, &source.path).unwrap();
     }
     let _tracing = tracing::subscriber::set_default(
@@ -339,12 +359,12 @@ async fn scenario(role: &str, wake: Wake) {
     );
     assert_eq!(handles.len(), 1);
     let generation = host::process_readiness().hosted_by(channel).unwrap();
-    if wake == Wake::RuntimeSource {
+    if matches!(wake, Wake::RuntimeSource | Wake::AbsentRuntime) {
         accepts(channel).await;
         std::fs::rename(&source.path, &saved).unwrap();
     }
     until(|| log.count("writer stopped and stays stopped") == 1).await;
-    if wake == Wake::RuntimeSource {
+    if matches!(wake, Wake::RuntimeSource | Wake::AbsentRuntime) {
         let held = retained_bytes(root.path(), channel, &source);
         for (path, hash) in &original {
             if path
@@ -361,6 +381,35 @@ async fn scenario(role: &str, wake: Wake) {
         original = held;
     }
     let tui_o = TuiOConfig::default();
+    if wake == Wake::AbsentRuntime {
+        super::super::super::super::super::owner_cleanup::refresh_writers(
+            &shared,
+            &ProviderKind::Claude,
+            Some(&tui_o),
+        )
+        .await;
+        accepts(channel).await;
+        assert!(!handles[0].live());
+        assert_ne!(
+            host::process_readiness().hosted_by(channel),
+            Some(generation)
+        );
+        assert_eq!(log.count("stage=\"hosted\" status=\"start\""), 2);
+        assert_eq!(retained_bytes(root.path(), channel, &source), original);
+        assert!(
+            !crate::services::tui_o::alarm::health_reasons()
+                .contains(&format!("tui_o:halted:{channel}"))
+        );
+        gate.close();
+        until(|| !host::process_readiness().is_hosted(channel)).await;
+        handles.remove(0).stop_and_join().await.unwrap();
+        server.abort();
+        pool.close().await;
+        eprintln!(
+            "MISSING_HALT_CASE role={role} wake={wake:?} boots=2 existing sessionless recovery preserved PG=real skip=0"
+        );
+        return;
+    }
     for _ in 0..if wake == Wake::EarlySource { 0 } else { 4 } {
         super::super::super::super::super::owner_cleanup::refresh_writers(
             &shared,
@@ -738,5 +787,15 @@ async fn missing_halt_retry_waits_for_current_pg_publication_pg() {
         "::missing_halt_retry_waits_for_current_pg_publication_pg"
     )) {
         scenario("gateway", Wake::InterruptedPresence).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_halt_sessionless_runtime_loss_keeps_main_recovery_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::missing_halt_sessionless_runtime_loss_keeps_main_recovery_pg"
+    )) {
+        scenario("gateway", Wake::AbsentRuntime).await;
     }
 }

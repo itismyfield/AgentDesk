@@ -61,10 +61,7 @@ pub trait HostIo: Send + Sync + 'static {
         _channel: u64,
         _provider: ShadowProvider,
     ) -> impl Future<Output = Option<super::ProducerObservation>> + Send {
-        std::future::ready(Some(super::ProducerObservation {
-            presence: super::ProducerPresence::Unknown,
-            incarnation: None,
-        }))
+        std::future::ready(Some(super::ProducerObservation::default()))
     }
     fn lease(&self) -> Self::Lease;
     /// A channel's writer stopped for good; the shared lease turns its verified episodes Unknown.
@@ -803,7 +800,10 @@ impl<I: HostIo> Hosted<'_, I> {
             // Keep the evidence used by this start, including changes before its halt settles.
             let known: Vec<_> = store
                 .cursors()
-                .map(|cursor| cursor.source.clone())
+                .map(|cursor| {
+                    let present = std::fs::metadata(&cursor.source.path).is_ok();
+                    (cursor.source.clone(), present)
+                })
                 .collect();
             let Some(absent) = unless_stopped(&self.stopping, observed.starting(&self)).await
             else {
@@ -826,6 +826,7 @@ impl<I: HostIo> Hosted<'_, I> {
                 }
                 return;
             }
+            observed = missing::Observation::default();
             if started.elapsed() >= resume::STABLE_RUN {
                 backoff = Backoff::default();
             }
