@@ -43,6 +43,14 @@ do the same thing?" If yes, do not write it.
     exceed changed production lines. State the reason in the PR when they do (a
     reproduced defect, replacing a deleted guard). An exception to rule 8 (new
     test infrastructure) needs coordinator approval.
+13. Every wait in a test goes through the capped helpers in `test_support::wait`
+    (`join_within`, `recv_within`, `await_within`, default cap `WAIT_CAP`; a
+    longer cap is an explicit argument). The cap bounds a cooperative wait; a
+    blocking `Drop`, thread-local destructor or runtime teardown past the cap
+    needs its own release. A bare `.join()`/`.recv()` in test code fails
+    `scripts/ci/rust_test_sources.py check`; the allowlist
+    `scripts/ci/test_wait_allowlist.txt` only shrinks (new rows fail against the
+    PR base).
 
 ## Scope
 

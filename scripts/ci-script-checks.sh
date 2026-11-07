@@ -270,6 +270,10 @@ if run_check guards "Writer namespace Windows exact-target runner fixtures (#567
 "$PYTHON" -m unittest tests.test_writer_namespace_windows_targets
 fi
 
+if run_check guards "Test wait cap source check"; then
+"$PYTHON" -m unittest tests.test_rust_test_wait_caps
+fi
+
 if run_check guards "CI setup-node reads .nvmrc"; then
 "$PYTHON" -m unittest tests.test_ci_node_version_file
 fi
