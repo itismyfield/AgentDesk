@@ -8,3 +8,8 @@ stateDiagram-v2
   Booting --> Running: 기존 reopen·prefix 검증·resume 성공
   Held --> Ended: stop / execution gate retirement
   Running --> Ended: 기존 종료 경로
+
+    Held --> OrphanRetired: Bound + actual marker absence + independent end proof + quiet/current + CAS
+    OrphanRetired --> PresenceAbsent: existing HerdrRetired absence checks and current publication
+    PresenceAbsent --> NewManagedExecution: one normal input / fresh nonce and pane
+    NewManagedExecution --> Running: own source attached / F1 fresh evidence

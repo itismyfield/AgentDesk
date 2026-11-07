@@ -4,3 +4,5 @@ stateDiagram-v2
   Halted --> Ended: actor join·host 종료·claim 반환
   Ended --> Booting: owner cleanup·같은 Missing·새 증거 없음
   Halted --> Halted: row는 고아 pane·provider는 다른 pane에서 live
+  Halted --> OrphanUnknown: 1a 적용 뒤 claim 유지
+  OrphanUnknown --> OrphanUnknown: Bound 고아 row·marker 없음·저장 provider 종료·retire 경로 없음

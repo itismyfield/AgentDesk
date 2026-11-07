@@ -1550,6 +1550,8 @@ src/
 │   │   │   ├── http_force_tests.rs
 │   │   │   ├── http_force_v2_tests.rs
 │   │   │   ├── http_force_writer_tests.rs
+│   │   │   ├── missing_marker_tests.rs
+│   │   │   ├── missing_marker_turn_tests.rs
 │   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
@@ -3685,6 +3687,7 @@ src/
 │   │   ├── herdr_gate/
 │   │   │   ├── legacy_return.rs
 │   │   │   ├── legacy_return_tests.rs
+│   │   │   ├── missing_marker_rig_tests.rs
 │   │   │   ├── notice_fence_tests.rs
 │   │   │   ├── policy_tests.rs
 │   │   │   ├── root_replaced.rs
