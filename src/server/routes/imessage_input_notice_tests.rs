@@ -588,6 +588,7 @@ async fn imessage_echo_enqueue_failure_preserves_result_pg() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+// 현행 동작 고정: owner의 external hold 거절은 echo를 만들지 않는다.
 async fn imessage_owner_external_hold_refusal_echoes_nothing_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::new(7_811_316, false).await;

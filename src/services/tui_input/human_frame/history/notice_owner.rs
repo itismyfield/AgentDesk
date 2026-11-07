@@ -16,6 +16,7 @@ type Answers = HashMap<String, (u64, Vec<String>, Decision)>;
 
 struct Scope {
     origin: NoticeOrigin,
+    executions: HashMap<PathBuf, Stamp>,
     through: u64,
     native_stamp: Option<Stamp>,
     exact: Answers,
@@ -95,14 +96,16 @@ impl Batch {
                     let after = file_stamp(&origin.record.source.path);
                     (through, after, if before == after { rows } else { None })
                 });
+            let mut executions = HashMap::new();
             let (exact, census) = snapshot
                 .as_ref()
                 .ok()
-                .and_then(|v| candidates(v, origin).ok())
+                .and_then(|v| candidates(v, origin, store.init().channel, &mut executions).ok())
                 .map(|(entries, blocked)| attribute(&entries, &blocked, rows.as_deref()))
                 .unwrap_or_default();
             batch.scopes.push(Scope {
                 origin: origin.clone(),
+                executions,
                 through: *through,
                 native_stamp: *native_stamp,
                 exact,
@@ -122,6 +125,13 @@ impl Batch {
         let Some(scope) = self.scopes.iter().find(|s| same_scope(&s.origin, origin)) else {
             return Decision::Pending("original_binding_missing");
         };
+        if scope
+            .executions
+            .iter()
+            .any(|(path, stamp)| file_stamp(path).as_ref() != Some(stamp))
+        {
+            return Decision::Pending("execution_context_changed");
+        }
         let hashes = class_hashes(prompt);
         if let Some((offset, frames, answer)) = scope.exact.get(row)
             && *offset <= origin.record.start
@@ -152,6 +162,8 @@ type Blocked = Vec<(String, &'static str)>;
 fn candidates(
     value: &serde_json::Value,
     origin: &NoticeOrigin,
+    channel: u64,
+    executions: &mut HashMap<PathBuf, Stamp>,
 ) -> Result<(Vec<Entry>, Blocked), String> {
     let source = &origin.record.source;
     let same = |e: &Entry| {
@@ -187,7 +199,7 @@ fn candidates(
         );
     for (raw, registration) in bound {
         if raw.is_null() {
-            if relevant(registration, origin) {
+            if relevant(registration, origin, channel, executions) {
                 blocked.push((frame_hash(registration)?, "unbound_pre_source"));
             }
             continue;
@@ -196,7 +208,9 @@ fn candidates(
         if entry.provider != "claude" || entry.session != origin.logical_session {
             continue;
         }
-        if !same(&entry) || (!registration.is_null() && !relevant(registration, origin)) {
+        if !same(&entry)
+            || (!registration.is_null() && !relevant(registration, origin, channel, executions))
+        {
             blocked.push((entry.class_hash.clone(), "registration_source_mismatch"));
             continue;
         }
@@ -219,7 +233,7 @@ fn candidates(
         _ => return Err("history planned invalid".into()),
     };
     for registration in planned {
-        if relevant(registration, origin) {
+        if relevant(registration, origin, channel, executions) {
             blocked.push((frame_hash(registration)?, "unbound_pre_source"));
         }
     }
@@ -233,11 +247,49 @@ fn frame_hash(registration: &serde_json::Value) -> Result<String, String> {
         .ok_or("frame hash missing".into())
 }
 
-fn relevant(registration: &serde_json::Value, origin: &NoticeOrigin) -> bool {
+fn relevant(
+    registration: &serde_json::Value,
+    origin: &NoticeOrigin,
+    channel: u64,
+    executions: &mut HashMap<PathBuf, Stamp>,
+) -> bool {
     let attempt = &registration["key"]["attempt"];
     attempt["provider"] == "claude"
         && attempt["target"]["owner"] == origin.logical_session
-        && attempt["target"]["execution_nonce"] == origin.execution_nonce
+        && (attempt["target"]["execution_nonce"] == origin.execution_nonce
+            || resumed_execution(&attempt["target"], origin, channel, executions))
+}
+
+fn resumed_execution(
+    target: &serde_json::Value,
+    origin: &NoticeOrigin,
+    channel: u64,
+    executions: &mut HashMap<PathBuf, Stamp>,
+) -> bool {
+    use crate::services::tui_prompt_dedupe::binding_context;
+    let proof = || {
+        let nonce = target["execution_nonce"].as_str()?;
+        let path = binding_context::context_path("claude", nonce).ok()?;
+        let before = file_stamp(&path)?;
+        let context = binding_context::execution_context("claude", nonce).ok()?;
+        // The attachment's nonce stays historical; this immutable launch names the resumed source.
+        (target["host"] == "tmux"
+            && context.tmux_session == origin.logical_session
+            && context.channel_id == Some(channel)
+            && target["root"] == context.owner_runtime_root
+            && context.launch_mode == "resume"
+            && context.expected_native_session_id.as_deref()
+                == Some(origin.record.source.session_id.as_str())
+            && file_stamp(&path) == Some(before))
+        .then_some((path, before))
+    };
+    match proof() {
+        Some((path, stamp)) => {
+            executions.insert(path, stamp);
+            true
+        }
+        None => false,
+    }
 }
 
 fn historical_match(
