@@ -829,12 +829,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         {
             let len = std::fs::metadata(&cursor.source.path).ok()?.len();
             uncaptured += usize::from(cursor.captured_through < len);
-            let through = match crate::services::tui_o::turn_mode::carried_close_mutant("producer")
-            {
-                true => len,
-                false => cursor.captured_through,
-            };
-            captured.push((cursor.source.path.clone(), through));
+            captured.push((cursor.source.path.clone(), cursor.captured_through));
         }
         let unapplied = latest.saturating_sub(checkpoint.unwrap_or(0));
         let unapplied = usize::try_from(unapplied).unwrap_or(usize::MAX);
@@ -850,10 +845,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             asked,
             verified_work: self.verified.as_ref().map_or(0, |log| log.work.len()),
             // A channel no writer counted yet has started no POST in this process.
-            posting: match crate::services::tui_o::turn_mode::carried_close_mutant("posting_zero") {
-                true => 0,
-                false => super::deliver::posts_in_flight(channel).unwrap_or(0),
-            },
+            posting: super::deliver::posts_in_flight(channel).unwrap_or(0),
             captured,
         })
     }
