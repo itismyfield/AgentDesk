@@ -12,6 +12,8 @@ use poise::serenity_prelude::ChannelId;
 mod carried_restart;
 #[path = "owner_input_owned_stop_tests.rs"]
 mod owned_stop;
+#[path = "owner_input_person_origin_tests.rs"]
+mod person_origin;
 
 #[derive(Clone, Default)]
 struct Trace(Arc<std::sync::Mutex<Vec<u8>>>);
@@ -305,7 +307,7 @@ impl IntakeRig {
                 let (original, ticket) = routine::synthetic_original(&turn, id, PROMPT, 1).unwrap();
                 let provenance = start::HeadlessProvenance {
                     owner: (7, "imessage"),
-                    source: Some("imessage"),
+                    source: Some("http"),
                     metadata: origin.map(|o| match fresh {
                         true => json!({"human_input": {"origin_id": o},
                             "routine_id": "routine-7772", "execution_strategy": "fresh"}),

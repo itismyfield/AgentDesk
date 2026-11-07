@@ -30,7 +30,7 @@ CONSTANTS
 
 VARIABLES
     mode,      \* turn or legacy, fixed per channel
-    src,       \* discord (a person's message) or start (a turn/start such as an iMessage reply)
+    src,       \* discord or imessage (people), start (HTTP, routine or scheduled machine input)
     mbx,       \* the mailbox holds an AgentDesk turn: idle or active
     nat,       \* the native Claude turn read from the transcript: idle or busy
     natOwner,  \* who answers the running native turn: none, ad (a reader that reads it), adNoObs
@@ -91,13 +91,13 @@ drv == <<screen, draft, notices, timer, byTimer, timed, reader, src, twin, heldB
          twinPend, stale, old, acct>>
 
 \* Slice C's transitions; "cf", "f", "f4", "f5" and "a2b" keep them.
-CX == Fix \in {"c", "cf", "f", "f4", "f5", "a2b", "a7772"}
+CX == Fix \in {"c", "cf", "f", "f4", "f5", "a2b", "a7772", "person"}
 \* Slice F's paths are in the model.
-F2 == Fix \in {"cf", "f", "f4", "f5", "a2b", "a7772"}
+F2 == Fix \in {"cf", "f", "f4", "f5", "a2b", "a7772", "person"}
 
 Init ==
     /\ mode \in {"turn", "legacy"}
-    /\ src \in {"discord", "start"}
+    /\ src \in IF Fix = "person" THEN {"discord", "imessage", "start"} ELSE {"discord", "start"}
     /\ \E s \in {<<"idle", "idle", "none">>, <<"idle", "busy", "relay">>,
                  <<"active", "busy", "ad">>, <<"active", "idle", "none">>} :
          mbx = s[1] /\ nat = s[2] /\ natOwner = s[3]
@@ -112,7 +112,7 @@ Init ==
     /\ screen \in {"ok", "held", "cause"} \cup (IF CX THEN {"ledger"} ELSE {}) /\ draft \in {"none", "unproven"} /\ notices = 0
     /\ wake = (old = "none") /\ timer = FALSE /\ byTimer = FALSE /\ timed = FALSE
     /\ heldBy = "none" /\ watch = FALSE /\ aged = FALSE /\ twinPend \in BOOLEAN
-    /\ stale \in IF Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4", "f5", "a2b", "a7772"} THEN BOOLEAN ELSE {FALSE}
+    /\ stale \in IF Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4", "f5", "a2b", "a7772", "person"} THEN BOOLEAN ELSE {FALSE}
     \* A kept input's boot is checked on one plain channel: no twin, draft, held screen or old watch.
     /\ old # "none" => ~twin /\ ~twinPend /\ draft = "none" /\ screen = "ok" /\ ~stale
     \* A ledger refusal is checked on a busy turn-mode pane, whose turn end wakes the owner (RC).
@@ -127,7 +127,7 @@ Init ==
     \* A marked row: the turn ended and released its mailbox, but its origin receipt failed to record,
     \* so the row stays stamped for the next admission to record and remove (receipt_settle.rs).
     \* Checked with the receipt store healthy again, from f4 on.
-    /\ row \in IF F2 THEN {"none", "carried"} \cup (IF Fix \in {"f4", "f5", "a2b", "a7772"} THEN {"marked"} ELSE {})
+    /\ row \in IF F2 THEN {"none", "carried"} \cup (IF Fix \in {"f4", "f5", "a2b", "a7772", "person"} THEN {"marked"} ELSE {})
               ELSE {"none"}
     /\ leak \in IF F2 THEN BOOLEAN ELSE {FALSE}
     /\ ep \in IF F2 THEN BOOLEAN ELSE {FALSE}
@@ -135,7 +135,7 @@ Init ==
     /\ outside = FALSE
     /\ nr = "ok" /\ prov = "none" /\ seen = "none"
     \* A Codex start is checked on one plain legacy channel; its rollout agrees with its pane.
-    /\ ev \in IF Fix = "a7772" THEN {"none", "open", "own", "noStart"} ELSE {"none"}
+    /\ ev \in IF Fix \in {"a7772", "person"} THEN {"none", "open", "own", "noStart"} ELSE {"none"}
     /\ ev # "none" => /\ src = "start" /\ mode = "legacy" /\ row = "none" /\ ~acct /\ old = "none"
                       /\ screen = "ok" /\ ~stale /\ ~twin /\ ~twinPend /\ draft = "none" /\ ~leak
                       /\ obsOk /\ (ev = "open") = (nat = "busy")
@@ -148,16 +148,16 @@ Init ==
     /\ row # "none" => mode = "turn" /\ mbx = "idle" /\ old = "none" /\ ~acct /\ screen = "ok"
                          /\ ~stale /\ ~twin /\ ~twinPend /\ draft = "none"
 
-A2D == Fix \in {"a2d1", "a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4", "f5", "a2b", "a7772"}
-R2 == Fix \in {"a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4", "f5", "a2b", "a7772"}
-R3 == Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4", "f5", "a2b", "a7772"}
+A2D == Fix \in {"a2d1", "a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4", "f5", "a2b", "a7772", "person"}
+R2 == Fix \in {"a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4", "f5", "a2b", "a7772", "person"}
+R3 == Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4", "f5", "a2b", "a7772", "person"}
 \* a2d4 keeps the watch through a failed read and ends a watch without touching a newer hold.
-R4 == Fix \in {"a2d4", "c", "cf", "f", "f4", "f5", "a2b", "a7772"}
+R4 == Fix \in {"a2d4", "c", "cf", "f", "f4", "f5", "a2b", "a7772", "person"}
 \* Slice C: on a turn-mode channel the presence supervisor reads the owner's V2 front and wakes the
 \* owner once at the idle transition (supervisor_tests). Legacy channels are not assumed woken.
 RC == CX /\ Mut # "noBoundaryWake"
 \* A start's read of its pane, which an unknown read hides (owner_input.rs native_read).
-A77 == Fix = "a7772"
+A77 == Fix \in {"a7772", "person"}
 \* What a Codex start's read shows (codex_observation.rs codex_native_end, owner_input.rs
 \* codex_read). Mutant classifierIdle takes any end for the turn's own, as the rollout classifier
 \* does; noStartEnded reads a rollout with no start as ended.
@@ -212,7 +212,7 @@ Handoff == wake /\ Waiting /\ wake' = FALSE /\ byTimer' = FALSE /\ timed' = (tim
 \* pane is NotBusy -> retain_not_sent ("send again"). a2d: the owned busy entry pastes whatever
 \* the transcript reads and declares no Answer. A start waits for an idle mailbox.
 DriveBusy ==
-    /\ Handoff /\ ~acct /\ src = "discord" /\ mbx = "active"
+    /\ Handoff /\ ~acct /\ src \in {"discord", "imessage"} /\ mbx = "active"
     /\ IF A2D \/ nat = "busy"
        THEN OwnedPaste("busyOwned", Mut = "pendOnBusy", FALSE)
        ELSE Stays("retained", "none")
@@ -223,13 +223,13 @@ DriveBusy ==
 \* An idle start meeting a marked row records and removes it. A headless start then retries its
 \* create (foreign_row admit_headless); an intake start up to f4 drops itself (admit), f5 retries
 \* once. An owned busy paste creates no row, so a marked row neither holds nor settles it.
-Retries == src = "start" \/ (Fix \in {"f5", "a2b", "a7772"} /\ Mut # "noRetry")
+Retries == src = "start" \/ (Fix \in {"f5", "a2b", "a7772", "person"} /\ Mut # "noRetry")
 RowClear == row = "none" \/ (row = "marked" /\ Retries)
 
 \* start_idle -> intake: a transcript-busy pane with an idle mailbox. main: the front is deferred
 \* to the next wake. a2d: the same owned busy entry pastes now.
 DriveIdleBusyPane ==
-    /\ Handoff /\ ~acct /\ src = "discord" /\ mbx = "idle" /\ nat = "busy"
+    /\ Handoff /\ ~acct /\ src \in {"discord", "imessage"} /\ mbx = "idle" /\ nat = "busy"
     /\ row # "carried"
     /\ IF A2D
        THEN OwnedPaste("busyOwned", Mut = "pendOnBusy", FALSE)
@@ -246,7 +246,7 @@ DriveIdleBusyPane ==
 \* reader of the row the input takes set up before the paste.
 DriveStartBusy ==
     /\ Handoff /\ ~acct /\ src = "start" /\ mbx = "idle" /\ nat = "busy"
-    /\ RowClear /\ (Fix \notin {"a2b", "a7772"} \/ Mut = "startPastes")
+    /\ RowClear /\ (Fix \notin {"a2b", "a7772", "person"} \/ Mut = "startPastes")
     /\ IF R2 /\ Mut # "startIdle"
        THEN OwnedPaste("busyStart", TRUE, TRUE) /\ mbx' = "active"
        ELSE IF obsOk
@@ -267,7 +267,7 @@ DriveStartWaits ==
     /\ IF A77 /\ mode = "legacy"
        THEN View \in (IF Mut = "earlyUnknownGoes" THEN {"busy"} ELSE {"busy", "unknown"})
        ELSE nat = "busy"
-    /\ row # "carried" /\ Fix \in {"a2b", "a7772"} /\ Mut # "startPastes"
+    /\ row # "carried" /\ Fix \in {"a2b", "a7772", "person"} /\ Mut # "startPastes"
     /\ inp' = "held" /\ heldBy' = "native"
     /\ watch' = (mode = "legacy" /\ Mut # "nativeNoWatch")
     /\ UNCHANGED <<route, plain, pend, sentInto, pastes, win, notices, reader, timer>>
@@ -585,7 +585,7 @@ WatchMisreads ==
 \* A read of a native-held pane fails (tmux has-session or list-panes errs); tmux answers next time.
 \* The watch keeps its probe; mutant nativeReadGone reads the failure as a gone pane and ends it.
 NativeWatchMisreads ==
-    /\ Fix \in {"a2b", "a7772"} /\ watch /\ inp = "held" /\ heldBy = "native"
+    /\ Fix \in {"a2b", "a7772", "person"} /\ watch /\ inp = "held" /\ heldBy = "native"
     /\ watch' = (Mut # "nativeReadGone")
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
@@ -699,9 +699,9 @@ DriveMeetsRow ==
 \* archive either way; mutant closeNoKick drops that kick.
 CarriedCloses ==
     /\ row = "carried" /\ nat = "idle"
-    /\ (~leak \/ (Fix \in {"f", "f4", "f5", "a2b", "a7772"} /\ Mut # "leakKept"))
+    /\ (~leak \/ (Fix \in {"f", "f4", "f5", "a2b", "a7772", "person"} /\ Mut # "leakKept"))
     /\ row' = "none" /\ ep' = FALSE
-    /\ wake' = (wake \/ ep \/ (Fix \in {"f4", "f5", "a2b", "a7772"} /\ Mut # "closeNoKick"))
+    /\ wake' = (wake \/ ep \/ (Fix \in {"f4", "f5", "a2b", "a7772", "person"} /\ Mut # "closeNoKick"))
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto,
                    win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft, notices, timer,
                    byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, leak,
@@ -794,7 +794,8 @@ HeadlessSettlesMarked == (src = "start" /\ pastes > 0) => row # "marked"
 \* 16. A start a native busy turn holds is not left waiting once all is quiet.
 NativeHeldResumes == ~(Quiet /\ inp = "held" /\ heldBy = "native")
 \* 17. A start runs as a turn of its own: it is never pasted into a running turn.
-StartOwnTurn == (src = "start" /\ pastes = 1) => sentInto = "idle"
+\* Only machine starts wait for their own turn; people may enter a busy native turn.
+StartOwnTurn == (src \notin {"discord", "imessage"} /\ pastes = 1) => sentInto = "idle"
 \* 18. An answered start was pasted exactly once.
 StartOnce == (src = "start" /\ inp = "answered") => pastes = 1
 \* 19. (liveness) A start a native busy turn holds is handed again unless its pane is gone, which
@@ -1279,5 +1280,13 @@ OtherOriginalProgress == SFResolved ~> (SF.payload["B"] = 1)
 RecoveredWithinRetryDelivered == (SF.state["A"] = "queued" /\ [](~SF.cause /\ ~SF.cleared)) ~> (SF.payload["A"] = 1)
 RetainedWakesB == (SF.state["A"] = "retained" /\ ~SF.token) ~> (SF.payload["B"] = 1)
 EarlyClearDelivers == (Fix = "OpaqueNoWakeEarlyClear") => <> (SF.payload["A"] = 1)
+
+\* A plain person's input at the active-turn boundary: the existing busy transaction takes it once.
+PersonBusyInit == Init /\ Fix = "person" /\ src = "imessage" /\ mode = "turn"
+    /\ mbx = "active" /\ nat = "busy" /\ screen = "ok" /\ draft = "none"
+    /\ old = "none" /\ row = "none" /\ ~acct /\ ~stale /\ ~leak /\ ~ep
+    /\ ~twin /\ ~twinPend /\ ev = "none" /\ envLeft = 1
+PersonBusyNext == DriveBusy
+PersonJoins == ~wake => pastes = 1 /\ sentInto = "busy"
 
 =============================================================================

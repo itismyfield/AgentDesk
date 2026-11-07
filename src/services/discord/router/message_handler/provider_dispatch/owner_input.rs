@@ -180,8 +180,19 @@ pub(in crate::services::discord) fn owner_drive(
         Box::pin(async move {
             use crate::services::discord::queue_io::input_ingress as ingress;
             let original = front.clone();
-            let synthetic = synthetic(&mailbox, &front).await;
-            let result = match mailbox.has_active_turn().await {
+            let synthetic = !front_origin(&mailbox, &front).await?.is_person();
+            let active = match mailbox.has_active_turn().await {
+                // Without a registry this read considers only a durable external holder.
+                Ok(false) if !synthetic => Ok(
+                    crate::services::discord::health::external_turn_hold_for_start(
+                        None, &provider, channel,
+                    )
+                    .await
+                    .is_some(),
+                ),
+                active => active,
+            };
+            let result = match active {
                 // A routine, scheduled or HTTP start completes only on its own turn.
                 Ok(true) if synthetic => Err("NotSent(\"synthetic_waits_idle\")".into()),
                 Ok(true) => {
@@ -203,7 +214,7 @@ pub(in crate::services::discord) fn owner_drive(
                         Err(effect::unsent("session_transition_busy".into()))
                     } else {
                         hand_busy(
-                            (mailbox, pool),
+                            (mailbox.clone(), pool),
                             provider.clone(),
                             (channel, front),
                             runtime.clone(),
@@ -214,6 +225,17 @@ pub(in crate::services::discord) fn owner_drive(
                 Ok(false) => idle(front).await,
                 Err(unreachable) => Err(format!("{unreachable:?}")),
             };
+            if synthetic && result.as_ref().err().map(String::as_str) == Some(START_WAITS) {
+                let held = original.clone();
+                mailbox
+                    .v2_request(move |slot| {
+                        slot.as_mut()
+                            .ok_or("V2 not adopted")?
+                            .prefer_person(&held)
+                            .map(drop)
+                    })
+                    .await?;
+            }
             if !synthetic
                 && let (Some(shared), Err(error)) = (&runtime, &result)
                 && error != "NotSent(\"owner_start_failed\")"
@@ -250,13 +272,20 @@ pub(in crate::services::discord) fn owner_drive(
     })
 }
 
-/// Whether a front's admission carries a start's context; an unreadable one counts as a start.
-async fn synthetic(mailbox: &ChannelMailboxHandle, (ticket, original): &Front) -> bool {
-    let Some(ticket) = ticket.clone() else {
-        return false;
+/// Reads the shared person policy from the exact front's kept context; read failures stay unsent.
+async fn front_origin(
+    mailbox: &ChannelMailboxHandle,
+    (ticket, original): &Front,
+) -> Result<InputOrigin, String> {
+    let context = match ticket {
+        Some(ticket) => {
+            mailbox
+                .v2_admission_context(original.clone(), ticket.clone())
+                .await?
+        }
+        None => None,
     };
-    let context = mailbox.v2_admission_context(original.clone(), ticket);
-    !matches!(context.await, Ok(None))
+    Ok(InputOrigin::from_context(context.as_ref()))
 }
 
 /// A front into the running turn whose inflight row names the pane; the grant is spent only for a
@@ -292,7 +321,11 @@ pub(in crate::services::discord) async fn hand_busy(
         .or(row.session_id.as_deref());
     let live = output.map(|path| (path, native));
     let at = (&host, session.as_str(), live);
-    let kind = (provider.as_str(), InputOrigin::Discord, true);
+    let kind = (
+        provider.as_str(),
+        front_origin(&mailbox, &front).await?,
+        true,
+    );
     let owner =
         Registration::observed(mailbox.clone(), kind, at, &front.1, None).map_err(|error| {
             if effect::surely_unsent(&error) {
@@ -345,8 +378,32 @@ async fn paste_busy(
     owner: Registration,
     settled: Settled,
 ) -> Option<tokio::task::JoinHandle<Result<(), String>>> {
+    let mut head = claim.front().1.clone();
+    if owner.origin == InputOrigin::Imessage
+        && head.reply_context.is_none()
+        && let Some(ticket) = claim.front().0.clone()
+    {
+        let context = owner
+            .mailbox
+            .v2_admission_context(head.clone(), ticket)
+            .await;
+        match context {
+            Ok(Some(context)) => {
+                head.reply_context = crate::services::imsg_reply::with_started_contract(
+                    None,
+                    context["source"].as_str(),
+                    context.get("metadata"),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = settled.send(Err(effect::unsent(error)));
+                return None;
+            }
+        }
+    }
     let mut bodies = Vec::new();
-    for item in std::iter::once(&claim.front().1).chain(claim.followers()) {
+    for item in std::iter::once(&head).chain(claim.followers()) {
         match super::super::input_payload::busy_body(channel, item, pool.as_ref()).await {
             Ok(body) => bodies.push(body),
             Err(error) => {
@@ -513,10 +570,10 @@ pub(in crate::services::discord) async fn admit_start(
     shared: &Shared,
     channel: ChannelId,
     (turn_id, text): (&str, &str),
-    provenance: serde_json::Value,
+    mut provenance: serde_json::Value,
 ) -> Option<crate::services::discord::queue_io::input_ingress::Intake> {
     use crate::services::discord::queue_io::input_ingress::{self as ingress, Intake};
-    use crate::services::discord::queue_io::input_owner::{routine, start};
+    use crate::services::discord::queue_io::input_owner::start;
     let execution = ingress::execution(&shared.provider, channel.get());
     if !execution.owner_takes(InputOrigin::HttpStart) {
         return None;
@@ -526,11 +583,17 @@ pub(in crate::services::discord) async fn admit_start(
         Ok(false) => return None,
         Err(error) => return Some(Intake::Rejected(error)),
     }
-    let (original, ticket) = match routine::synthetic_original(turn_id, channel.get(), text, 1) {
+    let (original, ticket) = match start::original(
+        &shared.mailbox(channel),
+        (turn_id, channel.get(), text),
+        &mut provenance,
+    )
+    .await
+    {
         Ok(original) => original,
         Err(error) => return Some(Intake::Rejected(error)),
     };
-    let at = (execution, InputOrigin::HttpStart);
+    let at = (execution, InputOrigin::from_context(Some(&provenance)));
     let ready = std::future::ready(Ok(()));
     start::admit_synthetic(
         drive(shared, channel),
@@ -740,7 +803,10 @@ async fn start_idle(
     .await?;
     // A start waits unclaimed behind a turn it did not start; that turn's idle wakes the owner.
     let wait = match &kept {
-        Some(context) => start_waits(&shared, channel, context).await,
+        Some(context) if !InputOrigin::from_context(Some(context)).is_person() => {
+            start_waits(&shared, channel, context).await
+        }
+        Some(_) => Wait::Go,
         None => Wait::Go,
     };
     if let Wait::Watch(read) = wait {
@@ -755,11 +821,7 @@ async fn start_idle(
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
     let (settled, answer) = tokio::sync::oneshot::channel();
-    let origin = match kept.as_ref().map(|context| context["origin"].as_str()) {
-        None => InputOrigin::Discord,
-        Some(Some("headless")) => InputOrigin::HttpStart,
-        Some(_) => InputOrigin::Routine,
-    };
+    let origin = InputOrigin::from_context(kept.as_ref());
     let failed = super::start_failure::Failure::claimed(&mailbox, &claim);
     let refusal = std::sync::Arc::new(Mutex::new(None));
     let owner = OwnerTurn {
@@ -890,7 +952,7 @@ pub(super) fn execute_owned(
     let session = turn.tmux_session_name.unwrap_or_default();
     // A start never joins a running or unreadable native turn: read once before it registers, it
     // waits unsent with a watch of that pane.
-    let synthetic = origin != InputOrigin::Discord
+    let synthetic = !origin.is_person()
         && matches!(turn.host, TurnHost::Tmux)
         && matches!(turn.provider, ProviderKind::Claude | ProviderKind::Codex);
     // Its idle or gone read is the pane it registers; no later read can turn it unobserved.
