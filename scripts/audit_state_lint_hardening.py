@@ -574,15 +574,14 @@ def audit_mutant_hooks(
     return findings
 
 
-# Test-policy rule 2: a test that reads Rust source text is a source-text guard. Added test-code lines
-# that read `.rs` text pass only inside a listed guard, or outside any test fn in a file hosting one.
+# Test-policy rule 2: added test lines reading `.rs` text pass only in a listed guard or a non-test fn of its file.
 # Not caught: a new test calling an existing helper that reads source, and paths built at run time.
 SOURCE_GUARD_ALLOWLIST = Path("scripts/ci/source_text_guard_allowlist.txt")
 SOURCE_GUARD_TOOLS = frozenset({"lexer", "direct", "include_str", "scanner"})
 SOURCE_GUARD_ROW_RE = re.compile(
     r"(\S+) ((?:[A-Za-z_][A-Za-z0-9_]*::)+([A-Za-z_][A-Za-z0-9_]*)) \| ([^|]*?) \| (.*)"
 )
-# The lexer is defined here; every other file naming it reads source.
+# The lexer's own file; every other file naming it reads source.
 SOURCE_LEXER_DEFINITION = "src/test_support.rs"
 SOURCE_LEXER_RE = re.compile(
     r"\b(?:strip_rust_comments|rust_code_mask|braced_item_span|source_guard_support)\b"

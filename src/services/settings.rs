@@ -1710,9 +1710,8 @@ mod retired_key_tests {
         assert!(CONFIG_KEYS.iter().all(|(k, ..)| *k != key));
     }
 
-    /// The kanban human-alert channel YAML field is gone from the config
-    /// model. A deploy whose YAML still carries it keeps booting (the
-    /// key is ignored) and the key does not survive a round-trip.
+    /// A YAML that still carries the retired human-alert channel field parses,
+    /// and the field does not survive a round-trip through the config model.
     #[test]
     fn retired_human_alert_channel_config_field_is_gone() {
         let field = "human_alert_channel_id";
