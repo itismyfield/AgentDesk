@@ -121,7 +121,7 @@ impl<B: BindingEvents> Sources<B> {
                 {
                     None
                 }
-                Err(failed) => return Err(reopen_halt(&cursor.source, failed)),
+                Err(failed) => return Err(failed.halt_at(&cursor.source)),
             };
             let mut reader = Reader::new(cursor.source.clone(), capture);
             reader.captured_any = captured_any
@@ -426,8 +426,7 @@ impl<B: BindingEvents> Sources<B> {
                 .store()
                 .cursor(&reader.source)
                 .ok_or_else(|| halt("dormant cursor missing"))?;
-            reader.capture =
-                Some(reopen(cursor).map_err(|failed| reopen_halt(&reader.source, failed))?);
+            reader.capture = Some(reopen(cursor).map_err(|failed| failed.halt_at(&reader.source))?);
             reader.dormant = None;
             reader.idle = None;
         }
@@ -744,21 +743,4 @@ fn drained(reader: &Reader, cursor: &Cursor) -> bool {
 
 fn missing_reader(reader: &Reader) -> bool {
     reader.capture.is_none() && reader.watch_until.is_none()
-}
-
-fn reopen_halt(source: &SourceId, failed: Reopen) -> WriterAlarm {
-    if let Reopen::Unread(error) = &failed
-        && error.kind() == std::io::ErrorKind::NotFound
-        && matches!(
-            Fingerprint::path(source),
-            Err((SourceAnomalyKind::Missing, _))
-        )
-    {
-        WriterAlarm::HaltedMissingSource {
-            source: source.clone(),
-            detail: format!("source reopen: {error}"),
-        }
-    } else {
-        failed.halt()
-    }
 }

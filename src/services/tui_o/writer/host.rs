@@ -809,7 +809,7 @@ impl<I: HostIo> Hosted<'_, I> {
             else {
                 return;
             };
-            let Some(cause) = self.run(store, attempt, absent).await else {
+            let Some((cause, ready)) = self.run(store, attempt, absent).await else {
                 settle(attempt);
                 return;
             };
@@ -818,7 +818,7 @@ impl<I: HostIo> Hosted<'_, I> {
                 self.io.writer_unavailable(channel);
                 let alarm = &cause.alarm;
                 tracing::error!(channel, ?alarm, "[tui_o] writer stopped and stays stopped");
-                if let Some(recovered) = observed.resume(&self, &cause, &known).await {
+                if let Some(recovered) = observed.resume(&self, &cause, &known, ready).await {
                     attempt += 1;
                     store = recovered;
                     super::deliver::seed_last_posted(channel, store.ledger());
@@ -840,13 +840,13 @@ impl<I: HostIo> Hosted<'_, I> {
         }
     }
 
-    /// Starts one actor and returns how it stopped, once it has ended.
+    /// Starts one actor and returns, once it has ended, how it stopped and whether it got ready.
     async fn run(
         &self,
         store: ChannelStore,
         attempt: u32,
         producer_absent: bool,
-    ) -> Option<StopCause> {
+    ) -> Option<(StopCause, bool)> {
         let boot = self.boot.attempt(attempt);
         let (channel, gate) = (self.channel, self.gate);
         let (port, lease) = (Arc::clone(&self.port), self.io.lease());
@@ -886,7 +886,9 @@ impl<I: HostIo> Hosted<'_, I> {
         let readiness = &self.claim.readiness;
         readiness.track(channel, Arc::clone(gate), watched);
         let port = readiness.register_ports(channel, ports);
+        let ready = AtomicBool::new(false);
         let on_resumed = || {
+            ready.store(true, Ordering::SeqCst);
             if attempt > 0 {
                 self.alarms.resume_pending(channel, false);
                 tracing::info!(
@@ -901,7 +903,7 @@ impl<I: HostIo> Hosted<'_, I> {
         let cause = ended.await;
         drop(stop_tx);
         readiness.close_transition(channel, port);
-        cause
+        cause.map(|cause| (cause, ready.load(Ordering::SeqCst)))
     }
 
     /// Waits and recovers the store until it opens; `None` once recovery fails for good. Evidence

@@ -62,6 +62,7 @@ impl Observation {
         host: &Hosted<'_, I>,
         cause: &StopCause,
         known: &[(SourceId, bool)],
+        ready: bool,
     ) -> Option<ChannelStore> {
         let WriterAlarm::HaltedMissingSource { source, .. } = &cause.alarm else {
             return None;
@@ -69,7 +70,12 @@ impl Observation {
         if cause.io.is_some() {
             return None;
         }
-        if self.start_absent && known.iter().any(|(id, present)| id == source && *present) {
+        // A source the ready actor attached after the store's cursors was lost at runtime too.
+        let runtime = known
+            .iter()
+            .find(|(id, _)| id == source)
+            .map_or(ready, |(_, present)| *present);
+        if self.start_absent && runtime {
             return None;
         }
         let wait = async {
