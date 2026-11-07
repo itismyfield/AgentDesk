@@ -237,7 +237,7 @@ impl Names {
     ) -> Result<SourceId, WriterAlarm> {
         match self.stored(store, source).map_err(halted)? {
             Some((cursor, true)) => {
-                reopen(cursor).map_err(Reopen::halt)?;
+                reopen(cursor).map_err(|failed| failed.halt_at(&cursor.source))?;
                 self.confirm(&cursor.source, source);
                 Ok(cursor.source.clone())
             }

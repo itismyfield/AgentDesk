@@ -763,7 +763,7 @@ impl<B: BindingEvents> Sources<B> {
         if reader.capture.is_none() {
             let cursor = writer.store().cursor(source).cloned();
             let cursor = cursor.ok_or_else(|| halt("retired source lost its cursor"))?;
-            reader.capture = Some(reopen(&cursor).map_err(Reopen::halt)?);
+            reader.capture = Some(reopen(&cursor).map_err(|failed| failed.halt_at(source))?);
         }
         Ok(())
     }
