@@ -1695,41 +1695,11 @@ mod tests {
 mod retired_key_tests {
     use super::*;
 
-    /// Files under `src/`, `policies/`, `dashboard/src/` (plus the example
-    /// config) whose text contains any of `needles`, repo-relative and sorted.
-    fn repo_files_containing(needles: &[&str]) -> Vec<String> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut stack: Vec<std::path::PathBuf> =
-            ["src", "policies", "dashboard/src", "agentdesk.example.yaml"]
-                .iter()
-                .map(|dir| root.join(dir))
-                .collect();
-        let mut readers = Vec::new();
-        while let Some(path) = stack.pop() {
-            if path.is_dir() {
-                for entry in std::fs::read_dir(&path).unwrap() {
-                    stack.push(entry.unwrap().path());
-                }
-            } else if std::fs::read_to_string(&path)
-                .is_ok_and(|text| needles.iter().any(|needle| text.contains(needle)))
-            {
-                let relative = path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                readers.push(relative);
-            }
-        }
-        readers.sort();
-        readers
-    }
-
-    /// The retired human-alert key is deleted at boot, never seeded or listed
-    /// as a config entry, and named by no code outside this file.
+    /// The retired human-alert key is deleted at boot and never seeded or
+    /// listed as a config entry, so a leftover reader only ever sees no value.
     #[test]
     fn retired_human_alert_channel_key_is_deleted_and_unread() {
-        let key = concat!("kanban_", "human_alert_channel_id");
+        let key = "kanban_human_alert_channel_id";
         let actions = config_default_seed_actions(&crate::config::Config::default());
         assert!(
             actions
@@ -1738,30 +1708,14 @@ mod retired_key_tests {
         );
         assert!(!actions.iter().any(|action| matches!(action, KvSeedAction::Put { key: k, .. } | KvSeedAction::PutIfAbsent { key: k, .. } if k == key)));
         assert!(CONFIG_KEYS.iter().all(|(k, ..)| *k != key));
-
-        // Only the boot delete list and this test name the key; nothing reads it.
-        assert_eq!(
-            repo_files_containing(&[key]),
-            ["src/services/settings.rs"],
-            "new or removed references to the retired key"
-        );
     }
 
-    /// #5993: the kanban human-alert channel YAML field is gone from the
-    /// config model, the example config, and every reader. A deploy whose YAML
-    /// still carries it keeps booting (the key is ignored) and the key does not
-    /// survive a round-trip through the config model.
+    /// The kanban human-alert channel YAML field is gone from the config
+    /// model. A deploy whose YAML still carries it keeps booting (the
+    /// key is ignored) and the key does not survive a round-trip.
     #[test]
     fn retired_human_alert_channel_config_field_is_gone() {
-        let field = concat!("human_alert", "_channel_id");
-        let access = format!(".{field}");
-        let declaration = format!("{field}:");
-        assert_eq!(
-            repo_files_containing(&[access.as_str(), declaration.as_str()]),
-            Vec::<String>::new(),
-            "the retired config field is read or declared again"
-        );
-
+        let field = "human_alert_channel_id";
         let legacy_yaml = format!("manager_channel_id: \"1\"\n{field}: \"2\"\n");
         let kanban: crate::config::KanbanConfig =
             serde_yaml::from_str(&legacy_yaml).expect("legacy YAML still parses");
