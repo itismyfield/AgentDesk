@@ -477,6 +477,47 @@ async fn backend_exit_removes_home_waiter_until_live_home_takes_handback_pg() {
     fixture.close().await;
 }
 
+/// #7906 inv: a deferred restart that is cancelled (begin → rollback) must leave the
+/// still-serving gateway holding its lease; today the keepalive unlocks and exits for good.
+#[tokio::test]
+async fn cancelled_deferred_restart_keeps_the_serving_holders_lease_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture.advertise(false).await;
+    let backup = fixture.backup().await;
+    fixture.ticks(1).await;
+    // What the deferred-restart poller publishes when a restart request appears.
+    backup.shared.restart.legacy_deferred_begin();
+    // Give the keepalive one full interval to react, however it reacts.
+    let observed = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if fixture.holder().await.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    // The restart request is cancelled: the runtime stays up and must keep serving.
+    backup.shared.restart.legacy_deferred_rollback();
+    assert!(!backup.backend.is_finished(), "backend keeps serving across a cancelled restart");
+    assert!(
+        observed.is_err() && fixture.holder().await.is_some(),
+        "a cancelled deferred restart must leave the serving gateway holding its lease"
+    );
+    fixture.ticks(1).await;
+    assert!(
+        try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+            .await
+            .unwrap()
+            .is_none(),
+        "a peer must not take the lease from a gateway that is still serving"
+    );
+    drop(backup);
+    fixture.close().await;
+}
+
 impl Fixture {
     fn save_config(&self, edit: impl FnOnce(&mut crate::config::Config)) {
         let mut config = self.config.clone();
