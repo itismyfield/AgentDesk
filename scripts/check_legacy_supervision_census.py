@@ -22,7 +22,7 @@ ENTRIES = {}
 # "*" pins a whole file.
 PROTECTED = {
     'src/cli/dcserver.rs': {'handle_dcserver': '6ebce96c00ecbe6a01a78a8a523428c8b2121fb56901dd6214f7976fa4cf073c'},
-    'src/services/discord/runtime_bootstrap.rs': {'run_bot': '4cf6297c24b9a38603e8c1620488f27a3f7b1c05c9a5ec406606463e32abf55b'},
+    'src/services/discord/runtime_bootstrap.rs': {'run_bot': '5cbb344eacb30de4967ccbc984211d300694a4581387d5ab2db46d8dacf38b6b'},
     'src/services/discord/inflight/removal/boot_reaper.rs': {
         'run_once': '6364c6e13da83bbf08092a6460de03dda10281c0af81b5f1293ab51b3ace9858',
         'prepare_before_reap': '9de0e7d478987fc0464a1753bee32171dc54a76cbebd4f8db4a7df6b47068f3e',

@@ -27,10 +27,19 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Option<Self> {
+        Self::build(tempfile::tempdir().unwrap(), None).await
+    }
+
+    /// Joins a database another process created; the root sits under `parent` so it can read it.
+    async fn attach(parent: &std::path::Path, database: String) -> Option<Self> {
+        Self::build(tempfile::tempdir_in(parent).unwrap(), Some(database)).await
+    }
+
+    async fn build(root: tempfile::TempDir, existing: Option<String>) -> Option<Self> {
         let environment = crate::config_live_reload::test_live_guard(
             crate::config::test_env_lock::acquire_shared_test_env_lock(),
         );
-        let root = tempfile::tempdir().unwrap();
+        let owns_database = existing.is_none();
         let config_path = root.path().join("agentdesk.yaml");
         let paths = [
             crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -51,10 +60,16 @@ impl Fixture {
             "{base}/{}",
             std::env::var("POSTGRES_TEST_ADMIN_DB").unwrap_or_else(|_| "postgres".into())
         );
-        let database = format!("agentdesk_handback_{}", uuid::Uuid::new_v4().simple());
-        postgres::create_test_database(&admin, &database, LABEL)
-            .await
-            .unwrap();
+        let database = match existing {
+            Some(database) => database,
+            None => {
+                let database = format!("agentdesk_handback_{}", uuid::Uuid::new_v4().simple());
+                postgres::create_test_database(&admin, &database, LABEL)
+                    .await
+                    .unwrap();
+                database
+            }
+        };
         let pool = postgres::connect_test_pool_and_migrate(&format!("{base}/{database}"), LABEL)
             .await
             .unwrap();
@@ -67,8 +82,10 @@ impl Fixture {
         config.cluster.gateway_yield_grace_secs = 5;
         crate::config::save_to_path(&config_path, &config).unwrap();
         crate::config_live_reload::install(config.clone());
-        sqlx::query("INSERT INTO worker_nodes(instance_id,status,last_heartbeat_at) VALUES ('home','online',NOW())")
-            .execute(&pool).await.unwrap();
+        if owns_database {
+            sqlx::query("INSERT INTO worker_nodes(instance_id,status,last_heartbeat_at) VALUES ('home','online',NOW())")
+                .execute(&pool).await.unwrap();
+        }
         Some(Self {
             _root: root,
             config,
@@ -92,6 +109,10 @@ impl Fixture {
     }
 
     async fn publish_waiter(&self) -> bool {
+        self.publish_waiter_for("claude").await
+    }
+
+    async fn publish_waiter_for(&self, provider: &str) -> bool {
         crate::services::cluster::node_registry::refresh_worker_node_runtime_capabilities(
             &self.pool, "home",
         )
@@ -104,7 +125,7 @@ impl Fixture {
                 .unwrap();
         crate::services::cluster::node_registry::node_awaits_gateway(
             &json!({"capabilities": capabilities}),
-            "claude",
+            provider,
         )
     }
 
@@ -666,4 +687,139 @@ async fn preferred_wait_stands_down_to_standby_when_a_restart_is_requested_pg() 
     );
     holder.unlock().await.unwrap();
     fixture.close().await;
+}
+
+const RESTART_PROOF_DATABASE_ENV: &str = "AGENTDESK_RESTART_PROOF_CHILD_DATABASE";
+const RESTART_PROOF_ROOT_ENV: &str = "AGENTDESK_RESTART_PROOF_CHILD_ROOT";
+const RESTART_PROOF_NONCE: &str = "20261107T022859-restart-proof-request";
+
+/// The acceptance path ends with the final provider's `exit(0)`, so it runs in a child process.
+#[tokio::test]
+async fn a_restart_requested_during_the_preferred_wait_is_persisted_within_30s_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let holder = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Codex)
+        .await
+        .unwrap()
+        .unwrap();
+    let proof_root = tempfile::tempdir().unwrap();
+    let test_name = concat!(
+        "services::discord::runtime_bootstrap::gateway_handback_integration_tests::",
+        "restart_proof_child"
+    );
+    let started = Instant::now();
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", test_name, "--nocapture"])
+        .env(RESTART_PROOF_DATABASE_ENV, &fixture.database)
+        .env(RESTART_PROOF_ROOT_ENV, proof_root.path())
+        .output()
+        .expect("spawn restart proof child");
+    let elapsed = started.elapsed();
+    let proof_name = format!("restart_persisted.{RESTART_PROOF_NONCE}");
+    let proof = std::fs::read_dir(proof_root.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path().join(&proof_name))
+        .find(|path| path.is_file());
+    holder.unlock().await.unwrap();
+    fixture.close().await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    println!(
+        "restart proof child: status={:?} elapsed_ms={}",
+        output.status,
+        elapsed.as_millis()
+    );
+    assert!(
+        output.status.success(),
+        "the child must end through the final provider's exit(0)\n{stdout}\n{stderr}"
+    );
+    let proof = proof.unwrap_or_else(|| panic!("{proof_name} must exist under the child's root"));
+    let body = std::fs::read_to_string(&proof).unwrap();
+    assert!(
+        body.lines()
+            .any(|line| line == format!("nonce={RESTART_PROOF_NONCE}")),
+        "the identity artifact must carry the request nonce: {body}"
+    );
+    assert!(
+        body.lines().any(|line| line == "provider=codex"),
+        "the provider that left the preferred wait must be the final one: {body}"
+    );
+}
+
+#[tokio::test]
+async fn restart_proof_child() {
+    let Ok(database) = std::env::var(RESTART_PROOF_DATABASE_ENV) else {
+        return;
+    };
+    let proof_root = std::path::PathBuf::from(std::env::var(RESTART_PROOF_ROOT_ENV).unwrap());
+    let fixture = Fixture::attach(&proof_root, database)
+        .await
+        .expect("the parent configured PostgreSQL");
+    fixture.save_config(|config| config.cluster.instance_id = Some("home".into()));
+    let shutdown_remaining = Arc::new(AtomicUsize::new(2));
+    let claude = super::super::make_shared_data_for_tests_with_barrier(
+        Some(fixture.pool.clone()),
+        shutdown_remaining.clone(),
+    );
+    let codex = super::super::make_shared_data_for_tests_with_barrier(
+        Some(fixture.pool.clone()),
+        shutdown_remaining.clone(),
+    );
+    let registry = Arc::new(health::HealthRegistry::new());
+    // The gateway provider settled long ago: its real poller is the first, non-final consumer.
+    registry
+        .register("claude".to_string(), claude.clone())
+        .await;
+    spawns::run_bot_spawn_execution_runtime_tasks(&claude, &ProviderKind::Claude);
+    let (codex_for_wait, registry_for_wait) = (codex.clone(), registry.clone());
+    let _waiting = tokio::spawn(async move {
+        let mut breaker = GatewayHandbackBreaker::for_owner("codex", TOKEN);
+        let outcome = run_bot_acquire_gateway_lease(
+            &codex_for_wait,
+            TOKEN,
+            &ProviderKind::Codex,
+            &Arc::new(AtomicUsize::new(0)),
+            &Arc::new(AtomicBool::new(true)),
+            &registry_for_wait,
+            0,
+            &mut breaker,
+        )
+        .await;
+        assert!(
+            matches!(outcome, GatewayLeaseOutcome::Standby),
+            "a held lease plus a restart request must end as standby"
+        );
+        start_standby_runtime(
+            &registry_for_wait,
+            &ProviderKind::Codex,
+            &codex_for_wait,
+            crate::services::tui_o::shadow::tap::TuiOConfig::or_default(None),
+            TOKEN,
+            breaker,
+        )
+        .await;
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fixture.publish_waiter_for("codex").await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the preferred waiter is published before its first attempt");
+    // The first attempt has failed and the loop is asleep: this request arrives late.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let root = crate::config::runtime_root().expect("fixture runtime root");
+    std::fs::write(
+        root.join("restart_pending"),
+        format!("nonce={RESTART_PROOF_NONCE}\nsource=test\n"),
+    )
+    .unwrap();
+    let issued = Instant::now();
+    while issued.elapsed() < Duration::from_secs(30) {
+        // The final provider's exit(0) ends this process before the deadline.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("no final provider published restart_persisted.{RESTART_PROOF_NONCE} within 30s");
 }
