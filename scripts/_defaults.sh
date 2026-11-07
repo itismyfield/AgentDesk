@@ -543,10 +543,10 @@ _health_json_reasons() {
 }
 
 _health_json_tui_gateway_verified_providers() {
-  # Providers every `tui_output_gateway_channels` entry verifies (worker/standby, complete,
-  # channels > 0), as an ERE alternation; the shared CSV reader keeps jq and jq-less alike.
-  local health_json="$1" csv entry name verified="" refused="" out=""
-  local entry_ere='^[a-z][a-z0-9_-]*:(worker|standby):complete:[1-9][0-9]*$'
+  # Verify every entry for each provider: complete, channels > 0, and an allowed role.
+  # The optional role filter restricts proof to standby; the default also accepts workers.
+  local health_json="$1" roles="${2:-worker|standby}" csv entry name verified="" refused="" out=""
+  local entry_ere="^[a-z][a-z0-9_-]*:($roles):complete:[1-9][0-9]*$"
   csv=$(_health_json_get_string_array_csv "$health_json" "tui_output_gateway_channels" || true)
   _health_json_reasons_csv_is_well_formed "$csv" || return 0
   local IFS=','
@@ -731,7 +731,7 @@ _health_json_deploy_nonblocking_ere() {
   # A relay verdict label cycles with placeholder state, so it cannot judge a
   # deploy (2026-09-07 measurement). Queue and deferred-hook depths are backlog,
   # so they only stop counting for a deploy verdict. Standby tokens join the set
-  # only once the body proves the node is a standby. A TUI gateway reason is
+  # once the body proves the node or the individual provider is standby. A TUI gateway reason is
   # accepted only for a provider whose role the body verifies. A TUI O channel
   # released to Legacy before any store write keeps its output there, so it never
   # blocks. Everything else, including an unrecognised reason, blocks. No comma:
@@ -747,6 +747,8 @@ _health_json_deploy_nonblocking_ere() {
   [ "${2:-0}" = "1" ] && [[ "${5:-}" =~ $ids_re ]] && ere="$ere|tui_o:too_many_readers:(${5})"
   [ "${2:-0}" = "1" ] && [[ "${6:-}" =~ $ids_re ]] && ere="$ere|tui_o:boundary_pending:(${6})"
   [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
+  # $8 is the body's providers with complete standby proof, independent of the node flag.
+  [ -n "${8:-}" ] && ere="$ere|provider:(${8}):gateway_standby"
   [ -n "${4:-}" ] && ere="$ere|provider:(${4}):tui_output_requires_gateway"
   [ "${2:-0}:${AGENTDESK_DEPLOY_ALLOW_DEGRADED+x}" = '1:x' ] || { printf '%s)$' "$ere"; return; }
   . "$(dirname "${BASH_SOURCE[0]}")/lib/deploy_allow_degraded.sh" || return 2
@@ -755,9 +757,10 @@ _health_json_deploy_nonblocking_ere() {
 _health_json_deploy_nonblocking_ere_for_body() {
   # Structural proof comes from this body; deploy-release supplies the smoke
   # channels and the local reader alarms observed before restart.
-  local health_json="$1" standby=0 tui reader_ids="" smoke_ids="" ids ids_re='^[0-9]+([|][0-9]+)*$'
+  local health_json="$1" standby=0 tui standby_tui reader_ids="" smoke_ids="" ids ids_re='^[0-9]+([|][0-9]+)*$'
   _health_json_field_is_true "$health_json" "cluster_standby" && standby=1
   tui=$(_health_json_tui_gateway_verified_providers "$health_json")
+  standby_tui=$(_health_json_tui_gateway_verified_providers "$health_json" standby)
   for ids in "${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-}" "${DEPLOY_PREEXISTING_READER_CHANNEL_IDS:-}"; do
     if [[ "$ids" =~ $ids_re ]]; then
       reader_ids="${reader_ids:+$reader_ids|}$ids"
@@ -765,7 +768,7 @@ _health_json_deploy_nonblocking_ere_for_body() {
   done
   [[ "${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-}" =~ $ids_re ]] && smoke_ids="$DEPLOY_E2E_SMOKE_CHANNEL_IDS"
   _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby" "$tui" \
-    "$reader_ids" "$smoke_ids" "$health_json"
+    "$reader_ids" "$smoke_ids" "$health_json" "$standby_tui"
 }
 
 _deploy_e2e_smoke_channel_ids() {
