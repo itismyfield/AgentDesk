@@ -2,7 +2,8 @@
 """Rust test sources: which #[test] fns the crate roots reach, and on which platforms they compile.
 
   inventory  walk src/lib.rs through `mod`, `#[path]` and `include!`, keeping each test's cfg chain
-  check      fail on test files no crate root reaches, missing module/include files and unreadable cfg
+  check      fail on test files no crate root reaches, missing module/include files, unreadable cfg and
+             test-only `.join()`/`.recv()` waits without a cap (allowlisted files excepted, allowlist shrinks only)
   compare    compare the source inventory for one platform with an unfiltered nextest list
   removed    per platform, tests a base checkout compiles that this tree no longer compiles, and tests
              runnable there that `#[ignore]` (plain or cfg_attr) now skips here; this tree must read
@@ -31,6 +32,12 @@ IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # cfg_attr payload attributes that change which files compile or which fns are tests.
 GATING_CFG_ATTR = {"path", "test", "cfg"}
 MANIFEST_DIR_INCLUDE = ("concat", "!", "(", "env", "!", "(", "CARGO_MANIFEST_DIR", ")")
+# Test-only `.join()`/`.recv()` calls must go through these capped helpers; a call nested in one is bounded.
+BOUNDED_CALLS = {"timeout", "timeout_at", "join_within", "recv_within", "await_within"}
+UNBOUNDED_WAITS = {"join": "thread join", "recv": "channel recv"}
+WAIT_HELPER = "src/test_support/wait.rs"
+WAIT_ALLOWLIST = "scripts/ci/test_wait_allowlist.txt"
+WAIT_CALL = re.compile(r"\.\s*(?:join|recv)\s*\(\s*\)")
 
 
 @dataclass(frozen=True)
@@ -265,6 +272,8 @@ class Inventory:
     # Test ID -> every (site, cfg chain) that declares it; cfg-disjoint duplicates keep one entry each.
     tests: dict = field(default_factory=dict)
     reached: set = field(default_factory=set)
+    # Reached file -> every cfg chain it is reached under; all test-only means the whole file is test code.
+    file_cfgs: dict = field(default_factory=dict)
     # Reached file -> every module path its items live in; more than one means one file, several modules.
     modules: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
@@ -318,6 +327,7 @@ def walk(root, repo_root, inventory=None, *, production=False):
                 inv.read_failures.append(f"{source}: source is missing or not a file")
             continue
         inv.reached.add(source.resolve())
+        inv.file_cfgs.setdefault(source.resolve(), set()).add(file_cfgs)
         inv.modules.setdefault(source.resolve(), set()).add(outer)
         try:
             if production:
@@ -485,6 +495,8 @@ def lib_inventory(repo_root):
         if root.name != "lib.rs" or root.parent != repo_root / "src":
             walk(root, repo_root, reached)
     lib.reached = reached.reached
+    for path, chains in reached.file_cfgs.items():
+        lib.file_cfgs.setdefault(path, set()).update(chains)
     lib.errors += [e for e in reached.errors if e not in lib.errors]
     lib.missing_files += [e for e in reached.missing_files if e not in lib.missing_files]
     lib.unreadable += [u for u in reached.unreadable if u not in lib.unreadable]
@@ -635,11 +647,129 @@ def _ignored_on(conditions, target_os, features):
     return True if True in verdicts else (None if None in verdicts else False)
 
 
+def _cfg_requires_test_text(expression):
+    """`rust_cfg.cfg_requires_test` for a cfg predicate's source text; the script may run from any cwd."""
+    try:
+        from rust_cfg import cfg_requires_test
+    except ModuleNotFoundError:
+        sys.path.append(str(Path(__file__).resolve().parents[1]))
+        from rust_cfg import cfg_requires_test
+    return cfg_requires_test(expression)
+
+
+def _cfg_requires_test(predicate):
+    """Whether one cfg token tuple from `walk` can only hold under `test`."""
+    words = list(predicate[1:-1])
+    text = ""
+    for n, word in enumerate(words):
+        if n and words[n - 1] not in "(=" and word not in "()=":
+            text += ","
+        text += f'"{word}"' if n and words[n - 1] == "=" else word
+    return _cfg_requires_test_text(text)
+
+
+def unbounded_waits(raw, tokens, whole_file):
+    """(line, kind) of every test-only `.join()`/`.recv()` that no bounded call (BOUNDED_CALLS) encloses."""
+    found, parens, gated, depth, pending, index = [], [], [], 0, False, 0
+    while index < len(tokens):
+        token = tokens[index]
+        span = attribute_span(tokens, index)
+        if span is not None:
+            bracket, end = span
+            attr = tokens[bracket + 1:end - 1]
+            if len(attr) > 2 and attr[0].kind == "ident" and attr[0].value == "cfg" and attr[1].value == "(":
+                gate = _cfg_requires_test_text(raw[attr[1].start + 1:attr[-1].start])
+                if bracket == index + 1:
+                    pending = pending or gate
+                elif gate and depth == 0:
+                    whole_file = True
+            index = end
+            continue
+        if token.kind == "punct":
+            if token.value == "(":
+                before = tokens[index - 1] if index else None
+                parens.append(before.value if before is not None and before.kind == "ident" else None)
+            elif token.value == ")":
+                if parens:
+                    parens.pop()
+            elif token.value == "{":
+                depth += 1
+                if pending:
+                    gated.append(depth)
+                pending = False
+            elif token.value == "}":
+                if gated and gated[-1] == depth:
+                    gated.pop()
+                depth, pending = depth - 1, False
+            elif token.value == ";" or token.value == "," and not parens:
+                # A gated field, variant or statement ends here; the gate must not reach the next block.
+                pending = False
+        elif token.kind == "ident" and token.value in UNBOUNDED_WAITS and index + 2 < len(tokens) \
+                and index and tokens[index - 1].value == "." and tokens[index - 1].kind == "punct" \
+                and tokens[index + 1].value == "(" and tokens[index + 2].value == ")" \
+                and (whole_file or gated) and not BOUNDED_CALLS & set(parens):
+            found.append((token.line, UNBOUNDED_WAITS[token.value]))
+        index += 1
+    return found
+
+
+def wait_allowlist(repo_root):
+    """(entries, problems) of the unbounded-wait allowlist: one repo path per line, `#` comments without issue numbers."""
+    path = repo_root / WAIT_ALLOWLIST
+    entries, problems = [], []
+    if not path.is_file():
+        return entries, problems
+    for number, line in enumerate(path.read_text("utf-8").splitlines(), 1):
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith("#"):
+            if re.search(r"#\d+", text):
+                problems.append(f"{WAIT_ALLOWLIST}:{number} comment names an issue number")
+            continue
+        if text in entries:
+            problems.append(f"{WAIT_ALLOWLIST}:{number} duplicate entry {text}")
+        entries.append(text)
+    return entries, problems
+
+
+def test_wait_findings(repo_root, inventory):
+    """Test code waiting without a cap: new violations and allowlist rows whose file no longer needs one."""
+    root = repo_root.resolve()
+    files = {path: chains for path, chains in inventory.file_cfgs.items()}
+    for path in sorted((root / "tests").rglob("*.rs")):
+        if "fixtures" not in path.relative_to(root).parts:
+            files[path.resolve()] = None
+    violations = {}
+    for path in sorted(files):
+        rel = path.relative_to(root).as_posix()
+        if rel == WAIT_HELPER:
+            continue
+        chains = files[path]
+        whole = chains is None or all(any(_cfg_requires_test(cfg) for cfg in chain) for chain in chains)
+        raw = path.read_text("utf-8")
+        if not WAIT_CALL.search(raw):
+            continue
+        hits = unbounded_waits(raw, rust_tokens(raw, extended=True), whole)
+        if hits:
+            violations[rel] = hits
+    allowed, found = wait_allowlist(repo_root)
+    found += [f"unbounded wait allowlist: {rel} has no unbounded wait left; remove from {WAIT_ALLOWLIST}"
+              for rel in allowed if rel not in violations]
+    for rel, hits in sorted(violations.items()):
+        if rel in allowed:
+            continue
+        found += [f"unbounded wait: {rel}:{line} {kind} without a cap; use test_support::wait "
+                  f"(join_within/recv_within/await_within)" for line, kind in hits]
+    return found
+
+
 def check_findings(repo_root):
     inv = lib_inventory(repo_root)
     found = [f"orphan test file: {path}" for path in orphans(repo_root, inv)]
     found += [f"missing source: {e}" for e in inv.errors]
     found += [f"unreadable: {u}" for u in inv.unreadable]
+    found += test_wait_findings(repo_root, inv)
     features = default_features(repo_root)
     for platform, target_os in PLATFORMS.items():
         _, _, unknown = platform_split(inv, target_os, features)
