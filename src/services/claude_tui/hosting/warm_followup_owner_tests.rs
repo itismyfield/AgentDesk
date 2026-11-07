@@ -234,6 +234,8 @@ impl ClearedPane {
             before: uuid::Uuid::new_v4().to_string(),
             after: uuid::Uuid::new_v4().to_string(),
         };
+        // A live pane, so only a receipt, a rebind or the grace ends the observer's wait.
+        pane.tmux.set_dead(false);
         let idle = "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n";
         std::fs::write(pane.path(&pane.before), idle).unwrap();
         pane.bind(&pane.before.clone());
