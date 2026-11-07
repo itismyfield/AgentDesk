@@ -51,17 +51,12 @@ pub(super) async fn end_live(
     let nonce = pin(&state.submission.lock().unwrap_or_else(|e| e.into_inner()))?;
     let pool = shared.pg_pool.as_ref()?;
     let http = shared.serenity_http_or_token_fallback()?;
-    let read = || read_ended(provider, &state, &turn.token);
-    let early = mutant("prb-read-before-end").then(read);
     let retire = execution_gone(pool, &shared.token_hash, provider, &row, &nonce).await?;
     #[cfg(test)]
     super::tests::hook("live_after_end").await;
     let (kind, held, actor) = (provider.clone(), state.clone(), turn.token.clone());
-    let late = || tokio::task::spawn_blocking(move || read_ended(&kind, &held, &actor));
-    let read = match early {
-        Some(read) => read,
-        None => late().await.ok().flatten(),
-    };
+    let read = tokio::task::spawn_blocking(move || read_ended(&kind, &held, &actor));
+    let read = read.await.ok().flatten();
     match read {
         Some(false) => {}
         // Its own terminal is the reader's to admit: the native settlement owns the turn.
@@ -87,11 +82,9 @@ pub(super) async fn end_live(
     if settled != TerminationResult::Retired {
         return keep(&row, "retired, settlement unconfirmed");
     }
-    if !mutant("prb-no-wake") {
-        // Watchers read the cleanup first, so the cancel below reads as a finished turn.
-        token.mark_completion_cleanup();
-        token.cancelled.store(true, Ordering::Release);
-    }
+    // Watchers read the cleanup first, so the cancel below reads as a finished turn.
+    token.mark_completion_cleanup();
+    token.cancelled.store(true, Ordering::Release);
     Some(())
 }
 
@@ -110,12 +103,12 @@ async fn execution_gone(
     nonce: &str,
 ) -> Option<Option<(HostedObservation, HostedExecution)>> {
     let (found, record) = hosted_record(pool, token_hash, provider, row).await.ok()?;
-    if record.execution_nonce != nonce && !mutant("prb-successor-reread") {
+    if record.execution_nonce != nonce {
         return None;
     }
     if record.state == HostedState::Retired {
         // A retire this pass or an earlier one made; the notice and settlement still follow.
-        return (!mutant("prb-retired-holds")).then_some(None);
+        return Some(None);
     }
     let target = herdr_endpoints().target(&record)?;
     let ended = execution_end(target, record.clone()).await == ExecutionEnd::Ended;

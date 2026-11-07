@@ -185,10 +185,6 @@ pub(super) async fn claim_tui_direct_synthetic_turn_prepared(
     identity.register_episode(active_turn_nonce.as_deref());
 
     let recap_pool = shared.pg_pool.as_ref().cloned();
-    #[cfg(test)]
-    let recap_pool = recap_pool.filter(|_| {
-        !crate::services::discord::session_idle_cleanup::recap_cleanup_mutant("skip_tui_cleanup")
-    });
     if let Some(pool) = recap_pool
         && let Some(http) = shared.serenity_http_or_token_fallback()
     {
