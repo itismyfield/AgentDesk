@@ -479,3 +479,39 @@ fn an_owner_observer_moves_once_to_a_session_adopted_after_the_grace() {
     );
     assert_eq!(result, Ok(()));
 }
+
+/// This submit's receipt in the observed session keeps the read there even when the pane is
+/// later verified on another session, so one turn's answer is never read from two transcripts.
+#[test]
+fn a_receipt_in_the_observed_session_keeps_the_read_from_moving() {
+    let pane = ClearedPane::new();
+    let frame = "own session input";
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(CancelToken::new());
+    let at = (pane.session.as_str(), frame, 7_889_302);
+    let _observe = owner_observer(at, (None, pane.dir.path()), sender, cancel.clone());
+    let answered = ClearedPane::turn(&pane.before, frame, "answered in its own session");
+    pane.tmux
+        .on_enter(&pane.path(&pane.before), answered.trim_end());
+    let sent = guarded_outcome::with_receipt_sink(Some(&cancel), || {
+        crate::services::claude_tui::input::send_warm_followup_owned(&pane.session, frame, None)
+    });
+    assert!(sent.is_ok(), "{sent:?}");
+    std::fs::write(pane.path(&pane.after), "").unwrap();
+    let observed = Resolution {
+        session_id: pane.before.clone(),
+        transcript_path: pane.path(&pane.before),
+        resume: true,
+    };
+    let adopted = Resolution {
+        session_id: pane.after.clone(),
+        transcript_path: pane.path(&pane.after),
+        resume: true,
+    };
+    let (leave, moved) = late_rebind(&observed, &cancel, move || Some(adopted.clone()));
+    assert!(
+        !leave(),
+        "a receipt in the observed session must keep the read"
+    );
+    assert!(moved.get().is_none());
+}
