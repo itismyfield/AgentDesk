@@ -521,7 +521,7 @@ async fn consumed_busy_input_restart_closes_on_the_first_idle_health_pass_pg() {
     )) {
         return;
     }
-    restart_case(7807301, 20, false, false).await;
+    restart_case(7807301, 20, false, false, false).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -532,7 +532,20 @@ async fn consumed_busy_input_with_zero_debt_closes_on_first_idle_pg() {
     )) {
         return;
     }
-    restart_case(7807303, 0, false, false).await;
+    restart_case(7807303, 0, false, false, false).await;
+}
+
+/// A pinless carried row naming the session the pane left closes on the first idle pass with one
+/// notice; the iMessage start and Discord input behind it each start once.
+#[tokio::test(flavor = "current_thread")]
+async fn superseded_session_carried_input_without_pin_frees_the_queue_with_one_notice_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::carried_restart::",
+        "superseded_session_carried_input_without_pin_frees_the_queue_with_one_notice_pg"
+    )) {
+        return;
+    }
+    restart_case(7896202, 20, false, false, true).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -543,10 +556,16 @@ async fn consumed_busy_input_followed_by_interrupted_native_turn_completes_pg() 
     )) {
         return;
     }
-    restart_case(7807304, 20, true, false).await;
+    restart_case(7807304, 20, true, false, false).await;
 }
 
-async fn restart_case(channel: u64, notices: usize, n_aborted: bool, own_cancelled: bool) {
+async fn restart_case(
+    channel: u64,
+    notices: usize,
+    n_aborted: bool,
+    own_cancelled: bool,
+    superseded: bool,
+) {
     let _root = crate::config::TestRuntimeRootGuard::new();
     discord::runtime_store::set_process_generation_for_tests(Some(4));
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -730,6 +749,18 @@ async fn restart_case(channel: u64, notices: usize, n_aborted: bool, own_cancell
         "N is idle with a proved native boundary before the health pass",
     )
     .await;
+    if superseded {
+        // The old daemon's shutdown rewrote A against the session the pane left, with no pin.
+        let mut stale = row(rig.channel).unwrap();
+        stale.native_stop_user_pin = None;
+        stale.session_id = Some("session-before-clear".into());
+        let file = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &ProviderKind::Claude,
+            rig.channel.get(),
+        );
+        fs::write(file, serde_json::to_vec(&stale).unwrap()).unwrap();
+    }
     let archives = inflight::inflight_runtime_root().unwrap().join("archive");
     eprintln!(
         "CARRIED_RESTART_STAGE channel={} phase=one_idle_health_pass",
@@ -891,6 +922,20 @@ async fn restart_case(channel: u64, notices: usize, n_aborted: bool, own_cancell
             .count(),
         0,
         "O owns B/C bodies, so the bridges cannot post duplicate legacy answers"
+    );
+    discord::health::run_stall_watchdog_pass(&registry, &ProviderKind::Claude).await;
+    let told: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_outbox
+         WHERE reason_code = 'carried.unverified_closed' AND target = $1",
+    )
+    .bind(format!("channel:{}", rig.channel))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        told,
+        i64::from(superseded),
+        "only an unproven input closes with a notice, and only once"
     );
     o.abort();
     drop(rig);
@@ -1159,5 +1204,5 @@ async fn consumed_busy_input_own_cancel_stamp_survives_orphan_close_pg() {
     )) {
         return;
     }
-    restart_case(7807308, 20, false, true).await;
+    restart_case(7807308, 20, false, true, false).await;
 }
