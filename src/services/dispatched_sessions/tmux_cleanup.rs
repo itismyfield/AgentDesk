@@ -11,8 +11,9 @@ use crate::db::dispatched_sessions as dispatched_sessions_db;
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 
 use super::{
-    RawProviderTranscriptObservationMode, classify_session_termination_reason,
-    latest_runtime_activity_unix_nanos, now_unix_nanos, provider_resume_selector_is_effective,
+    ProviderOutputEvidence, RawProviderTranscriptObservationMode,
+    classify_session_termination_reason, latest_runtime_activity_unix_nanos, now_unix_nanos,
+    provider_output_evidence, provider_resume_selector_is_effective,
     record_raw_provider_transcript_len_watermark_if_observed,
 };
 
@@ -110,12 +111,23 @@ pub(super) async fn kill_tmux_session_impl(
     )
     .await;
     if let Err(refusal) = host {
-        tracing::warn!(
-            session_key,
-            preserved_reason = refusal.reason(),
-            reason,
-            "kill-tmux: not a legacy tmux session; tmux, row and selectors left untouched"
-        );
+        // Non-legacy hosts (herdr, hosted E2E) have no idle-cleanup path in this route;
+        // the host owns teardown. One WARN per session key, then debug.
+        if host_refusal_first_sighting(session_key) {
+            tracing::warn!(
+                session_key,
+                preserved_reason = refusal.reason(),
+                reason,
+                "kill-tmux: not a legacy tmux session; tmux, row and selectors left untouched"
+            );
+        } else {
+            tracing::debug!(
+                session_key,
+                preserved_reason = refusal.reason(),
+                reason,
+                "kill-tmux: not a legacy tmux session; tmux, row and selectors left untouched (repeat)"
+            );
+        }
         return preserved_without_probe(pool, session_key, &tmux_name, refusal.reason()).await;
     }
     let reason_is_idle_cleanup = reason_is_idle_cleanup_reason(reason);
@@ -180,21 +192,22 @@ pub(super) async fn kill_tmux_session_impl(
             dispatched_sessions_db::session_last_seen_unix_nanos_pg(pool, session_key)
                 .await
                 .unwrap_or(0);
-        let runtime_activity_nanos = latest_runtime_activity_unix_nanos(&tmux_name);
+        // Provider output and open turns only; spawn markers and touched mtimes
+        // no longer count as activity.
+        let evidence = provider_output_evidence(&tmux_name);
+        let runtime_activity_nanos = evidence.output_unix_nanos;
         let now_nanos = now_unix_nanos();
         let runtime_activity_age_minutes =
             runtime_activity_age_minutes(runtime_activity_nanos, now_nanos);
         idle_decision_last_seen_nanos = Some(last_seen_nanos);
         idle_decision_runtime_activity_nanos = Some(runtime_activity_nanos);
         idle_decision_runtime_activity_age_minutes = runtime_activity_age_minutes;
-        if should_skip_idle_kill_for_live_runtime_activity(
-            last_seen_nanos,
-            runtime_activity_nanos,
-            now_nanos,
-            minimum_idle_minutes,
-        ) {
-            let refreshed =
-                dispatched_sessions_db::refresh_session_heartbeat_by_key_to_unix_nanos_pg(
+        if let Some(decision) =
+            idle_kill_skip_decision(last_seen_nanos, evidence, now_nanos, minimum_idle_minutes)
+        {
+            // An open turn is re-checked every tick instead of buying another idle window.
+            let refreshed = decision == "skip_live_output"
+                && dispatched_sessions_db::refresh_session_heartbeat_by_key_to_unix_nanos_pg(
                     pool,
                     session_key,
                     runtime_activity_nanos,
@@ -209,9 +222,10 @@ pub(super) async fn kill_tmux_session_impl(
                 runtime_activity_age_minutes,
                 minimum_idle_minutes,
                 heartbeat_refreshed = refreshed,
+                turn_open = evidence.turn_open,
                 reason,
-                decision = "skip_live_output",
-                "  [{ts}] 🛡 kill-tmux: SKIPPED idle kill — runtime activity newer than last_heartbeat and still within idle threshold, session is live (#3053). Heartbeat refreshed to runtime activity.",
+                decision,
+                "  [{ts}] 🛡 kill-tmux: SKIPPED idle kill — provider output newer than last_heartbeat and within idle threshold, or a turn is still open (#3053/#7897). Heartbeat refreshed to provider output.",
             );
             return (
                 StatusCode::OK,
@@ -222,6 +236,8 @@ pub(super) async fn kill_tmux_session_impl(
                     "tmux_session_name": tmux_name,
                     "session_row_preserved": true,
                     "skipped_live_activity_guard": true,
+                    "decision": decision,
+                    "turn_open": evidence.turn_open,
                     "heartbeat_refreshed": refreshed,
                     "runtime_activity_age_minutes": runtime_activity_age_minutes,
                     "minimum_idle_minutes": minimum_idle_minutes,
@@ -522,6 +538,36 @@ pub(super) fn should_skip_idle_kill_for_live_runtime_activity(
         (Some(_), None) => true,
         _ => false,
     }
+}
+
+/// An open turn (user submitted, assistant mid-tool) protects even a quiet long tool run;
+/// otherwise the provider-output age decides exactly as the live-activity guard did.
+pub(super) fn idle_kill_skip_decision(
+    last_seen_nanos: i64,
+    evidence: ProviderOutputEvidence,
+    now_nanos: i64,
+    minimum_idle_minutes: Option<u64>,
+) -> Option<&'static str> {
+    if evidence.turn_open {
+        return Some("skip_open_turn");
+    }
+    should_skip_idle_kill_for_live_runtime_activity(
+        last_seen_nanos,
+        evidence.output_unix_nanos,
+        now_nanos,
+        minimum_idle_minutes,
+    )
+    .then_some("skip_live_output")
+}
+
+/// True the first time this process refuses a session key for its host, false on repeats.
+fn host_refusal_first_sighting(session_key: &str) -> bool {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert(session_key.to_string()))
+        .unwrap_or(true)
 }
 
 pub(super) fn should_skip_idle_cleanup_for_active_dispatch(
