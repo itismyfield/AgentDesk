@@ -586,6 +586,55 @@ pub(crate) fn latest_runtime_activity_unix_nanos(tmux_session_name: &str) -> i64
     latest
 }
 
+/// Provider-output clock for the idle-kill guard: newest conversation record time plus an open-turn
+/// flag. Spawn markers and touched mtimes (Claude rewrites idle transcripts hourly) do not count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ProviderOutputEvidence {
+    pub output_unix_nanos: i64,
+    pub turn_open: bool,
+}
+
+pub(crate) fn provider_output_evidence(tmux_session_name: &str) -> ProviderOutputEvidence {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    let mut evidence = ProviderOutputEvidence::default();
+    let Some((provider, _)) =
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_session_name)
+    else {
+        return evidence;
+    };
+    let mut sources: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(path) =
+        crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl")
+    {
+        sources.push(path.into());
+    }
+    if let Some(marker) =
+        crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux_session_name)
+    {
+        sources.push(marker.rollout_path);
+    }
+    if let Some(binding) =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
+        && matches!(
+            binding.runtime_kind,
+            RuntimeHandoffKind::ClaudeTui | RuntimeHandoffKind::CodexTui
+        )
+    {
+        sources.push(binding.output_path.into());
+    }
+    for path in sources {
+        if let Some(nanos) =
+            crate::services::tui_turn_state::latest_provider_record_unix_nanos(&provider, &path)
+        {
+            evidence.output_unix_nanos = evidence.output_unix_nanos.max(nanos);
+        }
+        evidence.turn_open |=
+            crate::services::tui_turn_state::observe_provider_jsonl_turn_state(&provider, &path)
+                .is_busy();
+    }
+    evidence
+}
+
 fn now_unix_nanos() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -889,11 +938,13 @@ fn provider_resume_selector_is_effective_with_claude_home(
 #[cfg(test)]
 mod kill_tmux_resume_tests {
     use super::tmux_cleanup::{
-        runtime_activity_age_minutes, should_skip_idle_cleanup_for_active_dispatch,
+        idle_kill_skip_decision, runtime_activity_age_minutes,
+        should_skip_idle_cleanup_for_active_dispatch,
         should_skip_idle_kill_for_live_runtime_activity,
     };
     use super::{
-        latest_runtime_activity_unix_nanos, provider_resume_selector_is_effective_with_claude_home,
+        latest_runtime_activity_unix_nanos, provider_output_evidence,
+        provider_resume_selector_is_effective_with_claude_home,
         selected_provider_resume_selector_with_claude_home,
     };
     use crate::db::dispatched_sessions::ProviderSessionIds;
@@ -1040,6 +1091,165 @@ mod kill_tmux_resume_tests {
             now,
             Some(360),
         ));
+    }
+
+    fn rfc3339_at(unix_nanos: i64) -> String {
+        chrono::DateTime::<chrono::Utc>::from_timestamp_nanos(unix_nanos)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    fn millis_floor(unix_nanos: i64) -> i64 {
+        unix_nanos / 1_000_000 * 1_000_000
+    }
+
+    fn claude_record(kind: &str, body: &str, unix_nanos: i64) -> String {
+        format!(
+            "{{\"type\":\"{kind}\",{body},\"timestamp\":\"{}\"}}",
+            rfc3339_at(unix_nanos)
+        )
+    }
+
+    fn bind_claude_tui_transcript(
+        tmux: &str,
+        dir: &std::path::Path,
+        records: &[String],
+    ) -> std::path::PathBuf {
+        let transcript = dir.join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+        std::fs::write(&transcript, records.join("\n") + "\n").expect("write transcript");
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            tmux,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                output_path: transcript.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(uuid::Uuid::new_v4().to_string()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        transcript
+    }
+
+    const USER_HI: &str = "\"message\":{\"role\":\"user\",\"content\":\"hi\"}";
+    const ASSISTANT_TEXT: &str =
+        "\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}";
+    const ASSISTANT_TOOL_USE: &str = "\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{}}]}";
+    const TURN_DURATION: &str = "\"subtype\":\"turn_duration\",\"durationMs\":1";
+
+    /// Claude's hourly transcript rewrite and a respawn `.generation` marker refresh mtimes
+    /// without a new conversation record; the guard must not read that as activity.
+    #[test]
+    fn idle_kill_guard_ignores_marker_and_transcript_touch_without_provider_records() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("isolated root");
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let minute = 60_000_000_000i64;
+        let now = super::now_unix_nanos();
+        let last_output = now - 15 * 60 * minute;
+        let last_seen = now - 14 * 60 * minute;
+        let tmux = format!("AgentDesk-claude-runtime-{}", uuid::Uuid::new_v4());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transcript = bind_claude_tui_transcript(
+            &tmux,
+            dir.path(),
+            &[
+                claude_record("user", USER_HI, last_output - minute),
+                claude_record("assistant", ASSISTANT_TEXT, last_output - minute / 2),
+                claude_record("system", TURN_DURATION, last_output),
+                "{\"type\":\"cost-state\",\"totalCostUSD\":1.0}".to_string(),
+            ],
+        );
+        let touched = filetime::FileTime::from_unix_time(now / 1_000_000_000, 0);
+        filetime::set_file_mtime(&transcript, touched).expect("touch transcript");
+        let generation = std::path::PathBuf::from(crate::services::tmux_common::session_temp_path(
+            &tmux,
+            "generation",
+        ));
+        std::fs::create_dir_all(generation.parent().expect("marker parent")).expect("marker dir");
+        std::fs::write(&generation, "7").expect("write generation marker");
+
+        let evidence = provider_output_evidence(&tmux);
+
+        assert_eq!(evidence.output_unix_nanos, millis_floor(last_output));
+        assert!(!evidence.turn_open);
+        assert_eq!(
+            idle_kill_skip_decision(last_seen, evidence, now, Some(360)),
+            None
+        );
+        // The mtime clock still reads the touch and the marker as activity.
+        assert!(latest_runtime_activity_unix_nanos(&tmux) > last_seen);
+        assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux));
+    }
+
+    /// A recent closed turn behind an old mtime is still protected, and an open turn
+    /// (assistant `tool_use` without its result) is protected past the idle threshold.
+    #[test]
+    fn idle_kill_guard_protects_recent_provider_output_and_open_turn() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("isolated root");
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let minute = 60_000_000_000i64;
+        let now = super::now_unix_nanos();
+        let last_seen = now - 14 * 60 * minute;
+        let stale_mtime = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let tmux_recent = format!("AgentDesk-claude-runtime-{}", uuid::Uuid::new_v4());
+        let recent = bind_claude_tui_transcript(
+            &tmux_recent,
+            dir.path(),
+            &[
+                claude_record("user", USER_HI, now - 6 * minute),
+                claude_record("assistant", ASSISTANT_TEXT, now - 5 * minute - minute / 2),
+                claude_record("system", TURN_DURATION, now - 5 * minute),
+            ],
+        );
+        filetime::set_file_mtime(&recent, stale_mtime).expect("stale mtime");
+        let evidence = provider_output_evidence(&tmux_recent);
+        assert_eq!(evidence.output_unix_nanos, millis_floor(now - 5 * minute));
+        assert!(!evidence.turn_open);
+        assert_eq!(
+            idle_kill_skip_decision(last_seen, evidence, now, Some(360)),
+            Some("skip_live_output")
+        );
+
+        let tmux_open = format!("AgentDesk-claude-runtime-{}", uuid::Uuid::new_v4());
+        let open = bind_claude_tui_transcript(
+            &tmux_open,
+            dir.path(),
+            &[
+                claude_record("user", USER_HI, now - 401 * minute),
+                claude_record("assistant", ASSISTANT_TOOL_USE, now - 400 * minute),
+            ],
+        );
+        filetime::set_file_mtime(&open, stale_mtime).expect("stale mtime");
+        let evidence = provider_output_evidence(&tmux_open);
+        assert_eq!(evidence.output_unix_nanos, millis_floor(now - 400 * minute));
+        assert!(evidence.turn_open);
+        assert_eq!(
+            idle_kill_skip_decision(last_seen, evidence, now, Some(360)),
+            Some("skip_open_turn")
+        );
+
+        assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux_recent));
+        assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux_open));
     }
 
     #[test]

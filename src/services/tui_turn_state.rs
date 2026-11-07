@@ -154,6 +154,46 @@ pub(crate) fn observe_provider_jsonl_turn_state(
     }
 }
 
+/// Unix nanos of the newest provider conversation record in `path`'s tail window: a touched
+/// mtime without a new record does not count; an unstamped legacy relay jsonl falls back to mtime.
+pub(crate) fn latest_provider_record_unix_nanos(
+    provider: &ProviderKind,
+    path: &Path,
+) -> Option<i64> {
+    let window = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES).ok()?;
+    let newest = window
+        .lines
+        .iter()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|json| provider_record_is_conversation(provider, json))?;
+    let stamped = ["/timestamp", "/payload/timestamp"]
+        .iter()
+        .filter_map(|pointer| newest.pointer(pointer)?.as_str())
+        .find_map(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        .and_then(|time| time.timestamp_nanos_opt());
+    stamped.or_else(|| {
+        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+        let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+        i64::try_from(since_epoch.as_nanos()).ok()
+    })
+}
+
+/// Conversation records only: housekeeping (`cost-state`, `mode`, `session_meta`, ...) is not output.
+fn provider_record_is_conversation(provider: &ProviderKind, json: &Value) -> bool {
+    match provider {
+        ProviderKind::Claude => matches!(
+            claude_envelope_turn_state(json),
+            Some(TuiTurnState::Idle | TuiTurnState::Streaming | TuiTurnState::UserSubmitted)
+        ),
+        ProviderKind::Codex => matches!(
+            json.get("type").and_then(Value::as_str),
+            Some("event_msg" | "response_item" | "item.started" | "item.completed")
+        ),
+        _ => json.get("type").is_some(),
+    }
+}
+
 pub(crate) fn provider_runtime_has_structured_jsonl_turn_state(
     provider: &ProviderKind,
     runtime_kind: Option<RuntimeHandoffKind>,
