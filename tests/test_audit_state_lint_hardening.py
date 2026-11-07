@@ -309,29 +309,17 @@ class MutantHookAuditTests(unittest.TestCase):
             {"src/lib.rs": "pub fn production() {}\npub fn begin_sink_delivery_mutation(seq: u64) -> u64 {\n    seq\n}\n"}
         )
 
-    def test_new_call_to_an_existing_mutant_hook_fails(self) -> None:
-        self.assert_flagged(
-            {"src/lib.rs": "pub fn production() {\n    if n2b_mutant(\"x\") {\n        return;\n    }\n}\n"},
-            "src/lib.rs:2: new call to mutant hook `n2b_mutant`",
-        )
-
-    def test_reformatting_an_existing_hook_passes_but_a_second_call_fails(self) -> None:
-        existing = {
-            "src/lib.rs": 'pub fn production() {\n    if n2b_mutant("x") { return; }\n'
-            '    let _ = std::env::var("ADK_OLD_MUTANT");\n}\n'
-        }
-        reformatted = (
-            'pub fn production() {\n    if n2b_mutant("x") {\n        return;\n    }\n'
-            '    let _old = std::env::var("ADK_OLD_MUTANT");\n}\n'
-        )
+    def test_reformatting_an_existing_hook_passes_but_a_second_read_fails(self) -> None:
+        existing = {"src/lib.rs": 'pub fn production() {\n    let _ = std::env::var("ADK_OLD_MUTANT");\n}\n'}
+        reformatted = 'pub fn production() {\n    let _old = std::env::var("ADK_OLD_MUTANT");\n}\n'
         rc, output = self.run_audit({"src/lib.rs": reformatted}, base_files=existing)
         self.assertEqual(rc, 0, output)
         rc, output = self.run_audit(
-            {"src/lib.rs": reformatted[: -len("}\n")] + '    let _ = n2b_mutant("y");\n}\n'},
+            {"src/lib.rs": reformatted[: -len("}\n")] + '    let _ = std::env::var("ADK_OLD_MUTANT");\n}\n'},
             base_files=existing,
         )
         self.assertEqual(rc, 1, output)
-        self.assertIn("new call to mutant hook `n2b_mutant`", output)
+        self.assertIn("new mutant env `ADK_OLD_MUTANT`", output)
 
     def test_deleted_comments_and_strings_do_not_offset_a_new_hook(self) -> None:
         cases = {
@@ -344,11 +332,6 @@ class MutantHookAuditTests(unittest.TestCase):
                 "/*\nfn mutant(name: &str) -> bool {\n*/\npub fn production() {}\n",
                 "pub fn production() {}\nfn mutant(name: &str) -> bool {\n    false\n}\n",
                 "new mutant hook fn `mutant`",
-            ),
-            "call in a raw string": (
-                'pub const DOC: &str = r#"\nif n2b_mutant("x") {}\n"#;\npub fn production() {}\n',
-                'pub fn production() {\n    if n2b_mutant("x") {}\n}\n',
-                "new call to mutant hook `n2b_mutant`",
             ),
         }
         for name, (before, after, needle) in cases.items():
@@ -381,14 +364,14 @@ class MutantHookAllowListTests(unittest.TestCase):
 
 class MutantHookOldSnapshotTests(unittest.TestCase):
     def test_removed_line_without_a_readable_old_file_offsets_nothing(self) -> None:
-        line = '    if n2b_mutant("x") {}'
+        line = '    let _ = std::env::var("ADK_OLD_MUTANT");'
         added = [AUDIT.AddedLine("src/missing_fixture.rs", 1, line)]
         for rev in (None, "0" * 40):
             with self.subTest(rev=rev):
                 removed = [AUDIT.RemovedLine("src/missing_fixture.rs", 1, line, rev)]
                 findings = AUDIT.audit_mutant_hooks(added, True, removed)
                 self.assertEqual(len(findings), 1, findings)
-                self.assertIn("n2b_mutant", findings[0])
+                self.assertIn("ADK_OLD_MUTANT", findings[0])
 
 
 if __name__ == "__main__":

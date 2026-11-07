@@ -139,22 +139,7 @@ pub(super) fn execute_observed(
     let preflight = match &reason {
         LaunchReason::AbsentVerified(_) => None,
         LaunchReason::ExistingRail => {
-            #[cfg(test)]
-            {
-                let reopened = crate::services::claude_tui::source_verify::n2b_mutant("b1b-reason")
-                    && observation.is_some_and(|observed| {
-                        clear_relaunch::absent_capture(tmux_session_name, observed).is_some()
-                    });
-                if reopened {
-                    None
-                } else {
-                    verified_hold::preflight(tmux_session_name, cancel_token.as_ref())
-                }
-            }
-            #[cfg(not(test))]
-            {
-                verified_hold::preflight(tmux_session_name, cancel_token.as_ref())
-            }
+            verified_hold::preflight(tmux_session_name, cancel_token.as_ref())
         }
     };
     let warm_followup_enabled = match preflight {

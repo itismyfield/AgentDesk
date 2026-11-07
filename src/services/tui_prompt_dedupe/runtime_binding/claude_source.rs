@@ -160,8 +160,6 @@ impl Candidate<'_> {
         let source = match checked {
             Checked::Bound(pin) => {
                 *skip = unlogged;
-                #[cfg(test)]
-                let reclaimable = reclaimable && !source_verify::n2b_mutant("r5-reclaim-bound-off");
                 if let (true, Some(pin), Some(p)) = (reclaimable, pin, proposal) {
                     self.log_reclaim(p, &pin);
                 }
@@ -201,12 +199,6 @@ impl Candidate<'_> {
             }
         };
         *skip = unlogged;
-        #[cfg(test)]
-        if source_verify::n2b_mutant("mtime") && self.older_than_bound(candidate) {
-            *skip = Some(AdoptSkip::SourceRejected(SourceRejection::Regression));
-            reject("older_than_bound_transcript");
-            return false;
-        }
         #[cfg(test)]
         after_check();
         // The path must still name the file the check read; a replaced one waits for the next check,
@@ -305,11 +297,7 @@ impl Candidate<'_> {
     fn reclaimable(&self, history: &SourceHistory) -> bool {
         use crate::services::claude_tui::hook_server::HookEventKind;
         let prompt = HookEventKind::from_path(&self.hook.event) == HookEventKind::UserPromptSubmit;
-        #[cfg(test)]
-        let prompt = prompt || source_verify::n2b_mutant("r5-reclaim-any-event");
         let complete = history.complete;
-        #[cfg(test)]
-        let complete = complete || source_verify::n2b_mutant("r5-reclaim-incomplete");
         let waiting =
             (history.awaiting.as_ref()).is_some_and(|w| w.session != self.payload_session_id);
         prompt && complete && waiting
@@ -333,8 +321,6 @@ impl Candidate<'_> {
             None => (None, SourceHistory::default()),
         };
         let (pin, pinned_at) = pinned.unzip();
-        #[cfg(test)]
-        let (pin, history) = n2b_seams::checked((pin, history));
         let pin = pin.filter(|pin| {
             pin.session_id == bound_session && pin.path == Path::new(&bound.output_path)
         });
@@ -382,10 +368,6 @@ impl Candidate<'_> {
 /// Lets a prompt of the session a pane is bound to, named by the pane's own launch command,
 /// supersede the Pending it outlived; the binding and its hook routing stay as they are.
 pub(crate) fn reclaim_with_current_prompt(session_id: &str, hook: &HookSignal) -> bool {
-    #[cfg(test)]
-    if source_verify::n2b_mutant("r5-reclaim-inner-off") {
-        return false;
-    }
     let session_id = session_id.trim();
     let payload_path = hook.transcript_path.as_deref().map(str::trim);
     let Some(payload_path) = payload_path
@@ -487,60 +469,15 @@ pub(crate) use n2b_seams::{BEFORE_AUTHORITY, before_authority};
 
 #[cfg(test)]
 mod n2b_seams {
-    use super::*;
-
     thread_local! {
         /// Runs once before a hook takes its pane's authority.
         pub(crate) static BEFORE_AUTHORITY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-        static STALE_HISTORY: std::cell::RefCell<Option<(Option<SourceId>, SourceHistory)>> = const { std::cell::RefCell::new(None) };
     }
 
-    /// Before a hook takes its pane's authority: the mutation reads the history here and keeps
-    /// that copy for this hook's check, past any hook the seam lands meanwhile.
-    pub(crate) fn before_authority(command_session_id: &str) {
-        let mut stale = None;
-        if source_verify::n2b_mutant("auth") {
-            let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-            let key = PromptKey::new("claude", command_session_id);
-            let tmux = state
-                .tmux_by_provider_session
-                .get(&key)
-                .map(|e| e.value.clone());
-            let channel = tmux.as_ref().and_then(|t| state.channel_by_tmux.get(t));
-            let channel = channel.map(|e| e.value);
-            drop(state);
-            if let (Some(tmux), Some(channel)) = (tmux, channel) {
-                let nonce = match observe_spawn_nonce_marker(&tmux) {
-                    SpawnNonceMarker::Known(nonce) => Some(nonce),
-                    _ => None,
-                };
-                stale = binding_events::claude_history(channel, &tmux, nonce.as_deref()).ok();
-            }
-        }
+    /// Before a hook takes its pane's authority: runs the seam a test installed, once.
+    pub(crate) fn before_authority(_command_session_id: &str) {
         if let Some(seam) = BEFORE_AUTHORITY.with_borrow_mut(Option::take) {
             seam();
-        }
-        STALE_HISTORY.set(stale);
-    }
-
-    /// The history a mutation read before the authority, or what the check read under it.
-    pub(super) fn checked(
-        read: (Option<SourceId>, SourceHistory),
-    ) -> (Option<SourceId>, SourceHistory) {
-        match STALE_HISTORY.with_borrow_mut(Option::take) {
-            Some(stale) => stale,
-            None if source_verify::n2b_mutant("hist") => (read.0, SourceHistory::default()),
-            None => read,
-        }
-    }
-
-    impl Candidate<'_> {
-        /// The newer-transcript rule the log history replaced, for the mutation that brings it back.
-        pub(super) fn older_than_bound(&self, candidate: &str) -> bool {
-            let current = self.bound.session_id.as_deref();
-            let mtime = |path: &str| std::fs::metadata(path).and_then(|m| m.modified()).ok();
-            current.is_some_and(|c| c != self.command_session_id && c != self.payload_session_id)
-                && mtime(candidate) <= mtime(&self.bound.output_path)
         }
     }
 }

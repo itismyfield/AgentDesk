@@ -75,9 +75,7 @@ async fn install(fixture: &mut CanaryFixture, evidence: Evidence) -> OwnerScope 
             .await;
         registered.push(runtime);
     }
-    let omit_registry = std::env::var("AGENTDESK_N2B_TEST_MUTATION")
-        .is_ok_and(|value| value == "joint-owner-proof");
-    if evidence.registry && !omit_registry {
+    if evidence.registry {
         assert!(
             registered[0]
                 .tmux_watchers
@@ -91,7 +89,9 @@ async fn install(fixture: &mut CanaryFixture, evidence: Evidence) -> OwnerScope 
         registered[0]
             .tmux_watchers
             .owner_channel_for_tmux_session(REGISTRY_NAME),
-        (evidence.registry && !omit_registry).then_some(serenity::ChannelId::new(FOREIGN_CHANNEL)),
+        evidence
+            .registry
+            .then_some(serenity::ChannelId::new(FOREIGN_CHANNEL)),
     );
     if evidence.routine {
         sqlx::query("INSERT INTO routines (id, script_ref, name) VALUES ('bundle-owner-routine', 'fixture.js', 'bundle owner')")

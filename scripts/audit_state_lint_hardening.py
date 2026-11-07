@@ -475,12 +475,22 @@ def audit_migration_integers(lines: list[AddedLine]) -> list[str]:
 MUTANT_HOOK_ROOTS = ("src/", "tests/")
 MUTANT_ENV_RE = re.compile(r"[A-Z][A-Z0-9_]*(?:MUTANT|MUTATION)[A-Z0-9_]*")
 MUTANT_FN_DEF_RE = re.compile(r"\bfn\s+((?:[a-z0-9_]*_)?mutant(?:_[a-z0-9_]+)?)\s*[(<]")
-# Calls into the hooks main still carries; drop this rule once S4b1 lands and no hook remains to call.
-MUTANT_CALL_RE = re.compile(
-    r"\b((?:[a-z0-9_]*_)?mutant(?:_[a-z0-9_]+)?|behavior_mutation_enabled|parser_bypassed)\s*\("
-)
 # (path, env) pairs a committed test really arms; each row needs a one-line reason comment.
-MUTANT_HOOK_ALLOWED: frozenset[tuple[str, str]] = frozenset()
+MUTANT_HOOK_ALLOWED: frozenset[tuple[str, str]] = frozenset(
+    {
+        # Drops only the metadata name: absence evidence and that name come from one binding log.
+        (
+            "src/services/discord/turn_presence/activity/unbound/binding_metadata.rs",
+            "AGENTDESK_N2B_TEST_MUTATION",
+        ),
+        # The no-core missing-metadata FIFO test arms the binding_metadata.rs switch above.
+        (
+            "src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/"
+            "auxiliary_tests/joint_owner_tests.rs",
+            "AGENTDESK_N2B_TEST_MUTATION",
+        ),
+    }
+)
 MUTANT_HOOK_HINT = (
     "test switches stay out of committed code (docs/agent-maintenance/test-policy.md rule 3): "
     "prove the mutant in the lane, revert it, and inject the situation through an argument"
@@ -495,19 +505,13 @@ def is_mutant_hook_path(path: str) -> bool:
 
 
 def hook_occurrences(source: str) -> dict[int, list[tuple[str, str]]]:
-    """(kind, name) of every mutant env literal, hook fn and hook call, by line, lexed as one file."""
+    """(kind, name) of every mutant env literal and hook fn, by line, lexed as one file."""
     found: dict[int, list[tuple[str, str]]] = collections.defaultdict(list)
     for text, lines in rust_string_literals(source):
         if lines and MUTANT_ENV_RE.fullmatch(text):
             found[lines[0]].append(("new mutant env", text))
     for line_no, code in enumerate(strip_rust_non_code(source).splitlines(), start=1):
-        defined = MUTANT_FN_DEF_RE.findall(code)
-        found[line_no] += [("new mutant hook fn", name) for name in defined]
-        found[line_no] += [
-            ("new call to mutant hook", name)
-            for name in MUTANT_CALL_RE.findall(code)
-            if name not in defined
-        ]
+        found[line_no] += [("new mutant hook fn", name) for name in MUTANT_FN_DEF_RE.findall(code)]
     return found
 
 
@@ -537,7 +541,7 @@ def _hooks_at(snapshot: HookSnapshot | None, line_no: int, text: str) -> list[tu
 def audit_mutant_hooks(
     lines: list[AddedLine], base_resolved: bool, removed: list[RemovedLine] | None = None
 ) -> list[str]:
-    """Rules A (env literal), B (hook fn) and D (hook call), counted as net additions per file.
+    """Rules A (env literal) and B (hook fn), counted as net additions per file.
 
     A removed line offsets an added one only when lexing the old file shows a real hook on it;
     an unreadable old snapshot offsets nothing.
