@@ -625,7 +625,7 @@ fn rebound_source(
 ) -> Option<Resolution> {
     use std::sync::atomic::Ordering;
     let (mut dead_reads, deadline) = (0, std::time::Instant::now() + REBIND_GRACE);
-    let own_input = || match cancel.native_stop.observe_native_input() {
+    let own_input = || match cancel.native_stop.peek_native_input() {
         Some(Ok(pin)) => {
             pin.session_id == resolved.session_id
                 || std::path::Path::new(&pin.output_path) == resolved.transcript_path
