@@ -42,6 +42,10 @@ pub(super) fn enqueue_behind(
         });
     if let Some(last) = queue.last().filter(|_| !last_budgeted) {
         if last.author_id == intervention.author_id
+            && intervention
+                .source_message_queued_generations
+                .iter()
+                .all(|source| source.origin_id.is_none())
             && last.text == intervention.text
             && last.reply_context == intervention.reply_context
             && last.has_reply_boundary == intervention.has_reply_boundary

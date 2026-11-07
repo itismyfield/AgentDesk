@@ -58,7 +58,7 @@ fn said(bodies: &Bodies) -> Vec<(String, u64)> {
             .as_str()
             .and_then(|id| id.parse().ok())
     };
-    let notice = |text: &str| text.ends_with("즉시주입 하지 못하고 메시지큐에 들어갔습니다");
+    let notice = |text: &str| text == "큐에 들어갔습니다";
     bodies
         .iter()
         .map(|b| {
@@ -458,10 +458,7 @@ async fn every_hold_notices_once_and_pending_or_attempted_never() {
         })
         .collect();
     assert_eq!(texts, Hold::ALL.map(Hold::notice));
-    assert!(
-        texts.iter().all(|t| t.starts_with("-# ")
-            && t.ends_with("로 즉시주입 하지 못하고 메시지큐에 들어갔습니다"))
-    );
+    assert!(texts.iter().all(|text| text == "큐에 들어갔습니다"));
     let (key, _) = reserve(&handle, "attempted").await;
     write(&handle, &key).await;
     let fresh = input_ingress::Original::with_ticket(

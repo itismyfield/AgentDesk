@@ -117,28 +117,8 @@ impl Hold {
         Self::OwnerChange,
     ];
 
-    fn reason(self) -> &'static str {
-        match self {
-            #[cfg(any(unix, test))]
-            Self::SessionSwitch => "세션 전환(/clear·/resume·헤드리스 시작) 처리",
-            Self::RestartRecovery => "재시작 직후 복구 대기",
-            Self::Uploads => "첨부 업로드 미완료·실패",
-            #[cfg(any(unix, test))]
-            Self::ScreenMissing => "TUI 화면·대화 기록 확인 불가",
-            #[cfg(any(unix, test))]
-            Self::Modal => "모달 창 표시",
-            #[cfg(any(unix, test))]
-            Self::ScreenContention => "같은 화면 주입 충돌",
-            #[cfg(any(unix, test))]
-            Self::OwnerChange => "턴 주인 변경 충돌",
-        }
-    }
-
     pub(crate) fn notice(self) -> String {
-        format!(
-            "-# {}로 즉시주입 하지 못하고 메시지큐에 들어갔습니다",
-            self.reason()
-        )
+        "큐에 들어갔습니다".into()
     }
 
     /// Only a refusal proven to precede any content can owe a queue-hold notice.
@@ -523,7 +503,7 @@ pub(crate) fn original(
     let generations: Vec<_> = intervention.source_message_queued_generations().into_iter().map(|source| json!({
         "message_id":source.message_id.get(), "queued_generation":source.queued_generation,
         "enqueued_at_epoch_us":source.enqueued_at_epoch_us,"preserve_on_cancel":source.preserve_on_cancel,
-        "route":source.route,"origin":source.origin,
+        "route":source.route,"origin":source.origin,"origin_id":source.origin_id,
     })).collect();
     let segments: Vec<_> = intervention
         .source_text_segments()
