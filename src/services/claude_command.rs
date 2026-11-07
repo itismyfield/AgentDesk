@@ -23,9 +23,8 @@ use crate::services::platform::BinaryResolution;
 /// `resolve_provider_binary("claude")` now scrubs `resolved_path` /
 /// `canonical_path` / `exec_path` to `None` AND redacts the raw-path components
 /// embedded in the `attempts` diagnostics, so no raw Claude path is reachable
-/// through that seam (including by parsing `attempts`). The sole raw-path seam is
-/// `binary_resolver::resolve_claude_binary_sealed`, which takes a [`ClaudeSeal`]
-/// that only [`ClaudeBinary::resolve`] below can build.
+/// through that seam (including by parsing `attempts`). The sole raw-path seam,
+/// `binary_resolver::resolve_claude_binary_sealed`, needs a [`ClaudeSeal`] only this module builds.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ClaudeBinary {
     program: OsString,

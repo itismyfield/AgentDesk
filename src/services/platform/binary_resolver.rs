@@ -225,11 +225,8 @@ fn resolve_provider_binary_unsealed(provider: &str) -> BinaryResolution {
     }
 }
 
-/// Sole sanctioned raw-path seam for the Claude binary.
-///
-/// #4627: `ClaudeBinary::resolve` is the only caller, because only `claude_command` can build the
-/// [`ClaudeSeal`] argument. It returns the unscrubbed resolution so the guarded launch builder can
-/// wrap the raw path; every other consumer goes through the scrubbing [`resolve_provider_binary`].
+/// Sole raw-path seam for the Claude binary; other consumers use the scrubbing [`resolve_provider_binary`].
+/// Only `claude_command` can build the [`ClaudeSeal`] argument, so `ClaudeBinary::resolve` is the only caller.
 pub(crate) fn resolve_claude_binary_sealed(_: ClaudeSeal) -> BinaryResolution {
     resolve_provider_binary_unsealed("claude")
 }
