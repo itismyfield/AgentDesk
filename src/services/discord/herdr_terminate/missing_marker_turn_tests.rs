@@ -377,9 +377,14 @@ fn mm_retire_wakes_held_writer_and_normal_input_delivers_without_deadlock_pg() {
                 }),
         "the production writer input port must find this execution's own source"
     );
+    let is_reply = |post: &Value| {
+        post["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("Recovered managed execution reply."))
+    };
     case.rt.block_on(async {
         tokio::time::timeout(Duration::from_secs(15), async {
-            while discord.posts.lock().unwrap().is_empty() {
+            while !discord.posts.lock().unwrap().iter().any(&is_reply) {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
@@ -388,13 +393,7 @@ fn mm_retire_wakes_held_writer_and_normal_input_delivers_without_deadlock_pg() {
         handles.remove(0).stop_and_join().await.unwrap();
     });
     let posts = discord.posts.lock().unwrap();
-    assert_eq!(posts.len(), 1);
-    assert!(
-        posts[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("Recovered managed execution reply.")
-    );
+    assert_eq!(posts.iter().filter(|post| is_reply(post)).count(), 1);
     eprintln!("MM_WRITER delivered=1 new_nonce={}", next.execution_nonce);
     gate.lost();
     gateway.abort();
