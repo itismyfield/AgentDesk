@@ -4,15 +4,22 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::discord::turn_presence::activity::{self, Activity};
 use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+type EventHook = Box<dyn FnMut(&str) + Send>;
 
 #[derive(Clone, Default)]
 struct Log(
     Arc<std::sync::Mutex<Vec<u8>>>,
     Arc<std::sync::Mutex<Option<(PathBuf, PathBuf)>>>,
+    Arc<std::sync::Mutex<Option<EventHook>>>,
 );
 impl Write for Log {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().extend_from_slice(bytes);
+        if let Some(hook) = self.2.lock().unwrap().as_mut() {
+            hook(&String::from_utf8_lossy(bytes));
+        }
         if String::from_utf8_lossy(bytes).contains("writer stopped and stays stopped")
             && let Some((from, to)) = self.1.lock().unwrap().take()
         {
@@ -35,6 +42,93 @@ impl Log {
         String::from_utf8_lossy(&self.0.lock().unwrap())
             .matches(text)
             .count()
+    }
+}
+
+struct PgOutage {
+    command: std::sync::mpsc::Sender<Option<bool>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl PgOutage {
+    fn install(pool: &sqlx::PgPool, stage: Arc<AtomicUsize>) -> (Self, EventHook) {
+        let options = pool.connect_options();
+        let (command, commands) = std::sync::mpsc::channel();
+        let (acknowledge, acknowledgements) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            use sqlx::Connection;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let mut connection = sqlx::PgConnection::connect_with(&options).await.unwrap();
+                    let mut hidden = false;
+                    while let Ok(Some(hide)) = commands.recv() {
+                        let query = if hide {
+                            "ALTER TABLE sessions RENAME TO sessions_retry_outage"
+                        } else {
+                            "ALTER TABLE sessions_retry_outage RENAME TO sessions"
+                        };
+                        sqlx::query(query).execute(&mut connection).await.unwrap();
+                        hidden = hide;
+                        acknowledge.send(()).unwrap();
+                    }
+                    if hidden {
+                        sqlx::query("ALTER TABLE sessions_retry_outage RENAME TO sessions")
+                            .execute(&mut connection)
+                            .await
+                            .unwrap();
+                    }
+                });
+        });
+        let sender = command.clone();
+        let (mut hidden, mut restored) = (false, false);
+        let hook: EventHook = Box::new(move |text| {
+            if !hidden && text.contains("missing-source evidence changed; recovering") {
+                sender.send(Some(true)).unwrap();
+                acknowledgements
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+                hidden = true;
+            } else if hidden
+                && !restored
+                && (text.contains("missing-source retry awaits readable metadata")
+                    || text.contains("stage=\"hosted\" status=\"start\""))
+            {
+                stage.store(
+                    if text.contains("awaits readable metadata") {
+                        1
+                    } else {
+                        2
+                    },
+                    AtomicOrdering::SeqCst,
+                );
+                sender.send(Some(false)).unwrap();
+                acknowledgements
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+                restored = true;
+            }
+        });
+        (
+            Self {
+                command,
+                thread: Some(thread),
+            },
+            hook,
+        )
+    }
+    fn finish(mut self) {
+        self.command.send(None).unwrap();
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
+impl Drop for PgOutage {
+    fn drop(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = self.command.send(None);
+            let _ = thread.join();
+        }
     }
 }
 
@@ -83,6 +177,8 @@ enum Wake {
     Source,
     Presence,
     Binding,
+    ReplayedBinding,
+    InterruptedPresence,
     EarlySource,
     RuntimeSource,
     Stop,
@@ -91,7 +187,7 @@ enum Wake {
 }
 
 async fn scenario(role: &str, wake: Wake) {
-    let source_returns = wake != Wake::Presence;
+    let source_returns = !matches!(wake, Wake::Presence | Wake::InterruptedPresence);
     let root = crate::config::TestRuntimeRootGuard::new();
     let _binding = activity::tests::BindingRoot::enter(root.path());
     let _live = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
@@ -180,6 +276,32 @@ async fn scenario(role: &str, wake: Wake) {
     crate::services::tui_o::channel_policy::install(&config).unwrap();
     let mut original = retained_bytes(root.path(), channel, &source);
     let log = Log::default();
+    let outage_stage = Arc::new(AtomicUsize::new(0));
+    let mut outage = None;
+    if wake == Wake::InterruptedPresence {
+        let (guard, hook) = PgOutage::install(&pool, outage_stage.clone());
+        *log.2.lock().unwrap() = Some(hook);
+        outage = Some(guard);
+    }
+    if wake == Wake::ReplayedBinding {
+        let path = root
+            .path()
+            .join(crate::services::tui_prompt_dedupe::binding_events::BINDING_EVENTS_DIR)
+            .join(format!("{channel}.log"));
+        let (mut saved, mut restored) = (None, false);
+        *log.2.lock().unwrap() = Some(Box::new(move |text| {
+            if saved.is_none() && text.contains("missing-source evidence changed; recovering") {
+                saved = Some(std::fs::read(&path).unwrap());
+                std::fs::write(&path, b"").unwrap();
+            } else if !restored
+                && text.contains("stage=\"hosted\" status=\"start\"")
+                && let Some(bytes) = &saved
+            {
+                std::fs::write(&path, bytes).unwrap();
+                restored = true;
+            }
+        }));
+    }
     if wake == Wake::EarlySource {
         *log.1.lock().unwrap() = Some((saved.clone(), source.path.clone()));
     }
@@ -190,6 +312,13 @@ async fn scenario(role: &str, wake: Wake) {
         tracing_subscriber::fmt()
             .without_time()
             .with_ansi(false)
+            .with_max_level(
+                if matches!(wake, Wake::ReplayedBinding | Wake::InterruptedPresence) {
+                    tracing::Level::DEBUG
+                } else {
+                    tracing::Level::INFO
+                },
+            )
             .with_writer(log.clone())
             .finish(),
     );
@@ -308,7 +437,7 @@ async fn scenario(role: &str, wake: Wake) {
         pool.close().await;
         return;
     }
-    if wake == Wake::Binding {
+    if matches!(wake, Wake::Binding | Wake::ReplayedBinding) {
         use crate::services::tui_prompt_dedupe::binding_events as p5;
         let dir = root.path().join(p5::BINDING_EVENTS_DIR);
         std::fs::create_dir_all(&dir).unwrap();
@@ -388,7 +517,32 @@ async fn scenario(role: &str, wake: Wake) {
             "PG read failure and recovery must not create evidence"
         );
     }
-    if source_returns {
+    if wake == Wake::InterruptedPresence {
+        let mut retired = record(&owner, "orphan-execution", HostedState::Retired);
+        let endpoint = crate::config::session_hosts::herdr_endpoint(channel).unwrap();
+        retired.location = Some(HostedLocation {
+            host: "herdr".into(),
+            execution_node: endpoint.execution_node,
+            endpoint_config_key: endpoint.key,
+            socket_addr: endpoint.socket_path.display().to_string(),
+            named_session: endpoint.herdr_session,
+            pane_id: "orphan-pane".into(),
+        });
+        sqlx::query("UPDATE sessions SET hosted_execution=$2 WHERE session_key=$1")
+            .bind(&key)
+            .bind(serde_json::to_value(retired).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        accepts(channel).await;
+        assert_eq!(
+            outage_stage.load(AtomicOrdering::SeqCst),
+            1,
+            "the retry must wait for actual PG metadata recovery before booting"
+        );
+        assert_eq!(log.count("writer stopped and stays stopped"), 1);
+        assert_eq!(retained_bytes(root.path(), channel, &source), original);
+    } else if source_returns {
         if wake != Wake::EarlySource {
             std::fs::rename(&saved, &source.path).unwrap();
         }
@@ -433,10 +587,10 @@ async fn scenario(role: &str, wake: Wake) {
     );
     assert_eq!(
         log.count("stage=\"hosted\" status=\"start\""),
-        if source_returns && wake != Wake::Binding {
-            2
-        } else {
+        if matches!(wake, Wake::Presence | Wake::Binding | Wake::ReplayedBinding) {
             3
+        } else {
+            2
         }
     );
     assert!(
@@ -461,6 +615,9 @@ async fn scenario(role: &str, wake: Wake) {
         log.count("stage=\"hosted\" status=\"start\"")
     );
     server.abort();
+    if let Some(guard) = outage.take() {
+        guard.finish();
+    }
     pool.close().await;
 }
 
@@ -561,5 +718,25 @@ async fn missing_halt_replaced_path_keeps_existing_stop_pg() {
         "::missing_halt_replaced_path_keeps_existing_stop_pg"
     )) {
         scenario("gateway", Wake::Replaced).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_halt_replayed_binding_is_not_new_evidence_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::missing_halt_replayed_binding_is_not_new_evidence_pg"
+    )) {
+        scenario("gateway", Wake::ReplayedBinding).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_halt_retry_waits_for_current_pg_publication_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::missing_halt_retry_waits_for_current_pg_publication_pg"
+    )) {
+        scenario("gateway", Wake::InterruptedPresence).await;
     }
 }

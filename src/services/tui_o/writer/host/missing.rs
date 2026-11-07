@@ -5,13 +5,16 @@ use super::*;
 use crate::services::tui_o::shadow::SourceId;
 
 type Binding = Option<(SourceId, String)>;
+#[derive(Default)]
 pub(super) struct Observation {
+    retry: bool,
     producer: Option<ProducerObservation>,
     binding: Option<Binding>,
 }
 impl Observation {
     pub(super) async fn read<I: HostIo>(host: &Hosted<'_, I>) -> Self {
         Self {
+            retry: false,
             binding: binding(host),
             producer: host
                 .io
@@ -24,8 +27,36 @@ impl Observation {
             .as_ref()
             .is_some_and(|p| p.presence == ProducerPresence::Absent)
     }
+    pub(super) async fn starting<I: HostIo>(&mut self, host: &Hosted<'_, I>) -> bool {
+        loop {
+            let next = Self::read(host).await;
+            if !self.retry || (next.producer.is_some() && next.binding.is_some()) {
+                self.retry = false;
+                return self.record(next);
+            }
+            tracing::debug!(
+                channel = host.channel,
+                "[tui_o] missing-source retry awaits readable metadata"
+            );
+            tokio::time::sleep(actor::POLL_INTERVAL).await;
+        }
+    }
+    /// A failed read cannot erase consumed identities; absence comes from the fresh sample.
+    fn record(&mut self, next: Self) -> bool {
+        let absent = next.absent();
+        if let Some(mut producer) = next.producer {
+            if producer.incarnation.is_none() {
+                producer.incarnation = self.producer.as_ref().and_then(|p| p.incarnation.clone());
+            }
+            self.producer = Some(producer);
+        }
+        if next.binding.as_ref().is_some_and(Option::is_some) || self.binding.is_none() {
+            self.binding = next.binding.or(self.binding.take());
+        }
+        absent
+    }
     pub(super) async fn resume<I: HostIo>(
-        mut self,
+        &mut self,
         host: &Hosted<'_, I>,
         cause: &StopCause,
         known: &[SourceId],
@@ -58,20 +89,19 @@ impl Observation {
                         None => !known.contains(source),
                     },
                 );
+                self.record(next);
                 if presence_changed || binding_changed {
                     break;
-                }
-                // Failed reads carry no evidence; the first valid reading establishes a baseline.
-                if self.producer.is_none() {
-                    self.producer = next.producer;
-                }
-                if self.binding.is_none() {
-                    self.binding = next.binding;
                 }
                 tokio::time::sleep(actor::POLL_INTERVAL).await;
             }
         };
         unless_stopped(&host.stopping, wait).await?;
+        self.retry = true;
+        tracing::debug!(
+            channel = host.channel,
+            "[tui_o] missing-source evidence changed; recovering"
+        );
         match recover(host.runtime_root, host.channel, cause.unsent.as_ref()) {
             Ok(Recovered::Store(store)) => Some(store),
             Ok(Recovered::Fresh(_)) => {

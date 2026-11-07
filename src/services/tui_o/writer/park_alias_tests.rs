@@ -48,9 +48,22 @@ impl HostIo for AliasIo {
         self.bindings.clone()
     }
 
-    fn producer_absent(&self, _: u64, _: ShadowProvider) -> impl Future<Output = bool> + Send {
+    fn producer_observation(
+        &self,
+        _: u64,
+        _: ShadowProvider,
+    ) -> impl Future<Output = Option<crate::services::tui_o::writer::ProducerObservation>> + Send
+    {
+        use crate::services::tui_o::writer::{ProducerObservation, ProducerPresence};
         self.probes.fetch_add(1, Ordering::SeqCst);
-        std::future::ready(self.absent.load(Ordering::SeqCst))
+        std::future::ready(Some(ProducerObservation {
+            presence: if self.absent.load(Ordering::SeqCst) {
+                ProducerPresence::Absent
+            } else {
+                ProducerPresence::Unknown
+            },
+            incarnation: None,
+        }))
     }
 
     fn activation_facts(

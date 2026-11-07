@@ -1097,15 +1097,13 @@ async fn readers_s1a_unsafe_missing_never_retires() {
             assert!(failed.is_ok(), "historical missing source may park: {case}");
             assert!(s.is_parked(&old), "{case}");
             assert_eq!(retained(), retained_before.unwrap(), "retained {case}");
+        } else if matches!(case, "recent" | "partial" | "latest") {
+            assert!(
+                matches!(&failed, Err(WriterAlarm::HaltedMissingSource { source, .. }) if source == &old),
+                "{case}"
+            );
         } else {
-            if matches!(case, "recent" | "partial" | "barrier" | "latest") {
-                assert!(
-                    matches!(&failed, Err(WriterAlarm::HaltedMissingSource { source, .. }) if source == &old),
-                    "{case}"
-                );
-            } else {
-                assert!(matches!(failed, Err(WriterAlarm::Halted { .. })), "{case}");
-            }
+            assert!(matches!(failed, Err(WriterAlarm::Halted { .. })), "{case}");
         }
         assert_eq!(w.store().cursor(&old).unwrap(), &before, "{case}");
         drop(fault);

@@ -55,29 +55,16 @@ pub trait HostIo: Send + Sync + 'static {
     {
         None
     }
-    /// Only a current absence observation permits parking the latest missing source.
-    fn producer_absent(
+    /// Only a current Absent publication permits parking the latest missing source.
+    fn producer_observation(
         &self,
         _channel: u64,
         _provider: ShadowProvider,
-    ) -> impl Future<Output = bool> + Send {
-        std::future::ready(false)
-    }
-    fn producer_observation(
-        &self,
-        channel: u64,
-        provider: ShadowProvider,
     ) -> impl Future<Output = Option<super::ProducerObservation>> + Send {
-        async move {
-            Some(super::ProducerObservation {
-                presence: if self.producer_absent(channel, provider).await {
-                    super::ProducerPresence::Absent
-                } else {
-                    super::ProducerPresence::Unknown
-                },
-                incarnation: None,
-            })
-        }
+        std::future::ready(Some(super::ProducerObservation {
+            presence: super::ProducerPresence::Unknown,
+            incarnation: None,
+        }))
     }
     fn lease(&self) -> Self::Lease;
     /// A channel's writer stopped for good; the shared lease turns its verified episodes Unknown.
@@ -804,6 +791,7 @@ impl<I: HostIo> Hosted<'_, I> {
         let (channel, alarms) = (self.channel, &self.alarms);
         let mut backoff = Backoff::default();
         let mut attempt = 0u32;
+        let mut observed = missing::Observation::default();
         // Once a resume was tried, leaving the loop ends the wait for health as well.
         let settle = |attempt: u32| {
             if attempt > 0 {
@@ -817,12 +805,11 @@ impl<I: HostIo> Hosted<'_, I> {
                 .cursors()
                 .map(|cursor| cursor.source.clone())
                 .collect();
-            let Some(observed) =
-                unless_stopped(&self.stopping, missing::Observation::read(&self)).await
+            let Some(absent) = unless_stopped(&self.stopping, observed.starting(&self)).await
             else {
                 return;
             };
-            let Some(cause) = self.run(store, attempt, observed.absent()).await else {
+            let Some(cause) = self.run(store, attempt, absent).await else {
                 settle(attempt);
                 return;
             };

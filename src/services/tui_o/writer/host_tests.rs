@@ -216,12 +216,18 @@ impl HostIo for TestIo {
         Arc::new(ChannelBindingLog::new(channel, provider))
     }
 
-    fn producer_absent(
+    fn producer_observation(
         &self,
         channel: u64,
         _: ShadowProvider,
-    ) -> impl Future<Output = bool> + Send {
+    ) -> impl Future<Output = Option<crate::services::tui_o::writer::ProducerObservation>> + Send
+    {
+        use crate::services::tui_o::writer::{ProducerObservation as Reading, ProducerPresence};
         let observation = *self.producer.lock().unwrap();
+        let presence = match observation {
+            Some(ProducerObservation::Present) => ProducerPresence::Present,
+            _ => ProducerPresence::Unknown,
+        };
         if let Some(observation) = observation {
             let name = match observation {
                 ProducerObservation::Present => "producer-present",
@@ -229,7 +235,10 @@ impl HostIo for TestIo {
             };
             self.calls.lock().unwrap().push((name, channel));
         }
-        std::future::ready(false)
+        std::future::ready(Some(Reading {
+            presence,
+            incarnation: None,
+        }))
     }
 
     fn late_adopt_enabled(&self) -> bool {
