@@ -133,6 +133,7 @@ fn bridge(
             "native-stop-fixture",
             events,
             chrono::Utc::now(),
+            None,
         )
         .unwrap();
     });
