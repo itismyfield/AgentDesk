@@ -153,7 +153,8 @@ input-single-path/InputOwnershipPolicyEarlyRemove.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipPolicyRowOnlyBefore.cfg	InputOwnership	RecoveryCreditPreserved	FailureEventuallyResolved
 input-single-path/ManagedObserverRebindAfter.cfg	ManagedObserverRebind	-	-
 input-single-path/ManagedObserverRebindBefore.cfg	ManagedObserverRebind	-	SubmittedEventuallyCloses
-input-single-path/ManagedObserverRebindGraceBeforeAdoption.cfg	ManagedObserverRebind	-	SubmittedEventuallyCloses
+input-single-path/ManagedObserverRebindGraceBeforeAdoption.cfg	ManagedObserverRebind	-	-
+input-single-path/ManagedObserverRebindGraceBeforeAdoptionNoHandoff.cfg	ManagedObserverRebind	-	SubmittedEventuallyCloses
 input-single-path/ManagedObserverRebindMetaIsInput.cfg	ManagedObserverRebind	FixedAOnlyOnEvidenceOrGrace	SubmittedEventuallyCloses
 input-single-path/ManagedObserverRebindSinglePoll.cfg	ManagedObserverRebind	FixedAOnlyOnEvidenceOrGrace	SubmittedEventuallyCloses
 tui-o-writer/WriterParkedAliasFixed.cfg	WriterParkedAlias	-	-
