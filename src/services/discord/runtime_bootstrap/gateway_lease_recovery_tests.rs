@@ -1227,3 +1227,53 @@ async fn promotion_cancel_keeps_the_writer_incarnation_pg() {
 
 #[path = "o_writer_host_custody_tests.rs"]
 mod codex_custody;
+
+#[tokio::test]
+async fn gateway_observability_rejected_promotion_unlocks_before_record_pg() {
+    let _flag = PROMOTION_FLAG_LOCK.lock().await;
+    let fixture = PromotionFixture::new("observed rejected promotion")
+        .await
+        .unwrap();
+    // Resolve the unqualified unlock through a real PG wrapper that records completion.
+    sqlx::raw_sql("CREATE TABLE explicit_unlocks(done BOOL); CREATE FUNCTION public.pg_advisory_unlock(BIGINT) RETURNS BOOL LANGUAGE plpgsql AS 'BEGIN INSERT INTO explicit_unlocks VALUES (true); RETURN pg_catalog.pg_advisory_unlock($1); END';")
+        .execute(&fixture.pool).await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(
+        format!(
+            "ALTER DATABASE {} SET search_path = public, pg_catalog",
+            fixture.database_name
+        )
+        .as_str(),
+    ))
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    let lease = fixture.lease("observed rejected promotion").await;
+    STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::Release);
+    let result =
+        attempt_clean_standby_promotion(&fixture.runtimes[0], &ProviderKind::Claude, lease).await;
+    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+    assert!(!result);
+    let unlocks: i64 = sqlx::query_scalar("SELECT count(*) FROM explicit_unlocks")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        unlocks, 1,
+        "promotion must explicitly unlock before acquired_then_released"
+    );
+    let view = serde_json::to_value(
+        fixture.runtimes[0]
+            .restart
+            .gateway_lease_diagnostics
+            .projection(),
+    )
+    .unwrap();
+    assert_eq!(view["last_result"], "acquired_then_released");
+    fixture
+        .lease("peer can reacquire immediately")
+        .await
+        .unlock()
+        .await
+        .unwrap();
+    fixture.close("observed rejected promotion").await;
+}

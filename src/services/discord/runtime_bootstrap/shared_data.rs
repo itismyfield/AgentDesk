@@ -162,6 +162,7 @@ pub(super) fn run_bot_build_shared_data(
             shutdown_counted: std::sync::atomic::AtomicBool::new(false),
             shutdown_slot_consumed: std::sync::atomic::AtomicBool::new(false),
             gateway_waiter_cancellation: std::sync::Mutex::new(None),
+            gateway_lease_diagnostics: Default::default(),
             gateway_handback_health: Arc::default(),
         },
         turn_finalizer: crate::services::discord::turn_finalizer::TurnFinalizer::spawn(),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::shared_state::gateway_lease_diagnostics::{Diagnostics, LeaseResult};
 
 const DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const DISCORD_GATEWAY_LOCK_PREFIX: u64 = 0x0443_0000_0000_0000;
@@ -156,6 +157,14 @@ async fn yield_to_preferred_gateway(
         preference.yield_grace.as_secs()
     );
 
+    shared
+        .restart
+        .gateway_lease_diagnostics
+        .context(pool, "yield-wait");
+    shared
+        .restart
+        .gateway_lease_diagnostics
+        .record(LeaseResult::Waiting);
     let deadline = tokio::time::Instant::now() + preference.yield_grace;
     while tokio::time::Instant::now() < deadline {
         if shared
@@ -195,6 +204,8 @@ async fn acquire_as_preferred_gateway(
     shared: &Arc<SharedData>,
     handback_breaker: &mut GatewayHandbackBreaker,
 ) -> Result<Option<GatewayLeaseAcquisition>, String> {
+    let diagnostics = &shared.restart.gateway_lease_diagnostics;
+    diagnostics.context(pool, "preferred-poll");
     let waiter = GatewayWaiterGuard::new(provider.as_str());
     *shared
         .restart
@@ -211,15 +222,31 @@ async fn acquire_as_preferred_gateway(
         .await
     {
         tracing::warn!("GATEWAY-LEASE: could not publish gateway waiter capability: {error}");
+    } else {
+        diagnostics.waiter_refreshed();
     }
 
     let mut long_wait = PreferredWaitWarning::start();
     let mut attempts: u64 = 0;
     loop {
         let acquired = if attempts == 0 {
-            try_acquire_with_startup_orphan_reap(pool, token_hash, provider, handback_breaker).await
+            try_acquire_with_startup_orphan_reap(
+                pool,
+                token_hash,
+                provider,
+                handback_breaker,
+                diagnostics,
+            )
+            .await
         } else {
-            try_acquire_observing_handback(pool, token_hash, provider, handback_breaker).await
+            try_acquire_observing_handback(
+                pool,
+                token_hash,
+                provider,
+                handback_breaker,
+                diagnostics,
+            )
+            .await
         };
         match acquired {
             // Keep the waiter signal registered: we now hold the gateway, and a
@@ -290,6 +317,7 @@ fn discord_gateway_lock_id(token_hash: &str) -> i64 {
     (DISCORD_GATEWAY_LOCK_PREFIX | suffix) as i64
 }
 
+#[cfg(test)]
 pub(super) async fn try_acquire_discord_gateway_lease(
     pool: &sqlx::PgPool,
     token_hash: &str,
@@ -310,8 +338,24 @@ pub(super) async fn try_acquire_observing_handback(
     token_hash: &str,
     provider: &ProviderKind,
     handback_breaker: &mut GatewayHandbackBreaker,
+    diagnostics: &Diagnostics,
 ) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
-    let acquired = try_acquire_discord_gateway_lease(pool, token_hash, provider).await;
+    let mut tried = false;
+    let acquired = crate::db::postgres::AdvisoryLockLease::try_acquire_named_expiring_observed(
+        pool,
+        discord_gateway_lock_id(token_hash),
+        format!("discord gateway {}", provider.as_str()),
+        gateway_lease_application_name(provider),
+        gateway_lease_idle_expiry(&crate::config::snapshot().unwrap_or_default().cluster),
+        |event| {
+            tried = true;
+            diagnostics.attempt(event);
+        },
+    )
+    .await;
+    if acquired.is_err() && !tried {
+        diagnostics.record(LeaseResult::Err);
+    }
     handback_breaker.observe(acquired.as_ref().map(Option::is_some).map_err(|_| ()));
     acquired
 }
@@ -321,15 +365,18 @@ async fn try_acquire_with_startup_orphan_reap(
     token_hash: &str,
     provider: &ProviderKind,
     handback_breaker: &mut GatewayHandbackBreaker,
+    diagnostics: &Diagnostics,
 ) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
     let first =
-        try_acquire_observing_handback(pool, token_hash, provider, handback_breaker).await?;
+        try_acquire_observing_handback(pool, token_hash, provider, handback_breaker, diagnostics)
+            .await?;
     if first.is_some() {
         return Ok(first);
     }
     if reap_orphaned_gateway_lease_once(pool, discord_gateway_lock_id(token_hash), provider).await?
     {
-        try_acquire_observing_handback(pool, token_hash, provider, handback_breaker).await
+        try_acquire_observing_handback(pool, token_hash, provider, handback_breaker, diagnostics)
+            .await
     } else {
         Ok(None)
     }
@@ -382,6 +429,8 @@ pub(super) async fn run_bot_acquire_gateway_lease(
     handback_breaker.suppressed();
     match shared.pg_pool.as_ref() {
         Some(pool) => {
+            let diagnostics = &shared.restart.gateway_lease_diagnostics;
+            diagnostics.context(pool, "startup");
             // #4351: honor the configured gateway owner before racing for the lock.
             let preference = gateway_preference().await;
             let acquired = match preference.as_ref() {
@@ -399,11 +448,13 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                     if !handback_breaker.suppressed() {
                         yield_to_preferred_gateway(pool, pref, provider, shared).await;
                     }
+                    diagnostics.context(pool, "startup");
                     try_acquire_with_startup_orphan_reap(
                         pool,
                         token_hash,
                         provider,
                         handback_breaker,
+                        diagnostics,
                     )
                     .await
                     .map(|lease| {
@@ -418,6 +469,7 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                     token_hash,
                     provider,
                     handback_breaker,
+                    diagnostics,
                 )
                 .await
                 .map(|lease| {
@@ -439,6 +491,7 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                     GatewayLeaseOutcome::Proceed(Some(lease))
                 }
                 Ok(None) => {
+                    diagnostics.context(pool, "standby");
                     run_startup_diagnostic_after_reconcile_barrier(
                         startup_reconcile_remaining.clone(),
                         startup_doctor_started.clone(),
@@ -668,11 +721,16 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                 // No PG pool (standalone/no-DB path): nothing to keepalive.
                 return;
             };
+            shared_for_lease
+                .restart
+                .gateway_lease_diagnostics
+                .context(pool, "reacquire");
             match try_acquire_observing_handback(
                 pool,
                 &token_hash,
                 &provider_for_lease,
                 &mut handback_breaker,
+                &shared_for_lease.restart.gateway_lease_diagnostics,
             )
             .await
             {
