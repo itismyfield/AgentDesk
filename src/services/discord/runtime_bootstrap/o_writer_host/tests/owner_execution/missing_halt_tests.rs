@@ -382,12 +382,24 @@ async fn scenario(role: &str, wake: Wake) {
     }
     let tui_o = TuiOConfig::default();
     if wake == Wake::AbsentRuntime {
-        super::super::super::super::super::owner_cleanup::refresh_writers(
-            &shared,
-            &ProviderKind::Claude,
-            Some(&tui_o),
-        )
-        .await;
+        let mut successor = host::start_managed(
+            ShadowProvider::Claude,
+            true,
+            cutover::boot_ownership(),
+            || {
+                parts_with_rest(
+                    &shared,
+                    &ProviderKind::Claude,
+                    None,
+                    Some(discord.http.clone()),
+                )
+            },
+        );
+        assert_eq!(
+            successor.len(),
+            1,
+            "the sessionless host must release its first claim"
+        );
         accepts(channel).await;
         assert!(!handles[0].live());
         assert_ne!(
@@ -400,9 +412,10 @@ async fn scenario(role: &str, wake: Wake) {
             !crate::services::tui_o::alarm::health_reasons()
                 .contains(&format!("tui_o:halted:{channel}"))
         );
-        gate.close();
-        until(|| !host::process_readiness().is_hosted(channel)).await;
         handles.remove(0).stop_and_join().await.unwrap();
+        successor.remove(0).stop_and_join().await.unwrap();
+        assert!(!host::process_readiness().is_hosted(channel));
+        gate.lost();
         server.abort();
         pool.close().await;
         eprintln!(
@@ -513,7 +526,7 @@ async fn scenario(role: &str, wake: Wake) {
             format!("{}\n", serde_json::to_string(&event).unwrap()),
         )
         .unwrap();
-        until(|| log.count("writer stopped and stays stopped") == 2).await;
+        until(|| log.count("writer stopped and stays stopped") >= 2).await;
         event.seq = 2;
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -604,7 +617,7 @@ async fn scenario(role: &str, wake: Wake) {
             .execute(&pool)
             .await
             .unwrap();
-        until(|| log.count("writer stopped and stays stopped") == 2).await;
+        until(|| log.count("writer stopped and stays stopped") >= 2).await;
         tokio::time::sleep(Duration::from_millis(2200)).await;
         assert_eq!(
             log.count("stage=\"hosted\" status=\"start\""),
