@@ -579,8 +579,8 @@ async fn cancelled_deferred_restart_produces_zero_empty_handbacks_pg() {
     };
     let (shared, acquired) = fixture.preferred().await;
     assert!(fixture.publish_waiter().await);
-    shared.restart.legacy_deferred_begin();
-    shared.restart.legacy_deferred_rollback();
+    assert!(super::deferred_restart::begin_deferred_restart(&shared).is_some());
+    super::deferred_restart::rollback_deferred_restart(&shared);
     // Keep the original backend's guard alive across a real lease transfer.
     // It no longer contends, so a backup must not yield to its old advertisement.
     acquired.lease.unlock().await.unwrap();
@@ -623,13 +623,13 @@ async fn concurrent_deferred_rollbacks_preserve_another_live_waiter_pg() {
     };
     let (shared, acquired) = fixture.preferred().await;
     let survivor = GatewayWaiterGuard::new("claude");
-    shared.restart.legacy_deferred_begin();
+    assert!(super::deferred_restart::begin_deferred_restart(&shared).is_some());
     let barrier = std::sync::Barrier::new(3);
     std::thread::scope(|scope| {
         for _ in 0..2 {
             scope.spawn(|| {
                 barrier.wait();
-                shared.restart.legacy_deferred_rollback();
+                super::deferred_restart::rollback_deferred_restart(&shared);
             });
         }
         barrier.wait();
@@ -657,14 +657,14 @@ async fn deferred_rollback_racing_backend_exit_preserves_another_waiter_pg() {
     let (shared, acquired) = fixture.preferred().await;
     let mut running = Running::start(shared.clone(), acquired, Some(fixture.breaker())).await;
     let survivor = GatewayWaiterGuard::new("claude");
-    shared.restart.legacy_deferred_begin();
+    assert!(super::deferred_restart::begin_deferred_restart(&shared).is_some());
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let handle = tokio::runtime::Handle::current();
     let rollback = std::thread::spawn({
         let barrier = barrier.clone();
         move || {
             handle.block_on(barrier.wait());
-            shared.restart.legacy_deferred_rollback();
+            super::deferred_restart::rollback_deferred_restart(&shared);
         }
     });
     barrier.wait().await;
@@ -692,7 +692,7 @@ async fn normal_deferred_restart_holds_lease_until_backend_exit_pg() {
     let mut running = fixture.backup().await;
     fixture.ticks(1).await;
     let messages = running.events.messages.load(Ordering::SeqCst);
-    running.shared.restart.legacy_deferred_begin();
+    assert!(super::deferred_restart::begin_deferred_restart(&running.shared).is_some());
     fixture.ticks(2).await;
     assert!(!running.backend.is_finished());
     assert!(running.events.messages.load(Ordering::SeqCst) > messages);
