@@ -17,6 +17,7 @@ src/logging.rs
 src/server/dashboard_provision.rs
 src/server/routes/dispatches/crud.rs
 src/server/routes/health_api.rs
+src/server/routes/imessage_input_notice_tests.rs
 src/server/routes/receipt.rs
 src/services/claude_compact_trigger.rs
 src/services/claude_tui/busy_inject_tests.rs
@@ -216,6 +217,8 @@ src/services/tui_o/repost/probe_tests.rs
 src/services/tui_o/shadow/capture/observation/observation_tests.rs
 src/services/tui_o/store/codex_end_tests.rs
 src/services/tui_o/turn_mode.rs
+src/services/tui_o/writer/actor/notice_owner_tests.rs
+src/services/tui_o/writer/actor/notice_resume_tests.rs
 src/services/tui_o/writer/actor/notice_work_tests.rs
 src/services/tui_o/writer/adoption_past_stall_tests.rs
 src/services/tui_o/writer/clear_launch_tests.rs

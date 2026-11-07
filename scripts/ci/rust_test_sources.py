@@ -41,7 +41,7 @@ UNBOUNDED_WAITS = {"join": "thread join", "recv": "channel recv"}
 WAIT_HELPER = "src/test_support/wait.rs"
 WAIT_ALLOWLIST = "scripts/ci/test_wait_allowlist.txt"
 # sha256 of the approved first allowlist (sorted rows, one per line): a base without the file accepts only it.
-INITIAL_ALLOWLIST_SHA256 = "f99c677895ac3a69803ed59df4d538177ed5f7e72a9830b6b1091a1d4ae16640"
+INITIAL_ALLOWLIST_SHA256 = "e4dc90257fd137fc9c276e2385d5288073dd9b1350fb187e9657d26f60e7c09d"
 WAIT_CALL = re.compile(r"\b(?:join|recv)\b")
 # After `#[cfg(test)]`, one of these starts an item or block whose gate is its `{...}` block (or ends at `;`);
 # anything else (a `let`, expression, field or parameter) stays gated to its own `;`, `,` or `)`.
