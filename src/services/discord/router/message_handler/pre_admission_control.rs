@@ -178,6 +178,15 @@ async fn send_pre_admission_notice(
     }
 }
 
+/// A locally handled input that came in as the owner's claimed front leaves the queue before the
+/// caller returns; dropping that claim unsettled would hold every later front behind it.
+pub(super) async fn handled_locally(owner: Option<OwnerTurn>) -> Result<IntakeExecution, Error> {
+    if let Some(owner) = owner {
+        owner.complete_locally().await;
+    }
+    Ok(IntakeExecution::Executed)
+}
+
 /// Executes [`route`]'s decision; `HandledLocally` means the caller returns.
 pub(super) async fn resolve(
     runtime: (
