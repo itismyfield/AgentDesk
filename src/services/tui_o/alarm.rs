@@ -207,7 +207,7 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
         WriterAlarm::PausedNoGateway => PAUSED_NO_GATEWAY,
         WriterAlarm::SchemaBlocked { .. } => "schema_blocked",
         WriterAlarm::LedgerViolation { .. } => "ledger_violation",
-        WriterAlarm::Halted { .. } => "halted",
+        WriterAlarm::Halted { .. } | WriterAlarm::HaltedMissingSource { .. } => "halted",
         WriterAlarm::Released { .. } => "released",
         WriterAlarm::Abandoned { .. } => "abandoned",
         WriterAlarm::ContentTransform { .. } => "content_transform",

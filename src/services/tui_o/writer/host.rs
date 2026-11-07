@@ -28,6 +28,7 @@ use crate::services::tui_o::store::ledger::Unsent;
 mod activation_io;
 mod first_init;
 mod fresh_input;
+mod missing;
 mod recover;
 mod transition;
 pub use activation_io::{Custody, FencedFacts};
@@ -61,6 +62,22 @@ pub trait HostIo: Send + Sync + 'static {
         _provider: ShadowProvider,
     ) -> impl Future<Output = bool> + Send {
         std::future::ready(false)
+    }
+    fn producer_observation(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> impl Future<Output = Option<super::ProducerObservation>> + Send {
+        async move {
+            Some(super::ProducerObservation {
+                presence: if self.producer_absent(channel, provider).await {
+                    super::ProducerPresence::Absent
+                } else {
+                    super::ProducerPresence::Unknown
+                },
+                incarnation: None,
+            })
+        }
     }
     fn lease(&self) -> Self::Lease;
     /// A channel's writer stopped for good; the shared lease turns its verified episodes Unknown.
@@ -109,7 +126,7 @@ pub(crate) type RepostTurn<I> = Box<
         >,
 >;
 
-/// Channels with a hosted actor, by the claim that hosts each, and those ready to take work.
+/// Channels reserved by a host claim, and those whose actor is ready to take work.
 #[derive(Default)]
 pub struct Readiness {
     hosted: Mutex<BTreeMap<u64, u64>>,
@@ -782,7 +799,7 @@ struct Hosted<'a, I: HostIo> {
 }
 
 impl<I: HostIo> Hosted<'_, I> {
-    /// Restarts from the recovered store after transient halts; other stops end hosting.
+    /// Keeps Missing halts claimed until evidence changes; store errors retain their backoff.
     async fn serve(self, mut store: ChannelStore) {
         let (channel, alarms) = (self.channel, &self.alarms);
         let mut backoff = Backoff::default();
@@ -795,7 +812,17 @@ impl<I: HostIo> Hosted<'_, I> {
         };
         loop {
             let started = tokio::time::Instant::now();
-            let Some(cause) = self.run(store, attempt).await else {
+            // Keep the evidence used by this start, including changes before its halt settles.
+            let known: Vec<_> = store
+                .cursors()
+                .map(|cursor| cursor.source.clone())
+                .collect();
+            let Some(observed) =
+                unless_stopped(&self.stopping, missing::Observation::read(&self)).await
+            else {
+                return;
+            };
+            let Some(cause) = self.run(store, attempt, observed.absent()).await else {
                 settle(attempt);
                 return;
             };
@@ -804,6 +831,12 @@ impl<I: HostIo> Hosted<'_, I> {
                 self.io.writer_unavailable(channel);
                 let alarm = &cause.alarm;
                 tracing::error!(channel, ?alarm, "[tui_o] writer stopped and stays stopped");
+                if let Some(recovered) = observed.resume(&self, &cause, &known).await {
+                    attempt += 1;
+                    store = recovered;
+                    super::deliver::seed_last_posted(channel, store.ledger());
+                    continue;
+                }
                 return;
             }
             if started.elapsed() >= resume::STABLE_RUN {
@@ -820,7 +853,12 @@ impl<I: HostIo> Hosted<'_, I> {
     }
 
     /// Starts one actor and returns how it stopped, once it has ended.
-    async fn run(&self, store: ChannelStore, attempt: u32) -> Option<StopCause> {
+    async fn run(
+        &self,
+        store: ChannelStore,
+        attempt: u32,
+        producer_absent: bool,
+    ) -> Option<StopCause> {
         let boot = self.boot.attempt(attempt);
         let (channel, gate) = (self.channel, self.gate);
         let (port, lease) = (Arc::clone(&self.port), self.io.lease());
@@ -842,23 +880,6 @@ impl<I: HostIo> Hosted<'_, I> {
             published: owing.published.subscribe(),
             demand: owing.demand.clone(),
         };
-        let store = writer.store();
-        let missing_source = store.cursors().any(|cursor| {
-            !cursor.retired
-                && matches!(
-                    crate::services::tui_o::shadow::capture::Fingerprint::path(&cursor.source),
-                    Err((
-                        crate::services::tui_o::shadow::SourceAnomalyKind::Missing,
-                        _
-                    ))
-                )
-        });
-        let producer_absent = missing_source
-            && unless_stopped(
-                &self.stopping,
-                self.io.producer_absent(channel, self.provider),
-            )
-            .await?;
         let config = WriterConfig {
             enabled: true,
             producer_absent,

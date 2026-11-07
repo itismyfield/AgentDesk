@@ -201,11 +201,10 @@ async fn a_filled_return_to_an_empty_session_source_survives_restarts_without_re
         let pending = |link: &SourceLink| matches!(link.boundary, Boundary::Pending { .. });
         assert!(!rotation.links.values().any(pending), "round {round}");
         let alarms = harness.alarms.taken();
-        assert!(
-            !alarms
-                .iter()
-                .any(|a| matches!(a, WriterAlarm::Halted { .. }))
-        );
+        assert!(!alarms.iter().any(|a| matches!(
+            a,
+            WriterAlarm::Halted { .. } | WriterAlarm::HaltedMissingSource { .. }
+        )));
         assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(3));
         halt(stop, task).await;
     }
@@ -400,11 +399,10 @@ async fn an_empty_session_name_two_stored_sessions_share_stays_its_own_source() 
         assert!(harness.channel().cursor(source).is_some(), "{source:?}");
     }
     let alarms = harness.alarms.taken();
-    assert!(
-        !alarms
-            .iter()
-            .any(|a| matches!(a, WriterAlarm::Halted { .. }))
-    );
+    assert!(!alarms.iter().any(|a| matches!(
+        a,
+        WriterAlarm::Halted { .. } | WriterAlarm::HaltedMissingSource { .. }
+    )));
     assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(4));
     assert_eq!(harness.port.posts(), ["c one"]);
     halt(stop, task).await;
@@ -786,11 +784,10 @@ async fn device_change_resume_preserves_delivery_and_legacy_pending_across_resta
                 .count();
             assert_eq!(pending, usize::from(legacy));
             let alarms = harness.alarms.taken();
-            assert!(
-                !alarms
-                    .iter()
-                    .any(|alarm| matches!(alarm, WriterAlarm::Halted { .. }))
-            );
+            assert!(!alarms.iter().any(|alarm| matches!(
+                alarm,
+                WriterAlarm::Halted { .. } | WriterAlarm::HaltedMissingSource { .. }
+            )));
             assert_eq!(
                 alarms
                     .iter()

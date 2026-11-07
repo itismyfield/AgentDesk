@@ -53,6 +53,12 @@ impl<B: BindingEvents> Sources<B> {
                     if self.reader_config.is_some() && kind == SourceAnomalyKind::Missing {
                         return self.cleanup_missing(writer, index, SystemTime::now());
                     }
+                    if kind == SourceAnomalyKind::Missing {
+                        return Err(WriterAlarm::HaltedMissingSource {
+                            source: reader.source.clone(),
+                            detail,
+                        });
+                    }
                     return Err(halt(format!("source {kind:?}: {detail}")));
                 }
             },

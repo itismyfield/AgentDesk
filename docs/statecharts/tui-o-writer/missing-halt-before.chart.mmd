@@ -1,0 +1,6 @@
+stateDiagram-v2
+  [*] --> Booting
+  Booting --> Halted: 원본 Missing·presence Unknown
+  Halted --> Ended: actor join·host 종료·claim 반환
+  Ended --> Booting: owner cleanup·같은 Missing·새 증거 없음
+  Halted --> Halted: row는 고아 pane·provider는 다른 pane에서 live

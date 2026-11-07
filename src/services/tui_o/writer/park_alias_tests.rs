@@ -146,7 +146,12 @@ fn halts(h: &Harness) -> usize {
         .lock()
         .unwrap()
         .iter()
-        .filter(|alarm| matches!(alarm, WriterAlarm::Halted { .. }))
+        .filter(|alarm| {
+            matches!(
+                alarm,
+                WriterAlarm::Halted { .. } | WriterAlarm::HaltedMissingSource { .. }
+            )
+        })
         .count()
 }
 

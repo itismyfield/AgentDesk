@@ -66,7 +66,9 @@ impl Raised {
     fn halted(&self) -> Vec<(u64, String)> {
         let raised = self.0.lock().unwrap();
         let halted = raised.iter().filter_map(|(channel, alarm)| match alarm {
-            WriterAlarm::Halted { detail } => Some((*channel, detail.clone())),
+            WriterAlarm::Halted { detail } | WriterAlarm::HaltedMissingSource { detail, .. } => {
+                Some((*channel, detail.clone()))
+            }
             _ => None,
         });
         halted.collect()
