@@ -212,11 +212,17 @@ class SqlVersionDependentEscapeAuditTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
 
 
-class MutantHookAuditTests(unittest.TestCase):
+KEPT_GUARD_ROW = "agentdesk kept::tests::kept_source_guard | include_str | fixture reason\n"
+ALLOWLIST_HEADER = "# kept guards\n# <crate> <module path>::<test> | <tool> | <reason>\n"
+
+
+class AuditRepoCase(unittest.TestCase):
     """Run the real script on a throwaway repository whose HEAD adds the given files."""
 
     BASE_FILES = {
         "src/lib.rs": "pub fn production() {}\n",
+        "src/kept_tests.rs": "#[test]\nfn kept_source_guard() {\n    let _ = 1;\n}\n",
+        "scripts/ci/source_text_guard_allowlist.txt": ALLOWLIST_HEADER + KEPT_GUARD_ROW,
         "migrations/postgres/0001_fixture.sql": "SELECT 1;\n",
     }
 
@@ -267,6 +273,8 @@ class MutantHookAuditTests(unittest.TestCase):
         rc, output = self.run_audit(added)
         self.assertEqual(rc, 0, output)
 
+
+class MutantHookAuditTests(AuditRepoCase):
     def test_mutant_env_in_production_code_fails(self) -> None:
         self.assert_flagged(
             {"src/lib.rs": 'pub fn production() {\n    let _ = std::env::var("ADK_NEW_MUTANT");\n}\n'},
@@ -344,6 +352,110 @@ class MutantHookAuditTests(unittest.TestCase):
         rc, output = self.run_audit({"src/next.rs": "pub fn next() {}\n"}, base=False)
         self.assertNotEqual(rc, 0, output)
         self.assertIn("no diff base", output)
+
+
+class SourceTextGuardAuditTests(AuditRepoCase):
+    def test_a_new_test_reading_rust_source_fails(self) -> None:
+        reads = {
+            "include_str": '    let text = include_str!("lib.rs");\n',
+            "multi-line include_str": '    let text = include_str!(\n        "lib.rs"\n    );\n',
+            "lexer": "    let text = crate::test_support::strip_rust_comments(TEXT);\n",
+            "manifest-rooted tree walk": (
+                '    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));\n'
+                '    let text = std::fs::read_dir(root.join("src"));\n'
+            ),
+            "cwd-relative read": '    let text = std::fs::read_to_string("src/lib.rs");\n',
+        }
+        for name, body in reads.items():
+            with self.subTest(name):
+                self.assert_flagged(
+                    {"src/owner/reader_tests.rs": f"#[test]\nfn new_guard() {{\n{body}}}\n"},
+                    "in test `new_guard`",
+                )
+
+    def test_retargeting_an_existing_include_to_a_rust_file_fails(self) -> None:
+        before = '#[test]\nfn data() {\n    let text = include_str!(\n        "data.txt"\n    );\n}\n'
+        rc, output = self.run_audit(
+            {"src/owner/data_tests.rs": before.replace("data.txt", "../lib.rs")},
+            base_files={"src/owner/data_tests.rs": before},
+        )
+        self.assertEqual(rc, 1, output)
+        self.assertIn("src/owner/data_tests.rs:4: include_str! of a .rs file in test `data`", output)
+
+    def test_a_helper_reading_source_outside_a_kept_guard_file_fails(self) -> None:
+        self.assert_flagged(
+            {"src/owner/reader_tests.rs": 'const TEXT: &str = include_str!("../lib.rs");\n'},
+            "src/owner/reader_tests.rs:1: include_str! of a .rs file in code outside",
+        )
+
+    def test_the_listed_guard_and_its_file_helpers_may_read_source(self) -> None:
+        kept = self.BASE_FILES["src/kept_tests.rs"].replace(
+            "    let _ = 1;\n", '    let _ = include_str!("lib.rs");\n'
+        )
+        self.assert_passes(
+            {"src/kept_tests.rs": kept + 'fn helper() -> &\'static str {\n    include_str!("lib.rs")\n}\n'}
+        )
+        self.assert_flagged(
+            {"src/kept_tests.rs": kept + '#[test]\nfn other_guard() {\n    let _ = include_str!("lib.rs");\n}\n'},
+            "in test `other_guard`",
+        )
+
+    def test_ordinary_tests_and_fixtures_pass(self) -> None:
+        self.assert_passes(
+            {
+                "src/owner/plain_tests.rs": (
+                    "// include_str!(\"lib.rs\") is not used here\n"
+                    "#[test]\nfn plain() {\n"
+                    '    let fixture = include_str!("../../tests/fixtures/upstream.rs");\n'
+                    "    let dir = tempfile::tempdir().unwrap();\n"
+                    '    let _ = (fixture, dir.path().join("src"), dir.path().join("src/x.rs"));\n'
+                    '    let paths = serde_json::json!({"allowed_write_paths": ["src"]});\n'
+                    '    assert_eq!(paths.to_string(), "src/x.rs");\n'
+                    "}\n"
+                ),
+                "src/owner/prod.rs": (
+                    "pub fn root() -> std::path::PathBuf {\n"
+                    '    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")\n}\n'
+                ),
+            }
+        )
+
+    def test_a_row_naming_no_fn_fails(self) -> None:
+        stale = "agentdesk gone::tests::removed_guard | direct | fixture reason\n"
+        self.assert_flagged(
+            {"scripts/ci/source_text_guard_allowlist.txt": ALLOWLIST_HEADER + KEPT_GUARD_ROW + stale},
+            "`removed_guard` names no fn",
+        )
+
+
+class SourceTextGuardAllowListFormatTests(unittest.TestCase):
+    def findings(self, text: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "allowlist.txt"
+            path.write_text(text, encoding="utf-8")
+            return AUDIT.load_source_guard_allowlist(path)[1]
+
+    def test_well_formed_rows_pass(self) -> None:
+        self.assertEqual(self.findings(ALLOWLIST_HEADER + KEPT_GUARD_ROW), [])
+
+    def test_malformed_files_fail(self) -> None:
+        cases = {
+            "missing header": (KEPT_GUARD_ROW, "header comment"),
+            "duplicate row": (ALLOWLIST_HEADER + KEPT_GUARD_ROW * 2, "listed twice"),
+            "empty reason": (ALLOWLIST_HEADER + "agentdesk a::b | lexer |  \n", "needs a reason"),
+            "unknown tool": (ALLOWLIST_HEADER + "agentdesk a::b | grep | why\n", "tool `grep`"),
+            "comment after header": (ALLOWLIST_HEADER + "# late\n" + KEPT_GUARD_ROW, "expected `<crate>"),
+            "blank row": (ALLOWLIST_HEADER + "\n" + KEPT_GUARD_ROW, "expected `<crate>"),
+        }
+        for name, (text, needle) in cases.items():
+            with self.subTest(name):
+                findings = self.findings(text)
+                self.assertTrue(any(needle in finding for finding in findings), findings)
+
+    def test_missing_file_fails(self) -> None:
+        names, findings = AUDIT.load_source_guard_allowlist(Path("/nonexistent/allowlist.txt"))
+        self.assertEqual(names, set())
+        self.assertIn("missing", findings[0])
 
 
 class MutantHookAllowListTests(unittest.TestCase):
