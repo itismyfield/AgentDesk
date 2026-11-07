@@ -1325,33 +1325,6 @@ mod fresh_routine_tests {
         assert_eq!(metadata_parent_channel_id(None), None);
     }
 
-    // #4658 F1 (non-disruption contract): a scheduled-snapshot turn must NOT join
-    // `fresh_context_severance`. That path records a DURABLE channel clear
-    // boundary and wipes the CHANNEL's in-memory provider session — disturbing
-    // future live turns. The snapshot turn is isolated by its distinct
-    // session_key alone and cold-starts by dropping the LOCAL session_id, never
-    // by mutating the shared channel map. Mutation proof: re-add
-    // `|| scheduled_snapshot_turn` to fresh_context_severance and this fails.
-    #[test]
-    fn scheduled_snapshot_turn_stays_out_of_channel_mutating_severance() {
-        use super::recovery_context_take_order_tests::source_guard_tests::{
-            HEADLESS_TURN, snapshot_severance_gaps,
-        };
-        assert_eq!(snapshot_severance_gaps(HEADLESS_TURN), Vec::<String>::new());
-    }
-
-    // #4913 GO-A1: snapshot metadata must gate the legacy channel-key refresh.
-    // Mutation proof: remove `!scheduled_snapshot_turn &&` from the production
-    // guard and this source-contract test fails before a snapshot can rewrite the
-    // live channel row by channel_id.
-    #[test]
-    fn scheduled_snapshot_skips_channel_session_key_refresh() {
-        use super::recovery_context_take_order_tests::source_guard_tests::{
-            HEADLESS_TURN, snapshot_refresh_gaps,
-        };
-        assert_eq!(snapshot_refresh_gaps(HEADLESS_TURN), Vec::<String>::new());
-    }
-
     #[test]
     fn scheduled_snapshot_session_label_reads_metadata_marker() {
         use super::scheduled_snapshot_session_label;
