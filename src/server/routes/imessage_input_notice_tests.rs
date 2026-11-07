@@ -588,22 +588,59 @@ async fn imessage_echo_enqueue_failure_preserves_result_pg() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-// 현행 동작 고정: owner의 external hold 거절은 echo를 만들지 않는다.
-async fn imessage_owner_external_hold_refusal_echoes_nothing_pg() {
+async fn imessage_owner_external_hold_accepts_without_imessage_reply_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::new(7_811_316, false).await;
     let pane = InjectPane::new(f.channel, "external");
     let (status, body) = f
         .call(
             "turn/deliver",
-            &input(ENVELOPE, Some("owner-hold-refusal")),
+            &input(ENVELOPE, Some("owner-hold-accepted")),
             false,
         )
         .await;
-    assert!(!status.is_success(), "known owner hold refusal: {body}");
-    assert_eq!(body["error"], "queue_refused", "{body}");
-    assert!(f.notices().await.is_empty());
-    assert_eq!(f.enqueue.load(Ordering::SeqCst), 0);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["delivery"], "queued", "{body}");
+    assert_eq!(body["reason"], "accepted", "{body}");
+    f.one("-# ⌨️ 시험: 요청 본문").await;
+    let replies: i64 = sqlx::query_scalar("SELECT count(*) FROM imsg_reply_actions")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(replies, 0, "admission must not send an iMessage reply");
+    assert_eq!(f.enqueue.load(Ordering::SeqCst), 1);
+    assert!(pane.keys().is_empty());
+    drop(pane);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn imessage_owner_origin_conflict_echoes_nothing_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::new(7_811_326, false).await;
+    let pane = InjectPane::new(f.channel, "external");
+    let request = input(ENVELOPE, Some("owner-ticket-conflict"));
+    assert_eq!(
+        f.call("turn/deliver", &request, false).await.0,
+        StatusCode::OK
+    );
+    f.one("-# ⌨️ 시험: 요청 본문").await;
+    let before = f.notices().await;
+    let changed = input(
+        &ENVELOPE.replace("요청 본문", "다른 본문"),
+        Some("owner-ticket-conflict"),
+    );
+    let (status, body) = f.call("turn/deliver", &changed, false).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "origin_conflict", "{body}");
+    assert_eq!(f.backend.load(Ordering::SeqCst), 1);
+    assert_eq!(f.notices().await, before);
+    let replies: i64 = sqlx::query_scalar("SELECT count(*) FROM imsg_reply_actions")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(replies, 0);
+    assert_eq!(f.enqueue.load(Ordering::SeqCst), 1);
     assert!(pane.keys().is_empty());
     drop(pane);
     f.close().await;
