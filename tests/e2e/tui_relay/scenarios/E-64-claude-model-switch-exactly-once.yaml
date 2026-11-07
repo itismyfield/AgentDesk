@@ -1,0 +1,68 @@
+id: E-64
+title: Claude TUI 로컬 /model 직후 Discord 입력이 60초 안에 1회 처리되고 큐가 비어 있다
+agent_mode: real_live
+coverage_class: live
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
+cells: [claude-tui]
+isolation: required
+acceptance_criteria:
+  - Warm the Claude TUI through Discord and wait until the target mailbox is idle with queue 0.
+  - Type `/model default` into the TUI pane; the relay posts its local slash-command note.
+  - Send an ordinary Discord message; its answer arrives within 60 seconds.
+  - The answer marker occurs exactly once and the target mailbox drains back to idle with queue 0.
+  - The run issues no cancel; any stranded turn fails the 60-second wait or the idle check.
+notes: |
+  `/model` here is the Claude-native command typed into the pane, observed by
+  the relay as a local control that must not open a turn. `default` keeps the
+  cell's model unchanged while still producing the command echo and local
+  output; pick another alias only on a cell whose Claude settings are isolated.
+  Exactly once is provider_text_present (>=1), no_duplicate_marker (<=1 message)
+  and a chrome_count regex that forbids two copies inside one message.
+  Injection is not counted separately: a second injection would show as a
+  second answer or as a busy/queued mailbox at the idle check.
+report_marker_counts:
+  - "[E2E:E64:{run_id}:WARM]"
+  - "[E2E:E64:{run_id}:PROBE]"
+steps:
+  - send_discord_prompt: "E2E E64 warmup. Output one line made by joining '[E2E:E64:{run_id}:' and 'WARM]' with nothing between them."
+  - wait_for_discord_text: "[E2E:E64:{run_id}:WARM]"
+    relay_author: provider
+    timeout_s: 240
+  - wait_idle_s: 3
+  - assert_health:
+      timeout_s: 45
+      poll_interval_s: 1
+      global_active_max: 0
+      global_finalizing_max: 0
+  - send_keys_sequence:
+      keys:
+        - "/model default"
+        - C-m
+      key_interval_s: 0.35
+      mark_prompt_sent: false
+  - wait_for_raw_discord_text: "머신 슬래시 명령"
+    timeout_s: 60
+  - send_discord_prompt: "E2E E64 after model. Output one line made by joining '[E2E:E64:{run_id}:' and 'PROBE]' with nothing between them."
+  - wait_for_discord_text: "[E2E:E64:{run_id}:PROBE]"
+    relay_author: provider
+    timeout_s: 60
+  - wait_idle_s: 3
+  - assert_health:
+      timeout_s: 45
+      poll_interval_s: 1
+      global_active_max: 0
+      global_finalizing_max: 0
+assertions:
+  - provider_text_present: "[E2E:E64:{run_id}:WARM]"
+  - provider_text_present: "[E2E:E64:{run_id}:PROBE]"
+  - no_duplicate_marker: "[E2E:E64:{run_id}:WARM]"
+  - no_duplicate_marker: "[E2E:E64:{run_id}:PROBE]"
+  # chrome_count does not expand {run_id}; this matches any run id inside this run's window.
+  - chrome_count:
+      regex: '\[E2E:E64:[^\]\s]+:PROBE\][\s\S]*\[E2E:E64:[^\]\s]+:PROBE\]'
+      exact: 0
+  - ordered_text_present:
+      - "[E2E:E64:{run_id}:WARM]"
+      - "[E2E:E64:{run_id}:PROBE]"
+  - no_duplicate_content: true
+  - no_resume_prompt_chrome: true

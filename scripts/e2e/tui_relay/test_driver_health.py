@@ -4176,7 +4176,7 @@ class RestartTargetParameterized(_OutcomeFixture, unittest.TestCase):
                                              ("http://127.0.0.1:8797", None, "dev"),
                                              ("http://agentdesk.test", "dev", "dev"),
                                              ("http://agentdesk.test", None, "release")):
-            for scenario_id in ("E-8", "E-9", "E-10", "E-14", "E-61"):
+            for scenario_id in ("E-8", "E-9", "E-10", "E-14", "E-61", "E-63"):
                 with self.subTest(base_url=base_url, override=override, scenario=scenario_id):
                     restart.reset_mock()
                     self.args.base_url, self.args.restart_target_override = base_url, override

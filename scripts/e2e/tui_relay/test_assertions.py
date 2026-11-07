@@ -550,10 +550,11 @@ class E4ProviderBodyWait(unittest.TestCase):
 
 
 class ProviderAuthorScenarios(unittest.TestCase):
-    """E-1/E-2/E-36/E-50/E-51 accept a turn body only from the cell's provider bot."""
+    """E-1/E-2/E-36/E-50/E-51/E-63/E-64 accept a turn body only from the cell's provider bot."""
 
     NOTIFY_BOT = E4ProviderBodyWait.NOTICE_BOT
-    SCENARIOS = {"E-1": "claude", "E-2": "claude", "E-36": "claude", "E-50": "claude", "E-51": "codex"}
+    SCENARIOS = {"E-1": "claude", "E-2": "claude", "E-36": "claude", "E-50": "claude", "E-51": "codex",
+                 "E-63": "claude", "E-64": "claude"}
 
     @staticmethod
     def load(scenario_id):
