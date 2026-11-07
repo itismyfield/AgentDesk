@@ -27,6 +27,7 @@ impl State {
 }
 
 pub(super) struct GatewayHandbackBreaker {
+    pub(super) health: Option<super::super::shared_state::GatewayHandbackHealth>,
     provider: String,
     owner: String,
     path: Option<PathBuf>,
@@ -69,6 +70,7 @@ impl GatewayHandbackBreaker {
                 .join(format!("{owner}.json"))
         });
         Self {
+            health: None,
             provider: provider.to_owned(),
             owner,
             path,
@@ -89,7 +91,10 @@ impl GatewayHandbackBreaker {
         };
         match std::fs::read(path) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(state) => Some(state),
+                Ok(state) => {
+                    self.publish_health(&state);
+                    Some(state)
+                }
                 Err(error) => {
                     self.state_error(error);
                     None
@@ -97,6 +102,7 @@ impl GatewayHandbackBreaker {
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.retry = None;
+                self.publish_health(&State::default());
                 Some(State::default())
             }
             Err(error) => {
@@ -116,7 +122,24 @@ impl GatewayHandbackBreaker {
             self.state_error(error);
             return false;
         }
+        self.publish_health(state);
         true
+    }
+
+    fn publish_health(&self, state: &State) {
+        if let Some(health) = &self.health {
+            *health.write().unwrap_or_else(|e| e.into_inner()) = state.manual.then(|| {
+                (
+                    std::time::Instant::now(),
+                    format!(
+                        "provider:{}:gateway_handback_breaker:manual:empty={}:activations={}",
+                        self.provider,
+                        state.empty.len(),
+                        state.activations.len()
+                    ),
+                )
+            });
+        }
     }
 
     pub(super) fn suppressed(&mut self) -> bool {
@@ -162,6 +185,7 @@ impl GatewayHandbackBreaker {
             return;
         }
         let Ok(acquired) = acquired else {
+            self.publish_health(&State::default());
             return;
         };
         let Some(mut state) = self.read() else {

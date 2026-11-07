@@ -3,6 +3,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedLocation, HostedOwner, HostedState, tests::record,
 };
 use crate::services::discord::turn_presence::activity::{self, Activity};
+use crate::test_support::wait::{WAIT_CAP, join_within, recv_within};
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -63,7 +64,7 @@ impl PgOutage {
                 .block_on(async move {
                     let mut connection = sqlx::PgConnection::connect_with(&options).await.unwrap();
                     let mut hidden = false;
-                    while let Ok(Some(hide)) = commands.recv() {
+                    while let Some(hide) = recv_within(&commands, WAIT_CAP) {
                         let query = if hide {
                             "ALTER TABLE sessions RENAME TO sessions_retry_outage"
                         } else {
@@ -120,14 +121,16 @@ impl PgOutage {
     }
     fn finish(mut self) {
         self.command.send(None).unwrap();
-        self.thread.take().unwrap().join().unwrap();
+        join_within(self.thread.take().unwrap(), WAIT_CAP);
     }
 }
 impl Drop for PgOutage {
     fn drop(&mut self) {
         if let Some(thread) = self.thread.take() {
             let _ = self.command.send(None);
-            let _ = thread.join();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                join_within(thread, WAIT_CAP)
+            }));
         }
     }
 }
