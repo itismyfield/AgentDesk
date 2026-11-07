@@ -9,7 +9,8 @@ vars == <<clear, adopt, observer, submitted, inputIn, answered, closed>>
 Init ==
     /\ clear \in Clears
     /\ adopt = IF clear THEN "pending" ELSE "none"
-    /\ observer = "none" /\ ~submitted /\ inputIn = "none" /\ ~answered /\ ~closed
+    /\ observer = "none" /\ submitted = FALSE /\ inputIn = "none"
+    /\ answered = FALSE /\ closed = FALSE
 
 \* owner_observer resolves before the submit: B once adopted, else the cached A.
 Build ==
