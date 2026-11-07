@@ -4,6 +4,7 @@ use super::gateway_lease::{
 };
 use super::*;
 use crate::db::postgres;
+use crate::test_support::wait::{WAIT_CAP, join_within};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -477,7 +478,76 @@ async fn backend_exit_removes_home_waiter_until_live_home_takes_handback_pg() {
     fixture.close().await;
 }
 
+/// A cancelled drain must leave the serving gateway holding its lease.
+#[tokio::test]
+async fn cancelled_deferred_restart_keeps_the_serving_holders_lease_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture.advertise(false).await;
+    let backup = fixture.backup().await;
+    fixture.ticks(1).await;
+    // What the deferred-restart poller publishes when a restart request appears.
+    backup.shared.restart.legacy_deferred_begin();
+    // Give the keepalive one full interval to react, however it reacts.
+    let observed = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if fixture.holder().await.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    // The restart request is cancelled: the runtime stays up and must keep serving.
+    backup.shared.restart.legacy_deferred_rollback();
+    assert!(
+        !backup.backend.is_finished(),
+        "backend keeps serving across a cancelled restart"
+    );
+    assert!(
+        observed.is_err() && fixture.holder().await.is_some(),
+        "a cancelled deferred restart must leave the serving gateway holding its lease"
+    );
+    fixture.ticks(1).await;
+    assert!(
+        try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+            .await
+            .unwrap()
+            .is_none(),
+        "a peer must not take the lease from a gateway that is still serving"
+    );
+    drop(backup);
+    fixture.close().await;
+}
+
 impl Fixture {
+    async fn preferred(&self) -> (Arc<SharedData>, GatewayLeaseAcquisition) {
+        self.save_config(|config| config.cluster.instance_id = Some("home".into()));
+        let shared = super::super::make_shared_data_for_tests_with_storage(Some(self.pool.clone()));
+        let GatewayLeaseOutcome::Proceed(Some(acquired)) =
+            self.acquire(&shared, &mut self.breaker()).await
+        else {
+            panic!("preferred home acquires the released lease")
+        };
+        (shared, acquired)
+    }
+
+    fn empty_handbacks(&self) -> usize {
+        let path = self
+            ._root
+            .path()
+            .join("gateway_handback_breaker/claude-7465737467617465.json");
+        match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["empty"]
+                .as_array()
+                .unwrap()
+                .len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!("read test breaker state: {error}"),
+        }
+    }
+
     fn save_config(&self, edit: impl FnOnce(&mut crate::config::Config)) {
         let mut config = self.config.clone();
         edit(&mut config);
@@ -501,6 +571,333 @@ impl Fixture {
         .await
         .expect("the idle holder session expires and frees the lease")
     }
+}
+
+#[tokio::test]
+async fn cancelled_deferred_restart_produces_zero_empty_handbacks_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let (shared, acquired) = fixture.preferred().await;
+    assert!(fixture.publish_waiter().await);
+    assert!(super::deferred_restart::begin_deferred_restart(&shared).is_some());
+    super::deferred_restart::rollback_deferred_restart(&shared);
+    // Keep the original backend's guard alive across a real lease transfer.
+    // It no longer contends, so a backup must not yield to its old advertisement.
+    acquired.lease.unlock().await.unwrap();
+    fixture.publish_waiter().await;
+    fixture.save_config(|_| {});
+    let mut backup = fixture.backup().await;
+    tokio::select! {
+        () = fixture.ticks(2) => {},
+        result = &mut backup.backend => { result.unwrap(); },
+    }
+    if backup.backend.is_finished() {
+        let lease = try_acquire_observing_handback(
+            &fixture.pool,
+            TOKEN,
+            &ProviderKind::Claude,
+            &mut fixture.breaker(),
+        )
+        .await
+        .unwrap()
+        .expect("an unconsumed handback is empty");
+        lease.unlock().await.unwrap();
+    }
+    assert_eq!(
+        fixture.empty_handbacks(),
+        0,
+        "cancelled intent must not cause an empty handback"
+    );
+    assert!(!backup.backend.is_finished(), "backup continues serving");
+    backup.manager.shutdown_all().await;
+    backup.ended().await;
+    drop(acquired.waiter);
+    drop(backup);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn concurrent_deferred_rollbacks_preserve_another_live_waiter_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let (shared, acquired) = fixture.preferred().await;
+    let survivor = GatewayWaiterGuard::new("claude");
+    assert!(super::deferred_restart::begin_deferred_restart(&shared).is_some());
+    let barrier = std::sync::Barrier::new(3);
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            scope.spawn(|| {
+                barrier.wait();
+                super::deferred_restart::rollback_deferred_restart(&shared);
+            });
+        }
+        barrier.wait();
+    });
+    drop(acquired.waiter);
+    assert!(
+        fixture.publish_waiter().await,
+        "another guard stays advertised"
+    );
+    drop(survivor);
+    assert!(
+        !fixture.publish_waiter().await,
+        "no references leak after two rollbacks"
+    );
+    acquired.lease.unlock().await.unwrap();
+    drop(shared);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn deferred_rollback_racing_backend_exit_preserves_another_waiter_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let (shared, acquired) = fixture.preferred().await;
+    let mut running = Running::start(shared.clone(), acquired, Some(fixture.breaker())).await;
+    let survivor = GatewayWaiterGuard::new("claude");
+    assert!(super::deferred_restart::begin_deferred_restart(&shared).is_some());
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let handle = tokio::runtime::Handle::current();
+    let rollback = std::thread::spawn({
+        let barrier = barrier.clone();
+        move || {
+            handle.block_on(barrier.wait());
+            super::deferred_restart::rollback_deferred_restart(&shared);
+        }
+    });
+    barrier.wait().await;
+    running.manager.shutdown_all().await;
+    running.ended().await;
+    join_within(rollback, WAIT_CAP);
+    assert!(
+        fixture.publish_waiter().await,
+        "backend exit and rollback release only their own reference"
+    );
+    drop(survivor);
+    assert!(
+        !fixture.publish_waiter().await,
+        "backend exit and rollback leave no waiter"
+    );
+    drop(running);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn normal_deferred_restart_holds_lease_until_backend_exit_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut running = fixture.backup().await;
+    fixture.ticks(1).await;
+    let messages = running.events.messages.load(Ordering::SeqCst);
+    assert!(super::deferred_restart::begin_deferred_restart(&running.shared).is_some());
+    fixture.ticks(2).await;
+    assert!(!running.backend.is_finished());
+    assert!(running.events.messages.load(Ordering::SeqCst) > messages);
+    assert!(
+        try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+            .await
+            .unwrap()
+            .is_none(),
+        "serving backend retains the singleton lease while draining"
+    );
+    running.manager.shutdown_all().await;
+    running.ended().await;
+    let peer = fixture
+        .peer_takes_lease_within(Duration::from_secs(5))
+        .await;
+    peer.unlock().await.unwrap();
+    drop(running);
+    fixture.close().await;
+}
+
+async fn handback_health(registry: &health::HealthRegistry) -> Vec<String> {
+    let snapshot = serde_json::to_value(health::build_health_snapshot(registry).await).unwrap();
+    if snapshot["degraded_reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str().unwrap().contains("gateway_handback_breaker"))
+    {
+        assert_eq!(snapshot["status"], "degraded");
+    }
+    snapshot["degraded_reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .filter(|reason| reason.contains("gateway_handback_breaker"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn handback_health_restores_legacy_manual_state_and_clears_after_observed_deletion_pg() {
+    // Process-wide writer alarms from other tests must not mask the provider's status transition.
+    if std::env::var_os("AGENTDESK_HANDBACK_HEALTH_CHILD").is_none() {
+        let name = concat!(
+            "services::discord::runtime_bootstrap::gateway_handback_integration_tests::",
+            "handback_health_restores_legacy_manual_state_and_clears_after_observed_deletion_pg"
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("AGENTDESK_HANDBACK_HEALTH_CHILD", "1")
+            .output()
+            .expect("spawn isolated health snapshot test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+            "{stdout}"
+        );
+        print!("{stdout}");
+        return;
+    }
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let mut running = fixture.backup().await;
+    let shared = &running.shared;
+    shared.restart.reconcile_done.store(true, Ordering::SeqCst);
+    let registry = health::HealthRegistry::new();
+    registry.register("claude".into(), shared.clone()).await;
+    let baseline = serde_json::to_value(health::build_health_snapshot(&registry).await).unwrap();
+    assert_eq!(baseline["status"], "healthy", "{baseline}");
+    assert_eq!(baseline["degraded_reasons"], json!([]));
+    let path = fixture
+        ._root
+        .path()
+        .join("gateway_handback_breaker/claude-7465737467617465.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // This is the persisted schema before health observations were introduced.
+    let legacy =
+        r#"{"pending":null,"empty":[1,2,3,4],"activations":[4],"suppress_until":0,"manual":true}"#;
+    std::fs::write(&path, legacy).unwrap();
+    fixture.ticks(2).await;
+    let expected =
+        vec!["provider:claude:gateway_handback_breaker:manual:empty=4:activations=1".to_owned()];
+    assert_eq!(handback_health(&registry).await, expected);
+    let manual = serde_json::to_value(health::build_health_snapshot(&registry).await).unwrap();
+    assert_eq!(manual["status"], "degraded");
+    assert_eq!(manual["degraded_reasons"], json!(expected));
+    println!(
+        "health_manual={}",
+        serde_json::json!({"degraded_reasons": expected})
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        legacy,
+        "observing legacy state does not migrate it"
+    );
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(
+        handback_health(&registry).await,
+        expected,
+        "health reads the cached observation without disk I/O"
+    );
+    fixture.ticks(2).await;
+    assert!(handback_health(&registry).await.is_empty());
+    let cleared = serde_json::to_value(health::build_health_snapshot(&registry).await).unwrap();
+    assert_eq!(cleared["status"], "healthy", "{cleared}");
+    assert_eq!(cleared["degraded_reasons"], json!([]));
+    running.manager.shutdown_all().await;
+    running.ended().await;
+    drop(running);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn handback_health_omits_disabled_failed_and_stale_standby_observations_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(fixture.pool.clone()));
+    let registry = health::HealthRegistry::new();
+    registry
+        .register_standby("claude".into(), shared.clone())
+        .await;
+    let mut breaker = fixture.breaker();
+    let path = fixture
+        ._root
+        .path()
+        .join("gateway_handback_breaker/claude-7465737467617465.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"pending":null,"empty":[1,2,3,4],"activations":[],"suppress_until":0,"manual":true}"#,
+    )
+    .unwrap();
+    let home = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        fixture.acquire(&shared, &mut breaker).await,
+        GatewayLeaseOutcome::Standby
+    ));
+    assert_eq!(handback_health(&registry).await.len(), 1);
+    shared
+        .restart
+        .gateway_handback_health
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .0 = Instant::now() - Duration::from_secs(60);
+    assert_eq!(
+        handback_health(&registry).await.len(),
+        1,
+        "a normal standby retry interval stays fresh"
+    );
+    fixture.save_config(|config| config.cluster.gateway_handback_breaker.enabled = false);
+    assert!(
+        handback_health(&registry).await.is_empty(),
+        "disabled observations are hidden immediately"
+    );
+    fixture.save_config(|_| {});
+    assert!(breaker.suppressed());
+    let disconnected = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://postgres@127.0.0.1:1/unreachable")
+        .unwrap();
+    disconnected.close().await;
+    assert!(
+        try_acquire_observing_handback(&disconnected, TOKEN, &ProviderKind::Claude, &mut breaker)
+            .await
+            .is_err()
+    );
+    assert!(
+        handback_health(&registry).await.is_empty(),
+        "a failed standby lease observation clears its reason"
+    );
+    assert!(breaker.suppressed());
+    shared
+        .restart
+        .gateway_handback_health
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .0 = Instant::now() - Duration::from_secs(120);
+    assert!(
+        handback_health(&registry).await.is_empty(),
+        "stopped standby polling cannot expose a stale reason"
+    );
+    assert!(breaker.suppressed());
+    assert_eq!(
+        handback_health(&registry).await.len(),
+        1,
+        "a successful observation republishes the current manual state"
+    );
+    home.unlock().await.unwrap();
+    fixture.close().await;
 }
 
 #[tokio::test]

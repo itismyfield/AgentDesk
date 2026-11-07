@@ -2,6 +2,7 @@
 //! The lexer handles comments and literals without resolving names or evaluating `cfg`.
 
 pub(crate) mod serial_runtime;
+pub(crate) mod wait;
 
 use std::fmt;
 use std::ops::Range;

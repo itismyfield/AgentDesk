@@ -20,7 +20,9 @@ workflow warning annotation, in the step summary table and in the verdict JSON
 or deploys; it is where a flaky test outside the policy turns red.
 `scripts/check-ci-runner-hardening.sh` keeps the nightly plan on
 `--retry-mode policy` and the PR and main plans on `all-once`. Every plan still
-validates the policy file, so an expired entry fails all three.
+validates the policy file, so an expired entry fails all three. From 7 days
+before its `expires` date, every plan prints a `::warning::` naming the entry;
+give each entry its own date so they do not all expire at once.
 
 ## PR rerun of known flaky tests
 

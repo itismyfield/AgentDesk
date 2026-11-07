@@ -15,7 +15,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     list_local_herdr_rows_pg, list_local_unplaced_pending_pg,
 };
 use crate::services::discord::herdr_terminate::root_replaced::{
-    self, Recovery, RootReplacedCandidate,
+    self, Recovery, RootReplacedCandidate, missing_marker,
 };
 use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
 use crate::services::discord::tui_prompt_relay::herdr_source::{
@@ -128,6 +128,7 @@ enum Reconnect {
     /// Left to its next turn; nothing is launched or attached here.
     Pending,
     RootReplaced,
+    Retired,
 }
 
 impl Reconnect {
@@ -342,6 +343,9 @@ fn reconnect_pass(
                 )),
             }
         };
+        if result.reconnect == Reconnect::Retired {
+            continue;
+        }
         if let Some(candidate) = &result.candidate
             && runtime.block_on(root_replaced::recover(shared, pool, candidate, None))
                 == Recovery::Retired
@@ -480,6 +484,13 @@ fn reconnect_unless_pending(
         #[cfg(test)]
         ATTACHES.with(|attaches| attaches.set(attaches.get() + 1));
         let attached = reconnect(pool, record).await;
+        if let Some(candidate) =
+            missing_marker::MissingMarkerCandidate::from_refusal(row, &attached)
+            && missing_marker::recover(shared, pool, &candidate, &_transition).await
+                == Recovery::Retired
+        {
+            return (Reconnect::Retired, None);
+        }
         (
             Reconnect::of(&attached),
             RootReplacedCandidate::from_refusal(row, &attached),
@@ -531,6 +542,7 @@ pub(crate) fn reconnect_counts() -> ReconnectCounts {
     for result in results {
         match result {
             Reconnect::Published => counts.published += 1,
+            Reconnect::Retired => {}
             Reconnect::Refused | Reconnect::Withheld | Reconnect::RootReplaced => {
                 counts.withheld += 1
             }

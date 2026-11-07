@@ -1,6 +1,7 @@
 //! An armed owner start that finds the pane busy: its busy paste consumes the same first-key gate.
 use super::*;
 use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
+use crate::test_support::wait::{WAIT_CAP, join_within};
 
 #[test]
 fn a_running_owner_dispatch_records_its_user_row_as_the_native_root() {
@@ -52,9 +53,7 @@ fn a_running_owner_dispatch_records_its_user_row_as_the_native_root() {
         (rig.granted_front(), settled),
         |_| None,
     );
-    let pin = reader
-        .join()
-        .expect("the running paste observer exits after cancelling its fixture turn")
+    let pin = join_within(reader, WAIT_CAP)
         .expect("BusyClaude must capture a native root for the user row recorded after Enter")
         .expect("the running paste's native user root must validate");
     assert_eq!(result, Ok(()));
@@ -384,7 +383,7 @@ fn an_armed_start_on_a_busy_pane_pastes_only_through_the_first_key_gate() {
         let (settled, _) = tokio::sync::oneshot::channel();
         let at = (session.as_str(), elsewhere.path());
         let (result, _) = idle_turn(&rig, at, cancel, (rig.granted_front(), settled), |_| None);
-        let keyed_at_hold = other.join().unwrap();
+        let keyed_at_hold = join_within(other, WAIT_CAP);
         fs::write(rig.f.root.path().join("tmux"), &original).unwrap();
         let snapshot = rig.snapshot();
         if stop_first {
@@ -437,7 +436,7 @@ fn refused_busy_start(
     let (settled, _) = tokio::sync::oneshot::channel();
     let at = (session.as_str(), elsewhere.path());
     let (result, _) = idle_turn(&rig, at, cancel, (rig.granted_front(), settled), |_| None);
-    other.join().unwrap();
+    join_within(other, WAIT_CAP);
     fs::write(rig.f.root.path().join("tmux"), &original).unwrap();
     let snapshot = rig.snapshot();
     let requeue = rig

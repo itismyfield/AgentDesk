@@ -201,11 +201,10 @@ async fn a_filled_return_to_an_empty_session_source_survives_restarts_without_re
         let pending = |link: &SourceLink| matches!(link.boundary, Boundary::Pending { .. });
         assert!(!rotation.links.values().any(pending), "round {round}");
         let alarms = harness.alarms.taken();
-        assert!(
-            !alarms
-                .iter()
-                .any(|a| matches!(a, WriterAlarm::Halted { .. }))
-        );
+        assert!(!alarms.iter().any(|a| matches!(
+            a,
+            WriterAlarm::Halted { .. } | WriterAlarm::HaltedMissingSource { .. }
+        )));
         assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(3));
         halt(stop, task).await;
     }
@@ -400,11 +399,10 @@ async fn an_empty_session_name_two_stored_sessions_share_stays_its_own_source() 
         assert!(harness.channel().cursor(source).is_some(), "{source:?}");
     }
     let alarms = harness.alarms.taken();
-    assert!(
-        !alarms
-            .iter()
-            .any(|a| matches!(a, WriterAlarm::Halted { .. }))
-    );
+    assert!(!alarms.iter().any(|a| matches!(
+        a,
+        WriterAlarm::Halted { .. } | WriterAlarm::HaltedMissingSource { .. }
+    )));
     assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(4));
     assert_eq!(harness.port.posts(), ["c one"]);
     halt(stop, task).await;
@@ -577,6 +575,22 @@ async fn a_first_start_halts_rather_than_take_a_changed_source_as_its_baseline()
     let rotation = store.rotation().unwrap();
     assert!(rotation.links.is_empty() && rotation.successors.is_empty());
     assert!(harness.port.posts().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_first_start_names_its_missing_baseline_alias_as_missing() {
+    let (harness, path, w, bindings) = started_empty(&row("m0", "before the loss"));
+    bindings.commit(resume(2, &w, &named(&w, "A")));
+    std::fs::remove_file(&path).unwrap();
+    let (_stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(3).await;
+    assert!(task.is_finished());
+    let alarms = harness.alarms.taken();
+    assert!(
+        matches!(alarms.last(), Some(WriterAlarm::HaltedMissingSource { source, .. }) if *source == w),
+        "{alarms:?}"
+    );
+    assert_eq!(harness.channel().binding_checkpoint().unwrap(), None);
 }
 
 #[tokio::test(start_paused = true)]
@@ -786,11 +800,10 @@ async fn device_change_resume_preserves_delivery_and_legacy_pending_across_resta
                 .count();
             assert_eq!(pending, usize::from(legacy));
             let alarms = harness.alarms.taken();
-            assert!(
-                !alarms
-                    .iter()
-                    .any(|alarm| matches!(alarm, WriterAlarm::Halted { .. }))
-            );
+            assert!(!alarms.iter().any(|alarm| matches!(
+                alarm,
+                WriterAlarm::Halted { .. } | WriterAlarm::HaltedMissingSource { .. }
+            )));
             assert_eq!(
                 alarms
                     .iter()

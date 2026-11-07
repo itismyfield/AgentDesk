@@ -574,6 +574,169 @@ def audit_mutant_hooks(
     return findings
 
 
+# Test-policy rule 2: added test lines reading `.rs` text pass only in a listed guard or a non-test fn of its file.
+# Not caught: a new test calling an existing helper that reads source, and paths built at run time.
+SOURCE_GUARD_ALLOWLIST = Path("scripts/ci/source_text_guard_allowlist.txt")
+SOURCE_GUARD_TOOLS = frozenset({"lexer", "direct", "include_str", "scanner"})
+SOURCE_GUARD_ROW_RE = re.compile(
+    r"(\S+) ((?:[A-Za-z_][A-Za-z0-9_]*::)+([A-Za-z_][A-Za-z0-9_]*)) \| ([^|]*?) \| (.*)"
+)
+# The lexer's own file may name it; its other source reads are still checked.
+SOURCE_LEXER_DEFINITION = "src/test_support.rs"
+SOURCE_LEXER_RE = re.compile(
+    r"\b(?:strip_rust_comments|rust_code_mask|braced_item_span|source_guard_support)\b"
+)
+SOURCE_INCLUDE_RE = re.compile(r"\binclude_(?:str|bytes)!\s*\(")
+# Matched on the raw line; the match must start in code, not in a comment or string.
+SOURCE_TREE_RES = (
+    re.compile(r"\benv!\(\s*\"CARGO_MANIFEST_DIR\"\s*\)[^;]*\"/?src(?:/[^\"]*)?\""),
+    re.compile(r"\b(?:read_to_string|read_dir|read)\(\s*\"(?:\./)?src/[^\"]*\""),
+)
+# A bare `src` root is a tree read only in a file anchored at the crate root; elsewhere it is a temp dir.
+SOURCE_ROOT_RE = re.compile(r"\benv!\(\s*\"CARGO_MANIFEST_DIR\"")
+SOURCE_ROOTED_TREE_RES = (
+    re.compile(r"\.join\(\s*\"(?:\./)?src(?:/[^\"]*)?\"\s*\)"),
+    re.compile(r"\[\s*\"src\"\s*,|,\s*\"src\"\s*[,\]]"),
+)
+# `.rs` files under a fixtures directory are test data, not source.
+SOURCE_FIXTURE_DIR_RE = re.compile(r"(?:^|/)fixtures/")
+TEST_ATTRIBUTE_RE = re.compile(r"#\[\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*test\b")
+FN_DECLARATION_RE = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)")
+SOURCE_GUARD_HINT = (
+    "tests do not read Rust source (docs/agent-maintenance/test-policy.md rule 2): assert behavior, "
+    f"or list a kept guard in {SOURCE_GUARD_ALLOWLIST} with coordinator approval"
+)
+
+
+def load_source_guard_allowlist(path: Path = SOURCE_GUARD_ALLOWLIST) -> tuple[set[str], list[str]]:
+    """Allowlisted test names and format findings: two `# ` header lines, then one row per test."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set(), [f"{path}: missing; it lists the source-text guards kept on purpose"]
+    findings: list[str] = []
+    if len(lines) < 2 or not all(line.startswith("# ") for line in lines[:2]):
+        findings.append(f"{path}:1: needs its two `# ` header comment lines")
+    names: set[str] = set()
+    seen: set[tuple[str, str]] = set()
+    for line_no, line in enumerate(lines[2:], start=3):
+        match = SOURCE_GUARD_ROW_RE.fullmatch(line)
+        if match is None:
+            findings.append(f"{path}:{line_no}: expected `<crate> <module path>::<test> | <tool> | <reason>`")
+            continue
+        crate, test_id, name, tool, reason = match.groups()
+        if tool not in SOURCE_GUARD_TOOLS:
+            findings.append(f"{path}:{line_no}: tool `{tool}` is not one of {sorted(SOURCE_GUARD_TOOLS)}")
+        if not reason.strip():
+            findings.append(f"{path}:{line_no}: `{test_id}` needs a reason")
+        if (crate, test_id) in seen:
+            findings.append(f"{path}:{line_no}: `{test_id}` is listed twice")
+        seen.add((crate, test_id))
+        names.add(name)
+    return names, findings
+
+
+def source_read_lines(source: str) -> dict[int, str]:
+    """Lines whose code reads Rust source text, with the kind of read."""
+    code = strip_rust_non_code(source)
+    rooted = any(not code[m.start()].isspace() for m in SOURCE_ROOT_RE.finditer(source))
+    tree_patterns = SOURCE_TREE_RES + (SOURCE_ROOTED_TREE_RES if rooted else ())
+    found: dict[int, str] = {}
+    for line_no, (raw, code_line) in enumerate(zip(source.splitlines(), code.splitlines()), start=1):
+        lexer = SOURCE_LEXER_RE.search(code_line)
+        if lexer:
+            found[line_no] = f"source lexer `{lexer.group(0)}`"
+            continue
+        for pattern in tree_patterns:
+            if any(m.start() < len(code_line) and not code_line[m.start()].isspace() for m in pattern.finditer(raw)):
+                found[line_no] = "source tree read"
+                break
+    for opener in SOURCE_INCLUDE_RE.finditer(code):
+        depth, end = 0, None
+        for idx in range(opener.end() - 1, len(code)):
+            if code[idx] == "(":
+                depth += 1
+            elif code[idx] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = idx
+                    break
+        # Joined so a path split across `concat!` pieces is judged whole.
+        path = "".join(text for text, _ in rust_string_literals(source[opener.end() : end]))
+        if end is None or not path.endswith(".rs") or SOURCE_FIXTURE_DIR_RE.search(path):
+            continue
+        first, last = code.count("\n", 0, opener.start()) + 1, code.count("\n", 0, end) + 1
+        for line_no in range(first, last + 1):
+            found.setdefault(line_no, "include of a .rs file")
+    return found
+
+
+def rust_test_functions(source: str) -> list[tuple[int, int, str, bool]]:
+    """(first line, last line, name, is a test) of every fn with a body."""
+    code = strip_rust_non_code(source)
+    functions: list[tuple[int, int, str, bool]] = []
+    for decl in FN_DECLARATION_RE.finditer(code):
+        body = re.compile(r"[{;]").search(code, decl.end())
+        if body is None or body.group(0) == ";":
+            continue
+        depth, end = 0, len(code) - 1
+        for idx in range(body.start(), len(code)):
+            if code[idx] == "{":
+                depth += 1
+            elif code[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = idx
+                    break
+        item_start = max(code.rfind(ch, 0, decl.start()) for ch in "{};") + 1
+        is_test = TEST_ATTRIBUTE_RE.search(code, item_start, decl.start()) is not None
+        functions.append(
+            (code.count("\n", 0, decl.start()) + 1, code.count("\n", 0, end) + 1, decl.group(1), is_test)
+        )
+    return functions
+
+
+def audit_source_text_guards(lines: list[AddedLine], allowlist: Path = SOURCE_GUARD_ALLOWLIST) -> list[str]:
+    allowed, findings = load_source_guard_allowlist(allowlist)
+    by_path: dict[str, list[AddedLine]] = collections.defaultdict(list)
+    for added in lines:
+        if is_mutant_hook_path(added.path):
+            by_path[added.path].append(added)
+    for path, added_lines in sorted(by_path.items()):
+        try:
+            source = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            source = ""
+        file_lines = source.splitlines()
+        reads = source_read_lines(source)
+        functions = rust_test_functions(source)
+        hosts_guard = any(is_test and name in allowed for _, _, name, is_test in functions)
+        for added in added_lines:
+            current = added.line_no <= len(file_lines) and file_lines[added.line_no - 1] == added.text
+            kind = reads.get(added.line_no) if current else source_read_lines(added.text).get(1)
+            if kind is None or path == SOURCE_LEXER_DEFINITION and kind.startswith("source lexer"):
+                continue
+            enclosing = [f for f in functions if current and f[0] <= added.line_no <= f[1]]
+            test = next((name for *_, name, is_test in sorted(enclosing, reverse=True) if is_test), None)
+            test_code = test is not None or is_test_path(path) or path.startswith("tests/")
+            test_code = test_code or is_test_region(path, added.line_no)
+            if not test_code or test is None and hosts_guard or test in allowed:
+                continue
+            owner = f"test `{test}`" if test else "code outside any allowlisted guard's file"
+            findings.append(f"{path}:{added.line_no}: {kind} in {owner}; {SOURCE_GUARD_HINT}")
+    return findings
+
+
+def audit_source_guard_rows(root: Path, allowlist: Path = SOURCE_GUARD_ALLOWLIST) -> list[str]:
+    """Every allowlisted name is still a fn under src/ or tests/; a stale row would admit a new guard."""
+    allowed, _ = load_source_guard_allowlist(root / allowlist)
+    declared: set[str] = set()
+    for base in SQL_ESCAPE_RUST_ROOTS:
+        if (root / base).is_dir():
+            for path in (root / base).rglob("*.rs"):
+                declared.update(FN_DECLARATION_RE.findall(path.read_text(encoding="utf-8", errors="replace")))
+    return [f"{allowlist}: `{name}` names no fn under src/ or tests/; drop its row" for name in sorted(allowed - declared)]
+
 # PostgreSQL 17 reads E'\v' as U+000B; 16 and older read it as the letter v.
 # Probing every printable ASCII `E'\c'` on 16 and 17 found no other difference.
 SQL_VERSION_DEPENDENT_ESCAPES = {"v": "U+000B on PostgreSQL 17, letter v on 16 and older; write \\x0b"}
@@ -787,6 +950,8 @@ def main() -> int:
         audit_unwrap_panic(lines)
         + audit_migration_integers(lines)
         + audit_mutant_hooks(lines, merge_base() is not None, collect_removed_lines())
+        + audit_source_text_guards(lines)
+        + audit_source_guard_rows(Path("."))
         + sql_findings
     )
     if findings:

@@ -28,6 +28,7 @@ use crate::services::tui_o::store::ledger::Unsent;
 mod activation_io;
 mod first_init;
 mod fresh_input;
+mod missing;
 mod recover;
 mod transition;
 pub use activation_io::{Custody, FencedFacts};
@@ -54,13 +55,13 @@ pub trait HostIo: Send + Sync + 'static {
     {
         None
     }
-    /// Only a current absence observation permits parking the latest missing source.
-    fn producer_absent(
+    /// Only a current Absent publication permits parking the latest missing source.
+    fn producer_observation(
         &self,
         _channel: u64,
         _provider: ShadowProvider,
-    ) -> impl Future<Output = bool> + Send {
-        std::future::ready(false)
+    ) -> impl Future<Output = Option<super::ProducerObservation>> + Send {
+        std::future::ready(Some(super::ProducerObservation::default()))
     }
     fn lease(&self) -> Self::Lease;
     /// A channel's writer stopped for good; the shared lease turns its verified episodes Unknown.
@@ -109,7 +110,7 @@ pub(crate) type RepostTurn<I> = Box<
         >,
 >;
 
-/// Channels with a hosted actor, by the claim that hosts each, and those ready to take work.
+/// Channels reserved by a host claim, and those whose actor is ready to take work.
 #[derive(Default)]
 pub struct Readiness {
     hosted: Mutex<BTreeMap<u64, u64>>,
@@ -778,11 +779,12 @@ struct Hosted<'a, I: HostIo> {
 }
 
 impl<I: HostIo> Hosted<'_, I> {
-    /// Restarts from the recovered store after transient halts; other stops end hosting.
+    /// Keeps Missing halts claimed until evidence changes; store errors retain their backoff.
     async fn serve(self, mut store: ChannelStore) {
         let (channel, alarms) = (self.channel, &self.alarms);
         let mut backoff = Backoff::default();
         let mut attempt = 0u32;
+        let mut observed = missing::Observation::default();
         // Once a resume was tried, leaving the loop ends the wait for health as well.
         let settle = |attempt: u32| {
             if attempt > 0 {
@@ -791,7 +793,19 @@ impl<I: HostIo> Hosted<'_, I> {
         };
         loop {
             let started = tokio::time::Instant::now();
-            let Some(cause) = self.run(store, attempt).await else {
+            // Keep the evidence used by this start, including changes before its halt settles.
+            let known: Vec<_> = store
+                .cursors()
+                .map(|cursor| {
+                    let present = std::fs::metadata(&cursor.source.path).is_ok();
+                    (cursor.source.clone(), present)
+                })
+                .collect();
+            let Some(absent) = unless_stopped(&self.stopping, observed.starting(&self)).await
+            else {
+                return;
+            };
+            let Some((cause, ready)) = self.run(store, attempt, absent).await else {
                 settle(attempt);
                 return;
             };
@@ -800,8 +814,15 @@ impl<I: HostIo> Hosted<'_, I> {
                 self.io.writer_unavailable(channel);
                 let alarm = &cause.alarm;
                 tracing::error!(channel, ?alarm, "[tui_o] writer stopped and stays stopped");
+                if let Some(recovered) = observed.resume(&self, &cause, &known, ready).await {
+                    attempt += 1;
+                    store = recovered;
+                    super::deliver::seed_last_posted(channel, store.ledger());
+                    continue;
+                }
                 return;
             }
+            observed = missing::Observation::default();
             if started.elapsed() >= resume::STABLE_RUN {
                 backoff = Backoff::default();
             }
@@ -815,8 +836,13 @@ impl<I: HostIo> Hosted<'_, I> {
         }
     }
 
-    /// Starts one actor and returns how it stopped, once it has ended.
-    async fn run(&self, store: ChannelStore, attempt: u32) -> Option<StopCause> {
+    /// Starts one actor and returns, once it has ended, how it stopped and whether it got ready.
+    async fn run(
+        &self,
+        store: ChannelStore,
+        attempt: u32,
+        producer_absent: bool,
+    ) -> Option<(StopCause, bool)> {
         let boot = self.boot.attempt(attempt);
         let (channel, gate) = (self.channel, self.gate);
         let (port, lease) = (Arc::clone(&self.port), self.io.lease());
@@ -828,7 +854,7 @@ impl<I: HostIo> Hosted<'_, I> {
         let mut writer = unless_stopped(&self.stopping, hosted).await?;
         phase.finish("ok");
         writer.boot = boot;
-        let mut writer = writer.with_repost_stop(self.stopping.clone());
+        let writer = writer.with_repost_stop(self.stopping.clone());
         let (stop_tx, stop) = watch::channel(false);
         let (resumed_tx, resumed) = watch::channel(false);
         // Each start publishes its own count; the ended actor's closed one reads as `None`.
@@ -838,23 +864,6 @@ impl<I: HostIo> Hosted<'_, I> {
             published: owing.published.subscribe(),
             demand: owing.demand.clone(),
         };
-        let store = writer.store();
-        let missing_source = store.cursors().any(|cursor| {
-            !cursor.retired
-                && matches!(
-                    crate::services::tui_o::shadow::capture::Fingerprint::path(&cursor.source),
-                    Err((
-                        crate::services::tui_o::shadow::SourceAnomalyKind::Missing,
-                        _
-                    ))
-                )
-        });
-        let producer_absent = missing_source
-            && unless_stopped(
-                &self.stopping,
-                self.io.producer_absent(channel, self.provider),
-            )
-            .await?;
         let config = WriterConfig {
             enabled: true,
             producer_absent,
@@ -873,7 +882,9 @@ impl<I: HostIo> Hosted<'_, I> {
         let readiness = &self.claim.readiness;
         readiness.track(channel, Arc::clone(gate), watched);
         let port = readiness.register_ports(channel, ports);
+        let ready = AtomicBool::new(false);
         let on_resumed = || {
+            ready.store(true, Ordering::SeqCst);
             if attempt > 0 {
                 self.alarms.resume_pending(channel, false);
                 tracing::info!(
@@ -888,7 +899,7 @@ impl<I: HostIo> Hosted<'_, I> {
         let cause = ended.await;
         drop(stop_tx);
         readiness.close_transition(channel, port);
-        cause
+        cause.map(|cause| (cause, ready.load(Ordering::SeqCst)))
     }
 
     /// Waits and recovers the store until it opens; `None` once recovery fails for good. Evidence

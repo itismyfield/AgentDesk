@@ -1,4 +1,33 @@
-//! Retires only a proved-ended replaced-root execution; never writes or closes a pane.
+//! Retires only a proved-ended recorded execution; never writes or closes a pane.
+pub(in crate::services::discord) mod missing_marker {
+    //! An exact marker-loss refusal is a candidate, never proof that its provider ended.
+    use super::*;
+    use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrUnknown;
+
+    pub(in crate::services::discord) struct MissingMarkerCandidate(HostedObservation);
+    impl MissingMarkerCandidate {
+        pub(in crate::services::discord) fn from_refusal(
+            row: &HostedObservation,
+            attach: &HerdrSourceAttach,
+        ) -> Option<Self> {
+            matches!((&row.record, attach),
+                (HostedRecord::Known(record), HerdrSourceAttach::Refused(HostReconcile::Herdr(
+                    HerdrExecutionMatch::Unknown(HerdrUnknown::MarkerLost))))
+                    if record.state == HostedState::Bound
+            )
+            .then(|| Self(row.clone()))
+        }
+    }
+
+    pub(in crate::services::discord) async fn recover(
+        shared: &Arc<SharedData>,
+        pool: &PgPool,
+        candidate: &MissingMarkerCandidate,
+        transition: &SessionTransitionLease<'_>,
+    ) -> Recovery {
+        recover_report(shared, pool, &candidate.0, Some(transition), true).await
+    }
+}
 #[cfg(unix)]
 pub(in crate::services::discord) mod preclaim;
 
@@ -54,6 +83,8 @@ struct Cached {
     row: HostedObservation,
     result: Recovery,
     candidates: Vec<RootReplacedCandidate>,
+    // Preserve the existing root-replaced queue wake without granting one to marker loss.
+    wake_queue: bool,
 }
 #[cfg(not(test))]
 static CACHE: std::sync::LazyLock<std::sync::Mutex<BTreeMap<i64, Cached>>> =
@@ -102,7 +133,9 @@ pub(in crate::services::discord) fn remember_candidate(candidate: &RootReplacedC
             row: row.clone(),
             result: Recovery::Held("candidate observed".into()),
             candidates: Vec::new(),
+            wake_queue: true,
         });
+        entry.wake_queue = true;
         if !entry.candidates.iter().any(|known| known.matches(row)) {
             entry.candidates.push(candidate.clone());
         }
@@ -129,7 +162,7 @@ pub(in crate::services::discord) fn incomplete_for(row: &HostedObservation) -> b
     cache(|entries| {
         entries
             .get(&row.session_id())
-            .is_some_and(|entry| unfinished(entry, row))
+            .is_some_and(|entry| entry.wake_queue && unfinished(entry, row))
     })
 }
 fn unfinished(entry: &Cached, row: &HostedObservation) -> bool {
@@ -167,6 +200,9 @@ fn report(row: &HostedObservation, result: Recovery) -> Recovery {
                 "herdr_root_replaced_recovery"
             );
         }
+        let wake_queue = entries
+            .get(&row.session_id())
+            .is_some_and(|entry| entry.wake_queue);
         let candidates = entries
             .get(&row.session_id())
             .map(|old| old.candidates.clone())
@@ -177,6 +213,7 @@ fn report(row: &HostedObservation, result: Recovery) -> Recovery {
                 row: row.clone(),
                 result: result.clone(),
                 candidates,
+                wake_queue,
             },
         );
     });
@@ -309,7 +346,7 @@ pub(crate) async fn recover(
     transition: Option<&SessionTransitionLease<'_>>,
 ) -> Recovery {
     remember_candidate(candidate);
-    recover_report(shared, pool, &candidate.0, transition).await
+    recover_report(shared, pool, &candidate.0, transition, false).await
 }
 pub(crate) async fn recover_retired(
     shared: &Arc<SharedData>,
@@ -337,7 +374,7 @@ pub(crate) async fn recover_retired(
     {
         return Recovery::Retired;
     }
-    recover_report(shared, pool, row, transition).await
+    recover_report(shared, pool, row, transition, false).await
 }
 fn transition<'a>(
     shared: &'a SharedData,
@@ -361,8 +398,9 @@ async fn recover_report(
     pool: &PgPool,
     row: &HostedObservation,
     transition: Option<&SessionTransitionLease<'_>>,
+    marker_missing: bool,
 ) -> Recovery {
-    let result = recover_inner(shared, pool, row, transition).await;
+    let result = recover_inner(shared, pool, row, transition, marker_missing).await;
     let reported_retired = cache(|entries| {
         entries
             .get(&row.session_id())
@@ -386,6 +424,7 @@ async fn recover_inner(
     pool: &PgPool,
     row: &HostedObservation,
     borrowed: Option<&SessionTransitionLease<'_>>,
+    marker_missing: bool,
 ) -> Recovery {
     let held = Recovery::Held;
     if !shared
@@ -445,7 +484,11 @@ async fn recover_inner(
     let proof_target = target.clone();
     let proof_record = record.clone();
     let first = match tokio::task::spawn_blocking(move || {
-        proof_target.replaced_root_end(&proof_record, None)
+        if marker_missing {
+            proof_target.recovery_end(&proof_record, None, true)
+        } else {
+            proof_target.replaced_root_end(&proof_record, None)
+        }
     })
     .await
     {
@@ -469,7 +512,11 @@ async fn recover_inner(
         let proof_target = target.clone();
         let proof_record = record.clone();
         tokio::task::spawn_blocking(move || {
-            proof_target.replaced_root_end(&proof_record, Some(&first))
+            if marker_missing {
+                proof_target.recovery_end(&proof_record, Some(&first), true)
+            } else {
+                proof_target.replaced_root_end(&proof_record, Some(&first))
+            }
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -537,3 +584,7 @@ async fn cleanup(
     };
     report(row, result)
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "missing_marker_tests.rs"]
+mod missing_marker_tests;

@@ -121,7 +121,7 @@ impl<B: BindingEvents> Sources<B> {
                 {
                     None
                 }
-                Err(failed) => return Err(failed.halt()),
+                Err(failed) => return Err(failed.halt_at(&cursor.source)),
             };
             let mut reader = Reader::new(cursor.source.clone(), capture);
             reader.captured_any = captured_any
@@ -217,9 +217,11 @@ impl<B: BindingEvents> Sources<B> {
                 if missing_reader(&self.readers[index])
                     && !self.park_missing(writer, index, deriver.has_unsealed())
                 {
-                    return Err(halt(
-                        "source reopen: missing source still has a capture obligation",
-                    ));
+                    return Err(WriterAlarm::HaltedMissingSource {
+                        source: self.readers[index].source.clone(),
+                        detail: "source reopen: missing source still has a capture obligation"
+                            .into(),
+                    });
                 }
             }
         }
@@ -424,7 +426,7 @@ impl<B: BindingEvents> Sources<B> {
                 .store()
                 .cursor(&reader.source)
                 .ok_or_else(|| halt("dormant cursor missing"))?;
-            reader.capture = Some(reopen(cursor).map_err(Reopen::halt)?);
+            reader.capture = Some(reopen(cursor).map_err(|failed| failed.halt_at(&reader.source))?);
             reader.dormant = None;
             reader.idle = None;
         }
@@ -485,6 +487,19 @@ impl<B: BindingEvents> Sources<B> {
             .store()
             .cursor(&reader.source)
             .ok_or_else(|| halt("cleanup cursor missing"))?;
+        let missing = |detail: &str| {
+            if matches!(
+                Fingerprint::path(&reader.source),
+                Err((SourceAnomalyKind::Missing, _))
+            ) {
+                WriterAlarm::HaltedMissingSource {
+                    source: reader.source.clone(),
+                    detail: detail.into(),
+                }
+            } else {
+                halt(detail)
+            }
+        };
         let next = self.rotation.successors.get(&source_key(&reader.source));
         let observation = reader
             .observation
@@ -497,10 +512,12 @@ impl<B: BindingEvents> Sources<B> {
                 Err((SourceAnomalyKind::Missing, _))
             )
         {
-            return Err(halt("missing source has no fresh drained cleanup evidence"));
+            return Err(missing(
+                "missing source has no fresh drained cleanup evidence",
+            ));
         }
-        let observation =
-            observation.ok_or_else(|| halt("missing source has no fresh cleanup observation"))?;
+        let observation = observation
+            .ok_or_else(|| missing("missing source has no fresh cleanup observation"))?;
         if let Some(capture) = &reader.capture {
             let fp = capture
                 .verify_eof(cursor.captured_through, &cursor.prefix_hash)

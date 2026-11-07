@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use super::WriterAlarm;
 use super::binding::{BindingEvent, BindingRecord, BindingTarget};
 use super::rotation::{binding_baseline, bound_source};
-use crate::services::tui_o::shadow::capture::{SourceCapture, same_file};
-use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
+use crate::services::tui_o::shadow::capture::{Fingerprint, SourceCapture, same_file};
+use crate::services::tui_o::shadow::{ShadowProvider, SourceAnomalyKind, SourceId};
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::spool::{Cursor, source_key};
 
@@ -118,6 +118,25 @@ impl Reopen {
             Self::Unread(error) => halted(format!("source reopen: {error}")),
         }
     }
+
+    /// Names a reopen that found `source`'s path gone as Missing, so its host can wait for it.
+    pub(super) fn halt_at(self, source: &SourceId) -> WriterAlarm {
+        match self {
+            Self::Unread(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && matches!(
+                        Fingerprint::path(source),
+                        Err((SourceAnomalyKind::Missing, _))
+                    ) =>
+            {
+                WriterAlarm::HaltedMissingSource {
+                    source: source.clone(),
+                    detail: format!("source reopen: {error}"),
+                }
+            }
+            failed => failed.halt(),
+        }
+    }
 }
 
 pub(super) fn reopen(cursor: &Cursor) -> Result<SourceCapture, Reopen> {
@@ -218,7 +237,7 @@ impl Names {
     ) -> Result<SourceId, WriterAlarm> {
         match self.stored(store, source).map_err(halted)? {
             Some((cursor, true)) => {
-                reopen(cursor).map_err(Reopen::halt)?;
+                reopen(cursor).map_err(|failed| failed.halt_at(&cursor.source))?;
                 self.confirm(&cursor.source, source);
                 Ok(cursor.source.clone())
             }
@@ -330,7 +349,7 @@ impl Names {
             .and_then(bound_source);
         let stored = source.map(|source| self.stored(store, source)).transpose();
         if let Some((cursor, true)) = stored.map_err(halted)?.flatten() {
-            reopen(cursor).map_err(Reopen::halt)?;
+            reopen(cursor).map_err(|failed| failed.halt_at(&cursor.source))?;
         }
         Ok(Some(seq))
     }
