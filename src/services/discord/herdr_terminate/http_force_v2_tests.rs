@@ -59,3 +59,57 @@ fn a_forced_herdr_cancel_purges_the_owner_queue_pg() {
         node.finish().await;
     });
 }
+
+/// A purge the owner refuses keeps its input, and the reply's depth is the count the owner kept,
+/// not the empty legacy snapshot the receipt was measured against.
+#[test]
+fn a_refused_herdr_purge_reports_the_depth_the_owner_kept_pg() {
+    let Some((rig, runtime)) = rig_v2("a_refused_herdr_purge_reports_the_depth_the_owner_kept_pg")
+    else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::bind(&rig, herdr::HostedState::Bound, Some(DISPATCH)).await;
+        node.start(51, "turn-a", Some(DISPATCH)).await;
+        let handle = node.shared.mailbox(channel());
+        // The owner holds another token's queue file, so the cancel names a file that is not its own.
+        let owned = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+            &ProviderKind::Claude,
+            "owner-token",
+            None,
+        );
+        let (path, namespace) = v2_queue(&owned, channel()).unwrap();
+        handle.v2_adopt(path, namespace).await.unwrap();
+        for id in [62u64, 63] {
+            let queued: PendingQueueItem = serde_json::from_value(json!({"author_id":7,
+                "message_id":id,"channel_id":CHANNEL,"source_message_ids":[id],
+                "queued_generation":1,"text":format!("queued {id}")}))
+            .unwrap();
+            let enqueued = handle.v2_request(move |slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                owner
+                    .enqueue_fixture(&queued)
+                    .map_err(|error| format!("{error:?}"))
+            });
+            assert_eq!(enqueued.await, Ok(true));
+        }
+
+        let (status, reply) = node.cancel().await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{reply}");
+        let context = &reply["context"];
+        assert_eq!(
+            (&context["queued_remaining"], &context["queue_purged"]),
+            (&json!(2), &json!(0)),
+            "{reply}"
+        );
+        let kept =
+            handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.snapshot.items.len()));
+        assert_eq!(
+            kept.await,
+            Ok(2),
+            "the refused purge kept the owner's input"
+        );
+        node.finish().await;
+    });
+}
