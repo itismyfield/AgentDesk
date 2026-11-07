@@ -41,7 +41,7 @@ filter = 'test(=services::tui_o::writer::tests::actor::host_start::managed::rest
 success-output = "immediate"
 
 [scripts.wrapper.missing-marker-herdr]
-command = { command-line = "bash tests/fixtures/missing_marker_nextest.sh", relative-to = "workspace-root" }
+command = { command-line = "tests/fixtures/missing_marker_nextest.sh", relative-to = "workspace-root" }
 
 [[profile.ci.scripts]]
 filter = 'test(missing_marker_tests::)'
