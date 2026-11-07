@@ -162,7 +162,7 @@ fn write_answer(transcript: &Path, n: &str) {
 }
 
 /// An idle turn read on a scoped thread under a token the test holds. A turn the test did not
-/// join is cancelled and awaited for a bounded time, so the scope's own join never hangs.
+/// join is cancelled and awaited for a bounded time; one that still runs ends the test process.
 struct ScopedTurn<'scope, T> {
     reader: Option<std::thread::ScopedJoinHandle<'scope, T>>,
     cancel: Arc<CancelToken>,
@@ -178,14 +178,15 @@ impl<'scope, T: Send + 'scope> ScopedTurn<'scope, T> {
         turn: impl FnOnce(Arc<CancelToken>) -> T + Send + 'scope,
     ) -> Self {
         let (cancel, (done, ended)) = (fresh(), std::sync::mpsc::channel());
+        // Counted before the reader can send this turn's Enter.
+        let renderer = rig.renderer.clone();
+        let enter = enters(&renderer) + 1;
         let token = cancel.clone();
         let reader = scope.spawn(move || {
             let result = turn(token);
             let _ = done.send(());
             result
         });
-        let renderer = rig.renderer.clone();
-        let enter = enters(&renderer) + 1;
         Self {
             reader: Some(reader),
             cancel,
@@ -201,23 +202,28 @@ impl<'scope, T: Send + 'scope> ScopedTurn<'scope, T> {
             .is_some_and(|reader| reader.is_finished())
     }
 
-    /// Answers `n` once the pane recorded this turn's Enter and the user row of its last paste.
-    fn answer(&self, n: &str) {
+    fn recorded(&self, transcript: &Path) -> bool {
+        enters(&self.renderer) >= self.enter && user_row_landed(&self.renderer, transcript)
+    }
+
+    /// Answers `n` once the pane recorded this turn's Enter and the user row of its last paste. A
+    /// turn that ended first gets no answer: its panic, or this one, fails the test.
+    fn answer(&mut self, n: &str) {
         use std::sync::mpsc::RecvTimeoutError;
         let transcript = self.renderer.join("transcript");
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        while !(enters(&self.renderer) >= self.enter
-            && user_row_landed(&self.renderer, &transcript))
-        {
+        while !self.recorded(&transcript) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "Enter {}'s user row never came",
                 self.enter
             );
-            // A turn that already ended is joined next; its result says why.
             let waited = self.ended.recv_timeout(Duration::from_millis(20));
-            if waited != Err(RecvTimeoutError::Timeout) {
-                break;
+            if waited != Err(RecvTimeoutError::Timeout) && !self.recorded(&transcript) {
+                if let Some(Err(panic)) = self.reader.take().map(|reader| reader.join()) {
+                    std::panic::resume_unwind(panic);
+                }
+                panic!("the turn ended before Enter {}'s user row", self.enter);
             }
         }
         write_answer(&transcript, n);
@@ -241,7 +247,16 @@ impl<T> Drop for ScopedTurn<'_, T> {
             self.cancel
                 .cancelled
                 .store(true, std::sync::atomic::Ordering::Release);
-            let _ = self.ended.recv_timeout(Duration::from_secs(20));
+            let waited = self.ended.recv_timeout(Duration::from_secs(20));
+            if waited == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                // A scoped reader can be neither detached nor killed, and the scope would join it
+                // forever; ending the process fails the test instead. Output capture is bypassed.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "an idle turn's reader ignored its cancel for 20s; ending the test process"
+                );
+                std::process::exit(101);
+            }
         }
     }
 }
@@ -402,7 +417,7 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
     save_inflight_state(&row).unwrap();
     let at = (session.as_str(), elsewhere.path());
     std::thread::scope(|scope| {
-        let first = ScopedTurn::spawn(scope, &rig, |cancel| {
+        let mut first = ScopedTurn::spawn(scope, &rig, |cancel| {
             idle_turn(&rig, at, cancel, first, |_| None)
         });
         struct CloseOnUnwind(std::path::PathBuf);
@@ -548,7 +563,7 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
                 .recv_timeout(Duration::from_secs(20))
                 .expect("B's one idle start after A ends");
             std::thread::scope(|scope| {
-                let next = ScopedTurn::spawn(scope, &rig, |cancel| {
+                let mut next = ScopedTurn::spawn(scope, &rig, |cancel| {
                     idle_turn(&rig, at, cancel, next, |_| None)
                 });
                 let _close = CloseOnUnwind(rig.transcript());
@@ -1030,7 +1045,7 @@ fn busy_hold_case(
                 .expect("B starts once at A's boundary");
             let at = (session.as_str(), elsewhere.path());
             std::thread::scope(|scope| {
-                let started = ScopedTurn::spawn(scope, &rig, |cancel| {
+                let mut started = ScopedTurn::spawn(scope, &rig, |cancel| {
                     idle_turn(&rig, at, cancel, front, |_| None)
                 });
                 let settled = settled_events.recv_timeout(Duration::from_secs(20));
