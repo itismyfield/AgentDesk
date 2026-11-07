@@ -23,6 +23,7 @@ struct Answers {
     thread: Option<std::thread::JoinHandle<()>>,
     reads: Arc<std::sync::Mutex<Reads>>,
     done: Option<Sender<()>>,
+    exited: std::sync::mpsc::Receiver<()>,
 }
 
 #[derive(Default)]
@@ -32,12 +33,16 @@ struct Reads {
     finished: bool,
 }
 
-/// Cancels every read still waiting on the answering thread once that thread is gone.
-struct CancelReadsOnExit(Arc<std::sync::Mutex<Reads>>);
+/// Cancels every read still waiting on the answering thread once that thread is gone; dropping
+/// its sender tells the joining test that the thread has ended.
+struct CancelReadsOnExit {
+    reads: Arc<std::sync::Mutex<Reads>>,
+    _exit: Sender<()>,
+}
 
 impl Drop for CancelReadsOnExit {
     fn drop(&mut self) {
-        let mut reads = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
         reads.ended = true;
         if !reads.finished {
             for token in &reads.tokens {
@@ -73,6 +78,9 @@ impl Answers {
     fn join(&mut self) {
         self.reads.lock().unwrap().finished = true;
         self.done.take();
+        let exited = self.exited.recv_timeout(Duration::from_secs(20));
+        let stuck = exited == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+        assert!(!stuck, "the answering thread never ended");
         if let Some(Err(panic)) = self.thread.take().map(|t| t.join()) {
             std::panic::resume_unwind(panic);
         }
@@ -85,7 +93,11 @@ fn answers(rig: &Rig) -> Answers {
     let (renderer, transcript) = (rig.renderer.clone(), rig.transcript());
     let reads = Arc::new(std::sync::Mutex::new(Reads::default()));
     let (done, finished) = std::sync::mpsc::channel::<()>();
-    let release = CancelReadsOnExit(reads.clone());
+    let (exit, exited) = std::sync::mpsc::channel();
+    let release = CancelReadsOnExit {
+        reads: reads.clone(),
+        _exit: exit,
+    };
     let thread = std::thread::spawn(move || {
         let _release = release;
         // False once the test has ended; its own assertions then say why.
@@ -101,29 +113,14 @@ fn answers(rig: &Rig) -> Answers {
             true
         };
         for n in 1..=2 {
-            let entered = || events(&renderer).iter().filter(|e| *e == "Enter").count() >= n;
-            if !until(&format!("Enter {n}"), &entered) {
+            if !until(&format!("Enter {n}"), &|| enters(&renderer) >= n) {
                 return;
             }
-            // Enter is recorded before the pane writes its user row; an answer ahead of that row
-            // leaves the transcript ending Busy, so the turn's read never ends.
-            let body = fs::read_to_string(renderer.join("body")).unwrap();
-            let recorded = || {
-                let rows = fs::read_to_string(&transcript).unwrap();
-                rows.lines().any(|line| {
-                    serde_json::from_str::<serde_json::Value>(line)
-                        .is_ok_and(|row| row["type"] == "user" && row["message"]["content"] == body)
-                })
-            };
+            let recorded = || user_row_landed(&renderer, &transcript);
             if !until(&format!("Enter {n}'s user row"), &recorded) {
                 return;
             }
-            let mut file = fs::OpenOptions::new()
-                .append(true)
-                .open(&transcript)
-                .unwrap();
-            let answer = ASSISTANT.replace("{n}", &n.to_string());
-            writeln!(file, "{answer}\n{}", IDLE.trim_end()).unwrap();
+            write_answer(&transcript, &n.to_string());
         }
         let read = finished.recv_timeout(Duration::from_secs(60));
         assert!(
@@ -135,6 +132,117 @@ fn answers(rig: &Rig) -> Answers {
         thread: Some(thread),
         reads,
         done: Some(done),
+        exited,
+    }
+}
+
+fn enters(renderer: &Path) -> usize {
+    events(renderer).iter().filter(|e| *e == "Enter").count()
+}
+
+/// Whether the pane wrote the user row of its last paste. Enter is recorded before that row; an
+/// answer ahead of it leaves the transcript ending Busy, so the turn's read never ends.
+fn user_row_landed(renderer: &Path, transcript: &Path) -> bool {
+    let body = fs::read_to_string(renderer.join("body")).unwrap();
+    let rows = fs::read_to_string(transcript).unwrap();
+    rows.lines().any(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .is_ok_and(|row| row["type"] == "user" && row["message"]["content"] == body)
+    })
+}
+
+/// The AI turn's answer `n`, then the turn's end.
+fn write_answer(transcript: &Path, n: &str) {
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(transcript)
+        .unwrap();
+    let answer = ASSISTANT.replace("{n}", n);
+    writeln!(file, "{answer}\n{}", IDLE.trim_end()).unwrap();
+}
+
+/// An idle turn read on a scoped thread under a token the test holds. A turn the test did not
+/// join is cancelled and awaited for a bounded time, so the scope's own join never hangs.
+struct ScopedTurn<'scope, T> {
+    reader: Option<std::thread::ScopedJoinHandle<'scope, T>>,
+    cancel: Arc<CancelToken>,
+    ended: std::sync::mpsc::Receiver<()>,
+    renderer: std::path::PathBuf,
+    enter: usize,
+}
+
+impl<'scope, T: Send + 'scope> ScopedTurn<'scope, T> {
+    fn spawn<'env>(
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        rig: &Rig,
+        turn: impl FnOnce(Arc<CancelToken>) -> T + Send + 'scope,
+    ) -> Self {
+        let (cancel, (done, ended)) = (fresh(), std::sync::mpsc::channel());
+        let token = cancel.clone();
+        let reader = scope.spawn(move || {
+            let result = turn(token);
+            let _ = done.send(());
+            result
+        });
+        let renderer = rig.renderer.clone();
+        let enter = enters(&renderer) + 1;
+        Self {
+            reader: Some(reader),
+            cancel,
+            ended,
+            renderer,
+            enter,
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.reader
+            .as_ref()
+            .is_some_and(|reader| reader.is_finished())
+    }
+
+    /// Answers `n` once the pane recorded this turn's Enter and the user row of its last paste.
+    fn answer(&self, n: &str) {
+        use std::sync::mpsc::RecvTimeoutError;
+        let transcript = self.renderer.join("transcript");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !(enters(&self.renderer) >= self.enter
+            && user_row_landed(&self.renderer, &transcript))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Enter {}'s user row never came",
+                self.enter
+            );
+            // A turn that already ended is joined next; its result says why.
+            let waited = self.ended.recv_timeout(Duration::from_millis(20));
+            if waited != Err(RecvTimeoutError::Timeout) {
+                break;
+            }
+        }
+        write_answer(&transcript, n);
+    }
+
+    fn join(mut self) -> T {
+        let waited = self.ended.recv_timeout(Duration::from_secs(60));
+        let timed_out = waited == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+        assert!(!timed_out, "the answered turn's read never ended");
+        match self.reader.take().map(|reader| reader.join()) {
+            Some(Ok(result)) => result,
+            Some(Err(panic)) => std::panic::resume_unwind(panic),
+            None => unreachable!("a turn is joined once"),
+        }
+    }
+}
+
+impl<T> Drop for ScopedTurn<'_, T> {
+    fn drop(&mut self) {
+        if self.reader.is_some() {
+            self.cancel
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+            let _ = self.ended.recv_timeout(Duration::from_secs(20));
+        }
     }
 }
 
@@ -292,15 +400,10 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
     );
     row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
     save_inflight_state(&row).unwrap();
+    let at = (session.as_str(), elsewhere.path());
     std::thread::scope(|scope| {
-        let first = scope.spawn(|| {
-            idle_turn(
-                &rig,
-                (session.as_str(), elsewhere.path()),
-                fresh(),
-                first,
-                |_| None,
-            )
+        let first = ScopedTurn::spawn(scope, &rig, |cancel| {
+            idle_turn(&rig, at, cancel, first, |_| None)
         });
         struct CloseOnUnwind(std::path::PathBuf);
         impl Drop for CloseOnUnwind {
@@ -403,14 +506,8 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
         let busy_settled = on_settled.recv_timeout(Duration::from_secs(20));
         let before_end = rig.events();
         let kept = rig.snapshot();
-        writeln!(
-            file,
-            "{}\n{}",
-            ASSISTANT.replace("{n}", "A"),
-            IDLE.trim_end()
-        )
-        .unwrap();
-        let (result, _) = first.join().unwrap();
+        first.answer("A");
+        let (result, _) = first.join();
         assert_eq!(result, Ok(()), "A's observer completes once");
         println!(
             "BUSY_ARRIVAL merge={merge} B_settled={busy_settled:?} handoffs={:?}",
@@ -451,25 +548,13 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
                 .recv_timeout(Duration::from_secs(20))
                 .expect("B's one idle start after A ends");
             std::thread::scope(|scope| {
-                let next = scope.spawn(|| {
-                    idle_turn(
-                        &rig,
-                        (session.as_str(), elsewhere.path()),
-                        fresh(),
-                        next,
-                        |_| None,
-                    )
+                let next = ScopedTurn::spawn(scope, &rig, |cancel| {
+                    idle_turn(&rig, at, cancel, next, |_| None)
                 });
                 let _close = CloseOnUnwind(rig.transcript());
                 let settled = on_settled.recv_timeout(Duration::from_secs(20));
-                writeln!(
-                    file,
-                    "{}\n{}",
-                    ASSISTANT.replace("{n}", "B"),
-                    IDLE.trim_end()
-                )
-                .unwrap();
-                assert_eq!(next.join().unwrap().0, Ok(()));
+                next.answer("B");
+                assert_eq!(next.join().0, Ok(()));
                 assert!(settled.is_ok(), "B's idle submit settled once");
             });
             rig.runtime.block_on(rig.mailbox.finish_turn(
@@ -943,25 +1028,14 @@ fn busy_hold_case(
             let front = idle_inbox
                 .recv_timeout(Duration::from_secs(20))
                 .expect("B starts once at A's boundary");
+            let at = (session.as_str(), elsewhere.path());
             std::thread::scope(|scope| {
-                let started = scope.spawn(|| {
-                    idle_turn(
-                        &rig,
-                        (session.as_str(), elsewhere.path()),
-                        fresh(),
-                        front,
-                        |_| None,
-                    )
+                let started = ScopedTurn::spawn(scope, &rig, |cancel| {
+                    idle_turn(&rig, at, cancel, front, |_| None)
                 });
                 let settled = settled_events.recv_timeout(Duration::from_secs(20));
-                writeln!(
-                    transcript,
-                    "{}\n{}",
-                    ASSISTANT.replace("{n}", "B"),
-                    IDLE.trim_end()
-                )
-                .unwrap();
-                assert_eq!(started.join().unwrap().0, Ok(()));
+                started.answer("B");
+                assert_eq!(started.join().0, Ok(()));
                 assert!(settled.is_ok(), "B's boundary input settled");
             });
             assert_eq!(rig.events().iter().filter(|e| *e == "paste").count(), 1);
@@ -2740,7 +2814,8 @@ pub(crate) fn root_recovery_launch(
             return Err(Err("recovery launch observer closed".into()));
         }
         return Err(tokio::task::block_in_place(|| {
-            result.recv().unwrap_or_else(|error| Err(error.to_string()))
+            let reply = result.recv_timeout(Duration::from_secs(60));
+            reply.unwrap_or_else(|error| Err(error.to_string()))
         }));
     }
     let launch = ROOT_RECOVERY_LAUNCH.with(|slot| {
