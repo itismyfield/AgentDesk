@@ -535,9 +535,8 @@ async fn consumed_busy_input_with_zero_debt_closes_on_first_idle_pg() {
     restart_case(7807303, 0, false, false, false).await;
 }
 
-/// The carried row the old daemon left names the session the pane moved off and has no pin; the
-/// first idle pass closes it with one notice, and the iMessage start and Discord input behind it
-/// each start once.
+/// A pinless carried row naming the session the pane left closes on the first idle pass with one
+/// notice; the iMessage start and Discord input behind it each start once.
 #[tokio::test(flavor = "current_thread")]
 async fn superseded_session_carried_input_without_pin_frees_the_queue_with_one_notice_pg() {
     if !creator_child(concat!(
