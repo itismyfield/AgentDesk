@@ -47,11 +47,6 @@ pub(crate) fn transcript_turns(channel: u64) -> bool {
     })
 }
 
-/// Test mutant switch of the carried-turn close (`ADK_CARRIED_CLOSE_MUTANT`); constant false outside tests.
-pub(crate) fn carried_close_mutant(name: &str) -> bool {
-    cfg!(test) && std::env::var("ADK_CARRIED_CLOSE_MUTANT").is_ok_and(|value| value == name)
-}
-
 /// The channels confirmed for turn mode in this process.
 pub(crate) fn confirmed_channels() -> Vec<u64> {
     CONFIRMED.get().map_or_else(Vec::new, |channels| {

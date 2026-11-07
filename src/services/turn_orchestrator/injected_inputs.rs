@@ -373,9 +373,7 @@ pub(super) fn settle(
             let (provider, now) = (&persistence.provider, std::time::Instant::now());
             disposition::note_terminal(provider, channel_id, ticket.message, outcome, now);
             // An observed paste left its receipt in the transcript; only an unconfirmed one may not.
-            let unrecorded = outcome == InjectionOutcome::Unconfirmed
-                || crate::services::tui_o::turn_mode::carried_close_mutant("observed_time");
-            if unrecorded {
+            if outcome == InjectionOutcome::Unconfirmed {
                 disposition::note_unconfirmed_delivery(provider, channel_id, now);
             }
             release(state, &ticket);

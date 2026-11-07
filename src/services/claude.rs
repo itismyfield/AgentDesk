@@ -1598,12 +1598,23 @@ pub(crate) fn resolve_live_claude_tui_session(
     let (mut resolution, substitution) =
         tui_session_launch::prepared::resolve(working_dir, session_id, claude_home)?;
     let live = live()?;
+    // The pane answers in the session its hooks last reported; a cached id it moved off (/clear)
+    // still has a transcript on disk, so resuming it would tail a file the turn never reaches.
+    let adopted =
+        crate::services::tui_prompt_dedupe::hook_adopted_claude_session_id(tmux_session_name);
+    let superseded = adopted
+        .as_deref()
+        .is_some_and(|id| id != resolution.session_id);
     if session_exists
         && live
-        && !resolution.resume
+        && (!resolution.resume || superseded)
         && let Some(recovered) = recover_claude_tui_session_resolution_from_runtime_binding(
             tmux_session_name,
-            session_id,
+            if superseded {
+                adopted.as_deref()
+            } else {
+                session_id
+            },
         )
     {
         tracing::warn!(
@@ -3188,6 +3199,70 @@ mod local_tmux_lifecycle_tests {
 
         assert!(recovered.is_none());
         assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux_session_name));
+    }
+
+    #[test]
+    fn claude_tui_live_pane_follows_its_hook_adopted_session_over_a_stale_cached_one() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        // Rotation tests clear the adopted-session map under their own lock; hold it so they wait.
+        let _rotations =
+            crate::services::tui_prompt_dedupe::lock_claude_session_rotations_for_tests();
+        let (cwd, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let tmux_session_name = format!("AgentDesk-claude-adopted-{}", uuid::Uuid::new_v4());
+        // The cached provider session still has a transcript on disk, so the selector resumes it.
+        let cached = uuid::Uuid::new_v4().to_string();
+        let stale = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &cached,
+            Some(home.path()),
+        )
+        .unwrap();
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, "{}\n").unwrap();
+        // The pane's hooks moved it to a continuation session with its own live transcript.
+        let adopted = uuid::Uuid::new_v4().to_string();
+        let live_transcript = tempfile::NamedTempFile::new().unwrap();
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            &tmux_session_name,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                output_path: live_transcript.path().display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(adopted.clone()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        crate::services::tui_prompt_dedupe::record_hook_adopted_claude_session_id(
+            &tmux_session_name,
+            &adopted,
+        );
+
+        let found = resolve_live_claude_tui_session(
+            &tmux_session_name,
+            (cwd.path(), Some(&cached), Some(home.path())),
+            (true, || Ok(true)),
+        )
+        .expect("resolve live pane");
+
+        assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux_session_name));
+        assert!(
+            crate::services::tui_prompt_dedupe::forget_hook_adopted_claude_session_id(
+                &tmux_session_name
+            )
+        );
+        assert_eq!(
+            (
+                found.resolution.session_id.as_str(),
+                found.resolution.transcript_path.as_path(),
+                found.resolution.resume,
+            ),
+            (adopted.as_str(), live_transcript.path(), true),
+            "a warm follow-up pastes into the pane, so it must tail the session the pane runs now"
+        );
     }
 
     // ------------------------------------------------------------------

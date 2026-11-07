@@ -44,9 +44,7 @@ pub(super) fn closed_boundary(
         Outcome::Tail(reader) => &reader.facts,
         _ => return Err(NoBoundary::because("no_facts")),
     };
-    if facts.pending_receipt()
-        && !crate::services::tui_o::turn_mode::carried_close_mutant("receipt")
-    {
+    if facts.pending_receipt() {
         let owed_inputs = facts.owed_inputs();
         let reason = "pending_receipt";
         return Err(NoBoundary {

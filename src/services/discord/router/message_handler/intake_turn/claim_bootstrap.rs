@@ -28,16 +28,6 @@ pub(super) async fn bootstrap_claimed_turn(
             .await;
     }
 
-    #[cfg(test)]
-    let started = started
-        ^ crate::services::discord::session_idle_cleanup::recap_cleanup_mutant(
-            "invert_discord_started",
-        );
-    #[cfg(test)]
-    if crate::services::discord::session_idle_cleanup::recap_cleanup_mutant("skip_discord_cleanup")
-    {
-        return;
-    }
     if started && let Some(pool) = shared.pg_pool.as_ref().cloned() {
         crate::services::discord::session_idle_cleanup::spawn_clear_captured_idle_recap_for_channel(
             http.clone(), pool, channel_id.get(),
