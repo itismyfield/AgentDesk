@@ -17,16 +17,88 @@ fn fresh() -> Arc<CancelToken> {
     Arc::new(CancelToken::new())
 }
 
+/// The thread answering each Enter. A turn read only ends on its answer, so the reads use its
+/// tokens: when it ends before the test is done, it cancels them and the test raises its panic.
+struct Answers {
+    thread: Option<std::thread::JoinHandle<()>>,
+    reads: Arc<std::sync::Mutex<Reads>>,
+    done: Option<Sender<()>>,
+}
+
+#[derive(Default)]
+struct Reads {
+    tokens: Vec<Arc<CancelToken>>,
+    ended: bool,
+    finished: bool,
+}
+
+/// Cancels every read still waiting on the answering thread once that thread is gone.
+struct CancelReadsOnExit(Arc<std::sync::Mutex<Reads>>);
+
+impl Drop for CancelReadsOnExit {
+    fn drop(&mut self) {
+        let mut reads = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        reads.ended = true;
+        if !reads.finished {
+            for token in &reads.tokens {
+                token
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+}
+
+impl Answers {
+    /// A turn's token, cancelled at once if the answering thread has already ended.
+    fn token(&self) -> Arc<CancelToken> {
+        let token = fresh();
+        let mut reads = self.reads.lock().unwrap();
+        if reads.ended && !reads.finished {
+            token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        reads.tokens.push(token.clone());
+        token
+    }
+
+    /// Raises the answering thread's panic here once that thread has ended.
+    fn check(&mut self) {
+        if self.thread.as_ref().is_some_and(|t| t.is_finished()) {
+            self.join();
+        }
+    }
+
+    fn join(&mut self) {
+        self.reads.lock().unwrap().finished = true;
+        self.done.take();
+        if let Some(Err(panic)) = self.thread.take().map(|t| t.join()) {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
 /// Each Enter the pane records gets its AI turn: an answer, then the turn's end.
-fn answers(rig: &Rig) -> std::thread::JoinHandle<()> {
+fn answers(rig: &Rig) -> Answers {
+    use std::sync::mpsc::RecvTimeoutError;
     let (renderer, transcript) = (rig.renderer.clone(), rig.transcript());
-    std::thread::spawn(move || {
+    let reads = Arc::new(std::sync::Mutex::new(Reads::default()));
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    let release = CancelReadsOnExit(reads.clone());
+    let thread = std::thread::spawn(move || {
+        let _release = release;
         for n in 1..=2 {
             let entered = || events(&renderer).iter().filter(|e| *e == "Enter").count() >= n;
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
             while !entered() {
                 assert!(std::time::Instant::now() < deadline, "Enter {n} never came");
-                std::thread::sleep(Duration::from_millis(20));
+                // A test that ended before this Enter says why in its own assertions.
+                if finished.recv_timeout(Duration::from_millis(20))
+                    != Err(RecvTimeoutError::Timeout)
+                {
+                    return;
+                }
             }
             let mut file = fs::OpenOptions::new()
                 .append(true)
@@ -35,7 +107,17 @@ fn answers(rig: &Rig) -> std::thread::JoinHandle<()> {
             let answer = ASSISTANT.replace("{n}", &n.to_string());
             writeln!(file, "{answer}\n{}", IDLE.trim_end()).unwrap();
         }
-    })
+        let read = finished.recv_timeout(Duration::from_secs(60));
+        assert!(
+            read != Err(RecvTimeoutError::Timeout),
+            "the last answer's turn read never ended"
+        );
+    });
+    Answers {
+        thread: Some(thread),
+        reads,
+        done: Some(done),
+    }
 }
 
 /// The pane's runtime binding naming `session`, as the relay rehydrates it after each turn ends.
@@ -1093,7 +1175,7 @@ fn an_idle_pane_takes_each_queued_front_once_through_its_own_observer() {
         .open(rig.transcript())
         .unwrap();
     writeln!(file, "{}", IDLE.trim_end()).unwrap();
-    let answering = answers(&rig);
+    let mut answering = answers(&rig);
     {
         let _entered = rig.runtime.enter();
         crate::services::discord::queue_io::input_owner::drive::wake(drive);
@@ -1104,7 +1186,9 @@ fn an_idle_pane_takes_each_queued_front_once_through_its_own_observer() {
         handed.push(front.1.text.clone());
         rehydrate(&rig, &session);
         let at = (session.as_str(), elsewhere.path());
-        let (result, sent) = idle_turn(&rig, at, fresh(), (front, settled), |_| None);
+        let cancel = answering.token();
+        let (result, sent) = idle_turn(&rig, at, cancel, (front, settled), |_| None);
+        answering.check();
         assert_eq!(result, Ok(()), "{handed:?}");
         said.extend(sent.into_iter().filter_map(|m| match m {
             StreamMessage::Text { content } => Some(content),
@@ -1114,7 +1198,7 @@ fn an_idle_pane_takes_each_queued_front_once_through_its_own_observer() {
             break;
         }
     }
-    answering.join().unwrap();
+    answering.join();
     assert_eq!(handed, [PROMPT, "second question"], "in order, each once");
     let events = rig.events();
     let count = |key: &str| events.iter().filter(|e| *e == key).count();
@@ -2018,6 +2102,7 @@ fn relaunch(
     rig: &Rig,
     (session, dir): (&str, &Path),
     sender: &Sender<StreamMessage>,
+    cancel: Arc<CancelToken>,
 ) -> ClaudeLegacyProbe {
     let (name, channel, transcript) = (rig.name.clone(), rig.channel, rig.transcript());
     let (real, socket) = (rig.f.real.clone(), rig.f.socket.clone());
@@ -2053,7 +2138,6 @@ fn relaunch(
         let source = json!({"kind":"pre_source","expected_session_id":null,
             "expected_transcript":null,"binding_watermark":null});
         let observe = crate::services::claude_tui::hosting::owner_observer;
-        let cancel = Arc::new(CancelToken::new());
         let at = (name.as_str(), PROMPT, channel);
         let until_done = observe(at, (Some(&session), &dir), sender, cancel).ok_or("unobserved")?;
         let path = transcript.display().to_string();
@@ -2102,7 +2186,7 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
         .open(rig.transcript())
         .unwrap();
     writeln!(file, "{}", IDLE.trim_end()).unwrap();
-    let answering = answers(&rig);
+    let mut answering = answers(&rig);
     {
         let _entered = rig.runtime.enter();
         crate::services::discord::queue_io::input_owner::drive::wake(drive);
@@ -2112,9 +2196,12 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
         handed.push(front.1.text.clone());
         rehydrate(&rig, &session);
         let at = (session.as_str(), elsewhere.path());
-        let first = handed.len() == 1;
-        let driver = |sender: &Sender<StreamMessage>| first.then(|| relaunch(&rig, at, sender));
-        let (result, sent) = idle_turn(&rig, at, fresh(), (front, settled), driver);
+        let (first, observed) = (handed.len() == 1, answering.token());
+        let driver =
+            |sender: &Sender<StreamMessage>| first.then(|| relaunch(&rig, at, sender, observed));
+        let cancel = answering.token();
+        let (result, sent) = idle_turn(&rig, at, cancel, (front, settled), driver);
+        answering.check();
         assert_eq!(result, Ok(()), "{handed:?}");
         assert!(
             CLAUDE_LEGACY_PROBE.lock().unwrap().is_none(),
@@ -2128,7 +2215,7 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
             break;
         }
     }
-    answering.join().unwrap();
+    answering.join();
     assert_eq!(handed, [PROMPT, "second question"], "in order, each once");
     let events = rig.events();
     let count = |key: &str| events.iter().filter(|e| *e == key).count();
