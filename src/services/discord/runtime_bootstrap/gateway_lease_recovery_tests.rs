@@ -1248,9 +1248,47 @@ async fn gateway_observability_rejected_promotion_unlocks_before_record_pg() {
     .await
     .unwrap();
     let lease = fixture.lease("observed rejected promotion").await;
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    // Hold the wrapper's INSERT so the projection can be inspected before unlock completes.
+    let mut blocker_connection = sqlx::PgConnection::connect_with(&fixture.pool.connect_options())
+        .await
+        .unwrap();
+    let mut blocker = blocker_connection.begin().await.unwrap();
+    sqlx::query("LOCK TABLE explicit_unlocks IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
     STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::Release);
-    let result =
-        attempt_clean_standby_promotion(&fixture.runtimes[0], &ProviderKind::Claude, lease).await;
+    let (during, result) = {
+        let promotion =
+            attempt_clean_standby_promotion(&fixture.runtimes[0], &ProviderKind::Claude, lease);
+        tokio::pin!(promotion);
+        let blocked =
+            async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+                 AND wait_event_type='Lock' AND query LIKE 'SELECT pg_advisory_unlock%')")
+                .fetch_one(&fixture.pool).await.unwrap();
+                    if waiting {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            };
+        let (during, result) = tokio::select! {
+            result = &mut promotion => (None, Some(result)),
+            () = await_within(blocked, WAIT_CAP) => (
+                Some(fixture.runtimes[0].restart.gateway_lease_diagnostics.projection()), None),
+        };
+        blocker.rollback().await.unwrap();
+        let result = match result {
+            Some(result) => result,
+            None => await_within(&mut promotion, WAIT_CAP).await,
+        };
+        (during, result)
+    };
+    blocker_connection.close().await.unwrap();
     STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
     assert!(!result);
     let unlocks: i64 = sqlx::query_scalar("SELECT count(*) FROM explicit_unlocks")
@@ -1260,6 +1298,16 @@ async fn gateway_observability_rejected_promotion_unlocks_before_record_pg() {
     assert_eq!(
         unlocks, 1,
         "promotion must explicitly unlock before acquired_then_released"
+    );
+    let during =
+        serde_json::to_value(during.expect("unlock reached the blocked PG wrapper")).unwrap();
+    assert_ne!(
+        during["last_result"], "acquired_then_released",
+        "unlock pending must not advertise release completion"
+    );
+    assert!(
+        during["results"].get("acquired_then_released").is_none(),
+        "unlock pending must not increment release completions"
     );
     let view = serde_json::to_value(
         fixture.runtimes[0]

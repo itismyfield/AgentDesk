@@ -673,11 +673,6 @@ async fn gateway_observability_health_memory_only_pg() {
     lease.unlock().await.unwrap();
     let registry = health::HealthRegistry::new();
     registry.register_standby("claude".into(), shared).await;
-    // The lane supplies its throwaway statement log; CI also proves the closed-pool case.
-    let log = std::env::var("I7924_PG_LOG").ok();
-    let before = log
-        .as_ref()
-        .map(|path| std::fs::read_to_string(path).unwrap());
     for _ in 0..5 {
         let snapshot =
             serde_json::to_value(health::build_health_snapshot(&registry).await).unwrap();
@@ -685,18 +680,113 @@ async fn gateway_observability_health_memory_only_pg() {
         assert!(text.contains("\"tries\":1"), "{text}");
         assert!(text.contains("\"acquired\":1"), "{text}");
     }
-    if let Some(path) = log {
-        let after = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            before.unwrap(),
-            after,
-            "health requests issued zero PostgreSQL statements"
-        );
-        eprintln!("HEALTH_STATEMENTS requests=5 new_statements=0 log={path}");
+    if std::env::var_os("I7924_HEALTH_STATEMENT_AUDIT").is_some() {
+        audit_health_statements(&registry, &pool).await;
     }
     pool.close().await;
     let snapshot = serde_json::to_value(health::build_health_snapshot(&registry).await).unwrap();
     assert!(snapshot.to_string().contains("\"tries\":1"));
+    fixture.drop().await;
+}
+
+async fn audit_health_statements(registry: &health::HealthRegistry, pool: &sqlx::PgPool) {
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    let path = std::env::var("I7924_PG_LOG")
+        .expect("I7924_PG_LOG required for the requested health statement audit");
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let begin = format!("I7924_HEALTH_BEGIN_{nonce}");
+    let end = format!("I7924_HEALTH_END_{nonce}");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SELECT '{begin}'").as_str()))
+        .execute(pool)
+        .await
+        .unwrap();
+    for _ in 0..5 {
+        health::build_health_snapshot(registry).await;
+    }
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SELECT '{end}'").as_str()))
+        .execute(pool)
+        .await
+        .unwrap();
+    let log = await_within(
+        async {
+            loop {
+                let log = std::fs::read_to_string(&path).expect("read health statement log");
+                if log.contains(&end) {
+                    break log;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
+    let after_begin = log.find(&begin).expect("begin sentinel must reach the log");
+    let after_begin = after_begin + log[after_begin..].find('\n').unwrap() + 1;
+    let end_marker = log.find(&end).unwrap();
+    let before_end = log[..end_marker].rfind('\n').map_or(0, |i| i + 1);
+    assert_eq!(
+        log[after_begin..before_end].trim(),
+        "",
+        "health requests issued PostgreSQL statements between confirmed sentinels"
+    );
+    eprintln!("HEALTH_STATEMENTS requests=5 new_statements=0 confirmed_sentinels=2 log={path}");
+}
+
+#[tokio::test]
+async fn gateway_observability_provider_key_identity_pg() {
+    let (_root, _live, _paths) = snapshot_root();
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let tokens = ["discord_1234000000000001", "discord_1234000000000002"];
+    let held = try_acquire_discord_gateway_lease(&pool, tokens[0], &ProviderKind::Claude)
+        .await
+        .unwrap()
+        .unwrap();
+    let registry = health::HealthRegistry::new();
+    let (_capture, reader) = observability_capture();
+    for token in tokens {
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let diagnostics = &shared.restart.gateway_lease_diagnostics;
+        diagnostics.context(&pool, "standby", "claude");
+        let lease = try_acquire_observing_handback(
+            &pool,
+            token,
+            &ProviderKind::Claude,
+            &mut observability_breaker(),
+            diagnostics,
+        )
+        .await
+        .unwrap();
+        if let Some(lease) = lease {
+            diagnostics.waiter_refreshed();
+            lease.unlock().await.unwrap();
+        }
+        registry.register_standby("claude".into(), shared).await;
+    }
+    let snapshot = serde_json::to_value(health::build_health_snapshot(&registry).await).unwrap();
+    let providers = snapshot["providers"].as_array().unwrap();
+    for (token, result) in tokens.into_iter().zip(["held", "acquired"]) {
+        let key = discord_gateway_lock_id(token);
+        let view = providers
+            .iter()
+            .find(|p| p["gateway_lease"]["advisory_key"] == key)
+            .expect("same-provider health must identify each advisory key");
+        assert_eq!(view["gateway_lease"]["provider"], "claude");
+        assert_eq!(view["gateway_lease"]["last_result"], result);
+    }
+    let logs = observability_logs(reader);
+    let acquired_key = discord_gateway_lock_id(tokens[1]);
+    for event in ["PostgreSQL granted advisory", "waiter refresh completed"] {
+        let line = logs.lines().find(|line| line.contains(event)).unwrap();
+        assert!(line.contains("provider=\"claude\""), "{line}");
+        assert!(
+            line.contains(&format!("advisory_key={acquired_key}")),
+            "{line}"
+        );
+    }
+    held.unlock().await.unwrap();
+    pool.close().await;
     fixture.drop().await;
 }
 
