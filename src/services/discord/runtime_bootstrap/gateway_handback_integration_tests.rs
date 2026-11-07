@@ -721,7 +721,7 @@ async fn handback_health(registry: &health::HealthRegistry) -> Vec<String> {
         .iter()
         .any(|value| value.as_str().unwrap().contains("gateway_handback_breaker"))
     {
-        assert_ne!(snapshot["status"], "healthy");
+        assert_eq!(snapshot["status"], "degraded");
     }
     snapshot["degraded_reasons"]
         .as_array()
@@ -738,13 +738,15 @@ async fn handback_health_restores_legacy_manual_state_and_clears_after_observed_
     let Some(fixture) = Fixture::new().await else {
         return;
     };
-    let shared = super::super::make_shared_data_for_tests();
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let mut running = fixture.backup().await;
+    let shared = &running.shared;
+    shared.restart.reconcile_done.store(true, Ordering::SeqCst);
     let registry = health::HealthRegistry::new();
-    registry
-        .register_standby("claude".into(), shared.clone())
-        .await;
-    let mut breaker = fixture.breaker();
-    breaker.health = Some(shared.restart.gateway_handback_health.clone());
+    registry.register("claude".into(), shared.clone()).await;
+    let baseline = serde_json::to_value(health::build_health_snapshot(&registry).await).unwrap();
+    assert_eq!(baseline["status"], "healthy", "{baseline}");
+    assert_eq!(baseline["degraded_reasons"], json!([]));
     let path = fixture
         ._root
         .path()
@@ -754,10 +756,13 @@ async fn handback_health_restores_legacy_manual_state_and_clears_after_observed_
     let legacy =
         r#"{"pending":null,"empty":[1,2,3,4],"activations":[4],"suppress_until":0,"manual":true}"#;
     std::fs::write(&path, legacy).unwrap();
-    assert!(breaker.suppressed());
+    fixture.ticks(2).await;
     let expected =
         vec!["provider:claude:gateway_handback_breaker:manual:empty=4:activations=1".to_owned()];
     assert_eq!(handback_health(&registry).await, expected);
+    let manual = serde_json::to_value(health::build_health_snapshot(&registry).await).unwrap();
+    assert_eq!(manual["status"], "degraded");
+    assert_eq!(manual["degraded_reasons"], json!(expected));
     println!(
         "health_manual={}",
         serde_json::json!({"degraded_reasons": expected})
@@ -773,8 +778,14 @@ async fn handback_health_restores_legacy_manual_state_and_clears_after_observed_
         expected,
         "health reads the cached observation without disk I/O"
     );
-    assert!(!breaker.suppressed());
+    fixture.ticks(2).await;
     assert!(handback_health(&registry).await.is_empty());
+    let cleared = serde_json::to_value(health::build_health_snapshot(&registry).await).unwrap();
+    assert_eq!(cleared["status"], "healthy", "{cleared}");
+    assert_eq!(cleared["degraded_reasons"], json!([]));
+    running.manager.shutdown_all().await;
+    running.ended().await;
+    drop(running);
     fixture.close().await;
 }
 
@@ -783,13 +794,12 @@ async fn handback_health_omits_disabled_failed_and_stale_standby_observations_pg
     let Some(fixture) = Fixture::new().await else {
         return;
     };
-    let shared = super::super::make_shared_data_for_tests();
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(fixture.pool.clone()));
     let registry = health::HealthRegistry::new();
     registry
         .register_standby("claude".into(), shared.clone())
         .await;
     let mut breaker = fixture.breaker();
-    breaker.health = Some(shared.restart.gateway_handback_health.clone());
     let path = fixture
         ._root
         .path()
@@ -800,7 +810,14 @@ async fn handback_health_omits_disabled_failed_and_stale_standby_observations_pg
         r#"{"pending":null,"empty":[1,2,3,4],"activations":[],"suppress_until":0,"manual":true}"#,
     )
     .unwrap();
-    assert!(breaker.suppressed());
+    let home = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        fixture.acquire(&shared, &mut breaker).await,
+        GatewayLeaseOutcome::Standby
+    ));
     assert_eq!(handback_health(&registry).await.len(), 1);
     shared
         .restart
@@ -854,6 +871,7 @@ async fn handback_health_omits_disabled_failed_and_stale_standby_observations_pg
         1,
         "a successful observation republishes the current manual state"
     );
+    home.unlock().await.unwrap();
     fixture.close().await;
 }
 
