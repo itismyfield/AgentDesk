@@ -161,9 +161,8 @@ fn write_answer(transcript: &Path, n: &str) {
     writeln!(file, "{answer}\n{}", IDLE.trim_end()).unwrap();
 }
 
-/// An idle turn read on a scoped thread under a token the test holds; the reader hands back its
-/// result, panic included. A turn the test did not finish is cancelled, and a reader that does not
-/// end within a bounded time ends the test process.
+/// An idle turn read on a scoped thread under the test's token, handing back its result or panic.
+/// An unfinished turn is cancelled; a reader that does not end in time ends the test process.
 struct ScopedTurn<'scope, T> {
     reader: Option<std::thread::ScopedJoinHandle<'scope, ()>>,
     cancel: Arc<CancelToken>,
