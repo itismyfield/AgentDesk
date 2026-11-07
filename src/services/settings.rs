@@ -1710,15 +1710,17 @@ mod retired_key_tests {
         assert!(CONFIG_KEYS.iter().all(|(k, ..)| *k != key));
     }
 
-    /// A YAML that still carries the retired human-alert channel field parses,
-    /// and the field does not survive a round-trip through the config model.
+    /// A YAML that still carries the retired human-alert channel field parses to
+    /// the same config as one without it, and the field does not survive a round-trip.
     #[test]
     fn retired_human_alert_channel_config_field_is_gone() {
         let field = "human_alert_channel_id";
         let legacy_yaml = format!("manager_channel_id: \"1\"\n{field}: \"2\"\n");
         let kanban: crate::config::KanbanConfig =
             serde_yaml::from_str(&legacy_yaml).expect("legacy YAML still parses");
-        assert_eq!(kanban.manager_channel_id.as_deref(), Some("1"));
+        let without: crate::config::KanbanConfig =
+            serde_yaml::from_str("manager_channel_id: \"1\"\n").unwrap();
+        assert_eq!(kanban, without, "retired field changed the parsed config");
         let round_trip = serde_yaml::to_string(&kanban).unwrap();
         assert!(!round_trip.contains(field), "retired field re-serialized");
     }
