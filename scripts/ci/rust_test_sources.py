@@ -4,7 +4,7 @@
   inventory  walk src/lib.rs through `mod`, `#[path]` and `include!`, keeping each test's cfg chain
   check      fail on test files no crate root reaches, missing module/include files, unreadable cfg and
              test-only `.join()`/`.recv()` waits without a cap; the allowlist may only lose rows against
-             --allowlist-base (HEAD^1: the PR base in CI)
+             --allowlist-base (HEAD^1: the PR base in CI; a base without the file counts its own violations)
   compare    compare the source inventory for one platform with an unfiltered nextest list
   removed    per platform, tests a base checkout compiles that this tree no longer compiles, and tests
              runnable there that `#[ignore]` (plain or cfg_attr) now skips here; this tree must read
@@ -22,6 +22,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 
@@ -29,7 +30,7 @@ TEST_ATTRS = {("test",), ("tokio", "test"), ("async_std", "test"), ("actix_rt", 
 # Rust `target_os` value per supported CI platform.
 PLATFORMS = {"linux": "linux", "macos": "macos", "windows": "windows"}
 RAW_STRING = re.compile(r'b?r(#{0,255})"')
-CHAR_LITERAL = re.compile(r"'(?:\\.|[^\\'\n])'")
+CHAR_LITERAL = re.compile(r"'(?:\\u\{[0-9A-Fa-f_]{1,6}\}|\\x[0-9A-Fa-f]{2}|\\.|[^\\'\n])'")
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # cfg_attr payload attributes that change which files compile or which fns are tests.
 GATING_CFG_ATTR = {"path", "test", "cfg"}
@@ -39,11 +40,13 @@ BOUNDED_CALLS = {"timeout", "timeout_at", "join_within", "recv_within", "await_w
 UNBOUNDED_WAITS = {"join": "thread join", "recv": "channel recv"}
 WAIT_HELPER = "src/test_support/wait.rs"
 WAIT_ALLOWLIST = "scripts/ci/test_wait_allowlist.txt"
-WAIT_CALL = re.compile(r"\.\s*(?:join|recv)\s*\(")
-# After `#[cfg(test)]`, one of these starts an item or statement whose gate ends at `{`/`;`; anything else
-# (a field, variant or parameter) ends at the next `,`/`)` of its own list.
-ITEM_WORDS = {"fn", "mod", "impl", "struct", "enum", "union", "trait", "type", "static", "const", "let", "use",
-              "pub", "async", "unsafe", "extern", "macro_rules"}
+WAIT_CALL = re.compile(r"\b(?:join|recv)\b")
+# After `#[cfg(test)]`, one of these starts an item or block whose gate is its `{...}` block (or ends at `;`);
+# anything else (a `let`, expression, field or parameter) stays gated to its own `;`, `,` or `)`.
+BLOCK_WORDS = {"fn", "mod", "impl", "struct", "enum", "union", "trait", "type", "static", "const", "use", "pub",
+               "async", "unsafe", "extern", "macro_rules", "if", "match", "for", "while", "loop"}
+# Macros whose tokens are never compiled or run, so an attribute or call inside them gates nothing.
+INERT_MACROS = {"stringify"}
 
 
 @dataclass(frozen=True)
@@ -678,9 +681,9 @@ def unbounded_waits(raw, tokens, whole_file):
     """(line, kind) of every test-only `.join()`/`.recv()` that no bounded call (BOUNDED_CALLS) encloses.
 
     Test-only code: the whole file, a `#![cfg(test)]` block, and what follows a `#[cfg(test)]` or test
-    attribute: an item or statement up to its `{` block or `;`, a parameter/field up to its `,` or `)`."""
+    attribute: an item's `{}` block, or a statement, parameter or field up to its own `;`, `,` or `)`."""
     found, parens, gated, depth, brackets, index = [], [], [], 0, 0, 0
-    pending = None  # ("item" | "field", paren depth) of a gate still waiting for its block or end
+    pending = None  # (kind, paren depth, brace depth) of a gate still waiting for its block or end
     while index < len(tokens):
         token = tokens[index]
         span = attribute_span(tokens, index)
@@ -689,7 +692,7 @@ def unbounded_waits(raw, tokens, whole_file):
             attr = tokens[bracket + 1:end - 1]
             path_end = next((n for n, item in enumerate(attr) if item.value in ("(", "=")), len(attr))
             names = tuple(item.value for item in attr[:path_end] if item.kind == "ident")
-            gate = names in TEST_ATTRS
+            gate = names in TEST_ATTRS or names == ("cfg_attr",) and "test" in cfg_attr_payload(attr[path_end:])
             if names == ("cfg",) and path_end < len(attr) and attr[path_end].value == "(":
                 gate = _cfg_requires_test_text(raw[attr[path_end].start + 1:attr[-1].start])
             if gate and bracket != index + 1:
@@ -698,10 +701,17 @@ def unbounded_waits(raw, tokens, whole_file):
                 elif not gated or gated[-1] != depth:
                     gated.append(depth)
             elif gate and pending is None:
-                first = tokens[end] if end < len(tokens) else None
-                item = first is not None and first.kind == "ident" and first.value in ITEM_WORDS
-                pending = ("item" if item else "field", len(parens))
+                after = end
+                while after < len(tokens) and attribute_span(tokens, after) is not None:
+                    after = attribute_span(tokens, after)[1]
+                first = tokens[after] if after < len(tokens) else None
+                block = first is not None and first.kind == "ident" and first.value in BLOCK_WORDS
+                pending = ("block" if block else "span", len(parens), depth)
             index = end
+            continue
+        if token.kind == "ident" and token.value in INERT_MACROS and index + 2 < len(tokens) \
+                and tokens[index + 1].value == "!" and tokens[index + 2].value in ("(", "[", "{"):
+            index = _macro_end(tokens, index + 2)
             continue
         if token.kind == "punct":
             if token.value == "(":
@@ -718,16 +728,19 @@ def unbounded_waits(raw, tokens, whole_file):
                 brackets -= 1
             elif token.value == "{":
                 depth += 1
-                if pending is not None:
+                if pending is not None and pending[0] == "block":
                     gated.append(depth)
                     pending = None
             elif token.value == "}":
                 if gated and gated[-1] == depth:
                     gated.pop()
-                depth, pending = depth - 1, None
-            elif token.value == ";" and not brackets:
+                depth -= 1
+                if pending is not None and depth < pending[2]:
+                    pending = None
+            elif token.value == ";" and not brackets and pending is not None and depth == pending[2]:
                 pending = None
-            elif token.value == "," and pending is not None and pending[0] == "field" and len(parens) == pending[1]:
+            elif token.value == "," and pending is not None and pending[0] == "span" \
+                    and (len(parens), depth) == pending[1:]:
                 pending = None
         elif token.kind == "ident" and token.value in UNBOUNDED_WAITS and index + 2 < len(tokens) \
                 and index and tokens[index - 1].value == "." and tokens[index - 1].kind == "punct" \
@@ -736,6 +749,21 @@ def unbounded_waits(raw, tokens, whole_file):
             found.append((token.line, UNBOUNDED_WAITS[token.value]))
         index += 1
     return found
+
+
+def _macro_end(tokens, opener):
+    """Index just past the delimiter group that opens at tokens[opener]."""
+    pairs, depth = {"(": ")", "[": "]", "{": "}"}, 0
+    for index in range(opener, len(tokens)):
+        if tokens[index].kind != "punct":
+            continue
+        if tokens[index].value in pairs:
+            depth += 1
+        elif tokens[index].value in pairs.values():
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return len(tokens)
 
 
 def wait_allowlist(repo_root):
@@ -758,8 +786,8 @@ def wait_allowlist(repo_root):
     return entries, problems
 
 
-def test_wait_findings(repo_root, inventory):
-    """Test code waiting without a cap: new violations and allowlist rows whose file no longer needs one."""
+def unbounded_wait_files(repo_root, inventory):
+    """{repo path: [(line, kind)]} of the test code that waits without a cap."""
     root = repo_root.resolve()
     files = {path: chains for path, chains in inventory.file_cfgs.items()}
     for path in sorted((root / "tests").rglob("*.rs")):
@@ -778,6 +806,12 @@ def test_wait_findings(repo_root, inventory):
         hits = unbounded_waits(raw, rust_tokens(raw, extended=True), whole)
         if hits:
             violations[rel] = hits
+    return violations
+
+
+def test_wait_findings(repo_root, inventory):
+    """Test code waiting without a cap: new violations and allowlist rows whose file no longer needs one."""
+    violations = unbounded_wait_files(repo_root, inventory)
     allowed, found = wait_allowlist(repo_root)
     found += [f"unbounded wait allowlist: {rel} has no unbounded wait left; remove from {WAIT_ALLOWLIST}"
               for rel in allowed if rel not in violations]
@@ -790,20 +824,30 @@ def test_wait_findings(repo_root, inventory):
 
 
 def base_allowlist(repo_root, rev):
-    """Allowlist paths at git `rev`; None when the file does not exist there (its first introduction)."""
+    """Allowlist paths at git `rev`; where that tree has no allowlist yet, the files that wait without a cap in it."""
     result = subprocess.run(["git", "-C", str(repo_root), "show", f"{rev}:{WAIT_ALLOWLIST}"],
                             capture_output=True, text=True, check=False)
     if result.returncode:
         if "does not exist in" in result.stderr or "exists on disk, but not in" in result.stderr:
-            return None
+            return base_tree_violations(repo_root, rev)
         raise ValueError(result.stderr.strip() or f"git show {rev}:{WAIT_ALLOWLIST} failed")
     return {line.strip() for line in result.stdout.splitlines() if line.strip() and not line.startswith("#")}
 
 
+def base_tree_violations(repo_root, rev):
+    """Files with an unbounded wait in the tree at `rev`, read from a temporary `git archive` extraction."""
+    archive = subprocess.run(["git", "-C", str(repo_root), "archive", rev, "Cargo.toml", "src", "tests"],
+                             capture_output=True, check=False)
+    if archive.returncode:
+        raise ValueError(archive.stderr.decode().strip() or f"git archive {rev} failed")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["tar", "-x", "-C", tmp], input=archive.stdout, check=True)
+        base = Path(tmp)
+        return set(unbounded_wait_files(base, lib_inventory(base)))
+
+
 def allowlist_growth(current, base):
     """Rows the allowlist gained over `base`: it may only shrink, so each one is a problem."""
-    if base is None:
-        return []
     return [f"unbounded wait allowlist: {rel} is new against the base allowlist; the allowlist only shrinks, "
             f"use test_support::wait instead" for rel in sorted(set(current) - base)]
 

@@ -82,6 +82,19 @@ REGION_CASES = {
     "comment inside the call": ("#[cfg(test)]\nfn t(rx: std::sync::mpsc::Receiver<u8>) { rx.recv(/* first */).unwrap(); }\n", (2,)),
     "only comments and strings mention the call": (
         "#[cfg(test)]\nfn t() -> &'static str {\n    // rx.recv()\n    \"h.join()\"\n}\n", ()),
+    "test-only let whose closure block comes before the wait": (
+        "pub fn production() {\n    #[cfg(test)]\n    let answer = std::thread::spawn(|| { 7 })\n"
+        "        .join()\n        .unwrap();\n    let _ = answer;\n}\n", (4,)),
+    "unicode char literal before the wait": (
+        "pub fn production(h: std::thread::JoinHandle<()>) {\n    #[cfg(test)]\n    let pair = ('\\u{28}', h.join());\n}\n", (3,)),
+    "comment between the name and its parens": (
+        "#[cfg(test)]\nfn t(rx: std::sync::mpsc::Receiver<u8>) {\n    rx.recv/* comment */();\n}\n", (3,)),
+    "a gate followed by another attribute": (
+        "#[cfg(test)]\n#[derive(Default)]\npub struct Probe {\n    pub seen: u8,\n}\n"
+        "pub fn production(rx: std::sync::mpsc::Receiver<u8>) {\n    rx.recv().unwrap();\n}\n", ()),
+    "tokens inside stringify! are not code": (
+        "pub fn production() -> &'static str {\n    stringify!(\n        #[test]\n        fn imagined() { h.join(); }\n    )\n}\n"
+        "macro_rules! waits { ($h:expr) => { #[cfg(test)] fn t() { $h.join(); } }; }\n", (7,)),
 }
 
 
@@ -127,6 +140,10 @@ class UnboundedWaitCheckTest(unittest.TestCase):
                 found = [line for line in wait_problems(self.repo) if "src/prod.rs" in line]
                 self.assertEqual([int(line.split(" ")[2].rsplit(":", 1)[1]) for line in found], list(lines), found)
 
+    def test_cfg_attr_test_declares_a_test(self):
+        source = "#[cfg_attr(test, test)]\nfn t() {\n    let (_tx, rx) = std::sync::mpsc::channel::<u8>();\n    rx.recv();\n}\n"
+        self.assertEqual(rts.unbounded_waits(source, rts.rust_tokens(source, extended=True), False), [(4, "channel recv")])
+
     def test_a_new_bare_join_in_a_test_file_fails(self):
         self.allowlist.write_text(ALLOW_ALL, encoding="utf-8")
         (self.repo / "src/lib.rs").write_text(LIB + "#[cfg(test)]\nmod late_tests;\n", encoding="utf-8")
@@ -153,7 +170,6 @@ class UnboundedWaitCheckTest(unittest.TestCase):
                           "the allowlist only shrinks, use test_support::wait instead"])
         # A row swapped for a new path keeps the row count and still fails.
         self.assertEqual(len(rts.allowlist_growth(["src/lib.rs", "src/late_tests.rs"], {"src/lib.rs", "src/old.rs"})), 1)
-        self.assertEqual(rts.allowlist_growth(["src/lib.rs"], None), [])
         # Through git: the committed allowlist is the base, a new violation plus its row fails the whole check.
         self.allowlist.write_text(ALLOW_ALL, encoding="utf-8")
         git(self.repo, "init", "-q")
@@ -167,6 +183,31 @@ class UnboundedWaitCheckTest(unittest.TestCase):
         self.assertEqual(len(found), 1, found)
         self.assertIn("src/late_tests.rs is new against the base allowlist", found[0])
         self.assertTrue(any("unreadable" in line for line in rts.check_findings(self.repo, "no-such-rev")[1]))
+
+    def test_a_base_without_an_allowlist_counts_its_own_violations(self):
+        # CI checks the PR's synthetic merge: HEAD^1 is the base (no allowlist yet), HEAD^2 the PR head.
+        self.allowlist.unlink(missing_ok=True)
+        (self.repo / "src/lib.rs").write_text(LIB.replace("mod joins_tests;\n", "mod joins_tests;\n#[cfg(test)]\nmod late_tests;\n"),
+                                              encoding="utf-8")
+        (self.repo / "src/late_tests.rs").write_text(JOINS, encoding="utf-8")
+        git(self.repo, "init", "-q", "-b", "main")
+        commit = lambda message: (git(self.repo, "add", "-A"),
+                                  git(self.repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", message))
+        commit("base without an allowlist")
+        git(self.repo, "checkout", "-q", "-b", "pr")
+        self.allowlist.write_text(ALLOW_ALL + "src/late_tests.rs\n", encoding="utf-8")
+        commit("introduce the allowlist")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "-c", "user.email=t@t", "-c", "user.name=t", "merge", "-q", "--no-ff", "--no-edit", "pr")
+        self.assertEqual(rts.check_findings(self.repo, "HEAD^1")[1], [])
+        # A violation that did not exist on the base cannot buy itself a row in the same PR.
+        (self.repo / "src/lib.rs").write_text((self.repo / "src/lib.rs").read_text(encoding="utf-8")
+                                              + "#[cfg(test)]\nmod added_tests;\n", encoding="utf-8")
+        (self.repo / "src/added_tests.rs").write_text(JOINS, encoding="utf-8")
+        self.allowlist.write_text(ALLOW_ALL + "src/late_tests.rs\nsrc/added_tests.rs\n", encoding="utf-8")
+        found = rts.check_findings(self.repo, "HEAD^1")[1]
+        self.assertEqual(found, ["unbounded wait allowlist: src/added_tests.rs is new against the base allowlist; "
+                                 "the allowlist only shrinks, use test_support::wait instead"])
 
     def test_the_tree_passes_against_its_allowlist(self):
         try:
