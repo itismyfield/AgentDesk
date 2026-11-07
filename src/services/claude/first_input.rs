@@ -192,6 +192,7 @@ pub(super) fn observe(
         resolved_session_id,
         hook_rx,
         hook_events_after,
+        None,
     )
     .map(|(result, harvest)| (result, harvest, start_offset))
     .map_err(SubmissionError::from)

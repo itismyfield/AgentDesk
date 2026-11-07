@@ -408,6 +408,7 @@ fn run_claude_tui_warm_followup_submit_and_stream(
         transcript,
         to,
         (hook_rx, turn_started_at, fallback_start_offset),
+        None,
     )
 }
 
@@ -420,7 +421,9 @@ fn observe_submitted(
     (transcript_path, transcript_path_string): (&std::path::Path, &str),
     (sender, cancel_token, report_channel_id): Delivery,
     (hook_rx, turn_started_at, fallback_start_offset): Observed,
+    late: Option<Late>,
 ) -> ClaudeTuiWarmFollowupSubmitOutcome {
+    let (leave, moved) = late.map_or((None, None), |(leave, moved)| (Some(leave), Some(moved)));
     let hook_events_after = chrono::Utc::now();
     let start_offset = claude_tui_turn_start_offset_after_timestamp(
         &transcript_path,
@@ -436,12 +439,36 @@ fn observe_submitted(
         &resolved_session_id,
         hook_rx,
         hook_events_after,
+        leave,
     ) {
         Ok(result) => result,
         Err(error) => {
             return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(error));
         }
     };
+    // The read left this session for one adopted after the grace: read that one once from the
+    // submit's time. A left session that already relayed output is not read twice.
+    let left = moved.as_ref().and_then(|moved| moved.get());
+    if let Some(now) = left.filter(|_| matches!(read_result, ReadOutputResult::SessionDied { .. }))
+    {
+        if harvest.forwarded_messages > 0 {
+            let error = "claude tui session moved after relaying output; not read twice";
+            return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(error.into()));
+        }
+        let path = now.transcript_path.display().to_string();
+        let hooks = crate::services::claude_tui::hook_server::subscribe_hook_events();
+        let at = (tmux_session_name, now.session_id.as_str(), prompt);
+        let to = (sender, cancel_token, report_channel_id);
+        let observed = (hooks, turn_started_at, 0);
+        return observe_submitted(
+            host,
+            at,
+            (now.transcript_path.as_path(), path.as_str()),
+            to,
+            observed,
+            None,
+        );
+    }
     // #3281: capture BEFORE `classify_followup_result` consumes the read
     // result. The zero-harvest gate is `Completed`-only: classify maps
     // `Cancelled` to `Delivered` too, and a cancelled turn legitimately
@@ -587,12 +614,17 @@ pub(crate) fn owner_observer(
     let (dir, requested) = (working_dir.to_path_buf(), at.1.map(str::to_owned));
     let home = overlay.home;
     Some(Box::new(move || {
-        let rebound = rebound_source(&tmux, &resolved, &cancel, || {
+        let pane = tmux.clone();
+        let rebind = move || {
             let at = (dir.as_path(), requested.as_deref(), home.as_deref());
             let live = (true, move || Ok(matches));
-            let now = crate::services::claude::resolve_live_claude_tui_session(&tmux, at, live);
+            let now = crate::services::claude::resolve_live_claude_tui_session(&pane, at, live);
             now.ok().map(|live| live.resolution)
-        });
+        };
+        let rebound = rebound_source(&tmux, &resolved, &cancel, &rebind);
+        let late = rebound
+            .is_none()
+            .then(|| late_rebind(&resolved, &cancel, rebind));
         // A rebound session is read from this submit's time, never the old file's offset.
         let (resolved, fallback) = rebound.map_or((resolved, fallback), |now| (now, 0));
         let host = FollowupHost::legacy_tmux(&tmux);
@@ -600,7 +632,8 @@ pub(crate) fn owner_observer(
         let transcript = (resolved.transcript_path.as_path(), path.as_str());
         let to = (sender.clone(), Some(cancel), Some(channel));
         let at = (tmux.as_str(), resolved.session_id.as_str(), prompt.as_str());
-        let observed = observe_submitted(&host, at, transcript, to, (hooks, started_at, fallback));
+        let observed = (hooks, started_at, fallback);
+        let observed = observe_submitted(&host, at, transcript, to, observed, late);
         owner_settles(observed, &sender)
     }))
 }
@@ -624,23 +657,14 @@ fn rebound_source(
 ) -> Option<Resolution> {
     use std::sync::atomic::Ordering;
     let (mut dead_reads, deadline) = (0, std::time::Instant::now() + REBIND_GRACE);
-    let own_input = || match cancel.native_stop.peek_native_input() {
-        Some(Ok(pin)) => {
-            pin.session_id == resolved.session_id
-                || std::path::Path::new(&pin.output_path) == resolved.transcript_path
-        }
-        _ => false,
-    };
     loop {
-        if own_input()
+        if own_input(cancel, resolved)
             || cancel.cancelled.load(Ordering::Relaxed)
             || std::time::Instant::now() > deadline
         {
             return None;
         }
-        if let Some(now) = rebind()
-            .filter(|now| now.session_id != resolved.session_id && now.transcript_path.is_file())
-        {
+        if let Some(now) = moved_session(&rebind, resolved) {
             return Some(now);
         }
         // A dead pane leaves the observer's own read to report it, as before this wait.
@@ -653,6 +677,60 @@ fn rebound_source(
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+}
+
+/// This submit's receipt landed in `resolved`'s session.
+#[cfg(unix)]
+fn own_input(cancel: &CancelToken, resolved: &Resolution) -> bool {
+    match cancel.native_stop.peek_native_input() {
+        Some(Ok(pin)) => {
+            pin.session_id == resolved.session_id
+                || std::path::Path::new(&pin.output_path) == resolved.transcript_path
+        }
+        _ => false,
+    }
+}
+
+/// The pane's verified session when it is another one whose transcript exists.
+#[cfg(unix)]
+fn moved_session(
+    rebind: impl Fn() -> Option<Resolution>,
+    resolved: &Resolution,
+) -> Option<Resolution> {
+    rebind().filter(|now| now.session_id != resolved.session_id && now.transcript_path.is_file())
+}
+
+/// A reader of the observer's session that leaves it, once, for the session the pane is verified
+/// to run after the grace, with the session it left for.
+#[cfg(unix)]
+type Late = (
+    Box<dyn Fn() -> bool + Send>,
+    std::sync::Arc<std::sync::OnceLock<Resolution>>,
+);
+
+/// Leaves `resolved` for a session adopted after the grace while no receipt of this submit was
+/// seen in it; a receipt seen once keeps the read in `resolved` for good.
+#[cfg(unix)]
+fn late_rebind(
+    resolved: &Resolution,
+    cancel: &std::sync::Arc<CancelToken>,
+    rebind: impl Fn() -> Option<Resolution> + Send + 'static,
+) -> Late {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let moved = std::sync::Arc::new(std::sync::OnceLock::new());
+    let (resolved, cancel, to) = (resolved.clone(), cancel.clone(), moved.clone());
+    let own = AtomicBool::new(false);
+    let leave = move || {
+        if to.get().is_some() {
+            return true;
+        }
+        if own.load(Ordering::Relaxed) || own_input(&cancel, &resolved) {
+            own.store(true, Ordering::Relaxed);
+            return false;
+        }
+        moved_session(&rebind, &resolved).is_some_and(|now| to.set(now).is_ok())
+    };
+    (Box::new(leave), moved)
 }
 
 /// A paste into a running turn read as its caller's answer, from the user row the attempt took to
@@ -719,6 +797,7 @@ pub(crate) fn busy_owner_observer(
             (transcript.as_path(), path.as_str()),
             to,
             (hooks, chrono::Utc::now(), at),
+            None,
         );
         owner_settles(observed, &sender)
     }))
