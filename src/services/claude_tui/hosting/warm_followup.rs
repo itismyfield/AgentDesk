@@ -608,6 +608,11 @@ pub(crate) fn owner_observer(
 #[cfg(unix)]
 type Resolution = crate::services::claude::ClaudeTuiSessionResolution;
 
+/// How long a submit that grew nothing waits for a rebind; a prompt left in the input buffer then
+/// reaches the observer's own read, which reports it.
+#[cfg(unix)]
+const REBIND_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The session a submit reached when the pane's hooks verified another one before the observer's
 /// own transcript grew (`/clear` adopted after the observer was built); `None` keeps the observer's.
 #[cfg(unix)]
@@ -618,10 +623,11 @@ fn rebound_source(
     rebind: impl Fn() -> Option<Resolution>,
 ) -> Option<Resolution> {
     use std::sync::atomic::Ordering;
-    let mut dead_reads = 0;
+    let (mut dead_reads, deadline) = (0, std::time::Instant::now() + REBIND_GRACE);
     loop {
         let grew = std::fs::metadata(&resolved.transcript_path).is_ok_and(|m| m.len() > fallback);
-        if grew || cancel.cancelled.load(Ordering::Relaxed) {
+        if grew || cancel.cancelled.load(Ordering::Relaxed) || std::time::Instant::now() > deadline
+        {
             return None;
         }
         if let Some(now) = rebind()
