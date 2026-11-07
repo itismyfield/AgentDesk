@@ -410,6 +410,17 @@ class Plan(Fixture):
                 self.assertIsNone(plan)
                 self.assertIn(needle, err)
 
+    def test_retry_policy_warns_once_within_seven_days_of_expiry(self):
+        for today, days in (("2026-12-28", 3), ("2026-12-24", 7), ("2026-12-23", None)):
+            with self.subTest(today):
+                plan, err = self.plan(self.NAMES, today=today)
+                self.assertIsNotNone(plan, err)
+                self.assertEqual(len(plan["retry_policy"]), 1)
+                warnings = [line for line in err.splitlines() if line.startswith("::warning::retry policy")]
+                expected = [] if days is None else \
+                    [f"::warning::retry policy entry {BIN} {FLAKY} expires on 2026-12-31 ({days} days)"]
+                self.assertEqual(warnings, expected)
+
     def test_policy_entry_for_another_scope_is_not_applied(self):
         self.write("p.toml", POLICY.replace('"linux-lib"', '"windows-lib"').replace(FLAKY, "m::gone"))
         plan = self.plan_ok(self.NAMES, policy="p.toml")

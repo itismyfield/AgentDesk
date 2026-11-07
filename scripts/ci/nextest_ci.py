@@ -37,6 +37,8 @@ PLAN_VERSION = 2
 WORKER_VERSION = 1
 VERDICT_VERSION = 1
 POLICY_VERSION = 1
+# Every plan warns this many days before a policy entry expires and fails the plan.
+POLICY_EXPIRY_WARNING_DAYS = 7
 MAX_WORKERS = 32
 # nextest starts one process per test; this per-test cost keeps zero-duration tests spread out.
 PER_TEST_OVERHEAD = 0.05
@@ -217,6 +219,10 @@ def load_policy(path, scope, today, universe, ignored):
             continue
         if expires < today:
             raise PlanError(f"retry policy entry {_id_text(test_id)} expired on {expires}")
+        days_left = (expires - today).days
+        if days_left <= POLICY_EXPIRY_WARNING_DAYS:
+            print(f"::warning::retry policy entry {_id_text(test_id)} expires on {expires} ({days_left} days)",
+                  file=sys.stderr)
         if test_id not in universe:
             state = "ignored" if test_id in ignored else "absent"
             raise PlanError(f"retry policy entry {_id_text(test_id)} is {state} in the {scope} list")
