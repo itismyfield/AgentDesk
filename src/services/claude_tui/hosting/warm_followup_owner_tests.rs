@@ -206,8 +206,9 @@ fn clear_suffix() -> String {
 struct ClearedPane {
     _dedupe: std::sync::MutexGuard<'static, ()>,
     _rotations: std::sync::MutexGuard<'static, ()>,
-    _root: crate::config::TestRuntimeRootGuard,
+    // Declared first so its PATH is restored while `_root` still holds the environment lock.
     tmux: crate::services::claude_tui::input::submission::tests::ScriptedTmux,
+    _root: crate::config::TestRuntimeRootGuard,
     dir: tempfile::TempDir,
     session: String,
     before: String,
@@ -514,4 +515,32 @@ fn a_receipt_in_the_observed_session_keeps_the_read_from_moving() {
         "a receipt in the observed session must keep the read"
     );
     assert!(moved.get().is_none());
+}
+
+/// A cleared pane puts the scripted tmux's PATH back before its root guard unlocks the environment,
+/// so the next locked test never has its own tmux shim overwritten.
+#[test]
+fn a_cleared_pane_restores_path_before_the_root_unlocks() {
+    crate::config::test_env::teardown_probe::assert_restores_after_return(
+        concat!(
+            module_path!(),
+            "::a_cleared_pane_restores_path_before_the_root_unlocks"
+        ),
+        false,
+        || {
+            let baseline = std::env::var_os("PATH");
+            let restored = std::rc::Rc::new(std::cell::Cell::new(false));
+            let observed = restored.clone();
+            let _hook = crate::config::test_env::teardown_probe::on_before_restore(move || {
+                assert_eq!(
+                    std::env::var_os("PATH"),
+                    baseline,
+                    "PATH restored inside the lock"
+                );
+                observed.set(true);
+            });
+            drop(ClearedPane::new());
+            assert!(restored.get(), "root teardown hook must run");
+        },
+    );
 }
