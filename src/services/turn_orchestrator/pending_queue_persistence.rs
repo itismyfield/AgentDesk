@@ -29,6 +29,9 @@ pub(crate) struct PendingQueueItem {
     #[serde(default)]
     pub(crate) author_is_bot: bool,
     pub(crate) message_id: u64,
+    /// A durable send claim; absent legacy metadata suppresses recovery notices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) queue_notice_claimed: Option<bool>,
     /// #4180: original wall-clock timestamp for `Intervention::created_at`,
     /// persisted as Unix milliseconds so restart restore can recreate the
     /// monotonic age instead of stamping the item as newly queued.
@@ -380,6 +383,7 @@ pub(super) fn pending_queue_item_from_intervention(
         author_id: intervention.author_id.get(),
         author_is_bot: intervention.author_is_bot,
         message_id: intervention.message_id.get(),
+        queue_notice_claimed: Some(false),
         created_at_wall_time_ms: created_at_wall_time_ms_from_instant(
             intervention.created_at,
             reference_wall_time,

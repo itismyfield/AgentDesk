@@ -223,7 +223,7 @@ pub(crate) async fn handoff_held(
     }
 }
 
-/// Keeps the direct per-reason test contract on the same notice algorithm.
+/// Exercises the production notice claim for direct hold checks.
 #[cfg(test)]
 pub(crate) async fn held(
     shared: &SharedData,
@@ -232,7 +232,7 @@ pub(crate) async fn held(
     original: &Original,
     hold: Hold,
 ) -> bool {
-    held_with_scope(shared, handle, channel, original, hold, false).await
+    held_once(shared, handle, channel, original, hold).await
 }
 
 async fn held_once(
@@ -242,34 +242,16 @@ async fn held_once(
     original: &Original,
     hold: Hold,
 ) -> bool {
-    held_with_scope(shared, handle, channel, original, hold, true).await
-}
-
-/// Automatic holds retain the first reason; direct reason checks share the same atomic choice.
-async fn held_with_scope(
-    shared: &SharedData,
-    handle: &ChannelMailboxHandle,
-    channel: ChannelId,
-    original: &Original,
-    hold: Hold,
-    once_per_original: bool,
-) -> bool {
-    use super::admission::TurnBind;
-    static NOTICED: std::sync::Mutex<Vec<(String, Hold)>> = std::sync::Mutex::new(Vec::new());
-    let exact = super::admission::exact_turn(handle, &original.ticket, &original.item).await;
-    if exact != Ok(TurnBind::NotArmed) {
+    let (ticket, item) = (original.ticket.as_str().to_string(), original.item.clone());
+    let claimed = handle
+        .v2_request(move |slot| {
+            slot.as_mut()
+                .ok_or("V2 not adopted")?
+                .claim_queue_notice(&ticket, &item)
+        })
+        .await;
+    if claimed != Ok(true) {
         return false;
-    }
-    let key = (original.ticket.as_str().to_string(), hold);
-    {
-        let mut noticed = NOTICED.lock().unwrap_or_else(|e| e.into_inner());
-        if noticed
-            .iter()
-            .any(|(ticket, prior)| ticket == &key.0 && (once_per_original || *prior == hold))
-        {
-            return false;
-        }
-        noticed.push(key);
     }
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         return false;
@@ -526,6 +508,7 @@ pub(crate) fn original(
     let item = serde_json::from_value(json!({
         "author_id":intervention.author_id.get(),"author_is_bot":intervention.author_is_bot,
         "message_id":intervention.message_id.get(),"queued_generation":intervention.queued_generation,
+        "queue_notice_claimed":false,
         "created_at_wall_time_ms":now.saturating_sub(age),
         "source_message_ids":ids,"source_message_queued_generations":generations,
         "source_text_segments": if segments.len()>1 {segments} else {vec![]},

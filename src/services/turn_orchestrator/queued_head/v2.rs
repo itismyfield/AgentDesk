@@ -557,8 +557,11 @@ fn render(views: &[MemberView]) -> String {
     bodies.collect::<Vec<_>>().join("\n\n")
 }
 
-/// Exact equality of two stored originals, as the restore compares them.
+/// Exact stored input equality, excluding mutable queue notice bookkeeping.
 pub(super) fn same(a: &PendingQueueItem, b: &PendingQueueItem) -> bool {
+    let (mut a, mut b) = (a.clone(), b.clone());
+    a.queue_notice_claimed = None;
+    b.queue_notice_claimed = None;
     serde_json::to_value(a)
         .ok()
         .is_some_and(|a| serde_json::to_value(b).ok() == Some(a))

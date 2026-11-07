@@ -25,6 +25,32 @@ fn owner() -> Owner {
 }
 
 #[test]
+fn queue_notice_claim_preserves_front_grants_and_ticket_identity() {
+    let _root = TestRuntimeRootGuard::new();
+    let mut owner = owner();
+    let mut original = original(7_930_001, "queued body");
+    original.queue_notice_claimed = Some(false);
+    let ticket = Ticket::new("notice-grant").unwrap();
+    Custody::with_ticket(&original, ticket.clone())
+        .advance(&mut owner)
+        .unwrap();
+    let front = owner.front().unwrap();
+    owner.grant_front(&front).unwrap();
+    assert!(owner.claim_queue_notice(&ticket.0, &original).unwrap());
+    assert!(owner.claim_turn(original.message_id, &front).is_some());
+    assert_eq!(owner.exact_turn(&ticket, &original), Ok(TurnBind::NotArmed));
+    let mut edited = original.clone();
+    edited.text.push_str(" changed");
+    assert!(owner.exact_turn(&ticket, &edited).is_err());
+    let mut restored = Owner::adopt(owner.path.clone(), "s3b".into()).unwrap();
+    assert_eq!(
+        restored.exact_turn(&ticket, &original),
+        Ok(TurnBind::NotArmed)
+    );
+    assert!(!restored.claim_queue_notice(&ticket.0, &original).unwrap());
+}
+
+#[test]
 fn pending_synthetic_admission_recovers_the_same_candidate_without_reenqueue() {
     let _root = TestRuntimeRootGuard::new();
     let mut owner = owner();

@@ -71,6 +71,131 @@ fn said(bodies: &Bodies) -> Vec<(String, u64)> {
         .collect()
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn queue_notice_survives_process_restart_and_legacy_restore() {
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    const PHASE: &str = "ADK_QUEUE_NOTICE_TEST_PHASE";
+    const QUEUE: &str = "ADK_QUEUE_NOTICE_TEST_FILE";
+    const ROOT: &str = "ADK_QUEUE_NOTICE_TEST_ROOT";
+    if let Ok(phase) = std::env::var(PHASE) {
+        let _root = crate::config::set_agentdesk_root_for_test(std::path::Path::new(
+            &std::env::var_os(ROOT).unwrap(),
+        ));
+        seed_generation();
+        let channel = ChannelId::new(7_930_001);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = Arc::new(serenity::Http::new("Bot intake-dispatch-test"));
+        let deps = deps(&http, &shared);
+        let (handle, _) = adopt(&shared, channel).await;
+        let path = std::path::PathBuf::from(std::env::var_os(QUEUE).unwrap());
+        handle
+            .v2_adopt(path, shared.token_hash.clone())
+            .await
+            .unwrap();
+        handle
+            .restore_active_turn(
+                Arc::new(crate::services::provider::CancelToken::new()),
+                UserId::new(4350),
+                MessageId::new(7_930_001_000),
+            )
+            .await;
+        assert!(handle.has_active_turn().await.unwrap());
+        let (bodies, _rest) = notices(channel.get()).await;
+        shared.restart.reconcile_done.store(false, Relaxed);
+        if phase == "enqueue" {
+            for id in [7_930_001_001, 7_930_001_002] {
+                let mut submission = live(channel, id, "busy input");
+                submission.request.merge_consecutive = true;
+                dispatch_text_intake(&deps, submission).await.unwrap();
+            }
+            assert_eq!(
+                said(&bodies),
+                [
+                    (Hold::RestartRecovery.notice(), 7_930_001_001),
+                    (Hold::RestartRecovery.notice(), 7_930_001_002),
+                ]
+            );
+        } else {
+            let front = handle
+                .v2_request(|slot| {
+                    let owner = slot.as_ref().ok_or("no owner")?;
+                    assert_eq!(owner.followers().len(), 1);
+                    Ok(owner.front().unwrap())
+                })
+                .await
+                .unwrap();
+            let retry = || {
+                input_ingress::handoff_held(
+                    &shared,
+                    &ProviderKind::Claude,
+                    channel,
+                    &front,
+                    Hold::RestartRecovery,
+                )
+            };
+            await_within(async { tokio::join!(retry(), retry()) }, WAIT_CAP).await;
+            assert!(
+                said(&bodies).is_empty(),
+                "restored inputs must not be notified again: {:?}",
+                said(&bodies)
+            );
+            let mut replay = live(channel, 7_930_001_001, "busy input");
+            replay.request.merge_consecutive = true;
+            dispatch_text_intake(&deps, replay).await.unwrap();
+            dispatch_text_intake(&deps, live(channel, 7_930_001_003, "new after restart"))
+                .await
+                .unwrap();
+            assert_eq!(said(&bodies).len(), 1, "new input still gets its notice");
+            assert_eq!(items(&handle).await.len(), 3);
+        }
+        return;
+    }
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let path = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("persistent-queue.json");
+    let name = format!(
+        "{}::queue_notice_survives_process_restart_and_legacy_restore",
+        module_path!()
+    );
+    let name = name.strip_prefix("agentdesk::").unwrap();
+    let mut enqueued = Vec::new();
+    for phase in ["enqueue", "restart", "legacy"] {
+        if phase == "legacy" {
+            let mut snapshot: Value = serde_json::from_slice(&enqueued).unwrap();
+            for item in snapshot["items"].as_array_mut().unwrap() {
+                item.as_object_mut().unwrap().remove("queue_notice_claimed");
+            }
+            std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        }
+        let output = await_within(
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env(PHASE, phase)
+                .env(QUEUE, &path)
+                .env(ROOT, root.path())
+                .kill_on_drop(true)
+                .output(),
+            WAIT_CAP,
+        )
+        .await
+        .unwrap();
+        println!(
+            "queue_notice_phase={phase}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.status.success(),
+            "{phase}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if phase == "enqueue" {
+            enqueued = std::fs::read(&path).unwrap();
+        }
+    }
+}
+
 // reserve/write/submitted supply this fixture's pump and leaf. Keep a runtime drive from
 // racing that manual writer, and restore the previous wake hook with the handle's scope.
 struct ManualOwner {
@@ -443,8 +568,11 @@ async fn every_hold_notices_once_and_pending_or_attempted_never() {
         &item.source_message_ids,
     );
     let original = input_ingress::Original::with_ticket(item, ticket);
-    for hold in Hold::ALL {
-        assert!(input_ingress::held(&shared, &handle, channel, &original, hold).await);
+    for (index, hold) in Hold::ALL.into_iter().enumerate() {
+        assert_eq!(
+            input_ingress::held(&shared, &handle, channel, &original, hold).await,
+            index == 0
+        );
         assert!(
             !input_ingress::held(&shared, &handle, channel, &original, hold).await,
             "{hold:?} twice"
@@ -457,7 +585,7 @@ async fn every_hold_notices_once_and_pending_or_attempted_never() {
             text
         })
         .collect();
-    assert_eq!(texts, Hold::ALL.map(Hold::notice));
+    assert_eq!(texts, [Hold::ALL[0].notice()]);
     assert!(texts.iter().all(|text| text == "큐에 들어갔습니다"));
     let (key, _) = reserve(&handle, "attempted").await;
     write(&handle, &key).await;
@@ -500,11 +628,7 @@ async fn every_hold_notices_once_and_pending_or_attempted_never() {
         !input_ingress::held(&shared, &handle, channel, &unconfirmed, Hold::Modal).await,
         "held never notices Pending"
     );
-    assert_eq!(
-        said(&bodies).len(),
-        Hold::ALL.len(),
-        "Pending leaves no queue notice"
-    );
+    assert_eq!(said(&bodies).len(), 1, "Pending leaves no queue notice");
 }
 
 /// Pending keeps the original and its ticket: the worker holds its row, and the re-entry of the
