@@ -43,7 +43,8 @@ steps:
       keys:
         - "/model default"
         - C-m
-      key_interval_s: 0.35
+        - C-m
+      key_interval_s: 1.2
       mark_prompt_sent: false
   - wait_for_raw_discord_text: "머신 슬래시 명령"
     required: false
