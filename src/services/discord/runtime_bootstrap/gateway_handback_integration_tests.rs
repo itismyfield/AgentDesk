@@ -501,7 +501,10 @@ async fn cancelled_deferred_restart_keeps_the_serving_holders_lease_pg() {
     .await;
     // The restart request is cancelled: the runtime stays up and must keep serving.
     backup.shared.restart.legacy_deferred_rollback();
-    assert!(!backup.backend.is_finished(), "backend keeps serving across a cancelled restart");
+    assert!(
+        !backup.backend.is_finished(),
+        "backend keeps serving across a cancelled restart"
+    );
     assert!(
         observed.is_err() && fixture.holder().await.is_some(),
         "a cancelled deferred restart must leave the serving gateway holding its lease"

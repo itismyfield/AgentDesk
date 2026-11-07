@@ -664,6 +664,10 @@ pub(in crate::services) struct RestartLifecycle {
     /// Whether this provider already consumed its process-wide barrier slot.
     /// Cancellation restores only consumed slots, not merely acquired permits.
     pub(in crate::services) shutdown_slot_consumed: std::sync::atomic::AtomicBool,
+    pub(in crate::services) gateway_waiter_cancellation: std::sync::Mutex<
+        Option<crate::services::cluster::intake_worker_capabilities::GatewayWaiterCancellation>,
+    >,
+    pub(in crate::services) gateway_handback_health: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 /// #5485 — read-only view of the process-global shutdown flag for workers
@@ -708,6 +712,14 @@ impl RestartLifecycle {
     /// Deferred-restart rollback: clears in the original order, shutdown flag
     /// first, acknowledgement second.
     pub(in crate::services::discord) fn legacy_deferred_rollback(&self) {
+        if let Some(waiter) = self
+            .gateway_waiter_cancellation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            waiter.withdraw();
+        }
         self.shutting_down.store(false, Ordering::SeqCst);
         self.restart_pending.store(false, Ordering::SeqCst);
     }
