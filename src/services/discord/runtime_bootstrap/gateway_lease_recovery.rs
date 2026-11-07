@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::shared_state::gateway_lease_diagnostics::LeaseResult;
 
 pub(super) static STANDBY_PROMOTION_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -460,7 +461,6 @@ async fn release_observed_lease(
     shared: &SharedData,
     lease: crate::db::postgres::AdvisoryLockLease,
 ) -> bool {
-    use crate::services::discord::shared_state::gateway_lease_diagnostics::LeaseResult;
     let released = lease.unlock().await.is_ok();
     shared
         .restart
@@ -618,27 +618,38 @@ pub(super) async fn spawn_standby_gateway_retry(
             {
                 return;
             }
-            shared
-                .restart
-                .gateway_lease_diagnostics
-                .context(&pool, "standby");
+            let diagnostics = &shared.restart.gateway_lease_diagnostics;
+            diagnostics.context(&pool, "standby", provider.as_str());
             match super::gateway_lease::try_acquire_observing_handback(
                 &pool,
                 &token_hash,
                 &provider,
                 &mut handback_breaker,
-                &shared.restart.gateway_lease_diagnostics,
+                diagnostics,
             )
             .await
             {
                 Ok(Some(lease)) => {
                     if attempt_clean_standby_promotion(&shared, &provider, lease).await {
+                        diagnostics.adopted();
                         tracing::warn!(
                             provider = provider.as_str(),
                             "GATEWAY-LEASE: standby published a fenced graceful promotion restart"
                         );
                         return;
                     }
+                    let result = diagnostics
+                        .projection()
+                        .last_result
+                        .unwrap_or(LeaseResult::Err);
+                    diagnostics
+                        .failure(
+                            &pool,
+                            super::gateway_lease::discord_gateway_lock_id(&token_hash),
+                            result,
+                            false,
+                        )
+                        .await;
                 }
                 Ok(None) => {}
                 Err(error) => tracing::warn!(

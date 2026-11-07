@@ -429,33 +429,29 @@ async fn gateway_snapshot_wait_warning_uses_captured_live_timing() {
         .with_writer(move || file.try_clone().unwrap())
         .finish();
     let _subscriber = tracing::subscriber::set_default(subscriber);
-    let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy_with(
-        sqlx::postgres::PgConnectOptions::new_without_pgpass()
-            .socket(root.path().join("closed-postgres")),
-    );
-    pool.close().await;
+    let diagnostics = Diagnostics::default();
     let mut warning = expiry::PreferredWaitWarning::start();
     crate::config_live_reload::install(disk);
     tokio::time::advance(Duration::from_secs(59)).await;
-    warning.observe(&pool, 1, &ProviderKind::Claude).await;
+    warning.observe(&diagnostics, &ProviderKind::Claude);
     let mut logs = String::new();
     reader.seek(SeekFrom::Start(0)).unwrap();
     reader.read_to_string(&mut logs).unwrap();
     assert!(!logs.contains("preferred node has waited longer"));
     tokio::time::advance(Duration::from_secs(1)).await;
-    warning.observe(&pool, 1, &ProviderKind::Claude).await;
+    warning.observe(&diagnostics, &ProviderKind::Claude);
     logs.clear();
     reader.seek(SeekFrom::Start(0)).unwrap();
     reader.read_to_string(&mut logs).unwrap();
     assert_eq!(logs.matches("preferred node has waited longer").count(), 1);
     tokio::time::advance(Duration::from_secs(599)).await;
-    warning.observe(&pool, 1, &ProviderKind::Claude).await;
+    warning.observe(&diagnostics, &ProviderKind::Claude);
     logs.clear();
     reader.seek(SeekFrom::Start(0)).unwrap();
     reader.read_to_string(&mut logs).unwrap();
     assert_eq!(logs.matches("preferred node has waited longer").count(), 1);
     tokio::time::advance(Duration::from_secs(1)).await;
-    warning.observe(&pool, 1, &ProviderKind::Claude).await;
+    warning.observe(&diagnostics, &ProviderKind::Claude);
     logs.clear();
     reader.seek(SeekFrom::Start(0)).unwrap();
     reader.read_to_string(&mut logs).unwrap();
@@ -609,7 +605,7 @@ async fn gateway_observability_actual_try_error_and_setup_error_pg() {
         .await
         .unwrap();
     let diagnostics = Diagnostics::default();
-    diagnostics.context(&restricted, "standby");
+    diagnostics.context(&restricted, "standby", "claude");
     assert!(
         try_acquire_observing_handback(
             &restricted,
@@ -663,7 +659,7 @@ async fn gateway_observability_health_memory_only_pg() {
     shared
         .restart
         .gateway_lease_diagnostics
-        .context(&pool, "standby");
+        .context(&pool, "standby", "claude");
     let lease = try_acquire_observing_handback(
         &pool,
         "1234",
@@ -701,5 +697,131 @@ async fn gateway_observability_health_memory_only_pg() {
     pool.close().await;
     let snapshot = serde_json::to_value(health::build_health_snapshot(&registry).await).unwrap();
     assert!(snapshot.to_string().contains("\"tries\":1"));
+    fixture.drop().await;
+}
+
+#[tokio::test]
+async fn gateway_observability_c_different_pg_new_advisory_pg() {
+    let (_root, _live, _paths) = snapshot_root();
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let supplied_other = std::env::var("AGENTDESK_OBSERVABILITY_OTHER_PG").ok();
+    let other_base = supplied_other
+        .clone()
+        .unwrap_or_else(|| crate::db::postgres::postgres_test_database_url_base().unwrap());
+    let other = sqlx::PgPool::connect(&format!("{other_base}/postgres"))
+        .await
+        .unwrap();
+    let token = "discord_7465737467617465";
+    let held = try_acquire_discord_gateway_lease(&pool, token, &ProviderKind::Claude)
+        .await
+        .unwrap()
+        .unwrap();
+    let diagnostics = Diagnostics::default();
+    diagnostics.context(&pool, "standby", "claude");
+    assert!(
+        try_acquire_observing_handback(
+            &pool,
+            token,
+            &ProviderKind::Claude,
+            &mut observability_breaker(),
+            &diagnostics
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let old = diagnostics.projection();
+    assert!(old.holder.is_some());
+    diagnostics.context(&other, "startup", "claude");
+    let (_capture, reader) = observability_capture();
+    let second = try_acquire_observing_handback(
+        &other,
+        token,
+        &ProviderKind::Claude,
+        &mut observability_breaker(),
+        &diagnostics,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let targets: Vec<(i32, String)> = vec![
+        sqlx::query_as("SELECT inet_server_port(), current_database()")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        sqlx::query_as("SELECT inet_server_port(), current_database()")
+            .fetch_one(&other)
+            .await
+            .unwrap(),
+    ];
+    assert_ne!(targets[0], targets[1]);
+    if supplied_other.is_some() {
+        assert_ne!(
+            targets[0].0, targets[1].0,
+            "lane reproduction must use two actual PG servers"
+        );
+    }
+    eprintln!("actual PostgreSQL lock domains: {targets:?}");
+    let view = diagnostics.projection();
+    assert_ne!(view.pg_target, old.pg_target);
+    assert_eq!(view.last_result, Some(LeaseResult::Acquired));
+    assert_eq!(view.tries, 2);
+    assert!(
+        view.holder.is_none(),
+        "a previous PG holder is not evidence about this new grant"
+    );
+    assert!(view.snapshot_at.is_none());
+    assert_eq!(
+        serde_json::to_value(view).unwrap()["snapshot_status"],
+        "unknown"
+    );
+    second.unlock().await.unwrap();
+    held.unlock().await.unwrap();
+    other.close().await;
+    pool.close().await;
+    fixture.drop().await;
+    let logs = observability_logs(reader);
+    assert!(logs.contains("last_result=\"acquired\""));
+    assert!(logs.contains("pg_target="));
+}
+
+#[tokio::test]
+async fn gateway_observability_yield_wait_free_is_a_real_short_circuit_pg() {
+    let (_root, _live, _paths) = snapshot_root();
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    sqlx::query("INSERT INTO worker_nodes(instance_id,status,last_heartbeat_at,updated_at,capabilities) VALUES ('home','online',NOW(),NOW(),$1)")
+        .bind(json!({"discord_gateway":{"waiting_providers":["claude"]}})).execute(&pool).await.unwrap();
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    assert!(
+        preferred_gateway_is_waiting(&pool, "home", &ProviderKind::Claude).await,
+        "the fixture must publish a real preferred waiter"
+    );
+    let pref = GatewayPreference {
+        preferred_instance_id: "home".into(),
+        self_instance_id: "backup".into(),
+        yield_grace: Duration::from_secs(10),
+    };
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            yield_to_preferred_gateway(
+                &pool,
+                "7465737467617465",
+                &pref,
+                &ProviderKind::Claude,
+                &shared
+            )
+        )
+        .await
+        .is_err()
+    );
+    let view = shared.restart.gateway_lease_diagnostics.projection();
+    assert_eq!(view.tries, 0);
+    assert_eq!(view.last_result, Some(LeaseResult::RefusedWhileFree));
+    assert_eq!(view.snapshot_attempts, 1);
+    pool.close().await;
     fixture.drop().await;
 }

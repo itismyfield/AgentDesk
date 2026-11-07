@@ -143,6 +143,7 @@ async fn preferred_gateway_is_waiting(
 /// Discord unserved — the keepalive yield will hand it over later).
 async fn yield_to_preferred_gateway(
     pool: &sqlx::PgPool,
+    token_hash: &str,
     preference: &GatewayPreference,
     provider: &ProviderKind,
     shared: &Arc<SharedData>,
@@ -160,11 +161,7 @@ async fn yield_to_preferred_gateway(
     shared
         .restart
         .gateway_lease_diagnostics
-        .context(pool, "yield-wait");
-    shared
-        .restart
-        .gateway_lease_diagnostics
-        .record(LeaseResult::Waiting);
+        .context(pool, "yield-wait", provider.as_str());
     let deadline = tokio::time::Instant::now() + preference.yield_grace;
     while tokio::time::Instant::now() < deadline {
         if shared
@@ -174,6 +171,16 @@ async fn yield_to_preferred_gateway(
         {
             return;
         }
+        let diagnostics = &shared.restart.gateway_lease_diagnostics;
+        diagnostics.record(LeaseResult::Waiting);
+        diagnostics
+            .failure(
+                pool,
+                discord_gateway_lock_id(token_hash),
+                LeaseResult::Waiting,
+                true,
+            )
+            .await;
         tokio::time::sleep(GATEWAY_PREFERENCE_POLL_INTERVAL).await;
         if !preferred_gateway_is_waiting(pool, &preference.preferred_instance_id, provider).await {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -205,7 +212,7 @@ async fn acquire_as_preferred_gateway(
     handback_breaker: &mut GatewayHandbackBreaker,
 ) -> Result<Option<GatewayLeaseAcquisition>, String> {
     let diagnostics = &shared.restart.gateway_lease_diagnostics;
-    diagnostics.context(pool, "preferred-poll");
+    diagnostics.context(pool, "preferred-poll", provider.as_str());
     let waiter = GatewayWaiterGuard::new(provider.as_str());
     *shared
         .restart
@@ -275,18 +282,7 @@ async fn acquire_as_preferred_gateway(
                     );
                     return Ok(None);
                 }
-                // ~1 log/minute at a 5s poll: enough to see a stuck hand-off,
-                // quiet enough to leave running.
-                if attempts % 12 == 0 {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] ⏳ GATEWAY-LEASE: {} is the preferred gateway but the lease is held — waiting for the holder to yield",
-                        provider.display_name()
-                    );
-                }
-                long_wait
-                    .observe(pool, discord_gateway_lock_id(token_hash), provider)
-                    .await;
+                long_wait.observe(diagnostics, provider);
                 attempts += 1;
                 tokio::time::sleep(GATEWAY_PREFERENCE_POLL_INTERVAL).await;
             }
@@ -302,7 +298,7 @@ fn restart_request_is_pending() -> bool {
         .is_some_and(|root| restart_file_nonce(&root, "restart_pending").is_some())
 }
 
-fn discord_gateway_lock_id(token_hash: &str) -> i64 {
+pub(super) fn discord_gateway_lock_id(token_hash: &str) -> i64 {
     // `discord_token_hash()` returns "discord_<16hex>". Strip the literal prefix
     // so the first 16 chars we sample are actual hex; otherwise the `is_ascii_hexdigit`
     // check fails on non-hex letters in the prefix and every bot collapses onto the
@@ -357,6 +353,16 @@ pub(super) async fn try_acquire_observing_handback(
         diagnostics.record(LeaseResult::Err);
     }
     handback_breaker.observe(acquired.as_ref().map(Option::is_some).map_err(|_| ()));
+    let failure = match &acquired {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(LeaseResult::Held),
+        Err(_) => Some(LeaseResult::Err),
+    };
+    if let Some(result) = failure {
+        diagnostics
+            .failure(pool, discord_gateway_lock_id(token_hash), result, false)
+            .await;
+    }
     acquired
 }
 
@@ -430,7 +436,7 @@ pub(super) async fn run_bot_acquire_gateway_lease(
     match shared.pg_pool.as_ref() {
         Some(pool) => {
             let diagnostics = &shared.restart.gateway_lease_diagnostics;
-            diagnostics.context(pool, "startup");
+            diagnostics.context(pool, "startup", provider.as_str());
             // #4351: honor the configured gateway owner before racing for the lock.
             let preference = gateway_preference().await;
             let acquired = match preference.as_ref() {
@@ -446,9 +452,9 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                 }
                 Some(pref) => {
                     if !handback_breaker.suppressed() {
-                        yield_to_preferred_gateway(pool, pref, provider, shared).await;
+                        yield_to_preferred_gateway(pool, token_hash, pref, provider, shared).await;
                     }
-                    diagnostics.context(pool, "startup");
+                    diagnostics.context(pool, "startup", provider.as_str());
                     try_acquire_with_startup_orphan_reap(
                         pool,
                         token_hash,
@@ -481,6 +487,7 @@ pub(super) async fn run_bot_acquire_gateway_lease(
             };
             match acquired {
                 Ok(Some(lease)) => {
+                    diagnostics.adopted();
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
                         provider = provider.as_str(),
@@ -491,7 +498,7 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                     GatewayLeaseOutcome::Proceed(Some(lease))
                 }
                 Ok(None) => {
-                    diagnostics.context(pool, "standby");
+                    diagnostics.context(pool, "standby", provider.as_str());
                     run_startup_diagnostic_after_reconcile_barrier(
                         startup_reconcile_remaining.clone(),
                         startup_doctor_started.clone(),
@@ -721,10 +728,11 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                 // No PG pool (standalone/no-DB path): nothing to keepalive.
                 return;
             };
-            shared_for_lease
-                .restart
-                .gateway_lease_diagnostics
-                .context(pool, "reacquire");
+            shared_for_lease.restart.gateway_lease_diagnostics.context(
+                pool,
+                "reacquire",
+                provider_for_lease.as_str(),
+            );
             match try_acquire_observing_handback(
                 pool,
                 &token_hash,
@@ -741,6 +749,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         provider_for_lease.display_name()
                     );
                     gate.reacquired();
+                    shared_for_lease.restart.gateway_lease_diagnostics.adopted();
                     current_lease = Some(new_lease);
                 }
                 Err(error) => {
