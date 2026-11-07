@@ -886,14 +886,7 @@ pub(super) async fn build_health_snapshot_with_options(
     let first_reads = health_observation::first_reads(&providers, deadline).await;
     for (entry, observations) in providers.iter().zip(&first_reads) {
         let provider_probe = provider_probe::probe_provider(entry, observations);
-        if let Some(reason) = entry
-            .shared
-            .restart
-            .gateway_handback_health
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
+        if let Some(reason) = entry.shared.restart.gateway_handback_reason() {
             degraded_reasons.push(reason);
             status = status.worsen(HealthStatus::Degraded);
         }

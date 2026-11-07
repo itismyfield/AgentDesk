@@ -27,7 +27,7 @@ impl State {
 }
 
 pub(super) struct GatewayHandbackBreaker {
-    pub(super) health: Option<std::sync::Arc<std::sync::RwLock<Option<String>>>>,
+    pub(super) health: Option<super::super::shared_state::GatewayHandbackHealth>,
     provider: String,
     owner: String,
     path: Option<PathBuf>,
@@ -129,11 +129,14 @@ impl GatewayHandbackBreaker {
     fn publish_health(&self, state: &State) {
         if let Some(health) = &self.health {
             *health.write().unwrap_or_else(|e| e.into_inner()) = state.manual.then(|| {
-                format!(
-                    "provider:{}:gateway_handback_breaker:manual:empty={}:activations={}",
-                    self.provider,
-                    state.empty.len(),
-                    state.activations.len()
+                (
+                    std::time::Instant::now(),
+                    format!(
+                        "provider:{}:gateway_handback_breaker:manual:empty={}:activations={}",
+                        self.provider,
+                        state.empty.len(),
+                        state.activations.len()
+                    ),
                 )
             });
         }
@@ -182,6 +185,7 @@ impl GatewayHandbackBreaker {
             return;
         }
         let Ok(acquired) = acquired else {
+            self.publish_health(&State::default());
             return;
         };
         let Some(mut state) = self.read() else {
