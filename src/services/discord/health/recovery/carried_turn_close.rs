@@ -384,9 +384,8 @@ async fn unchanged_under_lock(
     Ok(())
 }
 
-/// A named input's receipt must really commit before its only durable row can be archived. A
-/// failed commit marks the row for the next settlement only when `mark` is set: an unproven input's
-/// mark would let a settlement remove the row without the notice its close owes.
+/// A named input's receipt must commit before its only row is archived. Only with `mark` does a
+/// failure mark the row for settlement, which would remove an unproven row without its notice.
 async fn commit_receipt(
     shared: &SharedData,
     provider: &ProviderKind,

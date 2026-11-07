@@ -613,9 +613,8 @@ type Resolution = crate::services::claude::ClaudeTuiSessionResolution;
 #[cfg(unix)]
 const REBIND_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// The session a submit reached when the pane's hooks verify another one before this submit's
-/// receipt lands in the observer's session (`/clear` adopted after the observer was built).
-/// `None` keeps the observer's; the old file growing proves nothing, as `/clear` appends to it.
+/// The session the pane's hooks verify before this submit's receipt lands in the observer's own;
+/// `None` keeps the observer's. The old file growing proves nothing: `/clear` appends to it.
 #[cfg(unix)]
 fn rebound_source(
     tmux: &str,
