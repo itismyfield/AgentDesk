@@ -642,7 +642,7 @@ pub(crate) fn owner_observer(
 type Resolution = crate::services::claude::ClaudeTuiSessionResolution;
 
 /// How long a submit with no receipt in the observer's session waits for a rebind before that
-/// session is read as before.
+/// session is read; a later rebind still moves the read once (`late_rebind`).
 #[cfg(unix)]
 const REBIND_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
