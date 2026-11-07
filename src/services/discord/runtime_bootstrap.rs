@@ -385,22 +385,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         GatewayLeaseOutcome::Proceed(Some(acquired)) => (Some(acquired.lease), acquired.waiter),
         GatewayLeaseOutcome::Proceed(None) => (None, None),
         GatewayLeaseOutcome::Standby => {
-            // Standby can execute full turns through the intake worker. Always
-            // register its SharedData so detailed health proves either the real
-            // active state or an explicit idle provider entry. This also makes
-            // a routing/config race fail closed instead of restoring the old
-            // health-blind empty registry.
-            register_standby_and_settle_reconcile(&health_registry, &provider, &shared).await;
-            o_writer_host::spawn_execution(&shared, &provider, Some(tui_o));
-            // Standby intake can execute a full turn, so it gets the same
-            // marker fence and acknowledgement path as a gateway runtime.
-            spawns::run_bot_spawn_execution_runtime_tasks(&shared, &provider);
-            run_bot_spawn_sigterm_handler(&shared, provider.clone());
-            run_bot_maybe_spawn_intake_worker(&shared, &provider);
-            spawn_standby_gateway_retry(
-                shared.clone(),
-                token_hash.clone(),
-                provider.clone(),
+            start_standby_runtime(
+                &health_registry,
+                &provider,
+                &shared,
+                tui_o,
+                &token_hash,
                 handback_breaker,
             )
             .await;
@@ -450,6 +440,32 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 // each helper runs the exact statements it replaced, in the same order,
 // and run_bot calls them in the same order with the same threaded state.
 // INITIALIZATION/SPAWN ORDER IS LOAD-BEARING — do not reorder. ──
+
+/// Standby start-up shared by `run_bot` and the restart acceptance test: the marker
+/// poller spawned here is what consumes this provider's shutdown-barrier slot.
+pub(in crate::services::discord) async fn start_standby_runtime(
+    health_registry: &Arc<health::HealthRegistry>,
+    provider: &ProviderKind,
+    shared: &Arc<SharedData>,
+    tui_o: &crate::services::tui_o::shadow::tap::TuiOConfig,
+    token_hash: &str,
+    handback_breaker: GatewayHandbackBreaker,
+) {
+    // Register first so detailed health never falls back to an empty, health-blind registry.
+    register_standby_and_settle_reconcile(health_registry, provider, shared).await;
+    o_writer_host::spawn_execution(shared, provider, Some(tui_o));
+    // Standby intake can execute a full turn, so it gets the gateway's marker fence and ack path.
+    spawns::run_bot_spawn_execution_runtime_tasks(shared, provider);
+    run_bot_spawn_sigterm_handler(shared, provider.clone());
+    run_bot_maybe_spawn_intake_worker(shared, provider);
+    spawn_standby_gateway_retry(
+        shared.clone(),
+        token_hash.to_string(),
+        provider.clone(),
+        handback_breaker,
+    )
+    .await;
+}
 
 /// Registers a standby and settles the reconcile it skips; promotion remains a fenced restart.
 pub(in crate::services::discord) async fn register_standby_and_settle_reconcile(
