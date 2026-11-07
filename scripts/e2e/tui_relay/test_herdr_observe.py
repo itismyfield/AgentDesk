@@ -735,6 +735,14 @@ class HerdrLocalKeys(unittest.TestCase):
                 self.assertIn(reason, str(error))
                 self.assertEqual(calls, [["herdr", "pane", "list"]])
 
+    def test_text_with_control_characters_writes_nothing(self):
+        for text in ("\x03", "x\r/model default", "\x1b", "\x00", "\x7f"):
+            with self.subTest(text=repr(text)):
+                error, calls = self.send([pane("w1A:p1", self.WORKSPACE)], ["ok", text, "C-m"])
+                self.assertIsInstance(error, driver.assertions.AssertionError)
+                self.assertIn("control character", str(error))
+                self.assertEqual(calls, [["herdr", "pane", "list"]])
+
 
 class RestartObserveOnly(unittest.TestCase):
     def setUp(self):

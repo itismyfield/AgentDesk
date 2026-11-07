@@ -50,9 +50,11 @@ steps:
     required: false
     timeout_s: 10
   - send_discord_prompt: "E2E E64 after model. Output one line made by joining '[E2E:E64:{run_id}:' and 'PROBE]' with nothing between them."
+    post_send_sleep_s: 0
+  # The wait clock starts after the send; 5s of the 60s DoD covers the send ack and the last fetch.
   - wait_for_discord_text: "[E2E:E64:{run_id}:PROBE]"
     relay_author: provider
-    timeout_s: 60
+    timeout_s: 55
   - wait_idle_s: 3
   - assert_health:
       timeout_s: 45

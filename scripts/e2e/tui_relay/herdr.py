@@ -29,6 +29,8 @@ HERDR_BIN = "/opt/homebrew/bin/herdr"
 HERDR_KEYS = {"C-m": "enter", "Enter": "enter", "Escape": "esc", "C-c": "ctrl+c", "C-u": "ctrl+u",
               "C-e": "ctrl+e", "C-s": "ctrl+s", "Left": "left", "Right": "right", "BSpace": "backspace"}
 TMUX_KEY_NAME = re.compile(r"^(?:[CMS]-\S+|BTab|DC|Delete|Down|End|Home|IC|NEnter|PageDown|PageUp|Space|Tab|Up)$")
+# send-text hands bytes to the PTY verbatim, so a raw CR/ESC/Ctrl-C in text would act as a key.
+CONTROL_CHAR = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def hosts_channel(health, channel_id):
@@ -52,11 +54,13 @@ def agent_pane(panes, *, agent_workspace, agent):
 
 
 def key_argv(pane_id, key, *, herdr_bin=HERDR_BIN):
-    """One Herdr call per scenario key: known key names as keys, anything else as literal text."""
+    """One Herdr call per scenario key: known key names as keys, other control-free text as literal text."""
     if key in HERDR_KEYS:
         return [herdr_bin, "pane", "send-keys", pane_id, HERDR_KEYS[key]]
     if TMUX_KEY_NAME.match(key):
         raise assertions.AssertionError(f"tmux key {key!r} has no Herdr mapping")
+    if CONTROL_CHAR.search(key):
+        raise assertions.AssertionError(f"text {key!r} carries a control character; send it as a key name")
     return [herdr_bin, "pane", "send-text", pane_id, key]
 
 

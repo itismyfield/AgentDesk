@@ -1048,6 +1048,7 @@ STEP_OPTIONS = {
     "inject_discord_failure": {"operation", "count"}, "clear_discord_failure": {"operation"},
     "send_keys_sequence": {"keys", "key_interval_s", "interval_s", "mark_prompt_sent", "diagnostic_prompt", "sleep_s"},
     "assert_health": {"timeout_s", "poll_interval_s", "global_active_max", "global_finalizing_max", "forbid_degraded_reasons", "require_status", "allowed_degraded_reasons"},
+    "assert_turn_active": {"prompt_sends", "marker_absent"},
 }
 ASSERTION_OPTIONS = {
     **{k: None for k in ("text_present", "provider_text_present", "raw_text_present", "no_duplicate_marker", "ordered_text_present",
@@ -1109,6 +1110,12 @@ def validate_scenario_schema(scenario):
                 raise ValueError(f"{action} requires text")
             if action in {"no_placeholder_left", "no_duplicate_content", "no_control_chars", "no_resume_prompt_chrome", "no_suppressed_label_chrome", "no_status_chrome"} and value is not True:
                 raise ValueError(f"{action} must be true")
+            if action == "assert_turn_active":
+                sends, marker = value.get("prompt_sends"), value.get("marker_absent")
+                if (not isinstance(sends, list) or not sends
+                        or any(type(n) is not int or n < 1 for n in sends)
+                        or not isinstance(marker, str) or not marker.strip()):
+                    raise ValueError("assert_turn_active needs prompt_sends (1-based send numbers) and marker_absent")
             if "post_send_sleep_s" in entry:
                 delay = entry["post_send_sleep_s"]
                 if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
@@ -2374,10 +2381,10 @@ def _assert_health_once(
     }
 
 
-def _assert_health_target_idle(
+def _health_target_mailbox(
     detail: dict[str, Any], *, channel_id: str | None, cell: str | None
 ) -> dict[str, Any]:
-    """Validate existing busy witnesses, without inferring a target finalizer count."""
+    """The one detail-health mailbox of this cell's provider on `channel_id`; zero or several fail."""
     if (
         not isinstance(channel_id, str) or not channel_id.isdecimal()
         or not channel_id.isascii() or int(channel_id) <= 0
@@ -2397,7 +2404,15 @@ def _assert_health_target_idle(
             f"assert_health requires exactly one target mailbox for {provider}:{channel_id}; "
             f"got {len(targets)}"
         )
-    mailbox = targets[0]
+    return targets[0]
+
+
+def _assert_health_target_idle(
+    detail: dict[str, Any], *, channel_id: str | None, cell: str | None
+) -> dict[str, Any]:
+    """Validate existing busy witnesses, without inferring a target finalizer count."""
+    mailbox = _health_target_mailbox(detail, channel_id=channel_id, cell=cell)
+    provider = cell_provider(cell)
     relay = mailbox.get("relay_health")
     if not isinstance(relay, dict):
         raise assertions.AssertionError("assert_health target relay_health must be an object")
@@ -2436,6 +2451,23 @@ def _assert_health_target_idle(
         "channel_id": channel_id, "provider": provider, "mailboxes_seen": 1,
         "status": "idle", "mailbox_idle_evidence": _mailbox_idle_evidence(mailbox),
     }
+
+
+def _assert_target_turn_active(
+    detail: dict[str, Any], *, channel_id: str | None, cell: str | None, allowed_ids: set[str]
+) -> dict[str, Any]:
+    """The target mailbox is still busy on a turn opened by one of this run's Discord sends."""
+    mailbox = _health_target_mailbox(detail, channel_id=channel_id, cell=cell)
+    reasons = _mailbox_busy_reasons(mailbox)
+    active = mailbox.get("active_user_message_id")
+    if not reasons:
+        raise assertions.AssertionError(
+            f"assert_turn_active: target {cell}:{channel_id} is idle; the held turn already ended")
+    if active is None or str(active) not in allowed_ids:
+        raise assertions.AssertionError(
+            f"assert_turn_active: active_user_message_id={active!r} is not one of {sorted(allowed_ids)}; "
+            f"busy={reasons}")
+    return {"channel_id": channel_id, "active_user_message_id": str(active), "busy": reasons}
 
 
 def _as_nonnegative_int(value: Any) -> int:
@@ -4281,6 +4313,26 @@ def run_one_cell(
             record.setdefault("health_assertions", []).append(
                 assert_health(client.base_url, params, channel_id=channel_id, cell=cell)
             )
+        elif "assert_turn_active" in step:
+            params = step["assert_turn_active"]
+            sends = record.get("prompt_sends") or []
+            allowed: set[str] = set()
+            for number in params["prompt_sends"]:
+                if number > len(sends) or not sends[number - 1].get("message_id"):
+                    raise assertions.AssertionError(
+                        f"assert_turn_active: prompt send {number} has no acknowledged message id")
+                allowed.add(str(sends[number - 1]["message_id"]))
+            check = _assert_target_turn_active(
+                _read_health_detail(client.base_url), channel_id=channel_id, cell=cell, allowed_ids=allowed)
+            # Read Discord after the busy witness so a marker relayed in between still fails the check.
+            marker = str(params["marker_absent"]).replace("{run_id}", run_id)
+            rows = client.fetch_messages(channel_id, after_id=after_id, limit=100)
+            _ingest_observed(rows)
+            author = assertions.provider_bot_id(cell_provider(cell))
+            if any(marker in (assertions.author_relay_body(row, author) or "") for row in rows):
+                raise assertions.AssertionError(
+                    f"assert_turn_active: {marker} already relayed; the held turn ended")
+            record.setdefault("turn_active_checks", []).append(check)
         elif "kill_pane" in step:
             thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
             session_name = cell_session_name(cell, thread_channel_id=thread_channel_id)

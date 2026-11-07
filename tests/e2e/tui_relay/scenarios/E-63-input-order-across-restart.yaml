@@ -10,7 +10,8 @@ acceptance_criteria:
   - Start a Discord turn that prints HOLD and then keeps the pane busy in a foreground sleep.
   - After HOLD, send Discord inputs A then B while that turn is still busy.
   - Restart dcserver right after B, before the busy turn can finish.
-  - After the restart, A and B are each answered exactly once (no loss, no duplicate) and A precedes B.
+  - Before A and again right before the restart, the target mailbox is still busy on the HOLD send and DONE has not been relayed.
+  - After the restart, A and B are each answered exactly once (no loss, no duplicate), after DONE, A before B.
   - The target mailbox drains back to idle with queue 0.
 notes: |
   Human Discord input joins a busy turn at once, so A and B may already be in
@@ -21,6 +22,9 @@ notes: |
   prompt carries the full marker. Exactly once is the conjunction of
   provider_text_present (>=1), no_duplicate_marker (<=1 message) and a
   chrome_count regex that forbids two copies inside one message.
+  The second busy check also accepts A or B as the active message, in case
+  intake merges them into the running turn; DONE still unrelayed keeps it the
+  HOLD turn. Queued inputs run after that turn, so the order is HOLD, DONE, A, B.
   The restart must kill the busy turn's server, so use the driver's default
   kickstart, not a draining wrapper that waits for live turns to finish.
 report_marker_counts:
@@ -40,9 +44,16 @@ steps:
     relay_author: provider
     timeout_s: 180
   - wait_idle_s: 2
+  - assert_turn_active:
+      prompt_sends: [1]
+      marker_absent: "[E2E:E63:{run_id}:DONE]"
   - send_discord_prompt: "E2E E63 input A. Output one line made by joining '[E2E:E63:{run_id}:' and 'A]' with nothing between them."
     post_send_sleep_s: 1
   - send_discord_prompt: "E2E E63 input B. Output one line made by joining '[E2E:E63:{run_id}:' and 'B]' with nothing between them."
+    post_send_sleep_s: 1
+  - assert_turn_active:
+      prompt_sends: [1, 2, 3]
+      marker_absent: "[E2E:E63:{run_id}:DONE]"
   # The run picks dev or release from --base-url or --restart-target-override.
   - restart_dcserver:
       # Same bulk inventory baseline as E-9; any other degraded reason still fails.
@@ -103,6 +114,7 @@ assertions:
       exact: 0
   - ordered_text_present:
       - "[E2E:E63:{run_id}:HOLD]"
+      - "[E2E:E63:{run_id}:DONE]"
       - "[E2E:E63:{run_id}:A]"
       - "[E2E:E63:{run_id}:B]"
   - no_duplicate_content: true

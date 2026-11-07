@@ -439,6 +439,12 @@ require `status: healthy`, forbid degraded reason substrings such as
 settled so counter underflow and stuck-finalizing regressions are visible in the
 E2E report.
 
+`assert_turn_active` is the opposite probe: the target mailbox in
+`/api/health/detail` must still be busy with `active_user_message_id` equal to
+one of the listed `prompt_sends` (1-based, this run's acknowledged sends), and
+the provider must not yet have relayed `marker_absent`. `E-63` uses it to prove
+A, B and the restart land while the HOLD turn is still running.
+
 Control-flow steps include `cancel_turn` (POSTs
 `/api/turns/<channel_id>/cancel?force=<bool>` and remains destructive-gated),
 `send_prompts_concurrent` (starts multiple prompt dispatches without the normal

@@ -4348,5 +4348,21 @@ class E37CodexModelLocalControl(unittest.TestCase):
                 self.run_e37(fault)
 
 
+
+class TurnActiveProbe(unittest.TestCase):
+    """E-63 proceeds only while the target is still busy on the listed send."""
+
+    def test_busy_on_listed_send_passes_idle_or_other_turn_fails(self):
+        hold = "1510404747188768880"
+        probe = lambda box, ids: driver._assert_target_turn_active(  # noqa: E731
+            {"mailboxes": [box]}, channel_id="99", cell="claude-tui", allowed_ids=ids)
+        self.assertEqual(probe(_busy_mailbox(), {hold})["active_user_message_id"], hold)
+        for label, box, ids, reason in (
+                ("turn already ended", _idle_mailbox("99", "claude"), {hold}, "is idle"),
+                ("another message's turn", _busy_mailbox(), {"1510404747188768881"}, "is not one of")):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(assertions.AssertionError, reason):
+                    probe(box, ids)
+
 if __name__ == "__main__":
     unittest.main()
