@@ -584,7 +584,17 @@ pub(crate) fn owner_observer(
     let fallback = std::fs::metadata(&resolved.transcript_path).ok()?.len();
     let hooks = crate::services::claude_tui::hook_server::subscribe_hook_events();
     let (started_at, tmux, prompt) = (chrono::Utc::now(), tmux.to_string(), prompt.to_string());
+    let (dir, requested) = (working_dir.to_path_buf(), at.1.map(str::to_owned));
+    let home = overlay.home;
     Some(Box::new(move || {
+        let rebound = rebound_source(&tmux, (&resolved, fallback), &cancel, || {
+            let at = (dir.as_path(), requested.as_deref(), home.as_deref());
+            let live = (true, move || Ok(matches));
+            let now = crate::services::claude::resolve_live_claude_tui_session(&tmux, at, live);
+            now.ok().map(|live| live.resolution)
+        });
+        // A rebound session is read from this submit's time, never the old file's offset.
+        let (resolved, fallback) = rebound.map_or((resolved, fallback), |now| (now, 0));
         let host = FollowupHost::legacy_tmux(&tmux);
         let path = resolved.transcript_path.display().to_string();
         let transcript = (resolved.transcript_path.as_path(), path.as_str());
@@ -593,6 +603,42 @@ pub(crate) fn owner_observer(
         let observed = observe_submitted(&host, at, transcript, to, (hooks, started_at, fallback));
         owner_settles(observed, &sender)
     }))
+}
+
+#[cfg(unix)]
+type Resolution = crate::services::claude::ClaudeTuiSessionResolution;
+
+/// The session a submit reached when the pane's hooks verified another one before the observer's
+/// own transcript grew (`/clear` adopted after the observer was built); `None` keeps the observer's.
+#[cfg(unix)]
+fn rebound_source(
+    tmux: &str,
+    (resolved, fallback): (&Resolution, u64),
+    cancel: &CancelToken,
+    rebind: impl Fn() -> Option<Resolution>,
+) -> Option<Resolution> {
+    use std::sync::atomic::Ordering;
+    let mut dead_reads = 0;
+    loop {
+        let grew = std::fs::metadata(&resolved.transcript_path).is_ok_and(|m| m.len() > fallback);
+        if grew || cancel.cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        if let Some(now) = rebind()
+            .filter(|now| now.session_id != resolved.session_id && now.transcript_path.is_file())
+        {
+            return Some(now);
+        }
+        // A dead pane leaves the observer's own read to report it, as before this wait.
+        dead_reads = match crate::services::claude_tui::host_input::legacy_pane_alive(tmux) {
+            true => 0,
+            false => dead_reads + 1,
+        };
+        if dead_reads >= 3 {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// A paste into a running turn read as its caller's answer, from the user row the attempt took to

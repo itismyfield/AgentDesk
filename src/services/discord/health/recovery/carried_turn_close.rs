@@ -157,6 +157,7 @@ async fn try_close(
     let generation = shared.restart.current_generation;
     let row = inflight::load_inflight_state(provider, channel.get());
     let remembered = archived().get(&channel.get()).cloned();
+    let mut unverified_input = false;
     let carried = match (row, remembered) {
         (Some(row), _) => {
             if !discord::tui_direct_pending_start::inflight_generation_precedes_current(
@@ -164,12 +165,9 @@ async fn try_close(
             ) {
                 return Err(kept("current_generation"));
             }
-            if row.managed_submission.is_some()
+            unverified_input = row.managed_submission.is_some()
                 && !row.readopted_from_inflight
-                && !inflight::historical_input_verified(&row)
-            {
-                return Err(kept("unverified_carried_input"));
-            }
+                && !inflight::historical_input_verified(&row);
             Carried::Row(Box::new(row))
         }
         (None, Some(target)) => Carried::Archived(Box::new(target)),
@@ -202,6 +200,10 @@ async fn try_close(
             no.reason, no.owed_inputs
         ))
     })?;
+    // An unproven input closes only when its row names a session the pane no longer runs.
+    if unverified_input && !matches!(&carried, Carried::Row(row) if session_superseded(row, &end)) {
+        return Err(kept("unverified_carried_input"));
+    }
     o_delivered_through(channel, &end).await.map_err(kept)?;
     // Injection holds this lock through its paste and settlement; a busy lock is this tick's no-op.
     let Ok(transition) = shared.session_transition_lock(channel).try_lock_owned() else {
@@ -217,6 +219,9 @@ async fn try_close(
         #[cfg(test)]
         tests::pause("receipt", channel.get()).await;
         unchanged_under_lock(shared, provider, channel, &end, &before).await?;
+        if unverified_input {
+            tell_unverified_close(shared, provider, row).await?;
+        }
     }
     let target = match carried {
         Carried::Row(row) => {
@@ -412,6 +417,37 @@ async fn commit_receipt(
         stamp,
     );
     Err(kept("receipt_not_committed"))
+}
+
+/// The row was bound to a session other than the one whose transcript the pane ended on.
+fn session_superseded(row: &InflightTurnState, end: &ClosedBoundary) -> bool {
+    let current = end.source.file_stem().and_then(|stem| stem.to_str());
+    row.session_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|session| !session.is_empty() && current != Some(session))
+}
+
+/// The one notice an unproven input's close owes its channel; the outbox dedupe keeps a repeat
+/// pass, restart or concurrent close to one post, and a failed enqueue keeps the row.
+async fn tell_unverified_close(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    row: &InflightTurnState,
+) -> Result<(), Kept> {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return Err(kept("unverified_close_notice_no_pool"));
+    };
+    let turn = (row.effective_finalizer_turn_id(), row.turn_nonce.as_deref());
+    discord::queue_io::retained_notice::carried_unverified_closed(
+        pool,
+        provider.as_str(),
+        row.channel_id,
+        turn,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| kept(format!("unverified_close_notice:{error}")))
 }
 
 /// O, asked after the native end was read, owes nothing and captured that source through it.
