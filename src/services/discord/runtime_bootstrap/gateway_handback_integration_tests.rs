@@ -735,6 +735,30 @@ async fn handback_health(registry: &health::HealthRegistry) -> Vec<String> {
 
 #[tokio::test]
 async fn handback_health_restores_legacy_manual_state_and_clears_after_observed_deletion_pg() {
+    // Process-wide writer alarms from other tests must not mask the provider's status transition.
+    if std::env::var_os("AGENTDESK_HANDBACK_HEALTH_CHILD").is_none() {
+        let name = concat!(
+            "services::discord::runtime_bootstrap::gateway_handback_integration_tests::",
+            "handback_health_restores_legacy_manual_state_and_clears_after_observed_deletion_pg"
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("AGENTDESK_HANDBACK_HEALTH_CHILD", "1")
+            .output()
+            .expect("spawn isolated health snapshot test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+            "{stdout}"
+        );
+        print!("{stdout}");
+        return;
+    }
     let Some(fixture) = Fixture::new().await else {
         return;
     };
