@@ -439,6 +439,12 @@ require `status: healthy`, forbid degraded reason substrings such as
 settled so counter underflow and stuck-finalizing regressions are visible in the
 E2E report.
 
+`assert_turn_active` is the opposite probe: the target mailbox in
+`/api/health/detail` must still be busy with `active_user_message_id` equal to
+one of the listed `prompt_sends` (1-based, this run's acknowledged sends), and
+the provider must not yet have relayed `marker_absent`. `E-63` uses it to prove
+A, B and the restart land while the HOLD turn is still running.
+
 Control-flow steps include `cancel_turn` (POSTs
 `/api/turns/<channel_id>/cancel?force=<bool>` and remains destructive-gated),
 `send_prompts_concurrent` (starts multiple prompt dispatches without the normal
@@ -449,7 +455,13 @@ By default it uses one tmux `send-keys` call; scenarios can set
 `key_interval_s` to send the same ordered key list one key at a time when a TUI
 composer must process a control key before Enter. `E-21` uses that mode to
 cover direct TUI input where a stale draft is cleared by a real control key
-before the submitted prompt is relayed.
+before the submitted prompt is relayed. When `/api/health/detail` lists the
+channel under `herdr.configured_channels`, the same keys go to the one Herdr
+pane running the cell's provider in `workspaces/<cell agent>`
+(`herdr pane send-keys` for mapped key names, `herdr pane send-text` for text);
+no such pane or more than one fails the step. `wait_for_raw_discord_text` with
+`required: false` records the text under `observed_notices` instead of failing
+when it does not arrive.
 
 Observation assertions now include negative and edit-aware primitives:
 `raw_text_absent`, `marker_absent`, `chrome_count`,
