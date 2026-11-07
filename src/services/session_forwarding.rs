@@ -1047,6 +1047,12 @@ mod tests {
 
     #[tokio::test]
     async fn redirect_is_not_followed_and_bearer_never_reaches_redirect_target() {
+        for operation in FORWARDERS {
+            redirect_is_not_followed_by(operation).await;
+        }
+    }
+
+    async fn redirect_is_not_followed_by(operation: &str) {
         let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind redirect listener");
@@ -1092,10 +1098,19 @@ mod tests {
             cluster_instance_id: Some("leader".to_string()),
         };
         let target = test_target("worker-a", &format!("http://{redirect_addr}"));
-        let (status, _) = super::forward_cancel_turn(&state, &target, "42", false).await;
-        redirect.await.expect("redirect server task");
-        assert_eq!(status, axum::http::StatusCode::FOUND);
-        assert!(destination.await.expect("destination task").is_err());
+        let (status, _) = tokio::time::timeout(
+            EXCHANGE_DEADLINE,
+            call_forwarder(operation, &state, &target),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{operation} got no response"));
+        tokio::time::timeout(EXCHANGE_DEADLINE, redirect)
+            .await
+            .unwrap_or_else(|_| panic!("{operation} sent no request"))
+            .expect("redirect server task");
+        assert_eq!(status, axum::http::StatusCode::FOUND, "{operation}");
+        let followed = destination.await.expect("destination task");
+        assert!(followed.is_err(), "{operation} followed the redirect");
     }
 
     /// Every session forwarder, named by the operation it reports.

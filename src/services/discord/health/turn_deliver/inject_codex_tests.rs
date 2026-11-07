@@ -1060,8 +1060,8 @@ async fn queued_codex_preserves_each_gate_and_live_discord_catchup_scope_pg() {
     );
 }
 
-/// With the mode and queued gate open, Claude takes a queued head; Codex stays closed until its own
-/// switch opens.
+/// With the mode, queued and live channel gates open, Claude takes a queued head; Codex stays closed
+/// until its own queued switch opens.
 #[test]
 fn queued_head_gate_opens_for_claude_and_stays_closed_for_unswitched_codex() {
     let channel = ChannelId::new(7_867_301);
@@ -1071,6 +1071,11 @@ fn queued_head_gate_opens_for_claude_and_stays_closed_for_unswitched_codex() {
         PathBuf::from("/nonexistent/tmux"),
     );
     test_hook::set_queued_head(channel.get(), true);
+    let _gate = crate::services::discord::router::busy_inject_support::open_gate(channel.get());
+    assert!(
+        crate::services::discord::router::live_intake_inject_covers(channel, None),
+        "the live channel gate must be open"
+    );
     for (provider, ready) in [(ProviderKind::Claude, true), (ProviderKind::Codex, false)] {
         assert_eq!(
             inject::Origin::queued_head_ready(&provider, channel),
