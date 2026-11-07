@@ -112,20 +112,22 @@ async fn gateway_observability_snapshot_timeout_preserves_held_and_budget_pg() {
                 ),
             ),
             tokio::time::timeout(Duration::from_secs(3), async {
-                while block_query {
-                    let waiting: bool = sqlx::query_scalar(
-                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                if block_query {
+                    loop {
+                        let waiting: bool = sqlx::query_scalar(
+                            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
                          WHERE pid = $1 AND wait_event = 'advisory'
                            AND query LIKE 'SELECT l.pid,%')",
-                    )
-                    .bind(pid)
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-                    if waiting {
-                        break;
+                        )
+                        .bind(pid)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                        if waiting {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }),
         );
