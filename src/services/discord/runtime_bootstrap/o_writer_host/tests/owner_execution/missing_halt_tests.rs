@@ -141,6 +141,8 @@ async fn scenario(role: &str, wake: Wake) {
     )
     .await;
     let discord = Discord::new().await;
+    let server = gateway_context(&shared, channel).await;
+    let _rest = crate::services::discord::shared_state::test_rest::install(discord.http.clone());
     let owner = HostedOwner {
         provider: "claude".into(),
         discord_token_hash: shared.token_hash.clone(),
@@ -176,7 +178,7 @@ async fn scenario(role: &str, wake: Wake) {
         std::fs::hard_link(path, &saved).unwrap();
     });
     crate::services::tui_o::channel_policy::install(&config).unwrap();
-    let original = retained_bytes(root.path(), channel, &source);
+    let mut original = retained_bytes(root.path(), channel, &source);
     let log = Log::default();
     if wake == Wake::EarlySource {
         *log.1.lock().unwrap() = Some((saved.clone(), source.path.clone()));
@@ -213,6 +215,22 @@ async fn scenario(role: &str, wake: Wake) {
         std::fs::rename(&source.path, &saved).unwrap();
     }
     until(|| log.count("writer stopped and stays stopped") == 1).await;
+    if wake == Wake::RuntimeSource {
+        let held = retained_bytes(root.path(), channel, &source);
+        for (path, hash) in &original {
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                assert_eq!(
+                    held.get(path),
+                    Some(hash),
+                    "live capture must preserve its cursor"
+                );
+            }
+        }
+        original = held;
+    }
     let tui_o = TuiOConfig::default();
     for _ in 0..if wake == Wake::EarlySource { 0 } else { 4 } {
         super::super::super::super::super::owner_cleanup::refresh_writers(
@@ -223,6 +241,25 @@ async fn scenario(role: &str, wake: Wake) {
         .await;
         tokio::time::sleep(Duration::from_millis(600)).await;
     }
+    let stable = activity::reading_now(
+        &shared,
+        &ProviderKind::Claude,
+        serenity::ChannelId::new(channel),
+    )
+    .await;
+    assert_eq!(stable.observed.activity, Activity::Unknown);
+    eprintln!(
+        "MISSING_HALT_STABLE role={role} wake={wake:?} boots={} halts={} generation={:?} presence={:?}",
+        log.count("stage=\"hosted\" status=\"start\""),
+        log.count("writer stopped and stays stopped"),
+        host::process_readiness().hosted_by(channel),
+        stable.observed
+    );
+    assert_eq!(
+        log.count("writer stopped and stays stopped"),
+        1,
+        "unchanged Missing/Unknown must halt once"
+    );
     assert_eq!(
         host::process_readiness().hosted_by(channel),
         Some(generation),
@@ -267,6 +304,7 @@ async fn scenario(role: &str, wake: Wake) {
         assert!(discord.posts.lock().unwrap().is_empty());
         gate.lost();
         eprintln!("MISSING_HALT_CASE role={role} wake={wake:?} PG=real skip=0");
+        server.abort();
         pool.close().await;
         return;
     }
@@ -422,6 +460,7 @@ async fn scenario(role: &str, wake: Wake) {
         "MISSING_HALT_CASE role={role} source_returns={source_returns} generation={generation} boots={} skip=0 PG=real",
         log.count("stage=\"hosted\" status=\"start\"")
     );
+    server.abort();
     pool.close().await;
 }
 

@@ -56,7 +56,7 @@ impl<B: BindingEvents> Sources<B> {
                     if kind == SourceAnomalyKind::Missing {
                         return Err(WriterAlarm::HaltedMissingSource {
                             source: reader.source.clone(),
-                            detail,
+                            detail: format!("source {kind:?}: {detail}"),
                         });
                     }
                     return Err(halt(format!("source {kind:?}: {detail}")));

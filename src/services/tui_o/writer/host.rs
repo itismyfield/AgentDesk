@@ -870,7 +870,7 @@ impl<I: HostIo> Hosted<'_, I> {
         let mut writer = unless_stopped(&self.stopping, hosted).await?;
         phase.finish("ok");
         writer.boot = boot;
-        let mut writer = writer.with_repost_stop(self.stopping.clone());
+        let writer = writer.with_repost_stop(self.stopping.clone());
         let (stop_tx, stop) = watch::channel(false);
         let (resumed_tx, resumed) = watch::channel(false);
         // Each start publishes its own count; the ended actor's closed one reads as `None`.

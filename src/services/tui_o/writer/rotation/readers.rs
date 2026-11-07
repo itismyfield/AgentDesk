@@ -747,7 +747,8 @@ fn missing_reader(reader: &Reader) -> bool {
 }
 
 fn reopen_halt(source: &SourceId, failed: Reopen) -> WriterAlarm {
-    if matches!(&failed, Reopen::Unread(error) if error.kind() == std::io::ErrorKind::NotFound)
+    if let Reopen::Unread(error) = &failed
+        && error.kind() == std::io::ErrorKind::NotFound
         && matches!(
             Fingerprint::path(source),
             Err((SourceAnomalyKind::Missing, _))
@@ -755,7 +756,7 @@ fn reopen_halt(source: &SourceId, failed: Reopen) -> WriterAlarm {
     {
         WriterAlarm::HaltedMissingSource {
             source: source.clone(),
-            detail: "source reopen: missing source".into(),
+            detail: format!("source reopen: {error}"),
         }
     } else {
         failed.halt()
