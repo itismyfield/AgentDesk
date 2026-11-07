@@ -168,9 +168,17 @@ async fn a_stop_settle_on_either_side_of_the_purge_capture_resends_nothing() {
             let stopper = handle.clone();
             let settled = move || async move { settle(stopper).await.unwrap() };
             let stale = purge_v2(&handle, persistence.clone(), settled).await;
-            assert!(
-                matches!(stale, Some(None)),
-                "a capture the stop outdated purges nothing and reports no purge: {stale:?}"
+            let kept = (stale.as_ref().and_then(Option::as_ref)).map(|purge| {
+                (
+                    purge.queued_head_refused,
+                    purge.drained,
+                    purge.queue_len_after,
+                )
+            });
+            assert_eq!(
+                kept,
+                Some((true, 0, 2)),
+                "a capture the stop outdated purges nothing and answers only the kept depth: {stale:?}"
             );
             let owed = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.owed_drops()));
             assert!(
@@ -205,4 +213,72 @@ async fn a_stop_settle_on_either_side_of_the_purge_capture_resends_nothing() {
             "{case}: the stopped head stays in custody"
         );
     }
+}
+
+/// A cancel without a session names another queue file than the owner's, so its purge is refused;
+/// the depth the owner measured while refusing still answers it, as the kept count, never as empty.
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_v2_purge_answers_with_the_depth_the_owner_kept() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (n, queued) in [0u64, 2].into_iter().enumerate() {
+        let (provider, channel) = (ProviderKind::Claude, ChannelId::new(7_892_001 + n as u64));
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        let owned = QueuePersistenceContext::new(&provider, "owner-token", None);
+        let (path, namespace) = v2_queue(&owned, channel).unwrap();
+        handle.v2_adopt(path, namespace).await.unwrap();
+        for id in 0..queued {
+            let item = item(8_000_000_000_007_892_001 + id, channel.get());
+            let enqueued = handle.v2_request(move |slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                owner.enqueue_fixture(&item).map_err(|e| format!("{e:?}"))
+            });
+            assert_eq!(enqueued.await, Ok(true));
+        }
+        let target = TurnLifecycleTarget {
+            provider: Some(provider),
+            channel_id: Some(channel),
+            tmux_name: String::new(),
+        };
+        let purged = force_purge_channel_mailbox(None, &target, None).await;
+        let answered = purged.map(|counts| (counts.drained, counts.queue_len_after));
+        assert_eq!(
+            answered,
+            Some((0, Some(queued as usize))),
+            "queued {queued}: the refused purge drains nothing and answers the kept depth"
+        );
+        let front = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.front()));
+        assert_eq!(
+            front.await.unwrap().is_some(),
+            queued > 0,
+            "queued {queued}: kept"
+        );
+    }
+}
+
+/// An owner gone between the capture and the checked purge measured no depth, so the purge
+/// answers none rather than an empty queue.
+#[tokio::test(flavor = "current_thread")]
+async fn a_purge_whose_owner_left_after_the_capture_answers_no_depth() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (provider, channel) = (ProviderKind::Claude, ChannelId::new(7_892_101));
+    let handle = ChannelMailboxRegistry::default().handle(channel);
+    let persistence = QueuePersistenceContext::new(&provider, "", None);
+    let (path, namespace) = v2_queue(&persistence, channel).unwrap();
+    handle.v2_adopt(path, namespace).await.unwrap();
+    let queued = item(8_000_000_000_007_892_101, channel.get());
+    let enqueued = handle.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        owner.enqueue_fixture(&queued).map_err(|e| format!("{e:?}"))
+    });
+    assert_eq!(enqueued.await, Ok(true));
+    let leaver = handle.clone();
+    let left = move || async move {
+        let took = leaver.v2_request(|slot| Ok(slot.take().is_some())).await;
+        assert_eq!(took, Ok(true));
+    };
+    let purge = purge_v2(&handle, persistence, left).await;
+    assert!(
+        matches!(purge, Some(None)),
+        "no owner measured the queue, so no depth is answered: {purge:?}"
+    );
 }

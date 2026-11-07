@@ -166,6 +166,7 @@ pub(crate) async fn force_purge_and_settle(
 }
 
 /// Purges `handle`'s queue; `None` when the actor did not answer or refused for a queued head.
+/// A V2 owner's refusal answers with nothing drained and the depth it kept.
 async fn purge_on(
     handle: &ChannelMailboxHandle,
     provider: &ProviderKind,
@@ -213,8 +214,8 @@ async fn purge_on(
 #[path = "cancel_effects_v2_tests.rs"]
 mod v2_tests;
 
-/// `None` when no V2 owner holds the queue; a refused or unanswered purge preserves it.
-/// `captured` runs between the capture and the checked purge, where the queue may change.
+/// `None` without a V2 owner; a kept queue answers its owner's measured depth with nothing drained,
+/// an unanswered, unknown or unmeasured one no purge. `captured` runs between capture and purge.
 #[cfg(unix)]
 async fn purge_v2<F: std::future::Future<Output = ()>>(
     handle: &ChannelMailboxHandle,
@@ -231,11 +232,18 @@ async fn purge_v2<F: std::future::Future<Output = ()>>(
     };
     captured().await;
     let purge = handle.try_purge_queue_if_unchanged(persistence, expected);
-    let purge = purge.await.ok().filter(|purge| purge.failed.is_none());
-    Some(purge.map(|purge| PurgeQueueResult {
-        drained: purge.receipt.len(),
-        queue_len_after: purge.queue_len_after,
-        ..Default::default()
+    Some(purge.await.ok().and_then(|purge| {
+        // A kept queue is exactly what the owner measured in that actor turn, so the depth stands.
+        let kept = purge.queue_preserved() == Some(true);
+        if purge.failed.is_some() && !kept {
+            return None;
+        }
+        Some(PurgeQueueResult {
+            queued_head_refused: kept,
+            drained: purge.receipt.len(),
+            queue_len_after: purge.queue_len_after?,
+            ..Default::default()
+        })
     }))
 }
 
@@ -413,7 +421,7 @@ pub(super) mod herdr {
         let purge = checked.as_ref().ok().map(|purge| QueuePurge {
             removed: purge.receipt.len(),
             preserved: purge.queue_preserved(),
-            queue_len_after: Some(purge.queue_len_after),
+            queue_len_after: purge.queue_len_after,
         });
         (failed, true, purge, Some(loss))
     }
