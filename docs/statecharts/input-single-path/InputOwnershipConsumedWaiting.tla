@@ -2,10 +2,12 @@
 \* The F ownership model, narrowed to consumed A, its restart, later native N and waiting B.
 \* A's input-notice debt has its own ledger; it never proves unfinished A output.
 \* ASessions: the session A's row names against the one the pane ended on ("old" after /clear).
+\* ASeeds: A pasted busy, or an idle managed start whose consumption no evidence settles.
+\* ReceiptFailures: how many receipt commits fail before one succeeds.
 EXTENDS InputOwnership
 CONSTANTS RepairConsumedWaiting, ReadoptOutcomes, OutputOwners,
           RepairBusyPinSupply, RepairOrphanOutcome, PinSources, NativeEnds, AStamps,
-          RepairSupersededClose, ASessions
+          RepairSupersededClose, ASessions, ASeeds, ReceiptFailures
 VARIABLE cw
 
 cwvars == <<vars, cw>>
@@ -20,7 +22,8 @@ CWInit ==
     /\ old = "none" /\ obsOk /\ ~twin /\ ~twinPend /\ screen = "ok"
     /\ draft = "none" /\ ~stale /\ ~acct /\ row = "none" /\ ~ep /\ ~leak
     /\ \E owner \in OutputOwners, source \in PinSources,
-          ending \in NativeEnds, stamp \in AStamps, session \in ASessions :
+          ending \in NativeEnds, stamp \in AStamps, session \in ASessions,
+          seed \in ASeeds :
          cw = [phase |-> "initial", outputOwner |-> owner,
               generation |-> 0, marker |-> FALSE, markerGeneration |-> 0,
               readopt |-> "pending", token |-> "none", aStarts |-> 0, consumed |-> FALSE,
@@ -34,14 +37,23 @@ CWInit ==
               nextNativeEnd |-> ending, nAborted |-> FALSE,
               unconfirmed |-> FALSE, attemptsB |-> 0,
               aSession |-> session, told |-> 0, archiveLost |-> FALSE,
+              seed |-> seed, failures |-> ReceiptFailures, marked |-> FALSE, aGone |-> FALSE,
               odebt |-> [aOutput |-> 1, inputNotice |-> 20]]
 
 \* execute_owned's busy paste creates A's row; its settled owner identity is not a completion.
 OwnerPastesA ==
-    /\ cw.phase = "initial"
+    /\ cw.phase = "initial" /\ cw.seed = "busy"
     /\ row' = "carried" /\ mbx' = "active"
     /\ cw' = [cw EXCEPT !.phase = "pasted", !.token = "A", !.aStarts = 1]
     /\ UNCHANGED <<ep, nat, inp, wake, pastes, op, CWFixed>>
+\* An idle managed start: its input may or may not have run, and no pin is ever supplied.
+OwnerStartsAIdle ==
+    /\ cw.phase = "initial" /\ cw.seed = "idle"
+    /\ \E ran \in BOOLEAN :
+         cw' = [cw EXCEPT !.phase = "settled", !.aStarts = 1, !.consumed = ran,
+                          !.odebt.aOutput = IF ran THEN 1 ELSE 0]
+    /\ row' = "carried"
+    /\ UNCHANGED <<ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
 \* The real busy effect returns before history settlement and the existing answer observer.
 BusyEffectReturns ==
     /\ cw.phase = "pasted"
@@ -123,7 +135,8 @@ SupersededUnproven == RepairSupersededClose /\ cw.aSession = "old"
 CloseProof ==
     /\ cw.phase = "running" /\ cw.outputOwner = "owned"
     /\ row = "carried" /\ ~ep /\ cw.token = "none"
-    /\ cw.nStarted /\ cw.consumed /\ cw.terminal /\ cw.captured /\ nat = "idle"
+    /\ cw.nStarted /\ (cw.consumed \/ SupersededUnproven) /\ cw.terminal /\ cw.captured
+    /\ nat = "idle"
     /\ (~RepairConsumedWaiting \/ cw.pinVerified \/ SupersededUnproven)
     /\ cw.refusedB /\ cw.lock = "free" /\ ~cw.unconfirmed
     /\ IF RepairConsumedWaiting
@@ -142,6 +155,20 @@ CommitReceiptA ==
                                  ELSE IF RepairOrphanOutcome THEN "completed"
                                  ELSE IF cw.nAborted THEN "cancelled" ELSE "completed"]
     /\ UNCHANGED <<row, ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
+\* A failed commit marks only a proven row for the generic settlement; marking an unproven one
+\* ("markUnproven") lets that settlement remove it without the close's notice.
+CommitReceiptFails ==
+    /\ cw.close = "locked" /\ row = "carried" /\ cw.failures > 0
+    /\ cw' = [cw EXCEPT !.close = "idle", !.lock = "free", !.failures = @ - 1,
+              !.marked = @ \/ ~SupersededUnproven \/ cw.pinVerified \/ Mut = "markUnproven"]
+    /\ UNCHANGED <<row, ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
+\* The next admission or a boot records a marked row and removes it; it tells nobody.
+SettleMarked ==
+    /\ cw.marked /\ row = "carried" /\ cw.close = "idle" /\ cw.token = "none"
+    /\ row' = "none" /\ wake' = TRUE
+    /\ cw' = [cw EXCEPT !.aGone = TRUE, !.receipt = TRUE,
+              !.receiptOutcome = IF cw.ownStamp = "none" THEN "completed" ELSE cw.ownStamp]
+    /\ UNCHANGED <<ep, mbx, nat, inp, pastes, op, CWFixed>>
 \* An unproven close tells A's channel before archiving; the outbox key keeps a retry to one post.
 TellA ==
     /\ cw.close = "committed" /\ ~cw.pinVerified /\ SupersededUnproven /\ row = "carried"
@@ -158,7 +185,7 @@ ArchiveA ==
     /\ cw.receipt /\ row = "carried"
     /\ cw.token = "none" /\ ~ep /\ nat = "idle" /\ ~cw.unconfirmed
     /\ row' = "none"
-    /\ cw' = [cw EXCEPT !.close = "archived", !.lock = "free"]
+    /\ cw' = [cw EXCEPT !.close = "archived", !.lock = "free", !.aGone = TRUE]
     /\ UNCHANGED <<ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
 KickoffB ==
     /\ cw.close = "archived"
@@ -211,15 +238,16 @@ HealthKeepsA ==
     /\ UNCHANGED cwvars
 CWDone == cw.phase = "done" /\ UNCHANGED cwvars
 
-CWNext == OwnerPastesA \/ BusyEffectReturns \/ SettleBusySubmission
+CWNext == OwnerPastesA \/ OwnerStartsAIdle \/ BusyEffectReturns \/ SettleBusySubmission
           \/ ObserveBusyReceipt \/ SupplyBusyPin
           \/ ShutdownRestamps \/ SettleBoot \/ RestoreAlive
           \/ EndA \/ NativeStartsN \/ CaptureAndDeliverA \/ FinishReadoptedA
-          \/ CloseATick \/ CommitReceiptA \/ TellA \/ ArchiveLost \/ ArchiveA \/ KickoffB
+          \/ CloseATick \/ CommitReceiptA \/ CommitReceiptFails \/ SettleMarked \/ TellA \/ ArchiveLost \/ ArchiveA \/ KickoffB
           \/ AdmitB \/ ClaimB \/ ForeignAdmission \/ NativeIdle
           \/ StartB \/ LateCloseA \/ HealthKeepsA \/ CWDone
 CWSpec == CWInit /\ [][CWNext]_cwvars
-          /\ WF_cwvars(OwnerPastesA) /\ WF_cwvars(BusyEffectReturns)
+          /\ WF_cwvars(OwnerPastesA) /\ WF_cwvars(OwnerStartsAIdle)
+          /\ WF_cwvars(BusyEffectReturns) /\ WF_cwvars(SettleMarked)
           /\ WF_cwvars(SettleBusySubmission) /\ WF_cwvars(ObserveBusyReceipt)
           /\ WF_cwvars(SupplyBusyPin) /\ WF_cwvars(ShutdownRestamps)
           /\ WF_cwvars(SettleBoot) /\ WF_cwvars(RestoreAlive) /\ WF_cwvars(EndA)
@@ -257,4 +285,5 @@ UnprovenCloseToldOnce == cw.told <= 1
 OrphanAReceiptCompleted == (cw.receipt /\ cw.readopt = "refused" /\ cw.ownStamp = "none")
                            => cw.receiptOutcome = "completed"
 OwnStampRespected == (cw.receipt /\ cw.ownStamp # "none") => cw.receiptOutcome = cw.ownStamp
+UnprovenRemovalTold == (cw.aGone /\ ~cw.pinVerified /\ SupersededUnproven) => cw.told = 1
 =============================================================================
