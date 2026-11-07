@@ -7,7 +7,49 @@ use super::admission::{Admission, AdmissionTicket, admit_with_context};
 use super::drive::{Drive, wake};
 use super::ingress::{Intake, OwnerPending, owner_will_take};
 use super::origin::{Execution, InputOrigin};
-use crate::services::turn_orchestrator::PendingQueueItem;
+use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
+
+/// Builds the start once, then resumes that ticket's stored original on a retry or restart.
+pub(crate) async fn original(
+    mailbox: &ChannelMailboxHandle,
+    (turn, channel, text): (&str, u64, &str),
+    context: &mut serde_json::Value,
+) -> Result<(PendingQueueItem, AdmissionTicket), String> {
+    let identity = InputOrigin::imessage_identity(
+        channel,
+        context["source"].as_str(),
+        context.get("metadata"),
+    );
+    let turn = identity
+        .as_ref()
+        .map(|(message, _)| format!("discord:{channel}:{message}"))
+        .unwrap_or_else(|| turn.to_string());
+    context["turn_id"] = turn.clone().into();
+    let (mut original, mut ticket) = super::routine::synthetic_original(&turn, channel, text, 1)?;
+    if InputOrigin::from_context(Some(context)).is_person() {
+        original.author_id = context["request_owner"]
+            .as_u64()
+            .ok_or("person owner missing")?;
+        original.author_is_bot = false;
+        original.reply_context = crate::services::imsg_reply::with_started_contract(
+            None,
+            context["source"].as_str(),
+            context.get("metadata"),
+        );
+    }
+    if let Some((_, raw)) = identity {
+        ticket = AdmissionTicket::stored(&raw);
+    }
+    let raw = ticket.as_str().to_string();
+    let original = mailbox
+        .v2_request(move |slot| {
+            slot.as_ref()
+                .ok_or("V2 not adopted")?
+                .retry_original(&raw, &original)
+        })
+        .await?;
+    Ok((original, ticket))
+}
 
 /// `None` leaves the start to its legacy path. Otherwise the preflight refuses before any
 /// admission, and Pending stays its own non-success answer with the caller's ticket.
