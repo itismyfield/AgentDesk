@@ -1635,6 +1635,23 @@ mod tests {
         ));
     }
 
+    /// Fixtures skip when no base is configured; required lanes must turn that into a failure.
+    #[test]
+    fn missing_fixture_base_panics_only_when_the_lane_requires_postgres() {
+        {
+            let _env = RequirePgEnvGuard::set(Some("1"), None);
+            let panic = std::panic::catch_unwind(super::postgres_test_database_url_base)
+                .expect_err("a required lane must fail on a missing fixture base");
+            let message = panic_message(panic);
+            assert!(
+                message.contains("POSTGRES_TEST_DATABASE_URL_BASE unset"),
+                "panic must name the missing base: {message}"
+            );
+        }
+        let _env = RequirePgEnvGuard::set(None, None);
+        assert_eq!(super::postgres_test_database_url_base(), None);
+    }
+
     struct TestDatabase {
         admin_url: String,
         database_name: String,

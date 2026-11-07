@@ -18,7 +18,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{braced_item_span, rust_code_mask, strip_rust_comments};
+    use crate::test_support::{rust_code_mask, strip_rust_comments};
 
     /// The fixture sources under contract, paired with the module path a
     /// reviewer would grep for.
@@ -156,9 +156,6 @@ mod tests {
         format!("{}:{}", "127.0.0.1", "5432")
     }
 
-    /// The shared helper the four fixtures now depend on.
-    const SHARED_HELPER_SOURCE: &str = include_str!("../db/postgres.rs");
-
     /// Classification 2: comment-free text (literals kept, so a quoted address still counts);
     /// required calls use the code mask. Lexical tripwire: no aliases, macros or reachability.
     fn code_text(source: &str) -> String {
@@ -167,37 +164,6 @@ mod tests {
 
     fn code_mask(source: &str) -> String {
         rust_code_mask(source).unwrap_or_else(|error| panic!("fixture source: {error}"))
-    }
-
-    /// The contract has to be read inside the helper's own body. The identical
-    /// `AGENTDESK_REQUIRE_PG` comparison also appears in `require_pg_guard`
-    /// further down the same file, so a whole-file search reports the contract
-    /// as intact even after the helper's copy is gutted — a mutation that
-    /// replaced the helper's condition survived a whole-file assertion here
-    /// before this narrowing was added.
-    const HELPER_SIGNATURE: &str =
-        "pub(crate) fn postgres_test_database_url_base() -> Option<String>";
-
-    fn shared_helper_body(source: &str) -> String {
-        let span = braced_item_span(&code_mask(source), HELPER_SIGNATURE)
-            .expect("db::postgres no longer defines postgres_test_database_url_base (#5218)");
-        code_text(source)[span].to_string()
-    }
-
-    const HELPER_REQUIREMENTS: [&str; 3] = [
-        "std::env::var(AGENTDESK_REQUIRE_PG_ENV).ok().as_deref() == Some(\"1\")",
-        "base.is_none()",
-        "panic!(\"PG required but POSTGRES_TEST_DATABASE_URL_BASE unset\")",
-    ];
-
-    /// Required fragments missing from the helper body, plus any host/port key it reads.
-    fn shared_helper_gaps(source: &str) -> Vec<&'static str> {
-        let body = shared_helper_body(source);
-        let missing = HELPER_REQUIREMENTS
-            .into_iter()
-            .filter(|f| !body.contains(f));
-        let read = HOST_PORT_KEYS.into_iter().filter(|key| body.contains(key));
-        missing.chain(read).collect()
     }
 
     const HOST_PORT_KEYS: [&str; 2] = ["PGHOST", "PGPORT"];
@@ -216,27 +182,6 @@ mod tests {
 
     fn calls_shared_base(source: &str) -> bool {
         code_mask(source).contains("postgres_test_database_url_base()")
-    }
-
-    /// The fixtures answer "no base configured" with a skip, which is only
-    /// defensible because the required lanes turn that same condition into a
-    /// panic. Nothing else in the tree pins that escalation, so deleting it
-    /// would silently downgrade every one of those lanes to a soft-skip green —
-    /// the exact failure mode this module exists to prevent. Asserted on the
-    /// source because the behaviour needs process-wide environment mutation,
-    /// which this module must not do while other tests run beside it.
-    #[test]
-    fn a_missing_fixture_base_stays_fatal_for_lanes_that_require_a_database() {
-        let gaps = shared_helper_gaps(SHARED_HELPER_SOURCE);
-        for fragment in HELPER_REQUIREMENTS {
-            assert!(
-                !gaps.contains(&fragment),
-                "the body of postgres_test_database_url_base no longer contains \
-                 `{fragment}`; without it a missing fixture base stops being \
-                 fatal under AGENTDESK_REQUIRE_PG=1 and the fixtures' skip \
-                 becomes a silent green (#5218, #4979 S2)"
-            );
-        }
     }
 
     #[test]
@@ -405,8 +350,8 @@ mod tests {
     }
 
     /// The guard is deliberately lexical. It rejects every non-comment
-    /// `PGHOST`/`PGPORT` token in the enumerated fixture sources and in the
-    /// shared helper body, so changing `var` to `var_os`, hiding the read
+    /// `PGHOST`/`PGPORT` token in the enumerated fixture sources, which include all
+    /// of `db::postgres` and its shared base helper, so changing `var` to `var_os`, hiding the read
     /// behind a constant, or reformatting the fallback cannot evade it. It
     /// does not claim to cover a fixture file omitted from `PG_FIXTURE_SOURCES`,
     /// an imported helper in another file, a fallback using a different
@@ -416,14 +361,6 @@ mod tests {
     /// assertion.
     #[test]
     fn fixture_sources_never_read_process_host_or_port() {
-        let helper = shared_helper_gaps(SHARED_HELPER_SOURCE);
-        for variable in HOST_PORT_KEYS {
-            assert!(
-                !helper.contains(&variable),
-                "db::postgres::postgres_test_database_url_base contains `{variable}`; \
-                 the canonical authority must not read process host/port defaults (#5229)"
-            );
-        }
         for (module, source) in address_checked_sources() {
             let read = host_port_keys_read(source);
             assert!(

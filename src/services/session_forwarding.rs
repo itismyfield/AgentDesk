@@ -1098,35 +1098,144 @@ mod tests {
         assert!(destination.await.expect("destination task").is_err());
     }
 
-    #[tokio::test]
-    async fn invalid_forwarding_headers_send_no_authenticated_request() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind validation listener");
-        let addr = listener.local_addr().expect("validation listener addr");
-        let server = tokio::spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_millis(250), listener.accept()).await
-        });
-        let mut config = crate::config::Config::default();
-        config.server.auth_token = Some("secret-token".to_string());
-        let state = super::ForwardCallerContext {
-            pg_pool: None,
-            config: std::sync::Arc::new(config),
-            cluster_instance_id: Some("bad\nheader".to_string()),
-        };
-        let target = test_target("worker-a", &format!("http://{addr}"));
-        let (status, Json(body)) = super::forward_cancel_turn(&state, &target, "42", false).await;
-        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body["code"], "session_forward_headers_invalid");
-        assert!(server.await.expect("validation server task").is_err());
+    /// Every session forwarder, named by the operation it reports.
+    const FORWARDERS: [&str; 6] = [
+        "tmux-output",
+        "force-kill",
+        "kill-tmux",
+        "resume-candidates",
+        "resume-previous",
+        "cancel-turn",
+    ];
+
+    /// Upper bound for one forwarded request/response exchange on loopback.
+    const EXCHANGE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    async fn call_forwarder(
+        operation: &str,
+        state: &super::ForwardCallerContext,
+        target: &TrustedForwardTarget,
+    ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+        let key = "host:AgentDesk-claude-a";
+        match operation {
+            "tmux-output" => super::forward_tmux_output(state, target, 7, 20).await,
+            "force-kill" => super::forward_force_kill(state, target, key, false, "test").await,
+            "kill-tmux" => super::forward_kill_tmux(state, target, key, "test", None).await,
+            "resume-candidates" => super::forward_resume_candidates(state, target, key).await,
+            "resume-previous" => {
+                super::forward_resume_previous(state, target, key, None, None).await
+            }
+            "cancel-turn" => super::forward_cancel_turn(state, target, "42", false).await,
+            other => panic!("unknown forwarder {other}"),
+        }
     }
 
-    mod source_guard_tests;
+    fn forwarding_state(instance_id: &str) -> super::ForwardCallerContext {
+        let mut config = crate::config::Config::default();
+        config.server.auth_token = Some("secret-token".to_string());
+        super::ForwardCallerContext {
+            pg_pool: None,
+            config: std::sync::Arc::new(config),
+            cluster_instance_id: Some(instance_id.to_string()),
+        }
+    }
 
-    #[test]
-    fn every_session_forwarder_uses_the_shared_trusted_request_builder() {
-        let gaps = source_guard_tests::trusted_request_gaps(source_guard_tests::SESSION_FORWARDING);
-        assert_eq!(gaps, Vec::<String>::new());
+    /// Accepts one request, answers `{"ok":true}`, and returns the lowercased request head.
+    async fn answer_one_request(listener: tokio::net::TcpListener) -> String {
+        let (mut socket, _) = listener.accept().await.expect("accept forwarded request");
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 2048];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket
+                .read(&mut buffer)
+                .await
+                .expect("read forwarded request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let body = r#"{"ok":true}"#;
+        let response = format!(
+            concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "content-type: application/json\r\n",
+                "content-length: {}\r\n",
+                "connection: close\r\n\r\n{}"
+            ),
+            body.len(),
+            body
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+        String::from_utf8_lossy(&request).to_ascii_lowercase()
+    }
+
+    #[tokio::test]
+    async fn every_forwarder_sends_auth_and_owner_headers() {
+        let state = forwarding_state("leader");
+        for operation in FORWARDERS {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test listener");
+            let addr = listener.local_addr().expect("test listener addr");
+            let target = test_target("worker-a", &format!("http://{addr}"));
+            let (request, response) = tokio::join!(
+                tokio::time::timeout(EXCHANGE_DEADLINE, answer_one_request(listener)),
+                tokio::time::timeout(
+                    EXCHANGE_DEADLINE,
+                    call_forwarder(operation, &state, &target)
+                ),
+            );
+            let request = request.unwrap_or_else(|_| panic!("{operation} sent no request"));
+            let (status, Json(body)) =
+                response.unwrap_or_else(|_| panic!("{operation} got no response"));
+            for header in [
+                "authorization: bearer secret-token",
+                "x-agentdesk-forwarded-by: leader",
+                "x-agentdesk-session-owner: worker-a",
+            ] {
+                assert!(
+                    request.contains(header),
+                    "{operation} omitted `{header}`:\n{request}"
+                );
+            }
+            assert_eq!(status, axum::http::StatusCode::OK, "{operation}");
+            assert_eq!(body["ok"].as_bool(), Some(true), "{operation}");
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_forwarding_headers_send_no_authenticated_request() {
+        let state = forwarding_state("bad\nheader");
+        for operation in FORWARDERS {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind validation listener");
+            let addr = listener.local_addr().expect("validation listener addr");
+            let target = test_target("worker-a", &format!("http://{addr}"));
+            let (status, Json(body)) = tokio::time::timeout(
+                EXCHANGE_DEADLINE,
+                call_forwarder(operation, &state, &target),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{operation} did not answer"));
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{operation}"
+            );
+            assert_eq!(
+                body["code"], "session_forward_headers_invalid",
+                "{operation}"
+            );
+            let connected =
+                tokio::time::timeout(std::time::Duration::from_millis(250), listener.accept())
+                    .await;
+            assert!(connected.is_err(), "{operation} connected to the peer");
+        }
     }
 
     #[test]
@@ -1135,51 +1244,6 @@ mod tests {
             encode_path_segment("host:AgentDesk-codex/a b"),
             "host%3AAgentDesk-codex%2Fa%20b"
         );
-    }
-
-    #[tokio::test]
-    async fn forward_cancel_sends_auth_and_owner_headers() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
-        let addr = listener.local_addr().expect("test listener addr");
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept test request");
-            let mut buffer = [0_u8; 2048];
-            let read = socket.read(&mut buffer).await.expect("read request");
-            let request = String::from_utf8_lossy(&buffer[..read]).to_ascii_lowercase();
-            assert!(request.contains("authorization: bearer secret-token"));
-            assert!(request.contains("x-agentdesk-forwarded-by: leader"));
-            assert!(request.contains("x-agentdesk-session-owner: worker-a"));
-            let body = r#"{"ok":true}"#;
-            let response = format!(
-                concat!(
-                    "HTTP/1.1 200 OK\r\n",
-                    "content-type: application/json\r\n",
-                    "content-length: {}\r\n",
-                    "connection: close\r\n\r\n{}"
-                ),
-                body.len(),
-                body
-            );
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("write response");
-        });
-        let mut config = crate::config::Config::default();
-        config.server.auth_token = Some("secret-token".to_string());
-        let state = super::ForwardCallerContext {
-            pg_pool: None,
-            config: std::sync::Arc::new(config),
-            cluster_instance_id: Some("leader".to_string()),
-        };
-        let target = test_target("worker-a", &format!("http://{addr}"));
-
-        let (status, Json(body)) = super::forward_cancel_turn(&state, &target, "42", false).await;
-        server.await.expect("test server task");
-        assert_eq!(status, axum::http::StatusCode::OK);
-        assert_eq!(body["ok"].as_bool(), Some(true));
     }
 
     #[test]

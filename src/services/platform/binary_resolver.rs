@@ -13,6 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::runtime_layout::expand_user_path;
+use crate::services::claude_command::ClaudeSeal;
 
 mod grok;
 pub(crate) mod resolution;
@@ -226,12 +227,10 @@ fn resolve_provider_binary_unsealed(provider: &str) -> BinaryResolution {
 
 /// Sole sanctioned raw-path seam for the Claude binary.
 ///
-/// #4627: `ClaudeBinary::resolve` is the only permitted caller (enforced by the
-/// `sealed_claude_seam_confined_to_chokepoint` guard in `claude_command.rs`). It
-/// returns the unscrubbed resolution so the guarded launch builder can wrap the
-/// raw path; every other consumer must go through the generic
-/// [`resolve_provider_binary`], which scrubs Claude paths.
-pub(crate) fn resolve_claude_binary_sealed() -> BinaryResolution {
+/// #4627: `ClaudeBinary::resolve` is the only caller, because only `claude_command` can build the
+/// [`ClaudeSeal`] argument. It returns the unscrubbed resolution so the guarded launch builder can
+/// wrap the raw path; every other consumer goes through the scrubbing [`resolve_provider_binary`].
+pub(crate) fn resolve_claude_binary_sealed(_: ClaudeSeal) -> BinaryResolution {
     resolve_provider_binary_unsealed("claude")
 }
 
@@ -1674,7 +1673,8 @@ mod tests {
         let _guard = ClaudePathOverrideGuard::set(&claude_path);
 
         // The sanctioned raw-path seam still exposes the resolved path.
-        let sealed = resolve_claude_binary_sealed();
+        let (_, sealed) = crate::services::claude_command::ClaudeBinary::resolve()
+            .expect("forced Claude path resolves through the chokepoint");
         assert_eq!(
             sealed.resolved_path.as_deref(),
             Some(claude_path.to_string_lossy().as_ref()),

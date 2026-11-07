@@ -2271,9 +2271,8 @@ need not match ordinary LoC churn.
   `canonical_path` / `exec_path` to `None` and redacts raw-path components from
   the `attempts` diagnostics (structure preserved, so `attempts` cannot be parsed
   back into a raw path), and the sole sanctioned raw-path seam
-  `resolve_claude_binary_sealed` (consumed only by `ClaudeBinary::resolve`) is
-  fenced by the `sealed_claude_seam_confined_to_chokepoint` guard in
-  `claude_command.rs`.
+  `resolve_claude_binary_sealed` takes a `ClaudeSeal` that only
+  `claude_command.rs` can build, so `ClaudeBinary::resolve` is its only caller.
 - `src/services/discord/mod.rs` (giant review surface; formerly 4152 prod LoC after #4049 S4-a2 moved
   queue-marker routing into `queue_marker.rs` and retired direct reaction
   mutation call sites; 4157 prod LoC after #4048 S3 extracted
