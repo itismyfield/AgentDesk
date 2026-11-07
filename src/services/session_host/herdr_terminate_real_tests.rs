@@ -1030,3 +1030,7 @@ fn a_p11_m2_confirmation_required_has_no_escalation() {
         db.drop().await;
     });
 }
+
+#[cfg(target_os = "linux")]
+#[path = "herdr_gate/missing_marker_rig_tests.rs"]
+pub(crate) mod missing_marker_rig;

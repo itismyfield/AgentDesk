@@ -1,4 +1,4 @@
-//! Strict read-only evidence for retiring one replaced-root execution.
+//! Strict read-only evidence for retiring one recorded execution.
 use super::*;
 
 #[derive(Debug)]
@@ -14,15 +14,27 @@ impl HerdrTarget {
         record: &HostedExecution,
         previous: Option<&ReplacedRootEnd>,
     ) -> Result<ReplacedRootEnd, String> {
+        self.recovery_end(record, previous, false)
+    }
+
+    pub(crate) fn recovery_end(
+        &self,
+        record: &HostedExecution,
+        previous: Option<&ReplacedRootEnd>,
+        marker_missing: bool,
+    ) -> Result<ReplacedRootEnd, String> {
         if record.state != HostedState::Bound
             || record.expected.as_ref() != Some(&self.0.expected)
             || record.execution_nonce != self.0.nonce
         {
             return Err("stored launch evidence differs".into());
         }
-        let witness = self
-            .revalidate_termination_reads()
-            .map_err(|why| format!("restore: {why:?}"))?;
+        let witness = if marker_missing {
+            self.missing_marker_witness()?
+        } else {
+            self.revalidate_termination_reads()
+                .map_err(|why| format!("restore: {why:?}"))?
+        };
         if previous.is_some_and(|old| old.record != *record || old.witness != witness) {
             return Err("execution or server changed between proofs".into());
         }
@@ -39,16 +51,34 @@ impl HerdrTarget {
             PaneReading::Present {
                 root,
                 provider: PaneProvider::Exited,
-            } if root != self.0.expected.root => {}
+            } if marker_missing && root == self.0.expected.root => {}
+            PaneReading::Present {
+                root,
+                provider: PaneProvider::Exited,
+            } if root != self.0.expected.root => {
+                if marker_missing {
+                    pane_probe::original_gone(
+                        self.0.os.as_ref(),
+                        &self.0.expected.root,
+                        self.0.rebooted(&witness),
+                    )
+                    .map_err(|read| format!("original root is not proven absent: {read:?}"))?;
+                }
+            }
             other => return Err(format!("replaced pane is not a lone shell: {other:?}")),
         }
-        let rebooted = self.0.rebooted(&witness);
-        for (name, stamp) in [
-            ("root", &self.0.expected.root),
-            ("provider", &self.0.expected.provider_process),
-        ] {
-            if let Err(read) = pane_probe::original_gone(self.0.os.as_ref(), stamp, rebooted) {
-                return Err(format!("original {name} is not proven absent: {read:?}"));
+        if marker_missing {
+            if !self.provider_absent()? {
+                return Err("original provider is still alive".into());
+            }
+        } else {
+            let rebooted = self.0.rebooted(&witness);
+            for (name, stamp) in [
+                ("root", &self.0.expected.root),
+                ("provider", &self.0.expected.provider_process),
+            ] {
+                pane_probe::original_gone(self.0.os.as_ref(), stamp, rebooted)
+                    .map_err(|read| format!("original {name} is not proven absent: {read:?}"))?;
             }
         }
         if self.0.transport.server_witness().as_ref() != Ok(&witness) {
@@ -58,6 +88,15 @@ impl HerdrTarget {
             record: record.clone(),
             witness,
         })
+    }
+
+    fn missing_marker_witness(&self) -> Result<ServerWitness, String> {
+        if read_host_kind_marker(&self.0.logical_key) != HostKindMarker::Absent {
+            return Err("marker is not confirmed absent".into());
+        }
+        self.0
+            .policy_witness(Mutation::Terminate)
+            .map_err(|why| format!("policy: {why:?}"))
     }
 
     /// `HerdrPaneView::ended` of a reading of this target's pane; on a server that replaced the

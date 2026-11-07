@@ -700,8 +700,8 @@ async fn cleanup_retirement_keeps_health_and_notifications_clear_but_missing_und
         if undrained {
             let alarm = result.unwrap_err();
             assert!(
-                matches!(&alarm, WriterAlarm::Halted { detail }
-                if detail.contains("no fresh drained cleanup evidence")),
+                matches!(&alarm, WriterAlarm::HaltedMissingSource { source, detail }
+                if source == &old && detail.contains("no fresh drained cleanup evidence")),
                 "{alarm:?}"
             );
             writer.stop(alarm);
@@ -1097,6 +1097,11 @@ async fn readers_s1a_unsafe_missing_never_retires() {
             assert!(failed.is_ok(), "historical missing source may park: {case}");
             assert!(s.is_parked(&old), "{case}");
             assert_eq!(retained(), retained_before.unwrap(), "retained {case}");
+        } else if matches!(case, "recent" | "partial" | "latest") {
+            assert!(
+                matches!(&failed, Err(WriterAlarm::HaltedMissingSource { source, .. }) if source == &old),
+                "{case}"
+            );
         } else {
             assert!(matches!(failed, Err(WriterAlarm::Halted { .. })), "{case}");
         }
@@ -1295,7 +1300,7 @@ async fn readers_s1a_clock_regression_invalidates_dormant_cleanup_evidence() {
     tokio::time::advance(Duration::from_secs(100)).await;
     assert!(matches!(
         s.tend_at(&mut w, now + Duration::from_secs(100)),
-        Err(WriterAlarm::Halted { .. })
+        Err(WriterAlarm::HaltedMissingSource { ref source, .. }) if source == &old
     ));
     assert!(!w.store().cursor(&old).unwrap().retired);
     assert!(
@@ -1402,7 +1407,7 @@ async fn readers_s1a_spoolfull_pending_keeps_fd_and_successor_barrier() {
             s.capture(&mut w, &mut d, &mut owed).unwrap();
             assert!(matches!(
                 reader_tend(&mut s, &mut w, now + Duration::from_secs(32)).await,
-                Err(WriterAlarm::Halted { .. })
+                Err(WriterAlarm::HaltedMissingSource { ref source, .. }) if source == &old
             ));
             assert_eq!(w.store().cursor(&old).unwrap(), &before);
             assert_eq!(w.store().cursor(&new).unwrap().captured_through, 0);
@@ -1668,7 +1673,9 @@ async fn readers_s1b_actor_on_recent_missing_halts_without_retirement() {
     std::fs::remove_file(&path).unwrap();
     s1b_actor_until(|| task.is_finished()).await;
     let cause = task.await.unwrap().expect("unsafe missing stops the actor");
-    assert!(matches!(cause.alarm, WriterAlarm::Halted { .. }));
+    assert!(
+        matches!(cause.alarm, WriterAlarm::HaltedMissingSource { ref source, .. } if source == &old)
+    );
     assert!(
         cause.io.is_none(),
         "source damage is not a transient store retry"

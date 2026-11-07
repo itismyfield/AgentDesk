@@ -171,6 +171,18 @@ turn-presence/TurnPresenceMain.cfg	TurnPresence	NoProgressIdentityUnknown,NoProg
 turn-presence/TurnPresenceM1.cfg	TurnPresence	NoProgressIdentityUnknown,NoProgressIdentityNotice	EventuallyStableBusy,PublicationContinues
 turn-presence/TurnPresenceM2.cfg	TurnPresence	-	PublicationContinues
 turn-presence/TurnPresenceM3.cfg	TurnPresence	NoOldProofAfterObservedBoundary,NoWrongAdmission,NoWrongPublication	-
+tui-o-writer/WriterMissingHaltBefore.cfg	WriterMissingHalt	NoUnchangedReboot	-
+tui-o-writer/WriterMissingHaltFixed.cfg	WriterMissingHalt	-	-
+tui-o-writer/WriterMissingHaltNoHold.cfg	WriterMissingHalt	NoUnchangedReboot	-
+tui-o-writer/WriterMissingHaltNoWake.cfg	WriterMissingHalt	-	EvidenceResumes
+tui-o-writer/WriterMissingHaltSource.cfg	WriterMissingHalt	-	-
+tui-o-writer/WriterMissingHaltPresence.cfg	WriterMissingHalt	-	-
+tui-o-writer/WriterMissingHaltNonce.cfg	WriterMissingHalt	-	-
+tui-o-writer/WriterMissingHaltBinding.cfg	WriterMissingHalt	-	-
+tui-o-writer/WriterMissingHaltEarly.cfg	WriterMissingHalt	-	-
+tui-o-writer/WriterMissingHaltMetadata.cfg	WriterMissingHalt	-	-
+tui-o-writer/WriterMissingHaltOrphanBefore.cfg	WriterMissingHalt	-	OrphanRecovers
+tui-o-writer/WriterMissingHaltOrphanFixed.cfg	WriterMissingHalt	-	-
 input-single-path/InputOwnershipPersonBusy.cfg	InputOwnership	-
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds

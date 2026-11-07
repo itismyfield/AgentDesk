@@ -1,0 +1,15 @@
+stateDiagram-v2
+  [*] --> Booting
+  Booting --> Halted: 정확한 원본 Missing
+  Halted --> Held: actor join·ready=false·claim 유지
+  Held --> Held: 같은 표본·revision·reset 거부·다른 pane만 live
+  Held --> Held: metadata 읽기 실패·기존 identity 유지
+  Held --> Booting: 원본 복귀 / presence 분류 / 새 nonce / 새 binding identity
+  Booting --> Running: 기존 reopen·prefix 검증·resume 성공
+  Held --> Ended: stop / execution gate retirement
+  Running --> Ended: 기존 종료 경로
+
+    Held --> OrphanRetired: Bound + actual marker absence + independent end proof + quiet/current + CAS
+    OrphanRetired --> PresenceAbsent: existing HerdrRetired absence checks and current publication
+    PresenceAbsent --> NewManagedExecution: one normal input / fresh nonce and pane
+    NewManagedExecution --> Running: own source attached / F1 fresh evidence
