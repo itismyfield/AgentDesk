@@ -13,12 +13,6 @@
 //!
 //! `departing` never affects the verdict, only which entry a re-key prefers —
 //! error direction is always over-preservation, never deleting a live card.
-//!
-//! Enforcement is layered, each partial: [`QueuedCardTeardown`]'s private
-//! fields block construction outside this module (not reuse of an issued
-//! token); visibility narrows callers, not raw `serenity`/`http::*` calls; the
-//! destructive call-site ratchet blocks per-file growth of raw Discord message
-//! delete/edit spellings, but not a count-preserving move inside one file.
 
 use std::collections::HashSet;
 use std::sync::Arc;

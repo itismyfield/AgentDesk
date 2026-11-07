@@ -1,8 +1,7 @@
 use super::*;
 
-/// After an edit failure on an already committed range, the shared reconciliation deletes the
-/// placeholder only when a different message is proven to hold the delivered body; without that
-/// proof the empty placeholder and its tracking stay.
+/// After an edit failure on a committed range, the placeholder is deleted only when another
+/// message is proven to hold the delivered body; otherwise it and its tracking stay.
 #[test]
 fn committed_edit_failure_deletes_placeholder_only_with_delivered_elsewhere_proof() {
     use super::super::terminal_long_chunks::{
