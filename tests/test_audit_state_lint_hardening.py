@@ -358,6 +358,11 @@ class SourceTextGuardAuditTests(AuditRepoCase):
     def test_a_new_test_reading_rust_source_fails(self) -> None:
         reads = {
             "include_str": '    let text = include_str!("lib.rs");\n',
+            "include_bytes": '    let text = include_bytes!("lib.rs");\n',
+            "rooted join on its own line": (
+                '    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));\n'
+                '    let text = std::fs::read_dir(root.join("src/owner"));\n'
+            ),
             "multi-line include_str": '    let text = include_str!(\n        "lib.rs"\n    );\n',
             "lexer": "    let text = crate::test_support::strip_rust_comments(TEXT);\n",
             "manifest-rooted tree walk": (
@@ -380,12 +385,12 @@ class SourceTextGuardAuditTests(AuditRepoCase):
             base_files={"src/owner/data_tests.rs": before},
         )
         self.assertEqual(rc, 1, output)
-        self.assertIn("src/owner/data_tests.rs:4: include_str! of a .rs file in test `data`", output)
+        self.assertIn("src/owner/data_tests.rs:4: include of a .rs file in test `data`", output)
 
     def test_a_helper_reading_source_outside_a_kept_guard_file_fails(self) -> None:
         self.assert_flagged(
             {"src/owner/reader_tests.rs": 'const TEXT: &str = include_str!("../lib.rs");\n'},
-            "src/owner/reader_tests.rs:1: include_str! of a .rs file in code outside",
+            "src/owner/reader_tests.rs:1: include of a .rs file in code outside",
         )
 
     def test_the_listed_guard_and_its_file_helpers_may_read_source(self) -> None:

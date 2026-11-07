@@ -586,7 +586,7 @@ SOURCE_LEXER_DEFINITION = "src/test_support.rs"
 SOURCE_LEXER_RE = re.compile(
     r"\b(?:strip_rust_comments|rust_code_mask|braced_item_span|source_guard_support)\b"
 )
-SOURCE_INCLUDE_RE = re.compile(r"\binclude_str!\s*\(")
+SOURCE_INCLUDE_RE = re.compile(r"\binclude_(?:str|bytes)!\s*\(")
 # Matched on the raw line; the match must start in code, not in a comment or string.
 SOURCE_TREE_RES = (
     re.compile(r"\benv!\(\s*\"CARGO_MANIFEST_DIR\"\s*\)[^;]*\"/?src(?:/[^\"]*)?\""),
@@ -595,7 +595,7 @@ SOURCE_TREE_RES = (
 # A bare `src` root is a tree read only in a file anchored at the crate root; elsewhere it is a temp dir.
 SOURCE_ROOT_RE = re.compile(r"\benv!\(\s*\"CARGO_MANIFEST_DIR\"")
 SOURCE_ROOTED_TREE_RES = (
-    re.compile(r"\.join\(\s*\"(?:\./)?src\"\s*\)"),
+    re.compile(r"\.join\(\s*\"(?:\./)?src(?:/[^\"]*)?\"\s*\)"),
     re.compile(r"\[\s*\"src\"\s*,|,\s*\"src\"\s*[,\]]"),
 )
 # `.rs` files under a fixtures directory are test data, not source.
@@ -665,7 +665,7 @@ def source_read_lines(source: str) -> dict[int, str]:
             continue
         first, last = code.count("\n", 0, opener.start()) + 1, code.count("\n", 0, end) + 1
         for line_no in range(first, last + 1):
-            found.setdefault(line_no, "include_str! of a .rs file")
+            found.setdefault(line_no, "include of a .rs file")
     return found
 
 
