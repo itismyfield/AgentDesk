@@ -14,8 +14,6 @@ use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{InterventionMode, QueueExitEvent, QueueExitKind};
 use poise::serenity_prelude::{self as serenity, UserId};
 
-mod source_guard_tests;
-
 fn scoped_root() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
     let root = tempfile::tempdir().expect("runtime root");
     let guard = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
@@ -188,8 +186,8 @@ async fn t1_t1b_t2_t5_t8_queue_exit_verdicts_over_the_whole_queue() {
     // T5b — the same controller-row evidence, but through the PRODUCTION
     // exit-body branch of `apply_queue_exit_feedback`. Every teardown helper
     // ends in `detach()`, so a controller row that outlives a `Released` verdict
-    // proves no teardown ran. This is the only assertion outside the T7 ratchet
-    // that can see the exit-body site at all (no Discord HTTP boundary is
+    // proves no teardown ran. Besides the destructive call-site ratchet, this is the
+    // only check that sees the exit-body site (no Discord HTTP boundary is
     // available — `serenity_http_or_token_fallback` builds its own client).
     let (c6, s6, x6) = (chan(6), id(6), id(89));
     let _ = shared
@@ -435,15 +433,6 @@ async fn t9_t10a_t10b_gated_helpers_wait_for_the_persist_lock() {
     assert_eq!(card_of(&shared, c11, n), None);
 }
 
-/// T7 — source-text ratchet over a FIXED region list: it asserts wiring only. A
-/// raw destructive call in a file that is not listed, or in an unlisted region
-/// of a listed file, passes.
-#[test]
-fn t7_gated_sites_hold_no_raw_destructive_call() {
-    let gaps = source_guard_tests::gate_wiring_gaps();
-    assert!(gaps.is_empty(), "{gaps:#?}");
-}
-
 // #5141: real HTTP evidence for parking and the timer-only 404 classifier.
 type ExitHttpRequests = Arc<std::sync::Mutex<Vec<(axum::http::Method, String)>>>;
 type ExitHttpFixture = (
@@ -583,6 +572,12 @@ async fn t2_parked_row_is_deleted_by_the_next_pending_drain() {
         .add_pending_queue_exit_placeholder_clear_one(channel, user, card)
         .await;
     assert_eq!(pending_disk(&shared).get(&(channel, user)), Some(&card));
+    // A parked card whose channel still has a cardless waiting entry is handed to that entry.
+    let (kept_channel, kept_user, kept_card, waiting) = (chan(107), id(107), id(108), id(109));
+    seed(&shared, kept_channel, vec![queued(waiting, &[waiting])]).await;
+    shared
+        .add_pending_queue_exit_placeholder_clear_one(kept_channel, kept_user, kept_card)
+        .await;
     let (http, server, requests) = exit_http_fixture(204, 0).await;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -595,6 +590,7 @@ async fn t2_parked_row_is_deleted_by_the_next_pending_drain() {
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
     assert_eq!(result.unwrap(), (1, 0));
+    assert_eq!(card_of(&shared, kept_channel, waiting), Some(kept_card));
     assert!(shared.pending_queue_exit_placeholder_clears().is_empty());
     assert!(pending_disk(&shared).is_empty());
     let requests = requests.lock().unwrap();
