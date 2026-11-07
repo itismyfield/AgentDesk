@@ -699,7 +699,7 @@ async fn owner_refused_receipt(case: &'static str) {
                                 .lock()
                                 .unwrap()
                                 .values()
-                                .any(|(_, notice)| notice.contains("모달"))
+                                .any(|(_, notice)| notice == "큐에 들어갔습니다")
                     }
                     _ => false,
                 }
