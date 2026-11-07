@@ -3135,6 +3135,7 @@ src/
 │   │   ├── footer_retirement_boot_tests.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
+│   │   ├── gateway_lease_diagnostics.rs
 │   │   ├── gateway_queue_owner.rs
 │   │   ├── health.rs
 │   │   ├── herdr_terminate.rs

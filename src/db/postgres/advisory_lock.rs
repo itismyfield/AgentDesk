@@ -17,11 +17,12 @@ impl AdvisoryLockLease {
         lock_id: i64,
         label: impl Into<String>,
     ) -> Result<Option<Self>, String> {
-        Self::try_acquire_with_application_name(pool, lock_id, label, None, None).await
+        Self::try_acquire_with_application_name(pool, lock_id, label, None, None, |_| {}).await
     }
 
     /// Acquire under PostgreSQL `application_name`; with `idle_expiry` the server ends the
     /// session after that long without a statement, so a vanished holder cannot keep the lock.
+    #[cfg(test)]
     pub async fn try_acquire_named_expiring(
         pool: &PgPool,
         lock_id: i64,
@@ -29,12 +30,32 @@ impl AdvisoryLockLease {
         application_name: impl Into<String>,
         idle_expiry: Option<Duration>,
     ) -> Result<Option<Self>, String> {
+        Self::try_acquire_named_expiring_observed(
+            pool,
+            lock_id,
+            label,
+            application_name,
+            idle_expiry,
+            |_| {},
+        )
+        .await
+    }
+
+    pub(crate) async fn try_acquire_named_expiring_observed(
+        pool: &PgPool,
+        lock_id: i64,
+        label: impl Into<String>,
+        application_name: impl Into<String>,
+        idle_expiry: Option<Duration>,
+        observe: impl FnMut(Option<Result<bool, ()>>),
+    ) -> Result<Option<Self>, String> {
         Self::try_acquire_with_application_name(
             pool,
             lock_id,
             label,
             Some(application_name.into()),
             idle_expiry.filter(|expiry| !expiry.is_zero()),
+            observe,
         )
         .await
     }
@@ -45,6 +66,7 @@ impl AdvisoryLockLease {
         label: impl Into<String>,
         application_name: Option<String>,
         idle_expiry: Option<Duration>,
+        mut observe: impl FnMut(Option<Result<bool, ()>>),
     ) -> Result<Option<Self>, String> {
         let label = label.into();
         let mut options = (*pool.connect_options()).clone();
@@ -58,11 +80,14 @@ impl AdvisoryLockLease {
         if let Some(expiry) = idle_expiry {
             set_idle_session_timeout(&mut conn, expiry, &label).await?;
         }
+        // None marks the actual SQL attempt; setup failures never invoke the observer.
+        observe(None);
         let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
             .bind(lock_id)
             .fetch_one(&mut conn)
-            .await
-            .map_err(|error| format!("{label} try advisory lock: {error}"))?;
+            .await;
+        observe(Some(acquired.as_ref().copied().map_err(|_| ())));
+        let acquired = acquired.map_err(|error| format!("{label} try advisory lock: {error}"))?;
         if acquired {
             #[cfg(test)]
             test_seam::stall_after_lock(lock_id).await;
