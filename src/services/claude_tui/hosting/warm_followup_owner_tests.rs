@@ -206,8 +206,9 @@ fn clear_suffix() -> String {
 struct ClearedPane {
     _dedupe: std::sync::MutexGuard<'static, ()>,
     _rotations: std::sync::MutexGuard<'static, ()>,
-    _root: crate::config::TestRuntimeRootGuard,
+    // Declared first so its PATH is restored while `_root` still holds the environment lock.
     tmux: crate::services::claude_tui::input::submission::tests::ScriptedTmux,
+    _root: crate::config::TestRuntimeRootGuard,
     dir: tempfile::TempDir,
     session: String,
     before: String,
@@ -407,4 +408,139 @@ fn a_rebind_pending_at_the_first_poll_is_followed_once_adopted() {
     });
     assert_eq!(rebound.map(|now| now.session_id), Some(pane.after.clone()));
     assert!(asked.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+}
+
+/// `/clear`'s session is adopted after the grace, while the observer reads the old session with
+/// no receipt of this submit: the answer is read once from the adopted session and the turn ends.
+#[test]
+fn an_owner_observer_moves_once_to_a_session_adopted_after_the_grace() {
+    let pane = ClearedPane::new();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(CancelToken::new());
+    let observe = owner_observer(
+        (&pane.session, "late clear", 7_889_301),
+        (None, pane.dir.path()),
+        sender,
+        cancel.clone(),
+    )
+    .expect("the observer resolves the pane's session before the submit");
+    let mut old = std::fs::OpenOptions::new()
+        .append(true)
+        .open(pane.path(&pane.before))
+        .unwrap();
+    std::io::Write::write_all(&mut old, clear_suffix().as_bytes()).unwrap();
+    let (finished, done) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let result = observe();
+        let _ = finished.send(());
+        result
+    });
+    // The old session's metadata is read only once the grace is over.
+    let mut seen = Vec::new();
+    let reading_old = std::time::Instant::now() + REBIND_GRACE + std::time::Duration::from_secs(10);
+    loop {
+        let left = reading_old.saturating_duration_since(std::time::Instant::now());
+        match receiver.recv_timeout(left) {
+            Ok(StreamMessage::OutputOffset { .. }) => break,
+            Ok(other) => seen.push(other),
+            Err(error) => panic!("the observer never read the old session: {error}"),
+        }
+    }
+    std::fs::write(
+        pane.path(&pane.after),
+        ClearedPane::turn(&pane.after, "late clear", "answered after the grace"),
+    )
+    .unwrap();
+    pane.bind(&pane.after.clone());
+    crate::services::tui_prompt_dedupe::record_hook_adopted_claude_session_id(
+        &pane.session,
+        &pane.after,
+    );
+    if done
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .is_err()
+    {
+        cancel
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let result = reader.join().unwrap();
+    let text: String = seen
+        .into_iter()
+        .chain(receiver.try_iter())
+        .filter_map(|message| match message {
+            StreamMessage::Text { content } => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text.matches("answered after the grace").count(),
+        1,
+        "the adopted session's answer is relayed once: {text:?}"
+    );
+    assert_eq!(result, Ok(()));
+}
+
+/// This submit's receipt in the observed session keeps the read there even when the pane is
+/// later verified on another session, so one turn's answer is never read from two transcripts.
+#[test]
+fn a_receipt_in_the_observed_session_keeps_the_read_from_moving() {
+    let pane = ClearedPane::new();
+    let frame = "own session input";
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(CancelToken::new());
+    let at = (pane.session.as_str(), frame, 7_889_302);
+    let _observe = owner_observer(at, (None, pane.dir.path()), sender, cancel.clone());
+    let answered = ClearedPane::turn(&pane.before, frame, "answered in its own session");
+    pane.tmux
+        .on_enter(&pane.path(&pane.before), answered.trim_end());
+    let sent = guarded_outcome::with_receipt_sink(Some(&cancel), || {
+        crate::services::claude_tui::input::send_warm_followup_owned(&pane.session, frame, None)
+    });
+    assert!(sent.is_ok(), "{sent:?}");
+    std::fs::write(pane.path(&pane.after), "").unwrap();
+    let observed = Resolution {
+        session_id: pane.before.clone(),
+        transcript_path: pane.path(&pane.before),
+        resume: true,
+    };
+    let adopted = Resolution {
+        session_id: pane.after.clone(),
+        transcript_path: pane.path(&pane.after),
+        resume: true,
+    };
+    let (leave, moved) = late_rebind(&observed, &cancel, move || Some(adopted.clone()));
+    assert!(
+        !leave(),
+        "a receipt in the observed session must keep the read"
+    );
+    assert!(moved.get().is_none());
+}
+
+/// A cleared pane puts the scripted tmux's PATH back before its root guard unlocks the environment,
+/// so the next locked test never has its own tmux shim overwritten.
+#[test]
+fn a_cleared_pane_restores_path_before_the_root_unlocks() {
+    crate::config::test_env::teardown_probe::assert_restores_after_return(
+        concat!(
+            module_path!(),
+            "::a_cleared_pane_restores_path_before_the_root_unlocks"
+        ),
+        false,
+        || {
+            let baseline = std::env::var_os("PATH");
+            let restored = std::rc::Rc::new(std::cell::Cell::new(false));
+            let observed = restored.clone();
+            let _hook = crate::config::test_env::teardown_probe::on_before_restore(move || {
+                assert_eq!(
+                    std::env::var_os("PATH"),
+                    baseline,
+                    "PATH restored inside the lock"
+                );
+                observed.set(true);
+            });
+            drop(ClearedPane::new());
+            assert!(restored.get(), "root teardown hook must run");
+        },
+    );
 }
