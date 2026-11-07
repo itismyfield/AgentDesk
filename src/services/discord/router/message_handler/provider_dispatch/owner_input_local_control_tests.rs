@@ -8,7 +8,10 @@ use crate::services::discord::shared_state::test_rest;
 use poise::serenity_prelude as serenity;
 use std::sync::Arc;
 
-const NOTICE: &str = "provider 턴을 만들지 않았습니다";
+const MODEL_NOTICE: &str = "provider 턴을 만들지 않았습니다";
+// The posted notice escapes the backticks around `/goal pause`, so match the plain tail.
+const GOAL_PAUSE_NOTICE: &str =
+    "routine lifecycle과 연결되어 있지 않아 Codex TUI로 전달하지 않았습니다";
 
 fn original(message: u64, author: u64, text: &str) -> crate::services::discord::Intervention {
     crate::services::discord::Intervention {
@@ -24,7 +27,8 @@ fn original(message: u64, author: u64, text: &str) -> crate::services::discord::
         created_at: std::time::Instant::now(),
         reply_context: None,
         has_reply_boundary: false,
-        merge_consecutive: true,
+        // Ingress keeps slash commands apart from the messages around them.
+        merge_consecutive: !text.starts_with('/'),
         pending_uploads: Vec::new(),
     }
 }
@@ -66,6 +70,16 @@ async fn rest(channel: u64) -> (Arc<Mutex<Vec<String>>>, test_rest::Guard) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_codex_local_control_front_leaves_the_queue_and_settles_its_drive() {
+    local_control_front_settles("/model", MODEL_NOTICE).await;
+}
+
+/// `/goal pause` completes on the goal lifecycle path, before ordinary admission.
+#[tokio::test(flavor = "current_thread")]
+async fn a_codex_goal_lifecycle_front_leaves_the_queue_and_settles_its_drive() {
+    local_control_front_settles("/goal pause", GOAL_PAUSE_NOTICE).await;
+}
+
+async fn local_control_front_settles(control: &str, notice: &str) {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let disabled = std::ffi::OsStr::new("disabled");
     let _mode =
@@ -108,10 +122,10 @@ async fn a_codex_local_control_front_leaves_the_queue_and_settles_its_drive() {
         .unwrap();
     let previous = set_owner_wake_for_tests(channel, Some(Arc::new(|| {})));
     for (message, author, text) in [
-        (7_272_370_001, 11, "/model"),
+        (7_272_370_001, 11, control),
         (
             7_272_370_002,
-            12,
+            11,
             "Reply with exactly [AFTER] and nothing else.",
         ),
     ] {
@@ -148,7 +162,7 @@ async fn a_codex_local_control_front_leaves_the_queue_and_settles_its_drive() {
     );
     let notices = posted.lock().unwrap().clone();
     assert_eq!(
-        notices.iter().filter(|text| text.contains(NOTICE)).count(),
+        notices.iter().filter(|text| text.contains(notice)).count(),
         1,
         "{notices:?}"
     );
