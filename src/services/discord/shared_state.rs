@@ -703,12 +703,12 @@ impl RestartLifecycle {
         {
             return None;
         }
-        // Two keepalive intervals bound stale observations when a standby stops polling.
+        // Allow two maximum standby retry intervals before hiding an unrefreshed observation.
         self.gateway_handback_health
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(30))
+            .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(120))
             .map(|(_, reason)| reason.clone())
     }
 

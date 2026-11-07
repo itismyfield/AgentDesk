@@ -802,6 +802,19 @@ async fn handback_health_omits_disabled_failed_and_stale_standby_observations_pg
     .unwrap();
     assert!(breaker.suppressed());
     assert_eq!(handback_health(&registry).await.len(), 1);
+    shared
+        .restart
+        .gateway_handback_health
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .0 = Instant::now() - Duration::from_secs(60);
+    assert_eq!(
+        handback_health(&registry).await.len(),
+        1,
+        "a normal standby retry interval stays fresh"
+    );
     fixture.save_config(|config| config.cluster.gateway_handback_breaker.enabled = false);
     assert!(
         handback_health(&registry).await.is_empty(),
@@ -830,7 +843,7 @@ async fn handback_health_omits_disabled_failed_and_stale_standby_observations_pg
         .unwrap()
         .as_mut()
         .unwrap()
-        .0 = Instant::now() - Duration::from_secs(30);
+        .0 = Instant::now() - Duration::from_secs(120);
     assert!(
         handback_health(&registry).await.is_empty(),
         "stopped standby polling cannot expose a stale reason"
