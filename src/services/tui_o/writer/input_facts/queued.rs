@@ -4,7 +4,6 @@
 use serde_json::Value;
 
 use crate::services::tui_o::shadow::ShadowProvider;
-use crate::services::tui_o::turn_mode::carried_close_mutant as mutant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
@@ -89,10 +88,6 @@ impl QueuedInputs {
             return;
         }
         let record = classify(value);
-        if mutant("bulk") && (opened || value["type"] == "attachment") {
-            self.inputs.clear();
-            return;
-        }
         match record {
             Some(Record::Enqueue(body)) => self.inputs.push(Input::new(body, Stage::Waiting)),
             Some(Record::Withdraw(body)) => {
@@ -102,9 +97,7 @@ impl QueuedInputs {
             Some(Record::Delivered(body)) => self.withdraw(&body),
             Some(Record::Absorbed(body)) => self.absorb(&body, open),
             Some(Record::WithdrawAll) => self.inputs.retain(|input| input.stage == Stage::Running),
-            Some(Record::Dequeue) if self.removed > 0 && !mutant("dequeue_credit") => {
-                self.removed -= 1
-            }
+            Some(Record::Dequeue) if self.removed > 0 => self.removed -= 1,
             Some(Record::Dequeue) => {
                 if let Some(at) = self.find(|input| input.stage == Stage::Waiting) {
                     self.inputs[at].stage = Stage::Dequeued;
@@ -222,11 +215,9 @@ pub(crate) fn classify(value: &Value) -> Option<Record> {
             let prompt = body(&command["prompt"])?;
             match human {
                 true => Some(Record::Human(prompt)),
-                false if mutant("notification_unlinked") => None,
                 false => Some(Record::Command(prompt)),
             }
         }
-        "user" if value["isMeta"] == true && mutant("exclude_meta") => None,
         "user" => body(&value["message"]["content"]).map(Record::Prompt),
         _ => None,
     }

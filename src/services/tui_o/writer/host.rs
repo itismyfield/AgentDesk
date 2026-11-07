@@ -277,9 +277,6 @@ impl Readiness {
         let view = self.undelivered(channel)?;
         let mut published = view.published;
         let wanting = view.demand.want();
-        if crate::services::tui_o::turn_mode::carried_close_mutant("stale_ask") {
-            return published.borrow().clone();
-        }
         // What is already there was published before this ask, including the initial `None`.
         published.borrow_and_update();
         let answer = async {
