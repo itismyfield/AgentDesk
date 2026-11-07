@@ -38,9 +38,11 @@ Rebind ==
 Close ==
     /\ answered /\ observer = inputIn /\ ~closed /\ closed' = TRUE
     /\ UNCHANGED <<clear, adopt, observer, submitted, inputIn, answered>>
+\* A reader on the other session keeps tailing a file that never grows: a lasso, not a deadlock.
+Tail == answered /\ ~closed /\ observer # inputIn /\ UNCHANGED vars
 Done == closed /\ UNCHANGED vars
 
-Next == Build \/ Submit \/ Adopt \/ Answer \/ Rebind \/ Close \/ Done
+Next == Build \/ Submit \/ Adopt \/ Answer \/ Rebind \/ Close \/ Tail \/ Done
 Spec == Init /\ [][Next]_vars /\ WF_vars(Build) /\ WF_vars(Submit) /\ WF_vars(Adopt)
         /\ WF_vars(Answer) /\ WF_vars(Rebind) /\ WF_vars(Close)
 
