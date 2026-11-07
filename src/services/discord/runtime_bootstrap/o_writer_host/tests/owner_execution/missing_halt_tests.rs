@@ -182,9 +182,49 @@ enum Wake {
     EarlySource,
     RuntimeSource,
     AbsentRuntime,
+    AbsentBoundRuntime,
+    HeldNewSource,
     Stop,
     Retire,
     Replaced,
+}
+
+fn transcript(root: &Path, name: &str) -> SourceId {
+    let path = root.join(name);
+    std::fs::write(&path, b"{}\n").unwrap();
+    let session = uuid::Uuid::new_v4().to_string();
+    crate::services::tui_o::shadow::binding_reader::source_id_for(&session, &path).unwrap()
+}
+
+/// Appends a `/clear` bind of one execution to the durable log, as a restarted process reads it.
+fn bind(root: &Path, channel: u64, pane: &str, seq: u64, old: Option<&SourceId>, new: &SourceId) {
+    use crate::services::tui_prompt_dedupe::binding_events as p5;
+    let now = chrono::Utc::now();
+    let event = p5::BindingEvent {
+        seq,
+        channel_id: channel,
+        provider: "claude".into(),
+        tmux_session: pane.into(),
+        execution_nonce: Some("bound-incarnation".into()),
+        old: old.cloned(),
+        new: p5::BindingTarget::Source(new.clone()),
+        cause: p5::BindingCause::Clear,
+        parent_hint: None,
+        evidence: p5::BindingEvidence {
+            hook_event: Some("SessionStart".into()),
+            received_at: now,
+        },
+        committed_at: now,
+    };
+    let dir = root.join(p5::BINDING_EVENTS_DIR);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("{channel}.log")))
+        .unwrap();
+    writeln!(log, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+    p5::forget_channel_for_tests(channel);
 }
 
 async fn scenario(role: &str, wake: Wake) {
@@ -249,7 +289,8 @@ async fn scenario(role: &str, wake: Wake) {
         runtime_root: root.path().display().to_string(),
     };
     let mut row = record(&owner, "orphan-execution", HostedState::Pending);
-    if wake == Wake::AbsentRuntime {
+    let absent = matches!(wake, Wake::AbsentRuntime | Wake::AbsentBoundRuntime);
+    if absent {
         row.state = HostedState::Retired;
         let endpoint = crate::config::session_hosts::herdr_endpoint(channel).unwrap();
         row.location = Some(HostedLocation {
@@ -282,7 +323,7 @@ async fn scenario(role: &str, wake: Wake) {
     .await;
     assert_eq!(
         reading.observed.activity,
-        if wake == Wake::AbsentRuntime {
+        if absent {
             Activity::Idle
         } else {
             Activity::Unknown
@@ -325,9 +366,22 @@ async fn scenario(role: &str, wake: Wake) {
     if wake == Wake::EarlySource {
         *log.1.lock().unwrap() = Some((saved.clone(), source.path.clone()));
     }
-    if matches!(wake, Wake::RuntimeSource | Wake::AbsentRuntime) {
+    if matches!(wake, Wake::RuntimeSource) || absent {
         std::fs::rename(&saved, &source.path).unwrap();
     }
+    // A source bound after the store's last checkpoint is attached by the actor, not the store.
+    let mut watched = source.clone();
+    if wake == Wake::AbsentBoundRuntime {
+        watched = transcript(root.path(), "bound.jsonl");
+        bind(root.path(), channel, &pane, 1, Some(&source), &watched);
+    } else if wake == Wake::HeldNewSource {
+        bind(root.path(), channel, &pane, 1, None, &source);
+    }
+    let watched_kept = if wake == Wake::AbsentBoundRuntime {
+        root.path().join("watched-kept")
+    } else {
+        saved.clone()
+    };
     let _tracing = tracing::subscriber::set_default(
         tracing_subscriber::fmt()
             .without_time()
@@ -359,14 +413,15 @@ async fn scenario(role: &str, wake: Wake) {
     );
     assert_eq!(handles.len(), 1);
     let generation = host::process_readiness().hosted_by(channel).unwrap();
-    if matches!(wake, Wake::RuntimeSource | Wake::AbsentRuntime) {
+    if matches!(wake, Wake::RuntimeSource) || absent {
         accepts(channel).await;
-        std::fs::rename(&source.path, &saved).unwrap();
+        assert!(!retained_bytes(root.path(), channel, &watched).is_empty());
+        std::fs::rename(&watched.path, &watched_kept).unwrap();
     }
     until(|| log.count("writer stopped and stays stopped") == 1).await;
-    if matches!(wake, Wake::RuntimeSource | Wake::AbsentRuntime) {
-        let held = retained_bytes(root.path(), channel, &source);
-        for (path, hash) in &original {
+    if matches!(wake, Wake::RuntimeSource) || absent {
+        let held = retained_bytes(root.path(), channel, &watched);
+        for (path, hash) in original.iter().filter(|_| wake != Wake::AbsentBoundRuntime) {
             if path
                 .extension()
                 .is_some_and(|extension| extension == "json")
@@ -381,7 +436,7 @@ async fn scenario(role: &str, wake: Wake) {
         original = held;
     }
     let tui_o = TuiOConfig::default();
-    if wake == Wake::AbsentRuntime {
+    if absent {
         let mut successor = host::start_managed(
             ShadowProvider::Claude,
             true,
@@ -407,7 +462,7 @@ async fn scenario(role: &str, wake: Wake) {
             Some(generation)
         );
         assert_eq!(log.count("stage=\"hosted\" status=\"start\""), 2);
-        assert_eq!(retained_bytes(root.path(), channel, &source), original);
+        assert_eq!(retained_bytes(root.path(), channel, &watched), original);
         assert!(
             !crate::services::tui_o::alarm::health_reasons()
                 .contains(&format!("tui_o:halted:{channel}"))
@@ -604,6 +659,10 @@ async fn scenario(role: &str, wake: Wake) {
         );
         assert_eq!(log.count("writer stopped and stays stopped"), 1);
         assert_eq!(retained_bytes(root.path(), channel, &source), original);
+    } else if wake == Wake::HeldNewSource {
+        let next = transcript(root.path(), "next.jsonl");
+        bind(root.path(), channel, &pane, 2, Some(&source), &next);
+        accepts(channel).await;
     } else if source_returns {
         if wake != Wake::EarlySource {
             std::fs::rename(&saved, &source.path).unwrap();
@@ -810,5 +869,25 @@ async fn missing_halt_sessionless_runtime_loss_keeps_main_recovery_pg() {
         "::missing_halt_sessionless_runtime_loss_keeps_main_recovery_pg"
     )) {
         scenario("gateway", Wake::AbsentRuntime).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_halt_sessionless_bound_runtime_loss_keeps_main_recovery_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::missing_halt_sessionless_bound_runtime_loss_keeps_main_recovery_pg"
+    )) {
+        scenario("gateway", Wake::AbsentBoundRuntime).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_halt_same_nonce_new_source_retries_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::missing_halt_same_nonce_new_source_retries_pg"
+    )) {
+        scenario("gateway", Wake::HeldNewSource).await;
     }
 }

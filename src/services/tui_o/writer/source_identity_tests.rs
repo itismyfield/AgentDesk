@@ -578,6 +578,22 @@ async fn a_first_start_halts_rather_than_take_a_changed_source_as_its_baseline()
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_first_start_names_its_missing_baseline_alias_as_missing() {
+    let (harness, path, w, bindings) = started_empty(&row("m0", "before the loss"));
+    bindings.commit(resume(2, &w, &named(&w, "A")));
+    std::fs::remove_file(&path).unwrap();
+    let (_stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(3).await;
+    assert!(task.is_finished());
+    let alarms = harness.alarms.taken();
+    assert!(
+        matches!(alarms.last(), Some(WriterAlarm::HaltedMissingSource { source, .. }) if *source == w),
+        "{alarms:?}"
+    );
+    assert_eq!(harness.channel().binding_checkpoint().unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_source_bound_again_waits_its_own_quiet_in_its_next_rotation() {
     let (harness, path, w, bindings) = started_empty(&row("m0", "before the switch"));
     let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
