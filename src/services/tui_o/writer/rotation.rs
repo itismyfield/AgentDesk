@@ -691,7 +691,14 @@ impl<B: BindingEvents> Sources<B> {
                 let attached = writer.store().attach_source(&new);
                 let attached = attached.map_err(halted("attach"))?;
                 let opened = SourceCapture::reopen(new.clone(), 0, &attached.prefix_hash);
-                let capture = opened.map_err(|error| halt(format!("bound source: {error}")))?;
+                // A new source already gone names itself Missing, so its host waits for it.
+                let capture = opened.map_err(|error| {
+                    let detail = format!("bound source: {error}");
+                    match Reopen::Unread(error).halt_at(&new) {
+                        missing @ WriterAlarm::HaltedMissingSource { .. } => missing,
+                        _ => halt(detail),
+                    }
+                })?;
                 self.readers.push(Reader::new(new, Some(capture)));
                 Ok(())
             }

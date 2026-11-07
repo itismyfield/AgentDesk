@@ -563,3 +563,71 @@ async fn a_source_cleared_in_after_ready_and_lost_releases_the_absent_claim() {
     );
     assert_eq!(h.channel().binding_checkpoint().unwrap(), Some(3));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_new_bound_source_missing_before_first_open_holds_unknown_claim() {
+    if !cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::a_new_bound_source_missing_before_first_open_holds_unknown_claim"
+    )) {
+        return;
+    }
+    let (h, empty, _, bindings) = aliases(false);
+    let (path, fresh) = transcript(&empty.path, "b.jsonl", "B", &row("first-open", REPLY));
+    bindings.commit(bound(
+        2,
+        Some(&empty),
+        BindingTarget::Source(fresh.clone()),
+        BindingCause::Startup,
+        None,
+    ));
+    let away = path.with_extension("away");
+    std::fs::rename(&path, &away).unwrap();
+    let _selected = cutover::test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(CHANNEL);
+    let io = Arc::new(AliasIo {
+        port: h.port.clone(),
+        lease: h.lease.clone(),
+        alarms: h.alarms.clone(),
+        bindings: bindings.clone(),
+        absent: AtomicBool::new(false),
+        probes: AtomicUsize::new(0),
+        boots: AtomicUsize::new(0),
+    });
+    let ready = Arc::new(Readiness::default());
+    let host = hosted(&h, &io, &ready);
+    let generation = ready.hosted_by(CHANNEL);
+    assert!(generation.is_some());
+    until(&h, || false).await;
+    // An Unknown producer's bound source gone before its first open holds the claim.
+    for _ in 0..5 {
+        polls(2).await;
+        let at = h.channel().binding_checkpoint().unwrap();
+        assert_eq!(
+            (ready.hosted_by(CHANNEL), at),
+            (generation, Some(1)),
+            "a new source missing on its first open must keep its claim"
+        );
+        assert_eq!((io.boots.load(Ordering::SeqCst), halts(&h)), (1, 1));
+        assert!(host.live() && !ready.accepts(CHANNEL));
+        assert!(h.port.posts().is_empty());
+    }
+    assert!(matches!(
+        h.alarms.raised.lock().unwrap().last(),
+        Some(WriterAlarm::HaltedMissingSource { source, .. }) if *source == fresh
+    ));
+    std::fs::rename(&away, &path).unwrap();
+    past(&h, 1, || {
+        h.port.posts().len() == 1 && ready.accepts(CHANNEL)
+    })
+    .await;
+    for _ in 0..5 {
+        polls(2).await;
+        assert_eq!(h.port.posts(), [REPLY]);
+        assert_eq!(h.channel().binding_checkpoint().unwrap(), Some(2));
+        assert_eq!((io.boots.load(Ordering::SeqCst), halts(&h)), (2, 1));
+        assert_eq!(ready.hosted_by(CHANNEL), generation);
+        assert!(host.live() && ready.accepts(CHANNEL));
+    }
+    host.stop_and_join().await.unwrap();
+}
