@@ -2556,6 +2556,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         with (
             patch("run_tui_relay.time.sleep", return_value=None),
             patch("run_tui_relay.tmux.send_keys", side_effect=fake_send_keys),
+            patch("run_tui_relay._read_api_json", return_value=(200, {})),
             patch(
                 "run_tui_relay.assert_cell_idle",
                 return_value={"status": "idle", "mailboxes_seen": 1},
@@ -2629,6 +2630,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         with (
             patch("run_tui_relay.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)),
             patch("run_tui_relay.tmux.send_keys", side_effect=fake_send_keys),
+            patch("run_tui_relay._read_api_json", return_value=(200, {})),
             patch(
                 "run_tui_relay.assert_cell_idle",
                 return_value={"status": "idle", "mailboxes_seen": 1},
@@ -2704,6 +2706,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         with (
             patch("run_tui_relay.time.sleep", return_value=None),
             patch("run_tui_relay.tmux.send_keys", return_value=True),
+            patch("run_tui_relay._read_api_json", return_value=(200, {})),
             patch(
                 "run_tui_relay.wait_for_discord_text_with_tui_idle_draft_guard",
                 side_effect=fake_wait,

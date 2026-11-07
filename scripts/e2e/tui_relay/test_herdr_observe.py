@@ -692,6 +692,50 @@ class HerdrTextClear(unittest.TestCase):
                 self.assertNotIn(f'"{prefix}', source)
 
 
+def pane(pane_id, cwd, agent="claude"):
+    return {"pane_id": pane_id, "cwd": cwd, **({"agent": agent} if agent else {})}
+
+
+class HerdrLocalKeys(unittest.TestCase):
+    """Scenario keys typed into a Herdr-hosted cell reach exactly one agent pane, or none at all."""
+
+    WORKSPACE = "/Users/u/.adk/release/workspaces/adk-claude-tui-2-e2e"
+
+    def send(self, panes, keys):
+        calls = []
+
+        def run(argv, **_):
+            calls.append(argv)
+            return Namespace(stdout=json.dumps({"result": {"panes": panes}}) if argv[2] == "list" else "")
+        try:
+            return herdr.send_key_sequence(keys, agent_workspace="adk-claude-tui-2-e2e", agent="claude",
+                                           herdr_bin="herdr", run=run), calls
+        except driver.assertions.AssertionError as error:
+            return error, calls
+
+    def test_text_and_keys_go_to_the_agent_pane(self):
+        panes = [pane("w6:p1", self.WORKSPACE, agent=None), pane("w7:p1", self.WORKSPACE + "-other"),
+                 pane("w1A:p1", self.WORKSPACE + "/")]
+        result, calls = self.send(panes, ["/model default", "C-m"])
+        self.assertEqual(calls, [["herdr", "pane", "list"],
+                                 ["herdr", "pane", "send-text", "w1A:p1", "/model default"],
+                                 ["herdr", "pane", "send-keys", "w1A:p1", "enter"]])
+        self.assertEqual((result["pane"], result["count"]), ("w1A:p1", 2))
+
+    def test_missing_ambiguous_pane_or_unmapped_key_writes_nothing(self):
+        two = [pane("w1A:p1", self.WORKSPACE), pane("w1B:p1", self.WORKSPACE)]
+        for label, panes, keys, reason in (
+                ("no agent pane", [pane("w6:p1", self.WORKSPACE, agent=None)], ["x", "C-m"], "missing or ambiguous"),
+                ("codex pane only", [pane("w6:p1", self.WORKSPACE, agent="codex")], ["x", "C-m"], "missing or ambiguous"),
+                ("two agent panes", two, ["x", "C-m"], "missing or ambiguous"),
+                ("unmapped tmux key", two[:1], ["x", "C-z"], "has no Herdr mapping")):
+            with self.subTest(label=label):
+                error, calls = self.send(panes, keys)
+                self.assertIsInstance(error, driver.assertions.AssertionError)
+                self.assertIn(reason, str(error))
+                self.assertEqual(calls, [["herdr", "pane", "list"]])
+
+
 class RestartObserveOnly(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())

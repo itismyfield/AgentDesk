@@ -449,7 +449,13 @@ By default it uses one tmux `send-keys` call; scenarios can set
 `key_interval_s` to send the same ordered key list one key at a time when a TUI
 composer must process a control key before Enter. `E-21` uses that mode to
 cover direct TUI input where a stale draft is cleared by a real control key
-before the submitted prompt is relayed.
+before the submitted prompt is relayed. When `/api/health/detail` lists the
+channel under `herdr.configured_channels`, the same keys go to the one Herdr
+pane running the cell's provider in `workspaces/<cell agent>`
+(`herdr pane send-keys` for mapped key names, `herdr pane send-text` for text);
+no such pane or more than one fails the step. `wait_for_raw_discord_text` with
+`required: false` records the text under `observed_notices` instead of failing
+when it does not arrive.
 
 Observation assertions now include negative and edit-aware primitives:
 `raw_text_absent`, `marker_absent`, `chrome_count`,

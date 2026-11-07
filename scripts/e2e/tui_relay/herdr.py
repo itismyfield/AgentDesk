@@ -11,7 +11,7 @@ import subprocess
 import time
 import urllib.error
 
-from . import assertions, health_readiness, http_auth, known_gap, restart_guard
+from . import assertions, channel_reset, health_readiness, http_auth, known_gap, restart_guard
 
 TMUX_STEPS = {
     "kill_pane", "capture_session_identity", "assert_session_preserved",
@@ -24,6 +24,56 @@ CHANNEL_ID = re.compile(r"\d{17,}")
 # Text !clear refusals as worded in commands/control/native.rs and control.rs, which share this prefix.
 # A wording change only loses the fail-fast: the acknowledgement wait then times out as before.
 CLEAR_REFUSAL_PREFIXES = ("세션을 초기화하지 못했어요:",)
+HERDR_BIN = "/opt/homebrew/bin/herdr"
+# tmux key names a scenario may use, as Herdr names them (session_host/herdr_gate.rs herdr_key).
+HERDR_KEYS = {"C-m": "enter", "Enter": "enter", "Escape": "esc", "C-c": "ctrl+c", "C-u": "ctrl+u",
+              "C-e": "ctrl+e", "C-s": "ctrl+s", "Left": "left", "Right": "right", "BSpace": "backspace"}
+TMUX_KEY_NAME = re.compile(r"^(?:[CMS]-\S+|BTab|DC|Delete|Down|End|Home|IC|NEnter|PageDown|PageUp|Space|Tab|Up)$")
+
+
+def hosts_channel(health, channel_id):
+    """True when detail health lists the channel as Herdr-hosted; a missing Herdr block means tmux."""
+    block = health.get("herdr") if isinstance(health, dict) else None
+    if block is None:
+        return False
+    configured = block.get("configured_channels") if isinstance(block, dict) else None
+    return channel_reset.preserve_herdr_session(channel_id=channel_id, configured_channels=configured,
+                                                log=lambda _action: None)
+
+
+def agent_pane(panes, *, agent_workspace, agent):
+    """The one pane running `agent` whose cwd is `.../workspaces/<agent_workspace>`; zero or several fail."""
+    matches = [p.get("pane_id") for p in panes if isinstance(p, dict) and p.get("agent") == agent
+               and isinstance(p.get("cwd"), str) and p["cwd"].rstrip("/").split("/")[-2:] == ["workspaces", agent_workspace]]
+    if len(matches) != 1 or not isinstance(matches[0], str) or not matches[0]:
+        raise assertions.AssertionError(
+            f"Herdr pane for workspaces/{agent_workspace} agent={agent} missing or ambiguous: {matches}")
+    return matches[0]
+
+
+def key_argv(pane_id, key, *, herdr_bin=HERDR_BIN):
+    """One Herdr call per scenario key: known key names as keys, anything else as literal text."""
+    if key in HERDR_KEYS:
+        return [herdr_bin, "pane", "send-keys", pane_id, HERDR_KEYS[key]]
+    if TMUX_KEY_NAME.match(key):
+        raise assertions.AssertionError(f"tmux key {key!r} has no Herdr mapping")
+    return [herdr_bin, "pane", "send-text", pane_id, key]
+
+
+def send_key_sequence(keys, *, agent_workspace, agent, key_interval_s=0.0, herdr_bin=HERDR_BIN, run=subprocess.run):
+    """Type `keys` into the cell's Herdr pane; every key is validated before the first write."""
+    listed = run([herdr_bin, "pane", "list"], capture_output=True, text=True, check=True, timeout=30)
+    panes = (json.loads(listed.stdout).get("result") or {}).get("panes")
+    if not isinstance(panes, list):
+        raise assertions.AssertionError("herdr pane list returned no pane array")
+    pane_id = agent_pane(panes, agent_workspace=agent_workspace, agent=agent)
+    calls = [key_argv(pane_id, str(key), herdr_bin=herdr_bin) for key in keys]
+    for index, argv in enumerate(calls):
+        run(argv, capture_output=True, text=True, check=True, timeout=30)
+        if key_interval_s > 0 and index < len(calls) - 1:
+            time.sleep(key_interval_s)
+    return {"host": "herdr", "pane": pane_id, "count": len(calls), "calls": [argv[2] for argv in calls],
+            "key_interval_s": key_interval_s}
 
 
 def validate_arguments(parser, args):
@@ -493,9 +543,13 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     refusal = clear_after is not None and clear_refusal(rows, after=clear_after, channel=args.channel_id)
                     if refusal:
                         raise assertions.AssertionError(f"text !clear refused by the server: {refusal}")
-                    if any(clear_reply(r, marker, after=clear_after, channel=args.channel_id) if clear_after is not None
-                           else marker in r.get("content", "") for r in rows):
-                        clear_after = None
+                    seen = any(clear_reply(r, marker, after=clear_after, channel=args.channel_id) if clear_after is not None
+                               else marker in r.get("content", "") for r in rows)
+                    optional = step.get("required", True) is False
+                    if seen or (optional and time.monotonic() >= deadline):
+                        if optional:
+                            result.setdefault("observed_notices", []).append({"needle": marker, "observed": seen})
+                        clear_after = None if seen else clear_after
                         break
                     if time.monotonic() >= deadline:
                         raise assertions.AssertionError(f"Herdr control acknowledgement missing: {marker}")

@@ -145,6 +145,8 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "marker_counts",
     "clear_refusal",
     "tmux_key_sequences",
+    "herdr_key_sequences",
+    "observed_notices",
     "direct_input_prompts",
     "concurrent_prompt_batches",
     "wait_timeouts",
@@ -1083,6 +1085,10 @@ def validate_scenario_schema(scenario):
             metadata = {"requires_feature"} if kind == "assertions" else set()
             if action in {"wait_for_discord_text", "wait_for_raw_discord_text"}:
                 metadata.add("timeout_s")
+            if action == "wait_for_raw_discord_text":
+                metadata.add("required")
+                if type(entry.get("required", True)) is not bool:
+                    raise ValueError("wait_for_raw_discord_text required must be a boolean")
             if action == "wait_for_discord_text":
                 metadata.add("relay_author")
             if action in {"send_prompt", "send_discord_prompt", "deliver_prompt", "send_provider_hold_prompt", "send_timed_response_prompt"}:
@@ -4080,6 +4086,12 @@ def run_one_cell(
                 _update_record_window_snapshot(record, window)
                 raise ScenarioStepAssertionError(
                     f"text !clear refused by the server: {refusal_reply['content']}", record=record)
+            if step.get("required", True) is False:
+                # An optional notice is evidence, not a gate: record whether it arrived and move on.
+                record.setdefault("observed_notices", []).append(
+                    {"needle": needle, "observed": found is not None,
+                     "message_id": str(found.get("id")) if found else None})
+                continue
             if not found:
                 diagnostic = _collect_wait_timeout_diagnostics(
                     base_url=client.base_url,
@@ -4329,13 +4341,21 @@ def run_one_cell(
             key_interval_s = float(
                 params.get("key_interval_s", params.get("interval_s", 0.0))
             )
-            record.setdefault("tmux_key_sequences", []).append(
-                send_tmux_key_sequence(
-                    session_name,
-                    key_args,
-                    key_interval_s=key_interval_s,
+            # A Herdr-hosted channel has no tmux session; its keys go to the agent's Herdr pane.
+            _, detail = _read_api_json(client.base_url, "/api/health/detail")
+            if herdr.hosts_channel(detail, channel_id):
+                record.setdefault("herdr_key_sequences", []).append(
+                    herdr.send_key_sequence(key_args, agent_workspace=cell_default_agent(cell),
+                                            agent=cell_provider(cell), key_interval_s=key_interval_s)
                 )
-            )
+            else:
+                record.setdefault("tmux_key_sequences", []).append(
+                    send_tmux_key_sequence(
+                        session_name,
+                        key_args,
+                        key_interval_s=key_interval_s,
+                    )
+                )
             if mark_prompt_sent:
                 _mark_real_provider_contacted(
                     record,
