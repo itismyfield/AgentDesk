@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 pub(crate) const WAIT_CAP: Duration = Duration::from_secs(30);
 
 /// Joins `handle` within `cap`, re-raising the thread's own panic; past the cap the thread is left behind.
+/// The cap covers the thread body: thread-local destructors run after it and are not cut.
 #[track_caller]
 pub(crate) fn join_within<T>(handle: JoinHandle<T>, cap: Duration) -> T {
     let caller = Location::caller();
@@ -40,7 +41,8 @@ pub(crate) fn recv_within<T>(rx: &Receiver<T>, cap: Duration) -> T {
     }
 }
 
-/// Awaits `fut` within `cap` on the current tokio runtime.
+/// Awaits `fut` within `cap` on the current tokio runtime; the cap acts only when the future yields,
+/// so a blocking poll or Drop is not cut and runtime teardown stays the caller's.
 #[track_caller]
 pub(crate) fn await_within<F: Future>(fut: F, cap: Duration) -> impl Future<Output = F::Output> {
     let caller = Location::caller();
