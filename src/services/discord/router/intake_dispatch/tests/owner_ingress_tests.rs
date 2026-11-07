@@ -458,9 +458,7 @@ async fn every_hold_notices_once_and_pending_or_attempted_never() {
         })
         .collect();
     assert_eq!(texts, Hold::ALL.map(Hold::notice));
-    assert!(
-        texts.iter().all(|text| text == "큐에 들어갔습니다")
-    );
+    assert!(texts.iter().all(|text| text == "큐에 들어갔습니다"));
     let (key, _) = reserve(&handle, "attempted").await;
     write(&handle, &key).await;
     let fresh = input_ingress::Original::with_ticket(
