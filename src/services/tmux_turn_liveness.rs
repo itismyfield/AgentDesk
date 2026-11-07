@@ -151,6 +151,20 @@ fn provider_idle_evidence_agrees(
             .any(|line| line.to_ascii_lowercase().contains("esc to interrupt"))
         && (!matches!(provider, ProviderKind::Claude)
             || !crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(pane))
+        // Background work (agents, shells, monitors, tasks) outlives the foreground
+        // turn and only vetoes cleanup; input readiness is unchanged.
+        && (!matches!(provider, ProviderKind::Claude) || !claude_pane_shows_background_work(pane))
+}
+
+/// The pending-agent footer or a bypass row counting shells/monitors/agents/tasks.
+fn claude_pane_shows_background_work(pane: &str) -> bool {
+    crate::services::tmux_common::tmux_capture_indicates_claude_tui_background_agent_pending(pane)
+        || pane
+            .lines()
+            .rev()
+            .filter(|line| !line.trim().is_empty())
+            .take(crate::services::tmux_common::CLAUDE_TUI_READINESS_SCAN_LINES)
+            .any(crate::services::tmux_common::claude_footer::counts_background_work)
 }
 
 /// Keep background work and approval waits even if the foreground provider is
@@ -220,6 +234,58 @@ mod idle_cleanup_tests {
             &ProviderKind::Claude,
             TuiTurnState::Idle,
             READY,
+        ));
+    }
+
+    const CLAUDE_FRAME: &str = "⏺ Foreground answer complete\n\
+────────────────────────────────────────────────────\n\
+❯\n\
+────────────────────────────────────────────────────\n";
+
+    /// Work moved to the background (Ctrl+B shells, agents) outlives the foreground turn
+    /// and registers no child row; only the pane shows it, so cleanup must read the pane.
+    #[test]
+    fn idle_cleanup_preserves_claude_background_work_shown_in_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = dir.path().join("native.jsonl");
+        std::fs::write(
+            &native,
+            "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"timestamp\":\"2026-01-01T00:00:00.000Z\"}\n",
+        )
+        .unwrap();
+        let idle = format!("{CLAUDE_FRAME}  ⏵⏵ bypass permissions on\n");
+        assert!(provider_output_is_proven_idle(
+            &ProviderKind::Claude,
+            &native,
+            &idle
+        ));
+        for footer in [
+            "  ⏵⏵ bypass permissions on · 1 shell",
+            "  ⏵⏵ bypass permissions on · 2 shells, 1 monitor · ↓ to manage",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · 1 background task",
+            "  ⏵⏵ bypass permissions on · 1 local agent",
+        ] {
+            let pane = format!("{CLAUDE_FRAME}{footer}\n");
+            assert!(
+                crate::services::provider::tmux_capture_indicates_ready_for_input(
+                    &pane,
+                    &ProviderKind::Claude
+                ),
+                "{footer}"
+            );
+            assert!(
+                !provider_output_is_proven_idle(&ProviderKind::Claude, &native, &pane),
+                "{footer}"
+            );
+        }
+        // Claude paints the waiting footer directly above the composer separator.
+        let agents =
+            CLAUDE_FRAME.replacen("\n─", "\n✻ Waiting for 3 background agents to finish\n─", 1)
+                + "  ⏵⏵ bypass permissions on\n";
+        assert!(!provider_output_is_proven_idle(
+            &ProviderKind::Claude,
+            &native,
+            &agents
         ));
     }
 

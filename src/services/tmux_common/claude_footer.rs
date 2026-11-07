@@ -3,15 +3,7 @@ pub(crate) const BYPASS_FOOTER: &str = "  ⏵⏵ bypass permissions on";
 
 /// None is unrecognised chrome; a recognised row reports whether interruption is offered.
 pub(crate) fn bypass_interrupt(row: &str) -> Option<bool> {
-    let rest = row.trim_end().strip_prefix(BYPASS_FOOTER)?;
-    let rest = rest.strip_prefix(" (shift+tab to cycle)").unwrap_or(rest);
-    let rest = match rest.split_once("  ") {
-        Some((rest, update)) if update.trim_start() == "✔ Update installed · Restart to update" => {
-            rest
-        }
-        Some(_) => return None,
-        None => rest,
-    };
+    let rest = status_rest(row)?;
     match rest.strip_prefix(" · ") {
         None => rest.is_empty().then_some(false),
         Some("esc to interrupt") => Some(true),
@@ -23,6 +15,30 @@ pub(crate) fn bypass_interrupt(row: &str) -> Option<bool> {
             let (counts, interrupt) = active.map_or((pill, false), |counts| (counts, true));
             counts.split(", ").all(counted).then_some(interrupt)
         }
+    }
+}
+
+/// A recognised bypass row whose pill counts background work, with or without an interrupt offer.
+pub(crate) fn counts_background_work(row: &str) -> bool {
+    status_rest(row)
+        .and_then(|rest| rest.strip_prefix(" · "))
+        .is_some_and(|pill| {
+            let pill = pill.strip_suffix(" · ↓ to manage").unwrap_or(pill);
+            let pill = pill.strip_suffix(" · esc to interrupt").unwrap_or(pill);
+            pill.split(", ").all(counted)
+        })
+}
+
+/// The status text after the bypass prefix, mode hint and update notice; None is unrecognised.
+fn status_rest(row: &str) -> Option<&str> {
+    let rest = row.trim_end().strip_prefix(BYPASS_FOOTER)?;
+    let rest = rest.strip_prefix(" (shift+tab to cycle)").unwrap_or(rest);
+    match rest.split_once("  ") {
+        Some((rest, update)) if update.trim_start() == "✔ Update installed · Restart to update" => {
+            Some(rest)
+        }
+        Some(_) => None,
+        None => Some(rest),
     }
 }
 

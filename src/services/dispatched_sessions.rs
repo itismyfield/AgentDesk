@@ -1252,6 +1252,128 @@ mod kill_tmux_resume_tests {
         assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux_open));
     }
 
+    /// A legacy relay carries no record timestamps; a wrapper sentinel appended after an
+    /// old result moves only the mtime, which is not output. A stamped result still is.
+    #[test]
+    fn idle_kill_guard_treats_unstamped_relay_with_meta_sentinel_as_no_output() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("isolated root");
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let minute = 60_000_000_000i64;
+        let now = super::now_unix_nanos();
+        let last_seen = now - 14 * 60 * minute;
+        let tmux = format!("AgentDesk-claude-relay-{}", uuid::Uuid::new_v4());
+        let relay = std::path::PathBuf::from(crate::services::tmux_common::session_temp_path(
+            &tmux, "jsonl",
+        ));
+        std::fs::create_dir_all(relay.parent().expect("relay parent")).expect("relay dir");
+        std::fs::write(&relay, "{\"type\":\"result\",\"subtype\":\"success\"}\n")
+            .expect("write relay");
+        crate::services::tmux_common::emit_wrapper_sentinel(
+            relay.to_str().expect("relay path"),
+            crate::services::tmux_common::WrapperSentinel::ReadyForInput { provider: "claude" },
+        );
+        assert!(mtime_nanos(&relay) > last_seen);
+
+        let evidence = provider_output_evidence(&tmux);
+
+        assert_eq!(evidence.output_unix_nanos, 0);
+        assert!(!evidence.turn_open);
+        assert_eq!(
+            idle_kill_skip_decision(last_seen, evidence, now, Some(360)),
+            None
+        );
+
+        std::fs::write(
+            &relay,
+            claude_record("result", "\"subtype\":\"success\"", now - 5 * minute) + "\n",
+        )
+        .expect("write stamped relay");
+        let evidence = provider_output_evidence(&tmux);
+        assert_eq!(evidence.output_unix_nanos, millis_floor(now - 5 * minute));
+        assert_eq!(
+            idle_kill_skip_decision(last_seen, evidence, now, Some(360)),
+            Some("skip_live_output")
+        );
+    }
+
+    fn codex_event(payload: &str, unix_nanos: i64) -> String {
+        format!(
+            "{{\"timestamp\":\"{}\",\"type\":\"event_msg\",\"payload\":{payload}}}",
+            rfc3339_at(unix_nanos)
+        )
+    }
+
+    /// Codex settings/token records after a completed turn are housekeeping with fresh
+    /// timestamps; the turn observer skips them and so must the output clock.
+    #[test]
+    fn idle_kill_guard_ignores_codex_housekeeping_records() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("isolated root");
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let minute = 60_000_000_000i64;
+        let now = super::now_unix_nanos();
+        let last_output = now - 15 * 60 * minute;
+        let last_seen = now - 14 * 60 * minute;
+        let tmux = format!("AgentDesk-codex-runtime-{}", uuid::Uuid::new_v4());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rollout = dir.path().join("rollout.jsonl");
+        let records = [
+            format!(
+                "{{\"timestamp\":\"{}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"s1\"}}}}",
+                rfc3339_at(last_output - 60 * minute)
+            ),
+            codex_event(
+                "{\"type\":\"task_started\",\"turn_id\":\"t1\"}",
+                last_output - minute,
+            ),
+            codex_event(
+                "{\"type\":\"task_complete\",\"turn_id\":\"t1\"}",
+                last_output,
+            ),
+            codex_event("{\"type\":\"thread_settings_applied\"}", now - minute),
+            codex_event("{\"type\":\"token_count\"}", now),
+        ];
+        std::fs::write(&rollout, records.join("\n") + "\n").expect("write rollout");
+        crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+            &tmux,
+            &rollout,
+            Some("session-housekeeping"),
+        )
+        .expect("write marker");
+
+        let evidence = provider_output_evidence(&tmux);
+
+        assert_eq!(evidence.output_unix_nanos, millis_floor(last_output));
+        assert!(!evidence.turn_open);
+        assert_eq!(
+            idle_kill_skip_decision(last_seen, evidence, now, Some(360)),
+            None
+        );
+
+        let recent = codex_event(
+            "{\"type\":\"task_complete\",\"turn_id\":\"t2\"}",
+            now - 5 * minute,
+        );
+        std::fs::write(&rollout, records.join("\n") + "\n" + &recent + "\n").expect("append");
+        let evidence = provider_output_evidence(&tmux);
+        assert_eq!(evidence.output_unix_nanos, millis_floor(now - 5 * minute));
+        assert_eq!(
+            idle_kill_skip_decision(last_seen, evidence, now, Some(360)),
+            Some("skip_live_output")
+        );
+    }
+
     #[test]
     fn idle_cleanup_reason_does_not_kill_active_dispatch_tmux() {
         assert!(should_skip_idle_cleanup_for_active_dispatch(
