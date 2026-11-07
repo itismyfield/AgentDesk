@@ -215,7 +215,8 @@ async fn try_close(
     if let Carried::Row(row) = &carried {
         let orphan_input =
             row.managed_submission.is_some() && !row.readopted_from_inflight && !target_episode;
-        commit_receipt(shared, provider, row, end.aborted && !orphan_input).await?;
+        let outcome = end.aborted && !orphan_input;
+        commit_receipt(shared, provider, row, outcome, !unverified_input).await?;
         #[cfg(test)]
         tests::pause("receipt", channel.get()).await;
         unchanged_under_lock(shared, provider, channel, &end, &before).await?;
@@ -383,12 +384,15 @@ async fn unchanged_under_lock(
     Ok(())
 }
 
-/// A named input's receipt must really commit before its only durable row can be archived.
+/// A named input's receipt must really commit before its only durable row can be archived. A
+/// failed commit marks the row for the next settlement only when `mark` is set: an unproven input's
+/// mark would let a settlement remove the row without the notice its close owes.
 async fn commit_receipt(
     shared: &SharedData,
     provider: &ProviderKind,
     row: &InflightTurnState,
     aborted: bool,
+    mark: bool,
 ) -> Result<(), Kept> {
     if row.user_msg_id == 0 {
         return Ok(());
@@ -409,13 +413,15 @@ async fn commit_receipt(
     {
         return Ok(());
     }
-    let _ = inflight::stamp_terminal_receipt_if_matches_identity(
-        provider,
-        row.channel_id,
-        &inflight::InflightTurnIdentity::from_state(row),
-        row.turn_nonce.as_deref(),
-        stamp,
-    );
+    if mark {
+        let _ = inflight::stamp_terminal_receipt_if_matches_identity(
+            provider,
+            row.channel_id,
+            &inflight::InflightTurnIdentity::from_state(row),
+            row.turn_nonce.as_deref(),
+            stamp,
+        );
+    }
     Err(kept("receipt_not_committed"))
 }
 

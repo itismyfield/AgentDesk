@@ -587,7 +587,7 @@ pub(crate) fn owner_observer(
     let (dir, requested) = (working_dir.to_path_buf(), at.1.map(str::to_owned));
     let home = overlay.home;
     Some(Box::new(move || {
-        let rebound = rebound_source(&tmux, (&resolved, fallback), &cancel, || {
+        let rebound = rebound_source(&tmux, &resolved, &cancel, || {
             let at = (dir.as_path(), requested.as_deref(), home.as_deref());
             let live = (true, move || Ok(matches));
             let now = crate::services::claude::resolve_live_claude_tui_session(&tmux, at, live);
@@ -608,25 +608,34 @@ pub(crate) fn owner_observer(
 #[cfg(unix)]
 type Resolution = crate::services::claude::ClaudeTuiSessionResolution;
 
-/// How long a submit that grew nothing waits for a rebind; a prompt left in the input buffer then
-/// reaches the observer's own read, which reports it.
+/// How long a submit with no receipt in the observer's session waits for a rebind before that
+/// session is read as before.
 #[cfg(unix)]
 const REBIND_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// The session a submit reached when the pane's hooks verified another one before the observer's
-/// own transcript grew (`/clear` adopted after the observer was built); `None` keeps the observer's.
+/// The session a submit reached when the pane's hooks verify another one before this submit's
+/// receipt lands in the observer's session (`/clear` adopted after the observer was built).
+/// `None` keeps the observer's; the old file growing proves nothing, as `/clear` appends to it.
 #[cfg(unix)]
 fn rebound_source(
     tmux: &str,
-    (resolved, fallback): (&Resolution, u64),
+    resolved: &Resolution,
     cancel: &CancelToken,
     rebind: impl Fn() -> Option<Resolution>,
 ) -> Option<Resolution> {
     use std::sync::atomic::Ordering;
     let (mut dead_reads, deadline) = (0, std::time::Instant::now() + REBIND_GRACE);
+    let own_input = || match cancel.native_stop.observe_native_input() {
+        Some(Ok(pin)) => {
+            pin.session_id == resolved.session_id
+                || std::path::Path::new(&pin.output_path) == resolved.transcript_path
+        }
+        _ => false,
+    };
     loop {
-        let grew = std::fs::metadata(&resolved.transcript_path).is_ok_and(|m| m.len() > fallback);
-        if grew || cancel.cancelled.load(Ordering::Relaxed) || std::time::Instant::now() > deadline
+        if own_input()
+            || cancel.cancelled.load(Ordering::Relaxed)
+            || std::time::Instant::now() > deadline
         {
             return None;
         }
