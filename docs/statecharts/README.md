@@ -57,6 +57,7 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 
 | Area | Code SHA | Rules that break | Disposition |
 |---|---|---|---|
+| `input-single-path` input notices (#7811) | `a2fdbaf6c52190a8cb1d6b45989fe9f76eb12433` | Before: owned receipt-gap input stays Pending and accepted iMessage has no echo; BeforeKnown: global frame knowledge excludes a direct twin; AcceptanceGap: backend effect without echo | design model only; After pairs original-source attempts and echoes accepted winners; implementation and route/writer tests remain pending; see [report](input-single-path/InputNoticeSettlement.report.md) |
 | `session-lifecycle` (tmux) | `e8d94425a0` | stale inflight row after a deferred boot probe (T-A/T-B), FIFO open race (T-C) | tracked by #7331 (I21 in `docs/relay-state-contract.md`) |
 | `session-lifecycle` (Herdr) | `e8d94425a0` | Pending row with no pane after a lost create reply or crash (H-A/H-B), prompt to an exited Claude pane (H-C) | H-A/H-B fixed by #7563 |
 | `session-lifecycle` (Herdr RootReplaced, #7788 S0/S1) | `d508839828` + S1 | owned channel retains a replaced Bound row when current startup policy evidence is never produced; early input can also leave current-generation inflight blocking quiet | S1 produces evidence before a new target; GREEN assumes input after the first reader pass, with preclaim/wake race reserved for S2; see `session-lifecycle/herdr-root.report.md` |

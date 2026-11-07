@@ -50,7 +50,11 @@ use self::observed_prompt_decision::{
 pub(crate) fn input_notice_content(prompt: &str) -> Option<String> {
     let decision = relay_observed_prompt_injected_prompt_decision(prompt);
     (decision.injected_class.is_human_active_turn() && !decision.local_only_slash)
-        .then(|| format_ssh_direct_prompt_notification("claude", "", prompt))
+        .then(|| input_notice_line(prompt))
+}
+
+pub(crate) fn input_notice_line(text: &str) -> String {
+    format_ssh_direct_prompt_notification("claude", "", text)
 }
 
 mod idle_tail_state;

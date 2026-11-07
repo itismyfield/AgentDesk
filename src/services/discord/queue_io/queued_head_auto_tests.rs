@@ -315,6 +315,17 @@ async fn s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg()
     fixture.enqueue("P spent its retries").await;
     let p = fixture.queue().await[0].message_id;
     fixture.park(&[p]);
+    assert_eq!(
+        input_class(&CLAUDE, fixture.channel, &fixture.queue().await[0]),
+        RetryClass::Parked
+    );
+    // Admission may offer a Ready input before its HTTP echo finishes; parking starts this window.
+    let offers_at_park = OFFERED_HEADS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|id| **id == p)
+        .count();
     drop(transition);
     quiet().await;
     let parked = payloads(items(fixture.disk()));
@@ -356,7 +367,16 @@ async fn s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg()
         (left[0].message_id, left[0].text.as_str()),
         (p, "P spent its retries")
     );
-    assert!(!OFFERED_HEADS.lock().unwrap().contains(&p));
+    assert_eq!(
+        OFFERED_HEADS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|id| **id == p)
+            .count(),
+        offers_at_park,
+        "a parked input is not offered again"
+    );
     assert_eq!(
         input_class(&CLAUDE, fixture.channel, &left[0]),
         RetryClass::Parked

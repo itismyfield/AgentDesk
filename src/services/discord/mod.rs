@@ -189,11 +189,11 @@ mod tui_prompt_relay;
 pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
-pub(crate) use tui_prompt_relay::input_notice_content;
 #[cfg(unix)]
 pub(crate) use tui_prompt_relay::rehydration::observer_binding_published;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
+pub(crate) use tui_prompt_relay::{input_notice_content, input_notice_line};
 pub(crate) mod replay_policy;
 mod tui_task_card;
 mod turn_bridge;
@@ -250,6 +250,57 @@ pub(in crate::services::discord) use recovery_engine as recovery;
 // declaration and constructor literals reference it without a module-qualified
 // path (surface freeze, #3294/#3295 pattern).
 pub(crate) use queue_io::input_ingress::takes_start as owner_takes_start;
+#[cfg(all(test, unix))]
+pub(crate) use queue_io::input_ingress::{
+    ADOPTS as OWNER_ADOPTS_FOR_TEST, execution as owner_execution_for_test,
+    installed as input_owner_installed_for_test,
+};
+#[cfg(all(test, unix))]
+pub(crate) use queue_io::input_owner::origin::Execution as OwnerExecutionForTest;
+#[cfg(all(test, unix))]
+pub(crate) fn input_mailbox_for_test(
+    shared: &SharedData,
+    channel: u64,
+) -> crate::services::turn_orchestrator::ChannelMailboxHandle {
+    shared.mailbox(ChannelId::new(channel))
+}
+#[cfg(all(test, unix))]
+pub(crate) async fn gateway_context_for_test(
+    http: Arc<serenity::Http>,
+    gateway: String,
+) -> serenity::Context {
+    tui_prompt_relay::relay_e2e::discord_mock::serenity_context_over(http, gateway).await
+}
+#[cfg(all(test, unix))]
+pub(crate) fn ready_gateway_for_test(shared: &SharedData, context: serenity::Context) {
+    shared.http.cached_serenity_ctx.set(context).unwrap();
+    shared
+        .http
+        .cached_bot_token
+        .set("test-token".into())
+        .unwrap();
+}
+#[cfg(all(test, unix))]
+pub(crate) struct RestGuardForTest(Option<shared_state::test_rest::Guard>);
+#[cfg(all(test, unix))]
+impl Drop for RestGuardForTest {
+    fn drop(&mut self) {
+        drop(self.0.take());
+    }
+}
+#[cfg(all(test, unix))]
+pub(crate) fn rest_for_test(http: Arc<serenity::Http>) -> RestGuardForTest {
+    RestGuardForTest(Some(shared_state::test_rest::install(http)))
+}
+#[cfg(all(test, unix))]
+pub(crate) fn input_queue_path_for_test(shared: &SharedData, channel: u64) -> std::path::PathBuf {
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(channel);
+    let context = queue_dispatch::persistence_context(shared, &provider, channel);
+    crate::services::turn_orchestrator::v2_queue(&context, channel)
+        .unwrap()
+        .0
+}
 pub(crate) use restart_mode::InflightRestartMode;
 pub(crate) use router::{
     HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus, IntakeExecution,
@@ -3358,3 +3409,8 @@ pub(crate) use recovery_engine::{codex_rebind_spawn_for_tests, codex_restart_out
 pub(crate) use tmux::tmux_output_stream::{
     codex_native_read_for_tests, codex_source_witness_present_for_tests,
 };
+
+#[cfg(all(test, unix))]
+pub(crate) async fn revoke_notice_author_for_test(shared: &SharedData) {
+    shared.settings.write().await.allowed_user_ids.clear();
+}

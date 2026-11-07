@@ -11,7 +11,7 @@ use crate::services::{discord, session_host, tmux_common as tc};
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum NoticeRefusal {
     Busy,
-    /// A registered injection may still own the row; a receipt or withdrawal decides it later.
+    /// Neither the native receipt nor the prepared census proves ownership yet.
     OwnershipPending,
     Withheld(String),
     Store(String),
@@ -25,6 +25,7 @@ fn withheld(reason: impl Into<String>) -> NoticeRefusal {
 pub(crate) fn admit_notice<R>(
     piece: &PieceWork,
     store: &mut ChannelStore,
+    owners: Option<&history::notice_owner::Batch>,
     start: impl FnOnce(&mut ChannelStore) -> R,
 ) -> Result<R, NoticeRefusal> {
     if piece.unit_key.kind != UnitKind::InputNotice {
@@ -87,7 +88,17 @@ pub(crate) fn admit_notice<R>(
         .map_err(withheld)?
         {
             ObservedAttempt::Known(_) => return exclude(piece, store, "input_notice_source"),
-            ObservedAttempt::Pending => return Err(NoticeRefusal::OwnershipPending),
+            ObservedAttempt::Pending => match owners
+                .map(|owners| owners.decision(origin, &piece.unit_key.native_key, &prompt))
+            {
+                Some(history::notice_owner::Decision::Owned) => {
+                    return exclude(piece, store, "input_notice_source");
+                }
+                Some(history::notice_owner::Decision::Unowned) => {}
+                Some(history::notice_owner::Decision::Pending(_)) | None => {
+                    return Err(NoticeRefusal::OwnershipPending);
+                }
+            },
             ObservedAttempt::None => {}
         }
         match crate::config::session_hosts::herdr_endpoint(store.init().channel) {

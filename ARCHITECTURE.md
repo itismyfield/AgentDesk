@@ -640,6 +640,9 @@ src/
 │   │   ├── herdr_terminate_tests.rs
 │   │   ├── home_metrics.rs
 │   │   ├── hooks.rs
+│   │   ├── imessage_input_notice.rs
+│   │   ├── imessage_input_notice_display_tests.rs
+│   │   ├── imessage_input_notice_tests.rs
 │   │   ├── kakao_calendar.rs
 │   │   ├── kanban.rs
 │   │   ├── kanban_list_view_tests.rs
@@ -3761,6 +3764,7 @@ src/
 │   │   │   │   ├── checked_tests.rs
 │   │   │   │   ├── compat.rs
 │   │   │   │   ├── compat_tests.rs
+│   │   │   │   ├── notice_owner.rs
 │   │   │   │   ├── rollback_reader_tests.rs
 │   │   │   │   ├── screen.rs
 │   │   │   │   ├── screen_tests.rs
@@ -3903,6 +3907,8 @@ src/
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── notice_activation_tests.rs
+│   │   │   │   ├── notice_owner_tests.rs
+│   │   │   │   ├── notice_resume_tests.rs
 │   │   │   │   ├── notice_work.rs
 │   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs

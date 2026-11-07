@@ -90,7 +90,10 @@ async fn observed_execution(
             release.notified().await;
         }
     }
-    delivery.await
+    let result = delivery.await;
+    #[cfg(all(test, unix))]
+    super::imessage_input_notice_tests::record_delivery_for_test(&result);
+    result
 }
 
 fn failure(status: StatusCode, error: &str) -> RouteResponse {
@@ -128,11 +131,19 @@ pub async fn deliver_turn_input(
     let Ok(body) = serde_json::from_slice::<DeliverTurnInputBody>(&body) else {
         return bad_request("invalid_body");
     };
+    let notice = super::imessage_input_notice::notice_line(body.source.as_deref(), &body.text);
     let text = body.text.trim();
     if text.is_empty() {
+        super::imessage_input_notice::not_echoed(notice.as_deref(), 0, "deliver", "text_required");
         return bad_request("text_required");
     }
     let Some(author_id) = parse_author_id(&body.author_discord_user_id) else {
+        super::imessage_input_notice::not_echoed(
+            notice.as_deref(),
+            0,
+            "deliver",
+            "invalid_author_id",
+        );
         return bad_request("invalid_author_id");
     };
     let source = non_empty(body.source).unwrap_or_else(|| "external".to_string());
@@ -146,16 +157,29 @@ pub async fn deliver_turn_input(
         non_empty(body.origin_id)
     };
     if obligations_enabled && origin_id.is_none() {
+        super::imessage_input_notice::not_echoed(
+            notice.as_deref(),
+            0,
+            "deliver",
+            "origin_id_required",
+        );
         return bad_request("origin_id_required");
     }
     if origin_id
         .as_ref()
         .is_some_and(|origin| origin.len() > MAX_ORIGIN_ID_LEN)
     {
+        super::imessage_input_notice::not_echoed(notice.as_deref(), 0, "deliver", "invalid_origin");
         return bad_request("origin_id_too_long");
     }
 
     let Some(pool) = state.pg_pool_ref() else {
+        super::imessage_input_notice::not_echoed(
+            notice.as_deref(),
+            0,
+            "deliver",
+            "pool_unavailable",
+        );
         return failure(StatusCode::SERVICE_UNAVAILABLE, "postgres pool unavailable");
     };
     let provider_override = non_empty(body.provider);
@@ -173,9 +197,23 @@ pub async fn deliver_turn_input(
     .await
     {
         Ok(target) => target,
-        Err(response) => return response,
+        Err(response) => {
+            super::imessage_input_notice::not_echoed(
+                notice.as_deref(),
+                0,
+                "deliver",
+                "invalid_target",
+            );
+            return response;
+        }
     };
     let Some(registry) = state.health_registry.as_deref() else {
+        super::imessage_input_notice::not_echoed(
+            notice.as_deref(),
+            channel_id,
+            "deliver",
+            "runtime_unavailable",
+        );
         return failure(StatusCode::SERVICE_UNAVAILABLE, "runtime_unavailable");
     };
 
@@ -206,10 +244,15 @@ pub async fn deliver_turn_input(
             text,
         };
         if !obligations_enabled {
-            return legacy_origin::deliver(pool, registry, &input, request).await;
+            return legacy_origin::deliver(pool, registry, &input, request, notice.as_deref())
+                .await;
         }
         let reply = imsg_reply::ReplyObligation::new(pool.clone(), origin_id);
-        imsg_reply::deliver_once(
+        let identity = format!("guid:{origin_id}");
+        let line = notice.as_deref();
+        let mut executed = false;
+        let ran = &mut executed;
+        let response = imsg_reply::deliver_once(
             pool,
             &input,
             || {
@@ -220,12 +263,40 @@ pub async fn deliver_turn_input(
                     author_id,
                 )
             },
-            || observed_delivery(registry, request, Some(reply)),
+            || async {
+                *ran = true;
+                super::imessage_input_notice::delivered(
+                    pool,
+                    channel_id,
+                    &identity,
+                    line,
+                    observed_delivery(registry, request, Some(reply)).await,
+                )
+                .await
+            },
             |result| delivery_response(channel_id, result),
         )
-        .await
+        .await;
+        if !executed {
+            super::imessage_input_notice::not_echoed(
+                line,
+                channel_id,
+                &identity,
+                response.0.as_str(),
+            );
+        }
+        response
     } else {
-        delivery_response(channel_id, observed_delivery(registry, request, None).await)
+        let identity = format!("request:{}", uuid::Uuid::new_v4());
+        let result = super::imessage_input_notice::delivered(
+            pool,
+            channel_id,
+            &identity,
+            notice.as_deref(),
+            observed_delivery(registry, request, None).await,
+        )
+        .await;
+        delivery_response(channel_id, result)
     }
 }
 

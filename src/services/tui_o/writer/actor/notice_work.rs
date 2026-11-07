@@ -256,14 +256,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let evidence: Vec<_> = state
             .evidence
             .iter()
-            .filter(|(id, e)| {
-                !state.unresolved.contains_key(*id)
-                    && e.unit_key.as_ref().is_none_or(|k| !settled(ledger, k))
-            })
+            .filter(|(_, e)| e.unit_key.as_ref().is_none_or(|k| !settled(ledger, k)))
             .map(|(_, e)| e.clone())
             .collect();
-        let (mut eligible, mut deferred) = (Vec::new(), Vec::new());
-        for mut evidence in evidence {
+        let mut evidence = evidence;
+        let ids: HashSet<_> = evidence
+            .iter()
+            .map(|e| (e.record.source.clone(), e.record.start, e.record.end))
+            .collect();
+        self.writer.notice_pending.retain(|id, _| ids.contains(id));
+        for evidence in &mut evidence {
             let record = CapturedRecord {
                 start: evidence.record.start,
                 end: evidence.record.end,
@@ -285,9 +287,33 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                     return;
                 }
             }
+        }
+        self.writer.notice_owners =
+            crate::services::tui_input::human_frame::history::notice_owner::Batch::prepare(
+                self.writer.store(),
+            );
+        let (mut eligible, mut deferred) = (Vec::new(), Vec::new());
+        for evidence in evidence {
+            let id = (
+                evidence.record.source.clone(),
+                evidence.record.start,
+                evidence.record.end,
+            );
+            if self
+                .writer
+                .store()
+                .ledger()
+                .input_notices()
+                .unresolved
+                .contains_key(&id)
+            {
+                self.defer_notice(id, "migration_unresolved");
+                continue;
+            }
             let (Some(unit_key), Some(payload), Some(origin)) =
                 (evidence.unit_key, evidence.payload, evidence.origin)
             else {
+                self.defer_notice(id, "incomplete_evidence");
                 continue;
             };
             let piece = PieceWork {
@@ -297,8 +323,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 index: 0,
                 notice_origin: Some(origin),
             };
-            match admit_notice(&piece, self.writer.store(), |_| ()) {
-                Ok(()) => eligible.push(piece),
+            let owners = std::mem::take(&mut self.writer.notice_owners);
+            let admission = admit_notice(&piece, self.writer.store(), Some(&owners), |_| ());
+            self.writer.notice_owners = owners;
+            match admission {
+                Ok(()) => {
+                    self.writer.notice_pending.remove(&id);
+                    eligible.push(piece);
+                }
                 Err(NoticeRefusal::Store(detail)) => {
                     self.writer.stop(WriterAlarm::Halted { detail });
                     return;
@@ -307,8 +339,23 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                     self.writer.stop(WriterAlarm::LedgerViolation { detail });
                     return;
                 }
-                Err(NoticeRefusal::OwnershipPending) => deferred.push(piece.unit_key),
-                Err(NoticeRefusal::Busy | NoticeRefusal::Withheld(_)) => {}
+                Err(NoticeRefusal::OwnershipPending) => {
+                    let reason = match self.writer.notice_owners.decision(piece.notice_origin.as_deref().unwrap(),
+                        &piece.unit_key.native_key, evidence.prompt.as_deref().unwrap_or("")) {
+                        crate::services::tui_input::human_frame::history::notice_owner::Decision::Pending(reason) => reason,
+                        _ => "ownership_pending",
+                    };
+                    self.defer_notice(id, reason);
+                    deferred.push(piece.unit_key);
+                }
+                Err(NoticeRefusal::Busy) => self.defer_notice(id, "authority_busy"),
+                Err(NoticeRefusal::Withheld(reason)) => {
+                    if settled(self.writer.store().ledger(), &piece.unit_key) {
+                        self.writer.notice_pending.remove(&id);
+                    } else {
+                        self.defer_notice(id, &reason);
+                    }
+                }
             }
         }
 
@@ -359,6 +406,19 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             {
                 self.owed.push_back(Derived::Piece(piece));
             }
+        }
+    }
+
+    fn defer_notice(&mut self, id: (SourceId, u64, u64), reason: &str) {
+        if self
+            .writer
+            .notice_pending
+            .insert(id.clone(), reason.into())
+            .as_deref()
+            != Some(reason)
+        {
+            let channel = self.writer.store().init().channel;
+            tracing::info!(channel, record = ?id, reason, "[tui_o] input notice remains pending");
         }
     }
 

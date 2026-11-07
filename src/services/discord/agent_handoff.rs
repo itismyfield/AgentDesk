@@ -376,6 +376,8 @@ pub(crate) async fn send_agent_handoff(
 /// scheduled — not merely that a message was best-effort delivered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct AgentHandoffTurnResponse {
+    #[serde(skip)]
+    pub(crate) channel_id_num: u64,
     pub(crate) to_agent_id: String,
     pub(crate) channel_id: String,
     pub(crate) channel_kind: &'static str,
@@ -502,6 +504,7 @@ fn map_turn_start_result(
 ) -> Result<AgentHandoffTurnResponse, AgentHandoffError> {
     match result {
         Ok(outcome) => Ok(AgentHandoffTurnResponse {
+            channel_id_num: target.channel_id_num,
             to_agent_id: target.to_agent_id.clone(),
             channel_id: target.channel_id.clone(),
             channel_kind: target.channel_kind.as_str(),
