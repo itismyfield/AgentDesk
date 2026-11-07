@@ -113,7 +113,6 @@ src/services/discord/router/message_handler/provider_dispatch_idle_stash_tests.r
 src/services/discord/router/message_handler/provider_dispatch/owner_input_carried_restart_tests.rs
 src/services/discord/router/message_handler/provider_dispatch/owner_input_codex_tests.rs
 src/services/discord/router/message_handler/provider_dispatch/owner_input_herdr_tests.rs
-src/services/discord/router/message_handler/provider_dispatch/owner_input_idle_tests.rs
 src/services/discord/router/message_handler/provider_dispatch/owner_input_stop_gate_tests.rs
 src/services/discord/router/message_handler/provider_dispatch/owner_input_tests.rs
 src/services/discord/router/message_handler/provider_isolation_seed_save_tests.rs
