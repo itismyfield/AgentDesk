@@ -377,10 +377,9 @@ pub(super) mod herdr {
         let persistence =
             QueuePersistenceContext::new(provider, token.as_deref().unwrap_or_default(), None);
         // Only the runtime's own namespace is absorbed first; another one is captured as held.
-        let capture = match (
-            actor.try_capture_v2().await,
-            token.as_deref() == exclusion.owner_token(),
-        ) {
+        let captured = actor.try_capture_v2().await;
+        let v2 = matches!(captured, Ok(Some(_)));
+        let capture = match (captured, token.as_deref() == exclusion.owner_token()) {
             (Ok(Some(expected)), _) => Ok(expected),
             (Err(why), _) => Err(format!("queue capture: {why}")),
             (Ok(None), true) => match actor.try_capture_own_queue(persistence.clone()).await {
@@ -415,7 +414,13 @@ pub(super) mod herdr {
         let reason = "queue_api_cancel_turn_force";
         let complete = failed.is_none();
         let loss = record_purge_receipt_on(actor, &target, receipt, complete, Some(pool), reason);
-        let loss = loss.await;
+        let mut loss = loss.await;
+        // A V2 owner's queue is not in the legacy snapshot the receipt measured: the depth is what
+        // the owner measured in its purge turn, or none.
+        if v2 {
+            loss.queue_depth_after =
+                (checked.as_ref().ok()).and_then(|purge| purge.queue_len_after);
+        }
         crate::services::queue::settle_v2_drops(Some(pool), actor, provider.as_str(), channel)
             .await;
         let purge = checked.as_ref().ok().map(|purge| QueuePurge {

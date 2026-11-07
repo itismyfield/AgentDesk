@@ -282,3 +282,139 @@ async fn a_purge_whose_owner_left_after_the_capture_answers_no_depth() {
         "no owner measured the queue, so no depth is answered: {purge:?}"
     );
 }
+
+/// The owner's committed items and the items its queue file holds: a pending save shows as a
+/// published candidate the snapshot does not count.
+async fn committed_and_filed(
+    handle: &ChannelMailboxHandle,
+    path: &std::path::Path,
+) -> (usize, usize) {
+    let committed =
+        handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.snapshot.items.len()));
+    let filed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    (
+        committed.await.unwrap(),
+        filed["items"].as_array().map_or(0, Vec::len),
+    )
+}
+
+/// A save left pending before the cancel published a candidate the snapshot does not count: the
+/// sessionless purge and the cancel route answer no depth, and recovery keeps that one input.
+#[tokio::test(flavor = "current_thread")]
+async fn a_purge_on_an_owner_whose_last_save_is_pending_answers_no_depth() {
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    use crate::services::turn_cancel_queue_guard::{
+        CancelRemovalWitness, capture_queue_before_cancel_on, record_queue_loss_after_cancel,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (provider, channel) = (ProviderKind::Claude, ChannelId::new(7_892_201));
+    let handle = ChannelMailboxRegistry::default().handle(channel);
+    let owned = QueuePersistenceContext::new(&provider, "owner-token", None);
+    let (path, namespace) = v2_queue(&owned, channel).unwrap();
+    handle.v2_adopt(path.clone(), namespace).await.unwrap();
+    let input = item(8_000_000_000_007_892_201, channel.get());
+    let ticket = || "t-7892-201".to_string();
+    let plan = Plan {
+        fail: vec![Step::ParentSync],
+        ..Default::default()
+    };
+    let watch = Watch::new(&path, plan);
+    let admitted = handle.v2_admit_ticket(input.clone(), ticket()).await;
+    assert_eq!(format!("{admitted:?}"), "Err(Pending)");
+    drop(watch);
+    assert_eq!(
+        committed_and_filed(&handle, &path).await,
+        (0, 1),
+        "committed snapshot 0, published candidate 1"
+    );
+    let target = TurnLifecycleTarget {
+        provider: Some(provider),
+        channel_id: Some(channel),
+        tmux_name: String::new(),
+    };
+    // Even the owner's own namespace measures nothing while the save is unresolved.
+    let expected = handle.try_capture_v2().await.unwrap().unwrap();
+    let purge = handle.try_purge_queue_if_unchanged(owned.clone(), expected);
+    let purge = purge.await.unwrap();
+    let stage = purge.failed.as_ref().map(|(stage, _)| format!("{stage:?}"));
+    assert_eq!(
+        (
+            stage.as_deref(),
+            purge.queue_preserved(),
+            purge.queue_len_after
+        ),
+        (Some("SaveUnknown"), None, None),
+        "{:?}",
+        purge.failed
+    );
+    let capture = capture_queue_before_cancel_on(&handle).await;
+    let purged = force_purge_channel_mailbox(None, &target, None).await;
+    assert!(
+        purged.is_none(),
+        "a pending save is no confirmed depth: {purged:?}"
+    );
+    // The cancel route publishes the loss depth, else the purge depth: here neither.
+    let witness = CancelRemovalWitness::Purge(purged);
+    let reason = "queue_api_cancel_turn_force";
+    let loss = record_queue_loss_after_cancel(&target, &capture, None, witness, reason).await;
+    let remaining = (loss.queue_depth_after).or(purged.and_then(|counts| counts.queue_len_after));
+    assert_eq!(remaining, None, "queued_remaining stays null");
+    let recovered = handle.v2_admit_ticket(input.clone(), ticket()).await;
+    assert_eq!(format!("{recovered:?}"), "Ok(Queued)");
+    assert_eq!(committed_and_filed(&handle, &path).await, (1, 1));
+    let front = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.front()));
+    let front = front.await.unwrap().map(|(_, item)| item.message_id);
+    assert_eq!(
+        front,
+        Some(input.message_id),
+        "the one input survives, once"
+    );
+}
+
+/// A save that goes pending between the capture and the purge is judged at the purge, not at the
+/// capture: the sessionless purge answers no depth, and recovery keeps that one input.
+#[tokio::test(flavor = "current_thread")]
+async fn a_save_pending_since_the_capture_answers_no_depth() {
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (provider, channel) = (ProviderKind::Claude, ChannelId::new(7_892_202));
+    let handle = ChannelMailboxRegistry::default().handle(channel);
+    let owned = QueuePersistenceContext::new(&provider, "owner-token", None);
+    let (path, namespace) = v2_queue(&owned, channel).unwrap();
+    handle.v2_adopt(path.clone(), namespace).await.unwrap();
+    let input = item(8_000_000_000_007_892_202, channel.get());
+    let ticket = || "t-7892-202".to_string();
+    let (admitter, admitted_path, pending) = (handle.clone(), path.clone(), input.clone());
+    let admitted = move || async move {
+        let plan = Plan {
+            fail: vec![Step::ParentSync],
+            ..Default::default()
+        };
+        let watch = Watch::new(&admitted_path, plan);
+        let admitted = admitter.v2_admit_ticket(pending, ticket()).await;
+        assert_eq!(format!("{admitted:?}"), "Err(Pending)");
+        drop(watch);
+        assert_eq!(
+            committed_and_filed(&admitter, &admitted_path).await,
+            (0, 1),
+            "committed snapshot 0, published candidate 1"
+        );
+    };
+    let sessionless = QueuePersistenceContext::new(&provider, "", None);
+    let purge = purge_v2(&handle, sessionless, admitted).await;
+    assert!(
+        matches!(purge, Some(None)),
+        "the save pending at the purge measures no depth: {purge:?}"
+    );
+    let recovered = handle.v2_admit_ticket(input.clone(), ticket()).await;
+    assert_eq!(format!("{recovered:?}"), "Ok(Queued)");
+    assert_eq!(committed_and_filed(&handle, &path).await, (1, 1));
+    let front = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.front()));
+    let front = front.await.unwrap().map(|(_, item)| item.message_id);
+    assert_eq!(
+        front,
+        Some(input.message_id),
+        "the one input survives, once"
+    );
+}

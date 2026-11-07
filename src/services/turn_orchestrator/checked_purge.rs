@@ -309,15 +309,30 @@ mod herdr {
         ) {
             use super::super::pending_queue_persistence::pending_queue_item_to_intervention;
             use super::V2PurgeStop as PurgeStop;
-            let (provider, token) = (&self.persistence.provider, &self.persistence.token_hash);
-            let checked = pending_queue_file_path(provider, token, channel_id)
-                .ok_or_else(|| "the request names no queue file".to_string())
-                .and_then(|path| self.expected.differs(state).map_or(Ok(path), Err))
-                .and_then(|path| Ok((path, self.expected.v2.ok_or("no V2 capture")?)));
-            let purge = match checked
-                .map(|(path, expected)| state.v2_purge_if_unchanged(&path, &expected))
-            {
-                Ok(Ok(drained)) => CheckedPurge {
+            let Self {
+                persistence,
+                expected,
+                reply,
+            } = self;
+            let (provider, token) = (&persistence.provider, &persistence.token_hash);
+            // A pending save is judged first, here at the purge: the candidate it published is
+            // input no path or capture comparison can count, and no depth may stand on it.
+            let checked = (state.v2_settled_len().map_err(PurgeStop::SaveUnknown)).and_then(|_| {
+                let path = pending_queue_file_path(provider, token, channel_id)
+                    .ok_or_else(|| PurgeStop::Refused("the request names no queue file".into()))?;
+                if let Some(changed) = expected.differs(state) {
+                    return Err(PurgeStop::Refused(changed));
+                }
+                let capture = expected
+                    .v2
+                    .ok_or(PurgeStop::Refused("no V2 capture".into()))?;
+                Ok((path, capture))
+            });
+            let purged =
+                checked.and_then(|(path, capture)| state.v2_purge_if_unchanged(&path, &capture));
+            let settled = state.v2_settled_len().ok().flatten();
+            let purge = match purged {
+                Ok(drained) => CheckedPurge {
                     receipt: (drained.into_iter())
                         .map(|item| {
                             let now = (SystemTime::now(), Instant::now());
@@ -325,20 +340,21 @@ mod herdr {
                         })
                         .collect(),
                     failed: None,
-                    queue_len_after: state.v2_len(),
+                    queue_len_after: settled,
                 },
-                Err(reason) | Ok(Err(PurgeStop::Refused(reason))) => {
+                Err(PurgeStop::Refused(reason)) => {
                     tracing::warn!(%channel_id, %reason, "V2 checked purge refused; queue preserved");
-                    CheckedPurge::stopped(PurgeStage::Refused, reason, state.v2_len())
+                    CheckedPurge::stopped(PurgeStage::Refused, reason, settled)
                 }
-                Ok(Err(PurgeStop::NotSaved(reason))) => {
-                    CheckedPurge::stopped(PurgeStage::NotSaved, reason, state.v2_len())
+                Err(PurgeStop::NotSaved(reason)) => {
+                    CheckedPurge::stopped(PurgeStage::NotSaved, reason, settled)
                 }
-                Ok(Err(PurgeStop::SaveUnknown(reason))) => {
-                    CheckedPurge::stopped(PurgeStage::SaveUnknown, reason, state.v2_len())
+                Err(PurgeStop::SaveUnknown(reason)) => {
+                    tracing::warn!(%channel_id, %reason, "V2 checked purge save unknown; depth unmeasured");
+                    CheckedPurge::stopped(PurgeStage::SaveUnknown, reason, None)
                 }
             };
-            let _ = self.reply.send(purge);
+            let _ = reply.send(purge);
         }
     }
 
