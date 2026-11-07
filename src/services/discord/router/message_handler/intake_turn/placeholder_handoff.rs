@@ -269,7 +269,12 @@ mod tests {
                         merge_consecutive: false,
                         pending_uploads: Vec::new(),
                     };
-                    assert!(shared.mailbox(channel_id).enqueue(item, ctx).await.enqueued);
+                    let mailbox = shared.mailbox(channel_id);
+                    assert!(
+                        await_within(mailbox.enqueue(item, ctx), WAIT_CAP)
+                            .await
+                            .enqueued
+                    );
                     shared
                         .queued
                         .queued_placeholders

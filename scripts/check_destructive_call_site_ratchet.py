@@ -128,7 +128,7 @@ A queued placeholder card may only be destroyed through ``queued_card_gate``'s
 teardown token, and that gate file is itself pinned here, so a new raw call in any
 file needs a reviewed baseline diff. ``placeholder_controller.rs`` must not call
 ``.detach_by_message(`` at all (comments aside, tests included); that check has no
-baseline and fails whatever the map says. Limits: a count-preserving move inside one
+baseline, fails whatever the map says, and fails when that file is missing. Limits: a count-preserving move inside one
 file (a raw call relocated into a gated region while another leaves), a removed
 gate call that is not replaced by a raw spelling, and calls through aliases,
 re-exports or other wrappers stay unseen.
@@ -811,7 +811,11 @@ def controller_detach_errors(repo_root: Path) -> list[str]:
     """``placeholder_controller.rs`` calls no ``.detach_by_message(``; no baseline relaxes it."""
     path = Path(repo_root) / CONTROLLER_PATH
     if not path.is_file():
-        return []
+        # A moved controller would otherwise lift this check silently.
+        return [
+            f"discord_message_ops: {CONTROLLER_PATH} is missing; "
+            "point CONTROLLER_PATH at the moved controller"
+        ]
     found = len(CONTROLLER_DETACH_PATTERN.findall(_stripped_text(path)))
     if not found:
         return []

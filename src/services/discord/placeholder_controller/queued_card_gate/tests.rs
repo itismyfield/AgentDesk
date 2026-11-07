@@ -574,10 +574,13 @@ async fn t2_parked_row_is_deleted_by_the_next_pending_drain() {
     assert_eq!(pending_disk(&shared).get(&(channel, user)), Some(&card));
     // A parked card whose channel still has a cardless waiting entry is handed to that entry.
     let (kept_channel, kept_user, kept_card, waiting) = (chan(107), id(107), id(108), id(109));
-    seed(&shared, kept_channel, vec![queued(waiting, &[waiting])]).await;
-    shared
-        .add_pending_queue_exit_placeholder_clear_one(kept_channel, kept_user, kept_card)
-        .await;
+    let setup = async {
+        seed(&shared, kept_channel, vec![queued(waiting, &[waiting])]).await;
+        shared
+            .add_pending_queue_exit_placeholder_clear_one(kept_channel, kept_user, kept_card)
+            .await;
+    };
+    crate::test_support::wait::await_within(setup, crate::test_support::wait::WAIT_CAP).await;
     let (http, server, requests) = exit_http_fixture(204, 0).await;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),

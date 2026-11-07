@@ -782,6 +782,7 @@ mod tests {
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write(root, self.KICKOFF, "fn drain() { gate(card); }\n")
+            write(root, ratchet.CONTROLLER_PATH, "")
             self._write_baseline_cli(root, "a" * 40)
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(ratchet.main(["--check"], repo_root=root), 0)
@@ -818,6 +819,18 @@ mod tests {
                 result = ratchet.main(["--check"], repo_root=root)
         self.assertEqual(result, 1)
         self.assertIn(f"{controller} calls .detach_by_message( 1x", stderr.getvalue())
+
+
+    def test_missing_controller_file_fails_the_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, "src/services/discord/placeholder_controller/mod.rs", "c.detach_by_message(a, b);\n")
+            self._write_baseline_cli(root, "a" * 40)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                result = ratchet.main(["--check"], repo_root=root)
+        self.assertEqual(result, 1)
+        self.assertIn(f"{ratchet.CONTROLLER_PATH} is missing", stderr.getvalue())
 
 
 if __name__ == "__main__":

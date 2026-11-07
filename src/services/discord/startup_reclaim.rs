@@ -882,7 +882,7 @@ mod tests {
         crate::services::observability::reset_for_tests();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = 6_325_613_002u64;
-        let unprotected = channel * 100 + 99;
+        let unprotected: Vec<u64> = (50..61).map(|n| channel * 100 + n).collect();
         let mut expected = std::collections::HashMap::new();
         for n in 0..ORPHAN_PLACEHOLDER_DELETE_LIMIT as u64 {
             let (outcome, skipped) = if n % 2 == 0 {
@@ -910,10 +910,12 @@ mod tests {
                 });
             expected.insert(channel * 100 + n, skipped.to_string());
         }
-        expected.insert(unprotected, "committed".to_string());
-        // The protected placeholders come first on the page, so a skip that spent the
-        // budget would leave the last one undeleted.
-        let mut ids: Vec<u64> = expected.keys().copied().collect();
+        for &id in &unprotected[..10] {
+            expected.insert(id, "committed".to_string());
+        }
+        // Protected placeholders lead the page and spend no budget; the 11th unprotected one
+        // is past the per-channel delete budget, so it is neither deleted nor observed.
+        let mut ids: Vec<u64> = expected.keys().copied().chain([unprotected[10]]).collect();
         ids.sort_unstable();
         let page = serde_json::Value::Array(
             ids.iter()
@@ -952,14 +954,16 @@ mod tests {
             (report, discord.calls_for(channel))
         });
 
-        let deletes: Vec<&String> = calls.iter().filter(|c| c.starts_with("DELETE")).collect();
-        assert_eq!(
-            deletes,
-            vec![&format!(
-                "DELETE /api/v10/channels/{channel}/messages/{unprotected}"
-            )]
-        );
-        assert_eq!(report.orphan_placeholders_deleted, 1);
+        let deletes: Vec<String> = calls
+            .into_iter()
+            .filter(|c| c.starts_with("DELETE"))
+            .collect();
+        let budgeted: Vec<String> = unprotected[..10]
+            .iter()
+            .map(|id| format!("DELETE /api/v10/channels/{channel}/messages/{id}"))
+            .collect();
+        assert_eq!(deletes, budgeted);
+        assert_eq!(report.orphan_placeholders_deleted, 10);
         let observed: std::collections::HashMap<u64, String> =
             crate::services::observability::events::recent(500)
                 .iter()
