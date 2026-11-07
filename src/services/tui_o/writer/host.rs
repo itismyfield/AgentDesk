@@ -277,9 +277,6 @@ impl Readiness {
         let view = self.undelivered(channel)?;
         let mut published = view.published;
         let wanting = view.demand.want();
-        if crate::services::tui_o::turn_mode::carried_close_mutant("stale_ask") {
-            return published.borrow().clone();
-        }
         // What is already there was published before this ask, including the initial `None`.
         published.borrow_and_update();
         let answer = async {
@@ -368,10 +365,6 @@ pub(crate) fn process_readiness() -> Arc<Readiness> {
 
 /// Whether this process's writer can take work for `channel`; false for any channel O does not own.
 pub(crate) fn channel_accepts(channel: u64) -> bool {
-    #[cfg(test)]
-    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-global") {
-        return fresh_input::initial_fresh_refusal(channel).is_none();
-    }
     PROCESS.accepts(channel)
 }
 

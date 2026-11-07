@@ -15,8 +15,6 @@ use super::TuiRuntimeBinding;
 use super::binding_context::{SpawnNonceMarker, launch_mode, observe_spawn_nonce_marker};
 mod herdr_resume;
 use crate::services::agent_protocol::RuntimeHandoffKind;
-#[cfg(test)]
-use crate::services::claude_tui::source_verify::n2b_mutant;
 use crate::services::claude_tui::source_verify::{
     Observation, PinJudgment, SourceHistory, judge_pin, observe_transcript,
 };
@@ -213,8 +211,6 @@ struct Writer {
     poisoned: bool,
     /// An unreadable line or seq gap came after the last record applied.
     tainted: bool,
-    #[cfg(test)]
-    latest_committed_at: Option<DateTime<Utc>>,
 }
 
 struct ChannelLog {
@@ -527,12 +523,6 @@ pub(crate) fn claude_history_at(
     commit_with(channel_id, |writer| {
         let pane = writer.panes.get(tmux_session);
         let pin = pane.filter(|pane| pane.verified).and_then(|pane| {
-            #[cfg(test)]
-            let pinned_at = match n2b_mutant("renumber-latest-event-time") {
-                true => writer.latest_committed_at,
-                false => pane.pinned_at,
-            };
-            #[cfg(not(test))]
             let pinned_at = pane.pinned_at;
             Some((pane.current.clone()?, pinned_at))
         });
@@ -585,9 +575,6 @@ fn commit_with(
         Planned::CodexAppend(record, ownership) => (record, false, None, Some(ownership)),
         Planned::Keep(committed) => return Ok(committed),
     };
-    #[cfg(test)]
-    let logged = published_at.filter(|_| !n2b_mutant("live"));
-    #[cfg(not(test))]
     let logged = published_at;
     if let Err(error) = writer.append(&path, &record, verified, logged, codex_ownership.as_deref())
     {
@@ -666,8 +653,6 @@ impl Writer {
             parents_synced: read.total_len > 0,
             poisoned: false,
             tainted: false,
-            #[cfg(test)]
-            latest_committed_at: None,
         };
         let mut next = 1;
         for logged in &read.records {
@@ -693,10 +678,6 @@ impl Writer {
         published_at: Option<DateTime<Utc>>,
     ) -> bool {
         self.last_seq = self.last_seq.max(record.seq);
-        #[cfg(test)]
-        {
-            self.latest_committed_at = Some(record.committed_at);
-        }
         let tainted = std::mem::take(&mut self.tainted);
         if tainted {
             self.panes.values_mut().for_each(|pane| pane.claude.taint());
@@ -714,9 +695,6 @@ impl Writer {
             let repinned = verified && pane.verified && same;
             let step = claude_fold::step(record, published_at, waiting, repinned);
             reclaimed = step == claude_fold::Step::Reclaim;
-            #[cfg(test)]
-            let kept = n2b_mutant("supersede-off");
-            #[cfg(not(test))]
             let kept = false;
             // A hook that moved the pane, or a prompt of its own session it outlived, supersedes it.
             if (step == claude_fold::Step::Switch && !kept) || step == claude_fold::Step::Reclaim {
@@ -774,11 +752,6 @@ impl Writer {
         let pane = self.panes.get(p.tmux_session).filter(|pane| pane.verified);
         let pin = pane.and_then(|pane| pane.current.as_ref());
         let pinned_at = pane.and_then(|pane| pane.pinned_at);
-        #[cfg(test)]
-        let pinned_at = match n2b_mutant("renumber-latest-event-time") {
-            true => self.latest_committed_at,
-            false => pinned_at,
-        };
         let session = p.session().or(pin.map(|pin| pin.session_id.as_str()));
         judge_pin(
             pin,
@@ -800,10 +773,6 @@ impl Writer {
             PinJudgment::Recheck => return Err(Committed::Recheck),
             _ => return Err(Committed::Anomaly),
         };
-        #[cfg(test)]
-        let replaced =
-            !n2b_mutant("renumber-skip-file-recheck") && !codex::source_file_matches(&source);
-        #[cfg(not(test))]
         let replaced = !codex::source_file_matches(&source);
         // A file swapped in after the check is judged again on the next hook, as a checked one is.
         match replaced {
@@ -857,8 +826,6 @@ impl Writer {
             },
             _ => None,
         };
-        #[cfg(test)]
-        let repin = repin.filter(|_| !n2b_mutant("renumber-stat-unverified"));
         // A renumbered pin is logged as the verified identity its first record proved.
         let (mode, file) = match &repin {
             Some(source) => (Plan::Verified(source), Some((source.dev, source.ino))),
@@ -942,9 +909,6 @@ impl Writer {
         // Pinning the source it already names is not a new source, so it has no parent.
         let repinned = matches!(&new, BindingTarget::Source(s) if pane.current.as_ref() == Some(s));
         // As the fold judges it: only a re-pin of the source the pane holds verified reclaims.
-        #[cfg(test)]
-        let pinned = pane.verified || n2b_mutant("r5-reclaim-first-pin");
-        #[cfg(not(test))]
         let pinned = pane.verified;
         if reclaim && !(repinned && pinned) {
             return Planned::Keep(Committed::Unchanged);

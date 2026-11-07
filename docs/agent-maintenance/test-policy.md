@@ -35,11 +35,23 @@ do the same thing?" If yes, do not write it.
 10. When you delete code, delete the tests that target only that code in the
     same PR, and add a reason line to
     `scripts/ci/test-removal-justifications.txt`.
+11. Do not add `std::env::set_var` calls, new env-var test seams, new
+    process-wide `static Mutex<()>` locks or test-hook statics. Where existing
+    code still reads an env var, use the shared `TestEnvVarGuard` until it takes
+    the value as an argument.
+12. Keep the test diff within the production diff: added test lines should not
+    exceed changed production lines. State the reason in the PR when they do (a
+    reproduced defect, replacing a deleted guard). An exception to rule 8 (new
+    test infrastructure) needs coordinator approval.
 
 ## Scope
 
 This is an authoring policy for humans and agents. Rule 3 is enforced on added
 lines by `scripts/audit_state_lint_hardening.py` for `*_MUTANT`/`*_MUTATION` env
 names and `*mutant` hook functions; a switch under another name is left to review.
+Existing process-global environment dependencies (raw counts in `src/`: about
+350 lines containing `set_var(` and 980 containing `shared_test_env_lock()`) are
+cleaned up in #7819. Reusing the shared `TestEnvVarGuard` stays allowed until a
+dependency is replaced by an injected value.
 Existing tests are cleaned up in the #7344 slices; do not bulk-rewrite them outside
 that work.

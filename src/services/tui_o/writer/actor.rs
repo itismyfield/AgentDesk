@@ -299,9 +299,6 @@ where
     };
     let selection = actor.writer.suspension.clone();
     let restore = provider == ShadowProvider::Codex;
-    #[cfg(test)]
-    let restore =
-        restore && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-selection-restore");
     if restore {
         match selection.restore_current(actor.writer.store()) {
             Ok(restored) => {
@@ -555,9 +552,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     fn observe_waiting(&mut self, restored: bool) {
         let scope_waiting = self.scope_hold == Some("new_root_waiting");
-        #[cfg(test)]
-        let scope_waiting = scope_waiting
-            && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-scope-hold");
         if self.writer.is_stopped() || scope_waiting {
             return;
         }
@@ -607,10 +601,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         if ready == 0 && prepared.is_none() {
             // A fresh actor's empty queue is evidence only after its durable sources were restored.
             let incident = self.waiting.incident.take().is_some();
-            #[cfg(test)]
-            let incident = incident
-                && (self.writer.suspension.is_empty()
-                    || !crate::services::claude_tui::source_verify::n2b_mutant("b1b-own-clear"));
             if incident
                 || (restored
                     && self.waiting.ready.is_empty()
@@ -726,12 +716,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     /// With nothing owed, unsealed or open, every retained segment of a source with a decided start
     /// is settled. The open segment stays unless the spool is full, so segment files do not churn.
     fn collect_settled(&mut self) {
-        #[cfg(test)]
-        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-gc")
-            && !self.writer.suspension.is_empty()
-        {
-            return;
-        }
         if !self.delivery_allowed() {
             return;
         }
@@ -829,12 +813,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         {
             let len = std::fs::metadata(&cursor.source.path).ok()?.len();
             uncaptured += usize::from(cursor.captured_through < len);
-            let through = match crate::services::tui_o::turn_mode::carried_close_mutant("producer")
-            {
-                true => len,
-                false => cursor.captured_through,
-            };
-            captured.push((cursor.source.path.clone(), through));
+            captured.push((cursor.source.path.clone(), cursor.captured_through));
         }
         let unapplied = latest.saturating_sub(checkpoint.unwrap_or(0));
         let unapplied = usize::try_from(unapplied).unwrap_or(usize::MAX);
@@ -850,10 +829,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             asked,
             verified_work: self.verified.as_ref().map_or(0, |log| log.work.len()),
             // A channel no writer counted yet has started no POST in this process.
-            posting: match crate::services::tui_o::turn_mode::carried_close_mutant("posting_zero") {
-                true => 0,
-                false => super::deliver::posts_in_flight(channel).unwrap_or(0),
-            },
+            posting: super::deliver::posts_in_flight(channel).unwrap_or(0),
             captured,
         })
     }

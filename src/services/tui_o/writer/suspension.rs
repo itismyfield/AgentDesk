@@ -66,11 +66,6 @@ impl Suspension {
                     return Ok(false);
                 };
                 let matches = record.nonce == nonce;
-                #[cfg(test)]
-                let matches = matches
-                    || crate::services::claude_tui::source_verify::n2b_mutant(
-                        "b1b-selection-nonce",
-                    );
                 if !matches {
                     return Ok(false);
                 }

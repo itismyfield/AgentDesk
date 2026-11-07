@@ -7,9 +7,6 @@ use std::str::FromStr;
 /// - In test builds, the `[Self; 9]` type of [`Self::ALL`] checks its cardinality.
 ///
 /// DOES NOT VALIDATE:
-/// - The compiler does not require [`Self::from_str`] to gain an arm for an
-///   added variant because its match has an unknown-input arm. That coverage and
-///   the members (rather than the cardinality) of [`Self::ALL`] are test-backed.
 /// - The strong-enum `sqlx::Type` derive generates `Type`, `Encode`, and `Decode`
 ///   implementations, and `rename_all` determines their codec spelling.
 ///   Production writes bind this enum directly, and `IntakeOutboxRow` decodes

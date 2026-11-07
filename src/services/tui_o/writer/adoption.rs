@@ -179,11 +179,7 @@ impl ReadVersion {
 /// Whether `later` supersedes `pending` as the writer drops it, never to resolve it: a hook on the
 /// pane adopting another session, a later Pending, or a prompt of its own session it outlived.
 pub(crate) fn supersedes(pending: &BindingEvent, later: &BindingEvent) -> bool {
-    #[cfg(test)]
-    use crate::services::claude_tui::source_verify::n2b_mutant;
     let same_pane = later.tmux_session == pending.tmux_session;
-    #[cfg(test)]
-    let same_pane = same_pane || n2b_mutant("r5-overwrite-any-pane");
     let claude = later.provider == ShadowProvider::Claude;
     let BindingRecord::Bound {
         old, new, evidence, ..
@@ -195,22 +191,14 @@ pub(crate) fn supersedes(pending: &BindingEvent, later: &BindingEvent) -> bool {
         return false;
     }
     let source = match new {
-        #[cfg(test)]
-        BindingTarget::Pending { .. } if n2b_mutant("r5-overwrite-off") => return false,
         BindingTarget::Pending { .. } => return true,
         BindingTarget::Source(source) => source,
     };
-    #[cfg(test)]
-    if n2b_mutant("o-supersede-off") {
-        return false;
-    }
     let moved = old
         .as_ref()
         .is_none_or(|old| old.session_id != source.session_id);
     // The writer's own fold judged the prompt reclaim; O follows that one judgment.
     let reclaims = evidence.reclaims;
-    #[cfg(test)]
-    let reclaims = reclaims && !n2b_mutant("r5-reclaim-o-off");
     !evidence.hook_event.is_empty() && (moved || reclaims)
 }
 

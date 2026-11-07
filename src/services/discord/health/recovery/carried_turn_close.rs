@@ -12,7 +12,6 @@ use crate::services::discord::turn_finalizer::{
     FinalizeContext, SyntheticClaimSnapshot, TerminalEvent, TurnKey,
 };
 use crate::services::discord::turn_presence::activity::{ClosedBoundary, NoBoundary};
-use crate::services::tui_o::turn_mode::carried_close_mutant as mutant;
 
 /// How long the close waits for the O actor's poll after it asked; O polls every second.
 const OWED_READ_LIMIT: Duration = Duration::from_secs(3);
@@ -78,9 +77,7 @@ async fn episode(shared: &Arc<SharedData>, channel: ChannelId) -> Episode {
 
 impl Episode {
     fn is(&self, finalizer_turn_id: u64, nonce: Option<&str>) -> bool {
-        self.token
-            && self.message == Some(finalizer_turn_id)
-            && (self.nonce.as_deref() == nonce || mutant("nonce"))
+        self.token && self.message == Some(finalizer_turn_id) && self.nonce.as_deref() == nonce
     }
 
     fn empty(&self) -> bool {
@@ -164,8 +161,7 @@ async fn try_close(
         (Some(row), _) => {
             if !discord::tui_direct_pending_start::inflight_generation_precedes_current(
                 &row, generation,
-            ) && !mutant("generation")
-            {
+            ) {
                 return Err(kept("current_generation"));
             }
             if row.managed_submission.is_some()
@@ -208,10 +204,8 @@ async fn try_close(
     })?;
     o_delivered_through(channel, &end).await.map_err(kept)?;
     // Injection holds this lock through its paste and settlement; a busy lock is this tick's no-op.
-    let transition = match shared.session_transition_lock(channel).try_lock_owned() {
-        Ok(transition) => Some(transition),
-        Err(_) if mutant("lock") => None,
-        Err(_) => return Err(kept("transition_lock_busy")),
+    let Ok(transition) = shared.session_transition_lock(channel).try_lock_owned() else {
+        return Err(kept("transition_lock_busy"));
     };
     #[cfg(test)]
     tests::pause("locked", channel.get()).await;
@@ -229,17 +223,14 @@ async fn try_close(
             let identity = inflight::InflightTurnIdentity::from_state(&row);
             #[cfg(test)]
             tests::pause("archive", channel.get()).await;
-            let archive = match mutant("archive") {
-                true => GuardedClearOutcome::Cleared,
-                false => inflight::archive_inflight_state_if_matches_identity_generation(
-                    provider,
-                    channel.get(),
-                    &identity,
-                    &row.updated_at,
-                    row.save_generation,
-                    ARCHIVE_REASON,
-                ),
-            };
+            let archive = inflight::archive_inflight_state_if_matches_identity_generation(
+                provider,
+                channel.get(),
+                &identity,
+                &row.updated_at,
+                row.save_generation,
+                ARCHIVE_REASON,
+            );
             if archive != GuardedClearOutcome::Cleared {
                 return Err(kept(format!("archive_{archive:?}")));
             }
@@ -264,12 +255,12 @@ async fn try_close(
         #[cfg(test)]
         tests::note_event(
             channel.get(),
-            match end.aborted && !mutant("event") {
+            match end.aborted {
                 true => "cancel",
                 false => "complete",
             },
         );
-        let event = if end.aborted && !mutant("event") {
+        let event = if end.aborted {
             TerminalEvent::Cancel
         } else {
             TerminalEvent::Complete
@@ -282,7 +273,7 @@ async fn try_close(
                 event,
                 // The row is archived already; nothing is left for the finalizer to clear.
                 FinalizeContext {
-                    clear_inflight: mutant("archive"),
+                    clear_inflight: false,
                     allow_completion_cleanup: false,
                     kickoff_queue: true,
                     expected_idempotent_guard_miss: false,
@@ -378,7 +369,7 @@ async fn unchanged_under_lock(
     if !still_closed(shared, provider, channel, end).await {
         return Err(kept("native_moved_under_lock"));
     }
-    if input_delivered_since(provider, channel, end) && !mutant("delivery") {
+    if input_delivered_since(provider, channel, end) {
         return Err(kept("unconfirmed_injection_since_growth"));
     }
     if episode(shared, channel).await != *before {
@@ -433,14 +424,13 @@ async fn o_delivered_through(channel: ChannelId, end: &ClosedBoundary) -> Result
         let hosted = readiness.undelivered(channel.get()).is_some();
         return Err(format!("o_unanswered:hosted={hosted}"));
     };
-    let drained = mutant("debt")
-        || (owed.owed == owed.notice_owed
-            && owed.prepared == 0
-            && owed.unsealed == 0
-            && owed.uncaptured == 0
-            && owed.binding_pending == 0
-            && owed.verified_work == 0
-            && owed.posting == 0);
+    let drained = owed.owed == owed.notice_owed
+        && owed.prepared == 0
+        && owed.unsealed == 0
+        && owed.uncaptured == 0
+        && owed.binding_pending == 0
+        && owed.verified_work == 0
+        && owed.posting == 0;
     if !drained {
         return Err(format!(
             "o_owes:owed={} prepared={} unsealed={} uncaptured={} binding_pending={} \
@@ -460,7 +450,7 @@ async fn o_delivered_through(channel: ChannelId, end: &ClosedBoundary) -> Result
         .iter()
         .find(|(path, _)| same_source(path, &end.source));
     match source {
-        Some((_, through)) if *through >= end.through || mutant("capture") => Ok(()),
+        Some((_, through)) if *through >= end.through => Ok(()),
         Some((_, through)) => Err(format!("o_capture_behind:{through}<{}", end.through)),
         None => Err(format!("o_source_unbound:sources={}", owed.captured.len())),
     }
