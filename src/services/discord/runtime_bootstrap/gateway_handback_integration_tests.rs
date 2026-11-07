@@ -632,3 +632,38 @@ async fn gateway_snapshot_first_lease_uses_prepared_boot_config_pg() {
         "the lease identity must use the prepared boot instance"
     );
 }
+
+#[tokio::test]
+async fn preferred_wait_stands_down_to_standby_when_a_restart_is_requested_pg() {
+    // The preferred node sat in the unbounded held-lease wait holding its barrier
+    // slot, so no marker poller drained it and the deploy request timed out.
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let holder = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.save_config(|config| config.cluster.instance_id = Some("home".into()));
+    let root = crate::config::runtime_root().expect("fixture runtime root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("restart_pending"),
+        "nonce=20261107T022859-i7906-request\nsource=test\n",
+    )
+    .unwrap();
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(fixture.pool.clone()));
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        fixture.acquire(&shared, &mut fixture.breaker()),
+    )
+    .await
+    .expect("a pending restart request must end the preferred wait within one poll");
+    assert!(matches!(outcome, GatewayLeaseOutcome::Standby));
+    assert!(
+        !shared.restart.shutting_down.load(Ordering::SeqCst),
+        "standing down is not a shutdown; the standby marker poller owns the drain"
+    );
+    holder.unlock().await.unwrap();
+    fixture.close().await;
+}
