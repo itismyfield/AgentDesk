@@ -882,8 +882,8 @@ mod cases {
         );
         row.readopted_from_inflight = false;
         row.native_stop_user_pin = None;
-        // The row names the session the pane still runs, so nothing proves its input superseded.
-        row.session_id = Some(fx.channel.get().to_string());
+        // The row names the session the fixture's binding still runs ("parent").
+        row.session_id = Some("parent".to_string());
         let path = inflight::inflight_state_path(
             &inflight::inflight_runtime_root().unwrap(),
             &PROVIDER,
@@ -1148,6 +1148,7 @@ mod cases {
                 fx.channel.get(),
                 Some(ClosedBoundary {
                     source: fx.path.clone(),
+                    session: String::new(),
                     through: len,
                     grew_at: std::time::Instant::now() - Duration::from_secs(60),
                     aborted: false,

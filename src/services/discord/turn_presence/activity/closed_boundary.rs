@@ -4,11 +4,13 @@ use std::time::Instant;
 
 use super::{Activity, Observed, Outcome, Watch, observed};
 
-/// A `closed` judgment's native end: the source and position read, when that position last
-/// grew, and whether the close was an interrupt.
+/// A `closed` judgment's native end: the source, its session and position read, when that
+/// position last grew, and whether the close was an interrupt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) struct ClosedBoundary {
     pub source: std::path::PathBuf,
+    /// The session the binding names for `source`; empty when it named none.
+    pub session: String,
     pub through: u64,
     pub grew_at: Instant,
     pub aborted: bool,
@@ -55,6 +57,7 @@ pub(super) fn closed_boundary(
     let aborted = (facts.last_close_aborted()).ok_or(NoBoundary::because("opener_unread"))?;
     Ok(ClosedBoundary {
         source: facts.binding().source.path.clone(),
+        session: facts.binding().source.session_id.clone(),
         through: guard.through,
         grew_at: guard.grew_at,
         aborted,

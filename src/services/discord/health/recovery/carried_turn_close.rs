@@ -419,13 +419,11 @@ async fn commit_receipt(
     Err(kept("receipt_not_committed"))
 }
 
-/// The row was bound to a session other than the one whose transcript the pane ended on.
+/// The row names a session other than the one the binding says the pane ended on.
 fn session_superseded(row: &InflightTurnState, end: &ClosedBoundary) -> bool {
-    let current = end.source.file_stem().and_then(|stem| stem.to_str());
-    row.session_id
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|session| !session.is_empty() && current != Some(session))
+    let current = end.session.trim();
+    let named = row.session_id.as_deref().map(str::trim);
+    !current.is_empty() && named.is_some_and(|session| !session.is_empty() && session != current)
 }
 
 /// The one notice an unproven input's close owes its channel; the outbox dedupe keeps a repeat
