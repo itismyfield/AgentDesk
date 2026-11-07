@@ -88,17 +88,35 @@ fn answers(rig: &Rig) -> Answers {
     let release = CancelReadsOnExit(reads.clone());
     let thread = std::thread::spawn(move || {
         let _release = release;
+        // False once the test has ended; its own assertions then say why.
+        let until = |what: &str, ready: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            while !ready() {
+                assert!(std::time::Instant::now() < deadline, "{what} never came");
+                let waited = finished.recv_timeout(Duration::from_millis(20));
+                if waited != Err(RecvTimeoutError::Timeout) {
+                    return false;
+                }
+            }
+            true
+        };
         for n in 1..=2 {
             let entered = || events(&renderer).iter().filter(|e| *e == "Enter").count() >= n;
-            let deadline = std::time::Instant::now() + Duration::from_secs(60);
-            while !entered() {
-                assert!(std::time::Instant::now() < deadline, "Enter {n} never came");
-                // A test that ended before this Enter says why in its own assertions.
-                if finished.recv_timeout(Duration::from_millis(20))
-                    != Err(RecvTimeoutError::Timeout)
-                {
-                    return;
-                }
+            if !until(&format!("Enter {n}"), &entered) {
+                return;
+            }
+            // Enter is recorded before the pane writes its user row; an answer ahead of that row
+            // leaves the transcript ending Busy, so the turn's read never ends.
+            let body = fs::read_to_string(renderer.join("body")).unwrap();
+            let recorded = || {
+                let rows = fs::read_to_string(&transcript).unwrap();
+                rows.lines().any(|line| {
+                    serde_json::from_str::<serde_json::Value>(line)
+                        .is_ok_and(|row| row["type"] == "user" && row["message"]["content"] == body)
+                })
+            };
+            if !until(&format!("Enter {n}'s user row"), &recorded) {
+                return;
             }
             let mut file = fs::OpenOptions::new()
                 .append(true)
