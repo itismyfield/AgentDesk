@@ -15,6 +15,10 @@ mod park_reply_tests;
 #[path = "missing_halt_tests.rs"]
 mod missing_halt_tests;
 
+#[cfg(target_os = "linux")]
+#[path = "../../../../herdr_terminate/missing_marker_turn_tests.rs"]
+mod missing_marker_turn_tests;
+
 fn retained_bytes(root: &Path, channel: u64, source: &SourceId) -> BTreeMap<PathBuf, String> {
     let channel = root.join("o_store").join(channel.to_string());
     let key = source_key(source);

@@ -1,17 +1,25 @@
 //! Retirement reaches current absence; one normal input creates and attaches its own source.
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
+use crate::db::dispatched_sessions::hosted_execution::{
+    self, HostedExecution, HostedLookupKey, HostedOwner, HostedRecord, HostedState,
+};
 use crate::services::claude::herdr_turn::{self, AttachRequest, HerdrTurn, HerdrTurnPorts};
 use crate::services::claude_tui::hook_server::{
     HookEvent, HookServerState, hook_receiver_router_with_state,
 };
+use crate::services::discord::herdr_terminate::root_replaced::CAS_ATTEMPTS;
 use crate::services::discord::recovery_engine::herdr_reader::SocketHerdrReader;
-use crate::services::discord::tui_prompt_relay::herdr_source::attach_launched_herdr_source;
+use crate::services::discord::tui_prompt_relay::herdr_source::{
+    HerdrSourceAttach, attach_launched_herdr_source,
+};
 use crate::services::discord::turn_presence::activity::{self, Activity};
 use crate::services::herdr_launch::HerdrLaunchHost;
 use crate::services::provider_auth_profile::ProviderAuthOverlay;
-use crate::services::tui_prompt_dedupe::binding_events;
-use real::missing_marker_rig::LOGICAL;
+use crate::services::session_host::{HerdrTarget, herdr_terminate_real_tests as real};
+use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events};
+use crate::services::turn_host::{self, HerdrRefusal, TurnHost};
+use real::missing_marker_rig::{CHANNEL, Case, LOGICAL, TOKEN, child};
+use sqlx::PgPool;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -65,9 +73,9 @@ impl HerdrTurnPorts for Ports {
 }
 
 #[test]
-fn mm_retire_presence_then_normal_input_finds_source_pg() {
+fn mm_retire_wakes_held_writer_and_normal_input_delivers_without_deadlock_pg() {
     if !child(
-        "mm_retire_presence_then_normal_input_finds_source_pg",
+        "mm_retire_wakes_held_writer_and_normal_input_delivers_without_deadlock_pg",
         module_path!(),
     ) {
         return;
@@ -136,9 +144,64 @@ fn mm_retire_presence_then_normal_input_finds_source_pg() {
             .block_on(unknown.publish_if_current(|| ()))
             .is_some()
     );
+    let mut config = (*crate::config_live_reload::current().unwrap()).clone();
+    config.tui_o = Some(serde_json::from_value(json!({"writer":{"channels":[CHANNEL]}})).unwrap());
+    crate::services::tui_o::channel_policy::install(&config).unwrap();
+    let _selected = cutover::test_override::force_boot(
+        BootChannels::validate(&config)
+            .unwrap()
+            .adopted(Adoption::Committed),
+    );
+    let (_store, _era, old) = missing_store(&root, CHANNEL);
+    let retained = retained_bytes(&root, CHANNEL, &old);
+    let discord = case.rt.block_on(Discord::new());
+    let gateway = case.rt.block_on(gateway_context(&case.shared, CHANNEL));
+    let gate = crate::services::tui_o::ownership::gate("claude");
+    gate.acquired();
+    let _enter = case.rt.enter();
+    let parts = parts_with_rest(
+        &case.shared,
+        &ProviderKind::Claude,
+        None,
+        Some(discord.http.clone()),
+    );
+    let mut handles = host::start_managed(
+        ShadowProvider::Claude,
+        true,
+        cutover::boot_ownership(),
+        || parts,
+    );
+    assert_eq!(handles.len(), 1);
+    let halted = format!("tui_o:halted:{CHANNEL}");
+    case.rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !crate::services::tui_o::alarm::health_reasons().contains(&halted) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("missing old source must hold the real writer");
+    });
+    assert!(handles[0].live() && !host::channel_accepts(CHANNEL));
+    let generation = host::process_readiness().hosted_by(CHANNEL).unwrap();
+    let _admission = crate::services::herdr_admission::force_for_test(
+        crate::services::herdr_admission::Admission::new(true, Some(root.join("no-stop"))),
+    );
+    assert!(matches!(
+        case.rt.block_on(turn_host::for_turn(
+            Some(&case.pool),
+            &ProviderKind::Claude,
+            CHANNEL,
+            Some(&case.execution.key),
+        )),
+        TurnHost::Refused(HerdrRefusal::OWriterNotReady)
+    ));
+    assert_eq!(case.record().state, HostedState::Bound);
+    eprintln!("MM_WRITER held generation={generation} normal_input=OWriterNotReady");
     case.pass();
     let record = case.record();
     assert_eq!(record.state, HostedState::Retired);
+    assert_eq!(CAS_ATTEMPTS.with(std::cell::Cell::get), 1);
     let absence = case.rt.block_on(activity::reading_now(
         &case.shared,
         &ProviderKind::Claude,
@@ -153,6 +216,29 @@ fn mm_retire_presence_then_normal_input_finds_source_pg() {
             .block_on(absence.publish_if_current(|| ()))
             .is_some()
     );
+
+    eprintln!("MM_WRITER retired cas=1 presence=Idle/no_session");
+    case.rt.block_on(accepts(CHANNEL));
+    assert_eq!(
+        host::process_readiness().hosted_by(CHANNEL),
+        Some(generation)
+    );
+    assert!(!crate::services::tui_o::alarm::health_reasons().contains(&halted));
+    assert!(!old.path.exists());
+    assert_eq!(retained_bytes(&root, CHANNEL, &old), retained);
+    let TurnHost::Herdr(plan) = case.rt.block_on(turn_host::for_turn(
+        Some(&case.pool),
+        &ProviderKind::Claude,
+        CHANNEL,
+        Some(&case.execution.key),
+    )) else {
+        panic!("retirement must reopen normal input without recovery deadlock")
+    };
+    assert_eq!(
+        plan.row.as_ref().map(|row| &row.record),
+        Some(&HostedRecord::Known(record.clone()))
+    );
+    eprintln!("MM_WRITER ready generation={generation} normal_input=Herdr retired_row=1");
 
     let home = root.join("claude-home");
     std::fs::create_dir_all(&home).unwrap();
@@ -197,16 +283,6 @@ fn mm_retire_presence_then_normal_input_finds_source_pg() {
         hooks: state,
         overlay,
     };
-    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
-    let endpoint = crate::services::herdr_launch::HerdrLaunchEndpoint {
-        execution_node: endpoint.execution_node,
-        config_key: endpoint.key,
-        socket_addr: endpoint.socket_path.display().to_string(),
-        herdr_session: endpoint.herdr_session,
-    };
-    let _admission = crate::services::herdr_admission::force_for_test(
-        crate::services::herdr_admission::Admission::new(true, Some(root.join("no-stop"))),
-    );
     let cancel = Arc::new(CancelToken::new());
     let cancel_timeout = cancel.clone();
     let timeout = case.rt.spawn(async move {
@@ -223,8 +299,8 @@ fn mm_retire_presence_then_normal_input_finds_source_pg() {
                 pool: &case.pool,
                 owner: record.owner.clone(),
                 channel_id: CHANNEL,
-                endpoint,
-                row: Some(&HostedRecord::Known(record.clone())),
+                endpoint: plan.endpoint,
+                row: plan.row.as_ref().map(|row| &row.record),
                 prompt: "one new normal input",
                 working_dir: cwd.to_str().unwrap(),
                 session_id: None,
@@ -301,6 +377,27 @@ fn mm_retire_presence_then_normal_input_finds_source_pg() {
                 }),
         "the production writer input port must find this execution's own source"
     );
+    case.rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while discord.posts.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the recovered writer must deliver the new execution's output");
+        handles.remove(0).stop_and_join().await.unwrap();
+    });
+    let posts = discord.posts.lock().unwrap();
+    assert_eq!(posts.len(), 1);
+    assert!(
+        posts[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Recovered managed execution reply.")
+    );
+    eprintln!("MM_WRITER delivered=1 new_nonce={}", next.execution_nonce);
+    gate.lost();
+    gateway.abort();
     assert!(
         std::fs::read_to_string(&source)
             .unwrap()

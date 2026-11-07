@@ -4,7 +4,7 @@ use crate::services::discord::recovery_engine::herdr_reader;
 use crate::services::session_host::herdr_terminate_real_tests as real;
 use real::missing_marker_rig::{CHANNEL, Case, TOKEN, child};
 impl Case {
-    fn pass(&self) {
+    pub(crate) fn pass(&self) {
         let _enter = self.rt.enter();
         let before = self.observation();
         herdr_reader::reconnect_restarted_herdr_with_shared(&self.shared, &ProviderKind::Claude);
@@ -330,9 +330,6 @@ fn mm_unreadable_marker_keeps_pg() {
     case.pass();
     case.assert_kept(&row, &hold);
 }
-
-#[path = "missing_marker_turn_tests.rs"]
-mod recovered_turn;
 
 #[test]
 fn mm_final_new_dispatch_keeps_pg() {
