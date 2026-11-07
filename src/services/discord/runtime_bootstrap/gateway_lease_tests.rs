@@ -718,20 +718,25 @@ async fn gateway_observability_health_memory_only_pg() {
 
 async fn audit_health_statements(registry: &health::HealthRegistry, pool: &sqlx::PgPool) {
     use crate::test_support::wait::{WAIT_CAP, await_within};
+    use sqlx::Connection;
     let path = std::env::var("I7924_PG_LOG")
         .expect("I7924_PG_LOG required for the requested health statement audit");
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let begin = format!("I7924_HEALTH_BEGIN_{nonce}");
     let end = format!("I7924_HEALTH_END_{nonce}");
+    // Keep sentinel traffic off the pool so its return cleanup stays outside the audit.
+    let mut sentinel = sqlx::PgConnection::connect_with(&pool.connect_options())
+        .await
+        .unwrap();
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SELECT '{begin}'").as_str()))
-        .execute(pool)
+        .execute(&mut sentinel)
         .await
         .unwrap();
     for _ in 0..5 {
         health::build_health_snapshot(registry).await;
     }
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SELECT '{end}'").as_str()))
-        .execute(pool)
+        .execute(&mut sentinel)
         .await
         .unwrap();
     let log = await_within(
