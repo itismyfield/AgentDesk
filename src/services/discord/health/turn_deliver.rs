@@ -254,7 +254,8 @@ async fn deliver_with_ports<P: DeliveryPorts>(
 ) -> Result<HumanInputDelivery, HumanInputError> {
     // A busy TUI pane takes the input whoever holds it; a veto keeps the start-or-queue below.
     let mut inject_veto = None;
-    if ports.inject_mode() != InjectMode::Off && !ports.owner_takes().await {
+    let owner_takes = ports.owner_takes().await;
+    if ports.inject_mode() != InjectMode::Off && !owner_takes {
         match ports.try_inject().await {
             InjectAttempt::NotSent(veto) => inject_veto = Some(veto.to_string()),
             InjectAttempt::Injected { turn_id } => {
@@ -282,7 +283,7 @@ async fn deliver_with_ports<P: DeliveryPorts>(
             }
         }
     }
-    if ports.external_hold().await.is_none() {
+    if owner_takes || ports.external_hold().await.is_none() {
         match ports.try_start().await {
             StartAttempt::Accepted(turn_id) => {
                 return Ok(HumanInputDelivery::Queued {
@@ -297,6 +298,11 @@ async fn deliver_with_ports<P: DeliveryPorts>(
             }
             StartAttempt::InvalidTarget(error) => {
                 return Err(HumanInputError::InvalidTarget(error));
+            }
+            StartAttempt::Busy if owner_takes => {
+                return Err(HumanInputError::QueueRefused(
+                    "owner_admission_pending".into(),
+                ));
             }
             StartAttempt::Busy => {}
         }
@@ -371,6 +377,15 @@ impl DeliveryPorts for LivePorts {
             InjectMode::External | InjectMode::All => {
                 router::reserve_headless_turn().behind_queue()
             }
+        };
+        let reservation = if self.owner_takes().await {
+            reservation.for_input(
+                self.request.channel_id,
+                Some(&self.request.source),
+                self.request.metadata.as_ref(),
+            )
+        } else {
+            reservation
         };
         let Some(reply) = &self.reply else {
             return self.start_reserved(reservation).await;
@@ -499,15 +514,20 @@ impl HumanInputRequest {
         let reservation = router::reserve_headless_turn();
         let message_id = reservation.user_msg_id();
         let generation = crate::services::discord::runtime_store::process_generation();
+        let mut source = SourceMessageQueuedGeneration::user_instruction(message_id, generation);
+        source.origin_id = self
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/human_input/origin_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         let intervention = Intervention {
             author_id: UserId::new(self.author_id),
             author_is_bot: false,
             message_id,
             queued_generation: generation,
             source_message_ids: vec![message_id],
-            source_message_queued_generations: vec![
-                SourceMessageQueuedGeneration::user_instruction(message_id, generation),
-            ],
+            source_message_queued_generations: vec![source],
             source_text_segments: Vec::new(),
             text: self.text.clone(),
             mode: InterventionMode::Soft,

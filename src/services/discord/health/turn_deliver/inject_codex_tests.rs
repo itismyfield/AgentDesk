@@ -1060,60 +1060,30 @@ async fn queued_codex_preserves_each_gate_and_live_discord_catchup_scope_pg() {
     );
 }
 
+/// With the mode, queued and live channel gates open, Claude takes a queued head; Codex stays closed
+/// until its own queued switch opens.
 #[test]
-fn queued_codex_production_origin_gate_stays_closed_without_cfg_test() {
-    let source = include_str!("inject.rs");
-    let origin = source
-        .split_once("impl Origin {")
-        .unwrap()
-        .1
-        .split_once("/// Tests never read the process env")
-        .unwrap()
-        .0;
-    let dir = tempfile::tempdir().unwrap();
-    let probe = format!(
-        r#"
-#[derive(PartialEq, Eq)]
-enum ProviderKind {{ Claude, Codex }}
-#[derive(Clone, Copy)]
-struct ChannelId(u64);
-impl ChannelId {{ fn get(self) -> u64 {{ self.0 }} }}
-#[derive(PartialEq, Eq)]
-enum InjectMode {{ Off, All }}
-fn mode(_: u64) -> InjectMode {{ InjectMode::All }}
-fn queued_head_enabled(_: u64) -> bool {{ true }}
-struct Origin;
-impl Origin {{{origin}
-fn main() {{
-    let channel = ChannelId(7272);
-    assert!(Origin::queued_head_ready(&ProviderKind::Claude, channel));
-    assert!(!Origin::queued_head_ready(&ProviderKind::Codex, channel),
-        "production Codex queued gate must stay closed even with mode and queued gate open");
-    assert!(!Origin::queued_head_gate_enabled(&ProviderKind::Codex, channel, None, |_, _| true));
-}}
-"#
+fn queued_head_gate_opens_for_claude_and_stays_closed_for_unswitched_codex() {
+    let channel = ChannelId::new(7_867_301);
+    test_hook::set(
+        channel.get(),
+        InjectMode::All,
+        PathBuf::from("/nonexistent/tmux"),
     );
-    let path = dir.path().join("gate.rs");
-    let binary = dir.path().join("gate");
-    fs::write(&path, probe).unwrap();
-    let compiled = std::process::Command::new("rustc")
-        .args(["--edition=2024", "--crate-name=queued_gate_probe"])
-        .arg(&path)
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .unwrap();
+    test_hook::set_queued_head(channel.get(), true);
+    let _gate = crate::services::discord::router::busy_inject_support::open_gate(channel.get());
     assert!(
-        compiled.status.success(),
-        "non-test gate probe must compile: {}",
-        String::from_utf8_lossy(&compiled.stderr)
+        crate::services::discord::router::live_intake_inject_covers(channel, None),
+        "the live channel gate must be open"
     );
-    let result = std::process::Command::new(binary).output().unwrap();
-    assert!(
-        result.status.success(),
-        "cfg(not(test)) gate failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+    for (provider, ready) in [(ProviderKind::Claude, true), (ProviderKind::Codex, false)] {
+        assert_eq!(
+            inject::Origin::queued_head_ready(&provider, channel),
+            ready,
+            "{provider:?}"
+        );
+    }
+    test_hook::clear(channel.get());
 }
 
 /// A missing native receipt is local success and does not stop the next Discord input.

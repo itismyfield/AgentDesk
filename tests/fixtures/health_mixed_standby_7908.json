@@ -1,0 +1,15 @@
+{
+  "server_up": true,
+  "db": true,
+  "dashboard": true,
+  "status": "degraded",
+  "ok": false,
+  "cluster_standby": false,
+  "degraded_reasons": [
+    "provider:codex:gateway_standby",
+    "provider:codex:tui_output_requires_gateway"
+  ],
+  "tui_output_gateway_channels": [
+    "codex:standby:complete:19"
+  ]
+}

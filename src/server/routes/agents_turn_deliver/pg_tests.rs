@@ -10,6 +10,142 @@ use crate::services::discord::health::{
 };
 use crate::services::provider::ProviderKind;
 
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn owner_channel_external_hold_deliver_is_admitted_pg() {
+    use crate::services::discord::health::register_inject_runtime;
+    use crate::services::turn_orchestrator::QueuePersistenceContext;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = 7_896_402;
+    crate::db::agents::insert_agent_channels_for_tests(
+        &pool,
+        "owner-deliver-agent",
+        Some(&channel.to_string()),
+        None,
+    )
+    .await;
+    let registry = Arc::new(HealthRegistry::new());
+    let shared = register_inject_runtime(&registry, &[channel], Some(pool.clone())).await;
+    let _gateway = shared.gateway_ready_for_tests(&[channel]).await;
+    let generation = crate::services::discord::runtime_store::generation_path().unwrap();
+    std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+    std::fs::write(generation, "1").unwrap();
+    let id = poise::serenity_prelude::ChannelId::new(channel);
+    crate::services::discord::health::end_turn(&shared, channel).await;
+    assert!(
+        crate::services::discord::health::queue_texts(&shared, channel)
+            .await
+            .is_empty()
+    );
+    let mailbox =
+        crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(id).unwrap();
+    let hashes = registry
+        .registered_token_hashes(&ProviderKind::Claude)
+        .await;
+    assert_eq!(hashes.len(), 1);
+    let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, &hashes[0], None);
+    mailbox.v2_ensure_channel(&persistence, id).await.unwrap();
+    seed_external_turn_row_for_tests(&ProviderKind::Claude, channel);
+    let app = router(Some(pool.clone()), Some(registry));
+    let input = json!({"text":"지금 턴에 합류해 줘", "author_discord_user_id":"200",
+        "source":"imessage", "origin_id":"owner-deliver-origin"});
+    let body = input.to_string();
+    let first = super::ADMISSION_ENABLED_FOR_TEST
+        .scope(true, deliver(&app, "owner-deliver-agent", &body))
+        .await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(first.1["delivery"], "queued", "{}", first.1);
+    let replay = super::ADMISSION_ENABLED_FOR_TEST
+        .scope(true, deliver(&app, "owner-deliver-agent", &body))
+        .await;
+    assert_eq!(replay, first);
+    let state = mailbox
+        .v2_request(|owner| owner.as_ref().unwrap().json())
+        .await
+        .unwrap();
+    assert_eq!(state["items"].as_array().unwrap().len(), 1, "{state}");
+    assert_eq!(
+        state["admission_receipts"].as_array().unwrap().len(),
+        1,
+        "{state}"
+    );
+    let message = state["items"][0]["message_id"].as_u64().unwrap();
+    assert_eq!(first.1["turn_id"], format!("discord:{channel}:{message}"));
+    let obligation = crate::db::imsg_reply::read_obligation(&pool, "owner-deliver-origin")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        obligation.episode_key,
+        Some(format!("turn:claude:{channel}:{message}"))
+    );
+    assert!(
+        state["items"][0]["reply_context"]
+            .as_str()
+            .unwrap()
+            .contains("origin: owner-deliver-origin")
+    );
+    drop(app);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn different_origin_ids_accept_equal_text_inside_the_dedup_window_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = 7_896_401;
+    crate::db::agents::insert_agent_channels_for_tests(
+        &pool,
+        "equal-origin-agent",
+        Some(&channel.to_string()),
+        None,
+    )
+    .await;
+    let registry = Arc::new(HealthRegistry::new());
+    register_bot_auth_for_tests(&registry, "claude", channel, Some(100), vec![200], false).await;
+    seed_external_turn_row_for_tests(&ProviderKind::Claude, channel);
+    let app = router(Some(pool.clone()), Some(registry));
+    let mut turns = Vec::new();
+    for origin in ["equal-origin-first", "equal-origin-second"] {
+        let input = json!({"text":"한 번 더 확인해 줘", "author_discord_user_id":"200",
+            "source":"imessage", "origin_id":origin});
+        let (status, body) = deliver(&app, "equal-origin-agent", &input.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{origin}: {body}");
+        assert_eq!(body["delivery"], "queued", "{origin}: {body}");
+        turns.push(body["turn_id"].clone());
+    }
+    assert_ne!(turns[0], turns[1]);
+    let handle = crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(
+        poise::serenity_prelude::ChannelId::new(channel),
+    )
+    .unwrap();
+    let queue = handle.snapshot().await.intervention_queue;
+    assert_eq!(queue.len(), 2);
+    let origins: Vec<_> = queue
+        .iter()
+        .map(|item| {
+            item.source_message_queued_generations[0]
+                .origin_id
+                .as_deref()
+        })
+        .collect();
+    assert_eq!(
+        origins,
+        [Some("equal-origin-first"), Some("equal-origin-second")]
+    );
+    let without_origin = json!({"text":"한 번 더 확인해 줘", "author_discord_user_id":"200"});
+    let (status, body) = deliver(&app, "equal-origin-agent", &without_origin.to_string()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["detail"], "LastItemDedup", "{body}");
+    drop(app);
+    pool.close().await;
+    db.drop().await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn an_external_tui_turn_row_is_busy_for_start_and_deliver_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();

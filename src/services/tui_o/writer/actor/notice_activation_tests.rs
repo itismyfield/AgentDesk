@@ -426,10 +426,12 @@ async fn pending_in_frozen_cohort(withdrawn: bool) {
     let path = runtime.path().join("native.jsonl");
     let prompt = "frozen pending input".to_string();
     let raw = row("frozen", &prompt);
-    std::fs::write(&path, &raw).unwrap();
+    std::fs::write(&path, b"").unwrap();
     let logical = "frozen-pending-pane";
     let (o, _binding) = begin(runtime.path(), &path, logical);
-    history::register(("claude", logical, "attempt", "733201"), &path, 0, &prompt).unwrap();
+    let (registry, keys) =
+        ambiguous_registration(&path, logical, "73320000000000000000000000000095", &prompt);
+    append(&path, &raw);
     let port = Arc::new(Port::default());
     port.messages.lock().unwrap().push(SeenMessage {
         id: 11,
@@ -474,12 +476,10 @@ async fn pending_in_frozen_cohort(withdrawn: bool) {
         "undecided ownership is not a permanent migration verdict"
     );
     if withdrawn {
-        history::withdraw("attempt", &path);
+        ambiguous_withdraw(&registry, &keys, &prompt);
     } else {
-        assert_eq!(
-            history::receipt("attempt", &path, 0, "user", Some("frozen"), &prompt),
-            Some(true)
-        );
+        abandon_rival(&registry, &keys, &prompt);
+        ambiguous_receipt(&registry, &keys[0], &path, "frozen", &prompt);
     }
     actor.prepare_notices(&[]).await;
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
@@ -509,12 +509,12 @@ async fn pending_in_frozen_cohort(withdrawn: bool) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn frozen_pending_ownership_is_excluded_after_its_receipt_without_a_migration_verdict() {
+async fn ambiguous_frozen_ownership_is_excluded_only_after_rival_abandoned_and_exact_receipt() {
     pending_in_frozen_cohort(false).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn frozen_pending_ownership_withdrawn_takes_the_ordinary_legacy_judgment() {
+async fn abandoned_ambiguous_frozen_ownership_takes_ordinary_legacy_judgment() {
     pending_in_frozen_cohort(true).await;
 }
 

@@ -23,6 +23,10 @@ input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-
 input-single-path/InputCancelSelectionLegacyGuarded.cfg	InputCancelSelection	LegacyFrontRemoved	-
 input-single-path/InputCancelSelectionNoRevoke.cfg	InputCancelSelection	FrontGrantRevoked	-
+input-single-path/InputNoticeSettlementAcceptanceGap.cfg	InputNoticeSettlement	-	AcceptedEventuallyEchoed
+input-single-path/InputNoticeSettlementAfter.cfg	InputNoticeSettlement	-	-
+input-single-path/InputNoticeSettlementBefore.cfg	InputNoticeSettlement	-	OwnedEventuallyExcluded,AcceptedEventuallyEchoed
+input-single-path/InputNoticeSettlementBeforeKnown.cfg	InputNoticeSettlement	NoFalseExcludeDirect	-
 input-single-path/InputNativeStop.cfg	InputNativeStop	-	-
 input-single-path/InputNativeStopAbsorptionBefore.cfg	InputNativeStop	NoForeignEscape,OwnInputStops	-
 input-single-path/InputNativeStopBefore.cfg	InputNativeStop	OwnInputStops	-
@@ -62,6 +66,14 @@ input-single-path/InputOwnershipConsumedWaitingInvalidPin.cfg	InputOwnershipCons
 input-single-path/InputOwnershipConsumedWaitingNonO.cfg	InputOwnershipConsumedWaiting	-	-
 input-single-path/InputOwnershipConsumedWaitingOutcomeBefore.cfg	InputOwnershipConsumedWaiting	OrphanAReceiptCompleted	-
 input-single-path/InputOwnershipConsumedWaitingPinSupplyBefore.cfg	InputOwnershipConsumedWaiting	-	PendingBEventuallyStarts
+input-single-path/InputOwnershipConsumedWaitingSupersededAfter.cfg	InputOwnershipConsumedWaiting	-	-
+input-single-path/InputOwnershipConsumedWaitingSupersededBefore.cfg	InputOwnershipConsumedWaiting	-	PendingBEventuallyStarts
+input-single-path/InputOwnershipConsumedWaitingSupersededIdle.cfg	InputOwnershipConsumedWaiting	-	-
+input-single-path/InputOwnershipConsumedWaitingSupersededIdleBefore.cfg	InputOwnershipConsumedWaiting	-	PendingBEventuallyStarts
+input-single-path/InputOwnershipConsumedWaitingSupersededIdleMarkUnproven.cfg	InputOwnershipConsumedWaiting	UnprovenRemovalTold	-
+input-single-path/InputOwnershipConsumedWaitingSupersededIdleSameSession.cfg	InputOwnershipConsumedWaiting	-	PendingBEventuallyStarts
+input-single-path/InputOwnershipConsumedWaitingSupersededNoDedupe.cfg	InputOwnershipConsumedWaiting	UnprovenCloseToldOnce	-
+input-single-path/InputOwnershipConsumedWaitingSupersededSameSession.cfg	InputOwnershipConsumedWaiting	-	PendingBEventuallyStarts
 input-single-path/InputOwnershipDuplicateIntake.cfg	InputOwnershipDuplicateIntake	-	-
 input-single-path/InputOwnershipDuplicateIntakeBefore.cfg	InputOwnershipDuplicateIntake	NoFalseWarning	-
 input-single-path/InputOwnershipF.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved	-
@@ -139,6 +151,11 @@ input-single-path/InputOwnershipEarlyRetainBefore.cfg	InputOwnership	FirstOpaque
 input-single-path/InputOwnershipReserveResetBefore.cfg	InputOwnership	ReserveResetsFailures	-
 input-single-path/InputOwnershipPolicyEarlyRemove.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipPolicyRowOnlyBefore.cfg	InputOwnership	RecoveryCreditPreserved	FailureEventuallyResolved
+input-single-path/ManagedObserverRebindAfter.cfg	ManagedObserverRebind	-	-
+input-single-path/ManagedObserverRebindBefore.cfg	ManagedObserverRebind	-	SubmittedEventuallyCloses
+input-single-path/ManagedObserverRebindGraceBeforeAdoption.cfg	ManagedObserverRebind	-	SubmittedEventuallyCloses
+input-single-path/ManagedObserverRebindMetaIsInput.cfg	ManagedObserverRebind	FixedAOnlyOnEvidenceOrGrace	SubmittedEventuallyCloses
+input-single-path/ManagedObserverRebindSinglePoll.cfg	ManagedObserverRebind	FixedAOnlyOnEvidenceOrGrace	SubmittedEventuallyCloses
 tui-o-writer/WriterParkedAliasFixed.cfg	WriterParkedAlias	-	-
 tui-o-writer/WriterParkedAliasMain.cfg	WriterParkedAlias	HaltRepeatZero,NoHaltForConfirmedOld	FirstReplyExactlyOnce
 tui-o-writer/WriterReboundBirth.cfg	WriterRebound	ActiveLossVisible,CurrentNeverHistorical,UnknownNeedsAbsence,ReadyAfterFollow,ParkedReboundHalts	-
@@ -154,3 +171,6 @@ turn-presence/TurnPresenceMain.cfg	TurnPresence	NoProgressIdentityUnknown,NoProg
 turn-presence/TurnPresenceM1.cfg	TurnPresence	NoProgressIdentityUnknown,NoProgressIdentityNotice	EventuallyStableBusy,PublicationContinues
 turn-presence/TurnPresenceM2.cfg	TurnPresence	-	PublicationContinues
 turn-presence/TurnPresenceM3.cfg	TurnPresence	NoOldProofAfterObservedBoundary,NoWrongAdmission,NoWrongPublication	-
+input-single-path/InputOwnershipPersonBusy.cfg	InputOwnership	-
+input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
+input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds

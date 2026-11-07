@@ -51,7 +51,99 @@ fn is_front(a: &Front, b: &Front) -> bool {
     a.0 == b.0 && same(&a.1, &b.1)
 }
 
+use crate::services::turn_orchestrator::ChannelMailboxHandle;
+
+impl ChannelMailboxHandle {
+    /// An absent context is Discord; a stored headless iMessage is also a person's input.
+    pub(crate) fn person_input(context: Option<&serde_json::Value>) -> bool {
+        context.is_none_or(|context| {
+            context["origin"] == "imessage"
+                || (context["origin"] == "headless"
+                    && context["source"] == "imessage"
+                    && context["metadata"].get("routine_id").is_none()
+                    && context["metadata"].get("scheduled_message_id").is_none())
+        })
+    }
+}
+
 impl Owner {
+    /// Reuses the stored canonical original, including its generation, without accepting changed input.
+    pub(crate) fn retry_original(
+        &self,
+        raw: &str,
+        candidate: &PendingQueueItem,
+    ) -> Result<PendingQueueItem, String> {
+        let ticket = Ticket::new(raw)?;
+        let prefix = format!("tk:{raw}:");
+        let snapshots = std::iter::once(&self.snapshot).chain(self.pending.iter().map(|(_, s)| s));
+        let saved = snapshots.flat_map(|s| &s.admission_binds).find_map(|b| {
+            b.receipt
+                .starts_with(&prefix)
+                .then_some(b.context.as_ref()?.original.as_ref()?)
+        });
+        let stored = self
+            .ticket_original(&ticket)
+            .map(Ok)
+            .or_else(|| {
+                saved.map(|v| {
+                    serde_json::from_value::<PendingQueueItem>(v.clone()).map_err(|e| e.to_string())
+                })
+            })
+            .transpose()?;
+        let Some(stored) = stored else {
+            return Ok(candidate.clone());
+        };
+        let mut compared = candidate.clone();
+        compared.queued_generation = stored.queued_generation;
+        if !source_admission::same_original(&stored, &compared) {
+            return Err("ticket input differs".into());
+        }
+        Ok(stored)
+    }
+
+    fn person_at(&self, index: usize) -> bool {
+        let Some(digest) = self.snapshot.queued_digest(index) else {
+            return false;
+        };
+        let mut contexts = self
+            .snapshot
+            .admission_binds
+            .iter()
+            .filter_map(|bind| match &bind.at {
+                BindAt::Queued { index: at, item } if *at == index && *item == digest => {
+                    Some(bind.context.as_ref().and_then(|c| c.execution.as_ref()))
+                }
+                _ => None,
+            });
+        contexts.all(ChannelMailboxHandle::person_input)
+    }
+
+    /// Moves the earliest person ahead of waiting machine starts, with every queued bind in one commit.
+    pub(crate) fn prefer_person(&mut self, held: &Front) -> Result<bool, String> {
+        if !self.front().is_some_and(|front| is_front(&front, held)) || self.person_at(0) {
+            return Ok(false);
+        }
+        let Some(index) = (1..self.snapshot.items.len()).find(|index| self.person_at(*index))
+        else {
+            return Ok(false);
+        };
+        let mut next = self.snapshot.clone();
+        next.items[..=index].rotate_right(1);
+        for bind in &mut next.admission_binds {
+            if let BindAt::Queued { index: at, .. } = &mut bind.at {
+                if *at == index {
+                    *at = 0;
+                } else if *at < index {
+                    *at += 1;
+                }
+            }
+        }
+        self.commit(next)?;
+        self.revoke_front();
+        self.held = None;
+        Ok(true)
+    }
+
     pub(crate) fn adopt(path: PathBuf, namespace: String) -> Result<Self, String> {
         let bytes = match std::fs::read_to_string(&path) {
             Ok(bytes) => Some(bytes),
@@ -284,10 +376,18 @@ impl Owner {
         let Some(head) = items.next() else {
             return Vec::new();
         };
+        // A machine owns its next turn; person inputs may merge only with other person inputs.
+        if !self.person_at(0) {
+            return Vec::new();
+        }
+        let people = (1..self.snapshot.items.len())
+            .take_while(|index| self.person_at(*index))
+            .count();
         let head = soft(head.clone(), now, instant);
         let merges =
             |item: &&PendingQueueItem| head.merges_with(&soft((*item).clone(), now, instant));
         items
+            .take(people)
             .take_while(merges)
             .take_while(|item| self.retry_member(self.snapshot.items.first().expect("front"), item))
             .cloned()

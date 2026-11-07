@@ -1,0 +1,21 @@
+stateDiagram-v2
+    [*] --> Registered: register original source and attempt
+    Registered --> Pending: capture late native user rows and materialize evidence
+    Pending --> Pending: Before has enqueue receipt only
+    Pending --> Owned: complete census pairs original source and free attempt
+    Pending --> Owned: exact native UUID receipt
+    Owned --> Excluded: exclude input_notice_source
+    Pending --> Direct: all matching attempts already occupied
+    Direct --> Posted: prepare and first POST
+    Direct --> FalseExcluded: BeforeKnown uses global frame knowledge
+    state HTTP {
+        [*] --> Received
+        Received --> Accepted: start or deliver winner Ok
+        Received --> Rejected: error or 409
+        Accepted --> DurableEcho: enqueue once with durable identity
+        DurableEcho --> Echoed: outbox transport recovers
+        Accepted --> MissingEcho: AcceptanceGap crashes before enqueue
+        Rejected --> MissingEcho: AcceptanceGap backend effect despite error
+        Accepted --> Accepted: replay makes no enqueue attempt
+        DurableEcho --> DurableEcho: restart preserves durable identity
+    }

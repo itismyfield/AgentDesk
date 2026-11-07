@@ -327,6 +327,37 @@ mod cases {
             assert!(!self.archived(), "{case}: nothing was archived");
         }
 
+        /// Rewrites the row as an unproven idle managed input bound to the session the pane left.
+        fn supersede_unproven(&self) -> std::path::PathBuf {
+            let mut row = self.row().unwrap();
+            row.managed_submission = Some(
+                serde_json::from_value(serde_json::json!({ "protocol": 1, "phase": "waiting" }))
+                    .unwrap(),
+            );
+            row.readopted_from_inflight = false;
+            row.native_stop_user_pin = None;
+            row.session_id = Some("session-before-clear".to_string());
+            let file = inflight::inflight_state_path(
+                &inflight::inflight_runtime_root().unwrap(),
+                &PROVIDER,
+                self.channel.get(),
+            );
+            std::fs::write(&file, serde_json::to_vec(&row).unwrap()).unwrap();
+            file
+        }
+
+        /// The unproven-close notices queued for this channel.
+        async fn told(&self) -> i64 {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM message_outbox
+                 WHERE reason_code = 'carried.unverified_closed' AND target = $1",
+            )
+            .bind(format!("channel:{}", self.channel.get()))
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+        }
+
         async fn assert_closed(&self, case: &str) {
             assert!(self.row().is_none(), "{case}: the carried row is gone");
             assert!(self.archived(), "{case}: the row was archived, not dropped");
@@ -882,6 +913,8 @@ mod cases {
         );
         row.readopted_from_inflight = false;
         row.native_stop_user_pin = None;
+        // The row names the session the fixture's binding still runs ("parent").
+        row.session_id = Some("parent".to_string());
         let path = inflight::inflight_state_path(
             &inflight::inflight_runtime_root().unwrap(),
             &PROVIDER,
@@ -891,6 +924,61 @@ mod cases {
         fx.pass().await;
         fx.assert_kept("unadopted managed input has no verified native pin")
             .await;
+    }
+
+    /// An unproven managed row bound to the session the pane left closes once the pane's own
+    /// turn ended and O delivered it; its channel is told once, even when a pass is repeated.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unproven_input_of_a_superseded_session_closes_with_one_notice_pg() {
+        let fx = Fixture::new(7_896_201, 9_100_096_243_727_098_100, Options::default()).await;
+        let file = fx.supersede_unproven();
+        let told = || fx.told();
+        // The first pass's archive loses to a re-save, as a restart's rewrite would.
+        let resaved = file.clone();
+        on("archive", fx.channel.get(), move || {
+            let mut row: InflightTurnState =
+                serde_json::from_slice(&std::fs::read(&resaved).unwrap()).unwrap();
+            row.save_generation += 1;
+            std::fs::write(&resaved, serde_json::to_vec(&row).unwrap()).unwrap();
+        });
+        fx.pass().await;
+        assert!(fx.row().is_some(), "the lost archive keeps the row");
+        assert_eq!(
+            told().await,
+            1,
+            "the close told its channel before archiving"
+        );
+        fx.pass().await;
+        fx.assert_closed("the superseded session's input").await;
+        assert_eq!(fx.archive_count(), 1);
+        fx.pass().await;
+        assert_eq!(told().await, 1, "a repeated close tells the channel once");
+    }
+
+    /// A receipt that fails to commit on an unproven close leaves no settlement mark, so the next
+    /// admission cannot remove the row without its notice; the later close tells the channel once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unproven_close_whose_receipt_fails_is_never_settled_without_its_notice_pg() {
+        let fx = Fixture::new(7_896_204, 9_100_096_243_727_098_104, Options::default()).await;
+        fx.supersede_unproven();
+        let turns = |sql: &'static str| sqlx::query(sql).execute(&fx.pool);
+        turns("ALTER TABLE turns RENAME TO turns_unavailable")
+            .await
+            .unwrap();
+        fx.pass().await;
+        let kept = fx.row().expect("the failed receipt keeps the row");
+        assert_eq!(kept.terminal_receipt, None, "no settlement mark");
+        assert_eq!(fx.told().await, 0);
+        turns("ALTER TABLE turns_unavailable RENAME TO turns")
+            .await
+            .unwrap();
+        let settled =
+            discord::receipt_settle::settle_marked_row(&fx.shared, &PROVIDER, fx.channel.get())
+                .await;
+        assert!(!settled && fx.row().is_some(), "admission leaves the row");
+        fx.pass().await;
+        fx.assert_closed("the recovered receipt").await;
+        assert_eq!(fx.told().await, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1094,6 +1182,7 @@ mod cases {
                 fx.channel.get(),
                 Some(ClosedBoundary {
                     source: fx.path.clone(),
+                    session: String::new(),
                     through: len,
                     grew_at: std::time::Instant::now() - Duration::from_secs(60),
                     aborted: false,

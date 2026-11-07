@@ -360,6 +360,7 @@ pub(super) fn pending_queue_item_from_intervention(
             preserve_on_cancel: owner.preserve_on_cancel,
             route: owner.route,
             origin: owner.origin,
+            origin_id: owner.origin_id,
         })
         .collect();
     let source_text_segments: Vec<PendingQueueSourceTextSegment> = intervention
@@ -648,6 +649,7 @@ pub(crate) fn pending_queue_item_to_intervention(
             preserve_on_cancel: owner.preserve_on_cancel,
             route: owner.route,
             origin: owner.origin,
+            origin_id: owner.origin_id,
         })
         .collect();
     for message_id in &source_message_ids {
@@ -662,6 +664,7 @@ pub(crate) fn pending_queue_item_to_intervention(
                 preserve_on_cancel: false,
                 route: None,
                 origin: None,
+                origin_id: None,
             });
         }
     }

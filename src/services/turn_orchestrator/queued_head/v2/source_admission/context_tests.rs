@@ -246,3 +246,103 @@ async fn an_ungrouped_unit_keeps_each_members_execution_context() {
         "after a new reserve and its settle"
     );
 }
+
+#[test]
+fn person_selection_moves_items_and_ticket_binds_atomically_across_restart() {
+    let _root = TestRuntimeRootGuard::new();
+    let path = discord_pending_queue_root()
+        .unwrap()
+        .join("claude/person-context/789641.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut owner = Owner::adopt(path.clone(), "people".into()).unwrap();
+    let by = |n, author, text: &str| {
+        let mut item = original();
+        item.message_id += n;
+        item.author_id = author;
+        item.text = text.to_string();
+        item.merge_consecutive = true;
+        item
+    };
+    let ticket = |n| Ticket::new(&format!("person-{n}")).unwrap();
+    let turn = |owner: &Owner, n, original: &PendingQueueItem| {
+        owner.exact_turn(&ticket(n), original).unwrap()
+    };
+    let machine = by(1, 7, "기계 시작");
+    owner
+        .admit_with_context(
+            &machine,
+            ticket(1),
+            json!({"origin":"headless", "source":"http"}),
+        )
+        .unwrap();
+    let first = by(2, 7, "첫 사람");
+    owner
+        .admit_with_context(
+            &first,
+            ticket(2),
+            json!({"origin":"headless", "source":"imessage"}),
+        )
+        .unwrap();
+    let second = by(3, 7, "둘째 사람");
+    Custody::with_ticket(&second, ticket(3))
+        .advance(&mut owner)
+        .unwrap();
+    let front = owner.front().unwrap();
+    owner.grant_front(&front).unwrap();
+    assert!(
+        owner.followers().is_empty(),
+        "machines never merge people or other starts"
+    );
+    let before = std::fs::read(&path).unwrap();
+    owner.fault = super::super::Fault::Before;
+    assert!(owner.prefer_person(&front).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(matches!(turn(&owner, 1, &machine), TurnBind::NotArmed));
+    owner.fault = super::super::Fault::None;
+    assert!(owner.prefer_person(&front).unwrap());
+    drop(owner);
+    let mut owner = Owner::adopt(path.clone(), "people".into()).unwrap();
+    assert_eq!(
+        owner
+            .snapshot
+            .items
+            .iter()
+            .map(|i| i.message_id)
+            .collect::<Vec<_>>(),
+        [first.message_id, machine.message_id, second.message_id]
+    );
+    for (n, original) in [(1, &machine), (2, &first), (3, &second)] {
+        assert!(matches!(turn(&owner, n, original), TurnBind::NotArmed));
+    }
+    assert!(
+        owner.followers().is_empty(),
+        "people cannot carry a machine follower"
+    );
+    let key = owner.reserve_unit(serde_json::from_value(json!({"nonce":"first-person", "provider":"claude",
+        "target":{"host":"tmux","owner":"person-context","root":"/test","execution_nonce":"e"},
+        "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}})).unwrap(), |item| (item.message_id == first.message_id).then(|| ("person".into(), item.text.clone()))).unwrap();
+    drop(owner.arm(&key, 100).unwrap());
+    owner.settle(&key, true, 101).unwrap();
+    assert!(matches!(turn(&owner, 2, &first), TurnBind::Settled(_)));
+    let mut retry = first.clone();
+    retry.queued_generation = 99;
+    let resumed = owner.retry_original("person-2", &retry).unwrap();
+    assert_eq!(resumed.queued_generation, 5);
+    assert_eq!(
+        owner
+            .admit_with_context(
+                &resumed,
+                ticket(2),
+                json!({"origin":"headless", "source":"imessage"})
+            )
+            .unwrap(),
+        Admitted::Duplicate
+    );
+    retry.text = "changed retry".into();
+    assert!(owner.retry_original("person-2", &retry).is_err());
+    assert!(matches!(turn(&owner, 1, &machine), TurnBind::NotArmed));
+    assert!(owner.prefer_person(&owner.front().unwrap()).unwrap());
+    assert_eq!(owner.front().unwrap().1.message_id, second.message_id);
+    assert!(matches!(turn(&owner, 3, &second), TurnBind::NotArmed));
+    assert!(matches!(turn(&owner, 1, &machine), TurnBind::NotArmed));
+}

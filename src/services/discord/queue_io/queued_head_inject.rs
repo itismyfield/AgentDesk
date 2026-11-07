@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::super::{health, mailbox_snapshot, router, session_runtime};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::busy_followup_retry_store::input_class;
@@ -97,6 +99,17 @@ pub(in crate::services::discord) async fn try_busy(
     };
     if !health::InjectOrigin::queued_head_gate_enabled(provider, channel, parent, gate) {
         return false;
+    }
+    // The durable echo may yield before the enqueue's caller releases its transition.
+    // This automatic wake retries briefly without parking a transition waiter.
+    if trigger == "post_enqueue_queued_head" {
+        let transition = deps.shared.session_transition_lock(channel);
+        let released = async {
+            while transition.try_lock().is_err() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(3), released).await;
     }
     let snapshot = mailbox_snapshot(deps.shared, channel).await;
     // A parked or unreadable input is never typed automatically; the actor reads again itself.
