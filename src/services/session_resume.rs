@@ -452,7 +452,8 @@ pub(crate) async fn perform_resume_rebind(
 
     // Explicit and auto-selected targets alike; an unreadable list never refuses the resume.
     if matches!(provider, Some(ProviderKind::Claude))
-        && background::listed(&target_session_id).await == Some(true)
+        && background::listed(&target_session_id, channel_id.map(|id| id.get()), tmux_name).await
+            == Some(true)
     {
         return Err(ResumeRebindError::BackgroundSession(target_session_id));
     }
