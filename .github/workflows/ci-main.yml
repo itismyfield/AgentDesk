@@ -167,11 +167,39 @@ jobs:
           --worker ${{ matrix.worker }} --archive "$RUNNER_TEMP/nextest/lib-tests.tar.zst"
           --config "$RUNNER_TEMP/nextest/plan/worker-${{ matrix.worker }}.toml" --sha "$GITHUB_SHA"
           --record "$RUNNER_TEMP/nextest-result"
+      # The real-Herdr fixture tests read this pinned binary; the key carries version and digest.
+      - name: Restore herdr test binary
+        id: herdr_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/herdr-test-bin
+          key: herdr-0.9.5-14d9e8bc8b4a-linux-x86_64
+      # A download outage fails here, before any test, with the line the infra rerun classifier matches.
+      - name: Install herdr test binary
+        id: herdr
+        shell: bash
+        env:
+          HERDR_CACHE_HIT: ${{ steps.herdr_cache.outputs.cache-hit }}
+        run: |
+          expected=14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d
+          bin="$RUNNER_TEMP/herdr-test-bin/herdr-0.9.5"
+          if [ "$HERDR_CACHE_HIT" != true ]; then
+            mkdir -p "$RUNNER_TEMP/herdr-test-bin"
+            code=$(curl --fail --location --retry 3 --silent --show-error --output "$bin" --write-out '%{http_code}' \
+              https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-x86_64) || {
+              echo "::error title=herdr download failed::herdr test binary download failed: HTTP ${code:-000}"
+              exit 1
+            }
+          fi
+          echo "$expected  $bin" | sha256sum --check
+          chmod 700 "$bin"
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
       - name: Run planned tests
         timeout-minutes: 60
         shell: bash
         env:
           BASH_ENV: /dev/null
+          ADK_TEST_HERDR_BIN: ${{ steps.herdr.outputs.bin }}
         run: |
           set +e
           NEXTEST_DIR="$RUNNER_TEMP/nextest"

@@ -740,7 +740,7 @@ targets = {
   "rust_tests" => {
     "label" => "nextest worker job", "name" => "Rust tests (worker ${{ matrix.worker }})",
     "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 75, "job_sha256" => "3074a8895c86c42eb37fe0dc731dfeba415036ee07d3c6040a6d649e19447ff0", "require_debug_env" => false,
+    "job_timeout_minutes" => 75, "job_sha256" => "865bee919018a57df997b694dce340c865fc46c580bdc5c0424f4e8370d9e8e3", "require_debug_env" => false,
     "cargo_steps" => {
       "Verify archive and plan" => {
         "commands" => ['python3 scripts/ci/nextest_ci.py verify-archive --plan "$RUNNER_TEMP/nextest/plan/plan.json" --worker ${{ matrix.worker }} --archive "$RUNNER_TEMP/nextest/lib-tests.tar.zst" --config "$RUNNER_TEMP/nextest/plan/worker-${{ matrix.worker }}.toml" --sha "$GITHUB_SHA" --record "$RUNNER_TEMP/nextest-result"'],
@@ -756,7 +756,7 @@ targets = {
           %q(junit="$(find "$RUNNER_TEMP/nextest-extract" "$GITHUB_WORKSPACE/target" -path '*/nextest/ci/junit.xml' 2>/dev/null | head -n 1)"),
           '[ -n "$junit" ] && cp "$junit" "$RESULT_DIR/junit.xml"', 'exit "$code"',
         ],
-        "timeout_minutes" => 60, "env" => {"BASH_ENV" => "/dev/null"},
+        "timeout_minutes" => 60, "env" => {"BASH_ENV" => "/dev/null", "ADK_TEST_HERDR_BIN" => "${{ steps.herdr.outputs.bin }}"},
       },
     },
   },
