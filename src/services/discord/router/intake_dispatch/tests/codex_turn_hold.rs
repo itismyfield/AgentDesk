@@ -53,6 +53,26 @@ fn intake_env() -> IntakeEnv {
     }
 }
 
+/// Legacy's unfinished turn on the channel, as the takeover turn leaves it while its pane runs.
+fn legacy_turn_running() {
+    use crate::services::discord::inflight::{self, InflightTurnState};
+    let row = InflightTurnState::new(
+        ProviderKind::Codex,
+        CHANNEL,
+        None,
+        1,
+        7,
+        0,
+        "sleep".into(),
+        None,
+        Some("codex-takeover-fixture".into()),
+        None,
+        None,
+        0,
+    );
+    inflight::save_inflight_state(&row).unwrap();
+}
+
 fn codex_message(message_id: u64) -> IntakeSubmission {
     IntakeSubmission {
         provider: ProviderKind::Codex,
@@ -93,6 +113,7 @@ async fn a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode()
     let deps = deps(&http, &shared);
     let _boot = committed_and_selected();
     let _ready = test_probe::answer_with(|_| true);
+    legacy_turn_running();
     assert!(super::super::live_checkpoint_waits(
         &ProviderKind::Codex,
         ChannelId::new(CHANNEL)
@@ -123,6 +144,42 @@ async fn a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode()
     );
 }
 
+/// A takeover turn whose end this process never saw (a restart or a clear took its completion) holds
+/// input only while Legacy's turn is unfinished; once that turn is gone the next look admits it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_held_input_starts_once_the_unseen_takeover_turn_is_gone() {
+    let _env = intake_env();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let http = Arc::new(serenity::Http::new("Bot intake-dispatch-test"));
+    let deps = deps(&http, &shared);
+    let _boot = committed_and_selected();
+    let _ready = test_probe::answer_with(|_| true);
+    legacy_turn_running();
+
+    let held = codex_message(4_370_051);
+    let admission = super::super::admit_text_intake(&deps, &held).await;
+    let early = turn_mode::transcript_turns(CHANNEL).then(|| TestConfirmation::confirmed(CHANNEL));
+    assert!(early.is_none(), "a running Legacy turn is not confirmed");
+    assert!(
+        matches!(admission, IntakeAdmission::DeferredTurnMode(Ok(_))),
+        "a running Legacy turn keeps the input queued: {admission:?}"
+    );
+
+    // The pane ended unseen and the clear removed Legacy's row; no completion runs here.
+    assert!(crate::services::discord::inflight::clear_inflight_state(
+        &ProviderKind::Codex,
+        CHANNEL
+    ));
+    let admission = super::super::admit_text_intake(&deps, &held).await;
+    let confirmed =
+        turn_mode::transcript_turns(CHANNEL).then(|| TestConfirmation::confirmed(CHANNEL));
+    assert!(
+        matches!(admission, IntakeAdmission::Local(_)),
+        "{admission:?}"
+    );
+    assert!(confirmed.is_some(), "the look confirmed turn mode");
+}
+
 /// An attachment that cannot be made portable, a refused enqueue and a failed queue write each
 /// fail the live dispatch before its checkpoint, so the message is read again.
 #[tokio::test(flavor = "current_thread")]
@@ -133,6 +190,7 @@ async fn a_turn_mode_input_the_queue_cannot_hold_fails_before_its_checkpoint() {
     let deps = deps(&http, &shared);
     let _boot = committed_and_selected();
     let _ready = test_probe::answer_with(|_| true);
+    legacy_turn_running();
     let channel = ChannelId::new(CHANNEL);
 
     let unportable = with_report(codex_message(4_370_021));
@@ -177,6 +235,7 @@ async fn a_turn_mode_input_keeps_its_attachment_queued_in_order_until_turn_mode_
     let deps = deps(&http, &shared);
     let _boot = committed_and_selected();
     let _ready = test_probe::answer_with(|_| true);
+    legacy_turn_running();
     let channel = ChannelId::new(CHANNEL);
     let body = b"the report the takeover turn must not lose".to_vec();
     TEST_DOWNLOADS.with(|served| served.borrow_mut().insert(URL.to_string(), body.clone()));
@@ -280,6 +339,7 @@ async fn a_gateway_attachment_moves_the_checkpoint_once_turn_mode_holds_it_pg() 
     }
     let _boot = committed_and_selected();
     let _ready = test_probe::answer_with(|_| true);
+    legacy_turn_running();
     let mock = discord_mock::DiscordMockState::new();
     mock.allow_channel(CHANNEL);
     let (proxy, gateway_url, server) = discord_mock::start(mock).await;
