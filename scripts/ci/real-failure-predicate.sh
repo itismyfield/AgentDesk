@@ -20,8 +20,17 @@
 # remain regressions fail-safe when mixed with those infrastructure symptoms.
 REAL_FAILURE_REGEX='test result: FAILED|error\[E|error: could not compile|panicked at|assertion .*failed|Diff in .*:[0-9]+:|SC[0-9]{4} \((error|warning|info|style)\):|FAILED \([^)]*(failures|errors)=[0-9]+|(^|[[:space:]])(FAIL|ERROR): [^[:space:]]+ \(|yaml\.(scanner|parser|composer|constructor)\.[A-Za-z]+Error:|(^|[[:space:]/])ld: cannot find '
 
+# Unittest emits progress before its final failure details. Accept only whole
+# progress records, with optional Actions timestamp and tab-separated job/step.
+UNITTEST_TIMESTAMP='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z'
+UNITTEST_JOB_STEP=$'([^\t]*\t){2}'
+UNITTEST_LOG_PREFIX="^((${UNITTEST_JOB_STEP})?${UNITTEST_TIMESTAMP}[[:space:]]+)?"
+UNITTEST_COMPACT_FAILURE='[.suxFE]*[FE][.suxFE]*'
+UNITTEST_VERBOSE_FAILURE='[^[:space:]]+ \(.+\) \.\.\. (FAIL|ERROR)'
+
 log_has_real_failure() {
   local log_path="$1"
   [[ -s "$log_path" ]] || return 1
-  grep -a -E -i -q -- "$REAL_FAILURE_REGEX" "$log_path"
+  grep -a -E -i -q -- "$REAL_FAILURE_REGEX" "$log_path" ||
+    grep -a -E -q -- "${UNITTEST_LOG_PREFIX}(${UNITTEST_COMPACT_FAILURE}|${UNITTEST_VERBOSE_FAILURE})[[:space:]]*$" "$log_path"
 }

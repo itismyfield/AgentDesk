@@ -109,6 +109,64 @@ else:
         self.assertIn("`regression`", self.summary)
         self.assertFalse((self.directory / "rerun").exists())
 
+    def interrupted_unittest_log(self, verbosity, outcome, prefix):
+        program = '''import sys, unittest
+class Interrupted(unittest.TestCase):
+    def test_a_pass(self):
+        pass
+    def test_b_failure(self):
+        if sys.argv[2] == "FAIL": self.fail("guard failed")
+        raise RuntimeError("guard errored")
+    def test_c_interrupt(self):
+        raise KeyboardInterrupt
+try:
+    unittest.main(argv=["fixture"], verbosity=int(sys.argv[1]))
+except KeyboardInterrupt:
+    raise SystemExit(130)
+'''
+        result = subprocess.run([sys.executable, "-c", program, str(verbosity), outcome],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 130, result.stderr)
+        self.assertIn("." + outcome[0] if verbosity == 1 else "... " + outcome, result.stderr)
+        self.assertNotRegex(result.stderr, r"FAIL:|ERROR:|Ran \d+ tests|FAILED \(")
+        return "".join(prefix + line + "\n" for line in result.stderr.splitlines()) + prefix + CANCEL
+
+    def assert_interrupted_unittest_vetoes_timeout(self, verbosity):
+        for outcome in ("FAIL", "ERROR"):
+            for prefix in ("", "2026-11-08T06:00:00.0000000Z ",
+                           "Script checks runner (guards)\tRun script checks\t2026-11-08T06:00:00Z "):
+                with self.subTest(outcome=outcome, prefix=prefix):
+                    self.log = self.interrupted_unittest_log(verbosity, outcome, prefix)
+                    self.write("calls.jsonl", "")
+                    output = self.run_classifier(dry_run=False)
+                    reruns = [call for call in self.calls if call[:2] == ["run", "rerun"]]
+                    self.assertEqual(reruns, [], output)
+                    self.assertIn("decision=no-op:regression", output)
+                    self.assertIn("`regression`", self.summary)
+
+    def test_interrupted_compact_unittest_vetoes_timeout(self):
+        self.assert_interrupted_unittest_vetoes_timeout(1)
+
+    def test_interrupted_verbose_unittest_vetoes_timeout(self):
+        self.assert_interrupted_unittest_vetoes_timeout(2)
+
+    def assert_progress_is_not_a_failure(self, progress):
+        self.log = "".join(prefix + line + "\n" for prefix in (
+            "", "2026-11-08T06:00:00Z ",
+            "Script checks runner (guards)\tRun script checks\t2026-11-08T06:00:00.0000000Z ",
+        ) for line in progress.splitlines()) + CANCEL
+        self.assertIn("decision=would-rerun:infra", self.run_classifier())
+        self.assertIn("`infra-job-timeout`", self.summary)
+
+    def test_passing_compact_progress_does_not_veto_timeout(self):
+        self.assert_progress_is_not_a_failure("....")
+
+    def test_prose_failure_letters_do_not_veto_timeout(self):
+        self.assert_progress_is_not_a_failure("cache key F\nF is a flag\nINFO: .F\nprofile E\nprogress: ... FAIL")
+
+    def test_skipped_success_summary_does_not_veto_timeout(self):
+        self.assert_progress_is_not_a_failure("...s\n----------------------------------------------------------------------\nRan 4 tests in 0.001s\n\nOK (skipped=1)")
+
     def test_unittest_error_before_summary_vetoes_timeout(self):
         self.log = "ERROR: test_guard (tests.example.Guard.test_guard)\n" + CANCEL
         self.assertIn("decision=no-op:regression", self.run_classifier())
