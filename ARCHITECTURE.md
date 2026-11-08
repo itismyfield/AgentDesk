@@ -2231,7 +2231,6 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── queue_status_presentation.rs
 │   │   │   ├── response_format.rs
-│   │   │   ├── source_guard_support.rs
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
