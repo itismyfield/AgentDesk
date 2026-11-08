@@ -60,7 +60,7 @@ async fn fixture(channel: u64, command: bool, competitor: bool) -> (Fixture, Val
         json!({"identity":{"primary":primary,
         "queued_generation":5,"sources":[{"message_id":primary,"queued_generation":5}]},
         "attempt":{"nonce":nonce,"provider":"claude","target":{"host":"tmux","owner":session,
-            "root":"/tmp","execution_nonce":execution.context.execution_nonce},
+            "root":execution.context.owner_runtime_root,"execution_nonce":execution.context.execution_nonce},
             "source":{"kind":"existing","session_id":"parent","transcript":fx.path,
             "file":[meta.dev(),meta.ino()],"offset":offset}},
         "original":{"author_id":7},"payload":{"frame":frame}})

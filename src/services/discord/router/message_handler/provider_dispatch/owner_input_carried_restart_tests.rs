@@ -52,6 +52,15 @@ impl Drop for DaemonRuntime {
 }
 
 fn assert_canonical(row: &Value) {
+    if row["type"] == "queue-operation" {
+        assert!(matches!(
+            row["operation"].as_str(),
+            Some("enqueue" | "remove")
+        ));
+        assert!(row["content"].is_string());
+        assert!(row["sessionId"].is_string() && row["uuid"].is_string());
+        return;
+    }
     let facts = crate::services::tui_o::shadow::identity::classify(
         crate::services::tui_o::shadow::ShadowProvider::Claude,
         row,
