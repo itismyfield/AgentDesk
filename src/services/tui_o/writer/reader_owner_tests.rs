@@ -195,7 +195,7 @@ fn verified_restart_leaves_out_sources_earlier_executions_bound_in_the_pane() {
     let sessions = root.path().join("sessions");
     std::fs::create_dir(&sessions).unwrap();
     let sessions = sessions.canonicalize().unwrap();
-    let ids: Vec<SourceId> = (0..=MAX_READERS)
+    let ids: Vec<SourceId> = (0..=MAX_READERS + 1)
         .map(|n| {
             let id = format!("019e660d-4859-7522-9cee-{n:012}");
             let path = sessions.join(format!("rollout-{id}.jsonl"));
@@ -257,7 +257,7 @@ fn verified_restart_leaves_out_sources_earlier_executions_bound_in_the_pane() {
         .count();
     assert_eq!(
         (delivered.len(), held),
-        (ids.len(), MAX_READERS),
+        (ids.len(), ids.len() - 1),
         "{delivered:#?}"
     );
     let mut rotation = Rotation::default();
