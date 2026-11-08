@@ -205,7 +205,21 @@ impl Fixture {
             bodies,
             0,
             None,
-            Some(prefix),
+            Some((prefix, true)),
+            (0, false, false, PostEvidence::Legacy),
+        )
+        .await
+    }
+
+    /// A typed user input whose turn starts `prefix` bytes into the transcript.
+    pub async fn typed_with_prefix(channel: u64, bodies: &[&str], prefix: usize) -> Self {
+        Self::new_scoped(
+            channel,
+            ProviderKind::Claude,
+            bodies,
+            0,
+            None,
+            Some((prefix, false)),
             (0, false, false, PostEvidence::Legacy),
         )
         .await
@@ -218,7 +232,7 @@ impl Fixture {
             &["background task finished. ", "monitor followup"],
             0,
             None,
-            Some(4096),
+            Some((4096, true)),
             (
                 if large { 2_426_345 } else { 0 },
                 true,
@@ -241,7 +255,7 @@ impl Fixture {
             bodies,
             0,
             None,
-            Some(prefix),
+            Some((prefix, true)),
             (
                 0,
                 false,
@@ -262,7 +276,7 @@ impl Fixture {
         bodies: &[&str],
         uncertain: u8,
         ending: Option<serde_json::Value>,
-        prefix: Option<usize>,
+        prefix: Option<(usize, bool)>,
         (padding, early_stop, duration, evidence): (usize, bool, bool, PostEvidence),
     ) -> Self {
         let root = crate::config::runtime_root().unwrap();
@@ -270,7 +284,7 @@ impl Fixture {
         let path = root.join(format!("native-{channel}.jsonl"));
         let mut values = Vec::new();
         match provider {
-            ProviderKind::Claude => values.push(if prefix.is_some() {
+            ProviderKind::Claude => values.push(if prefix.is_some_and(|(_, meta)| meta) {
                 json!({"type":"user","uuid":"input","sessionId":"native-session","isMeta":true,"message":{"content":"<task-notification>background task completed</task-notification>"}})
             } else {
                 json!({"type":"user","uuid":"input","sessionId":"native-session","message":{"content":"input"}})
@@ -309,7 +323,7 @@ impl Fixture {
             ProviderKind::Claude => json!({"type":"system","subtype":"stop_hook_summary"}),
             _ => json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}),
         }));
-        let mut raw = vec![b' '; prefix.unwrap_or(0)];
+        let mut raw = vec![b' '; prefix.map_or(0, |(bytes, _)| bytes)];
         if let Some(last) = raw.last_mut() {
             *last = b'\n';
         }
@@ -1469,7 +1483,7 @@ async fn i7441c2_frame_read_bound_and_expired_deadline_are_exact() {
             &["bounded answer"],
             0,
             None,
-            Some(prefix),
+            Some((prefix, true)),
             (padding, false, false, PostEvidence::Legacy),
         )
         .await;
