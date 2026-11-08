@@ -287,6 +287,22 @@ fn carried_competitor_foreign_sid_cannot_give_actual_b_to_a() {
 }
 
 #[test]
+fn carried_competitor_partial_paste_cannot_give_actual_b_to_a() {
+    let f = Fixture::new();
+    f.register(200);
+    f.append(&json!({"type":"progress"}));
+    f.register(100);
+    let mut partial = f.user("partial-b");
+    partial["message"]["content"] = json!(format!("{}\n</pasted_content id=\"cafe\">", f.frame));
+    f.append(&partial);
+    f.append(&f.user("actual-b"));
+    assert!(
+        f.lookup(100).is_none(),
+        "a partial paste cannot consume B's slot and give its actual row to A"
+    );
+}
+
+#[test]
 fn carried_passive_competitor_at_equal_offset_preserves_a() {
     let f = Fixture::new();
     let b = f.register(200);
@@ -308,6 +324,19 @@ fn carried_pairing_keeps_consumption_before_a_offset() {
     let f = Fixture::new();
     f.register(200);
     f.append(&f.user("actual-b"));
+    f.register(100);
+    let range = f.append(&f.user("actual-a"));
+    f.assert_user(100, "actual-a", range);
+}
+
+#[test]
+fn carried_distinct_raw_frames_with_same_class_keep_their_owners() {
+    let mut f = Fixture::new();
+    let plain = f.frame.clone();
+    f.frame.push(' ');
+    f.register(200);
+    f.append(&f.user("actual-b"));
+    f.frame = plain;
     f.register(100);
     let range = f.append(&f.user("actual-a"));
     f.assert_user(100, "actual-a", range);

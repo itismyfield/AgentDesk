@@ -89,7 +89,9 @@ pub(crate) fn lookup(
             continue;
         }
         checked_source(r, e, owner, sid, transcript)?;
-        entries.push(e);
+        let mut view = e.clone();
+        view.class_hash = e.hash.clone();
+        entries.push(view);
     }
     entries.sort_by_key(|e| e.offset);
     if entries
@@ -99,6 +101,7 @@ pub(crate) fn lookup(
         return None;
     }
     let from = entries.first()?.offset;
+    let entries: Vec<_> = entries.iter().collect();
     (through.checked_sub(from)? <= CAP).then_some(())?;
     let mut rows = Vec::new();
     let mut digests = std::collections::BTreeMap::new();
@@ -107,11 +110,12 @@ pub(crate) fn lookup(
         let native = read_native_row(transcript, source.file, at, through - at, true)?;
         at = native.range.1;
         (at <= through).then_some(())?;
-        if native_prompt(&native.record, sid).is_none() {
+        let Some(text) = native_prompt(&native.record, sid) else {
             continue;
-        }
-        let taken = taken_record(&native.record, native.range.0)?;
-        if taken.hashes.contains(&entry.class_hash) {
+        };
+        let mut taken = taken_record(&native.record, native.range.0)?;
+        taken.hashes = native_frames(&text).map(hash).collect();
+        if entries.iter().any(|e| taken.hashes.contains(&e.class_hash)) {
             if rows.iter().any(|r: &Taken| r.uuid == taken.uuid) {
                 return None;
             }
@@ -119,10 +123,18 @@ pub(crate) fn lookup(
             rows.push(taken);
         }
     }
-    let paired: Vec<_> = rows
-        .iter()
-        .filter(|r| pair(&entries, &rows, &r.uuid).is_some_and(|e| std::ptr::eq(e, entry)))
-        .collect();
+    let mut paired = Vec::new();
+    for taken in &rows {
+        let Some(owner) = pair(&entries, &rows, &taken.uuid) else {
+            continue;
+        };
+        if owner.offset > taken.offset || !taken.hashes.contains(&owner.class_hash) {
+            return None;
+        }
+        if owner.id == nonce {
+            paired.push(taken);
+        }
+    }
     let [taken] = paired.as_slice() else {
         return None;
     };
@@ -135,15 +147,10 @@ pub(crate) fn lookup(
         true,
     )?;
     let text = native_prompt(&native.record, sid)?;
-    let frame = if hash(&text) == registration.frame.hash {
-        text.as_str()
-    } else {
-        crate::services::claude_tui::busy_inject::pasted_inner(&text)?
-    };
+    let frame = native_frames(&text).find(|frame| hash(frame) == registration.frame.hash)?;
     if native.range.1 > through
         || native.digest != *digests.get(&taken.offset)?
         || native.record["uuid"] != taken.uuid
-        || hash(frame) != registration.frame.hash
     {
         return None;
     }
@@ -162,6 +169,11 @@ pub(crate) fn lookup(
     } else {
         Consumed::Command { row }
     })
+}
+
+#[cfg(test)]
+fn native_frames(text: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(text).chain(crate::services::claude_tui::busy_inject::pasted_inner(text))
 }
 
 #[cfg(test)]
