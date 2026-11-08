@@ -18,7 +18,12 @@ pub(super) async fn autocomplete_cancel_queued(
             .v2_request(|slot| Ok(slot.as_ref().map(|owner| owner.cancelable())))
             .await
         {
-            Ok(Some(items)) => items,
+            Ok(Some(mut items)) => {
+                // Keep newest waiting inputs ahead of retained inputs before the choice limit.
+                let queued = items.partition_point(|item| !item.4);
+                items[..queued].reverse();
+                items
+            }
             Ok(None) => match mailbox.try_snapshot().await {
                 Ok(snapshot) => snapshot
                     .intervention_queue
