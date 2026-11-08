@@ -226,6 +226,9 @@ pub async fn patch_node(
     Json(body): Json<PatchCampaignNode>,
 ) -> AppResult<Json<Value>> {
     let mut campaign = campaigns::get(pool(&state)?, &id).await.map_err(error)?;
+    if campaign.revision != body.expected_revision {
+        return Err(error(CampaignError::Conflict));
+    }
     let node = campaign
         .nodes
         .iter_mut()

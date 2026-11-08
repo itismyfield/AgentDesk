@@ -115,6 +115,9 @@ Other nodes and campaign fields remain unchanged. Node `id`, timestamps,
 `auto_closed_from` and `issue_drift` are read-only; unknown fields return 400.
 The `nodes_partial` marker belongs to whole-document PUT, not the node PATCH body.
 
+`expected_revision` must equal the revision of this initial full read;
+a mismatch returns 409 before merging or saving.
+
 Arrays replace the entire field. Explicit `null` clears optional scalar fields
 to null, array fields to `[]`, and `details` to an empty string. Required node
 `title`, `status`, `stage` and `round` cannot be cleared; null returns 400.

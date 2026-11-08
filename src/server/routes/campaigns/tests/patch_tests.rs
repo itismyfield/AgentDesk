@@ -289,6 +289,118 @@ async fn postgres_campaign_node_patch_races_put_on_the_same_revision_pg() {
 }
 
 #[tokio::test]
+async fn postgres_campaign_node_patch_rejects_future_revision_before_competing_put_pg() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::{
+        sync::Notify,
+        time::{Duration, timeout},
+    };
+
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let regular_app = app(pool.clone());
+    let mut body = document(false);
+    body["nodes"][0]["details"] = json!("old");
+    let (status, created) =
+        request(&regular_app, Method::POST, "/campaigns", Some(body), true).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let read_finished = Arc::new(Notify::new());
+    let put_finished = Arc::new(Notify::new());
+    let patch_pool = sqlx::postgres::PgPoolOptions::new()
+        .min_connections(0)
+        .max_connections(1)
+        .after_release({
+            let read_finished = read_finished.clone();
+            let put_finished = put_finished.clone();
+            let first_release = AtomicBool::new(true);
+            move |_, _| {
+                let read_finished = read_finished.clone();
+                let put_finished = put_finished.clone();
+                let block = first_release.swap(false, Ordering::SeqCst);
+                Box::pin(async move {
+                    // Hold PATCH's GET connection until the competing PUT commits.
+                    if block {
+                        read_finished.notify_one();
+                        put_finished.notified().await;
+                    }
+                    Ok(true)
+                })
+            }
+        })
+        .connect_lazy(&fixture.database_url)
+        .unwrap();
+    let patch_app = app(patch_pool.clone());
+    let patch_task = tokio::spawn(async move {
+        patch(
+            &patch_app,
+            "second",
+            json!({"expected_revision": 2, "status": "running"}),
+        )
+        .await
+    });
+    timeout(Duration::from_secs(20), read_finished.notified())
+        .await
+        .expect("PATCH finished its revision-1 GET");
+
+    let mut replacement = created["campaign"].clone();
+    replacement["expected_revision"] = json!(1);
+    replacement["nodes"][0]["details"] = json!("new");
+    let (put_status, saved) = request(
+        &regular_app,
+        Method::PUT,
+        "/campaigns/patch",
+        Some(replacement.clone()),
+        true,
+    )
+    .await;
+    put_finished.notify_one();
+    let (patch_status, patched) = timeout(Duration::from_secs(20), patch_task)
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, current) = request(&regular_app, Method::GET, "/campaigns/patch", None, true).await;
+    let (_, history) = request(
+        &regular_app,
+        Method::GET,
+        "/campaigns/patch/history",
+        None,
+        true,
+    )
+    .await;
+    let (stale_status, put_conflict) = request(
+        &regular_app,
+        Method::PUT,
+        "/campaigns/patch",
+        Some(replacement),
+        true,
+    )
+    .await;
+    patch_pool.close().await;
+    pool.close().await;
+    fixture.drop().await;
+
+    assert_eq!(put_status, StatusCode::OK);
+    assert_eq!(saved["campaign"]["revision"], 2);
+    assert_eq!(
+        (
+            patch_status,
+            current["campaign"]["revision"].clone(),
+            current["campaign"]["nodes"][0]["details"].clone()
+        ),
+        (StatusCode::CONFLICT, json!(2), json!("new")),
+        "a PATCH merged from revision 1 must not overwrite the competing PUT: {patched}"
+    );
+    assert_eq!(current["campaign"], saved["campaign"]);
+    assert_eq!(
+        history["revisions"],
+        json!([saved["campaign"], created["campaign"]])
+    );
+    assert_eq!(stale_status, StatusCode::CONFLICT);
+    assert_eq!(patched, put_conflict, "PATCH uses PUT's conflict envelope");
+}
+
+#[tokio::test]
 async fn campaign_node_patch_is_advertised_by_api_docs() {
     let app = Router::new().route(
         "/api/docs",

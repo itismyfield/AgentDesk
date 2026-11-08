@@ -75,7 +75,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_params([
             ("id", path_param("Campaign ID.")),
             ("node_id", path_param("Existing node ID; cannot be changed in the body.")),
-            ("expected_revision", body_param("integer", true, "Observed campaign revision; positive and incrementable.")),
+            ("expected_revision", body_param("integer", true, "Observed campaign revision; positive and incrementable. Must equal the revision of the server's initial full read; otherwise 409 before merging or saving.")),
             ("title", body_param("string", false, "Nonempty node title, at most 512 bytes.")),
             ("status", body_param("string", false, "pending|running|blocked|completed|failed|skipped")),
             ("stage", body_param("string", false, "Nonempty workflow stage, at most 128 bytes.")),
