@@ -174,26 +174,31 @@ pub(super) fn resolve_cwd(
     {
         return Ok(cwd.to_string_lossy().into_owned());
     }
-    // Nothing found anywhere: name the session and how many worktrees were searched.
-    if matches.is_empty() && lookup_error.is_none() {
-        let short: String = id.chars().take(8).collect();
-        return Err(ResumeRebindError::TargetTranscriptMissing(format!(
-            "세션 {short} 트랜스크립트를 찾지 못함(검색 범위 {searched}개). session_id와 Claude config home을 확인하세요."
-        )));
-    }
-    let hint = matches.first().map_or_else(
-        || lookup_error.unwrap_or_default(),
-        |(_, cwd)| {
+    let reason = match (matches.first(), lookup_error) {
+        // Nothing found anywhere: name the session and how many worktrees were searched.
+        (None, None) => {
+            let short: String = id.chars().take(8).collect();
             format!(
-                "Transcript is available at cwd={}; retry with that cwd or omit cwd.",
-                cwd.display()
+                "세션 {short} 트랜스크립트를 찾지 못함(검색 범위 {searched}개). session_id와 Claude config home을 확인하세요."
             )
-        },
-    );
-    Err(ResumeRebindError::TargetTranscriptMissing(format!(
-        "Claude transcript unavailable for session_id={id}{}: {hint}",
-        requested.map_or(String::new(), |cwd| format!(" at cwd={cwd}")),
-    )))
+        }
+        (found, error) => {
+            let hint = found.map_or_else(
+                || error.unwrap_or_default(),
+                |(_, cwd)| {
+                    format!(
+                        "Transcript is available at cwd={}; retry with that cwd or omit cwd.",
+                        cwd.display()
+                    )
+                },
+            );
+            format!(
+                "Claude transcript unavailable for session_id={id}{}: {hint}",
+                requested.map_or(String::new(), |cwd| format!(" at cwd={cwd}")),
+            )
+        }
+    };
+    Err(ResumeRebindError::TargetTranscriptMissing(reason))
 }
 
 pub(super) async fn resolve_cwd_off_runtime(
