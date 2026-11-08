@@ -17,6 +17,10 @@ impl AlarmSink for BacklogHealth {
         self.observed.raise(channel, alarm.clone());
         self.router.raise(channel, alarm);
     }
+    fn reconcile_retained_readers(&self, channel: u64, reading: usize, retained: &[String]) {
+        self.router
+            .reconcile_retained_readers(channel, reading, retained);
+    }
     fn reconcile_reader_count(&self, channel: u64, count: usize) {
         self.observed.reconcile_reader_count(channel, count);
         self.router.reconcile_reader_count(channel, count);
@@ -53,7 +57,7 @@ fn healthy_writer(
     )
 }
 
-fn degraded(health: &AlarmHealth) -> bool {
+fn too_many_readers(health: &AlarmHealth) -> bool {
     health
         .current_at(std::time::Instant::now())
         .contains(&format!("tui_o:too_many_readers:{CHANNEL}"))
@@ -121,7 +125,8 @@ async fn targeted_old(
 }
 
 #[tokio::test(start_paused = true)]
-async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_retires_readers() {
+async fn ba_twenty_replaced_old_sources_keep_published_count_monotone_during_retention_and_restore()
+{
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &[]);
     let root = crate::config::runtime_root().unwrap();
@@ -146,8 +151,14 @@ async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_ret
     settle(&chain).await;
     polls(1).await;
     assert_eq!(chain.harness.alarms.readers(), Some(1));
+    let retained_reason = format!("tui_o:reader_retention_stalled:{CHANNEL}");
     assert!(
-        !degraded(&health),
+        health
+            .current_at(std::time::Instant::now())
+            .contains(&retained_reason)
+    );
+    assert!(
+        !too_many_readers(&health),
         "replaced old readers do not raise reader health"
     );
     assert_eq!(
@@ -161,6 +172,7 @@ async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_ret
         .iter()
         .map(|path| std::fs::read(path).unwrap())
         .collect();
+    let mut published = chain.harness.alarms.readers().unwrap();
     for n in 1..=OLD_NATIVE {
         let (request, digest) = targeted_old(&chain, &run, &observer, n).await;
         let before = OLD_NATIVE + 3 - n;
@@ -203,11 +215,17 @@ async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_ret
             OLD_NATIVE + 2 - n,
             "retention retired the reading reader of target {n}"
         );
+        let next = chain.harness.alarms.readers().unwrap();
         assert!(
-            chain.harness.alarms.readers().unwrap() <= MAX_READERS,
-            "actual tend count after target {n}"
+            next <= published,
+            "retiring target {n}: {published} -> {next}"
         );
-        assert!(!degraded(&health), "actual router health after target {n}");
+        assert!(next <= MAX_READERS, "actual tend count after target {n}");
+        published = next;
+        assert!(
+            !too_many_readers(&health),
+            "actual router health after target {n}"
+        );
         assert!(
             !chain.cursor(0).retired,
             "unproven backlog is never inferred empty"
@@ -217,7 +235,12 @@ async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_ret
             "current source remains held"
         );
     }
-    assert_eq!(chain.harness.alarms.readers(), Some(2));
+    assert_eq!(chain.harness.alarms.readers(), Some(1));
+    assert!(
+        !health
+            .current_at(std::time::Instant::now())
+            .contains(&retained_reason)
+    );
     let cursors_before: Vec<_> = (0..chain.sources.len())
         .map(|n| chain.cursor_file(n))
         .collect();
@@ -239,10 +262,13 @@ async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_ret
         );
         assert_eq!(
             chain.harness.alarms.readers(),
-            Some(2),
+            Some(1),
             "restore {cycle}: reader count remains constant"
         );
-        assert!(!degraded(&health), "restore {cycle}: no stale reader alarm");
+        assert!(
+            !too_many_readers(&health),
+            "restore {cycle}: no stale reader alarm"
+        );
         assert_eq!(
             chain.harness.port.posts().len(),
             posts_before,

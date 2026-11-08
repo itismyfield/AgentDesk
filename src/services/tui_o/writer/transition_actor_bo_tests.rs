@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::services::tmux_common::TmuxSourceAuthority;
+use crate::services::tui_o::alarm::{AlarmHealth, AlarmRouter};
 use crate::services::tui_o::writer::codex_snapshot::{
     Coverage, HostPath, Inputs, Observation, Observer, Pane, PaneState, Target,
 };
@@ -9,6 +10,7 @@ use crate::services::tui_o::writer::transition_cleanup::scope::codex::identity;
 use crate::services::tui_o::writer::transition_port::Idle;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
+use crate::test_support::wait::{WAIT_CAP, await_within};
 
 const NONCE: &str = "11111111111111111111111111111111";
 
@@ -430,13 +432,35 @@ impl crate::services::tui_o::writer::binding::BindingEvents for GuardedProductio
     }
 }
 
+struct RetentionAlarms {
+    observed: Alarms,
+    router: Arc<AlarmRouter>,
+    counted: watch::Sender<()>,
+}
+
+impl AlarmSink for RetentionAlarms {
+    fn raise(&self, channel: u64, alarm: WriterAlarm) {
+        self.observed.raise(channel, alarm.clone());
+        self.router.raise(channel, alarm);
+    }
+    fn reconcile_retained_readers(&self, channel: u64, reading: usize, retained: &[String]) {
+        self.router
+            .reconcile_retained_readers(channel, reading, retained);
+    }
+    fn reconcile_reader_count(&self, channel: u64, count: usize) {
+        self.observed.reconcile_reader_count(channel, count);
+        self.router.reconcile_reader_count(channel, count);
+        self.counted.send_replace(());
+    }
+}
+
 /// Restores a real pre-existing backlog, preserving its persisted rotation and delivery permission.
 pub(crate) async fn with_ready_codex_backlog<T, F, Fut>(
     sources: Vec<SourceId>,
     pane: String,
     configured: bool,
     run: F,
-) -> (T, Vec<Cursor>, Option<usize>)
+) -> (T, Vec<Cursor>, Option<usize>, Arc<AlarmHealth>)
 where
     F: FnOnce(Arc<crate::services::tui_o::writer::host::Readiness>) -> Fut,
     Fut: std::future::Future<Output = T>,
@@ -483,6 +507,20 @@ where
         stopping.clone(),
     );
     let port = port.with_provider(ShadowProvider::Codex);
+    let health = Arc::new(AlarmHealth::default());
+    let (counted, mut counts) = watch::channel(());
+    let alarms = RetentionAlarms {
+        observed: harness.alarms.clone(),
+        router: Arc::new(AlarmRouter::new(None, None, health.clone())),
+        counted,
+    };
+    let writer = ChannelWriter::new(
+        harness.channel(),
+        harness.gate.clone(),
+        harness.port.clone(),
+        harness.lease.clone(),
+        alarms,
+    );
     let task = transition_port::spawning(receiver, || {
         spawn_projecting(
             &WriterConfig {
@@ -490,7 +528,7 @@ where
                 ..Default::default()
             },
             configured.then_some(ReaderConfig { dormant: false }),
-            harness.writer(),
+            writer,
             ShadowProvider::Codex,
             Arc::new(GuardedProductionBindingLog {
                 inner: ChannelBindingLog::new(7, ShadowProvider::Codex),
@@ -499,20 +537,28 @@ where
         )
     })
     .expect("actual backlog actor started");
-    for _ in 0..200 {
-        let store = harness.channel();
-        if *ready_state.borrow()
-            && sources.iter().all(|source| {
-                store.cursor(source).is_some_and(|cursor| {
-                    cursor.captured_through == std::fs::metadata(&source.path).unwrap().len()
-                })
-            })
-            && harness.port.posts().len() == sources.len()
-        {
-            break;
-        }
-        polls(1).await;
-    }
+    await_within(
+        async {
+            loop {
+                let captured = {
+                    let store = harness.channel();
+                    sources.iter().all(|source| {
+                        store.cursor(source).is_some_and(|cursor| {
+                            cursor.captured_through
+                                == std::fs::metadata(&source.path).unwrap().len()
+                        })
+                    })
+                };
+                if *ready_state.borrow() && captured && harness.port.posts().len() == sources.len()
+                {
+                    break;
+                }
+                counts.changed().await.unwrap();
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
     assert!(*ready_state.borrow());
     assert_eq!(
         harness.port.posts().len(),
@@ -521,7 +567,10 @@ where
     );
     let _hosted = ready.host_port_for_test(7, &harness.gate, port, (ready_state, stopping));
     let result = run(ready).await;
-    polls(3).await;
+    counts.borrow_and_update();
+    for _ in 0..3 {
+        await_within(counts.changed(), WAIT_CAP).await.unwrap();
+    }
     assert!(!task.is_finished(), "retention actor remains available");
     let cursors = sources
         .iter()
@@ -537,5 +586,5 @@ where
     }
     halt(stop, task).await;
     drop(host);
-    (result, cursors, reading)
+    (result, cursors, reading, health)
 }
