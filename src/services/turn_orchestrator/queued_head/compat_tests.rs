@@ -168,6 +168,62 @@ fn v2_boot_recovery_skips_only_a_cleared_unconfirmed_retention() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn v2_told_retained_inputs_currently_hold_boot_recovery() {
+    use super::super::pending_queue_persistence as persistence;
+
+    let _root = TestRuntimeRootGuard::new();
+    let ctx = context();
+    let cases: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/e2e/tui_relay/tests/fixtures/queue_v2_cleared_unconfirmed_cases.json"
+    )))
+    .unwrap();
+    let disagreements = cases["current_disagreements"].as_array().unwrap();
+    assert_eq!(disagreements.len(), 2);
+    for (index, case) in disagreements.iter().enumerate() {
+        let mut snapshot = cases["base"].clone();
+        for (key, value) in case["retained"].as_object().unwrap() {
+            snapshot["retained_inputs"][0][key] = value.clone();
+        }
+        let channel = ChannelId::new(7_966_000 + index as u64);
+        let (path, bytes) = seed(channel.get(), &snapshot);
+        let read = compat::inspect(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        let busy = case["rust_busy"].as_bool().unwrap();
+        assert!(busy);
+        assert_eq!(case["python_busy"], false);
+        assert_eq!(read.v2_holds_input(), busy, "{}", case["name"]);
+        eprintln!(
+            "CURRENT_RETAINED_OWNERSHIP case={} rust_busy={busy}",
+            case["name"].as_str().unwrap()
+        );
+        let compat::SnapshotRead::ReadOnlyV2(v2) = read else {
+            panic!("V2 must stay inspectable");
+        };
+        assert_eq!(v2.retained_inputs.len(), 1);
+        let entry = &v2.retained_inputs[0];
+        assert!(entry.owed_to_owner(), "{}", case["name"]);
+        assert!(matches!(&v2.admission_binds[0].at,
+            v2_types::BindAt::Attempt { identity, attempt }
+            if *identity == entry.input.identity
+                && entry.input.attempt.as_ref() == Some(attempt)
+                && !entry.closes_bind(identity, attempt)));
+        let adopted = persistence::v2_channels(&ctx.provider, &ctx.token_hash);
+        assert_eq!(adopted.contains(&channel), busy, "{}", case["name"]);
+        let legacy = persistence::load_pending_queues_checked(&ctx.provider, &ctx.token_hash);
+        assert!(legacy.queues.is_empty());
+        assert_eq!(
+            legacy.quarantined.iter().any(|(c, _)| *c == channel),
+            busy,
+            "{}",
+            case["name"]
+        );
+        assert!(!legacy.v2_idle.contains(&channel));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+}
+
 #[test]
 fn v2_metadata_only_catalog_is_visible_but_legacy_recovery_is_quarantined() {
     let _root = TestRuntimeRootGuard::new();
