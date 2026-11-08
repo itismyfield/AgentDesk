@@ -287,10 +287,10 @@ fn cancel_queued_live_just_notified_front_is_present_and_cancelable() {
         let data = authorized().await;
         let _rest = crate::services::discord::rest_for_test(rig.ctx.http.clone());
         let (handle, _) = empty_owner(&data).await;
-        let original = input_owner::ingress::Original::with_ticket(
-            item(A),
-            input_owner::admission::AdmissionTicket::new(),
-        );
+        let intervention =
+            pending_queue_item_to_intervention(item(A), SystemTime::now(), Instant::now());
+        let original =
+            input_owner::ingress::original(&data.provider, channel(), None, &intervention).unwrap();
         assert!(matches!(
             original.admit(&handle).await,
             input_owner::admission::Admission::Accepted(_)
