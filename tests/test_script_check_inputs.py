@@ -138,7 +138,7 @@ class ScriptCheckInputSelection(unittest.TestCase):
                 self.assertIn("script_check_files", select(filters, [path]))
         self.assertEqual(changes["outputs"]["script_check_files"],
                          "${{ steps.filter.outputs.script_check_files_files }}")
-        for job_id in ("scripts", "scripts_guards", "scripts_contracts"):
+        for job_id in ("scripts", "scripts_guards", "scripts_census", "scripts_contracts"):
             job = jobs[job_id]
             self.assertEqual(job["needs"], "changes")
             self.assertEqual(job["if"], "${{ !github.event.pull_request.draft && !cancelled() }}")
