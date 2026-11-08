@@ -1,7 +1,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use super::super::{ResumePreviousOptions, ResumeRebindError, catalog, perform_resume_rebind};
+use super::{ResumePreviousOptions, ResumeRebindError, catalog, perform_resume_rebind};
 use crate::services::provider::ProviderKind;
 
 const KEY: &str = "i6483-background";
@@ -56,8 +56,8 @@ async fn binding(pool: &sqlx::PgPool) -> String {
 }
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all();
-    runtime.build().unwrap().block_on(future)
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all().build().unwrap().block_on(future)
 }
 
 // A /resume whose target `claude agents --json` lists is refused with the cleanup to do, and the

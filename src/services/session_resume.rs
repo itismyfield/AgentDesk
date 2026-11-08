@@ -28,6 +28,9 @@ use crate::services::turn_lifecycle::{
 use poise::serenity_prelude::ChannelId;
 
 mod background;
+#[cfg(all(test, unix))]
+#[path = "session_resume/background_tests.rs"]
+mod background_tests;
 pub(crate) mod catalog;
 mod errors;
 

@@ -149,8 +149,7 @@ fn the_launch_logs_resumed_from_the_argv_it_runs() {
     let fresh = launch_lines(NAME, cwd.path(), &lost);
     assert_eq!(fresh.len(), 1, "{fresh:?}");
     assert!(fresh[0].ends_with("resumed=false"), "{fresh:?}");
-    let fp = crate::services::observability::turn_lifecycle::provider_session_fingerprint;
-    assert!(!fresh[0].contains(&fp(&lost)), "{fresh:?}");
+    assert!(!fresh[0].contains(&lost), "{fresh:?}");
 
     let kept = uuid::Uuid::new_v4().to_string();
     let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
@@ -164,6 +163,6 @@ fn the_launch_logs_resumed_from_the_argv_it_runs() {
     let resumed = launch_lines(NAME, cwd.path(), &kept);
     assert_eq!(resumed.len(), 1, "{resumed:?}");
     assert!(resumed[0].ends_with("resumed=true"), "{resumed:?}");
-    assert!(resumed[0].contains(&fp(&kept)), "{resumed:?}");
+    assert!(resumed[0].contains(&kept), "{resumed:?}");
     crate::services::tmux_common::cleanup_session_temp_files(NAME);
 }

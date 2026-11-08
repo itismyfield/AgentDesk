@@ -53,7 +53,3 @@ fn names(value: &serde_json::Value, session_id: &str) -> bool {
         _ => false,
     }
 }
-
-#[cfg(all(test, unix))]
-#[path = "background_tests.rs"]
-mod tests;
