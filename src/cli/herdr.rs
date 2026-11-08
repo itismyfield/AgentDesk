@@ -35,6 +35,10 @@ pub(crate) enum HerdrCommand {
         /// Why it is terminated, kept in the server's result log
         #[arg(long)]
         reason: String,
+        /// With the channel's `.host_kind` marker absent, verify the pane alone: its root shell,
+        /// provider and binding nonce must be the recorded ones
+        #[arg(long)]
+        verify_by_pane: bool,
     },
     /// Check the execution user's own herdr server once; reads no AgentDesk config or database
     ProbeUserDefault {
@@ -50,8 +54,12 @@ pub(crate) fn run(args: HerdrArgs) -> Result<(), String> {
             session_key,
             execution_nonce,
             reason,
+            verify_by_pane,
         } => {
-            let body = json!({"session_key": session_key, "execution_nonce": execution_nonce, "reason": reason});
+            let mut body = json!({"session_key": session_key, "execution_nonce": execution_nonce, "reason": reason});
+            if verify_by_pane {
+                body["verify_by_pane"] = true.into();
+            }
             return terminate(&super::client::api_base(), &body);
         }
         #[cfg(unix)]
