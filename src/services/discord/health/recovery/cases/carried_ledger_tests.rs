@@ -12,6 +12,13 @@ async fn fixture(channel: u64, command: bool, competitor: bool) -> (Fixture, Val
         .to_string()
     };
     let mut rows = vec![];
+    if command {
+        rows.push(
+            json!({"type":"user","uuid":"native-n","sessionId":"parent",
+            "message":{"role":"user","content":"native N"}})
+            .to_string(),
+        );
+    }
     if competitor {
         rows.push(user("before-a"));
     }
