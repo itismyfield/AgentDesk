@@ -916,6 +916,31 @@ async fn confirm_awaited_codex_turn(provider: &ProviderKind, channel: u64) {
     }
 }
 
+/// An owner front refused only because Codex turn mode is still awaited.
+pub(crate) const TURN_MODE_AWAITED: &str =
+    "NotSent(\"owner_front_not_admitted: turn_mode_awaited\")";
+
+/// The held-front read for an awaited turn mode: the confirmation check boot and completion run,
+/// so the first look after Legacy's turn is gone confirms and wakes the owner once.
+#[cfg(unix)]
+pub(crate) fn turn_mode_watch(
+    channel: u64,
+) -> Option<crate::services::discord::queue_io::input_owner::held_watch::ScreenProbe> {
+    use super::super::tui_direct_pending_start::turn_retirement::codex;
+    use crate::services::claude_tui::busy_inject::Screen;
+    let turn = crate::services::tui_o::cutover::codex_turn_awaited(channel)?;
+    Some(Box::new(move || {
+        match codex::confirm_current(channel, &turn) {
+            codex::Confirmation::Confirmed => {
+                super::super::turn_presence::supervisor::register(&ProviderKind::Codex, &[channel]);
+                Screen::Ready
+            }
+            codex::Confirmation::Unselected => Screen::Ready,
+            codex::Confirmation::Retry(_) => Screen::Unknown,
+        }
+    }))
+}
+
 fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_msg_id: &str) {
     match admission {
         #[cfg(unix)]

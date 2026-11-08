@@ -899,7 +899,20 @@ async fn start_idle(
             return Err("NotSent(\"owner_start_failed\")".into());
         }
     }
+    let turn_mode = crate::services::discord::router::intake_dispatch::TURN_MODE_AWAITED;
     match (answer.await, started) {
+        // Held only by an awaited turn mode: watched by the confirmation that releases it.
+        (_, Err(error)) if error == turn_mode => {
+            let watch = crate::services::discord::router::intake_dispatch::turn_mode_watch;
+            if let Some(read) = watch(channel.get()) {
+                crate::services::discord::queue_io::input_owner::held_watch::arm(
+                    channel.get(),
+                    read,
+                );
+                hold_start(&holder, channel, &held).await;
+            }
+            Err(error)
+        }
         // The late read held the claimed start: it waits as an unclaimed start would, watched.
         (Ok(Err(error)), _) if error == START_WAITS => {
             hold_start(&holder, channel, &held).await;
