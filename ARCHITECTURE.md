@@ -1342,6 +1342,9 @@ src/
 │   │   │   │   ├── clear_http_overlap_tests.rs
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
+│   │   │   ├── tui_passthrough/
+│   │   │   │   ├── herdr_settings.rs
+│   │   │   │   └── herdr_settings_tests.rs
 │   │   │   ├── autocomplete.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── command_policy.rs
