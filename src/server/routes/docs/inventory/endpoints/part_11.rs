@@ -67,6 +67,44 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_error_example(409, json!({"body": {"expected_revision": 1, "title": "Release A", "status": "paused", "round": 1}}), json!({"error": "campaign revision conflict; reload before retrying", "code": "conflict", "context": {}}))
         .with_curl("curl -X PUT -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" -H 'Content-Type: application/json' \"$ADK_URL/api/campaigns/release-a\" -d '{\"expected_revision\":1,\"title\":\"Release A\",\"status\":\"paused\",\"round\":1,\"nodes\":[]}'"),
         ep(
+            "PATCH",
+            "/api/campaigns/{id}/nodes/{node_id}",
+            "campaigns",
+            "Update one node against the server's full stored campaign. Omitted fields and other nodes stay unchanged; arrays replace the whole field. Explicit null clears optional scalars to null, arrays to [], and details to an empty string; required title/status/stage/round cannot be cleared (400). Shares PUT's full DAG validation, revision CAS, history transaction and active auto_queue handoff/handoff_error response. Stale revision returns 409; missing campaign or node returns 404; invalid dependencies, cycles, unknown/read-only fields or invalid node values return 400. Missing or malformed expected_revision returns 422. Reload/reconcile on 409.",
+        )
+        .with_params([
+            ("id", path_param("Campaign ID.")),
+            ("node_id", path_param("Existing node ID; cannot be changed in the body.")),
+            ("expected_revision", body_param("integer", true, "Observed campaign revision; positive and incrementable. Must equal the revision of the server's initial full read; otherwise 409 before merging or saving.")),
+            ("title", body_param("string", false, "Nonempty node title, at most 512 bytes.")),
+            ("status", body_param("string", false, "pending|running|blocked|completed|failed|skipped")),
+            ("stage", body_param("string", false, "Nonempty workflow stage, at most 128 bytes.")),
+            ("round", body_param("integer", false, "Positive node round.")),
+            ("group", body_param("string|null", false, "Organizational label; trimmed, blank/null clears it.")),
+            ("assignee", body_param("string|null", false, "Node assignee.")),
+            ("session_id", body_param("string|null", false, "Historical session reference.")),
+            ("provider", body_param("string|null", false, "Provider label.")),
+            ("dependencies", body_param("array|null", false, "Replacement node ID array; must exist and keep the full DAG acyclic.")),
+            ("issue_url", body_param("string|null", false, "Linked issue; changing it clears server-owned issue sync metadata as in PUT.")),
+            ("pr_url", body_param("string|null", false, "Linked pull request.")),
+            ("head_sha", body_param("string|null", false, "Recorded commit.")),
+            ("evidence", body_param("array|null", false, "Replacement evidence string array.")),
+            ("next_action", body_param("string|null", false, "Next action.")),
+            ("blocker", body_param("string|null", false, "Current blocker.")),
+            ("summary", body_param("string|null", false, "One-line gist.")),
+            ("benefit", body_param("string|null", false, "Expected effect.")),
+            ("post_merge_hold", body_param("string|null", false, "Remaining post-merge work; null clears it.")),
+            ("details", body_param("string|null", false, "Durable notes; null clears to an empty string.")),
+            ("acceptance", body_param("array|null", false, "Replacement acceptance string array.")),
+            ("findings", body_param("array|null", false, "Replacement findings string array.")),
+            ("evidence_records", body_param("array|null", false, "Replacement structured evidence array; see docs/campaign-ledger.md.")),
+        ])
+        .with_example(json!({"path": {"id": "release-a", "node_id": "review"}, "body": {"expected_revision": 1, "status": "running"}}), json!({"campaign": {"id": "release-a", "revision": 2, "nodes": [{"id": "review", "status": "running"}]}}))
+        .with_error_example(400, json!({"body": {"expected_revision": 1, "dependencies": ["absent"]}}), json!({"error": "node review has missing dependency absent", "code": "validation", "context": {}}))
+        .with_error_example(404, json!({"path": {"id": "release-a", "node_id": "absent"}}), json!({"error": "campaign node not found", "code": "not_found", "context": {}}))
+        .with_error_example(409, json!({"body": {"expected_revision": 1, "status": "running"}}), json!({"error": "campaign revision conflict; reload before retrying", "code": "conflict", "context": {}}))
+        .with_curl("curl -X PATCH -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" -H 'Content-Type: application/json' \"$ADK_URL/api/campaigns/release-a/nodes/review\" -d '{\"expected_revision\":1,\"status\":\"running\"}'"),
+        ep(
             "GET",
             "/api/campaigns/{id}/history",
             "campaigns",

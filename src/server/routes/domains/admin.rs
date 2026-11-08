@@ -21,6 +21,10 @@ fn campaign_router() -> ApiRouter {
             get(campaigns::get).put(campaigns::replace),
         )
         .route("/campaigns/{id}/history", get(campaigns::history))
+        .route(
+            "/campaigns/{id}/nodes/{node_id}",
+            patch(campaigns::patch_node),
+        )
         .layer(DefaultBodyLimit::max(campaigns::LEDGER_BODY_LIMIT_BYTES))
         .layer(map_response(campaigns::body_limit_envelope))
 }
