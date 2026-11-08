@@ -131,7 +131,10 @@ async fn unmarked_v1_heads_recover_and_accept_new_input() {
         assert_eq!(ids, [100, 101, 102]);
         assert_eq!(owner.snapshot.items[0].queue_notice_claimed, None);
         assert_eq!(owner.snapshot.items[1].queue_notice_claimed, None);
-        assert_eq!(owner.snapshot.items[2].queue_notice_claimed, Some(false));
+        assert_eq!(
+            owner.snapshot.items[2].queue_notice_claimed, None,
+            "unclaimed metadata is omitted and restores conservatively"
+        );
         if phase == "reserved" {
             assert!(owner.snapshot.head_injection.is_none());
             assert_eq!(owner.front().unwrap().1.message_id, 100);

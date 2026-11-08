@@ -29,8 +29,9 @@ pub(crate) struct PendingQueueItem {
     #[serde(default)]
     pub(crate) author_is_bot: bool,
     pub(crate) message_id: u64,
-    /// A durable send claim; absent legacy metadata suppresses recovery notices.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Only true is persisted; absent metadata suppresses recovery notices.
+    /// Fresh false stays in memory until the notice is claimed.
+    #[serde(default, skip_serializing_if = "queue_notice_unclaimed")]
     pub(crate) queue_notice_claimed: Option<bool>,
     /// #4180: original wall-clock timestamp for `Intervention::created_at`,
     /// persisted as Unix milliseconds so restart restore can recreate the
@@ -68,6 +69,10 @@ pub(crate) struct PendingQueueItem {
     /// Active dispatch role override at save time (lost on restart; stored for diagnostics).
     #[serde(default)]
     pub(crate) override_channel_id: Option<u64>,
+}
+
+fn queue_notice_unclaimed(claimed: &Option<bool>) -> bool {
+    *claimed != Some(true)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

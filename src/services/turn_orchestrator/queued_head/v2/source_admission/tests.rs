@@ -34,15 +34,22 @@ fn queue_notice_claim_preserves_front_grants_and_ticket_identity() {
     Custody::with_ticket(&original, ticket.clone())
         .advance(&mut owner)
         .unwrap();
+    assert_eq!(owner.snapshot.items[0].queue_notice_claimed, Some(false));
+    let unclaimed = std::fs::read_to_string(&owner.path).unwrap();
+    assert!(!unclaimed.contains("queue_notice_claimed"));
     let front = owner.front().unwrap();
     owner.grant_front(&front).unwrap();
     assert!(owner.claim_queue_notice(&ticket.0, &original).unwrap());
+    let claimed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&owner.path).unwrap()).unwrap();
+    assert_eq!(claimed["items"][0]["queue_notice_claimed"], true);
     assert!(owner.claim_turn(original.message_id, &front).is_some());
     assert_eq!(owner.exact_turn(&ticket, &original), Ok(TurnBind::NotArmed));
     let mut edited = original.clone();
     edited.text.push_str(" changed");
     assert!(owner.exact_turn(&ticket, &edited).is_err());
     let mut restored = Owner::adopt(owner.path.clone(), "s3b".into()).unwrap();
+    assert_eq!(restored.snapshot.items[0].queue_notice_claimed, Some(true));
     assert_eq!(
         restored.exact_turn(&ticket, &original),
         Ok(TurnBind::NotArmed)
