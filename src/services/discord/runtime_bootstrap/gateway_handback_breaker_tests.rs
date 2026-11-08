@@ -407,3 +407,28 @@ fn gateway_snapshot_for_owner_observes_live_breaker_without_touching_state() {
     assert!(!owner.record_yield());
     assert_eq!(std::fs::read(&path).unwrap(), state);
 }
+
+#[test]
+fn timed_hold_is_a_degraded_health_reason_until_it_expires() {
+    let fixture = Fixture::new();
+    let mut owner = fixture.owner("a");
+    let health = super::super::super::shared_state::GatewayHandbackHealth::default();
+    owner.health = Some(health.clone());
+    let reason = || {
+        health
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|(_, reason)| reason.clone())
+    };
+    empty(&mut owner);
+    empty(&mut owner);
+    assert!(owner.suppressed());
+    assert_eq!(
+        reason().as_deref(),
+        Some("provider:claude:gateway_handback_breaker:auto:until=101800")
+    );
+    fixture.advance(1800);
+    assert!(!owner.suppressed());
+    assert_eq!(reason(), None);
+}
