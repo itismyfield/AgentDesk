@@ -113,7 +113,7 @@ fn unsupported_notice(provider: &ProviderKind, command: ClaudeSlashPassthrough) 
     )
 }
 
-/// Applies effort on a live Herdr pane and saves it for that pane's next launch, or saves it
+/// Applies effort on a live Herdr pane and records it in the channel's settings, or saves it
 /// for a local tmux TUI relaunch.
 pub(super) async fn effort_save_notice(
     shared: &std::sync::Arc<SharedData>,
