@@ -100,8 +100,15 @@ trap - EXIT
 
 CURRENT_CHECK=""
 # PR CI runs one shard per job; an unset SCRIPT_CHECK_SHARD runs every check.
-SCRIPT_CHECK_SHARDS=(guards contracts cargo)
+SCRIPT_CHECK_SHARDS=(guards census contracts cargo)
 SCRIPT_CHECK_SHARD="${SCRIPT_CHECK_SHARD:-}"
+if [ "$#" -gt 0 ]; then
+  if [ "$#" -ne 2 ] || [ "$1" != --shard ] || [ -z "$2" ]; then
+    echo "Usage: $0 [--shard <guards|census|contracts|cargo>]" >&2
+    exit 2
+  fi
+  SCRIPT_CHECK_SHARD="$2"
+fi
 SCRIPT_CHECK_LIST="${SCRIPT_CHECK_LIST:-}"
 script_check_self_tests_only="${SCRIPT_CHECK_SELF_TESTS_ONLY:-}"
 unset SCRIPT_CHECK_SELF_TESTS_ONLY
@@ -318,7 +325,7 @@ if run_check guards "Policy DB capability manifest guard (#3734)"; then
 "$PYTHON" -m unittest tests.test_policy_db_capabilities
 fi
 
-if run_check guards "Destructive call-site per-file ratchet (#5071 T3-A4)"; then
+if run_check census "Destructive call-site per-file ratchet (#5071 T3-A4)"; then
 "$PYTHON" scripts/check_destructive_call_site_ratchet.py --check
 git diff --exit-code HEAD -- scripts/destructive_call_site_baseline.json
 "$PYTHON" -m unittest tests.test_destructive_call_site_ratchet
@@ -371,7 +378,7 @@ if run_check guards "DeliveryJournal raw-writer allowlist"; then
 "$PYTHON" -m unittest tests.test_delivery_journal_raw_writer
 fi
 
-if run_check guards "Durable frontier writer per-file call-site allowlist (#5071)"; then
+if run_check census "Durable frontier writer per-file call-site allowlist (#5071)"; then
 # Built for #5071 T1 S7, which changes the recovery path's durable behaviour.
 # Nothing in the repo pinned WHERE these writer symbols are called from, so this
 # fixes an exact per-file count for each of them over all of src/ before that
@@ -388,7 +395,7 @@ if run_check guards "Input thread mapping census"; then
 "$PYTHON" scripts/test_input_mapping_census.py
 fi
 
-if run_check guards "TUI O writer census: Legacy send sites and cutover gates"; then
+if run_check census "TUI O writer census: Legacy send sites and cutover gates"; then
 # Pins every Discord send site's census row and every O cutover gate by exact
 # per-file count; the script docstring declares its lexical limits.
 "$PYTHON" scripts/check_tui_o_writer_census.py
@@ -403,7 +410,7 @@ if run_check guards "Config snapshot disk-reader zero guard"; then
 "$PYTHON" -m unittest tests.test_config_snapshot_readers
 fi
 
-if run_check guards "Dormant boot retirement census"; then
+if run_check census "Dormant boot retirement census"; then
 "$PYTHON" scripts/check_legacy_supervision_census.py
 "$PYTHON" -m unittest tests.test_check_legacy_supervision_census
 "$PYTHON" -m unittest tests.test_registration_fragments tests.test_skip_pin_fragments

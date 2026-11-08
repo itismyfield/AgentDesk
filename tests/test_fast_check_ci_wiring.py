@@ -1085,7 +1085,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             rejected = self.run_hardening_fixture(mutated)
             self.assertNotEqual(rejected.returncode, 0, key)
         main = MAIN_WORKFLOW.read_text()
-        for job_id in ("scripts", "scripts_guards", "scripts_contracts"):
+        for job_id in ("scripts", "scripts_guards", "scripts_census", "scripts_contracts"):
             block = job_block(main, job_id)
             for key in ("GFP_REF", "GFP_REF_PROTECTED"):
                 with self.subTest(main_shard=job_id, key=key):
@@ -1335,7 +1335,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         rust_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
         cross_os = "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}"
         expected_if = {
-            "changes": "${{ !github.event.pull_request.draft }}", "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": MIRROR_IF, "scripts_contracts": MIRROR_IF,
+            "changes": "${{ !github.event.pull_request.draft }}", "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": MIRROR_IF, "scripts_census": MIRROR_IF, "scripts_contracts": MIRROR_IF,
             "rust_build": rust_gate, "pg15_owner_proof": rust_gate, "base_compare": n_gate, "rust_tests": n_gate, "test_evidence": n_gate,
             "relay_authority_mutations": RUST_REQUIRED_IF,
             "lint": _LINT_FILTER, "dashboard": "${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}",

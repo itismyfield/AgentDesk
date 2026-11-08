@@ -301,6 +301,7 @@ end
 script_check_shard_jobs = {
   "scripts" => "cargo",
   "scripts_guards" => "guards",
+  "scripts_census" => "census",
   "scripts_contracts" => "contracts",
 }
 script_checks_job = jobs["scripts"]
@@ -330,7 +331,7 @@ expected_closure_if = {
   "changes" => "${{ !github.event.pull_request.draft }}", "rust_build" => rust_tests_gate, "base_compare" => built_gate,
   "rust_tests" => built_gate, "test_evidence" => built_gate,
   "lint" => "${{ !github.event.pull_request.draft && (needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true') }}",
-  "scripts" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_guards" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_contracts" => "${{ !github.event.pull_request.draft && !cancelled() }}",
+  "scripts" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_guards" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_census" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_contracts" => "${{ !github.event.pull_request.draft && !cancelled() }}",
   "dashboard" => "${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}", "pg15_owner_proof" => rust_tests_gate,
   "relay_authority_mutations" => relay_gate,
   "check_fast_cross_os" => cross_os_gate, "check_fast_cross_os_targets" => cross_os_gate,
@@ -398,7 +399,7 @@ end
 required_key_node = jobs_node.children.each_slice(2).find { |key_node, _| key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "required_contexts" }&.first
 required_source = required_key_node && raw_job_source(path, required_key_node).gsub(/\b[0-9a-f]{64}\b/, "<sha256>")
 required_source_sha256 = required_source && Digest::SHA256.hexdigest(required_source)
-unless required_source_sha256 == "ef88557e3be990d67db05ca382b57e118ba7a7a9d74151301db9459c08d7d2b7"
+unless required_source_sha256 == "0fa6d23c66396919bb0e79420d07108fa71f358db42dda2922adf4000eb2c126"
   warn "#{path}: required_contexts source bytes changed (scalar tags/styles and exact step surface are pinned); found #{required_source_sha256 || '<missing>'}"
   exit 1
 end
@@ -1004,6 +1005,7 @@ errors = []
 expected_shards = {
   "scripts" => ["cargo", "Main script checks"],
   "scripts_guards" => ["guards", "Main script checks (guards)"],
+  "scripts_census" => ["census", "Main script checks (census)"],
   "scripts_contracts" => ["contracts", "Main script checks (contracts)"],
 }
 base_env = {

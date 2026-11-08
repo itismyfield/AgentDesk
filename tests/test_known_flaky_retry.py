@@ -329,8 +329,8 @@ sys.stdout.write((p / file).read_text())
         original = (self.path / "902.log").read_text()
         for log in (
             original.replace("scripts_guards: 'failure'", "scripts_contracts: 'failure'"),
-            original.replace("expected to run: true\n2026-10-22T08:57:43.9533985Z ##[error]Script checks: scripts_contracts",
-                             "expected to run: false\n2026-10-22T08:57:43.9533985Z ##[error]Script checks: scripts_contracts"),
+            original.replace("scripts_guards: 'failure' but expected to run: true",
+                             "scripts_guards: 'failure' but expected to run: false"),
             original.replace("'failure' but", "'cancelled' but"),
             original.replace("scripts_contracts: success (expected to run: true)",
                              "scripts_contracts: 'skipped' but expected to run: true"),
@@ -346,6 +346,7 @@ sys.stdout.write((p / file).read_text())
             rust_log(KNOWN),
         ):
             with self.subTest(log=log):
+                self.assertNotEqual(log, original, "negative fixture must change the judge log")
                 (self.path / "902.log").write_text(log)
                 self.assertIn("unlisted-mirror", self.assert_no_retry())
 
@@ -382,6 +383,8 @@ class Parser(unittest.TestCase):
         self.assertEqual([s["run"] for s in judge["steps"] if s.get("name") == retry.JUDGE_STEP],
                          ["python3 scripts/ci/nextest_ci.py required-gate"])
         judged = {job for groups in nextest_required.CONTEXTS.values() for group, _ in groups for job in group}
+        self.assertIn("scripts_census", judged)
+        self.assertIn("scripts_census", retry.JOB_NAMES)
         self.assertEqual(judged, set(retry.JOB_NAMES))
         for job_id in judged:
             rendered = jobs[job_id]["name"].replace("${{ matrix.worker }}", "1").replace(

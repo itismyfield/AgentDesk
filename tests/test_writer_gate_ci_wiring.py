@@ -123,7 +123,7 @@ class WriterGateCiWiringTests(unittest.TestCase):
 
     def test_process_rejects_destructive_ratchet_block_deletion(self) -> None:
         text = (REPO_ROOT / guard.CI_SCRIPT).read_text(encoding="utf-8")
-        header = 'if run_check guards "Destructive call-site per-file ratchet (#5071 T3-A4)"; then\n'
+        header = 'if run_check census "Destructive call-site per-file ratchet (#5071 T3-A4)"; then\n'
         before, separator, after = text.partition(header)
         self.assertTrue(separator)
         block, separator, after = after.partition("\nfi\n")

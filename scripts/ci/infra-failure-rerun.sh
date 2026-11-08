@@ -44,7 +44,7 @@ Environment:
   RUN_ID             CI PR workflow run id
   RUN_ATTEMPT        initial attempt to classify (only attempt 1 may retry)
   RERUN_DRY_RUN      set to 1 to classify historical attempts without rerunning
-  GUARDS_TIMEOUT_MINUTES  configured guards job timeout (diagnosis only)
+  GUARDS_TIMEOUT_MINUTES  shared guards/census job timeout (diagnosis only)
 EOF
 }
 
@@ -635,7 +635,7 @@ run_classifier() {
     if jq -e --argjson id "$job_id" '.jobs[] | select(.id == $id) | .conclusion == "cancelled"' "$jobs_payload" >/dev/null; then
       if [[ "$job_class" != "regression" ]]; then
         unknown_count=$((unknown_count + 1))
-        if [[ "$job_name" == "Script checks runner (guards)" ]] &&
+        if [[ "$job_name" == "Script checks runner (guards)" || "$job_name" == "Script checks runner (census)" ]] &&
           job_has_suspected_timeout "$jobs_payload" "$job_id" "${GUARDS_TIMEOUT_MINUTES:-}" "$log_path" &&
           ! log_has_repo_config_fault "$log_path"; then
           job_class="suspected-job-timeout:manual-retry"
