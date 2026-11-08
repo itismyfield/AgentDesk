@@ -238,6 +238,15 @@ fn herdr_effort_applies_and_reports_only_fresh_matching_level_pg() {
             json!({"session_id":NATIVE,"written_at":"fresh","effort":{"level":"high"}}),
         );
         let notice = fx.command().await;
+        let reads: Vec<Value> = rig
+            .requests()
+            .into_iter()
+            .filter(|r| r["method"] == "pane.read")
+            .collect();
+        assert!(
+            !reads.is_empty() && reads.iter().all(|r| r["params"]["strip_ansi"] == true),
+            "readiness requires plain pane text: {reads:?}"
+        );
         assert_eq!(
             keys.load(Ordering::SeqCst),
             0,

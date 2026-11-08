@@ -135,7 +135,7 @@ pub(super) async fn effort(
         let original = handle.block_on(target(&shared, channel))?;
         let (pane, logical, native) = original.clone();
         wait(|| {
-            pane.capture_ansi(-80)
+            pane.capture(-80)
                 .filter(|c| ready(c))
                 .ok_or("pane ready 대기 시간 초과".into())
         })?;
@@ -143,7 +143,7 @@ pub(super) async fn effort(
             if handle.block_on(target(&shared, channel))? != original {
                 return Err("pane 소유 실행 변경".into());
             }
-            let capture = pane.capture_ansi(-80).ok_or("pane 입력 상태 미확인")?;
+            let capture = pane.capture(-80).ok_or("pane 입력 상태 미확인")?;
             if composer_lock::composer_admission(&logical, || Some(capture.clone()))
                 != composer_lock::ComposerAdmission::Any
                 || !ready(&capture)
@@ -157,7 +157,7 @@ pub(super) async fn effort(
             };
             send(&[Literal("/effort".into()), Enter])?;
             wait(|| {
-                pane.capture_ansi(-80)
+                pane.capture(-80)
                     .filter(|c| tc::tmux_capture_indicates_claude_tui_selector_open(c))
                     .ok_or("effort overlay 열림 미확인".into())
             })?;
