@@ -412,43 +412,24 @@ impl BusyNativeInput {
     fn verify(&self, offset: u64) -> Option<NativeUserPin> {
         use crate::services::claude_tui::input::{PaneIdentity, UserReceipt};
         use crate::services::tui_input::human_frame::history::{self, RowOwner};
-        use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        use history::native_row::{native_prompt, read_native_row};
 
         const MAX_ROW: u64 = 128 * 1024;
         if offset < self.source_offset || PaneIdentity::capture(&self.session)? != self.pane {
             return None;
         }
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&self.transcript)
-            .ok()?;
-        let metadata = file.metadata().ok()?;
-        if !metadata.is_file()
-            || (metadata.dev(), metadata.ino()) != self.source_file
-            || offset >= metadata.len()
-        {
+        let native = read_native_row(
+            &self.transcript,
+            [self.source_file.0, self.source_file.1],
+            offset,
+            MAX_ROW,
+            false,
+        )?;
+        let record = &native.record;
+        if record["type"] != "user" || native_prompt(record, &self.session_id).is_none() {
             return None;
         }
-        file.seek(SeekFrom::Start(offset)).ok()?;
-        let mut raw = Vec::new();
-        BufReader::new(file.take(MAX_ROW + 1))
-            .read_until(b'\n', &mut raw)
-            .ok()?;
-        if raw.len() as u64 > MAX_ROW || raw.last() != Some(&b'\n') {
-            return None;
-        }
-        let end = offset.checked_add(raw.len() as u64)?;
-        let record: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-        if record["type"] != "user"
-            || record["isMeta"] == true
-            || record["isSidechain"] == true
-            || record["isCompactSummary"] == true
-            || record["sessionId"] != self.session_id
-        {
-            return None;
-        }
+        let end = native.range.1;
         let mut pin = UserReceipt::native_pin_before_tail(
             &self.session,
             &self.frame,
@@ -456,7 +437,9 @@ impl BusyNativeInput {
             end,
         )?;
         if pin.uuid != record["uuid"].as_str()?
-            || pin.range != (offset, end)
+            || pin.range != native.range
+            || pin.row_digest != native.digest
+            || pin.source_file != (native.file[0], native.file[1])
             || pin.source_file != self.source_file
             || pin.session_id != self.session_id
             || std::path::Path::new(&pin.output_path) != self.transcript

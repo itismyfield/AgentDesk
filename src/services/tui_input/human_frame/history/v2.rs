@@ -3,6 +3,8 @@ use super::*;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+#[cfg(all(test, unix))]
+pub(crate) mod carried;
 mod collision;
 mod migration;
 
