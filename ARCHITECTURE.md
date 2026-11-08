@@ -3721,6 +3721,8 @@ src/
 │   ├── session_resume/
 │   │   ├── catalog/
 │   │   │   └── tests.rs
+│   │   ├── background.rs
+│   │   ├── background_tests.rs
 │   │   ├── catalog.rs
 │   │   └── errors.rs
 │   ├── settings/
