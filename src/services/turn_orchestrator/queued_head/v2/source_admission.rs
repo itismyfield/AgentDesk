@@ -79,12 +79,16 @@ impl Ticket {
     }
 }
 
-/// The original as stored, without the fields a retry recomputes: wall-clock times and diagnostics.
+/// The original without retry times, diagnostics or queue notice bookkeeping.
 /// Every other field, including one added later, changes what runs and so names another original.
 fn canonical(original: &PendingQueueItem) -> serde_json::Value {
     let mut value = serde_json::to_value(original).expect("queue item serializes");
     if let Some(map) = value.as_object_mut() {
-        for field in ["created_at_wall_time_ms", "channel_name"] {
+        for field in [
+            "created_at_wall_time_ms",
+            "channel_name",
+            "queue_notice_claimed",
+        ] {
             map.remove(field);
         }
         if let Some(serde_json::Value::Array(sources)) =
@@ -290,6 +294,38 @@ impl Custody {
 }
 
 impl Owner {
+    /// Claims the queued ticket's notice durably before any HTTP request, in this actor turn.
+    pub(crate) fn claim_queue_notice(
+        &mut self,
+        raw: &str,
+        original: &PendingQueueItem,
+    ) -> Result<bool, String> {
+        let ticket = Ticket::new(raw)?;
+        if self.exact_turn(&ticket, original)? != TurnBind::NotArmed {
+            return Ok(false);
+        }
+        let receipt = ticket.receipt(original);
+        let index = self
+            .snapshot
+            .admission_binds
+            .iter()
+            .find_map(|bind| match &bind.at {
+                BindAt::Queued { index, .. } if bind.receipt == receipt => Some(*index),
+                _ => None,
+            });
+        let Some(index) = index else { return Ok(false) };
+        let mut next = self.snapshot.clone();
+        let Some(item) = next.items.get_mut(index) else {
+            return Ok(false);
+        };
+        if item.queue_notice_claimed != Some(false) {
+            return Ok(false);
+        }
+        item.queue_notice_claimed = Some(true);
+        self.commit(next)?;
+        Ok(true)
+    }
+
     /// The outcome of an admission this owner committed while its caller saw Pending; acknowledged
     /// once, after which the same ticket is a duplicate.
     fn acknowledge(&mut self, receipt: &str) -> Option<Admitted> {

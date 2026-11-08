@@ -127,7 +127,16 @@ async fn real_enqueue_keeps_pending_raw_and_reuses_the_source_after_restart() {
     assert_eq!(state["admission_sequence"], 1);
     assert_eq!(state["admission_receipts"].as_array().unwrap().len(), 1);
     assert!(enter().await.enqueued);
-    assert_eq!(snapshot(&handle).await["items"], state["items"]);
+    let mut after = snapshot(&handle).await["items"].clone();
+    let mut before = state["items"].clone();
+    // Notice claims may advance while every custody field stays unchanged.
+    for items in [&mut after, &mut before] {
+        items[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("queue_notice_claimed");
+    }
+    assert_eq!(after, before);
 }
 
 #[tokio::test]

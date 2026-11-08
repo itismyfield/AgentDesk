@@ -124,7 +124,7 @@ pub(super) fn owned(
     let id = 8_000_000_000_000_005_000 + channel % 1000;
     let original: PendingQueueItem = serde_json::from_value(json!({"author_id":7,
         "message_id":id,"channel_id":channel,"source_message_ids":[id],
-        "queued_generation":1,"text":PROMPT}))
+        "queued_generation":1,"text":PROMPT,"queue_notice_claimed":false}))
     .unwrap();
     let ticket = AdmissionTicket::new();
     runtime.block_on(async {
