@@ -217,6 +217,9 @@ pub struct ProviderConfig {
     /// `pipe` or `tui` overrides `tui_hosting`; unknown values use legacy derivation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// Extra Claude config homes that `/resume` may copy a transcript from into the active home.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript_homes: Vec<String>,
 }
 
 pub fn default_provider_tui_hosting(provider: &str) -> bool {

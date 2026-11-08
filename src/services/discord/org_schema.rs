@@ -365,6 +365,44 @@ pub(crate) fn configured_launch_overlay(
     overlay.map(Some).map_err(|error| error.to_string())
 }
 
+/// The configured launch account before fallback routing, validated so a typo never picks an account,
+/// plus the channel and policy fallback routing would apply to it.
+type LaunchParts = (
+    crate::services::provider_auth_profile::ProviderAuthOverlay,
+    Option<(u64, FallbackPolicy)>,
+);
+
+fn launch_overlay_parts(
+    schema: Option<&OrgSchema>,
+    provider: &ProviderKind,
+    channel_id: Option<u64>,
+    agent_id: Option<&str>,
+    catalog: &HashMap<String, ProviderAuthProfileDef>,
+) -> Result<LaunchParts, String> {
+    let (profile, recovery_pinned) =
+        configured_launch_profile(schema, provider, channel_id, agent_id)?;
+    let primary = crate::services::provider_auth_profile::resolve(
+        provider.clone(),
+        profile.as_deref(),
+        None,
+        catalog,
+    )
+    .map_err(|error| error.to_string())?;
+    let route = channel_id.filter(|_| !recovery_pinned).map(|channel| {
+        let policy = schema
+            .and_then(|schema| schema.provider_auth_fallbacks.get(provider.as_str()))
+            .cloned()
+            .unwrap_or_default();
+        (channel, policy)
+    });
+    Ok((primary, route))
+}
+
+fn fallback_selects(provider: &ProviderKind, policy: &FallbackPolicy) -> bool {
+    policy.enabled
+        && crate::services::provider_auth_profile::extra_account_login_supported(provider)
+}
+
 fn spawn_auth_overlay_for_context(
     provider: ProviderKind,
     channel_id: Option<u64>,
@@ -377,21 +415,11 @@ fn spawn_auth_overlay_for_context(
         .as_ref()
         .and_then(|schema| schema.provider_auth_profiles.clone())
         .unwrap_or_default();
-    let (profile, recovery_pinned) =
-        configured_launch_profile(schema.as_ref(), &provider, channel_id, agent_id)?;
-    // Validate the configured primary first: a typo must not silently choose an account.
-    let primary_overlay = resolve(provider.clone(), profile.as_deref(), None, &catalog)
-        .map_err(|error| error.to_string())?;
-    let overlay = if let Some(channel) = channel_id.filter(|_| !recovery_pinned) {
-        let policy = schema
-            .as_ref()
-            .and_then(|schema| schema.provider_auth_fallbacks.get(provider.as_str()))
-            .cloned()
-            .unwrap_or_default();
+    let (primary_overlay, fallback_route) =
+        launch_overlay_parts(schema.as_ref(), &provider, channel_id, agent_id, &catalog)?;
+    let overlay = if let Some((channel, policy)) = fallback_route {
         let candidates = policy.candidates(&provider, &primary_overlay.profile_id, &catalog);
-        let selected = if policy.enabled
-            && crate::services::provider_auth_profile::extra_account_login_supported(&provider)
-        {
+        let selected = if fallback_selects(&provider, &policy) {
             fallback::select_for_launch(&provider, channel, &candidates, |id| {
                 fallback_profile_available(&provider, id, agent_id, &catalog)
             })
@@ -445,6 +473,61 @@ pub(crate) fn overlay_from_tmux_session(
             .as_ref()
             .and_then(|context| context.agent_id.as_deref()),
     )
+}
+
+/// Home the next launch reads, without touching the fallback router or quota record. Intake picks the
+/// agent per message, so a home is promised only when every agent the launch could carry yields it.
+pub(crate) fn predicted_launch_home(
+    provider: ProviderKind,
+    channel_id: Option<u64>,
+    session_name: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let channel_id = channel_id.or_else(|| {
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(session_name)
+            .and_then(|(_, channel)| channel.parse().ok())
+    });
+    let (loaded, name) = (load_org_schema_for_auth()?, provider.as_str());
+    let schema = loaded.as_ref();
+    let catalog = schema
+        .and_then(|schema| schema.provider_auth_profiles.clone())
+        .unwrap_or_default();
+    // No agent, an agent outside the schema, and each schema agent cover every launch context.
+    let agents = [None, Some("\0unbound")].into_iter().chain(
+        schema
+            .into_iter()
+            .flat_map(|schema| schema.agents.keys().map(|id| Some(id.as_str()))),
+    );
+    let mut homes = Vec::new();
+    for agent in agents {
+        // An agent whose account cannot resolve for this provider never launches it, so it adds no home.
+        let (primary, route) =
+            match launch_overlay_parts(schema, &provider, channel_id, agent, &catalog) {
+                Ok(resolved) => resolved,
+                Err(_) if agent.is_some() => continue,
+                Err(error) => return Err(error),
+            };
+        // Launch-time routing can only move off the primary when it has another candidate.
+        let routed = route.is_some_and(|(_, policy)| {
+            fallback_selects(&provider, &policy)
+                && policy
+                    .candidates(&provider, &primary.profile_id, &catalog)
+                    .len()
+                    > 1
+        });
+        if routed {
+            return Err(format!("{name} auth fallback picks the launch account"));
+        }
+        homes.push(primary.home);
+    }
+    homes.sort();
+    homes.dedup();
+    match homes.as_slice() {
+        [home] => Ok(home.clone()),
+        many => Err(format!(
+            "the next {name} account depends on which agent the channel resolves to ({} homes)",
+            many.len()
+        )),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -802,6 +885,43 @@ pub(super) fn lookup_suffix_provider(channel_name: &str) -> Option<ProviderKind>
 mod tests {
     use super::*;
     use crate::services::agent_identity::identity_label;
+
+    #[test]
+    fn predicted_launch_home_is_promised_only_when_every_launch_agent_reads_the_same_home() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        let home_path = std::fs::canonicalize(home.path()).unwrap();
+        let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+        let _home = set("HOME", &home_path);
+        let accounts = home_path.join(".adk/profiles");
+        let profile = accounts.join("claude/acct-b");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(accounts.join("codex/acct-x")).unwrap();
+        let root = crate::config::runtime_root().unwrap();
+        let org = super::super::runtime_store::org_schema_path_for_root(&root);
+        std::fs::create_dir_all(org.parent().unwrap()).unwrap();
+        let catalog = format!(
+            "version: 1\nprovider_auth_profiles:\n  acct-b:\n    provider: claude\n    home: {}\n  acct-x:\n    provider: codex\n    home: {}\n",
+            profile.display(),
+            accounts.join("codex/acct-x").display()
+        );
+        // The channel reaches `coder` only by name; a Codex-account agent never launches Claude.
+        let org_with = |coder: &str, extra: &str| {
+            let yaml = format!(
+                "{catalog}agents:\n  coder:\n    display_name: Coder\n{coder}  reviewer:\n    display_name: Reviewer\n    auth_profile: acct-x\nchannels:\n  by_name:\n    enabled: true\n    mappings:\n      coder-room:\n        agent: coder\n{extra}"
+            );
+            std::fs::write(&org, yaml).unwrap();
+            predicted_launch_home(ProviderKind::Claude, Some(42), "")
+        };
+        let off = "provider_auth_fallbacks:\n  claude:\n    enabled: false\n";
+        let named = org_with("    auth_profile: acct-b\n", off).unwrap_err();
+        assert!(named.contains("depends on which agent"), "{named}");
+        assert_eq!(org_with("", off).unwrap(), None);
+        let primary = format!("{off}provider_auth_primary_profiles:\n  claude: acct-b\n");
+        assert_eq!(org_with("", &primary).unwrap(), Some(profile));
+        // With no policy entry, launch routing may still move to the other Claude account.
+        assert!(org_with("", "").unwrap_err().contains("fallback"));
+    }
 
     #[test]
     fn profile_fallback_configuration_validates_and_defaults_to_auto() {

@@ -30,7 +30,17 @@ impl Fixture {
         contents: &str,
         mtime: i64,
     ) -> PathBuf {
-        let dir = claude_project_dir_candidates_for_cwd(cwd, Some(&self.home))
+        self.transcript_in(&self.home, cwd, id, contents, mtime)
+    }
+    fn transcript_in(
+        &self,
+        home: &Path,
+        cwd: &Path,
+        id: &str,
+        contents: &str,
+        mtime: i64,
+    ) -> PathBuf {
+        let dir = claude_project_dir_candidates_for_cwd(cwd, Some(home))
             .unwrap()
             .remove(0);
         fs::create_dir_all(&dir).unwrap();
@@ -50,6 +60,7 @@ impl Fixture {
             current,
             live,
             Some(&self.home),
+            &[],
             partial,
             Instant::now() + Duration::from_secs(2),
         )
@@ -81,6 +92,8 @@ fn choices_show_sibling_title_time_and_resolve_selected_cwd_without_recorded_cwd
         None,
         &choices[0].session_id,
         Some(&f.home),
+        &[],
+        Ok(None),
     )
     .unwrap();
     assert_eq!(resolved, f.sibling.to_string_lossy());
@@ -120,6 +133,8 @@ fn explicit_wrong_cwd_returns_422_and_actual_location_missing_transcript_refuses
         Some(f.current.to_str().unwrap()),
         PRIOR,
         Some(&f.home),
+        &[],
+        Ok(None),
     )
     .unwrap_err();
     let (status, axum::Json(body)) = error.into_response();
@@ -135,6 +150,8 @@ fn explicit_wrong_cwd_returns_422_and_actual_location_missing_transcript_refuses
         None,
         OTHER,
         Some(&f.home),
+        &[],
+        Ok(None),
     )
     .unwrap_err();
     let (status, axum::Json(body)) = missing.into_response();
@@ -150,6 +167,8 @@ fn explicit_wrong_cwd_returns_422_and_actual_location_missing_transcript_refuses
         None,
         "bad-id",
         Some(&f.home),
+        &[],
+        Ok(None),
     )
     .unwrap_err();
     let (status, axum::Json(body)) = invalid.into_response();
@@ -179,11 +198,19 @@ fn forks_choose_newest_mtime_explicit_cwd_wins_and_choices_deduplicate() {
     );
     let current = f.current.to_str().unwrap();
     assert_eq!(
-        resolve_cwd(Some(current), None, PRIOR, Some(&f.home)).unwrap(),
+        resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &[], Ok(None)).unwrap(),
         f.sibling.to_string_lossy()
     );
     assert_eq!(
-        resolve_cwd(Some(current), Some(current), PRIOR, Some(&f.home)).unwrap(),
+        resolve_cwd(
+            Some(current),
+            Some(current),
+            PRIOR,
+            Some(&f.home),
+            &[],
+            Ok(None)
+        )
+        .unwrap(),
         current
     );
     assert_eq!(f.choices(None, &HashSet::new(), "").len(), 1);
@@ -298,6 +325,7 @@ fn short_discovery_deadline_preserves_partial_results() {
         None,
         &HashSet::new(),
         Some(&f.home),
+        &[],
         "",
         start + Duration::from_millis(120),
     );
@@ -324,4 +352,161 @@ fn sibling_deadline_is_checked_before_filtering_unreadable_entries() {
         "expired discovery scanned {} entries before checking its deadline",
         visited.get()
     );
+}
+
+#[test]
+fn transcript_only_in_another_home_is_listed_then_copied_once_into_the_same_cwd_key() {
+    let f = Fixture::new();
+    let other = f.root.path().join("1-acct");
+    let title = "{\"type\":\"ai-title\",\"aiTitle\":\"스왑 작업\"}\n";
+    let source = f.transcript_in(&other, &f.sibling, PRIOR, title, 2000);
+    let current = f.current.to_str().unwrap();
+    let homes = [other.clone()];
+    let listed = choices(
+        current,
+        None,
+        &HashSet::new(),
+        Some(&f.home),
+        &homes,
+        "스왑",
+        Instant::now() + Duration::from_secs(2),
+    );
+    assert_eq!(listed.len(), 1);
+    assert!(
+        listed[0]
+            .label
+            .ends_with("claude-adk-cc-20260101-000002 · home 1-acct")
+    );
+    // Without declared homes only the active home is searched.
+    assert!(resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &[], Ok(None)).is_err());
+    assert_eq!(
+        resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &homes, Ok(None)).unwrap(),
+        f.sibling.to_string_lossy()
+    );
+    let copy = claude_transcript_path(&f.sibling, PRIOR, Some(&f.home)).unwrap();
+    assert_eq!(fs::read_to_string(&copy).unwrap(), title);
+    assert_eq!(fs::read_to_string(&source).unwrap(), title);
+    assert!(
+        !claude_transcript_path(&f.current, PRIOR, Some(&f.home))
+            .unwrap()
+            .exists()
+    );
+    // Once the active home holds a copy, a changed source is never copied again.
+    fs::write(&source, "{}\n").unwrap();
+    assert_eq!(
+        resolve_cwd(
+            Some(current),
+            Some(f.sibling.to_str().unwrap()),
+            PRIOR,
+            Some(&f.home),
+            &homes,
+            Ok(None)
+        )
+        .unwrap(),
+        f.sibling.to_str().unwrap()
+    );
+    assert_eq!(fs::read_to_string(&copy).unwrap(), title);
+}
+
+#[test]
+fn transcript_in_two_other_homes_is_refused_without_choosing_one() {
+    let f = Fixture::new();
+    let homes = [f.root.path().join("1-acct"), f.root.path().join("2-acct")];
+    f.transcript_in(&homes[0], &f.current, PRIOR, "{}\n", 1000);
+    f.transcript_in(&homes[1], &f.sibling, PRIOR, "{}\n", 2000);
+    let error = resolve_cwd(
+        Some(f.current.to_str().unwrap()),
+        None,
+        PRIOR,
+        Some(&f.home),
+        &homes,
+        Ok(None),
+    )
+    .unwrap_err();
+    let (status, axum::Json(body)) = error.into_response();
+    assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("Claude config home 2곳")
+    );
+    assert!(!f.home.exists());
+}
+
+#[test]
+fn failed_copy_refuses_and_leaves_no_partial_transcript_in_the_active_home() {
+    let f = Fixture::new();
+    let other = f.root.path().join("1-acct");
+    f.transcript_in(&other, &f.current, PRIOR, "{}\n", 1000);
+    // A directory occupying the target name makes the final publish fail at the resume boundary.
+    let target = claude_transcript_path(&f.current, PRIOR, Some(&f.home)).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    let current = f.current.to_str().unwrap();
+    let error = resolve_cwd(
+        Some(current),
+        None,
+        PRIOR,
+        Some(&f.home),
+        std::slice::from_ref(&other),
+        Ok(None),
+    )
+    .unwrap_err();
+    let (status, axum::Json(body)) = error.into_response();
+    assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["error"].as_str().unwrap().contains("복사하지 못함"));
+    let entries = |dir: &Path| fs::read_dir(dir).map_or(0, |dir| dir.count());
+    assert_eq!(entries(target.parent().unwrap()), 1);
+    // A read that fails mid-copy leaves neither the target nor a temp file behind.
+    struct Broken;
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk gone"))
+        }
+    }
+    let fresh = f
+        .home
+        .join("projects")
+        .join("fresh")
+        .join(format!("{PRIOR}.jsonl"));
+    let input = Cursor::new(b"{\"type\":\"user\"}\n".to_vec()).chain(Broken);
+    assert!(copy_without_partial(input, SystemTime::UNIX_EPOCH, &fresh).is_err());
+    assert_eq!(entries(fresh.parent().unwrap()), 0);
+}
+
+#[test]
+fn copy_is_refused_before_writing_when_the_launch_home_differs_or_a_candidate_is_unreadable() {
+    let f = Fixture::new();
+    let other = f.root.path().join("1-acct");
+    let source = f.transcript_in(&other, &f.sibling, PRIOR, "{}\n", 1000);
+    let profile = f.root.path().join("profile");
+    // A home path the OS cannot stat stands in for an unreadable candidate.
+    let both = [other.clone(), f.root.path().join("bad\0home")];
+    let mismatch = format!(
+        "복사 대상 {}와 다음 실행 Claude home {}",
+        f.home.display(),
+        profile.display()
+    );
+    type Case<'a> = (&'a [PathBuf], Result<Option<&'a Path>, &'a str>, &'a str);
+    let cases: [Case; 3] = [
+        (std::slice::from_ref(&other), Ok(Some(&profile)), &mismatch),
+        (
+            std::slice::from_ref(&other),
+            Err("claude auth fallback chooses the account at launch"),
+            "다음 실행 Claude home을 확정하지 못함",
+        ),
+        (&both, Ok(None), "확인하지 못해 복사하지 않음"),
+    ];
+    for (homes, launch, expected) in cases {
+        let current = f.current.to_str().unwrap();
+        let error = resolve_cwd(Some(current), None, PRIOR, Some(&f.home), homes, launch);
+        let (status, axum::Json(body)) = error.unwrap_err().into_response();
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["error"].as_str().unwrap().contains(expected), "{body}");
+        assert!(
+            !f.home.exists(),
+            "{expected}: nothing is written to the active home"
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), "{}\n");
+    }
 }
