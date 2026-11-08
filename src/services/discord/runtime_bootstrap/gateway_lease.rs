@@ -655,7 +655,16 @@ async fn self_fence_gateway(
     }
 }
 
-type ReleaseReply = tokio::sync::oneshot::Sender<Result<(), String>>;
+/// Why an operator gateway release did not end in a clean handback.
+#[derive(Debug)]
+pub(crate) enum GatewayReleaseError {
+    /// Nothing was released; this node keeps serving or never served.
+    Refused(String),
+    /// The node fenced itself, but the advisory unlock reported an error.
+    UnlockFailed(String),
+}
+
+type ReleaseReply = tokio::sync::oneshot::Sender<Result<(), GatewayReleaseError>>;
 
 /// Operator release channels of the keepalives serving on this node, by provider.
 static RELEASE_REQUESTS: std::sync::LazyLock<
@@ -666,8 +675,15 @@ static RELEASE_REQUESTS: std::sync::LazyLock<
 
 /// Hand this node's gateway for `provider` to the waiting preferred node once, even while
 /// handbacks are suppressed; the breaker state is left untouched.
-pub(crate) async fn request_gateway_release(provider: &ProviderKind) -> Result<(), String> {
-    let not_serving = || format!("this node does not serve the {} gateway", provider.as_str());
+pub(crate) async fn request_gateway_release(
+    provider: &ProviderKind,
+) -> Result<(), GatewayReleaseError> {
+    let not_serving = || {
+        GatewayReleaseError::Refused(format!(
+            "this node does not serve the {} gateway",
+            provider.as_str()
+        ))
+    };
     let sender = RELEASE_REQUESTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -749,11 +765,13 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                             );
                             // Release first: the preferred node is an unbounded
                             // waiter and can only win once the lock is free.
-                            if let Some(lease) = current_lease.take() {
-                                let _ = release_gateway(&gate, lease.unlock()).await;
-                            }
+                            let unlocked = match current_lease.take() {
+                                Some(lease) => release_gateway(&gate, lease.unlock()).await,
+                                None => Ok(()),
+                            };
                             if let Some(reply) = operator_release.take() {
-                                let _ = reply.send(Ok(()));
+                                let _ =
+                                    reply.send(unlocked.map_err(GatewayReleaseError::UnlockFailed));
                             }
                             let (shared, provider) = (&shared_for_lease, &provider_for_lease);
                             self_fence_gateway(shared, provider, &shard_manager).await;
@@ -763,9 +781,9 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                 }
             }
             if let Some(reply) = operator_release {
-                let _ = reply.send(Err(
+                let _ = reply.send(Err(GatewayReleaseError::Refused(
                     "release refused: this node is not a non-preferred holder, or the preferred node is not waiting".into(),
-                ));
+                )));
             }
 
             // Keepalive the held lease. On error the lock connection died (the

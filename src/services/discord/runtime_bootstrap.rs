@@ -60,10 +60,10 @@ mod startup_doctor;
 pub(in crate::services::discord) use self::framework_setup::run_bot_build_slash_commands;
 use self::framework_setup::run_bot_framework_setup;
 use self::gateway_handback_breaker::GatewayHandbackBreaker;
-pub(crate) use self::gateway_lease::request_gateway_release;
 use self::gateway_lease::{
     GatewayLeaseOutcome, run_bot_acquire_gateway_lease, run_bot_spawn_gateway_lease_keepalive,
 };
+pub(crate) use self::gateway_lease::{GatewayReleaseError, request_gateway_release};
 use self::gateway_lease_recovery::spawn_standby_gateway_retry;
 use self::gateway_runtime::run_bot_start_gateway_runtime;
 use self::intake::run_bot_maybe_spawn_intake_worker;

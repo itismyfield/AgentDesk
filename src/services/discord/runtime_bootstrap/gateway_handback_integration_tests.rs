@@ -1356,3 +1356,44 @@ async fn operator_release_hands_a_held_gateway_to_the_waiting_preferred_node_onc
     drop(running);
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn operator_release_reports_a_failed_unlock_and_still_fences_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut running = fixture.backup().await;
+    fixture.hold_handbacks_for(600);
+    fixture.advertise(true).await;
+    // Right after a keepalive, so the next tick cannot see the dead session before the release does.
+    fixture.ticks(1).await;
+    let pid = fixture.holder().await.unwrap();
+    sqlx::query("SELECT pg_terminate_backend($1)")
+        .bind(pid)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    await_within(
+        async {
+            while sqlx::query_scalar::<_, i32>("SELECT pid FROM pg_stat_activity WHERE pid=$1")
+                .bind(pid)
+                .fetch_optional(&fixture.pool)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
+    let answer = await_within(request_gateway_release(&ProviderKind::Claude), WAIT_CAP).await;
+    assert!(
+        matches!(answer, Err(GatewayReleaseError::UnlockFailed(_))),
+        "a failed unlock is reported, not a clean release: {answer:?}"
+    );
+    running.ended().await;
+    drop(running);
+    fixture.close().await;
+}

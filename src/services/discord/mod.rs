@@ -101,7 +101,7 @@ pub(crate) use receipt_settle::settle_v2_drops;
 pub(crate) mod restart_report;
 mod router;
 mod runtime_bootstrap;
-pub(crate) use runtime_bootstrap::request_gateway_release;
+pub(crate) use runtime_bootstrap::{GatewayReleaseError, request_gateway_release};
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
 mod turn_presence;

@@ -327,9 +327,15 @@ pub async fn release_gateway(
 ) -> AppResult<Json<serde_json::Value>> {
     let provider = crate::services::provider::ProviderKind::from_str(&body.provider)
         .ok_or_else(|| AppError::bad_request("unknown provider"))?;
+    use crate::services::discord::GatewayReleaseError;
     crate::services::discord::request_gateway_release(&provider)
         .await
-        .map_err(AppError::conflict)?;
+        .map_err(|error| match error {
+            GatewayReleaseError::Refused(reason) => AppError::conflict(reason),
+            GatewayReleaseError::UnlockFailed(reason) => AppError::internal(format!(
+                "gateway fenced, but the advisory unlock failed: {reason}"
+            )),
+        })?;
     Ok(Json(
         json!({"released": true, "provider": provider.as_str()}),
     ))
