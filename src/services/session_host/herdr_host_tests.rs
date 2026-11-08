@@ -435,6 +435,29 @@ fn herdr_capture_maps_scroll_back_and_rejects_truncation() {
         wrong_source.capture_screen(pane(), 0),
         Err(HostError::Protocol(_))
     ));
+    // A history longer than the window: Herdr omits older rows and keeps the newest whole.
+    let recent = HerdrRequest::PaneRead {
+        pane_id: PANE.into(),
+        source: RecentUnwrapped,
+        lines: Some(80),
+        strip_ansi: true,
+        format: None,
+    };
+    for (rows, whole) in [(80, true), (81, false)] {
+        let text = "row\n".repeat(rows);
+        let window = Scripted::Result(json!({"type": "pane_read", "read": {
+            "pane_id": PANE, "workspace_id": "w1", "tab_id": "w1:1", "source": "recent_unwrapped",
+            "format": "text", "text": text, "revision": 3, "truncated": true
+        }}));
+        let captured = host(vec![(recent.clone(), window)]).capture_screen(pane(), -80);
+        match whole {
+            true => assert_eq!(captured, Ok(text), "the newest 80 rows are a complete read"),
+            false => assert!(
+                matches!(captured, Err(HostError::Protocol(_))),
+                "more rows than requested is no window: {captured:?}"
+            ),
+        }
+    }
 }
 
 #[test]
