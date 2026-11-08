@@ -487,7 +487,7 @@ pub(crate) fn predicted_launch_home(
         crate::services::provider::parse_provider_and_channel_from_tmux_name(session_name)
             .and_then(|(_, channel)| channel.parse().ok())
     });
-    let loaded = load_org_schema_for_auth()?;
+    let (loaded, name) = (load_org_schema_for_auth()?, provider.as_str());
     let schema = loaded.as_ref();
     let catalog = schema
         .and_then(|schema| schema.provider_auth_profiles.clone())
@@ -516,10 +516,7 @@ pub(crate) fn predicted_launch_home(
                     > 1
         });
         if routed {
-            return Err(format!(
-                "{} auth fallback chooses the account at launch",
-                provider.as_str()
-            ));
+            return Err(format!("{name} auth fallback picks the launch account"));
         }
         homes.push(primary.home);
     }
@@ -527,10 +524,9 @@ pub(crate) fn predicted_launch_home(
     homes.dedup();
     match homes.as_slice() {
         [home] => Ok(home.clone()),
-        _ => Err(format!(
-            "the next {} account depends on which agent the channel resolves to ({} homes)",
-            provider.as_str(),
-            homes.len()
+        many => Err(format!(
+            "the next {name} account depends on which agent the channel resolves to ({} homes)",
+            many.len()
         )),
     }
 }
