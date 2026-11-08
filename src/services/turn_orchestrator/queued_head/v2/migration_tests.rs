@@ -75,7 +75,8 @@ fn adopt(file: &Path, channel: u64) -> Result<Owner, String> {
 
 // The pre-notice V1 writer's format: both the queue and reserved original lack notice metadata.
 #[cfg(unix)]
-const LEGACY_V1_RESERVED: &str = include_str!("../fixtures/legacy_v1_reserved.json");
+const LEGACY_V1_RESERVED: &str =
+    include_str!("../../../../../tests/fixtures/queued_head/legacy_v1_reserved.json");
 
 #[cfg(unix)]
 #[tokio::test]
