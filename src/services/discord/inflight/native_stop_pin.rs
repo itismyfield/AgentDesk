@@ -89,6 +89,25 @@ impl NativeBusyChildren {
 }
 
 impl InflightTurnState {
+    /// Whether this row's own verified input record lies inside `range` of the transcript file
+    /// `source` (dev, ino) on `tmux_session`: a frame holding it ends this row's turn, not an older one.
+    pub(in crate::services::discord) fn native_input_within(
+        &self,
+        source: (u64, u64),
+        tmux_session: &str,
+        range: (u64, u64),
+    ) -> bool {
+        self.native_stop_user_pin.as_ref().is_some_and(|pin| {
+            pin.matches_owner(self)
+                && self.tmux_session_name.as_deref() == Some(tmux_session)
+                && pin.input.tmux_session == tmux_session
+                && pin.input.source_file == source
+                && range.0 <= pin.input.range.0
+                && pin.input.range.0 < pin.input.range.1
+                && pin.input.range.1 <= range.1
+        })
+    }
+
     /// Read current proof without granting a missing or foreign child the root's birth.
     pub(in crate::services::discord) fn native_stop_child_proof(
         &self,

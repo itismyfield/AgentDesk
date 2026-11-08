@@ -17,6 +17,7 @@ mod pool_return;
 #[cfg(test)]
 mod pool_return_pg_tests;
 pub use advisory_lock::AdvisoryLockLease;
+pub(crate) use advisory_lock::PooledAdvisoryLock;
 pub use agent_sync::sync_agents_from_config_pg;
 use pool_return::{RETURN_CLEANUP_BUDGET, with_return_cleanup};
 mod shared_config;

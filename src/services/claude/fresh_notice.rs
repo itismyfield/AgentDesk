@@ -22,6 +22,8 @@ pub(super) fn announce(
         channel_id = channel,
         requested_session_id = requested,
         missing_transcript = %missing.display(),
+        resumed = false,
+        reason = %"transcript_missing",
         "Claude resume transcript missing; launching a fresh session instead"
     );
     let Some(channel) = channel else {

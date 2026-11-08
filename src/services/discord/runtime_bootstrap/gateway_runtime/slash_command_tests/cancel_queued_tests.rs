@@ -236,6 +236,153 @@ fn cancel_queued_t1_registration() {
     assert_eq!(v["options"][0]["autocomplete"], true);
 }
 #[test]
+fn cancel_queued_live_delivered_and_cleared_items_are_absent() {
+    isolated(async {
+        let rig = Rig::new().await;
+        let data = authorized().await;
+        let (handle, _) = empty_owner(&data).await;
+        enqueue(&handle, &[A, B]).await;
+        handle
+            .v2_request(|slot| {
+                let owner = slot.as_mut().unwrap();
+                let key = owner.reserve(
+                    serde_json::from_value(attempt(A)).unwrap(),
+                    serde_json::from_value(payload(vec![])).unwrap(),
+                )?;
+                drop(owner.arm(&key, 0)?);
+                owner.settle(&key, true, 1)
+            })
+            .await
+            .unwrap();
+        let choices = rig
+            .invoke(&data, "cancel-queued", Some(("message_id", "")))
+            .await;
+        assert_eq!(choices["choices"].as_array().unwrap().len(), 1);
+        assert_eq!(choices["choices"][0]["value"], B.to_string());
+        assert!(content(&rig.invoke_cancel(&data, None).await).contains("비웠어요"));
+        rig.writes.lock().unwrap().clear();
+        rig.replies.lock().unwrap().clear();
+        enqueue(&handle, &[C]).await;
+        let choices = rig
+            .invoke(&data, "cancel-queued", Some(("message_id", "")))
+            .await;
+        assert_eq!(choices["choices"].as_array().unwrap().len(), 1);
+        assert_eq!(choices["choices"][0]["value"], C.to_string());
+        let retained_data = authorized().await;
+        seeded(&retained_data).await;
+        assert!(content(&rig.invoke_cancel(&retained_data, None).await).contains("비웠어요"));
+        rig.writes.lock().unwrap().clear();
+        rig.replies.lock().unwrap().clear();
+        assert_eq!(
+            rig.invoke(&retained_data, "cancel-queued", Some(("message_id", "")))
+                .await["choices"],
+            json!([])
+        );
+    });
+}
+#[test]
+fn cancel_queued_live_just_notified_front_is_present_and_cancelable() {
+    isolated(async {
+        let rig = Rig::new().await;
+        let data = authorized().await;
+        let _rest = crate::services::discord::rest_for_test(rig.ctx.http.clone());
+        let (handle, _) = empty_owner(&data).await;
+        let intervention =
+            pending_queue_item_to_intervention(item(A), SystemTime::now(), Instant::now());
+        let original =
+            input_owner::ingress::original(&data.provider, channel(), None, &intervention).unwrap();
+        assert!(matches!(
+            original.admit(&handle).await,
+            input_owner::admission::Admission::Accepted(_)
+        ));
+        assert!(
+            input_owner::ingress::held(
+                &data.shared,
+                &handle,
+                channel(),
+                &original,
+                input_owner::ingress::Hold::Modal,
+            )
+            .await
+        );
+        assert!(rig.messages.lock().unwrap().iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("큐에 들어갔습니다"))
+        }));
+        rig.writes.lock().unwrap().clear();
+        handle
+            .v2_request(|slot| {
+                let owner = slot.as_mut().unwrap();
+                let front = owner.front().unwrap();
+                owner.grant_front(&front)?;
+                assert!(owner.claim_turn(A, &front).is_some());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let choices = rig
+            .invoke(&data, "cancel-queued", Some(("message_id", "")))
+            .await;
+        assert_eq!(choices["choices"][0]["value"], A.to_string());
+        let selected = choices["choices"][0]["value"].as_str().unwrap();
+        assert!(content(&rig.invoke_cancel(&data, Some(selected)).await).contains("취소했어요"));
+        assert!(ids(&snapshot(&handle).await).is_empty());
+    });
+}
+#[test]
+fn cancel_queued_live_retained_choice_keeps_label_and_cancels() {
+    isolated(async {
+        let rig = Rig::new().await;
+        let data = authorized().await;
+        let (handle, _) = seeded(&data).await;
+        let choices = rig
+            .invoke(&data, "cancel-queued", Some(("message_id", &D.to_string())))
+            .await;
+        assert_eq!(choices["choices"].as_array().unwrap().len(), 1);
+        let choice = &choices["choices"][0];
+        assert!(choice["name"].as_str().unwrap().contains("보관"));
+        assert_eq!(choice["value"], D.to_string());
+        assert!(
+            content(&rig.invoke_cancel(&data, choice["value"].as_str()).await)
+                .contains("취소했어요")
+        );
+        assert_eq!(ids(&snapshot(&handle).await), [A, B, C, S]);
+        rig.writes.lock().unwrap().clear();
+        rig.replies.lock().unwrap().clear();
+        assert_eq!(
+            rig.invoke(&data, "cancel-queued", Some(("message_id", &D.to_string())))
+                .await["choices"],
+            json!([])
+        );
+    });
+}
+#[test]
+fn cancel_queued_live_latest_waiting_items_take_the_25_choices() {
+    isolated(async {
+        let rig = Rig::new().await;
+        let data = authorized().await;
+        let (handle, _) = empty_owner(&data).await;
+        enqueue(&handle, &(B..B + 30).collect::<Vec<_>>()).await;
+        let choices = rig
+            .invoke(&data, "cancel-queued", Some(("message_id", "")))
+            .await;
+        let actual: Vec<_> = choices["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|choice| choice["value"].as_str().unwrap().to_string())
+            .collect();
+        let expected: Vec<_> = (B + 5..B + 30).rev().map(|id| id.to_string()).collect();
+        assert_eq!(actual, expected);
+        let oldest = rig
+            .invoke(&data, "cancel-queued", Some(("message_id", &B.to_string())))
+            .await;
+        assert_eq!(oldest["choices"].as_array().unwrap().len(), 1);
+        assert_eq!(oldest["choices"][0]["value"], B.to_string());
+    });
+}
+#[test]
 fn cancel_queued_t2_v2_candidates_are_read_only_and_bounded() {
     isolated(async {
         let rig = Rig::new().await;
@@ -256,7 +403,7 @@ fn cancel_queued_t2_v2_candidates_are_read_only_and_bounded() {
                 .iter()
                 .map(|c| c["value"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            [B.to_string(), C.to_string(), S.to_string(), D.to_string()]
+            [S.to_string(), C.to_string(), B.to_string(), D.to_string()]
         );
         let retained_id = D.to_string();
         let synthetic_id = S.to_string();

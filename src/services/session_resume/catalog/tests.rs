@@ -139,8 +139,12 @@ fn explicit_wrong_cwd_returns_422_and_actual_location_missing_transcript_refuses
     .unwrap_err();
     let (status, axum::Json(body)) = missing.into_response();
     assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(body["error"].as_str().unwrap().contains("No transcript"));
-    assert!(body["error"].as_str().unwrap().contains("config home"));
+    let error = body["error"].as_str().unwrap();
+    assert!(
+        error.contains("세션 33333333 트랜스크립트를 찾지 못함(검색 범위 2개)"),
+        "{error}"
+    );
+    assert!(error.contains("config home"), "{error}");
     let invalid = resolve_cwd(
         Some(f.current.to_str().unwrap()),
         None,

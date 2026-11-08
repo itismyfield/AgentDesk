@@ -33,6 +33,9 @@ mod activate_command;
 mod activate_preflight;
 #[path = "activate_route.rs"]
 mod activate_route;
+#[cfg(test)]
+#[path = "advisory_return_pg_tests.rs"]
+mod advisory_return_pg_tests;
 #[path = "campaign_handoff.rs"]
 mod campaign_handoff;
 #[path = "command.rs"]

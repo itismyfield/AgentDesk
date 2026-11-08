@@ -3,6 +3,56 @@ use std::time::Duration;
 use sqlx::Connection;
 use sqlx::{PgConnection, PgPool};
 
+/// A pooled session returns to the pool only after its advisory lock was explicitly released.
+pub(crate) struct PooledAdvisoryLock {
+    conn: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
+    namespace: String,
+    key: String,
+}
+
+impl PooledAdvisoryLock {
+    pub(crate) async fn acquire(
+        pool: &PgPool,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Self, sqlx::Error> {
+        let mut guard = Self {
+            conn: Some(pool.acquire().await?),
+            namespace: namespace.to_owned(),
+            key: key.to_owned(),
+        };
+        if let Some(conn) = guard.conn.as_mut() {
+            sqlx::query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))")
+                .bind(&guard.namespace)
+                .bind(&guard.key)
+                .execute(&mut **conn)
+                .await?;
+        }
+        Ok(guard)
+    }
+
+    pub(crate) async fn unlock(mut self) -> Result<(), sqlx::Error> {
+        if let Some(conn) = self.conn.as_mut() {
+            sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
+                .bind(&self.namespace)
+                .bind(&self.key)
+                .execute(&mut **conn)
+                .await?;
+        }
+        drop(self.conn.take());
+        Ok(())
+    }
+}
+
+impl Drop for PooledAdvisoryLock {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            // An interrupted acquisition or unlock can still own the server lock; end that session.
+            drop(conn.detach());
+        }
+    }
+}
+
 /// Session-scoped advisory lock held on a dedicated connection; the server frees it
 /// when it sees that session end (drop, `unlock()`, or an idle expiry it enforces).
 pub struct AdvisoryLockLease {
@@ -187,3 +237,7 @@ pub(crate) mod test_seam {
 #[cfg(test)]
 #[path = "advisory_lock_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "pooled_advisory_lock_pg_tests.rs"]
+mod pooled_advisory_lock_pg_tests;

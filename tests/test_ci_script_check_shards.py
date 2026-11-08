@@ -24,6 +24,14 @@ SCRIPT = REPO_ROOT / "scripts/ci-script-checks.sh"
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 JUDGE_JOB = "required_contexts"
+SHARD_JOBS = {"scripts": "cargo", "scripts_guards": "guards",
+              "scripts_census": "census", "scripts_contracts": "contracts"}
+CENSUS_CHECKS = {
+    "Destructive call-site per-file ratchet (#5071 T3-A4)",
+    "Durable frontier writer per-file call-site allowlist (#5071)",
+    "TUI O writer census: Legacy send sites and cutover gates",
+    "Dormant boot retirement census",
+}
 
 
 def clean_env(**extra: str) -> dict[str, str]:
@@ -54,9 +62,9 @@ def workflow_shards(jobs: dict) -> dict[str, str]:
 
 
 def list_checks(script: Path, shard: str = "") -> subprocess.CompletedProcess[str]:
-    env = clean_env(SCRIPT_CHECK_LIST="1", SCRIPT_CHECK_SHARD=shard)
+    env = clean_env(SCRIPT_CHECK_LIST="1")
     return subprocess.run(
-        ["bash", str(script)], cwd=REPO_ROOT, env=env,
+        ["bash", str(script), *(["--shard", shard] if shard else [])], cwd=REPO_ROOT, env=env,
         capture_output=True, text=True, timeout=60,
     )
 
@@ -74,7 +82,7 @@ class ScriptCheckShardOwnership(unittest.TestCase):
 
     def assert_shards_cover_every_check_once(self, workflow: Path) -> None:
         shards = workflow_shards(load_jobs(workflow))
-        self.assertGreaterEqual(len(shards), 2, shards)
+        self.assertEqual(shards, SHARD_JOBS)
         self.assertNotIn("", shards.values(), shards)
         self.assertEqual(len(set(shards.values())), len(shards), shards)
 
@@ -97,6 +105,35 @@ class ScriptCheckShardOwnership(unittest.TestCase):
                 self.assertEqual({owner for owner, _ in selected}, {shard})
                 union.extend(selected)
         self.assertEqual(sorted(union), sorted(full))
+
+    def test_cli_and_environment_select_the_same_shard(self) -> None:
+        for shard in SHARD_JOBS.values():
+            with self.subTest(shard=shard):
+                result = subprocess.run(
+                    ["bash", str(SCRIPT)], cwd=REPO_ROOT,
+                    env=clean_env(SCRIPT_CHECK_LIST="1", SCRIPT_CHECK_SHARD=shard),
+                    capture_output=True, text=True, timeout=60,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, list_checks(SCRIPT, shard).stdout)
+        for args in (["--shard"], ["--shard", ""], ["--shard", "nowhere"],
+                     ["--shard", "census", "extra"], ["--unknown", "census"]):
+            with self.subTest(args=args):
+                result = subprocess.run(
+                    ["bash", str(SCRIPT), *args], cwd=REPO_ROOT,
+                    env=clean_env(SCRIPT_CHECK_LIST="1"), capture_output=True, text=True, timeout=60,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("\t", result.stdout)
+
+    def test_heavy_censuses_run_only_in_census(self) -> None:
+        census = list_checks(SCRIPT, "census")
+        guards = list_checks(SCRIPT, "guards")
+        self.assertEqual(census.returncode, 0, census.stderr)
+        self.assertEqual(guards.returncode, 0, guards.stderr)
+        self.assertEqual({owner for owner, _ in listed(census)}, {"census"})
+        self.assertEqual({title for _, title in listed(census)}, CENSUS_CHECKS)
+        self.assertTrue(CENSUS_CHECKS.isdisjoint(title for _, title in listed(guards)))
 
     def test_sharded_run_rejects_a_check_without_a_shard(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
@@ -155,12 +192,12 @@ class GiantDeadlineReporterRegistration(unittest.TestCase):
 class ScriptChecksJudgeAggregation(unittest.TestCase):
     """Replay the workflow's judge step for Script checks against upstream shard results."""
 
-    def run_judge(self, job: dict, results: dict[str, str]) -> str:
+    def run_judge(self, job: dict, results: dict[str, str | None]) -> str:
         if job.get("if") != "${{ always() }}":
             raise AssertionError(f"unmodelled judge condition: {job.get('if')}")
         outputs = dict.fromkeys(("rust_tests", "rust_or_policy", "relay_contract", "high_risk_recovery",
                                  "dashboard", "cross_os_rust"), "true") | {"rust_tests_skip": "false"}
-        needs = {name: {"result": results[name], "outputs": outputs if name == "changes" else {}} for name in job["needs"]}
+        needs = {name: {"result": results[name], "outputs": outputs if name == "changes" else {}} for name in job["needs"] if results.get(name) is not None}
         step = next(step for step in job["steps"] if step.get("name") == "Judge required checks")
         env = {key: str(value) for key, value in step["env"].items()}
         self.assertEqual(env.pop("NEEDS_JSON"), "${{ toJSON(needs) }}")
@@ -185,12 +222,13 @@ class ScriptChecksJudgeAggregation(unittest.TestCase):
         sys.path.pop(0)
         self.assertIn("Script checks", nextest_required.CONTEXTS)
         self.assertEqual(job["name"], nextest_required.GATE)
-        shard_jobs = sorted(workflow_shards(jobs))
+        self.assertEqual(workflow_shards(jobs), SHARD_JOBS)
+        shard_jobs = sorted(SHARD_JOBS)
         self.assertLessEqual(set(shard_jobs), set(job["needs"]))
         baseline = {name: "success" for name in job["needs"]}
         self.assertEqual(self.run_judge(job, baseline), "success")
         for shard_job in shard_jobs:
-            for outcome in ("failure", "cancelled", "skipped", ""):
+            for outcome in ("failure", "cancelled", "skipped", "", None):
                 with self.subTest(job=shard_job, result=outcome or "<empty>"):
                     results = {**baseline, shard_job: outcome}
                     self.assertEqual(self.run_judge(job, results), "failure")

@@ -53,6 +53,9 @@ mod receipt_watcher_harness_tests;
 #[path = "adopted_run_first_output_tests.rs"]
 mod adopted_run_first_output_tests;
 
+#[path = "o_tail_owned_close_tests.rs"]
+mod o_tail_owned_close_tests;
+
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
 const CLAUDE: ProviderKind = ProviderKind::Claude;
 static LOG: Mutex<Vec<u8>> = Mutex::new(Vec::new());

@@ -10,7 +10,7 @@ REAL_FAILURE_PREDICATE="$SCRIPT_DIR/real-failure-predicate.sh"
 source "$REAL_FAILURE_PREDICATE"
 TMP_DIR="$(mktemp -d)"
 SUMMARY_ROWS="$TMP_DIR/summary-rows.md"
-# The nextest worker jobs are the only retry candidates; the capture is the worker index.
+# Workers are retry candidates; ambiguous guards timeouts require manual retry.
 WORKER_JOB_REGEX='^Rust tests \(worker (0|[1-9][0-9]?)\)$'
 WORKER_JOB_NAME="Rust tests (worker 0)"
 WINDOWS_ADVISORY_JOB_NAME="Fast check + non-PG tests (windows-latest)"
@@ -44,6 +44,7 @@ Environment:
   RUN_ID             CI PR workflow run id
   RUN_ATTEMPT        initial attempt to classify (only attempt 1 may retry)
   RERUN_DRY_RUN      set to 1 to classify historical attempts without rerunning
+  GUARDS_TIMEOUT_MINUTES  shared guards/census job timeout (diagnosis only)
 EOF
 }
 
@@ -74,7 +75,7 @@ is_positive_integer() {
 # shellcheck disable=SC2016
 FAILED_JOB_ROWS_JQ='
     .jobs[]
-    | select(.conclusion == "failure")
+    | select(.conclusion == "failure" or .conclusion == "cancelled")
     | [
         (.id | tostring),
         (if (.steps | type) == "array" and ((.steps | length) > 0)
@@ -88,6 +89,22 @@ FAILED_JOB_ROWS_JQ='
 failed_job_rows() {
   local jobs_payload="$1"
   jq -r "$FAILED_JOB_ROWS_JQ" "$jobs_payload"
+}
+
+# Elapsed time plus cancellation cannot distinguish a timeout from user cancellation.
+# Use this evidence only for a manual-retry diagnosis, never for automatic retry.
+job_has_suspected_timeout() {
+  local jobs="$1" job_id="$2" timeout_minutes="$3" log_path="$4"
+  is_positive_integer "$timeout_minutes" || return 1
+  grep -a -E -q '^([0-9][0-9T:.-]*Z )?##\[error\]The operation was canceled\.[[:space:]]*$' "$log_path" || return 1
+  jq -e --argjson id "$job_id" --argjson minutes "$timeout_minutes" '
+    [.jobs[] | select(.id == $id)] | length == 1 and (.[0] |
+      .status == "completed" and .conclusion == "cancelled" and
+      (.steps | type) == "array" and
+      any(.steps[]; .name == "Run script checks" and .status == "completed" and .conclusion == "cancelled") and
+      all(.steps[]; .conclusion != "failure") and
+      ((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) >= ($minutes * 60))
+    ' "$jobs" >/dev/null 2>&1
 }
 
 # #5207 (R2): this literal must stay byte-identical to the validated
@@ -513,7 +530,7 @@ validate_attempt_payload() {
   local expected_attempt="$2"
   jq -e \
     --argjson attempt "$expected_attempt" \
-    '.name == "CI PR" and .event == "pull_request" and .status == "completed" and .conclusion == "failure" and .run_attempt == $attempt' \
+    '.name == "CI PR" and .event == "pull_request" and .status == "completed" and (.conclusion == "failure" or .conclusion == "cancelled") and .run_attempt == $attempt' \
     "$payload" >/dev/null
 }
 
@@ -526,7 +543,7 @@ latest_attempt_is_still_failed() {
   gh api "repos/$repo/actions/runs/$run_id" >"$payload" 2>/dev/null || return 1
   jq -e \
     --argjson attempt "$expected_attempt" \
-    '.status == "completed" and .conclusion == "failure" and .run_attempt == $attempt' \
+    '.status == "completed" and (.conclusion == "failure" or .conclusion == "cancelled") and .run_attempt == $attempt' \
     "$payload" >/dev/null
 }
 
@@ -549,7 +566,7 @@ run_classifier() {
     return 0
   fi
 
-  # Only the initial failed attempt may request one retry per worker.
+  # Only the initial attempt may request one retry per candidate job.
   if (( run_attempt >= 2 )); then
     decision="no-op:attempt-cap"
     write_summary "$run_id" "$run_attempt" "$decision"
@@ -615,6 +632,19 @@ run_classifier() {
       regression_count=$((regression_count + 1))
     fi
 
+    if jq -e --argjson id "$job_id" '.jobs[] | select(.id == $id) | .conclusion == "cancelled"' "$jobs_payload" >/dev/null; then
+      if [[ "$job_class" != "regression" ]]; then
+        unknown_count=$((unknown_count + 1))
+        if [[ "$job_name" == "Script checks runner (guards)" || "$job_name" == "Script checks runner (census)" ]] &&
+          job_has_suspected_timeout "$jobs_payload" "$job_id" "${GUARDS_TIMEOUT_MINUTES:-}" "$log_path" &&
+          ! log_has_repo_config_fault "$log_path"; then
+          job_class="suspected-job-timeout:manual-retry"
+        fi
+      fi
+      append_summary_row "$job_id" "$job_class"
+      continue
+    fi
+
     if is_worker_job "$job_name"; then
       worker_index="${BASH_REMATCH[1]}"
       if [[ "$seen_worker_names" == *$'\n'"$job_name"$'\n'* ]]; then
@@ -653,7 +683,7 @@ run_classifier() {
   done < <(failed_job_rows "$jobs_payload")
 
   decision="$(decide_retry "$worker_failed_count" "$worker_classified_count" "$regression_count" "$unknown_count")"
-  if [[ "$decision" == "would-rerun:infra" ]] &&
+  if [[ "$decision" == "would-rerun:infra" ]] && (( worker_failed_count > 0 )) &&
     ! worker_artifacts_allow_retry "$repo" "$run_id" "$run_attempt" "${worker_entries[@]}"; then
     decision="no-op:worker-artifact-veto"
   fi
@@ -669,14 +699,13 @@ run_classifier() {
     return 0
   fi
 
-  if ! latest_attempt_is_still_failed "$repo" "$run_id" "$run_attempt"; then
-    decision="no-op:stale-attempt"
-    write_summary "$run_id" "$run_attempt" "$decision"
-    echo "decision=$decision"
-    return 0
-  fi
-
   for job_id in ${worker_job_ids[@]+"${worker_job_ids[@]}"}; do
+    if ! latest_attempt_is_still_failed "$repo" "$run_id" "$run_attempt"; then
+      decision="no-op:stale-attempt"
+      write_summary "$run_id" "$run_attempt" "$decision"
+      echo "decision=$decision"
+      return 0
+    fi
     if ! python3 "$SCRIPT_DIR/pr_head_current.py" "$repo" "$attempt_payload"; then
       write_summary "$run_id" "$run_attempt" "no-op:stale-head"
       echo "decision=no-op:stale-head"

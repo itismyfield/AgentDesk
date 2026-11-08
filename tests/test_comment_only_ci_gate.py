@@ -44,7 +44,7 @@ SKIPPED_WHEN_COMMENT_ONLY = (
     "check_fast_cross_os",
     "check_fast_cross_os_targets",
 )
-KEPT_WHEN_COMMENT_ONLY = ("scripts", "scripts_guards", "scripts_contracts")
+KEPT_WHEN_COMMENT_ONLY = ("scripts", "scripts_guards", "scripts_census", "scripts_contracts")
 KEPT_FOR_INCLUDED_RUST = {"rust_build", "base_compare", "rust_tests", "test_evidence", "lint",
                           "relay_authority_mutations", "pg15_owner_proof"}
 REQUIRED_CONTEXTS = (
@@ -764,7 +764,7 @@ N_JOBS = ("rust_build", "base_compare", "rust_tests", "test_evidence")
 CONTEXTS_OF = {
     **{job: set(REQUIRED_CONTEXTS) for job in N_JOBS},
     "lint": {"Lint", "Fast check (ubuntu-latest)"},
-    "scripts": {"Script checks"}, "scripts_guards": {"Script checks"}, "scripts_contracts": {"Script checks"},
+    "scripts": {"Script checks"}, "scripts_guards": {"Script checks"}, "scripts_census": {"Script checks"}, "scripts_contracts": {"Script checks"},
     "dashboard": {"Dashboard (Node 22)"},
     "pg15_owner_proof": {"Fast targeted tests (ubuntu-latest)"},
     "relay_authority_mutations": {"relay-authority-contract"},

@@ -237,6 +237,7 @@ pub(crate) async fn start_owner_front(
             submission.owner = Some(owner);
             finish_admitted_local(deps, permit, submission).await
         }
+        IntakeAdmission::DeferredTurnMode(_) => Err(super::TURN_MODE_AWAITED.into()),
         _ => Err("NotSent(\"owner_front_not_admitted\")".into()),
     }
 }

@@ -245,11 +245,11 @@ lib 시험 identity는 `rust_build`의 nextest list와 소스 인벤토리 대�
 
 ### Script checks 샤드
 
-- PR CI는 `ci-script-checks.sh`의 각 검사를 `if run_check <shard> "<title>"; then … fi`로 `guards`·`contracts`·`cargo` 샤드 중 하나에 고정하고, 샤드마다 별도 잡(`scripts_guards`, `scripts_contracts`, `cargo`는 기존 `scripts`)이 `SCRIPT_CHECK_SHARD`로 자기 샤드만 실행한다. Rust toolchain·캐시는 `cargo` 샤드 잡에만 있다. 새 샤드 잡의 raw job 전체(checkout·setup·install·run, `timeout-minutes: 45`)는 `check-ci-runner-hardening.sh`가 고정한다.
-- 샤드가 없는 검사(`banner`만 연 검사)와 모르는 샤드 이름은 모든 샤드·목록 실행에서 실패한다. `run_check` 블록 밖 최상위 명령은 DEBUG trap이 실행 전에 막지만, 바로 앞 블록을 소유한 샤드에서는 그 블록 안으로 간주돼 실행된다. 다른 샤드와 목록 실행은 실패하므로 보장은 `CI required`의 `Script checks` 하위 판정이 FAIL이 되는 것이다. `SCRIPT_CHECK_LIST=1`은 `shard<TAB>title` 목록만 출력하고, `SCRIPT_CHECK_SHARD` 미설정 로컬 실행은 전 검사를 돈다.
+- PR CI는 `ci-script-checks.sh`의 각 검사를 `if run_check <shard> "<title>"; then … fi`로 `guards`·`census`·`contracts`·`cargo` 샤드 중 하나에 고정하고, 샤드마다 별도 잡(`scripts_guards`, `scripts_census`, `scripts_contracts`, `cargo`는 기존 `scripts`)이 `SCRIPT_CHECK_SHARD`로 자기 샤드만 실행한다. Rust toolchain·캐시는 `cargo` 샤드 잡에만 있다. 새 샤드 잡의 raw job 전체(checkout·setup·install·run, `timeout-minutes: 45`)는 `check-ci-runner-hardening.sh`가 고정한다.
+- 샤드가 없는 검사(`banner`만 연 검사)와 모르는 샤드 이름은 모든 샤드·목록 실행에서 실패한다. `run_check` 블록 밖 최상위 명령은 DEBUG trap이 실행 전에 막지만, 바로 앞 블록을 소유한 샤드에서는 그 블록 안으로 간주돼 실행된다. 다른 샤드와 목록 실행은 실패하므로 보장은 `CI required`의 `Script checks` 하위 판정이 FAIL이 되는 것이다. `SCRIPT_CHECK_LIST=1`은 `shard<TAB>title` 목록만 출력하고, `--shard <name>` 또는 `SCRIPT_CHECK_SHARD`로 선택하며, 둘 다 미설정인 로컬 실행은 전 검사를 돈다.
 - 이 가드가 `Script checks` 하위 판정(곧 `CI required`)을 FAIL로 만드는 것은 배정 누락·미등록 banner·목록 밖 추가 명령이다. 등록된 검사 본문을 조건으로 건너뛰는 형태(`if run_check … && false; then`, 본문 안 `if false`)는 기계로 막지 않으며 리뷰 대상이다.
-- main push CI(`ci-main.yml`)도 같은 세 샤드를 `Main script checks`(`scripts`, `cargo`)·`Main script checks (guards)`·`Main script checks (contracts)` 잡으로 나눠 병렬로 돈다. 세 잡은 main 전용 env(`GFP_EVENT_NAME`·`GFP_REPOSITORY`·`GFP_CANDIDATE_SHA`, `TEST_LANE_BASELINE_REF=HEAD`)를 똑같이 두고, Rust·업로드는 `cargo` 샤드 잡에만 있다. 배포 게이트는 run 전체 결론이므로 한 샤드라도 실패하면 그 SHA는 배포되지 않는다. `check-ci-runner-hardening.sh`가 잡 집합·env·업로드 위치를, `tests/test_ci_script_check_shards.py`가 샤드 합집합이 전 검사와 같음을 검사한다.
-- `CI required`의 `Script checks` 하위 판정은 세 샤드 잡 결과를 모두 읽으므로 한 샤드라도 success가 아니면 실패한다. `tests/test_ci_script_check_shards.py`가 샤드 소유와 미러 집계를 검사한다.
+- main push CI(`ci-main.yml`)도 같은 네 샤드를 `Main script checks`(`scripts`, `cargo`)·`Main script checks (guards)`·`Main script checks (census)`·`Main script checks (contracts)` 잡으로 나눠 병렬로 돈다. 네 잡은 main 전용 env(`GFP_EVENT_NAME`·`GFP_REPOSITORY`·`GFP_CANDIDATE_SHA`, `TEST_LANE_BASELINE_REF=HEAD`)를 똑같이 두고, Rust·업로드는 `cargo` 샤드 잡에만 있다. 배포 게이트는 run 전체 결론이므로 한 샤드라도 실패하면 그 SHA는 배포되지 않는다. `check-ci-runner-hardening.sh`가 잡 집합·env·업로드 위치를, `tests/test_ci_script_check_shards.py`가 샤드 합집합이 전 검사와 같음을 검사한다.
+- `CI required`의 `Script checks` 하위 판정은 네 샤드 잡 결과를 모두 읽으므로 한 샤드라도 success가 아니면 실패한다. `tests/test_ci_script_check_shards.py`가 샤드 소유와 미러 집계를 검사한다.
 - 로컬에서 `python3` 이 3.10 이하이면 `PYTHON=/path/to/python3.11 ./scripts/ci-script-checks.sh` 로 같은 정책을 재현한다. 지원하지 않는 Python 은 check 본문 실행 전에 명확한 오류로 실패해야 한다.
 
 ## 3. High-risk recovery lane test axes
