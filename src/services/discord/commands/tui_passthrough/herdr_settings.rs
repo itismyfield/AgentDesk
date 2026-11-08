@@ -169,26 +169,32 @@ pub(super) async fn effort(
         let send =
             |plan: &[input::TuiInputAction]| host_input::run_herdr(pane, plan, None).into_legacy();
         send(&[Literal("/effort".into()), Enter])?;
-        wait(|| {
+        let overlay = wait(|| {
             pane.capture(-80)
                 .filter(|c| tc::tmux_capture_indicates_claude_tui_selector_open(c))
                 .ok_or("effort overlay 열림 미확인".into())
         })?;
+        let labels = overlay
+            .rsplit_once("Effort")
+            .and_then(|(_, s)| s.split_once('←'));
+        if !labels.is_some_and(|(s, _)| {
+            s.split(|c: char| !c.is_alphanumeric())
+                .filter(|s| !s.is_empty())
+                .eq(["low", "medium", "high", "xhigh", "max"])
+        }) {
+            return Err("effort 옵션 배치 미확인".into());
+        }
         let mut plan = vec![Left; 4];
         plan.extend(std::iter::repeat_n(Right, level as usize));
         plan.push(Enter);
         send(&plan)?;
         wait(|| {
-            let value = record(native, after).map_err(str::to_string)?;
-            let seen = value["effort"]["level"]
-                .as_str()
-                .ok_or("effort.level 없는 기록")?;
-            (seen == level.as_str())
+            let seen = &record(native, after).map_err(str::to_string)?["effort"]["level"];
+            (seen.as_str() == Some(level.as_str()))
                 .then_some(())
                 .ok_or_else(|| format!("effort.level 불일치: `{seen}`"))
         })
-        .map_err(|reason| format!("적용 미확인: {reason}"))?;
-        Ok(())
+        .map_err(|reason| format!("적용 미확인: {reason}"))
     })
     .await
 }

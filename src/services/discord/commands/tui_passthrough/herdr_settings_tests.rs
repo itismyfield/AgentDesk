@@ -285,6 +285,10 @@ fn herdr_effort_applies_and_reports_only_fresh_matching_level_pg() {
                 .session_reset_pending
                 .contains(&ChannelId::new(CHANNEL))
         );
+        rig.answer("pane.read", screen(READY));
+        rig.answer_after_send("pane.read", screen("  Effort   low ─ medium ─ [high] ─ xhigh ─ max\n  ←/→ to adjust · Enter to confirm · Esc to cancel"));
+        fx.record_on_confirm(&rig, json!({"session_id":NATIVE,"written_at":"fresh","effort":{"level":"high"}}));
+        assert!(fx.command().await.contains("적용했습니다"), "decorated known layout");
         std::fs::remove_file(&fx.record).unwrap();
         rig.on_send(|_| {});
         rig.answer("pane.read", screen(READY));
@@ -835,5 +839,237 @@ fn herdr_thread_fast_targets_runtime_pane_without_parent_reset_pg() {
         fx.assert_fast_preserved(rig,keys,thread).await;
         fx.finish().await;
     })
+    });
+}
+
+#[test]
+fn herdr_first_input_and_effort_never_submit_mixed_content_pg() {
+    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_INSTANCE_ID",
+        std::ffi::OsStr::new(NODE),
+    );
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &crate::config::runtime_root().unwrap().join("missing.yaml"),
+    );
+    let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(CHANNEL, NODE)]);
+    let _hosting = hosting();
+    let rig = HerdrRig::start();
+    runtime(&rig, Arc::new(AtomicUsize::new(0))).block_on(async {
+        use crate::services::claude::herdr_turn::{HerdrTurn, owned_prompt_for_tests};
+        use crate::services::claude_tui::owner_input::{self, Lineage};
+        use crate::services::session_host::herdr_socket_rig_tests::HerdrRequest;
+        let fx = Fixture::new(&rig).await;
+        // Normal submission must leave a ready composer; only /effort opens the overlay.
+        rig.answer_after_send("pane.read", screen(READY));
+        let submitted = Arc::new(std::sync::Mutex::new((String::new(), Vec::<String>::new())));
+        let seen = submitted.clone();
+        rig.on_send(move |params| {
+            let mut state = seen.lock().unwrap();
+            if let Some(text) = params["text"].as_str() {
+                state.0.push_str(
+                    text.trim_start_matches("\x1b[200~")
+                        .trim_end_matches("\x1b[201~"),
+                );
+            }
+            if params["keys"] == json!(["enter"]) {
+                let text = std::mem::take(&mut state.0);
+                state.1.push(text);
+            }
+        });
+        let (captured_tx, captured_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (literal_tx, literal_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let captured = std::sync::atomic::AtomicBool::new(false);
+        rig.on_reply(move |call| {
+            if matches!(
+                call.request,
+                HerdrRequest::PaneRead {
+                    strip_ansi: false,
+                    ..
+                }
+            ) && !captured.swap(true, Ordering::SeqCst)
+            {
+                captured_tx.send(()).unwrap();
+                recv_within(&release_rx.lock().unwrap(), WAIT_CAP);
+            }
+        });
+        let done_rx = std::sync::Mutex::new(done_rx);
+        let target = crate::services::session_host::herdr_endpoints().target(&fx.bound).unwrap();
+        let _actions = crate::services::claude_tui::host_input::watch_actions(target, move |action| {
+            if matches!(action, crate::services::claude_tui::input::TuiInputAction::Literal(text) if text == "/effort") {
+                literal_tx.send(()).unwrap();
+                recv_within(&done_rx.lock().unwrap(), WAIT_CAP);
+            }
+        });
+        let record = fx.bound.clone();
+        let pool = fx.shared.pg_pool.as_ref().unwrap().clone();
+        let prompt = "normal first prompt";
+        let normal = tokio::task::spawn_blocking(move || {
+            let _launch = owner_input::install_launch(Box::new(move |_, _, _, _, send| {
+                send(prompt.into()).map_err(|e| e.into_legacy())
+            }));
+            let loc = record.location.as_ref().unwrap();
+            let turn = HerdrTurn {
+                pool: &pool,
+                owner: record.owner.clone(),
+                channel_id: CHANNEL,
+                endpoint: crate::services::herdr_launch::HerdrLaunchEndpoint {
+                    execution_node: NODE.into(),
+                    config_key: KEY.into(),
+                    socket_addr: loc.socket_addr.clone(),
+                    herdr_session: SESSION.into(),
+                },
+                row: None,
+                prompt,
+                working_dir: "/work",
+                session_id: Some(NATIVE),
+                force_fresh: false,
+                system_prompt: None,
+                model: None,
+                hook_endpoint: None,
+                cancel: None,
+            };
+            let result = owned_prompt_for_tests(
+                &turn,
+                &record,
+                (
+                    NATIVE,
+                    crate::config::runtime_root()
+                        .unwrap()
+                        .join("not-created.jsonl"),
+                ),
+                Lineage::Existing,
+            );
+            done_tx.send(()).unwrap();
+            result
+        });
+        recv_within(&captured_rx, WAIT_CAP);
+        let normal_holds_composer =
+            composer_lock::try_with_composer_mutation_lock(&fx.logical, || ()).is_none();
+        let shared = fx.shared.clone();
+        let command = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(effort_save_notice(
+                &shared,
+                "test-token",
+                ChannelId::new(CHANNEL),
+                &ProviderKind::Claude,
+                EffortLevel::High,
+            ))
+        });
+        await_within(
+            async {
+                while rig
+                    .requests()
+                    .iter()
+                    .filter(|r| r["method"] == "pane.read")
+                    .count()
+                    < 2
+                {
+                    tokio::task::yield_now().await;
+                }
+            },
+            WAIT_CAP,
+        )
+        .await;
+        // With the fence removed, force the reported stale-capture interleaving before releasing.
+        if !normal_holds_composer {
+            await_within(
+                tokio::task::spawn_blocking(move || recv_within(&literal_rx, WAIT_CAP)),
+                WAIT_CAP,
+            )
+            .await
+            .unwrap();
+        }
+        release_tx.send(()).unwrap();
+        await_within(normal, WAIT_CAP).await.unwrap().unwrap();
+        let notice = await_within(command, WAIT_CAP).await.unwrap();
+        assert!(notice.contains("overlay"), "{notice}");
+        assert_eq!(
+            submitted.lock().unwrap().1,
+            [prompt, "/effort"],
+            "first-input Paste/Enter and effort Literal/Enter must stay separate"
+        );
+        fx.finish().await;
+    });
+}
+
+#[test]
+fn herdr_effort_rejects_unknown_option_layout_before_navigation_pg() {
+    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_INSTANCE_ID",
+        std::ffi::OsStr::new(NODE),
+    );
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &crate::config::runtime_root().unwrap().join("missing.yaml"),
+    );
+    let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(CHANNEL, NODE)]);
+    let _hosting = hosting();
+    for labels in [
+        "low medium high max",
+        "medium low high xhigh max",
+        "low medium high xhigh max ultra",
+        "low medium high xhigh max\nultra",
+    ] {
+        let rig = HerdrRig::start();
+        runtime(&rig, Arc::new(AtomicUsize::new(0))).block_on(async {
+            let fx = Fixture::new(&rig).await;
+            rig.answer_after_send("pane.read", screen(&format!("Effort\n{labels}\n←/→ to adjust · Enter to confirm")));
+            let notice = fx.command().await;
+            assert_eq!(rig.sends().len(), 2, "unknown options permit only opening /effort and Enter, no navigation or confirmation: {labels}; {notice}");
+            assert!(!notice.contains("적용했습니다"), "{notice}");
+            fx.finish().await;
+        });
+    }
+}
+
+#[test]
+fn herdr_effort_partial_navigation_failure_sends_no_confirmation_pg() {
+    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_INSTANCE_ID",
+        std::ffi::OsStr::new(NODE),
+    );
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &crate::config::runtime_root().unwrap().join("missing.yaml"),
+    );
+    let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(CHANNEL, NODE)]);
+    let _hosting = hosting();
+    let rig = HerdrRig::start();
+    runtime(&rig, Arc::new(AtomicUsize::new(0))).block_on(async {
+        let fx = Fixture::new(&rig).await;
+        rig.answer_sends_then_leave_unanswered(3);
+        let notice = fx.command().await;
+        let sends = rig.sends();
+        assert_eq!(
+            sends.len(),
+            4,
+            "stop after the second navigation send loses its ACK: {sends:?}"
+        );
+        assert_eq!(
+            sends
+                .iter()
+                .filter(|p| p["keys"] == json!(["enter"]))
+                .count(),
+            1,
+            "only the opening Enter may be sent"
+        );
+        assert!(!notice.contains("적용했습니다"), "{notice}");
+        fx.finish().await;
     });
 }

@@ -14,8 +14,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use super::herdr::contract::HerdrTransport;
+use super::herdr::contract::{HerdrOutcome, HerdrTransport, ServerHello, ServerWitness, Witnessed};
 use super::herdr::model::HerdrEndpoint;
+pub(crate) use super::herdr::model::{HerdrCall, HerdrRequest};
 use super::herdr::observe::{RestoreResume, RestoreUnverified};
 use super::herdr::pane_probe::ProcessOs;
 use super::herdr::pane_probe::tests::{FakeOs, context, env_naming};
@@ -86,6 +87,37 @@ type OnSend = Arc<Mutex<Option<Box<dyn FnMut(&Value) + Send>>>>;
 /// Prefixes an answer that takes its method's place once a pane write arrives.
 const AFTER_SEND: &str = "after-send:";
 
+type ReplyHook = Arc<dyn Fn(&HerdrCall) + Send + Sync>;
+type OnReply = Arc<Mutex<Option<ReplyHook>>>;
+
+struct RecordingTransport(HerdrSocketTransport, OnReply);
+impl RecordingTransport {
+    fn after_reply(&self, call: &HerdrCall) {
+        let hook = self.1.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(call);
+        }
+    }
+}
+impl HerdrTransport for RecordingTransport {
+    fn call(&self, call: &HerdrCall) -> (HerdrOutcome, Witnessed) {
+        let reply = self.0.call(call);
+        self.after_reply(call);
+        reply
+    }
+    fn call_with_witness(&self, call: &HerdrCall, expected: &ServerWitness) -> HerdrOutcome {
+        let reply = self.0.call_with_witness(call, expected);
+        self.after_reply(call);
+        reply
+    }
+    fn server_witness(&self) -> Witnessed {
+        self.0.server_witness()
+    }
+    fn hello(&self) -> Result<ServerHello, RestoreUnverified> {
+        self.0.hello()
+    }
+}
+
 /// A launched pane's processes that also answer whether each exists: the provider as `alive`
 /// says, every other one present.
 struct Seen(FakeOs, bool);
@@ -118,6 +150,7 @@ pub(crate) struct HerdrRig {
     /// Pane writes still answered before the rest go unanswered; `usize::MAX` answers them all.
     answered_sends: Arc<AtomicUsize>,
     on_send: OnSend,
+    on_reply: OnReply,
     os: Arc<LateOs>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -231,6 +264,7 @@ impl HerdrRig {
             unanswered_sends,
             answered_sends,
             on_send,
+            on_reply: OnReply::default(),
             os: Arc::default(),
             stop,
             thread: Some(thread),
@@ -284,6 +318,7 @@ impl HerdrRig {
             session.to_owned(),
         );
         let (path, servers, os) = (self.path.clone(), self.servers.clone(), self.os.clone());
+        let on_reply = self.on_reply.clone();
         move || {
             let endpoint = |socket: &Path| {
                 HerdrEndpoint::new(&node, &key, socket, &session)
@@ -306,7 +341,10 @@ impl HerdrRig {
                     };
                     Ok((pid, start(1_000)))
                 }));
-            let registry = HerdrRegistry::with_transport(endpoint(&at), Arc::new(socket));
+            let registry = HerdrRegistry::with_transport(
+                endpoint(&at),
+                Arc::new(RecordingTransport(socket, on_reply.clone())),
+            );
             let os: Arc<dyn ProcessOs> = os.clone();
             registry.with_reads((off_where_dialled, os))
         }
@@ -382,6 +420,11 @@ impl HerdrRig {
     /// Runs `hook` on the params of every later pane write before the server answers it.
     pub(crate) fn on_send(&self, hook: impl FnMut(&Value) + Send + 'static) {
         *self.on_send.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    /// Pauses a caller after a real socket reply, while the server can serve another writer.
+    pub(crate) fn on_reply(&self, hook: impl Fn(&HerdrCall) + Send + Sync + 'static) {
+        *self.on_reply.lock().unwrap() = Some(Arc::new(hook));
     }
 
     /// Every later snapshot is complete and lists exactly `panes`.
