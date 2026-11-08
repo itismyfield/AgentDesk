@@ -449,21 +449,29 @@ async fn consumed_a(rig: &mut IntakeRig, restart: bool) -> Option<DaemonRuntime>
     let channel = rig.channel;
     let mailbox = rig.mailbox.clone();
     let daemon = tokio::task::spawn_blocking(move || {
+        let workers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let entered = workers.clone();
+        let leaving = workers.clone();
+        let (stopped, retired) = std::sync::mpsc::channel();
         let mut daemon = DaemonRuntime(Some(
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
                 .on_thread_start(move || {
+                    entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     DAEMON_INTAKE_READY
                         .with(|slot| *slot.borrow_mut() = Some(intake_ready(channel)));
                 })
-                .on_thread_stop(|| {
+                .on_thread_stop(move || {
                     DAEMON_INTAKE_READY.with(|slot| slot.borrow_mut().take());
+                    if leaving.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                        let _ = stopped.send(());
+                    }
                 })
                 .build()
                 .unwrap(),
         ));
-        daemon.0.as_ref().unwrap().block_on(async move {
+        let old_reader = daemon.0.as_ref().unwrap().block_on(async move {
             crate::services::discord::queue_io::input_owner::drive::wake(drive);
             let result = tokio::time::timeout(Duration::from_secs(30), settled.recv())
                 .await
@@ -498,9 +506,19 @@ async fn consumed_a(rig: &mut IntakeRig, restart: bool) -> Option<DaemonRuntime>
                     discord::runtime_bootstrap::carried_restart_marked(&ProviderKind::Claude).await
                 );
             }
+            mailbox.snapshot().await.cancel_token
         });
         if restart {
             daemon.0.take().unwrap().shutdown_timeout(Duration::ZERO);
+            if late {
+                // Runtime shutdown leaves blocking workers alive; retire this daemon's reader too.
+                old_reader
+                    .unwrap()
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
+                crate::test_support::wait::recv_within(&retired, Duration::from_secs(30));
+                assert_eq!(workers.load(std::sync::atomic::Ordering::SeqCst), 0);
+            }
             None
         } else {
             Some(daemon)
@@ -837,6 +855,11 @@ async fn restart_input_case(
         "CARRIED_RESTART_STAGE channel={} phase=one_idle_health_pass",
         rig.channel
     );
+    if late {
+        let carried = row(rig.channel).unwrap();
+        assert!(carried.native_stop_user_pin.is_none());
+        assert!(carried.terminal_receipt.is_none());
+    }
     let expected_outcome = if own_cancelled {
         "cancelled"
     } else {

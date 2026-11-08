@@ -50,7 +50,14 @@ async fn fixture(channel: u64, command: bool, competitor: bool) -> (Fixture, Val
     row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
     row.session_id = Some("parent".into());
     row.readopted_from_inflight = false;
-    inflight::save_inflight_state(&row).unwrap();
+    let row_path = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &PROVIDER,
+        channel,
+    );
+    std::fs::write(row_path, serde_json::to_vec(&row).unwrap()).unwrap();
+    assert_eq!(fx.row().unwrap().session_id.as_deref(), Some("parent"));
+    assert!(fx.row().unwrap().managed_submission.is_some());
     let session = row.tmux_session_name.as_deref().unwrap();
     let execution =
         PreparedIncarnation::prepare("claude", session, Some(channel), Some("parent"), true)
@@ -212,6 +219,7 @@ async fn carried_ledger_command_waits_for_native_and_o_without_stop_authority_pg
         .await
         .unwrap();
     assert_eq!(outcome, "completed");
+    assert_eq!(fx.told().await, 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -254,4 +262,30 @@ async fn carried_ledger_confirmed_user_pin_is_independent_of_later_registrations
     fx.pass().await;
     assert!(fx.row().is_none());
     assert_eq!(fx.archive_count(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn carried_ledger_unrelated_registration_does_not_delay_pin_pg() {
+    let (fx, mut input) = fixture(7_828_318, false, false).await;
+    let namespace = format!("claude/{}", fx.shared.token_hash);
+    on("consumed", fx.channel.get(), move || {
+        input["identity"]["primary"] = json!(7_828_418);
+        input["attempt"]["nonce"] = json!("unrelated-attempt");
+        input["payload"]["frame"] = json!(crate::services::tui_input::human_frame::idle(
+            "ann",
+            "7",
+            "unrelated input"
+        ));
+        Registry::runtime()
+            .unwrap()
+            .prepare(&namespace, &input)
+            .unwrap();
+    });
+    fx.pass().await;
+    assert!(
+        fx.row().is_none(),
+        "only the selection and its competitors gate publication"
+    );
+    assert_eq!(fx.archive_count(), 1);
+    assert_eq!(fx.told().await, 0);
 }
