@@ -2705,8 +2705,31 @@ def _bind_closed_by_retained(at: dict, retained: list) -> bool:
         return False
     return any(
         isinstance(entry, dict) and not _retained_input_waiting(entry) and isinstance(entry.get("input"), dict)
-        and entry["input"].get("identity") == identity and entry["input"].get("attempt") == attempt
+        and entry["input"].get("attempt") == attempt
+        and (entry["input"].get("identity") == identity or identity in _member_identities(entry["input"]))
         for entry in retained)
+
+
+def _member_identities(input_: dict) -> list:
+    """QueueIdentity::of for the original and every follower its one attempt carried."""
+    payload = input_.get("payload")
+    followers = payload.get("followers") if isinstance(payload, dict) else None
+    members = [input_.get("original"), *(followers if isinstance(followers, list) else [])]
+    return [_item_identity(member) for member in members]
+
+
+def _item_identity(item: Any) -> dict | None:
+    """A stored item's identity; None for generation 0, which the runtime fills per process."""
+    if (not isinstance(item, dict) or type(item.get("message_id")) is not int
+            or type(item.get("queued_generation")) is not int or item["queued_generation"] == 0):
+        return None
+    generation, owners = item["queued_generation"], {}
+    for owner in item.get("source_message_queued_generations") or []:
+        if isinstance(owner, dict) and owner.get("message_id") and owner["message_id"] not in owners:
+            owners[owner["message_id"]] = owner.get("queued_generation") or generation
+    ids = item.get("source_message_ids") or [item["message_id"]]
+    return {"primary": item["message_id"], "queued_generation": generation,
+            "sources": [{"message_id": i, "queued_generation": owners.get(i, generation)} for i in ids]}
 
 
 def _runtime_payload_has_entries(payload: Any) -> bool:

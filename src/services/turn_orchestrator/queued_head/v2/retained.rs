@@ -252,6 +252,15 @@ impl RetainedInput {
             && self.notice.kind == CLEARED_NOTICE
             && self.notice.enqueued)
     }
+
+    /// Whether this unowed retention closes an attempt bind: one of its attempt naming the input or
+    /// any member it carried, matched member by member as a delivered settle would settle it.
+    pub(crate) fn closes_bind(&self, identity: &QueueIdentity, attempt: &AttemptIdentity) -> bool {
+        !self.owed_to_owner()
+            && self.input.attempt.as_ref() == Some(attempt)
+            && (self.input.identity == *identity
+                || (self.input.members()).any(|member| sources::identity(member) == *identity))
+    }
 }
 
 /// Refusals that no later look can turn into a submit; their originals stay retained.

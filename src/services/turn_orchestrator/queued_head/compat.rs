@@ -16,11 +16,7 @@ impl SnapshotRead {
             return false;
         };
         let closed = |identity: &QueueIdentity, attempt: &super::v2_types::AttemptIdentity| {
-            (v2.retained_inputs.iter()).any(|entry| {
-                !entry.owed_to_owner()
-                    && entry.input.identity == *identity
-                    && entry.input.attempt.as_ref() == Some(attempt)
-            })
+            (v2.retained_inputs.iter()).any(|entry| entry.closes_bind(identity, attempt))
         };
         let bound = |bind: &super::v2_types::AdmissionBind| match &bind.at {
             BindAt::Queued { .. } => false,
