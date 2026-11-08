@@ -416,14 +416,14 @@ fn transcript_in_two_other_homes_is_refused_without_choosing_one() {
     assert!(!f.home.exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn failed_copy_refuses_and_leaves_no_partial_transcript_in_the_active_home() {
-    use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     let other = f.root.path().join("1-acct");
-    let source = f.transcript_in(&other, &f.current, PRIOR, "{}\n", 1000);
-    fs::set_permissions(&source, fs::Permissions::from_mode(0o000)).unwrap();
+    f.transcript_in(&other, &f.current, PRIOR, "{}\n", 1000);
+    // A directory occupying the target name makes the final publish fail at the resume boundary.
+    let target = claude_transcript_path(&f.current, PRIOR, Some(&f.home)).unwrap();
+    fs::create_dir_all(&target).unwrap();
     let current = f.current.to_str().unwrap();
     let error = resolve_cwd(
         Some(current),
@@ -433,11 +433,24 @@ fn failed_copy_refuses_and_leaves_no_partial_transcript_in_the_active_home() {
         std::slice::from_ref(&other),
     )
     .unwrap_err();
-    fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
     let (status, axum::Json(body)) = error.into_response();
     assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body["error"].as_str().unwrap().contains("복사하지 못함"));
-    let target_dir = claude_transcript_path(&f.current, PRIOR, Some(&f.home)).unwrap();
-    let leftovers = fs::read_dir(target_dir.parent().unwrap()).map_or(0, |dir| dir.count());
-    assert_eq!(leftovers, 0);
+    let entries = |dir: &Path| fs::read_dir(dir).map_or(0, |dir| dir.count());
+    assert_eq!(entries(target.parent().unwrap()), 1);
+    // A read that fails mid-copy leaves neither the target nor a temp file behind.
+    struct Broken;
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk gone"))
+        }
+    }
+    let fresh = f
+        .home
+        .join("projects")
+        .join("fresh")
+        .join(format!("{PRIOR}.jsonl"));
+    let input = Cursor::new(b"{\"type\":\"user\"}\n".to_vec()).chain(Broken);
+    assert!(copy_without_partial(input, SystemTime::UNIX_EPOCH, &fresh).is_err());
+    assert_eq!(entries(fresh.parent().unwrap()), 0);
 }

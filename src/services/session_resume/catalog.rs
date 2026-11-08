@@ -202,12 +202,17 @@ fn adopt_from_other_home(
         return Ok(false);
     };
     let target = claude_transcript_path(cwd, id, home)?;
-    copy_without_partial(source, &target).map_err(|error| {
-        format!(
-            "세션 {id8} 트랜스크립트를 {}에서 활성 Claude home으로 복사하지 못함: {error}",
-            source_home.display()
-        )
-    })?;
+    File::open(source)
+        .and_then(|input| {
+            let modified = input.metadata()?.modified()?;
+            copy_without_partial(input, modified, &target)
+        })
+        .map_err(|error| {
+            format!(
+                "세션 {id8} 트랜스크립트를 {}에서 활성 Claude home으로 복사하지 못함: {error}",
+                source_home.display()
+            )
+        })?;
     tracing::info!(
         session_id = %id,
         from = %source.display(),
@@ -218,15 +223,18 @@ fn adopt_from_other_home(
 }
 
 /// Write through a sibling temp file and publish without clobbering, so a failure leaves no partial transcript.
-fn copy_without_partial(source: &Path, target: &Path) -> std::io::Result<()> {
+fn copy_without_partial(
+    mut input: impl Read,
+    modified: SystemTime,
+    target: &Path,
+) -> std::io::Result<()> {
     let dir = target
         .parent()
         .ok_or_else(|| std::io::Error::other("transcript path has no parent"))?;
     fs::create_dir_all(dir)?;
     let mut temp = tempfile::NamedTempFile::new_in(dir)?;
-    let mut input = File::open(source)?;
     std::io::copy(&mut input, temp.as_file_mut())?;
-    temp.as_file().set_modified(input.metadata()?.modified()?)?;
+    temp.as_file().set_modified(modified)?;
     temp.as_file().sync_all()?;
     temp.persist_noclobber(target)
         .map_err(|error| error.error)?;
