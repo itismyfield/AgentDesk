@@ -1088,6 +1088,104 @@ mod cases {
         assert_eq!(receipt, "cancelled");
     }
 
+    /// A managed input with its own mailbox episode keeps that episode's cancellation outcome.
+    #[tokio::test(flavor = "current_thread")]
+    async fn interrupted_unreadopted_managed_input_with_pin_cancels_its_episode_pg() {
+        use crate::services::tui_input::human_frame::history;
+        use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+        use crate::test_support::wait::{WAIT_CAP, await_within};
+        use std::os::unix::fs::MetadataExt;
+        use std::sync::atomic::AtomicBool;
+
+        let attempt = "managed-interrupted-attempt";
+        let frame = crate::services::claude_tui::busy_inject::frame(
+            "discord", "7", "ann", attempt, "carried",
+        );
+        let input = serde_json::json!({"type":"user","uuid":"managed-interrupted-input",
+            "sessionId":"session-7533","message":{"role":"user","content":frame}});
+        let options = Options {
+            transcript: vec![input.to_string(), INTERRUPT.to_string()],
+            ..Options::default()
+        };
+        let fx = await_within(
+            Fixture::new(7_828_371, 9_100_095_491_915_388_052, options),
+            WAIT_CAP,
+        )
+        .await;
+        let mut row = fx.row().unwrap();
+        row.managed_submission = Some(
+            serde_json::from_value(serde_json::json!({"protocol":1,"phase":"waiting"})).unwrap(),
+        );
+        row.readopted_from_inflight = false;
+        row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        let row_path = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &PROVIDER,
+            fx.channel.get(),
+        );
+        std::fs::write(row_path, serde_json::to_vec(&row).unwrap()).unwrap();
+        let token = await_within(discord::mailbox_snapshot(&fx.shared, fx.channel), WAIT_CAP)
+            .await
+            .cancel_token
+            .unwrap();
+        assert_eq!(token.turn_nonce(), row.turn_nonce.as_deref());
+        let session = row.tmux_session_name.as_deref().unwrap();
+        let marker = crate::services::tmux_common::session_temp_path(session, "spawn_nonce");
+        std::fs::write(marker, "managed-interrupted-incarnation").unwrap();
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            session,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: fx.path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: row.session_id.clone(),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        history::register(("claude", session, attempt, "7"), &fx.path, 0, &frame).unwrap();
+        inflight::bind_native_stop_pin(&row, &token);
+        let metadata = fx.path.metadata().unwrap();
+        let source = serde_json::json!({"kind":"existing","session_id":row.session_id,
+            "transcript":fx.path,"file":[metadata.dev(),metadata.ino()],"offset":0});
+        inflight::BusyNativeInput::capture(
+            session,
+            attempt,
+            &frame,
+            &fx.path,
+            &source,
+            Arc::new(AtomicBool::new(true)),
+            token,
+        )
+        .unwrap()
+        .adopt(0);
+        tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+        let pinned = fx.row().unwrap();
+        assert!(pinned.managed_submission.is_some());
+        assert!(!pinned.readopted_from_inflight);
+        assert!(pinned.terminal_receipt.is_none());
+        assert!(inflight::historical_input_verified(&pinned));
+        assert!(await_within(fx.episode_open(), WAIT_CAP).await);
+
+        await_within(fx.pass(), WAIT_CAP).await;
+        await_within(fx.assert_closed("managed interrupted episode"), WAIT_CAP).await;
+        let receipt: String = await_within(
+            sqlx::query_scalar("SELECT terminal_outcome FROM turns WHERE turn_id=$1")
+                .bind(format!("discord:{}:{}", fx.channel, fx.user_msg_id))
+                .fetch_one(&fx.pool),
+            WAIT_CAP,
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt, "cancelled");
+        assert_eq!(events(fx.channel.get()), ["cancel"]);
+        assert_eq!(fx.archive_count(), 1);
+        await_within(fx.pass(), WAIT_CAP).await;
+        assert_eq!(events(fx.channel.get()), ["cancel"]);
+        assert_eq!(fx.archive_count(), 1);
+    }
+
     /// A pane with no turn evidence reads Idle, but not `closed`: nothing ended, nothing closes.
     #[tokio::test(flavor = "current_thread")]
     async fn no_turn_evidence_ready_is_not_closed() {
