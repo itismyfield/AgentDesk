@@ -77,6 +77,9 @@ pub(super) struct TerminalRelayPlan<'a> {
     pub(super) has_direct_terminal_response: bool,
     pub(super) direct_terminal_response_refused_duplicate: bool,
     pub(super) watcher_resend_action: Option<WatcherTerminalResendAction>,
+    /// O proved this denied frame posted AND the row's own input lies inside it, so the watcher
+    /// may consume it read-only and end the row; an unowned frame keeps the row.
+    pub(super) o_tail_owned: bool,
     pub(super) watcher_direct_terminal_idle_committed: bool,
     pub(super) tui_direct_anchor_terminal_body_visible: bool,
     pub(super) tui_direct_anchor_or_lease_present_for_lifecycle: bool,
@@ -760,6 +763,17 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                 "terminal orphan has no O delivery proof"
             );
         }
+        let o_tail_owned = o_tail_covered.is_some()
+            && context
+                .evidence_source
+                .zip(inflight_before_relay.as_ref())
+                .is_some_and(|(file, row)| {
+                    row.native_input_within(
+                        file,
+                        tmux_session_name,
+                        (turn_data_start_offset, consumed_end),
+                    )
+                });
         orphan_facts.o_tail_covered = o_tail_covered.as_ref();
         orphan_terminal_frame::observe_orphan_terminal_frame(
             shared,
@@ -809,6 +823,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
             has_direct_terminal_response,
             direct_terminal_response_refused_duplicate,
             watcher_resend_action,
+            o_tail_owned,
             watcher_direct_terminal_idle_committed,
             tui_direct_anchor_terminal_body_visible,
             tui_direct_anchor_or_lease_present_for_lifecycle,

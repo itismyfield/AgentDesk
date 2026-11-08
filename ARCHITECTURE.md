@@ -2511,6 +2511,7 @@ src/
 │   │   │   ├── o_delegated_watcher_tests.rs
 │   │   │   ├── o_evidence_tests.rs
 │   │   │   ├── o_seed_install_tests.rs
+│   │   │   ├── o_tail_owned_close_tests.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
 │   │   │   ├── owed_range_baseline_tests.rs
