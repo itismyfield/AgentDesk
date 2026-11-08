@@ -9,6 +9,8 @@ mod checked_tests;
 mod compat;
 #[cfg(test)]
 mod compat_tests;
+#[cfg(unix)]
+pub(crate) mod native_row;
 pub(crate) mod notice_owner;
 mod screen;
 #[cfg(test)]
@@ -565,39 +567,46 @@ fn taken_rows(path: &Path, file: [u64; 2], from: u64) -> Option<Vec<Taken>> {
             false => serde_json::Value::Null,
         };
         line.clear();
-        let text = match record["type"].as_str() {
-            Some("user")
-                if record["isMeta"] != true
-                    && !crate::services::tui_o::shadow::identity::record_is_compact_summary(
-                        &record,
-                    ) =>
-            {
-                match &record["message"]["content"] {
-                    serde_json::Value::String(text) => Some(text.clone()),
-                    serde_json::Value::Array(blocks) => blocks
-                        .iter()
-                        .map(|block| (block["type"] == "text").then(|| block["text"].as_str()))
-                        .collect::<Option<Option<Vec<_>>>>()
-                        .flatten()
-                        .map(|texts| texts.join("\n")),
-                    _ => None,
-                }
-            }
-            Some("attachment") if record["attachment"]["type"] == "queued_command" => {
-                record["attachment"]["prompt"].as_str().map(str::to_string)
-            }
-            _ => None,
-        };
-        if let (Some(text), Some(uuid)) = (text, record["uuid"].as_str()) {
-            rows.push(Taken {
-                offset,
-                uuid: uuid.into(),
-                hashes: class_hashes(&text),
-                user: record["type"] == "user",
-            });
+        if let Some(taken) = taken_record(&record, offset) {
+            rows.push(taken);
         }
     }
     Some(rows)
+}
+
+fn taken_text(record: &serde_json::Value) -> Option<String> {
+    match record["type"].as_str() {
+        Some("user")
+            if record["isMeta"] != true
+                && !crate::services::tui_o::shadow::identity::record_is_compact_summary(record) =>
+        {
+            match &record["message"]["content"] {
+                serde_json::Value::String(text) => Some(text.clone()),
+                serde_json::Value::Array(blocks) => blocks
+                    .iter()
+                    .map(|block| (block["type"] == "text").then(|| block["text"].as_str()))
+                    .collect::<Option<Option<Vec<_>>>>()
+                    .flatten()
+                    .map(|texts| texts.join("\n")),
+                _ => None,
+            }
+        }
+        Some("attachment") if record["attachment"]["type"] == "queued_command" => {
+            record["attachment"]["prompt"].as_str().map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
+fn taken_record(record: &serde_json::Value, offset: u64) -> Option<Taken> {
+    let text = taken_text(record)?;
+    let uuid = record["uuid"].as_str()?;
+    Some(Taken {
+        offset,
+        uuid: uuid.into(),
+        hashes: class_hashes(&text),
+        user: record["type"] == "user",
+    })
 }
 
 /// The attempt `row` took: a receipt's own row, else same-frame rows paired with attempts in
