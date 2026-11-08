@@ -219,9 +219,8 @@ async fn purge_on(
 #[path = "cancel_effects_v2_tests.rs"]
 mod v2_tests;
 
-/// `None` without a V2 owner; a kept queue answers its owner's measured depth with nothing drained
-/// and the owner's reason, an unanswered, unknown or unmeasured one no purge. `captured` runs
-/// between capture and purge.
+/// `None` without a V2 owner; a kept queue answers the owner's depth and reason, nothing drained,
+/// an unanswered, unknown or unmeasured one no purge. `captured` runs between capture and purge.
 #[cfg(unix)]
 async fn purge_v2<F: std::future::Future<Output = ()>>(
     handle: &ChannelMailboxHandle,
