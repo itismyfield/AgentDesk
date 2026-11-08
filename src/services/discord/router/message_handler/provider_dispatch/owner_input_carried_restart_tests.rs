@@ -422,6 +422,7 @@ async fn post_b(pool: &sqlx::PgPool, registry: Arc<HealthRegistry>, rig: &Intake
 /// The input enters through real owner intake. Only the old daemon runtime is stopped; the pane
 /// and its disk queue remain, as with a planned restart.
 async fn consumed_a(rig: &mut IntakeRig, restart: bool) -> Option<DaemonRuntime> {
+    let late = rig.renderer.join("queue-mode").exists();
     Arc::get_mut(&mut rig.shared)
         .unwrap()
         .restart
@@ -478,7 +479,11 @@ async fn consumed_a(rig: &mut IntakeRig, restart: bool) -> Option<DaemonRuntime>
                 )
             });
             assert!(live.terminal_receipt.is_none());
-            observe_busy_producer_pin(channel).await;
+            if !late {
+                observe_busy_producer_pin(channel).await;
+            } else {
+                assert!(row(channel).unwrap().native_stop_user_pin.is_none());
+            }
             if restart {
                 assert!(
                     discord::runtime_bootstrap::carried_restart_marked(&ProviderKind::Claude).await
@@ -504,11 +509,7 @@ async fn consumed_a(rig: &mut IntakeRig, restart: bool) -> Option<DaemonRuntime>
             .any(|item| item["identity"]["primary"] == a || item["primary"] == a),
         "{owner}"
     );
-    assert_eq!(
-        native_prompts(rig, PROMPT),
-        1,
-        "A really reached the native transcript"
-    );
+    assert_eq!(native_prompts(rig, PROMPT), usize::from(!late));
     assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
     daemon
 }
@@ -566,6 +567,27 @@ async fn restart_case(
     own_cancelled: bool,
     superseded: bool,
 ) {
+    restart_input_case(
+        channel,
+        notices,
+        n_aborted,
+        own_cancelled,
+        superseded,
+        false,
+        false,
+    )
+    .await;
+}
+
+async fn restart_input_case(
+    channel: u64,
+    notices: usize,
+    n_aborted: bool,
+    own_cancelled: bool,
+    superseded: bool,
+    late: bool,
+    report: bool,
+) {
     let _root = crate::config::TestRuntimeRootGuard::new();
     discord::runtime_store::set_process_generation_for_tests(Some(4));
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -584,6 +606,9 @@ async fn restart_case(
     );
     let _intake_ready = intake_ready(rig.channel);
     let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(rig.channel.get());
+    if late {
+        fs::write(rig.renderer.join("queue-mode"), "absorption-only").unwrap();
+    }
     assert!(consumed_a(&mut rig, true).await.is_none());
     let a = row(rig.channel).unwrap();
     assert_eq!(
@@ -593,9 +618,22 @@ async fn restart_case(
     assert!(!a.readopted_from_inflight);
     let first_restored = restore_then_restart(&rig, &pool).await;
     assert_eq!(first_restored.user_msg_id, a.user_msg_id);
-    assert_eq!(native_prompts(&rig, PROMPT), 1);
+    assert_eq!(native_prompts(&rig, PROMPT), usize::from(!late));
     discord::runtime_store::set_process_generation_for_tests(Some(6));
     let shared = fresh_runtime(&rig, &pool, 6).await;
+    if report {
+        use discord::restart_report::{RestartReportContext, announce_restart_in_root};
+        announce_restart_in_root(
+            &discord::runtime_store::discord_restart_reports_root().unwrap(),
+            &RestartReportContext::from_bridge(
+                ProviderKind::Claude,
+                channel,
+                None,
+                a.channel_name.clone(),
+            ),
+        )
+        .unwrap();
+    }
     let http = &rig.shared.http.cached_serenity_ctx.get().unwrap().http;
     discord::recovery_engine::restore_inflight_turns(http, &shared, &ProviderKind::Claude).await;
     assert!(
@@ -633,6 +671,30 @@ async fn restart_case(
         &session,
         &rig.transcript,
     );
+    if late {
+        use crate::services::tui_prompt_dedupe::binding_events as p5;
+        let log = binding_root
+            .join(p5::BINDING_EVENTS_DIR)
+            .join(format!("{}.log", rig.channel));
+        let mut event: p5::BindingEvent =
+            serde_json::from_str(&fs::read_to_string(&log).unwrap()).unwrap();
+        event.new = p5::BindingTarget::Source(
+            crate::services::tui_o::shadow::binding_reader::source_id_for(
+                a.session_id.as_deref().unwrap(),
+                &rig.transcript,
+            )
+            .unwrap(),
+        );
+        fs::write(log, format!("{}\n", serde_json::to_string(&event).unwrap())).unwrap();
+        assert!(row(rig.channel).unwrap().native_stop_user_pin.is_none());
+        append(
+            &rig.transcript,
+            &[json!({"type":"user","uuid":"carried-native-1",
+            "sessionId":a.session_id,"message":{"role":"user",
+            "content":fs::read_to_string(rig.renderer.join("body")).unwrap()}})],
+        );
+        fs::remove_file(rig.renderer.join("queue-mode")).unwrap();
+    }
     wait_activity(
         &rig,
         &shared,
@@ -838,8 +900,8 @@ async fn restart_case(
     );
     assert!(committed.load(std::sync::atomic::Ordering::SeqCst));
     assert!(
-        a.native_stop_user_pin.is_some(),
-        "the busy producer stored A's pin before shutdown"
+        a.native_stop_user_pin.is_some() != late,
+        "only an input consumed before shutdown has a producer pin"
     );
     until(&rig, "B starts after the one idle pass", || {
         native_prompts(&rig, B) == 1
@@ -941,6 +1003,36 @@ async fn restart_case(
     drop(rig);
     pool.close().await;
     db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn carried_ledger_user_after_shutdown_first_idle_owed0_pg() {
+    if creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::carried_restart::",
+        "carried_ledger_user_after_shutdown_first_idle_owed0_pg"
+    )) {
+        restart_input_case(7_828_301, 0, false, false, false, true, false).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn carried_ledger_user_after_shutdown_first_idle_notice20_pg() {
+    if creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::carried_restart::",
+        "carried_ledger_user_after_shutdown_first_idle_notice20_pg"
+    )) {
+        restart_input_case(7_828_302, 20, false, false, false, true, false).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn carried_ledger_report_restore_consumes_o_marker_pg() {
+    if creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::carried_restart::",
+        "carried_ledger_report_restore_consumes_o_marker_pg"
+    )) {
+        restart_input_case(7_828_303, 20, false, false, false, false, true).await;
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

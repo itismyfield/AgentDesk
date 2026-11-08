@@ -697,3 +697,6 @@ pub(crate) async fn run_stall_watchdog_pass(
 mod o_stall_tests;
 #[cfg(all(test, unix))]
 mod tick_tests;
+
+#[cfg(all(test, unix))]
+mod terminal_receipt_tests;

@@ -1429,6 +1429,8 @@ src/
 │   │   │   │   ├── tail.rs
 │   │   │   │   └── verdict.rs
 │   │   │   ├── recovery/
+│   │   │   │   ├── cases/
+│   │   │   │   │   └── carried_ledger_tests.rs
 │   │   │   │   ├── live_agent_recovery/
 │   │   │   │   │   └── judged_finish_fence_tests.rs
 │   │   │   │   ├── self_watchdog/
@@ -1444,6 +1446,7 @@ src/
 │   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── watchdog_pass/
 │   │   │   │   │   ├── o_stall_tests.rs
+│   │   │   │   │   ├── terminal_receipt_tests.rs
 │   │   │   │   │   └── tick_tests.rs
 │   │   │   │   ├── carried_turn_close.rs
 │   │   │   │   ├── carried_turn_close_tests.rs
