@@ -53,6 +53,30 @@ fn intake_env() -> IntakeEnv {
     }
 }
 
+/// Legacy's unfinished turn on the channel, as the takeover turn leaves it while its pane runs.
+fn legacy_turn_running() {
+    use crate::services::discord::inflight::{self, InflightTurnState};
+    let row = InflightTurnState::new(
+        ProviderKind::Codex,
+        CHANNEL,
+        None,
+        1,
+        7,
+        0,
+        "sleep".into(),
+        None,
+        Some("codex-takeover-fixture".into()),
+        None,
+        None,
+        0,
+    );
+    let root = inflight::inflight_runtime_root().unwrap();
+    let path = inflight::inflight_state_path(&root, &ProviderKind::Codex, CHANNEL);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let _lock = inflight::lock_inflight_state_path(&path).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&row).unwrap()).unwrap();
+}
+
 fn codex_message(message_id: u64) -> IntakeSubmission {
     IntakeSubmission {
         provider: ProviderKind::Codex,
@@ -93,6 +117,7 @@ async fn a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode()
     let deps = deps(&http, &shared);
     let _boot = committed_and_selected();
     let _ready = test_probe::answer_with(|_| true);
+    legacy_turn_running();
     assert!(super::super::live_checkpoint_waits(
         &ProviderKind::Codex,
         ChannelId::new(CHANNEL)
@@ -133,6 +158,7 @@ async fn a_turn_mode_input_the_queue_cannot_hold_fails_before_its_checkpoint() {
     let deps = deps(&http, &shared);
     let _boot = committed_and_selected();
     let _ready = test_probe::answer_with(|_| true);
+    legacy_turn_running();
     let channel = ChannelId::new(CHANNEL);
 
     let unportable = with_report(codex_message(4_370_021));
@@ -177,6 +203,7 @@ async fn a_turn_mode_input_keeps_its_attachment_queued_in_order_until_turn_mode_
     let deps = deps(&http, &shared);
     let _boot = committed_and_selected();
     let _ready = test_probe::answer_with(|_| true);
+    legacy_turn_running();
     let channel = ChannelId::new(CHANNEL);
     let body = b"the report the takeover turn must not lose".to_vec();
     TEST_DOWNLOADS.with(|served| served.borrow_mut().insert(URL.to_string(), body.clone()));
@@ -280,6 +307,7 @@ async fn a_gateway_attachment_moves_the_checkpoint_once_turn_mode_holds_it_pg() 
     }
     let _boot = committed_and_selected();
     let _ready = test_probe::answer_with(|_| true);
+    legacy_turn_running();
     let mock = discord_mock::DiscordMockState::new();
     mock.allow_channel(CHANNEL);
     let (proxy, gateway_url, server) = discord_mock::start(mock).await;

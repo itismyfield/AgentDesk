@@ -280,6 +280,7 @@ pub(crate) async fn admit_text_intake(
     }
     // Before any routing or Postgres-less local fallback: an O channel runs only on its gateway.
     let (provider, destination) = (submission.provider.as_str(), submission.request.channel_id);
+    confirm_awaited_codex_turn(&submission.provider, destination.get()).await;
     if let IntakeRoute::Hold(detail) =
         intake_route::for_input_placement(provider, destination.get()).await
     {
@@ -890,6 +891,54 @@ pub(in crate::services::discord::router) async fn defer_live_submission(
         )
     );
     (outcome.enqueued || outcome.merged || duplicate) && outcome.persistence_error.is_none()
+}
+
+/// A turn-mode wait whose Legacy turn ended unseen here (a restart or a clear took its completion)
+/// confirms by the check boot and completion run; an unfinished Legacy turn keeps it waiting.
+async fn confirm_awaited_codex_turn(provider: &ProviderKind, channel: u64) {
+    use super::super::tui_direct_pending_start::turn_retirement::codex;
+    let turn = crate::services::tui_o::cutover::codex_turn_awaited(channel);
+    let Some(turn) = turn.filter(|_| *provider == ProviderKind::Codex) else {
+        return;
+    };
+    match tokio::task::spawn_blocking(move || codex::confirm_current(channel, &turn)).await {
+        Ok(codex::Confirmation::Confirmed) => {
+            super::super::turn_presence::supervisor::register(provider, &[channel]);
+        }
+        Ok(codex::Confirmation::Retry(detail)) => {
+            tracing::info!(
+                channel,
+                detail,
+                "[tui_o] Codex turn mode waits; input stays queued"
+            );
+        }
+        Ok(codex::Confirmation::Unselected) | Err(_) => {}
+    }
+}
+
+/// An owner front refused only because Codex turn mode is still awaited.
+pub(crate) const TURN_MODE_AWAITED: &str =
+    "NotSent(\"owner_front_not_admitted: turn_mode_awaited\")";
+
+/// The held-front read for an awaited turn mode: the confirmation check boot and completion run,
+/// so the first look after Legacy's turn is gone confirms and wakes the owner once.
+#[cfg(unix)]
+pub(crate) fn turn_mode_watch(
+    channel: u64,
+) -> Option<crate::services::discord::queue_io::input_owner::held_watch::ScreenProbe> {
+    use super::super::tui_direct_pending_start::turn_retirement::codex;
+    use crate::services::claude_tui::busy_inject::Screen;
+    let turn = crate::services::tui_o::cutover::codex_turn_awaited(channel)?;
+    Some(Box::new(move || {
+        match codex::confirm_current(channel, &turn) {
+            codex::Confirmation::Confirmed => {
+                super::super::turn_presence::supervisor::register(&ProviderKind::Codex, &[channel]);
+                Screen::Ready
+            }
+            codex::Confirmation::Unselected => Screen::Ready,
+            codex::Confirmation::Retry(_) => Screen::Unknown,
+        }
+    }))
 }
 
 fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_msg_id: &str) {
