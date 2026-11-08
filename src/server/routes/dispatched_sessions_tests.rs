@@ -267,6 +267,111 @@ async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
     pg_db.drop().await;
 }
 
+/// A Codex session whose runtime binding and rollout marker are gone (restart,
+/// binding expiry) is re-proven only by its stored provider session id: another
+/// session's rollout or several rollouts for the id keep the session with a
+/// diagnostic, and only a unique exact match lets idle cleanup kill it.
+#[tokio::test(flavor = "current_thread")]
+async fn idle_kill_route_reproves_codex_rollout_by_stored_session_id_pg() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (tmux_probe, _path_guard) = install_tmux_probe(concat!(
+        "[ \"$1\" = -u ] && shift\n",
+        "dir=$(dirname \"$0\")\n",
+        "case \"$1\" in\n",
+        "has-session) [ -e \"$dir/alive\" ] && exit 0; echo \"can't find session\" >&2; exit 1 ;;\n",
+        "capture-pane) printf 'Ready for input (type message + Enter)\\n> \\n' ;;\n",
+        "kill-session) echo \"$3\" >> \"$dir/killed\"; rm -f \"$dir/alive\" ;;\n",
+        "esac",
+    ));
+    let runtime_root = tempfile::TempDir::new().expect("runtime root");
+    let _root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        runtime_root.path(),
+    );
+    let _index = crate::services::codex_tui::rollout_index::lock_cache_for_tests();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+    let state = test_state(pool.clone());
+    let cwd = tempfile::TempDir::new().expect("codex cwd");
+    let killed_log = tmux_probe.path().join("killed");
+
+    // (rollout session ids on disk, expected kill, expected missing evidence, matches)
+    let cases: [(&[&str], bool, Option<&str>, u64); 3] = [
+        (&["other-session"], false, Some("rollout_for_session_id"), 0),
+        (
+            &["sess-own", "sess-own"],
+            false,
+            Some("unique_rollout_for_session_id"),
+            2,
+        ),
+        (&["sess-own", "other-session"], true, None, 0),
+    ];
+    for (ids, expect_killed, missing, matching) in cases {
+        let codex_home = tempfile::TempDir::new().expect("codex home");
+        let day = codex_home.path().join("sessions/2026/11/06");
+        std::fs::create_dir_all(&day).unwrap();
+        // Later files are newer, so newest-file selection would pick another session.
+        for (index, id) in ids.iter().enumerate() {
+            let meta = serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": cwd.path()}});
+            std::fs::write(
+                day.join(format!("rollout-2026-11-06T00-00-0{index}-{id}.jsonl")),
+                format!("{meta}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\"}}}}\n"),
+            )
+            .unwrap();
+        }
+        let home_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "CODEX_HOME",
+            codex_home.path(),
+        );
+        let tmux_name = format!("AgentDesk-codex-reprove-{}", uuid::Uuid::new_v4().simple());
+        let session_key = format!(
+            "{}:{tmux_name}",
+            crate::services::platform::hostname_short()
+        );
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, last_heartbeat,
+                                   raw_provider_session_id, cwd)
+             VALUES ($1, 'codex', 'idle', NOW() - INTERVAL '7 hours', 'sess-own', $2)",
+        )
+        .bind(&session_key)
+        .bind(cwd.path().to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .unwrap();
+        std::fs::write(tmux_probe.path().join("alive"), "").unwrap();
+
+        let (status, Json(body)) = super::kill_tmux_session(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Path(session_key.clone()),
+            Json(crate::services::dispatched_sessions::KillTmuxOptions {
+                reason: Some("idle 7시간 초과 — 자동 정리".to_string()),
+                minimum_idle_minutes: Some(360),
+            }),
+        )
+        .await;
+        drop(home_guard);
+        assert_eq!(status, StatusCode::OK);
+        let killed = std::fs::read_to_string(&killed_log).unwrap_or_default();
+        assert_eq!(
+            killed.contains(&format!("={tmux_name}:")),
+            expect_killed,
+            "{ids:?}: {body}"
+        );
+        assert_eq!(body["tmux_killed"], expect_killed, "{ids:?}: {body}");
+        if let Some(missing) = missing {
+            assert_eq!(body["preserved_reason"], "transcript_unresolved", "{body}");
+            let diagnostic = &body["transcript_diagnostic"];
+            assert_eq!(diagnostic["missing"], missing, "{body}");
+            assert_eq!(diagnostic["provider_session_id"], "sess-own", "{body}");
+            assert_eq!(diagnostic["matching_rollouts"], matching, "{body}");
+        }
+    }
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
