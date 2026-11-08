@@ -647,7 +647,7 @@ setup_specs = {
     "toolchain" => "1.94.1",
   },
   "Setup sccache for lib inventory" => {
-    "uses" => "mozilla-actions/sccache-action@v0.0.10",
+    "uses" => "./.github/actions/sccache-or-nothing",
   },
   "Cache Cargo dependencies for lib inventory" => {
     "uses" => "Swatinem/rust-cache@v2",
@@ -700,7 +700,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "998f138d30df8c49df49cc71483aeb0fc659a04b08ffa5f302ab0d4074806c41",
+    "job_timeout_minutes" => 100, "job_sha256" => "2a9bc6139c91a288215cacd933e570cfaadd458cb0162a13faf8e11e31a1b9a2",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -728,7 +728,7 @@ targets = {
   "base_compare" => {
     "label" => "nextest base comparison job", "name" => "Rust tests base comparison",
     "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 60, "job_sha256" => "6af0ae6c8cadc08ceb89f33b133f1ec369f70dd09da05e474d4ee92a5c22662e",
+    "job_timeout_minutes" => 60, "job_sha256" => "71752609857f8e44770e812c3865cda75a0dcff9b0b00af3f488df86e00813d4",
     "cargo_steps" => {
       # Dropping this step or changing its argv (a report-only diff) is rejected here.
       "Compare tests with the comparison base" => {
@@ -740,7 +740,7 @@ targets = {
   "rust_tests" => {
     "label" => "nextest worker job", "name" => "Rust tests (worker ${{ matrix.worker }})",
     "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 75, "job_sha256" => "cf5cfe84d889c91e0dbca7dc7512249bb1c873c1d9e701fd30adcf2714cd9dc6", "require_debug_env" => false,
+    "job_timeout_minutes" => 75, "job_sha256" => "3074a8895c86c42eb37fe0dc731dfeba415036ee07d3c6040a6d649e19447ff0", "require_debug_env" => false,
     "cargo_steps" => {
       "Verify archive and plan" => {
         "commands" => ['python3 scripts/ci/nextest_ci.py verify-archive --plan "$RUNNER_TEMP/nextest/plan/plan.json" --worker ${{ matrix.worker }} --archive "$RUNNER_TEMP/nextest/lib-tests.tar.zst" --config "$RUNNER_TEMP/nextest/plan/worker-${{ matrix.worker }}.toml" --sha "$GITHUB_SHA" --record "$RUNNER_TEMP/nextest-result"'],
@@ -785,7 +785,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "959bbf84d5672397470445b0aa15245bdebe413b43485dbd03189c2a2550d627",
+    "job_sha256" => "a684faf2f7569abde75876a770678c3c7208f9f6c3f6f06f4711eb98f469ba6d",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
@@ -799,7 +799,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "d01dcdf5b05e0b25e87fd5af17acb4881ab91aab92ebe0914527a3ff3fdcecad",
+    "job_sha256" => "fc080a14aa7bffb9b6e155f6982a8973c78cf726e8794f429ef5b6ed6a3f8300",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
@@ -825,7 +825,7 @@ targets = {
     "if" => rust_tests_gate,
     "runs_on" => "ubuntu-latest",
     "job_timeout_minutes" => 50,
-    "job_sha256" => "9cefc4440d03462576f60b0fa8f8f577bc59583bfb3157f3ad6082af48ac393e",
+    "job_sha256" => "dc65253eee0288f8167e522302053a74ad3094e967d738848ea57d2b320bd83d",
     "cargo_steps" => {
       "PostgreSQL 15 exact owner proof" => {
         "commands" => ["python3 scripts/run_test_lane.py --lane pg --max-summaries 4 --expected-ids scripts/ci/pg15_required_ids.txt -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- --exact db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_owner_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg --test-threads=1"],
@@ -840,7 +840,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "f9d82ef5c7b9d497edaad746306464a733033519a9a19ba4d7ff3b290fdec26e",
+    "job_sha256" => "4b493dd1746981ce7715b46d680350f84cb514678a48b2688867f4548f80af4d",
     "job_timeout_minutes" => 60,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
@@ -995,6 +995,7 @@ pr_workflow=".github/workflows/ci-pr.yml"
 main_workflow=".github/workflows/ci-main.yml"
 warm_workflow=".github/workflows/ci-windows-cache-warm.yml"
 nightly_workflow=".github/workflows/ci-nightly.yml"
+sccache_action=".github/actions/sccache-or-nothing/action.yml"
 validate_main_script_check_shards() {
   if ! ruby - "$main_workflow" <<'RUBY'
 require "yaml"
@@ -1185,7 +1186,7 @@ hashed = ->(env) { (env || {}).select { |key, _| key.to_s.match?(/\A(CARGO|CC|CF
 errors << "#{label}: workflow CARGO/RUST env must equal #{pr_path}" unless hashed.(warm["env"]) == hashed.(pr["env"])
 
 setup = ->(steps) do
-  Array(steps).take_while { |step| step["uses"].to_s.start_with?("actions/checkout", "actions/setup-python", "dtolnay/", "mozilla-actions/", "Swatinem/") || step["if"] == "runner.os == 'macOS'" }
+  Array(steps).take_while { |step| step["uses"].to_s.start_with?("actions/checkout", "actions/setup-python", "dtolnay/", "./.github/actions/sccache-or-nothing", "Swatinem/") || step["if"] == "runner.os == 'macOS'" }
     .reject { |step| step["if"] == "runner.os == 'macOS'" }
     .map { |step| step.reject { |key, _| %w[name if].include?(key) } }
 end
@@ -1232,6 +1233,83 @@ RUBY
   fi
 }
 validate_windows_cache_warm
+
+# A GitHub release outage must not stop PR jobs: sccache falls back to an uncached build and
+# ripgrep to the OS package manager, each with a warning annotation so the fallback stays visible.
+validate_tool_download_fallbacks() {
+  if ! ruby - "$pr_workflow" "$sccache_action" <<'RUBY'
+require "yaml"
+pr_path, action_path = ARGV
+errors = []
+sccache_uses = "mozilla-actions/sccache-action@v0.0.10"
+local_action = "./.github/actions/sccache-or-nothing"
+warning = /^echo "::warning[ :]/
+
+begin
+  action = YAML.safe_load(File.read(action_path), aliases: false, filename: action_path)
+rescue StandardError => error
+  action = nil
+  errors << "#{action_path}: cannot read the sccache fallback action: #{error.message}"
+end
+if action
+  runs = action.is_a?(Hash) ? action["runs"] : nil
+  steps = runs.is_a?(Hash) ? Array(runs["steps"]) : []
+  setup, fallback = steps
+  errors << "#{action_path}: must be a composite action of exactly the setup and fallback steps" unless runs.is_a?(Hash) && runs["using"] == "composite" && steps.length == 2
+  unless setup == {"name" => "Setup sccache", "id" => "sccache", "continue-on-error" => true, "uses" => sccache_uses}
+    errors << "#{action_path}: first step must be #{sccache_uses} with id sccache and continue-on-error: true"
+  end
+  run = fallback.is_a?(Hash) ? fallback["run"].to_s : ""
+  cleared = run.scan(/^\s*echo "([A-Za-z_][A-Za-z0-9_]*=[^"]*)"/).flatten.sort
+  fallback_ok = fallback.is_a?(Hash) && (fallback.keys - %w[name if shell env run]).empty? &&
+    fallback["if"] == "steps.sccache.outcome != 'success'" && fallback["shell"] == "bash" &&
+    (fallback["env"] || {}).keys.all? { |key| key == "SCCACHE_SETUP_OUTCOME" }
+  errors << "#{action_path}: fallback step must run when the setup outcome is not success, in bash, without continue-on-error or other env" unless fallback_ok
+  errors << "#{action_path}: fallback must leave a warning annotation" unless run.lines.any? { |line| line.strip.match?(warning) }
+  # Only these line shapes may appear, so no other command can write GITHUB_ENV or GITHUB_PATH.
+  run_lines = run.lines.map(&:strip).reject(&:empty?)
+  shapes_ok = !run.include?("$(") && !run.include?("`") && run_lines.all? { |line|
+    line.match?(/\Aecho "::warning[^">]*"\z/) || line == "{" || line == '} >> "$GITHUB_ENV"' || line.match?(/\Aecho "[A-Za-z_][A-Za-z0-9_]*="\z/)
+  }
+  unless shapes_ok && cleared == ["RUSTC_WRAPPER=", "SCCACHE_GHA_ENABLED="] && run_lines.include?('} >> "$GITHUB_ENV"')
+    errors << "#{action_path}: fallback must clear exactly RUSTC_WRAPPER and SCCACHE_GHA_ENABLED through GITHUB_ENV"
+  end
+end
+
+YAML.load_file(pr_path).fetch("jobs", {}).each do |job_id, job|
+  steps = Array(job.is_a?(Hash) ? job["steps"] : nil)
+  steps.each_with_index do |step, index|
+    next unless step.is_a?(Hash)
+
+    uses = step["uses"].to_s
+    label = "#{pr_path} job #{job_id} step #{(step["name"] || uses).inspect}"
+    errors << "#{label} must install sccache through #{local_action}" if uses.downcase.start_with?("mozilla-actions/sccache-action")
+    errors << "#{label} must not set continue-on-error; the action owns the fallback" if uses == local_action && step.key?("continue-on-error")
+    next unless uses.downcase.start_with?("taiki-e/install-action") && step.dig("with", "tool").to_s.split(",").any? { |tool| tool.strip.match?(/\Aripgrep(@|\z)/) }
+
+    id = step["id"].to_s
+    errors << "#{label} must set an id and continue-on-error: true so its fallback can run" unless !id.empty? && step["continue-on-error"] == true
+    fallback = steps[index + 1]
+    fallback_run = fallback.is_a?(Hash) ? fallback["run"].to_s : ""
+    unless fallback.is_a?(Hash) && fallback["if"] == "steps.#{id}.outcome != 'success'" && !fallback.key?("continue-on-error") &&
+        fallback_run.include?("apt-get install") && fallback_run.lines.any? { |line| line.strip.match?(warning) }
+      errors << "#{label} must be followed by a warning package-manager fallback gated on steps.#{id}.outcome"
+    end
+    required = steps[(index + 1)..].select { |later| later.is_a?(Hash) && later["run"].to_s.strip == "rg --version" }
+    unless required.any? { |later| !later.key?("if") && !later.key?("continue-on-error") }
+      errors << "#{label} must be followed by an unconditional rg --version step that fails the job when both installs fail"
+    end
+  end
+end
+
+errors.each { |message| warn message }
+exit(errors.empty? ? 0 : 1)
+RUBY
+  then
+    error "$pr_workflow must keep building when sccache or ripgrep downloads fail"
+  fi
+}
+validate_tool_download_fallbacks
 
 workflow_files() {
   find .github/workflows -maxdepth 1 -type f \

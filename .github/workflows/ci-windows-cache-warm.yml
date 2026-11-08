@@ -56,7 +56,7 @@ jobs:
           toolchain: "1.94.1"
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: ./.github/actions/sccache-or-nothing
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2

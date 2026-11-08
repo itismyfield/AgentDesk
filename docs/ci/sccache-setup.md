@@ -124,11 +124,14 @@ If sccache is not installed, both release scripts continue with
 
 `RUSTC_WRAPPER: sccache` is set at the workflow `env:` level in `ci-main.yml`,
 `ci-pr.yml`, and `ci-nightly.yml` for Linux/Windows jobs. Each Rust build job adds a
-`Setup sccache` step:
+`Setup sccache` step. `ci-pr.yml`, the `rust_build` jobs it shares with
+`ci-main.yml`/`ci-nightly.yml`, and `ci-windows-cache-warm.yml` install it through
+the local composite action (§2.3.1); the other main/nightly jobs still call
+`mozilla-actions/sccache-action@v0.0.10` directly:
 
 ```yaml
 - name: Setup sccache
-  uses: mozilla-actions/sccache-action@v0.0.9
+  uses: ./.github/actions/sccache-or-nothing
 ```
 
 Cache storage is backed by GitHub Actions cache (automatic when using the
@@ -147,6 +150,30 @@ not part of any cache key: rust-cache hashes only `CARGO`/`CC`/`CFLAGS`/`CXX`/
 All macOS CI jobs use GitHub-hosted runners and explicitly clear both
 `RUSTC_WRAPPER` and `SCCACHE_GHA_ENABLED` before build steps so a Homebrew
 `sccache` binary does not use the GitHub Actions backend without the action token.
+
+### 2.3.1 Download failure: build without the cache
+
+The workflow-wide `RUSTC_WRAPPER: sccache` turns a failed sccache download (a GitHub
+release 503/504, or the latest-release API lookup failing) into a failed rustc call in
+every job. `.github/actions/sccache-or-nothing/action.yml` runs
+`mozilla-actions/sccache-action@v0.0.10` with `continue-on-error: true`; when that step's
+outcome is not `success`, it writes empty `RUSTC_WRAPPER` and `SCCACHE_GHA_ENABLED` to
+`GITHUB_ENV` (the macOS pattern above) and emits a
+`::warning title=sccache unavailable::` annotation. The job then builds uncached and stays
+green, so a fallback run is visible from that annotation, not from the job result. The
+action's post step inherits `continue-on-error`, so its `--show-stats` call cannot fail
+the job either; the per-job `sccache stats` steps already end in `|| true`.
+
+An uncached build is slower: job and step `timeout-minutes` still apply, so a fallback
+run that exceeds them fails as a timeout, not silently. The `rust_tests` workers' ripgrep
+install has the same shape: `taiki-e/install-action` with `continue-on-error`, then the
+runner package manager (apt-get, brew or choco) with a `::warning`, then an unconditional
+`rg --version` that still fails the job if both installs failed.
+
+`scripts/check-ci-runner-hardening.sh` (`validate_tool_download_fallbacks`) rejects a
+direct `mozilla-actions/sccache-action` step in `ci-pr.yml`, any change to the action's
+two steps or to the variables it clears, and a ripgrep install without its gated
+fallback and the `rg --version` check.
 
 ### 2.4 Build token wrapper (campaign build path)
 

@@ -68,6 +68,7 @@ UNREACHABLE_RUST_FILES = (
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 WARM_WORKFLOW = REPO_ROOT / ".github/workflows/ci-windows-cache-warm.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
+SCCACHE_ACTION = Path(".github/actions/sccache-or-nothing/action.yml")
 
 
 def job_block(workflow: str, job_name: str) -> str:
@@ -1858,6 +1859,40 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     self.assert_hosted_sccache_reset(disable["run"].replace(line, "", 1))
 
+    def test_hardening_rejects_tool_downloads_without_their_fallback(self) -> None:
+        # A release outage must leave PR jobs building uncached, not red before the first rustc.
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        action = (REPO_ROOT / SCCACHE_ACTION).read_text(encoding="utf-8")
+        fallback_step = action[action.index("    # RUSTC_WRAPPER=sccache"):]
+        warning_line = next(line for line in action.splitlines(keepends=True) if "::warning" in line)
+        ripgrep = step_block(job_block(workflow, "rust_tests"), "Install ripgrep from the OS package manager")
+        direct = "        uses: mozilla-actions/sccache-action@v0.0.10\n"
+        cases = (
+            ("direct sccache step", workflow.replace("        uses: ./.github/actions/sccache-or-nothing\n", direct, 1), action,
+             "must install sccache through ./.github/actions/sccache-or-nothing"),
+            ("fallback step removed", workflow, action.replace(fallback_step, ""),
+             "composite action of exactly the setup and fallback steps"),
+            ("setup fails the job", workflow, action.replace("      continue-on-error: true\n", "", 1),
+             "with id sccache and continue-on-error: true"),
+            ("case-variant direct step", workflow.replace("        uses: ./.github/actions/sccache-or-nothing\n", direct.replace("mozilla-actions", "Mozilla-Actions"), 1),
+             action, "must install sccache through ./.github/actions/sccache-or-nothing"),
+            ("silent fallback", workflow, action.replace(warning_line, ""), "fallback must leave a warning annotation"),
+            ("extra GITHUB_ENV write", workflow, action.replace('          echo "SCCACHE_GHA_ENABLED="\n', '          echo "SCCACHE_GHA_ENABLED="\n          printf \'BASH_ENV=/tmp/x\\n\'\n'),
+             "must clear exactly RUSTC_WRAPPER and SCCACHE_GHA_ENABLED"),
+            ("wrapper left set", workflow, action.replace('          echo "RUSTC_WRAPPER="\n', ""),
+             "must clear exactly RUSTC_WRAPPER and SCCACHE_GHA_ENABLED"),
+            ("ripgrep fallback removed", workflow.replace(ripgrep, "", 1), action,
+             "followed by a warning package-manager fallback gated on steps.ripgrep.outcome"),
+        )
+        baseline = self.run_hardening_fixture(workflow)
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        for label, candidate, candidate_action, reason in cases:
+            with self.subTest(case=label):
+                self.assertTrue(candidate != workflow or candidate_action != action)
+                result = self.run_hardening_fixture(candidate, extra_files={str(SCCACHE_ACTION): candidate_action})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stderr)
+
     def test_ci_sccache_server_outlives_the_uncached_lib_test_rustc(self) -> None:
         # The lib-test rustc runs 20+ minutes after the last cached request; hardening pins only the PR env.
         for path in (PR_WORKFLOW, MAIN_WORKFLOW, NIGHTLY_WORKFLOW):
@@ -1984,6 +2019,8 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             (workflows / "ci-main.yml").write_text(MAIN_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
             (workflows / WARM_WORKFLOW.name).write_text(WARM_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
             (workflows / "ci-nightly.yml").write_text(NIGHTLY_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
+            (root / SCCACHE_ACTION).parent.mkdir(parents=True)
+            (root / SCCACHE_ACTION).write_bytes((REPO_ROOT / SCCACHE_ACTION).read_bytes())
             for name, content in (extra_workflows or {}).items():
                 (workflows / name).write_text(content, encoding="utf-8")
             for name, target in (workflow_symlinks or {}).items():
