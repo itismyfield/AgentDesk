@@ -39,8 +39,7 @@ pub(crate) enum InputRefusal {
 }
 
 impl InputTarget {
-    /// Production entry, decided before any IO: no Herdr selector exists, so a
-    /// Claude TUI session is the legacy tmux session of that name.
+    /// A legacy tmux caller already confirmed the session's host.
     pub(crate) fn legacy_tmux(session_name: &str) -> Self {
         Self::Tmux(session_name.to_string())
     }
@@ -384,6 +383,8 @@ pub(crate) fn run_plan(
         if let Err(stopped) = plan.step(action, actions.get(index + 1)) {
             return stopped;
         }
+        #[cfg(test)]
+        spy::after_action(target, action);
     }
     InputRun::Applied
 }
@@ -423,6 +424,8 @@ impl Plan<'_> {
             TuiInputAction::Enter => self.mutate(action, key(HostKey::Enter))?,
             TuiInputAction::Escape => self.mutate(action, key(HostKey::Escape))?,
             TuiInputAction::CtrlU => self.mutate(action, key(HostKey::CtrlU))?,
+            TuiInputAction::Left => self.mutate(action, key(HostKey::Left))?,
+            TuiInputAction::Right => self.mutate(action, key(HostKey::Right))?,
             TuiInputAction::Backspace(count) => {
                 let mut remaining = *count;
                 while remaining > 0 {
@@ -739,7 +742,7 @@ pub(crate) fn classify(
 }
 
 #[cfg(all(test, unix))]
-pub(crate) use spy::FakeDraftPane;
+pub(crate) use spy::{FakeDraftPane, watch_actions};
 #[cfg(test)]
 pub(crate) use spy::{SpyGuard, SpyState};
 
@@ -752,6 +755,48 @@ mod spy {
 
     use super::*;
     use crate::services::session_host::tmux_key_name;
+
+    type ActionHook = std::sync::Arc<dyn Fn(&TuiInputAction) + Send + Sync>;
+    type ActionHooks = Vec<(HerdrTarget, ActionHook)>;
+    static ACTION_HOOKS: std::sync::LazyLock<std::sync::Mutex<ActionHooks>> =
+        std::sync::LazyLock::new(Default::default);
+
+    #[cfg(unix)]
+    pub(crate) struct ActionWatch(HerdrTarget);
+    #[cfg(unix)]
+    impl Drop for ActionWatch {
+        fn drop(&mut self) {
+            ACTION_HOOKS
+                .lock()
+                .unwrap()
+                .retain(|(pane, _)| pane != &self.0);
+        }
+    }
+    #[cfg(unix)]
+    pub(crate) fn watch_actions(
+        target: HerdrTarget,
+        hook: impl Fn(&TuiInputAction) + Send + Sync + 'static,
+    ) -> ActionWatch {
+        ACTION_HOOKS
+            .lock()
+            .unwrap()
+            .push((target.clone(), std::sync::Arc::new(hook)));
+        ActionWatch(target)
+    }
+    pub(super) fn after_action(target: &InputTarget, action: &TuiInputAction) {
+        let InputTarget::Herdr(target) = target else {
+            return;
+        };
+        let hook = ACTION_HOOKS
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(pane, _)| pane == target)
+            .map(|(_, hook)| hook.clone());
+        if let Some(hook) = hook {
+            hook(action);
+        }
+    }
 
     pub(crate) struct SpyState {
         pub calls: Vec<String>,

@@ -193,11 +193,6 @@ pub(in crate::services::discord) fn claude_local_tui_relaunch_applies(
             == ProviderSessionDriver::TuiHosting
 }
 
-fn claude_herdr_fast_unavailable(provider: &ProviderKind, channel_id: serenity::ChannelId) -> bool {
-    matches!(provider, ProviderKind::Claude)
-        && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
-}
-
 pub(in crate::services::discord) async fn update_channel_model_override(
     shared: &Arc<SharedData>,
     token: &str,
@@ -294,11 +289,6 @@ pub(in crate::services::discord) async fn update_channel_effort(
     level: &str,
 ) -> io::Result<bool> {
     shared.check_settings_owner(provider, channel_id).await?;
-    if claude_herdr_fast_unavailable(provider, channel_id) {
-        return Err(io::Error::other(
-            "Herdr 채널의 Claude TUI에는 /effort 설정이 적용되지 않습니다. 설정과 현재 세션을 유지했습니다.",
-        ));
-    }
     if !claude_local_tui_relaunch_applies(provider, channel_id) {
         return Err(io::Error::other(
             "/effort는 로컬 Claude TUI 채널에서만 저장할 수 있습니다.",
@@ -331,13 +321,20 @@ pub(in crate::services::discord) async fn update_channel_fast_mode(
     shared
         .check_settings_owner(provider, runtime_channel_id)
         .await?;
+    if matches!(provider, ProviderKind::Claude)
+        && crate::config::session_hosts::herdr_endpoint(runtime_channel_id.get()).is_some()
+    {
+        return super::super::tui_passthrough::herdr_settings::fast(
+            shared,
+            runtime_channel_id,
+            Some(enabled),
+        )
+        .await
+        .map(|(_, changed)| changed)
+        .map_err(io::Error::other);
+    }
     if runtime_channel_id != channel_id {
         shared.check_settings_owner(provider, channel_id).await?;
-    }
-    if claude_herdr_fast_unavailable(provider, runtime_channel_id) {
-        return Err(io::Error::other(
-            "Herdr 채널의 Claude TUI에는 /fast 설정이 적용되지 않습니다. 설정과 현재 세션을 유지했습니다.",
-        ));
     }
     let mut settings = shared.settings.write().await;
     if channel_fast_mode_enabled(shared, channel_id) == enabled
