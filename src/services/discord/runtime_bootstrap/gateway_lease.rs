@@ -463,9 +463,9 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                     .await
                 }
                 Some(pref) => {
-                    if !handback_breaker.suppressed() {
-                        yield_to_preferred_gateway(pool, token_hash, pref, provider, shared).await;
-                    }
+                    // Suppression only stops a serving holder from yielding; a restart has
+                    // already freed the lock, so a waiting preferred node still gets the grace.
+                    yield_to_preferred_gateway(pool, token_hash, pref, provider, shared).await;
                     diagnostics.context(
                         pool,
                         "startup",
@@ -655,6 +655,30 @@ async fn self_fence_gateway(
     }
 }
 
+type ReleaseReply = tokio::sync::oneshot::Sender<Result<(), String>>;
+
+/// Operator release channels of the keepalives serving on this node, by provider.
+static RELEASE_REQUESTS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<ReleaseReply>>,
+    >,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Hand this node's gateway for `provider` to the waiting preferred node once, even while
+/// handbacks are suppressed; the breaker state is left untouched.
+pub(crate) async fn request_gateway_release(provider: &ProviderKind) -> Result<(), String> {
+    let not_serving = || format!("this node does not serve the {} gateway", provider.as_str());
+    let sender = RELEASE_REQUESTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(provider.as_str())
+        .cloned()
+        .ok_or_else(not_serving)?;
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    sender.send(reply).map_err(|_| not_serving())?;
+    answer.await.map_err(|_| not_serving())?
+}
+
 /// Keep the lease alive while serving, and self-fence when another node holds it.
 /// Voluntary handback suppression never bypasses lease recovery or fencing.
 pub(super) fn run_bot_spawn_gateway_lease_keepalive(
@@ -677,6 +701,11 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
         stage = "gate_owned",
         "[tui_o] gateway admission owned"
     );
+    let (release_sender, mut release_requests) = tokio::sync::mpsc::unbounded_channel();
+    RELEASE_REQUESTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(provider.as_str().to_owned(), release_sender);
     tokio::spawn(async move {
         // Resolved once, inside the task because it may await bootstrap (#4356):
         // the self-id is stable for the life of the process, and a hot config
@@ -686,7 +715,10 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
         let mut interval = tokio::time::interval(DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL);
         interval.tick().await;
         loop {
-            interval.tick().await;
+            let mut operator_release = tokio::select! {
+                _ = interval.tick() => None,
+                Some(reply) = release_requests.recv() => Some(reply),
+            };
 
             // A cancellable drain still serves Discord; backend cleanup owns lease release.
             let handback_suppressed = handback_breaker.suppressed();
@@ -697,7 +729,8 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
             // `deploy-release.sh` restarts the local node first, so a
             // non-preferred node routinely wins the initial race.
             if let Some(pref) = preference.as_ref().filter(|p| !p.self_is_preferred()) {
-                if current_lease.is_some() && !handback_suppressed {
+                let operator = operator_release.is_some();
+                if current_lease.is_some() && (operator || !handback_suppressed) {
                     if let Some(pool) = shared_for_lease.pg_pool.as_ref() {
                         if preferred_gateway_is_waiting(
                             pool,
@@ -705,10 +738,11 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                             &provider_for_lease,
                         )
                         .await
-                            && handback_breaker.record_yield()
+                            && (operator || handback_breaker.record_yield())
                         {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
+                                operator,
                                 "  [{ts}] 🤝 GATEWAY-LEASE: {} yielding gateway to preferred node {} — self-fencing",
                                 provider_for_lease.display_name(),
                                 pref.preferred_instance_id
@@ -718,12 +752,20 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                             if let Some(lease) = current_lease.take() {
                                 let _ = release_gateway(&gate, lease.unlock()).await;
                             }
+                            if let Some(reply) = operator_release.take() {
+                                let _ = reply.send(Ok(()));
+                            }
                             let (shared, provider) = (&shared_for_lease, &provider_for_lease);
                             self_fence_gateway(shared, provider, &shard_manager).await;
                             return;
                         }
                     }
                 }
+            }
+            if let Some(reply) = operator_release {
+                let _ = reply.send(Err(
+                    "release refused: this node is not a non-preferred holder, or the preferred node is not waiting".into(),
+                ));
             }
 
             // Keepalive the held lease. On error the lock connection died (the
