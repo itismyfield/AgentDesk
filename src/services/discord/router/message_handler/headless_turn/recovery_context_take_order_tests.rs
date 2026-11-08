@@ -4,8 +4,6 @@ use super::super::super::super::prompt_builder::{
 use super::super::super::super::settings::RoleBinding;
 use poise::serenity_prelude::ChannelId;
 
-pub(super) mod source_guard_tests;
-
 #[tokio::test(start_paused = true)]
 async fn deferred_headless_start_leaves_metadata_with_caller_and_no_foreground_queue() {
     use crate::services::discord::{self, inflight::InflightTurnState, live_bridge};

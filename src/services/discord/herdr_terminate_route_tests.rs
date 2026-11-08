@@ -243,6 +243,17 @@ impl Node {
         post(&self.app(), LOOPBACK, &[JSON], &body(&self.key, nonce)).await
     }
 
+    async fn terminate_by_pane(&self) -> (StatusCode, Value) {
+        let mut payload: Value = serde_json::from_str(&body(&self.key, herdr::EXECUTION)).unwrap();
+        payload["verify_by_pane"] = true.into();
+        post(&self.app(), LOOPBACK, &[JSON], &payload.to_string()).await
+    }
+
+    fn marker(&self) -> std::path::PathBuf {
+        let logical = self.key.rsplit_once(':').unwrap().1;
+        crate::services::tmux_common::session_temp_path(logical, "host_kind").into()
+    }
+
     async fn row(&self) -> Option<(herdr::HostedState, String)> {
         herdr::row(&self.pool, &self.key).await
     }
@@ -292,6 +303,92 @@ async fn wait_for(what: &str, mut done: impl AsyncFnMut() -> bool) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("timed out waiting for {what}");
+}
+
+// A lost `.host_kind` marker over a live provider refuses both the plain terminate and the CLI
+// retire; the pane-verified terminate closes that pane, retires the row and releases its hold.
+#[test]
+fn act_route_marker_lost_provider_running_retires_by_pane_pg() {
+    let name = "act_route_marker_lost_provider_running_retires_by_pane_pg";
+    let Some((rig, runtime)) = rig_child(name) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::bind(&rig, None).await;
+        std::fs::remove_file(node.marker()).unwrap();
+        let (results, _logs) = capture();
+        let (status, reply) = node.terminate(herdr::EXECUTION).await;
+        assert_eq!(
+            (status, &reply["result"]),
+            (StatusCode::CONFLICT, &json!("refused"))
+        );
+        let detail = reply["detail"].as_str().unwrap();
+        assert!(detail.contains("MarkerUnverified"), "{detail}");
+        let retire = crate::cli::herdr::retire(&node.pool, CHANNEL).await;
+        assert_eq!(
+            retire,
+            Err(crate::cli::herdr::RetireRefusal::ProviderRunning)
+        );
+        assert_eq!(closes(&rig), 0);
+        assert_eq!(node.row().await, node.bound());
+        assert!(herdr::held());
+
+        let (status, reply) = node.terminate_by_pane().await;
+        assert_eq!(
+            (status, &reply["result"]),
+            (StatusCode::OK, &json!("retired")),
+            "{reply}"
+        );
+        assert_eq!(closes(&rig), 1);
+        let records = results.take();
+        let by_pane: Vec<_> = records
+            .iter()
+            .map(|r| r["verify_by_pane"].clone())
+            .collect();
+        assert_eq!(by_pane, ["false", "true"], "{records:?}");
+        let logged = results_of(records, &node.key, herdr::EXECUTION);
+        assert_eq!(logged, ["refused", "retired"]);
+        let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
+        assert_eq!(node.row().await, Some(retired));
+        assert!(!herdr::held());
+        node.finish().await;
+    });
+}
+
+// The pane-verified terminate never overrides another host's marker, and with the marker absent
+// it still needs the pane to run this execution: either refusal sends no close and keeps the row.
+#[test]
+fn act_route_by_pane_refuses_other_host_or_other_execution_pg() {
+    let name = "act_route_by_pane_refuses_other_host_or_other_execution_pg";
+    let Some((rig, runtime)) = rig_child(name) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::bind(&rig, None).await;
+        std::fs::write(node.marker(), "tmux").unwrap();
+        let (status, reply) = node.terminate_by_pane().await;
+        assert_eq!(status, StatusCode::CONFLICT, "{reply}");
+        let detail = reply["detail"].as_str().unwrap();
+        assert!(detail.contains("MarkerOtherHost"), "{detail}");
+
+        std::fs::remove_file(node.marker()).unwrap();
+        rig.run_other_execution();
+        let (status, reply) = node.terminate_by_pane().await;
+        assert_eq!(
+            (status, &reply["result"], &reply["detail"]),
+            (
+                StatusCode::CONFLICT,
+                &json!("gate_refused"),
+                &json!("OtherNonce")
+            )
+        );
+        assert_eq!(closes(&rig), 0);
+        assert_eq!(node.row().await, node.bound());
+        assert!(herdr::held());
+        node.finish().await;
+    });
 }
 
 // A nonce that is not the row's, or a row that does not exist, is refused with no close and no

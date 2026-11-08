@@ -21,6 +21,9 @@ pub(super) struct TerminateBody {
     session_key: String,
     execution_nonce: String,
     reason: String,
+    /// With the `.host_kind` marker absent, the close rests on the exact pane proof alone.
+    #[serde(default)]
+    verify_by_pane: bool,
 }
 
 type Reply = (StatusCode, Json<Value>);
@@ -86,7 +89,11 @@ pub(super) async fn terminate(
         session_key: body.session_key.clone(),
         execution_nonce: body.execution_nonce.clone(),
     };
-    let result = terminate_registered_herdr(registry, pool, request, body.reason).await;
+    let result = if body.verify_by_pane {
+        terminate_registered_herdr(registry, pool, request.verified_by_pane(), body.reason).await
+    } else {
+        terminate_registered_herdr(registry, pool, request, body.reason).await
+    };
     let (name, detail) = result.outcome();
     let status = status_of(name);
     let reply = json!({

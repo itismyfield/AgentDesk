@@ -195,6 +195,7 @@ fn cli() -> Result<(), String> {
             session_key: "claude/h/mac-mini:AgentDesk-claude-act".into(),
             execution_nonce: "n".into(),
             reason: "r".into(),
+            verify_by_pane: false,
         },
     })
 }
