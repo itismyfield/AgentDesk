@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use super::o_stall_tests::watcher;
 use super::*;
@@ -102,18 +103,21 @@ impl Fixture {
                 demand: owing.demand.clone(),
             },
         );
-        let o_task = tokio::spawn(async move {
-            loop {
-                if owing.demand.wanted() {
-                    owing.published.send_replace(Some(Undelivered {
-                        asked: owing.demand.asked(),
-                        captured: vec![(path.clone(), std::fs::metadata(&path).unwrap().len())],
-                        ..Undelivered::default()
-                    }));
+        let o_task = tokio::spawn(crate::test_support::wait::await_within(
+            async move {
+                loop {
+                    if owing.demand.wanted() {
+                        owing.published.send_replace(Some(Undelivered {
+                            asked: owing.demand.asked(),
+                            captured: vec![(path.clone(), std::fs::metadata(&path).unwrap().len())],
+                            ..Undelivered::default()
+                        }));
+                    }
+                    tokio::task::yield_now().await;
                 }
-                tokio::task::yield_now().await;
-            }
-        });
+            },
+            Duration::from_secs(30),
+        ));
         let registry = HealthRegistry::new();
         registry
             .register(PROVIDER.as_str().to_string(), shared.clone())
