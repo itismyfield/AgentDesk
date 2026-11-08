@@ -46,7 +46,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.149
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: ./.github/actions/sccache-or-nothing
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -132,9 +132,22 @@ jobs:
         run: ./scripts/ci/postgres-service.sh start
       # Rollback rehearsal executes the runbook's literal rg command.
       - name: Install ripgrep
+        id: ripgrep
+        continue-on-error: true
         uses: taiki-e/install-action@v2
         with:
           tool: ripgrep
+      # A release download outage must not stop the workers; any packaged rg runs the runbook command.
+      - name: Install ripgrep from the OS package manager
+        if: steps.ripgrep.outcome != 'success'
+        shell: bash
+        run: |
+          echo "::warning title=ripgrep download failed::installing ripgrep from the ${RUNNER_OS} package manager"
+          case "$RUNNER_OS" in
+            Linux) sudo apt-get install -y ripgrep || { sudo apt-get update && sudo apt-get install -y ripgrep; } ;;
+            macOS) brew install ripgrep ;;
+            Windows) choco install ripgrep --yes --no-progress ;;
+          esac
       - name: Require ripgrep
         run: rg --version
       - name: Install Rust toolchain
