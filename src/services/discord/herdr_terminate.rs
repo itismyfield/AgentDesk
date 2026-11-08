@@ -37,16 +37,27 @@ type Postlude = Box<
 pub(crate) struct ExplicitTerminate {
     request: OperatorTerminate,
     after: Option<Postlude>,
+    by_pane: bool,
 }
 impl From<OperatorTerminate> for ExplicitTerminate {
     fn from(request: OperatorTerminate) -> Self {
         Self {
             request,
             after: None,
+            by_pane: false,
         }
     }
 }
 impl OperatorTerminate {
+    /// An operator's terminate that, with the `.host_kind` marker absent, rests on the exact pane
+    /// proof alone: the pane's root shell, provider and binding nonce must be the recorded ones.
+    pub(crate) fn verified_by_pane(self) -> ExplicitTerminate {
+        ExplicitTerminate {
+            by_pane: true,
+            ..ExplicitTerminate::from(self)
+        }
+    }
+
     pub(crate) fn after_retire<F, Fut>(self, after: F) -> ExplicitTerminate
     where
         F: FnOnce(RetiredExclusion) -> Fut + Send + 'static,
@@ -55,6 +66,7 @@ impl OperatorTerminate {
         ExplicitTerminate {
             request: self,
             after: Some(Box::new(move |held| after(held).boxed())),
+            by_pane: false,
         }
     }
 }
@@ -391,9 +403,13 @@ pub(in crate::services::discord) async fn terminate_explicit_herdr(
     shared: Arc<SharedData>,
     pool: &PgPool,
 ) -> TerminationResult {
-    let ExplicitTerminate { request, after } = request.into();
+    let ExplicitTerminate {
+        request,
+        after,
+        by_pane,
+    } = request.into();
     let resume_retired = after.is_some();
-    match terminate_scoped(request, shared, pool, None, resume_retired).await {
+    match terminate_scoped(request, shared, pool, None, resume_retired, by_pane).await {
         Ok(exclusion) => {
             if let Some(after) = after {
                 return after(exclusion).await;
@@ -424,6 +440,7 @@ async fn terminate_scoped(
     pool: &PgPool,
     expected: Option<http_force::Expected>,
     resume_retired: bool,
+    by_pane: bool,
 ) -> Result<RetiredExclusion, TerminationResult> {
     use TerminationResult::{Indeterminate, Refused};
     if !terminate_enabled() {
@@ -490,11 +507,14 @@ async fn terminate_scoped(
     let target = if retired {
         None
     } else {
-        Some(
-            herdr_endpoints()
-                .target(record)
-                .ok_or_else(|| Refused("missing launch evidence".into()))?,
-        )
+        let target = herdr_endpoints()
+            .target(record)
+            .ok_or_else(|| Refused("missing launch evidence".into()))?;
+        Some(if by_pane {
+            target.verified_by_pane()
+        } else {
+            target
+        })
     };
     let fence = if let Some(target) = &target {
         Arc::new(
@@ -659,19 +679,21 @@ async fn load(pool: &PgPool, key: &str) -> Result<HostedObservation, Termination
 pub(crate) async fn terminate_registered_herdr(
     registry: &HealthRegistry,
     pool: PgPool,
-    request: OperatorTerminate,
+    request: impl Into<ExplicitTerminate>,
     reason: String,
 ) -> TerminationResult {
     if !terminate_enabled() {
         return TerminationResult::Disabled;
     }
+    let request = request.into();
     let logged = Logged {
-        key: request.session_key.clone(),
-        nonce: request.execution_nonce.clone(),
+        key: request.request.session_key.clone(),
+        nonce: request.request.execution_nonce.clone(),
         reason,
+        verify_by_pane: request.by_pane,
         started: std::time::Instant::now(),
     };
-    let shared = match runtime_of(registry, &pool, &request.session_key).await {
+    let shared = match runtime_of(registry, &pool, &request.request.session_key).await {
         Ok(shared) => shared,
         Err(result) => {
             logged.write(&result);
@@ -722,6 +744,8 @@ struct Logged {
     key: String,
     nonce: String,
     reason: String,
+    /// The operator asked for the pane proof to stand in for an absent marker.
+    verify_by_pane: bool,
     started: std::time::Instant,
 }
 impl Logged {
@@ -732,12 +756,15 @@ impl Logged {
         let (name, detail) = result.outcome();
         let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let (session_key, execution_nonce, reason) = (&self.key, &self.nonce, &self.reason);
+        let verify_by_pane = self.verify_by_pane;
         if *result == TerminationResult::Retired {
             tracing::info!(target: "agentdesk::herdr_terminate", %session_key, %execution_nonce,
-                %reason, result = name, %detail, elapsed_ms, "herdr terminate finished");
+                %reason, verify_by_pane, result = name, %detail, elapsed_ms,
+                "herdr terminate finished");
         } else {
             tracing::warn!(target: "agentdesk::herdr_terminate", %session_key, %execution_nonce,
-                %reason, result = name, %detail, elapsed_ms, "herdr terminate finished");
+                %reason, verify_by_pane, result = name, %detail, elapsed_ms,
+                "herdr terminate finished");
         }
     }
 }

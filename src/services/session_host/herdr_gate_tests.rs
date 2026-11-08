@@ -953,6 +953,50 @@ fn m0_terminate_admission_off_still_judges() {
     assert_eq!(rig.server.mutations().len(), 1);
 }
 
+// The pane-verified override admits only an absent marker and only for a terminate: another
+// host, an unreadable or unrecognized marker, and input or cancel keys stay refused unwritten.
+#[test]
+fn by_pane_override_admits_only_an_absent_marker_for_terminate() {
+    if run_terminate_child("by_pane_override_admits_only_an_absent_marker_for_terminate") {
+        return;
+    }
+    use HerdrGateRefusal as Why;
+    let rig = rig();
+    let _switch = LiveTerminateSwitch::new();
+    let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
+    let InputTarget::Herdr(target) = target else {
+        panic!("not a Herdr target");
+    };
+    let target = target.verified_by_pane();
+    let close = || terminate_herdr_once(OperatorTerminateWarrant::issue(target.clone()));
+    let path = marker_path();
+    for (marker, why) in [
+        (Some("tmux"), Why::MarkerOtherHost),
+        (Some("zellij"), Why::MarkerUnverified),
+        (Some("<dir>"), Why::MarkerUnverified),
+    ] {
+        let _ = std::fs::remove_file(&path);
+        match marker {
+            Some("<dir>") => std::fs::create_dir(&path).unwrap(),
+            Some(text) => std::fs::write(&path, text).unwrap(),
+            None => {}
+        }
+        let refused = HerdrTerminateResult::Refused(TerminateRefusal::Gate(why));
+        assert_eq!(close(), refused, "{marker:?}");
+    }
+    std::fs::remove_dir(&path).unwrap();
+    for plan in [
+        &[TuiInputAction::Literal("x".into()), TuiInputAction::Enter][..],
+        &[TuiInputAction::Escape][..],
+    ] {
+        let refused = InputRun::Refused(InputRefusal::Herdr(Why::MarkerUnverified));
+        assert_eq!(host_input::run_herdr(&target, plan, None), refused);
+    }
+    assert!(rig.server.mutations().is_empty() && rig.server.sends().is_empty());
+    assert_eq!(close(), HerdrTerminateResult::Acknowledged);
+    assert_eq!(rig.server.mutations().len(), 1);
+}
+
 #[test]
 fn m0_close_witness_mismatch_zero_bytes() {
     if run_terminate_child("m0_close_witness_mismatch_zero_bytes") {
@@ -2262,6 +2306,12 @@ pub(crate) mod p11 {
 
         pub(crate) fn fail_next_process_read(&self) {
             self.os.fail_next_read();
+        }
+
+        /// The recorded pane's provider now names another execution's launch context.
+        pub(crate) fn run_other_execution(&self) {
+            let other = context("fedcba9876543210fedcba9876543210");
+            self.os.swap(Arc::new(FakeOs::launched(env_naming(&other))));
         }
 
         /// A restarted server restored the pane as shell `FRESH` alone.

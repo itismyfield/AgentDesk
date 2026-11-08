@@ -1277,6 +1277,7 @@ Usage: `agentdesk herdr terminate [OPTIONS]`
 | `--session-key <SESSION_KEY>` (required) | `String` |  | Session key of the execution's row |
 | `--execution-nonce <EXECUTION_NONCE>` (required) | `String` |  | Execution nonce the row must still record |
 | `--reason <REASON>` (required) | `String` |  | Why it is terminated, kept in the server's result log |
+| `--verify-by-pane` | flag |  | With the channel's `.host_kind` marker absent, verify the pane alone: its root shell, provider and binding nonce must be the recorded ones |
 
 ### `agentdesk herdr probe-user-default`
 

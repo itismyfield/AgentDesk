@@ -45,6 +45,7 @@ where
         key: request.session_key.clone(),
         nonce: request.execution_nonce.clone(),
         reason: reason.into(),
+        verify_by_pane: false,
         started: std::time::Instant::now(),
     };
     let shared = match runtime_of(registry, &pool, &request.session_key).await {
@@ -56,7 +57,7 @@ where
     };
     let run = tokio::spawn(async move {
         let service = async {
-            match terminate_scoped(request, shared, &pool, Some(expected), false).await {
+            match terminate_scoped(request, shared, &pool, Some(expected), false, false).await {
                 Ok(exclusion) => {
                     #[cfg(test)]
                     super::run_probe(&super::BEFORE_POSTLUDE).await;
