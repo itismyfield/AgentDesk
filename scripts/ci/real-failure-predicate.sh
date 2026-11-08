@@ -18,7 +18,7 @@
 # `error: could not compile` followed by SIGKILL can be runner OOM, and linker
 # errors accompanied by `No space left on device` can be disk exhaustion. They
 # remain regressions fail-safe when mixed with those infrastructure symptoms.
-REAL_FAILURE_REGEX='test result: FAILED|error\[E|error: could not compile|panicked at|assertion .*failed|Diff in .*:[0-9]+:|SC[0-9]{4} \((error|warning|info|style)\):|FAILED \([^)]*(failures|errors)=[0-9]+|yaml\.(scanner|parser|composer|constructor)\.[A-Za-z]+Error:|(^|[[:space:]/])ld: cannot find '
+REAL_FAILURE_REGEX='test result: FAILED|error\[E|error: could not compile|panicked at|assertion .*failed|Diff in .*:[0-9]+:|SC[0-9]{4} \((error|warning|info|style)\):|FAILED \([^)]*(failures|errors)=[0-9]+|(^|[[:space:]])(FAIL|ERROR): [^[:space:]]+ \(|yaml\.(scanner|parser|composer|constructor)\.[A-Za-z]+Error:|(^|[[:space:]/])ld: cannot find '
 
 log_has_real_failure() {
   local log_path="$1"

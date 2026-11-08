@@ -10,7 +10,7 @@ REAL_FAILURE_PREDICATE="$SCRIPT_DIR/real-failure-predicate.sh"
 source "$REAL_FAILURE_PREDICATE"
 TMP_DIR="$(mktemp -d)"
 SUMMARY_ROWS="$TMP_DIR/summary-rows.md"
-# The nextest worker jobs are the only retry candidates; the capture is the worker index.
+# Workers and annotation-confirmed guards timeouts are retry candidates.
 WORKER_JOB_REGEX='^Rust tests \(worker (0|[1-9][0-9]?)\)$'
 WORKER_JOB_NAME="Rust tests (worker 0)"
 WINDOWS_ADVISORY_JOB_NAME="Fast check + non-PG tests (windows-latest)"
@@ -74,7 +74,7 @@ is_positive_integer() {
 # shellcheck disable=SC2016
 FAILED_JOB_ROWS_JQ='
     .jobs[]
-    | select(.conclusion == "failure")
+    | select(.conclusion == "failure" or .conclusion == "cancelled")
     | [
         (.id | tostring),
         (if (.steps | type) == "array" and ((.steps | length) > 0)
@@ -88,6 +88,21 @@ FAILED_JOB_ROWS_JQ='
 failed_job_rows() {
   local jobs_payload="$1"
   jq -r "$FAILED_JOB_ROWS_JQ" "$jobs_payload"
+}
+
+# The observed runner timeout is a check annotation, not downloadable log text.
+# A full page could hide further evidence; leave it for a manual retry.
+job_has_timeout_annotation() {
+  local repo="$1" jobs="$2" job_id="$3" check_url check_id annotations="$TMP_DIR/annotations.json"
+  check_url="$(jq -r --argjson id "$job_id" '.jobs[] | select(.id == $id) | .check_run_url // empty' "$jobs")"
+  [[ "$check_url" == "https://api.github.com/repos/$repo/check-runs/"* ]] || return 1
+  check_id="${check_url##*/}"
+  is_positive_integer "$check_id" || return 1
+  [[ "$check_url" == "https://api.github.com/repos/$repo/check-runs/$check_id" ]] || return 1
+  gh api "repos/$repo/check-runs/$check_id/annotations?per_page=100" >"$annotations" 2>/dev/null || return 1
+  jq -e 'type == "array" and length < 100 and any(.[];
+    .path == ".github" and .annotation_level == "failure" and
+    (.message // "" | test("^The job has exceeded the maximum execution time of ([0-9]+h)?([0-9]+m)?[0-9]+s$")))' "$annotations" >/dev/null 2>&1
 }
 
 # #5207 (R2): this literal must stay byte-identical to the validated
@@ -513,7 +528,7 @@ validate_attempt_payload() {
   local expected_attempt="$2"
   jq -e \
     --argjson attempt "$expected_attempt" \
-    '.name == "CI PR" and .event == "pull_request" and .status == "completed" and .conclusion == "failure" and .run_attempt == $attempt' \
+    '.name == "CI PR" and .event == "pull_request" and .status == "completed" and (.conclusion == "failure" or .conclusion == "cancelled") and .run_attempt == $attempt' \
     "$payload" >/dev/null
 }
 
@@ -526,7 +541,7 @@ latest_attempt_is_still_failed() {
   gh api "repos/$repo/actions/runs/$run_id" >"$payload" 2>/dev/null || return 1
   jq -e \
     --argjson attempt "$expected_attempt" \
-    '.status == "completed" and .conclusion == "failure" and .run_attempt == $attempt' \
+    '.status == "completed" and (.conclusion == "failure" or .conclusion == "cancelled") and .run_attempt == $attempt' \
     "$payload" >/dev/null
 }
 
@@ -549,7 +564,7 @@ run_classifier() {
     return 0
   fi
 
-  # Only the initial failed attempt may request one retry per worker.
+  # Only the initial attempt may request one retry per candidate job.
   if (( run_attempt >= 2 )); then
     decision="no-op:attempt-cap"
     write_summary "$run_id" "$run_attempt" "$decision"
@@ -593,6 +608,7 @@ run_classifier() {
   local worker_classified_count=0
   local regression_count=0
   local unknown_count=0
+  local timeout_job_count=0
   local -a worker_job_ids=() worker_entries=()
   # Newline-delimited name set: bash 3.2 (macOS prepush) has no associative arrays.
   local seen_worker_names=$'\n'
@@ -613,6 +629,20 @@ run_classifier() {
     job_class="$(classify_job "$job_name" "$log_path" "$executed_steps")"
     if [[ "$job_class" == "regression" ]]; then
       regression_count=$((regression_count + 1))
+    fi
+
+    if jq -e --argjson id "$job_id" '.jobs[] | select(.id == $id) | .conclusion == "cancelled"' "$jobs_payload" >/dev/null; then
+      if [[ "$job_name" == "Script checks runner (guards)" ]] &&
+        job_has_timeout_annotation "$repo" "$jobs_payload" "$job_id" && ! log_has_repo_config_fault "$log_path"; then
+        timeout_job_count=$((timeout_job_count + 1))
+        (( timeout_job_count == 1 )) || unknown_count=$((unknown_count + 1))
+        worker_job_ids+=("$job_id")
+        [[ "$job_class" == "regression" ]] || job_class="infra-job-timeout"
+      else
+        unknown_count=$((unknown_count + 1))
+      fi
+      append_summary_row "$job_id" "$job_class"
+      continue
     fi
 
     if is_worker_job "$job_name"; then
@@ -652,8 +682,8 @@ run_classifier() {
     append_summary_row "$job_id" "$job_class"
   done < <(failed_job_rows "$jobs_payload")
 
-  decision="$(decide_retry "$worker_failed_count" "$worker_classified_count" "$regression_count" "$unknown_count")"
-  if [[ "$decision" == "would-rerun:infra" ]] &&
+  decision="$(decide_retry "$((worker_failed_count + timeout_job_count))" "$((worker_classified_count + timeout_job_count))" "$regression_count" "$unknown_count")"
+  if [[ "$decision" == "would-rerun:infra" ]] && (( worker_failed_count > 0 )) &&
     ! worker_artifacts_allow_retry "$repo" "$run_id" "$run_attempt" "${worker_entries[@]}"; then
     decision="no-op:worker-artifact-veto"
   fi
@@ -669,14 +699,13 @@ run_classifier() {
     return 0
   fi
 
-  if ! latest_attempt_is_still_failed "$repo" "$run_id" "$run_attempt"; then
-    decision="no-op:stale-attempt"
-    write_summary "$run_id" "$run_attempt" "$decision"
-    echo "decision=$decision"
-    return 0
-  fi
-
   for job_id in ${worker_job_ids[@]+"${worker_job_ids[@]}"}; do
+    if ! latest_attempt_is_still_failed "$repo" "$run_id" "$run_attempt"; then
+      decision="no-op:stale-attempt"
+      write_summary "$run_id" "$run_attempt" "$decision"
+      echo "decision=$decision"
+      return 0
+    fi
     if ! python3 "$SCRIPT_DIR/pr_head_current.py" "$repo" "$attempt_payload"; then
       write_summary "$run_id" "$run_attempt" "no-op:stale-head"
       echo "decision=no-op:stale-head"

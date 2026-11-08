@@ -510,7 +510,14 @@ class GatewayReadyTest(unittest.TestCase):
         self.details = []
         self.read_delay = 0.0
         self.calls = {"detail": 0, "read": 0}
+        self.server_errors = []
         fixture = self
+
+        class Server(ThreadingHTTPServer):
+            daemon_threads = False
+
+            def handle_error(self, request, client_address):
+                fixture.server_errors.append(sys.exc_info()[1])
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args):
@@ -535,13 +542,18 @@ class GatewayReadyTest(unittest.TestCase):
                 elif self.path.startswith("/api/discord/channels/222/messages?"):
                     fixture.calls["read"] += 1
                     time.sleep(fixture.read_delay)
-                    self.reply([])
+                    try:
+                        self.reply([])
+                    except (BrokenPipeError, ConnectionResetError):
+                        if not fixture.read_delay:
+                            raise
                 else:
                     self.send_error(404)
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = Server(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         thread.start()
+        self.addCleanup(lambda: self.assertEqual(self.server_errors, []))
         self.addCleanup(self.server.server_close)
         self.addCleanup(thread.join)
         self.addCleanup(self.server.shutdown)
