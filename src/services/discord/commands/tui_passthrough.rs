@@ -1,5 +1,7 @@
 use crate::services::provider::ProviderKind;
 
+pub(super) mod herdr_settings;
+
 use super::super::{Context, Error, SharedData, check_auth};
 use super::config::{effective_provider_for_channel, fallback_channel_name_for_feature_toggle};
 
@@ -111,8 +113,7 @@ fn unsupported_notice(provider: &ProviderKind, command: ClaudeSlashPassthrough) 
     )
 }
 
-/// Saves the channel's effort level for its local Claude TUI and says what follows; nothing is
-/// typed into the TUI, and a refused save keeps the setting and session as they were.
+/// Applies effort on a live Herdr pane, or saves it for a local tmux TUI relaunch.
 pub(super) async fn effort_save_notice(
     shared: &std::sync::Arc<SharedData>,
     token: &str,
@@ -122,6 +123,21 @@ pub(super) async fn effort_save_notice(
 ) -> String {
     if !matches!(provider, ProviderKind::Claude) {
         return unsupported_effort_notice(provider);
+    }
+    if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
+        use crate::services::provider_hosting::{
+            ProviderSessionDriver, resolve_provider_session_selection_with_channel,
+        };
+        if resolve_provider_session_selection_with_channel(provider, true, Some(channel_id.get()))
+            .driver
+            != ProviderSessionDriver::TuiHosting
+        {
+            return "Herdr /effort는 live Claude TUI pane에서만 지원합니다.".into();
+        }
+        return match herdr_settings::effort(shared, channel_id, level).await {
+            Ok(()) => format!("effort를 `{}`로 적용했습니다.", level.as_str()),
+            Err(error) => format!("effort 적용 미확인: {error}"),
+        };
     }
     let level = level.as_str();
     match super::config::update_channel_effort(shared, token, channel_id, provider, level).await {
@@ -285,7 +301,7 @@ async fn run_claude_passthrough(
     Ok(())
 }
 
-/// /effort <level> — save the local Claude TUI effort, applied by a same-session relaunch.
+/// /effort <level> — apply live Herdr effort or save it for a local tmux TUI relaunch.
 #[poise::command(slash_command, rename = "effort")]
 pub(in crate::services::discord) async fn cmd_effort(
     ctx: Context<'_>,
@@ -309,6 +325,7 @@ pub(in crate::services::discord) async fn cmd_effort(
     );
     let (provider, _) = resolve_effective_provider_and_tmux_name(ctx).await;
     let (shared, token) = (&ctx.data().shared, &ctx.data().token);
+    ctx.defer().await?;
     let notice = effort_save_notice(shared, token, ctx.channel_id(), &provider, level).await;
     ctx.say(notice).await?;
     Ok(())
@@ -367,7 +384,7 @@ mod tests {
         // LOCAL_ONLY_SLASH_COMMANDS (the variant-pinned set) — see the dedicated
         // test below for its local-only behavior.
         assert!(!LOCAL_ONLY_SLASH_COMMANDS.contains(&"/model"));
-        // `/effort` is no longer typed by AgentDesk; one a person types in the TUI stays local-only.
+        // Native effort changes complete locally, including those sent to a Herdr pane.
         assert!(is_local_only_slash_command_kind("/effort"));
         assert!(OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS.contains(&"/effort"));
     }
@@ -464,3 +481,6 @@ mod host_guard_tests {
         db.drop().await;
     }
 }
+
+#[cfg(test)]
+mod herdr_settings_tests;

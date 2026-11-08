@@ -242,6 +242,8 @@ pub enum TuiInputAction {
     Escape,
     CtrlU,
     Backspace(usize),
+    Left,
+    Right,
 }
 
 pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
@@ -310,7 +312,7 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
     prompt_readiness_snapshot_from_capture(pane.as_deref(), alive)
 }
 
-pub(super) fn prompt_readiness_snapshot_from_capture(
+pub(crate) fn prompt_readiness_snapshot_from_capture(
     pane: Option<&str>,
     tmux_pane_alive: bool,
 ) -> PromptReadinessSnapshot {
@@ -618,6 +620,7 @@ pub(super) fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Re
         TuiInputAction::Escape => "escape",
         TuiInputAction::CtrlU => "ctrl-u",
         TuiInputAction::Backspace(_) => "backspace",
+        TuiInputAction::Left | TuiInputAction::Right => "horizontal",
     };
     if stderr.is_empty() {
         Err(format!("tmux send {action_name} failed: {}", output.status))

@@ -58,6 +58,8 @@ mod fork_lineage;
 mod owe;
 use current::Current;
 pub(crate) mod provenance;
+#[path = "rotation/reader_count.rs"]
+mod reader_count;
 #[path = "rotation/readers.rs"]
 mod readers;
 mod scoped;
@@ -159,6 +161,9 @@ pub struct Sources<B> {
     dirty: bool,
     raised: Vec<WriterAlarm>,
     readers_alarmed: bool,
+    /// Per old source key and hop seq, judged at a log tail: whether a later execution replaced
+    /// the source's execution in its pane.
+    replaced: Option<(u64, reader_count::Judged)>,
     pending_alarmed: Option<u64>,
     /// Set while the binding log cannot be read, so the outage alarms once.
     log_alarmed: bool,
@@ -330,6 +335,7 @@ impl<B: BindingEvents> Sources<B> {
             dirty: false,
             raised: Vec::new(),
             readers_alarmed: false,
+            replaced: None,
             pending_alarmed: None,
             log_alarmed: false,
             legacy_hops: HashMap::new(),

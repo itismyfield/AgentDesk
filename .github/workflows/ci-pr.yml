@@ -516,7 +516,7 @@ jobs:
 
       - name: Setup sccache
         if: runner.os != 'macOS'
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: ./.github/actions/sccache-or-nothing
 
       # `target/` is intentionally NOT cached — sccache (GHA-backed) handles
       # compiled rustc output, and caching multi-GB `target/` directories
@@ -585,7 +585,7 @@ jobs:
 
       - name: Setup sccache
         if: runner.os != 'macOS'
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: ./.github/actions/sccache-or-nothing
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -667,7 +667,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.149
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: ./.github/actions/sccache-or-nothing
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -737,7 +737,7 @@ jobs:
         uses: taiki-e/install-action@v2
         with: {tool: cargo-nextest@0.9.149}
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: ./.github/actions/sccache-or-nothing
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -791,9 +791,22 @@ jobs:
         run: ./scripts/ci/postgres-service.sh start
       # Rollback rehearsal executes the runbook's literal rg command.
       - name: Install ripgrep
+        id: ripgrep
+        continue-on-error: true
         uses: taiki-e/install-action@v2
         with:
           tool: ripgrep
+      # A release download outage must not stop the workers; any packaged rg runs the runbook command.
+      - name: Install ripgrep from the OS package manager
+        if: steps.ripgrep.outcome != 'success'
+        shell: bash
+        run: |
+          echo "::warning title=ripgrep download failed::installing ripgrep from the ${RUNNER_OS} package manager"
+          case "$RUNNER_OS" in
+            Linux) sudo apt-get install -y ripgrep || { sudo apt-get update && sudo apt-get install -y ripgrep; } ;;
+            macOS) brew install ripgrep ;;
+            Windows) choco install ripgrep --yes --no-progress ;;
+          esac
       - name: Require ripgrep
         run: rg --version
       - name: Install Rust toolchain
@@ -813,11 +826,39 @@ jobs:
           --worker ${{ matrix.worker }} --archive "$RUNNER_TEMP/nextest/lib-tests.tar.zst"
           --config "$RUNNER_TEMP/nextest/plan/worker-${{ matrix.worker }}.toml" --sha "$GITHUB_SHA"
           --record "$RUNNER_TEMP/nextest-result"
+      # The real-Herdr fixture tests read this pinned binary; the key carries version and digest.
+      - name: Restore herdr test binary
+        id: herdr_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/herdr-test-bin
+          key: herdr-0.9.5-14d9e8bc8b4a-linux-x86_64
+      # A download outage fails here, before any test, with the line the infra rerun classifier matches.
+      - name: Install herdr test binary
+        id: herdr
+        shell: bash
+        env:
+          HERDR_CACHE_HIT: ${{ steps.herdr_cache.outputs.cache-hit }}
+        run: |
+          expected=14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d
+          bin="$RUNNER_TEMP/herdr-test-bin/herdr-0.9.5"
+          if [ "$HERDR_CACHE_HIT" != true ]; then
+            mkdir -p "$RUNNER_TEMP/herdr-test-bin"
+            code=$(curl --fail --location --retry 3 --silent --show-error --output "$bin" --write-out '%{http_code}' \
+              https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-x86_64) || {
+              echo "::error title=herdr download failed::herdr test binary download failed: HTTP ${code:-000}"
+              exit 1
+            }
+          fi
+          echo "$expected  $bin" | sha256sum --check
+          chmod 700 "$bin"
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
       - name: Run planned tests
         timeout-minutes: 60
         shell: bash
         env:
           BASH_ENV: /dev/null
+          ADK_TEST_HERDR_BIN: ${{ steps.herdr.outputs.bin }}
         run: |
           set +e
           NEXTEST_DIR="$RUNNER_TEMP/nextest"
@@ -941,7 +982,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 9b7367b25a8eaef1c22814b68547904bfeb186d24d4af6ca00555eaa6ac5019e
+          pin scripts/check-ci-runner-hardening.sh 64f57fecb95b8ddd73b87a3b2529190506216265d6b1f201099c716d34bf258b
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -992,7 +1033,7 @@ jobs:
           toolchain: "1.94.1"
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: ./.github/actions/sccache-or-nothing
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -1067,7 +1108,7 @@ jobs:
           tool: just@1.51.0
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: ./.github/actions/sccache-or-nothing
 
       # `target/` is intentionally NOT cached — sccache (GHA-backed) handles
       # compiled rustc output, and caching multi-GB `target/` directories
@@ -1139,7 +1180,7 @@ jobs:
           components: clippy
 
       - name: Setup sccache for lib inventory
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: ./.github/actions/sccache-or-nothing
 
       - name: Cache Cargo dependencies for lib inventory
         uses: Swatinem/rust-cache@v2
@@ -1419,7 +1460,7 @@ jobs:
 
       - name: Setup sccache
         if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: ./.github/actions/sccache-or-nothing
 
       - name: Cache Cargo dependencies
         if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'

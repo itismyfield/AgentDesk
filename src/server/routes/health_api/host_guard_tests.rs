@@ -168,3 +168,73 @@ async fn stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+// The repair's queue gate counts the queue that owns the channel's input: a V2 owner holding an
+// item refuses with `queue_not_empty` and keeps its file, as a V1 item does; an empty one proceeds.
+#[tokio::test(flavor = "current_thread")]
+async fn stale_mailbox_repair_refuses_while_the_owner_queue_holds_input_pg() {
+    use crate::services::provider::ProviderKind;
+    use crate::services::turn_orchestrator::{Intervention, InterventionMode, PendingQueueItem};
+    use crate::services::turn_orchestrator::{QueuePersistenceContext, v2_queue};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (shared, registry) = runtime(&pool).await;
+    let (mailboxes, token) = shared.queue_fixture_parts();
+    let context = QueuePersistenceContext::new(&ProviderKind::Claude, token, None);
+    for (n, (v2_items, v1_items)) in [(1, 0), (0, 1), (0, 0)].into_iter().enumerate() {
+        let channel = ChannelId::new(1_479_671_301_387_061_000 + n as u64);
+        let handle = mailboxes.handle(channel);
+        let mut owner_file = None;
+        if v2_items > 0 {
+            let (path, namespace) = v2_queue(&context, channel).unwrap();
+            handle.v2_adopt(path.clone(), namespace).await.unwrap();
+            let item: PendingQueueItem = serde_json::from_value(serde_json::json!({
+                "author_id": 7, "message_id": 9_761, "channel_id": channel.get(),
+                "source_message_ids": [9_761], "queued_generation": 1, "text": "owner input"}))
+            .unwrap();
+            let enqueued = handle.v2_request(move |slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                owner.enqueue_fixture(&item).map_err(|e| format!("{e:?}"))
+            });
+            assert_eq!(enqueued.await, Ok(true));
+            owner_file = Some((std::fs::read(&path).unwrap(), path));
+        }
+        if v1_items > 0 {
+            let id = poise::serenity_prelude::MessageId::new(9_762);
+            let item = Intervention {
+                author_id: poise::serenity_prelude::UserId::new(7),
+                author_is_bot: false,
+                message_id: id,
+                queued_generation: crate::services::discord::runtime_store::process_generation(),
+                source_message_ids: vec![id],
+                source_message_queued_generations: Vec::new(),
+                source_text_segments: Vec::new(),
+                text: "v1 input".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Vec::new(),
+            };
+            handle.replace_queue(vec![item], context.clone()).await;
+        }
+        let depth = handle.snapshot().await.queue_depth();
+        let (status, json) = post_repair(registry.clone(), &pool, channel).await;
+        let case = format!("v2={v2_items} v1={v1_items} {json}");
+        if v2_items + v1_items == 0 {
+            assert_eq!(status, StatusCode::OK, "{case}");
+            continue;
+        }
+        assert_eq!(status, StatusCode::CONFLICT, "{case}");
+        assert_eq!(json["safety_gate"], "queue_not_empty", "{case}");
+        assert_eq!(json["post_repair_mailbox"]["queue_depth"], 1, "{case}");
+        assert_eq!(handle.snapshot().await.queue_depth(), depth, "{case}");
+        if let Some((bytes, path)) = owner_file {
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{case}");
+        }
+    }
+    pool.close().await;
+    db.drop().await;
+}

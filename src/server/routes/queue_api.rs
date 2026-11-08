@@ -1157,6 +1157,67 @@ mod cancel_queue_preserve_pg_tests {
         pool.close().await;
         pg_db.drop().await;
     }
+
+    /// A forced cancel with no session row names no owner queue file, so the V2 owner refuses its
+    /// purge: the reply names why and counts the owner's queue, the depth health detail reports.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_sessionless_force_cancel_reports_the_refusal_and_the_owner_depth_pg() {
+        use crate::services::turn_orchestrator::{PendingQueueItem, v2_queue};
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel = ChannelId::new(6_813_760);
+        sqlx::query("INSERT INTO agents (id, name, discord_channel_cc) VALUES ($1, $1, $2)")
+            .bind("agent-sessionless")
+            .bind(channel.get().to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let shared = crate::services::discord::host_teardown_gate::test_support::shared_on(&pool);
+        let shared = shared.await;
+        let (mailboxes, token) = shared.queue_fixture_parts();
+        let handle = mailboxes.handle(channel);
+        let owned = QueuePersistenceContext::new(&ProviderKind::Claude, token, None);
+        let (path, namespace) = v2_queue(&owned, channel).unwrap();
+        handle.v2_adopt(path, namespace).await.unwrap();
+        let item: PendingQueueItem = serde_json::from_value(serde_json::json!({"author_id": 7,
+            "message_id": 9_760, "channel_id": channel.get(), "source_message_ids": [9_760],
+            "queued_generation": 1, "text": QUEUED_TEXT}))
+        .unwrap();
+        let enqueued = handle.v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            owner.enqueue_fixture(&item).map_err(|e| format!("{e:?}"))
+        });
+        assert_eq!(enqueued.await, Ok(true));
+        let app = registered_app(&pool, &shared).await;
+
+        let (status, body) = post_cancel(&app, channel.get(), true).await;
+        assert_eq!(status, StatusCode::OK, "cancel response: {body}");
+        assert_explicit_null(&body, "session_key");
+        let reason = "the request names another queue file than the owner's";
+        assert_eq!(body["queue_purge_refused_reason"], reason, "{body}");
+        assert_eq!(
+            body["queued_remaining"], 1,
+            "the owner kept its input: {body}"
+        );
+        let mut request = Request::builder().uri("/health/detail");
+        request = request.header(header::AUTHORIZATION, format!("Bearer {AUTH_TOKEN}"));
+        let mut request = request.body(Body::empty()).unwrap();
+        let peer = "127.0.0.1:8791".parse::<std::net::SocketAddr>().unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer));
+        let response = app.clone().oneshot(request).await.unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let detail: Value = serde_json::from_slice(&bytes).unwrap();
+        let rows = detail["mailboxes"].as_array().expect("detail mailboxes");
+        let row = rows.iter().find(|row| row["channel_id"] == channel.get());
+        let depth = row.map(|row| &row["queue_depth"]);
+        assert_eq!(depth, Some(&body["queued_remaining"]), "{detail}");
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 #[cfg(test)]

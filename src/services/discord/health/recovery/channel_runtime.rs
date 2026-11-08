@@ -14,6 +14,21 @@ pub struct ProviderMailboxState {
     pub recovery_started: bool,
 }
 
+impl ProviderMailboxState {
+    /// A live mailbox's probe; its depth counts the queue that owns the channel's input.
+    pub(crate) fn from_snapshot(
+        channel_id: u64,
+        snapshot: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
+    ) -> Self {
+        Self {
+            channel_id,
+            has_cancel_token: snapshot.cancel_token.is_some(),
+            queue_depth: snapshot.queue_depth(),
+            recovery_started: snapshot.recovery_started_at.is_some(),
+        }
+    }
+}
+
 /// Resolve the runtime that owns `channel_id` for `provider`. Channel-aware
 /// so multi-bot deployments (several runtimes under one provider name) stop,
 /// drain, and snapshot the runtime that actually handles the channel rather

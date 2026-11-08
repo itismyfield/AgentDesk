@@ -406,12 +406,7 @@ impl<B: BindingEvents> Sources<B> {
                 *deadline = now + DORMANT_POLL;
             }
         }
-        let count = self.readers.iter().filter(|r| r.reading()).count();
-        if count > MAX_READERS && !self.readers_alarmed {
-            writer.alarm(WriterAlarm::TooManyReaders { count });
-        }
-        self.readers_alarmed = count > MAX_READERS;
-        writer.reconcile_reader_count(count);
+        self.publish_reader_count(writer);
         Ok(())
     }
 
@@ -711,12 +706,7 @@ impl<B: BindingEvents> Sources<B> {
             self.unretire(writer, &source)?;
             transition::regrowth_alarm(writer, source);
         }
-        let count = self.readers.iter().filter(|r| r.reading()).count();
-        if count > MAX_READERS && !self.readers_alarmed {
-            writer.alarm(WriterAlarm::TooManyReaders { count });
-        }
-        self.readers_alarmed = count > MAX_READERS;
-        writer.reconcile_reader_count(count);
+        self.publish_reader_count(writer);
         Ok(())
     }
 }

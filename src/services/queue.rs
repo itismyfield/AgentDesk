@@ -597,7 +597,7 @@ impl QueueService {
                 &queue_capture,
                 self.pg_pool.as_ref(),
                 if force {
-                    CancelRemovalWitness::Purge(queue_purge)
+                    CancelRemovalWitness::Purge(queue_purge.clone())
                 } else {
                     CancelRemovalWitness::Preserve {
                         disk_lost: disk_queue_lost(
@@ -621,6 +621,7 @@ impl QueueService {
                 drain_depth.or(loss.queue_depth_after)
             };
             let queue_purged_count = queue_purge.as_ref().map(|c| c.drained);
+            let queue_purge_refused_reason = queue_purge.and_then(|c| c.refused_reason);
 
             tracing::info!(
                 "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={:?}, queued_before={:?}, queued_after={:?}, queue_disk_before={:?}, queue_disk_after={:?}, queue_purged={:?}, mailbox_foreground_free={:?}, queue_dropped_message_ids={:?}",
@@ -656,6 +657,8 @@ impl QueueService {
                 "queued_remaining": queued_remaining,
                 "queued_before": lifecycle.queue_depth_before,
                 "queue_purged": queue_purged_count,
+                // Why the owner kept a forced purge's queue; `queued_remaining` counts what it kept.
+                "queue_purge_refused_reason": queue_purge_refused_reason,
                 "queue_preserved": lifecycle.queue_preserved,
                 "queue_disk_present_before": lifecycle.queue_disk_present_before,
                 "queue_disk_present_after": lifecycle.queue_disk_present_after,

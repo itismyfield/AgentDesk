@@ -120,6 +120,7 @@ pub(crate) async fn force_purge_channel_mailbox(
             disk_files_removed,
             own_files_removed: Some(0),
             queue_len_after: None,
+            refused_reason: None,
         });
     };
     // #3029(D): force purge must also release the active-turn anchor so the
@@ -127,7 +128,8 @@ pub(crate) async fn force_purge_channel_mailbox(
     // `active_user_message_id`. The handler only clears an anchor whose token
     // is already `cancelled` (the force-kill above flipped it), so a fresh
     // turn that raced in after the kill keeps its anchor (#2706).
-    let purge = purge_on(&handle, provider, channel_id, session_key, true).await?;
+    let (purge, refused_reason) =
+        purge_on(&handle, provider, channel_id, session_key, true).await?;
     let finish = crate::services::discord::health::finish_cancelled_provider_channel_mailbox(
         health_registry.map(Arc::as_ref),
         Some(provider.as_str()),
@@ -145,7 +147,10 @@ pub(crate) async fn force_purge_channel_mailbox(
             "force purge finalized cancelled active mailbox turn"
         );
     }
-    Some(purge.into())
+    Some(PurgeCounts {
+        refused_reason,
+        ..purge.into()
+    })
 }
 
 /// The forced purge, then the receipts its owner owes for each removed origin.
@@ -166,14 +171,14 @@ pub(crate) async fn force_purge_and_settle(
 }
 
 /// Purges `handle`'s queue; `None` when the actor did not answer or refused for a queued head.
-/// A V2 owner's refusal answers with nothing drained and the depth it kept.
+/// A V2 owner's refusal answers with nothing drained, the depth it kept and why it kept it.
 async fn purge_on(
     handle: &ChannelMailboxHandle,
     provider: &ProviderKind,
     channel_id: ChannelId,
     session_key: Option<&str>,
     clear_cancelled_active_anchor: bool,
-) -> Option<PurgeQueueResult> {
+) -> Option<(PurgeQueueResult, Option<String>)> {
     let token_hash = session_key
         .and_then(SessionIdentity::parse)
         .and_then(|identity| identity.token_hash)
@@ -207,21 +212,21 @@ async fn purge_on(
         session_key,
         "force purged channel mailbox queue"
     );
-    Some(purge)
+    Some((purge, None))
 }
 
 #[cfg(all(test, unix))]
 #[path = "cancel_effects_v2_tests.rs"]
 mod v2_tests;
 
-/// `None` without a V2 owner; a kept queue answers its owner's measured depth with nothing drained,
+/// `None` without a V2 owner; a kept queue answers the owner's depth and reason, nothing drained,
 /// an unanswered, unknown or unmeasured one no purge. `captured` runs between capture and purge.
 #[cfg(unix)]
 async fn purge_v2<F: std::future::Future<Output = ()>>(
     handle: &ChannelMailboxHandle,
     persistence: QueuePersistenceContext,
     captured: impl FnOnce() -> F,
-) -> Option<Option<PurgeQueueResult>> {
+) -> Option<Option<(PurgeQueueResult, Option<String>)>> {
     let expected = match handle.try_capture_v2().await {
         Ok(Some(expected)) => expected,
         Ok(None) => return None,
@@ -238,12 +243,13 @@ async fn purge_v2<F: std::future::Future<Output = ()>>(
         if purge.failed.is_some() && !kept {
             return None;
         }
-        Some(PurgeQueueResult {
+        let result = PurgeQueueResult {
             queued_head_refused: kept,
             drained: purge.receipt.len(),
             queue_len_after: purge.queue_len_after?,
             ..Default::default()
-        })
+        };
+        Some((result, purge.failed.map(|(_, reason)| reason)))
     }))
 }
 

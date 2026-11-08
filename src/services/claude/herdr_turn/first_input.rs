@@ -92,7 +92,9 @@ fn write(
         start
     };
     let HerdrInputRun::Ran(run) = observed_input(cancel, start, || {
-        composer::run(&attached.target, &plan, cancel)
+        crate::services::claude_tui::composer_lock::with_composer_mutation_lock(logical, || {
+            composer::run(&attached.target, &plan, cancel)
+        })
     })?
     else {
         before_start::release_claude_hold(logical, &held);

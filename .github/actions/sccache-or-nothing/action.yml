@@ -1,0 +1,23 @@
+name: Setup sccache or build uncached
+description: >-
+  Install sccache for the workflow-wide RUSTC_WRAPPER. When the release download fails, clear
+  the wrapper so cargo builds without a cache and leave a warning instead of failing the job.
+runs:
+  using: composite
+  steps:
+    - name: Setup sccache
+      id: sccache
+      continue-on-error: true
+      uses: mozilla-actions/sccache-action@v0.0.10
+    # RUSTC_WRAPPER=sccache without the binary fails every rustc call; the warning keeps a real setup error visible.
+    - name: Build without sccache
+      if: steps.sccache.outcome != 'success'
+      shell: bash
+      env:
+        SCCACHE_SETUP_OUTCOME: ${{ steps.sccache.outcome }}
+      run: |
+        echo "::warning title=sccache unavailable::sccache setup ended in ${SCCACHE_SETUP_OUTCOME}; building without cache"
+        {
+          echo "RUSTC_WRAPPER="
+          echo "SCCACHE_GHA_ENABLED="
+        } >> "$GITHUB_ENV"

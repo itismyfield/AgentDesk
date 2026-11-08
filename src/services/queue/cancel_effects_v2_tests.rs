@@ -168,7 +168,7 @@ async fn a_stop_settle_on_either_side_of_the_purge_capture_resends_nothing() {
             let stopper = handle.clone();
             let settled = move || async move { settle(stopper).await.unwrap() };
             let stale = purge_v2(&handle, persistence.clone(), settled).await;
-            let kept = (stale.as_ref().and_then(Option::as_ref)).map(|purge| {
+            let kept = (stale.as_ref().and_then(Option::as_ref)).map(|(purge, _)| {
                 (
                     purge.queued_head_refused,
                     purge.drained,
@@ -355,7 +355,7 @@ async fn a_purge_on_an_owner_whose_last_save_is_pending_answers_no_depth() {
         "a pending save is no confirmed depth: {purged:?}"
     );
     // The cancel route publishes the loss depth, else the purge depth: here neither.
-    let witness = CancelRemovalWitness::Purge(purged);
+    let witness = CancelRemovalWitness::Purge(purged.clone());
     let reason = "queue_api_cancel_turn_force";
     let loss = record_queue_loss_after_cancel(&target, &capture, None, witness, reason).await;
     let remaining = (loss.queue_depth_after).or(purged.and_then(|counts| counts.queue_len_after));
