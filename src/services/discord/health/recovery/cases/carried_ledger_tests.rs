@@ -213,3 +213,45 @@ async fn carried_ledger_command_waits_for_native_and_o_without_stop_authority_pg
         .unwrap();
     assert_eq!(outcome, "completed");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn carried_ledger_command_rechecks_registration_under_transition_pg() {
+    let (fx, mut input) = fixture(7_828_316, true, false).await;
+    append(&fx.path, &[END]);
+    discord::health::settled_reason(&fx.shared, &PROVIDER, fx.channel.get()).await;
+    let namespace = format!("claude/{}", fx.shared.token_hash);
+    let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = reached.clone();
+    on("locked", fx.channel.get(), move || {
+        input["attempt"]["nonce"] = json!("duplicate-a");
+        Registry::runtime()
+            .unwrap()
+            .prepare(&namespace, &input)
+            .unwrap();
+        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    fx.pass().await;
+    assert!(reached.load(std::sync::atomic::Ordering::SeqCst));
+    assert_unconsumed(&fx).await;
+    fx.pass().await;
+    assert_unconsumed(&fx).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn carried_ledger_confirmed_user_pin_is_independent_of_later_registrations_pg() {
+    let (fx, mut input) = fixture(7_828_317, false, false).await;
+    fx.o.lock().unwrap().debt.owed = 1;
+    fx.pass().await;
+    let row = fx.row().unwrap();
+    assert!(row.native_stop_user_pin.is_some());
+    assert!(inflight::historical_input_verified(&row));
+    input["attempt"]["nonce"] = json!("later-duplicate-a");
+    Registry::runtime()
+        .unwrap()
+        .prepare(&format!("claude/{}", fx.shared.token_hash), &input)
+        .unwrap();
+    fx.o.lock().unwrap().debt = Undelivered::default();
+    fx.pass().await;
+    assert!(fx.row().is_none());
+    assert_eq!(fx.archive_count(), 1);
+}
