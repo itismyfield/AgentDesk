@@ -777,6 +777,12 @@ pub(crate) fn load_pending_queues(
             tracing::warn!(channel_id = channel.get(), %error, "pending queue recovery quarantined channel");
         }
     }
+    for channel in &loaded.v2_idle {
+        tracing::info!(
+            channel_id = channel.get(),
+            "pending queue recovery left a V2 file holding no input"
+        );
+    }
     (loaded.queues, loaded.overrides)
 }
 
@@ -785,6 +791,8 @@ pub(crate) struct PendingQueueRecovery {
     pub(crate) queues: HashMap<ChannelId, Vec<Intervention>>,
     pub(crate) overrides: HashMap<ChannelId, ChannelId>,
     pub(crate) quarantined: Vec<(ChannelId, String)>,
+    /// V2 files whose retained inputs no owner owes and that hold nothing else; logged, not restored.
+    pub(crate) v2_idle: Vec<ChannelId>,
     pub(crate) scan_errors: Vec<String>,
 }
 

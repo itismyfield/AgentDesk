@@ -243,6 +243,17 @@ impl Owner {
     }
 }
 
+impl RetainedInput {
+    /// Whether its owner may still deliver or recover this input. An unconfirmed retention a clear
+    /// already told stays only as settlement evidence: nothing re-sends it (deploy idle proof agrees).
+    pub(crate) fn owed_to_owner(&self) -> bool {
+        !(matches!(self.reason, RetainedReason::Unconfirmed)
+            && self.disposition.is_none()
+            && self.notice.kind == CLEARED_NOTICE
+            && self.notice.enqueued)
+    }
+}
+
 /// Refusals that no later look can turn into a submit; their originals stay retained.
 const PERMANENT: [&str; 2] = ["vetoed: frame_mismatch", "vetoed: InvalidInput"];
 

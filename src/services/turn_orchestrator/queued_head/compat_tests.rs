@@ -121,6 +121,53 @@ fn v2_clear_purge_drain_and_restore_preserve_originals_and_marker() {
     });
 }
 
+/// The V2 files the deploy idle proof reads from the same fixture: a clear-told unconfirmed
+/// retention is idle at boot, every other held input is still recovered and quarantined.
+#[cfg(unix)]
+#[test]
+fn v2_boot_recovery_skips_only_a_cleared_unconfirmed_retention() {
+    let _root = TestRuntimeRootGuard::new();
+    let ctx = context();
+    let cases: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/e2e/tui_relay/tests/fixtures/queue_v2_cleared_unconfirmed_cases.json"
+    )))
+    .unwrap();
+    let mut expected = Vec::new();
+    for (index, case) in cases["cases"].as_array().unwrap().iter().enumerate() {
+        let mut snapshot = cases["base"].clone();
+        for (key, value) in case["retained"].as_object().into_iter().flatten() {
+            snapshot["retained_inputs"][0][key] = value.clone();
+        }
+        for (key, value) in case["set"].as_object().into_iter().flatten() {
+            snapshot[key] = value.clone();
+        }
+        let channel = 7_962_000 + index as u64;
+        let (_, bytes) = seed(channel, &snapshot);
+        let busy = case["busy"].as_bool().unwrap();
+        let read = compat::inspect(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        assert_eq!(read.v2_holds_input(), busy, "{}", case["name"]);
+        expected.push((ChannelId::new(channel), busy, case["name"].clone()));
+    }
+    let adopted =
+        super::super::pending_queue_persistence::v2_channels(&ctx.provider, &ctx.token_hash);
+    let legacy = super::super::pending_queue_persistence::load_pending_queues_checked(
+        &ctx.provider,
+        &ctx.token_hash,
+    );
+    for (channel, busy, name) in expected {
+        assert_eq!(adopted.contains(&channel), busy, "boot adoption {name}");
+        let quarantined = legacy.quarantined.iter().any(|(c, _)| *c == channel);
+        assert_eq!(quarantined, busy, "legacy quarantine {name}");
+        // An idle file is still reported, never silently skipped.
+        assert_eq!(
+            legacy.v2_idle.contains(&channel),
+            !busy,
+            "idle report {name}"
+        );
+    }
+}
+
 #[test]
 fn v2_metadata_only_catalog_is_visible_but_legacy_recovery_is_quarantined() {
     let _root = TestRuntimeRootGuard::new();

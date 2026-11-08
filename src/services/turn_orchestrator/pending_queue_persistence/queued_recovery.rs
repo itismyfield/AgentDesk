@@ -48,6 +48,14 @@ pub(crate) fn load_pending_queues_checked(
                 }
                 items
             }
+            // Only retained inputs no owner owes leave this file input-free; any other V2 file
+            // keeps its quarantine report as before.
+            SnapshotRead::ReadOnlyV2(ref v2)
+                if !v2.retained_inputs.is_empty() && !snapshot.v2_holds_input() =>
+            {
+                recovery.v2_idle.push(channel);
+                continue;
+            }
             SnapshotRead::ReadOnlyV2(snapshot) => {
                 recovery.quarantined.push((
                     channel,

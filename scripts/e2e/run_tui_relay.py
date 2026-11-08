@@ -2655,7 +2655,8 @@ def _mailbox_idle_evidence(mailbox: dict[str, Any]) -> dict[str, Any]:
 # SnapshotV2 in src/services/turn_orchestrator/queued_head/v2_types.rs: items and head_injection wait.
 # Known completed retained notices are history; unsettled admission binds still wait. A queued bind
 # never waits on its own: its item waits in items, and a cleared queue leaves the bind without one
-# (the runtime's SnapshotRead::v2_holds_input applies the same rule).
+# (the runtime's SnapshotRead::v2_holds_input applies the same rule). An unconfirmed retention a clear
+# already told is never re-sent (RetainedInput::owed_to_owner), nor is its attempt bind.
 QUEUE_V2_KEYS = frozenset({
     "version", "items", "head_injection", "retained_inputs", "terminal_identities", "namespace",
     "admission_receipts", "admission_sequence", "admission_binds",
@@ -2670,6 +2671,8 @@ def _retained_input_waiting(entry: Any) -> bool:
     if (not isinstance(notice, dict) or set(notice) != {"kind", "enqueued"}
             or notice.get("enqueued") is not True):
         return True
+    if (entry.get("disposition"), notice["kind"], entry.get("reason")) == (None, "cleared", {"kind": "unconfirmed"}):
+        return False
     return (entry.get("disposition"), notice["kind"]) not in (
         ("known_not_sent", "retained_retry_required"),
         ("opaque_unsent", "retained_retry_required"),
