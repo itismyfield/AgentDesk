@@ -606,10 +606,10 @@ impl Fixture {
             "same execution/nonce/pane"
         );
         assert!(
-            rig.requests().iter().all(|r| !matches!(
-                r["method"].as_str(),
-                Some("workspace.create" | "pane.create" | "pane.close" | "workspace.close")
-            )),
+            rig.requests().iter().all(|r| !r["method"]
+                .as_str()
+                .and_then(|method| method.rsplit('.').next())
+                .is_some_and(|operation| matches!(operation, "close" | "create"))),
             "no close/create: {:?}",
             rig.requests()
         );
