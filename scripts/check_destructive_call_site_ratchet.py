@@ -128,14 +128,18 @@ A queued placeholder card may only be destroyed through ``queued_card_gate``'s
 teardown token, and that gate file is itself pinned here, so a new raw call in any
 file needs a reviewed baseline diff. ``placeholder_controller.rs`` must not call
 ``.detach_by_message(`` at all (comments aside, tests included); that check has no
-baseline, fails whatever the map says, and fails when that file is missing. Limits: a count-preserving move inside one
+baseline, fails whatever the map says, and fails when that file is missing. Likewise
+``terminal_send.rs`` and ``terminal_direct_fallback.rs`` must each call
+``reconcile_already_committed_after_edit_failure(`` outside tests, with no baseline
+and failing when either file is missing. Limits: a count-preserving move inside one
 file (a raw call relocated into a gated region while another leaves), a removed
 gate call that is not replaced by a raw spelling, and calls through aliases,
 re-exports or other wrappers stay unseen.
 
 ``--check`` rejects growth in an existing file, every UNLISTED file, any
 host_terminate spelling outside its declared sites, any identity/delivery pairing
-mismatch, and any controller ``detach_by_message`` call.  A decrease is allowed for growth: this is a
+mismatch, any controller ``detach_by_message`` call, and a terminal path that
+stops calling the shared committed-placeholder helper.  A decrease is allowed for growth: this is a
 no-growth ratchet.  For an intentional change, run ``--write-baseline`` and
 review the JSON diff in the same commit.
 
@@ -253,6 +257,13 @@ DISCORD_MESSAGE_EDIT_PATTERN = re.compile(
 # Queued cards leave the controller only through the queued-card gate's teardown.
 CONTROLLER_PATH = "src/services/discord/placeholder_controller.rs"
 CONTROLLER_DETACH_PATTERN = re.compile(r"\.\s*detach_by_message\s*\(")
+# Both terminal paths settle an already-committed placeholder through the one shared helper.
+COMMITTED_CLEANUP_CALLERS = (
+    "src/services/discord/tmux_watcher/terminal_send.rs",
+    "src/services/discord/tmux_watcher/terminal_direct_fallback.rs",
+)
+COMMITTED_CLEANUP_HELPER = "reconcile_already_committed_after_edit_failure"
+COMMITTED_CLEANUP_PATTERN = re.compile(rf"(?<!fn )\b{COMMITTED_CLEANUP_HELPER}\s*\(")
 HOST_TERMINATE_OWNER = "src/services/termination_audit/host_terminate.rs"
 # Fixed model, judged leaf and test spellings need no baseline growth;
 # any additional spelling still exceeds a measured per-file ceiling.
@@ -825,6 +836,24 @@ def controller_detach_errors(repo_root: Path) -> list[str]:
     ]
 
 
+def committed_cleanup_parity_errors(repo_root: Path) -> list[str]:
+    """Each terminal path calls the committed-placeholder helper outside tests; no baseline relaxes it."""
+    errors: list[str] = []
+    for rel in COMMITTED_CLEANUP_CALLERS:
+        path = Path(repo_root) / rel
+        if not path.is_file():
+            errors.append(
+                f"discord_message_ops: {rel} is missing; if the terminal path moved or was "
+                "deleted, update COMMITTED_CLEANUP_CALLERS"
+            )
+        elif not COMMITTED_CLEANUP_PATTERN.search(RUST_LEXER._production_text(path)):
+            errors.append(
+                f"discord_message_ops: {rel} no longer calls {COMMITTED_CLEANUP_HELPER}( "
+                "outside tests; both terminal paths settle a committed placeholder through it"
+            )
+    return errors
+
+
 def _snapshot(
     counts: Mapping[str, Mapping[str, int]],
     registry_subcounts: Mapping[str, int],
@@ -984,6 +1013,7 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
             + owner_only_errors(counts, baseline)
             + pairing_errors(counts)
             + controller_detach_errors(root)
+            + committed_cleanup_parity_errors(root)
         )
     except Exception as exc:
         print(f"FAIL: destructive call-site ratchet: {type(exc).__name__}: {exc}", file=sys.stderr)

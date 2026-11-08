@@ -2085,8 +2085,6 @@ src/
 │   │   │   │   │   ├── process_mailbox/
 │   │   │   │   │   │   ├── bridge_tests.rs
 │   │   │   │   │   │   └── tests.rs
-│   │   │   │   │   ├── recovery_context_take_order_tests/
-│   │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
 │   │   │   │   │   ├── process_mailbox.rs
@@ -2234,7 +2232,6 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── queue_status_presentation.rs
 │   │   │   ├── response_format.rs
-│   │   │   ├── source_guard_support.rs
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/

@@ -26,6 +26,14 @@ def write(root: Path, rel: str, body: str) -> None:
     path.write_text(body, encoding="utf-8")
 
 
+COMMITTED_CLEANUP_CALL = "fn settle() { cleanup::reconcile_already_committed_after_edit_failure(ctx).await; }\n"
+
+
+def write_committed_cleanup_callers(root: Path) -> None:
+    for rel in ratchet.COMMITTED_CLEANUP_CALLERS:
+        write(root, rel, COMMITTED_CLEANUP_CALL)
+
+
 def empty_counts() -> dict[str, dict[str, int]]:
     return {category: {} for category in ratchet.CATEGORIES}
 
@@ -783,6 +791,7 @@ mod tests {
             root = Path(tmp)
             write(root, self.KICKOFF, "fn drain() { gate(card); }\n")
             write(root, ratchet.CONTROLLER_PATH, "")
+            write_committed_cleanup_callers(root)
             self._write_baseline_cli(root, "a" * 40)
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(ratchet.main(["--check"], repo_root=root), 0)
@@ -809,6 +818,7 @@ mod tests {
                 controller,
                 "pub fn detach_by_message(&self) {}\n// .detach_by_message( is gated\n",
             )
+            write_committed_cleanup_callers(root)
             self._write_baseline_cli(root, "a" * 40)
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(ratchet.main(["--check"], repo_root=root), 0)
@@ -831,6 +841,74 @@ mod tests {
                 result = ratchet.main(["--check"], repo_root=root)
         self.assertEqual(result, 1)
         self.assertIn(f"{ratchet.CONTROLLER_PATH} is missing", stderr.getvalue())
+
+
+class CommittedCleanupParityTests(unittest.TestCase):
+    """Both terminal paths keep calling the shared committed-placeholder helper."""
+
+    # A comment and a cfg(test) call keep the spelling but no longer settle the placeholder.
+    UNCALLED = (
+        "// reconcile_already_committed_after_edit_failure( used to run here\n"
+        "pub(crate) async fn reconcile_already_committed_after_edit_failure(ctx: Ctx) {}\n"
+        "#[cfg(test)]\nmod tests {\n    fn t() { reconcile_already_committed_after_edit_failure(ctx); }\n}\n"
+    )
+
+    def _tree(self, root: Path) -> None:
+        write(root, ratchet.CONTROLLER_PATH, "")
+        write_committed_cleanup_callers(root)
+        git = mock.Mock(stdout="a" * 40 + "\n")
+        with mock.patch.object(ratchet.subprocess, "run", return_value=git):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(ratchet.main(["--write-baseline"], repo_root=root), 0)
+
+    def _check(self, root: Path) -> tuple[int, str]:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+            result = ratchet.main(["--check"], repo_root=root)
+        return result, stderr.getvalue()
+
+    def test_both_terminal_paths_calling_the_helper_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._tree(root)
+            self.assertEqual(self._check(root), (0, ""))
+
+    def test_either_terminal_path_dropping_the_call_fails_alone(self) -> None:
+        for dropped in ratchet.COMMITTED_CLEANUP_CALLERS:
+            with self.subTest(dropped=dropped), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self._tree(root)
+                write(root, dropped, self.UNCALLED)
+                result, stderr = self._check(root)
+                self.assertEqual(result, 1)
+                self.assertIn(f"{dropped} no longer calls", stderr)
+                (kept,) = set(ratchet.COMMITTED_CLEANUP_CALLERS) - {dropped}
+                self.assertNotIn(kept, stderr)
+
+    def test_a_missing_terminal_path_fails_the_check(self) -> None:
+        for missing in ratchet.COMMITTED_CLEANUP_CALLERS:
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self._tree(root)
+                (root / missing).unlink()
+                result, stderr = self._check(root)
+                self.assertEqual(result, 1)
+                self.assertIn(f"{missing} is missing", stderr)
+
+    def test_a_rewritten_baseline_does_not_relax_a_dropped_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._tree(root)
+            for rel in ratchet.COMMITTED_CLEANUP_CALLERS:
+                write(root, rel, self.UNCALLED)
+            git = mock.Mock(stdout="b" * 40 + "\n")
+            with mock.patch.object(ratchet.subprocess, "run", return_value=git):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(ratchet.main(["--write-baseline"], repo_root=root), 0)
+            result, stderr = self._check(root)
+        self.assertEqual(result, 1)
+        for rel in ratchet.COMMITTED_CLEANUP_CALLERS:
+            self.assertIn(f"{rel} no longer calls", stderr)
 
 
 if __name__ == "__main__":
