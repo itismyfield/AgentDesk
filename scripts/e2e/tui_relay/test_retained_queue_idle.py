@@ -116,6 +116,17 @@ class RetainedQueueIdle(unittest.TestCase):
             with self.subTest(entry=entry):
                 self.assert_busy({**self.snapshot, "retained_inputs": [entry]}, True)
 
+    def test_shared_cleared_unconfirmed_cases_match_the_runtime(self):
+        # The runtime's v2_holds_input test reads the same cases with the same `busy` verdicts.
+        cases = json.loads((Path(__file__).parent / "tests/fixtures/queue_v2_cleared_unconfirmed_cases.json")
+                           .read_text(encoding="utf-8"))
+        for case in cases["cases"]:
+            with self.subTest(case=case["name"]):
+                snapshot = copy.deepcopy(cases["base"])
+                snapshot["retained_inputs"][0].update(case.get("retained", {}))
+                snapshot.update(case.get("set", {}))
+                self.assert_busy(snapshot, case["busy"])
+
     def test_legacy_payload_is_not_given_the_v2_exception(self):
         self.assert_busy([self.retained], True)
         self.assert_busy([{"message_id": 2}], True)

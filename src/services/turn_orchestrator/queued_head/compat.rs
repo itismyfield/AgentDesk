@@ -8,19 +8,24 @@ pub(crate) enum SnapshotRead {
 }
 
 impl SnapshotRead {
-    /// Whether a V2 file still holds an input its owner must recover: queued, attempted, retained or
-    /// settled, or a bind other than a queued one, which a cleared queue leaves without its item.
-    #[cfg(unix)]
+    /// Whether a V2 file holds an input its owner must recover: queued, attempted, owed retained or
+    /// settled, or a non-queued bind other than the attempt of a retained input no owner owes.
     pub(crate) fn v2_holds_input(&self) -> bool {
+        use super::v2_types::BindAt;
         let Self::ReadOnlyV2(v2) = self else {
             return false;
         };
-        let bound = |bind: &super::v2_types::AdmissionBind| {
-            !matches!(bind.at, super::v2_types::BindAt::Queued { .. })
+        let closed = |identity: &QueueIdentity, attempt: &super::v2_types::AttemptIdentity| {
+            (v2.retained_inputs.iter()).any(|entry| entry.closes_bind(identity, attempt))
+        };
+        let bound = |bind: &super::v2_types::AdmissionBind| match &bind.at {
+            BindAt::Queued { .. } => false,
+            BindAt::Attempt { identity, attempt } => !closed(identity, attempt),
+            BindAt::Opaque | BindAt::Settled { .. } => true,
         };
         !v2.items.is_empty()
             || v2.head_injection.is_some()
-            || !v2.retained_inputs.is_empty()
+            || v2.retained_inputs.iter().any(|entry| entry.owed_to_owner())
             || !v2.terminal_identities.is_empty()
             || v2.admission_binds.iter().any(bound)
     }
