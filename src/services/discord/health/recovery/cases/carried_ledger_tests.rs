@@ -268,9 +268,10 @@ async fn carried_ledger_confirmed_user_pin_is_independent_of_later_registrations
 async fn carried_ledger_unrelated_registration_does_not_delay_pin_pg() {
     let (fx, mut input) = fixture(7_828_318, false, false).await;
     let namespace = format!("claude/{}", fx.shared.token_hash);
+    let unrelated = fx.user_msg_id + 100;
     on("consumed", fx.channel.get(), move || {
-        input["identity"]["primary"] = json!(7_828_418);
-        input["identity"]["sources"][0]["message_id"] = json!(7_828_418);
+        input["identity"]["primary"] = json!(unrelated);
+        input["identity"]["sources"][0]["message_id"] = json!(unrelated);
         input["attempt"]["nonce"] = json!("unrelated-attempt");
         input["payload"]["frame"] = json!(crate::services::tui_input::human_frame::idle(
             "ann",
