@@ -9,8 +9,6 @@ pub(in crate::services::discord) mod message_handler;
 pub(in crate::services::discord) use message_handler::input_payload;
 mod queue_status_presentation;
 mod response_format;
-#[cfg(test)]
-pub(in crate::services::discord) mod source_guard_support;
 mod thread_binding;
 mod turn_start;
 

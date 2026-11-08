@@ -1148,7 +1148,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"fixture answer","
 }
 
 /// The real headless start of a scheduled snapshot turn marks its durable row with the
-/// launch turn id as isolated, the mark every completer settles that delivery by.
+/// launch turn id as isolated, the mark every completer settles that delivery by. It leaves
+/// the channel alone: no durable clear boundary and the channel's provider session kept.
 #[test]
 fn a_scheduled_snapshot_headless_start_marks_its_row_isolated_pg() {
     use crate::services::scheduled_messages::turn_completion::tests::launch_agent_delivery;
@@ -1162,6 +1163,14 @@ fn a_scheduled_snapshot_headless_start_marks_its_row_isolated_pg() {
     intake_replay_rt().block_on(async {
         let channel = ChannelId::new(7_420_501);
         let host = Host::new(&[channel]).await;
+        host.shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get_mut(&channel)
+            .unwrap()
+            .session_id = Some("kept-channel-session".into());
         let reservation = health::reserve_headless_agent_turn(channel);
         let turn_id = reservation.turn_id().to_owned();
         let launched =
@@ -1201,6 +1210,83 @@ fn a_scheduled_snapshot_headless_start_marks_its_row_isolated_pg() {
                 outcome: None,
             }
         );
+        let boundaries: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM channel_session_clear_boundaries WHERE channel_id = $1",
+        )
+        .bind(channel.get().to_string())
+        .fetch_one(&host.pool)
+        .await
+        .unwrap();
+        assert_eq!(boundaries, 0, "a snapshot start records no channel clear");
+        let channel_session = host.shared.core.lock().await.sessions[&channel]
+            .session_id
+            .clone();
+        assert_eq!(
+            channel_session.as_deref(),
+            Some("kept-channel-session"),
+            "a snapshot start cold-starts locally, not by clearing the channel session"
+        );
+        host.close().await;
+    });
+}
+
+/// A scheduled snapshot that also carries routine metadata (so it has a role binding) never
+/// stamps the channel's live `sessions` row with its own isolated session key or agent.
+#[test]
+fn a_scheduled_snapshot_routine_start_leaves_the_channel_session_row_pg() {
+    use crate::services::scheduled_messages::turn_completion::tests::launch_agent_delivery;
+    let name = concat!(
+        module_path!(),
+        "::a_scheduled_snapshot_routine_start_leaves_the_channel_session_row_pg"
+    );
+    if !child(name) {
+        return;
+    }
+    intake_replay_rt().block_on(async {
+        let channel = ChannelId::new(7_420_502);
+        let host = Host::new(&[channel]).await;
+        let reservation = health::reserve_headless_agent_turn(channel);
+        let turn_id = reservation.turn_id().to_owned();
+        let launched =
+            launch_agent_delivery(&host.pool, "i7867-snapshot", &turn_id, true, "fail").await;
+        // The channel's live row with no key yet: the refresh would stamp it.
+        let row: i64 = sqlx::query_scalar(
+            "INSERT INTO sessions (session_key, agent_id, provider, channel_id)
+             VALUES (NULL, NULL, 'claude', $1) RETURNING id",
+        )
+        .bind(channel.get().to_string())
+        .fetch_one(&host.pool)
+        .await
+        .unwrap();
+        let label = format!("scheduled:{}", launched.message_id);
+        let metadata = serde_json::json!({
+            "agent_id": "i7867-snapshot", "routine_id": "i7867-routine",
+            "scheduled_message_id": launched.message_id, "turn_id": turn_id,
+            "parent_channel_id": channel.get().to_string(),
+            "scheduled_snapshot_session_label": label,
+        });
+        let outcome = health::start_reserved_headless_agent_turn_with_owner_channel(
+            &host.registry,
+            channel,
+            channel,
+            ProviderKind::Claude,
+            "scheduled prompt".into(),
+            Some("scheduled_message".into()),
+            Some(metadata),
+            Some(format!("headless-fixture-{channel}")),
+            Some(label),
+            reservation,
+        )
+        .await
+        .expect("scheduled routine headless start");
+        assert_eq!(outcome.turn_id, turn_id);
+        let kept: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT session_key, agent_id FROM sessions WHERE id = $1")
+                .bind(row)
+                .fetch_one(&host.pool)
+                .await
+                .unwrap();
+        assert_eq!(kept, (None, None), "the channel row keeps its identity");
         host.close().await;
     });
 }
