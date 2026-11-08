@@ -30,12 +30,14 @@ impl CancelQueueCapture {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct PurgeCounts {
     pub(crate) drained: usize,
     pub(crate) disk_files_removed: usize,
     pub(crate) own_files_removed: Option<usize>,
     pub(crate) queue_len_after: Option<usize>,
+    /// Why the actor kept its queue instead of purging it; `None` when it gave no such reason.
+    pub(crate) refused_reason: Option<String>,
 }
 
 impl From<crate::services::turn_orchestrator::PurgeQueueResult> for PurgeCounts {
@@ -45,6 +47,7 @@ impl From<crate::services::turn_orchestrator::PurgeQueueResult> for PurgeCounts 
             disk_files_removed: result.disk_files_removed,
             own_files_removed: result.own_files_removed,
             queue_len_after: Some(result.queue_len_after),
+            refused_reason: None,
         }
     }
 }
