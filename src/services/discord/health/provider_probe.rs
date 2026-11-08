@@ -127,7 +127,7 @@ pub(super) fn probe_provider(
         .and_then(|g| g.clone());
     let gateway_channels = tui_output_gateway(&entry.name, entry.role);
 
-    let classification = classify_provider(
+    let mut classification = classify_provider(
         &entry.name,
         entry.role,
         ProviderProbeSignals {
@@ -142,6 +142,10 @@ pub(super) fn probe_provider(
         },
     );
 
+    if let Some(reason) = entry.shared.restart.gateway_handback_reason() {
+        classification.degraded_reasons.push(reason);
+        classification.status = classification.status.worsen(HealthStatus::Degraded);
+    }
     ProviderProbe {
         mailbox_snapshots,
         snapshot: ProviderHealthSnapshot {

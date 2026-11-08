@@ -12,6 +12,13 @@ use std::path::{Path, PathBuf};
 #[path = "park_reply_tests.rs"]
 mod park_reply_tests;
 
+#[path = "missing_halt_tests.rs"]
+mod missing_halt_tests;
+
+#[cfg(target_os = "linux")]
+#[path = "../../../../herdr_terminate/missing_marker_turn_tests.rs"]
+mod missing_marker_turn_tests;
+
 fn retained_bytes(root: &Path, channel: u64, source: &SourceId) -> BTreeMap<PathBuf, String> {
     let channel = root.join("o_store").join(channel.to_string());
     let key = source_key(source);
@@ -37,6 +44,14 @@ fn retained_bytes(root: &Path, channel: u64, source: &SourceId) -> BTreeMap<Path
 }
 
 fn missing_store(root: &Path, channel: u64) -> (OStore, OEra, SourceId) {
+    missing_store_with(root, channel, |_| {})
+}
+
+fn missing_store_with(
+    root: &Path,
+    channel: u64,
+    before_unlink: impl FnOnce(&Path),
+) -> (OStore, OEra, SourceId) {
     let path = root.join("old.jsonl");
     std::fs::write(&path, b"{}\n{}\n").unwrap();
     let source = crate::services::tui_o::shadow::binding_reader::source_id_for(
@@ -78,6 +93,7 @@ fn missing_store(root: &Path, channel: u64) -> (OStore, OEra, SourceId) {
     assert_eq!(channel_store.retained_segments(&source), 2);
     assert!(!channel_store.cursor(&source).unwrap().retired);
     drop(channel_store);
+    before_unlink(&path);
     std::fs::remove_file(path).unwrap();
     (store, era, source)
 }
@@ -230,7 +246,7 @@ fn isolated_scenario(test: &str, scenario: usize, failures: &mut usize) -> bool 
         .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
         .unwrap_or(test);
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", qualified, "--nocapture", "--test-threads=1"])
+        .args(["--exact", qualified, "--nocapture"])
         .env(CASE, scenario.to_string())
         .output();
     let output = match output {

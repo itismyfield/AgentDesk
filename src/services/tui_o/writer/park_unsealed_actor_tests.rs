@@ -62,15 +62,15 @@ async fn sessionless_latest_missing_codex_source_with_unsealed_work_stays_halted
             .await
             .unwrap()
             .expect("a halted actor reports its stop cause");
-        assert!(matches!(cause.alarm, WriterAlarm::Halted { .. }));
+        assert!(matches!(
+            cause.alarm,
+            WriterAlarm::HaltedMissingSource { .. }
+        ));
         assert!(harness.port.posts().is_empty());
-        assert!(
-            harness
-                .alarms
-                .taken()
-                .iter()
-                .any(|alarm| matches!(alarm, WriterAlarm::Halted { .. }))
-        );
+        assert!(harness.alarms.taken().iter().any(|alarm| matches!(
+            alarm,
+            WriterAlarm::Halted { .. } | WriterAlarm::HaltedMissingSource { .. }
+        )));
         drop(stop);
     }
 }

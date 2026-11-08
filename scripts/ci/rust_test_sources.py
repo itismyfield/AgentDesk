@@ -2,7 +2,9 @@
 """Rust test sources: which #[test] fns the crate roots reach, and on which platforms they compile.
 
   inventory  walk src/lib.rs through `mod`, `#[path]` and `include!`, keeping each test's cfg chain
-  check      fail on test files no crate root reaches, missing module/include files and unreadable cfg
+  check      fail on test files no crate root reaches, missing module/include files, unreadable cfg and
+             test-only `.join()`/`.recv()` waits without a cap; the allowlist may only lose rows against
+             --allowlist-base (HEAD^1: the PR base in CI; a base without the file accepts the approved first list only)
   compare    compare the source inventory for one platform with an unfiltered nextest list
   removed    per platform, tests a base checkout compiles that this tree no longer compiles, and tests
              runnable there that `#[ignore]` (plain or cfg_attr) now skips here; this tree must read
@@ -15,9 +17,11 @@ Nothing here runs cargo.
 import argparse
 from bisect import bisect_right
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tomllib
 
@@ -26,11 +30,25 @@ TEST_ATTRS = {("test",), ("tokio", "test"), ("async_std", "test"), ("actix_rt", 
 # Rust `target_os` value per supported CI platform.
 PLATFORMS = {"linux": "linux", "macos": "macos", "windows": "windows"}
 RAW_STRING = re.compile(r'b?r(#{0,255})"')
-CHAR_LITERAL = re.compile(r"'(?:\\.|[^\\'\n])'")
+CHAR_LITERAL = re.compile(r"'(?:\\u\{[0-9A-Fa-f_]{1,6}\}|\\x[0-9A-Fa-f]{2}|\\.|[^\\'\n])'")
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # cfg_attr payload attributes that change which files compile or which fns are tests.
 GATING_CFG_ATTR = {"path", "test", "cfg"}
 MANIFEST_DIR_INCLUDE = ("concat", "!", "(", "env", "!", "(", "CARGO_MANIFEST_DIR", ")")
+# Test-only `.join()`/`.recv()` calls must go through these capped helpers; a call nested in one is bounded.
+BOUNDED_CALLS = {"timeout", "timeout_at", "join_within", "recv_within", "await_within"}
+UNBOUNDED_WAITS = {"join": "thread join", "recv": "channel recv"}
+WAIT_HELPER = "src/test_support/wait.rs"
+WAIT_ALLOWLIST = "scripts/ci/test_wait_allowlist.txt"
+# sha256 of the approved first allowlist (sorted rows, one per line): a base without the file accepts only it.
+INITIAL_ALLOWLIST_SHA256 = "e4dc90257fd137fc9c276e2385d5288073dd9b1350fb187e9657d26f60e7c09d"
+WAIT_CALL = re.compile(r"\b(?:join|recv)\b")
+# After `#[cfg(test)]`, one of these starts an item or block whose gate is its `{...}` block (or ends at `;`);
+# anything else (a `let`, expression, field or parameter) stays gated to its own `;`, `,` or `)`.
+BLOCK_WORDS = {"fn", "mod", "impl", "struct", "enum", "union", "trait", "type", "static", "const", "use", "pub",
+               "async", "unsafe", "extern", "macro_rules", "if", "match", "for", "while", "loop"}
+# Macros whose tokens are never compiled or run, so an attribute or call inside them gates nothing.
+INERT_MACROS = {"stringify"}
 
 
 @dataclass(frozen=True)
@@ -265,6 +283,8 @@ class Inventory:
     # Test ID -> every (site, cfg chain) that declares it; cfg-disjoint duplicates keep one entry each.
     tests: dict = field(default_factory=dict)
     reached: set = field(default_factory=set)
+    # Reached file -> every cfg chain it is reached under; all test-only means the whole file is test code.
+    file_cfgs: dict = field(default_factory=dict)
     # Reached file -> every module path its items live in; more than one means one file, several modules.
     modules: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
@@ -318,6 +338,7 @@ def walk(root, repo_root, inventory=None, *, production=False):
                 inv.read_failures.append(f"{source}: source is missing or not a file")
             continue
         inv.reached.add(source.resolve())
+        inv.file_cfgs.setdefault(source.resolve(), set()).add(file_cfgs)
         inv.modules.setdefault(source.resolve(), set()).add(outer)
         try:
             if production:
@@ -485,6 +506,8 @@ def lib_inventory(repo_root):
         if root.name != "lib.rs" or root.parent != repo_root / "src":
             walk(root, repo_root, reached)
     lib.reached = reached.reached
+    for path, chains in reached.file_cfgs.items():
+        lib.file_cfgs.setdefault(path, set()).update(chains)
     lib.errors += [e for e in reached.errors if e not in lib.errors]
     lib.missing_files += [e for e in reached.missing_files if e not in lib.missing_files]
     lib.unreadable += [u for u in reached.unreadable if u not in lib.unreadable]
@@ -635,11 +658,218 @@ def _ignored_on(conditions, target_os, features):
     return True if True in verdicts else (None if None in verdicts else False)
 
 
-def check_findings(repo_root):
+def _cfg_requires_test_text(expression):
+    """`rust_cfg.cfg_requires_test` for a cfg predicate's source text; the script may run from any cwd."""
+    try:
+        from rust_cfg import cfg_requires_test
+    except ModuleNotFoundError:
+        sys.path.append(str(Path(__file__).resolve().parents[1]))
+        from rust_cfg import cfg_requires_test
+    return cfg_requires_test(expression)
+
+
+def _cfg_requires_test(predicate):
+    """Whether one cfg token tuple from `walk` can only hold under `test`."""
+    words = list(predicate[1:-1])
+    text = ""
+    for n, word in enumerate(words):
+        if n and words[n - 1] not in "(=" and word not in "()=":
+            text += ","
+        text += f'"{word}"' if n and words[n - 1] == "=" else word
+    return _cfg_requires_test_text(text)
+
+
+def unbounded_waits(raw, tokens, whole_file):
+    """(line, kind) of every test-only `.join()`/`.recv()` that no bounded call (BOUNDED_CALLS) encloses.
+
+    Test-only code: the whole file, a `#![cfg(test)]` block, and what follows a `#[cfg(test)]` or test
+    attribute: an item's or bare `{}` block, or a statement, parameter or field up to its own `;`, `,` or `)`."""
+    found, parens, gated, depth, brackets, index = [], [], [], 0, 0, 0
+    pending = None  # (kind, paren depth, brace depth) of a gate still waiting for its block or end
+    while index < len(tokens):
+        token = tokens[index]
+        span = attribute_span(tokens, index)
+        if span is not None:
+            bracket, end = span
+            attr = tokens[bracket + 1:end - 1]
+            path_end = next((n for n, item in enumerate(attr) if item.value in ("(", "=")), len(attr))
+            names = tuple(item.value for item in attr[:path_end] if item.kind == "ident")
+            gate = names in TEST_ATTRS or names == ("cfg_attr",) and "test" in cfg_attr_payload(attr[path_end:])
+            if names == ("cfg",) and path_end < len(attr) and attr[path_end].value == "(":
+                gate = _cfg_requires_test_text(raw[attr[path_end].start + 1:attr[-1].start])
+            if gate and bracket != index + 1:
+                if depth == 0:
+                    whole_file = True
+                elif not gated or gated[-1] != depth:
+                    gated.append(depth)
+            elif gate and pending is None:
+                after = end
+                while after < len(tokens) and attribute_span(tokens, after) is not None:
+                    after = attribute_span(tokens, after)[1]
+                first = tokens[after] if after < len(tokens) else None
+                block = first is not None and (first.kind == "ident" and first.value in BLOCK_WORDS
+                                               or first.kind == "punct" and first.value == "{")
+                pending = ("block" if block else "span", len(parens), depth)
+            index = end
+            continue
+        if token.kind == "ident" and token.value in INERT_MACROS and index + 2 < len(tokens) \
+                and tokens[index + 1].value == "!" and tokens[index + 2].value in ("(", "[", "{"):
+            index = _macro_end(tokens, index + 2)
+            continue
+        if token.kind == "punct":
+            if token.value == "(":
+                before = tokens[index - 1] if index else None
+                parens.append(before.value if before is not None and before.kind == "ident" else None)
+            elif token.value == ")":
+                if parens:
+                    parens.pop()
+                if pending is not None and len(parens) < pending[1]:
+                    pending = None
+            elif token.value == "[":
+                brackets += 1
+            elif token.value == "]":
+                brackets -= 1
+            elif token.value == "{":
+                depth += 1
+                if pending is not None and pending[0] == "block":
+                    gated.append(depth)
+                    pending = None
+            elif token.value == "}":
+                if gated and gated[-1] == depth:
+                    gated.pop()
+                depth -= 1
+                if pending is not None and depth < pending[2]:
+                    pending = None
+            elif token.value == ";" and not brackets and pending is not None and depth == pending[2]:
+                pending = None
+            elif token.value == "," and pending is not None and pending[0] == "span" \
+                    and (len(parens), depth) == pending[1:]:
+                pending = None
+        elif token.kind == "ident" and token.value in UNBOUNDED_WAITS and index + 2 < len(tokens) \
+                and index and tokens[index - 1].value == "." and tokens[index - 1].kind == "punct" \
+                and tokens[index + 1].value == "(" and tokens[index + 2].value == ")" \
+                and (whole_file or gated or pending is not None) and not BOUNDED_CALLS & set(parens):
+            found.append((token.line, UNBOUNDED_WAITS[token.value]))
+        index += 1
+    return found
+
+
+def _macro_end(tokens, opener):
+    """Index just past the delimiter group that opens at tokens[opener]."""
+    pairs, depth = {"(": ")", "[": "]", "{": "}"}, 0
+    for index in range(opener, len(tokens)):
+        if tokens[index].kind != "punct":
+            continue
+        if tokens[index].value in pairs:
+            depth += 1
+        elif tokens[index].value in pairs.values():
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return len(tokens)
+
+
+def wait_allowlist(repo_root):
+    """(entries, problems) of the unbounded-wait allowlist: one repo path per line, `#` comments without issue numbers."""
+    path = repo_root / WAIT_ALLOWLIST
+    entries, problems = [], []
+    if not path.is_file():
+        return entries, problems
+    for number, line in enumerate(path.read_text("utf-8").splitlines(), 1):
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith("#"):
+            if re.search(r"#\d+", text):
+                problems.append(f"{WAIT_ALLOWLIST}:{number} comment names an issue number")
+            continue
+        if text in entries:
+            problems.append(f"{WAIT_ALLOWLIST}:{number} duplicate entry {text}")
+        entries.append(text)
+    return entries, problems
+
+
+def unbounded_wait_files(repo_root, inventory):
+    """{repo path: [(line, kind)]} of the test code that waits without a cap."""
+    root = repo_root.resolve()
+    files = {path: chains for path, chains in inventory.file_cfgs.items()}
+    for path in sorted((root / "tests").rglob("*.rs")):
+        if "fixtures" not in path.relative_to(root).parts:
+            files[path.resolve()] = None
+    violations = {}
+    for path in sorted(files):
+        rel = path.relative_to(root).as_posix()
+        if rel == WAIT_HELPER:
+            continue
+        chains = files[path]
+        whole = chains is None or all(any(_cfg_requires_test(cfg) for cfg in chain) for chain in chains)
+        raw = path.read_text("utf-8")
+        if not WAIT_CALL.search(raw):
+            continue
+        hits = unbounded_waits(raw, rust_tokens(raw, extended=True), whole)
+        if hits:
+            violations[rel] = hits
+    return violations
+
+
+def test_wait_findings(repo_root, inventory, violations=None):
+    """Test code waiting without a cap: new violations and allowlist rows whose file no longer needs one."""
+    if violations is None:
+        violations = unbounded_wait_files(repo_root, inventory)
+    allowed, found = wait_allowlist(repo_root)
+    found += [f"unbounded wait allowlist: {rel} has no unbounded wait left; remove from {WAIT_ALLOWLIST}"
+              for rel in allowed if rel not in violations]
+    for rel, hits in sorted(violations.items()):
+        if rel in allowed:
+            continue
+        found += [f"unbounded wait: {rel}:{line} {kind} without a cap; use test_support::wait "
+                  f"(join_within/recv_within/await_within)" for line, kind in hits]
+    return found
+
+
+def base_allowlist(repo_root, rev):
+    """Allowlist paths at git `rev`; None when the file does not exist there (its first introduction)."""
+    result = subprocess.run(["git", "-C", str(repo_root), "show", f"{rev}:{WAIT_ALLOWLIST}"],
+                            capture_output=True, text=True, check=False)
+    if result.returncode:
+        if "does not exist in" in result.stderr or "exists on disk, but not in" in result.stderr:
+            return None
+        raise ValueError(result.stderr.strip() or f"git show {rev}:{WAIT_ALLOWLIST} failed")
+    return {line.strip() for line in result.stdout.splitlines() if line.strip() and not line.startswith("#")}
+
+
+def allowlist_digest(entries):
+    return hashlib.sha256(("\n".join(sorted(entries)) + "\n").encode()).hexdigest()
+
+
+def allowlist_growth(current, base, violations, approved=None):
+    """Rows the allowlist may not hold: new ones against `base`, or, where the base has no allowlist yet,
+    anything but the approved first list, which must also equal the files that wait without a cap now."""
+    if base is not None:
+        return [f"unbounded wait allowlist: {rel} is new against the base allowlist; the allowlist only shrinks, "
+                f"use test_support::wait instead" for rel in sorted(set(current) - base)]
+    found = [f"unbounded wait allowlist: {rel} is listed but waits with a cap now; the first allowlist names "
+             f"exactly the files that wait without one" for rel in sorted(set(current) - set(violations))]
+    found += [f"unbounded wait allowlist: {rel} waits without a cap but is not listed; the first allowlist names "
+              f"exactly the files that wait without one" for rel in sorted(set(violations) - set(current))]
+    if allowlist_digest(current) != (approved or INITIAL_ALLOWLIST_SHA256):
+        found.append(f"unbounded wait allowlist: {len(current)} rows differ from the approved first allowlist "
+                     f"(sha256 {allowlist_digest(current)[:12]}); it cannot change in the PR that introduces it")
+    return found
+
+
+def check_findings(repo_root, allowlist_base="HEAD^1", approved=None):
     inv = lib_inventory(repo_root)
     found = [f"orphan test file: {path}" for path in orphans(repo_root, inv)]
     found += [f"missing source: {e}" for e in inv.errors]
     found += [f"unreadable: {u}" for u in inv.unreadable]
+    violations = unbounded_wait_files(repo_root, inv)
+    found += test_wait_findings(repo_root, inv, violations)
+    try:
+        found += allowlist_growth(wait_allowlist(repo_root)[0], base_allowlist(repo_root, allowlist_base),
+                                  violations, approved)
+    except ValueError as exc:
+        found.append(f"unbounded wait allowlist: base {allowlist_base} unreadable ({exc}); pass --allowlist-base")
     features = default_features(repo_root)
     for platform, target_os in PLATFORMS.items():
         _, _, unknown = platform_split(inv, target_os, features)
@@ -654,7 +884,9 @@ def main(argv=None):
     i = sub.add_parser("inventory")
     i.add_argument("--platform", choices=sorted(PLATFORMS), help="only tests compiled there")
     i.add_argument("--json-out", required=True)
-    sub.add_parser("check")
+    k = sub.add_parser("check")
+    k.add_argument("--allowlist-base", default="HEAD^1",
+                   help="git rev whose unbounded-wait allowlist the current one may only shrink from")
     c = sub.add_parser("compare")
     c.add_argument("--platform", choices=sorted(PLATFORMS), required=True)
     c.add_argument("--list", required=True, help="unfiltered `cargo nextest list --message-format json`")
@@ -686,7 +918,7 @@ def main(argv=None):
                          for p in PLATFORMS))
         return 0
     if args.command == "check":
-        inv, found = check_findings(root)
+        inv, found = check_findings(root, args.allowlist_base)
         for line in found:
             print(f"ERROR {line}", file=sys.stderr)
         print(f"{len(inv.tests)} lib tests reached; {len(found)} problem(s)")

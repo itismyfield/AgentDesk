@@ -131,8 +131,14 @@ impl HostIo for GatewayHost {
         }
     }
 
-    async fn producer_absent(&self, channel: u64, provider: ShadowProvider) -> bool {
+    async fn producer_observation(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> Option<crate::services::tui_o::writer::ProducerObservation> {
+        use crate::services::discord::turn_presence::activity::notice_identity::ExecutionIdentity;
         use crate::services::discord::turn_presence::activity::{self, Activity};
+        use crate::services::tui_o::writer::{ProducerObservation, ProducerPresence};
         let provider = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
@@ -143,20 +149,45 @@ impl HostIo for GatewayHost {
                     activity::reading_now(&self.shared, &provider, ChannelId::new(channel)).await;
                 #[cfg(test)]
                 let reading = fence_tests::producer_reading_for_tests(channel, reading);
-                if reading.observed.activity == Activity::Idle
-                    && reading.observed.reason == "no_session"
+                let observed = reading.observed;
+                let notice = reading.notice_observation();
+                if matches!(
+                    observed.reason,
+                    "probe_failed"
+                        | "session_probe_failed"
+                        | "binding_unreadable"
+                        | "host_probe_failed"
+                ) || notice.hold_leaf == Some("probe_failed")
                 {
-                    if reading.publish_if_current(|| ()).await.is_some() {
-                        return true;
+                    return None;
+                }
+                if observed.reason != "superseded" {
+                    let presence = match observed.activity {
+                        Activity::Idle if observed.reason == "no_session" => {
+                            ProducerPresence::Absent
+                        }
+                        Activity::Unknown => ProducerPresence::Unknown,
+                        _ => ProducerPresence::Present,
+                    };
+                    let incarnation = match notice.identity {
+                        ExecutionIdentity::Nonce(nonce) => Some(nonce),
+                        _ => None,
+                    };
+                    if let Some(observation) = reading
+                        .publish_if_current(|| ProducerObservation {
+                            presence,
+                            incarnation,
+                        })
+                        .await
+                    {
+                        return Some(observation);
                     }
-                } else if reading.observed.reason != "superseded" {
-                    return false;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(None)
     }
 
     fn execution_permit(&self, channel: u64) -> Option<Result<Arc<OwnerPermit>, String>> {

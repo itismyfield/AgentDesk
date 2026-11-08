@@ -50,12 +50,15 @@ async fn snapshot(handle: &ChannelMailboxHandle) -> Value {
         .unwrap()
 }
 async fn enqueue(handle: &ChannelMailboxHandle, ids: &[u64]) {
+    enqueue_source(handle, ids, None).await;
+}
+async fn enqueue_source(handle: &ChannelMailboxHandle, ids: &[u64], source: Option<&str>) {
     for &id in ids {
         handle
             .v2_admit_ticket_with_context(
                 item(id),
                 format!("ticket-{id}"),
-                json!({"origin":"headless",
+                json!({"origin":"headless","source":source,
             "metadata":{"human_input":{"origin_id":format!("origin-{id}")}}}),
             )
             .await
@@ -682,7 +685,16 @@ fn cancel_queued_t11_follower_cancel_revokes_claim_so_drive_progresses() {
         let rig = Rig::new().await;
         let data = authorized().await;
         let (handle, _) = empty_owner(&data).await;
-        enqueue(&handle, &[A, B]).await;
+        enqueue(&handle, &[C, D]).await;
+        assert!(
+            handle
+                .v2_request(|s| Ok(s.as_ref().unwrap().followers().is_empty()))
+                .await
+                .unwrap(),
+            "same-author machine starts keep their own turns"
+        );
+        assert!(content(&rig.invoke_cancel(&data, None).await).contains("비웠어요"));
+        enqueue_source(&handle, &[A, B], Some("imessage")).await;
         let front = handle
             .v2_request(|s| {
                 let o = s.as_mut().unwrap();

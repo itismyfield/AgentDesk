@@ -2556,6 +2556,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         with (
             patch("run_tui_relay.time.sleep", return_value=None),
             patch("run_tui_relay.tmux.send_keys", side_effect=fake_send_keys),
+            patch("run_tui_relay._read_api_json", return_value=(200, {})),
             patch(
                 "run_tui_relay.assert_cell_idle",
                 return_value={"status": "idle", "mailboxes_seen": 1},
@@ -2629,6 +2630,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         with (
             patch("run_tui_relay.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)),
             patch("run_tui_relay.tmux.send_keys", side_effect=fake_send_keys),
+            patch("run_tui_relay._read_api_json", return_value=(200, {})),
             patch(
                 "run_tui_relay.assert_cell_idle",
                 return_value={"status": "idle", "mailboxes_seen": 1},
@@ -2704,6 +2706,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         with (
             patch("run_tui_relay.time.sleep", return_value=None),
             patch("run_tui_relay.tmux.send_keys", return_value=True),
+            patch("run_tui_relay._read_api_json", return_value=(200, {})),
             patch(
                 "run_tui_relay.wait_for_discord_text_with_tui_idle_draft_guard",
                 side_effect=fake_wait,
@@ -4176,7 +4179,7 @@ class RestartTargetParameterized(_OutcomeFixture, unittest.TestCase):
                                              ("http://127.0.0.1:8797", None, "dev"),
                                              ("http://agentdesk.test", "dev", "dev"),
                                              ("http://agentdesk.test", None, "release")):
-            for scenario_id in ("E-8", "E-9", "E-10", "E-14", "E-61"):
+            for scenario_id in ("E-8", "E-9", "E-10", "E-14", "E-61", "E-63"):
                 with self.subTest(base_url=base_url, override=override, scenario=scenario_id):
                     restart.reset_mock()
                     self.args.base_url, self.args.restart_target_override = base_url, override
@@ -4344,6 +4347,22 @@ class E37CodexModelLocalControl(unittest.TestCase):
             with self.subTest(fault=fault), self.assertRaisesRegex(assertions.AssertionError, reason):
                 self.run_e37(fault)
 
+
+
+class TurnActiveProbe(unittest.TestCase):
+    """E-63 proceeds only while the target is still busy on the listed send."""
+
+    def test_busy_on_listed_send_passes_idle_or_other_turn_fails(self):
+        hold = "1510404747188768880"
+        probe = lambda box, ids: driver._assert_target_turn_active(  # noqa: E731
+            {"mailboxes": [box]}, channel_id="99", cell="claude-tui", allowed_ids=ids)
+        self.assertEqual(probe(_busy_mailbox(), {hold})["active_user_message_id"], hold)
+        for label, box, ids, reason in (
+                ("turn already ended", _idle_mailbox("99", "claude"), {hold}, "is idle"),
+                ("another message's turn", _busy_mailbox(), {"1510404747188768881"}, "is not one of")):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(assertions.AssertionError, reason):
+                    probe(box, ids)
 
 if __name__ == "__main__":
     unittest.main()

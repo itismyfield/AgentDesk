@@ -580,15 +580,20 @@ async fn owner_busy_receipts(active: bool, observed: bool) {
         "the owner must observe the live execution and physical pane"
     );
     if !active {
+        assert!(
+            !rt.h
+                .shared
+                .mailbox(ChannelId::new(CHANNEL_ID))
+                .has_active_turn()
+                .await
+                .unwrap(),
+            "a person input joins the native turn without opening a mailbox turn"
+        );
         let ops = rt.h.shared.turn_view_reconciler.ops();
         assert!(
             ops.iter()
-                .any(|op| op.target.message_id.get() == ids[0] && op.emoji == '⏳' && op.add)
-        );
-        assert!(
-            ops.iter()
-                .any(|op| op.target.message_id.get() == ids[0] && op.emoji == '⏳' && !op.add),
-            "the initially idle owner turn must roll back before into_busy_pane submits"
+                .all(|op| !ids.contains(&op.target.message_id.get()) || op.emoji != '⏳'),
+            "joining the native turn must not add or roll back an interim hourglass"
         );
     }
     assert!(

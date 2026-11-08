@@ -419,6 +419,31 @@ async fn a_source_bound_back_waits_for_the_tail_of_the_source_it_replaces() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_retired_source_bound_back_after_its_file_went_names_it_missing() {
+    let (harness, a_path, a, bindings) = started(&row("m0", "before the switch"));
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    let (_, b) = transcript(&a_path, "b.jsonl", "s2", &row("n1", "b first"));
+    bindings.commit(rotate(2, &a, &b, BindingCause::Clear));
+    polls(15).await;
+    assert!(retired(&harness, &a));
+    halt(stop, task).await;
+    assert_eq!(harness.alarms.taken(), []);
+    std::fs::remove_file(&a_path).unwrap();
+    let (_stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(3).await;
+    assert!(!task.is_finished(), "{:?}", harness.alarms.taken());
+    bindings.commit(rotate(3, &b, &a, BindingCause::Resume));
+    polls(3).await;
+    assert!(task.is_finished());
+    let alarms = harness.alarms.taken();
+    assert!(
+        matches!(&alarms[..], [WriterAlarm::HaltedMissingSource { source, .. }] if *source == a),
+        "{alarms:?}"
+    );
+    assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(2));
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_old_tail_the_full_spool_refuses_behind_an_announced_unit_stops_the_channel_intact() {
     let message = |id: &str, text: &str| {
         codex_line(serde_json::json!({"type": "response_item",

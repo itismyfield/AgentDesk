@@ -5,7 +5,7 @@ Code SHA: `b5e0f2115f` plus this repair. Models: `InputOwnershipConsumedWaiting.
 ## What the code does
 
 - `health/recovery/carried_turn_close.rs`: an earlier generation's managed row that was not readopted and has no verified native pin used to be kept forever (`unverified_carried_input`). It now closes when its `session_id` names a session other than the one the binding names for the source the pane ended on (`ClosedBoundary.session`; an empty binding session keeps the row), after the same native end, O drain/capture, lock and receipt proof as every other carried close. Before archiving it enqueues one outbox notice keyed by the turn (`queue_io/retained_notice.rs`), so a repeated close posts once. A failed receipt commit on this close leaves no settlement mark, so no generic settlement can remove the row without the notice. A row naming the current session is still kept (#7828).
-- `claude_tui/hosting/warm_followup.rs`: `owner_observer` resolves its session before the submit. After the submit it now polls for up to 10 s: this submit's own receipt pin in that session reads it as before, and the pane's verified session (hook adoption + runtime binding) changing reads that one from the submit's time. Growth of the old file proves nothing, because `/clear` appends its cost-state there. When the grace expires the old session is read as before; that read does not complete on idle alone, so the grace bounds the wait, not the turn.
+- `claude_tui/hosting/warm_followup.rs`: `owner_observer` resolves its session before the submit. After the submit it now polls for up to 10 s: this submit's own receipt pin in that session reads it as before, and the pane's verified session (hook adoption + runtime binding) changing reads that one from the submit's time. Growth of the old file proves nothing, because `/clear` appends its cost-state there. When the grace expires the old session is read, and a session adopted later still takes the read over once (see "Late adoption after the grace" below).
 
 ## Entry points the models take their values from
 
@@ -43,6 +43,19 @@ Code SHA: `b5e0f2115f` plus this repair. Models: `InputOwnershipConsumedWaiting.
 | ManagedObserverRebindMetaIsInput (new, Mut = r1 head behaviour) | — | `FixedAOnlyOnEvidenceOrGrace` and `SubmittedEventuallyCloses` break |
 | ManagedObserverRebindSinglePoll (new, Mut) | — | `FixedAOnlyOnEvidenceOrGrace` and `SubmittedEventuallyCloses` break |
 | ManagedObserverRebindGraceBeforeAdoption (new) | — | `SubmittedEventuallyCloses` breaks: liveness holds only while the grace outlasts the adoption |
+
+## Late adoption after the grace (#7889)
+
+Code SHA: `31389fb471` plus this repair. `RepairLate` adds `LateHandoff`: once the grace has expired and the observer reads A, a verified adoption of B while A holds no receipt of this submit moves the reader to B once (`left`), read from the submit's time. In code the A reader's liveness probe asks `late_rebind` (`warm_followup.rs`), the read ends as a death would, and `observe_submitted` reads B only when A relayed nothing; a receipt seen in A keeps the read there for good.
+
+| cfg | before | after |
+|---|---|---|
+| ManagedObserverRebindGraceBeforeAdoption (`RepairLate = TRUE`) | `SubmittedEventuallyCloses` breaks | holds |
+| ManagedObserverRebindGraceBeforeAdoptionNoHandoff (new, `RepairLate = FALSE`) | — | `SubmittedEventuallyCloses` breaks (the old gap) |
+| Before / MetaIsInput / SinglePoll (`RepairLate = FALSE`, so the poll mutants keep their meaning) | unchanged | unchanged |
+| After (`RepairLate = TRUE`) | holds | holds |
+
+The receipt guard is not exercised: in this model the input reaches A only without a `/clear`, and then B is never adopted. It is covered by the code's receipt test instead.
 
 Liveness is a PROPERTY with weak fairness on every progress action; `Tail` and `HealthKeepsA` are the stutter steps that make a permanent wait a lasso.
 

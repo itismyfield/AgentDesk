@@ -897,6 +897,10 @@ impl PaneGate {
             HostKindMarker::Known(_) => return Err(HerdrGateRefusal::MarkerOtherHost),
             _ => return Err(HerdrGateRefusal::MarkerUnverified),
         }
+        self.policy_witness(mutation)
+    }
+
+    fn policy_witness(&self, mutation: Mutation) -> Result<ServerWitness, HerdrGateRefusal> {
         if self.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
             let evidence = self
                 .evidence

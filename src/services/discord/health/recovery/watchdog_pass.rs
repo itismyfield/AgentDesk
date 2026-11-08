@@ -139,7 +139,7 @@ use super::super::transcript_binding_stall::{self as binding_stall, TranscriptBi
 static DEFERRALS: std::sync::LazyLock<binding_stall::TransitionLog> =
     std::sync::LazyLock::new(binding_stall::TransitionLog::default);
 
-/// An O verdict that blames delivery pages as branch 4 does: once per cooldown, nothing cleaned.
+/// An O verdict that blames delivery pages once per turn with its reason; nothing is cleaned.
 async fn page_o_stall(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -147,29 +147,38 @@ async fn page_o_stall(
     snapshot: &WatcherStateSnapshot,
 ) {
     let delivery = [
-        TranscriptBindingStall::ODeliveryStalled,
-        TranscriptBindingStall::ODrainedTurnOpen,
+        (
+            TranscriptBindingStall::ODeliveryStalled,
+            "O가 보낼 조각이 남았는데 몇 분째 전달 장부가 움직이지 않습니다",
+        ),
+        (
+            TranscriptBindingStall::ODrainedTurnOpen,
+            "O가 이 턴의 답을 다 보냈고 transcript도 멈췄는데 턴이 닫히지 않았습니다",
+        ),
     ];
-    let blamed = delivery
+    let Some((_, why)) = delivery
         .iter()
-        .any(|stall| stall.as_str() == snapshot.transcript_binding_stall);
-    if !blamed {
+        .find(|(stall, _)| stall.as_str() == snapshot.transcript_binding_stall)
+    else {
         return;
-    }
+    };
     // The turn the verdict judged, not the Legacy row, which may be left from an earlier turn.
     let mailbox = discord::mailbox_snapshot(shared, channel_id).await;
     let turn_age = binding_stall::turn_age_secs(&mailbox, snapshot.inflight_started_at.as_deref());
-    if turn_age.is_none_or(|age| age < STALL_WATCHDOG_THRESHOLD_SECS) {
+    let Some(age) = turn_age.filter(|age| *age >= STALL_WATCHDOG_THRESHOLD_SECS) else {
         return;
-    }
+    };
     let inflight = discord::inflight::load_inflight_state(provider, channel_id.get());
-    stall_alert::notify_suspected_stall_without_cleanup(
-        shared,
-        provider,
-        channel_id,
-        inflight.as_ref(),
-    )
-    .await;
+    // A turn with no message id to name keeps the cooldown page.
+    let Some(turn) = mailbox.active_user_message_id else {
+        let inflight = inflight.as_ref();
+        stall_alert::notify_suspected_stall_without_cleanup(shared, provider, channel_id, inflight)
+            .await;
+        return;
+    };
+    let page = (turn.get(), age, *why);
+    stall_alert::notify_unclosed_o_turn(shared, provider, channel_id, inflight.as_ref(), page)
+        .await;
 }
 
 /// Run a single stall-watchdog pass against one provider+SharedData.

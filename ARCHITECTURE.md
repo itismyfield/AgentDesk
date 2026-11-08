@@ -1553,6 +1553,8 @@ src/
 │   │   │   ├── http_force_tests.rs
 │   │   │   ├── http_force_v2_tests.rs
 │   │   │   ├── http_force_writer_tests.rs
+│   │   │   ├── missing_marker_tests.rs
+│   │   │   ├── missing_marker_turn_tests.rs
 │   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
@@ -1765,8 +1767,6 @@ src/
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_controller/
 │   │   │   ├── queued_card_gate/
-│   │   │   │   ├── tests/
-│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── tests.rs
 │   │   │   │   └── unanswered_tests.rs
 │   │   │   └── queued_card_gate.rs
@@ -2150,6 +2150,7 @@ src/
 │   │   │   │   │   ├── owner_input_owned_stop_format_tests.rs
 │   │   │   │   │   ├── owner_input_owned_stop_tests.rs
 │   │   │   │   │   ├── owner_input_parent_tests.rs
+│   │   │   │   │   ├── owner_input_person_origin_tests.rs
 │   │   │   │   │   ├── owner_input_rollback_tests.rs
 │   │   │   │   │   ├── owner_input_stop_gate_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
@@ -2257,6 +2258,7 @@ src/
 │   │   │   │   │   └── b1b_terminal_tests.rs
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── owner_execution/
+│   │   │   │   │   │   ├── missing_halt_tests.rs
 │   │   │   │   │   │   ├── park_missing_tests.rs
 │   │   │   │   │   │   ├── park_reply_tests.rs
 │   │   │   │   │   │   └── refresh_tests.rs
@@ -2363,8 +2365,6 @@ src/
 │   │   │   ├── scheduled_settle.rs
 │   │   │   └── scheduled_settle_tests.rs
 │   │   ├── startup_reclaim/
-│   │   │   ├── tests/
-│   │   │   │   └── source_guard_tests.rs
 │   │   │   └── intake_placeholder_retirement_tests.rs
 │   │   ├── task_notification_delivery/
 │   │   │   ├── inline_contract_tests/
@@ -3683,6 +3683,7 @@ src/
 │   │   ├── herdr_gate/
 │   │   │   ├── legacy_return.rs
 │   │   │   ├── legacy_return_tests.rs
+│   │   │   ├── missing_marker_rig_tests.rs
 │   │   │   ├── notice_fence_tests.rs
 │   │   │   ├── policy_tests.rs
 │   │   │   ├── root_replaced.rs
@@ -3928,6 +3929,7 @@ src/
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs
 │   │   │   │   ├── fresh_input_tests.rs
+│   │   │   │   ├── missing.rs
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
@@ -4457,7 +4459,8 @@ src/
 │   ├── decision_log_pg_tests.rs
 │   └── mod.rs
 ├── test_support/
-│   └── serial_runtime.rs
+│   ├── serial_runtime.rs
+│   └── wait.rs
 ├── ui/
 │   ├── ai_screen.rs
 │   └── mod.rs

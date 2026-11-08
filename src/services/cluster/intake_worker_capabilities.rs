@@ -47,9 +47,24 @@ pub(super) fn active_intake_worker_providers() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Keeps gateway intent advertised until acquisition or backend ownership ends.
+/// Keeps gateway intent advertised until cancellation or backend ownership ends.
 pub(crate) struct GatewayWaiterGuard {
+    state: std::sync::Arc<GatewayWaiterState>,
+}
+
+struct GatewayWaiterState {
     provider: String,
+    advertised: std::sync::atomic::AtomicBool,
+}
+
+pub(crate) struct GatewayWaiterCancellation(std::sync::Weak<GatewayWaiterState>);
+
+impl GatewayWaiterCancellation {
+    pub(crate) fn withdraw(self) {
+        if let Some(state) = self.0.upgrade() {
+            state.withdraw();
+        }
+    }
 }
 
 impl GatewayWaiterGuard {
@@ -61,15 +76,37 @@ impl GatewayWaiterGuard {
                 .unwrap_or_else(|error| error.into_inner());
             *providers.entry(provider.clone()).or_default() += 1;
         }
-        Self { provider }
+        Self {
+            state: std::sync::Arc::new(GatewayWaiterState {
+                provider,
+                advertised: std::sync::atomic::AtomicBool::new(true),
+            }),
+        }
+    }
+
+    pub(crate) fn cancellation(&self) -> GatewayWaiterCancellation {
+        GatewayWaiterCancellation(std::sync::Arc::downgrade(&self.state))
     }
 }
 
 impl Drop for GatewayWaiterGuard {
     fn drop(&mut self) {
+        self.state.withdraw();
+    }
+}
+
+impl GatewayWaiterState {
+    fn withdraw(&self) {
         let mut providers = GATEWAY_WAITER_PROVIDERS
             .write()
             .unwrap_or_else(|error| error.into_inner());
+        // Rollback and backend exit release this owner's reference exactly once.
+        if !self
+            .advertised
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
         if let Some(count) = providers.get_mut(&self.provider) {
             *count -= 1;
             if *count == 0 {

@@ -56,6 +56,20 @@ pub struct ReaderConfig {
     pub dormant: bool,
 }
 
+/// Stable producer evidence; observation revisions and repeated publications are not identities.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProducerPresence {
+    Absent,
+    Present,
+    #[default]
+    Unknown,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProducerObservation {
+    pub presence: ProducerPresence,
+    pub incarnation: Option<String>,
+}
+
 /// A message as Discord returned it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeenMessage {
@@ -141,6 +155,10 @@ pub enum WriterAlarm {
         detail: String,
     },
     Halted {
+        detail: String,
+    },
+    HaltedMissingSource {
+        source: SourceId,
         detail: String,
     },
     /// The writer host stopped before any store write, so Legacy keeps the channel's output.

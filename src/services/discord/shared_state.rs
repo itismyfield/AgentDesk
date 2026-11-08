@@ -664,7 +664,14 @@ pub(in crate::services) struct RestartLifecycle {
     /// Whether this provider already consumed its process-wide barrier slot.
     /// Cancellation restores only consumed slots, not merely acquired permits.
     pub(in crate::services) shutdown_slot_consumed: std::sync::atomic::AtomicBool,
+    pub(in crate::services) gateway_waiter_cancellation: std::sync::Mutex<
+        Option<crate::services::cluster::intake_worker_capabilities::GatewayWaiterCancellation>,
+    >,
+    pub(in crate::services) gateway_handback_health: GatewayHandbackHealth,
 }
+
+pub(in crate::services) type GatewayHandbackHealth =
+    Arc<std::sync::RwLock<Option<(std::time::Instant, String)>>>;
 
 /// #5485 — read-only view of the process-global shutdown flag for workers
 /// that only *observe* shutdown (intake poll loop, voice
@@ -687,6 +694,24 @@ impl ShutdownReader {
 }
 
 impl RestartLifecycle {
+    pub(in crate::services::discord) fn gateway_handback_reason(&self) -> Option<String> {
+        if !crate::config::snapshot()
+            .unwrap_or_default()
+            .cluster
+            .gateway_handback_breaker
+            .enabled
+        {
+            return None;
+        }
+        // Allow two maximum standby retry intervals before hiding an unrefreshed observation.
+        self.gateway_handback_health
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(120))
+            .map(|(_, reason)| reason.clone())
+    }
+
     /// Hand out a read-only view of the shutdown flag. The only constructor
     /// of [`ShutdownReader`]: its wrapped handle is a private tuple field, so
     /// nothing outside can forge observer capability or unwrap it into a
@@ -708,6 +733,14 @@ impl RestartLifecycle {
     /// Deferred-restart rollback: clears in the original order, shutdown flag
     /// first, acknowledgement second.
     pub(in crate::services::discord) fn legacy_deferred_rollback(&self) {
+        if let Some(waiter) = self
+            .gateway_waiter_cancellation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            waiter.withdraw();
+        }
         self.shutting_down.store(false, Ordering::SeqCst);
         self.restart_pending.store(false, Ordering::SeqCst);
     }

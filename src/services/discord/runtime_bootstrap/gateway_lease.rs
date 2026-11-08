@@ -196,6 +196,11 @@ async fn acquire_as_preferred_gateway(
     handback_breaker: &mut GatewayHandbackBreaker,
 ) -> Result<Option<GatewayLeaseAcquisition>, String> {
     let waiter = GatewayWaiterGuard::new(provider.as_str());
+    *shared
+        .restart
+        .gateway_waiter_cancellation
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(waiter.cancellation());
     // Publish the intent immediately rather than waiting for the next heartbeat,
     // so a peer holding the lease can start yielding right away.
     if let Err(error) =
@@ -373,6 +378,8 @@ pub(super) async fn run_bot_acquire_gateway_lease(
     api_port: u16,
     handback_breaker: &mut GatewayHandbackBreaker,
 ) -> GatewayLeaseOutcome {
+    handback_breaker.health = Some(shared.restart.gateway_handback_health.clone());
+    handback_breaker.suppressed();
     match shared.pg_pool.as_ref() {
         Some(pool) => {
             // #4351: honor the configured gateway owner before racing for the lock.
@@ -599,16 +606,8 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
         loop {
             interval.tick().await;
 
-            if shared_for_lease
-                .restart
-                .shutting_down
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
-                if let Some(lease) = current_lease.take() {
-                    let _ = release_gateway(&gate, lease.unlock()).await;
-                }
-                return;
-            }
+            // A cancellable drain still serves Discord; backend cleanup owns lease release.
+            let handback_suppressed = handback_breaker.suppressed();
 
             // #4351: we are holding the gateway but we are not the node that is
             // supposed to. Hand it back as soon as the preferred node is up.
@@ -616,7 +615,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
             // `deploy-release.sh` restarts the local node first, so a
             // non-preferred node routinely wins the initial race.
             if let Some(pref) = preference.as_ref().filter(|p| !p.self_is_preferred()) {
-                if current_lease.is_some() && !handback_breaker.suppressed() {
+                if current_lease.is_some() && !handback_suppressed {
                     if let Some(pool) = shared_for_lease.pg_pool.as_ref() {
                         if preferred_gateway_is_waiting(
                             pool,

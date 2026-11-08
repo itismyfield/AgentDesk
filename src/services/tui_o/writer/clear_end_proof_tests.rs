@@ -408,7 +408,7 @@ async fn a_proven_old_source_that_vanishes_halts_instead_of_retiring() {
     tokio::time::advance(Duration::from_secs(60)).await;
     let tended = sources.tend_at(&mut writer, t0 + Duration::from_secs(60));
     assert!(
-        matches!(tended, Err(WriterAlarm::Halted { .. })),
+        matches!(tended, Err(WriterAlarm::HaltedMissingSource { ref source, .. }) if source == &a),
         "{tended:?}"
     );
     assert!(

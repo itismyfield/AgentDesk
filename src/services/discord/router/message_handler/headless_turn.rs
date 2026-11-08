@@ -57,6 +57,11 @@ async fn start_reserved_headless_turn_admitted(
         ));
     }
 
+    let reservation = if owner.is_none() {
+        reservation.for_input(channel_id, source, metadata.as_ref())
+    } else {
+        reservation
+    };
     let user_msg_id = reservation.user_msg_id;
     let placeholder_msg_id = reservation.placeholder_msg_id;
     let (settings_provider, allowed_tools) = {
