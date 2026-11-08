@@ -93,7 +93,7 @@ fn choices_show_sibling_title_time_and_resolve_selected_cwd_without_recorded_cwd
         &choices[0].session_id,
         Some(&f.home),
         &[],
-        Ok(&f.home),
+        Ok(None),
     )
     .unwrap();
     assert_eq!(resolved, f.sibling.to_string_lossy());
@@ -134,7 +134,7 @@ fn explicit_wrong_cwd_returns_422_and_actual_location_missing_transcript_refuses
         PRIOR,
         Some(&f.home),
         &[],
-        Ok(&f.home),
+        Ok(None),
     )
     .unwrap_err();
     let (status, axum::Json(body)) = error.into_response();
@@ -151,7 +151,7 @@ fn explicit_wrong_cwd_returns_422_and_actual_location_missing_transcript_refuses
         OTHER,
         Some(&f.home),
         &[],
-        Ok(&f.home),
+        Ok(None),
     )
     .unwrap_err();
     let (status, axum::Json(body)) = missing.into_response();
@@ -164,7 +164,7 @@ fn explicit_wrong_cwd_returns_422_and_actual_location_missing_transcript_refuses
         "bad-id",
         Some(&f.home),
         &[],
-        Ok(&f.home),
+        Ok(None),
     )
     .unwrap_err();
     let (status, axum::Json(body)) = invalid.into_response();
@@ -194,7 +194,7 @@ fn forks_choose_newest_mtime_explicit_cwd_wins_and_choices_deduplicate() {
     );
     let current = f.current.to_str().unwrap();
     assert_eq!(
-        resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &[], Ok(&f.home)).unwrap(),
+        resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &[], Ok(None)).unwrap(),
         f.sibling.to_string_lossy()
     );
     assert_eq!(
@@ -204,7 +204,7 @@ fn forks_choose_newest_mtime_explicit_cwd_wins_and_choices_deduplicate() {
             PRIOR,
             Some(&f.home),
             &[],
-            Ok(&f.home)
+            Ok(None)
         )
         .unwrap(),
         current
@@ -374,17 +374,9 @@ fn transcript_only_in_another_home_is_listed_then_copied_once_into_the_same_cwd_
             .ends_with("claude-adk-cc-20260101-000002 · home 1-acct")
     );
     // Without declared homes only the active home is searched.
-    assert!(resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &[], Ok(&f.home)).is_err());
+    assert!(resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &[], Ok(None)).is_err());
     assert_eq!(
-        resolve_cwd(
-            Some(current),
-            None,
-            PRIOR,
-            Some(&f.home),
-            &homes,
-            Ok(&f.home)
-        )
-        .unwrap(),
+        resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &homes, Ok(None)).unwrap(),
         f.sibling.to_string_lossy()
     );
     let copy = claude_transcript_path(&f.sibling, PRIOR, Some(&f.home)).unwrap();
@@ -404,7 +396,7 @@ fn transcript_only_in_another_home_is_listed_then_copied_once_into_the_same_cwd_
             PRIOR,
             Some(&f.home),
             &homes,
-            Ok(&f.home)
+            Ok(None)
         )
         .unwrap(),
         f.sibling.to_str().unwrap()
@@ -424,7 +416,7 @@ fn transcript_in_two_other_homes_is_refused_without_choosing_one() {
         PRIOR,
         Some(&f.home),
         &homes,
-        Ok(&f.home),
+        Ok(None),
     )
     .unwrap_err();
     let (status, axum::Json(body)) = error.into_response();
@@ -453,7 +445,7 @@ fn failed_copy_refuses_and_leaves_no_partial_transcript_in_the_active_home() {
         PRIOR,
         Some(&f.home),
         std::slice::from_ref(&other),
-        Ok(&f.home),
+        Ok(None),
     )
     .unwrap_err();
     let (status, axum::Json(body)) = error.into_response();
@@ -491,14 +483,14 @@ fn copy_is_refused_before_writing_when_the_launch_home_differs_or_a_candidate_is
         f.home.display(),
         profile.display()
     );
-    let cases: [(&[PathBuf], Result<&Path, &str>, &str); 3] = [
-        (std::slice::from_ref(&other), Ok(&profile), &mismatch),
+    let cases: [(&[PathBuf], Result<Option<&Path>, &str>, &str); 3] = [
+        (std::slice::from_ref(&other), Ok(Some(&profile)), &mismatch),
         (
             std::slice::from_ref(&other),
             Err("claude auth fallback chooses the account at launch"),
             "다음 실행 Claude home을 확정하지 못함",
         ),
-        (&both, Ok(&f.home), "확인하지 못해 복사하지 않음"),
+        (&both, Ok(None), "확인하지 못해 복사하지 않음"),
     ];
     for (homes, launch, expected) in cases {
         let current = f.current.to_str().unwrap();

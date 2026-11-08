@@ -367,19 +367,18 @@ pub(crate) fn configured_launch_overlay(
 
 /// The configured launch account before fallback routing, validated so a typo never picks an account,
 /// plus the channel and policy fallback routing would apply to it.
+type LaunchParts = (
+    crate::services::provider_auth_profile::ProviderAuthOverlay,
+    Option<(u64, FallbackPolicy)>,
+);
+
 fn launch_overlay_parts(
     schema: Option<&OrgSchema>,
     provider: &ProviderKind,
     channel_id: Option<u64>,
     agent_id: Option<&str>,
     catalog: &HashMap<String, ProviderAuthProfileDef>,
-) -> Result<
-    (
-        crate::services::provider_auth_profile::ProviderAuthOverlay,
-        Option<(u64, FallbackPolicy)>,
-    ),
-    String,
-> {
+) -> Result<LaunchParts, String> {
     let (profile, recovery_pinned) =
         configured_launch_profile(schema, provider, channel_id, agent_id)?;
     let primary = crate::services::provider_auth_profile::resolve(
@@ -488,15 +487,8 @@ pub(crate) fn predicted_launch_home(
         crate::services::provider::parse_provider_and_channel_from_tmux_name(session_name)
             .and_then(|(_, channel)| channel.parse().ok())
     });
-    let schema = load_org_schema_for_auth()?;
-    predicted_launch_home_from(schema.as_ref(), provider, channel_id)
-}
-
-fn predicted_launch_home_from(
-    schema: Option<&OrgSchema>,
-    provider: ProviderKind,
-    channel_id: Option<u64>,
-) -> Result<Option<std::path::PathBuf>, String> {
+    let loaded = load_org_schema_for_auth()?;
+    let schema = loaded.as_ref();
     let catalog = schema
         .and_then(|schema| schema.provider_auth_profiles.clone())
         .unwrap_or_default();
@@ -529,10 +521,10 @@ fn predicted_launch_home_from(
                 provider.as_str()
             ));
         }
-        if !homes.contains(&primary.home) {
-            homes.push(primary.home);
-        }
+        homes.push(primary.home);
     }
+    homes.sort();
+    homes.dedup();
     match homes.as_slice() {
         [home] => Ok(home.clone()),
         _ => Err(format!(

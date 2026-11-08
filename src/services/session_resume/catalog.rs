@@ -169,7 +169,7 @@ fn adopt_from_other_home(
     id: &str,
     home: Option<&Path>,
     others: &[PathBuf],
-    launch_home: Result<&Path, &str>,
+    launch_home: Result<Option<&Path>, &str>,
 ) -> Result<bool, String> {
     let active = home.map(Path::to_path_buf).or_else(default_claude_home);
     let mut homes: Vec<&PathBuf> = Vec::new();
@@ -211,22 +211,20 @@ fn adopt_from_other_home(
             other.display()
         ));
     }
-    // A copy only helps when the next launch reads the home it lands in.
+    // A copy only helps when the next launch reads the home it lands in; `None` is the global home.
     let active = active.ok_or("Claude home directory is unavailable")?;
-    match launch_home {
-        Ok(launch) if same_dir(launch, &active) => {}
-        Ok(launch) => {
-            return Err(format!(
-                "세션 {id8} 트랜스크립트를 복사하지 않음: 복사 대상 {}와 다음 실행 Claude home {}이 다릅니다.",
-                active.display(),
-                launch.display()
-            ));
-        }
-        Err(reason) => {
-            return Err(format!(
-                "세션 {id8} 트랜스크립트를 복사하지 않음: 다음 실행 Claude home을 확정하지 못함({reason})"
-            ));
-        }
+    let refusal = match launch_home {
+        Ok(None) => None,
+        Ok(Some(launch)) if same_dir(launch, &active) => None,
+        Ok(Some(launch)) => Some(format!(
+            "복사 대상 {}와 다음 실행 Claude home {}이 다릅니다.",
+            active.display(),
+            launch.display()
+        )),
+        Err(reason) => Some(format!("다음 실행 Claude home을 확정하지 못함({reason})")),
+    };
+    if let Some(reason) = refusal {
+        return Err(format!("세션 {id8} 트랜스크립트를 복사하지 않음: {reason}"));
     }
     let target = claude_transcript_path(cwd, id, home)?;
     File::open(source)
@@ -274,7 +272,7 @@ pub(super) fn resolve_cwd(
     id: &str,
     home: Option<&Path>,
     others: &[PathBuf],
-    launch_home: Result<&Path, &str>,
+    launch_home: Result<Option<&Path>, &str>,
 ) -> Result<String, ResumeRebindError> {
     if uuid::Uuid::parse_str(id).is_err() {
         return Err(ResumeRebindError::TargetTranscriptMissing(
@@ -343,20 +341,14 @@ pub(super) async fn resolve_cwd_off_runtime(
     let home = claude_home();
     let others = transcript_homes();
     tokio::task::spawn_blocking(move || {
-        // Only a declared extra home can trigger a copy; the launch falls back to the global home.
-        let launch = if others.is_empty() {
-            Err("no transcript_homes declared".to_string())
-        } else {
-            crate::services::discord::org_schema::predicted_launch_home(
+        // Only a declared extra home can trigger a copy, so the launch is predicted only then.
+        let launch = match others.is_empty() {
+            true => Ok(None),
+            false => crate::services::discord::org_schema::predicted_launch_home(
                 crate::services::provider::ProviderKind::Claude,
                 channel_id,
                 &tmux_name,
-            )
-            .and_then(|launch| {
-                launch
-                    .or_else(claude_home)
-                    .ok_or_else(|| "Claude home directory is unavailable".to_string())
-            })
+            ),
         };
         resolve_cwd(
             current.as_deref(),
@@ -364,7 +356,10 @@ pub(super) async fn resolve_cwd_off_runtime(
             &id,
             home.as_deref(),
             &others,
-            launch.as_deref().map_err(String::as_str),
+            launch
+                .as_ref()
+                .map(Option::as_deref)
+                .map_err(String::as_str),
         )
     })
     .await
