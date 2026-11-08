@@ -41,12 +41,14 @@ pub(super) async fn autocomplete_session(
         };
         let partial = partial.to_string();
         let home = catalog::claude_home();
+        let others = catalog::transcript_homes();
         tokio::task::spawn_blocking(move || {
             catalog::choices(
                 &cwd,
                 context.claude_session_id.as_deref(),
                 &live,
                 home.as_deref(),
+                &others,
                 &partial,
                 deadline - std::time::Duration::from_millis(200),
             )
