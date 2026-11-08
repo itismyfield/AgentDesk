@@ -298,12 +298,17 @@ class FakeResponse:
     def __init__(self, status: int, payload: object):
         self.status = status
         self._body = json.dumps(payload).encode("utf-8")
+        self.closed = False
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
+        self.close()
         return False
+
+    def close(self):
+        self.closed = True
 
     def read(self) -> bytes:
         return self._body
@@ -3779,6 +3784,8 @@ class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
                     response = urllib.error.HTTPError(self.args.base_url, 503, "unavailable", {}, BrokenResponse(503, {})) if http_error else BrokenResponse(200, {})
                     with patch.object(driver.urllib.request, "urlopen", side_effect=response if http_error else None, return_value=response):
                         with self.assertRaises(type(error)): self.real_api(self.args.base_url, "/api/health/detail")
+                    response.close()
+                    self.assertTrue(response.fp.closed if http_error else response.closed)
         self.blocked.assert_not_called()
 
     def test_selected_prebody_exception_identity_and_legacy_bounds(self):

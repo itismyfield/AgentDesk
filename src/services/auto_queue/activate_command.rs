@@ -823,44 +823,18 @@ async fn ensure_activate_run_is_eligible(
     Ok(())
 }
 
-/// #2048 F4: serialize per-run activate so concurrent
-/// `POST /api/queue/activate` and `policy::activateRun` invocations cannot
-/// both observe the same `active_turn_count` snapshot and each create
-/// `(max_concurrent_threads - N)` dispatches, exceeding the cap. Lock is
-/// session-scoped, pinned to a dedicated connection so it survives the
-/// multi-step pool-based loop. A drop guard releases the lock on every
-/// early-return path.
+/// Serialize the pool-based activate loop; the guarded session also covers acquisition cancellation.
 async fn acquire_activate_run_lock(
     pool: &sqlx::PgPool,
     run_id: &str,
 ) -> Result<ActivateLockReleaseGuard, ActivateResponse> {
-    let activate_lock_conn_result = pool.acquire().await;
-    let mut activate_lock_conn = match activate_lock_conn_result {
-        Ok(conn) => conn,
-        Err(error) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("acquire activate lock connection for {run_id}: {error}")}),
-                ),
-            ));
-        }
-    };
-    if let Err(error) = sqlx::query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))")
-        .bind("aq_activate")
-        .bind(run_id)
-        .execute(&mut *activate_lock_conn)
+    let lock = crate::db::postgres::PooledAdvisoryLock::acquire(pool, "aq_activate", run_id)
         .await
-    {
-        return Err((
+        .map_err(|error| (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("acquire activate advisory lock for {run_id}: {error}")})),
-        ));
-    }
-    Ok(ActivateLockReleaseGuard::new(
-        activate_lock_conn,
-        run_id.to_string(),
-    ))
+        ))?;
+    Ok(ActivateLockReleaseGuard::new(lock, run_id.to_string()))
 }
 
 /// Promotes a generated/pending run to `active` (skipped when `active_only`)
@@ -1485,14 +1459,9 @@ fn activate_fallback_capacity_reached(
         || (active_group_count + new_dispatches_this_activate) >= max_concurrent
 }
 
-/// #2048 F4: RAII guard that releases the per-run `aq_activate` session
-/// advisory lock acquired at the start of `activate_with_deps_pg`. We can't
-/// hold the lock across the (many) early `return` sites without a closure
-/// rewrite, so a Drop impl keeps the unlock-on-exit invariant intact even
-/// for panic paths. Unlock runs on a detached tokio task; if the runtime is
-/// unavailable, Postgres releases session locks when the session ends.
+/// Release asynchronously on exit; an interrupted release still drops the guarded session.
 struct ActivateLockReleaseGuard {
-    conn: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
+    conn: Option<crate::db::postgres::PooledAdvisoryLock>,
     run_id: String,
 }
 
@@ -2706,7 +2675,7 @@ mod tests {
 }
 
 impl ActivateLockReleaseGuard {
-    fn new(conn: sqlx::pool::PoolConnection<sqlx::Postgres>, run_id: String) -> Self {
+    fn new(conn: crate::db::postgres::PooledAdvisoryLock, run_id: String) -> Self {
         Self {
             conn: Some(conn),
             run_id,
@@ -2716,19 +2685,13 @@ impl ActivateLockReleaseGuard {
 
 impl Drop for ActivateLockReleaseGuard {
     fn drop(&mut self) {
-        let Some(mut conn) = self.conn.take() else {
+        let Some(conn) = self.conn.take() else {
             return;
         };
         let run_id = std::mem::take(&mut self.run_id);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                if let Err(error) =
-                    sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
-                        .bind("aq_activate")
-                        .bind(&run_id)
-                        .execute(&mut *conn)
-                        .await
-                {
+                if let Err(error) = conn.unlock().await {
                     tracing::warn!(
                         run_id,
                         error = %error,

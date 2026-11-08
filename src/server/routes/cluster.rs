@@ -316,6 +316,31 @@ pub async fn release_resource_lock(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GatewayReleaseRequest {
+    pub provider: String,
+}
+
+/// Operator one-shot handback: this node's serving gateway yields to the waiting preferred node.
+pub async fn release_gateway(
+    Json(body): Json<GatewayReleaseRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let provider = crate::services::provider::ProviderKind::from_str(&body.provider)
+        .ok_or_else(|| AppError::bad_request("unknown provider"))?;
+    use crate::services::discord::GatewayReleaseError;
+    crate::services::discord::request_gateway_release(&provider)
+        .await
+        .map_err(|error| match error {
+            GatewayReleaseError::Refused(reason) => AppError::conflict(reason),
+            GatewayReleaseError::UnlockFailed(reason) => AppError::internal(format!(
+                "gateway fenced, but the advisory unlock failed: {reason}"
+            )),
+        })?;
+    Ok(Json(
+        json!({"released": true, "provider": provider.as_str()}),
+    ))
+}
+
 pub async fn reclaim_expired_resource_locks(
     State(state): State<AppState>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {

@@ -899,6 +899,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             has_direct_terminal_response,
             direct_terminal_response_refused_duplicate,
             watcher_resend_action,
+            o_tail_owned,
             mut watcher_direct_terminal_idle_committed,
             mut tui_direct_anchor_terminal_body_visible,
             mut tui_direct_anchor_or_lease_present_for_lifecycle,
@@ -945,7 +946,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             Some(&tmux_session_name),
         );
         let o_delegated_session = o_ownership.unwrap_or(true);
-        let o_delegated_terminal = o_ownership == Ok(true) && watcher_will_direct_send;
+        // A denied frame O proved posted for the row's own input ends that row the same way.
+        let o_delegated_terminal =
+            o_ownership == Ok(true) && (watcher_will_direct_send || o_tail_owned);
         let watcher_will_direct_send = watcher_will_direct_send && !o_delegated_session;
         // #3089/#3998: the unified controller owns one lease for eligible non-task
         // terminals. Task responses keep the watcher lease around card+reference send;
@@ -1378,7 +1381,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 continue 'watcher_loop;
             }
         }
-        if watcher_direct_fallback_requested && !watcher_direct_fallback_authorized {
+        if watcher_direct_fallback_requested && !watcher_direct_fallback_authorized && !o_tail_owned
+        {
             slot_guard.release();
             continue 'watcher_loop;
         }

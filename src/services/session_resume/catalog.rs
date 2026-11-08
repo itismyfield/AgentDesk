@@ -288,8 +288,10 @@ pub(super) fn resolve_cwd(
     }
     let mut cwds = current.map(scoped_worktrees).unwrap_or_default();
     if let Some(cwd) = requested {
+        cwds.retain(|path| path != Path::new(cwd));
         cwds.insert(0, PathBuf::from(cwd));
     }
+    let searched = cwds.len();
     let (mut matches, mut lookup_error) = scan_home(&cwds, id, home);
     // Other homes are consulted only when the active home provably holds no copy anywhere in scope.
     if matches.is_empty() && lookup_error.is_none() {
@@ -309,14 +311,31 @@ pub(super) fn resolve_cwd(
     {
         return Ok(cwd.to_string_lossy().into_owned());
     }
-    let hint = matches.first().map_or_else(
-        || lookup_error.unwrap_or_else(|| "No transcript was found in this channel's worktree lineage. Check the session id and Claude config home.".to_string()),
-        |(_, cwd, _)| format!("Transcript is available at cwd={}; retry with that cwd or omit cwd.", cwd.display()),
-    );
-    Err(ResumeRebindError::TargetTranscriptMissing(format!(
-        "Claude transcript unavailable for session_id={id}{}: {hint}",
-        requested.map_or(String::new(), |cwd| format!(" at cwd={cwd}")),
-    )))
+    let reason = match (matches.first(), lookup_error) {
+        // Nothing found anywhere: name the session and how many worktrees were searched.
+        (None, None) => {
+            let short: String = id.chars().take(8).collect();
+            format!(
+                "세션 {short} 트랜스크립트를 찾지 못함(검색 범위 {searched}개). session_id와 Claude config home을 확인하세요."
+            )
+        }
+        (found, error) => {
+            let hint = found.map_or_else(
+                || error.unwrap_or_default(),
+                |(_, cwd, _)| {
+                    format!(
+                        "Transcript is available at cwd={}; retry with that cwd or omit cwd.",
+                        cwd.display()
+                    )
+                },
+            );
+            format!(
+                "Claude transcript unavailable for session_id={id}{}: {hint}",
+                requested.map_or(String::new(), |cwd| format!(" at cwd={cwd}")),
+            )
+        }
+    };
+    Err(ResumeRebindError::TargetTranscriptMissing(reason))
 }
 
 /// Extra Claude homes declared in `providers.claude.transcript_homes`; relative entries are ignored.

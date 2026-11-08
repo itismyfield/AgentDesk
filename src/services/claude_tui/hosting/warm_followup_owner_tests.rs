@@ -204,11 +204,13 @@ fn clear_suffix() -> String {
 
 /// A live pane whose observer is built on session `before` while `after` may be adopted later.
 struct ClearedPane {
-    _dedupe: std::sync::MutexGuard<'static, ()>,
-    _rotations: std::sync::MutexGuard<'static, ()>,
-    // Declared first so its PATH is restored while `_root` still holds the environment lock.
+    // Restore PATH and root before releasing rotations, dedupe, and finally the shared env lock.
     tmux: crate::services::claude_tui::input::submission::tests::ScriptedTmux,
-    _root: crate::config::TestRuntimeRootGuard,
+    _root: crate::config::TestEnvVarGuard,
+    _rotations: std::sync::MutexGuard<'static, ()>,
+    _dedupe: std::sync::MutexGuard<'static, ()>,
+    _env_lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+    _runtime_root: tempfile::TempDir,
     dir: tempfile::TempDir,
     session: String,
     before: String,
@@ -218,18 +220,26 @@ struct ClearedPane {
 impl ClearedPane {
     fn new() -> Self {
         use crate::services::claude_tui::input::submission::tests::{ScriptedTmux, view};
+        // Env precedes dedupe and rotations, matching the Codex warm fixture to avoid a cycle.
+        let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         // Rotation tests clear the adopted-session map under their own lock; hold it so they wait.
         let rotations =
             crate::services::tui_prompt_dedupe::lock_claude_session_rotations_for_tests();
-        let root = crate::config::TestRuntimeRootGuard::new();
+        let runtime_root = tempfile::tempdir().unwrap();
+        let root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
         let pane = Self {
-            _dedupe: dedupe,
-            _rotations: rotations,
-            _root: root,
             tmux: ScriptedTmux::new(&view("", false)),
+            _root: root,
+            _rotations: rotations,
+            _dedupe: dedupe,
+            _env_lock: env_lock,
+            _runtime_root: runtime_root,
             dir: tempfile::tempdir().unwrap(),
             session: format!("AgentDesk-claude-clear-{}", uuid::Uuid::new_v4().simple()),
             before: uuid::Uuid::new_v4().to_string(),
@@ -517,7 +527,7 @@ fn a_receipt_in_the_observed_session_keeps_the_read_from_moving() {
     assert!(moved.get().is_none());
 }
 
-/// A cleared pane puts the scripted tmux's PATH back before its root guard unlocks the environment,
+/// A cleared pane restores the scripted tmux's PATH and root before releasing the shared env lock,
 /// so the next locked test never has its own tmux shim overwritten.
 #[test]
 fn a_cleared_pane_restores_path_before_the_root_unlocks() {

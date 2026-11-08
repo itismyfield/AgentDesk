@@ -711,6 +711,8 @@ else
   fail "classifier self-test is wired into scripts/ci-script-checks.sh"
 fi
 
+python3 -m unittest -v tests.test_infra_timeout_retry || fail "timeout retry and fixture cleanup regressions"
+
 if [ "$FAILED" -ne 0 ]; then
   echo "tests/test_infra_failure_classifier_5207.sh FAILED" >&2
   exit 1

@@ -250,6 +250,7 @@ src/
 │   │   ├── agent_sync.rs
 │   │   ├── pool_return.rs
 │   │   ├── pool_return_pg_tests.rs
+│   │   ├── pooled_advisory_lock_pg_tests.rs
 │   │   ├── shared_config.rs
 │   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
@@ -775,6 +776,7 @@ src/
 │   │   ├── activate_command.rs
 │   │   ├── activate_preflight.rs
 │   │   ├── activate_route.rs
+│   │   ├── advisory_return_pg_tests.rs
 │   │   ├── campaign_handoff.rs
 │   │   ├── campaign_handoff_tests.rs
 │   │   ├── cancel_run.rs
@@ -2158,6 +2160,7 @@ src/
 │   │   │   │   │   ├── owner_input_rollback_tests.rs
 │   │   │   │   │   ├── owner_input_stop_gate_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
+│   │   │   │   │   ├── owner_input_turn_mode_tests.rs
 │   │   │   │   │   ├── owner_provenance_tests.rs
 │   │   │   │   │   ├── owner_start_failure_tests.rs
 │   │   │   │   │   ├── producer_error_test_support.rs
@@ -2511,6 +2514,7 @@ src/
 │   │   │   ├── o_delegated_watcher_tests.rs
 │   │   │   ├── o_evidence_tests.rs
 │   │   │   ├── o_seed_install_tests.rs
+│   │   │   ├── o_tail_owned_close_tests.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
 │   │   │   ├── owed_range_baseline_tests.rs

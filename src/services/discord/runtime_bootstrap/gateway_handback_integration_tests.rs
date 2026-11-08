@@ -4,7 +4,7 @@ use super::gateway_lease::{
 };
 use super::*;
 use crate::db::postgres;
-use crate::test_support::wait::{WAIT_CAP, join_within};
+use crate::test_support::wait::{WAIT_CAP, await_within, join_within};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -337,12 +337,11 @@ async fn empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self
         );
     }
     assert!(fixture.breaker().suppressed());
-    let standby = tokio::time::timeout(
-        Duration::from_secs(2),
+    let standby = await_within(
         fixture.acquire(&running.shared, &mut fixture.breaker()),
+        WAIT_CAP,
     )
-    .await
-    .expect("active suppression skips the configured initial grace");
+    .await;
     assert!(matches!(standby, GatewayLeaseOutcome::Standby));
     let before = running.events.messages.load(Ordering::SeqCst);
     fixture.ticks(2).await;
@@ -554,6 +553,20 @@ impl Fixture {
         edit(&mut config);
         crate::config::save_to_path(&self._root.path().join("agentdesk.yaml"), &config).unwrap();
         crate::config_live_reload::install(config);
+    }
+
+    /// Persists a timed handback hold ending `secs` from now and returns the written bytes.
+    fn hold_handbacks_for(&self, secs: u64) -> Vec<u8> {
+        let until = chrono::Utc::now().timestamp() as u64 + secs;
+        let path = self
+            ._root
+            .path()
+            .join("gateway_handback_breaker/claude-7465737467617465.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let state = json!({"pending": null, "empty": [], "activations": [], "suppress_until": until, "manual": false});
+        let bytes = serde_json::to_vec(&state).unwrap();
+        std::fs::write(path, &bytes).unwrap();
+        bytes
     }
 
     async fn peer_takes_lease_within(&self, within: Duration) -> postgres::AdvisoryLockLease {
@@ -1227,4 +1240,160 @@ async fn restart_proof_child() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("no final provider published restart_persisted.{RESTART_PROOF_NONCE} within 30s");
+}
+
+#[tokio::test]
+async fn held_gateway_yields_on_the_first_keepalive_after_the_timed_hold_ends_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut running = fixture.backup().await;
+    let hold_secs = 25;
+    let hold_ends = Instant::now() + Duration::from_secs(hold_secs);
+    fixture.hold_handbacks_for(hold_secs);
+    fixture.advertise(true).await;
+    let pid = fixture.holder().await;
+    fixture.ticks(1).await;
+    assert!(Instant::now() < hold_ends, "the tick ran inside the hold");
+    assert_eq!(fixture.holder().await, pid, "the hold keeps the lease");
+    assert!(!running.backend.is_finished());
+    let (_, released) = fixture.unlock_observation().await;
+    assert!(
+        released >= hold_ends && released <= hold_ends + Duration::from_secs(17),
+        "yield lands on the first keepalive tick after the hold"
+    );
+    let home = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+        .await
+        .unwrap()
+        .expect("the waiting preferred node takes the handed-back lease");
+    running.ended().await;
+    home.unlock().await.unwrap();
+    drop(running);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn restarted_standby_gives_a_waiting_preferred_node_the_grace_during_a_hold_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture.advertise(true).await;
+    fixture.hold_handbacks_for(600);
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(fixture.pool.clone()));
+    let mut breaker = fixture.breaker();
+    let started = Instant::now();
+    let mut standby = Box::pin(fixture.acquire(&shared, &mut breaker));
+    let diagnostics = &shared.restart.gateway_lease_diagnostics;
+    await_within(
+        async {
+            tokio::select! {
+                _ = &mut standby => panic!("standby settled before giving the preferred node its grace"),
+                () = async {
+                    while diagnostics.projection().loop_state != "yield-wait" {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                } => {}
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
+    let home = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+        .await
+        .unwrap()
+        .expect("the restart left the lease free for the preferred node");
+    assert!(matches!(
+        await_within(standby, WAIT_CAP).await,
+        GatewayLeaseOutcome::Standby
+    ));
+    assert!(
+        started.elapsed() >= Duration::from_secs(fixture.config.cluster.gateway_yield_grace_secs)
+    );
+    home.unlock().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn operator_release_hands_a_held_gateway_to_the_waiting_preferred_node_once_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut running = fixture.backup().await;
+    let state = fixture.hold_handbacks_for(600);
+    fixture.advertise(false).await;
+    let refused = await_within(request_gateway_release(&ProviderKind::Claude), WAIT_CAP).await;
+    assert!(refused.is_err(), "nothing is waiting for the gateway");
+    fixture.ticks(1).await;
+    assert!(
+        !running.backend.is_finished(),
+        "a refused release keeps serving"
+    );
+    fixture.advertise(true).await;
+    await_within(request_gateway_release(&ProviderKind::Claude), WAIT_CAP)
+        .await
+        .expect("a held gateway is released to the waiting preferred node");
+    let home = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+        .await
+        .unwrap()
+        .expect("the preferred node takes the released lease");
+    running.ended().await;
+    let path = fixture
+        ._root
+        .path()
+        .join("gateway_handback_breaker/claude-7465737467617465.json");
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        state,
+        "release leaves the hold untouched"
+    );
+    assert!(
+        await_within(request_gateway_release(&ProviderKind::Claude), WAIT_CAP)
+            .await
+            .is_err(),
+        "the fenced holder no longer serves the gateway"
+    );
+    home.unlock().await.unwrap();
+    drop(running);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn operator_release_reports_a_failed_unlock_and_still_fences_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut running = fixture.backup().await;
+    fixture.hold_handbacks_for(600);
+    fixture.advertise(true).await;
+    // Right after a keepalive, so the next tick cannot see the dead session before the release does.
+    fixture.ticks(1).await;
+    let pid = fixture.holder().await.unwrap();
+    sqlx::query("SELECT pg_terminate_backend($1)")
+        .bind(pid)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    await_within(
+        async {
+            while sqlx::query_scalar::<_, i32>("SELECT pid FROM pg_stat_activity WHERE pid=$1")
+                .bind(pid)
+                .fetch_optional(&fixture.pool)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
+    let answer = await_within(request_gateway_release(&ProviderKind::Claude), WAIT_CAP).await;
+    assert!(
+        matches!(answer, Err(GatewayReleaseError::UnlockFailed(_))),
+        "a failed unlock is reported, not a clean release: {answer:?}"
+    );
+    running.ended().await;
+    drop(running);
+    fixture.close().await;
 }
