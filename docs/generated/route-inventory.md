@@ -134,7 +134,7 @@
 | `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:388` | `src/server/routes/domains/access.rs:15` |
 | `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:393` | `src/server/routes/domains/runtime.rs:21` |
 | `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:37` | `src/server/routes/domains/ops.rs:267` |
-| `POST` | `/api/herdr/terminate` | `super::super::herdr_terminate::terminate` | `src/server/routes/herdr_terminate.rs:37` | `src/server/routes/domains/runtime.rs:162` |
+| `POST` | `/api/herdr/terminate` | `super::super::herdr_terminate::terminate` | `src/server/routes/herdr_terminate.rs:40` | `src/server/routes/domains/runtime.rs:162` |
 | `GET` | `/api/home/kpi-trends` | `home_metrics::home_kpi_trends` | `src/server/routes/home_metrics.rs:33` | `src/server/routes/domains/admin.rs:89` |
 | `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:36` | `src/server/routes/domains/runtime.rs:146` |
 | `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:72` | `src/server/routes/domains/runtime.rs:148` |
