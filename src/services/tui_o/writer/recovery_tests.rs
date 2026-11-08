@@ -996,3 +996,6 @@ async fn input_notice_upgrade_preserves_body_v2_through_v6_and_old_prepared_with
         );
     }
 }
+
+#[path = "reader_owner_tests.rs"]
+mod reader_owner_tests;

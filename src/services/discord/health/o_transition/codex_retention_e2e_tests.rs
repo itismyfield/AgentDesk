@@ -381,7 +381,9 @@ fn codex_twenty_readers_survive_watcher_and_pane_census_skips() {
                     ]));
                 }
             ).await;
-            assert_eq!(reading, Some(20), "component={component}");
+            // Health counts only readers that may still be written: the 19 replaced, fully read
+            // sources are left out of the count while all 20 cursors below stay unretired.
+            assert_eq!(reading, Some(1), "component={component}");
             assert_eq!(cursors.len(), 20);
             assert!(cursors.iter().all(|cursor| !cursor.retired && cursor.transition_cleanup.is_none()), "component={component}");
         });
