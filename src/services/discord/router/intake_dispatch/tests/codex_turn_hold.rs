@@ -70,7 +70,11 @@ fn legacy_turn_running() {
         None,
         0,
     );
-    inflight::save_inflight_state(&row).unwrap();
+    let root = inflight::inflight_runtime_root().unwrap();
+    let path = inflight::inflight_state_path(&root, &ProviderKind::Codex, CHANNEL);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let _lock = inflight::lock_inflight_state_path(&path).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&row).unwrap()).unwrap();
 }
 
 fn codex_message(message_id: u64) -> IntakeSubmission {
