@@ -297,6 +297,7 @@ async fn idle_kill_route_reproves_codex_rollout_by_stored_session_id_pg() {
 
     // (rollout session ids on disk, expected kill, expected missing evidence, matches)
     let cases: [(&[&str], bool, Option<&str>, u64); 3] = [
+        (&["sess-own", "other-session"], true, None, 0),
         (&["other-session"], false, Some("rollout_for_session_id"), 0),
         (
             &["sess-own", "sess-own"],
@@ -304,7 +305,6 @@ async fn idle_kill_route_reproves_codex_rollout_by_stored_session_id_pg() {
             Some("unique_rollout_for_session_id"),
             2,
         ),
-        (&["sess-own", "other-session"], true, None, 0),
     ];
     for (ids, expect_killed, missing, matching) in cases {
         let codex_home = tempfile::TempDir::new().expect("codex home");
