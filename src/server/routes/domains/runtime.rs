@@ -28,6 +28,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(health_api::rebind_inflight_handler),
             )
             .route("/cluster/nodes", get(cluster::list_nodes))
+            .route("/cluster/gateway/release", post(cluster::release_gateway))
             .route(
                 "/cluster/machine-resources/history",
                 get(cluster::machine_resource_history),

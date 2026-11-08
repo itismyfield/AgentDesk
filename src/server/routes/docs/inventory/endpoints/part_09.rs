@@ -255,5 +255,21 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("limit", query_param("integer", false, "Page size (default 20, max 100)")),
             ("before", query_param("string", false, "Cursor: createdAt returned by a prior page")),
         ]),
+        ep(
+            "POST",
+            "/api/cluster/gateway/release",
+            "cluster",
+            "Operator one-shot handback on the node serving the Discord gateway: it releases the provider's lease and self-fences when the preferred node is waiting, even while handbacks are suppressed. Breaker state is unchanged; 409 when this node is not a non-preferred holder or the preferred node is not waiting; 500 when it self-fenced but the advisory unlock reported an error.",
+        )
+        .with_params([("provider", body_param("string", true, "Provider runtime name, e.g. claude or codex."))])
+        .with_example(
+            json!({"body": {"provider": "claude"}}),
+            json!({"released": true, "provider": "claude"}),
+        )
+        .with_error_example(
+            409,
+            json!({"body": {"provider": "claude"}}),
+            json!({"error": "this node does not serve the claude gateway"}),
+        ),
     ]
 }

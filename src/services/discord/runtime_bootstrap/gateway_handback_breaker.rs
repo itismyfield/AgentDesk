@@ -126,19 +126,26 @@ impl GatewayHandbackBreaker {
         true
     }
 
+    /// Both holds are degraded: a timed (auto) hold also keeps the gateway from the preferred node.
     fn publish_health(&self, state: &State) {
         if let Some(health) = &self.health {
-            *health.write().unwrap_or_else(|e| e.into_inner()) = state.manual.then(|| {
-                (
-                    std::time::Instant::now(),
-                    format!(
-                        "provider:{}:gateway_handback_breaker:manual:empty={}:activations={}",
-                        self.provider,
-                        state.empty.len(),
-                        state.activations.len()
-                    ),
-                )
-            });
+            let provider = &self.provider;
+            let reason = if state.manual {
+                Some(format!(
+                    "provider:{provider}:gateway_handback_breaker:manual:empty={}:activations={}",
+                    state.empty.len(),
+                    state.activations.len()
+                ))
+            } else if (self.clock)() < state.suppress_until {
+                Some(format!(
+                    "provider:{provider}:gateway_handback_breaker:auto:until={}",
+                    state.suppress_until
+                ))
+            } else {
+                None
+            };
+            *health.write().unwrap_or_else(|e| e.into_inner()) =
+                reason.map(|reason| (std::time::Instant::now(), reason));
         }
     }
 
