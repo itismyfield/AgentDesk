@@ -493,6 +493,9 @@ src/
 │   │   ├── auth/
 │   │   │   ├── tailnet_peer.rs
 │   │   │   └── tailnet_peer_tests.rs
+│   │   ├── campaigns/
+│   │   │   └── tests/
+│   │   │       └── patch_tests.rs
 │   │   ├── dispatches/
 │   │   │   ├── crud.rs
 │   │   │   ├── discord_delivery.rs

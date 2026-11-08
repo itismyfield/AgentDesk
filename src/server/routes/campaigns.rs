@@ -51,6 +51,13 @@ pub struct ReplaceCampaign {
     pub campaign: CampaignInput,
 }
 
+#[derive(Deserialize)]
+pub struct PatchCampaignNode {
+    pub expected_revision: i64,
+    #[serde(flatten)]
+    pub fields: serde_json::Map<String, Value>,
+}
+
 #[derive(Default, Deserialize)]
 pub struct ListQuery {
     pub limit: Option<u32>,
@@ -210,11 +217,60 @@ pub async fn replace(
             "summary view documents cannot be saved; GET /api/campaigns/{id} first",
         ));
     }
-    let pool = pool(&state)?;
-    let campaign = campaigns::replace(pool, &id, body.expected_revision, body.campaign)
+    replace_with_handoff(&state, &id, body.expected_revision, body.campaign).await
+}
+
+pub async fn patch_node(
+    State(state): State<AppState>,
+    Path((id, node_id)): Path<(String, String)>,
+    Json(body): Json<PatchCampaignNode>,
+) -> AppResult<Json<Value>> {
+    let mut campaign = campaigns::get(pool(&state)?, &id).await.map_err(error)?;
+    let node = campaign
+        .nodes
+        .iter_mut()
+        .find(|node| node.input.id == node_id)
+        .ok_or_else(|| AppError::not_found("campaign node not found"))?;
+    let Value::Object(mut merged) = json!(&node.input) else {
+        return Err(AppError::internal("invalid stored campaign node"));
+    };
+    for (field, value) in body.fields {
+        if field == "id" || !merged.contains_key(&field) {
+            return Err(AppError::bad_request(format!(
+                "unknown or read-only node field: {field}"
+            )));
+        }
+        // Missing fields keep stored values; explicit null uses the node type's empty default.
+        if value.is_null() {
+            merged.remove(&field);
+        } else {
+            merged.insert(field, value);
+        }
+    }
+    node.input = serde_json::from_value(Value::Object(merged))
+        .map_err(|error| AppError::bad_request(format!("invalid node patch: {error}")))?;
+    let input = CampaignInput {
+        title: campaign.title,
+        description: campaign.description,
+        status: campaign.status,
+        round: campaign.round,
+        auto_queue: Some(campaign.auto_queue),
+        nodes: campaign.nodes.into_iter().map(|node| node.input).collect(),
+    };
+    replace_with_handoff(&state, &id, body.expected_revision, input).await
+}
+
+async fn replace_with_handoff(
+    state: &AppState,
+    id: &str,
+    expected_revision: i64,
+    input: CampaignInput,
+) -> AppResult<Json<Value>> {
+    let pool = pool(state)?;
+    let campaign = campaigns::replace(pool, id, expected_revision, input)
         .await
         .map_err(error)?;
-    Ok(Json(saved_with_handoff(&state, pool, campaign).await))
+    Ok(Json(saved_with_handoff(state, pool, campaign).await))
 }
 
 /// A saved write already succeeded, so a failed handoff is reported beside it, not as an error.
@@ -239,6 +295,8 @@ async fn saved_with_handoff(state: &AppState, pool: &sqlx::PgPool, campaign: Cam
 
 #[cfg(test)]
 mod tests {
+    mod patch_tests;
+
     use super::*;
     use axum::{
         Router,

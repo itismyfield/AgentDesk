@@ -29,6 +29,7 @@ All routes are under `/api` and use the same protected admin middleware as
 | POST | `/campaigns` | HTTP 201 `{campaign}`; optional client ID, otherwise UUID; existing ID returns 409 |
 | GET | `/campaigns/{id}` | `{campaign, live, issue_drift}`; missing ID returns 404 |
 | PUT | `/campaigns/{id}` | `{campaign}`; requires `expected_revision`, replaces complete aggregate |
+| PATCH | `/campaigns/{id}/nodes/{node_id}` | `{campaign}`; requires `expected_revision`, updates only supplied fields of an existing node |
 | GET | `/campaigns/{id}/history` | `{revisions: Campaign[]}`; the retained newest 10 revisions, descending; older ones are deleted, not archived |
 
 `live` is the execution projection the ledger itself does not hold. For each node
@@ -103,6 +104,34 @@ Duplicate node IDs, duplicate/missing dependencies, self edges and cycles return
 400 before writes. A completed campaign must contain nodes, all completed or
 skipped. The API validates structure, not the truth of a claimed test result;
 callers must verify their evidence before marking work complete.
+
+## Updating one node
+
+Send `expected_revision` and the node fields to change to
+`PATCH /api/campaigns/{id}/nodes/{node_id}`. The server loads the full canonical
+campaign before merging, so a revision read from a summary list is sufficient:
+omitted fields retain their stored values, including details and evidence.
+Other nodes and campaign fields remain unchanged. Node `id`, timestamps,
+`auto_closed_from` and `issue_drift` are read-only; unknown fields return 400.
+The `nodes_partial` marker belongs to whole-document PUT, not the node PATCH body.
+
+Arrays replace the entire field. Explicit `null` clears optional scalar fields
+to null, array fields to `[]`, and `details` to an empty string. Required node
+`title`, `status`, `stage` and `round` cannot be cleared; null returns 400.
+Omitting `expected_revision` or supplying it with the wrong JSON type returns 422.
+
+PATCH uses the same full DAG validation, revision CAS and history transaction
+as PUT: a success increments the campaign revision once and stores one complete
+snapshot, subject to the newest-10 retention policy. Missing campaign/node returns
+404; stale revision returns 409; missing/duplicate dependencies, cycles and invalid
+node values return 400 without saving. Concurrent PUT and PATCH with the same
+revision cannot both succeed. On 409, reload and reconcile the intended fields.
+Active campaigns with `auto_queue: true` run the same post-save handoff and return
+`handoff` or `handoff_error` alongside the saved campaign.
+
+```sh
+curl -X PATCH -H "Authorization: Bearer $ADK_AUTH_TOKEN" -H 'Content-Type: application/json' "$ADK_URL/api/campaigns/release-a/nodes/review" -d '{"expected_revision":1,"status":"running"}'
+```
 
 ## Auto-queue handoff
 
