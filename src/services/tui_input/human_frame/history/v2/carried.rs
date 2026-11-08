@@ -216,8 +216,8 @@ fn checked_source(
     Some(source.clone())
 }
 
-#[path = "carried_tests.rs"]
 #[cfg(test)]
+#[path = "carried_tests.rs"]
 mod tests;
 
 fn source_fingerprint(path: &Path) -> Option<crate::services::tui_o::shadow::capture::Fingerprint> {
