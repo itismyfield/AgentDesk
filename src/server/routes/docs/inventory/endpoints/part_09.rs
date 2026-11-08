@@ -259,7 +259,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/cluster/gateway/release",
             "cluster",
-            "Operator one-shot handback on the node serving the Discord gateway: it releases the provider's lease and self-fences when the preferred node is waiting, even while handbacks are suppressed. Breaker state is unchanged; 409 when this node is not a non-preferred holder or the preferred node is not waiting.",
+            "Operator one-shot handback on the node serving the Discord gateway: it releases the provider's lease and self-fences when the preferred node is waiting, even while handbacks are suppressed. Breaker state is unchanged; 409 when this node is not a non-preferred holder or the preferred node is not waiting; 500 when it self-fenced but the advisory unlock reported an error.",
         )
         .with_params([("provider", body_param("string", true, "Provider runtime name, e.g. claude or codex."))])
         .with_example(
