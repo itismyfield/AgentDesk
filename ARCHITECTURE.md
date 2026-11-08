@@ -250,6 +250,7 @@ src/
 │   │   ├── agent_sync.rs
 │   │   ├── pool_return.rs
 │   │   ├── pool_return_pg_tests.rs
+│   │   ├── pooled_advisory_lock_pg_tests.rs
 │   │   ├── shared_config.rs
 │   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
@@ -775,6 +776,7 @@ src/
 │   │   ├── activate_command.rs
 │   │   ├── activate_preflight.rs
 │   │   ├── activate_route.rs
+│   │   ├── advisory_return_pg_tests.rs
 │   │   ├── campaign_handoff.rs
 │   │   ├── campaign_handoff_tests.rs
 │   │   ├── cancel_run.rs

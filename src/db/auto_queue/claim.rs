@@ -302,39 +302,20 @@ pub async fn allocate_slot_for_group_agent_pg(
             format!("prepare postgres slot rows for run {run_id} agent {agent_id}: {error}")
         })?;
 
-    // #2048 F3: serialize the whole allocation per-agent against concurrent
-    // calls. The compare-and-set pattern across "existing → reusable → free"
-    // probe + UPDATE + busy-recheck is racy — two calls for the same agent
-    // could both observe the same slot, claim it, and bind the same
-    // `slot_index` on different entries before either's post-claim busy
-    // probe fires. An agent-scoped session advisory lock pinned to a
-    // dedicated connection orders the probe+claim without changing
-    // wire-level UPDATE semantics for any single step.
-    let mut conn = pool.acquire().await.map_err(|error| {
-        format!("acquire slot allocation connection for agent {agent_id}: {error}")
-    })?;
-    sqlx::query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))")
-        .bind("aq_slot_alloc")
-        .bind(agent_id)
-        .execute(&mut *conn)
+    // Serialize the pool-based allocation steps; cancellation must end the lock's session.
+    let lock = crate::db::postgres::PooledAdvisoryLock::acquire(pool, "aq_slot_alloc", agent_id)
         .await
         .map_err(|error| {
             format!("acquire slot allocation advisory lock for agent {agent_id}: {error}")
         })?;
     let result = allocate_slot_for_group_agent_pg_inner(pool, run_id, thread_group, agent_id).await;
-    if let Err(unlock_error) = sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
-        .bind("aq_slot_alloc")
-        .bind(agent_id)
-        .execute(&mut *conn)
-        .await
-    {
+    if let Err(unlock_error) = lock.unlock().await {
         tracing::warn!(
             agent_id,
             error = %unlock_error,
             "[auto-queue] failed to release slot allocation advisory lock"
         );
     }
-    drop(conn);
     result
 }
 
