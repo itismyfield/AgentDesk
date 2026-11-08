@@ -461,6 +461,7 @@ async fn backend_exit_removes_home_waiter_until_live_home_takes_handback_pg() {
         TOKEN,
         &ProviderKind::Claude,
         &mut fixture.breaker(),
+        &Default::default(),
     )
     .await
     .unwrap();
@@ -598,6 +599,7 @@ async fn cancelled_deferred_restart_produces_zero_empty_handbacks_pg() {
             TOKEN,
             &ProviderKind::Claude,
             &mut fixture.breaker(),
+            &Default::default(),
         )
         .await
         .unwrap()
@@ -869,9 +871,15 @@ async fn handback_health_omits_disabled_failed_and_stale_standby_observations_pg
         .unwrap();
     disconnected.close().await;
     assert!(
-        try_acquire_observing_handback(&disconnected, TOKEN, &ProviderKind::Claude, &mut breaker)
-            .await
-            .is_err()
+        try_acquire_observing_handback(
+            &disconnected,
+            TOKEN,
+            &ProviderKind::Claude,
+            &mut breaker,
+            &Default::default()
+        )
+        .await
+        .is_err()
     );
     assert!(
         handback_health(&registry).await.is_empty(),

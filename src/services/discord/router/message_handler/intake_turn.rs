@@ -270,7 +270,7 @@ pub(super) async fn handle_text_message(
                 early_stale_session_id,
             )
             .await;
-            return Ok(IntakeExecution::Executed);
+            return pre_admission_control::handled_locally(owner).await;
         }
         // #5660 [R1]: ordinary inputs own their session state before later awaits.
         let session_info = {
@@ -934,7 +934,7 @@ pub(super) async fn handle_text_message(
             )
             .await
         else {
-            return Ok(IntakeExecution::Executed);
+            return pre_admission_control::handled_locally(owner).await;
         };
         // #5660 [R2]: classification passed; the mailbox claim still follows below.
         let taken_cleared = if let Some(cleared) = session_was_cleared {

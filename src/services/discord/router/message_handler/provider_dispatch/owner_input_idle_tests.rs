@@ -4,12 +4,13 @@ use super::*;
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::tui_prompt_dedupe::{TuiRuntimeBinding, register_tmux_runtime_binding};
 use std::io::Write;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{RecvTimeoutError, Sender};
 
 use crate::services::claude_tui::input::submission::tests::wait;
 use crate::services::discord::router::message_handler::provider_dispatch::{
     CLAUDE_LEGACY_PROBE, ClaudeLegacyProbe,
 };
+use crate::test_support::wait::{WAIT_CAP, join_within};
 
 const ASSISTANT: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"answer {n}"}]}}"#;
 
@@ -71,25 +72,24 @@ impl Answers {
     /// Raises the answering thread's panic here once that thread has ended.
     fn check(&mut self) {
         if self.thread.as_ref().is_some_and(|t| t.is_finished()) {
-            self.join();
+            self.finish();
         }
     }
 
-    fn join(&mut self) {
+    fn finish(&mut self) {
         self.reads.lock().unwrap().finished = true;
         self.done.take();
         let exited = self.exited.recv_timeout(Duration::from_secs(20));
-        let stuck = exited == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+        let stuck = exited == Err(RecvTimeoutError::Timeout);
         assert!(!stuck, "the answering thread never ended");
-        if let Some(Err(panic)) = self.thread.take().map(|t| t.join()) {
-            std::panic::resume_unwind(panic);
+        if let Some(thread) = self.thread.take() {
+            join_within(thread, WAIT_CAP);
         }
     }
 }
 
 /// Each Enter the pane records gets its AI turn: an answer, then the turn's end.
 fn answers(rig: &Rig) -> Answers {
-    use std::sync::mpsc::RecvTimeoutError;
     let (renderer, transcript) = (rig.renderer.clone(), rig.transcript());
     let reads = Arc::new(std::sync::Mutex::new(Reads::default()));
     let (done, finished) = std::sync::mpsc::channel::<()>();
@@ -161,12 +161,13 @@ fn write_answer(transcript: &Path, n: &str) {
     writeln!(file, "{answer}\n{}", IDLE.trim_end()).unwrap();
 }
 
-/// An idle turn read on a scoped thread under a token the test holds. A turn the test did not
-/// join is cancelled and awaited for a bounded time; one that still runs ends the test process.
+/// An idle turn read on a scoped thread under the test's token, handing back its result or panic.
+/// An unfinished turn is cancelled; a reader that does not end in time ends the test process.
 struct ScopedTurn<'scope, T> {
-    reader: Option<std::thread::ScopedJoinHandle<'scope, T>>,
+    reader: Option<std::thread::ScopedJoinHandle<'scope, ()>>,
     cancel: Arc<CancelToken>,
-    ended: std::sync::mpsc::Receiver<()>,
+    ended: std::sync::mpsc::Receiver<std::thread::Result<T>>,
+    result: Option<std::thread::Result<T>>,
     renderer: std::path::PathBuf,
     enter: usize,
 }
@@ -183,14 +184,14 @@ impl<'scope, T: Send + 'scope> ScopedTurn<'scope, T> {
         let enter = enters(&renderer) + 1;
         let token = cancel.clone();
         let reader = scope.spawn(move || {
-            let result = turn(token);
-            let _ = done.send(());
-            result
+            let turn = std::panic::AssertUnwindSafe(|| turn(token));
+            let _ = done.send(std::panic::catch_unwind(turn));
         });
         Self {
             reader: Some(reader),
             cancel,
             ended,
+            result: None,
             renderer,
             enter,
         }
@@ -209,7 +210,6 @@ impl<'scope, T: Send + 'scope> ScopedTurn<'scope, T> {
     /// Answers `n` once the pane recorded this turn's Enter and the user row of its last paste. A
     /// turn that ended first gets no answer: its panic, or this one, fails the test.
     fn answer(&mut self, n: &str) {
-        use std::sync::mpsc::RecvTimeoutError;
         let transcript = self.renderer.join("transcript");
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while !self.recorded(&transcript) {
@@ -218,9 +218,8 @@ impl<'scope, T: Send + 'scope> ScopedTurn<'scope, T> {
                 "Enter {}'s user row never came",
                 self.enter
             );
-            let waited = self.ended.recv_timeout(Duration::from_millis(20));
-            if waited != Err(RecvTimeoutError::Timeout) && !self.recorded(&transcript) {
-                if let Some(Err(panic)) = self.reader.take().map(|reader| reader.join()) {
+            if self.ended_within(Duration::from_millis(20)) && !self.recorded(&transcript) {
+                if let Err(panic) = self.collect(WAIT_CAP) {
                     std::panic::resume_unwind(panic);
                 }
                 panic!("the turn ended before Enter {}'s user row", self.enter);
@@ -229,15 +228,41 @@ impl<'scope, T: Send + 'scope> ScopedTurn<'scope, T> {
         write_answer(&transcript, n);
     }
 
-    fn join(mut self) -> T {
-        let waited = self.ended.recv_timeout(Duration::from_secs(60));
-        let timed_out = waited == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
-        assert!(!timed_out, "the answered turn's read never ended");
-        match self.reader.take().map(|reader| reader.join()) {
-            Some(Ok(result)) => result,
-            Some(Err(panic)) => std::panic::resume_unwind(panic),
-            None => unreachable!("a turn is joined once"),
+    fn finish(mut self) -> T {
+        let ended = self.ended_within(Duration::from_secs(60));
+        assert!(ended, "the answered turn's read never ended");
+        match self.collect(WAIT_CAP) {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
         }
+    }
+}
+
+impl<T> ScopedTurn<'_, T> {
+    /// Whether the reader handed back its result within `wait`; the result is kept for `collect`.
+    fn ended_within(&mut self, wait: Duration) -> bool {
+        if self.result.is_none() {
+            match self.ended.recv_timeout(wait) {
+                Ok(result) => self.result = Some(result),
+                Err(RecvTimeoutError::Timeout) => return false,
+                Err(RecvTimeoutError::Disconnected) => {}
+            }
+        }
+        true
+    }
+
+    /// The reader's result once its body has returned, which drops its sender. The scope joins the
+    /// reader, so one still running `cap` after it ended ends the test process.
+    fn collect(&mut self, cap: Duration) -> std::thread::Result<T> {
+        self.reader = None;
+        if matches!(self.ended.recv_timeout(cap), Err(RecvTimeoutError::Timeout)) {
+            end_process(&format!(
+                "an idle turn's reader still ran {cap:?} after its turn ended"
+            ));
+        }
+        self.result
+            .take()
+            .unwrap_or_else(|| Err(Box::new("an idle turn's reader ended without a result")))
     }
 }
 
@@ -247,18 +272,23 @@ impl<T> Drop for ScopedTurn<'_, T> {
             self.cancel
                 .cancelled
                 .store(true, std::sync::atomic::Ordering::Release);
-            let waited = self.ended.recv_timeout(Duration::from_secs(20));
-            if waited == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-                // A scoped reader can be neither detached nor killed, and the scope would join it
-                // forever; ending the process fails the test instead. Output capture is bypassed.
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "an idle turn's reader ignored its cancel for 20s; ending the test process"
-                );
-                std::process::exit(101);
+            if !self.ended_within(Duration::from_secs(20)) {
+                end_process("an idle turn's reader ignored its cancel for 20s");
+            }
+            if let Err(panic) = self.collect(WAIT_CAP)
+                && !std::thread::panicking()
+            {
+                std::panic::resume_unwind(panic);
             }
         }
     }
+}
+
+/// Fails the test from a scoped reader that will not end: it can be neither detached nor killed,
+/// and the scope would join it forever. Output capture is bypassed.
+fn end_process(why: &str) -> ! {
+    let _ = writeln!(std::io::stderr(), "{why}; ending the test process");
+    std::process::exit(101);
 }
 
 /// The pane's runtime binding naming `session`, as the relay rehydrates it after each turn ends.
@@ -522,7 +552,7 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
         let before_end = rig.events();
         let kept = rig.snapshot();
         first.answer("A");
-        let (result, _) = first.join();
+        let (result, _) = first.finish();
         assert_eq!(result, Ok(()), "A's observer completes once");
         println!(
             "BUSY_ARRIVAL merge={merge} B_settled={busy_settled:?} handoffs={:?}",
@@ -569,7 +599,7 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
                 let _close = CloseOnUnwind(rig.transcript());
                 let settled = on_settled.recv_timeout(Duration::from_secs(20));
                 next.answer("B");
-                assert_eq!(next.join().0, Ok(()));
+                assert_eq!(next.finish().0, Ok(()));
                 assert!(settled.is_ok(), "B's idle submit settled once");
             });
             rig.runtime.block_on(rig.mailbox.finish_turn(
@@ -1051,7 +1081,7 @@ fn busy_hold_case(
                 });
                 let settled = settled_events.recv_timeout(Duration::from_secs(20));
                 started.answer("B");
-                assert_eq!(started.join().0, Ok(()));
+                assert_eq!(started.finish().0, Ok(()));
                 assert!(settled.is_ok(), "B's boundary input settled");
             });
             assert_eq!(rig.events().iter().filter(|e| *e == "paste").count(), 1);
@@ -1306,7 +1336,7 @@ fn an_idle_pane_takes_each_queued_front_once_through_its_own_observer() {
             break;
         }
     }
-    answering.join();
+    answering.finish();
     assert_eq!(handed, [PROMPT, "second question"], "in order, each once");
     let events = rig.events();
     let count = |key: &str| events.iter().filter(|e| *e == key).count();
@@ -2323,7 +2353,7 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
             break;
         }
     }
-    answering.join();
+    answering.finish();
     assert_eq!(handed, [PROMPT, "second question"], "in order, each once");
     let events = rig.events();
     let count = |key: &str| events.iter().filter(|e| *e == key).count();

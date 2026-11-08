@@ -2145,6 +2145,7 @@ src/
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
+│   │   │   │   │   ├── owner_input_local_control_tests.rs
 │   │   │   │   │   ├── owner_input_native_read_tests.rs
 │   │   │   │   │   ├── owner_input_not_sent_tests.rs
 │   │   │   │   │   ├── owner_input_owned_stop_format_tests.rs
@@ -3128,6 +3129,8 @@ src/
 │   │   ├── footer_retirement_boot_tests.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
+│   │   ├── gateway_lease_diagnostics.rs
+│   │   ├── gateway_lease_diagnostics_tests.rs
 │   │   ├── gateway_queue_owner.rs
 │   │   ├── health.rs
 │   │   ├── herdr_terminate.rs
