@@ -2264,6 +2264,12 @@ pub(crate) mod p11 {
             self.os.fail_next_read();
         }
 
+        /// The recorded pane's provider now names another execution's launch context.
+        pub(crate) fn run_other_execution(&self) {
+            let other = context("fedcba9876543210fedcba9876543210");
+            self.os.swap(Arc::new(FakeOs::launched(env_naming(&other))));
+        }
+
         /// A restarted server restored the pane as shell `FRESH` alone.
         pub(crate) fn restore_shell(&self) {
             let os = FakeOs::launched(Vec::new()).starting(FRESH, &[start(2_000)]);

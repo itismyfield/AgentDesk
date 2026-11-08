@@ -380,9 +380,8 @@ impl HerdrTarget {
         })))
     }
 
-    /// A terminate of this target admits an absent `.host_kind` marker; the close still needs the
-    /// pane's root shell, provider and binding nonce to be the recorded ones. A shared target is
-    /// returned unchanged.
+    /// A terminate admits an absent `.host_kind` marker; the close still needs the recorded root
+    /// shell, provider and binding nonce. A shared target is returned unchanged.
     pub(crate) fn verified_by_pane(self) -> Self {
         match Arc::try_unwrap(self.0) {
             Ok(gate) => Self(Arc::new(PaneGate {
