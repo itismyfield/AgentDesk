@@ -267,12 +267,10 @@ async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
     pg_db.drop().await;
 }
 
-/// A Codex session whose runtime binding and rollout marker are gone (restart,
-/// binding expiry) is re-proven only by its stored provider session id: another
-/// session's rollout or several rollouts for the id keep the session with a
-/// diagnostic, and only a unique exact match lets idle cleanup kill it.
-#[tokio::test(flavor = "current_thread")]
-async fn idle_kill_route_reproves_codex_rollout_by_stored_session_id_pg() {
+/// With binding and marker gone, only a unique rollout matching the stored provider session id
+/// lets idle cleanup kill; another session's rollout or several matches keep it with a diagnostic.
+#[test]
+fn idle_kill_route_reproves_codex_rollout_by_stored_session_id_pg() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (tmux_probe, _path_guard) = install_tmux_probe(concat!(
         "[ \"$1\" = -u ] && shift\n",
@@ -288,12 +286,21 @@ async fn idle_kill_route_reproves_codex_rollout_by_stored_session_id_pg() {
         "AGENTDESK_ROOT_DIR",
         runtime_root.path(),
     );
+    // The rollout index is process-global and its test lock is a std mutex, held outside the async body.
     let _index = crate::services::codex_tui::rollout_index::lock_cache_for_tests();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(reprove_codex_rollout_cases(tmux_probe.path()));
+}
+
+async fn reprove_codex_rollout_cases(tmux_probe: &std::path::Path) {
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
     let state = test_state(pool.clone());
     let cwd = tempfile::TempDir::new().expect("codex cwd");
-    let killed_log = tmux_probe.path().join("killed");
+    let killed_log = tmux_probe.join("killed");
 
     // (rollout session ids on disk, expected kill, expected missing evidence, matches)
     let cases: [(&[&str], bool, Option<&str>, u64); 3] = [
@@ -338,7 +345,7 @@ async fn idle_kill_route_reproves_codex_rollout_by_stored_session_id_pg() {
         .execute(&pool)
         .await
         .unwrap();
-        std::fs::write(tmux_probe.path().join("alive"), "").unwrap();
+        std::fs::write(tmux_probe.join("alive"), "").unwrap();
 
         let (status, Json(body)) = super::kill_tmux_session(
             State(state.clone()),
