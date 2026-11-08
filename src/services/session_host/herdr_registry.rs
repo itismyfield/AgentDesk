@@ -297,6 +297,16 @@ impl HerdrRegistry {
         Ok(census)
     }
 
+    /// Reads cwd only on the endpoint named by this execution, never another endpoint's pane.
+    pub(crate) fn working_dir(&self, stored: &HostedExecution) -> Option<PathBuf> {
+        let entry = self.endpoints.iter().find(|entry| {
+            HerdrPaneView::new(&entry.endpoint, Arc::new(entry.transport.clone()), stored).is_some()
+        })?;
+        let pane = &stored.location.as_ref()?.pane_id;
+        let reference = HostSessionRef::herdr_pane(pane);
+        entry.host.current_working_dir(reference).ok().flatten()
+    }
+
     /// The one local endpoint's read-only host; none, or several, give no host.
     pub(crate) fn sole_host(&self) -> Option<&dyn InteractiveSessionHost> {
         match self.endpoints.as_slice() {

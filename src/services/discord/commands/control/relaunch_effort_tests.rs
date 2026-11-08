@@ -156,10 +156,11 @@ async fn effort_off_the_local_tui_is_refused_with_the_setting_kept_pg() {
         crate::config::session_hosts::force_for_test(Some(&local), &[(fx.channel.get(), &local)]);
     let said = fx.save_effort(EffortLevel::Max).await;
     assert!(
-        said.contains("Herdr 채널의 Claude TUI에는 /effort"),
+        said.contains("effort 적용 미확인") && said.contains("pane 실행 기록 미확인"),
         "{said}"
     );
     assert_eq!(fx.effort_state().await, untouched);
+    assert!(!called(&fx.tmux.take_calls(), "send-keys"));
     drop(herdr);
 
     let mut headless = crate::config::Config::default();

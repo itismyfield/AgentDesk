@@ -39,8 +39,7 @@ pub(crate) enum InputRefusal {
 }
 
 impl InputTarget {
-    /// Production entry, decided before any IO: no Herdr selector exists, so a
-    /// Claude TUI session is the legacy tmux session of that name.
+    /// A legacy tmux caller already confirmed the session's host.
     pub(crate) fn legacy_tmux(session_name: &str) -> Self {
         Self::Tmux(session_name.to_string())
     }
@@ -423,6 +422,8 @@ impl Plan<'_> {
             TuiInputAction::Enter => self.mutate(action, key(HostKey::Enter))?,
             TuiInputAction::Escape => self.mutate(action, key(HostKey::Escape))?,
             TuiInputAction::CtrlU => self.mutate(action, key(HostKey::CtrlU))?,
+            TuiInputAction::Left => self.mutate(action, key(HostKey::Left))?,
+            TuiInputAction::Right => self.mutate(action, key(HostKey::Right))?,
             TuiInputAction::Backspace(count) => {
                 let mut remaining = *count;
                 while remaining > 0 {

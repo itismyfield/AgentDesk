@@ -294,11 +294,6 @@ pub(in crate::services::discord) async fn update_channel_effort(
     level: &str,
 ) -> io::Result<bool> {
     shared.check_settings_owner(provider, channel_id).await?;
-    if claude_herdr_fast_unavailable(provider, channel_id) {
-        return Err(io::Error::other(
-            "Herdr 채널의 Claude TUI에는 /effort 설정이 적용되지 않습니다. 설정과 현재 세션을 유지했습니다.",
-        ));
-    }
     if !claude_local_tui_relaunch_applies(provider, channel_id) {
         return Err(io::Error::other(
             "/effort는 로컬 Claude TUI 채널에서만 저장할 수 있습니다.",
