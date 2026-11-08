@@ -903,6 +903,7 @@ jobs:
       - lint
       - scripts
       - scripts_guards
+      - scripts_census
       - scripts_contracts
       - dashboard
       - pg15_owner_proof
@@ -939,8 +940,8 @@ jobs:
               exit 1
             fi
           }
-          pin scripts/ci/nextest_required.py e053f5c127c059178cc8a47aa573b9c18997641d545a0d5718e47e2415468d70
-          pin scripts/check-ci-runner-hardening.sh 56e7c0f4dd4031c8ddff1a9384e2d8e35ac42ecf2bf12d780522a9033f05e4f3
+          pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
+          pin scripts/check-ci-runner-hardening.sh 9b7367b25a8eaef1c22814b68547904bfeb186d24d4af6ca00555eaa6ac5019e
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1280,6 +1281,45 @@ jobs:
           GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           TEST_LANE_BASELINE_REF: HEAD^1
           SCRIPT_CHECK_SHARD: guards
+          SCRIPT_CHECK_CHANGES_RESULT: ${{ needs.changes.result }}
+          SCRIPT_CHECK_CHANGED_FILES: ${{ needs.changes.outputs.script_check_files }}
+
+  scripts_census:
+    name: Script checks runner (census)
+    needs: changes
+    if: ${{ !github.event.pull_request.draft && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python for script checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install script-test Python deps
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck zsh
+
+      - name: Run script checks
+        shell: bash
+        run: ./scripts/ci-script-checks.sh
+        env:
+          BASH_ENV: /dev/null
+          PYTHON: python3
+          GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REPOSITORY: ${{ github.repository }}
+          GFP_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          GFP_CANDIDATE_SHA: ${{ github.sha }}
+          GFP_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TEST_LANE_BASELINE_REF: HEAD^1
+          SCRIPT_CHECK_SHARD: census
           SCRIPT_CHECK_CHANGES_RESULT: ${{ needs.changes.result }}
           SCRIPT_CHECK_CHANGED_FILES: ${{ needs.changes.outputs.script_check_files }}
 

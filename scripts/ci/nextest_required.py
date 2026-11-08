@@ -22,7 +22,7 @@ N_JOBS = ("rust_build", "base_compare", "rust_tests", "test_evidence")
 # A gate is the changes outputs that make a job expected to run; "!x" reads x == "false", () always runs.
 CONTEXTS = {
     "Lint": ((N_JOBS, ("rust_tests",)), (("lint",), ("rust_or_policy", "relay_contract"))),
-    "Script checks": ((N_JOBS, ("rust_tests",)), (("scripts", "scripts_guards", "scripts_contracts"), ())),
+    "Script checks": ((N_JOBS, ("rust_tests",)), (("scripts", "scripts_guards", "scripts_census", "scripts_contracts"), ())),
     "Fast check (ubuntu-latest)": ((N_JOBS, ("rust_tests",)), (("lint",), ("rust_or_policy", "relay_contract"))),
     "High-risk recovery": ((N_JOBS, ("rust_tests", "high_risk_recovery")),),
     "Dashboard (Node 22)": ((N_JOBS, ("rust_tests",)), (("dashboard",), ("dashboard",))),

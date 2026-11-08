@@ -21,7 +21,7 @@ N = ("rust_build", "base_compare", "rust_tests", "test_evidence")
 # context -> (N gate, {own job: gate}). A gate lists changes outputs that make the job expected; "!x" means x false.
 EXPECTED = {
     "Lint": (["rust_tests"], {"lint": ["rust_or_policy", "relay_contract"]}),
-    "Script checks": (["rust_tests"], {"scripts": [], "scripts_guards": [], "scripts_contracts": []}),
+    "Script checks": (["rust_tests"], {"scripts": [], "scripts_guards": [], "scripts_census": [], "scripts_contracts": []}),
     "Fast check (ubuntu-latest)": (["rust_tests"], {"lint": ["rust_or_policy", "relay_contract"]}),
     "High-risk recovery": (["rust_tests", "high_risk_recovery"], {}),
     "Dashboard (Node 22)": (["rust_tests"], {"dashboard": ["dashboard"]}),

@@ -35,6 +35,7 @@ JOB_NAMES = {
     "test_evidence": r"Rust tests evidence", "lint": r"Lint runner",
     "dashboard": r"Dashboard \(Node 22\) runner", "pg15_owner_proof": r"PostgreSQL 15 owner proof",
     "scripts": r"Script checks runner", "scripts_guards": r"Script checks runner \(guards\)",
+    "scripts_census": r"Script checks runner \(census\)",
     "scripts_contracts": r"Script checks runner \(contracts\)",
     "relay_authority_mutations": r"Relay authority mutations \(\d+\)",
     "check_fast_cross_os": r"Fast check \+ non-PG tests \(windows-latest\)",

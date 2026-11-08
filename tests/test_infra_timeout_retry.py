@@ -93,6 +93,10 @@ else:
     def test_observed_cancelled_guard_is_suspected_timeout_for_manual_retry(self):
         self.assert_manual_timeout()
 
+    def test_cancelled_census_uses_shared_timeout_and_never_retries(self):
+        self.job["name"] = "Script checks runner (census)"
+        self.assert_manual_timeout()
+
     def test_cancelled_run_reaches_the_timeout_classifier(self):
         self.attempt["conclusion"] = self.latest["conclusion"] = "cancelled"
         self.assert_manual_timeout()
@@ -269,10 +273,11 @@ except KeyboardInterrupt:
 
     def test_caller_timeout_matches_guard_job_timeout(self):
         retry = yaml.safe_load((ROOT / ".github/workflows/ci-pr-infra-retry.yml").read_text())
-        guard = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())["jobs"]["scripts_guards"]
+        jobs = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())["jobs"]
         step = next(step for step in retry["jobs"]["retry"]["steps"]
                     if step.get("run") == "./scripts/ci/infra-failure-rerun.sh")
-        self.assertEqual(int(step["env"]["GUARDS_TIMEOUT_MINUTES"]), guard["timeout-minutes"])
+        for job_id in ("scripts_guards", "scripts_census"):
+            self.assertEqual(int(step["env"]["GUARDS_TIMEOUT_MINUTES"]), jobs[job_id]["timeout-minutes"])
 
     def test_workflow_allows_only_failed_or_cancelled_initial_runs(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci-pr-infra-retry.yml").read_text())
