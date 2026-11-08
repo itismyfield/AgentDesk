@@ -1616,24 +1616,34 @@ mod tests {
         let key = "i6483-missing-transcript";
         sqlx::query("INSERT INTO sessions (session_key, provider, status, cwd, claude_session_id) VALUES ($1, 'claude', 'idle', $2, 'old')")
             .bind(key).bind(cwd.path().to_str().unwrap()).execute(&pool).await.unwrap();
-        let result = super::perform_resume_rebind(
-            &pool,
-            None,
-            key,
-            Some(ProviderKind::Claude),
-            None,
-            "i6483-no-runtime",
-            &ResumePreviousOptions {
-                session_id: Some(uuid::Uuid::new_v4().to_string()),
-                cwd: Some(cwd.path().to_string_lossy().into_owned()),
-            },
-        )
-        .await;
+        let home = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let result = catalog::TEST_HOME
+            .scope(
+                home.path().to_path_buf(),
+                super::perform_resume_rebind(
+                    &pool,
+                    None,
+                    key,
+                    Some(ProviderKind::Claude),
+                    None,
+                    "i6483-no-runtime",
+                    &ResumePreviousOptions {
+                        session_id: Some(id.clone()),
+                        cwd: Some(cwd.path().to_string_lossy().into_owned()),
+                    },
+                ),
+            )
+            .await;
         let (status, axum::Json(body)) = result
             .expect_err("an existing cwd without a transcript must fail")
             .into_response();
         assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(body["error"].as_str().unwrap().contains("transcript"));
+        let error = body["error"].as_str().unwrap();
+        assert!(
+            error.contains(&format!("세션 {} 트랜스크립트를 찾지 못함", &id[..8])),
+            "{error}"
+        );
         let binding: String =
             sqlx::query_scalar("SELECT claude_session_id FROM sessions WHERE session_key=$1")
                 .bind(key)
