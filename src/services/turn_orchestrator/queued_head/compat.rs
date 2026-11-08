@@ -8,9 +8,8 @@ pub(crate) enum SnapshotRead {
 }
 
 impl SnapshotRead {
-    /// Whether a V2 file still holds an input its owner must recover: queued, attempted, owed
-    /// retained or settled, or a bind other than a queued one, which a cleared queue leaves without
-    /// its item. An attempt bind closes with a retained input no owner owes.
+    /// Whether a V2 file holds an input its owner must recover: queued, attempted, owed retained or
+    /// settled, or a non-queued bind other than the attempt of a retained input no owner owes.
     pub(crate) fn v2_holds_input(&self) -> bool {
         use super::v2_types::BindAt;
         let Self::ReadOnlyV2(v2) = self else {
