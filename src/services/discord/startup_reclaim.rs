@@ -494,8 +494,6 @@ pub(super) fn spawn_startup_reclaim_sweep(
 
 #[cfg(test)]
 mod tests {
-    mod source_guard_tests;
-
     use super::*;
 
     #[test]
@@ -752,11 +750,6 @@ mod tests {
     }
 
     #[test]
-    fn orphan_placeholder_delete_is_terminal_cleanup_guarded() {
-        source_guard_tests::assert_orphan_delete_order();
-    }
-
-    #[test]
     fn configured_candidates_are_provider_scoped_and_deduplicated() {
         let bindings = vec![
             super::super::settings::RegisteredChannelBinding {
@@ -869,6 +862,121 @@ mod tests {
             ]);
             Some((200, page))
         })
+    }
+
+    /// Committed and retry-pending terminal placeholders are skipped without spending the
+    /// per-channel delete budget; the unprotected placeholder behind them is deleted and observed.
+    #[test]
+    fn orphan_reclaim_skips_terminal_cleanup_protected_placeholders() {
+        use super::super::health::test_support::{Answer, MockDiscord, message_json};
+        use super::super::placeholder_cleanup::{
+            PlaceholderCleanupOperation, PlaceholderCleanupOutcome, PlaceholderCleanupRecord,
+        };
+        use crate::test_support::wait::{WAIT_CAP, await_within};
+        let _locks = crate::services::observability::lock_env_then_runtime();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        crate::services::observability::reset_for_tests();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = 6_325_613_002u64;
+        let unprotected: Vec<u64> = (50..61).map(|n| channel * 100 + n).collect();
+        let mut expected = std::collections::HashMap::new();
+        for n in 0..ORPHAN_PLACEHOLDER_DELETE_LIMIT as u64 {
+            let (outcome, skipped) = if n % 2 == 0 {
+                (
+                    PlaceholderCleanupOutcome::Succeeded,
+                    "skipped_committed_terminal",
+                )
+            } else {
+                (
+                    PlaceholderCleanupOutcome::failed("503 retry later"),
+                    "skipped_terminal_retry_pending",
+                )
+            };
+            shared
+                .ui
+                .placeholder_cleanup
+                .record(PlaceholderCleanupRecord {
+                    provider: ProviderKind::Codex,
+                    channel_id: serenity::ChannelId::new(channel),
+                    message_id: serenity::MessageId::new(channel * 100 + n),
+                    tmux_session_name: None,
+                    operation: PlaceholderCleanupOperation::DeleteTerminal,
+                    outcome,
+                    source: "test",
+                });
+            expected.insert(channel * 100 + n, skipped.to_string());
+        }
+        for &id in &unprotected[..10] {
+            expected.insert(id, "committed".to_string());
+        }
+        // Protected placeholders lead the page and spend no budget; the 11th unprotected one
+        // is past the per-channel delete budget, so it is neither deleted nor observed.
+        let mut ids: Vec<u64> = expected.keys().copied().chain([unprotected[10]]).collect();
+        ids.sort_unstable();
+        let page = serde_json::Value::Array(
+            ids.iter()
+                .map(|&id| message_json(id, channel, BOT, "...", "2026-01-01T00:00:00+00:00"))
+                .collect(),
+        );
+        let identity = reclaim_answer();
+        let answer: Answer = Arc::new(move |method, path| {
+            if path.ends_with("/messages") {
+                return Some((200, page.clone()));
+            }
+            identity(method, path)
+        });
+        let plan = ReclaimScanPlan {
+            orphan_placeholder_channels: vec![channel],
+            ..Default::default()
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (report, calls) = rt.block_on(async {
+            let discord = MockDiscord::start_with(answer).await;
+            let report = await_within(
+                run_startup_reclaim_plan(
+                    &discord.http,
+                    &shared,
+                    &ProviderKind::Codex,
+                    chrono::Utc::now().timestamp(),
+                    ReclaimPass::OrphanPlaceholders,
+                    &plan,
+                ),
+                WAIT_CAP,
+            )
+            .await;
+            (report, discord.calls_for(channel))
+        });
+
+        let deletes: Vec<String> = calls
+            .into_iter()
+            .filter(|c| c.starts_with("DELETE"))
+            .collect();
+        let budgeted: Vec<String> = unprotected[..10]
+            .iter()
+            .map(|id| format!("DELETE /api/v10/channels/{channel}/messages/{id}"))
+            .collect();
+        assert_eq!(deletes, budgeted);
+        assert_eq!(report.orphan_placeholders_deleted, 10);
+        let observed: std::collections::HashMap<u64, String> =
+            crate::services::observability::events::recent(500)
+                .iter()
+                .filter(|event| event.event_type == "relay_delete")
+                .filter(|event| event.channel_id == Some(channel))
+                .map(|event| {
+                    (
+                        event.payload["message_id"].as_u64().unwrap(),
+                        event.payload["outcome"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+        assert_eq!(observed, expected);
     }
 
     /// Both startup passes claim a Legacy channel and finalize its frozen panel and placeholder.

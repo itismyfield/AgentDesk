@@ -208,4 +208,113 @@ mod tests {
             user_msg_id.get()
         ));
     }
+
+    /// Reusing a bound busy notice routes a distinct stale queued card through the queued-card
+    /// gate: a card a waiting entry still owns gets no DELETE or PATCH, an unowned one is deleted.
+    #[test]
+    fn reused_busy_notice_deletes_stale_queued_card_only_when_unowned() {
+        use crate::services::discord::health::test_support::MockDiscord;
+        use crate::services::turn_orchestrator::{Intervention, InterventionMode};
+        use crate::test_support::wait::{WAIT_CAP, await_within};
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let (user_msg_id, notice) = (
+            MessageId::new(100_000_005_035_710),
+            MessageId::new(100_000_005_035_720),
+        );
+        let (stale, waiting) = (
+            MessageId::new(100_000_005_035_730),
+            MessageId::new(100_000_005_035_740),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        rt.block_on(async {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let discord = MockDiscord::start().await;
+            for (index, owned) in [(0u64, true), (1, false)] {
+                let channel_id = ChannelId::new(100_000_005_035_700 + index);
+                crate::services::discord::busy_followup_retry_store::bind_notice_if_absent(
+                    &provider,
+                    channel_id.get(),
+                    user_msg_id.get(),
+                    notice.get(),
+                )
+                .expect("bind notice");
+                if owned {
+                    let ctx = crate::services::discord::queue_dispatch::persistence_context(
+                        &shared, &provider, channel_id,
+                    );
+                    let item = Intervention {
+                        author_id: serenity::UserId::new(7),
+                        author_is_bot: false,
+                        message_id: waiting,
+                        queued_generation: 1,
+                        source_message_ids: vec![waiting],
+                        source_message_queued_generations: Vec::new(),
+                        source_text_segments: Vec::new(),
+                        text: "waiting entry".to_string(),
+                        mode: InterventionMode::Soft,
+                        created_at: std::time::Instant::now(),
+                        reply_context: None,
+                        has_reply_boundary: false,
+                        merge_consecutive: false,
+                        pending_uploads: Vec::new(),
+                    };
+                    let mailbox = shared.mailbox(channel_id);
+                    assert!(
+                        await_within(mailbox.enqueue(item, ctx), WAIT_CAP)
+                            .await
+                            .enqueued
+                    );
+                    shared
+                        .queued
+                        .queued_placeholders
+                        .insert((channel_id, waiting), stale);
+                }
+                let reused = await_within(
+                    reuse_bound_busy_notice(
+                        &discord.http,
+                        &shared,
+                        &provider,
+                        channel_id,
+                        user_msg_id,
+                        Some(stale),
+                    ),
+                    WAIT_CAP,
+                )
+                .await;
+                assert_eq!(reused, Some(notice));
+                let stale_calls: Vec<String> = discord
+                    .calls_for(channel_id.get())
+                    .into_iter()
+                    .filter(|call| call.ends_with(&format!("/messages/{stale}")))
+                    .collect();
+                let expected = if owned {
+                    Vec::new()
+                } else {
+                    vec![format!(
+                        "DELETE /api/v10/channels/{channel_id}/messages/{stale}"
+                    )]
+                };
+                assert_eq!(stale_calls, expected, "owned={owned}");
+                assert_eq!(
+                    shared
+                        .queued
+                        .queued_placeholders
+                        .get(&(channel_id, waiting))
+                        .map(|card| *card),
+                    owned.then_some(stale)
+                );
+            }
+        });
+    }
 }

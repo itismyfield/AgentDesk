@@ -1767,8 +1767,6 @@ src/
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_controller/
 │   │   │   ├── queued_card_gate/
-│   │   │   │   ├── tests/
-│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── tests.rs
 │   │   │   │   └── unanswered_tests.rs
 │   │   │   └── queued_card_gate.rs
@@ -2369,8 +2367,6 @@ src/
 │   │   │   ├── scheduled_settle.rs
 │   │   │   └── scheduled_settle_tests.rs
 │   │   ├── startup_reclaim/
-│   │   │   ├── tests/
-│   │   │   │   └── source_guard_tests.rs
 │   │   │   └── intake_placeholder_retirement_tests.rs
 │   │   ├── task_notification_delivery/
 │   │   │   ├── inline_contract_tests/

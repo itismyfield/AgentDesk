@@ -4794,26 +4794,95 @@ fn failed_synthetic_claim_cleans_only_owned_placeholder() {
     );
 }
 
+/// A rejected synthetic placeholder is deleted only when no committed or retry-pending terminal
+/// cleanup owns it, and each decision is observed as a relay_delete event.
 #[test]
-fn failed_synthetic_placeholder_delete_is_terminal_cleanup_guarded() {
-    let helper_src = include_str!("synthetic_start_wiring.rs");
-    let guard_needle = ["terminal_cleanup_", "protects_delete("].concat();
-    let delete_needle = [".delete_", "message(&http, anchor_message_id)"].concat();
-    let result_needle = ["emit_relay_delete_", "result("].concat();
-    let guard = helper_src
-        .find(&guard_needle)
-        .expect("rejected synthetic cleanup must consult terminal cleanup protection");
-    let delete = helper_src
-        .find(&delete_needle)
-        .expect("rejected synthetic cleanup must retain its owned-placeholder delete");
-    let result = helper_src
-        .find(&result_needle)
-        .expect("rejected synthetic cleanup delete result must be durably observed");
-
-    assert!(
-        guard < delete && delete < result,
-        "committed and retry-pending terminal placeholders must be skipped before delete"
+fn failed_synthetic_placeholder_cleanup_spares_terminal_cleanup_protected_anchor() {
+    use crate::services::discord::placeholder_cleanup::{
+        PlaceholderCleanupOperation, PlaceholderCleanupOutcome, PlaceholderCleanupRecord,
+    };
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    let _telemetry = crate::services::observability::lock_env_then_runtime();
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        temp.path(),
     );
+    crate::services::observability::reset_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(940_000_000_004_798);
+    let rows = [
+        (
+            940_000_000_004_801,
+            Some(PlaceholderCleanupOutcome::Succeeded),
+            "skipped_committed_terminal",
+        ),
+        (
+            940_000_000_004_802,
+            Some(PlaceholderCleanupOutcome::failed("503 retry later")),
+            "skipped_terminal_retry_pending",
+        ),
+        (940_000_000_004_803, None, "committed"),
+    ];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime");
+    let deletes = rt.block_on(async {
+        let shared = super::super::make_shared_data_for_tests();
+        let (log, _rest) = crate::services::discord::shared_state::test_rest::recording_mock(
+            940_000_000_005_000,
+            channel.get(),
+        )
+        .await;
+        for (anchor, outcome, _) in rows.clone() {
+            if let Some(outcome) = outcome {
+                shared
+                    .ui
+                    .placeholder_cleanup
+                    .record(PlaceholderCleanupRecord {
+                        provider: provider.clone(),
+                        channel_id: channel,
+                        message_id: MessageId::new(anchor),
+                        tmux_session_name: None,
+                        operation: PlaceholderCleanupOperation::DeleteTerminal,
+                        outcome,
+                        source: "test",
+                    });
+            }
+            await_within(
+                synthetic_start_wiring::delete_failed_synthetic_owned_placeholder(
+                    &shared,
+                    &provider,
+                    channel,
+                    MessageId::new(anchor),
+                    true,
+                ),
+                WAIT_CAP,
+            )
+            .await;
+        }
+        log.lock().unwrap().clone()
+    });
+
+    assert_eq!(deletes, vec![("DELETE".to_string(), rows[2].0)]);
+    let observed: std::collections::HashMap<u64, String> =
+        crate::services::observability::events::recent(500)
+            .iter()
+            .filter(|event| event.event_type == "relay_delete")
+            .filter(|event| event.channel_id == Some(channel.get()))
+            .map(|event| {
+                (
+                    event.payload["message_id"].as_u64().unwrap(),
+                    event.payload["outcome"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+    let expected = rows
+        .iter()
+        .map(|(anchor, _, outcome)| (*anchor, outcome.to_string()))
+        .collect();
+    assert_eq!(observed, expected);
 }
 
 #[tokio::test]
