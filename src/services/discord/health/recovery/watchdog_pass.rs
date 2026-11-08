@@ -563,7 +563,10 @@ pub(crate) async fn run_stall_watchdog_pass(
                     if completed_stale_no_answer_orphan_should_clean(
                         terminal_committed,
                         this_turn_user_msg_id,
-                    ) {
+                    ) && !leak_inflight
+                        .as_ref()
+                        .is_some_and(|s| s.terminal_receipt.is_some())
+                    {
                         // Identity-guarded removal: a newer turn that has since
                         // written this channel's row yields UserMsgMismatch and
                         // is preserved; planned-restart / rebind-origin rows are

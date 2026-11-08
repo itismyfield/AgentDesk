@@ -270,6 +270,7 @@ async fn carried_ledger_unrelated_registration_does_not_delay_pin_pg() {
     let namespace = format!("claude/{}", fx.shared.token_hash);
     on("consumed", fx.channel.get(), move || {
         input["identity"]["primary"] = json!(7_828_418);
+        input["identity"]["sources"][0]["message_id"] = json!(7_828_418);
         input["attempt"]["nonce"] = json!("unrelated-attempt");
         input["payload"]["frame"] = json!(crate::services::tui_input::human_frame::idle(
             "ann",
@@ -287,5 +288,39 @@ async fn carried_ledger_unrelated_registration_does_not_delay_pin_pg() {
         "only the selection and its competitors gate publication"
     );
     assert_eq!(fx.archive_count(), 1);
+    assert_eq!(fx.told().await, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn carried_ledger_command_rechecks_registration_after_receipt_pg() {
+    let (fx, mut input) = fixture(7_828_319, true, false).await;
+    append(&fx.path, &[END]);
+    discord::health::settled_reason(&fx.shared, &PROVIDER, fx.channel.get()).await;
+    let namespace = format!("claude/{}", fx.shared.token_hash);
+    let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = reached.clone();
+    on("receipt", fx.channel.get(), move || {
+        input["attempt"]["nonce"] = json!("duplicate-after-receipt");
+        Registry::runtime()
+            .unwrap()
+            .prepare(&namespace, &input)
+            .unwrap();
+        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    fx.pass().await;
+    assert!(reached.load(std::sync::atomic::Ordering::SeqCst));
+    for _ in 0..2 {
+        let row = fx.row().expect("a changed command witness keeps its row");
+        assert!(row.native_stop_user_pin.is_none());
+        assert!(row.terminal_receipt.is_none());
+        assert_eq!(fx.archive_count(), 0);
+        fx.pass().await;
+    }
+    let outcome: String = sqlx::query_scalar("SELECT terminal_outcome FROM turns WHERE turn_id=$1")
+        .bind(format!("discord:{}:{}", fx.channel, fx.user_msg_id))
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(outcome, "completed");
     assert_eq!(fx.told().await, 0);
 }
