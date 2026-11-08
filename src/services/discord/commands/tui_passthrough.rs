@@ -136,6 +136,8 @@ pub(super) async fn effort_save_notice(
             return "Herdr /effort는 live Claude TUI pane에서만 지원합니다.".into();
         }
         return match herdr_settings::effort(shared, token, channel_id, level).await {
+            // Claude Code keeps `max` for the running session only, unlike the other levels.
+            Ok(()) if matches!(level, EffortLevel::Max) => "effort를 `max`로 적용했습니다. max는 이 Claude 세션에만 유지되어 pane을 새로 띄우면 Claude 기본값으로 돌아갑니다.".into(),
             Ok(()) => format!("effort를 `{}`로 적용했습니다.", level.as_str()),
             Err(error) => format!("effort 적용 미확인: {error}"),
         };

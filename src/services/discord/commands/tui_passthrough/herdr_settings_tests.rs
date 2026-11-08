@@ -280,7 +280,7 @@ fn herdr_effort_applies_and_reports_only_fresh_matching_level_pg() {
         assert_eq!(
             settings.channel_effort_levels.get(&CHANNEL.to_string()).map(String::as_str),
             Some("high"),
-            "a recreated pane launches at the level the live pane runs"
+            "the channel's settings name the level its live pane runs"
         );
         drop(settings);
         assert!(
@@ -594,7 +594,7 @@ impl Fixture {
         assert_eq!(
             settings.channel_fast_modes.get(&runtime.to_string()),
             Some(&saved),
-            "a recreated pane launches with the mode the live pane runs"
+            "the channel's settings name the mode its live pane runs"
         );
         assert!(
             runtime == CHANNEL

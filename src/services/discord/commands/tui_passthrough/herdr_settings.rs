@@ -128,10 +128,13 @@ fn record(session: &str, after: f64) -> Result<Value, &'static str> {
     Ok(value)
 }
 
+/// Applies on a ready pane, then saves the applied value into the channel's settings while the
+/// transition lock still orders commands, so a later command's value is never overwritten.
 async fn with_ready_pane<T: Send + 'static>(
     shared: &Arc<SharedData>,
-    channel: ChannelId,
+    (token, channel): (&str, ChannelId),
     apply: impl FnOnce(&HerdrTarget, &str, f64) -> Result<T, String> + Send + 'static,
+    save: impl FnOnce(&T, &mut crate::services::discord::DiscordBotSettings),
 ) -> Result<T, String> {
     let after = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -139,8 +142,9 @@ async fn with_ready_pane<T: Send + 'static>(
         .as_secs_f64();
     let transition = shared.session_transition_lock(channel);
     let _transition = transition.lock().await;
-    let shared = shared.clone();
-    tokio::task::spawn_blocking(move || {
+    let reader = shared.clone();
+    let applied = tokio::task::spawn_blocking(move || -> Result<T, String> {
+        let shared = reader;
         let handle = tokio::runtime::Handle::current();
         let original = handle.block_on(target(&shared, channel))?;
         let (pane, logical, native) = original.clone();
@@ -165,23 +169,16 @@ async fn with_ready_pane<T: Send + 'static>(
         })
     })
     .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Saves what the live pane now runs, so a recreated pane launches with it; queues no relaunch.
-async fn remember(
-    shared: &SharedData,
-    token: &str,
-    update: impl FnOnce(&mut crate::services::discord::DiscordBotSettings),
-) -> Result<(), String> {
+    .map_err(|e| e.to_string())??;
+    // No relaunch is queued: the live pane already runs this value.
     let mut settings = shared.settings.write().await;
     let mut candidate = settings.clone();
-    update(&mut candidate);
-    candidate.try_save_bot_settings(token).map_err(|e| {
-        format!("pane에는 적용했지만 설정 저장 실패(pane 재생성 시 이전 값으로 뜸): {e}")
-    })?;
+    save(&applied, &mut candidate);
+    candidate
+        .try_save_bot_settings(token)
+        .map_err(|e| format!("pane에는 적용했지만 채널 설정 저장 실패: {e}"))?;
     *settings = candidate;
-    Ok(())
+    Ok(applied)
 }
 
 pub(super) async fn effort(
@@ -190,7 +187,7 @@ pub(super) async fn effort(
     channel: ChannelId,
     level: EffortLevel,
 ) -> Result<(), String> {
-    with_ready_pane(shared, channel, move |pane, native, after| {
+    let apply = move |pane: &HerdrTarget, native: &str, after| {
         use input::TuiInputAction::{Enter, Escape, Left, Literal, Right};
         let send =
             |plan: &[input::TuiInputAction]| host_input::run_herdr(pane, plan, None).into_legacy();
@@ -224,20 +221,23 @@ pub(super) async fn effort(
             })
             .map_err(|reason| format!("적용 미확인: {reason}"))
         };
-        // A selector left open would take the next prompt's Enter as its answer.
-        choose().map_err(
-            |reason| match send(&[Escape]).and_then(|()| wait(|| ready_pane(pane))) {
+        // A selector left open would take the next prompt's Enter as its answer; one Escape
+        // closes it, sent only while it shows so an idle composer never gets a stray one.
+        choose().map_err(|reason| {
+            let open = screen(pane).map_or(true, |c| {
+                tc::tmux_capture_indicates_claude_tui_selector_open(&c)
+            });
+            let closed = if open { send(&[Escape]) } else { Ok(()) };
+            match closed.and_then(|()| wait(|| ready_pane(pane))) {
                 Ok(()) => reason,
                 Err(why) => format!("{reason} (effort 선택창이 남았을 수 있음: {why})"),
-            },
-        )
-    })
-    .await?;
-    remember(shared, token, |settings| {
-        let key = channel.get().to_string();
-        settings
-            .channel_effort_levels
-            .insert(key, level.as_str().to_string());
+            }
+        })
+    };
+    let key = channel.get().to_string();
+    with_ready_pane(shared, (token, channel), apply, |(), settings| {
+        let level = level.as_str().to_string();
+        settings.channel_effort_levels.insert(key, level);
     })
     .await
 }
@@ -261,7 +261,7 @@ pub(in crate::services::discord::commands) async fn fast(
     {
         return Err("Herdr /fast는 live Claude TUI pane에서만 지원합니다.".into());
     }
-    let applied = with_ready_pane(shared, channel, move |pane, native, after| {
+    let apply = move |pane: &HerdrTarget, native: &str, after| {
         let read = |after| {
             record(native, after).map_err(str::to_string)?["fast_mode"]
                 .as_bool()
@@ -286,17 +286,17 @@ pub(in crate::services::discord::commands) async fn fast(
         })
         .map_err(|e| format!("적용 미확인: {e}"))?;
         Ok((next, true))
+    };
+    let mirror = &shared.overrides.fast_mode_channels;
+    with_ready_pane(shared, (token, channel), apply, |&(next, _), settings| {
+        settings
+            .channel_fast_modes
+            .insert(channel.get().to_string(), next);
+        if next {
+            mirror.insert(channel);
+        } else {
+            mirror.remove(&channel);
+        }
     })
-    .await?;
-    remember(shared, token, |settings| {
-        let key = channel.get().to_string();
-        settings.channel_fast_modes.insert(key, applied.0);
-    })
-    .await?;
-    if applied.0 {
-        shared.overrides.fast_mode_channels.insert(channel);
-    } else {
-        shared.overrides.fast_mode_channels.remove(&channel);
-    }
-    Ok(applied)
+    .await
 }
