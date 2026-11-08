@@ -148,42 +148,6 @@ async fn a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode()
     );
 }
 
-/// A takeover turn whose end this process never saw (a restart or a clear took its completion) holds
-/// input only while Legacy's turn is unfinished; once that turn is gone the next look admits it.
-#[tokio::test(flavor = "current_thread")]
-async fn a_held_input_starts_once_the_unseen_takeover_turn_is_gone() {
-    let _env = intake_env();
-    let shared = crate::services::discord::make_shared_data_for_tests();
-    let http = Arc::new(serenity::Http::new("Bot intake-dispatch-test"));
-    let deps = deps(&http, &shared);
-    let _boot = committed_and_selected();
-    let _ready = test_probe::answer_with(|_| true);
-    legacy_turn_running();
-
-    let held = codex_message(4_370_051);
-    let admission = super::super::admit_text_intake(&deps, &held).await;
-    let early = turn_mode::transcript_turns(CHANNEL).then(|| TestConfirmation::confirmed(CHANNEL));
-    assert!(early.is_none(), "a running Legacy turn is not confirmed");
-    assert!(
-        matches!(admission, IntakeAdmission::DeferredTurnMode(Ok(_))),
-        "a running Legacy turn keeps the input queued: {admission:?}"
-    );
-
-    // The pane ended unseen and the clear removed Legacy's row; no completion runs here.
-    assert!(crate::services::discord::inflight::clear_inflight_state(
-        &ProviderKind::Codex,
-        CHANNEL
-    ));
-    let admission = super::super::admit_text_intake(&deps, &held).await;
-    let confirmed =
-        turn_mode::transcript_turns(CHANNEL).then(|| TestConfirmation::confirmed(CHANNEL));
-    assert!(
-        matches!(admission, IntakeAdmission::Local(_)),
-        "{admission:?}"
-    );
-    assert!(confirmed.is_some(), "the look confirmed turn mode");
-}
-
 /// An attachment that cannot be made portable, a refused enqueue and a failed queue write each
 /// fail the live dispatch before its checkpoint, so the message is read again.
 #[tokio::test(flavor = "current_thread")]
