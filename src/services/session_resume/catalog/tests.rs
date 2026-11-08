@@ -483,7 +483,8 @@ fn copy_is_refused_before_writing_when_the_launch_home_differs_or_a_candidate_is
         f.home.display(),
         profile.display()
     );
-    let cases: [(&[PathBuf], Result<Option<&Path>, &str>, &str); 3] = [
+    type Case<'a> = (&'a [PathBuf], Result<Option<&'a Path>, &'a str>, &'a str);
+    let cases: [Case; 3] = [
         (std::slice::from_ref(&other), Ok(Some(&profile)), &mismatch),
         (
             std::slice::from_ref(&other),
