@@ -446,6 +446,7 @@ impl ChannelMailboxState {
             active_turn_nonce: self.active_turn_nonce.clone(),
             active_turn_kind: self.active_turn_kind,
             intervention_queue: self.intervention_queue.clone(),
+            v2_queue_depth: self.v2_len(),
             pending_user_dispatch: self.pending_user_dispatch,
             pending_user_dispatch_source_ids: self.pending_user_dispatch_source_ids.clone(),
             active_absorbed_source_ids: self.active_absorbed_source_ids.clone(),

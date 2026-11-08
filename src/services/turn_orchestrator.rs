@@ -306,6 +306,8 @@ pub(crate) struct ChannelMailboxSnapshot {
     /// monitor marker for reclaim policy.
     pub(crate) active_turn_kind: ActiveTurnKind,
     pub(crate) intervention_queue: Vec<Intervention>,
+    /// The V2 owner's committed item count; `None` when no V2 owner holds this queue.
+    pub(crate) v2_queue_depth: Option<usize>,
     pub(crate) pending_user_dispatch: Option<MessageId>,
     /// #5191 — the reserved head's absorbed inbound ids (see the same-named
     /// field on `ChannelMailboxState`). Recovery dedup must union these with
@@ -324,6 +326,13 @@ pub(crate) struct ChannelMailboxSnapshot {
     /// freshness anchor so the banner doesn't fire within the first poll of
     /// a brand-new turn.
     pub(crate) turn_started_at: Option<DateTime<Utc>>,
+}
+
+impl ChannelMailboxSnapshot {
+    /// The depth of the queue that owns this channel's input: the V2 owner's, else the V1 queue.
+    pub(crate) fn queue_depth(&self) -> usize {
+        self.v2_queue_depth.unwrap_or(self.intervention_queue.len())
+    }
 }
 
 pub(crate) struct FinishTurnResult {

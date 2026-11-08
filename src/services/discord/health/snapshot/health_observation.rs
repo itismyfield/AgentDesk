@@ -321,7 +321,8 @@ pub(super) async fn channel_entries<'s>(
                 provider: entry.name.clone(),
                 channel_id: channel.get(),
                 has_cancel_token: mailbox_has_cancel_token,
-                queue_depth,
+                // The owner's queue, as a cancel's `queued_remaining` counts it.
+                queue_depth: snapshot.queue_depth(),
                 recovery_started: snapshot.recovery_started_at.is_some(),
                 active_request_owner: snapshot.active_request_owner.map(|id| id.get()),
                 active_user_message_id: mailbox_active_user_msg_id,
