@@ -59,8 +59,9 @@ fn degraded(health: &AlarmHealth) -> bool {
         .contains(&format!("tui_o:too_many_readers:{CHANNEL}"))
 }
 
-/// The readers the actor holds open, as its snapshot counts them.
-async fn open_readers(chain: &Chain, run: &Run, observer: &HostObservation) -> usize {
+/// The actor's reading readers, as its snapshot counts them; a retired one under watch is not
+/// reading even while its file stays open.
+async fn reading_readers(chain: &Chain, run: &Run, observer: &HostObservation) -> usize {
     let mut request = chain.request("ba-backlog-readers");
     request.termination = None;
     let inspected = ask(run, Operation::Inspect(request), context(chain, observer)).await;
@@ -120,7 +121,7 @@ async fn targeted_old(
 }
 
 #[tokio::test(start_paused = true)]
-async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_closes_readers() {
+async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_retires_readers() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &[]);
     let root = crate::config::runtime_root().unwrap();
@@ -149,7 +150,10 @@ async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_clo
         !degraded(&health),
         "replaced old readers do not raise reader health"
     );
-    assert_eq!(open_readers(&chain, &run, &observer).await, OLD_NATIVE + 2);
+    assert_eq!(
+        reading_readers(&chain, &run, &observer).await,
+        OLD_NATIVE + 2
+    );
     assert!((0..chain.sources.len()).all(|n| !chain.cursor(n).retired));
     let p5_before = std::fs::read(&path).unwrap();
     let native_before: Vec<_> = chain
@@ -161,7 +165,7 @@ async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_clo
         let (request, digest) = targeted_old(&chain, &run, &observer, n).await;
         let before = OLD_NATIVE + 3 - n;
         assert_eq!(
-            open_readers(&chain, &run, &observer).await,
+            reading_readers(&chain, &run, &observer).await,
             before,
             "Inspect did not retire target {n}"
         );
@@ -195,9 +199,9 @@ async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_clo
         );
         polls(1).await;
         assert_eq!(
-            open_readers(&chain, &run, &observer).await,
+            reading_readers(&chain, &run, &observer).await,
             OLD_NATIVE + 2 - n,
-            "retention closed the reader of target {n}"
+            "retention retired the reading reader of target {n}"
         );
         assert!(
             chain.harness.alarms.readers().unwrap() <= MAX_READERS,

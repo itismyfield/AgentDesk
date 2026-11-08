@@ -28,24 +28,25 @@ impl<B: BindingEvents> Sources<B> {
         writer.reconcile_reader_count(count);
     }
 
-    /// Judges every hop again once the log tail moved or a hop is new; an unreadable log
-    /// replaces none and is read again at the next tend.
+    /// Judges every hop again once the log tail moved, a hop is new or the log cannot be watched;
+    /// an unreadable log replaces none and is read again at the next tend.
     fn judge_replaced<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
     ) {
-        let tail = *self.notice.borrow();
+        let (tail, watched) = (*self.notice.borrow(), self.notice.has_changed().is_ok());
         let hops: Vec<_> = (self.rotation.successors.iter())
             .filter_map(|(key, next)| Some((key.clone(), next.seq?, next.tmux_session.clone())))
             .collect();
         let judged = self.replaced.as_ref().is_some_and(|(at, judged)| {
-            *at == tail
+            watched
+                && *at == tail
                 && (hops.iter()).all(|(key, seq, _)| judged.contains_key(&(key.clone(), *seq)))
         });
         if judged {
             return;
         }
-        let Ok(Some((_, events))) = self.read_log(writer, 0) else {
+        let Some(events) = self.history(writer) else {
             self.replaced = None;
             return;
         };
@@ -56,6 +57,25 @@ impl<B: BindingEvents> Sources<B> {
             })
             .collect();
         self.replaced = Some((tail, judged));
+    }
+
+    /// The whole log by stored name, binds the delivery policy now holds included, since a later
+    /// execution's policy holds every earlier one's; `None` unless every seq from 1 is this channel's.
+    fn history<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &self,
+        writer: &mut ChannelWriter<P, L, A>,
+    ) -> Option<Vec<BindingEvent>> {
+        let mut events = self.bindings.binding_history(self.channel).ok()?;
+        let mut whole = (events.iter().zip(1..)).all(|(e, seq)| e.seq == seq)
+            && events.iter().all(|e| e.channel_id == self.channel);
+        for event in &mut events {
+            renumbered::map_sources(event, |source| {
+                let named = self.names.stored_name(writer.store(), source);
+                whole &= named.is_some();
+                named.unwrap_or_else(|| source.clone())
+            });
+        }
+        whole.then_some(events)
     }
 
     fn replaced_and_read(&self, reader: &Reader) -> bool {

@@ -25,13 +25,21 @@ fn executions(
     captured.unwrap();
 }
 
-fn restarted(
+fn restarted<B: BindingEvents>(
     harness: &Harness,
-    bindings: Arc<FakeBindings>,
-) -> (Sources<FakeBindings>, HealthyWriter, UnitDeriver) {
+    bindings: Arc<B>,
+) -> (Sources<B>, HealthyWriter, UnitDeriver) {
+    restarted_as(harness, bindings, ShadowProvider::Claude)
+}
+
+fn restarted_as<B: BindingEvents>(
+    harness: &Harness,
+    bindings: Arc<B>,
+    provider: ShadowProvider,
+) -> (Sources<B>, HealthyWriter, UnitDeriver) {
     let (mut writer, health, counts) = health_writer(harness);
-    let mut sources = Sources::new(CHANNEL, ShadowProvider::Claude, bindings);
-    let mut deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
+    let mut sources = Sources::new(harness.channel_id, provider, bindings);
+    let mut deriver = UnitDeriver::new(harness.channel_id, provider);
     sources
         .resume(&mut writer, &mut deriver, &mut VecDeque::new())
         .unwrap();
@@ -119,5 +127,153 @@ fn unreadable_binding_log_counts_every_reader_until_read_again() {
     bindings.fail(None);
     sources.tend(&mut writer).unwrap();
     assert_eq!(counts.lock().unwrap().last(), Some(&1));
+    assert!(!active(&health).contains(&reason));
+}
+
+/// A log that cannot be watched, as a failed subscription leaves it.
+struct Unwatched(Arc<FakeBindings>);
+
+impl BindingEvents for Unwatched {
+    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+        self.0.binding_events_since(channel, after)
+    }
+
+    fn subscribe(&self, _channel: u64) -> tokio::sync::watch::Receiver<u64> {
+        tokio::sync::watch::channel(u64::MAX).1
+    }
+}
+
+#[test]
+fn unwatched_log_judges_again_after_a_rebind_that_adds_no_hop() {
+    let (harness, ids, bindings) = fixture(MAX_READERS + 2);
+    executions(&harness, &bindings, &ids, |_| ("tmux", "a".into()));
+    let unwatched = Arc::new(Unwatched(bindings.clone()));
+    let (mut sources, (mut writer, health, counts), _) = restarted(&harness, unwatched);
+    let reason = format!("tui_o:too_many_readers:{CHANNEL}");
+    assert_eq!(counts.lock().unwrap().last(), Some(&ids.len()));
+    assert!(active(&health).contains(&reason));
+    let current = BindingTarget::Source(ids.last().unwrap().clone());
+    let mut rebind = bound(LAST_HOP + 1, None, current, BindingCause::Resume, None);
+    (rebind.tmux_session, rebind.execution_nonce) = ("tmux".into(), "b".into());
+    bindings.commit(rebind);
+    sources.follow(&mut writer).unwrap();
+    sources.tend(&mut writer).unwrap();
+    assert_eq!(counts.lock().unwrap().last(), Some(&1));
+    assert!(!active(&health).contains(&reason));
+}
+
+/// A verified Codex pane where execution `n` bound only its own rollout, each under its own nonce,
+/// so the current policy holds every earlier execution's bind.
+#[cfg(unix)]
+#[test]
+fn verified_restart_leaves_out_sources_earlier_executions_bound_in_the_pane() {
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_o::store::rotation::{Rotation, Successor};
+    use crate::services::tui_o::writer::binding::ChannelBindingLog;
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        self as contexts, BindingContext, PreparedIncarnation,
+    };
+    use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events as p5};
+    use p5::codex::{Claim, ClaimEvidence, Decision};
+    const VERIFIED: u64 = 794_901;
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            p5::forget_channel_for_tests(VERIFIED);
+            p5::set_test_root(None);
+            dedupe::reset_state_for_tests();
+        }
+    }
+    let _shared = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (root, _env) = contexts::tests::fixture_after_shared_test_env_lock();
+    dedupe::reset_state_for_tests();
+    p5::set_test_root(Some(root.path()));
+    let _clear = Clear;
+    let pane = format!("reader-count-{}", uuid::Uuid::new_v4().simple());
+    dedupe::register_tmux_channel(&pane, VERIFIED);
+    let sessions = root.path().join("sessions");
+    std::fs::create_dir(&sessions).unwrap();
+    let sessions = sessions.canonicalize().unwrap();
+    let ids: Vec<SourceId> = (0..=MAX_READERS)
+        .map(|n| {
+            let id = format!("019e660d-4859-7522-9cee-{n:012}");
+            let path = sessions.join(format!("rollout-{id}.jsonl"));
+            std::fs::write(&path, b"").unwrap();
+            source_id_for(&id, &path).unwrap()
+        })
+        .collect();
+    let harness = Harness::build_channel(VERIFIED, |_| {
+        let empty = hex::encode(sha2::Sha256::digest(b""));
+        (ids.iter().cloned())
+            .map(|source_id| InitSource {
+                source_id,
+                delivery_start: 0,
+                prefix_hash: empty.clone(),
+            })
+            .collect()
+    });
+    harness.gate.acquired();
+    for source in &ids {
+        let context = BindingContext {
+            schema: 1,
+            provider: "codex".into(),
+            created_at: Utc::now(),
+            execution_nonce: uuid::Uuid::new_v4().simple().to_string(),
+            tmux_session: pane.clone(),
+            channel_id: Some(VERIFIED),
+            owner_runtime_root: tc::current_tmux_owner_marker(),
+            host: None,
+            expected_native_session_id: None,
+            launch_mode: "fresh".into(),
+            provider_root: Some(sessions.clone()),
+            first_prompt_digest: None,
+            source_policy: Some("verified".into()),
+        };
+        PreparedIncarnation::create(context.clone()).unwrap();
+        std::fs::write(
+            tc::session_temp_path(&pane, "spawn_nonce"),
+            &context.execution_nonce,
+        )
+        .unwrap();
+        let claim = Claim {
+            session_id: source.session_id.clone(),
+            path: Some(source.path.clone()),
+            evidence: ClaimEvidence::NativeHook {
+                event: "session_start".into(),
+                source: Some("startup".into()),
+                first_prompt_digest: None,
+            },
+        };
+        let verified = Decision::Verified(source.clone());
+        tc::with_tmux_source_authority(&pane, |_| {
+            p5::codex::commit_claim(&context, &claim, verified, || Ok(())).unwrap()
+        });
+    }
+    let log = Arc::new(ChannelBindingLog::new(VERIFIED, ShadowProvider::Codex));
+    let delivered = log.binding_events_since(VERIFIED, 0).unwrap();
+    let held = (delivered.iter())
+        .filter(|e| matches!(e.record, BindingRecord::Rejected { .. }))
+        .count();
+    assert_eq!(
+        (delivered.len(), held),
+        (ids.len(), MAX_READERS),
+        "{delivered:#?}"
+    );
+    let mut rotation = Rotation::default();
+    for (seq, pair) in (2..).zip(ids.windows(2)) {
+        let next = Successor {
+            seq: Some(seq),
+            tmux_session: Some(pane.clone()),
+            ..Successor::from(pair[1].clone())
+        };
+        rotation.successors.insert(source_key(&pair[0]), next);
+    }
+    let mut store = harness.channel();
+    store.write_rotation(&rotation).unwrap();
+    store.set_binding_checkpoint(ids.len() as u64).unwrap();
+    let (_, (_, health, counts), _) = restarted_as(&harness, log, ShadowProvider::Codex);
+    assert_eq!(counts.lock().unwrap().last(), Some(&1));
+    let reason = format!("tui_o:too_many_readers:{VERIFIED}");
     assert!(!active(&health).contains(&reason));
 }
