@@ -1282,7 +1282,7 @@ async fn restarted_standby_gives_a_waiting_preferred_node_the_grace_during_a_hol
     let shared = super::super::make_shared_data_for_tests_with_storage(Some(fixture.pool.clone()));
     let mut breaker = fixture.breaker();
     let started = Instant::now();
-    let mut standby = std::pin::pin!(fixture.acquire(&shared, &mut breaker));
+    let mut standby = Box::pin(fixture.acquire(&shared, &mut breaker));
     let diagnostics = &shared.restart.gateway_lease_diagnostics;
     await_within(
         async {
