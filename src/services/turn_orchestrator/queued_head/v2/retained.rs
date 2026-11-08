@@ -244,13 +244,19 @@ impl Owner {
 }
 
 impl RetainedInput {
-    /// Whether its owner may still deliver or recover this input. An unconfirmed retention a clear
-    /// already told stays only as settlement evidence: nothing re-sends it (deploy idle proof agrees).
+    /// An enqueued notice ends ownership for retry-required known/opaque unsent, disposition-free
+    /// unconfirmed, or cleared disposition-free unconfirmed evidence; other inputs remain owed.
     pub(crate) fn owed_to_owner(&self) -> bool {
-        !(matches!(self.reason, RetainedReason::Unconfirmed)
-            && self.disposition.is_none()
-            && self.notice.kind == CLEARED_NOTICE
-            && self.notice.enqueued)
+        !(self.notice.enqueued
+            && (matches!(
+                (&self.disposition, self.notice.kind.as_str()),
+                (
+                    Some(RetainedDisposition::KnownNotSent | RetainedDisposition::OpaqueUnsent),
+                    "retained_retry_required"
+                ) | (None, "unconfirmed")
+            ) || (self.disposition.is_none()
+                && self.notice.kind == CLEARED_NOTICE
+                && matches!(self.reason, RetainedReason::Unconfirmed))))
     }
 
     /// Whether this unowed retention closes an attempt bind: one of its attempt naming the input or
