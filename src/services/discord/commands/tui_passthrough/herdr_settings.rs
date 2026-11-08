@@ -1,4 +1,4 @@
-//! A live effort change on the channel's recorded pane, confirmed by its own fresh statusline.
+//! Live settings changes on the channel's recorded pane, confirmed by its own fresh statusline.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -102,7 +102,7 @@ fn ready(capture: &str) -> bool {
         ))
 }
 
-fn record(session: &str, after: f64) -> Result<String, &'static str> {
+fn record(session: &str, after: f64) -> Result<Value, &'static str> {
     let path = statusline::record_path(&statusline::record_dir(), session);
     let bytes = std::fs::read(path).map_err(|_| "기록 없음")?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| "기록 형식 미확인")?;
@@ -112,17 +112,14 @@ fn record(session: &str, after: f64) -> Result<String, &'static str> {
     if !value["written_at"].as_f64().is_some_and(|at| at > after) {
         return Err("오래된 written_at 기록");
     }
-    value["effort"]["level"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or("effort.level 없는 기록")
+    Ok(value)
 }
 
-pub(super) async fn effort(
+async fn with_ready_pane<T: Send + 'static>(
     shared: &Arc<SharedData>,
     channel: ChannelId,
-    level: EffortLevel,
-) -> Result<(), String> {
+    apply: impl FnOnce(&HerdrTarget, &str, f64) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
     let after = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -151,33 +148,94 @@ pub(super) async fn effort(
             {
                 return Err("초안 보호: draft 또는 준비 상태가 바뀌었습니다".into());
             }
-            use input::TuiInputAction::{Enter, Left, Literal, Right};
-            let send = |plan: &[input::TuiInputAction]| {
-                host_input::run_herdr(&pane, plan, None).into_legacy()
-            };
-            send(&[Literal("/effort".into()), Enter])?;
-            wait(|| {
-                pane.capture(-80)
-                    .filter(|c| tc::tmux_capture_indicates_claude_tui_selector_open(c))
-                    .ok_or("effort overlay 열림 미확인".into())
-            })?;
-            let mut plan = vec![Left; 4];
-            plan.extend(std::iter::repeat_n(Right, level as usize));
-            plan.push(Enter);
-            send(&plan)?;
-            wait(|| {
-                let seen = record(&native, after).map_err(str::to_string)?;
-                (seen == level.as_str())
-                    .then_some(())
-                    .ok_or_else(|| format!("effort.level 불일치: `{seen}`"))
-            })
-            .map_err(|reason| format!("적용 미확인: {reason}"))?;
+            let result = apply(&pane, &native, after)?;
             if handle.block_on(target(&shared, channel))? != original {
                 return Err("적용 미확인: pane 소유 실행 변경".into());
             }
-            Ok(())
+            Ok(result)
         })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+pub(super) async fn effort(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    level: EffortLevel,
+) -> Result<(), String> {
+    with_ready_pane(shared, channel, move |pane, native, after| {
+        use input::TuiInputAction::{Enter, Left, Literal, Right};
+        let send =
+            |plan: &[input::TuiInputAction]| host_input::run_herdr(pane, plan, None).into_legacy();
+        send(&[Literal("/effort".into()), Enter])?;
+        wait(|| {
+            pane.capture(-80)
+                .filter(|c| tc::tmux_capture_indicates_claude_tui_selector_open(c))
+                .ok_or("effort overlay 열림 미확인".into())
+        })?;
+        let mut plan = vec![Left; 4];
+        plan.extend(std::iter::repeat_n(Right, level as usize));
+        plan.push(Enter);
+        send(&plan)?;
+        wait(|| {
+            let value = record(native, after).map_err(str::to_string)?;
+            let seen = value["effort"]["level"]
+                .as_str()
+                .ok_or("effort.level 없는 기록")?;
+            (seen == level.as_str())
+                .then_some(())
+                .ok_or_else(|| format!("effort.level 불일치: `{seen}`"))
+        })
+        .map_err(|reason| format!("적용 미확인: {reason}"))?;
+        Ok(())
+    })
+    .await
+}
+
+pub(in crate::services::discord::commands) async fn fast(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    desired: Option<bool>,
+) -> Result<(bool, bool), String> {
+    use crate::services::provider_hosting::{
+        ProviderSessionDriver, resolve_provider_session_selection_with_channel,
+    };
+    if resolve_provider_session_selection_with_channel(
+        &ProviderKind::Claude,
+        true,
+        Some(channel.get()),
+    )
+    .driver
+        != ProviderSessionDriver::TuiHosting
+    {
+        return Err("Herdr /fast는 live Claude TUI pane에서만 지원합니다.".into());
+    }
+    with_ready_pane(shared, channel, move |pane, native, after| {
+        let read = |after| {
+            record(native, after).map_err(str::to_string)?["fast_mode"]
+                .as_bool()
+                .ok_or("fast_mode 없는 기록".into())
+        };
+        let before = wait(|| read(after))?;
+        let next = desired.unwrap_or(!before);
+        if next == before {
+            return Ok((next, false));
+        }
+        let sent_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs_f64();
+        use input::TuiInputAction::{Enter, Literal};
+        host_input::run_herdr(pane, &[Literal("/fast".into()), Enter], None).into_legacy()?;
+        wait(|| {
+            let seen = read(sent_at)?;
+            (seen == next)
+                .then_some(())
+                .ok_or_else(|| format!("fast_mode 불일치: `{seen}`"))
+        })
+        .map_err(|e| format!("적용 미확인: {e}"))?;
+        Ok((next, true))
+    })
+    .await
 }

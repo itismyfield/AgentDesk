@@ -488,3 +488,352 @@ fn herdr_effort_waits_for_overlay_before_navigation_pg() {
         });
     }
 }
+
+impl Fixture {
+    async fn fast(
+        &self,
+        rig: &HerdrRig,
+        runtime: u64,
+        parent: u64,
+        before: Option<Value>,
+        after: Option<Value>,
+    ) -> String {
+        let shared = self.shared.clone();
+        self.run_fast(rig, before, after, async move {
+            super::super::fast_mode::fast_save_notice(
+                &shared,
+                "test-token",
+                ChannelId::new(runtime),
+                &ProviderKind::Claude,
+                async { ChannelId::new(parent) },
+            )
+            .await
+        })
+        .await
+    }
+
+    async fn run_fast(
+        &self,
+        rig: &HerdrRig,
+        before: Option<Value>,
+        after: Option<Value>,
+        command: impl std::future::Future<Output = std::io::Result<String>> + Send + 'static,
+    ) -> String {
+        rig.answer_after_send("pane.read", screen(READY));
+        let path = self.record.clone();
+        rig.on_send(move |params| {
+            if params["keys"] == json!(["enter"]) {
+                if let Some(mut value) = after.clone() {
+                    if value["written_at"] == "fresh" {
+                        value["written_at"] = json!(now());
+                    }
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(&path, value.to_string()).unwrap();
+                }
+            }
+        });
+        let requests = rig.requests().len();
+        let command = tokio::spawn(command);
+        await_within(
+            async {
+                while !command.is_finished()
+                    && !rig.requests()[requests..]
+                        .iter()
+                        .any(|r| r["method"] == "pane.read")
+                {
+                    tokio::task::yield_now().await;
+                }
+            },
+            WAIT_CAP,
+        )
+        .await;
+        if let Some(mut value) = before {
+            if value["written_at"] == "fresh" {
+                value["written_at"] = json!(now());
+            }
+            std::fs::create_dir_all(self.record.parent().unwrap()).unwrap();
+            std::fs::write(&self.record, value.to_string()).unwrap();
+        }
+        await_within(command, WAIT_CAP)
+            .await
+            .unwrap()
+            .unwrap_or_else(|e| e.to_string())
+    }
+
+    async fn assert_fast_preserved(&self, rig: &HerdrRig, keys: &AtomicUsize, runtime: u64) {
+        let settings = self.shared.settings.read().await;
+        assert!(
+            settings.channel_fast_mode_reset_pending.is_empty(),
+            "no persisted pending reset"
+        );
+        assert!(settings.channel_relaunch_pending.is_empty());
+        assert!(
+            self.shared
+                .overrides
+                .fast_mode_session_reset_pending
+                .is_empty()
+        );
+        assert!(
+            self.shared.overrides.session_reset_pending.is_empty(),
+            "no pending reset"
+        );
+        assert_eq!(
+            settings.channel_fast_modes.get(&CHANNEL.to_string()),
+            Some(&true)
+        );
+        assert!(
+            !settings
+                .channel_fast_modes
+                .contains_key(&runtime.to_string())
+                || runtime == CHANNEL
+        );
+        assert_eq!(keys.load(Ordering::SeqCst), 0, "no tmux input");
+        assert_eq!(
+            self.shared.core.lock().await.sessions[&ChannelId::new(runtime)]
+                .session_id
+                .as_deref(),
+            Some(NATIVE)
+        );
+        let bound: Value =
+            sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
+                .bind(runtime.to_string())
+                .fetch_one(self.shared.pg_pool.as_ref().unwrap())
+                .await
+                .unwrap();
+        assert_eq!(
+            bound,
+            serde_json::to_value(&self.bound).unwrap(),
+            "same execution/nonce/pane"
+        );
+        assert!(
+            rig.requests().iter().all(|r| !matches!(
+                r["method"].as_str(),
+                Some("workspace.create" | "pane.create" | "pane.close" | "workspace.close")
+            )),
+            "no close/create: {:?}",
+            rig.requests()
+        );
+    }
+}
+
+fn with_fast_rig(run: impl FnOnce(&HerdrRig, &Arc<AtomicUsize>, &tokio::runtime::Runtime)) {
+    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_INSTANCE_ID",
+        std::ffi::OsStr::new(NODE),
+    );
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &crate::config::runtime_root().unwrap().join("missing.yaml"),
+    );
+    let _hosting = hosting();
+    let rig = HerdrRig::start();
+    let keys = Arc::new(AtomicUsize::new(0));
+    let rt = runtime(&rig, keys.clone());
+    run(&rig, &keys, &rt);
+}
+
+#[test]
+fn herdr_fast_toggles_native_once_without_reset_pg() {
+    with_fast_rig(|rig, keys, rt| {
+        rt.block_on(async {
+            let fx = Fixture::new(rig).await;
+            fx.shared
+                .settings
+                .write()
+                .await
+                .channel_fast_modes
+                .insert(CHANNEL.to_string(), true);
+            for enabled in [false, true] {
+                rig.on_send(|_| {});
+                let _ = std::fs::remove_file(&fx.record);
+                let sent = rig.sends().len();
+                let notice = fx
+                    .fast(
+                        rig,
+                        CHANNEL,
+                        CHANNEL,
+                        Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":enabled})),
+                        Some(
+                            json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":!enabled}),
+                        ),
+                    )
+                    .await;
+                fx.assert_fast_preserved(rig, keys, CHANNEL).await;
+                assert!(
+                    notice.contains(&format!("fast mode를 `{}`로 적용했습니다", !enabled)),
+                    "{notice}"
+                );
+                let sends = rig.sends();
+                assert_eq!(
+                    sends.len() - sent,
+                    2,
+                    "one native /fast and Enter: {sends:?}"
+                );
+                assert_eq!(sends[sent]["text"], "/fast");
+                assert_eq!(sends[sent + 1]["keys"], json!(["enter"]));
+                assert!(sends[sent..].iter().all(|p| p["pane_id"] == PANE));
+            }
+            // Direct settings callers use the same runtime pane and also stop before reset storage.
+            let shared = fx.shared.clone();
+            let sent = rig.sends().len();
+            let changed = fx
+                .run_fast(
+                    rig,
+                    Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false})),
+                    Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":true})),
+                    async move {
+                        super::super::config::update_channel_fast_mode(
+                            &shared,
+                            "test-token",
+                            ChannelId::new(CHANNEL),
+                            &ProviderKind::Claude,
+                            true,
+                            ChannelId::new(CHANNEL),
+                        )
+                        .await
+                        .map(|changed| changed.to_string())
+                    },
+                )
+                .await;
+            assert_eq!(changed, "true");
+            assert_eq!(rig.sends().len() - sent, 2);
+            fx.assert_fast_preserved(rig, keys, CHANNEL).await;
+            // The initial fresh receipt is not a post-toggle confirmation, even when ACK succeeds.
+            let sent = rig.sends().len();
+            let notice = fx
+                .fast(
+                    rig,
+                    CHANNEL,
+                    CHANNEL,
+                    Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false})),
+                    None,
+                )
+                .await;
+            assert!(
+                !notice.contains("적용했습니다"),
+                "ACK is not application: {notice}"
+            );
+            assert_eq!(
+                rig.sends().len() - sent,
+                2,
+                "no retry after unconfirmed ACK"
+            );
+            fx.assert_fast_preserved(rig, keys, CHANNEL).await;
+            fx.finish().await;
+        })
+    });
+}
+
+#[test]
+fn herdr_fast_mismatch_never_reports_success_or_retries_toggle_pg() {
+    with_fast_rig(|rig, keys, rt| {
+        rt.block_on(async {
+            let fx = Fixture::new(rig).await;
+            fx.shared
+                .settings
+                .write()
+                .await
+                .channel_fast_modes
+                .insert(CHANNEL.to_string(), true);
+            for after in [
+                Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false})),
+                Some(json!({"session_id":NATIVE,"written_at":0.0,"fast_mode":true})),
+                Some(json!({"session_id":"other","written_at":"fresh","fast_mode":true})),
+                Some(json!({"session_id":NATIVE,"written_at":"fresh"})),
+                None,
+            ] {
+                let _ = std::fs::remove_file(&fx.record);
+                let sent = rig.sends().len();
+                let notice = fx
+                    .fast(
+                        rig,
+                        CHANNEL,
+                        CHANNEL,
+                        Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false})),
+                        after,
+                    )
+                    .await;
+                assert!(notice.contains("적용 미확인"), "{notice}");
+                assert!(!notice.contains("적용했습니다"), "{notice}");
+                assert_eq!(
+                    rig.sends().len() - sent,
+                    2,
+                    "exactly one toggle, no retries"
+                );
+                fx.assert_fast_preserved(rig, keys, CHANNEL).await;
+            }
+            for before in [
+                Some(json!({"session_id":NATIVE,"written_at":0.0,"fast_mode":false})),
+                Some(json!({"session_id":"other","written_at":"fresh","fast_mode":false})),
+                Some(json!({"session_id":NATIVE,"written_at":"fresh"})),
+                None,
+            ] {
+                let _ = std::fs::remove_file(&fx.record);
+                let sent = rig.sends().len();
+                let notice = fx.fast(rig, CHANNEL, CHANNEL, before, None).await;
+                assert!(!notice.contains("적용했습니다"), "{notice}");
+                assert_eq!(
+                    rig.sends().len(),
+                    sent,
+                    "unknown current state never toggles"
+                );
+            }
+            fx.finish().await;
+        })
+    });
+}
+
+#[test]
+fn herdr_thread_fast_targets_runtime_pane_without_parent_reset_pg() {
+    with_fast_rig(|rig, keys, rt| {
+        rt.block_on(async {
+        let mut fx = Fixture::new(rig).await;
+        let thread = CHANNEL + 1;
+        let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(CHANNEL,NODE),(thread,NODE)]);
+        map_channel(&fx.shared, ChannelId::new(thread), "herdr-thread-fast").await;
+        {
+            let mut core = fx.shared.core.lock().await;
+            let session = core.sessions.get_mut(&ChannelId::new(thread)).unwrap();
+            session.session_id = Some(NATIVE.into());
+            session.current_path = Some("/work".into());
+        }
+        fx.logical = ProviderKind::Claude.build_tmux_session_name("herdr-thread-fast");
+        std::fs::write(crate::services::tmux_common::session_temp_path(&fx.logical,"host_kind"),"herdr").unwrap();
+        fx.bound.owner.channel_id = thread.to_string();
+        fx.bound.owner.logical_key = fx.logical.clone();
+        fx.bound.source_ref.channel = thread.to_string();
+        fx.bound.source_ref.logical_key = fx.logical.clone();
+        let pool = fx.shared.pg_pool.as_ref().unwrap();
+        sqlx::query("UPDATE sessions SET channel_id=$1, hosted_execution=$2, session_key=$3")
+            .bind(thread.to_string()).bind(serde_json::to_value(&fx.bound).unwrap())
+            .bind(crate::services::discord::adk_session::build_namespaced_session_key(&fx.shared.token_hash,&ProviderKind::Claude,&fx.logical)).execute(pool).await.unwrap();
+        // A live parent pane is deliberately a different location with its own native session.
+        let mut parent = fx.bound.clone();
+        parent.owner.channel_id = CHANNEL.to_string();
+        parent.owner.logical_key = ProviderKind::Claude.build_tmux_session_name("herdr-effort");
+        parent.source_ref.channel = CHANNEL.to_string();
+        parent.source_ref.logical_key = parent.owner.logical_key.clone();
+        parent.location.as_mut().unwrap().pane_id = "parent-pane".into();
+        sqlx::query("INSERT INTO sessions (session_key,provider,status,identity_kind,discord_token_hash,channel_id,cwd,agent_id,claude_session_id,hosted_execution) VALUES ($1,'claude','idle','discord_channel',$2,$3,'/work','settings-agent',$4,$5)")
+            .bind(crate::services::discord::adk_session::build_namespaced_session_key(&fx.shared.token_hash,&ProviderKind::Claude,&parent.owner.logical_key))
+            .bind(&fx.shared.token_hash).bind(CHANNEL.to_string()).bind("parent-native").bind(serde_json::to_value(&parent).unwrap()).execute(pool).await.unwrap();
+        fx.shared.settings.write().await.channel_fast_modes.insert(CHANNEL.to_string(), true);
+        let notice = fx.fast(rig, thread, CHANNEL,
+            Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false})),
+            Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":true}))).await;
+        assert!(notice.contains("fast mode를 `true`로 적용했습니다"), "{notice}");
+        assert_eq!(rig.sends().len(),2);
+        assert!(rig.sends().iter().all(|p|p["pane_id"]==PANE), "parent pane receives zero keys");
+        // Check the thread row separately; the parent row remains byte-identical.
+        let parent_after: Value = sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
+            .bind(CHANNEL.to_string()).fetch_one(pool).await.unwrap();
+        assert_eq!(parent_after,serde_json::to_value(&parent).unwrap());
+        fx.assert_fast_preserved(rig,keys,thread).await;
+        fx.finish().await;
+    })
+    });
+}

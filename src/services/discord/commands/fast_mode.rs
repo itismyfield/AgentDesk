@@ -76,55 +76,68 @@ pub(in crate::services::discord) async fn cmd_fast(ctx: Context<'_>) -> Result<(
         return Ok(());
     }
 
-    let notice: std::io::Result<String> = async {
-        ctx.data()
-            .shared
-            .check_settings_owner(&effective_provider, channel_id)
-            .await?;
-        let runtime_channel_id = channel_id;
-        let channel_id = ctx
-            .data()
-            .shared
-            .feature_command_channel_id(
-                &ctx.serenity_context().http,
-                &effective_provider,
-                channel_id,
-            )
-            .await;
-        let currently_enabled = channel_fast_mode_setting(&ctx.data().shared, channel_id)
-            .await
-            .unwrap_or(false);
-        let next_enabled = !currently_enabled;
-        update_channel_fast_mode(
-            &ctx.data().shared,
-            &ctx.data().token,
-            channel_id,
+    ctx.defer().await?;
+    let notice = fast_save_notice(
+        &ctx.data().shared,
+        &ctx.data().token,
+        channel_id,
+        &effective_provider,
+        ctx.data().shared.feature_command_channel_id(
+            &ctx.serenity_context().http,
             &effective_provider,
-            next_enabled,
-            runtime_channel_id,
-        )
-        .await?;
-
-        if claude_local_tui_relaunch_applies(&effective_provider, runtime_channel_id) {
-            let shared_with_parent = runtime_channel_id != channel_id;
-            return Ok(build_fast_relaunch_notice(next_enabled, shared_with_parent));
-        }
-        let reset_pending = ctx
-            .data()
-            .shared
-            .overrides
-            .session_reset_pending
-            .contains(&channel_id);
-        let notice = if next_enabled {
-            build_fast_enabled_notice(&effective_provider, reset_pending)
-        } else {
-            build_fast_disabled_notice(&effective_provider, reset_pending)
-        };
-        let scope = feature_scope_notice(runtime_channel_id != channel_id);
-        Ok(format!("{notice}{scope}"))
-    }
+            channel_id,
+        ),
+    )
     .await;
     ctx.say(notice.unwrap_or_else(|error| format!("설정을 저장하지 못했습니다: {error}")))
         .await?;
     Ok(())
+}
+
+pub(super) async fn fast_save_notice(
+    shared: &std::sync::Arc<super::super::SharedData>,
+    token: &str,
+    channel_id: poise::serenity_prelude::ChannelId,
+    effective_provider: &ProviderKind,
+    settings_channel: impl std::future::Future<Output = poise::serenity_prelude::ChannelId>,
+) -> std::io::Result<String> {
+    shared
+        .check_settings_owner(effective_provider, channel_id)
+        .await?;
+    if matches!(effective_provider, ProviderKind::Claude)
+        && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
+    {
+        return super::tui_passthrough::herdr_settings::fast(shared, channel_id, None)
+            .await
+            .map(|(enabled, _)| format!("fast mode를 `{enabled}`로 적용했습니다."))
+            .map_err(std::io::Error::other);
+    }
+    let runtime_channel_id = channel_id;
+    let channel_id = settings_channel.await;
+    let currently_enabled = channel_fast_mode_setting(shared, channel_id)
+        .await
+        .unwrap_or(false);
+    let next_enabled = !currently_enabled;
+    update_channel_fast_mode(
+        shared,
+        token,
+        channel_id,
+        effective_provider,
+        next_enabled,
+        runtime_channel_id,
+    )
+    .await?;
+
+    if claude_local_tui_relaunch_applies(effective_provider, runtime_channel_id) {
+        let shared_with_parent = runtime_channel_id != channel_id;
+        return Ok(build_fast_relaunch_notice(next_enabled, shared_with_parent));
+    }
+    let reset_pending = shared.overrides.session_reset_pending.contains(&channel_id);
+    let notice = if next_enabled {
+        build_fast_enabled_notice(effective_provider, reset_pending)
+    } else {
+        build_fast_disabled_notice(effective_provider, reset_pending)
+    };
+    let scope = feature_scope_notice(runtime_channel_id != channel_id);
+    Ok(format!("{notice}{scope}"))
 }

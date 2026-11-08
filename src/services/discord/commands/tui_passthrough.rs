@@ -1,6 +1,6 @@
 use crate::services::provider::ProviderKind;
 
-mod herdr_settings;
+pub(super) mod herdr_settings;
 
 use super::super::{Context, Error, SharedData, check_auth};
 use super::config::{effective_provider_for_channel, fallback_channel_name_for_feature_toggle};
