@@ -348,7 +348,9 @@ fn herdr_settings_reject_foreign_channel_cwd_or_agent_before_keys_pg() {
     );
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(CHANNEL, NODE)]);
     let _hosting = hosting();
-    for case in ["channel", "cwd", "agent", "pane-cwd", "pending", "gate"] {
+    for case in [
+        "channel", "cwd", "agent", "pane-cwd", "pending", "gate", "modal",
+    ] {
         let rig = HerdrRig::start();
         let keys = Arc::new(AtomicUsize::new(0));
         runtime(&rig,keys.clone()).block_on(async {
@@ -361,6 +363,7 @@ fn herdr_settings_reject_foreign_channel_cwd_or_agent_before_keys_pg() {
                 "agent" => {sqlx::query("UPDATE sessions SET agent_id='other-agent'").execute(pool).await.unwrap();},
                 "pane-cwd" => rig.answer("pane.get",json!({"type":"pane_info","pane":{"pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","revision":1,"cwd":"/other","foreground_cwd":"/other"}})),
                 "gate" => {rig.run_provider(&rig.context(&uuid::Uuid::new_v4().simple().to_string()),false);},
+                "modal" => rig.answer("pane.read", screen(&format!("{READY}\nAllow / Deny\nEnter to confirm · Esc to cancel"))),
                 _ => unreachable!(),
             }
             if matches!(case,"channel"|"pending") {sqlx::query("UPDATE sessions SET hosted_execution=$1").bind(serde_json::to_value(&fx.bound).unwrap()).execute(pool).await.unwrap();}

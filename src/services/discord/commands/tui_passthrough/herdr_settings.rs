@@ -95,10 +95,11 @@ fn wait<T>(mut observe: impl FnMut() -> Result<T, String>) -> Result<T, String> 
 }
 
 fn ready(capture: &str) -> bool {
-    input::final_prompt_ready(&input::prompt_readiness_snapshot_from_capture(
-        Some(capture),
-        true,
-    ))
+    !tc::tmux_capture_indicates_claude_tui_interactive_modal(capture)
+        && input::final_prompt_ready(&input::prompt_readiness_snapshot_from_capture(
+            Some(capture),
+            true,
+        ))
 }
 
 fn record(session: &str, after: f64) -> Result<String, &'static str> {
