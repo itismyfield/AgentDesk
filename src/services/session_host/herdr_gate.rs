@@ -590,18 +590,26 @@ impl HerdrTarget {
 
     /// A read of the pane's screen; `scroll_back` follows the tmux capture convention.
     pub(crate) fn capture(&self, scroll_back: i32) -> Option<String> {
+        self.capture_checked(scroll_back).ok()
+    }
+
+    /// [`Self::capture`] that keeps why a read was refused, for a caller that reports it.
+    pub(crate) fn capture_checked(&self, scroll_back: i32) -> Result<String, HostError> {
         self.read(contract::capture_request(&self.0.pane, scroll_back))
     }
 
     /// The same read with ANSI styling kept, under the same source and truncation checks.
     pub(crate) fn capture_ansi(&self, scroll_back: i32) -> Option<String> {
         self.read(contract::capture_ansi_request(&self.0.pane, scroll_back))
+            .ok()
     }
 
-    fn read(&self, request: HerdrRequest) -> Option<String> {
+    fn read(&self, request: HerdrRequest) -> Result<String, HostError> {
         let call = self.0.call(request);
         let (outcome, _) = self.0.transport.call(&call);
-        contract::capture_result(&call, outcome, &self.0.pane).ok()
+        contract::capture_result(&call, outcome, &self.0.pane).inspect_err(|why| {
+            tracing::warn!(pane = %self.0.pane, ?why, "herdr gate: pane read refused");
+        })
     }
 
     /// Whether a complete snapshot of the endpoint shows the pane.

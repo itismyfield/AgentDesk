@@ -113,7 +113,8 @@ fn unsupported_notice(provider: &ProviderKind, command: ClaudeSlashPassthrough) 
     )
 }
 
-/// Applies effort on a live Herdr pane, or saves it for a local tmux TUI relaunch.
+/// Applies effort on a live Herdr pane and saves it for that pane's next launch, or saves it
+/// for a local tmux TUI relaunch.
 pub(super) async fn effort_save_notice(
     shared: &std::sync::Arc<SharedData>,
     token: &str,
@@ -134,7 +135,7 @@ pub(super) async fn effort_save_notice(
         {
             return "Herdr /effort는 live Claude TUI pane에서만 지원합니다.".into();
         }
-        return match herdr_settings::effort(shared, channel_id, level).await {
+        return match herdr_settings::effort(shared, token, channel_id, level).await {
             Ok(()) => format!("effort를 `{}`로 적용했습니다.", level.as_str()),
             Err(error) => format!("effort 적용 미확인: {error}"),
         };
