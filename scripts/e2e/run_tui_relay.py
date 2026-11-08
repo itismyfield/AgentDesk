@@ -2671,13 +2671,21 @@ def _retained_input_waiting(entry: Any) -> bool:
     if (not isinstance(notice, dict) or set(notice) != {"kind", "enqueued"}
             or notice.get("enqueued") is not True):
         return True
-    if (entry.get("disposition"), notice["kind"], entry.get("reason")) == (None, "cleared", {"kind": "unconfirmed"}):
+    if not _owed_to_owner(entry):
         return False
     return (entry.get("disposition"), notice["kind"]) not in (
         ("known_not_sent", "retained_retry_required"),
         ("opaque_unsent", "retained_retry_required"),
         (None, "unconfirmed"),
     )
+
+
+def _owed_to_owner(entry: Any) -> bool:
+    """RetainedInput::owed_to_owner: only an unconfirmed retention a clear already told is not owed."""
+    notice = entry.get("notice") if isinstance(entry, dict) else None
+    return not (isinstance(notice, dict) and set(notice) == {"kind", "enqueued"} and notice["kind"] == "cleared"
+                and notice["enqueued"] is True and entry.get("disposition") is None
+                and entry.get("reason") == {"kind": "unconfirmed"})
 
 
 def _queue_v2_waiting(payload: Any) -> bool | None:
@@ -2698,15 +2706,16 @@ def _queue_v2_waiting(payload: Any) -> bool | None:
 
 
 def _bind_closed_by_retained(at: dict, retained: list) -> bool:
-    """An attempt bind of an input that was retained and already re-sent notice has nothing left to run."""
+    """An attempt bind of a retained input already told has nothing left to run; a follower's bind closes
+    only with a retention no owner owes (RetainedInput::closes_bind)."""
     identity, attempt = at.get("identity"), at.get("attempt")
     if (at.get("kind") != "attempt" or not isinstance(identity, dict) or "primary" not in identity
             or not isinstance(attempt, dict) or not attempt.get("nonce")):
         return False
     return any(
-        isinstance(entry, dict) and not _retained_input_waiting(entry) and isinstance(entry.get("input"), dict)
-        and entry["input"].get("attempt") == attempt
-        and (entry["input"].get("identity") == identity or identity in _member_identities(entry["input"]))
+        isinstance(entry, dict) and isinstance(entry.get("input"), dict) and entry["input"].get("attempt") == attempt
+        and ((not _retained_input_waiting(entry) and entry["input"].get("identity") == identity)
+             or (not _owed_to_owner(entry) and identity in _member_identities(entry["input"])))
         for entry in retained)
 
 
