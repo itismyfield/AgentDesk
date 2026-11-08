@@ -259,24 +259,52 @@ pub(super) async fn kill_tmux_session_impl(
         .await;
         let probe_name = tmux_name.clone();
         let probe_reason = reason.to_string();
+        // The stored provider session id can re-prove a Codex rollout after its binding and marker are gone.
+        let stored = match dispatched_sessions_db::load_provider_session_ids_pg(
+            pool,
+            session_key,
+            effective_provider_name,
+        )
+        .await
+        {
+            Ok(ids) => ids.map(|ids| (ids.raw_provider_session_id, ids.cwd)),
+            Err(error) => {
+                tracing::warn!(
+                    session_key,
+                    error,
+                    "kill-tmux: stored provider session unreadable"
+                );
+                None
+            }
+        };
         let probe = if unoccupied {
             tokio::task::spawn_blocking(move || {
                 crate::services::tmux_turn_liveness::kill_proven_idle_provider_session(
                     &probe_name,
                     &probe_reason,
+                    || {
+                        let (id, cwd) = stored.unwrap_or_default();
+                        crate::services::codex_tui::session::prove_codex_rollout_by_session_id(
+                            id.as_deref(),
+                            cwd.as_deref(),
+                            None,
+                        )
+                        .map_err(Some)
+                    },
                 )
             })
             .await
-            .unwrap_or(Err("probe_task_failed"))
+            .unwrap_or(Err(("probe_task_failed", None)))
         } else {
-            Err("session_occupied")
+            Err(("session_occupied", None))
         };
         match probe {
             Ok(killed) => idle_tmux_kill_result = Some(killed),
-            Err(preserved_reason) => {
+            Err((preserved_reason, transcript_diagnostic)) => {
                 tracing::info!(
                     session_key,
                     preserved_reason,
+                    transcript_diagnostic = ?transcript_diagnostic,
                     "idle cleanup preserved provider: idle state not proven"
                 );
                 record_idle_cleanup_preserved(
@@ -297,6 +325,7 @@ pub(super) async fn kill_tmux_session_impl(
                         "session_row_preserved": true,
                         "skipped_provider_activity_guard": true,
                         "preserved_reason": preserved_reason,
+                        "transcript_diagnostic": transcript_diagnostic,
                     })),
                 );
             }

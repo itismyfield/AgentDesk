@@ -745,6 +745,43 @@ fn matching_rollout_candidates(
         .collect()
 }
 
+/// The rollout of a stored provider session id, accepted only when exactly one TUI rollout
+/// matches the id and cwd. Err is the operator diagnostic of what was searched and missing.
+pub(crate) fn prove_codex_rollout_by_session_id(
+    session_id: Option<&str>,
+    cwd: Option<&str>,
+    sessions_dir: Option<&Path>,
+) -> Result<PathBuf, Value> {
+    let id = session_id.map(str::trim).filter(|id| !id.is_empty());
+    let cwd = cwd.map(str::trim).filter(|cwd| !cwd.is_empty());
+    let root = sessions_dir
+        .map(Path::to_path_buf)
+        .or_else(default_codex_sessions_dir);
+    let miss = |missing: &str, matching: usize| {
+        serde_json::json!({
+            "provider_session_id": id,
+            "cwd": cwd,
+            "sessions_dir": root.as_ref().map(|root| root.display().to_string()),
+            "missing": missing,
+            "matching_rollouts": matching,
+        })
+    };
+    let (Some(id), Some(cwd), Some(root)) = (id, cwd, root.as_deref()) else {
+        let missing = match (id, cwd) {
+            (None, _) => "stored_provider_session_id",
+            (_, None) => "stored_cwd",
+            _ => "sessions_dir",
+        };
+        return Err(miss(missing, 0));
+    };
+    let mut matching = matching_rollout_candidates(root, Path::new(cwd), id);
+    match matching.len() {
+        1 => Ok(matching.remove(0).path),
+        0 => Err(miss("rollout_for_session_id", 0)),
+        many => Err(miss("unique_rollout_for_session_id", many)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

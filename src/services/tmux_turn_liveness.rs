@@ -22,19 +22,29 @@ pub(crate) enum IndependentTmuxReadiness {
 /// that a provider stopped working. Missing bindings/captures fail closed.
 pub(crate) fn provider_session_is_proven_idle(tmux_session_name: &str) -> bool {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        provider_session_is_proven_idle_under_authority(authority).is_ok()
+        provider_session_is_proven_idle_under_authority(authority, unrecoverable).is_ok()
     })
 }
 
+/// A transcript recovery that has no stored identity to prove anything with.
+fn unrecoverable() -> Result<std::path::PathBuf, Option<serde_json::Value>> {
+    Err(None)
+}
+
+/// Why idle cleanup kept the session, plus an operator diagnostic when transcript recovery ran.
+pub(crate) type IdlePreserved = (&'static str, Option<serde_json::Value>);
+
 /// Keep the final provider probe and kill under the same source authority used
 /// by runtime rebinding, so a replacement binding cannot race an idle decision.
+/// `recover_codex` runs only when neither binding nor marker names a Codex transcript.
 /// Err names why the session was preserved; Ok(false) means the kill failed.
 pub(crate) fn kill_proven_idle_provider_session(
     tmux_session_name: &str,
     reason: &str,
-) -> Result<bool, &'static str> {
+    recover_codex: impl FnOnce() -> Result<std::path::PathBuf, Option<serde_json::Value>>,
+) -> Result<bool, IdlePreserved> {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        provider_session_is_proven_idle_under_authority(authority).map(|()| {
+        provider_session_is_proven_idle_under_authority(authority, recover_codex).map(|()| {
             crate::services::platform::tmux::kill_session_output_timeout(
                 tmux_session_name,
                 reason,
@@ -47,12 +57,13 @@ pub(crate) fn kill_proven_idle_provider_session(
 
 pub(crate) fn provider_session_is_proven_idle_under_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-) -> Result<(), &'static str> {
+    recover_codex: impl FnOnce() -> Result<std::path::PathBuf, Option<serde_json::Value>>,
+) -> Result<(), IdlePreserved> {
     let tmux_session_name = authority.session();
     let Some((provider, _)) =
         crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_session_name)
     else {
-        return Err("provider_unknown");
+        return Err(("provider_unknown", None));
     };
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
@@ -76,19 +87,23 @@ pub(crate) fn provider_session_is_proven_idle_under_authority(
                 })
                 .flatten()
         });
-    let Some(native_path) = native_path else {
-        return Err("transcript_unresolved");
+    let native_path = match native_path {
+        Some(path) => path,
+        None if matches!(provider, ProviderKind::Codex) => {
+            recover_codex().map_err(|detail| ("transcript_unresolved", detail))?
+        }
+        None => return Err(("transcript_unresolved", None)),
     };
     let Some(pane) = crate::services::platform::tmux::capture_pane_timeout(
         tmux_session_name,
         -80,
         std::time::Duration::from_secs(2),
     ) else {
-        return Err("pane_capture_failed");
+        return Err(("pane_capture_failed", None));
     };
     provider_output_is_proven_idle(&provider, &native_path, &pane)
         .then_some(())
-        .ok_or("provider_idle_not_proven")
+        .ok_or(("provider_idle_not_proven", None))
 }
 
 fn provider_output_is_proven_idle(provider: &ProviderKind, native_path: &Path, pane: &str) -> bool {
