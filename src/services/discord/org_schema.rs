@@ -475,9 +475,8 @@ pub(crate) fn overlay_from_tmux_session(
     )
 }
 
-/// Home the next launch for this channel reads, judged without the fallback router or quota record.
-/// Intake picks the launch agent per message (name binding, thread parent, DM default, dispatch reuse),
-/// so a home is promised only when every agent the launch could carry yields it; otherwise `Err`.
+/// Home the next launch reads, without touching the fallback router or quota record. Intake picks the
+/// agent per message, so a home is promised only when every agent the launch could carry yields it.
 pub(crate) fn predicted_launch_home(
     provider: ProviderKind,
     channel_id: Option<u64>,
