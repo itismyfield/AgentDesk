@@ -911,7 +911,11 @@ impl PaneGate {
             HostKindMarker::Known(HostKind::Herdr) => {}
             HostKindMarker::Known(_) => return Err(HerdrGateRefusal::MarkerOtherHost),
             HostKindMarker::Absent
-                if self.marker_absent_by_pane && mutation == Mutation::Terminate => {}
+                if self.marker_absent_by_pane && mutation == Mutation::Terminate =>
+            {
+                tracing::warn!(pane = %self.pane, verify_by_pane = true,
+                    "herdr gate: absent marker admitted on the pane proof");
+            }
             _ => return Err(HerdrGateRefusal::MarkerUnverified),
         }
         self.policy_witness(mutation)

@@ -317,6 +317,7 @@ fn act_route_marker_lost_provider_running_retires_by_pane_pg() {
     runtime.block_on(async {
         let node = Node::bind(&rig, None).await;
         std::fs::remove_file(node.marker()).unwrap();
+        let (results, _logs) = capture();
         let (status, reply) = node.terminate(herdr::EXECUTION).await;
         assert_eq!(
             (status, &reply["result"]),
@@ -340,6 +341,14 @@ fn act_route_marker_lost_provider_running_retires_by_pane_pg() {
             "{reply}"
         );
         assert_eq!(closes(&rig), 1);
+        let records = results.take();
+        let by_pane: Vec<_> = records
+            .iter()
+            .map(|r| r["verify_by_pane"].clone())
+            .collect();
+        assert_eq!(by_pane, ["false", "true"], "{records:?}");
+        let logged = results_of(records, &node.key, herdr::EXECUTION);
+        assert_eq!(logged, ["refused", "retired"]);
         let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
         assert_eq!(node.row().await, Some(retired));
         assert!(!herdr::held());

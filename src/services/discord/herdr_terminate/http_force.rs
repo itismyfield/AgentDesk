@@ -45,6 +45,7 @@ where
         key: request.session_key.clone(),
         nonce: request.execution_nonce.clone(),
         reason: reason.into(),
+        verify_by_pane: false,
         started: std::time::Instant::now(),
     };
     let shared = match runtime_of(registry, &pool, &request.session_key).await {

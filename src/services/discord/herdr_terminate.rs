@@ -690,6 +690,7 @@ pub(crate) async fn terminate_registered_herdr(
         key: request.request.session_key.clone(),
         nonce: request.request.execution_nonce.clone(),
         reason,
+        verify_by_pane: request.by_pane,
         started: std::time::Instant::now(),
     };
     let shared = match runtime_of(registry, &pool, &request.request.session_key).await {
@@ -743,6 +744,8 @@ struct Logged {
     key: String,
     nonce: String,
     reason: String,
+    /// The operator asked for the pane proof to stand in for an absent marker.
+    verify_by_pane: bool,
     started: std::time::Instant,
 }
 impl Logged {
@@ -753,12 +756,15 @@ impl Logged {
         let (name, detail) = result.outcome();
         let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let (session_key, execution_nonce, reason) = (&self.key, &self.nonce, &self.reason);
+        let verify_by_pane = self.verify_by_pane;
         if *result == TerminationResult::Retired {
             tracing::info!(target: "agentdesk::herdr_terminate", %session_key, %execution_nonce,
-                %reason, result = name, %detail, elapsed_ms, "herdr terminate finished");
+                %reason, verify_by_pane, result = name, %detail, elapsed_ms,
+                "herdr terminate finished");
         } else {
             tracing::warn!(target: "agentdesk::herdr_terminate", %session_key, %execution_nonce,
-                %reason, result = name, %detail, elapsed_ms, "herdr terminate finished");
+                %reason, verify_by_pane, result = name, %detail, elapsed_ms,
+                "herdr terminate finished");
         }
     }
 }
