@@ -162,17 +162,19 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 /// Copy a transcript that exists in exactly one other home into the same cwd key of the active home.
-/// Returns whether a copy was made; several homes holding the id are refused rather than chosen.
+/// Returns whether a copy was made; ambiguity, an unreadable candidate or a launch reading another home refuse.
 fn adopt_from_other_home(
     cwds: &[PathBuf],
     requested: Option<&str>,
     id: &str,
     home: Option<&Path>,
     others: &[PathBuf],
+    launch_home: Result<&Path, &str>,
 ) -> Result<bool, String> {
     let active = home.map(Path::to_path_buf).or_else(default_claude_home);
     let mut homes: Vec<&PathBuf> = Vec::new();
     let mut found = Vec::new();
+    let mut unreadable = Vec::new();
     for other in others {
         if active
             .as_deref()
@@ -181,7 +183,8 @@ fn adopt_from_other_home(
         {
             continue;
         }
-        let (matches, _) = scan_home(cwds, id, Some(other));
+        let (matches, error) = scan_home(cwds, id, Some(other));
+        unreadable.extend(error.map(|error| (other, error)));
         if !matches.is_empty() {
             homes.push(other);
             found.extend(matches.into_iter().map(|hit| (other, hit)));
@@ -201,6 +204,30 @@ fn adopt_from_other_home(
     let Some((source_home, (_, cwd, source))) = pick else {
         return Ok(false);
     };
+    // An unreadable candidate may hold another copy, so ambiguity cannot be ruled out.
+    if let Some((other, error)) = unreadable.first() {
+        return Err(format!(
+            "세션 {id8} 후보 Claude home {}을 확인하지 못해 복사하지 않음: {error}",
+            other.display()
+        ));
+    }
+    // A copy only helps when the next launch reads the home it lands in.
+    let active = active.ok_or("Claude home directory is unavailable")?;
+    match launch_home {
+        Ok(launch) if same_dir(launch, &active) => {}
+        Ok(launch) => {
+            return Err(format!(
+                "세션 {id8} 트랜스크립트를 복사하지 않음: 복사 대상 {}와 다음 실행 Claude home {}이 다릅니다.",
+                active.display(),
+                launch.display()
+            ));
+        }
+        Err(reason) => {
+            return Err(format!(
+                "세션 {id8} 트랜스크립트를 복사하지 않음: 다음 실행 Claude home을 확정하지 못함({reason})"
+            ));
+        }
+    }
     let target = claude_transcript_path(cwd, id, home)?;
     File::open(source)
         .and_then(|input| {
@@ -247,6 +274,7 @@ pub(super) fn resolve_cwd(
     id: &str,
     home: Option<&Path>,
     others: &[PathBuf],
+    launch_home: Result<&Path, &str>,
 ) -> Result<String, ResumeRebindError> {
     if uuid::Uuid::parse_str(id).is_err() {
         return Err(ResumeRebindError::TargetTranscriptMissing(
@@ -267,7 +295,7 @@ pub(super) fn resolve_cwd(
     let (mut matches, mut lookup_error) = scan_home(&cwds, id, home);
     // Other homes are consulted only when the active home provably holds no copy anywhere in scope.
     if matches.is_empty() && lookup_error.is_none() {
-        match adopt_from_other_home(&cwds, requested, id, home, others) {
+        match adopt_from_other_home(&cwds, requested, id, home, others, launch_home) {
             Ok(true) => (matches, lookup_error) = scan_home(&cwds, id, home),
             Ok(false) => {}
             Err(refusal) => lookup_error = Some(refusal),
@@ -309,16 +337,34 @@ pub(super) async fn resolve_cwd_off_runtime(
     current: Option<String>,
     requested: Option<String>,
     id: String,
+    channel_id: Option<u64>,
+    tmux_name: String,
 ) -> Result<String, ResumeRebindError> {
     let home = claude_home();
     let others = transcript_homes();
     tokio::task::spawn_blocking(move || {
+        // Only a declared extra home can trigger a copy; the launch falls back to the global home.
+        let launch = if others.is_empty() {
+            Err("no transcript_homes declared".to_string())
+        } else {
+            crate::services::discord::org_schema::predicted_launch_home(
+                crate::services::provider::ProviderKind::Claude,
+                channel_id,
+                &tmux_name,
+            )
+            .and_then(|launch| {
+                launch
+                    .or_else(claude_home)
+                    .ok_or_else(|| "Claude home directory is unavailable".to_string())
+            })
+        };
         resolve_cwd(
             current.as_deref(),
             requested.as_deref(),
             &id,
             home.as_deref(),
             &others,
+            launch.as_deref().map_err(String::as_str),
         )
     })
     .await

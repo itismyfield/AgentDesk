@@ -401,6 +401,8 @@ pub(crate) async fn perform_resume_rebind(
                     current_cwd.clone(),
                     opts.cwd.clone(),
                     session_id.trim().to_string(),
+                    channel_id.map(|id| id.get()),
+                    tmux_name.to_string(),
                 )
                 .await?
             } else {
@@ -448,7 +450,8 @@ pub(crate) async fn perform_resume_rebind(
         return Err(ResumeRebindError::TargetCwdMissing(target_cwd));
     }
 
-    // A Herdr-configured channel, then the stored rows, are judged before the first change below.
+    // A Herdr-configured channel, then the stored rows, are judged before the first binding or
+    // teardown change below; a transcript copy made by the cwd lookup above is not undone.
     let configured_refusal = crate::services::discord::admin_host_guard::configured_refusal;
     if let Some(reason) = channel_id.and_then(|id| configured_refusal(id.get())) {
         return Err(ResumeRebindError::HostUnsupported(reason));

@@ -447,6 +447,53 @@ pub(crate) fn overlay_from_tmux_session(
     )
 }
 
+/// Home the next launch for this channel reads, judged without the fallback router or quota record.
+/// `Err` when launch-time fallback may still pick another account, so no home can be promised.
+pub(crate) fn predicted_launch_home(
+    provider: ProviderKind,
+    channel_id: Option<u64>,
+    session_name: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let channel_id = channel_id.or_else(|| {
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(session_name)
+            .and_then(|(_, channel)| channel.parse().ok())
+    });
+    let agent = channel_id
+        .and_then(|id| resolve_role_binding(ChannelId::new(id), None))
+        .map(|binding| binding.role_id);
+    let schema = load_org_schema_for_auth()?;
+    predicted_launch_home_from(schema.as_ref(), provider, channel_id, agent.as_deref())
+}
+
+fn predicted_launch_home_from(
+    schema: Option<&OrgSchema>,
+    provider: ProviderKind,
+    channel_id: Option<u64>,
+    agent_id: Option<&str>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let catalog = schema
+        .and_then(|schema| schema.provider_auth_profiles.clone())
+        .unwrap_or_default();
+    let (profile, recovery_pinned) =
+        configured_launch_profile(schema, &provider, channel_id, agent_id)?;
+    let fallback = schema
+        .and_then(|schema| schema.provider_auth_fallbacks.get(provider.as_str()))
+        .is_some_and(|policy| policy.enabled);
+    if channel_id.is_some()
+        && !recovery_pinned
+        && fallback
+        && crate::services::provider_auth_profile::extra_account_login_supported(&provider)
+    {
+        return Err(format!(
+            "{} auth fallback chooses the account at launch",
+            provider.as_str()
+        ));
+    }
+    crate::services::provider_auth_profile::resolve(provider, profile.as_deref(), None, &catalog)
+        .map(|overlay| overlay.home)
+        .map_err(|error| error.to_string())
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ProfileBinding {
     pub agent_id: String,
@@ -802,6 +849,29 @@ pub(super) fn lookup_suffix_provider(channel_name: &str) -> Option<ProviderKind>
 mod tests {
     use super::*;
     use crate::services::agent_identity::identity_label;
+
+    #[test]
+    fn predicted_launch_home_follows_the_primary_profile_and_refuses_launch_time_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        let home_path = std::fs::canonicalize(home.path()).unwrap();
+        let _home = crate::config::TestEnvVarGuard::set_path("HOME", &home_path);
+        let profile = home_path.join(".adk/profiles/claude/acct-b");
+        std::fs::create_dir_all(&profile).unwrap();
+        let yaml = format!(
+            "version: 1\nagents: {{}}\nprovider_auth_profiles:\n  acct-b:\n    provider: claude\n    home: {}\nprovider_auth_primary_profiles:\n  claude: acct-b\n",
+            profile.display()
+        );
+        let predict = |schema: Option<&OrgSchema>| {
+            predicted_launch_home_from(schema, ProviderKind::Claude, Some(42), None)
+        };
+        let schema = parse_org_schema(&yaml).unwrap();
+        assert_eq!(predict(Some(&schema)).unwrap(), Some(profile));
+        assert_eq!(predict(None).unwrap(), None);
+        let fallback =
+            format!("{yaml}provider_auth_fallbacks:\n  claude:\n    fallback_profile: default\n");
+        let fallback = parse_org_schema(&fallback).unwrap();
+        assert!(predict(Some(&fallback)).unwrap_err().contains("fallback"));
+    }
 
     #[test]
     fn profile_fallback_configuration_validates_and_defaults_to_auto() {
