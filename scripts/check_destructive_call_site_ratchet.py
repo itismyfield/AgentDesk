@@ -118,9 +118,24 @@ The baseline pins owner growth only and cannot relax declaration maxima. Pieces
 passed through a variable, built at runtime (``push_str``, ``+=``) or read from a
 non-Rust file stay unseen, and the count proves nothing about the warrant a call receives.
 
+``discord_message_delete`` and ``discord_message_edit`` count, per production
+file of ``src/**`` (whole test files and ``cfg(test)`` code excluded), identifiers
+ending in a raw Discord message delete spelling (``delete_message``,
+``delete_channel_message``, ``delete_rollback_channel_message``) or edit spelling
+(``edit_message``, ``edit_channel_message``, ``edit_outbound_message``,
+``edit_outbound_message_classified``) followed by ``(``. Definitions count too.
+A queued placeholder card may only be destroyed through ``queued_card_gate``'s
+teardown token, and that gate file is itself pinned here, so a new raw call in any
+file needs a reviewed baseline diff. ``placeholder_controller.rs`` must not call
+``.detach_by_message(`` at all (comments aside, tests included); that check has no
+baseline, fails whatever the map says, and fails when that file is missing. Limits: a count-preserving move inside one
+file (a raw call relocated into a gated region while another leaves), a removed
+gate call that is not replaced by a raw spelling, and calls through aliases,
+re-exports or other wrappers stay unseen.
+
 ``--check`` rejects growth in an existing file, every UNLISTED file, any
-host_terminate spelling outside its declared sites, and any identity/delivery pairing
-mismatch.  A decrease is allowed for growth: this is a
+host_terminate spelling outside its declared sites, any identity/delivery pairing
+mismatch, and any controller ``detach_by_message`` call.  A decrease is allowed for growth: this is a
 no-growth ratchet.  For an intentional change, run ``--write-baseline`` and
 review the JSON diff in the same commit.
 
@@ -155,6 +170,8 @@ CATEGORIES = (
     "structural_candidate_apply",
     "destructive_warrant_bind",
     "host_terminate",
+    "discord_message_delete",
+    "discord_message_edit",
 )
 WARNING = "These counts are a growth-blocking baseline, not proof of safety."
 REGISTRY_REMOVE_COMMENT = (
@@ -226,6 +243,16 @@ FS_UNLINK_PATTERN = re.compile(
     r"\s*(?:::<|\()"
 )
 INFLIGHT_ROW_CLEAR_OWNER_PREFIX = "src/services/discord/inflight/clear_store/"
+DISCORD_MESSAGE_DELETE_PATTERN = re.compile(
+    r"\w*(?:delete_message|delete_channel_message|delete_rollback_channel_message)\s*\("
+)
+DISCORD_MESSAGE_EDIT_PATTERN = re.compile(
+    r"\w*(?:edit_message|edit_channel_message|edit_outbound_message"
+    r"|edit_outbound_message_classified)\s*\("
+)
+# Queued cards leave the controller only through the queued-card gate's teardown.
+CONTROLLER_PATH = "src/services/discord/placeholder_controller.rs"
+CONTROLLER_DETACH_PATTERN = re.compile(r"\.\s*detach_by_message\s*\(")
 HOST_TERMINATE_OWNER = "src/services/termination_audit/host_terminate.rs"
 # Fixed model, judged leaf and test spellings need no baseline growth;
 # any additional spelling still exceeds a measured per-file ceiling.
@@ -648,6 +675,13 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
             clear_found = len(INFLIGHT_ROW_CLEAR_PATTERN.findall(production))
             if clear_found:
                 counts["inflight_row_clear_call"][rel] = clear_found
+        for category, pattern in (
+            ("discord_message_delete", DISCORD_MESSAGE_DELETE_PATTERN),
+            ("discord_message_edit", DISCORD_MESSAGE_EDIT_PATTERN),
+        ):
+            message_found = len(pattern.findall(production))
+            if message_found:
+                counts[category][rel] = message_found
 
         if not rel.startswith("src/services/discord/"):
             continue
@@ -773,6 +807,24 @@ def owner_only_errors(
     return errors
 
 
+def controller_detach_errors(repo_root: Path) -> list[str]:
+    """``placeholder_controller.rs`` calls no ``.detach_by_message(``; no baseline relaxes it."""
+    path = Path(repo_root) / CONTROLLER_PATH
+    if not path.is_file():
+        # A moved controller would otherwise lift this check silently.
+        return [
+            f"discord_message_ops: {CONTROLLER_PATH} is missing; "
+            "point CONTROLLER_PATH at the moved controller"
+        ]
+    found = len(CONTROLLER_DETACH_PATTERN.findall(_stripped_text(path)))
+    if not found:
+        return []
+    return [
+        f"discord_message_ops: {CONTROLLER_PATH} calls .detach_by_message( {found}x; "
+        "queued cards detach only through queued_card_gate's teardown token"
+    ]
+
+
 def _snapshot(
     counts: Mapping[str, Mapping[str, int]],
     registry_subcounts: Mapping[str, int],
@@ -847,6 +899,25 @@ def _snapshot(
                 "comment": '#5464 T5 S6b-B: per-file warrant/structural counts are a two-sided pairing check, not no-growth; calls do not prove result consumption, argument identity, or control-flow dominance. The stale-sweep behavioral witness enforces veto consumption. See the module docstring.',
                 "files": dict(sorted(counts["destructive_warrant_bind"].items())),
             },
+            "discord_message_delete": {
+                "comment": (
+                    "Production identifiers ending in delete_message, "
+                    "delete_channel_message or delete_rollback_channel_message "
+                    "followed by '('; test files and cfg(test) code are excluded. "
+                    "Queued cards are destroyed only through queued_card_gate.rs, "
+                    "which is listed here too. See the module docstring for limits."
+                ),
+                "files": dict(sorted(counts["discord_message_delete"].items())),
+            },
+            "discord_message_edit": {
+                "comment": (
+                    "Production identifiers ending in edit_message, "
+                    "edit_channel_message, edit_outbound_message or "
+                    "edit_outbound_message_classified followed by '('; same scope "
+                    "and limits as discord_message_delete."
+                ),
+                "files": dict(sorted(counts["discord_message_edit"].items())),
+            },
             "host_terminate": {
                 "comment": HOST_TERMINATE_COMMENT,
                 "files": {
@@ -912,6 +983,7 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
             growth_errors(counts, baseline)
             + owner_only_errors(counts, baseline)
             + pairing_errors(counts)
+            + controller_detach_errors(root)
         )
     except Exception as exc:
         print(f"FAIL: destructive call-site ratchet: {type(exc).__name__}: {exc}", file=sys.stderr)

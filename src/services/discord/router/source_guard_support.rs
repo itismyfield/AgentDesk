@@ -60,14 +60,6 @@ impl Lexed {
         self.find_all(needle).first().copied()
     }
 
-    pub(in crate::services::discord) fn find_after(
-        &self,
-        from: usize,
-        needle: &str,
-    ) -> Option<usize> {
-        self.find_all(needle).into_iter().find(|at| *at >= from)
-    }
-
     pub(in crate::services::discord) fn contains(&self, needle: &str) -> bool {
         !self.find_all(needle).is_empty()
     }

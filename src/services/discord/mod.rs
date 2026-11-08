@@ -1371,6 +1371,7 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
             shutdown_counted: std::sync::atomic::AtomicBool::new(false),
             shutdown_slot_consumed: std::sync::atomic::AtomicBool::new(false),
             gateway_waiter_cancellation: std::sync::Mutex::new(None),
+            gateway_lease_diagnostics: Default::default(),
             gateway_handback_health: Arc::default(),
         },
         turn_finalizer: turn_finalizer::TurnFinalizer::spawn(),

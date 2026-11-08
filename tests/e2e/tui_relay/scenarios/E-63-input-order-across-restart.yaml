@@ -1,0 +1,121 @@
+id: E-63
+title: Discord 입력 A·B가 busy 턴 중 재시작을 지나도 A → B 순서로 각 1회 처리된다
+agent_mode: real_live
+coverage_class: live
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
+cells: [claude-tui]
+isolation: required
+destructive: true
+acceptance_criteria:
+  - Start a Discord turn that prints HOLD and then keeps the pane busy in a foreground sleep.
+  - After HOLD, send Discord inputs A then B while that turn is still busy.
+  - Restart dcserver right after B, before the busy turn can finish.
+  - Before A and again right before the restart, the target mailbox is still busy on the HOLD send and DONE has not been relayed.
+  - After the restart, A and B are each answered exactly once (no loss, no duplicate), after DONE, A before B.
+  - The target mailbox drains back to idle with queue 0.
+notes: |
+  Human Discord input joins a busy turn at once, so A and B may already be in
+  the pane or still held by intake when the restart lands; either way each must
+  be handled exactly once and in send order. Which state they were in is not
+  observed here; read intake_queue_transaction lines in the run's dcserver log.
+  A and B answers are built from fragments so no input notice or echo of the
+  prompt carries the full marker. Exactly once is the conjunction of
+  provider_text_present (>=1), no_duplicate_marker (<=1 message) and a
+  chrome_count regex that forbids two copies inside one message.
+  The second busy check also accepts A or B as the active message, in case
+  intake merges them into the running turn; DONE still unrelayed keeps it the
+  HOLD turn. Queued inputs run after that turn, so the order is HOLD, DONE, A, B.
+  The restart must kill the busy turn's server, so use the driver's default
+  kickstart, not a draining wrapper that waits for live turns to finish.
+report_marker_counts:
+  - "[E2E:E63:{run_id}:HOLD]"
+  - "[E2E:E63:{run_id}:A]"
+  - "[E2E:E63:{run_id}:B]"
+  - "[E2E:E63:{run_id}:DONE]"
+steps:
+  - send_discord_prompt: |
+      E2E E63 order probe. First output [E2E:E63:{run_id}:HOLD].
+      Then call Bash in the foreground with run_in_background=false:
+      python3 -c "import time; time.sleep(90)"
+      Keep the turn active while that command runs. Do not launch a background task.
+      After the command finishes, output [E2E:E63:{run_id}:DONE].
+      Other messages may arrive while the command runs; do what each one asks.
+  - wait_for_discord_text: "[E2E:E63:{run_id}:HOLD]"
+    relay_author: provider
+    timeout_s: 180
+  - wait_idle_s: 2
+  - assert_turn_active:
+      prompt_sends: [1]
+      marker_absent: "[E2E:E63:{run_id}:DONE]"
+  - send_discord_prompt: "E2E E63 input A. Output one line made by joining '[E2E:E63:{run_id}:' and 'A]' with nothing between them."
+    post_send_sleep_s: 1
+  - send_discord_prompt: "E2E E63 input B. Output one line made by joining '[E2E:E63:{run_id}:' and 'B]' with nothing between them."
+    post_send_sleep_s: 1
+  - assert_turn_active:
+      prompt_sends: [1, 2, 3]
+      marker_absent: "[E2E:E63:{run_id}:DONE]"
+  # The run picks dev or release from --base-url or --restart-target-override.
+  - restart_dcserver:
+      # Same bulk inventory baseline as E-9; any other degraded reason still fails.
+      require_status: &bulk_status [healthy, degraded]
+      allowed_degraded_reasons: &bulk_baseline_reasons
+        - "tui_o:released:1474933804887179286"
+        - "tui_o:released:1475086789696946196"
+        - "tui_o:released:1478248459445469264"
+        - "tui_o:released:1478652416533463101"
+        - "tui_o:released:1478652616295583805"
+        - "tui_o:released:1478652735300829185"
+        - "tui_o:released:1478653028000338114"
+        - "tui_o:released:1478653071214252103"
+        - "tui_o:released:1480531508820185241"
+        - "tui_o:released:1481478222439907560"
+        - "tui_o:released:1490141479707086938"
+        - "tui_o:released:1500628371829428350"
+        - "tui_o:released:1509350778043895902"
+        - "tui_o:released:1527859708180828350"
+        - "tui_o:released:1536866287983132752"
+        - "tui_o:released:1536887557290197062"
+        - "tui_o:too_many_readers:1509350490461180105"
+        - "relay_verdict_unknown_codex_1509350778043895902"
+  - wait_for_discord_text: "[E2E:E63:{run_id}:A]"
+    relay_author: provider
+    timeout_s: 300
+  - wait_for_discord_text: "[E2E:E63:{run_id}:B]"
+    relay_author: provider
+    timeout_s: 300
+  - wait_for_discord_text: "[E2E:E63:{run_id}:DONE]"
+    relay_author: provider
+    timeout_s: 300
+  - wait_idle_s: 5
+  - assert_health:
+      require_status: *bulk_status
+      allowed_degraded_reasons: *bulk_baseline_reasons
+      timeout_s: 120
+      poll_interval_s: 2
+      forbid_degraded_reasons:
+        - global_active_counter_out_of_bounds
+      global_active_max: 0
+      global_finalizing_max: 0
+assertions:
+  - provider_text_present: "[E2E:E63:{run_id}:HOLD]"
+  - provider_text_present: "[E2E:E63:{run_id}:A]"
+  - provider_text_present: "[E2E:E63:{run_id}:B]"
+  - provider_text_present: "[E2E:E63:{run_id}:DONE]"
+  - no_duplicate_marker: "[E2E:E63:{run_id}:HOLD]"
+  - no_duplicate_marker: "[E2E:E63:{run_id}:A]"
+  - no_duplicate_marker: "[E2E:E63:{run_id}:B]"
+  - no_duplicate_marker: "[E2E:E63:{run_id}:DONE]"
+  # chrome_count does not expand {run_id}; these match any run id inside this run's window.
+  - chrome_count:
+      regex: '\[E2E:E63:[^\]\s]+:A\][\s\S]*\[E2E:E63:[^\]\s]+:A\]'
+      exact: 0
+  - chrome_count:
+      regex: '\[E2E:E63:[^\]\s]+:B\][\s\S]*\[E2E:E63:[^\]\s]+:B\]'
+      exact: 0
+  - ordered_text_present:
+      - "[E2E:E63:{run_id}:HOLD]"
+      - "[E2E:E63:{run_id}:DONE]"
+      - "[E2E:E63:{run_id}:A]"
+      - "[E2E:E63:{run_id}:B]"
+  - no_duplicate_content: true
+  - no_resume_prompt_chrome: true

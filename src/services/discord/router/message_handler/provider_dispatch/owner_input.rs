@@ -497,6 +497,17 @@ impl OwnerTurn {
         let _ = self.settled.send(Err(effect::unsent(reason.into())));
     }
 
+    /// The input finished locally with no provider turn: it leaves the queue and the drive goes on.
+    pub(in crate::services::discord) async fn complete_locally(self) {
+        let claimed = (self.claim.front().clone(), self.claim.number());
+        let followers = self.claim.followers().len();
+        let done = self.mailbox.v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("V2 not adopted")?;
+            owner.complete_claimed_locally((&claimed.0, claimed.1), followers)
+        });
+        let _ = self.settled.send(done.await);
+    }
+
     /// A pane running a turn AgentDesk did not start takes the claimed front now, through the busy
     /// entry; the row the input produces decides who answers, and the drive hears its settlement.
     pub(in crate::services::discord) async fn into_busy_pane(
@@ -1523,6 +1534,9 @@ mod codex_tests;
 #[cfg(test)]
 #[path = "owner_input_herdr_tests.rs"]
 mod herdr_tests;
+#[cfg(test)]
+#[path = "owner_input_local_control_tests.rs"]
+mod local_control_tests;
 #[cfg(test)]
 #[path = "owner_input_tests.rs"]
 pub(super) mod tests;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::shared_state::gateway_lease_diagnostics::LeaseResult;
 
 pub(super) static STANDBY_PROMOTION_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -456,6 +457,22 @@ pub(super) fn recover_cancelled_promotion(runtimes: &[Arc<SharedData>]) {
     STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
 }
 
+async fn release_observed_lease(
+    shared: &SharedData,
+    lease: crate::db::postgres::AdvisoryLockLease,
+) -> bool {
+    let released = lease.unlock().await.is_ok();
+    shared
+        .restart
+        .gateway_lease_diagnostics
+        .record(if released {
+            LeaseResult::AcquiredThenReleased
+        } else {
+            LeaseResult::Err
+        });
+    released
+}
+
 pub(super) async fn attempt_clean_standby_promotion(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -470,7 +487,7 @@ pub(super) async fn attempt_clean_standby_promotion(
         )
         .is_err()
     {
-        drop(lease);
+        release_observed_lease(shared, lease).await;
         return false;
     }
 
@@ -493,7 +510,7 @@ pub(super) async fn attempt_clean_standby_promotion(
     }
 
     if !runtime_is_idle(shared) {
-        drop(lease);
+        release_observed_lease(shared, lease).await;
         unfence_runtimes(&runtimes);
         STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
         return false;
@@ -503,14 +520,17 @@ pub(super) async fn attempt_clean_standby_promotion(
         let runtime_provider = runtime.provider.clone();
         let drain = mailbox_restart_drain_all(runtime, &runtime_provider).await;
         if drain.queued_count > 0 || !drain.persistence_errors.is_empty() {
-            drop(lease);
+            release_observed_lease(shared, lease).await;
             unfence_runtimes(&runtimes);
             STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
             return false;
         }
     }
 
-    drop(lease);
+    if !release_observed_lease(shared, lease).await {
+        recover_cancelled_promotion(&runtimes);
+        return false;
+    }
     let Some(root) = crate::config::runtime_root() else {
         unfence_runtimes(&runtimes);
         STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
@@ -598,22 +618,43 @@ pub(super) async fn spawn_standby_gateway_retry(
             {
                 return;
             }
+            let diagnostics = &shared.restart.gateway_lease_diagnostics;
+            diagnostics.context(
+                &pool,
+                "standby",
+                provider.as_str(),
+                super::gateway_lease::discord_gateway_lock_id(&token_hash),
+            );
             match super::gateway_lease::try_acquire_observing_handback(
                 &pool,
                 &token_hash,
                 &provider,
                 &mut handback_breaker,
+                diagnostics,
             )
             .await
             {
                 Ok(Some(lease)) => {
                     if attempt_clean_standby_promotion(&shared, &provider, lease).await {
+                        diagnostics.adopted();
                         tracing::warn!(
                             provider = provider.as_str(),
                             "GATEWAY-LEASE: standby published a fenced graceful promotion restart"
                         );
                         return;
                     }
+                    let result = diagnostics
+                        .projection()
+                        .last_result
+                        .unwrap_or(LeaseResult::Err);
+                    diagnostics
+                        .failure(
+                            &pool,
+                            super::gateway_lease::discord_gateway_lock_id(&token_hash),
+                            result,
+                            false,
+                        )
+                        .await;
                 }
                 Ok(None) => {}
                 Err(error) => tracing::warn!(

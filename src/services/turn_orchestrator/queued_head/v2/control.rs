@@ -368,6 +368,35 @@ impl Owner {
             .collect()
     }
 
+    /// Takes the claimed front and the followers its one input carried once that input finished
+    /// without a provider turn; an origin waiting on them is owed `Completed`.
+    pub(crate) fn complete_claimed_locally(
+        &mut self,
+        (front, number): (&Front, u64),
+        followers: usize,
+    ) -> Result<(), String> {
+        let claimed = number == self.claim_number
+            && (self.front_claim.as_ref()).is_some_and(|c| is_front(c, front))
+            && self.front().is_some_and(|now| is_front(&now, front));
+        if !claimed {
+            return Err("NotSent(\"front_not_granted\")".into());
+        }
+        let mut next = self.snapshot.clone();
+        let taken = (1 + followers).min(next.items.len());
+        next.owe_queued(
+            0..taken,
+            TerminalOutcome::Completed,
+            super::origin::now_ms(),
+        );
+        for _ in 0..taken {
+            next.items.remove(0);
+            next.unbind_item(0);
+        }
+        self.commit(next)?;
+        self.revoke_front();
+        Ok(())
+    }
+
     /// Clears waiting inputs in one commit; in-flight evidence remains available to late settlement.
     pub(crate) fn clear_waiting(&mut self) -> Result<ClearedWaiting, String> {
         let mut next = requeued(self, |_| true);

@@ -10,6 +10,7 @@ use crate::services::turn_orchestrator::{ChannelMailboxSnapshot, MailboxObservat
 
 #[derive(Debug, Serialize)]
 pub(super) struct ProviderHealthSnapshot {
+    gateway_lease: crate::services::discord::shared_state::gateway_lease_diagnostics::Projection,
     name: String,
     runtime_role: ProviderRuntimeRole,
     connected: bool,
@@ -149,6 +150,7 @@ pub(super) fn probe_provider(
     ProviderProbe {
         mailbox_snapshots,
         snapshot: ProviderHealthSnapshot {
+            gateway_lease: entry.shared.restart.gateway_lease_diagnostics.projection(),
             name: entry.name.clone(),
             runtime_role: entry.role,
             connected,

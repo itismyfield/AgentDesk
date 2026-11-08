@@ -3,6 +3,9 @@
 //! fields, keeping `SharedData`'s public surface and every call site
 //! unchanged.
 
+#[path = "gateway_lease_diagnostics.rs"]
+pub(in crate::services::discord) mod gateway_lease_diagnostics;
+
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -667,6 +670,8 @@ pub(in crate::services) struct RestartLifecycle {
     pub(in crate::services) gateway_waiter_cancellation: std::sync::Mutex<
         Option<crate::services::cluster::intake_worker_capabilities::GatewayWaiterCancellation>,
     >,
+    pub(in crate::services::discord) gateway_lease_diagnostics:
+        gateway_lease_diagnostics::Diagnostics,
     pub(in crate::services) gateway_handback_health: GatewayHandbackHealth,
 }
 

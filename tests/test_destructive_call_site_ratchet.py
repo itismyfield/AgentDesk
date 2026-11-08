@@ -745,5 +745,93 @@ fn probe() {
             self.assertEqual(ratchet.load_baseline(path)[1]["measured_at_sha"], payload["measured_at_sha"])
 
 
+    KICKOFF = "src/services/discord/queue_dispatch/kickoff.rs"
+    DISCORD_OPS_BODY = """
+fn drain(http: &Http, channel: ChannelId, card: MessageId) {
+    channel.delete_message(http, card);
+    delete_channel_message(http, channel, card);
+    delete_rollback_channel_message(http, channel, card);
+    channel.edit_message(http, card, edit);
+    edit_channel_message(http, channel, card, "x");
+    edit_outbound_message(http, shared, channel, card, "x");
+    edit_outbound_message_classified(http, shared, channel, card, "x");
+    // delete_message(http, card) in prose
+    let label = "edit_message(";
+    channel.delete_messages(http, ids);
+}
+#[cfg(test)]
+mod tests {
+    fn probe() { delete_channel_message(http, channel, card); edit_message(http, card); }
+}
+"""
+
+    def test_discord_message_ops_count_production_spellings_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, self.KICKOFF, self.DISCORD_OPS_BODY)
+            write(root, "src/services/discord/kickoff_tests.rs", self.DISCORD_OPS_BODY)
+            write(root, "src/server/routes/probe.rs", "channel.delete_message(http, id);\n")
+            actual, _subcounts = ratchet.scan(root)
+        self.assertEqual(
+            actual["discord_message_delete"],
+            {self.KICKOFF: 3, "src/server/routes/probe.rs": 1},
+        )
+        self.assertEqual(actual["discord_message_edit"], {self.KICKOFF: 4})
+
+    def test_raw_discord_delete_added_to_a_listed_file_fails_the_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, self.KICKOFF, "fn drain() { gate(card); }\n")
+            write(root, ratchet.CONTROLLER_PATH, "")
+            self._write_baseline_cli(root, "a" * 40)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(ratchet.main(["--check"], repo_root=root), 0)
+            write(
+                root,
+                self.KICKOFF,
+                "fn drain() { gate(card); delete_channel_message(http, channel, card); }\n",
+            )
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                result = ratchet.main(["--check"], repo_root=root)
+        self.assertEqual(result, 1)
+        self.assertIn(
+            f"discord_message_delete: UNLISTED call site in {self.KICKOFF} (1x)",
+            stderr.getvalue(),
+        )
+
+    def test_controller_detach_by_message_fails_whatever_the_baseline(self) -> None:
+        controller = ratchet.CONTROLLER_PATH
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(
+                root,
+                controller,
+                "pub fn detach_by_message(&self) {}\n// .detach_by_message( is gated\n",
+            )
+            self._write_baseline_cli(root, "a" * 40)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(ratchet.main(["--check"], repo_root=root), 0)
+            write(root, controller, "fn teardown(c: &C) { c.detach_by_message(channel, card); }\n")
+            self._write_baseline_cli(root, "b" * 40)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                result = ratchet.main(["--check"], repo_root=root)
+        self.assertEqual(result, 1)
+        self.assertIn(f"{controller} calls .detach_by_message( 1x", stderr.getvalue())
+
+
+    def test_missing_controller_file_fails_the_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, "src/services/discord/placeholder_controller/mod.rs", "c.detach_by_message(a, b);\n")
+            self._write_baseline_cli(root, "a" * 40)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                result = ratchet.main(["--check"], repo_root=root)
+        self.assertEqual(result, 1)
+        self.assertIn(f"{ratchet.CONTROLLER_PATH} is missing", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
