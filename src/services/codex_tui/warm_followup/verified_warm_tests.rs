@@ -26,6 +26,7 @@ use std::{fs, io::Write, os::unix::fs::PermissionsExt, sync::Arc};
 
 #[test]
 fn actual_verified_warm_consumes_ticket_without_sealing_or_later_reuse() {
+    // Env precedes dedupe in both warm fixtures, so parallel setup cannot form a lock cycle.
     let _shared = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
