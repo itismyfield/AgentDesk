@@ -281,6 +281,8 @@ struct PaneGate {
     /// The latest judgment, waiting for the send it admits.
     pinned: Mutex<Option<Judged>>,
     fence: Arc<ExecutionFence>,
+    /// An operator asked a terminate to stand on the exact pane proof when the marker is absent.
+    marker_absent_by_pane: bool,
 }
 
 /// A recorded Herdr pane on this node's registered endpoint; every input to it passes the gate.
@@ -374,7 +376,21 @@ impl HerdrTarget {
             os: Arc::new(HostOs),
             next_id: AtomicU64::new(1),
             pinned: Mutex::new(None),
+            marker_absent_by_pane: false,
         })))
+    }
+
+    /// A terminate of this target admits an absent `.host_kind` marker; the close still needs the
+    /// pane's root shell, provider and binding nonce to be the recorded ones. A shared target is
+    /// returned unchanged.
+    pub(crate) fn verified_by_pane(self) -> Self {
+        match Arc::try_unwrap(self.0) {
+            Ok(gate) => Self(Arc::new(PaneGate {
+                marker_absent_by_pane: true,
+                ..gate
+            })),
+            Err(shared) => Self(shared),
+        }
     }
 
     #[cfg(test)]
@@ -895,6 +911,8 @@ impl PaneGate {
         match read_host_kind_marker(&self.logical_key) {
             HostKindMarker::Known(HostKind::Herdr) => {}
             HostKindMarker::Known(_) => return Err(HerdrGateRefusal::MarkerOtherHost),
+            HostKindMarker::Absent
+                if self.marker_absent_by_pane && mutation == Mutation::Terminate => {}
             _ => return Err(HerdrGateRefusal::MarkerUnverified),
         }
         self.policy_witness(mutation)
