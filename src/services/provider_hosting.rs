@@ -637,6 +637,7 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(true),
                 runtime: Some("pipe".to_string()),
+                ..Default::default()
             },
         );
         install_provider_hosting_config(&config);
@@ -661,6 +662,7 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(false),
                 runtime: Some("tui".to_string()),
+                ..Default::default()
             },
         );
         install_provider_hosting_config(&config);
@@ -685,6 +687,7 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(true),
                 runtime: Some("tui".to_string()),
+                ..Default::default()
             },
         );
         config.agents.push(test_agent_with_claude_channel_runtime(
@@ -727,6 +730,7 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(false),
                 runtime: Some("tui".to_string()),
+                ..Default::default()
             },
         );
 
@@ -753,6 +757,7 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(true),
                 runtime: Some("pipe".to_string()),
+                ..Default::default()
             },
         );
         config.agents.push(test_agent_with_claude_channel(
@@ -807,6 +812,7 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(true),
                 runtime: Some("pipe".to_string()),
+                ..Default::default()
             },
         );
         // Other providers default to no TUI, so this should be false overall.
@@ -826,6 +832,7 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(true),
                 runtime: Some("bogus".to_string()),
+                ..Default::default()
             },
         );
         install_provider_hosting_config(&config);
@@ -860,6 +867,7 @@ mod tests {
                 ProviderConfig {
                     runtime: provider_runtime.map(str::to_owned),
                     tui_hosting: Some(legacy),
+                    ..Default::default()
                 },
             );
             config.agents.push(test_agent_with_claude_channel_runtime(
