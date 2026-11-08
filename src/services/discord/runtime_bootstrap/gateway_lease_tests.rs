@@ -761,52 +761,76 @@ async fn gateway_self_fence_keeps_the_execution_owner_and_native_session_pg() {
 
 #[tokio::test]
 async fn gateway_observability_actual_try_error_and_setup_error_pg() {
+    use futures::FutureExt;
+
     let (_root, _live, _paths) = snapshot_root();
     let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
     let role = format!("diag_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(sqlx::AssertSqlSafe(
-        format!("CREATE ROLE {role} LOGIN").as_str(),
+    let pw = uuid::Uuid::new_v4().simple().to_string();
+    let diagnostics = Diagnostics::default();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        sqlx::query(sqlx::AssertSqlSafe(
+            format!("CREATE ROLE {role} LOGIN PASSWORD '{pw}'").as_str(),
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("REVOKE EXECUTE ON FUNCTION pg_try_advisory_lock(bigint) FROM PUBLIC")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let restricted = sqlx::postgres::PgPoolOptions::new()
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .username(&role)
+                    .password(&pw),
+            )
+            .await
+            .unwrap();
+        diagnostics.context(
+            &restricted,
+            "standby",
+            "claude",
+            discord_gateway_lock_id("1234"),
+        );
+        assert!(
+            try_acquire_observing_handback(
+                &restricted,
+                "1234",
+                &ProviderKind::Claude,
+                &mut observability_breaker(),
+                &diagnostics
+            )
+            .await
+            .is_err()
+        );
+        let view = diagnostics.projection();
+        assert_eq!(view.tries, 1, "actual failing SQL is still a try");
+        assert_eq!(view.last_result, Some(LeaseResult::Err));
+        restricted.close().await;
+    })
+    .catch_unwind()
+    .await;
+    let cleanup = sqlx::query(sqlx::AssertSqlSafe(
+        format!("DROP ROLE IF EXISTS {role}").as_str(),
     ))
     .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query("REVOKE EXECUTE ON FUNCTION pg_try_advisory_lock(bigint) FROM PUBLIC")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let restricted = sqlx::postgres::PgPoolOptions::new()
-        .connect_with((*pool.connect_options()).clone().username(&role))
-        .await
-        .unwrap();
-    let diagnostics = Diagnostics::default();
-    diagnostics.context(
-        &restricted,
-        "standby",
-        "claude",
-        discord_gateway_lock_id("1234"),
+    .await;
+    if let Err(panic) = outcome {
+        pool.close().await;
+        fixture.drop().await;
+        cleanup.expect("drop restricted diagnostic role after test failure");
+        std::panic::resume_unwind(panic);
+    }
+    cleanup.unwrap();
+    let unreachable = sqlx::postgres::PgPoolOptions::new().connect_lazy_with(
+        (*pool.connect_options())
+            .clone()
+            .username(&role)
+            .password(&pw),
     );
-    assert!(
-        try_acquire_observing_handback(
-            &restricted,
-            "1234",
-            &ProviderKind::Claude,
-            &mut observability_breaker(),
-            &diagnostics
-        )
-        .await
-        .is_err()
-    );
-    let view = diagnostics.projection();
-    assert_eq!(view.tries, 1, "actual failing SQL is still a try");
-    assert_eq!(view.last_result, Some(LeaseResult::Err));
-    restricted.close().await;
-    sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {role}").as_str()))
-        .execute(&pool)
-        .await
-        .unwrap();
-    let unreachable = sqlx::postgres::PgPoolOptions::new()
-        .connect_lazy_with((*pool.connect_options()).clone().username(&role));
     assert!(
         try_acquire_observing_handback(
             &unreachable,
