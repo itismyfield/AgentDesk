@@ -175,6 +175,10 @@ INFRA_ACTION_TIMEOUT_REGEX="the action '.+' has timed out after [0-9]+ minutes"
 # `temporarily unavailable` and `429` stay out: no cited log here; a 429 dies in `Set up job` (zero-step path).
 INFRA_ACTION_DOWNLOAD_REGEX='failed to resolve action download info.*(service unavailable|bad gateway|gateway time-?out|internal server error)'
 
+# The worker's `Install herdr test binary` step prints this for curl's final HTTP status;
+# only 5xx is an outage, while 404, 000 and checksum failures stay real failures.
+INFRA_HERDR_DOWNLOAD_REGEX='herdr test binary download failed: http 5[0-9][0-9]([^0-9]|$)'
+
 # #5207 (F1): repo-configuration faults that kill a job before any repo step.
 # Needed because the original R3 premise ("a job that ran no repo step cannot
 # have failed because of this repo's code") is false, and its falseness quietly
@@ -313,7 +317,7 @@ log_has_infra_failure() {
   local log_path="$1"
   [[ -s "$log_path" ]] || return 1
   grep -a -E -i -q -- \
-    "$INFRA_TERMINATION_REGEX|$INFRA_ACTION_TIMEOUT_REGEX|$INFRA_ACTION_DOWNLOAD_REGEX" \
+    "$INFRA_TERMINATION_REGEX|$INFRA_ACTION_TIMEOUT_REGEX|$INFRA_ACTION_DOWNLOAD_REGEX|$INFRA_HERDR_DOWNLOAD_REGEX" \
     "$log_path"
 }
 
