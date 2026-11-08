@@ -1,8 +1,12 @@
+#[cfg(test)]
 use super::super::native_row::{native_prompt, read_native_row};
+#[cfg(test)]
 use super::*;
 
+#[cfg(test)]
 pub(crate) const CAP: u64 = 16 * 1024 * 1024;
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct Evidence {
     pub(crate) namespace: String,
@@ -15,12 +19,14 @@ pub(crate) struct Evidence {
     pub(crate) frame_digest: String,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) enum Consumed {
     User { row: Evidence },
     Command { row: Evidence },
 }
 
+#[cfg(test)]
 pub(crate) fn lookup(
     primary: u64,
     namespace: &str,
@@ -158,6 +164,7 @@ pub(crate) fn lookup(
     })
 }
 
+#[cfg(test)]
 fn checked_source(
     r: &Registration,
     e: &Entry,
