@@ -92,3 +92,78 @@ fn a_live_session_its_binding_recovers_is_never_announced() {
     assert_eq!(posted_for_tests(&live), 0);
     crate::services::tmux_common::cleanup_session_temp_files(NAME);
 }
+
+#[derive(Clone, Default)]
+struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The `[session-strategy] launch` lines one launch of `session` logs.
+fn launch_lines(name: &str, cwd: &std::path::Path, session: &str) -> Vec<String> {
+    let logs = Logs::default();
+    let copy = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || copy.clone())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    tracing::subscriber::with_default(subscriber, || launch(name, cwd, session));
+    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    let lines = text
+        .lines()
+        .filter(|line| line.contains("[session-strategy] launch"));
+    lines.map(str::to_string).collect()
+}
+
+// The launch's `resumed=` follows the argv its script runs: false when a lost session's turn
+// launches `--session-id` with a fresh id, true when a kept one launches `--resume`.
+#[test]
+fn the_launch_logs_resumed_from_the_argv_it_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    const NAME: &str = "adk-i6483-resumed-log";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = FakeTmux::install(NAME);
+    tmux.mark_missing();
+    let (home, cwd, bin) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let claude = bin.path().join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _home = set("CLAUDE_CONFIG_DIR", home.path());
+    let _claude = set("AGENTDESK_CLAUDE_PATH", &claude);
+
+    let lost = uuid::Uuid::new_v4().to_string();
+    let fresh = launch_lines(NAME, cwd.path(), &lost);
+    assert_eq!(fresh.len(), 1, "{fresh:?}");
+    assert!(fresh[0].ends_with("resumed=false"), "{fresh:?}");
+    let fp = crate::services::observability::turn_lifecycle::provider_session_fingerprint;
+    assert!(!fresh[0].contains(&fp(&lost)), "{fresh:?}");
+
+    let kept = uuid::Uuid::new_v4().to_string();
+    let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        cwd.path(),
+        &kept,
+        None,
+    )
+    .unwrap();
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, "{}\n").unwrap();
+    let resumed = launch_lines(NAME, cwd.path(), &kept);
+    assert_eq!(resumed.len(), 1, "{resumed:?}");
+    assert!(resumed[0].ends_with("resumed=true"), "{resumed:?}");
+    assert!(resumed[0].contains(&fp(&kept)), "{resumed:?}");
+    crate::services::tmux_common::cleanup_session_temp_files(NAME);
+}

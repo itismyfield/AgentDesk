@@ -27,6 +27,7 @@ use crate::services::turn_lifecycle::{
 };
 use poise::serenity_prelude::ChannelId;
 
+mod background;
 pub(crate) mod catalog;
 mod errors;
 
@@ -141,6 +142,8 @@ pub(crate) enum ResumeRebindError {
     MissingCwd,
     /// The requested Claude transcript cannot be located at the target cwd.
     TargetTranscriptMissing(String),
+    /// The target runs as a Claude Code background session, which a launch here would fight.
+    BackgroundSession(String),
     /// Target `cwd` does not exist on disk.
     TargetCwdMissing(String),
     /// Auto-selection is only wired for Claude transcripts.
@@ -443,6 +446,13 @@ pub(crate) async fn perform_resume_rebind(
             (candidate.session_id, candidate.cwd, true)
         }
     };
+
+    // Explicit and auto-selected targets alike; an unreadable list never refuses the resume.
+    if matches!(provider, Some(ProviderKind::Claude))
+        && background::listed(&target_session_id).await == Some(true)
+    {
+        return Err(ResumeRebindError::BackgroundSession(target_session_id));
+    }
 
     // Reject a target worktree that no longer exists — resuming into a missing
     // cwd would silently start a fresh session in the wrong place.
