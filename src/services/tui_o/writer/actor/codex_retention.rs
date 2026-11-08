@@ -108,57 +108,48 @@ fn claim(
     if successor == old {
         return Err("codex_retention_edge_mismatch");
     }
-    let mut bindings = Vec::new();
-    for event in events {
-        let companion = settled.contains(event.seq);
-        if companion {
-            continue;
-        }
-        if matches!(
-            event.new,
-            BindingTarget::Source(_) | BindingTarget::Pending { .. }
-        ) {
-            let (source, binder) = resolved(events, event)?;
-            if source == old {
-                if event.tmux_session != pane {
-                    return Err("codex_retention_binding_ambiguous");
-                }
-                bindings.push((event, binder));
+    let binds = (events.iter())
+        .filter(|event| !settled.contains(event.seq))
+        .filter(|event| {
+            matches!(
+                event.new,
+                BindingTarget::Source(_) | BindingTarget::Pending { .. }
+            )
+        })
+        .filter_map(|event| match resolved(events, event) {
+            Err(error) => Some(Err(error)),
+            Ok((source, binder)) => (source == old).then(|| {
+                Ok(Bind {
+                    seq: event.seq,
+                    binder_seq: binder.seq,
+                    pane: &event.tmux_session,
+                    nonce: event.execution_nonce.as_deref().unwrap_or_default(),
+                })
+            }),
+        });
+    let binding = last_bind(binds, seq, pane)?;
+    let nonce = binding.nonce;
+    let (basis, detail) =
+        if let Some(superseded) = superseded(&binding, &target.tmux, &target.nonce) {
+            if !superseded {
+                return Err("codex_retention_current_execution");
             }
-        }
-    }
-    let (binding, binder) = bindings
-        .into_iter()
-        .max_by_key(|(binding, _)| binding.seq)
-        .ok_or("codex_retention_binding_missing")?;
-    let nonce = binding
-        .execution_nonce
-        .as_deref()
-        .filter(|nonce| !nonce.trim().is_empty())
-        .ok_or("codex_retention_nonce_unknown")?;
-    if binder.seq >= seq {
-        return Err("codex_retention_source_revisited");
-    }
-    let (basis, detail) = if pane == target.tmux {
-        if nonce == target.nonce {
-            return Err("codex_retention_current_execution");
-        }
-        (
-            RetentionBasisV1::SamePane,
-            format!(
-                "last binder {} superseded by current nonce {}",
-                binder.seq, target.nonce
-            ),
-        )
-    } else {
-        let digest = historical(observed, pane, nonce)?;
-        (
-            RetentionBasisV1::LocalHistorical {
-                context_digest: digest,
-            },
-            "exact local historical execution is dead or absent".into(),
-        )
-    };
+            (
+                RetentionBasisV1::SamePane,
+                format!(
+                    "last binder {} superseded by current nonce {}",
+                    binding.binder_seq, target.nonce
+                ),
+            )
+        } else {
+            let digest = historical(observed, pane, nonce)?;
+            (
+                RetentionBasisV1::LocalHistorical {
+                    context_digest: digest,
+                },
+                "exact local historical execution is dead or absent".into(),
+            )
+        };
     let (binding_seq, binder_nonce) = (binding.seq, nonce.to_owned());
     Ok(RetentionClaimV1 {
         version: 1,
@@ -167,7 +158,7 @@ fn claim(
         old: old.clone(),
         hop_seq: seq,
         binding_seq,
-        binder_seq: binder.seq,
+        binder_seq: binding.binder_seq,
         binder_nonce,
         successor: successor.clone(),
         observation: identity(&Observation::Complete(Box::new(observed.clone())))
@@ -181,6 +172,47 @@ fn claim(
         },
         basis,
     })
+}
+
+/// One bind of an old source: the binding row, the row naming its file, and the binding's pane.
+pub(crate) struct Bind<'a> {
+    pub seq: u64,
+    pub binder_seq: u64,
+    pub pane: &'a str,
+    pub nonce: &'a str,
+}
+
+/// The old source's last bind, when every bind ran in `pane` before the hop at `seq` under a
+/// known execution nonce; a later bind means the source was taken up again.
+pub(crate) fn last_bind<'a>(
+    binds: impl IntoIterator<Item = Result<Bind<'a>, &'static str>>,
+    seq: u64,
+    pane: &str,
+) -> Result<Bind<'a>, &'static str> {
+    let mut last: Option<Bind<'a>> = None;
+    for bind in binds {
+        let bind = bind?;
+        if bind.pane != pane {
+            return Err("codex_retention_binding_ambiguous");
+        }
+        if last.as_ref().is_none_or(|last| bind.seq > last.seq) {
+            last = Some(bind);
+        }
+    }
+    let last = last.ok_or("codex_retention_binding_missing")?;
+    if last.nonce.trim().is_empty() {
+        return Err("codex_retention_nonce_unknown");
+    }
+    if last.binder_seq >= seq {
+        return Err("codex_retention_source_revisited");
+    }
+    Ok(last)
+}
+
+/// The same-pane basis: whether the execution now in the bind's pane replaced its binder;
+/// `None` when the pane differs.
+pub(crate) fn superseded(bind: &Bind, pane: &str, nonce: &str) -> Option<bool> {
+    (bind.pane == pane).then(|| bind.nonce != nonce)
 }
 
 fn overlaps(a: &SourceId, b: &SourceId) -> bool {

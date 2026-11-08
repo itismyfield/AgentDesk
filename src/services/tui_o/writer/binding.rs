@@ -77,6 +77,11 @@ pub struct BindingEvent {
 pub trait BindingEvents: Send + Sync + 'static {
     /// The channel's events with a seq above `after`, in seq order.
     fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String>;
+    /// The channel's whole log as recorded, with no bind held by the current source policy; a log
+    /// without such a policy reads as delivered.
+    fn binding_history(&self, channel: u64) -> Result<Vec<BindingEvent>, String> {
+        self.binding_events_since(channel, 0)
+    }
     /// The channel's latest committed seq, updated after each append.
     fn subscribe(&self, channel: u64) -> watch::Receiver<u64>;
 }
@@ -85,15 +90,31 @@ pub trait BindingEvents: Send + Sync + 'static {
 /// shorter list, so the actor alarms instead of acting on a partial history.
 pub struct BindingLog;
 
-impl BindingEvents for BindingLog {
-    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+impl BindingLog {
+    /// Events past `after`, each bind held as `policy` judges it.
+    fn read(
+        channel: u64,
+        after: u64,
+        policy: fn(&[&p5::BindingEvent]) -> Vec<bool>,
+    ) -> Result<Vec<BindingEvent>, String> {
         let events = p5::binding_events_judged_since(channel, after);
         let events = events.map_err(|e| e.to_string())?;
         let judged: Vec<_> = events.iter().map(|(event, _)| event).collect();
-        let allowed = crate::services::tui_prompt_dedupe::codex_verified_events_allowed(&judged);
+        let allowed = policy(&judged);
         (events.into_iter().zip(allowed))
             .map(|((event, reclaims), allowed)| judged_from_p5(event, reclaims, allowed))
             .collect()
+    }
+}
+
+impl BindingEvents for BindingLog {
+    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+        let policy = crate::services::tui_prompt_dedupe::codex_verified_events_allowed;
+        Self::read(channel, after, policy)
+    }
+
+    fn binding_history(&self, channel: u64) -> Result<Vec<BindingEvent>, String> {
+        Self::read(channel, 0, |events| vec![true; events.len()])
     }
 
     /// A log that cannot be watched reads as always changed, so every poll retries the read.
@@ -113,17 +134,19 @@ impl ChannelBindingLog {
     pub fn new(channel: u64, provider: ShadowProvider) -> Self {
         Self { channel, provider }
     }
-}
 
-impl BindingEvents for ChannelBindingLog {
-    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+    fn own(
+        &self,
+        channel: u64,
+        read: impl FnOnce() -> Result<Vec<BindingEvent>, String>,
+    ) -> Result<Vec<BindingEvent>, String> {
         if channel != self.channel {
             return Err(format!(
                 "channel {}'s binding log read for {channel}",
                 self.channel
             ));
         }
-        let events = BindingLog.binding_events_since(channel, after)?;
+        let events = read()?;
         let foreign = events
             .iter()
             .find(|event| event.channel_id != channel || event.provider != self.provider);
@@ -134,6 +157,16 @@ impl BindingEvents for ChannelBindingLog {
             )),
             None => Ok(events),
         }
+    }
+}
+
+impl BindingEvents for ChannelBindingLog {
+    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+        self.own(channel, || BindingLog.binding_events_since(channel, after))
+    }
+
+    fn binding_history(&self, channel: u64) -> Result<Vec<BindingEvent>, String> {
+        self.own(channel, || BindingLog.binding_history(channel))
     }
 
     fn subscribe(&self, _channel: u64) -> watch::Receiver<u64> {

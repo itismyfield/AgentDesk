@@ -59,6 +59,15 @@ fn degraded(health: &AlarmHealth) -> bool {
         .contains(&format!("tui_o:too_many_readers:{CHANNEL}"))
 }
 
+/// The actor's reading readers, as its snapshot counts them; a retired one under watch is not
+/// reading even while its file stays open.
+async fn reading_readers(chain: &Chain, run: &Run, observer: &HostObservation) -> usize {
+    let mut request = chain.request("ba-backlog-readers");
+    request.termination = None;
+    let inspected = ask(run, Operation::Inspect(request), context(chain, observer)).await;
+    inspected.diagnostics.unwrap().reading
+}
+
 async fn targeted_old(
     chain: &Chain,
     run: &Run,
@@ -112,7 +121,7 @@ async fn targeted_old(
 }
 
 #[tokio::test(start_paused = true)]
-async fn ba_twenty_native_old_sources_clear_reader_health_only_at_three_and_survive_two_restores() {
+async fn ba_twenty_replaced_old_sources_never_degrade_health_while_retention_retires_readers() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &[]);
     let root = crate::config::runtime_root().unwrap();
@@ -120,6 +129,7 @@ async fn ba_twenty_native_old_sources_clear_reader_health_only_at_three_and_surv
     let _clear = ClearP5;
     // Source 0 is pre-existing unproven non-native data, followed by 20 aged native sources
     // and the held current native source: 22 real reading readers before retention.
+    // A later execution replaced the 21 old sources' writer in the pane: only the current counts.
     let chain = native_chain_with_old(OLD_NATIVE);
     let path = root.join(format!("binding_events/{CHANNEL}.log"));
     write_p5(&chain, &path);
@@ -135,8 +145,15 @@ async fn ba_twenty_native_old_sources_clear_reader_health_only_at_three_and_surv
     );
     settle(&chain).await;
     polls(1).await;
-    assert_eq!(chain.harness.alarms.readers(), Some(OLD_NATIVE + 2));
-    assert!(degraded(&health), "actual actor tend raised reader health");
+    assert_eq!(chain.harness.alarms.readers(), Some(1));
+    assert!(
+        !degraded(&health),
+        "replaced old readers do not raise reader health"
+    );
+    assert_eq!(
+        reading_readers(&chain, &run, &observer).await,
+        OLD_NATIVE + 2
+    );
     assert!((0..chain.sources.len()).all(|n| !chain.cursor(n).retired));
     let p5_before = std::fs::read(&path).unwrap();
     let native_before: Vec<_> = chain
@@ -148,14 +165,9 @@ async fn ba_twenty_native_old_sources_clear_reader_health_only_at_three_and_surv
         let (request, digest) = targeted_old(&chain, &run, &observer, n).await;
         let before = OLD_NATIVE + 3 - n;
         assert_eq!(
-            chain.harness.alarms.readers(),
-            Some(before),
+            reading_readers(&chain, &run, &observer).await,
+            before,
             "Inspect did not retire target {n}"
-        );
-        assert_eq!(
-            degraded(&health),
-            before > MAX_READERS,
-            "Inspect alone cannot clear health"
         );
         let reply = ask(
             &run,
@@ -186,17 +198,16 @@ async fn ba_twenty_native_old_sources_clear_reader_health_only_at_three_and_surv
                 .is_some()
         );
         polls(1).await;
-        let expected = OLD_NATIVE + 2 - n;
         assert_eq!(
-            chain.harness.alarms.readers(),
-            Some(expected),
+            reading_readers(&chain, &run, &observer).await,
+            OLD_NATIVE + 2 - n,
+            "retention retired the reading reader of target {n}"
+        );
+        assert!(
+            chain.harness.alarms.readers().unwrap() <= MAX_READERS,
             "actual tend count after target {n}"
         );
-        assert_eq!(
-            degraded(&health),
-            expected > MAX_READERS,
-            "actual router health after target {n}"
-        );
+        assert!(!degraded(&health), "actual router health after target {n}");
         assert!(
             !chain.cursor(0).retired,
             "unproven backlog is never inferred empty"
