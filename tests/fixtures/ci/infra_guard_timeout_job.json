@@ -1,0 +1,82 @@
+{
+  "id": 128638504609,
+  "name": "Script checks runner (guards)",
+  "status": "completed",
+  "conclusion": "cancelled",
+  "started_at": "2026-11-08T05:22:18Z",
+  "completed_at": "2026-11-08T06:07:29Z",
+  "steps": [
+    {
+      "name": "Set up job",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-11-08T05:22:19Z",
+      "completed_at": "2026-11-08T05:22:20Z"
+    },
+    {
+      "name": "Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 2,
+      "started_at": "2026-11-08T05:22:20Z",
+      "completed_at": "2026-11-08T05:22:41Z"
+    },
+    {
+      "name": "Setup Python for script checks",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 3,
+      "started_at": "2026-11-08T05:22:41Z",
+      "completed_at": "2026-11-08T05:22:42Z"
+    },
+    {
+      "name": "Install script-test Python deps",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 4,
+      "started_at": "2026-11-08T05:22:42Z",
+      "completed_at": "2026-11-08T05:22:45Z"
+    },
+    {
+      "name": "Install shellcheck",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 5,
+      "started_at": "2026-11-08T05:22:45Z",
+      "completed_at": "2026-11-08T05:22:58Z"
+    },
+    {
+      "name": "Run script checks",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "number": 6,
+      "started_at": "2026-11-08T05:22:58Z",
+      "completed_at": "2026-11-08T06:07:26Z"
+    },
+    {
+      "name": "Post Setup Python for script checks",
+      "status": "completed",
+      "conclusion": "skipped",
+      "number": 11,
+      "started_at": "2026-11-08T06:07:26Z",
+      "completed_at": "2026-11-08T06:07:26Z"
+    },
+    {
+      "name": "Post Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 12,
+      "started_at": "2026-11-08T06:07:26Z",
+      "completed_at": "2026-11-08T06:07:26Z"
+    },
+    {
+      "name": "Complete job",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 13,
+      "started_at": "2026-11-08T06:07:26Z",
+      "completed_at": "2026-11-08T06:07:26Z"
+    }
+  ]
+}
