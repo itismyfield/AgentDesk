@@ -178,7 +178,7 @@ pub(super) async fn effort(
             .rsplit_once("Effort")
             .and_then(|(_, s)| s.split_once('←'));
         if !labels.is_some_and(|(s, _)| {
-            s.split(|c: char| !c.is_alphanumeric())
+            s.split(|c: char| c.is_whitespace() || "[]─".contains(c))
                 .filter(|s| !s.is_empty())
                 .eq(["low", "medium", "high", "xhigh", "max"])
         }) {

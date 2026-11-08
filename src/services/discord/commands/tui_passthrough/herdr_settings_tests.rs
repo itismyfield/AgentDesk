@@ -1021,6 +1021,7 @@ fn herdr_effort_rejects_unknown_option_layout_before_navigation_pg() {
         "medium low high xhigh max",
         "low medium high xhigh max ultra",
         "low medium high xhigh max\nultra",
+        "low medium ⚡ high xhigh max",
     ] {
         let rig = HerdrRig::start();
         runtime(&rig, Arc::new(AtomicUsize::new(0))).block_on(async {
