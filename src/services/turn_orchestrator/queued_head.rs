@@ -304,6 +304,7 @@ fn set_phase(ledger: &mut HeadLedger, phase: HeadPhase) {
 fn is_head(head: &PersistedHeadInjection, item: &Intervention, channel_id: ChannelId) -> bool {
     let payload = |item: &PendingQueueItem| {
         let mut item = item.clone();
+        item.queue_notice_claimed = None;
         // Restoring queue age may fill absent source clocks; clocks are not frozen payload.
         for source in &mut item.source_message_queued_generations {
             source.enqueued_at_epoch_us = None;

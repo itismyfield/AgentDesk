@@ -4257,6 +4257,8 @@ src/
 │   │   │   ├── queued_recovery_tests.rs
 │   │   │   └── snapshot_io.rs
 │   │   ├── queued_head/
+│   │   │   ├── fixtures/
+│   │   │   │   └── legacy_v1_reserved.json
 │   │   │   ├── v2/
 │   │   │   │   ├── owner_tests/
 │   │   │   │   │   ├── fixtures/

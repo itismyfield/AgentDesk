@@ -73,6 +73,115 @@ fn adopt(file: &Path, channel: u64) -> Result<Owner, String> {
     Owner::adopt(file.to_path_buf(), format!("migration-{channel}"))
 }
 
+// The pre-notice V1 writer's format: both the queue and reserved original lack notice metadata.
+#[cfg(unix)]
+const LEGACY_V1_RESERVED: &str = include_str!("../fixtures/legacy_v1_reserved.json");
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unmarked_v1_heads_recover_and_accept_new_input() {
+    use crate::services::turn_orchestrator::{
+        ChannelMailboxRegistry, QueuePersistenceContext, load_pending_queues,
+        pending_queue_persistence::load_pending_queues_checked,
+    };
+
+    let _root = TestRuntimeRootGuard::new();
+    assert!(!LEGACY_V1_RESERVED.contains("queue_notice_claimed"));
+    let channel = ChannelId::new(7272);
+    for phase in ["reserved", "may_have_sent", "unknown"] {
+        let raw = LEGACY_V1_RESERVED.replace("\"reserved\"", &format!("\"{phase}\""));
+        let file = seed(channel.get(), &raw);
+        let loaded = load_pending_queues_checked(&ProviderKind::Claude, "v2-migration");
+        assert!(
+            loaded.quarantined.is_empty(),
+            "{phase}: valid old V1 must recover: {:?}",
+            loaded.quarantined
+        );
+        assert!(loaded.scan_errors.is_empty());
+        let (queues, _) = load_pending_queues(&ProviderKind::Claude, "v2-migration");
+        let ids: Vec<_> = queues[&channel]
+            .iter()
+            .map(|item| item.message_id.get())
+            .collect();
+        assert_eq!(ids, [100, 101], "{phase}: boot keeps order");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), raw);
+
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel);
+        let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, "v2-migration", None);
+        handle
+            .v2_ensure_channel(&persistence, channel)
+            .await
+            .unwrap();
+        let mut fresh = item(102);
+        fresh.queue_notice_claimed = Some(false);
+        assert_eq!(
+            handle.v2_admit_ticket(fresh, "after-upgrade".into()).await,
+            Ok(source_admission::Admitted::Queued),
+            "{phase}: a new input is accepted after upgrade"
+        );
+        let owner = Owner::adopt(file, "claude/v2-migration".into()).unwrap();
+        let ids: Vec<_> = owner
+            .snapshot
+            .items
+            .iter()
+            .map(|item| item.message_id)
+            .collect();
+        assert_eq!(ids, [100, 101, 102]);
+        assert_eq!(owner.snapshot.items[0].queue_notice_claimed, None);
+        assert_eq!(owner.snapshot.items[1].queue_notice_claimed, None);
+        assert_eq!(owner.snapshot.items[2].queue_notice_claimed, Some(false));
+        if phase == "reserved" {
+            assert!(owner.snapshot.head_injection.is_none());
+            assert_eq!(owner.front().unwrap().1.message_id, 100);
+        } else {
+            assert_eq!(
+                owner.snapshot.head_injection.as_ref().unwrap().phase,
+                HeadPhase::Unknown
+            );
+            assert!(owner.front().is_none(), "{phase}: possibly sent stays held");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn v1_head_identity_ignores_only_notice_metadata() {
+    for queued_flag in [None, Some(false), Some(true)] {
+        for original_flag in [None, Some(false), Some(true)] {
+            let mut snapshot: serde_json::Value = serde_json::from_str(LEGACY_V1_RESERVED).unwrap();
+            if let Some(flag) = queued_flag {
+                snapshot["items"][0]["queue_notice_claimed"] = json!(flag);
+            }
+            if let Some(flag) = original_flag {
+                snapshot["head_injection"]["original"]["queue_notice_claimed"] = json!(flag);
+            }
+            let parse = |value: &serde_json::Value| parse_snapshot(&value.to_string());
+            let (items, meta) =
+                parse(&snapshot).expect("notice metadata does not change V1 identity");
+            assert_eq!(items[0].queue_notice_claimed, queued_flag);
+            assert_eq!(
+                meta.unwrap()
+                    .head_injection
+                    .unwrap()
+                    .original
+                    .queue_notice_claimed,
+                original_flag
+            );
+
+            let mut edited = snapshot.clone();
+            edited["items"][0]["text"] = json!("changed body");
+            assert!(
+                matches!(parse(&edited), Err(error) if error == "reserved snapshot payload differs from its original")
+            );
+            snapshot["items"][0]["queued_generation"] = json!(6);
+            assert!(
+                matches!(parse(&snapshot), Err(error) if error == "reserved snapshot source identity differs from its original")
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn legacy_shapes_migrate_once_without_inventing_provenance() {
