@@ -39,6 +39,9 @@ impl OwnerTurn {
     ) -> &crate::services::turn_orchestrator::OwnerFront {
         match *self {}
     }
+    pub(in crate::services::discord) async fn complete_locally(self) {
+        match self {}
+    }
 }
 
 #[derive(Clone)]
