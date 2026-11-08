@@ -29,7 +29,7 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     /// Judges every hop again once the log tail moved or a hop is new; an unreadable log
-    /// replaces none.
+    /// replaces none and is read again at the next tend.
     fn judge_replaced<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
@@ -45,9 +45,9 @@ impl<B: BindingEvents> Sources<B> {
         if judged {
             return;
         }
-        let events = match self.read_log(writer, 0) {
-            Ok(Some((_, events))) => events,
-            _ => Vec::new(),
+        let Ok(Some((_, events))) = self.read_log(writer, 0) else {
+            self.replaced = None;
+            return;
         };
         let judged = (hops.into_iter())
             .map(|(key, seq, pane)| {

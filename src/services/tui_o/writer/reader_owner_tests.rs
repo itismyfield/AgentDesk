@@ -96,3 +96,28 @@ fn replaced_source_that_grows_counts_until_read_again() {
     assert_eq!(counts.lock().unwrap().last(), Some(&1));
     assert!(!active(&health).contains(&reason));
 }
+
+#[test]
+fn unreadable_binding_log_counts_every_reader_until_read_again() {
+    let (harness, ids, bindings) = fixture(MAX_READERS + 2);
+    executions(&harness, &bindings, &ids, |seq| {
+        ("tmux", format!("execution-{seq}"))
+    });
+    let (mut sources, (mut writer, health, counts), _) = restarted(&harness, bindings.clone());
+    let reason = format!("tui_o:too_many_readers:{CHANNEL}");
+    let mut later = hop(LAST_HOP + 1, &ids[0], &ids[0]);
+    later.record = BindingRecord::Rejected {
+        detail: "held".into(),
+        closes: None,
+    };
+    (later.tmux_session, later.execution_nonce) = ("tmux".into(), format!("execution-{LAST_HOP}"));
+    bindings.commit(later);
+    bindings.fail(Some("log unreadable"));
+    sources.tend(&mut writer).unwrap();
+    assert_eq!(counts.lock().unwrap().last(), Some(&ids.len()));
+    assert!(active(&health).contains(&reason));
+    bindings.fail(None);
+    sources.tend(&mut writer).unwrap();
+    assert_eq!(counts.lock().unwrap().last(), Some(&1));
+    assert!(!active(&health).contains(&reason));
+}
