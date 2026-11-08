@@ -125,10 +125,10 @@ set +e
 PATH="$fakebin:$PATH" RUNNER_TEMP="$WORK_DIR/fixture/tmp" ADK_TEST_HERDR_BIN="$WORK_DIR/fixture/herdr" \
   FAKE_CURL=504 FAKE_CURL_CALLS="$WORK_DIR/fixture/calls" \
   bash "$FIXTURE" touch "$WORK_DIR/fixture/ran" >"$WORK_DIR/fixture/log" 2>&1
-fixture_rc=$?
+echo "$?" >"$WORK_DIR/fixture/rc"
 set -e
 check "the fixture refuses a provided binary with other bytes without downloading" \
-  '[[ $fixture_rc != 0 && ! -e "$WORK_DIR/fixture/calls" && ! -e "$WORK_DIR/fixture/ran" ]]'
+  '[[ $(cat "$WORK_DIR/fixture/rc") != 0 && ! -e "$WORK_DIR/fixture/calls" && ! -e "$WORK_DIR/fixture/ran" ]]'
 
 if [[ "$FAILED" -ne 0 ]]; then
   for log in "$WORK_DIR"/*/log; do echo "--- $log" >&2; cat "$log" >&2; done
