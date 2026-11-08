@@ -134,13 +134,7 @@ pub(super) async fn peeked_provider_mailbox_state(
             recovery_started: false,
         };
     };
-    let snapshot = handle.snapshot().await;
-    ProviderMailboxState {
-        channel_id,
-        has_cancel_token: snapshot.cancel_token.is_some(),
-        queue_depth: snapshot.intervention_queue.len(),
-        recovery_started: snapshot.recovery_started_at.is_some(),
-    }
+    ProviderMailboxState::from_snapshot(channel_id, &handle.snapshot().await)
 }
 
 /// Result of [`purge_idle_channel_mailbox_registry_entry`].

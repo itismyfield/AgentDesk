@@ -608,13 +608,7 @@ pub async fn stale_mailbox_repair_handler(
             )
                 .into_response();
         };
-        let snapshot = handle.snapshot().await;
-        health::ProviderMailboxState {
-            channel_id: request.channel_id,
-            has_cancel_token: snapshot.cancel_token.is_some(),
-            queue_depth: snapshot.intervention_queue.len(),
-            recovery_started: snapshot.recovery_started_at.is_some(),
-        }
+        health::ProviderMailboxState::from_snapshot(request.channel_id, &handle.snapshot().await)
     };
     if request.expected_has_cancel_token.is_some()
         && request.expected_has_cancel_token != Some(before.has_cancel_token)
@@ -737,13 +731,10 @@ pub async fn stale_mailbox_repair_handler(
                                 },
                             }
                         } else if let Some(handle) = global_handle.as_ref() {
-                            let snapshot = handle.snapshot().await;
-                            health::ProviderMailboxState {
-                                channel_id: request.channel_id,
-                                has_cancel_token: snapshot.cancel_token.is_some(),
-                                queue_depth: snapshot.intervention_queue.len(),
-                                recovery_started: snapshot.recovery_started_at.is_some(),
-                            }
+                            health::ProviderMailboxState::from_snapshot(
+                                request.channel_id,
+                                &handle.snapshot().await,
+                            )
                         } else {
                             health::ProviderMailboxState {
                                 channel_id: request.channel_id,
@@ -868,13 +859,10 @@ pub async fn stale_mailbox_repair_handler(
                         },
                     }
                 } else if let Some(handle) = global_handle.as_ref() {
-                    let snapshot = handle.snapshot().await;
-                    health::ProviderMailboxState {
-                        channel_id: request.channel_id,
-                        has_cancel_token: snapshot.cancel_token.is_some(),
-                        queue_depth: snapshot.intervention_queue.len(),
-                        recovery_started: snapshot.recovery_started_at.is_some(),
-                    }
+                    health::ProviderMailboxState::from_snapshot(
+                        request.channel_id,
+                        &handle.snapshot().await,
+                    )
                 } else {
                     health::ProviderMailboxState {
                         channel_id: request.channel_id,
