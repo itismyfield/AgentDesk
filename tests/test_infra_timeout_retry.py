@@ -28,11 +28,9 @@ class TimeoutRetry(unittest.TestCase):
                             pull_requests=[dict(number=42)])
         self.latest = dict(self.attempt)
         self.pull = dict(state="open", head=dict(sha=SHA))
-        self.job = dict(id=901, name="Script checks runner (guards)", conclusion="cancelled",
-                        check_run_url="https://api.github.com/repos/offline/repo/check-runs/77",
-                        steps=[dict(name="Run script checks", conclusion="cancelled")])
+        self.job = json.loads((ROOT / "tests/fixtures/ci/infra_guard_timeout_job.json").read_text())
+        self.job["id"] = 901
         self.jobs = [self.job]
-        self.annotations = [dict(path=".github", annotation_level="failure", message=TIMEOUT)]
         self.log = CANCEL
         self.write("gh", '''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -45,7 +43,6 @@ sources = {
     "repos/offline/repo/actions/runs/7/attempts/1/jobs?per_page=100": "jobs.json",
     "repos/offline/repo/actions/jobs/901/logs": "job.log",
     "repos/offline/repo/actions/jobs/902/logs": "worker.log",
-    "repos/offline/repo/check-runs/77/annotations?per_page=100": "annotations.json",
     "repos/offline/repo/actions/runs/7": "latest.json",
     "repos/offline/repo/pulls/42": "pull.json",
     "repos/offline/repo/actions/runs/7/artifacts?per_page=100": "artifacts.json",
@@ -65,18 +62,16 @@ else:
     def write(self, name, value):
         (self.directory / name).write_text(value if isinstance(value, str) else json.dumps(value))
 
-    def run_classifier(self, *, dry_run=True, attempt=1, annotation_api=True):
+    def run_classifier(self, *, dry_run=True, attempt=1, timeout_minutes="45"):
         for name, value in (("attempt.json", self.attempt), ("latest.json", self.latest),
                             ("pull.json", self.pull), ("job.log", self.log),
                             ("jobs.json", dict(total_count=len(self.jobs), jobs=self.jobs))):
             self.write(name, value)
-        if annotation_api:
-            self.write("annotations.json", self.annotations)
         summary = self.directory / "summary.md"
         env = {**os.environ, "PATH": str(self.directory) + os.pathsep + os.environ["PATH"],
                "FIXTURES": str(self.directory), "GITHUB_REPOSITORY": "offline/repo",
                "RUN_ID": "7", "RUN_ATTEMPT": str(attempt), "RERUN_DRY_RUN": str(int(dry_run)),
-               "GITHUB_STEP_SUMMARY": str(summary)}
+               "GITHUB_STEP_SUMMARY": str(summary), "GUARDS_TIMEOUT_MINUTES": timeout_minutes}
         result = subprocess.run(["bash", str(SCRIPT)], cwd=ROOT, env=env,
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -85,23 +80,34 @@ else:
         self.calls = [json.loads(line) for line in (self.directory / "calls.jsonl").read_text().splitlines()] if (self.directory / "calls.jsonl").exists() else []
         return result.stdout
 
-    def test_cancelled_guard_annotation_is_infra_and_would_rerun(self):
-        self.assertIn("decision=would-rerun:infra", self.run_classifier())
-        self.assertIn("`infra-job-timeout`", self.summary)
+    def assert_manual_timeout(self, **kwargs):
+        output = self.run_classifier(dry_run=False, **kwargs)
+        self.assertIn("decision=no-op:unknown", output)
+        self.assertIn("`suspected-job-timeout:manual-retry`", self.summary)
         self.assertFalse((self.directory / "rerun").exists())
+        self.assertEqual(self.calls, [
+            ["api", "repos/offline/repo/actions/runs/7/attempts/1"],
+            ["api", "repos/offline/repo/actions/runs/7/attempts/1/jobs?per_page=100"],
+            ["api", "repos/offline/repo/actions/jobs/901/logs"]])
+
+    def test_observed_cancelled_guard_is_suspected_timeout_for_manual_retry(self):
+        self.assert_manual_timeout()
 
     def test_cancelled_run_reaches_the_timeout_classifier(self):
         self.attempt["conclusion"] = self.latest["conclusion"] = "cancelled"
-        self.assertIn("decision=would-rerun:infra", self.run_classifier())
+        self.assert_manual_timeout()
 
-    def test_actual_retry_rechecks_attempt_and_current_pr_head(self):
-        self.attempt["conclusion"] = self.latest["conclusion"] = "cancelled"
-        self.assertIn("decision=rerun-requested:infra", self.run_classifier(dry_run=False))
-        self.assertEqual((self.directory / "rerun").read_text(), "901")
-        self.assertEqual(self.calls[-3:], [
-            ["api", "repos/offline/repo/actions/runs/7"],
-            ["api", "repos/offline/repo/pulls/42"],
-            ["run", "rerun", "7", "--repo", "offline/repo", "--job", "901"]])
+    def test_timeout_boundary_is_inclusive_and_never_retries(self):
+        self.job["completed_at"] = "2026-11-08T06:07:18Z"
+        self.assert_manual_timeout()
+
+    def test_manual_cancel_before_timeout_is_not_labelled_timeout(self):
+        self.job["completed_at"] = "2026-11-08T06:07:17Z"
+        self.assertNotIn("suspected-job-timeout", self.run_classifier() + self.summary)
+        self.assertFalse((self.directory / "rerun").exists())
+
+    def test_manual_cancel_after_timeout_is_still_never_retried(self):
+        self.assert_manual_timeout()
 
     def test_unittest_failure_before_summary_vetoes_timeout(self):
         self.log = "2026-11-08T06:00:00Z FAIL: test_guard (tests.example.Guard.test_guard)\n" + CANCEL
@@ -155,8 +161,7 @@ except KeyboardInterrupt:
             "", "2026-11-08T06:00:00Z ",
             "Script checks runner (guards)\tRun script checks\t2026-11-08T06:00:00.0000000Z ",
         ) for line in progress.splitlines()) + CANCEL
-        self.assertIn("decision=would-rerun:infra", self.run_classifier())
-        self.assertIn("`infra-job-timeout`", self.summary)
+        self.assert_manual_timeout()
 
     def test_passing_compact_progress_does_not_veto_timeout(self):
         self.assert_progress_is_not_a_failure("....")
@@ -184,7 +189,6 @@ except KeyboardInterrupt:
         self.assertNotIn("decision=would-rerun", self.run_classifier())
 
     def test_manual_cancel_and_log_only_timeout_are_not_retried(self):
-        self.annotations = []
         self.log = CANCEL + TIMEOUT + "\n"
         self.assertNotIn("decision=would-rerun", self.run_classifier())
 
@@ -197,72 +201,82 @@ except KeyboardInterrupt:
         self.write("worker.log", CANCEL)
         self.assertIn("decision=no-op:unknown", self.run_classifier())
 
-    def test_failed_worker_still_requires_artifacts_beside_timeout(self):
+    def test_suspected_timeout_blocks_retry_even_with_failed_worker(self):
         self.jobs.append(dict(id=902, name="Rust tests (worker 0)", conclusion="failure"))
         self.write("worker.log", "The runner has received a shutdown signal.\n")
         self.write("artifacts.json", dict(total_count=0, artifacts=[]))
-        self.assertIn("decision=no-op:worker-artifact-veto", self.run_classifier())
+        self.assertIn("decision=no-op:unknown", self.run_classifier())
+        self.assertNotIn(["api", "repos/offline/repo/actions/runs/7/artifacts?per_page=100"], self.calls)
 
     def test_failure_job_cannot_use_cancelled_timeout_path(self):
         self.job["conclusion"] = "failure"
         self.assertNotIn("decision=would-rerun", self.run_classifier())
 
-    def test_annotation_api_failure_is_closed(self):
-        self.assertNotIn("decision=would-rerun", self.run_classifier(annotation_api=False))
+    def test_missing_or_invalid_timestamps_are_not_labelled_timeout(self):
+        for started, completed in ((None, "2026-11-08T06:07:29Z"), ("bad", "bad"),
+                                   ("2026-11-08T06:07:29Z", "2026-11-08T05:22:18Z")):
+            with self.subTest(started=started, completed=completed):
+                self.job.update(started_at=started, completed_at=completed)
+                self.assertNotIn("suspected-job-timeout", self.run_classifier() + self.summary)
 
-    def test_wrong_annotation_level_is_closed(self):
-        self.annotations[0]["annotation_level"] = "warning"
-        self.assertNotIn("decision=would-rerun", self.run_classifier())
+    def test_missing_or_invalid_timeout_is_closed(self):
+        for minutes in ("", "0", "-1", "abc", "45.5"):
+            with self.subTest(minutes=minutes):
+                self.assertNotIn("suspected-job-timeout", self.run_classifier(timeout_minutes=minutes) + self.summary)
 
-    def test_other_annotation_timeout_text_is_closed(self):
-        self.annotations[0]["message"] = "test exceeded the maximum execution time"
-        self.assertNotIn("decision=would-rerun", self.run_classifier())
+    def test_caller_timeout_controls_diagnostic_threshold(self):
+        self.assertNotIn("suspected-job-timeout", self.run_classifier(timeout_minutes="60") + self.summary)
 
-    def test_full_annotation_page_is_closed(self):
-        self.annotations *= 100
-        self.assertNotIn("decision=would-rerun", self.run_classifier())
+    def test_missing_or_unsuitable_steps_are_not_labelled_timeout(self):
+        for steps in (None, [], [dict(name="Run script checks", status="completed", conclusion="success")],
+                      [dict(name="Run script checks", status="completed", conclusion="failure")]):
+            with self.subTest(steps=steps):
+                self.job["steps"] = steps
+                self.assertNotIn("suspected-job-timeout", self.run_classifier() + self.summary)
 
-    def test_malformed_annotations_are_closed(self):
-        self.annotations = {"message": TIMEOUT}
-        self.assertNotIn("decision=would-rerun", self.run_classifier())
+    def test_failed_step_blocks_timeout_diagnosis_without_log_failure(self):
+        self.job["steps"][1]["conclusion"] = "failure"
+        self.assertNotIn("suspected-job-timeout", self.run_classifier() + self.summary)
 
-    def test_foreign_check_run_url_is_closed(self):
-        self.job["check_run_url"] = "https://api.github.com/repos/another/repo/check-runs/77"
-        self.assertNotIn("decision=would-rerun", self.run_classifier())
+    def test_in_progress_job_is_not_labelled_timeout(self):
+        self.job["status"] = "in_progress"
+        self.assertNotIn("suspected-job-timeout", self.run_classifier() + self.summary)
 
-    def test_extra_check_run_url_segments_are_closed(self):
-        self.job["check_run_url"] += "/other/77"
-        self.assertNotIn("decision=would-rerun", self.run_classifier())
+    def test_missing_cancellation_log_is_not_labelled_timeout(self):
+        self.log = TIMEOUT + "\n"
+        self.assertNotIn("suspected-job-timeout", self.run_classifier() + self.summary)
 
     def test_duplicate_timeout_guard_rows_are_closed(self):
         self.jobs.append(dict(self.job))
         self.assertIn("decision=no-op:unknown", self.run_classifier())
-
-    def test_missing_check_run_url_is_closed(self):
-        del self.job["check_run_url"]
-        self.assertNotIn("decision=would-rerun", self.run_classifier())
+        self.assertNotIn("suspected-job-timeout", self.summary)
 
     def test_second_attempt_never_retries(self):
         self.assertIn("decision=no-op:attempt-cap", self.run_classifier(attempt=2))
         self.assertEqual(self.calls, [])
 
-    def test_new_attempt_blocks_live_retry(self):
+    def test_new_attempt_cannot_make_suspected_timeout_retryable(self):
         self.latest["run_attempt"] = 2
-        self.assertIn("decision=no-op:stale-attempt", self.run_classifier(dry_run=False))
-        self.assertFalse((self.directory / "rerun").exists())
+        self.assert_manual_timeout()
 
-    def test_in_progress_attempt_blocks_live_retry(self):
+    def test_in_progress_attempt_cannot_make_suspected_timeout_retryable(self):
         self.latest["status"] = "in_progress"
-        self.assertIn("decision=no-op:stale-attempt", self.run_classifier(dry_run=False))
+        self.assert_manual_timeout()
 
-    def test_new_pr_head_blocks_live_retry(self):
+    def test_new_pr_head_cannot_make_suspected_timeout_retryable(self):
         self.pull["head"]["sha"] = "b" * 40
-        self.assertIn("decision=no-op:stale-head", self.run_classifier(dry_run=False))
-        self.assertFalse((self.directory / "rerun").exists())
+        self.assert_manual_timeout()
+
+    def test_caller_timeout_matches_guard_job_timeout(self):
+        retry = yaml.safe_load((ROOT / ".github/workflows/ci-pr-infra-retry.yml").read_text())
+        guard = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())["jobs"]["scripts_guards"]
+        step = next(step for step in retry["jobs"]["retry"]["steps"]
+                    if step.get("run") == "./scripts/ci/infra-failure-rerun.sh")
+        self.assertEqual(int(step["env"]["GUARDS_TIMEOUT_MINUTES"]), guard["timeout-minutes"])
 
     def test_workflow_allows_only_failed_or_cancelled_initial_runs(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci-pr-infra-retry.yml").read_text())
-        self.assertEqual(workflow["permissions"].get("checks"), "read")
+        self.assertNotIn("checks", workflow["permissions"])
         condition = workflow["jobs"]["retry"]["if"]
         for conclusion in ("failure", "cancelled", "success", "skipped"):
             for attempt in (1, 2):

@@ -10,7 +10,6 @@ on:
 
 permissions:
   actions: write
-  checks: read
   contents: read
   pull-requests: read
 
@@ -39,10 +38,11 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
         run: python3 scripts/ci/known-flaky-rerun.py
 
-      - name: Classify failure and retry infra workers or timed out guards
+      - name: Classify failure and retry infra workers
         if: ${{ !cancelled() && steps.flaky.outputs.handled != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           RUN_ID: ${{ github.event.workflow_run.id }}
+          GUARDS_TIMEOUT_MINUTES: '45'
         run: ./scripts/ci/infra-failure-rerun.sh
