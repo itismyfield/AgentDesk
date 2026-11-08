@@ -1259,11 +1259,17 @@ if action
   end
   run = fallback.is_a?(Hash) ? fallback["run"].to_s : ""
   cleared = run.scan(/^\s*echo "([A-Za-z_][A-Za-z0-9_]*=[^"]*)"/).flatten.sort
-  unless fallback.is_a?(Hash) && fallback["if"] == "steps.sccache.outcome != 'success'" && fallback["shell"] == "bash" && !fallback.key?("continue-on-error")
-    errors << "#{action_path}: fallback step must run when the setup outcome is not success, in bash, without continue-on-error"
-  end
+  fallback_ok = fallback.is_a?(Hash) && (fallback.keys - %w[name if shell env run]).empty? &&
+    fallback["if"] == "steps.sccache.outcome != 'success'" && fallback["shell"] == "bash" &&
+    (fallback["env"] || {}).keys.all? { |key| key == "SCCACHE_SETUP_OUTCOME" }
+  errors << "#{action_path}: fallback step must run when the setup outcome is not success, in bash, without continue-on-error or other env" unless fallback_ok
   errors << "#{action_path}: fallback must leave a warning annotation" unless run.lines.any? { |line| line.strip.match?(warning) }
-  unless cleared == ["RUSTC_WRAPPER=", "SCCACHE_GHA_ENABLED="] && run.include?('>> "$GITHUB_ENV"') && !run.include?("GITHUB_PATH")
+  # Only these line shapes may appear, so no other command can write GITHUB_ENV or GITHUB_PATH.
+  run_lines = run.lines.map(&:strip).reject(&:empty?)
+  shapes_ok = !run.include?("$(") && !run.include?("`") && run_lines.all? { |line|
+    line.match?(/\Aecho "::warning[^">]*"\z/) || line == "{" || line == '} >> "$GITHUB_ENV"' || line.match?(/\Aecho "[A-Za-z_][A-Za-z0-9_]*="\z/)
+  }
+  unless shapes_ok && cleared == ["RUSTC_WRAPPER=", "SCCACHE_GHA_ENABLED="] && run_lines.include?('} >> "$GITHUB_ENV"')
     errors << "#{action_path}: fallback must clear exactly RUSTC_WRAPPER and SCCACHE_GHA_ENABLED through GITHUB_ENV"
   end
 end
@@ -1275,9 +1281,9 @@ YAML.load_file(pr_path).fetch("jobs", {}).each do |job_id, job|
 
     uses = step["uses"].to_s
     label = "#{pr_path} job #{job_id} step #{(step["name"] || uses).inspect}"
-    errors << "#{label} must install sccache through #{local_action}" if uses.start_with?("mozilla-actions/sccache-action")
+    errors << "#{label} must install sccache through #{local_action}" if uses.downcase.start_with?("mozilla-actions/sccache-action")
     errors << "#{label} must not set continue-on-error; the action owns the fallback" if uses == local_action && step.key?("continue-on-error")
-    next unless uses.start_with?("taiki-e/install-action") && step.dig("with", "tool").to_s.split(",").map(&:strip).include?("ripgrep")
+    next unless uses.downcase.start_with?("taiki-e/install-action") && step.dig("with", "tool").to_s.split(",").any? { |tool| tool.strip.match?(/\Aripgrep(@|\z)/) }
 
     id = step["id"].to_s
     errors << "#{label} must set an id and continue-on-error: true so its fallback can run" unless !id.empty? && step["continue-on-error"] == true
