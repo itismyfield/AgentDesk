@@ -141,14 +141,19 @@ impl Owner {
     pub(crate) fn fingerprint(&self) -> Result<String, String> {
         serde_json::to_string(&self.snapshot).map_err(|e| e.to_string())
     }
+
+    /// The waiting depth: committed items less the front an attempt already carries.
+    pub(crate) fn waiting(&self) -> usize {
+        let head = self.snapshot.head_injection.as_ref();
+        let carried = head.map_or(0, |head| head.members().count());
+        self.snapshot.items.len().saturating_sub(carried)
+    }
 }
 
 impl ChannelMailboxState {
-    /// The V2 owner's waiting depth: its committed items less the front an attempt already carries.
+    /// The V2 owner's waiting depth, by [`Owner::waiting`].
     pub(crate) fn v2_len(&self) -> Option<usize> {
-        let snapshot = &self.queued_head.v2.as_ref()?.snapshot;
-        let carried = (snapshot.head_injection.as_ref()).map_or(0, |head| head.members().count());
-        Some(snapshot.items.len().saturating_sub(carried))
+        (self.queued_head.v2.as_ref()).map(Owner::waiting)
     }
 
     /// The V2 owner's waiting depth and whether it holds any input, attempted or owed included.

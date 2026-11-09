@@ -476,6 +476,10 @@ fn a_stop_counts_only_the_owner_input_waiting_behind_an_attempted_front() {
         assert_eq!(result.queue_depth_before, Some(1));
         assert_eq!(result.queue_depth, Some(1), "{}", result.lifecycle_path);
         assert_eq!(result.queue_preserved, Some(true));
+        // A preserve cancel then answers `queued_remaining` from the drain's hydration reply.
+        let drain = crate::services::discord::health::schedule_pending_queue_drain_after_cancel;
+        let drained = drain(&registry, "claude", channel, "depth").await;
+        assert_eq!(drained.queue_depth_after, Some(1));
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
     });
 }
