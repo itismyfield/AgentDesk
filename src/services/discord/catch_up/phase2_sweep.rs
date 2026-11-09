@@ -118,7 +118,7 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         }
         let last_bot_response_id = recent[last_bot_idx].id.get();
         let unanswered_slice = &recent[..slice_end];
-        // The newest bot post bounds the slice, so read notice replies from the whole page.
+        // Notice replies come from the whole fetched page, as in phase 1, not only the slice.
         let noticed = super::classification::noticed_messages(&recent, current_bot_user_id);
 
         // Collect existing queue IDs for dedup from the same snapshot used for
