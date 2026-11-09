@@ -111,26 +111,14 @@ pub(super) async fn clear(
             _ => false,
         };
         if same {
-            let exact = crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+            // `current` already proved the exact key names this row; the keyed clear skips it.
+            let cleared = hosted_execution::http_force::clear_retired_selector_pg(
                 pool,
-                None,
-                Some(provider.as_str()),
-                Some(CanonicalSessionIdentity {
-                    kind: SessionIdentityKind::DiscordChannel,
-                    discord_token_hash: &shared.token_hash,
-                    channel_id: &key,
-                }),
+                row.session_id(),
+                record,
             )
             .await;
-            match exact {
-                Ok(Some((id, key))) if id == row.session_id() => {
-                    super::clear_teardown::forget_selector(shared, &key, report).await
-                }
-                other => report.fail(
-                    "session_selector",
-                    &format!("retired session key: {other:?}"),
-                ),
-            }
+            super::clear_teardown::note_retired_selector(cleared, report);
             native::clear_session_memory(shared, channel).await;
             native::clear_process_reset_pending(shared, channel).await;
             super::clear_teardown::write_boundary(shared, channel, report).await;
