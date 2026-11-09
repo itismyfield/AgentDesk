@@ -21,6 +21,7 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         incomplete_recent_channels,
         ttl_retired_channels,
         open_barriers,
+        phase1_read_through,
     } = state;
     let mut total_recovered = 0usize;
     // Pace successive per-channel REST scans so a many-channel sweep doesn't
@@ -119,6 +120,10 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
             ControlFlow::Continue(messages) => messages,
             ControlFlow::Break(()) => continue,
         };
+        // Phase 1's barrier and retry own every id it read, so phase 2 must not retry them.
+        if let Some(newest) = messages.last() {
+            phase1_read_through.insert(channel_id, newest.id.get());
+        }
 
         // Get bot's own user ID to filter out self-messages
         // Collect existing message IDs in queue for dedup

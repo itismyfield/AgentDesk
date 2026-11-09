@@ -327,6 +327,20 @@ pub async fn find_origin_receipt(
     .map_err(|e| anyhow!("read turn receipt failed: {e}"))
 }
 
+/// Whether `turn_id` committed a `completed` terminal, still in `turns` or moved to the archive.
+/// Cancelled, failed and empty terminals may be retried, so they do not count.
+pub async fn turn_completed(pool: &PgPool, turn_id: &str) -> Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM turns WHERE turn_id = $1 AND terminal_outcome = 'completed')
+             OR EXISTS(SELECT 1 FROM turns_archive
+                        WHERE turn_id = $1 AND terminal_outcome = 'completed')",
+    )
+    .bind(turn_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| anyhow!("read turn completion failed: {e}"))
+}
+
 fn normalized_opt(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)

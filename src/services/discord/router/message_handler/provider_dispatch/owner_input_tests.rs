@@ -1978,6 +1978,9 @@ mod stop_gate;
 #[path = "owner_input_turn_mode_tests.rs"]
 mod turn_mode;
 
+#[path = "owner_input_settled_front_tests.rs"]
+mod settled_front;
+
 type BusySubmissionObservation = (Result<(), String>, bool, Vec<bool>, Vec<String>);
 
 /// Runs the actual pump/leaf/settlement and records the write flag at answer-observer entry.
