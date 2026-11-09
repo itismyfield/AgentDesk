@@ -313,7 +313,7 @@ pub(crate) async fn enqueue_outbox_with_origin_on_tx(
     .await?;
     if inserted {
         let census = body_census::capture(message.source);
-        body_census::store(tx, id, census.as_ref()).await;
+        body_census::store(tx, id, census.as_ref()).await?;
     }
     Ok(id)
 }
@@ -413,7 +413,7 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
     .await?;
     if inserted {
         let census = body_census::capture(message.source);
-        body_census::store(&mut tx, id, census.as_ref()).await;
+        body_census::store(&mut tx, id, census.as_ref()).await?;
     }
     tx.commit().await?;
     Ok(OutboxEnqueueOutcome::Enqueued { id })
@@ -600,7 +600,7 @@ async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
     .await?;
     if let Some(id) = id {
         let census = body_census::capture(message.source);
-        body_census::store(tx, id, census.as_ref()).await;
+        body_census::store(tx, id, census.as_ref()).await?;
     }
     Ok(id)
 }
@@ -693,7 +693,7 @@ pub(crate) async fn stage_outbox_pg_with_ttl_and_attachment(
     .await?;
     if let Some(id) = inserted {
         let census = body_census::capture(message.source);
-        body_census::store(&mut tx, id, census.as_ref()).await;
+        body_census::store(&mut tx, id, census.as_ref()).await?;
     }
     let id = match inserted {
         Some(id) => id,
@@ -877,7 +877,7 @@ async fn enqueue_plain_on_tx(
     .fetch_one(&mut **tx)
     .await?;
     let census = body_census::capture(message.source);
-    body_census::store(tx, id, census.as_ref()).await;
+    body_census::store(tx, id, census.as_ref()).await?;
     Ok(id)
 }
 
@@ -951,7 +951,7 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
     .await?;
     if let Some(id) = inserted {
         let census = body_census::capture(LIFECYCLE_NOTIFIER_SOURCE);
-        body_census::store(&mut tx, id, census.as_ref()).await;
+        body_census::store(&mut tx, id, census.as_ref()).await?;
     }
     tx.commit().await?;
 
