@@ -486,6 +486,19 @@ pub(super) async fn resolve_cwd_off_runtime(
     .map_err(|e| ResumeRebindError::Filesystem(format!("transcript lookup failed: {e}")))?
 }
 
+/// Declared homes the dropdown may offer: none unless a copy would land in the home the next launch reads.
+pub(crate) fn offered_homes(
+    others: Vec<PathBuf>,
+    home: Option<&Path>,
+    launch: Result<Option<&Path>, &str>,
+) -> Vec<PathBuf> {
+    let active = home.map(Path::to_path_buf).or_else(default_claude_home);
+    match active.is_some_and(|active| launch_refusal(launch, &active).is_none()) {
+        true => others,
+        false => Vec::new(),
+    }
+}
+
 pub(crate) struct ResumeChoice {
     pub(crate) label: String,
     pub(crate) session_id: String,
@@ -497,14 +510,9 @@ pub(crate) fn choices(
     live_bound: &HashSet<String>,
     home: Option<&Path>,
     others: &[PathBuf],
-    launch: Result<Option<&Path>, &str>,
     partial: &str,
     deadline: Instant,
 ) -> Vec<ResumeChoice> {
-    // A declared home's entry is offered only when resuming it could copy into the home the launch reads.
-    let active = home.map(Path::to_path_buf).or_else(default_claude_home);
-    let readable = active.is_some_and(|active| launch_refusal(launch, &active).is_none());
-    let others = if readable { others } else { &[] };
     // Reserve preview time even when directory discovery consumes its share of the budget.
     let discovery_deadline =
         Instant::now() + deadline.saturating_duration_since(Instant::now()) / 3;

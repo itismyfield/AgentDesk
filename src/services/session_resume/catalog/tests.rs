@@ -61,7 +61,6 @@ impl Fixture {
             live,
             Some(&self.home),
             &[],
-            Ok(None),
             partial,
             Instant::now() + Duration::from_secs(2),
         )
@@ -327,7 +326,6 @@ fn short_discovery_deadline_preserves_partial_results() {
         &HashSet::new(),
         Some(&f.home),
         &[],
-        Ok(None),
         "",
         start + Duration::from_millis(120),
     );
@@ -370,7 +368,6 @@ fn transcript_only_in_another_home_is_listed_then_copied_once_into_the_same_cwd_
         &HashSet::new(),
         Some(&f.home),
         &homes,
-        Ok(None),
         "스왑",
         Instant::now() + Duration::from_secs(2),
     );
@@ -527,7 +524,6 @@ fn an_id_the_active_home_holds_is_listed_and_resumed_from_the_active_home_only()
         &HashSet::new(),
         Some(&f.home),
         &homes,
-        Ok(None),
         "",
         Instant::now() + Duration::from_secs(2),
     );
@@ -540,6 +536,12 @@ fn an_id_the_active_home_holds_is_listed_and_resumed_from_the_active_home_only()
     assert!(!listed[0].label.contains(" · home "), "{}", listed[0].label);
     let resolved = resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &homes, Ok(None));
     assert_eq!(resolved.unwrap(), current);
+    // A declared home is offered only while the copy would land in the home the next launch reads.
+    let offered = |launch| offered_homes(homes.to_vec(), Some(&f.home), launch);
+    assert_eq!(offered(Ok(None)), homes);
+    assert_eq!(offered(Ok(Some(&f.home))), homes);
+    assert!(offered(Ok(Some(&other))).is_empty());
+    assert!(offered(Err("claude auth fallback picks the launch account")).is_empty());
     assert!(
         !claude_transcript_path(&f.sibling, PRIOR, Some(&f.home))
             .unwrap()
@@ -673,7 +675,6 @@ fn unusable_transcript_homes_warn_once_each_at_load_and_leave_the_list_alone() {
         &HashSet::new(),
         Some(&f.home),
         &declared_homes(&loaded),
-        Ok(None),
         "",
         Instant::now() + Duration::from_secs(2),
     );
