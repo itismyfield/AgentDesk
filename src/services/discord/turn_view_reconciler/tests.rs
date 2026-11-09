@@ -1,14 +1,11 @@
 use super::serenity::{ChannelId, MessageId};
 use super::*;
-
 fn target() -> TurnViewTarget {
     target_with(100_000_000_000_001, 100_000_000_000_101)
 }
-
 fn target_with(channel_id: u64, message_id: u64) -> TurnViewTarget {
     TurnViewTarget::intake_user_message(ChannelId::new(channel_id), MessageId::new(message_id))
 }
-
 fn owner(generation: u64, suffix: &str) -> TurnViewOwner {
     TurnViewOwner::new(generation, format!("turn-{suffix}"))
 }
@@ -730,7 +727,7 @@ async fn persisted_v1_queued_state_is_invalidated_for_reapplication() {
     );
     let text = std::fs::read_to_string(persisted_path(target)).expect("rewritten v4 state");
     let rewritten: PersistedTargetState = serde_json::from_str(&text).expect("parse v4 state");
-    assert_eq!(rewritten.version, QUEUE_SOON_STATE_VERSION);
+    assert_eq!(rewritten.version, LIVE_QUEUED_MARKER_STATE_VERSION);
 }
 
 #[tokio::test]
@@ -2407,3 +2404,6 @@ async fn reg_7832_waiting_input_uses_soon_then_turn_start_uses_hourglass() {
             .all(|op| !op.add || !['➕', '📥'].contains(&op.emoji))
     );
 }
+
+#[path = "previous_v3_reader_tests.rs"]
+mod previous_v3_reader;

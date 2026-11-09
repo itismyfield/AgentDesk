@@ -7,14 +7,12 @@ use crate::services::discord::router::message_handler::provider_dispatch::submis
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::{self as discord, SharedData, turn_completion_events};
 use poise::serenity_prelude::ChannelId;
-
 #[path = "owner_input_carried_restart_tests.rs"]
 mod carried_restart;
 #[path = "owner_input_owned_stop_tests.rs"]
 mod owned_stop;
 #[path = "owner_input_person_origin_tests.rs"]
 mod person_origin;
-
 #[derive(Clone, Default)]
 struct Trace(Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -1485,3 +1483,5 @@ async fn a_marked_row_is_settled_and_the_owned_front_submitted_on_one_wake_pg() 
 
 #[path = "owner_input_native_read_tests.rs"]
 mod native_read;
+#[path = "owner_input_retained_marker_tests.rs"]
+mod retained_markers;

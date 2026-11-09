@@ -88,6 +88,7 @@ impl Failure {
             .map(|shared| shared.provider.as_str().to_string());
         let proof_token = token.clone();
         let mailbox = self.mailbox.clone();
+        let members = self.members.clone();
         let decision = mailbox
             .v2_request(move |slot| {
                 let kind =
@@ -123,6 +124,36 @@ impl Failure {
                 owner.start_failed(&self.front, self.number, &self.members, pin, kind, &detail)
             })
             .await?;
+        if decision == Some(true)
+            && let Some(shared) = shared.as_ref()
+        {
+            use crate::services::discord::turn_view_reconciler::{
+                TurnViewIdentity, TurnViewTarget, turn_view_owner_for_message,
+            };
+            let now = (std::time::SystemTime::now(), std::time::Instant::now());
+            for item in members {
+                let input = crate::services::turn_orchestrator::pending_queue_item_to_intervention(
+                    item, now.0, now.1,
+                );
+                for source in input.source_message_queued_generations() {
+                    shared
+                        .turn_view_reconciler
+                        .note_queue_marker_removed(
+                            shared,
+                            TurnViewTarget::intake_user_message(channel, source.message_id),
+                            turn_view_owner_for_message(
+                                channel,
+                                source.message_id,
+                                source.queued_generation,
+                            ),
+                            TurnViewIdentity::IntakeShared,
+                            crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+                            "start_failure_retained",
+                        )
+                        .await;
+                }
+            }
+        }
         if decision.is_some() {
             if let Some(shared) = shared {
                 tokio::spawn(async move {
