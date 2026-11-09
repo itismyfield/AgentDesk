@@ -218,7 +218,7 @@ async fn busy_crash_snapshot_before_first_key_preserves_the_accepted_original() 
     );
     let (path, namespace) =
         crate::services::turn_orchestrator::v2_queue(&persistence, rig.channel).unwrap();
-    let snapshot = rig._tmux.root.path().join("crash-queue.json");
+    let snapshot = path.with_extension("crash.json");
     fs::copy(path, &snapshot).unwrap();
     let registry = ChannelMailboxRegistry::default();
     let recovered = registry.handle(rig.channel);
@@ -285,6 +285,12 @@ async fn gated_idle_start_restores_pending_then_completes() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = IntakeRig::new(7_991_106, false).await;
     let _gate = discord::router::busy_inject_support::open_gate(rig.channel.get());
+    let session = rig.shared.core.lock().await.sessions[&rig.channel]
+        .session_id
+        .clone()
+        .unwrap();
+    fs::write(rig.renderer.join("native-sid"), session).unwrap();
+    fs::write(rig.renderer.join("native-uuid"), "single-idle-user").unwrap();
     fs::create_dir_all(rig.transcript.parent().unwrap()).unwrap();
     fs::write(rig.renderer.join("transcript"), IDLE).unwrap();
     fs::hard_link(rig.renderer.join("transcript"), &rig.transcript).unwrap();
@@ -345,6 +351,9 @@ async fn gated_idle_start_restores_pending_then_completes() {
     await_within(bridge, WAIT_CAP).await.unwrap();
     assert_eq!(
         reaction_ops(&rig),
-        [('⏳', true), ('⏳', false), ('✅', true)]
+        [('⏳', true), ('⏳', false), ('✅', true)],
+        "{}; Discord: {:?}",
+        rig.trace.text(),
+        rig.mock.written_texts()
     );
 }

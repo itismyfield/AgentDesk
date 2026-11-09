@@ -86,14 +86,14 @@ pub(super) async fn defer_owned_front(
         );
         if !defer_busy_view {
             super::intake_turn::race_loss::mailbox_reaction::note_busy_tui_pre_submit_queue_pending(
-            shared,
-            http,
-            channel_id,
-            user_msg_id,
-            false,
-            turn_start_attempt,
-        )
-        .await;
+                shared,
+                http,
+                channel_id,
+                user_msg_id,
+                false,
+                turn_start_attempt,
+            )
+            .await;
         }
         if let Some(placeholder) = placeholder_msg_id {
             let _ = channel_id.delete_message(http, placeholder).await;
