@@ -197,8 +197,8 @@ fn v2_queue_arms_reach_the_owner_or_refuse_without_a_v1_writer() {
                 "a refusal is never a success"
             );
             assert_eq!(
-                restored.queue_len_after, 3,
-                "a refusal is not an empty queue"
+                restored.queue_len_after, 2,
+                "a refusal is not an empty queue; the attempted head is not waiting"
             );
         }
         assert_eq!(handle.restart_drain(ctx()).await.queued_count, 3);
