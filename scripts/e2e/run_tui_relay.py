@@ -1037,7 +1037,7 @@ def validate_scenario_filter(raw: str | None, scenarios_dir: Path) -> set[str]:
 STEP_OPTIONS = {
     "send_prompt": None, "send_discord_prompt": None, "send_keys": None, "send_keys_no_enter": None,
     "wait_for_discord_text": None, "wait_for_raw_discord_text": None, "wait_idle_s": None,
-    "deliver_prompt": {"text", "source"}, "restart_dcserver": {"target", "require_status", "allowed_degraded_reasons"},
+    "deliver_prompt": {"text", "source"}, "restart_dcserver": {"target", "require_status", "allowed_degraded_reasons", "allowed_target_queue_depth"},
     "kill_pane": {"reverify_session_name_substring"}, "poison_claude_tui_relay_offset": set(),
     "capture_session_identity": {"label"}, "assert_session_preserved": {"label"},
     "send_prompts_concurrent": {"prompts"}, "fixture_followup_probe": {"prompt"}, "replay_fixture": {"kind", "provider", "frames"},
@@ -4225,7 +4225,7 @@ def run_one_cell(
                 ),
                 allowed_degraded_reasons=_as_string_tuple(
                     restart_options.get("allowed_degraded_reasons")
-                ),
+                ) + health_readiness.target_queue_allowance(restart_options, cell_provider(cell)),
             ))
         elif "poison_claude_tui_relay_offset" in step:
             record.setdefault("poisoned_offsets", []).append(

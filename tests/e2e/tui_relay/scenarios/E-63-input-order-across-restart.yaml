@@ -77,6 +77,8 @@ steps:
         - "tui_o:released:1536887557290197062"
         - "tui_o:too_many_readers:1509350490461180105"
         - "relay_verdict_unknown_codex_1509350778043895902"
+      # A and B stay queued behind the held turn; only this channel's mailbox may hold them.
+      allowed_target_queue_depth: 2
   - wait_for_discord_text: "[E2E:E63:{run_id}:A]"
     relay_author: provider
     timeout_s: 300
