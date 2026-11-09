@@ -493,7 +493,11 @@ async fn channel_sweep(
         let scope = match inspected.scope {
             Some(Ok(scope)) => scope,
             Some(Err(reason)) => {
-                stats.skip(format!("scope_refused:{reason}"));
+                let source = inspected
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|d| d.candidates.iter().find(|c| c.key == key));
+                stats.skip_source(format!("scope_refused:{reason}"), source.map(|c| &c.source));
                 continue;
             }
             None => {
