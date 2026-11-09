@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from test_driver_health import ROOT, _OutcomeFixture, driver  # noqa: E402
+from tui_relay.test_driver_health import ROOT, _OutcomeFixture, driver  # noqa: E402
 
 TARGET, OTHER = "99", 1475086789696946196
 QUEUED_2 = "provider:claude:pending_queue_depth:2"
