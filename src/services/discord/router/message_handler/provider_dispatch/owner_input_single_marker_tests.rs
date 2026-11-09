@@ -50,6 +50,8 @@ async fn accepted_busy_input_recovers_without_a_pending_view() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = IntakeRig::new(7_991_104, true).await;
     let before = rig.state().await;
+    assert_eq!(before["items"].as_array().unwrap().len(), 1);
+    assert_eq!(before["admission_receipts"].as_array().unwrap().len(), 1);
     assert!(reaction_ops(&rig).is_empty());
     assert_eq!(
         view::sweep_orphan_tui_anchor_reactions(&rig.shared, &rig.shared.provider).await,
@@ -64,7 +66,7 @@ async fn accepted_busy_input_recovers_without_a_pending_view() {
     );
     let queue = crate::services::turn_orchestrator::v2_queue(&persistence, rig.channel).unwrap();
     let history = crate::services::tui_input::human_frame::history::v2::Registry::at(
-        rig._tmux.root.path().join("accepted-history.json"),
+        queue.0.with_extension("accepted-history.json"),
     );
     let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
     assert_eq!(
@@ -155,9 +157,9 @@ async fn busy_unconfirmed_has_only_one_question_op_and_recovers_without_pending(
     let queue = crate::services::turn_orchestrator::v2_queue(&persistence, rig.channel).unwrap();
     let registry = ChannelMailboxRegistry::default();
     let recovered = registry.handle(rig.channel);
-    let history = crate::services::tui_input::human_frame::history::v2::Registry::at(
-        rig._tmux.root.path().join("recovered-history.json"),
-    );
+    let history_path = queue.0.with_extension("recovered-history.json");
+    let history =
+        crate::services::tui_input::human_frame::history::v2::Registry::at(history_path.clone());
     let now = chrono::Utc::now().timestamp_millis().max(0) as u64 + 86_400_000;
     assert_eq!(
         await_within(
@@ -184,6 +186,14 @@ async fn busy_unconfirmed_has_only_one_question_op_and_recovers_without_pending(
     );
     assert_eq!(state["retained_inputs"].as_array().unwrap().len(), 1);
     assert_eq!(state["retained_inputs"][0]["reason"]["kind"], "unconfirmed");
+    let projected: Value =
+        serde_json::from_str(&fs::read_to_string(history_path).unwrap()).unwrap();
+    assert_eq!(projected["passive"].as_array().unwrap().len(), 1);
+    assert_eq!(projected["passive"][0]["state"], "retained");
+    assert_eq!(
+        projected["passive"][0]["registration"]["key"]["identity"],
+        state["retained_inputs"][0]["input"]["identity"]
+    );
     assert_eq!(reaction_ops(&rig), [('❓', true)]);
 }
 
@@ -222,9 +232,9 @@ async fn busy_crash_snapshot_before_first_key_preserves_the_accepted_original() 
     fs::copy(path, &snapshot).unwrap();
     let registry = ChannelMailboxRegistry::default();
     let recovered = registry.handle(rig.channel);
-    let history = crate::services::tui_input::human_frame::history::v2::Registry::at(
-        rig._tmux.root.path().join("crash-history.json"),
-    );
+    let history_path = snapshot.with_extension("history.json");
+    let history =
+        crate::services::tui_input::human_frame::history::v2::Registry::at(history_path.clone());
     let now = chrono::Utc::now().timestamp_millis().max(0) as u64 + 86_400_000;
     assert_eq!(
         await_within(
@@ -244,6 +254,7 @@ async fn busy_crash_snapshot_before_first_key_preserves_the_accepted_original() 
         .v2_request(|slot| slot.as_ref().ok_or("owner")?.json())
         .await
         .unwrap();
+    let _: Value = serde_json::from_str(&fs::read_to_string(history_path).unwrap()).unwrap();
     let queued = state["items"]
         .as_array()
         .unwrap()
