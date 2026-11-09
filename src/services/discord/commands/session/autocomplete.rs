@@ -42,7 +42,14 @@ pub(super) async fn autocomplete_session(
         let partial = partial.to_string();
         let home = catalog::claude_home();
         let others = catalog::transcript_homes();
+        let channel = ctx.channel_id().get();
         tokio::task::spawn_blocking(move || {
+            let launch = catalog::predicted_launch(&others, Some(channel), "");
+            let launch = launch
+                .as_ref()
+                .map(Option::as_deref)
+                .map_err(String::as_str);
+            let others = catalog::offered_homes(others, home.as_deref(), launch);
             catalog::choices(
                 &cwd,
                 context.claude_session_id.as_deref(),

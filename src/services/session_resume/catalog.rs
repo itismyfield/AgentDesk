@@ -172,6 +172,8 @@ fn adopt_from_other_home(
     launch_home: Result<Option<&Path>, &str>,
 ) -> Result<bool, String> {
     let active = home.map(Path::to_path_buf).or_else(default_claude_home);
+    // The resume refuses a cwd that is gone, so nothing is copied for one.
+    let existing: Vec<PathBuf> = cwds.iter().filter(|cwd| cwd.is_dir()).cloned().collect();
     let mut homes: Vec<&PathBuf> = Vec::new();
     let mut found = Vec::new();
     let mut unreadable = Vec::new();
@@ -183,7 +185,7 @@ fn adopt_from_other_home(
         {
             continue;
         }
-        let (matches, error) = scan_home(cwds, id, Some(other));
+        let (matches, error) = scan_home(&existing, id, Some(other));
         unreadable.extend(error.map(|error| (other, error)));
         if !matches.is_empty() {
             homes.push(other);
@@ -211,33 +213,17 @@ fn adopt_from_other_home(
             other.display()
         ));
     }
-    // A copy only helps when the next launch reads the home it lands in; `None` is the global home.
     let active = active.ok_or("Claude home directory is unavailable")?;
-    let refusal = match launch_home {
-        Ok(None) => None,
-        Ok(Some(launch)) if same_dir(launch, &active) => None,
-        Ok(Some(launch)) => Some(format!(
-            "복사 대상 {}와 다음 실행 Claude home {}이 다릅니다.",
-            active.display(),
-            launch.display()
-        )),
-        Err(reason) => Some(format!("다음 실행 Claude home을 확정하지 못함({reason})")),
-    };
-    if let Some(reason) = refusal {
+    if let Some(reason) = launch_refusal(launch_home, &active) {
         return Err(format!("세션 {id8} 트랜스크립트를 복사하지 않음: {reason}"));
     }
     let target = claude_transcript_path(cwd, id, home)?;
-    File::open(source)
-        .and_then(|input| {
-            let modified = input.metadata()?.modified()?;
-            copy_without_partial(input, modified, &target)
-        })
-        .map_err(|error| {
-            format!(
-                "세션 {id8} 트랜스크립트를 {}에서 활성 Claude home으로 복사하지 못함: {error}",
-                source_home.display()
-            )
-        })?;
+    copy_session(source, &target).map_err(|error| {
+        format!(
+            "세션 {id8} 트랜스크립트를 {}에서 활성 Claude home으로 복사하지 못함: {error}",
+            source_home.display()
+        )
+    })?;
     tracing::info!(
         session_id = %id,
         from = %source.display(),
@@ -245,6 +231,104 @@ fn adopt_from_other_home(
         "copied Claude transcript from another config home for /resume"
     );
     Ok(true)
+}
+
+/// Why a copy into `active` would not be read by the next launch; `Ok(None)` is the global home.
+fn launch_refusal(launch: Result<Option<&Path>, &str>, active: &Path) -> Option<String> {
+    match launch {
+        Ok(None) => None,
+        Ok(Some(launch)) if same_dir(launch, active) => None,
+        Ok(Some(launch)) => Some(format!(
+            "복사 대상 {}와 다음 실행 Claude home {}이 다릅니다.",
+            active.display(),
+            launch.display()
+        )),
+        Err(reason) => Some(format!("다음 실행 Claude home을 확정하지 못함({reason})")),
+    }
+}
+
+/// A newer transcript of another size at the same key in a declared home means the active copy fell
+/// behind it, so that copy is neither resumed nor overwritten.
+fn stale_copy(
+    hit: &TranscriptMatch,
+    id: &str,
+    home: Option<&Path>,
+    others: &[PathBuf],
+) -> Option<String> {
+    let (modified, cwd, path) = hit;
+    let len = fs::metadata(path).ok()?.len();
+    let active = home.map(Path::to_path_buf).or_else(default_claude_home);
+    let mut others = others.iter().filter(|other| {
+        !active
+            .as_deref()
+            .is_some_and(|active| same_dir(active, other))
+    });
+    others.find_map(|other| {
+        let meta = fs::metadata(claude_transcript_path(cwd, id, Some(other)).ok()?).ok()?;
+        let newer = meta.modified().is_ok_and(|other| other > *modified);
+        (meta.is_file() && newer && meta.len() != len).then(|| {
+            format!(
+                "세션 {} 트랜스크립트가 {}에 더 새로운 {} bytes로 있어 활성 home의 {len} bytes 사본을 이어받거나 덮어쓰지 않습니다. 이어갈 쪽 하나만 남기세요.",
+                id.chars().take(8).collect::<String>(),
+                other.display(),
+                meta.len()
+            )
+        })
+    })
+}
+
+/// Publish `<id>/subagents` files before the transcript itself; a failed transcript withdraws them,
+/// and only a withdrawal that also fails leaves them behind, named in a warning.
+fn copy_session(source: &Path, target: &Path) -> std::io::Result<()> {
+    let session_dir = |transcript: &Path| transcript.with_extension("");
+    let entries = match fs::read_dir(session_dir(source).join("subagents")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        entries => entries?.collect::<std::io::Result<Vec<_>>>()?,
+    };
+    let mut published = None;
+    if !entries.is_empty() {
+        let dir = target
+            .parent()
+            .ok_or_else(|| std::io::Error::other("transcript path has no parent"))?;
+        fs::create_dir_all(dir)?;
+        let stage = tempfile::TempDir::new_in(dir)?;
+        let staged = stage.path().join("subagents");
+        fs::create_dir(&staged)?;
+        for entry in &entries {
+            if !entry.file_type()?.is_file() {
+                let name = entry.path().display().to_string();
+                return Err(std::io::Error::other(format!(
+                    "{name} is not a regular file"
+                )));
+            }
+            fs::copy(entry.path(), staged.join(entry.file_name()))?;
+        }
+        // Renaming onto a non-empty session directory fails, so nothing already there is replaced.
+        fs::rename(stage.path(), session_dir(target))?;
+        published = Some(stage);
+    }
+    let copied = File::open(source).and_then(|input| {
+        let modified = input.metadata()?.modified()?;
+        copy_without_partial(input, modified, target)
+    });
+    // A published transcript keeps the subagent files; a failed one withdraws them.
+    match (published, &copied) {
+        (Some(stage), Err(_)) => withdraw(&session_dir(target), stage),
+        (Some(stage), Ok(())) => drop(stage.keep()),
+        (None, _) => {}
+    }
+    copied
+}
+
+/// Move published subagent files back under their temp owner, whose drop removes them.
+fn withdraw(published: &Path, stage: tempfile::TempDir) {
+    if let Err(error) = fs::rename(published, stage.path()) {
+        tracing::warn!(
+            left = %published.display(),
+            %error,
+            "copied Claude subagent files were not withdrawn after the transcript copy failed"
+        );
+    }
 }
 
 /// Write through a sibling temp file and publish without clobbering, so a failure leaves no partial transcript.
@@ -301,25 +385,23 @@ pub(super) fn resolve_cwd(
             Err(refusal) => lookup_error = Some(refusal),
         }
     }
-    if let Some(cwd) = requested
-        && matches.iter().any(|hit| hit.1 == Path::new(cwd))
-    {
-        return Ok(cwd.to_string());
-    }
-    if requested.is_none()
-        && let Some((_, cwd, _)) = matches.first()
-    {
-        return Ok(cwd.to_string_lossy().into_owned());
-    }
-    let reason = match (matches.first(), lookup_error) {
+    let chosen = match requested {
+        Some(cwd) => matches.iter().find(|hit| hit.1 == Path::new(cwd)),
+        None => matches.first(),
+    };
+    let reason = match (chosen, matches.first(), lookup_error) {
+        (Some(hit), _, _) => match stale_copy(hit, id, home, others) {
+            Some(refusal) => refusal,
+            None => return Ok(hit.1.to_string_lossy().into_owned()),
+        },
         // Nothing found anywhere: name the session and how many worktrees were searched.
-        (None, None) => {
+        (None, None, None) => {
             let short: String = id.chars().take(8).collect();
             format!(
                 "세션 {short} 트랜스크립트를 찾지 못함(검색 범위 {searched}개). session_id와 Claude config home을 확인하세요."
             )
         }
-        (found, error) => {
+        (None, found, error) => {
             let hint = found.map_or_else(
                 || error.unwrap_or_default(),
                 |(_, cwd, _)| {
@@ -340,14 +422,53 @@ pub(super) fn resolve_cwd(
 
 /// Extra Claude homes declared in `providers.claude.transcript_homes`; relative entries are ignored.
 pub(crate) fn transcript_homes() -> Vec<PathBuf> {
-    crate::config::snapshot()
-        .and_then(|config| config.providers.get("claude").cloned())
-        .map(|claude| claude.transcript_homes)
-        .unwrap_or_default()
-        .iter()
-        .map(|home| PathBuf::from(crate::utils::format::expand_tilde_string(home)))
-        .filter(|home| home.is_absolute())
-        .collect()
+    crate::config::snapshot().map_or_else(Vec::new, |config| declared_homes(&config))
+}
+
+fn declared_homes(config: &crate::config::Config) -> Vec<PathBuf> {
+    let declared = declared(config).map(|(_, home)| home);
+    declared.filter(|home| home.is_absolute()).collect()
+}
+
+fn declared(config: &crate::config::Config) -> impl Iterator<Item = (&str, PathBuf)> {
+    let entries = config
+        .providers
+        .get("claude")
+        .map(|claude| &claude.transcript_homes);
+    entries.into_iter().flatten().map(|entry| {
+        let home = PathBuf::from(crate::utils::format::expand_tilde_string(entry));
+        (entry.as_str(), home)
+    })
+}
+
+/// Name each declared transcript home `/resume` can never read when the config is validated.
+pub(crate) fn warn_unusable_transcript_homes(config: &crate::config::Config) {
+    for (entry, home) in declared(config) {
+        let problem = match () {
+            _ if !home.is_absolute() => "not an absolute path",
+            _ if !home.is_dir() => "not an existing directory",
+            _ => continue,
+        };
+        tracing::warn!(
+            "providers.claude.transcript_homes entry {entry:?} is {problem}; /resume ignores it"
+        );
+    }
+}
+
+/// The home the channel's next Claude launch reads, predicted only when a declared home could be copied from.
+pub(crate) fn predicted_launch(
+    others: &[PathBuf],
+    channel_id: Option<u64>,
+    tmux_name: &str,
+) -> Result<Option<PathBuf>, String> {
+    match others.is_empty() {
+        true => Ok(None),
+        false => crate::services::discord::org_schema::predicted_launch_home(
+            crate::services::provider::ProviderKind::Claude,
+            channel_id,
+            tmux_name,
+        ),
+    }
 }
 
 pub(super) async fn resolve_cwd_off_runtime(
@@ -360,15 +481,7 @@ pub(super) async fn resolve_cwd_off_runtime(
     let home = claude_home();
     let others = transcript_homes();
     tokio::task::spawn_blocking(move || {
-        // Only a declared extra home can trigger a copy, so the launch is predicted only then.
-        let launch = match others.is_empty() {
-            true => Ok(None),
-            false => crate::services::discord::org_schema::predicted_launch_home(
-                crate::services::provider::ProviderKind::Claude,
-                channel_id,
-                &tmux_name,
-            ),
-        };
+        let launch = predicted_launch(&others, channel_id, &tmux_name);
         resolve_cwd(
             current.as_deref(),
             requested.as_deref(),
@@ -383,6 +496,19 @@ pub(super) async fn resolve_cwd_off_runtime(
     })
     .await
     .map_err(|e| ResumeRebindError::Filesystem(format!("transcript lookup failed: {e}")))?
+}
+
+/// Declared homes the dropdown may offer: none unless a copy would land in the home the next launch reads.
+pub(crate) fn offered_homes(
+    others: Vec<PathBuf>,
+    home: Option<&Path>,
+    launch: Result<Option<&Path>, &str>,
+) -> Vec<PathBuf> {
+    let active = home.map(Path::to_path_buf).or_else(default_claude_home);
+    match active.is_some_and(|active| launch_refusal(launch, &active).is_none()) {
+        true => others,
+        false => Vec::new(),
+    }
 }
 
 pub(crate) struct ResumeChoice {
@@ -462,6 +588,13 @@ pub(crate) fn choices(
         }
     }
     files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    // The resume reads the active home whenever it holds the id, so a declared home's copy is not offered.
+    let active_ids: HashSet<String> = files
+        .iter()
+        .filter(|file| file.3.is_none())
+        .map(|file| file.4.session_id.clone())
+        .collect();
+    files.retain(|file| file.3.is_none() || !active_ids.contains(&file.4.session_id));
     let mut seen = HashSet::new();
     let partial = partial.to_lowercase();
     let mut result = Vec::new();
