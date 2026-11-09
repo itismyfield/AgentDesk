@@ -177,8 +177,8 @@ async fn a_stop_settle_on_either_side_of_the_purge_capture_resends_nothing() {
             });
             assert_eq!(
                 kept,
-                Some((true, 0, 2)),
-                "a capture the stop outdated purges nothing and answers only the kept depth: {stale:?}"
+                Some((true, 0, 1)),
+                "a capture the stop outdated purges nothing and answers the kept waiting depth: {stale:?}"
             );
             let owed = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.owed_drops()));
             assert!(
