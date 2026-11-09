@@ -76,6 +76,10 @@ input-single-path/InputOwnershipConsumedWaitingSupersededNoDedupe.cfg	InputOwner
 input-single-path/InputOwnershipConsumedWaitingSupersededSameSession.cfg	InputOwnershipConsumedWaiting	-	PendingBEventuallyStarts
 input-single-path/InputOwnershipDuplicateIntake.cfg	InputOwnershipDuplicateIntake	-	-
 input-single-path/InputOwnershipDuplicateIntakeBefore.cfg	InputOwnershipDuplicateIntake	NoFalseWarning	-
+input-single-path/InputOwnershipFailoverIntake.cfg	InputOwnershipFailoverIntake	-	-
+input-single-path/InputOwnershipFailoverIntakeBefore.cfg	InputOwnershipFailoverIntake	NoCrossNodeRedelivery	-
+input-single-path/InputOwnershipFailoverIntakeBeforeReverse.cfg	InputOwnershipFailoverIntake	NoCrossNodeRedelivery	-
+input-single-path/InputOwnershipFailoverIntakeIncident.cfg	InputOwnershipFailoverIntake	-	-
 input-single-path/InputOwnershipF.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipF4.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipF5.cfg	InputOwnership	-	-
