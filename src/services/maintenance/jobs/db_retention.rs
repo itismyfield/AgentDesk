@@ -465,6 +465,7 @@ async fn retain_context_snapshots(
 fn intake_outbox_aged_terminal(alias: &str) -> String {
     format!(
         "({alias}.status IN ('done', 'unknown', 'failed_pre_accept', 'failed_post_accept') \
+          AND {alias}.routing_state IS DISTINCT FROM 'held' \
           AND (({alias}.status = 'done' \
                 AND {alias}.updated_at < NOW() - ($1::INT || ' days')::INTERVAL) \
                OR ({alias}.status IN ('unknown', 'failed_pre_accept', 'failed_post_accept') \
@@ -478,8 +479,9 @@ fn intake_outbox_candidate_predicate() -> String {
         intake_outbox_aged_terminal("f"),
         intake_outbox_aged_terminal("c"),
     );
+    // Held custody rows await delivery and replay-only receipts never close; both stay `unknown`.
     format!(
-        "{row} \
+        "NOT io.replay_only AND {row} \
          AND NOT EXISTS (SELECT 1 FROM intake_outbox f \
              WHERE f.channel_id = io.channel_id AND f.user_msg_id = io.user_msg_id \
                AND NOT {family}) \
@@ -1389,6 +1391,69 @@ mod tests {
             Some(1)
         );
 
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// A held custody row still awaits delivery and a replay-only receipt never closes,
+    /// so neither counts even when aged `unknown`; a closed row counts only past its window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_candidates_skip_held_custody_and_replay_receipts() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_intake_outbox_kinds",
+            "db_retention intake_outbox held/receipt rows",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let mut tx = pool.begin().await.expect("begin");
+        // Keeps the seeded ages through the row-kind UPDATEs below; rolled back with the rest.
+        sqlx::query("ALTER TABLE intake_outbox DISABLE TRIGGER trg_intake_outbox_touch_updated_at")
+            .execute(&mut *tx)
+            .await
+            .expect("disable updated_at touch");
+        let receipt =
+            seed_intake(&mut *tx, ("c-receipt", "m", 1), "unknown", "60 days", None).await;
+        sqlx::query(
+            "UPDATE intake_outbox SET replay_only = TRUE, \
+                 replay_disposition = 'registered_not_started', \
+                 replay_source_message_ids = ARRAY[user_msg_id] WHERE id = $1",
+        )
+        .bind(receipt)
+        .execute(&mut *tx)
+        .await
+        .expect("mark replay-only receipt");
+        let held = seed_intake(&mut *tx, ("c-held", "m", 1), "unknown", "60 days", None).await;
+        sqlx::query(
+            "UPDATE intake_outbox SET routing_receipt_id = $2, routing_state = 'held', \
+                 routing_home_revision = 0, routing_not_before = NOW() WHERE id = $1",
+        )
+        .bind(held)
+        .bind(receipt)
+        .execute(&mut *tx)
+        .await
+        .expect("mark held custody");
+        let closed = seed_intake(&mut *tx, ("c-closed", "m", 1), "done", "8 days", None).await;
+
+        let mut report = RetentionReport::default();
+        count_intake_outbox_candidates(&mut *tx, &mut report)
+            .await
+            .expect("count intake_outbox candidates");
+        assert_eq!(candidates(&report, "intake_outbox"), Some(1));
+        assert_eq!(candidates(&report, "intake_outbox.done"), Some(1));
+        assert_eq!(candidates(&report, "intake_outbox.unknown"), Some(0));
+
+        sqlx::query("UPDATE intake_outbox SET updated_at = NOW() WHERE id = $1")
+            .bind(closed)
+            .execute(&mut *tx)
+            .await
+            .expect("move closed row inside its window");
+        let mut report = RetentionReport::default();
+        count_intake_outbox_candidates(&mut *tx, &mut report)
+            .await
+            .expect("recount intake_outbox candidates");
+        assert_eq!(candidates(&report, "intake_outbox"), Some(0));
+
+        tx.rollback().await.expect("rollback");
         pool.close().await;
         db.drop().await;
     }
