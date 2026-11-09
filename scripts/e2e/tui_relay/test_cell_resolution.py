@@ -453,6 +453,66 @@ class ScenarioFilter(unittest.TestCase):
             )
 
 
+class E64LocalControl(unittest.TestCase):
+    def scenario(self):
+        path = next((ROOT / "tests/e2e/tui_relay/scenarios").glob("E-64-*.yaml"))
+        return driver.yaml.safe_load(path.read_text())
+
+    def test_local_command_is_readonly_and_registered(self):
+        import re
+        scenario = self.scenario()
+        sequences = [step["send_keys_sequence"] for step in scenario["steps"] if "send_keys_sequence" in step]
+        self.assertEqual(len(sequences), 1)
+        commands = [key for key in sequences[0]["keys"] if key.startswith("/")]
+        self.assertEqual(len(commands), 1)
+        command = commands[0].split()[0]
+        self.assertNotIn(command, {"/model", "/effort", "/fast", "/config", "/settings",
+                                   "/permissions", "/compact", "/clear", "/reset", "/new"})
+        self.assertEqual(commands, ["/context"])
+        registry = (ROOT / "src/services/tui_prompt_control.rs").read_text()
+        local = re.search(r"const LOCAL_ONLY_SLASH_COMMANDS:[^=]+=(.*?);", registry, re.S)
+        self.assertIsNotNone(local)
+        self.assertIn(f'"{command}"', local.group(1))
+        self.assertFalse(sequences[0]["mark_prompt_sent"])
+
+    def test_followup_keeps_deadline_and_exactly_once_checks(self):
+        scenario = self.scenario()
+        steps = scenario["steps"]
+        control = next(i for i, step in enumerate(steps) if "send_keys_sequence" in step)
+        probe = next(i for i, step in enumerate(steps) if "PROBE]" in step.get("send_discord_prompt", ""))
+        self.assertLess(control, probe)
+        self.assertEqual(steps[probe]["post_send_sleep_s"], 0)
+        wait = steps[probe + 1]
+        self.assertEqual((wait["relay_author"], wait["timeout_s"]), ("provider", 55))
+        marker = wait["wait_for_discord_text"]
+        self.assertIn({"provider_text_present": marker}, scenario["assertions"])
+        self.assertIn({"no_duplicate_marker": marker}, scenario["assertions"])
+        self.assertTrue(any(spec.get("chrome_count", {}).get("exact") == 0 for spec in scenario["assertions"]))
+        self.assertEqual(steps[-1]["assert_health"]["global_active_max"], 0)
+        self.assertEqual(steps[-1]["assert_health"]["global_finalizing_max"], 0)
+
+
+class HerdrDialogKeys(unittest.TestCase):
+    def test_space_and_escape_are_keys_and_existing_names_keep_meaning(self):
+        for key, expected in (("Space", "space"), ("Esc", "esc"), ("Escape", "esc"), ("C-m", "enter")):
+            with self.subTest(key=key):
+                self.assertEqual(driver.herdr.key_argv("pane", key, herdr_bin="herdr"),
+                                 ["herdr", "pane", "send-keys", "pane", expected])
+        self.assertEqual(driver.herdr.key_argv("pane", " ", herdr_bin="herdr"),
+                         ["herdr", "pane", "send-text", "pane", " "])
+
+    def test_unsupported_key_refuses_before_any_input(self):
+        import json
+        from argparse import Namespace
+        from unittest.mock import Mock
+        run = Mock(return_value=Namespace(stdout=json.dumps({"result": {"panes": [
+            {"pane_id": "pane", "agent": "claude", "cwd": "/workspaces/cell"}]}})))
+        with self.assertRaisesRegex(driver.assertions.AssertionError, "has no Herdr mapping"):
+            driver.herdr.send_key_sequence(["/context", "Down"], agent_workspace="cell", agent="claude",
+                                           herdr_bin="herdr", run=run)
+        self.assertEqual([call.args[0] for call in run.call_args_list], [["herdr", "pane", "list"]])
+
+
 if __name__ == "__main__":
     unittest.main()
 
