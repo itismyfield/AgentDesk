@@ -181,6 +181,8 @@ async fn automatic_orphan_apply_keeps_a_turn_on_an_unconfirmed_host_pg() {
                 "{label}: a measured dead orphan"
             );
             earlier_refund(channel, source, now_ms);
+            let v2 = crate::services::discord::relay_recovery::tests::orphan_token_finish::v2_attempted_front;
+            v2(&shared, &provider, channel, true).await;
 
             let response =
                 apply_relay_recovery_plan(&registry, &shared, &provider, decision, now_ms, source)
@@ -194,6 +196,8 @@ async fn automatic_orphan_apply_keeps_a_turn_on_an_unconfirmed_host_pg() {
             let result = response.apply_result.as_ref().expect("an apply result");
             assert_eq!(result.status, "host_deferred", "{label}");
             assert!(!response.applied && response.skipped, "{label}");
+            let depth = result.post_mailbox_queue_depth;
+            assert_eq!(depth, Some(1), "{label}: the V2 owner's waiting depth");
             assert!(turn_kept(&shared, channel, &token).await, "{label}");
             assert_eq!(
                 budget(channel, source),

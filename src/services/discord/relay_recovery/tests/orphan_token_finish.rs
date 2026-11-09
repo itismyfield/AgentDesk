@@ -52,7 +52,8 @@ pub(in crate::services::discord) async fn v2_attempted_front(
             "queued_generation": 1, "text": format!("queued {id}")}))
         .unwrap()
     };
-    let (front, behind) = (item(channel.get() + 1), item(channel.get() + 2));
+    // Clear of `channel + 1`, which fixtures use as the active turn's message.
+    let (front, behind) = (item(channel.get() + 101), item(channel.get() + 102));
     let attempt = serde_json::json!({"nonce": "front", "provider": provider.as_str(),
         "target": {"host": "tmux", "owner": "front", "root": "/test", "execution_nonce": "e"},
         "source": {"kind": "pre_source", "expected_session_id": null,
