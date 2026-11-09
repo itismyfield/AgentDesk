@@ -8,24 +8,24 @@ use crate::services::tui_o::writer::actor::codex_retention::{Bind, last_bind, su
 pub(super) type Judged = HashMap<(String, u64), bool>;
 
 impl<B: BindingEvents> Sources<B> {
-    /// Below the limit the count is published without reading the binding log.
+    /// Apply the cached replacement judgment at every count, including below the alarm limit.
     pub(super) fn publish_reader_count<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
     ) {
-        let mut count = self.readers.iter().filter(|r| r.reading()).count();
-        if count > MAX_READERS {
-            self.judge_replaced(writer);
-            let left_out = (self.readers.iter())
-                .filter(|r| r.reading() && self.replaced_and_read(r))
-                .count();
-            count -= left_out;
-        }
+        let raw = self.readers.iter().filter(|r| r.reading()).count();
+        self.judge_replaced(writer);
+        let left_out: Vec<_> = (self.readers.iter())
+            .filter(|r| r.reading() && self.replaced_and_read(r))
+            .map(|r| source_key(&r.source))
+            .collect();
+        let count = raw - left_out.len();
         if count > MAX_READERS && !self.readers_alarmed {
             writer.alarm(WriterAlarm::TooManyReaders { count });
         }
         self.readers_alarmed = count > MAX_READERS;
         writer.reconcile_reader_count(count);
+        writer.reconcile_retained_readers(raw, &left_out);
     }
 
     /// Judges every hop again once the log tail moved, a hop is new or the log cannot be watched;
@@ -38,6 +38,10 @@ impl<B: BindingEvents> Sources<B> {
         let hops: Vec<_> = (self.rotation.successors.iter())
             .filter_map(|(key, next)| Some((key.clone(), next.seq?, next.tmux_session.clone())))
             .collect();
+        if hops.is_empty() {
+            self.replaced = Some((tail, HashMap::new()));
+            return;
+        }
         let judged = self.replaced.as_ref().is_some_and(|(at, judged)| {
             watched
                 && *at == tail
@@ -92,12 +96,13 @@ impl<B: BindingEvents> Sources<B> {
     }
 }
 
-/// Retention's same-pane basis, with the channel's latest event standing for the execution now
-/// in the pane: every bind of `key` ran in `pane` before the hop, under another nonce.
+/// Every bind of `key` ran in `pane` before the hop, under a nonce the pane's latest known
+/// execution replaced; another pane's events cannot change that execution.
 fn hop_replaced(events: &[BindingEvent], key: &str, seq: u64, pane: &str) -> bool {
     let Some(now) = events
-        .last()
-        .filter(|e| !e.execution_nonce.trim().is_empty())
+        .iter()
+        .rev()
+        .find(|e| e.tmux_session == pane && !e.execution_nonce.trim().is_empty())
     else {
         return false;
     };

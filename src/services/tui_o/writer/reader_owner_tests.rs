@@ -73,7 +73,33 @@ fn restart_counts_only_sources_an_unreplaced_execution_may_still_write() {
             format!("e{seq}"),
         )
     });
-    assert_eq!(other_pane, (MAX_READERS + 2, true), "earlier panes");
+    assert_eq!(other_pane, (2, false), "each pane keeps its latest writer");
+}
+
+#[test]
+fn other_pane_tail_does_not_hide_replacement_in_the_original_pane() {
+    let (harness, ids, bindings) = fixture(MAX_READERS + 2);
+    executions(&harness, &bindings, &ids, |seq| {
+        ("tmux", format!("execution-{seq}"))
+    });
+    let mut other = hop(LAST_HOP + 1, &ids[0], &ids[0]);
+    other.tmux_session = "other".into();
+    other.execution_nonce = "other-execution".into();
+    other.record = BindingRecord::Rejected {
+        detail: "another pane".into(),
+        closes: None,
+    };
+    bindings.commit(other);
+    let (_, (mut writer, health, counts), _) = restarted(&harness, bindings);
+    let alarmed = active(&health).contains(&format!("tui_o:too_many_readers:{CHANNEL}"));
+    assert_eq!(
+        (*counts.lock().unwrap().last().unwrap(), alarmed),
+        (1, false)
+    );
+    assert!(
+        ids.iter()
+            .all(|s| !writer.store().cursor(s).unwrap().retired)
+    );
 }
 
 #[test]

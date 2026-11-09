@@ -170,7 +170,11 @@ async fn legacy_hop_retry_without_legacy_successors_does_not_read_extra_history(
     let (_, b) = transcript(&path, "b.jsonl", "s2", &row("n1", "new first"));
     bindings.commit(rotate(2, &a, &b, BindingCause::Clear));
     polls(3).await;
-    assert_eq!(reads.full_reads.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        reads.full_reads.load(Ordering::SeqCst),
+        3,
+        "startup, bind history, and one cached replacement judgment"
+    );
     assert_eq!(checkpoint(&harness), Some(2));
     assert_eq!(harness.port.posts(), ["new first"]);
     assert_eq!(harness.alarms.taken(), []);
