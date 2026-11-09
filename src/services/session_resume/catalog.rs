@@ -304,17 +304,17 @@ fn copy_session(source: &Path, target: &Path) -> std::io::Result<()> {
         }
         // Renaming onto a non-empty session directory fails, so nothing already there is replaced.
         fs::rename(stage.path(), session_dir(target))?;
-        let _ = stage.keep();
-        published = Some(session_dir(target));
+        published = Some(stage);
     }
     let copied = File::open(source).and_then(|input| {
         let modified = input.metadata()?.modified()?;
         copy_without_partial(input, modified, target)
     });
-    if copied.is_err()
-        && let Some(dir) = published
-    {
-        let _ = fs::remove_dir_all(dir);
+    // A failed transcript moves the directory back under its temp owner, whose drop removes it.
+    match (published, &copied) {
+        (Some(stage), Err(_)) => drop(fs::rename(session_dir(target), stage.path())),
+        (Some(stage), Ok(())) => drop(stage.keep()),
+        (None, _) => {}
     }
     copied
 }
@@ -377,21 +377,19 @@ pub(super) fn resolve_cwd(
         Some(cwd) => matches.iter().find(|hit| hit.1 == Path::new(cwd)),
         None => matches.first(),
     };
-    if let Some(hit) = chosen {
-        if let Some(refusal) = stale_copy(hit, id, home, others) {
-            return Err(ResumeRebindError::TargetTranscriptMissing(refusal));
-        }
-        return Ok(hit.1.to_string_lossy().into_owned());
-    }
-    let reason = match (matches.first(), lookup_error) {
+    let reason = match (chosen, matches.first(), lookup_error) {
+        (Some(hit), _, _) => match stale_copy(hit, id, home, others) {
+            Some(refusal) => refusal,
+            None => return Ok(hit.1.to_string_lossy().into_owned()),
+        },
         // Nothing found anywhere: name the session and how many worktrees were searched.
-        (None, None) => {
+        (None, None, None) => {
             let short: String = id.chars().take(8).collect();
             format!(
                 "세션 {short} 트랜스크립트를 찾지 못함(검색 범위 {searched}개). session_id와 Claude config home을 확인하세요."
             )
         }
-        (found, error) => {
+        (None, found, error) => {
             let hint = found.map_or_else(
                 || error.unwrap_or_default(),
                 |(_, cwd, _)| {
