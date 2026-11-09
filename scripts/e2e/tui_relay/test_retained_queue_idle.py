@@ -120,7 +120,7 @@ class RetainedQueueIdle(unittest.TestCase):
         # The runtime's v2_holds_input test reads the same cases with the same `busy` verdicts.
         cases = json.loads((Path(__file__).parent / "tests/fixtures/queue_v2_cleared_unconfirmed_cases.json")
                            .read_text(encoding="utf-8"))
-        self.assertEqual(len(cases["cases"]), 25)
+        self.assertEqual(len(cases["cases"]), 26)
         for case in cases["cases"]:
             with self.subTest(case=case["name"]):
                 snapshot = copy.deepcopy(cases["base"])

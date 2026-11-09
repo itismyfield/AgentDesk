@@ -128,7 +128,7 @@ fn shared_ownership_cases() -> Vec<(Value, Value)> {
     )))
     .unwrap();
     let list = cases["cases"].as_array().unwrap();
-    assert_eq!(list.len(), 25);
+    assert_eq!(list.len(), 26);
     list.iter()
         .map(|case| {
             let mut snapshot = cases["base"].clone();
