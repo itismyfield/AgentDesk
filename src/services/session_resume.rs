@@ -520,6 +520,17 @@ pub(crate) async fn perform_resume_rebind(
     if !std::path::Path::new(&target_cwd).is_dir() {
         return Err(ResumeRebindError::TargetCwdMissing(target_cwd));
     }
+    // An automatic pick at its cwd passes the transcript checks a named target does.
+    if auto_selected {
+        catalog::resolve_cwd_off_runtime(
+            current_cwd.clone(),
+            Some(target_cwd.clone()),
+            target_session_id.clone(),
+            channel_id.map(|id| id.get()),
+            tmux_name.to_string(),
+        )
+        .await?;
+    }
 
     // P1-B — durable-first ordering: commit the DB rebind BEFORE tearing down
     // the current tmux. If the durable UPDATE fails we return here without

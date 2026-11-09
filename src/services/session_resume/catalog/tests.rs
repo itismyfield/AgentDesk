@@ -66,6 +66,30 @@ impl Fixture {
         )
     }
 }
+/// Run `body` with this thread's log events captured as plain text.
+fn logged<T>(body: impl FnOnce() -> T) -> (T, String) {
+    #[derive(Clone, Default)]
+    struct Logs(std::sync::Arc<Mutex<Vec<u8>>>);
+    impl Write for Logs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let logs = Logs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .finish();
+    let value = tracing::subscriber::with_default(subscriber, body);
+    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    (value, text)
+}
+
 pub(in crate::services::session_resume) const PRIOR: &str = "22222222-2222-2222-2222-222222222222";
 const OTHER: &str = "33333333-3333-3333-3333-333333333333";
 
@@ -639,27 +663,7 @@ fn unusable_transcript_homes_warn_once_each_at_load_and_leave_the_list_alone() {
         other.display()
     );
     fs::write(&config, yaml).unwrap();
-    #[derive(Clone, Default)]
-    struct Logs(std::sync::Arc<Mutex<Vec<u8>>>);
-    impl Write for Logs {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let logs = Logs::default();
-    let writer = logs.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .finish();
-    let loaded = tracing::subscriber::with_default(subscriber, || {
-        crate::config::load_from_path(&config).unwrap()
-    });
-    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    let (loaded, logs) = logged(|| crate::config::load_from_path(&config).unwrap());
     let warned = |entry: &str| {
         logs.lines()
             .filter(|line| line.contains("WARN") && line.contains("transcript_homes"))
@@ -684,4 +688,20 @@ fn unusable_transcript_homes_warn_once_each_at_load_and_leave_the_list_alone() {
         "{}",
         listed[0].label
     );
+}
+
+#[test]
+fn subagent_files_that_cannot_be_withdrawn_are_named_in_one_warning() {
+    let f = Fixture::new();
+    let published = f.root.path().join("project").join(PRIOR);
+    fs::create_dir_all(published.join("subagents")).unwrap();
+    fs::write(published.join("subagents").join("agent-a.jsonl"), "{}\n").unwrap();
+    // A non-empty temp owner refuses the move back, as any failed withdrawal would.
+    let stage = tempfile::TempDir::new_in(f.root.path()).unwrap();
+    fs::write(stage.path().join("occupied"), "").unwrap();
+    let ((), logs) = logged(|| withdraw(&published, stage));
+    let warnings: Vec<_> = logs.lines().filter(|line| line.contains("WARN")).collect();
+    assert_eq!(warnings.len(), 1, "{logs}");
+    assert!(warnings[0].contains(published.to_str().unwrap()), "{logs}");
+    assert!(published.join("subagents").join("agent-a.jsonl").is_file());
 }

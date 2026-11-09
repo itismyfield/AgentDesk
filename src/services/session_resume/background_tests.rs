@@ -348,3 +348,61 @@ fn a_refused_resume_leaves_no_copy_from_another_home_pg() {
         db.drop().await;
     });
 }
+
+// An active copy that fell behind a newer, differently sized copy in a declared home is refused
+// whether the session is named or picked automatically, and neither the binding nor a file changes.
+#[test]
+fn a_stale_active_copy_is_refused_for_named_and_automatic_targets_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dirs: [_; 4] = std::array::from_fn(|_| tempfile::tempdir().unwrap());
+    let [bin, home, other, cwd] = dirs.each_ref().map(|dir| dir.path());
+    let mut config = crate::config::Config::default();
+    let claude = config.providers.entry("claude".to_string()).or_default();
+    claude.transcript_homes = vec![other.display().to_string()];
+    let _live = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
+    crate::config_live_reload::install(config);
+    let _claude = fake_claude(bin, &listing(&[]));
+    let id = uuid::Uuid::new_v4().to_string();
+    let write = |home, body: &str, mtime| {
+        let path = claude_transcript_path(cwd, &id, Some(home)).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        let mtime = filetime::FileTime::from_unix_time(mtime, 0);
+        filetime::set_file_mtime(&path, mtime).unwrap();
+        path
+    };
+    let active = write(home, "{}\n", 1000);
+    let newer = write(other, "{}\n{\"type\":\"user\"}\n", 2000);
+    block_on(async {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let unrelated = "11111111-1111-1111-1111-111111111111";
+        seeded(&pool, (other, cwd), "old", unrelated).await;
+        for session_id in [Some(id.clone()), None] {
+            let opts = ResumePreviousOptions {
+                session_id: session_id.clone(),
+                cwd: None,
+            };
+            let claude = Some(ProviderKind::Claude);
+            let rebind = perform_resume_rebind(&pool, None, KEY, claude, None, "i6483-bg", &opts);
+            let refused = catalog::TEST_HOME.scope(home.to_path_buf(), rebind).await;
+            let case = format!("session_id={session_id:?}");
+            let (status, axum::Json(body)) = refused.expect_err(&case).into_response();
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "{case}"
+            );
+            let error = body["error"].as_str().unwrap();
+            assert!(
+                error.contains("3 bytes") && error.contains("19 bytes"),
+                "{case}: {error}"
+            );
+            assert_eq!(binding(&pool).await, "old", "{case}");
+            assert_eq!(std::fs::read_to_string(&active).unwrap(), "{}\n", "{case}");
+            assert_eq!(std::fs::read(&newer).unwrap().len(), 19, "{case}");
+        }
+        pool.close().await;
+        db.drop().await;
+    });
+}

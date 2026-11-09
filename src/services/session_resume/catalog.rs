@@ -277,7 +277,8 @@ fn stale_copy(
     })
 }
 
-/// Publish `<id>/subagents` files before the transcript itself; any failure leaves neither behind.
+/// Publish `<id>/subagents` files before the transcript itself; a failed transcript withdraws them,
+/// and only a withdrawal that also fails leaves them behind, named in a warning.
 fn copy_session(source: &Path, target: &Path) -> std::io::Result<()> {
     let session_dir = |transcript: &Path| transcript.with_extension("");
     let entries = match fs::read_dir(session_dir(source).join("subagents")) {
@@ -310,13 +311,24 @@ fn copy_session(source: &Path, target: &Path) -> std::io::Result<()> {
         let modified = input.metadata()?.modified()?;
         copy_without_partial(input, modified, target)
     });
-    // A failed transcript moves the directory back under its temp owner, whose drop removes it.
+    // A published transcript keeps the subagent files; a failed one withdraws them.
     match (published, &copied) {
-        (Some(stage), Err(_)) => drop(fs::rename(session_dir(target), stage.path())),
+        (Some(stage), Err(_)) => withdraw(&session_dir(target), stage),
         (Some(stage), Ok(())) => drop(stage.keep()),
         (None, _) => {}
     }
     copied
+}
+
+/// Move published subagent files back under their temp owner, whose drop removes them.
+fn withdraw(published: &Path, stage: tempfile::TempDir) {
+    if let Err(error) = fs::rename(published, stage.path()) {
+        tracing::warn!(
+            left = %published.display(),
+            %error,
+            "copied Claude subagent files were not withdrawn after the transcript copy failed"
+        );
+    }
 }
 
 /// Write through a sibling temp file and publish without clobbering, so a failure leaves no partial transcript.
