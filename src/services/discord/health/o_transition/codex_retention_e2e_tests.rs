@@ -167,7 +167,7 @@ async fn assert_sweep(fixture: &Fixture, shared: Arc<SharedData>, count: usize, 
         sources,
         fixture.context.tmux_session.clone(),
         configured,
-        |ready| async move {
+        |ready, _| async move {
             prepare(&registry, observed_shared, CHANNEL)
                 .await
                 .expect("complete live-pane channel attribution before retention");
@@ -376,7 +376,7 @@ fn codex_twenty_readers_survive_watcher_and_pane_census_skips() {
             registry.register("codex".into(), shared).await;
             let (_, cursors, reading, health) = with_ready_codex_backlog(
                 sources, fixture.context.tmux_session.clone(), false,
-                |ready| async move {
+                |ready, _| async move {
                     assert_eq!(test_support::codex_sweep_for_test(&registry, &ready, CHANNEL).await.unwrap_err(), "no Codex Inspect was sent");
                     tokio::time::advance(std::time::Duration::from_secs(elapsed)).await;
                     assert_eq!(test_support::codex_sweep_for_test(&registry, &ready, CHANNEL).await.unwrap_err(), "no Codex Inspect was sent");
@@ -423,4 +423,94 @@ fn known_live_channels_without_channel_files_form_a_complete_codex_census() {
         fixture.observe(&prepared).err().as_deref(),
         Some("Codex full-tail/census changed during observation")
     );
+}
+
+async fn unproven_canary(young: bool, regrow: bool, configured: bool) {
+    use crate::services::tui_o::writer::rotation::RETIRED_WATCH;
+    let fixture = Fixture::new(false);
+    let (sources, _) = backlog(&fixture, 4);
+    let now = std::time::SystemTime::now();
+    for (index, source) in sources[..4].iter().enumerate() {
+        std::fs::File::options()
+            .write(true)
+            .open(&source.path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new().set_modified(if young && index == 0 {
+                    now
+                } else {
+                    now - RETIRED_WATCH
+                }),
+            )
+            .unwrap();
+    }
+    let old = sources[0].clone();
+    let (_, cursors, _, health) = with_ready_codex_backlog(
+        sources, fixture.context.tmux_session.clone(), configured,
+        |_, mut probe| async move {
+            let reason = "tui_o:reader_retention_stalled:7".to_owned();
+            assert!(probe.health.current_at(std::time::Instant::now()).contains(&reason));
+            tokio::time::advance(RETIRED_WATCH - std::time::Duration::from_secs(1)).await;
+            probe.ticks().await;
+            assert!(probe.cursors().iter().all(|c| !c.retired), "24h boundary must hold");
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            probe.ticks().await;
+            let observed = probe.cursors();
+            assert_eq!(observed.iter().filter(|c| c.retired).count(), if young {3} else {4},
+                "actual canary retirement: {observed:?}");
+            assert_eq!(probe.health.current_at(std::time::Instant::now()).contains(&reason), young);
+            if regrow {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new().append(true).open(&old.path).unwrap();
+                writeln!(file, "{}", json!({"timestamp":chrono::Utc::now().to_rfc3339(),"type":"response_item","payload":{"type":"message","role":"assistant","id":"late-native","content":[{"type":"output_text","text":"late after retirement"}]}})).unwrap();
+                probe.regrown(&old).await;
+            }
+        }
+    ).await;
+    assert!(!cursors[4].retired);
+    if young {
+        assert!(!cursors[0].retired);
+    }
+    assert_eq!(
+        health
+            .current_at(std::time::Instant::now())
+            .contains(&"tui_o:reader_retention_stalled:7".into()),
+        young
+    );
+}
+
+#[test]
+fn unproven_canary_four_aged_sources_retire_and_clear_actual_health() {
+    for configured in [false, true] {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(unproven_canary(false, false, configured));
+    }
+}
+
+#[test]
+fn unproven_canary_recent_source_survives_and_keeps_actual_health() {
+    for configured in [false, true] {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(unproven_canary(true, false, configured));
+    }
+}
+
+#[test]
+fn unproven_canary_retired_source_regrows_is_read_and_alarms() {
+    for configured in [false, true] {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(unproven_canary(false, true, configured));
+    }
 }

@@ -462,7 +462,7 @@ pub(crate) async fn with_ready_codex_backlog<T, F, Fut>(
     run: F,
 ) -> (T, Vec<Cursor>, Option<usize>, Arc<AlarmHealth>)
 where
-    F: FnOnce(Arc<crate::services::tui_o::writer::host::Readiness>) -> Fut,
+    F: FnOnce(Arc<crate::services::tui_o::writer::host::Readiness>, BacklogProbe) -> Fut,
     Fut: std::future::Future<Output = T>,
 {
     use crate::services::tui_o::writer::binding::ChannelBindingLog;
@@ -566,7 +566,15 @@ where
         "actual native dialogue was posted before retention"
     );
     let _hosted = ready.host_port_for_test(7, &harness.gate, port, (ready_state, stopping));
-    let result = run(ready).await;
+    let probe = BacklogProbe {
+        root: harness._runtime.path().to_owned(),
+        sources: sources.clone(),
+        counts: counts.clone(),
+        health: health.clone(),
+        alarms: harness.alarms.clone(),
+        port: harness.port.clone(),
+    };
+    let result = run(ready, probe).await;
     counts.borrow_and_update();
     for _ in 0..3 {
         await_within(counts.changed(), WAIT_CAP).await.unwrap();
@@ -579,12 +587,73 @@ where
     let reading = harness.alarms.readers();
     for (source, before) in sources.iter().zip(originals) {
         assert_eq!(
-            std::fs::read(&source.path).unwrap(),
+            std::fs::read(&source.path).unwrap()[..before.len()],
             before,
-            "retention leaves native transcript bytes unchanged"
+            "retention leaves existing native transcript bytes unchanged"
         );
     }
     halt(stop, task).await;
     drop(host);
     (result, cursors, reading, health)
+}
+
+/// Reads durable cursors and routed health while the actual backlog actor keeps running.
+pub(crate) struct BacklogProbe {
+    root: PathBuf,
+    sources: Vec<SourceId>,
+    counts: watch::Receiver<()>,
+    pub(crate) health: Arc<AlarmHealth>,
+    alarms: Alarms,
+    port: Arc<FakePort>,
+}
+
+impl BacklogProbe {
+    pub(crate) fn cursors(&self) -> Vec<Cursor> {
+        let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &self.root)
+            .unwrap()
+            .unwrap();
+        let era = store.read_era().unwrap().unwrap();
+        let channel = store.open_channel(&era, 7).unwrap().unwrap();
+        self.sources
+            .iter()
+            .map(|s| channel.cursor(s).unwrap().clone())
+            .collect()
+    }
+
+    pub(crate) async fn ticks(&mut self) {
+        for _ in 0..12 {
+            await_within(self.counts.changed(), WAIT_CAP).await.unwrap();
+        }
+    }
+
+    pub(crate) async fn regrown(&mut self, source: &SourceId) {
+        await_within(
+            async {
+                loop {
+                    if self.cursors().iter().any(|c| {
+                        c.source == *source
+                            && !c.retired
+                            && c.captured_through == std::fs::metadata(&source.path).unwrap().len()
+                    }) && self
+                        .port
+                        .posts()
+                        .last()
+                        .is_some_and(|p| p == "late after retirement")
+                    {
+                        break;
+                    }
+                    self.counts.changed().await.unwrap();
+                }
+            },
+            WAIT_CAP,
+        )
+        .await;
+        assert!(self.alarms.taken().iter().any(|alarm| matches!(alarm,
+            WriterAlarm::RetiredSourceGrew { source: grown, .. } if grown == source)));
+        assert!(
+            self.health
+                .current_at(std::time::Instant::now())
+                .contains(&"tui_o:retired_source_grew:7".into())
+        );
+    }
 }
