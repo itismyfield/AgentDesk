@@ -115,6 +115,58 @@ fn ready(capture: &str) -> bool {
         ))
 }
 
+/// One Escape closes a dialog left open, which would take the next prompt's Enter as its answer;
+/// it is sent only while `open` sees it, so an idle composer never gets a stray one.
+fn close_after(pane: &HerdrTarget, reason: String, open: fn(&str) -> bool, what: &str) -> String {
+    let closed = if screen(pane).map_or(true, |c| open(&c)) {
+        host_input::run_herdr(pane, &[input::TuiInputAction::Escape], None).into_legacy()
+    } else {
+        Ok(())
+    };
+    match closed.and_then(|()| wait(|| ready_pane(pane))) {
+        Ok(()) => reason,
+        Err(why) => format!("{reason} ({what}이 남았을 수 있음: {why})"),
+    }
+}
+
+/// The selector's one option row, the only row led by a lowercase word, lists exactly the five
+/// levels; hint text around it (`Tab to toggle`, `The default effort …`) starts uppercase.
+fn effort_labels_known(overlay: &str) -> bool {
+    let Some((region, _)) = overlay
+        .rsplit_once("Effort")
+        .and_then(|(_, s)| s.split_once('←'))
+    else {
+        return false;
+    };
+    let mut rows = region
+        .lines()
+        .map(|line| {
+            line.split(|c: char| c.is_whitespace() || "[]─▲".contains(c))
+                .filter(|s| !s.is_empty())
+                .take_while(|w| w.starts_with(|c: char| c.is_ascii_lowercase()))
+                .collect::<Vec<_>>()
+        })
+        .filter(|row| !row.is_empty());
+    rows.next() == Some(vec!["low", "medium", "high", "xhigh", "max"]) && rows.next().is_none()
+}
+
+/// The open `/fast` overlay's shown state; `Some(None)` when it shows neither ON nor OFF.
+fn fast_overlay(capture: &str) -> Option<Option<bool>> {
+    let (overlay, _) = capture.rsplit_once("Space to toggle")?;
+    let line = overlay
+        .lines()
+        .rev()
+        .take(8)
+        .find(|l| l.contains("Fast mode"))?;
+    Some(
+        match line.split_once("Fast mode")?.1.split_whitespace().next() {
+            Some("ON") => Some(true),
+            Some("OFF") => Some(false),
+            _ => None,
+        },
+    )
+}
+
 fn record(session: &str, after: f64) -> Result<Value, &'static str> {
     let path = statusline::record_path(&statusline::record_dir(), session);
     let bytes = std::fs::read(path).map_err(|_| "기록 없음")?;
@@ -188,7 +240,7 @@ pub(super) async fn effort(
     level: EffortLevel,
 ) -> Result<(), String> {
     let apply = move |pane: &HerdrTarget, native: &str, after| {
-        use input::TuiInputAction::{Enter, Escape, Left, Literal, Right};
+        use input::TuiInputAction::{Enter, Left, Literal, Right};
         let send =
             |plan: &[input::TuiInputAction]| host_input::run_herdr(pane, plan, None).into_legacy();
         send(&[Literal("/effort".into()), Enter])?;
@@ -199,14 +251,7 @@ pub(super) async fn effort(
                 .ok_or("effort overlay 열림 미확인".into())
         })?;
         let choose = || {
-            let labels = overlay
-                .rsplit_once("Effort")
-                .and_then(|(_, s)| s.split_once('←'));
-            if !labels.is_some_and(|(s, _)| {
-                s.split(|c: char| c.is_whitespace() || "[]─".contains(c))
-                    .filter(|s| !s.is_empty())
-                    .eq(["low", "medium", "high", "xhigh", "max"])
-            }) {
+            if !effort_labels_known(&overlay) {
                 return Err("effort 옵션 배치 미확인".to_string());
             }
             let mut plan = vec![Left; 4];
@@ -221,17 +266,9 @@ pub(super) async fn effort(
             })
             .map_err(|reason| format!("적용 미확인: {reason}"))
         };
-        // A selector left open would take the next prompt's Enter as its answer; one Escape
-        // closes it, sent only while it shows so an idle composer never gets a stray one.
         choose().map_err(|reason| {
-            let open = screen(pane).map_or(true, |c| {
-                tc::tmux_capture_indicates_claude_tui_selector_open(&c)
-            });
-            let closed = if open { send(&[Escape]) } else { Ok(()) };
-            match closed.and_then(|()| wait(|| ready_pane(pane))) {
-                Ok(()) => reason,
-                Err(why) => format!("{reason} (effort 선택창이 남았을 수 있음: {why})"),
-            }
+            let open = tc::tmux_capture_indicates_claude_tui_selector_open;
+            close_after(pane, reason, open, "effort 선택창")
         })
     };
     let key = channel.get().to_string();
@@ -277,14 +314,36 @@ pub(in crate::services::discord::commands) async fn fast(
             .map_err(|e| e.to_string())?
             .as_secs_f64();
         use input::TuiInputAction::{Enter, Literal};
-        host_input::run_herdr(pane, &[Literal("/fast".into()), Enter], None).into_legacy()?;
-        wait(|| {
+        let send =
+            |plan: &[input::TuiInputAction]| host_input::run_herdr(pane, plan, None).into_legacy();
+        let applied = || {
             let seen = read(sent_at)?;
             (seen == next)
                 .then_some(())
                 .ok_or_else(|| format!("fast_mode 불일치: `{seen}`"))
-        })
-        .map_err(|e| format!("적용 미확인: {e}"))?;
+        };
+        // Older Claude toggles at once; 2.1.319 opens an overlay that applies on Space, Enter.
+        let toggle = || {
+            send(&[Literal("/fast".into()), Enter])?;
+            let opened = wait(|| match screen(pane).ok().and_then(|c| fast_overlay(&c)) {
+                Some(Some(shown)) => Ok(Some(shown)),
+                Some(None) => Err("fast 선택창 상태 미확인".into()),
+                None => applied().map(|()| None),
+            })
+            .map_err(|e| format!("적용 미확인: {e}"))?;
+            match opened {
+                None => Ok(()),
+                // Toggles only when the overlay agrees with the record; a typed space is Space's byte.
+                Some(shown) if shown == before => {
+                    send(&[Literal(" ".into()), Enter])?;
+                    wait(applied).map_err(|e| format!("적용 미확인: {e}"))
+                }
+                Some(_) => Err("적용 미확인: fast 선택창 상태가 기록과 다름".into()),
+            }
+        };
+        toggle().map_err(|reason| {
+            close_after(pane, reason, |c| fast_overlay(c).is_some(), "fast 선택창")
+        })?;
         Ok((next, true))
     };
     let mirror = &shared.overrides.fast_mode_channels;
