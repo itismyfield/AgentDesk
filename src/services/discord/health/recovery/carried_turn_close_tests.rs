@@ -51,6 +51,8 @@ pub(super) fn note_event(channel: u64, event: &'static str) {
 // The cases bind a real transcript through the turn-presence fixture, which only unix builds have.
 #[cfg(unix)]
 mod cases {
+    #[path = "carried_ledger_tests.rs"]
+    mod ledger;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;

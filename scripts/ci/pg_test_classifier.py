@@ -460,7 +460,8 @@ def _inside_test_region(offset: int, ranges: Iterable[ModuleRange], external: bo
     return external or any(item.is_test and item.start < offset < item.end for item in ranges)
 
 
-def _external_test_files(repo_root: Path, counter: list[int] | None = None, findings: list[Finding] | None = None) -> set[Path]:
+def _external_test_files(repo_root: Path, inventory: rust_test_sources.Inventory,
+                         counter: list[int] | None = None, findings: list[Finding] | None = None) -> set[Path]:
     src_root = (repo_root / "src").resolve()
     declarations: dict[Path, list[tuple[Path | None, bool, Finding]]] = {}
     targets: set[Path] = set()
@@ -470,6 +471,9 @@ def _external_test_files(repo_root: Path, counter: list[int] | None = None, find
         ranges = _module_ranges(source, clean, counter)
         attributes = {match.start("name"): match for match in _ATTR_MOD.finditer(clean)}
         children = declarations.setdefault(path.resolve(), [])
+        directories = inventory.module_dirs.get(path.resolve(), {
+            rust_test_sources.module_directory(path, crate_root=path.name in {"lib.rs", "main.rs"}),
+        })
         for match in _MOD.finditer(clean):
             if match.group("term") != ";":
                 continue
@@ -479,27 +483,26 @@ def _external_test_files(repo_root: Path, counter: list[int] | None = None, find
             path_attr = re.search(r"#\s*\[\s*path\s*=", attrs)
             redirect = _PATH_ATTR.match(source, attributed.start("attrs") + path_attr.start(), attributed.end("attrs")) if path_attr else None
             parents = _scope_at(match.start(), ranges)
-            if redirect:
-                base = path.with_suffix("") if parents and path.name not in {"mod.rs", "lib.rs", "main.rs"} else path.parent
-                candidates = (base.joinpath(*parents, redirect.group("path")),)
-            else:
-                base = path.parent if path.name in {"mod.rs", "lib.rs", "main.rs"} else path.with_suffix("")
-                base = base.joinpath(*parents)
-                name = match.group("name")
-                candidates = (base / f"{name}.rs", base / name / "mod.rs")
-            target = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
-            if target and not target.is_relative_to(src_root):
-                target = None
             location = attributed.start() if attributed else match.start()
             line = source.count("\n", 0, location) + 1
-            tried = ", ".join(Path(os.path.relpath(candidate, repo_root)).as_posix() for candidate in candidates)
-            finding = Finding("unresolved-external-test-module", f"{path.relative_to(repo_root).as_posix()}:{line}", f"mod {match.group('name')}; did not resolve inside src; tried: {tried}")
-            children.append((target, is_test, finding))
-            if is_test:
-                if target:
-                    targets.add(target)
-                elif findings is not None:
-                    findings.append(finding)
+            for directory in sorted(directories):
+                base = directory.joinpath(*parents)
+                if redirect:
+                    candidates = ((base if parents else path.parent) / redirect.group("path"),)
+                else:
+                    name = match.group("name")
+                    candidates = (base / f"{name}.rs", base / name / "mod.rs")
+                target = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
+                if target and not target.is_relative_to(src_root):
+                    target = None
+                tried = ", ".join(Path(os.path.relpath(candidate, repo_root)).as_posix() for candidate in candidates)
+                finding = Finding("unresolved-external-test-module", f"{path.relative_to(repo_root).as_posix()}:{line}", f"mod {match.group('name')}; did not resolve inside src; tried: {tried}")
+                children.append((target, is_test, finding))
+                if is_test:
+                    if target:
+                        targets.add(target)
+                    elif findings is not None:
+                        findings.append(finding)
     pending = list(targets)
     while pending:
         for target, is_test, finding in declarations.get(pending.pop(), []):
@@ -571,8 +574,8 @@ def discover_pg_inventory(
     _matching_brace_cached.cache_clear()
     src_root = (repo_root / "src").resolve()
     brace_counter = [0]
-    external_tests = _external_test_files(repo_root, brace_counter, findings)
     inventory = rust_test_sources.lib_inventory(repo_root)
+    external_tests = _external_test_files(repo_root, inventory, brace_counter, findings)
     declared_tests = set(inventory.tests)
     item_bodies: dict[tuple[tuple[str, ...], str, str], str] = {}
     impl_methods: dict[tuple[tuple[str, ...], str, str], list[str]] = {}
