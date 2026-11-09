@@ -374,7 +374,7 @@ impl<B: BindingEvents> Sources<B> {
                 _ => now,
             };
             reader.quiet = Some((fp.len, quiet_since));
-            let retire = (next.proof.is_some() || unproven.contains(&key))
+            let retire = (next.proof.is_some() || unproven.contains_key(&key))
                 && successor_captured
                 && now - quiet_since >= RETIRE_QUIET;
             let sleep = self.reader_config.is_some_and(|c| c.dormant)
@@ -651,10 +651,10 @@ impl<B: BindingEvents> Sources<B> {
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
         wall_now: SystemTime,
-    ) -> HashSet<String> {
+    ) -> HashMap<String, Fingerprint> {
         self.judge_replaced(writer);
         if self.provider != ShadowProvider::Codex {
-            return HashSet::new();
+            return HashMap::new();
         }
         let now = Instant::now();
         self.readers
@@ -671,7 +671,7 @@ impl<B: BindingEvents> Sources<B> {
                         .is_ok_and(|age| age >= RETIRED_WATCH)
                     && Fingerprint::path(&reader.source).ok().as_ref() == Some(fingerprint)
                 {
-                    Some(source_key(&reader.source))
+                    Some((source_key(&reader.source), fingerprint.clone()))
                 } else {
                     None
                 }
@@ -715,8 +715,8 @@ impl<B: BindingEvents> Sources<B> {
                 continue;
             };
             let successor_captured = captured.contains(&source_key(&successor.source));
-            let aged = unproven.contains(&source_key(&reader.source));
-            let proven = successor.proof.is_some() || aged;
+            let aged = unproven.get(&source_key(&reader.source));
+            let proven = successor.proof.is_some() || aged.is_some();
             let drained = through == len && reader.pending.is_none();
             let fingerprint = capture.fingerprint().ok();
             reader.idle = fingerprint
@@ -744,7 +744,7 @@ impl<B: BindingEvents> Sources<B> {
             };
             reader.quiet = Some((len, since));
             if proven && successor_captured && drained && now - since >= RETIRE_QUIET {
-                if aged {
+                if let Some(expected) = aged {
                     let cursor = writer
                         .store()
                         .cursor(&reader.source)
@@ -752,7 +752,9 @@ impl<B: BindingEvents> Sources<B> {
                     let verified = capture
                         .verify_eof(cursor.captured_through, &cursor.prefix_hash)
                         .map_err(|e| halt(format!("aged EOF validation: {e}")))?;
-                    if Fingerprint::path(&reader.source).ok().as_ref() != Some(&verified) {
+                    if &verified != expected
+                        || Fingerprint::path(&reader.source).ok().as_ref() != Some(&verified)
+                    {
                         reader.idle = None;
                         continue;
                     }
