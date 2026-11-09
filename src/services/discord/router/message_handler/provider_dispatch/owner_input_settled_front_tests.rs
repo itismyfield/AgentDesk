@@ -28,7 +28,7 @@ struct Env {
 }
 
 fn env() -> Env {
-    let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+    let root = crate::config::TestRuntimeRootGuard::new();
     let config = crate::runtime_layout::config_file_path(root.path());
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, "server: {}\ndata: {dir: data}\n").unwrap();
