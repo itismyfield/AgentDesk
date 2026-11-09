@@ -268,3 +268,7 @@ pub(super) fn clear_recovered_leak_inflight_in_root(
         )
     }
 }
+
+#[cfg(test)]
+#[path = "inflight_repair_tests.rs"]
+mod tests;

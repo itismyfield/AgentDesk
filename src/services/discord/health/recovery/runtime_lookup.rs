@@ -339,3 +339,7 @@ async fn runtime_turn_cleanup_by_lookup(
 
     HardStopRuntimeResult::default()
 }
+
+#[cfg(test)]
+#[path = "runtime_lookup_tests.rs"]
+mod tests;

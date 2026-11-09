@@ -743,6 +743,43 @@ mod repost_tests {
 #[path = "o_writer_host/tests/owner_execution.rs"]
 mod owner_execution_tests;
 
+#[cfg(test)]
+mod legacy_busy_tests {
+    use super::*;
+
+    // Input a V2 owner holds keeps Legacy busy: a waiting input, and a front an attempt carries.
+    #[tokio::test]
+    async fn legacy_busy_counts_input_the_v2_owner_holds() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let gateway = GatewayHost {
+            shared: Arc::clone(&shared),
+            alarms: Arc::new(AlarmRouter::for_process(None, None)),
+            self_id_wait: Duration::ZERO,
+            configured_id: None,
+            turn: TurnConfig::off(),
+            rest: None,
+            boot: None,
+            execution: BTreeMap::new(),
+        };
+        let seed = crate::services::discord::relay_recovery::tests::orphan_token_finish::v2_attempted_front;
+        for (channel, waiting) in [(7_998_601_u64, true), (7_998_602, false)] {
+            assert!(
+                !gateway.legacy_busy(channel).await,
+                "an empty mailbox is idle"
+            );
+            seed(
+                &shared,
+                &ProviderKind::Claude,
+                ChannelId::new(channel),
+                waiting,
+            )
+            .await;
+            assert!(gateway.legacy_busy(channel).await, "waiting={waiting}");
+        }
+    }
+}
+
 /// Non-gateway boots start only channels with a PG execution view.
 pub(super) fn spawn_execution(
     shared: &Arc<SharedData>,

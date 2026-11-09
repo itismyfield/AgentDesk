@@ -2645,7 +2645,7 @@ mod stall_watchdog_auto_heal_tests {
         }
     }
 
-    fn result_line(text: &str) -> String {
+    pub(super) fn result_line(text: &str) -> String {
         format!("{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"{text}\"}}\n")
     }
 
@@ -2703,7 +2703,7 @@ mod stall_watchdog_auto_heal_tests {
         }
     }
 
-    fn seed_idle_inflight(
+    pub(super) fn seed_idle_inflight(
         provider: &ProviderKind,
         channel: ChannelId,
         user_msg_id: u64,
@@ -4044,7 +4044,7 @@ mod hard_stop_completion_event_tests {
         }
     }
 
-    async fn capture_warns_async<F, Fut, T>(f: F) -> (T, String)
+    pub(super) async fn capture_warns_async<F, Fut, T>(f: F) -> (T, String)
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,
