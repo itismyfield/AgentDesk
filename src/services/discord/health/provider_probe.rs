@@ -88,7 +88,7 @@ pub(super) fn probe_provider(
         .count();
     let queue_depth: usize = mailbox_snapshots
         .values()
-        .map(|snapshot| snapshot.intervention_queue.len())
+        .map(|snapshot| snapshot.queue_depth())
         .sum();
 
     let restart_pending = entry

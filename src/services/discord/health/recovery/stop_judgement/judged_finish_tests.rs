@@ -287,6 +287,60 @@ fn a_stop_leaves_a_turn_admitted_after_the_judged_one_ended() {
     });
 }
 
+// A stop whose judged turn was superseded reports the owner queue's waiting depth: the V2 front an
+// attempt carries is not waiting, and the empty V1 queue is not the one that owns the input.
+#[test]
+fn a_superseded_stop_reports_the_owner_queue_waiting_depth() {
+    use crate::services::turn_orchestrator::{PendingQueueItem, v2_queue};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    run(async {
+        let fx = Channel::new(5_340_134_000).await;
+        let target = fx.target();
+        let stop = crate::services::turn_lifecycle::stop_turn_preserving_queue;
+        let stop = stop(Some(&fx.registry), &target, "rs13");
+        let race = async {
+            let next = fx.admit_successor_after_cancel().await;
+            let (handle, channel) = (fx.shared.mailbox(fx.channel), fx.channel);
+            let persistence = discord::queue_persistence_context(&fx.shared, &claude(), channel);
+            handle.replace_queue(Vec::new(), persistence.clone()).await;
+            let (path, namespace) = v2_queue(&persistence, channel).unwrap();
+            handle.v2_adopt(path, namespace).await.unwrap();
+            let item = |id: u64| -> PendingQueueItem {
+                serde_json::from_value(serde_json::json!({"author_id": 7, "message_id": id,
+                    "channel_id": channel.get(), "source_message_ids": [id],
+                    "queued_generation": 1, "text": format!("queued {id}")}))
+                .unwrap()
+            };
+            let (front, waiting) = (item(9_974_101), item(9_974_102));
+            let attempt = serde_json::json!({"nonce": "superseded", "provider": "claude",
+                "target": {"host": "tmux", "owner": "s", "root": "/test", "execution_nonce": "e"},
+                "source": {"kind": "pre_source", "expected_session_id": null,
+                    "expected_transcript": null, "binding_watermark": null}});
+            let attempted = handle.v2_request(move |slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                owner
+                    .enqueue_fixture(&front)
+                    .map_err(|e| format!("{e:?}"))?;
+                let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+                owner.reserve_unit(attempt, |item| Some((String::new(), item.text.clone())))?;
+                owner
+                    .enqueue_fixture(&waiting)
+                    .map_err(|e| format!("{e:?}"))
+            });
+            assert_eq!(attempted.await, Ok(true));
+            next
+        };
+        let (result, _next) = tokio::join!(stop, race);
+        let superseded = crate::services::discord::health::TOKEN_SUPERSEDED_PATH;
+        assert_eq!(result.lifecycle_path, superseded);
+        assert_eq!(
+            result.queue_depth,
+            Some(1),
+            "an agent stop's `queued_remaining`"
+        );
+    });
+}
+
 // A force-kill keeps a turn superseded during its wait: nothing of the successor's is cleared or
 // killed.
 #[test]

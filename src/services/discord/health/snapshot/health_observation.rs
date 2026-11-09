@@ -223,7 +223,7 @@ pub(super) async fn channel_entries<'s>(
         let tmux_present = matches!(executor_witness, ExecutorWitness::Present);
         let desynced = session.desynced(tmux_present, session.watcher_attached);
         let mailbox_has_cancel_token = snapshot.cancel_token.is_some();
-        let queue_depth = snapshot.intervention_queue.len();
+        let queue_depth = snapshot.queue_depth();
         let mailbox_active_user_msg_id =
             redaction::visible_serenity_message_id(snapshot.active_user_message_id);
         // Resolved before `relay_thread_proof` is folded into the relay

@@ -464,6 +464,27 @@ fn a_stop_counts_only_the_owner_input_waiting_behind_an_attempted_front() {
                 .map_err(|e| format!("{e:?}"))
         });
         assert_eq!(attempted.await, Ok(true));
+        // Health reads the same waiting depth for the mailbox, its relay and its provider.
+        let health = crate::services::discord::health::build_health_snapshot(&registry).await;
+        let health = serde_json::to_value(health).unwrap();
+        let rows = health["mailboxes"].as_array().unwrap();
+        let row = rows.iter().find(|row| row["channel_id"] == channel.get());
+        let row = row.unwrap_or_else(|| panic!("no mailbox row: {health}"));
+        let relay = &row["relay_health"]["queue_depth"];
+        let depths = (
+            &row["queue_depth"],
+            relay,
+            &health["providers"][0]["queue_depth"],
+        );
+        assert_eq!(depths, (&1.into(), &1.into(), &1.into()), "{health}");
+        let watcher = registry
+            .snapshot_watcher_state(channel.get())
+            .await
+            .unwrap();
+        assert_eq!(
+            (watcher.relay_health.queue_depth, watcher.has_pending_queue),
+            (1, true)
+        );
         owner_exits_after_cancel(&shared, channel, &token);
         let target = TurnLifecycleTarget {
             provider: Some(ProviderKind::Claude),

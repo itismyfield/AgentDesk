@@ -145,7 +145,7 @@ pub(super) async fn preserved(
     kept: impl FnOnce(usize) -> RuntimeTurnStopResult,
 ) -> RuntimeTurnStopResult {
     let snapshot = discord::mailbox_snapshot(shared, channel).await;
-    kept(snapshot.intervention_queue.len())
+    kept(snapshot.queue_depth())
 }
 
 /// Finishes the channel's turn only while `judged` still keys it; `Err`, with nothing cleared, when
