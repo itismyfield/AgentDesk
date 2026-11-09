@@ -12,7 +12,7 @@
 pub(crate) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 3] = ["/compact", "/cost", "/context"];
 
 /// Claude-native controls observed from a TUI that also complete locally.
-pub(crate) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 2] = ["/model", "/effort"];
+pub(crate) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 3] = ["/model", "/effort", "/fast"];
 
 /// #5188: slash controls that RESET the provider session — Claude Code opens a
 /// brand-new transcript JSONL and stops writing to the current one.
@@ -344,6 +344,7 @@ mod tests {
             "/compact",
             "/compact now",
             "/effort high",
+            "/fast",
             "/cost",
             "/context",
             "/model",
@@ -353,7 +354,13 @@ mod tests {
                 "{prompt}"
             );
         }
-        for prompt in ["/compactfoo", "tell me about /compact", "/loop 5m"] {
+        for prompt in [
+            "/compactfoo",
+            "/fastish",
+            "tell me about /compact",
+            "/loop 5m",
+            "<command-name>/loop</command-name><command-args>5m</command-args>",
+        ] {
             assert!(
                 classify_local_only_slash_control(prompt).is_none(),
                 "{prompt}"

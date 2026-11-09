@@ -81,8 +81,8 @@ pub(in crate::services::discord) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 3] =
 /// (which the `local_only_whitelist_matches_passthrough_command_set` anti-drift test
 /// pins to that variant set).
 #[cfg(test)]
-pub(in crate::services::discord) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 2] =
-    crate::services::tui_prompt_control::OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS;
+pub(in crate::services::discord) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: &[&str] =
+    &crate::services::tui_prompt_control::OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS;
 
 /// #3305/#3500: whether `kind` (a canonical `slash_command_control_kind`, e.g.
 /// `/compact`) is a local-completing command that SKIPS the turn lifecycle — either
@@ -387,9 +387,12 @@ mod tests {
         // LOCAL_ONLY_SLASH_COMMANDS (the variant-pinned set) — see the dedicated
         // test below for its local-only behavior.
         assert!(!LOCAL_ONLY_SLASH_COMMANDS.contains(&"/model"));
-        // Native effort changes complete locally, including those sent to a Herdr pane.
-        assert!(is_local_only_slash_command_kind("/effort"));
-        assert!(OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS.contains(&"/effort"));
+        // Native settings complete locally, including those sent to a Herdr pane.
+        for name in ["/effort", "/fast"] {
+            assert!(is_local_only_slash_command_kind(name));
+            assert!(OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS.contains(&name));
+            assert!(!LOCAL_ONLY_SLASH_COMMANDS.contains(&name));
+        }
     }
 
     /// #3500: `/model` (Claude-native model change, no model turn) must be treated
