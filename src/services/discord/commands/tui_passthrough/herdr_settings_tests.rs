@@ -27,6 +27,13 @@ const NATIVE: &str = "79400000-0000-4000-8000-000000000001";
 const READY: &str = "────────────────────────────────────────────────────────────\n❯\u{a0}\n────────────────────────────────────────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";
 const OVERLAY: &str =
     "Effort\n  low    medium    high    xhigh    max\n←/→ to adjust · Enter to confirm";
+/// Claude Code 2.1.319's effort selector as the pane showed it: a slider and hints share the rows.
+const OVERLAY_2_1_319: &str = "   Effort
+                             Faster                             Smarter
+                             ──────────▲───────────────────────────────      Ultracode  off
+                             low     medium     high     xhigh      max      Tab to toggle
+                                           The default effort for this model
+   ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel";
 
 fn screen(text: &str) -> Value {
     json!({"type":"pane_read", "read":{"pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","source":"recent_unwrapped","format":"text","text":text,"revision":1,"truncated":false}})
@@ -293,6 +300,11 @@ fn herdr_effort_applies_and_reports_only_fresh_matching_level_pg() {
         rig.answer_after_send("pane.read", screen("  Effort   low ─ medium ─ [high] ─ xhigh ─ max\n  ←/→ to adjust · Enter to confirm · Esc to cancel"));
         fx.record_on_confirm(&rig, json!({"session_id":NATIVE,"written_at":"fresh","effort":{"level":"high"}}));
         assert!(fx.command().await.contains("적용했습니다"), "decorated known layout");
+        rig.answer("pane.read", screen(READY));
+        rig.answer_after_send("pane.read", screen(OVERLAY_2_1_319));
+        fx.record_on_confirm(&rig, json!({"session_id":NATIVE,"written_at":"fresh","effort":{"level":"high"}}));
+        let notice = fx.command().await;
+        assert!(notice.contains("적용했습니다"), "Claude Code 2.1.319 layout: {notice}");
         std::fs::remove_file(&fx.record).unwrap();
         rig.on_send(|_| {});
         rig.answer("pane.read", screen(READY));
@@ -540,6 +552,16 @@ impl Fixture {
                 }
             }
         });
+        self.run_with_before(rig, before, command).await
+    }
+
+    /// Runs `command`, writing `before` as the fresh record once it first reads the pane.
+    async fn run_with_before(
+        &self,
+        rig: &HerdrRig,
+        before: Option<Value>,
+        command: impl std::future::Future<Output = std::io::Result<String>> + Send + 'static,
+    ) -> String {
         let requests = rig.requests().len();
         let command = tokio::spawn(command);
         await_within(
@@ -795,6 +817,80 @@ fn herdr_fast_mismatch_never_reports_success_or_retries_toggle_pg() {
                     sent,
                     "unknown current state never toggles"
                 );
+            }
+            fx.finish().await;
+        })
+    });
+}
+
+/// Claude Code 2.1.319's `/fast` overlay, which applies only on Space and then Enter.
+fn fast_overlay(state: &str) -> Value {
+    screen(&format!(
+        "↯ Fast mode\nHigh-speed mode for Opus 5.5. Draws from usage credits at a higher rate. Separate rate limits apply.\n  Fast mode  {state}  $8/$40 per Mtok\nLearn more: https://code.claude.com/docs/en/fast-mode\nSpace to toggle · Enter to confirm · Esc to cancel"
+    ))
+}
+
+#[test]
+fn herdr_fast_overlay_toggles_only_from_its_shown_state_and_closes_on_failure_pg() {
+    with_fast_rig(|rig, keys, rt| {
+        rt.block_on(async {
+            let fx = Fixture::new(rig).await;
+            for (shown, confirms, expected) in [
+                ("OFF", true, &["/fast", "enter", " ", "enter"][..]),
+                ("OFF", false, &["/fast", "enter", " ", "enter", "esc"][..]),
+                ("ON", false, &["/fast", "enter", "esc"][..]),
+            ] {
+                let _ = std::fs::remove_file(&fx.record);
+                fx.shared
+                    .settings
+                    .write()
+                    .await
+                    .channel_fast_modes
+                    .insert(CHANNEL.to_string(), false);
+                rig.answer("pane.read", screen(READY));
+                rig.answer_after_send("pane.read", fast_overlay(shown));
+                rig.answer_after_key("esc", "pane.read", screen(READY));
+                let (path, mut toggled) = (fx.record.clone(), false);
+                // Only an Enter after Space applies; the opening Enter just shows the overlay.
+                rig.on_send(move |p| {
+                    toggled |= p["text"] == " ";
+                    if confirms && toggled && p["keys"] == json!(["enter"]) {
+                        let fresh =
+                            json!({"session_id":NATIVE,"written_at":now(),"fast_mode":true});
+                        std::fs::write(&path, fresh.to_string()).unwrap();
+                    }
+                });
+                let (sent, shared) = (rig.sends().len(), fx.shared.clone());
+                let before = json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false});
+                let notice = fx
+                    .run_with_before(rig, Some(before), async move {
+                        let parent = async { ChannelId::new(CHANNEL) };
+                        super::super::fast_mode::fast_save_notice(
+                            &shared,
+                            "test-token",
+                            ChannelId::new(CHANNEL),
+                            &ProviderKind::Claude,
+                            parent,
+                        )
+                        .await
+                    })
+                    .await;
+                let sends: Vec<String> = rig.sends()[sent..]
+                    .iter()
+                    .map(|p| {
+                        p["text"]
+                            .as_str()
+                            .unwrap_or_else(|| p["keys"][0].as_str().unwrap())
+                            .to_string()
+                    })
+                    .collect();
+                assert_eq!(sends, expected, "{shown}: {notice}");
+                assert_eq!(
+                    notice.contains("fast mode를 `true`로 적용했습니다"),
+                    confirms,
+                    "{shown}: {notice}"
+                );
+                fx.assert_fast_preserved(rig, keys, CHANNEL, confirms).await;
             }
             fx.finish().await;
         })
