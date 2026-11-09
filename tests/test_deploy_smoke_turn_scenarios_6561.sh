@@ -49,6 +49,8 @@ for flag in ("--base-url", "--cell", "--channel-id", "--scenarios", "--filter", 
     parser.add_argument(flag)
 parser.add_argument("--no-reset-before-each", action="store_true")
 args = parser.parse_args()
+sys.path.insert(0, str(Path(args.scenarios).resolve().parents[3] / "scripts/e2e"))
+from tui_relay.wait_timeout import expand_markers
 with open(os.environ["FAKE_ARGV_LOG"], "a", encoding="utf-8") as handle:
     handle.write(" ".join(sys.argv[1:]) + "\n")
 mode = os.environ.get(f"FAKE_MODE_{args.filter.replace('-', '_')}", "clean")
@@ -59,7 +61,7 @@ scenario = next(
     data for path in sorted(Path(args.scenarios).glob("*.yaml"))
     if (data := yaml.safe_load(path.read_text(encoding="utf-8"))).get("id") == args.filter
 )
-counts = {m.replace("{run_id}", run_id): 1 for m in scenario.get("report_marker_counts", [])}
+counts = {expand_markers(m, run_id): 1 for m in scenario.get("report_marker_counts", [])}
 status, reason = "pass", None
 if mode == "withheld":
     counts = {m: (0 if m.endswith(":AFTER_CLEAR]") else 1) for m in counts}

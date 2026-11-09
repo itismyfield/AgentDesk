@@ -96,9 +96,7 @@ class LiveShapedDiscord:
 
 
 def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver", answer_author: str | None = None) -> dict:
-    scenario = next(
-        s for s in driver.load_scenarios(SCENARIOS, cell=cell) if s["id"] == scenario_id
-    )
+    scenario = next(s for s in driver.load_scenarios(SCENARIOS, cell=cell) if s["id"] == scenario_id)
     args = Namespace(
         cell=cell, channel_id=CHANNELS[cell], thread_channel_id=None, base_url="http://offline.invalid",
         dry_run=False, reset_before_each=False, hard_reset_session_each=False,
@@ -167,10 +165,8 @@ class TurnSmokeFromCollectedEvidence(unittest.TestCase):
         result = run_live_shaped("E-50", "claude-tui", after_clear="withhold")
 
         self.assertEqual(result["status"], "fail")
-        self.assertEqual(
-            result["marker_counts"],
-            {f"[E2E:E50:{RUN_ID}:{label}]": hits for label, hits in (("T1", 1), ("T2", 1), ("AFTER_CLEAR", 0))},
-        )
+        self.assertEqual(result["marker_counts"], {m: n for m, n in zip(
+            turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID), (1, 1, 0))})
         passed, detail = verdict(result, "E-50", "claude-tui", "turns-clean.dcserver.log")
         self.assertFalse(passed)
         self.assertIn("AFTER_CLEAR body withheld after !clear (0 deliveries)", detail)
@@ -294,7 +290,7 @@ class HerdrTurnSmoke(unittest.TestCase):
         for label in ("T1", "T2", "AFTER_CLEAR"):
             for hits in (0, 2, -1, True):
                 result = self.collect()
-                result["marker_counts"][f"[E2E:E50:{RUN_ID}:{label}]"] = hits
+                result["marker_counts"][f"[E2E:E50:{driver.wait_timeout.marker_identity(RUN_ID)}:{label}]"] = hits
                 self.assertFalse(self.judge(result)[0])
 
     def test_herdr_judge_requires_two_complete_observations_and_valid_final_row(self):
@@ -360,7 +356,11 @@ class UserVisibleTurnVerdict(unittest.TestCase):
             f"session_hosts:\n  herdr:\n    channels: {{{mapped}: local}}\n", encoding="utf-8")
 
     def saved(self, name):
-        return json.loads((SAVED / name).read_text(encoding="utf-8"))
+        report = json.loads((SAVED / name).read_text(encoding="utf-8"))
+        for row in report["scenarios"]:
+            if "marker_counts" in row:
+                row["marker_counts"] = {m.replace(f":{report['run_id']}:", f":{driver.wait_timeout.marker_identity(report['run_id'])}:"): n for m, n in row["marker_counts"].items()}
+        return report
 
     def judge_cli(self, report, *, driver_rc):
         path = self.root / "report.json"

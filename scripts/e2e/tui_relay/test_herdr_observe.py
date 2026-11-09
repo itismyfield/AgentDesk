@@ -1068,7 +1068,7 @@ class RestartObserveOnly(unittest.TestCase):
         self.marked()
         client = self.client.return_value
         client.send_control.return_value = {"id": "100"}
-        marker = f"[E2E:E19:{self.args.run_id}:POST]"
+        marker = f"[E2E:E19:{driver.wait_timeout.marker_identity(self.args.run_id)}:POST]"
         message = {"id": "101", "content": marker, "author": {"id": "42", "bot": True}}
         client.wait_for_message.return_value = (message, [message])
         client.fetch_messages.return_value = [message]
@@ -1109,7 +1109,7 @@ class RestartObserveOnly(unittest.TestCase):
         self.marked()
         client = self.client.return_value
         client.send_control.return_value = {"id": "100"}
-        marker = f"[E2E:E19:{self.args.run_id}:POST]"
+        marker = f"[E2E:E19:{driver.wait_timeout.marker_identity(self.args.run_id)}:POST]"
         message = {"id": "101", "content": marker, "author": {"id": "42", "bot": True}}
         client.wait_for_message.return_value = (message, [message])
         client.fetch_messages.return_value = [message]

@@ -33,7 +33,7 @@ NOTIFY = "1481522187197218816"
 
 class E36DriverContract(unittest.TestCase):
     def run_e36(self, *, fault=None, mutate=None):
-        scenario = driver.yaml.safe_load((ROOT / "tests/e2e/tui_relay/scenarios/E-36-normal-intake-sequential-ten.yaml").read_text())
+        scenario = driver.wait_timeout.expand_markers(driver.yaml.safe_load((ROOT / "tests/e2e/tui_relay/scenarios/E-36-normal-intake-sequential-ten.yaml").read_text()), "offline")
         clock, trace, sent, first, sink = [92.0], [], [], {}, {}
         state = {"qa_done": False, "qb_done": False}
         args = Namespace(cell="claude-tui", channel_id="42", thread_channel_id=None, base_url="http://offline.invalid",
