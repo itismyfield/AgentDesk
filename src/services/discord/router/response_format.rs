@@ -430,4 +430,51 @@ mod tests {
             build_memory_injection_plan(&ProviderKind::Codex, true, DispatchProfile::Full);
         assert_eq!(resumed.shared_knowledge_for_context, None);
     }
+
+    /// The SAK file is a fallback for deployments whose agents lack the Memento
+    /// MCP: `auto` follows the live config's MCP catalog, `on`/`off` override it.
+    #[test]
+    fn sak_injection_is_a_fallback_for_configs_without_memento_mcp() {
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+        let _live = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
+        let sak_path = crate::runtime_layout::shared_agent_knowledge_path(runtime_root.path());
+        std::fs::create_dir_all(sak_path.parent().expect("SAK parent")).expect("create SAK parent");
+        std::fs::write(&sak_path, "fallback rules").expect("write SAK");
+        crate::services::discord::shared_memory::invalidate_shared_knowledge_cache_for_tests();
+        let expected = "[Shared Agent Knowledge]\nfallback rules";
+        let memento: crate::config::McpServerConfig =
+            serde_yaml::from_str("url: http://127.0.0.1:57332/mcp").expect("memento server");
+
+        for (has_memento, policy, injected) in [
+            (true, None, false),
+            (true, Some("auto"), false),
+            (false, None, true),
+            (true, Some("on"), true),
+            (false, Some("off"), false),
+        ] {
+            let mut config = crate::config::Config::default();
+            config.mcp_servers.clear();
+            if has_memento {
+                config.mcp_servers.insert("memento".into(), memento.clone());
+            }
+            config.memory = policy.map(|policy| {
+                serde_yaml::from_str(&format!("shared_knowledge_injection: {policy}"))
+                    .expect("memory policy")
+            });
+            crate::config_live_reload::install(config);
+            let want = injected.then_some(expected);
+            let claude =
+                build_memory_injection_plan(&ProviderKind::Claude, false, DispatchProfile::Full);
+            let codex =
+                build_memory_injection_plan(&ProviderKind::Codex, false, DispatchProfile::Full);
+            let case = format!("memento={has_memento} policy={policy:?}");
+            assert_eq!(claude.sak_for_system_prompt(), want, "{case}");
+            assert_eq!(
+                codex.shared_knowledge_for_context.as_deref(),
+                want,
+                "{case}"
+            );
+        }
+    }
 }

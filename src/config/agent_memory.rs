@@ -38,6 +38,42 @@ pub struct AgentDef {
     pub preferred_intake_node_labels: Option<Vec<String>>,
 }
 
+/// `memory.shared_knowledge_injection`: whether the SAK file goes into agent prompts.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SharedKnowledgeInjection {
+    /// Inject only when the agents lack the Memento MCP.
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl SharedKnowledgeInjection {
+    pub fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
+}
+
+impl Config {
+    /// Memento is available when the MCP catalog handed to agents (yaml, or the
+    /// default server added when `MEMENTO_ACCESS_KEY` is set) names `memento` with a URL.
+    pub(crate) fn memento_available(&self) -> bool {
+        self.mcp_servers
+            .iter()
+            .any(|(name, server)| name.trim() == "memento" && !server.url.trim().is_empty())
+    }
+
+    /// The SAK file is the memory fallback for deployments without Memento.
+    pub(crate) fn shared_knowledge_injection_enabled(&self) -> bool {
+        match self.memory.as_ref().map(|m| m.shared_knowledge_injection) {
+            Some(SharedKnowledgeInjection::On) => true,
+            Some(SharedKnowledgeInjection::Off) => false,
+            Some(SharedKnowledgeInjection::Auto) | None => !self.memento_available(),
+        }
+    }
+}
+
 fn deserialize_memory_group<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
