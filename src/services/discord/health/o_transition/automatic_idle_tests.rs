@@ -5,7 +5,7 @@ use poise::serenity_prelude::MessageId;
 
 use super::*;
 use crate::services::discord::make_shared_data_for_tests;
-use crate::services::provider::CancelToken;
+use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 use crate::services::turn_orchestrator::registry_purge::MailboxRefusal;
 
@@ -86,5 +86,19 @@ async fn automatic_idle_reads_the_live_runtime_snapshot() {
             .insert_idle_snapshot_for_test(channel, snapshot, MailboxRefusal::Closed);
         assert_eq!(idle(&shared, channel.get()).await, expected);
         shared.mailboxes.remove_fixture_for_test(channel);
+    }
+}
+
+// Input a V2 owner holds keeps cleanup away: a waiting input, and a front an attempt carries alike.
+#[tokio::test]
+async fn automatic_idle_keeps_input_the_v2_owner_holds() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let shared = make_shared_data_for_tests();
+    let seed =
+        crate::services::discord::relay_recovery::tests::orphan_token_finish::v2_attempted_front;
+    for (channel, waiting) in [(7_268_305, true), (7_268_306, false)] {
+        let channel = ChannelId::new(channel);
+        seed(&shared, &ProviderKind::Codex, channel, waiting).await;
+        assert!(!idle(&shared, channel.get()).await, "waiting={waiting}");
     }
 }

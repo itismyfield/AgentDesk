@@ -44,7 +44,7 @@ async fn local_mailbox_ownership(shared: &SharedData, channel_id: ChannelId) -> 
     // a side effect, so bare local-handle existence is not ownership evidence.
     if snapshot.cancel_token.is_some() {
         MailboxOwnership::ActiveTurn
-    } else if !snapshot.intervention_queue.is_empty() {
+    } else if snapshot.queue_depth() > 0 {
         MailboxOwnership::PendingQueue
     } else {
         MailboxOwnership::None
@@ -319,7 +319,7 @@ async fn runtime_turn_cleanup_by_lookup(
         // different sibling's mailbox. Observe only; an attributed finish must
         // go through the ownership-gated runtime path above.
         let snapshot = handle.snapshot().await;
-        if !snapshot.intervention_queue.is_empty() {
+        if snapshot.queue_depth() > 0 {
             discord::turn_completion_events::warn_unresolvable_hard_stop_pending_backlog(
                 channel_id,
                 true,
@@ -339,3 +339,7 @@ async fn runtime_turn_cleanup_by_lookup(
 
     HardStopRuntimeResult::default()
 }
+
+#[cfg(test)]
+#[path = "runtime_lookup_tests.rs"]
+mod tests;

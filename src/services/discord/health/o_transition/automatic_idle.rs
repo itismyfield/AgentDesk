@@ -19,9 +19,10 @@ pub(super) async fn idle(shared: &SharedData, channel: u64) -> bool {
     snapshot_idle(&snapshot)
 }
 
+/// A V2 front an attempt carries holds cleanup as a reserved dispatch does.
 fn snapshot_idle(snapshot: &ChannelMailboxSnapshot) -> bool {
     snapshot.cancel_token.is_none()
-        && snapshot.intervention_queue.is_empty()
+        && !snapshot.holds_input()
         && snapshot.pending_user_dispatch.is_none()
         && snapshot.recovery_started_at.is_none()
 }
