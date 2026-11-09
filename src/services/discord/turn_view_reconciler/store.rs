@@ -255,7 +255,7 @@ impl TurnViewReconciler {
             PERSISTED_STATE_VERSION
                 | LEGACY_QUEUED_HOURGLASS_STATE_VERSION
                 | QUEUED_MARKER_ONLY_STATE_VERSION
-                | QUEUE_SOON_STATE_VERSION
+                | LIVE_QUEUED_MARKER_STATE_VERSION
         ) || record.provider != shared.provider.as_str()
             || TurnViewTargetKind::from_str(&record.kind) != Some(target.kind)
             || record.channel_id != target.channel_id.get()
@@ -347,7 +347,7 @@ impl TurnViewReconciler {
             } else if !applied.legacy_queue_reactions.is_empty() {
                 QUEUED_MARKER_ONLY_STATE_VERSION
             } else if applied.applied.is_queue_marker() {
-                QUEUE_SOON_STATE_VERSION
+                LIVE_QUEUED_MARKER_STATE_VERSION
             } else {
                 PERSISTED_STATE_VERSION
             },

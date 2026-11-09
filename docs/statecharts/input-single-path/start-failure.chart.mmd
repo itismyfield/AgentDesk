@@ -11,6 +11,7 @@ flowchart TD
     C --> K{"allowlist or failures = 2"}
     K -->|yes| T["attemptless retained; one notice obligation"]
     K -->|no| A["keep A at front"]
+    T --> V["clear retained sources’ matching-generation 📬"]
     T --> N["outbox notice independently"]
     T --> E0{"wrapper row exists?"}
     E0 -->|yes| X["NotSent bridge; delete placeholder"]
