@@ -237,9 +237,10 @@ async fn ba_twenty_replaced_old_sources_keep_published_count_monotone_during_ret
     }
     assert_eq!(chain.harness.alarms.readers(), Some(1));
     assert!(
-        !health
+        health
             .current_at(std::time::Instant::now())
-            .contains(&retained_reason)
+            .contains(&retained_reason),
+        "the unproven source still retains its reader"
     );
     let cursors_before: Vec<_> = (0..chain.sources.len())
         .map(|n| chain.cursor_file(n))
