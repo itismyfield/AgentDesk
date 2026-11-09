@@ -664,7 +664,7 @@ class HerdrScopedGapRepairs(unittest.TestCase):
                 rows.append({'id': '104', 'content': '세션을 초기화했어요.', 'author': {'bot': True}})
                 return {'ok': True, 'message_id': '102'}
         def wait(channel, **kwargs):
-            for marker in ('[E2E:E51:run:T1]', '[E2E:E51:run:T2]'):
+            for marker in (f'[E2E:E51:{driver.wait_timeout.marker_identity("run")}:T1]', f'[E2E:E51:{driver.wait_timeout.marker_identity("run")}:T2]'):
                 row = {'id': '101' if marker.endswith('T1]') else '103', 'content': marker,
                        'author': {'id': assertions.provider_bot_id('codex'), 'bot': True}}
                 if kwargs['predicate'](row):

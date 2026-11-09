@@ -97,7 +97,7 @@ def expected_markers(scenarios_dir: Path, scenario_id: str, run_id: str) -> list
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         if isinstance(data, dict) and str(data.get("id")) == scenario_id:
             return [
-                str(marker).replace("{run_id}", run_id)
+                cell_driver.wait_timeout.expand_markers(str(marker), run_id).replace("{run_id}", run_id)
                 for marker in data.get("report_marker_counts") or []
             ]
     return []

@@ -3079,13 +3079,12 @@ def _collect_wait_timeout_diagnostics(
         "scenario_id": str(scenario.get("id") or ""),
         "cell": cell,
         "classification": wait_timeout.classify(
-            window=window,
-            needle=needle,
-            after_id=after_id,
-            head=head,
+            window=window, needle=needle, after_id=after_id, head=head,
             prompt_draft_present=prompt_draft_present,
-            health=health,
+            health=health, provider=cell_provider(cell),
         ),
+        "expected_marker": needle,
+        "actual_markers": wait_timeout.marker_mismatches(window, needle, after_id, cell_provider(cell)),
         "relay_count": len(window.messages),
         "raw_count": len(window.raw_messages),
         "message_updates": len(window.message_updates),
@@ -3199,6 +3198,7 @@ def run_scenario(
     client: discord.DiscordClient,
     partial_result_sink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    scenario = wait_timeout.expand_markers(scenario, run_id)
     scenario_id = str(scenario.get("id"))
     cell = args.cell
     declared_agent_mode = scenario_agent_mode(scenario)

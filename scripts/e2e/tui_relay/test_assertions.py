@@ -1814,7 +1814,7 @@ class E35CurrentRunContract(unittest.TestCase):
         path = ROOT / "tests/e2e/tui_relay/scenarios/E-35-durable-delivery-record.yaml"
         scenario = driver.yaml.safe_load(path.read_text(encoding="utf-8"))
         original = copy.deepcopy(scenario)
-        marker = "[E2E:E35:current-run:OK]"
+        marker = f"[E2E:E35:{driver.wait_timeout.marker_identity('current-run')}:OK]"
         body, completion = _relay_msg(3, marker), _raw_bot_msg(6, "-# ⏱️ 1초")
         cases = {
             "current": ([body, completion], "pass"), "retired chrome": ([body, _raw_bot_msg(6, "✅ 응답 완료")], "fail"),
@@ -1850,7 +1850,7 @@ class E35CurrentRunContract(unittest.TestCase):
                     self.assertEqual(result["status"], expected_status, result)
                     if expected == "fail":
                         self.assertIn(result["failure_attribution"]["source"], ("assertion", "assertions"))
-                    client.send.assert_called_once_with("42", original["steps"][0]["send_discord_prompt"].replace("{run_id}", "current-run"))
+                    client.send.assert_called_once_with("42", driver.wait_timeout.expand_markers(original["steps"][0]["send_discord_prompt"], "current-run"))
                     client.send_prompt.assert_not_called()
                     if cell.endswith("-herdr"):
                         receipt.assert_not_called()

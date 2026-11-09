@@ -571,7 +571,7 @@ class HerdrCells(unittest.TestCase):
         client = Mock()
         client.send_control.return_value = {'id': '100'}
         def add(marker):
-            row = {'id': str(102 + len(rows)), 'content': marker.replace('{run_id}', 'phase'),
+            row = {'id': str(102 + len(rows)), 'content': driver.wait_timeout.expand_markers(marker, 'phase'),
                    'author': {'id': author, 'bot': True}}
             rows.append(row)
         def send(channel, prompt):
@@ -592,7 +592,7 @@ class HerdrCells(unittest.TestCase):
     def test_e36_notify_bot_body_never_completes_a_herdr_request(self):
         result, client = self.run_herdr_e36('1481522187197218816')
         self.assertEqual(result['status'], 'fail', result)
-        self.assertIn('Herdr Discord marker timeout: [E2E:E36:phase:S01]', result['reason'])
+        self.assertIn(f'Herdr Discord marker timeout: [E2E:E36:{driver.wait_timeout.marker_identity("phase")}:S01]', result['reason'])
         self.assertEqual(client.send.call_count, 1)
 
     def test_e36_executes_twelve_normal_discord_prompts_without_legacy_evidence(self):
