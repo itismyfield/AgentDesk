@@ -461,8 +461,7 @@ async fn retain_context_snapshots(
 }
 
 // An intake_outbox row is a candidate only when it, its whole (channel_id, user_msg_id)
-// attempt family, and every child are allowlisted terminal and aged. A held custody row is
-// `unknown` while it still awaits delivery, so it is never terminal.
+// attempt family, and every child are allowlisted terminal and aged.
 fn intake_outbox_aged_terminal(alias: &str) -> String {
     format!(
         "({alias}.status IN ('done', 'unknown', 'failed_pre_accept', 'failed_post_accept') \
@@ -480,7 +479,7 @@ fn intake_outbox_candidate_predicate() -> String {
         intake_outbox_aged_terminal("f"),
         intake_outbox_aged_terminal("c"),
     );
-    // A replay-only receipt stays `unknown` for life and sits outside the attempt sequence.
+    // Held custody rows await delivery and replay-only receipts never close; both stay `unknown`.
     format!(
         "NOT io.replay_only AND {row} \
          AND NOT EXISTS (SELECT 1 FROM intake_outbox f \
