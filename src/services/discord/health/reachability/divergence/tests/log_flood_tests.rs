@@ -111,7 +111,7 @@ async fn divergence_summaries_preserve_identity_aliases_missing_rows_and_recover
         assert_eq!(observe(&row, &registry), RowCoordinateDivergence::Diverged);
         tokio::time::advance(Duration::from_millis(500)).await;
     }
-    tokio::time::advance(Duration::from_millis(239_500)).await;
+    tokio::time::advance(Duration::from_millis(539_500)).await;
     assert_eq!(
         observe(&alias, &registry),
         RowCoordinateDivergence::Diverged
@@ -130,7 +130,7 @@ async fn divergence_summaries_preserve_identity_aliases_missing_rows_and_recover
         observe(&alias, &registry),
         RowCoordinateDivergence::Diverged
     );
-    tokio::time::advance(Duration::from_secs(300)).await;
+    tokio::time::advance(Duration::from_secs(600)).await;
     assert_eq!(observe(&row, &registry), RowCoordinateDivergence::Diverged);
     assert_eq!(logs.count(DIVERGENCE), 3, "{}", logs.text());
     assert!(
@@ -199,4 +199,111 @@ fn concurrent_divergence_observers_emit_one_first_line_without_changing_results(
         join_within(thread, WAIT_CAP);
     }
     assert_eq!(logs.count(DIVERGENCE), 1, "{}", logs.text());
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_turn_pair_stays_within_ten_lines_over_thirty_two_minutes() {
+    use crate::services::discord::live_bridge;
+    use crate::services::provider::ProviderKind;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = 799_320_001;
+    let _original = live_bridge::log_flood_tests::registered_original(channel).await;
+    let dir = tempfile::tempdir().unwrap();
+    let row = dir.path().join("row");
+    let registry = dir.path().join("registry");
+    std::fs::write(&row, "a").unwrap();
+    std::fs::write(&registry, "b").unwrap();
+    let logs = Logs::default();
+    let _capture = logs.capture();
+    for tick in 0..=3840 {
+        assert!(live_bridge::try_recovery(&ProviderKind::Codex, channel).is_err());
+        if tick % 20 == 0 {
+            assert_eq!(
+                observe_row_coordinate_divergence(
+                    "codex",
+                    channel,
+                    row.to_str(),
+                    registry.to_str()
+                ),
+                RowCoordinateDivergence::Diverged,
+            );
+        }
+        if tick < 3840 {
+            tokio::time::advance(Duration::from_millis(500)).await;
+        }
+    }
+    let counts = [
+        logs.count("live_original_bridge_deferred"),
+        logs.count(DIVERGENCE),
+    ];
+    assert!(
+        counts.iter().sum::<usize>() <= 10,
+        "counts={counts:?}\n{}",
+        logs.text()
+    );
+    assert_eq!(counts, [4, 4], "{}", logs.text());
+}
+
+#[tokio::test(start_paused = true)]
+async fn summary_lines_report_actual_elapsed_since_previous_log() {
+    use crate::services::discord::live_bridge;
+    use crate::services::provider::ProviderKind;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = 799_320_002;
+    let _original = live_bridge::log_flood_tests::registered_original(channel).await;
+    let dir = tempfile::tempdir().unwrap();
+    let row = dir.path().join("row");
+    let registry = dir.path().join("registry");
+    std::fs::write(&row, "a").unwrap();
+    std::fs::write(&registry, "b").unwrap();
+    let logs = Logs::default();
+    let _capture = logs.capture();
+    for delay in [0, 600, 675] {
+        tokio::time::advance(Duration::from_secs(delay)).await;
+        assert!(live_bridge::try_recovery(&ProviderKind::Codex, channel).is_err());
+        assert_eq!(
+            observe_row_coordinate_divergence("codex", channel, row.to_str(), registry.to_str()),
+            RowCoordinateDivergence::Diverged,
+        );
+    }
+    for marker in ["live_original_bridge_deferred", DIVERGENCE] {
+        let periods = logs
+            .text()
+            .lines()
+            .filter(|line| line.contains(marker))
+            .filter_map(|line| {
+                line.split_whitespace().find_map(|field| {
+                    field
+                        .strip_prefix("since_previous_log_secs=")
+                        .map(|value| value.parse::<u64>().unwrap())
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(periods, [0, 600, 675], "{marker}\n{}", logs.text());
+    }
+}
+
+#[test]
+fn core_summary_periods_follow_previous_emission_not_episode_age() {
+    use crate::services::discord::idle_relay_drift::{DriftState, decide_drift_warn};
+    let start = std::time::Instant::now();
+    let mut state = DriftState::new(start);
+    let decisions = [0, 300, 675].map(|second| {
+        decide_drift_warn(
+            &mut state,
+            start + Duration::from_secs(second),
+            Duration::from_secs(300),
+        )
+    });
+    assert!(decisions.iter().all(|decision| decision.emit));
+    assert_eq!(
+        decisions
+            .each_ref()
+            .map(|decision| decision.since_previous_log_secs),
+        [0, 300, 375]
+    );
+    assert_eq!(
+        decisions.each_ref().map(|decision| decision.drift_age_secs),
+        [0, 300, 675]
+    );
 }

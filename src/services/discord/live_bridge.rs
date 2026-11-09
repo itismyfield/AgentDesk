@@ -387,11 +387,16 @@ fn admit_recovery(
     let permit = slot.gate.clone().try_write_owned().map_err(|_| {
         let now = tokio::time::Instant::now().into_std();
         let mut deferred = slot.deferred.lock().unwrap_or_else(|e| e.into_inner());
-        let decision = decide_drift_warn(deferred.get_or_insert_with(|| DriftState::new(now)), now);
+        let decision = decide_drift_warn(
+            deferred.get_or_insert_with(|| DriftState::new(now)),
+            now,
+            Duration::from_secs(600),
+        );
         if decision.emit {
             tracing::info!(
                 channel_id,
                 provider = provider.as_str(),
+                since_previous_log_secs = decision.since_previous_log_secs,
                 "live_original_bridge_deferred (suppressed {} times since previous log)",
                 decision.suppressed_count
             );
@@ -500,4 +505,4 @@ mod tests;
 
 #[cfg(all(test, unix))]
 #[path = "live_bridge/log_flood_tests.rs"]
-mod log_flood_tests;
+pub(super) mod log_flood_tests;

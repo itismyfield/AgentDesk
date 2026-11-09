@@ -128,33 +128,33 @@ pub(super) struct WarnDecision {
     pub(super) suppressed_count: u64,
     /// Seconds since the drift was first observed for this session.
     pub(super) drift_age_secs: u64,
+    /// Seconds since the preceding emission, or zero for the first.
+    pub(super) since_previous_log_secs: u64,
 }
 
 /// Pure rate-limiter core (time injected) so the suppression policy is unit
 /// testable without wall-clock dependence. Mutates `state` in place.
-pub(super) fn decide_drift_warn(state: &mut DriftState, now: Instant) -> WarnDecision {
+pub(super) fn decide_drift_warn(
+    state: &mut DriftState,
+    now: Instant,
+    interval: Duration,
+) -> WarnDecision {
     state.last_touched_at = now;
     let drift_age_secs = now.saturating_duration_since(state.first_seen_at).as_secs();
-    let due = match state.last_warn_at {
-        None => true,
-        Some(last) => now.saturating_duration_since(last) >= DRIFT_WARN_COOLDOWN,
-    };
-    if due {
-        let suppressed = state.suppressed_count;
+    let elapsed = now.saturating_duration_since(state.last_warn_at.unwrap_or(now));
+    let emit = state.last_warn_at.is_none() || elapsed >= interval;
+    let suppressed_count = if emit {
         state.last_warn_at = Some(now);
-        state.suppressed_count = 0;
-        WarnDecision {
-            emit: true,
-            suppressed_count: suppressed,
-            drift_age_secs,
-        }
+        std::mem::take(&mut state.suppressed_count)
     } else {
         state.suppressed_count = state.suppressed_count.saturating_add(1);
-        WarnDecision {
-            emit: false,
-            suppressed_count: state.suppressed_count,
-            drift_age_secs,
-        }
+        state.suppressed_count
+    };
+    WarnDecision {
+        emit,
+        suppressed_count,
+        drift_age_secs,
+        since_previous_log_secs: elapsed.as_secs(),
     }
 }
 
@@ -212,7 +212,7 @@ pub(super) fn should_emit_drift_warn(tmux_session_name: &str) -> WarnDecision {
     let state = map
         .entry(tmux_session_name.to_string())
         .or_insert_with(|| DriftState::new(now));
-    decide_drift_warn(state, now)
+    decide_drift_warn(state, now, DRIFT_WARN_COOLDOWN)
 }
 
 fn note_pending_emission_count(
@@ -692,24 +692,24 @@ mod tests {
         let mut state = DriftState::new(start);
 
         // First occurrence emits immediately, zero suppressed.
-        let d0 = decide_drift_warn(&mut state, start);
+        let d0 = decide_drift_warn(&mut state, start, DRIFT_WARN_COOLDOWN);
         assert!(d0.emit, "first drift WARN must emit immediately");
         assert_eq!(d0.suppressed_count, 0);
 
         // Within the cooldown: suppressed, count accumulates.
         let t1 = start + Duration::from_secs(1);
-        let d1 = decide_drift_warn(&mut state, t1);
+        let d1 = decide_drift_warn(&mut state, t1, DRIFT_WARN_COOLDOWN);
         assert!(!d1.emit);
         assert_eq!(d1.suppressed_count, 1);
         let t2 = start + Duration::from_secs(2);
-        let d2 = decide_drift_warn(&mut state, t2);
+        let d2 = decide_drift_warn(&mut state, t2, DRIFT_WARN_COOLDOWN);
         assert!(!d2.emit);
         assert_eq!(d2.suppressed_count, 2);
 
         // After the cooldown: re-emit, carrying the accumulated suppressed count,
         // then reset.
-        let t3 = start + DRIFT_WARN_COOLDOWN + Duration::from_secs(1);
-        let d3 = decide_drift_warn(&mut state, t3);
+        let t3 = start + Duration::from_secs(300);
+        let d3 = decide_drift_warn(&mut state, t3, DRIFT_WARN_COOLDOWN);
         assert!(d3.emit, "WARN must re-emit after the cooldown window");
         assert_eq!(
             d3.suppressed_count, 2,
@@ -719,7 +719,7 @@ mod tests {
 
         // The next suppression window starts fresh.
         let t4 = t3 + Duration::from_secs(1);
-        let d4 = decide_drift_warn(&mut state, t4);
+        let d4 = decide_drift_warn(&mut state, t4, DRIFT_WARN_COOLDOWN);
         assert!(!d4.emit);
         assert_eq!(d4.suppressed_count, 1);
     }

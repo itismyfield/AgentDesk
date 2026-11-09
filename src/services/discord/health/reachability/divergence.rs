@@ -169,7 +169,7 @@ pub(in crate::services::discord) fn divergence(
 }
 
 /// Compare the two sequential stats; only logging is deduplicated by their identities.
-/// Changed pairs warn immediately, repeats summarize every five minutes, and clearing is logged.
+/// Changed pairs warn immediately, repeats summarize every ten minutes, and clearing is logged.
 pub(in crate::services::discord) fn observe_row_coordinate_divergence(
     provider: &str,
     channel_id: u64,
@@ -201,7 +201,7 @@ pub(in crate::services::discord) fn observe_row_coordinate_divergence(
     if state.0 != identities {
         *state = (identities, DriftState::new(now));
     }
-    let decision = decide_drift_warn(&mut state.1, now);
+    let decision = decide_drift_warn(&mut state.1, now, std::time::Duration::from_secs(600));
     if decision.emit {
         tracing::warn!(
             counter = "reachability_row_coordinate_divergence",
@@ -210,6 +210,7 @@ pub(in crate::services::discord) fn observe_row_coordinate_divergence(
             row_output_path = row_output_path.unwrap_or(""),
             registry_output_path = registry_output_path.unwrap_or(""),
             outcome = outcome.as_str(),
+            since_previous_log_secs = decision.since_previous_log_secs,
             "in-flight row and independently resolved transcript disagree by file identity; \
              descriptive signal only — no verdict changes here and no redelivery or \
              destructive action is authorized (4987 S4) (suppressed {} times since previous log)",

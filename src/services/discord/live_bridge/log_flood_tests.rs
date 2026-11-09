@@ -43,6 +43,17 @@ impl Logs {
 
 const DEFERRED: &str = "live_original_bridge_deferred";
 
+pub(in crate::services::discord) async fn registered_original(
+    channel: u64,
+) -> (Arc<CancelToken>, Arc<OriginalRegistration>) {
+    let token = Arc::new(CancelToken::new());
+    let original = register_original(&ProviderKind::Codex, channel, &token)
+        .await
+        .unwrap()
+        .unwrap();
+    (token, original)
+}
+
 #[tokio::test(start_paused = true)]
 async fn deferred_log_flood_is_bounded_and_changed_keys_emit_immediately() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -79,7 +90,7 @@ async fn deferred_log_flood_is_bounded_and_changed_keys_emit_immediately() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn deferred_summaries_cover_exact_five_minute_boundaries_and_reset_counts() {
+async fn deferred_summaries_cover_exact_ten_minute_boundaries_and_reset_counts() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let channel = 799_300_003;
     let token = Arc::new(CancelToken::new());
@@ -92,7 +103,7 @@ async fn deferred_summaries_cover_exact_five_minute_boundaries_and_reset_counts(
         assert!(try_recovery(&ProviderKind::Codex, channel).is_err());
         tokio::time::advance(Duration::from_millis(500)).await;
     }
-    tokio::time::advance(Duration::from_millis(239_500)).await;
+    tokio::time::advance(Duration::from_millis(539_500)).await;
     assert!(try_recovery(&ProviderKind::Codex, channel).is_err());
     assert_eq!(logs.count(DEFERRED), 1, "{}", logs.text());
     tokio::time::advance(Duration::from_millis(500)).await;
@@ -105,7 +116,7 @@ async fn deferred_summaries_cover_exact_five_minute_boundaries_and_reset_counts(
         logs.text()
     );
     assert!(try_recovery(&ProviderKind::Codex, channel).is_err());
-    tokio::time::advance(Duration::from_secs(300)).await;
+    tokio::time::advance(Duration::from_secs(600)).await;
     assert!(try_recovery(&ProviderKind::Codex, channel).is_err());
     assert_eq!(logs.count(DEFERRED), 3, "{}", logs.text());
     assert!(
