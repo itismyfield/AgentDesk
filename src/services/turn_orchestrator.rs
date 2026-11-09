@@ -306,8 +306,8 @@ pub(crate) struct ChannelMailboxSnapshot {
     /// monitor marker for reclaim policy.
     pub(crate) active_turn_kind: ActiveTurnKind,
     pub(crate) intervention_queue: Vec<Intervention>,
-    /// The V2 owner's committed item count; `None` when no V2 owner holds this queue.
-    pub(crate) v2_queue_depth: Option<usize>,
+    /// The V2 owner's waiting depth and whether it holds any input; `None` without a V2 owner.
+    pub(crate) v2_queue: Option<(usize, bool)>,
     pub(crate) pending_user_dispatch: Option<MessageId>,
     /// #5191 — the reserved head's absorbed inbound ids (see the same-named
     /// field on `ChannelMailboxState`). Recovery dedup must union these with
@@ -329,9 +329,9 @@ pub(crate) struct ChannelMailboxSnapshot {
 }
 
 impl ChannelMailboxSnapshot {
-    /// The depth of the queue that owns this channel's input: the V2 owner's, else the V1 queue.
+    /// The waiting (undelivered) depth of the queue that owns this channel's input: V2, else V1.
     pub(crate) fn queue_depth(&self) -> usize {
-        self.v2_queue_depth.unwrap_or(self.intervention_queue.len())
+        self.v2_queue.map_or(self.intervention_queue.len(), |q| q.0)
     }
 }
 

@@ -99,7 +99,7 @@ pub(super) async fn stop_judged_channel_runtime(
                     } else {
                         native.lifecycle_path()
                     },
-                    snapshot.intervention_queue.len(),
+                    snapshot.queue_depth(),
                     snapshot.cancel_token.is_none(),
                 );
             }
@@ -167,7 +167,7 @@ pub(super) async fn stop_judged_channel_runtime(
             return RuntimeTurnStopResult {
                 lifecycle_path: "canonical",
                 had_active_turn: true,
-                queue_depth: snapshot.intervention_queue.len(),
+                queue_depth: snapshot.queue_depth(),
                 inflight: match outcome.may_clear_inflight() {
                     false => InflightDisposition::PreservedByHostGuard,
                     true => InflightDisposition::cleared_if(
@@ -234,12 +234,7 @@ pub(super) async fn stop_judged_channel_runtime(
         cleanup_requested,
     )
     .await;
-    let queue_depth = shared
-        .mailbox(channel_id)
-        .snapshot()
-        .await
-        .intervention_queue
-        .len();
+    let queue_depth = shared.mailbox(channel_id).snapshot().await.queue_depth();
     discord::mailbox_clear_recovery_marker(&shared, channel_id).await;
     discord::receipt_settle::stopped(&shared, &provider, channel_id, cleanup_policy, None).await;
     let idle_inflight_cleared = if skipped_idle_provider_interrupt {
@@ -271,14 +266,11 @@ pub(super) async fn stop_judged_channel_runtime(
         "runtime_stop_fallback",
     )
     .await;
-    let mailbox_foreground_free = shared
-        .mailbox(channel_id)
-        .snapshot()
-        .await
-        .cancel_token
-        .is_none();
+    let after = shared.mailbox(channel_id).snapshot().await;
+    let mailbox_foreground_free = after.cancel_token.is_none();
+    // A release is measured after it, by the same waiting depth as every other stop path.
     let queue_depth = if release.released {
-        release.queue_depth_after
+        after.queue_depth()
     } else {
         queue_depth
     };

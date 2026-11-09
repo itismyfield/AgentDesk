@@ -383,6 +383,20 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
             std::fs::write(path, state.to_string()).unwrap();
         }
     }
+    // The bytes each file held before the first recovery, which an unowned file keeps through it.
+    let seeded: Vec<Option<Vec<u8>>> = (0..cases.len())
+        .map(|index| {
+            let root = crate::services::discord::runtime_store::discord_pending_queue_root();
+            let file = format!("{}.json", 7_676_510 + index as u64);
+            std::fs::read(
+                root.unwrap()
+                    .join("claude")
+                    .join(&fx.shared.token_hash)
+                    .join(file),
+            )
+            .ok()
+        })
+        .collect();
     let http = Arc::new(serenity::Http::new("Bot test-token"));
     for boot in 1..=2 {
         // Past the retention the boot rightly drops the terminal identity: that is no restore.
@@ -448,6 +462,10 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
             let path = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap()
                 .join("claude").join(&fx.shared.token_hash).join(format!("{channel}.json"));
             let expected = std::fs::read(&path).unwrap();
+            if unowned {
+                let seeded = seeded[index].as_ref();
+                assert_eq!(Some(&expected), seeded, "the first recovery rewrote the {case} file");
+            }
             // Repeating recovery in the same process must keep the actor already adopted.
             crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests(
                 &http, &fx.shared, &fx.provider,

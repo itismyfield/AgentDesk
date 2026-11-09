@@ -628,7 +628,7 @@ pub async fn stale_mailbox_repair_handler(
         )
             .into_response();
     }
-    if before.queue_depth > 0 {
+    if before.holds_input {
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -717,18 +717,8 @@ pub async fn stale_mailbox_repair_handler(
                                     request.channel_id,
                                 )
                                 .await
-                                .unwrap_or(health::ProviderMailboxState {
-                                    channel_id: request.channel_id,
-                                    has_cancel_token: false,
-                                    queue_depth: 0,
-                                    recovery_started: false,
-                                }),
-                                None => health::ProviderMailboxState {
-                                    channel_id: request.channel_id,
-                                    has_cancel_token: false,
-                                    queue_depth: 0,
-                                    recovery_started: false,
-                                },
+                                .unwrap_or(health::ProviderMailboxState::empty(request.channel_id)),
+                                None => health::ProviderMailboxState::empty(request.channel_id),
                             }
                         } else if let Some(handle) = global_handle.as_ref() {
                             health::ProviderMailboxState::from_snapshot(
@@ -736,12 +726,7 @@ pub async fn stale_mailbox_repair_handler(
                                 &handle.snapshot().await,
                             )
                         } else {
-                            health::ProviderMailboxState {
-                                channel_id: request.channel_id,
-                                has_cancel_token: false,
-                                queue_depth: 0,
-                                recovery_started: false,
-                            }
+                            health::ProviderMailboxState::empty(request.channel_id)
                         };
                         let after_watcher_inflight = if let Some(registry) = state.health_registry.as_ref() {
                             if let Some(provider) = provider_filter.as_ref() {
@@ -845,18 +830,8 @@ pub async fn stale_mailbox_repair_handler(
                             request.channel_id,
                         )
                         .await
-                        .unwrap_or(health::ProviderMailboxState {
-                            channel_id: request.channel_id,
-                            has_cancel_token: false,
-                            queue_depth: 0,
-                            recovery_started: false,
-                        }),
-                        None => health::ProviderMailboxState {
-                            channel_id: request.channel_id,
-                            has_cancel_token: false,
-                            queue_depth: 0,
-                            recovery_started: false,
-                        },
+                        .unwrap_or(health::ProviderMailboxState::empty(request.channel_id)),
+                        None => health::ProviderMailboxState::empty(request.channel_id),
                     }
                 } else if let Some(handle) = global_handle.as_ref() {
                     health::ProviderMailboxState::from_snapshot(
@@ -864,12 +839,7 @@ pub async fn stale_mailbox_repair_handler(
                         &handle.snapshot().await,
                     )
                 } else {
-                    health::ProviderMailboxState {
-                        channel_id: request.channel_id,
-                        has_cancel_token: false,
-                        queue_depth: 0,
-                        recovery_started: false,
-                    }
+                    health::ProviderMailboxState::empty(request.channel_id)
                 };
                 let (after_session_state, session_lookup_error) = session_repair::post_session(
                     health_diagnostics::load_channel_session_state(state.pg_pool_ref(), request.channel_id).await,
