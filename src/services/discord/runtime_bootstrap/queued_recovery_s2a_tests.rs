@@ -251,7 +251,7 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
         files
     });
     let before: Vec<_> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
-    // Each input-holding file keeps its input in one field alone, so none rides on a bind.
+    // Each one-input file keeps that input in one field alone, so none rides on a bind.
     for bytes in &before[2..5] {
         let json: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         assert!(json.get("admission_binds").is_none(), "{json}");
@@ -266,6 +266,14 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
         drained_file.get("admission_binds").is_none(),
         "{drained_file}"
     );
+    // The settled input is delivered: only its terminal identity remains.
+    let settled_file: serde_json::Value = serde_json::from_slice(&before[4]).unwrap();
+    for field in ["items", "retained_inputs"] {
+        assert_eq!(settled_file[field], serde_json::json!([]), "{settled_file}");
+    }
+    assert!(settled_file["head_injection"].is_null(), "{settled_file}");
+    let terminal = settled_file["terminal_identities"].clone();
+    assert_eq!(terminal.as_array().map(Vec::len), Some(1), "{settled_file}");
     let cleared_file: serde_json::Value = serde_json::from_slice(&before[5]).unwrap();
     for field in ["items", "retained_inputs", "terminal_identities"] {
         assert_eq!(cleared_file[field], serde_json::json!([]), "{cleared_file}");
@@ -283,15 +291,15 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
         minted.sort_unstable();
         assert_eq!(
             minted,
-            [pending, retained, settled],
+            [pending, retained],
             "only a file that holds an input gets a mailbox at boot"
         );
-        for channel in [pending, retained, settled] {
+        for channel in [pending, retained] {
             let owned = shared.mailbox_peek(ChannelId::new(channel)).unwrap();
             let owned = owned.v2_request(|slot| Ok(slot.is_some())).await;
             assert_eq!(owned, Ok(true), "channel {channel} is re-adopted");
         }
-        for skipped in [0, 1, 5] {
+        for skipped in [0, 1, 4, 5] {
             assert_eq!(std::fs::read(&files[skipped]).unwrap(), before[skipped]);
         }
         // The next input adopts the kept file: its admission history carries over.
@@ -308,6 +316,17 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
         assert_eq!(state["admission_sequence"], 1, "{state}");
         let receipts = state["admission_receipts"].as_array().map(Vec::len);
         assert_eq!(receipts, Some(1), "{state}");
+        // The settled input's terminal identity carries over to the next input's owner.
+        let channel = ChannelId::new(settled);
+        let persistence = context(&shared, &provider, channel);
+        let handle = shared.mailbox(channel);
+        handle
+            .v2_ensure_channel(&persistence, channel)
+            .await
+            .unwrap();
+        let state = handle.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+        let state = state.await.unwrap();
+        assert_eq!(state["terminal_identities"], terminal, "{state}");
         // The cleared input's ticket stays spent, and a new ticket queues a new input.
         let channel = ChannelId::new(cleared);
         let persistence = context(&shared, &provider, channel);
