@@ -632,7 +632,7 @@ impl BacklogProbe {
     pub(crate) async fn settled(&mut self, retired: usize) {
         await_within(
             async {
-                while self.cursors().iter().filter(|c| c.retired).count() != retired {
+                while self.cursors().iter().filter(|c| c.retired).count() < retired {
                     self.counts.changed().await.unwrap();
                 }
             },

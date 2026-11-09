@@ -452,6 +452,7 @@ async fn unproven_canary(young: bool, regrow: bool, configured: bool) {
             assert!(probe.health.current_at(std::time::Instant::now()).contains(&reason));
             probe.settled(if young { 3 } else { 4 }).await;
             let observed = probe.cursors();
+            if young { assert!(!observed[0].retired, "recent source retired: {observed:?}"); }
             assert_eq!(probe.retained.lock().unwrap().last(), Some(&(if young {2} else {1}, if young {1} else {0})));
             assert_eq!(observed.iter().filter(|c| c.retired).count(), if young {3} else {4},
                 "actual canary retirement: {observed:?}");
