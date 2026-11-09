@@ -662,15 +662,19 @@ impl<B: BindingEvents> Sources<B> {
             .filter_map(|reader| {
                 let (fingerprint, since) = reader.idle.as_ref()?;
                 let cursor = writer.store().cursor(&reader.source)?;
-                (self.replaced_source(reader)
+                if self.replaced_source(reader)
                     && drained(reader, cursor)
                     && fingerprint.len == cursor.captured_through
                     && now - *since >= RETIRE_QUIET
                     && wall_now
                         .duration_since(fingerprint.modified)
                         .is_ok_and(|age| age >= RETIRED_WATCH)
-                    && Fingerprint::path(&reader.source).ok().as_ref() == Some(fingerprint))
-                .then(|| source_key(&reader.source))
+                    && Fingerprint::path(&reader.source).ok().as_ref() == Some(fingerprint)
+                {
+                    Some(source_key(&reader.source))
+                } else {
+                    None
+                }
             })
             .collect()
     }

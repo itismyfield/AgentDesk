@@ -86,10 +86,16 @@ impl Stats {
         *self.skipped.entry(reason.into()).or_default() += 1;
     }
 
-    fn skip_source(&mut self, reason: String, source: &crate::services::tui_o::shadow::SourceId) {
+    fn skip_source(
+        &mut self,
+        reason: String,
+        source: Option<&crate::services::tui_o::shadow::SourceId>,
+    ) {
         if reason.contains("NotObserved") || reason.contains("TerminationUnread") {
-            let young = crate::services::tui_o::shadow::capture::Fingerprint::path(source)
-                .ok()
+            let young = source
+                .and_then(|source| {
+                    crate::services::tui_o::shadow::capture::Fingerprint::path(source).ok()
+                })
                 .and_then(|fp| {
                     std::time::SystemTime::now()
                         .duration_since(fp.modified)
@@ -124,9 +130,9 @@ impl Stats {
                 .as_ref()
                 .and_then(|d| d.candidates.iter().find(|c| c.key == key));
             if let Some(candidate) = source {
-                self.skip_source(reason, &candidate.source);
+                self.skip_source(reason, Some(&candidate.source));
             } else {
-                self.skip(reason);
+                self.skip_source(reason, None);
             }
         } else {
             self.targets.push(format!("{channel}:{key}"));
@@ -364,7 +370,7 @@ async fn channel_sweep(
             let scope = match inspected.scope {
                 Some(Ok(scope)) => scope,
                 Some(Err(reason)) => {
-                    stats.skip_source(format!("scope_refused:{reason}"), &candidate.source);
+                    stats.skip_source(format!("scope_refused:{reason}"), Some(&candidate.source));
                     continue;
                 }
                 None => {
@@ -570,16 +576,16 @@ pub(crate) mod test_support {
         let source = source_id_for("old", &path).unwrap();
         let mut stats = Stats::default();
         for reason in ["unknown:NotObserved", "scope_refused:TerminationUnread"] {
-            stats.skip_source(reason.into(), &source);
+            stats.skip_source(reason.into(), Some(&source));
         }
         let file = std::fs::File::options().write(true).open(&path).unwrap();
         file.set_times(std::fs::FileTimes::new().set_modified(
             std::time::SystemTime::now() - crate::services::tui_o::writer::rotation::RETIRED_WATCH,
         ))
         .unwrap();
-        stats.skip_source("unknown:NotObserved".into(), &source);
+        stats.skip_source("unknown:NotObserved".into(), Some(&source));
         std::fs::remove_file(&path).unwrap();
-        stats.skip_source("scope_refused:TerminationUnread".into(), &source);
+        stats.skip_source("scope_refused:TerminationUnread".into(), Some(&source));
         assert_eq!((stats.unproven_young, stats.unproven_permanent), (2, 2));
         assert_eq!(stats.skipped.values().sum::<usize>(), 4);
     }

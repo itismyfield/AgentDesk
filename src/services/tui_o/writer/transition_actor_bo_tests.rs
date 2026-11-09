@@ -629,10 +629,16 @@ impl BacklogProbe {
             .collect()
     }
 
-    pub(crate) async fn ticks(&mut self) {
-        for _ in 0..12 {
-            await_within(self.counts.changed(), WAIT_CAP).await.unwrap();
-        }
+    pub(crate) async fn settled(&mut self, retired: usize) {
+        await_within(
+            async {
+                while self.cursors().iter().filter(|c| c.retired).count() != retired {
+                    self.counts.changed().await.unwrap();
+                }
+            },
+            WAIT_CAP,
+        )
+        .await;
     }
 
     pub(crate) async fn regrown(&mut self, source: &SourceId) {

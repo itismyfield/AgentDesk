@@ -450,7 +450,7 @@ async fn unproven_canary(young: bool, regrow: bool, configured: bool) {
         |_, mut probe| async move {
             let reason = "tui_o:reader_retention_stalled:7".to_owned();
             assert!(probe.health.current_at(std::time::Instant::now()).contains(&reason));
-            probe.ticks().await;
+            probe.settled(if young { 3 } else { 4 }).await;
             let observed = probe.cursors();
             assert_eq!(probe.retained.lock().unwrap().last(), Some(&(if young {2} else {1}, if young {1} else {0})));
             assert_eq!(observed.iter().filter(|c| c.retired).count(), if young {3} else {4},
