@@ -125,7 +125,7 @@ pub(super) fn isolated_in(submodule: &str, test: &str, envs: &[(&str, &str)]) ->
     let module = module_path!().split_once("::").unwrap().1;
     let exact = format!("{module}::{submodule}::{test}");
     let out = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &exact, "--nocapture", "--test-threads=1"])
+        .args(["--exact", &exact, "--nocapture"])
         // The empty writer list unless the case names its own; later envs win.
         .env(
             crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
