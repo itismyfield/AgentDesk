@@ -326,6 +326,7 @@ pub(in crate::services::discord) async fn update_channel_fast_mode(
     {
         return super::super::tui_passthrough::herdr_settings::fast(
             shared,
+            token,
             runtime_channel_id,
             Some(enabled),
         )

@@ -616,12 +616,11 @@ pub(super) async fn log_session_strategy_diagnostic(
         .unwrap_or("-");
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
-        "  [{ts}] [session-strategy] channel={} provider={} dispatch={} reason={} resumed={} provider_session_fp={} adk_key_present={} tmux={} tmux_alive={} recovery_context_present={} memento_context_loaded={}",
+        "  [{ts}] [session-strategy] channel={} provider={} dispatch={} reason={} provider_session_fp={} adk_key_present={} tmux={} tmux_alive={} recovery_context_present={} memento_context_loaded={}",
         channel_id.get(),
         provider.as_str(),
         super::response_format::dispatch_profile_label(dispatch_profile),
         session_strategy_reason,
-        provider_session_id.is_some(),
         provider_session,
         adk_session_key.is_some(),
         tmux_label,

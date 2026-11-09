@@ -41,6 +41,15 @@ impl ResumeRebindError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({"error": reason})),
             ),
+            ResumeRebindError::BackgroundSession(id) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": format!(
+                        "세션 {}은(는) Claude Code background 세션으로 실행 중이라 이어받을 수 없어요. 터미널에서 `claude agents`로 그 세션을 찾아 종료한 뒤 /resume을 다시 시도해 주세요.",
+                        id.chars().take(8).collect::<String>()
+                    )
+                })),
+            ),
             ResumeRebindError::TargetCwdMissing(path) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({"error": format!("target cwd does not exist: {path}")})),

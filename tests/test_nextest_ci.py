@@ -1872,6 +1872,47 @@ mod tests {
         self.assertEqual(problems, [])
         self.assertEqual(pg.get("outer::inner::tests::pg"), "src/w/inner.rs")
 
+    def test_path_loaded_file_inline_path_uses_its_owned_directory(self):
+        self.tree({
+            "src/lib.rs": '#[cfg(test)]\n#[path = "w/carried_tests.rs"]\nmod tests;\n',
+            "src/w/carried_tests.rs": 'mod cases {\n    #[path = "ledger.rs"]\n    mod ledger;\n}\n',
+            "src/w/cases/ledger.rs": '#[test]\nfn pg() { TestPostgresDb::new(); }\n',
+        })
+        inventory = pgc.rust_test_sources.lib_inventory(self.root)
+        self.assertEqual(inventory.errors, [])
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertEqual(pg, {"tests::cases::ledger::pg": "src/w/cases/ledger.rs"})
+
+    def test_plain_children_of_path_loaded_test_files_use_owned_directory(self):
+        self.tree({
+            "src/lib.rs": '#[cfg(test)]\n#[path = "w/carried_tests.rs"]\nmod tests;\n',
+            "src/w/carried_tests.rs": 'mod child;\n',
+            "src/w/child.rs": '#[test]\nfn pg() { TestPostgresDb::new(); }\n',
+        })
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertEqual(pg, {"tests::child::pg": "src/w/child.rs"})
+
+    def test_inline_paths_keep_lib_plain_and_mod_rs_directories(self):
+        inline = '#[cfg(test)]\nmod cases {\n    #[path = "leaf.rs"]\n    mod leaf;\n}\n'
+        leaf = '#[test]\nfn pg() { TestPostgresDb::new(); }\n'
+        self.tree({
+            "src/lib.rs": 'mod plain;\nmod folder;\n' + inline,
+            "src/cases/leaf.rs": leaf,
+            "src/plain.rs": inline,
+            "src/plain/cases/leaf.rs": leaf,
+            "src/folder/mod.rs": inline,
+            "src/folder/cases/leaf.rs": leaf,
+        })
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertEqual(pg, {
+            "cases::leaf::pg": "src/cases/leaf.rs",
+            "plain::cases::leaf::pg": "src/plain/cases/leaf.rs",
+            "folder::cases::leaf::pg": "src/folder/cases/leaf.rs",
+        })
+
     def test_a_fixture_two_globs_up_makes_the_grandchild_test_pg(self):
         self.tree({"src/lib.rs": "mod db;\nmod support;\nmod q;\n",
                    "src/q.rs": "#[cfg(test)]\nmod tests;\n",
@@ -2113,7 +2154,8 @@ fn opaque() { run(&pick()); }
                     host_os = SimpleNamespace(path=SimpleNamespace(normpath=normalizer, relpath=os.path.relpath))
                     with mock.patch.object(pgc, "os", host_os), \
                             mock.patch.object(pgc.rust_test_sources, "lib_inventory",
-                                              return_value=SimpleNamespace(tests=sites, modules=inventory.modules)):
+                                              return_value=SimpleNamespace(tests=sites, modules=inventory.modules,
+                                                                           module_dirs=inventory.module_dirs)):
                         pg, problems = pgc.classify(self.root, exempt={})
                     self.assertEqual(set(pg), expected)
                     self.assertEqual(len(problems), 1)

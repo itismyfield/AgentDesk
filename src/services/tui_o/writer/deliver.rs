@@ -413,6 +413,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         self.alarms.reconcile_reader_count(self.channel, count);
     }
 
+    pub fn reconcile_retained_readers(&self, reading: usize, retained: &[String]) {
+        self.alarms
+            .reconcile_retained_readers(self.channel, reading, retained);
+    }
+
     pub fn reconcile_boundary_pending(&self, count: usize) {
         self.alarms.reconcile_boundary_pending(self.channel, count);
     }

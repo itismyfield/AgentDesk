@@ -200,6 +200,39 @@ async fn try_close(
             no.reason, no.owed_inputs
         ))
     })?;
+    #[cfg(unix)]
+    let (carried, unverified_input, command) = match carried {
+        Carried::Row(row) if unverified_input && row.native_stop_user_pin.is_none() => {
+            use crate::services::tui_input::human_frame::history::v2::carried::{self, Consumed};
+            let consumed = row.tmux_session_name.as_deref().and_then(|owner| {
+                carried::lookup(
+                    row.user_msg_id,
+                    &format!("claude/{}", shared.token_hash),
+                    owner,
+                    &end.session,
+                    &end.source,
+                    end.through,
+                )
+            });
+            #[cfg(test)]
+            if consumed.is_some() {
+                tests::pause("consumed", channel.get()).await;
+            }
+            match consumed.and_then(|witness| {
+                row.recover_consumed_input(&witness)
+                    .map(|fresh| (fresh, witness))
+            }) {
+                Some((fresh, witness)) => {
+                    let command = matches!(witness, Consumed::Command { .. }).then_some(witness);
+                    let unverified =
+                        !inflight::historical_input_verified(&fresh) && command.is_none();
+                    (Carried::Row(Box::new(fresh)), unverified, command)
+                }
+                None => (Carried::Row(row), true, None),
+            }
+        }
+        carried => (carried, unverified_input, None),
+    };
     // An unproven input closes only when its row names a session the pane no longer runs.
     if unverified_input && !matches!(&carried, Carried::Row(row) if session_superseded(row, &end)) {
         return Err(kept("unverified_carried_input"));
@@ -213,6 +246,13 @@ async fn try_close(
     tests::pause("locked", channel.get()).await;
     unchanged_under_lock(shared, provider, channel, &end, &before).await?;
     if let Carried::Row(row) = &carried {
+        #[cfg(unix)]
+        if command
+            .as_ref()
+            .is_some_and(|proof| row.recover_consumed_input(proof).is_none())
+        {
+            return Err(kept("consumed_input_changed"));
+        }
         let orphan_input =
             row.managed_submission.is_some() && !row.readopted_from_inflight && !target_episode;
         let outcome = end.aborted && !orphan_input;
@@ -220,6 +260,13 @@ async fn try_close(
         #[cfg(test)]
         tests::pause("receipt", channel.get()).await;
         unchanged_under_lock(shared, provider, channel, &end, &before).await?;
+        #[cfg(unix)]
+        if command
+            .as_ref()
+            .is_some_and(|proof| row.recover_consumed_input(proof).is_none())
+        {
+            return Err(kept("consumed_input_changed"));
+        }
         if unverified_input {
             tell_unverified_close(shared, provider, row).await?;
         }

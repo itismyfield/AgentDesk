@@ -94,6 +94,19 @@ fn wait<T>(mut observe: impl FnMut() -> Result<T, String>) -> Result<T, String> 
     }
 }
 
+/// The pane's last 80 rows, or why Herdr's reply was refused.
+fn screen(pane: &HerdrTarget) -> Result<String, String> {
+    pane.capture_checked(-80)
+        .map_err(|why| format!("pane 읽기 실패: {why:?}"))
+}
+
+/// Ok once the pane shows a ready composer under no dialog.
+fn ready_pane(pane: &HerdrTarget) -> Result<(), String> {
+    ready(&screen(pane)?)
+        .then_some(())
+        .ok_or("pane ready 대기 시간 초과".into())
+}
+
 fn ready(capture: &str) -> bool {
     !tc::tmux_capture_indicates_claude_tui_interactive_modal(capture)
         && input::final_prompt_ready(&input::prompt_readiness_snapshot_from_capture(
@@ -115,10 +128,13 @@ fn record(session: &str, after: f64) -> Result<Value, &'static str> {
     Ok(value)
 }
 
+/// Applies on a ready pane, then saves the applied value into the channel's settings while the
+/// transition lock still orders commands, so a later command's value is never overwritten.
 async fn with_ready_pane<T: Send + 'static>(
     shared: &Arc<SharedData>,
-    channel: ChannelId,
+    (token, channel): (&str, ChannelId),
     apply: impl FnOnce(&HerdrTarget, &str, f64) -> Result<T, String> + Send + 'static,
+    save: impl FnOnce(&T, &mut crate::services::discord::DiscordBotSettings),
 ) -> Result<T, String> {
     let after = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -126,21 +142,18 @@ async fn with_ready_pane<T: Send + 'static>(
         .as_secs_f64();
     let transition = shared.session_transition_lock(channel);
     let _transition = transition.lock().await;
-    let shared = shared.clone();
-    tokio::task::spawn_blocking(move || {
+    let reader = shared.clone();
+    let applied = tokio::task::spawn_blocking(move || -> Result<T, String> {
+        let shared = reader;
         let handle = tokio::runtime::Handle::current();
         let original = handle.block_on(target(&shared, channel))?;
         let (pane, logical, native) = original.clone();
-        wait(|| {
-            pane.capture(-80)
-                .filter(|c| ready(c))
-                .ok_or("pane ready 대기 시간 초과".into())
-        })?;
+        wait(|| ready_pane(&pane))?;
         composer_lock::with_composer_mutation_lock(&logical, || {
             if handle.block_on(target(&shared, channel))? != original {
                 return Err("pane 소유 실행 변경".into());
             }
-            let capture = pane.capture(-80).ok_or("pane 입력 상태 미확인")?;
+            let capture = screen(&pane)?;
             if composer_lock::composer_admission(&logical, || Some(capture.clone()))
                 != composer_lock::ComposerAdmission::Any
                 || !ready(&capture)
@@ -156,51 +169,82 @@ async fn with_ready_pane<T: Send + 'static>(
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    // No relaunch is queued: the live pane already runs this value.
+    let mut settings = shared.settings.write().await;
+    let mut candidate = settings.clone();
+    save(&applied, &mut candidate);
+    candidate
+        .try_save_bot_settings(token)
+        .map_err(|e| format!("pane에는 적용했지만 채널 설정 저장 실패: {e}"))?;
+    *settings = candidate;
+    Ok(applied)
 }
 
 pub(super) async fn effort(
     shared: &Arc<SharedData>,
+    token: &str,
     channel: ChannelId,
     level: EffortLevel,
 ) -> Result<(), String> {
-    with_ready_pane(shared, channel, move |pane, native, after| {
-        use input::TuiInputAction::{Enter, Left, Literal, Right};
+    let apply = move |pane: &HerdrTarget, native: &str, after| {
+        use input::TuiInputAction::{Enter, Escape, Left, Literal, Right};
         let send =
             |plan: &[input::TuiInputAction]| host_input::run_herdr(pane, plan, None).into_legacy();
         send(&[Literal("/effort".into()), Enter])?;
         let overlay = wait(|| {
-            pane.capture(-80)
-                .filter(|c| tc::tmux_capture_indicates_claude_tui_selector_open(c))
+            let capture = screen(pane)?;
+            tc::tmux_capture_indicates_claude_tui_selector_open(&capture)
+                .then_some(capture)
                 .ok_or("effort overlay 열림 미확인".into())
         })?;
-        let labels = overlay
-            .rsplit_once("Effort")
-            .and_then(|(_, s)| s.split_once('←'));
-        if !labels.is_some_and(|(s, _)| {
-            s.split(|c: char| c.is_whitespace() || "[]─".contains(c))
-                .filter(|s| !s.is_empty())
-                .eq(["low", "medium", "high", "xhigh", "max"])
-        }) {
-            return Err("effort 옵션 배치 미확인".into());
-        }
-        let mut plan = vec![Left; 4];
-        plan.extend(std::iter::repeat_n(Right, level as usize));
-        plan.push(Enter);
-        send(&plan)?;
-        wait(|| {
-            let seen = &record(native, after).map_err(str::to_string)?["effort"]["level"];
-            (seen.as_str() == Some(level.as_str()))
-                .then_some(())
-                .ok_or_else(|| format!("effort.level 불일치: `{seen}`"))
+        let choose = || {
+            let labels = overlay
+                .rsplit_once("Effort")
+                .and_then(|(_, s)| s.split_once('←'));
+            if !labels.is_some_and(|(s, _)| {
+                s.split(|c: char| c.is_whitespace() || "[]─".contains(c))
+                    .filter(|s| !s.is_empty())
+                    .eq(["low", "medium", "high", "xhigh", "max"])
+            }) {
+                return Err("effort 옵션 배치 미확인".to_string());
+            }
+            let mut plan = vec![Left; 4];
+            plan.extend(std::iter::repeat_n(Right, level as usize));
+            plan.push(Enter);
+            send(&plan)?;
+            wait(|| {
+                let seen = &record(native, after).map_err(str::to_string)?["effort"]["level"];
+                (seen.as_str() == Some(level.as_str()))
+                    .then_some(())
+                    .ok_or_else(|| format!("effort.level 불일치: `{seen}`"))
+            })
+            .map_err(|reason| format!("적용 미확인: {reason}"))
+        };
+        // A selector left open would take the next prompt's Enter as its answer; one Escape
+        // closes it, sent only while it shows so an idle composer never gets a stray one.
+        choose().map_err(|reason| {
+            let open = screen(pane).map_or(true, |c| {
+                tc::tmux_capture_indicates_claude_tui_selector_open(&c)
+            });
+            let closed = if open { send(&[Escape]) } else { Ok(()) };
+            match closed.and_then(|()| wait(|| ready_pane(pane))) {
+                Ok(()) => reason,
+                Err(why) => format!("{reason} (effort 선택창이 남았을 수 있음: {why})"),
+            }
         })
-        .map_err(|reason| format!("적용 미확인: {reason}"))
+    };
+    let key = channel.get().to_string();
+    with_ready_pane(shared, (token, channel), apply, |(), settings| {
+        let level = level.as_str().to_string();
+        settings.channel_effort_levels.insert(key, level);
     })
     .await
 }
 
 pub(in crate::services::discord::commands) async fn fast(
     shared: &Arc<SharedData>,
+    token: &str,
     channel: ChannelId,
     desired: Option<bool>,
 ) -> Result<(bool, bool), String> {
@@ -217,7 +261,7 @@ pub(in crate::services::discord::commands) async fn fast(
     {
         return Err("Herdr /fast는 live Claude TUI pane에서만 지원합니다.".into());
     }
-    with_ready_pane(shared, channel, move |pane, native, after| {
+    let apply = move |pane: &HerdrTarget, native: &str, after| {
         let read = |after| {
             record(native, after).map_err(str::to_string)?["fast_mode"]
                 .as_bool()
@@ -242,6 +286,17 @@ pub(in crate::services::discord::commands) async fn fast(
         })
         .map_err(|e| format!("적용 미확인: {e}"))?;
         Ok((next, true))
+    };
+    let mirror = &shared.overrides.fast_mode_channels;
+    with_ready_pane(shared, (token, channel), apply, |&(next, _), settings| {
+        settings
+            .channel_fast_modes
+            .insert(channel.get().to_string(), next);
+        if next {
+            mirror.insert(channel);
+        } else {
+            mirror.remove(&channel);
+        }
     })
     .await
 }

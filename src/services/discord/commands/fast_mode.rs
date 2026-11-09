@@ -107,7 +107,7 @@ pub(super) async fn fast_save_notice(
     if matches!(effective_provider, ProviderKind::Claude)
         && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
     {
-        return super::tui_passthrough::herdr_settings::fast(shared, channel_id, None)
+        return super::tui_passthrough::herdr_settings::fast(shared, token, channel_id, None)
             .await
             .map(|(enabled, _)| format!("fast mode를 `{enabled}`로 적용했습니다."))
             .map_err(std::io::Error::other);

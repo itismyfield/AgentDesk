@@ -249,19 +249,21 @@ fn read_request(pane_id: &str, scroll_back: i32, format: Option<HerdrReadFormat>
     }
 }
 
-/// A truncated read is an error, never a complete screen.
+/// Herdr marks a bounded recent read `truncated` when older rows fell outside its window; the
+/// newest rows, at most the requested count, are still whole. Any other truncation is an error.
 pub(crate) fn capture_result(
     call: &HerdrCall,
     outcome: HerdrOutcome,
     pane_id: &str,
 ) -> Result<String, HostError> {
-    let HerdrRequest::PaneRead { source, .. } = &call.request else {
+    let HerdrRequest::PaneRead { source, lines, .. } = &call.request else {
         return Err(HostError::Protocol("capture without pane.read".to_string()));
     };
     match reply_result(call, outcome)? {
         HerdrResult::PaneRead { read } => {
             same_pane(pane_id, &read.pane_id)?;
-            if read.source != *source || read.truncated {
+            let windowed = lines.is_some_and(|lines| read.text.lines().count() <= lines as usize);
+            if read.source != *source || (read.truncated && !windowed) {
                 return Err(HostError::Protocol(format!(
                     "read source {:?} truncated={}",
                     read.source, read.truncated

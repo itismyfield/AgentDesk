@@ -261,24 +261,99 @@ pub(in crate::services::discord) fn bind_native_stop_pin(
                     return PinSaveOutcome::Never;
                 }
             };
-            let mut updated = locked.state().clone();
-            let Some(pin) = VerifiedNativeUserPin::new(&updated, input.clone()) else {
-                return PinSaveOutcome::Never;
-            };
-            if let Some(existing) = &updated.native_stop_user_pin {
-                return if *existing == pin {
-                    PinSaveOutcome::Saved
-                } else {
-                    PinSaveOutcome::Never
-                };
-            }
-            updated.native_stop_user_pin = Some(pin);
-            match locked.persist_verified_under_guard(&updated, "native_input_pin") {
-                GuardedSaveOutcome::Saved => PinSaveOutcome::Saved,
-                GuardedSaveOutcome::IoError => PinSaveOutcome::Retry,
-                _ => PinSaveOutcome::Never,
-            }
+            persist_native_pin(&mut locked, input)
         }));
+}
+
+fn persist_native_pin(locked: &mut LockedInflightEpisode, input: &NativeUserPin) -> PinSaveOutcome {
+    let mut updated = locked.state().clone();
+    let Some(pin) = VerifiedNativeUserPin::new(&updated, input.clone()) else {
+        return PinSaveOutcome::Never;
+    };
+    if let Some(existing) = &updated.native_stop_user_pin {
+        return if *existing == pin {
+            PinSaveOutcome::Saved
+        } else {
+            PinSaveOutcome::Never
+        };
+    }
+    updated.native_stop_user_pin = Some(pin);
+    match locked.persist_verified_under_guard(&updated, "native_input_pin") {
+        GuardedSaveOutcome::Saved => PinSaveOutcome::Saved,
+        GuardedSaveOutcome::IoError => PinSaveOutcome::Retry,
+        _ => PinSaveOutcome::Never,
+    }
+}
+
+#[cfg(unix)]
+impl InflightTurnState {
+    pub(in crate::services::discord) fn recover_consumed_input(
+        &self,
+        consumed: &crate::services::tui_input::human_frame::history::v2::carried::Consumed,
+    ) -> Option<Self> {
+        use crate::services::tui_input::human_frame::history::v2::carried::Consumed;
+        let row = consumed.evidence();
+        if self.provider != "claude"
+            || self.has_native_herdr_input()
+            || self.native_stop_user_pin.is_some()
+            || self
+                .turn_nonce
+                .as_deref()
+                .is_none_or(|nonce| nonce.trim().is_empty())
+            || row.key["identity"]["primary"] != self.user_msg_id
+        {
+            return None;
+        }
+        let nonce = row.source.target["execution_nonce"].as_str()?;
+        let context =
+            crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", nonce)
+                .ok()?;
+        if context.channel_id != Some(self.channel_id)
+            || context.tmux_session != row.source.target["owner"].as_str()?
+            || context.owner_runtime_root != row.source.target["root"].as_str()?
+            || context
+                .expected_native_session_id
+                .as_deref()
+                .is_some_and(|sid| sid != row.source.session_id)
+        {
+            return None;
+        }
+        let mut locked = episode_guard::lock_inflight_birth_episode(
+            &ProviderKind::Claude,
+            self.channel_id,
+            &InflightEpisodePin::from_state(self),
+        )
+        .ok()?;
+        if locked.state().native_stop_user_pin.is_some()
+            || !InflightEpisodePin::from_state(self).matches_state(locked.state())
+        {
+            return None;
+        }
+        // Birth precedes registry; neither guard crosses an async delivery or receipt write.
+        consumed.confirm(|| {
+            if matches!(consumed, Consumed::User { .. }) {
+                let input = NativeUserPin {
+                    uuid: row.uuid.clone(),
+                    source_file: (row.file[0], row.file[1]),
+                    range: row.range,
+                    receipt_start: row.source.offset,
+                    row_digest: row.row_digest.clone(),
+                    frame_digest: row.frame_digest.clone(),
+                    session_id: row.source.session_id.clone(),
+                    output_path: row.source.transcript.to_str()?.into(),
+                    tmux_session: context.tmux_session,
+                    spawn_nonce: Some(context.execution_nonce),
+                    direct: false,
+                };
+                if persist_native_pin(&mut locked, &input) != PinSaveOutcome::Saved
+                    || !historical_input_verified(locked.state())
+                {
+                    return None;
+                }
+            }
+            Some(locked.state().clone())
+        })
+    }
 }
 
 /// Recovery keeps the proof across an app generation as a candidate the stop rechecks.

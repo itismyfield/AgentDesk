@@ -69,6 +69,28 @@ async fn restore_admitted_native_stop_pin(
     }
 }
 
+fn consume_refused_o_restart_marker(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    readopted: bool,
+) {
+    if !readopted
+        && super::runtime::readopt_marker_eligible_real_user(state)
+        && crate::services::tui_o::cutover::boot_ownership()
+            .into_iter()
+            .any(|(channel, _, owner)| {
+                channel == state.channel_id && owner.is_some_and(|owner| owner.peek().owned())
+            })
+    {
+        let _ = inflight::consume_stale_restart_marker_if_identity_unchanged(
+            provider,
+            state,
+            shared.restart.current_generation,
+        );
+    }
+}
+
 pub(in crate::services::discord) async fn restore_inflight_turns(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -759,6 +781,12 @@ pub(in crate::services::discord) async fn restore_inflight_states(
 
                 let finish_mailbox_on_completion =
                     reregister_active_turn_from_inflight(shared, &state).await;
+                consume_refused_o_restart_marker(
+                    shared,
+                    provider,
+                    &state,
+                    finish_mailbox_on_completion,
+                );
                 restore_admitted_native_stop_pin(shared, &state).await;
 
                 // Spawn the tmux watcher immediately rather than deferring to
@@ -1922,21 +1950,12 @@ pub(in crate::services::discord) async fn restore_inflight_states(
 
             let finish_mailbox_on_completion =
                 reregister_active_turn_from_inflight(shared, &state).await;
-            if !finish_mailbox_on_completion
-                && super::runtime::readopt_marker_eligible_real_user(&state)
-                && crate::services::tui_o::cutover::boot_ownership()
-                    .into_iter()
-                    .any(|(channel, _, owner)| {
-                        channel == state.channel_id
-                            && owner.is_some_and(|owner| owner.peek().owned())
-                    })
-            {
-                let _ = inflight::consume_stale_restart_marker_if_identity_unchanged(
-                    provider,
-                    &state,
-                    shared.restart.current_generation,
-                );
-            }
+            consume_refused_o_restart_marker(
+                shared,
+                provider,
+                &state,
+                finish_mailbox_on_completion,
+            );
             restore_admitted_native_stop_pin(shared, &state).await;
 
             // #4380 backstop: `reregister_active_turn_from_inflight` stamps

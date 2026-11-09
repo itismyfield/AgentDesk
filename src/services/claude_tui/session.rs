@@ -415,6 +415,16 @@ fn write_launch_script(
     if let Some(effort) = effort {
         args.extend(["--effort".to_string(), effort.to_string()]);
     }
+    // `resumed=` is read off the argv this script runs, since a launch may start fresh in place of
+    // the session its turn asked for.
+    let resumed = args
+        .windows(2)
+        .any(|pair| pair[0] == "--resume" && pair[1] == config.session_id);
+    tracing::info!(
+        "[session-strategy] launch provider=claude tmux={} provider_session_id={} resumed={resumed}",
+        config.tmux_session_name,
+        config.session_id,
+    );
     let args = args
         .into_iter()
         .map(|arg| shell_escape(&arg))
