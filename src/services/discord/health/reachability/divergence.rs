@@ -4,7 +4,13 @@
 //!
 //! Two fail-closed shapes, not one: when the independently resolved side (or both sides) fails to stat, no identity is comparable and the outcome is silent [`RowCoordinateDivergence::Unknown`] (`discovery`'s fail-closed discipline). When the row side fails to stat while the independent side is alive, that is the designed detection, not a retreat — [`RowCoordinateDivergence::RowPathUnresolvableWhileRegistryLive`], mapping to `TranscriptCoordinateDivergence` and firing `reachability_row_coordinate_divergence`. `stat_transcript` answers `None` uniformly for ENOENT, a directory, a broken symlink, and EACCES, so this comparison offers no permission-vs-absence distinction.
 
+use crate::services::discord::idle_relay_drift::{DRIFT_STATE_TTL, DriftState, decide_drift_warn};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
+
+type LogState = ((CoordinateObservation, CoordinateObservation), DriftState);
+static LOGS: LazyLock<Mutex<HashMap<(String, u64), LogState>>> = LazyLock::new(Mutex::default);
 
 use super::discovery::{TranscriptFileId, stat_transcript};
 use super::verdict::ReachabilityUnknownReason;
@@ -162,20 +168,41 @@ pub(in crate::services::discord) fn divergence(
     }
 }
 
-/// Stat both operands, compare, and emit the structured record when the outcome is one of the two non-GREEN shapes — one record per call, per poll, no dedupe, same contract as T4-B0's string-comparison record. This **coexists with, not supersedes** T4-B0's `SessionEnrichment::record_transcript_source_divergence`: a split both records recognise logs twice, once as `relay_transcript_source_divergence` and once as `reachability_row_coordinate_divergence`, because B0 compares path strings and still shouts about aliases this comparison correctly calls `SameFile` — retiring it is a follow-up slice's item. Agreement and not-comparable outcomes stay silent.
-///
-/// The two stats are taken one after the other (row, then registry), not as an atomic snapshot: a transcript rotation landing between them can produce a one-poll `Diverged` on files that never disagreed, or a one-poll `SameFile` that masks a real split (`rename` carries the inode, so a rotation onto the registry path mid-comparison hands both operands the same identity). Neither is corrected inside the poll; the next poll re-observes, recovering the true pair only once the files have settled.
+/// Compare the two sequential stats; only logging is deduplicated by their identities.
+/// Changed pairs warn immediately, repeats summarize every ten minutes, and clearing is logged.
 pub(in crate::services::discord) fn observe_row_coordinate_divergence(
     provider: &str,
     channel_id: u64,
     row_output_path: Option<&str>,
     registry_output_path: Option<&str>,
 ) -> RowCoordinateDivergence {
-    let outcome = divergence(
-        CoordinateObservation::observe(row_output_path),
-        CoordinateObservation::observe(registry_output_path),
-    );
-    if outcome.is_non_green_signal() {
+    let row = CoordinateObservation::observe(row_output_path);
+    let registry = CoordinateObservation::observe(registry_output_path);
+    let identities = (row, registry);
+    let outcome = divergence(row, registry);
+    let now = tokio::time::Instant::now().into_std();
+    let mut logs = LOGS.lock().unwrap_or_else(|e| e.into_inner());
+    logs.retain(|_, (_, log)| now.saturating_duration_since(log.last_touched_at) < DRIFT_STATE_TTL);
+    let key = (provider.to_owned(), channel_id);
+    if !outcome.is_non_green_signal() {
+        if logs.remove(&key).is_some() {
+            tracing::info!(
+                provider,
+                channel_id,
+                outcome = outcome.as_str(),
+                "reachability_row_coordinate_divergence_cleared"
+            );
+        }
+        return outcome;
+    }
+    let state = logs
+        .entry(key)
+        .or_insert_with(|| (identities, DriftState::new(now)));
+    if state.0 != identities {
+        *state = (identities, DriftState::new(now));
+    }
+    let decision = decide_drift_warn(&mut state.1, now, std::time::Duration::from_secs(600));
+    if decision.emit {
         tracing::warn!(
             counter = "reachability_row_coordinate_divergence",
             provider,
@@ -183,9 +210,11 @@ pub(in crate::services::discord) fn observe_row_coordinate_divergence(
             row_output_path = row_output_path.unwrap_or(""),
             registry_output_path = registry_output_path.unwrap_or(""),
             outcome = outcome.as_str(),
+            since_previous_log_secs = decision.since_previous_log_secs,
             "in-flight row and independently resolved transcript disagree by file identity; \
              descriptive signal only — no verdict changes here and no redelivery or \
-             destructive action is authorized (4987 S4)"
+             destructive action is authorized (4987 S4) (suppressed {} times since previous log)",
+            decision.suppressed_count
         );
     }
     outcome
@@ -193,6 +222,9 @@ pub(in crate::services::discord) fn observe_row_coordinate_divergence(
 
 #[cfg(test)]
 mod tests {
+    #[path = "log_flood_tests.rs"]
+    mod log_flood_tests;
+
     use std::fs;
 
     use tempfile::TempDir;
