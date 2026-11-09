@@ -529,10 +529,31 @@ impl OwnerTurn {
         let live = Some((transcript.as_str(), session_id.as_deref()));
         let kind = (provider.as_str(), origin, true);
         let at = (&host, session.as_str(), live);
-        let owner = match Registration::observed(mailbox, kind, at, &claim.front().1, None) {
-            Ok(owner) if owner.phase == target::Phase::Busy => owner,
-            Ok(_) => return drop(settled.send(Err(unobserved()))),
-            Err(error) => return drop(settled.send(Err(error))),
+        let observed =
+            Registration::observed(mailbox, kind, at, &claim.front().1, None).and_then(|owner| {
+                (owner.phase == target::Phase::Busy)
+                    .then_some(owner)
+                    .ok_or_else(unobserved)
+            });
+        let owner = match observed {
+            Ok(owner) => owner,
+            Err(error) => {
+                if let Some(shared) = runtime.as_ref() {
+                    let originals: Vec<_> = std::iter::once(claim.front().1.clone())
+                        .chain(claim.followers().iter().cloned())
+                        .collect();
+                    super::super::busy_retry::note_busy_result(
+                        shared,
+                        &provider,
+                        ChannelId::new(channel),
+                        &originals,
+                        &[],
+                        &Err(error.clone()),
+                    )
+                    .await;
+                }
+                return drop(settled.send(Err(error)));
+            }
         };
         let at = (channel, session, host);
         let _ = paste_busy((pool, provider, runtime), at, claim, owner, settled).await;
@@ -1271,7 +1292,34 @@ fn take_owned(
     let gate = matches!(route, target::Route::ClaudeIdle | target::Route::ClaudeBusy)
         .then(|| turn.cancel.native_stop.receipt_sink());
     let native_pin_submitted = registration.native_pin_submitted.clone();
+    let busy = matches!(
+        route,
+        target::Route::ClaudeBusy
+            | target::Route::ClaudeHerdrBusy
+            | target::Route::CodexBusy
+            | target::Route::CodexHerdrBusy
+    );
+    let originals: Vec<_> = front
+        .as_ref()
+        .map(|claim| {
+            std::iter::once(claim.front().1.clone())
+                .chain(claim.followers().iter().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let fallback = registration.sources.clone();
     let result = run(turn, (route, declared), registration, front);
+    if busy && let Some(shared) = turn.shared {
+        let note = super::super::busy_retry::note_busy_result;
+        tokio::runtime::Handle::current().block_on(note(
+            shared,
+            turn.provider,
+            ChannelId::new(turn.channel_id),
+            &originals,
+            &fallback,
+            &result,
+        ));
+    }
     if result.is_ok()
         && let Some(submitted) = native_pin_submitted
     {
@@ -1467,61 +1515,12 @@ fn run(
         target::Route::HerdrIdle => return Err("NotSent(\"idle_unowned\")".into()),
         target::Route::Held(reason) => return Err(format!("NotSent({reason:?})")),
     };
-    let busy = matches!(
-        route,
-        target::Route::ClaudeBusy
-            | target::Route::ClaudeHerdrBusy
-            | target::Route::CodexBusy
-            | target::Route::CodexHerdrBusy
-    );
-    let mut sources = Vec::new();
-    if busy {
-        if let Some(claim) = front.as_ref() {
-            for original in std::iter::once(&claim.front().1).chain(claim.followers()) {
-                let ids = match original.source_message_ids.as_slice() {
-                    [] => std::slice::from_ref(&original.message_id),
-                    ids => ids,
-                };
-                sources.extend_from_slice(ids);
-            }
-        } else {
-            sources.extend(r.sources.iter().filter_map(|id| id.parse::<u64>().ok()));
-        }
-        let mut seen = std::collections::HashSet::new();
-        sources.retain(|id| {
-            crate::services::discord::reaction_lifecycle::is_real_discord_message_id_value(*id)
-                && seen.insert(*id)
-        });
-    }
     let prepared = PreparedPayload {
         frame,
         sources: r.sources,
         attempt: r.attempt,
     };
-    submit((&r.mailbox, r.clock), front, prepared, leaf)?;
-    if busy && let Some(shared) = turn.shared {
-        tokio::runtime::Handle::current().block_on(async {
-            use crate::services::discord::turn_view_reconciler::{
-                TurnViewIdentity, TurnViewTarget,
-            };
-            for message in sources {
-                let target = TurnViewTarget::intake_user_message(
-                    ChannelId::new(turn.channel_id),
-                    poise::serenity_prelude::MessageId::new(message),
-                );
-                shared
-                    .turn_view_reconciler
-                    .note_confirmed_injection(
-                        shared,
-                        turn.provider,
-                        target,
-                        TurnViewIdentity::IntakeShared,
-                    )
-                    .await;
-            }
-        });
-    }
-    Ok(())
+    submit((&r.mailbox, r.clock), front, prepared, leaf)
 }
 
 /// Posts the original's one notice that a draft beside its paste may not be kept; the outbox key

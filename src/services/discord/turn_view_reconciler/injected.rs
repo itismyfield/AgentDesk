@@ -49,6 +49,7 @@ impl TurnViewReconciler {
             .get(&target)
             .map(|entry| entry.clone())
             .or_else(|| self.load_persisted_target(target, shared, "busy_inject_reaction"));
+        let tracked = current.is_some();
         let owner = current.map(|entry| entry.owner).unwrap_or_else(|| {
             turn_view_owner_for_message(
                 target.channel_id,
@@ -56,7 +57,10 @@ impl TurnViewReconciler {
                 shared.restart.current_generation,
             )
         });
-        for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
+        for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS
+            .into_iter()
+            .filter(|_| tracked)
+        {
             let delivery = self
                 .note_queue_marker_removed_delivery(
                     shared,

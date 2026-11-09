@@ -478,13 +478,16 @@ async fn owned_front_on_a_busy_pane_is_pasted_once_without_completion() {
     }
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = IntakeRig::new(7_676_101, true).await;
+    let _gate = crate::services::discord::router::busy_inject_support::open_gate(rig.channel.get());
     let mut completions = turn_completion_events::subscribe_turn_completion_events(&rig.shared);
     let (drive, mut settled) = rig.drive();
     crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
-    let result = tokio::time::timeout(Duration::from_secs(30), settled.recv())
-        .await
-        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
-        .unwrap();
+    let result = crate::test_support::wait::await_within(
+        settled.recv(),
+        crate::test_support::wait::WAIT_CAP,
+    )
+    .await
+    .unwrap();
     assert_eq!(result, Ok(()), "{}", rig.trace.text());
     assert!(
         rig.trace
@@ -512,6 +515,19 @@ async fn owned_front_on_a_busy_pane_is_pasted_once_without_completion() {
             .written_texts()
             .iter()
             .any(|s| s.contains("provider가 응답을 완료하지 못했어요"))
+    );
+    let ops: Vec<_> = rig
+        .shared
+        .turn_view_reconciler
+        .ops()
+        .into_iter()
+        .filter(|op| op.target.channel_id == rig.channel)
+        .map(|op| (op.emoji, op.add))
+        .collect();
+    assert_eq!(
+        ops,
+        [('➕', true)],
+        "a busy input decides its display only after injection"
     );
     drop(drive);
 }
@@ -1485,3 +1501,5 @@ async fn a_marked_row_is_settled_and_the_owned_front_submitted_on_one_wake_pg() 
 mod native_read;
 #[path = "owner_input_retained_marker_tests.rs"]
 mod retained_markers;
+#[path = "owner_input_single_marker_tests.rs"]
+mod single_marker;

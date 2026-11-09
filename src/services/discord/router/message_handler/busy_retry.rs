@@ -18,6 +18,7 @@ pub(super) struct FinalizeEnqueueContext<'a> {
     pub(super) channel_id: ChannelId,
     pub(super) user_msg_id: MessageId,
     pub(super) placeholder_msg_id: Option<MessageId>,
+    pub(super) defer_busy_view: bool,
     pub(super) turn_start_attempt:
         Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
     pub(super) session_retry_context:
@@ -41,6 +42,7 @@ pub(super) async fn defer_owned_front(
         channel_id,
         user_msg_id,
         placeholder_msg_id,
+        defer_busy_view,
         turn_start_attempt,
         session_retry_context,
         feedback_reminder,
@@ -83,7 +85,8 @@ pub(super) async fn defer_owned_front(
             feedback_reminder,
             Some("owned_busy_pre_submit"),
         );
-        super::intake_turn::race_loss::mailbox_reaction::note_busy_tui_pre_submit_queue_pending(
+        if !defer_busy_view {
+            super::intake_turn::race_loss::mailbox_reaction::note_busy_tui_pre_submit_queue_pending(
             shared,
             http,
             channel_id,
@@ -92,6 +95,7 @@ pub(super) async fn defer_owned_front(
             turn_start_attempt,
         )
         .await;
+        }
         if let Some(placeholder) = placeholder_msg_id {
             let _ = channel_id.delete_message(http, placeholder).await;
         }
@@ -115,6 +119,7 @@ pub(super) async fn finalize_enqueue(
         channel_id,
         user_msg_id,
         placeholder_msg_id,
+        defer_busy_view: _,
         turn_start_attempt,
         session_retry_context,
         feedback_reminder,
@@ -169,4 +174,113 @@ pub(super) async fn finalize_enqueue(
         .await;
     }
     accepted
+}
+
+/// Each original gets the result of its busy attempt under its own queued generation.
+#[cfg(unix)]
+pub(super) async fn note_busy_result(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    originals: &[crate::services::turn_orchestrator::PendingQueueItem],
+    fallback: &[String],
+    result: &Result<(), String>,
+) {
+    use crate::services::discord::turn_view_reconciler::{
+        TurnViewIdentity, TurnViewOwner, TurnViewTarget,
+    };
+    let mut sources = Vec::new();
+    for original in originals {
+        let ids = match original.source_message_ids.as_slice() {
+            [] => std::slice::from_ref(&original.message_id),
+            ids => ids,
+        };
+        for id in ids {
+            let source = original
+                .source_message_queued_generations
+                .iter()
+                .find(|source| source.message_id == *id);
+            sources.push((
+                MessageId::new(*id),
+                source.map_or(original.queued_generation, |source| {
+                    source.queued_generation
+                }),
+                source
+                    .and_then(|source| source.route)
+                    .and_then(|route| route.parent),
+            ));
+        }
+    }
+    if originals.is_empty() {
+        sources.extend(
+            fallback
+                .iter()
+                .filter_map(|id| id.parse().ok())
+                .map(|id| (MessageId::new(id), shared.restart.current_generation, None)),
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (message, generation, parent) in sources {
+        if !crate::services::discord::reaction_lifecycle::is_real_discord_message_id(message)
+            || !seen.insert(message)
+        {
+            continue;
+        }
+        let target = TurnViewTarget::intake_user_message(channel, message);
+        let identity = TurnViewIdentity::IntakeShared;
+        let view = &shared.turn_view_reconciler;
+        match result {
+            Ok(()) => {
+                view.note_confirmed_injection(shared, provider, target, identity)
+                    .await
+            }
+            Err(error)
+                if super::super::intake_gate::busy_inject::queued_head_covers(channel, parent) =>
+            {
+                if error.starts_with("NotSent(") {
+                    let queued = shared
+                        .mailbox(channel)
+                        .v2_request(move |slot| {
+                            Ok(slot.as_ref().is_some_and(|owner| {
+                                owner.snapshot.items.iter().any(|item| {
+                                    let source = item
+                                        .source_message_queued_generations
+                                        .iter()
+                                        .find(|source| source.message_id == message.get());
+                                    (item.message_id == message.get()
+                                        || item.source_message_ids.contains(&message.get()))
+                                        && source.map_or(item.queued_generation, |source| {
+                                            source.queued_generation
+                                        }) == generation
+                                })
+                            }))
+                        })
+                        .await
+                        .unwrap_or(false);
+                    if queued {
+                        let owner = TurnViewOwner::for_message(channel, message, generation);
+                        view.note_queue_marker_added(
+                            shared,
+                            target,
+                            owner,
+                            identity,
+                            '📬',
+                            "busy_inject_handback",
+                        )
+                        .await;
+                    }
+                } else {
+                    view.note_untracked_reaction_added(
+                        shared,
+                        target,
+                        identity,
+                        '❓',
+                        "busy_inject_unconfirmed",
+                    )
+                    .await;
+                }
+            }
+            Err(_) => {}
+        }
+    }
 }

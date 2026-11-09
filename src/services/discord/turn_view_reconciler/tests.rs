@@ -1835,6 +1835,80 @@ fn reg_7832_seed_reactions(
 }
 
 #[tokio::test]
+async fn confirmed_cold_injection_has_exactly_one_plus_op() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_079_910, 100_000_000_079_911);
+    let reconciler = &shared.turn_view_reconciler;
+    reconciler
+        .note_confirmed_injection(
+            &shared,
+            &shared.provider,
+            target,
+            TurnViewIdentity::Test("intake"),
+        )
+        .await;
+    assert_eq!(
+        reconciler
+            .ops()
+            .iter()
+            .map(|op| (op.emoji, op.add))
+            .collect::<Vec<_>>(),
+        [('➕', true)]
+    );
+}
+
+#[tokio::test]
+async fn confirmed_persisted_injection_clears_legacy_and_live_queue_markers() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    for version in [1, 2, 3, 4] {
+        let target = target_with(
+            100_000_000_079_920,
+            100_000_000_079_920 + u64::from(version),
+        );
+        let record = persisted_record_with_version(
+            &shared,
+            target,
+            shared.provider.as_str(),
+            "queued_merged",
+            version,
+        );
+        write_persisted(&record, target);
+        let reconciler = TurnViewReconciler::default();
+        let old = match version {
+            2 => &['➕', '⏳'][..],
+            4 => &['📬'][..],
+            _ => &['➕'][..],
+        };
+        reg_7832_seed_reactions(&reconciler, target, target.kind.identity_label(), old);
+        reconciler
+            .note_confirmed_injection(
+                &shared,
+                &shared.provider,
+                target,
+                TurnViewIdentity::IntakeShared,
+            )
+            .await;
+        assert_eq!(
+            snapshot_reactions(&reconciler, target),
+            [expected('➕', target.kind.identity_label())],
+            "version {version}"
+        );
+        assert!(!persisted_exists(target));
+        for emoji in old {
+            assert!(
+                reconciler
+                    .ops()
+                    .iter()
+                    .any(|op| op.target == target && op.emoji == *emoji && !op.add),
+                "version {version} must remove its owned old marker"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn reg_7832_observed_busy_injection_keeps_plus_through_idle() {
     use crate::services::discord::turn_presence::supervisor::{self, tests::LiveSupervisor};
     use crate::services::tui_o::turn_mode::TestConfirmation;
