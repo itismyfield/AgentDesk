@@ -26,6 +26,8 @@ pub struct ChannelFact {
     pub binding: SourceBinding,
     pub through: u64,
     pub state: TurnState,
+    /// The open turn holds only `/effort`·`/model` echoes and their output: no model turn runs.
+    pub local: bool,
 }
 
 /// One fact of the last poll in record order; nothing here is stored.
@@ -73,6 +75,7 @@ pub struct InputFacts {
     /// every receipt of that turn lies in what it read.
     last_close_aborted: Option<bool>,
     opened: bool,
+    local: bool,
     /// Queued inputs received and not yet run to a close.
     queued: queued::QueuedInputs,
 }
@@ -133,6 +136,7 @@ impl InputFacts {
             awaiting_boundary: false,
             last_close_aborted: None,
             opened: false,
+            local: false,
             queued: queued::QueuedInputs::default(),
         })
     }
@@ -322,6 +326,7 @@ impl InputFacts {
                         });
                     }
                 }
+                let local = local_row(self.binding.provider, &fact);
                 let event = self.tracker.observe(&fact, row.as_ref());
                 let (next, closed) = match event {
                     TurnEvent::Opened(id) => (
@@ -357,9 +362,12 @@ impl InputFacts {
                         (next, None)
                     }
                 };
+                let opens = matches!(next, Some(TurnState::Open { .. }));
                 if let Some(next) = next {
                     self.mark(next, range, closed, &value);
                 }
+                self.local = matches!(self.state, TurnState::Open { .. })
+                    && local.is_some_and(|setting| if opens { setting } else { self.local });
             }
             let open = matches!(self.state, TurnState::Open { .. });
             let provider = self.binding.provider;
@@ -382,6 +390,7 @@ impl InputFacts {
         Ok(ChannelFact {
             binding: self.binding.clone(),
             through,
+            local: self.local && matches!(state, TurnState::Open { .. }),
             state,
         })
     }
@@ -411,6 +420,21 @@ impl InputFacts {
         self.state = next;
         self.awaiting_boundary = false;
         self.carried = TurnState::Unknown;
+    }
+}
+
+/// A Claude settings-control echo (`Some(true)`, may open) or local command output (`Some(false)`).
+fn local_row(provider: ShadowProvider, fact: &RecordFact) -> Option<bool> {
+    use crate::services::tui_prompt_control as control;
+    let RecordFact::Prompt(true, text) = fact else {
+        return None;
+    };
+    let kind = (provider == ShadowProvider::Claude)
+        .then(|| control::classify_local_only_slash_control(text))??
+        .kind;
+    match control::OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS.contains(&kind.as_str()) {
+        true => Some(true),
+        false => (kind == "local-command-stdout").then_some(false),
     }
 }
 

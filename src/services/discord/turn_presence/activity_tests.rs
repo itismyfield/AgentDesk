@@ -14,6 +14,8 @@ use crate::services::tui_o::writer::binding::{
 
 #[path = "activity_tests/large_tests.rs"]
 mod large;
+#[path = "activity_tests/local_control_tests.rs"]
+mod local_control;
 
 const CHANNEL: u64 = 6_100_001;
 const SESSION: &str = "presence-parent";
@@ -108,7 +110,7 @@ impl Probe {
 
     fn ask(&self) -> (Activity, &'static str) {
         let ports: Arc<dyn Ports> = self.fake.clone();
-        let observed = observe(
+        let (observed, _) = judge(
             &self.watch,
             &ports,
             self.provider,
