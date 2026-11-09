@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
 import run_tui_relay as driver  # noqa: E402
 from tui_relay import assertions, normal_intake_evidence as e36  # noqa: E402
 from tui_relay.tests.restart_guard_cases import RestartObservationGuard  # noqa: E402, F401
-
+from tui_relay.tests.marker_identity_cases import MarkerIdentity, MarkerMismatch  # noqa: E402, F401
 PROVIDER = assertions.provider_bot_id("claude")
 NOTIFY = "1481522187197218816"
 
