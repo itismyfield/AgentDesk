@@ -219,12 +219,11 @@ pub(super) async fn note_busy_result(
         if !seen.insert(message) {
             continue;
         }
-        let parent = parent.or_else(|| {
-            let parents = &shared.dispatch.thread_parents;
-            parents
-                .iter()
-                .find_map(|edge| (*edge.value() == channel).then_some(*edge.key()))
-        });
+        let resolve = super::super::super::resolve_thread_parent;
+        let parent = match (result, parent, shared.http.cached_serenity_ctx.get()) {
+            (Err(_), None, Some(ctx)) => resolve(&ctx.http, channel).await.map(|(id, _)| id),
+            (_, parent, _) => parent,
+        };
         let target = TurnViewTarget::intake_user_message(channel, message);
         let identity = TurnViewIdentity::IntakeShared;
         let view = &shared.turn_view_reconciler;
