@@ -187,26 +187,25 @@ pub(super) async fn note_busy_result(
     use crate::services::discord::turn_view_reconciler::{
         TurnViewIdentity, TurnViewOwner, TurnViewTarget,
     };
-    let mut sources = Vec::new();
-    for original in originals {
-        let ids = match original.source_message_ids.as_slice() {
-            [] => std::slice::from_ref(&original.message_id),
-            ids => ids,
-        };
-        for id in ids {
-            let source = original
-                .source_message_queued_generations
-                .iter()
-                .find(|source| source.message_id == *id);
-            sources.push((
-                MessageId::new(*id),
-                source.map_or(original.queued_generation, |s| s.queued_generation),
-                source
-                    .and_then(|source| source.route)
-                    .and_then(|route| route.parent),
-            ));
-        }
-    }
+    let canonical_sources = |item: &crate::services::turn_orchestrator::PendingQueueItem| {
+        crate::services::turn_orchestrator::pending_queue_item_to_intervention(
+            item.clone(),
+            std::time::SystemTime::now(),
+            std::time::Instant::now(),
+        )
+        .source_message_queued_generations()
+    };
+    let mut sources: Vec<_> = originals
+        .iter()
+        .flat_map(canonical_sources)
+        .map(|source| {
+            (
+                source.message_id,
+                source.queued_generation,
+                source.route.and_then(|route| route.parent),
+            )
+        })
+        .collect();
     if originals.is_empty() {
         sources.extend(
             fallback
@@ -236,17 +235,12 @@ pub(super) async fn note_busy_result(
                         .mailbox(channel)
                         .v2_request(move |slot| {
                             Ok(slot.as_ref().is_some_and(|owner| {
-                                owner.snapshot.items.iter().any(|item| {
-                                    let source = item
-                                        .source_message_queued_generations
-                                        .iter()
-                                        .find(|source| source.message_id == message.get());
-                                    (item.message_id == message.get()
-                                        || item.source_message_ids.contains(&message.get()))
-                                        && source
-                                            .map_or(item.queued_generation, |s| s.queued_generation)
-                                            == generation
-                                })
+                                owner.snapshot.items.iter().flat_map(canonical_sources).any(
+                                    |source| {
+                                        source.message_id == message
+                                            && source.queued_generation == generation
+                                    },
+                                )
                             }))
                         })
                         .await
