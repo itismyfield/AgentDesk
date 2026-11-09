@@ -77,11 +77,38 @@ pub(crate) fn skip_key(hop: &Hop) -> Option<String> {
 struct Stats {
     targets: Vec<String>,
     skipped: BTreeMap<String, usize>,
+    unproven_young: usize,
+    unproven_permanent: usize,
 }
 
 impl Stats {
     fn skip(&mut self, reason: impl Into<String>) {
         *self.skipped.entry(reason.into()).or_default() += 1;
+    }
+
+    fn skip_source(
+        &mut self,
+        reason: String,
+        source: Option<&crate::services::tui_o::shadow::SourceId>,
+    ) {
+        if reason.contains("NotObserved") || reason.contains("TerminationUnread") {
+            let young = source
+                .and_then(|source| {
+                    crate::services::tui_o::shadow::capture::Fingerprint::path(source).ok()
+                })
+                .and_then(|fp| {
+                    std::time::SystemTime::now()
+                        .duration_since(fp.modified)
+                        .ok()
+                })
+                .is_some_and(|age| age < crate::services::tui_o::writer::rotation::RETIRED_WATCH);
+            if young {
+                self.unproven_young += 1;
+            } else {
+                self.unproven_permanent += 1;
+            }
+        }
+        self.skip(reason);
     }
 
     fn actor_refused(&mut self, reply: &Reply) -> bool {
@@ -98,7 +125,15 @@ impl Stats {
             return;
         };
         if let Some(reason) = skip_key(hop) {
-            self.skip(reason);
+            let source = reply
+                .diagnostics
+                .as_ref()
+                .and_then(|d| d.candidates.iter().find(|c| c.key == key));
+            if let Some(candidate) = source {
+                self.skip_source(reason, Some(&candidate.source));
+            } else {
+                self.skip_source(reason, None);
+            }
         } else {
             self.targets.push(format!("{channel}:{key}"));
         }
@@ -130,6 +165,7 @@ async fn sweep(registry: &HealthRegistry, provider: &ProviderKind) {
         }
     }
     tracing::info!(provider = provider.as_str(), channels = channel_count, count = stats.targets.len(), targets = ?stats.targets,
+        unproven_young = stats.unproven_young, unproven_permanent = stats.unproven_permanent,
         skip_reasons = ?stats.skipped, "[tui_o] automatic retention sweep");
 }
 
@@ -334,7 +370,7 @@ async fn channel_sweep(
             let scope = match inspected.scope {
                 Some(Ok(scope)) => scope,
                 Some(Err(reason)) => {
-                    stats.skip(format!("scope_refused:{reason}"));
+                    stats.skip_source(format!("scope_refused:{reason}"), Some(&candidate.source));
                     continue;
                 }
                 None => {
@@ -457,7 +493,11 @@ async fn channel_sweep(
         let scope = match inspected.scope {
             Some(Ok(scope)) => scope,
             Some(Err(reason)) => {
-                stats.skip(format!("scope_refused:{reason}"));
+                let source = inspected
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|d| d.candidates.iter().find(|c| c.key == key));
+                stats.skip_source(format!("scope_refused:{reason}"), source.map(|c| &c.source));
                 continue;
             }
             None => {
@@ -528,6 +568,30 @@ pub(crate) mod test_support {
         CODEX_REPLIES
             .with(|slot| slot.borrow_mut().pop())
             .ok_or("no Codex Inspect was sent")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unproven_skips_split_recent_files_from_permanent_evidence_skips() {
+        use crate::services::tui_o::shadow::binding_reader::source_id_for;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("old.jsonl");
+        std::fs::write(&path, b"native source\n").unwrap();
+        let source = source_id_for("old", &path).unwrap();
+        let mut stats = Stats::default();
+        for reason in ["unknown:NotObserved", "scope_refused:TerminationUnread"] {
+            stats.skip_source(reason.into(), Some(&source));
+        }
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(
+            std::time::SystemTime::now() - crate::services::tui_o::writer::rotation::RETIRED_WATCH,
+        ))
+        .unwrap();
+        stats.skip_source("unknown:NotObserved".into(), Some(&source));
+        std::fs::remove_file(&path).unwrap();
+        stats.skip_source("scope_refused:TerminationUnread".into(), Some(&source));
+        assert_eq!((stats.unproven_young, stats.unproven_permanent), (2, 2));
+        assert_eq!(stats.skipped.values().sum::<usize>(), 4);
     }
 
     #[cfg(unix)]

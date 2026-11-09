@@ -19,15 +19,18 @@ impl AlarmSink for AlarmRouter {
     fn reconcile_retained_readers(&self, channel: u64, reading: usize, retained: &[String]) {
         let reason = format!("tui_o:reader_retention_stalled:{channel}");
         let now = tokio::time::Instant::now();
+        let was_stalled = locked(&self.health.active).contains(&reason);
+        let pressured = reading >= MAX_READERS || was_stalled;
         let mut since = locked(&self.health.retained_readers);
-        let stalled = if reading >= MAX_READERS && !retained.is_empty() {
+        let stalled = if pressured && !retained.is_empty() {
             let current: HashSet<_> = retained.iter().map(String::as_str).collect();
             let readers = since.entry(channel).or_default();
             readers.retain(|key, _| current.contains(key.as_str()));
             for key in retained {
                 readers.entry(key.clone()).or_insert(now);
             }
-            retained.len() > MAX_READERS
+            was_stalled
+                || retained.len() > MAX_READERS
                 || readers.values().any(|started| {
                     now.saturating_duration_since(*started) >= READER_RETENTION_GRACE
                 })

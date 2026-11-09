@@ -567,7 +567,8 @@ mod tests {
                 .contains("check retention sweep skips and cleanup evidence")
         );
         router.reconcile_retained_readers(FAILING, 2, &old[1..]);
-        assert!(!health.current_at(Instant::now()).contains(&reason));
+        assert!(health.current_at(Instant::now()).contains(&reason));
+        router.reconcile_retained_readers(FAILING, 2, &[]);
         router.reconcile_retained_readers(FAILING, 3, &old[1..]);
         tokio::time::advance(Duration::from_secs(7199)).await;
         router.reconcile_retained_readers(FAILING, 3, &old[1..]);
@@ -581,7 +582,6 @@ mod tests {
         router.reconcile_retained_readers(FAILING, 3, &[]);
         assert!(!health.current_at(Instant::now()).contains(&reason));
     }
-
     #[tokio::test(start_paused = true)]
     async fn retained_reader_age_follows_the_source_instead_of_a_constant_count() {
         let (router, _, health) = router(Some(ALERT));

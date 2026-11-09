@@ -30,7 +30,7 @@ impl<B: BindingEvents> Sources<B> {
 
     /// Judges every hop again once the log tail moved, a hop is new or the log cannot be watched;
     /// an unreadable log replaces none and is read again at the next tend.
-    fn judge_replaced<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+    pub(super) fn judge_replaced<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
     ) {
@@ -82,13 +82,16 @@ impl<B: BindingEvents> Sources<B> {
         whole.then_some(events)
     }
 
-    fn replaced_and_read(&self, reader: &Reader) -> bool {
+    pub(super) fn replaced_source(&self, reader: &Reader) -> bool {
         let key = source_key(&reader.source);
         let hop = self.rotation.successors.get(&key).and_then(|next| next.seq);
-        let replaced = (self.replaced.as_ref()).is_some_and(|(_, judged)| {
+        (self.replaced.as_ref()).is_some_and(|(_, judged)| {
             hop.is_some_and(|seq| judged.get(&(key, seq)) == Some(&true))
-        });
-        replaced
+        })
+    }
+
+    fn replaced_and_read(&self, reader: &Reader) -> bool {
+        self.replaced_source(reader)
             && reader.pending.is_none()
             && reader.drain_to.is_none()
             && (reader.capture.as_ref())
