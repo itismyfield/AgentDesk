@@ -292,7 +292,7 @@ async fn gated_idle_start_restores_pending_then_completes() {
     let (user_row, mut recorded) = tokio::sync::mpsc::unbounded_channel();
     let transcript = rig.transcript.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_ok()
+        if event.is_ok_and(|event| event.kind.is_modify())
             && fs::read_to_string(&transcript).is_ok_and(|text| {
                 text.lines().any(|line| {
                     serde_json::from_str::<Value>(line).is_ok_and(|row| {
