@@ -554,17 +554,6 @@ async fn read_now(
     }
 }
 
-#[cfg(test)]
-fn observe(
-    watch: &Arc<Mutex<Watch>>,
-    ports: &Arc<dyn Ports>,
-    provider: ShadowProvider,
-    channel: u64,
-    target: Target,
-) -> Observed {
-    judge(watch, ports, provider, channel, target).0
-}
-
 fn judge(
     watch: &Arc<Mutex<Watch>>,
     ports: &Arc<dyn Ports>,
@@ -696,6 +685,7 @@ fn judge_with_policy(
     match fact.state {
         TurnState::Idle if allows_idle => at(&guard, observed(Activity::Idle, "closed")),
         TurnState::Idle => at(&guard, observed(Activity::Unknown, "no_turn_boundary")),
+        TurnState::Open { .. } if fact.local => at(&guard, observed(Activity::Idle, "local_only")),
         TurnState::Open { .. } if guard.grew_at.elapsed() < STALE_OPEN_AFTER => {
             at(&guard, observed(Activity::Busy, "open"))
         }
