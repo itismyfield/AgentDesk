@@ -53,7 +53,7 @@ fn an_effort_echo_reads_idle_while_real_prompts_keep_their_turn() {
 }
 
 fn fast_rows(on: bool) -> Vec<serde_json::Value> {
-    include_str!("fixtures/fast_transcript_rows.jsonl")
+    include_str!("../../../../../tests/fixtures/fast_transcript_rows.jsonl")
         .lines()
         .skip(if on { 0 } else { 4 })
         .take(if on { 4 } else { 5 })
