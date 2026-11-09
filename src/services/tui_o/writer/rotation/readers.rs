@@ -392,6 +392,10 @@ impl<B: BindingEvents> Sources<B> {
                             .store()
                             .set_retired(&reader.source, true)
                             .map_err(halted("retire"))?;
+                        if next.proof.is_none() {
+                            tracing::info!(channel = self.channel, source = %reader.source.path.display(),
+                                offset = cursor.captured_through, "[tui_o] cleanup retired drained source after long silence");
+                        }
                         reader.watch_until = Some(now + RETIRED_WATCH);
                         reader.dormant = None;
                         reader.capture = None;
@@ -761,6 +765,10 @@ impl<B: BindingEvents> Sources<B> {
                 }
                 let retired = writer.store().set_retired(&reader.source, true);
                 retired.map_err(halted("retire"))?;
+                if successor.proof.is_none() {
+                    tracing::info!(channel = self.channel, source = %reader.source.path.display(),
+                        offset = through, "[tui_o] cleanup retired drained source after long silence");
+                }
                 (reader.watch_until, reader.quiet) = (Some(now + RETIRED_WATCH), None);
             }
         }
