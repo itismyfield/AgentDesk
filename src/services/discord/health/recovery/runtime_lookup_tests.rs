@@ -12,9 +12,8 @@ use crate::services::discord::health::recovery::hard_stop_completion_event_tests
 use crate::services::discord::relay_recovery::tests::orphan_token_finish::v2_attempted_front;
 use crate::services::provider::ProviderKind;
 
-// A V2 owner's waiting input is mailbox ownership: the unresolved fallback warns of it as backlog,
-// and a hard stop resolves the owning runtime past an empty sibling while the input survives. A
-// front an attempt carries is neither.
+// A V2 owner's waiting input is backlog the unresolved fallback warns of and ownership a hard stop
+// resolves past an empty sibling, leaving the input; a front an attempt carries is neither.
 #[tokio::test(flavor = "current_thread")]
 async fn hard_stop_lookup_counts_the_v2_owner_waiting_input() {
     let tempdir = tempfile::tempdir().expect("runtime root tempdir");
