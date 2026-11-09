@@ -426,7 +426,7 @@ fn known_live_channels_without_channel_files_form_a_complete_codex_census() {
 }
 
 async fn unproven_canary(young: bool, regrow: bool, configured: bool) {
-    use crate::services::tui_o::writer::rotation::RETIRED_WATCH;
+    let stable_age = std::time::Duration::from_secs(24 * 60 * 60);
     let fixture = Fixture::new(false);
     let (sources, _) = backlog(&fixture, 4);
     let now = std::time::SystemTime::now();
@@ -437,9 +437,9 @@ async fn unproven_canary(young: bool, regrow: bool, configured: bool) {
             .unwrap()
             .set_times(
                 std::fs::FileTimes::new().set_modified(if young && index == 0 {
-                    now
+                    now - stable_age + std::time::Duration::from_secs(60)
                 } else {
-                    now - RETIRED_WATCH
+                    now - stable_age
                 }),
             )
             .unwrap();
