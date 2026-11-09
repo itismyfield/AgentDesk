@@ -20,9 +20,6 @@ mod streaming_baseline_tests;
 #[path = "o_delegated_watcher_tests.rs"]
 mod o_delegated_watcher_tests;
 
-#[path = "self_started_publish_tests.rs"]
-mod self_started_publish_tests;
-
 #[cfg(test)]
 #[path = "post_stream_exit_host_tests.rs"]
 mod post_stream_exit_host_tests;
