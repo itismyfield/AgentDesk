@@ -2652,40 +2652,24 @@ def _mailbox_idle_evidence(mailbox: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# SnapshotV2 in src/services/turn_orchestrator/queued_head/v2_types.rs: items and head_injection wait.
-# Known completed retained notices are history; unsettled admission binds still wait. A queued bind
-# never waits on its own: its item waits in items, and a cleared queue leaves the bind without one
-# (the runtime's SnapshotRead::v2_holds_input applies the same rule). An unconfirmed retention a clear
-# already told is never re-sent (RetainedInput::owed_to_owner), nor is its attempt bind.
+# Retained ownership and exact attempt-bind closure mirror SnapshotRead::v2_holds_input.
+# Unsettled drop receipts still need their owner even when every retained notice was enqueued.
 QUEUE_V2_KEYS = frozenset({
     "version", "items", "head_injection", "retained_inputs", "terminal_identities", "namespace",
-    "admission_receipts", "admission_sequence", "admission_binds",
+    "admission_receipts", "admission_sequence", "admission_binds", "owed_drop_receipts",
 })
 
 
-def _retained_input_waiting(entry: Any) -> bool:
-    """Only known notices already enqueued leave no retained work for the owner."""
-    if not isinstance(entry, dict):
-        return True
-    notice = entry.get("notice")
-    if (not isinstance(notice, dict) or set(notice) != {"kind", "enqueued"}
-            or notice.get("enqueued") is not True):
-        return True
-    if not _owed_to_owner(entry):
-        return False
-    return (entry.get("disposition"), notice["kind"]) not in (
-        ("known_not_sent", "retained_retry_required"),
-        ("opaque_unsent", "retained_retry_required"),
-        (None, "unconfirmed"),
-    )
-
-
 def _owed_to_owner(entry: Any) -> bool:
-    """RetainedInput::owed_to_owner: only an unconfirmed retention a clear already told is not owed."""
+    """An enqueued notice ends ownership for retry-required known/opaque unsent, disposition-free
+    unconfirmed, or cleared disposition-free unconfirmed evidence; other inputs remain owed."""
     notice = entry.get("notice") if isinstance(entry, dict) else None
-    return not (isinstance(notice, dict) and set(notice) == {"kind", "enqueued"} and notice["kind"] == "cleared"
-                and notice["enqueued"] is True and entry.get("disposition") is None
-                and entry.get("reason") == {"kind": "unconfirmed"})
+    return not (isinstance(notice, dict) and set(notice) == {"kind", "enqueued"} and notice["enqueued"] is True
+                and ((entry.get("disposition"), notice["kind"]) in (
+                    ("known_not_sent", "retained_retry_required"),
+                    ("opaque_unsent", "retained_retry_required"), (None, "unconfirmed"))
+                     or (entry.get("disposition") is None and notice["kind"] == "cleared"
+                         and entry.get("reason") == {"kind": "unconfirmed"})))
 
 
 def _queue_v2_waiting(payload: Any) -> bool | None:
@@ -2694,28 +2678,29 @@ def _queue_v2_waiting(payload: Any) -> bool | None:
             or not set(payload) <= QUEUE_V2_KEYS
             or not isinstance(payload.get("items"), list) or not isinstance(payload.get("retained_inputs"), list)
             or not isinstance(payload.get("terminal_identities"), list)
+            or not isinstance(payload.get("owed_drop_receipts", []), list)
             or "head_injection" not in payload or not isinstance(payload["head_injection"], (dict, type(None)))):
         return None
     binds = payload.get("admission_binds", [])
     if not isinstance(binds, list) or not all(isinstance(b, dict) and isinstance(b.get("at"), dict) for b in binds):
         return None
-    return bool(payload["items"] or any(_retained_input_waiting(entry) for entry in payload["retained_inputs"])
+    return bool(payload["items"] or payload.get("owed_drop_receipts")
+                or any(_owed_to_owner(entry) for entry in payload["retained_inputs"])
                 or payload["head_injection"] is not None
                 or any(b["at"].get("kind") not in ("settled", "queued") and not _bind_closed_by_retained(b["at"], payload["retained_inputs"])
                        for b in binds))
 
 
 def _bind_closed_by_retained(at: dict, retained: list) -> bool:
-    """An attempt bind of a retained input already told has nothing left to run; a follower's bind closes
-    only with a retention no owner owes (RetainedInput::closes_bind)."""
+    """An unowed retained input closes the exact attempt bind of its stored identity or any member."""
     identity, attempt = at.get("identity"), at.get("attempt")
     if (at.get("kind") != "attempt" or not isinstance(identity, dict) or "primary" not in identity
             or not isinstance(attempt, dict) or not attempt.get("nonce")):
         return False
     return any(
-        isinstance(entry, dict) and isinstance(entry.get("input"), dict) and entry["input"].get("attempt") == attempt
-        and ((not _retained_input_waiting(entry) and entry["input"].get("identity") == identity)
-             or (not _owed_to_owner(entry) and identity in _member_identities(entry["input"])))
+        not _owed_to_owner(entry) and isinstance(entry.get("input"), dict)
+        and entry["input"].get("attempt") == attempt
+        and (entry["input"].get("identity") == identity or identity in _member_identities(entry["input"]))
         for entry in retained)
 
 

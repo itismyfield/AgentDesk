@@ -120,6 +120,7 @@ class RetainedQueueIdle(unittest.TestCase):
         # The runtime's v2_holds_input test reads the same cases with the same `busy` verdicts.
         cases = json.loads((Path(__file__).parent / "tests/fixtures/queue_v2_cleared_unconfirmed_cases.json")
                            .read_text(encoding="utf-8"))
+        self.assertEqual(len(cases["cases"]), 26)
         for case in cases["cases"]:
             with self.subTest(case=case["name"]):
                 snapshot = copy.deepcopy(cases["base"])
@@ -134,6 +135,32 @@ class RetainedQueueIdle(unittest.TestCase):
         legacy = copy.deepcopy(self.snapshot)
         del legacy["version"]
         self.assert_busy(legacy, True)
+
+    def test_shared_told_retained_inputs_leave_deploy_idle(self):
+        cases = json.loads((Path(__file__).parent / "tests/fixtures/queue_v2_cleared_unconfirmed_cases.json")
+                           .read_text(encoding="utf-8"))
+        told = [case for case in cases["cases"] if case["name"] in (
+            "told_known_not_sent_single_with_original_bind", "told_unconfirmed_single_with_original_bind")]
+        self.assertEqual(len(told), 2)
+        for case in told:
+            with self.subTest(case=case["name"]):
+                self.assertIs(case["busy"], False)
+                snapshot = copy.deepcopy(cases["base"])
+                snapshot["retained_inputs"][0].update(case["retained"])
+                self.assertEqual(len(snapshot["retained_inputs"]), 1)
+                entry = snapshot["retained_inputs"][0]
+                bind = snapshot["admission_binds"][0]["at"]
+                self.assertEqual(bind["identity"], entry["input"]["identity"])
+                self.assertEqual(bind["attempt"], entry["input"]["attempt"])
+                self.assert_busy(snapshot, case["busy"])
+
+    def test_missing_notice_or_malformed_receipts_stay_busy(self):
+        entry = copy.deepcopy(self.retained)
+        del entry["notice"]
+        self.assert_busy({**self.snapshot, "retained_inputs": [entry]}, True)
+        for receipts in (None, {}, "future"):
+            with self.subTest(receipts=receipts):
+                self.assert_busy({**self.snapshot, "owed_drop_receipts": receipts}, True)
 
 
 if __name__ == "__main__":
