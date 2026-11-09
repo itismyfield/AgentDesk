@@ -399,9 +399,69 @@ pub(crate) async fn perform_resume_rebind(
         return Err(ResumeRebindError::ActiveTurn);
     }
 
+    // A Herdr-configured channel, then the stored rows, are judged before the target lookup, which
+    // may copy a transcript into the active home, and before any binding or teardown change.
+    let configured_refusal = crate::services::discord::admin_host_guard::configured_refusal;
+    if let Some(reason) = channel_id.and_then(|id| configured_refusal(id.get())) {
+        return Err(ResumeRebindError::HostUnsupported(reason));
+    }
+    let host_refusal = crate::services::discord::host_defer_gate::resume_host_refusal(
+        pool,
+        provider.as_ref(),
+        channel_id,
+        session_key,
+        tmux_name,
+    );
+    if let Some(reason) = host_refusal.await {
+        return Err(ResumeRebindError::HostUnsupported(reason));
+    }
+    // The teardown below runs on this verdict, so a kill the host guard keeps refuses here.
+    let teardown = match (registry, provider.as_ref(), channel_id) {
+        (Some(registry), Some(provider), Some(channel_id)) => {
+            let target = TurnLifecycleTarget {
+                provider: Some(provider.clone()),
+                channel_id: Some(channel_id),
+                tmux_name: tmux_name.to_string(),
+            };
+            let stored_provider = Some(provider.as_str());
+            let row = ForceKillRow {
+                pool,
+                session_key,
+                stored_provider,
+            };
+            let verdict = force_kill_verdict(Some(registry), &target, Some(row)).await;
+            if verdict.kept() {
+                let reason = "the session's teardown is kept by the host guard".to_string();
+                return Err(ResumeRebindError::HostUnsupported(reason));
+            }
+            Some((registry, verdict))
+        }
+        _ => None,
+    };
+
+    // A Claude background session is never taken over; an unreadable list never refuses the resume.
+    let background = |id: &str| {
+        let (id, channel) = (id.to_string(), channel_id.map(|id| id.get()));
+        let claude = matches!(provider, Some(ProviderKind::Claude));
+        async move { claude && background::listed(&id, channel, tmux_name).await == Some(true) }
+    };
+
     // Resolve the rebind target.
     let (target_session_id, target_cwd, auto_selected) = match opts.session_id.as_deref() {
         Some(session_id) if !session_id.trim().is_empty() => {
+            // Refusals the request alone decides come before the lookup, which may copy a transcript in.
+            if background(session_id.trim()).await {
+                return Err(ResumeRebindError::BackgroundSession(
+                    session_id.trim().to_string(),
+                ));
+            }
+            if let Some(cwd) = opts
+                .cwd
+                .as_deref()
+                .filter(|cwd| !std::path::Path::new(cwd).is_dir())
+            {
+                return Err(ResumeRebindError::TargetCwdMissing(cwd.to_string()));
+            }
             let cwd = if matches!(provider, Some(ProviderKind::Claude)) {
                 catalog::resolve_cwd_off_runtime(
                     current_cwd.clone(),
@@ -450,11 +510,8 @@ pub(crate) async fn perform_resume_rebind(
         }
     };
 
-    // Explicit and auto-selected targets alike; an unreadable list never refuses the resume.
-    if matches!(provider, Some(ProviderKind::Claude))
-        && background::listed(&target_session_id, channel_id.map(|id| id.get()), tmux_name).await
-            == Some(true)
-    {
+    // An explicit target was checked before its lookup.
+    if auto_selected && background(&target_session_id).await {
         return Err(ResumeRebindError::BackgroundSession(target_session_id));
     }
 
@@ -463,46 +520,6 @@ pub(crate) async fn perform_resume_rebind(
     if !std::path::Path::new(&target_cwd).is_dir() {
         return Err(ResumeRebindError::TargetCwdMissing(target_cwd));
     }
-
-    // A Herdr-configured channel, then the stored rows, are judged before the first binding or
-    // teardown change below; a transcript copy made by the cwd lookup above is not undone.
-    let configured_refusal = crate::services::discord::admin_host_guard::configured_refusal;
-    if let Some(reason) = channel_id.and_then(|id| configured_refusal(id.get())) {
-        return Err(ResumeRebindError::HostUnsupported(reason));
-    }
-    let host_refusal = crate::services::discord::host_defer_gate::resume_host_refusal(
-        pool,
-        provider.as_ref(),
-        channel_id,
-        session_key,
-        tmux_name,
-    );
-    if let Some(reason) = host_refusal.await {
-        return Err(ResumeRebindError::HostUnsupported(reason));
-    }
-    // The teardown below runs on this verdict, so a kill the host guard keeps refuses here.
-    let teardown = match (registry, provider.as_ref(), channel_id) {
-        (Some(registry), Some(provider), Some(channel_id)) => {
-            let target = TurnLifecycleTarget {
-                provider: Some(provider.clone()),
-                channel_id: Some(channel_id),
-                tmux_name: tmux_name.to_string(),
-            };
-            let stored_provider = Some(provider.as_str());
-            let row = ForceKillRow {
-                pool,
-                session_key,
-                stored_provider,
-            };
-            let verdict = force_kill_verdict(Some(registry), &target, Some(row)).await;
-            if verdict.kept() {
-                let reason = "the session's teardown is kept by the host guard".to_string();
-                return Err(ResumeRebindError::HostUnsupported(reason));
-            }
-            Some((registry, verdict))
-        }
-        _ => None,
-    };
 
     // P1-B — durable-first ordering: commit the DB rebind BEFORE tearing down
     // the current tmux. If the durable UPDATE fails we return here without

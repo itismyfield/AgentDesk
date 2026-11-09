@@ -2484,6 +2484,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     config.cluster.runtime_profile.validate(&config.cluster)?;
     session_hosts::validate(config)?;
     config.onboarding.warn_invalid_rules();
+    crate::services::session_resume::catalog::warn_unusable_transcript_homes(config);
     validate_scheduled_message_required_mentions(
         &config.discord.scheduled_message_required_mention_user_ids,
     )

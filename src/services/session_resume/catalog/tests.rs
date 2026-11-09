@@ -61,6 +61,7 @@ impl Fixture {
             live,
             Some(&self.home),
             &[],
+            Ok(None),
             partial,
             Instant::now() + Duration::from_secs(2),
         )
@@ -326,6 +327,7 @@ fn short_discovery_deadline_preserves_partial_results() {
         &HashSet::new(),
         Some(&f.home),
         &[],
+        Ok(None),
         "",
         start + Duration::from_millis(120),
     );
@@ -368,6 +370,7 @@ fn transcript_only_in_another_home_is_listed_then_copied_once_into_the_same_cwd_
         &HashSet::new(),
         Some(&f.home),
         &homes,
+        Ok(None),
         "스왑",
         Instant::now() + Duration::from_secs(2),
     );
@@ -391,20 +394,18 @@ fn transcript_only_in_another_home_is_listed_then_copied_once_into_the_same_cwd_
             .unwrap()
             .exists()
     );
-    // Once the active home holds a copy, a changed source is never copied again.
+    // Once the active home holds a copy, a changed source is never copied again; a newer one refuses.
     fs::write(&source, "{}\n").unwrap();
-    assert_eq!(
-        resolve_cwd(
-            Some(current),
-            Some(f.sibling.to_str().unwrap()),
-            PRIOR,
-            Some(&f.home),
-            &homes,
-            Ok(None)
-        )
-        .unwrap(),
-        f.sibling.to_str().unwrap()
-    );
+    let error = resolve_cwd(
+        Some(current),
+        Some(f.sibling.to_str().unwrap()),
+        PRIOR,
+        Some(&f.home),
+        &homes,
+        Ok(None),
+    )
+    .unwrap_err();
+    assert!(format!("{error:?}").contains("bytes"), "{error:?}");
     assert_eq!(fs::read_to_string(&copy).unwrap(), title);
 }
 
@@ -509,4 +510,177 @@ fn copy_is_refused_before_writing_when_the_launch_home_differs_or_a_candidate_is
         );
         assert_eq!(fs::read_to_string(&source).unwrap(), "{}\n");
     }
+}
+
+#[test]
+fn an_id_the_active_home_holds_is_listed_and_resumed_from_the_active_home_only() {
+    let f = Fixture::new();
+    let other = f.root.path().join("1-acct");
+    let title = |name: &str| format!("{{\"type\":\"ai-title\",\"aiTitle\":\"{name}\"}}\n");
+    f.transcript(&f.current, PRIOR, &title("활성"), 1000);
+    f.transcript_in(&other, &f.sibling, PRIOR, &title("다른 home"), 2000);
+    let homes = [other.clone()];
+    let current = f.current.to_str().unwrap();
+    let listed = choices(
+        current,
+        None,
+        &HashSet::new(),
+        Some(&f.home),
+        &homes,
+        Ok(None),
+        "",
+        Instant::now() + Duration::from_secs(2),
+    );
+    assert_eq!(listed.len(), 1);
+    assert!(
+        listed[0].label.starts_with("활성 · "),
+        "{}",
+        listed[0].label
+    );
+    assert!(!listed[0].label.contains(" · home "), "{}", listed[0].label);
+    let resolved = resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &homes, Ok(None));
+    assert_eq!(resolved.unwrap(), current);
+    assert!(
+        !claude_transcript_path(&f.sibling, PRIOR, Some(&f.home))
+            .unwrap()
+            .exists()
+    );
+}
+
+#[test]
+fn an_older_active_copy_of_another_size_is_refused_without_overwriting() {
+    let f = Fixture::new();
+    let other = f.root.path().join("1-acct");
+    let active = f.transcript(&f.current, PRIOR, "{}\n", 1000);
+    f.transcript_in(&other, &f.current, PRIOR, "{}\n{\"type\":\"user\"}\n", 2000);
+    let current = f.current.to_str().unwrap();
+    let homes = [other.clone()];
+    let error = resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &homes, Ok(None));
+    let (status, axum::Json(body)) = error.unwrap_err().into_response();
+    assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    let error = body["error"].as_str().unwrap();
+    assert!(
+        error.contains("3 bytes") && error.contains("19 bytes"),
+        "{error}"
+    );
+    assert_eq!(fs::read_to_string(&active).unwrap(), "{}\n");
+    // The active copy continued after the adoption is newer, so it resumes.
+    set_file_mtime(&active, FileTime::from_unix_time(3000, 0)).unwrap();
+    let resumed = resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &homes, Ok(None));
+    assert_eq!(resumed.unwrap(), current);
+}
+
+#[test]
+fn subagent_files_are_copied_with_the_transcript_or_not_at_all() {
+    let f = Fixture::new();
+    let other = f.root.path().join("1-acct");
+    let source = f.transcript_in(&other, &f.current, PRIOR, "{}\n", 1000);
+    let subagents = |transcript: &Path| transcript.with_extension("").join("subagents");
+    fs::create_dir_all(subagents(&source)).unwrap();
+    let files = [
+        ("agent-a.jsonl", "{\"type\":\"user\"}\n"),
+        ("agent-a.meta.json", "{}"),
+    ];
+    for (name, body) in files {
+        fs::write(subagents(&source).join(name), body).unwrap();
+    }
+    let snapshot = |root: &Path| {
+        let mut all = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                match entry.file_type().unwrap().is_dir() {
+                    true => stack.push(entry.path()),
+                    false => all.push((entry.path(), fs::read(entry.path()).unwrap())),
+                }
+            }
+        }
+        all.sort();
+        all
+    };
+    let before = snapshot(&other);
+    let current = f.current.to_str().unwrap();
+    let homes = [other.clone()];
+    let resume = || resolve_cwd(Some(current), None, PRIOR, Some(&f.home), &homes, Ok(None));
+    // A non-file entry or a failed transcript publish refuses and leaves no partial copy.
+    let nested = subagents(&source).join("nested");
+    fs::create_dir(&nested).unwrap();
+    assert!(resume().is_err());
+    assert_eq!(snapshot(&f.home), Vec::new());
+    fs::remove_dir(&nested).unwrap();
+    let target = claude_transcript_path(&f.current, PRIOR, Some(&f.home)).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    assert!(resume().is_err());
+    assert!(!target.with_extension("").exists());
+    fs::remove_dir(&target).unwrap();
+    assert_eq!(resume().unwrap(), current);
+    for (name, body) in files {
+        assert_eq!(
+            fs::read_to_string(subagents(&target).join(name)).unwrap(),
+            body
+        );
+    }
+    assert_eq!(snapshot(&other), before);
+}
+
+#[test]
+fn unusable_transcript_homes_warn_once_each_at_load_and_leave_the_list_alone() {
+    let f = Fixture::new();
+    let other = f.root.path().join("1-acct");
+    let title = "{\"type\":\"ai-title\",\"aiTitle\":\"선언 home\"}\n";
+    f.transcript_in(&other, &f.sibling, PRIOR, title, 1000);
+    let config = f.root.path().join("agentdesk.yaml");
+    let missing = f.root.path().join("no-such-home");
+    let yaml = format!(
+        "server: {{}}\nproviders:\n  claude:\n    transcript_homes: [\".claude-b\", \"{}\", \"{}\"]\n",
+        missing.display(),
+        other.display()
+    );
+    fs::write(&config, yaml).unwrap();
+    #[derive(Clone, Default)]
+    struct Logs(std::sync::Arc<Mutex<Vec<u8>>>);
+    impl Write for Logs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let logs = Logs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .finish();
+    let loaded = tracing::subscriber::with_default(subscriber, || {
+        crate::config::load_from_path(&config).unwrap()
+    });
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    let warned = |entry: &str| {
+        logs.lines()
+            .filter(|line| line.contains("WARN") && line.contains("transcript_homes"))
+            .filter(|line| line.contains(entry))
+            .count()
+    };
+    assert_eq!(warned(".claude-b"), 1, "{logs}");
+    assert_eq!(warned(missing.to_str().unwrap()), 1, "{logs}");
+    assert_eq!(warned(other.to_str().unwrap()), 0, "{logs}");
+    let listed = choices(
+        f.current.to_str().unwrap(),
+        None,
+        &HashSet::new(),
+        Some(&f.home),
+        &declared_homes(&loaded),
+        Ok(None),
+        "",
+        Instant::now() + Duration::from_secs(2),
+    );
+    assert_eq!(listed.len(), 1);
+    assert!(
+        listed[0].label.ends_with(" · home 1-acct"),
+        "{}",
+        listed[0].label
+    );
 }

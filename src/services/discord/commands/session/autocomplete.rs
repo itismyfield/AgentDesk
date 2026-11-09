@@ -42,13 +42,19 @@ pub(super) async fn autocomplete_session(
         let partial = partial.to_string();
         let home = catalog::claude_home();
         let others = catalog::transcript_homes();
+        let channel = ctx.channel_id().get();
         tokio::task::spawn_blocking(move || {
+            let launch = catalog::predicted_launch(&others, Some(channel), "");
             catalog::choices(
                 &cwd,
                 context.claude_session_id.as_deref(),
                 &live,
                 home.as_deref(),
                 &others,
+                launch
+                    .as_ref()
+                    .map(Option::as_deref)
+                    .map_err(String::as_str),
                 &partial,
                 deadline - std::time::Duration::from_millis(200),
             )
