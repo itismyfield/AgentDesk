@@ -33,6 +33,7 @@ pub(super) async fn defer_owned_front(
     context: FinalizeEnqueueContext<'_>,
     cancel: &Arc<CancelToken>,
     queue_provider: &crate::services::provider::ProviderKind,
+    defer_busy_view: bool,
 ) {
     let FinalizeEnqueueContext {
         shared,
@@ -83,15 +84,17 @@ pub(super) async fn defer_owned_front(
             feedback_reminder,
             Some("owned_busy_pre_submit"),
         );
-        super::intake_turn::race_loss::mailbox_reaction::note_busy_tui_pre_submit_queue_pending(
-            shared,
-            http,
-            channel_id,
-            user_msg_id,
-            false,
-            turn_start_attempt,
-        )
-        .await;
+        if !defer_busy_view {
+            super::intake_turn::race_loss::mailbox_reaction::note_busy_tui_pre_submit_queue_pending(
+                shared,
+                http,
+                channel_id,
+                user_msg_id,
+                false,
+                turn_start_attempt,
+            )
+            .await;
+        }
         if let Some(placeholder) = placeholder_msg_id {
             let _ = channel_id.delete_message(http, placeholder).await;
         }
@@ -169,4 +172,108 @@ pub(super) async fn finalize_enqueue(
         .await;
     }
     accepted
+}
+
+/// Each original gets the result of its busy attempt under its own queued generation.
+#[cfg(unix)]
+pub(super) async fn note_busy_result(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    originals: &[crate::services::turn_orchestrator::PendingQueueItem],
+    fallback: &[String],
+    result: &Result<(), String>,
+) {
+    use crate::services::discord::turn_view_reconciler::{
+        TurnViewIdentity, TurnViewOwner, TurnViewTarget,
+    };
+    let canonical_sources = |item: &crate::services::turn_orchestrator::PendingQueueItem| {
+        crate::services::turn_orchestrator::pending_queue_item_to_intervention(
+            item.clone(),
+            std::time::SystemTime::now(),
+            std::time::Instant::now(),
+        )
+        .source_message_queued_generations()
+    };
+    let mut sources: Vec<_> = originals
+        .iter()
+        .flat_map(canonical_sources)
+        .map(|source| {
+            (
+                source.message_id,
+                source.queued_generation,
+                source.route.and_then(|route| route.parent),
+            )
+        })
+        .collect();
+    if originals.is_empty() {
+        sources.extend(
+            fallback
+                .iter()
+                .filter_map(|id| id.parse().ok())
+                .map(|id| (MessageId::new(id), shared.restart.current_generation, None)),
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (message, generation, parent) in sources {
+        if !seen.insert(message) {
+            continue;
+        }
+        let resolve = super::super::super::resolve_thread_parent;
+        let parent = match (result, parent, shared.http.cached_serenity_ctx.get()) {
+            (Err(_), None, Some(ctx)) => resolve(&ctx.http, channel).await.map(|(id, _)| id),
+            (_, parent, _) => parent,
+        };
+        let target = TurnViewTarget::intake_user_message(channel, message);
+        let identity = TurnViewIdentity::IntakeShared;
+        let view = &shared.turn_view_reconciler;
+        match result {
+            Ok(()) => {
+                view.note_confirmed_injection(shared, provider, target, identity)
+                    .await
+            }
+            Err(error)
+                if super::super::intake_gate::busy_inject::queued_head_covers(channel, parent) =>
+            {
+                if error.starts_with("NotSent(") {
+                    let queued = shared
+                        .mailbox(channel)
+                        .v2_request(move |slot| {
+                            Ok(slot.as_ref().is_some_and(|owner| {
+                                owner.snapshot.items.iter().flat_map(canonical_sources).any(
+                                    |source| {
+                                        source.message_id == message
+                                            && source.queued_generation == generation
+                                    },
+                                )
+                            }))
+                        })
+                        .await
+                        .unwrap_or(false);
+                    if queued {
+                        let owner = TurnViewOwner::for_message(channel, message, generation);
+                        view.note_queue_marker_added(
+                            shared,
+                            target,
+                            owner,
+                            identity,
+                            '📬',
+                            "busy_inject_handback",
+                        )
+                        .await;
+                    }
+                } else {
+                    view.note_untracked_reaction_added(
+                        shared,
+                        target,
+                        identity,
+                        '❓',
+                        "busy_inject_unconfirmed",
+                    )
+                    .await;
+                }
+            }
+            Err(_) => {}
+        }
+    }
 }

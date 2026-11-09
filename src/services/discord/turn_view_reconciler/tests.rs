@@ -1816,6 +1816,17 @@ fn persisted_unknown_applied_value_deletes_file_and_loads_cold() {
     assert!(!reconciler.targets.contains_key(&target));
 }
 
+fn seed_queued_cleanup_target(shared: &SharedData, target: TurnViewTarget) {
+    let record = persisted_record_with_version(
+        shared,
+        target,
+        shared.provider.as_str(),
+        "queued",
+        LIVE_QUEUED_MARKER_STATE_VERSION,
+    );
+    write_persisted(&record, target);
+}
+
 fn reg_7832_seed_reactions(
     reconciler: &TurnViewReconciler,
     target: TurnViewTarget,
@@ -2031,6 +2042,7 @@ async fn reg_7832_cleanup_retry_restores_observed_receipt_and_idle_completion() 
     Arc::get_mut(&mut shared).unwrap().turn_view_reconciler =
         TurnViewReconciler::with_test_deliveries(vec![TurnViewDelivery::Failed]);
     let target = target_with(100_000_000_078_380, 100_000_000_078_381);
+    seed_queued_cleanup_target(&shared, target);
     let _confirmation = TestConfirmation::new(target.channel_id.get());
     let _supervisor = LiveSupervisor::new(
         shared.clone(),
@@ -2255,6 +2267,7 @@ async fn reg_7832_permanent_cleanup_failure_is_not_retried_or_registered() {
     Arc::get_mut(&mut shared).unwrap().turn_view_reconciler =
         TurnViewReconciler::with_test_deliveries(vec![TurnViewDelivery::FailedPermanent]);
     let target = target_with(100_000_000_078_410, 100_000_000_078_411);
+    seed_queued_cleanup_target(&shared, target);
     let _confirmation = TestConfirmation::new(target.channel_id.get());
     let _supervisor = LiveSupervisor::new(
         shared.clone(),

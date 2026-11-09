@@ -1102,8 +1102,13 @@ pub(super) async fn handle_text_message(
             .await.map(|_| IntakeExecution::deferred(channel_id));
         }
 
-        // Dispatch redirects keep the reaction on the original Discord message.
-        let _turn_start_attempt = if add_turn_pending {
+        let defer_busy_view = owner.is_some() && provider == ProviderKind::Claude
+            && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
+            && super::super::intake_gate::busy_inject::queued_head_covers(
+                channel_id, final_thread_parent.as_ref().map(|(parent, _)| *parent),
+            );
+        // Owned input remains durable while its pane decides between a start and a busy paste.
+        let _turn_start_attempt = if add_turn_pending && !defer_busy_view {
             tv_start_current_with_attempt(shared, http, original_channel_id, user_msg_id, "intake_start")
                 .await
                 .attempt()
@@ -1537,12 +1542,7 @@ pub(super) async fn handle_text_message(
         let watcher_tmux_name = inflight_tmux_name.clone();
         #[cfg(unix)]
         let mut recapture_offset_after_busy_wait = false;
-        // #2416: compute claude_tui busy-followup diagnostic with a wait+retry step.
-        // If the first snapshot says busy, run wait_for_prompt_ready (Followup kind,
-        // ~45s default) via spawn_blocking. If the wait succeeds AND a fresh
-        // diagnostic now says ready, fall through to normal dispatch instead of
-        // dropping the user's message. Only emit the busy notice if the wait
-        // times out / errors, or if the post-wait diagnostic is still busy.
+        // A busy transcript queues immediately; otherwise wait once for composer readiness.
         #[cfg(unix)]
         let tui_busy_diagnostic = {
             let initial = tui_busy_followup_diagnostic(
@@ -1554,14 +1554,6 @@ pub(super) async fn handle_text_message(
                 session_id.as_deref(),
             );
             if let Some(initial_diagnostic) = initial {
-                // #3208 (A): when the authoritative JSONL turn-state says the prior
-                // turn is genuinely in-flight (Streaming/UserSubmitted), do NOT
-                // enter the up-to-45s readiness poll — it would always time out
-                // (the prompt marker is suppressed for the whole agentic turn) and
-                // surface a misleading error after the response already landed.
-                // Route straight to the queue-defer path: the busy diagnostic is
-                // already correct, and the watcher idle signal delivers the queued
-                // input cleanly once the turn reaches Idle.
                 if initial_diagnostic.transcript_turn_state.is_busy() {
                     tracing::info!(
                         channel_id = channel_id.get(),
@@ -1715,6 +1707,11 @@ pub(super) async fn handle_text_message(
             }
         };
         #[cfg(unix)]
+        let _turn_start_attempt = if defer_busy_view && add_turn_pending && tui_busy_diagnostic.is_none() {
+            tv_start_current_with_attempt(shared, http, original_channel_id, user_msg_id, "intake_start")
+                .await.attempt()
+        } else { _turn_start_attempt };
+        #[cfg(unix)]
         if let Some(diagnostic) = tui_busy_diagnostic {
             if let Some(owner) = owner {
                 busy_retry::defer_owned_front(
@@ -1727,6 +1724,7 @@ pub(super) async fn handle_text_message(
                     },
                     &cancel_token,
                     &super::super::super::resolve_discord_bot_provider(token),
+                    defer_busy_view,
                 ).await;
                 post_adk_session_status(
                     adk_session_key.as_deref(),
