@@ -5,6 +5,103 @@ pub(super) struct Pending {
     channels: std::sync::Mutex<HashMap<ChannelId, HashMap<MessageId, TurnViewIdentity>>>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+
+    fn target(message: u64) -> TurnViewTarget {
+        TurnViewTarget::intake_user_message(
+            ChannelId::new(100_000_000_079_920),
+            MessageId::new(message),
+        )
+    }
+
+    #[tokio::test]
+    async fn confirmed_cold_injection_has_exactly_one_plus_op() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let reconciler = &shared.turn_view_reconciler;
+        reconciler
+            .note_confirmed_injection(
+                &shared,
+                &shared.provider,
+                target(100_000_000_079_911),
+                TurnViewIdentity::Test("intake"),
+            )
+            .await;
+        assert_eq!(
+            reconciler
+                .ops()
+                .iter()
+                .map(|op| (op.emoji, op.add))
+                .collect::<Vec<_>>(),
+            [('➕', true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_persisted_injection_clears_legacy_and_live_queue_markers() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        for version in [1_u32, 2, 3, 4] {
+            let target = target(100_000_000_079_920 + u64::from(version));
+            let path = TurnViewReconciler::persisted_target_path(target).unwrap();
+            let record = serde_json::json!({"version":version,"provider":shared.provider.as_str(),
+                "kind":target.kind.as_str(),"channel_id":target.channel_id.get(),"message_id":target.message_id.get(),
+                "owner_generation":1,"owner_turn_id":"legacy-input","applied":"queued_merged",
+                "identity_label":target.kind.identity_label(),"token_hash":shared.token_hash});
+            runtime_store::atomic_write(&path, &record.to_string()).unwrap();
+            let reconciler = TurnViewReconciler::default();
+            let old = match version {
+                2 => &['➕', '⏳'][..],
+                4 => &['📬'][..],
+                _ => &['➕'][..],
+            };
+            reconciler
+                .ops
+                .lock()
+                .unwrap()
+                .extend(old.iter().map(|emoji| TestReactionOp {
+                    target,
+                    emoji: *emoji,
+                    add: true,
+                    identity: target.kind.identity_label().into(),
+                }));
+            reconciler
+                .note_confirmed_injection(
+                    &shared,
+                    &shared.provider,
+                    target,
+                    TurnViewIdentity::Test("intake"),
+                )
+                .await;
+            let mut visible = std::collections::BTreeSet::new();
+            for op in reconciler.ops() {
+                if op.add {
+                    visible.insert(op.emoji);
+                } else {
+                    visible.remove(&op.emoji);
+                }
+            }
+            assert_eq!(
+                visible.into_iter().collect::<Vec<_>>(),
+                ['➕'],
+                "version {version}"
+            );
+            assert!(!path.exists());
+            for emoji in old {
+                assert!(
+                    reconciler
+                        .ops()
+                        .iter()
+                        .any(|op| op.emoji == *emoji && !op.add),
+                    "version {version} must remove its owned old marker"
+                );
+            }
+        }
+    }
+}
+
 async fn retry_delivery<F, Fut>(mut attempt: F) -> TurnViewDelivery
 where
     F: FnMut() -> Fut,
@@ -49,6 +146,7 @@ impl TurnViewReconciler {
             .get(&target)
             .map(|entry| entry.clone())
             .or_else(|| self.load_persisted_target(target, shared, "busy_inject_reaction"));
+        let tracked = current.is_some();
         let owner = current.map(|entry| entry.owner).unwrap_or_else(|| {
             turn_view_owner_for_message(
                 target.channel_id,
@@ -56,7 +154,10 @@ impl TurnViewReconciler {
                 shared.restart.current_generation,
             )
         });
-        for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
+        for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS
+            .into_iter()
+            .filter(|_| tracked)
+        {
             let delivery = self
                 .note_queue_marker_removed_delivery(
                     shared,

@@ -20,8 +20,9 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         incomplete_recent_channels,
         ttl_retired_channels,
         open_barriers,
+        phase1_read_through,
     } = state;
-    // Phase 2: Scan for unanswered messages since last bot response.
+    // Phase 2: Scan for unanswered messages since last bot response or intake record.
     // Catches messages that were queued in-memory but lost on restart. This
     // intentionally also scans configured channels that currently have no
     // checkpoint file, because `/clear` or stale-checkpoint pruning can leave
@@ -95,12 +96,28 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
             Some(m.author.id.get()) == current_bot_user_id && !m.content.trim().is_empty()
         });
 
-        // Messages at indices 0..last_bot_idx are newer than the last bot response.
-        let (last_bot_response_id, unanswered_slice) = match last_bot_idx {
-            Some(0) => continue, // Latest message is from bot — nothing unanswered
-            Some(idx) => (recent[idx].id.get(), &recent[..idx]),
-            None => continue, // No bot response found — skip (new/inactive channel)
+        // No bot response found — skip (new/inactive channel).
+        let Some(last_bot_idx) = last_bot_idx else {
+            continue;
         };
+        // A bot post (e.g. a queued placeholder) answers nothing intake never recorded, so inputs
+        // past both the live intake checkpoint and phase 1's read range stay unanswered too.
+        let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|v| *v);
+        let unrecorded = live_checkpoint.map_or(0, |checkpoint| {
+            let floor = (phase1_read_through.get(&channel_id))
+                .map_or(checkpoint, |&read| read.max(checkpoint));
+            let past = recent.iter().take_while(|m| m.id.get() > floor).count();
+            // Only an input extends the slice; our own posts alone keep the channel quiet.
+            (recent[..past].iter())
+                .rposition(|m| Some(m.author.id.get()) != current_bot_user_id)
+                .map_or(0, |oldest_input| oldest_input + 1)
+        });
+        let slice_end = last_bot_idx.max(unrecorded);
+        if slice_end == 0 {
+            continue;
+        }
+        let last_bot_response_id = recent[last_bot_idx].id.get();
+        let unanswered_slice = &recent[..slice_end];
 
         // Collect existing queue IDs for dedup from the same snapshot used for
         // capacity so the initial phase2 claim boundary is internally coherent.
@@ -134,7 +151,6 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         let consumed = consumed_commands::read(provider, channel_id);
         let barrier = open_barriers.get(&channel_id).map(|r| r.barrier);
         let frontier = Phase2Frontier::new(barrier, last_bot_response_id);
-        let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|v| *v);
         let mut phase2_checkpoint = frontier.scan_checkpoint(live_checkpoint);
         let phase2_prior = catch_up_retry_prior(
             shared,

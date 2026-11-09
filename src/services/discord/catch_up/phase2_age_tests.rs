@@ -2,6 +2,8 @@ use chrono::{DateTime, TimeZone, Utc};
 
 use super::super::super::clock::{CatchUpClock, SystemClock};
 use super::*;
+#[path = "phase2_bot_boundary_tests.rs"]
+mod phase2_bot_boundary_tests;
 
 struct FakeClock {
     pair: Mutex<(DateTime<Utc>, Instant)>,

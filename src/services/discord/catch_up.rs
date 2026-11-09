@@ -499,7 +499,9 @@ struct SweepState {
     consumed_retry_states_this_cycle: HashMap<ChannelId, CatchUpRetryState>,
     incomplete_recent_channels: HashSet<ChannelId>,
     ttl_retired_channels: HashSet<ChannelId>,
+    // Open barriers bound phase 2's durable write and every retry cursor.
     open_barriers: HashMap<ChannelId, RetainedBarrier>,
+    phase1_read_through: HashMap<ChannelId, u64>,
 }
 
 async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_, A>) {
@@ -580,9 +582,6 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
     // Phase 2 must not bypass an incomplete unbounded Recent scan and persist a
     // newer recovery across the same unknown lower gap.
     let incomplete_recent_channels: HashSet<ChannelId> = HashSet::new();
-    let ttl_retired_channels = HashSet::new();
-    // Open barriers bound phase 2's durable write and every retry cursor.
-    let open_barriers: HashMap<ChannelId, RetainedBarrier> = HashMap::new();
 
     let context = SweepContext {
         deps: CatchUpDeps {
@@ -601,8 +600,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
     let mut state = SweepState {
         consumed_retry_states_this_cycle,
         incomplete_recent_channels,
-        ttl_retired_channels,
-        open_barriers,
+        ttl_retired_channels: HashSet::new(),
+        open_barriers: HashMap::new(),
+        phase1_read_through: HashMap::new(),
     };
     phase1_sweep::run(&context, &candidates, &mut state).await;
     phase2_sweep::run(&context, &candidates, &mut state).await;
