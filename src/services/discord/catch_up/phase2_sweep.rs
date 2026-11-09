@@ -118,6 +118,8 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         }
         let last_bot_response_id = recent[last_bot_idx].id.get();
         let unanswered_slice = &recent[..slice_end];
+        // The newest bot post bounds the slice, so read notice replies from the whole page.
+        let noticed = super::classification::noticed_messages(&recent, current_bot_user_id);
 
         // Collect existing queue IDs for dedup from the same snapshot used for
         // capacity so the initial phase2 claim boundary is internally coherent.
@@ -189,6 +191,7 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
                 existing_ids: &mut existing_ids,
                 settled_ids: &settled_ids,
                 consumed: &consumed,
+                noticed: &noticed,
                 allowed_bot_ids_phase2: &allowed_bot_ids_phase2,
                 announce_resolution_phase2,
                 notify_resolution_phase2,
@@ -264,6 +267,7 @@ struct MessageEvidence<'a> {
     existing_ids: &'a mut HashSet<u64>,
     settled_ids: &'a HashSet<u64>,
     consumed: &'a consumed_commands::ConsumedCommands,
+    noticed: &'a HashSet<u64>,
     allowed_bot_ids_phase2: &'a [u64],
     announce_resolution_phase2: health::UtilityBotUserIdResolution,
     notify_resolution_phase2: health::UtilityBotUserIdResolution,
@@ -475,6 +479,8 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
             },
             evidence.mailbox.claim_observation,
         );
+        let enqueue =
+            queue_io::input_ingress::notice_claimed(evidence.noticed.contains(&mid), enqueue);
         let enqueue = evidence
             .consumed
             .guard(enqueue, msg.id, &intervention_text)

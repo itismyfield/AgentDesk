@@ -497,6 +497,7 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
         .intervention_queue
         .len();
     let remaining_capacity = catch_up_remaining_queue_capacity(queue_initial_len);
+    let noticed = super::classification::noticed_messages(messages, current_bot_user_id);
 
     for msg in messages {
         let text = msg.content.trim().to_string();
@@ -709,6 +710,7 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
             },
             evidence.known_snapshot.claim_observation,
         );
+        let enqueue = queue_io::input_ingress::notice_claimed(noticed.contains(&mid), enqueue);
         let enqueue = evidence
             .consumed
             .guard(enqueue, msg.id, &intervention_text)

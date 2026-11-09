@@ -1,5 +1,24 @@
 use super::health::UtilityBotUserIdResolution;
 
+/// Messages this bot already answered with a queue-hold notice reply in the scanned history,
+/// possibly from another node on the same bot account; recovering them owes no second notice.
+pub(super) fn noticed_messages(
+    scanned: &[poise::serenity_prelude::Message],
+    bot_user_id: Option<u64>,
+) -> std::collections::HashSet<u64> {
+    use crate::services::discord::queue_io::input_ingress::Hold;
+    let own = |message: &&poise::serenity_prelude::Message| {
+        Some(message.author.id.get()) == bot_user_id && Hold::is_notice(&message.content)
+    };
+    (scanned.iter().filter(own))
+        .filter_map(|notice| notice.message_reference.as_ref())
+        .filter(|reference| {
+            reference.kind == poise::serenity_prelude::MessageReferenceKind::Default
+        })
+        .filter_map(|reference| reference.message_id.map(|id| id.get()))
+        .collect()
+}
+
 // Both phases ignore historical bot notices; humans quoting the marker can recover.
 pub(super) fn is_restart_gap_notice(author_is_bot: bool, text: &str) -> bool {
     author_is_bot && text.starts_with(super::CATCH_UP_TOO_OLD_NOTICE_PREFIX)
