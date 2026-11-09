@@ -341,13 +341,15 @@ async fn fetch_messages<A: CatchUpDiscordApi + ?Sized>(
         }
     };
 
-    if matches!(fetch_mode, CatchUpFetchMode::After(_))
-        && retry_state.is_some_and(|state| state.is_exhausted_hold())
-    {
+    // Membership barriers keep their retry anchor, but must not hide later pages.
+    if matches!(fetch_mode, CatchUpFetchMode::After(_)) && retry_state.is_some() {
         messages = match held_range::complete(api, channel_id, messages).await {
             Ok(messages) => messages,
             Err(error) => {
                 incomplete_recent_channels.insert(channel_id);
+                if let Some(retry_state) = retry_state {
+                    rearm_catch_up_retry_after_fetch_failure(shared, channel_id, retry_state);
+                }
                 tracing::warn!(target: "agentdesk::services::discord::catch_up",%channel_id, %error, "catch-up: held range unread; preserving hold");
                 return ControlFlow::Break(());
             }
@@ -358,8 +360,8 @@ async fn fetch_messages<A: CatchUpDiscordApi + ?Sized>(
     // newest-first page can be fully consumed by newer bot/system noise and
     // bury an age-window-eligible user message past page 1. Page backward
     // with `.before(oldest)` up to `CATCH_UP_RECENT_MAX_PAGES`, stopping as
-    // soon as a page's oldest message exceeds the age window. The `After`
-    // path keeps its precise single-page contract and is left untouched.
+    // soon as a page's oldest message exceeds the age window. Fresh `After`
+    // scans keep one page; retries finish the finite snapshot above.
     let mut fetch_completeness = CatchUpFetchCompleteness::Complete;
     if matches!(fetch_mode, CatchUpFetchMode::Recent) {
         let mut pages_fetched: u8 = 1;
