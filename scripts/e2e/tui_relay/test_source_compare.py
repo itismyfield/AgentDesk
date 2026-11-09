@@ -16,6 +16,7 @@ import run_tui_relay as driver  # noqa: E402
 
 
 MARKER = "[E2E:S5:fixture:ONE]"
+CURRENT_MARKER = "[E2E:S5:f16d05ec6b29-fixture:ONE]"
 
 
 def message(mid, text=MARKER, *, author="relay", bot=True):
@@ -44,6 +45,46 @@ class SourceCompareTests(unittest.TestCase):
     def test_ok(self):
         self.assertEqual(self.compare(), dict(native_user_count=1, discord_input_mirror_count=1,
                                              relay_body_count=1, direct_input_notice_count=0, verdict="ok"))
+
+    def test_current_markers_compare_by_raw_run_id_for_claude_and_codex(self):
+        native = [self.user(CURRENT_MARKER), {"type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text", "text": CURRENT_MARKER}]}}]
+        messages = [message(1, CURRENT_MARKER, author=OUR_BOT_ID), message(2, CURRENT_MARKER)]
+        for row in native:
+            with self.subTest(provider=row["type"]):
+                self.write([row])
+                self.assertEqual(sc.compare(self.path, messages, run_id="fixture"), {
+                    CURRENT_MARKER: dict(native_user_count=1, discord_input_mirror_count=1,
+                        relay_body_count=1, direct_input_notice_count=0, verdict="ok")})
+                self.assertEqual(self.main_rc(messages), 0)
+
+    def test_current_marker_missing_relay_is_failure(self):
+        self.write([self.user(CURRENT_MARKER)])
+        messages = [message(1, CURRENT_MARKER, author=OUR_BOT_ID)]
+        self.assertEqual(sc.compare(self.path, messages, run_id="fixture")[CURRENT_MARKER]["verdict"],
+                         "missing_relay")
+        self.assertEqual(self.main_rc(messages), 1)
+
+    def test_legacy_and_current_records_remain_distinct(self):
+        self.write([self.user(), self.user(CURRENT_MARKER)])
+        messages = self.messages + [message(3, CURRENT_MARKER, author=OUR_BOT_ID), message(4, CURRENT_MARKER)]
+        result = sc.compare(self.path, messages, run_id="fixture")
+        self.assertEqual({marker: row["verdict"] for marker, row in result.items()},
+                         {MARKER: "ok", CURRENT_MARKER: "ok"})
+
+    def test_run_id_rejects_foreign_hashes_and_other_raw_ids(self):
+        foreign = ["[E2E:S5:03d85b3f65bc-fixture-other:ONE]",
+                   "[E2E:S5:03d85b3f65bc-fixture:ONE]",
+                   "[E2E:S5:f16d05ec6b29-fixture-other:ONE]", "[E2E:S5:fixture-other:ONE]"]
+        for marker in foreign:
+            with self.subTest(marker=marker):
+                messages = [message(1, marker, author=OUR_BOT_ID), message(2, marker)]
+                self.write([self.user(marker)])
+                with self.assertRaisesRegex(ValueError, "no markers found"):
+                    sc.compare(self.path, messages, run_id="fixture")
+                self.write([self.user(CURRENT_MARKER), self.user(marker)])
+                messages += [message(3, CURRENT_MARKER, author=OUR_BOT_ID), message(4, CURRENT_MARKER)]
+                self.assertEqual(set(sc.compare(self.path, messages, run_id="fixture")), {CURRENT_MARKER})
 
     def test_lost_native_input(self):
         self.write([])
@@ -396,6 +437,29 @@ class AutonomousEvidenceTests(unittest.TestCase):
         with patch.object(sc, "resolve_binding", return_value=binding), patch.object(sc, "fetch_messages") as fetch, contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(sc.main(["--agent-id", "worker", "--run-id", "fixture", "--autonomous-background-turn"]), 0)
             fetch.assert_not_called()
+
+    def test_s4_cli_passes_current_markers_to_native_evidence(self):
+        self.rows = json.loads(json.dumps(self.rows).replace(":fixture:", ":f16d05ec6b29-fixture:"))
+        self.write(self.rows)
+        binding = {"provider": "claude", "channel_id": "123", "transcript_path": str(self.path)}
+        with patch.object(sc, "resolve_binding", return_value=binding), \
+             patch.object(sc, "fetch_messages") as fetch, \
+             patch.object(sc, "autonomous_background_turn", wraps=sc.autonomous_background_turn) as evidence, \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(sc.main(["--agent-id", "worker", "--run-id", "fixture", "--autonomous-background-turn"]), 0)
+        evidence.assert_called_once_with(str(self.path), armed_marker="[E2E:S4:f16d05ec6b29-fixture:ARMED]",
+                                         auto_marker="[E2E:S4:f16d05ec6b29-fixture:AUTO]")
+        self.assertEqual(json.loads(out.getvalue())["autonomous_background_turn"]["task_id"], "task-1")
+        fetch.assert_not_called()
+
+    def test_s4_invalid_current_evidence_cannot_fall_back_to_legacy(self):
+        current = json.loads(json.dumps(self.rows).replace(":fixture:", ":f16d05ec6b29-fixture:"))
+        self.write([current[0]] + self.rows)
+        binding = {"provider": "claude", "channel_id": "123", "transcript_path": str(self.path)}
+        with patch.object(sc, "resolve_binding", return_value=binding), \
+             contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(sc.main(["--agent-id", "worker", "--run-id", "fixture", "--autonomous-background-turn"]), 2)
+        self.assertIn("background Bash", err.getvalue())
 
 
 class AutonomousDispatchTests(unittest.TestCase):
