@@ -144,6 +144,7 @@ async fn boot_live_pending_auto_reset_catch_up_commits_once_and_preserves_metada
             "sources":[{"message_id":id(1, 700).get(),"queued_generation":7}]},
         "settled_at_ms":chrono::Utc::now().timestamp_millis() as u64}]);
     std::fs::write(&path, seed.to_string()).unwrap();
+    let seeded = std::fs::read(&path).unwrap();
     let http = Arc::new(serenity::Http::new("unit-test-token"));
     let stale = crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests(
         &http,
@@ -152,6 +153,13 @@ async fn boot_live_pending_auto_reset_catch_up_commits_once_and_preserves_metada
     )
     .await;
     assert!(stale.is_empty());
+    // A terminal identity is delivered history: boot leaves the file to the next input's owner.
+    assert!(!adopted(&fx, channel).await, "boot adopted settled history");
+    assert_eq!(std::fs::read(&path).unwrap(), seeded);
+    // The untouched file is adopted on demand, as ingress does for the channel's next input.
+    let namespace = format!("claude/{}", fx.shared.token_hash);
+    let handle = fx.shared.mailbox(channel);
+    handle.v2_ensure(path.clone(), namespace).await.unwrap();
     let metadata = snapshot(&fx, channel).await["terminal_identities"].clone();
     assert_eq!(metadata, seed["terminal_identities"]);
     let (checkpoint, q) = (id(1, 600), id(2, 150));
@@ -391,8 +399,9 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
         for (index, case) in cases.iter().enumerate() {
             let channel = ChannelId::new(7_676_510 + index as u64);
             let handle = fx.shared.mailbox(channel);
-            // A told unconfirmed retention is owed to no owner: boot leaves it to the next input.
-            let unowned = boot == 1 && *case == "retained";
+            // A told unconfirmed retention or a terminal identity is owed to no owner: boot
+            // leaves it to the next input.
+            let unowned = boot == 1 && matches!(*case, "retained" | "terminal");
             assert_eq!(adopted(&fx, channel).await, !unowned, "boot {boot} adopted {case}");
             let before = if unowned { None } else { Some(snapshot(&fx, channel).await) };
             let (original, identity, notice) = &fixtures[index];

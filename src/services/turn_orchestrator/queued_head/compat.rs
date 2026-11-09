@@ -8,8 +8,8 @@ pub(crate) enum SnapshotRead {
 }
 
 impl SnapshotRead {
-    /// Whether a V2 file needs its owner: queued, attempted, owed retained, terminal or receipt
-    /// evidence, or a non-queued bind not closed by an unowed retained attempt.
+    /// Whether a V2 file holds queued, attempted or owed retained input, an owed drop receipt, or an
+    /// opaque/unclosed bind. Settled binds and terminal identities are delivered history, kept as is.
     pub(crate) fn v2_holds_input(&self) -> bool {
         use super::v2_types::BindAt;
         let Self::ReadOnlyV2(v2) = self else {
@@ -19,15 +19,14 @@ impl SnapshotRead {
             (v2.retained_inputs.iter()).any(|entry| entry.closes_bind(identity, attempt))
         };
         let bound = |bind: &super::v2_types::AdmissionBind| match &bind.at {
-            BindAt::Queued { .. } => false,
+            BindAt::Queued { .. } | BindAt::Settled { .. } => false,
             BindAt::Attempt { identity, attempt } => !closed(identity, attempt),
-            BindAt::Opaque | BindAt::Settled { .. } => true,
+            BindAt::Opaque => true,
         };
         !v2.items.is_empty()
             || !v2.owed_drop_receipts.is_empty()
             || v2.head_injection.is_some()
             || v2.retained_inputs.iter().any(|entry| entry.owed_to_owner())
-            || !v2.terminal_identities.is_empty()
             || v2.admission_binds.iter().any(bound)
     }
 }
