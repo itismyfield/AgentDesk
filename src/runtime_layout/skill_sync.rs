@@ -93,7 +93,7 @@ pub(super) fn sync_managed_skills(root: &Path) -> Result<SkillSyncReport, String
     let mut report = SkillSyncReport::default();
 
     for (skill_name, skill_dir) in skill_dirs {
-        let deployment = skill_deployment_plan(&manifest, &skill_name, root, &workspace_names);
+        let deployment = skill_deployment_plan(&manifest, &skill_name, root);
 
         if !deployment.global_providers.is_empty() {
             let Some(home) = current_home_dir() else {
@@ -154,7 +154,6 @@ fn skill_deployment_plan(
     manifest: &SkillManifest,
     skill_name: &str,
     root: &Path,
-    workspace_names: &[String],
 ) -> SkillDeploymentPlan {
     if let Some(entry) = manifest.skills.get(skill_name) {
         let providers = normalize_provider_list(&entry.providers)
@@ -166,17 +165,10 @@ fn skill_deployment_plan(
             providers
         };
         let global_enabled = entry.global.unwrap_or_else(|| {
-            if manifest.skills.is_empty()
-                && manifest.global_core_skills.is_empty()
-                && manifest.legacy_skills.is_empty()
-            {
-                true
-            } else {
-                manifest
-                    .global_core_skills
-                    .iter()
-                    .any(|name| name == skill_name)
-            }
+            manifest
+                .global_core_skills
+                .iter()
+                .any(|name| name == skill_name)
         });
         let workspace_targets = if entry.workspaces.is_empty() {
             Vec::new()
@@ -201,17 +193,8 @@ fn skill_deployment_plan(
         return legacy_skill_deployment_plan(&entry.targets);
     }
 
-    if manifest.skills.is_empty()
-        && manifest.global_core_skills.is_empty()
-        && manifest.legacy_skills.is_empty()
-    {
-        let providers = all_skill_providers();
-        return SkillDeploymentPlan {
-            global_providers: providers.clone(),
-            workspace_targets: workspace_targets_for_names(root, workspace_names, &providers),
-        };
-    }
-
+    // Unlisted skills deploy only via `global_core_skills` or a legacy-format manifest, so an
+    // empty manifest links nothing, including vault skills the boot migration cached.
     if !manifest.legacy_skills.is_empty() {
         return SkillDeploymentPlan {
             global_providers: all_skill_providers(),
@@ -560,55 +543,24 @@ pub(super) fn ensure_managed_skill_dir(
     // Never copy a skill onto itself; otherwise re-copy whenever the managed cache no
     // longer reflects the source (#4256: it used to be copy-once, ignoring later edits).
     if !same_canonical_path(&managed_dir, source_skill_dir)
-        && managed_skill_dir_is_stale(skill_name, source_skill_dir, &managed_dir)?
+        && managed_skill_dir_is_stale(source_skill_dir, &managed_dir)?
     {
         refresh_managed_skill_dir(root, skill_name, source_skill_dir, &managed_dir)?;
     }
-    rewrite_managed_skill_paths(skill_name, &managed_dir)?;
     Ok(managed_dir)
-}
-
-/// Relative paths whose managed copies are content-rewritten by
-/// [`rewrite_managed_skill_paths`]; shared with the freshness check so the idempotent
-/// rewrite does not make a rewritten cache look perpetually stale.
-fn managed_skill_rewrite_relpaths(skill_name: &str) -> Vec<PathBuf> {
-    match skill_name {
-        "memory-read" | "memory-write" => vec![PathBuf::from("SKILL.md")],
-        "memory-merge" => vec![
-            PathBuf::from("SKILL.md"),
-            PathBuf::from("references").join("architecture.md"),
-            PathBuf::from("references").join("classification-guide.md"),
-            PathBuf::from("references").join("phase-details.md"),
-            PathBuf::from("references").join("report-template.md"),
-        ],
-        _ => Vec::new(),
-    }
-}
-
-fn rewrite_managed_skill_paths(skill_name: &str, skill_dir: &Path) -> Result<(), String> {
-    for relative in managed_skill_rewrite_relpaths(skill_name) {
-        rewrite_text_file_paths(&skill_dir.join(relative))?;
-    }
-    Ok(())
 }
 
 /// Returns `true` when the managed cache must be re-copied: never populated, drifted
 /// from the source, or carrying a file the source dropped (mirrors `rsync -aL --delete`).
-fn managed_skill_dir_is_stale(
-    skill_name: &str,
-    source_skill_dir: &Path,
-    managed_dir: &Path,
-) -> Result<bool, String> {
+fn managed_skill_dir_is_stale(source_skill_dir: &Path, managed_dir: &Path) -> Result<bool, String> {
     if !managed_dir.join("SKILL.md").is_file() {
         return Ok(true); // never copied yet
     }
-    let rewrite_relpaths = managed_skill_rewrite_relpaths(skill_name);
     let mut source_relpaths = BTreeSet::new();
     if source_skill_content_differs(
         source_skill_dir,
         managed_dir,
         Path::new(""),
-        &rewrite_relpaths,
         &mut source_relpaths,
     )? {
         return Ok(true);
@@ -624,7 +576,6 @@ fn source_skill_content_differs(
     src: &Path,
     managed: &Path,
     relative: &Path,
-    rewrite_relpaths: &[PathBuf],
     source_relpaths: &mut BTreeSet<PathBuf>,
 ) -> Result<bool, String> {
     if should_skip_skill_entry(src) {
@@ -645,13 +596,7 @@ fn source_skill_content_differs(
                 ));
             }
         };
-        return source_skill_content_differs(
-            &resolved,
-            managed,
-            relative,
-            rewrite_relpaths,
-            source_relpaths,
-        );
+        return source_skill_content_differs(&resolved, managed, relative, source_relpaths);
     }
 
     if meta.is_dir() {
@@ -666,7 +611,6 @@ fn source_skill_content_differs(
                 &child,
                 &managed.join(name),
                 &relative.join(name),
-                rewrite_relpaths,
                 source_relpaths,
             )? {
                 return Ok(true);
@@ -682,28 +626,9 @@ fn source_skill_content_differs(
     let managed_bytes =
         fs::read(managed).map_err(|e| format!("Failed to read '{}': {e}", managed.display()))?;
 
-    let differs = if rewrite_relpaths.iter().any(|p| p == relative) {
-        // Compare against the expected rewrite so a rewritten cache is not flagged stale.
-        match fs::read_to_string(src) {
-            Ok(source_text) => {
-                let mut expected = source_text;
-                for (from, to) in skill_path_replacements() {
-                    expected = expected.replace(from, to);
-                }
-                expected.as_bytes() != managed_bytes.as_slice()
-            }
-            Err(_) => {
-                let source_bytes = fs::read(src)
-                    .map_err(|e| format!("Failed to read '{}': {e}", src.display()))?;
-                source_bytes != managed_bytes
-            }
-        }
-    } else {
-        let source_bytes =
-            fs::read(src).map_err(|e| format!("Failed to read '{}': {e}", src.display()))?;
-        source_bytes != managed_bytes
-    };
-    Ok(differs)
+    let source_bytes =
+        fs::read(src).map_err(|e| format!("Failed to read '{}': {e}", src.display()))?;
+    Ok(source_bytes != managed_bytes)
 }
 
 /// Reports whether the managed cache carries a regular file deleted upstream.
@@ -737,56 +662,6 @@ fn managed_skill_has_extra_files(
         }
     }
     Ok(false)
-}
-
-fn rewrite_text_file_paths(path: &Path) -> Result<(), String> {
-    if !path.is_file() {
-        return Ok(());
-    }
-    let original = fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read '{}': {e}", path.display()))?;
-    let mut rewritten = original.clone();
-    for (from, to) in skill_path_replacements() {
-        rewritten = rewritten.replace(from, to);
-    }
-    if rewritten != original {
-        fs::write(path, rewritten)
-            .map_err(|e| format!("Failed to write '{}': {e}", path.display()))?;
-    }
-    Ok(())
-}
-
-fn skill_path_replacements() -> &'static [(&'static str, &'static str)] {
-    &[
-        (
-            "~/.adk/release/shared_agent_memory/shared_knowledge.md",
-            "~/.adk/release/config/memories/shared-agent-knowledge/shared_knowledge.md",
-        ),
-        (
-            "~/.adk/release/shared_agent_memory/{role_id}.json",
-            "~/.adk/release/config/memories/shared-agent-memory/{role_id}.json",
-        ),
-        (
-            "~/.adk/release/shared_agent_memory/{roleId}.json",
-            "~/.adk/release/config/memories/shared-agent-memory/{roleId}.json",
-        ),
-        (
-            "~/.adk/release/shared_agent_memory/archive/{YYYY-MM-DD}/",
-            "~/.adk/release/config/memories/archive/{YYYY-MM-DD}/",
-        ),
-        (
-            "~/ObsidianVault/RemoteVault/agents/{role_id}/long-term-memory/",
-            "~/.adk/release/config/memories/long-term/{role_id}/",
-        ),
-        (
-            "~/ObsidianVault/RemoteVault/agents/{roleId}/long-term-memory/",
-            "~/.adk/release/config/memories/long-term/{roleId}/",
-        ),
-        (
-            "~/.claude/projects/-Users-itismyfield--adk-release-workspaces-{workspace}/memory/",
-            "~/.claude/projects/*{workspace}*/memory/",
-        ),
-    ]
 }
 
 fn provider_target_dir(provider: &str, base: &Path) -> PathBuf {
@@ -1047,38 +922,6 @@ mod skill_cache_freshness_tests {
         assert_eq!(mtime(&skill_md), pinned, "unchanged source must not churn");
     }
 
-    #[test]
-    fn rewritten_skill_is_not_perpetually_stale() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let source = root.join("source-skills").join("memory-read");
-        write_file(
-            &source.join("SKILL.md"),
-            "see ~/.adk/release/shared_agent_memory/shared_knowledge.md\n",
-        );
-
-        let managed = ensure_managed_skill_dir(root, "memory-read", &source).unwrap();
-        let skill_md = managed.join("SKILL.md");
-        let rewritten = fs::read_to_string(&skill_md).unwrap();
-        assert!(
-            rewritten.contains(
-                "~/.adk/release/config/memories/shared-agent-knowledge/shared_knowledge.md"
-            ),
-            "managed copy should carry the rewritten path"
-        );
-        assert!(!rewritten.contains("release/shared_agent_memory/shared_knowledge.md"));
-
-        // The managed copy differs from the source only because of the idempotent
-        // path rewrite, so a second sync must recognize it as fresh (no churn).
-        let pinned = pin_mtime(&skill_md);
-        ensure_managed_skill_dir(root, "memory-read", &source).unwrap();
-        assert_eq!(
-            mtime(&skill_md),
-            pinned,
-            "rewrite-aware freshness check must not re-copy a rewritten skill"
-        );
-    }
-
     /// #4256 concurrency safety: a unique-named staging dir left behind by a crashed prior
     /// refresh must not corrupt a later one, and a lockfile held by a "concurrent" process
     /// must make the refresh skip (converge later) instead of racing the swap.
@@ -1248,6 +1091,86 @@ mod skill_cache_freshness_tests {
         assert_eq!(
             fs::read_to_string(managed.join("SKILL.md")).unwrap(),
             "v2\n"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod shipped_tree_tests {
+    use super::*;
+
+    fn entries_under(dir: &Path, base: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+                entries_under(&path, base, out);
+            } else {
+                out.push(path.strip_prefix(base).unwrap().to_path_buf());
+            }
+        }
+    }
+
+    /// The repo `skills/` tree, deployed as-is, audits clean and through boot and sync adds
+    /// no provider link: not for a vault skill boot caches, nor by reviving a retired one.
+    #[test]
+    fn shipped_skills_tree_links_nothing_and_revives_no_stale_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime");
+        let home = temp.path().join("home");
+        let _root_env = crate::config::set_agentdesk_root_for_test(&root);
+        let _home_env =
+            crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("HOME", &home);
+        let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+        copy_skill_dir_resolving_symlinks(&shipped, &managed_skills_root(&root)).unwrap();
+        let audit = crate::server::routes::skills_manifest_audit::audit_skill_manifest_agents(
+            crate::server::routes::skills_manifest_audit::build_manifest_audit_request(
+                ["live".to_string()].into(),
+                Some(["live".to_string()].into()),
+                Some(BTreeSet::new()),
+                vec![(
+                    managed_skills_manifest_path(&root),
+                    crate::server::routes::skills_manifest_audit::DirectoryScope::OwnManifest,
+                )],
+            ),
+        );
+        assert_eq!(
+            audit.warning(),
+            None,
+            "the shipped manifest must audit clean"
+        );
+
+        // A retired skill's link dangles once deploy replaced the tree; a vault skill
+        // linked into the codex home is what the boot migration copies into the cache.
+        let stale = home.join(".claude").join("commands").join("memory-read.md");
+        let vault_link = home.join(".codex").join("skills").join("vault-skill");
+        let vault_skill = temp.path().join("vault").join("vault-skill");
+        for dir in [
+            stale.parent().unwrap(),
+            vault_link.parent().unwrap(),
+            &vault_skill,
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(vault_skill.join("SKILL.md"), "vault\n").unwrap();
+        let stale_target = managed_skills_root(&root)
+            .join("memory-read")
+            .join("SKILL.md");
+        std::os::unix::fs::symlink(&stale_target, &stale).unwrap();
+        std::os::unix::fs::symlink(&vault_skill, &vault_link).unwrap();
+
+        crate::runtime_layout::ensure_runtime_layout(&root).unwrap();
+        let report = sync_managed_skills(&root).unwrap();
+
+        assert_eq!(report, SkillSyncReport::default());
+        let mut linked = Vec::new();
+        entries_under(&home, &home, &mut linked);
+        linked.sort();
+        let expected = [&stale, &vault_link].map(|p| p.strip_prefix(&home).unwrap().to_path_buf());
+        assert_eq!(linked, expected, "no provider link may be created");
+        assert_eq!(fs::read_link(&vault_link).unwrap(), vault_skill);
+        assert!(
+            !stale.exists(),
+            "the retired skill's link must stay unresolved"
         );
     }
 }

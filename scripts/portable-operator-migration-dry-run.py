@@ -13,7 +13,6 @@ from typing import Any
 MIGRATED_AGENTFACTORY_ROUTINES = (
     "migrated-launchd/memento-daily-report.js",
     "migrated-launchd/memento-hygiene.js",
-    "migrated-launchd/memory-merge.js",
 )
 
 

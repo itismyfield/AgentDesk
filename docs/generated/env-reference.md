@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 94
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 93
 - Platform and third-party variables: 40
 
 ## AgentDesk variables
@@ -79,7 +79,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_KAKAO_ENABLED` | `src/services/kakao.rs`, `src/services/operator_connectors.rs` |  |
 | `AGENTDESK_KAKAO_LANDING_URL` | `src/services/kakao.rs` |  |
 | `AGENTDESK_KAKAO_TOKEN_STORE_DIR` | `src/services/kakao.rs`, `src/services/kakao/token_store.rs` | Offline settings probe. |
-| `AGENTDESK_MEMORY_MERGE_SKILL` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_OBSIDIAN_AGENTS_SRC` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_OBSIDIAN_SKILL_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
