@@ -1244,6 +1244,7 @@ src/
 │   │   │   ├── phase1_sweep.rs
 │   │   │   ├── phase2.rs
 │   │   │   ├── phase2_age_tests.rs
+│   │   │   ├── phase2_bot_boundary_tests.rs
 │   │   │   ├── phase2_sweep.rs
 │   │   │   ├── retry_state.rs
 │   │   │   ├── scan_progress.rs
