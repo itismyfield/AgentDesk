@@ -135,10 +135,6 @@ def launchd_env_example(root: Path) -> str:
                 "AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR",
                 root / "workspaces" / "agentfactory",
             ),
-            shell_export(
-                "AGENTDESK_MEMORY_MERGE_SKILL",
-                root / "skills" / "memory-merge" / "SKILL.md",
-            ),
             "",
             "# Optional Obsidian connector paths. Leave commented when not installed.",
             commented_shell_export("OBSIDIAN_VAULT_ROOT", obsidian_vault),

@@ -39,7 +39,7 @@ class PortableOperatorMigrationTests(unittest.TestCase):
             plan["env_overrides"]["AGENTDESK_OBSIDIAN_AGENTS_SRC"],
             agents_src.as_posix(),
         )
-        self.assertIn("migrated-launchd/memory-merge.js", plan["routine_overrides"])
+        self.assertIn("migrated-launchd/memento-hygiene.js", plan["routine_overrides"])
         rendered = json.dumps(plan)
         self.assertNotIn("/Users/itismyfield", rendered)
         self.assertNotIn("mac-mini-release", rendered)

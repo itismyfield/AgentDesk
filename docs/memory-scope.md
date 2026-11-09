@@ -79,7 +79,7 @@ Re-read the authoritative file instead. This includes:
 | Runtime, Discord, database and MCP declarations | Runtime YAML and settings surfaces in [`config-domains.md`](config-domains.md) |
 | Policy hooks and pipeline | `policies/` |
 | Skill instructions | The skill's `SKILL.md` |
-| SAM / SAK / long-term file memory | The memory tiers in [`source-of-truth.md`](source-of-truth.md) |
+| Retired SAM / SAK / LTM file memory (Memento is canonical) | The memory tiers in [`source-of-truth.md`](source-of-truth.md) |
 | Operational paths and ownership | [`source-of-truth.md`](source-of-truth.md) |
 
 Treat canonical files as authoritative when a memory duplicates them. Broad

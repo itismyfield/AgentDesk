@@ -200,9 +200,7 @@ fn migrated_launchd_builtin_required_paths(script_ref: &str) -> AppResult<Vec<Re
     let mut paths = Vec::new();
     if matches!(
         script_ref,
-        "migrated-launchd/memento-daily-report.js"
-            | "migrated-launchd/memento-hygiene.js"
-            | "migrated-launchd/memory-merge.js"
+        "migrated-launchd/memento-daily-report.js" | "migrated-launchd/memento-hygiene.js"
     ) {
         let workdir = migrated_env_path("AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR")
             .or_else(|| migrated_workspace_path("agentfactory"))
@@ -215,23 +213,6 @@ fn migrated_launchd_builtin_required_paths(script_ref: &str) -> AppResult<Vec<Re
             label: "AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR".to_string(),
             path: workdir,
             kind: RequiredPathKind::Dir,
-        });
-    }
-    if script_ref == "migrated-launchd/memory-merge.js" {
-        let skill = migrated_env_path("AGENTDESK_MEMORY_MERGE_SKILL")
-            .or_else(|| {
-                crate::config::runtime_root()
-                    .map(|root| root.join("skills").join("memory-merge").join("SKILL.md"))
-            })
-            .ok_or_else(|| {
-                AppError::conflict(
-                    "migrated routine memory-merge is invalid: AGENTDESK_MEMORY_MERGE_SKILL is unavailable",
-                )
-            })?;
-        paths.push(RequiredPath {
-            label: "AGENTDESK_MEMORY_MERGE_SKILL".to_string(),
-            path: skill,
-            kind: RequiredPathKind::File,
         });
     }
     match script_ref {
@@ -612,7 +593,6 @@ const MIGRATED_RESOLVER_ENV_KEYS: &[&str] = &[
     "AGENTDESK_OBSIDIAN_AGENTS_SRC",
     "AGENTDESK_OBSIDIAN_SKILL_ROOT",
     "AGENTDESK_AGENT_FEEDBACK_INBOX",
-    "AGENTDESK_MEMORY_MERGE_SKILL",
 ];
 
 fn migrated_zprofile_env() -> HashMap<String, String> {
@@ -863,7 +843,7 @@ mod tests {
     };
 
     struct MigratedEnvGuard {
-        _env: [crate::config::TestEnvVarGuard; 12],
+        _env: [crate::config::TestEnvVarGuard; 11],
         _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
     }
 
@@ -877,7 +857,7 @@ mod tests {
         }
     }
 
-    const MIGRATED_ENV_TEST_VARS: [&str; 12] = [
+    const MIGRATED_ENV_TEST_VARS: [&str; 11] = [
         "HOME",
         "USERPROFILE",
         "AGENTDESK_SOURCE_ZPROFILE",
@@ -889,7 +869,6 @@ mod tests {
         "AGENTDESK_OBSIDIAN_AGENTS_SRC",
         "AGENTDESK_OBSIDIAN_SKILL_ROOT",
         "AGENTDESK_AGENT_FEEDBACK_INBOX",
-        "AGENTDESK_MEMORY_MERGE_SKILL",
     ];
 
     const ENV_FIXTURES: &[fn()] = &[
@@ -1047,7 +1026,7 @@ mod tests {
 
     #[test]
     fn migrated_launchd_entrypoint_validation_uses_repo_relative_fallback() {
-        validate_migrated_launchd_entrypoint("migrated-launchd/memory-merge.js", None, &[])
+        validate_migrated_launchd_entrypoint("migrated-launchd/memento-hygiene.js", None, &[])
             .expect("repo checkout includes migrated shell entrypoint");
     }
 

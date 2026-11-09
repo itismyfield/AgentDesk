@@ -61,16 +61,16 @@ from the runtime root (and peer nodes) too.
 | 7 | `com.itismyfield.family-morning-briefing.yohoejang` | `migrated-launchd/family-morning-briefing-yohoejang.js` | `31 6 * * *` | `personal-yobiseo` | cutover (stage-paused) |
 | 8 | `com.itismyfield.memento-daily-report` | `migrated-launchd/memento-daily-report.js` | `0 9 * * *` | `personal-obiseo` | cutover (stage-paused) |
 | 9 | `com.itismyfield.memento-hygiene` | `migrated-launchd/memento-hygiene.js` | `0 6 * * *` | `personal-obiseo` | cutover (stage-paused) |
-| 10 | `com.itismyfield.memory-merge` | `migrated-launchd/memory-merge.js` | `0 6 * * *` | `project-agentdesk` | cutover (stage-paused) |
+| 10 | `com.itismyfield.memory-merge` | — | — | — | 폐기(11-09): skill and entrypoint removed, never attach |
 | 11 | `com.itismyfield.token-daily-report` | `migrated-launchd/token-daily-report.js` | `0 7 * * *` | `token-manager` | cutover (stage-paused) |
 | 12 | `com.agentdesk.queue-stability-batch` | `migrated-launchd/queue-stability-batch.js` | `0 4 * * *` | `project-agentdesk` | parallel-run (idempotent) |
 
-Owner decision for jobs 8/9/10: the two Memento store jobs belong to
+Owner decision for jobs 8/9: the two Memento store jobs belong to
 `personal-obiseo` because they operate on the operator-private Memento
-store/reporting channel; `memory-merge` belongs to `project-agentdesk`
-because it maintains the AgentDesk-managed memory tier files and skill
-catalog. They still use the stage-paused cutover flow because they mutate
-external memory state and must not true-parallel-run with launchd.
+store/reporting channel. They still use the stage-paused cutover flow because
+they mutate external memory state and must not true-parallel-run with launchd.
+Job 10 (`memory-merge`) was retired 2026-11-09 with the file-based memory
+skills; its script and skill no longer exist.
 
 ## Routine cron timezone
 
@@ -212,13 +212,12 @@ done
 # Expected: every row reports "paused".
 ```
 
-### Group C — stage-paused attach without schedule (memory-state jobs: 8, 9, 10)
+### Group C — stage-paused attach without schedule (memory-state jobs: 8, 9)
 
-The launchd plists for memento-daily-report, memento-hygiene, and
-memory-merge keep firing until cutover. Attach these via the Group B
-pattern (no schedule, then pause, then PATCH schedule at cutover) because
-they mutate external state (memento store / merged memory files), so true
-parallel-run is not safe.
+The launchd plists for memento-daily-report and memento-hygiene keep firing
+until cutover. Attach these via the Group B pattern (no schedule, then pause,
+then PATCH schedule at cutover) because they mutate the memento store, so true
+parallel-run is not safe. Job 10 (memory-merge) is retired; do not attach it.
 
 ```bash
 # Job 8 — memento-daily-report (cutover schedule: 0 9 * * *)
@@ -240,16 +239,6 @@ ID9=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -
   "timeout_secs": 1800
 }' | jq -r '.routine.id')
 curl -sf "$API/api/routines/$ID9/pause" -X POST
-
-# Job 10 — memory-merge (cutover schedule: 0 6 * * *)
-ID10=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-  "script_ref": "migrated-launchd/memory-merge.js",
-  "name": "memory-merge",
-  "agent_id": "project-agentdesk",
-  "execution_strategy": "fresh",
-  "timeout_secs": 1800
-}' | jq -r '.routine.id')
-curl -sf "$API/api/routines/$ID10/pause" -X POST
 ```
 
 ## Cross-leader prerequisite — script availability
@@ -302,9 +291,7 @@ agentdesk.routines.register({
 ```
 
 Memory-state jobs also require the resolved
-`AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR` directory, and `memory-merge`
-requires `AGENTDESK_MEMORY_MERGE_SKILL` or the default
-`$AGENTDESK_ROOT_DIR/skills/memory-merge/SKILL.md` file.
+`AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR` directory.
 
 If a migrated routine depends on an operator-specific vault, prompt,
 connector, or workdir, declare the stable contract in routine metadata
@@ -458,11 +445,11 @@ cutover protocol.
    `mv ~/Library/LaunchAgents/com.agentdesk.queue-stability-batch.plist
    ~/Library/LaunchAgents.disabled/` so Rollback C is avoidable.
 
-### Jobs 8/9/10 — memory-state cutover
+### Jobs 8/9 — memory-state cutover
 
 These now have concrete owners, but still use the stage-paused →
 cutover protocol. The launchd plists keep firing until the cutover
-moment because these jobs write/report Memento and memory-tier state.
+moment because these jobs write/report Memento state. Job 10 is retired.
 
 ### Per-routine observability
 
