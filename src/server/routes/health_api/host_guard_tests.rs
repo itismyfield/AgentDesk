@@ -169,9 +169,8 @@ async fn stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg() {
     db.drop().await;
 }
 
-// The repair's queue gate sees any input the channel's owner holds: a waiting V2 or V1 item, or a V2
-// front an attempt carries but the waiting depth leaves out, refuses with `queue_not_empty` and keeps
-// its file; an empty one proceeds.
+// The repair gate refuses with `queue_not_empty`, keeping the file, while the owner holds input: a
+// waiting V1 or V2 item, or a V2 front an attempt carries; an empty one proceeds.
 #[tokio::test(flavor = "current_thread")]
 async fn stale_mailbox_repair_refuses_while_the_owner_queue_holds_input_pg() {
     use crate::services::provider::ProviderKind;
