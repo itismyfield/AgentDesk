@@ -1,0 +1,9 @@
+# TUI O reader retirement
+
+A Codex source without a sealed execution end may retire when its binding history proves that a later execution replaced it in the same pane, its successor has captured a record, and the old source is fully captured. Its pathname must still identify the retained file, its mtime must be at least `RETIRED_WATCH` (24 hours) old, and its complete fingerprint (identity, size, mtime and change time) must remain stable for `RETIRE_QUIET` (10 seconds). The durable cursor's prefix and EOF are verified before retirement. The mtime age survives writer restarts; the short fingerprint observation starts again on resume.
+
+A recent write, an unread tail, an unresolved successor, or unknown replacement history keeps the reader active. Retirement only changes the durable cursor and reader watch; it does not delete the transcript or retained spool. Existing provider end proofs retain their shorter quiet retirement path. Claude's retirement policy is unchanged.
+
+Retired sources retain the existing growth watch. Growth un-retires the cursor, resumes capture and raises `RetiredSourceGrew`; a growing old reader still raises `SourceStillGrowing`. Legacy readers watch the retained descriptor for 24 hours before closing it. This change does not extend that existing watch horizon.
+
+`reader_retention_stalled` is reconciled after cursor retirement. Once raised, it remains active while any of those retained readers remain; it clears when none remain. Automatic sweep logs distinguish unproven skips whose file is younger than 24 hours (`unproven_young`) from evidence or observation skips at older, missing or unreadable sources (`unproven_permanent`). The latter counts evidence-route skips, not a promise that the independent reader retirement pass can never recover them. No additional health reason is introduced.

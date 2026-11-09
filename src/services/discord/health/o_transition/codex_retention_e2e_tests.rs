@@ -450,12 +450,9 @@ async fn unproven_canary(young: bool, regrow: bool, configured: bool) {
         |_, mut probe| async move {
             let reason = "tui_o:reader_retention_stalled:7".to_owned();
             assert!(probe.health.current_at(std::time::Instant::now()).contains(&reason));
-            tokio::time::advance(RETIRED_WATCH - std::time::Duration::from_secs(1)).await;
-            probe.ticks().await;
-            assert!(probe.cursors().iter().all(|c| !c.retired), "24h boundary must hold");
-            tokio::time::advance(std::time::Duration::from_secs(1)).await;
             probe.ticks().await;
             let observed = probe.cursors();
+            assert_eq!(probe.retained.lock().unwrap().last(), Some(&(if young {2} else {1}, if young {1} else {0})));
             assert_eq!(observed.iter().filter(|c| c.retired).count(), if young {3} else {4},
                 "actual canary retirement: {observed:?}");
             assert_eq!(probe.health.current_at(std::time::Instant::now()).contains(&reason), young);

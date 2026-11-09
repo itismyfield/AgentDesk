@@ -436,6 +436,7 @@ struct RetentionAlarms {
     observed: Alarms,
     router: Arc<AlarmRouter>,
     counted: watch::Sender<()>,
+    retained: Arc<Mutex<Vec<(usize, usize)>>>,
 }
 
 impl AlarmSink for RetentionAlarms {
@@ -444,6 +445,10 @@ impl AlarmSink for RetentionAlarms {
         self.router.raise(channel, alarm);
     }
     fn reconcile_retained_readers(&self, channel: u64, reading: usize, retained: &[String]) {
+        self.retained
+            .lock()
+            .unwrap()
+            .push((reading, retained.len()));
         self.router
             .reconcile_retained_readers(channel, reading, retained);
     }
@@ -509,10 +514,12 @@ where
     let port = port.with_provider(ShadowProvider::Codex);
     let health = Arc::new(AlarmHealth::default());
     let (counted, mut counts) = watch::channel(());
+    let retained = Arc::new(Mutex::new(Vec::new()));
     let alarms = RetentionAlarms {
         observed: harness.alarms.clone(),
         router: Arc::new(AlarmRouter::new(None, None, health.clone())),
         counted,
+        retained: retained.clone(),
     };
     let writer = ChannelWriter::new(
         harness.channel(),
@@ -573,6 +580,7 @@ where
         health: health.clone(),
         alarms: harness.alarms.clone(),
         port: harness.port.clone(),
+        retained,
     };
     let result = run(ready, probe).await;
     counts.borrow_and_update();
@@ -605,6 +613,7 @@ pub(crate) struct BacklogProbe {
     pub(crate) health: Arc<AlarmHealth>,
     alarms: Alarms,
     port: Arc<FakePort>,
+    pub(crate) retained: Arc<Mutex<Vec<(usize, usize)>>>,
 }
 
 impl BacklogProbe {

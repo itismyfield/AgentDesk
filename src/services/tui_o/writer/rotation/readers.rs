@@ -253,9 +253,10 @@ impl<B: BindingEvents> Sources<B> {
         wall_now: SystemTime,
     ) -> Result<(), WriterAlarm> {
         if self.reader_config.is_none() {
-            return self.tend_legacy(writer);
+            return self.tend_legacy(writer, wall_now);
         }
         self.observe_clock(wall_now)?;
+        let unproven = self.aged_replacements(writer, wall_now);
         let verified = self.validation_result(writer, wall_now)?;
         let now = Instant::now();
         let captured: HashSet<_> = self
@@ -373,8 +374,9 @@ impl<B: BindingEvents> Sources<B> {
                 _ => now,
             };
             reader.quiet = Some((fp.len, quiet_since));
-            let retire =
-                next.proof.is_some() && successor_captured && now - quiet_since >= RETIRE_QUIET;
+            let retire = (next.proof.is_some() || unproven.contains(&key))
+                && successor_captured
+                && now - quiet_since >= RETIRE_QUIET;
             let sleep = self.reader_config.is_some_and(|c| c.dormant)
                 && reader.dormant.is_none()
                 && now - idle_since >= DORMANT_QUIET;
@@ -644,13 +646,44 @@ impl<B: BindingEvents> Sources<B> {
         Ok(Some(index))
     }
 
+    /// File age survives restart; the fingerprint and durable EOF must also stay quiet.
+    fn aged_replacements<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+        wall_now: SystemTime,
+    ) -> HashSet<String> {
+        self.judge_replaced(writer);
+        if self.provider != ShadowProvider::Codex {
+            return HashSet::new();
+        }
+        let now = Instant::now();
+        self.readers
+            .iter()
+            .filter_map(|reader| {
+                let (fingerprint, since) = reader.idle.as_ref()?;
+                let cursor = writer.store().cursor(&reader.source)?;
+                (self.replaced_source(reader)
+                    && drained(reader, cursor)
+                    && fingerprint.len == cursor.captured_through
+                    && now - *since >= RETIRE_QUIET
+                    && wall_now
+                        .duration_since(fingerprint.modified)
+                        .is_ok_and(|age| age >= RETIRED_WATCH)
+                    && Fingerprint::path(&reader.source).ok().as_ref() == Some(fingerprint))
+                .then(|| source_key(&reader.source))
+            })
+            .collect()
+    }
+
     /// Retires quiet drained old sources whose hop is proven, alarms on growth and reader count, and
     /// watches retired ones.
     fn tend_legacy<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
+        wall_now: SystemTime,
     ) -> Result<(), WriterAlarm> {
         let now = Instant::now();
+        let unproven = self.aged_replacements(writer, wall_now);
         let captured = self.readers.iter().filter(|r| r.captured_any);
         let captured: HashSet<String> = captured.map(|r| source_key(&r.source)).collect();
         let mut grew_back = Vec::new();
@@ -678,10 +711,20 @@ impl<B: BindingEvents> Sources<B> {
                 continue;
             };
             let successor_captured = captured.contains(&source_key(&successor.source));
-            // Only a provider record or a confirmed clear end shows the old source stopped; a
-            // drained quiet one stays read.
-            let proven = successor.proof.is_some();
+            let aged = unproven.contains(&source_key(&reader.source));
+            let proven = successor.proof.is_some() || aged;
             let drained = through == len && reader.pending.is_none();
+            let fingerprint = capture.fingerprint().ok();
+            reader.idle = fingerprint
+                .filter(|fp| drained && fp.len == through)
+                .map(|fp| {
+                    let since = reader
+                        .idle
+                        .as_ref()
+                        .filter(|(held, _)| *held == fp)
+                        .map_or(now, |(_, since)| *since);
+                    (fp, since)
+                });
             let grew = reader.quiet.is_some_and(|(held, _)| held != len);
             let late = reader
                 .rotated_at
@@ -697,6 +740,19 @@ impl<B: BindingEvents> Sources<B> {
             };
             reader.quiet = Some((len, since));
             if proven && successor_captured && drained && now - since >= RETIRE_QUIET {
+                if aged {
+                    let cursor = writer
+                        .store()
+                        .cursor(&reader.source)
+                        .ok_or_else(|| halt("aged reader cursor missing"))?;
+                    let verified = capture
+                        .verify_eof(cursor.captured_through, &cursor.prefix_hash)
+                        .map_err(|e| halt(format!("aged EOF validation: {e}")))?;
+                    if Fingerprint::path(&reader.source).ok().as_ref() != Some(&verified) {
+                        reader.idle = None;
+                        continue;
+                    }
+                }
                 let retired = writer.store().set_retired(&reader.source, true);
                 retired.map_err(halted("retire"))?;
                 (reader.watch_until, reader.quiet) = (Some(now + RETIRED_WATCH), None);
