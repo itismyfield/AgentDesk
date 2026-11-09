@@ -382,7 +382,7 @@ pub(in crate::services::discord) async fn release_zombie_foreground_turn_guarded
         return ZombieForegroundReleaseOutcome {
             verdict: Some(verdict),
             released: false,
-            queue_depth_after: snapshot.intervention_queue.len(),
+            queue_depth_after: snapshot.queue_depth(),
             queue_kickoff_scheduled: false,
         };
     }
@@ -398,7 +398,7 @@ pub(in crate::services::discord) async fn release_zombie_foreground_turn_guarded
         return ZombieForegroundReleaseOutcome {
             verdict: Some(verdict),
             released: false,
-            queue_depth_after: snapshot.intervention_queue.len(),
+            queue_depth_after: snapshot.queue_depth(),
             queue_kickoff_scheduled: false,
         };
     }
@@ -427,7 +427,7 @@ pub(in crate::services::discord) async fn release_zombie_foreground_turn_guarded
     if released {
         super::saturating_decrement_global_active(shared);
     }
-    let queue_depth_after = handle.snapshot().await.intervention_queue.len();
+    let queue_depth_after = handle.snapshot().await.queue_depth();
 
     // The queued user messages must not merely survive the release — the
     // channel is idle now, so nothing else will come along to promote them.

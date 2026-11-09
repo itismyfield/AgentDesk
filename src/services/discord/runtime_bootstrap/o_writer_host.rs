@@ -342,13 +342,14 @@ impl HostIo for GatewayHost {
         Arc::new(LegacyRelay::new(Arc::clone(&self.shared)))
     }
 
-    /// An active turn, a queued intervention or a dispatch not yet started.
+    /// An active turn, input either queue holds (a V2 front an attempt carries included) or a
+    /// dispatch not yet started.
     fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send {
         let shared = Arc::clone(&self.shared);
         async move {
             let mailbox = super::super::mailbox_snapshot(&shared, ChannelId::new(channel)).await;
             mailbox.cancel_token.is_some()
-                || !mailbox.intervention_queue.is_empty()
+                || mailbox.holds_input()
                 || mailbox.pending_user_dispatch.is_some()
         }
     }
