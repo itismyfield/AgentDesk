@@ -230,6 +230,13 @@ pub(crate) async fn start_owner_front(
     request_owner_name: String,
     owner: super::super::message_handler::OwnerTurn,
 ) -> Result<super::super::IntakeExecution, super::super::super::Error> {
+    // start_idle joins each claimed follower's text into this input, so equal text means none.
+    if intervention.text == owner.front().1.text
+        && turn_completed(deps, channel_id, intervention.message_id).await
+    {
+        owner.complete_locally().await;
+        return Ok(super::super::IntakeExecution::Executed);
+    }
     let at = (intervention.author_id, request_owner_name);
     let mut submission = queued_submission(provider, channel_id, intervention, at, (false, false));
     match admit_text_intake(deps, &submission).await {
@@ -239,6 +246,33 @@ pub(crate) async fn start_owner_front(
         }
         IntakeAdmission::DeferredTurnMode(_) => Err(super::TURN_MODE_AWAITED.into()),
         _ => Err("NotSent(\"owner_front_not_admitted\")".into()),
+    }
+}
+
+/// Whether any node's recorded turn already completed this Discord message; the shared `turns`
+/// receipt is the only cross-node evidence, and a read failure starts the front as before.
+async fn turn_completed(
+    deps: &super::super::message_handler::IntakeDeps<'_>,
+    channel_id: serenity::ChannelId,
+    message_id: serenity::MessageId,
+) -> bool {
+    let Some(pool) = deps.shared.pg_pool.as_ref() else {
+        return false;
+    };
+    if !crate::services::tui_input::input_key::is_discord_key(message_id.get()) {
+        return false;
+    }
+    let turn_id = super::super::turn_start::discord_turn_id(channel_id, message_id);
+    match crate::db::turns::turn_completed(pool, &turn_id).await {
+        Ok(true) => {
+            tracing::info!(channel_id = channel_id.get(), %turn_id, "owner front retired: its recorded turn already completed");
+            true
+        }
+        Ok(false) => false,
+        Err(error) => {
+            tracing::warn!(channel_id = channel_id.get(), %turn_id, %error, "owner front completion unread; starting it");
+            false
+        }
     }
 }
 
