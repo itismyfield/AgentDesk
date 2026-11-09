@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use super::SharedData;
+use super::idle_relay_drift::{DriftState, decide_drift_warn};
 use super::inflight::InflightTurnState;
 use crate::services::provider::{CancelToken, ProviderKind};
 use poise::serenity_prelude::ChannelId;
@@ -16,8 +17,29 @@ static SLOTS: LazyLock<Mutex<HashMap<Key, Weak<Slot>>>> = LazyLock::new(Mutex::d
 const START_WAIT: Duration = Duration::from_secs(5);
 
 struct Slot {
+    identity: (String, u64),
+    deferred: Mutex<Option<DriftState>>,
     gate: Arc<RwLock<()>>,
     originals: Mutex<Vec<Weak<OriginalRegistration>>>,
+}
+
+impl Slot {
+    fn clear_deferred(&self) {
+        let mut deferred = self.deferred.lock().unwrap_or_else(|e| e.into_inner());
+        if deferred.take().is_some() {
+            tracing::info!(
+                channel_id = self.identity.1,
+                provider = self.identity.0,
+                "live_original_bridge_deferral_cleared"
+            );
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.clear_deferred();
+    }
 }
 
 pub(super) struct OriginalRegistration {
@@ -107,6 +129,8 @@ fn slot(provider: &ProviderKind, channel_id: u64) -> Arc<Slot> {
         return slot;
     }
     let new = Arc::new(Slot {
+        identity: (provider.as_str().to_owned(), channel_id),
+        deferred: Mutex::default(),
         gate: Arc::new(RwLock::new(())),
         originals: Mutex::default(),
     });
@@ -361,12 +385,19 @@ fn admit_recovery(
         return Ok(registration);
     }
     let permit = slot.gate.clone().try_write_owned().map_err(|_| {
-        tracing::info!(
-            channel_id,
-            provider = provider.as_str(),
-            "live_original_bridge_deferred"
-        );
+        let now = tokio::time::Instant::now().into_std();
+        let mut deferred = slot.deferred.lock().unwrap_or_else(|e| e.into_inner());
+        let decision = decide_drift_warn(deferred.get_or_insert_with(|| DriftState::new(now)), now);
+        if decision.emit {
+            tracing::info!(
+                channel_id,
+                provider = provider.as_str(),
+                "live_original_bridge_deferred (suppressed {} times since previous log)",
+                decision.suppressed_count
+            );
+        }
     })?;
+    slot.clear_deferred();
     Ok(RecoveryRegistration {
         slot: Some(slot),
         _permit: Some(Arc::new(permit)),
@@ -466,3 +497,7 @@ pub(crate) mod handback_gap {
 #[cfg(all(test, unix))]
 #[path = "live_bridge/guard_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "live_bridge/log_flood_tests.rs"]
+mod log_flood_tests;

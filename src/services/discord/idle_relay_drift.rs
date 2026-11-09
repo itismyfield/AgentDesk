@@ -83,12 +83,12 @@ const DRIFT_REPAIR_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Purge per-session drift state entries untouched for longer than this, so the
 /// map cannot grow unbounded across the process lifetime.
-const DRIFT_STATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+pub(super) const DRIFT_STATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug)]
-struct DriftState {
+pub(super) struct DriftState {
     first_seen_at: Instant,
-    last_touched_at: Instant,
+    pub(super) last_touched_at: Instant,
     last_warn_at: Option<Instant>,
     suppressed_count: u64,
     pending_emission_count: u64,
@@ -100,7 +100,7 @@ struct DriftState {
 }
 
 impl DriftState {
-    fn new(now: Instant) -> Self {
+    pub(super) fn new(now: Instant) -> Self {
         Self {
             first_seen_at: now,
             last_touched_at: now,
@@ -132,7 +132,7 @@ pub(super) struct WarnDecision {
 
 /// Pure rate-limiter core (time injected) so the suppression policy is unit
 /// testable without wall-clock dependence. Mutates `state` in place.
-fn decide_drift_warn(state: &mut DriftState, now: Instant) -> WarnDecision {
+pub(super) fn decide_drift_warn(state: &mut DriftState, now: Instant) -> WarnDecision {
     state.last_touched_at = now;
     let drift_age_secs = now.saturating_duration_since(state.first_seen_at).as_secs();
     let due = match state.last_warn_at {
@@ -161,21 +161,20 @@ fn decide_drift_warn(state: &mut DriftState, now: Instant) -> WarnDecision {
 fn purge_expired_locked(map: &mut HashMap<String, DriftState>, now: Instant) {
     let expired = map
         .iter()
-        .filter_map(|(tmux_session_name, state)| {
-            (!state.repair_inflight
-                && now.saturating_duration_since(state.last_touched_at) >= DRIFT_STATE_TTL)
-                .then(|| {
-                    (
-                        tmux_session_name.clone(),
-                        state.pending_emission_count,
-                        state.pending_channel_id.unwrap_or(0),
-                        state
-                            .pending_provider
-                            .as_deref()
-                            .unwrap_or("unknown")
-                            .to_string(),
-                    )
-                })
+        .filter(|(_, state)| {
+            !state.repair_inflight
+                && now.saturating_duration_since(state.last_touched_at) >= DRIFT_STATE_TTL
+        })
+        .map(|(tmux_session_name, state)| {
+            (
+                tmux_session_name.clone(),
+                state.pending_emission_count,
+                state.pending_channel_id.unwrap_or(0),
+                state
+                    .pending_provider
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            )
         })
         .collect::<Vec<_>>();
 
