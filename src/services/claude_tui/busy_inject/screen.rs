@@ -131,8 +131,8 @@ pub(in crate::services::claude_tui) fn input_box(capture: &str) -> Composer {
     })
 }
 
-/// The bottom-most `❯` row between two equal full borders; below, only status-line rows and then
-/// a measured footer as the last row drawn.
+/// The bottom-most `❯` row between two equal full borders; below, only status-line rows, the
+/// first footer row, then blanks or two-column task rows such as a running agent list.
 pub(super) fn read(capture: &str) -> Screen {
     let rows: Vec<Row> = capture.lines().map(row).collect();
     let border = |index: usize| -> Option<usize> {
@@ -152,32 +152,43 @@ pub(super) fn read(capture: &str) -> Screen {
     let Some(bottom) = (prompt + 1..rows.len()).find(|&index| border(index).is_some()) else {
         return UNKNOWN;
     };
-    // A box that closes at another width, a footer cut, unmeasured or not last, or a row between
-    // that is no status line (another box, a `!` bash-mode prompt, a blank) is stale or unread.
-    let last = rows
-        .iter()
-        .rposition(|row| !row.plain.trim_end().is_empty());
-    let Some(foot) = last.filter(|&last| last > bottom && footer(rows[last].plain.trim_end()))
-    else {
+    // A box that closes at another width, no footer, or a row between that is no status line
+    // (another box, a `!` bash-mode prompt, a blank) is stale or unread.
+    let Some(foot) = (bottom + 1..rows.len()).find(|&index| {
+        let text = rows[index].plain.trim_end();
+        text.starts_with(FOOTER) || paste_footer::recognized(text)
+    }) else {
         return UNKNOWN;
     };
     let statusline = &rows[bottom + 1..foot];
-    if border(bottom) != Some(width) || !statusline.iter().all(|row| status_line(&row.plain)) {
+    let below = &rows[foot + 1..];
+    let task_row = |row: &Row| {
+        let text = row.plain.trim_end();
+        text.is_empty() || (status_line(text) && !paste_footer::recognized(text))
+    };
+    if border(bottom) != Some(width)
+        || !statusline.iter().all(|row| status_line(&row.plain))
+        || !below.iter().all(task_row)
+    {
         return UNKNOWN;
     }
+    // A cut or unmeasured footer still proves the live box, but leaves stash and footer unread.
+    let measured = footer(rows[foot].plain.trim_end());
     // A stash marker under the box is in no measured layout, so the row above cannot rule it out.
     let marked = |row: &Row| row.plain.contains('\u{203a}') || row.plain.contains("stash");
     Screen {
         composer: composer(&rows[prompt..bottom]),
-        stash: if statusline.iter().any(marked) {
+        stash: if !measured || statusline.iter().chain(below).any(marked) {
             Stash::Unknown
         } else {
             stash(&rows[status].plain, width)
         },
         footer: if paste_footer::recognized(rows[foot].plain.trim_end()) {
             Footer::PasteExpand
-        } else {
+        } else if measured {
             Footer::Normal
+        } else {
+            Footer::Unknown
         },
     }
 }
@@ -216,7 +227,7 @@ pub(super) fn modal(capture: &str) -> bool {
     )
 }
 
-/// A row of the user's status line, drawn two columns in like the footer; never a box edge, a
+/// A status-line or task-list row, drawn two columns in like the footer; never a box edge, a
 /// prompt or a second footer.
 fn status_line(row: &str) -> bool {
     let first = row

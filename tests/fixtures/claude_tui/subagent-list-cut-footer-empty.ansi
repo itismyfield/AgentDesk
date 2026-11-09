@@ -1,0 +1,39 @@
+    감시기(#7938)도 발동.
+
+  다음 액션: eaff459d CI·배포, #7994 체인,
+  i7974/i7853/#7852 레인 알림 대기.
+
+[38;5;246m✻[39m [38;5;246mCrunched for 4m 50s · done 4:57 PM · 3 [39m
+  [38;5;246mshells, 1 monitor still running[39m
+
+[38;5;246m✻ Running scheduled task (Nov 9 5:08pm)[39m
+
+[38;5;246m [39m Showing the mac lane launcher template,
+  saving my live pane capture as the #7990
+  fixture, and creating the i7990 worktree
+  from origin/main
+[38;5;246m  ⎿  $ R=/Users/itismyfield/.adk/release/lane-
+[39m     [38;5;246mruns/hl-20260925; mkdir -p $R/i7990/logs;
+[39m     [38;5;246mecho "--- template:"; cat [39m
+     [38;5;246m$R/i7988/launch-1.sh | cut -c1-240; echo
+[39m     [38;5;246m"--- save real capture fixture:"; tmux [39m
+     [38;5;246mcapture-pane -ep -t %2 > [39m
+     [38;5;246m$R/i7990/field-1109-adk-cc-capture.ans; [39m
+     [38;5;246mtmux capture-pane -p -t %2 > [39m
+     [38;5;246m$R/i7990/field-1…[39m
+
+[38;5;174m✢[39m [38;5;216mBillowing…[38;5;174m [38;5;246m(1m 10s · ↓[39m [38;5;246m2.7k tokens)[39m
+      [38;5;114m✔ Update installed · Restart to update[39m
+[38;5;244m──────────────────────────────────────────────
+[38;5;246m❯ [39m
+[38;5;244m──────────────────────────────────────────────
+[39m  [38;5;249m⏱ 68h22m[38;5;246m [2m│[0m[38;5;246m [38;5;151m███░░░░░░░[38;5;246m [2m│[0m[38;5;246m [38;5;151m33%[38;5;246m [2m│[0m[38;5;246m 328K/1.0M [2m│[0m[38;5;246m…[39m
+  [38;5;117m◆ Fable(X)[38;5;246m [2m│[0m[38;5;246m [38;5;222m⚠️[38;5;246m [2m│[0m[38;5;246m 7d: [38;5;151m45%[38;5;246m (3d20h) [2m│[0m[38;5;246m 7d-F:…[39m
+  [38;5;117m🔷️[38;5;246m gpt-6.1-sol [2m│[0m[38;5;246m 5h: [38;5;210m100%[38;5;246m (1d22h) [2m│[0m[38;5;246m [38;5;117m🟢[38;5;246m ag…[39m
+  [38;5;222m📁️ agentdesk[38;5;246m [38;5;218m(]8;id=zrb1w9;https://github.com/itismyfield/AgentDesk/tree/main\main ↓4]8;;\)[39m
+  [38;5;249mMCP: 2[38;5;246m [2m│[0m[38;5;246m [38;5;249mTools: 3364 done[39m
+  [38;5;211m⏵⏵ bypass permissions on[38;5;246m · [38;5;44m3 shells, 1 [39m
+
+[1m  ⏺ main[0m
+[38;5;246m  ◯ adk-lane[39m  [38;5;246mVeri…[39m [38;5;246m52m 7s · ↓ 462.8k tokens[39m
+[38;5;246m  ◯ adk-lane[39m  [38;5;246mRead…[39m   [38;5;246m5m 7s · ↓ 55.0k tokens[39m

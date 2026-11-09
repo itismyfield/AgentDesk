@@ -122,5 +122,40 @@ fn measured_interrupt_footers_share_the_existing_layout_reader() {
             screen::Footer::Unknown,
             "{footer}"
         );
+        // The box is read, but an unmeasured footer never vouches for the stash row above it.
+        let draft = screen::read(&boxed("❯ draft", footer));
+        assert_eq!(draft.composer, Composer::Text(vec!["draft".into()]));
+        assert_eq!(draft.stash, screen::Stash::Unknown, "{footer}");
+    }
+}
+
+#[test]
+fn agent_list_under_a_cut_footer_keeps_the_live_box_read() {
+    let field =
+        include_str!("../../../../tests/fixtures/claude_tui/subagent-list-cut-footer-empty.ansi");
+    assert_eq!(screen::read(field).composer, Composer::Empty);
+    assert_eq!(screen::read(field).footer, screen::Footer::Unknown);
+    assert_eq!(screen::input_box(field), Composer::Empty);
+    assert!(!super::ownership::draft_unproven(field));
+    assert!(!screen::parkable(field));
+    assert!(!screen::modal(field));
+    let draft = field.replacen("❯\u{a0}\x1b[39m", "❯\u{a0}draft\x1b[39m", 1);
+    assert_eq!(
+        screen::read(&draft).composer,
+        Composer::Text(vec!["draft".into()])
+    );
+    assert!(super::ownership::draft_unproven(&draft));
+    assert!(screen::parkable(&draft));
+    // Below the footer a prompt, a box edge, a second footer or flush prose is no agent list.
+    for tail in [
+        "  ❯ 1. Yes",
+        "  ──────────────",
+        "  ⏵⏵ bypass permissions on",
+        "  paste again to expand",
+        "Do you want to proceed?",
+    ] {
+        let capture = format!("{field}{tail}\n");
+        assert_eq!(screen::read(&capture).composer, Composer::Unknown, "{tail}");
+        assert!(super::ownership::draft_unproven(&capture), "{tail}");
     }
 }
