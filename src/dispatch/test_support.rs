@@ -169,3 +169,96 @@ pub(crate) async fn seed_pg_dispatch(pool: &sqlx::PgPool, dispatch_id: &str, tit
     .await
     .unwrap_or_else(|err| panic!("seed postgres dispatch {dispatch_id}: {err}"));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DispatchPostgresTestDb;
+    use crate::test_support::wait::{WAIT_CAP, await_within, join_within};
+
+    #[test]
+    fn try_create_pg_contract() {
+        const PROBE: &str = "AGENTDESK_DISPATCH_FIXTURE_PROBE";
+        if std::env::var_os(PROBE).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(await_within(
+                async {
+                    assert!(
+                        DispatchPostgresTestDb::try_create(
+                            "agentdesk_probe",
+                            "dispatch fixture probe"
+                        )
+                        .await
+                        .is_none(),
+                        "an unavailable optional fixture must skip"
+                    );
+                },
+                WAIT_CAP,
+            ));
+            return;
+        }
+        let _lifecycle = crate::db::postgres::lock_test_lifecycle();
+        let base = crate::db::postgres::postgres_test_database_url_base();
+        for required in [false, true] {
+            for configured in [false, true] {
+                if configured && base.is_none() {
+                    eprintln!("PG_NOT_RUN dispatch fixture creation failure: base not configured");
+                    continue;
+                }
+                let admin_db = format!("agentdesk_missing_{}", uuid::Uuid::new_v4().simple());
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "dispatch::test_support::tests::try_create_pg_contract",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(PROBE, "1")
+                    .env("AGENTDESK_REQUIRE_PG", if required { "1" } else { "0" })
+                    .env("POSTGRES_TEST_ADMIN_DB", &admin_db);
+                if configured {
+                    command.env("POSTGRES_TEST_DATABASE_URL_BASE", base.as_ref().unwrap());
+                } else {
+                    command.env_remove("POSTGRES_TEST_DATABASE_URL_BASE");
+                }
+                let output = join_within(
+                    std::thread::spawn(move || command.output().unwrap()),
+                    WAIT_CAP,
+                );
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert_eq!(
+                    output.status.success(),
+                    !required,
+                    "required={required} configured={configured}: {stdout} {stderr}"
+                );
+                if required {
+                    assert!(
+                        stderr.contains(if configured {
+                            "AGENTDESK_REQUIRE_PG=1"
+                        } else {
+                            "PG required"
+                        }),
+                        "{stderr}"
+                    );
+                    if configured {
+                        assert!(stderr.contains("dispatch fixture probe admin"), "{stderr}");
+                        assert!(stderr.contains(&admin_db), "{stderr}");
+                    }
+                } else if configured {
+                    assert!(
+                        stderr.contains("skipping dispatch fixture probe"),
+                        "{stderr}"
+                    );
+                }
+                eprintln!(
+                    "fixture contract required={required} configured={configured} child_success={}",
+                    output.status.success()
+                );
+            }
+        }
+    }
+}

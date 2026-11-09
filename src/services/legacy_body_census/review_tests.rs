@@ -1,5 +1,21 @@
 use super::*;
+use crate::test_support::wait::{WAIT_CAP, await_within, recv_within};
 use std::path::Path;
+
+// ACK confirms durability; the collector also needs the writer to release its file lock.
+async fn collector_gate(root: &Path) -> std::fs::File {
+    let path = root.join("legacy_body_census/writer.lock");
+    await_within(
+        tokio::task::spawn_blocking(move || {
+            let gate = std::fs::File::open(path).unwrap();
+            gate.lock_shared().unwrap();
+            gate
+        }),
+        WAIT_CAP,
+    )
+    .await
+    .unwrap()
+}
 
 fn records(root: &Path, boot: &Boot) -> Vec<Value> {
     std::fs::read_to_string(
@@ -743,7 +759,30 @@ async fn a_durable_cut_requires_its_boot_and_a_live_owner_or_final_drain() {
 async fn a_new_enqueue_cannot_reuse_the_previous_drain() {
     let root = tempfile::tempdir().unwrap();
     let id = boot();
-    let current = open(root.path(), &id).await;
+    let armed = Arc::new(AtomicBool::new(false));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let current = Journal(writer::Writer::spawn(
+        Some(root.path().into()),
+        id.clone(),
+        writer::Options {
+            doctor: Some("doctor-123-456".into()),
+            host: Some("test-node".into()),
+            after_ack: {
+                let armed = armed.clone();
+                let release_rx = Mutex::new(release_rx);
+                Arc::new(move || {
+                    if armed.swap(false, Ordering::SeqCst) {
+                        entered_tx.send(()).unwrap();
+                        recv_within(&release_rx.lock().unwrap(), WAIT_CAP);
+                    }
+                })
+            },
+            ..Default::default()
+        },
+    ));
+    assert!(current.append(json!({"kind":"boot_ready"})).await);
+    let initial_gate = collector_gate(root.path()).await;
     let mut collector = Collector::default();
     let before = collector.collect(
         root.path(),
@@ -757,6 +796,7 @@ async fn a_new_enqueue_cannot_reuse_the_previous_drain() {
             .unwrap()
             .contains(&json!("LIVE_CUT_UNVERIFIED"))
     );
+    drop(initial_gate);
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -786,11 +826,36 @@ async fn a_new_enqueue_cannot_reuse_the_previous_drain() {
             .contains(&json!("LIVE_CUT_UNVERIFIED"))
     );
     drop(lock);
+    armed.store(true, Ordering::SeqCst);
     assert!(current.append(json!({"kind":"checkpoint"})).await);
+    recv_within(&entered_rx, WAIT_CAP);
     {
         let state = current.0.state.lock().unwrap();
         assert_eq!(state.window.verdict(Some(&id.id), "PASS"), "PASS");
     }
+    let locked = collector.collect(
+        root.path(),
+        &id.id,
+        chrono::Utc::now().timestamp_millis(),
+        Some(&current.0.state),
+    );
+    let durable = records(root.path(), &id).pop().unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(durable["kind"], "drain");
+    assert_eq!(durable["cut"], current.snapshot()["window"]["cut"]);
+    assert!(
+        locked["errors"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("JOURNAL_INVENTORY_UNAVAILABLE"))
+    );
+    assert!(
+        locked["local_evaluation"]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("LIVE_CUT_UNVERIFIED"))
+    );
+    let _drained_gate = collector_gate(root.path()).await;
     let drained = collector.collect(
         root.path(),
         &id.id,

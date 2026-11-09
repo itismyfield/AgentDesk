@@ -16,6 +16,8 @@ pub(super) struct Options {
     pub(super) host: Option<String>,
     pub(super) timeout: Duration,
     pub(super) before_write: Hook,
+    #[cfg(test)]
+    pub(super) after_ack: Hook,
     pub(super) sync_parent: Option<SyncParent>,
 }
 
@@ -26,6 +28,8 @@ impl Default for Options {
             host: None,
             timeout: Duration::from_secs(2),
             before_write: Arc::new(|| {}),
+            #[cfg(test)]
+            after_ack: Arc::new(|| {}),
             sync_parent: None,
         }
     }
@@ -169,6 +173,8 @@ impl Writer {
                     let drained =
                         gate.is_some() && write_drain(&mut file, &shared, message.cut, false);
                     last_cut = message.cut;
+                    #[cfg(test)]
+                    let acknowledged = message.ack.is_some();
                     if let Some(ack) = message.ack
                         && ack.send(written && drained).is_err()
                     {
@@ -176,6 +182,10 @@ impl Writer {
                         if let Some(file) = file.as_mut() {
                             persist_invalid(file, &shared, &mut persisted);
                         }
+                    }
+                    #[cfg(test)]
+                    if acknowledged {
+                        (options.after_ack)();
                     }
                     drop(gate);
                     if refreshed.is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
