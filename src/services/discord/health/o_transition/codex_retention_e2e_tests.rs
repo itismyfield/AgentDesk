@@ -163,7 +163,7 @@ async fn assert_sweep(fixture: &Fixture, shared: Arc<SharedData>, count: usize, 
     let registry = HealthRegistry::new();
     registry.register("codex".into(), shared.clone()).await;
     let observed_shared = shared.clone();
-    let (reply, cursors, reading) = with_ready_codex_backlog(
+    let (reply, cursors, reading, _) = with_ready_codex_backlog(
         sources,
         fixture.context.tmux_session.clone(),
         configured,
@@ -351,14 +351,16 @@ fn codex_twenty_reader_backlog_retires_after_complete_retention_evidence() {
 
 #[test]
 fn codex_twenty_readers_survive_watcher_and_pane_census_skips() {
-    for component in ["watcher_binding", "pane_census"] {
-        let fixture = Fixture::new(false);
-        let (sources, _) = backlog(&fixture, 19);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
+    for (old, elapsed) in [(2, 60), (2, 3600), (2, 7200), (19, 60)] {
+        for component in ["watcher_binding", "pane_census"] {
+            let fixture = Fixture::new(false);
+            let (sources, _) = backlog(&fixture, old);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            runtime.block_on(async {
             let shared = if component == "watcher_binding" {
                 crate::services::discord::make_shared_data_for_tests_with_storage(None)
             } else {
@@ -372,21 +374,24 @@ fn codex_twenty_readers_survive_watcher_and_pane_census_skips() {
             shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
             let registry = HealthRegistry::new();
             registry.register("codex".into(), shared).await;
-            let (_, cursors, reading) = with_ready_codex_backlog(
+            let (_, cursors, reading, health) = with_ready_codex_backlog(
                 sources, fixture.context.tmux_session.clone(), false,
                 |ready| async move {
+                    assert_eq!(test_support::codex_sweep_for_test(&registry, &ready, CHANNEL).await.unwrap_err(), "no Codex Inspect was sent");
+                    tokio::time::advance(std::time::Duration::from_secs(elapsed)).await;
                     assert_eq!(test_support::codex_sweep_for_test(&registry, &ready, CHANNEL).await.unwrap_err(), "no Codex Inspect was sent");
                     assert_eq!(test_support::codex_skips_for_test(), std::collections::BTreeMap::from([
                         (format!("codex_context_unavailable:{component}"), 1)
                     ]));
                 }
             ).await;
-            // Health counts only readers that may still be written: the 19 replaced, fully read
-            // sources are left out of the count while all 20 cursors below stay unretired.
+            // The writer count stays low while a separate reason exposes retained reader pressure.
             assert_eq!(reading, Some(1), "component={component}");
-            assert_eq!(cursors.len(), 20);
+            assert_eq!(health.current_at(std::time::Instant::now()).contains(&format!("tui_o:reader_retention_stalled:{CHANNEL}")), old > 3 || elapsed >= 7200, "component={component}, old={old}, elapsed={elapsed}");
+            assert_eq!(cursors.len(), old + 1);
             assert!(cursors.iter().all(|cursor| !cursor.retired && cursor.transition_cleanup.is_none()), "component={component}");
         });
+        }
     }
 }
 

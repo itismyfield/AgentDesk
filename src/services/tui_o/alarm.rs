@@ -23,6 +23,8 @@ pub(crate) const ALARM_SOURCE: &str = "tui_o_alarm";
 pub(crate) const ALARM_REASON_CODE: &str = "tui_o.writer_alarm";
 const ENQUEUE_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Two hourly sweep opportunities before a below-limit backlog is considered stuck.
+const READER_RETENTION_GRACE: Duration = Duration::from_secs(2 * 3600);
 
 /// Sends one alarm line to the operator channel.
 pub(crate) trait AlarmNotifier: Send + Sync {
@@ -36,6 +38,7 @@ pub(crate) struct AlarmHealth {
     notifications: Mutex<HashMap<String, NotificationState>>,
     active: Mutex<BTreeSet<String>>,
     waiting: Mutex<HashMap<u64, String>>,
+    retained_readers: Mutex<HashMap<u64, HashMap<String, tokio::time::Instant>>>,
     not_found: Mutex<HashMap<u64, VecDeque<Instant>>>,
 }
 
@@ -219,6 +222,7 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
         WriterAlarm::BoundaryPending { .. } => "boundary_pending",
         WriterAlarm::SourceStillGrowing { .. } => "source_still_growing",
         WriterAlarm::TooManyReaders { .. } => "too_many_readers",
+        WriterAlarm::ReaderRetentionStalled { .. } => "reader_retention_stalled",
         WriterAlarm::RetiredSourceGrew { .. } => "retired_source_grew",
         WriterAlarm::BindingLogUnavailable { .. } => "binding_log_unavailable",
         WriterAlarm::RotationStalled { .. } => "rotation_stalled",
@@ -311,13 +315,18 @@ impl AlarmRouter {
         else {
             return;
         };
+        let guidance = if matches!(alarm, WriterAlarm::ReaderRetentionStalled { .. }) {
+            "; check retention sweep skips and cleanup evidence"
+        } else {
+            ""
+        };
         notifier.notify(
             alert_channel,
             AlarmNotification {
                 channel,
                 kind,
                 incident,
-                text: format!("[tui_o] {kind} on channel {channel}: {alarm:?}"),
+                text: format!("[tui_o] {kind} on channel {channel}: {alarm:?}{guidance}"),
             },
             attempt,
         );
@@ -534,6 +543,62 @@ mod tests {
 
     fn sent(recorder: &Recorder) -> Vec<(u64, String)> {
         recorder.0.lock().unwrap().clone()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retained_reader_pressure_has_a_grace_boundary_reset_and_one_operator_notice() {
+        let (router, recorder, health) = router(Some(ALERT));
+        let reason = format!("tui_o:reader_retention_stalled:{FAILING}");
+        let old = ["a".into(), "b".into()];
+        router.reconcile_retained_readers(FAILING, 3, &old);
+        tokio::time::advance(Duration::from_secs(7199)).await;
+        router.reconcile_retained_readers(FAILING, 3, &old);
+        assert!(!health.current_at(Instant::now()).contains(&reason));
+        assert!(sent(&recorder).is_empty());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        router.reconcile_retained_readers(FAILING, 3, &old);
+        router.reconcile_reader_count(FAILING, 1);
+        assert!(health.current_at(Instant::now()).contains(&reason));
+        let notices = sent(&recorder);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0]
+                .1
+                .contains("check retention sweep skips and cleanup evidence")
+        );
+        router.reconcile_retained_readers(FAILING, 2, &old[1..]);
+        assert!(!health.current_at(Instant::now()).contains(&reason));
+        router.reconcile_retained_readers(FAILING, 3, &old[1..]);
+        tokio::time::advance(Duration::from_secs(7199)).await;
+        router.reconcile_retained_readers(FAILING, 3, &old[1..]);
+        assert!(!health.current_at(Instant::now()).contains(&reason));
+        let many = ["a".into(), "b".into(), "c".into(), "d".into()];
+        router.reconcile_retained_readers(FAILING, 4, &many[..3]);
+        assert!(!health.current_at(Instant::now()).contains(&reason));
+        router.reconcile_retained_readers(FAILING, 5, &many);
+        assert!(health.current_at(Instant::now()).contains(&reason));
+        assert_eq!(sent(&recorder), notices);
+        router.reconcile_retained_readers(FAILING, 3, &[]);
+        assert!(!health.current_at(Instant::now()).contains(&reason));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retained_reader_age_follows_the_source_instead_of_a_constant_count() {
+        let (router, _, health) = router(Some(ALERT));
+        let reason = format!("tui_o:reader_retention_stalled:{FAILING}");
+        router.reconcile_retained_readers(FAILING, 3, &["a".into(), "b".into()]);
+        tokio::time::advance(Duration::from_secs(7199)).await;
+        let rotated = ["c".into(), "d".into()];
+        router.reconcile_retained_readers(FAILING, 3, &rotated);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        router.reconcile_retained_readers(FAILING, 3, &rotated);
+        assert!(!health.current_at(Instant::now()).contains(&reason));
+        tokio::time::advance(Duration::from_secs(7199)).await;
+        router.reconcile_retained_readers(FAILING, 3, &["c".into(), "e".into()]);
+        assert!(
+            health.current_at(Instant::now()).contains(&reason),
+            "c remained stuck while d retired"
+        );
     }
 
     #[test]

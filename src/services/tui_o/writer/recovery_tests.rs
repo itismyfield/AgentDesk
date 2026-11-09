@@ -364,6 +364,10 @@ impl AlarmSink for HealthSink {
     fn raise(&self, channel: u64, alarm: WriterAlarm) {
         self.router.raise(channel, alarm);
     }
+    fn reconcile_retained_readers(&self, channel: u64, reading: usize, retained: &[String]) {
+        self.router
+            .reconcile_retained_readers(channel, reading, retained);
+    }
     fn reconcile_reader_count(&self, channel: u64, count: usize) {
         self.reconciled.lock().unwrap().push(count);
         self.router.reconcile_reader_count(channel, count);

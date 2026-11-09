@@ -1,12 +1,8 @@
-#[cfg(test)]
 use super::super::native_row::{native_prompt, read_native_row};
-#[cfg(test)]
 use super::*;
 
-#[cfg(test)]
 pub(crate) const CAP: u64 = 16 * 1024 * 1024;
 
-#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct Evidence {
     pub(crate) namespace: String,
@@ -17,16 +13,17 @@ pub(crate) struct Evidence {
     pub(crate) range: (u64, u64),
     pub(crate) row_digest: String,
     pub(crate) frame_digest: String,
+    snapshot: Value,
+    class_hash: String,
+    fingerprint: crate::services::tui_o::shadow::capture::Fingerprint,
 }
 
-#[cfg(test)]
 #[derive(Debug)]
 pub(crate) enum Consumed {
     User { row: Evidence },
     Command { row: Evidence },
 }
 
-#[cfg(test)]
 pub(crate) fn lookup(
     primary: u64,
     namespace: &str,
@@ -75,6 +72,7 @@ pub(crate) fn lookup(
         return None;
     };
     let source = checked_source(registration, entry, owner, sid, transcript)?;
+    let fingerprint = source_fingerprint(transcript)?;
     let mut entries = Vec::new();
     for (r, e) in state.entries().filter(|(_, e)| {
         e.append.is_none()
@@ -151,10 +149,14 @@ pub(crate) fn lookup(
     if native.range.1 > through
         || native.digest != *digests.get(&taken.offset)?
         || native.record["uuid"] != taken.uuid
+        || source_fingerprint(transcript)? != fingerprint
     {
         return None;
     }
     let row = Evidence {
+        snapshot: selection(&state, &registration.key, &source, &entry.class_hash)?,
+        class_hash: entry.class_hash.clone(),
+        fingerprint,
         namespace: namespace.into(),
         key: registration.key.clone(),
         source,
@@ -171,12 +173,10 @@ pub(crate) fn lookup(
     })
 }
 
-#[cfg(test)]
 fn native_frames(text: &str) -> impl Iterator<Item = &str> {
     std::iter::once(text).chain(crate::services::claude_tui::busy_inject::pasted_inner(text))
 }
 
-#[cfg(test)]
 fn checked_source(
     r: &Registration,
     e: &Entry,
@@ -219,3 +219,86 @@ fn checked_source(
 #[cfg(test)]
 #[path = "carried_tests.rs"]
 mod tests;
+
+fn source_fingerprint(path: &Path) -> Option<crate::services::tui_o::shadow::capture::Fingerprint> {
+    crate::services::tui_o::shadow::capture::Fingerprint::of(&std::fs::symlink_metadata(path).ok()?)
+        .ok()
+}
+
+fn selection(state: &Snapshot, key: &Value, source: &Source, class: &str) -> Option<Value> {
+    let relevant = |r: Option<&Registration>, e: Option<&Entry>| {
+        r.is_some_and(|r| {
+            r.key["identity"]["primary"] == key["identity"]["primary"]
+                || r.key["attempt"]["nonce"] == key["attempt"]["nonce"]
+        }) || e.is_some_and(|e| {
+            e.append.is_none()
+                && e.provider == "claude"
+                && source.target["owner"] == e.session
+                && e.path == source.transcript
+                && e.file[1] == source.file[1]
+                && e.class_hash == class
+        })
+    };
+    let live: Vec<_> = state
+        .live
+        .iter()
+        .filter(|b| relevant(Some(&b.registration), Some(&b.entry)))
+        .collect();
+    let planned: Vec<_> = state
+        .planned
+        .iter()
+        .filter(|r| relevant(Some(r), None))
+        .collect();
+    let passive: Vec<_> = state
+        .passive
+        .iter()
+        .filter(|p| relevant(p.registration.as_ref(), p.entry.as_ref()))
+        .collect();
+    serde_json::to_value((live, planned, passive)).ok()
+}
+
+impl Consumed {
+    pub(crate) fn evidence(&self) -> &Evidence {
+        match self {
+            Self::User { row } | Self::Command { row } => row,
+        }
+    }
+
+    /// Publish only while the registry still has the exact selection and competing owners.
+    pub(crate) fn confirm<T>(&self, publish: impl FnOnce() -> Option<T>) -> Option<T> {
+        let row = self.evidence();
+        Registry::runtime()
+            .ok()?
+            .inspect(|state| {
+                if selection(state, &row.key, &row.source, &row.class_hash).as_ref()
+                    != Some(&row.snapshot)
+                    || state.locate(&row.namespace, &row.key).is_none()
+                {
+                    return Ok(None);
+                }
+                let verify = || -> Option<()> {
+                    let native = read_native_row(
+                        &row.source.transcript,
+                        row.source.file,
+                        row.range.0,
+                        row.range.1.checked_sub(row.range.0)?,
+                        true,
+                    )?;
+                    if native.file != row.file
+                        || native.range != row.range
+                        || native.digest != row.row_digest
+                        || native.record["uuid"] != row.uuid
+                        || source_fingerprint(&row.source.transcript)? != row.fingerprint
+                        || (native.record["type"] == "user") != matches!(self, Self::User { .. })
+                    {
+                        return None;
+                    }
+                    native_prompt(&native.record, &row.source.session_id)?;
+                    Some(())
+                };
+                Ok(verify().and_then(|()| publish()))
+            })
+            .ok()
+            .flatten()
+    }
+}

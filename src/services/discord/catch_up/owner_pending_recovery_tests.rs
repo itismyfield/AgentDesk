@@ -37,6 +37,11 @@ async fn snapshot(fx: &Fixture, channel_id: ChannelId) -> serde_json::Value {
     read.await.unwrap()
 }
 
+async fn adopted(fx: &Fixture, channel: ChannelId) -> bool {
+    let handle = fx.shared.mailbox(channel);
+    handle.v2_request(|slot| Ok(slot.is_some())).await.unwrap()
+}
+
 async fn recover(channel_seed: u64, reply: Option<&str>, uploads: Vec<&str>) {
     let fx = Fixture::new().await;
     let generation = crate::services::discord::runtime_store::generation_path().unwrap();
@@ -386,7 +391,10 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
         for (index, case) in cases.iter().enumerate() {
             let channel = ChannelId::new(7_676_510 + index as u64);
             let handle = fx.shared.mailbox(channel);
-            let before = snapshot(&fx, channel).await;
+            // A told unconfirmed retention is owed to no owner: boot leaves it to the next input.
+            let unowned = boot == 1 && *case == "retained";
+            assert_eq!(adopted(&fx, channel).await, !unowned, "boot {boot} adopted {case}");
+            let before = if unowned { None } else { Some(snapshot(&fx, channel).await) };
             let (original, identity, notice) = &fixtures[index];
             let assert_restored = |state: &serde_json::Value| {
                 let items = state["items"].as_array().unwrap();
@@ -427,7 +435,7 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
                     }
                 }
             };
-            assert_restored(&before);
+            before.iter().for_each(&assert_restored);
             let path = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap()
                 .join("claude").join(&fx.shared.token_hash).join(format!("{channel}.json"));
             let expected = std::fs::read(&path).unwrap();
@@ -435,10 +443,23 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
             crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests(
                 &http, &fx.shared, &fx.provider,
             ).await;
-            assert_restored(&snapshot(&fx, channel).await);
+            assert_eq!(adopted(&fx, channel).await, !unowned, "repeat adopted {case}");
+            if !unowned {
+                assert_restored(&snapshot(&fx, channel).await);
+            }
             assert!(handle.same_actor(&fx.shared.mailbox(channel)));
             let actual = std::fs::read(&path).unwrap();
             assert_eq!(actual, expected);
+            // The untouched file is adopted on demand, as ingress does for the channel's next input.
+            let before = match before {
+                Some(before) => before,
+                None => {
+                    let namespace = format!("claude/{}", fx.shared.token_hash);
+                    handle.v2_ensure(path.clone(), namespace).await.unwrap();
+                    snapshot(&fx, channel).await
+                }
+            };
+            assert_restored(&before);
             let live = live_request(channel, id(boot * 10, 500), None);
             assert_eq!(input_ingress::intake(&fx.shared, &fx.provider, &live, vec![], false, false).await,
                 Some(Intake::Accepted));

@@ -287,6 +287,8 @@ class Inventory:
     file_cfgs: dict = field(default_factory=dict)
     # Reached file -> every module path its items live in; more than one means one file, several modules.
     modules: dict = field(default_factory=dict)
+    # A file can own different child directories under plain mod and #[path] loads.
+    module_dirs: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
     # The subset of errors that name a mod or include! target file that does not exist.
     missing_files: list = field(default_factory=list)
@@ -311,6 +313,12 @@ def _include_target(tokens, index, source, repo_root):
     return None
 
 
+def module_directory(source, *, explicit_path=False, crate_root=False):
+    """Directory for child modules, retaining how the source file was loaded."""
+    owns_dir = crate_root or explicit_path or source.name == "mod.rs"
+    return source.parent if owns_dir else source.parent / source.stem
+
+
 def walk(root, repo_root, inventory=None, *, production=False):
     """Add every test the crate root reaches to the inventory, following mod, #[path] and include!."""
     inv = inventory if inventory is not None else Inventory()
@@ -320,7 +328,7 @@ def walk(root, repo_root, inventory=None, *, production=False):
         except ModuleNotFoundError:
             from scripts.rust_cfg import cfg_requires_test
     # (file, module names, children directory, directory its own #[path] resolves against, cfg chain)
-    queue = [(root, (), root.parent, root.parent, ())]
+    queue = [(root, (), module_directory(root, crate_root=True), root.parent, ())]
     seen = set()
     while queue:
         source, outer, base_dir, path_dir, file_cfgs = queue.pop()
@@ -340,6 +348,7 @@ def walk(root, repo_root, inventory=None, *, production=False):
         inv.reached.add(source.resolve())
         inv.file_cfgs.setdefault(source.resolve(), set()).add(file_cfgs)
         inv.modules.setdefault(source.resolve(), set()).add(outer)
+        inv.module_dirs.setdefault(source.resolve(), set()).add(base_dir)
         try:
             if production:
                 if source.resolve() not in inv.source_tokens:
@@ -429,8 +438,7 @@ def walk(root, repo_root, inventory=None, *, production=False):
                                           f"{', '.join(str(c.relative_to(repo_root)) if c.is_relative_to(repo_root) else str(c) for c in candidates)}")
                         inv.missing_files.append(inv.errors[-1])
                     else:
-                        owns_dir = pending_path is not None or child.name == "mod.rs"
-                        queue.append((child, names + (name,), child.parent if owns_dir else child.parent / child.stem,
+                        queue.append((child, names + (name,), module_directory(child, explicit_path=pending_path is not None),
                                       child.parent, cfgs + pending_cfgs))
                     pending_path, pending_test, pending_cfgs = None, False, ()
             elif token.kind == "ident" and token.value == "include" and index + 3 < len(tokens) \
@@ -508,6 +516,8 @@ def lib_inventory(repo_root):
     lib.reached = reached.reached
     for path, chains in reached.file_cfgs.items():
         lib.file_cfgs.setdefault(path, set()).update(chains)
+    for path, directories in reached.module_dirs.items():
+        lib.module_dirs.setdefault(path, set()).update(directories)
     lib.errors += [e for e in reached.errors if e not in lib.errors]
     lib.missing_files += [e for e in reached.missing_files if e not in lib.missing_files]
     lib.unreadable += [u for u in reached.unreadable if u not in lib.unreadable]

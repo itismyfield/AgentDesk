@@ -121,51 +121,150 @@ fn v2_clear_purge_drain_and_restore_preserve_originals_and_marker() {
     });
 }
 
-/// The V2 files the deploy idle proof reads from the same fixture: a clear-told unconfirmed
-/// retention is idle at boot, every other held input is still recovered and quarantined.
-#[cfg(unix)]
-#[test]
-fn v2_boot_recovery_skips_only_a_cleared_unconfirmed_retention() {
-    let _root = TestRuntimeRootGuard::new();
-    let ctx = context();
+fn shared_ownership_cases() -> Vec<(Value, Value)> {
     let cases: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/scripts/e2e/tui_relay/tests/fixtures/queue_v2_cleared_unconfirmed_cases.json"
     )))
     .unwrap();
+    let list = cases["cases"].as_array().unwrap();
+    assert_eq!(list.len(), 26);
+    list.iter()
+        .map(|case| {
+            let mut snapshot = cases["base"].clone();
+            for (key, value) in case["retained"].as_object().into_iter().flatten() {
+                snapshot["retained_inputs"][0][key] = value.clone();
+            }
+            for (key, value) in case["set"].as_object().into_iter().flatten() {
+                snapshot[key] = value.clone();
+            }
+            (case.clone(), snapshot)
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn v2_boot_recovery_uses_shared_retained_ownership_cases() {
+    use super::super::pending_queue_persistence as persistence;
+
+    let _root = TestRuntimeRootGuard::new();
+    let ctx = context();
     let mut expected = Vec::new();
-    for (index, case) in cases["cases"].as_array().unwrap().iter().enumerate() {
-        let mut snapshot = cases["base"].clone();
-        for (key, value) in case["retained"].as_object().into_iter().flatten() {
-            snapshot["retained_inputs"][0][key] = value.clone();
-        }
-        for (key, value) in case["set"].as_object().into_iter().flatten() {
-            snapshot[key] = value.clone();
-        }
-        let channel = 7_962_000 + index as u64;
-        let (_, bytes) = seed(channel, &snapshot);
-        let busy = case["busy"].as_bool().unwrap();
+    for (index, (case, snapshot)) in shared_ownership_cases().into_iter().enumerate() {
+        let channel = ChannelId::new(7_962_000 + index as u64);
+        let (path, bytes) = seed(channel.get(), &snapshot);
         let read = compat::inspect(std::str::from_utf8(&bytes).unwrap()).unwrap();
-        assert_eq!(read.v2_holds_input(), busy, "{}", case["name"]);
-        expected.push((ChannelId::new(channel), busy, case["name"].clone()));
+        let busy = read.v2_holds_input();
+        eprintln!(
+            "RETAINED_OWNERSHIP case={} rust_busy={busy}",
+            case["name"].as_str().unwrap()
+        );
+        expected.push((channel, busy, case, path, bytes));
     }
-    let adopted =
-        super::super::pending_queue_persistence::v2_channels(&ctx.provider, &ctx.token_hash);
+    let adopted = persistence::v2_channels(&ctx.provider, &ctx.token_hash);
+    let legacy = persistence::load_pending_queues_checked(&ctx.provider, &ctx.token_hash);
+    assert!(legacy.queues.is_empty());
+    for (channel, busy, case, path, bytes) in expected {
+        let expected_busy = case["busy"].as_bool().unwrap();
+        assert_eq!(busy, expected_busy, "ownership {}", case["name"]);
+        assert_eq!(
+            adopted.contains(&channel),
+            expected_busy,
+            "boot adoption {}",
+            case["name"]
+        );
+        assert_eq!(
+            legacy.quarantined.iter().any(|(c, _)| *c == channel),
+            expected_busy,
+            "legacy quarantine {}",
+            case["name"]
+        );
+        assert_eq!(
+            legacy.v2_idle.contains(&channel),
+            !expected_busy,
+            "idle report {}",
+            case["name"]
+        );
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn v2_told_retained_evidence_survives_readoption_and_late_settle() {
+    let _root = TestRuntimeRootGuard::new();
+    let mut checked = 0;
+    for (index, (case, snapshot)) in shared_ownership_cases().into_iter().enumerate() {
+        if case["busy"].as_bool().unwrap() {
+            continue;
+        }
+        let (path, bytes) = seed(7_966_000 + index as u64, &snapshot);
+        let read = compat::inspect(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        let compat::SnapshotRead::ReadOnlyV2(v2) = read else {
+            panic!("V2");
+        };
+        let entry = &v2.retained_inputs[0];
+        assert!(!entry.owed_to_owner(), "{}", case["name"]);
+        for bind in &v2.admission_binds {
+            assert!(
+                matches!(&bind.at, v2_types::BindAt::Attempt { identity, attempt }
+                if entry.closes_bind(identity, attempt))
+            );
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let retained = serde_json::to_value(&v2.retained_inputs).unwrap();
+        let members = entry.input.members().count();
+        let key = v2::AttemptRef {
+            identity: entry.input.identity.clone(),
+            attempt: entry.input.attempt.clone().unwrap(),
+        };
+        let mut owner =
+            v2::Owner::adopt(path, snapshot["namespace"].as_str().unwrap().into()).unwrap();
+        assert!(owner.requeue_known_not_sent().unwrap().is_empty());
+        assert!(owner.front().is_none());
+        assert_eq!(owner.json().unwrap()["retained_inputs"], retained);
+        owner.settle(&key, true, 1000).unwrap();
+        let settled = owner.json().unwrap();
+        assert_eq!(settled["retained_inputs"], json!([]));
+        assert_eq!(
+            settled["terminal_identities"].as_array().unwrap().len(),
+            members
+        );
+        assert!(
+            settled["admission_binds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|bind| bind["at"]["kind"] == "settled")
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 8);
+}
+
+#[test]
+fn v2_missing_retained_notice_is_quarantined_without_rewrite() {
+    let _root = TestRuntimeRootGuard::new();
+    let ctx = context();
+    let mut snapshot = shared_ownership_cases()[0].1.clone();
+    snapshot["retained_inputs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("notice");
+    let (path, bytes) = seed(7_966_100, &snapshot);
+    assert!(compat::inspect(std::str::from_utf8(&bytes).unwrap()).is_err());
     let legacy = super::super::pending_queue_persistence::load_pending_queues_checked(
         &ctx.provider,
         &ctx.token_hash,
     );
-    for (channel, busy, name) in expected {
-        assert_eq!(adopted.contains(&channel), busy, "boot adoption {name}");
-        let quarantined = legacy.quarantined.iter().any(|(c, _)| *c == channel);
-        assert_eq!(quarantined, busy, "legacy quarantine {name}");
-        // An idle file is still reported, never silently skipped.
-        assert_eq!(
-            legacy.v2_idle.contains(&channel),
-            !busy,
-            "idle report {name}"
-        );
-    }
+    assert!(
+        legacy
+            .quarantined
+            .iter()
+            .any(|(channel, _)| channel.get() == 7_966_100)
+    );
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
 }
 
 #[test]

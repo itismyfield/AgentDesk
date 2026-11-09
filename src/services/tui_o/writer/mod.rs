@@ -217,6 +217,11 @@ pub enum WriterAlarm {
     TooManyReaders {
         count: usize,
     },
+    /// Replaced, fully read sources still hold enough readers to require retention attention.
+    ReaderRetentionStalled {
+        reading: usize,
+        retained: usize,
+    },
     /// A retired source grew; it is read again.
     RetiredSourceGrew {
         source: SourceId,
@@ -244,6 +249,7 @@ pub trait AlarmSink: Send + Sync {
     /// No overdue work remains; a later overdue wait is a new incident.
     fn waiting_cleared(&self, _channel: u64) {}
     fn reconcile_reader_count(&self, _channel: u64, _count: usize) {}
+    fn reconcile_retained_readers(&self, _channel: u64, _reading: usize, _retained: &[String]) {}
     /// Pending boundaries of selected sources after a successful restore or capture.
     fn reconcile_boundary_pending(&self, _channel: u64, _count: usize) {}
     /// Whether the host will start the halted writer again after a wait.
