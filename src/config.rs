@@ -10,7 +10,7 @@ mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
 
 mod agent_memory;
-pub use agent_memory::AgentDef;
+pub use agent_memory::{AgentDef, SharedKnowledgeInjection};
 mod agent_channels;
 pub use agent_channels::AgentChannels;
 pub(crate) mod runtime_profile;
@@ -1833,10 +1833,10 @@ fn normalize_suffix_key(raw: &str) -> String {
 pub struct MemoryConfig {
     #[serde(default = "default_memory_backend")]
     pub backend: String,
-    #[serde(default)]
     pub file: FileMemoryConfig,
-    #[serde(default)]
     pub mcp: McpMemoryConfig,
+    #[serde(skip_serializing_if = "SharedKnowledgeInjection::is_auto")]
+    pub shared_knowledge_injection: SharedKnowledgeInjection,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

@@ -165,6 +165,7 @@ pub const FIELDS: &[FieldReload] = &[
     row("memory.file.auto_memory_root", Live, "`src/runtime_layout/mod.rs` memory_backend_from_config (no daemon reader)"),
     row("memory.mcp.endpoint", Live, "`src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/memory/memento.rs:runtime_config"),
     row("memory.mcp.access_key_env", Live, "`src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/memory/memento.rs:runtime_config"),
+    row("memory.shared_knowledge_injection", Live, "`src/services/discord/shared_memory.rs` load_shared_knowledge (per-call runtime_config_optional())"),
     row("prompt_manifest_retention", Restart, "`src/db/prompt_manifests/retention.rs` install_retention_config (OnceLock set from bootstrap::initialize)"),
     custom("tui_o.writer.channels", Restart, Detect::Custom(detect::tui_o_writer_channels), "`src/services/tui_o/channel_policy.rs` install (BOOT OnceLock; bootstrap::install_boot_snapshots)"),
     custom("tui_o.writer.all_tui", Restart, Detect::Covered, "`src/services/tui_o/channel_policy.rs` install (BOOT OnceLock; bootstrap::install_boot_snapshots)"),

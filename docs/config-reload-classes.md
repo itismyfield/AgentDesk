@@ -180,6 +180,7 @@ seconds with content comparison, independently of native filesystem notification
 | `memory.file.auto_memory_root` | live | `src/runtime_layout/mod.rs` memory_backend_from_config (no daemon reader) |
 | `memory.mcp.endpoint` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/memory/memento.rs:runtime_config |
 | `memory.mcp.access_key_env` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/memory/memento.rs:runtime_config |
+| `memory.shared_knowledge_injection` | live | `src/services/discord/shared_memory.rs` load_shared_knowledge (per-call runtime_config_optional()) |
 | `prompt_manifest_retention` | restart | `src/db/prompt_manifests/retention.rs` install_retention_config (OnceLock set from bootstrap::initialize) |
 | `tui_o.writer.channels` | restart | `src/services/tui_o/channel_policy.rs` install (BOOT OnceLock; bootstrap::install_boot_snapshots) |
 | `tui_o.writer.all_tui` | restart | `src/services/tui_o/channel_policy.rs` install (BOOT OnceLock; bootstrap::install_boot_snapshots) |

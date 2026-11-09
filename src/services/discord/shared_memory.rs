@@ -32,13 +32,19 @@ fn file_mtime(path: &std::path::Path) -> Option<SystemTime> {
 
 /// Read shared_knowledge.md from the managed SAK path.
 /// Returns the file content wrapped in a [Shared Agent Knowledge] section,
-/// or None if the file doesn't exist or is empty.
+/// or None if the file doesn't exist or is empty, or the live config's
+/// `memory.shared_knowledge_injection` turns the fallback off.
 ///
 /// #2663: the rendered section is cached process-locally, keyed on the file's
 /// canonical path + mtime. The next call only re-reads the file when mtime
 /// changes (or the path moves), turning the hot path into a hash lookup +
 /// Arc-like String clone instead of a syscall + format!.
 pub(crate) fn load_shared_knowledge() -> Option<String> {
+    let inject = crate::config::runtime_config_optional()
+        .is_none_or(|config| config.shared_knowledge_injection_enabled());
+    if !inject {
+        return None;
+    }
     let path = shared_agent_knowledge_path()?;
     let current_mtime = file_mtime(&path);
     let mut guard = shared_knowledge_cache()

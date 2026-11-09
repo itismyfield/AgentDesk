@@ -35,10 +35,7 @@ pub(super) async fn build(
     );
     let shared_knowledge =
         if profile == DispatchProfile::Full && matches!(provider, ProviderKind::Claude) {
-            super::super::super::runtime_store::shared_agent_knowledge_path()
-                .and_then(|path| std::fs::read_to_string(path).ok())
-                .filter(|text| !text.trim().is_empty())
-                .map(|text| format!("[Shared Agent Knowledge]\n{}", text.trim()))
+            super::super::super::shared_memory::load_shared_knowledge()
         } else {
             None
         };
