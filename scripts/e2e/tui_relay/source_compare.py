@@ -15,6 +15,7 @@ import urllib.request
 from .assertions import DIRECT_INPUT_NOTICE as DIRECT_NOTICE, is_our_send, relay_body
 from .discord import DiscordClient
 from .normal_intake_evidence import content, tool_result
+from .wait_timeout import expand_markers, marker_identity
 
 # Discord text command (`!clear ...`): the router consumes it, so no native input or body follows.
 TEXT_COMMAND = re.compile(r"^![a-z][a-z_-]*(?:\s|$)")
@@ -32,7 +33,10 @@ PASSING_VERDICTS = {"ok", "command", "known_gap"}
 def marker_pattern(*, marker_regex=None, run_id=None):
     if bool(marker_regex) == bool(run_id):
         raise ValueError("provide exactly one of marker_regex or run_id")
-    pattern = re.compile(marker_regex or rf"\[E2E:[^:\]\s]+:{re.escape(run_id)}(?::[^\]\s]+)?\]")
+    if run_id:
+        identities = "|".join(re.escape(identity) for identity in (marker_identity(run_id), run_id))
+        marker_regex = rf"\[E2E:[^:\]\s]+:(?:{identities})(?::[^\]\s]+)?\]"
+    pattern = re.compile(marker_regex)
     if pattern.search(""):
         raise ValueError("marker regex must not match empty text")
     return pattern
@@ -343,8 +347,14 @@ def main(argv=None):
         if args.autonomous_background_turn:
             if not args.run_id or binding["provider"] != "claude":
                 raise ValueError("S4 evidence requires --run-id and Claude provider")
-            evidence = autonomous_background_turn(binding["transcript_path"],
-                armed_marker=f"[E2E:S4:{args.run_id}:ARMED]", auto_marker=f"[E2E:S4:{args.run_id}:AUTO]")
+            s4_markers = expand_markers({"armed_marker": "[E2E:S4:{run_id}:ARMED]",
+                                         "auto_marker": "[E2E:S4:{run_id}:AUTO]"}, args.run_id)
+            inputs = list(native_inputs(binding["transcript_path"], marker_pattern(run_id=args.run_id)))
+            # Select legacy evidence only when the current initiating marker is absent.
+            if not any(s4_markers["armed_marker"] in text for text in inputs):
+                s4_markers = {key: f"[E2E:S4:{args.run_id}:{label}]"
+                              for key, label in (("armed_marker", "ARMED"), ("auto_marker", "AUTO"))}
+            evidence = autonomous_background_turn(binding["transcript_path"], **s4_markers)
             print(json.dumps({"binding": binding, "autonomous_background_turn": evidence}, indent=2))
             return 0
         messages = fetch_messages(args.api_base, binding["channel_id"], after_id=args.after_id,
