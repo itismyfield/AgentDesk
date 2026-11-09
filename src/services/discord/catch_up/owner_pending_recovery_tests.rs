@@ -4,6 +4,8 @@ use super::*;
 use crate::services::discord::queue_io::input_ingress::{self, Intake};
 use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
 use crate::services::discord::{IntakeRequest, TurnKind};
+#[path = "queue_notice_reuse_tests.rs"]
+mod queue_notice_reuse_tests;
 
 fn live_request(
     channel_id: ChannelId,

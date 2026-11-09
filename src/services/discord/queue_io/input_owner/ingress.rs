@@ -10,7 +10,7 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-tokio::task_local! { static EXISTING_RETRY: bool; }
+tokio::task_local! { static EXISTING_RETRY: bool; static NOTICE_CLAIMED: bool; }
 // A test adopts only inside this scope; any other test keeps the channel unadopted.
 #[cfg(test)]
 tokio::task_local! { pub(crate) static ADOPTS: bool; }
@@ -36,6 +36,12 @@ fn adopts() -> bool {
 
 pub(crate) async fn existing_retry<F: std::future::Future>(future: F) -> F::Output {
     EXISTING_RETRY.scope(true, future).await
+}
+
+/// Admits originals inside `future` with their queue notice already claimed when `claimed`:
+/// this bot's notice reply to the message is already in the channel.
+pub(crate) async fn notice_claimed<F: std::future::Future>(claimed: bool, future: F) -> F::Output {
+    NOTICE_CLAIMED.scope(claimed, future).await
 }
 
 /// The one Pending contract; code, tests and the report state it in these words.
@@ -105,6 +111,8 @@ pub(crate) enum Hold {
     OwnerChange,
 }
 
+const QUEUE_NOTICE: &str = "큐에 들어갔습니다";
+
 impl Hold {
     #[cfg(test)]
     pub(crate) const ALL: [Self; 7] = [
@@ -118,7 +126,12 @@ impl Hold {
     ];
 
     pub(crate) fn notice(self) -> String {
-        "큐에 들어갔습니다".into()
+        QUEUE_NOTICE.into()
+    }
+
+    /// Whether a posted text is a hold notice, whatever hold posted it.
+    pub(crate) fn is_notice(text: &str) -> bool {
+        text.trim() == QUEUE_NOTICE
     }
 
     /// Only a refusal proven to precede any content can owe a queue-hold notice.
@@ -508,7 +521,7 @@ pub(crate) fn original(
     let item = serde_json::from_value(json!({
         "author_id":intervention.author_id.get(),"author_is_bot":intervention.author_is_bot,
         "message_id":intervention.message_id.get(),"queued_generation":intervention.queued_generation,
-        "queue_notice_claimed":false,
+        "queue_notice_claimed":NOTICE_CLAIMED.try_with(|claimed| *claimed).unwrap_or(false),
         "created_at_wall_time_ms":now.saturating_sub(age),
         "source_message_ids":ids,"source_message_queued_generations":generations,
         "source_text_segments": if segments.len()>1 {segments} else {vec![]},
