@@ -277,7 +277,11 @@ fn herdr_effort_applies_and_reports_only_fresh_matching_level_pg() {
         }));
         let settings = fx.shared.settings.read().await;
         assert!(settings.channel_relaunch_pending.is_empty());
-        assert!(settings.channel_effort_levels.is_empty());
+        assert_eq!(
+            settings.channel_effort_levels.get(&CHANNEL.to_string()).map(String::as_str),
+            Some("high"),
+            "the channel's settings name the level its live pane runs"
+        );
         drop(settings);
         assert!(
             !fx.shared
@@ -564,7 +568,13 @@ impl Fixture {
             .unwrap_or_else(|e| e.to_string())
     }
 
-    async fn assert_fast_preserved(&self, rig: &HerdrRig, keys: &AtomicUsize, runtime: u64) {
+    async fn assert_fast_preserved(
+        &self,
+        rig: &HerdrRig,
+        keys: &AtomicUsize,
+        runtime: u64,
+        saved: bool,
+    ) {
         let settings = self.shared.settings.read().await;
         assert!(
             settings.channel_fast_mode_reset_pending.is_empty(),
@@ -582,14 +592,14 @@ impl Fixture {
             "no pending reset"
         );
         assert_eq!(
-            settings.channel_fast_modes.get(&CHANNEL.to_string()),
-            Some(&true)
+            settings.channel_fast_modes.get(&runtime.to_string()),
+            Some(&saved),
+            "the channel's settings name the mode its live pane runs"
         );
         assert!(
-            !settings
-                .channel_fast_modes
-                .contains_key(&runtime.to_string())
-                || runtime == CHANNEL
+            runtime == CHANNEL
+                || settings.channel_fast_modes.get(&CHANNEL.to_string()) == Some(&true),
+            "a thread pane leaves its parent's mode"
         );
         assert_eq!(keys.load(Ordering::SeqCst), 0, "no tmux input");
         assert_eq!(
@@ -666,7 +676,7 @@ fn herdr_fast_toggles_native_once_without_reset_pg() {
                         ),
                     )
                     .await;
-                fx.assert_fast_preserved(rig, keys, CHANNEL).await;
+                fx.assert_fast_preserved(rig, keys, CHANNEL, !enabled).await;
                 assert!(
                     notice.contains(&format!("fast mode를 `{}`로 적용했습니다", !enabled)),
                     "{notice}"
@@ -705,7 +715,7 @@ fn herdr_fast_toggles_native_once_without_reset_pg() {
                 .await;
             assert_eq!(changed, "true");
             assert_eq!(rig.sends().len() - sent, 2);
-            fx.assert_fast_preserved(rig, keys, CHANNEL).await;
+            fx.assert_fast_preserved(rig, keys, CHANNEL, true).await;
             // The initial fresh receipt is not a post-toggle confirmation, even when ACK succeeds.
             let sent = rig.sends().len();
             let notice = fx
@@ -726,7 +736,7 @@ fn herdr_fast_toggles_native_once_without_reset_pg() {
                 2,
                 "no retry after unconfirmed ACK"
             );
-            fx.assert_fast_preserved(rig, keys, CHANNEL).await;
+            fx.assert_fast_preserved(rig, keys, CHANNEL, true).await;
             fx.finish().await;
         })
     });
@@ -768,7 +778,7 @@ fn herdr_fast_mismatch_never_reports_success_or_retries_toggle_pg() {
                     2,
                     "exactly one toggle, no retries"
                 );
-                fx.assert_fast_preserved(rig, keys, CHANNEL).await;
+                fx.assert_fast_preserved(rig, keys, CHANNEL, true).await;
             }
             for before in [
                 Some(json!({"session_id":NATIVE,"written_at":0.0,"fast_mode":false})),
@@ -836,7 +846,7 @@ fn herdr_thread_fast_targets_runtime_pane_without_parent_reset_pg() {
         let parent_after: Value = sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
             .bind(CHANNEL.to_string()).fetch_one(pool).await.unwrap();
         assert_eq!(parent_after,serde_json::to_value(&parent).unwrap());
-        fx.assert_fast_preserved(rig,keys,thread).await;
+        fx.assert_fast_preserved(rig,keys,thread,true).await;
         fx.finish().await;
     })
     });
@@ -1028,11 +1038,88 @@ fn herdr_effort_rejects_unknown_option_layout_before_navigation_pg() {
             let fx = Fixture::new(&rig).await;
             rig.answer_after_send("pane.read", screen(&format!("Effort\n{labels}\n←/→ to adjust · Enter to confirm")));
             let notice = fx.command().await;
-            assert_eq!(rig.sends().len(), 2, "unknown options permit only opening /effort and Enter, no navigation or confirmation: {labels}; {notice}");
+            let sends = rig.sends();
+            assert_eq!(sends.len(), 3, "unknown options permit only opening /effort and Enter, then Escape: {labels}; {notice}");
+            assert_eq!(sends[2]["keys"], json!(["esc"]), "the opened selector is closed: {labels}");
             assert!(!notice.contains("적용했습니다"), "{notice}");
             fx.finish().await;
         });
     }
+}
+
+/// What Herdr answers for a pane whose history outgrew the read: its newest 80 rows, `truncated`.
+fn long_history(text: &str) -> Value {
+    let mut read = screen(&format!(
+        "{}{text}",
+        "history\n".repeat(80 - text.lines().count())
+    ));
+    read["read"]["truncated"] = json!(true);
+    read
+}
+
+#[test]
+fn herdr_effort_on_long_history_names_read_failure_and_closes_selector_pg() {
+    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_INSTANCE_ID",
+        std::ffi::OsStr::new(NODE),
+    );
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &crate::config::runtime_root().unwrap().join("missing.yaml"),
+    );
+    let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(CHANNEL, NODE)]);
+    let _hosting = hosting();
+    let rig = HerdrRig::start();
+    runtime(&rig, Arc::new(AtomicUsize::new(0))).block_on(async {
+        let fx = Fixture::new(&rig).await;
+        let mut refused = screen(READY);
+        refused["read"]["source"] = json!("visible");
+        rig.answer("pane.read", refused);
+        let notice = fx.command().await;
+        assert!(
+            notice.contains("pane 읽기 실패") && notice.contains("read source"),
+            "{notice}"
+        );
+        assert!(rig.sends().is_empty());
+        rig.answer("pane.read", long_history(READY));
+        rig.answer_after_send(
+            "pane.read",
+            long_history("Effort\nlow medium high max\n←/→ to adjust · Enter to confirm"),
+        );
+        rig.answer_after_key("esc", "pane.read", long_history(READY));
+        let notice = fx.command().await;
+        assert!(
+            notice.contains("배치 미확인") && !notice.contains("선택창"),
+            "{notice}"
+        );
+        assert_eq!(
+            rig.sends().last().unwrap()["keys"],
+            json!(["esc"]),
+            "{notice}"
+        );
+        // The next first input reaches the composer instead of answering a selector.
+        let target = crate::services::session_host::herdr_endpoints()
+            .target(&fx.bound)
+            .unwrap();
+        use crate::services::claude_tui::input::TuiInputAction::{Enter, Literal};
+        let plan = [Literal("next prompt".into()), Enter];
+        let next = tokio::task::spawn_blocking(move || {
+            crate::services::claude::herdr_turn::composer::run(&target, &plan, None)
+        });
+        let next = await_within(next, WAIT_CAP).await.unwrap();
+        assert!(
+            matches!(
+                next,
+                crate::services::claude_tui::host_input::InputRun::Applied
+            ),
+            "{next:?}"
+        );
+        fx.finish().await;
+    });
 }
 
 #[test]
@@ -1059,9 +1146,10 @@ fn herdr_effort_partial_navigation_failure_sends_no_confirmation_pg() {
         let sends = rig.sends();
         assert_eq!(
             sends.len(),
-            4,
-            "stop after the second navigation send loses its ACK: {sends:?}"
+            5,
+            "stop after the second navigation send loses its ACK, then close the selector: {sends:?}"
         );
+        assert_eq!(sends[4]["keys"], json!(["esc"]));
         assert_eq!(
             sends
                 .iter()

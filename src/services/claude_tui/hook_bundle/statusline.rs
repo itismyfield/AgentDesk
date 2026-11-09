@@ -55,9 +55,12 @@ pub(crate) fn record_path(root: &Path, session: &str) -> PathBuf {
     root.join(format!("{:x}.json", Sha256::digest(session.as_bytes())))
 }
 
+/// Also re-runs on a timer: an idle session emits no update events, and a live settings change
+/// is confirmed only by a record written after it.
 pub(super) fn settings(root: &Path) -> Value {
     json!({
         "type": "command",
+        "refreshInterval": 5,
         "command": format!("python3 -c {} {}", super::shell_quote(WRAPPER),
             super::shell_quote(&root.to_string_lossy())),
     })

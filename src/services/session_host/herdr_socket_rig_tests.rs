@@ -86,6 +86,8 @@ type OnSend = Arc<Mutex<Option<Box<dyn FnMut(&Value) + Send>>>>;
 
 /// Prefixes an answer that takes its method's place once a pane write arrives.
 const AFTER_SEND: &str = "after-send:";
+/// Prefixes an answer that takes its method's place once a write sends its key.
+const AFTER_KEY: &str = "after-key:";
 
 type ReplyHook = Arc<dyn Fn(&HerdrCall) + Send + Sync>;
 type OnReply = Arc<Mutex<Option<ReplyHook>>>;
@@ -236,8 +238,13 @@ impl HerdrRig {
                     }
                     let mut answers = scripted.lock().unwrap();
                     let later: Vec<String> = answers.keys().cloned().collect();
+                    let sent = request["params"]["keys"].as_array().cloned();
                     for key in later {
-                        if let Some(method) = key.strip_prefix(AFTER_SEND) {
+                        let method = key.strip_prefix(AFTER_SEND).or_else(|| {
+                            let (name, method) = key.strip_prefix(AFTER_KEY)?.split_once(':')?;
+                            sent.as_ref()?.contains(&json!(name)).then_some(method)
+                        });
+                        if let Some(method) = method {
                             let result = answers.remove(&key).unwrap();
                             answers.insert(method.to_owned(), result);
                         }
@@ -415,6 +422,11 @@ impl HerdrRig {
     /// Replies with `result` to every `method` request after the next pane write.
     pub(crate) fn answer_after_send(&self, method: &str, result: Value) {
         self.answer(&format!("{AFTER_SEND}{method}"), result);
+    }
+
+    /// Replies with `result` to every `method` request after a pane write sends `key`.
+    pub(crate) fn answer_after_key(&self, key: &str, method: &str, result: Value) {
+        self.answer(&format!("{AFTER_KEY}{key}:{method}"), result);
     }
 
     /// Runs `hook` on the params of every later pane write before the server answers it.
