@@ -518,7 +518,7 @@ pub(super) async fn resume_aborted_restart_turn(
         let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
         #[cfg(test)]
         retirement_await_tests::checkpoint("rowless_snapshot").await;
-        let has_queued_backlog = !snapshot.intervention_queue.is_empty();
+        let has_queued_backlog = snapshot.queue_depth() > 0;
         // codex review P2: only auto-drain when the mailbox is IDLE. The
         // watcher death handler runs asynchronously, so by the time it fires a
         // concurrent kickoff / user message may already have started the next
