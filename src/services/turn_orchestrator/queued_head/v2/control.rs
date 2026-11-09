@@ -134,7 +134,7 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         | M::MergeRestoredQueueItems { reply, .. }
         | M::MergeRestoredDispatchMarker { reply, .. } => {
             let _ = reply.send(HydratePendingQueueResult {
-                queue_len_after: owner.snapshot.items.len(),
+                queue_len_after: owner.waiting(),
                 persistence_error: Some(HELD.into()),
                 ..Default::default()
             });

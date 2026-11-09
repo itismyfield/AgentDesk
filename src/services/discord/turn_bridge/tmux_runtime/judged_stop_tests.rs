@@ -420,6 +420,91 @@ fn a_name_only_preserve_stop_keeps_a_turn_on_another_host() {
     });
 }
 
+// A preserve stop counts the waiting input of the queue that owns the channel, before the stop and
+// after it: the V2 front an attempt carries is not waiting, so one queued input reads as one.
+#[test]
+fn a_stop_counts_only_the_owner_input_waiting_behind_an_attempted_front() {
+    use crate::services::turn_orchestrator::{PendingQueueItem, QueuePersistenceContext, v2_queue};
+    let fx = Fixture::new();
+    run(async {
+        let (shared, registry) = runtime().await;
+        fx.serve(Server::NoSocket);
+        let (channel, session) = (
+            ChannelId::new(5_340_690_000),
+            "AgentDesk-claude-depth-front",
+        );
+        mark(session, Mark::Absent);
+        let token = bound_token(&ProviderKind::Claude, session);
+        start(&shared, channel, &token).await;
+        let (mailboxes, hash) = shared.queue_fixture_parts();
+        let handle = mailboxes.handle(channel);
+        let context = QueuePersistenceContext::new(&ProviderKind::Claude, hash, None);
+        let (path, namespace) = v2_queue(&context, channel).unwrap();
+        handle.v2_adopt(path, namespace).await.unwrap();
+        let item = |id: u64| -> PendingQueueItem {
+            serde_json::from_value(serde_json::json!({"author_id": 7, "message_id": id,
+                "channel_id": channel.get(), "source_message_ids": [id],
+                "queued_generation": 1, "text": format!("queued {id}")}))
+            .unwrap()
+        };
+        let (front, waiting) = (item(9_974_001), item(9_974_002));
+        let attempt = serde_json::json!({"nonce": "depth", "provider": "claude",
+            "target": {"host": "tmux", "owner": "depth", "root": "/test", "execution_nonce": "e"},
+            "source": {"kind": "pre_source", "expected_session_id": null,
+                "expected_transcript": null, "binding_watermark": null}});
+        let attempted = handle.v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            owner
+                .enqueue_fixture(&front)
+                .map_err(|e| format!("{e:?}"))?;
+            let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+            owner.reserve_unit(attempt, |item| Some((String::new(), item.text.clone())))?;
+            owner
+                .enqueue_fixture(&waiting)
+                .map_err(|e| format!("{e:?}"))
+        });
+        assert_eq!(attempted.await, Ok(true));
+        // Health reads the same waiting depth for the mailbox, its relay and its provider.
+        let health = crate::services::discord::health::build_health_snapshot(&registry).await;
+        let health = serde_json::to_value(health).unwrap();
+        let rows = health["mailboxes"].as_array().unwrap();
+        let row = rows.iter().find(|row| row["channel_id"] == channel.get());
+        let row = row.unwrap_or_else(|| panic!("no mailbox row: {health}"));
+        let relay = &row["relay_health"]["queue_depth"];
+        let depths = (
+            &row["queue_depth"],
+            relay,
+            &health["providers"][0]["queue_depth"],
+        );
+        assert_eq!(depths, (&1.into(), &1.into(), &1.into()), "{health}");
+        let watcher = registry
+            .snapshot_watcher_state(channel.get())
+            .await
+            .unwrap();
+        assert_eq!(
+            (watcher.relay_health.queue_depth, watcher.has_pending_queue),
+            (1, true)
+        );
+        owner_exits_after_cancel(&shared, channel, &token);
+        let target = TurnLifecycleTarget {
+            provider: Some(ProviderKind::Claude),
+            channel_id: Some(channel),
+            tmux_name: session.to_string(),
+        };
+        let stop = crate::services::turn_lifecycle::stop_turn_preserving_queue;
+        let result = stop(Some(&registry), &target, "depth").await;
+        // `queued_before` and an agent stop's `queued_remaining` are these two values.
+        assert_eq!(result.queue_depth_before, Some(1));
+        assert_eq!(result.queue_depth, Some(1), "{}", result.lifecycle_path);
+        assert_eq!(result.queue_preserved, Some(true));
+        // A preserve cancel then answers `queued_remaining` from the drain's hydration reply.
+        let drain = crate::services::discord::health::schedule_pending_queue_drain_after_cancel;
+        let drained = drain(&registry, "claude", channel, "depth").await;
+        assert_eq!(drained.queue_depth_after, Some(1));
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
+}
+
 // A user stop on an unbound turn whose row fails to read or parse keeps it as a refused host's:
 // nothing cancelled, bound or tombstoned, and the row is left as it was.
 #[test]

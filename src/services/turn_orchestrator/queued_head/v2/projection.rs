@@ -1,7 +1,6 @@
 //! What the V1 paths may know of a V2 queue: a boot/catalog plan, read-only state views, and the
 //! checked purge's compare-and-commit. Reading never writes; boot wiring that acts on a plan is not here.
 use super::*;
-use crate::services::turn_orchestrator::ChannelMailboxState;
 #[cfg(unix)]
 use crate::services::turn_orchestrator::checked_purge::V2PurgeStop as PurgeStop;
 #[cfg(test)]
@@ -11,6 +10,7 @@ use crate::services::turn_orchestrator::pending_queue_persistence::{
 };
 #[cfg(test)]
 use crate::services::turn_orchestrator::{ChannelMailboxRegistry, QueuePersistenceContext};
+use crate::services::turn_orchestrator::{ChannelMailboxSnapshot, ChannelMailboxState};
 #[cfg(test)]
 use poise::serenity_prelude::ChannelId;
 
@@ -141,14 +141,28 @@ impl Owner {
     pub(crate) fn fingerprint(&self) -> Result<String, String> {
         serde_json::to_string(&self.snapshot).map_err(|e| e.to_string())
     }
+
+    /// The waiting depth: committed items less the front an attempt already carries.
+    pub(crate) fn waiting(&self) -> usize {
+        let head = self.snapshot.head_injection.as_ref();
+        let carried = head.map_or(0, |head| head.members().count());
+        self.snapshot.items.len().saturating_sub(carried)
+    }
 }
 
 impl ChannelMailboxState {
+    /// The V2 owner's waiting depth, by [`Owner::waiting`].
     pub(crate) fn v2_len(&self) -> Option<usize> {
-        (self.queued_head.v2.as_ref()).map(|owner| owner.snapshot.items.len())
+        (self.queued_head.v2.as_ref()).map(Owner::waiting)
     }
 
-    /// The depth a checked purge may report: the committed items while the owner's last save is
+    /// The V2 owner's waiting depth and whether it holds any input, attempted or owed included.
+    pub(crate) fn v2_queue(&self) -> Option<(usize, bool)> {
+        let owner = self.queued_head.v2.as_ref()?;
+        Some((self.v2_len()?, owner.snapshot.holds_input()))
+    }
+
+    /// The depth a checked purge may report: the waiting items while the owner's last save is
     /// settled. A save still pending published a candidate the snapshot does not count.
     #[cfg(unix)]
     pub(crate) fn v2_settled_len(&self) -> Result<Option<usize>, String> {
@@ -197,6 +211,14 @@ impl ChannelMailboxState {
             Err(error) if owner.pending.is_some() => Err(PurgeStop::SaveUnknown(error)),
             Err(error) => Err(PurgeStop::NotSaved(error)),
         }
+    }
+}
+
+impl ChannelMailboxSnapshot {
+    /// Whether a repair must leave the channel alone: input waits in either queue, or the V2 owner
+    /// holds an attempted, owed or unclosed input that the waiting depth does not count.
+    pub(crate) fn holds_input(&self) -> bool {
+        self.queue_depth() > 0 || self.v2_queue.is_some_and(|(_, held)| held)
     }
 }
 

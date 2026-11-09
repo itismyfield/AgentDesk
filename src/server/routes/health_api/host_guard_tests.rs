@@ -169,8 +169,8 @@ async fn stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg() {
     db.drop().await;
 }
 
-// The repair's queue gate counts the queue that owns the channel's input: a V2 owner holding an
-// item refuses with `queue_not_empty` and keeps its file, as a V1 item does; an empty one proceeds.
+// The repair gate refuses with `queue_not_empty`, keeping the file, while the owner holds input: a
+// waiting V1 or V2 item, or a V2 front an attempt carries; an empty one proceeds.
 #[tokio::test(flavor = "current_thread")]
 async fn stale_mailbox_repair_refuses_while_the_owner_queue_holds_input_pg() {
     use crate::services::provider::ProviderKind;
@@ -182,7 +182,8 @@ async fn stale_mailbox_repair_refuses_while_the_owner_queue_holds_input_pg() {
     let (shared, registry) = runtime(&pool).await;
     let (mailboxes, token) = shared.queue_fixture_parts();
     let context = QueuePersistenceContext::new(&ProviderKind::Claude, token, None);
-    for (n, (v2_items, v1_items)) in [(1, 0), (0, 1), (0, 0)].into_iter().enumerate() {
+    let cases = [(1, 0, false), (0, 1, false), (0, 0, false), (1, 0, true)];
+    for (n, (v2_items, v1_items, attempted)) in cases.into_iter().enumerate() {
         let channel = ChannelId::new(1_479_671_301_387_061_000 + n as u64);
         let handle = mailboxes.handle(channel);
         let mut owner_file = None;
@@ -193,9 +194,19 @@ async fn stale_mailbox_repair_refuses_while_the_owner_queue_holds_input_pg() {
                 "author_id": 7, "message_id": 9_761, "channel_id": channel.get(),
                 "source_message_ids": [9_761], "queued_generation": 1, "text": "owner input"}))
             .unwrap();
+            let attempt = serde_json::json!({"nonce": "gate", "provider": "claude",
+                "target": {"host": "tmux", "owner": "gate", "root": "/test", "execution_nonce": "e"},
+                "source": {"kind": "pre_source", "expected_session_id": null,
+                    "expected_transcript": null, "binding_watermark": null}});
             let enqueued = handle.v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("no owner")?;
-                owner.enqueue_fixture(&item).map_err(|e| format!("{e:?}"))
+                let queued = owner.enqueue_fixture(&item).map_err(|e| format!("{e:?}"))?;
+                if attempted {
+                    let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+                    let unit = |item: &PendingQueueItem| Some((String::new(), item.text.clone()));
+                    owner.reserve_unit(attempt, unit)?;
+                }
+                Ok(queued)
             });
             assert_eq!(enqueued.await, Ok(true));
             owner_file = Some((std::fs::read(&path).unwrap(), path));
@@ -221,15 +232,24 @@ async fn stale_mailbox_repair_refuses_while_the_owner_queue_holds_input_pg() {
             handle.replace_queue(vec![item], context.clone()).await;
         }
         let depth = handle.snapshot().await.queue_depth();
+        let waiting = if attempted { 0 } else { v2_items + v1_items };
+        assert_eq!(
+            depth, waiting,
+            "a front an attempt carries is no longer waiting"
+        );
         let (status, json) = post_repair(registry.clone(), &pool, channel).await;
-        let case = format!("v2={v2_items} v1={v1_items} {json}");
+        let case = format!("v2={v2_items} v1={v1_items} attempted={attempted} {json}");
         if v2_items + v1_items == 0 {
             assert_eq!(status, StatusCode::OK, "{case}");
             continue;
         }
         assert_eq!(status, StatusCode::CONFLICT, "{case}");
         assert_eq!(json["safety_gate"], "queue_not_empty", "{case}");
-        assert_eq!(json["post_repair_mailbox"]["queue_depth"], 1, "{case}");
+        assert_eq!(
+            json["post_repair_mailbox"]["queue_depth"], waiting,
+            "{case}"
+        );
+        assert_eq!(json["post_repair_mailbox"]["holds_input"], true, "{case}");
         assert_eq!(handle.snapshot().await.queue_depth(), depth, "{case}");
         if let Some((bytes, path)) = owner_file {
             assert_eq!(std::fs::read(&path).unwrap(), bytes, "{case}");

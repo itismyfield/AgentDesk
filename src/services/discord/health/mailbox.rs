@@ -127,12 +127,7 @@ pub(super) async fn peeked_provider_mailbox_state(
     channel_id: u64,
 ) -> ProviderMailboxState {
     let Some(handle) = shared.mailbox_peek(ChannelId::new(channel_id)) else {
-        return ProviderMailboxState {
-            channel_id,
-            has_cancel_token: false,
-            queue_depth: 0,
-            recovery_started: false,
-        };
+        return ProviderMailboxState::empty(channel_id);
     };
     ProviderMailboxState::from_snapshot(channel_id, &handle.snapshot().await)
 }

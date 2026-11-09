@@ -1312,8 +1312,9 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   sweep's gate is neither, so periodizing it unchanged is the retirement this invariant
   forbids. Any release not driven by a turn-end event owes progress evidence, and neither
   the anchor's presence nor its `turn_started_at` age is that.
-- Consumer — the `stale-mailbox/repair` route's `queue_not_empty` gate. A
-  `queue_depth > 0` is not "live queue evidence": it is equally the signature of a
+- Consumer — the `stale-mailbox/repair` route's `queue_not_empty` gate. Held input
+  (`holds_input`: a waiting depth, or a V2 owner's attempted or owed input) is not
+  "live queue evidence": it is equally the signature of a
   queue that cannot drain — the state the gate is asked to repair — so the
   `skipped_reason` names the opposite of what the field measures. Depth is
   inadmissible as a liveness term; the authority is the GRADED form of the three-conjunct
@@ -1324,7 +1325,7 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   does NOT give you"; this consumer has no admissible liveness term today, and it may not
   substitute one — not depth, not age, not the ungraded conjunction.
   Carry it with the row precondition named above, because that branch is reached today
-  only after `queue_depth > 0` has returned CONFLICT, and retiring the depth gate admits
+  only after `holds_input` has returned CONFLICT, and retiring the depth gate admits
   queued channels to it.
 - Consumer — `catch_up` phase 2's `existing_ids` membership test.
   `recovery_known_message_ids` unions three sets and only one tests liveness:

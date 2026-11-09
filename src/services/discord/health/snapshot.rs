@@ -518,7 +518,7 @@ async fn watcher_state_snapshot_for_shared(
     let mailbox_has_cancel_token = mailbox_snapshot.cancel_token.is_some();
     let mailbox_active_user_msg_id =
         redaction::visible_serenity_message_id(mailbox_snapshot.active_user_message_id);
-    let has_pending_queue = !mailbox_snapshot.intervention_queue.is_empty();
+    let has_pending_queue = mailbox_snapshot.queue_depth() > 0;
     let mailbox_engaged =
         mailbox_has_cancel_token || mailbox_active_user_msg_id.is_some() || has_pending_queue;
     let mailbox_cancel_tmux_session = mailbox_snapshot
@@ -579,7 +579,7 @@ async fn watcher_state_snapshot_for_shared(
             .turn_started_at
             .map(|started_at| started_at.timestamp_millis()),
         unpaired_active_token_reconfirmed,
-        queue_depth: mailbox_snapshot.intervention_queue.len(),
+        queue_depth: mailbox_snapshot.queue_depth(),
         watcher_attached: session.attached,
         watcher_attached_stale: session.watcher_attached_stale,
         watcher_owner_channel_id: session.watcher_owner_channel_id,

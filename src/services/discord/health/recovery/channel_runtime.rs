@@ -12,10 +12,12 @@ pub struct ProviderMailboxState {
     pub has_cancel_token: bool,
     pub queue_depth: usize,
     pub recovery_started: bool,
+    /// Waiting input, or a V2 attempt, owed retained input or receipt the waiting depth leaves out.
+    pub holds_input: bool,
 }
 
 impl ProviderMailboxState {
-    /// A live mailbox's probe; its depth counts the queue that owns the channel's input.
+    /// A live mailbox's probe; its depth counts the waiting input of the queue that owns the channel.
     pub(crate) fn from_snapshot(
         channel_id: u64,
         snapshot: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
@@ -25,6 +27,18 @@ impl ProviderMailboxState {
             has_cancel_token: snapshot.cancel_token.is_some(),
             queue_depth: snapshot.queue_depth(),
             recovery_started: snapshot.recovery_started_at.is_some(),
+            holds_input: snapshot.holds_input(),
+        }
+    }
+
+    /// The idle, empty state reported for a channel no mailbox answers for.
+    pub(crate) fn empty(channel_id: u64) -> Self {
+        Self {
+            channel_id,
+            has_cancel_token: false,
+            queue_depth: 0,
+            recovery_started: false,
+            holds_input: false,
         }
     }
 }
@@ -148,15 +162,9 @@ async fn snapshot_pending_queue_state_for_shared(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Option<PendingQueueSnapshot> {
-    let queued = shared
-        .mailbox(channel_id)
-        .try_snapshot()
-        .await
-        .ok()?
-        .intervention_queue;
-    let queue_depth = queued.len();
-    let message_ids = queued
-        .iter()
+    let snapshot = shared.mailbox(channel_id).try_snapshot().await.ok()?;
+    let queue_depth = snapshot.queue_depth();
+    let message_ids = (snapshot.intervention_queue.iter())
         .map(|intervention| intervention.message_id.get())
         .collect();
     let disk_path = discord::runtime_store::discord_pending_queue_root().map(|root| {
