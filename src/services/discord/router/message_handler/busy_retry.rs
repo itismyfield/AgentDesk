@@ -219,6 +219,12 @@ pub(super) async fn note_busy_result(
         if !seen.insert(message) {
             continue;
         }
+        let parent = parent.or_else(|| {
+            let parents = &shared.dispatch.thread_parents;
+            parents
+                .iter()
+                .find_map(|edge| (*edge.value() == channel).then_some(*edge.key()))
+        });
         let target = TurnViewTarget::intake_user_message(channel, message);
         let identity = TurnViewIdentity::IntakeShared;
         let view = &shared.turn_view_reconciler;

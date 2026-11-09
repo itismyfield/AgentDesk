@@ -114,6 +114,39 @@ async fn busy_handback_has_only_one_mailbox_op() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parent_gate_handback_without_stored_route_has_one_mailbox_op() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::single_marker::",
+        "parent_gate_handback_without_stored_route_has_one_mailbox_op"
+    )) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let modal = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel\n";
+    let rig = IntakeRig::busy_with_screen(7_991_107, modal.into()).await;
+    let parent = rig.channel.get() + 100;
+    rig.mock.unname_channel(rig.channel.get());
+    rig.mock.name_channel(parent, "parent-gate");
+    rig.mock.add_thread(rig.channel.get(), parent);
+    let _gate = discord::router::busy_inject_support::open_gate(parent);
+    let (drive, mut settled) = rig.drive();
+    discord::queue_io::input_owner::drive::wake(drive);
+    let result = await_within(settled.recv(), WAIT_CAP).await.unwrap();
+    assert_eq!(
+        result,
+        Err("NotSent(\"Modal\")".into()),
+        "{}",
+        rig.trace.text()
+    );
+    assert!(
+        rig.trace
+            .text()
+            .contains("prior turn genuinely busy per JSONL")
+    );
+    assert_eq!(reaction_ops(&rig), [('📬', true)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn busy_unconfirmed_has_only_one_question_op_and_recovers_without_pending() {
     if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::single_marker::",
