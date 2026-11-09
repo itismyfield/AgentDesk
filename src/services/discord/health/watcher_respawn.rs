@@ -385,7 +385,7 @@ async fn unwatched_relay_work_candidates(
 fn mailbox_owes_relay_work(
     mailbox: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
 ) -> bool {
-    mailbox.active_user_message_id.is_some() || !mailbox.intervention_queue.is_empty()
+    mailbox.active_user_message_id.is_some() || mailbox.queue_depth() > 0
 }
 
 /// The runtime that currently owns `channel_id`'s watcher, if any runtime does
@@ -1792,6 +1792,25 @@ mod tests {
             .into_iter()
             .map(|(channel_id, _)| channel_id)
             .collect()
+    }
+
+    // Input waiting in a V2 owner is relay work owed; a front an attempt already carries is not,
+    // so a channel holding only that front stays out of the sweep.
+    #[tokio::test]
+    async fn unwatched_candidates_count_only_v2_input_waiting_behind_an_attempted_front() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let provider = ProviderKind::Codex;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let (waiting, attempted_only) = (ChannelId::new(5_998_401), ChannelId::new(5_998_501));
+        let seed = discord::relay_recovery::tests::orphan_token_finish::v2_attempted_front;
+        seed(&shared, &provider, waiting, true).await;
+        seed(&shared, &provider, attempted_only, false).await;
+
+        let runtimes = vec![shared.clone()];
+        let empty = std::collections::HashSet::new();
+        let candidates = candidate_channels(&provider, &runtimes, &empty).await;
+        assert!(candidates.contains(&waiting), "{candidates:?}");
+        assert!(!candidates.contains(&attempted_only), "{candidates:?}");
     }
 
     /// #5957: the watchdog pass derives candidates from `tmux_watchers`, so the
