@@ -43,7 +43,7 @@ mod tests {
     async fn confirmed_persisted_injection_clears_legacy_and_live_queue_markers() {
         let _root = crate::config::TestRuntimeRootGuard::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
-        for version in [1, 2, 3, 4] {
+        for version in [1_u32, 2, 3, 4] {
             let target = target(100_000_000_079_920 + u64::from(version));
             let path = TurnViewReconciler::persisted_target_path(target).unwrap();
             let record = serde_json::json!({"version":version,"provider":shared.provider.as_str(),

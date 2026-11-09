@@ -1717,13 +1717,14 @@ pub(super) async fn handle_text_message(
                 busy_retry::defer_owned_front(
                     busy_retry::FinalizeEnqueueContext {
                         shared, http, provider: &provider, channel_id, user_msg_id,
-                        placeholder_msg_id, turn_start_attempt: _turn_start_attempt, defer_busy_view,
+                        placeholder_msg_id, turn_start_attempt: _turn_start_attempt,
                         session_retry_context: None,
                         feedback_reminder: feedback_reminder.as_deref(),
                         wip_warning: wip_warning.as_deref(),
                     },
                     &cancel_token,
                     &super::super::super::resolve_discord_bot_provider(token),
+                    defer_busy_view,
                 ).await;
                 post_adk_session_status(
                     adk_session_key.as_deref(),
@@ -1799,7 +1800,7 @@ pub(super) async fn handle_text_message(
                     channel_id,
                     user_msg_id,
                     placeholder_msg_id,
-                    turn_start_attempt: _turn_start_attempt, defer_busy_view: false,
+                    turn_start_attempt: _turn_start_attempt,
                     session_retry_context: None,
                     feedback_reminder: feedback_reminder.as_deref(),
                     wip_warning: wip_warning.as_deref(),

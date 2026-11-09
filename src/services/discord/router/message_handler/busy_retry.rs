@@ -18,7 +18,6 @@ pub(super) struct FinalizeEnqueueContext<'a> {
     pub(super) channel_id: ChannelId,
     pub(super) user_msg_id: MessageId,
     pub(super) placeholder_msg_id: Option<MessageId>,
-    pub(super) defer_busy_view: bool,
     pub(super) turn_start_attempt:
         Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
     pub(super) session_retry_context:
@@ -34,6 +33,7 @@ pub(super) async fn defer_owned_front(
     context: FinalizeEnqueueContext<'_>,
     cancel: &Arc<CancelToken>,
     queue_provider: &crate::services::provider::ProviderKind,
+    defer_busy_view: bool,
 ) {
     let FinalizeEnqueueContext {
         shared,
@@ -42,7 +42,6 @@ pub(super) async fn defer_owned_front(
         channel_id,
         user_msg_id,
         placeholder_msg_id,
-        defer_busy_view,
         turn_start_attempt,
         session_retry_context,
         feedback_reminder,
@@ -119,7 +118,6 @@ pub(super) async fn finalize_enqueue(
         channel_id,
         user_msg_id,
         placeholder_msg_id,
-        defer_busy_view: _,
         turn_start_attempt,
         session_retry_context,
         feedback_reminder,
@@ -202,9 +200,7 @@ pub(super) async fn note_busy_result(
                 .find(|source| source.message_id == *id);
             sources.push((
                 MessageId::new(*id),
-                source.map_or(original.queued_generation, |source| {
-                    source.queued_generation
-                }),
+                source.map_or(original.queued_generation, |s| s.queued_generation),
                 source
                     .and_then(|source| source.route)
                     .and_then(|route| route.parent),
@@ -221,9 +217,7 @@ pub(super) async fn note_busy_result(
     }
     let mut seen = std::collections::HashSet::new();
     for (message, generation, parent) in sources {
-        if !crate::services::discord::reaction_lifecycle::is_real_discord_message_id(message)
-            || !seen.insert(message)
-        {
+        if !seen.insert(message) {
             continue;
         }
         let target = TurnViewTarget::intake_user_message(channel, message);
@@ -249,9 +243,9 @@ pub(super) async fn note_busy_result(
                                         .find(|source| source.message_id == message.get());
                                     (item.message_id == message.get()
                                         || item.source_message_ids.contains(&message.get()))
-                                        && source.map_or(item.queued_generation, |source| {
-                                            source.queued_generation
-                                        }) == generation
+                                        && source
+                                            .map_or(item.queued_generation, |s| s.queued_generation)
+                                            == generation
                                 })
                             }))
                         })
