@@ -103,15 +103,17 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         // A bot post (e.g. a queued placeholder) answers nothing intake never recorded, so inputs
         // past both the live intake checkpoint and phase 1's read range stay unanswered too.
         let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|v| *v);
-        let unrecorded = live_checkpoint.map_or(0, |checkpoint| {
-            let floor = (phase1_read_through.get(&channel_id))
-                .map_or(checkpoint, |&read| read.max(checkpoint));
-            let past = recent.iter().take_while(|m| m.id.get() > floor).count();
-            // Only an input extends the slice; our own posts alone keep the channel quiet.
-            (recent[..past].iter())
-                .rposition(|m| Some(m.author.id.get()) != current_bot_user_id)
-                .map_or(0, |oldest_input| oldest_input + 1)
-        });
+        let unrecorded = live_checkpoint
+            .or_else(|| phase1_read_through.get(&channel_id).copied())
+            .map_or(0, |checkpoint| {
+                let floor = (phase1_read_through.get(&channel_id))
+                    .map_or(checkpoint, |&read| read.max(checkpoint));
+                let past = recent.iter().take_while(|m| m.id.get() > floor).count();
+                // Only an input extends the slice; our own posts alone keep the channel quiet.
+                (recent[..past].iter())
+                    .rposition(|m| Some(m.author.id.get()) != current_bot_user_id)
+                    .map_or(0, |oldest_input| oldest_input + 1)
+            });
         let slice_end = last_bot_idx.max(unrecorded);
         if slice_end == 0 {
             continue;

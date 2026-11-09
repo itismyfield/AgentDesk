@@ -2,6 +2,96 @@ use super::*;
 use crate::services::discord::catch_up::scan_progress::{self as progress, Origin};
 
 #[tokio::test(flavor = "current_thread")]
+async fn phase1_open_retry_pages_past_terminal_noise_to_new_inputs() {
+    let fx = Fixture::new().await;
+    let channel = ChannelId::new(8_006_001);
+    let (before, open, fresh) = (id(1, 700), id(2, 200), id(100, 30));
+    fx.seed_checkpoint(channel, before);
+    fx.queue(channel, open).await;
+    let mut history = vec![human(channel, open)];
+    history.extend((3..100).map(|seq| {
+        let mid = id(seq, 200 - seq);
+        if seq % 2 == 0 {
+            own_reply(channel, mid)
+        } else {
+            foreign_bot(channel, mid)
+        }
+    }));
+    history.push(human(channel, fresh));
+    history.extend((101..125).map(|seq| own_reply(channel, id(seq, 20))));
+    let api = StrictApi::new(&fx.shared).with_history(channel, history);
+    fx.sweep(&api).await;
+    assert!(accepted(&api).is_empty(), "B is outside both initial pages");
+    for _ in 0..2 {
+        fx.retry_sweep(&api, channel).await;
+    }
+    assert_eq!(accepted(&api), [fresh.get()], "B is recovered only once");
+    let fetches = api.fetch_log();
+    assert!(
+        fetches.iter().any(|(_, request, ids)| {
+            matches!(request.cursor, Some(CatchUpFetchCursor::After(after)) if after > open.get())
+                && ids.contains(&fresh.get())
+        }),
+        "the After query advances beyond the Open's first page"
+    );
+    assert_eq!(progress::read(&fx.provider, channel), Some(before.get()));
+    assert!(fx.pending(channel).unwrap().checkpoint < open.get());
+    assert_eq!(
+        fetches
+            .iter()
+            .filter(|(_, request, ids)| { request.cursor.is_some() && ids.contains(&open.get()) })
+            .count(),
+        3,
+        "each sweep rereads Open once through its retry cursor"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase1_open_retry_recovers_unprocessed_open_once_after_membership_leaves() {
+    let fx = Fixture::new().await;
+    let channel = ChannelId::new(8_006_002);
+    let (before, open) = (id(1, 700), id(2, 200));
+    fx.seed_checkpoint(channel, before);
+    fx.queue(channel, open).await;
+    let mut history = vec![human(channel, open)];
+    history.extend((3..80).map(|seq| own_reply(channel, id(seq, 200 - seq))));
+    let last = history.last().unwrap().id;
+    let api = StrictApi::new(&fx.shared).with_history(channel, history);
+    fx.sweep(&api).await;
+    fx.retry_sweep(&api, channel).await;
+    assert!(fx.pending(channel).unwrap().checkpoint < open.get());
+    discord::mailbox_clear_channel(&fx.shared, &fx.provider, channel).await;
+    fx.retry_sweep(&api, channel).await;
+    fx.sweep(&api).await;
+    assert_eq!(api.enqueue_log(), [(open.get(), true, None)]);
+    assert_eq!(progress::read(&fx.provider, channel), Some(last.get()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase1_open_retry_snapshot_failure_preserves_origin_and_budget() {
+    let fx = Fixture::new().await;
+    let channel = ChannelId::new(8_006_004);
+    let (before, open) = (id(1, 700), id(2, 200));
+    fx.seed_checkpoint(channel, before);
+    fx.queue(channel, open).await;
+    let retry = CatchUpRetryState {
+        checkpoint: before.get(),
+        armed_at: Instant::now() - Duration::from_secs(5),
+        fetch_failures: 1,
+        deferred_rearms: 3,
+    };
+    fx.shared.catch_up_retry_pending.insert(channel, retry);
+    let mut history = vec![human(channel, open)];
+    history.extend((3..80).map(|seq| own_reply(channel, id(seq, 200 - seq))));
+    let mut api = StrictApi::new(&fx.shared).with_history(channel, history);
+    api.fetch_failure = Some((true, "snapshot unavailable".into()));
+    fx.retry_sweep(&api, channel).await;
+    assert_eq!(fx.pending(channel), retry.after_fetch_failure());
+    assert_eq!(progress::read(&fx.provider, channel), Some(before.get()));
+    assert!(api.enqueue_log().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn i7441_live_intake_is_never_saved_as_scanner_progress() {
     let fx = Fixture::new().await;
     let channel = ChannelId::new(7_441_114);
