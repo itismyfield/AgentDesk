@@ -1677,6 +1677,7 @@ async fn reattach_idle_tmux_clear_refuses_newer_idle_row_between_predicate_and_p
         .expect("output fixture metadata")
         .len();
     let token = start_test_turn(&shared, channel, user_msg).await;
+    orphan_token_finish::v2_attempted_front(&shared, &provider, channel, true).await;
     shared.restart.global_active.store(1, Ordering::Relaxed);
 
     let mut stale = super::super::inflight::InflightTurnState::new(
@@ -1777,6 +1778,11 @@ async fn reattach_idle_tmux_clear_refuses_newer_idle_row_between_predicate_and_p
     assert_ne!(result.status, "cleared_idle_tmux_stale_turn");
     assert!(!result.removed_mailbox_token);
     assert_eq!(result.post_mailbox_has_cancel_token, Some(true));
+    assert_eq!(
+        result.post_mailbox_queue_depth,
+        Some(1),
+        "the V2 owner's waiting depth"
+    );
     assert!(!token.cancelled.load(Ordering::Relaxed));
     assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     assert!(
@@ -1835,6 +1841,7 @@ async fn reattach_idle_tmux_clear_success_tears_down_after_guarded_clear() {
         .expect("output fixture metadata")
         .len();
     let token = start_test_turn(&shared, channel, user_msg).await;
+    orphan_token_finish::v2_attempted_front(&shared, &provider, channel, true).await;
     shared.restart.global_active.store(1, Ordering::Relaxed);
 
     let mut state = super::super::inflight::InflightTurnState::new(
@@ -1893,6 +1900,11 @@ async fn reattach_idle_tmux_clear_success_tears_down_after_guarded_clear() {
     assert!(relay_recovery_status_counts_as_applied(result.status));
     assert!(result.removed_mailbox_token);
     assert_eq!(result.post_mailbox_has_cancel_token, Some(false));
+    assert_eq!(
+        result.post_mailbox_queue_depth,
+        Some(1),
+        "the V2 owner's waiting depth"
+    );
     assert_eq!(result.reattach_watcher_replaced, Some(true));
     assert!(token.cancelled.load(Ordering::Relaxed));
     assert!(watcher_cancel.load(Ordering::Relaxed));

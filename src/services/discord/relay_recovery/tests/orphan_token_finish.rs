@@ -32,6 +32,47 @@ async fn enqueue_three(shared: &Arc<SharedData>, provider: &ProviderKind, channe
     }
 }
 
+/// Hands `channel`'s input to its V2 owner: one front an attempt carries and, when `waiting`, one
+/// input behind it. The V1 queue stays empty.
+pub(in crate::services::discord) async fn v2_attempted_front(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    waiting: bool,
+) {
+    use crate::services::turn_orchestrator::{PendingQueueItem, QueuePersistenceContext, v2_queue};
+    let (mailboxes, hash) = shared.queue_fixture_parts();
+    let handle = mailboxes.handle(channel);
+    let context = QueuePersistenceContext::new(provider, hash, None);
+    let (path, namespace) = v2_queue(&context, channel).unwrap();
+    handle.v2_adopt(path, namespace).await.unwrap();
+    let item = |id: u64| -> PendingQueueItem {
+        serde_json::from_value(serde_json::json!({"author_id": 7, "message_id": id,
+            "channel_id": channel.get(), "source_message_ids": [id],
+            "queued_generation": 1, "text": format!("queued {id}")}))
+        .unwrap()
+    };
+    // Clear of `channel + 1`, which fixtures use as the active turn's message.
+    let (front, behind) = (item(channel.get() + 101), item(channel.get() + 102));
+    let attempt = serde_json::json!({"nonce": "front", "provider": provider.as_str(),
+        "target": {"host": "tmux", "owner": "front", "root": "/test", "execution_nonce": "e"},
+        "source": {"kind": "pre_source", "expected_session_id": null,
+            "expected_transcript": null, "binding_watermark": null}});
+    let attempted = handle.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        owner
+            .enqueue_fixture(&front)
+            .map_err(|e| format!("{e:?}"))?;
+        let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+        owner.reserve_unit(attempt, |item| Some((String::new(), item.text.clone())))?;
+        if !waiting {
+            return Ok(true);
+        }
+        owner.enqueue_fixture(&behind).map_err(|e| format!("{e:?}"))
+    });
+    assert_eq!(attempted.await, Ok(true));
+}
+
 /// The decision the operator lane plans from its own snapshot, before apply.
 async fn planned_decision(registry: &HealthRegistry, channel: ChannelId) -> RelayRecoveryDecision {
     run_relay_recovery_at(
@@ -87,6 +128,42 @@ async fn orphan_token_apply_finishes_the_snapshot_episode_and_keeps_the_queue() 
         shared.restart.deferred_hook_channels.contains_key(&channel),
         "the preserved queue must be handed to a kickoff owner"
     );
+}
+
+// An orphan finish and a queue drain report the waiting depth of the V2 owner that holds the
+// input: its attempted front is not waiting, and the empty V1 queue owns nothing.
+#[tokio::test]
+async fn orphan_and_drain_applies_report_the_v2_owner_waiting_depth() {
+    let (_root_guard, _root_dir) = isolated_agentdesk_root();
+    let provider = ProviderKind::Codex;
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(5_998_301);
+    start_test_turn(&shared, channel, MessageId::new(5_998_310)).await;
+    v2_attempted_front(&shared, &provider, channel, true).await;
+    shared.restart.global_active.store(1, Ordering::Relaxed);
+    let orphan = planned_decision(&registry, channel).await;
+    assert_eq!(
+        orphan.action,
+        RelayRecoveryActionKind::ClearOrphanPendingToken
+    );
+    let source = RelayRecoveryApplySource::Manual;
+
+    let finished =
+        apply_relay_recovery_decision(&registry, &shared, &provider, &orphan, None, source).await;
+    assert_eq!(finished.status, "applied");
+    assert_eq!(finished.post_mailbox_queue_depth, Some(1));
+
+    let blocked = RelayHealthSnapshot {
+        channel_id: channel.get(),
+        queue_depth: 1,
+        ..snapshot()
+    };
+    let drain = plan_relay_recovery(&blocked, RelayStallState::QueueBlocked, 1_000);
+    assert_eq!(drain.action, RelayRecoveryActionKind::DrainPendingQueue);
+    let drained =
+        apply_relay_recovery_decision(&registry, &shared, &provider, &drain, None, source).await;
+    assert_eq!(drained.status, "scheduled_pending_queue_drain");
+    assert_eq!(drained.post_mailbox_queue_depth, Some(1));
 }
 
 #[tokio::test]
