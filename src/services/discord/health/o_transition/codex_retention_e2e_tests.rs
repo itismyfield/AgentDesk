@@ -4,6 +4,26 @@ use crate::services::discord::health::o_transition::automatic::test_support;
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::writer::tests::with_ready_codex_backlog;
 use crate::services::turn_orchestrator::{ChannelMailboxSnapshot, registry_purge::MailboxRefusal};
+use crate::test_support::wait::{WAIT_CAP, join_within};
+
+// Separate the real-time cap from virtual quiet periods; live PG I/O keeps real timers.
+fn run_sweep(
+    paused: bool,
+    cap: std::time::Duration,
+    run: impl FnOnce(&tokio::runtime::Runtime) + Send + 'static,
+) {
+    join_within(
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(paused)
+                .build()
+                .unwrap();
+            run(&runtime);
+        }),
+        cap,
+    );
+}
 
 fn backlog(fixture: &Fixture, count: usize) -> (Vec<SourceId>, chrono::DateTime<chrono::Utc>) {
     let now = chrono::Utc::now();
@@ -167,6 +187,7 @@ async fn assert_sweep(fixture: &Fixture, shared: Arc<SharedData>, count: usize, 
         sources,
         fixture.context.tmux_session.clone(),
         configured,
+        WAIT_CAP * (2 * count as u32 + 1),
         |ready, _| async move {
             prepare(&registry, observed_shared, CHANNEL)
                 .await
@@ -202,8 +223,9 @@ async fn assert_sweep(fixture: &Fixture, shared: Arc<SharedData>, count: usize, 
     for cursor in &cursors[..count] {
         assert!(
             cursor.retired,
-            "[ba:e2e] old native source retired after actual sweep: {:?}; reply={reply:?}",
-            cursor.source
+            "[ba:e2e] old native source retired after actual sweep: {:?}; skips={:?}; reply={reply:?}",
+            cursor.source,
+            test_support::codex_skips_for_test()
         );
         let audit = cursor
             .transition_cleanup
@@ -233,43 +255,54 @@ async fn assert_sweep(fixture: &Fixture, shared: Arc<SharedData>, count: usize, 
 
 #[test]
 fn codex_native_legacy_sweep_retires_only_aged_backlog_and_records_atomic_audit() {
-    let fixture = Fixture::new(false);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(assert_sweep(&fixture, fixture.shared(None), 2, false));
+    run_sweep(true, WAIT_CAP, |runtime| {
+        let fixture = Fixture::new(false);
+        runtime.block_on(assert_sweep(&fixture, fixture.shared(None), 2, false));
+    });
 }
 
 #[test]
 fn older_unbound_resume_context_requires_superseding_marker_and_reaches_inspect() {
-    let fixture = Fixture::new(false);
-    let mut old = fixture.context.clone();
-    old.execution_nonce = "b".repeat(32);
-    old.created_at -= chrono::TimeDelta::seconds(1);
-    old.launch_mode = "resume".into();
-    let pending = PreparedIncarnation::create(old.clone()).unwrap();
-    let mut legacy = serde_json::to_value(&old).unwrap();
-    for field in ["first_prompt_digest", "source_policy"] {
-        legacy.as_object_mut().unwrap().remove(field);
-    }
-    std::fs::write(&pending.path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let shared = fixture.shared(None);
-    let prepared = runtime
-        .block_on(prepare(&HealthRegistry::new(), shared.clone(), CHANNEL))
-        .expect("an older unbound resume is superseded by the current pane marker");
-    let observed = fixture.observe(&prepared).unwrap();
-    let host = census::host_inventory(None, &prepared.tmux).unwrap();
-    let marker = tc::session_temp_path(&prepared.tmux, "spawn_nonce");
-    for value in [None, Some(old.execution_nonce.as_str()), Some("")] {
-        match value {
-            None => std::fs::remove_file(&marker).unwrap(),
-            Some(value) => std::fs::write(&marker, value).unwrap(),
+    run_sweep(true, WAIT_CAP, |runtime| {
+        let fixture = Fixture::new(false);
+        let mut old = fixture.context.clone();
+        old.execution_nonce = "b".repeat(32);
+        old.created_at -= chrono::TimeDelta::seconds(1);
+        old.launch_mode = "resume".into();
+        let pending = PreparedIncarnation::create(old.clone()).unwrap();
+        let mut legacy = serde_json::to_value(&old).unwrap();
+        for field in ["first_prompt_digest", "source_policy"] {
+            legacy.as_object_mut().unwrap().remove(field);
         }
+        std::fs::write(&pending.path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let shared = fixture.shared(None);
+        let prepared = runtime
+            .block_on(prepare(&HealthRegistry::new(), shared.clone(), CHANNEL))
+            .expect("an older unbound resume is superseded by the current pane marker");
+        let observed = fixture.observe(&prepared).unwrap();
+        let host = census::host_inventory(None, &prepared.tmux).unwrap();
+        let marker = tc::session_temp_path(&prepared.tmux, "spawn_nonce");
+        for value in [None, Some(old.execution_nonce.as_str()), Some("")] {
+            match value {
+                None => std::fs::remove_file(&marker).unwrap(),
+                Some(value) => std::fs::write(&marker, value).unwrap(),
+            }
+            assert_eq!(
+                census::read(
+                    &shared,
+                    &observed.target,
+                    &fixture.context,
+                    &observed.events,
+                    &host
+                )
+                .unwrap_err(),
+                "prepared or unaccounted launch context"
+            );
+        }
+        std::fs::write(&marker, &fixture.context.execution_nonce).unwrap();
+        let mut equal = old;
+        equal.created_at = fixture.context.created_at;
+        std::fs::write(&pending.path, serde_json::to_vec(&equal).unwrap()).unwrap();
         assert_eq!(
             census::read(
                 &shared,
@@ -281,72 +314,61 @@ fn older_unbound_resume_context_requires_superseding_marker_and_reaches_inspect(
             .unwrap_err(),
             "prepared or unaccounted launch context"
         );
-    }
-    std::fs::write(&marker, &fixture.context.execution_nonce).unwrap();
-    let mut equal = old;
-    equal.created_at = fixture.context.created_at;
-    std::fs::write(&pending.path, serde_json::to_vec(&equal).unwrap()).unwrap();
-    assert_eq!(
-        census::read(
-            &shared,
-            &observed.target,
-            &fixture.context,
-            &observed.events,
-            &host
-        )
-        .unwrap_err(),
-        "prepared or unaccounted launch context"
-    );
-    std::fs::write(&pending.path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    runtime.block_on(assert_sweep(&fixture, shared, 2, false));
+        std::fs::write(&pending.path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        runtime.block_on(assert_sweep(&fixture, shared, 2, false));
+    });
 }
 
 #[test]
 fn pg_codex_native_configured_herdr_sweep_retires_aged_backlog() {
-    let fixture = Fixture::new(true);
-    let _node =
-        crate::config::session_hosts::force_for_test(Some("test-node"), &[(CHANNEL, "test-node")]);
-    let rig = crate::services::session_host::herdr_socket_rig_tests::HerdrRig::start();
-    rig.show_panes(&["w1-1"]);
-    let _registry = rig.registry_as_on_this_thread(
-        "test-node",
-        "test-node-endpoint",
-        rig.socket(),
-        "agentdesk",
-    );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let db=crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool=db.connect_and_migrate().await;
-        let shared=fixture.shared(Some(pool.clone()));
-        let mut owner=crate::db::dispatched_sessions::hosted_execution::tests::owner(&CHANNEL.to_string());
-        owner.provider="codex".into();owner.discord_token_hash=shared.token_hash.clone();owner.logical_key=fixture.context.tmux_session.clone();owner.runtime_root=fixture.context.owner_runtime_root.clone();
-        let mut record=crate::db::dispatched_sessions::hosted_execution::tests::record(&owner,&fixture.context.execution_nonce,crate::db::dispatched_sessions::hosted_execution::HostedState::Bound);
-        let location=record.location.as_mut().unwrap();location.pane_id="w1-1".into();location.endpoint_config_key="test-node-endpoint".into();location.socket_addr=rig.socket().display().to_string();
-        record.expected.as_mut().unwrap().binding_provider="codex".into();
-        let key=format!("codex/{}/test-node:{}",shared.token_hash,fixture.context.tmux_session);
-        sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id, hosted_execution) VALUES ($1, 'codex', 'idle', 'discord_channel', $2, $3, $4)").bind(key).bind(&shared.token_hash).bind(CHANNEL.to_string()).bind(serde_json::to_value(record).unwrap()).execute(&pool).await.unwrap();
-        assert_sweep(&fixture,shared,2,true).await;
-        pool.close().await;drop(db);
+    run_sweep(false, WAIT_CAP * 3, |runtime| {
+        let fixture = Fixture::new(true);
+        let _node = crate::config::session_hosts::force_for_test(
+            Some("test-node"),
+            &[(CHANNEL, "test-node")],
+        );
+        let rig = crate::services::session_host::herdr_socket_rig_tests::HerdrRig::start();
+        rig.show_panes(&["w1-1"]);
+        let _registry = rig.registry_as_on_this_thread(
+            "test-node",
+            "test-node-endpoint",
+            rig.socket(),
+            "agentdesk",
+        );
+        runtime.block_on(async {
+            let db=crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+            let pool=db.connect_and_migrate().await;
+            let shared=fixture.shared(Some(pool.clone()));
+            let mut owner=crate::db::dispatched_sessions::hosted_execution::tests::owner(&CHANNEL.to_string());
+            owner.provider="codex".into();owner.discord_token_hash=shared.token_hash.clone();owner.logical_key=fixture.context.tmux_session.clone();owner.runtime_root=fixture.context.owner_runtime_root.clone();
+            let mut record=crate::db::dispatched_sessions::hosted_execution::tests::record(&owner,&fixture.context.execution_nonce,crate::db::dispatched_sessions::hosted_execution::HostedState::Bound);
+            let location=record.location.as_mut().unwrap();location.pane_id="w1-1".into();location.endpoint_config_key="test-node-endpoint".into();location.socket_addr=rig.socket().display().to_string();
+            record.expected.as_mut().unwrap().binding_provider="codex".into();
+            let key=format!("codex/{}/test-node:{}",shared.token_hash,fixture.context.tmux_session);
+            sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id, hosted_execution) VALUES ($1, 'codex', 'idle', 'discord_channel', $2, $3, $4)").bind(key).bind(&shared.token_hash).bind(CHANNEL.to_string()).bind(serde_json::to_value(record).unwrap()).execute(&pool).await.unwrap();
+            assert_sweep(&fixture,shared,2,true).await;
+            pool.close().await;drop(db);
+        });
+        assert!(
+            rig.sends().is_empty(),
+            "retention never sends terminal input"
+        );
     });
-    assert!(
-        rig.sends().is_empty(),
-        "retention never sends terminal input"
-    );
 }
 
 #[test]
 fn codex_twenty_reader_backlog_retires_after_complete_retention_evidence() {
-    let fixture = Fixture::new(false);
-    mapped_live_panes(&fixture);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(assert_sweep(&fixture, fixture.shared(None), 19, false));
+    run_sweep(true, WAIT_CAP, |runtime| {
+        let fixture = Fixture::new(false);
+        mapped_live_panes(&fixture);
+        runtime.block_on(async {
+            let started = tokio::time::Instant::now();
+            assert_sweep(&fixture, fixture.shared(None), 19, false).await;
+            assert!(
+                started.elapsed() >= crate::services::tui_o::writer::rotation::RETIRE_QUIET * 38
+            );
+        });
+    });
 }
 
 #[test]
@@ -376,6 +398,7 @@ fn codex_twenty_readers_survive_watcher_and_pane_census_skips() {
             registry.register("codex".into(), shared).await;
             let (_, cursors, reading, health) = with_ready_codex_backlog(
                 sources, fixture.context.tmux_session.clone(), false,
+                std::time::Duration::from_secs(elapsed) + WAIT_CAP,
                 |ready, _| async move {
                     assert_eq!(test_support::codex_sweep_for_test(&registry, &ready, CHANNEL).await.unwrap_err(), "no Codex Inspect was sent");
                     tokio::time::advance(std::time::Duration::from_secs(elapsed)).await;
@@ -447,6 +470,7 @@ async fn unproven_canary(young: bool, regrow: bool, configured: bool) {
     let old = sources[0].clone();
     let (_, cursors, _, health) = with_ready_codex_backlog(
         sources, fixture.context.tmux_session.clone(), configured,
+        WAIT_CAP * 3,
         |_, mut probe| async move {
             let reason = "tui_o:reader_retention_stalled:7".to_owned();
             assert!(probe.health.current_at(std::time::Instant::now()).contains(&reason));
