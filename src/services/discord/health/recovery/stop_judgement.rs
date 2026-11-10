@@ -148,9 +148,8 @@ pub(super) async fn preserved(
     kept(snapshot.queue_depth())
 }
 
-/// Finishes the channel's turn only while `judged` still keys it; `Err`, with nothing cleared, when
-/// another turn holds the channel or the judged turn's finish went unobserved. The release wakes
-/// no queue: the stop resumes it after its cleanup.
+/// Finishes the channel's turn only while `judged` still keys it, waking no queue (the stop does
+/// after its cleanup); `Err`, nothing cleared, when another turn holds it or the finish is unseen.
 pub(super) async fn finish_judged_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

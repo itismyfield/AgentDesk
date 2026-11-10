@@ -1,6 +1,5 @@
-//! A stop fallback resumes its channel's waiting input once, after its own cleanup: its token
-//! release publishes no queue-eligible completion, an owned queue is woken only once its row is
-//! gone, and an unowned backlog still gets its kickoff.
+//! A stop fallback resumes waiting input once, after its cleanup: its token release wakes no queue,
+//! an owned queue wakes once its row is gone, and an unowned backlog keeps its kickoff.
 
 use std::sync::{Arc, Mutex};
 

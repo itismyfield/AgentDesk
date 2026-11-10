@@ -1,6 +1,5 @@
-//! The resume notice of a closing or recovery operation: given once, after the operation's own
-//! row, mailbox and handback cleanup and its terminal barrier, through the existing kickoff, which
-//! an owned queue takes as one owner wake. A refused, mismatched or superseded close gives none.
+//! A closing or recovery operation's resume notice, given once after its own cleanup and terminal
+//! barrier through the existing kickoff (one owner wake for an owned queue); a refusal gives none.
 use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
