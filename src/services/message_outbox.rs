@@ -1,9 +1,7 @@
 use sqlx::PgPool;
 
-use crate::services::{
-    discord::bot_role::UtilityBotRole,
-    provider::{CancelToken, cancel_requested},
-};
+use crate::domain::bot_role::UtilityBotRole;
+use crate::services::provider::{CancelToken, cancel_requested};
 
 mod attachments;
 pub(crate) mod body_census;
