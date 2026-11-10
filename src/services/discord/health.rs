@@ -57,6 +57,7 @@ pub(in crate::services::discord) use relay_auto_heal::relay_recovery_retry_delay
 mod relay_dead_reattach;
 mod relay_progress;
 mod routine_process;
+pub(crate) use super::queue_io::input_owner::closed::repair_cleared_row;
 pub(crate) use routine_process::cancel_routine_process_turn;
 mod channel_home_seed;
 mod runtime_resolve;

@@ -33,15 +33,12 @@ pub(in crate::services::discord) fn closed(
     );
 }
 
-/// An operator repair's clear of the channel's row; a row it removed resumes the waiting input once.
-pub(crate) async fn clear_inflight_state_for_channel(
+/// An operator repair removed the channel's row: its waiting input is resumed once.
+pub(crate) async fn repair_cleared_row(
     registry: Option<&crate::services::discord::health::HealthRegistry>,
     provider: &ProviderKind,
     channel_id: u64,
 ) {
-    if !crate::services::discord::inflight::clear_inflight_state(provider, channel_id) {
-        return;
-    }
     let channel = ChannelId::new(channel_id);
     let Some(registry) = registry else {
         return;

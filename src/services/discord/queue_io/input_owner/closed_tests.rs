@@ -1,4 +1,4 @@
-//! An operator repair's row clear resumes the channel's owner once when it removed a row, and
+//! The stale mailbox repair's row clear resumes the channel's owner once when it removed a row, and
 //! gives no notice when no row was there to remove.
 
 use std::sync::Arc;
@@ -67,7 +67,10 @@ async fn a_repair_row_clear_resumes_the_owner_once_only_when_it_removed_a_row() 
         let _unhook = WakeHook(channel);
         let completion = support::KickoffCompletion::install(channel);
 
-        discord::clear_inflight_state_for_channel(Some(&registry), &provider, id).await;
+        // The stale mailbox repair's own sequence: clear the row, then resume what it held.
+        if discord::clear_inflight_state_for_channel(&provider, id) {
+            discord::health::repair_cleared_row(Some(&registry), &provider, id).await;
+        }
         await_within(completion.processed(0, WAIT_CAP), WAIT_CAP).await;
         assert!(
             !inflight::inflight_state_file_exists(&provider, id),
