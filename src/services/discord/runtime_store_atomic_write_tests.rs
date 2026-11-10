@@ -69,12 +69,12 @@ fn atomic_write_stage_failures_preserve_bytes_and_observations() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let old = r#"{"user_msg_id":7}"#;
     fs::write(&path, old).unwrap();
-    for stage in [
-        Stage::CreateDir,
-        Stage::CreateTemp,
-        Stage::Write,
-        Stage::FileSync,
-        Stage::Rename,
+    for (stage, syscall) in [
+        (Stage::CreateDir, "create_dir_all"),
+        (Stage::CreateTemp, "create_tmp"),
+        (Stage::Write, "write_all"),
+        (Stage::FileSync, "sync_all"),
+        (Stage::Rename, "rename"),
     ] {
         for errno in [5, 28] {
             let fault = FaultGuard::new(&path, stage, errno);
@@ -82,7 +82,7 @@ fn atomic_write_stage_failures_preserve_bytes_and_observations() {
             let error = result.expect_err("a failed syscall must never report success");
             let raw = std::io::Error::from_raw_os_error(errno);
             let prefix = if errno == 28 { "ENOSPC: " } else { "" };
-            assert_eq!(error, format!("{prefix}{}: {raw}", stage.prefix()));
+            assert_eq!(error, format!("{prefix}{syscall}: {raw}"));
             assert_eq!(fs::read_to_string(&path).unwrap(), old);
             assert_eq!(
                 logs.contains("agentdesk::inflight_write"),
