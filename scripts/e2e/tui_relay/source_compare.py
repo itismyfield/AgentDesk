@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import datetime as dt
 import json
 import os
 from pathlib import Path
@@ -102,6 +103,16 @@ def native_inputs(path, pattern):
             known = set(row) in LAST_PROMPT_SHAPES and isinstance(row.get("lastPrompt", ""), str) and not any(
                 markers(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), pattern)
                 for key, value in row.items() if key != "lastPrompt")
+        elif kind == "api-request-blob":
+            # Request blobs copy user content; only the observed envelope may hide those markers.
+            message = row.get("message")
+            blocks = message.get("content") if isinstance(message, dict) else None
+            known = set(row) == {"type", "sessionId", "hash", "message"} and isinstance(message, dict) and (
+                set(message) == {"role", "content"} and message["role"] == "user" and isinstance(blocks, list) and all(
+                    isinstance(b, str) or isinstance(b, dict) and set(b) == {"type", "text"}
+                    and b["type"] == "text" and isinstance(b["text"], str) for b in blocks)) and not any(
+                markers(json.dumps(value, ensure_ascii=False), pattern)
+                for key, value in row.items() if key != "message")
         else:
             known = kind in ignored
         if not known and markers(json.dumps(row, ensure_ascii=False), pattern):
@@ -127,7 +138,8 @@ def compare(path, messages, *, marker_regex=None, run_id=None, input_mirror_auth
     """Return per-marker counts; same-ID Discord edits count only their last snapshot."""
     pattern = marker_pattern(marker_regex=marker_regex, run_id=run_id)
     native, delivered = Counter(), Counter()
-    for text in native_inputs(path, pattern):
+    for text in (text for source in ([path] if isinstance(path, (str, Path)) else path)
+                 for text in native_inputs(source, pattern)):
         found = markers(text, pattern)
         native.update(found)
         if is_deliver_input(text, {str(a) for a in deliver_author_ids}):
@@ -206,7 +218,31 @@ def resolve_binding(base, *, agent_id=None, channel_id=None, transcript_root=Non
     if len(paths) != 1:
         raise ValueError(f"expected one local transcript for {sid}, found {len(paths)} under {root}")
     return dict(agent_id=identity["agent_id"], channel_id=str(identity["channel_id"]),
-                session_key=key, provider=provider, session_id=sid, transcript_path=str(paths[0]))
+                session_key=key, provider=provider, session_id=sid, transcript_path=str(paths[0]),
+                transcript_root=str(root))
+
+
+def run_transcripts(binding, messages, run_id):
+    """Use exact channel/run markers as evidence for sessions replaced since the run began."""
+    if not run_id or "transcript_root" not in binding:
+        return [binding["transcript_path"]]
+    pattern = marker_pattern(run_id=run_id)
+    marked = []
+    for m in {str(m["id"]): m for m in messages}.values():
+        text = m.get("content") or ""
+        if (m.get("author") or {}).get("bot") and text.startswith("-# ⌨️ "):
+            text = re.sub(r"\\([\\`*_~|\[\]#])", r"\1", text)
+        marked.append((m, markers(text, pattern)))
+    channel_markers = set().union(*(found for _, found in marked))
+    if not channel_markers:
+        return [binding["transcript_path"]]
+    stamp = re.match(r"^\d{8}T\d{6}Z(?:-|$)", run_id)
+    started = (dt.datetime.strptime(run_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc).timestamp()
+               if stamp else min((int(m["id"]) >> 22) / 1000 + 1420070400 for m, found in marked if found))
+    root = Path(binding["transcript_root"])
+    glob = "*/*.jsonl" if binding["provider"] == "claude" else "**/rollout-*.jsonl"
+    return sorted(str(path) for path in root.glob(glob) if path.stat().st_mtime >= started
+                  and markers(path.read_text(encoding="utf-8"), pattern) & channel_markers)
 
 
 def notification_fields(row):
@@ -359,7 +395,8 @@ def main(argv=None):
             return 0
         messages = fetch_messages(args.api_base, binding["channel_id"], after_id=args.after_id,
                                   max_pages=args.max_pages)
-        result = compare(binding["transcript_path"], messages,
+        binding["transcript_paths"] = run_transcripts(binding, messages, args.run_id)
+        result = compare(binding["transcript_paths"], messages,
                          marker_regex=args.marker_regex, run_id=args.run_id,
                          input_mirror_author_ids=args.input_mirror_author_id,
                          deliver_author_ids=args.deliver_author_id)
