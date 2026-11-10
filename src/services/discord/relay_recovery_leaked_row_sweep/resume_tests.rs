@@ -15,6 +15,9 @@ use crate::services::discord::queue_io::input_owner::drive::{
 };
 use crate::services::discord::queue_io::input_owner::effect::{Completion, Leaf, PreparedPayload};
 use crate::services::discord::queue_io::input_owner::pump;
+use crate::services::discord::turn_finalizer::{
+    FinalizeContext, FinalizeOutcome, SyntheticClaimSnapshot, TerminalEvent, TurnKey,
+};
 use crate::services::discord::{self as discord, inflight, tui_direct_pending_start};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::PendingQueueItem;
@@ -32,6 +35,22 @@ enum Case {
     Token,
     /// The row is not stale yet, so the sweep recovers nothing.
     Refused,
+    /// No token; the finalizer keeps a rebind-origin row and the lifecycle clear removes it.
+    LifecycleClears,
+    /// As `LifecycleClears` with the token: its publish precedes the lifecycle clear.
+    LifecycleClearsToken,
+    /// The episode was finalized first, releasing its token but keeping its row; the sweep's
+    /// finalizer reads `AlreadyFinalized` and its duplicate cleanup removes the row itself.
+    DuplicateClears,
+}
+
+impl Case {
+    fn holds_token(self) -> bool {
+        matches!(
+            self,
+            Case::Token | Case::LifecycleClearsToken | Case::DuplicateClears
+        )
+    }
 }
 
 /// What a start behind a row does (owner_input.rs:677-681): refuse while the channel's row stands,
@@ -143,7 +162,7 @@ async fn run_case(case: Case, channel_id: u64) {
     .unwrap();
     let user_msg = channel_id + 100;
     let token = Arc::new(CancelToken::new());
-    if case == Case::Token {
+    if case.holds_token() {
         let start = discord::mailbox_try_start_turn;
         assert!(
             start(
@@ -157,7 +176,7 @@ async fn run_case(case: Case, channel_id: u64) {
         );
         shared.restart.global_active.store(1, Ordering::Relaxed);
     }
-    let held = (case == Case::Token).then_some(token.as_ref());
+    let held = case.holds_token().then_some(token.as_ref());
     let mut row = stale_row(channel_id, user_msg, held, &output);
     if case == Case::Refused {
         row.started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -174,7 +193,43 @@ async fn run_case(case: Case, channel_id: u64) {
         row.full_response = "delivered".to_string();
         row.response_sent_offset = row.full_response.len();
     }
+    row.rebind_origin = matches!(case, Case::LifecycleClears | Case::LifecycleClearsToken);
     write_row(&row);
+    if case == Case::DuplicateClears {
+        // The same episode's earlier finalize, as the bridge's actor finalize leaves it.
+        let keep = FinalizeContext {
+            clear_inflight: false,
+            allow_completion_cleanup: false,
+            kickoff_queue: false,
+            expected_idempotent_guard_miss: false,
+        };
+        let key = TurnKey::new(channel, user_msg, shared.restart.current_generation);
+        let snapshot = Some(SyntheticClaimSnapshot::from_row(&row));
+        let finalizer = &shared.turn_finalizer;
+        let event = TerminalEvent::Complete;
+        let first = finalizer
+            .submit_terminal_with_claim_snapshot(
+                key,
+                provider.clone(),
+                event,
+                keep,
+                snapshot,
+                shared.clone(),
+            )
+            .await;
+        let released = matches!(
+            first,
+            FinalizeOutcome::Finalized {
+                removed_token: Some(_),
+                ..
+            }
+        );
+        assert!(released, "{case:?}: the first finalize released the token");
+        assert!(
+            inflight::inflight_state_file_exists(&provider, channel_id),
+            "row kept"
+        );
+    }
     // The owner's queue holds one front the row already refused.
     let mailbox = shared.mailbox(channel);
     let dir = discord::runtime_store::discord_pending_queue_root().unwrap();
@@ -228,7 +283,11 @@ async fn run_case(case: Case, channel_id: u64) {
     let row_left = inflight::inflight_state_file_exists(&provider, channel_id);
     let wakes = *wakes.lock().unwrap();
     match case {
-        Case::FinalizerClears | Case::Committed => {
+        Case::FinalizerClears
+        | Case::Committed
+        | Case::LifecycleClears
+        | Case::LifecycleClearsToken
+        | Case::DuplicateClears => {
             assert_eq!(
                 (applied, row_left),
                 (1, false),
@@ -245,6 +304,13 @@ async fn run_case(case: Case, channel_id: u64) {
                 1,
                 "{case:?}: delivered once"
             );
+            if case == Case::LifecycleClearsToken {
+                assert_eq!(
+                    eligible(&mut events, channel),
+                    1,
+                    "{case:?}: its token published"
+                );
+            }
         }
         Case::Successor | Case::Refused => {
             assert!(row_left, "{case:?}: a row still holds the channel");
@@ -265,18 +331,27 @@ async fn run_case(case: Case, channel_id: u64) {
                 wakes, 0,
                 "{case:?}: the finalizer's publish owns the notice"
             );
-            let mut eligible = 0;
-            loop {
-                match events.try_recv() {
-                    Ok(event) => {
-                        eligible +=
-                            usize::from(event.channel_id == channel && event.queue_is_eligible());
-                    }
-                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
-                    Err(other) => panic!("{case:?}: completion bus unreadable: {other:?}"),
-                }
+            let published = eligible(&mut events, channel);
+            assert_eq!(published, 1, "{case:?}: the token release publishes once");
+        }
+    }
+}
+
+/// The channel's queue-eligible completions on the bus; only an emptied bus ends the count.
+fn eligible(
+    events: &mut tokio::sync::broadcast::Receiver<
+        discord::turn_completion_events::TurnCompletionEvent,
+    >,
+    channel: ChannelId,
+) -> usize {
+    let mut eligible = 0;
+    loop {
+        match events.try_recv() {
+            Ok(event) => {
+                eligible += usize::from(event.channel_id == channel && event.queue_is_eligible())
             }
-            assert_eq!(eligible, 1, "{case:?}: the token release publishes once");
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => return eligible,
+            Err(other) => panic!("completion bus unreadable: {other:?}"),
         }
     }
 }
@@ -289,6 +364,9 @@ async fn a_sweep_resumes_a_held_front_once_only_when_its_recovery_removed_the_ro
         (Case::Successor, 7_753_230),
         (Case::Token, 7_753_240),
         (Case::Refused, 7_753_250),
+        (Case::LifecycleClears, 7_753_260),
+        (Case::LifecycleClearsToken, 7_753_270),
+        (Case::DuplicateClears, 7_753_280),
     ];
     for (case, channel) in cases {
         run_case(case, channel).await;

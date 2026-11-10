@@ -1304,7 +1304,10 @@ PersonJoins == ~wake => pastes = 1 /\ sentInto = "busy"
    row clear at :241-250; repair = a row clear with no wake (inflight_repair.rs:81,
    health_api.rs:811); staleCancel = the sweep's tokenless Cancel finalizer (foreign_recovery.rs:119)
    whose row the finalizer clears, so the later lifecycle clear (:135) reads Missing
-   (clear_store/mod.rs:595-598), or reads Cleared when the finalizer kept the row. A refused
+   (clear_store/mod.rs:595-598), or reads Cleared when the finalizer kept the row; dupClear = an
+   episode an earlier finalize ended with its token published but its row kept
+   (completion_postlude.rs:171-202), whose row the sweep's AlreadyFinalized duplicate cleanup
+   removes itself (cleanup/already_finalized.rs, episode.rs:129-143). A refused
    archive keeps the row; a successor row runs its own finalizer.
    The owner refuses a start while a token, a row or a held barrier stands (owner_input.rs:196-197,
    :213-214, :677-681) with no watch; the supervisor wakes only on its idle transition with no token
@@ -1314,10 +1317,13 @@ PersonJoins == ~wake => pastes = 1 /\ sentInto = "busy"
    each successful closer notifies once after its barrier; a token-removing finalizer's publish is
    that notification. The slice reuses observer. *)
 CB == observer
-CBOps == {"finalizer", "tokenless", "noEpisode", "stopFallback", "repair", "staleCancel"}
+CBOps == {"finalizer", "tokenless", "noEpisode", "stopFallback", "repair", "staleCancel", "dupClear"}
 CBAfter == Fix = "CBAfter"
 \* Whether the token step wakes the owner: stop's QueueEligible publish, or its reverted mutant.
 CBTokenWakes(k) == k = "stopFallback" /\ (~CBAfter \/ Mut = "cbTokenEligible")
+\* An earlier operation's publish: the bridge finalize that released dupClear's token wakes the
+\* owner as its own completion, not as this closer's notice.
+CBForeignWake(k) == k = "dupClear"
 \* Whether the barrier step notifies; the no-notice and early mutants act on the archive closer
 \* and the stop, the early one moving that wake to the row step; the Cleared-only mutant notifies
 \* a stale cancel only when its own lifecycle clear removed the row.
@@ -1326,6 +1332,7 @@ CBBarrierNotes(k) ==
     IF CBAfter
     THEN /\ ~(Mut \in {"cbNoNotify", "cbEarlyNotify"} /\ CBMutated(k))
          /\ ~(Mut = "cbClearedOnly" /\ k = "staleCancel" /\ CB.life # "cleared")
+         /\ ~(Mut = "cbDupIgnored" /\ k = "dupClear")
     ELSE k \in {"finalizer", "noEpisode"} /\ (Mut # "cbNoNotify" \/ k # "noEpisode")
 CBRowNotes(k) == CBAfter /\ Mut = "cbEarlyNotify" /\ CBMutated(k)
 CBBlocked == CB.token \/ CB.row \/ CB.barrier
@@ -1340,7 +1347,7 @@ CompletionWakeInit ==
     /\ row = "none" /\ ep = FALSE /\ leak = FALSE /\ outside = FALSE
     /\ nr = "ok" /\ ev = "none" /\ prov = "none" /\ seen = "none"
     /\ \E o \in CBOps, w \in BOOLEAN :
-        observer = [op |-> o, token |-> o \in {"finalizer", "stopFallback"}, row |-> TRUE,
+        observer = [op |-> o, token |-> o \in {"finalizer", "stopFallback", "dupClear"}, row |-> TRUE,
             barrier |-> TRUE, native |-> "busy", phase |-> "open", wake |-> w, pending |-> TRUE,
             running |-> FALSE, claims |-> 0, pastes |-> 0, watched |-> FALSE, notes |-> 0,
             closes |-> 0, refusalNotes |-> 0, refusals |-> 0, successors |-> 0, dups |-> 0,
@@ -1387,7 +1394,7 @@ CBNativeEnds ==
 CBCloseToken ==
     /\ CB.native = "idle" /\ CB.phase = "open" /\ CB.token
     /\ LET n == CBTokenWakes(CB.op)
-       IN observer' = [CB EXCEPT !.token = FALSE, !.wake = @ \/ n,
+       IN observer' = [CB EXCEPT !.token = FALSE, !.wake = @ \/ n \/ CBForeignWake(CB.op),
             !.notes = @ + (IF n THEN 1 ELSE 0)]
     /\ UNCHANGED ObserverLegacy
 CBCloseRow ==

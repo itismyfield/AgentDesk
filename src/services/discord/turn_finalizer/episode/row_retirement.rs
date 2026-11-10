@@ -86,7 +86,8 @@ fn proof_refusal(
     None
 }
 
-/// Retires the loaded row through the snapshot CAS once the release proves it is this episode's.
+/// Retires the loaded row through the snapshot CAS once the release proves it is this episode's;
+/// true when this call removed it.
 pub(super) fn retire_drifted_row(
     provider: &ProviderKind,
     key: TurnKey,
@@ -94,10 +95,10 @@ pub(super) fn retire_drifted_row(
     row: &InflightTurnState,
     finish: &crate::services::turn_orchestrator::FinishTurnResult,
     witness: RuntimeWitness<'_>,
-) {
+) -> bool {
     if let Some(reason) = proof_refusal(provider, key, observed, row, finish, witness) {
         warn_declined(provider, key, row, finish, "proof", reason, None);
-        return;
+        return false;
     }
     #[cfg(test)]
     before_cas(key.channel_id.get());
@@ -113,10 +114,12 @@ pub(super) fn retire_drifted_row(
                 outcome = ?outcome,
                 "episode_row_retired: released episode's drifted row removed"
             );
+            outcome == GuardedClearOutcome::Cleared
         }
         _ => {
             let observed = detail.observed_save_generation;
             warn_declined(provider, key, row, finish, "cas", detail.reason, observed);
+            false
         }
     }
 }

@@ -16,48 +16,58 @@ pub(super) enum ForeignRecoverySource {
 pub(in crate::services::discord) struct ForeignRecovery {
     /// The recovered row is gone or replaced.
     pub(in crate::services::discord) cleared: bool,
-    /// Its finalizer released a mailbox token, whose publish resumes the queue.
+    /// Its finalizer, or a late duplicate's cleanup, released a mailbox token and published.
     token_released: bool,
-    /// Its finalizer finalized the turn itself with no token to release.
-    finalized_tokenless: bool,
+    /// Its finalizer removed the row: a tokenless finalize, or a duplicate's own row clear.
+    finalizer_removed: bool,
     /// Its own last row clear, when it ran one.
     last_clear: Option<super::super::inflight::GuardedClearOutcome>,
+    /// That clear ran after the finalizer, so any token publish came before the row went.
+    clear_after_finalizer: bool,
     /// A row, its own or a successor's, still stands on the channel.
     row_left: bool,
 }
 
 impl ForeignRecovery {
     fn after(
-        finalized: &super::super::turn_finalizer::FinalizeOutcome,
-        last_clear: Option<super::super::inflight::GuardedClearOutcome>,
+        (finalized, duplicate): (
+            &super::super::turn_finalizer::FinalizeOutcome,
+            super::super::turn_finalizer::cleanup::DuplicateCleanup,
+        ),
+        (last_clear, clear_after_finalizer): (
+            Option<super::super::inflight::GuardedClearOutcome>,
+            bool,
+        ),
         (cleared, row_left): (bool, bool),
     ) -> Self {
         use super::super::turn_finalizer::FinalizeOutcome;
-        let (token_released, finalized_tokenless) = match finalized {
+        let (token_released, finalizer_removed) = match finalized {
             FinalizeOutcome::Finalized { removed_token, .. } => {
                 (removed_token.is_some(), removed_token.is_none())
             }
-            FinalizeOutcome::AlreadyFinalized | FinalizeOutcome::Deferred => (false, false),
+            FinalizeOutcome::AlreadyFinalized => (duplicate.token_released, duplicate.row_cleared),
+            FinalizeOutcome::Deferred => (false, false),
         };
         Self {
             cleared,
             token_released,
-            finalized_tokenless,
+            finalizer_removed,
             last_clear,
+            clear_after_finalizer,
             row_left,
         }
     }
 
-    /// Whether this recovery itself removed the channel's row and released no token: its own last
-    /// clear did, or found nothing after its own finalizer cleared it.
+    /// Whether this recovery's last own step removed the channel's row with no publish after it:
+    /// its own clear did (after any token publish when it ran last), or its finalizer did tokenless.
     pub(in crate::services::discord) fn resumes(&self) -> bool {
         use super::super::inflight::GuardedClearOutcome::{Cleared, Missing};
-        let removed_here = match self.last_clear {
-            Some(Cleared) => true,
-            Some(Missing) | None => self.finalized_tokenless,
+        let removed_last = match self.last_clear {
+            Some(Cleared) => self.clear_after_finalizer || !self.token_released,
+            Some(Missing) | None => self.finalizer_removed && !self.token_released,
             Some(_) => false,
         };
-        removed_here && !self.token_released && !self.row_left
+        removed_last && !self.row_left
     }
 }
 
@@ -166,17 +176,19 @@ pub(super) async fn submit_stale_foreign_inflight_cancel(
             .store(true, std::sync::atomic::Ordering::Release);
     }
     let stale_identity = probe.inflight_identity.clone();
-    let finalized = shared
+    let (finalized, duplicate) = shared
         .turn_finalizer
-        .submit_terminal_with_claim_snapshot(
+        .submit_recovery_terminal(
             super::super::turn_finalizer::TurnKey::new(
                 channel_id,
                 finalizer_turn_id,
                 shared.restart.current_generation,
             ),
-            provider.clone(),
-            super::super::turn_finalizer::TerminalEvent::Cancel,
-            stale_foreign_cancel_finalize_context(),
+            (
+                provider.clone(),
+                super::super::turn_finalizer::TerminalEvent::Cancel,
+                stale_foreign_cancel_finalize_context(),
+            ),
             Some(probe.finalizer_claim_snapshot.clone()),
             shared.clone(),
         )
@@ -205,8 +217,12 @@ pub(super) async fn submit_stale_foreign_inflight_cancel(
         "tui_direct_pending_start: stale FOREIGN finalizer cancel completed under death-evidence gate"
     );
     let row_left = current.is_some();
-    let last_clear = Some(lifecycle_clear_outcome);
-    ForeignRecovery::after(&finalized, last_clear, (gone_or_changed, row_left))
+    let last_clear = (Some(lifecycle_clear_outcome), true);
+    ForeignRecovery::after(
+        (&finalized, duplicate),
+        last_clear,
+        (gone_or_changed, row_left),
+    )
 }
 
 async fn submit_committed_foreign_inflight_complete(
@@ -289,17 +305,19 @@ async fn submit_committed_foreign_inflight_complete(
         }
         last_clear = Some(archive_outcome);
     }
-    let outcome = shared
+    let (outcome, duplicate) = shared
         .turn_finalizer
-        .submit_terminal_with_claim_snapshot(
+        .submit_recovery_terminal(
             super::super::turn_finalizer::TurnKey::new(
                 channel_id,
                 finalizer_turn_id,
                 shared.restart.current_generation,
             ),
-            provider.clone(),
-            super::super::turn_finalizer::TerminalEvent::Complete,
-            committed_foreign_complete_finalize_context(),
+            (
+                provider.clone(),
+                super::super::turn_finalizer::TerminalEvent::Complete,
+                committed_foreign_complete_finalize_context(),
+            ),
             Some(probe.finalizer_claim_snapshot.clone()),
             shared.clone(),
         )
@@ -320,7 +338,12 @@ async fn submit_committed_foreign_inflight_complete(
         restart_orphan_evidence,
         "tui_direct_pending_start: committed FOREIGN inflight cleared via finalizer Complete under terminal or restart-orphan evidence"
     );
-    ForeignRecovery::after(&outcome, last_clear, (gone_or_changed, current.is_some()))
+    let archive = (last_clear, false);
+    ForeignRecovery::after(
+        (&outcome, duplicate),
+        archive,
+        (gone_or_changed, current.is_some()),
+    )
 }
 
 pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_current(
