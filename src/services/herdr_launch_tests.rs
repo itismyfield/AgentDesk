@@ -914,6 +914,10 @@ fn a_late_reserved_channel_is_not_o_owned_for_a_herdr_turn() {
 mod retired_hold_tests;
 
 #[cfg(unix)]
+#[path = "herdr_launch_tests/runtime_marker_launch_tests.rs"]
+mod runtime_marker_launch_tests;
+
+#[cfg(unix)]
 #[path = "herdr_launch/retired_hold/tests.rs"]
 pub(crate) mod retired_durability_tests;
 

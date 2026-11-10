@@ -142,6 +142,8 @@ session-lifecycle/HerdrPreclaimNonlocal.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrPreclaimPending.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrPreclaimRetired.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrPreclaimSameRoot.cfg	HerdrRootRecovery	-	-
+session-lifecycle/HerdrRetiredMarkerBefore.cfg	HerdrRootRecovery	-	RetiredInputProgress
+session-lifecycle/HerdrRetiredMarkerFixed.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrRootBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
 session-lifecycle/HerdrRootFixed.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrRootWakeBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
@@ -187,6 +189,16 @@ turn-presence/TurnPresenceMain.cfg	TurnPresence	NoProgressIdentityUnknown,NoProg
 turn-presence/TurnPresenceM1.cfg	TurnPresence	NoProgressIdentityUnknown,NoProgressIdentityNotice	EventuallyStableBusy,PublicationContinues
 turn-presence/TurnPresenceM2.cfg	TurnPresence	-	PublicationContinues
 turn-presence/TurnPresenceM3.cfg	TurnPresence	NoOldProofAfterObservedBoundary,NoWrongAdmission,NoWrongPublication	-
+turn-presence/TurnPresenceRetiredBefore.cfg	TurnPresence	RetiredOnlyQuietNotUnknown	NewInputEventuallyStarts
+turn-presence/TurnPresenceRetiredBeforeLiveness.cfg	TurnPresence	-	NewInputEventuallyStarts
+turn-presence/TurnPresenceRetiredFallbackFixed.cfg	TurnPresence	-	-
+turn-presence/TurnPresenceRetiredFixed.cfg	TurnPresence	-	-
+turn-presence/TurnPresenceRetiredForeign.cfg	TurnPresence	-	-
+turn-presence/TurnPresenceRetiredRestartBefore.cfg	TurnPresence	RetiredOnlyQuietNotUnknown	NewInputEventuallyStarts
+turn-presence/TurnPresenceRetiredRestartBeforeLiveness.cfg	TurnPresence	-	NewInputEventuallyStarts
+turn-presence/TurnPresenceRetiredRestartFixed.cfg	TurnPresence	-	-
+turn-presence/TurnPresenceRetiredSweep.cfg	TurnPresence	RetiredOnlyQuietNotUnknown	NewInputEventuallyStarts
+turn-presence/TurnPresenceRetiredUnsafe.cfg	TurnPresence	NoForeignMarkerRemoval,NoLiveMarkerRemoval	-
 tui-o-writer/WriterMissingHaltBefore.cfg	WriterMissingHalt	NoUnchangedReboot	-
 tui-o-writer/WriterMissingHaltFixed.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltNoHold.cfg	WriterMissingHalt	NoUnchangedReboot	-

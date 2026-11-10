@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "62257daa3d2a219dcfd7b79ef227f0ab8c16e4df",
+  "measured_at_sha": "8558c96cf7ffb17ea98db05d075e165a301b2c5b",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -210,6 +210,7 @@
         "src/services/discord/watchers/lifecycle/liveness.rs": 1,
         "src/services/discord/watchers/lifecycle/restore.rs": 1,
         "src/services/gemini.rs": 1,
+        "src/services/herdr_launch/runtime_marker.rs": 1,
         "src/services/maintenance/jobs/hang_dump_cleanup.rs": 1,
         "src/services/maintenance/jobs/worktree_orphan_sweep.rs": 2,
         "src/services/memory/memento_writer_guard.rs": 1,
