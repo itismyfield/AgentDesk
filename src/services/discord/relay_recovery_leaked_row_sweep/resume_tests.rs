@@ -1,6 +1,5 @@
-//! The leaked-row sweep resumes an owner front its FOREIGN row held exactly once, and only when that
-//! recovery itself removed the row and released no token; a successor row or a released token
-//! leaves the notice to that row's turn or to the finalizer's publish.
+//! The leaked-row sweep resumes a front its FOREIGN row held once, only when that recovery removed
+//! the row and released no token; a successor row or a released token gives no sweep notice.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
