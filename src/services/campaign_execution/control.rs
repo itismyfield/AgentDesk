@@ -215,6 +215,7 @@ pub fn decide_with_receipt(
             state: state.clone(),
             events: Vec::new(),
             result,
+            records: Vec::new(),
         });
     }
     decide(state, envelope)
@@ -246,6 +247,7 @@ fn finish(
         state,
         events: vec![event],
         result,
+        records: Vec::new(),
     }
 }
 
@@ -713,6 +715,7 @@ fn unchanged(state: &CampaignState) -> Decision {
             event_sequence: state.event_sequence,
             control: state.control,
         },
+        records: Vec::new(),
     }
 }
 fn action_mut<'a>(
