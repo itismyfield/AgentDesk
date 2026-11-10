@@ -375,7 +375,8 @@ src/
 │   └── types.rs
 ├── domain/
 │   ├── lifecycle.rs
-│   └── mod.rs
+│   ├── mod.rs
+│   └── tool_text.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── db_ops/

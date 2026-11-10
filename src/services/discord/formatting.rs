@@ -1,10 +1,8 @@
 use poise::serenity_prelude as serenity;
-use regex::Regex;
 use serenity::{ChannelId, CreateAttachment, MessageId};
-use std::collections::HashSet;
+use std::sync::Arc;
 #[cfg(test)]
-use std::sync::Mutex;
-use std::sync::{Arc, LazyLock};
+use std::sync::{LazyLock, Mutex};
 
 use super::{
     DISCORD_MSG_LIMIT, SharedData,
