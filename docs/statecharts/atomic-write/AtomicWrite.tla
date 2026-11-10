@@ -40,8 +40,9 @@ FileSync ==
     /\ pc = "FileSync" /\ failAt # pc /\ pc' = "Observe" /\ temp' = "Synced"
     /\ UNCHANGED <<oldTarget, target, published, returned, returnedStage, ioError,
                     enospcRecorded, diagnosed, failAt, errno, platform, inflight, parentSync>>
+NeedDiagnostic == inflight /\ oldTarget = "Old"
 Observe ==
-    /\ pc = "Observe" /\ pc' = "Rename" /\ diagnosed' = inflight
+    /\ pc = "Observe" /\ pc' = "Rename" /\ diagnosed' = NeedDiagnostic
     /\ UNCHANGED <<oldTarget, temp, target, published, returned, returnedStage, ioError,
                     enospcRecorded, failAt, errno, platform, inflight, parentSync>>
 Rename ==
@@ -59,7 +60,7 @@ OutcomeMatchesPublication ==
     /\ (returned = "Err" => ~published /\ returnedStage = failAt /\ ioError = errno)
 DiskObservation ==
     /\ (returned = "Err" /\ ioError = "ENOSPC" => enospcRecorded)
-    /\ ((pc = "Rename" \/ returnedStage = "Rename") /\ inflight => diagnosed)
+    /\ ((pc = "Rename" \/ returnedStage = "Rename") /\ NeedDiagnostic => diagnosed)
 DirectorySemantics == parentSync = "NotRequested"
 DirectoryCapability == IF platform = "Windows" THEN "OkButUnflushed" ELSE "Flushes"
 ======================================================================

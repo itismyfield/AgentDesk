@@ -4,7 +4,7 @@ const phases = {
   CreateTemp: "Create a private temp file",
   Write: "Write the complete bytes to temp",
   FileSync: "Sync the temp file",
-  Observe: "Record the upper inflight diagnostic",
+  Observe: "Observe an existing inflight row if applicable",
   Rename: "Publish by rename",
 };
 export const state = (v) => v.pc === "Done"

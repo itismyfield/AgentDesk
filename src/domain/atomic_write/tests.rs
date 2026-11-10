@@ -71,8 +71,7 @@ fn real_rename_fault_is_at_the_adapter_syscall() {
     let fault = rename_fault::Armed::new(&path);
     let error = prepare(&path, "new").unwrap().publish().unwrap_err();
     assert_eq!(error.stage, Stage::Rename);
-    assert_eq!(error.error.kind(), io::ErrorKind::NotFound);
-    assert_eq!(fault.evidence().0, 1);
-    assert_eq!(fault.evidence().1.len(), 1);
+    assert!(error.error.raw_os_error().is_some());
+    assert_eq!(fault.evidence(), (1, vec![error.error.to_string()]));
     assert_eq!(fs::read_to_string(&path).unwrap(), "old");
 }

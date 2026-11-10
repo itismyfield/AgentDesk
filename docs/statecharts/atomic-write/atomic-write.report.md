@@ -2,7 +2,7 @@
 
 코드 기준 SHA: `762ee31d48d15cab091fa8fff5c7fa4e8c5c5409` (이동 전).
 
-모델의 bounds는 아래 생산 호출 전수표와 기존 함수의 분기에서 가져왔다. `git grep -n -E '\batomic_write\b' -- src`의 원문을 생산 cfg scanner `ci.rust_test_sources.walk(..., production=True)`와 대조했다. 주석·시험 호출·3개 import는 호출에서 제외한다. 50개 직접 호출과 generation 함수 포인터 등록 1개(실제 호출 :612)를 포함한다. 경로·payload 문자열 자체를 나열하지 않고 기존 파일/첫 쓰기 전 부재/새 bytes와 inflight 관측 적용 여부로 나눈다. 실패 단계는 기존 create_dir_all/create_tmp/write_all/sync_all/rename, errno는 ENOSPC/기타의 관측 분류, 플랫폼은 Unix/Windows뿐이다. 임의 channel 수·queue 수·재시도 상한을 만들지 않았다.
+모델의 bounds는 아래 생산 호출 전수표와 기존 함수의 분기에서 가져왔다. `git grep -n -E '\batomic_write\b' -- src`의 원문을 생산 cfg scanner `ci.rust_test_sources.walk(..., production=True)`와 대조했다. 주석·시험 호출·3개 import는 호출에서 제외한다. 50개 직접 호출과 generation 함수 포인터 등록 1개(실제 호출 :612)를 포함한다. 경로·payload 문자열 자체를 나열하지 않고 기존 파일/첫 쓰기 전 부재/새 bytes와 inflight 경로 일치 여부로 나눈다. 실패 단계는 기존 create_dir_all/create_tmp/write_all/sync_all/rename, errno는 ENOSPC/기타의 관측 분류, 플랫폼은 Unix/Windows뿐이다. 임의 channel 수·queue 수·재시도 상한을 만들지 않았다.
 
 ## 진입점 전수표
 
@@ -77,7 +77,7 @@
 
 plain atomic_write는 parent sync를 요청하지 않는다. file sync는 Windows에서도 실제 `sync_all`이다. Windows Ok-but-unflushed는 S07의 **parent directory** fsync 계약이며, 모델의 DirectoryCapability로 구별하고 parentSync는 항상 NotRequested이다. durable_publish의 parent/ancestor flush 정책과 성공 후 SyncFailed/UnflushedPlatform 구분은 이번 변경 범위 밖이며 T6 회귀로 확인한다.
 
-모델 범위 밖: 프로세스 crash·전원 손실 뒤 durability, UUID collision, 외부에서 temp/target을 바꾸는 경쟁, 여러 동시 writer 사이의 마지막 rename 선택. 기존 함수는 별도 caller lock 여부를 바꾸지 않으며 이 모델은 단일 호출의 반환/관측 계약만 검증한다. 진단은 기존 코드처럼 rename 전 시도 기록이므로 rename 실패에도 남는다. 이를 성공 확인 로그로 바꾸지 않는다.
+모델 범위 밖: 프로세스 crash·전원 손실 뒤 durability, UUID collision, 외부에서 temp/target을 바꾸는 경쟁, 여러 동시 writer 사이의 마지막 rename 선택. 기존 함수는 별도 caller lock 여부를 바꾸지 않으며 이 모델은 단일 호출의 반환/관측 계약만 검증한다. 진단은 inflight 경로이면서 기존 target이 있을 때만 적용한다(`NeedDiagnostic`); 첫 쓰기의 부재 target에는 적용하지 않는다. 진단은 기존 코드처럼 rename 전 시도 기록이므로 rename 실패에도 남는다. 이를 성공 확인 로그로 바꾸지 않는다.
 
 ## 구현의 관측 회귀
 
