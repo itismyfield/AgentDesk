@@ -20,9 +20,7 @@ pub use advisory_lock::AdvisoryLockLease;
 pub(crate) use advisory_lock::PooledAdvisoryLock;
 pub use agent_sync::sync_agents_from_config_pg;
 use pool_return::{RETURN_CLEANUP_BUDGET, with_return_cleanup};
-mod shared_config;
-pub(crate) use shared_config::shared_config_sync_enabled;
-pub use shared_config::startup_reseed_with_warmup_pool;
+pub(crate) mod shared_config;
 
 static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
 const DEFAULT_PG_ACQUIRE_TIMEOUT_SECS: u64 = 10;
@@ -1402,10 +1400,10 @@ mod tests {
         connect_test_pool, connect_test_pool_and_migrate, connect_test_pool_and_migrate_config,
         connect_test_pool_with_max_connections, connect_test_pool_with_max_connections_and_migrate,
         create_test_database, database_enabled, database_summary, health_check, require_pg_guard,
-        run_test_postgres_sqlx_op_with_timeout, runtime_pool_settings,
-        shared_config::startup_reseed, shared_config_sync_enabled, should_yield_for_counters,
+        run_test_postgres_sqlx_op_with_timeout, runtime_pool_settings, should_yield_for_counters,
         startup_pool_settings, sync_agents_from_config_pg, with_startup_advisory_lock,
     };
+    use crate::services::settings::startup::{shared_config_sync_enabled, startup_reseed};
     use sqlx::postgres::PgConnectOptions;
     use sqlx::{Executor as _, PgPool, Row};
     use std::collections::BTreeMap;

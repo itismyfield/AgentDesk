@@ -201,26 +201,8 @@ pub(crate) async fn ensure_ready_with(host: Option<&str>) {
 pub(crate) async fn record_selection(config: &crate::config::Config, installed: bool) {
     use crate::services::tui_o::channel_policy;
     let writer = &channel_policy::tui_o_of(config).writer;
-    let bindings: Option<std::collections::BTreeSet<u64>> = config
-        .agents
-        .iter()
-        .flat_map(|agent| agent.channels.iter())
-        .filter(|(provider, channel)| {
-            let provider = channel
-                .provider()
-                .unwrap_or_else(|| (*provider).to_string());
-            crate::services::provider_hosting::channel_effective_tui_request(
-                config, channel, &provider,
-            )
-        })
-        .map(|(_, channel)| {
-            channel
-                .channel_id()?
-                .parse::<std::num::NonZeroU64>()
-                .ok()
-                .map(|id| id.get())
-        })
-        .collect();
+    let bindings: Option<std::collections::BTreeSet<u64>> =
+        crate::services::provider_hosting::tui_binding_ids(config).collect();
     let selection_source = if writer.all_tui == Some(false) && writer.channels.is_empty() {
         "explicit_off"
     } else if !writer.channels.is_empty() {
