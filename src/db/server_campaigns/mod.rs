@@ -61,6 +61,34 @@ fn evidence_error(error: evidence_store::EvidenceStoreError) -> StoreError {
     }
 }
 
+// Writes one evidence row of a decision; an ID that already holds something else fails the transaction.
+async fn write_evidence(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    run_id: &str,
+    written: &EvidenceWrite,
+) -> StoreResult<()> {
+    use evidence_store::StoredEvidence;
+    match written {
+        EvidenceWrite::Seal(seal) => {
+            let seal = StoredEvidence::Seal { seal: seal.clone() };
+            evidence_store::record(tx, id, run_id, &seal)
+                .await
+                .map_err(evidence_error)?;
+        }
+        EvidenceWrite::Admitted { envelope, decision } => {
+            let evidence = StoredEvidence::recorded((**envelope).clone());
+            evidence_store::record(tx, id, run_id, &evidence)
+                .await
+                .map_err(evidence_error)?;
+            evidence_store::decide(tx, id, run_id, &envelope.evidence_id, decision)
+                .await
+                .map_err(evidence_error)?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum Request<'a> {
     Create(&'a DefinitionInput),
@@ -207,9 +235,7 @@ async fn apply(
             // Evidence rows commit or roll back together with the state they belong to.
             if let Some(run) = &decision.state.run {
                 for record in &decision.records {
-                    evidence_store::apply(tx, id, &run.id, record)
-                        .await
-                        .map_err(evidence_error)?;
+                    write_evidence(tx, id, &run.id, record).await?;
                 }
             }
             CommandOutcome::Decided(Ok(decision.result))
