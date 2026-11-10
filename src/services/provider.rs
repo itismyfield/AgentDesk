@@ -20,9 +20,9 @@ pub use output_reader::{fold_read_output_result, poll_output_file_until_result};
 pub(crate) mod read_fault;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 pub use registry::{
-    ProviderCatalogEntry, ProviderCompactionAdapter, ProviderExecutionAdapter,
-    ProviderReadinessAdapter, ProviderRegistryEntry, StreamJsonDialectId, intern_provider_id,
-    provider_registry, public_provider_catalog, supported_provider_ids,
+    ProviderCatalogEntry, ProviderExecutionAdapter, ProviderReadinessAdapter,
+    ProviderRegistryEntry, StreamJsonDialectId, intern_provider_id, provider_registry,
+    public_provider_catalog, supported_provider_ids,
 };
 pub(crate) use session_probe::SessionProbe;
 

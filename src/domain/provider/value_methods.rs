@@ -45,6 +45,7 @@ impl ProviderKind {
         self.catalog_entry().map(|entry| entry.execution_adapter)
     }
 
+    #[cfg(test)]
     pub fn stream_json_dialect(&self) -> Option<StreamJsonDialectId> {
         match self.execution_adapter()? {
             ProviderExecutionAdapter::StreamJsonCli(dialect) => Some(dialect),
@@ -88,6 +89,7 @@ impl ProviderKind {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn cli_init_label(&self) -> &'static str {
         self.catalog_entry()
             .map(|entry| entry.cli_init_label)
@@ -123,6 +125,7 @@ impl ProviderKind {
     /// Claude intentionally has no generic percent environment variable: its
     /// launch path resolves a model-aware absolute
     /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from launch provenance instead.
+    #[cfg(test)]
     pub fn compact_env_vars(&self, percent: u64) -> Vec<(String, String)> {
         let Some(adapter) = self.compaction_adapter() else {
             return Vec::new();
@@ -177,6 +180,7 @@ impl ProviderKind {
             .unwrap_or(false)
     }
 
+    #[cfg(test)]
     pub fn managed_tmux_wrapper_subcommand(&self) -> Option<&'static str> {
         self.catalog_entry()
             .and_then(|entry| entry.managed_tmux_wrapper_subcommand)

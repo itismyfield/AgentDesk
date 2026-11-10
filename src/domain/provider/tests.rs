@@ -212,6 +212,15 @@ fn provider_kind_catalog_helpers_preserve_known_alias_and_unknown_contract() {
         ProviderKind::from_str(" AGY "),
         Some(ProviderKind::Antigravity)
     );
+    assert_eq!(
+        ProviderKind::Grok.stream_json_dialect(),
+        Some(super::StreamJsonDialectId::Grok)
+    );
+    assert_eq!(
+        ProviderKind::Antigravity.stream_json_dialect(),
+        Some(super::StreamJsonDialectId::Agy)
+    );
+    assert_eq!(ProviderKind::Claude.stream_json_dialect(), None);
     assert_eq!(ProviderKind::provider_for_cli_init_index(7), None);
     assert_eq!(ProviderKind::provider_for_cli_init_index(usize::MAX), None);
     for raw in ["", " Future-CLI ", "claude-extra"] {
