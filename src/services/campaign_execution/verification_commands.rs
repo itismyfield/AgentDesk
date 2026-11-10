@@ -372,9 +372,8 @@ fn log_refs(v: &VerificationRun) -> Vec<String> {
         .collect()
 }
 
-// Settling ends a quiet V one of two ways: its results are collected, or, when a phase was
-// cancelled and nothing is running, the V is closed as cancelled. Unstarted phases left behind
-// are cancelled either way.
+// A quiet V is collected, or closed as cancelled once a phase was cancelled and nothing runs;
+// unstarted phases left behind are cancelled either way.
 fn settle(
     next: &mut CampaignState,
     execution_id: &str,
