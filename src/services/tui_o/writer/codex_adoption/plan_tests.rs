@@ -736,3 +736,51 @@ fn a_held_turn_starts_the_current_source_at_legacys_delivered_end() {
         other => panic!("expected an unknown frontier, got {other:?}"),
     }
 }
+
+/// Two panes reading one transcript while a turn is held must agree on Legacy's delivered end:
+/// different ends refuse whichever pane holds which, and one shared end pins the source once.
+#[test]
+fn two_panes_on_one_source_pin_it_only_over_one_delivered_end() {
+    let bytes = std::fs::read(&fixture().sources[2].path).unwrap();
+    let start_of = |turn: &str| {
+        let at = String::from_utf8_lossy(&bytes)
+            .find(&format!(r#""turn_id":"{turn}""#))
+            .unwrap();
+        (bytes[..at].iter().rposition(|b| *b == b'\n').unwrap() + 1) as u64
+    };
+    let (early, late) = (start_of("s2-t32"), start_of("s2-t33"));
+    for (first, second) in [(early, late), (late, early), (late, late)] {
+        let mut fixture = fixture();
+        let s2 = fixture.sources[2].clone();
+        let shared = bind(
+            None,
+            BindingTarget::Source(s2.clone()),
+            BindingCause::Startup,
+        );
+        fixture.events.push(event(5, ("c", "m2"), shared));
+        fixture.live.push(LivePane {
+            pane: pane("c", "m2"),
+            output_path: s2.path.clone(),
+            relay_output_path: None,
+        });
+        fixture.facts["obligations"]["custody"] = json!("held");
+        let mut other = fixture.checkpoints[0].clone();
+        (other.pane, other.proof_seq) = (pane("c", "m2"), 5);
+        fixture.checkpoints[0].delivered = native(&s2, first);
+        other.delivered = native(&s2, second);
+        fixture.checkpoints.push(other);
+        match fixture.verify() {
+            Ok(plan) if first == second => {
+                let starts: Vec<_> = (plan.sources().iter())
+                    .filter(|init| init.source_id == s2)
+                    .map(|init| init.delivery_start)
+                    .collect();
+                assert_eq!(starts, [first]);
+            }
+            Err(Refusal::Fold(detail)) if first != second => {
+                assert!(detail.contains("delivered ends"), "{detail}");
+            }
+            other => panic!("{first} and {second}: {other:?}"),
+        }
+    }
+}

@@ -3,16 +3,18 @@ EXTENDS Naturals
 CONSTANTS Fix, Mut
 VARIABLES sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
-          recovered, rejected, commitWithOther, hturn, hp
+          recovered, rejected, commitWithOther, hturn, hp, nativeEnded
 vars == <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
-          recovered, rejected, commitWithOther, hturn, hp>>
+          recovered, rejected, commitWithOther, hturn, hp, nativeEnded>>
 
 \* Code baseline 13f9acdd9a; the stage-1 adoption plan r2 with its r2.1 corrections.
 \* One TUI-bound channel with one turn, plus one non-TUI (headless) channel in the same config.
 \* Fix: "main" as written, "gateOnly" holds unadopted bodies without the warm takeover from the
 \* Legacy delivery frontier, "stage1" is the whole stage (boot refusal, hold, frontier takeover).
 \* Mut removes one stage-1 guard. Value ranges come from the entry table in report-p1-2.md.
+\*   nativeEnded  late_adopt/codex/prefix.rs frontier: the turn's own end record (task_complete)
+\*            written before Legacy delivered it; advanceOnEnd is the takeover that moved F past it
 \*   sel      tap.rs:61-67, channel_policy.rs:73-134 (explicit off, list excluding, late off,
 \*            implicit default off when the default cannot apply)
 \*   site     adoption.rs:384-390 (only the O home has candidates)
@@ -75,9 +77,9 @@ Init ==
     /\ turn = "none" /\ waitMark = FALSE /\ otherCustody \in BOOLEAN
     /\ lp = 0 /\ op = 0 /\ rowCleared = FALSE /\ dispatchSettled = FALSE
     /\ attempts = 0 /\ restarts = 0 /\ recovered = FALSE /\ commitWithOther = FALSE
-    /\ hturn = "none" /\ hp = 0
+    /\ hturn = "none" /\ hp = 0 /\ nativeEnded = FALSE
 
-Fixed == UNCHANGED <<sel, site, root, exec, bound>>
+Fixed == UNCHANGED <<sel, site, root, exec, bound, nativeEnded>>
 
 \* Discord intake on the TUI channel opens a turn (intake_dispatch.rs:281-294).
 Input == /\ Booted /\ turn = "none" /\ turn' = "running"
@@ -146,9 +148,16 @@ Commit(start) ==
 \* A fresh source or rollout is taken before it has output (late_adopt.rs:182-186, codex.rs:203-310).
 FreshAdopt == /\ Booted /\ adopt \in {"Deferred", "Pending"} /\ bound = "fresh" /\ ~Blocked
               /\ Commit("F")
-\* Warm takeover from the Legacy delivery frontier (stage 1 P3a and P3b).
+\* Warm takeover from the Legacy delivery frontier (stage 1 P3a and P3b). A turn's own end does
+\* not move the frontier; advanceOnEnd starts past a turn Codex ended but nobody delivered.
 WarmAdoptF == /\ Fix = "stage1" /\ adopt = "Deferred" /\ bound # "fresh" /\ ~Blocked
-              /\ Commit("F")
+              /\ Commit(IF Mut = "advanceOnEnd" /\ nativeEnded THEN "EOF" ELSE "F")
+
+\* Codex writes the turn's end into its transcript before anyone delivered the turn.
+NativeEnd == /\ turn \in {"running", "held"} /\ ~nativeEnded /\ nativeEnded' = TRUE
+             /\ UNCHANGED <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
+                             otherCustody, lp, op, rowCleared, dispatchSettled, attempts,
+                             restarts, recovered, rejected, commitWithOther, hturn, hp>>
 \* Stale handoff at the end of file (deferred.rs:26-29); not guaranteed to happen.
 EofHandoff == /\ Fix # "stage1" /\ adopt = "Deferred" /\ bound = "withOutput" /\ ~Blocked
               /\ Commit(IF turn = "none" THEN "F" ELSE "EOF")
@@ -207,11 +216,11 @@ HeadlessTerminal == /\ hturn = "running"
 
 Rest == UNCHANGED vars
 Next == Input \/ TerminalBody \/ ReEval \/ RecoveryBody \/ WatcherDispatch \/ FreshAdopt
-        \/ WarmAdoptF \/ EofHandoff \/ Reject \/ OPost \/ OtherTurnEnds \/ Restart
+        \/ WarmAdoptF \/ EofHandoff \/ Reject \/ OPost \/ OtherTurnEnds \/ Restart \/ NativeEnd
         \/ HeadlessInput \/ HeadlessTerminal \/ Rest
 
-\* Writer, recovery and turn-end actions are fair. Input, Restart, Reject, the stale handoff
-\* and the watcher finalizer are environment.
+\* Writer, recovery and turn-end actions are fair. Input, Restart, Reject, the stale handoff,
+\* the watcher finalizer and Codex's own turn end are environment.
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(TerminalBody) /\ WF_vars(ReEval) /\ WF_vars(RecoveryBody)
         /\ WF_vars(FreshAdopt) /\ WF_vars(WarmAdoptF) /\ WF_vars(OPost)

@@ -106,9 +106,17 @@ pub fn verify(mut facts: Evidence, reads: Reads<'_>) -> Result<VerifiedCodexInit
             wrapper,
             ..read_evidence(&scanned)
         });
-        // Two panes on one file pin it once.
-        if !pinned.iter().any(|(pinned, _, _)| *pinned == source) {
-            pinned.push((source, scanned, frontier.filter(|_| held)));
+        // Two panes on one file pin it once, and only over one delivered end.
+        let start = frontier.filter(|_| held);
+        match pinned.iter().find(|(pinned, _, _)| *pinned == source) {
+            None => pinned.push((source, scanned, start)),
+            Some((_, _, first)) if *first == start => {}
+            Some((_, _, first)) => {
+                let shown = source.path.display();
+                return Err(Refusal::Fold(format!(
+                    "panes on {shown} hold delivered ends {first:?} and {start:?}"
+                )));
+            }
         }
     }
     for (source, retirement, binds) in &folded.retired {
