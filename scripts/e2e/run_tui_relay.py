@@ -841,6 +841,11 @@ def _record_send(record: dict[str, Any], step: str, prompt: str | None = None) -
     entry: dict[str, Any] = {"step": step, "send_state": "attempted"}
     if prompt is not None:
         entry["markers"] = re.findall(r"\[E2E:[^\]\r\n]+\]", prompt)
+        counts = record.get("marker_counts")
+        if isinstance(counts, dict):
+            for marker in entry["markers"]:
+                if marker in counts and counts[marker] is None:
+                    counts[marker] = 0
     record.setdefault("prompt_sends", []).append(entry)
     return entry
 
@@ -3264,6 +3269,10 @@ def run_scenario(
         "real_provider_contacted": False,
         "failure_attribution": None,
     }
+    if scenario_id in {"E-50", "E-51"}:
+        result["marker_counts"] = dict.fromkeys(
+            str(marker).replace("{run_id}", run_id) for marker in scenario.get("report_marker_counts") or []
+        )
     partial_record_holder: dict[str, Any] = {}
     if partial_result_sink is not None:
         partial_result_sink["result"] = result
@@ -3770,6 +3779,8 @@ def run_one_cell(
         "provider_identity": provider_identity(cell, channel_id),
         "real_provider_contacted": False,
     }
+    if record["track_marker_prompts"]:
+        record["marker_counts"] = dict.fromkeys(marker_targets)
     if scenario.get("durable_delivery_probe"):
         record["durable_record_probe"] = {
             "status": "unevaluable", "reason": "response not observed",

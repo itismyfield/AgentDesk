@@ -97,7 +97,8 @@ class LiveShapedDiscord:
         return next((m for m in observed if predicate(m)), None), observed
 
 
-def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver", answer_author: str | None = None) -> dict:
+def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver", answer_author: str | None = None,
+                    partial_result_sink: dict | None = None) -> dict:
     scenario = next(s for s in driver.load_scenarios(SCENARIOS, cell=cell) if s["id"] == scenario_id)
     args = Namespace(
         cell=cell, channel_id=CHANNELS[cell], thread_channel_id=None, base_url="http://offline.invalid",
@@ -121,6 +122,7 @@ def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver"
         return driver.run_scenario(
             scenario, args=args, run_id=RUN_ID,
             client=LiveShapedDiscord(after_clear=after_clear, provider=driver.cell_provider(cell), answer_author=answer_author),
+            partial_result_sink=partial_result_sink,
         )
 
 
@@ -142,6 +144,47 @@ def verdict(result: dict, scenario_id: str, cell: str, log_fixture: str | None) 
 
 class ProviderAuthorDelivery(unittest.TestCase):
     """A turn marker counts only from the cell's provider bot, never a notify/announce body quoting it."""
+
+    def assert_attempted_t2(self, result):
+        markers = turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID)
+        self.assertEqual([result["marker_counts"][marker] for marker in markers], [1, 0, None])
+        self.assertEqual(result["status"], "fail")
+        passed, detail = verdict(result, "E-50", "claude-tui", "turns-clean.dcserver.log")
+        self.assertFalse(passed, detail)
+        self.assertIn("T1=1 T2=0 AFTER_CLEAR=not_run", detail)
+
+    def test_t2_send_timeout_keeps_attempted_marker_at_zero(self):
+        send = LiveShapedDiscord.send
+
+        def timeout(client, channel, content):
+            if ":T2]" in content:
+                raise TimeoutError("T2 send timed out")
+            return send(client, channel, content)
+
+        with patch.object(LiveShapedDiscord, "send", timeout):
+            result = run_live_shaped("E-50", "claude-tui")
+        self.assert_attempted_t2(result)
+        self.assertIn("TimeoutError", result["reason"])
+
+    def test_t2_wait_deadline_keeps_attempted_marker_at_zero(self):
+        wait = driver.wait_for_discord_text_with_tui_idle_draft_guard
+        partial = {}
+
+        def deadline(**kwargs):
+            if ":T2]" in kwargs["needle"]:
+                raise driver.PhaseDeadlineExpired("T2 wait phase expired")
+            return wait(**kwargs)
+
+        with patch.object(driver, "wait_for_discord_text_with_tui_idle_draft_guard", side_effect=deadline):
+            with self.assertRaises(driver.PhaseDeadlineExpired):
+                run_live_shaped("E-50", "claude-tui", partial_result_sink=partial)
+        self.assert_attempted_t2(partial["result"])
+
+    def test_setup_failure_leaves_all_declared_markers_not_run(self):
+        with patch.object(LiveShapedDiscord, "send_control", side_effect=TimeoutError("setup timed out")):
+            result = run_live_shaped("E-50", "claude-tui")
+        markers = turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID)
+        self.assertEqual(result["marker_counts"], dict.fromkeys(markers))
 
     def test_t1_timeout_leaves_later_markers_not_run(self):
         result = run_live_shaped("E-50", "claude-tui", after_clear="refuse_t1")
