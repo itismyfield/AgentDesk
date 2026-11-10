@@ -433,6 +433,12 @@ async fn s1_real_missing_namespace_reaches_selected_tmux_start_pg() {
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _injection = injection_off();
+    // TUI bindings outside the writer selection hold their bodies, so these Legacy turns read the
+    // process-wide empty list instead.
+    let _legacy = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+        std::ffi::OsStr::new("[]"),
+    );
     let root = tempfile::tempdir().unwrap();
     let _binding = activity::BindingRoot::enter(root.path());
     // tmux reports the realpath of TMUX_TMPDIR (macOS /var -> /private/var); match it.
@@ -742,6 +748,12 @@ async fn s1_fallback_only_and_restored_owner_only_live_hold_real_effects_pg() {
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _injection = injection_off();
+    // TUI bindings outside the writer selection hold their bodies, so these Legacy turns read the
+    // process-wide empty list instead.
+    let _legacy = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+        std::ffi::OsStr::new("[]"),
+    );
     let root = tempfile::tempdir().unwrap();
     let _namespace_root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "TMUX_TMPDIR",
