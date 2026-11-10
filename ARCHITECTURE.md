@@ -374,8 +374,19 @@ src/
 │   ├── test_support.rs
 │   └── types.rs
 ├── domain/
+│   ├── provider/
+│   │   ├── catalog/
+│   │   │   └── rows.rs
+│   │   ├── fixtures/
+│   │   │   └── public_catalog.json
+│   │   ├── capabilities.rs
+│   │   ├── catalog.rs
+│   │   ├── execution.rs
+│   │   ├── public_catalog.rs
+│   │   └── tests.rs
 │   ├── lifecycle.rs
-│   └── mod.rs
+│   ├── mod.rs
+│   └── provider.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── db_ops/
