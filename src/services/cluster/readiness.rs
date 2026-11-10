@@ -1,5 +1,6 @@
 //! Fresh local execution evidence. Heartbeats publish this snapshot without
 //! extending its lifetime; an online registry row is not execution readiness.
+use crate::services::provider::ProviderRuntimeExt;
 use std::collections::BTreeMap;
 use std::sync::{LazyLock, RwLock};
 use std::time::Duration;

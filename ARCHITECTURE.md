@@ -380,8 +380,10 @@ src/
 │   │   ├── capabilities.rs
 │   │   ├── catalog.rs
 │   │   ├── execution.rs
+│   │   ├── naming.rs
 │   │   ├── public_catalog.rs
-│   │   └── tests.rs
+│   │   ├── tests.rs
+│   │   └── value_methods.rs
 │   ├── lifecycle.rs
 │   ├── mod.rs
 │   └── provider.rs
@@ -3536,6 +3538,7 @@ src/
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
 │   │   ├── registry.rs
+│   │   ├── runtime.rs
 │   │   ├── session_probe.rs
 │   │   └── session_prompt.rs
 │   ├── provider_auth_profile/

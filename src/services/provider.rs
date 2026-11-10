@@ -1,6 +1,4 @@
-use crate::services::platform::BinaryResolution;
 use crate::services::provider::cancel_token_cleanup::target::CapturedProcess;
-use crate::utils::format::safe_prefix;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
@@ -13,6 +11,7 @@ pub(crate) mod herdr_before_start;
 pub(crate) mod native_stop;
 mod output_reader;
 mod registry;
+mod runtime;
 pub(crate) mod session_probe;
 pub(crate) mod session_prompt;
 pub(crate) use output_reader::herdr_provider_terminal_only;
@@ -22,353 +21,15 @@ pub(crate) mod read_fault;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 pub use registry::{
     ProviderCatalogEntry, ProviderCompactionAdapter, ProviderExecutionAdapter,
-    ProviderReadinessAdapter, ProviderRegistryEntry, StreamJsonDialectId, derived_counterpart_ids,
-    intern_provider_id, provider_registry, public_provider_catalog, supported_provider_ids,
+    ProviderReadinessAdapter, ProviderRegistryEntry, StreamJsonDialectId, intern_provider_id,
+    provider_registry, public_provider_catalog, supported_provider_ids,
 };
 pub(crate) use session_probe::SessionProbe;
 
-/// Tmux session name prefix — always "AgentDesk".
-pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
-
+pub(crate) use crate::domain::provider::LegacyDispatchKind;
+pub use crate::domain::provider::naming::{TMUX_SESSION_PREFIX, tmux_env_suffix};
 pub use crate::domain::provider::{ProviderCapabilities, ProviderDefaultBehavior, ProviderKind};
-
-/// Tmux session name suffix (reserved for future isolation use; currently empty).
-pub fn tmux_env_suffix() -> &'static str {
-    ""
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LegacyDispatchKind {
-    Claude,
-    Codex,
-    Gemini,
-    OpenCode,
-    Qwen,
-    StreamJsonCli(StreamJsonDialectId),
-    Unsupported(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProviderRuntimeProbe {
-    pub provider: ProviderKind,
-    pub capabilities: ProviderCapabilities,
-    pub resolution: BinaryResolution,
-    pub version: Option<String>,
-    pub probe_failure_kind: Option<String>,
-    pub skipped_candidate_failures: Vec<String>,
-    pub credential_present: bool,
-    pub credential_source: Option<String>,
-}
-
-impl ProviderKind {
-    pub fn registry_entry(&self) -> Option<&'static ProviderRegistryEntry> {
-        provider_registry()
-            .iter()
-            .find(|entry| entry.id == self.as_str() && !matches!(self, Self::Unsupported(_)))
-    }
-
-    pub fn display_name(&self) -> &str {
-        self.registry_entry()
-            .map(|entry| entry.display_name)
-            .unwrap_or_else(|| match self {
-                Self::Unsupported(s) => s.as_str(),
-                _ => self.as_str(),
-            })
-    }
-
-    pub fn preferred_counterparts(&self) -> Vec<Self> {
-        if self.registry_entry().is_none() {
-            return Vec::new();
-        }
-        derived_counterpart_ids(self.as_str())
-            .into_iter()
-            .filter_map(Self::from_str)
-            .collect()
-    }
-
-    pub fn default_channel_provider() -> Option<Self> {
-        crate::config_live_reload::current()
-            .map(|config| config.onboarding.effective_default_provider())
-            .unwrap_or_else(|| {
-                crate::config::OnboardingConfig::default().effective_default_provider()
-            })
-    }
-    pub fn from_channel_suffix(channel_name: &str) -> Option<Self> {
-        crate::config_live_reload::current()
-            .map(|config| config.onboarding.provider_from_channel_suffix(channel_name))
-            .unwrap_or_else(|| {
-                crate::config::OnboardingConfig::default()
-                    .provider_from_channel_suffix(channel_name)
-            })
-            .as_deref()
-            .and_then(Self::from_str)
-    }
-
-    pub fn counterpart(&self) -> Self {
-        self.preferred_counterparts()
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| self.clone())
-    }
-
-    pub fn capabilities(&self) -> Option<ProviderCapabilities> {
-        self.registry_entry().map(|entry| entry.capabilities)
-    }
-
-    pub fn execution_adapter(&self) -> Option<ProviderExecutionAdapter> {
-        self.registry_entry().map(|entry| entry.execution_adapter)
-    }
-
-    pub fn stream_json_dialect(&self) -> Option<StreamJsonDialectId> {
-        match self.execution_adapter()? {
-            ProviderExecutionAdapter::StreamJsonCli(dialect) => Some(dialect),
-            _ => None,
-        }
-    }
-
-    pub fn compaction_adapter(&self) -> Option<ProviderCompactionAdapter> {
-        self.registry_entry().map(|entry| entry.compaction_adapter)
-    }
-
-    pub fn readiness_adapter(&self) -> Option<ProviderReadinessAdapter> {
-        self.registry_entry().map(|entry| entry.readiness_adapter)
-    }
-
-    /// Provider-specific behavior when AgentDesk clears its explicit model
-    /// override and falls through to the provider-managed default path.
-    pub fn default_model_behavior(&self) -> ProviderDefaultBehavior {
-        self.registry_entry()
-            .map(|entry| entry.default_behavior)
-            .unwrap_or(ProviderDefaultBehavior {
-                resume_without_reset: true,
-                runtime_model: None,
-                source_label: "provider default",
-            })
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn resolve_runtime_path(&self) -> Option<String> {
-        registry::resolve_kind_runtime_path(self)
-    }
-    pub fn probe_runtime(&self) -> Option<ProviderRuntimeProbe> {
-        let entry = self.registry_entry()?;
-        let capabilities = entry.capabilities;
-        let binary_probe =
-            crate::services::platform::probe_provider_binary_version(capabilities.binary_name);
-        let credentials =
-            crate::services::provider_auth::detect_provider_credentials(entry.id, &entry.auth);
-        Some(ProviderRuntimeProbe {
-            provider: self.clone(),
-            capabilities,
-            resolution: binary_probe.resolution,
-            version: binary_probe.version_output,
-            probe_failure_kind: binary_probe.probe_failure_kind,
-            skipped_candidate_failures: binary_probe.skipped_candidate_failures,
-            credential_present: credentials.credential_present,
-            credential_source: credentials.source,
-        })
-    }
-
-    /// Parse a known provider string. Returns None for unknown providers.
-    pub fn from_str(raw: &str) -> Option<Self> {
-        let normalized = raw.trim().to_ascii_lowercase();
-        provider_registry()
-            .iter()
-            .find(|entry| entry.matches_id_or_alias(&normalized))
-            .and_then(ProviderRegistryEntry::kind)
-    }
-
-    pub fn cli_init_labels() -> Vec<&'static str> {
-        provider_registry()
-            .iter()
-            .map(|entry| entry.cli_init_label)
-            .collect()
-    }
-
-    pub fn cli_init_label(&self) -> &'static str {
-        self.registry_entry()
-            .map(|entry| entry.cli_init_label)
-            .unwrap_or("claude")
-    }
-
-    pub(crate) fn legacy_streaming_dispatch_kind(&self) -> LegacyDispatchKind {
-        match self {
-            Self::Claude => LegacyDispatchKind::Claude,
-            Self::Codex => LegacyDispatchKind::Codex,
-            Self::Gemini => LegacyDispatchKind::Gemini,
-            Self::OpenCode => LegacyDispatchKind::OpenCode,
-            Self::Grok => LegacyDispatchKind::StreamJsonCli(StreamJsonDialectId::Grok),
-            Self::Qwen => LegacyDispatchKind::Qwen,
-            Self::Antigravity => LegacyDispatchKind::StreamJsonCli(StreamJsonDialectId::Agy),
-            Self::Unsupported(name) => LegacyDispatchKind::Unsupported(name.clone()),
-        }
-    }
-
-    pub fn provider_for_cli_init_index(index: usize) -> Option<Self> {
-        provider_registry()
-            .get(index)
-            .and_then(|entry| Self::from_str(entry.id))
-    }
-
-    pub fn resolve_channel_provider(
-        channel_name: Option<&str>,
-        explicit_provider: Option<&ProviderKind>,
-    ) -> Option<Self> {
-        explicit_provider
-            .cloned()
-            .filter(ProviderKind::is_supported)
-            .or_else(|| channel_name.and_then(Self::from_channel_suffix))
-            .or_else(Self::default_channel_provider)
-    }
-
-    pub fn is_channel_supported(
-        &self,
-        channel_name: Option<&str>,
-        is_dm: bool,
-        explicit_provider: Option<&ProviderKind>,
-    ) -> bool {
-        if is_dm {
-            return self.is_supported();
-        }
-        Self::resolve_channel_provider(channel_name, explicit_provider)
-            .is_some_and(|provider| provider == *self)
-    }
-
-    /// Parse a provider string, returning Unsupported for unknown providers.
-    pub fn from_str_or_unsupported(raw: &str) -> Self {
-        Self::from_str(raw).unwrap_or_else(|| Self::Unsupported(raw.trim().to_string()))
-    }
-
-    /// Returns generic provider environment variables for auto-compact.
-    ///
-    /// Claude intentionally has no generic percent environment variable: its
-    /// launch path resolves a model-aware absolute
-    /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from launch provenance instead.
-    #[allow(dead_code)]
-    pub fn compact_env_vars(&self, percent: u64) -> Vec<(String, String)> {
-        let Some(adapter) = self.compaction_adapter() else {
-            return Vec::new();
-        };
-        match adapter {
-            ProviderCompactionAdapter::ClaudeEnvironment => {
-                let _ = percent;
-                Vec::new()
-            }
-            ProviderCompactionAdapter::CodexCli
-            | ProviderCompactionAdapter::GeminiDisabled
-            | ProviderCompactionAdapter::OpenCodeDisabled
-            | ProviderCompactionAdapter::QwenDisabled
-            | ProviderCompactionAdapter::StreamJsonDisabled(_) => Vec::new(),
-        }
-    }
-
-    /// Default context window size in tokens for this provider.
-    pub fn default_context_window(&self) -> u64 {
-        self.registry_entry()
-            .map(|entry| entry.default_context_window)
-            .unwrap_or(200_000)
-    }
-
-    /// Resolve the context window for a specific model.
-    ///
-    /// #3263: Codex is cache-first REGARDLESS of whether `model` is `Some`/`None`
-    /// — `codex_model_context_window` reads `~/.codex/models_cache.json` (exact
-    /// slug when supplied, else max-of-cache). A provider-default Codex turn
-    /// (`None`) therefore still prefers the cache's max-of-cache window over the
-    /// stale constant. Only when that cache is absent/empty/unparseable do we
-    /// fall back to the provider default (`CODEX_FALLBACK_CONTEXT_WINDOW`). Other
-    /// providers have no local source and always use their registry default.
-    pub fn resolve_context_window(&self, model: Option<&str>) -> u64 {
-        // `None` (provider-default turn) maps to an empty slug, which never
-        // matches an entry, so `codex_context_window_from_cache` skips the
-        // exact-match branch and yields the cache's max-of-cache window.
-        let cached = if let Self::Codex = self {
-            codex_model_context_window(model.unwrap_or(""))
-        } else {
-            None
-        };
-        self.resolve_context_window_with(cached)
-    }
-
-    /// Pure composition of [`resolve_context_window`]: apply the cache-first →
-    /// provider-default fallback to a pre-resolved cache window. Splitting this
-    /// out keeps the absent-cache → `default_context_window()` fallback testable
-    /// without touching the real `~/.codex/models_cache.json` on disk.
-    fn resolve_context_window_with(&self, cached: Option<u64>) -> u64 {
-        cached.unwrap_or_else(|| self.default_context_window())
-    }
-
-    /// Returns Codex-specific CLI config overrides for auto-compact.
-    /// Codex uses model_auto_compact_token_limit (absolute token count).
-    pub fn compact_cli_config(&self, percent: u64, context_window: u64) -> Vec<(String, String)> {
-        let Some(adapter) = self.compaction_adapter() else {
-            return Vec::new();
-        };
-        match adapter {
-            ProviderCompactionAdapter::CodexCli => {
-                let token_limit = context_window * percent / 100;
-                vec![(
-                    "model_auto_compact_token_limit".to_string(),
-                    token_limit.to_string(),
-                )]
-            }
-            ProviderCompactionAdapter::ClaudeEnvironment
-            | ProviderCompactionAdapter::GeminiDisabled
-            | ProviderCompactionAdapter::OpenCodeDisabled
-            | ProviderCompactionAdapter::QwenDisabled
-            | ProviderCompactionAdapter::StreamJsonDisabled(_) => Vec::new(),
-        }
-    }
-
-    /// Returns true when this provider can own a reusable local tmux/process
-    /// session that AgentDesk may need to clear or pre-seed in inflight state.
-    pub fn uses_managed_tmux_backend(&self) -> bool {
-        self.registry_entry()
-            .map(|entry| entry.managed_tmux_backend)
-            .unwrap_or(false)
-    }
-
-    pub fn managed_tmux_wrapper_subcommand(&self) -> Option<&'static str> {
-        self.registry_entry()
-            .and_then(|entry| entry.managed_tmux_wrapper_subcommand)
-    }
-
-    pub fn build_tmux_session_name(&self, channel_name: &str) -> String {
-        let sanitized: String = channel_name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        // #145: Preserve -t{thread_id} suffix when truncating, so unified-thread
-        // guards (is_unified_thread_channel_name_active) can extract the thread ID.
-        let trimmed: String = if let Some(pos) = sanitized.rfind("-t") {
-            let suffix = &sanitized[pos..];
-            let is_thread_suffix =
-                suffix.len() > 2 && suffix[2..].chars().all(|c| c.is_ascii_digit());
-            if is_thread_suffix && sanitized.len() > 44 {
-                let prefix_budget = 44_usize.saturating_sub(suffix.len());
-                let prefix = safe_prefix(&sanitized[..pos], prefix_budget);
-                format!("{}{}", prefix, suffix)
-            } else {
-                safe_prefix(&sanitized, 44).to_string()
-            }
-        } else {
-            safe_prefix(&sanitized, 44).to_string()
-        };
-        format!(
-            "{}-{}-{}{}",
-            TMUX_SESSION_PREFIX,
-            self.as_str(),
-            trimmed,
-            tmux_env_suffix()
-        )
-    }
-}
+pub use runtime::{ProviderRuntimeExt, ProviderRuntimeProbe};
 
 pub fn parse_provider_and_channel_from_tmux_name(
     session_name: &str,
@@ -1369,7 +1030,7 @@ fn codex_context_window_from_cache(data: &str, model: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod codex_context_window_tests {
-    use super::{ProviderKind, codex_context_window_from_cache};
+    use super::{ProviderKind, ProviderRuntimeExt, codex_context_window_from_cache, runtime};
     use crate::domain::provider::CODEX_FALLBACK_CONTEXT_WINDOW;
 
     const CACHE: &str = r#"{
@@ -1479,7 +1140,7 @@ mod codex_context_window_tests {
         // Resolve-level: cache-absent (None) → the documented constant, for both
         // the `None` (empty-slug) and `Some(model)` paths.
         assert_eq!(
-            ProviderKind::Codex.resolve_context_window_with(None),
+            runtime::resolve_context_window_with(&ProviderKind::Codex, None),
             CODEX_FALLBACK_CONTEXT_WINDOW
         );
 
@@ -1491,7 +1152,7 @@ mod codex_context_window_tests {
         );
         // A present cache window supersedes the constant at the resolve level.
         assert_eq!(
-            ProviderKind::Codex.resolve_context_window_with(Some(123_456)),
+            runtime::resolve_context_window_with(&ProviderKind::Codex, Some(123_456)),
             123_456
         );
     }

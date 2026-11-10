@@ -56,6 +56,7 @@ pub(crate) fn warnings(config: &OnboardingConfig) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::provider::ProviderRuntimeExt;
 
     fn parse(yaml: &str) -> OnboardingConfig {
         serde_yaml::from_str(yaml).unwrap()
