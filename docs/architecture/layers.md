@@ -28,6 +28,7 @@ HTTP extractor·AppState·응답 변환을 소유한 `auto_queue::route`는 asse
 책임이 다른 하위 모듈은 긴 prefix로 구분한다. 아직 검토하지 않았거나
 책임을 정하지 못한 모듈은 사유와 함께 미분류로 남긴다.
 `domain::lifecycle`이 재시작 mode enum·정적 변환을 소유하며 vocabulary다.
+`domain::memory`(vocabulary)가 memory backend 값·기본값을, `utils::discord`(foundation)가 token hash 계산을 소유하고 `services::discord::settings`는 둘을 재노출한다.
 `services::discord::restart_mode`는 같은 타입을 재노출하는 vocabulary 호환 shim이고,
 `cli::restart_terminal_proof`의 nonce·경로·파일 증거 판정은 foundation이다.
 두 leaf는 부모의 Discord/최종 조립 책임보다 긴 prefix 규칙으로 분류한다.

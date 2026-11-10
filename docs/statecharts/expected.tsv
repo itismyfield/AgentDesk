@@ -61,6 +61,7 @@ input-single-path/InputOwnershipAutoHold.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipAutoHoldBefore.cfg	InputOwnership	AutomaticHoldNoticeOnce	-
 input-single-path/InputOwnershipAutoHoldReasonKey.cfg	InputOwnership	AutomaticHoldNoticeOnce	-
 input-single-path/InputOwnershipC.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipTurnLegacy.cfg	InputOwnership	AnswerOnce	-
 input-single-path/InputOwnershipCF.cfg	InputOwnership	CarriedRowEnds,NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipConsumedWaitingAfter.cfg	InputOwnershipConsumedWaiting	-	-
 input-single-path/InputOwnershipConsumedWaitingAfterStamped.cfg	InputOwnershipConsumedWaiting	-	-
@@ -191,6 +192,16 @@ tui-o-writer/WriterMissingHaltEarly.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltMetadata.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltOrphanBefore.cfg	WriterMissingHalt	-	OrphanRecovers
 tui-o-writer/WriterMissingHaltOrphanFixed.cfg	WriterMissingHalt	-	-
+# WriterAdoption (TUI Legacy body, stage 1): Main and GateOnly document the gaps; Stage1 passes; the rest drop one stage-1 guard.
+tui-o-writer/WriterAdoptionMain.cfg	WriterAdoption	NoLegacyBodyOnTui,UnadoptedNotOwned,RowClearedHasEvidence,NoEarlyDispatch	AdoptionSettles
+tui-o-writer/WriterAdoptionGateOnly.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered,AdoptionSettles
+tui-o-writer/WriterAdoptionStage1.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAdoptionOwnedMut.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
+tui-o-writer/WriterAdoptionUnadoptedOwned.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
+tui-o-writer/WriterAdoptionExemptAll.cfg	WriterAdoption	OtherCustodyBlocks	-
+tui-o-writer/WriterAdoptionWatcherNoGuard.cfg	WriterAdoption	NoEarlyDispatch	-
+tui-o-writer/WriterAdoptionBudgetMut.cfg	WriterAdoption	RowClearedHasEvidence	-
+tui-o-writer/WriterAdoptionHeadlessMut.cfg	WriterAdoption	HeadlessKept	-
 input-single-path/InputOwnershipPersonBusy.cfg	InputOwnership	-
 input-single-path/InputOwnershipCBBefore.cfg	InputOwnership	CBCloseNotifiesOnce,CBNoStall	CBEventuallyDelivered
 input-single-path/InputOwnershipCBAfter.cfg	InputOwnership	-	-

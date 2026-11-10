@@ -4,10 +4,10 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 use serenity::ChannelId;
-use sha2::{Digest, Sha256};
 
 use poise::serenity_prelude as serenity;
 
+use crate::domain::memory::{DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS, DEFAULT_MEMORY_RECALL_TIMEOUT_MS};
 use crate::runtime_layout;
 use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::provider::ProviderKind;
@@ -25,6 +25,8 @@ use super::org_schema;
 use super::runtime_store;
 use super::runtime_store::{bot_settings_path, discord_uploads_root};
 
+pub(crate) use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings};
+pub(crate) use crate::utils::discord::discord_token_hash;
 pub(super) use content::{
     channel_upload_dir, cleanup_channel_uploads, cleanup_old_uploads, is_known_agent,
     load_review_tuning_guidance, load_role_prompt, load_shared_prompt_for_profile,
@@ -56,15 +58,6 @@ fn json_u64(value: &serde_json::Value) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_str().and_then(|raw| raw.parse::<u64>().ok()))
-}
-
-/// Compute a short hash key from the bot token (first 16 chars of SHA-256 hex)
-/// Uses "discord_" prefix to namespace Discord bot entries in settings.
-pub(crate) fn discord_token_hash(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    let result = hasher.finalize();
-    format!("discord_{}", hex::encode(&result[..8]))
 }
 
 fn default_allowed_tools_for_provider(provider: &ProviderKind) -> Vec<String> {
@@ -129,8 +122,6 @@ pub(crate) struct RegisteredChannelBinding {
     pub fallback_name: Option<String>,
 }
 
-const DEFAULT_MEMORY_RECALL_TIMEOUT_MS: u64 = 500;
-const DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS: u64 = 5_000;
 const MIN_MEMORY_RECALL_TIMEOUT_MS: u64 = 100;
 const MAX_MEMORY_RECALL_TIMEOUT_MS: u64 = 2_000;
 const MIN_MEMORY_CAPTURE_TIMEOUT_MS: u64 = 500;
@@ -142,48 +133,6 @@ pub(crate) struct MemoryConfigOverride {
     pub backend: Option<String>,
     pub recall_timeout_ms: Option<u64>,
     pub capture_timeout_ms: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum MemoryBackendKind {
-    #[default]
-    File,
-    Memento,
-}
-
-impl MemoryBackendKind {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::File => "file",
-            Self::Memento => "memento",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ResolvedMemorySettings {
-    pub memory_group: Option<String>,
-    pub backend: MemoryBackendKind,
-    /// True only when the resolved `backend` is `File` because memento was the
-    /// requested/configured backend but is degraded (unreachable). Lets the
-    /// guidance layer distinguish a deliberate file backend from a transparent
-    /// memento fallback, which have different write policies. Always false for a
-    /// deliberately configured file backend and for an active memento backend.
-    pub memento_fallback: bool,
-    pub recall_timeout_ms: u64,
-    pub capture_timeout_ms: u64,
-}
-
-impl Default for ResolvedMemorySettings {
-    fn default() -> Self {
-        Self {
-            memory_group: None,
-            backend: MemoryBackendKind::File,
-            memento_fallback: false,
-            recall_timeout_ms: DEFAULT_MEMORY_RECALL_TIMEOUT_MS,
-            capture_timeout_ms: DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS,
-        }
-    }
 }
 
 fn clamp_timeout(name: &str, value: u64, min: u64, max: u64, default: u64) -> u64 {

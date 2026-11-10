@@ -12,6 +12,7 @@ use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
 mod resolve;
 mod runtime_config_put;
+pub mod startup;
 #[cfg(test)]
 pub use resolve::clamp_retry_limit;
 pub use resolve::{
