@@ -1,5 +1,6 @@
-//! Codex late takeover of a fresh rollout before Legacy posted any of its output.
-//! Legacy's sends are counted before the next bind, so a body sent from any rollout skips it.
+//! Codex late takeover: a fresh rollout from its first byte, or a rollout that already holds
+//! output from its frontier, where Legacy's delivery provably ends. A Legacy body sent since the
+//! baseline skips the rollout's open turn; the sends are read before the binding log.
 
 use sha2::{Digest, Sha256};
 
@@ -15,9 +16,13 @@ use crate::services::tui_o::writer::binding::{
 };
 use crate::services::tui_o::writer::host::{FencedFacts, HostIo, release, until_owned};
 use crate::services::tui_o::writer::renumbered;
+use crate::services::tui_o::writer::rotation::bound_source;
 
 pub(super) mod prefix;
-use prefix::{Prefix, Verdict};
+use prefix::{Frontier, Prefix, Verdict};
+
+/// How far a turn opener's own clock may trail its bind and still be that execution's turn.
+const BIND_CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::seconds(1);
 
 /// Legacy's sends, then the last binding seq: only a rollout bound after it, with no Legacy send
 /// started since, may be taken.
@@ -50,7 +55,7 @@ pub(super) enum Taken {
     Soon(String),
     /// The rollout grew while still eligible; it is judged again at once.
     Again(String),
-    /// Legacy may hold this rollout's output; only a later bind is taken.
+    /// A Legacy body started since the baseline; the rollout's open turn stays Legacy's.
     Skip(String),
     /// The channel stays Legacy's for this process.
     Final(String),
@@ -66,6 +71,25 @@ impl Taken {
             | Self::Final(detail) => detail,
         }
     }
+}
+
+/// The init a takeover commits, judged again under the fence.
+#[derive(Clone, Copy)]
+pub(super) enum Plan<'p> {
+    /// A rollout before any output, read from its first byte, after any source owed before it.
+    Fresh(&'p Prefix, &'p [InitSource]),
+    /// Sources started at their frontiers; the bytes before each must still hash the same.
+    Warm(&'p [InitSource]),
+}
+
+/// Where O starts on a rollout that holds output.
+enum Start {
+    /// The turn its execution opened that Legacy provably sent nothing of.
+    Owed(u64),
+    /// The end of its last complete record: no turn is open, or the open one predates its bind.
+    End(u64),
+    /// Legacy may have sent part of the open turn; it is judged again once that turn ends.
+    Legacy(String),
 }
 
 /// One provider's takeover: its prefix judge and the origin its init records.
@@ -106,6 +130,8 @@ pub(super) async fn activate<I: HostIo>(
     };
     let (mut baseline, mut logged) = (None, None);
     let (mut retry_order, mut short_retries) = (0, 0);
+    // Rollouts a Legacy body was sent from while bound, this host run.
+    let mut sent_from = Vec::new();
     loop {
         if candidate.peek() != Adoption::Deferred {
             return false;
@@ -122,7 +148,7 @@ pub(super) async fn activate<I: HostIo>(
                     if retry_order != at.order {
                         (retry_order, short_retries) = (at.order, 0);
                     }
-                    takeover.attempt(at).await
+                    takeover.attempt(at, &mut sent_from).await
                 }
                 Err(taken) => Err(taken),
             };
@@ -200,18 +226,21 @@ impl<I: HostIo> Takeover<'_, I> {
         }
     }
 
-    async fn attempt(&self, at: Baseline) -> Result<(), Taken> {
+    async fn attempt(&self, at: Baseline, sent_from: &mut Vec<SourceId>) -> Result<(), Taken> {
         let events = self.events()?;
-        let Some(bound) = bound_after(&events, at.seq) else {
+        let fresh = bound_after(&events, at.seq);
+        let Some(bound) = fresh.clone().or_else(|| bound_after(&events, 0)) else {
             return Err(Taken::Retry("no rollout bound since the baseline".into()));
         };
-        match prefix::judge(&bound.0) {
+        let verdict = fresh.map(|bound| prefix::judge(&bound.0));
+        let result = match verdict {
             // Turn mode is confirmed after the taken turn, so a rollout with no prompt is not taken yet.
-            Verdict::Eligible(prefix) if prefix.prompt_end.is_none() => Err(Taken::Retry(
+            Some(Verdict::Eligible(prefix)) if prefix.prompt_end.is_none() => Err(Taken::Retry(
                 "the takeover rollout has no first user prompt yet".into(),
             )),
-            Verdict::Eligible(prefix) => {
-                self.commit(at, &bound, &prefix)
+            Some(Verdict::Eligible(prefix)) => {
+                let owed = self.owed(&events, &bound, at, sent_from);
+                self.fenced(at, &bound, Plan::Fresh(&prefix, &owed))
                     .await
                     .map_err(|taken| match taken {
                         Taken::Retry(detail)
@@ -226,17 +255,114 @@ impl<I: HostIo> Takeover<'_, I> {
                         other => other,
                     })
             }
-            Verdict::Wait(detail) => Err(Taken::Retry(detail)),
-            Verdict::Refuse(detail) => Err(Taken::Skip(detail)),
+            Some(Verdict::Wait(detail)) => Err(Taken::Retry(detail)),
+            // A rollout that holds output, or none bound since the baseline, starts at its frontier.
+            Some(Verdict::Refuse(_)) | None => self.warm(&events, &bound, at, sent_from).await,
+        };
+        if matches!(result, Err(Taken::Skip(_))) && !sent_from.contains(&bound.0) {
+            sent_from.push(bound.0.clone());
+        }
+        result
+    }
+
+    /// Takes `bound` at its frontier, with the source bound before it when that one is owed.
+    async fn warm(
+        &self,
+        events: &[BindingEvent],
+        bound: &(SourceId, u64),
+        at: Baseline,
+        sent_from: &[SourceId],
+    ) -> Result<(), Taken> {
+        let sends = {
+            let _adoption = self.candidate.lock();
+            self.candidate.sends()
+        };
+        if sends.0 != at.sends.0 {
+            return Err(Taken::Skip(
+                "a Legacy body send started since the baseline".into(),
+            ));
+        }
+        let start = match self.start_on(events, bound, at, sent_from)? {
+            Start::Owed(start) | Start::End(start) => start,
+            Start::Legacy(detail) => return Err(Taken::Retry(detail)),
+        };
+        let mut sources = self.owed(events, bound, at, sent_from);
+        sources.push(ranged(&bound.0, start)?);
+        self.fenced(at, bound, Plan::Warm(&sources)).await
+    }
+
+    /// Where O starts on `source`, read now. An open turn opened before the bind that names its
+    /// execution was left by an earlier one; a newer turn is O's only while no Legacy send since
+    /// its bind can be part of it.
+    fn start_on(
+        &self,
+        events: &[BindingEvent],
+        (source, seq): &(SourceId, u64),
+        at: Baseline,
+        sent_from: &[SourceId],
+    ) -> Result<Start, Taken> {
+        let Frontier { open, complete } = prefix::frontier(source).map_err(retry)?;
+        let Some((opened, written)) = open else {
+            return Ok(Start::End(complete));
+        };
+        if sent_from.contains(source) {
+            return Ok(Start::Legacy(
+                "a turn Legacy sent from is still open".into(),
+            ));
+        }
+        let bound_at = events
+            .iter()
+            .find(|e| e.seq == *seq)
+            .map(|e| e.committed_at);
+        let ours = written
+            .zip(bound_at)
+            .is_some_and(|(written, bound_at)| written + BIND_CLOCK_SLACK >= bound_at);
+        if !ours {
+            return Ok(Start::End(complete));
+        }
+        // Sends read before a later bind cannot hold its turn; in a process with none, nothing can.
+        if *seq > at.seq || at.sends.0 == 0 {
+            Ok(Start::Owed(opened))
+        } else {
+            Ok(Start::Legacy(
+                "Legacy may have sent from the open turn".into(),
+            ))
         }
     }
 
-    /// The intake fence is held from before the final checks until the init is published.
+    /// The source bound just before `bound`, from its open turn, when that turn is owed to O.
+    fn owed(
+        &self,
+        events: &[BindingEvent],
+        bound: &(SourceId, u64),
+        at: Baseline,
+        sent_from: &[SourceId],
+    ) -> Vec<InitSource> {
+        let Some(previous) = bound_before(events, bound) else {
+            return Vec::new();
+        };
+        match self.start_on(events, &previous, at, sent_from) {
+            Ok(Start::Owed(start)) => ranged(&previous.0, start).into_iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A fresh rollout from its first byte under the fence; see `fenced`.
     pub(super) async fn commit(
         &self,
         at: Baseline,
         bound: &(SourceId, u64),
         prefix: &Prefix,
+    ) -> Result<(), Taken> {
+        self.fenced(at, bound, Plan::Fresh(prefix, &[])).await
+    }
+
+    /// The intake fence is held from before the final checks until the init is published.
+    async fn fenced(
+        &self,
+        at: Baseline,
+        bound: &(SourceId, u64),
+        plan: Plan<'_>,
     ) -> Result<(), Taken> {
         let (io, channel) = (self.io, self.channel);
         let Some(expected) = self.gate.current().epoch() else {
@@ -270,12 +396,11 @@ impl<I: HostIo> Takeover<'_, I> {
             }
             let mut why = None;
             let sources = || {
-                self.recheck(at, fence_sends, bound, prefix)
-                    .map_err(|taken| {
-                        let detail = taken.detail().to_owned();
-                        why = Some(taken);
-                        detail
-                    })
+                self.recheck(at, fence_sends, bound, plan).map_err(|taken| {
+                    let detail = taken.detail().to_owned();
+                    why = Some(taken);
+                    detail
+                })
             };
             // Custody reads are not atomic; the fence, the sends and the relay are judged too.
             let local = || {
@@ -310,13 +435,13 @@ impl<I: HostIo> Takeover<'_, I> {
     }
 
     /// Under the adoption lock: no Legacy send since the baseline or the fence, the same bind,
-    /// and the same eligible bytes. The init reads the rollout from its first byte.
+    /// the same eligible bytes of a fresh rollout and the same bytes before every frontier.
     fn recheck(
         &self,
         at: Baseline,
         fence_sends: (u64, u64),
-        (source, seq): &(SourceId, u64),
-        prefix: &Prefix,
+        bound: &(SourceId, u64),
+        plan: Plan<'_>,
     ) -> Result<Vec<InitSource>, Taken> {
         // A send started since the baseline may be this rollout's; one only finished is older.
         let sends = self.candidate.sends();
@@ -330,28 +455,78 @@ impl<I: HostIo> Takeover<'_, I> {
                 "a Legacy body send finished while O fenced the takeover".into(),
             ));
         }
-        let now = bound_after(&self.events()?, at.seq);
-        if now.as_ref().is_none_or(|(s, q)| s != source || q != seq) {
+        if bound_after(&self.events()?, 0).as_ref() != Some(bound) {
             return Err(Taken::Retry(
                 "the binding moved while O fenced the takeover".into(),
             ));
         }
-        match (self.judge)(source) {
-            Verdict::Eligible(now) if now == *prefix => {}
-            Verdict::Eligible(_) => {
-                return Err(Taken::Again(
-                    "the rollout grew while O fenced the takeover".into(),
+        let (checked, fresh) = match plan {
+            Plan::Fresh(prefix, owed) => (owed, Some(prefix)),
+            Plan::Warm(sources) => (sources, None),
+        };
+        if let Some(prefix) = fresh {
+            match (self.judge)(&bound.0) {
+                Verdict::Eligible(now) if now == *prefix => {}
+                Verdict::Eligible(_) => {
+                    return Err(Taken::Again(
+                        "the rollout grew while O fenced the takeover".into(),
+                    ));
+                }
+                Verdict::Wait(detail) => return Err(Taken::Retry(detail)),
+                // A Codex rollout that gained output is judged again at its frontier.
+                Verdict::Refuse(detail) if self.provider == ShadowProvider::Codex => {
+                    return Err(Taken::Again(detail));
+                }
+                Verdict::Refuse(detail) => return Err(Taken::Skip(detail)),
+            }
+        }
+        for source in checked {
+            let now = prefix::hash_before(&source.source_id, source.delivery_start);
+            if now.map_err(retry)? != source.prefix_hash {
+                return Err(Taken::Retry(
+                    "the bytes before a frontier changed while O fenced the takeover".into(),
                 ));
             }
-            Verdict::Wait(detail) => return Err(Taken::Retry(detail)),
-            Verdict::Refuse(detail) => return Err(Taken::Skip(detail)),
         }
-        Ok(vec![InitSource {
-            source_id: source.clone(),
-            delivery_start: 0,
-            prefix_hash: hex::encode(Sha256::digest(b"")),
-        }])
+        let mut sources = checked.to_vec();
+        if fresh.is_some() {
+            sources.push(InitSource {
+                source_id: bound.0.clone(),
+                delivery_start: 0,
+                prefix_hash: hex::encode(Sha256::digest(b"")),
+            });
+        }
+        Ok(sources)
     }
+}
+
+/// A frontier read that does not pass now is judged again on the next wake.
+fn retry(verdict: Verdict) -> Taken {
+    match verdict {
+        Verdict::Wait(detail) | Verdict::Refuse(detail) => Taken::Retry(detail),
+        Verdict::Eligible(_) => Taken::Retry("the rollout was judged eligible".into()),
+    }
+}
+
+/// `source` from `start`, over the hash of the bytes before it.
+fn ranged(source: &SourceId, start: u64) -> Result<InitSource, Taken> {
+    Ok(InitSource {
+        source_id: source.clone(),
+        delivery_start: start,
+        prefix_hash: prefix::hash_before(source, start).map_err(retry)?,
+    })
+}
+
+/// The other source bound last before `bound`'s own last bind, with that bind's seq.
+fn bound_before(
+    events: &[BindingEvent],
+    (source, seq): &(SourceId, u64),
+) -> Option<(SourceId, u64)> {
+    let earlier = events.iter().rev().filter(|event| event.seq < *seq);
+    earlier
+        .filter_map(|event| bound_source(event).map(|bound| (bound, event.seq)))
+        .find(|(bound, _)| *bound != source)
+        .map(|(bound, seq)| (bound.clone(), seq))
 }
 
 /// The source the log binds now with the seq that bound it, when that seq is above `after`.

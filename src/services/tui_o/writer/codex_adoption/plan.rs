@@ -1,11 +1,18 @@
 //! A verified Codex init, built only by the shared evaluator. It starts every bound source at
-//! the end it read, so Legacy's consumed prefix is never recorded as delivered.
+//! the end it read, so Legacy's consumed prefix is never recorded as delivered; while a turn is
+//! held for O, the current source starts at Legacy's delivered end instead.
+
+use std::io::Read;
+
+use sha2::{Digest, Sha256};
 
 use super::coord::{self, NativeCheckpoint, WrapperCheckpoint};
 use super::fold::{LivePane, fold};
 use super::judge::{BUDGET_BYTES, BUDGET_SOURCES, Judgment, Verdict, judge};
 use super::scan::{Scanned, scan};
-use super::{Anchor, Evidence, Proof, Retirement, SourceEvidence, SourceRole, Suffix, Wrapper};
+use super::{
+    Anchor, Evidence, Load, Proof, Retirement, SourceEvidence, SourceRole, Suffix, Wrapper,
+};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_o::store::InitSource;
@@ -70,6 +77,7 @@ pub fn verify(mut facts: Evidence, reads: Reads<'_>) -> Result<VerifiedCodexInit
         )));
     }
     let mut budget = BUDGET_BYTES;
+    let held = facts.obligations.values().any(|load| *load == Load::Held);
     let (mut sources, mut pinned) = (Vec::new(), Vec::new());
     for (pane, source, binds) in &folded.current {
         let scanned = read(source, &mut budget)?;
@@ -77,6 +85,10 @@ pub fn verify(mut facts: Evidence, reads: Reads<'_>) -> Result<VerifiedCodexInit
         let checkpoint = reads.checkpoints.iter().find(at_pane);
         let (marker, cursor) =
             coord::native_cursor(channel, (pane, binds.as_slice()), source, checkpoint);
+        // Only a linked checkpoint's delivered end on a record boundary is a frontier.
+        let frontier = (checkpoint.filter(|_| marker == Proof::Linked))
+            .and_then(|checkpoint| coord::native_delivered(source, checkpoint))
+            .filter(|at| scanned.suffix(*at) != Suffix::Partial);
         let file = coord::file_proof(channel, binds, source, &scanned);
         let live = reads.live.iter().find(|live| live.pane == *pane);
         let relay = live.and_then(|live| live.relay_output_path.as_deref());
@@ -89,14 +101,15 @@ pub fn verify(mut facts: Evidence, reads: Reads<'_>) -> Result<VerifiedCodexInit
             role: SourceRole::Current,
             proof: if file == Proof::Linked { marker } else { file },
             native_cursor: cursor,
+            frontier,
             suffix: cursor.map_or(Suffix::Unknown, |cursor| scanned.suffix(cursor)),
             closed: scanned.closed,
             wrapper,
             ..read_evidence(&scanned)
         });
         // Two panes on one file pin it once.
-        if !pinned.iter().any(|(pinned, _)| *pinned == source) {
-            pinned.push((source, scanned));
+        if !pinned.iter().any(|(pinned, _, _)| *pinned == source) {
+            pinned.push((source, scanned, frontier.filter(|_| held)));
         }
     }
     for (source, retirement, binds) in &folded.retired {
@@ -107,7 +120,7 @@ pub fn verify(mut facts: Evidence, reads: Reads<'_>) -> Result<VerifiedCodexInit
             retirement: *retirement,
             ..read_evidence(&scanned)
         });
-        pinned.push((source, scanned));
+        pinned.push((source, scanned, None));
     }
     for source in &folded.named {
         // Opened, not only stat'ed: a file that cannot be read is not a proven empty source.
@@ -130,17 +143,40 @@ pub fn verify(mut facts: Evidence, reads: Reads<'_>) -> Result<VerifiedCodexInit
     if judgment.boundary != Verdict::Eligible {
         return Err(Refusal::Judged(Box::new(judgment)));
     }
-    let init = |(source, scanned): (&SourceId, Scanned)| InitSource {
-        source_id: source.clone(),
-        delivery_start: scanned.len,
-        prefix_hash: scanned.hash,
+    let init = |(source, scanned, frontier): (&SourceId, Scanned, Option<u64>)| {
+        let (delivery_start, prefix_hash) = match frontier {
+            Some(at) if at != scanned.len => (at, hash_before(source, at)?),
+            _ => (scanned.len, scanned.hash),
+        };
+        Ok(InitSource {
+            source_id: source.clone(),
+            delivery_start,
+            prefix_hash,
+        })
     };
+    let sources = pinned.into_iter().map(init).collect::<Result<_, _>>();
     Ok(VerifiedCodexInit {
         channel,
         seq: folded.seq,
-        sources: pinned.into_iter().map(init).collect(),
+        sources: sources.map_err(Refusal::Read)?,
         anchor,
     })
+}
+
+/// The SHA-256 of the first `at` bytes of the same file the scan read.
+fn hash_before(source: &SourceId, at: u64) -> Result<String, String> {
+    let shown = source.path.display();
+    let io = |error: std::io::Error| format!("source {shown}: {error}");
+    let file = std::fs::File::open(&source.path).map_err(io)?;
+    if file_identity(&file.metadata().map_err(io)?).1 != source.ino {
+        return Err(format!("source {shown} was replaced"));
+    }
+    let mut bytes = Vec::new();
+    file.take(at).read_to_end(&mut bytes).map_err(io)?;
+    if bytes.len() as u64 != at {
+        return Err(format!("source {shown} holds fewer than {at} bytes"));
+    }
+    Ok(hex::encode(Sha256::digest(&bytes)))
 }
 
 /// Reads `source` within what is left of the channel's budget.

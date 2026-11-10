@@ -1,8 +1,10 @@
 //! Whether a Codex rollout still sits before any output: its verified `session_meta`, records the
 //! classifier ignores, one turn opener, and one user prompt with that prompt's own mirrors.
+//! A rollout that holds output is read for its frontier instead: the turn still open, if any.
 
 use std::io::Read;
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -35,6 +37,93 @@ pub(super) fn judge(source: &SourceId) -> Verdict {
     judged(source).unwrap_or_else(|verdict| verdict)
 }
 
+/// What a rollout's bytes say about where its delivery may end: the turn still open past the last
+/// turn end, and the end of the last complete record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::services::tui_o::writer::late_adopt) struct Frontier {
+    /// The open turn's first record offset with the time Codex wrote it, when one is open.
+    pub(in crate::services::tui_o::writer::late_adopt) open: Option<(u64, Option<DateTime<Utc>>)>,
+    pub(in crate::services::tui_o::writer::late_adopt) complete: u64,
+}
+
+/// Reads `source` for its frontier. A turn end closes the open turn and a later `session_meta`
+/// closes every turn before it; a record that cannot be parsed refuses the rollout.
+pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
+    source: &SourceId,
+) -> Result<Frontier, Verdict> {
+    let bytes = read(source)?;
+    let complete = bytes
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |at| at + 1);
+    let (mut open, mut start, mut metas) = (None, 0, 0);
+    for line in bytes[..complete].split_inclusive(|b| *b == b'\n') {
+        let at = start;
+        start += line.len() as u64;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value = serde_json::from_slice::<Value>(line).ok();
+        let value = value
+            .filter(Value::is_object)
+            .ok_or_else(|| Verdict::Refuse(format!("malformed record at {at}")))?;
+        if value["type"] == "session_meta" {
+            metas += 1;
+            open = open.filter(|_| metas == 1);
+            continue;
+        }
+        let written = || {
+            let stamp = value["timestamp"].as_str();
+            let stamp = stamp.and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok());
+            stamp.map(|stamp| stamp.with_timezone(&Utc))
+        };
+        for fact in classify(ShadowProvider::Codex, &value) {
+            match fact {
+                RecordFact::TurnStart(_) => open = Some((at, written())),
+                RecordFact::Prompt(..)
+                    if open.is_none() && !is_codex_context_record(&value["payload"]) =>
+                {
+                    open = Some((at, written()));
+                }
+                RecordFact::Idle(_) => open = None,
+                _ => {}
+            }
+        }
+    }
+    if metas == 0 {
+        return Err(Verdict::Wait("no session_meta yet".into()));
+    }
+    session_proven(source)?;
+    Ok(Frontier {
+        open,
+        complete: complete as u64,
+    })
+}
+
+/// The SHA-256 of `source`'s bytes before `at`, as an init records the prefix it starts after.
+pub(in crate::services::tui_o::writer::late_adopt) fn hash_before(
+    source: &SourceId,
+    at: u64,
+) -> Result<String, Verdict> {
+    let bytes = read(source)?;
+    let prefix = usize::try_from(at).ok().and_then(|at| bytes.get(..at));
+    let prefix = prefix.ok_or_else(|| {
+        let shown = source.path.display();
+        Verdict::Wait(format!("source {shown} holds fewer than {at} bytes"))
+    })?;
+    Ok(hex::encode(Sha256::digest(prefix)))
+}
+
+/// A failed read waits; a header that does not prove the bound session refuses the rollout.
+fn session_proven(source: &SourceId) -> Result<(), Verdict> {
+    strict_parent_session(&source.path, &source.session_id)
+        .map(|_| ())
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::Other => Verdict::Refuse(error.to_string()),
+            _ => Verdict::Wait(error.to_string()),
+        })
+}
+
 fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
     let bytes = read(source)?;
     let complete = bytes
@@ -54,13 +143,7 @@ fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
     if complete != bytes.len() {
         return Err(Verdict::Wait("the rollout ends inside a record".into()));
     }
-    // A failed read waits; a header that does not prove the bound session refuses the rollout.
-    strict_parent_session(&source.path, &source.session_id).map_err(|error| {
-        match error.kind() {
-            std::io::ErrorKind::Other => Verdict::Refuse(error.to_string()),
-            _ => Verdict::Wait(error.to_string()),
-        }
-    })?;
+    session_proven(source)?;
     Ok(Verdict::Eligible(Prefix {
         len: bytes.len() as u64,
         sha256: hex::encode(Sha256::digest(&bytes)),

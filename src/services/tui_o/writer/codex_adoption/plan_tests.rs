@@ -236,6 +236,7 @@ fn checkpoint(source: &SourceId, pane: Pane, proof_seq: u64, at: u64) -> NativeC
         path: source.path.clone(),
         ino: source.ino,
         cursor: native(source, at),
+        delivered: native(source, at),
     }
 }
 
