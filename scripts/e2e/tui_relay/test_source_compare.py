@@ -818,7 +818,46 @@ class SourceCompareGapTests(unittest.TestCase):
                 self.assertEqual([row["verdict"] for row in result["markers"].values()],
                                  ["ok", "command", "ok", "ok"])
                 self.assertEqual(rc, 0)
-                self.assertEqual(set(result["binding"]["transcript_paths"]), set(map(str, setup[1][:2])))
+                self.assertEqual(set(result["binding"]["transcript_paths"]), set(map(str, setup[1])))
+
+    def test_current_binding_native_without_discord_evidence_is_lost(self):
+        for provider in ("claude", "codex"):
+            for modified in (self.START - 1, self.START):
+                with self.subTest(provider=provider, modified=modified):
+                    setup = self.setup_run(provider)
+                    _, paths, _, messages, markers = setup
+                    before, after = markers[0], markers[3]
+                    self.write(paths[0], [before], provider, self.START)
+                    self.write(paths[1], [], provider, self.START)
+                    self.write(paths[2], [after], provider, modified)
+                    messages[:] = self.messages(before)
+                    rc, result = self.audit(setup)
+                    self.assertEqual((rc, set(result["binding"]["transcript_paths"]),
+                        {m: (r["native_user_count"], r["verdict"]) for m, r in result["markers"].items()}),
+                        (1, {str(paths[0]), str(paths[2])}, {before: (1, "ok"), after: (1, "lost")}))
+
+    def test_current_binding_discovered_by_history_counts_once(self):
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                setup = self.setup_run(provider)
+                setup[2]["raw_provider_session_id"] = "after"
+                rc, result = self.audit(setup)
+                self.assertEqual(rc, 0)
+                self.assertCountEqual(result["binding"]["transcript_paths"], list(map(str, setup[1][:2])))
+                self.assertEqual(result["markers"][setup[-1][3]]["native_user_count"], 1)
+
+    def test_missing_current_binding_evidence_cannot_pass_on_history(self):
+        setup = self.setup_run()
+        for missing in ("path", "file"):
+            with self.subTest(missing=missing):
+                binding = dict(provider="codex", channel_id="123", transcript_root=str(setup[0]))
+                if missing == "file":
+                    binding["transcript_path"] = str(setup[1][2].with_name("absent.jsonl"))
+                with patch.object(sc, "resolve_binding", return_value=binding), \
+                     patch.object(sc, "fetch_messages", return_value=setup[3]), \
+                     contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(sc.main(["--channel-id", "123", "--run-id", self.RUN]), 2)
+                self.assertIn("transcript_path" if missing == "path" else "absent.jsonl", err.getvalue())
 
     def test_other_channel_and_other_run_cannot_fill_missing_native_input(self):
         setup = self.setup_run()
@@ -831,11 +870,12 @@ class SourceCompareGapTests(unittest.TestCase):
                             self.marker("T1", self.RUN + "-other")], "codex", self.START + 1)
         old = paths[0].with_name("rollout-before-run.jsonl")
         self.write(old, markers[:2], "codex", self.START - 0.001)
+        self.write(paths[2], [self.marker("T1", self.RUN + "-other")], "codex", self.START)
         rc, result = self.audit(setup)
         self.assertEqual(result["markers"][markers[0]]["verdict"], "lost")
         self.assertEqual(result["markers"][markers[0]]["native_user_count"], 0)
         self.assertEqual(set(result["markers"]), set(markers))
-        self.assertEqual(result["binding"]["transcript_paths"], [str(paths[1])])
+        self.assertCountEqual(result["binding"]["transcript_paths"], list(map(str, paths[1:])))
         self.assertEqual(rc, 1)
 
     def test_opaque_run_uses_discord_snowflake_time_and_legacy_markers(self):
@@ -843,7 +883,7 @@ class SourceCompareGapTests(unittest.TestCase):
         setup = self.setup_run(run=run, legacy=True)
         rc, result = self.audit(setup, run)
         self.assertEqual(rc, 0)
-        self.assertEqual(set(result["binding"]["transcript_paths"]), set(map(str, setup[1][:2])))
+        self.assertEqual(set(result["binding"]["transcript_paths"]), set(map(str, setup[1])))
 
     def test_selected_unknown_record_and_duplicate_across_sessions_fail(self):
         setup = self.setup_run()

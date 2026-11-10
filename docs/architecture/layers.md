@@ -389,6 +389,38 @@ queued_head V2 start_failure도 상위 미분류 규칙을 상속한다. 따라�
 services namespace 1개와 위 보류 23개를 합친 24개다. 새 병합 뒤에는 C4 착지 계약에
 따라 검토된 canonical을 보존하고 일반 감소 갱신·감사를 수행한다.
 
+### 보류된 history·owner/V2 queue 편입
+
+C8은 C7에서 보류한 23개와 같은 history 가족에 새로 생긴 3개를 함께 검토한다.
+history의 native_row·notice_owner·v2::carried는 파일·metadata·registry 실행을
+소유하므로 adapter다. history 저장 본체와 실행 자식도 adapter이며, 주어진 snapshot을
+비교하는 collision과 raw 문자열을 decode·변환하는 migration은 foundation으로 둔다.
+이 두 leaf의 파일·lock 실행은 부모 registry가 소유한다.
+
+routine/예약 owner_input과 routine custody는 admission 상태별 실행 유지·관찰·재시도·
+종결을 조립하는 application이다. queued_head V2의 우선순위·권한·원본 보존·시작 실패
+정책도 application이다. 실제 writer lease/capability, CAS·fsync 저장, origin 관측과
+clock·generation/history 복원은 attempt·commit·origin·sources adapter로 구분한다.
+v2_types는 serde 값 계약을 정의하는 vocabulary이며 실행 capability를 발급하지 않는다.
+기존 가족 책임 원칙으로 경계를 재구성했고 원설계 전수표의 exact leaf값을 복구했다고
+주장하지 않는다. 새 가족에 대한 층 선택은 없고 기존 known 층과 rank는 모두 유지한다.
+
+26개 모듈을 규칙 11개로 편입한 증거는
+[`module-layer-c8-admission.tsv`](module-layer-c8-admission.tsv)에 기록한다.
+새 역방향은 14 ID·20회, `accepted_indeterminate_count` 합계 17,
+`grown_since_accepted` 합계 3이다. 증가한 3행은 모두 accepted의 positive·zero에
+없던 missing-ID다. v2_types → db::turns와 v2::origin → v2는
+`959999d883611d97b7854b05a1d96f7971d6cfe4`, notice_owner → writer::input_notices는
+`9d371204d86389f9e757bc6341b7c10c6ee74c51`에서 도입됐다. 같은 현재 source의
+이전 투영에서는 각각 판정 불가 1회이고 새 투영에서는 정확히 역방향 1회다.
+
+기존 현재 역방향 504 ID·1,126회는 분류 전후 동일하다. 과거 accepted 1,127회 중
+routines::migrated → error가 23→22회로 줄어든 것은 PR #7994의
+`68b23f7d`가 삭제한 AppError::conflict 참조이며 분류 효과가 아니다.
+이 기존 역방향 감소도 일반 감소 규칙으로 고정하며 positive·zero 한도를 올리지 않는다.
+남은 미분류는 의도한 services namespace 1개다. 진행 중 ref와의 겹침은 시작과
+최종 main 병합 뒤 다시 대조하며, 편입 뒤에는 과거 매핑으로 재승인하지 않는다.
+
 ## 검토된 모듈 이동의 old→new 대응
 
 이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.
