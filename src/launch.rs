@@ -39,7 +39,7 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
                 })?
                 .config;
             }
-            crate::db::postgres::startup_reseed_with_warmup_pool(pool, &config).await
+            crate::services::settings::startup::startup_reseed_with_warmup_pool(pool, &config).await
         })
         .await
         .map_err(anyhow::Error::msg)
