@@ -60,8 +60,7 @@ pub async fn gc_stale_thread_sessions_pg(pool: &PgPool) -> Vec<String> {
     gc_stale_thread_sessions_with_probe_pg(pool, |key| async move {
         tokio::task::spawn_blocking(move || {
             use crate::services::platform::tmux::{SessionPresence, session_presence};
-            let Some(tmux_name) =
-                crate::services::discord::session_identity::tmux_name_from_session_key(&key)
+            let Some(tmux_name) = crate::domain::session_identity::tmux_name_from_session_key(&key)
             else {
                 return SessionPresence::ProbeFailed;
             };

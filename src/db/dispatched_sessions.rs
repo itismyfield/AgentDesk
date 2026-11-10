@@ -5,7 +5,7 @@ use crate::db::auto_queue::run_owner_guard as owner_guard;
 use crate::db::session_agent_resolution::{
     normalize_thread_channel_id, parse_thread_channel_id_from_session_key,
 };
-use crate::services::discord::session_identity::tmux_name_from_session_key;
+use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::services::session_activity::SessionActivityResolver;
 
 #[path = "dispatched_sessions/force_kill.rs"]

@@ -6,10 +6,10 @@ use sqlx::{PgPool, Row as SqlxRow};
 use crate::db::auto_queue::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate,
 };
+use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::services::discord::admin_host_guard::{ManagedResetVerdict, managed_reset_verdict};
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::host_teardown_gate::row_host_refusal;
-use crate::services::discord::session_identity::tmux_name_from_session_key;
 
 const SLOT_THREAD_RESET_SESSION_INFO: &str = "Slot thread reset";
 
