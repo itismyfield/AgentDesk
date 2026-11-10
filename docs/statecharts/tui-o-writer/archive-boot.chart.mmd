@@ -1,0 +1,22 @@
+---
+title: "압축 기록을 가진 출력 담당의 부팅"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the VerifiedArchiveOnlyProgress bug
+    lg1: Repeats forever, so VerifiedArchiveOnlyProgress breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: 첫 부팅 #183; 압축 기록으로 부팅
+  s1: 첫 부팅 #183; 원본 의무 때문에 중단
+  s2: 재부팅 뒤 #183; 압축 기록으로 부팅
+  s3: 재부팅 뒤 #183; 원본 의무 때문에 중단
+  [*] --> s0
+  s0 --> s1: 캡처#183;미봉인 상태 판정
+  s1 --> s2: 프로세스 재시작
+  s2 --> s3: 캡처#183;미봉인 상태 판정
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 repeats
