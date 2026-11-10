@@ -36,6 +36,7 @@ import json
 import uuid
 import math
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -143,6 +144,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "sample_raw",
     "recent_raw",
     "marker_counts",
+    "input_refusals",
     "clear_refusal",
     "tmux_key_sequences",
     "herdr_key_sequences",
@@ -834,9 +836,11 @@ def _failure_attribution(
     return attribution
 
 
-def _record_send(record: dict[str, Any], step: str) -> dict[str, Any]:
+def _record_send(record: dict[str, Any], step: str, prompt: str | None = None) -> dict[str, Any]:
     """Log a prompt before it leaves, so a deadline still reports it as attempted."""
     entry: dict[str, Any] = {"step": step, "send_state": "attempted"}
+    if prompt is not None:
+        entry["markers"] = re.findall(r"\[E2E:[^\]\r\n]+\]", prompt)
     record.setdefault("prompt_sends", []).append(entry)
     return entry
 
@@ -983,11 +987,21 @@ def _record_marker_counts(
     window: assertions.Window,
     markers: list[str],
 ) -> None:
-    # Relay hits per declared marker as last observed; 0 means not delivered yet, 2+ a duplicate.
+    # Smoke markers count only after their prompt was attempted; null means a later step never ran.
+    tracked = record.get("track_marker_prompts") is True
+    attempted = {marker for sent in record.get("prompt_sends") or [] for marker in sent.get("markers") or []}
     if markers:
         record["marker_counts"] = {
-            marker: assertions.relay_marker_hits(window, marker=marker) for marker in markers
+            marker: (assertions.relay_marker_hits(window, marker=marker)
+                     if not tracked or marker in attempted else None) for marker in markers
         }
+    record["input_refusals"] = _input_refusals(window)
+
+
+def _input_refusals(window: assertions.Window) -> list[dict[str, Any]]:
+    return [_message_debug_summary(message) for message in window.raw_messages
+            if "runs only on the gateway with its writer ready" in str(message.get("content") or "")
+            or "herdr turn refused: o_writer_not_ready" in str(message.get("content") or "")]
 
 
 def _merge_record_into_result(
@@ -3096,6 +3110,7 @@ def _collect_wait_timeout_diagnostics(
         "recent_raw": [
             _message_debug_summary(message) for message in window.raw_messages[-8:]
         ],
+        "input_refusals": _input_refusals(window),
         "tmux": tmux_snapshot,
         "health": health,
     }
@@ -3727,6 +3742,7 @@ def run_one_cell(
         for marker in scenario.get("report_marker_counts") or []
     ]
     record: dict[str, Any] = {
+        "track_marker_prompts": scenario_id in {"E-50", "E-51"},
         "assertions": [],
         "agent_mode": declared_agent_mode,
         "agent_mode_actual": "none",
@@ -3930,7 +3946,7 @@ def run_one_cell(
                     return record
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_discord_prompt"]).replace("{run_id}", run_id)
-            sent = _record_send(record, "send_discord_prompt")
+            sent = _record_send(record, "send_discord_prompt", last_sent_prompt)
             response = client.send(channel_id, last_sent_prompt)
             _ack_send(sent, response)
             if scenario_id == "E-50" and last_sent_prompt.startswith("!clear "):
@@ -3945,7 +3961,7 @@ def run_one_cell(
             _prepare_first_prompt_window()
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_prompt"])
-            sent = _record_send(record, "send_prompt")
+            sent = _record_send(record, "send_prompt", last_sent_prompt)
             response = client.send_prompt(
                 channel_id,
                 last_sent_prompt,

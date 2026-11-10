@@ -138,6 +138,10 @@ def judge(
     for marker in markers:
         label = _label(marker)
         hits = counts.get(marker)
+        if marker in counts and hits is None:
+            marker_parts.append(f"{label}=not_run")
+            findings.append(f"{label} prompt not run")
+            continue
         if not isinstance(hits, int) or isinstance(hits, bool):
             marker_parts.append(f"{label}=?")
             findings.append(f"{label} delivery count unobserved")
@@ -195,6 +199,8 @@ def judge(
         findings.append(f"scenario status={status or 'missing'}" + (f": {reason}" if reason else ""))
     if driver_rc != 0:
         findings.append(f"driver rc={driver_rc}")
+    for refusal in (result or {}).get("input_refusals") or []:
+        findings.append(f"input refusal: {str(refusal.get('content') or '')[:300]}")
 
     detail = f"deliveries {' '.join(marker_parts) or 'none'} {log_part}"
     steps = f"steps: {cell_driver.format_step_timings((result or {}).get('step_timings'))}"
@@ -236,7 +242,7 @@ def cell_path(config_path: Path, cell: str, channel_id: str) -> str:
     return "herdr" if channel_is_herdr(config_path, cell, channel_id) else cell_driver.cell_runtime(cell)
 
 
-def gateway_observation(detail: Any, *, provider: str) -> str | None:
+def gateway_observation(detail: Any, *, provider: str, channel_id: str) -> str | None:
     """Why /api/health/detail does not yet show a recovered, connected gateway; None when it does."""
     if not isinstance(detail, dict):
         return "health detail is not an object"
@@ -249,14 +255,25 @@ def gateway_observation(detail: Any, *, provider: str) -> str | None:
     if not any(p.get("name") == provider for p in gateways):
         return f"no {provider} gateway provider"
     waiting = sorted(str(p.get("name")) for p in gateways if p.get("connected") is not True)
-    return f"gateway not connected: {', '.join(waiting)}" if waiting else None
+    if waiting:
+        return f"gateway not connected: {', '.join(waiting)}"
+    writers = detail.get("tui_o_writer_readiness")
+    if not isinstance(writers, list):
+        return "target writer readiness unavailable"
+    target = [row for row in writers if isinstance(row, dict)
+              and row.get("provider") == provider and str(row.get("channel_id")) == str(channel_id)]
+    if len(target) != 1:
+        return f"target writer {provider}:{channel_id} missing or ambiguous"
+    if target[0].get("accepts") is not True:
+        return f"target writer {provider}:{channel_id} not accepting: {target[0].get('hold_reason') or 'unreported'}"
+    return None
 
 
 def wait_gateway_ready(
     *, base_url: str, cell: str, channel_id: str, deadline_s: float, interval_s: float = 2.0,
     clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[bool, str]:
-    """Poll until the gateway is connected and a Discord read of the cell channel answers in time.
+    """Poll until the gateway and target writer accept input and a channel read answers in time.
 
     The read is the one every scenario wait polls, so a server that cannot answer it yet is not ready.
     """
@@ -269,8 +286,10 @@ def wait_gateway_ready(
         request_s = max(0.1, min(10.0, remaining))
         try:
             _, detail = cell_driver._read_api_json(base_url, "/api/health/detail", timeout=request_s)  # noqa: SLF001
-            observation = gateway_observation(detail, provider=cell_driver.cell_provider(cell))
+            observation = gateway_observation(detail, provider=cell_driver.cell_provider(cell), channel_id=channel_id)
             remaining = deadline_s - (clock() - started)
+            if observation is None and remaining <= 0:
+                observation = "health detail answered after the deadline"
             if observation is None and remaining > 0:
                 read_started = clock()
                 client = cell_driver.discord.DiscordClient(base_url=base_url, timeout_s=max(0.1, min(10.0, remaining)))
@@ -278,7 +297,7 @@ def wait_gateway_ready(
                 # A read that answers only after the deadline does not make the gateway ready in time.
                 if clock() - started <= deadline_s:
                     return True, (f"ready after {clock() - started:.1f}s "
-                                  f"(gateway connected; Discord read {clock() - read_started:.1f}s)")
+                                  f"(gateway connected; target writer accepts; Discord read {clock() - read_started:.1f}s)")
                 observation = "Discord read answered after the deadline"
         except Exception as error:  # noqa: BLE001 - an unanswered probe is "not ready yet"
             observation = f"{type(error).__name__}: {error}"[:300]
