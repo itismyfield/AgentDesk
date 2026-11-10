@@ -283,7 +283,7 @@ pub(crate) async fn initialize_postgres_for_bootstrap(
             )?
             .config;
         }
-        crate::db::postgres::startup_reseed_with_warmup_pool(pool, &config).await
+        crate::services::settings::startup::startup_reseed_with_warmup_pool(pool, &config).await
     })
     .await;
     if let Err(error) = initialized {

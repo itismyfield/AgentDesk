@@ -21,7 +21,7 @@ seconds with content comparison, independently of native filesystem notification
 
 | Field | Class | Read or captured by |
 |---|---|---|
-| `server.port` | restart | `src/server/mod.rs` run (listener bind); also seeded as kv server_port by `src/db/postgres/shared_config.rs` startup_reseed |
+| `server.port` | restart | `src/server/mod.rs` run (listener bind); also seeded as kv server_port by `src/services/settings/startup.rs` startup_reseed |
 | `server.host` | restart | `src/server/mod.rs` run (bind addr) |
 | `server.auth_token` | restart | `src/server/routes/auth.rs` auth_middleware (AppState.config Arc built in server::run) |
 | `server.allow_insecure_nonloopback_bind` | restart | `src/server/mod.rs` run (bind_host decision) |
@@ -67,7 +67,7 @@ seconds with content comparison, independently of native filesystem notification
 | `agents.*.department` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (agents.department) |
 | `agents.*.avatar_emoji` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (agents.avatar_emoji) |
 | `agents.*.preferred_intake_node_labels` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (COALESCE: absent key keeps DB value) |
-| `github.repos` | seeded-at-boot | `src/db/postgres/shared_config.rs` startup_reseed (register_repo INSERT ... ON CONFLICT DO NOTHING into github_repos) |
+| `github.repos` | seeded-at-boot | `src/services/settings/startup.rs` startup_reseed (register_repo INSERT ... ON CONFLICT DO NOTHING into github_repos) |
 | `github.repo_dirs` | restart | `src/services/cluster/readiness.rs` collect (config captured by readiness::spawn_probe at node_registry::bootstrap) |
 | `github.sync_interval_minutes` | restart | `src/server/worker_registry/registry.rs` start_worker (GithubSync arm captures sync_interval) |
 | `policies` | restart | `src/engine/mod.rs` PolicyEngine::new_with_runtime_deps (runtime limits and watcher dir) |
@@ -113,10 +113,10 @@ seconds with content comparison, independently of native filesystem notification
 | `cluster.semaphores.*.capacity` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
 | `cluster.semaphores.*.scope` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
 | `kanban.manager_channel_id` | restart | `src/services/kanban_cards.rs` require_explicit_bearer_token, `src/server/routes/kanban.rs` log_kanban_identity_consumption, `src/services/auto_queue/order_routes.rs` submit_order_with_pg (live runtime_config()); `src/services/auto_queue/control_routes.rs` repair_phase_gates (boot AppState.config authorization) |
-| `kanban.deadlock_manager_channel_id` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv deadlock_manager_channel_id |
-| `kanban.relay_alert_threshold` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv kanban_relay_alert_threshold |
-| `review.enabled` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv review_enabled |
-| `review.max_rounds` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv max_review_rounds |
+| `kanban.deadlock_manager_channel_id` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by services/settings/startup.rs:startup_reseed) -> kv deadlock_manager_channel_id |
+| `kanban.relay_alert_threshold` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by services/settings/startup.rs:startup_reseed) -> kv kanban_relay_alert_threshold |
+| `review.enabled` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by services/settings/startup.rs:startup_reseed) -> kv review_enabled |
+| `review.max_rounds` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by services/settings/startup.rs:startup_reseed) -> kv max_review_rounds |
 | `placeholder` | restart | `src/cli/dcserver.rs` handle_dcserver (UiFeatureFlags into SharedData) |
 | `runtime.execution_identity_mode` | live | `src/services/discord/tmux_watcher_registry/fences.rs` execution_identity_mode (current()) |
 | `runtime.publication_permit_mode` | live | `src/services/discord/delivery_lease_cell/source_epoch_observer.rs` marker_if_enabled (current()) |
@@ -124,12 +124,12 @@ seconds with content comparison, independently of native filesystem notification
 | `runtime.intake_delivery_sweep_dispatched_cutoff_secs` | live | `src/services/discord/runtime_bootstrap/intake_delivery_sweep.rs` spawn_intake_delivery_sweep (current() per tick) |
 | `runtime.intake_delivery_sweep_spawned_cutoff_secs` | live | `src/services/discord/runtime_bootstrap/intake_delivery_sweep.rs` spawn_intake_delivery_sweep (current() per tick) |
 | `runtime.intake_delivery_sweep_batch_limit` | live | `src/services/discord/runtime_bootstrap/intake_delivery_sweep.rs` spawn_intake_delivery_sweep (current() per tick) |
-| `runtime.requested_timeout_min` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via shared_config.rs:startup_reseed) -> requested_timeout_min |
-| `runtime.in_progress_stale_min` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via shared_config.rs:startup_reseed) -> in_progress_stale_min |
-| `runtime.context_compact_percent` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via shared_config.rs:startup_reseed) -> context_compact_percent |
-| `runtime.context_compact_percent_codex` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via shared_config.rs:startup_reseed) -> context_compact_percent_codex |
-| `runtime.context_compact_percent_claude` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via shared_config.rs:startup_reseed) -> context_compact_percent_claude |
-| `runtime.context_compact_lower_bound_tokens` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via shared_config.rs:startup_reseed) -> context_compact_lower_bound_tokens |
+| `runtime.requested_timeout_min` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via settings/startup.rs:startup_reseed) -> requested_timeout_min |
+| `runtime.in_progress_stale_min` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via settings/startup.rs:startup_reseed) -> in_progress_stale_min |
+| `runtime.context_compact_percent` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via settings/startup.rs:startup_reseed) -> context_compact_percent |
+| `runtime.context_compact_percent_codex` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via settings/startup.rs:startup_reseed) -> context_compact_percent_codex |
+| `runtime.context_compact_percent_claude` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via settings/startup.rs:startup_reseed) -> context_compact_percent_claude |
+| `runtime.context_compact_lower_bound_tokens` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via settings/startup.rs:startup_reseed) -> context_compact_lower_bound_tokens |
 | `runtime.context_compact_window_claude` | live | `src/services/claude_tui/session.rs` write_launch_script (validated snapshot per launch) |
 | `runtime.max_retries` | seeded-at-boot | `src/services/settings.rs` seed_runtime_config_defaults_pg (kv runtime-config blob; via startup_reseed) -> maxRetries |
 | `runtime.max_entry_retries` | seeded-at-boot | `src/services/settings.rs` seed_runtime_config_defaults_pg (kv runtime-config blob; via startup_reseed) -> maxEntryRetries |

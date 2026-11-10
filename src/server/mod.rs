@@ -271,7 +271,10 @@ pub(crate) async fn run(
             if let Some(pool_ref) = pool.as_ref() {
                 crate::db::postgres::with_startup_advisory_lock(pool_ref, || async {
                     crate::db::postgres::migrate(pool_ref).await?;
-                    crate::db::postgres::startup_reseed_with_warmup_pool(pool_ref, &config).await
+                    crate::services::settings::startup::startup_reseed_with_warmup_pool(
+                        pool_ref, &config,
+                    )
+                    .await
                 })
                 .await
                 .map_err(anyhow::Error::msg)?;

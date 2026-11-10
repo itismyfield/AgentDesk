@@ -203,6 +203,15 @@ tui-o-writer/WriterAdoptionWatcherNoGuard.cfg	WriterAdoption	NoEarlyDispatch	-
 tui-o-writer/WriterAdoptionBudgetMut.cfg	WriterAdoption	RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionHeadlessMut.cfg	WriterAdoption	HeadlessKept	-
 input-single-path/InputOwnershipPersonBusy.cfg	InputOwnership	-
+input-single-path/InputOwnershipCBBefore.cfg	InputOwnership	CBCloseNotifiesOnce,CBNoStall	CBEventuallyDelivered
+input-single-path/InputOwnershipCBAfter.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipCBNoNotify.cfg	InputOwnership	CBNoStall	CBEventuallyDelivered
+input-single-path/InputOwnershipCBEarlyNotify.cfg	InputOwnership	CBCloseNotifiesOnce,CBNoStall	CBEventuallyDelivered
+input-single-path/InputOwnershipCBDoubleNotify.cfg	InputOwnership	CBCloseNotifiesOnce	-
+input-single-path/InputOwnershipCBFailNotify.cfg	InputOwnership	CBRefusalSilent	-
+input-single-path/InputOwnershipCBTokenEligible.cfg	InputOwnership	CBCloseNotifiesOnce	-
+input-single-path/InputOwnershipCBDupClaim.cfg	InputOwnership	CBDeliverOnce	-
+input-single-path/InputOwnershipCBClearedOnly.cfg	InputOwnership	CBNoStall	CBEventuallyDelivered
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
 tui-o-writer/WriterArchivedSourceBefore.cfg	WriterArchivedSource	ArchiveAtVerifiedEofRetires

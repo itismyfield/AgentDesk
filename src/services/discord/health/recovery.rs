@@ -148,7 +148,7 @@ async fn apply_runtime_hard_stop_cleanup(
     finish: &discord::FinishTurnResult,
     owned_role_override: Option<ChannelId>,
     stop_source: &'static str,
-    stop_watcher: bool,
+    (stop_watcher, kick_queue): (bool, bool),
 ) -> bool {
     if let Some(token) = finish.removed_token.as_ref() {
         token.cancelled.store(true, Ordering::Relaxed);
@@ -184,7 +184,7 @@ async fn apply_runtime_hard_stop_cleanup(
         }
     };
 
-    if finish.mailbox_online && finish.has_pending {
+    if kick_queue && finish.mailbox_online && finish.has_pending {
         discord::schedule_deferred_idle_queue_kickoff(
             shared.clone(),
             provider.clone(),

@@ -373,6 +373,9 @@ src/
 │   ├── mod.rs
 │   ├── test_support.rs
 │   └── types.rs
+├── domain/
+│   ├── lifecycle.rs
+│   └── mod.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── db_ops/
@@ -1446,6 +1449,8 @@ src/
 │   │   │   │   │   └── carried_ledger_tests.rs
 │   │   │   │   ├── live_agent_recovery/
 │   │   │   │   │   └── judged_finish_fence_tests.rs
+│   │   │   │   ├── runtime_stop/
+│   │   │   │   │   └── wake_tests.rs
 │   │   │   │   ├── self_watchdog/
 │   │   │   │   │   ├── policy/
 │   │   │   │   │   │   └── tests/
@@ -1866,6 +1871,7 @@ src/
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── closed.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
@@ -3751,7 +3757,9 @@ src/
 │   │   ├── resolve/
 │   │   │   └── tests.rs
 │   │   ├── resolve.rs
-│   │   └── runtime_config_put.rs
+│   │   ├── runtime_config_put.rs
+│   │   ├── startup.rs
+│   │   └── startup_tests.rs
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── stale_turn_reconciler/
@@ -4565,6 +4573,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/config/` | Config newtypes extracted from the `config.rs` facade, including the provider-keyed `AgentChannels` map. |
 | `src/db/` | PostgreSQL access layer, migration helpers, and schema authority. |
 | `src/dispatch/` | Dispatch context construction, review metadata, and worktree targeting. |
+| `src/domain/` | Shared pure values and static contracts. |
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
