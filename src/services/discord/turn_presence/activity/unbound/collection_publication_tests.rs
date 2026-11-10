@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "retired_codex_runtime_marker_tests.rs"]
+mod retired_codex_runtime_marker_tests;
 #[path = "superseded_measurement_tests.rs"]
 mod superseded_measurement_tests;
 
