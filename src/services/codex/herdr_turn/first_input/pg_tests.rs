@@ -98,6 +98,11 @@ fn run_case(refuse_commit: bool) {
         "herdr",
     )
     .unwrap();
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(&turn.owner.logical_key, "spawn_nonce"),
+        nonce,
+    )
+    .unwrap();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727399));
     rt.block_on(mailbox.v2_cold_fixture(root.path().join("herdr-owner.json"),json!({"nonce":"codex-herdr-scope","provider":"codex","target":{"host":"herdr","owner":turn.owner.logical_key,"root":"test","execution_nonce":nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),turn.prompt.into(),727399)).unwrap();

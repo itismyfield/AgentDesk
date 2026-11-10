@@ -128,6 +128,13 @@ input-single-path/InputPathStopNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopNotSentLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopBusyNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopProofOverStopLive.cfg	InputPath	-	StoppedLeaves
+session-lifecycle/HerdrPendingRegistrationAfter.cfg	HerdrPendingRegistration	-	-
+session-lifecycle/HerdrPendingRegistrationBefore.cfg	HerdrPendingRegistration	-	PendingReuseBound
+session-lifecycle/HerdrPendingRegistrationBound.cfg	HerdrPendingRegistration	-	-
+session-lifecycle/HerdrPendingRegistrationEvidence.cfg	HerdrPendingRegistration	-	-
+session-lifecycle/HerdrPendingRegistrationMarker.cfg	HerdrPendingRegistration	-	-
+session-lifecycle/HerdrPendingRegistrationOther.cfg	HerdrPendingRegistration	-	-
+session-lifecycle/HerdrPendingRegistrationUnplaced.cfg	HerdrPendingRegistration	-	-
 session-lifecycle/HerdrPreclaimBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
 session-lifecycle/HerdrPreclaimFixed.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrPreclaimNonlocal.cfg	HerdrRootRecovery	-	-
