@@ -138,10 +138,9 @@ A held store is never initialized again: an era channel whose `init` is missing 
 
 A Claude TUI channel whose transcript already holds output, the warm-up canary included, is added
 the same way; a Codex channel with output is taken at its frontier instead (below). O starts at
-the cursor Legacy reads that transcript from in the new process, so neither writer repeats a byte.
-Records Legacy left undelivered before that cursor are posted by neither: the adoption reports
-their range once as `tui_o:abandoned:<channel>` (`Abandoned { source, from, to }`). Every check of
-§1 still applies; in addition all of these must hold after the restart, or the
+the cursor Legacy reads that transcript from in the new process, or at Legacy's delivered frontier
+when records before that cursor were never delivered: O posts those once, so neither writer
+repeats or drops a byte. Every check of §1 still applies; in addition all of these must hold after the restart, or the
 channel stays on Legacy for that process with `adoption held: <reason>`:
 
 - Legacy's first rehydrate pass ran within 60 seconds (`legacy cursor not established` otherwise),
@@ -153,7 +152,7 @@ channel stays on Legacy for that process with `adoption held: <reason>`:
   turn ends and TUI bookkeeping after it are not undelivered: `turn_duration`, `informational`,
   `last-prompt`, `ai-title`, `mode`, `permission-mode`, `atis-latch`, `cost-state`,
   `file-history-snapshot` and `hook_success` attachments. The first prompt or other record there
-  starts the abandoned range; it no longer holds the channel.
+  is where O starts instead; it no longer holds the channel.
 - Earlier transcripts are pinned newest first within a 64-source scan and cumulative 128 MiB
   budget. Missing past sources are skipped and the byte budget stops further pinning; exceeding
   it does not reject the whole adoption. Inspect the actual pinned set rather than assuming it
@@ -161,7 +160,7 @@ channel stays on Legacy for that process with `adoption held: <reason>`:
 - Nothing moved before the `init`: the log, the transcripts' length and mtime, and no Legacy
   response tail runs for the session.
 
-An open last turn, delivery debt, lagging cursor, custody or other transient Legacy state can defer
+An open last turn, lagging cursor, custody or other transient Legacy state can defer
 adoption; sessions on another node or a node override release it first. The channel stays on Legacy, logged as
 `adoption waits for Legacy`, and its writer host looks again every 5 seconds without a restart. It
 reads the transcript again only once the reason it waited on may have cleared: the transcript
@@ -171,8 +170,8 @@ once all of these hold, logged as `deferred adoption committed`:
 - The transcript has not changed for 10 seconds.
 - Legacy holds no inflight row, custody, pending start, response tail, mailbox turn, queued
   intervention or pending dispatch for the channel, and is not emitting a terminal delivery.
-- Every check above passes, and in the normal clean branch nothing past Legacy's frontier is left
-  undelivered. This branch abandons nothing; the stall-EOF branch below is a separate outcome.
+- Every check above passes. Records past Legacy's frontier are O's from that frontier, which must
+  not move before the `init` is written; nothing is abandoned.
 
 A deferred channel is released for good, with `adoption held: <reason>`, if the reason is final
 (sessions on another node, a node override or a non-authoritative delivery record) or if
@@ -180,13 +179,15 @@ the binding log bound another transcript while it waited (`was bound while the a
 waited`), since Legacy may still owe output it read from that one. A late reservation waits from
 its boundary: the log's end at its first read, only if this process's Legacy had then started no
 body and held no inflight row, pending start or terminal custody for the channel, else seq 0.
+When its transcript rotates, the old one goes into the `init` from where Legacy last delivered
+it, once no Legacy body started since that delivery; otherwise the reservation keeps waiting.
 
 Deferred adoption does not promise an unlimited wait. After 40 minutes without delivery progress
 (soft stall), or the 80-minute frontier-progress cap (hard stall), the guarded non-late path may
-handoff at EOF. The log is `Legacy delivered nothing through the stall; O starts at the source's
-end`. Preserve the stall kind, source, frontier and abandoned ranges. Do not approve that sample
-as a clean comparison baseline until the historical debt/abandon evidence is established; elapsed time or
-`deferred adoption committed` alone is insufficient (P31:
+hand off at Legacy's delivered frontier and post what Legacy never delivered. The log is `Legacy
+delivered nothing through the stall; O starts at its frontier`. Preserve the stall kind, source
+and frontier; elapsed time or `deferred adoption committed` alone does not make the sample a clean
+comparison baseline (P31:
 `src/services/tui_o/writer/deferred.rs:19–28,325–428`).
 
 A reserved Codex channel whose rollout already holds output is taken at its frontier, logged as

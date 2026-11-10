@@ -1,5 +1,5 @@
 //! Adoption of a selected Claude channel that already holds output: O starts at Legacy's cursor, or
-//! at the source's end once Legacy stalled behind it. Records Legacy left before it are only reported.
+//! at Legacy's delivered frontier when records past it were never delivered, and posts those.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
