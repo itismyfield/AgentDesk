@@ -232,6 +232,7 @@ pub(in crate::services::discord) async fn update_channel_model_override(
         }
     }
     candidate.try_save_bot_settings(token)?;
+    super::super::control::cancel_relaunch_confirmation(channel_id);
     super::super::control::forget_relaunch_failures(channel_id);
     *settings = candidate;
     match next_override {

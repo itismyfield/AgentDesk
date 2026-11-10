@@ -1,8 +1,11 @@
 """Fixture-only coverage for the read-only source comparator."""
 
 import contextlib
+import copy
+import datetime as dt
 import io
 import json
+import os
 import sys
 from pathlib import Path
 import tempfile
@@ -705,6 +708,251 @@ class FinalSnapshotDriverTests(unittest.TestCase):
                                 args=Namespace(queue_runtime_root="/offline-denied", final_refetches=1))
         self.assertEqual(get.call_count, 1)
         self.assertEqual(len(client.captures[0]["pages"][0]["messages"]), 100)
+
+
+class SourceCompareGapTests(unittest.TestCase):
+    RUN = "20261109T223903Z-99211-E-51-codex-tui"
+    START = dt.datetime(2026, 11, 9, 22, 39, 3, tzinfo=dt.timezone.utc).timestamp()
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.path = self.root / "native.jsonl"
+
+    def marker(self, label, run=None, scenario="E51", legacy=False):
+        run = run or self.RUN
+        return f"[E2E:{scenario}:{run if legacy else sc.marker_identity(run)}:{label}]"
+
+    def write(self, path, texts, provider="claude", modified=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [{"type": "user", "message": {"content": text}} if provider == "claude" else
+                {"type": "response_item", "payload": {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": text}]}} for text in texts]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        if modified is not None:
+            os.utime(path, (modified, modified))
+
+    def messages(self, *markers):
+        rows = []
+        first = int((self.START * 1000 - 1420070400000)) << 22
+        for marker in markers:
+            for bot_id in (OUR_BOT_ID, "relay"):
+                rows.append({"id": str(first + len(rows) + 1), "content": marker,
+                             "author": {"id": bot_id, "bot": True}})
+        return rows
+
+    def blobs(self):
+        path = Path(__file__).parent / "fixtures/source_compare/api-request-blob.jsonl"
+        return list(sc.transcript_rows(path))
+
+    def test_observed_api_request_blob_copies_do_not_count_as_inputs(self):
+        blobs = self.blobs()
+        marker = "[E2E:E50:20261109T193944Z-rr8609:AFTER_CLEAR]"
+        self.write(self.path, [marker])
+        with self.path.open("a") as out:
+            out.writelines(json.dumps(row) + "\n" for row in blobs + blobs[:1])
+        result = sc.compare(self.path, self.messages(marker), run_id="20261109T193944Z-rr8609")
+        self.assertEqual((result[marker]["native_user_count"], result[marker]["verdict"]), (1, "ok"))
+        self.path.write_text(json.dumps(blobs[0]) + "\n")
+        self.assertEqual(sc.compare(self.path, self.messages(marker),
+                         run_id="20261109T193944Z-rr8609")[marker]["verdict"], "lost")
+        strings = blobs[1]
+        strings["message"]["content"][0] = marker
+        self.path.write_text(json.dumps(strings) + "\n")
+        self.assertEqual(list(sc.native_inputs(self.path, sc.marker_pattern(
+                         run_id="20261109T193944Z-rr8609"))), [])
+
+    def test_string_api_request_blob_copies_do_not_count_as_inputs(self):
+        blob = next(row for row in self.blobs() if isinstance(row["message"]["content"], str))
+        run = "20261110T000000Z-i8044"
+        marker = f"[E2E:E50:{run}:T1]"
+        pattern = sc.marker_pattern(run_id=run)
+        self.write(self.path, [marker])
+        with self.path.open("a") as out:
+            out.writelines(json.dumps(blob) + "\n" for _ in range(2))
+        self.assertEqual(list(sc.native_inputs(self.path, pattern)), [marker])
+        result = sc.compare(self.path, self.messages(marker), run_id=run)[marker]
+        self.assertEqual((result["native_user_count"], result["verdict"]), (1, "ok"))
+        binding = {"channel_id": "123", "transcript_path": str(self.path)}
+        with patch.object(sc, "resolve_binding", return_value=binding), \
+             patch.object(sc, "fetch_messages", return_value=self.messages(marker)), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(sc.main(["--channel-id", "123", "--run-id", run]), 0)
+        self.path.write_text(json.dumps(blob) + "\n")
+        self.assertEqual(list(sc.native_inputs(self.path, pattern)), [])
+        result = sc.compare(self.path, self.messages(marker), run_id=run)[marker]
+        self.assertEqual((result["native_user_count"], result["verdict"]), (0, "lost"))
+
+    def test_api_request_blob_unknown_fields_or_shapes_stay_fail_closed(self):
+        marker = self.marker("PROBE")
+        for baseline in (self.blobs()[0], self.blobs()[-1]):
+            for kind in ("extra", "session", "hash", "role", "block", "nested", "message_extra"):
+                row = copy.deepcopy(baseline)
+                if kind == "extra":
+                    row["future"] = marker
+                elif kind in ("session", "hash"):
+                    row["sessionId" if kind == "session" else "hash"] = marker
+                elif kind == "role":
+                    row["message"]["role"] = marker
+                elif kind == "block":
+                    row["message"]["content"] = [{"type": "future", "text": marker}]
+                elif kind == "nested":
+                    row["message"]["content"] = [{"type": "text", "text": [marker]}]
+                else:
+                    row["message"]["future"] = marker
+                self.path.write_text(json.dumps(row) + "\n")
+                with self.subTest(content_type=type(baseline["message"]["content"]).__name__, kind=kind), \
+                     self.assertRaisesRegex(ValueError, "unsupported marker-bearing"):
+                    list(sc.native_inputs(self.path, sc.marker_pattern(run_id=self.RUN)))
+        for blocks in (42, {"text": marker}, None):
+            row = copy.deepcopy(self.blobs()[0])
+            row["message"]["content"] = blocks
+            self.path.write_text(json.dumps(row) + "\n")
+            # Numeric and null bodies need a regex that marks their JSON literals.
+            pattern = sc.marker_pattern(marker_regex=r"\b42\b|\bnull\b|PROBE")
+            with self.subTest(content=blocks), self.assertRaisesRegex(ValueError, "unsupported marker-bearing"):
+                list(sc.native_inputs(self.path, pattern))
+
+    def setup_run(self, provider="codex", run=None, legacy=False):
+        run = run or self.RUN
+        markers = [self.marker(label, run, legacy=legacy) for label in ("T1", "T2", "CLEAR", "AFTER_CLEAR")]
+        root = self.root / provider
+        paths = [root / "project" / f"{sid}.jsonl" if provider == "claude" else
+                 root / "2026/11/09" / f"rollout-2026-11-09T22-39-03-{sid}.jsonl"
+                 for sid in ("before", "after", "current")]
+        for path, texts in zip(paths, (markers[:2], markers[3:], [])):
+            self.write(path, texts, provider, self.START)
+        identity = dict(agent_id="worker", channel_id="123", provider=provider,
+                        session_key="key", raw_provider_session_id="current")
+        messages = self.messages(*markers)
+        messages = [row for row in messages if row["content"] != markers[2] or row["author"]["id"] == OUR_BOT_ID]
+        next(row for row in messages if row["content"] == markers[2])["content"] = "!clear " + markers[2]
+        return root, paths, identity, messages, markers
+
+    def audit(self, setup, run=None):
+        root, _, identity, messages, _ = setup
+        with patch.object(sc, "get_json", return_value=identity), \
+             patch.object(sc, "fetch_messages", return_value=messages) as fetch, \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = sc.main(["--channel-id", "123", "--run-id", run or self.RUN,
+                          "--transcript-root", str(root)])
+        fetch.assert_called_once_with("http://127.0.0.1:8791", "123", after_id="0", max_pages=100)
+        return rc, json.loads(out.getvalue())
+
+    def test_clear_run_uses_both_transcripts_even_after_later_session(self):
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                setup = self.setup_run(provider)
+                rc, result = self.audit(setup)
+                self.assertEqual([row["verdict"] for row in result["markers"].values()],
+                                 ["ok", "command", "ok", "ok"])
+                self.assertEqual(rc, 0)
+                self.assertEqual(set(result["binding"]["transcript_paths"]), set(map(str, setup[1])))
+
+    def test_current_binding_native_without_discord_evidence_is_lost(self):
+        for provider in ("claude", "codex"):
+            for modified in (self.START - 1, self.START):
+                with self.subTest(provider=provider, modified=modified):
+                    setup = self.setup_run(provider)
+                    _, paths, _, messages, markers = setup
+                    before, after = markers[0], markers[3]
+                    self.write(paths[0], [before], provider, self.START)
+                    self.write(paths[1], [], provider, self.START)
+                    self.write(paths[2], [after], provider, modified)
+                    messages[:] = self.messages(before)
+                    rc, result = self.audit(setup)
+                    self.assertEqual((rc, set(result["binding"]["transcript_paths"]),
+                        {m: (r["native_user_count"], r["verdict"]) for m, r in result["markers"].items()}),
+                        (1, {str(paths[0]), str(paths[2])}, {before: (1, "ok"), after: (1, "lost")}))
+
+    def test_current_binding_discovered_by_history_counts_once(self):
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                setup = self.setup_run(provider)
+                setup[2]["raw_provider_session_id"] = "after"
+                rc, result = self.audit(setup)
+                self.assertEqual(rc, 0)
+                self.assertCountEqual(result["binding"]["transcript_paths"], list(map(str, setup[1][:2])))
+                self.assertEqual(result["markers"][setup[-1][3]]["native_user_count"], 1)
+
+    def test_missing_current_binding_evidence_cannot_pass_on_history(self):
+        setup = self.setup_run()
+        for missing in ("path", "file"):
+            with self.subTest(missing=missing):
+                binding = dict(provider="codex", channel_id="123", transcript_root=str(setup[0]))
+                if missing == "file":
+                    binding["transcript_path"] = str(setup[1][2].with_name("absent.jsonl"))
+                with patch.object(sc, "resolve_binding", return_value=binding), \
+                     patch.object(sc, "fetch_messages", return_value=setup[3]), \
+                     contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(sc.main(["--channel-id", "123", "--run-id", self.RUN]), 2)
+                self.assertIn("transcript_path" if missing == "path" else "absent.jsonl", err.getvalue())
+
+    def test_other_channel_and_other_run_cannot_fill_missing_native_input(self):
+        setup = self.setup_run()
+        _, paths, _, _, markers = setup
+        self.write(paths[0], [], "codex", self.START)
+        foreign = paths[0].with_name("rollout-other-channel.jsonl")
+        other_cell = self.RUN.replace("E-51", "E-50")
+        self.write(foreign, [self.marker("T1", other_cell, scenario="E50"),
+                            self.marker("T1", scenario="S5"),
+                            self.marker("T1", self.RUN + "-other")], "codex", self.START + 1)
+        old = paths[0].with_name("rollout-before-run.jsonl")
+        self.write(old, markers[:2], "codex", self.START - 0.001)
+        self.write(paths[2], [self.marker("T1", self.RUN + "-other")], "codex", self.START)
+        rc, result = self.audit(setup)
+        self.assertEqual(result["markers"][markers[0]]["verdict"], "lost")
+        self.assertEqual(result["markers"][markers[0]]["native_user_count"], 0)
+        self.assertEqual(set(result["markers"]), set(markers))
+        self.assertCountEqual(result["binding"]["transcript_paths"], list(map(str, paths[1:])))
+        self.assertEqual(rc, 1)
+
+    def test_opaque_run_uses_discord_snowflake_time_and_legacy_markers(self):
+        run = "opaque-E-51-codex-tui"
+        setup = self.setup_run(run=run, legacy=True)
+        rc, result = self.audit(setup, run)
+        self.assertEqual(rc, 0)
+        self.assertEqual(set(result["binding"]["transcript_paths"]), set(map(str, setup[1])))
+
+    def test_selected_unknown_record_and_duplicate_across_sessions_fail(self):
+        setup = self.setup_run()
+        paths, markers = setup[1], setup[-1]
+        with paths[1].open("a") as out:
+            out.write(json.dumps({"type": "future", "text": markers[0]}) + "\n")
+        with patch.object(sc, "get_json", return_value=setup[2]), \
+             patch.object(sc, "fetch_messages", return_value=setup[3]), \
+             contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(sc.main(["--channel-id", "123", "--run-id", self.RUN,
+                             "--transcript-root", str(setup[0])]), 2)
+        self.assertIn("unsupported marker-bearing", err.getvalue())
+        self.write(paths[1], [markers[0], markers[3]], "codex", self.START)
+        rc, result = self.audit(setup)
+        self.assertEqual(result["markers"][markers[0]]["verdict"], "duplicated")
+        self.assertEqual(rc, 1)
+
+    def test_escaped_direct_notice_still_selects_previous_native_session(self):
+        setup = self.setup_run()
+        marker = setup[-1][0]
+        escaped = marker.replace("[", r"\[").replace("]", r"\]")
+        notice = {**setup[3][0], "content": "-# ⌨️ " + escaped, "author": {"id": "relay", "bot": True}}
+        setup[3][:] = [notice]
+        rc, result = self.audit(setup)
+        self.assertEqual(result["markers"][marker]["verdict"], "missing_relay")
+        self.assertEqual(result["markers"][marker]["native_user_count"], 1)
+        self.assertEqual(rc, 1)
+
+    def test_edited_away_marker_does_not_select_foreign_session(self):
+        setup = self.setup_run()
+        foreign_marker = self.marker("ONE", scenario="S5")
+        foreign = setup[1][0].with_name("rollout-edited-away.jsonl")
+        self.write(foreign, [foreign_marker], "codex", self.START)
+        old = {**setup[3][0], "id": str(int(setup[3][-1]["id"]) + 1), "content": foreign_marker}
+        setup[3].extend([old, {**old, "content": "edited away"}])
+        rc, result = self.audit(setup)
+        self.assertEqual(rc, 0)
+        self.assertNotIn(str(foreign), result["binding"]["transcript_paths"])
+        self.assertNotIn(foreign_marker, result["markers"])
 
 
 if __name__ == "__main__":

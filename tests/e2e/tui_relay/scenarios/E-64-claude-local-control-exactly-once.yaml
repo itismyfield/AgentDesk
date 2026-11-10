@@ -1,5 +1,5 @@
 id: E-64
-title: Claude TUI 로컬 /model 직후 Discord 입력이 60초 안에 1회 처리되고 큐가 비어 있다
+title: Claude TUI 로컬 /context 직후 Discord 입력이 60초 안에 1회 처리되고 큐가 비어 있다
 agent_mode: real_live
 coverage_class: live
 # Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
@@ -7,20 +7,20 @@ cells: [claude-tui]
 isolation: required
 acceptance_criteria:
   - Warm the Claude TUI through Discord and wait until the target mailbox is idle with queue 0.
-  - Type `/model default` into the TUI pane (the Herdr pane on a Herdr-hosted channel); the relay's local slash-command note is recorded if it appears.
+  - Type `/context` into the TUI pane (the Herdr pane on a Herdr-hosted channel); the relay's local slash-command note is recorded if it appears.
   - Send an ordinary Discord message; its answer arrives within 60 seconds.
   - The answer marker occurs exactly once and the target mailbox drains back to idle with queue 0.
   - The run issues no cancel; any stranded turn fails the 60-second wait or the idle check.
 notes: |
-  `/model` here is the Claude-native command typed into the pane, observed by
+  `/context` here is the Claude-native command typed into the pane, observed by
   the relay as a local control that must not open a turn. Sent as Discord text
   it is an ordinary turn instead, so this scenario types it locally.
   The note is observed, not required: the relay drops a repeat within its
   dedupe window and skips it without provider HTTP, so its absence proves
   nothing about the turn path. `observed_notices` in the report records it.
-  `default` keeps the cell's model unchanged while still producing the command
-  echo and local output; pick another alias only on a cell whose Claude
-  settings are isolated.
+  `/context` only displays context usage and returns to the prompt; it does not
+  select a model, save settings, or require a confirmation key. Do not substitute
+  `/model`, `/effort`, or `/fast`: local completion does not imply settings isolation.
   Exactly once is provider_text_present (>=1), no_duplicate_marker (<=1 message)
   and a chrome_count regex that forbids two copies inside one message.
   Injection is not counted separately: a second injection would show as a
@@ -41,7 +41,7 @@ steps:
       global_finalizing_max: 0
   - send_keys_sequence:
       keys:
-        - "/model default"
+        - "/context"
         - C-m
         - C-m
       key_interval_s: 1.2
@@ -49,7 +49,7 @@ steps:
   - wait_for_raw_discord_text: "머신 슬래시 명령"
     required: false
     timeout_s: 10
-  - send_discord_prompt: "E2E E64 after model. Output one line made by joining '[E2E:E64:{run_id}:' and 'PROBE]' with nothing between them."
+  - send_discord_prompt: "E2E E64 after local control. Output one line made by joining '[E2E:E64:{run_id}:' and 'PROBE]' with nothing between them."
     post_send_sleep_s: 0
   # The wait clock starts after the send; 5s of the 60s DoD covers the send ack and the last fetch.
   - wait_for_discord_text: "[E2E:E64:{run_id}:PROBE]"
