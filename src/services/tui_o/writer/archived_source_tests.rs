@@ -6,7 +6,7 @@ use std::time::SystemTime;
 fn archive(path: &Path) {
     let mut name = path.as_os_str().to_os_string();
     name.push(".zst");
-    // Deliberately invalid compressed bytes: classification must never read the archive.
+    // Live retirement uses its retained FD; boot must reject this invalid archive.
     std::fs::write(PathBuf::from(name), b"existence only").unwrap();
     std::fs::remove_file(path).unwrap();
 }

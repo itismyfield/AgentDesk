@@ -13,9 +13,13 @@ pub(super) fn submit(
 ) -> Result<Option<Submitted>, String> {
     let (logical, cancel) = (turn.owner.logical_key.as_str(), turn.cancel.as_deref());
     let at = (logical, turn.channel_id, nonce);
-    write(at, cancel, turn.prompt, || {
-        gate(&current_record(turn, runtime, nonce)?)
-    })
+    write(
+        at,
+        cancel,
+        turn.prompt,
+        || gate(&current_record(turn, runtime, nonce)?),
+        || restore_pending(turn.pool, &turn.owner, runtime, nonce),
+    )
     .map_err(SubmissionError::into_legacy)
 }
 
@@ -46,9 +50,16 @@ pub(super) fn submit_owned(
         turn.cancel.clone(),
         nonce.to_owned(),
     );
+    let (pool, owner, runtime) = (turn.pool.clone(), turn.owner.clone(), Handle::current());
     let submit = Box::new(move |frame: String| {
         let at = (logical.as_str(), channel, nonce.as_str());
-        let written = write(at, cancel.as_deref(), &frame, || Ok(target))?;
+        let written = write(
+            at,
+            cancel.as_deref(),
+            &frame,
+            || Ok(target),
+            || restore_pending(&pool, &owner, &runtime, &nonce),
+        )?;
         let closed = || "herdr turn: the input closed before its first key".to_string();
         let submitted = written.ok_or_else(closed)?;
         *ticket.lock().unwrap_or_else(|e| e.into_inner()) = Some(submitted);
@@ -65,11 +76,46 @@ pub(super) fn submit_owned(
     submitted.ok_or_else(|| "herdr turn: the owner submitted without a ticket".into())
 }
 
+fn restore_pending(
+    pool: &PgPool,
+    owner: &HostedOwner,
+    runtime: &Handle,
+    nonce: &str,
+) -> Result<(), String> {
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context as context};
+    let order = dedupe::herdr_listing_order(&owner.logical_key);
+    let order_guard = order.lock().unwrap_or_else(|p| p.into_inner());
+    let restored = tc::with_tmux_source_authority(&owner.logical_key, |authority| {
+        let HostedLookup::Found(found) = runtime.block_on(load(pool, owner)) else {
+            return Err("herdr turn: Pending row unreadable before input".into());
+        };
+        let HostedRecord::Known(record) = found.record else {
+            return Err("herdr turn: no Pending execution before input".into());
+        };
+        if record.state != HostedState::Pending
+            || record.owner != *owner
+            || record.execution_nonce != nonce
+            || context::observe_spawn_nonce_marker(authority.session())
+                != context::SpawnNonceMarker::Known(nonce.to_owned())
+        {
+            return Err("herdr turn: Pending execution changed before input".into());
+        }
+        if !dedupe::restore_herdr_execution_under_source_authority(authority, nonce) {
+            return Err("herdr turn: another execution is registered before input".into());
+        }
+        Ok(())
+    });
+    drop(order_guard);
+    restored
+}
+
 fn write(
     (logical, channel, nonce): (&str, u64, &str),
     cancel: Option<&CancelToken>,
     prompt: &str,
     target: impl FnOnce() -> Result<HerdrTarget, String>,
+    restore: impl FnOnce() -> Result<(), String>,
 ) -> Result<Option<Submitted>, SubmissionError> {
     let owned = crate::services::claude_tui::owner_input::active();
     let plan = if owned {
@@ -91,6 +137,11 @@ fn write(
         empty_composer(&target, cancel)?;
         false
     };
+    restore().inspect_err(|_| {
+        if owned {
+            crate::services::claude_tui::owner_input::vetoed("pending_restore_refused");
+        }
+    })?;
     crate::services::tui_prompt_dedupe::register_provider_session("codex", logical, logical);
     crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(logical, channel);
     hold(nonce).inspect_err(|_| {

@@ -5,6 +5,9 @@ use crate::services::tui_o::store::rotation::{
 };
 use crate::services::tui_o::store::spool::source_key;
 
+#[path = "resume_time_tests.rs"]
+mod resume_time_tests;
+
 #[cfg(unix)]
 #[path = "clear_end_proof_tests.rs"]
 mod clear_end_proof_tests;
