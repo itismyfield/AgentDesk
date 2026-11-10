@@ -833,16 +833,16 @@ impl CancelToken {
         });
     }
 
-    pub fn set_restart_mode(&self, mode: Option<crate::services::discord::InflightRestartMode>) {
+    pub fn set_restart_mode(&self, mode: Option<crate::domain::lifecycle::InflightRestartMode>) {
         self.restart_mode.store(
-            mode.map(crate::services::discord::InflightRestartMode::as_u8)
+            mode.map(crate::domain::lifecycle::InflightRestartMode::as_u8)
                 .unwrap_or(0),
             Ordering::Relaxed,
         );
     }
 
-    pub fn restart_mode(&self) -> Option<crate::services::discord::InflightRestartMode> {
-        crate::services::discord::InflightRestartMode::from_u8(
+    pub fn restart_mode(&self) -> Option<crate::domain::lifecycle::InflightRestartMode> {
+        crate::domain::lifecycle::InflightRestartMode::from_u8(
             self.restart_mode.load(Ordering::Relaxed),
         )
     }

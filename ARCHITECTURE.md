@@ -373,6 +373,9 @@ src/
 │   ├── mod.rs
 │   ├── test_support.rs
 │   └── types.rs
+├── domain/
+│   ├── lifecycle.rs
+│   └── mod.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── db_ops/
@@ -936,6 +939,7 @@ src/
 │   │   │   ├── observation_ingress/
 │   │   │   │   └── resume_start.rs
 │   │   │   ├── adoption_retry.rs
+│   │   │   ├── codex_herdr_ingress_tests.rs
 │   │   │   ├── codex_ingress_tests.rs
 │   │   │   ├── hook_event.rs
 │   │   │   ├── native_clear_fence_tests.rs
@@ -1445,6 +1449,8 @@ src/
 │   │   │   │   │   └── carried_ledger_tests.rs
 │   │   │   │   ├── live_agent_recovery/
 │   │   │   │   │   └── judged_finish_fence_tests.rs
+│   │   │   │   ├── runtime_stop/
+│   │   │   │   │   └── wake_tests.rs
 │   │   │   │   ├── self_watchdog/
 │   │   │   │   │   ├── policy/
 │   │   │   │   │   │   └── tests/
@@ -1865,6 +1871,7 @@ src/
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── closed.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
@@ -2290,6 +2297,7 @@ src/
 │   │   │   │   │   │   ├── boot_input_more_tests.rs
 │   │   │   │   │   │   ├── boot_input_owner_ready_tests.rs
 │   │   │   │   │   │   ├── boot_input_payload_tests.rs
+│   │   │   │   │   │   ├── boot_input_placement_tests.rs
 │   │   │   │   │   │   ├── boot_input_race_tests.rs
 │   │   │   │   │   │   ├── boot_input_tests.rs
 │   │   │   │   │   │   ├── missing_halt_tests.rs
@@ -4031,6 +4039,8 @@ src/
 │   │   │   ├── adoption_terminal_tests.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── always_on_repost_tests.rs
+│   │   │   ├── archived_host_tests.rs
+│   │   │   ├── archived_source_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── bo_post_tests.rs
 │   │   │   ├── boot.rs
@@ -4569,6 +4579,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/config/` | Config newtypes extracted from the `config.rs` facade, including the provider-keyed `AgentChannels` map. |
 | `src/db/` | PostgreSQL access layer, migration helpers, and schema authority. |
 | `src/dispatch/` | Dispatch context construction, review metadata, and worktree targeting. |
+| `src/domain/` | Shared pure values and static contracts. |
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |

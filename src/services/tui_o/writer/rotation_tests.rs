@@ -2,6 +2,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::*;
 
+#[path = "archived_source_tests.rs"]
+mod archived_source;
+
 fn row_at(id: &str, text: &str, at: DateTime<Utc>) -> Vec<u8> {
     let mut value: serde_json::Value = serde_json::from_slice(&row(id, text)).unwrap();
     value["timestamp"] = at.to_rfc3339().into();

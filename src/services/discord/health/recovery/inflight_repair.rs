@@ -212,7 +212,7 @@ pub async fn clear_idle_tmux_stale_turn(
             &finish,
             owned_role_override,
             stop_source,
-            false,
+            (false, true),
         )
         .await
     } else {
