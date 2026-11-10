@@ -5,15 +5,28 @@ use serde_json::json;
 
 #[test]
 fn cold_codex_herdr_submit_keeps_hold_and_returns_before_session_start_pg() {
-    run_case(false);
+    run_case(Case::Submitted);
 }
 
 #[test]
 fn cold_codex_herdr_payload_commit_refusal_preserves_raw_and_hold_with_zero_keys_pg() {
-    run_case(true);
+    run_case(Case::CommitRefused);
 }
 
-fn run_case(refuse_commit: bool) {
+#[test]
+fn cold_codex_herdr_pending_restore_refusal_proves_not_sent_before_payload_pg() {
+    run_case(Case::RestoreRefused);
+}
+
+#[derive(PartialEq, Eq)]
+enum Case {
+    Submitted,
+    CommitRefused,
+    RestoreRefused,
+}
+
+fn run_case(case: Case) {
+    let refuse_commit = case == Case::CommitRefused;
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let rig = HerdrRig::start();
@@ -100,7 +113,11 @@ fn run_case(refuse_commit: bool) {
     .unwrap();
     std::fs::write(
         crate::services::tmux_common::session_temp_path(&turn.owner.logical_key, "spawn_nonce"),
-        nonce,
+        if case == Case::RestoreRefused {
+            "ffeeddccbbaa00998877665544332211"
+        } else {
+            nonce
+        },
     )
     .unwrap();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
@@ -112,9 +129,9 @@ fn run_case(refuse_commit: bool) {
     let commit_path = crate::config::runtime_root()
         .unwrap()
         .join("runtime/discord_pending_queue/cold-matrix/727399-herdr-owner.json");
-    let (_, result) = rt
+    let (attempt, outcome) = rt
         .block_on(
-            mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
+            mailbox.v2_cold_observed(1, std::sync::Arc::new(|| 10000), move |frame| {
                 assert!(
                     crate::services::tui_input::human_frame::history::v2::scoped_source().is_some(),
                     "actual Codex Herdr submit requires exact source scope"
@@ -158,6 +175,38 @@ fn run_case(refuse_commit: bool) {
     let owner_snapshot = rt
         .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
         .unwrap();
+    let result = outcome.result;
+    if case == Case::RestoreRefused {
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("Pending execution changed"))
+        );
+        assert!(
+            rig.sends().is_empty(),
+            "restore refusal sends no content or Enter"
+        );
+        assert!(
+            not_held(nonce).is_ok(),
+            "restore refusal creates no input hold"
+        );
+        assert_eq!(
+            owner_snapshot["head_injection"]["payload_window"]["kind"],
+            "bootstrap"
+        );
+        assert_eq!(
+            owner_snapshot["head_injection"]["original"]["text"],
+            turn.prompt
+        );
+        let proof = outcome
+            .not_sent
+            .expect("restore refusal proves not-sent in the actual owner scope");
+        assert_eq!(
+            proof.into_reason(&attempt).unwrap(),
+            "vetoed: pending_restore_refused"
+        );
+        return;
+    }
     if refuse_commit {
         assert_eq!(
             rig.sends().len(),

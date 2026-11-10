@@ -137,7 +137,11 @@ fn write(
         empty_composer(&target, cancel)?;
         false
     };
-    restore()?;
+    restore().inspect_err(|_| {
+        if owned {
+            crate::services::claude_tui::owner_input::vetoed("pending_restore_refused");
+        }
+    })?;
     crate::services::tui_prompt_dedupe::register_provider_session("codex", logical, logical);
     crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(logical, channel);
     hold(nonce).inspect_err(|_| {
