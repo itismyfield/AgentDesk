@@ -455,7 +455,8 @@ async fn a_record_past_legacys_frontier_is_taken_from_the_frontier_and_posted_on
     );
     assert_eq!(open.alarms(), [], "nothing is abandoned");
     polls(3).await;
-    assert_eq!(open.harness.port.posts(), ["owed"]);
+    let owed = ["owed", "-# ✅ 완료"];
+    assert_eq!(open.harness.port.posts(), owed);
 
     abort(tasks);
     polls(2).await;
@@ -463,14 +464,10 @@ async fn a_record_past_legacys_frontier_is_taken_from_the_frontier_and_posted_on
     let _tasks = start_host(&open.harness, &open.io, &ready);
     polls(3).await;
     assert!(ready.is_ready(CHANNEL), "{:?}", open.alarms());
-    assert_eq!(
-        open.harness.port.posts(),
-        ["owed"],
-        "a restart reposts nothing"
-    );
+    assert_eq!(open.harness.port.posts(), owed, "a restart reposts nothing");
     append(&open.path, &row("m9", "next"));
     polls(3).await;
-    assert_eq!(open.harness.port.posts(), ["owed", "next"]);
+    assert_eq!(open.harness.port.posts(), ["owed", "-# ✅ 완료", "next"]);
 }
 
 #[tokio::test(start_paused = true)]

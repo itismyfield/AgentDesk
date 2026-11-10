@@ -205,9 +205,13 @@ async fn transcript_cursor_and_placement_do_not_restart_delivery_clocks() {
         clock.to(minute * MINUTE).await;
         append(
             &stalled.path,
-            &[row(&format!("m{minute}"), "capture only"), closed()].concat(),
+            &[
+                row(&format!("m{minute}"), &format!("capture {minute}")),
+                closed(),
+            ]
+            .concat(),
         );
-        stalled.legacy.at(stalled.len());
+        stalled.legacy.at(lagging_now(&stalled));
         for _ in 0..5 {
             assert!(!candidate().claim(CHANNEL));
         }
@@ -237,7 +241,7 @@ async fn frontier_progress_restarts_both_clocks_at_the_observed_tick() {
     }
     let first = row("m0", "delivered late");
     let body = [first.clone(), row("m1", "undelivered"), closed()].concat();
-    let stalled = Stalled::new(&body, body.len() as u64, Some(0), Custody::Row);
+    let stalled = Stalled::new(&body, lagging(&body), Some(0), Custody::Row);
     let clock = Clock::new();
     let tasks = stalled.start();
     clock.started().await;
@@ -376,7 +380,7 @@ async fn redrive_schedule_keeps_hard_expiry_blocked_until_relay_slot_clears() {
         return;
     }
     let body = row("m0", "open through the first redrive rearm");
-    let stalled = Stalled::new(&body, body.len() as u64, Some(0), Custody::Row);
+    let stalled = Stalled::new(&body, lagging(&body), Some(0), Custody::Row);
     let clock = Clock::new();
     let tasks = stalled.start();
     clock.started().await;
@@ -412,7 +416,7 @@ async fn both_expired_clocks_choose_soft_after_a_long_open_turn() {
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(logged.clone()))
         .unwrap();
     let body = row("m0", "still open");
-    let stalled = Stalled::new(&body, body.len() as u64, Some(0), Custody::Active);
+    let stalled = Stalled::new(&body, lagging(&body), Some(0), Custody::Active);
     stalled.io.relaying.store(true, Ordering::SeqCst);
     let clock = Clock::new();
     let tasks = stalled.start();
@@ -606,7 +610,10 @@ async fn source_appended_when_expiry_pin_starts_must_be_quiet_before_handoff() {
     clock.to(SOFT + 2 * TICK).await;
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     let init = stalled.harness.store.read_init(CHANNEL).unwrap().unwrap();
-    assert_eq!(init.sources[0].delivery_start, new_end);
+    assert_eq!(
+        init.sources[0].delivery_start, 0,
+        "{new_end} is past the frontier"
+    );
     drop(clock);
     stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
@@ -652,7 +659,7 @@ async fn frontier_at_expiry_lock_refuses_and_restarts_delivery_clocks() {
     }
     let first = row("m0", "delivered late");
     let body = [first.clone(), row("m1", "undelivered"), closed()].concat();
-    let stalled = Stalled::new(&body, body.len() as u64, Some(0), Custody::Row);
+    let stalled = Stalled::new(&body, lagging(&body), Some(0), Custody::Row);
     let clock = Clock::new();
     let tasks = stalled.start();
     clock.started().await;
@@ -916,6 +923,7 @@ async fn ownership_stays_locked_through_init(expired: bool) {
     let tasks = stalled.start();
     clock.started().await;
     if !expired {
+        stalled.legacy.at(stalled.len());
         *stalled.legacy.frontier.lock().unwrap() = Some(stalled.len());
         *stalled.io.custody.lock().unwrap() = Ok(Custody::Free);
     }
@@ -989,6 +997,7 @@ async fn renewed_owned_epoch_between_fence_and_admit_refuses_both_commit_paths()
         let tasks = stalled.start();
         clock.started().await;
         if !expired {
+            stalled.legacy.at(stalled.len());
             *stalled.legacy.frontier.lock().unwrap() = Some(stalled.len());
             *stalled.io.custody.lock().unwrap() = Ok(Custody::Free);
         }
@@ -1082,6 +1091,7 @@ async fn default_intake_fence_prevents_actual_deferred_activation() {
         });
         clock.started().await;
         if !expired {
+            stalled.legacy.at(stalled.len());
             *stalled.legacy.frontier.lock().unwrap() = Some(stalled.len());
             *stalled.io.custody.lock().unwrap() = Ok(Custody::Free);
         }
@@ -1280,7 +1290,7 @@ async fn frontier_decrease_restarts_the_hard_clock_despite_epoch_churn() {
     let body = [first.clone(), row("m1", "undelivered"), closed()].concat();
     let stalled = Stalled::new(
         &body,
-        body.len() as u64,
+        lagging(&body),
         Some(first.len() as u64),
         Custody::Row,
     );

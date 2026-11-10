@@ -307,7 +307,7 @@ async fn late_claude_answer_past_the_frontier_is_taken_from_it_and_posted_once()
     let starts: Vec<u64> = init.sources.iter().map(|s| s.delivery_start).collect();
     assert_eq!(starts, [head.len() as u64]);
     polls(3).await;
-    assert_eq!(f.harness.port.posts(), ["undelivered"]);
+    assert_eq!(f.harness.port.posts(), ["undelivered", "-# ✅ 완료"]);
 }
 
 /// Legacy's relay following the transcript the log binds now, read to its end.
@@ -402,12 +402,8 @@ async fn late_claude_rotation_carries_the_old_transcripts_owed_answer_into_the_i
     polls(3).await;
     let mut posts = harness.port.posts();
     posts.sort();
-    assert_eq!(
-        posts,
-        ["owed", "the new answer"],
-        "{:?}",
-        io.alarms.halted()
-    );
+    let expected = ["-# ✅ 완료", "owed", "the new answer"];
+    assert_eq!(posts, expected, "{:?}", io.alarms.halted());
 }
 
 /// A first read under Legacy custody fixes no deferred baseline, yet a transcript already bound
@@ -466,7 +462,13 @@ async fn moved_on(channel: u64, delivered: bool) -> (Reserved, SourceId, u64) {
         });
     }
     settle().await;
-    assert_eq!(adoption(channel), Adoption::Deferred);
+    // Only a delivered old transcript is held back; an undelivered one is O's from its frontier.
+    let held = if delivered {
+        Adoption::Deferred
+    } else {
+        Adoption::Committed
+    };
+    assert_eq!(adoption(channel), held);
     let new = [prompted(), answer("msg_1", "new"), turn_end()].concat();
     let path = f.file("new.jsonl", &new);
     let moved = Legacy {
@@ -481,19 +483,30 @@ async fn moved_on(channel: u64, delivered: bool) -> (Reserved, SourceId, u64) {
     (f, source, new.len() as u64)
 }
 
-/// With the old transcript's answer undelivered, the cleared one finishing its turn and Legacy
-/// delivering it to EOF does not let O start the old one at EOF: the channel stays Legacy's.
+/// With the old transcript's answer undelivered, O takes the old transcript from Legacy's frontier
+/// before the cleared one binds, never at EOF; the old answer is posted once.
 #[tokio::test(start_paused = true)]
-async fn late_claude_fallback_keeps_an_undelivered_old_transcript_owed_after_the_new_turn() {
+async fn late_claude_undelivered_old_transcript_is_taken_from_the_frontier_before_the_new_turn() {
     const CH: u64 = 63_761_906;
     let (f, _, _) = moved_on(CH, false).await;
     assert_eq!(
         adoption(CH),
-        Adoption::Deferred,
+        Adoption::Committed,
         "{:?}",
         f.io.alarms.released()
     );
-    assert!(!f.harness.store.has_channel_dir(CH));
+    let init = f.harness.store.read_init(CH).unwrap().unwrap();
+    let starts: Vec<u64> = init.sources.iter().map(|s| s.delivery_start).collect();
+    assert_eq!(starts, [prompted().len() as u64]);
+    assert_eq!(
+        f.harness
+            .port
+            .posts()
+            .iter()
+            .filter(|p| *p == "old")
+            .count(),
+        1
+    );
 }
 
 /// The old transcript sampled delivered settles its obligation, so the quiet handoff commits the

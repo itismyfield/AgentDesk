@@ -133,16 +133,35 @@ fn late_pin_no_pane_delivered_closed_eof_has_no_owed_range() {
 }
 
 #[test]
-fn late_pin_no_pane_missing_or_non_eof_frontier_retries() {
-    for frontier in [None, Some(0), Some(u64::MAX)] {
+fn late_pin_no_pane_missing_or_past_eof_frontier_retries_and_a_lagging_one_is_owed() {
+    for frontier in [None, Some(u64::MAX)] {
         let f = Fixture::new();
         *f.legacy.frontier.lock().unwrap() = frontier;
-        assert_retry(f.pin(), "NoPane cannot bypass missing or unequal frontier");
+        assert_retry(
+            f.pin(),
+            "NoPane cannot bypass a missing or impossible frontier",
+        );
     }
+    let f = Fixture::new();
+    *f.legacy.frontier.lock().unwrap() = Some(0);
+    let snapshot = f.pin().unwrap();
+    assert!(
+        snapshot.owed().is_some(),
+        "records past the frontier are owed"
+    );
+    assert!(!snapshot.delivered_to_start());
+    let sources = snapshot
+        .owed_to_o()
+        .recheck(&f.legacy, &f.log, CHANNEL)
+        .unwrap();
+    assert_eq!(
+        sources[0].delivery_start, 0,
+        "O takes them from the frontier"
+    );
 }
 
 #[test]
-fn late_pin_no_pane_quiet_tail_without_owed_still_needs_eof_frontier() {
+fn late_pin_no_pane_quiet_tail_past_a_lagging_frontier_is_no_delivered_sample() {
     let mut f = Fixture::new();
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
@@ -156,9 +175,11 @@ fn late_pin_no_pane_quiet_tail_without_owed_still_needs_eof_frontier() {
     )
     .unwrap();
     f.eof = std::fs::metadata(&f.path).unwrap().len();
-    assert_retry(
-        f.pin(),
-        "quiet bookkeeping cannot stand in for delivered EOF",
+    let snapshot = f.pin().unwrap();
+    assert!(snapshot.owed().is_none(), "quiet bookkeeping owes nothing");
+    assert!(
+        !snapshot.delivered_to_start(),
+        "quiet bookkeeping cannot stand in for delivered EOF"
     );
 }
 
@@ -172,7 +193,7 @@ fn late_pin_bound_cursor_requires_eof_frontier_and_remains_positive_when_deliver
 }
 
 #[test]
-fn late_pin_bound_lagging_frontier_quiet_tail_and_owed_range_retry() {
+fn late_pin_bound_lagging_frontier_pins_a_quiet_tail_and_retries_an_open_turn() {
     use std::io::Write;
     for quiet in [false, true] {
         let mut f = Fixture::new();
@@ -188,14 +209,17 @@ fn late_pin_bound_lagging_frontier_quiet_tail_and_owed_range_retry() {
         writeln!(file, "{row}").unwrap();
         f.eof = std::fs::metadata(&f.path).unwrap().len();
         f.bound();
-        assert_retry(f.pin(), "Bound cursor cannot skip a lagging frontier");
-        if !quiet {
-            *f.legacy.frontier.lock().unwrap() = Some(f.eof);
-            assert_retry(
-                f.pin(),
-                "a delivered frontier cannot close an open Bound turn",
-            );
+        if quiet {
+            let snapshot = f.pin().unwrap();
+            assert!(snapshot.owed().is_none() && !snapshot.delivered_to_start());
+            continue;
         }
+        assert_retry(f.pin(), "Bound cursor cannot take an open turn");
+        *f.legacy.frontier.lock().unwrap() = Some(f.eof);
+        assert_retry(
+            f.pin(),
+            "a delivered frontier cannot close an open Bound turn",
+        );
     }
 }
 

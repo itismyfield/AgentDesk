@@ -1,5 +1,5 @@
-//! A deferred channel whose Legacy stays behind, driven through the real host: O starts at the
-//! source's end after delivery stops progressing; marker and capture activity do not reset it.
+//! A deferred channel whose Legacy stays behind, driven through the real host: O starts at Legacy's
+//! frontier after delivery stops progressing; marker and capture activity do not reset it.
 
 use super::*;
 use crate::services::tui_o::writer::adoption::LegacyEpoch;
@@ -48,6 +48,16 @@ impl LegacyView for Behind {
     }
 }
 
+/// Legacy's cursor before `body`'s closing record, so only the stall takes the turn it ends.
+fn lagging(body: &[u8]) -> u64 {
+    (body.len() - closed().len()) as u64
+}
+
+/// The same lag on the transcript as it stands now.
+fn lagging_now(stalled: &Stalled) -> u64 {
+    stalled.len() - closed().len() as u64
+}
+
 /// A selected channel whose transcript holds `body` and whose Legacy reads it from `cursor` with
 /// its delivered frontier at `frontier`; the gateway reports `custody`.
 struct Stalled {
@@ -87,10 +97,12 @@ impl Stalled {
         }
     }
 
-    /// A closed turn Legacy never delivered, behind an inflight row; Legacy read all of it.
+    /// A closed turn Legacy never delivered, behind an inflight row; Legacy's cursor has not read
+    /// its turn end, so only the stall takes it.
     fn dead_tail() -> Self {
         let body = [row("m0", "undelivered"), closed()].concat();
-        Self::new(&body, body.len() as u64, Some(0), Custody::Row)
+        let cursor = row("m0", "undelivered").len() as u64;
+        Self::new(&body, cursor, Some(0), Custody::Row)
     }
 
     fn start(&self) -> Vec<tokio::task::JoinHandle<()>> {
@@ -130,8 +142,13 @@ impl Stalled {
         assert_eq!(self.alarms(), [], "nothing is abandoned");
         polls(3).await;
         let before = self.harness.port.posts();
-        let unique: std::collections::BTreeSet<_> = before.iter().collect();
-        assert_eq!(unique.len(), before.len(), "posted twice: {before:?}");
+        // Turn summaries repeat by design; every body is posted once.
+        let bodies: Vec<_> = before
+            .iter()
+            .filter(|post| !post.starts_with("-# "))
+            .collect();
+        let unique: std::collections::BTreeSet<_> = bodies.iter().collect();
+        assert_eq!(unique.len(), bodies.len(), "posted twice: {before:?}");
         append(&self.path, &row("m9", "next"));
         polls(3).await;
         let after = self.harness.port.posts();
@@ -149,7 +166,8 @@ async fn a_cursor_behind_a_closed_tail_at_boot_waits_out_the_stall_and_starts_at
     stalled.assert_waiting("Legacy may still catch up");
     tokio::time::sleep(2 * MINUTE).await;
     stalled.assert_adopted_from(Some(0)).await;
-    assert_eq!(stalled.harness.port.posts(), ["undelivered", "next"]);
+    let posts = stalled.harness.port.posts();
+    assert_eq!(posts, ["undelivered", "-# ✅ 완료", "next"]);
 
     // Legacy delivered everything but never read the closing record: nothing is reported.
     let cursor = row("m0", "delivered").len() as u64;
@@ -326,7 +344,7 @@ async fn a_new_legacy_redrive_episode_restarts_the_stall() {
 
 #[tokio::test(start_paused = true)]
 async fn a_cursor_that_moves_restarts_the_stall() {
-    stall_not_restarted_by(|s| s.legacy.at(0), |s| s.legacy.at(s.len())).await;
+    stall_not_restarted_by(|s| s.legacy.at(0), |s| s.legacy.at(lagging_now(s))).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -490,7 +508,7 @@ async fn a_delivery_right_before_the_lock_restarts_the_stall() {
     }
     let first = row("m0", "delivered late");
     let body = [first.clone(), row("m1", "undelivered"), closed()].concat();
-    let stalled = Stalled::new(&body, body.len() as u64, Some(0), Custody::Row);
+    let stalled = Stalled::new(&body, lagging(&body), Some(0), Custody::Row);
     let nudge: fn(&Behind) = |legacy| {
         let delivered = row("m0", "delivered late").len() as u64;
         *legacy.frontier.lock().unwrap() = Some(delivered);

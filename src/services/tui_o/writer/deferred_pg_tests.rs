@@ -163,8 +163,11 @@ impl PgCase {
     fn new(pool: PgPool, expired: bool) -> Self {
         let open = Open::new();
         if expired {
+            let before_close = open.len();
             open.close();
             open.legacy.frontier.store(0, Ordering::SeqCst);
+            // The cursor has not read the turn end, so only the expired handoff takes it.
+            open.legacy.cursor.store(before_close, Ordering::SeqCst);
             *open.io.custody.lock().unwrap() = Ok(Custody::Row);
         }
         let io = Arc::new(PgIo {
@@ -236,7 +239,13 @@ impl PgCase {
             .iter()
             .map(|source| source.delivery_start)
             .collect();
-        assert_eq!(starts, [self.open.len()]);
+        // The expired handoff starts at Legacy's frontier 0, posting the turn it never delivered.
+        let owed: &[&str] = if self.expired {
+            &["asked", "-# ✅ 완료"]
+        } else {
+            &[]
+        };
+        assert_eq!(starts, [if self.expired { 0 } else { self.open.len() }]);
         assert!(
             self.samples().contains(&(0, 0)),
             "fresh fence allowed commit"
@@ -247,13 +256,13 @@ impl PgCase {
             .iter()
             .filter(|(_, alarm)| matches!(alarm, WriterAlarm::Abandoned { .. }))
             .count();
-        assert_eq!(abandoned, usize::from(self.expired));
+        assert_eq!(abandoned, 0);
         append(&self.open.path, &row("pg-next", "next"));
         for _ in 0..3 {
             clock.tick().await;
         }
         assert!(self.open.ready.is_ready(CHANNEL));
-        assert_eq!(self.open.harness.port.posts(), ["next"]);
+        assert_eq!(self.open.harness.port.posts(), [owed, &["next"]].concat());
     }
 
     async fn stop(mut self) {
