@@ -1,5 +1,5 @@
-//! Row reads and the one write an HTTP force cancel of a Herdr execution makes around the
-//! P11 terminate service; each is bound to the row id and execution it was given.
+//! Row reads and the writes an HTTP force cancel or a user clear of a Herdr execution makes around
+//! the P11 terminate service; each is bound to the row id and execution it was given.
 use super::*;
 
 /// The execution a cancel's selected row records, when it is a Herdr record its row owns.
@@ -67,5 +67,45 @@ pub(crate) async fn disconnect_retired_pg(
     .execute(pool)
     .await
     .map_err(|error| format!("disconnect retired session: {error}"))?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Forgets the provider session selector only while the row records `record` retired, field by
+/// field; `Ok(false)` means the row moved on, so no other execution's selector is touched.
+pub(crate) async fn clear_retired_selector_pg(
+    pool: &PgPool,
+    session_id: i64,
+    record: &HostedExecution,
+) -> Result<bool, String> {
+    let owner = &record.owner;
+    let updated = sqlx::query(
+        "UPDATE sessions
+         SET claude_session_id = NULL,
+             raw_provider_session_id = NULL,
+             claude_session_id_recorded_at = NULL,
+             raw_provider_transcript_len_watermark = 0,
+             raw_provider_transcript_watermark_session_id = NULL,
+             raw_provider_transcript_growth_proven = FALSE
+         WHERE id = $1
+           AND hosted_execution->>'state' = 'retired'
+           AND hosted_execution->>'execution_nonce' = $2
+           AND hosted_execution->'owner'->>'provider' = $3
+           AND hosted_execution->'owner'->>'discord_token_hash' = $4
+           AND hosted_execution->'owner'->>'channel_id' = $5
+           AND hosted_execution->'owner'->>'logical_key' = $6
+           AND hosted_execution->'owner'->>'owner_node' = $7
+           AND hosted_execution->'owner'->>'runtime_root' = $8",
+    )
+    .bind(session_id)
+    .bind(&record.execution_nonce)
+    .bind(&owner.provider)
+    .bind(&owner.discord_token_hash)
+    .bind(&owner.channel_id)
+    .bind(&owner.logical_key)
+    .bind(&owner.owner_node)
+    .bind(&owner.runtime_root)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("clear retired session selector: {error}"))?;
     Ok(updated.rows_affected() == 1)
 }
