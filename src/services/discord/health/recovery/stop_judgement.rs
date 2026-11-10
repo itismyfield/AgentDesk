@@ -148,8 +148,8 @@ pub(super) async fn preserved(
     kept(snapshot.queue_depth())
 }
 
-/// Finishes the channel's turn only while `judged` still keys it; `Err`, with nothing cleared, when
-/// another turn holds the channel or the judged turn's finish went unobserved.
+/// Finishes the channel's turn only while `judged` still keys it, waking no queue (the stop does
+/// after its cleanup); `Err`, nothing cleared, when another turn holds it or the finish is unseen.
 pub(super) async fn finish_judged_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -157,7 +157,8 @@ pub(super) async fn finish_judged_turn(
     (stop, judged_termination): (Option<&ChannelStop>, bool),
 ) -> Result<FinishTurnResult, RuntimeTurnStopResult> {
     let key = stop.map(ChannelStop::token);
-    let finish = discord::mailbox_finish_judged_turn(shared, provider, channel, key, Create);
+    let finish = discord::mailbox_finish::mailbox_finish_stopped_turn;
+    let finish = finish(shared, provider, channel, key, Create);
     match finish.await {
         TokenFinish::Finished(finish) | TokenFinish::NoActiveTurn(finish) => Ok(finish),
         TokenFinish::TokenMismatch { .. } => {
