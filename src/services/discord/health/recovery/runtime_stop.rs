@@ -4,6 +4,9 @@ use super::*;
 
 use crate::services::discord::mailbox_probe::wait_for_turn_end;
 
+#[cfg(all(test, unix))]
+mod wake_tests;
+
 pub(super) fn preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
     provider: &ProviderKind,
     cleanup_policy: discord::TmuxCleanupPolicy,
@@ -224,6 +227,8 @@ pub(super) async fn stop_judged_channel_runtime(
             termination_recorded = stop.stop(cleanup_policy, reason).await.termination_recorded;
         }
     }
+    // An owned queue is resumed only by this stop's notice below, never before its cleanup.
+    let owned = discord::queue_io::input_owner::closed::owned(&shared, channel_id).await;
     apply_runtime_hard_stop_cleanup(
         &shared,
         &provider,
@@ -231,7 +236,7 @@ pub(super) async fn stop_judged_channel_runtime(
         &finish,
         owned_role_override,
         "runtime_stop_fallback",
-        cleanup_requested,
+        (cleanup_requested, !owned),
     )
     .await;
     let queue_depth = shared.mailbox(channel_id).snapshot().await.queue_depth();
@@ -266,6 +271,12 @@ pub(super) async fn stop_judged_channel_runtime(
         "runtime_stop_fallback",
     )
     .await;
+    // Its cleanup done, the stop resumes what its token or row held back, once; a turn the zombie
+    // release finished was announced by that release.
+    if (finish.removed_token.is_some() || persistent_inflight_cleared) && !release.released {
+        let notice = discord::queue_io::input_owner::closed::closed;
+        notice(&shared, &provider, channel_id, "runtime_stop_fallback");
+    }
     let after = shared.mailbox(channel_id).snapshot().await;
     let mailbox_foreground_free = after.cancel_token.is_none();
     // A release is measured after it, by the same waiting depth as every other stop path.

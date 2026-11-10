@@ -275,12 +275,8 @@ async fn settle_row(
     super::restart_report::clear_loaded_restart_report(report.as_ref());
     diagnostics::settled(provider, &row);
     drop(transition);
-    super::schedule_deferred_idle_queue_kickoff_immediate(
-        shared.clone(),
-        provider.clone(),
-        channel,
-        "herdr_row_end",
-    );
+    let notice = super::super::queue_io::input_owner::closed::closed;
+    notice(shared, provider, channel, "herdr_row_end");
     if silent {
         placeholder::spawn_cleanup(shared, provider, &row);
     }
