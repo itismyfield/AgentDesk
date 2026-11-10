@@ -11,6 +11,8 @@ ATOM = re.compile(r"[a-z][a-z0-9_]*\Z")
 GROUP = re.compile(r"turn_presence_unknown:(claude|codex):(~|(?:[A-Za-z0-9_.-]|%[0-9A-F]{2})+):"
                    r"([a-z][a-z0-9_]*):([a-z][a-z0-9_]*):([1-9][0-9]*):(0|[1-9][0-9]*)\Z")
 STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)\Z")
+QUEUE_REASON = re.compile(r"provider:([a-z0-9_-]+):pending_queue_depth:([1-9][0-9]*)\Z")
+TARGET_QUEUE = re.compile(r"target_mailbox:([a-z0-9_-]+):pending_queue_depth<=([1-9][0-9]*)\Z")
 
 
 def unknown_family(reason):
@@ -21,10 +23,38 @@ def reason_allowed(reason, allowed):
     return any(reason.startswith(p[:-1]) if p.endswith("*") else reason == p for p in allowed)
 
 
+def target_queue_allowance(options, provider):
+    """Allowed-reason entry for `allowed_target_queue_depth`: the target's provider mailbox may hold that many queued inputs."""
+    bound = options.get("allowed_target_queue_depth")
+    if bound is None:
+        return ()
+    if type(bound) is not int or bound < 1:
+        raise ValueError(f"allowed_target_queue_depth must be a positive integer, got {bound!r}")
+    return (f"target_mailbox:{provider}:pending_queue_depth<={bound}",)
+
+
+def target_queue_waived(payload, reason, allowed, target_channel):
+    """Waive a provider pending queue only when this response's target mailbox of that provider holds all of it within the bound.
+    The provider count is the sum over the same snapshot's mailboxes, so equality leaves no queue on other channels."""
+    match = QUEUE_REASON.fullmatch(reason)
+    bounds = [int(m[2]) for p in allowed if (m := TARGET_QUEUE.fullmatch(str(p))) and match and m[1] == match[1]]
+    target = channel_id(target_channel)
+    boxes = payload.get("mailboxes")
+    if not bounds or match is None or target is None or not isinstance(boxes, list) or int(match[2]) > min(bounds):
+        return False
+    own = [box for box in boxes if isinstance(box, dict) and box.get("provider") == match[1]
+           and channel_id(box.get("channel_id")) == target]
+    return len(own) == 1 and type(own[0].get("queue_depth")) is int and own[0]["queue_depth"] == int(match[2])
+
+
 def read_health(read, base_url, allowed):
     status, body = read(base_url, "/api/health", timeout=5)
     reasons = body.get("degraded_reasons") if isinstance(body, dict) else None
-    if isinstance(reasons, list) and any(unknown_family(r) and reason_allowed(r, allowed) for r in reasons):
+    queue_bound = any(TARGET_QUEUE.fullmatch(str(p)) for p in allowed)
+    # Unknown waivers and the target queue bound are both judged on the detail body that names channels.
+    if isinstance(reasons, list) and any((unknown_family(r) and reason_allowed(r, allowed))
+                                         or (queue_bound and isinstance(r, str) and QUEUE_REASON.fullmatch(r))
+                                         for r in reasons):
         status, body = read(base_url, "/api/health/detail", timeout=5)
         return status, body, True
     return status, body, False
@@ -119,7 +149,8 @@ def ready_violations(payload, *, allowed_statuses=("healthy",), allowed_degraded
                     or ("ok" in payload and payload["ok"] is not False)
                     or ("degraded" in payload and payload["degraded"] is not True)):
                 violations.append("Unknown detail readiness inconsistent")
-        blocked = [str(r) for r in reasons if not reason_allowed(str(r), allowed_degraded_reasons)]
+        blocked = [str(r) for r in reasons if not reason_allowed(str(r), allowed_degraded_reasons)
+                   and not target_queue_waived(payload, str(r), allowed_degraded_reasons, target_channel)]
         if blocked:
             violations.append(f"degraded_reasons={blocked}")
     elif reasons:
