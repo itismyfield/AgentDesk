@@ -21,7 +21,10 @@ struct RetiredCodex {
 
 impl RetiredCodex {
     async fn new(id: u64) -> Self {
-        let mut rig = Rig::new(id, true, false).await;
+        let live = crate::config_live_reload::test_live_guard(
+            crate::config::test_env_lock::acquire_shared_test_env_lock(),
+        );
+        let mut rig = Rig::with_live_guard(id, true, false, live).await;
         let agent = &mut rig.config.agents[0];
         agent.provider = "codex".into();
         let channel = agent.channels.get("claude").unwrap().clone();
