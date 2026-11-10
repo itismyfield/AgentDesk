@@ -948,6 +948,7 @@ src/
 │   │   │   ├── observation_ingress/
 │   │   │   │   └── resume_start.rs
 │   │   │   ├── adoption_retry.rs
+│   │   │   ├── codex_herdr_ingress_tests.rs
 │   │   │   ├── codex_ingress_tests.rs
 │   │   │   ├── hook_event.rs
 │   │   │   ├── native_clear_fence_tests.rs
@@ -1457,6 +1458,8 @@ src/
 │   │   │   │   │   └── carried_ledger_tests.rs
 │   │   │   │   ├── live_agent_recovery/
 │   │   │   │   │   └── judged_finish_fence_tests.rs
+│   │   │   │   ├── runtime_stop/
+│   │   │   │   │   └── wake_tests.rs
 │   │   │   │   ├── self_watchdog/
 │   │   │   │   │   ├── policy/
 │   │   │   │   │   │   └── tests/
@@ -1877,6 +1880,7 @@ src/
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── closed.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
@@ -3762,7 +3766,9 @@ src/
 │   │   ├── resolve/
 │   │   │   └── tests.rs
 │   │   ├── resolve.rs
-│   │   └── runtime_config_put.rs
+│   │   ├── runtime_config_put.rs
+│   │   ├── startup.rs
+│   │   └── startup_tests.rs
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── stale_turn_reconciler/
@@ -4036,6 +4042,8 @@ src/
 │   │   │   ├── adoption_terminal_tests.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── always_on_repost_tests.rs
+│   │   │   ├── archived_host_tests.rs
+│   │   │   ├── archived_source_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── bo_post_tests.rs
 │   │   │   ├── boot.rs

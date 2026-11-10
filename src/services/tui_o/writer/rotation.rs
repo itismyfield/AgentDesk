@@ -668,9 +668,11 @@ impl<B: BindingEvents> Sources<B> {
             (r.rotated_at, r.quiet, r.drain_to, r.growth_alarmed) = (None, None, None, false);
         }
         if let Some(old) = old.filter(|old| **old != new) {
-            if writer.store().cursor(old).is_none() {
-                return Err(halt("a bind names an old source this channel never read"));
-            }
+            let through = writer
+                .store()
+                .cursor(old)
+                .ok_or_else(|| halt("a bind names an old source this channel never read"))?
+                .captured_through;
             let old_key = source_key(old);
             let reader = self.readers.iter_mut().find(|r| r.source == *old);
             // A record applied again after a crash keeps what its first application measured.
@@ -686,7 +688,7 @@ impl<B: BindingEvents> Sources<B> {
             });
             if let Some(reader) = reader {
                 (reader.rotated_at, reader.growth_alarmed) = (Some(Instant::now()), false);
-                reader.drain_to = next.drain_to;
+                reader.drain_to = next.drain_to.filter(|end| through < *end);
             }
             self.rotation.successors.insert(old_key, next);
         }

@@ -1,14 +1,11 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A Legacy body on a TUI binding fails stage 1 even when its runtime or source is unknown.
 pub(super) fn is_violation(event: &Value) -> bool {
     let tag = &event["census"];
     tag["binding_mode"] == "TUI"
         && tag["body_owner"] == "Legacy"
-        && tag["actual_runtime"]
-            .as_str()
-            .is_some_and(|runtime| !runtime.is_empty() && runtime != "unknown")
-        && !tag["source_incarnation"].is_null()
         && matches!(
             tag["output_class"].as_str(),
             Some("LegacyBody" | "RecoveredLegacyBody")

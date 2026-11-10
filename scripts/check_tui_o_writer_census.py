@@ -694,9 +694,9 @@ def _claim_guard_problems(root: Path) -> list[str]:
     problems = []
     decide = body(gate_path, "decide_with_snapshot")
     if "CLAIM_GATE_REASON" in active and not all(token in decide for token in (
-        "ifsnapshot.channels().is_empty(){returnOk(legacy(ClaimReason::EmptySelection));}",
-        "if!snapshot.channels().contains(&channel_id){returnOk(legacy(ClaimReason::NonMember));}",
-        "ifselected{ClaimReason::NoCandidate}else{ClaimReason::Unselected}",
+        "ifsnapshot.channels().is_empty(){returnoutside_selection(snapshot,channel_id,ClaimReason::EmptySelection);}",
+        "if!snapshot.channels().contains(&channel_id){returnoutside_selection(snapshot,channel_id,ClaimReason::NonMember);}",
+        "letSome(candidate)=snapshot.candidate(channel_id)else{returnOk(legacy(ClaimReason::NoCandidate));};",
         "execution.permit.is_err(){ClaimReason::OwnedHeld}",
         "Some(origin)=>candidate.claim_body_from(channel_id,origin)",
     )):
