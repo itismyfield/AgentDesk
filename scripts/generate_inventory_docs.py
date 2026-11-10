@@ -128,6 +128,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "credential.rs": "Reads runtime credential files such as Discord bot tokens from the AgentDesk root.",
     "db/": "PostgreSQL access layer, migration helpers, and schema authority.",
     "dispatch/": "Dispatch context construction, review metadata, and worktree targeting.",
+    "domain/": "Shared pure values and static contracts.",
     "engine/": "QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops.",
     "error.rs": "Shared HTTP and policy error type with typed codes and JSON response helpers.",
     "eventbus.rs": "In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow.",

@@ -98,6 +98,7 @@ pub(crate) mod credential;
 // wired from selected API/maintenance paths.
 mod db;
 mod dispatch;
+mod domain;
 // Policy-engine loader/runtime helpers cover hot-reload and test-only entry
 // points outside the default server launch path.
 mod engine;

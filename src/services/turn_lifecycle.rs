@@ -121,7 +121,7 @@ async fn stop_turn_preserving_queue_with_cancel_event(
         None,
         reason,
         crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
-            restart_mode: crate::services::discord::InflightRestartMode::HotSwapHandoff,
+            restart_mode: crate::domain::lifecycle::InflightRestartMode::HotSwapHandoff,
         },
         emit_cancel_observability,
     )

@@ -7,7 +7,7 @@
 
 | 층 | 책임 | 대표 근거 |
 |---|---|---|
-| vocabulary (0) | 순수 값·정적 계약 | `queue_contract`, `phase_gate`, Discord `bot_role`·`restart_mode`·`session_identity` |
+| vocabulary (0) | 순수 값·정적 계약 | `domain::lifecycle`, `queue_contract`, `phase_gate`, Discord `bot_role`·`session_identity` |
 | foundation (1) | 순수 계산·경로·문자열 구현 | `runtime_layout::paths`, `cli::restart_terminal_proof`, 검토된 `utils` leaf |
 | adapter (2) | 저장·provider·process/platform 실행 | `db`, `services::provider`, `services::platform` |
 | application (3) | 업무 정책·상태 전이 orchestration | `engine`, `kanban`, `dispatch`, `services::auto_queue` |
@@ -27,11 +27,12 @@ HTTP extractor·AppState·응답 변환을 소유한 `auto_queue::route`는 asse
 논리 위치와 무관하게 adapter다. 혼재 모듈도 본체의 책임을 검토하고,
 책임이 다른 하위 모듈은 긴 prefix로 구분한다. 아직 검토하지 않았거나
 책임을 정하지 못한 모듈은 사유와 함께 미분류로 남긴다.
-`services::discord::restart_mode`의 enum·정적 변환은 vocabulary이고,
+`domain::lifecycle`이 재시작 mode enum·정적 변환을 소유하며 vocabulary다.
+`services::discord::restart_mode`는 같은 타입을 재노출하는 vocabulary 호환 shim이고,
 `cli::restart_terminal_proof`의 nonce·경로·파일 증거 판정은 foundation이다.
 두 leaf는 부모의 Discord/최종 조립 책임보다 긴 prefix 규칙으로 분류한다.
 모든 규칙의 이유와 `file:line` 근거는 TOML에 있으며, 미분류 모듈의 전체 목록은
-감사 JSON의 `layer_analysis`에서 확인한다. 이 표를 맞추기 위한 Rust 코드 이동은 하지 않았다.
+감사 JSON의 `layer_analysis`에서 확인한다.
 
 ## 실행과 출력 계약
 
@@ -278,6 +279,19 @@ C2·C3 known 층, owner_input의 기존 분류와 C6 보류, history 7개 보류
 zero-rule의 한도를 올리지 않는다. TSV는 검토 증거이고 생성기 입력이 아니다.
 
 C3 squash 결과는 검토한 C3 accepted의 매핑·부채 records·zero-rule과 대조하고 provenance 차이는 별도로 기록한다.
+
+### Lifecycle 값 소유권 이동
+
+`InflightRestartMode`의 실제 소유는 `domain::lifecycle`이다. 두 variant와 serde 이름,
+수치 1/2, invalid→None, label은 기존 정의와 동일하다. Discord root와
+`services::discord::restart_mode`는 같은 타입을 위에서 아래로 재노출한다.
+domain은 services 실행 타입을 참조하지 않으며 기존 known 층과 rank는 유지한다.
+
+`services::provider`의 4참조, `services::queue`의 2참조,
+`services::turn_lifecycle`의 1참조만 정본 경로로 바꿨다.
+시작 소스 e285a5cff1의 W595/G878에서 W588/G871로 줄었고,
+각 source의 canonical target도 restart_mode에서 domain::lifecycle로 이동했다.
+내부 legacy 소비자 경로와 CancelToken의 AtomicU8·0 sentinel·Relaxed ordering은 유지한다.
 동일하면 검토된 C4 canonical과 C3·C4 기록을 보존하여 충돌을 풀고, 다르면 `DESIGN_DELTA`로 멈춘다.
 새 병합 source anchor에서 `--update-reductions`와 일반 `--check`를 실행하며, 과거 C3 매핑으로 C4 편입을 다시 승인하지 않는다.
 C5·C6도 이전 조각의 실제 squash와 검토한 accepted를 대조하는 같은 착지 절차를 적용한다.
