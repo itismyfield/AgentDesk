@@ -95,7 +95,7 @@ fn ordinary_gateway_writer_starts_detached_and_backend_exit_does_not_join_it() {
         let backend = tokio::spawn(async { Ok::<(), &str>(()) });
         tokio::time::timeout(
             Duration::from_secs(5),
-            super::finish_gateway_backend(backend, &provider, None, None, None, async {}),
+            super::finish_gateway_backend(backend, &provider, None, None, async {}),
         )
         .await
         .expect("backend exit does not wait on a writer registry");

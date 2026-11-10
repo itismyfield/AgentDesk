@@ -845,31 +845,9 @@ pub(crate) fn known_models(provider: &ProviderKind) -> Vec<ModelCatalogEntry> {
     }
 }
 
-pub(in crate::services::discord) fn spawn_claude_model_catalog_refresh(
-    provider: &ProviderKind,
-) -> Option<tokio::task::JoinHandle<()>> {
-    claude::spawn_background_refresh(provider)
-}
-
+pub(in crate::services::discord) use claude::record_claude_model_observation;
 #[cfg(test)]
-pub(in crate::services::discord) fn spawn_test_claude_model_catalog_refresh_after_claim(
-    refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    after_claim: impl Fn() + Send + Sync + 'static,
-) -> tokio::task::JoinHandle<()> {
-    claude::spawn_test_background_refresh_after_claim(refreshes, after_claim)
-}
-
-#[cfg(test)]
-pub(in crate::services::discord) fn with_test_claude_model_catalog_refresh_state<T>(
-    operation: impl FnOnce() -> T,
-) -> T {
-    claude::with_test_refresh_task_state(operation)
-}
-
-#[cfg(test)]
-pub(in crate::services::discord) fn test_claude_model_catalog_refresh_running() -> bool {
-    claude::test_refresh_task_running()
-}
+pub(in crate::services::discord) use claude::with_test_claude_catalog_sources;
 
 fn model_aliases(provider: &ProviderKind) -> &'static [(&'static str, &'static str)] {
     match provider {
@@ -949,7 +927,7 @@ pub(in crate::services::discord) fn validate_model_input(
         }
 
         return Err(format!(
-            "Unrecognized model `{}` for {}.\nOpenCode model overrides must use providerID/modelID, for example `anthropic/claude-sonnet-4-5`.\nUse `/model` to open the interactive picker.",
+            "Unrecognized model `{}` for {}.\nOpenCode model overrides must use providerID/modelID, for example `anthropic/claude-sonnet`.\nUse `/model` to open the interactive picker.",
             trimmed,
             provider.display_name()
         ));
