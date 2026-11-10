@@ -30,7 +30,6 @@ pub(crate) use session_probe::SessionProbe;
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
 
-pub(crate) use crate::domain::provider::CODEX_FALLBACK_CONTEXT_WINDOW;
 pub use crate::domain::provider::{ProviderCapabilities, ProviderDefaultBehavior, ProviderKind};
 
 /// Tmux session name suffix (reserved for future isolation use; currently empty).
@@ -1370,7 +1369,8 @@ fn codex_context_window_from_cache(data: &str, model: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod codex_context_window_tests {
-    use super::{CODEX_FALLBACK_CONTEXT_WINDOW, ProviderKind, codex_context_window_from_cache};
+    use super::{ProviderKind, codex_context_window_from_cache};
+    use crate::domain::provider::CODEX_FALLBACK_CONTEXT_WINDOW;
 
     const CACHE: &str = r#"{
         "models": [
