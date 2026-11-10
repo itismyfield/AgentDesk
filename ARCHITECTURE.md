@@ -373,6 +373,9 @@ src/
 │   ├── mod.rs
 │   ├── test_support.rs
 │   └── types.rs
+├── domain/
+│   ├── lifecycle.rs
+│   └── mod.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── db_ops/
@@ -4562,6 +4565,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/config/` | Config newtypes extracted from the `config.rs` facade, including the provider-keyed `AgentChannels` map. |
 | `src/db/` | PostgreSQL access layer, migration helpers, and schema authority. |
 | `src/dispatch/` | Dispatch context construction, review metadata, and worktree targeting. |
+| `src/domain/` | Shared pure values and static contracts. |
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |

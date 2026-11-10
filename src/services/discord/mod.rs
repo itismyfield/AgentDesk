@@ -302,7 +302,7 @@ pub(crate) fn input_queue_path_for_test(shared: &SharedData, channel: u64) -> st
         .unwrap()
         .0
 }
-pub(crate) use restart_mode::InflightRestartMode;
+pub(crate) use crate::domain::lifecycle::InflightRestartMode;
 pub(crate) use router::{
     HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus, IntakeExecution,
     IntakeRequest, TurnKind, checkpoint_waits_for_admission, execute_intake_turn_core,
