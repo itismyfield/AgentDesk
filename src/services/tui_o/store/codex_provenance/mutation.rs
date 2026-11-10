@@ -48,12 +48,12 @@ fn stage(stage: CommitStage) -> std::io::Result<()> {
 
 fn sync_parent(path: &std::path::Path) -> std::io::Result<()> {
     stage(CommitStage::Renamed)?;
-    crate::services::discord::runtime_store::fsync_parent_dir(path)
+    crate::domain::file_sync::fsync_parent_dir(path)
 }
 
 impl ChannelStore {
     pub(crate) fn prepare_codex_floor(&mut self, floor: SubmitFloor) -> Result<(), StoreError> {
-        if !crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES {
+        if !crate::domain::file_sync::PARENT_DIR_FSYNC_FLUSHES {
             return Err(StoreError::Rejected(
                 "durable Codex floors unsupported".into(),
             ));
@@ -183,7 +183,7 @@ impl ChannelStore {
         &mut self,
         deny: CodexEpisodeDeny,
     ) -> Result<DurableDenyRecorded, PersistenceReason> {
-        if !crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES {
+        if !crate::domain::file_sync::PARENT_DIR_FSYNC_FLUSHES {
             return Err(PersistenceReason::StorageFailed);
         }
         let read = match self.codex_provenance() {
