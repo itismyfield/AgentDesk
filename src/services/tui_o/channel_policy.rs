@@ -365,9 +365,8 @@ impl BootChannels {
         self.tui_bindings.contains(&channel)
     }
 
-    /// An explicit setting that leaves a TUI binding without the O writer refuses the boot, as
-    /// Legacy no longer posts TUI bodies; a committed channel the home keeps is O's. An unset
-    /// selection that cannot apply here boots.
+    /// An explicit setting leaving a TUI binding to Legacy, which no longer posts TUI bodies, refuses
+    /// the boot; a committed channel the home keeps is O's, and an unset selection boots.
     fn refuse_explicit_off(&self, config: &Config) -> Result<()> {
         let writer = &tui_o_of(config).writer;
         let left: Vec<u64> = self
