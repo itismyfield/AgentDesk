@@ -1,6 +1,7 @@
 //! Codex late takeover: a fresh rollout from its first byte, or one that holds output from its
 //! frontier, where Legacy's delivery provably ends; a Legacy send since the baseline skips it.
 
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use super::Wake;
@@ -18,7 +19,7 @@ use crate::services::tui_o::writer::renumbered;
 use crate::services::tui_o::writer::rotation::bound_source;
 
 pub(super) mod prefix;
-use prefix::{Frontier, Prefix, Verdict};
+use prefix::{Frontier, Prefix, Span, Verdict};
 
 /// How far a turn opener's own clock may trail its bind and still be that execution's turn.
 const BIND_CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::seconds(1);
@@ -83,12 +84,22 @@ pub(super) enum Plan<'p> {
 
 /// Where O starts on a rollout that holds output.
 enum Start {
-    /// The turn its execution opened that Legacy provably sent nothing of.
+    /// The earliest turn of its execution, ended or not, that Legacy provably sent nothing of.
     Owed(u64),
-    /// The end of its last complete record: no turn is open, or the open one predates its bind.
+    /// The end of its last complete record: every turn predates its bind or ended before the
+    /// baseline was read.
     End(u64),
-    /// Legacy may have sent part of the open turn; it is judged again once that turn ends.
+    /// Legacy may have sent part of that turn; it is judged again later.
     Legacy(String),
+}
+
+/// When the baseline's sends were read: a turn that ended before then was Legacy's to relay, and
+/// one opened after then holds no Legacy send while those sends stay unchanged.
+#[derive(Clone, Copy)]
+pub(super) struct Since {
+    at: DateTime<Utc>,
+    /// False for a turn mark, whose sends were read at a time this host does not know.
+    proves: bool,
 }
 
 /// One provider's takeover: its prefix judge and the origin its init records.
@@ -128,6 +139,7 @@ pub(super) async fn activate<I: HostIo>(
         origin: InitOrigin::LateCodexTakeover,
     };
     let (mut baseline, mut logged) = (None, None);
+    let mut sampled_at = Utc::now();
     let (mut retry_order, mut short_retries) = (0, 0);
     // Rollouts a Legacy body was sent from while bound, this host run.
     let mut sent_from = Vec::new();
@@ -137,7 +149,11 @@ pub(super) async fn activate<I: HostIo>(
         }
         if io.late_adopt_enabled() {
             until_owned(gate).await;
+            let fresh = baseline.is_none();
             let sampled = baseline.map_or_else(|| takeover.baseline(), Ok);
+            if fresh && sampled.is_ok() {
+                sampled_at = Utc::now();
+            }
             let mut used = None;
             let outcome = match sampled {
                 Ok(at) => {
@@ -147,7 +163,11 @@ pub(super) async fn activate<I: HostIo>(
                     if retry_order != at.order {
                         (retry_order, short_retries) = (at.order, 0);
                     }
-                    takeover.attempt(at, &mut sent_from).await
+                    let since = Since {
+                        at: sampled_at,
+                        proves: !at.turn_mark,
+                    };
+                    takeover.attempt(at, since, &mut sent_from).await
                 }
                 Err(taken) => Err(taken),
             };
@@ -225,7 +245,12 @@ impl<I: HostIo> Takeover<'_, I> {
         }
     }
 
-    async fn attempt(&self, at: Baseline, sent_from: &mut Vec<SourceId>) -> Result<(), Taken> {
+    async fn attempt(
+        &self,
+        at: Baseline,
+        since: Since,
+        sent_from: &mut Vec<SourceId>,
+    ) -> Result<(), Taken> {
         let events = self.events()?;
         let fresh = bound_after(&events, at.seq);
         let Some(bound) = fresh.clone().or_else(|| bound_after(&events, 0)) else {
@@ -238,7 +263,7 @@ impl<I: HostIo> Takeover<'_, I> {
                 "the takeover rollout has no first user prompt yet".into(),
             )),
             Some(Verdict::Eligible(prefix)) => {
-                let owed = self.owed(&events, &bound, at, sent_from);
+                let owed = self.owed(&events, &bound, (at, since), sent_from);
                 self.fenced(at, &bound, Plan::Fresh(&prefix, &owed))
                     .await
                     .map_err(|taken| match taken {
@@ -256,7 +281,9 @@ impl<I: HostIo> Takeover<'_, I> {
             }
             Some(Verdict::Wait(detail)) => Err(Taken::Retry(detail)),
             // A rollout that holds output, or none bound since the baseline, starts at its frontier.
-            Some(Verdict::Refuse(_)) | None => self.warm(&events, &bound, at, sent_from).await,
+            Some(Verdict::Refuse(_)) | None => {
+                self.warm(&events, &bound, (at, since), sent_from).await
+            }
         };
         if matches!(result, Err(Taken::Skip(_))) && !sent_from.contains(&bound.0) {
             sent_from.push(bound.0.clone());
@@ -269,7 +296,7 @@ impl<I: HostIo> Takeover<'_, I> {
         &self,
         events: &[BindingEvent],
         bound: &(SourceId, u64),
-        at: Baseline,
+        (at, since): (Baseline, Since),
         sent_from: &[SourceId],
     ) -> Result<(), Taken> {
         let sends = {
@@ -281,65 +308,66 @@ impl<I: HostIo> Takeover<'_, I> {
                 "a Legacy body send started since the baseline".into(),
             ));
         }
-        let start = match self.start_on(events, bound, at, sent_from)? {
+        let start = match self.start_on(events, bound, (at, since), sent_from)? {
             Start::Owed(start) | Start::End(start) => start,
             Start::Legacy(detail) => return Err(Taken::Retry(detail)),
         };
-        let mut sources = self.owed(events, bound, at, sent_from);
+        let mut sources = self.owed(events, bound, (at, since), sent_from);
         sources.push(ranged(&bound.0, start)?);
         self.fenced(at, bound, Plan::Warm(&sources)).await
     }
 
-    /// Where O starts on `source`: a turn opened before its bind was left by an earlier execution;
-    /// a newer one is O's only while no Legacy send since its bind can be part of it.
+    /// Where O starts on `source`: at the earliest turn of the execution its bind names that did not
+    /// end before the baseline was read, ended or not, once no Legacy send can be part of it.
     fn start_on(
         &self,
         events: &[BindingEvent],
         (source, seq): &(SourceId, u64),
-        at: Baseline,
+        (at, since): (Baseline, Since),
         sent_from: &[SourceId],
     ) -> Result<Start, Taken> {
-        let Frontier { open, complete } = prefix::frontier(source).map_err(retry)?;
-        let Some((opened, written)) = open else {
-            return Ok(Start::End(complete));
-        };
-        if sent_from.contains(source) {
-            return Ok(Start::Legacy(
-                "a turn Legacy sent from is still open".into(),
-            ));
-        }
+        let Frontier { turns, complete } = prefix::frontier(source).map_err(retry)?;
         let bound_at = events
             .iter()
             .find(|e| e.seq == *seq)
             .map(|e| e.committed_at);
-        let ours = written
-            .zip(bound_at)
-            .is_some_and(|(written, bound_at)| written + BIND_CLOCK_SLACK >= bound_at);
-        if !ours {
+        let this_execution = |turn: &&Span| {
+            (turn.opened_at.zip(bound_at))
+                .is_some_and(|(opened, bound_at)| opened + BIND_CLOCK_SLACK >= bound_at)
+        };
+        let relayed = |turn: &&Span| matches!(turn.ended_at, Some(Some(ended)) if ended + BIND_CLOCK_SLACK < since.at);
+        let Some(turn) = (turns.iter().filter(this_execution)).find(|turn| !relayed(turn)) else {
             return Ok(Start::End(complete));
+        };
+        if turn.ended_at.is_none() && sent_from.contains(source) {
+            return Ok(Start::Legacy(
+                "a turn Legacy sent from is still open".into(),
+            ));
         }
-        // Sends read before a later bind cannot hold its turn; in a process with none, nothing can.
-        if *seq > at.seq || at.sends.0 == 0 {
-            Ok(Start::Owed(opened))
+        // Sends read before a later bind or before the turn opened cannot hold it; nor can none.
+        let opened_after = (turn.opened_at)
+            .is_some_and(|opened| since.proves && opened > since.at + BIND_CLOCK_SLACK);
+        if *seq > at.seq || at.sends.0 == 0 || opened_after {
+            Ok(Start::Owed(turn.opened))
         } else {
             Ok(Start::Legacy(
-                "Legacy may have sent from the open turn".into(),
+                "Legacy may have sent from the execution's earliest unrelayed turn".into(),
             ))
         }
     }
 
-    /// The source bound just before `bound`, from its open turn, when that turn is owed to O.
+    /// The source bound just before `bound`, from its earliest turn owed to O, when one is.
     fn owed(
         &self,
         events: &[BindingEvent],
         bound: &(SourceId, u64),
-        at: Baseline,
+        (at, since): (Baseline, Since),
         sent_from: &[SourceId],
     ) -> Vec<InitSource> {
         let Some(previous) = bound_before(events, bound) else {
             return Vec::new();
         };
-        match self.start_on(events, &previous, at, sent_from) {
+        match self.start_on(events, &previous, (at, since), sent_from) {
             Ok(Start::Owed(start)) => ranged(&previous.0, start).into_iter().collect(),
             _ => Vec::new(),
         }

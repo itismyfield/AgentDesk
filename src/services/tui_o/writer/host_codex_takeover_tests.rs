@@ -305,7 +305,7 @@ async fn a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
 }
 
 /// Under the adoption lock, a Legacy send finished since the fence leaves no init for that rollout;
-/// an output appended since the judgement is taken from its turn's opener, a mirror judged again.
+/// a turn answered and ended since the judgement is taken from its opener, a mirror judged again.
 #[tokio::test(start_paused = true)]
 async fn the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence() {
     for (channel, race) in [(61_814_u64, "send"), (61_815, "output"), (61_816, "mirror")] {
@@ -321,7 +321,7 @@ async fn the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
         test_hook::set(channel, Step::BeforeLock, move || {
             match race {
                 "send" => assert!(legacy_sends(channel)),
-                "output" => append(&appended, &answer("msg_1", "raced")),
+                "output" => append(&appended, &[answer("msg_1", "raced"), turn_end()].concat()),
                 _ => append(&appended, &mirror()),
             }
             Ok(())
@@ -335,10 +335,24 @@ async fn the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
                 "{:?}",
                 io.alarms.halted()
             );
+            // The turn's own end does not move the frontier past its undelivered answer.
             let opener = metadata("s-codex").len() as u64;
             assert_eq!(init_sources(&harness, channel), [(source, opener)]);
             polls(3).await;
-            assert_eq!(harness.port.posts(), ["raced"], "{:?}", io.alarms.halted());
+            let posts = ["raced".to_owned(), completed_summary(&path)];
+            assert_eq!(harness.port.posts(), posts, "{:?}", io.alarms.halted());
+            let late = crate::services::tui_o::cutover::claim_then_send(
+                Some(crate::services::tui_o::cutover::BodyClaim::new(
+                    channel,
+                    Some(CodexTui),
+                )),
+                || async { "legacy" },
+            );
+            let late = late.await;
+            assert_eq!(
+                late,
+                Ok(crate::services::tui_o::cutover::BodySend::OwnedByO)
+            );
             continue;
         }
         if race == "mirror" {
@@ -413,6 +427,38 @@ async fn a_takeover_cut_off_before_its_era_seal_recovers_its_store_on_the_next_s
         "{:?}",
         io.alarms.halted()
     );
+}
+
+/// The end of turn `t1`.
+fn turn_end() -> Vec<u8> {
+    codex_line(
+        serde_json::json!({"type": "event_msg", "timestamp": Utc::now().to_rfc3339(),
+        "payload": {"type": "task_complete", "turn_id": "t1"}}),
+    )
+}
+
+/// The summary O posts for `path`'s turn `t1`, timed from its opener to its end as recorded.
+fn completed_summary(path: &Path) -> String {
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let at = |kind: &str| {
+        let field = |record: &serde_json::Value, at| record.pointer(at).cloned();
+        let record = records.iter().find(|record| {
+            field(record, "/payload/type") == Some(kind.into())
+                && field(record, "/payload/turn_id") == Some("t1".into())
+        });
+        DateTime::parse_from_rfc3339(record.unwrap()["timestamp"].as_str().unwrap()).unwrap()
+    };
+    let elapsed = at("task_complete").signed_duration_since(at("task_started"));
+    crate::services::turn_summary_line::render(
+        crate::services::turn_summary_line::Outcome::Completed,
+        u64::try_from(elapsed.num_milliseconds()).ok(),
+        None,
+        None,
+    )
 }
 
 /// A host over an empty binding log, started before any rollout is bound.
@@ -517,8 +563,8 @@ async fn a_byte_changed_before_the_frontier_refuses_the_commit_until_it_is_resto
     assert_eq!(init_sources(&harness, CODEX), [(source, end)]);
 }
 
-/// A turn opened after the bind while a Legacy terminal delivery blocks the commit is taken from its opener
-/// once the custody clears; O posts its answer, written before the commit, exactly once.
+/// Turns opened after the bind while a Legacy terminal delivery blocks the commit, the first ended
+/// and the second open, are taken from the first opener; O posts each answer once.
 #[tokio::test(start_paused = true)]
 async fn a_turn_opened_after_the_bind_is_taken_from_its_opener_and_posted_once() {
     const CODEX: u64 = 61_833;
@@ -537,9 +583,13 @@ async fn a_turn_opened_after_the_bind_is_taken_from_its_opener_and_posted_once()
         Adoption::Deferred,
         "custody blocks the commit"
     );
+    let second = codex_line(serde_json::json!({"type": "event_msg",
+        "timestamp": Utc::now().to_rfc3339(), "payload": {"type": "task_started", "turn_id": "t2"}}));
+    let held = [opening(), answer("msg_1", "the ended answer"), turn_end()];
+    append(&path, &held.concat());
     append(
         &path,
-        &[opening(), answer("msg_1", "the held answer")].concat(),
+        &[second, answer("msg_2", "the held answer")].concat(),
     );
     *io.custody.lock().unwrap() = Ok(Custody::Free);
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -552,12 +602,12 @@ async fn a_turn_opened_after_the_bind_is_taken_from_its_opener_and_posted_once()
     );
     assert_eq!(init_sources(&harness, CODEX), [(source, opened)]);
     polls(3).await;
-    assert_eq!(
-        harness.port.posts(),
-        ["the held answer"],
-        "{:?}",
-        io.alarms.halted()
-    );
+    let posts = [
+        "the ended answer".to_owned(),
+        completed_summary(&path),
+        "the held answer".to_owned(),
+    ];
+    assert_eq!(harness.port.posts(), posts, "{:?}", io.alarms.halted());
 }
 
 /// A rollout left with an owed open turn when the next one is bound goes into the init beside it,
