@@ -1,6 +1,6 @@
 # Writer adoption and the TUI Legacy body (#7651 stage 1)
 
-Code baseline: `13f9acdd9a0f5e3aa500d20cd1b9a31a91e7ced4`. The stage-1 behavior is plan r2 with its r2.1 corrections (lane `report-p1-2.md`); `Fix = "gateOnly"` is that plan without the warm takeover from the Legacy delivery frontier.
+Code baseline: `13f9acdd9a0f5e3aa500d20cd1b9a31a91e7ced4`; line numbers below are at this change's head, which moves `channel_policy.rs`, `channel_policy/adoption.rs` and `cutover/channel_gate.rs`. The stage-1 behavior is plan r2 with its r2.1 corrections (lane `report-p1-2.md`); `Fix = "gateOnly"` is that plan without the warm takeover from the Legacy delivery frontier.
 
 One TUI-bound channel carries one turn; one non-TUI channel in the same config carries a headless turn. The model checks who posts the TUI turn's body, when its row and the watcher dispatch may be settled, and whether a held turn is eventually answered.
 
@@ -8,12 +8,12 @@ One TUI-bound channel carries one turn; one non-TUI channel in the same config c
 
 | Variable | Values | Code |
 |---|---|---|
-| `sel` | default, explicitOff, listExcl, lateOff, defaultOff | `shadow/tap.rs:61-67`, `channel_policy.rs:72-112` (implicit default off when no cluster ids or a binding is rejected) |
-| `site` | home, foreign | `channel_policy/adoption.rs:385-391`; off the home `seeded` makes no candidate (`channel_policy.rs:293-301`) |
-| `root` | runtime root present or not | `channel_policy/adoption.rs:420-422` reads every channel as `Held` without a root |
-| `exec` | none, permit, unverifiedHeld | `channel_policy.rs:385-452`, `ownership/execution.rs:72-78`, gate `cutover/channel_gate.rs:446-457` |
+| `sel` | default, explicitOff, listExcl, lateOff, defaultOff | `shadow/tap.rs:61-67`, `channel_policy.rs:73-134` (implicit default off when no cluster ids or a binding is rejected) |
+| `site` | home, foreign | `channel_policy/adoption.rs:384-390`; off the home `seeded` makes no candidate (`channel_policy.rs:316-324`) |
+| `root` | runtime root present or not | `channel_policy/adoption.rs:419-421` reads every channel as `Held` without a root |
+| `exec` | none, permit, unverifiedHeld | `channel_policy.rs:446-513`, `ownership/execution.rs:72-78`, gate `cutover/channel_gate.rs:461-471` |
 | `bound` | none, fresh, withOutput | `writer/late_adopt/codex.rs:205-207` (no new bind, Retry), `late_adopt/codex/prefix.rs:205-213` with `codex.rs:229-230` (bound rollout already has output, Skip) |
-| `store` | none, init, damaged | `channel_policy/adoption.rs:415-440` |
+| `store` | none, init, damaged | `channel_policy/adoption.rs:414-439` |
 | `adopt` | None, Pending, Deferred, Committed, Held, Released, Refused | `channel_policy/adoption.rs:16-28`; `Refused` is the stage-1 refusal (plan r2 G5) |
 | custody | another turn's row, pending start or open intake; the held turn's own row | `runtime_bootstrap/o_writer_host.rs:306-339`, `writer/deferred.rs:89-92`; the kinds block alike, so the model keeps whose custody it is |
 | `attempts` | 0..3, tmux absent | `discord/inflight.rs:341-344`, `recovery_paths/shared.rs:156-171` |
@@ -51,7 +51,7 @@ A restart keeps the turn: a running turn's bridge is restored and judges again (
 | BudgetMut | stage1, waiting and refusal counted in the recovery budget | `RowClearedHasEvidence` |
 | HeadlessMut | stage1, the non-TUI turn held too | `HeadlessKept` |
 
-Main's violations are code paths on the baseline. Legacy posts the Deferred turn (the 11-08 trace: Deferred seed, a bound rollout with output skipped, warm input, Legacy W14/W10). Without a runtime root, or with an execution view and no store, the gate answers owned (`adoption.rs:420-422`, `channel_gate.rs:446-457`), so the bridge commits and the watcher settles with nothing posted. GateOnly holds the body but the warm channel never commits, or commits at end of file and skips the held turn.
+Main's violations are code paths on the baseline. Legacy posts the Deferred turn (the 11-08 trace: Deferred seed, a bound rollout with output skipped, warm input, Legacy W14/W10). Without a runtime root, or with an execution view and no store, the gate answers owned (`adoption.rs:419-421`, `channel_gate.rs:461-471`), so the bridge commits and the watcher settles with nothing posted. GateOnly holds the body but the warm channel never commits, or commits at end of file and skips the held turn.
 
 ## Left out, and how it relates
 

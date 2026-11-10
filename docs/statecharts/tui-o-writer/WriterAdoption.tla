@@ -13,14 +13,14 @@ vars == <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
 \* Fix: "main" as written, "gateOnly" holds unadopted bodies without the warm takeover from the
 \* Legacy delivery frontier, "stage1" is the whole stage (boot refusal, hold, frontier takeover).
 \* Mut removes one stage-1 guard. Value ranges come from the entry table in report-p1-2.md.
-\*   sel      tap.rs:61-67, channel_policy.rs:72-112 (explicit off, list excluding, late off,
+\*   sel      tap.rs:61-67, channel_policy.rs:73-134 (explicit off, list excluding, late off,
 \*            implicit default off when the default cannot apply)
-\*   site     adoption.rs:385-391 (only the O home has candidates)
-\*   root     adoption.rs:420-422 (no runtime root reads every channel as held)
-\*   exec     channel_policy.rs:385-452, execution.rs:72-79, channel_gate.rs:446-457
+\*   site     adoption.rs:384-390 (only the O home has candidates)
+\*   root     adoption.rs:419-421 (no runtime root reads every channel as held)
+\*   exec     channel_policy.rs:446-513, execution.rs:72-79, channel_gate.rs:461-471
 \*   bound    late_adopt/codex.rs:205-207 (no new bind), prefix.rs:205-213 with
 \*            codex.rs:229-230 (bound rollout already has output), fresh source or rollout
-\*   store    adoption.rs:415-440 (init, damaged or era-only, none)
+\*   store    adoption.rs:414-439 (init, damaged or era-only, none)
 \*   adopt    adoption.rs:16-28; Refused is the stage-1 refusal state
 \*   custody  o_writer_host.rs:306-339, deferred.rs:89-92 (all kinds block alike)
 \*   attempts inflight.rs:341-344, recovery_paths/shared.rs:156-171 (tmux absent)
@@ -39,7 +39,7 @@ Seed(st) ==
     ELSE IF sel = "lateOff" THEN "Pending"
     ELSE "Deferred"
 
-\* What the shared gate (channel_gate.rs:418-486) answers for the TUI channel's body.
+\* What the shared gate (channel_gate.rs:433-494) answers for the TUI channel's body.
 Answer ==
     IF Fix = "main"
     THEN IF ~Selected \/ site = "foreign" THEN "legacy"
@@ -179,7 +179,7 @@ OtherTurnEnds == /\ otherCustody /\ otherCustody' = FALSE
                                  dispatchSettled, attempts, restarts, recovered, rejected,
                                  commitWithOther, hturn, hp>>
 
-\* A process restart keeps the row and seeds adoption from the store (channel_policy.rs:262-327).
+\* A process restart keeps the row and seeds adoption from the store (channel_policy.rs:285-351).
 \* A running turn's bridge is restored and judges again (restore_inflight.rs:2378); a held row
 \* waits for the boot recovery.
 Restart == /\ Booted /\ restarts < 3 /\ turn \in {"running", "held"}
