@@ -13,9 +13,9 @@ use crate::runtime_layout;
 use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::discord::org_writer::{self, OrgAgentUpdate, OrgChannelBindingUpdate};
 use crate::services::discord::runtime_store::org_schema_path_for_root;
-use crate::services::discord::settings::discord_token_hash;
 use crate::services::provider::ProviderKind;
 use crate::ui::ai_screen::{HistoryItem, HistoryType, SessionData};
+use crate::utils::discord::discord_token_hash;
 
 use super::DiscordTokenMode;
 use super::OpenClawMigrateArgs;

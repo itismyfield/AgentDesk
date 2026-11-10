@@ -1,8 +1,8 @@
 use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, SystemTime};
 
+use crate::domain::memory::MemoryBackendKind;
 use crate::runtime_layout;
-use crate::services::discord::settings::MemoryBackendKind;
 
 const MEMENTO_HEALTH_PATH: &str = "/health";
 const MEMENTO_MCP_PATH: &str = "/mcp";

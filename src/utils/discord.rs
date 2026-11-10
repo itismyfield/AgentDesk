@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+
 pub fn is_discord_snowflake(value: &str) -> bool {
     let value = value.trim();
     value.len() >= 15 && value.bytes().all(|byte| byte.is_ascii_digit())
@@ -39,6 +41,15 @@ pub fn normalize_discord_recipient_ids(
     Ok(normalized)
 }
 
+/// Compute a short hash key from the bot token (first 16 chars of SHA-256 hex)
+/// Uses "discord_" prefix to namespace Discord bot entries in settings.
+pub(crate) fn discord_token_hash(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let result = hasher.finalize();
+    format!("discord_{}", hex::encode(&result[..8]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,6 +61,12 @@ mod tests {
         assert!(!is_discord_snowflake("123"));
         assert!(!is_discord_snowflake("guild-123"));
         assert!(!is_discord_snowflake(""));
+    }
+
+    #[test]
+    fn token_hash_keeps_prefixed_eight_byte_sha256_hex() {
+        assert_eq!(discord_token_hash("abc"), "discord_ba7816bf8f01cfea");
+        assert_eq!(discord_token_hash(""), "discord_e3b0c44298fc1c14");
     }
 
     #[test]
