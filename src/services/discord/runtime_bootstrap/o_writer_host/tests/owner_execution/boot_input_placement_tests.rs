@@ -114,7 +114,9 @@ async fn placement_case(late: bool) {
                     if let Some(prior) = prior {
                         prior().await;
                     }
-                    drop(settled_send.send(counted.load(Ordering::SeqCst)));
+                    settled_send
+                        .send(counted.load(Ordering::SeqCst))
+                        .unwrap_or_default();
                 })
             }));
             let wake_count = Arc::new(AtomicUsize::new(0));
