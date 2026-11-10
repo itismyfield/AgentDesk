@@ -269,6 +269,7 @@ async fn assemble(
             crate::services::legacy_body_census::health_json()
         };
         attach_runtime_profile(&mut json, &state.config);
+        super::writer_readiness::attach(&mut json, detailed);
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
         json["intake_routing"]["input_fallback"] =
@@ -369,6 +370,7 @@ async fn assemble(
         json["resident_loops"] = crate::services::resident_loops::health_json();
         json["release_source"] = release_source;
         attach_runtime_profile(&mut json, &state.config);
+        super::writer_readiness::attach(&mut json, detailed);
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
         json["intake_routing"]["input_fallback"] =
