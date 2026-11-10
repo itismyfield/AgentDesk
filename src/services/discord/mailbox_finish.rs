@@ -58,6 +58,41 @@ pub(in crate::services::discord) async fn mailbox_finish_judged_turn(
     expected: Option<&Arc<CancelToken>>,
     lookup: MailboxLookup,
 ) -> TokenFinish {
+    let finish = finish_judged(shared, provider, channel_id, expected, lookup).await;
+    if let TokenFinish::Finished(result) | TokenFinish::NoActiveTurn(result) = &finish {
+        turn_completion_events::publish_mailbox_release_completion_event(
+            shared, channel_id, None, result,
+        );
+    }
+    finish
+}
+
+/// A stop's judged finish: its token release is only observed, never a queue wake, because the
+/// stop itself resumes the queue once its own cleanup is done.
+pub(in crate::services::discord) async fn mailbox_finish_stopped_turn(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected: Option<&Arc<CancelToken>>,
+    lookup: MailboxLookup,
+) -> TokenFinish {
+    let finish = finish_judged(shared, provider, channel_id, expected, lookup).await;
+    if let TokenFinish::Finished(result) | TokenFinish::NoActiveTurn(result) = &finish
+        && result.removed_token.is_some()
+    {
+        let released = turn_completion_events::TurnCompletionEvent::mailbox_released;
+        turn_completion_events::publish_turn_completion_event(shared, released(channel_id, None));
+    }
+    finish
+}
+
+async fn finish_judged(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected: Option<&Arc<CancelToken>>,
+    lookup: MailboxLookup,
+) -> TokenFinish {
     let handle = match lookup {
         MailboxLookup::Create => shared.mailbox(channel_id),
         // No actor is registered in this instance; an entry is removed only on an idle or closed
@@ -73,9 +108,6 @@ pub(in crate::services::discord) async fn mailbox_finish_judged_turn(
     if let TokenFinish::Finished(result) | TokenFinish::NoActiveTurn(result) = &finish {
         apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
         handle.recovery_done().mark_done();
-        turn_completion_events::publish_mailbox_release_completion_event(
-            shared, channel_id, None, result,
-        );
     }
     finish
 }

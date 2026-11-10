@@ -1450,6 +1450,8 @@ src/
 │   │   │   │   │   └── carried_ledger_tests.rs
 │   │   │   │   ├── live_agent_recovery/
 │   │   │   │   │   └── judged_finish_fence_tests.rs
+│   │   │   │   ├── runtime_stop/
+│   │   │   │   │   └── wake_tests.rs
 │   │   │   │   ├── self_watchdog/
 │   │   │   │   │   ├── policy/
 │   │   │   │   │   │   └── tests/
@@ -1870,6 +1872,7 @@ src/
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── closed.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
@@ -3755,7 +3758,9 @@ src/
 │   │   ├── resolve/
 │   │   │   └── tests.rs
 │   │   ├── resolve.rs
-│   │   └── runtime_config_put.rs
+│   │   ├── runtime_config_put.rs
+│   │   ├── startup.rs
+│   │   └── startup_tests.rs
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── stale_turn_reconciler/

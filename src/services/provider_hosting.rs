@@ -358,6 +358,24 @@ pub(crate) fn channel_effective_tui_request(
     provider_tui_hosting(config, provider_id)
 }
 
+/// Each agent binding whose Claude or Codex runtime resolves to a TUI, with its channel id when
+/// that id parses. Writer boot membership and the census selection record both read this.
+pub(crate) fn tui_binding_ids(config: &Config) -> impl Iterator<Item = Option<u64>> + '_ {
+    let bindings = config.agents.iter().flat_map(|agent| agent.channels.iter());
+    bindings
+        .filter(|(provider, channel)| {
+            let provider = channel.provider().unwrap_or_else(|| (*provider).to_owned());
+            matches!(
+                provider.trim().to_ascii_lowercase().as_str(),
+                "claude" | "codex"
+            ) && channel_effective_tui_request(config, channel, &provider)
+        })
+        .map(|(_, channel)| {
+            let id = channel.channel_id()?.parse::<std::num::NonZeroU64>().ok()?;
+            Some(id.get())
+        })
+}
+
 fn provider_default_effective_tui_request(config: &Config, provider_id: &str) -> bool {
     if let Some(mode) = provider_runtime_mode_explicit(config, provider_id) {
         return mode;

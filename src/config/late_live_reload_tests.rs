@@ -1,9 +1,10 @@
 use super::*;
 
+// A TUI binding refuses an explicit `late_adopt: false` boot, so the fixture binds a pipe runtime.
 fn config(on: bool) -> Config {
     serde_json::from_value(serde_json::json!({"server": {},
-        "agents": [{"id": "fixture", "name": "Fixture", "channels": {"claude": {"id": "41", "runtime": "tui"}}}],
-        "tui_o": {"writer": {"channels": [41], "late_adopt": on}}
+        "agents": [{"id": "fixture", "name": "Fixture", "channels": {"claude": {"id": "41", "runtime": "pipe"}}}],
+        "tui_o": {"writer": {"late_adopt": on}}
     })).unwrap()
 }
 

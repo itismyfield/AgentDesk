@@ -22,6 +22,8 @@ pub(crate) enum IdentityError {
         expected: Option<RuntimeHandoffKind>,
         actual: RuntimeHandoffKind,
     },
+    #[error("TUI-bound channel is outside the O writer selection")]
+    UnselectedTui,
 }
 
 /// How a caller uses the answer: before a body Legacy would send, or only to read ownership.
@@ -406,6 +408,19 @@ impl IdentityError {
     }
 }
 
+/// A channel outside the selection is Legacy's unless the boot config binds it as a TUI, whose
+/// body is held rather than sent by Legacy.
+fn outside_selection(
+    snapshot: &BootChannels,
+    channel_id: u64,
+    reason: ClaimReason,
+) -> Result<BodyClaimed, IdentityError> {
+    if snapshot.tui_bound(channel_id) {
+        return Err(IdentityError::UnselectedTui);
+    }
+    Ok(legacy(reason))
+}
+
 /// Legacy's answer for a channel with no adoption to count its send against.
 fn legacy(reason: ClaimReason) -> BodyClaimed {
     BodyClaimed {
@@ -423,16 +438,16 @@ fn decide_with_snapshot(
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<BodyClaimed, IdentityError> {
     let snapshot = snapshot.ok_or(IdentityError::MissingSnapshot)?;
-    // A verified empty list is O off: Legacy before any destination or kind is resolved.
+    // A verified empty list is O off: decided before any destination or kind is resolved.
     if snapshot.channels().is_empty() {
-        return Ok(legacy(ClaimReason::EmptySelection));
+        return outside_selection(snapshot, channel_id, ClaimReason::EmptySelection);
     }
     if channel_id == 0 {
         return Err(IdentityError::UnknownChannel);
     }
     // Membership comes before runtime lookup so unrelated Legacy channels stay independent.
     if !snapshot.channels().contains(&channel_id) {
-        return Ok(legacy(ClaimReason::NonMember));
+        return outside_selection(snapshot, channel_id, ClaimReason::NonMember);
     }
     let kind = resolve_kind().ok_or(IdentityError::UnknownKind)?;
     let expected = snapshot.kind(channel_id);
@@ -442,28 +457,21 @@ fn decide_with_snapshot(
             actual: kind,
         });
     }
-    let selected = channel_policy::owns_output(snapshot.channels(), channel_id, Some(kind));
+    // A member's boot kind is always a TUI kind, so from here the channel is selected.
     if let Some(execution) = snapshot.execution(channel_id) {
         return Ok(BodyClaimed {
-            owned: selected,
+            owned: true,
             send: None,
-            reason: if !selected {
-                ClaimReason::Unselected
-            } else if execution.permit.is_err() {
+            reason: if execution.permit.is_err() {
                 ClaimReason::OwnedHeld
             } else {
                 ClaimReason::OwnedByO
             },
         });
     }
-    let candidate = snapshot.candidate(channel_id);
     // The body and its host share both state and sends.
-    let Some(candidate) = candidate.filter(|_| selected) else {
-        return Ok(legacy(if selected {
-            ClaimReason::NoCandidate
-        } else {
-            ClaimReason::Unselected
-        }));
+    let Some(candidate) = snapshot.candidate(channel_id) else {
+        return Ok(legacy(ClaimReason::NoCandidate));
     };
     Ok(match usage {
         Use::Body => match origin {

@@ -2805,6 +2805,7 @@ mod tests {
                 }
                 if case == "runtime_unknown" && i == 2 {
                     records.last_mut().unwrap()["census"]["actual_runtime"] = json!("unknown");
+                    records.last_mut().unwrap()["census"]["source_incarnation"] = json!(null);
                 }
                 if case == "runtime_empty" && i == 2 {
                     records.last_mut().unwrap()["census"]["actual_runtime"] = json!("");
@@ -2890,8 +2891,8 @@ mod tests {
             ("skew", "INCONCLUSIVE"),
             ("wrong_build", "INCONCLUSIVE"),
             ("wrong_census", "FAIL"),
-            ("runtime_unknown", "INCONCLUSIVE"),
-            ("runtime_empty", "INCONCLUSIVE"),
+            ("runtime_unknown", "FAIL"),
+            ("runtime_empty", "FAIL"),
             ("owner_unknown", "INCONCLUSIVE"),
             ("unknown_body", "INCONCLUSIVE"),
             ("old_unknown", "INCONCLUSIVE"),
@@ -3020,7 +3021,7 @@ mod tests {
             if case == "no_site_traffic" {
                 assert_eq!(report["sites"]["W11"]["status"], "DELETE_NOT_READY");
             }
-            if case == "refresh" {
+            if matches!(case, "refresh" | "runtime_unknown") {
                 assert_eq!(report["sites"]["W11"]["status"], "DELETE_NOT_READY");
                 assert_eq!(report["sites"]["W11"]["body_events"], 1);
             }
