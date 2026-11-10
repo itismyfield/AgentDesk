@@ -1,0 +1,8 @@
+stateDiagram-v2
+    [*] --> Present: cursor at verified EOF
+    Present --> Present: optional append beyond durable cursor
+    Present --> Missing: external archive removes original
+    Missing --> Retired: archive exists and retained FD verifies durable EOF
+    Missing --> Halted: missing proof or unread tail
+    Retired --> Retired: restart retains durable retirement
+    Retired --> Attached: next normal binding attaches new source
