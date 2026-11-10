@@ -377,8 +377,6 @@ src/
 │   ├── provider/
 │   │   ├── catalog/
 │   │   │   └── rows.rs
-│   │   ├── fixtures/
-│   │   │   └── public_catalog.json
 │   │   ├── capabilities.rs
 │   │   ├── catalog.rs
 │   │   ├── execution.rs
