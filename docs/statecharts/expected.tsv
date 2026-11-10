@@ -219,3 +219,5 @@ input-single-path/InputPathBootNoReadyWake.cfg	InputPath	-	BootHeldEventuallyExe
 tui-o-writer/WriterWakeI8055Current.cfg	WriterWake	BootCheckpointOnlyAccepted,BootNoSilentLoss	-
 tui-o-writer/WriterWakeI8055Design.cfg	WriterWake	-	-
 tui-o-writer/WriterWakeI8055NoReadyWake.cfg	WriterWake	-	BootHeldEventuallyExecutes
+tui-o-writer/WriterWakeI8055RouteCurrent.cfg	WriterWake	BootRouteNoBlockedSelfWake	-
+tui-o-writer/WriterWakeI8055RouteDesign.cfg	WriterWake	-	-

@@ -32,57 +32,56 @@ stateDiagram-v2
   s21: 보관 완료 #183; ready #183; wake 대기 #183; 재회수 완료 #183; 새 보류 입력 #183; 재시작 뒤 #183; 접수 종료
   s22: 보관 완료 #183; ready #183; wake 대기 #183; 재회수 완료 #183; 기존 보관 입력 #183; 재시작 뒤 #183; 접수 종료
   [*] --> s0
-  s0 --> s1: Discord 입력 도착
-  s1 --> s2: 승인 조건과 writer 상태 판정
-  s1 --> s3: 승인 조건과 writer 상태 판정
-  s2 --> s4: 동일 입력 ID로 보관 성공 or catch-up이 동일 ID 재회수
-  s2 --> s3: 보관 실패 #8594; 재시도 안내
-  s3 --> s5: 안내 전송 실패 #8594; 처리 미완료
-  s4 --> s6: writer 복구 완료
-  s4 --> s4: 접수 처리 종료와 커서 판정 or 재시작 #183; 보관 유지 #183; 메모리 wake 소실
-  s2 --> s7: 동일 입력 ID로 보관 성공 or catch-up이 동일 ID 재회수
-  s5 --> s3: 사용자가 안내 전송 재시도
-  s3 --> s8: 접수 처리 종료와 커서 판정
-  s4 --> s9: writer 복구 완료
-  s4 --> s10: writer 복구 완료
-  s6 --> s4: 재시작 #183; 보관 유지 #183; 메모리 wake 소실
-  s6 --> s13: 접수 처리 종료와 커서 판정
-  s6 --> s7: catch-up이 동일 ID 재회수
-  s7 --> s4: 재시작 #183; 보관 유지 #183; 메모리 wake 소실
-  s7 --> s11: 보관한 동일 입력 1회 실행
-  s4 --> s12: writer 복구 완료
-  s4 --> s13: writer 복구 완료
-  s4 --> s14: writer 복구 완료
-  s9 --> s4: 재시작 #183; 보관 유지 #183; 메모리 wake 소실
-  s9 --> s7: ready 전환이 보관 입력 깨움 or 동일 입력 ID로 보관 성공
-  s4 --> s15: writer 복구 완료
-  s10 --> s18: 접수 처리 종료와 커서 판정
-  s10 --> s7: catch-up이 동일 ID 재회수
-  s4 --> s16: writer 복구 완료
-  s4 --> s17: writer 복구 완료
-  s4 --> s18: writer 복구 완료
-  s12 --> s4: 재시작 #183; 보관 유지 #183; 메모리 wake 소실
-  s12 --> s16: 접수 처리 종료와 커서 판정
-  s13 --> s4: 재시작 #183; 보관 유지 #183; 메모리 wake 소실
-  s13 --> s16: catch-up이 동일 ID 재회수
-  s14 --> s7: 동일 입력 ID로 보관 성공 or ready 전환이 보관 입력 깨움
-  s15 --> s7: catch-up이 동일 ID 재회수 or ready 전환이 보관 입력 깨움
-  s15 --> s20: 접수 처리 종료와 커서 판정
-  s4 --> s19: writer 복구 완료
-  s4 --> s20: writer 복구 완료
-  s4 --> s21: writer 복구 완료
-  s16 --> s4: 재시작 #183; 보관 유지 #183; 메모리 wake 소실
-  s17 --> s21: 접수 처리 종료와 커서 판정
-  s18 --> s21: catch-up이 동일 ID 재회수
-  s4 --> s22: writer 복구 완료
-  s19 --> s7: ready 전환이 보관 입력 깨움
-  s19 --> s22: 접수 처리 종료와 커서 판정
-  s20 --> s22: catch-up이 동일 ID 재회수
-  s20 --> s7: ready 전환이 보관 입력 깨움
-  s22 --> s7: ready 전환이 보관 입력 깨움
+  s0 --> s1: BootNext
+  s1 --> s2: BootNext
+  s1 --> s3: BootNext
+  s2 --> s4: BootNext
+  s2 --> s3: BootNext
+  s3 --> s5: BootNext
+  s4 --> s6: BootNext
+  s2 --> s7: BootNext
+  s5 --> s3: BootNext
+  s3 --> s8: BootNext
+  s4 --> s4: BootNext
+  s4 --> s9: BootNext
+  s4 --> s10: BootNext
+  s6 --> s4: BootNext
+  s6 --> s13: BootNext
+  s6 --> s7: BootNext
+  s7 --> s4: BootNext
+  s7 --> s11: BootNext
+  s4 --> s12: BootNext
+  s4 --> s13: BootNext
+  s4 --> s14: BootNext
+  s9 --> s4: BootNext
+  s9 --> s7: BootNext
+  s4 --> s15: BootNext
+  s10 --> s18: BootNext
+  s10 --> s7: BootNext
+  s4 --> s16: BootNext
+  s4 --> s17: BootNext
+  s4 --> s18: BootNext
+  s12 --> s4: BootNext
+  s12 --> s16: BootNext
+  s13 --> s4: BootNext
+  s13 --> s16: BootNext
+  s14 --> s7: BootNext
+  s15 --> s7: BootNext
+  s15 --> s20: BootNext
+  s4 --> s19: BootNext
+  s4 --> s20: BootNext
+  s4 --> s21: BootNext
+  s16 --> s4: BootNext
+  s17 --> s21: BootNext
+  s18 --> s21: BootNext
+  s4 --> s22: BootNext
+  s19 --> s7: BootNext
+  s19 --> s22: BootNext
+  s20 --> s22: BootNext
+  s20 --> s7: BootNext
+  s22 --> s7: BootNext
   class s0 bugPath
   class s1 bugPath
   class s2 bugPath
   class s4 bugPath
-  class s18 bugPath
   class s21 repeats

@@ -13,17 +13,17 @@ stateDiagram-v2
   s8: 거절 안내 완료 #183; 실행 없음
   s9: 동일 입력 1회 실행
   [*] --> s0
-  s0 --> s1: Discord 입력 도착
-  s1 --> s2: 승인 조건과 writer 상태 판정
-  s1 --> s3: 승인 조건과 writer 상태 판정
-  s2 --> s4: 동일 입력 ID로 보관 성공 or catch-up이 동일 ID 재회수
-  s2 --> s3: 보관 실패 #8594; 재시도 안내
-  s3 --> s5: 안내 전송 실패 #8594; 처리 미완료
-  s4 --> s6: writer 복구 완료
-  s2 --> s7: 동일 입력 ID로 보관 성공 or catch-up이 동일 ID 재회수
-  s5 --> s3: 안내 전송을 다시 시도
-  s3 --> s8: 접수 처리 종료와 커서 판정
-  s6 --> s4: 재시작 #183; 보관 유지 #183; 메모리 wake 소실
-  s6 --> s7: ready 전환이 보관 입력 깨움 or catch-up이 동일 ID 재회수 or 동일 입력 ID로 보관 성공
-  s7 --> s4: 재시작 #183; 보관 유지 #183; 메모리 wake 소실
-  s7 --> s9: 보관한 동일 입력 1회 실행
+  s0 --> s1: BootNext
+  s1 --> s2: BootNext
+  s1 --> s3: BootNext
+  s2 --> s4: BootNext
+  s2 --> s3: BootNext
+  s3 --> s5: BootNext
+  s4 --> s6: BootNext
+  s2 --> s7: BootNext
+  s5 --> s3: BootNext
+  s3 --> s8: BootNext
+  s6 --> s4: BootNext
+  s6 --> s7: BootNext
+  s7 --> s4: BootNext
+  s7 --> s9: BootNext

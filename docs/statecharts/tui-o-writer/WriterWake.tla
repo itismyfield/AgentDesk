@@ -87,7 +87,10 @@ VARIABLES bootHandler, bootCustody, bootNotice, bootCheckpoint, bootExecutions,
 bootVars == <<bootHandler, bootCustody, bootNotice, bootCheckpoint, bootExecutions,
               bootWake, bootReady, bootPermanent, bootPersistFails, bootNoticeFails,
               bootCatchup, bootRestarted, bootHeld, bootReason>>
-bootAll == <<vars, bootVars>>
+VARIABLES routeGateway, routeCheck, routeBadWake
+routeVars == <<routeGateway, routeCheck, routeBadWake>>
+RouteDormant == /\ routeGateway = TRUE /\ routeCheck = FALSE /\ routeBadWake = FALSE
+bootAll == <<vars, bootVars, routeVars>>
 BootDormant ==
     /\ bootHandler = "dormant" /\ bootCustody = FALSE /\ bootNotice = FALSE
     /\ bootCheckpoint = FALSE /\ bootExecutions = 0 /\ bootWake = FALSE
@@ -95,8 +98,8 @@ BootDormant ==
     /\ bootNoticeFails = FALSE /\ bootCatchup = FALSE /\ bootRestarted = FALSE
     /\ bootHeld = FALSE /\ bootReason = "none"
 
-Init == BaseInit /\ BootDormant
-Next == BaseNext /\ UNCHANGED bootVars
+Init == BaseInit /\ BootDormant /\ RouteDormant
+Next == BaseNext /\ UNCHANGED <<bootVars, routeVars>>
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(ResumePark) /\ WF_vars(ResumeHalt) /\ WF_vars(HostEnds)
         /\ WF_vars(PeriodicBoot) /\ WF_vars(InputArrives) /\ WF_vars(AdmitInput)
@@ -122,6 +125,7 @@ BootInit ==
     /\ bootReady = FALSE /\ bootCatchup = FALSE /\ bootRestarted = FALSE
     /\ bootPermanent \in BOOLEAN /\ bootPersistFails \in BOOLEAN
     /\ bootNoticeFails \in BOOLEAN /\ bootHeld = FALSE /\ bootReason = "none"
+    /\ RouteDormant
 
 \* intake_gate -> admit_text_intake: handler work is not yet a completed intake.
 GatewayArrivalRaw ==
@@ -220,22 +224,23 @@ BootRestartRaw ==
     /\ UNCHANGED <<bootHandler, bootCustody, bootNotice, bootCheckpoint, bootExecutions,
                    bootPermanent, bootPersistFails, bootNoticeFails, bootCatchup,
                    bootHeld, bootReason>>
-GatewayArrival == GatewayArrivalRaw /\ UNCHANGED vars
-GatewayClassify == GatewayClassifyRaw /\ UNCHANGED vars
-GatewayCustody == GatewayCustodyRaw /\ UNCHANGED vars
-GatewayCustodyFailure == GatewayCustodyFailureRaw /\ UNCHANGED vars
-NoticeFailure == NoticeFailureRaw /\ UNCHANGED vars
-NoticeDelivered == NoticeDeliveredRaw /\ UNCHANGED vars
-NoticeRetry == NoticeRetryRaw /\ UNCHANGED vars
-GatewayComplete == GatewayCompleteRaw /\ UNCHANGED vars
-WriterReady == WriterReadyRaw /\ UNCHANGED vars
-ReadyWake == ReadyWakeRaw /\ UNCHANGED vars
-ExecuteSource == ExecuteSourceRaw /\ UNCHANGED vars
-CatchupSameSource == CatchupSameSourceRaw /\ UNCHANGED vars
-BootRestart == BootRestartRaw /\ UNCHANGED vars
+GatewayArrival == GatewayArrivalRaw /\ UNCHANGED <<vars, routeVars>>
+GatewayClassify == GatewayClassifyRaw /\ UNCHANGED <<vars, routeVars>>
+GatewayCustody == GatewayCustodyRaw /\ UNCHANGED <<vars, routeVars>>
+GatewayCustodyFailure == GatewayCustodyFailureRaw /\ UNCHANGED <<vars, routeVars>>
+NoticeFailure == NoticeFailureRaw /\ UNCHANGED <<vars, routeVars>>
+NoticeDelivered == NoticeDeliveredRaw /\ UNCHANGED <<vars, routeVars>>
+NoticeRetry == NoticeRetryRaw /\ UNCHANGED <<vars, routeVars>>
+GatewayComplete == GatewayCompleteRaw /\ UNCHANGED <<vars, routeVars>>
+WriterReady == WriterReadyRaw /\ UNCHANGED <<vars, routeVars>>
+ReadyWake == ReadyWakeRaw /\ UNCHANGED <<vars, routeVars>>
+ExecuteSource == ExecuteSourceRaw /\ UNCHANGED <<vars, routeVars>>
+CatchupSameSource == CatchupSameSourceRaw /\ UNCHANGED <<vars, routeVars>>
+BootRestart == BootRestartRaw /\ UNCHANGED <<vars, routeVars>>
 BootDone == UNCHANGED bootAll
 BootNext ==
-    GatewayArrival \/ GatewayClassify \/ GatewayCustody \/ GatewayCustodyFailure \/ NoticeFailure \/ NoticeDelivered \/ NoticeRetry \/ GatewayComplete \/ WriterReady \/ ReadyWake \/ ExecuteSource \/ CatchupSameSource \/ BootRestart \/ BootDone
+    /\ (GatewayArrival \/ GatewayClassify \/ GatewayCustody \/ GatewayCustodyFailure \/ NoticeFailure \/ NoticeDelivered \/ NoticeRetry \/ GatewayComplete \/ WriterReady \/ ReadyWake \/ ExecuteSource \/ CatchupSameSource \/ BootRestart \/ BootDone)
+    /\ UNCHANGED routeVars
 BootSpec == BootInit /\ [][BootNext]_bootAll
             /\ WF_bootAll(GatewayArrival) /\ WF_bootAll(GatewayClassify)
             /\ WF_bootAll(GatewayCustody) /\ WF_bootAll(GatewayCustodyFailure)
@@ -249,4 +254,66 @@ BootExecuteOnce == bootExecutions <= 1
 BootCheckpointOnlyAccepted == bootCheckpoint => bootCustody \/ bootExecutions > 0
 BootPermanentNeverExecutes == bootPermanent => bootExecutions = 0 /\ ~bootCustody
 BootHeldEventuallyExecutes == bootHeld ~> (bootExecutions = 1)
+
+\* RouteSpec starts after one real ready callback or post-commit kick reached a held front.
+\* host readiness and input placement are independent: successor_unproved precedes accepts.
+\* No clock or periodic wake is modeled. Gateway progress and a later existing owner event
+\* are explicit environment obligations, not promises of the two self-wake checks.
+RouteInit ==
+    /\ BaseInit
+    /\ bootHandler = "done" /\ bootCustody = TRUE /\ bootNotice = FALSE
+    /\ bootCheckpoint = TRUE /\ bootExecutions = 0 /\ bootWake = TRUE
+    /\ bootReady = TRUE /\ bootPermanent = FALSE /\ bootPersistFails = FALSE
+    /\ bootNoticeFails = FALSE /\ bootCatchup = FALSE /\ bootRestarted = FALSE
+    /\ bootHeld = TRUE /\ bootReason = "none"
+    /\ routeGateway = FALSE /\ routeCheck = FALSE /\ routeBadWake = FALSE
+
+\* Both common preclaim and late claimed-front holds commit before their level recheck.
+RouteOwnerHold ==
+    /\ bootCustody /\ bootWake /\ bootExecutions = 0 /\ ~routeGateway /\ ~routeCheck
+    /\ bootWake' = FALSE /\ routeCheck' = TRUE
+    /\ UNCHANGED <<vars, bootHandler, bootCustody, bootNotice, bootCheckpoint,
+                   bootExecutions, bootReady, bootPermanent, bootPersistFails,
+                   bootNoticeFails, bootCatchup, bootRestarted, bootHeld, bootReason,
+                   routeGateway, routeBadWake>>
+RouteSelfWakeRecheck ==
+    /\ routeCheck /\ bootExecutions = 0
+    /\ LET current == Case = "boot_route_current"
+           wantsWake == bootReady /\ (current \/ routeGateway)
+       IN /\ bootWake' = (bootWake \/ wantsWake)
+          /\ routeBadWake' = (routeBadWake \/ (wantsWake /\ ~routeGateway))
+    /\ routeCheck' = FALSE
+    /\ UNCHANGED <<vars, bootHandler, bootCustody, bootNotice, bootCheckpoint,
+                   bootExecutions, bootReady, bootPermanent, bootPersistFails,
+                   bootNoticeFails, bootCatchup, bootRestarted, bootHeld, bootReason,
+                   routeGateway>>
+\* A source/owner fact becoming eligible is not itself this code's notification.
+RouteGatewayOpens ==
+    /\ ~routeGateway /\ routeGateway' = TRUE
+    /\ UNCHANGED <<vars, bootVars, routeCheck, routeBadWake>>
+\* Existing owner/start/reconcile notifications remain an external event, not a self-poll.
+RouteExistingOwnerWake ==
+    /\ bootReady /\ routeGateway /\ bootCustody /\ ~routeCheck
+    /\ ~bootWake /\ bootExecutions = 0 /\ bootWake' = TRUE
+    /\ UNCHANGED <<vars, bootHandler, bootCustody, bootNotice, bootCheckpoint,
+                   bootExecutions, bootReady, bootPermanent, bootPersistFails,
+                   bootNoticeFails, bootCatchup, bootRestarted, bootHeld, bootReason,
+                   routeVars>>
+RouteExecute ==
+    /\ bootReady /\ routeGateway /\ bootCustody /\ bootWake
+    /\ ~routeCheck /\ bootExecutions = 0
+    /\ bootExecutions' = 1 /\ bootWake' = FALSE
+    /\ UNCHANGED <<vars, bootHandler, bootCustody, bootNotice, bootCheckpoint,
+                   bootReady, bootPermanent, bootPersistFails, bootNoticeFails,
+                   bootCatchup, bootRestarted, bootHeld, bootReason, routeVars>>
+RouteDone == UNCHANGED bootAll
+RouteNext == RouteOwnerHold \/ RouteSelfWakeRecheck \/ RouteGatewayOpens \/
+             RouteExistingOwnerWake \/ RouteExecute \/ RouteDone
+RouteSpec == RouteInit /\ [][RouteNext]_bootAll
+             /\ WF_bootAll(RouteOwnerHold) /\ WF_bootAll(RouteSelfWakeRecheck)
+             /\ WF_bootAll(RouteGatewayOpens) /\ WF_bootAll(RouteExistingOwnerWake)
+             /\ WF_bootAll(RouteExecute)
+BootRouteNoBlockedSelfWake == ~routeBadWake
+BootRouteEligibleHeldExecutes ==
+    (bootHeld /\ bootReady /\ routeGateway) ~> (bootExecutions = 1)
 =============================================================================

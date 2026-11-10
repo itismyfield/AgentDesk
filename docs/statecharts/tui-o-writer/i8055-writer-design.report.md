@@ -1,7 +1,7 @@
 Implementation code snapshot: `7f7e47d0b397d97527e5fefd92e48ac03fdfb9a4` (production source; Current baseline is listed below).
 
 코드 기준 SHA(수정 전): `e285a5cff1e8f8eadfc87e297ad7a202531f3ed3`. 설정: `WriterWakeI8055Design.cfg`. 분류: **design / GREEN**.
-모델 SHA256: `ead8f8ea53f827b52bfb50c5e522f8b8d8825f0968cf8533c7ab86d2662349cf`.
+모델 SHA256: `479f54730bb03c8c6d3cc2ce03f91bb0b1d09a1cf129bf9ba7904004115d4413`.
 
 #8055의 좁힌 수리 범위는 기존 `IntakeRoute::Hold` 판정을 유지하고, 로컬 gateway와 host execution permit를 각각 확인한 뒤 기존 custody로 보관하고 ready kick과 보관 뒤 level 확인을 연결하는 경계다. 모델은 기존 권한 판정을 입력으로 추상화하며 서로 다른 gate의 포인터·enum·epoch 동일성을 요구하지 않는다. 새 boot phase/proof 타입은 이 모델 결과의 구현 전제가 아니다.
 
@@ -14,24 +14,14 @@ Current는 기준 SHA의 수정 전 동작을 동결한 known RED이고, Design�
 # WriterWake
 
 TLC reached 492 states and 1420 steps. The chart draws 10 states and 14 arrows.
-The chart does not draw 524 steps that stay in one chart state.
-The view hides 492 steps, so the chart does not draw them.
+The chart does not draw 1016 steps that stay in one chart state.
 
 ## Rules that hold
 BootNoSilentLoss, BootExecuteOnce, BootCheckpointOnlyAccepted, BootPermanentNeverExecutes, NoDeadlock, BootHeldEventuallyExecutes
 
-
 ## 재현 및 증거
 
-기존 정본 산출물: `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8055/sc-out/writer-design-presented`. 이번 문서 생성은 동일한 모델/cfg/view SHA의 완료 검증 결과를 재사용했으며 TLC를 다시 실행하지 않았다. 새 출력 폴더로 재현할 때만 다음을 실행한다.
+모델 재검증 원시 출력: /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8055/sc-land/boot-design-2. 기존 BootSpec 전이와 oracle는 바꾸지 않았고 RouteSpec용 추가 변수는 이 cfg에서 고정했다. 별도 Gateway/self-wake 보완은 [RouteSpec 보고서](i8055-route-design.report.md) 범위다.
 
-```sh
-unset TMUX TMUX_PANE
-TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar \
-JAVA=/opt/homebrew/opt/openjdk/bin/java \
-~/.claude/skills/statechart/scripts/statechart \
- docs/statecharts/tui-o-writer/WriterWake.tla \
- --config docs/statecharts/tui-o-writer/WriterWakeI8055Design.cfg \
- --view docs/statecharts/tui-o-writer/i8055-writer-design.view.mjs \
- --out /tmp/i8055-i8055-writer-design-recheck-new
-```
+    unset TMUX TMUX_PANE
+    TLA2TOOLS=/Users/itismyfield/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew/opt/openjdk/bin/java /Users/itismyfield/.codex/skills/statechart/scripts/statechart docs/statecharts/tui-o-writer/WriterWake.tla --config docs/statecharts/tui-o-writer/WriterWakeI8055Design.cfg --view docs/statecharts/tui-o-writer/i8055-writer-design.view.mjs --out <새-출력-디렉터리>

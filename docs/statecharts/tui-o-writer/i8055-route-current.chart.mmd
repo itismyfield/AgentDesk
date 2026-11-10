@@ -1,0 +1,28 @@
+---
+title: "Host ready와 Gateway 판정을 분리한 보관 입력 self-wake"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks BootRouteNoBlockedSelfWake
+    lg1: Path to the BootRouteNoBlockedSelfWake bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: host ready #183; Gateway Hold #183; 일회성 wake
+  s1: hold 커밋 뒤 아직 Gateway Hold
+  s2: host ready #183; Gateway #183; 실행 준비
+  s3: hold 커밋 뒤 Gateway 재확인
+  s4: Gateway Hold인데 self-wake 재예약
+  s5: 동일 입력 1회 실행
+  [*] --> s0
+  s0 --> s1: Gateway Hold로 원본 보관
+  s0 --> s2: 외부 source 판정이 Gateway로 복구
+  s1 --> s3: 외부 source 판정이 Gateway로 복구
+  s1 --> s4: host ready만 보고 self-wake 재예약
+  s2 --> s5: 동일 원본 1회 실행
+  s3 --> s2: hold 뒤 현재 ready와 Gateway 재확인
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s4 breaks
+  class s4 bugPath
