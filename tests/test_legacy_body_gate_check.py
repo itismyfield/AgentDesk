@@ -89,7 +89,10 @@ class GateVerdictTests(unittest.TestCase):
                 self.assertIn(f"ch={TUI_CHANNEL} site=W10 EDIT/result LegacyBody", out)
 
     def test_evidence_gaps_never_pass(self):
-        def truncated(doc):
+        def capped(doc):
+            doc["evidence_truncated"] = True
+
+        def shrunk(doc):
             doc.update(evidence_truncated=True, boot_files=[])
 
         def late_coverage(doc):
@@ -101,12 +104,15 @@ class GateVerdictTests(unittest.TestCase):
         def journal_error(doc):
             doc["errors"].append("JOURNAL_READ_FAILED")
 
+        def unknown_class(doc):
+            doc["boot_files"][1]["targets"].append(target(SINCE_MS + 7_400_000, TUI_CHANNEL, output_class=None))
+
         def live_behind(doc):
             doc["live_journal"]["enqueued_cut"] = 3
 
-        cases = {truncated: "EVIDENCE_TRUNCATED", late_coverage: "WINDOW_NOT_COVERING_SINCE",
+        cases = {capped: "EVIDENCE_TRUNCATED", shrunk: "BOOT_FILES_MISSING", late_coverage: "WINDOW_NOT_COVERING_SINCE",
                  missing_predecessor: f"BOOT_CHAIN_GAP:{OLD_BOOT}", journal_error: "CENSUS_ERROR:JOURNAL_READ_FAILED",
-                 live_behind: "LIVE_JOURNAL_NOT_DRAINED"}
+                 unknown_class: "BODY_CLASS_UNKNOWN", live_behind: "LIVE_JOURNAL_NOT_DRAINED"}
         for mutate, reason in cases.items():
             with self.subTest(reason=reason):
                 doc = copy.deepcopy(census())

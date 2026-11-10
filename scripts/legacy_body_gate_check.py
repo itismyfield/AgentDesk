@@ -106,7 +106,10 @@ def census_part(census, since):
         for event in file.get("targets") or []:
             tag, at = event.get("census") or {}, event.get("at_ms")
             klass = tag.get("output_class")
-            if klass not in LEGACY_CLASSES and klass != "UnknownBody":
+            if klass not in LEGACY_CLASSES | {"UnknownBody", "NonBody"}:
+                blockers.append("BODY_CLASS_UNKNOWN")
+                continue
+            if klass == "NonBody":
                 continue
             if not isinstance(at, int):
                 blockers.append("EVENT_TIME_UNKNOWN")
