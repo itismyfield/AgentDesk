@@ -15,6 +15,7 @@ use crate::services::discord::queue_io::input_owner::effect::{
 };
 use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOrigin};
 use crate::services::discord::queue_io::input_owner::{pump, target};
+use crate::services::discord::router::intake_dispatch::WRITER_HELD;
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::session_host::{HerdrTarget, herdr_endpoints};
@@ -180,6 +181,24 @@ pub(in crate::services::discord) fn owner_drive(
         Box::pin(async move {
             use crate::services::discord::queue_io::input_ingress as ingress;
             let original = front.clone();
+            if crate::services::discord::router::intake_dispatch::writer_boot_held(
+                &provider, channel,
+            )
+            .await
+            {
+                let id = ChannelId::new(channel);
+                hold_start(&mailbox, id, &front).await;
+                #[cfg(test)]
+                crate::services::discord::queue_io::cancel_backstop_test_support::owner_boot_hold_finished(
+                    id, front.1.message_id,
+                );
+                if crate::services::tui_o::writer::host::channel_accepts(channel)
+                    && let Some(shared) = &runtime
+                {
+                    wake(shared, id);
+                }
+                return Err(WRITER_HELD.into());
+            }
             let synthetic = !front_origin(&mailbox, &front).await?.is_person();
             let active = match mailbox.has_active_turn().await {
                 // Without a registry this read considers only a durable external holder.
@@ -922,6 +941,13 @@ async fn start_idle(
     }
     let turn_mode = crate::services::discord::router::intake_dispatch::TURN_MODE_AWAITED;
     match (answer.await, started) {
+        (_, Err(error)) if error == WRITER_HELD => {
+            hold_start(&holder, channel, &held).await;
+            if crate::services::tui_o::writer::host::channel_accepts(channel.get()) {
+                wake(&shared, channel);
+            }
+            Err(error)
+        }
         // Held only by an awaited turn mode: watched by the confirmation that releases it.
         (_, Err(error)) if error == turn_mode => {
             let watch = crate::services::discord::router::intake_dispatch::turn_mode_watch;

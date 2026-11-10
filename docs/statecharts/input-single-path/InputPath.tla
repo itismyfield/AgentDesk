@@ -53,7 +53,7 @@ vars == <<arrived, queue, head, dl, retU, retNS, drv, cur, wake, heldWait, booti
 \* stopped rides along with the environment: only StopBeforeKey changes it.
 envVars == <<humanLeft, modal, modalLeft, stopLeft, legacyLeft, stopped>>
 
-Init ==
+BaseInit ==
     /\ arrived = 0 /\ queue = <<>> /\ head = "none" /\ dl = "pending"
     /\ retU = {} /\ retNS = {}
     /\ drv = [k \in 1..2 |-> "idle"] /\ cur = [k \in 1..2 |-> 0]
@@ -332,7 +332,7 @@ Done ==
     /\ Quiet /\ arrived = N /\ ~wake
     /\ UNCHANGED vars
 
-Next ==
+BaseNext ==
     \/ Arrive \/ DriveFindsNothing
     \/ \E k \in 1..2 : DriveTakesFront(k) \/ Prepare(k) \/ ArmAndKey(k) \/ Paste(k)
                         \/ WriteUncertain(k) \/ Enter(k) \/ StopBeforeKey(k)
@@ -340,6 +340,35 @@ Next ==
     \/ Absorb \/ TurnEnds \/ Stop
     \/ HumanTypes \/ ModalOpens \/ ModalCloses \/ HoldRetries \/ LegacyStarts
     \/ Done
+
+\* Boot intake refinement: value domains and code anchors are in i8055/model-values.md.
+\* A gateway action is the completed ingress transaction, not an attempted notice.
+\* Failed storage + failed notice does not complete in the design; availability is external.
+VARIABLES biReceived, biHeld, biAccepted, biVisible, biPermanent, biCheckpoint,
+          biExecutions, biWriter, biWake, biRestarts, biHalts, biOrigin, biOwner,
+          biProviderMatch, biPayload
+bootIngressVars == <<biReceived,biHeld,biAccepted,biVisible,biPermanent,biCheckpoint,
+                    biExecutions,biWriter,biWake,biRestarts,biHalts,biOrigin,biOwner,
+                    biProviderMatch,biPayload>>
+biMode == Mut \in {"boot-current", "boot-design", "boot-no-ready-wake", "boot-checkpoint-early"}
+biFixed == Mut # "boot-current"
+biLocal == biOwner = "local" /\ biProviderMatch
+biReady == biWriter = "ready" /\ biLocal
+biDone == {i \in Ids : biExecutions[i] > 0}
+BootIngressInit ==
+    /\ biOrigin \in (IF biMode THEN {"live", "queued", "claimed"} ELSE {"live"})
+    /\ biOwner \in (IF biMode THEN {"local", "remote", "lost"} ELSE {"local"})
+    /\ biProviderMatch \in (IF biMode THEN BOOLEAN ELSE {TRUE})
+    /\ biReceived = {} /\ biVisible = {} /\ biPermanent = {} /\ biCheckpoint = {}
+    /\ biHeld = (IF biOrigin = "live" THEN {} ELSE Ids)
+    /\ biAccepted = biHeld
+    /\ biExecutions = [i \in Ids |-> 0]
+    /\ biPayload = [i \in Ids |-> "original"]
+    /\ biWriter = "booting" /\ biWake = FALSE /\ biRestarts = 1 /\ biHalts = 1
+
+
+Init == BaseInit /\ BootIngressInit
+Next == BaseNext /\ UNCHANGED bootIngressVars
 
 Spec == Init /\ [][Next]_vars
 
@@ -368,4 +397,101 @@ LiveSpec == Spec /\ WF_vars(Next)
 StoppedLeaves == \A i \in Ids : (i \in stopped) ~> (i \in retU \/ consumed[i] = 1)
 \* 10. After that stop the line unblocks: no head is held and every drive is idle.
 StopUnblocks == (stopped # {}) ~> (head = "none" /\ AllIdle)
+
+\* Ordinary existing owners keep their originals when admission is blocked.
+BootGatewayTransient ==
+    /\ biLocal /\ ~biReady
+    /\ \E i \in Ids \ biReceived, saved \in BOOLEAN, visibleAck \in BOOLEAN :
+       /\ biReceived' = biReceived \cup {i}
+       /\ IF biOrigin # "live" \/ (saved /\ biFixed)
+          THEN /\ biHeld' = biHeld \cup {i} /\ biAccepted' = biAccepted \cup {i}
+               /\ biCheckpoint' = biCheckpoint \cup {i}
+               /\ UNCHANGED biVisible
+          ELSE /\ (~biFixed \/ visibleAck)
+               /\ biVisible' = IF visibleAck THEN biVisible \cup {i} ELSE biVisible
+               /\ biCheckpoint' = IF ~biFixed \/ Mut = "boot-checkpoint-early"
+                                   THEN biCheckpoint \cup {i} ELSE biCheckpoint
+               /\ UNCHANGED <<biHeld,biAccepted>>
+    /\ UNCHANGED <<biPermanent,biExecutions,biWriter,biWake,biRestarts,biHalts,
+                   biOrigin,biOwner,biProviderMatch,biPayload,vars>>
+
+BootGatewayReady ==
+    /\ biReady
+    /\ \E i \in Ids \ biReceived :
+       /\ biReceived' = biReceived \cup {i}
+       /\ biHeld' = biHeld \cup {i} /\ biAccepted' = biAccepted \cup {i}
+       /\ biCheckpoint' = biCheckpoint \cup {i} /\ biWake' = TRUE
+    /\ UNCHANGED <<biVisible,biPermanent,biExecutions,biWriter,biRestarts,biHalts,
+                   biOrigin,biOwner,biProviderMatch,biPayload,vars>>
+
+BootPermanentReject ==
+    /\ ~biLocal
+    /\ \E i \in Ids \ biReceived :
+       /\ biReceived' = biReceived \cup {i} /\ biVisible' = biVisible \cup {i}
+       /\ biPermanent' = biPermanent \cup {i}
+    /\ UNCHANGED <<biHeld,biAccepted,biCheckpoint,biExecutions,biWriter,biWake,
+                   biRestarts,biHalts,biOrigin,biOwner,biProviderMatch,biPayload,vars>>
+
+\* Gateway redelivery and catch-up use the same durable source ID; no second executor.
+BootCatchUp ==
+    /\ biLocal /\ biReceived # {}
+    /\ \E i \in biReceived \ biPermanent :
+       /\ biHeld' = IF i \in biDone THEN biHeld ELSE biHeld \cup {i}
+       /\ biAccepted' = biAccepted \cup {i} /\ biCheckpoint' = biCheckpoint \cup {i}
+       /\ biWake' = biReady
+    /\ UNCHANGED <<biReceived,biVisible,biPermanent,biExecutions,biWriter,biRestarts,
+                   biHalts,biOrigin,biOwner,biProviderMatch,biPayload,vars>>
+BootGatewayRedelivery ==
+    /\ biReceived # {} /\ UNCHANGED <<bootIngressVars,vars>>
+BootBeginResume ==
+    /\ biWriter = "booting" /\ biWriter' = "resuming"
+    /\ UNCHANGED <<biReceived,biHeld,biAccepted,biVisible,biPermanent,biCheckpoint,
+                   biExecutions,biWake,biRestarts,biHalts,biOrigin,biOwner,
+                   biProviderMatch,biPayload,vars>>
+BootReady ==
+    /\ biWriter = "resuming" /\ biWriter' = "ready"
+    /\ biWake' = ((Mut # "boot-no-ready-wake") /\ biHeld # {})
+    /\ UNCHANGED <<biReceived,biHeld,biAccepted,biVisible,biPermanent,biCheckpoint,
+                   biExecutions,biRestarts,biHalts,biOrigin,biOwner,
+                   biProviderMatch,biPayload,vars>>
+BootHalt ==
+    /\ biWriter = "resuming" /\ biHalts > 0
+    /\ biWriter' = "halted" /\ biHalts' = biHalts - 1 /\ biWake' = FALSE
+    /\ UNCHANGED <<biReceived,biHeld,biAccepted,biVisible,biPermanent,biCheckpoint,
+                   biExecutions,biRestarts,biOrigin,biOwner,biProviderMatch,biPayload,vars>>
+BootRefreshHost ==
+    /\ biWriter = "halted" /\ biWriter' = "booting"
+    /\ UNCHANGED <<biReceived,biHeld,biAccepted,biVisible,biPermanent,biCheckpoint,
+                   biExecutions,biWake,biRestarts,biHalts,biOrigin,biOwner,
+                   biProviderMatch,biPayload,vars>>
+BootProcessRestart ==
+    /\ biRestarts > 0
+    /\ biWriter' = "booting" /\ biRestarts' = biRestarts - 1 /\ biWake' = FALSE
+    /\ UNCHANGED <<biReceived,biHeld,biAccepted,biVisible,biPermanent,biCheckpoint,
+                   biExecutions,biHalts,biOrigin,biOwner,biProviderMatch,biPayload,vars>>
+BootExecute(i) ==
+    /\ biReady /\ biWake /\ i \in biHeld /\ i \notin biPermanent
+    /\ biExecutions[i] = 0
+    /\ biExecutions' = [biExecutions EXCEPT ![i] = @ + 1]
+    /\ biHeld' = biHeld \ {i}
+    /\ UNCHANGED <<biReceived,biAccepted,biVisible,biPermanent,biCheckpoint,
+                   biWriter,biWake,biRestarts,biHalts,biOrigin,biOwner,
+                   biProviderMatch,biPayload,vars>>
+BootRest == UNCHANGED <<bootIngressVars,vars>>
+BootNext == BootGatewayTransient \/ BootGatewayReady \/ BootPermanentReject \/
+            BootCatchUp \/ BootGatewayRedelivery \/ BootBeginResume \/ BootReady \/
+            BootHalt \/ BootRefreshHost \/ BootProcessRestart \/
+            (\E i \in Ids : BootExecute(i)) \/ BootRest
+BootSpec == Init /\ [][BootNext]_<<vars,bootIngressVars>>
+            /\ WF_<<vars,bootIngressVars>>(BootBeginResume)
+            /\ WF_<<vars,bootIngressVars>>(BootReady)
+            /\ WF_<<vars,bootIngressVars>>(BootRefreshHost)
+            /\ (\A i \in Ids : WF_<<vars,bootIngressVars>>(BootExecute(i)))
+BootNoSilentLoss == biReceived \subseteq biHeld \cup biDone \cup biVisible
+BootNoDuplicate == \A i \in Ids : biExecutions[i] <= 1
+BootCheckpointBacked == biCheckpoint \subseteq biAccepted \cup biDone
+BootPermanentNeverExecutes == \A i \in biPermanent : biExecutions[i] = 0
+BootPayloadIntact == \A i \in biAccepted : biPayload[i] = "original"
+BootHeldEventuallyExecutes == \A i \in Ids : (i \in biHeld /\ biReady) ~> (i \in biDone)
+
 =============================================================================

@@ -1,0 +1,50 @@
+---
+title: "Writer ready 전후 입력 보관과 동일 입력 재회수"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks BootCheckpointOnlyAccepted or BootNoSilentLoss
+    lg1: Path to the BootCheckpointOnlyAccepted or BootNoSilentLoss bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 입력 도착 전
+  s1: 입력 처리 중 #183; 승인 판정 전
+  s2: writer 미준비 #183; 보관 없이 안내
+  s3: 거절 또는 보관 실패 #183; 안내 중
+  s4: 입력 처리 중 #183; 보관 결과 대기
+  s5: 입력 보관 완료 #183; writer 대기
+  s6: 보관 완료 #183; 실행 준비
+  s7: 안내 실패에도 처리 종료
+  s8: 보관 완료 #183; ready #183; wake 대기
+  s9: 일시 거절 안내 완료 #183; 실행 없음
+  s10: 거절 안내 완료 #183; 실행 없음
+  s11: 동일 입력 1회 실행
+  [*] --> s0
+  s0 --> s1: Discord 입력 도착
+  s1 --> s2: 승인 조건과 writer 상태 판정
+  s1 --> s3: 승인 조건과 writer 상태 판정
+  s2 --> s2: 거절#183;실패 안내 도착 or 안내 전송 실패를 삼키고 복귀
+  s2 --> s5: catch-up이 동일 ID 재회수
+  s1 --> s4: 승인 조건과 writer 상태 판정
+  s2 --> s7: 접수 처리 종료와 커서 판정
+  s4 --> s6: 동일 입력 ID로 보관 성공 or catch-up이 동일 ID 재회수
+  s4 --> s3: 보관 실패 #8594; 재시도 안내
+  s2 --> s6: catch-up이 동일 ID 재회수
+  s3 --> s7: 접수 처리 종료와 커서 판정
+  s2 --> s9: 접수 처리 종료와 커서 판정
+  s3 --> s10: 접수 처리 종료와 커서 판정
+  s5 --> s8: writer 복구 완료
+  s6 --> s5: 재시작 #183; 보관 유지 #183; 메모리 wake 소실
+  s6 --> s11: 보관한 동일 입력 1회 실행
+  s8 --> s5: 재시작 #183; 보관 유지 #183; 메모리 wake 소실
+  s8 --> s6: ready 전환이 보관 입력 깨움 or catch-up이 동일 ID 재회수 or 동일 입력 ID로 보관 성공
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s7 breaks
+  class s7 bugPath
+  class s9 breaks
+  class s9 bugPath
+  class s10 breaks

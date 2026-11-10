@@ -10,7 +10,8 @@ vars == <<presence, loss, drain, unsealed, successor, writer, parked, alarm,
 \* One unretired missing cursor, no live capture; retained spool debt may remain.
 \* drain is unread capture debt; unsealed is unfinished derivation, not posted debt.
 \* family has no EOF witness; superseded models durable successor/link seq.
-Init == /\ presence \in IF Case = "active" THEN {"present", "unknown"}
+BaseInit ==
+        /\ presence \in IF Case = "active" THEN {"present", "unknown"}
                         ELSE IF Case = "superseded" THEN {"present"}
                         ELSE {"absent"}
         /\ loss \in IF Case = "unsafe" THEN {"missing", "replaced", "denied", "shrunk"}
@@ -75,9 +76,27 @@ DeliverRetainedSpool == /\ writer = "running" /\ oldDebt = 1 /\ oldDebt' = 0
                        /\ UNCHANGED <<presence,loss,drain,unsealed,successor,writer,
                                        parked,alarm,boots,restarted,input,newSource,posted>>
 Rest == UNCHANGED vars
-Next == ResumePark \/ ResumeHalt \/ HostEnds \/ PeriodicBoot \/ InputArrives \/
+BaseNext == ResumePark \/ ResumeHalt \/ HostEnds \/ PeriodicBoot \/ InputArrives \/
         AdmitInput \/ NewSessionSource \/ PostFirstReply \/ RepeatNotification \/
         Restart \/ DeliverRetainedSpool \/ Rest
+\* Boot ingress uses one stable (provider, channel, source-id) across gateway and catch-up.
+\* ParkRule selects old FALSE / custody design TRUE only in BootSpec; old cfgs retain Spec.
+VARIABLES bootHandler, bootCustody, bootNotice, bootCheckpoint, bootExecutions,
+          bootWake, bootReady, bootPermanent, bootPersistFails, bootNoticeFails,
+          bootCatchup, bootRestarted, bootHeld, bootReason
+bootVars == <<bootHandler, bootCustody, bootNotice, bootCheckpoint, bootExecutions,
+              bootWake, bootReady, bootPermanent, bootPersistFails, bootNoticeFails,
+              bootCatchup, bootRestarted, bootHeld, bootReason>>
+bootAll == <<vars, bootVars>>
+BootDormant ==
+    /\ bootHandler = "dormant" /\ bootCustody = FALSE /\ bootNotice = FALSE
+    /\ bootCheckpoint = FALSE /\ bootExecutions = 0 /\ bootWake = FALSE
+    /\ bootReady = FALSE /\ bootPermanent = FALSE /\ bootPersistFails = FALSE
+    /\ bootNoticeFails = FALSE /\ bootCatchup = FALSE /\ bootRestarted = FALSE
+    /\ bootHeld = FALSE /\ bootReason = "none"
+
+Init == BaseInit /\ BootDormant
+Next == BaseNext /\ UNCHANGED bootVars
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(ResumePark) /\ WF_vars(ResumeHalt) /\ WF_vars(HostEnds)
         /\ WF_vars(PeriodicBoot) /\ WF_vars(InputArrives) /\ WF_vars(AdmitInput)
@@ -95,4 +114,139 @@ ParkedKeepsHost == (writer = "running" /\ parked) => boots = 1
 NewSourceGetsFirstReply == (input = "launched") ~> (posted = 1)
 RetainedSpoolDelivered == (writer = "running" /\ oldDebt = 1) ~> (oldDebt = 0)
 WaitingInputGetsFirstReply == (input = "held") ~> (posted = 1)
+
+BootInit ==
+    /\ BaseInit
+    /\ bootHandler = "unseen" /\ bootCustody = FALSE /\ bootNotice = FALSE
+    /\ bootCheckpoint = FALSE /\ bootExecutions = 0 /\ bootWake = FALSE
+    /\ bootReady = FALSE /\ bootCatchup = FALSE /\ bootRestarted = FALSE
+    /\ bootPermanent \in BOOLEAN /\ bootPersistFails \in BOOLEAN
+    /\ bootNoticeFails \in BOOLEAN /\ bootHeld = FALSE /\ bootReason = "none"
+
+\* intake_gate -> admit_text_intake: handler work is not yet a completed intake.
+GatewayArrivalRaw ==
+    /\ bootHandler = "unseen" /\ bootHandler' = "classify"
+    /\ UNCHANGED <<bootCustody, bootNotice, bootCheckpoint, bootExecutions, bootWake,
+                   bootReady, bootPermanent, bootPersistFails, bootNoticeFails,
+                   bootCatchup, bootRestarted, bootHeld, bootReason>>
+\* Route Hold guards are distinct from a permanent destination/provider refusal.
+GatewayClassifyRaw ==
+    /\ bootHandler = "classify"
+    /\ IF bootPermanent
+       THEN /\ bootHandler' = "notice" /\ bootReason' = "permanent"
+            /\ bootHeld' = FALSE
+       ELSE /\ bootHeld' = FALSE
+            /\ IF ~bootReady /\ ~ParkRule
+               THEN /\ bootHandler' = "notice" /\ bootReason' = "transient"
+               ELSE /\ bootHandler' = "custody" /\ bootReason' = "none"
+    /\ UNCHANGED <<bootCustody, bootNotice, bootCheckpoint, bootExecutions, bootWake,
+                   bootReady, bootPermanent, bootPersistFails, bootNoticeFails,
+                   bootCatchup, bootRestarted>>
+\* defer_live_submission: enqueue/merge/source-id duplicate is custody only without IO error.
+GatewayCustodyRaw ==
+    /\ bootHandler = "custody"
+    /\ (~bootPersistFails \/ bootCustody)
+    /\ bootCustody' = TRUE /\ bootHandler' = "complete"
+    /\ bootWake' = (bootWake \/ bootReady)
+    /\ bootHeld' = (bootHeld \/ (~bootReady /\ ParkRule))
+    /\ UNCHANGED <<bootNotice, bootCheckpoint, bootExecutions, bootReady, bootPermanent,
+                   bootPersistFails, bootNoticeFails, bootCatchup, bootRestarted, bootReason>>
+GatewayCustodyFailureRaw ==
+    /\ bootHandler = "custody" /\ bootPersistFails /\ ~bootCustody
+    /\ bootHandler' = "notice" /\ bootReason' = "custody_failed" /\ bootHeld' = FALSE
+    /\ UNCHANGED <<bootCustody, bootNotice, bootCheckpoint, bootExecutions, bootWake,
+                   bootReady, bootPermanent, bootPersistFails, bootNoticeFails,
+                   bootCatchup, bootRestarted>>
+\* A failed notice is explicitly unfinished/retry-required; never reported as completed.
+NoticeFailureRaw ==
+    /\ bootHandler = "notice" /\ bootNoticeFails
+    /\ bootHandler' = (IF ParkRule THEN "retry_required" ELSE "complete")
+    /\ UNCHANGED <<bootCustody, bootNotice, bootCheckpoint, bootExecutions, bootWake,
+                   bootReady, bootPermanent, bootPersistFails, bootNoticeFails,
+                   bootCatchup, bootRestarted, bootHeld, bootReason>>
+NoticeDeliveredRaw ==
+    /\ bootHandler = "notice" /\ ~bootNoticeFails
+    /\ bootNotice' = TRUE /\ bootHandler' = "complete"
+    /\ UNCHANGED <<bootCustody, bootCheckpoint, bootExecutions, bootWake, bootReady,
+                   bootPermanent, bootPersistFails, bootNoticeFails, bootCatchup,
+                   bootRestarted, bootHeld, bootReason>>
+\* Explicit retry is an environment action, not a promised production retry loop.
+NoticeRetryRaw ==
+    /\ bootHandler = "retry_required" /\ bootHandler' = "notice"
+    /\ bootNoticeFails' = FALSE
+    /\ UNCHANGED <<bootCustody, bootNotice, bootCheckpoint, bootExecutions, bootWake,
+                   bootReady, bootPermanent, bootPersistFails, bootCatchup,
+                   bootRestarted, bootHeld, bootReason>>
+GatewayCompleteRaw ==
+    /\ bootHandler = "complete" /\ bootHandler' = "done"
+    /\ bootCheckpoint' = (IF ParkRule THEN (bootCustody \/ bootExecutions > 0) ELSE TRUE)
+    /\ UNCHANGED <<bootCustody, bootNotice, bootExecutions, bootWake, bootReady,
+                   bootPermanent, bootPersistFails, bootNoticeFails, bootCatchup,
+                   bootRestarted, bootHeld, bootReason>>
+\* Writer readiness summarizes ready/live/Owned/not-stopping/resumed; readiness eventually returns.
+WriterReadyRaw ==
+    /\ ~bootReady /\ bootReady' = TRUE
+    /\ UNCHANGED <<bootHandler, bootCustody, bootNotice, bootCheckpoint, bootExecutions,
+                   bootWake, bootPermanent, bootPersistFails, bootNoticeFails,
+                   bootCatchup, bootRestarted, bootHeld, bootReason>>
+\* Existing owner/start/reconcile wakes are preserved in both behaviors.
+\* boot_no_wake alone removes the proposed readiness notification for the liveness mutant.
+ReadyWakeRaw ==
+    /\ (Case # "boot_no_wake" \/ ~bootHeld) /\ bootReady /\ bootCustody /\ bootExecutions = 0 /\ ~bootWake
+    /\ bootWake' = TRUE
+    /\ UNCHANGED <<bootHandler, bootCustody, bootNotice, bootCheckpoint, bootExecutions,
+                   bootReady, bootPermanent, bootPersistFails, bootNoticeFails,
+                   bootCatchup, bootRestarted, bootHeld, bootReason>>
+ExecuteSourceRaw ==
+    /\ bootReady /\ bootCustody /\ bootWake /\ bootExecutions = 0
+    /\ bootExecutions' = bootExecutions + 1 /\ bootWake' = FALSE
+    /\ UNCHANGED <<bootHandler, bootCustody, bootNotice, bootCheckpoint, bootReady,
+                   bootPermanent, bootPersistFails, bootNoticeFails, bootCatchup,
+                   bootRestarted, bootHeld, bootReason>>
+\* Catch-up overlaps gateway custody/finalization and reuses its source-id dedupe result.
+CatchupSameSourceRaw ==
+    /\ bootHandler \notin {"unseen", "classify"} /\ ~bootCatchup /\ ~bootPermanent
+    /\ bootCatchup' = TRUE
+    /\ IF bootCheckpoint \/ bootReason = "custody_failed" \/ bootPersistFails
+       THEN UNCHANGED <<bootCustody, bootCheckpoint, bootWake>>
+       ELSE /\ bootCustody' = TRUE /\ bootCheckpoint' = TRUE
+            /\ bootWake' = (bootWake \/ bootReady)
+    /\ UNCHANGED <<bootHandler, bootNotice, bootExecutions, bootReady, bootPermanent,
+                   bootPersistFails, bootNoticeFails, bootRestarted, bootHeld, bootReason>>
+\* Only a confirmed durable row is promised to survive restart; memory wakes disappear.
+BootRestartRaw ==
+    /\ bootCustody /\ ~bootRestarted
+    /\ bootRestarted' = TRUE /\ bootReady' = FALSE /\ bootWake' = FALSE
+    /\ UNCHANGED <<bootHandler, bootCustody, bootNotice, bootCheckpoint, bootExecutions,
+                   bootPermanent, bootPersistFails, bootNoticeFails, bootCatchup,
+                   bootHeld, bootReason>>
+GatewayArrival == GatewayArrivalRaw /\ UNCHANGED vars
+GatewayClassify == GatewayClassifyRaw /\ UNCHANGED vars
+GatewayCustody == GatewayCustodyRaw /\ UNCHANGED vars
+GatewayCustodyFailure == GatewayCustodyFailureRaw /\ UNCHANGED vars
+NoticeFailure == NoticeFailureRaw /\ UNCHANGED vars
+NoticeDelivered == NoticeDeliveredRaw /\ UNCHANGED vars
+NoticeRetry == NoticeRetryRaw /\ UNCHANGED vars
+GatewayComplete == GatewayCompleteRaw /\ UNCHANGED vars
+WriterReady == WriterReadyRaw /\ UNCHANGED vars
+ReadyWake == ReadyWakeRaw /\ UNCHANGED vars
+ExecuteSource == ExecuteSourceRaw /\ UNCHANGED vars
+CatchupSameSource == CatchupSameSourceRaw /\ UNCHANGED vars
+BootRestart == BootRestartRaw /\ UNCHANGED vars
+BootDone == UNCHANGED bootAll
+BootNext ==
+    GatewayArrival \/ GatewayClassify \/ GatewayCustody \/ GatewayCustodyFailure \/ NoticeFailure \/ NoticeDelivered \/ NoticeRetry \/ GatewayComplete \/ WriterReady \/ ReadyWake \/ ExecuteSource \/ CatchupSameSource \/ BootRestart \/ BootDone
+BootSpec == BootInit /\ [][BootNext]_bootAll
+            /\ WF_bootAll(GatewayArrival) /\ WF_bootAll(GatewayClassify)
+            /\ WF_bootAll(GatewayCustody) /\ WF_bootAll(GatewayCustodyFailure)
+            /\ WF_bootAll(NoticeFailure) /\ WF_bootAll(NoticeDelivered)
+            /\ WF_bootAll(GatewayComplete) /\ WF_bootAll(WriterReady)
+            /\ WF_bootAll(ReadyWake) /\ WF_bootAll(ExecuteSource)
+\* Completed processing needs durable custody, execution, or a refusal visible to the user.
+BootNoSilentLoss == bootHandler = "done" =>
+    bootCustody \/ bootExecutions > 0 \/ bootNotice
+BootExecuteOnce == bootExecutions <= 1
+BootCheckpointOnlyAccepted == bootCheckpoint => bootCustody \/ bootExecutions > 0
+BootPermanentNeverExecutes == bootPermanent => bootExecutions = 0 /\ ~bootCustody
+BootHeldEventuallyExecutes == bootHeld ~> (bootExecutions = 1)
 =============================================================================

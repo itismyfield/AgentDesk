@@ -463,3 +463,117 @@ static STORE_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUs
 thread_local! {
     static TEST_SOURCE: std::cell::RefCell<Option<Arc<dyn PeerSource>>> = const { std::cell::RefCell::new(None) };
 }
+
+#[cfg(test)]
+pub(in crate::services::discord) fn boot_input_effect_probe_for_tests(
+    effects: Arc<std::sync::atomic::AtomicUsize>,
+    completed: Arc<tokio::sync::Notify>,
+) -> impl Drop {
+    admission::tests::install_final_local_probe(move |_| {
+        effects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        completed.notify_one();
+        Ok(crate::services::discord::IntakeExecution::Executed)
+    })
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn dispatch_boot_live_for_tests(
+    deps: &super::message_handler::IntakeDeps<'_>,
+    request: super::message_handler::IntakeRequest,
+    checkpoint: impl FnOnce() + Send,
+) -> Result<(), Error> {
+    dispatch_boot_with_provider_for_tests(deps, ProviderKind::Claude, request, checkpoint).await
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn dispatch_boot_with_provider_for_tests(
+    deps: &super::message_handler::IntakeDeps<'_>,
+    provider: ProviderKind,
+    request: super::message_handler::IntakeRequest,
+    checkpoint: impl FnOnce() + Send,
+) -> Result<(), Error> {
+    let preserve_on_cancel = request.preserve_on_cancel;
+    let submission = super::intake_dispatch::IntakeSubmission {
+        provider,
+        request,
+        origin: super::intake_dispatch::IntakeOrigin::LiveMessage,
+        preserve_on_cancel,
+        has_nonportable_uploads: false,
+        attachments: Vec::new(),
+        preloaded_uploads: Vec::new(),
+        owner: None,
+    };
+    super::intake_dispatch::dispatch_live_text_intake(deps, submission, checkpoint).await
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn pause_boot_preflight_for_tests(
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Semaphore>,
+) -> impl Drop {
+    admission::tests::install_boot_preflight_pause(entered, release)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn override_boot_effect_for_tests(
+    mut callback: impl FnMut(
+        &super::message_handler::IntakeRequest,
+    ) -> Result<crate::services::discord::IntakeExecution, Error>
+    + 'static,
+) -> impl Drop {
+    admission::tests::override_final_local_probe(move |submission| callback(&submission.request))
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn dispatch_boot_gate_for_tests(
+    deps: &super::message_handler::IntakeDeps<'_>,
+    request: super::message_handler::IntakeRequest,
+    checkpoint: impl FnOnce() + Send,
+) -> Result<(), Error> {
+    let preserve_on_cancel = request.preserve_on_cancel;
+    let submission = super::intake_dispatch::IntakeSubmission {
+        provider: ProviderKind::Claude,
+        request,
+        origin: super::intake_dispatch::IntakeOrigin::LiveMessage,
+        preserve_on_cancel,
+        has_nonportable_uploads: false,
+        attachments: Vec::new(),
+        preloaded_uploads: Vec::new(),
+        owner: None,
+    };
+    super::intake_dispatch::dispatch_o_hold_intake(deps, submission, checkpoint).await
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn dispatch_boot_payload_for_tests(
+    deps: &super::message_handler::IntakeDeps<'_>,
+    request: super::message_handler::IntakeRequest,
+    uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+    checkpoint: impl FnOnce() + Send,
+) -> Result<(), Error> {
+    let preserve_on_cancel = request.preserve_on_cancel;
+    let submission = super::intake_dispatch::IntakeSubmission {
+        provider: ProviderKind::Claude,
+        request,
+        origin: super::intake_dispatch::IntakeOrigin::LiveMessage,
+        preserve_on_cancel,
+        has_nonportable_uploads: uploads.iter().any(|upload| upload.is_local()),
+        attachments: Vec::new(),
+        preloaded_uploads: uploads,
+        owner: None,
+    };
+    super::intake_dispatch::dispatch_live_text_intake(deps, submission, checkpoint).await
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn override_boot_payload_for_tests(
+    mut callback: impl FnMut(
+        &super::message_handler::IntakeRequest,
+        &crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+    ) -> Result<crate::services::discord::IntakeExecution, Error>
+    + 'static,
+) -> impl Drop {
+    admission::tests::override_final_local_probe(move |submission| {
+        callback(&submission.request, &submission.preloaded_uploads)
+    })
+}
