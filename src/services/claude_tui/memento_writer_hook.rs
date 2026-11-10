@@ -349,7 +349,7 @@ mod tests {
     fn run(dir: &Path, event: &str, payload: &Value) -> Option<String> {
         observe_at(
             ReceiptStore {
-                dir: dir,
+                dir,
                 endpoint: "http://memento.test/mcp",
                 identity: "test-identity",
             },
