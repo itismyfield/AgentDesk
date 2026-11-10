@@ -191,3 +191,15 @@ tui-o-writer/WriterMissingHaltOrphanFixed.cfg	WriterMissingHalt	-	-
 input-single-path/InputOwnershipPersonBusy.cfg	InputOwnership	-
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
+campaign-execution/CampaignVerification.cfg	CampaignVerification	-	-
+campaign-execution/CampaignVerificationChart.cfg	CampaignVerification	-	-
+campaign-execution/CampaignVerificationClaimKept.cfg	CampaignVerification	ImmediateRevokes,NoStartWithoutAuthority	-
+campaign-execution/CampaignVerificationFactsRefused.cfg	CampaignVerification	-	DeliveredEventually,StopCompletes,VSettles
+campaign-execution/CampaignVerificationFencedStartBefore.cfg	CampaignVerification	-	DeliveredEventually,StopCompletes,VSettles
+campaign-execution/CampaignVerificationFinishDeadBefore.cfg	CampaignVerification	-	StopCompletes
+campaign-execution/CampaignVerificationIndeterminate.cfg	CampaignVerification	-	StopCompletes,VSettles
+campaign-execution/CampaignVerificationIndeterminateSettled.cfg	CampaignVerification	-	-
+campaign-execution/CampaignVerificationInterruptBefore.cfg	CampaignVerification	-	StopCompletes
+campaign-execution/CampaignVerificationNoRedelivery.cfg	CampaignVerification	-	DeliveredEventually,StopCompletes,VSettles
+campaign-execution/CampaignVerificationNotSentBefore.cfg	CampaignVerification	NoCancelWhileAuthorized	-
+campaign-execution/CampaignVerificationSettleBefore.cfg	CampaignVerification	-	StopCompletes,VSettles

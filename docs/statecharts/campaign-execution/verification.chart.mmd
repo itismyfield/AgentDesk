@@ -1,0 +1,105 @@
+---
+title: "Server campaign: one verification run under stop, interruption and restart"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Running
+    lg1: Stopping
+    lg2: Stopped
+  }
+  class lg0 blue
+  class lg1 orange
+  class lg2 teal
+  s0: Running: check not started
+  s1: Stopping after this stage: check not started
+  s2: Stopping now: check not started
+  s3: Stopping now: check cancelled
+  s4: Running: start requested
+  s5: Stopping after this stage: start requested
+  s6: Stopping now: start requested
+  s7: Stopped: check not started
+  s8: Stopped: check cancelled
+  s9: Running: check process running
+  s10: Stopping after this stage: check process running
+  s11: Stopping now: check process running
+  s12: Running: result recorded
+  s13: Running: check failed
+  s14: Running: check passed
+  s15: Stopping after this stage: result recorded
+  s16: Stopping now: result recorded
+  s17: Stopping after this stage: check failed
+  s18: Stopping after this stage: check passed
+  s19: Stopping now: check failed
+  s20: Stopping now: check passed
+  s21: Stopped: result recorded
+  s22: Stopped: check failed
+  s23: Stopped: check passed
+  [*] --> s0
+  s0 --> s1: you stop the campaign
+  s0 --> s2: you stop the campaign
+  s1 --> s2: you change the stop to stop now
+  s2 --> s3: the server collects or closes the check
+  s0 --> s4: the server commits to starting a check phase
+  s4 --> s5: you stop the campaign
+  s4 --> s6: you stop the campaign
+  s1 --> s5: the server commits to starting a check phase
+  s2 --> s7: everything is quiet, the campaign is stopped
+  s5 --> s6: you change the stop to stop now
+  s6 --> s2: the gate confirms the phase never started
+  s7 --> s8: the server collects or closes the check
+  s3 --> s8: everything is quiet, the campaign is stopped
+  s4 --> s9: the server records the start receipt
+  s5 --> s10: the server records the start receipt
+  s6 --> s11: the server records the start receipt
+  s9 --> s10: you stop the campaign
+  s9 --> s11: you stop the campaign
+  s10 --> s11: you change the stop to stop now
+  s9 --> s12: the server records the phase result
+  s10 --> s15: the server records the phase result
+  s11 --> s16: the server records the phase result
+  s12 --> s13: the server collects or closes the check
+  s12 --> s15: you stop the campaign
+  s12 --> s16: you stop the campaign
+  s12 --> s14: the server collects or closes the check
+  s13 --> s17: you stop the campaign
+  s13 --> s19: you stop the campaign
+  s14 --> s18: you stop the campaign
+  s14 --> s20: you stop the campaign
+  s15 --> s17: the server collects or closes the check
+  s15 --> s16: you change the stop to stop now
+  s15 --> s18: the server collects or closes the check
+  s16 --> s19: the server collects or closes the check
+  s16 --> s20: the server collects or closes the check
+  s17 --> s19: you change the stop to stop now
+  s18 --> s20: you change the stop to stop now
+  s16 --> s21: everything is quiet, the campaign is stopped
+  s21 --> s22: the server collects or closes the check
+  s19 --> s22: everything is quiet, the campaign is stopped
+  s21 --> s23: the server collects or closes the check
+  s20 --> s23: everything is quiet, the campaign is stopped
+  s17 --> s22: everything is quiet, the campaign is stopped
+  s18 --> s23: everything is quiet, the campaign is stopped
+  class s0 blue
+  class s1 orange
+  class s2 orange
+  class s3 orange
+  class s4 blue
+  class s5 orange
+  class s6 orange
+  class s7 teal
+  class s8 teal
+  class s9 blue
+  class s10 orange
+  class s11 orange
+  class s12 blue
+  class s13 blue
+  class s14 blue
+  class s15 orange
+  class s16 orange
+  class s17 orange
+  class s18 orange
+  class s19 orange
+  class s20 orange
+  class s21 teal
+  class s22 teal
+  class s23 teal
