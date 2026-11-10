@@ -28,7 +28,8 @@ struct CanonicalIdentityPgDatabase {
 
 impl CanonicalIdentityPgDatabase {
     async fn create() -> Option<Self> {
-        let base = crate::db::postgres::postgres_test_database_url_base()?;
+        let base = crate::db::postgres::postgres_test_database_url_base()
+            .expect("POSTGRES_TEST_DATABASE_URL_BASE required for canonical identity PG tests");
         let lifecycle = crate::db::postgres::lock_test_lifecycle();
         let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
             .ok()

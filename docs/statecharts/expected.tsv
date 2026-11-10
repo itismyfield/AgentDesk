@@ -4,6 +4,9 @@
 # scripts/ci/statecharts_tlc.py fails when a run breaks a rule not listed here or a listed rule holds.
 # ExecutionAuthorityDeployed: statechart exit=1 (SameUnmanagedReadmits); ExecutionAuthority: exit=0.
 # BeforeGateway safety holds but temporary PROPERTY AdmissionResumes fails (13); fix3 passes (0).
+catch-up-frontier/CatchUpFrontier.cfg	CatchUpFrontier	-	-
+catch-up-frontier/CatchUpFrontierMain.cfg	CatchUpFrontier	-	DeliveredInputsAdvanceCursor
+catch-up-frontier/CatchUpFrontierPendingPass.cfg	CatchUpFrontier	NoDeadlock,NoUndeliveredBehindCursor	-
 execution-authority/ExecutionAuthority.cfg	ExecutionAuthority	-	-
 execution-authority/ExecutionAuthorityAmbiguousGateway.cfg	ExecutionAuthority	-	-
 execution-authority/ExecutionAuthorityBeforeGateway.cfg	ExecutionAuthority	-	-
@@ -202,3 +205,20 @@ tui-o-writer/WriterAdoptionHeadlessMut.cfg	WriterAdoption	HeadlessKept	-
 input-single-path/InputOwnershipPersonBusy.cfg	InputOwnership	-
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
+campaign-execution/CampaignVerification.cfg	CampaignVerification	-	-
+campaign-execution/CampaignVerificationChart.cfg	CampaignVerification	-	-
+campaign-execution/CampaignVerificationClaimKept.cfg	CampaignVerification	ImmediateRevokes,NoStartWithoutAuthority	-
+campaign-execution/CampaignVerificationFactsRefused.cfg	CampaignVerification	-	DeliveredEventually,StopNowCompletes,UnsealedClosed,VSettles
+campaign-execution/CampaignVerificationFencedStartBefore.cfg	CampaignVerification	-	DeliveredEventually,StopFinishCompletes,VSettles
+campaign-execution/CampaignVerificationFinishDeadBefore.cfg	CampaignVerification	-	StopFinishCompletes
+campaign-execution/CampaignVerificationIndeterminate.cfg	CampaignVerification	-	StopFinishCompletes,StopNowCompletes,VSettles
+campaign-execution/CampaignVerificationIndeterminateSettled.cfg	CampaignVerification	-	-
+campaign-execution/CampaignVerificationInterruptBefore.cfg	CampaignVerification	-	StopFinishCompletes
+campaign-execution/CampaignVerificationLateLaunch.cfg	CampaignVerification	-	-
+campaign-execution/CampaignVerificationLateLaunchBefore.cfg	CampaignVerification	FinishScopeKept	-
+campaign-execution/CampaignVerificationNoRedelivery.cfg	CampaignVerification	-	DeliveredEventually,StopFinishCompletes,StopNowCompletes,VSettles
+campaign-execution/CampaignVerificationNotSentBefore.cfg	CampaignVerification	NoCancelWhileAuthorized	-
+campaign-execution/CampaignVerificationOverwrite.cfg	CampaignVerification	FillOnce	-
+campaign-execution/CampaignVerificationQuietSession.cfg	CampaignVerification	-	StopFinishCompletes
+campaign-execution/CampaignVerificationSettleBefore.cfg	CampaignVerification	-	StopFinishCompletes,UnsealedClosed,VSettles
+campaign-execution/CampaignVerificationTwoValues.cfg	CampaignVerification	-	-

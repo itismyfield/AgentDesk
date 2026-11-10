@@ -13,7 +13,8 @@ use super::profile::{Candidate, ProfileLimits, RepositoryProfile};
 use super::review_gate::{StagePrerequisite, evaluate_review_stage};
 use super::verification_run::{
     AuthoritySource, BoundSubject, CurrentFence, PhaseAdmission, RegistrationInput,
-    VerificationError, VerificationRun, VerificationStartAuthority, digest_of,
+    VerificationCollection, VerificationError, VerificationRun, VerificationStartAuthority,
+    digest_of,
 };
 
 // None leaves the state unchanged: a retransmitted command adds no V, epoch, count or action.
@@ -676,6 +677,7 @@ pub(super) fn accept_stage_result(
         .get(attempt_id)
         .filter(|a| current.current_attempt.as_deref() == Some(attempt_id) && a.outcome.is_none())
         .ok_or_else(|| Rejection::new(RejectionCode::StaleBinding))?;
+    let unreviewed = StageAssessment::of(Verdict::Wait, GateReason::Pending(attempt_id.into()));
     let (assessment, cycle, executions) = match (attempt.binding.stage, review) {
         (Stage::Implementation, None) => {
             let execution = attempt
@@ -697,7 +699,7 @@ pub(super) fn accept_stage_result(
                     &subject,
                     attempt.binding.stage,
                 ),
-                None => StageAssessment::of(Verdict::Wait, GateReason::Pending(attempt_id.into())),
+                None => unreviewed,
             };
             // A passing Work hands over only through BeginReview, except a finishing stop, which
             // records the result and creates no Review.
@@ -712,7 +714,7 @@ pub(super) fn accept_stage_result(
                 .collect();
             (assessment, execution.repair_cycle, executions)
         }
-        (Stage::Review, Some(review)) => {
+        (Stage::Review, review) if review.is_some() || finishing => {
             let mut parts = Vec::new();
             let mut executions = Vec::new();
             let mut cycle = None;
@@ -748,14 +750,29 @@ pub(super) fn accept_stage_result(
                 parts.push(part);
             }
             let cycle = cycle.unwrap_or(current.repair_cycles);
-            (
-                evaluate_review_stage(review.clone(), parts),
-                cycle,
-                executions,
-            )
+            let assessment = match review {
+                Some(review) => evaluate_review_stage(review.clone(), parts),
+                None => unreviewed,
+            };
+            (assessment, cycle, executions)
         }
         _ => return reject(RejectionCode::InvalidState),
     };
+    // A finishing attempt waits for nothing once one of its checks ended without a result.
+    let dead = finishing
+        && matches!(assessment.verdict, Verdict::Wait | Verdict::Reject)
+        && executions.iter().any(|id| {
+            run.verifications.get(id).is_some_and(|v| {
+                v.cancellation.is_some()
+                    || matches!(
+                        v.collection,
+                        Some(VerificationCollection::Interrupted { .. })
+                    )
+            })
+        });
+    if review.is_none() && attempt.binding.stage == Stage::Review && !dead {
+        return reject(RejectionCode::InvalidState);
+    }
     // A stopping Work keeps Review only as its next stage; nothing is enqueued for it.
     let next_stage = match attempt.binding.stage {
         Stage::Implementation => Stage::Review,
@@ -766,6 +783,19 @@ pub(super) fn accept_stage_result(
     let run = next.run.as_mut().expect("checked above");
     let node = next.nodes.get_mut(node_id).expect("checked above");
     match verdict {
+        Verdict::Wait | Verdict::Reject if dead => {
+            run.fences.entry(node_id.into()).or_default().epoch += 1;
+            if let Some(attempt) = run.attempts.get_mut(attempt_id) {
+                attempt.outcome = Some(AttemptOutcome::UserInterrupted);
+            }
+            node.disposition = NodeDisposition::Interrupted;
+            revoke_unstarted(
+                run,
+                &executions,
+                "finishing check ended without a result",
+                at,
+            );
+        }
         Verdict::Wait | Verdict::Reject => {
             node.disposition = NodeDisposition::Verifying;
         }
@@ -799,8 +829,83 @@ pub(super) fn accept_stage_result(
     }))
 }
 
+// The V an attempt owns or consumes as a fixed prerequisite.
+fn attempt_executions(run: &Run, attempt: &Attempt) -> Vec<String> {
+    let owned = attempt
+        .execution
+        .iter()
+        .flat_map(|e| e.start_executions.iter().chain(&e.finish_executions))
+        .cloned();
+    let consumed = run
+        .prerequisites
+        .values()
+        .filter(|p| p.consumer_attempt == attempt.binding.attempt_id)
+        .map(|p| p.target.execution_id.clone());
+    owned.chain(consumed).collect()
+}
+
+fn launching(run: &Run, attempt_id: &str) -> bool {
+    run.actions.values().any(|a| {
+        a.binding.attempt_id == attempt_id
+            && a.kind != ActionKind::VerificationPhase
+            && matches!(a.state, ActionState::StartPending | ActionState::Unknown)
+    })
+}
+
 // FinishStage freezes the exact V each finishing consumer may still continue.
 pub(super) fn finish_grants(state: &CampaignState, run: &Run) -> Vec<FinishGrant> {
+    grants_for(state, run, |a| a.started)
+}
+
+// The phases of an attempt whose launch is in flight at a finish stop stay until it resolves.
+pub(super) fn provisional_finish_actions(state: &CampaignState, run: &Run) -> Vec<String> {
+    grants_for(state, run, |a| {
+        !a.started && launching(run, &a.binding.attempt_id)
+    })
+    .into_iter()
+    .flat_map(|g| g.phase_actions)
+    .collect()
+}
+
+// A launch receipt recorded after a finish stop turns the attempt's kept phases into grants.
+pub(super) fn grant_late_start(state: &mut CampaignState, attempt_id: &str) {
+    let Some(run) = state.run.as_ref() else {
+        return;
+    };
+    if !run
+        .stop
+        .as_ref()
+        .is_some_and(|s| s.mode == StopMode::FinishStage)
+    {
+        return;
+    }
+    let late = grants_for(state, run, |a| a.binding.attempt_id == attempt_id);
+    if let Some(stop) = state.run.as_mut().and_then(|r| r.stop.as_mut()) {
+        stop.finish_grants.extend(late);
+    }
+}
+
+// A launch proven unsent under a stop takes the attempt's kept phases with it.
+pub(super) fn revoke_unlaunched(run: &mut Run, attempt_id: &str, at: DateTime<Utc>) {
+    let Some(attempt) = run
+        .attempts
+        .get(attempt_id)
+        .filter(|a| !a.started && a.outcome.is_none())
+    else {
+        return;
+    };
+    if run.stop.is_none() || launching(run, attempt_id) {
+        return;
+    }
+    let executions = attempt_executions(run, attempt);
+    revoke_unstarted(run, &executions, "launch never started", at);
+}
+
+fn grants_for(
+    state: &CampaignState,
+    run: &Run,
+    eligible: impl Fn(&Attempt) -> bool,
+) -> Vec<FinishGrant> {
     let mut grants = Vec::new();
     for (node_id, current) in &state.nodes {
         let fenced = fence(run, node_id);
@@ -811,24 +916,14 @@ pub(super) fn finish_grants(state: &CampaignState, run: &Run) -> Vec<FinishGrant
             .current_attempt
             .as_ref()
             .and_then(|id| run.attempts.get(id))
-            .filter(|a| a.started && a.outcome.is_none())
+            .filter(|a| a.outcome.is_none() && eligible(a))
         else {
             continue;
         };
         let Ok(consumer_digest) = digest_of(&attempt.binding) else {
             continue;
         };
-        let owned = attempt
-            .execution
-            .iter()
-            .flat_map(|e| e.start_executions.iter().chain(&e.finish_executions))
-            .cloned();
-        let consumed = run
-            .prerequisites
-            .values()
-            .filter(|p| p.consumer_attempt == attempt.binding.attempt_id)
-            .map(|p| p.target.execution_id.clone());
-        for id in owned.chain(consumed) {
+        for id in attempt_executions(run, attempt) {
             let Some(v) = run
                 .verifications
                 .get(&id)

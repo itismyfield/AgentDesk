@@ -80,6 +80,7 @@ impl Harness {
             &mut tx,
             None,
             &Decision {
+                records: Vec::new(),
                 state,
                 events: vec![event],
                 result,
@@ -687,6 +688,7 @@ async fn immutable_attempt_binding_and_action_target_mismatch_roll_back_pg() {
         };
         let mut tx = h.pool.begin().await.unwrap();
         let decision = Decision {
+            records: Vec::new(),
             state: wrong,
             events: vec![event],
             result,

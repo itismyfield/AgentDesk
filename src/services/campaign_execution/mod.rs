@@ -17,6 +17,7 @@ pub mod model;
 pub mod profile;
 pub mod review_gate;
 pub mod stage_fsm;
+mod verification_commands;
 pub mod verification_run;
 pub mod verification_runner;
 pub mod view;

@@ -5,7 +5,8 @@ fn kept<T: PartialEq>(old: &Slot<T>, new: &Slot<T>) -> bool {
     old.bound().is_none_or(|value| new.bound() == Some(value))
 }
 
-// V origins, filled slots, fixed prerequisites and attempt execution facts never change once stored.
+// V origins, filled slots, fixed prerequisites, attempt execution facts, seals and observed
+// environments never change once stored.
 fn preserves_execution_facts(old: &Run, new: &Run) -> bool {
     let verifications = old.verifications.iter().all(|(id, before)| {
         new.verifications.get(id).is_some_and(|after| {
@@ -29,7 +30,15 @@ fn preserves_execution_facts(old: &Run, new: &Run) -> bool {
                 .get(id)
                 .is_some_and(|after| after.execution == before.execution)
     });
-    verifications && prerequisites && attempts
+    let sealed = old
+        .seals
+        .iter()
+        .all(|(id, before)| new.seals.get(id) == Some(before));
+    let environments = old
+        .environments
+        .iter()
+        .all(|(id, before)| new.environments.get(id) == Some(before));
+    verifications && prerequisites && attempts && sealed && environments
 }
 
 fn number(value: u64) -> StoreResult<i64> {
