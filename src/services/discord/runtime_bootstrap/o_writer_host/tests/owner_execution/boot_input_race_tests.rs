@@ -140,6 +140,7 @@ async fn writer_boot_live_and_observed_enqueue_keep_one_canonical_source_pg() {
             assert_eq!(f.checkpoints.load(Ordering::SeqCst), 1);
             f.release.add_permits(1);
             one_effect(f, &done, 2).await;
+            drop((preflight_guard, release_guard));
         })).await;
 }
 
