@@ -400,21 +400,24 @@ async fn late_adopt_coalesced_bound_rotation_rejects_before_pin() {
     handle.stop_and_join().await.unwrap();
 }
 
+/// A frontier behind the reserved transcript's end is where O starts, never at EOF: the records
+/// Legacy did not deliver are posted once and nothing is abandoned.
 #[tokio::test(start_paused = true)]
-async fn late_adopt_stalled_frontier_never_skips_to_eof() {
+async fn late_adopt_stalled_frontier_is_taken_from_it_never_from_eof() {
     if !test_override::isolated_binding_case(concat!(
         module_path!(),
-        "::late_adopt_stalled_frontier_never_skips_to_eof"
+        "::late_adopt_stalled_frontier_is_taken_from_it_never_from_eof"
     )) {
         return;
     }
     let f = Late::new();
-    let end = f.bind_delivered();
+    f.bind_delivered();
     f.legacy.frontier.store(0, Ordering::SeqCst);
     let handle = f.start();
-    tokio::time::sleep(Duration::from_secs(90 * 60)).await;
-    assert!(!init_path(&f.harness, CHANNEL).exists());
-    assert_eq!(adoption(CHANNEL), Adoption::Deferred);
+    f.adopted().await;
+    assert_eq!(adoption(CHANNEL), Adoption::Committed);
+    let init = f.harness.store.read_init(CHANNEL).unwrap().unwrap();
+    assert_eq!(init.sources[0].delivery_start, 0);
     assert!(
         !f.io
             .alarms
@@ -424,8 +427,8 @@ async fn late_adopt_stalled_frontier_never_skips_to_eof() {
             .iter()
             .any(|(_, a)| matches!(a, WriterAlarm::Abandoned { .. }))
     );
-    f.legacy.frontier.store(end, Ordering::SeqCst);
-    f.assert_new_once(end).await;
+    polls(3).await;
+    assert_eq!(f.harness.port.posts(), ["old delivered payload"]);
     handle.stop_and_join().await.unwrap();
 }
 

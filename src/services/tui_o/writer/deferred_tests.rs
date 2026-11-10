@@ -431,22 +431,46 @@ async fn a_unit_written_after_the_cursor_caught_up_is_read_again_before_adoption
     open.assert_adopted().await;
 }
 
+/// A record past Legacy's frontier is O's: the adoption starts at the frontier without waiting for
+/// Legacy, O posts the record once, and a restart over the init posts nothing again.
 #[tokio::test(start_paused = true)]
-async fn a_record_past_legacys_frontier_waits_until_the_frontier_covers_it() {
+async fn a_record_past_legacys_frontier_is_taken_from_the_frontier_and_posted_once() {
     let open = Open::new();
-    let _tasks = open.start().await;
+    let tasks = open.start().await;
     let frontier = open.len();
     append(&open.path, &[row("m1", "owed"), closed()].concat());
     open.legacy.caught_up(&open.path);
     open.legacy.frontier.store(frontier, Ordering::SeqCst);
     retried().await;
-    open.assert_waiting("Legacy may still send the record");
-    retried().await;
-    open.assert_waiting("the frontier has not moved");
+    assert_eq!(
+        adoption(CHANNEL),
+        Adoption::Committed,
+        "{:?}",
+        open.alarms()
+    );
+    assert_eq!(
+        open.start_of_o(),
+        Some(frontier),
+        "O starts at Legacy's frontier"
+    );
+    assert_eq!(open.alarms(), [], "nothing is abandoned");
+    polls(3).await;
+    assert_eq!(open.harness.port.posts(), ["owed"]);
 
-    open.legacy.caught_up(&open.path);
-    retried().await;
-    open.assert_adopted().await;
+    abort(tasks);
+    polls(2).await;
+    let ready = Arc::new(Readiness::default());
+    let _tasks = start_host(&open.harness, &open.io, &ready);
+    polls(3).await;
+    assert!(ready.is_ready(CHANNEL), "{:?}", open.alarms());
+    assert_eq!(
+        open.harness.port.posts(),
+        ["owed"],
+        "a restart reposts nothing"
+    );
+    append(&open.path, &row("m9", "next"));
+    polls(3).await;
+    assert_eq!(open.harness.port.posts(), ["owed", "next"]);
 }
 
 #[tokio::test(start_paused = true)]

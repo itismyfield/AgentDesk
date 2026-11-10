@@ -111,8 +111,9 @@ impl Stalled {
         assert_eq!(self.alarms(), [], "{why}");
     }
 
-    /// Committed at the source's end with `abandoned` reported once, and the next unit posted once.
-    async fn assert_adopted_at_end(&self, abandoned: Option<u64>) {
+    /// Committed at Legacy's frontier `owed` when records past it were undelivered, else at the
+    /// source's end; nothing is abandoned, nothing posted twice, and the next unit posted once.
+    async fn assert_adopted_from(&self, owed: Option<u64>) {
         assert_eq!(
             adoption(CHANNEL),
             Adoption::Committed,
@@ -121,20 +122,25 @@ impl Stalled {
         );
         let init = self.harness.store.read_init(CHANNEL).unwrap().unwrap();
         let starts: Vec<_> = init.sources.iter().map(|s| s.delivery_start).collect();
-        assert_eq!(starts, [self.len()], "O starts at the source's end");
-        let source = init.sources[0].source_id.clone();
-        let to = self.len();
-        let reported = abandoned.map(|from| WriterAlarm::Abandoned { source, from, to });
-        let reported: Vec<_> = reported.into_iter().map(|alarm| (CHANNEL, alarm)).collect();
-        assert_eq!(self.alarms(), reported);
+        assert_eq!(
+            starts,
+            [owed.unwrap_or(self.len())],
+            "O starts at the frontier"
+        );
+        assert_eq!(self.alarms(), [], "nothing is abandoned");
+        polls(3).await;
+        let before = self.harness.port.posts();
+        let unique: std::collections::BTreeSet<_> = before.iter().collect();
+        assert_eq!(unique.len(), before.len(), "posted twice: {before:?}");
         append(&self.path, &row("m9", "next"));
         polls(3).await;
-        assert_eq!(self.harness.port.posts(), ["next"]);
+        let after = self.harness.port.posts();
+        assert_eq!(after, [before, vec!["next".to_owned()]].concat());
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_cursor_behind_a_closed_tail_at_boot_waits_out_the_stall_and_starts_at_the_end() {
+async fn a_cursor_behind_a_closed_tail_at_boot_waits_out_the_stall_and_starts_at_the_frontier() {
     let tail = [row("m0", "undelivered"), closed()].concat();
     let cursor = row("m0", "undelivered").len() as u64;
     let stalled = Stalled::new(&tail, cursor, Some(0), Custody::Row);
@@ -142,7 +148,8 @@ async fn a_cursor_behind_a_closed_tail_at_boot_waits_out_the_stall_and_starts_at
     tokio::time::sleep(39 * MINUTE).await;
     stalled.assert_waiting("Legacy may still catch up");
     tokio::time::sleep(2 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
+    assert_eq!(stalled.harness.port.posts(), ["undelivered", "next"]);
 
     // Legacy delivered everything but never read the closing record: nothing is reported.
     let cursor = row("m0", "delivered").len() as u64;
@@ -152,7 +159,7 @@ async fn a_cursor_behind_a_closed_tail_at_boot_waits_out_the_stall_and_starts_at
     tokio::time::sleep(39 * MINUTE).await;
     caught_up.assert_waiting("the cursor still lags");
     tokio::time::sleep(2 * MINUTE).await;
-    caught_up.assert_adopted_at_end(None).await;
+    caught_up.assert_adopted_from(None).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -255,7 +262,7 @@ async fn a_turn_opened_and_closed_during_the_stall_restarts_it() {
     stalled.assert_waiting("an open turn blocks the expired clock");
     append(&stalled.path, &closed());
     retried().await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     abort(tasks);
 }
 
@@ -271,7 +278,7 @@ async fn stall_restarted_by(nudge: impl FnOnce(&Stalled), settle: impl FnOnce(&S
     tokio::time::sleep(39 * MINUTE).await;
     stalled.assert_waiting("the stall restarted");
     tokio::time::sleep(3 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
 }
 
 async fn stall_not_restarted_by(nudge: impl FnOnce(&Stalled), settle: impl FnOnce(&Stalled)) {
@@ -284,7 +291,7 @@ async fn stall_not_restarted_by(nudge: impl FnOnce(&Stalled), settle: impl FnOnc
     tokio::time::sleep(9 * MINUTE).await;
     stalled.assert_waiting("marker activity did not shorten the wait");
     tokio::time::sleep(2 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     abort(tasks);
 }
 
@@ -342,7 +349,7 @@ async fn legacy_intake_open_when_the_stall_ends_restarts_it() {
     stalled.assert_waiting("an open intake holds the expired adoption");
     intake(0);
     retried().await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     abort(tasks);
 }
 
@@ -360,7 +367,7 @@ async fn a_restart_starts_the_stall_over() {
     tokio::time::sleep(39 * MINUTE).await;
     stalled.assert_waiting("the clock is this process's own");
     tokio::time::sleep(3 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -419,7 +426,7 @@ async fn a_stalled_adoption_refused_under_the_lock_reports_nothing_and_waits_aga
     tokio::time::sleep(39 * MINUTE).await;
     stalled.assert_waiting("body completion restarted the soft clock");
     tokio::time::sleep(3 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     abort(tasks);
 }
 
@@ -438,7 +445,7 @@ async fn moved_before_the_lock(stalled: Stalled, nudge: fn(&Behind), abandoned: 
     tokio::time::sleep(38 * MINUTE).await;
     stalled.assert_waiting("a new stall started");
     tokio::time::sleep(3 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(abandoned)).await;
+    stalled.assert_adopted_from(Some(abandoned)).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -469,7 +476,7 @@ async fn a_cursor_moving_right_before_the_lock_restarts_the_stall() {
     let tasks = stalled.start();
     tokio::time::sleep(41 * MINUTE).await;
     assert!(reached.load(Ordering::SeqCst));
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     abort(tasks);
 }
 

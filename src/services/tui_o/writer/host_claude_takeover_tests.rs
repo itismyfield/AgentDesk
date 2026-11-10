@@ -281,10 +281,10 @@ async fn late_claude_rotation_rebases_with_new_discord_turn_busy() {
     assert_eq!(f.init(), [(source, 0)]);
 }
 
-/// Legacy's read cursor at EOF is not delivery: with its frontier before the answer, no sample
-/// proves the old transcript, so the cleared one is not taken and the reservation stays Deferred.
+/// Legacy's read cursor at EOF is not delivery: with its frontier before the answer, the reserved
+/// transcript is taken from that frontier and O posts the undelivered answer once.
 #[tokio::test(start_paused = true)]
-async fn late_claude_read_cursor_at_eof_without_delivery_does_not_rebase_into_a_takeover() {
+async fn late_claude_answer_past_the_frontier_is_taken_from_it_and_posted_once() {
     const CH: u64 = 63_761_904;
     let head = prompted();
     let old = [head.clone(), answer("msg_0", "undelivered"), turn_end()].concat();
@@ -297,16 +297,117 @@ async fn late_claude_read_cursor_at_eof_without_delivery_does_not_rebase_into_a_
     .await;
     f.legacy.frontier.store(head.len() as u64, Ordering::SeqCst);
     settle().await;
-    let path = f.file("new.jsonl", &prompted());
-    f.binds.source(f.root(), "n-new", &path);
-    settle().await;
     assert_eq!(
         adoption(CH),
-        Adoption::Deferred,
+        Adoption::Committed,
         "{:?}",
         f.io.alarms.released()
     );
-    assert!(!f.harness.store.has_channel_dir(CH));
+    let init = f.harness.store.read_init(CH).unwrap().unwrap();
+    let starts: Vec<u64> = init.sources.iter().map(|s| s.delivery_start).collect();
+    assert_eq!(starts, [head.len() as u64]);
+    polls(3).await;
+    assert_eq!(f.harness.port.posts(), ["undelivered"]);
+}
+
+/// Legacy's relay following the transcript the log binds now, read to its end.
+struct Following {
+    path: Mutex<PathBuf>,
+    frontier: AtomicU64,
+}
+
+impl LegacyView for Following {
+    fn started(&self) -> bool {
+        true
+    }
+
+    fn cursor(&self, _: &str) -> LegacyCursor {
+        let path = self.path.lock().unwrap().clone();
+        let offset = std::fs::metadata(&path).unwrap().len();
+        LegacyCursor::Bound { path, offset }
+    }
+
+    fn late_cursor(&self, tmux: &str) -> Result<LegacyCursor, String> {
+        Ok(self.cursor(tmux))
+    }
+
+    fn frontier(&self, _: u64, _: &str, _: u64) -> Option<u64> {
+        Some(self.frontier.load(Ordering::SeqCst))
+    }
+
+    fn tail_running(&self, _: &str) -> bool {
+        false
+    }
+}
+
+/// An old transcript delivered and sampled, then given an answer Legacy never delivered, rotates to
+/// a new one: the init holds the old one from its delivered end beside the new one, and O posts
+/// the old answer and the new turn's answer once each.
+#[tokio::test(start_paused = true)]
+async fn late_claude_rotation_carries_the_old_transcripts_owed_answer_into_the_init() {
+    const CH: u64 = 63_761_910;
+    let harness = fresh_on(CH);
+    harness.gate.acquired();
+    let _reserved = reserve(CH);
+    let root = harness._runtime.path().to_path_buf();
+    p5::set_test_root(Some(&root));
+    let binds = Binds::new(CH);
+    let old = [prompted(), answer("msg_0", "delivered"), turn_end()].concat();
+    let old_path = root.join("old.jsonl");
+    std::fs::write(&old_path, &old).unwrap();
+    let old_source = binds.source(&root, "n-old", &old_path);
+    let io = TestIo::over(&harness);
+    io.late_enabled.store(true, Ordering::SeqCst);
+    // Open intake keeps every commit back while the delivered sample is taken.
+    io.facts.lock().unwrap().as_mut().unwrap().open_intake = 1;
+    let legacy = Arc::new(Following {
+        path: Mutex::new(old_path.clone()),
+        frontier: AtomicU64::new(old.len() as u64),
+    });
+    *io.legacy.lock().unwrap() = Some(legacy.clone());
+    let ready = Arc::new(Readiness::default());
+    let _tasks = hosted_as(ShadowProvider::Claude, &harness, &io, (true, &ready));
+    settle().await;
+    assert_eq!(adoption(CH), Adoption::Deferred);
+    append(&old_path, &[answer("msg_1", "owed"), turn_end()].concat());
+    settle().await;
+    assert_eq!(adoption(CH), Adoption::Deferred, "intake still blocks");
+
+    let new = [prompted(), answer("msg_2", "first"), turn_end()].concat();
+    let new_path = root.join("new.jsonl");
+    std::fs::write(&new_path, &new).unwrap();
+    let new_source = binds.source(&root, "n-new", &new_path);
+    *legacy.path.lock().unwrap() = new_path.clone();
+    legacy.frontier.store(new.len() as u64, Ordering::SeqCst);
+    io.facts.lock().unwrap().as_mut().unwrap().open_intake = 0;
+    settle().await;
+    assert_eq!(
+        adoption(CH),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.released()
+    );
+    let init = harness.store.read_init(CH).unwrap().unwrap();
+    let starts: Vec<(SourceId, u64)> = (init.sources.into_iter())
+        .map(|s| (s.source_id, s.delivery_start))
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            (new_source, new.len() as u64),
+            (old_source, old.len() as u64)
+        ]
+    );
+    append(&new_path, &answer("msg_3", "the new answer"));
+    polls(3).await;
+    let mut posts = harness.port.posts();
+    posts.sort();
+    assert_eq!(
+        posts,
+        ["owed", "the new answer"],
+        "{:?}",
+        io.alarms.halted()
+    );
 }
 
 /// A first read under Legacy custody fixes no deferred baseline, yet a transcript already bound

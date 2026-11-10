@@ -185,7 +185,7 @@ async fn zombie_markers_expire_soft_at_exact_boundary() {
     clock.to(SOFT + Duration::from_nanos(1)).await;
     assert_eq!(fence_calls(&stalled.io), 1, "the handoff commits once");
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -223,7 +223,7 @@ async fn transcript_cursor_and_placement_do_not_restart_delivery_clocks() {
     );
     clock.to(SOFT + TICK).await;
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -250,9 +250,7 @@ async fn frontier_progress_restarts_both_clocks_at_the_observed_tick() {
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     clock.to(70 * MINUTE + TICK).await;
     drop(clock);
-    stalled
-        .assert_adopted_at_end(Some(first.len() as u64))
-        .await;
+    stalled.assert_adopted_from(Some(first.len() as u64)).await;
     finish(tasks).await;
 }
 
@@ -283,7 +281,7 @@ async fn actual_completed_body_send_restarts_soft_clock_at_the_observed_tick() {
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     clock.to(70 * MINUTE + TICK).await;
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -315,7 +313,7 @@ async fn epoch_churn_does_not_postpone_exact_hard_boundary() {
     );
     clock.to(HARD + Duration::from_nanos(1)).await;
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -363,7 +361,7 @@ async fn relay_started_after_fence_blocks_hard_expiry_without_progress() {
         clock.to(HARD + TICK).await;
         assert_eq!(adoption(CHANNEL), Adoption::Committed);
         drop(clock);
-        stalled.assert_adopted_at_end(Some(0)).await;
+        stalled.assert_adopted_from(Some(0)).await;
         finish(tasks).await;
     }
     assert_eq!(*logged.0.lock().unwrap(), ["hard", "hard"]);
@@ -398,7 +396,7 @@ async fn redrive_schedule_keeps_hard_expiry_blocked_until_relay_slot_clears() {
     clock.to(HARD + 2 * TICK).await;
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -434,7 +432,7 @@ async fn both_expired_clocks_choose_soft_after_a_long_open_turn() {
         "the successful handoff records its chosen clock"
     );
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -570,7 +568,7 @@ async fn expired_intake_queue_and_fence_errors_block_without_restarting_the_cloc
             "clearing {blocker} does not add another40m"
         );
         drop(clock);
-        stalled.assert_adopted_at_end(Some(0)).await;
+        stalled.assert_adopted_from(Some(0)).await;
         finish(tasks).await;
     }
 }
@@ -610,7 +608,7 @@ async fn source_appended_when_expiry_pin_starts_must_be_quiet_before_handoff() {
     let init = stalled.harness.store.read_init(CHANNEL).unwrap().unwrap();
     assert_eq!(init.sources[0].delivery_start, new_end);
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -640,7 +638,7 @@ async fn appended_source_at_expiry_lock_refuses_once_without_restarting_the_cloc
         "source stats do not restart delivery clocks"
     );
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -671,7 +669,7 @@ async fn frontier_at_expiry_lock_refuses_and_restarts_delivery_clocks() {
     clock.to(HARD).await;
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     drop(clock);
-    stalled.assert_adopted_at_end(Some(delivered)).await;
+    stalled.assert_adopted_from(Some(delivered)).await;
     finish(tasks).await;
 }
 
@@ -703,7 +701,7 @@ async fn expired_adoption_legacy_attempts_are_judged_owned_and_o_posts_once() {
     assert!(judged.iter().all(|owned| *owned));
     assert_eq!(sends.load(Ordering::SeqCst), 0);
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -747,7 +745,7 @@ async fn a_real_body_transport_survives_soft_expiry_until_it_finishes() {
     clock.to(HARD).await;
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -786,7 +784,7 @@ async fn binding_and_epoch_changes_under_the_expiry_lock_refuse_the_old_snapshot
         }
         assert_eq!(adoption(CHANNEL), Adoption::Committed);
         drop(clock);
-        stalled.assert_adopted_at_end(Some(0)).await;
+        stalled.assert_adopted_from(Some(0)).await;
         finish(tasks).await;
     }
 }
@@ -1219,7 +1217,7 @@ async fn permanent_open_turn_and_held_body_reservation_block_for_120_minutes() {
             assert_eq!(adoption(CHANNEL), Adoption::Committed);
             assert_eq!(sends.load(Ordering::SeqCst), 1);
             drop(clock);
-            stalled.assert_adopted_at_end(Some(0)).await;
+            stalled.assert_adopted_from(Some(0)).await;
         } else {
             assert_eq!(candidate().sends(), (0, 0));
             assert_eq!(sends.load(Ordering::SeqCst), 0);
@@ -1333,6 +1331,6 @@ async fn frontier_decrease_restarts_the_hard_clock_despite_epoch_churn() {
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     assert_eq!(fence_calls(&stalled.io), 1, "the handoff commits once");
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
