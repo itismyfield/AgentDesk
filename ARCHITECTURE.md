@@ -374,6 +374,8 @@ src/
 │   ├── test_support.rs
 │   └── types.rs
 ├── domain/
+│   ├── message_split/
+│   │   └── semantic_boundaries.rs
 │   ├── provider/
 │   │   ├── catalog/
 │   │   │   └── rows.rs
@@ -387,6 +389,7 @@ src/
 │   ├── human_input.rs
 │   ├── lifecycle.rs
 │   ├── memory.rs
+│   ├── message_split.rs
 │   ├── mod.rs
 │   ├── provider.rs
 │   └── tool_text.rs
