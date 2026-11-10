@@ -166,7 +166,7 @@ impl QueueService {
                                 "queue-api cancel_dispatch (preserve)",
                                 crate::services::turn_lifecycle::cleanup_policy_observability_surface(
                                     crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
-                                        restart_mode: crate::services::discord::InflightRestartMode::HotSwapHandoff,
+                                        restart_mode: crate::domain::lifecycle::InflightRestartMode::HotSwapHandoff,
                                     },
                                 ),
                                 &lifecycle,
@@ -524,7 +524,7 @@ impl QueueService {
                     }
                 } else {
                     crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
-                        restart_mode: crate::services::discord::InflightRestartMode::HotSwapHandoff,
+                        restart_mode: crate::domain::lifecycle::InflightRestartMode::HotSwapHandoff,
                     }
                 }),
                 &lifecycle,
