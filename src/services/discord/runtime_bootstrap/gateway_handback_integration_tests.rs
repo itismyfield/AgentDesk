@@ -240,7 +240,6 @@ impl Running {
                 &ProviderKind::Claude,
                 acquired.waiter,
                 lease_task,
-                None,
                 Arc::new(AtomicUsize::new(0)),
                 Arc::new(AtomicBool::new(true)),
                 Arc::new(health::HealthRegistry::new()),

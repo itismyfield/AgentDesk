@@ -162,7 +162,12 @@ enum Answer {
 }
 
 /// The first answer of `session` written past `offset`.
-fn first_answer(transcript: &Path, offset: u64, session: &str) -> Option<Answer> {
+fn first_answer(
+    transcript: &Path,
+    offset: u64,
+    session: &str,
+    selector: Option<&str>,
+) -> Option<Answer> {
     use std::io::{Read, Seek};
     let mut file = std::fs::File::open(transcript).ok()?;
     file.seek(std::io::SeekFrom::Start(offset)).ok()?;
@@ -174,6 +179,9 @@ fn first_answer(transcript: &Path, offset: u64, session: &str) -> Option<Answer>
         (record["type"] == "assistant" && record["sessionId"].as_str() == Some(session))
             .then_some(record)
     })?;
+    if let Some(selector) = selector {
+        crate::services::discord::model_catalog::record_claude_model_observation(selector, &record);
+    }
     if record["isApiErrorMessage"].as_bool() == Some(true) {
         return Some(Answer::Failed);
     }
@@ -270,7 +278,14 @@ where
             return notice;
         }
         let transcript = check.transcript.as_deref();
-        let answer = transcript.and_then(|path| first_answer(path, check.offset, &confirm.session));
+        let answer = transcript.and_then(|path| {
+            first_answer(
+                path,
+                check.offset,
+                &confirm.session,
+                check.requested.as_deref(),
+            )
+        });
         if answer.is_some() || Instant::now() >= deadline {
             break answer;
         }
@@ -278,3 +293,7 @@ where
     };
     format!("{status}\n{}", answered(check, answer))
 }
+
+#[cfg(test)]
+#[path = "model_catalog_observation_tests.rs"]
+mod model_catalog_observation_tests;

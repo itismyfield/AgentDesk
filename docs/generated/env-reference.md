@@ -117,7 +117,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 
 | Variable | Defined at | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | `src/server/rate_limit_sync.rs`, `src/services/discord/model_catalog/claude.rs` | Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY. |
+| `ANTHROPIC_API_KEY` | `src/server/rate_limit_sync.rs` | Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY. |
 | `APPDATA` | `src/services/platform/binary_resolver.rs` |  |
 | `ASDF_DATA_DIR` | `src/services/platform/binary_resolver.rs` |  |
 | `BUN_INSTALL` | `src/services/platform/binary_resolver.rs` |  |

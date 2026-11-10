@@ -1307,6 +1307,7 @@ src/
 │   │   │   │   ├── herdr_recovery_tests.rs
 │   │   │   │   ├── herdr_report_tests.rs
 │   │   │   │   ├── managed_reset.rs
+│   │   │   │   ├── model_catalog_observation_tests.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── provider_reset.rs
 │   │   │   │   ├── relaunch.rs

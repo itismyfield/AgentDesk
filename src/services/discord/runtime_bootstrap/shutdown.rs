@@ -207,22 +207,11 @@ async fn abort_and_join_task(handle: Option<tokio::task::JoinHandle<()>>) {
     }
 }
 
-async fn release_catalog_before_diagnostic<F>(
-    model_catalog_refresh_task: Option<tokio::task::JoinHandle<()>>,
-    diagnostic: F,
-) where
-    F: std::future::Future<Output = ()>,
-{
-    abort_and_join_task(model_catalog_refresh_task).await;
-    diagnostic.await;
-}
-
 async fn finish_gateway_backend<E, F>(
     gateway_backend_task: tokio::task::JoinHandle<Result<(), E>>,
     provider_for_error: &ProviderKind,
     gateway_waiter: Option<GatewayWaiterGuard>,
     gateway_lease_task: Option<tokio::task::JoinHandle<()>>,
-    model_catalog_refresh_task: Option<tokio::task::JoinHandle<()>>,
     diagnostic: F,
 ) where
     E: std::fmt::Display,
@@ -259,7 +248,7 @@ async fn finish_gateway_backend<E, F>(
     let gate = crate::services::tui_o::ownership::gate(provider_for_error.as_str());
     gate.close();
     drop(gateway_waiter);
-    release_catalog_before_diagnostic(model_catalog_refresh_task, diagnostic).await;
+    diagnostic.await;
     abort_and_join_task(gateway_lease_task).await;
 }
 
@@ -271,7 +260,6 @@ pub(super) async fn run_bot_run_gateway_backend(
     provider_for_error: &ProviderKind,
     gateway_waiter: Option<GatewayWaiterGuard>,
     gateway_lease_task: Option<tokio::task::JoinHandle<()>>,
-    model_catalog_refresh_task: Option<tokio::task::JoinHandle<()>>,
     startup_reconcile_remaining_for_client_start: Arc<std::sync::atomic::AtomicUsize>,
     startup_doctor_started_for_client_start: Arc<std::sync::atomic::AtomicBool>,
     health_registry_for_client_start: Arc<health::HealthRegistry>,
@@ -283,7 +271,6 @@ pub(super) async fn run_bot_run_gateway_backend(
         provider_for_error,
         gateway_waiter,
         gateway_lease_task,
-        model_catalog_refresh_task,
         run_startup_diagnostic_after_reconcile_barrier(
             startup_reconcile_remaining_for_client_start,
             startup_doctor_started_for_client_start,
@@ -301,81 +288,6 @@ mod sigterm_tests;
 #[cfg(test)]
 #[path = "home_lifecycle_tests.rs"]
 pub(super) mod home_lifecycle_tests;
-
-#[cfg(test)]
-mod lifecycle_tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
-
-    use super::{abort_and_join_task, release_catalog_before_diagnostic};
-
-    #[test]
-    fn invariant_gateway_exit_releases_catalog_owner_before_diagnostics_and_takeover() {
-        crate::services::discord::model_catalog::with_test_claude_model_catalog_refresh_state(
-            || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                runtime.block_on(async {
-                    let refreshes = Arc::new(AtomicUsize::new(0));
-                    let (owner_tx, owner_rx) = tokio::sync::oneshot::channel();
-                    let owner_tx = std::sync::Mutex::new(Some(owner_tx));
-                    let owner = crate::services::discord::model_catalog::spawn_test_claude_model_catalog_refresh_after_claim(
-                        Arc::clone(&refreshes),
-                        move || {
-                            if let Some(owner_tx) = owner_tx.lock().unwrap().take() {
-                                let _ = owner_tx.send(());
-                            }
-                        },
-                    );
-                    tokio::time::timeout(Duration::from_millis(100), owner_rx)
-                        .await
-                        .expect("the initial supervisor must claim refresh ownership")
-                        .expect("initial supervisor ended before claiming");
-                    assert_eq!(refreshes.load(Ordering::Acquire), 1);
-
-                    let (takeover_tx, takeover_rx) = tokio::sync::oneshot::channel();
-                    let takeover_tx = std::sync::Mutex::new(Some(takeover_tx));
-                    let survivor = crate::services::discord::model_catalog::spawn_test_claude_model_catalog_refresh_after_claim(
-                        Arc::clone(&refreshes),
-                        move || {
-                            if let Some(takeover_tx) = takeover_tx.lock().unwrap().take() {
-                                let _ = takeover_tx.send(());
-                            }
-                        },
-                    );
-                    tokio::task::yield_now().await;
-                    assert_eq!(refreshes.load(Ordering::Acquire), 1);
-
-                    release_catalog_before_diagnostic(Some(owner), async {
-                        assert_eq!(
-                            refreshes.load(Ordering::Acquire),
-                            1,
-                            "the original owner must be released before diagnostics"
-                        );
-                        tokio::time::timeout(Duration::from_millis(1_100), takeover_rx)
-                            .await
-                            .expect("a live supervisor must claim before diagnostics continue")
-                            .expect("takeover supervisor ended before claiming");
-                    })
-                    .await;
-                    assert_eq!(
-                        refreshes.load(Ordering::Acquire),
-                        2,
-                        "a live supervisor must take over within the one-second standby interval"
-                    );
-
-                    abort_and_join_task(Some(survivor)).await;
-                    assert!(
-                        !crate::services::discord::model_catalog::test_claude_model_catalog_refresh_running()
-                    );
-                });
-            },
-        );
-    }
-}
 
 #[cfg(test)]
 mod gateway_waiter_tests {
@@ -417,7 +329,6 @@ mod gateway_waiter_tests {
                 &ProviderKind::Codex,
                 Some(waiter),
                 Some(lease),
-                None,
                 async {
                     assert!(
                         !advertised(&provider),
@@ -460,20 +371,13 @@ mod gateway_waiter_tests {
             std::future::pending::<()>().await;
         });
         let backend = tokio::spawn(async { Ok::<(), &str>(()) });
-        finish_gateway_backend(
-            backend,
-            &ProviderKind::Qwen,
-            None,
-            Some(lease),
-            None,
-            async {
-                assert_eq!(
-                    gate.admit(|epoch| epoch),
-                    None,
-                    "admission open after backend exit"
-                );
-            },
-        )
+        finish_gateway_backend(backend, &ProviderKind::Qwen, None, Some(lease), async {
+            assert_eq!(
+                gate.admit(|epoch| epoch),
+                None,
+                "admission open after backend exit"
+            );
+        })
         .await;
         assert_eq!(*seen.lock().unwrap(), Some(GatewayOwnership::Lost));
     }
@@ -486,7 +390,7 @@ mod gateway_waiter_tests {
         gate.acquired();
         let lease = tokio::spawn(std::future::pending::<()>());
         let backend = tokio::spawn(async { Ok::<(), &str>(()) });
-        finish_gateway_backend(backend, &provider, None, Some(lease), None, async {
+        finish_gateway_backend(backend, &provider, None, Some(lease), async {
             // The lease task's in-flight re-acquisition completes here.
             assert_eq!(gate.reacquired(), None);
         })
