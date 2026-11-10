@@ -1301,12 +1301,13 @@ PersonJoins == ~wake => pastes = 1 /\ sentInto = "busy"
    (owner_input.rs:196-197, :677-681) with no watch; the supervisor wakes only on its idle
    transition with no token (supervisor.rs:663-673). Notifications coalesce in lane.again
    (drive.rs:88-94). Fix "CBBefore" is that code; "CBAfter" notifies once after each successful
-   closer's last own cleanup, never on a refusal or a successor. The slice reuses observer. *)
+   closer's last own cleanup, never on a refusal or a successor; the finalizer's publish already
+   is that notification. The slice reuses observer. *)
 CB == observer
 CBOps == {"finalizer", "noEpisode", "stopFallback", "repair"}
 CBAfter == Fix = "CBAfter"
-\* Whether a closer's step publishes a wake in this column.
-CBTokenNotes(k) == ~CBAfter /\ k = "stopFallback"
+\* The boundary notification a closer's row step gives in this column; a token-step publish is
+\* an existing event in both columns, kept for its other subscribers and never counted here.
 CBRowNotes(k) ==
     IF CBAfter
     THEN ~(Mut \in {"cbNoNotify", "cbEarlyNotify"} /\ k = "noEpisode")
@@ -1348,8 +1349,7 @@ CBNativeEnds ==
     /\ UNCHANGED ObserverLegacy
 CBCloseToken ==
     /\ CB.native = "idle" /\ CB.phase = "open" /\ CB.token
-    /\ observer' = [CB EXCEPT !.token = FALSE,
-         !.wake = @ \/ CBTokenNotes(CB.op), !.notes = @ + (IF CBTokenNotes(CB.op) THEN 1 ELSE 0)]
+    /\ observer' = [CB EXCEPT !.token = FALSE, !.wake = @ \/ CB.op = "stopFallback"]
     /\ UNCHANGED ObserverLegacy
 CBCloseRow ==
     /\ CB.native = "idle" /\ CB.phase = "open" /\ ~CB.token /\ CB.row
