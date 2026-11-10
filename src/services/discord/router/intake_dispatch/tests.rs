@@ -379,8 +379,14 @@ async fn admitted_locally(deps: &IntakeDeps<'_>, channel: ChannelId) -> Result<(
     use crate::services::cluster::intake_router_hook::IntakeBlockedReason;
     let submission = submission_for_admission(channel, 4_360_011);
     match super::admit_text_intake(deps, &submission).await {
-        super::IntakeAdmission::Local(_) => Ok(()),
-        super::IntakeAdmission::Blocked {
+        super::IntakeAdmission::Local(permit) => {
+            assert!(
+                permit.permits_submission(&submission),
+                "the local permit must match this input"
+            );
+            Ok(())
+        }
+        super::IntakeAdmission::WriterBlocked {
             reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
         } => Err(detail),
         other => panic!("unexpected admission {other:?}"),
@@ -417,6 +423,8 @@ async fn an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_post
         Ok(()),
         "an unselected channel keeps its path"
     );
+    // Route probes do not give this fixture authority to retain input for writer boot.
+    assert!(!super::boot_custody::can_hold("claude", o.get()));
     let _not_ready = test_probe::answers(&[false]);
     let held = local(o).await.expect_err("no ready writer here");
     assert!(held.contains("gateway"), "{held}");
