@@ -374,21 +374,29 @@ src/
 │   ├── test_support.rs
 │   └── types.rs
 ├── domain/
+│   ├── message_split/
+│   │   └── semantic_boundaries.rs
 │   ├── provider/
 │   │   ├── catalog/
 │   │   │   └── rows.rs
 │   │   ├── capabilities.rs
 │   │   ├── catalog.rs
 │   │   ├── execution.rs
+│   │   ├── naming.rs
 │   │   ├── public_catalog.rs
-│   │   └── tests.rs
+│   │   ├── tests.rs
+│   │   └── value_methods.rs
+│   ├── session_identity/
+│   │   └── naming.rs
 │   ├── bot_role.rs
 │   ├── file_sync.rs
 │   ├── human_input.rs
 │   ├── lifecycle.rs
 │   ├── memory.rs
+│   ├── message_split.rs
 │   ├── mod.rs
 │   ├── provider.rs
+│   ├── session_identity.rs
 │   └── tool_text.rs
 ├── engine/
 │   ├── ops/
@@ -3552,6 +3560,7 @@ src/
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
 │   │   ├── registry.rs
+│   │   ├── runtime.rs
 │   │   ├── session_probe.rs
 │   │   └── session_prompt.rs
 │   ├── provider_auth_profile/

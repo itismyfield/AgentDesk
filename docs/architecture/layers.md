@@ -517,7 +517,6 @@ zero-rule 부채 역시 이 대응으로 검사한다. mapping을 지우거나 �
 `domain::human_input`이 HumanInputDelivery·HumanInputError·ExternalHold와 정적 hold 사유를 실제 소유하며 vocabulary다. 기존 health 경로는 같은 타입을 재노출하고 Registry·HumanInputRequest·전달 실행은 기존 Discord owner에 유지한다.
 
 S04에서 정적 catalog helper의 실제 구현은 `domain::provider`로, 문자열 naming 계산은 foundation child `domain::provider::naming`으로 옮겼다. config·auth·cache·runtime registry 조회는 `services::provider::ProviderRuntimeExt` adapter 경계가 소유한다. 기존 서비스 경로는 같은 값·함수·trait의 재수출이며 legacy 소비자는 유지한다. 별도 crate 추출 완료를 선언하지 않는다.
-언하지 않는다.
 
 ### Session identity 소유 경계
 
