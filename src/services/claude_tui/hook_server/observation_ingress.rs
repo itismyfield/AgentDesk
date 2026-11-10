@@ -184,6 +184,15 @@ pub(crate) fn observe_binding_hook(
     let (Some(command), Some(payload_session)) = (command_session_id, payload_session_id) else {
         return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
     };
+    if provider == "codex"
+        && let Some(outcome) = crate::services::tui_prompt_dedupe::observe_codex_herdr_hook(
+            payload_session,
+            &hook,
+            envelope.as_ref(),
+        )
+    {
+        return outcome;
+    }
     if command == payload_session
         && !(provider == "codex"
             && HookEventKind::from_path(event) == HookEventKind::SessionStart

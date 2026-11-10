@@ -79,7 +79,8 @@ use crate::services::codex_tui::session::{
     source_observation::{CodexHookSourceClaim, CodexRolloutSource, verify_codex_hook_source},
 };
 use crate::services::tui_prompt_dedupe::binding_context::{
-    CapturedContext, HookBindingEnvelope, SpawnNonceMarker, observe_spawn_nonce_marker,
+    BindingContext, CapturedContext, HookBindingEnvelope, SpawnNonceMarker,
+    observe_spawn_nonce_marker,
 };
 
 #[cfg(test)]
@@ -308,168 +309,196 @@ pub(crate) fn observe_codex_hook(
         );
     };
     let tmux = resolve_tmux_session_name("codex", command);
-    if context.schema != 1
-        || context.provider != "codex"
-        || tmux.as_deref() != Some(context.tmux_session.as_str())
-    {
+    if tmux.as_deref() != Some(context.tmux_session.as_str()) {
         return reject(
             NotApplicableReason::CodexContextUnavailable,
             payload_session,
         );
     }
     crate::services::tmux_common::with_tmux_source_authority(&context.tmux_session, |authority| {
-        if observe_spawn_nonce_marker(authority.session())
-            != SpawnNonceMarker::Known(context.execution_nonce.clone())
-        {
-            return reject(
-                NotApplicableReason::CodexContextUnavailable,
-                payload_session,
-            );
+        observe_codex_hook_under_source_authority(authority, payload_session, hook, context)
+    })
+}
+
+/// The relay names a native UUID; only a listed Herdr execution may use its context's logical key.
+pub(crate) fn observe_codex_herdr_hook(
+    payload_session: &str,
+    hook: &HookSignal,
+    envelope: Option<&HookBindingEnvelope>,
+) -> Option<IngressOutcome> {
+    let CapturedContext::Captured(context) = &envelope?.context else {
+        return None;
+    };
+    crate::services::tmux_common::with_tmux_source_authority(&context.tmux_session, |authority| {
+        if !herdr_execution_is(&context.tmux_session, &context.execution_nonce) {
+            return None;
         }
-        let sessions_root = context.provider_root.clone();
-        let Some(root) = sessions_root.as_deref().filter(|root| root.is_absolute()) else {
-            return reject(
-                NotApplicableReason::CodexContextUnavailable,
-                payload_session,
-            );
-        };
-        let (old, channel) =
-            with_runtime_binding_state_under_source_authority(authority, |state| {
-                (
-                    state
-                        .runtime_by_tmux
-                        .get(authority.session())
-                        .map(|entry| entry.value.clone()),
-                    state
-                        .channel_by_tmux
-                        .get(authority.session())
-                        .map(|entry| entry.value),
-                )
-            });
-        #[cfg(test)]
-        if let Some(after_snapshot) = AFTER_LEGACY_SNAPSHOT.with_borrow_mut(Option::take) {
-            after_snapshot();
-        }
-        let Some(old) = old else {
-            return IngressOutcome::Unavailable(UnavailableReason::RestoreNotReady);
-        };
-        if old.runtime_kind != RuntimeHandoffKind::CodexTui
-            || context.channel_id.filter(|id| *id != 0) != channel
-            || context.channel_id.is_none()
-        {
-            return reject(
-                NotApplicableReason::CodexContextUnavailable,
-                payload_session,
-            );
-        }
-        match binding_events::codex::superseded(context, payload_session) {
-            Ok(false) => {}
-            Ok(true) => {
-                return reject(NotApplicableReason::CodexSourceRejected, payload_session);
-            }
-            Err(error) => {
-                tracing::error!(%error, payload_session, "Codex binding history unavailable");
-                return IngressOutcome::NotDurable(NotDurableReason::Append);
-            }
-        }
-        let verified = match verify_codex_hook_source(
-            root,
-            &CodexHookSourceClaim {
-                session_id: payload_session,
-                transcript_path: hook.transcript_path.as_deref().map(std::path::Path::new),
-                expected_source: CodexRolloutSource::Cli,
-            },
-        ) {
-            Ok(verified) => Some(verified),
-            Err(error) if error.may_resolve_later() => {
-                tracing::debug!(?error, payload_session, "Codex source awaits verification");
-                None
-            }
-            Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    payload_session,
-                    "Codex source verification rejected"
-                );
-                return reject(NotApplicableReason::CodexSourceRejected, payload_session);
-            }
-        };
-        let changed = match binding_events::codex::record(
-            context,
+        Some(observe_codex_hook_under_source_authority(
+            authority,
             payload_session,
             hook,
-            verified.as_ref(),
-        ) {
+            context,
+        ))
+    })
+}
+
+fn observe_codex_hook_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    payload_session: &str,
+    hook: &HookSignal,
+    context: &BindingContext,
+) -> IngressOutcome {
+    if context.schema != 1 || context.provider != "codex" {
+        return reject(
+            NotApplicableReason::CodexContextUnavailable,
+            payload_session,
+        );
+    }
+    if observe_spawn_nonce_marker(authority.session())
+        != SpawnNonceMarker::Known(context.execution_nonce.clone())
+    {
+        return reject(
+            NotApplicableReason::CodexContextUnavailable,
+            payload_session,
+        );
+    }
+    let sessions_root = context.provider_root.clone();
+    let Some(root) = sessions_root.as_deref().filter(|root| root.is_absolute()) else {
+        return reject(
+            NotApplicableReason::CodexContextUnavailable,
+            payload_session,
+        );
+    };
+    let (old, channel) = with_runtime_binding_state_under_source_authority(authority, |state| {
+        (
+            state
+                .runtime_by_tmux
+                .get(authority.session())
+                .map(|entry| entry.value.clone()),
+            state
+                .channel_by_tmux
+                .get(authority.session())
+                .map(|entry| entry.value),
+        )
+    });
+    #[cfg(test)]
+    if let Some(after_snapshot) = AFTER_LEGACY_SNAPSHOT.with_borrow_mut(Option::take) {
+        after_snapshot();
+    }
+    let Some(old) = old else {
+        return IngressOutcome::Unavailable(UnavailableReason::RestoreNotReady);
+    };
+    if old.runtime_kind != RuntimeHandoffKind::CodexTui
+        || context.channel_id.filter(|id| *id != 0) != channel
+        || context.channel_id.is_none()
+    {
+        return reject(
+            NotApplicableReason::CodexContextUnavailable,
+            payload_session,
+        );
+    }
+    match binding_events::codex::superseded(context, payload_session) {
+        Ok(false) => {}
+        Ok(true) => {
+            return reject(NotApplicableReason::CodexSourceRejected, payload_session);
+        }
+        Err(error) => {
+            tracing::error!(%error, payload_session, "Codex binding history unavailable");
+            return IngressOutcome::NotDurable(NotDurableReason::Append);
+        }
+    }
+    let verified = match verify_codex_hook_source(
+        root,
+        &CodexHookSourceClaim {
+            session_id: payload_session,
+            transcript_path: hook.transcript_path.as_deref().map(std::path::Path::new),
+            expected_source: CodexRolloutSource::Cli,
+        },
+    ) {
+        Ok(verified) => Some(verified),
+        Err(error) if error.may_resolve_later() => {
+            tracing::debug!(?error, payload_session, "Codex source awaits verification");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                payload_session,
+                "Codex source verification rejected"
+            );
+            return reject(NotApplicableReason::CodexSourceRejected, payload_session);
+        }
+    };
+    let changed =
+        match binding_events::codex::record(context, payload_session, hook, verified.as_ref()) {
             Ok(changed) => changed,
             Err(error) => {
                 tracing::error!(%error, payload_session, "Codex binding event persistence failed");
                 return IngressOutcome::NotDurable(NotDurableReason::Append);
             }
         };
-        let Some(verified) = verified else {
-            return IngressOutcome::Durable(DurableKind::Pending);
-        };
-        let path = verified.rollout_path.to_string_lossy().into_owned();
-        if !changed && old.output_path == path && old.session_id.as_deref() == Some(payload_session)
-        {
-            return IngressOutcome::Durable(DurableKind::AlreadyRecorded);
-        }
-        if observe_spawn_nonce_marker(authority.session())
-            != SpawnNonceMarker::Known(context.execution_nonce.clone())
+    let Some(verified) = verified else {
+        return IngressOutcome::Durable(DurableKind::Pending);
+    };
+    let path = verified.rollout_path.to_string_lossy().into_owned();
+    if !changed && old.output_path == path && old.session_id.as_deref() == Some(payload_session) {
+        return IngressOutcome::Durable(DurableKind::AlreadyRecorded);
+    }
+    if observe_spawn_nonce_marker(authority.session())
+        != SpawnNonceMarker::Known(context.execution_nonce.clone())
+    {
+        return reject(
+            NotApplicableReason::CodexContextUnavailable,
+            payload_session,
+        );
+    }
+    if let Err(error) = session::write_codex_tui_rollout_marker_under_source_authority(
+        authority,
+        &verified.rollout_path,
+        Some(&verified.session_id),
+        Some(0),
+    ) {
+        tracing::error!(
+            error,
+            payload_session,
+            "Codex rollout marker publication failed"
+        );
+        return IngressOutcome::NotDurable(NotDurableReason::Append);
+    }
+    with_runtime_binding_state_under_source_authority(authority, |state| {
+        if state
+            .channel_by_tmux
+            .get(authority.session())
+            .map(|entry| entry.value)
+            != channel
+            || state
+                .runtime_by_tmux
+                .get(authority.session())
+                .map(|entry| &entry.value)
+                != Some(&old)
+            || observe_spawn_nonce_marker(authority.session())
+                != SpawnNonceMarker::Known(context.execution_nonce.clone())
         {
             return reject(
                 NotApplicableReason::CodexContextUnavailable,
                 payload_session,
             );
         }
-        if let Err(error) = session::write_codex_tui_rollout_marker_under_source_authority(
-            authority,
-            &verified.rollout_path,
-            Some(&verified.session_id),
-            Some(0),
-        ) {
-            tracing::error!(
-                error,
-                payload_session,
-                "Codex rollout marker publication failed"
-            );
-            return IngressOutcome::NotDurable(NotDurableReason::Append);
-        }
-        with_runtime_binding_state_under_source_authority(authority, |state| {
-            if state
-                .channel_by_tmux
-                .get(authority.session())
-                .map(|entry| entry.value)
-                != channel
-                || state
-                    .runtime_by_tmux
-                    .get(authority.session())
-                    .map(|entry| &entry.value)
-                    != Some(&old)
-                || observe_spawn_nonce_marker(authority.session())
-                    != SpawnNonceMarker::Known(context.execution_nonce.clone())
-            {
-                return reject(
-                    NotApplicableReason::CodexContextUnavailable,
-                    payload_session,
-                );
-            }
-            state.runtime_by_tmux.insert(
-                authority.session().to_owned(),
-                TimedValue {
-                    value: TuiRuntimeBinding {
-                        output_path: path,
-                        relay_output_path: None,
-                        session_id: Some(verified.session_id),
-                        last_offset: 0,
-                        relay_last_offset: Some(0),
-                        ..old
-                    },
-                    recorded_at: Instant::now(),
+        state.runtime_by_tmux.insert(
+            authority.session().to_owned(),
+            TimedValue {
+                value: TuiRuntimeBinding {
+                    output_path: path,
+                    relay_output_path: None,
+                    session_id: Some(verified.session_id),
+                    last_offset: 0,
+                    relay_last_offset: Some(0),
+                    ..old
                 },
-            );
-            IngressOutcome::Durable(DurableKind::Adopted)
-        })
+                recorded_at: Instant::now(),
+            },
+        );
+        IngressOutcome::Durable(DurableKind::Adopted)
     })
 }
 
