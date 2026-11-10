@@ -26,7 +26,7 @@ CHANNEL_ID = re.compile(r"\d{17,}")
 CLEAR_REFUSAL_PREFIXES = ("세션을 초기화하지 못했어요:",)
 HERDR_BIN = "/opt/homebrew/bin/herdr"
 # tmux key names a scenario may use, as Herdr names them (session_host/herdr_gate.rs herdr_key).
-HERDR_KEYS = {"C-m": "enter", "Enter": "enter", "Escape": "esc", "C-c": "ctrl+c", "C-u": "ctrl+u",
+HERDR_KEYS = {"C-m": "enter", "Enter": "enter", "Escape": "esc", "Esc": "esc", "Space": "space", "C-c": "ctrl+c", "C-u": "ctrl+u",
               "C-e": "ctrl+e", "C-s": "ctrl+s", "Left": "left", "Right": "right", "BSpace": "backspace"}
 TMUX_KEY_NAME = re.compile(r"^(?:[CMS]-\S+|BTab|DC|Delete|Down|End|Home|IC|NEnter|PageDown|PageUp|Space|Tab|Up)$")
 # send-text hands bytes to the PTY verbatim, so a raw CR/ESC/Ctrl-C in text would act as a key.
