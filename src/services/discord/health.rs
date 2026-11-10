@@ -134,9 +134,7 @@ pub(crate) use turn_deliver::inject_tests::{
 };
 #[cfg(test)]
 pub use turn_deliver::{ExternalHold, HumanInputDelivery, HumanInputError};
-pub use turn_deliver::{
-    HumanInputRequest, deliver_human_input, external_turn_hold_for_start,
-};
+pub use turn_deliver::{HumanInputRequest, deliver_human_input, external_turn_hold_for_start};
 pub(crate) use turn_deliver::{InjectAttempt, InjectOrigin, SOURCE_OWNED, inject_human_input};
 pub(crate) use turn_deliver::{deliver_with_reply, preflight_human_input};
 #[cfg(test)]
