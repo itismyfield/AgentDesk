@@ -326,7 +326,7 @@ fn write_cleared_files(
 /// Removes `path`; a missing file is already removed. The parent is synced so the removal survives.
 fn unlink(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
-        Ok(()) => crate::services::discord::runtime_store::fsync_parent_dir(path)
+        Ok(()) => crate::domain::file_sync::fsync_parent_dir(path)
             .map_err(|error| format!("sync after removing {}: {error}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("remove {}: {error}", path.display())),

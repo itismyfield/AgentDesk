@@ -14,7 +14,7 @@ use super::ledger::{LedgerEntry, LedgerState};
 use super::{
     CURSOR_DIR, ChannelStore, HaltReason, Initialized, SPOOL_DIR, StoreError, damage, durable,
 };
-use crate::services::discord::runtime_store::fsync_parent_dir;
+use crate::domain::file_sync::fsync_parent_dir;
 use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
 use crate::services::tui_o::shadow::{CaptureBatch, CapturedRecord, IDENTITY_VERSION, SourceId};
 
