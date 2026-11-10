@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use super::markers::ApiFrictionReport;
 use super::memory_sync::sync_event_memory_pg;
 use super::storage::store_api_friction_events_pg;
-use crate::services::discord::settings::ResolvedMemorySettings;
+use crate::domain::memory::ResolvedMemorySettings;
 use crate::services::memory::TokenUsage;
 
 #[derive(Clone, Debug)]

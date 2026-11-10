@@ -9,7 +9,8 @@ use std::pin::Pin;
 
 use serde_json::Value;
 
-use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings, RoleBinding};
+use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings};
+use crate::services::discord::settings::RoleBinding;
 use crate::services::provider::ProviderKind;
 
 pub(crate) use local::LocalMemoryBackend;

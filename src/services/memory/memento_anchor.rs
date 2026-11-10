@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use super::*;
-use crate::services::discord::settings::{MemoryBackendKind, RoleBinding};
+use crate::domain::memory::MemoryBackendKind;
+use crate::services::discord::settings::RoleBinding;
 use crate::services::provider::ProviderKind;
 
 const ANCHOR_POLICY: &str = "[Memento anchor context]\n\
