@@ -4009,6 +4009,8 @@ src/
 │   │   │   ├── local_retry/
 │   │   │   │   └── notice_selection.rs
 │   │   │   ├── rotation/
+│   │   │   │   ├── archive_eof.rs
+│   │   │   │   ├── archive_eof_tests.rs
 │   │   │   │   ├── claude_boundary.rs
 │   │   │   │   ├── clear_end.rs
 │   │   │   │   ├── codex_end.rs
@@ -4035,8 +4037,11 @@ src/
 │   │   │   ├── adoption_terminal_tests.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── always_on_repost_tests.rs
+│   │   │   ├── archive_boot_compat_tests.rs
+│   │   │   ├── archive_boot_tests.rs
 │   │   │   ├── archived_host_tests.rs
 │   │   │   ├── archived_source_tests.rs
+│   │   │   ├── async_question_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── bo_post_tests.rs
 │   │   │   ├── boot.rs

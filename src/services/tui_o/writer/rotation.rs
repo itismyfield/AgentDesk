@@ -989,4 +989,5 @@ pub(crate) mod probe {
     }
 }
 
+mod archive_eof;
 mod retained_capture;
