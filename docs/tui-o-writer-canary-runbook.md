@@ -151,8 +151,9 @@ channel stays on Legacy for that process with `adoption held: <reason>`:
   (`frontier F ends no record`). Legacy's reader can end a turn at its `stop_hook_summary`, so
   turn ends and TUI bookkeeping after it are not undelivered: `turn_duration`, `informational`,
   `last-prompt`, `ai-title`, `mode`, `permission-mode`, `atis-latch`, `cost-state`,
-  `file-history-snapshot` and `hook_success` attachments. The first prompt or other record there
-  is where O starts instead; it no longer holds the channel.
+  `file-history-snapshot` and `hook_success` attachments. If any other record follows F, O
+  starts at F itself, quiet records included, over `prefix_hash = sha256([0, F))`; it no longer
+  holds the channel.
 - Earlier transcripts are pinned newest first within a 64-source scan and cumulative 128 MiB
   budget. Missing past sources are skipped and the byte budget stops further pinning; exceeding
   it does not reject the whole adoption. Inspect the actual pinned set rather than assuming it
