@@ -384,10 +384,12 @@ src/
 │   │   └── tests.rs
 │   ├── bot_role.rs
 │   ├── file_sync.rs
+│   ├── human_input.rs
 │   ├── lifecycle.rs
 │   ├── memory.rs
 │   ├── mod.rs
-│   └── provider.rs
+│   ├── provider.rs
+│   └── tool_text.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── db_ops/
