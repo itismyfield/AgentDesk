@@ -763,26 +763,56 @@ class SourceCompareGapTests(unittest.TestCase):
         self.assertEqual(list(sc.native_inputs(self.path, sc.marker_pattern(
                          run_id="20261109T193944Z-rr8609"))), [])
 
+    def test_string_api_request_blob_copies_do_not_count_as_inputs(self):
+        blob = next(row for row in self.blobs() if isinstance(row["message"]["content"], str))
+        run = "20261110T000000Z-i8044"
+        marker = f"[E2E:E50:{run}:T1]"
+        pattern = sc.marker_pattern(run_id=run)
+        self.write(self.path, [marker])
+        with self.path.open("a") as out:
+            out.writelines(json.dumps(blob) + "\n" for _ in range(2))
+        self.assertEqual(list(sc.native_inputs(self.path, pattern)), [marker])
+        result = sc.compare(self.path, self.messages(marker), run_id=run)[marker]
+        self.assertEqual((result["native_user_count"], result["verdict"]), (1, "ok"))
+        binding = {"channel_id": "123", "transcript_path": str(self.path)}
+        with patch.object(sc, "resolve_binding", return_value=binding), \
+             patch.object(sc, "fetch_messages", return_value=self.messages(marker)), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(sc.main(["--channel-id", "123", "--run-id", run]), 0)
+        self.path.write_text(json.dumps(blob) + "\n")
+        self.assertEqual(list(sc.native_inputs(self.path, pattern)), [])
+        result = sc.compare(self.path, self.messages(marker), run_id=run)[marker]
+        self.assertEqual((result["native_user_count"], result["verdict"]), (0, "lost"))
+
     def test_api_request_blob_unknown_fields_or_shapes_stay_fail_closed(self):
-        baseline = self.blobs()[0]
         marker = self.marker("PROBE")
-        for kind in ("extra", "session", "hash", "role", "block", "nested", "message_extra"):
-            row = copy.deepcopy(baseline)
-            if kind == "extra":
-                row["future"] = marker
-            elif kind in ("session", "hash"):
-                row["sessionId" if kind == "session" else "hash"] = marker
-            elif kind == "role":
-                row["message"]["role"] = marker
-            elif kind == "block":
-                row["message"]["content"] = [{"type": "future", "text": marker}]
-            elif kind == "nested":
-                row["message"]["content"] = [{"type": "text", "text": [marker]}]
-            else:
-                row["message"]["future"] = marker
+        for baseline in (self.blobs()[0], self.blobs()[-1]):
+            for kind in ("extra", "session", "hash", "role", "block", "nested", "message_extra"):
+                row = copy.deepcopy(baseline)
+                if kind == "extra":
+                    row["future"] = marker
+                elif kind in ("session", "hash"):
+                    row["sessionId" if kind == "session" else "hash"] = marker
+                elif kind == "role":
+                    row["message"]["role"] = marker
+                elif kind == "block":
+                    row["message"]["content"] = [{"type": "future", "text": marker}]
+                elif kind == "nested":
+                    row["message"]["content"] = [{"type": "text", "text": [marker]}]
+                else:
+                    row["message"]["future"] = marker
+                self.path.write_text(json.dumps(row) + "\n")
+                with self.subTest(content_type=type(baseline["message"]["content"]).__name__, kind=kind), \
+                     self.assertRaisesRegex(ValueError, "unsupported marker-bearing"):
+                    list(sc.native_inputs(self.path, sc.marker_pattern(run_id=self.RUN)))
+        for blocks in (42, {"text": marker}, None):
+            row = copy.deepcopy(self.blobs()[0])
+            row["message"]["content"] = blocks
             self.path.write_text(json.dumps(row) + "\n")
-            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "unsupported marker-bearing"):
-                list(sc.native_inputs(self.path, sc.marker_pattern(run_id=self.RUN)))
+            # Numeric and null bodies need a regex that marks their JSON literals.
+            pattern = sc.marker_pattern(marker_regex=r"\b42\b|\bnull\b|PROBE")
+            with self.subTest(content=blocks), self.assertRaisesRegex(ValueError, "unsupported marker-bearing"):
+                list(sc.native_inputs(self.path, pattern))
 
     def setup_run(self, provider="codex", run=None, legacy=False):
         run = run or self.RUN
