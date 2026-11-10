@@ -296,6 +296,22 @@ domain은 services 실행 타입을 참조하지 않으며 기존 known 층과 r
 새 병합 source anchor에서 `--update-reductions`와 일반 `--check`를 실행하며, 과거 C3 매핑으로 C4 편입을 다시 승인하지 않는다.
 C5·C6도 이전 조각의 실제 squash와 검토한 accepted를 대조하는 같은 착지 절차를 적용한다.
 
+### Utility bot 역할 값 소유권 이동
+
+`UtilityBotRole`의 실제 소유는 `domain::bot_role`이다. 기존 enum·정적 구현·T2 시험을
+바이트 동일하게 이동했으며 Announce=0/Notify=1, ALL 순서, alias·credential label·emoji·
+oversize attachment 정책과 Display/FromStr 계약을 보존한다. 기존 serde 구현은 없다.
+`services::discord::bot_role`은 같은 타입을 재노출하는 단일 `pub use` 호환 경로이며,
+domain의 생산 의존은 표준 라이브러리뿐이다. 기존 vocabulary 층과 rank는 유지한다.
+
+바깥 18 consumer 파일의 작성 경로 25개만 정본으로 바꿨다. S01 source
+`da4f9e6ad1b5ed0c8ab2faa1788c1e4bbdf0ae1a`와 같은 도구로 비교한 결과
+W588→563, G488→464 ID·871→836회이며, canonical target도
+`services::discord::bot_role`에서 `domain::bot_role`로 이동했다.
+기존 Discord·legacy 소비자의 작성 경로와 동작은 유지한다.
+`cli/direct.rs`의 역할 경로 한 줄은 같은 이슈 S4 조각의 startup 변경과 구간이 분리된
+공동 파일 사용 승인을 받아 치환했다. 기준선은 source 커밋 뒤 공식 감소 갱신만 적용한다.
+
 ### Config·runtime·core와 model/org 저장 경계
 
 `config` 본체와 `runtime_layout`, live reload·credential·eventbus·logging은

@@ -38,10 +38,10 @@ impl DispatchFollowupConfig {
         Self {
             discord_api_base: crate::services::dispatches::discord_delivery::discord_api_base_url(),
             notify_bot_token: crate::credential::read_bot_token(
-                crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+                crate::domain::bot_role::UtilityBotRole::Notify.alias(),
             ),
             announce_bot_token: crate::credential::read_bot_token(
-                crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
+                crate::domain::bot_role::UtilityBotRole::Announce.alias(),
             ),
         }
     }

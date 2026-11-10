@@ -46,8 +46,7 @@ const PAST_TOLERANCE_SECS: i64 = 60;
 
 /// Info-only scheduled pushes must not wake an agent that owns the target
 /// channel, so they use the non-actionable utility-bot role.
-const DEFAULT_SCHEDULED_MESSAGE_BOT: &str =
-    crate::services::discord::bot_role::UtilityBotRole::Notify.alias();
+const DEFAULT_SCHEDULED_MESSAGE_BOT: &str = crate::domain::bot_role::UtilityBotRole::Notify.alias();
 
 type ApiResponse = AppResult<(StatusCode, Json<JsonValue>)>;
 

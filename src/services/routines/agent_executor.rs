@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
 
-use crate::services::discord::bot_role::UtilityBotRole;
+use crate::domain::bot_role::UtilityBotRole;
 use crate::services::discord::health::{
     HealthRegistry, reserve_headless_agent_turn, reserve_headless_agent_turn_in_dm,
     resolve_bot_http, start_reserved_headless_agent_turn_in_dm,
