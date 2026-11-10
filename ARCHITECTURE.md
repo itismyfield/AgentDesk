@@ -374,6 +374,7 @@ src/
 │   ├── test_support.rs
 │   └── types.rs
 ├── domain/
+│   ├── bot_role.rs
 │   ├── lifecycle.rs
 │   └── mod.rs
 ├── engine/
