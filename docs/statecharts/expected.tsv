@@ -201,6 +201,11 @@ tui-o-writer/WriterMissingHaltOrphanFixed.cfg	WriterMissingHalt	-	-
 input-single-path/InputOwnershipPersonBusy.cfg	InputOwnership	-
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
+tui-o-writer/WriterArchivedSourceBefore.cfg	WriterArchivedSource	ArchiveAtVerifiedEofRetires
+tui-o-writer/WriterArchivedSourceAfter.cfg	WriterArchivedSource	-
+tui-o-writer/WriterArchivedSourceNoDrain.cfg	WriterArchivedSource	NoUnsentTailLost
+tui-o-writer/WriterArchivedSourceRebindBefore.cfg	WriterArchivedSource	-	NewBindingProgress
+tui-o-writer/WriterArchivedSourceRebindAfter.cfg	WriterArchivedSource	-	-
 campaign-execution/CampaignVerification.cfg	CampaignVerification	-	-
 campaign-execution/CampaignVerificationChart.cfg	CampaignVerification	-	-
 campaign-execution/CampaignVerificationClaimKept.cfg	CampaignVerification	ImmediateRevokes,NoStartWithoutAuthority	-
