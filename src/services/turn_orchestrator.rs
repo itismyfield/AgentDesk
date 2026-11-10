@@ -116,7 +116,7 @@ pub(crate) use queued_head::{OwedDrop, TurnBind, Waiting, v2_queue, waiting_orig
 pub(crate) type OwnerFront = (Option<String>, PendingQueueItem);
 #[derive(Clone, Debug)]
 pub(crate) enum TakeHeadCondition {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "state_properties"))]
     Unchecked,
     Observed(Option<QueueIdentity>),
 }
@@ -850,7 +850,7 @@ impl ChannelMailboxHandle {
             })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "state_properties"))]
     pub(crate) async fn take_next_soft(
         &self,
         persistence: QueuePersistenceContext,
@@ -858,7 +858,7 @@ impl ChannelMailboxHandle {
         self.take_soft_matching(persistence, None).await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "state_properties"))]
     pub(crate) async fn take_soft_matching(
         &self,
         persistence: QueuePersistenceContext,
@@ -2226,7 +2226,7 @@ fn input_mailbox_step(
                 TakeHeadCondition::Observed(expected) => {
                     state.intervention_queue.first().map(QueueIdentity::of) != expected
                 }
-                #[cfg(test)]
+                #[cfg(any(test, feature = "state_properties"))]
                 TakeHeadCondition::Unchecked => false,
             };
             if selection_stale {

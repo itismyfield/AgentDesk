@@ -200,6 +200,10 @@ mod tui_task_card;
 mod turn_bridge;
 #[allow(clippy::too_many_arguments)]
 mod turn_finalizer;
+#[cfg(any(test, feature = "state_properties"))]
+mod state_properties;
+#[cfg(feature = "state_properties")]
+pub(crate) use state_properties::run_all as run_state_property_tests;
 pub(crate) mod turn_lease;
 mod turn_view_reconciler;
 #[path = "watchers/lifecycle_decision.rs"]
@@ -1299,12 +1303,12 @@ impl SharedData {
     // `shared_state` sibling module alongside `QueuedPlaceholderState`.
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "state_properties"))]
 pub(crate) fn make_shared_data_for_tests() -> Arc<SharedData> {
     make_shared_data_for_tests_with_storage(None)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "state_properties"))]
 pub(super) fn make_shared_data_for_tests_with_storage(
     pg_pool: Option<sqlx::PgPool>,
 ) -> Arc<SharedData> {
@@ -1315,7 +1319,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
 }
 
 /// One process's providers share `shutdown_remaining`; a test of that barrier injects it.
-#[cfg(test)]
+#[cfg(any(test, feature = "state_properties"))]
 pub(super) fn make_shared_data_for_tests_with_barrier(
     pg_pool: Option<sqlx::PgPool>,
     shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,

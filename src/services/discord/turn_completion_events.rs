@@ -72,7 +72,7 @@ impl TurnCompletionEvent {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "state_properties"))]
 pub(in crate::services::discord) fn turn_completion_event_bus()
 -> broadcast::Sender<TurnCompletionEvent> {
     broadcast::channel(TURN_COMPLETION_EVENT_BUS_CAPACITY).0

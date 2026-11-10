@@ -241,6 +241,11 @@ mod services;
 /// ```
 pub use services::claude_command::ClaudeBinary;
 
+#[cfg(feature = "state_properties")]
+pub fn run_state_property_tests() {
+    services::discord::run_state_property_tests();
+}
+
 // Supervisor test hooks are intentionally retained for dispatch/runtime tests.
 pub(crate) mod supervisor;
 mod ui;

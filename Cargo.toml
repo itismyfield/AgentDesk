@@ -108,6 +108,8 @@ rand = "0.8"
 libc = "0.2"
 croner = "3.0.1"
 tempfile = "3"
+proptest = { version = "1.6", optional = true }
+proptest-state-machine = { version = "0.3", optional = true }
 
 
 [target.'cfg(windows)'.dependencies]
@@ -116,10 +118,15 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1.8"
 
+[features]
+state_properties = ["dep:proptest", "dep:proptest-state-machine"]
+
 [dev-dependencies]
 flate2 = "1"
 filetime = "0.2"
 plist = "1.8"
+proptest = "1.6"
+proptest-state-machine = "0.3"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
