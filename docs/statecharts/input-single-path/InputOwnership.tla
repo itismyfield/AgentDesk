@@ -1291,27 +1291,37 @@ PersonBusyNext == DriveBusy
 PersonJoins == ~wake => pastes = 1 /\ sentInto = "busy"
 
 \* ------------------------------------------------------------------- CompletionWake
-(* One owner start waits behind an ended turn's token and row; one closing operation removes them.
-   Closers (code ec1ffa4cc): finalizer = episode.rs:87 token, :133 row, then one queue-eligible
-   publish (completion_admission_actor.rs:136-151); noEpisode = carried_turn_close.rs:279 archive,
-   :343 kick, or herdr_row_end.rs:270-282; stopFallback = runtime_stop.rs:199 token publish
-   (mailbox_finish.rs:54-76) before the row clear at :241-250; repair = a row clear with no wake
-   (inflight_repair.rs:81, health_api.rs:811). A refused archive keeps the row and retries; a
-   successor row is left to its own turn. The owner refuses a start while a token or a row holds
-   (owner_input.rs:196-197, :677-681) with no watch; the supervisor wakes only on its idle
-   transition with no token (supervisor.rs:663-673). Notifications coalesce in lane.again
-   (drive.rs:88-94). Fix "CBBefore" is that code; "CBAfter" notifies once after each successful
-   closer's last own cleanup, never on a refusal or a successor; the finalizer's publish already
-   is that notification. The slice reuses observer. *)
+(* One owner start waits behind an ended turn's token, row and terminal barrier; one closing
+   operation removes them. Every wake a closer causes counts as a resume notification.
+   Closers (code ec1ffa4cc):
+   finalizer = episode.rs:87 token (no completion), :133 row, completion_admission_actor.rs:136-151
+   publish once a token was removed; tokenless = the same finalizer with no token: episode.rs:97-104
+   makes removed_token None, :129-138 still clears the row, completion_admission_actor.rs:141-148
+   and finalize.rs:305-313 publish nothing (foreign_recovery.rs:358 from the leaked-row sweep,
+   relay_recovery_leaked_row_sweep.rs:61); noEpisode = carried_turn_close.rs:279 archive, :340 lock
+   drop, :343 kick, or herdr_row_end.rs:270-282; stopFallback = runtime_stop.rs:199 token release
+   publishing QueueEligible (mailbox_finish.rs:73-78, turn_completion_events.rs:122-132) before the
+   row clear at :241-250; repair = a row clear with no wake (inflight_repair.rs:81,
+   health_api.rs:811). A refused archive keeps the row; a successor row runs its own finalizer.
+   The owner refuses a start while a token, a row or a held barrier stands (owner_input.rs:196-197,
+   :213-214, :677-681) with no watch; the supervisor wakes only on its idle transition with no token
+   (supervisor.rs:663-673). One drive runs per channel; a wake during a run sets lane.again
+   (drive.rs:88-94, :114-117); a front is granted, claimed, pasted, then settled (drive.rs:37-48).
+   "CBBefore" is that code. "CBAfter": the stop releases its token with MailboxReleased only, and
+   each successful closer notifies once after its barrier; a token-removing finalizer's publish is
+   that notification. The slice reuses observer. *)
 CB == observer
-CBOps == {"finalizer", "noEpisode", "stopFallback", "repair"}
+CBOps == {"finalizer", "tokenless", "noEpisode", "stopFallback", "repair"}
 CBAfter == Fix = "CBAfter"
-\* The boundary notification a closer's row step gives in this column; a token-step publish is
-\* an existing event in both columns, kept for its other subscribers and never counted here.
-CBRowNotes(k) ==
+\* Whether the token step wakes the owner: stop's QueueEligible publish, or its reverted mutant.
+CBTokenWakes(k) == k = "stopFallback" /\ (~CBAfter \/ Mut = "cbTokenEligible")
+\* Whether the barrier step notifies; the early mutant moves that wake to the row step.
+CBBarrierNotes(k) ==
     IF CBAfter
     THEN ~(Mut \in {"cbNoNotify", "cbEarlyNotify"} /\ k = "noEpisode")
     ELSE k \in {"finalizer", "noEpisode"} /\ (Mut # "cbNoNotify" \/ k # "noEpisode")
+CBRowNotes(k) == CBAfter /\ Mut = "cbEarlyNotify" /\ k = "noEpisode"
+CBBlocked == CB.token \/ CB.row \/ CB.barrier
 CompletionWakeInit ==
     /\ mode = "turn" /\ src = "start" /\ mbx = "idle" /\ nat = "idle"
     /\ natOwner = "none" /\ inp = "queued" /\ pend = FALSE /\ reader = FALSE /\ obsOk = TRUE
@@ -1324,18 +1334,38 @@ CompletionWakeInit ==
     /\ nr = "ok" /\ ev = "none" /\ prov = "none" /\ seen = "none"
     /\ \E o \in CBOps, w \in BOOLEAN :
         observer = [op |-> o, token |-> o \in {"finalizer", "stopFallback"}, row |-> TRUE,
-            native |-> "busy", phase |-> "open", wake |-> w, pending |-> TRUE, pastes |-> 0,
-            watched |-> FALSE, notes |-> 0, closes |-> 0, refusalNotes |-> 0,
-            refusals |-> 0, successors |-> 0]
+            barrier |-> TRUE, native |-> "busy", phase |-> "open", wake |-> w, pending |-> TRUE,
+            running |-> FALSE, claims |-> 0, pastes |-> 0, watched |-> FALSE, notes |-> 0,
+            closes |-> 0, refusalNotes |-> 0, refusals |-> 0, successors |-> 0, dups |-> 0,
+            arrivals |-> 0]
 
-\* ingress.rs:457-459 and routine.rs:380 wake on admission; drive.rs:96-123 takes one look per wake.
+\* Admission wakes (ingress.rs:457-459, start.rs:74); a look grants and claims, or is refused.
+\* The duplicate-claim mutant lets a second look claim while the first claim is unsettled.
 CBLook ==
-    /\ CB.wake /\ CB.pending
-    /\ observer' = IF CB.token \/ CB.row
+    /\ CB.wake /\ CB.pending /\ (~CB.running \/ Mut = "cbDupClaim")
+    /\ observer' = IF CBBlocked
                    THEN [CB EXCEPT !.wake = FALSE]
                    ELSE IF CB.native = "busy"
                    THEN [CB EXCEPT !.wake = FALSE, !.watched = TRUE]
-                   ELSE [CB EXCEPT !.wake = FALSE, !.pending = FALSE, !.pastes = @ + 1]
+                   ELSE [CB EXCEPT !.wake = FALSE, !.running = TRUE, !.claims = @ + 1]
+    /\ UNCHANGED ObserverLegacy
+CBPaste ==
+    /\ CB.claims > 0
+    /\ observer' = [CB EXCEPT !.claims = @ - 1, !.pastes = @ + 1]
+    /\ UNCHANGED ObserverLegacy
+\* The input settles and leaves the queue; a later wake finds no front (drive.rs:104-117).
+CBSettle ==
+    /\ CB.running /\ CB.claims = 0 /\ CB.pastes > 0
+    /\ observer' = [CB EXCEPT !.running = FALSE, !.pending = FALSE]
+    /\ UNCHANGED ObserverLegacy
+CBNothingLeft ==
+    /\ CB.wake /\ ~CB.pending /\ ~CB.running
+    /\ observer' = [CB EXCEPT !.wake = FALSE]
+    /\ UNCHANGED ObserverLegacy
+\* Another input's admission wakes the drive at any time, also while a claim runs (ingress.rs:458).
+CBArrival ==
+    /\ CB.arrivals = 0
+    /\ observer' = [CB EXCEPT !.arrivals = 1, !.wake = TRUE]
     /\ UNCHANGED ObserverLegacy
 \* owner_input.rs:744-751 with held_watch.rs:111-140: a native read that turns idle wakes once.
 CBWatchSees ==
@@ -1349,20 +1379,27 @@ CBNativeEnds ==
     /\ UNCHANGED ObserverLegacy
 CBCloseToken ==
     /\ CB.native = "idle" /\ CB.phase = "open" /\ CB.token
-    /\ observer' = [CB EXCEPT !.token = FALSE, !.wake = @ \/ CB.op = "stopFallback"]
+    /\ LET n == CBTokenWakes(CB.op)
+       IN observer' = [CB EXCEPT !.token = FALSE, !.wake = @ \/ n,
+            !.notes = @ + (IF n THEN 1 ELSE 0)]
     /\ UNCHANGED ObserverLegacy
 CBCloseRow ==
     /\ CB.native = "idle" /\ CB.phase = "open" /\ ~CB.token /\ CB.row
     /\ LET n == CBRowNotes(CB.op)
-           twice == n /\ Mut = "cbDoubleNotify" /\ CB.op = "finalizer"
-       IN observer' = [CB EXCEPT !.row = FALSE, !.phase = "done", !.closes = @ + 1,
-            !.wake = @ \/ n, !.notes = @ + (IF n THEN (IF twice THEN 2 ELSE 1) ELSE 0)]
+       IN observer' = [CB EXCEPT !.row = FALSE, !.phase = "rowGone", !.wake = @ \/ n,
+            !.notes = @ + (IF n THEN 1 ELSE 0)]
     /\ UNCHANGED ObserverLegacy
-\* The mutant moves the wake before the row goes: the low-level archive wake the contract refuses.
-CBEarlyNotify ==
-    /\ Mut = "cbEarlyNotify" /\ CBAfter /\ CB.native = "idle" /\ CB.phase = "open"
-    /\ ~CB.token /\ CB.row /\ CB.op = "noEpisode" /\ CB.notes = 0
-    /\ observer' = [CB EXCEPT !.wake = TRUE, !.notes = 1]
+\* The closer's last own step: its lock drop or receipt commit (carried_turn_close.rs:340).
+CBCloseBarrier ==
+    /\ CB.phase = "rowGone" /\ CB.barrier
+    /\ LET n == CBBarrierNotes(CB.op)
+       IN observer' = [CB EXCEPT !.barrier = FALSE, !.phase = "done", !.closes = @ + 1,
+            !.wake = @ \/ n, !.notes = @ + (IF n THEN 1 ELSE 0)]
+    /\ UNCHANGED ObserverLegacy
+\* The double mutant sends a second, separate notification for a finished finalizer close.
+CBLateDuplicate ==
+    /\ Mut = "cbDoubleNotify" /\ CB.phase = "done" /\ CB.op = "finalizer" /\ CB.dups = 0
+    /\ observer' = [CB EXCEPT !.dups = 1, !.wake = TRUE, !.notes = @ + 1]
     /\ UNCHANGED ObserverLegacy
 \* A guarded archive that is not Cleared keeps the row for the next pass (carried_turn_close.rs:287).
 CBCloseRefused ==
@@ -1371,23 +1408,25 @@ CBCloseRefused ==
        IN observer' = [CB EXCEPT !.refusals = 1, !.wake = @ \/ n,
             !.refusalNotes = @ + (IF n THEN 1 ELSE 0)]
     /\ UNCHANGED ObserverLegacy
-\* The closer finds another turn's row; that turn runs and ends through its own finalizer.
+\* The closer finds another turn's row (UserMsgMismatch); that turn ends through its own finalizer.
 CBSuccessor ==
     /\ CB.phase = "open" /\ CB.row /\ CB.successors = 0 /\ CB.native = "idle"
     /\ observer' = [CB EXCEPT !.successors = 1, !.op = "finalizer", !.token = TRUE,
          !.native = "busy"]
     /\ UNCHANGED ObserverLegacy
-CBNext == CBLook \/ CBWatchSees \/ CBNativeEnds \/ CBCloseToken \/ CBCloseRow \/ CBEarlyNotify
-    \/ CBCloseRefused \/ CBSuccessor
+CBNext == CBLook \/ CBPaste \/ CBSettle \/ CBNothingLeft \/ CBArrival \/ CBWatchSees \/ CBNativeEnds
+    \/ CBCloseToken \/ CBCloseRow \/ CBCloseBarrier \/ CBLateDuplicate \/ CBCloseRefused \/ CBSuccessor
 CBSpec == CompletionWakeInit /\ [][CBNext]_vars
-    /\ WF_vars(CBLook) /\ WF_vars(CBWatchSees) /\ WF_vars(CBNativeEnds)
-    /\ WF_vars(CBCloseToken) /\ WF_vars(CBCloseRow)
+    /\ WF_vars(CBLook) /\ WF_vars(CBPaste) /\ WF_vars(CBSettle) /\ WF_vars(CBNothingLeft)
+    /\ WF_vars(CBWatchSees) /\ WF_vars(CBNativeEnds) /\ WF_vars(CBCloseToken)
+    /\ WF_vars(CBCloseRow) /\ WF_vars(CBCloseBarrier) /\ WF_vars(CBLateDuplicate)
 
-\* Every blocker is gone, nothing is pending and the start still waits: it waits forever.
-CBQuiet == CB.phase = "done" /\ ~CB.token /\ ~CB.row /\ CB.native = "idle" /\ ~CB.wake /\ ~CB.watched
+\* Every blocker is gone, nothing is pending or running and the start still waits: forever.
+CBQuiet == CB.phase = "done" /\ ~CBBlocked /\ CB.native = "idle" /\ ~CB.wake /\ ~CB.watched
+           /\ ~CB.running
 CBNoStall == ~(CBQuiet /\ CB.pending)
 CBDeliverOnce == CB.pastes <= 1
-\* At most one notification per finished close, none before it; deliveries stay once regardless.
+\* Closer wakes: at most one per finished close and none before its barrier.
 CBCloseNotifiesOnce == CB.notes <= CB.closes
 CBRefusalSilent == CB.refusalNotes = 0
 CBEventuallyDelivered == <>(CB.pastes = 1)

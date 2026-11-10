@@ -189,11 +189,13 @@ tui-o-writer/WriterMissingHaltMetadata.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltOrphanBefore.cfg	WriterMissingHalt	-	OrphanRecovers
 tui-o-writer/WriterMissingHaltOrphanFixed.cfg	WriterMissingHalt	-	-
 input-single-path/InputOwnershipPersonBusy.cfg	InputOwnership	-
-input-single-path/InputOwnershipCBBefore.cfg	InputOwnership	CBNoStall	CBEventuallyDelivered
+input-single-path/InputOwnershipCBBefore.cfg	InputOwnership	CBCloseNotifiesOnce,CBNoStall	CBEventuallyDelivered
 input-single-path/InputOwnershipCBAfter.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipCBNoNotify.cfg	InputOwnership	CBNoStall	CBEventuallyDelivered
 input-single-path/InputOwnershipCBEarlyNotify.cfg	InputOwnership	CBCloseNotifiesOnce,CBNoStall	CBEventuallyDelivered
 input-single-path/InputOwnershipCBDoubleNotify.cfg	InputOwnership	CBCloseNotifiesOnce	-
 input-single-path/InputOwnershipCBFailNotify.cfg	InputOwnership	CBRefusalSilent	-
+input-single-path/InputOwnershipCBTokenEligible.cfg	InputOwnership	CBCloseNotifiesOnce	-
+input-single-path/InputOwnershipCBDupClaim.cfg	InputOwnership	CBDeliverOnce	-
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
