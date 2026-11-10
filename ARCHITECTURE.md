@@ -936,6 +936,7 @@ src/
 │   │   │   ├── observation_ingress/
 │   │   │   │   └── resume_start.rs
 │   │   │   ├── adoption_retry.rs
+│   │   │   ├── codex_herdr_ingress_tests.rs
 │   │   │   ├── codex_ingress_tests.rs
 │   │   │   ├── hook_event.rs
 │   │   │   ├── native_clear_fence_tests.rs
