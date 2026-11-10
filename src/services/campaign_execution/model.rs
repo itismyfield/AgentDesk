@@ -3,14 +3,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::adk_workspace::WorkspaceObservation;
 use super::candidate_seal::CandidateSeal;
 use super::definition::{
     AcceptanceCondition, DefinitionError, DefinitionHashes, DefinitionInput, ValidatedDefinition,
 };
+use super::evidence::{EvidenceDecision, EvidenceEnvelope};
 use super::evidence_gate::{StageAssessment, Verdict};
 use super::execution_pin::ExecutionPin;
+use super::profile::ExecutionEnvironment;
 use super::review_gate::StagePrerequisite;
-use super::verification_run::{Digest, VerificationRun, VerificationSpec};
+use super::verification_run::{
+    Digest, InitiationObservation, PhaseInput, PhaseResult, ProcessIdentity,
+    TerminationObservation, VerificationRun, VerificationSpec,
+};
 
 macro_rules! domain_enum {
     ($name:ident { $($variant:ident),+ $(,)? }) => {
@@ -278,6 +284,12 @@ pub struct Run {
     pub prerequisites: BTreeMap<String, StagePrerequisite>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fences: BTreeMap<String, NodeFence>,
+    // The one seal of each Work attempt's output, keyed by attempt ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub seals: BTreeMap<String, CandidateSeal>,
+    // The environment observed with a V's first start receipt, keyed by execution ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environments: BTreeMap<String, ExecutionEnvironment>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,6 +436,65 @@ pub enum Command {
         attempt_id: String,
         review: Option<Box<StageAssessment>>,
     },
+    // The workspace observation is the caller's reading of the session's checkout.
+    SealCandidate {
+        claim: Box<EvidenceEnvelope>,
+        repository_identity: String,
+        workspace: Box<WorkspaceObservation>,
+    },
+    BindVerificationSubject {
+        execution_id: String,
+        consumer: Box<AttemptBinding>,
+    },
+    BindVerificationInput {
+        execution_id: String,
+        phase_id: String,
+        consumer: Box<AttemptBinding>,
+        input: Box<PhaseInput>,
+    },
+    BindVerificationPlan {
+        execution_id: String,
+        consumer: Box<AttemptBinding>,
+    },
+    // A fact about a phase its gate already acted on; it needs no current holder.
+    RecordVerificationPhase {
+        execution_id: String,
+        phase_id: String,
+        fact: Box<PhaseFact>,
+    },
+    // Collects the V, or closes it as cancelled once a remaining phase can no longer start.
+    SettleVerification {
+        execution_id: String,
+        evidence: String,
+    },
+}
+
+// Every start receipt carries the environment its host observed; the first one is kept.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "fact", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PhaseFact {
+    Started {
+        receipt: String,
+        process: ProcessIdentity,
+        environment: Box<ExecutionEnvironment>,
+    },
+    NotStarted {
+        evidence: String,
+    },
+    Indeterminate {
+        initiation_id: String,
+        evidence: String,
+    },
+    Resolved {
+        observation: InitiationObservation,
+        environment: Option<Box<ExecutionEnvironment>>,
+    },
+    Terminated {
+        observation: TerminationObservation,
+    },
+    Finished {
+        result: Box<PhaseResult>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -492,6 +563,14 @@ pub enum EventKind {
         attempt_id: String,
         verdict: Verdict,
     },
+    CandidateSealed {
+        node_id: String,
+        attempt_id: String,
+        seal_id: String,
+    },
+    VerificationChanged {
+        execution_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -517,6 +596,18 @@ pub struct Decision {
     pub state: CampaignState,
     pub events: Vec<Event>,
     pub result: CommandResult,
+    // Evidence rows written in the same transaction as the state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<EvidenceWrite>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EvidenceWrite {
+    Admitted {
+        envelope: Box<EvidenceEnvelope>,
+        decision: EvidenceDecision,
+    },
+    Seal(Box<CandidateSeal>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

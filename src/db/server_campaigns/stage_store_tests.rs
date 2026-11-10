@@ -96,6 +96,7 @@ async fn stored_v_origin_filled_slots_prerequisites_and_pins_cannot_be_rewritten
         wrong.event_sequence += 1;
         rewrite(wrong.run.as_mut().unwrap());
         let decision = Decision {
+            records: Vec::new(),
             result: CommandResult {
                 definition_revision: 1,
                 run_id: Some("run".into()),
