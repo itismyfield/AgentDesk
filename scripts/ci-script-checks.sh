@@ -403,6 +403,7 @@ if run_check census "TUI O writer census: Legacy send sites and cutover gates"; 
 "$PYTHON" -m unittest tests.test_tui_o_body_probes_7651
 "$PYTHON" -m unittest tests.test_terminal_notice_census
 "$PYTHON" -m unittest tests.test_retired_panel_boot_wiring
+"$PYTHON" -m unittest tests.test_legacy_body_gate_check
 fi
 
 if run_check guards "Config snapshot disk-reader zero guard"; then

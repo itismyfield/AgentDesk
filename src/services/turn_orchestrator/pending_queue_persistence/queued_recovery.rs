@@ -91,18 +91,26 @@ pub(crate) fn v2_channels(provider: &ProviderKind, token_hash: &str) -> Vec<Chan
     v2.map(|(channel, _)| channel).collect()
 }
 
-/// Source ids a read-only V2 queue file keeps, queued, attempted, retained or settled, so a binary
-/// that cannot write V2 never takes them again; a legacy, missing or unreadable file keeps none.
+/// Source ids a read-only V2 queue file keeps, so a binary that cannot write V2 never takes them
+/// again; a legacy, missing or unreadable file keeps none.
+#[derive(Default)]
+pub(crate) struct V2HeldSources {
+    /// Queued, attempted or retained inputs the owner still owes a delivery.
+    pub(crate) owed: Vec<u64>,
+    /// Inputs only the settled history holds: the owner confirmed their delivery.
+    pub(crate) delivered: Vec<u64>,
+}
+
 pub(crate) fn v2_held_sources(
     provider: &ProviderKind,
     token_hash: &str,
     channel: ChannelId,
-) -> Vec<u64> {
+) -> V2HeldSources {
     let read = super::pending_queue_file_path(provider, token_hash, channel)
         .and_then(|path| fs::read_to_string(path).ok())
         .and_then(|content| compat::inspect(&content).ok());
     let Some(SnapshotRead::ReadOnlyV2(snapshot)) = read else {
-        return Vec::new();
+        return V2HeldSources::default();
     };
     let ids = |item: &super::PendingQueueItem| match item.source_message_ids.as_slice() {
         [] => vec![item.message_id],
@@ -117,16 +125,18 @@ pub(crate) fn v2_held_sources(
             .flat_map(|payload| payload.followers.iter());
         std::iter::once(&input.original).chain(followers)
     });
-    let settled = snapshot.terminal_identities.iter();
-    let settled =
-        settled.flat_map(|terminal| terminal.identity.sources.iter().map(|s| s.message_id));
-    snapshot
+    let owed: Vec<u64> = snapshot
         .items
         .iter()
         .chain(attempted)
         .flat_map(ids)
-        .chain(settled)
-        .collect()
+        .collect();
+    let settled = snapshot.terminal_identities.iter();
+    let settled =
+        settled.flat_map(|terminal| terminal.identity.sources.iter().map(|s| s.message_id));
+    // An id still owed stays owed even when an earlier delivery of it settled.
+    let delivered = settled.filter(|id| !owed.contains(id)).collect();
+    V2HeldSources { owed, delivered }
 }
 
 pub(crate) fn read_catalog(provider: &ProviderKind, token_hash: &str) -> SnapshotCatalog {

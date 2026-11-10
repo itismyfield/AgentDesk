@@ -108,9 +108,10 @@ def native_inputs(path, pattern):
             message = row.get("message")
             blocks = message.get("content") if isinstance(message, dict) else None
             known = set(row) == {"type", "sessionId", "hash", "message"} and isinstance(message, dict) and (
-                set(message) == {"role", "content"} and message["role"] == "user" and isinstance(blocks, list) and all(
-                    isinstance(b, str) or isinstance(b, dict) and set(b) == {"type", "text"}
-                    and b["type"] == "text" and isinstance(b["text"], str) for b in blocks)) and not any(
+                set(message) == {"role", "content"} and message["role"] == "user" and (
+                    isinstance(blocks, str) or (isinstance(blocks, list) and all(
+                        isinstance(b, str) or isinstance(b, dict) and set(b) == {"type", "text"}
+                        and b["type"] == "text" and isinstance(b["text"], str) for b in blocks)))) and not any(
                 markers(json.dumps(value, ensure_ascii=False), pattern)
                 for key, value in row.items() if key != "message")
         else:

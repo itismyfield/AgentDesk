@@ -303,6 +303,7 @@ src/
 │   │   ├── recovery_tests.rs
 │   │   ├── stage_store_tests.rs
 │   │   ├── storage_tests.rs
+│   │   ├── verification_store_tests.rs
 │   │   └── write.rs
 │   ├── session_observability/
 │   │   └── background_ordering_pg_tests.rs
@@ -855,6 +856,7 @@ src/
 │   │   ├── review_gate_tests.rs
 │   │   ├── stage_fsm.rs
 │   │   ├── stage_fsm_tests.rs
+│   │   ├── verification_commands.rs
 │   │   ├── verification_run.rs
 │   │   ├── verification_run_tests.rs
 │   │   ├── verification_runner.rs

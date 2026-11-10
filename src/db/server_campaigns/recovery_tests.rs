@@ -731,6 +731,7 @@ async fn replaced_current_run_does_not_erase_old_attempt_action_or_runtime_pg() 
         &mut tx,
         Some(&original),
         &Decision {
+            records: Vec::new(),
             state: replacement,
             events: vec![event],
             result,

@@ -47,6 +47,8 @@ pub(in crate::services::discord) enum RecoveryKnownIdArm {
     ActiveTurn,
     /// A durable successful claim, retained after the turn ends; not delivery proof.
     Dispatched,
+    /// A V2 queue file's settled history: its owner confirmed this input delivered.
+    V2Delivered,
     /// A busy-turn injection put this message into a pane that recorded it.
     InjectedObserved,
     /// A busy-turn injection may have put this message into a pane; it is never resent on its
@@ -142,14 +144,15 @@ fn recovery_known_id_arms(
     arms
 }
 
-/// Ids a read-only V2 queue file keeps count as queued, so catch-up never takes them again on a
-/// binary that cannot write that file; an input owner holding the file admits by ticket instead.
+/// Ids a read-only V2 queue file keeps stay known, so catch-up never takes them again on a binary
+/// that cannot write that file; only a settled one may let the frontier pass.
 pub(in crate::services::discord) async fn merge_v2_held_sources(
     shared: &crate::services::discord::SharedData,
     channel: poise::serenity_prelude::ChannelId,
     arms: &mut std::collections::HashMap<u64, RecoveryKnownIdArm>,
     ids: &mut std::collections::HashSet<u64>,
 ) {
+    // An input owner holding the file admits by ticket instead.
     #[cfg(test)]
     if shared
         .mailbox(channel)
@@ -159,9 +162,13 @@ pub(in crate::services::discord) async fn merge_v2_held_sources(
     {
         return;
     }
+    use RecoveryKnownIdArm::{Queued, V2Delivered};
     let held = crate::services::turn_orchestrator::v2_held_sources;
-    for id in held(&shared.provider, &shared.token_hash, channel) {
-        arms.entry(id).or_insert(RecoveryKnownIdArm::Queued);
+    let held = held(&shared.provider, &shared.token_hash, channel);
+    let owed = held.owed.into_iter().map(|id| (id, Queued));
+    let delivered = held.delivered.into_iter().map(|id| (id, V2Delivered));
+    for (id, arm) in owed.chain(delivered) {
+        arms.entry(id).or_insert(arm);
         ids.insert(id);
     }
 }
