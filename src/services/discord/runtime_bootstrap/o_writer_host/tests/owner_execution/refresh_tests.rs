@@ -836,3 +836,7 @@ async fn owner_refresh_foreign_executor_after_transient_failure_stays_suspended_
     );
     pool.close().await;
 }
+
+#[cfg(unix)]
+#[path = "boot_input_tests.rs"]
+mod boot_input_tests;

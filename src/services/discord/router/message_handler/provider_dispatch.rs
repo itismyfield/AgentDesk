@@ -27,6 +27,10 @@ pub(in crate::services::discord) use owner_input::hand_busy;
 pub(in crate::services::discord) use owner_input::{
     OwnerTurn, admit_start as owner_admit_start, recover as owner_recover, wake as owner_wake,
 };
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use owner_input::{
+    owner_drive as owner_drive_for_test, start_idle_for_test,
+};
 pub(super) mod replay_scope;
 
 /// No input owner runs a turn off unix.

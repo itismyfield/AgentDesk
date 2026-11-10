@@ -394,6 +394,18 @@ impl HostIo for GatewayHost {
         Some(Box::new(turn))
     }
 
+    fn input_ready(&self, channel: u64, provider: ShadowProvider) {
+        let provider = match provider {
+            ShadowProvider::Claude => ProviderKind::Claude,
+            ShadowProvider::Codex => ProviderKind::Codex,
+        };
+        super::super::queue_io::schedule_writer_ready_queue_kick(
+            self.shared.clone(),
+            provider,
+            serenity::ChannelId::new(channel),
+        );
+    }
+
     fn adopted(&self, channel: u64, provider: ShadowProvider) {
         let kind = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,

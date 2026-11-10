@@ -1,8 +1,10 @@
 //! A second real absent-target launch keeps the same O actor and suspends both predecessors.
 
 use super::*;
+use crate::services::cluster::intake_router_hook::IntakeBlockedReason;
 use crate::services::codex::actual_submit_tests::source_io::Watch;
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::CanaryFixture;
+use crate::services::discord::router::IntakeAdmission;
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::store::rotation::Successor;
 use crate::services::tui_o::store::spool::Cursor;
@@ -80,11 +82,20 @@ pub(super) async fn unproved_successor_holds_actual_input(
         shared: &fixture.shared,
         token: "e51-isolated-test-bot",
     };
+    let held_reason = format!("O channel {CANARY_CHANNEL} successor_unproved");
+    assert_eq!(
+        cutover::intake_route::for_input_placement("codex", CANARY_CHANNEL).await,
+        cutover::intake_route::IntakeRoute::Hold(held_reason.clone()),
+    );
     let admission = admit_text_intake(&deps, &input()).await;
-    let decision = format!("{admission:?}");
     assert!(
-        decision.starts_with("Blocked {") && decision.contains("successor_unproved"),
-        "actual D intake must hold the unproved successor: {decision}",
+        matches!(
+            &admission,
+            IntakeAdmission::WriterBlocked {
+                reason: IntakeBlockedReason::RoutingDependencyFailed { detail }
+            } if detail == &held_reason
+        ),
+        "actual D intake must hold the unproved successor: {admission:?}",
     );
     assert!(b1::queue_identities(fixture).await.is_empty());
     assert!(output.texts().is_empty());

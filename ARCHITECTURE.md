@@ -2096,6 +2096,7 @@ src/
 │   │   │   │   │   ├── owner_ingress_tests.rs
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
+│   │   │   │   ├── boot_custody.rs
 │   │   │   │   ├── home_order_tests.rs
 │   │   │   │   ├── initial_fresh_tests.rs
 │   │   │   │   ├── notice.rs
@@ -2309,6 +2310,13 @@ src/
 │   │   │   │   │   └── b1b_terminal_tests.rs
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── owner_execution/
+│   │   │   │   │   │   ├── boot_input_gateway_tests.rs
+│   │   │   │   │   │   ├── boot_input_more_tests.rs
+│   │   │   │   │   │   ├── boot_input_owner_ready_tests.rs
+│   │   │   │   │   │   ├── boot_input_payload_tests.rs
+│   │   │   │   │   │   ├── boot_input_placement_tests.rs
+│   │   │   │   │   │   ├── boot_input_race_tests.rs
+│   │   │   │   │   │   ├── boot_input_tests.rs
 │   │   │   │   │   │   ├── missing_halt_tests.rs
 │   │   │   │   │   │   ├── park_missing_tests.rs
 │   │   │   │   │   │   ├── park_reply_tests.rs

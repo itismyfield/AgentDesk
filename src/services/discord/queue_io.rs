@@ -366,6 +366,29 @@ pub(super) fn schedule_race_loss_requeue_post_enqueue_idle_recheck(
     });
 }
 
+/// A resumed writer wakes its V2 owner even while a foreground turn holds the channel.
+pub(super) fn schedule_writer_ready_queue_kick(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+) {
+    super::task_supervisor::spawn_observed("writer_ready_queue_kick", async move {
+        #[cfg(unix)]
+        match input_ingress::installed(&shared.mailbox(channel_id)).await {
+            Ok(true) => {
+                super::router::message_handler::owner_wake(&shared, channel_id);
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(channel_id = channel_id.get(), %error, "writer-ready queue owner unavailable");
+                return;
+            }
+            Ok(false) => {}
+        }
+        schedule_post_enqueue_idle_queue_kick(shared, provider, channel_id);
+    });
+}
+
 pub(super) fn schedule_post_enqueue_idle_queue_kick(
     shared: Arc<SharedData>,
     provider: ProviderKind,
@@ -416,6 +439,11 @@ pub(super) fn schedule_post_enqueue_idle_queue_kick(
             )
             .await;
         }
+        #[cfg(test)]
+        cancel_backstop_test_support::post_enqueue_snapshot_finished(
+            channel_id,
+            snapshot.intervention_queue.len(),
+        );
     });
 }
 

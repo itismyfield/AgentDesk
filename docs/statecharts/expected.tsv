@@ -255,3 +255,13 @@ campaign-execution/CampaignVerificationOverwrite.cfg	CampaignVerification	FillOn
 campaign-execution/CampaignVerificationQuietSession.cfg	CampaignVerification	-	StopFinishCompletes
 campaign-execution/CampaignVerificationSettleBefore.cfg	CampaignVerification	-	StopFinishCompletes,UnsealedClosed,VSettles
 campaign-execution/CampaignVerificationTwoValues.cfg	CampaignVerification	-	-
+input-single-path/InputPathBootCurrent.cfg	InputPath	BootCheckpointBacked,BootNoSilentLoss	-
+input-single-path/InputPathBootDesign.cfg	InputPath	-	-
+input-single-path/InputPathBootDesignTwo.cfg	InputPath	-	-
+input-single-path/InputPathBootEarlyCheckpoint.cfg	InputPath	BootCheckpointBacked	-
+input-single-path/InputPathBootNoReadyWake.cfg	InputPath	-	BootHeldEventuallyExecutes
+tui-o-writer/WriterWakeI8055Current.cfg	WriterWake	BootCheckpointOnlyAccepted,BootNoSilentLoss	-
+tui-o-writer/WriterWakeI8055Design.cfg	WriterWake	-	-
+tui-o-writer/WriterWakeI8055NoReadyWake.cfg	WriterWake	-	BootHeldEventuallyExecutes
+tui-o-writer/WriterWakeI8055RouteCurrent.cfg	WriterWake	BootRouteNoBlockedSelfWake	-
+tui-o-writer/WriterWakeI8055RouteDesign.cfg	WriterWake	-	-

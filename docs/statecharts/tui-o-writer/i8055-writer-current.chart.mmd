@@ -1,0 +1,50 @@
+---
+title: "Writer ready 전후 입력 보관과 동일 입력 재회수"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks BootCheckpointOnlyAccepted or BootNoSilentLoss
+    lg1: Path to the BootCheckpointOnlyAccepted or BootNoSilentLoss bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 입력 도착 전
+  s1: 입력 처리 중 #183; 승인 판정 전
+  s2: writer 미준비 #183; 보관 없이 안내
+  s3: 거절 또는 보관 실패 #183; 안내 중
+  s4: 입력 처리 중 #183; 보관 결과 대기
+  s5: 입력 보관 완료 #183; writer 대기
+  s6: 보관 완료 #183; 실행 준비
+  s7: 안내 실패에도 처리 종료
+  s8: 보관 완료 #183; ready #183; wake 대기
+  s9: 일시 거절 안내 완료 #183; 실행 없음
+  s10: 거절 안내 완료 #183; 실행 없음
+  s11: 동일 입력 1회 실행
+  [*] --> s0
+  s0 --> s1: BootNext
+  s1 --> s2: BootNext
+  s1 --> s3: BootNext
+  s2 --> s2: BootNext
+  s2 --> s5: BootNext
+  s1 --> s4: BootNext
+  s2 --> s7: BootNext
+  s4 --> s6: BootNext
+  s4 --> s3: BootNext
+  s2 --> s6: BootNext
+  s3 --> s7: BootNext
+  s2 --> s9: BootNext
+  s3 --> s10: BootNext
+  s5 --> s8: BootNext
+  s6 --> s5: BootNext
+  s6 --> s11: BootNext
+  s8 --> s5: BootNext
+  s8 --> s6: BootNext
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s7 breaks
+  class s7 bugPath
+  class s9 breaks
+  class s9 bugPath
+  class s10 breaks

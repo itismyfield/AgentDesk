@@ -1,0 +1,29 @@
+---
+title: "부팅 중 입력 보관과 checkpoint"
+---
+stateDiagram-v2
+  direction LR
+  state "Legend" as legend {
+    lg0: Breaks BootCheckpointBacked
+    lg1: Path to the BootCheckpointBacked bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  state "At the same time" as all {
+    state "Writer" as r0 {
+      s0: 부팅 중
+      [*] --> s0
+    }
+    --
+    state "Input" as r1 {
+      s1: 입력 도착 전
+      s2: 사용자에게 거절 표시
+      [*] --> s1
+      s1 --> s2: 복구 중 입력의 보관 결과를 확정
+    }
+  }
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath
