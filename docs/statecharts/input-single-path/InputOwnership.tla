@@ -1302,7 +1302,10 @@ PersonJoins == ~wake => pastes = 1 /\ sentInto = "busy"
    drop, :343 kick, or herdr_row_end.rs:270-282; stopFallback = runtime_stop.rs:199 token release
    publishing QueueEligible (mailbox_finish.rs:73-78, turn_completion_events.rs:122-132) before the
    row clear at :241-250; repair = a row clear with no wake (inflight_repair.rs:81,
-   health_api.rs:811). A refused archive keeps the row; a successor row runs its own finalizer.
+   health_api.rs:811); staleCancel = the sweep's tokenless Cancel finalizer (foreign_recovery.rs:119)
+   whose row the finalizer clears, so the later lifecycle clear (:135) reads Missing
+   (clear_store/mod.rs:595-598), or reads Cleared when the finalizer kept the row. A refused
+   archive keeps the row; a successor row runs its own finalizer.
    The owner refuses a start while a token, a row or a held barrier stands (owner_input.rs:196-197,
    :213-214, :677-681) with no watch; the supervisor wakes only on its idle transition with no token
    (supervisor.rs:663-673). One drive runs per channel; a wake during a run sets lane.again
@@ -1311,14 +1314,16 @@ PersonJoins == ~wake => pastes = 1 /\ sentInto = "busy"
    each successful closer notifies once after its barrier; a token-removing finalizer's publish is
    that notification. The slice reuses observer. *)
 CB == observer
-CBOps == {"finalizer", "tokenless", "noEpisode", "stopFallback", "repair"}
+CBOps == {"finalizer", "tokenless", "noEpisode", "stopFallback", "repair", "staleCancel"}
 CBAfter == Fix = "CBAfter"
 \* Whether the token step wakes the owner: stop's QueueEligible publish, or its reverted mutant.
 CBTokenWakes(k) == k = "stopFallback" /\ (~CBAfter \/ Mut = "cbTokenEligible")
-\* Whether the barrier step notifies; the early mutant moves that wake to the row step.
+\* Whether the barrier step notifies; the early mutant moves that wake to the row step, and the
+\* Cleared-only mutant notifies a stale cancel only when its own lifecycle clear removed the row.
 CBBarrierNotes(k) ==
     IF CBAfter
-    THEN ~(Mut \in {"cbNoNotify", "cbEarlyNotify"} /\ k = "noEpisode")
+    THEN /\ ~(Mut \in {"cbNoNotify", "cbEarlyNotify"} /\ k = "noEpisode")
+         /\ ~(Mut = "cbClearedOnly" /\ k = "staleCancel" /\ CB.life # "cleared")
     ELSE k \in {"finalizer", "noEpisode"} /\ (Mut # "cbNoNotify" \/ k # "noEpisode")
 CBRowNotes(k) == CBAfter /\ Mut = "cbEarlyNotify" /\ k = "noEpisode"
 CBBlocked == CB.token \/ CB.row \/ CB.barrier
@@ -1337,7 +1342,7 @@ CompletionWakeInit ==
             barrier |-> TRUE, native |-> "busy", phase |-> "open", wake |-> w, pending |-> TRUE,
             running |-> FALSE, claims |-> 0, pastes |-> 0, watched |-> FALSE, notes |-> 0,
             closes |-> 0, refusalNotes |-> 0, refusals |-> 0, successors |-> 0, dups |-> 0,
-            arrivals |-> 0]
+            arrivals |-> 0, life |-> "none"]
 
 \* Admission wakes (ingress.rs:457-459, start.rs:74); a look grants and claims, or is refused.
 \* The duplicate-claim mutant lets a second look claim while the first claim is unsettled.
@@ -1387,7 +1392,13 @@ CBCloseRow ==
     /\ CB.native = "idle" /\ CB.phase = "open" /\ ~CB.token /\ CB.row
     /\ LET n == CBRowNotes(CB.op)
        IN observer' = [CB EXCEPT !.row = FALSE, !.phase = "rowGone", !.wake = @ \/ n,
-            !.notes = @ + (IF n THEN 1 ELSE 0)]
+            !.notes = @ + (IF n THEN 1 ELSE 0),
+            !.life = IF CB.op = "staleCancel" THEN "missing" ELSE @]
+    /\ UNCHANGED ObserverLegacy
+\* A stale cancel whose finalizer kept the row: the lifecycle clear removes it and reads Cleared.
+CBLifecycleClears ==
+    /\ CB.native = "idle" /\ CB.phase = "open" /\ ~CB.token /\ CB.row /\ CB.op = "staleCancel"
+    /\ observer' = [CB EXCEPT !.row = FALSE, !.phase = "rowGone", !.life = "cleared"]
     /\ UNCHANGED ObserverLegacy
 \* The closer's last own step: its lock drop or receipt commit (carried_turn_close.rs:340).
 CBCloseBarrier ==
@@ -1415,7 +1426,7 @@ CBSuccessor ==
          !.native = "busy"]
     /\ UNCHANGED ObserverLegacy
 CBNext == CBLook \/ CBPaste \/ CBSettle \/ CBNothingLeft \/ CBArrival \/ CBWatchSees \/ CBNativeEnds
-    \/ CBCloseToken \/ CBCloseRow \/ CBCloseBarrier \/ CBLateDuplicate \/ CBCloseRefused \/ CBSuccessor
+    \/ CBCloseToken \/ CBCloseRow \/ CBLifecycleClears \/ CBCloseBarrier \/ CBLateDuplicate \/ CBCloseRefused \/ CBSuccessor
 CBSpec == CompletionWakeInit /\ [][CBNext]_vars
     /\ WF_vars(CBLook) /\ WF_vars(CBPaste) /\ WF_vars(CBSettle) /\ WF_vars(CBNothingLeft)
     /\ WF_vars(CBWatchSees) /\ WF_vars(CBNativeEnds) /\ WF_vars(CBCloseToken)

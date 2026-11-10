@@ -197,5 +197,6 @@ input-single-path/InputOwnershipCBDoubleNotify.cfg	InputOwnership	CBCloseNotifie
 input-single-path/InputOwnershipCBFailNotify.cfg	InputOwnership	CBRefusalSilent	-
 input-single-path/InputOwnershipCBTokenEligible.cfg	InputOwnership	CBCloseNotifiesOnce	-
 input-single-path/InputOwnershipCBDupClaim.cfg	InputOwnership	CBDeliverOnce	-
+input-single-path/InputOwnershipCBClearedOnly.cfg	InputOwnership	CBNoStall	CBEventuallyDelivered
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
