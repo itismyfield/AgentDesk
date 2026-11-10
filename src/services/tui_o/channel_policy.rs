@@ -29,6 +29,8 @@ pub(crate) struct BootChannels {
     /// The selection and, on the home, each committed channel the selection left out.
     channels: BTreeSet<u64>,
     selected: BTreeSet<u64>,
+    /// Every TUI binding in the boot config, selected or not.
+    tui_bindings: BTreeSet<u64>,
     dormant_channels: BTreeSet<u64>,
     /// Initial reservations can only be installed before this snapshot is published.
     late_adopt_capable: bool,
@@ -77,6 +79,26 @@ pub(crate) fn configured_channels(config: &Config) -> BTreeSet<u64> {
     selected_kinds(config, false)
         .map(|kinds| kinds.into_keys().collect())
         .unwrap_or_default()
+}
+
+/// Each agent binding that resolves to a Claude or Codex TUI, with its channel id when that id
+/// parses. Boot membership and the census selection record both read this.
+pub(crate) fn tui_binding_ids(config: &Config) -> impl Iterator<Item = Option<u64>> + '_ {
+    let bindings = config.agents.iter().flat_map(|agent| agent.channels.iter());
+    bindings
+        .filter(|(provider, channel)| {
+            let provider = channel.provider().unwrap_or_else(|| (*provider).to_owned());
+            matches!(
+                provider.trim().to_ascii_lowercase().as_str(),
+                "claude" | "codex"
+            ) && crate::services::provider_hosting::channel_effective_tui_request(
+                config, channel, &provider,
+            )
+        })
+        .map(|(_, channel)| {
+            let id = channel.channel_id()?.parse::<std::num::NonZeroU64>().ok()?;
+            Some(id.get())
+        })
 }
 
 /// Dormant membership as configured; only validation decides whether these writers are selected.
@@ -242,6 +264,7 @@ impl BootChannels {
         let (site, configured_id) = site(config, !channels.is_empty())?;
         Ok(Self {
             selected: channels.clone(),
+            tui_bindings: tui_binding_ids(config).flatten().collect(),
             dormant_channels,
             late_adopt_capable: tui_o.writer.late_adopt(),
             turn: tui_o.turn.clone(),
@@ -335,6 +358,43 @@ impl BootChannels {
     /// The channels the boot config selected, for restart-required comparison.
     pub(crate) fn selected(&self) -> &BTreeSet<u64> {
         &self.selected
+    }
+
+    /// Whether the boot config binds `channel` as a TUI, so its body is O's whether selected or not.
+    pub(crate) fn tui_bound(&self, channel: u64) -> bool {
+        self.tui_bindings.contains(&channel)
+    }
+
+    /// An explicit setting that leaves a TUI binding without the O writer refuses the boot, as
+    /// Legacy no longer posts TUI bodies. An unset selection that cannot apply here boots.
+    fn refuse_explicit_off(&self, config: &Config) -> Result<()> {
+        let writer = &tui_o_of(config).writer;
+        let left: Vec<u64> = self
+            .tui_bindings
+            .difference(&self.selected)
+            .copied()
+            .collect();
+        let setting = if writer.late_adopt == Some(false) && !self.tui_bindings.is_empty() {
+            Some("tui_o.writer.late_adopt: false")
+        } else if left.is_empty() || (writer.all_tui.is_none() && writer.channels.is_empty()) {
+            None
+        } else if writer.channels.is_empty() {
+            Some("tui_o.writer.all_tui: false")
+        } else {
+            Some("tui_o.writer.channels")
+        };
+        let Some(setting) = setting else {
+            return Ok(());
+        };
+        let bound: Vec<u64> = if left.is_empty() {
+            self.tui_bindings.iter().copied().collect()
+        } else {
+            left
+        };
+        anyhow::bail!(
+            "{setting} leaves TUI-bound channels {bound:?} without the O writer, and Legacy no \
+             longer posts TUI bodies; remove the setting"
+        )
     }
 
     /// Installed dormant policy, kept fixed across live config reloads.
@@ -585,6 +645,7 @@ fn site(config: &Config, selects: bool) -> Result<(Site, Option<String>)> {
 
 pub(crate) fn install(config: &Config) -> Result<()> {
     let candidate = BootChannels::validate(config)?;
+    candidate.refuse_explicit_off(config)?;
     let installed = match BOOT.get() {
         Some(installed) => installed,
         None => {

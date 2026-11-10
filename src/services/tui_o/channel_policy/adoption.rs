@@ -56,7 +56,6 @@ impl Drop for LegacySend {
 pub(crate) enum ClaimReason {
     EmptySelection,
     NonMember,
-    Unselected,
     NoCandidate,
     PendingReleased,
     Released,
