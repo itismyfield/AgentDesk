@@ -374,10 +374,20 @@ src/
 │   ├── test_support.rs
 │   └── types.rs
 ├── domain/
+│   ├── provider/
+│   │   ├── catalog/
+│   │   │   └── rows.rs
+│   │   ├── capabilities.rs
+│   │   ├── catalog.rs
+│   │   ├── execution.rs
+│   │   ├── public_catalog.rs
+│   │   └── tests.rs
 │   ├── bot_role.rs
+│   ├── file_sync.rs
 │   ├── lifecycle.rs
 │   ├── memory.rs
-│   └── mod.rs
+│   ├── mod.rs
+│   └── provider.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── db_ops/
