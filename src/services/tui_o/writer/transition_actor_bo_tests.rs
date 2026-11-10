@@ -464,6 +464,7 @@ pub(crate) async fn with_ready_codex_backlog<T, F, Fut>(
     sources: Vec<SourceId>,
     pane: String,
     configured: bool,
+    callback_budget: std::time::Duration,
     run: F,
 ) -> (T, Vec<Cursor>, Option<usize>, Arc<AlarmHealth>)
 where
@@ -505,12 +506,11 @@ where
     let (host, stopping) = watch::channel(false);
     let (stop, stopped) = watch::channel(false);
     let (resumed, ready_state) = watch::channel(false);
-    let (port, receiver) = TransitionPort::new(
-        1,
-        Arc::clone(&harness.gate),
-        Arc::new(SystemTime::now),
-        stopping.clone(),
-    );
+    let (started, wall) = (tokio::time::Instant::now(), SystemTime::now());
+    // Probe timestamps follow the same paused clock as the actor's quiet period.
+    let wall = Arc::new(move || wall + started.elapsed());
+    let (port, receiver) =
+        TransitionPort::new(1, Arc::clone(&harness.gate), wall, stopping.clone());
     let port = port.with_provider(ShadowProvider::Codex);
     let health = Arc::new(AlarmHealth::default());
     let (counted, mut counts) = watch::channel(());
@@ -582,7 +582,7 @@ where
         port: harness.port.clone(),
         retained,
     };
-    let result = run(ready, probe).await;
+    let result = await_within(run(ready, probe), callback_budget).await;
     counts.borrow_and_update();
     for _ in 0..3 {
         await_within(counts.changed(), WAIT_CAP).await.unwrap();
@@ -600,7 +600,8 @@ where
             "retention leaves existing native transcript bytes unchanged"
         );
     }
-    halt(stop, task).await;
+    stop.send(true).unwrap();
+    await_within(task, WAIT_CAP).await.unwrap();
     drop(host);
     (result, cursors, reading, health)
 }

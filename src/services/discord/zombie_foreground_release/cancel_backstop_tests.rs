@@ -207,3 +207,44 @@ async fn stale_cancel_probe_preserves_uncancelled_successor() {
 async fn stale_cancel_probe_preserves_cancelled_successor_with_inflight() {
     stale_cancel_probe_preserves_successor(true).await;
 }
+
+// Every release answer reports the waiting depth of the V2 owner holding the channel's input; the
+// front an attempt carries is not waiting.
+#[tokio::test]
+async fn zombie_release_answers_report_the_v2_owner_waiting_depth() {
+    let temp = tempfile::tempdir().expect("isolated runtime root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let _tmux = missing_tmux_fixture(&temp);
+    let provider = ProviderKind::Claude;
+    let shared = discord::make_shared_data_for_tests();
+    let seed = discord::relay_recovery::tests::orphan_token_finish::v2_attempted_front;
+    // (channel, cancelled, authority kept, V2 input waiting, released)
+    for (channel, cancelled, kept, waiting, released) in [
+        (6_016_151, false, true, true, false),
+        (6_016_152, true, false, true, false),
+        (6_016_153, true, true, true, true),
+        (6_016_154, true, true, false, true),
+    ] {
+        let channel = ChannelId::new(channel);
+        let token = Arc::new(CancelToken::new());
+        token.cancelled.store(cancelled, Ordering::Relaxed);
+        token.bind_unmanaged_session_name(&format!("AgentDesk-claude-v2-depth-{channel}"));
+        let actor = shared.mailbox(channel);
+        assert!(
+            actor
+                .try_start_turn(token, UserId::new(7), MessageId::new(70))
+                .await
+        );
+        seed(&shared, &provider, channel, waiting).await;
+        let outcome = super::release_zombie_foreground_turn_guarded(
+            &shared,
+            &provider,
+            channel,
+            "test/v2_depth",
+            move |_| kept,
+        )
+        .await;
+        assert_eq!(outcome.released, released, "{channel}");
+        assert_eq!(outcome.queue_depth_after, usize::from(waiting), "{channel}");
+    }
+}

@@ -400,8 +400,12 @@ not false, `fully_recovered` not false, and no unallowed degraded reasons). A
 `restart_dcserver` step may declare `require_status` and
 `allowed_degraded_reasons` with the same meaning as `assert_health`; they relax
 only the status and the `ok`/`degraded` flags, never `fully_recovered` or an
-unlisted degraded reason. A failed `launchctl kickstart` fails the step. Other
-bodies keep polling until timeout and then fail with the last health summary.
+unlisted degraded reason. `allowed_target_queue_depth: N` additionally passes a
+`provider:<p>:pending_queue_depth:<d>` reason with `d <= N` only when the
+`/api/health/detail` body shows the whole count on the target channel's single
+mailbox (every other mailbox of that provider at 0). A failed `launchctl
+kickstart` fails the step. Other bodies keep polling until timeout and then fail
+with the last health summary.
 
 `/api/health/detail.boot_incarnation` is a random id generated once per dcserver
 process (the public body does not carry it). A restart step reads it before the

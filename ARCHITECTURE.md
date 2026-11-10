@@ -1165,6 +1165,7 @@ src/
 │   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
 │   │   │   ├── composer_status.rs
+│   │   │   ├── composer_status_tier_tests.rs
 │   │   │   ├── herdr_cancel.rs
 │   │   │   ├── inline_banner.rs
 │   │   │   └── submission.rs
@@ -1460,11 +1461,13 @@ src/
 │   │   │   │   ├── carried_turn_close_tests.rs
 │   │   │   │   ├── channel_runtime.rs
 │   │   │   │   ├── inflight_repair.rs
+│   │   │   │   ├── inflight_repair_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
 │   │   │   │   ├── legacy_send_tests.rs
 │   │   │   │   ├── live_agent_recovery.rs
 │   │   │   │   ├── retirement_await_tests.rs
 │   │   │   │   ├── runtime_lookup.rs
+│   │   │   │   ├── runtime_lookup_tests.rs
 │   │   │   │   ├── runtime_stop.rs
 │   │   │   │   ├── self_watchdog.rs
 │   │   │   │   ├── stall_alert.rs

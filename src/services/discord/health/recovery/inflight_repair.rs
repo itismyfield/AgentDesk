@@ -198,7 +198,7 @@ pub async fn clear_idle_tmux_stale_turn(
         let snapshot = discord::mailbox_snapshot(&shared, channel_id).await;
         discord::FinishTurnResult {
             removed_token: None,
-            has_pending: !snapshot.intervention_queue.is_empty(),
+            has_pending: snapshot.queue_depth() > 0,
             mailbox_online: shared.mailbox_peek(channel_id).is_some(),
             queue_exit_events: Vec::new(),
             persistence_error: None,
@@ -268,3 +268,7 @@ pub(super) fn clear_recovered_leak_inflight_in_root(
         )
     }
 }
+
+#[cfg(test)]
+#[path = "inflight_repair_tests.rs"]
+mod tests;

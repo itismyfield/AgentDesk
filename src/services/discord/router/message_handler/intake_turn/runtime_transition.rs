@@ -41,6 +41,28 @@ pub(super) async fn acquire_after_redirect_or_requeue(
         Some(transition) => Ok(Some(transition)),
         None => {
             if queued_drain {
+                // An owner's front stays queued and its owner looks again once this holder
+                // releases; a legacy queue parks no transition waiter and keeps its backstop.
+                #[cfg(unix)]
+                let (waker, lock) = (shared.clone(), shared.session_transition_lock(channel_id));
+                #[cfg(unix)]
+                crate::services::discord::task_supervisor::spawn_observed(
+                    "transition_busy_owner_wake",
+                    async move {
+                        let Some(mailbox) = waker.mailbox_peek(original_channel_id) else {
+                            return;
+                        };
+                        if mailbox.v2_request(|slot| Ok(slot.is_some())).await != Ok(true) {
+                            return;
+                        }
+                        drop(lock.lock_owned().await);
+                        crate::services::discord::session_transition::wake_installed_owner(
+                            &waker,
+                            original_channel_id,
+                        )
+                        .await;
+                    },
+                );
                 return Err(Box::new(
                     super::super::super::intake_dispatch::QueuedTransitionBusyHandoff {
                         owned_uploads: std::mem::take(pending_uploads),
@@ -173,5 +195,120 @@ mod tests {
                 .is_empty()
         );
         shared.mailboxes.remove_fixture_for_test(channel);
+    }
+
+    /// A queued front refused because a transition is held starts exactly once after that holder
+    /// releases, whether the release lands after the drive's failed pass or inside it; never before.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn transition_busy_front_starts_once_after_the_holder_releases() {
+        use crate::services::discord::queue_io::cancel_backstop_test_support as hooks;
+        use crate::services::discord::queue_io::input_owner::{admission, drive};
+        use crate::test_support::wait::{WAIT_CAP, await_within};
+        use tokio::sync::{Mutex, mpsc::unbounded_channel as events};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let queue = crate::services::discord::queue_dispatch::persistence_context;
+        for (case, n) in ["after_pass", "inside_pass", "never"]
+            .into_iter()
+            .zip(1_u64..)
+        {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(7_317_100 + n);
+            let mailbox = shared.mailbox(channel);
+            let persistence = queue(&shared, &ProviderKind::Claude, channel);
+            let v2 = crate::services::turn_orchestrator::v2_queue(&persistence, channel).unwrap();
+            mailbox.v2_adopt(v2.0, v2.1).await.unwrap();
+            let message = 8_000_000_000_000_317_000 + n;
+            let original = serde_json::from_value(serde_json::json!({"author_id":7,
+                "message_id":message,"channel_id":channel.get(),"source_message_ids":[message],
+                "queued_generation":1,"text":"after the clear"}))
+            .unwrap();
+            let admitted = admission::admit(&mailbox, &original, admission::AdmissionTicket::new());
+            assert!(matches!(admitted.await, admission::Admission::Accepted(_)));
+            let guard = shared.session_transition_lock(channel).lock_owned().await;
+            let held = Arc::new(Mutex::new(Some(guard)));
+            let (started, mut starts) = events();
+            let (woke, wakes) = events();
+            let wakes = Arc::new(Mutex::new(wakes));
+            let (settled, mut settles) = events();
+            let at = (shared.clone(), mailbox.clone(), held.clone(), wakes.clone());
+            let handoff: drive::Handoff = Arc::new(move |front| {
+                let ((shared, mailbox, held, wakes), started) = (at.clone(), started.clone());
+                Box::pin(async move {
+                    let http = Arc::new(serenity::Http::new("test-token"));
+                    let id = MessageId::new(front.1.message_id);
+                    let transition = acquire_after_redirect_or_requeue(
+                        (&http, &shared, "test-token", &ProviderKind::Claude),
+                        (channel, channel),
+                        (TurnKind::Foreground, UserId::new(7), id, "after the clear"),
+                        (&None, false, false),
+                        &mut Vec::new(),
+                        (false, &None, None, false, (true, route(channel))),
+                        (None, false, String::new()),
+                    )
+                    .await;
+                    if let Err(error) = transition {
+                        // Released inside the failed pass: its wake lands while this drive runs.
+                        if n == 2 && held.lock().await.take().is_some() {
+                            await_within(wakes.lock().await.recv(), WAIT_CAP)
+                                .await
+                                .unwrap();
+                        }
+                        return Err(error.to_string());
+                    }
+                    let persistence = queue(&shared, &ProviderKind::Claude, channel);
+                    let removed = mailbox.cancel_queued_primary_message(id, persistence).await;
+                    assert!(removed.removed.is_some());
+                    started.send(id).map_err(|e| e.to_string())
+                })
+            });
+            let settled: drive::Settled = Arc::new(move || {
+                let settled = settled.clone();
+                Box::pin(async move {
+                    let _ = settled.send(());
+                })
+            });
+            let owner = Arc::new(drive::Drive {
+                mailbox: mailbox.clone(),
+                channel: channel.get(),
+                handoff,
+                settled: Some(settled),
+            });
+            let waking = owner.clone();
+            hooks::set_owner_wake_for_tests(
+                channel,
+                Some(Arc::new(move || {
+                    drive::wake(waking.clone());
+                    let _ = woke.send(());
+                })),
+            );
+            drive::wake(owner);
+            await_within(settles.recv(), WAIT_CAP).await.unwrap();
+            if n == 1 {
+                assert!(starts.try_recv().is_err(), "{case}: no start while held");
+                drop(held.lock().await.take());
+            }
+            if n == 3 {
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    starts.try_recv().is_err(),
+                    "{case}: a held transition starts nothing"
+                );
+                assert!(
+                    wakes.lock().await.try_recv().is_err(),
+                    "{case}: nothing woke the owner"
+                );
+            } else {
+                let id = await_within(starts.recv(), WAIT_CAP).await;
+                assert_eq!(id, Some(MessageId::new(message)), "{case}");
+                await_within(settles.recv(), WAIT_CAP).await.unwrap();
+                assert!(starts.try_recv().is_err(), "{case}: the front starts once");
+            }
+            hooks::set_owner_wake_for_tests(channel, None);
+            // The holder of the never case keeps its transition past the test.
+            std::mem::forget(held.lock().await.take());
+        }
     }
 }
