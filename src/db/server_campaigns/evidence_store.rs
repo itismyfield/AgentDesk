@@ -4,7 +4,7 @@ use sqlx::{Postgres, Transaction, types::Json};
 use crate::services::campaign_execution::{
     candidate_seal::CandidateSeal,
     evidence::{EvidenceDecision, EvidenceEnvelope, EvidenceStatus},
-    model::{AttemptBinding, EvidenceRecord},
+    model::{AttemptBinding, EvidenceWrite},
     verification_run::digest_of,
 };
 
@@ -200,14 +200,14 @@ pub async fn apply(
     tx: &mut Transaction<'_, Postgres>,
     campaign_id: &str,
     run_id: &str,
-    written: &EvidenceRecord,
+    written: &EvidenceWrite,
 ) -> Result<()> {
     match written {
-        EvidenceRecord::Seal(seal) => {
+        EvidenceWrite::Seal(seal) => {
             let seal = StoredEvidence::Seal { seal: seal.clone() };
             record(tx, campaign_id, run_id, &seal).await?;
         }
-        EvidenceRecord::Admitted { envelope, decision } => {
+        EvidenceWrite::Admitted { envelope, decision } => {
             let evidence = StoredEvidence::recorded((**envelope).clone());
             record(tx, campaign_id, run_id, &evidence).await?;
             decide(tx, campaign_id, run_id, &envelope.evidence_id, decision).await?;

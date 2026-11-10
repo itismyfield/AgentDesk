@@ -598,11 +598,11 @@ pub struct Decision {
     pub result: CommandResult,
     // Evidence rows written in the same transaction as the state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub records: Vec<EvidenceRecord>,
+    pub records: Vec<EvidenceWrite>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EvidenceRecord {
+pub enum EvidenceWrite {
     Admitted {
         envelope: Box<EvidenceEnvelope>,
         decision: EvidenceDecision,

@@ -241,3 +241,5 @@ mod stage_store_tests;
 #[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;
+#[cfg(test)]
+mod verification_store_tests;

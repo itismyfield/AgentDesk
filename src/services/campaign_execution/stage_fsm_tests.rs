@@ -10,7 +10,7 @@ use crate::services::campaign_execution::{
 const START: &str = "lib-tests";
 const FINISH: &str = "slow-tests";
 
-fn spec() -> VerificationSpec {
+pub(crate) fn spec() -> VerificationSpec {
     let mut spec = a1::spec_with_audit();
     let mut slow = spec.checks[0].clone();
     slow.id = FINISH.into();
@@ -19,7 +19,7 @@ fn spec() -> VerificationSpec {
 }
 
 // The running fixture without an attempt: node `a` is at Implementation and free for a Work.
-fn base() -> CampaignState {
+pub(crate) fn base() -> CampaignState {
     let mut state = domain::running();
     state.run.as_mut().unwrap().attempts.clear();
     for id in ["a", "c"] {
@@ -52,7 +52,7 @@ pub(crate) fn review_of(work: &AttemptBinding) -> AttemptBinding {
     review
 }
 
-fn assignment(binding: &AttemptBinding) -> WorkAssignment {
+pub(crate) fn assignment(binding: &AttemptBinding) -> WorkAssignment {
     let spec = spec();
     WorkAssignment {
         pin: ExecutionPin {
@@ -82,7 +82,7 @@ fn launch(binding: &AttemptBinding) -> Action {
     }
 }
 
-fn assign(binding: &AttemptBinding, assignment: WorkAssignment) -> Command {
+pub(crate) fn assign(binding: &AttemptBinding, assignment: WorkAssignment) -> Command {
     Command::AssignWork {
         binding: Box::new(binding.clone()),
         assignment: Box::new(assignment),
@@ -197,7 +197,7 @@ fn finish_v(state: &CampaignState) -> String {
     execution(state, "work-a").finish_executions[0].clone()
 }
 
-fn advance(v: &str, phase: &str, consumer: &AttemptBinding, to: ActionState) -> Command {
+pub(crate) fn advance(v: &str, phase: &str, consumer: &AttemptBinding, to: ActionState) -> Command {
     Command::AdvanceVerificationPhase {
         execution_id: v.into(),
         phase_id: phase.into(),
@@ -214,7 +214,11 @@ fn materialize(state: &mut CampaignState, v: &str, seal: &CandidateSeal) {
     v.bind_phase_input("archive", a1::input(&[])).unwrap();
 }
 
-fn accept(state: &CampaignState, attempt: &str, review: Option<StageAssessment>) -> Command {
+pub(crate) fn accept(
+    state: &CampaignState,
+    attempt: &str,
+    review: Option<StageAssessment>,
+) -> Command {
     Command::AcceptStageResult {
         node_id: "a".into(),
         expected_epoch: epoch(state, "a"),
@@ -223,7 +227,7 @@ fn accept(state: &CampaignState, attempt: &str, review: Option<StageAssessment>)
     }
 }
 
-fn interrupt(state: &CampaignState, node: &str, session: &SessionIdentity) -> Command {
+pub(crate) fn interrupt(state: &CampaignState, node: &str, session: &SessionIdentity) -> Command {
     Command::InterruptNode {
         expected_run: "run".into(),
         node_id: node.into(),

@@ -48,7 +48,7 @@ pub(super) fn decide(
     next: &mut CampaignState,
     command: &Command,
     at: DateTime<Utc>,
-    records: &mut Vec<EvidenceRecord>,
+    records: &mut Vec<EvidenceWrite>,
 ) -> Transition {
     match command {
         Command::SealCandidate {
@@ -106,7 +106,7 @@ fn seal_candidate(
     repository_identity: &str,
     workspace: &WorkspaceObservation,
     at: DateTime<Utc>,
-    records: &mut Vec<EvidenceRecord>,
+    records: &mut Vec<EvidenceWrite>,
 ) -> Transition {
     let run = current_run(next)?;
     let binding = &claim.binding;
@@ -155,11 +155,11 @@ fn seal_candidate(
         attempt_id: binding.attempt_id.clone(),
         seal_id: seal.seal_id.clone(),
     };
-    records.push(EvidenceRecord::Admitted {
+    records.push(EvidenceWrite::Admitted {
         envelope: Box::new(claim.clone()),
         decision,
     });
-    records.push(EvidenceRecord::Seal(Box::new(seal.clone())));
+    records.push(EvidenceWrite::Seal(Box::new(seal.clone())));
     let run = next.run.as_mut().expect("checked above");
     run.seals.insert(seal.owner_attempt.clone(), seal);
     Ok(Some(event))
@@ -380,7 +380,7 @@ fn settle(
     execution_id: &str,
     evidence: &str,
     at: DateTime<Utc>,
-    records: &mut Vec<EvidenceRecord>,
+    records: &mut Vec<EvidenceWrite>,
 ) -> Transition {
     if evidence.trim().is_empty() {
         return reject(RejectionCode::InvalidState);
@@ -449,7 +449,7 @@ fn settle(
         if decision.status != EvidenceStatus::Accepted {
             return reject(RejectionCode::InvalidState);
         }
-        records.push(EvidenceRecord::Admitted {
+        records.push(EvidenceWrite::Admitted {
             envelope: Box::new(envelope),
             decision,
         });
