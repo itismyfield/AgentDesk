@@ -44,7 +44,7 @@ pub(crate) async fn queue_run_completion_notify_on_pg(
             crate::services::message_outbox::OutboxMessage {
                 target: &target,
                 content: &content,
-                bot: crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+                bot: crate::domain::bot_role::UtilityBotRole::Notify.alias(),
                 source: "system",
                 reason_code: None,
                 session_key: None,

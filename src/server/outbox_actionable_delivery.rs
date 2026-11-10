@@ -183,7 +183,7 @@ pub(super) async fn deliver(
         registry,
         pg_pool,
         row,
-        crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+        crate::domain::bot_role::UtilityBotRole::Notify.alias(),
     )
     .await;
     (fallback_status.to_string(), fallback_error)

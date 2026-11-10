@@ -19,6 +19,7 @@ use serenity::{ChannelId, UserId};
 
 use super::HealthRegistry;
 use super::runtime_resolve::resolve_direct_channel_shared;
+pub use crate::domain::human_input::{ExternalHold, HumanInputDelivery, HumanInputError};
 use crate::services::discord::{SharedData, router};
 use crate::services::imsg_reply::{self, ReplyObligation, episode};
 use crate::services::provider::ProviderKind;
@@ -40,37 +41,6 @@ pub struct HumanInputRequest {
     pub source: String,
     pub metadata: Option<serde_json::Value>,
     pub channel_name_hint: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HumanInputDelivery {
-    Started {
-        turn_id: String,
-    },
-    /// `inject_veto` names why a busy turn could not take the input; `None` when none was asked.
-    Queued {
-        turn_id: String,
-        reason: String,
-        inject_veto: Option<String>,
-    },
-    /// The busy turn's transcript recorded the input; `turn_id` is null unless the turn's durable
-    /// row names a Discord message.
-    Injected {
-        turn_id: Option<String>,
-    },
-    /// A paste was attempted but not confirmed; nothing was queued.
-    Unconfirmed {
-        turn_id: Option<String>,
-        detail: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HumanInputError {
-    AuthorNotAllowed,
-    RuntimeUnavailable(String),
-    QueueRefused(String),
-    InvalidTarget(String),
 }
 
 impl HumanInputError {
@@ -156,12 +126,6 @@ enum MailboxHolder {
     BackgroundTurn,
 }
 
-/// Queue reason when a turn that never claimed the mailbox holds the channel.
-pub const EXTERNAL_TURN_ACTIVE: &str = "external_turn_active";
-
-/// Queue reason when a confirmed turn-mode channel's transcript reads neither idle nor busy.
-pub const TURN_ACTIVITY_UNKNOWN: &str = "turn_activity_unknown";
-
 /// A TUI-direct, adopted or monitor turn owns the channel through its durable row alone; a
 /// headless start there could not create its own row and would lose the input.
 /// A prior process's Herdr row holds the channel the same way, whatever source started it.
@@ -176,23 +140,6 @@ pub fn external_turn_holds_channel(provider: &ProviderKind, channel_id: u64) -> 
         .is_some_and(|row| {
             row.turn_source != crate::services::discord::inflight::TurnSource::Managed
         })
-}
-
-/// What keeps a start off a channel whose mailbox may be free.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExternalHold {
-    Row,
-    Busy,
-    Unknown,
-}
-
-impl ExternalHold {
-    pub fn reason(self) -> &'static str {
-        match self {
-            Self::Row | Self::Busy => EXTERNAL_TURN_ACTIVE,
-            Self::Unknown => TURN_ACTIVITY_UNKNOWN,
-        }
-    }
 }
 
 /// A turn-mode direct turn leaves no row, so a confirmed channel also reads its transcript fresh.

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::super::observe::RestoreUnverified;
 use super::{invalid, open_regular, publish, synced_temp, unchanged};
-use crate::services::discord::runtime_store::fsync_parent_dir;
+use crate::domain::file_sync::fsync_parent_dir;
 
 pub(crate) const STATE_FILE: &str = ".agentdesk-config-state";
 

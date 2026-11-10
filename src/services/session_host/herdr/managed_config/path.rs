@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::invalid;
 use crate::config::session_hosts::{BootSessionHosts, EndpointMode, SessionHostsConfig};
-use crate::services::discord::runtime_store::fsync_parent_dir;
+use crate::domain::file_sync::fsync_parent_dir;
 
 #[derive(Debug)]
 pub(crate) struct PersonalPaths {

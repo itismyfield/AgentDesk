@@ -44,16 +44,16 @@ mod config {
         Some(std::env::var_os("AGENTDESK_ROOT_DIR").expect("explicit fixture root").into())
     }
 }
-mod services {
-    pub mod discord {
-        pub mod runtime_store {
-            pub fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
-                assert!(path.starts_with(crate::config::runtime_root().unwrap()));
-                assert!(path.is_file());
-                Ok(())
-            }
+mod domain {
+    pub mod file_sync {
+        pub fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
+            assert!(path.starts_with(crate::config::runtime_root().unwrap()));
+            assert!(path.is_file());
+            Ok(())
         }
     }
+}
+mod services {
     pub mod platform {
         pub mod shell {
             pub fn hostname_short() -> String {

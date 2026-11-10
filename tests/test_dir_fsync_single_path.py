@@ -4,7 +4,7 @@ from pathlib import Path
 
 from scripts.check_dir_fsync_single_path import audit
 
-CANONICAL = "src/services/discord/runtime_store.rs"
+CANONICAL = "src/domain/file_sync.rs"
 HELPER = '    fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all()\n'
 
 

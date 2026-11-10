@@ -30,33 +30,11 @@ pub(crate) use session_probe::SessionProbe;
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
 
-/// #3263: Codex context-window LAST-RESORT fallback (tokens).
-///
-/// Codex is the only provider with a dynamic local context-window source
-/// (`~/.codex/models_cache.json`, keyed by model slug). Resolution order is:
-///   1. exact slug match in the cache (`context_window`),
-///   2. max `context_window` across cached models (cache present, slug drift),
-///   3. this constant (cache absent / empty / unparseable).
-/// It is set to a conservative current-generation Codex window (matching the
-/// current gpt-5.x cache value) so the fallback is not stale; the cache and the
-/// max-of-cache value above are authoritative whenever the cache exists.
-pub(crate) const CODEX_FALLBACK_CONTEXT_WINDOW: u64 = 272_000;
+pub use crate::domain::provider::{ProviderCapabilities, ProviderDefaultBehavior, ProviderKind};
 
 /// Tmux session name suffix (reserved for future isolation use; currently empty).
 pub fn tmux_env_suffix() -> &'static str {
     ""
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum ProviderKind {
-    Claude,
-    Codex,
-    Gemini,
-    OpenCode,
-    Qwen,
-    Grok,
-    Antigravity,
-    Unsupported(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,14 +46,6 @@ pub(crate) enum LegacyDispatchKind {
     Qwen,
     StreamJsonCli(StreamJsonDialectId),
     Unsupported(String),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProviderCapabilities {
-    pub binary_name: &'static str,
-    pub supports_structured_output: bool,
-    pub supports_resume: bool,
-    pub supports_tool_stream: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,44 +60,11 @@ pub struct ProviderRuntimeProbe {
     pub credential_source: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProviderDefaultBehavior {
-    pub resume_without_reset: bool,
-    pub runtime_model: Option<&'static str>,
-    pub source_label: &'static str,
-}
-
 impl ProviderKind {
     pub fn registry_entry(&self) -> Option<&'static ProviderRegistryEntry> {
         provider_registry()
             .iter()
             .find(|entry| entry.id == self.as_str() && !matches!(self, Self::Unsupported(_)))
-    }
-
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Gemini => "gemini",
-            Self::OpenCode => "opencode",
-            Self::Qwen => "qwen",
-            Self::Grok => "grok",
-            Self::Antigravity => "antigravity",
-            Self::Unsupported(s) => s.as_str(),
-        }
-    }
-
-    pub fn doctor_check_id(&self) -> &'static str {
-        match self {
-            Self::Claude => "provider_claude",
-            Self::Codex => "provider_codex",
-            Self::Gemini => "provider_gemini",
-            Self::OpenCode => "provider_opencode",
-            Self::Qwen => "provider_qwen",
-            Self::Grok => "provider_grok",
-            Self::Antigravity => "provider_antigravity",
-            Self::Unsupported(_) => "provider_unsupported",
-        }
     }
 
     pub fn display_name(&self) -> &str {
@@ -282,11 +219,6 @@ impl ProviderKind {
             .filter(ProviderKind::is_supported)
             .or_else(|| channel_name.and_then(Self::from_channel_suffix))
             .or_else(Self::default_channel_provider)
-    }
-
-    /// Returns true if this is a known, supported provider.
-    pub fn is_supported(&self) -> bool {
-        !matches!(self, Self::Unsupported(_))
     }
 
     pub fn is_channel_supported(
@@ -1437,7 +1369,8 @@ fn codex_context_window_from_cache(data: &str, model: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod codex_context_window_tests {
-    use super::{CODEX_FALLBACK_CONTEXT_WINDOW, ProviderKind, codex_context_window_from_cache};
+    use super::{ProviderKind, codex_context_window_from_cache};
+    use crate::domain::provider::CODEX_FALLBACK_CONTEXT_WINDOW;
 
     const CACHE: &str = r#"{
         "models": [

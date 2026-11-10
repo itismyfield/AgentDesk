@@ -5,7 +5,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use std::sync::Arc;
 
-use crate::services::discord::bot_role::UtilityBotRole;
+use crate::domain::bot_role::UtilityBotRole;
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
 use crate::services::discord::outbound::message::{OutboundOperation, OutboundTarget};
