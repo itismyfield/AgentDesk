@@ -137,8 +137,8 @@ A held store is never initialized again: an era channel whose `init` is missing 
 ### 3.1 A channel whose transcript already holds output
 
 A Claude TUI channel whose transcript already holds output, the warm-up canary included, is added
-the same way. Codex channels with output are not adopted: they stay on Legacy. O starts at the
-cursor Legacy reads that transcript from in the new process, so neither writer repeats a byte.
+the same way; a Codex channel with output is taken at its frontier instead (below). O starts at
+the cursor Legacy reads that transcript from in the new process, so neither writer repeats a byte.
 Records Legacy left undelivered before that cursor are posted by neither: the adoption reports
 their range once as `tui_o:abandoned:<channel>` (`Abandoned { source, from, to }`). Every check of
 §1 still applies; in addition all of these must hold after the restart, or the
@@ -188,6 +188,15 @@ end`. Preserve the stall kind, source, frontier and abandoned ranges. Do not app
 as a clean comparison baseline until the historical debt/abandon evidence is established; elapsed time or
 `deferred adoption committed` alone is insufficient (P31:
 `src/services/tui_o/writer/deferred.rs:19–28,325–428`).
+
+A reserved Codex channel whose rollout already holds output is taken at its frontier, logged as
+`Codex takeover committed`: the end of the last complete record, or the opener of the turn the
+rollout's current execution opened when no Legacy body sent since its bind can be part of it. A
+turn left open from before that bind was an earlier execution's and is not posted. While a turn
+Legacy sent a body from is open the takeover waits, logged as `Codex takeover waits`; once it
+ends the rollout is taken at its end. The bytes before the frontier must hash the same under the
+intake fence, or the commit waits for the next look. An earlier rollout's turn owed the same way
+goes into the `init` beside the new one (`src/services/tui_o/writer/late_adopt/codex.rs`).
 
 Before editing the list, run both cross-node checks below by hand and keep their output in the lane
 log. If either fails, stop the expansion; neither may be skipped.
