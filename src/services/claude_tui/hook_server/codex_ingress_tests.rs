@@ -12,6 +12,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tower::ServiceExt;
 
+#[path = "codex_herdr_ingress_tests.rs"]
+mod codex_herdr_ingress_tests;
+
 struct Harness {
     _env: Vec<Guard>,
     _lock: std::sync::MutexGuard<'static, ()>,
