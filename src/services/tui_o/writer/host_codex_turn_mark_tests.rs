@@ -41,7 +41,7 @@ async fn r1_fresh_turn_mark_excludes_a_completed_previous_turn_body() {
     assert!(!previous.owned);
     drop(previous);
     let candidate = mark(CODEX);
-    assert_eq!(candidate.turn_mark().unwrap().sends, (1, 1));
+    assert_eq!(candidate.turn_mark().unwrap().sends, (2, 2));
 
     let (path, source) = rollout(&harness, "fresh-turn.jsonl", &prompted("s-codex"));
     bind_late(CODEX, &path);
@@ -94,7 +94,7 @@ async fn r3_a_previous_turn_body_in_flight_retries_then_commits_after_it_finishe
     } = hosted_over_old(CODEX).await;
     let previous = candidate(CODEX).claim_body(CODEX);
     let candidate = mark(CODEX);
-    assert_eq!(candidate.turn_mark().unwrap().sends, (1, 0));
+    assert_eq!(candidate.turn_mark().unwrap().sends, (2, 1));
     let (path, source) = rollout(&harness, "in-flight.jsonl", &prompted("s-codex"));
     bind_late(CODEX, &path);
     ready_work().await;
@@ -141,7 +141,7 @@ async fn r4_sends_are_captured_before_the_unlocked_binding_read() {
         binding_seq(CODEX)
     }));
     let captured = candidate.turn_mark().unwrap();
-    assert_eq!(captured.sends, (0, 0), "the sends read precedes binding IO");
+    assert_eq!(captured.sends, (1, 1), "the sends read precedes binding IO");
     assert_eq!(captured.seq, binding_seq(CODEX).unwrap());
     let attempted = Arc::new(AtomicBool::new(false));
     let observed = Arc::clone(&attempted);
@@ -265,7 +265,7 @@ async fn a_failed_later_admission_read_restores_the_host_baseline_after_a_retry(
     } = hosted_over_old(CODEX).await;
     drop(candidate(CODEX).claim_body(CODEX));
     let candidate = mark(CODEX);
-    assert_eq!(candidate.turn_mark().unwrap().sends, (1, 1));
+    assert_eq!(candidate.turn_mark().unwrap().sends, (2, 2));
     let tried = Arc::new(AtomicBool::new(false));
     let observed = Arc::clone(&tried);
     test_hook::set(CODEX, Step::BeforeFence, move || {

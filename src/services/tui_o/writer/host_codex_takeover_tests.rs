@@ -1,5 +1,5 @@
-//! A reserved Codex channel taken over through the real host: only a rollout bound after the
-//! baseline whose bytes still hold no output commits, and Legacy sends nothing once it does.
+//! A reserved Codex channel taken over through the real host: a fresh rollout from its first byte,
+//! one that holds output from its frontier, and Legacy sends nothing once it commits.
 
 use super::*;
 use crate::config::Config;
@@ -79,15 +79,34 @@ struct Takeover {
     _reserved: test_override::ChannelsGuard,
 }
 
-/// A host whose channel already bound a rollout Legacy answered from before the baseline.
+/// A turn Codex opened and closed before the bind that resumed its rollout, by its own clock.
+fn history(turn: &str, text: &str) -> Vec<u8> {
+    let at = "2026-01-01T00:00:00Z";
+    [
+        codex_line(serde_json::json!({"type": "event_msg", "timestamp": at,
+            "payload": {"type": "task_started", "turn_id": turn}})),
+        codex_line(serde_json::json!({"type": "response_item", "timestamp": at,
+            "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "before"}]}})),
+        answer("msg_0", text),
+        codex_line(serde_json::json!({"type": "event_msg", "timestamp": at,
+            "payload": {"type": "task_complete", "turn_id": turn}})),
+    ]
+    .concat()
+}
+
+/// A host whose channel already bound a rollout with a turn open that Legacy sent a body from
+/// before the baseline, so that rollout stays Legacy's.
 async fn hosted_over_old(channel: u64) -> Takeover {
     let harness = fresh_on(channel);
     harness.gate.acquired();
     let reserved = reserve(channel);
     p5::set_test_root(Some(harness._runtime.path()));
-    let old = [metadata("s-codex"), answer("msg_0", "old answer")].concat();
-    let (old, _) = rollout(&harness, "rollout-old.jsonl", &old);
+    let (old, _) = rollout(&harness, "rollout-old.jsonl", &metadata("s-codex"));
     bind_late(channel, &old);
+    append(&old, &[opening(), answer("msg_0", "old answer")].concat());
+    let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(channel).cloned());
+    drop(candidate.unwrap().claim_body(channel));
     let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
     io.late_enabled.store(true, Ordering::SeqCst);
     let tasks = start_codex(&harness, &io, &ready);
@@ -285,8 +304,8 @@ async fn a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
     }
 }
 
-/// Under the adoption lock, a Legacy send finished since the fence or an output appended since the
-/// judgement leaves no init for that rollout; a prompt mirror appended since is judged again at once.
+/// Under the adoption lock, a Legacy send finished since the fence leaves no init for that rollout;
+/// an output appended since the judgement is taken from its turn's opener, a mirror judged again.
 #[tokio::test(start_paused = true)]
 async fn the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence() {
     for (channel, race) in [(61_814_u64, "send"), (61_815, "output"), (61_816, "mirror")] {
@@ -309,6 +328,19 @@ async fn the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
         });
         bind_late(channel, &path);
         polls(3).await;
+        if race == "output" {
+            assert_eq!(
+                adoption(channel),
+                Adoption::Committed,
+                "{:?}",
+                io.alarms.halted()
+            );
+            let opener = metadata("s-codex").len() as u64;
+            assert_eq!(init_sources(&harness, channel), [(source, opener)]);
+            polls(3).await;
+            assert_eq!(harness.port.posts(), ["raced"], "{:?}", io.alarms.halted());
+            continue;
+        }
         if race == "mirror" {
             assert_eq!(
                 adoption(channel),
@@ -378,6 +410,203 @@ async fn a_takeover_cut_off_before_its_era_seal_recovers_its_store_on_the_next_s
     assert_eq!(
         harness.port.posts(),
         ["the answer"],
+        "{:?}",
+        io.alarms.halted()
+    );
+}
+
+/// A host over an empty binding log, started before any rollout is bound.
+async fn hosted_unbound(channel: u64) -> Takeover {
+    let harness = fresh_on(channel);
+    harness.gate.acquired();
+    let reserved = reserve(channel);
+    p5::set_test_root(Some(harness._runtime.path()));
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    io.late_enabled.store(true, Ordering::SeqCst);
+    let tasks = start_codex(&harness, &io, &ready);
+    polls(3).await;
+    Takeover {
+        harness,
+        io,
+        tasks,
+        _reserved: reserved,
+    }
+}
+
+/// A resumed rollout bound after the baseline whose history already holds an answer.
+fn warm(harness: &Harness, name: &str) -> (PathBuf, SourceId, u64) {
+    let bytes = [metadata("s-codex"), history("t0", "old answer")].concat();
+    let (path, source) = rollout(harness, name, &bytes);
+    (path, source, bytes.len() as u64)
+}
+
+fn rewrite(path: &Path, from: &str, to: &str) {
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(text.contains(from));
+    std::fs::write(path, text.replace(from, to)).unwrap();
+}
+
+/// A resumed rollout that already holds answered history is taken at its end: the managed turn
+/// after it gets no Legacy body, O posts it once, and a restart that rereads the init goes on.
+#[tokio::test(start_paused = true)]
+async fn a_warm_rollout_holding_output_is_taken_at_its_frontier_and_its_next_turn_posted_once() {
+    const CODEX: u64 = 61_831;
+    let Takeover {
+        harness,
+        io,
+        tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    let (path, source, end) = warm(&harness, "rollout-warm.jsonl");
+    bind_late(CODEX, &path);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(init_sources(&harness, CODEX), [(source.clone(), end)]);
+    assert!(!legacy_sends(CODEX), "the managed turn's body is O's");
+    append(&path, &[opening(), answer("msg_1", "the answer")].concat());
+    polls(3).await;
+    assert_eq!(
+        harness.port.posts(),
+        ["the answer"],
+        "{:?}",
+        io.alarms.halted()
+    );
+    restart_posts_nothing(&harness, tasks, &source).await;
+    append(&path, &answer("msg_2", "after the restart"));
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["the answer", "after the restart"]);
+}
+
+/// A byte before the frontier changed after the init was planned refuses the commit under the
+/// fence: no store and nothing posted. Restored, the next wake commits the same rollout.
+#[tokio::test(start_paused = true)]
+async fn a_byte_changed_before_the_frontier_refuses_the_commit_until_it_is_restored() {
+    const CODEX: u64 = 61_832;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    let (path, source, end) = warm(&harness, "rollout-changed.jsonl");
+    let changed = path.clone();
+    test_hook::set(CODEX, Step::BeforeFence, move || {
+        rewrite(&changed, "old answer", "OLD answer");
+        Ok(())
+    });
+    bind_late(CODEX, &path);
+    polls(3).await;
+    assert_eq!(adoption(CODEX), Adoption::Deferred);
+    assert!(!harness.store.has_channel_dir(CODEX));
+    assert!(harness.port.posts().is_empty());
+
+    rewrite(&path, "OLD answer", "old answer");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(init_sources(&harness, CODEX), [(source, end)]);
+}
+
+/// A turn opened after the bind while a Legacy terminal delivery blocks the commit is taken from its opener
+/// once the custody clears; O posts its answer, written before the commit, exactly once.
+#[tokio::test(start_paused = true)]
+async fn a_turn_opened_after_the_bind_is_taken_from_its_opener_and_posted_once() {
+    const CODEX: u64 = 61_833;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    *io.custody.lock().unwrap() = Ok(Custody::Active);
+    let (path, source, opened) = warm(&harness, "rollout-held.jsonl");
+    bind_late(CODEX, &path);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Deferred,
+        "custody blocks the commit"
+    );
+    append(
+        &path,
+        &[opening(), answer("msg_1", "the held answer")].concat(),
+    );
+    *io.custody.lock().unwrap() = Ok(Custody::Free);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(init_sources(&harness, CODEX), [(source, opened)]);
+    polls(3).await;
+    assert_eq!(
+        harness.port.posts(),
+        ["the held answer"],
+        "{:?}",
+        io.alarms.halted()
+    );
+}
+
+/// A rollout left with an owed open turn when the next one is bound goes into the init beside it,
+/// from that turn's opener; O posts the old turn's answer and the new rollout's answer, each once.
+#[tokio::test(start_paused = true)]
+async fn an_owed_turn_on_the_rollout_before_a_new_bind_goes_into_the_init() {
+    const CODEX: u64 = 61_834;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    *io.custody.lock().unwrap() = Ok(Custody::Active);
+    let (old, old_source, opened) = warm(&harness, "rollout-before.jsonl");
+    bind_late(CODEX, &old);
+    polls(3).await;
+    append(
+        &old,
+        &[opening(), answer("msg_1", "the owed answer")].concat(),
+    );
+    let (next, next_source) = rollout(&harness, "rollout-after.jsonl", &prompted("s-codex"));
+    bind_late(CODEX, &next);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Deferred,
+        "custody blocks the commit"
+    );
+    *io.custody.lock().unwrap() = Ok(Custody::Free);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(
+        init_sources(&harness, CODEX),
+        [(old_source, opened), (next_source, 0)]
+    );
+    append(&next, &answer("msg_2", "the new answer"));
+    polls(3).await;
+    let mut posts = harness.port.posts();
+    posts.sort();
+    assert_eq!(
+        posts,
+        ["the new answer", "the owed answer"],
         "{:?}",
         io.alarms.halted()
     );

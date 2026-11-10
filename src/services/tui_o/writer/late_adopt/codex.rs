@@ -1,6 +1,5 @@
-//! Codex late takeover: a fresh rollout from its first byte, or a rollout that already holds
-//! output from its frontier, where Legacy's delivery provably ends. A Legacy body sent since the
-//! baseline skips the rollout's open turn; the sends are read before the binding log.
+//! Codex late takeover: a fresh rollout from its first byte, or one that holds output from its
+//! frontier, where Legacy's delivery provably ends; a Legacy send since the baseline skips it.
 
 use sha2::{Digest, Sha256};
 
@@ -291,9 +290,8 @@ impl<I: HostIo> Takeover<'_, I> {
         self.fenced(at, bound, Plan::Warm(&sources)).await
     }
 
-    /// Where O starts on `source`, read now. An open turn opened before the bind that names its
-    /// execution was left by an earlier one; a newer turn is O's only while no Legacy send since
-    /// its bind can be part of it.
+    /// Where O starts on `source`: a turn opened before its bind was left by an earlier execution;
+    /// a newer one is O's only while no Legacy send since its bind can be part of it.
     fn start_on(
         &self,
         events: &[BindingEvent],

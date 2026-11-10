@@ -694,3 +694,45 @@ fn a_named_source_that_cannot_be_opened_is_unreadable() {
         other => panic!("expected an unreadable named source, got {other:?}"),
     }
 }
+
+/// While a turn is held for O the current source starts at Legacy's delivered end, over the hash
+/// of the bytes before it; a delivered end inside a record is no frontier and stays unknown.
+#[test]
+fn a_held_turn_starts_the_current_source_at_legacys_delivered_end() {
+    let mut fixture = fixture();
+    let [s0, s1, s2] = fixture.sources.clone();
+    let bytes = std::fs::read(&s2.path).unwrap();
+    let held = String::from_utf8_lossy(&bytes)
+        .find(r#""turn_id":"s2-t33""#)
+        .unwrap();
+    let frontier = bytes[..held].iter().rposition(|b| *b == b'\n').unwrap() + 1;
+    fixture.facts["obligations"]["custody"] = json!("held");
+    fixture.checkpoints[0].delivered = native(&s2, frontier as u64);
+    let plan = fixture.verify().unwrap();
+    let starts: Vec<(SourceId, u64, String)> = (plan.sources().iter())
+        .map(|init| {
+            let start = (init.delivery_start, init.prefix_hash.clone());
+            (init.source_id.clone(), start.0, start.1)
+        })
+        .collect();
+    let whole = |s: &SourceId| (s.clone(), len(&s.path), hash(&s.path));
+    let before = hex::encode(Sha256::digest(&bytes[..frontier]));
+    assert_eq!(
+        starts,
+        vec![
+            (s2.clone(), frontier as u64, before),
+            whole(&s1),
+            whole(&s0)
+        ]
+    );
+    fixture.checkpoints[0].delivered = native(&s2, frontier as u64 + 1);
+    match fixture.verify() {
+        Err(Refusal::Judged(judgment)) => {
+            assert!(
+                judgment.unknown.contains("current.frontier"),
+                "{judgment:?}"
+            );
+        }
+        other => panic!("expected an unknown frontier, got {other:?}"),
+    }
+}

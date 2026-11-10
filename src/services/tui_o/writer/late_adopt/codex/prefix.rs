@@ -1,6 +1,5 @@
-//! Whether a Codex rollout still sits before any output: its verified `session_meta`, records the
-//! classifier ignores, one turn opener, and one user prompt with that prompt's own mirrors.
-//! A rollout that holds output is read for its frontier instead: the turn still open, if any.
+//! Whether a Codex rollout still sits before any output (verified `session_meta`, one opener, one
+//! prompt and its mirrors), and else where its frontier lies: the turn still open, if any.
 
 use std::io::Read;
 

@@ -1,6 +1,5 @@
-//! A verified Codex init, built only by the shared evaluator. It starts every bound source at
-//! the end it read, so Legacy's consumed prefix is never recorded as delivered; while a turn is
-//! held for O, the current source starts at Legacy's delivered end instead.
+//! A verified Codex init, built only by the shared evaluator: each bound source starts at the end
+//! it read, or the current one at Legacy's delivered end while a turn is held for O.
 
 use std::io::Read;
 
