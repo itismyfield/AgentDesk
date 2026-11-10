@@ -1443,6 +1443,8 @@ src/
 │   │   │   │   │   └── carried_ledger_tests.rs
 │   │   │   │   ├── live_agent_recovery/
 │   │   │   │   │   └── judged_finish_fence_tests.rs
+│   │   │   │   ├── runtime_stop/
+│   │   │   │   │   └── wake_tests.rs
 │   │   │   │   ├── self_watchdog/
 │   │   │   │   │   ├── policy/
 │   │   │   │   │   │   └── tests/
@@ -1863,6 +1865,7 @@ src/
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── closed.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
