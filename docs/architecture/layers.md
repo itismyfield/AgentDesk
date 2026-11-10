@@ -510,3 +510,5 @@ zero-rule 부채 역시 이 대응으로 검사한다. mapping을 지우거나 �
 역사 측정은 금지 설정을 제외한 `Cargo.toml`과 `src/**/*.rs`만 Git archive에서
 추출했고 도구/helper도 tool SHA로 고정했다. 읽기 실패와 모듈 도달 오류는 0이었다.
 재현 명령·archive/source/tool SHA256·검색 원문·graph는 캠페인 보고서의 증거 목록에 있다.
+
+`domain::provider`가 ProviderKind enum과 정적 catalog·이름·별칭·CLI 순서·counterpart·공개 serde 값을 소유한다. 준비 조각, 추출 미완료 — runtime 책임은 S04가 adapter 경계로 전환한다. 기존 services::provider 경로는 같은 타입을 재수출하며 config·auth·cache·registry resolver와 runtime inherent impl은 adapter에 유지한다.
