@@ -17,6 +17,7 @@ from typing import Any, Sequence
 from .tool_cards import is_tool_card, tool_card_body
 from .turn_summary import TURN_SUMMARY_PATTERN, is_turn_summary, turn_summary_body
 from .status_chrome import no_status_chrome, turn_summary_after_body
+from .queue_notice import duplicate_content_key
 # Discord author ids:
 #   - Our driver uses the "명령봇" account to push prompts via /api/discord/send.
 #     We must exclude this id from the relay window so prompts are not counted
@@ -408,13 +409,11 @@ def raw_message_count_between_markers(
 
 
 def no_duplicate_content(window: Window) -> None:
-    """Fail if the same ADK relay body is left twice in the channel's final state.
-
-    Messages deleted before the latest snapshot (per-turn '...' placeholders) are
-    transient and not counted; edits already replace the observed content.
+    """Fail if the same ADK relay body survives twice in the final snapshot.
+    Deleted placeholders are ignored; edits replace the observed content.
     """
 
-    seen: dict[str, str] = {}
+    seen: dict[tuple[str, str], str] = {}
     for message in window.messages:
         message_id = str(message.get("id") or "")
         if message_id in window.deleted_ids:
@@ -422,12 +421,13 @@ def no_duplicate_content(window: Window) -> None:
         body = (relay_body(message) or "").strip()
         if not body:
             continue
-        if body in seen:
+        key = duplicate_content_key(message, body)
+        if key in seen:
             raise AssertionError(
                 f"duplicate Discord relay body: {body[:80]!r} "
-                f"(ids {seen[body]}, {message_id})"
+                f"(ids {seen[key]}, {message_id})"
             )
-        seen[body] = message_id
+        seen[key] = message_id
 
 
 def author_relay_body(message: dict[str, Any], author_id: str) -> str | None:

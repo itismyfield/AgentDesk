@@ -193,7 +193,10 @@ async fn end_herdr(
     if let Ok(cleared) = forgotten.await {
         note_retired_selector(cleared, report);
     }
-    if result != TerminationResult::Retired {
+    if result == TerminationResult::Retired {
+        // A retired execution's reply then names what its cleanup left behind, not a fresh session.
+        report.execution = Some(super::clear_report::ExecutionCleanup::Retired);
+    } else {
         let (outcome, detail) = result.outcome();
         tracing::warn!(session_key = key, outcome, %detail, "herdr clear could not end its execution");
         report.end_unconfirmed = true;

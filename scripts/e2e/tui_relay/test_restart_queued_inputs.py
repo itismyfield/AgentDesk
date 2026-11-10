@@ -11,6 +11,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tui_relay.test_driver_health import ROOT, _OutcomeFixture, driver  # noqa: E402
+from tui_relay import assertions  # noqa: E402
+from tui_relay.discord import DiscordClient  # noqa: E402
+from tui_relay.test_discord_client import _Response  # noqa: E402
 
 TARGET, OTHER = "99", 1475086789696946196
 QUEUED_2 = "provider:claude:pending_queue_depth:2"
@@ -74,6 +77,72 @@ class RestartQueuedInputs(_OutcomeFixture, unittest.TestCase):
                 if blocked:
                     self.assertIn("did not become healthy", row["reason"])
                     self.assertIn(f"degraded_reasons={blocked!r}", row["reason"])
+
+
+class QueueNoticeDuplicates(unittest.TestCase):
+    NOTICE = "큐에 들어갔습니다"
+
+    def window(self, *references, body=None):
+        window = assertions.Window("10")
+        for index, reference in enumerate(references, 20):
+            window.add({"id": str(index), "content": self.NOTICE if body is None else body,
+                        "type": 19, "author": {"id": "relay-fixture", "bot": True}, **reference})
+        window.reconcile_snapshot(list(window.messages), after_id="10", complete=True)
+        return window
+
+    def test_distinct_input_references_pass(self):
+        for field, key in (("message_reference", "message_id"), ("referenced_message", "id")):
+            with self.subTest(field=field):
+                window = self.window({field: {key: "101"}}, {field: {key: "102"}})
+                assertions.no_duplicate_content(window)
+
+    def test_same_input_reference_fails(self):
+        references = ({"message_reference": {"message_id": "101"}},
+                      {"referenced_message": {"id": 101}},
+                      {"message_reference": None, "referenced_message": {"id": "101"}})
+        for first in references:
+            for second in references:
+                with self.subTest(first=first, second=second):
+                    with self.assertRaisesRegex(assertions.AssertionError, "duplicate Discord relay body"):
+                        assertions.no_duplicate_content(self.window(first, second))
+
+    def test_missing_reference_fails(self):
+        references = ({}, {"message_reference": None, "referenced_message": None},
+                      {"message_reference": {}, "referenced_message": {}},
+                      {"message_reference": {"message_id": None}, "referenced_message": {"id": None}})
+        for first in references:
+            for second in references:
+                with self.subTest(first=first, second=second):
+                    with self.assertRaisesRegex(assertions.AssertionError, "duplicate Discord relay body"):
+                        assertions.no_duplicate_content(self.window(first, second))
+
+    def test_regular_body_duplicate_fails(self):
+        for body in ("same answer", f"answer mentioning {self.NOTICE}", f"{self.NOTICE}\nmore answer"):
+            for references in (({}, {}), ({"message_reference": {"message_id": "101"}},
+                                          {"message_reference": {"message_id": "102"}})):
+                with self.subTest(body=body, references=references):
+                    with self.assertRaisesRegex(assertions.AssertionError, "duplicate Discord relay body"):
+                        assertions.no_duplicate_content(self.window(*references, body=body))
+
+    def test_fetch_and_window_preserve_reply_references(self):
+        rows = self.window({"message_reference": {"message_id": "101"}},
+                           {"message_reference": None, "referenced_message": {"id": "102"}}).messages
+        for capture in (False, True):
+            for payload in (rows, {"messages": rows}):
+                with self.subTest(capture=capture, envelope=isinstance(payload, dict)):
+                    captures = [] if capture else None
+                    client = DiscordClient(base_url="http://offline.invalid", captures=captures, capture_after_id="10")
+                    with patch("urllib.request.urlopen", return_value=_Response(payload)):
+                        fetched = client.fetch_messages(TARGET, after_id="10")
+                    window = assertions.Window("10")
+                    for row in fetched:
+                        window.add({**row, "content": "previous snapshot"})
+                        window.add(row)
+                    window.reconcile_snapshot(fetched, after_id="10", complete=True)
+                    self.assertEqual(window.messages, rows)
+                    if capture:
+                        self.assertEqual(captures[0]["pages"][0]["messages"], rows)
+                    assertions.no_duplicate_content(window)
 
 
 if __name__ == "__main__":
