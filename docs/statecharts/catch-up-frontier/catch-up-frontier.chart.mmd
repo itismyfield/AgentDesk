@@ -1,0 +1,76 @@
+---
+title: "Catch-up cursor over a V2 queue channel"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Stuck
+    lg1: Moved
+  }
+  class lg0 pink
+  class lg1 teal
+  s0: cursor 0: next input waiting
+  s1: cursor 0: next input being sent
+  s2: cursor 0: next input dropped, not sent
+  s3: cursor 0: next input owed after an unclear send
+  s4: cursor 0: next input delivered
+  s5: cursor 1: next input waiting
+  s6: cursor 1: next input being sent
+  s7: cursor 1: next input dropped, not sent
+  s8: cursor 1: next input owed after an unclear send
+  s9: cursor 1: next input delivered
+  s10: cursor 2: next input waiting
+  s11: cursor 2: next input being sent
+  s12: cursor 2: next input dropped, not sent
+  s13: cursor 2: next input owed after an unclear send
+  s14: cursor 2: next input delivered
+  s15: cursor 3: every input behind it
+  [*] --> s0
+  s0 --> s1: an input is sent
+  s0 --> s2: a waiting input is dropped
+  s1 --> s3: the send is unclear
+  s1 --> s4: the send is confirmed
+  s2 --> s0: the periodic scan runs
+  s3 --> s0: an owed input is queued again
+  s3 --> s4: the send is confirmed
+  s4 --> s5: the periodic scan runs
+  s4 --> s6: the periodic scan runs
+  s5 --> s6: an input is sent
+  s5 --> s7: a waiting input is dropped
+  s6 --> s8: the send is unclear
+  s6 --> s9: the send is confirmed
+  s7 --> s5: the periodic scan runs
+  s4 --> s8: the periodic scan runs
+  s4 --> s10: the periodic scan runs
+  s8 --> s5: an owed input is queued again
+  s8 --> s9: the send is confirmed
+  s4 --> s11: the periodic scan runs
+  s9 --> s10: the periodic scan runs
+  s10 --> s11: an input is sent
+  s10 --> s12: a waiting input is dropped
+  s9 --> s11: the periodic scan runs
+  s11 --> s13: the send is unclear
+  s11 --> s14: the send is confirmed
+  s12 --> s10: the periodic scan runs
+  s4 --> s13: the periodic scan runs
+  s4 --> s15: the periodic scan runs
+  s9 --> s13: the periodic scan runs
+  s13 --> s10: an owed input is queued again
+  s13 --> s14: the send is confirmed
+  s9 --> s15: the periodic scan runs
+  s14 --> s15: the periodic scan runs
+  class s0 pink
+  class s1 pink
+  class s2 pink
+  class s3 pink
+  class s4 pink
+  class s5 teal
+  class s6 teal
+  class s7 teal
+  class s8 teal
+  class s9 teal
+  class s10 teal
+  class s11 teal
+  class s12 teal
+  class s13 teal
+  class s14 teal
+  class s15 teal
