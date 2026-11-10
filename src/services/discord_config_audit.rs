@@ -11,7 +11,7 @@ use crate::runtime_layout;
 use crate::services::discord::formatting::normalize_allowed_tools;
 use crate::services::discord::internal_api;
 use crate::services::discord::runtime_store::atomic_write;
-use crate::services::discord::settings::discord_token_hash;
+use crate::utils::discord::discord_token_hash;
 
 mod bot_settings;
 mod db_agents;

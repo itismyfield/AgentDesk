@@ -681,35 +681,7 @@ fn a_codex_launch_that_never_sent_its_create_is_followed_by_one_fresh_launch_pg(
 // nothing and sends only its own prompt once.
 #[test]
 fn a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg() {
-    let fx = Fixture::admitted("cancel");
-    let launcher = Arc::new(Launcher::default());
-    let (first, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(&launcher), || {
-        if fx.start_provider(&launcher, false).is_some() {
-            fx.cancel_now();
-        }
-    });
-    assert!(first.unwrap_err().contains("cancel"));
-    assert!(fx.rig.sends().is_empty());
-    assert_eq!(fx.row(), Some(HostedState::Pending));
-    let nonce = launcher.nonces.lock().unwrap()[0].clone();
-    assert!(!hold_of(&nonce).exists());
-    // Other launch options than the pane's refuse its first prompt before any read or write.
-    let kept = options_of(&fx);
-    let launched_with = std::fs::read_to_string(&kept).unwrap();
-    std::fs::write(&kept, "other options").unwrap();
-    let (changed, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
-    assert!(changed.unwrap_err().contains("LaunchOptionsChanged"));
-    assert!(fx.rig.sends().is_empty());
-    std::fs::write(&kept, launched_with).unwrap();
-    let ports = fx.ports(&launcher);
-    let (second, _) = fx.turn(&fx.record(), &ports, || {
-        fx.rig.answer("pane.read", screen(READY));
-        fx.answer(&nonce);
-    });
-    assert_eq!(second, Ok(()));
-    assert_eq!(fx.rig.sends(), prompt_sends());
-    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
-    assert_eq!(fx.row(), Some(HostedState::Bound));
+    pending_registration::cancel_before_first_write();
 }
 
 // A first write the gate refuses before any key lands releases the hold; the next prompt is
@@ -1571,3 +1543,6 @@ fn coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg() {
 
 #[path = "provider_dispatch_codex_live_end_tests.rs"]
 mod live_end;
+
+#[path = "provider_dispatch_codex_herdr_pending_tests.rs"]
+mod pending_registration;
