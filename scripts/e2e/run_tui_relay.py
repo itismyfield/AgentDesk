@@ -839,8 +839,9 @@ def _failure_attribution(
 def _record_send(record: dict[str, Any], step: str, prompt: str | None = None) -> dict[str, Any]:
     """Log a prompt before it leaves, so a deadline still reports it as attempted."""
     entry: dict[str, Any] = {"step": step, "send_state": "attempted"}
-    if prompt is not None:
-        entry["markers"] = re.findall(r"\[E2E:[^\]\r\n]+\]", prompt)
+    markers = re.findall(r"\[E2E:[^\]\r\n]+\]", prompt) if prompt is not None else []
+    if markers and record.get("track_marker_prompts") is True:
+        entry["markers"] = markers
         counts = record.get("marker_counts")
         if isinstance(counts, dict):
             for marker in entry["markers"]:
@@ -3270,6 +3271,7 @@ def run_scenario(
         "failure_attribution": None,
     }
     if scenario_id in {"E-50", "E-51"}:
+        result["track_marker_prompts"] = True
         result["marker_counts"] = dict.fromkeys(
             str(marker).replace("{run_id}", run_id) for marker in scenario.get("report_marker_counts") or []
         )
