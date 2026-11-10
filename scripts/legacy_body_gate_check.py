@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -25,6 +26,8 @@ LEGACY_CLASSES = {"LegacyBody", "RecoveredLegacyBody", "LegacyBodyRefresh"}
 NON_BLOCKING_ERRORS = {"START_INVENTORY_UNAVAILABLE"}
 # `clamp_api_limit` caps every transcripts page at this many rows.
 API_MAX_LIMIT = 2000
+# session_key ends in "/<host>:<tmux session>"; the host is where the turn ran.
+SESSION_HOST = re.compile(r"/([^/:]+):[^/]*$")
 TURN_FIELDS = ("id", "turn_id", "channel_id", "session_key", "provider", "created_at", "duration_ms")
 
 
@@ -100,10 +103,17 @@ def census_part(census, since):
     restarts = sum(1 for at in started if isinstance(at, int) and since < at <= cut)
     legacy, unknown, tui_channels = [], [], set()
     for file in files:
-        selection = file.get("selection") or {}
-        bindings = {int(c) for c in selection.get("tui_bindings") or []}
+        boot_id = (file.get("header") or {}).get("boot_id")
+        selection, targets = file.get("selection"), file.get("targets")
+        raw = selection.get("tui_bindings") if isinstance(selection, dict) else None
+        # A missing record is no evidence of zero TUI bindings or zero sends.
+        if not isinstance(raw, list):
+            blockers.append(f"BOOT_SELECTION_MISSING:{boot_id}")
+        if not isinstance(targets, list):
+            blockers.append(f"BOOT_TARGETS_MISSING:{boot_id}")
+        bindings = {int(c) for c in raw or []}
         tui_channels |= bindings
-        for event in file.get("targets") or []:
+        for event in targets if isinstance(targets, list) else []:
             tag, at = event.get("census") or {}, event.get("at_ms")
             klass = tag.get("output_class")
             if klass not in LEGACY_CLASSES | {"UnknownBody", "NonBody"}:
@@ -117,7 +127,9 @@ def census_part(census, since):
             if not since <= at <= cut:
                 continue
             channel = event.get("channel")
-            tui = tag.get("binding_mode") == "TUI" or channel in bindings
+            # Only an unclassified binding falls back to the boot's TUI bindings; explicit NON_TUI stands.
+            binding = tag.get("binding_mode")
+            tui = binding == "TUI" or (binding != "NON_TUI" and channel in bindings)
             row = {"at_ms": at, "channel": channel, "site": tag.get("site"), "op": event.get("op"),
                    "phase": event.get("phase"), "output_class": klass, "binding_mode": tag.get("binding_mode"),
                    "actual_runtime": tag.get("actual_runtime"), "reason": tag.get("reason"), "tui": tui}
@@ -136,7 +148,7 @@ def turn_end(row):
     return int(created.replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
 
 
-def turns_part(bundle, since, cut, excluded_agents, excluded_channels, tui_channels):
+def turns_part(bundle, since, cut, turn_host, excluded_agents, excluded_channels, tui_channels):
     blockers, total, tui, truncated = [], 0, 0, []
     hosts = Counter()
     limit = bundle.get("limit") if isinstance(bundle, dict) else None
@@ -162,9 +174,13 @@ def turns_part(bundle, since, cut, excluded_agents, excluded_channels, tui_chann
             channel = str(row.get("channel_id") or "")
             if channel in excluded_channels or not since <= end <= cut:
                 continue
-            total += 1
-            tui += channel.isdigit() and int(channel) in tui_channels
-            hosts[str(row.get("session_key") or "").rsplit("/", 1)[-1].split(":", 1)[0] or "?"] += 1
+            match = SESSION_HOST.search(str(row.get("session_key") or ""))
+            hosts[match.group(1) if match else "?"] += 1
+            if match is None:
+                blockers.append(f"TURN_HOST_UNKNOWN:{agent_id}")
+            elif match.group(1) == turn_host:
+                total += 1
+                tui += channel.isdigit() and int(channel) in tui_channels
         # A full page whose oldest turn is not before `since` may hide older in-window turns.
         if len(rows) >= min(limit, API_MAX_LIMIT) and ends and min(ends) >= since:
             truncated.append(agent_id)
@@ -172,19 +188,22 @@ def turns_part(bundle, since, cut, excluded_agents, excluded_channels, tui_chann
             "hosts": hosts}
 
 
-def evaluate(census, bundle, since, min_turns, excluded_agents=(), excluded_channels=()):
+def evaluate(census, bundle, since, min_turns, turn_host, excluded_agents=(), excluded_channels=()):
     c = census_part(census, since)
-    t = turns_part(bundle, since, c["window"][1] or since, set(excluded_agents),
+    t = turns_part(bundle, since, c["window"][1] or since, turn_host, set(excluded_agents),
                    {str(ch) for ch in excluded_channels}, c["tui_channels"])
     reasons = c["blockers"] + t["blockers"]
+    if t["truncated"]:
+        reasons.append("TURNS_PAGE_FULL")
     if t["total"] < min_turns:
-        reasons.append("TURNS_TRUNCATED_BELOW_THRESHOLD" if t["truncated"] else "TURNS_BELOW_THRESHOLD")
+        reasons.append("TURNS_BELOW_THRESHOLD")
     if c["restarts"] < 1:
         reasons.append("NO_RESTART_SINCE")
     verdict = "FAIL" if c["legacy"] else ("INCOMPLETE" if reasons else "PASS")
     return {"verdict": verdict, "reasons": reasons, "review_needed": bool(c["unknown"]),
             "host": c["host"], "since_ms": since, "window": c["window"], "restarts": c["restarts"],
-            "turns": t, "legacy": c["legacy"], "unknown": c["unknown"], "min_turns": min_turns}
+            "turns": t, "turn_host": turn_host, "legacy": c["legacy"], "unknown": c["unknown"],
+            "min_turns": min_turns}
 
 
 def render(report):
@@ -192,7 +211,8 @@ def render(report):
     flag = " REVIEW_NEEDED" if report["review_needed"] else ""
     lines = [f"VERDICT {report['verdict']}{flag}",
              f"host={report['host']} since={iso(report['since_ms'])} window={iso(start)}..{iso(end)}",
-             f"turns={t['total']} (min {report['min_turns']}, tui_channels={t['tui']}, "
+             f"turns={t['total']} (turn_host={report['turn_host']}, min {report['min_turns']}, "
+             f"tui_channels={t['tui']}, "
              f"hosts={dict(sorted(t['hosts'].items()))}, full_pages={t['truncated']})",
              f"restarts={report['restarts']}",
              f"tui_legacy_sends={len(report['legacy'])}",
@@ -229,6 +249,7 @@ def main(argv=None):
     check.add_argument("--turns", required=True)
     check.add_argument("--since", required=True, type=parse_since)
     check.add_argument("--min-turns", required=True, type=int)
+    check.add_argument("--turn-host", required=True, help="count only turns whose session ran on this host")
     check.add_argument("--exclude-agent", action="append", default=[])
     check.add_argument("--exclude-channel", action="append", default=[])
     check.add_argument("--json", action="store_true")
@@ -243,7 +264,7 @@ def main(argv=None):
         return 0
     with open(args.turns, encoding="utf-8") as handle:
         bundle = json.load(handle)
-    report = evaluate(load_census(args.census), bundle, args.since, args.min_turns,
+    report = evaluate(load_census(args.census), bundle, args.since, args.min_turns, args.turn_host,
                       args.exclude_agent, args.exclude_channel)
     if args.json:
         report["turns"]["hosts"] = dict(report["turns"]["hosts"])

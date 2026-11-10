@@ -12,6 +12,7 @@ from scripts import legacy_body_gate_check as gate
 SINCE = "2026-11-08T12:00:00+09:00"
 SINCE_MS = 1794106800000  # 2026-11-08T03:00:00Z
 TUI_CHANNEL, OTHER_CHANNEL = 111, 222
+HOST, OTHER_HOST = "MacBook-Pro-14", "itismyfieldui-Macmini"
 OLD_BOOT = "00000000-0000-4000-8000-000000000001"
 NEW_BOOT = "00000000-0000-4000-8000-000000000002"
 
@@ -43,9 +44,10 @@ def census():
             "boot_files": [old, new]}
 
 
-def turns(agent, count, channel=TUI_CHANNEL):
+def turns(agent, count, channel=TUI_CHANNEL, host=HOST):
     # created_at is UTC text; the first row sits exactly on `since`.
-    rows = [{"turn_id": f"t{n}", "channel_id": str(channel), "session_key": "claude/x/MacBook-Pro-14:s",
+    key = f"claude/x/{host}:s" if host else None
+    rows = [{"turn_id": f"{agent}{n}", "channel_id": str(channel), "session_key": key,
              "created_at": f"2026-11-08 03:00:{n:02d}", "duration_ms": 1000} for n in range(count)]
     return {"agent_id": agent, "transcripts": rows}
 
@@ -67,7 +69,7 @@ class GateVerdictTests(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = gate.main(["check", "--census", str(census_path), "--turns", str(turns_path),
-                              "--since", SINCE, "--min-turns", "50", *extra])
+                              "--since", SINCE, "--min-turns", "50", "--turn-host", HOST, *extra])
         return code, out.getvalue()
 
     def test_complete_evidence_passes(self):
@@ -87,6 +89,11 @@ class GateVerdictTests(unittest.TestCase):
                 self.assertEqual(code, 1, out)
                 self.assertTrue(out.startswith("VERDICT FAIL"), out)
                 self.assertIn(f"ch={TUI_CHANNEL} site=W10 EDIT/result LegacyBody", out)
+        doc = census()
+        doc["boot_files"][1]["targets"].append(target(SINCE_MS + 7_400_000, TUI_CHANNEL, binding="NON_TUI"))
+        code, out = self.run_gate(doc, bundle(turns("work", 50)))
+        self.assertEqual(code, 0, out)
+        self.assertIn("tui_legacy_sends=0\n", out)
 
     def test_evidence_gaps_never_pass(self):
         def capped(doc):
@@ -110,9 +117,23 @@ class GateVerdictTests(unittest.TestCase):
         def live_behind(doc):
             doc["live_journal"]["enqueued_cut"] = 3
 
+        def stale(doc):
+            doc["stale_snapshot"] = True
+
+        def no_selection(doc):
+            del doc["boot_files"][1]["selection"]
+
+        def null_bindings(doc):
+            doc["boot_files"][1]["selection"]["tui_bindings"] = None
+
+        def no_targets(doc):
+            doc["boot_files"][1]["targets"] = None
+
         cases = {capped: "EVIDENCE_TRUNCATED", shrunk: "BOOT_FILES_MISSING", late_coverage: "WINDOW_NOT_COVERING_SINCE",
                  missing_predecessor: f"BOOT_CHAIN_GAP:{OLD_BOOT}", journal_error: "CENSUS_ERROR:JOURNAL_READ_FAILED",
-                 unknown_class: "BODY_CLASS_UNKNOWN", live_behind: "LIVE_JOURNAL_NOT_DRAINED"}
+                 unknown_class: "BODY_CLASS_UNKNOWN", live_behind: "LIVE_JOURNAL_NOT_DRAINED",
+                 stale: "STALE_SNAPSHOT", no_selection: f"BOOT_SELECTION_MISSING:{NEW_BOOT}",
+                 null_bindings: f"BOOT_SELECTION_MISSING:{NEW_BOOT}", no_targets: f"BOOT_TARGETS_MISSING:{NEW_BOOT}"}
         for mutate, reason in cases.items():
             with self.subTest(reason=reason):
                 doc = copy.deepcopy(census())
@@ -130,13 +151,30 @@ class GateVerdictTests(unittest.TestCase):
         self.assertIn("TURNS_BELOW_THRESHOLD", out)
         code, out = self.run_gate(census(), cells, "--exclude-channel", str(OTHER_CHANNEL))
         self.assertIn("TURNS_BELOW_THRESHOLD", out)
-        code, out = self.run_gate(census(), bundle(turns("work", 40), limit=40))
-        self.assertIn("TURNS_TRUNCATED_BELOW_THRESHOLD", out)
+        # A full page reaching back only to `since` may hide turns, even above the threshold.
+        code, out = self.run_gate(census(), bundle(turns("work", 50), limit=50))
+        self.assertEqual(code, 2, out)
+        self.assertIn("TURNS_PAGE_FULL", out)
+        older = turns("work", 50)
+        older["transcripts"].append(dict(older["transcripts"][0], turn_id="old", created_at="2026-11-08 02:59:59"))
+        code, out = self.run_gate(census(), bundle(older, limit=51))
+        self.assertEqual(code, 0, out)
         no_restart = census()
         no_restart["boot_files"][1]["header"]["started_at_ms"] = SINCE_MS - 1
         code, out = self.run_gate(no_restart, bundle(turns("work", 50)))
         self.assertEqual(code, 2, out)
         self.assertIn("NO_RESTART_SINCE", out)
+
+    def test_turns_count_only_the_named_host(self):
+        code, out = self.run_gate(census(), bundle(turns("work", 40), turns("mini", 10, host=OTHER_HOST)))
+        self.assertEqual(code, 2, out)
+        self.assertIn("TURNS_BELOW_THRESHOLD", out)
+        code, out = self.run_gate(census(), bundle(turns("work", 50), turns("mini", 10, host=OTHER_HOST)))
+        self.assertEqual(code, 0, out)
+        self.assertIn("turns=50 ", out)
+        code, out = self.run_gate(census(), bundle(turns("work", 50), turns("anon", 1, host=None)))
+        self.assertEqual(code, 2, out)
+        self.assertIn("TURN_HOST_UNKNOWN:anon", out)
 
     def test_unknown_body_is_listed_without_deciding(self):
         doc = census()
