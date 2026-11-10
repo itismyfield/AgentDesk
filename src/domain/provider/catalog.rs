@@ -1,6 +1,6 @@
 use super::{
     ProviderCapabilities, ProviderCompactionAdapter, ProviderDefaultBehavior,
-    ProviderExecutionAdapter, ProviderReadinessAdapter,
+    ProviderExecutionAdapter, ProviderKind, ProviderReadinessAdapter,
 };
 
 mod rows;
@@ -60,5 +60,24 @@ pub fn derived_counterpart_ids(provider_id: &str) -> Vec<&'static str> {
     match first {
         Some(first) => std::iter::once(first).chain(rest).collect(),
         None => rest,
+    }
+}
+
+impl ProviderDescriptor {
+    pub fn matches_id_or_alias(&self, normalized: &str) -> bool {
+        self.id == normalized || self.aliases.iter().any(|alias| *alias == normalized)
+    }
+
+    pub fn kind(&self) -> Option<ProviderKind> {
+        Some(match self.id {
+            "claude" => ProviderKind::Claude,
+            "codex" => ProviderKind::Codex,
+            "gemini" => ProviderKind::Gemini,
+            "opencode" => ProviderKind::OpenCode,
+            "qwen" => ProviderKind::Qwen,
+            "grok" => ProviderKind::Grok,
+            "antigravity" => ProviderKind::Antigravity,
+            _ => return None,
+        })
     }
 }

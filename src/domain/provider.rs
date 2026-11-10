@@ -1,11 +1,14 @@
 mod capabilities;
 mod catalog;
 mod execution;
+pub mod naming;
 mod public_catalog;
+mod value_methods;
 
 pub(crate) use capabilities::CODEX_FALLBACK_CONTEXT_WINDOW;
 pub use capabilities::{ProviderCapabilities, ProviderDefaultBehavior};
 pub use catalog::{ProviderDescriptor, derived_counterpart_ids, provider_catalog};
+pub(crate) use execution::LegacyDispatchKind;
 pub use execution::{
     ProviderCompactionAdapter, ProviderExecutionAdapter, ProviderReadinessAdapter,
     StreamJsonDialectId,

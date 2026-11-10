@@ -7,7 +7,7 @@
 
 | 층 | 책임 | 대표 근거 |
 |---|---|---|
-| vocabulary (0) | 순수 값·정적 계약 | `domain::lifecycle`, `queue_contract`, `phase_gate`, Discord `bot_role`·`session_identity` |
+| vocabulary (0) | 순수 값·정적 계약 | `domain::lifecycle`, `queue_contract`, `phase_gate`, Discord `bot_role`, `domain::session_identity` |
 | foundation (1) | 순수 계산·경로·문자열 구현 | `runtime_layout::paths`, `cli::restart_terminal_proof`, 검토된 `utils` leaf |
 | adapter (2) | 저장·provider·process/platform 실행 | `db`, `services::provider`, `services::platform` |
 | application (3) | 업무 정책·상태 전이 orchestration | `engine`, `kanban`, `dispatch`, `services::auto_queue` |
@@ -515,3 +515,12 @@ zero-rule 부채 역시 이 대응으로 검사한다. mapping을 지우거나 �
 `domain::file_sync`는 parent directory fsync·flush 판정과 시험 probe의 adapter 소유자이며, Discord runtime_store는 같은 함수를 재수출한다. S07의 13 consumer 파일만 정본 경로를 사용하고 syscall 순서·오류·Windows의 unflushed 성공·상위 ENOSPC 관측은 유지한다.
 `domain::tool_text`는 foundation에서 민감값 마스킹과 allowed-tools 정규화의 실제 구현·정적 tool catalog를 소유하며, 기존 Discord formatting 경로는 같은 함수·catalog를 재노출한다.
 `domain::human_input`이 HumanInputDelivery·HumanInputError·ExternalHold와 정적 hold 사유를 실제 소유하며 vocabulary다. 기존 health 경로는 같은 타입을 재노출하고 Registry·HumanInputRequest·전달 실행은 기존 Discord owner에 유지한다.
+
+S04에서 정적 catalog helper의 실제 구현은 `domain::provider`로, 문자열 naming 계산은 foundation child `domain::provider::naming`으로 옮겼다. config·auth·cache·runtime registry 조회는 `services::provider::ProviderRuntimeExt` adapter 경계가 소유한다. 기존 서비스 경로는 같은 값·함수·trait의 재수출이며 legacy 소비자는 유지한다. 별도 crate 추출 완료를 선언하지 않는다.
+언하지 않는다.
+
+### Session identity 소유 경계
+
+`domain::session_identity` vocabulary가 legacy/namespaced session key의 값과 parse, tmux tail 추출을 소유한다. `domain::session_identity::naming` foundation은 정적 provider catalog로 tmux provider/channel과 legacy default를 계산하고 `SessionIdentity::provider_and_channel`의 순수 impl을 소유한다. provider catalog 순서·기본값, 마지막 colon·slash alias·trim·malformed 처리 결과는 보존한다.
+
+기존 Discord identity 경로와 services provider parser 경로는 같은 타입·함수의 재수출이다. 사용되지 않는 `legacy_key` 문자열 렌더링 accessor는 기존 호환 모듈에 남기며 새 suppression을 추가하지 않는다. DB·config·auth·runtime registry와 fallback 실행 순서는 이동하지 않는다. identity A consumer 12파일만 정본 경로로 전환하고 identity B와 legacy 소비자는 기존 경로를 유지한다.

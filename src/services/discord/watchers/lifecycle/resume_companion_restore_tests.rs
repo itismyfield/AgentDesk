@@ -7,6 +7,7 @@ use crate::services::discord::router::message_handler::codex_resume_companion_qu
 use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;
 use crate::services::discord::tmux::watcher_install_fixture as install;
 use crate::services::discord::turn_presence::activity::Activity;
+use crate::services::provider::ProviderRuntimeExt;
 use crate::services::tui_prompt_dedupe as dedupe;
 use serde_json::json;
 use std::process::{Child, Command, Stdio};

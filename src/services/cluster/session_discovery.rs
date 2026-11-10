@@ -57,7 +57,7 @@ use super::session_matcher::{
     match_session_detailed,
 };
 use super::session_registry::{RegistryChange, SessionRegistry, global_session_registry};
-use crate::services::discord::session_identity::tmux_name_from_session_key;
+use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::services::platform::tmux::{EnumeratedSession, list_sessions_with_pane_command};
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 

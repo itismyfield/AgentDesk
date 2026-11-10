@@ -1029,7 +1029,7 @@ pub(super) async fn list_sessions(
                 .ok()
                 .flatten();
             let key = session["session_key"].as_str().unwrap_or_default();
-            let name = crate::services::discord::session_identity::tmux_name_from_session_key(key);
+            let name = crate::domain::session_identity::tmux_name_from_session_key(key);
             let local_tmux = if session["owner"]["is_local"] == true
                 && session["status"] == "turn_active"
                 && let Some(name) = name

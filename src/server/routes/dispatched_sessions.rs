@@ -189,7 +189,7 @@ pub async fn reconcile_stale_turn(
             // success this endpoint was supposed to cure, so release it here
             // too. The release runs through the guarded authority and cannot
             // take a live turn's anchor.
-            let release = match crate::services::discord::session_identity::tmux_name_from_session_key(&session_key) {
+            let release = match crate::domain::session_identity::tmux_name_from_session_key(&session_key) {
                 Some(tmux_name) => {
                     crate::services::discord::health::release_zombie_foreground_turn_by_tmux_name(
                         state.health_registry.as_deref(),
