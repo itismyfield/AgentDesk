@@ -11,15 +11,28 @@ impl<B: BindingEvents> Sources<B> {
         deriver: &mut UnitDeriver,
         owed: &mut impl Owe,
     ) -> Result<(), WriterAlarm> {
-        self.resume_at(writer, deriver, owed, SystemTime::now())
+        self.resume_with_clock(writer, deriver, owed, SystemTime::now(), &SystemTime::now)
     }
 
+    #[cfg(test)]
     pub fn resume_at<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
         deriver: &mut UnitDeriver,
         owed: &mut impl Owe,
         wall_now: SystemTime,
+    ) -> Result<(), WriterAlarm> {
+        // Explicit-time callers use the same clock for replay and cleanup witnesses.
+        self.resume_with_clock(writer, deriver, owed, wall_now, &|| wall_now)
+    }
+
+    pub(crate) fn resume_with_clock<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+        deriver: &mut UnitDeriver,
+        owed: &mut impl Owe,
+        wall_now: SystemTime,
+        check_clock: &dyn Fn() -> SystemTime,
     ) -> Result<(), WriterAlarm> {
         let started = std::time::Instant::now();
         let mut records = 0;
@@ -151,8 +164,15 @@ impl<B: BindingEvents> Sources<B> {
                     let fp = capture
                         .verify_eof(cursor.captured_through, &cursor.prefix_hash)
                         .map_err(|e| halt(format!("restore EOF: {e}")))?;
-                    if fp.modified > wall_now {
-                        return Err(halt("source mtime is in the future"));
+                    let checked_at = check_clock();
+                    self.observe_clock(checked_at)?;
+                    if fp.modified > checked_at {
+                        return Err(halt(format!(
+                            "source mtime is in the future: source={} modified={:?} sampled_at={wall_now:?} checked_at={checked_at:?} replay_elapsed_ms={}",
+                            cursor.source.path.display(),
+                            fp.modified,
+                            started.elapsed().as_millis()
+                        )));
                     }
                 }
             }

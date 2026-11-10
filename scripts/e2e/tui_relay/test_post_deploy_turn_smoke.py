@@ -77,7 +77,9 @@ class LiveShapedDiscord:
             self._post(CLEARED, author=self.provider_bot)
             return sent
         marker = content[content.index("[E2E:") : content.index("]") + 1]
-        if marker.endswith(":AFTER_CLEAR]") and self.after_clear == "withhold":
+        if marker.endswith(":T1]") and self.after_clear == "refuse_t1":
+            self._post(f"O channel {channel_id} runs only on the gateway with its writer ready", author=self.provider_bot)
+        elif marker.endswith(":AFTER_CLEAR]") and self.after_clear == "withhold":
             self._post("✅ 완료", author=self.provider_bot)
         elif marker.endswith(":AFTER_CLEAR]") and self.after_clear == "duplicate":
             self._post(marker, author=self.provider_bot)
@@ -95,7 +97,8 @@ class LiveShapedDiscord:
         return next((m for m in observed if predicate(m)), None), observed
 
 
-def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver", answer_author: str | None = None) -> dict:
+def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver", answer_author: str | None = None,
+                    partial_result_sink: dict | None = None) -> dict:
     scenario = next(s for s in driver.load_scenarios(SCENARIOS, cell=cell) if s["id"] == scenario_id)
     args = Namespace(
         cell=cell, channel_id=CHANNELS[cell], thread_channel_id=None, base_url="http://offline.invalid",
@@ -119,6 +122,7 @@ def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver"
         return driver.run_scenario(
             scenario, args=args, run_id=RUN_ID,
             client=LiveShapedDiscord(after_clear=after_clear, provider=driver.cell_provider(cell), answer_author=answer_author),
+            partial_result_sink=partial_result_sink,
         )
 
 
@@ -140,6 +144,75 @@ def verdict(result: dict, scenario_id: str, cell: str, log_fixture: str | None) 
 
 class ProviderAuthorDelivery(unittest.TestCase):
     """A turn marker counts only from the cell's provider bot, never a notify/announce body quoting it."""
+
+    def assert_attempted_t2(self, result):
+        markers = turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID)
+        self.assertEqual([result["marker_counts"][marker] for marker in markers], [1, 0, None])
+        self.assertEqual(result["status"], "fail")
+        passed, detail = verdict(result, "E-50", "claude-tui", "turns-clean.dcserver.log")
+        self.assertFalse(passed, detail)
+        self.assertIn("T1=1 T2=0 AFTER_CLEAR=not_run", detail)
+
+    def test_t2_send_timeout_keeps_attempted_marker_at_zero(self):
+        send = LiveShapedDiscord.send
+
+        def timeout(client, channel, content):
+            if ":T2]" in content:
+                raise TimeoutError("T2 send timed out")
+            return send(client, channel, content)
+
+        with patch.object(LiveShapedDiscord, "send", timeout):
+            result = run_live_shaped("E-50", "claude-tui")
+        self.assert_attempted_t2(result)
+        self.assertIn("TimeoutError", result["reason"])
+
+    def test_t2_wait_deadline_keeps_attempted_marker_at_zero(self):
+        wait = driver.wait_for_discord_text_with_tui_idle_draft_guard
+        partial = {}
+
+        def deadline(**kwargs):
+            if ":T2]" in kwargs["needle"]:
+                raise driver.PhaseDeadlineExpired("T2 wait phase expired")
+            return wait(**kwargs)
+
+        with patch.object(driver, "wait_for_discord_text_with_tui_idle_draft_guard", side_effect=deadline):
+            with self.assertRaises(driver.PhaseDeadlineExpired):
+                run_live_shaped("E-50", "claude-tui", partial_result_sink=partial)
+        self.assert_attempted_t2(partial["result"])
+
+    def test_setup_failure_leaves_all_declared_markers_not_run(self):
+        with patch.object(LiveShapedDiscord, "send_control", side_effect=TimeoutError("setup timed out")):
+            result = run_live_shaped("E-50", "claude-tui")
+        markers = turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID)
+        self.assertEqual(result["marker_counts"], dict.fromkeys(markers))
+
+    def test_t1_timeout_leaves_later_markers_not_run(self):
+        result = run_live_shaped("E-50", "claude-tui", after_clear="refuse_t1")
+        markers = turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID)
+        self.assertEqual([result["marker_counts"][m] for m in markers], [0, None, None])
+        passed, detail = verdict(result, "E-50", "claude-tui", "turns-clean.dcserver.log")
+        self.assertFalse(passed)
+        self.assertIn("T2=not_run", detail)
+        self.assertIn("AFTER_CLEAR=not_run", detail)
+        self.assertNotIn("AFTER_CLEAR body withheld", detail)
+        self.assertIn("writer ready", result["input_refusals"][0]["content"])
+        self.assertIn("writer ready", detail)
+
+    def test_timeout_diagnostic_keeps_the_input_refusal_beyond_recent_rows(self):
+        client = LiveShapedDiscord(after_clear="refuse_t1")
+        client.send("222", "[E2E:E50:test:T1]")
+        for index in range(10):
+            client._post(f"other status {index}", author=client.provider_bot)
+        window = assertions.Window("0")
+        for message in client.messages:
+            window.add(message)
+        with patch.object(driver, "_target_mailbox_debug_snapshot", return_value={}):
+            diagnostic = driver._collect_wait_timeout_diagnostics(
+                base_url=client.base_url, channel_id="222", cell="claude-herdr", scenario={"id": "E-50"},
+                thread_channel_id=None, after_id="0", wait_kind="relay", needle="[E2E:E50:test:T1]",
+                prompt=None, window=window)
+        self.assertEqual(len(diagnostic["input_refusals"]), 1)
+        self.assertIn("writer ready", diagnostic["input_refusals"][0]["content"])
 
     def test_legacy_turn_waits_reject_notify_and_announce_bodies(self):
         for scenario_id, cell in (("E-50", "claude-tui"), ("E-51", "codex-tui")):
@@ -278,6 +351,16 @@ class HerdrTurnSmoke(unittest.TestCase):
                 result = self.collect(answer_author=author)
                 self.assertEqual(result["status"], "fail", result.get("reason"))
                 self.assertIn("Herdr Discord marker timeout", result["reason"])
+
+    def test_herdr_t1_refusal_reports_unsent_later_markers(self):
+        result = self.collect("refuse_t1")
+        markers = turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID)
+        self.assertEqual([result["marker_counts"][m] for m in markers], [0, None, None])
+        passed, detail = self.judge(result)
+        self.assertFalse(passed)
+        self.assertIn("T2=not_run", detail)
+        self.assertIn("AFTER_CLEAR=not_run", detail)
+        self.assertIn("writer ready", detail)
 
     def test_herdr_delivery_counts_and_missing_observations_fail_closed(self):
         for behavior, expected in (("deliver", True), ("withhold", False), ("duplicate", False)):
@@ -510,6 +593,8 @@ class GatewayReadyTest(unittest.TestCase):
         self.details = []
         self.read_delay = 0.0
         self.calls = {"detail": 0, "read": 0}
+        self.writer_states = [[{"provider": "claude", "channel_id": "222", "accepts": True,
+                                "hold_reason": None}]]
         self.server_errors = []
         fixture = self
 
@@ -536,9 +621,13 @@ class GatewayReadyTest(unittest.TestCase):
                     fixture.calls["detail"] += 1
                     recovered, connected = (fixture.details.pop(0) if len(fixture.details) > 1
                                             else fixture.details[0])
-                    self.reply({"fully_recovered": recovered, "providers": [
+                    payload = {"fully_recovered": recovered, "providers": [
                         {"name": "claude", "runtime_role": "gateway", "connected": connected},
-                        {"name": "codex", "runtime_role": "gateway", "connected": True}]})
+                        {"name": "codex", "runtime_role": "gateway", "connected": True}]}
+                    writers = fixture.writer_states.pop(0) if len(fixture.writer_states) > 1 else fixture.writer_states[0]
+                    if writers is not None:
+                        payload["tui_o_writer_readiness"] = writers
+                    self.reply(payload)
                 elif self.path.startswith("/api/discord/channels/222/messages?"):
                     fixture.calls["read"] += 1
                     time.sleep(fixture.read_delay)
@@ -577,6 +666,29 @@ class GatewayReadyTest(unittest.TestCase):
         self.assertIn("gateway not connected: claude", detail)
         self.assertEqual(self.calls["read"], 0)
 
+    def test_target_writer_must_accept_before_the_discord_probe(self):
+        self.details = [(True, True)]
+        ready = self.writer_states[0]
+        self.writer_states = [[dict(ready[0], accepts=False, hold_reason="writer boot replay")], [], ready]
+        accepted, detail = self.wait(10)
+        self.assertTrue(accepted, detail)
+        self.assertEqual(self.calls, {"detail": 3, "read": 1})
+
+    def test_missing_or_unready_or_foreign_writer_fails_at_the_existing_deadline(self):
+        self.details = [(True, True)]
+        own = self.writer_states[0][0]
+        for state, reason in [(None, "unavailable"), ([], "missing"),
+                              ([dict(own, channel_id="333")], "missing"),
+                              ([dict(own, provider="codex")], "missing"),
+                              ([dict(own, accepts=False, hold_reason="writer boot replay")], "writer boot replay"),
+                              ([dict(own, accepts="true")], "not accepting")]:
+            with self.subTest(state=state):
+                self.writer_states = [state]
+                accepted, detail = self.wait(0.05)
+                self.assertFalse(accepted, detail)
+                self.assertIn(reason, detail)
+        self.assertEqual(self.calls["read"], 0)
+
     def test_a_channel_read_that_outlasts_the_deadline_is_not_ready(self):
         self.details = [(True, True)]
         self.read_delay = 1.5
@@ -591,6 +703,7 @@ class GatewayReadyTest(unittest.TestCase):
             timeouts.append(timeout)
             clock[0] += 0.8
             return 200, {"fully_recovered": True,
+                         "tui_o_writer_readiness": self.writer_states[0],
                          "providers": [{"name": "claude", "runtime_role": "gateway", "connected": True}]}
 
         class SlowClient:
@@ -611,6 +724,21 @@ class GatewayReadyTest(unittest.TestCase):
         self.assertIn("not ready after 1.6s", detail)
         self.assertEqual(timeouts[0], 1.0)
         self.assertAlmostEqual(timeouts[1], 0.2, places=6)
+
+    def test_ready_health_after_the_deadline_cannot_start_the_discord_probe(self):
+        clock = [0.0]
+        def late_detail(*args, **kwargs):
+            clock[0] = 2.0
+            return 200, {"fully_recovered": True, "tui_o_writer_readiness": self.writer_states[0],
+                         "providers": [{"name": "claude", "runtime_role": "gateway", "connected": True}]}
+        with patch.object(driver, "_read_api_json", side_effect=late_detail), \
+             patch.object(driver.discord, "DiscordClient") as client, redirect_stdout(io.StringIO()):
+            ready, detail = turn_smoke.wait_gateway_ready(
+                base_url=self.base_url, cell="claude-tui", channel_id="222", deadline_s=1.0,
+                clock=lambda: clock[0])
+        self.assertFalse(ready)
+        self.assertIn("health detail answered after the deadline", detail)
+        client.assert_not_called()
 
     def test_cli_exits_1_with_one_fail_line_when_not_ready(self):
         self.details = [(False, False)]

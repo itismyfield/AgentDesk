@@ -573,7 +573,8 @@ src/
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
 │   │   │   ├── tui_output_readiness_tests.rs
-│   │   │   └── unread_tail_attribution_tests.rs
+│   │   │   ├── unread_tail_attribution_tests.rs
+│   │   │   └── writer_readiness.rs
 │   │   ├── kanban/
 │   │   │   └── card_delete.rs
 │   │   ├── receipt/
@@ -4118,6 +4119,7 @@ src/
 │   │   │   ├── restart_replay_host_tests.rs
 │   │   │   ├── resume.rs
 │   │   │   ├── resume_tests.rs
+│   │   │   ├── resume_time_tests.rs
 │   │   │   ├── retire_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
