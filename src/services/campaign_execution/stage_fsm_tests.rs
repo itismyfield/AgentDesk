@@ -4,7 +4,7 @@ use crate::services::campaign_execution::{
     evidence_gate::tests::{REPO, a1_finish, claim, workspace},
     execution_pin::ExecutionPin,
     profile::TestOutcome,
-    verification_run::{VerificationSpec, tests as a1},
+    verification_run::{ProcessIdentity, VerificationSpec, tests as a1},
 };
 
 const START: &str = "lib-tests";
@@ -723,14 +723,25 @@ fn finish_plan_phase_may_start_after_its_gate_applied_the_stop_fence() {
         &claimed,
         advance(&finish, "archive", &review, ActionState::StartPending),
     );
+    let mut environment = a1::environment();
+    environment.checkout.host = work.session.gate.host.clone();
+    let fact = PhaseFact::Started {
+        receipt: "archive-receipt".into(),
+        process: ProcessIdentity {
+            host: environment.checkout.host.clone(),
+            pid: 7,
+            process_group: Some(7),
+            started_at: domain::now(),
+            nonce: "nonce".into(),
+        },
+        environment: Box::new(environment),
+    };
     let started = apply(
         &pending,
-        Command::ObserveAction {
-            action_id: archive.clone(),
-            binding: Box::new(work),
-            observation: ActionObservation::Started {
-                receipt: "archive-receipt".into(),
-            },
+        Command::RecordVerificationPhase {
+            execution_id: finish.clone(),
+            phase_id: "archive".into(),
+            fact: Box::new(fact),
         },
     );
     assert_eq!(action(&started, &archive), ActionState::Started);
