@@ -21,11 +21,12 @@ PolicyAdmitted == CacheReadable /\ target.witness = witness
 Quiet == ~q.inflight
 ReplacementEvidence == recovery.candidate \/ (OldGrant /\ row.grant # witness)
 
-Init ==
+RootInit(markerPolicy) ==
     /\ phase = "running" /\ generation = 0 /\ witness = 0 /\ paneRoot = 0
-    /\ oldLive = TRUE /\ replacementLive = FALSE
+    /\ oldLive = (InitialRowState # "retired" \/ markerPolicy = "outside") /\ replacementLive = FALSE
     /\ row = [state |-> InitialRowState, nonce |-> 1, root |-> 0, grant |-> InitialGrant,
-              freshGrant |-> NoWitness, createdFromPending |-> FALSE]
+              freshGrant |-> NoWitness, createdFromPending |-> FALSE,
+              runtimeMarker |-> "codex_tui", markerPolicy |-> markerPolicy]
     /\ startupWitness = NoWitness /\ nextRestartReady = FALSE /\ target = EmptyTarget
     /\ recovery = [stage |-> IF InitialRowState = "retired" THEN "settled" ELSE "idle",
                     candidate |-> FALSE, firstPass |-> FALSE, seenIncomplete |-> FALSE,
@@ -35,6 +36,8 @@ Init ==
              inflightGeneration |-> 0, effects |-> 0, execution |-> 0, heldOnce |-> FALSE]
     /\ creates = 0 /\ trustedWitness = NoWitness /\ trustedEvidence = NoWitness
     /\ retiredUnsafe = FALSE /\ preclaimReads = 0 /\ wakes = 0
+
+Init == RootInit("outside")
 
 \* A dcserver restart loses process evidence, not the durable row or exact nonce grant.
 DcRestart ==
@@ -147,6 +150,7 @@ QuietHeld ==
                     trustedWitness, trustedEvidence, retiredUnsafe, preclaimReads, wakes>>
 ReleaseOldHold ==
     /\ recovery.stage = "cleanup"
+    /\ (row.markerPolicy # "cleanup" \/ row.runtimeMarker = "none")
     /\ recovery' = [recovery EXCEPT !.stage = "settled", !.firstPass = TRUE,
                         !.completionPending = recovery.seenIncomplete /\ q.state # "recovering"]
     /\ q' = IF q.state = "recovering" THEN [q EXCEPT !.state = "queued"] ELSE q
@@ -205,6 +209,7 @@ SendSameRoot ==
                     startupWitness, nextRestartReady, target, recovery, creates, retiredUnsafe, preclaimReads, wakes>>
 StartLaunch ==
     /\ q.state \in {"queued", "claimed"} /\ row.state = "retired" /\ recovery.stage = "settled"
+    /\ (row.markerPolicy = "outside" \/ row.runtimeMarker = "none")
     /\ nextRestartReady
     /\ row' = [row EXCEPT !.state = "pending", !.nonce = 2]
     /\ UNCHANGED <<phase, generation, witness, paneRoot, oldLive, replacementLive,
@@ -268,6 +273,16 @@ PrepareFresh ==
     /\ UNCHANGED <<phase, generation, witness, paneRoot, oldLive, replacementLive, row,
                     startupWitness, target, recovery, q, creates,
                     trustedWitness, trustedEvidence, retiredUnsafe, preclaimReads, wakes>>
+\* The detailed source-lock, host/nonce, local slot and foreign-marker guards are checked by
+\* TurnPresence's RetiredPresence scenario; this model links successful cleanup to root progress.
+RetiredRuntimeMarkerCleanup ==
+    /\ row.markerPolicy = "cleanup" /\ row.state = "retired" /\ LocalCurrent
+    /\ phase = "reconciled" /\ recovery.stage \in {"cleanup", "settled"}
+    /\ row.runtimeMarker = "codex_tui" /\ Quiet /\ ~oldLive /\ ~replacementLive
+    /\ row' = [row EXCEPT !.runtimeMarker = "none"]
+    /\ UNCHANGED <<phase, generation, witness, paneRoot, oldLive, replacementLive,
+                    startupWitness, nextRestartReady, target, recovery, q, creates,
+                    trustedWitness, trustedEvidence, retiredUnsafe, preclaimReads, wakes>>
 \* Pending and nonlocal rows belong to their existing owners outside this root model.
 OtherOwner ==
     /\ phase = "reconciled" /\ (InitialRowState = "pending" \/ ~LocalCurrent)
@@ -275,6 +290,10 @@ OtherOwner ==
 
 AwaitWake ==
     /\ q.state = "held" /\ row.state = "retired" /\ recovery.stage = "settled"
+    /\ UNCHANGED vars
+AwaitRetiredPresence ==
+    /\ row.markerPolicy # "outside" /\ row.state = "retired"
+    /\ row.runtimeMarker # "none" /\ q.state = "queued"
     /\ UNCHANGED vars
 Done == q.state = "done" /\ UNCHANGED vars
 
@@ -284,10 +303,10 @@ Next == DcRestart \/ HerdrReplaces \/ PaneRootReplaces \/ HerdrSurvives \/ Recon
         \/ ReleaseOldHold \/ RetryReader \/ AcceptInput \/ ClaimOldBinding \/ BeginOldBindingStart \/ RejectOldBinding
         \/ SettleRestartedInflight \/ SendSameRoot \/ StartLaunch \/ CreateOk
         \/ RecordEvidenceAndBind \/ SendFresh \/ PreclaimRecover \/ HoldBeforeClaim
-        \/ WakeOriginalInput \/ PrepareFresh \/ OtherOwner \/ AwaitWake \/ Done
+        \/ WakeOriginalInput \/ PrepareFresh \/ RetiredRuntimeMarkerCleanup
+        \/ OtherOwner \/ AwaitWake \/ AwaitRetiredPresence \/ Done
 
-Spec == Init /\ [][Next]_vars
-        /\ WF_vars(DcRestart) /\ WF_vars(HerdrReplaces) /\ WF_vars(PaneRootReplaces)
+Fairness == WF_vars(DcRestart) /\ WF_vars(HerdrReplaces) /\ WF_vars(PaneRootReplaces)
         /\ WF_vars(HerdrSurvives)
         /\ WF_vars(Reconcile) /\ WF_vars(ObserveExecution) /\ WF_vars(UseExactGrant)
         /\ (IF PrepareEnabled THEN WF_vars(PreparePolicy) ELSE TRUE)
@@ -298,8 +317,13 @@ Spec == Init /\ [][Next]_vars
         /\ WF_vars(SettleRestartedInflight) /\ WF_vars(SendSameRoot)
         /\ WF_vars(StartLaunch) /\ WF_vars(CreateOk) /\ WF_vars(RecordEvidenceAndBind)
         /\ WF_vars(SendFresh) /\ WF_vars(PrepareFresh)
+        /\ WF_vars(RetiredRuntimeMarkerCleanup)
         /\ (IF PreclaimEnabled THEN WF_vars(PreclaimRecover) /\ WF_vars(HoldBeforeClaim) ELSE TRUE)
         /\ (IF WakeEnabled THEN WF_vars(WakeOriginalInput) ELSE TRUE)
+
+Spec == Init /\ [][Next]_vars /\ Fairness
+RetiredMarkerBeforeSpec == RootInit("legacy") /\ [][Next]_vars /\ Fairness
+RetiredMarkerFixedSpec == RootInit("cleanup") /\ [][Next]_vars /\ Fairness
 
 SameRootNoCreate == ~ReplaceServer => creates = 0
 InputAtMostOnce == q.effects <= 1

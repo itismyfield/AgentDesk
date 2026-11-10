@@ -3082,6 +3082,7 @@ src/
 │   │   │   │   │   ├── midread_owner_tests.rs
 │   │   │   │   │   ├── newlive_ownership_file_tests.rs
 │   │   │   │   │   ├── receipt_tests.rs
+│   │   │   │   │   ├── retired_codex_runtime_marker_tests.rs
 │   │   │   │   │   ├── routine_owner.rs
 │   │   │   │   │   ├── routine_owner_tests.rs
 │   │   │   │   │   ├── routine_registered_receipt_tests.rs
@@ -3391,14 +3392,18 @@ src/
 │   ├── herdr_launch/
 │   │   ├── retired_hold/
 │   │   │   └── tests.rs
+│   │   ├── runtime_marker/
+│   │   │   └── tests.rs
 │   │   ├── policy.rs
 │   │   ├── policy_tests.rs
 │   │   ├── prepared.rs
 │   │   ├── retired_hold.rs
+│   │   ├── runtime_marker.rs
 │   │   ├── unplaced.rs
 │   │   └── unplaced_tests.rs
 │   ├── herdr_launch_tests/
-│   │   └── retired_hold_tests.rs
+│   │   ├── retired_hold_tests.rs
+│   │   └── runtime_marker_launch_tests.rs
 │   ├── imsg_reply/
 │   │   ├── admission.rs
 │   │   ├── contract.rs
