@@ -238,10 +238,10 @@ fn model_catalog_gateway_resolver_preserves_last_good_until_fresh_replacement() 
 #[cfg(unix)]
 #[test]
 fn model_catalog_new_model_save_cancels_previous_observation_after_failed_launch() {
+    let root = crate::config::TestRuntimeRootGuard::new();
     let hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let root = crate::config::TestRuntimeRootGuard::new();
     let config_path = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_CONFIG",
         &root.path().join("missing.yaml"),
@@ -415,6 +415,6 @@ fn model_catalog_new_model_save_cancels_previous_observation_after_failed_launch
     drop(restore);
     drop(hosts);
     drop(config_path);
-    drop(root);
     drop(hosting);
+    drop(root);
 }
