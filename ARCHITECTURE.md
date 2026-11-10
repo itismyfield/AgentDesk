@@ -1872,6 +1872,7 @@ src/
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── closed.rs
+│   │   │   │   ├── closed_tests.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
@@ -2032,6 +2033,8 @@ src/
 │   │   │   ├── destructive_warrant.rs
 │   │   │   ├── idle_tmux.rs
 │   │   │   └── tests.rs
+│   │   ├── relay_recovery_leaked_row_sweep/
+│   │   │   └── resume_tests.rs
 │   │   ├── replay_policy/
 │   │   │   ├── live/
 │   │   │   │   ├── observer_tests.rs

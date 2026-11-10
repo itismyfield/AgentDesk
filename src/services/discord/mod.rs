@@ -597,9 +597,7 @@ pub(super) fn status_update_interval() -> Duration {
     *CACHED.get_or_init(|| env_duration_secs("AGENTDESK_STATUS_INTERVAL_SECS", 5))
 }
 
-pub(crate) fn clear_inflight_state_for_channel(provider: &ProviderKind, channel_id: u64) {
-    inflight::clear_inflight_state(provider, channel_id);
-}
+pub(crate) use queue_io::input_owner::closed::clear_inflight_state_for_channel;
 
 pub(crate) fn inflight_state_allows_idle_tmux_repair_for_channel(
     provider: &ProviderKind,

@@ -11,16 +11,66 @@ pub(super) enum ForeignRecoverySource {
     LeakedRowSweep,
 }
 
+/// What one FOREIGN row recovery did, for the single resume notice its sweep may give.
+#[derive(Clone, Copy, Debug, Default)]
+pub(in crate::services::discord) struct ForeignRecovery {
+    /// The recovered row is gone or replaced.
+    pub(in crate::services::discord) cleared: bool,
+    /// Its finalizer released a mailbox token, whose publish resumes the queue.
+    token_released: bool,
+    /// Its finalizer finalized the turn itself with no token to release.
+    finalized_tokenless: bool,
+    /// Its own last row clear, when it ran one.
+    last_clear: Option<super::super::inflight::GuardedClearOutcome>,
+    /// A row, its own or a successor's, still stands on the channel.
+    row_left: bool,
+}
+
+impl ForeignRecovery {
+    fn after(
+        finalized: &super::super::turn_finalizer::FinalizeOutcome,
+        last_clear: Option<super::super::inflight::GuardedClearOutcome>,
+        (cleared, row_left): (bool, bool),
+    ) -> Self {
+        use super::super::turn_finalizer::FinalizeOutcome;
+        let (token_released, finalized_tokenless) = match finalized {
+            FinalizeOutcome::Finalized { removed_token, .. } => {
+                (removed_token.is_some(), removed_token.is_none())
+            }
+            FinalizeOutcome::AlreadyFinalized | FinalizeOutcome::Deferred => (false, false),
+        };
+        Self {
+            cleared,
+            token_released,
+            finalized_tokenless,
+            last_clear,
+            row_left,
+        }
+    }
+
+    /// Whether this recovery itself removed the channel's row and released no token: its own last
+    /// clear did, or found nothing after its own finalizer cleared it.
+    pub(in crate::services::discord) fn resumes(&self) -> bool {
+        use super::super::inflight::GuardedClearOutcome::{Cleared, Missing};
+        let removed_here = match self.last_clear {
+            Some(Cleared) => true,
+            Some(Missing) | None => self.finalized_tokenless,
+            Some(_) => false,
+        };
+        removed_here && !self.token_released && !self.row_left
+    }
+}
+
 pub(super) async fn submit_stale_foreign_inflight_cancel(
     shared: &Arc<SharedData>,
     provider: &crate::services::provider::ProviderKind,
     channel_id: poise::serenity_prelude::ChannelId,
     probe: &super::super::destructive_cancel_gate::DestructiveCancelProbeSnapshot,
     _source: ForeignRecoverySource,
-) -> bool {
+) -> ForeignRecovery {
     let finalizer_turn_id = probe.pin.finalizer_turn_id;
     if finalizer_turn_id == 0 {
-        return false;
+        return ForeignRecovery::default();
     }
     let mailbox_active_user_msg_id = super::super::mailbox_snapshot(shared, channel_id)
         .await
@@ -34,7 +84,7 @@ pub(super) async fn submit_stale_foreign_inflight_cancel(
             mailbox_active_user_msg_id = mailbox_active_user_msg_id.unwrap_or(0),
             "tui_direct_pending_start: stale FOREIGN cancel no-op; mailbox episode changed"
         );
-        return false;
+        return ForeignRecovery::default();
     }
     #[cfg(test)]
     retirement_recheck_tests::pause("leaked_row_cancel_after_mailbox", channel_id.get()).await;
@@ -89,7 +139,7 @@ pub(super) async fn submit_stale_foreign_inflight_cancel(
             ?commit_outcome,
             "tui_direct_pending_start: stale FOREIGN cancel no-op; flock-held pin commit failed"
         );
-        return false;
+        return ForeignRecovery::default();
     }
     #[cfg(test)]
     run_destructive_cancel_post_gate_hook_for_tests(DestructiveCancelHookPoint::PreRegistryCas);
@@ -109,14 +159,14 @@ pub(super) async fn submit_stale_foreign_inflight_cancel(
                 tmux_session = pinned.tmux_session_name.as_str(),
                 "tui_direct_pending_start: stale FOREIGN cancel committed but watcher incarnation changed; finalizer skipped"
             );
-            return false;
+            return ForeignRecovery::default();
         }
         pinned
             .cancel
             .store(true, std::sync::atomic::Ordering::Release);
     }
     let stale_identity = probe.inflight_identity.clone();
-    let _ = shared
+    let finalized = shared
         .turn_finalizer
         .submit_terminal_with_claim_snapshot(
             super::super::turn_finalizer::TurnKey::new(
@@ -141,11 +191,11 @@ pub(super) async fn submit_stale_foreign_inflight_cancel(
             probe.save_generation,
         );
 
-    let gone_or_changed = !super::super::inflight::load_inflight_state(provider, channel_id.get())
-        .is_some_and(|current| {
-            stale_identity == super::super::inflight::InflightTurnIdentity::from_state(&current)
-                && current.effective_finalizer_turn_id() == finalizer_turn_id
-        });
+    let current = super::super::inflight::load_inflight_state(provider, channel_id.get());
+    let gone_or_changed = !current.as_ref().is_some_and(|current| {
+        stale_identity == super::super::inflight::InflightTurnIdentity::from_state(current)
+            && current.effective_finalizer_turn_id() == finalizer_turn_id
+    });
     tracing::warn!(
         provider = %provider.as_str(),
         channel_id = channel_id.get(),
@@ -154,7 +204,9 @@ pub(super) async fn submit_stale_foreign_inflight_cancel(
         gone_or_changed,
         "tui_direct_pending_start: stale FOREIGN finalizer cancel completed under death-evidence gate"
     );
-    gone_or_changed
+    let row_left = current.is_some();
+    let last_clear = Some(lifecycle_clear_outcome);
+    ForeignRecovery::after(&finalized, last_clear, (gone_or_changed, row_left))
 }
 
 async fn submit_committed_foreign_inflight_complete(
@@ -164,10 +216,10 @@ async fn submit_committed_foreign_inflight_complete(
     probe: &super::super::destructive_cancel_gate::DestructiveCancelProbeSnapshot,
     restart_orphan_evidence: bool,
     _source: ForeignRecoverySource,
-) -> bool {
+) -> ForeignRecovery {
     let finalizer_turn_id = probe.pin.finalizer_turn_id;
     if finalizer_turn_id == 0 {
-        return false;
+        return ForeignRecovery::default();
     }
     let Some(current) = super::super::inflight::load_inflight_state(provider, channel_id.get())
     else {
@@ -177,7 +229,7 @@ async fn submit_committed_foreign_inflight_complete(
             finalizer_turn_id,
             "tui_direct_pending_start: committed FOREIGN complete no-op; inflight disappeared before finalizer submit"
         );
-        return false;
+        return ForeignRecovery::default();
     };
     let mailbox_active_user_msg_id = super::super::mailbox_snapshot(shared, channel_id)
         .await
@@ -208,13 +260,14 @@ async fn submit_committed_foreign_inflight_complete(
             current_save_generation = current.save_generation,
             "tui_direct_pending_start: committed FOREIGN complete no-op; terminal envelope or identity pin no longer matches"
         );
-        return false;
+        return ForeignRecovery::default();
     }
 
     #[cfg(test)]
     retirement_recheck_tests::pause("leaked_row_complete_after_mailbox", channel_id.get()).await;
 
     let committed_identity = super::super::inflight::InflightTurnIdentity::from_state(&current);
+    let mut last_clear = None;
     if restart_orphan_evidence {
         let archive_outcome =
             super::super::inflight::archive_inflight_state_if_matches_identity_generation(
@@ -232,8 +285,9 @@ async fn submit_committed_foreign_inflight_complete(
                 ?archive_outcome,
                 "tui_direct_pending_start: restart-orphan archive failed; preserving committed FOREIGN inflight"
             );
-            return false;
+            return ForeignRecovery::default();
         }
+        last_clear = Some(archive_outcome);
     }
     let outcome = shared
         .turn_finalizer
@@ -251,12 +305,12 @@ async fn submit_committed_foreign_inflight_complete(
         )
         .await;
 
-    let gone_or_changed = !super::super::inflight::load_inflight_state(provider, channel_id.get())
-        .is_some_and(|current| {
-            committed_identity == super::super::inflight::InflightTurnIdentity::from_state(&current)
-                && current.effective_finalizer_turn_id() == finalizer_turn_id
-                && current.save_generation == probe.save_generation
-        });
+    let current = super::super::inflight::load_inflight_state(provider, channel_id.get());
+    let gone_or_changed = !current.as_ref().is_some_and(|current| {
+        committed_identity == super::super::inflight::InflightTurnIdentity::from_state(current)
+            && current.effective_finalizer_turn_id() == finalizer_turn_id
+            && current.save_generation == probe.save_generation
+    });
     tracing::warn!(
         provider = %provider.as_str(),
         channel_id = channel_id.get(),
@@ -266,20 +320,22 @@ async fn submit_committed_foreign_inflight_complete(
         restart_orphan_evidence,
         "tui_direct_pending_start: committed FOREIGN inflight cleared via finalizer Complete under terminal or restart-orphan evidence"
     );
-    gone_or_changed
+    ForeignRecovery::after(&outcome, last_clear, (gone_or_changed, current.is_some()))
 }
 
 pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_current(
     shared: &Arc<SharedData>,
     record: &TuiDirectPendingStart,
 ) -> bool {
-    demote_stale_foreign_inflight(shared, record, ForeignRecoverySource::PendingStart).await
+    let recovery =
+        demote_stale_foreign_inflight(shared, record, ForeignRecoverySource::PendingStart);
+    recovery.await.cleared
 }
 
 pub(in crate::services::discord) async fn demote_leaked_foreign_inflight_if_current(
     shared: &Arc<SharedData>,
     record: &TuiDirectPendingStart,
-) -> bool {
+) -> ForeignRecovery {
     demote_stale_foreign_inflight(shared, record, ForeignRecoverySource::LeakedRowSweep).await
 }
 
@@ -287,14 +343,14 @@ async fn demote_stale_foreign_inflight(
     shared: &Arc<SharedData>,
     record: &TuiDirectPendingStart,
     source: ForeignRecoverySource,
-) -> bool {
+) -> ForeignRecovery {
     let Some(provider) = crate::services::provider::ProviderKind::from_str(&record.provider) else {
-        return false;
+        return ForeignRecovery::default();
     };
     let channel = poise::serenity_prelude::ChannelId::new(record.channel_id);
     let Some(state) = super::super::inflight::load_inflight_state(&provider, record.channel_id)
     else {
-        return false;
+        return ForeignRecovery::default();
     };
     // A restarted Herdr row's end belongs to its dedicated owner, never to this sweep; the sweep
     // only asks that owner to look again, so a stalled end pass cannot hold the channel.
@@ -311,7 +367,7 @@ async fn demote_stale_foreign_inflight(
         );
         use super::super::recovery_engine::herdr_row_end::{RowEndAsk, request_row_end};
         request_row_end(shared, &provider, channel, RowEndAsk::Sweep);
-        return false;
+        return ForeignRecovery::default();
     }
     let capture_offset = output_capture_offset(&state);
     if committed_foreign_inflight_is_finalize_clearable(&state, record) {
@@ -353,9 +409,9 @@ async fn demote_stale_foreign_inflight(
                 pane_ready_for_input = restart_evidence.pane_ready_for_input,
                 "tui_direct_pending_start: skipped committed FOREIGN finalize-clear; terminal envelope and restart-orphan evidence missing"
             );
-            return false;
+            return ForeignRecovery::default();
         }
-        let cleared = submit_committed_foreign_inflight_complete(
+        let recovery = submit_committed_foreign_inflight_complete(
             shared,
             &provider,
             channel,
@@ -364,7 +420,7 @@ async fn demote_stale_foreign_inflight(
             source,
         )
         .await;
-        if cleared {
+        if recovery.cleared {
             tracing::warn!(
                 provider = %record.provider,
                 channel_id = record.channel_id,
@@ -379,10 +435,10 @@ async fn demote_stale_foreign_inflight(
                 "tui_direct_pending_start: cleared committed FOREIGN inflight via finalizer Complete; re-evaluating before claiming (#4805)"
             );
         }
-        return cleared;
+        return recovery;
     }
     if !stale_foreign_inflight_is_reclaimable_at(&state, record, chrono::Utc::now().timestamp()) {
-        return false;
+        return ForeignRecovery::default();
     }
     let mailbox_active_user_msg_id = super::super::mailbox_snapshot(shared, channel)
         .await
@@ -408,14 +464,14 @@ async fn demote_stale_foreign_inflight(
             denied_reason = gate.denied_reason().unwrap_or("unknown"),
             "tui_direct_pending_start: skipped destructive stale FOREIGN demotion; death/identity gate did not pass (#4030)"
         );
-        return false;
+        return ForeignRecovery::default();
     }
 
     #[cfg(test)]
     run_destructive_cancel_post_gate_hook_for_tests(DestructiveCancelHookPoint::PostGate);
-    let demoted =
+    let recovery =
         submit_stale_foreign_inflight_cancel(shared, &provider, channel, &probe, source).await;
-    if demoted {
+    if recovery.cleared {
         tracing::warn!(
             provider = %record.provider,
             channel_id = record.channel_id,
@@ -431,5 +487,5 @@ async fn demote_stale_foreign_inflight(
             "tui_direct_pending_start: demoted stale FOREIGN inflight with dead relay frontier via finalizer Cancel; re-evaluating before claiming (#4030)"
         );
     }
-    demoted
+    recovery
 }

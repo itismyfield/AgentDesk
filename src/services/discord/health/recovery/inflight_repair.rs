@@ -218,6 +218,10 @@ pub async fn clear_idle_tmux_stale_turn(
     } else {
         false
     };
+    // The repair removed the row; with no token released, nothing else resumes what it held.
+    if finish.removed_token.is_none() {
+        discord::queue_io::input_owner::closed::closed(&shared, &provider, channel_id, stop_source);
+    }
 
     Some(IdleTmuxStaleTurnRepairResult {
         had_active_turn: finish.removed_token.is_some(),
