@@ -493,3 +493,5 @@ zero-rule 부채 역시 이 대응으로 검사한다. mapping을 지우거나 �
 역사 측정은 금지 설정을 제외한 `Cargo.toml`과 `src/**/*.rs`만 Git archive에서
 추출했고 도구/helper도 tool SHA로 고정했다. 읽기 실패와 모듈 도달 오류는 0이었다.
 재현 명령·archive/source/tool SHA256·검색 원문·graph는 캠페인 보고서의 증거 목록에 있다.
+
+`domain::file_sync`는 parent directory fsync·flush 판정과 시험 probe의 adapter 소유자이며, Discord runtime_store는 같은 함수를 재수출한다. S07의 13 consumer 파일만 정본 경로를 사용하고 syscall 순서·오류·Windows의 unflushed 성공·상위 ENOSPC 관측은 유지한다.

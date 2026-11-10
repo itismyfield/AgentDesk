@@ -5,7 +5,7 @@ use std::path::Path;
 #[cfg(not(test))]
 use std::sync::OnceLock;
 
-use crate::services::discord::runtime_store::fsync_parent_dir;
+use crate::domain::file_sync::fsync_parent_dir;
 
 #[cfg(not(test))]
 pub(crate) fn session_host_label() -> String {

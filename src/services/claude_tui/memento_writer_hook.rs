@@ -287,8 +287,7 @@ fn read_receipt(path: &Path) -> std::io::Result<String> {
 fn sync_receipt_directory(entry: &Path) -> Result<(), String> {
     #[cfg(unix)]
     for child in std::iter::once(entry).chain(entry.parent()) {
-        crate::services::discord::runtime_store::fsync_parent_dir(child)
-            .map_err(|e| e.to_string())?;
+        crate::domain::file_sync::fsync_parent_dir(child).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
