@@ -846,6 +846,8 @@ pub(crate) fn known_models(provider: &ProviderKind) -> Vec<ModelCatalogEntry> {
 }
 
 pub(in crate::services::discord) use claude::record_claude_model_observation;
+#[cfg(test)]
+pub(in crate::services::discord) use claude::with_test_claude_catalog_sources;
 
 fn model_aliases(provider: &ProviderKind) -> &'static [(&'static str, &'static str)] {
     match provider {

@@ -244,8 +244,12 @@ fn merge_entries(
     gateway_entries: Vec<ModelCatalogEntry>,
     observations: Observations,
 ) -> Vec<ModelCatalogEntry> {
+    let observed_ids = observations
+        .values()
+        .map(|id| id.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
     let mut seen = HashSet::new();
-    curated_entries(&observations)
+    let mut entries = curated_entries(&observations)
         .into_iter()
         .chain(gateway_entries)
         .chain(
@@ -254,16 +258,33 @@ fn merge_entries(
                 .map(|id| model_entry(id.clone(), id, "Observed Claude response")),
         )
         .filter(|entry| seen.insert(entry.value.to_ascii_lowercase()))
-        .collect()
+        .collect::<Vec<_>>();
+    // Choose metadata before promotion so shared IDs retain the gateway label.
+    entries.sort_by_key(|entry| {
+        if CURATED_ALIASES
+            .iter()
+            .any(|alias| alias.selector == entry.value)
+        {
+            0
+        } else if observed_ids.contains(&entry.value.to_ascii_lowercase()) {
+            1
+        } else {
+            2
+        }
+    });
+    entries
 }
 
-pub(super) fn resolved_models() -> Vec<ModelCatalogEntry> {
-    let gateway = gateway_cache_path()
-        .as_deref()
+fn resolve_models(
+    cache: &RwLock<Vec<ModelCatalogEntry>>,
+    gateway_path: Option<&Path>,
+    observed_path: Option<&Path>,
+    current_ms: u64,
+) -> Vec<ModelCatalogEntry> {
+    let gateway = gateway_path
         .and_then(read_cache_file)
-        .map(|raw| gateway_entries_from_raw(&raw, now_ms()))
+        .map(|raw| gateway_entries_from_raw(&raw, current_ms))
         .unwrap_or_default();
-    let cache = GATEWAY_ENTRIES.get_or_init(|| RwLock::new(Vec::new()));
     if !gateway.is_empty()
         && let Ok(mut entries) = cache.write()
     {
@@ -273,13 +294,77 @@ pub(super) fn resolved_models() -> Vec<ModelCatalogEntry> {
         .read()
         .map(|entries| entries.clone())
         .unwrap_or_default();
-    merge_entries(gateway, read_observations(observations_path().as_deref()))
+    merge_entries(gateway, read_observations(observed_path))
 }
+
+pub(super) fn resolved_models() -> Vec<ModelCatalogEntry> {
+    #[cfg(test)]
+    if let Some(entries) = tests::resolve_test_sources() {
+        return entries;
+    }
+    resolve_models(
+        GATEWAY_ENTRIES.get_or_init(|| RwLock::new(Vec::new())),
+        gateway_cache_path().as_deref(),
+        observations_path().as_deref(),
+        now_ms(),
+    )
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) use tests::with_test_claude_catalog_sources;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    struct TestSources {
+        gateway: PathBuf,
+        observations: PathBuf,
+        cache: RwLock<Vec<ModelCatalogEntry>>,
+    }
+
+    thread_local! {
+        static SOURCES: std::cell::RefCell<Option<TestSources>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn resolve_test_sources() -> Option<Vec<ModelCatalogEntry>> {
+        SOURCES.with(|slot| {
+            slot.borrow().as_ref().map(|sources| {
+                resolve_models(
+                    &sources.cache,
+                    Some(&sources.gateway),
+                    Some(&sources.observations),
+                    now_ms(),
+                )
+            })
+        })
+    }
+
+    pub(in crate::services::discord) fn with_test_claude_catalog_sources<T>(
+        gateway: PathBuf,
+        observations: PathBuf,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SOURCES.with(|slot| slot.take());
+            }
+        }
+        SOURCES.with(|slot| {
+            assert!(slot.borrow().is_none());
+            slot.replace(Some(TestSources {
+                gateway,
+                observations,
+                cache: RwLock::new(Vec::new()),
+            }));
+        });
+        let reset = Reset;
+        let result = operation();
+        drop(reset);
+        result
+    }
 
     #[test]
     fn invariant_claude_model_catalog_curated_aliases_remain_evergreen_runtime_selectors() {

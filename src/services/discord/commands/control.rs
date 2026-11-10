@@ -472,6 +472,10 @@ pub(in crate::services::discord) fn forget_relaunch_failures(channel: serenity::
     relaunch::forget_failures(channel);
 }
 
+pub(in crate::services::discord) fn cancel_relaunch_confirmation(channel: serenity::ChannelId) {
+    relaunch_confirm::abort(channel);
+}
+
 fn choose_clear_session_key(
     explicit_session_key: Option<&str>,
     resolved_session_key: Option<String>,
