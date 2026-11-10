@@ -246,6 +246,47 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
                 snapshots.append(self._counts(snapshot))
         self.assertTrue(all(snapshot == snapshots[0] for snapshot in snapshots))
 
+    def test_startup_orchestration_calls_storage_without_a_storage_forwarder(self):
+        source = """
+            mod db { pub fn put() {} }
+            mod settings { pub fn reseed() { crate::db::put(); } }
+        """
+        with self._tree(source) as root:
+            (root / "scripts/audit_maintainability/layers.toml").write_text("""
+                schema_version=1
+                [layers]
+                adapter=2
+                application=3
+                assembly=5
+                [[rules]]
+                prefix=""
+                layer="assembly"
+                reason="fixture composition"
+                [[rules]]
+                prefix="db"
+                layer="adapter"
+                reason="fixture storage"
+                [[rules]]
+                prefix="settings"
+                layer="application"
+                reason="fixture startup orchestration"
+            """, encoding="utf-8")
+            self._generate_initial_baseline(root)
+            self.assertEqual(self._runner()[0], 0)
+            self.assertFalse(self._snapshot(root)["reverse_dependencies"])
+
+            (root / "src/lib.rs").write_text(source.replace(
+                "pub fn put() {}", "pub fn put() { crate::settings::reseed(); }"),
+                encoding="utf-8")
+            self._git(root, "commit", "-qam", "add storage forwarding dependency")
+            result, report, stderr = self._runner()
+            self.assertEqual(result, 1, stderr)
+            self.assertTrue(any(row["severity"] == "error"
+                                for row in report["checks"]["module_layers"]["findings"]))
+            self.assertTrue(any(row["source"].endswith("::db")
+                                and row["target"].endswith("::settings")
+                                for row in self._snapshot(root)["reverse_dependencies"]))
+
     def test_runner_blocks_new_body_dependency_with_comments_or_const_parameter_types(self):
         contexts = ({}, {"prefix": "// standalone comment\n"},
                     {"prefix": "const BEFORE: () = (); // trailing comment\n"},

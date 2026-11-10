@@ -29,6 +29,8 @@ pub(crate) struct BootChannels {
     /// The selection and, on the home, each committed channel the selection left out.
     channels: BTreeSet<u64>,
     selected: BTreeSet<u64>,
+    /// Every TUI binding in the boot config, selected or not.
+    tui_bindings: BTreeSet<u64>,
     dormant_channels: BTreeSet<u64>,
     /// Initial reservations can only be installed before this snapshot is published.
     late_adopt_capable: bool,
@@ -242,6 +244,9 @@ impl BootChannels {
         let (site, configured_id) = site(config, !channels.is_empty())?;
         Ok(Self {
             selected: channels.clone(),
+            tui_bindings: crate::services::provider_hosting::tui_binding_ids(config)
+                .flatten()
+                .collect(),
             dormant_channels,
             late_adopt_capable: tui_o.writer.late_adopt(),
             turn: tui_o.turn.clone(),
@@ -335,6 +340,43 @@ impl BootChannels {
     /// The channels the boot config selected, for restart-required comparison.
     pub(crate) fn selected(&self) -> &BTreeSet<u64> {
         &self.selected
+    }
+
+    /// Whether the boot config binds `channel` as a TUI, so its body is O's whether selected or not.
+    pub(crate) fn tui_bound(&self, channel: u64) -> bool {
+        self.tui_bindings.contains(&channel)
+    }
+
+    /// An explicit setting leaving a TUI binding to Legacy, which no longer posts TUI bodies, refuses
+    /// the boot; a committed channel the home keeps is O's, and an unset selection boots.
+    fn refuse_explicit_off(&self, config: &Config) -> Result<()> {
+        let writer = &tui_o_of(config).writer;
+        let left: Vec<u64> = self
+            .tui_bindings
+            .difference(&self.channels)
+            .copied()
+            .collect();
+        let setting = if writer.late_adopt == Some(false) && !self.tui_bindings.is_empty() {
+            Some("tui_o.writer.late_adopt: false")
+        } else if left.is_empty() || (writer.all_tui.is_none() && writer.channels.is_empty()) {
+            None
+        } else if writer.channels.is_empty() {
+            Some("tui_o.writer.all_tui: false")
+        } else {
+            Some("tui_o.writer.channels")
+        };
+        let Some(setting) = setting else {
+            return Ok(());
+        };
+        let bound: Vec<u64> = if left.is_empty() {
+            self.tui_bindings.iter().copied().collect()
+        } else {
+            left
+        };
+        anyhow::bail!(
+            "{setting} leaves TUI-bound channels {bound:?} without the O writer, and Legacy no \
+             longer posts TUI bodies; remove the setting"
+        )
     }
 
     /// Installed dormant policy, kept fixed across live config reloads.
@@ -597,6 +639,7 @@ pub(crate) fn install(config: &Config) -> Result<()> {
                 }
             };
             let seeded = candidate.clone().seeded(config, stored)?;
+            seeded.refuse_explicit_off(config)?;
             BOOT.get_or_init(|| seeded)
         }
     };
