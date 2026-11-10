@@ -460,7 +460,7 @@ impl<B: BindingEvents> Sources<B> {
         };
         let superseded = self.current.historical(&reader.source);
         if cursor.retired
-            || self.archived_source(&reader.source)
+            || (!superseded && self.archived_source(&reader.source))
             || reader.drain_to.is_some()
             || !(superseded || self.producer_absent)
             || (!superseded && unsealed)

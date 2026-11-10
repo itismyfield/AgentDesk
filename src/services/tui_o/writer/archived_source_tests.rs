@@ -181,3 +181,62 @@ fn boot_archive_without_retained_fd_does_not_trust_a_prior_eof_witness() {
         }
     }
 }
+
+#[tokio::test]
+async fn archive_before_new_bind_retires_only_a_fulfilled_drain() {
+    for readers in [None, Some(ReaderConfig { dormant: true })] {
+        for unread in [false, true] {
+            let (h, path, old, _) = started(&row("old", "consumed"));
+            let bindings = Arc::new(FakeBindings::new());
+            let mut w = h.writer();
+            w.store().set_binding_checkpoint(0).unwrap();
+            let mut s = Sources::new(CHANNEL, ShadowProvider::Codex, bindings.clone());
+            if let Some(config) = readers {
+                s = s.with_readers(config);
+            }
+            let mut d = UnitDeriver::new(CHANNEL, ShadowProvider::Codex);
+            let mut owed = VecDeque::new();
+            s.resume(&mut w, &mut d, &mut owed).unwrap();
+            let cursor = w.store().cursor(&old).unwrap().clone();
+            if unread {
+                append(&path, &row("tail", "must not lose"));
+            }
+            archive(&path);
+            let (fresh_path, fresh) = transcript(&path, "fresh.jsonl", "s2", b"");
+            let mut event = bound(
+                1,
+                Some(&old),
+                BindingTarget::Source(fresh.clone()),
+                BindingCause::Startup,
+                None,
+            );
+            event.provider = ShadowProvider::Codex;
+            bindings.commit(event);
+            s.follow(&mut w).unwrap();
+            append(&fresh_path, concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"fresh\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"fresh-answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"fresh reply\"}]}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"fresh\"}}\n",
+            ).as_bytes());
+            let result = s.capture(&mut w, &mut d, &mut owed);
+            if unread {
+                assert!(matches!(
+                    result,
+                    Err(WriterAlarm::HaltedMissingSource { .. })
+                ));
+                assert_eq!(w.store().cursor(&old).unwrap(), &cursor);
+                assert!(h.port.posts().is_empty());
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "fulfilled drain must not block retirement: {result:?}"
+                );
+                assert!(w.store().cursor(&old).unwrap().retired);
+                while let Some(piece) = owed.pop_front() {
+                    w.deliver(&piece).await;
+                }
+                assert_eq!(h.port.posts(), ["fresh reply"]);
+            }
+        }
+    }
+}

@@ -4022,6 +4022,7 @@ src/
 │   │   │   ├── adoption_terminal_tests.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── always_on_repost_tests.rs
+│   │   │   ├── archived_host_tests.rs
 │   │   │   ├── archived_source_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── bo_post_tests.rs

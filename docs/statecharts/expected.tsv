@@ -194,3 +194,5 @@ input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
 tui-o-writer/WriterArchivedSourceBefore.cfg	WriterArchivedSource	ArchiveAtVerifiedEofRetires
 tui-o-writer/WriterArchivedSourceAfter.cfg	WriterArchivedSource	-
 tui-o-writer/WriterArchivedSourceNoDrain.cfg	WriterArchivedSource	NoUnsentTailLost
+tui-o-writer/WriterArchivedSourceRebindBefore.cfg	WriterArchivedSource	-	NewBindingProgress
+tui-o-writer/WriterArchivedSourceRebindAfter.cfg	WriterArchivedSource	-	-

@@ -3,6 +3,8 @@
 use super::*;
 #[path = "current_host_tests.rs"]
 mod current_host;
+#[path = "archived_host_tests.rs"]
+mod archived_host;
 use crate::services::tui_o::channel_policy;
 use crate::services::tui_o::store::fault::{self, Keep, Step as FaultStep};
 use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink, Successor};
