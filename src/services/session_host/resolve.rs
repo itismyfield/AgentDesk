@@ -6,8 +6,8 @@ use super::model::{HostKind, HostKindResolution, HostKindSource, HostSessionRef}
 use super::process_host::ProcessHost;
 use super::tmux_host::TmuxHost;
 use super::traits::InteractiveSessionHost;
+use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
 /// Host-kind evidence the caller already read at its own site. The resolver

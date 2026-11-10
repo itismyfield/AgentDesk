@@ -79,7 +79,7 @@ fn private_session_provider_from_key(session_key: Option<&str>) -> Option<String
     let session_key = session_key
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
-    let parsed = crate::services::discord::session_identity::SessionIdentity::parse(session_key);
+    let parsed = crate::domain::session_identity::SessionIdentity::parse(session_key);
     let tmux_name = parsed
         .as_ref()
         .map(|identity| identity.tmux_name.as_str())

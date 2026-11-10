@@ -502,4 +502,4 @@ S04에서 정적 catalog helper의 실제 구현은 `domain::provider`로, 문�
 
 `domain::session_identity` vocabulary가 legacy/namespaced session key의 값과 parse, tmux tail 추출을 소유한다. `domain::session_identity::naming` foundation은 정적 provider catalog로 tmux provider/channel과 legacy default를 계산하고 `SessionIdentity::provider_and_channel`의 순수 impl을 소유한다. provider catalog 순서·기본값, 마지막 colon·slash alias·trim·malformed 처리 결과는 보존한다.
 
-기존 Discord identity 경로와 services provider parser 경로는 같은 타입·함수의 재수출이다. 사용되지 않는 `legacy_key` 문자열 렌더링 accessor는 기존 호환 모듈에 남기며 새 suppression을 추가하지 않는다. DB·config·auth·runtime registry와 fallback 실행 순서는 이동하지 않는다. identity A consumer 12파일만 정본 경로로 전환하고 identity B와 legacy 소비자는 기존 경로를 유지한다.
+기존 Discord identity 경로와 services provider parser 경로는 같은 타입·함수의 재수출이다. 사용되지 않는 `legacy_key` 문자열 렌더링 accessor는 기존 호환 모듈에 남기며 새 suppression을 추가하지 않는다. DB·config·auth·runtime registry와 fallback 실행 순서는 이동하지 않는다. identity A consumer 12파일과 identity B consumer 11파일은 domain 정본 경로를 직접 사용하며 legacy 소비자는 기존 호환 경로를 유지한다.
