@@ -1318,14 +1318,16 @@ CBOps == {"finalizer", "tokenless", "noEpisode", "stopFallback", "repair", "stal
 CBAfter == Fix = "CBAfter"
 \* Whether the token step wakes the owner: stop's QueueEligible publish, or its reverted mutant.
 CBTokenWakes(k) == k = "stopFallback" /\ (~CBAfter \/ Mut = "cbTokenEligible")
-\* Whether the barrier step notifies; the early mutant moves that wake to the row step, and the
-\* Cleared-only mutant notifies a stale cancel only when its own lifecycle clear removed the row.
+\* Whether the barrier step notifies; the no-notice and early mutants act on the archive closer
+\* and the stop, the early one moving that wake to the row step; the Cleared-only mutant notifies
+\* a stale cancel only when its own lifecycle clear removed the row.
+CBMutated(k) == k \in {"noEpisode", "stopFallback"}
 CBBarrierNotes(k) ==
     IF CBAfter
-    THEN /\ ~(Mut \in {"cbNoNotify", "cbEarlyNotify"} /\ k = "noEpisode")
+    THEN /\ ~(Mut \in {"cbNoNotify", "cbEarlyNotify"} /\ CBMutated(k))
          /\ ~(Mut = "cbClearedOnly" /\ k = "staleCancel" /\ CB.life # "cleared")
     ELSE k \in {"finalizer", "noEpisode"} /\ (Mut # "cbNoNotify" \/ k # "noEpisode")
-CBRowNotes(k) == CBAfter /\ Mut = "cbEarlyNotify" /\ k = "noEpisode"
+CBRowNotes(k) == CBAfter /\ Mut = "cbEarlyNotify" /\ CBMutated(k)
 CBBlocked == CB.token \/ CB.row \/ CB.barrier
 CompletionWakeInit ==
     /\ mode = "turn" /\ src = "start" /\ mbx = "idle" /\ nat = "idle"
