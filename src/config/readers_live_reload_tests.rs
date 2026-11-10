@@ -33,7 +33,7 @@ fn readers_s1b_validated_reload_compares_installed_boot_in_both_directions() {
         std::fs::write(
             &path,
             format!(
-                "server: {{}}\nagents:\n  - id: fixture\n    name: Fixture\n    channels:\n      claude: {{id: '41', runtime: tui}}\n      codex: {{id: '42', runtime: tui}}\ntui_o:\n  writer:\n    channels: [41]\n    dormant_channels: {dormant}\n"
+                "server: {{}}\nagents:\n  - id: fixture\n    name: Fixture\n    channels:\n      claude: {{id: '41', runtime: tui}}\n      codex: {{id: '42', runtime: pipe}}\ntui_o:\n  writer:\n    channels: [41]\n    dormant_channels: {dormant}\n"
             ),
         )
         .unwrap();
