@@ -157,8 +157,7 @@ fn bounded_redacted_error_tail(content: &str, max_bytes: usize) -> (String, usiz
         }
     }
 
-    let redacted =
-        crate::services::discord::formatting::redact_sensitive_for_placeholder(safe_tail);
+    let redacted = crate::domain::tool_text::redact_sensitive_for_placeholder(safe_tail);
     if skipped == 0 {
         (redacted, 0)
     } else if redacted.is_empty() {
@@ -234,10 +233,10 @@ pub fn project_for_relay<'a>(
     // head/tail slices. Larger errors use a trusted head plus a tail that drops
     // an untrusted partial first line and leading obs-fold continuations.
     let excerpt = if report.bytes <= ERROR_EDGE_BYTES * 2 {
-        crate::services::discord::formatting::redact_sensitive_for_placeholder(content)
+        crate::domain::tool_text::redact_sensitive_for_placeholder(content)
     } else {
         let raw_head = utf8_head(content, ERROR_EDGE_BYTES);
-        let head = crate::services::discord::formatting::redact_sensitive_for_placeholder(raw_head);
+        let head = crate::domain::tool_text::redact_sensitive_for_placeholder(raw_head);
         let raw_tail = utf8_tail(content, ERROR_EDGE_BYTES);
         let (tail, skipped_tail_bytes) = bounded_redacted_error_tail(content, ERROR_EDGE_BYTES);
         let omitted = report

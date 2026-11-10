@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use crate::config::{AgentChannel, AgentDef, BotConfig, Config};
 use crate::runtime_layout;
 
-use crate::services::discord::formatting::normalize_allowed_tools;
+use crate::domain::tool_text::normalize_allowed_tools;
 use crate::services::discord::internal_api;
 use crate::services::discord::runtime_store::atomic_write;
 use crate::utils::discord::discord_token_hash;

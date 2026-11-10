@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgRow};
 
-use crate::services::discord::formatting::redact_sensitive_for_placeholder;
+use crate::domain::tool_text::redact_sensitive_for_placeholder;
 
 pub const RECOVERY_AUDIT_SOURCE_DISCORD_RECENT: &str = "discord_recent";
 const RECOVERY_AUDIT_PREVIEW_CHARS_PER_MESSAGE: usize = 60;
