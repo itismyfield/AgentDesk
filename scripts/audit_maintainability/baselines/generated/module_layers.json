@@ -2,7 +2,7 @@
   "configuration_errors":[],
   "count_unit_version":1,
   "edge_count_unit":"static reference occurrences",
-  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha a5e3619b403b98da9d6c11302d9244ce3d78762d --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
+  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha bba5836315ff3739b10c7b20f44c56e9b5762819 --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
   "indeterminate_dependencies":[
     {"count":1,"id":"3d29ca6b7465863f206febb861a0f441644c728f409182ccd49d175c2c2806b8","kind":"import","source":"src/lib.rs::crate::cli::discord","target":"src/lib.rs::crate::services"},
     {"count":1,"id":"47c075858c533c75543be0e9196aaa2eecd8c00d2951247879e8d5baff37f816","kind":"import","source":"src/lib.rs::crate::server::routes::reviews","target":"src/lib.rs::crate::services"},
@@ -12,8 +12,8 @@
   ],
   "indeterminate_edges":5,
   "indeterminate_occurrences":5,
-  "input_sha":"a5e3619b403b98da9d6c11302d9244ce3d78762d",
-  "mapping_sha256":"7a2d7709b9aa01179ec19e4ad0b3614708edecc1ab3faafc06f8b1ed5b011b55",
+  "input_sha":"bba5836315ff3739b10c7b20f44c56e9b5762819",
+  "mapping_sha256":"e41743978057bc03918c004fa515972d2c9d8446d58456ac849aabae16760237",
   "reverse_dependencies":[
     {"count":2,"id":"0035d7ca439517230bc6306b0881fc487fe95b44c2852a7e74379cb98436987d","kind":"path","source":"src/lib.rs::crate::config","target":"src/lib.rs::crate::config::session_hosts"},
     {"count":3,"id":"004548ea3340d4f2db928565ed126a4a242f7421b1c3421bba76cf7df27c3fc4","kind":"import","source":"src/lib.rs::crate::services::auto_queue","target":"src/lib.rs::crate::error"},
@@ -8857,7 +8857,7 @@
     {"count":2,"id":"b530f60d2a83136f4a7ff9a8fb79b8e5afdb03c257731392d7dfe16cb40f6341"},
     {"count":1,"id":"b5359d527acd543d0302168ff35e22ffb4b8344b83db96f7261acaea0031c7b7"},
     {"count":3,"id":"b53a693fb2be021c344b5bc94626c2aec1cbb4235ae2f2d90589df8f414160c0"},
-    {"count":4,"id":"b54147c3ea8dd11f00b8cb06ee524816af4dd4bb1ddaaff8d4ac7ccd0db09155"},
+    {"count":3,"id":"b54147c3ea8dd11f00b8cb06ee524816af4dd4bb1ddaaff8d4ac7ccd0db09155"},
     {"count":1,"id":"b5431c6182e22cf74c28b8bf8c437b288c47a2f233a876009fd4f9b5abe77698"},
     {"count":51,"id":"b5477bd222e7d9a8f971a0abd0d0e8129b73e3b28971e885e897c9d27b9c93ca"},
     {"count":3,"id":"b54bb65dacb301925646439890dcbbaf71522c832bbffb5ddf3446fb0b3a4c39"},

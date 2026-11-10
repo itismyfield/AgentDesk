@@ -374,6 +374,8 @@ src/
 │   ├── test_support.rs
 │   └── types.rs
 ├── domain/
+│   ├── atomic_write/
+│   │   └── tests.rs
 │   ├── provider/
 │   │   ├── catalog/
 │   │   │   └── rows.rs
@@ -382,6 +384,7 @@ src/
 │   │   ├── execution.rs
 │   │   ├── public_catalog.rs
 │   │   └── tests.rs
+│   ├── atomic_write.rs
 │   ├── bot_role.rs
 │   ├── file_sync.rs
 │   ├── human_input.rs
@@ -3258,6 +3261,7 @@ src/
 │   │   ├── restart_report.rs
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
+│   │   ├── runtime_store_atomic_write_tests.rs
 │   │   ├── runtime_store_checkpoint_lock_tests.rs
 │   │   ├── scheduled_turn.rs
 │   │   ├── scheduled_turn_tests.rs
