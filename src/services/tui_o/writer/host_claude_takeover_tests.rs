@@ -340,9 +340,8 @@ impl LegacyView for Following {
     }
 }
 
-/// An old transcript delivered and sampled, then given an answer Legacy never delivered, rotates to
-/// a new one: the init holds the old one from its delivered end beside the new one, and O posts
-/// the old answer and the new turn's answer once each.
+/// A sampled old transcript later given an undelivered answer rotates to a new one: the init holds
+/// both, the old one from its delivered end, and O posts each answer once.
 #[tokio::test(start_paused = true)]
 async fn late_claude_rotation_carries_the_old_transcripts_owed_answer_into_the_init() {
     const CH: u64 = 63_761_910;

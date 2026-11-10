@@ -403,10 +403,10 @@ async fn late_adopt_coalesced_bound_rotation_rejects_before_pin() {
 /// A frontier behind the reserved transcript's end is where O starts, never at EOF: the records
 /// Legacy did not deliver are posted once and nothing is abandoned.
 #[tokio::test(start_paused = true)]
-async fn late_adopt_stalled_frontier_is_taken_from_it_never_from_eof() {
+async fn late_adopt_stalled_frontier_never_skips_to_eof() {
     if !test_override::isolated_binding_case(concat!(
         module_path!(),
-        "::late_adopt_stalled_frontier_is_taken_from_it_never_from_eof"
+        "::late_adopt_stalled_frontier_never_skips_to_eof"
     )) {
         return;
     }
