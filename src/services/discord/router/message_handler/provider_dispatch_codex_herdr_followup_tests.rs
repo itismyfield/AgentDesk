@@ -38,7 +38,7 @@ fn launch(fx: &Fixture, ports: &Ports<'_>) -> (String, PathBuf) {
 
 /// What a dcserver restart forgets, then `provider`'s restart pass on this node's endpoint; the
 /// fixture's hook ingress holds the dedupe test lock, so no other dedupe test sees the reset.
-fn restart_and_reconnect(fx: &Fixture, provider: &ProviderKind) -> ReconnectCounts {
+pub(super) fn restart_and_reconnect(fx: &Fixture, provider: &ProviderKind) -> ReconnectCounts {
     crate::services::tui_prompt_dedupe::reset_state_for_tests();
     crate::services::tui_prompt_dedupe::binding_events::forget_channel_for_tests(CHANNEL);
     reconnect(fx, provider)
