@@ -1,3 +1,5 @@
+Implementation code snapshot: `7f7e47d0b397d97527e5fefd92e48ac03fdfb9a4` (production source; Current baseline is listed below).
+
 코드 기준 SHA(수정 전): `e285a5cff1e8f8eadfc87e297ad7a202531f3ed3`. 설정: `InputPathBootDesignTwo.cfg`. 분류: **design N=2 / GREEN**.
 모델 SHA256: `6b95f76afb94259c7ad5b28b82108c10b0a90d17fa98f4fb78bcca3e567b002f`.
 

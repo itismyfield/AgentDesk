@@ -1,3 +1,5 @@
+Implementation code snapshot: `7f7e47d0b397d97527e5fefd92e48ac03fdfb9a4` (production source; Current baseline is listed below).
+
 코드 기준 SHA(수정 전): `e285a5cff1e8f8eadfc87e297ad7a202531f3ed3`. 설정: `WriterWakeI8055NoReadyWake.cfg`. 분류: **wake mutant / known RED**.
 모델 SHA256: `ead8f8ea53f827b52bfb50c5e522f8b8d8825f0968cf8533c7ab86d2662349cf`.
 

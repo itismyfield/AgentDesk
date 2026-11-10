@@ -25,6 +25,9 @@ async fn writer_boot_ready_wakes_busy_v2_owner_with_legacy_queue_gate_closed_pg(
                 &ProviderKind::Claude, channel,
             ), "the legacy queued paste lane must be closed in this regression");
 
+            let generation = crate::services::discord::runtime_store::generation_path().unwrap();
+            std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+            std::fs::write(generation, "7").unwrap();
             assert_eq!(queue_io::input_ingress::ADOPTS.scope(true,
                 queue_io::input_ingress::adopt(&f.shared, &ProviderKind::Claude, channel),
             ).await, Ok(true));
