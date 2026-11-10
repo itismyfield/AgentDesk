@@ -262,7 +262,7 @@ pub(crate) fn write_codex_tui_rollout_marker_under_source_authority(
         temp.persist(&path).map_err(|e| e.to_string())?;
         #[cfg(test)]
         crate::services::tui_prompt_dedupe::assert_marker_publication_unlocked_for_tests();
-        return crate::services::discord::runtime_store::fsync_parent_dir(Path::new(&path))
+        return crate::domain::file_sync::fsync_parent_dir(Path::new(&path))
             .map_err(|e| e.to_string());
     }
     if changed {

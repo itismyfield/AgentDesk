@@ -11,15 +11,28 @@ impl<B: BindingEvents> Sources<B> {
         deriver: &mut UnitDeriver,
         owed: &mut impl Owe,
     ) -> Result<(), WriterAlarm> {
-        self.resume_at(writer, deriver, owed, SystemTime::now())
+        self.resume_with_clock(writer, deriver, owed, SystemTime::now(), &SystemTime::now)
     }
 
+    #[cfg(test)]
     pub fn resume_at<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
         deriver: &mut UnitDeriver,
         owed: &mut impl Owe,
         wall_now: SystemTime,
+    ) -> Result<(), WriterAlarm> {
+        // Explicit-time callers use the same clock for replay and cleanup witnesses.
+        self.resume_with_clock(writer, deriver, owed, wall_now, &|| wall_now)
+    }
+
+    pub(crate) fn resume_with_clock<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+        deriver: &mut UnitDeriver,
+        owed: &mut impl Owe,
+        wall_now: SystemTime,
+        check_clock: &dyn Fn() -> SystemTime,
     ) -> Result<(), WriterAlarm> {
         let started = std::time::Instant::now();
         let mut records = 0;
@@ -112,7 +125,8 @@ impl<B: BindingEvents> Sources<B> {
                     if missing
                         && (self.reader_config.is_some()
                             || self.producer_absent
-                            || self.current.historical(&cursor.source))
+                            || self.current.historical(&cursor.source)
+                            || archive_eof::candidate(self.provider, &cursor.source))
                         && error.kind() == std::io::ErrorKind::NotFound
                         && matches!(
                             Fingerprint::path(&cursor.source),
@@ -151,8 +165,15 @@ impl<B: BindingEvents> Sources<B> {
                     let fp = capture
                         .verify_eof(cursor.captured_through, &cursor.prefix_hash)
                         .map_err(|e| halt(format!("restore EOF: {e}")))?;
-                    if fp.modified > wall_now {
-                        return Err(halt("source mtime is in the future"));
+                    let checked_at = check_clock();
+                    self.observe_clock(checked_at)?;
+                    if fp.modified > checked_at {
+                        return Err(halt(format!(
+                            "source mtime is in the future: source={} modified={:?} sampled_at={wall_now:?} checked_at={checked_at:?} replay_elapsed_ms={}",
+                            cursor.source.path.display(),
+                            fp.modified,
+                            started.elapsed().as_millis()
+                        )));
                     }
                 }
             }
@@ -163,6 +184,15 @@ impl<B: BindingEvents> Sources<B> {
         }
         self.restore_legacy_hops(writer)?;
         self.flush(writer)?;
+        for index in 0..self.readers.len() {
+            let reader = &self.readers[index];
+            if missing_reader(reader)
+                && !self.current.historical(&reader.source)
+                && archive_eof::candidate(self.provider, &reader.source)
+            {
+                self.retire_boot_archive(writer, index, deriver.has_unsealed(), check_clock)?;
+            }
+        }
         if self.reader_config.is_some() {
             for index in 0..self.readers.len() {
                 if missing_reader(&self.readers[index]) {
@@ -444,6 +474,66 @@ impl<B: BindingEvents> Sources<B> {
             self.validation = None;
             return Err(halt("wall clock regressed; cleanup evidence invalidated"));
         }
+        Ok(())
+    }
+
+    fn retire_boot_archive<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+        index: usize,
+        unsealed: bool,
+        check_clock: &dyn Fn() -> SystemTime,
+    ) -> Result<(), WriterAlarm> {
+        let reader = &self.readers[index];
+        let source = reader.source.clone();
+        let failure = |detail: String| {
+            if matches!(
+                Fingerprint::path(&source),
+                Err((SourceAnomalyKind::Missing, _))
+            ) {
+                WriterAlarm::HaltedMissingSource {
+                    source: source.clone(),
+                    detail,
+                }
+            } else {
+                halt(detail)
+            }
+        };
+        let cursor = writer
+            .store()
+            .cursor(&source)
+            .cloned()
+            .ok_or_else(|| halt("archive boot cursor missing"))?;
+        if unsealed || !drained(reader, &cursor) || reader.capture.is_some() {
+            return Err(failure("archive boot retains a capture obligation".into()));
+        }
+        let checked_at = check_clock();
+        self.observe_clock(checked_at)?;
+        let proof = archive_eof::verify(self.provider, &cursor, checked_at)
+            .map_err(|error| failure(format!("archive boot verification: {error}")))?;
+        let current = writer
+            .store()
+            .cursor(&source)
+            .cloned()
+            .ok_or_else(|| halt("archive boot cursor disappeared"))?;
+        if !drained(&self.readers[index], &current) {
+            return Err(failure("archive boot reader obligations changed".into()));
+        }
+        let checked_at = check_clock();
+        self.observe_clock(checked_at)?;
+        proof
+            .recheck(&current, checked_at)
+            .map_err(|error| failure(format!("archive boot commit: {error}")))?;
+        writer
+            .store()
+            .set_retired(&source, true)
+            .map_err(halted("archive boot retire"))?;
+        let reader = &mut self.readers[index];
+        reader.capture = None;
+        reader.dormant = None;
+        reader.watch_until = Some(Instant::now() + RETIRED_WATCH);
+        tracing::info!(channel = self.channel, path = %source.path.display(),
+            offset = cursor.captured_through, "[tui_o] retired archive at verified boot EOF");
         Ok(())
     }
 

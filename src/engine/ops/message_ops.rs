@@ -1,7 +1,7 @@
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::PgPool;
 
-use crate::services::discord::bot_role::UtilityBotRole;
+use crate::domain::bot_role::UtilityBotRole;
 
 // ── Message queue ops ─────────────────────────────────────────────
 // agentdesk.message.queue(target, content, bot?, source?)

@@ -433,6 +433,12 @@ async fn s1_real_missing_namespace_reaches_selected_tmux_start_pg() {
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _injection = injection_off();
+    // TUI bindings outside the writer selection hold their bodies, so these Legacy turns read the
+    // process-wide empty list instead.
+    let _legacy = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+        std::ffi::OsStr::new("[]"),
+    );
     let root = tempfile::tempdir().unwrap();
     let _binding = activity::BindingRoot::enter(root.path());
     // tmux reports the realpath of TMUX_TMPDIR (macOS /var -> /private/var); match it.
@@ -465,8 +471,10 @@ async fn s1_real_missing_namespace_reaches_selected_tmux_start_pg() {
         "id":format!("fixture{i}"), "name":format!("fixture{i}"), "provider":"claude",
         "channels":{"claude":{"id":id.to_string(),"name":format!("s1-entry-{id}"),"runtime":"tui"}}
     })).collect();
-    let config: crate::config::Config =
-        serde_json::from_value(serde_json::json!({"server":{},"agents":agents,"tui_o":{"writer":{"all_tui":false,"late_adopt":false},"turn":{"all_owned":false}}})).unwrap();
+    let config: crate::config::Config = serde_json::from_value(
+        serde_json::json!({"server":{},"agents":agents,"tui_o":{"turn":{"all_owned":false}}}),
+    )
+    .unwrap();
     crate::config_live_reload::install(config.clone());
     crate::services::tui_o::channel_policy::install(&config).unwrap();
     let path = crate::runtime_layout::config_file_path(&crate::config::runtime_root().unwrap());
@@ -740,6 +748,12 @@ async fn s1_fallback_only_and_restored_owner_only_live_hold_real_effects_pg() {
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _injection = injection_off();
+    // TUI bindings outside the writer selection hold their bodies, so these Legacy turns read the
+    // process-wide empty list instead.
+    let _legacy = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+        std::ffi::OsStr::new("[]"),
+    );
     let root = tempfile::tempdir().unwrap();
     let _namespace_root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "TMUX_TMPDIR",
@@ -766,7 +780,7 @@ async fn s1_fallback_only_and_restored_owner_only_live_hold_real_effects_pg() {
         &ProviderKind::Claude,
     )
     .await;
-    let mut config:crate::config::Config=serde_yaml::from_str(&format!("server: {{}}\nagents:\n  - id: fixture\n    name: fixture\n    provider: claude\n    channels:\n      claude: {{id: '{}', name: s1-entry-{}, runtime: tui}}\n  - id: fixture2\n    name: fixture2\n    provider: claude\n    channels:\n      claude: {{id: '{}', name: s1-entry-{}, runtime: tui}}\ntui_o:\n  writer: {{all_tui: false, late_adopt: false}}\n  turn: {{all_owned: false}}\n",ids[0],ids[0],ids[1],ids[1])).unwrap();
+    let mut config:crate::config::Config=serde_yaml::from_str(&format!("server: {{}}\nagents:\n  - id: fixture\n    name: fixture\n    provider: claude\n    channels:\n      claude: {{id: '{}', name: s1-entry-{}, runtime: tui}}\n  - id: fixture2\n    name: fixture2\n    provider: claude\n    channels:\n      claude: {{id: '{}', name: s1-entry-{}, runtime: tui}}\ntui_o:\n  turn: {{all_owned: false}}\n",ids[0],ids[0],ids[1],ids[1])).unwrap();
     crate::services::tui_o::channel_policy::install(&config).unwrap();
     let config_path =
         crate::runtime_layout::config_file_path(&crate::config::runtime_root().unwrap());
@@ -1075,7 +1089,7 @@ fn s1_herdr_first_create_and_retired_use_herdr_pg() {
         .map(|id| (id.to_string(), serde_json::json!("native")))
         .collect();
     let config: crate::config::Config = serde_json::from_value(serde_json::json!({
-        "server":{},"agents":agents,"cluster":{"instance_id":"test-node"},"runtime":{"herdr_turn_enabled":true},"tui_o":{"writer":{"all_tui":false,"late_adopt":false},"turn":{"all_owned":false}},
+        "server":{},"agents":agents,"cluster":{"instance_id":"test-node"},"runtime":{"herdr_turn_enabled":true},"tui_o":{"turn":{"all_owned":false}},
         "session_hosts":{"herdr":{"endpoints":{"native":{"execution_node":"test-node","socket_path":rig.socket(),"herdr_home":rig.home(),"herdr_session":"agentdesk"}},"channels":channels}}
     })).unwrap();
     crate::config::session_hosts::install(&config).unwrap();

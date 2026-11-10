@@ -208,6 +208,23 @@ pub(crate) fn install_herdr_execution(logical: &str, nonce: &str) {
     });
 }
 
+/// Restores a validated Pending execution without replacing a listed execution or its admission.
+/// The caller holds listing order and source authority, after checking the row and spawn marker.
+pub(crate) fn restore_herdr_execution_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    nonce: &str,
+) -> bool {
+    listed(|flag| flag.fetch_or(true, AcqRel));
+    let mut executions = HERDR_EXECUTIONS.lock().unwrap_or_else(|p| p.into_inner());
+    match executions.entry(authority.session().to_owned()) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert((nonce.to_owned(), false));
+            true
+        }
+        std::collections::hash_map::Entry::Occupied(entry) => entry.get().0 == nonce,
+    }
+}
+
 /// The reconcile admitted execution `nonce` on `logical`, unless a newer one is installed there.
 pub(crate) fn admit_herdr_execution(logical: &str, nonce: &str) {
     change_hold(logical, |executions| match executions.get(logical) {

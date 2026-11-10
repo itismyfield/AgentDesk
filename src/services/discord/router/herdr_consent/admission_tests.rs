@@ -918,6 +918,94 @@ async fn actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_follo
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn actual_o_herdr_blocked_notice_keeps_live_checkpoint_pg() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::{cutover::test_override, writer::host};
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+
+    const CHANNEL: u64 = discord_mock::CHANNEL_ID + 8_055;
+    let mut f = Fixture::new("disabled").await;
+    f.state.allow_channel(CHANNEL);
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    f.shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let boot_mapping = session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    // A real hosted row passes consent; the missing writer remains a permanent admission refusal.
+    seed_ready_row(&pool, &f.shared, CHANNEL).await;
+    assert!(
+        endpoint(CHANNEL).is_some(),
+        "the Herdr checkpoint path is selected"
+    );
+    assert!(!host::process_readiness().is_hosted(CHANNEL));
+    let channel = ChannelId::new(CHANNEL);
+    let mut input = submission(8_916_085_055, IntakeOrigin::LiveMessage);
+    input.request.channel_id = channel;
+    let deps = f.deps();
+    let admission = intake::admit_text_intake(&deps, &input).await;
+    assert!(
+        matches!(
+            &admission,
+            IntakeAdmission::Blocked {
+                reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::RoutingDependencyFailed { detail }
+            } | IntakeAdmission::WriterBlocked {
+                reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::RoutingDependencyFailed { detail }
+            } if detail.contains("writer ready")
+        ),
+        "actual_o_writer_refusal_is_blocked_before_live_dispatch: {admission:?}"
+    );
+    let checkpoints = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let moved = checkpoints.clone();
+    let result = await_within(
+        intake::dispatch_live_text_intake(&deps, input, move || {
+            moved.fetch_add(1, Ordering::SeqCst);
+        }),
+        WAIT_CAP,
+    )
+    .await;
+    let posts = f.state.written_texts();
+    let note_posts = f.state.local_note_posts.load(Ordering::SeqCst);
+    let unhandled = f.state.unhandled.lock().unwrap().clone();
+    let snapshot = f.shared.mailbox(channel).try_snapshot().await.unwrap();
+    let disk = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+        &ProviderKind::Claude,
+        &f.shared.token_hash,
+        channel,
+    )
+    .unwrap()
+    .0;
+    drop((boot_mapping, selected));
+    pool.close().await;
+    db.drop().await;
+
+    assert!(result.is_ok(), "the visible refusal finishes: {result:?}");
+    assert_eq!(note_posts, 1, "one real Discord refusal POST");
+    assert!(
+        posts.iter().any(|text| text.starts_with("⛔")
+            && text.contains(&format!("O channel {CHANNEL}"))
+            && text.contains("writer ready")),
+        "the mock's normal Create response delivered the writer refusal: {posts:?}"
+    );
+    assert!(
+        unhandled.is_empty(),
+        "no unanswered Discord calls: {unhandled:?}"
+    );
+    assert!(snapshot.intervention_queue.is_empty());
+    assert!(snapshot.active_user_message_id.is_none());
+    assert!(
+        disk.is_empty(),
+        "the refused input has no durable queue custody"
+    );
+    assert_eq!(
+        checkpoints.load(Ordering::SeqCst),
+        0,
+        "a visible O/Herdr refusal is not execution or durable custody"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn actual_live_checkpoint_waits_for_second_check_failed_custody_pg() {
     let mut f = Fixture::new("disabled").await;
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -1795,4 +1883,60 @@ async fn a_passing_admission_check_is_kept_by_the_launch_host() {
         evidence.startup.is_some(),
         "the host keeps the admission's proof"
     );
+}
+
+pub(in crate::services::discord::router) fn install_final_local_probe(
+    callback: impl FnMut(&IntakeSubmission) -> Result<crate::services::discord::IntakeExecution, Error>
+    + 'static,
+) -> impl Drop {
+    assert!(
+        FINAL
+            .with(|slot| slot.borrow_mut().replace(Box::new(callback)))
+            .is_none()
+    );
+    Hooks
+}
+
+struct BootPreflightProbe;
+impl Drop for BootPreflightProbe {
+    fn drop(&mut self) {
+        PREFLIGHT.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+pub(in crate::services::discord::router) fn install_boot_preflight_pause(
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Semaphore>,
+) -> impl Drop {
+    let mut first = true;
+    let hook: Preflight = Box::new(move |_| {
+        let pause = std::mem::take(&mut first);
+        let (entered, release) = (entered.clone(), release.clone());
+        Box::pin(async move {
+            if pause {
+                entered.notify_one();
+                release.acquire_owned().await.unwrap().forget();
+            }
+        })
+    });
+    assert!(
+        PREFLIGHT
+            .with(|slot| slot.borrow_mut().replace(hook))
+            .is_none()
+    );
+    BootPreflightProbe
+}
+
+struct FinalOverride(Option<Local>);
+impl Drop for FinalOverride {
+    fn drop(&mut self) {
+        FINAL.with(|slot| *slot.borrow_mut() = self.0.take());
+    }
+}
+
+pub(in crate::services::discord::router) fn override_final_local_probe(
+    callback: impl FnMut(&IntakeSubmission) -> Result<crate::services::discord::IntakeExecution, Error>
+    + 'static,
+) -> impl Drop {
+    FinalOverride(FINAL.with(|slot| slot.borrow_mut().replace(Box::new(callback))))
 }

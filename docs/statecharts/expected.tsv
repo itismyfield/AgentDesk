@@ -61,6 +61,7 @@ input-single-path/InputOwnershipAutoHold.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipAutoHoldBefore.cfg	InputOwnership	AutomaticHoldNoticeOnce	-
 input-single-path/InputOwnershipAutoHoldReasonKey.cfg	InputOwnership	AutomaticHoldNoticeOnce	-
 input-single-path/InputOwnershipC.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipTurnLegacy.cfg	InputOwnership	AnswerOnce	-
 input-single-path/InputOwnershipCF.cfg	InputOwnership	CarriedRowEnds,NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipConsumedWaitingAfter.cfg	InputOwnershipConsumedWaiting	-	-
 input-single-path/InputOwnershipConsumedWaitingAfterStamped.cfg	InputOwnershipConsumedWaiting	-	-
@@ -128,6 +129,13 @@ input-single-path/InputPathStopNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopNotSentLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopBusyNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopProofOverStopLive.cfg	InputPath	-	StoppedLeaves
+session-lifecycle/HerdrPendingRegistrationAfter.cfg	HerdrPendingRegistration	-	-
+session-lifecycle/HerdrPendingRegistrationBefore.cfg	HerdrPendingRegistration	-	PendingReuseBound
+session-lifecycle/HerdrPendingRegistrationBound.cfg	HerdrPendingRegistration	-	-
+session-lifecycle/HerdrPendingRegistrationEvidence.cfg	HerdrPendingRegistration	-	-
+session-lifecycle/HerdrPendingRegistrationMarker.cfg	HerdrPendingRegistration	-	-
+session-lifecycle/HerdrPendingRegistrationOther.cfg	HerdrPendingRegistration	-	-
+session-lifecycle/HerdrPendingRegistrationUnplaced.cfg	HerdrPendingRegistration	-	-
 session-lifecycle/HerdrPreclaimBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
 session-lifecycle/HerdrPreclaimFixed.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrPreclaimNonlocal.cfg	HerdrRootRecovery	-	-
@@ -191,6 +199,16 @@ tui-o-writer/WriterMissingHaltEarly.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltMetadata.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltOrphanBefore.cfg	WriterMissingHalt	-	OrphanRecovers
 tui-o-writer/WriterMissingHaltOrphanFixed.cfg	WriterMissingHalt	-	-
+# WriterAdoption (TUI Legacy body, stage 1): Main and GateOnly document the gaps; Stage1 passes; the rest drop one stage-1 guard.
+tui-o-writer/WriterAdoptionMain.cfg	WriterAdoption	NoLegacyBodyOnTui,UnadoptedNotOwned,RowClearedHasEvidence,NoEarlyDispatch	AdoptionSettles
+tui-o-writer/WriterAdoptionGateOnly.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered,AdoptionSettles
+tui-o-writer/WriterAdoptionStage1.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAdoptionOwnedMut.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
+tui-o-writer/WriterAdoptionUnadoptedOwned.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
+tui-o-writer/WriterAdoptionExemptAll.cfg	WriterAdoption	OtherCustodyBlocks	-
+tui-o-writer/WriterAdoptionWatcherNoGuard.cfg	WriterAdoption	NoEarlyDispatch	-
+tui-o-writer/WriterAdoptionBudgetMut.cfg	WriterAdoption	RowClearedHasEvidence	-
+tui-o-writer/WriterAdoptionHeadlessMut.cfg	WriterAdoption	HeadlessKept	-
 input-single-path/InputOwnershipPersonBusy.cfg	InputOwnership	-
 input-single-path/InputOwnershipCBBefore.cfg	InputOwnership	CBCloseNotifiesOnce,CBNoStall	CBEventuallyDelivered
 input-single-path/InputOwnershipCBAfter.cfg	InputOwnership	-	-
@@ -209,6 +227,18 @@ tui-o-writer/WriterArchivedSourceAfter.cfg	WriterArchivedSource	-
 tui-o-writer/WriterArchivedSourceNoDrain.cfg	WriterArchivedSource	NoUnsentTailLost
 tui-o-writer/WriterArchivedSourceRebindBefore.cfg	WriterArchivedSource	-	NewBindingProgress
 tui-o-writer/WriterArchivedSourceRebindAfter.cfg	WriterArchivedSource	-	-
+tui-o-writer/WriterArchivedSourceBootAfter.cfg	WriterArchivedSource	-	-
+tui-o-writer/WriterArchivedSourceBootBefore.cfg	WriterArchivedSource	-	VerifiedArchiveOnlyProgress
+tui-o-writer/WriterArchivedSourceBootNoDebt.cfg	WriterArchivedSource	NoArchiveObligationLost	-
+tui-o-writer/WriterArchivedSourceBootNoDecoder.cfg	WriterArchivedSource	NoArchiveObligationLost	-
+tui-o-writer/WriterArchivedSourceBootNoHash.cfg	WriterArchivedSource	NoArchiveObligationLost	-
+tui-o-writer/WriterArchivedSourceBootNoLength.cfg	WriterArchivedSource	NoArchiveObligationLost	-
+tui-o-writer/WriterArchivedSourceBootNoParkGuard.cfg	WriterArchivedSource	NoHistoricalParkOverOriginal	-
+tui-o-writer/WriterArchivedSourceBootNoPostedGuard.cfg	WriterArchivedSource	NoDuplicatePostedBodies	-
+tui-o-writer/WriterArchivedSourceBootNoQuestionFilter.cfg	WriterArchivedSource	-	VerifiedArchiveOnlyProgress
+tui-o-writer/WriterArchivedSourceBootNoRace.cfg	WriterArchivedSource	NoArchiveObligationLost	-
+tui-o-writer/WriterArchivedSourceBootNoReopen.cfg	WriterArchivedSource	-	VerifiedArchiveOnlyProgress
+tui-o-writer/WriterArchivedSourceBootNoUnsealedGuard.cfg	WriterArchivedSource	NoRealUnsealedRetired	-
 campaign-execution/CampaignVerification.cfg	CampaignVerification	-	-
 campaign-execution/CampaignVerificationChart.cfg	CampaignVerification	-	-
 campaign-execution/CampaignVerificationClaimKept.cfg	CampaignVerification	ImmediateRevokes,NoStartWithoutAuthority	-
@@ -226,3 +256,13 @@ campaign-execution/CampaignVerificationOverwrite.cfg	CampaignVerification	FillOn
 campaign-execution/CampaignVerificationQuietSession.cfg	CampaignVerification	-	StopFinishCompletes
 campaign-execution/CampaignVerificationSettleBefore.cfg	CampaignVerification	-	StopFinishCompletes,UnsealedClosed,VSettles
 campaign-execution/CampaignVerificationTwoValues.cfg	CampaignVerification	-	-
+input-single-path/InputPathBootCurrent.cfg	InputPath	BootCheckpointBacked,BootNoSilentLoss	-
+input-single-path/InputPathBootDesign.cfg	InputPath	-	-
+input-single-path/InputPathBootDesignTwo.cfg	InputPath	-	-
+input-single-path/InputPathBootEarlyCheckpoint.cfg	InputPath	BootCheckpointBacked	-
+input-single-path/InputPathBootNoReadyWake.cfg	InputPath	-	BootHeldEventuallyExecutes
+tui-o-writer/WriterWakeI8055Current.cfg	WriterWake	BootCheckpointOnlyAccepted,BootNoSilentLoss	-
+tui-o-writer/WriterWakeI8055Design.cfg	WriterWake	-	-
+tui-o-writer/WriterWakeI8055NoReadyWake.cfg	WriterWake	-	BootHeldEventuallyExecutes
+tui-o-writer/WriterWakeI8055RouteCurrent.cfg	WriterWake	BootRouteNoBlockedSelfWake	-
+tui-o-writer/WriterWakeI8055RouteDesign.cfg	WriterWake	-	-

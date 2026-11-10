@@ -1,3 +1,7 @@
+#[cfg(all(test, not(windows)))]
+pub(crate) use crate::domain::file_sync::parent_sync_probe;
+pub(crate) use crate::domain::file_sync::{PARENT_DIR_FSYNC_FLUSHES, fsync_parent_dir};
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -997,51 +1001,6 @@ pub(in crate::services::discord) mod rename_fault {
     }
 }
 
-/// #5254 D10: fsync the directory entry `atomic_write` published, so the rename
-/// itself — not just the bytes `sync_all` already flushed — is handed to the
-/// filesystem. The contract stops at the calls: `sync_all` on the file, then an
-/// fsync of the parent directory. What either one survives is not a claim this
-/// helper makes.
-///
-/// Separate from `atomic_write` (unflushed; recovery-critical stores use `durable_publish`) so
-/// rename and parent sync failures stay apart; read-only because a writable open fails `EISDIR`.
-#[cfg(not(windows))]
-pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
-    #[cfg(test)]
-    use parent_sync_probe as fs;
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty());
-    fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all()
-}
-
-/// Test stand-in for `fs` in `fsync_parent_dir`: while armed, records each directory it synced.
-#[cfg(all(test, not(windows)))]
-pub(crate) mod parent_sync_probe {
-    use std::path::{Path, PathBuf};
-    thread_local! {
-        pub(crate) static SYNCED: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
-    }
-    pub(crate) struct File(std::fs::File, PathBuf);
-    impl File {
-        pub(crate) fn open(dir: &Path) -> std::io::Result<Self> {
-            Ok(Self(std::fs::File::open(dir)?, dir.to_path_buf()))
-        }
-        pub(crate) fn sync_all(&self) -> std::io::Result<()> {
-            self.0.sync_all()?;
-            SYNCED.with(|synced| synced.borrow_mut().as_mut().map(|s| s.push(self.1.clone())));
-            Ok(())
-        }
-    }
-}
-
-/// No directory flush on Windows: `Ok` means only that the rename is visible,
-/// and a crash shortly after may roll it back. See `PARENT_DIR_FSYNC_FLUSHES`.
-#[cfg(windows)]
-pub(crate) fn fsync_parent_dir(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
 /// (device, inode) of a directory, so a replaced directory is told from the one it replaced.
 #[cfg(unix)]
 fn dir_identity(meta: &fs::Metadata) -> (u64, u64) {
@@ -1054,10 +1013,6 @@ fn dir_identity(meta: &fs::Metadata) -> (u64, u64) {
 fn dir_identity(_meta: &fs::Metadata) -> (u64, u64) {
     (0, 0)
 }
-
-/// Whether an `Ok` from `fsync_parent_dir` flushed the parent directory. Callers
-/// that decide on crash durability must consult this, not the `Ok` alone.
-pub(crate) const PARENT_DIR_FSYNC_FLUSHES: bool = cfg!(not(windows));
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AtomicWriteContext<'a> {

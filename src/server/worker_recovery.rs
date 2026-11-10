@@ -625,7 +625,7 @@ fn save_fatal_ledger(path: &Path, entries: &[FatalExitLedgerEntry]) -> io::Resul
         temp.write_all(&serialized)?;
         temp.sync_all()?;
         std::fs::rename(&temp_path, path)?;
-        crate::services::discord::runtime_store::fsync_parent_dir(path)?;
+        crate::domain::file_sync::fsync_parent_dir(path)?;
         Ok(())
     })();
     if write_result.is_err() {

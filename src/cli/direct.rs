@@ -219,7 +219,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
                 .map_err(|e| format!("persist runtime config audit after pg migration: {e}"))?
                 .config;
             }
-            crate::db::postgres::startup_reseed_with_warmup_pool(pool, &config).await
+            crate::services::settings::startup::startup_reseed_with_warmup_pool(pool, &config).await
         })
         .await?;
     }
@@ -305,7 +305,7 @@ pub(crate) async fn cmd_send(
             target,
             content,
             source.unwrap_or("system"),
-            bot.unwrap_or(crate::services::discord::bot_role::UtilityBotRole::Announce.alias()),
+            bot.unwrap_or(crate::domain::bot_role::UtilityBotRole::Announce.alias()),
             None,
         )
         .await;

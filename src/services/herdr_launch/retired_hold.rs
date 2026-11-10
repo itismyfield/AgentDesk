@@ -117,5 +117,5 @@ pub(crate) fn release(_nonce: &str) -> RetiredHoldOutcome {
 fn sync_parent(path: &Path) -> io::Result<()> {
     #[cfg(test)]
     super::tests::retired_durability_tests::before_sync(path)?;
-    crate::services::discord::runtime_store::fsync_parent_dir(path)
+    crate::domain::file_sync::fsync_parent_dir(path)
 }

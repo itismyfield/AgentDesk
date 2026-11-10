@@ -1,0 +1,20 @@
+---
+title: "Host ready와 Gateway 판정을 분리한 보관 입력 self-wake"
+---
+stateDiagram-v2
+  s0: host ready #183; Gateway Hold #183; 일회성 wake
+  s1: hold 커밋 뒤 아직 Gateway Hold
+  s2: host ready #183; Gateway #183; 실행 준비
+  s3: host ready #183; Gateway Hold #183; 보관 유지
+  s4: hold 커밋 뒤 Gateway 재확인
+  s5: 동일 입력 1회 실행
+  s6: host ready #183; Gateway #183; 기존 이벤트 대기
+  [*] --> s0
+  s0 --> s1: Gateway Hold로 원본 보관
+  s0 --> s2: 외부 source 판정이 Gateway로 복구
+  s1 --> s3: hold 뒤 현재 ready와 Gateway 재확인
+  s1 --> s4: 외부 source 판정이 Gateway로 복구
+  s2 --> s5: 동일 원본 1회 실행
+  s3 --> s6: 외부 source 판정이 Gateway로 복구
+  s4 --> s2: hold 뒤 현재 ready와 Gateway 재확인
+  s6 --> s2: 기존 owner 이벤트가 다시 깨움

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use crate::db::imsg_reply::{bind_episode, bind_queued, hand_back_busy, release_episode};
-use crate::services::discord::health::{HumanInputDelivery, HumanInputError};
+use crate::domain::human_input::{HumanInputDelivery, HumanInputError};
 
 pub(crate) use admission::{AdmissionInput, AdmissionResponse};
 

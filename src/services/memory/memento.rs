@@ -15,8 +15,8 @@ use super::{
         note_memento_dedup_hit, note_memento_remote_call, note_memento_tool_request,
     },
 };
+use crate::domain::memory::ResolvedMemorySettings;
 use crate::runtime_layout;
-use crate::services::discord::settings::ResolvedMemorySettings;
 
 const MEMENTO_PROTOCOL_VERSION: &str = "2025-11-25";
 const MEMENTO_CONTEXT_FULL_TOKEN_BUDGET: u64 = 1_000;

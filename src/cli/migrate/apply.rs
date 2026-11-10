@@ -13,9 +13,9 @@ use crate::runtime_layout;
 use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::discord::org_writer::{self, OrgAgentUpdate, OrgChannelBindingUpdate};
 use crate::services::discord::runtime_store::org_schema_path_for_root;
-use crate::services::discord::settings::discord_token_hash;
 use crate::services::provider::ProviderKind;
 use crate::ui::ai_screen::{HistoryItem, HistoryType, SessionData};
+use crate::utils::discord::discord_token_hash;
 
 use super::DiscordTokenMode;
 use super::OpenClawMigrateArgs;
@@ -1743,7 +1743,7 @@ fn apply_db_import(
     runtime_root: &Path,
     warnings: &mut Vec<String>,
 ) -> Result<String, String> {
-    if !db::postgres::shared_config_sync_enabled(config) {
+    if !crate::services::settings::startup::shared_config_sync_enabled(config) {
         return Err(format!(
             "OpenClaw --write-db imports run the destructive config-to-DB agent roster sync; run this command only on a single-node deployment or the configured cluster hub (cluster.role={}).",
             config.cluster.role

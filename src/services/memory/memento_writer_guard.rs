@@ -116,7 +116,7 @@ impl Drop for WriterClaim {
 /// Flushes the directory holding `entry` through `fsync_parent_dir`.
 #[cfg(unix)]
 fn sync_parent_directory(entry: &Path) -> Result<(), String> {
-    crate::services::discord::runtime_store::fsync_parent_dir(entry)
+    crate::domain::file_sync::fsync_parent_dir(entry)
         .map_err(|error| format!("memento writer receipt directory persist: {error}"))
 }
 

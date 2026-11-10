@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> PendingRegistered
+    PendingRegistered --> PendingEmpty: Crash + Boot / row와 marker 유지
+    PendingEmpty --> Prepared: 같은 Pending nonce + marker / 빈 registry 복구
+    PendingEmpty --> Refused: 다른 nonce 또는 Pending 아님
+    Prepared --> AwaitStartup: 첫 입력 1회 / hold
+    AwaitStartup --> Bound: native UUID Startup 기록 + attach / hold 해제
+    PendingEmpty --> HeldForever: 복구 전 / 입력 후 Startup 누락
+    Bound --> [*]
+    Refused --> [*]
+    HeldForever --> HeldForever: 다음 입력 hold

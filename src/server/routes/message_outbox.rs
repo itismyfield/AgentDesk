@@ -125,11 +125,11 @@ fn normalized_monitor_alert(
         ),
         ("alert", "REVIEW_LONG") => (
             "auto_queue.monitor_review_long",
-            crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+            crate::domain::bot_role::UtilityBotRole::Notify.alias(),
         ),
         ("recovery", _) => (
             "auto_queue.monitor_recovery",
-            crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+            crate::domain::bot_role::UtilityBotRole::Notify.alias(),
         ),
         _ => return Err("action must be alert or recovery"),
     };
