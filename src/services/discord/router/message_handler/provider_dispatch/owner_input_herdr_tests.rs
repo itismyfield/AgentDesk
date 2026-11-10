@@ -15,6 +15,9 @@ use scope::Lineage;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+#[path = "owner_input_herdr_pending_tests.rs"]
+mod pending;
+
 const PROMPT: &str = "owner herdr first prompt";
 
 /// Claude's idle composer, as Herdr reads the pane.
@@ -312,7 +315,7 @@ impl HerdrOwner {
     }
 }
 
-/// A pool no test path connects, made inside the owner's runtime as sqlx requires.
+/// A pool for owner paths that do not read a hosted Pending row.
 fn unused_pool(owner: &HerdrOwner) -> sqlx::PgPool {
     let _entered = owner.runtime.enter();
     sqlx::postgres::PgPoolOptions::new()
@@ -452,9 +455,8 @@ fn owned_herdr_codex_first_prompt_takes_only_a_fresh_execution() {
     let owner = HerdrOwner::start("codex", 7_272_604);
     let _registry = owner.rig.registry_on_this_thread();
     owner.rig.answer("pane.read", codex_ready());
-    let pool = unused_pool(&owner);
+    let (database, pool, record) = pending::recorded(&owner);
     let turn = owner.codex_turn(&pool);
-    let record = owner.record("codex", HostedState::Pending);
     let _entered = owner.runtime.enter();
     {
         let _waiting = owner.wait_for("codex", Lineage::Created);
@@ -479,6 +481,7 @@ fn owned_herdr_codex_first_prompt_takes_only_a_fresh_execution() {
         heads.lock().unwrap()[0]["attempt"]["target"]["execution_nonce"],
         owner.execution
     );
+    drop((pool, database));
 }
 
 #[test]
@@ -516,9 +519,8 @@ fn owned_herdr_codex_first_prompt_delivers_over_draft_and_busy_but_holds_modal()
         let mut shown = codex_ready();
         shown["read"]["text"] = json!(screen);
         owner.rig.answer("pane.read", shown);
-        let pool = unused_pool(&owner);
+        let (database, pool, record) = pending::recorded(&owner);
         let turn = owner.codex_turn(&pool);
-        let record = owner.record("codex", HostedState::Pending);
         let _entered = owner.runtime.enter();
         let _waiting = owner.wait_for("codex", Lineage::Created);
         let result = crate::services::codex::herdr_turn::owned_first_prompt_for_tests(
@@ -544,6 +546,7 @@ fn owned_herdr_codex_first_prompt_delivers_over_draft_and_busy_but_holds_modal()
                 "{snapshot}"
             );
         }
+        drop((pool, database));
     }
 }
 
@@ -587,9 +590,8 @@ fn owned_herdr_codex_reserves_the_typed_text_for_every_line_ending() {
         });
         let hook = owner.hook_with("codex", "herdr", Lineage::Created, prompt);
         let _waiting = scope::install_launch(hook);
-        let pool = unused_pool(&owner);
+        let (database, pool, record) = pending::recorded(&owner);
         let turn = owner.codex_turn_with(&pool, prompt);
-        let record = owner.record("codex", HostedState::Pending);
         let _entered = owner.runtime.enter();
         let result = crate::services::codex::herdr_turn::owned_first_prompt_for_tests(
             &turn,
@@ -609,6 +611,7 @@ fn owned_herdr_codex_reserves_the_typed_text_for_every_line_ending() {
             .map(|record| &record["frame"]["hash"])
             .collect();
         assert_eq!(frames, [&json!(sha(typed))], "{history}");
+        drop((pool, database));
     }
 }
 
