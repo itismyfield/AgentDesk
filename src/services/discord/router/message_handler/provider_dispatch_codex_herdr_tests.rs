@@ -323,7 +323,7 @@ impl Fixture {
         });
         let payload = json!({"session_id": session, "source": "startup",
             "hook_event_name": "SessionStart", "cwd": self.cwd, "transcript_path": path});
-        let uri = format!("/hooks/codex/SessionStart?session_id={}", self.logical());
+        let uri = format!("/hooks/codex/SessionStart?session_id={session}");
         self.started.store(true, Ordering::SeqCst);
         let envelope = envelope.encode().unwrap();
         self.ingress
@@ -765,10 +765,10 @@ fn without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg() 
     .unwrap();
     let marker = crate::services::tmux_common::session_temp_path(fx.logical(), "spawn_nonce");
     std::fs::write(&marker, &older.context.execution_nonce).unwrap();
-    crate::services::tui_prompt_dedupe::register_provider_session(
-        "codex",
+    // The prior Herdr launch listed this execution before its Startup hook.
+    crate::services::tui_prompt_dedupe::install_herdr_execution(
         fx.logical(),
-        fx.logical(),
+        &older.context.execution_nonce,
     );
     crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(fx.logical(), CHANNEL);
     let old_session = uuid::Uuid::new_v4().to_string();

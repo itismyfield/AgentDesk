@@ -460,6 +460,7 @@ impl<B: BindingEvents> Sources<B> {
         };
         let superseded = self.current.historical(&reader.source);
         if cursor.retired
+            || (!superseded && self.archived_source(&reader.source))
             || reader.drain_to.is_some()
             || !(superseded || self.producer_absent)
             || (!superseded && unsealed)
@@ -475,6 +476,60 @@ impl<B: BindingEvents> Sources<B> {
             "[tui_o] missing source parked; later bytes cannot be recovered");
         self.readers[index].parked = true;
         true
+    }
+
+    fn archived_source(&self, source: &SourceId) -> bool {
+        if self.provider != ShadowProvider::Codex
+            || !source.path.extension().is_some_and(|e| e == "jsonl")
+        {
+            return false;
+        }
+        let mut archive = source.path.as_os_str().to_os_string();
+        archive.push(".zst");
+        std::fs::symlink_metadata(&archive).is_ok_and(|m| m.is_file())
+    }
+
+    /// The retained FD proves the cursor reached the actual end, including any partial line.
+    pub(super) fn retire_archived<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+        index: usize,
+    ) -> Result<bool, WriterAlarm> {
+        let reader = &self.readers[index];
+        let cursor = writer
+            .store()
+            .cursor(&reader.source)
+            .cloned()
+            .ok_or_else(|| halt("archive cursor missing"))?;
+        if !self.archived_source(&reader.source) || !drained(reader, &cursor) {
+            return Ok(false);
+        }
+        let Some(capture) = &reader.capture else {
+            return Ok(false);
+        };
+        let Ok(fp) = capture.verify_eof(cursor.captured_through, &cursor.prefix_hash) else {
+            return Ok(false);
+        };
+        if fp.modified > SystemTime::now()
+            || !matches!(
+                Fingerprint::path(&reader.source),
+                Err((SourceAnomalyKind::Missing, _))
+            )
+        {
+            return Ok(false);
+        }
+        writer
+            .store()
+            .set_retired(&reader.source, true)
+            .map_err(halted("archive retire"))?;
+        tracing::info!(channel = self.channel, source = %reader.source.path.display(),
+            offset = cursor.captured_through, modified = ?fp.modified,
+            "[tui_o] retired archived source at verified EOF");
+        let reader = &mut self.readers[index];
+        reader.capture = None;
+        reader.dormant = None;
+        reader.watch_until = Some(Instant::now() + RETIRED_WATCH);
+        Ok(true)
     }
 
     pub(super) fn cleanup_missing<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(

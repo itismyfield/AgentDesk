@@ -42,22 +42,23 @@ impl<B: BindingEvents> Sources<B> {
                 CaptureOutcome::Batch(batch) => batch,
                 CaptureOutcome::Anomaly(anomaly) => {
                     let (kind, detail) = (anomaly.kind, anomaly.detail);
-                    if verified
-                        && matches!(
-                            kind,
-                            SourceAnomalyKind::Missing | SourceAnomalyKind::Replaced
-                        )
-                    {
-                        return Ok(());
-                    }
-                    if self.reader_config.is_some() && kind == SourceAnomalyKind::Missing {
-                        return self.cleanup_missing(writer, index, SystemTime::now());
-                    }
                     if kind == SourceAnomalyKind::Missing {
-                        return Err(WriterAlarm::HaltedMissingSource {
-                            source: reader.source.clone(),
-                            detail: format!("source {kind:?}: {detail}"),
-                        });
+                        return if (!deriver.has_unsealed()
+                            && self.retire_archived(writer, index)?)
+                            || verified
+                        {
+                            Ok(())
+                        } else if self.reader_config.is_some() {
+                            self.cleanup_missing(writer, index, SystemTime::now())
+                        } else {
+                            Err(WriterAlarm::HaltedMissingSource {
+                                source: self.readers[index].source.clone(),
+                                detail: format!("source {kind:?}: {detail}"),
+                            })
+                        };
+                    }
+                    if verified && kind == SourceAnomalyKind::Replaced {
+                        return Ok(());
                     }
                     return Err(halt(format!("source {kind:?}: {detail}")));
                 }
