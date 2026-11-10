@@ -512,3 +512,4 @@ zero-rule 부채 역시 이 대응으로 검사한다. mapping을 지우거나 �
 재현 명령·archive/source/tool SHA256·검색 원문·graph는 캠페인 보고서의 증거 목록에 있다.
 
 `domain::provider`가 ProviderKind enum과 정적 catalog·이름·별칭·CLI 순서·counterpart·공개 serde 값을 소유한다. 준비 조각, 추출 미완료 — runtime 책임은 S04가 adapter 경계로 전환한다. 기존 services::provider 경로는 같은 타입을 재수출하며 config·auth·cache·registry resolver와 runtime inherent impl은 adapter에 유지한다.
+`domain::file_sync`는 parent directory fsync·flush 판정과 시험 probe의 adapter 소유자이며, Discord runtime_store는 같은 함수를 재수출한다. S07의 13 consumer 파일만 정본 경로를 사용하고 syscall 순서·오류·Windows의 unflushed 성공·상위 ENOSPC 관측은 유지한다.

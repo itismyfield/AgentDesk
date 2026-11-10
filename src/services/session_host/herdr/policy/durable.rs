@@ -25,7 +25,7 @@ pub(crate) fn key(value: &impl Serialize) -> Result<String, String> {
 
 #[cfg(unix)]
 fn sync_parent(path: &Path) -> Result<(), String> {
-    crate::services::discord::runtime_store::fsync_parent_dir(path).map_err(|e| e.to_string())
+    crate::domain::file_sync::fsync_parent_dir(path).map_err(|e| e.to_string())
 }
 
 #[cfg(unix)]

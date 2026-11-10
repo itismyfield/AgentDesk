@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep `runtime_store::fsync_parent_dir` the only path-based directory fsync.
+"""Keep `domain::file_sync::fsync_parent_dir` the only path-based directory fsync.
 
 Windows cannot open a directory with `File::open`, so an inline copy fails on
 every call there. Lexical scan, one function at a time (a function runs from
@@ -36,7 +36,7 @@ FN_HEADER = re.compile(r"\bfn\s+(\w+)")
 RAW_SYNC = re.compile(
     r"\b(?:libc|nix|rustix)(?:::\w+)*::f(?:data)?sync\b|\bFlushFileBuffers\b"
 )
-CANONICAL = {Path("src/services/discord/runtime_store.rs"): 1}
+CANONICAL = {Path("src/domain/file_sync.rs"): 1}
 RAW_SYNC_REVIEWED: dict[tuple[Path, str], int] = {}
 
 
@@ -122,7 +122,7 @@ def audit(root: Path) -> list[str]:
             where = ", ".join(f"{relative}:{number}" for number in hits) or str(relative)
             findings.append(
                 f"{where}: expected {expected} directory fsync opens, found {len(hits)}; "
-                "call runtime_store::fsync_parent_dir instead"
+                "call domain::file_sync::fsync_parent_dir instead"
             )
         by_function: dict[str, list[int]] = {}
         for name, number in raw_syncs(text):
@@ -133,7 +133,7 @@ def audit(root: Path) -> list[str]:
                 where = ", ".join(f"{relative}:{number}" for number in numbers)
                 findings.append(
                     f"{where}: expected {expected} raw sync calls in fn {name or '<top level>'}, "
-                    f"found {len(numbers)}; call runtime_store::fsync_parent_dir instead"
+                    f"found {len(numbers)}; call domain::file_sync::fsync_parent_dir instead"
                 )
     for relative in CANONICAL:
         if not (root / relative).is_file():
