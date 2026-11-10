@@ -8,6 +8,8 @@ const bookkeeping = {
   BindPlan: "the server binds the test plan",
   Claim: "the server claims a check phase",
   Launch: "the server hands the approved start to the gate",
+  LaunchStarted: "the server records the session's start receipt",
+  LaunchUnsent: "the gate confirms the session never started",
   ApplyNodeFence: "the gate applies the task's stop mark",
   ProcExit: "the check process exits",
   GateFinish: "the gate keeps the phase result",
