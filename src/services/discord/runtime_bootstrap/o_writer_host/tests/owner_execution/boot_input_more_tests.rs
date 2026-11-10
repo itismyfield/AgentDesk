@@ -315,3 +315,6 @@ mod race_tests;
 
 #[path = "boot_input_owner_ready_tests.rs"]
 mod boot_input_owner_ready_tests;
+
+#[path = "boot_input_placement_tests.rs"]
+mod boot_input_placement_tests;

@@ -19,6 +19,7 @@ use crate::services::discord::router::intake_dispatch::WRITER_HELD;
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::session_host::{HerdrTarget, herdr_endpoints};
+use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use crate::services::turn_host::{HerdrTurnPlan, TurnHost};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 use serde_json::{Value, json};
@@ -193,6 +194,8 @@ pub(in crate::services::discord) fn owner_drive(
                     id, front.1.message_id,
                 );
                 if crate::services::tui_o::writer::host::channel_accepts(channel)
+                    && intake_route::for_input_placement(provider.as_str(), channel).await
+                        == IntakeRoute::Gateway
                     && let Some(shared) = &runtime
                 {
                     wake(shared, id);
@@ -943,7 +946,10 @@ async fn start_idle(
     match (answer.await, started) {
         (_, Err(error)) if error == WRITER_HELD => {
             hold_start(&holder, channel, &held).await;
-            if crate::services::tui_o::writer::host::channel_accepts(channel.get()) {
+            if crate::services::tui_o::writer::host::channel_accepts(channel.get())
+                && intake_route::for_input_placement(shared.provider.as_str(), channel.get()).await
+                    == IntakeRoute::Gateway
+            {
                 wake(&shared, channel);
             }
             Err(error)
