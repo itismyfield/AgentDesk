@@ -223,9 +223,10 @@ def resolve_binding(base, *, agent_id=None, channel_id=None, transcript_root=Non
 
 
 def run_transcripts(binding, messages, run_id):
-    """Use exact channel/run markers as evidence for sessions replaced since the run began."""
+    """Always audit the binding; add past sessions with exact channel/run marker evidence."""
+    current = binding["transcript_path"]
     if not run_id or "transcript_root" not in binding:
-        return [binding["transcript_path"]]
+        return [current]
     pattern = marker_pattern(run_id=run_id)
     marked = []
     for m in {str(m["id"]): m for m in messages}.values():
@@ -235,14 +236,15 @@ def run_transcripts(binding, messages, run_id):
         marked.append((m, markers(text, pattern)))
     channel_markers = set().union(*(found for _, found in marked))
     if not channel_markers:
-        return [binding["transcript_path"]]
+        return [current]
     stamp = re.match(r"^\d{8}T\d{6}Z(?:-|$)", run_id)
     started = (dt.datetime.strptime(run_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc).timestamp()
                if stamp else min((int(m["id"]) >> 22) / 1000 + 1420070400 for m, found in marked if found))
     root = Path(binding["transcript_root"])
     glob = "*/*.jsonl" if binding["provider"] == "claude" else "**/rollout-*.jsonl"
-    return sorted(str(path) for path in root.glob(glob) if path.stat().st_mtime >= started
-                  and markers(path.read_text(encoding="utf-8"), pattern) & channel_markers)
+    return sorted({current} | {str(path) for path in root.glob(glob) if str(path) != current
+                  and path.stat().st_mtime >= started
+                  and markers(path.read_text(encoding="utf-8"), pattern) & channel_markers})
 
 
 def notification_fields(row):
