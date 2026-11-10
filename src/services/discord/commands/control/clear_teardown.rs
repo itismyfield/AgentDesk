@@ -143,6 +143,7 @@ async fn end_herdr(
     use super::super::super::herdr_terminate::{
         OperatorTerminate, TerminationResult, terminate_explicit_herdr,
     };
+    use crate::db::dispatched_sessions::hosted_execution::http_force::clear_retired_selector_pg;
     use crate::db::dispatched_sessions::hosted_execution::{
         HostedLookup, HostedLookupKey, HostedRecord, HostedState, load_hosted_execution_pg,
     };
@@ -153,17 +154,17 @@ async fn end_herdr(
     };
     let lookup = load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await;
     let nonce = match lookup {
-        HostedLookup::Found(row) => match row.record {
-            HostedRecord::Known(record) if record.state != HostedState::Retired => {
-                Some(record.execution_nonce)
+        HostedLookup::Found(row) => match (row.session_id(), row.record) {
+            (id, HostedRecord::Known(record)) if record.state != HostedState::Retired => {
+                Some((id, record.execution_nonce))
             }
-            HostedRecord::Known(_) | HostedRecord::Legacy => return false,
-            HostedRecord::Unknown(_) => None,
+            (_, HostedRecord::Known(_) | HostedRecord::Legacy) => return false,
+            (_, HostedRecord::Unknown(_)) => None,
         },
         HostedLookup::Missing => return false,
         HostedLookup::Unknown(_) | HostedLookup::Conflict(_) => None,
     };
-    let Some(execution_nonce) = nonce else {
+    let Some((session_id, execution_nonce)) = nonce else {
         tracing::warn!(
             session_key = key,
             "herdr clear cannot read the execution to end"
@@ -171,18 +172,43 @@ async fn end_herdr(
         report.end_unconfirmed = true;
         return false;
     };
+    // The keyed selector clear skips hosted rows: the retired execution's own is forgotten here,
+    // inside the terminate's exclusion, so no successor can start in between.
+    let (answer, forgotten) = tokio::sync::oneshot::channel();
+    let selector_pool = pool.clone();
     let request = OperatorTerminate {
         session_key: key.to_owned(),
         execution_nonce,
-    };
+    }
+    .after_retire(move |exclusion| async move {
+        if let Some(record) = exclusion.execution() {
+            let _ =
+                answer.send(clear_retired_selector_pg(&selector_pool, session_id, record).await);
+        }
+        drop(exclusion);
+        TerminationResult::Retired
+    });
     drop(transition.take());
     let result = terminate_explicit_herdr(request, shared.clone(), pool).await;
+    if let Ok(cleared) = forgotten.await {
+        note_retired_selector(cleared, report);
+    }
     if result != TerminationResult::Retired {
         let (outcome, detail) = result.outcome();
         tracing::warn!(session_key = key, outcome, %detail, "herdr clear could not end its execution");
         report.end_unconfirmed = true;
     }
     true
+}
+
+/// Records a retired execution's selector the exact clear could not forget.
+#[cfg(unix)]
+pub(super) fn note_retired_selector(cleared: Result<bool, String>, report: &mut ClearReport) {
+    match cleared {
+        Ok(true) => {}
+        Ok(false) => report.fail("session_selector", "retired execution row moved on"),
+        Err(error) => report.fail("session_selector", &error),
+    }
 }
 
 /// Uses the canonical stop ordering; a host refusal leaves the released turn unconfirmed.
