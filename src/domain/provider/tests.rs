@@ -107,7 +107,7 @@ fn provider_counterpart_order_contract() {
 
 #[test]
 fn public_catalog_serde_golden_contract() {
-    let expected = include_str!("fixtures/public_catalog.json").trim();
+    let expected = include_str!("../../../tests/fixtures/provider/public_catalog.json").trim();
     let catalog = public_provider_catalog();
     assert_eq!(serde_json::to_string(&catalog).unwrap(), expected);
     let decoded: Vec<ProviderCatalogEntry> = serde_json::from_str(expected).unwrap();
