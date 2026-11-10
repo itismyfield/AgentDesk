@@ -226,7 +226,7 @@ pub async fn finish_cancelled_provider_channel_mailbox(
         &finish,
         owned_role_override,
         stop_source,
-        true,
+        (true, true),
     )
     .await;
     let after = runtime.shared.restart.global_active.load(Ordering::Acquire);
@@ -295,7 +295,7 @@ async fn runtime_turn_cleanup_by_lookup(
             &finish,
             owned_role_override,
             stop_source,
-            stop_watcher,
+            (stop_watcher, true),
         )
         .await;
         return HardStopRuntimeResult {
