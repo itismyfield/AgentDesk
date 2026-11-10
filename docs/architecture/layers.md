@@ -515,3 +515,4 @@ zero-rule 부채 역시 이 대응으로 검사한다. mapping을 지우거나 �
 `domain::file_sync`는 parent directory fsync·flush 판정과 시험 probe의 adapter 소유자이며, Discord runtime_store는 같은 함수를 재수출한다. S07의 13 consumer 파일만 정본 경로를 사용하고 syscall 순서·오류·Windows의 unflushed 성공·상위 ENOSPC 관측은 유지한다.
 `domain::tool_text`는 foundation에서 민감값 마스킹과 allowed-tools 정규화의 실제 구현·정적 tool catalog를 소유하며, 기존 Discord formatting 경로는 같은 함수·catalog를 재노출한다.
 `domain::human_input`이 HumanInputDelivery·HumanInputError·ExternalHold와 정적 hold 사유를 실제 소유하며 vocabulary다. 기존 health 경로는 같은 타입을 재노출하고 Registry·HumanInputRequest·전달 실행은 기존 Discord owner에 유지한다.
+`domain::process_incarnation`은 process당 한 번 만드는 owner incarnation UUID의 adapter 소유자이며, Discord replay_policy·replay_admission은 같은 함수를 재노출한다. replay hold notice의 db 소비자만 정본 경로를 쓰고 UUID 생성 시점·횟수와 admission·recovery 비교는 유지한다.
