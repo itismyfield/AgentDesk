@@ -153,7 +153,8 @@ pub(super) async fn external_turn_conflict(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> Option<(StatusCode, Json<serde_json::Value>)> {
-    use crate::services::discord::health::{ExternalHold, external_turn_hold_for_start};
+    use crate::domain::human_input::ExternalHold;
+    use crate::services::discord::health::external_turn_hold_for_start;
     let hold = external_turn_hold_for_start(registry, provider, channel_id).await?;
     let error = match hold {
         ExternalHold::Unknown => format!("channel {channel_id}'s TUI turn state is unknown"),
