@@ -64,6 +64,7 @@ mod retired_selector {
     const REPLACED: u64 = 5_340_222;
     const HELD: u64 = 5_340_223;
     const EXACT: u64 = 5_340_224;
+    const KEPT: u64 = 5_340_225;
 
     fn runtime(rig: &herdr::P11TerminationRig) -> tokio::runtime::Runtime {
         let install = rig.thread_installer();
@@ -193,6 +194,40 @@ mod retired_selector {
             assert_eq!(herdr::row(&seeded.pool, &seeded.key).await, retired());
             assert!(seeded.take_clear_flag().await, "the clear set its flag");
             assert_eq!(seeded.selected().await, None, "the next input starts fresh");
+            seeded.done().await;
+        });
+    }
+
+    // A retired execution whose selector the database refuses to forget keeps it, and the reply
+    // neither says the session was cleared nor claims a retry it never made.
+    #[test]
+    fn live_clear_whose_selector_write_fails_says_so_pg() {
+        let path = concat!(
+            module_path!(),
+            "::live_clear_whose_selector_write_fails_says_so_pg"
+        );
+        if !herdr::in_child(path, KEPT) {
+            return;
+        }
+        let rig = herdr::P11TerminationRig::boot(KEPT);
+        runtime(&rig).block_on(async {
+            let _root = crate::config::TestRuntimeRootGuard::new();
+            let seeded = seeded(&rig, KEPT, herdr::HostedState::Bound).await;
+            for refuse in [
+                "CREATE FUNCTION refuse_selector_clear() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'selector clear refused'; END $$",
+                "CREATE TRIGGER refuse_selector_clear BEFORE UPDATE ON sessions FOR EACH ROW WHEN (OLD.hosted_execution->>'state' = 'retired' AND NEW.hosted_execution->>'state' = 'retired' AND OLD.claude_session_id IS NOT NULL AND NEW.claude_session_id IS NULL) EXECUTE FUNCTION refuse_selector_clear()",
+            ] {
+                sqlx::query(refuse).execute(&seeded.pool).await.unwrap();
+            }
+
+            let report = seeded.clear().await;
+
+            let reply = report.reply();
+            assert_eq!(herdr::row(&seeded.pool, &seeded.key).await, retired());
+            assert_eq!(seeded.selected().await.as_deref(), Some(SELECTOR));
+            assert_eq!(report.failed, ["session_selector"], "{report:?}");
+            assert!(!reply.contains(SESSION_CLEARED_RESPONSE), "{reply}");
+            assert!(!reply.contains("재시도"), "{reply}");
             seeded.done().await;
         });
     }
