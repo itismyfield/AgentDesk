@@ -1,0 +1,13 @@
+stateDiagram-v2
+    [*] --> Present: cursor at verified EOF
+    Present --> Present: optional append beyond durable cursor
+    Present --> Missing: external archive removes original
+    Missing --> Retired: retained FD verifies durable EOF
+    Missing --> Halted: missing proof or unread tail
+    Retired --> Retired: restart retains retirement
+    Retired --> Attached: valid B binds while ready
+    Halted --> NewBinding: valid readable B binds
+    NewBinding --> Resuming: same host consumes B evidence once
+    Resuming --> Halted: before repair archive blocks historical park
+    Resuming --> Parked: after repair historical A parks without retirement
+    Parked --> Attached: ready actor follows B
