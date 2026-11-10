@@ -13,9 +13,9 @@ mod thread_binding;
 mod turn_start;
 
 pub(crate) use authorization::TurnKind;
-pub(crate) use intake_dispatch::replay_admission::IntakeExecution;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use intake_dispatch::IntakeAdmission;
+pub(crate) use intake_dispatch::replay_admission::IntakeExecution;
 pub(in crate::services::discord) fn replay_producers_dormant(channel: &str) -> bool {
     intake_dispatch::replay_admission::dormant_start(channel).is_some()
 }
