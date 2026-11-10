@@ -1,6 +1,7 @@
 //! Accepted iMessage input uses the existing durable outbox; display parsing never rejects input.
 use crate::services::discord::bot_role::UtilityBotRole;
-use crate::services::discord::health::{HumanInputDelivery, HumanInputError};
+
+use crate::domain::human_input::{HumanInputDelivery, HumanInputError};
 use crate::services::discord::outbound::source_registry::IMESSAGE_INPUT_NOTICE_SOURCE;
 use crate::services::message_outbox::{self, OutboxMessage};
 use sqlx::PgPool;
