@@ -220,7 +220,11 @@ fn settled_history_leaves_cleared_unconfirmed_recovery_idle_without_hiding_input
             !idle,
             "boot adoption: {extra}"
         );
-        assert!(v2_held_sources(&provider, TOKEN, channel).contains(&225));
+        assert!(
+            v2_held_sources(&provider, TOKEN, channel)
+                .delivered
+                .contains(&225)
+        );
 
         let logs = Arc::new(Mutex::new(Vec::new()));
         let writer = CapturedLogs(logs.clone());

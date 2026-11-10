@@ -51,32 +51,9 @@ impl Drop for DispatchPostgresTestDb {
 }
 
 impl DispatchPostgresTestDb {
+    /// Keeps the legacy Option adapter while treating unavailable PostgreSQL as a fixture failure.
     pub(crate) async fn try_create(prefix: &str, label: &str) -> Option<Self> {
-        let lock = crate::db::postgres::lock_test_lifecycle();
-        let base = crate::db::postgres::postgres_test_database_url_base()?;
-        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "postgres".to_string());
-        let admin_url = format!("{base}/{admin_db}");
-        let database_name = format!("{}_{}", prefix, uuid::Uuid::new_v4().simple());
-        let database_url = format!("{base}/{database_name}");
-        if let Err(error) =
-            crate::db::postgres::create_test_database(&admin_url, &database_name, label).await
-        {
-            eprintln!("skipping {label}: {error}");
-            drop(lock);
-            return None;
-        }
-
-        Some(Self {
-            _lock: lock,
-            admin_url,
-            database_name,
-            database_url,
-            label: label.to_string(),
-            dropped: false,
-        })
+        Some(Self::create(prefix, label).await)
     }
 
     pub(crate) async fn create(prefix: &str, label: &str) -> Self {
@@ -172,7 +149,7 @@ pub(crate) async fn seed_pg_dispatch(pool: &sqlx::PgPool, dispatch_id: &str, tit
 
 #[cfg(test)]
 mod tests {
-    use super::DispatchPostgresTestDb;
+    use super::{DispatchPostgresTestDb, postgres_base_database_url};
     use crate::test_support::wait::{WAIT_CAP, await_within, join_within};
 
     #[test]
@@ -185,28 +162,20 @@ mod tests {
                 .unwrap();
             runtime.block_on(await_within(
                 async {
-                    assert!(
-                        DispatchPostgresTestDb::try_create(
-                            "agentdesk_probe",
-                            "dispatch fixture probe"
-                        )
-                        .await
-                        .is_none(),
-                        "an unavailable optional fixture must skip"
-                    );
+                    let _fixture = DispatchPostgresTestDb::try_create(
+                        "agentdesk_probe",
+                        "dispatch fixture probe",
+                    )
+                    .await;
                 },
                 WAIT_CAP,
             ));
             return;
         }
         let _lifecycle = crate::db::postgres::lock_test_lifecycle();
-        let base = crate::db::postgres::postgres_test_database_url_base();
-        for required in [false, true] {
+        let base = postgres_base_database_url();
+        for required in [None, Some("0"), Some("1")] {
             for configured in [false, true] {
-                if configured && base.is_none() {
-                    eprintln!("PG_NOT_RUN dispatch fixture creation failure: base not configured");
-                    continue;
-                }
                 let admin_db = format!("agentdesk_missing_{}", uuid::Uuid::new_v4().simple());
                 let mut command = std::process::Command::new(std::env::current_exe().unwrap());
                 command
@@ -214,13 +183,17 @@ mod tests {
                         "--exact",
                         "dispatch::test_support::tests::try_create_pg_contract",
                         "--nocapture",
-                        "--test-threads=1",
                     ])
                     .env(PROBE, "1")
-                    .env("AGENTDESK_REQUIRE_PG", if required { "1" } else { "0" })
+                    .env("AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS", "250")
                     .env("POSTGRES_TEST_ADMIN_DB", &admin_db);
+                if let Some(required) = required {
+                    command.env("AGENTDESK_REQUIRE_PG", required);
+                } else {
+                    command.env_remove("AGENTDESK_REQUIRE_PG");
+                }
                 if configured {
-                    command.env("POSTGRES_TEST_DATABASE_URL_BASE", base.as_ref().unwrap());
+                    command.env("POSTGRES_TEST_DATABASE_URL_BASE", &base);
                 } else {
                     command.env_remove("POSTGRES_TEST_DATABASE_URL_BASE");
                 }
@@ -230,32 +203,30 @@ mod tests {
                 );
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                assert_eq!(
-                    output.status.success(),
-                    !required,
-                    "required={required} configured={configured}: {stdout} {stderr}"
+                assert!(
+                    !output.status.success(),
+                    "required={required:?} configured={configured}: {stdout} {stderr}"
                 );
-                if required {
+                assert!(
+                    stdout.contains("running 1 test")
+                        && stdout.contains("test result: FAILED. 0 passed; 1 failed; 0 ignored;"),
+                    "required={required:?} configured={configured}: {stdout} {stderr}"
+                );
+                if configured {
+                    assert!(stderr.contains("dispatch fixture probe admin"), "{stderr}");
+                    assert!(stderr.contains(&admin_db), "{stderr}");
+                } else {
                     assert!(
-                        stderr.contains(if configured {
-                            "AGENTDESK_REQUIRE_PG=1"
-                        } else {
+                        stderr.contains(if required == Some("1") {
                             "PG required"
+                        } else {
+                            "POSTGRES_TEST_DATABASE_URL_BASE required"
                         }),
-                        "{stderr}"
-                    );
-                    if configured {
-                        assert!(stderr.contains("dispatch fixture probe admin"), "{stderr}");
-                        assert!(stderr.contains(&admin_db), "{stderr}");
-                    }
-                } else if configured {
-                    assert!(
-                        stderr.contains("skipping dispatch fixture probe"),
                         "{stderr}"
                     );
                 }
                 eprintln!(
-                    "fixture contract required={required} configured={configured} child_success={}",
+                    "fixture contract required={required:?} configured={configured} child_success={}",
                     output.status.success()
                 );
             }

@@ -12,7 +12,8 @@ use crate::services::campaign_execution::effect_envelope::{
     action_envelope, host_fences, phase_envelope, phase_launch,
 };
 use crate::services::campaign_execution::model::{
-    ActionObservation, ActionState, AttemptBinding, CampaignState, Command, RejectionCode,
+    ActionObservation, ActionState, AttemptBinding, CampaignState, Command, PhaseFact,
+    RejectionCode,
 };
 use crate::services::campaign_execution::stage_fsm::tests::{
     assigned, begin, execution, review_of, run_v, seal_of,
@@ -214,6 +215,37 @@ fn observe(
     )
 }
 
+// Records what the phase's gate did, through the verification command that owns phase facts.
+fn record(state: &CampaignState, v: &str, fact: PhaseFact) -> CampaignState {
+    let command = Command::RecordVerificationPhase {
+        execution_id: v.into(),
+        phase_id: PHASE.into(),
+        fact: Box::new(fact),
+    };
+    apply(state, command)
+}
+
+fn started_fact(
+    state: &CampaignState,
+    v: &str,
+    receipt: String,
+    process: ProcessIdentity,
+) -> PhaseFact {
+    let mut environment = a1::environment();
+    let run = state.run.as_ref().unwrap();
+    environment.checkout.host = run.verifications[v]
+        .phase(PHASE)
+        .unwrap()
+        .target
+        .host
+        .clone();
+    PhaseFact::Started {
+        receipt,
+        process,
+        environment: Box::new(environment),
+    }
+}
+
 #[test]
 fn a_start_before_the_stop_fence_is_reconciled_and_one_after_it_never_happens() {
     let (mut state, work) = assigned();
@@ -265,13 +297,10 @@ fn a_start_before_the_stop_fence_is_reconciled_and_one_after_it_never_happens() 
     let not_sent = || ActionObservation::NotStarted {
         evidence: "host fence applied; journal holds no start".into(),
     };
-    let mut reconciled = observe(
-        &stopped,
-        &early.action_id,
-        &work,
-        ActionObservation::Started { receipt },
-    );
-    reconciled = observe(&reconciled, &late.action_id, &work, not_sent());
+    let early_start = started_fact(&stopped, &finish, receipt, process(&early.execution_nonce));
+    let mut reconciled = record(&stopped, &finish, early_start);
+    let evidence = "host fence applied; journal holds no start".into();
+    reconciled = record(&reconciled, &start, PhaseFact::NotStarted { evidence });
     reconciled = observe(&reconciled, &launch.action_id, &work, not_sent());
     // The verification-only host is a stop target of its own and must acknowledge.
     assert_eq!(
@@ -724,13 +753,10 @@ fn restart_observes_a_phase_child_without_turning_it_into_a_result() {
     let spawns = std::fs::read_to_string(&marker).unwrap();
     assert_eq!(spawns, format!("{}\n", request.execution_nonce));
 
-    let started_state = observe(
+    let started_state = record(
         &state,
-        &request.action_id,
-        &work,
-        ActionObservation::Started {
-            receipt: receipt.clone(),
-        },
+        &finish,
+        started_fact(&state, &finish, receipt.clone(), process.clone()),
     );
     let mut v = started_state.run.as_ref().unwrap().verifications[&finish].clone();
     let action = started_state.run.as_ref().unwrap().actions[&request.action_id].clone();

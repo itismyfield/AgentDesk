@@ -126,7 +126,11 @@ FinishStage에서는 중단 경계에서 마무리가 허용된 기존 attempt�
 | RequestStop(mode) | 같은 run/정의, Running/Stopping | StopRequested, control version 증가, 새 intent 배정 즉시 금지 |
 | RequestStop(Immediate) | FinishStage로 stopping | StopEscalated; 이미 취소한 시도를 복원하지 않음 |
 | ConfirmStopFence | 모든 실행 가능 host가 새 fence를 확정, 이전 in-flight 개시 결과 분류 | StopConfirmed; §5의 실제 실행 경계 |
-| ObserveSession/Action | 같은 incarnation/action/attempt의 직접 관측 | SessionObserved/ActionReconciled; 추측 성공 금지 |
+| ObserveSession/Action | 같은 incarnation/action/attempt의 직접 관측. 검증 구간 action은 거부 | SessionObserved/ActionReconciled; 추측 성공 금지 |
+| SealCandidate | 개시된 현재 Work attempt의 출력 주장과, 그 세션 호스트가 본 깨끗한 checkout 관측(명령 입력) | CandidateSealed; 주장 증거 수용과 봉인을 상태와 한 트랜잭션에 저장 |
+| BindVerificationSubject/Input/Plan | 검증 실행의 현재 보유자(작업·리뷰 선행조건·마무리 계획). 채운 칸은 다시 쓰지 않음 | VerificationChanged; 같은 값 재전송은 무변화 |
+| RecordVerificationPhase | 관문이 이미 한 일(개시 영수증과 실행 환경, 미개시, 개시 불명, 대사, 종료, 결과). 중단·fence와 무관 | VerificationChanged; 미개시는 보유자 유효면 Planned, 폐기면 Cancelled; 첫 실행 환경 저장 |
+| SettleVerification | 시작했고 결과 없는 구간이 없음 | 수집(실행자 증거 수용과 함께) 또는 취소된 구간이 있으면 취소 마감; 남은 미개시 구간 취소 |
 | ConfirmStopped | 모든 관련 세션 Gone, 개시 불명/미대사 action 0, stop 확정 | RunStopped; 편집/재개 가능 |
 | PrepareRetry(node) | Stopped, failed 대상 | RetryPrepared, 새 series 준비; 발사 없음, 과거 실패 보존 |
 | Resume | Stopped, 정의·증거·자원/소유권 재검증 | RunResumed, control version 증가; failed는 자동 초기화하지 않음 |
@@ -206,6 +210,8 @@ Unknown 세션의 대체 발사와 정의 편집은 거부한다. 실제 stop/te
 Immediate는 실행 중 TUI에 중단 요청을 보내고 미완수 attempt를 UserInterrupted로 닫는다.
 부분 산출물은 성공 증거가 아니고 품질 실패 횟수도 늘리지 않는다. 이미 채택된 증거·main/배포 사실은 유지한다.
 FinishStage는 stop 확정 전에 시작한 stage의 같은 attempt와 그 자체 검증만 허용한다.
+stop 때 세션 발사가 진행 중이던 attempt의 검증은 잠정 보존하고, 개시가 확인되면 마무리 대상으로, 미개시가 확인되면 취소한다.
+마무리 대상 검증이 중단·취소로 끝나면 그 attempt를 UserInterrupted로 닫는다.
 구현 뒤 새 독립 리뷰, 리뷰 뒤 수리, CI 뒤 merge, merge 뒤 deploy는 각각 새 단계/외부 action이므로 시작하지 않는다.
 끝난 stage 결과는 정상 게이트로 수용한 뒤 관련 TUI를 종료한다. 노드 전체 drain은 하지 않는다.
 같은 run에 이미 시작한 외부 효과는 두 모드 모두 결과를 회수한다. 모든 관련 세션 Gone과 대사가 끝나야 Stopped다.

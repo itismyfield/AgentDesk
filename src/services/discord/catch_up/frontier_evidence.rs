@@ -50,6 +50,7 @@ fn of_arm(arm: RecoveryKnownIdArm) -> FrontierEvidence {
     match arm {
         RecoveryKnownIdArm::ActiveTurn
         | RecoveryKnownIdArm::Dispatched
+        | RecoveryKnownIdArm::V2Delivered
         | RecoveryKnownIdArm::InjectedObserved
         | RecoveryKnownIdArm::InjectedUnconfirmed => FrontierEvidence::Dispatched,
         RecoveryKnownIdArm::Queued

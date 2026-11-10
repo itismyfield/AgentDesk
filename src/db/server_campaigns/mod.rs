@@ -53,6 +53,42 @@ pub struct ReceiptResponse {
 
 pub type RenderReceipt = fn(&CommandOutcome) -> StoreResult<ReceiptResponse>;
 
+fn evidence_error(error: evidence_store::EvidenceStoreError) -> StoreError {
+    match error {
+        evidence_store::EvidenceStoreError::Sql(e) => StoreError::Sql(e),
+        evidence_store::EvidenceStoreError::Json(e) => StoreError::Json(e),
+        _ => StoreError::InconsistentState,
+    }
+}
+
+// Writes one evidence row of a decision; an ID that already holds something else fails the transaction.
+async fn write_evidence(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    run_id: &str,
+    written: &EvidenceWrite,
+) -> StoreResult<()> {
+    use evidence_store::StoredEvidence;
+    match written {
+        EvidenceWrite::Seal(seal) => {
+            let seal = StoredEvidence::Seal { seal: seal.clone() };
+            evidence_store::record(tx, id, run_id, &seal)
+                .await
+                .map_err(evidence_error)?;
+        }
+        EvidenceWrite::Admitted { envelope, decision } => {
+            let evidence = StoredEvidence::recorded((**envelope).clone());
+            evidence_store::record(tx, id, run_id, &evidence)
+                .await
+                .map_err(evidence_error)?;
+            evidence_store::decide(tx, id, run_id, &envelope.evidence_id, decision)
+                .await
+                .map_err(evidence_error)?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum Request<'a> {
     Create(&'a DefinitionInput),
@@ -170,11 +206,7 @@ async fn apply(
     {
         let stored = evidence_store::sealed(tx, id, &run.id, &seal.seal_id)
             .await
-            .map_err(|error| match error {
-                evidence_store::EvidenceStoreError::Sql(e) => StoreError::Sql(e),
-                evidence_store::EvidenceStoreError::Json(e) => StoreError::Json(e),
-                _ => StoreError::InconsistentState,
-            })?;
+            .map_err(evidence_error)?;
         unsealed = stored.is_none_or(|stored| seal.confirm_retry(&stored).is_err());
     }
     let decision = match (&request, &previous) {
@@ -200,6 +232,12 @@ async fn apply(
     let outcome = match decision {
         Some(Ok(decision)) => {
             write::persist(tx, previous.as_ref(), &decision).await?;
+            // Evidence rows commit or roll back together with the state they belong to.
+            if let Some(run) = &decision.state.run {
+                for record in &decision.records {
+                    write_evidence(tx, id, &run.id, record).await?;
+                }
+            }
             CommandOutcome::Decided(Ok(decision.result))
         }
         Some(Err(rejection)) => CommandOutcome::Decided(Err(rejection)),
@@ -229,3 +267,5 @@ mod stage_store_tests;
 #[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;
+#[cfg(test)]
+mod verification_store_tests;
