@@ -20,6 +20,8 @@ pub mod codex_tui;
 // Storage primitives remain dormant until the input actor is wired.
 pub mod cswap;
 pub mod discord;
+#[cfg(fuzzing)]
+pub use discord::input_fuzz;
 pub mod discord_config_audit;
 #[allow(dead_code)]
 pub(crate) mod tui_input;

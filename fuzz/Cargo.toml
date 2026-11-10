@@ -1,0 +1,75 @@
+[package]
+name = "agentdesk-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+agentdesk = { path = ".." }
+
+[profile.release]
+debug = 1
+lto = false
+codegen-units = 16
+opt-level = 1
+overflow-checks = true
+
+[[bin]]
+name = "discord_message_text"
+path = "fuzz_targets/discord_message_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "discord_commands"
+path = "fuzz_targets/discord_commands.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ansi_and_frames"
+path = "fuzz_targets/ansi_and_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "prompt_extract"
+path = "fuzz_targets/prompt_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rollout_and_codecs"
+path = "fuzz_targets/rollout_and_codecs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_yaml"
+path = "fuzz_targets/config_yaml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "redact_and_fences"
+path = "fuzz_targets/redact_and_fences.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "outbound_and_chunks"
+path = "fuzz_targets/outbound_and_chunks.rs"
+test = false
+doc = false
+bench = false

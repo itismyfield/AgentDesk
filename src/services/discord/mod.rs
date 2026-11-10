@@ -23,6 +23,8 @@ pub(crate) mod e2e_control;
 mod footer_retirement;
 mod footer_view_reconciler;
 pub(crate) mod formatting;
+#[cfg(fuzzing)]
+pub use formatting::input_fuzz;
 mod gateway;
 mod gateway_queue_owner;
 pub(crate) mod health;

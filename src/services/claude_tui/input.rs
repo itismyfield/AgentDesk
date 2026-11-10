@@ -17,6 +17,11 @@ mod preparation_hold;
 pub(crate) mod submission;
 mod user_receipt;
 use literal_chunks::split_literal_chunks;
+#[cfg(any(test, fuzzing))]
+#[path = "input/literal_chunk_fuzz.rs"]
+mod literal_chunk_fuzz;
+#[cfg(any(test, fuzzing))]
+pub(crate) use literal_chunk_fuzz::split_for_fuzz as split_literal_chunks_for_fuzz;
 pub(crate) use preparation_hold::PreparationHold;
 pub(crate) use preparation_hold::readiness_failure;
 #[cfg(all(test, unix))]

@@ -13,6 +13,9 @@ name = "agentdesk"
 path = "src/main.rs"
 
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [lints.clippy]
 # #2954 stage-1 hard gates. Full `-D warnings` is tracked separately because
 # the current tree still has existing clippy/rustc warning debt.
@@ -122,6 +125,7 @@ filetime = "0.2"
 plist = "1.8"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
+proptest = "1"
 
 # Keep local backtrace file:line while reducing dev/test artifact size.
 [profile.dev]

@@ -268,3 +268,10 @@ mod relay_state_contract_refs {
 #[cfg(test)]
 #[path = "formatting/replace_long_message_tests.rs"]
 mod replace_long_message_tests;
+
+#[cfg(any(test, fuzzing))]
+#[path = "formatting/input_properties.rs"]
+mod input_properties;
+
+#[cfg(fuzzing)]
+pub use input_properties::fuzz as input_fuzz;

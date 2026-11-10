@@ -250,6 +250,9 @@ mod utils;
 #[cfg(test)]
 mod high_risk_recovery;
 
+#[cfg(fuzzing)]
+pub use services::input_fuzz;
+
 use anyhow::{Context, Result};
 
 pub fn run_from_args() -> Result<()> {
