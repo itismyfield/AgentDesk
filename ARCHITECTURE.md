@@ -1165,6 +1165,7 @@ src/
 │   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
 │   │   │   ├── composer_status.rs
+│   │   │   ├── composer_status_tier_tests.rs
 │   │   │   ├── herdr_cancel.rs
 │   │   │   ├── inline_banner.rs
 │   │   │   └── submission.rs

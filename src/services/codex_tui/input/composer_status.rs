@@ -1,6 +1,9 @@
+/// Service-tier slot of the status row; current Codex names the default tier `Standard`.
+const SERVICE_TIER_SLOTS: [&str; 3] = ["Fast on", "Fast off", "Standard"];
+
 pub(super) fn line_is_codex_fast_context_status(line: &str) -> bool {
     let parts = status_parts(line);
-    if parts.len() == 3 && matches!(parts[0], "Fast on" | "Fast off") {
+    if parts.len() == 3 && SERVICE_TIER_SLOTS.contains(&parts[0]) {
         return !parts[1].is_empty() && context_percent(parts[2]).is_some();
     }
     model_first_status(&parts)
@@ -49,7 +52,7 @@ fn model_first_status(parts: &[&str]) -> bool {
     let Some(fast) = parts
         .iter()
         .skip(1)
-        .position(|part| matches!(*part, "Fast on" | "Fast off"))
+        .position(|part| SERVICE_TIER_SLOTS.contains(part))
         .map(|index| index + 1)
     else {
         return false;
@@ -157,11 +160,7 @@ fn short_composer_footer(line: &str) -> bool {
     {
         return false;
     }
-    if !quotas.is_empty()
-        && ["Fast on", "Fast off"]
-            .iter()
-            .any(|slot| slot.starts_with(cut))
-    {
+    if !quotas.is_empty() && SERVICE_TIER_SLOTS.iter().any(|slot| slot.starts_with(cut)) {
         return true;
     }
     let fields: Vec<&str> = cut.split_ascii_whitespace().collect();
@@ -981,3 +980,7 @@ new output"
         }
     }
 }
+
+#[cfg(test)]
+#[path = "composer_status_tier_tests.rs"]
+mod tier_tests;
