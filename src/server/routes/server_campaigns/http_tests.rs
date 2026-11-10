@@ -519,6 +519,12 @@ async fn internal_commands_and_unknown_nested_execution_fields_are_400_without_m
         "complete",
         "complete_node",
         "complete_run",
+        "seal_candidate",
+        "bind_verification_subject",
+        "bind_verification_input",
+        "bind_verification_plan",
+        "record_verification_phase",
+        "settle_verification",
     ] {
         assert_eq!(
             request(

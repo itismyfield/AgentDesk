@@ -79,6 +79,8 @@ fn model_preserves_nonempty_fence_ack_and_action_target_for_canonical_json_stora
         verifications: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         fences: BTreeMap::new(),
+        seals: BTreeMap::new(),
+        environments: BTreeMap::new(),
     };
     let state = CampaignState {
         id: "campaign".into(),
@@ -108,6 +110,7 @@ fn model_preserves_nonempty_fence_ack_and_action_target_for_canonical_json_stora
         control: CampaignControl::Stopping,
     };
     let decision = Decision {
+        records: Vec::new(),
         state,
         result: result.clone(),
         events: vec![Event {
