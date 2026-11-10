@@ -384,9 +384,12 @@ src/
 │   │   ├── public_catalog.rs
 │   │   ├── tests.rs
 │   │   └── value_methods.rs
+│   ├── session_identity/
+│   │   └── naming.rs
 │   ├── lifecycle.rs
 │   ├── mod.rs
-│   └── provider.rs
+│   ├── provider.rs
+│   └── session_identity.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── db_ops/
