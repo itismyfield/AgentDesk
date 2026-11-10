@@ -258,16 +258,44 @@ with ResetServer(sys.argv[2], herdr=True) as api:
 
 /// A V2 queue file as a forward binary leaves it, holding `held` queued for a V2-capable binary.
 fn write_v2_queue(fx: &Fixture, channel_id: ChannelId, held: MessageId) -> std::path::PathBuf {
+    write_v2_file(fx, channel_id, [held], [], [])
+}
+
+/// A V2 queue file with queued and retained (owed) inputs and a settled (delivered) history.
+fn write_v2_file<const Q: usize, const R: usize, const S: usize>(
+    fx: &Fixture,
+    channel_id: ChannelId,
+    queued: [MessageId; Q],
+    retained: [MessageId; R],
+    settled: [MessageId; S],
+) -> std::path::PathBuf {
+    use serde_json::json;
     let path = crate::services::discord::runtime_store::discord_pending_queue_root()
         .unwrap()
         .join("claude")
         .join(&fx.shared.token_hash)
         .join(format!("{channel_id}.json"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let item = serde_json::json!({"author_id":HUMAN_ID,"message_id":held.get(),"channel_id":channel_id.get(),
-        "source_message_ids":[held.get()],"queued_generation":7,"text":format!("request {}", held.get())});
-    let snapshot = serde_json::json!({"version":2,"items":[item],"head_injection":null,
-        "retained_inputs":[],"terminal_identities":[],"namespace":fx.shared.token_hash});
+    let item = |held: &MessageId| {
+        json!({"author_id":HUMAN_ID,"message_id":held.get(),"channel_id":channel_id.get(),
+        "source_message_ids":[held.get()],"queued_generation":7,"text":format!("request {}", held.get())})
+    };
+    let identity = |held: &MessageId| {
+        json!({"primary":held.get(),"queued_generation":7,
+        "sources":[{"message_id":held.get(),"queued_generation":7}]})
+    };
+    let retained = retained.iter().map(|held| {
+        json!({"input":{"identity":identity(held),
+        "original":item(held),"phase":"unknown","attempt":null,"payload":null,
+        "confirmation_deadline_ms":null},"reason":{"kind":"unconfirmed"},
+        "notice":{"kind":"unconfirmed","enqueued":false}})
+    });
+    let settled = settled
+        .iter()
+        .map(|held| json!({"identity":identity(held),"settled_at_ms":1}));
+    let snapshot = json!({"version":2,"items":queued.iter().map(item).collect::<Vec<_>>(),
+        "head_injection":null,"retained_inputs":retained.collect::<Vec<_>>(),
+        "terminal_identities":settled.collect::<Vec<_>>(),"namespace":fx.shared.token_hash});
     std::fs::write(&path, snapshot.to_string()).unwrap();
     path
 }
@@ -310,6 +338,60 @@ async fn catch_up_never_retakes_a_message_a_v2_queue_holds() {
         (Some(checkpoint.get()), Some(checkpoint.get()))
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// An input the V2 file's settled history holds was delivered: the real sweep does not take it
+/// again, and its frontier moves past it rather than rereading it on every sweep.
+#[tokio::test(flavor = "current_thread")]
+async fn catch_up_frontier_passes_an_input_the_v2_file_settled() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(8_045_001);
+    let (checkpoint, settled, reply) = (id(1, 600), id(2, 150), id(3, 140));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    write_v2_file(&fx, channel_id, [], [], [settled]);
+    let history = vec![
+        own_reply(channel_id, checkpoint),
+        human(channel_id, settled),
+        own_reply(channel_id, reply),
+    ];
+    let api = StrictApi::new(&fx.shared).with_history(channel_id, history);
+    fx.sweep(&api).await;
+    assert_eq!(api.enqueue_log(), Vec::<EnqueueRecord>::new());
+    let progress =
+        crate::services::discord::catch_up::scan_progress::read(&fx.provider, channel_id);
+    assert_eq!(progress, Some(reply.get()), "the scanner cursor passes it");
+    assert_eq!(
+        fx.surfaces(channel_id),
+        (Some(reply.get()), Some(reply.get()))
+    );
+}
+
+/// Delivered history does not carry the frontier past an input the V2 file still owes: it stops
+/// before the first retained or queued one and takes neither.
+#[tokio::test(flavor = "current_thread")]
+async fn catch_up_frontier_stops_before_the_first_input_the_v2_file_still_owes() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(8_045_002);
+    let checkpoint = id(1, 600);
+    let (settled, retained, queued, later) = (id(2, 200), id(4, 180), id(6, 160), id(8, 140));
+    let replies = [id(3, 190), id(5, 170), id(7, 150), id(9, 130)];
+    fx.seed_checkpoint(channel_id, checkpoint);
+    write_v2_file(&fx, channel_id, [queued], [retained], [settled, later]);
+    let mut history = vec![own_reply(channel_id, checkpoint)];
+    for (input, reply) in [settled, retained, queued, later].into_iter().zip(replies) {
+        history.push(human(channel_id, input));
+        history.push(own_reply(channel_id, reply));
+    }
+    let api = StrictApi::new(&fx.shared).with_history(channel_id, history);
+    fx.sweep(&api).await;
+    assert_eq!(api.enqueue_log(), Vec::<EnqueueRecord>::new());
+    let progress =
+        crate::services::discord::catch_up::scan_progress::read(&fx.provider, channel_id);
+    assert_eq!(
+        progress,
+        Some(replies[0].get()),
+        "it stops before the retained input"
+    );
 }
 
 /// The owner's retention of a terminal identity, as `tick` drops it.
