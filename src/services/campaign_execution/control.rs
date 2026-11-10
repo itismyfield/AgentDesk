@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use super::{
     definition::{self, DefinitionInput, WORKFLOW_VERSION},
     model::*,
-    stage_fsm,
+    stage_fsm, verification_commands,
 };
 
 type DecisionResult<T> = Result<T, Rejection>;
@@ -402,13 +402,17 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
                 confirmed_event: None,
                 finish_grants,
             });
-            // FinishStage keeps only the frozen V phases; Immediate and escalation cancel them too.
+            // FinishStage keeps the frozen V phases and those of a launch still in flight;
+            // Immediate and escalation cancel them too.
             let stop = run.stop.as_ref().expect("set above");
-            let granted: std::collections::BTreeSet<_> = stop
+            let mut granted: std::collections::BTreeSet<_> = stop
                 .finish_grants
                 .iter()
                 .flat_map(|g| g.phase_actions.iter().cloned())
                 .collect();
+            if *mode == StopMode::FinishStage {
+                granted.extend(stage_fsm::provisional_finish_actions(state, run));
+            }
             for action in run.actions.values_mut() {
                 if matches!(action.state, ActionState::Planned | ActionState::Claimed)
                     && !granted.contains(&action.id)
@@ -494,7 +498,13 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
             binding,
             observation,
         } => {
-            observe_action(&mut next, action_id, binding, observation)?;
+            observe_action(
+                &mut next,
+                action_id,
+                binding,
+                observation,
+                envelope.observed_at,
+            )?;
             EventKind::ActionChanged {
                 action_id: action_id.clone(),
             }
@@ -695,6 +705,23 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
             Some(event) => event,
             None => return Ok(unchanged(state)),
         },
+        Command::SealCandidate { .. }
+        | Command::BindVerificationSubject { .. }
+        | Command::BindVerificationInput { .. }
+        | Command::BindVerificationPlan { .. }
+        | Command::RecordVerificationPhase { .. }
+        | Command::SettleVerification { .. } => {
+            let mut records = Vec::new();
+            let at = envelope.observed_at;
+            let Some(event) =
+                verification_commands::decide(&mut next, &envelope.command, at, &mut records)?
+            else {
+                return Ok(unchanged(state));
+            };
+            let mut decision = finish(next, &envelope.idempotency_key, at, event);
+            decision.records = records;
+            return Ok(decision);
+        }
     };
     Ok(finish(
         next,
@@ -744,12 +771,17 @@ fn observe_action(
     id: &str,
     binding: &AttemptBinding,
     observation: &ActionObservation,
+    at: DateTime<Utc>,
 ) -> DecisionResult<()> {
     let current = run(state)?;
     let recorded = current
         .actions
         .get(id)
         .ok_or_else(|| reject(RejectionCode::StaleBinding))?;
+    // A verification phase changes only together with its V record.
+    if recorded.kind == ActionKind::VerificationPhase {
+        return Err(reject(RejectionCode::InvalidState));
+    }
     // A frozen FinishPlan phase may still start after its gate applied the stop fence.
     let gate_fenced = current.stop.as_ref().is_some_and(|s| {
         (s.confirmed_event.is_some()
@@ -829,7 +861,9 @@ fn observe_action(
                 },
             });
         }
+        let mut late = false;
         if let Some(attempt) = run.attempts.get_mut(&binding.attempt_id) {
+            late = !attempt.started;
             attempt.started = true;
         }
         if let Some(stop) = &mut run.stop {
@@ -842,9 +876,13 @@ fn observe_action(
                 stop.finish_attempts.insert(binding.attempt_id.clone());
             }
         }
+        if late {
+            stage_fsm::grant_late_start(state, &binding.attempt_id);
+        }
     }
     if matches!(observation, ActionObservation::NotStarted { .. }) {
         let current = run_mut(state)?;
+        stage_fsm::revoke_unlaunched(current, &binding.attempt_id, at);
         let mut interrupted = false;
         if current.stop.is_some()
             && !current.actions.values().any(|a| {
