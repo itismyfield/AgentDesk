@@ -515,3 +515,9 @@ zero-rule 부채 역시 이 대응으로 검사한다. mapping을 지우거나 �
 `domain::file_sync`는 parent directory fsync·flush 판정과 시험 probe의 adapter 소유자이며, Discord runtime_store는 같은 함수를 재수출한다. S07의 13 consumer 파일만 정본 경로를 사용하고 syscall 순서·오류·Windows의 unflushed 성공·상위 ENOSPC 관측은 유지한다.
 `domain::tool_text`는 foundation에서 민감값 마스킹과 allowed-tools 정규화의 실제 구현·정적 tool catalog를 소유하며, 기존 Discord formatting 경로는 같은 함수·catalog를 재노출한다.
 `domain::human_input`이 HumanInputDelivery·HumanInputError·ExternalHold와 정적 hold 사유를 실제 소유하며 vocabulary다. 기존 health 경로는 같은 타입을 재노출하고 Registry·HumanInputRequest·전달 실행은 기존 Discord owner에 유지한다.
+
+`domain::atomic_write`는 temp 생성·write·file sync와 rename을 소유하는 adapter다.
+`prepare`가 반환한 synced temp와 원본 I/O 오류를 상위로 돌려주며,
+`runtime_store::atomic_write`가 rename 전 inflight 진단과 ENOSPC 기록을 수행한다.
+외부 consumer는 기존 관측 함수 경로를 유지하고, plain atomic write는 parent sync를 추가하지 않는다.
+S07 `domain::file_sync`의 Windows unflushed 성공 계약과 durable publication은 유지한다.

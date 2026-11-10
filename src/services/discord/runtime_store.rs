@@ -3,7 +3,6 @@ pub(crate) use crate::domain::file_sync::parent_sync_probe;
 pub(crate) use crate::domain::file_sync::{PARENT_DIR_FSYNC_FLUSHES, fsync_parent_dir};
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 mod durable_ancestors;
@@ -922,84 +921,17 @@ fn log_discord_inflight_atomic_replace(path: &Path) {
 }
 
 pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| classify_io_error("create_dir_all", e))?;
-    }
-    let unique = uuid::Uuid::new_v4().simple();
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = path.with_file_name(format!(".{}.{}.tmp", file_name, unique));
-    let mut file = fs::File::create(&tmp).map_err(|e| classify_io_error("create_tmp", e))?;
-    file.write_all(data.as_bytes())
-        .map_err(|e| classify_io_error("write_all", e))?;
-    file.sync_all()
-        .map_err(|e| classify_io_error("sync_all", e))?;
+    use crate::domain::atomic_write::{Published, prepare};
+    let failed = |failure: crate::domain::atomic_write::NotPublished| {
+        classify_io_error(failure.stage.prefix(), failure.error)
+    };
+    let prepared = prepare(path, data).map_err(failed)?;
     log_discord_inflight_atomic_replace(path);
-    #[cfg(test)]
-    rename_fault::before(path, &tmp);
-    let renamed = fs::rename(&tmp, path);
-    #[cfg(test)]
-    rename_fault::after(path, &renamed);
-    renamed.map_err(|e| classify_io_error("rename", e))
+    prepared.publish().map(|Published| ()).map_err(failed)
 }
 
-/// Real rename failures of `atomic_write` for one path: the synced temp file is removed right
-/// before its rename, so the OS refuses that rename and the target keeps its bytes.
 #[cfg(test)]
-pub(in crate::services::discord) mod rename_fault {
-    use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
-
-    /// (path, fault still pending, rename attempts, their OS errors)
-    type Entry = (PathBuf, bool, usize, Vec<String>);
-    static ARMED: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
-
-    /// Fails the next rename onto its path; records that path's renames until dropped.
-    pub(in crate::services::discord) struct Armed(PathBuf);
-
-    impl Armed {
-        pub(in crate::services::discord) fn new(path: &Path) -> Self {
-            let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
-            armed.push((path.to_path_buf(), true, 0, Vec::new()));
-            Self(path.to_path_buf())
-        }
-        /// Renames attempted onto the path since arming and the errors they returned.
-        pub(in crate::services::discord) fn evidence(&self) -> (usize, Vec<String>) {
-            let armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
-            armed
-                .iter()
-                .find(|entry| entry.0 == self.0)
-                .map(|entry| (entry.2, entry.3.clone()))
-                .unwrap_or_default()
-        }
-    }
-
-    impl Drop for Armed {
-        fn drop(&mut self) {
-            let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(index) = armed.iter().position(|entry| entry.0 == self.0) {
-                armed.remove(index);
-            }
-        }
-    }
-
-    pub(super) fn before(path: &Path, tmp: &Path) {
-        let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = armed.iter_mut().find(|entry| entry.0 == path) {
-            entry.2 += 1;
-            if std::mem::take(&mut entry.1) {
-                let _ = std::fs::remove_file(tmp);
-            }
-        }
-    }
-
-    pub(super) fn after(path: &Path, renamed: &std::io::Result<()>) {
-        let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
-        if let (Some(entry), Err(error)) = (armed.iter_mut().find(|entry| entry.0 == path), renamed)
-        {
-            entry.3.push(error.to_string());
-        }
-    }
-}
+pub(crate) use crate::domain::atomic_write::rename_fault;
 
 /// (device, inode) of a directory, so a replaced directory is told from the one it replaced.
 #[cfg(unix)]
@@ -1608,30 +1540,5 @@ mod windows_contract {
 }
 
 #[cfg(test)]
-mod atomic_write_logging_tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn critical_atomic_write_returns_error_for_unwritable_parent_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let parent_file = tmp.path().join("not-a-dir");
-        fs::write(&parent_file, "blocking-file").unwrap();
-        let target = parent_file.join("queue.json");
-
-        let error = critical_publish(
-            &target,
-            "[]",
-            AtomicWriteContext::new("discord_pending_queue")
-                .provider("codex")
-                .token_hash("discord_deadbeef")
-                .channel_id(42),
-        )
-        .expect_err("critical write must expose persistence failure");
-
-        assert!(
-            error.contains("create_dir_all") || error.contains("Not a directory"),
-            "unexpected critical write error: {error}"
-        );
-    }
-}
+#[path = "runtime_store_atomic_write_tests.rs"]
+mod atomic_write_logging_tests;

@@ -57,6 +57,7 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 
 | Area | Code SHA | Rules that break | Disposition |
 |---|---|---|---|
+| `atomic-write` | `762ee31d48` | MissingObservation mutant: ENOSPC Err without disk record | current prepare/observe/rename sequence preserves old bytes, publication outcome and observations; [report](atomic-write/atomic-write.report.md) |
 | `catch-up-frontier` (#8045) | `5918c79bb3` | Main: a V2 channel's delivered inputs read as queued, so the phase-1 cursor never passes them; PendingPass (mutant): a waiting input passes and is lost | fixed passes settled-only ids and keeps queued, attempted and retained ids open; see [report](catch-up-frontier/catch-up-frontier.report.md) |
 | `input-single-path` input notices (#7811) | `a2fdbaf6c52190a8cb1d6b45989fe9f76eb12433` | Before: owned receipt-gap input stays Pending and accepted iMessage has no echo; BeforeKnown: global frame knowledge excludes a direct twin; AcceptanceGap: backend effect without echo | design model only; After pairs original-source attempts and echoes accepted winners; implementation and route/writer tests remain pending; see [report](input-single-path/InputNoticeSettlement.report.md) |
 | `session-lifecycle` (tmux) | `e8d94425a0` | stale inflight row after a deferred boot probe (T-A/T-B), FIFO open race (T-C) | tracked by #7331 (I21 in `docs/relay-state-contract.md`) |
