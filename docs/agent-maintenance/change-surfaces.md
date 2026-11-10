@@ -2501,6 +2501,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/discord/router/message_handler/intake_turn.rs`
 - `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs`
 - `src/services/discord/standby_relay.rs`
+- `src/services/discord/task_notification_delivery/store/response_fence.rs`
 - `src/services/discord/tmux_watcher.rs`
 - `src/services/discord/tmux_watcher/streaming_status_tick.rs`
 - `src/services/discord/tui_prompt_relay/rehydration.rs`
@@ -2508,6 +2509,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/discord/turn_bridge/terminal_controller_cutover.rs`
 - `src/services/discord/turn_bridge/terminal_outcome_delivery.rs`
 - `src/services/discord/turn_presence/activity.rs`
+- `src/services/discord/turn_presence/activity/unbound/live.rs`
 - `src/services/dispatches/discord_delivery/orchestration.rs`
 - `src/services/dispatches/outbox_route.rs`
 - `src/services/gemini.rs`
@@ -2523,7 +2525,9 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/settings.rs`
 - `src/services/tmux_common.rs`
 - `src/services/tui_o/writer/deliver.rs`
+- `src/services/tui_o/writer/host.rs`
 - `src/services/tui_prompt_dedupe/binding_events.rs`
 - `src/services/tui_prompt_dedupe/runtime_binding/codex_cursor.rs`
 - `src/services/turn_orchestrator.rs`
+- `src/services/turn_orchestrator/queued_head/v2/source_admission.rs`
 <!-- END GENERATED: GIANT PATHS -->

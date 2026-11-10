@@ -936,6 +936,7 @@ src/
 │   │   │   ├── observation_ingress/
 │   │   │   │   └── resume_start.rs
 │   │   │   ├── adoption_retry.rs
+│   │   │   ├── codex_herdr_ingress_tests.rs
 │   │   │   ├── codex_ingress_tests.rs
 │   │   │   ├── hook_event.rs
 │   │   │   ├── native_clear_fence_tests.rs
@@ -4026,6 +4027,8 @@ src/
 │   │   │   ├── adoption_terminal_tests.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── always_on_repost_tests.rs
+│   │   │   ├── archived_host_tests.rs
+│   │   │   ├── archived_source_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── bo_post_tests.rs
 │   │   │   ├── boot.rs

@@ -1,6 +1,8 @@
 //! Installed reader policy through the real host, with one BOOT per child process.
 
 use super::*;
+#[path = "archived_host_tests.rs"]
+mod archived_host;
 #[path = "current_host_tests.rs"]
 mod current_host;
 use crate::services::tui_o::channel_policy;
