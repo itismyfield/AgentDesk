@@ -52,6 +52,7 @@ Progress, with weak fairness on the driver, process exit and restart: `StopCompl
 
 `scripts/ci/statecharts_tlc.py` over these twelve configs finished in 126 seconds with four jobs; the slowest config took 83 seconds.
 The base config reaches 145,087 distinct states. The chart is drawn from `…Chart` (482 states) and hides bindings, claims, the launch hand-off, fence bookkeeping, process exit, delivery and restart.
+For a config that is expected to break, pass `--view verification-trace.view.mjs`: it labels every step, which the statechart command requires on a counterexample path. With it the three mutant configs exit 1 and the base config exits 0.
 
 ## Findings checked against the code
 
