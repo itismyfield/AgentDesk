@@ -202,7 +202,7 @@ pub(crate) async fn record_selection(config: &crate::config::Config, installed: 
     use crate::services::tui_o::channel_policy;
     let writer = &channel_policy::tui_o_of(config).writer;
     let bindings: Option<std::collections::BTreeSet<u64>> =
-        channel_policy::tui_binding_ids(config).collect();
+        crate::services::provider_hosting::tui_binding_ids(config).collect();
     let selection_source = if writer.all_tui == Some(false) && writer.channels.is_empty() {
         "explicit_off"
     } else if !writer.channels.is_empty() {

@@ -81,26 +81,6 @@ pub(crate) fn configured_channels(config: &Config) -> BTreeSet<u64> {
         .unwrap_or_default()
 }
 
-/// Each agent binding that resolves to a Claude or Codex TUI, with its channel id when that id
-/// parses. Boot membership and the census selection record both read this.
-pub(crate) fn tui_binding_ids(config: &Config) -> impl Iterator<Item = Option<u64>> + '_ {
-    let bindings = config.agents.iter().flat_map(|agent| agent.channels.iter());
-    bindings
-        .filter(|(provider, channel)| {
-            let provider = channel.provider().unwrap_or_else(|| (*provider).to_owned());
-            matches!(
-                provider.trim().to_ascii_lowercase().as_str(),
-                "claude" | "codex"
-            ) && crate::services::provider_hosting::channel_effective_tui_request(
-                config, channel, &provider,
-            )
-        })
-        .map(|(_, channel)| {
-            let id = channel.channel_id()?.parse::<std::num::NonZeroU64>().ok()?;
-            Some(id.get())
-        })
-}
-
 /// Dormant membership as configured; only validation decides whether these writers are selected.
 pub(crate) fn configured_dormant_channels(config: &Config) -> BTreeSet<u64> {
     tui_o_of(config).writer.dormant_channels.clone()
@@ -264,7 +244,9 @@ impl BootChannels {
         let (site, configured_id) = site(config, !channels.is_empty())?;
         Ok(Self {
             selected: channels.clone(),
-            tui_bindings: tui_binding_ids(config).flatten().collect(),
+            tui_bindings: crate::services::provider_hosting::tui_binding_ids(config)
+                .flatten()
+                .collect(),
             dormant_channels,
             late_adopt_capable: tui_o.writer.late_adopt(),
             turn: tui_o.turn.clone(),
