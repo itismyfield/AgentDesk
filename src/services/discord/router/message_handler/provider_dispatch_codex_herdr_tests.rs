@@ -323,7 +323,7 @@ impl Fixture {
         });
         let payload = json!({"session_id": session, "source": "startup",
             "hook_event_name": "SessionStart", "cwd": self.cwd, "transcript_path": path});
-        let uri = format!("/hooks/codex/SessionStart?session_id={}", self.logical());
+        let uri = format!("/hooks/codex/SessionStart?session_id={session}");
         self.started.store(true, Ordering::SeqCst);
         let envelope = envelope.encode().unwrap();
         self.ingress
