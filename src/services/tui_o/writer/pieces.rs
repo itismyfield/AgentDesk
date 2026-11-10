@@ -5,7 +5,7 @@ pub use super::tool_cards::ToolCardInputs;
 use super::tool_cards::{ToolCardRun, ToolMeta};
 pub use super::turn_summary::SummaryInputs;
 use super::turn_summary::TurnSummaryRun;
-use crate::services::discord::formatting::split_for_shadow;
+use crate::domain::message_split::split_for_shadow;
 use crate::services::tui_o::shadow::identity::{RecordFact, UnitContent, classify_with_version};
 use crate::services::tui_o::shadow::seal::{SealOutcome, SealRegistry};
 use crate::services::tui_o::shadow::unit_plan::{UnitPlan, plan};
