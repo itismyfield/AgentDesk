@@ -16,6 +16,7 @@ One TUI-bound channel carries one turn; one non-TUI channel in the same config c
 | `store` | none, init, damaged | `channel_policy/adoption.rs:414-439` |
 | `adopt` | None, Pending, Deferred, Committed, Held, Released, Refused | `channel_policy/adoption.rs:16-28`; `Refused` is the stage-1 refusal (plan r2 G5) |
 | custody | another turn's row, pending start or open intake; the held turn's own row | `runtime_bootstrap/o_writer_host.rs:306-339`, `writer/deferred.rs:89-92`; the kinds block alike, so the model keeps whose custody it is |
+| `nativeEnded` | the TUI turn's own end record written before anyone delivered the turn | `writer/late_adopt/codex/prefix.rs` `frontier` (a `task_complete` ends its turn and never moves where delivery stands) |
 | `attempts` | 0..3, tmux absent | `discord/inflight.rs:341-344`, `recovery_paths/shared.rs:156-171` |
 
 Actions map to the bridge tick and terminal (`turn_bridge/stream_tick.rs:389-397`, `terminal_outcome_delivery.rs:440-453`), restart recovery (`recovery_engine/completion_delivery.rs:117-151`), the watcher dispatch finalizer (`tmux_watcher.rs:2351-2392`), the takeovers (`late_adopt.rs:182-186`, `late_adopt/codex.rs:203-310`), the stale end-of-file handoff (`writer/deferred.rs:26-29`), refusal (`writer/host.rs:659-678`, `host/first_init.rs:79-80`, `writer/activation.rs:223-225`) and headless delivery (`turn_bridge/headless_delivery.rs:588-608`).
@@ -28,14 +29,14 @@ A restart keeps the turn: a running turn's bridge is restored and judges again (
 - `AnswerAtMostOnce`: O and Legacy together post the turn at most once.
 - `UnadoptedNotOwned`: without an O store the gate never answers that O owns the body.
 - `RowClearedHasEvidence`, `NoEarlyDispatch`: the row and the watcher dispatch settle only after a post, or while the O store owns the turn's range unposted.
-- `HeldBodyNotSkipped`: a commit while the turn is held starts at the Legacy delivery frontier, not at the end of file.
+- `HeldBodyNotSkipped`: a commit while the turn is held starts at the Legacy delivery frontier, not at the end of file, even after Codex wrote the turn's end.
 - `OtherCustodyBlocks`: no commit while another turn's custody is open.
 - `HeadlessKept`: the non-TUI turn is never held and posts its body.
 - `HeldTurnAnswered` (PROPERTY): a held turn on an adoptable channel (home, default selection) is posted by O unless a refusal happened.
 - `AdoptionSettles` (PROPERTY): a Deferred adoption with a turn on an adoptable channel commits unless a refusal happened.
 - `RowEventuallySettled` (PROPERTY): a turn O posted gets its row settled.
 
-`rejected` records any refusal: the `Reject` action, and a seed that is `Refused` (no runtime root, or an unverified execution view without a store). `Reject`, `Input`, `Restart`, the stale handoff and the watcher finalizer carry no fairness; writer, recovery and turn-end actions are weakly fair.
+`NativeEnd` (Codex writing the turn's end) is environment, like `Input`. `rejected` records any refusal: the `Reject` action, and a seed that is `Refused` (no runtime root, or an unverified execution view without a store). `Reject`, `Input`, `Restart`, the stale handoff and the watcher finalizer carry no fairness; writer, recovery and turn-end actions are weakly fair.
 
 ## Results (TLC 1.7.4, `scripts/ci/statecharts_tlc.py`)
 
@@ -50,6 +51,7 @@ A restart keeps the turn: a running turn's bridge is restored and judges again (
 | WatcherNoGuard | stage1, dispatch without evidence | `NoEarlyDispatch` |
 | BudgetMut | stage1, waiting and refusal counted in the recovery budget | `RowClearedHasEvidence` |
 | HeadlessMut | stage1, the non-TUI turn held too | `HeadlessKept` |
+| AdvanceOnEnd | stage1, a warm takeover that moves the frontier past a turn Codex ended but nobody delivered | `HeldBodyNotSkipped`, `RowClearedHasEvidence`; liveness `HeldTurnAnswered` |
 
 Main's violations are code paths on the baseline. Legacy posts the Deferred turn (the 11-08 trace: Deferred seed, a bound rollout with output skipped, warm input, Legacy W14/W10). Without a runtime root, or with an execution view and no store, the gate answers owned (`adoption.rs:419-421`, `channel_gate.rs:461-471`), so the bridge commits and the watcher settles with nothing posted. GateOnly holds the body but the warm channel never commits, or commits at end of file and skips the held turn.
 

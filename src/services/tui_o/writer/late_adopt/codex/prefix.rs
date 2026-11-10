@@ -1,5 +1,5 @@
 //! Whether a Codex rollout still sits before any output (verified `session_meta`, one opener, one
-//! prompt and its mirrors), and else where its frontier lies: the turn still open, if any.
+//! prompt and its mirrors), and else which turns it records, so delivery is judged turn by turn.
 
 use std::io::Read;
 
@@ -36,17 +36,24 @@ pub(super) fn judge(source: &SourceId) -> Verdict {
     judged(source).unwrap_or_else(|verdict| verdict)
 }
 
-/// What a rollout's bytes say about where its delivery may end: the turn still open past the last
-/// turn end, and the end of the last complete record.
+/// One turn as the rollout records it: its first record, when Codex opened it, and when it ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::services::tui_o::writer::late_adopt) struct Span {
+    pub(in crate::services::tui_o::writer::late_adopt) opened: u64,
+    pub(in crate::services::tui_o::writer::late_adopt) opened_at: Option<DateTime<Utc>>,
+    /// `None` while open; a turn the next opener supersedes ends when that opener was written.
+    pub(in crate::services::tui_o::writer::late_adopt) ended_at: Option<Option<DateTime<Utc>>>,
+}
+
+/// A rollout's turns in order, ended or not, and the end of its last complete record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::tui_o::writer::late_adopt) struct Frontier {
-    /// The open turn's first record offset with the time Codex wrote it, when one is open.
-    pub(in crate::services::tui_o::writer::late_adopt) open: Option<(u64, Option<DateTime<Utc>>)>,
+    pub(in crate::services::tui_o::writer::late_adopt) turns: Vec<Span>,
     pub(in crate::services::tui_o::writer::late_adopt) complete: u64,
 }
 
-/// Reads `source` for its frontier. A turn end closes the open turn and a later `session_meta`
-/// closes every turn before it; a record that cannot be parsed refuses the rollout.
+/// Reads `source` for its turns. A turn end only ends its turn and never moves where delivery
+/// stands; a later `session_meta` drops every turn before it. An unparsable record refuses.
 pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
     source: &SourceId,
 ) -> Result<Frontier, Verdict> {
@@ -55,7 +62,7 @@ pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
         .iter()
         .rposition(|b| *b == b'\n')
         .map_or(0, |at| at + 1);
-    let (mut open, mut start, mut metas) = (None, 0, 0);
+    let (mut turns, mut start, mut metas) = (Vec::<Span>::new(), 0, 0);
     for line in bytes[..complete].split_inclusive(|b| *b == b'\n') {
         let at = start;
         start += line.len() as u64;
@@ -68,23 +75,41 @@ pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
             .ok_or_else(|| Verdict::Refuse(format!("malformed record at {at}")))?;
         if value["type"] == "session_meta" {
             metas += 1;
-            open = open.filter(|_| metas == 1);
+            if metas > 1 {
+                turns.clear();
+            }
             continue;
         }
-        let written = || {
-            let stamp = value["timestamp"].as_str();
-            let stamp = stamp.and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok());
-            stamp.map(|stamp| stamp.with_timezone(&Utc))
-        };
+        let stamp = value["timestamp"].as_str();
+        let stamp = stamp.and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok());
+        let written = stamp.map(|stamp| stamp.with_timezone(&Utc));
         for fact in classify(ShadowProvider::Codex, &value) {
             match fact {
-                RecordFact::TurnStart(_) => open = Some((at, written())),
-                RecordFact::Prompt(..)
-                    if open.is_none() && !is_codex_context_record(&value["payload"]) =>
-                {
-                    open = Some((at, written()));
+                RecordFact::TurnStart(_) => {
+                    if let Some(turn) = turns.last_mut().filter(|turn| turn.ended_at.is_none()) {
+                        turn.ended_at = Some(written);
+                    }
+                    turns.push(Span {
+                        opened: at,
+                        opened_at: written,
+                        ended_at: None,
+                    });
                 }
-                RecordFact::Idle(_) => open = None,
+                RecordFact::Prompt(..)
+                    if turns.last().is_none_or(|turn| turn.ended_at.is_some())
+                        && !is_codex_context_record(&value["payload"]) =>
+                {
+                    turns.push(Span {
+                        opened: at,
+                        opened_at: written,
+                        ended_at: None,
+                    });
+                }
+                RecordFact::Idle(_) => {
+                    if let Some(turn) = turns.last_mut().filter(|turn| turn.ended_at.is_none()) {
+                        turn.ended_at = Some(written);
+                    }
+                }
                 _ => {}
             }
         }
@@ -94,7 +119,7 @@ pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
     }
     session_proven(source)?;
     Ok(Frontier {
-        open,
+        turns,
         complete: complete as u64,
     })
 }

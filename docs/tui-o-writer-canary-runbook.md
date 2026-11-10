@@ -191,11 +191,12 @@ comparison baseline (P31:
 `src/services/tui_o/writer/deferred.rs:19–28,325–428`).
 
 A reserved Codex channel whose rollout already holds output is taken at its frontier, logged as
-`Codex takeover committed`: the end of the last complete record, or the opener of the turn the
-rollout's current execution opened when no Legacy body sent since its bind can be part of it. A
-turn left open from before that bind was an earlier execution's and is not posted. While a turn
-Legacy sent a body from is open the takeover waits, logged as `Codex takeover waits`; once it
-ends the rollout is taken at its end. The bytes before the frontier must hash the same under the
+`Codex takeover committed`: the opener of the earliest turn the rollout's current execution
+opened that did not end before the takeover's baseline, ended or not, when no Legacy body sent
+since its bind can be part of it; with no such turn, the end of the last complete record. A
+turn's own end never moves the frontier past its answer. Turns from before that bind belonged to
+an earlier execution and are not posted. While Legacy may have sent part of that turn the takeover
+waits, logged as `Codex takeover waits`. The bytes before the frontier must hash the same under the
 intake fence, or the commit waits for the next look. An earlier rollout's turn owed the same way
 goes into the `init` beside the new one (`src/services/tui_o/writer/late_adopt/codex.rs`).
 
