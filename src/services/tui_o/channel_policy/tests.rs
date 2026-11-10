@@ -40,9 +40,15 @@ fn boot_membership_survives_reload_until_restart() {
     }
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("agentdesk.yaml");
+    // A TUI binding the list leaves out refuses the boot, so 42 is a TUI only while listed.
     let write = |channels: &str| {
+        let codex = if channels.contains("42") {
+            "tui"
+        } else {
+            "pipe"
+        };
         std::fs::write(&path, format!(
-            "server: {{}}\nagents:\n  - id: fixture\n    name: Fixture\n    channels:\n      claude: {{id: '41', runtime: tui}}\n      codex: {{id: '42', runtime: tui}}\ntui_o:\n  writer:\n    channels: {channels}\n"
+            "server: {{}}\nagents:\n  - id: fixture\n    name: Fixture\n    channels:\n      claude: {{id: '41', runtime: tui}}\n      codex: {{id: '42', runtime: {codex}}}\ntui_o:\n  writer:\n    channels: {channels}\n"
         )).unwrap();
     };
     write("[41]");
@@ -570,7 +576,7 @@ fn o_owns(channel: u64) -> bool {
 }
 
 /// On the home, a channel committed on disk stays O's when the selection drops it, with one alarm
-/// per such channel; a full list and the empty list boot as before.
+/// per such channel; a full list boots as before and the explicit empty list refuses the boot.
 #[test]
 fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
     let test = "a_committed_channel_left_out_of_the_selection_stays_o_on_the_home";
@@ -583,7 +589,8 @@ fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
     std::fs::write(store.join("44/init"), b"{").unwrap();
     std::fs::create_dir(store.join("045")).unwrap();
     std::fs::write(store.join("045/init"), b"{").unwrap();
-    let registered = [41, 42, 43, 44, 46];
+    // 46 is bound to no runtime: a TUI binding left out uncommitted would refuse the boot.
+    let registered = [41, 42, 43, 44];
     let selected: &[u64] = match role.as_str() {
         "dropped" | "unregistered" => &[41],
         "listed" => &[41, 42, 43, 44],
@@ -603,17 +610,19 @@ fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
         );
         return;
     }
+    if role == "empty" {
+        let error = install(&config).unwrap_err();
+        let error = format!("{error:#}");
+        assert!(error.contains("tui_o.writer.all_tui: false"), "{error}");
+        return;
+    }
     install(&config).unwrap();
     let owned: Vec<_> = [41, 42, 43, 44, 46]
         .into_iter()
         .filter(|&c| o_owns(c))
         .collect();
     let held = boot().unwrap().candidate(44).map(Candidate::peek);
-    if role == "empty" {
-        assert_eq!((owned, held), (vec![], None), "the empty list is O off");
-    } else {
-        assert_eq!((owned, held), (vec![41, 42, 43, 44], Some(Adoption::Held)));
-    }
+    assert_eq!((owned, held), (vec![41, 42, 43, 44], Some(Adoption::Held)));
     let missing = match role.as_str() {
         "dropped" => vec![42, 43, 44],
         _ => vec![],
@@ -629,7 +638,7 @@ fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
 }
 
 /// The unsupported two-node drift: the home keeps its committed channel with an alarm, while a
-/// standby whose selection also dropped it places it as an ordinary Legacy channel.
+/// standby whose selection also dropped it refuses the boot, as that channel would be Legacy's.
 #[test]
 fn a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_standby() {
     use crate::services::tui_o::cutover::intake_route::{IntakeRoute, route_for_placement};
@@ -643,17 +652,111 @@ fn a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_stan
     let cluster = serde_json::json!({
         "enabled": true, "instance_id": local, "gateway_preferred_instance_id": "a",
     });
-    install(&boot_config(&[41], &[41, 42], cluster)).unwrap();
-    let placed = route_for_placement("claude", 42);
+    let installed = install(&boot_config(&[41], &[41, 42], cluster));
     if role == "home" {
+        installed.unwrap();
         assert!(o_owns(42));
+        let placed = route_for_placement("claude", 42);
         assert!(matches!(placed, IntakeRoute::Hold(_)), "{placed:?}");
         assert_eq!(selection_missing(), ["tui_o:selection_missing:42"]);
     } else {
-        assert!(!o_owns(42));
-        assert_eq!(placed, IntakeRoute::Unselected);
+        let error = format!("{:#}", installed.unwrap_err());
+        assert!(
+            error.contains("tui_o.writer.channels") && error.contains("[42]"),
+            "{error}"
+        );
         assert!(selection_missing().is_empty());
-        let held = route_for_placement("claude", 41);
-        assert!(matches!(held, IntakeRoute::Hold(d) if d.contains("O home a")));
     }
+}
+
+fn tui_bound(writer: serde_json::Value, cluster: serde_json::Value) -> Config {
+    serde_json::from_value(serde_json::json!({
+        "server": {}, "cluster": cluster, "tui_o": {"writer": writer},
+        "agents": [{"id": "w", "name": "W", "channels": {
+            "claude": {"id": "41", "runtime": "tui"}, "codex": {"id": "42", "runtime": "tui"}
+        }}, {"id": "p", "name": "P", "channels": {"claude": {"id": "43", "runtime": "pipe"}}}],
+    }))
+    .unwrap()
+}
+
+/// An explicit setting that leaves a TUI binding without the O writer refuses the boot and names
+/// the setting; with only a pipe binding left out the same settings boot.
+#[test]
+fn explicit_writer_off_refuses_the_boot_while_tui_bindings_exist() {
+    let test = "explicit_writer_off_refuses_the_boot_while_tui_bindings_exist";
+    if boot_role(test, &["child"]).is_none() {
+        return;
+    }
+    let cases = [
+        (
+            serde_json::json!({"all_tui": false}),
+            "tui_o.writer.all_tui: false",
+            "[41, 42]",
+        ),
+        (
+            serde_json::json!({"channels": [41]}),
+            "tui_o.writer.channels",
+            "[42]",
+        ),
+        (
+            serde_json::json!({"late_adopt": false}),
+            "tui_o.writer.late_adopt: false",
+            "[41, 42]",
+        ),
+    ];
+    for (writer, setting, channels) in cases {
+        let error = install(&tui_bound(writer.clone(), serde_json::json!({}))).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(setting) && message.contains(channels),
+            "{writer}: {message}"
+        );
+    }
+    let pipe_only: Config = serde_json::from_value(serde_json::json!({
+        "server": {}, "tui_o": {"writer": {"all_tui": false, "late_adopt": false}},
+        "agents": [{"id": "p", "name": "P", "channels": {"claude": {"id": "43", "runtime": "pipe"}}}],
+    }))
+    .unwrap();
+    let boot = BootChannels::validate(&pipe_only).unwrap();
+    boot.refuse_explicit_off(&pipe_only).unwrap();
+}
+
+/// A cluster node without ids boots with the unset selection off; its TUI bindings are held with
+/// an alarm while its pipe binding stays Legacy's.
+#[test]
+fn implicit_default_off_boots_and_holds_tui_bindings() {
+    use crate::services::tui_o::cutover::{IdentityError, peek_o_owns_tui_output_for_channel};
+    let name = concat!(
+        module_path!(),
+        "::implicit_default_off_boots_and_holds_tui_bindings"
+    );
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(name) {
+        return;
+    }
+    install(&tui_bound(
+        serde_json::json!({}),
+        serde_json::json!({"enabled": true}),
+    ))
+    .unwrap();
+    assert!(boot().unwrap().selected().is_empty());
+    let peek = |channel, kind| peek_o_owns_tui_output_for_channel(channel, Some(kind));
+    assert_eq!(
+        peek(41, RuntimeHandoffKind::ClaudeTui),
+        Err(IdentityError::UnselectedTui)
+    );
+    assert_eq!(
+        peek(42, RuntimeHandoffKind::CodexTui),
+        Err(IdentityError::UnselectedTui)
+    );
+    assert_eq!(peek(43, RuntimeHandoffKind::ProcessBackend), Ok(false));
+    let reasons = crate::services::tui_o::alarm::health_reasons();
+    let halted: Vec<_> = reasons
+        .iter()
+        .filter(|r| r.starts_with("tui_o:halted:"))
+        .collect();
+    assert_eq!(
+        halted,
+        ["tui_o:halted:41", "tui_o:halted:42"],
+        "{reasons:?}"
+    );
 }

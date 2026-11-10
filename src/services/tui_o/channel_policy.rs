@@ -366,12 +366,13 @@ impl BootChannels {
     }
 
     /// An explicit setting that leaves a TUI binding without the O writer refuses the boot, as
-    /// Legacy no longer posts TUI bodies. An unset selection that cannot apply here boots.
+    /// Legacy no longer posts TUI bodies; a committed channel the home keeps is O's. An unset
+    /// selection that cannot apply here boots.
     fn refuse_explicit_off(&self, config: &Config) -> Result<()> {
         let writer = &tui_o_of(config).writer;
         let left: Vec<u64> = self
             .tui_bindings
-            .difference(&self.selected)
+            .difference(&self.channels)
             .copied()
             .collect();
         let setting = if writer.late_adopt == Some(false) && !self.tui_bindings.is_empty() {
@@ -645,7 +646,6 @@ fn site(config: &Config, selects: bool) -> Result<(Site, Option<String>)> {
 
 pub(crate) fn install(config: &Config) -> Result<()> {
     let candidate = BootChannels::validate(config)?;
-    candidate.refuse_explicit_off(config)?;
     let installed = match BOOT.get() {
         Some(installed) => installed,
         None => {
@@ -658,6 +658,7 @@ pub(crate) fn install(config: &Config) -> Result<()> {
                 }
             };
             let seeded = candidate.clone().seeded(config, stored)?;
+            seeded.refuse_explicit_off(config)?;
             BOOT.get_or_init(|| seeded)
         }
     };
