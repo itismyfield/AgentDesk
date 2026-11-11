@@ -244,6 +244,7 @@ input-single-path/InputOwnershipCBTokenEligible.cfg	InputOwnership	CBCloseNotifi
 input-single-path/InputOwnershipCBDupClaim.cfg	InputOwnership	CBDeliverOnce	-
 input-single-path/InputOwnershipCBClearedOnly.cfg	InputOwnership	CBNoStall	CBEventuallyDelivered
 input-single-path/InputOwnershipCBDupIgnored.cfg	InputOwnership	CBNoStall	CBEventuallyDelivered
+input-single-path/InputOwnershipCBDowngradeWake.cfg	InputOwnership	CBDowngradeQuiet	-
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
 tui-o-writer/WriterArchivedSourceBefore.cfg	WriterArchivedSource	ArchiveAtVerifiedEofRetires

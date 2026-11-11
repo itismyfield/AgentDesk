@@ -377,6 +377,7 @@ src/
 ├── domain/
 │   ├── atomic_write/
 │   │   └── tests.rs
+│   ├── intake_consent/
 │   ├── message_split/
 │   │   └── semantic_boundaries.rs
 │   ├── outbound/
@@ -1887,6 +1888,7 @@ src/
 │   │   ├── placeholder_sweeper/
 │   │   │   ├── abandon_guard.rs
 │   │   │   ├── panel_shape.rs
+│   │   │   ├── rebind_resume_tests.rs
 │   │   │   ├── retirement_tests.rs
 │   │   │   └── tick.rs
 │   │   ├── prompt_builder/
