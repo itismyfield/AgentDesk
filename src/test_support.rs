@@ -534,11 +534,19 @@ pub(crate) mod o_store {
     }
 
     /// Commits the installed boot policy's adoption of `channel` as O's writer would, for a rig
-    /// whose turn was admitted unadopted and must end through O's delivery.
+    /// whose turn was admitted unadopted and must end through O's delivery: the store's init
+    /// must read back before the candidate is confirmed.
     pub(crate) fn adopt_installed(channel: u64) {
-        let candidate = crate::services::tui_o::channel_policy::boot()
-            .and_then(|boot| boot.candidate(channel).cloned())
-            .expect("the installed candidate");
+        let root = crate::config::runtime_root().expect("the test runtime root");
+        commit_o_store(&root, &[channel]);
+        let store = crate::services::tui_o::store::OStore::existing(&root).expect("the O store");
+        let init = store.read_init(channel).expect("a readable init");
+        assert!(init.is_some(), "the adoption has its init on disk");
+        let boot = crate::services::tui_o::channel_policy::boot().expect("the boot policy");
+        let candidate = boot.candidate(channel).expect("the installed candidate");
         assert!(candidate.confirm_store(), "the adoption commits");
+        let kind = boot.kind(channel);
+        let owned = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
+        assert!(matches!(owned(channel, kind), Ok(true)), "O owns the body");
     }
 }
