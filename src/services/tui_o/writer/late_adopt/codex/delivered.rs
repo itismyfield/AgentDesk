@@ -1,5 +1,5 @@
 //! Legacy's Codex delivery records as a floor per rollout. A record names no file, so it counts
-//! only while the generation bound that rollout alone, or for the first one dated before another.
+//! only while the generation bound that one rollout.
 
 use chrono::{DateTime, Utc};
 
@@ -85,18 +85,11 @@ impl Records {
         })
     }
 
-    /// The source a record is proven to be of. A receipt may be written after the next bind for
-    /// the source before it, so a date inside a later bind span proves nothing.
-    fn owner(&self, at: Option<DateTime<Utc>>) -> Option<SourceId> {
-        let generation = self.generation();
-        let first = generation.first()?;
-        let second = self.alive().find(|span| span.source != *first);
-        match (second, at) {
-            (None, _) => Some(first.clone()),
-            // Discord dates to the millisecond: one in the bind's own millisecond is unproven.
-            (Some(second), Some(at)) if at.timestamp_millis() < second.from.timestamp_millis() => {
-                Some(first.clone())
-            }
+    /// The source every record is proven to be of: a receipt may be written after the next bind,
+    /// or keep an edited message's earlier id, so no date proves it once two rollouts were bound.
+    fn owner(&self) -> Option<SourceId> {
+        match self.generation().as_slice() {
+            [only] => Some(only.clone()),
             _ => None,
         }
     }
@@ -107,7 +100,7 @@ impl Records {
         source: &SourceId,
         frontier: &Frontier,
     ) -> u64 {
-        if self.delivered.generation_since.is_none() {
+        if self.delivered.generation_since.is_none() || self.owner().as_ref() != Some(source) {
             return 0;
         }
         let records = self
@@ -116,7 +109,6 @@ impl Records {
             .iter()
             .chain(&self.delivered.receipts);
         records
-            .filter(|record| self.owner(record.at).as_ref() == Some(source))
             .filter_map(|record| frontier.closes(record.range, record.at))
             .max()
             .unwrap_or(0)

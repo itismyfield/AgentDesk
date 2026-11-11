@@ -8,6 +8,9 @@
 (*           older generation or another source of the same generation.        *)
 (*   "hist"  a Historical receipt of an earlier source, dated inside this      *)
 (*           source's bind span: time alone names this source.                 *)
+(*   "edit"  a later source's short answer edited into its placeholder: the   *)
+(*           receipt keeps the placeholder's id, dated before its own bind,    *)
+(*           at bytes where this (first) source's turn ends.                   *)
 (* early2[s][i]: the record is dated before the generation's second source.    *)
 (* P2 ships in the same PR, so after boot no TUI body is posted except where  *)
 (* the environment action Evidence stands for a delivery before the gate.     *)
@@ -21,8 +24,10 @@
 (*            source is remembered only on its own Retry.                      *)
 (*      "r5"  r4, but a record counts only while the generation bound one      *)
 (*            source, or for the first source when dated before the second;    *)
-(*            a current source judged owed is remembered too.                  *)
-(* Mut  "genIgnore" r5 trusting bogus records, "prebindFilter" r5 with the    *)
+(*            a current source judged owed on the warm path is remembered.     *)
+(*      "r6"  a record counts only while the generation bound one source; the  *)
+(*            current source is remembered on the fresh path too.              *)
+(* Mut  "genIgnore" r6 trusting bogus records, "prebindFilter" r6 with the    *)
 (*      bind-time filter back.                                                 *)
 EXTENDS Naturals, FiniteSets
 
@@ -31,7 +36,7 @@ CONSTANTS Rule, Mut, Scenario
 S == 1..3
 T == 1..2
 Cus == {"none", "row", "pending"}
-Ev == {"none", "cur", "bogus", "hist"}
+Ev == {"none", "cur", "bogus", "hist", "edit"}
 
 VARIABLES nb, nt, ended, early, dlv, ev, early2, prebind, ingen, cus, readable, unres, done, start,
           blocked, judged
@@ -72,7 +77,7 @@ SrcOk(r, isLast) ==
         /\ i > r.c => (~r.e[i] /\ ~r.d[i] /\ r.v[i] = "none" /\ ~r.p[i])
         /\ (i <= r.c /\ (~isLast \/ i < r.c)) => r.e[i]
         /\ r.v[i] = "cur" => (r.e[i] /\ r.d[i])
-        /\ r.v[i] # "hist"
+        /\ r.v[i] \notin {"hist", "edit"}
         /\ r.w[i] => r.v[i] = "cur"
         /\ ~r.e[i] => (~r.d[i] /\ r.v[i] = "none")
 
@@ -135,6 +140,18 @@ MovedInit ==
     /\ ingen = [s \in S |-> TRUE]
     /\ cus = [s \in S |-> NoCusF]
 
+(* Trajectory genfresh: A holds only its prompt (an open turn) when judged. *)
+FreshInit ==
+    /\ nb = 1
+    /\ nt = [s \in S |-> IF s = 1 THEN 1 ELSE 0]
+    /\ ended = [s \in S |-> NoTurnF]
+    /\ dlv = [s \in S |-> NoTurnF]
+    /\ ev = [s \in S |-> NoEvF]
+    /\ early2 = [s \in S |-> NoTurnF]
+    /\ prebind = [s \in S |-> NoTurnF]
+    /\ ingen = [s \in S |-> TRUE]
+    /\ cus = [s \in S |-> NoCusF]
+
 Init ==
     /\ CASE Scenario = "free" -> OneTurn("none", FALSE, "none")
          [] Scenario = "rowpending" -> RowPendingInit
@@ -144,6 +161,8 @@ Init ==
          [] Scenario = "moved" -> MovedInit
          [] Scenario = "hist" -> OneTurn("none", FALSE, "none")
          [] Scenario = "genmove" -> OneTurn("none", FALSE, "none")
+         [] Scenario = "edit" -> OneTurn("none", FALSE, "none")
+         [] Scenario = "genfresh" -> FreshInit
          [] OTHER -> AllInit
     \* every pre-boot turn that ended did so before the baseline sampled after boot
     /\ early = ended
@@ -156,7 +175,7 @@ Init ==
     /\ done = FALSE
     /\ start = [s \in S |-> 0]
     \* custody holding the commit: the genmove trajectory starts held
-    /\ blocked = (Scenario = "genmove")
+    /\ blocked = (Scenario \in {"genmove", "genfresh"})
     /\ judged = {}
 
 (* ---------------------------- environment ---------------------------------- *)
@@ -166,7 +185,7 @@ FirstInGen == MinOf(InGen, 1)
 
 Bind ==
     /\ EnvOK /\ nb < 3
-    /\ Scenario \in {"rotate", "moved", "all", "hist", "genmove"}
+    /\ Scenario \in {"rotate", "moved", "all", "hist", "genmove", "edit", "genfresh"}
     /\ nb' = nb + 1
     /\ ingen' = [ingen EXCEPT ![nb + 1] = TRUE]
     /\ UNCHANGED <<nt, ended, early, dlv, ev, early2, prebind, cus, readable, unres, done, start,
@@ -174,7 +193,7 @@ Bind ==
 
 NewTurn ==
     /\ EnvOK
-    /\ Scenario \notin {"moved", "gen", "pending", "genmove"}
+    /\ Scenario \notin {"moved", "gen", "pending", "genmove", "edit", "genfresh"}
     /\ nt[nb] < 2
     /\ IF nt[nb] = 0 THEN TRUE ELSE ended[nb][nt[nb]]
     /\ Scenario \in {"rotate", "hist"} => (nb = 2 /\ nt[nb] = 0)
@@ -184,7 +203,7 @@ NewTurn ==
 
 EndTurn ==
     /\ EnvOK
-    /\ Scenario \in {"free", "rowpending", "all", "hist"}
+    /\ Scenario \in {"free", "rowpending", "all", "hist", "genfresh"}
     /\ IF nt[nb] = 0 THEN FALSE ELSE ~ended[nb][nt[nb]]
     /\ ended' = [ended EXCEPT ![nb][nt[nb]] = TRUE]
     \* only r3 reads early; the other scenarios end their turns before the baseline
@@ -229,10 +248,24 @@ Historical ==
     /\ UNCHANGED <<nb, nt, ended, early, dlv, early2, prebind, ingen, cus, readable, unres, done,
                    start, blocked, judged>>
 
+(* A later source's answer edits its placeholder: the receipt is dated before  *)
+(* that source's bind and lands on bytes where the first source's turn ends.  *)
+Edit ==
+    /\ EnvOK
+    /\ Scenario = "edit"
+    /\ Cardinality(InGen) >= 2
+    /\ \E i \in T :
+          /\ Exists(FirstInGen, i) /\ ended[FirstInGen][i] /\ ~dlv[FirstInGen][i]
+          /\ ev[FirstInGen][i] = "none"
+          /\ ev' = [ev EXCEPT ![FirstInGen][i] = "edit"]
+          /\ early2' = [early2 EXCEPT ![FirstInGen][i] = TRUE]
+    /\ UNCHANGED <<nb, nt, ended, early, dlv, prebind, ingen, cus, readable, unres, done, start,
+                   blocked, judged>>
+
 (* The generation's start moves past the oldest older source's span. *)
 GenMove ==
     /\ EnvOK
-    /\ Scenario = "genmove"
+    /\ Scenario \in {"genmove", "genfresh"}
     /\ \E s \in InGen : s < nb /\ s = FirstInGen /\ ingen' = [ingen EXCEPT ![s] = FALSE]
     /\ UNCHANGED <<nb, nt, ended, early, dlv, ev, early2, prebind, cus, readable, unres, done,
                    start, blocked, judged>>
@@ -260,8 +293,12 @@ CurFloor(s) == MaxOf({i \in 1..nt[s] : ev[s][i] = "cur"})
 AnyFloor(s) == MaxOf({i \in 1..nt[s] : ev[s][i] # "none"})
 \* r4 places a record by its date: a Historical receipt passes as this source's
 DatedFloor(s) == MaxOf({i \in 1..nt[s] : ev[s][i] \in {"cur", "hist"}})
-\* r5 counts a record only where its source is proven
-Proven(s, i) == ev[s][i] = "cur" /\ (Cardinality(InGen) = 1 \/ (s = FirstInGen /\ early2[s][i]))
+\* r5 trusts a date before the second bind; an edited placeholder's receipt passes too
+R5Proven(s, i) ==
+    ev[s][i] \in {"cur", "edit"} /\ (Cardinality(InGen) = 1 \/ (s = FirstInGen /\ early2[s][i]))
+R5Floor(s) == MaxOf({i \in 1..nt[s] : R5Proven(s, i)})
+\* r6 counts a record only while the generation bound one source
+Proven(s, i) == ev[s][i] \in {"cur", "edit"} /\ Cardinality(InGen) = 1
 ProvenFloor(s) == MaxOf({i \in 1..nt[s] : Proven(s, i)})
 
 \* d1: aligned records of any generation or source, the bind-time filter
@@ -270,6 +307,7 @@ D1First(s) == MinOf({i \in 1..nt[s] : i > AnyFloor(s) /\ ~prebind[s][i]}, nt[s] 
 NewFloor(s) ==
     CASE Mut = "genIgnore" -> AnyFloor(s)
       [] Rule = "r4" -> DatedFloor(s)
+      [] Rule = "r5" -> R5Floor(s)
       [] OTHER -> ProvenFloor(s)
 NewFirst(s) == MinOf({i \in 1..nt[s] : i > NewFloor(s) /\ ~(Mut = "prebindFilter" /\ prebind[s][i])},
                      nt[s] + 1)
@@ -296,9 +334,12 @@ Owed(s) == Decided[s] # 0 /\ First(s) <= nt[s]
 (* keep the current source only on its own read failure.                       *)
 ReadJudged == IF ~readable[nb] THEN {nb}
               ELSE {s \in Named : \A r \in Named : (r > s) => readable[r]}
+\* the current source still holds only its prompt: the fresh path judges it
+FreshCur == nt[nb] = 1 /\ ~ended[nb][1]
 RetryJudged ==
     IF \E s \in Named : ~readable[s] THEN ReadJudged
-    ELSE IF Rule = "r5" THEN {s \in Named : Owed(s)}
+    ELSE IF Rule = "r6" THEN {s \in Named : Owed(s)}
+    ELSE IF Rule = "r5" THEN {s \in Named : Owed(s) /\ ~(s = nb /\ FreshCur)}
     ELSE {s \in Named : Owed(s) /\ s # nb}
 
 RetryJudge ==
@@ -321,7 +362,7 @@ Commit ==
                    blocked, judged>>
 
 Next ==
-    \/ Bind \/ NewTurn \/ EndTurn \/ Observe \/ Evidence \/ Historical \/ GenMove \/ ReadOK
+    \/ Bind \/ NewTurn \/ EndTurn \/ Observe \/ Evidence \/ Historical \/ Edit \/ GenMove \/ ReadOK
     \/ Unblock \/ RetryJudge \/ Commit
     \/ UNCHANGED vars
 
