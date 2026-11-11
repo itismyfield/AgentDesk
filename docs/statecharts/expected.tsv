@@ -29,6 +29,11 @@ hosted-cleanup/HostedCleanupAfterGaps.cfg	HostedCleanup	AllAliasesRechecked,Bulk
 hosted-cleanup/HostedCleanupBefore.cfg	HostedCleanup	-	-
 hosted-cleanup/HostedCleanupBeforeGaps.cfg	HostedCleanup	AllAliasesRechecked,BulkLockWaitMarkerNotMissed,ExplicitActivePreserved,LegacyCurrentMarkerSafe	-
 hosted-cleanup/HostedCleanupNoRecheck.cfg	HostedCleanup	BulkDisconnectedRechecked,ChangedRowRechecked,ExplicitAliasRechecked	-
+hosted-cleanup/ThreadGCAfter.cfg	HostedCleanup	-	-
+hosted-cleanup/ThreadGCAfterGaps.cfg	HostedCleanup	GCAliasesRechecked,GCCurrentLegacyMarkerSafe,GCCurrentOwnerLocal	-
+hosted-cleanup/ThreadGCBefore.cfg	HostedCleanup	-	-
+hosted-cleanup/ThreadGCBeforeGaps.cfg	HostedCleanup	GCAliasesRechecked,GCCurrentLegacyMarkerSafe,GCCurrentOwnerLocal	-
+hosted-cleanup/ThreadGCNoRecheck.cfg	HostedCleanup	GCConditionalRefusalsKept,GCNewTurnKept	-
 input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-
 input-single-path/InputCancelSelectionLegacyGuarded.cfg	InputCancelSelection	LegacyFrontRemoved	-
