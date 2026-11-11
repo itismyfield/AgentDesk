@@ -339,8 +339,8 @@ provider_dispatch/owner_input.rs 1583줄이다. 새 ledger/wait/scheduler를 여
 
 | prod 파일 그룹 | 역할/추가 코드 상한 |
 |---|---|
-| 새 claude_tui/readiness.rs, readiness/evidence.rs, readiness/wait.rs, readiness/compact.rs (4) | 값/strict terminal+latch/read/wait/pending compact ≤850. r1의 보수 예산 안에 latch 포함 |
-| claude_tui.rs, hook_server.rs, session.rs, tui_prompt_dedupe/runtime_binding.rs (4) | ingress/launch/clear 연결 ≤45 |
+| claude_tui/readiness/mod.rs, readiness/evidence.rs, readiness/wait.rs 및 신설 예정 compact 모듈 (4) | 값/strict terminal+latch/read/wait/pending compact ≤850. r1의 보수 예산 안에 latch 포함 |
+| claude_tui/mod.rs, hook_server.rs, session.rs, tui_prompt_dedupe/runtime_binding.rs (4) | ingress/launch/clear 연결 ≤45 |
 | input.rs, input/submission.rs, input/preparation_hold.rs (3) | screen wait 삭제/최종 proof ≤55 추가 |
 | hosting/followup_support.rs, hosting/warm_followup.rs, host_input.rs (3) | R/D 분리 ≤40 |
 | claude/herdr_turn/composer.rs, first_input.rs, discord/recovery_engine/herdr_row_end.rs (3) | first/recovery R, custody 동일 ≤40 |
