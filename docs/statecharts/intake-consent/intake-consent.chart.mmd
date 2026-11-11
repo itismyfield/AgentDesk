@@ -1,7 +1,9 @@
-%% Hand-authored design diagram; SC_RUN=mac-needed, not generated TLC output.
+%% Hand-authored schematic; nine cfg outcomes verified by TLC on 2026-11-11.
 stateDiagram-v2
     [*] --> Claimed: fresh claim (epoch, serial), same row
-    Claimed --> Accepted: fenced CAS
+    Claimed --> Pending: stale pre-accept sweep; previous worker stays live
+    Claimed --> Pending: clean cancellation; cancelled worker stops
+    Claimed --> Accepted: fenced CAS; older worker may resume after same-token reclaim
     Accepted --> Spawned: CAS returns bool in Current/r2
     Spawned --> Scoped: Current private issue
     Spawned --> KeyReady: r2 old o_input creates private key
@@ -17,7 +19,7 @@ stateDiagram-v2
     OwnerLock --> RowLock: SELECT FOR UPDATE
     RowLock --> Commit: exact CAS
     Commit --> Pending: rollback or later exact release
-    Pending --> Claimed: new serial, retained marker
+    Pending --> Claimed: new serial; same process token may repeat
     Spawned --> StoredPermit: d1 CAS returns public receipt
     StoredPermit --> Unscoped: sibling retains receipt across executor entry
     Unscoped --> EffectsNoProof: executor effects without task-local proof

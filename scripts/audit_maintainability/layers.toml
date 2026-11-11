@@ -2,6 +2,10 @@ schema_version = 1
 
 rules = [
   { prefix = "", root = "src/lib.rs", layer = "assembly", reason = "라이브러리 진입점이 CLI와 서버 부팅을 최종 조립한다.", evidence = ["src/lib.rs:255"] },
+  { prefix = "intake_consent_authority", root = "src/lib.rs", layer = "adapter", reason = "DB row 기반 opaque before-effects 증거를 소유하며 발급 runtime은 child에 둔다.", evidence = ["src/intake_consent_authority.rs:6"] },
+  { prefix = "intake_consent_authority::issuer", root = "src/lib.rs", layer = "application", reason = "private worker key를 소비해 기존 task-local 발급·소비 순서를 조립한다.", evidence = ["src/services/cluster/intake_worker/consent_scope.rs:10"] },
+  { prefix = "domain::intake_consent", root = "src/lib.rs", layer = "foundation", reason = "중립 wire·payload digest·source binding·marker 판정만 소유한다.", evidence = ["src/domain/intake_consent.rs:16", "src/domain/intake_consent/decision.rs:63"] },
+  { prefix = "services::cluster::intake_worker::o_input::scope_key", root = "src/lib.rs", layer = "application", reason = "생성은 o_input private scope에만 허용되는 issuer 인수 값이다.", evidence = ["src/services/cluster/intake_worker/o_input.rs:75"] },
   { prefix = "app_state", root = "src/lib.rs", layer = "assembly", reason = "HTTP handler 공유 상태가 PolicyEngine과 HealthRegistry를 보유하고 서비스를 생성한다.", evidence = ["src/app_state.rs:11", "src/app_state.rs:17", "src/app_state.rs:34"] },
   { prefix = "bootstrap", root = "src/lib.rs", layer = "assembly", reason = "런타임 초기화가 서비스와 저장소를 부팅한다.", evidence = ["src/bootstrap.rs:7"] },
   { prefix = "cli", root = "src/lib.rs", layer = "assembly", reason = "명령 해석과 실행 진입점을 조립한다.", evidence = ["src/lib.rs:89", "src/lib.rs:265"] },

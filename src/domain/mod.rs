@@ -5,6 +5,7 @@ pub(crate) mod bot_role;
 pub(crate) mod cluster_policy;
 pub(crate) mod file_sync;
 pub(crate) mod human_input;
+pub(crate) mod intake_consent;
 pub(crate) mod intake_identity;
 pub(crate) mod lifecycle;
 pub(crate) mod memory;
