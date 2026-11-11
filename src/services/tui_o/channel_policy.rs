@@ -424,10 +424,15 @@ impl BootChannels {
             .or_else(|| self.candidate(channel).cloned())
     }
 
-    /// The adoption `channel`'s local store gives it, as a fresh seed would read it.
-    fn stored_one(&self, channel: u64) -> Adoption {
+    /// An unverified permit's candidate follows the channel's store: with no store it is refused.
+    fn unverified_candidate(&self, channel: u64) -> Candidate {
         let selected = BTreeSet::from([channel]);
-        adoption::stored(crate::config::runtime_root().as_deref(), &selected)[&channel]
+        let stored =
+            adoption::stored(crate::config::runtime_root().as_deref(), &selected)[&channel];
+        Candidate::new(match stored {
+            Adoption::Committed | Adoption::Held => stored,
+            _ => Adoption::Refused,
+        })
     }
 
     pub(crate) fn install_execution(
@@ -481,7 +486,7 @@ impl BootChannels {
                     .remove(&channel);
                 return;
             }
-            Some(Err(reason)) => View::held(reason, self.stored_one(channel)),
+            Some(Err(reason)) => View::held(reason, self.unverified_candidate(channel)),
             Some(Ok(permit)) => {
                 let selected = BTreeSet::from([channel]);
                 let state =
@@ -514,9 +519,9 @@ impl BootChannels {
                 prior.gate().close();
             }
         }
-        let candidate = old
-            .map(|view| view.candidate)
-            .unwrap_or_else(|| View::held(reason.clone(), self.stored_one(channel)).candidate);
+        let candidate = old.map(|view| view.candidate).unwrap_or_else(|| {
+            View::held(reason.clone(), self.unverified_candidate(channel)).candidate
+        });
         self.execution
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
