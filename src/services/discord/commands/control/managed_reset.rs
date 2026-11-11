@@ -72,19 +72,47 @@ pub(super) struct ManagedEnd {
 /// Kills the session's process tree and tmux session and removes its launch files; a verified
 /// Codex incarnation's spawn nonce goes with them, so its pin does not hold the next launch.
 pub(super) fn end_managed_process_session(session_name: &str) -> ManagedEnd {
-    end_process(session_name, None)
+    #[cfg(unix)]
+    let Ok(fence) =
+        crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence::acquire(session_name)
+    else {
+        return ManagedEnd {
+            reset: false,
+            tmux_unconfirmed: true,
+        };
+    };
+    end_process(
+        session_name,
+        None,
+        #[cfg(unix)]
+        &fence,
+    )
 }
 
 pub(super) fn end_under_source(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    #[cfg(unix)] fence: &crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence,
 ) -> ManagedEnd {
-    end_process(authority.session(), Some(authority))
+    end_process(
+        authority.session(),
+        Some(authority),
+        #[cfg(unix)]
+        fence,
+    )
 }
 
 fn end_process(
     session_name: &str,
     authority: Option<&crate::services::tmux_common::TmuxSourceAuthority<'_>>,
+    #[cfg(unix)] fence: &crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence,
 ) -> ManagedEnd {
+    #[cfg(unix)]
+    if fence.validate(session_name).is_err() {
+        return ManagedEnd {
+            reset: false,
+            tmux_unconfirmed: true,
+        };
+    }
     #[cfg(not(unix))]
     let _ = authority;
     let mut reset = false;
@@ -113,10 +141,19 @@ fn end_process(
                 );
                 let killed = tmux::kill_session(session_name, "managed session reset");
                 if killed {
-                    if let Some(authority) = authority {
-                        crate::services::tmux_common::cleanup_session_temp_files_under_source_authority(authority,session_name);
+                    let cleaned = if let Some(authority) = authority {
+                        crate::services::tmux_common::cleanup_session_temp_files_under_source_authority(authority,session_name,fence)
                     } else {
-                        crate::services::tmux_common::cleanup_session_temp_files(session_name);
+                        crate::services::tmux_common::cleanup_session_temp_files_under_fence(
+                            fence,
+                            session_name,
+                        )
+                    };
+                    if cleaned.is_err() {
+                        return ManagedEnd {
+                            reset: true,
+                            tmux_unconfirmed: true,
+                        };
                     }
                     reset = true;
                 }

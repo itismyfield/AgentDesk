@@ -44,6 +44,11 @@ intake-consent/IntakeConsentProposed.cfg	IntakeConsent	-	-
 intake-consent/IntakeConsentReuse.cfg	IntakeConsent	ProofConsumedOnce	-
 intake-consent/IntakeConsentScopeOpen.cfg	IntakeConsent	NoUnauthorizedIssue,NoEffectsThenRollback	-
 intake-consent/IntakeConsentStale.cfg	IntakeConsent	NoStaleProofWrite	-
+intake-readiness/IntakeReadinessChart.cfg	IntakeReadiness	-	-
+intake-readiness/IntakeReadinessCurrent.cfg	IntakeReadiness	-	-
+intake-readiness/IntakeReadinessEarlyTxEnd.cfg	IntakeReadiness	ApplyUsesLockedTransaction	-
+intake-readiness/IntakeReadinessProposed.cfg	IntakeReadiness	-	-
+intake-readiness/IntakeReadinessStaleSnapshot.cfg	IntakeReadiness	NoStaleSnapshot	-
 input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-
 input-single-path/InputCancelSelectionLegacyGuarded.cfg	InputCancelSelection	LegacyFrontRemoved	-
@@ -151,6 +156,16 @@ input-single-path/InputPathStopNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopNotSentLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopBusyNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopProofOverStopLive.cfg	InputPath	-	StoppedLeaves
+session-lifecycle/HerdrHandoffFixed.cfg	HerdrSession	-	-
+session-lifecycle/HerdrHandoffHintBefore.cfg	HerdrSession	-	HandoffProgress
+session-lifecycle/HerdrHandoffPersonBefore.cfg	HerdrSession	-	-
+session-lifecycle/HerdrHandoffQueueBefore.cfg	HerdrSession	-	HandoffProgress
+session-lifecycle/HerdrHandoffTargetBefore.cfg	HerdrSession	NoBusyExit,NoLiteralIntoDraft,NoUnexpectedEnter,NoWrongExecutionExit	HandoffProgress
+session-lifecycle/HerdrHintAFixed.cfg	HerdrSession	-	-
+session-lifecycle/HerdrHintALegacyBefore.cfg	HerdrSession	-	AProgress
+session-lifecycle/HerdrHintAMissingBefore.cfg	HerdrSession	-	-
+session-lifecycle/HerdrHintANoFrontCheck.cfg	HerdrSession	ANoStaleGrant	-
+session-lifecycle/HerdrHintANoOutboxDiscovery.cfg	HerdrSession	-	AProgress
 session-lifecycle/HerdrPendingRegistrationAfter.cfg	HerdrPendingRegistration	-	-
 session-lifecycle/HerdrPendingRegistrationBefore.cfg	HerdrPendingRegistration	-	PendingReuseBound
 session-lifecycle/HerdrPendingRegistrationBound.cfg	HerdrPendingRegistration	-	-
@@ -319,3 +334,6 @@ outbound-port/OutboundPortLossyKey.cfg	OutboundPort	NoSilentLoss,NoSuccessWithou
 outbound-port/OutboundPortNoReserve.cfg	OutboundPort	NoDuplicatePost,NoPostWithoutReservation	-
 outbound-port/OutboundPortNoReserveNonce.cfg	OutboundPort	NoPostWithoutReservation	-
 outbound-port/OutboundPortRecordBeforePost.cfg	OutboundPort	NoSilentLoss,NoSuccessWithoutReceipt	-
+session-lifecycle/HerdrHintARetryFixed.cfg	HerdrSession	-	-
+session-lifecycle/HerdrHintARetryNoController.cfg	HerdrSession	-	AProgress
+session-lifecycle/HerdrHintARetryNoBudget.cfg	HerdrSession	-	AProgress
