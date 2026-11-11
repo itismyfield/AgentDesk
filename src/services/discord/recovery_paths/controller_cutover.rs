@@ -159,6 +159,13 @@ where
             channel_id.get(),
             placeholder.get()
         ),
+        RecoveryRelayOutcome::AwaitingAdoption | RecoveryRelayOutcome::AdoptionRefused => {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                ?outcome,
+                "recovery body held for O adoption"
+            )
+        }
     }
     outcome
 }

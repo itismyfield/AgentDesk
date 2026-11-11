@@ -747,7 +747,7 @@ async fn apply_undeliverable_relay_disposition(
     handoff_already_saved: bool,
 ) {
     match disposition {
-        RowDisposition::FinishAndClear => {}
+        RowDisposition::FinishAndClear | RowDisposition::Preserve => {}
         RowDisposition::ClearPermanent | RowDisposition::ClearBudgetExhausted => {
             let reason_code = disposition_reason_code(disposition)
                 .expect("clearing dispositions always carry a reason code");

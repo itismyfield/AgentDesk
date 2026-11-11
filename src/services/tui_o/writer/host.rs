@@ -662,7 +662,7 @@ fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
 /// A channel not adopted before its first `init` is refused for this process; its body stays held.
 pub(super) fn release(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
     candidate.release(channel);
-    let detail = format!("adoption held: {detail}");
+    let detail = format!("adoption refused: {detail}");
     stop(candidate, alarms, channel, &detail);
 }
 

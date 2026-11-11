@@ -405,13 +405,18 @@ fn decide_from(
 
 impl IdentityError {
     pub(crate) fn hold(self, channel_id: u64) -> Self {
-        // An adoption wait is no identity fault: the writer host raises its own alarms.
-        if matches!(self, Self::AwaitingAdoption | Self::AdoptionRefused) {
-            tracing::info!(channel_id, error = %self, "tui_o output held for adoption");
-            return self;
-        }
-        let alarm = WriterAlarm::Halted {
-            detail: self.to_string(),
+        // An adoption wait is no identity fault; a refusal asks for an operator, not a halt.
+        let alarm = match &self {
+            Self::AwaitingAdoption => {
+                tracing::info!(channel_id, error = %self, "tui_o output held for adoption");
+                return self;
+            }
+            Self::AdoptionRefused => WriterAlarm::Released {
+                detail: format!("adoption refused: {self}"),
+            },
+            _ => WriterAlarm::Halted {
+                detail: self.to_string(),
+            },
         };
         AlarmRouter::for_process(None, None).raise_at(channel_id, &alarm, Instant::now());
         tracing::error!(channel_id, reason = ?ClaimReason::IdentityHeld, error = %self, "tui_o output identity held");
