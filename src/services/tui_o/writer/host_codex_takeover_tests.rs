@@ -661,3 +661,123 @@ async fn an_owed_turn_on_the_rollout_before_a_new_bind_goes_into_the_init() {
         io.alarms.halted()
     );
 }
+
+/// A turn this execution opened and ended before the baseline, behind Legacy's inflight row with
+/// no Legacy send, is posted by O from its opener once; the same turn with no Legacy custody left
+/// was delivered, so nothing is posted again.
+#[tokio::test(start_paused = true)]
+async fn a_turn_ended_before_the_baseline_is_skipped_only_on_delivery_evidence() {
+    for (channel, custody) in [(61_835_u64, Custody::Row), (61_836, Custody::Free)] {
+        let harness = fresh_on(channel);
+        harness.gate.acquired();
+        let _reserved = reserve(channel);
+        p5::set_test_root(Some(harness._runtime.path()));
+        let (path, source) = rollout(&harness, "rollout-ended.jsonl", &metadata("s-codex"));
+        bind_late(channel, &path);
+        let opener = std::fs::metadata(&path).unwrap().len();
+        append(
+            &path,
+            &[opening(), answer("msg_1", "ended early"), turn_end()].concat(),
+        );
+        let end = std::fs::metadata(&path).unwrap().len();
+        let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+        io.late_enabled.store(true, Ordering::SeqCst);
+        *io.custody.lock().unwrap() = Ok(custody);
+        let _tasks = start_codex(&harness, &io, &ready);
+        polls(3).await;
+        assert_eq!(
+            adoption(channel),
+            Adoption::Committed,
+            "{:?}",
+            io.alarms.halted()
+        );
+        polls(3).await;
+        if custody == Custody::Row {
+            assert_eq!(init_sources(&harness, channel), [(source, opener)]);
+            let posts = ["ended early".to_owned(), completed_summary(&path)];
+            assert_eq!(harness.port.posts(), posts, "{:?}", io.alarms.halted());
+        } else {
+            assert_eq!(init_sources(&harness, channel), [(source, end)]);
+            assert!(
+                harness.port.posts().is_empty(),
+                "a delivered turn is not reposted"
+            );
+        }
+    }
+}
+
+/// A turn on the rollout bound before, opened before the baseline after a Legacy send and ended
+/// undelivered, keeps a new rollout's takeover waiting; once Legacy delivered both, it commits.
+#[tokio::test(start_paused = true)]
+async fn an_undelivered_turn_on_the_rollout_before_holds_the_next_rollouts_takeover() {
+    const CODEX: u64 = 61_837;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_over_old(CODEX).await;
+    append(
+        &harness._runtime.path().join("rollout-old.jsonl"),
+        &turn_end(),
+    );
+    let (path, source) = rollout(&harness, "rollout-new.jsonl", &prompted("s-codex"));
+    bind_late(CODEX, &path);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Deferred,
+        "the old turn may be Legacy's"
+    );
+    assert!(!harness.store.has_channel_dir(CODEX));
+
+    append(
+        &path,
+        &[answer("msg_1", "the new answer"), turn_end()].concat(),
+    );
+    let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(CODEX).cloned());
+    drop(candidate.unwrap().claim_body(CODEX));
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    let end = std::fs::metadata(&path).unwrap().len();
+    assert_eq!(init_sources(&harness, CODEX), [(source, end)]);
+    assert!(
+        harness.port.posts().is_empty(),
+        "Legacy delivered both turns"
+    );
+}
+
+/// A turn whose records carry no time cannot be told from this execution's, so the takeover waits
+/// instead of starting past it at the end of the file.
+#[tokio::test(start_paused = true)]
+async fn a_turn_without_a_time_keeps_the_takeover_waiting() {
+    const CODEX: u64 = 61_838;
+    let Takeover {
+        harness,
+        io: _io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    let (path, _) = rollout(&harness, "rollout-undated.jsonl", &metadata("s-codex"));
+    let undated = [
+        codex_line(serde_json::json!({"type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "t1"}})),
+        codex_line(serde_json::json!({"type": "response_item",
+            "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}]}})),
+        codex_line(serde_json::json!({"type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "id": "msg_1",
+            "content": [{"type": "output_text", "text": "undated answer"}]}})),
+    ];
+    append(&path, &undated.concat());
+    bind_late(CODEX, &path);
+    polls(3).await;
+    assert_eq!(adoption(CODEX), Adoption::Deferred);
+    assert!(!harness.store.has_channel_dir(CODEX));
+}

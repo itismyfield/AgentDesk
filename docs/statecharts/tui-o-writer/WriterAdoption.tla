@@ -3,10 +3,12 @@ EXTENDS Naturals
 CONSTANTS Fix, Mut
 VARIABLES sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
-          recovered, rejected, commitWithOther, hturn, hp, nativeEnded
+          recovered, rejected, commitWithOther, hturn, hp, nativeEnded,
+          endedBeforeBase, prevOwed, commitPastOwed
 vars == <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
-          recovered, rejected, commitWithOther, hturn, hp, nativeEnded>>
+          recovered, rejected, commitWithOther, hturn, hp, nativeEnded,
+          endedBeforeBase, prevOwed, commitPastOwed>>
 
 \* Code baseline 13f9acdd9a; the stage-1 adoption plan r2 with its r2.1 corrections.
 \* One TUI-bound channel with one turn, plus one non-TUI (headless) channel in the same config.
@@ -15,6 +17,10 @@ vars == <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
 \* Mut removes one stage-1 guard. Value ranges come from the entry table in report-p1-2.md.
 \*   nativeEnded  late_adopt/codex/prefix.rs frontier: the turn's own end record (task_complete)
 \*            written before Legacy delivered it; advanceOnEnd is the takeover that moved F past it
+\*   endedBeforeBase  that end was written before the takeover's baseline; relayedByTime counted it
+\*            delivered by time alone (late_adopt/codex.rs start_on)
+\*   prevOwed the rollout bound before holds a turn Legacy may have sent part of (codex.rs owed);
+\*            swallowOwed committed the new rollout without it
 \*   sel      tap.rs:61-67, channel_policy.rs:73-134 (explicit off, list excluding, late off,
 \*            implicit default off when the default cannot apply)
 \*   site     adoption.rs:384-390 (only the O home has candidates)
@@ -77,9 +83,11 @@ Init ==
     /\ turn = "none" /\ waitMark = FALSE /\ otherCustody \in BOOLEAN
     /\ lp = 0 /\ op = 0 /\ rowCleared = FALSE /\ dispatchSettled = FALSE
     /\ attempts = 0 /\ restarts = 0 /\ recovered = FALSE /\ commitWithOther = FALSE
-    /\ hturn = "none" /\ hp = 0 /\ nativeEnded = FALSE
+    /\ hturn = "none" /\ hp = 0 /\ nativeEnded = FALSE /\ endedBeforeBase = FALSE
+    /\ prevOwed \in BOOLEAN /\ commitPastOwed = FALSE
 
-Fixed == UNCHANGED <<sel, site, root, exec, bound, nativeEnded>>
+Fixed == UNCHANGED <<sel, site, root, exec, bound, nativeEnded, endedBeforeBase, prevOwed,
+                     commitPastOwed>>
 
 \* Discord intake on the TUI channel opens a turn (intake_dispatch.rs:281-294).
 Input == /\ Booted /\ turn = "none" /\ turn' = "running"
@@ -141,23 +149,37 @@ WatcherDispatch ==
 Commit(start) ==
     /\ adopt' = "Committed" /\ store' = "init" /\ oStart' = start
     /\ commitWithOther' = (commitWithOther \/ otherCustody)
-    /\ Fixed
+    /\ commitPastOwed' = (commitPastOwed \/ prevOwed)
+    /\ UNCHANGED <<sel, site, root, exec, bound, nativeEnded, endedBeforeBase, prevOwed>>
     /\ UNCHANGED <<turn, waitMark, otherCustody, lp, op, rowCleared, dispatchSettled,
                     attempts, restarts, recovered, rejected, hturn, hp>>
 
 \* A fresh source or rollout is taken before it has output (late_adopt.rs:182-186, codex.rs:203-310).
+\* Stage 1 retries while the rollout bound before still holds a turn Legacy may have sent from.
+OwedClear == Fix # "stage1" \/ Mut = "swallowOwed" \/ ~prevOwed
 FreshAdopt == /\ Booted /\ adopt \in {"Deferred", "Pending"} /\ bound = "fresh" /\ ~Blocked
-              /\ Commit("F")
+              /\ OwedClear /\ Commit("F")
 \* Warm takeover from the Legacy delivery frontier (stage 1 P3a and P3b). A turn's own end does
 \* not move the frontier; advanceOnEnd starts past a turn Codex ended but nobody delivered.
+\* relayedByTime counts a turn that ended before the baseline as delivered with no evidence.
+SkipsEnded == nativeEnded /\ (Mut = "advanceOnEnd" \/ (Mut = "relayedByTime" /\ endedBeforeBase))
 WarmAdoptF == /\ Fix = "stage1" /\ adopt = "Deferred" /\ bound # "fresh" /\ ~Blocked
-              /\ Commit(IF Mut = "advanceOnEnd" /\ nativeEnded THEN "EOF" ELSE "F")
+              /\ OwedClear /\ Commit(IF SkipsEnded THEN "EOF" ELSE "F")
 
 \* Codex writes the turn's end into its transcript before anyone delivered the turn.
 NativeEnd == /\ turn \in {"running", "held"} /\ ~nativeEnded /\ nativeEnded' = TRUE
+             /\ endedBeforeBase' \in BOOLEAN
              /\ UNCHANGED <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
                              otherCustody, lp, op, rowCleared, dispatchSettled, attempts,
-                             restarts, recovered, rejected, commitWithOther, hturn, hp>>
+                             restarts, recovered, rejected, commitWithOther, hturn, hp,
+                             prevOwed, commitPastOwed>>
+
+\* Legacy finishes the earlier rollout's turn, or a later read proves it unsent.
+PrevDrains == /\ prevOwed /\ prevOwed' = FALSE
+              /\ UNCHANGED <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
+                              otherCustody, lp, op, rowCleared, dispatchSettled, attempts,
+                              restarts, recovered, rejected, commitWithOther, hturn, hp,
+                              nativeEnded, endedBeforeBase, commitPastOwed>>
 \* Stale handoff at the end of file (deferred.rs:26-29); not guaranteed to happen.
 EofHandoff == /\ Fix # "stage1" /\ adopt = "Deferred" /\ bound = "withOutput" /\ ~Blocked
               /\ Commit(IF turn = "none" THEN "F" ELSE "EOF")
@@ -216,7 +238,7 @@ HeadlessTerminal == /\ hturn = "running"
 
 Rest == UNCHANGED vars
 Next == Input \/ TerminalBody \/ ReEval \/ RecoveryBody \/ WatcherDispatch \/ FreshAdopt
-        \/ WarmAdoptF \/ EofHandoff \/ Reject \/ OPost \/ OtherTurnEnds \/ Restart \/ NativeEnd
+        \/ WarmAdoptF \/ EofHandoff \/ Reject \/ OPost \/ OtherTurnEnds \/ Restart \/ NativeEnd \/ PrevDrains
         \/ HeadlessInput \/ HeadlessTerminal \/ Rest
 
 \* Writer, recovery and turn-end actions are fair. Input, Restart, Reject, the stale handoff,
@@ -224,7 +246,7 @@ Next == Input \/ TerminalBody \/ ReEval \/ RecoveryBody \/ WatcherDispatch \/ Fr
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(TerminalBody) /\ WF_vars(ReEval) /\ WF_vars(RecoveryBody)
         /\ WF_vars(FreshAdopt) /\ WF_vars(WarmAdoptF) /\ WF_vars(OPost)
-        /\ WF_vars(OtherTurnEnds) /\ WF_vars(HeadlessTerminal)
+        /\ WF_vars(OtherTurnEnds) /\ WF_vars(HeadlessTerminal) /\ WF_vars(PrevDrains)
 
 NoLegacyBodyOnTui == lp = 0
 AnswerAtMostOnce == op + lp <= 1
@@ -233,6 +255,7 @@ RowClearedHasEvidence == rowCleared => Evidence
 NoEarlyDispatch == dispatchSettled => Evidence
 HeldBodyNotSkipped == (turn = "held" /\ adopt = "Committed") => oStart = "F"
 OtherCustodyBlocks == ~commitWithOther
+NoCommitPastOwed == ~commitPastOwed
 HeadlessKept == hturn # "held" /\ (hturn = "done" => hp = 1)
 
 HeldTurnAnswered == [](turn = "held" /\ Adoptable => <>(op = 1 \/ rejected))
