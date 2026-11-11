@@ -342,7 +342,7 @@ pub(super) async fn run_terminal_commit_epilogue(
                         // #3607 chokepoint. The clear ABOVE has already run; this only
                         // RECORDS the live lifecycle signals and fires a NON-FATAL
                         // ERROR-level invariant signal if a committed terminal was cleared
-                        // without a visible UI completion (#3607). Never gates cleanup.
+                        // without a visible UI completion. Never gates cleanup.
                         // S2-b removed completion-gate
                         // suppression, so a busy pane observation no longer suppresses this
                         // clear. Orchestration + the non-fatal invariant live in

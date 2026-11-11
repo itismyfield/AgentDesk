@@ -223,7 +223,7 @@ pub(in crate::services::discord) fn emit_terminal_body_commit(
     );
 }
 
-/// Emit #3646 event 2/3 (`terminal_ui_transition`).
+/// Emit `terminal_ui_transition`.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn emit_terminal_ui_transition(
     provider: &str,
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn invariant_violated_only_on_committed_without_ui_or_obligation() {
-        // #3607 state: committed, but no UI completion.
+        // Committed, but no UI completion.
         assert!(inflight_clear_invariant_violated(true, false));
         // A visible UI completion satisfies the invariant.
         assert!(!inflight_clear_invariant_violated(true, true));
