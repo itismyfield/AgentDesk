@@ -86,7 +86,16 @@ async fn a_held_watcher_terminal_retries_until_o_adopts_and_then_ends_through_o(
     h.spawn(f);
     h.append(turn("T1", BODY).as_bytes());
     let held = || Harness::logged("tui_o output held for adoption").len();
-    h.until("the held terminal retried", |_| held() >= 2).await;
+    // Past the three rewinds a failing send gets before the watcher gives up on its turn.
+    h.until("the held terminal retried past the rewind cap", |_| {
+        held() >= 20
+    })
+    .await;
+    let gave_up = Harness::logged("rewind cap exceeded");
+    assert!(
+        gave_up.is_empty(),
+        "a held turn is never given up: {gave_up:?}"
+    );
     let waiting = h.observe(&[BODY]);
     assert_eq!(
         waiting.copies,
