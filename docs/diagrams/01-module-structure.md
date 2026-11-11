@@ -1,5 +1,7 @@
 # AgentDesk Module Structure
 
+<!-- doc-path-refs: removed src/db/schema.rs -->
+
 ```plantuml
 @startuml AgentDesk Module Structure
 !theme plain
