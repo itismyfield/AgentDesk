@@ -167,6 +167,20 @@ function _autoRefreshInventoryDocs(card, dispatch, dispatchContext, workResult) 
     if (!branch) {
       throw new Error("could not resolve worktree branch for inventory push");
     }
+    if (branch === "main") {
+      throw new Error("refusing inventory push to default branch: " + branch);
+    }
+    if (branch.indexOf(":") !== -1 || branch.charAt(0) === "-") {
+      throw new Error("invalid inventory push branch: " + branch);
+    }
+    var currentBranch = _execOrThrow(
+      "git",
+      ["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"],
+      { timeout_ms: 10000 }
+    ).trim();
+    if (branch !== currentBranch) {
+      throw new Error("inventory push branch does not match current worktree branch: " + branch + " != " + currentBranch);
+    }
 
     _execOrThrow(
       "git",
