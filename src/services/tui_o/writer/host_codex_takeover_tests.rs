@@ -169,8 +169,14 @@ impl LegacyView for Records {
     }
 }
 
-/// Legacy's receipt for `range`, dated now.
+/// Legacy's receipt for `range`, dated half a second ago: before any bind that follows it.
 fn receipt(range: (u64, u64)) -> CodexDelivery {
+    let at = Some(Utc::now() - chrono::TimeDelta::milliseconds(500));
+    CodexDelivery { range, at }
+}
+
+/// Legacy's receipt for `range`, dated now: after every bind so far.
+fn late_receipt(range: (u64, u64)) -> CodexDelivery {
     let at = Some(Utc::now());
     CodexDelivery { range, at }
 }
@@ -875,7 +881,7 @@ async fn an_undelivered_turn_on_the_rollout_before_holds_the_next_rollouts_takeo
         &path,
         &[answer("msg_1", "the new answer"), turn_end()].concat(),
     );
-    recorded(&io, vec![old_delivered, receipt((0, len(&path)))]);
+    recorded(&io, vec![old_delivered, late_receipt((0, len(&path)))]);
     drop(candidate.claim_body(CODEX));
     tokio::time::sleep(Duration::from_secs(5)).await;
     polls(3).await;
@@ -1226,7 +1232,7 @@ async fn a_recorded_rollout_does_not_end_the_walk_before_an_older_owed_one() {
         &b,
         &[opening(), answer("msg_2", "recorded answer"), turn_end()].concat(),
     );
-    let b_delivered = receipt((b_opener, len(&b)));
+    let b_delivered = late_receipt((b_opener, len(&b)));
     polls(3).await;
     let (c, c_source) = rollout(&harness, "rollout-c.jsonl", &prompted("s-codex"));
     bind_late(CODEX, &c);
@@ -1317,7 +1323,7 @@ async fn a_receipt_dated_after_the_next_bind_covers_no_rollout() {
     bind_late(CODEX, &b);
     append(&b, &turn("msg_2", "answer B"));
     assert_eq!(len(&a), len(&b));
-    recorded(&io, vec![receipt((opener, len(&a)))]);
+    recorded(&io, vec![late_receipt((opener, len(&a)))]);
     *io.custody.lock().unwrap() = Ok(Custody::Free);
     tokio::time::sleep(Duration::from_secs(5)).await;
     polls(3).await;
