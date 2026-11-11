@@ -5,6 +5,7 @@ pub(crate) mod human_input;
 pub(crate) mod lifecycle;
 pub(crate) mod memory;
 pub(crate) mod message_split;
+pub(crate) mod process_incarnation;
 pub(crate) mod provider;
 pub(crate) mod session_identity;
 pub(crate) mod tool_text;

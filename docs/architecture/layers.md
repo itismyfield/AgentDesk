@@ -531,3 +531,4 @@ S04에서 정적 catalog helper의 실제 구현은 `domain::provider`로, 문�
 `runtime_store::atomic_write`가 rename 전 inflight 진단과 ENOSPC 기록을 수행한다.
 외부 consumer는 기존 관측 함수 경로를 유지하고, plain atomic write는 parent sync를 추가하지 않는다.
 S07 `domain::file_sync`의 Windows unflushed 성공 계약과 durable publication은 유지한다.
+`domain::process_incarnation`은 process당 한 번 만드는 owner incarnation UUID의 adapter 소유자이며, Discord replay_policy·replay_admission은 같은 함수를 재노출한다. replay hold notice의 db 소비자만 정본 경로를 쓰고 UUID 생성 시점·횟수와 admission·recovery 비교는 유지한다.

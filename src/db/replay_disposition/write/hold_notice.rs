@@ -186,7 +186,7 @@ pub(crate) async fn recover_hold_notice(
             || text != state.user_text
             || sources != local_sources
             || !incarnation.as_deref().is_some_and(|v| {
-                !v.trim().is_empty() && v != crate::services::discord::replay_policy::incarnation()
+                !v.trim().is_empty() && v != crate::domain::process_incarnation::incarnation()
             })
             || !nonce
                 .as_deref()
