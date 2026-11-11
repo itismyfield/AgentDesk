@@ -3375,7 +3375,6 @@ src/
 │   │   ├── herdr_kill/
 │   │   │   └── effects.rs
 │   │   ├── listing_tests/
-│   │   │   └── legacy.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── force_kill.rs
 │   │   ├── herdr_kill.rs
