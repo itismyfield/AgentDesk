@@ -3,8 +3,8 @@
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::domain::cluster_policy::AgentExecutionNode;
 use crate::domain::intake_identity::OwnerIdentity;
-use crate::services::cluster::agent_execution_node::AgentExecutionNode;
 
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
 pub(crate) struct Preference {

@@ -1,27 +1,7 @@
 //! Agent defaults select a node only after existing session ownership is resolved.
-use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AgentExecutionNode {
-    pub default_node_id: Option<String>,
-}
-
-impl AgentExecutionNode {
-    pub(crate) fn validate(&self) -> Result<(), &'static str> {
-        if self.default_node_id.as_ref().is_some_and(|id| {
-            id.is_empty()
-                || id.len() > 128
-                || !id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-        }) {
-            return Err("default_node_id must be null or a valid node instance ID");
-        }
-        Ok(())
-    }
-}
+pub(crate) use crate::domain::cluster_policy::AgentExecutionNode;
 
 pub(crate) async fn get(
     pool: &PgPool,
@@ -94,6 +74,33 @@ pub(crate) async fn has_channel_policy(pool: &PgPool) -> Result<bool, sqlx::Erro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_policy_paths_are_the_domain_items() {
+        use crate::domain::cluster_policy::{
+            AgentExecutionNode as DomainNode, ExecutionRequirements as DomainRequirements,
+            supports_attachment_transfer,
+        };
+        use crate::services::cluster::{attachment_transfer, execution_requirements};
+
+        let canonical_node = DomainNode {
+            default_node_id: None,
+        };
+        let old_node: AgentExecutionNode = canonical_node;
+        let canonical_node: DomainNode = old_node;
+        assert!(canonical_node.validate().is_ok());
+        let canonical = DomainRequirements::parse(serde_json::json!({})).unwrap();
+        let old: execution_requirements::ExecutionRequirements = canonical;
+        let canonical: DomainRequirements = old;
+        assert!(canonical.is_empty());
+        let old_supports: fn(&serde_json::Value) -> bool = attachment_transfer::supports;
+        let canonical_supports: fn(&serde_json::Value) -> bool = supports_attachment_transfer;
+        let node = serde_json::json!({"capabilities":{"intake_worker":{
+            "features":["attachment_bundle_v1"]
+        }}});
+        assert!(old_supports(&node));
+        assert!(canonical_supports(&node));
+    }
 
     #[test]
     fn validates_stable_node_identifiers_and_explicit_reset() {
