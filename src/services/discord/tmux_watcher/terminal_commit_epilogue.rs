@@ -342,9 +342,8 @@ pub(super) async fn run_terminal_commit_epilogue(
                         // #3607 chokepoint. The clear ABOVE has already run; this only
                         // RECORDS the live lifecycle signals and fires a NON-FATAL
                         // ERROR-level invariant signal if a committed terminal was cleared
-                        // with neither a visible UI completion nor a persisted obligation
-                        // (#3607). Never gates cleanup. `terminal_ui_obligation_persisted` is
-                        // `false` on the watcher path. S2-b removed completion-gate
+                        // without a visible UI completion (#3607). Never gates cleanup.
+                        // S2-b removed completion-gate
                         // suppression, so a busy pane observation no longer suppresses this
                         // clear. Orchestration + the non-fatal invariant live in
                         // relay_owner_observability (non-hot file).
@@ -357,7 +356,6 @@ pub(super) async fn run_terminal_commit_epilogue(
                                 terminal_delivery_committed,
                                 terminal_output_committed
                                     && watcher_tui_gate_outcome.should_emit_completion(),
-                                false,
                             );
                     }
                     crate::services::discord::inflight::GuardedClearOutcome::IoError => {
