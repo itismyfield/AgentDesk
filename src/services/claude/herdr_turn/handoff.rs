@@ -125,9 +125,16 @@ fn current_session(
     else {
         return Ok(original.map(str::to_string));
     };
+    // A record without a nonce does not reset the writer's execution fold.
+    let nonce = latest.execution_nonce.as_deref().or_else(|| {
+        records
+            .iter()
+            .rev()
+            .filter(|record| record.tmux_session == logical && record.provider == "claude")
+            .find_map(|record| record.execution_nonce.as_deref())
+    });
     let (source, history) =
-        events::claude_history(channel, logical, latest.execution_nonce.as_deref())
-            .map_err(|e| e.to_string())?;
+        events::claude_history(channel, logical, nonce).map_err(|e| e.to_string())?;
     if history.awaiting.is_some() {
         return Err("handoff native session is still Pending".into());
     }
