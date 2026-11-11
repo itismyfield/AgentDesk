@@ -62,3 +62,17 @@ Main's violations are code paths on the baseline. Legacy posts the Deferred turn
 - Turn presence keeps a held turn Busy; that is `turn-presence`'s `EventuallyStableBusy`.
 - Census instrumentation (denominators, end evidence) is an observation contract checked by Rust tests.
 - tmux presence: with tmux alive the recovery budget never clears a row, so only the absent case is modelled.
+
+## S18 purpose-specific port assumption check (design only)
+
+Code SHA `92ef5b00b205679965c24c5c017f7237e8b5d57f`. Current code was checked at
+`src/services/tui_o/channel_policy/adoption.rs:420,428` (Held without a root, stored commitment),
+`src/services/tui_o/cutover/channel_gate.rs:460,466` (execution view remains owned/held), and
+`src/services/tui_o/writer/host.rs:530` (managed writer start).
+The proposed admission/lookup ports do not change adoption, O/Legacy body ownership, warm takeover,
+or body-census/terminal settlement. Outbox/turn_bridge/relay_recovery callers are excluded from this slice.
+No new WriterAdoption action or config is needed for an unchanged assumption.
+
+The admission/authority projection is in the existing
+[InputOwnershipAdmission model report](../input-single-path/InputOwnershipAdmissionPorts.report.md).
+`SC_RUN=mac-needed`: no TLC execution in this WSL leg, and no new GREEN claim for the historical results above.

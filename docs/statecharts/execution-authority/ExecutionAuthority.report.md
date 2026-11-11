@@ -133,3 +133,15 @@ python3 scripts/ci/statecharts_tlc.py \
 ```
 
 첫 명령은 scratch TemporaryDirectory에 모델/cfg를 복사하여 safety와 세 liveness를 10cfg×4=40회 실행한다. 원시 결과 `logs/*-r3.log`, 요약 `logs/authority-r3-summary.json`, 모델/cfg/expected SHA256은 `logs/authority-r3-source-hashes.json`이다. source 모델에 PROPERTY를 직접 넣지 않는다. 전체 CI는 `logs/statecharts-ci-r3.log`이며, 진행 중 로그를 PASS로 쓰지 않는다.
+
+## S18 port 분리 가정 확인 (설계, 미실행)
+
+Code SHA `92ef5b00b205679965c24c5c017f7237e8b5d57f`. `runtime_bootstrap.rs:271`의 prepare,
+`:340` worker 및 `:457` standby writer 시작과 `runtime_bootstrap/owner_execution.rs:70,146`의
+prepare/refresh를 소스에서 대조했다. 새 RuntimeLookup의 provider hash 관측은 permit/lease grant가 아니며
+Held/Unknown을 admission 허가로 바꾸지 않는다. A/H의 실제 실행은 기존 authority gate를
+계속 통과하고 port가 별도 owner state나 등록 관측을 실행 허가로 캐시하지 않는다.
+
+이 레그는 ExecutionAuthority의 행동·cfg·fairness를 변경하지 않는다. admission port 경계는
+[기존 admission 모델의 PortSpec](../input-single-path/InputOwnershipAdmissionPorts.report.md)으로 보완한다.
+WSL 실행기 부재로 `SC_RUN=mac-needed`; 이 절은 위 역사적 GREEN 결과의 현재 SHA 재실행 증거가 아니다.

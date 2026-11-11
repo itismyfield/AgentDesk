@@ -277,3 +277,10 @@ tui-o-writer/WriterWakeI8055Design.cfg	WriterWake	-	-
 tui-o-writer/WriterWakeI8055NoReadyWake.cfg	WriterWake	-	BootHeldEventuallyExecutes
 tui-o-writer/WriterWakeI8055RouteCurrent.cfg	WriterWake	BootRouteNoBlockedSelfWake	-
 tui-o-writer/WriterWakeI8055RouteDesign.cfg	WriterWake	-	-
+input-single-path/InputOwnershipAdmissionPorts.cfg	InputOwnershipAdmission	-	-
+input-single-path/InputOwnershipAdmissionPortsBootBypass.cfg	InputOwnershipAdmission	PortBootReceiptBeforeEffect	-
+input-single-path/InputOwnershipAdmissionPortsDuplicateReceipt.cfg	InputOwnershipAdmission	PortReceiptAtMostOnce,PortReceiptSettledExactlyOnce	PortInputsSettle
+input-single-path/InputOwnershipAdmissionPortsGrantLeak.cfg	InputOwnershipAdmission	PortNoGrantWithoutAdmission,PortNoUnauthorizedCalls	-
+input-single-path/InputOwnershipAdmissionPortsLooseStop.cfg	InputOwnershipAdmission	PortStopSameEpoch	-
+input-single-path/InputOwnershipAdmissionPortsNoWake.cfg	InputOwnershipAdmission	-	PortInputsSettle
+input-single-path/InputOwnershipAdmissionPortsStopLeak.cfg	InputOwnershipAdmission	PortNoUnauthorizedCalls	-

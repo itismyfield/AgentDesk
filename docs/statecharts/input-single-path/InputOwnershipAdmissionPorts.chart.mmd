@@ -1,0 +1,36 @@
+stateDiagram-v2
+    [*] --> Restart
+    Restart --> AuthorityHeld: first execution read fails
+    AuthorityHeld --> Verified: fair refresh succeeds
+    Restart --> Verified: prepare succeeds
+    Verified --> Ready: verified authority, tickets may enqueue
+    Ready --> Admitted: authorized original + stable ticket committed
+    Admitted --> Granted: actor grants exact queue front
+    Granted --> Claimed: matching front consumes grant once
+    Claimed --> Effect: no marked predecessor, private effect permit
+    Claimed --> BootReceipt: previous marked row
+    BootReceipt --> Effect: existing receipt commits, exact row clears
+    Effect --> Terminal: owner end
+    Claimed --> Terminal: authorized current execution stop
+    Effect --> Terminal: authorized current execution stop
+    Terminal --> Receipt: existing owner commits idempotent terminal
+    Receipt --> [*]
+    Admitted --> Restart: one crash, durable ticket preserved
+    Granted --> Restart: volatile grant discarded
+    Claimed --> Restart: unused claim discarded
+    Effect --> Restart: native effect proof resolved by existing owner
+    state AuthorityBoundary {
+        LookupOnly --> LookupOnly: grant / stop attempts refused
+        InputCaller --> InputCaller: requests admission, receives values only
+        StopCaller --> StopCaller: nonforced holder intent only
+    }
+    note right of Granted
+        Reservation ID is not a grant.
+        A ticket may enqueue while an old receipt is owed.
+        No grant/lease/actor/SharedData in public ports.
+    end note
+    note right of Receipt
+        One logical receipt per eligible original.
+        Retries may write the same row more than once.
+        PROPERTY PortInputsSettle checks eventual settlement.
+    end note
