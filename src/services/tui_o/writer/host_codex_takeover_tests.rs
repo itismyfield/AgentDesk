@@ -1203,3 +1203,84 @@ async fn a_turn_opened_before_a_late_bind_is_taken_without_a_legacy_record() {
         assert_eq!(harness.port.posts(), posts, "{:?}", io.alarms.halted());
     }
 }
+
+/// A rollout Legacy recorded in full does not end the walk: an older rollout of the generation with
+/// an unrecorded turn still goes into the init from that turn's opener.
+#[tokio::test(start_paused = true)]
+async fn a_recorded_rollout_does_not_end_the_walk_before_an_older_owed_one() {
+    const CODEX: u64 = 61_880;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    *io.custody.lock().unwrap() = Ok(Custody::Active);
+    let (a, a_source) = rollout(&harness, "rollout-a.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &a);
+    let a_opener = len(&a);
+    append(
+        &a,
+        &[opening(), answer("msg_1", "owed answer"), turn_end()].concat(),
+    );
+    polls(3).await;
+    let (b, _) = rollout(&harness, "rollout-b.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &b);
+    let b_opener = len(&b);
+    append(
+        &b,
+        &[opening(), answer("msg_2", "recorded answer"), turn_end()].concat(),
+    );
+    let b_delivered = receipt((b_opener, len(&b)));
+    polls(3).await;
+    let (c, c_source) = rollout(&harness, "rollout-c.jsonl", &prompted("s-codex"));
+    bind_late(CODEX, &c);
+    recorded(&io, vec![b_delivered]);
+    *io.custody.lock().unwrap() = Ok(Custody::Free);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(
+        init_sources(&harness, CODEX),
+        [(a_source, a_opener), (c_source, 0)]
+    );
+    polls(3).await;
+    assert_eq!(posted(&harness, "owed answer"), 1);
+    assert_eq!(posted(&harness, "recorded answer"), 0);
+}
+
+/// A record whose start is not a record end of the rollout is another file's bytes: it covers no
+/// turn here, which is taken from its opener.
+#[tokio::test(start_paused = true)]
+async fn a_record_off_the_rollouts_record_ends_covers_no_turn() {
+    const CODEX: u64 = 61_881;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    let (path, source) = rollout(&harness, "rollout-off.jsonl", &metadata("s-codex"));
+    let opener = len(&path);
+    append(
+        &path,
+        &[opening(), answer("msg_1", "off answer"), turn_end()].concat(),
+    );
+    bind_late(CODEX, &path);
+    recorded(&io, vec![receipt((opener + 1, len(&path)))]);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(init_sources(&harness, CODEX), [(source, opener)]);
+    polls(3).await;
+    assert_eq!(posted(&harness, "off answer"), 1);
+}
