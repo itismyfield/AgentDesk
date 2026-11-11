@@ -1,6 +1,6 @@
 # Claude Idle 입력 준비 확정 — #8080 설계 d2
 
-구현 A source SHA: be346e01c94fa32a37d13d05d01f7d3ab656bd72. B compact pending은 미구현이며 기존 compact 동작을 유지한다.
+구현 A source SHA: 664d1589dd99c3d51d9082194e0c09189035b4b1. B compact pending은 미구현이며 기존 compact 동작을 유지한다.
 
 설계 d2 시점 Prod 기준 SHA: 574af580b0c5d6e6ce280994f4ed243463de5d2d.
 main: 4f30c67d9a48eacad96a99faff9fd442d0d4dd3c.
@@ -428,3 +428,8 @@ AwaitResume의 새 활동은 suppression floor 이후에 시작한 완결 행이
 Stop 때 일부만 쓰인 옛 행의 뒤늦은 완성을 새 활동으로 인정하지 않는다. continuation은 producer
 활동 시각도 suppression 시각 이후인지 검사한다. 2.1.322의 timestamp 정밀도·생성/flush 순서는
 격리 실측하지 못한 [U]이며, 모델은 이 byte/clock 구체화를 열거하지 않는다.
+
+
+### A 리뷰 수리의 준비 경계
+
+permission-mode는 현재 terminal을 무효화하되 뒤의 정상 완료까지 거절하지 않는다. bounded 준비 대기는 readiness/dialog.rs에서 기존 startup plan·5회 해제 한도·500ms settle·composer lock·cancel을 반복 적용한다. 이 UI 처리는 준비 증거가 아니며 SourceStart/Idle 확인은 별도다. Herdr 첫 입력의 시험은 실제 run_ready와 현재 source를 사용하고 옛 test-only run/when_ready wrapper는 제거했다. /resume B 뒤 늦은 /clear X의 typed ingress 판정 연결(P2)은 별도 후속이며 이번에 변경하지 않았다.

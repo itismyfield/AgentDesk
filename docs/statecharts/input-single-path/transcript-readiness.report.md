@@ -1,8 +1,8 @@
 # Claude Idle readiness refinement — implementation A
 
-Implementation source SHA: be346e01c94fa32a37d13d05d01f7d3ab656bd72.
+Implementation source SHA: 664d1589dd99c3d51d9082194e0c09189035b4b1.
 Implementation base: c3b660544bab3971630931b444c67a985f4c9169.
-Current model evidence: 33 cfg / 97 reported runs / 21 GREEN / 12 expected RED / failed0 / skip0; a1 direct TLC reused.
+Current model evidence: 37 cfg / 105 reported runs / 23 GREEN / 14 expected RED / failed0 / skip0; a3 direct TLC run.
 Document baseline: 0b0f39c582a9073fdb20b62512bc7794a18d1281.
 Main: 4f30c67d9a48eacad96a99faff9fd442d0d4dd3c.
 SC_RUN=direct-TLC (a1 run reused); the statechart wrapper is absent.
@@ -172,3 +172,17 @@ a2에서는 모델·cfg를 바꾸지 않았다. a1 직접 TLC 최종 실행의 3
 52개 파일이 현재 파일과 바이트 단위로 일치한다. compact GREEN은 분할 B까지 포함한 설계
 결과이며 A의 compact 제품 구현을 주장하지 않는다. partial-record/producer clock 검사는
 이 추상 모델의 새 활동 술어를 구체화하며 별도 Rust RED/GREEN 시험으로 검증한다.
+
+
+## A review repair — permission and startup refinement
+
+Implementation source SHA: 664d1589dd99c3d51d9082194e0c09189035b4b1. Direct TLC reran the existing33 plus4 new configs:37 cfg/105 reported runs/GREEN23/expected RED14/unexpected failed0/skip0,61.9s.
+
+| cfg | before/after | actual violation |
+|---|---|---|
+| InputPathReadyPermissionPoison.cfg | before | ReadyPendingEventuallyExecutes |
+| InputPathReadyPermissionLater.cfg | after | none |
+| InputPathReadyPreflightOnly.cfg | before | ReadyPendingEventuallyExecutes |
+| InputPathReadyLateDialog.cfg | after | none |
+
+Permission metadata clears the current terminal while later completion remains eligible. A late approved startup picker must be polled again before SessionStart; its dialog Enter is separate from original payload writes. The concrete workspace plan is tested by callers, not proved by these abstract paths. Existing compact GREEN remains a design-B claim only.
