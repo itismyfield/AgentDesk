@@ -1,5 +1,5 @@
-export const title = "Consent: worker authority, observation, locked CAS";
-export const state = (v) => `${v.row.status}; marker=${v.row.marker}; owner=${v.live ? "live" : "retired"}; workers=${JSON.stringify(v.pc)}`;
-export const group = (v) => v.row.marker === "released" ? "Released" : v.row.marker === "rearm" ? "Rearmed" : v.row.marker === "held" ? "Held" : "Worker";
-export const colors = { Worker: "blue", Held: "pink", Rearmed: "teal", Released: "teal" };
+export const title = "Before-effects authority: Current / public receipt d1 / keyed scope r2";
+export const state = ({s}) => `${s.row.status}; claim=${s.row.claim}; epoch=${s.epoch}; effects=${s.effects}; ${JSON.stringify(s.a)}`;
+export const group = ({s}) => s.badAfterEffects ? "Unsafe" : s.row.marker === "rearm" ? "Rearmed" : "Authority";
+export const colors = { Authority: "blue", Rearmed: "teal", Unsafe: "pink" };
 export const step = (action) => action;

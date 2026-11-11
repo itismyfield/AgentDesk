@@ -24,13 +24,15 @@ execution-authority/ExecutionAuthorityWorker.cfg	ExecutionAuthority	-	-
 host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses	-
 host-migration/HostMigrationClean.cfg	HostMigration	-	-
 host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock	-
-# S4-07 design expectations, unexecuted on WSL: SC_RUN=mac-needed; see intake-consent report.
+# S4-07 r2 predictions only; SC_RUN=mac-needed; see intake-consent report.
 intake-consent/IntakeConsentBookkeeping.cfg	IntakeConsent	RollbackExactAndBookkeeping	-
 intake-consent/IntakeConsentCurrent.cfg	IntakeConsent	-	-
+intake-consent/IntakeConsentD1Public.cfg	IntakeConsent	NoUnauthorizedIssue,NoEffectsThenRollback	-
 intake-consent/IntakeConsentForge.cfg	IntakeConsent	NoUnauthorizedIssue	-
 intake-consent/IntakeConsentOwnerOnly.cfg	IntakeConsent	NoStaleProofWrite	-
 intake-consent/IntakeConsentProposed.cfg	IntakeConsent	-	-
 intake-consent/IntakeConsentReuse.cfg	IntakeConsent	ProofConsumedOnce	-
+intake-consent/IntakeConsentScopeOpen.cfg	IntakeConsent	NoUnauthorizedIssue,NoEffectsThenRollback	-
 intake-consent/IntakeConsentStale.cfg	IntakeConsent	NoStaleProofWrite	-
 input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-
