@@ -59,6 +59,9 @@ async fn enqueue_race_loss_requeued_intervention(
     if input_refusal(outcome.refusal_reason) {
         return outcome;
     }
+    if !outcome.enqueued && outcome.persistence_error.is_none() {
+        return outcome;
+    }
     if outcome.persistence_error.is_some() {
         let cleared = crate::services::discord::mailbox_clear_pending_dispatch_reservation(
             shared,

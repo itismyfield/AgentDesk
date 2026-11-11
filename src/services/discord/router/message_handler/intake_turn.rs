@@ -1078,6 +1078,9 @@ pub(super) async fn handle_text_message(
 
         // A refused claim owns no start attempt; publish only its durable queue view.
         if !started {
+            super::super::intake_dispatch::hand_back_race_lost(
+                _queued_drain && owner.is_none(), &mut pending_uploads,
+            )?;
             return race_loss::handle_race_loss_enqueue(
                 http,
                 shared,
