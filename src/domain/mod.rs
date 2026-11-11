@@ -3,6 +3,7 @@ pub(crate) mod auto_queue_log;
 pub(crate) mod automation_contract;
 pub(crate) mod bot_role;
 pub(crate) mod cluster_policy;
+pub(crate) mod dispatch_route;
 pub(crate) mod file_sync;
 pub(crate) mod human_input;
 pub(crate) mod intake_identity;

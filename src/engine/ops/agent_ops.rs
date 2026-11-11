@@ -209,14 +209,17 @@ fn resolve_agent_channel_pg_raw(
         move |bridge_pool| async move {
             let resolved = match resolver {
                 ChannelResolver::Primary => {
-                    crate::db::agents::resolve_agent_primary_channel_pg(&bridge_pool, &agent_id)
-                        .await
-                        .map_err(|error| {
-                            format!("resolve primary postgres channel {agent_id}: {error}")
-                        })?
+                    crate::services::agent_channels::resolve_agent_primary_channel_pg(
+                        &bridge_pool,
+                        &agent_id,
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!("resolve primary postgres channel {agent_id}: {error}")
+                    })?
                 }
                 ChannelResolver::Counter => {
-                    crate::db::agents::resolve_agent_counter_model_channel_pg(
+                    crate::services::agent_channels::resolve_agent_counter_model_channel_pg(
                         &bridge_pool,
                         &agent_id,
                     )
@@ -225,15 +228,17 @@ fn resolve_agent_channel_pg_raw(
                         format!("resolve counter postgres channel {agent_id}: {error}")
                     })?
                 }
-                ChannelResolver::Dispatch => crate::db::agents::resolve_agent_dispatch_channel_pg(
-                    &bridge_pool,
-                    &agent_id,
-                    dispatch_type.as_deref(),
-                )
-                .await
-                .map_err(|error| {
-                    format!("resolve dispatch postgres channel {agent_id}: {error}")
-                })?,
+                ChannelResolver::Dispatch => {
+                    crate::services::agent_channels::resolve_agent_dispatch_channel_pg(
+                        &bridge_pool,
+                        &agent_id,
+                        dispatch_type.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!("resolve dispatch postgres channel {agent_id}: {error}")
+                    })?
+                }
             };
             Ok(resolved.unwrap_or_default())
         },

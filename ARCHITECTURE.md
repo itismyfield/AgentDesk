@@ -404,6 +404,7 @@ src/
 │   ├── automation_contract.rs
 │   ├── bot_role.rs
 │   ├── cluster_policy.rs
+│   ├── dispatch_route.rs
 │   ├── file_sync.rs
 │   ├── human_input.rs
 │   ├── intake_identity.rs
@@ -4475,6 +4476,7 @@ src/
 │   │   │   └── statusline_tests.rs
 │   │   ├── quota.rs
 │   │   └── quota_tests.rs
+│   ├── agent_channels.rs
 │   ├── agent_identity.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
@@ -4558,6 +4560,7 @@ src/
 │   ├── service_error.rs
 │   ├── session_activity.rs
 │   ├── session_backend.rs
+│   ├── session_evidence.rs
 │   ├── session_forwarding.rs
 │   ├── session_host.rs
 │   ├── session_resume.rs

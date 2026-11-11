@@ -152,7 +152,7 @@ async fn create_activate_dispatch_pg_inner(
     }
 
     if !sandbox_preflight_dispatch {
-        let channel_value = crate::db::agents::resolve_agent_dispatch_channel_pg(
+        let channel_value = crate::services::agent_channels::resolve_agent_dispatch_channel_pg(
             pool,
             to_agent_id,
             Some(dispatch_type),

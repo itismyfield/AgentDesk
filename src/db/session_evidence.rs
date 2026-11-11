@@ -2,8 +2,7 @@
 
 use super::agents::AgentChannelBindings;
 use serde::Serialize;
-use sqlx::{PgPool, Row};
-use std::collections::BTreeMap;
+use sqlx::{PgPool, Row, postgres::PgRow};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct SessionEvidence {
@@ -14,10 +13,46 @@ pub(crate) struct SessionEvidence {
     pub raw_provider_session_id: Option<String>,
 }
 
-pub(crate) async fn load_session_evidence_pg(
+pub(crate) struct SessionEvidenceRow(PgRow);
+
+impl SessionEvidenceRow {
+    pub(crate) fn decode_binding(&self) -> Result<(String, AgentChannelBindings), sqlx::Error> {
+        let agent_id = self.0.try_get("agent_id")?;
+        let bindings = AgentChannelBindings {
+            provider: self.0.try_get("agent_provider")?,
+            discord_channel_id: self.0.try_get("discord_channel_id")?,
+            discord_channel_alt: self.0.try_get("discord_channel_alt")?,
+            discord_channel_cc: self.0.try_get("discord_channel_cc")?,
+            discord_channel_cdx: self.0.try_get("discord_channel_cdx")?,
+        };
+        Ok((agent_id, bindings))
+    }
+
+    pub(crate) fn matches_session(
+        &self,
+        channel_id: &Option<String>,
+        provider: &Option<String>,
+    ) -> Result<bool, sqlx::Error> {
+        Ok(
+            self.0.try_get::<Option<String>, _>("channel_id")? == *channel_id
+                && self.0.try_get::<Option<String>, _>("provider")? == *provider
+                && provider.is_some(),
+        )
+    }
+
+    pub(crate) fn decode_session_key(&self) -> Result<Option<String>, sqlx::Error> {
+        self.0.try_get("session_key")
+    }
+
+    pub(crate) fn decode_raw_provider_session_id(&self) -> Result<Option<String>, sqlx::Error> {
+        self.0.try_get("raw_provider_session_id")
+    }
+}
+
+pub(crate) async fn load_session_evidence_rows_pg(
     pool: &PgPool,
     identifier: &str,
-) -> Result<Vec<SessionEvidence>, sqlx::Error> {
+) -> Result<Vec<SessionEvidenceRow>, sqlx::Error> {
     // Only stored fixed-channel identities count; channel-less free slots are not evidence.
     let rows = sqlx::query(
         "SELECT a.id AS agent_id, a.provider AS agent_provider,
@@ -38,53 +73,5 @@ pub(crate) async fn load_session_evidence_pg(
     .bind(identifier)
     .fetch_all(pool)
     .await?;
-    let mut targets = BTreeMap::new();
-    let mut evidence = Vec::new();
-    for row in rows {
-        let agent_id: String = row.try_get("agent_id")?;
-        let bindings = AgentChannelBindings {
-            provider: row.try_get("agent_provider")?,
-            discord_channel_id: row.try_get("discord_channel_id")?,
-            discord_channel_alt: row.try_get("discord_channel_alt")?,
-            discord_channel_cc: row.try_get("discord_channel_cc")?,
-            discord_channel_cdx: row.try_get("discord_channel_cdx")?,
-        };
-        let channel_id = if agent_id == identifier {
-            bindings.primary_channel()
-        } else {
-            Some(identifier.to_string())
-        };
-        let provider = channel_id
-            .as_ref()
-            .and_then(|channel| bindings.provider_for_channel(|bound| bound == channel))
-            .map(|provider| provider.as_str().to_string());
-        let matched = row.try_get::<Option<String>, _>("channel_id")? == channel_id
-            && row.try_get::<Option<String>, _>("provider")? == provider
-            && provider.is_some();
-        let target = targets
-            .entry(agent_id.clone())
-            .or_insert((channel_id, provider, false));
-        if matched {
-            evidence.push(SessionEvidence {
-                agent_id,
-                channel_id: target.0.clone(),
-                provider: target.1.clone(),
-                session_key: row.try_get("session_key")?,
-                raw_provider_session_id: row.try_get("raw_provider_session_id")?,
-            });
-            target.2 = true;
-        }
-    }
-    for (agent_id, (channel_id, provider, matched)) in targets {
-        if !matched {
-            evidence.push(SessionEvidence {
-                agent_id,
-                channel_id,
-                provider,
-                session_key: None,
-                raw_provider_session_id: None,
-            });
-        }
-    }
-    Ok(evidence)
+    Ok(rows.into_iter().map(SessionEvidenceRow).collect())
 }

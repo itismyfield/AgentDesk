@@ -1,3 +1,4 @@
+pub(crate) mod agent_channels;
 pub mod agent_identity;
 pub mod agent_protocol;
 pub mod agent_recovery;

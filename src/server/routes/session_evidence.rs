@@ -17,11 +17,14 @@ pub(crate) async fn get(
     let pool = state
         .pg_pool_ref()
         .ok_or_else(|| AppError::internal("postgres required"))?;
-    let mut evidence = crate::db::session_evidence::load_session_evidence_pg(pool, &identifier)
-        .await
-        .map_err(|error| {
-            AppError::internal(format!("query: {error}")).with_code(ErrorCode::Database)
-        })?;
+    let mut evidence = crate::services::agent_channels::session_evidence::load_session_evidence_pg(
+        pool,
+        &identifier,
+    )
+    .await
+    .map_err(|error| {
+        AppError::internal(format!("query: {error}")).with_code(ErrorCode::Database)
+    })?;
     match evidence.len() {
         0 => Err(AppError::not_found("session evidence binding not found")),
         1 => Ok(Json(evidence.remove(0))),
