@@ -835,7 +835,8 @@ async fn a_turn_ended_before_the_baseline_is_skipped_only_on_delivery_evidence()
 }
 
 /// A turn on the rollout bound before, opened before the baseline after a Legacy send and ended
-/// undelivered, keeps a new rollout's takeover waiting; once Legacy recorded both, it commits.
+/// undelivered, keeps a new rollout's takeover waiting; a record of the new rollout's turn proves
+/// nothing once two rollouts were bound, so with Legacy sending it keeps waiting.
 #[tokio::test(start_paused = true)]
 async fn an_undelivered_turn_on_the_rollout_before_holds_the_next_rollouts_takeover() {
     const CODEX: u64 = 61_837;
@@ -860,7 +861,7 @@ async fn an_undelivered_turn_on_the_rollout_before_holds_the_next_rollouts_takeo
     );
     append(&old, &turn_end());
     let old_delivered = receipt((first_opener(), len(&old)));
-    let (path, source) = rollout(&harness, "rollout-new.jsonl", &prompted("s-codex"));
+    let (path, _) = rollout(&harness, "rollout-new.jsonl", &prompted("s-codex"));
     bind_late(CODEX, &path);
     polls(3).await;
     assert_eq!(
@@ -880,16 +881,11 @@ async fn an_undelivered_turn_on_the_rollout_before_holds_the_next_rollouts_takeo
     polls(3).await;
     assert_eq!(
         adoption(CODEX),
-        Adoption::Committed,
-        "{:?}",
-        io.alarms.halted()
+        Adoption::Deferred,
+        "Legacy may have sent the new turn"
     );
-    let end = std::fs::metadata(&path).unwrap().len();
-    assert_eq!(init_sources(&harness, CODEX), [(source, end)]);
-    assert!(
-        harness.port.posts().is_empty(),
-        "Legacy delivered both turns"
-    );
+    assert!(!harness.store.has_channel_dir(CODEX));
+    assert!(harness.port.posts().is_empty());
 }
 
 /// A turn whose records carry no time is taken from its opener when uncertain; only Legacy's record
@@ -1223,7 +1219,7 @@ async fn a_recorded_rollout_does_not_end_the_walk_before_an_older_owed_one() {
         &[opening(), answer("msg_1", "owed answer"), turn_end()].concat(),
     );
     polls(3).await;
-    let (b, _) = rollout(&harness, "rollout-b.jsonl", &metadata("s-codex"));
+    let (b, b_source) = rollout(&harness, "rollout-b.jsonl", &metadata("s-codex"));
     bind_late(CODEX, &b);
     let b_opener = len(&b);
     append(
@@ -1244,13 +1240,14 @@ async fn a_recorded_rollout_does_not_end_the_walk_before_an_older_owed_one() {
         "{:?}",
         io.alarms.halted()
     );
+    // B's record is dated after B's bind, so it proves no rollout and B is taken as well.
     assert_eq!(
         init_sources(&harness, CODEX),
-        [(a_source, a_opener), (c_source, 0)]
+        [(a_source, a_opener), (b_source, b_opener), (c_source, 0)]
     );
     polls(3).await;
     assert_eq!(posted(&harness, "owed answer"), 1);
-    assert_eq!(posted(&harness, "recorded answer"), 0);
+    assert_eq!(posted(&harness, "recorded answer"), 1);
 }
 
 /// A record whose start is not a record end of the rollout is another file's bytes: it covers no
@@ -1282,4 +1279,173 @@ async fn a_record_off_the_rollouts_record_ends_covers_no_turn() {
     assert_eq!(init_sources(&harness, CODEX), [(source, opener)]);
     polls(3).await;
     assert_eq!(posted(&harness, "off answer"), 1);
+}
+
+/// A Historical receipt of the rollout bound first, dated after the next bind at the very bytes
+/// where the next rollout's turn ends, covers neither: both turns are taken and posted once.
+#[tokio::test(start_paused = true)]
+async fn a_receipt_dated_after_the_next_bind_covers_no_rollout() {
+    const CODEX: u64 = 61_882;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    *io.custody.lock().unwrap() = Ok(Custody::Active);
+    let (a, a_source) = rollout(&harness, "rollout-a.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &a);
+    let opener = len(&a);
+    let at = Utc::now().to_rfc3339();
+    let turn = |id: &str, text: &str| {
+        let line = |value| codex_line(value);
+        [
+            line(serde_json::json!({"type": "event_msg", "timestamp": at,
+                "payload": {"type": "task_started", "turn_id": "t1"}})),
+            line(serde_json::json!({"type": "response_item", "timestamp": at,
+                "payload": {"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}]}})),
+            answer(id, text),
+            line(serde_json::json!({"type": "event_msg", "timestamp": at,
+                "payload": {"type": "task_complete", "turn_id": "t1"}})),
+        ]
+        .concat()
+    };
+    append(&a, &turn("msg_1", "answer A"));
+    polls(3).await;
+    let (b, b_source) = rollout(&harness, "rollout-b.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &b);
+    append(&b, &turn("msg_2", "answer B"));
+    assert_eq!(len(&a), len(&b));
+    recorded(&io, vec![receipt((opener, len(&a)))]);
+    *io.custody.lock().unwrap() = Ok(Custody::Free);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(
+        init_sources(&harness, CODEX),
+        [(a_source, opener), (b_source, opener)]
+    );
+    polls(3).await;
+    assert_eq!(posted(&harness, "answer B"), 1);
+    assert_eq!(posted(&harness, "answer A"), 1);
+}
+
+/// The current rollout judged owed while custody holds the commit stays owed when the next bind
+/// and a later generation start come before any further look.
+#[tokio::test(start_paused = true)]
+async fn a_current_rollout_judged_owed_stays_owed_past_a_generation_move() {
+    const CODEX: u64 = 61_883;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    *io.custody.lock().unwrap() = Ok(Custody::Active);
+    let (a, a_source) = rollout(&harness, "rollout-a.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &a);
+    let opener = len(&a);
+    append(
+        &a,
+        &[opening(), answer("msg_1", "owed answer"), turn_end()].concat(),
+    );
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Deferred,
+        "custody blocks the commit"
+    );
+    let (b, b_source) = rollout(&harness, "rollout-b.jsonl", &prompted("s-codex"));
+    bind_late(CODEX, &b);
+    recorded_since(&io, Utc::now(), Vec::new());
+    *io.custody.lock().unwrap() = Ok(Custody::Free);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(
+        init_sources(&harness, CODEX),
+        [(a_source, opener), (b_source, 0)]
+    );
+    polls(3).await;
+    assert_eq!(posted(&harness, "owed answer"), 1);
+}
+
+/// A rollout over the fresh-prefix read budget whose recorded history Legacy delivered is taken
+/// after it, and its next turn is posted once.
+#[tokio::test(start_paused = true)]
+async fn a_rollout_over_the_fresh_read_budget_is_taken_and_its_turn_posted() {
+    const CODEX: u64 = 61_884;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    let big = "x".repeat(1_100_000);
+    let (path, source) = rollout(&harness, "rollout-big.jsonl", &metadata("s-codex"));
+    append(&path, &history("t0", &big));
+    let end = len(&path);
+    assert!(end > crate::services::tui_o::shadow::MAX_READ_BYTES);
+    append(
+        &path,
+        &[opening(), answer("msg_1", "after the big turn"), turn_end()].concat(),
+    );
+    bind_late(CODEX, &path);
+    history_recorded(&io, end);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(init_sources(&harness, CODEX), [(source, end)]);
+    polls(3).await;
+    assert_eq!(posted(&harness, "after the big turn"), 1);
+}
+
+/// A recorded rollout over the fresh-prefix read budget does not hold the takeover of a small
+/// rollout bound after it.
+#[tokio::test(start_paused = true)]
+async fn a_rollout_over_the_fresh_read_budget_lets_the_next_rollout_commit() {
+    const CODEX: u64 = 61_885;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    *io.custody.lock().unwrap() = Ok(Custody::Active);
+    let big = "x".repeat(1_100_000);
+    let (a, _) = rollout(&harness, "rollout-big.jsonl", &metadata("s-codex"));
+    append(&a, &history("t0", &big));
+    bind_late(CODEX, &a);
+    history_recorded(&io, len(&a));
+    polls(3).await;
+    let (b, b_source) = rollout(&harness, "rollout-small.jsonl", &prompted("s-codex"));
+    bind_late(CODEX, &b);
+    *io.custody.lock().unwrap() = Ok(Custody::Free);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(init_sources(&harness, CODEX), [(b_source, 0)]);
+    append(&b, &answer("msg_1", "the small answer"));
+    polls(3).await;
+    assert_eq!(posted(&harness, "the small answer"), 1);
 }

@@ -621,3 +621,96 @@ async fn busy_takeover() {
     pool.close().await;
     fixture.drop().await;
 }
+
+/// A rollout after `/clear` whose one turn is answered `text` and ended; returns where that turn
+/// opens and where the file ends.
+fn answered(dir: &std::path::Path, name: &str, text: &str) -> (SourceId, u64, u64) {
+    let path = dir.join(name);
+    let header =
+        json!({"type":"session_meta","payload":{"id":"takeover","cwd":"/tmp","source":"cli"}});
+    let turn = [
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"user",
+            "content":[{"type":"input_text","text":"hi"}]}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant","id":"m1",
+            "content":[{"type":"output_text","text":text}]}}),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}),
+    ];
+    let header = format!("{header}\n");
+    let turn: String = turn.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(&path, format!("{header}{turn}")).unwrap();
+    let (opener, end) = (header.len() as u64, (header.len() + turn.len()) as u64);
+    (source_id_for("takeover", &path).unwrap(), opener, end)
+}
+
+/// Through the gateway's own delivery records: a Historical receipt of the rollout bound first,
+/// written by the pinned writer after the next bind at the very bytes where that rollout's turn
+/// ends, proves neither rollout's delivery, so both turns are taken from their openers.
+#[cfg(unix)]
+#[test]
+fn codex_takeover_counts_a_historical_receipt_for_no_rollout_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(historical_takeover());
+}
+
+#[cfg(unix)]
+async fn historical_takeover() {
+    use crate::services::discord::outbound::delivery_record as dr;
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let local = crate::services::cluster::node_registry::SELF_INSTANCE_ID.get();
+    let local = local.map_or("takeover-local", String::as_str);
+    let channel = 64_700_511;
+    let log = Log::new(channel);
+    let io = Late {
+        host: test_host::over(shared, Duration::ZERO, Some(local)),
+        log: Arc::clone(&log),
+        stub: None,
+    };
+    let stores = tempfile::tempdir().unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, stores.path());
+    let store = store.unwrap().unwrap();
+    let rollouts = tempfile::tempdir().unwrap();
+    let _reserved = reserve(&[channel]);
+    let gate = OwnershipGate::default();
+    gate.acquired();
+    // The tmux generation the binding log names began an hour before both binds.
+    let marker = crate::services::tmux_common::session_temp_path("takeover", "generation");
+    std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(&marker, "generation").unwrap();
+    let began = chrono::Utc::now().timestamp() - 3600;
+    filetime::set_file_mtime(&marker, filetime::FileTime::from_unix_time(began, 0)).unwrap();
+    let generation = dr::current_generation_mtime_ns("takeover");
+    let (a, a_opener, a_end) = answered(rollouts.path(), "rollout-a.jsonl", "answer A");
+    log.bind_now(&a);
+    let (b, b_opener, b_end) = answered(rollouts.path(), "rollout-b.jsonl", "answer B");
+    log.bind_now(&b);
+    assert_eq!((a_opener, a_end), (b_opener, b_end));
+    let last_chunk = dr::ExactJsonlSourceIdentity {
+        provider: "codex".into(),
+        tmux_session_name: "takeover".into(),
+        turn_nonce: "a-last-chunk".into(),
+        range: (a_opener, a_end),
+        generation_mtime_ns: generation,
+        offset_authority_channel_id: channel,
+        delivery_channel_id: channel,
+    };
+    let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
+    let message_id = (now_ms - 1_420_070_400_000) << 22;
+    dr::record_historical_pinned_delivery(&last_chunk, message_id).unwrap();
+    let adopting = candidate(channel);
+    assert!(late_adopt::activate(&io, channel, Codex, &store, &*log, &adopting, &gate).await);
+    assert_eq!(
+        init_sources(&store, channel),
+        [(a, a_opener), (b, b_opener)],
+        "a receipt dated after the next bind covers no rollout"
+    );
+    pool.close().await;
+    fixture.drop().await;
+}
