@@ -1,6 +1,6 @@
 # Claude Idle 입력 준비 확정 — #8080 설계 d2
 
-구현 A+B source SHA: efe1ba3647bea52f0a6dc19b662eaf17219d3316. 설계 r2 좌표는 당시 snapshot이며 최신 B 구현 대응과 검증 경계는 [보고서](transcript-readiness.report.md)의 B 절을 따른다.
+구현 A+B 및 compact 완료 수리 source SHA: 01d6532dce19bf3f2c60783a15077113b6e113e3. 최신 compact 완료 계약과 검증은 [보고서](transcript-readiness.report.md)의 B 완료 수리 절을 따른다.
 
 설계 d2 시점 Prod 기준 SHA: 574af580b0c5d6e6ce280994f4ed243463de5d2d.
 main: 4f30c67d9a48eacad96a99faff9fd442d0d4dd3c.
@@ -23,7 +23,7 @@ r2 문서 기준: 0b0f39c582a9073fdb20b62512bc7794a18d1281. 리뷰 P1/P2와 코�
 | 훅 버퍼 수신 | claude_tui/hook_server.rs:304, :395, :459, :465, :495, :531; hook_registry.rs:276, :443 | [C] ingress 뒤 event, 계속 실행되는 Stop은 notify/registry 제외. 기존 필터는 유지하며 새 continuation fence만 제외 전에 기록; 정상 ready wake는 제외 뒤 관측 |
 | transcript 경로 | claude_tui/transcript_tail.rs:23, :44, :72, :139; source_verify.rs:39, :223, :332; tui_prompt_dedupe/binding_events.rs:498 | [C] source pin/UUID/path/dev/ino 우선. cwd newest/mtime는 신원 증거 아님. 복수 후보 임의 선택 금지 |
 | transcript Idle 생산 | claude_tui/transcript_tail.rs:394 → tui_turn_state.rs:339 → tui_turn_state/claude_meta.rs:6, :17; tui_turn_state.rs:574 | [C] 빈/init-only도 Idle일 수 있고 malformed를 넘길 수 있어 준비 확정에는 추가 경계 검증 필요 |
-| 운영 Claude Code 2.1.322 | 코디네이터 brief. r1에서 확인한 로컬 claude --version은 2.1.316 | [U] 운영 바이너리/이벤트를 실측하지 않음. 로컬 version을 운영 증거로 대체하지 않음 |
+| 운영 Claude Code 2.1.322 | 코디네이터 제공 격리 TUI transcript 기록 순서, 이번 fixture | [C] local compact 뒤 assistant/stop_hook_summary/turn_duration 없음. 레인 자체 운영 접근/실행 없음. SessionStart payload 전체 등 다른 전제는 별도 [U] 유지 |
 | source 값 | [Anthropic hooks reference](https://code.claude.com/docs/en/hooks#sessionstart) | [D] startup/resume/clear/compact 구별. 현재 문서에는 fork도 존재; unknown/fork를 startup으로 처리하지 않음. 2.1.322 payload는 [U] |
 | SessionStart와 composer 순서 | source_verify.rs:376은 startup/clear background start의 늦은 회귀를 거절. 공식 문서는 interactive startup/launch resume/clear의 훅 실행 중 입력을 받고 응답은 훅 종료를 기다린다고 설명 | [D/U] 화면 marker보다 먼저 Start를 쓸 근거. 정확히 2.1.322에서 조기 paste+Enter 한 번이 수용되는지는 구현 격리 fixture로 확인해야 함. settle 시간은 증명이 아님 |
 
@@ -256,6 +256,17 @@ usage drop/rearm 의미는 유지한다.
 완료 뒤 전부 stale가 되는 버그가 난다. current source+마지막 완료 턴 proof로 바꾸고 successor turn이 시작되면 보류한다.
 첫 mutation 이후 불명확한 요청은 자동 재주입하지 않는다. 화면 queued/empty hint로 성공을 선언하지 않고
 native compact/occupancy 하락을 관측하거나 ambiguity를 유지한다. 새로운 prompt replay 계약은 없다.
+
+확실히 제출한 자기 compact는 일반 턴의 assistant/hard terminal을 만들지 않을 수 있다. 2.1.322 격리 실측의
+manual compact_boundary → summary → caveat → /compact command-name → 닫힌 local-command-stdout → housekeeping을
+전용 완료 계약으로 승인한다. 닫힌 local-command-stderr 또는 비성공 stdout도 control 종료로 분류하되 성공으로 기록하지 않는다.
+소스/nonce/native/path/file/Start와 자기 reservation token을 검증하고, 현 generation을 잠근 채 그 compact pending만 종결한다.
+기존 continuation 및 recovery floor는 지우지 않는다. recovery는 예약 당시 이미 승인한 동일 floor만 재사용한다.
+새 Start·file 교체·새 native submit은 이전 완료 증거를 폐기한다. 알려진 pre-key NotSent는 완료 증거를 보존한다.
+PostCompact 또는 SessionStart(compact) 단독은 어떤 일반 readiness authority도 만들지 않는다.
+Submitted worker는 종료하지 않고 완료를 기다린다. 새 일반 입력은 이 source-bound 완료 proof와 기존 D/lock/current 검사를 거쳐 한 번 제출한다.
+Unknown 전송, foreign/multiple command, 다른 generation/source/reservation에는 이 종료 계약을 적용하지 않는다.
+
 
 ## 4. 사람 초안·출처·인접 경로
 

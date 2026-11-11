@@ -188,7 +188,7 @@ Implementation source SHA: 664d1589dd99c3d51d9082194e0c09189035b4b1. Direct TLC 
 Permission metadata clears the current terminal while later completion remains eligible. A late approved startup picker must be polled again before SessionStart; its dialog Enter is separate from original payload writes. The concrete workspace plan is tested by callers, not proved by these abstract paths. Existing compact GREEN remains a design-B claim only.
 
 
-## B implementation / direct TLC correspondence
+## Historical B1 implementation / direct TLC correspondence
 
 Implementation source SHA `efe1ba3647bea52f0a6dc19b662eaf17219d3316`. B measure base / merged A ref is `6be9c44583b0cb24f49e31ede6a4c59cfdf88515`. No TLA/cfg change was needed: this implementation follows the already reviewed compact-pending actions. Direct TLC was rerun from the current 56 model/cfg files (all byte-identical to the execution snapshot): 37 cfg / 105 reported runs, GREEN23 / expected RED14 / unexpected failure0 / skip0, 66.1s. These results are specification checks, not a CLI execution or code extraction.
 
@@ -213,6 +213,37 @@ Implementation source SHA `efe1ba3647bea52f0a6dc19b662eaf17219d3316`. B measure 
 | InputPathReadyUnread.cfg | GREEN | - |
 | InputPathReadyRace.cfg | GREEN | - |
 
-The model abstracts a valid pending generation, eventual approved terminal evidence, recoverable pre-key capture, and a non-ambiguous compact write. Source invalidation and unknown transport are tested by callers; the liveness GREEN does not prove progress after an uncertain first key. The installed WSL CLI is 2.1.316, not operational 2.1.322. An older 2.1.283 capture has PreCompact / SessionStart(compact) / PostCompact and no following root Stop, so the exact 2.1.322 native compact-completion activity/terminal sequence remains [U]. SessionStart(compact) is not used to authorize a first input. No PostCompact readiness authority was added. The next-input-after-compact caller case uses explicitly synthetic new native activity and a hard terminal; it does not settle that operational assumption.
+The following paragraph records the historical B1 assumption, superseded by the B completion repair below. The model abstracts a valid pending generation, eventual approved terminal evidence, recoverable pre-key capture, and a non-ambiguous compact write. Source invalidation and unknown transport are tested by callers; the liveness GREEN does not prove progress after an uncertain first key. The installed WSL CLI is 2.1.316, not operational 2.1.322. An older 2.1.283 capture has PreCompact / SessionStart(compact) / PostCompact and no following root Stop, so the exact 2.1.322 native compact-completion activity/terminal sequence remains [U]. SessionStart(compact) is not used to authorize a first input. No PostCompact readiness authority was added. The next-input-after-compact caller case uses explicitly synthetic new native activity and a hard terminal; it does not settle that operational assumption.
 
 Busy hand_busy / native Running writes and #8077 custody / exact-close / first-input behavior stay on their existing paths. P2-4 (late old clear Start after resume) remains deferred.
+
+
+## B 완료 수리 / own compact completion
+
+Current implementation source SHA `01d6532dce19bf3f2c60783a15077113b6e113e3`; repair base `eee9d323e23576b7e6eb98cf92890ac9726d60da`. The older B1 synthetic native-terminal assumption above is disproved by the coordinator's isolated Claude Code 2.1.322 capture. The committed redacted fixture is tests/fixtures/claude_compact/local-command-2.1.322.jsonl (post-compact rows 46 through 64, no assistant/stop-hook-summary/turn-duration). The lane did not access an operational session or run that target CLI itself.
+
+Only confirmed Enter creates a local-control ticket. The persistent worker accepts one source-bound /compact command followed by a closed local stdout/stderr envelope after its reserved file offset. Success also needs a manual compact boundary and the known Compacted stdout. Failure is completion with success=false. Current source/native/path/nonce/file and Start are rechecked; generation is rechecked and held stable through memory-only exact-token publication. No file/source-authority I/O is done under the generation leaf lock. The worker never sends another key during completion. PostCompact remains ignored; SessionStart(compact) can only wake the existing worker and never authorizes readiness.
+
+Continuation latches and recovery floors remain intact. A recovery floor already proven by the reservation can support that same completion; a newer recovery floor cannot. A new approved Start/file incarnation or real native submit discards old completion evidence. Reservation by itself keeps the evidence behind pending, allowing a proven pre-key NotSent to retry; a mutation remains pending until a new native turn or the owned completion proves progress. Unknown transfer, foreign/multiple command, old output before the floor, wrong source/generation/token never release another reservation. Existing Busy injection, draft policy, and #8077 custody/close/composer contracts are unchanged. P2-4 hook source ordering remains deferred.
+
+| Model action / contract | Production coordinate |
+|---|---|
+| Submitted worker remains alive | src/services/claude_tui/readiness/compact.rs:201 |
+| completion parse / source checks before publication | src/services/claude_tui/readiness/compact.rs:86 |
+| closed local-command output classifier | src/services/claude_tui/readiness/compact/completion.rs:13 |
+| exact reservation / Start / recovery publication | src/services/claude_tui/readiness/compact/completion.rs:112 |
+| completion proof consumption | src/services/claude_tui/readiness/mod.rs:158 |
+| generation gate permits same-cycle re-arm | src/services/claude_compact_trigger.rs:243 |
+| memory-only generation guarded publication | src/services/claude_compact_trigger.rs:424 |
+| same file new Start invalidates completion | src/services/claude_tui/readiness/mod.rs:375 |
+
+`CompactCompletionEvidence` emits no native terminal. `FinishSelfCompactFence` provides the owned completion proof; PROPERTY `ReadySelfCompactEventuallyReleases` states that a confirmed self compact followed by completion evidence eventually lets the next Idle original execute. Direct TLC: 39 cfg / 111 reported runs, GREEN24 / expected RED15 / unexpected0 / skip0, 104s. All 58 TLA/cfg source files match the executed snapshot. This is a specification check and manual code correspondence, not code extraction. Source/generation invalidation, Unknown transport, recovery, NotSent, and draft admission are caller-test boundaries; unconditional progress is not claimed after an ambiguous write or a foreign generation.
+
+| Before/after cfg | Actual result | Broken property/rule |
+|---|---|---|
+| InputPathReadyBusyCompact.cfg | expected RED | ReadyCompactAfterStopIdle |
+| InputPathReadyCompact.cfg | GREEN | - |
+| InputPathReadyCompactCompletion.cfg | GREEN | - |
+| InputPathReadyCompactNoCompletion.cfg | expected RED | ReadySelfCompactEventuallyReleases |
+| InputPathReadyNoLatchCompact.cfg | expected RED | ReadyCompactAfterStopIdle,ReadyNoContinuationEarlyInput,ReadyNoIdleRunningInjection |
+| InputPathReadySuppressedCompact.cfg | GREEN | - |

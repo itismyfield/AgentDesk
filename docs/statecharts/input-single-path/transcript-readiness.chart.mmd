@@ -1,6 +1,6 @@
 %% Hand-authored projection, not generated TLC output.
-%% Implementation source SHA efe1ba3647bea52f0a6dc19b662eaf17219d3316; merge base 6be9c44583b0cb24f49e31ede6a4c59cfdf88515.
-%% Compact projection is nominal; uncertain transport and target CLI ordering are caller-test / operational boundaries.
+%% Implementation source SHA 01d6532dce19bf3f2c60783a15077113b6e113e3; compact completion repair of eee9d323e23576b7e6eb98cf92890ac9726d60da.
+%% Confirmed own local command completion only; Unknown transfer remains fenced.
 stateDiagram-v2
     [*] --> Route
     Route --> BusyQueue : existing active hand_busy / native Running branches
@@ -33,6 +33,10 @@ stateDiagram-v2
     Settled --> Route : next original
     Observe --> CompactPending : source-bound usage crossing remembered
     Running --> CompactPending : remember request without a control key
-    CompactPending --> Running : approved terminal Idle + no latch + D + composer permit + reserve/current
+    CompactPending --> CompactInFlight : approved terminal Idle + no latch + D + permit + confirmed literal/Enter
+    CompactPending --> UnknownTransfer : first mutation uncertain; never replay
+    CompactInFlight --> CompactInFlight : compact Start / PostCompact alone cannot authorize input
+    CompactInFlight --> Observe : same source and generation + own closed local output; retire only own fence
+    CompactInFlight --> Held : continuation remains fenced
     Observe --> ScreenStall : before model requires screen confirmation
     ScreenStall --> ScreenStall : narrow / resize never confirms; progress RED

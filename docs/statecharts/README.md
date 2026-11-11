@@ -57,7 +57,7 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 
 | Area | Code SHA | Rules that break | Disposition |
 |---|---|---|---|
-| input-single-path / session-lifecycle Idle readiness (#8080 d2) | 574af580b0c5d6e6ce280994f4ed243463de5d2d | BeforeNarrow, permanent unread/no-wake, block-busy and latch/guard mutants remain expected RED | Design only; existing busy injection preserved, Idle terminal/continuation fence explicit. Supplemental TLC: 30 cfg / 86 runs, all expected sets matched; wrapper absent (mac-needed). [Report](input-single-path/transcript-readiness.report.md), [design](input-single-path/transcript-readiness.design.md) |
+| input-single-path / session-lifecycle Idle readiness (#8080 A+B completion) | 01d6532dce19bf3f2c60783a15077113b6e113e3 | BeforeNarrow, compact-no-completion and guard mutants are expected RED | Direct TLC 39 cfg / 111 reported runs: GREEN24, expected RED15, unexpected0. [Report](input-single-path/transcript-readiness.report.md), [design](input-single-path/transcript-readiness.design.md) |
 | `intake-consent` (#7353 S4-07 r2 PLAN) | `08e2336e47986d70d0cbe95e56215858377aed5c` | unexecuted r2: Current private issue / d1 public receipt / r2 keyed scope have distinct actions; d1 predicts effects-then-rollback RED | `SC_RUN=mac-needed`; no FS-currentness claim, see [report](intake-consent/intake-consent.report.md) |
 | `intake-consent` (#7353 S4-07 r3 checked) | `df492f9412` | Current·Proposed GREEN; D1Public·ScopeOpen break NoUnauthorizedIssue and NoEffectsThenRollback; same-process claimed rearm included | 9 cfg expected results matched; FS observation gap retained, see [report](intake-consent/intake-consent.report.md) |
 | `outbound-port` (#7353 S21) | `92ef5b00b205679965c24c5c017f7237e8b5d57f` | NoNonceAmbiguous/NoNonceRestart: 응답 없는 생성 뒤 재시도나 재시작으로 nonce 없는 같은 intent가 두 번 게시됨; LossyKey·RecordBeforePost·NoReserve·NoReserveNonce 변형은 기대 RED; caller 흐름(OutboundCallerFlow)은 fallback-on-transient·관측 뒤 반환·caller 새 deduper 변형이 RED | 값 계약 이동 전(Before)·후(After) 같은 전이로 GREEN, nonce 강제 경로만 재시작·재시도에도 1회 게시; see [report](outbound-port/outbound-port.report.md) |
@@ -118,3 +118,5 @@ keep custody reads and their existing properties; this pair adds no liveness pro
 The model abstracts the full raw wait into `output = held`; the real guard has an effective
 upper bound of about 65 seconds from the server `idle_in_transaction_session_timeout`.
 Routing/staging can still wait for that guard; admission here does not mean durable staging has completed.
+
+The Claude readiness refinement also checks terminal-free self-compact completion: [before](input-single-path/InputPathReadyCompactNoCompletion.cfg) breaks next-input liveness; [after](input-single-path/InputPathReadyCompactCompletion.cfg) satisfies it. Source, generation, reservation and Unknown-transfer guards remain caller obligations documented in [the readiness report](input-single-path/transcript-readiness.report.md).
