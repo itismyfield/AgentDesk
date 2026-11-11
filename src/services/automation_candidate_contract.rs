@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-pub const PIPELINE_STAGE_ID: &str = "automation-candidate";
+pub use crate::domain::automation_contract::PIPELINE_STAGE_ID;
 pub const MARKER_METADATA_KEY: &str = "automation_candidate";
 pub const PROGRAM_METADATA_KEY: &str = "program";
 pub const PROGRAM_REPO_DIR_KEY: &str = "repo_dir";
