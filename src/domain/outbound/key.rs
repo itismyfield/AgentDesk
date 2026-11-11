@@ -60,6 +60,14 @@ pub(crate) enum OutboundTargetKey {
     },
 }
 
+impl OutboundTargetKey {
+    pub(crate) fn channel(id: u64) -> Self {
+        Self::Channel {
+            channel: OutboundChannelId::new(id),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum OutboundOperationKey {

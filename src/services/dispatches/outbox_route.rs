@@ -467,13 +467,11 @@ async fn post_dispatch_completion_summary(
     message: &str,
     config: &DispatchFollowupConfig,
 ) -> Result<(), String> {
+    use crate::domain::outbound::{
+        DeliveryResult, DiscordOutboundPolicy, OutboundChannelId, OutboundDelivery, OutboundIntent,
+        OutboundTargetKey,
+    };
     use crate::services::discord::outbound::HttpOutboundClient;
-    use crate::services::discord::outbound::delivery::deliver_outbound;
-    use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
-    use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
-    use crate::services::discord::outbound::result::DeliveryResult;
-    use crate::services::discord::outbound::shared_outbound_deduper;
-    use poise::serenity_prelude::ChannelId;
 
     let Some(token) = config.notify_bot_token.as_deref() else {
         return Err("no notify bot token".to_string());
@@ -484,26 +482,21 @@ async fn post_dispatch_completion_summary(
 
     let target_channel_id = thread_id
         .parse::<u64>()
-        .map(ChannelId::new)
+        .map(OutboundChannelId::new)
         .map_err(|error| format!("invalid dispatch summary thread id {thread_id}: {error}"))?;
     let outbound_client =
         HttpOutboundClient::new(client, token.to_string(), config.discord_api_base.clone());
-    let outbound_msg = DiscordOutboundMessage::new(
+    let outbound_msg = OutboundIntent::new(
         format!("dispatch:{dispatch_id}"),
         format!("dispatch:{dispatch_id}:completion-summary"),
         message,
-        OutboundTarget::Channel(target_channel_id),
+        OutboundTargetKey::Channel {
+            channel: target_channel_id,
+        },
         DiscordOutboundPolicy::review_notification(),
     );
 
-    match deliver_outbound(
-        &outbound_client,
-        shared_outbound_deduper(),
-        outbound_msg,
-        None,
-    )
-    .await
-    {
+    match outbound_client.deliver(outbound_msg).await {
         DeliveryResult::Sent { .. }
         | DeliveryResult::Fallback { .. }
         | DeliveryResult::Duplicate { .. }

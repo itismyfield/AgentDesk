@@ -1,13 +1,11 @@
 use chrono::{DateTime, Utc};
-use poise::serenity_prelude::ChannelId;
 use sqlx::{PgPool, Row};
 
-use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
-use crate::services::discord::outbound::message::OutboundTarget;
-use crate::services::discord::outbound::{
-    DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
-    HttpOutboundClient, shared_outbound_deduper,
+use crate::domain::outbound::{
+    DeliveryResult, DiscordOutboundClient, DiscordOutboundPolicy, OutboundDelivery, OutboundIntent,
+    OutboundTargetKey, first_raw_message_id,
 };
+use crate::services::discord::outbound::HttpOutboundClient;
 use crate::services::dispatches::discord_delivery::DispatchMessagePostError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -390,14 +388,14 @@ async fn send_issue_announcement_message(
             .map_err(IssueAnnouncementDeliveryError::from);
     }
 
-    let message = DiscordOutboundMessage::new(
+    let message = OutboundIntent::new(
         correlation_id.to_string(),
         event_id.to_string(),
         content.to_string(),
-        OutboundTarget::Channel(ChannelId::new(channel_id_num)),
+        OutboundTargetKey::channel(channel_id_num),
         DiscordOutboundPolicy::review_notification(),
     );
-    match deliver_outbound(&client, shared_outbound_deduper(), message, None).await {
+    match client.deliver(message).await {
         DeliveryResult::Sent { messages, .. } | DeliveryResult::Fallback { messages, .. } => {
             first_raw_message_id(&messages).ok_or_else(|| {
                 IssueAnnouncementDeliveryError::new(
