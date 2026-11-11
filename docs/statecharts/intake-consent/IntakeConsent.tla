@@ -186,6 +186,16 @@ ReclaimPreAccept ==
     /\ s.ownerLock = 0 /\ s.rowLock = 0
     /\ \E i \in Ids : s.row.claim = s.a[i].snap.claim /\ s.a[i].epoch = 0 /\ s.a[i].pc = "done"
     /\ s' = [s EXCEPT !.row = [@ EXCEPT !.status = "pending", !.claim = 0]]
+\* A stale sweep leaves the claimed worker alive; cancellation stops that worker.
+\* Reclaim may reuse its process token, so an older worker can win the later accept CAS.
+RearmLivePreAccept(i, cancelled) ==
+    /\ s.row.status = "claimed" /\ s.live /\ s.a[i].epoch = s.epoch
+    /\ s.a[i].pc = "claimed" /\ SameStamp(i)
+    /\ s.ownerLock = 0 /\ s.rowLock = 0
+    /\ s' = [s EXCEPT !.row = [@ EXCEPT !.status = "pending", !.claim = 0],
+             !.a[i].pc = (IF cancelled THEN "done" ELSE @)]
+SweepPreAccept(i) == RearmLivePreAccept(i, FALSE)
+CancelPreAccept(i) == RearmLivePreAccept(i, TRUE)
 Forge(i) ==
     /\ Mutant = "forge" /\ i = s.next /\ i \in Ids /\ s.a[i].pc = "idle"
     /\ s' = [s EXCEPT !.a[i].pc = "scope", !.a[i].proof = "slot", !.a[i].origin = "forged",
@@ -202,6 +212,7 @@ Advance(i) == AdvanceStatus(i, "claimed", "accepted") \/ AdvanceStatus(i, "accep
     \/ ObserveAndMove(i) \/ RollbackMove(i) \/ LockOwner(i) \/ ReadForUpdate(i) \/ PrepareCAS(i) \/ Commit(i)
 Next == (\E i \in Ids : (\E actor \in {"worker", "sibling"} : Claim(i, actor)) \/ Advance(i) \/ Forge(i) \/ Reuse(i))
         \/ Release \/ Restart \/ ReclaimPreAccept \/ ChangeConsent
+        \/ (\E i \in Ids : SweepPreAccept(i) \/ CancelPreAccept(i))
         \/ (\E k \in {"payload", "source", "claim", "generation", "forceFail", "retire", "marker"} : Drift(k))
 Spec == Init /\ [][Next]_vars /\ (\A i \in Ids : WF_vars(Advance(i))) /\ WF_vars(Release)
 TypeOK == s.row.status \in {"pending", "claimed", "accepted", "spawned", "failed"}
