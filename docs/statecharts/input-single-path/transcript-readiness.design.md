@@ -1,10 +1,12 @@
 # Claude Idle 입력 준비 확정 — #8080 설계 d2
 
-Prod 기준 SHA: 574af580b0c5d6e6ce280994f4ed243463de5d2d.
+구현 A source SHA: be346e01c94fa32a37d13d05d01f7d3ab656bd72. B compact pending은 미구현이며 기존 compact 동작을 유지한다.
+
+설계 d2 시점 Prod 기준 SHA: 574af580b0c5d6e6ce280994f4ed243463de5d2d.
 main: 4f30c67d9a48eacad96a99faff9fd442d0d4dd3c.
 선행 #8077 head: 08d5ac88be45e5e1af7d46696c69b2ee02def1b6.
 r2 문서 기준: 0b0f39c582a9073fdb20b62512bc7794a18d1281. 리뷰 P1/P2와 코디네이터의 busy 불변 결정을 반영했다.
-이 레그는 문서·모델만 변경한다. [이슈와 DoD](https://github.com/itismyfield/AgentDesk/issues/8080)를 gh issue view로 읽었다.
+설계 d2 레그는 문서·모델만 변경했다. 구현 A 보완은 문서 끝 절을 따른다. [이슈와 DoD](https://github.com/itismyfield/AgentDesk/issues/8080)를 gh issue view로 읽었다.
 아래 코드 표에서 src/services/ 접두어는 생략한다.
 
 ## 0. 운영 전제와 상태 차트

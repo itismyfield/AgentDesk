@@ -1,10 +1,14 @@
-# Claude Idle readiness refinement — design d2
+# Claude Idle readiness refinement — implementation A
 
-Production code SHA: 574af580b0c5d6e6ce280994f4ed243463de5d2d (production unchanged).
+Implementation source SHA: be346e01c94fa32a37d13d05d01f7d3ab656bd72.
+Implementation base: c3b660544bab3971630931b444c67a985f4c9169.
+Current model evidence: 33 cfg / 97 reported runs / 21 GREEN / 12 expected RED / failed0 / skip0; a1 direct TLC reused.
 Document baseline: 0b0f39c582a9073fdb20b62512bc7794a18d1281.
 Main: 4f30c67d9a48eacad96a99faff9fd442d0d4dd3c.
-SC_RUN=mac-needed: /home/adk/.claude/skills/statechart/scripts/statechart is absent.
+SC_RUN=direct-TLC (a1 run reused); the statechart wrapper is absent.
 Chart/view are hand-authored projections, not wrapper-generated state-space output.
+
+## Historical design d2 execution
 
 Supplemental repository TLC checker actually ran:
 **30 cfg / 86 reported TLC runs / 19 GREEN / 11 expected RED / failed0 / skip0**, 70.1 seconds.
