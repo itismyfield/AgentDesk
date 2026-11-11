@@ -109,7 +109,8 @@ pub(super) fn isolated_in(submodule: &str, test: &str, envs: &[(&str, &str)]) ->
                  agentdesk::services::discord::tmux::tmux_watcher::turn_stream_collector=info,\
                  agentdesk::services::discord::host_liveness=info,\
                  agentdesk::services::discord::tmux::tmux_watcher::post_stream_exit::host_gate=debug,\
-                 agentdesk::services::discord::tmux::watcher_lifecycle::watch_host=debug",
+                 agentdesk::services::discord::tmux::watcher_lifecycle::watch_host=debug,\
+                 agentdesk::services::tui_o::cutover::channel_gate=info",
             )
             .with_writer(|| Capture)
             .finish();

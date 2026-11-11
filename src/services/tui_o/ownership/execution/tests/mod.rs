@@ -338,7 +338,8 @@ async fn owner_execution_swap_seeds_a_late_candidate_with_an_unfixed_boundary_pg
     }))
     .unwrap();
     let boot = BootChannels::validate(&config).unwrap();
-    let states = std::collections::BTreeMap::from([(channel, Adoption::Pending)]);
+    let pending = crate::services::tui_o::channel_policy::Adoption::Pending;
+    let states = std::collections::BTreeMap::from([(channel, pending)]);
     let seeded = boot.seeded(&config, |_, _| Ok(states)).unwrap();
     let _channels = cutover::test_override::force_boot(seeded);
     let snapshot = cutover::boot_snapshot().unwrap();
@@ -457,5 +458,56 @@ async fn an_execution_view_answers_owned_only_over_a_store_backed_candidate() {
         answer(),
         Ok(true),
         "an unverified permit over a store keeps O's body"
+    );
+}
+
+/// A Codex input waits for turn mode only once O adopted the channel: an unadopted execution
+/// permit routes it to the writer hold, and the adoption commit turns that into the turn wait.
+#[tokio::test]
+async fn a_codex_turn_waits_for_turn_mode_only_after_the_execution_views_adoption() {
+    use crate::services::tui_o::channel_policy::BootChannels;
+    use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = 73_369_102u64;
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "server": {},
+        "agents": [{"id": "w", "name": "W",
+            "channels": {"codex": {"id": channel.to_string(), "runtime": "tui"}}}],
+        "tui_o": {"writer": {"channels": [channel], "late_adopt": true},
+            "turn": {"channels": [channel]}}
+    }))
+    .unwrap();
+    let pending = crate::services::tui_o::channel_policy::Adoption::Pending;
+    let states = std::collections::BTreeMap::from([(channel, pending)]);
+    let boot = BootChannels::validate(&config).unwrap();
+    let boot = boot.seeded(&config, |_, _| Ok(states)).unwrap();
+    let _boot = cutover::test_override::force_boot(boot);
+    let snapshot = cutover::boot_snapshot().unwrap();
+    let pool = PgPool::connect_lazy("postgres://fixture@127.0.0.1:1/unused").unwrap();
+    let permit = Arc::new(OwnerPermit {
+        pool,
+        identity: OwnerIdentity::new("codex", &channel.to_string()),
+        executor: "mac-a".into(),
+        generation: 0,
+        session_ref: SessionRef::Fresh,
+        gate: Arc::new(super::super::OwnershipGate::for_execution(0)),
+    });
+    snapshot.install_execution(channel, Some(Ok(permit)));
+    let held =
+        |route: &IntakeRoute, text: &str| matches!(route, IntakeRoute::Hold(d) if d.contains(text));
+    assert!(cutover::codex_turn_awaited(channel).is_none(), "unadopted");
+    let route = intake_route::route_for_placement("codex", channel);
+    assert!(held(&route, "with its writer ready"), "{route:?}");
+
+    let view = cutover::boot_snapshot()
+        .unwrap()
+        .execution(channel)
+        .unwrap();
+    assert!(view.candidate.confirm_store(), "the adoption commits");
+    assert!(cutover::codex_turn_awaited(channel).is_some(), "adopted");
+    let route = intake_route::route_for_placement("codex", channel);
+    assert!(
+        held(&route, "waits for its Codex turn confirmation"),
+        "{route:?}"
     );
 }

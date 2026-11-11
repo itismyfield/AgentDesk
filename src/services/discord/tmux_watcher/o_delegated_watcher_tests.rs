@@ -61,6 +61,64 @@ async fn o_delegated_watcher_turn_shows_no_body_and_records_no_frontier() {
     );
 }
 
+/// A watcher terminal whose body waits on O's adoption is retried, never finalized: nothing shows
+/// and the row stays open. Once the adoption commits, with no new input, the next retry ends the
+/// turn through O and Legacy still shows nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn a_held_watcher_terminal_retries_until_o_adopts_and_then_ends_through_o() {
+    if !isolated_in(
+        "o_delegated_watcher_tests",
+        "a_held_watcher_terminal_retries_until_o_adopts_and_then_ends_through_o",
+        &[],
+    ) {
+        return;
+    }
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::cutover::test_override;
+    let seed = turn("T0", T0);
+    let mut h = Harness::new(25, &seed).await;
+    let f = seed.len() as u64;
+    h.commit(0, f);
+    let _bound = test_override::bind_claude_tui_session(&h.tmux, &h.path);
+    // A thread-local candidate: this runtime runs the watcher on the test's own thread.
+    let _pending = test_override::force_candidates(&[(h.channel.get(), ClaudeTui)]);
+    h.row_at(f);
+    h.spawn(f);
+    h.append(turn("T1", BODY).as_bytes());
+    let held = || Harness::logged("tui_o output held for adoption").len();
+    h.until("the held terminal retried", |_| held() >= 2).await;
+    let waiting = h.observe(&[BODY]);
+    assert_eq!(
+        waiting.copies,
+        vec![Vec::<u64>::new()],
+        "nothing shows the held body"
+    );
+    assert_eq!(
+        waiting.row,
+        Some((f, false)),
+        "the held turn's row stays open"
+    );
+
+    let candidate = test_override::with_channels(|boot| boot?.candidate(h.channel.get()).cloned());
+    assert!(candidate.unwrap().confirm_store(), "the adoption commits");
+    h.until("the turn ends through O", |h| {
+        h.row().is_none_or(|row| row.terminal_delivery_committed)
+    })
+    .await;
+    let ended = h.observe(&[BODY]);
+    assert_eq!(
+        ended.copies,
+        vec![Vec::<u64>::new()],
+        "O, not Legacy, owns the body"
+    );
+    assert_eq!(ended.overwritten, 0, "and Legacy never showed it");
+    assert_eq!(
+        ended.frontier,
+        Some((0, f)),
+        "no Legacy frontier for the range"
+    );
+}
+
 const TASK_SUMMARY: &str = "ADK-O background task finished";
 
 fn task_value() -> serde_json::Value {
