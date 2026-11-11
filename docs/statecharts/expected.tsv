@@ -376,3 +376,5 @@ input-single-path/InputPathReadyPermissionLater.cfg	InputPath	-	-
 input-single-path/InputPathReadyPermissionPoison.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyLateDialog.cfg	InputPath	-	-
 input-single-path/InputPathReadyPreflightOnly.cfg	InputPath	-	ReadyPendingEventuallyExecutes
+input-single-path/InputPathReadyCompactCompletion.cfg	InputPath	-	-
+input-single-path/InputPathReadyCompactNoCompletion.cfg	InputPath	ReadySelfCompactEventuallyReleases	-

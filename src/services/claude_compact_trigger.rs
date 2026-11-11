@@ -231,6 +231,7 @@ fn submit_under_composer_lock(
     generation: u64,
     threshold: CompactThreshold,
     expected_turn: &ManagedCompactTurnIdentity,
+    completing: bool,
     live_turn_matches: impl FnOnce(&ManagedCompactTurnIdentity) -> Result<bool, String>,
     submit: impl for<'a> FnOnce(
         crate::services::claude_tui::composer_lock::ComposerPermit<'a>,
@@ -239,10 +240,27 @@ fn submit_under_composer_lock(
     crate::services::claude_tui::composer_lock::with_composer_permit(
         &pane.tmux_session_name,
         |permit| {
-            if !pane_still_disarmed_for_send(pane, generation, threshold) {
+            let eligible = if completing {
+                COMPACT_TRIGGER_STATE
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .panes
+                    .get(pane)
+                    .is_some_and(|entry| {
+                        entry.generation == generation
+                            && entry.last_window_tokens == threshold.actual_window_tokens
+                    })
+            } else {
+                pane_still_disarmed_for_send(pane, generation, threshold)
+            };
+            if !eligible {
                 return None;
             }
-            match live_turn_matches(expected_turn) {
+            match if completing {
+                Ok(true)
+            } else {
+                live_turn_matches(expected_turn)
+            } {
                 Ok(true) => {}
                 Ok(false) => {
                     invalidate_after_authority_rejection(pane, generation, threshold);
@@ -399,8 +417,20 @@ pub(in crate::services) fn maybe_inject_compact_with_source(
             generation,
             threshold,
             &turn_identity,
+            pending.completing(),
             pending_managed_turn_matches,
-            |permit| pending.poll(permit),
+            |permit| {
+                pending.poll(permit, |publish| {
+                    // No file or source-authority reads while holding the generation leaf lock.
+                    let state = COMPACT_TRIGGER_STATE
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    state.panes.get(&worker_pane).is_some_and(|entry| {
+                        entry.generation == generation
+                            && entry.last_window_tokens == threshold.actual_window_tokens
+                    }) && publish()
+                })
+            },
         );
         match outcome {
             Some(Outcome::Submitted) => tracing::info!(
@@ -891,6 +921,7 @@ mod tests {
                             generation,
                             threshold,
                             &expected_turn,
+                            false,
                             |_| Ok(worker_authority.load(Ordering::SeqCst)),
                             |_permit| {
                                 worker_sends.fetch_add(1, Ordering::SeqCst);

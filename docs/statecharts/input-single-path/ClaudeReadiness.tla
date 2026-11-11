@@ -18,7 +18,8 @@ Busy == Mode \in {"ready-busy-active", "ready-busy-native", "ready-block-busy", 
 Suppressed == Mode \in {"ready-suppressed-stop", "ready-no-latch",
                         "ready-suppressed-compact", "ready-no-latch-compact"}
 NoLatch == Mode \in {"ready-no-latch", "ready-no-latch-compact"}
-Compact == Mode \in {"ready-compact", "ready-busy-compact",
+CompactCompletion == Mode \in {"ready-compact-completion", "ready-compact-no-completion"}
+Compact == CompactCompletion \/ Mode \in {"ready-compact", "ready-busy-compact",
                      "ready-suppressed-compact", "ready-no-latch-compact"}
 Initial ==
     [phase |-> IF Fresh THEN "Booting" ELSE "Running",
@@ -36,6 +37,7 @@ Initial ==
      nativeStarts |-> IF Race THEN 1 ELSE 0,
      restarts |-> IF Mode = "ready-restart" THEN 1 ELSE 0,
      compactPending |-> Compact, compacts |-> 0,
+     compactFence |-> FALSE, compactEvidence |-> FALSE, compactReady |-> FALSE,
      badIdleRunning |-> FALSE, badDraft |-> FALSE, badEarly |-> FALSE,
      dialog |-> IF Dialog THEN "Boot" ELSE "None", dialogKeys |-> 0,
      permissionStage |-> 0, poisoned |-> FALSE,
@@ -48,7 +50,8 @@ CurrentEvidence ==
     /\ r.observed = "Idle" /\ r.seenEpoch = r.epoch /\ r.seenTurn = r.turn
     /\ (~r.needsStart \/ r.started)
     /\ ~r.continuing
-    /\ (r.started /\ r.turn = 0) \/
+    /\ ~r.compactFence
+    /\ (r.started /\ r.turn = 0) \/ r.compactReady \/
        (r.terminal = r.turn /\ r.turn > 0 /\ TerminalEligible)
 Ready == CurrentEvidence /\ ~Before /\ ~r.poisoned
 First == {i \in Ids : r.q[i] \in {"queued", "held"} /\
@@ -68,7 +71,7 @@ PermissionRecord ==
                      !.tail = IF r.permissionStage = 0 THEN "permission" ELSE "assistant",
                      !.poisoned = @ \/ Mode = "ready-permission-poison"]
 Finish ==
-    /\ r.phase = "Running"
+    /\ r.phase = "Running" /\ ~r.compactFence
     /\ ~Busy \/ r.q[1] # "queued"
     /\ Mode # "ready-busy-finish-after" \/ r.writes[1] > 0
     /\ ~Suppressed \/ r.softStage >= 4
@@ -112,6 +115,7 @@ Hold(i) ==
     /\ ~Ready \/ r.draft # "Empty"
     /\ r' = [r EXCEPT !.q[i] = "held", !.awake = FALSE]
 Prepare(i) ==
+    /\ ~CompactCompletion \/ ~r.compactPending
     /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake /\ Ready
     /\ r.draft = "Empty" \/ Mode = "ready-draft-bypass"
     /\ r' = [r EXCEPT !.q[i] = "prepared", !.head = i,
@@ -131,7 +135,7 @@ Submit ==
     /\ r' = [r EXCEPT !.q[r.head] = "sent", !.effects[r.head] = @ + 1,
                      !.writes[r.head] = @ + 1, !.head = 0,
                      !.phase = "Running", !.turn = @ + 1, !.tail = "assistant",
-                     !.awake = FALSE,
+                     !.compactReady = FALSE, !.awake = FALSE,
                      !.badIdleRunning = @ \/ r.phase = "Running",
                      !.badDraft = @ \/ r.human,
                      !.badEarly = @ \/ (r.needsStart /\ ~r.started),
@@ -178,14 +182,22 @@ CompactSubmit ==
     /\ r.compactPending /\ r.head = 0 /\ r.draft = "Empty"
     /\ (Ready /\ r.terminal = r.turn /\ r.turn > 0) \/ Mode = "ready-busy-compact"
     /\ r' = [r EXCEPT !.compactPending = FALSE, !.compacts = @ + 1,
+                     !.compactFence = CompactCompletion, !.compactReady = FALSE,
                      !.phase = "Running", !.turn = @ + 1, !.tail = "assistant", !.awake = FALSE,
                      !.badCompact = @ \/ r.phase # "Idle" \/ r.terminal # r.turn,
                      !.badContinuation = @ \/ (Suppressed /\ r.softStage < 5)]
-Next == PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
+\* A local command finishes without a native assistant/turn-duration record.
+CompactCompletionEvidence ==
+    /\ CompactCompletion /\ r.compactFence /\ ~r.compactEvidence
+    /\ r' = [r EXCEPT !.compactEvidence = TRUE, !.phase = "Idle", !.tail = "local-output"]
+FinishSelfCompactFence ==
+    /\ r.compactFence /\ r.compactEvidence /\ Mode # "ready-compact-no-completion"
+    /\ r' = [r EXCEPT !.compactFence = FALSE, !.compactReady = TRUE, !.awake = TRUE]
+Next == CompactCompletionEvidence \/ FinishSelfCompactFence \/ PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
         SuppressStop \/ SoftSummary \/ LateAssistant \/
         NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/ IdleWake \/
         (\E i \in Ids : Hold(i) \/ Prepare(i) \/ SelectBusy(i) \/ BusyInject(i) \/ BusyPublish(i) \/ ReexposeBusy(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
-Fairness == WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
+Fairness == WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
             WF_r(SuppressStop) /\ WF_r(SoftSummary) /\ WF_r(LateAssistant) /\
             WF_r(RecoverDraft) /\ WF_r(HumanClears) /\ WF_r(NativeStart) /\
             WF_r(Revoke) /\ WF_r(Submit) /\ WF_r(CompactSubmit) /\
@@ -208,5 +220,6 @@ BusyKeyPlanPreserved == \A i \in Ids : r.busyWrites[i] > 0 =>
     (r.route[i] = "busy" /\ r.busyWrites[i] = 1 /\ r.busyKeys[i] = "paste,Enter")
 PendingEventuallyExecutes == \A i \in Ids : (r.q[i] \in {"queued", "held", "prepared", "busy-selected", "busy-written", "native-queued"}) ~> (r.effects[i] >= 1)
 CompactEventuallyExecutes == r.compactPending ~> (r.compacts = 1)
+SelfCompactEventuallyReleases == (r.compacts = 1 /\ r.compactEvidence) ~> (\E i \in Ids : r.writes[i] > 0)
 BusyEventuallyQueues == Busy => <>(r.busyWrites[1] = 1)
 =============================================================================

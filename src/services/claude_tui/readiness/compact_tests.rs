@@ -4,7 +4,7 @@ use crate::services::claude_tui::readiness::compact::{Outcome, Pending};
 
 fn poll(pending: &mut Pending, session: &str) -> Outcome {
     crate::services::claude_tui::composer_lock::with_composer_permit(session, |permit| {
-        pending.poll(permit)
+        pending.poll(permit, |publish| publish())
     })
 }
 
@@ -41,14 +41,38 @@ fn compact_waits_for_the_running_turn_before_any_control_key() {
     r.terminal();
     assert_eq!(poll(&mut pending, &r.session), Outcome::Submitted);
     assert_eq!(tmux.sends(), ["/compact", "Enter"]);
-    assert_eq!(poll(&mut pending, &r.session), Outcome::Obsolete);
+    let _ = poll(&mut pending, &r.session);
     assert_eq!(tmux.sends(), ["/compact", "Enter"]);
-    // Synthetic native completion; the operational CLI's compact ordering remains unmeasured.
-    r.append(json!({"type":"user","message":{"content":"/compact"}}));
-    r.assistant("compacted");
-    r.terminal();
+    // Bounded actual caller admission observes no payload before completion.
+    let previous = crate::services::claude_tui::input::FOLLOWUP_TIMEOUT_FOR_TESTS
+        .with(|slot| slot.replace(Some(Duration::from_millis(25))));
+    assert!(r.send().is_err());
+    crate::services::claude_tui::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(previous));
+    assert_eq!(tmux.sends(), ["/compact", "Enter"]);
+    r.hook("compact");
+    note_hook(
+        "claude",
+        &HookEventKind::PostCompact,
+        &r.session,
+        &json!({"transcript_path":r.path,"session_id":r.ctx.expected_native_session_id}),
+        Some(&r.ctx),
+        Some(Utc::now()),
+        false,
+    );
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Pending);
+    assert!(!r.ready());
+    // The measured local command emits no assistant or native terminal after compact.
+    compact_records(&r, false);
+    let completion = poll(&mut pending, &r.session);
+    let duplicate = poll(&mut pending, &r.session);
     tmux.show(&view("", false));
-    assert_eq!(r.send(), Ok(()));
+    let previous = crate::services::claude_tui::input::FOLLOWUP_TIMEOUT_FOR_TESTS
+        .with(|slot| slot.replace(Some(Duration::from_millis(100))));
+    let next = r.send();
+    crate::services::claude_tui::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(previous));
+    assert_eq!(next, Ok(()));
+    assert_eq!(completion, Outcome::Completed);
+    assert_eq!(duplicate, Outcome::Obsolete);
     assert_eq!(
         tmux.sends(),
         ["/compact", "Enter", "load", "paste", "Enter"]
@@ -209,6 +233,15 @@ fn compact_ignores_suppressed_summary_timer_and_late_assistant_until_final() {
 
 #[test]
 fn compact_usage_caller_keeps_one_pending_across_busy_completion_and_duplicate_usage() {
+    usage_completion(false);
+}
+
+#[test]
+fn compact_old_generation_cannot_release_a_recreated_cycle() {
+    usage_completion(true);
+}
+
+fn usage_completion(recreated: bool) {
     use crate::services::{
         claude_compact_trigger, discord::ManagedCompactTurnIdentity, provider::ProviderKind,
     };
@@ -254,5 +287,320 @@ fn compact_usage_caller_keeps_one_pending_across_busy_completion_and_duplicate_u
     });
     request();
     assert_eq!(tmux.sends(), ["/compact", "Enter"]);
+    assert!(!r.ready());
+    if recreated {
+        claude_compact_trigger::clear_for_tmux(&r.session);
+        let before = fs::read_to_string(tmux.directory().join("argv"))
+            .unwrap()
+            .matches("capture-pane")
+            .count();
+        tmux.show(&view("", false));
+        request();
+        compact_records(&r, false);
+        wait("new generation polled without adopting old compact", || {
+            fs::read_to_string(tmux.directory().join("argv"))
+                .unwrap_or_default()
+                .matches("capture-pane")
+                .count()
+                > before
+        });
+        assert!(!r.ready());
+        assert_eq!(tmux.sends(), ["/compact", "Enter"]);
+    } else {
+        claude_compact_trigger::maybe_inject_compact(
+            identity.clone(),
+            &ProviderKind::Claude,
+            1,
+            Some(1_000_000),
+            50,
+            300_000,
+        );
+        compact_records(&r, false);
+        wait("submitted generation completes after usage re-arm", || {
+            r.ready()
+        });
+        tmux.show(&view("", false));
+        assert_eq!(r.send(), Ok(()));
+        assert_eq!(
+            tmux.sends(),
+            ["/compact", "Enter", "load", "paste", "Enter"]
+        );
+    }
     claude_compact_trigger::clear_for_tmux(&r.session);
+}
+
+// Redacted record kinds/order from the coordinator's isolated 2.1.322 capture, rows 46..64.
+fn compact_records(r: &Rig, failed: bool) {
+    if failed {
+        r.append(
+            json!({"type":"user","message":{"content":"<command-name>/compact</command-name>"}}),
+        );
+        r.append(json!({"type":"user","message":{"content":"<local-command-stderr>Error: unable to compact</local-command-stderr>"}}));
+    } else {
+        for line in
+            include_str!("../../../../tests/fixtures/claude_compact/local-command-2.1.322.jsonl")
+                .lines()
+        {
+            r.append(serde_json::from_str(line).unwrap());
+        }
+    }
+}
+
+#[test]
+fn compact_failure_output_releases_only_the_submitted_control_without_claiming_success() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    r.assistant("done");
+    r.terminal();
+    let tmux = pane();
+    let mut pending = Pending::capture(&r.session).unwrap();
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Submitted);
+    tmux.show(&view("", false));
+    assert!(!r.ready());
+    let floor = evidence::Stamp::read(&r.path).unwrap();
+    compact_records(&r, true);
+    assert_eq!(
+        compact::completion::read(
+            &r.path,
+            &floor,
+            r.ctx.expected_native_session_id.as_deref().unwrap()
+        ),
+        Some(false)
+    );
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Completed);
+    assert_eq!(r.send(), Ok(()));
+    assert_eq!(
+        tmux.sends(),
+        ["/compact", "Enter", "load", "paste", "Enter"]
+    );
+}
+
+#[test]
+fn compact_completion_does_not_release_unknown_foreign_source_or_newer_reservation() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for mode in [
+        "unknown-enter",
+        "unknown-literal",
+        "clear",
+        "inode",
+        "native",
+        "nonce",
+        "other-command",
+        "new-reservation",
+        "new-recovery",
+    ] {
+        let r = Rig::new();
+        r.assistant("done");
+        r.terminal();
+        let tmux = pane();
+        let mut pending = Pending::capture(&r.session).unwrap();
+        if mode == "unknown-enter" {
+            tmux.fail_send(1);
+        }
+        if mode == "unknown-literal" {
+            tmux.fail_send(0);
+        }
+        let first = poll(&mut pending, &r.session);
+        assert_eq!(
+            first,
+            if mode.starts_with("unknown") {
+                Outcome::Ambiguous
+            } else {
+                Outcome::Submitted
+            }
+        );
+        let keys = tmux.sends();
+        match mode {
+            "clear" => r.hook("clear"),
+            "inode" => {
+                let replacement = r.path.with_extension("replacement");
+                fs::write(&replacement, fs::read(&r.path).unwrap()).unwrap();
+                fs::rename(replacement, &r.path).unwrap();
+            }
+            "nonce" => fs::write(
+                crate::services::tmux_common::session_temp_path(&r.session, "spawn_nonce"),
+                "different",
+            )
+            .unwrap(),
+            "new-recovery" => {
+                let source = source::Source::current(&r.session, None).unwrap();
+                ledger().entries.get_mut(&source).unwrap().recovery = Some((1000, Utc::now()));
+            }
+            "new-reservation" => {
+                let source = source::Source::current(&r.session, None).unwrap();
+                let mut state = ledger();
+                let entry = state.entries.get_mut(&source).unwrap();
+                entry.pending = entry.pending.map(|(floor, token)| (floor, token + 100));
+            }
+            _ => {}
+        }
+        compact_records(&r, false);
+        if mode == "native" {
+            r.append(json!({"type":"attachment","sessionId":"another-native"}));
+        }
+        if mode == "other-command" {
+            r.append(json!({"type":"user","message":{"content":"<command-name>/compact</command-name>"}}));
+        }
+        let _ = poll(&mut pending, &r.session);
+        tmux.show(&view("", false));
+        assert!(!r.ready(), "{mode}");
+        assert_eq!(tmux.sends(), keys, "{mode}");
+    }
+}
+
+#[test]
+fn compact_completion_preserves_root_continuation_and_rejects_unowned_commands() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for owned in [false, true] {
+        let r = Rig::new();
+        r.assistant("done");
+        r.terminal();
+        let tmux = pane();
+        let mut pending = Pending::capture(&r.session).unwrap();
+        if owned {
+            assert_eq!(poll(&mut pending, &r.session), Outcome::Submitted);
+            note_hook(
+                "claude",
+                &HookEventKind::Stop,
+                &r.session,
+                &json!({"transcript_path":r.path,"session_id":r.ctx.expected_native_session_id}),
+                Some(&r.ctx),
+                Some(Utc::now()),
+                true,
+            );
+        }
+        compact_records(&r, false);
+        r.hook("compact");
+        note_hook(
+            "claude",
+            &HookEventKind::PostCompact,
+            &r.session,
+            &json!({"transcript_path":r.path,"session_id":r.ctx.expected_native_session_id}),
+            Some(&r.ctx),
+            Some(Utc::now()),
+            false,
+        );
+        if owned {
+            assert_eq!(poll(&mut pending, &r.session), Outcome::Completed);
+        }
+        tmux.show(&view("", false));
+        assert!(!r.ready());
+        assert_eq!(tmux.sends().len(), if owned { 2 } else { 0 });
+    }
+}
+
+#[test]
+fn compact_completion_ignores_replayed_old_output_and_incomplete_output() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    compact_records(&r, false);
+    r.assistant("done");
+    r.terminal();
+    let tmux = pane();
+    let mut pending = Pending::capture(&r.session).unwrap();
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Submitted);
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Pending);
+    r.append(json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual"}}));
+    r.append(json!({"type":"user","message":{"content":"<command-name>/compact</command-name>"}}));
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Pending);
+    assert!(!r.ready());
+    r.append(json!({"type":"user","message":{"content":"<local-command-stdout>Compacted (summary)</local-command-stdout>"}}));
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Completed);
+    let unmutated = reserve(observe(&r.session, None).unwrap()).unwrap();
+    assert!(!r.ready());
+    unmutated.not_sent();
+    assert!(r.ready());
+    r.append(json!({"type":"attachment"}));
+    r.append(json!({"type":"permission-mode"}));
+    tmux.show(&view("", false));
+    assert_eq!(r.send(), Ok(()));
+    assert_eq!(
+        tmux.sends(),
+        ["/compact", "Enter", "load", "paste", "Enter"]
+    );
+    assert!(!r.ready());
+}
+
+#[test]
+fn compact_stdout_error_is_completion_without_success_and_new_submit_keeps_its_own_fence() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    r.assistant("done");
+    r.terminal();
+    let tmux = pane();
+    let mut pending = Pending::capture(&r.session).unwrap();
+    let floor = evidence::Stamp::read(&r.path).unwrap();
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Submitted);
+    r.append(json!({"type":"user","message":{"content":"<command-name>/compact</command-name>"}}));
+    r.append(json!({"type":"user","message":{"content":"<local-command-stdout>Error: not enough messages to compact</local-command-stdout>"}}));
+    assert_eq!(
+        compact::completion::read(
+            &r.path,
+            &floor,
+            r.ctx.expected_native_session_id.as_deref().unwrap()
+        ),
+        Some(false)
+    );
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Completed);
+    tmux.show(&view("", false));
+    assert_eq!(r.send(), Ok(()));
+    assert!(!r.ready());
+    assert_eq!(
+        tmux.sends(),
+        ["/compact", "Enter", "load", "paste", "Enter"]
+    );
+}
+
+#[test]
+fn compact_receipt_does_not_survive_a_new_start_on_the_same_file() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    r.assistant("done");
+    r.terminal();
+    let tmux = pane();
+    let mut pending = Pending::capture(&r.session).unwrap();
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Submitted);
+    compact_records(&r, false);
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Completed);
+    assert!(r.ready());
+    r.hook("clear");
+    assert!(!r.ready());
+    assert_eq!(tmux.sends(), ["/compact", "Enter"]);
+    r.assistant("new current turn");
+    r.terminal();
+    tmux.show(&view("", false));
+    assert_eq!(r.send(), Ok(()));
+    assert_eq!(
+        tmux.sends(),
+        ["/compact", "Enter", "load", "paste", "Enter"]
+    );
+}
+
+#[test]
+fn compact_completion_retains_the_recovery_floor_already_proven_by_its_reservation() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    let source = source::Source::current(&r.session, None).unwrap();
+    let recovery = Some((0, Utc::now()));
+    {
+        let mut state = ledger();
+        let entry = state.entries.get_mut(&source).unwrap();
+        entry.start = false;
+        entry.recovery = recovery;
+    }
+    r.assistant("new recovery activity");
+    r.terminal();
+    assert!(r.ready());
+    let tmux = pane();
+    let mut pending = Pending::capture(&r.session).unwrap();
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Submitted);
+    compact_records(&r, false);
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Completed);
+    assert_eq!(ledger().entries.get(&source).unwrap().recovery, recovery);
+    tmux.show(&view("", false));
+    assert_eq!(r.send(), Ok(()));
+    assert_eq!(
+        tmux.sends(),
+        ["/compact", "Enter", "load", "paste", "Enter"]
+    );
 }

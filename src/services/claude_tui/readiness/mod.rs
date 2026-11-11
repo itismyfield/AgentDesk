@@ -25,6 +25,8 @@ struct Entry {
     start: bool,
     pending: Option<(u64, u64)>,
     submitted: bool,
+    compact_ticket: Option<u64>,
+    compact_done: Option<compact::completion::Done>,
     recovery: Option<(u64, DateTime<Utc>)>,
     file: Option<(u64, u64)>,
     high_water: u64,
@@ -69,13 +71,20 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
     }) {
         return None;
     }
-    if tail.is_some()
-        && crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(&source.path)
-            != crate::services::tui_turn_state::TuiTurnState::Idle
+    let native_idle = tail.is_none()
+        || crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
+            &source.path,
+        ) == crate::services::tui_turn_state::TuiTurnState::Idle;
+    let mut state = ledger();
+    // Keep ordinary Running observation side-effect-free; only our completed control can differ.
+    if !native_idle
+        && state
+            .entries
+            .get(&source)
+            .is_none_or(|entry| entry.compact_done.is_none())
     {
         return None;
     }
-    let mut state = ledger();
     if state
         .unread_continuations
         .contains(&(source.path.clone(), source.nonce.clone()))
@@ -114,6 +123,7 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
         {
             entry.recovery = Some((tail.stamp.len, Utc::now()));
             entry.start = false;
+            entry.compact_done = None;
             entry.revision += 1;
         }
         entry.file = Some(tail.stamp.file);
@@ -144,43 +154,57 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
             return None;
         }
     }
-    let ready = match &tail {
-        Some(tail) => {
-            let recovered = entry.recovery.is_none_or(|(floor, _)| {
-                tail.activity_start >= floor
-                    && tail.activity > floor
-                    && tail.terminal >= tail.activity
+    // Local compact completion only replaces that control's fence, never a continuation.
+    let compact_ready = tail.is_some()
+        && entry.compact_ticket.is_none()
+        && entry.pending.is_none()
+        && blocked.is_none()
+        && entry.compact_done.as_ref().is_some_and(|done| {
+            entry
+                .recovery
+                .is_none_or(|recovery| Some(recovery) == done.recovery)
+                && compact::completion::read(&source.path, &done.floor, &source.native).is_some()
+        });
+    let ready = compact_ready
+        || (native_idle
+            && entry.compact_ticket.is_none()
+            && match &tail {
+                Some(tail) => {
+                    let recovered = entry.recovery.is_none_or(|(floor, _)| {
+                        tail.activity_start >= floor
+                            && tail.activity > floor
+                            && tail.terminal >= tail.activity
+                    });
+                    let after_pending = entry.pending.is_none_or(|(floor, _)| {
+                        tail.activity_start >= floor
+                            && tail.activity > floor
+                            && tail.terminal >= tail.activity
+                    });
+                    // Finishing an old partial row is not activity from the requested continuation.
+                    let after_continuation = blocked.is_none_or(|(floor, at)| {
+                        tail.activity_start >= floor
+                            && tail.activity > floor
+                            && tail.terminal >= tail.activity
+                            && tail.activity_at.is_some_and(|seen| seen > at)
+                    });
+                    let terminal = tail.end == End::Hard
+                        || (tail.end == End::Summary
+                            && final_stop.is_some_and(|floor| tail.activity <= floor));
+                    (terminal && recovered && after_pending && after_continuation)
+                        || (entry.start
+                            && !entry.submitted
+                            && entry.pending.is_none()
+                            && tail.empty
+                            && blocked.is_none())
+                }
+                None => {
+                    entry.start
+                        && !entry.submitted
+                        && entry.pending.is_none()
+                        && entry.file.is_none()
+                        && !source.path.exists()
+                }
             });
-            let after_pending = entry.pending.is_none_or(|(floor, _)| {
-                tail.activity_start >= floor
-                    && tail.activity > floor
-                    && tail.terminal >= tail.activity
-            });
-            // Finishing an old partial row is not activity from the requested continuation.
-            let after_continuation = blocked.is_none_or(|(floor, at)| {
-                tail.activity_start >= floor
-                    && tail.activity > floor
-                    && tail.terminal >= tail.activity
-                    && tail.activity_at.is_some_and(|seen| seen > at)
-            });
-            let terminal = tail.end == End::Hard
-                || (tail.end == End::Summary
-                    && final_stop.is_some_and(|floor| tail.activity <= floor));
-            (terminal && recovered && after_pending && after_continuation)
-                || (entry.start
-                    && !entry.submitted
-                    && entry.pending.is_none()
-                    && tail.empty
-                    && blocked.is_none())
-        }
-        None => {
-            entry.start
-                && !entry.submitted
-                && entry.pending.is_none()
-                && entry.file.is_none()
-                && !source.path.exists()
-        }
-    };
     if !ready {
         return None;
     }
@@ -211,17 +235,20 @@ pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
     entry.revision += 1;
     entry.pending = Some((proof.stamp.as_ref().map_or(0, |s| s.len), entry.revision));
     let revision = entry.revision;
+    let recovery = entry.recovery;
     changed(&mut state);
     Some(Reservation {
         source: proof.source,
         stamp: proof.stamp,
         revision,
+        recovery,
     })
 }
 pub(crate) struct Reservation {
     source: Source,
     stamp: Option<Stamp>,
     revision: u64,
+    recovery: Option<(u64, DateTime<Utc>)>,
 }
 impl Reservation {
     pub(crate) fn current(&self) -> bool {
@@ -346,6 +373,7 @@ pub(crate) fn note_hook(
             });
             let entry = state.entries.entry(source).or_default();
             entry.start = true;
+            entry.compact_done = None;
             entry.recovery = None;
             entry.revision += 1;
             changed(&mut state);
@@ -402,6 +430,9 @@ pub(crate) fn note_hook(
                 && context
                     .is_none_or(|ctx| source.nonce.as_deref() == Some(ctx.execution_nonce.as_str()))
             {
+                // A real new submit supersedes local-control ownership, retaining its own fence.
+                entry.compact_ticket = None;
+                entry.compact_done = None;
                 entry.pending = Some((stamp.len, entry.revision + 1));
             }
         }

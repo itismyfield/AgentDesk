@@ -1031,6 +1031,8 @@ src/
 │   │   │   ├── timeout_draft_tests.rs
 │   │   │   └── user_receipt.rs
 │   │   ├── readiness/
+│   │   │   ├── compact/
+│   │   │   │   └── completion.rs
 │   │   │   ├── compact.rs
 │   │   │   ├── compact_tests.rs
 │   │   │   ├── dialog.rs

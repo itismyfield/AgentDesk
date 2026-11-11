@@ -514,6 +514,7 @@ ReadyNoEarlyInput == Readiness!NoEarlyInput
 ReadyCompactAfterStopIdle == Readiness!CompactAfterStopIdle
 ReadyPendingEventuallyExecutes == Readiness!PendingEventuallyExecutes
 ReadyCompactEventuallyExecutes == Readiness!CompactEventuallyExecutes
+ReadySelfCompactEventuallyReleases == Readiness!SelfCompactEventuallyReleases
 ReadyNoContinuationEarlyInput == Readiness!NoContinuationEarlyInput
 ReadyBusyKeyPlanPreserved == Readiness!BusyKeyPlanPreserved
 ReadyBusyEventuallyQueues == Readiness!BusyEventuallyQueues

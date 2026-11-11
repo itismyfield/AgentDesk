@@ -1,4 +1,5 @@
 //! A generation-bound compact waits for current terminal evidence and never replays a mutation.
+pub(super) mod completion;
 use super::{evidence, source::Source};
 use crate::services::claude_tui::{busy_inject::screen, composer_lock, host_input, input};
 use std::sync::{Arc, LazyLock};
@@ -8,6 +9,7 @@ use std::time::Duration;
 pub(crate) enum Outcome {
     Pending,
     Submitted,
+    Completed,
     Ambiguous,
     Obsolete,
 }
@@ -17,6 +19,7 @@ pub(crate) struct Pending {
     file: Option<(u64, u64)>,
     start: Option<chrono::DateTime<chrono::Utc>>,
     finished: bool,
+    submitted: Option<super::Reservation>,
 }
 impl Pending {
     pub(crate) fn capture(session: &str) -> Option<Self> {
@@ -33,13 +36,22 @@ impl Pending {
             file,
             start,
             finished: false,
+            submitted: None,
         })
     }
 
+    pub(crate) fn completing(&self) -> bool {
+        self.submitted.is_some()
+    }
+
     /// The caller holds the composer lock and has rechecked generation, occupancy and authority.
-    pub(crate) fn poll(&mut self, _permit: composer_lock::ComposerPermit<'_>) -> Outcome {
+    pub(crate) fn poll(
+        &mut self,
+        _permit: composer_lock::ComposerPermit<'_>,
+        complete: impl FnOnce(&mut dyn FnMut() -> bool) -> bool,
+    ) -> Outcome {
         let session = &self.source.session;
-        if self.finished {
+        if self.finished && self.submitted.is_none() {
             return Outcome::Obsolete;
         }
         if super::source::nonce(session).is_some_and(|nonce| nonce != self.source.nonce)
@@ -66,6 +78,25 @@ impl Pending {
         }
         if self.file.is_none() {
             self.file = stamp.map(|stamp| stamp.file);
+        }
+        if let Some(reservation) = &self.submitted {
+            let Some(floor) = &reservation.stamp else {
+                return Outcome::Obsolete;
+            };
+            let Some(result) = completion::read(&self.source.path, floor, &self.source.native)
+            else {
+                return Outcome::Pending;
+            };
+            if Source::current(session, None).as_ref() != Some(&self.source) {
+                return Outcome::Obsolete;
+            }
+            if !complete(&mut || reservation.finish_compact(floor, self.start)) {
+                return Outcome::Obsolete;
+            }
+            tracing::info!(tmux_session_name = %session, success = result,
+                "Claude local compact control finished");
+            self.submitted = None;
+            return Outcome::Completed;
         }
         let proof = super::observe(session, Some(&self.source.path)).filter(|proof| {
             evidence::read(&self.source.path).is_some_and(|tail| {
@@ -129,7 +160,7 @@ impl Pending {
             return Outcome::Ambiguous;
         }
         if let Some(reservation) = reservation {
-            reservation.sent();
+            self.submitted = Some(reservation.compact_submitted());
         }
         Outcome::Submitted
     }
@@ -167,7 +198,7 @@ pub(crate) fn spawn(
                 return;
             };
             pending = returned;
-            if outcome != Some(Outcome::Pending) {
+            if !matches!(outcome, Some(Outcome::Pending | Outcome::Submitted)) {
                 return;
             }
             tokio::select! {
