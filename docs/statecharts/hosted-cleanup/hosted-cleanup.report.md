@@ -35,11 +35,11 @@ Coordinates below compare the frozen baseline with the service ownership impleme
 | ReadCandidate | `db/dispatched_sessions/hosted_execution.rs:685,727,758` | `db/dispatched_sessions/hosted_execution.rs:677,726,748`; service orchestrates at `services/dispatched_sessions/hosted_cleanup.rs:11,29` |
 | ObserveMarker | `hosted_execution.rs:643,674` | `services/tmux_turn_liveness/cleanup_host.rs:18`; `record_deletable` at `hosted_execution.rs:639` remains DB-only |
 | WriteMarkerDuringWait | the marker-only interleaving in `canonical_identity_pg_tests.rs:2431` | same scenario; no new writer authority |
-| NewTurnOrRespawn | bulk status condition `hosted_execution.rs:708`; raw/identity/key comparison `:709`; explicit CleanupRow comparison `:822` | identical SQL condition at `hosted_execution.rs:706`; explicit comparison `:791` |
+| NewTurnOrRespawn | bulk status condition `hosted_execution.rs:708`; raw/identity/key comparison `:709`; explicit CleanupRow comparison at frozen-baseline line 822 | identical SQL condition at `hosted_execution.rs:706`; explicit comparison `:791` |
 | AddAlias | explicit CleanupRow equality includes ordered aliases; bulk SQL recheck does not | same row comparison and bulk SQL projection |
 | ReleasePriorLock | `hosted_execution.rs:772,797` | service `hosted_cleanup.rs:37`; DB wait primitive `hosted_execution.rs:766` |
 | ObserveAfterWait | `hosted_execution.rs:774,777` | `hosted_cleanup.rs:38–41` |
-| ConditionalApply | `hosted_execution.rs:707,814` | `hosted_execution.rs:697,783`; explicit DB transaction `dispatched_sessions.rs:2552` |
+| ConditionalApply | frozen-baseline bulk DELETE at line 707 and locked explicit DELETE at line 814 | `hosted_execution.rs:697,783`; explicit DB transaction `dispatched_sessions.rs:2552` |
 | Commit / Rollback | one bulk transaction; explicit wait transaction rolls back before actual mutation | same transaction boundaries and order |
 | Restart / Retry | discard uncommitted work and read candidates on a later cleanup invocation | same behavior; at most one modeled restart and transient failure |
 
