@@ -1,6 +1,6 @@
 %% Hand-authored projection, not generated TLC output.
-%% Implementation source SHA 664d1589dd99c3d51d9082194e0c09189035b4b1; CompactPending is design B, not A product behavior.
-%% Implementation base SHA c3b660544bab3971630931b444c67a985f4c9169; A leaves CompactPending for B.
+%% Implementation source SHA efe1ba3647bea52f0a6dc19b662eaf17219d3316; merge base 6be9c44583b0cb24f49e31ede6a4c59cfdf88515.
+%% Compact projection is nominal; uncertain transport and target CLI ordering are caller-test / operational boundaries.
 stateDiagram-v2
     [*] --> Route
     Route --> BusyQueue : existing active hand_busy / native Running branches
@@ -31,7 +31,8 @@ stateDiagram-v2
     Running --> Observe : current approved terminal
     Running --> Settled : exact original receipt; no replay of Unknown
     Settled --> Route : next original
-    Observe --> CompactPending : usage crossing remembered
-    CompactPending --> Running : approved terminal Idle + no continuation latch + draft admission
+    Observe --> CompactPending : source-bound usage crossing remembered
+    Running --> CompactPending : remember request without a control key
+    CompactPending --> Running : approved terminal Idle + no latch + D + composer permit + reserve/current
     Observe --> ScreenStall : before model requires screen confirmation
     ScreenStall --> ScreenStall : narrow / resize never confirms; progress RED

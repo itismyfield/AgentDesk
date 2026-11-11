@@ -1,6 +1,6 @@
 # Claude Idle 입력 준비 확정 — #8080 설계 d2
 
-구현 A source SHA: 664d1589dd99c3d51d9082194e0c09189035b4b1. B compact pending은 미구현이며 기존 compact 동작을 유지한다.
+구현 A+B source SHA: efe1ba3647bea52f0a6dc19b662eaf17219d3316. 설계 r2 좌표는 당시 snapshot이며 최신 B 구현 대응과 검증 경계는 [보고서](transcript-readiness.report.md)의 B 절을 따른다.
 
 설계 d2 시점 Prod 기준 SHA: 574af580b0c5d6e6ce280994f4ed243463de5d2d.
 main: 4f30c67d9a48eacad96a99faff9fd442d0d4dd3c.
@@ -339,7 +339,7 @@ provider_dispatch/owner_input.rs 1583줄이다. 새 ledger/wait/scheduler를 여
 
 | prod 파일 그룹 | 역할/추가 코드 상한 |
 |---|---|
-| claude_tui/readiness/mod.rs, readiness/evidence.rs, readiness/wait.rs 및 신설 예정 compact 모듈 (4) | 값/strict terminal+latch/read/wait/pending compact ≤850. r1의 보수 예산 안에 latch 포함 |
+| claude_tui/readiness/mod.rs, readiness/evidence.rs, readiness/wait.rs 및 src/services/claude_tui/readiness/compact.rs (4) | 값/strict terminal+latch/read/wait/pending compact ≤850. r1의 보수 예산 안에 latch 포함 |
 | claude_tui/mod.rs, hook_server.rs, session.rs, tui_prompt_dedupe/runtime_binding.rs (4) | ingress/launch/clear 연결 ≤45 |
 | input.rs, input/submission.rs, input/preparation_hold.rs (3) | screen wait 삭제/최종 proof ≤55 추가 |
 | hosting/followup_support.rs, hosting/warm_followup.rs, host_input.rs (3) | R/D 분리 ≤40 |

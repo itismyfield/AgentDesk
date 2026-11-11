@@ -186,3 +186,33 @@ Implementation source SHA: 664d1589dd99c3d51d9082194e0c09189035b4b1. Direct TLC 
 | InputPathReadyLateDialog.cfg | after | none |
 
 Permission metadata clears the current terminal while later completion remains eligible. A late approved startup picker must be polled again before SessionStart; its dialog Enter is separate from original payload writes. The concrete workspace plan is tested by callers, not proved by these abstract paths. Existing compact GREEN remains a design-B claim only.
+
+
+## B implementation / direct TLC correspondence
+
+Implementation source SHA `efe1ba3647bea52f0a6dc19b662eaf17219d3316`. B measure base / merged A ref is `6be9c44583b0cb24f49e31ede6a4c59cfdf88515`. No TLA/cfg change was needed: this implementation follows the already reviewed compact-pending actions. Direct TLC was rerun from the current 56 model/cfg files (all byte-identical to the execution snapshot): 37 cfg / 105 reported runs, GREEN23 / expected RED14 / unexpected failure0 / skip0, 66.1s. These results are specification checks, not a CLI execution or code extraction.
+
+| Model value/action | Production coordinate |
+|---|---|
+| usage crossing / pending callback | src/services/claude_compact_trigger.rs:356 |
+| generation / occupancy / captured authority | src/services/claude_compact_trigger.rs:229 |
+| source / Start / file identity capture | src/services/claude_tui/readiness/compact.rs:22 |
+| terminal-only / reserve-current / D / pre-Enter | src/services/claude_tui/readiness/compact.rs:40 |
+| event hint / 250ms timer | src/services/claude_tui/readiness/compact.rs:147 |
+| wake after hook ledger guard release | src/services/claude_tui/readiness/mod.rs:277 |
+| blocking composer witness | src/services/claude_tui/composer_lock.rs:80 |
+| completed absence vs error / successor | src/services/discord/compact_turn_authority.rs:81 |
+
+| Before / after cfg | Actual result | Broken rules |
+|---|---|---|
+| InputPathReadyBusyCompact.cfg | expected RED | ReadyCompactAfterStopIdle |
+| InputPathReadyCompact.cfg | GREEN | - |
+| InputPathReadySuppressedCompact.cfg | GREEN | - |
+| InputPathReadyNoLatchCompact.cfg | expected RED | ReadyCompactAfterStopIdle,ReadyNoContinuationEarlyInput,ReadyNoIdleRunningInjection |
+| InputPathReadyDraft.cfg | GREEN | - |
+| InputPathReadyUnread.cfg | GREEN | - |
+| InputPathReadyRace.cfg | GREEN | - |
+
+The model abstracts a valid pending generation, eventual approved terminal evidence, recoverable pre-key capture, and a non-ambiguous compact write. Source invalidation and unknown transport are tested by callers; the liveness GREEN does not prove progress after an uncertain first key. The installed WSL CLI is 2.1.316, not operational 2.1.322. An older 2.1.283 capture has PreCompact / SessionStart(compact) / PostCompact and no following root Stop, so the exact 2.1.322 native compact-completion activity/terminal sequence remains [U]. SessionStart(compact) is not used to authorize a first input. No PostCompact readiness authority was added. The next-input-after-compact caller case uses explicitly synthetic new native activity and a hard terminal; it does not settle that operational assumption.
+
+Busy hand_busy / native Running writes and #8077 custody / exact-close / first-input behavior stay on their existing paths. P2-4 (late old clear Start after resume) remains deferred.
