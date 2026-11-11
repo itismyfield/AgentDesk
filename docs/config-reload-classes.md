@@ -170,9 +170,9 @@ seconds with content comparison, independently of native filesystem notification
 | `routines.max_consecutive_failures` | restart | `src/server/routes/routines/handlers.rs` run_routine_now (AppState.config) |
 | `onboarding.guild_id` | restart | `src/services/auto_queue/fsm.rs` AutoQueueActivateDeps::from_state (AppState effective_guild_id) |
 | `onboarding.default_categories` | live | `src/services/onboarding/channel.rs` apply_runtime_config_defaults (current() -> OnboardingConfig::resolve_category) |
-| `onboarding.provider_suffix_map` | live | `src/services/provider.rs` ProviderKind::from_channel_suffix (current()) |
+| `onboarding.provider_suffix_map` | live | `src/services/provider/runtime.rs` ProviderRuntimeExt::from_channel_suffix (current()) |
 | `onboarding.provider_options` | live | `src/config.rs` OnboardingConfig::is_empty (no daemon reader) |
-| `onboarding.default_provider` | live | `src/services/provider.rs` ProviderKind::default_channel_provider (current()) |
+| `onboarding.default_provider` | live | `src/services/provider/runtime.rs` ProviderRuntimeExt::default_channel_provider (current()) |
 | `memory.backend` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/discord/settings/memory.rs:configured_memory_backend_name |
 | `memory.file.sak_path` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via runtime_layout/mod.rs:shared_agent_knowledge_path |
 | `memory.file.sam_path` | live | `src/runtime_layout/mod.rs` memory_backend_from_config (no daemon reader) |
