@@ -280,7 +280,16 @@ async fn normal_end(
         owner,
         &transition,
     );
+    #[cfg(unix)]
+    let fence =
+        match crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence::try_acquire(owner)
+        {
+            Ok(Some(fence)) => fence,
+            Ok(None) | Err(_) => return Response::Retry,
+        };
     let ended = crate::services::tmux_common::try_with_tmux_source_authority(owner, |authority| {
+        #[cfg(unix)]
+        fence.validate(owner).map_err(|_| Response::Retry)?;
         let validation = validate_native(
             row,
             row.routing_cleanup
@@ -289,15 +298,23 @@ async fn normal_end(
                 .ok_or(Response::NeedsOperator)?,
         );
         validation?;
-        let ended = super::super::managed_reset::end_under_source(authority);
+        let ended = super::super::managed_reset::end_under_source(
+            authority,
+            #[cfg(unix)]
+            &fence,
+        );
         // A confirmed vacant slot still carries the exact old launch files after a host restart.
         if !ended.tmux_unconfirmed
             && !ended.reset
             && crate::services::session_backend::process_session_pid(owner).is_none()
         {
             crate::services::tmux_common::cleanup_session_temp_files_under_source_authority(
-                authority, owner,
-            );
+                authority,
+                owner,
+                #[cfg(unix)]
+                &fence,
+            )
+            .map_err(|_| Response::Retry)?;
         }
         Ok(ended)
     });
@@ -306,6 +323,8 @@ async fn normal_end(
         Some(Err(response)) => return response,
         None => return Response::Retry,
     };
+    #[cfg(unix)]
+    drop(fence);
     if ended.tmux_unconfirmed {
         return Response::Retry;
     }

@@ -390,6 +390,11 @@ pub(crate) async fn launch_herdr_session(
         None
     };
     let owner = launch.owner;
+    let fence = crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence::acquire_async(
+        &owner.logical_key,
+    )
+    .await
+    .map_err(HerdrLaunchError::Prepare)?;
     let observed = load_row(pool, &owner).await?;
     if let HostedRecord::Known(record) = &observed.record
         && let Some(location) = awaiting_evidence(record, &endpoint)
@@ -419,6 +424,7 @@ pub(crate) async fn launch_herdr_session(
                 granted
             }
         };
+        drop(fence);
         return probe_again(pool, &owner, record, location, witness, &host).await;
     }
     match &observed.record {
@@ -489,11 +495,12 @@ pub(crate) async fn launch_herdr_session(
             .map_err(|error| HerdrLaunchError::Marker(error.to_string()))
     });
     let markers = match markers {
-        Ok(_) => runtime_marker::clear_fresh(&owner, &nonce)
-            .await
-            .map_err(HerdrLaunchError::Marker),
+        Ok(_) => {
+            runtime_marker::clear_fresh(&owner, &nonce, &fence).map_err(HerdrLaunchError::Marker)
+        }
         Err(error) => Err(error),
     };
+    drop(fence);
     if let Err(error) = markers {
         return Err(retire_unsent(pool, &owner, &nonce, error).await);
     }

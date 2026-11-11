@@ -1,14 +1,17 @@
 pub(crate) mod claude_footer;
 pub(crate) mod host_marker;
+pub(crate) mod runtime_hint_fence;
 mod session_markers;
+#[cfg(test)]
+pub(crate) use session_markers::write_tmux_runtime_kind_marker;
 pub(crate) use session_markers::{
     AuthMarkers, advance_claude_session_auth, resolve_tmux_runtime_kind_marker,
-    tmux_session_auth_profile_matches, write_tmux_runtime_kind_marker,
-    write_tmux_session_auth_profile,
+    tmux_session_auth_profile_matches, write_tmux_session_auth_profile,
 };
 #[cfg(unix)]
 pub(crate) use session_markers::{
     claude_session_auth, claude_session_auth_matches, write_claude_session_auth,
+    write_tmux_runtime_kind_marker_under_fence,
 };
 
 use sha2::{Digest, Sha256};
@@ -1181,9 +1184,32 @@ const CLAUDE_SESSION_AUTH_TEMP_EXT: &str = "auth_session";
 /// location and the legacy `/tmp/` location so cleanup is total regardless
 /// of where the wrapper originally wrote.
 pub fn cleanup_session_temp_files(session_name: &str) {
-    with_tmux_source_authority(session_name, |authority| {
+    #[cfg(unix)]
+    let result = runtime_hint_fence::RuntimeHintFence::acquire(session_name)
+        .and_then(|fence| cleanup_session_temp_files_under_fence(&fence, session_name));
+    #[cfg(not(unix))]
+    let result = with_tmux_source_authority(session_name, |authority| {
         cleanup_session_temp_files_under_source_authority(authority, session_name)
     });
+    if let Err(error) = result {
+        tracing::warn!(session_name, %error, "session temp cleanup fence refused");
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn cleanup_session_temp_files_under_fence(
+    fence: &runtime_hint_fence::RuntimeHintFence,
+    session_name: &str,
+) -> Result<(), String> {
+    fence.validate(session_name)?;
+    with_tmux_source_authority(session_name, |authority| {
+        cleanup_session_temp_files_under_source_authority(
+            authority,
+            session_name,
+            #[cfg(unix)]
+            fence,
+        )
+    })
 }
 
 /// [`cleanup_session_temp_files`] for a session the host guard admitted.
@@ -1196,7 +1222,13 @@ pub(crate) fn cleanup_cleared_session_temp_files(
 pub(crate) fn cleanup_session_temp_files_under_source_authority(
     authority: &TmuxSourceAuthority<'_>,
     session_name: &str,
-) {
+    #[cfg(unix)] fence: &runtime_hint_fence::RuntimeHintFence,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    fence.validate(session_name)?;
+    if authority.session() != session_name {
+        return Err("runtime hint cleanup source differs".into());
+    }
     // All extensions we ever allocate under the session prefix.
     const EXTS: &[&str] = &[
         "jsonl",
@@ -1232,6 +1264,7 @@ pub(crate) fn cleanup_session_temp_files_under_source_authority(
         session_name,
         CODEX_TUI_HOME_TEMP_EXT,
     ));
+    Ok(())
 }
 
 /// Get the current AgentDesk runtime root marker for tmux session ownership.
