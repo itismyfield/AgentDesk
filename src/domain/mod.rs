@@ -5,5 +5,6 @@ pub(crate) mod lifecycle;
 pub(crate) mod memory;
 pub(crate) mod message_split;
 pub(crate) mod provider;
+pub(crate) mod provider_auth_profile;
 pub(crate) mod session_identity;
 pub(crate) mod tool_text;
