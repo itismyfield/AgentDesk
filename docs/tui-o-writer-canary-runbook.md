@@ -194,11 +194,13 @@ committed`, from the opener of its first turn, ended or not, that Legacy's own d
 not cover; with every turn covered, from the end of the last complete record. Only records of the
 tmux's current generation count (the durable frontier and the confirmed receipts, never the
 in-memory watermark), and a record counts for a rollout only while the generation bound that one
-rollout, or for the first rollout when Discord dated it before the next bind; a record must also
-end on that rollout's turn boundary. Custody, inflight rows, turn times, a bind recorded after the
-turn and a turn with no recorded time never leave a turn out: when unsure, O takes the turn. The
-first switch to O may therefore post again a turn Legacy delivered without such a record, once;
-the committed `init` is reread on later starts. The takeover waits, logged as `Codex takeover
+rollout; it must also end on that rollout's turn boundary. A record names no rollout, may be
+written after the next bind and may keep an edited placeholder's earlier id, so once a generation
+bound two rollouts none of its records counts and every turn of those rollouts is taken. Custody,
+inflight rows, turn times, a bind recorded after the turn and a turn with no recorded time never
+leave a turn out: when unsure, O takes the turn. The first switch to O may therefore post again,
+once, every turn Legacy delivered from the rollouts of a generation that bound more than one, and
+any turn it delivered without such a record; the committed `init` is reread on later starts. The takeover waits, logged as `Codex takeover
 waits`, while a Legacy body sent since its bind may be part of a turn, or while a rollout it must
 read cannot be read. The bytes before each start must hash the same under the intake fence. Every
 other rollout the current generation bound, and every rollout an attempt judged owed, goes into the
