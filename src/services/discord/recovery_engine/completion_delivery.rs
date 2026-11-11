@@ -65,18 +65,23 @@ impl CapturedReadyDeliveryCommit {
         {
             return None;
         }
-        if matches!(self.delivery.outcome, RecoveryRelayOutcome::Delivered) {
-            self.state.terminal_delivery_committed = true;
-            self.state.response_sent_offset = self.state.full_response.len();
-            // The scheduled outcome is stored with the commit it settles.
-            let outcome = crate::services::discord::scheduled_turn::recovery_delivered_outcome(
-                &self.state,
-                &self.state.full_response,
-            );
-            self.state.scheduled.set_outcome(outcome);
-        } else {
-            self.state.recovery_relay_attempts =
-                self.state.recovery_relay_attempts.saturating_add(1);
+        match self.delivery.outcome {
+            RecoveryRelayOutcome::Delivered => {
+                self.state.terminal_delivery_committed = true;
+                self.state.response_sent_offset = self.state.full_response.len();
+                // The scheduled outcome is stored with the commit it settles.
+                let outcome = crate::services::discord::scheduled_turn::recovery_delivered_outcome(
+                    &self.state,
+                    &self.state.full_response,
+                );
+                self.state.scheduled.set_outcome(outcome);
+            }
+            // A body held for O's adoption was never sent, so it spends no retry budget.
+            RecoveryRelayOutcome::AwaitingAdoption | RecoveryRelayOutcome::AdoptionRefused => {}
+            RecoveryRelayOutcome::PermanentFailure | RecoveryRelayOutcome::TransientFailure => {
+                self.state.recovery_relay_attempts =
+                    self.state.recovery_relay_attempts.saturating_add(1);
+            }
         }
         // Row writers still use the existing save-generation CAS. A failed or
         // uncertain transport persists its retry without releasing the obligation.
