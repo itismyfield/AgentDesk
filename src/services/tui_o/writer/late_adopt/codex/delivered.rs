@@ -1,6 +1,5 @@
-//! Legacy's Codex delivery records read as a floor per rollout. A record names no file, so it
-//! counts for a source only when it is of the current tmux generation and dated inside that
-//! source's bind span, or undated while the generation bound that source alone.
+//! Legacy's Codex delivery records as a floor per rollout. A record names no file, so it counts
+//! only of the current generation, dated in that rollout's bind span or undated with it alone.
 
 use chrono::{DateTime, Utc};
 

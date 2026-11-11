@@ -974,9 +974,8 @@ fn posted(harness: &Harness, text: &str) -> usize {
         .count()
 }
 
-/// Two turns ended before the baseline, the first behind Legacy's row and the second behind a
-/// pending start, with no Legacy record, are both taken from the first opener; a record of the
-/// first leaves only the second.
+/// Two turns ended before the baseline behind a row and a pending start, with no Legacy record,
+/// are both taken from the first opener; a record of the first leaves only the second.
 #[tokio::test(start_paused = true)]
 async fn two_ended_turns_without_a_legacy_record_are_both_taken() {
     for (channel, first_delivered) in [(61_872_u64, false), (61_873, true)] {

@@ -60,9 +60,8 @@ pub(in crate::services::tui_o::writer::late_adopt) struct Frontier {
 const DELIVERY_CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::seconds(1);
 
 impl Frontier {
-    /// Where a delivered `(from, to)` leaves these bytes when it is one turn's delivery: both ends
-    /// on record ends, `to` at or past that turn's end and before the next opener, `from` after
-    /// the turn before it ended, and a dated delivery no earlier than that turn ended.
+    /// Where a delivered `(from, to)` leaves these bytes as one turn's delivery: both ends on record
+    /// ends inside that turn's window, and a dated delivery no earlier than the turn ended.
     pub(in crate::services::tui_o::writer::late_adopt) fn closes(
         &self,
         (from, to): (u64, u64),
