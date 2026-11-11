@@ -138,14 +138,52 @@ fn current_session(
     if history.awaiting.is_some() {
         return Err("handoff native session is still Pending".into());
     }
-    let source = source.ok_or("handoff native session has no verified durable binding")?;
-    uuid::Uuid::parse_str(&source.session_id)
-        .map_err(|_| "handoff native session ID is invalid")?;
-    let metadata = std::fs::metadata(&source.path).map_err(|e| e.to_string())?;
+    let legacy = source.is_none();
+    let source = source
+        .or_else(|| match &latest.new {
+            events::BindingTarget::Source(source)
+            | events::BindingTarget::Resolved { source, .. }
+                if latest.evidence.hook_event.is_none() =>
+            {
+                Some(source.clone())
+            }
+            _ => None,
+        })
+        .ok_or("handoff native session has no verified durable binding")?;
+    if legacy {
+        use crate::services::tui_prompt_dedupe::binding_context::{
+            SpawnNonceMarker, observe_spawn_nonce_marker,
+        };
+        // A failed create can leave a marker without logging a native execution.
+        match (nonce, observe_spawn_nonce_marker(logical)) {
+            (Some(recorded), SpawnNonceMarker::Known(current)) if recorded != current => {
+                return Err("handoff binding belongs to another execution".into());
+            }
+            (_, SpawnNonceMarker::Unreadable) => {
+                return Err("handoff execution marker unreadable".into());
+            }
+            _ => (),
+        }
+    } else {
+        uuid::Uuid::parse_str(&source.session_id)
+            .map_err(|_| "handoff native session ID is invalid")?;
+    }
+    let metadata = match std::fs::metadata(&source.path) {
+        Ok(metadata) => metadata,
+        // The existing resume check owns the missing-transcript fresh launch and notice.
+        Err(error) if legacy && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(original.map(str::to_string));
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     if (metadata.dev(), metadata.ino()) != (source.dev, source.ino) {
         return Err("handoff transcript identity changed".into());
     }
-    Ok(Some(source.session_id))
+    Ok(if legacy {
+        original.map(str::to_string)
+    } else {
+        Some(source.session_id)
+    })
 }
 #[cfg(test)]
 mod tests {
@@ -271,6 +309,61 @@ mod tests {
             Some(continued)
         );
         drop(root_guard);
+    }
+    #[test]
+    fn tmux_stat_registration_resumes_without_a_verified_hook_pin() {
+        let _root_guard = crate::config::TestRuntimeRootGuard::new();
+        for nonce in [None, Some("a".repeat(32))] {
+            let log = Log::new(8077013);
+            let original = uuid::Uuid::new_v4().to_string();
+            let source = log.source(&original);
+            let marker =
+                crate::services::tmux_common::session_temp_path(log.logical, "spawn_nonce");
+            if let Some(nonce) = &nonce {
+                std::fs::write(&marker, nonce).unwrap();
+            }
+            crate::services::tui_prompt_dedupe::register_tmux_channel(log.logical, log.channel);
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                log.logical,
+                TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    output_path: source.path.display().to_string(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: nonce.as_ref().map(|_| original.clone()),
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+            );
+            let records = events::records_strict(log.channel).unwrap().unwrap();
+            assert!(!records.is_empty());
+            assert_eq!(records.last().unwrap().execution_nonce, nonce);
+            assert!(
+                events::claude_history(log.channel, log.logical, nonce.as_deref())
+                    .unwrap()
+                    .0
+                    .is_none()
+            );
+            assert_eq!(
+                current_session(log.channel, log.logical, Some(&original)).unwrap(),
+                Some(original.clone())
+            );
+            if let Some(nonce) = &nonce {
+                std::fs::write(&marker, "b".repeat(32)).unwrap();
+                assert!(current_session(log.channel, log.logical, Some(&original)).is_err());
+                std::fs::write(&marker, nonce).unwrap();
+            } else {
+                std::fs::write(&marker, "b".repeat(32)).unwrap();
+                assert_eq!(
+                    current_session(log.channel, log.logical, Some(&original)).unwrap(),
+                    Some(original.clone())
+                );
+                std::fs::remove_file(&marker).unwrap();
+            }
+            std::fs::rename(&source.path, source.path.with_extension("old")).unwrap();
+            std::fs::write(&source.path, b"{}\n").unwrap();
+            assert!(current_session(log.channel, log.logical, Some(&original)).is_err());
+        }
     }
     #[test]
     fn missing_log_keeps_legacy_id_but_corrupt_or_replaced_source_never_uses_it() {

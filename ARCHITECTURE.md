@@ -1915,6 +1915,9 @@ src/
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
 │   │   │   ├── input_owner/
+│   │   │   │   ├── claude_handoff/
+│   │   │   │   │   └── tests/
+│   │   │   │   │       └── actual_close_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── codex.rs
 │   │   │   │   │   ├── codex_herdr_tests.rs
@@ -2288,6 +2291,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
