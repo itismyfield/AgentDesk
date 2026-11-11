@@ -290,7 +290,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `discord/router/message_handler/headless_turn.rs:541,562` | start_reserved_headless_turn_admitted | AChange/source evidence; 기존 binding cleanup 별도 |
 | `discord/router/message_handler/provider_dispatch/owner_input.rs:1061` | execute_owned | AChange/source evidence; 기존 binding cleanup 별도 |
 | `discord/router/message_handler/provider_isolation.rs:377,549` | observed_runtime_kind_for_managed_tmux / reconcile_managed_tmux_runtime_kind_for_config | AChange/source evidence; 기존 binding cleanup 별도 |
-| `discord/terminal_ui_obligation.rs:428` | terminal_ui_session_ready_for_input | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
+| `discord/terminal_ui_obligation.rs` (삭제됨) | terminal_ui_session_ready_for_input | #8104에서 sweeper와 함께 삭제되어 진입점 아님 |
 | `discord/tmux_watcher/loop_poll_prologue.rs:412,413,418` | poll_watcher_output_or_continue | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
 | `discord/tmux_watcher/no_result_exits.rs:121` | handle_no_result_exits | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
 | `discord/tmux_watcher/terminal_readiness.rs:596` | watcher_session_ready_for_input | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
