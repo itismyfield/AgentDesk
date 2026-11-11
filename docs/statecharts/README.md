@@ -57,6 +57,7 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 
 | Area | Code SHA | Rules that break | Disposition |
 |---|---|---|---|
+| `intake-readiness` (#7353 S4-05) | `b20a366c8812348f14a9e08a7439cb8df6cfb09a` | StaleSnapshot: lock 전 profile/cache 재사용; EarlyTxEnd: 다른 transaction으로 적용 | Current/Proposed GREEN; 같은 lock→live 관측→write/commit 유지, modern unknown/offline fail-closed·legacy 호환 보존. [보고서](intake-readiness/intake-readiness.report.md) |
 | `intake-consent` (#7353 S4-07 r2 PLAN) | `08e2336e47986d70d0cbe95e56215858377aed5c` | unexecuted r2: Current private issue / d1 public receipt / r2 keyed scope have distinct actions; d1 predicts effects-then-rollback RED | `SC_RUN=mac-needed`; no FS-currentness claim, see [report](intake-consent/intake-consent.report.md) |
 | `intake-consent` (#7353 S4-07 r3 checked) | `df492f9412` | Current·Proposed GREEN; D1Public·ScopeOpen break NoUnauthorizedIssue and NoEffectsThenRollback; same-process claimed rearm included | 9 cfg expected results matched; FS observation gap retained, see [report](intake-consent/intake-consent.report.md) |
 | `outbound-port` (#7353 S21) | `92ef5b00b205679965c24c5c017f7237e8b5d57f` | NoNonceAmbiguous/NoNonceRestart: 응답 없는 생성 뒤 재시도나 재시작으로 nonce 없는 같은 intent가 두 번 게시됨; LossyKey·RecordBeforePost·NoReserve·NoReserveNonce 변형은 기대 RED; caller 흐름(OutboundCallerFlow)은 fallback-on-transient·관측 뒤 반환·caller 새 deduper 변형이 RED | 값 계약 이동 전(Before)·후(After) 같은 전이로 GREEN, nonce 강제 경로만 재시작·재시도에도 1회 게시; see [report](outbound-port/outbound-port.report.md) |

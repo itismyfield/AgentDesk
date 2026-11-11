@@ -31,6 +31,7 @@ pub(crate) mod machine_resources;
 /// the rest of the cluster services. `server::cluster` re-exports it for the
 /// route layer.
 pub(crate) mod node_registry;
+pub(crate) mod pre_accept_sweep;
 pub(crate) mod readiness;
 pub mod registry_adapter_sink;
 pub mod relay_producer_registry;

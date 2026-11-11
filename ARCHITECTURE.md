@@ -231,6 +231,7 @@ src/
 │   │   ├── consent_projection.rs
 │   │   ├── owner_fence_pg_tests.rs
 │   │   ├── postgres_tests.rs
+│   │   ├── pre_accept_sweep.rs
 │   │   └── worker_status.rs
 │   ├── intake_outbox_dispatch_stamp/
 │   │   └── tests.rs
@@ -1134,6 +1135,8 @@ src/
 │   │   │   ├── sampler.rs
 │   │   │   ├── store.rs
 │   │   │   └── tests.rs
+│   │   ├── pre_accept_sweep/
+│   │   │   └── tests.rs
 │   │   ├── readiness/
 │   │   │   └── tests.rs
 │   │   ├── stream_relay/
@@ -1164,6 +1167,7 @@ src/
 │   │   ├── machine_resources.rs
 │   │   ├── mod.rs
 │   │   ├── node_registry.rs
+│   │   ├── pre_accept_sweep.rs
 │   │   ├── readiness.rs
 │   │   ├── registry_adapter_sink.rs
 │   │   ├── relay_producer_registry.rs
