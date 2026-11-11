@@ -588,10 +588,60 @@ pub async fn load_channel_states(pool: &PgPool) -> Result<Vec<ChannelState>, sql
     ).fetch_all(pool).await?.into_iter().map(RecoveryStateRow::decode).collect()
 }
 
+#[cfg(test)]
 pub async fn load_checkpoint_events(
     pool: &sqlx::PgPool,
     channel_id: &str,
     limit: i64,
+) -> Result<Vec<CheckpointEvent>, sqlx::Error> {
+    load_checkpoint_events_before(pool, channel_id, limit, None, true).await
+}
+
+// Restore intent duplicates its source payload and must not displace it from the budget.
+pub(super) async fn load_restore_events(
+    pool: &PgPool,
+    channel_id: &str,
+) -> Result<Vec<CheckpointEvent>, sqlx::Error> {
+    let mut events = Vec::new();
+    let mut bytes = 0usize;
+    let mut before_seq = None;
+    let mut has_source = false;
+    'read: loop {
+        let batch = load_checkpoint_events_before(
+            pool,
+            channel_id,
+            DEFAULT_READ_EVENT_LIMIT as i64,
+            before_seq,
+            false,
+        )
+        .await?;
+        let Some(oldest) = batch.first() else { break };
+        before_seq = Some(oldest.seq);
+        for event in batch.into_iter().rev() {
+            let next_bytes = bytes.saturating_add(event.payload_bytes);
+            // Keep the existing last_n_events exception for a single oversized event.
+            if !events.is_empty() && next_bytes > READ_BYTE_CAP {
+                break 'read;
+            }
+            bytes = next_bytes;
+            has_source |=
+                super::restore::latest_progress_or_complete(std::slice::from_ref(&event)).is_some();
+            events.push(event);
+            if events.len() >= DEFAULT_READ_EVENT_LIMIT && has_source {
+                break 'read;
+            }
+        }
+    }
+    events.reverse();
+    Ok(events)
+}
+
+async fn load_checkpoint_events_before(
+    pool: &PgPool,
+    channel_id: &str,
+    limit: i64,
+    before_seq: Option<i64>,
+    include_restore: bool,
 ) -> Result<Vec<CheckpointEvent>, sqlx::Error> {
     let rows = sqlx::query_as::<
         _,
@@ -608,12 +658,15 @@ pub async fn load_checkpoint_events(
     >(
         "SELECT id, channel_id, seq, at, writer_agent_id, kind, payload, payload_bytes
            FROM agent_recovery_checkpoint_events
-          WHERE channel_id = $1
+          WHERE channel_id = $1 AND ($3::bigint IS NULL OR seq < $3)
+            AND ($4 OR kind <> 'restore')
           ORDER BY seq DESC
           LIMIT $2",
     )
     .bind(channel_id)
     .bind(limit)
+    .bind(before_seq)
+    .bind(include_restore)
     .fetch_all(pool)
     .await?;
     let mut events = Vec::new();
