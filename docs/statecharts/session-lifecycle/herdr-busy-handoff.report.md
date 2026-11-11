@@ -1,5 +1,7 @@
 # Claude forward handoff — slice A model report
 
+Implementation code SHA: `97292a8beb12d2ad2ee451d80be6852d2d845c02`. The following documentation commit changes no production code.
+
 Code base SHA: `07b57b5724f6bede32f7cc0cf00c7a23652ff3c2`; merge checkpoint `92dd105adb37ec99df1496542f7641fc092d4c15`. Final implementation SHA and Rust evidence: `/home/adk/adk/lane-runs/i8077/report-impl-3.md`. Model SHA256: `84a3a98a4475365cf5c483e4b75826565138848abf496bff2c06b62d08353341`.
 
 This replaces r2: no old destination/fallback/C-s/reversible-old transitions, no native readiness capability. Existing composer and Person draft guard remain. Actual accepted crash contract is Unknown→tick→retained; NoRetained covers crash-free executions. Terminal retained custody does not claim an execution. BeforeEffectCrash explicitly schedules its injected fault. See the [design](herdr-busy-handoff.design.md) and [chart](herdr-busy-handoff.chart.mmd).
