@@ -1,6 +1,6 @@
 use crate::services::provider::ProviderKind;
 
-use super::checkpoint::{CheckpointEvent, CheckpointEventKind, CheckpointPayload};
+use super::checkpoint::{CheckpointEvent, CheckpointPayload};
 use super::handoff::RecoveryIntake;
 use super::policy::ChannelRecoveryBinding;
 
@@ -33,27 +33,7 @@ pub fn session_mode_for_provider(provider: &ProviderKind) -> RestoreSessionMode 
 }
 
 pub fn latest_progress_or_complete(events: &[CheckpointEvent]) -> Option<&CheckpointEvent> {
-    events.iter().rev().find(|event| {
-        let payload = &event.payload;
-        // Older restores wrote an empty completion without a synthetic marker.
-        let legacy_complete = event.kind == CheckpointEventKind::Complete
-            && payload.schema_version == 1
-            && matches!(
-                payload.progress.as_str(),
-                "fallback complete" | "fallback failed"
-            )
-            && payload.goal.is_empty()
-            && payload.decisions.is_empty()
-            && payload.files.is_empty()
-            && payload.next.is_empty()
-            && payload.last_user_message.is_empty();
-        matches!(
-            event.kind,
-            CheckpointEventKind::Complete
-                | CheckpointEventKind::FallbackProgress
-                | CheckpointEventKind::OwnerProgress
-        ) && !legacy_complete
-    })
+    events.iter().rev().find(|event| event.is_restore_source())
 }
 
 pub fn format_restore_packet(

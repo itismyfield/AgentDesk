@@ -168,6 +168,30 @@ pub struct CheckpointEvent {
     pub payload_bytes: usize,
 }
 
+impl CheckpointEvent {
+    pub fn is_restore_source(&self) -> bool {
+        let payload = &self.payload;
+        // Older restores wrote an empty completion without a synthetic marker.
+        let legacy_complete = self.kind == CheckpointEventKind::Complete
+            && payload.schema_version == 1
+            && matches!(
+                payload.progress.as_str(),
+                "fallback complete" | "fallback failed"
+            )
+            && payload.goal.is_empty()
+            && payload.decisions.is_empty()
+            && payload.files.is_empty()
+            && payload.next.is_empty()
+            && payload.last_user_message.is_empty();
+        matches!(
+            self.kind,
+            CheckpointEventKind::Complete
+                | CheckpointEventKind::FallbackProgress
+                | CheckpointEventKind::OwnerProgress
+        ) && !legacy_complete
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelState {
     pub channel_id: String,
@@ -624,8 +648,7 @@ pub(super) async fn load_restore_events(
                 break 'read;
             }
             bytes = next_bytes;
-            has_source |=
-                super::restore::latest_progress_or_complete(std::slice::from_ref(&event)).is_some();
+            has_source |= event.is_restore_source();
             events.push(event);
             if events.len() >= DEFAULT_READ_EVENT_LIMIT && has_source {
                 break 'read;

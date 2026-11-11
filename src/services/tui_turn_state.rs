@@ -60,14 +60,6 @@ impl TuiReadyState {
     pub(crate) fn is_ready(self) -> bool {
         matches!(self, Self::Ready)
     }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Ready => "ready",
-            Self::Busy => "busy",
-            Self::Unknown => "unknown",
-        }
-    }
 }
 
 /// #3981/#4024: a busy JSONL `UserSubmitted` turn-state is only reclaimed as a

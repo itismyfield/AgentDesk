@@ -777,7 +777,8 @@ src/
 │   │   ├── durable/
 │   │   │   ├── operations.rs
 │   │   │   ├── postgres_tests.rs
-│   │   │   └── provider_errors.rs
+│   │   │   ├── provider_errors.rs
+│   │   │   └── restore_window_tests.rs
 │   │   ├── accounts.rs
 │   │   ├── admission.rs
 │   │   ├── checkpoint.rs
@@ -789,6 +790,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── policy.rs
 │   │   ├── restore.rs
+│   │   ├── restore_window_tests.rs
 │   │   ├── tests.rs
 │   │   └── wakeup.rs
 │   ├── agents/
@@ -4575,7 +4577,6 @@ src/
 │   ├── tool_output_guard.rs
 │   ├── tui_prompt_control.rs
 │   ├── tui_prompt_dedupe.rs
-│   ├── tui_steering.rs
 │   ├── tui_turn_state.rs
 │   ├── turn_cancel_finalizer.rs
 │   ├── turn_cancel_queue_guard.rs
