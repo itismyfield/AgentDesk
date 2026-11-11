@@ -14,8 +14,8 @@ Key(i) == IF Conv = "lossy" THEN "t" ELSE i
 Keys == {Key(i) : i \in Intents}
 Outcomes == {"none", "sent", "duplicate", "skip", "transient", "permanent"}
 
-VARIABLES pc, outcome, shown, retried, dedup, holder, store, posts, nonceSeen, restarts
-vars == <<pc, outcome, shown, retried, dedup, holder, store, posts, nonceSeen, restarts>>
+VARIABLES pc, outcome, shown, retried, dedup, holder, store, posts, nonceSeen, restarts, unreserved
+vars == <<pc, outcome, shown, retried, dedup, holder, store, posts, nonceSeen, restarts, unreserved>>
 
 Init ==
     /\ pc = [r \in Reqs |-> "idle"]
@@ -28,6 +28,7 @@ Init ==
     /\ posts = [i \in Intents |-> 0]
     /\ nonceSeen = [i \in Intents |-> FALSE]
     /\ restarts = 0
+    /\ unreserved = FALSE
 
 TypeOK ==
     /\ pc \in [Reqs -> {"idle", "waiting", "sending", "done"}]
@@ -62,7 +63,7 @@ Reserve(r) ==
                        ELSE /\ dedup' = [dedup EXCEPT ![k] = "inflight"]
                             /\ UNCHANGED store
                     /\ UNCHANGED <<outcome, shown>>
-    /\ UNCHANGED <<retried, posts, nonceSeen, restarts>>
+    /\ UNCHANGED <<retried, posts, nonceSeen, restarts, unreserved>>
 
 \* wait_for_delivery: Delivered, Released (loop again) or TimedOut (Skip).
 Wait(r) ==
@@ -74,7 +75,7 @@ Wait(r) ==
               /\ pc' = [pc EXCEPT ![r] = "idle"]
               /\ UNCHANGED <<outcome, shown>>
          [] OTHER -> Finish(r, "skip", "none")
-    /\ UNCHANGED <<retried, dedup, holder, store, posts, nonceSeen, restarts>>
+    /\ UNCHANGED <<retried, dedup, holder, store, posts, nonceSeen, restarts, unreserved>>
 
 \* Discord creates a message unless an enforced nonce was already seen.
 Created(i) ==
@@ -87,9 +88,13 @@ Release(k, r) ==
          /\ holder' = [holder EXCEPT ![k] = NoReq]
     ELSE UNCHANGED <<dedup, holder>>
 
+\* Every post attempt records whether the request held the reservation for its key.
+PostAttempt(r) == unreserved' = (unreserved \/ holder[Key(r[1])] # r)
+
 SendOk(r) ==
     LET i == r[1] k == Key(i) IN
     /\ pc[r] = "sending"
+    /\ PostAttempt(r)
     /\ Created(i)
     /\ dedup' = [dedup EXCEPT ![k] = "delivered"]
     /\ store' = [store EXCEPT ![k] = i]
@@ -100,6 +105,7 @@ SendOk(r) ==
 SendFail(r) ==
     LET i == r[1] k == Key(i) IN
     /\ pc[r] = "sending"
+    /\ PostAttempt(r)
     /\ \E o \in {"transient", "permanent"}: Finish(r, o, "none")
     /\ Release(k, r)
     /\ UNCHANGED <<retried, store, posts, nonceSeen, restarts>>
@@ -109,6 +115,7 @@ SendAmbiguous(r) ==
     LET i == r[1] k == Key(i) IN
     /\ Ambiguous
     /\ pc[r] = "sending"
+    /\ PostAttempt(r)
     /\ Created(i)
     /\ Finish(r, "transient", "none")
     /\ Release(k, r)
@@ -120,7 +127,7 @@ Retry(r) ==
     /\ pc' = [pc EXCEPT ![r] = "idle"]
     /\ outcome' = [outcome EXCEPT ![r] = "none"]
     /\ retried' = [retried EXCEPT ![r] = TRUE]
-    /\ UNCHANGED <<shown, dedup, holder, store, posts, nonceSeen, restarts>>
+    /\ UNCHANGED <<shown, dedup, holder, store, posts, nonceSeen, restarts, unreserved>>
 
 \* The in-memory deduper is lost; the durable caller drives open requests again.
 Restart ==
@@ -130,7 +137,7 @@ Restart ==
     /\ holder' = [k \in Keys |-> NoReq]
     /\ store' = [k \in Keys |-> "none"]
     /\ pc' = [r \in Reqs |-> IF pc[r] = "done" THEN "done" ELSE "idle"]
-    /\ UNCHANGED <<outcome, shown, retried, posts, nonceSeen>>
+    /\ UNCHANGED <<outcome, shown, retried, posts, nonceSeen, unreserved>>
 
 Next ==
     \/ \E r \in Reqs: Reserve(r) \/ Wait(r) \/ SendOk(r) \/ SendFail(r)
@@ -145,6 +152,7 @@ Spec == Init /\ [][Next]_vars
 NoDuplicatePost == \A i \in Intents: posts[i] <= 1
 NoSuccessWithoutReceipt ==
     \A r \in Reqs: outcome[r] \in {"sent", "duplicate"} => shown[r] = r[1] /\ posts[r[1]] >= 1
+NoPostWithoutReservation == ~unreserved
 NoSilentLoss ==
     \A i \in Intents:
         (\A n \in Tries: pc[<<i, n>>] = "done")
