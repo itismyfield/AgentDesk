@@ -21,6 +21,11 @@ use serde_json::json;
 
 #[path = "dispatched_sessions/canonical_identity.rs"]
 mod canonical_identity;
+mod listing;
+pub use listing::list_dispatched_sessions;
+pub(crate) use listing::list_dispatched_sessions_pg;
+#[cfg(test)]
+mod listing_tests;
 mod output;
 pub use output::tmux_output;
 
@@ -127,43 +132,6 @@ pub struct DeleteSessionQuery {
 }
 
 // ── Handlers ──────────────────────────────────────────────────
-
-/// GET /api/dispatched-sessions
-pub async fn list_dispatched_sessions(
-    State(state): State<AppState>,
-    Query(params): Query<ListDispatchedSessionsQuery>,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    let include_all = params.include_merged.as_deref() == Some("1");
-    if let Some(pool) = state.pg_pool_ref() {
-        return match dispatched_sessions_db::list_dispatched_sessions_pg(pool, include_all).await {
-            Ok(mut sessions) => {
-                let worker_nodes = match crate::services::cluster::node_registry::list_worker_nodes(
-                    pool,
-                    state.config.cluster.lease_ttl_secs.max(1),
-                )
-                .await
-                {
-                    Ok(nodes) => nodes,
-                    Err(error) => {
-                        tracing::warn!(
-                            "failed to list worker nodes for dispatched session owner routing: {error}"
-                        );
-                        Vec::new()
-                    }
-                };
-                crate::services::cluster::session_routing::enrich_session_owner_routing(
-                    &mut sessions,
-                    state.cluster_instance_id.as_deref(),
-                    &worker_nodes,
-                );
-                Ok((StatusCode::OK, Json(json!({"sessions": sessions}))))
-            }
-            Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
-        };
-    }
-
-    Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
-}
 
 /// DELETE /api/dispatched-sessions/cleanup — manual: delete disconnected sessions
 pub async fn cleanup_sessions(

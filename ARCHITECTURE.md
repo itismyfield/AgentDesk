@@ -208,6 +208,7 @@ src/
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
+│   │   ├── listing.rs
 │   │   ├── rebind_override.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
@@ -3373,10 +3374,14 @@ src/
 │   │   │   └── retry_wake_tests.rs
 │   │   ├── herdr_kill/
 │   │   │   └── effects.rs
+│   │   ├── listing_tests/
+│   │   │   └── legacy.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── force_kill.rs
 │   │   ├── herdr_kill.rs
 │   │   ├── hook.rs
+│   │   ├── listing.rs
+│   │   ├── listing_tests.rs
 │   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
