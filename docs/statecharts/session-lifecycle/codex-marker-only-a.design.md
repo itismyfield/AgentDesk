@@ -89,6 +89,8 @@ lock 순서는 **정렬 physical entries → 반환을 기다리는 DB → try S
 
 ## 4. v3 read view·부팅·history pin
 
+①의 정적 수리에서 wire DTO는 `queued_head/v2_types/marker_control.rs`, strict decode는 `queued_head/compat/owned_decode.rs`, debt refs/TTL은 `queued_head/v2/a_read_view.rs`로 분리한다. vocabulary가 application을 참조하거나 decoder adapter가 application을 호출하지 않는다. marker owner는 같은 여섯 문자열의 wire DTO이며 DB repository 타입에 의존하지 않는다.
+
 A 최초 intent를 생산하는 commit에서만 version 3으로 승격한다. `v2.rs:155-165`와 `migration.rs:31`의 기존 생산 literal은 ①에서 version 2와 empty A extension을 유지하며 empty 필드는 serialize하지 않는다. v2 unknown-field 무시로 A debt가 사라지는 형식을 만들지 않는다. codec은 version을 먼저 분기하고 v3의 알려진 typed schema/tag/namespace만 허용한다. v2에 A control 필드를 숨겨 넣은 자료·unknown version/record는 명시 오류다. 기존 raw-byte CAS/rename/directory fsync/candidate recovery(`v2/commit.rs:17-105`)를 재사용한다.
 
 ①에서는 read view와 **effectful owner adoption**을 분리한다. `v2/sources.rs:47-53`의 생산 restore/adopt는 version3를 명시 read-only 오류로 거절해 원본을 보존한다. 따라서 수동/미래 v3 자료가 있더라도 `input_owner/recovery.rs:15→17→23`의 ensure→tick(commit)→requeue 및 wake가 A debt를 무시하고 진행하지 못한다. ①의 실제 v3 reader/source projection과 TTL pin의 의미시험은 가능하되, v3 owner mutation은 ②에서 이 고정 read-only 가드를 제거하고 controller를 함께 연결할 때만 열린다. feature flag/default-off branch/새 allow는 필요 없다. 이 guard 제거 파일도 ②에 센다.

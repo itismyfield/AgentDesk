@@ -1,3 +1,4 @@
+use super::super::v2_types::marker_control::MarkerControl;
 use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::turn_orchestrator::{ChannelMailboxRegistry, queued_head::compat};
@@ -10,7 +11,7 @@ fn item(id: u64) -> PendingQueueItem {
     .unwrap()
 }
 
-fn control() -> a_read_view::MarkerControl {
+fn control() -> MarkerControl {
     serde_json::from_value(json!({"cleanup_id":"cleanup-a",
         "identity":{"primary":42,"queued_generation":5,
             "sources":[{"message_id":42,"queued_generation":5}]},

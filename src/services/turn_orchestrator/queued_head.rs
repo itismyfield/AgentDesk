@@ -10,20 +10,6 @@ use super::pending_queue_persistence::{
 };
 use super::*;
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct SourceIdentity {
-    pub(crate) message_id: u64,
-    pub(crate) queued_generation: u64,
-}
-
-/// The primary, its generation and every source in order; terminal checks use the sources alone.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct QueueIdentity {
-    pub(crate) primary: u64,
-    pub(crate) queued_generation: u64,
-    pub(crate) sources: Vec<SourceIdentity>,
-}
-
 impl QueueIdentity {
     pub(crate) fn of(item: &Intervention) -> Self {
         let ids = match item.source_message_ids.as_slice() {
@@ -92,7 +78,7 @@ mod v2;
 pub(crate) use v2::actor::v2_queue;
 pub(crate) use v2::origin::{Waiting, waiting_origin};
 pub(crate) use v2::source_admission::TurnBind;
-pub(crate) use v2_types::OwedDrop;
+pub(crate) use v2_types::{OwedDrop, QueueIdentity, SourceIdentity};
 mod v2_types;
 pub(super) use snapshot::{parse_snapshot, snapshot_json};
 

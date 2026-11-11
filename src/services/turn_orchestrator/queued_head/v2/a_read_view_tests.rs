@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::turn_orchestrator::queued_head::compat::{self, SnapshotRead};
-use serde_json::json;
+use serde_json::{Value, json};
 
 const V2_BYTES: &str = "{\n  \"version\": 2,\n  \"items\": [],\n  \"head_injection\": null,\n  \"retained_inputs\": [],\n  \"terminal_identities\": [],\n  \"namespace\": \"marker-read\",\n  \"admission_sequence\": 0\n}";
 

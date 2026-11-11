@@ -2,6 +2,8 @@
 use super::v2_types::SnapshotV2;
 use super::*;
 
+mod owned_decode;
+
 pub(crate) enum SnapshotRead {
     Legacy(Vec<PendingQueueItem>, Option<Box<SnapshotMeta>>),
     ReadOnlyV2(Box<SnapshotV2>),
@@ -42,7 +44,7 @@ pub(crate) fn inspect(content: &str) -> Result<SnapshotRead, String> {
         value.get("version").and_then(serde_json::Value::as_u64),
         Some(2 | 3)
     ) {
-        let snapshot = super::v2::a_read_view::decode(value)?;
+        let snapshot = owned_decode::decode(value)?;
         return Ok(SnapshotRead::ReadOnlyV2(Box::new(snapshot)));
     }
     let (items, meta) = parse_snapshot(content)?;

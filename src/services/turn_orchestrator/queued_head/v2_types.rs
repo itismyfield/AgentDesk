@@ -1,6 +1,22 @@
 //! Durable V2 data: the owner's queue, attempts, retained inputs and admission binds.
-use super::{HeadPhase, PendingQueueItem, QueueIdentity};
+use super::{HeadPhase, PendingQueueItem};
 use serde::{Deserialize, Serialize};
+
+pub(crate) mod marker_control;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SourceIdentity {
+    pub(crate) message_id: u64,
+    pub(crate) queued_generation: u64,
+}
+
+/// The primary, its generation and every source in order; terminal checks use the sources alone.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct QueueIdentity {
+    pub(crate) primary: u64,
+    pub(crate) queued_generation: u64,
+    pub(crate) sources: Vec<SourceIdentity>,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SnapshotV2 {
@@ -22,7 +38,7 @@ pub(crate) struct SnapshotV2 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) owed_drop_receipts: Vec<OwedDrop>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) a_control: Vec<super::v2::a_read_view::MarkerControl>,
+    pub(crate) a_control: Vec<marker_control::MarkerControl>,
 }
 
 /// A removed input's terminal receipt not yet in the database; acked once it is.
