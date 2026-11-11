@@ -208,6 +208,7 @@ src/
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
+│   │   ├── listing.rs
 │   │   ├── rebind_override.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
@@ -233,6 +234,7 @@ src/
 │   ├── intake_outbox_dispatch_stamp/
 │   │   └── tests.rs
 │   ├── kanban_cards/
+│   │   ├── clock_columns.rs
 │   │   ├── crud.rs
 │   │   ├── labels.rs
 │   │   ├── listing.rs
@@ -381,6 +383,7 @@ src/
 │   │   └── semantic_boundaries.rs
 │   ├── outbound/
 │   │   ├── ids.rs
+│   │   ├── intent.rs
 │   │   ├── key.rs
 │   │   ├── policy.rs
 │   │   ├── port.rs
@@ -404,7 +407,9 @@ src/
 │   ├── automation_contract.rs
 │   ├── bot_role.rs
 │   ├── cluster_policy.rs
+│   ├── dispatch_route.rs
 │   ├── file_sync.rs
+│   ├── host_observation.rs
 │   ├── human_input.rs
 │   ├── intake_identity.rs
 │   ├── lifecycle.rs
@@ -777,7 +782,8 @@ src/
 │   │   ├── durable/
 │   │   │   ├── operations.rs
 │   │   │   ├── postgres_tests.rs
-│   │   │   └── provider_errors.rs
+│   │   │   ├── provider_errors.rs
+│   │   │   └── restore_window_tests.rs
 │   │   ├── accounts.rs
 │   │   ├── admission.rs
 │   │   ├── checkpoint.rs
@@ -789,6 +795,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── policy.rs
 │   │   ├── restore.rs
+│   │   ├── restore_window_tests.rs
 │   │   ├── tests.rs
 │   │   └── wakeup.rs
 │   ├── agents/
@@ -1772,24 +1779,6 @@ src/
 │   │   │   │   └── o_pending_tests.rs
 │   │   │   ├── confirmation/
 │   │   │   │   └── terminal_notice_tests.rs
-│   │   │   ├── delivery_obligation/
-│   │   │   │   ├── state/
-│   │   │   │   │   ├── proof_access.rs
-│   │   │   │   │   ├── proof_input.rs
-│   │   │   │   │   ├── proof_tests.rs
-│   │   │   │   │   └── whole_proof.rs
-│   │   │   │   ├── codec_tests.rs
-│   │   │   │   ├── fence.rs
-│   │   │   │   ├── load.rs
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── protocol.rs
-│   │   │   │   ├── reader.rs
-│   │   │   │   ├── reader_tests.rs
-│   │   │   │   ├── schema.rs
-│   │   │   │   ├── state.rs
-│   │   │   │   ├── tests.rs
-│   │   │   │   ├── validation.rs
-│   │   │   │   └── validation_tests.rs
 │   │   │   ├── delivery_record/
 │   │   │   │   ├── content.rs
 │   │   │   │   ├── frontier.rs
@@ -1830,6 +1819,7 @@ src/
 │   │   │   ├── o_writer_legacy.rs
 │   │   │   ├── o_writer_repost_io.rs
 │   │   │   ├── o_writer_repost_io_tests.rs
+│   │   │   ├── outbound_delivery_port_tests.rs
 │   │   │   ├── policy.rs
 │   │   │   ├── raw_output.rs
 │   │   │   ├── reaction_control.rs
@@ -2512,8 +2502,6 @@ src/
 │   │   ├── terminal_delivery_custody/
 │   │   │   ├── pg_tests.rs
 │   │   │   └── tests.rs
-│   │   ├── terminal_ui_obligation/
-│   │   │   └── sweep_tests.rs
 │   │   ├── tmux/
 │   │   │   ├── monitor_auto_turn_inflight.rs
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
@@ -3160,6 +3148,7 @@ src/
 │   │   │   ├── supervisor_notice_tests.rs
 │   │   │   ├── supervisor_reader_notice_tests.rs
 │   │   │   ├── supervisor_tests.rs
+│   │   │   ├── supervisor_worker_tests.rs
 │   │   │   ├── unknown_notice.rs
 │   │   │   ├── unknown_notice_store.rs
 │   │   │   └── unknown_notice_tests.rs
@@ -3348,7 +3337,6 @@ src/
 │   │   ├── task_supervisor.rs
 │   │   ├── terminal_coordinate.rs
 │   │   ├── terminal_delivery_custody.rs
-│   │   ├── terminal_ui_obligation.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
 │   │   ├── tmux_kill_policy.rs
@@ -3392,10 +3380,17 @@ src/
 │   │   │   └── retry_wake_tests.rs
 │   │   ├── herdr_kill/
 │   │   │   └── effects.rs
+│   │   ├── hosted_cleanup/
+│   │   │   ├── thread_gc/
+│   │   │   │   └── tests_pg.rs
+│   │   │   └── thread_gc.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── force_kill.rs
 │   │   ├── herdr_kill.rs
 │   │   ├── hook.rs
+│   │   ├── hosted_cleanup.rs
+│   │   ├── listing.rs
+│   │   ├── listing_tests.rs
 │   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
@@ -4485,6 +4480,7 @@ src/
 │   │   │   └── statusline_tests.rs
 │   │   ├── quota.rs
 │   │   └── quota_tests.rs
+│   ├── agent_channels.rs
 │   ├── agent_identity.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
@@ -4568,6 +4564,7 @@ src/
 │   ├── service_error.rs
 │   ├── session_activity.rs
 │   ├── session_backend.rs
+│   ├── session_evidence.rs
 │   ├── session_forwarding.rs
 │   ├── session_host.rs
 │   ├── session_resume.rs
@@ -4584,7 +4581,6 @@ src/
 │   ├── tool_output_guard.rs
 │   ├── tui_prompt_control.rs
 │   ├── tui_prompt_dedupe.rs
-│   ├── tui_steering.rs
 │   ├── tui_turn_state.rs
 │   ├── turn_cancel_finalizer.rs
 │   ├── turn_cancel_queue_guard.rs

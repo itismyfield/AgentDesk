@@ -1,4 +1,10 @@
-//! Transport port over the Discord HTTP API with plain string ids, and its failure classes.
+//! Transport port over the Discord HTTP API with plain string ids, its failure classes, and
+//! the caller-facing delivery port for Serenity-free intents.
+
+use std::future::Future;
+
+use super::intent::OutboundIntent;
+use super::result::DeliveryResult;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchMessagePostErrorKind {
@@ -147,4 +153,9 @@ pub(crate) trait DiscordOutboundClient: Send + Sync {
             format!("outbound client does not support DM channel resolution for user {user_id}"),
         ))
     }
+}
+
+/// Delivers one intent; the implementation owns the dedup reservation and nonce use.
+pub(crate) trait OutboundDelivery: Send + Sync {
+    fn deliver(&self, intent: OutboundIntent) -> impl Future<Output = DeliveryResult> + Send;
 }

@@ -12,9 +12,11 @@ use serenity::{ChannelId, MessageId};
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
+use crate::domain::outbound::intent::OutboundIntent;
 use crate::domain::outbound::port::{
-    DiscordOutboundClient, DispatchMessagePostError, DispatchMessagePostErrorKind,
+    DiscordOutboundClient, DispatchMessagePostError, DispatchMessagePostErrorKind, OutboundDelivery,
 };
+use crate::domain::outbound::result::DeliveryResult;
 use crate::services::discord::SharedData;
 
 pub(crate) async fn post_serenity_message_with_nonce(
@@ -263,6 +265,21 @@ impl HttpOutboundClient {
             token: token.into(),
             discord_api_base: discord_api_base.into(),
         }
+    }
+}
+
+/// Binds the process-wide deduper so callers cannot pick their own dedup store.
+impl OutboundDelivery for HttpOutboundClient {
+    fn deliver(
+        &self,
+        intent: OutboundIntent,
+    ) -> impl std::future::Future<Output = DeliveryResult> + Send {
+        super::delivery::deliver_outbound(
+            self,
+            super::shared_outbound_deduper(),
+            intent.into(),
+            None,
+        )
     }
 }
 

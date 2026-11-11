@@ -182,6 +182,16 @@ fn claude_pane_shows_background_work(pane: &str) -> bool {
             .any(crate::services::tmux_common::claude_footer::counts_background_work)
 }
 
+/// Judge the hosted row and marker before the existing occupancy query.
+pub(crate) async fn cleanup_row_is_unoccupied_pg(
+    pool: &sqlx::PgPool,
+    session_key: &str,
+    row: &crate::db::dispatched_sessions::hosted_execution::CleanupRow,
+) -> bool {
+    cleanup_host::cleanup_row_deletable(row)
+        && idle_cleanup_session_is_unoccupied(pool, session_key).await
+}
+
 /// Keep background work and approval waits even if the foreground provider is
 /// at a prompt. DB errors or missing rows are unknown, hence not cleanup proof.
 pub(crate) async fn idle_cleanup_session_is_unoccupied(

@@ -73,7 +73,8 @@ pub async fn list_nodes(
                     );
             }
             let (session_owners, session_owner_error) =
-                match crate::db::dispatched_sessions::list_dispatched_sessions_pg(pool, false).await
+                match crate::services::dispatched_sessions::list_dispatched_sessions_pg(pool, false)
+                    .await
                 {
                     Ok(mut sessions) => {
                         crate::server::cluster_session_routing::enrich_session_owner_routing(

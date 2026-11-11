@@ -1,5 +1,6 @@
 use sqlx::Row as SqlxRow;
 
+pub(crate) mod clock_columns;
 pub mod crud;
 pub mod labels;
 pub mod listing;
