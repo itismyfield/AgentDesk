@@ -189,18 +189,21 @@ as a clean comparison baseline until the historical debt/abandon evidence is est
 `deferred adoption committed` alone is insufficient (P31:
 `src/services/tui_o/writer/deferred.rs:19–28,325–428`).
 
-A reserved Codex channel whose rollout already holds output is taken at its frontier, logged as
-`Codex takeover committed`: the opener of the earliest turn of the rollout's current execution,
-ended or not, that Legacy is not shown to have delivered, when no Legacy body sent since its bind
-can be part of it; with no such turn, the end of the last complete record. A turn's own end never
-moves the frontier. A turn that ended before the takeover's baseline counts as delivered only while
-Legacy holds no custody for the channel; its one inflight row can owe only the last such turn.
-Turns from before that bind belonged to an earlier execution and are not posted; a turn with no
-recorded time is not assumed either way. Otherwise the takeover waits, logged as `Codex takeover
-waits`, also while the rollout bound before holds a turn Legacy may have sent part of. The bytes
-before the frontier must hash the same under the intake fence, or the commit waits for the next
-look. An earlier rollout's turn owed the same way
-goes into the `init` beside the new one (`src/services/tui_o/writer/late_adopt/codex.rs`).
+A reserved Codex channel whose rollout already holds output is taken, logged as `Codex takeover
+committed`, from the opener of its first turn, ended or not, that Legacy's own delivery records do
+not cover; with every turn covered, from the end of the last complete record. Only records of the
+tmux's current generation count (the durable frontier and the confirmed receipts, never the
+in-memory watermark), and a record counts for a rollout only while the generation bound that one
+rollout, or for the first rollout when Discord dated it before the next bind; a record must also
+end on that rollout's turn boundary. Custody, inflight rows, turn times, a bind recorded after the
+turn and a turn with no recorded time never leave a turn out: when unsure, O takes the turn. The
+first switch to O may therefore post again a turn Legacy delivered without such a record, once;
+the committed `init` is reread on later starts. The takeover waits, logged as `Codex takeover
+waits`, while a Legacy body sent since its bind may be part of a turn, or while a rollout it must
+read cannot be read. The bytes before each start must hash the same under the intake fence. Every
+other rollout the current generation bound, and every rollout an attempt judged owed, goes into the
+`init` from its own first uncovered turn (`src/services/tui_o/writer/late_adopt/codex.rs`,
+`src/services/tui_o/writer/late_adopt/codex/delivered.rs`).
 
 Before editing the list, run both cross-node checks below by hand and keep their output in the lane
 log. If either fails, stop the expansion; neither may be skipped.
