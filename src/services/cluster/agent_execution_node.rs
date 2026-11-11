@@ -87,12 +87,12 @@ mod tests {
             default_node_id: None,
         };
         let old_node: AgentExecutionNode = canonical_node;
-        let canonical_node: DomainNode = old_node;
-        assert!(canonical_node.validate().is_ok());
+        let returned_node: DomainNode = old_node;
+        assert!(returned_node.validate().is_ok());
         let canonical = DomainRequirements::parse(serde_json::json!({})).unwrap();
         let old: execution_requirements::ExecutionRequirements = canonical;
-        let canonical: DomainRequirements = old;
-        assert!(canonical.is_empty());
+        let returned: DomainRequirements = old;
+        assert!(returned.is_empty());
         let old_supports: fn(&serde_json::Value) -> bool = attachment_transfer::supports;
         let canonical_supports: fn(&serde_json::Value) -> bool = supports_attachment_transfer;
         let node = serde_json::json!({"capabilities":{"intake_worker":{
