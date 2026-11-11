@@ -374,6 +374,12 @@ src/
 │   ├── test_support.rs
 │   └── types.rs
 ├── domain/
+│   ├── outbound/
+│   │   ├── ids.rs
+│   │   ├── key.rs
+│   │   ├── policy.rs
+│   │   ├── port.rs
+│   │   └── result.rs
 │   ├── provider/
 │   │   ├── catalog/
 │   │   │   └── rows.rs
@@ -388,6 +394,7 @@ src/
 │   ├── lifecycle.rs
 │   ├── memory.rs
 │   ├── mod.rs
+│   ├── outbound.rs
 │   ├── provider.rs
 │   └── tool_text.rs
 ├── engine/
