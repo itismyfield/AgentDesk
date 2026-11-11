@@ -1,0 +1,39 @@
+---
+title: "Thread GC: 관측과 조건부 삭제"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks GCConditionalRefusalsKept or GCNewTurnKept
+    lg1: Path to the GCConditionalRefusalsKept or GCNewTurnKept bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 후보 조회 전
+  s1: 후보 snapshot
+  s2: host gate 통과
+  s3: 점유 없음 관측
+  s4: 로컬 owner 관측
+  s5: tmux 없음 관측
+  s6: tmux 없음 관측 #183; 새 turn
+  s7: 조건부 DELETE 적용 #183; 새 turn
+  s8: 삭제됨 #183; 새 turn
+  [*] --> s0
+  s0 --> s1: 후보 snapshot 또는 조회 실패
+  s1 --> s2: host와 Legacy marker 판단
+  s2 --> s3: DB 점유 조회
+  s3 --> s4: owner 파일 확인
+  s4 --> s5: tmux presence 확인
+  s5 --> s6: 새 turn이 DB 조건 변경
+  s6 --> s7: DELETE 조건 판정
+  s7 --> s8: statement commit
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 bugPath
+  class s8 breaks
+  class s8 bugPath

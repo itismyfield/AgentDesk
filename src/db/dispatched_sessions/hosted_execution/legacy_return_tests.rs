@@ -1,6 +1,7 @@
 use super::super::tests::{owner, record, wire};
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::dispatched_sessions::hosted_cleanup::cleanup_disconnected_sessions_pg as delete_disconnected_sessions_pg;
 use crate::services::session_host::legacy_return::tests::{ended, provider_alive};
 use serde_json::json;
 

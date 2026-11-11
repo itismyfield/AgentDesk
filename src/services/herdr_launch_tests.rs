@@ -303,7 +303,10 @@ impl Rival {
             }
             Self::ExplicitDelete => {
                 let deleted =
-                    crate::db::dispatched_sessions::delete_session_by_key_pg(pool, SESSION_KEY);
+                    crate::services::dispatched_sessions::hosted_cleanup::delete_session_by_key_pg(
+                        pool,
+                        SESSION_KEY,
+                    );
                 assert_eq!(deleted.await.map(|result| result.deleted), Ok(1));
             }
         }
