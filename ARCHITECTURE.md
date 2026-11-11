@@ -383,6 +383,7 @@ src/
 │   │   ├── public_catalog.rs
 │   │   └── tests.rs
 │   ├── bot_role.rs
+│   ├── cluster_policy.rs
 │   ├── file_sync.rs
 │   ├── human_input.rs
 │   ├── intake_identity.rs
