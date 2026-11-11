@@ -1,5 +1,5 @@
-//! Codex late takeover: a fresh rollout from its first byte, or one that holds output from its
-//! frontier, where Legacy's delivery provably ends; a Legacy send since the baseline skips it.
+//! Codex late takeover: a fresh rollout from its first byte, or one that holds output from the
+//! first turn Legacy's records do not show delivered; a Legacy send since the baseline skips it.
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
@@ -14,14 +14,16 @@ use crate::services::tui_o::writer::adoption;
 use crate::services::tui_o::writer::binding::{
     BindingEvent, BindingEvents, BindingRecord, BindingTarget,
 };
-use crate::services::tui_o::writer::host::{Custody, FencedFacts, HostIo, release, until_owned};
+use crate::services::tui_o::writer::host::{FencedFacts, HostIo, release, until_owned};
 use crate::services::tui_o::writer::renumbered;
 use crate::services::tui_o::writer::rotation::bound_source;
 
+mod delivered;
 pub(super) mod prefix;
-use prefix::{Frontier, Prefix, Span, Verdict};
+use delivered::Records;
+use prefix::{Prefix, Verdict};
 
-/// How far a turn opener's own clock may trail its bind and still be that execution's turn.
+/// How far a turn opener's own clock may trail this host's when judged against a baseline.
 const BIND_CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::seconds(1);
 
 /// Legacy's sends, then the last binding seq: only a rollout bound after it, with no Legacy send
@@ -84,16 +86,16 @@ pub(super) enum Plan<'p> {
 
 /// Where O starts on a rollout that holds output.
 enum Start {
-    /// The earliest turn of its execution, ended or not, that Legacy provably sent nothing of.
+    /// The earliest turn, ended or not, that Legacy's records do not show delivered.
     Owed(u64),
-    /// The end of its last complete record: every turn predates its bind or Legacy delivered it.
+    /// The end of its last complete record: Legacy's records show every turn delivered.
     End(u64),
     /// Legacy may have sent part of that turn; it is judged again later.
     Legacy(String),
 }
 
-/// When the baseline's sends were read: a turn that ended before then and that Legacy holds no
-/// custody for was delivered, and one opened after then holds no Legacy send while they hold.
+/// When the baseline's sends were read: a turn opened after then holds no Legacy send while
+/// they hold.
 #[derive(Clone, Copy)]
 pub(super) struct Since {
     at: DateTime<Utc>,
@@ -142,6 +144,8 @@ pub(super) async fn activate<I: HostIo>(
     let (mut retry_order, mut short_retries) = (0, 0);
     // Rollouts a Legacy body was sent from while bound, this host run.
     let mut sent_from = Vec::new();
+    // Rollouts judged owed or retried, until Legacy's records cover them or an init names them.
+    let mut unresolved = Vec::new();
     loop {
         if candidate.peek() != Adoption::Deferred {
             return false;
@@ -166,7 +170,8 @@ pub(super) async fn activate<I: HostIo>(
                         at: sampled_at,
                         proves: !at.turn_mark,
                     };
-                    takeover.attempt(at, since, &mut sent_from).await
+                    let seen = (&mut sent_from, &mut unresolved);
+                    takeover.attempt(at, since, seen).await
                 }
                 Err(taken) => Err(taken),
             };
@@ -248,7 +253,7 @@ impl<I: HostIo> Takeover<'_, I> {
         &self,
         at: Baseline,
         since: Since,
-        sent_from: &mut Vec<SourceId>,
+        (sent_from, unresolved): (&mut Vec<SourceId>, &mut Vec<SourceId>),
     ) -> Result<(), Taken> {
         let events = self.events()?;
         let fresh = bound_after(&events, at.seq);
@@ -266,7 +271,9 @@ impl<I: HostIo> Takeover<'_, I> {
                 "a Legacy body send started since the baseline".into(),
             )),
             Some(Verdict::Eligible(prefix)) => {
-                let owed = match self.owed(&events, &bound, (at, since), sent_from) {
+                let records = self.records(&events)?;
+                let judged = (&records, sent_from.as_slice(), &mut *unresolved);
+                let owed = match self.owed(&events, &bound, (at, since), judged) {
                     Ok(owed) => owed,
                     Err(taken) => return Err(taken),
                 };
@@ -288,7 +295,9 @@ impl<I: HostIo> Takeover<'_, I> {
             Some(Verdict::Wait(detail)) => Err(Taken::Retry(detail)),
             // A rollout that holds output, or none bound since the baseline, starts at its frontier.
             Some(Verdict::Refuse(_)) | None => {
-                self.warm(&events, &bound, (at, since), sent_from).await
+                let records = self.records(&events)?;
+                let judged = (&records, sent_from.as_slice(), &mut *unresolved);
+                self.warm(&events, &bound, (at, since), judged).await
             }
         };
         if matches!(result, Err(Taken::Skip(_))) && !sent_from.contains(&bound.0) {
@@ -303,68 +312,60 @@ impl<I: HostIo> Takeover<'_, I> {
         self.candidate.sends().0 != at.sends.0
     }
 
-    /// Takes `bound` at its frontier, with the source bound before it when that one is owed.
+    /// Legacy's Codex delivery records for the tmux the log binds now.
+    fn records(&self, events: &[BindingEvent]) -> Result<Records, Taken> {
+        let tmux = adoption::current(events).map(|(_, tmux)| tmux);
+        let delivered = match tmux {
+            Some(tmux) => self.io.legacy().codex_delivered(self.channel, &tmux),
+            None => Ok(Default::default()),
+        };
+        Ok(Records::new(delivered.map_err(Taken::Retry)?, events))
+    }
+
+    /// Takes `bound` where Legacy's records stop, with every source owed before it.
     async fn warm(
         &self,
         events: &[BindingEvent],
         bound: &(SourceId, u64),
         (at, since): (Baseline, Since),
-        sent_from: &[SourceId],
+        (records, sent_from, unresolved): (&Records, &[SourceId], &mut Vec<SourceId>),
     ) -> Result<(), Taken> {
         if self.sends_moved(at) {
             return Err(Taken::Skip(
                 "a Legacy body send started since the baseline".into(),
             ));
         }
-        let start = match self.start_on(events, bound, (at, since), sent_from)? {
-            Start::Owed(start) | Start::End(start) => start,
-            Start::Legacy(detail) => return Err(Taken::Retry(detail)),
+        let start = match self.start_on(bound, (at, since), (records, sent_from)) {
+            Ok(Start::Owed(start) | Start::End(start)) => start,
+            Ok(Start::Legacy(detail)) => {
+                remember(unresolved, &bound.0);
+                return Err(Taken::Retry(detail));
+            }
+            Err(taken) => {
+                remember(unresolved, &bound.0);
+                return Err(taken);
+            }
         };
-        let mut sources = self.owed(events, bound, (at, since), sent_from)?;
+        let judged = (records, sent_from, unresolved);
+        let mut sources = self.owed(events, bound, (at, since), judged)?;
         sources.push(ranged(&bound.0, start)?);
         self.fenced(at, bound, Plan::Warm(&sources)).await
     }
 
-    /// Where O starts on `source`: at the earliest turn of the execution its bind names, ended or
-    /// not, that Legacy is not shown to have delivered, once no Legacy send can be part of it.
+    /// Where O starts on `source`: at its earliest turn, ended or not, that Legacy's records do not
+    /// show delivered, once no Legacy send can be part of it. Turn time and custody prove nothing.
     fn start_on(
         &self,
-        events: &[BindingEvent],
         (source, seq): &(SourceId, u64),
         (at, since): (Baseline, Since),
-        sent_from: &[SourceId],
+        (records, sent_from): (&Records, &[SourceId]),
     ) -> Result<Start, Taken> {
-        let Frontier { turns, complete } = prefix::frontier(source).map_err(retry)?;
-        let bound_at = events
-            .iter()
-            .find(|e| e.seq == *seq)
-            .map(|e| e.committed_at);
-        // A turn of unknown time cannot be told from this execution's, so it is never skipped.
-        let earlier = |turn: &&Span| {
-            (turn.opened_at.zip(bound_at))
-                .is_some_and(|(opened, bound_at)| opened + BIND_CLOCK_SLACK < bound_at)
+        let frontier = prefix::frontier(source).map_err(retry)?;
+        let floor = records.floor(source, &frontier);
+        let covered = |end: Option<u64>| end.is_some_and(|end| end <= floor);
+        let Some(turn) = frontier.turns.iter().find(|turn| !covered(turn.ended_end)) else {
+            return Ok(Start::End(frontier.complete));
         };
-        let turns: Vec<&Span> = turns.iter().filter(|turn| !earlier(turn)).collect();
-        let ended_before = |turn: &Span| matches!(turn.ended_at, Some(Some(end)) if end < since.at);
-        let last_ended = turns.iter().rposition(|turn| ended_before(turn));
-        // Legacy keeps one inflight row per channel, so its custody can owe only the last turn that
-        // ended before the baseline; with none held, every such turn was delivered.
-        let idle = matches!(
-            self.io.local_custody(self.channel, self.provider),
-            Ok(Custody::Free)
-        ) && !self.io.relaying(self.channel);
-        let delivered = |at: usize| ended_before(turns[at]) && (idle || Some(at) != last_ended);
-        let Some(turn) = (0..turns.len())
-            .find(|at| !delivered(*at))
-            .map(|at| turns[at])
-        else {
-            return Ok(Start::End(complete));
-        };
-        if turn.opened_at.is_none() {
-            return Ok(Start::Legacy(
-                "a turn the rollout does not date may be undelivered".into(),
-            ));
-        }
         if turn.ended_at.is_none() && sent_from.contains(source) {
             return Ok(Start::Legacy(
                 "a turn Legacy sent from is still open".into(),
@@ -377,30 +378,45 @@ impl<I: HostIo> Takeover<'_, I> {
             Ok(Start::Owed(turn.opened))
         } else {
             Ok(Start::Legacy(
-                "Legacy may have sent from the execution's earliest undelivered turn".into(),
+                "Legacy may have sent from the earliest undelivered turn".into(),
             ))
         }
     }
 
-    /// The source bound just before `bound`, from its earliest turn owed to O; a turn there that
-    /// Legacy may have sent part of retries the takeover instead of being left behind.
+    /// Every other source the current tmux generation bound, and every one judged before, from
+    /// its earliest turn owed to O; one Legacy may have sent part of retries the takeover.
     fn owed(
         &self,
         events: &[BindingEvent],
         bound: &(SourceId, u64),
         (at, since): (Baseline, Since),
-        sent_from: &[SourceId],
+        (records, sent_from, unresolved): (&Records, &[SourceId], &mut Vec<SourceId>),
     ) -> Result<Vec<InitSource>, Taken> {
-        let Some(previous) = bound_before(events, bound) else {
-            return Ok(Vec::new());
-        };
-        match self.start_on(events, &previous, (at, since), sent_from)? {
-            Start::Owed(start) => Ok(vec![ranged(&previous.0, start)?]),
-            Start::End(_) => Ok(Vec::new()),
-            Start::Legacy(detail) => {
-                Err(Taken::Retry(format!("the rollout bound before: {detail}")))
+        let mut walked: Vec<SourceId> = unresolved.clone();
+        walked.retain(|source| !records.generation().contains(source));
+        walked.extend(records.generation());
+        let mut owed = Vec::new();
+        for source in walked.into_iter().filter(|source| *source != bound.0) {
+            let seq = (events.iter().rev())
+                .find(|event| bound_source(event) == Some(&source))
+                .map_or(0, |event| event.seq);
+            match self.start_on(&(source.clone(), seq), (at, since), (records, sent_from)) {
+                Ok(Start::End(_)) => unresolved.retain(|judged| *judged != source),
+                Ok(Start::Owed(start)) => {
+                    remember(unresolved, &source);
+                    owed.push(ranged(&source, start)?);
+                }
+                Ok(Start::Legacy(detail)) => {
+                    remember(unresolved, &source);
+                    return Err(Taken::Retry(format!("a rollout bound before: {detail}")));
+                }
+                Err(taken) => {
+                    remember(unresolved, &source);
+                    return Err(taken);
+                }
             }
         }
+        Ok(owed)
     }
 
     /// A fresh rollout from its first byte under the fence; see `fenced`.
@@ -573,16 +589,11 @@ fn ranged(source: &SourceId, start: u64) -> Result<InitSource, Taken> {
     })
 }
 
-/// The other source bound last before `bound`'s own last bind, with that bind's seq.
-fn bound_before(
-    events: &[BindingEvent],
-    (source, seq): &(SourceId, u64),
-) -> Option<(SourceId, u64)> {
-    let earlier = events.iter().rev().filter(|event| event.seq < *seq);
-    earlier
-        .filter_map(|event| bound_source(event).map(|bound| (bound, event.seq)))
-        .find(|(bound, _)| *bound != source)
-        .map(|(bound, seq)| (bound.clone(), seq))
+/// Keeps `source` among the judged rollouts.
+fn remember(unresolved: &mut Vec<SourceId>, source: &SourceId) {
+    if !unresolved.contains(source) {
+        unresolved.push(source.clone());
+    }
 }
 
 /// The source the log binds now with the seq that bound it, when that seq is above `after`.
