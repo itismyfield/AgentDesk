@@ -1,101 +1,132 @@
-# Claude busy forward handoff — design 1 (#8077)
+# Claude busy forward handoff — design r2 (#8077)
 
-Code SHA: **`1fe3a57d266e1e7fe384796d22a925076f1d99fc`**. This is a design model and a baseline predicate investigation; production code is unchanged. Full design, production entry census, source/owner classification, estimates and test/mutant plan: [herdr-busy-handoff.design.md](herdr-busy-handoff.design.md).
+Production code SHA: **`1fe3a57d266e1e7fe384796d22a925076f1d99fc`**. Reviewed d1 artifact: `fae2d9ee41bf57897dcef1e56869b1a19b1265cc`. Production code is unchanged in this design leg. The [full design](herdr-busy-handoff.design.md) includes the updated production entry census, source/owner classification, remaining screen readers, 22-file/+1180 estimate and implementation test/mutant plan. External copy: `/home/adk/adk/lane-runs/i8077/design-2.md`.
 
-## 원인
+## 원인과 리뷰 처리
 
-`session_handoff.rs:115` runs `/exit` through `herdr_turn/composer.rs:111`. `observation` at `composer.rs:50` checks readiness and, for an exit, additionally requires `draft_sighting == Settled` at `:75`. The supplied 46×39 capture has an empty composer (ownership.rs:74 → screen.rs:326) but an unmeasured clipped footer (screen.rs:157/175, claude_footer.rs:5) and an unmeasured update row above the composer (screen.rs:298). Both leave the stash unproven. `ownership.rs:26` returns Unsettled even in the synthetic idle capture. Correcting only the footer still fails; correcting the update row as well makes the focused contrast Settled.
+The 46×39 busy sample and the explicitly synthetic idle sample have an empty composer and a recognized ready marker, but an unmeasured clipped footer/update area makes draft_sighting Unsettled. `src/services/claude/herdr_turn/composer.rs:50` observes the screen, `:75` adds the exit-only settled-draft requirement, and `:125`–`:130` refuses with Unknown. `src/services/claude/session_handoff.rs:115` uses this for `/exit`. The busy sample additionally fails the final busy veto; the synthetic idle sample still fails the draft gate. The actual 14:17 idle screen was not captured. This baseline finding reuses d1's two focused predicate tests; r2 does not rerun them or claim a new production fix. BeforeBusy/BeforeUnread abstract the existing generic opaque-failure threshold reaching retention (`provider_dispatch/start_failure.rs:226`, `queued_head/v2/start_failure.rs:95`), not immediate retention on every first failure.
 
-The actual marker predicate is true on both supplied busy and synthetic idle screens. Busy is vetoed separately by `input.rs:1285`/`prompt_readiness.rs:216`; on idle, the exit-only stash guard itself refuses immediately. The visible ready prompt is therefore not sufficient. `composer.rs:130` maps both immediate refusal and timeout to Unknown; `session_handoff.rs:69` maps it to earlier Claude kept running. The generic opaque start-failure path (`provider_dispatch/start_failure.rs:226`, `queued_head/v2/start_failure.rs:95`) retains after its existing threshold. It is not correct to say every first opaque failure immediately retains.
+| Review | r2 treatment and production evidence | Model evidence |
+|---|---|---|
+| P1-1 permanent unread after a transient close failure | A provisional old destination can be released **only with exact positive no-key proof and zero keys**, then identity is freshly verified and close is retried. `composer.rs:125` is no longer a screen-recovery dependency. C-s/any key makes the destination irreversible until exact old native processing terminal | BeforeFailureUnread RED → AfterFailureUnread GREEN. OldUnread is constant; no RecoverScreen action or fairness |
+| P1-2 fresh Herdr first-input refusal becomes a string/retained | Replace the own-resume first epoch's general composer readiness with a native nonce/ID/source capability. Preserve SubmissionError::Held through `first_input.rs:48`, `:94`, `:112` → `effect.rs:367`. Populate real owner known_before/first-key proof (`claude_tui/owner_input.rs:484`) and use hold_not_sent (`effect.rs:122`) plus a native/host level wake. Enum-only Held and confirmed=0 are insufficient | BeforeFirstRefusal RED → AfterFirstRefusal GREEN; NoFirstWake/NoNativeReady RED |
+| P1-3 first active message never reaches Begin | Add mapped local Claude Legacy preflight **before hand_busy** at `provider_dispatch/owner_input.rs:217`/`:238`. It admits without a marker or Bound row, claims the same front, and rechecks current actor journal at commit. Existing registration Absent at `:91`/`:359` is not used as the forward entry | BeforeActiveEntry/BeforeActiveRace RED → AfterActiveEntry/AfterActiveRace GREEN. N=2 separates intake probe from actor commit |
+| P1-4 numeric PID/PGID signal race | Do not call `src/services/process.rs:527`, `:546`–`:550`. New dedicated capability keeps the **same tmux control connection** from exact pane observation through kill-pane. EOF revokes authority; old numeric pane IDs are never blindly replayed after reconnect | PidSignal/ReconnectNumber RED; AfterPidReuse/AfterPaneReplacement/AfterServerReplacement GREEN. Isolated tmux protocol probe 3/3 |
+| P2 journal-only census/wake | Keep only unfinished_handoff census, not historical retained eligibility. Existing `pending_queue_persistence/queued_recovery.rs:87` and `queued_head/compat.rs:20` select holds_input only. A journal-only driver must progress without a front grant | BeforeJournalCensus and journal-only NoWake RED → AfterJournalOnly GREEN |
+| P2 vacuous draft rule | Submit can execute an unparked old draft in the DraftEnter mutant; normal old fallback uses the existing draft transaction. New draft UX is not decided here | DraftExecution RED at DraftNeverExecuted |
+| P2 native ID versus argv UUID | Initial argv A is lineage, current binding B may continue to C (`hook_server/adoption_retry.rs:395`). Re-read the final durable native/source binding after old execution end; resume C, with a new execution nonce | BeforeContinuation/WrongSession RED → AfterContinuation GREEN |
 
-Existing 46-column fixtures and busy paste tests are present (`busy_inject/screen_tests.rs:78`, `busy_inject_tests.rs:596`); the exit-specific test at `herdr_turn/composer_tests.rs:285` uses a wider measured layout. The original 14:17 idle capture is unavailable; the idle reproduction removes the spinner and Tip rows from the supplied 14:24 busy capture. This is an explicit assumption, not an operating-screen observation.
+Short paths in this table are expanded in the full design's production entry census. The new close is limited to the owned local Claude forward pane. It does not add generic kill-session/tree cleanup, Return behavior or Codex authority. The existing numeric helper's race remains in its existing callers; this proposal does not widen them.
 
-The proposed path stops only an exact verified old local Claude execution, after a visible draft-discard notice, without typing into the composer. It preserves the existing resume/auth/source/nonce checks. An unsuccessful stop either selects a freshly verified old execution for the same original claim, or waits in active custody for evidence; it never converts a handoff refusal into retry-required retention. Old fallback cannot be interrupted again until the exact input has actually been processed. The production plan is **17 files / net +1150 code lines**, including contingency and the Claude-only boot census described below.
+Historical classifier/migration, attempt=None/told retained recovery, Opaque rebind and eligible_handoff_retained census are **removed**. The five old operating retained messages are not promised automatic delivery by this scope. AfterRetained and RetainedRecovery cfgs were deleted. DraftNotice was replaced by the nonvacuous DraftExecution cfg because the human-draft UX policy is deferred.
+
+## 종료·첫 입력의 구체적 계약
+
+On one verified live tmux control connection, capture exact owner/session/window/pane/nonce identity, recheck owner generation before the close, and issue kill-pane only for the captured pane object. tmux IDs are unique only within a running server, so socket path, numeric server PID and pane number alone are not authority. EOF invalidates the capability. A new connection requires fresh ownership/source verification. No numeric PID/PGID signal fallback is permitted. [Official tmux identifier contract](https://github.com/tmux/tmux/wiki/Advanced-Use/4aaa59af320a585fe488332775a336ad06c1ccfb#unique-identifiers), [control protocol](https://man.openbsd.org/tmux#CONTROL_MODE).
+
+Linux WSL tmux 3.4 private-server probe: exact old pane close leaves the other pane alive; retrying a removed pane returns a typed command error without closing its replacement; restarting the private server reuses %0 but the old connection cannot replay into it. **3 passed, 0 failed**. A removed-pane display-message actually returned exit0 with empty metadata; it is not a positive witness. These are protocol experiments, not AgentDesk adapter tests. The same protocol contract applies on macOS, but the deployed macOS version still requires its own isolated test. Pane close does not guarantee provider exit, descendant cleanup or transcript flush on either OS. Provider absence is checked separately; orphan cleanup is not added.
+
+A fresh own-resume first-input capability requires old execution ended, final current native ID, exact new nonce/physical writer, durable source=resume SessionStart record and an unused original first-payload epoch. Reuse `herdr_turn.rs:705` and `hook_server/observation_ingress/resume_start.rs:27`/`:47`; do not treat any hook or a ready-looking screen as authority. The native adapter sends bracketed paste+Enter in one PaneSendInput RPC under the existing gate/writer fence. Only a positive pre-key refusal becomes Held with real no-key proof. Subscribe to native/host/lease readiness and immediately recheck its current level so an already-arrived event cannot strand the hold. Lost replies/partial input remain uncertain, not no-key.
+
+SessionStart is not proof of arbitrary TUI emptiness or receipt. The official hook field initialUserMessage is for noninteractive -p, so it is not used as a fictional TUI injection API. [Claude hook reference](https://code.claude.com/docs/en/hooks#sessionstart-decision-control).
+
+Human draft classifiers are unchanged. Old fallback keeps its current guard and on pre-key unread releases the old choice instead of waiting for screen recovery. A concurrently edited, not-yet-submitted human draft in the fresh pane is **outside the modeled native-first epoch guarantee**; deferred preservation/discard UX is not claimed solved. An implementation that silently executes such a draft fails acceptance. Neither a hook boolean nor this model's GREEN replaces that test/policy boundary. Volatile old draft preservation and actual Claude 2.1.322 partial-tail resume are also not guaranteed by tmux close.
 
 ## 상태 차트
 
-`SC_RUN=mac-needed`: `/home/adk/.claude/skills/statechart/scripts/statechart` is absent. The `.chart.mmd` is explicitly hand-authored, not a generated state-space rendering. The `.view.mjs` is ready for a later Mac frontend run.
+**SC_RUN=GREEN for the proposed cfgs.** Actual repository CI checker: 31 configs, **136 TLC runs**, all expected broken-rule sets matched, **84.3 seconds, exit 0**. 13 cfgs GREEN; 18 expected RED, including the explicit permanent post-content LostReceipt boundary. This zero is the expectation checker's success, not a claim that the old behavior passes. No model/cfg mutation followed this final check. The last model mtime is 06:39:58 UTC; the final checker log completed at 06:41:25 UTC, within 30 minutes of the 06:17 UTC start.
 
-The WSL does have Java 21 and the verified TLC 1.7.4 jar. The repository's official CI checker ran the new 15 configs in an isolated root: **15 expected sets matched; 52 TLC runs; 28.0 seconds; exit 0**. The frontend absence remains reported as requested. No model/cfg change followed the final run. Modeling finished within the 30-minute limit.
+The frontend `/home/adk/.claude/skills/statechart/scripts/statechart` is absent. r2 explicitly uses Java 21/TLC 1.7.4 and the repository checker; `.chart.mmd` and `.view.mjs` are clearly hand-authored projections, not frontend-generated state-space output. The directly checked isolated-root copies are byte-identical to the committed model and all 31 cfgs, and their manifest entries match the repository manifest.
 
-| Config suffix (`HerdrBusyHandoff*.cfg`) | Result | Broken rules |
-|---|---|---|
-| BeforeBusy, BeforeUnread | RED | NoUserResend; MessageProgress; HandoffProgress |
-| AfterBusy | GREEN | none; 2 inputs and 1 restart |
-| AfterUnreadDraft | GREEN | none; unmeasured screen and possible draft |
-| AfterStopFailure | GREEN | none; verified old fallback and processing completion |
-| AfterFailureUnread | GREEN | none; fallback waits for a readable screen |
-| AfterRetained | GREEN | none; 5 historical retained originals |
-| Controls | GREEN | none; explicit pre-content cancel/clear |
-| Duplicate | RED | InputAtMostOnce; NoSilentLoss; MessageProgress |
-| SilentDrop | RED | NoSilentLoss; MessageProgress; HandoffProgress |
-| DraftNotice | RED | DraftLossTold |
-| WrongSession | RED | SameSession |
-| NoWake | RED | MessageProgress; HandoffProgress |
-| RetainedRecovery | RED | MessageProgress; HandoffProgress |
-| LostReceipt | RED — residual boundary | MessageProgress |
+Command:
 
-Direct raw TLC additionally reproduced BeforeUnread exit **12** at NoUserResend and AfterBusy exit **0**, 236 generated/101 distinct states, depth 19, temporal checking completed. Expected RED configs are not being counted as GREEN behavior. `AwaitEvents` models the long-running event loop's ability to wait; liveness is checked by actual PROPERTY declarations under the applied weak fairness in `Spec`, rather than by a deadlock-free claim.
+```sh
+python3 scripts/ci/statecharts_tlc.py \
+  --root /home/adk/adk/lane-runs/i8077/logs/d2/sc-root \
+  --jar /home/adk/.local/share/tla2tools/tla2tools-1.7.4.jar --jobs 2
+```
 
-The before counterexample is queued → Begin → BeforeRefuse(retained). It abstracts the existing opaque-failure threshold reaching its retain decision. The proposed path separates provider stop, absence observation, Pending/create, exact resumed attach, destination choice, arm, backend effect and owner receipt. Crash can intervene between effects, including between the input effect and settlement. `NoKeyYet` is positive writer evidence; lack of transcript evidence is never treated as proof of no send.
+Each suffix below is `HerdrBusyHandoff<suffix>.cfg`. Broken rules are the **actual** checker result; every row matched expected.tsv.
 
-Fairness assumes recoverable storage/hosts, finite restart/stop failures, eventual verified stop or readable old fallback, and obtainable native receipt evidence. Old fallback additionally waits for the exact native processing terminal before trying migration again. LostReceipt intentionally shows that permanent evidence loss cannot provide unconditional progress. The model does not verify arbitrary OS failures, actual Claude flush semantics, all adjacent command FSMs, or old-writer rollback. CancelBeforeContent represents explicit cancellation, while the detailed clear timeout, Terminate fence and late callback generation checks remain Rust test obligations.
+| cfg suffix | Actual result | Actual broken rules | TLC runs |
+|---|---|---|---:|
+| `AfterActiveEntry` | GREEN | — | 4 |
+| `AfterActiveRace` | GREEN | — | 4 |
+| `AfterBusy` | GREEN | — | 4 |
+| `AfterContinuation` | GREEN | — | 4 |
+| `AfterFailureUnread` | GREEN | — | 4 |
+| `AfterFirstRefusal` | GREEN | — | 4 |
+| `AfterJournalOnly` | GREEN | — | 4 |
+| `AfterPaneReplacement` | GREEN | — | 4 |
+| `AfterPidReuse` | GREEN | — | 4 |
+| `AfterServerReplacement` | GREEN | — | 4 |
+| `AfterStopFailure` | GREEN | — | 4 |
+| `AfterUnreadDraft` | GREEN | — | 4 |
+| `BeforeActiveEntry` | RED (expected) | HandoffProgress, MessageProgress | 4 |
+| `BeforeActiveRace` | RED (expected) | NoIntakeBypass | 5 |
+| `BeforeBusy` | RED (expected) | HandoffProgress, JournalProgress, MessageProgress, NoUserResend | 5 |
+| `BeforeContinuation` | RED (expected) | SameSession | 5 |
+| `BeforeFailureUnread` | RED (expected) | HandoffProgress, JournalProgress, MessageProgress | 4 |
+| `BeforeFirstRefusal` | RED (expected) | JournalProgress, MessageProgress, NoUserResend | 5 |
+| `BeforeJournalCensus` | RED (expected) | HandoffProgress, JournalProgress | 4 |
+| `BeforeUnread` | RED (expected) | HandoffProgress, JournalProgress, MessageProgress, NoUserResend | 5 |
+| `Controls` | GREEN | — | 4 |
+| `DraftExecution` | RED (expected) | DraftNeverExecuted | 5 |
+| `Duplicate` | RED (expected) | InputAtMostOnce, NoSilentLoss | 6 |
+| `LostReceipt` | RED (expected) | JournalProgress, MessageProgress | 4 |
+| `NoFirstWake` | RED (expected) | JournalProgress, MessageProgress | 4 |
+| `NoNativeReady` | RED (expected) | JournalProgress, MessageProgress | 4 |
+| `NoWake` | RED (expected) | HandoffProgress, JournalProgress | 4 |
+| `PidSignal` | RED (expected) | NoForeignClose | 5 |
+| `ReconnectNumber` | RED (expected) | NoForeignClose | 5 |
+| `SilentDrop` | RED (expected) | JournalProgress, MessageProgress, NoSilentLoss | 5 |
+| `WrongSession` | RED (expected) | SameSession | 5 |
 
-## 과거 retained와 boot
+The model uses real PROPERTY declarations MessageProgress, HandoffProgress and JournalProgress. Intake is incoming→probe→commit; HandoffProgress includes admitted inputs even when Begin is missing. Active N=2 permits both marker-absent probes before the first Begin, then detects a second commit that bypasses the current journal. Journal-only starts down with all inputs done, effects=1 and old processing terminal complete: progress of that journal cannot be hidden by vacuous MessageProgress. BootCensus and BootWake are separate transitions and mutants.
 
-The old opaque start-failure record is `KnownNotSent`, `Reserved`, **attempt=None** (`queued_head/v2/start_failure.rs:104`). Ordinary automatic requeue requires `!notice.enqueued` and an attempt (`retained.rs:283`), while told inputs are unowed (`:249`). Boot also selects only `holds_input` snapshots (`pending_queue_persistence/queued_recovery.rs:87`, `queued_head/compat.rs:20`), so merely adding a consumer inside owner recovery would miss a told-only file. Completed old fallback can similarly leave an input-free file that still owes migration.
+DraftNeverExecuted is exercised by Submit and a guard-removal mutant. OldUnread never changes. StopFailures=1 plus OldUnread=TRUE goes through provisional old/no-key/revalidate/close without a readable-screen fairness assumption. New first refusal is separately modeled on the new destination and requires native cause wake. Numeric-signal and reconnect-number mutants can close a foreign object; the correct capability cannot. Native continuation B→C occurs before close and the stale-native mutant fails SameSession.
 
-The proposal therefore adds a narrow Claude-only census plus an atomic owner migration for the exact historical error/provenance, including told attempt-less records. It restores originals, source members, uploads/reply boundaries and exact receipt bindings together. An `Opaque` admission bind is not repaired by calling the existing `rebind_queued` alone (`source_admission.rs:546`); exact digest/context rebinding is part of the new design. Cancelled/cleared, delivered, opaque/unconfirmed, partial-content, different-provider and different-error records are excluded. The five operating events are expected candidates, not five inspected production rows; only the first two message IDs were supplied. No operating DB/store was read.
+Fairness assumes a recoverable store/host, finite daemon restarts/close and pre-key failures, eventual provider end or usable verified old execution, own native hook and obtainable receipts. Fresh identity reacquisition is abstracted, not proven to serialize arbitrary external process replacement. Permanent PTY-orphan, post-content receipt loss and arbitrary unsent human editing of a new pane are outside GREEN. Controls covers explicit positive-no-key cancellation, not a proof of every real Cancel/clear/stop/Terminate state machine. Real control-generation, adapter and native CLI tests remain required.
 
-## Main already provides
+## 이미 main에서 제공하는 것과 구현 수용 조건
 
-All coordinates below use the code SHA above. These behaviors are reused rather than reimplemented.
+No reimplementation is planned for existing resume account/transcript eligibility (`herdr_turn.rs:590`), O cursor continuity (`session_handoff.rs:153`, `tui_o/writer/renumbered.rs:50`), exact own resume nonce/source checking (`session_handoff.rs:192`), --resume argv/context (`claude_tui/session.rs:372`, `claude/tui_session_launch.rs:138`), physical writer/first-key owner fences, or existing typed CreatedSubmit (`claude_tui/owner_input.rs:325`). All refer to production SHA above.
 
-| Existing behavior | Main evidence |
+Required implementation evidence: fixed-unread + transient-close-failure with no resend; new first-input refusal through the real owner NotSentProof/Held/wake path; active marker-absent entry with the 46-column real busy fixture; N=2 intake race; pane/server/PID aliases without foreign mutation; input-free unfinished boot recovery; argv A/binding B/continuation C; real 2.1.322 interrupted partial-tail resume and exact native receipt/O boundary; human-draft and Cancel/clear late-callback cases. Complete records/spool/cursor must survive; close acknowledgment, hook receipt, empty metadata or process exit0 alone cannot pass.
+
+Estimated production change **22 files / net +1180**, including +170 contingency, below 30/+1500 and PLAN +1200. Giant parents are kept at net zero or reduced by moving existing related responsibilities into small children. If +1200 is exceeded, independent A (+850) includes close/active Begin/reversible old choice/journal boot **and typed no-key custody+wake**; B (+330) switches native-first readiness and adds the framed adapter. A alone is not full issue completion.
+
+| Review focus | Prevention or remaining counterexample |
 |---|---|
-| Same account and transcript eligibility for resume | `src/services/claude/herdr_turn.rs:590` |
-| Existing O cursor continuity rather than reading from zero | `src/services/claude/session_handoff.rs:153`, `src/services/tui_o/writer/renumbered.rs:50` |
-| Own resumed hook requires native ID, source=resume and incarnation nonce | `src/services/claude/session_handoff.rs:192` |
-| Actual resume argv and matching prepared context | `src/services/claude_tui/session.rs:372`, `src/services/claude/tui_session_launch.rs:138` |
-| Durable first-input hold and physical owner writer binding | `src/services/claude/herdr_turn/first_input.rs:22`, `:86` |
-| Same-channel drive and first-key/physical writer fences | `src/services/discord/queue_io/input_owner/drive.rs:87`, `src/services/claude_tui/busy_inject/stash.rs:52`, `:135` |
-
-## 리뷰 집중 항목
-
-| Focus | Guard or remaining counterexample |
-|---|---|
-| Turn ends immediately before/after stop | Reobserve PID/start, pane/nonce and absence. Signal dispatch is not exit proof. Real Claude partial flush/resume remains a development integration check. |
-| Two messages on one channel | One owner claim, durable destination, writer lease; busy intake must also honor the handoff marker. Entry race tests are planned, not claimed passed here. |
-| Restart during migration | Existing Pending nonce recovery plus explicit handoff recovery/wake; include told-only and input-free unfinished handoffs in boot census. |
-| Interrupted output loss/duplication | Preserve complete persisted records, spool and existing cursor. Current-turn unpersisted output loss is accepted; no cursor-zero or EOF jumps. |
-| Old format restoration | Fixtures must cover attempt=None/told/Opaque and missing optional fields. Older writer reserialization can discard a new optional journal; rollback with unfinished handoffs is outside model GREEN. |
-| Guards only declared in docs | Require production callers and deleting-guard mutants for strict fallback, other pending frames, clear overtake checks, notice-before-signal and boot census. |
-| False 0/PASS | Two focused baseline tests, 15 cfg/52 TLC runs are counted separately. No PG/repository cargo/clippy/prepush success is claimed. Unknown and LostReceipt remain visible. |
-
-The proposed forced stop does not reuse main's broad tmux session cleanup (`claude_tui/host_input.rs:216`). The general unread-draft busy paste behavior (`busy_inject.rs:499`, `queue_io/input_owner/effect.rs:223`) is not widened; the fallback adapter adds a strict pre-key policy for this one capability. Codex and Herdr→tmux Return retain their existing behavior.
+| Boundary time | Separate close dispatch/end, receipt/processing terminal and hook/first payload. Re-read current native binding after end. Actual partial-tail behavior remains an acceptance condition |
+| Concurrency | Probe/commit journal recheck, moved original claim, first-key fence; actual production active entry test still required |
+| Restart | Journal-only census and wake mutants; capabilities cannot be restored as open connections. Old-binary downgrade with unfinished new journal is unsupported |
+| Old format | Missing optional journal preserves ordinary V2 behavior; historical retained records remain untouched |
+| Declared-only guards | Require actual caller tests and deletion mutants for close authority, active preflight, old release, native first proof/wake and boot driver |
+| False 0/PASS | Per-cfg RED/GREEN sets, typed no-key proof, receipt1 and output/spool continuity. 31-model cfgs, three tmux cases and reused two predicate tests are separate counts |
 
 ## 증거 목록
 
-External lane root: `/home/adk/adk/lane-runs/i8077`.
+External evidence root: `/home/adk/adk/lane-runs/i8077`. All paths below are under that root unless absolute.
 
-| Evidence | Path / count |
+| Evidence | Path / actual result |
 |---|---|
-| Full external design, identical to the committed design | `design-1.md` |
-| Issue read, title/body/comments | `logs/issue-8077.json` |
-| All handoff, retained, adjacent and boot/incarnation git-grep hits | `logs/handoff-entries.txt`, `logs/retained-entries.txt`, `logs/adjacent-entries.txt`, `logs/boot-incarnation-entries.txt` |
-| Existing narrow fixture search | `logs/fixture-search.txt` |
-| Final focused baseline predicate log | `logs/predicate-probe-final.log`: 2 passed, 0 failed, 0 ignored, 0 filtered; doc-tests 0, not counted as coverage |
-| Test names | `services::claude_tui::busy_inject::existing_46_column_fixture_also_cannot_certify_an_exit`; `services::claude_tui::busy_inject::measured_field_and_synthetic_idle_both_fail_the_exit_stash_gate` |
-| Probe executable | `logs/predicate-probe/target/debug/deps/i8077_predicate_probe-69c97a0ef2df0bd8` |
-| Executable SHA256 | `ad15cdda2b4b44a682c07e2c51d21dc5e88262f1d1bc47e366327c279188508a` |
-| Reusable focused crate and scope notes | `logs/predicate-probe/Cargo.toml`, `logs/predicate-probe/src/`, `logs/predicate-probe/README.md` |
-| Final official checker log | `logs/statechart-ci-6.log`: selected 15, matched 15, TLC runs 52, exit 0 |
-| Direct TLC raw traces/state counts | `logs/tlc-before-unread.log` exit 12; `logs/tlc-after-busy.log` exit 0 |
-| Exact final checked copies | `logs/sc-root/`; byte-identical model/cfg copies of committed sources |
-| Source hashes, source-extraction checks, environment and binary hashes | `logs/evidence-design-1.json` |
+| Exact external design / committed copy | `design-2.md` / `docs/statecharts/session-lifecycle/herdr-busy-handoff.design.md`, byte-identical |
+| Review input | `review-design-1-pro.out.md`, four P1s and P2s read |
+| Updated production grep | `logs/d2/entrypoints.txt`; d1 exhaustive `logs/handoff-entries.txt`, `logs/retained-entries.txt`, `logs/adjacent-entries.txt`, `logs/boot-incarnation-entries.txt` remain source-baseline evidence |
+| Final official TLC run | `logs/d2/statechart-ci-6.log`: selected31/matched31, TLC136, exit0 |
+| Parsed per-cfg results | `logs/d2/model-results.json`; 13 GREEN, 18 expected RED, 0 mismatch |
+| Reproducible exact checked inputs | `logs/d2/sc-root/`; model+31 cfgs+manifest entries match worktree |
+| Model build helper | `logs/d2/build_model.py`, frozen before final acceptance check |
+| Protocol experiment / raw transcript | `logs/d2/tmux_control_probe.py`, `logs/d2/tmux-control-probe-4.log`, `logs/d2/tmux-control-protocol.json` |
+| Protocol case assertions | `logs/d2/tmux-control-evidence.json`:3 passed,0 failed; no default socket or sleep polling |
+| Environment and hashes | `logs/d2/evidence-design-2.json` |
+| Final artifact audit | `logs/d2/final-checks.json`: global manifest/delta CI selection, checked-input identity, jar/probe/capture hashes and production diff0 |
+| Reused d1 predicate log | `logs/predicate-probe-final.log`:2 passed,0 failed,0 ignored,0 filtered; **not rerun in r2** |
+| Reused d1 predicate binary | `logs/predicate-probe/target/debug/deps/i8077_predicate_probe-69c97a0ef2df0bd8`, SHA256 `ad15cdda2b4b44a682c07e2c51d21dc5e88262f1d1bc47e366327c279188508a` |
+| Reused test names | `services::claude_tui::busy_inject::existing_46_column_fixture_also_cannot_certify_an_exit`; `services::claude_tui::busy_inject::measured_field_and_synthetic_idle_both_fail_the_exit_stash_gate` |
+| Reused supplied capture | `adkcc-pane-busy-1424.ansi`, SHA256 `b4ed2407b6cb970bf7d5538f3f86e9564974ce627aaf7ac19643da5d5bace893` |
 
-The focused crate uses unchanged main ANSI/ownership/footer code, a screen copy with only its child-module path adjusted, and **28 byte-identical extracted ready/busy/modal functions**. Neutral frame-history and unused modal-adapter stubs are explicit. The probe is not the production `observation` entry test; that is in the implementation test plan. Isolated-crate unused-code warnings come from the intentionally unused copied API, not production changes. No `#[allow]` or baseline increase was introduced.
+Model SHA256: `049eb80b897bf733357901c2df009b601dfd88f5d9c6a289b8370747df07b4f7`. TLC jar SHA256: `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`. Earlier numbered authoring/probe failures are retained for audit and are not acceptance evidence.
 
-Environment: SHELL=/bin/bash; TMPDIR unset; CARGO_TARGET_DIR unset and unchanged; cargo resolved to `/home/adk/skills/agentdesk-issue-pipeline/scripts/cargo-shim/cargo`. `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_TEST_DEBUG=0`, `CARGO_PROFILE_DEV_STRIP=none`, `CARGO_PROFILE_TEST_STRIP=none`. Default parallel tests; no `--test-threads=1`. PG executed: **no**. Repository cargo/check/clippy/source_scan_readers/prepush: **not run (design-only, no production change)**. No background process remains from these checks.
-
-Jar SHA256: `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`. Model SHA256: `b4d02a45b9452eb8506c027d3ee735d1e35c525084523169cc81fe53548dec73`. Earlier probe/compiler/model authoring failures remain in numbered logs; only the final logs above are acceptance evidence. The official checker's zero means exact expected violations matched, never that the historical behavior meets the proposed contract.
+R2 environment: SHELL=/bin/bash; TMPDIR unset; CARGO_TARGET_DIR unset and unchanged; Java21/OpenJDK, TLC1.7.4, WSL Linux, tmux3.4. R2 repository Rust test executable: **none built/run**; actual PG: **no**; cargo/check/clippy/source_scan_readers/prepush: **not run, design only**. D1 focused probe used cargo-shim and the requested DEBUG=0/STRIP=none profiles, default parallel tests. Production changes, runtime/config/DB/store access and operational tmux/Herdr mutation: **0**. Isolated tmux resources were closed. No background process is carried forward.

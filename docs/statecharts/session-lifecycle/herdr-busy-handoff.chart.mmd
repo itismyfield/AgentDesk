@@ -1,50 +1,64 @@
-%% Hand-authored design projection; not frontend-generated TLC output.
-%% Baseline: 1fe3a57d266e1e7fe384796d22a925076f1d99fc. SC_RUN=mac-needed.
+%% Hand-authored projection of HerdrBusyHandoff r2, not generated state-space output.
+%% Production SHA 1fe3a57d266e1e7fe384796d22a925076f1d99fc; 31 cfg / 136 TLC runs.
 stateDiagram-v2
-    [*] --> Queued: original admitted once
-    Retained --> Queued: RecoverRetained / strict historical proof
-    Queued --> Stopping: Begin / owner and transition
-    Stopping --> Retained: BeforeRefuse / main busy or unread RED
-    Stopping --> Notified: TellDraftPolicy / receipt before destructive stop
-    Notified --> Checking: SignalStop / exact old execution
-    Checking --> OldEnded: ProviderEnds then VerifyEnd
-    Stopping --> OldFallback: StopFailed / freshly proven same old Live
-    OldFallback --> OldFallback: RecoverScreen / no blind key
-    OldFallback --> OldSelected: Choose(old) and optional ParkDraft
-    OldSelected --> OldArmed: Arm / durable original and destination
-    OldArmed --> OldReceipt: Submit / provider input effect
-    OldReceipt --> OldSettled: Confirm / owner settlement
-    OldSettled --> OldCompleted: OldCompletes / exact native processing terminal
-    OldCompleted --> Stopping: FallbackDone / migrate without replay
-    OldEnded --> Pending: Launch / same native session ID
-    Pending --> Created: Create / new incarnation nonce
-    Created --> Ready: Attach / own resumed SessionStart and source
-    Ready --> NewSelected: Choose(new)
-    NewSelected --> NewArmed: Arm
-    NewArmed --> NewReceipt: Submit
+    [*] --> IntakeProbe: incoming original
+    IntakeProbe --> Begin: CommitIntake / current journal recheck
+    IntakeProbe --> Blocked: BeforeActiveEntry RED / no Bound row
+    Begin --> Stopping: durable unfinished_handoff and owner
+    Stopping --> Retained: BeforeReadyRefusal RED / main unread
+    Stopping --> OldSelected: StopFailed then ChooseOld
+    OldSelected --> Revalidating: ReleaseOldNoKey / positive proof and zero keys
+    Revalidating --> Stopping: RevalidateOld / fresh identity
+    OldSelected --> OldArmed: Arm / readable existing draft guard
+    OldArmed --> OldReceipt: Submit / first key fixes destination
+    OldReceipt --> OldSettled: Confirm / exact receipt
+    OldSettled --> OldCompleted: OldProcessingTerminal
+    OldCompleted --> Stopping: OldFallbackComplete / migration without replay
+    Stopping --> Checking: ClosePinnedPane / same server connection
+    Checking --> OldEnded: ProviderEnds then VerifyOldAbsent
+    Stopping --> OldEnded: verified old object already ended
+    OldEnded --> Pending: Launch / latest native ID, not argv UUID
+    Pending --> Created: Create / same native ID, new nonce
+    Created --> Bound: OwnResumeStartAndAttach / durable source
+    Bound --> NewSelected: ChooseNew / unused first-input epoch
+    NewSelected --> FirstHeld: NewPreKeyRefused / typed Held and proof
+    FirstHeld --> NewSelected: NativeReadyWake / level recheck, same original
+    NewSelected --> NewArmed: Arm / native capability, owner gate
+    NewArmed --> NewReceipt: Submit / one framed RPC
     NewReceipt --> Done: Confirm
-    Queued --> Cancelled: CancelBeforeContent / explicit Cancel or clear
-    OldArmed --> Cancelled: CancelBeforeContent / proven NoKeyYet
-    NewArmed --> Cancelled: CancelBeforeContent / proven NoKeyYet
-    OldReceipt --> EvidenceWait: crash or lost receipt
-    NewReceipt --> EvidenceWait: crash or lost receipt
-    EvidenceWait --> OldSettled: exact old receipt / never send elsewhere
-    EvidenceWait --> Done: exact new receipt / never send elsewhere
-    EvidenceWait --> EvidenceWait: LostReceipt RED / no absence-as-NotSent
-    note right of Stopping
-      Running includes busy/unread composers.
-      Generic Return and Codex keep their policies.
-      Clear may overtake a transition after 3 seconds:
-      recheck owner generation before each effect.
+    Done --> Complete: FinishJournal / no remaining originals
+    Begin --> Cancelled: CancelBeforeKey / explicit control
+    NewArmed --> Cancelled: CancelBeforeKey / positive zero-key proof
+    OldArmed --> Cancelled: CancelBeforeKey / positive zero-key proof
+    Cancelled --> Complete: FinishJournal after migration and queue settlement
+    note right of IntakeProbe
+      Active marker-absent entry reaches Begin before hand_busy.
+      N=2 probe/commit interleavings test stale-marker bypass.
     end note
-    note right of Pending
-      Crash/Boot may occur between every modeled effect.
-      Durable original, destination and launch nonce survive.
-      Boot restores custody and wakes the same owner.
+    note right of OldSelected
+      OldUnread stays constant: no RecoverScreen fairness.
+      C-s or any first key forbids destination release.
+      Existing draft guard is unchanged; DraftEnter mutant is RED.
     end note
-    note right of OldSettled
-      Local Enter/receipt is not processing completion.
-      Do not kill a provider that still queues this input.
+    note right of Checking
+      Pane ID is a capability only on the same live connection.
+      EOF invalidates it; no numeric PID signal or blind reconnect.
+      Close acknowledgment is not provider end or transcript flush.
     end note
-    Done --> [*]
-    Cancelled --> [*]
+    note right of FirstHeld
+      No string conversion, no retained, no screen-only watcher.
+      Native hook is own resume/ID/nonce/source evidence.
+      Human unsent editing in the new pane remains deferred policy.
+    end note
+    state RestartRecovery {
+      [*] --> Down: Crash at any modeled effect
+      Down --> ActorSelected: BootCensus / input OR unfinished journal
+      ActorSelected --> Awake: BootWake / separate action
+      Awake --> Recovered: receipt or positive no-key evidence
+    }
+    note right of RestartRecovery
+      Journal-only starts with all inputs already done.
+      A lost connection must be freshly verified, never restored as authority.
+      Permanent post-content receipt loss remains LostReceipt RED.
+    end note
+    Complete --> [*]
