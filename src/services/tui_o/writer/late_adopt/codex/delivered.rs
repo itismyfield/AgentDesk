@@ -1,5 +1,5 @@
 //! Legacy's Codex delivery records as a floor per rollout. A record names no file, so it counts
-//! only of the current generation, dated in that rollout's bind span or undated with it alone.
+//! only while the generation bound that rollout alone, or for the first one dated before another.
 
 use chrono::{DateTime, Utc};
 
@@ -68,13 +68,8 @@ impl Records {
     /// Every source bound in the current generation, oldest first; every source of the log when
     /// the generation cannot be read.
     pub(in crate::services::tui_o::writer::late_adopt) fn generation(&self) -> Vec<SourceId> {
-        let since = self.delivered.generation_since;
-        let alive = |span: &&Span| {
-            span.until
-                .is_none_or(|until| since.is_none_or(|s| until > s))
-        };
         let mut sources: Vec<SourceId> = Vec::new();
-        for span in self.spans.iter().filter(alive) {
+        for span in self.alive() {
             if !sources.contains(&span.source) {
                 sources.push(span.source.clone());
             }
@@ -82,15 +77,27 @@ impl Records {
         sources
     }
 
+    fn alive(&self) -> impl Iterator<Item = &Span> {
+        let since = self.delivered.generation_since;
+        (self.spans.iter()).filter(move |span| {
+            span.until
+                .is_none_or(|until| since.is_none_or(|s| until > s))
+        })
+    }
+
+    /// The source a record is proven to be of. A receipt may be written after the next bind for
+    /// the source before it, so a date inside a later bind span proves nothing.
     fn owner(&self, at: Option<DateTime<Utc>>) -> Option<SourceId> {
-        match at {
-            Some(at) => (self.spans.iter().rev())
-                .find(|span| span.from <= at && span.until.is_none_or(|until| at < until))
-                .map(|span| span.source.clone()),
-            None => match self.generation().as_slice() {
-                [only] => Some(only.clone()),
-                _ => None,
-            },
+        let generation = self.generation();
+        let first = generation.first()?;
+        let second = self.alive().find(|span| span.source != *first);
+        match (second, at) {
+            (None, _) => Some(first.clone()),
+            // Discord dates to the millisecond: one in the bind's own millisecond is unproven.
+            (Some(second), Some(at)) if at.timestamp_millis() < second.from.timestamp_millis() => {
+                Some(first.clone())
+            }
+            _ => None,
         }
     }
 

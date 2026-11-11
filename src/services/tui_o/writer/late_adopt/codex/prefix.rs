@@ -1,7 +1,7 @@
 //! Whether a Codex rollout still sits before any output (verified `session_meta`, one opener, one
 //! prompt and its mirrors), and else which turns it records, so delivery is judged turn by turn.
 
-use std::io::Read;
+use std::io::{BufRead, Read};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -87,19 +87,21 @@ impl Frontier {
     }
 }
 
-/// Reads `source` for its turns. A turn end only ends its turn and never moves where delivery
-/// stands; a later `session_meta` drops every turn before it. An unparsable record refuses.
+/// Streams `source` for its turns, whatever its size. A turn end only ends its turn and never
+/// moves where delivery stands; a later `session_meta` drops every turn before it.
 pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
     source: &SourceId,
 ) -> Result<Frontier, Verdict> {
-    let bytes = read(source)?;
-    let complete = bytes
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map_or(0, |at| at + 1);
+    let mut reader = std::io::BufReader::new(open(source)?);
     let (mut turns, mut start, mut metas) = (Vec::<Span>::new(), 0, 0);
-    let mut ends = Vec::new();
-    for line in bytes[..complete].split_inclusive(|b| *b == b'\n') {
+    let (mut ends, mut line) = (Vec::new(), Vec::new());
+    loop {
+        line.clear();
+        reader.read_until(b'\n', &mut line).map_err(waits(source))?;
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        let line = line.as_slice();
         let at = start;
         start += line.len() as u64;
         ends.push(start);
@@ -161,7 +163,7 @@ pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
     session_proven(source)?;
     Ok(Frontier {
         turns,
-        complete: complete as u64,
+        complete: start,
         ends,
     })
 }
@@ -171,13 +173,23 @@ pub(in crate::services::tui_o::writer::late_adopt) fn hash_before(
     source: &SourceId,
     at: u64,
 ) -> Result<String, Verdict> {
-    let bytes = read(source)?;
-    let prefix = usize::try_from(at).ok().and_then(|at| bytes.get(..at));
-    let prefix = prefix.ok_or_else(|| {
+    let mut prefix = open(source)?.take(at);
+    let (mut hasher, mut chunk, mut read) = (Sha256::new(), vec![0; 64 << 10], 0);
+    loop {
+        let got = prefix.read(&mut chunk).map_err(waits(source))?;
+        if got == 0 {
+            break;
+        }
+        hasher.update(&chunk[..got]);
+        read += got as u64;
+    }
+    if read < at {
         let shown = source.path.display();
-        Verdict::Wait(format!("source {shown} holds fewer than {at} bytes"))
-    })?;
-    Ok(hex::encode(Sha256::digest(prefix)))
+        return Err(Verdict::Wait(format!(
+            "source {shown} holds fewer than {at} bytes"
+        )));
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// A failed read waits; a header that does not prove the bound session refuses the rollout.
@@ -217,20 +229,31 @@ fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
     }))
 }
 
+/// A failed read of `source` waits.
+fn waits(source: &SourceId) -> impl Fn(std::io::Error) -> Verdict + '_ {
+    move |error| Verdict::Wait(format!("source {}: {error}", source.path.display()))
+}
+
+/// `source`'s file while it is still the file the bind named.
+fn open(source: &SourceId) -> Result<std::fs::File, Verdict> {
+    let file = std::fs::File::open(&source.path).map_err(waits(source))?;
+    let meta = file.metadata().map_err(waits(source))?;
+    if file_identity(&meta).1 != source.ino {
+        let shown = source.path.display();
+        return Err(Verdict::Refuse(format!("source {shown} was replaced")));
+    }
+    Ok(file)
+}
+
+/// A rollout judged before any output, read whole within the small fresh-prefix budget.
 pub(in crate::services::tui_o::writer::late_adopt) fn read(
     source: &SourceId,
 ) -> Result<Vec<u8>, Verdict> {
     let shown = source.path.display();
-    let wait = |error: std::io::Error| Verdict::Wait(format!("source {shown}: {error}"));
-    let file = std::fs::File::open(&source.path).map_err(wait)?;
-    let meta = file.metadata().map_err(wait)?;
-    if file_identity(&meta).1 != source.ino {
-        return Err(Verdict::Refuse(format!("source {shown} was replaced")));
-    }
     let mut bytes = Vec::new();
-    file.take(MAX_READ_BYTES + 1)
+    (open(source)?.take(MAX_READ_BYTES + 1))
         .read_to_end(&mut bytes)
-        .map_err(wait)?;
+        .map_err(waits(source))?;
     match bytes.len() as u64 {
         len if len > MAX_READ_BYTES => Err(Verdict::Refuse(format!(
             "source {shown} holds more than {MAX_READ_BYTES} bytes"
