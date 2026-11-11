@@ -1,5 +1,6 @@
 //! Initial adoption retains the original local binding; it never stamps old artifacts.
-use super::{OwnerIdentity, custody};
+use super::OwnerIdentity;
+use crate::db::channel_custody_lock;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -28,7 +29,7 @@ pub(crate) async fn adopt_on_tx(
         binding,
     )
     .map_err(Error::Native)?;
-    custody::lock(tx, id).await?;
+    channel_custody_lock::lock(tx, id).await?;
     let sessions: Vec<(i64, String, String)> = sqlx::query_as("SELECT id,session_key,instance_id FROM sessions WHERE LOWER(BTRIM(provider))=$1 AND channel_id=$2 AND COALESCE(LOWER(BTRIM(status)),'') NOT IN ('disconnected','aborted') ORDER BY id FOR UPDATE")
         .bind(id.provider()).bind(id.raw_channel_id()).fetch_all(&mut **tx).await?;
     let [(session_id, locator, instance)] = sessions.as_slice() else {

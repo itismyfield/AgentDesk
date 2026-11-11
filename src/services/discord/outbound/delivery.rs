@@ -27,9 +27,9 @@ use super::message::{
 };
 use super::result::{DeliveredMessage, DeliveryResult, FallbackUsed};
 use super::transport::{
-    DiscordOutboundClient, OutboundDedupClaim, OutboundDedupReservation, OutboundDedupWait,
-    OutboundDeduper,
+    OutboundDedupClaim, OutboundDedupReservation, OutboundDedupWait, OutboundDeduper,
 };
+use crate::domain::outbound::port::DiscordOutboundClient;
 
 const DISCORD_EMPTY_CONTENT_PLACEHOLDER: &str = "\u{200B}";
 
@@ -692,11 +692,7 @@ fn parse_channel_id_lossy(raw: &str) -> ChannelId {
         .unwrap_or_else(|_| ChannelId::new(1))
 }
 
-pub(crate) fn first_raw_message_id(messages: &[DeliveredMessage]) -> Option<String> {
-    messages
-        .first()
-        .map(|message| message.raw_message_id.clone())
-}
+pub(crate) use crate::domain::outbound::result::first_raw_message_id;
 
 /// Truncate `content` to at most `max_units` Discord message units, appending a truncation
 /// marker on a new paragraph when truncation occurred.

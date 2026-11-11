@@ -1,5 +1,6 @@
 //! Historical routing notices keep their original outbox pointer after any later owner change.
-use super::{OwnerIdentity, custody, fallback::notice};
+use super::{OwnerIdentity, fallback::notice};
+use crate::db::channel_custody_lock;
 use crate::services::message_outbox::{
     OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx,
 };
@@ -82,7 +83,7 @@ pub(crate) async fn reserve_on_tx(
     generation: i64,
     description: Description<'_>,
 ) -> Result<Option<Reservation>, sqlx::Error> {
-    custody::lock(tx, id).await?;
+    channel_custody_lock::lock(tx, id).await?;
     let stored: Option<StoredNotice> = sqlx::query_as("SELECT owner_instance_id,status,routing_notice,routing_notice_outbox_id,routing_notice_delivery_state,routing_notice_started_at,routing_notice_message_id FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND generation=$3 FOR UPDATE")
         .bind(id.provider()).bind(id.raw_channel_id()).bind(generation).fetch_optional(&mut **tx).await?;
     let Some(StoredNotice {
@@ -231,7 +232,7 @@ pub(crate) async fn begin_post(pool: &sqlx::PgPool, outbox_id: i64) -> Result<St
         return Ok(Step::Unowned);
     };
     let mut tx = pool.begin().await?;
-    custody::lock(&mut tx, &OwnerIdentity::new(&provider, &channel)).await?;
+    channel_custody_lock::lock(&mut tx, &OwnerIdentity::new(&provider, &channel)).await?;
     let stored: Option<Cursor> = sqlx::query_as("SELECT o.routing_notice,o.routing_notice_delivery_state,o.routing_notice_message_id,COALESCE(o.routing_notice_started_at>NOW()-make_interval(secs=>$2) AND o.routing_notice_started_at<=NOW()+INTERVAL '5 seconds',FALSE) AS fresh,EXISTS(SELECT 1 FROM message_outbox m WHERE m.id=o.routing_notice_outbox_id AND m.source=$3 AND m.target=o.routing_notice->>'target' AND m.session_key=o.routing_notice->>'session_key' AND m.reason_code=o.routing_notice->>'reason_code' AND m.content=o.routing_notice->>'content' AND m.bot=o.routing_notice->>'bot') AS matches FROM intake_session_owners o WHERE o.routing_notice_outbox_id=$1 FOR UPDATE")
         .bind(outbox_id).bind(NONCE_RETRY_SECONDS).bind(SOURCE).fetch_optional(&mut *tx).await?;
     let Some(Cursor {

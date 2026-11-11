@@ -241,7 +241,7 @@ async fn persist_iteration_outcome_pg_rolls_back_when_card_is_inactive() {
     )
     .bind(card_id)
     .bind(serde_json::json!({"program": {"current_iteration": 0}}).to_string())
-    .bind(crate::services::automation_candidate_contract::PIPELINE_STAGE_ID)
+    .bind("automation-candidate")
     .execute(&pool)
     .await
     .expect("seed inactive automation candidate");

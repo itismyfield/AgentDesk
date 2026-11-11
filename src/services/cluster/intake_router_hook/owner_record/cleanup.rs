@@ -1,5 +1,6 @@
 //! Restartable cleanup belongs to the original owner history row, never to its successor.
 use super::{OwnerIdentity, custody};
+use crate::db::channel_custody_lock;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -64,7 +65,7 @@ pub(crate) async fn request(
         return Err(sqlx::Error::Protocol("invalid control deadline".into()));
     }
     let mut tx = pool.begin().await?;
-    custody::lock(&mut tx, id).await?;
+    channel_custody_lock::lock(&mut tx, id).await?;
     let held:Option<i64>=sqlx::query_scalar("SELECT routing_home_revision FROM intake_outbox WHERE id=$1 AND provider=$2 AND channel_id=$3 AND routing_state='held' AND routing_wait_owner_generation=$4 AND target_instance_id=$5")
         .bind(pending).bind(id.provider()).bind(id.raw_channel_id()).bind(old.1).bind(target).fetch_optional(&mut *tx).await?;
     let Some(home_revision) = held else {
@@ -102,7 +103,7 @@ async fn locked<'a>(
     sqlx::query("SET LOCAL lock_timeout='2s'")
         .execute(&mut *tx)
         .await?;
-    custody::lock(
+    channel_custody_lock::lock(
         &mut tx,
         &OwnerIdentity::new(&row.provider, &row.raw_channel_id),
     )
