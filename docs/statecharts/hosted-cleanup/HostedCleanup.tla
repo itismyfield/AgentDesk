@@ -149,4 +149,138 @@ ExplicitActivePreserved == ~deleted \/ route # "explicit" \/ row.status # "activ
 StableTarget == row.generation = 0 /\ ObservationAllows(row, MarkerFor(row))
     /\ (route # "bulk" \/ row.status = "disconnected")
 EligibleEventuallyDeleted == (<>[]StableTarget) => <>deleted
+
+\* Thread GC retains the same SQL authority and observation order at both boundaries.
+\* Source baseline: 2ddece1ebb2de1f66c4263c4bc29239b36250ec3.
+GCRecordAllows(r) == r.record \in {"legacy", "retired"}
+GCSqlEligible(r) == r.thread /\ r.status = "idle" /\ ~r.dispatch
+    /\ ~r.children /\ ~r.openChild /\ r.stale
+GCOccupancyAllows(r) == r.status = "idle" /\ ~r.dispatch /\ ~r.children /\ ~r.openChild
+GCInit ==
+    /\ Boundary \in {"DB", "service"}
+    /\ phase = "start" /\ route = "thread-gc"
+    /\ row \in [generation : {0}, record : Records \cup {"lookup-failed", "unreadable", "missing"},
+        status : {"idle"}, alias : {0}, dispatch : {FALSE}, children : {FALSE},
+        openChild : {FALSE}, stale : {TRUE}, thread : {TRUE}, owner : {"local", "foreign", "unreadable"}]
+    /\ snapshot = row
+    /\ marker \in {"absent", "tmux", "non-tmux", "read-failed", "unknown"}
+    /\ seen = [host |-> FALSE, marker |-> "none", occupancy |-> "none", owner |-> "none", probe |-> "none"]
+    /\ held = FALSE /\ markerWritten = FALSE /\ rowChanged = FALSE
+    /\ restarted = FALSE /\ failed = FALSE /\ staged = FALSE
+    /\ earlierExists = TRUE /\ deleted = FALSE /\ markerAtDelete = "none"
+    /\ checkedGeneration = 0 /\ sawWaitMarker = FALSE /\ lastOutcome = "none"
+    /\ aliasMarker \in {"Missing", "Present", "ProbeFailed"} /\ earlierAtStart = TRUE
+GCReadCandidate ==
+    /\ phase = "start"
+    /\ snapshot' = row
+    /\ phase' = IF GCSqlEligible(row) /\ row.record \notin {"lookup-failed", "missing"} THEN "candidate" ELSE "done"
+    /\ UNCHANGED <<route, row, marker, seen, held, markerWritten, rowChanged, restarted, failed, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, lastOutcome, aliasMarker, earlierAtStart>>
+GCObserveHost ==
+    /\ phase = "candidate"
+    /\ seen' = [seen EXCEPT !.host = GCRecordAllows(snapshot) /\ (snapshot.record # "legacy" \/ marker \in SafeMarkers), !.marker = IF snapshot.record = "legacy" THEN marker ELSE "not-read"]
+    /\ phase' = IF GCRecordAllows(snapshot) /\ (snapshot.record # "legacy" \/ marker \in SafeMarkers) THEN "host-ok" ELSE "done"
+    /\ UNCHANGED <<route, row, snapshot, marker, held, markerWritten, rowChanged, restarted, failed, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, lastOutcome, aliasMarker, earlierAtStart>>
+GCObserveOccupancy ==
+    /\ phase = "host-ok"
+    /\ lastOutcome = "none"
+    /\ lastOutcome' = "occupancy-read"
+    /\ seen' = [seen EXCEPT !.occupancy = IF GCOccupancyAllows(row) THEN "unoccupied" ELSE "occupied"]
+    /\ phase' = IF GCOccupancyAllows(row) THEN "occupancy-ok" ELSE "done"
+    /\ UNCHANGED <<route, row, snapshot, marker, held, markerWritten, rowChanged, restarted, failed, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, aliasMarker, earlierAtStart>>
+GCOccupancyLookupFailed ==
+    /\ phase = "host-ok"
+    /\ lastOutcome = "none"
+    /\ lastOutcome' = "lookup-failed"
+    /\ seen' = [seen EXCEPT !.occupancy = "lookup-failed"]
+    /\ phase' = "done"
+    /\ UNCHANGED <<route, row, snapshot, marker, held, markerWritten, rowChanged, restarted, failed, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, aliasMarker, earlierAtStart>>
+GCObserveOwner ==
+    /\ phase = "occupancy-ok"
+    /\ seen' = [seen EXCEPT !.owner = row.owner]
+    /\ phase' = IF row.owner = "local" THEN "owner-ok" ELSE "done"
+    /\ UNCHANGED <<route, row, snapshot, marker, held, markerWritten, rowChanged, restarted, failed, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, lastOutcome, aliasMarker, earlierAtStart>>
+GCProbe ==
+    /\ phase = "owner-ok"
+    /\ seen' = [seen EXCEPT !.probe = aliasMarker]
+    /\ phase' = IF aliasMarker = "Missing" THEN "ready" ELSE "done"
+    /\ UNCHANGED <<route, row, snapshot, marker, held, markerWritten, rowChanged, restarted, failed, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, lastOutcome, aliasMarker, earlierAtStart>>
+GCNewTurn ==
+    /\ phase \in {"host-ok", "occupancy-ok", "owner-ok", "ready"}
+    /\ ~rowChanged
+    /\ row' \in {[row EXCEPT !.status = "active"], [row EXCEPT !.dispatch = TRUE], [row EXCEPT !.children = TRUE], [row EXCEPT !.openChild = TRUE], [row EXCEPT !.stale = FALSE], [row EXCEPT !.generation = 1, !.record = "bound"]}
+    /\ rowChanged' = TRUE
+    /\ sawWaitMarker' = TRUE
+    /\ UNCHANGED <<phase, route, snapshot, marker, seen, held, markerWritten, restarted, failed, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, lastOutcome, aliasMarker, earlierAtStart>>
+GCRowProjectionChanges ==
+    /\ phase \in {"host-ok", "occupancy-ok", "owner-ok", "ready"}
+    /\ ~rowChanged
+    /\ row' \in {[row EXCEPT !.generation = 1], [row EXCEPT !.generation = 1, !.record = "unknown"], [row EXCEPT !.generation = 1, !.record = "foreign"], [row EXCEPT !.thread = FALSE]}
+    /\ rowChanged' = TRUE
+    /\ UNCHANGED <<phase, route, snapshot, marker, seen, held, markerWritten, restarted, failed, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, lastOutcome, aliasMarker, earlierAtStart>>
+GCKillFailed ==
+    /\ phase \in {"host-ok", "occupancy-ok", "owner-ok"}
+    /\ ~failed
+    /\ failed' = TRUE
+    /\ aliasMarker' \in {"Present", "ProbeFailed"}
+    /\ UNCHANGED <<phase, route, row, snapshot, marker, seen, held, markerWritten, rowChanged, restarted, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, lastOutcome, earlierAtStart>>
+GCMarkerChanges ==
+    /\ phase \in {"host-ok", "occupancy-ok", "owner-ok", "ready"}
+    /\ ~markerWritten
+    /\ marker' = "non-tmux"
+    /\ markerWritten' = TRUE
+    /\ UNCHANGED <<phase, route, row, snapshot, seen, held, rowChanged, restarted, failed, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, lastOutcome, aliasMarker, earlierAtStart>>
+GCOwnerChanges ==
+    /\ phase = "ready"
+    /\ row.owner = "local"
+    /\ row' = [row EXCEPT !.owner = "foreign"]
+    /\ UNCHANGED <<phase, route, snapshot, marker, seen, held, markerWritten, rowChanged, restarted, failed, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, lastOutcome, aliasMarker, earlierAtStart>>
+GCAliasAdded ==
+    /\ phase \in {"host-ok", "occupancy-ok", "owner-ok", "ready"}
+    /\ row.alias = 0
+    /\ row' = [row EXCEPT !.alias = 1]
+    /\ UNCHANGED <<phase, route, snapshot, marker, seen, held, markerWritten, rowChanged, restarted, failed, staged, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, lastOutcome, aliasMarker, earlierAtStart>>
+GCConditionalDelete ==
+    /\ phase = "ready"
+    /\ checkedGeneration' = IF Recheck THEN row.generation ELSE snapshot.generation
+    /\ staged' = IF Recheck THEN SameJudgedRow /\ GCRecordAllows(row) /\ GCSqlEligible(row) ELSE GCRecordAllows(snapshot)
+    /\ phase' = "applied"
+    /\ UNCHANGED <<route, row, snapshot, marker, seen, held, markerWritten, rowChanged, restarted, failed, earlierExists, deleted, markerAtDelete, sawWaitMarker, lastOutcome, aliasMarker, earlierAtStart>>
+GCAutocommit ==
+    /\ phase = "applied"
+    /\ deleted' = staged
+    /\ markerAtDelete' = IF staged THEN marker ELSE "none"
+    /\ lastOutcome' = "commit"
+    /\ phase' = "done"
+    /\ UNCHANGED <<route, row, snapshot, marker, seen, held, markerWritten, rowChanged, restarted, failed, staged, earlierExists, checkedGeneration, sawWaitMarker, aliasMarker, earlierAtStart>>
+GCStatementFailure ==
+    /\ phase = "applied"
+    /\ staged' = FALSE
+    /\ lastOutcome' = "rollback"
+    /\ phase' = "done"
+    /\ UNCHANGED <<route, row, snapshot, marker, seen, held, markerWritten, rowChanged, restarted, failed, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, aliasMarker, earlierAtStart>>
+GCRestart ==
+    /\ phase \in {"candidate", "host-ok", "occupancy-ok", "owner-ok", "ready", "applied"}
+    /\ ~restarted
+    /\ phase' = "start"
+    /\ restarted' = TRUE
+    /\ staged' = FALSE
+    /\ lastOutcome' = "none"
+    /\ seen' = [host |-> FALSE, marker |-> "none", occupancy |-> "none", owner |-> "none", probe |-> "none"]
+    /\ UNCHANGED <<route, row, snapshot, marker, held, markerWritten, rowChanged, failed, earlierExists, deleted, markerAtDelete, checkedGeneration, sawWaitMarker, aliasMarker, earlierAtStart>>
+GCNext == GCReadCandidate \/ GCObserveHost \/ GCObserveOccupancy \/ GCOccupancyLookupFailed
+    \/ GCObserveOwner \/ GCProbe \/ GCNewTurn \/ GCRowProjectionChanges \/ GCKillFailed \/ GCMarkerChanges
+    \/ GCOwnerChanges \/ GCAliasAdded \/ GCConditionalDelete \/ GCAutocommit
+    \/ GCStatementFailure \/ GCRestart \/ Done
+GCSpec == GCInit /\ [][GCNext]_vars
+GCNewTurnKept == ~deleted \/ ~sawWaitMarker
+GCUnknownLookupKept == ~deleted \/ snapshot.record \notin {"unknown", "foreign", "bound", "lookup-failed", "unreadable", "missing"}
+GCObservedHostBeforeProbe == seen.probe = "none" \/ seen.host
+GCObservedLegacyMarkerSafe == ~deleted \/ snapshot.record # "legacy" \/ seen.marker \in SafeMarkers
+GCObservedMissingAndLocal == ~deleted \/ (seen.host /\ seen.occupancy = "unoccupied" /\ seen.owner = "local" /\ seen.probe = "Missing")
+GCKillFailureKept == ~deleted \/ ~failed
+GCConditionalRefusalsKept == ~deleted \/ (SameJudgedRow /\ GCRecordAllows(row) /\ GCSqlEligible(row))
+\* Stronger characterizations expose existing filesystem/alias gaps; no new fence is proposed.
+GCCurrentLegacyMarkerSafe == ~deleted \/ snapshot.record # "legacy" \/ markerAtDelete \in SafeMarkers
+GCCurrentOwnerLocal == ~deleted \/ row.owner = "local"
+GCAliasesRechecked == ~deleted \/ row.alias = snapshot.alias
 =============================================================================

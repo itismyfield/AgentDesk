@@ -1,4 +1,6 @@
 //! Marker observations around the existing hosted cleanup database boundaries.
+pub(crate) mod thread_gc;
+
 use sqlx::PgPool;
 
 use crate::db::dispatched_sessions::hosted_execution::{
