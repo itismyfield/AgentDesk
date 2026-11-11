@@ -562,7 +562,7 @@ pub fn probe_serve_health(working_dir: &str) -> Result<String, String> {
         port,
         &password,
         working_dir,
-        &crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+        &crate::domain::provider_auth_profile::ProviderAuthOverlay::default_for(
             ProviderKind::OpenCode,
         ),
     )?;
@@ -711,7 +711,7 @@ fn warm_server_key(bin: &str, working_dir: &str, profile_id: &str) -> OpenCodeSe
         bin: bin.to_string(),
         working_dir: pool_working_dir(working_dir),
         profile_id: if profile_id.trim().is_empty() {
-            crate::services::provider_auth_profile::DEFAULT_PROFILE_ID.to_string()
+            crate::domain::provider_auth_profile::DEFAULT_PROFILE_ID.to_string()
         } else {
             profile_id.to_string()
         },
@@ -836,7 +836,7 @@ fn acquire_warm_server(
     bin: &str,
     resolution: &crate::services::platform::BinaryResolution,
     working_dir: &str,
-    overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
+    overlay: &crate::domain::provider_auth_profile::ProviderAuthOverlay,
 ) -> Result<OpenCodeWarmServerLease, String> {
     let key = warm_server_key(bin, working_dir, &overlay.profile_id);
     let pool = opencode_server_pool();

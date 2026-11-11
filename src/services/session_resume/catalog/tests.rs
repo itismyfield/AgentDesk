@@ -656,18 +656,21 @@ fn unusable_transcript_homes_warn_once_each_at_load_and_leave_the_list_alone() {
     let title = "{\"type\":\"ai-title\",\"aiTitle\":\"선언 home\"}\n";
     f.transcript_in(&other, &f.sibling, PRIOR, title, 1000);
     let config = f.root.path().join("agentdesk.yaml");
-    let missing = f.root.path().join("no-such-home");
-    let yaml = format!(
-        "server: {{}}\nproviders:\n  claude:\n    transcript_homes: [\".claude-b\", \"{}\", \"{}\"]\n",
-        missing.display(),
-        other.display()
-    );
+    let missing = f.root.path().join(r"no-such-home\quoted");
+    let homes = serde_json::to_string(&[
+        std::path::Path::new(".claude-b"),
+        missing.as_path(),
+        other.as_path(),
+    ])
+    .unwrap();
+    let yaml = format!("server: {{}}\nproviders:\n  claude:\n    transcript_homes: {homes}\n");
     fs::write(&config, yaml).unwrap();
     let (loaded, logs) = logged(|| crate::config::load_from_path(&config).unwrap());
     let warned = |entry: &str| {
+        let quoted = format!("{entry:?}");
         logs.lines()
             .filter(|line| line.contains("WARN") && line.contains("transcript_homes"))
-            .filter(|line| line.contains(entry))
+            .filter(|line| line.contains(&quoted))
             .count()
     };
     assert_eq!(warned(".claude-b"), 1, "{logs}");

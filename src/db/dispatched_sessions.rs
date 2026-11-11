@@ -700,13 +700,6 @@ pub(crate) async fn create_retry_dispatch_pg(
         event.emit();
     }
 
-    crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
-        pool.clone(),
-        "constraint_release",
-        meta.origin_dispatch_id.clone(),
-        "dispatch_terminal_status",
-    );
-
     Ok(dispatch_id)
 }
 

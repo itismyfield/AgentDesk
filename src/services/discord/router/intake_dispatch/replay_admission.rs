@@ -11,9 +11,7 @@ use crate::services::provider::CancelToken;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
-pub(crate) fn incarnation() -> &'static str {
-    crate::services::discord::replay_policy::incarnation()
-}
+pub(crate) use crate::services::discord::replay_policy::incarnation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProducerMode {

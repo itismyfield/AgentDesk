@@ -402,12 +402,11 @@ pub(crate) async fn sweep_failed_pre_accept_once(
             .owner_generation
             .is_some_and(|generation| generation >= 0);
     if owner_fenced {
-        let owner_key =
-            crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity::new(
-                &source.provider,
-                &source.channel_id,
-            )
-            .advisory_key();
+        let owner_key = crate::domain::intake_identity::OwnerIdentity::new(
+            &source.provider,
+            &source.channel_id,
+        )
+        .advisory_key();
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(owner_key)
             .execute(&mut *tx)
@@ -475,11 +474,10 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     .bind(&source.required_labels)
     .fetch_all(&mut *tx)
     .await?;
-    let requirements =
-        crate::services::cluster::execution_requirements::ExecutionRequirements::parse(
-            source.execution_requirements.clone(),
-        )
-        .map_err(sqlx::Error::Protocol)?;
+    let requirements = crate::domain::cluster_policy::ExecutionRequirements::parse(
+        source.execution_requirements.clone(),
+    )
+    .map_err(sqlx::Error::Protocol)?;
     let auth_profile = crate::services::cluster::readiness::expected_auth_profile(
         &source.provider,
         &source.channel_id,
@@ -490,7 +488,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
         .find(|node| {
             requirements.intake_reasons(node).is_empty()
                 && (source.attachment_refs.as_array().is_some_and(Vec::is_empty)
-                    || crate::services::cluster::attachment_transfer::supports(node))
+                    || crate::domain::cluster_policy::supports_attachment_transfer(node))
                 && crate::services::cluster::readiness::evaluate_declared(
                     node,
                     &source.provider,

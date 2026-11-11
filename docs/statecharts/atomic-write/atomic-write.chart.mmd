@@ -1,0 +1,20 @@
+stateDiagram-v2
+    [*] --> CreateDir
+    CreateDir --> CreateTemp
+    CreateTemp --> Write
+    Write --> FileSync
+    FileSync --> Observe: complete file synced (Unix and Windows)
+    Observe --> Rename: upper inflight diagnostic if applicable
+    Rename --> Published: rename succeeds
+    Published --> [*]: Ok; parent sync not requested
+    CreateDir --> NotPublished: io error
+    CreateTemp --> NotPublished: io error
+    Write --> NotPublished: io error
+    FileSync --> NotPublished: io error
+    Rename --> NotPublished: io error; diagnostic already emitted
+    NotPublished --> [*]: upper ENOSPC record if errno 28; Err(stage, io error)
+    note right of Published
+      Separate S07 parent sync capability:
+      Unix flushes; Windows Ok but unflushed.
+      Plain atomic_write never calls it.
+    end note

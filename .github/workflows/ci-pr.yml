@@ -282,6 +282,7 @@ jobs:
               - 'src/services/cluster/**'
               - 'src/services/codex_tui/**'
               - 'src/services/codex/**'
+              - 'src/services/dispatch_gate/auth_profiles.rs'
               - 'src/services/dispatched_sessions/**'
               - 'src/services/dispatches/**'
               - 'src/services/legacy_body_census/**'

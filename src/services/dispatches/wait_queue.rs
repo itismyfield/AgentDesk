@@ -72,6 +72,8 @@ pub(crate) fn spawn_cached_constraint_release_wake(
     dispatch_id: String,
     source: &'static str,
 ) {
+    #[cfg(test)]
+    tests::record_cached_wake(&pool, trigger, &dispatch_id, source);
     spawn_wait_queue_wake_pg(
         pool,
         runtime_cluster_config_snapshot(),
@@ -375,10 +377,40 @@ fn increment_active_dispatch_count(worker_nodes: &mut [Value], instance_id: &str
 }
 
 #[cfg(test)]
+pub(crate) use tests::cached_wakes;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
     use sqlx::PgPool;
+
+    type CachedWake = (Option<String>, &'static str, String, &'static str);
+    static CACHED_WAKES: std::sync::Mutex<Vec<CachedWake>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn record_cached_wake(
+        pool: &PgPool,
+        trigger: &'static str,
+        dispatch_id: &str,
+        source: &'static str,
+    ) {
+        CACHED_WAKES.lock().expect("wake observations").push((
+            pool.connect_options().get_database().map(str::to_owned),
+            trigger,
+            dispatch_id.to_string(),
+            source,
+        ));
+    }
+
+    pub(crate) fn cached_wakes(dispatch_id: &str) -> Vec<CachedWake> {
+        CACHED_WAKES
+            .lock()
+            .expect("wake observations")
+            .iter()
+            .filter(|wake| wake.2 == dispatch_id)
+            .cloned()
+            .collect()
+    }
 
     #[test]
     fn wait_timeout_uses_wait_started_at() {

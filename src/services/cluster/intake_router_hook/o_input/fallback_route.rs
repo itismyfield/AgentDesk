@@ -1,4 +1,5 @@
 //! Enabled pilot/derived channels pick home or peer from shared PG; off never enters this path.
+use crate::db::channel_custody_lock;
 use crate::services::cluster::intake_router_hook::owner_record::{
     OwnerIdentity, adoption, cleanup, custody, fallback::Target, plan, snapshot,
 };
@@ -48,7 +49,7 @@ async fn adopt_local(
     };
     let mut tx = pool.begin().await?;
     let custody_wait = std::time::Instant::now();
-    custody::lock(&mut tx, id).await?;
+    channel_custody_lock::lock(&mut tx, id).await?;
     tracing::debug!(
         provider = id.provider(),
         channel_id = id.raw_channel_id(),

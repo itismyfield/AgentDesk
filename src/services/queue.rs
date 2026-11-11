@@ -5,8 +5,8 @@ use axum::{Json, http::HeaderMap};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
+use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 use crate::services::turn_lifecycle::{

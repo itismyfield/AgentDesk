@@ -140,6 +140,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "kanban/": "High-level kanban orchestration, state machine facade, and shared test support.",
     "launch.rs": "Starts the Tokio runtime and hands off to server boot.",
     "lib.rs": "Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests.",
+    "logging/": "Shared tracing adapters and tests for structured correlation fields.",
     "logging.rs": "Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs.",
     "main.rs": "Binary entry point. Dispatches CLI commands or boots the server runtime.",
     "phase_gate.rs": "Immutable typed phase-gate declarations and snapshot compatibility checks shared by HTTP, policy dispatch, and durable reducers.",
