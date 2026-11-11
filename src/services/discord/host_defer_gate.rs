@@ -51,26 +51,6 @@ pub(super) async fn sweep_session_deferred(
     )
 }
 
-/// [`sweep_session_deferred`] for a pass holding no channel name: only a found legacy row
-/// with no host trace admits it.
-pub(super) async fn nameless_sweep_deferred(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: u64,
-) -> bool {
-    let gate = nameless_channel_gate(shared, provider, channel_id).await;
-    let held = !matches!(gate, Ok(KeyedTeardown::Cleared(_)));
-    if held {
-        tracing::warn!(
-            caller = CALLER,
-            channel_id,
-            lookup = ?gate.as_ref().err(),
-            "no channel name; card kept"
-        );
-    }
-    held
-}
-
 /// [`channel_session_deferred`] on the registered fallback name for a channel holding none;
 /// unregistered, only a found legacy row, or no row with nothing in flight, admits it.
 pub(super) async fn nameless_channel_deferred(
