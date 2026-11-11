@@ -137,6 +137,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "test_env_panic_probe.rs": "Isolated test-fixture panic and environment restoration probes.",
     "test_support.rs": "Test-only Rust source lexer that strips comments and masks literals for `include_str!` guards.",
     "test_support/": "Test runtime that holds fixture serialization for the whole async body.",
+    "intake_consent_authority.rs": "Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys.",
     "kanban/": "High-level kanban orchestration, state machine facade, and shared test support.",
     "launch.rs": "Starts the Tokio runtime and hands off to server boot.",
     "lib.rs": "Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests.",

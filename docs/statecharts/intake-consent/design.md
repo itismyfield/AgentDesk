@@ -2,7 +2,7 @@
 
 - 레그: 구현 전 PLAN, production 변경 0. 기준 production SHA `08e2336e47986d70d0cbe95e56215858377aed5c`; d1 문서 head `4bf484ed8363bdbdc7734e21013bd157ffc43bd6`.
 - 첫 커밋 `e8f13ac6a744b27bf85da308c8be5ea40766904c`: 기존 모델 :159의 IF 우선순위만 `(IF …)`와 `drift'=TRUE` 별도 conjunct로 수정. amend 없이 먼저 커밋했다.
-- 정본 r2: `/home/adk/adk/lane-runs/i7353/plan-s4-07-2.md`. 커밋 사본 `docs/statecharts/intake-consent/design.md`와 바이트 동일하게 유지한다. d1은 이력으로 남기며 r2가 이를 대체한다.
+- 정본 r2: `/home/adk/adk/lane-runs/i7353/plan-s4-07-2.md`. 현재 문서는 r2 설계 내용을 보존하고, 구현 후 줄 수가 바뀐 DB handoff의 과거 좌표는 r2 기준 SHA 링크로 구분한다. d1은 이력으로 남기며 r2가 이를 대체한다.
 - 선택: **adapter 소유 opaque proof + 기존 o_input만 만들 수 있는 private scope key + 봉인된 service issuer child**. CAS는 기존 bool 그대로, **SpawnPermit/변환 API/저장 가능한 CAS receipt 없음**.
 - 추정 **16 production 파일 / +580 순 코드**(소계+450, 보수 여유+130), 범위 +400~750. d1 14/+520 대비 +2파일/+60. hard cap은 공식 `pr_cap_prod.py:15`의 30/+1500, PLAN 정지선 +1200.
 - WSL 모델 실행기 없음: `SC_RUN=mac-needed`. 새 모델/TLC/state count의 GREEN/RED 관측은 없다. cfg의 결과 표는 예측이다. 기존 모델링과 새 모델링 결과를 섞지 않는다.
@@ -118,7 +118,7 @@ cfg(unix)는 기존 proof와 동일하게 유지한다. non-unix의 mark_spawned
 | E05 | `services/discord/router/herdr_consent/admission.rs:438–491` | RecordAttempt → ObserveAndMove | S만 check/record/load, A에 proof 소유값 + D checked binding 전달 | 현재 worker pub(in router), helper는 private child |
 | E06 | 같은 파일 `:499–509` | RollbackMove | recording 시작 전만 같은 proof를 A rollback에 move, 다른 row id fallback은 authority 아님 | rollback pub(crate), proof by value |
 | E07 | 같은 파일 `:215–242`; `consent.rs:304–334,479–499` | attempted / FS record | S Store.question/append, source별 참조만 저장. payload/upload 복사 없음 | Hold.record private; Store methods pub(crate) |
-| E08 | `db/intake_outbox/consent_handoff.rs:184–243` | LockOwner, ReadForUpdate, PrepareCAS, Commit(rollback) | A가 same row/stamp/marker/live owner 재확인, bookkeeping 유지 | DB rollback pub(crate), tuple ctor 접근0 |
+| E08 | [r2 handoff (184–243)](https://github.com/itismyfield/AgentDesk/blob/08e2336e47986d70d0cbe95e56215858377aed5c/src/db/intake_outbox/consent_handoff.rs#L184-L243) | LockOwner, ReadForUpdate, PrepareCAS, Commit(rollback) | A가 same row/stamp/marker/live owner 재확인, bookkeeping 유지 | DB rollback pub(crate), tuple ctor 접근0 |
 | E09 | 같은 파일 `:246–315` | ObserveAndMove → locked hold CAS | FS 관측은 S helper로만 이동. A는 opaque proof와 checked values, 기존 CAS/상위 retirement 결합 유지 | DB hold pub(crate), proof 필수 |
 | E10 | 같은 파일 `:107–180`; `services/discord/router/herdr_consent/custody.rs:205–268` | Release / releases<=1 | S exact durable release receipt → A. nonce만으로 row 생성/증식/새 proof 발급 없음 | DB release pub(crate), LiveSink service scope |
 | E11 | `services/session_host/herdr/policy/consent/settlement.rs:62–105,224–288` | unresolved eligibility / release boundary | D predicate, S Applied/preview/settlement guard·ack는 유지. returned/adopted는 unresolved지만 releasable과 다름 | Consent methods/Store pub(crate) |
@@ -148,7 +148,7 @@ cfg(unix)는 기존 proof와 동일하게 유지한다. non-unix의 mark_spawned
 
 | file:line | 관측 진입 / 모델 | 제안 경계 |
 |---|---|---|
-| `db/intake_outbox/consent_handoff.rs:255–259` | 정확한 expected snapshot+unresolved intent / ObserveAndMove | 이 1개 load만 새 S worker_handoff로 이동, begin보다 앞 |
+| [r2 handoff (255–259)](https://github.com/itismyfield/AgentDesk/blob/08e2336e47986d70d0cbe95e56215858377aed5c/src/db/intake_outbox/consent_handoff.rs#L255-L259) | 정확한 expected snapshot+unresolved intent / ObserveAndMove | 이 1개 load만 새 S worker_handoff로 이동, begin보다 앞 |
 | `services/discord/router/herdr_consent.rs:89,407` | load_all / load_each inventory, OOS | S 유지 |
 | `services/discord/router/herdr_consent/startup.rs:61` | boot interrupt inventory / Restart 경계 | S 유지 |
 | `services/session_host/herdr/policy/consent/engine.rs:149,171,272` | card reserve/retry/apply 최신 관측, OOS | S 유지 |
@@ -166,9 +166,9 @@ cfg(unix)는 기존 proof와 동일하게 유지한다. non-unix의 mark_spawned
 | `db/intake_outbox.rs:121` | Claim 초기 row / retry child OOS | A 일반 insert/retry, proof 발급 없음 |
 | `db/intake_outbox.rs:502` | Claim 초기 row / retry child OOS | A 일반 insert/retry, proof 발급 없음 |
 | `db/intake_outbox.rs:514` | Claim 초기 row / retry child OOS | A 일반 insert/retry, proof 발급 없음 |
-| `db/intake_outbox/consent_handoff.rs:175` | Release | A 구현 대상, 원본 row CAS |
-| `db/intake_outbox/consent_handoff.rs:240` | Commit(rollback) | A 구현 대상, 원본 row CAS |
-| `db/intake_outbox/consent_handoff.rs:308` | Commit(hold) | A 구현 대상, 원본 row CAS |
+| [r2 handoff (175)](https://github.com/itismyfield/AgentDesk/blob/08e2336e47986d70d0cbe95e56215858377aed5c/src/db/intake_outbox/consent_handoff.rs#L175) | Release | A 구현 대상, 원본 row CAS |
+| [r2 handoff (240)](https://github.com/itismyfield/AgentDesk/blob/08e2336e47986d70d0cbe95e56215858377aed5c/src/db/intake_outbox/consent_handoff.rs#L240) | Commit(rollback) | A 구현 대상, 원본 row CAS |
+| [r2 handoff (308)](https://github.com/itismyfield/AgentDesk/blob/08e2336e47986d70d0cbe95e56215858377aed5c/src/db/intake_outbox/consent_handoff.rs#L308) | Commit(hold) | A 구현 대상, 원본 row CAS |
 | `db/intake_outbox/worker_status.rs:164` | Claim / AdvanceStatus / pending rearm | A, stamp/live-owner fence 유지 |
 | `db/intake_outbox/worker_status.rs:260` | Claim / AdvanceStatus / pending rearm | A, stamp/live-owner fence 유지 |
 | `db/intake_outbox/worker_status.rs:385` | Claim / AdvanceStatus / pending rearm | A, stamp/live-owner fence 유지 — :385 함수는 cfg(test), runtime 아님 |
