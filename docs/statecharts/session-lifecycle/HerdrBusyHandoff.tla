@@ -1,294 +1,249 @@
 ---- MODULE HerdrBusyHandoff ----
-\* Claude forward handoff design r2; production baseline 1fe3a57d266e1e7fe384796d22a925076f1d99fc.
-\* Reviewed d1 artifact fae2d9ee41bf57897dcef1e56869b1a19b1265cc; no historical retained replay.
+\* Slice A: no old fallback and no native-first readiness capability.
+\* Production baseline 07b57b5724f6bede32f7cc0cf00c7a23652ff3c2.
 EXTENDS Naturals, FiniteSets
-CONSTANTS Policy, Entry, OldUnread, HasDraft, StopFailures, FirstRefusals, N, Restarts, BootCase, IdentityRace, Mutant, Controls, RotateNative
-VARIABLES server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks
-vars == <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
+CONSTANTS Policy, Entry, N, AlwaysFails, Failures, FirstRefusals, Blocked, HasDraft, Restarts, CrashPoint, BootCase, IdentityRace, Mutant
+VARIABLES up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes
+vars == <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 Ids == 1..N
-Terminal == {"done", "cancelled"}
-HasInput == \E i \in Ids : q[i] \notin Terminal
-Front == {i \in Ids : q[i] = "queued" /\ \A j \in 1..(i-1) : q[j] \in Terminal}
-RaceReady == IdentityRace = "none" \/ raced
+Terminal == {"done", "cancelled", "retained"}
+Front == {i \in Ids : q[i] \in {"queued", "held"} /\ \A j \in 1..(i-1) : q[j] \in Terminal}
 Init ==
-    /\ server = IF BootCase = "journal-only" THEN "down" ELSE "up"
-    /\ crashes = 0 /\ awake = (BootCase # "journal-only") /\ actor = awake
-    /\ phase = IF BootCase = "journal-only" THEN "stopping" ELSE "legacy"
-    /\ journal = (BootCase = "journal-only") /\ oldLive = TRUE /\ newLive = FALSE
-    /\ peer = 0 /\ capPeer = IF BootCase = "journal-only" THEN 2 ELSE 0
-    /\ pane = 1 /\ capPane = 1 /\ raced = FALSE
-    /\ foreignKilled = FALSE /\ nativeSid = "B" /\ resumeSid = "B" /\ newSid = "none"
-    /\ nativeReady = FALSE /\ remainingFailures = StopFailures /\ remainingRefusals = FirstRefusals
-    /\ draft = HasDraft /\ parked = FALSE /\ draftExecuted = FALSE
-    /\ q = [i \in Ids |-> IF BootCase = "journal-only" THEN "done" ELSE "incoming"]
-    /\ chosen = [i \in Ids |-> IF BootCase = "journal-only" THEN "old" ELSE "none"]
-    /\ receipt = [i \in Ids |-> IF BootCase = "journal-only" THEN "provider" ELSE "none"]
-    /\ keys = [i \in Ids |-> IF BootCase = "journal-only" THEN 1 ELSE 0]
-    /\ effects = [i \in Ids |-> IF BootCase = "journal-only" THEN 1 ELSE 0]
-    /\ oldComplete = [i \in Ids |-> BootCase = "journal-only"]
-    /\ probeMarker = [i \in Ids |-> "none"] /\ bypassed = FALSE /\ resendAsks = 0
+    /\ up = (BootCase # "journal-only")
+    /\ awake = (BootCase # "journal-only")
+    /\ actor = (BootCase # "journal-only")
+    /\ phase = (IF BootCase = "journal-only" THEN "bound" ELSE "legacy")
+    /\ journal = (BootCase = "journal-only")
+    /\ oldLive = (BootCase # "journal-only")
+    /\ newLive = (BootCase = "journal-only")
+    /\ peer = (0)
+    /\ capPeer = (IF BootCase = "journal-only" THEN 2 ELSE 0)
+    /\ pane = (1)
+    /\ capPane = (1)
+    /\ raced = (FALSE)
+    /\ foreignClosed = (FALSE)
+    /\ failures = (Failures)
+    /\ notice = (FALSE)
+    /\ retrySeen = (FALSE)
+    /\ q = ([i \in Ids |-> IF BootCase = "journal-only" THEN "done" ELSE "incoming"])
+    /\ probe = ([i \in Ids |-> FALSE])
+    /\ attempt = ([i \in Ids |-> "none"])
+    /\ effects = ([i \in Ids |-> IF BootCase = "journal-only" THEN 1 ELSE 0])
+    /\ nativeLog = ([i \in Ids |-> BootCase = "journal-only"])
+    /\ seen = ([i \in Ids |-> FALSE])
+    /\ oldKeys = (0)
+    /\ retained = (FALSE)
+    /\ draft = ([i \in Ids |-> HasDraft])
+    /\ executedDraft = (FALSE)
+    /\ crashes = (0)
 
-ProbeIntake(i) ==
-    /\ server = "up"
+Probe(i) ==
+    /\ up
     /\ q[i] = "incoming"
-    /\ IF i = 1 THEN TRUE ELSE q[i-1] # "incoming"
     /\ q' = ([q EXCEPT ![i] = "probing"])
-    /\ probeMarker' = ([probeMarker EXCEPT ![i] = IF journal THEN "present" ELSE "absent"])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, chosen, receipt, keys, effects, oldComplete, bypassed, resendAsks>>
+    /\ probe' = ([probe EXCEPT ![i] = journal])
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
-CommitIntake(i) ==
-    /\ server = "up" /\ awake
+Commit(i) ==
+    /\ up /\ awake
     /\ q[i] = "probing"
-    /\ q' = ([q EXCEPT ![i] = IF ~journal /\ Entry = "active" /\ (Policy = "main" \/ Mutant = "MissingActiveBegin") THEN "blocked" ELSE "queued"])
-    /\ journal' = (journal \/ (~(Entry = "active" /\ (Policy = "main" \/ Mutant = "MissingActiveBegin"))))
-    /\ phase' = (IF ~journal /\ ~(Entry = "active" /\ (Policy = "main" \/ Mutant = "MissingActiveBegin")) THEN "stopping" ELSE phase)
-    /\ capPeer' = (IF ~journal THEN peer ELSE capPeer)
-    /\ capPane' = (IF ~journal THEN pane ELSE capPane)
-    /\ resumeSid' = (IF ~journal THEN nativeSid ELSE resumeSid)
-    /\ bypassed' = (bypassed \/ (Mutant = "StaleIntake" /\ journal /\ probeMarker[i] = "absent"))
-    /\ UNCHANGED <<server, crashes, awake, actor, oldLive, newLive, peer, pane, raced, foreignKilled, nativeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, chosen, receipt, keys, effects, oldComplete, probeMarker, resendAsks>>
+    /\ q' = ([q EXCEPT ![i] = IF Policy = "main" /\ Entry = "active" /\ ~journal THEN "blocked" ELSE "queued"])
+    /\ journal' = (journal \/ ~(Policy = "main" /\ Entry = "active"))
+    /\ phase' = (IF ~journal /\ ~(Policy = "main" /\ Entry = "active") THEN "revalidate" ELSE phase)
+    /\ oldKeys' = (IF Mutant = "StaleIntake" /\ journal /\ ~probe[i] THEN 1 ELSE oldKeys)
+    /\ UNCHANGED <<up, awake, actor, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, probe, attempt, effects, nativeLog, seen, retained, draft, executedDraft, crashes>>
 
-BeforeReadyRefusal ==
-    /\ server = "up" /\ awake /\ journal /\ phase = "stopping"
-    /\ Policy = "main" /\ OldUnread
-    /\ q' = ([i \in Ids |-> IF q[i] = "queued" THEN "retained" ELSE q[i]])
-    /\ phase' = ("retained")
-    /\ resendAsks' = (resendAsks + 1)
-    /\ UNCHANGED <<server, crashes, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed>>
-
-StopFailed ==
-    /\ server = "up" /\ awake /\ phase = "stopping" /\ journal
-    /\ Policy # "main" /\ remainingFailures > 0 /\ RaceReady
-    /\ phase' = ("fallback")
-    /\ remainingFailures' = (remainingFailures - 1)
-    /\ UNCHANGED <<server, crashes, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-ChooseOld(i) ==
-    /\ server = "up" /\ awake /\ phase = "fallback" /\ oldLive
-    /\ i \in Front /\ chosen[i] = "none"
-    /\ chosen' = ([chosen EXCEPT ![i] = "old"])
-    /\ receipt' = ([receipt EXCEPT ![i] = "no-key"])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-ParkDraft(i) ==
-    /\ server = "up" /\ awake /\ phase = "fallback" /\ ~OldUnread
-    /\ draft /\ ~parked /\ chosen[i] = "old" /\ q[i] = "queued"
-    /\ parked' = (TRUE)
-    /\ keys' = ([keys EXCEPT ![i] = 1])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, draftExecuted, q, chosen, receipt, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-ReleaseOldNoKey(i) ==
-    /\ server = "up" /\ awake /\ phase = "fallback"
-    /\ Policy = "fixed" /\ Mutant # "NoOldRelease"
-    /\ chosen[i] = "old" /\ q[i] = "queued" /\ receipt[i] = "no-key" /\ keys[i] = 0
-    /\ OldUnread
-    /\ chosen' = ([chosen EXCEPT ![i] = "none"])
-    /\ receipt' = ([receipt EXCEPT ![i] = "none"])
-    /\ phase' = ("revalidating")
-    /\ UNCHANGED <<server, crashes, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-RevalidateOld ==
-    /\ server = "up" /\ awake /\ phase = "revalidating"
-    /\ phase' = (IF oldLive THEN "stopping" ELSE "ended")
+Revalidate ==
+    /\ up /\ awake /\ journal
+    /\ phase = "revalidate"
+    /\ phase' = (IF oldLive THEN "closing" ELSE "ended")
     /\ capPeer' = (peer)
     /\ capPane' = (pane)
-    /\ resumeSid' = (nativeSid)
-    /\ UNCHANGED <<server, crashes, awake, actor, journal, oldLive, newLive, peer, pane, raced, foreignKilled, nativeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-ReacquireOldPeer ==
-    /\ server = "up" /\ awake /\ phase = "stopping" /\ oldLive
-    /\ capPeer # peer /\ ~raced
-    /\ capPeer' = (peer)
-    /\ capPane' = (pane)
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, pane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-NativeContinuation ==
-    /\ RotateNative /\ oldLive /\ nativeSid = "B"
-    /\ phase = "stopping"
-    /\ nativeSid' = ("C")
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-OldFallbackComplete ==
-    /\ server = "up" /\ awake /\ phase = "fallback"
-    /\ \E i \in Ids : chosen[i] = "old" /\ q[i] \in Terminal
-    /\ \A i \in Ids : chosen[i] # "old" \/ q[i] = "cancelled" \/ (q[i] = "done" /\ oldComplete[i])
-    /\ phase' = ("stopping")
-    /\ UNCHANGED <<server, crashes, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+    /\ UNCHANGED <<up, awake, actor, journal, oldLive, newLive, peer, pane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
 IdentityChanges ==
-    /\ IdentityRace # "none" /\ ~raced /\ phase = "stopping"
-    /\ raced' = (TRUE)
-    /\ oldLive' = (FALSE)
-    /\ peer' = (IF IdentityRace = "server" THEN peer + 1 ELSE peer)
+    /\ phase = "closing"
+    /\ IdentityRace # "none" /\ ~raced
+    /\ peer' = (IF IdentityRace = "server" THEN 1 ELSE peer)
     /\ pane' = (IF IdentityRace = "pane" THEN 2 ELSE pane)
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, newLive, capPeer, capPane, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+    /\ oldLive' = (FALSE)
+    /\ raced' = (TRUE)
+    /\ UNCHANGED <<up, awake, actor, phase, journal, newLive, capPeer, capPane, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
-UnsafeNumericSignal ==
-    /\ server = "up" /\ phase = "stopping" /\ raced
-    /\ (Mutant = "PidSignal" /\ IdentityRace = "pid") \/ (Mutant = "ReconnectNumber" /\ IdentityRace = "server")
-    /\ foreignKilled' = (TRUE)
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+BeforeExitRefusal ==
+    /\ up /\ awake /\ phase = "closing"
+    /\ Policy = "main"
+    /\ retained' = (TRUE)
+    /\ phase' = ("stuck")
+    /\ UNCHANGED <<up, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, draft, executedDraft, crashes>>
 
-ClosePinnedPane ==
-    /\ server = "up" /\ awake /\ phase = "stopping" /\ journal /\ oldLive
-    /\ Policy # "main" \/ ~OldUnread
-    /\ remainingFailures = 0 /\ RaceReady
-    /\ ~RotateNative \/ nativeSid = "C"
-    /\ capPeer = peer /\ capPane = pane
-    /\ \A i \in Ids : chosen[i] # "old" \/ q[i] = "cancelled" \/ (q[i] = "done" /\ oldComplete[i])
+CloseFails ==
+    /\ up /\ awake /\ phase = "closing"
+    /\ Policy = "fixed" /\ (AlwaysFails \/ failures > 0)
+    /\ IdentityRace = "none" \/ raced
+    /\ phase' = ("held-close")
+    /\ failures' = (IF failures > 0 THEN failures - 1 ELSE 0)
+    /\ notice' = (TRUE)
+    /\ oldKeys' = (IF Mutant = "OldFallback" THEN 1 ELSE oldKeys)
+    /\ UNCHANGED <<up, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, retrySeen, q, probe, attempt, effects, nativeLog, seen, retained, draft, executedDraft, crashes>>
+
+RetryClose ==
+    /\ up /\ awake /\ phase = "held-close"
+    /\ Mutant # "NoRetry"
+    /\ phase' = ("revalidate")
+    /\ retrySeen' = (TRUE)
+    /\ UNCHANGED <<up, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
+
+Close ==
+    /\ up /\ awake /\ phase = "closing"
+    /\ Policy = "fixed" /\ ~AlwaysFails /\ failures = 0
+    /\ IdentityRace = "none" \/ raced
+    /\ oldLive /\ capPeer = peer /\ capPane = pane
     /\ phase' = ("checking")
-    /\ UNCHANGED <<server, crashes, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+    /\ UNCHANGED <<up, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
+
+UnsafeClose ==
+    /\ phase = "closing" /\ raced
+    /\ Mutant = "ReconnectNumber"
+    /\ foreignClosed' = (TRUE)
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
 ProviderEnds ==
     /\ phase = "checking" /\ oldLive
     /\ oldLive' = (FALSE)
-    /\ draft' = (FALSE)
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+    /\ UNCHANGED <<up, awake, actor, phase, journal, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
-VerifyOldAbsent ==
-    /\ server = "up" /\ awake /\ journal
-    /\ phase \in {"stopping", "checking"} /\ ~oldLive /\ RaceReady
+VerifyAbsent ==
+    /\ up /\ awake /\ journal
+    /\ ~oldLive /\ phase \in {"closing", "checking"}
+    /\ IdentityRace = "none" \/ raced
     /\ phase' = ("ended")
-    /\ resumeSid' = (IF Mutant = "StaleNative" THEN resumeSid ELSE nativeSid)
-    /\ UNCHANGED <<server, crashes, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+    /\ UNCHANGED <<up, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
 Launch ==
-    /\ server = "up" /\ awake /\ phase = "ended" /\ ~oldLive
-    /\ phase' = ("pending")
-    /\ UNCHANGED <<server, crashes, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-Create ==
-    /\ server = "up" /\ awake /\ phase = "pending" /\ ~newLive
-    /\ newLive' = (TRUE)
-    /\ phase' = ("created")
-    /\ newSid' = (IF Mutant = "WrongSession" THEN "A" ELSE resumeSid)
-    /\ UNCHANGED <<server, crashes, awake, actor, journal, oldLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-OwnResumeStartAndAttach ==
-    /\ server = "up" /\ awake /\ phase = "created" /\ newLive
+    /\ up /\ awake /\ phase = "ended"
+    /\ ~oldLive
     /\ phase' = ("bound")
-    /\ nativeReady' = (Mutant # "NoNativeReady")
-    /\ UNCHANGED <<server, crashes, awake, actor, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+    /\ newLive' = (TRUE)
+    /\ UNCHANGED <<up, awake, actor, journal, oldLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
-ChooseNew(i) ==
-    /\ server = "up" /\ awake /\ phase = "bound"
-    /\ i \in Front /\ chosen[i] = "none"
-    /\ chosen' = ([chosen EXCEPT ![i] = "new"])
-    /\ receipt' = ([receipt EXCEPT ![i] = "no-key"])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+Refuse(i) ==
+    /\ up /\ awake /\ phase = "bound"
+    /\ i \in Front
+    /\ attempt[i] = "none"
+    /\ (FirstRefusals /\ q[i] = "queued") \/ Blocked \/ draft[i]
+    /\ q' = ([q EXCEPT ![i] = "held"])
+    /\ attempt' = ([attempt EXCEPT ![i] = "no-key"])
+    /\ retained' = (retained \/ Mutant = "UntypedHeld")
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, probe, effects, nativeLog, seen, oldKeys, draft, executedDraft, crashes>>
 
-NewPreKeyRefused(i) ==
-    /\ server = "up" /\ awake /\ phase = "bound"
-    /\ i \in Front /\ chosen[i] = "new" /\ keys[i] = 0 /\ remainingRefusals > 0
-    /\ q' = ([q EXCEPT ![i] = IF Policy # "fixed" \/ Mutant = "UntypedFirst" THEN "retained" ELSE "held"])
-    /\ remainingRefusals' = (remainingRefusals - 1)
-    /\ resendAsks' = (IF Policy # "fixed" \/ Mutant = "UntypedFirst" THEN resendAsks + 1 ELSE resendAsks)
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, draft, parked, draftExecuted, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed>>
-
-NativeReadyWake(i) ==
-    /\ server = "up" /\ awake /\ q[i] = "held"
-    /\ chosen[i] = "new" /\ receipt[i] = "no-key" /\ keys[i] = 0
-    /\ nativeReady /\ Mutant # "NoFirstWake"
+WakeFirst(i) ==
+    /\ up /\ awake /\ i \in Front
+    /\ q[i] = "held" /\ attempt[i] = "no-key"
+    /\ ~Blocked /\ ~draft[i]
+    /\ Mutant # "NoFirstWake"
     /\ q' = ([q EXCEPT ![i] = "queued"])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+    /\ attempt' = ([attempt EXCEPT ![i] = "ready"])
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, probe, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
-Arm(i) ==
-    /\ server = "up" /\ awake /\ i \in Front
-    /\ chosen[i] # "none"
-    /\ chosen[i] = "new" => (phase = "bound" /\ nativeReady /\ remainingRefusals = 0)
-    /\ chosen[i] = "old" => (phase = "fallback" /\ ~OldUnread /\ (~draft \/ parked \/ Mutant = "DraftEnter"))
-    /\ q' = ([q EXCEPT ![i] = "armed"])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+Reserve(i) ==
+    /\ up /\ awake /\ phase = "bound"
+    /\ i \in Front
+    /\ ~Blocked \/ Mutant = "DraftBypass"
+    /\ ~draft[i] \/ Mutant = "DraftBypass"
+    /\ attempt[i] \in {"none", "ready"}
+    /\ ~FirstRefusals \/ attempt[i] = "ready" \/ Mutant = "DraftBypass"
+    /\ q' = ([q EXCEPT ![i] = "reserved"])
+    /\ attempt' = ([attempt EXCEPT ![i] = IF i = 1 THEN "created" ELSE "existing"])
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, probe, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
-Submit(i) ==
-    /\ server = "up" /\ awake /\ q[i] = "armed" /\ receipt[i] = "no-key"
+CommitMayHaveSent(i) ==
+    /\ up /\ awake /\ q[i] = "reserved"
+    /\ q' = ([q EXCEPT ![i] = "may"])
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
+
+Effect(i) ==
+    /\ up /\ awake /\ q[i] = "may"
+    /\ CrashPoint # "before-effect" \/ crashes = Restarts
     /\ q' = ([q EXCEPT ![i] = "sent"])
     /\ effects' = ([effects EXCEPT ![i] = @ + 1])
-    /\ keys' = ([keys EXCEPT ![i] = 1])
-    /\ receipt' = ([receipt EXCEPT ![i] = IF Mutant = "LostReceipt" THEN "unknown" ELSE "provider"])
-    /\ draftExecuted' = (draftExecuted \/ (chosen[i] = "old" /\ draft /\ ~parked))
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, chosen, oldComplete, probeMarker, bypassed, resendAsks>>
+    /\ executedDraft' = (executedDraft \/ draft[i])
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, probe, attempt, nativeLog, seen, oldKeys, retained, draft, crashes>>
 
-Confirm(i) ==
-    /\ server = "up" /\ awake /\ q[i] \in {"sent", "recover"}
-    /\ receipt[i] = "provider"
+NativeReceipt(i) ==
+    /\ effects[i] = 1 /\ ~nativeLog[i]
+    /\ nativeLog' = ([nativeLog EXCEPT ![i] = TRUE])
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, seen, oldKeys, retained, draft, executedDraft, crashes>>
+
+ReadReceipt(i) ==
+    /\ up /\ awake /\ nativeLog[i]
+    /\ q[i] \in {"sent", "uncertain"}
+    /\ seen' = ([seen EXCEPT ![i] = TRUE])
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, oldKeys, retained, draft, executedDraft, crashes>>
+
+Settle(i) ==
+    /\ up /\ awake /\ seen[i]
+    /\ q[i] \in {"sent", "uncertain"}
     /\ q' = ([q EXCEPT ![i] = "done"])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
-OldProcessingTerminal(i) ==
-    /\ chosen[i] = "old" /\ q[i] = "done" /\ ~oldComplete[i]
-    /\ oldComplete' = ([oldComplete EXCEPT ![i] = TRUE])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, probeMarker, bypassed, resendAsks>>
+TickUnknown(i) ==
+    /\ up /\ awake /\ q[i] = "uncertain"
+    /\ q' = [q EXCEPT ![i] = "retained"]
+    /\ retained' = TRUE
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, probe, attempt, effects, nativeLog, seen, oldKeys, draft, executedDraft, crashes>>
 
-RecoverNoKey(i) ==
-    /\ server = "up" /\ awake /\ q[i] = "recover" /\ receipt[i] = "no-key"
-    /\ q' = ([q EXCEPT ![i] = "queued"])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-FinishJournal ==
-    /\ server = "up" /\ awake /\ journal /\ phase = "bound"
-    /\ \A i \in Ids : q[i] \in Terminal
-    /\ journal' = (FALSE)
-    /\ phase' = ("complete")
-    /\ UNCHANGED <<server, crashes, awake, actor, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-CancelBeforeKey(i) ==
-    /\ Controls /\ server = "up" /\ q[i] \in {"queued", "held", "armed"}
-    /\ receipt[i] \in {"none", "no-key"} /\ keys[i] = 0
-    /\ q' = ([q EXCEPT ![i] = "cancelled"])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+ReplayUnknown(i) ==
+    /\ Mutant = "ReplayUnknown" /\ q[i] = "uncertain"
+    /\ q' = ([q EXCEPT ![i] = "may"])
+    /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
 Crash ==
-    /\ server = "up" /\ crashes < Restarts
-    /\ server' = ("down")
-    /\ crashes' = (crashes + 1)
+    /\ up /\ crashes < Restarts
+    /\ IF CrashPoint = "before-effect" THEN \E i \in Ids : q[i] = "may" ELSE IF CrashPoint = "after-effect" THEN \E i \in Ids : q[i] = "sent" ELSE TRUE
+    /\ up' = (FALSE)
     /\ awake' = (FALSE)
     /\ actor' = (FALSE)
+    /\ crashes' = (crashes + 1)
     /\ capPeer' = (2)
-    /\ q' = ([i \in Ids |-> IF q[i] \in {"armed", "sent"} THEN "recover" ELSE q[i]])
-    /\ UNCHANGED <<phase, journal, oldLive, newLive, peer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+    /\ seen' = ([i \in Ids |-> FALSE])
+    /\ q' = ([i \in Ids |-> IF q[i] \in {"may", "sent"} THEN "uncertain" ELSE IF q[i] = "reserved" THEN "queued" ELSE q[i]])
+    /\ UNCHANGED <<phase, journal, oldLive, newLive, peer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, probe, attempt, effects, nativeLog, oldKeys, retained, draft, executedDraft>>
 
-BootCensus ==
-    /\ server = "down"
-    /\ server' = ("up")
-    /\ actor' = (HasInput \/ (journal /\ Mutant # "NoJournalCensus"))
-    /\ UNCHANGED <<crashes, awake, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+Census ==
+    /\ ~up
+    /\ up' = (TRUE)
+    /\ actor' = ((\E i \in Ids : q[i] \notin Terminal) \/ (journal /\ Mutant # "NoJournalCensus"))
+    /\ UNCHANGED <<awake, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
 BootWake ==
-    /\ server = "up" /\ actor /\ ~awake
-    /\ Mutant # "NoWake"
+    /\ up /\ actor /\ ~awake
+    /\ Mutant # "NoBootWake"
     /\ awake' = (TRUE)
-    /\ UNCHANGED <<server, crashes, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
+    /\ UNCHANGED <<up, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
-Duplicate ==
-    /\ Mutant = "Duplicate"
-    /\ \E i \in Ids : effects[i] = 1 /\ q[i] = "done"
-    /\ effects' = (CHOOSE e \in [Ids -> 0..2] : \E i \in Ids : q[i] = "done" /\ effects[i] = 1 /\ e = [effects EXCEPT ![i] = 2])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, q, chosen, receipt, keys, oldComplete, probeMarker, bypassed, resendAsks>>
+Complete ==
+    /\ up /\ awake /\ phase = "bound" /\ journal
+    /\ \A i \in Ids : q[i] \in Terminal
+    /\ phase' = ("complete")
+    /\ journal' = (FALSE)
+    /\ UNCHANGED <<up, awake, actor, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, q, probe, attempt, effects, nativeLog, seen, oldKeys, retained, draft, executedDraft, crashes>>
 
-SilentDrop(i) ==
-    /\ Mutant = "SilentDrop" /\ q[i] = "queued"
-    /\ q' = ([q EXCEPT ![i] = "lost"])
-    /\ UNCHANGED <<server, crashes, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignKilled, nativeSid, resumeSid, newSid, nativeReady, remainingFailures, remainingRefusals, draft, parked, draftExecuted, chosen, receipt, keys, effects, oldComplete, probeMarker, bypassed, resendAsks>>
-
-AwaitEvents == UNCHANGED vars
-Next == AwaitEvents \/ BeforeReadyRefusal \/ StopFailed \/ OldFallbackComplete \/ RevalidateOld \/ ReacquireOldPeer \/ NativeContinuation \/ IdentityChanges \/ UnsafeNumericSignal \/ ClosePinnedPane \/ ProviderEnds \/ VerifyOldAbsent \/ Launch \/ Create \/ OwnResumeStartAndAttach \/ FinishJournal \/ Crash \/ BootCensus \/ BootWake \/ Duplicate \/ (\E i \in Ids : ProbeIntake(i) \/ CommitIntake(i) \/ ChooseOld(i) \/ ParkDraft(i) \/ ReleaseOldNoKey(i) \/ ChooseNew(i) \/ NewPreKeyRefused(i) \/ NativeReadyWake(i) \/ Arm(i) \/ Submit(i) \/ Confirm(i) \/ OldProcessingTerminal(i) \/ RecoverNoKey(i) \/ CancelBeforeKey(i) \/ SilentDrop(i))
-Fairness == WF_vars(BeforeReadyRefusal) /\ WF_vars(StopFailed) /\ WF_vars(OldFallbackComplete) /\ WF_vars(RevalidateOld) /\ WF_vars(ReacquireOldPeer) /\ WF_vars(NativeContinuation) /\ WF_vars(IdentityChanges) /\ WF_vars(ClosePinnedPane) /\ WF_vars(ProviderEnds) /\ WF_vars(VerifyOldAbsent) /\ WF_vars(Launch) /\ WF_vars(Create) /\ WF_vars(OwnResumeStartAndAttach) /\ WF_vars(FinishJournal) /\ WF_vars(BootCensus) /\ WF_vars(BootWake)
-    /\ \A i \in Ids : (WF_vars(ProbeIntake(i)) /\ WF_vars(CommitIntake(i)) /\ WF_vars(ChooseOld(i)) /\ WF_vars(ParkDraft(i)) /\ WF_vars(ReleaseOldNoKey(i)) /\ WF_vars(ChooseNew(i)) /\ WF_vars(NewPreKeyRefused(i)) /\ WF_vars(NativeReadyWake(i)) /\ WF_vars(Arm(i)) /\ WF_vars(Submit(i)) /\ WF_vars(Confirm(i)) /\ WF_vars(OldProcessingTerminal(i)) /\ WF_vars(RecoverNoKey(i)))
-
-Spec == Init /\ [][Next]_vars /\ Fairness
-TypeOK == /\ server \in {"up", "down"} /\ crashes \in 0..Restarts
-          /\ effects \in [Ids -> 0..2] /\ keys \in [Ids -> 0..1]
+Wait == UNCHANGED vars
+Next == Wait \/ Revalidate \/ IdentityChanges \/ BeforeExitRefusal \/ CloseFails \/ RetryClose \/ Close \/ UnsafeClose \/ ProviderEnds \/ VerifyAbsent \/ Launch \/ Crash \/ Census \/ BootWake \/ Complete \/ (\E i \in Ids : Probe(i) \/ Commit(i) \/ Refuse(i) \/ WakeFirst(i) \/ Reserve(i) \/ CommitMayHaveSent(i) \/ Effect(i) \/ NativeReceipt(i) \/ ReadReceipt(i) \/ Settle(i) \/ TickUnknown(i) \/ ReplayUnknown(i))
+Fairness == WF_vars(Revalidate) /\ WF_vars(IdentityChanges) /\ WF_vars(BeforeExitRefusal) /\ WF_vars(CloseFails) /\ WF_vars(RetryClose) /\ WF_vars(Close) /\ WF_vars(ProviderEnds) /\ WF_vars(VerifyAbsent) /\ WF_vars(Launch) /\ WF_vars(Census) /\ WF_vars(BootWake) /\ WF_vars(Complete) /\ (\A i \in Ids : WF_vars(Probe(i)) /\ WF_vars(Commit(i)) /\ WF_vars(Refuse(i)) /\ WF_vars(WakeFirst(i)) /\ WF_vars(Reserve(i)) /\ WF_vars(CommitMayHaveSent(i)) /\ WF_vars(Effect(i)) /\ WF_vars(NativeReceipt(i)) /\ WF_vars(ReadReceipt(i)) /\ WF_vars(Settle(i)) /\ WF_vars(TickUnknown(i)))
+Spec == Init /\ [][Next]_vars /\ Fairness /\ (CrashPoint = "before-effect" => WF_vars(Crash))
+TypeOK == effects \in [Ids -> 0..2] /\ crashes \in 0..Restarts
 InputAtMostOnce == \A i \in Ids : effects[i] <= 1
-NoSilentLoss == \A i \in Ids : q[i] # "lost" /\ (q[i] = "done" => effects[i] = 1)
-NoUserResend == resendAsks = 0
-DraftNeverExecuted == ~draftExecuted
+NoSilentLoss == \A i \in Ids : q[i] = "done" => effects[i] = 1
+\* Crash recovery keeps main's Unknown-to-retained contract.
+NoRetained == (crashes = 0 => ~retained)
+NoOldKeys == oldKeys = 0
+NoHumanDraftExecution == ~executedDraft
+NoForeignClose == ~foreignClosed
 OneProvider == ~(oldLive /\ newLive)
-SameSession == newLive => (newSid = resumeSid /\ resumeSid = nativeSid)
-NoForeignClose == ~foreignKilled
-NoIntakeBypass == ~bypassed
 MessageProgress == \A i \in Ids : (q[i] # "incoming") ~> (q[i] \in Terminal)
-HandoffProgress == (journal \/ (\E i \in Ids : q[i] # "incoming")) ~> (phase \in {"bound", "complete"})
-JournalProgress == journal ~> ~journal
+HandoffProgress == ((journal \/ (\E i \in Ids : q[i] # "incoming")) /\ ~AlwaysFails) ~> (phase \in {"bound", "complete"})
+RetryProgress == (AlwaysFails /\ journal) ~> retrySeen
+JournalProgress == (journal /\ ~AlwaysFails) ~> ~journal
 =============================================================================

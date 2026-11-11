@@ -2496,6 +2496,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/discord/mod.rs`
 - `src/services/discord/outbound/turn_output_controller.rs`
 - `src/services/discord/recovery_engine/restore_inflight.rs`
+- `src/services/discord/router/intake_dispatch.rs`
 - `src/services/discord/router/intake_gate.rs`
 - `src/services/discord/router/message_handler/headless_turn.rs`
 - `src/services/discord/router/message_handler/intake_turn.rs`
@@ -2516,7 +2517,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/onboarding/mod.rs`
 - `src/services/opencode.rs`
 - `src/services/platform/binary_resolver.rs`
-- `src/services/provider.rs`
 - `src/services/qwen.rs`
 - `src/services/routines/agent_executor.rs`
 - `src/services/routines/discord_log.rs`

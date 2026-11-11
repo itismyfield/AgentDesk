@@ -1,64 +1,52 @@
-%% Hand-authored projection of HerdrBusyHandoff r2, not generated state-space output.
-%% Production SHA 1fe3a57d266e1e7fe384796d22a925076f1d99fc; 31 cfg / 136 TLC runs.
+%% Hand-authored projection of slice A; actual TLC evidence is in the companion report.
+%% Code base 07b57b5724f6bede32f7cc0cf00c7a23652ff3c2; 26 cfg / 130 TLC runs.
 stateDiagram-v2
-    [*] --> IntakeProbe: incoming original
-    IntakeProbe --> Begin: CommitIntake / current journal recheck
-    IntakeProbe --> Blocked: BeforeActiveEntry RED / no Bound row
-    Begin --> Stopping: durable unfinished_handoff and owner
-    Stopping --> Retained: BeforeReadyRefusal RED / main unread
-    Stopping --> OldSelected: StopFailed then ChooseOld
-    OldSelected --> Revalidating: ReleaseOldNoKey / positive proof and zero keys
-    Revalidating --> Stopping: RevalidateOld / fresh identity
-    OldSelected --> OldArmed: Arm / readable existing draft guard
-    OldArmed --> OldReceipt: Submit / first key fixes destination
-    OldReceipt --> OldSettled: Confirm / exact receipt
-    OldSettled --> OldCompleted: OldProcessingTerminal
-    OldCompleted --> Stopping: OldFallbackComplete / migration without replay
-    Stopping --> Checking: ClosePinnedPane / same server connection
-    Checking --> OldEnded: ProviderEnds then VerifyOldAbsent
-    Stopping --> OldEnded: verified old object already ended
-    OldEnded --> Pending: Launch / latest native ID, not argv UUID
-    Pending --> Created: Create / same native ID, new nonce
-    Created --> Bound: OwnResumeStartAndAttach / durable source
-    Bound --> NewSelected: ChooseNew / unused first-input epoch
-    NewSelected --> FirstHeld: NewPreKeyRefused / typed Held and proof
-    FirstHeld --> NewSelected: NativeReadyWake / level recheck, same original
-    NewSelected --> NewArmed: Arm / native capability, owner gate
-    NewArmed --> NewReceipt: Submit / one framed RPC
-    NewReceipt --> Done: Confirm
-    Done --> Complete: FinishJournal / no remaining originals
-    Begin --> Cancelled: CancelBeforeKey / explicit control
-    NewArmed --> Cancelled: CancelBeforeKey / positive zero-key proof
-    OldArmed --> Cancelled: CancelBeforeKey / positive zero-key proof
-    Cancelled --> Complete: FinishJournal after migration and queue settlement
-    note right of IntakeProbe
-      Active marker-absent entry reaches Begin before hand_busy.
-      N=2 probe/commit interleavings test stale-marker bypass.
+    [*] --> Probe
+    Probe --> Begin: active or idle front / actor grant recheck
+    Begin --> Closing: durable journal and exact old identity
+    Closing --> CloseHeld: close failed / no old keys
+    CloseHeld --> Closing: backoff wake and fresh identity check
+    Closing --> Checking: same control connection / kill exact pane
+    Checking --> Ended: provider identity positively absent
+    Ended --> Bound: latest durable native ID / existing resume guards
+    Bound --> FirstHeld: composer pre-key refusal / typed Held and proof
+    FirstHeld --> Bound: level screen wake / same queued original
+    Bound --> Reserved: existing composer and owner gate
+    Reserved --> MayHaveSent: durable Bootstrap commit
+    MayHaveSent --> Effect: backend keys
+    Effect --> Receipt: durable native receipt / owner observes it
+    Receipt --> Done: exact attempt settlement
+    Done --> Complete: no owed original
+    MayHaveSent --> Unknown: daemon crash before first key
+    Effect --> Unknown: daemon crash before receipt settlement
+    Unknown --> Retained: existing main tick / Unconfirmed
+    Retained --> Complete: original in retained once / no live journal
+    Begin --> Cancelled: explicit cancel or clear
+    FirstHeld --> Cancelled: explicit cancel or clear
+    Cancelled --> Complete: no owed original
+    state Restart {
+        [*] --> Census: input OR unfinished journal
+        Census --> Awake: explicit boot wake
+        Awake --> Closing: unfinished old close
+        Awake --> Complete: Bound and original no longer owed
+    }
+    note right of CloseHeld
+      Fixed unread screen and permanent close failure preserve Held.
+      No close-success fairness; no old fallback, C-s, or old payload.
     end note
-    note right of OldSelected
-      OldUnread stays constant: no RecoverScreen fairness.
-      C-s or any first key forbids destination release.
-      Existing draft guard is unchanged; DraftEnter mutant is RED.
-    end note
-    note right of Checking
-      Pane ID is a capability only on the same live connection.
-      EOF invalidates it; no numeric PID signal or blind reconnect.
-      Close acknowledgment is not provider end or transcript flush.
+    note right of Closing
+      Same tmux control connection and exact pane metadata.
+      EOF discards authority; no PID signal or blind number replay.
+      Close acknowledgment does not prove transcript flush.
     end note
     note right of FirstHeld
-      No string conversion, no retained, no screen-only watcher.
-      Native hook is own resume/ID/nonce/source evidence.
-      Human unsent editing in the new pane remains deferred policy.
+      Existing composer/Person draft guard remains.
+      Positive no-key proof reaches hold_not_sent and wake.
+      No native-first capability in slice A.
     end note
-    state RestartRecovery {
-      [*] --> Down: Crash at any modeled effect
-      Down --> ActorSelected: BootCensus / input OR unfinished journal
-      ActorSelected --> Awake: BootWake / separate action
-      Awake --> Recovered: receipt or positive no-key evidence
-    }
-    note right of RestartRecovery
-      Journal-only starts with all inputs already done.
-      A lost connection must be freshly verified, never restored as authority.
-      Permanent post-content receipt loss remains LostReceipt RED.
+    note right of Unknown
+      Accepted crash exception: main Bootstrap to Unknown to retained.
+      NoRetained covers crash-free executions.
+      Unknown is never blindly replayed.
     end note
     Complete --> [*]

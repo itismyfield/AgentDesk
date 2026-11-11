@@ -1,30 +1,28 @@
-// Hand-authored design projection; the WSL run used the repository TLC checker.
-export const title = "Claude forward handoff: pinned pane, native first input, journal recovery";
+// Hand-authored projection of HerdrBusyHandoff slice A; see the TLC report.
+export const title = "Claude forward handoff: exact pane close, composer hold, boot recovery";
 export const state = (v) => {
-  if (v.server === "down") return `Restart during ${v.phase}`;
-  if (!v.actor && v.journal) return "Journal exists; boot census must select actor";
-  if (!v.awake && v.actor) return "Actor selected; BootWake still required";
-  const inputs = Object.values(v.q);
-  if (inputs.includes("blocked")) return "Active first input missed Begin (RED)";
-  if (inputs.includes("retained")) return "Pre-key refusal retained original (RED)";
-  if (inputs.includes("held")) return "Typed first-input hold; native/host level wake";
-  if (inputs.includes("recover")) return "Recover exact receipt or positive no-key proof";
-  if (inputs.includes("sent")) return "Input effect happened; owner awaits receipt";
-  if (inputs.includes("armed")) return "One destination armed; first-key fence";
+  if (!v.up) return `Restart during ${v.phase}`;
+  if (!v.actor && v.journal) return "Journal-only actor needs boot census";
+  if (!v.awake) return "Actor needs boot wake";
+  const inputs = Object.values(v.q ?? {});
+  if (inputs.includes("blocked")) return "Active intake missed Begin (RED)";
+  if (inputs.includes("retained")) return v.crashes > 0 ? "Main crash contract: retained Unconfirmed" : "Crash-free retained leak (RED)";
+  if (inputs.includes("uncertain")) return "Restored Unknown: exact receipt or main retention";
+  if (inputs.includes("held")) return "Typed no-key hold; existing composer wake";
+  if (inputs.includes("may")) return "MayHaveSent committed before backend effect";
+  if (inputs.includes("sent")) return "Effect happened; receipt settlement pending";
   return {
-    legacy: "Probe and commit active/idle intake",
-    stopping: "Close exact old pane on the pinned server connection",
-    checking: "Close dispatched; provider end still unproven",
-    fallback: "Provisional old destination, releasable only before any key",
-    revalidating: "Positive no-key release; revalidate old identity",
-    ended: "Old provider absent; final current native ID captured",
-    pending: "Durable Pending launch",
-    created: "Await own resume nonce/source record",
-    bound: "Native first-input epoch ready",
-    complete: "Originals settled and unfinished journal cleared",
+    legacy: "Probe active or idle intake",
+    revalidate: "Revalidate owner grant and old identity",
+    closing: "Close exact pane on one live control connection",
+    "held-close": "Backoff retry; original Held and old keys zero",
+    checking: "Close acknowledged; verify provider absence",
+    ended: "Read final durable native ID and resume guards",
+    bound: "Existing composer and Person draft guard",
+    complete: "Originals settled or retained; journal complete",
+    stuck: "Main unread / retained failure (RED)",
   }[v.phase] ?? v.phase;
 };
-export const group = (v) => v.server === "down" || !v.awake ? "Restart"
-  : v.phase === "fallback" || v.phase === "revalidating" ? "Fallback" : "Forward";
-export const colors = { Restart: "pink", Fallback: "blue", Forward: "teal" };
+export const group = (v) => !v.up || !v.awake ? "Restart" : v.phase === "held-close" ? "Held" : "Forward";
+export const colors = { Restart: "pink", Held: "blue", Forward: "teal" };
 export const step = (action) => action;

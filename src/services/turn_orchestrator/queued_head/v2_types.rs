@@ -21,6 +21,8 @@ pub(crate) struct SnapshotV2 {
     /// Terminal receipts owed for removed inputs that carried an origin, committed with the removal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) owed_drop_receipts: Vec<OwedDrop>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) unfinished_handoff: Option<super::v2::claude_handoff::Journal>,
 }
 
 /// A removed input's terminal receipt not yet in the database; acked once it is.

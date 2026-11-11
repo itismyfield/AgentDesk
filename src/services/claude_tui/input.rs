@@ -17,6 +17,8 @@ mod preparation_hold;
 pub(crate) mod submission;
 mod user_receipt;
 use literal_chunks::split_literal_chunks;
+#[cfg(unix)]
+pub(crate) use preparation_hold::EffectPhase;
 pub(crate) use preparation_hold::PreparationHold;
 pub(crate) use preparation_hold::readiness_failure;
 #[cfg(all(test, unix))]
