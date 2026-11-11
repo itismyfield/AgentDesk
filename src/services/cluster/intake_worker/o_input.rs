@@ -164,3 +164,69 @@ async fn effects_cannot_acquire_late_before_effects_authority_pg() {
     pool.close().await;
     db.drop().await;
 }
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn scoped_reclaim_preserves_once_marker_across_process_tokens_pg() {
+    use crate::db::intake_outbox::{
+        claim_pending_for_target, consent_handoff, mark_accepted, mark_spawned,
+        owner_fence_pg_tests::snapshot,
+    };
+
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for (channel, fresh_incarnation) in [("891290", false), ("891291", true)] {
+        let fixture = consent_handoff::tests::setup(&pool, channel).await;
+        let original = &fixture.0;
+        let request = intake_request_from_row(original).unwrap();
+        let original_token = original.claim_owner.as_deref().unwrap();
+        let next_incarnation = format!("{original_token}-fresh-incarnation");
+        let token = if fresh_incarnation {
+            next_incarnation.as_str()
+        } else {
+            original_token
+        };
+        assert_eq!(token == original_token, !fresh_incarnation);
+        assert!(take_before_effects(&request).is_none());
+        assert!(
+            scope_before_effects(original, async {
+                let proof = take_before_effects(&request).unwrap();
+                assert!(take_before_effects(&request).is_none());
+                consent_handoff::return_before_record(&pool, proof)
+                    .await
+                    .unwrap()
+            })
+            .await
+        );
+        let rearmed = snapshot(&pool, original.id).await;
+        assert_eq!(rearmed["status"], "pending");
+        assert!(rearmed["claim_owner"].is_null());
+        let claimed = claim_pending_for_target(&pool, "fence-worker", "claude", token)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, original.id);
+        assert_eq!(claimed.claim_owner.as_deref(), Some(token));
+        assert!(mark_accepted(&pool, original.id, token).await.unwrap());
+        assert!(mark_spawned(&pool, original.id, token).await.unwrap());
+        let before = snapshot(&pool, original.id).await;
+        assert_eq!(before["status"], "spawned");
+        assert_eq!(before["last_error"], rearmed["last_error"]);
+        let reclaimed_request = intake_request_from_row(&claimed).unwrap();
+        assert!(take_before_effects(&reclaimed_request).is_none());
+        assert!(
+            !scope_before_effects(&claimed, async {
+                let proof = take_before_effects(&reclaimed_request).unwrap();
+                assert!(take_before_effects(&reclaimed_request).is_none());
+                consent_handoff::return_before_record(&pool, proof)
+                    .await
+                    .unwrap()
+            })
+            .await
+        );
+        assert!(take_before_effects(&reclaimed_request).is_none());
+        assert_eq!(snapshot(&pool, original.id).await, before);
+        drop(fixture);
+    }
+    pool.close().await;
+    db.drop().await;
+}
