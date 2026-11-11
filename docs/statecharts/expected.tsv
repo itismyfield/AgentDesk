@@ -224,7 +224,7 @@ tui-o-writer/WriterAdoptionHeadlessMut.cfg	WriterAdoption	HeadlessKept	-
 tui-o-writer/WriterAdoptionAdvanceOnEnd.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
 tui-o-writer/WriterAdoptionRelayedByTime.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
 tui-o-writer/WriterAdoptionSwallowOwed.cfg	WriterAdoption	NoCommitPastOwed	-
-# CodexLateDelivery (Codex late takeover start point): R3*, D1* and R4* reproduce the reviewed rules' losses; R5* pass; R5 mutants each break NoAdoptionLoss; R5Residual lists what r5 leaves to Legacy.
+# CodexLateDelivery (Codex late takeover start point): R3*, D1*, R4* and R5* reproduce the reviewed rules' losses; R6* pass; R6 mutants each break NoAdoptionLoss; R6Residual lists what r6 leaves to Legacy.
 tui-o-writer/CodexLateDeliveryR3Free.cfg	CodexLateDelivery	NoAdoptionLoss	-
 tui-o-writer/CodexLateDeliveryR3RowPending.cfg	CodexLateDelivery	NoAdoptionLoss	-
 tui-o-writer/CodexLateDeliveryR3Rotate.cfg	CodexLateDelivery	NoAdoptionLoss	-
@@ -233,18 +233,22 @@ tui-o-writer/CodexLateDeliveryD1Pending.cfg	CodexLateDelivery	NoAdoptionLoss	-
 tui-o-writer/CodexLateDeliveryD1Moved.cfg	CodexLateDelivery	NoAdoptionLoss	-
 tui-o-writer/CodexLateDeliveryR4Hist.cfg	CodexLateDelivery	NoAdoptionLoss	-
 tui-o-writer/CodexLateDeliveryR4GenMove.cfg	CodexLateDelivery	JudgedOwedKept	-
-tui-o-writer/CodexLateDeliveryR5Free.cfg	CodexLateDelivery	-	-
-tui-o-writer/CodexLateDeliveryR5RowPending.cfg	CodexLateDelivery	-	-
-tui-o-writer/CodexLateDeliveryR5Rotate.cfg	CodexLateDelivery	-	-
-tui-o-writer/CodexLateDeliveryR5Gen.cfg	CodexLateDelivery	-	-
-tui-o-writer/CodexLateDeliveryR5Pending.cfg	CodexLateDelivery	-	-
-tui-o-writer/CodexLateDeliveryR5Moved.cfg	CodexLateDelivery	-	-
-tui-o-writer/CodexLateDeliveryR5Hist.cfg	CodexLateDelivery	-	-
-tui-o-writer/CodexLateDeliveryR5GenMove.cfg	CodexLateDelivery	-	-
-tui-o-writer/CodexLateDeliveryR5All.cfg	CodexLateDelivery	-	-
-tui-o-writer/CodexLateDeliveryR5GenIgnore.cfg	CodexLateDelivery	NoAdoptionLoss	-
-tui-o-writer/CodexLateDeliveryR5PrebindFilter.cfg	CodexLateDelivery	NoAdoptionLoss	-
-tui-o-writer/CodexLateDeliveryR5Residual.cfg	CodexLateDelivery	NoLossStrict,NoDupDelivered	-
+tui-o-writer/CodexLateDeliveryR5Edit.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryR5GenFresh.cfg	CodexLateDelivery	JudgedOwedKept	-
+tui-o-writer/CodexLateDeliveryR6Free.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6RowPending.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Rotate.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Gen.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Pending.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Moved.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Hist.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6GenMove.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Edit.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6GenFresh.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6All.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6GenIgnore.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryR6PrebindFilter.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryR6Residual.cfg	CodexLateDelivery	NoLossStrict,NoDupDelivered	-
 input-single-path/InputOwnershipPersonBusy.cfg	InputOwnership	-
 input-single-path/InputOwnershipCBBefore.cfg	InputOwnership	CBCloseNotifiesOnce,CBNoStall	CBEventuallyDelivered
 input-single-path/InputOwnershipCBAfter.cfg	InputOwnership	-	-
