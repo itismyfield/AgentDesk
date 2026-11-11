@@ -291,3 +291,6 @@ tui-o-writer/WriterWakeI8055RouteDesign.cfg	WriterWake	-	-
 session-lifecycle/HerdrHintARetryFixed.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHintARetryNoController.cfg	HerdrSession	-	AProgress
 session-lifecycle/HerdrHintARetryNoBudget.cfg	HerdrSession	-	AProgress
+session-lifecycle/HerdrHintADbBefore.cfg	HerdrSession	DGuardBound	DWaitProgress
+session-lifecycle/HerdrHintADbFixed.cfg	HerdrSession	-	-
+session-lifecycle/HerdrHintADbNoTimeout.cfg	HerdrSession	DGuardBound	DWaitProgress

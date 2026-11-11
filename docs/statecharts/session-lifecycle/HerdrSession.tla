@@ -398,8 +398,12 @@ HandoffProgress == <> (handoff.queue = "delivered" \/ (handoff.queue = "refused"
 
 \* Marker-only cleanup uses the existing handoff variable, independently of the
 \* deferred exit/journal specification. Lookup kind is evidence, not a Boolean.
+DPolicies == {"a-db-before", "a-db-fixed", "a-db-no-timeout"}
+DCases == {"db_read_stall", "db_read_input", "db_read_clear", "db_read_cancel", "db_cas_stall", "db_cas_input", "db_cas_clear", "db_cas_cancel", "db_read_reply", "db_cas_reply", "db_notice_stall"}
+
 AInitial(c) ==
-    [case |-> c, phase |-> IF c \in {"outbox_only", "boot_transient", "boot_permanent"} THEN "boot" ELSE "observe",
+    [case |-> c, phase |-> IF c \in DCases THEN "db_acquire"
+                          ELSE IF c \in {"outbox_only", "boot_transient", "boot_permanent"} THEN "boot" ELSE "observe",
      lookup |-> IF c = "missing" THEN "Missing" ELSE IF c = "retired" THEN "Retired" ELSE "Legacy",
      owner |-> c # "owner_unknown", probe |-> c # "probe_error",
      canonical |-> c # "outbox_only", alias |-> c # "outbox_only",
@@ -417,6 +421,12 @@ AInitial(c) ==
      restarted |-> FALSE, contested |-> FALSE, proof |-> FALSE,
      raw |-> IF c = "outbox_only" THEN "settled" ELSE "queued",
      notified |-> FALSE, deletes |-> 0, unsafeDeletes |-> 0, wakes |-> 0,
+     clock |-> 0, sliceStart |-> 0, noticeStart |-> 0, requests |-> 0, arrived |-> FALSE,
+     pendingDb |-> FALSE, installed |-> FALSE, indeterminate |-> FALSE,
+     operation |-> IF c \in {"db_cas_stall", "db_cas_input", "db_cas_clear", "db_cas_cancel", "db_cas_reply"} THEN "cas" ELSE "read",
+     incoming |-> IF c \in {"db_read_input", "db_cas_input"} THEN "input"
+                   ELSE IF c \in {"db_read_clear", "db_cas_clear"} THEN "clear"
+                   ELSE IF c \in {"db_read_cancel", "db_cas_cancel"} THEN "cancel" ELSE "none",
      grants |-> 0, creates |-> 0, prompts |-> 0]
 AInit == \E c \in HandoffCases : handoff = AInitial(c)
 AOwned == handoff.owner /\ handoff.probe /\ handoff.snapshot
@@ -547,8 +557,76 @@ ASteps == AObserve \/ AIntent \/ ARecheck \/ AUnlinkCanonical \/ AUnlinkAlias \/
        \/ ACommit \/ AOutbox \/ AWake \/ AAdmission \/ AGrant \/ ACreate \/ APrompt
        \/ AAck \/ ARedeliver \/ ACrash \/ ABoot \/ ARecover \/ AChange
        \/ AFenceContender \/ AStale \/ ANotice \/ ARetryContinue
-AHintNext == ASteps /\ UNCHANGED sessionVars
+
+\* A deadline bounds the locally owned DB future; it is not a server rollback
+\* proof. A timed-out CAS is never replayed and may still have committed.
+DBounded == HandoffPolicy = "a-db-fixed"
+DTerminal == handoff.phase \in {"db_ready", "db_yielded", "db_done", "db_notice_debt"}
+DDue == handoff.clock >= handoff.sliceStart + 3 \/ handoff.clock >= 9
+DAcquire ==
+    /\ handoff.phase = "db_acquire" /\ (~DBounded \/ handoff.clock < 9)
+    /\ handoff' = [handoff EXCEPT !.fence = TRUE, !.controller = TRUE,
+         !.phase = "db_pending", !.pendingDb = TRUE, !.sliceStart = handoff.clock, !.requests = @ + 1]
+DStillPending == handoff.phase = "db_pending" /\ UNCHANGED handoff
+DTick ==
+    /\ handoff.clock < 10
+    /\ ~(handoff.clock = 1 /\ handoff.incoming # "none" /\ ~handoff.arrived)
+    /\ (~DBounded \/ DTerminal
+        \/ (handoff.phase = "db_pending" /\ ~DDue)
+        \/ (handoff.phase = "db_notice" /\ handoff.clock < handoff.noticeStart + 1)
+        \/ (handoff.phase \in {"db_acquire", "db_retry"} /\ handoff.clock < 9))
+    /\ handoff' = [handoff EXCEPT !.clock = @ + 1]
+DIncoming ==
+    /\ handoff.phase = "db_pending" /\ handoff.clock = 1
+    /\ handoff.incoming # "none" /\ ~handoff.arrived
+    /\ handoff' = [handoff EXCEPT !.arrived = TRUE,
+         !.front = IF handoff.incoming = "input" THEN FALSE ELSE @,
+         !.epoch = IF handoff.incoming \in {"clear", "cancel"} THEN FALSE ELSE @]
+DReply ==
+    /\ handoff.phase = "db_pending" /\ handoff.clock >= 1
+    /\ handoff.case \in {"db_read_reply", "db_cas_reply"}
+    /\ handoff' = [handoff EXCEPT !.phase = IF handoff.arrived THEN "db_yielded" ELSE "db_ready",
+         !.pendingDb = FALSE, !.fence = FALSE, !.controller = FALSE,
+         !.installed = handoff.operation = "cas"]
+DTimeout ==
+    /\ DBounded /\ handoff.phase = "db_pending" /\ DDue
+    /\ handoff' = [handoff EXCEPT !.fence = FALSE, !.pendingDb = FALSE,
+         !.failures = @ + 1,
+         !.indeterminate = handoff.operation = "cas",
+         !.controller = ~(handoff.arrived /\ handoff.operation = "read"),
+         !.noticeStart = handoff.clock,
+         !.phase = IF handoff.arrived /\ handoff.operation = "read" THEN "db_yielded"
+                   ELSE IF handoff.operation = "cas" \/ handoff.failures = 2 \/ handoff.clock >= 9
+                   THEN "db_notice" ELSE "db_retry"]
+DRetry ==
+    /\ handoff.phase = "db_retry" /\ handoff.controller /\ handoff.clock < 9
+    /\ handoff' = [handoff EXCEPT !.phase = "db_acquire"]
+DOverallExpired ==
+    /\ DBounded /\ handoff.phase \in {"db_acquire", "db_retry"} /\ handoff.clock >= 9
+    /\ handoff' = [handoff EXCEPT !.fence = FALSE, !.noticeStart = handoff.clock, !.phase = "db_notice"]
+DNotice ==
+    /\ handoff.phase = "db_notice" /\ handoff.case # "db_notice_stall"
+    /\ handoff' = [handoff EXCEPT !.controller = FALSE, !.phase = "db_done",
+         !.notified = TRUE, !.raw = "retained"]
+DNoticeTimeout ==
+    /\ DBounded /\ handoff.phase = "db_notice" /\ handoff.clock >= handoff.noticeStart + 1
+    /\ handoff' = [handoff EXCEPT !.controller = FALSE, !.phase = "db_notice_debt"]
+\* The server may commit before or after the local future is abandoned. That
+\* does not permit file publication, retirement or another nonce/create.
+DMayCommit ==
+    /\ handoff.operation = "cas" /\ handoff.requests = 1 /\ ~handoff.installed
+    /\ handoff.phase # "db_acquire"
+    /\ handoff' = [handoff EXCEPT !.installed = TRUE]
+DSteps == DAcquire \/ DStillPending \/ DTick \/ DIncoming \/ DReply \/ DTimeout
+       \/ DRetry \/ DOverallExpired \/ DNotice \/ DNoticeTimeout \/ DMayCommit
+DGuardBound == handoff.fence => handoff.clock - handoff.sliceStart <= 3
+DRequestBound == handoff.requests <= (IF handoff.operation = "cas" THEN 1 ELSE 3)
+DNoLateEffects == handoff.deletes = 0 /\ handoff.creates = 0 /\ handoff.prompts = 0
+DWaitProgress == <> (DTerminal /\ ~handoff.fence /\ ~handoff.controller)
+
+AHintNext == (IF HandoffPolicy \in DPolicies THEN DSteps ELSE ASteps) /\ UNCHANGED sessionVars
 AHintSpec == SessionInit /\ AInit /\ [][AHintNext]_vars /\ WF_vars(AHintNext)
+    /\ (IF HandoffPolicy \in DPolicies THEN WF_vars(DTick /\ UNCHANGED sessionVars) ELSE TRUE)
 ANoForeignMutation ==
     /\ handoff.unsafeDeletes = 0
     /\ ((~handoff.owner \/ ~handoff.probe) => handoff.deletes = 0)

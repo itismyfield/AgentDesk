@@ -1,39 +1,25 @@
 stateDiagram-v2
-    [*] --> Observe
-    Observe --> Intent: eligible Missing or exact Legacy
-    Observe --> Notice: ineligible
-    Intent --> Recheck: durable intent
-    Recheck --> UnlinkCanonical: fresh fence and authority
-    UnlinkCanonical --> UnlinkLegacy
-    UnlinkLegacy --> ReceiptCommit
-    ReceiptCommit --> OutboxCommit
-    OutboxCommit --> Wake
-    Wake --> Admission
-    Admission --> Wait: before plus Legacy
-    Wait --> Wait
-    Admission --> Grant: typed fresh Legacy proof
-    Admission --> Ack: already settled outbox
-    Grant --> Create
-    Create --> Prompt
-    Prompt --> Ack
-    Intent --> Continuation: transient I/O error
-    UnlinkLegacy --> Continuation: partial unlink
-    ReceiptCommit --> Continuation: commit I/O error
-    Boot --> Recover: discovered intent, controller acquired
-    Recover --> Continuation: boot reobserve error
-    Continuation --> Observe: live controller, no intent yet
-    Continuation --> Recover: live controller, failures below 3
-    Continuation --> Stuck: controller dropped mutant
-    Stuck --> Stuck
-    Recover --> UnlinkCanonical: fresh recheck, same paths
-    Continuation --> Notice: budget exhausted
-    Notice --> Ack: preserve custody, explicit notice
-    Ack --> [*]
-    note right of Continuation
-      The same awaited callback continues.
-      No new timer, wake or input is assumed.
-    end note
-    note right of Prompt
-      Post-effect crash and replay are outside
-      this retry liveness proof.
-    end note
+    [*] --> ActiveFrame: stamp only crosses the work queue
+    ActiveFrame --> Acquire: deadline and owner still current
+    ActiveFrame --> Held: expired before execution
+    Acquire --> DbPending: physical try-lock, no Source mutex
+    DbPending --> DbPending: request never replies
+    DbPending --> DbPending: input / clear / cancel arrives
+    DbPending --> Hung: before or timeout removed
+    Hung --> Hung
+    DbPending --> Recheck: reply before shared deadline
+    DbPending --> Released: 3s slice or 9s pass elapsed
+    Recheck --> Publish: same owner/nonce/epoch, CAS Written
+    Recheck --> Released: stale or cancelled
+    Publish --> [*]: same-frame file transaction, drop guard
+    Released --> Retry: read only, failures below 3 and time remains
+    Retry --> Acquire: fresh observation, no renewed pass deadline
+    Released --> Indeterminate: CAS, one request, nonce preserved
+    Indeterminate --> Indeterminate: server may commit late
+    Released --> Yield: input/front/epoch changed
+    Released --> Notice: 9s exhausted
+    Indeterminate --> Notice
+    Notice --> [*]: outbox within 1s
+    Notice --> NoticeDebt: unavailable, not notified success
+    Yield --> [*]: original and intent remain owned
+    NoticeDebt --> [*]
