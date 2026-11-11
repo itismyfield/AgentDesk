@@ -50,10 +50,11 @@ pub(super) fn account_key(provider: &str, profile_id: &str) -> String {
 pub(super) fn refresh_profiles(
     bindings: &std::collections::BTreeMap<String, crate::db::agents::AgentChannelBindings>,
 ) {
-    let profiles = crate::services::discord::org_schema::list_profile_bindings();
-    let primary = crate::services::discord::org_schema::provider_auth_primary_profiles();
-    let catalog = crate::services::discord::org_schema::provider_auth_catalog();
-    let policies = crate::services::discord::org_schema::provider_auth_fallback_policies();
+    let profiles = crate::services::provider_auth_profile::queries::list_profile_bindings();
+    let primary = crate::services::provider_auth_profile::queries::provider_auth_primary_profiles();
+    let catalog = crate::services::provider_auth_profile::queries::provider_auth_catalog();
+    let policies =
+        crate::services::provider_auth_profile::queries::provider_auth_fallback_policies();
     let mut alternatives = HashMap::new();
     let mut snapshot = HashMap::new();
     for (agent_id, binding) in bindings {
@@ -174,6 +175,49 @@ mod selection_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_uses_configured_primary_instead_of_the_available_catalog() {
+        let runtime = crate::config::TestRuntimeRootGuard::new();
+        let gate_guard = super::super::tests::global_gate_test_guard();
+        let home = tempfile::tempdir().unwrap();
+        let home_path = std::fs::canonicalize(home.path()).unwrap();
+        let home_guard =
+            crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("HOME", &home_path);
+        let profile_home = home_path.join(".adk/profiles/codex/work");
+        std::fs::create_dir_all(&profile_home).unwrap();
+        let org = crate::runtime_layout::org_schema_path(&crate::config::runtime_root().unwrap());
+        std::fs::create_dir_all(org.parent().unwrap()).unwrap();
+        let schema = serde_json::json!({
+            "version": 1,
+            "agents": {},
+            "provider_auth_profiles": {"work": {"provider": "codex", "home": profile_home}},
+            "provider_auth_primary_profiles": {"codex": "default"},
+        });
+        std::fs::write(org, serde_yaml::to_string(&schema).unwrap()).unwrap();
+        let bindings = std::collections::BTreeMap::from([(
+            "primary-projection-agent".into(),
+            crate::db::agents::AgentChannelBindings {
+                provider: Some("codex".into()),
+                discord_channel_cdx: Some("61018516".into()),
+                ..Default::default()
+            },
+        )]);
+        refresh_profiles(&bindings);
+        assert_eq!(
+            agent_account_key("primary-projection-agent", "codex"),
+            "codex"
+        );
+        assert_eq!(
+            agent_fallback_keys("primary-projection-agent"),
+            ["codex:work"]
+        );
+        clear_profiles();
+        drop(home_guard);
+        drop(gate_guard);
+        drop(runtime);
+    }
+
     #[test]
     fn exhausted_primary_can_dispatch_to_backup_but_missing_or_exhausted_candidates_do_not_bypass_gate()
      {
