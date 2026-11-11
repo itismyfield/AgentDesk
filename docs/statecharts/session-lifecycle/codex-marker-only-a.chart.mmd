@@ -1,39 +1,38 @@
+---
+title: "Codex marker-only A-admission r6: 반환되는 DB I/O"
+---
 stateDiagram-v2
-    [*] --> Observe
-    Observe --> Intent: eligible Missing or exact Legacy
-    Observe --> Notice: ineligible
-    Intent --> Recheck: durable intent
-    Recheck --> UnlinkCanonical: fresh fence and authority
-    UnlinkCanonical --> UnlinkLegacy
-    UnlinkLegacy --> ReceiptCommit
-    ReceiptCommit --> OutboxCommit
-    OutboxCommit --> Wake
-    Wake --> Admission
-    Admission --> Wait: before plus Legacy
-    Wait --> Wait
-    Admission --> Grant: typed fresh Legacy proof
-    Admission --> Ack: already settled outbox
-    Grant --> Create
-    Create --> Prompt
-    Prompt --> Ack
-    Intent --> Continuation: transient I/O error
-    UnlinkLegacy --> Continuation: partial unlink
-    ReceiptCommit --> Continuation: commit I/O error
-    Boot --> Recover: discovered intent, controller acquired
-    Recover --> Continuation: boot reobserve error
-    Continuation --> Observe: live controller, no intent yet
-    Continuation --> Recover: live controller, failures below 3
-    Continuation --> Stuck: controller dropped mutant
-    Stuck --> Stuck
-    Recover --> UnlinkCanonical: fresh recheck, same paths
-    Continuation --> Notice: budget exhausted
-    Notice --> Ack: preserve custody, explicit notice
-    Ack --> [*]
-    note right of Continuation
-      The same awaited callback continues.
-      No new timer, wake or input is assumed.
-    end note
-    note right of Prompt
-      Post-effect crash and replay are outside
-      this retry liveness proof.
-    end note
+  s0: 부재#183;소유권 관찰
+  s1: 정리 intent 저장
+  s2: fence 아래 재검증
+  s3: canonical 표식 정리
+  s4: legacy 표식 정리
+  s5: 원문 보존#183;통지 정산
+  s6: 정리 receipt 저장
+  s7: 원문 보존#183;명시 통지
+  s8: wake debt 저장
+  s9: owner 깨우기
+  s10: typed 부재 증거 소비
+  s11: 같은 front grant
+  s12: Pending#183;새 실행
+  s13: 원래 입력 전달
+  s14: 결과 확인#183;debt 정산
+  s15: 원래 입력 전달 완료
+  [*] --> s0
+  s0 --> s1: 부재 증거 확인
+  s1 --> s2: intent durable
+  s2 --> s3: 현재 owner#183;행#183;파일 일치
+  s3 --> s4: 같은 canonical만 unlink
+  s2 --> s5: stale 또는 부재 증거 거절
+  s4 --> s6: 같은 legacy만 unlink
+  s5 --> s7: 원문 보존#183;명시 통지
+  s6 --> s8: 정리 receipt durable
+  s8 --> s9: 안정 event id 저장
+  s9 --> s10: 기존 owner drive
+  s10 --> s11: 좁은 Legacy/Missing 증거 소비
+  s9 --> s5: stale 또는 부재 증거 거절
+  s11 --> s12: 현재 front claim
+  s10 --> s5: stale 또는 부재 증거 거절
+  s12 --> s13: 기존 Pending CAS
+  s13 --> s14: 원래 입력 전달 또는 기존 정산 확인
+  s14 --> s15: debt ack

@@ -147,7 +147,10 @@ session-lifecycle/HerdrHandoffPersonBefore.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHandoffQueueBefore.cfg	HerdrSession	-	HandoffProgress
 session-lifecycle/HerdrHandoffTargetBefore.cfg	HerdrSession	NoBusyExit,NoLiteralIntoDraft,NoUnexpectedEnter,NoWrongExecutionExit	HandoffProgress
 session-lifecycle/HerdrHintAFixed.cfg	HerdrSession	-	-
+session-lifecycle/HerdrHintAIdentityFixed.cfg	HerdrSession	-	-
+session-lifecycle/HerdrHintAIdentityUnchecked.cfg	HerdrSession	ANoForeignExecution,ANoForeignMutation	-
 session-lifecycle/HerdrHintALegacyBefore.cfg	HerdrSession	-	AProgress
+session-lifecycle/HerdrHintALegacyProgress.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHintAMissingBefore.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHintANoFrontCheck.cfg	HerdrSession	ANoStaleGrant	-
 session-lifecycle/HerdrHintANoOutboxDiscovery.cfg	HerdrSession	-	AProgress

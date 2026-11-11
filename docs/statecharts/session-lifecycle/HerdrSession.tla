@@ -398,12 +398,23 @@ HandoffProgress == <> (handoff.queue = "delivered" \/ (handoff.queue = "refused"
 
 \* Marker-only cleanup uses the existing handoff variable, independently of the
 \* deferred exit/journal specification. Lookup kind is evidence, not a Boolean.
+\* A-admission r6 code baseline: e9549f721d7a9910a52a19a5b9101c48fda27386.
+\* All modeled DB calls return; a DB that never responds is outside this model.
+\* Rollout identity matches runtime_hint_fence.rs:82-115,214-219: storage inode
+\* and cursor are publication details, while declared and observed source ids remain.
+ARolloutIdentity ==
+    [path |-> "old", session |-> "old", nonce |-> "old", proof |-> 1,
+     declaredDev |-> 1, declaredIno |-> 1, sourceDev |-> 1, sourceIno |-> 1]
+ARolloutCases == {"rollout_cursor", "rollout_storage", "rollout_nonce", "rollout_proof",
+    "rollout_path", "rollout_session", "rollout_declared_dev", "rollout_declared_ino",
+    "rollout_source_dev", "rollout_source_ino"}
 AInitial(c) ==
     [case |-> c, phase |-> IF c \in {"outbox_only", "boot_transient", "boot_permanent"} THEN "boot" ELSE "observe",
      lookup |-> IF c = "missing" THEN "Missing" ELSE IF c = "retired" THEN "Retired" ELSE "Legacy",
      owner |-> c # "owner_unknown", probe |-> c # "probe_error",
      canonical |-> c # "outbox_only", alias |-> c # "outbox_only",
-     snapshot |-> TRUE, front |-> TRUE, epoch |-> TRUE, fence |-> FALSE,
+     snapshot |-> TRUE, rollout |-> ARolloutIdentity, rolloutSnapshot |-> ARolloutIdentity,
+     storageInode |-> 1, cursor |-> 0, front |-> TRUE, epoch |-> TRUE, fence |-> FALSE,
      intent |-> c \in {"boot_transient", "boot_permanent"}, committed |-> c = "outbox_only",
      outbox |-> c = "outbox_only", acknowledged |-> FALSE,
      up |-> c \notin {"outbox_only", "boot_transient", "boot_permanent"}, disturbed |-> FALSE, faulted |-> FALSE,
@@ -413,13 +424,18 @@ AInitial(c) ==
                ELSE IF c = "intent_transient" THEN "intent"
                ELSE IF c \in {"boot_transient", "boot_permanent"} THEN "recover" ELSE "none",
      failLeft |-> IF c \in {"unlink_permanent", "commit_permanent", "boot_permanent"} THEN 3
-                 ELSE IF c \in {"partial", "commit_transient", "intent_transient", "boot_transient"} THEN 1 ELSE 0,
+                 ELSE IF c \in {"partial", "commit_transient", "intent_transient", "boot_transient"}
+                 THEN IF HandoffPolicy = "a-progress-two" THEN 2 ELSE 1 ELSE 0,
      restarted |-> FALSE, contested |-> FALSE, proof |-> FALSE,
      raw |-> IF c = "outbox_only" THEN "settled" ELSE "queued",
      notified |-> FALSE, deletes |-> 0, unsafeDeletes |-> 0, wakes |-> 0,
      grants |-> 0, creates |-> 0, prompts |-> 0]
 AInit == \E c \in HandoffCases : handoff = AInitial(c)
-AOwned == handoff.owner /\ handoff.probe /\ handoff.snapshot
+ARolloutCurrent == HandoffPolicy = "a-no-rollout-identity"
+    \/ handoff.rollout = handoff.rolloutSnapshot
+AExactOwned == handoff.owner /\ handoff.probe /\ handoff.snapshot
+    /\ handoff.rollout = handoff.rolloutSnapshot
+AOwned == handoff.owner /\ handoff.probe /\ handoff.snapshot /\ ARolloutCurrent
 AFront == handoff.front /\ handoff.epoch
 AValid == AOwned /\ AFront /\ handoff.lookup \in {"Missing", "Legacy"}
 AHoldsInput == handoff.raw = "queued" \/ handoff.intent \/ handoff.outbox
@@ -443,12 +459,12 @@ AUnlinkCanonical ==
     /\ handoff.up /\ handoff.phase = "unlink_canonical" /\ handoff.fence /\ AValid
     /\ handoff' = [handoff EXCEPT !.canonical = FALSE,
          !.deletes = @ + (IF handoff.canonical THEN 1 ELSE 0),
-         !.unsafeDeletes = @ + (IF AValid /\ handoff.fence THEN 0 ELSE 1), !.phase = "unlink_alias"]
+         !.unsafeDeletes = @ + (IF AExactOwned /\ AFront /\ handoff.fence THEN 0 ELSE 1), !.phase = "unlink_alias"]
 AUnlinkAlias ==
     /\ handoff.up /\ handoff.phase = "unlink_alias" /\ handoff.fence /\ AValid /\ AIoReady
     /\ handoff' = [handoff EXCEPT !.alias = FALSE,
          !.deletes = @ + (IF handoff.alias THEN 1 ELSE 0),
-         !.unsafeDeletes = @ + (IF AValid /\ handoff.fence THEN 0 ELSE 1), !.phase = "commit"]
+         !.unsafeDeletes = @ + (IF AExactOwned /\ AFront /\ handoff.fence THEN 0 ELSE 1), !.phase = "commit"]
 \* A failing step retains its existing callback future. Losing that controller
 \* is the mutant; no future wake or fresh input is assumed for a continuation.
 APartialUnlink ==
@@ -543,10 +559,26 @@ ANotice ==
     /\ handoff.up /\ handoff.phase = "notice"
     /\ handoff' = [handoff EXCEPT !.raw = "retained", !.notified = TRUE,
          !.outbox = FALSE, !.intent = FALSE, !.acknowledged = TRUE, !.controller = FALSE, !.phase = "done"]
+\* A publisher may replace the serialized rollout marker or advance its cursor
+\* without changing execution. Every typed identity change revokes the old proof.
+ARolloutChange ==
+    /\ handoff.up /\ handoff.case \in ARolloutCases /\ ~handoff.disturbed
+    /\ handoff.phase \in {"recheck", "wake", "admit"}
+    /\ handoff' = [handoff EXCEPT !.disturbed = TRUE,
+         !.storageInode = IF handoff.case = "rollout_storage" THEN 2 ELSE @,
+         !.cursor = IF handoff.case = "rollout_cursor" THEN 1 ELSE @,
+         !.rollout.nonce = IF handoff.case = "rollout_nonce" THEN "other" ELSE @,
+         !.rollout.proof = IF handoff.case = "rollout_proof" THEN 2 ELSE @,
+         !.rollout.path = IF handoff.case = "rollout_path" THEN "other" ELSE @,
+         !.rollout.session = IF handoff.case = "rollout_session" THEN "other" ELSE @,
+         !.rollout.declaredDev = IF handoff.case = "rollout_declared_dev" THEN 2 ELSE @,
+         !.rollout.declaredIno = IF handoff.case = "rollout_declared_ino" THEN 2 ELSE @,
+         !.rollout.sourceDev = IF handoff.case = "rollout_source_dev" THEN 2 ELSE @,
+         !.rollout.sourceIno = IF handoff.case = "rollout_source_ino" THEN 2 ELSE @]
 ASteps == AObserve \/ AIntent \/ ARecheck \/ AUnlinkCanonical \/ AUnlinkAlias \/ APartialUnlink
        \/ ACommit \/ AOutbox \/ AWake \/ AAdmission \/ AGrant \/ ACreate \/ APrompt
        \/ AAck \/ ARedeliver \/ ACrash \/ ABoot \/ ARecover \/ AChange
-       \/ AFenceContender \/ AStale \/ ANotice \/ ARetryContinue
+       \/ AFenceContender \/ AStale \/ ANotice \/ ARetryContinue \/ ARolloutChange
 AHintNext == ASteps /\ UNCHANGED sessionVars
 AHintSpec == SessionInit /\ AInit /\ [][AHintNext]_vars /\ WF_vars(AHintNext)
 ANoForeignMutation ==
@@ -561,7 +593,13 @@ ANoSilentLoss ==
     /\ (handoff.raw = "retained" => handoff.notified)
     /\ (handoff.phase = "done" => handoff.raw # "queued")
 ANoEarlyUnlink == handoff.deletes > 0 => handoff.intent \/ handoff.acknowledged
+ANoForeignExecution == handoff.grants > 0 => handoff.rollout = handoff.rolloutSnapshot
 ARetryBounded == handoff.failures <= 3
+\* A finite transient within the three-failure budget eventually delivers the
+\* original Legacy input; explicit refusal is not a successful delivery witness.
+AEligibleCases == {"missing", "legacy", "partial", "intent_transient", "commit_transient",
+    "boot_transient", "crash", "redelivery", "fence", "rollout_cursor", "rollout_storage"}
+ALegacyProgress == handoff.case \in AEligibleCases => <> (handoff.raw = "delivered")
 AProgress == <> (handoff.phase = "done")
 
 ====
