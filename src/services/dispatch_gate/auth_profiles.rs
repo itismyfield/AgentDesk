@@ -176,6 +176,7 @@ mod selection_tests;
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn refresh_uses_configured_primary_instead_of_the_available_catalog() {
         let runtime = crate::config::TestRuntimeRootGuard::new();
