@@ -18,6 +18,20 @@ use crate::services::discord::{Data, mailbox_snapshot, router};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
+#[derive(Clone, Default)]
+struct Trace(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Trace {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Branch {
     ThreadGuard,
@@ -46,6 +60,7 @@ impl Branch {
 #[derive(Clone)]
 struct HttpState {
     calls: Arc<Mutex<Vec<(Method, String)>>>,
+    notices: Arc<Mutex<Vec<String>>>,
 }
 
 async fn discord_http(State(state): State<HttpState>, request: Request<Body>) -> Response {
@@ -80,6 +95,11 @@ async fn discord_http(State(state): State<HttpState>, request: Request<Body>) ->
             .await
             .unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
+        state
+            .notices
+            .lock()
+            .unwrap()
+            .push(body["content"].as_str().unwrap_or_default().to_string());
         if matches!(body["content"].as_str(), Some("..." | "⠋ 계속 처리 중")) {
             return (
                 StatusCode::FORBIDDEN,
@@ -106,6 +126,7 @@ async fn discord_http(State(state): State<HttpState>, request: Request<Body>) ->
 struct Transport {
     ctx: serenity::Context,
     calls: Arc<Mutex<Vec<(Method, String)>>>,
+    notices: Arc<Mutex<Vec<String>>>,
     http: tokio::task::JoinHandle<()>,
     gateway: tokio::task::JoinHandle<()>,
 }
@@ -122,10 +143,12 @@ impl Transport {
         let (_, gateway_url, gateway) =
             discord_mock::start(discord_mock::DiscordMockState::new()).await;
         let calls = Arc::new(Mutex::new(Vec::new()));
+        let notices = Arc::new(Mutex::new(Vec::new()));
         let app = axum::Router::new()
             .fallback(discord_http)
             .with_state(HttpState {
                 calls: calls.clone(),
+                notices: notices.clone(),
             });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy = format!("http://{}", listener.local_addr().unwrap());
@@ -134,6 +157,7 @@ impl Transport {
         Self {
             ctx,
             calls,
+            notices,
             http,
             gateway,
         }
@@ -149,9 +173,12 @@ struct Outcome {
     checkpoint: Option<u64>,
     http: Vec<(Method, String)>,
     message: serenity::MessageId,
+    notices: Vec<String>,
+    followup_checkpoint: Option<u64>,
+    logs: String,
 }
 
-async fn invoke(branch: Branch, root: &Path) -> Outcome {
+async fn invoke(branch: Branch, root: &Path, fail_save: bool, trace: &Trace) -> Outcome {
     let channel = serenity::ChannelId::new(branch.channel());
     let thread = serenity::ChannelId::new(branch.channel() + 1);
     let message_id = serenity::MessageId::new(branch.channel() + 4);
@@ -310,8 +337,13 @@ async fn invoke(branch: Branch, root: &Path) -> Outcome {
     let event = serenity::FullEvent::Message {
         new_message: message,
     };
+    if fail_save {
+        crate::services::turn_orchestrator::test_support::fail_queue_saves(channel, 1);
+    }
+    let task_data = data.clone();
+    let task_ctx = ctx.clone();
     let mut called = tokio::spawn(async move {
-        let result = router::handle_event(&ctx, &event, &data).await;
+        let result = router::handle_event(&task_ctx, &event, &task_data).await;
         (result, event)
     });
     let completed = tokio::time::timeout(Duration::from_secs(10), &mut called).await;
@@ -325,7 +357,7 @@ async fn invoke(branch: Branch, root: &Path) -> Outcome {
     let serenity::FullEvent::Message { new_message } = event else {
         unreachable!()
     };
-    let after = serde_json::to_value(new_message).unwrap();
+    let after = serde_json::to_value(&new_message).unwrap();
     let snapshot = mailbox_snapshot(&shared, channel).await;
     let queued = snapshot.intervention_queue;
     let (durable, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
@@ -335,6 +367,42 @@ async fn invoke(branch: Branch, root: &Path) -> Outcome {
     );
     let checkpoint = shared.last_message_ids.get(&channel).map(|entry| *entry);
     let http = transport.calls.lock().unwrap().clone();
+    let logs = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+    let mut followup_checkpoint = None;
+    if fail_save {
+        assert_eq!(
+            crate::services::turn_orchestrator::test_support::queue_save_faults(channel, false),
+            0,
+            "{branch:?}: the real queue save consumed the injected failure"
+        );
+        let mut later = new_message.clone();
+        later.id = serenity::MessageId::new(message_id.get() + 1);
+        if matches!(branch, Branch::ThreadGuard | Branch::DispatchGuard) {
+            later.content = format!("DISPATCH: later-{} - follow-up input", later.id);
+        } else {
+            later.content.push_str(" later");
+        }
+        let later_event = serenity::FullEvent::Message { new_message: later };
+        for _ in 0..2 {
+            router::handle_event(&ctx, &later_event, &data)
+                .await
+                .expect("later input and its duplicate succeed");
+        }
+        followup_checkpoint = shared.last_message_ids.get(&channel).map(|entry| *entry);
+        let (saved, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+            &ProviderKind::Claude,
+            &shared.token_hash,
+            channel,
+        );
+        assert!(
+            saved
+                .iter()
+                .all(|row| !row.source_message_ids.contains(&message_id)
+                    && row.message_id != message_id),
+            "failed input is absent even after a later input is saved"
+        );
+    }
+    let notices = transport.notices.lock().unwrap().clone();
     shared.mailboxes.remove_fixture_for_test(channel);
     shared.mailboxes.remove_fixture_for_test(thread);
     transport.http.abort();
@@ -350,10 +418,13 @@ async fn invoke(branch: Branch, root: &Path) -> Outcome {
         checkpoint,
         http,
         message: message_id,
+        notices,
+        followup_checkpoint,
+        logs,
     }
 }
 
-fn run(test: &str, branches: &[Branch]) {
+fn run(test: &str, branches: &[Branch], fail_save: bool) {
     let qualified = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
     if !crate::services::discord::admin_host_guard::tests::api_child(&qualified) {
         return;
@@ -383,7 +454,7 @@ fn run(test: &str, branches: &[Branch]) {
         "AGENTDESK_CLAUDE_PATH",
         &bin.join("claude"),
     );
-    let config_path = crate::runtime_layout::config_file_path(&root);
+    let config_path = root.join("fixture-config.json");
     assert_eq!(crate::config::runtime_root().unwrap(), root);
     assert!(config_path.starts_with(&root));
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -411,6 +482,14 @@ fn run(test: &str, branches: &[Branch]) {
     );
     assert_eq!(std::fs::canonicalize(&config_path).unwrap(), config_path);
     assert_eq!(crate::config::resolved_config_path(), config_path);
+    let trace = Trace::default();
+    let writer = trace.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish();
+    let _tracing = tracing::subscriber::set_default(subscriber);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -418,7 +497,10 @@ fn run(test: &str, branches: &[Branch]) {
     let outcomes = runtime.block_on(async {
         let mut outcomes = Vec::new();
         for &branch in branches {
-            outcomes.push((branch, Box::pin(invoke(branch, &root)).await));
+            outcomes.push((
+                branch,
+                Box::pin(invoke(branch, &root, fail_save, &trace)).await,
+            ));
         }
         outcomes
     });
@@ -428,6 +510,53 @@ fn run(test: &str, branches: &[Branch]) {
             outcome.original, outcome.after,
             "{branch:?}: the whole gateway Message stays original"
         );
+        if fail_save {
+            assert_eq!(
+                outcome
+                    .notices
+                    .iter()
+                    .filter(|text| text.contains("메시지 큐 저장 중 오류"))
+                    .count(),
+                1,
+                "{branch:?}: exactly one save-failure notice, including later duplicate replay"
+            );
+            assert!(
+                !outcome
+                    .logs
+                    .lines()
+                    .any(|line| (line.contains("THREAD-GUARD:")
+                        || line.contains("DISPATCH-GUARD:"))
+                        && line.contains("queued")),
+                "{branch:?}: failed save must not log queued: {}",
+                outcome.logs
+            );
+            assert_eq!(
+                outcome.held,
+                !matches!(branch, Branch::BusyActiveTurn),
+                "guards return failure while the existing busy-turn return contract stays intact"
+            );
+            assert!(
+                outcome.queued.is_empty() && outcome.durable.is_empty(),
+                "failed save retains no queue row"
+            );
+            assert_eq!(
+                outcome.checkpoint, None,
+                "failed input does not advance checkpoint"
+            );
+            assert_eq!(
+                outcome.followup_checkpoint,
+                Some(outcome.message.get() + 1),
+                "the failure notice remains observable after a later input advances checkpoint"
+            );
+            assert!(
+                !outcome
+                    .http
+                    .iter()
+                    .any(|(method, path)| *method == Method::PUT && path.contains("/reactions/")),
+                "failed input has no pending reaction"
+            );
+            continue;
+        }
         assert!(
             !outcome.held,
             "{branch:?}: actual intake executes the existing queue branch"
@@ -459,5 +588,42 @@ fn actual_live_entry_keeps_all_six_queue_branches() {
     run(
         "actual_live_entry_keeps_all_six_queue_branches",
         &Branch::ALL,
+        false,
+    );
+}
+
+#[test]
+fn thread_guard_reports_queue_save_failure() {
+    run(
+        "thread_guard_reports_queue_save_failure",
+        &[Branch::ThreadGuard],
+        true,
+    );
+}
+
+#[test]
+fn dispatch_guard_reports_queue_save_failure() {
+    run(
+        "dispatch_guard_reports_queue_save_failure",
+        &[Branch::DispatchGuard],
+        true,
+    );
+}
+
+#[test]
+fn reconcile_gate_reports_queue_save_failure() {
+    run(
+        "reconcile_gate_reports_queue_save_failure",
+        &[Branch::ReconcileGate],
+        true,
+    );
+}
+
+#[test]
+fn busy_active_turn_reports_queue_save_failure() {
+    run(
+        "busy_active_turn_reports_queue_save_failure",
+        &[Branch::BusyActiveTurn],
+        true,
     );
 }
