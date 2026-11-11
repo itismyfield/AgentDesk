@@ -3354,6 +3354,8 @@ src/
 │   │   │   └── selection_tests.rs
 │   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
+│   │   ├── force_kill/
+│   │   │   └── retry_wake_tests.rs
 │   │   ├── herdr_kill/
 │   │   │   └── effects.rs
 │   │   ├── canonical_identity.rs
