@@ -395,4 +395,153 @@ NoSilentLoss ==
     /\ (handoff.step = "done" => handoff.queue = "delivered" \/ (handoff.queue = "refused" /\ handoff.notified))
 HandoffProgress == <> (handoff.queue = "delivered" \/ (handoff.queue = "refused" /\ handoff.notified))
 
+
+\* Marker-only cleanup uses the existing handoff variable, independently of the
+\* deferred exit/journal specification. Lookup kind is evidence, not a Boolean.
+AInitial(c) ==
+    [case |-> c, phase |-> IF c = "outbox_only" THEN "boot" ELSE "observe",
+     lookup |-> IF c = "missing" THEN "Missing" ELSE IF c = "retired" THEN "Retired" ELSE "Legacy",
+     owner |-> c # "owner_unknown", probe |-> c # "probe_error",
+     canonical |-> c # "outbox_only", alias |-> c # "outbox_only",
+     snapshot |-> TRUE, front |-> TRUE, epoch |-> TRUE, fence |-> FALSE,
+     intent |-> FALSE, committed |-> c = "outbox_only",
+     outbox |-> c = "outbox_only", acknowledged |-> FALSE,
+     up |-> c # "outbox_only", disturbed |-> FALSE, faulted |-> FALSE,
+     restarted |-> FALSE, contested |-> FALSE, proof |-> FALSE,
+     raw |-> IF c = "outbox_only" THEN "settled" ELSE "queued",
+     notified |-> FALSE, deletes |-> 0, unsafeDeletes |-> 0, wakes |-> 0,
+     grants |-> 0, creates |-> 0, prompts |-> 0]
+AInit == \E c \in HandoffCases : handoff = AInitial(c)
+AOwned == handoff.owner /\ handoff.probe /\ handoff.snapshot
+AFront == handoff.front /\ handoff.epoch
+AValid == AOwned /\ AFront /\ handoff.lookup \in {"Missing", "Legacy"}
+AHoldsInput == handoff.raw = "queued" \/ handoff.intent \/ handoff.outbox
+
+AObserve ==
+    /\ handoff.up /\ handoff.phase = "observe"
+    /\ handoff' = [handoff EXCEPT
+         !.phase = IF AValid THEN "intent" ELSE "notice",
+         !.fence = AValid]
+\* The queue intent is committed before the first unlink. Unlink is idempotent
+\* only for this intent's recorded paths and exact unchanged witnesses.
+AIntent ==
+    /\ handoff.phase = "intent" /\ handoff.up /\ handoff.fence
+    /\ handoff' = [handoff EXCEPT !.intent = TRUE, !.fence = FALSE, !.phase = "recheck"]
+ARecheck ==
+    /\ handoff.up /\ handoff.phase = "recheck" /\ handoff.intent
+    /\ handoff' = [handoff EXCEPT !.fence = AValid,
+         !.phase = IF AValid THEN "unlink_canonical" ELSE "notice"]
+AUnlinkCanonical ==
+    /\ handoff.up /\ handoff.phase = "unlink_canonical" /\ handoff.fence /\ AValid
+    /\ handoff' = [handoff EXCEPT !.canonical = FALSE,
+         !.deletes = @ + (IF handoff.canonical THEN 1 ELSE 0),
+         !.unsafeDeletes = @ + (IF AValid /\ handoff.fence THEN 0 ELSE 1), !.phase = "unlink_alias"]
+AUnlinkAlias ==
+    /\ handoff.up /\ handoff.phase = "unlink_alias" /\ handoff.fence /\ AValid
+    /\ handoff' = [handoff EXCEPT !.alias = FALSE,
+         !.deletes = @ + (IF handoff.alias THEN 1 ELSE 0),
+         !.unsafeDeletes = @ + (IF AValid /\ handoff.fence THEN 0 ELSE 1), !.phase = "commit"]
+APartialUnlink ==
+    /\ handoff.up /\ handoff.case = "partial" /\ ~handoff.faulted
+    /\ handoff.phase = "unlink_alias"
+    /\ handoff' = [handoff EXCEPT !.faulted = TRUE, !.fence = FALSE, !.phase = "recover"]
+ACommit ==
+    /\ handoff.up /\ handoff.phase = "commit" /\ AValid
+    /\ ~handoff.canonical /\ ~handoff.alias
+    /\ handoff' = [handoff EXCEPT !.committed = TRUE, !.fence = FALSE, !.phase = "outbox"]
+\* Receipt commit and outbox creation are separate recoverable steps. The receipt
+\* itself keeps boot discovery live until the outbox is durably acknowledged.
+AOutbox ==
+    /\ handoff.up /\ handoff.phase = "outbox" /\ handoff.committed
+    /\ handoff' = [handoff EXCEPT !.outbox = TRUE, !.phase = "wake"]
+AWake ==
+    /\ handoff.up /\ handoff.outbox /\ handoff.phase = "wake"
+    /\ handoff' = [handoff EXCEPT !.wakes = @ + 1, !.phase = "admit"]
+\* Read-only admission re-probes absence and compares the exact Legacy row,
+\* owner, paths, front and epoch; clearing a hint alone never grants authority.
+AAdmission ==
+    /\ handoff.up /\ handoff.phase = "admit"
+    /\ handoff' = IF handoff.raw = "settled"
+       THEN [handoff EXCEPT !.phase = "ack"]
+       ELSE IF ~AValid
+       THEN [handoff EXCEPT !.phase = "notice"]
+       ELSE IF HandoffPolicy = "a-before" /\ handoff.lookup = "Legacy"
+       THEN [handoff EXCEPT !.phase = "wait"]
+       ELSE [handoff EXCEPT !.proof = TRUE, !.fence = TRUE, !.phase = "grant"]
+AGrant ==
+    /\ handoff.up /\ handoff.phase = "grant" /\ handoff.proof /\ handoff.fence
+    /\ (IF HandoffPolicy = "a-no-front-check" THEN AOwned ELSE AValid)
+    /\ ~handoff.canonical /\ ~handoff.alias /\ handoff.committed
+    /\ handoff' = [handoff EXCEPT !.grants = @ + 1, !.phase = "create"]
+ACreate ==
+    /\ handoff.up /\ handoff.phase = "create"
+    /\ handoff' = [handoff EXCEPT !.creates = @ + 1, !.fence = FALSE, !.phase = "prompt"]
+APrompt ==
+    /\ handoff.up /\ handoff.phase = "prompt"
+    /\ handoff' = [handoff EXCEPT !.prompts = @ + 1, !.raw = "delivered", !.phase = "ack"]
+AAck ==
+    /\ handoff.up /\ handoff.phase = "ack"
+    /\ handoff' = [handoff EXCEPT !.acknowledged = TRUE, !.outbox = FALSE,
+         !.intent = FALSE, !.phase = "done"]
+ARedeliver ==
+    /\ handoff.up /\ handoff.case = "redelivery" /\ handoff.wakes = 1
+    /\ handoff.phase \in {"admit", "grant", "create", "prompt", "ack", "done"}
+    /\ handoff' = [handoff EXCEPT !.wakes = 2]
+ACrash ==
+    /\ handoff.up /\ handoff.case = "crash" /\ ~handoff.restarted
+    /\ handoff.phase \in {"commit", "outbox", "wake", "admit"}
+    /\ handoff' = [handoff EXCEPT !.up = FALSE, !.restarted = TRUE,
+         !.fence = FALSE, !.proof = FALSE, !.phase = "boot"]
+ABoot ==
+    /\ ~handoff.up /\ handoff.phase = "boot"
+    /\ (IF HandoffPolicy = "a-no-outbox-discovery" THEN handoff.raw = "queued" ELSE AHoldsInput)
+    /\ handoff' = [handoff EXCEPT !.up = TRUE,
+         !.phase = IF handoff.committed THEN "outbox" ELSE "recover"]
+ARecover ==
+    /\ handoff.up /\ handoff.phase = "recover" /\ handoff.intent
+    /\ handoff' = [handoff EXCEPT !.fence = AValid,
+         !.phase = IF AValid THEN "unlink_canonical" ELSE "notice"]
+\* Queue-front and owner-epoch changes invalidate the receipt's consumer. A
+\* changed file before the mutation fence is acquired invalidates its snapshot.
+AChange ==
+    /\ handoff.up /\ ~handoff.disturbed
+    /\ ((handoff.case \in {"front", "epoch"} /\ handoff.phase \in {"commit", "outbox", "wake", "admit", "grant"})
+        \/ (handoff.case = "file_replaced" /\ handoff.phase \in {"observe", "recheck"})
+        \/ (handoff.case \in {"post_cleanup_replace", "row_changed"} /\ handoff.phase \in {"wake", "admit"}))
+    /\ handoff' = [handoff EXCEPT !.disturbed = TRUE,
+         !.front = IF handoff.case = "front" THEN FALSE ELSE @,
+         !.epoch = IF handoff.case = "epoch" THEN FALSE ELSE @,
+         !.snapshot = IF handoff.case \in {"file_replaced", "post_cleanup_replace"} THEN FALSE ELSE @,
+         !.lookup = IF handoff.case = "row_changed" THEN "Retired" ELSE @]
+AFenceContender ==
+    /\ handoff.up /\ handoff.case = "fence" /\ handoff.fence /\ ~handoff.contested
+    /\ handoff' = [handoff EXCEPT !.contested = TRUE]
+AStale ==
+    /\ handoff.up /\ ~AValid
+    /\ handoff.phase \in {"unlink_canonical", "unlink_alias", "commit", "outbox", "wake", "grant"}
+    /\ handoff' = [handoff EXCEPT !.fence = FALSE, !.phase = "notice"]
+ANotice ==
+    /\ handoff.up /\ handoff.phase = "notice"
+    /\ handoff' = [handoff EXCEPT !.raw = "retained", !.notified = TRUE,
+         !.outbox = FALSE, !.intent = FALSE, !.acknowledged = TRUE, !.phase = "done"]
+ASteps == AObserve \/ AIntent \/ ARecheck \/ AUnlinkCanonical \/ AUnlinkAlias \/ APartialUnlink
+       \/ ACommit \/ AOutbox \/ AWake \/ AAdmission \/ AGrant \/ ACreate \/ APrompt
+       \/ AAck \/ ARedeliver \/ ACrash \/ ABoot \/ ARecover \/ AChange
+       \/ AFenceContender \/ AStale \/ ANotice
+AHintNext == ASteps /\ UNCHANGED sessionVars
+AHintSpec == SessionInit /\ AInit /\ [][AHintNext]_vars /\ WF_vars(AHintNext)
+ANoForeignMutation ==
+    /\ handoff.unsafeDeletes = 0
+    /\ ((~handoff.owner \/ ~handoff.probe) => handoff.deletes = 0)
+ANoDuplicateEffects == handoff.grants <= 1 /\ handoff.creates <= 1 /\ handoff.prompts <= 1
+ANoUnprovedGrant == handoff.grants > 0 => handoff.proof /\ handoff.committed
+ANoStaleGrant == handoff.grants > 0 => AValid
+ANoSilentLoss ==
+    /\ handoff.raw \in {"queued", "retained", "delivered", "settled"}
+    /\ (handoff.raw = "delivered" => handoff.prompts = 1)
+    /\ (handoff.raw = "retained" => handoff.notified)
+    /\ (handoff.phase = "done" => handoff.raw # "queued")
+ANoEarlyUnlink == handoff.deletes > 0 => handoff.intent \/ handoff.acknowledged
+AProgress == <> (handoff.phase = "done")
+
 ====

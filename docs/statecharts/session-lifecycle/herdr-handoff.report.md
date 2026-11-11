@@ -1,5 +1,7 @@
 # Codex legacy handoff (design r2)
 
+A is superseded by [design r3](codex-marker-only-a.design.md): r2 omitted Found Legacy admission and split cleanup/outbox crash boundaries. B/C and their cfgs are retained as deferred design evidence.
+
 Code snapshot: `289f41b1d0f48fab0dc426e652308eced4326fce`. This is a proposed contract, not an implementation claim.
 The existing `HerdrSession` module now has a separate `HandoffSpec`; `HandoffPolicy=off` preserves its original session actions and known gaps.
 

@@ -1,0 +1,28 @@
+stateDiagram-v2
+    [*] --> Observe
+    Observe --> Notice: owner/probe/lookup invalid
+    Observe --> Intent: Missing or exact Legacy
+    Intent --> Recheck: durable queue commit, release locks
+    Recheck --> Notice: witnesses changed
+    Recheck --> UnlinkCanonical: physical locks then Source
+    UnlinkCanonical --> UnlinkLegacy
+    UnlinkLegacy --> Recover: partial unlink
+    Recover --> Recheck: durable intent + fresh evidence
+    UnlinkLegacy --> ReceiptCommit
+    ReceiptCommit --> Boot: crash before commit
+    ReceiptCommit --> OutboxCommit: durable receipt
+    OutboxCommit --> Boot: crash before outbox
+    OutboxCommit --> Wake
+    Boot --> Recover: intent only
+    Boot --> OutboxCommit: receipt or outbox debt
+    Wake --> Admission
+    Admission --> Wait: before + Found Legacy
+    Wait --> Wait
+    Admission --> Notice: front/epoch/file/row changed
+    Admission --> Grant: fixed + fresh proof + fence
+    Grant --> Create: exact front claim
+    Create --> Prompt: Pending and host/spawn published, release fence
+    Prompt --> Ack
+    Wake --> Wake: duplicate delivery does not grant
+    Notice --> Ack: retain original, durable notice
+    Ack --> [*]
