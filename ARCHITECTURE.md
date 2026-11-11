@@ -1889,6 +1889,7 @@ src/
 │   │   ├── placeholder_sweeper/
 │   │   │   ├── abandon_guard.rs
 │   │   │   ├── panel_shape.rs
+│   │   │   ├── rebind_resume_tests.rs
 │   │   │   ├── retirement_tests.rs
 │   │   │   └── tick.rs
 │   │   ├── prompt_builder/
@@ -4576,7 +4577,6 @@ src/
 │   ├── tool_output_guard.rs
 │   ├── tui_prompt_control.rs
 │   ├── tui_prompt_dedupe.rs
-│   ├── tui_steering.rs
 │   ├── tui_turn_state.rs
 │   ├── turn_cancel_finalizer.rs
 │   ├── turn_cancel_queue_guard.rs

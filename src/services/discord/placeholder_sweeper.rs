@@ -31,8 +31,8 @@ use super::formatting::{
 use super::gateway::edit_outbound_message;
 use super::inflight::{
     InflightTurnState, emit_reap_abandoned_rebind_origin, load_inflight_states_for_sweep,
-    opt_channel_id, parse_started_at_unix, reap_abandoned_rebind_origin_locked,
-    should_reap_abandoned_rebind_origin, sweep_reap_dead_watcher_rebind_origin,
+    opt_channel_id, parse_started_at_unix, reap_rebind_origin_resuming,
+    should_reap_abandoned_rebind_origin, sweep_reap_dead_watcher_rebind_origin_resuming,
 };
 use crate::services::provider::ProviderKind;
 
@@ -344,7 +344,7 @@ async fn run_placeholder_sweep_pass(
             // is never clobbered (codex TOCTOU). `age_secs` = file-mtime age.
             let current_generation = super::runtime_store::process_generation();
             if should_reap_abandoned_rebind_origin(&state, age_secs, current_generation)
-                && reap_abandoned_rebind_origin_locked(provider, &state, current_generation)
+                && reap_rebind_origin_resuming(shared, provider, &state, current_generation)
             {
                 emit_reap_abandoned_rebind_origin(
                     provider,
@@ -354,7 +354,7 @@ async fn run_placeholder_sweep_pass(
                     "placeholder_sweep_deadline",
                 );
                 report.abandoned += 1;
-            } else if sweep_reap_dead_watcher_rebind_origin(
+            } else if sweep_reap_dead_watcher_rebind_origin_resuming(
                 shared,
                 provider,
                 &state,

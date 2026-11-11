@@ -20,10 +20,7 @@ fn startup_update_modal_blocks_readiness_steering_and_submit_without_keys() {
             ..SpyState::default()
         });
         let snapshot = prompt_readiness_snapshot("startup-update");
-        assert!(codex_snapshot_indicates_interactive_modal(&snapshot));
         assert!(!snapshot_allows_warm_followup_submit(&snapshot));
-        assert!(steering_snapshot_decision(&snapshot).is_err());
-        assert!(inject_steering_prompt("startup-update", "follow-up").is_err());
         let outcome = submit_codex_followup_prompt("startup-update", "follow-up", None);
         assert!(matches!(
             outcome,
@@ -48,10 +45,6 @@ fn startup_update_modal_blocks_readiness_steering_and_submit_without_keys() {
         capture_available: true,
         pane_tail: UPDATE_PANE.to_string(),
     };
-    assert_eq!(
-        steering_snapshot_decision(&stale_composer),
-        Err("interactive modal")
-    );
     assert!(!snapshot_allows_warm_followup_submit(&stale_composer));
     stale_composer.pane_tail.clear();
     assert!(snapshot_allows_warm_followup_submit(&stale_composer));
@@ -67,25 +60,11 @@ fn startup_update_unknown_screen_without_composer_gets_no_keys() {
         .into(),
         ..SpyState::default()
     });
-    assert!(inject_steering_prompt("startup-unknown", "follow-up").is_err());
     assert!(matches!(
         submit_codex_followup_prompt("startup-unknown", "follow-up", None),
         CodexFollowupPromptSubmitOutcome::NotSubmitted { .. }
     ));
     assert_eq!(guard.0.borrow().sends, 0, "{:?}", guard.calls());
-}
-
-#[test]
-fn steering_snapshot_requires_composer_and_rejects_modal() {
-    let missing_composer = submit_snapshot(true, true, false, false);
-    assert_eq!(
-        steering_snapshot_decision(&missing_composer),
-        Err("composer not present")
-    );
-
-    let mut modal = submit_snapshot(true, true, true, false);
-    modal.pane_tail = "Approval required: allow command?".to_string();
-    assert_eq!(steering_snapshot_decision(&modal), Err("interactive modal"));
 }
 
 #[test]
