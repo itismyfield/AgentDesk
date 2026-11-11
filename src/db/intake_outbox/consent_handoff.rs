@@ -2,7 +2,7 @@
 
 //! A consent release may rearm only the original row carrying a before-effects custody marker.
 use super::IntakeOutboxRow;
-use crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity;
+use crate::domain::intake_identity::OwnerIdentity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
