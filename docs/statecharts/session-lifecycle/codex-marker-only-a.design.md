@@ -1,4 +1,5 @@
 # Codex Herdr marker-only A 설계 r4
+<!-- doc-path-refs: proposed live/codex_marker_absence.rs src/services/codex/legacy_hint.rs src/services/discord/router/message_handler/provider_dispatch/owner_input/legacy_hint.rs src/services/discord/turn_presence/activity/unbound/live/codex_marker_absence.rs src/services/turn_orchestrator/queued_head/v2/legacy_hint.rs src/services/discord/router/message_handler/provider_dispatch/owner_input/storage_failure.rs -->
 
 상태: 구현 전 PLAN. **운영 코드 변경 0**. 코드 정본은 `289f41b1d0f48fab0dc426e652308eced4326fce`, 모델/문서 입력은 `89a8ea63c4b86c79247f1d68118815b1e3ce7a3f`다. 두 SHA 사이 `src/` 차이는 없다. 이 문서는 r3의 A를 대체한다. r3의 Legacy admission·물리 fence·boot discovery 계약은 유지하고, 일시 실패를 구동할 controller 수명을 보완한다. B(HandoffWaiting·넘김 journal)와 C(종료 포트)는 보류하며, #8077 착지 뒤 공유 계약으로 다시 설계한다. 이 A에는 `/exit`, 화면 판독, pane close, kill, provider 종료 판정 기능이 없다. 아래 CleanupIntent는 파일 정리의 복구 기록이며 predecessor 종료 attempt가 아니다.
 
