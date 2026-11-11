@@ -100,7 +100,7 @@ pub(super) async fn execute_before_effects(
     request: IntakeRequest,
     uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
 ) -> Result<IntakeExecution, Box<dyn std::error::Error + Send + Sync>> {
-    let execution = execute_intake_turn_core(http, shared, token, request, uploads);
+    let execution = Box::pin(execute_intake_turn_core(http, shared, token, request, uploads));
     #[cfg(unix)]
     {
         scope_before_effects(row, execution).await
