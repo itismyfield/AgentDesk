@@ -1127,6 +1127,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             );
             false
         } else if o_ownership.is_err() {
+            retry_terminal_delivery_from_offset = held_for_adoption(&o_ownership);
             false
         } else if o_delegated_terminal {
             match o_delegated_arm::consume_delegated_terminal(o_delegated_arm::DelegatedTerminal {
@@ -1320,10 +1321,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         };
         if retry_terminal_delivery_from_offset {
-            // #4115: bound the terminal-delivery rewind so a persistently failing
-            // send cannot retry the SAME range forever — give up after N attempts
-            // and let the turn finalize instead of looping.
-            terminal_rewind_attempts = terminal_rewind_attempts.saturating_add(1);
+            // A failing send gives up after N rewinds and lets the turn finalize; a body
+            // held for O's adoption retries uncounted until the adopted channel ends the turn.
+            terminal_rewind_attempts = counted_rewind(terminal_rewind_attempts, &o_ownership);
             if matches!(
                 watcher_rewind_attempt_disposition(terminal_rewind_attempts),
                 WatcherRewindAttemptDisposition::GiveUp
