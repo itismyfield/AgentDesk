@@ -132,10 +132,12 @@ async fn hosted_over_old(channel: u64) -> Takeover {
     }
 }
 
-/// Binds the next rollout once the old one's queued Legacy body went out.
+/// Binds the next rollout once the old one's queued Legacy body went out, in a tmux generation
+/// that begins with it: records of a two-rollout generation prove nothing, this keeps one.
 fn bind_new(io: &TestIo, channel: u64, path: &Path) {
     io.queued_bodies.store(0, Ordering::SeqCst);
     bind_late(channel, path);
+    recorded_since(io, Utc::now(), Vec::new());
 }
 
 fn legacy_sends(channel: u64) -> bool {
@@ -735,18 +737,19 @@ async fn an_owed_turn_on_the_rollout_before_a_new_bind_goes_into_the_init() {
     );
     assert_eq!(
         init_sources(&harness, CODEX),
-        [(old_source, opened), (next_source, 0)]
+        [(old_source, first_opener()), (next_source, 0)]
     );
     append(&next, &answer("msg_2", "the new answer"));
     polls(3).await;
-    let mut posts = harness.port.posts();
-    posts.sort();
-    assert_eq!(
-        posts,
-        ["the new answer", "the owed answer"],
-        "{:?}",
-        io.alarms.halted()
-    );
+    // The history's record proves nothing once a second rollout was bound, so it is posted too.
+    for answer in ["old answer", "the owed answer", "the new answer"] {
+        assert_eq!(
+            posted(&harness, answer),
+            1,
+            "{answer}: {:?}",
+            io.alarms.halted()
+        );
+    }
 }
 
 /// Moves the time the binding log records for `channel`'s binds back by `ago`, as if its Codex
@@ -1061,16 +1064,19 @@ async fn a_rotation_through_two_rollouts_keeps_the_first_rollouts_turn() {
             "{:?}",
             io.alarms.halted()
         );
-        let mut expected = vec![(b_source, first_opener()), (c_source, 0)];
-        if !delivered {
-            expected.insert(0, (a_source, opener));
-        }
-        assert_eq!(init_sources(&harness, channel), expected);
-        polls(3).await;
+        // A's record proves nothing once B was bound, so A is taken either way.
+        let expected = [
+            (a_source, opener),
+            (b_source, first_opener()),
+            (c_source, 0),
+        ];
         assert_eq!(
-            posted(&harness, "first rollout answer"),
-            usize::from(!delivered)
+            init_sources(&harness, channel),
+            expected,
+            "delivered={delivered}"
         );
+        polls(3).await;
+        assert_eq!(posted(&harness, "first rollout answer"), 1);
     }
 }
 
@@ -1127,7 +1133,7 @@ async fn a_receipt_of_another_rollout_in_the_generation_does_not_cover_this_one(
     } = hosted_unbound(CODEX).await;
     *io.custody.lock().unwrap() = Ok(Custody::Active);
     let turn = [opening(), answer("msg_1", "same bytes"), turn_end()].concat();
-    let (a, _) = rollout(&harness, "rollout-a.jsonl", &metadata("s-codex"));
+    let (a, a_source) = rollout(&harness, "rollout-a.jsonl", &metadata("s-codex"));
     bind_late(CODEX, &a);
     let opener = len(&a);
     append(&a, &turn);
@@ -1147,8 +1153,13 @@ async fn a_receipt_of_another_rollout_in_the_generation_does_not_cover_this_one(
         "{:?}",
         io.alarms.halted()
     );
-    assert_eq!(init_sources(&harness, CODEX), [(b_source, opener)]);
+    // A's own record proves nothing once B was bound either, so both are taken.
+    assert_eq!(
+        init_sources(&harness, CODEX),
+        [(a_source, opener), (b_source, opener)]
+    );
     polls(3).await;
+    // Both rollouts carry the same message id, which O posts once.
     assert_eq!(posted(&harness, "same bytes"), 1);
 }
 
@@ -1433,7 +1444,7 @@ async fn a_rollout_over_the_fresh_read_budget_lets_the_next_rollout_commit() {
     } = hosted_unbound(CODEX).await;
     *io.custody.lock().unwrap() = Ok(Custody::Active);
     let big = "x".repeat(1_100_000);
-    let (a, _) = rollout(&harness, "rollout-big.jsonl", &metadata("s-codex"));
+    let (a, a_source) = rollout(&harness, "rollout-big.jsonl", &metadata("s-codex"));
     append(&a, &history("t0", &big));
     bind_late(CODEX, &a);
     history_recorded(&io, len(&a));
@@ -1449,8 +1460,109 @@ async fn a_rollout_over_the_fresh_read_budget_lets_the_next_rollout_commit() {
         "{:?}",
         io.alarms.halted()
     );
-    assert_eq!(init_sources(&harness, CODEX), [(b_source, 0)]);
+    // A's record proves nothing once B was bound, so the big history is streamed and taken too.
+    assert_eq!(
+        init_sources(&harness, CODEX),
+        [(a_source, first_opener()), (b_source, 0)]
+    );
     append(&b, &answer("msg_1", "the small answer"));
     polls(3).await;
     assert_eq!(posted(&harness, "the small answer"), 1);
+}
+
+/// The next rollout's short answer edited into a placeholder made before its bind keeps that
+/// earlier id: the receipt, at bytes where the first rollout's turn ends too, covers neither.
+#[tokio::test(start_paused = true)]
+async fn a_receipt_dated_before_the_next_bind_by_an_edited_placeholder_covers_no_rollout() {
+    const CODEX: u64 = 61_886;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    *io.custody.lock().unwrap() = Ok(Custody::Active);
+    let (a, a_source) = rollout(&harness, "rollout-a.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &a);
+    let opener = len(&a);
+    let at = Utc::now().to_rfc3339();
+    let turn = |id: &str, text: &str| {
+        let line = |value| codex_line(value);
+        [
+            line(serde_json::json!({"type": "event_msg", "timestamp": at,
+                "payload": {"type": "task_started", "turn_id": "t1"}})),
+            line(serde_json::json!({"type": "response_item", "timestamp": at,
+                "payload": {"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}]}})),
+            answer(id, text),
+            line(serde_json::json!({"type": "event_msg", "timestamp": at,
+                "payload": {"type": "task_complete", "turn_id": "t1"}})),
+        ]
+        .concat()
+    };
+    append(&a, &turn("msg_1", "answer A"));
+    polls(3).await;
+    // B's placeholder exists before B's bind; the edited answer's receipt keeps its date.
+    let placeholder = receipt((opener, len(&a)));
+    let (b, b_source) = rollout(&harness, "rollout-b.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &b);
+    append(&b, &turn("msg_2", "answer B"));
+    assert_eq!(len(&a), len(&b));
+    recorded(&io, vec![placeholder]);
+    *io.custody.lock().unwrap() = Ok(Custody::Free);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(
+        init_sources(&harness, CODEX),
+        [(a_source, opener), (b_source, opener)]
+    );
+    polls(3).await;
+    assert_eq!(posted(&harness, "answer A"), 1);
+}
+
+/// A fresh rollout judged owed while custody holds the commit, answered only afterwards, stays
+/// owed when the next bind and a later generation start come before any further look.
+#[tokio::test(start_paused = true)]
+async fn a_fresh_rollout_judged_owed_stays_owed_past_a_generation_move() {
+    const CODEX: u64 = 61_887;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    *io.custody.lock().unwrap() = Ok(Custody::Active);
+    let (a, a_source) = rollout(&harness, "rollout-a.jsonl", &prompted("s-codex"));
+    bind_late(CODEX, &a);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Deferred,
+        "custody blocks the commit"
+    );
+    append(&a, &[answer("msg_1", "fresh answer"), turn_end()].concat());
+    let (b, b_source) = rollout(&harness, "rollout-b.jsonl", &prompted("s-codex"));
+    bind_late(CODEX, &b);
+    recorded_since(&io, Utc::now(), Vec::new());
+    *io.custody.lock().unwrap() = Ok(Custody::Free);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(
+        init_sources(&harness, CODEX),
+        [(a_source, first_opener()), (b_source, 0)]
+    );
+    polls(3).await;
+    assert_eq!(posted(&harness, "fresh answer"), 1);
 }

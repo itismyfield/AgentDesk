@@ -261,6 +261,10 @@ impl<I: HostIo> Takeover<'_, I> {
             return Err(Taken::Retry("no rollout bound since the baseline".into()));
         };
         let verdict = fresh.map(|bound| prefix::judge(&bound.0));
+        // A fresh rollout judged now stays a candidate until a record covers it, as a warm one does.
+        if matches!(verdict, Some(Verdict::Eligible(_) | Verdict::Wait(_))) {
+            remember(unresolved, &bound.0);
+        }
         let result = match verdict {
             // Turn mode is confirmed after the taken turn, so a rollout with no prompt is not taken yet.
             Some(Verdict::Eligible(prefix)) if prefix.prompt_end.is_none() => Err(Taken::Retry(

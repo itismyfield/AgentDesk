@@ -717,3 +717,78 @@ async fn historical_takeover() {
     pool.close().await;
     fixture.drop().await;
 }
+
+/// The next rollout's short answer edited into its placeholder, made before its bind: the pinned
+/// writer records the placeholder's earlier id at bytes where both turns end, proving neither.
+#[cfg(unix)]
+#[test]
+fn codex_takeover_counts_an_edited_placeholder_receipt_for_no_rollout_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(edited_placeholder_takeover());
+}
+
+#[cfg(unix)]
+async fn edited_placeholder_takeover() {
+    use crate::services::discord::outbound::delivery_record as dr;
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let local = crate::services::cluster::node_registry::SELF_INSTANCE_ID.get();
+    let local = local.map_or("takeover-local", String::as_str);
+    let channel = 64_700_512;
+    let log = Log::new(channel);
+    let io = Late {
+        host: test_host::over(shared, Duration::ZERO, Some(local)),
+        log: Arc::clone(&log),
+        stub: None,
+    };
+    let stores = tempfile::tempdir().unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, stores.path());
+    let store = store.unwrap().unwrap();
+    let rollouts = tempfile::tempdir().unwrap();
+    let _reserved = reserve(&[channel]);
+    let gate = OwnershipGate::default();
+    gate.acquired();
+    let marker = crate::services::tmux_common::session_temp_path("takeover", "generation");
+    std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(&marker, "generation").unwrap();
+    let began = chrono::Utc::now().timestamp() - 3600;
+    filetime::set_file_mtime(&marker, filetime::FileTime::from_unix_time(began, 0)).unwrap();
+    let generation = dr::current_generation_mtime_ns("takeover");
+    let (a, a_opener, a_end) = answered(rollouts.path(), "rollout-a.jsonl", "answer A");
+    log.bind_now(&a);
+    let (b, b_opener, b_end) = answered(rollouts.path(), "rollout-b.jsonl", "answer B");
+    log.bind_now(&b);
+    // A was bound ten seconds ago and B five; B's placeholder was made seven seconds ago.
+    for (event, ago) in log.events.lock().unwrap().iter_mut().zip([10, 5]) {
+        event.committed_at = chrono::Utc::now() - chrono::TimeDelta::seconds(ago);
+    }
+    assert_eq!((a_opener, a_end), (b_opener, b_end));
+    let edited = dr::ExactJsonlSourceIdentity {
+        provider: "codex".into(),
+        tmux_session_name: "takeover".into(),
+        turn_nonce: "b-short-answer".into(),
+        range: (b_opener, b_end),
+        generation_mtime_ns: generation,
+        offset_authority_channel_id: channel,
+        delivery_channel_id: channel,
+    };
+    let made = chrono::Utc::now() - chrono::TimeDelta::seconds(7);
+    let placeholder_id =
+        (u64::try_from(made.timestamp_millis()).unwrap() - 1_420_070_400_000) << 22;
+    dr::record_current_pinned_delivery(&edited, placeholder_id).unwrap();
+    let adopting = candidate(channel);
+    assert!(late_adopt::activate(&io, channel, Codex, &store, &*log, &adopting, &gate).await);
+    assert_eq!(
+        init_sources(&store, channel),
+        [(a, a_opener), (b, b_opener)],
+        "a placeholder's earlier date proves no rollout"
+    );
+    pool.close().await;
+    fixture.drop().await;
+}
