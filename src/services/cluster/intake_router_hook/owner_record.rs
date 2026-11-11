@@ -20,63 +20,7 @@ pub(crate) mod output;
 pub(crate) mod plan;
 pub(crate) mod snapshot;
 
-/// Canonical identity uses Rust trim/lowercase; queries and advisory keys use these same bytes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OwnerIdentity {
-    provider: String,
-    raw_channel_id: String,
-}
-
-impl OwnerIdentity {
-    pub(crate) fn new(provider: &str, raw_channel_id: &str) -> Self {
-        Self {
-            provider: provider.trim().to_lowercase(),
-            raw_channel_id: raw_channel_id.trim().to_string(),
-        }
-    }
-
-    pub(crate) fn provider(&self) -> &str {
-        &self.provider
-    }
-
-    pub(crate) fn raw_channel_id(&self) -> &str {
-        &self.raw_channel_id
-    }
-
-    /// Deterministic per-channel serialization key for `pg_advisory_xact_lock`
-    /// (§3.10). `acquire`, `transfer`, operator-retry, and adoption all take
-    /// this same key so a channel's ownership transitions run serially. FNV-1a
-    /// over a fixed byte encoding keeps the value stable across binaries and
-    /// platforms during a rolling deploy (pinned by
-    /// `advisory_lock_key_is_stable`).
-    pub(crate) fn advisory_key(&self) -> i64 {
-        advisory_lock_key(&self.provider, &self.raw_channel_id)
-    }
-}
-
-/// FNV-1a 64-bit over `domain-tag \0 provider \0 raw_channel_id`, reinterpreted
-/// as `i64`. Inputs must already be normalized (`OwnerIdentity` guarantees it).
-/// The domain tag prevents collisions with other advisory-lock users in the
-/// same database.
-fn advisory_lock_key(norm_provider: &str, norm_raw_channel_id: &str) -> i64 {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    let mut hash: u64 = FNV_OFFSET_BASIS;
-    let mut absorb = |bytes: &[u8]| {
-        for &byte in bytes {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-    };
-
-    absorb(b"intake_session_owner\0");
-    absorb(norm_provider.as_bytes());
-    absorb(b"\0");
-    absorb(norm_raw_channel_id.as_bytes());
-
-    hash as i64
-}
+pub(crate) use crate::domain::intake_identity::OwnerIdentity;
 
 /// Idempotency key for an admission attempt (§3.8). Ambiguous-commit retries
 /// of the same `(provider, channel, user_msg, attempt_no)` reproduce the same
@@ -1054,6 +998,20 @@ mod tests {
             preserve_on_cancel: false,
             agent_id: "agent-x".to_string(),
         }
+    }
+
+    #[test]
+    fn owner_identity_compatibility_path_is_the_domain_item() {
+        use crate::domain::intake_identity::OwnerIdentity as DomainIdentity;
+
+        let canonical = DomainIdentity::new(" CLAUDE ", " 42 ");
+        let compatibility: &OwnerIdentity = &canonical;
+        let back_to_domain: &DomainIdentity = compatibility;
+        assert!(std::ptr::eq(&canonical, back_to_domain));
+
+        let from_compatibility = OwnerIdentity::new("claude", "42");
+        let from_old_path: DomainIdentity = from_compatibility;
+        assert_eq!(from_old_path, canonical);
     }
 
     // -- advisory key + idempotency key (deterministic, no DB) --------------

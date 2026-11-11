@@ -1,9 +1,13 @@
+pub(crate) mod atomic_write;
+pub(crate) mod auto_queue_log;
 pub(crate) mod bot_role;
 pub(crate) mod file_sync;
 pub(crate) mod human_input;
+pub(crate) mod intake_identity;
 pub(crate) mod lifecycle;
 pub(crate) mod memory;
 pub(crate) mod message_split;
+pub(crate) mod process_incarnation;
 pub(crate) mod provider;
 pub(crate) mod session_identity;
 pub(crate) mod tool_text;
