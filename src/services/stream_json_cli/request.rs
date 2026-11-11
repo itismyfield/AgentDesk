@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::domain::provider_auth_profile::ProviderAuthOverlay;
 use crate::services::provider::CancelToken;
 use crate::services::provider::ProviderKind;
+use crate::services::provider_auth_profile::ProviderAuthOverlay;
 
 use super::policy::ConfiguredToolPolicy;
 use super::session::ProviderSessionToken;
