@@ -40,6 +40,7 @@ pub(crate) mod source_registry;
 mod transport;
 pub(in crate::services::discord) mod turn_output_controller; // #3089 A1
 
+pub(crate) use crate::domain::outbound::port::DiscordOutboundClient;
 pub(crate) use decision::{
     DISCORD_MESSAGE_HARD_LIMIT_CHARS as DISCORD_HARD_LIMIT_CHARS,
     DISCORD_MESSAGE_SAFE_CHARS as DISCORD_SAFE_LIMIT_CHARS,
@@ -48,8 +49,8 @@ pub(crate) use message::DiscordOutboundMessage;
 pub(crate) use policy::DiscordOutboundPolicy;
 pub(crate) use result::{DeliveryResult, DiscordTransportReceipt};
 pub(crate) use transport::{
-    DiscordOutboundClient, HttpOutboundClient, OutboundDedupClaim, OutboundDedupReservation,
-    OutboundDedupWait, OutboundDeduper, outbound_fingerprint, post_serenity_message_with_nonce,
+    HttpOutboundClient, OutboundDedupClaim, OutboundDedupReservation, OutboundDedupWait,
+    OutboundDeduper, outbound_fingerprint, post_serenity_message_with_nonce,
 };
 
 /// Process-wide in-memory outbound deduper shared by every Discord producer.

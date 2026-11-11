@@ -256,7 +256,7 @@ pub(in crate::services::discord) async fn send_single_message_returning_receipt(
     rate_limit_wait(shared, channel_id).await;
     let message =
         send_channel_message_with_optional_reference(http, channel_id, text, reference).await?;
-    Ok(super::super::outbound::DiscordTransportReceipt::from_message(channel_id, &message))
+    Ok(super::super::outbound::result::transport_receipt_from_message(channel_id, &message))
 }
 
 pub(super) async fn send_channel_message_with_optional_reference(
