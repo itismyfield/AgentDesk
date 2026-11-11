@@ -282,6 +282,6 @@ outbound-port/OutboundPortAfterInProcess.cfg	OutboundPort	-	-
 outbound-port/OutboundPortAfterNoNonceAmbiguous.cfg	OutboundPort	NoDuplicatePost	-
 outbound-port/OutboundPortAfterNoNonceRestart.cfg	OutboundPort	NoDuplicatePost	-
 outbound-port/OutboundPortBefore.cfg	OutboundPort	-	-
-outbound-port/OutboundPortLossyKey.cfg	OutboundPort	NoSuccessWithoutReceipt	-
+outbound-port/OutboundPortLossyKey.cfg	OutboundPort	NoSilentLoss,NoSuccessWithoutReceipt	-
 outbound-port/OutboundPortNoReserve.cfg	OutboundPort	NoDuplicatePost	-
-outbound-port/OutboundPortRecordBeforePost.cfg	OutboundPort	NoSuccessWithoutReceipt	-
+outbound-port/OutboundPortRecordBeforePost.cfg	OutboundPort	NoSilentLoss,NoSuccessWithoutReceipt	-
