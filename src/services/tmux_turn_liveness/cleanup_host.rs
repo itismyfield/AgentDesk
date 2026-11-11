@@ -28,15 +28,6 @@ pub(crate) fn cleanup_row_deletable(row: &CleanupRow) -> bool {
             }))
 }
 
-/// Check the hosted record and marker before querying session occupancy.
-pub(crate) async fn cleanup_row_is_unoccupied_pg(
-    pool: &PgPool,
-    key: &str,
-    row: &CleanupRow,
-) -> bool {
-    cleanup_row_deletable(row) && super::idle_cleanup_session_is_unoccupied(pool, key).await
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CleanupHostRefusal {
     /// No sessions row: never read as a legacy tmux session.

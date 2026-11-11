@@ -6,7 +6,6 @@ use crate::services::provider::ProviderKind;
 
 #[path = "tmux_turn_liveness/cleanup_host.rs"]
 pub(crate) mod cleanup_host;
-pub(crate) use cleanup_host::cleanup_row_is_unoccupied_pg;
 #[cfg(test)]
 #[path = "tmux_turn_liveness/tests_pg.rs"]
 mod tests_pg;
@@ -185,6 +184,16 @@ fn claude_pane_shows_background_work(pane: &str) -> bool {
 
 /// Keep background work and approval waits even if the foreground provider is
 /// at a prompt. DB errors or missing rows are unknown, hence not cleanup proof.
+/// Judge the hosted row and marker before the existing occupancy query.
+pub(crate) async fn cleanup_row_is_unoccupied_pg(
+    pool: &sqlx::PgPool,
+    session_key: &str,
+    row: &crate::db::dispatched_sessions::hosted_execution::CleanupRow,
+) -> bool {
+    cleanup_host::cleanup_row_deletable(row)
+        && idle_cleanup_session_is_unoccupied(pool, session_key).await
+}
+
 pub(crate) async fn idle_cleanup_session_is_unoccupied(
     pool: &sqlx::PgPool,
     session_key: &str,
