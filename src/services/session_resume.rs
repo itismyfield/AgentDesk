@@ -15,12 +15,12 @@ use crate::db::dispatched_sessions::{
     self as dispatched_sessions_db, SessionRebindContext, load_force_kill_session_pg,
     load_session_rebind_context_pg, rebind_session_provider_by_id_pg,
 };
+use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::services::discord::health::{
     HealthRegistry, channel_has_active_turn, clear_resume_runtime_owner_after_death,
     rebind_channel_provider_session, resume_runtime_for_channel,
     retain_resume_runtime_owner_before_teardown,
 };
-use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{
     ForceKillRow, TurnLifecycleTarget, force_kill_turn_with_verdict, force_kill_verdict,

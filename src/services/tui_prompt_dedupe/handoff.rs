@@ -586,7 +586,12 @@ pub(super) fn sync_durable(provider: &str, tmux: &str) {
     let result = match record {
         Some(record) => serde_json::to_string(&record)
             .map_err(|error| error.to_string())
-            .and_then(|data| crate::services::discord::runtime_store::atomic_write(&path, &data)),
+            .and_then(|data| {
+                crate::domain::atomic_write::prepare(&path, &data)
+                    .and_then(|prepared| prepared.publish())
+                    .map(|crate::domain::atomic_write::Published| ())
+                    .map_err(crate::services::disk_monitor::atomic_write_error)
+            }),
         None => match std::fs::remove_file(&path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
             _ => Ok(()),

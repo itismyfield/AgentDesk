@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
+use crate::domain::session_identity::SessionIdentity;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::session_identity::SessionIdentity;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_cancel_queue_guard::PurgeCounts;
 use crate::services::turn_lifecycle::TurnLifecycleTarget;

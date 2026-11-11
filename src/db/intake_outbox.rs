@@ -402,12 +402,11 @@ pub(crate) async fn sweep_failed_pre_accept_once(
             .owner_generation
             .is_some_and(|generation| generation >= 0);
     if owner_fenced {
-        let owner_key =
-            crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity::new(
-                &source.provider,
-                &source.channel_id,
-            )
-            .advisory_key();
+        let owner_key = crate::domain::intake_identity::OwnerIdentity::new(
+            &source.provider,
+            &source.channel_id,
+        )
+        .advisory_key();
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(owner_key)
             .execute(&mut *tx)

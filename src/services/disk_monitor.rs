@@ -28,6 +28,23 @@ pub fn record_enospc_now() {
     LAST_ENOSPC_EPOCH_SECS.store(now, Ordering::Relaxed);
 }
 
+/// Preserve the atomic-write error text and disk observation for non-Discord writers.
+pub(crate) fn atomic_write_error(failure: crate::domain::atomic_write::NotPublished) -> String {
+    let prefix = failure.stage.prefix();
+    let error = failure.error;
+    if error.raw_os_error() == Some(28) {
+        record_enospc_now();
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            target: "agentdesk::services::discord::runtime_store",
+            "  [{ts}] 💾 ENOSPC at runtime_store::atomic_write ({prefix}): {error}"
+        );
+        format!("ENOSPC: {prefix}: {error}")
+    } else {
+        format!("{prefix}: {error}")
+    }
+}
+
 /// Seconds since the most recent recorded ENOSPC, or `None` if no fault has
 /// ever been recorded in this process.
 pub fn seconds_since_last_enospc() -> Option<u64> {

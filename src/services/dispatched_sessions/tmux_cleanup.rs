@@ -8,7 +8,7 @@ use serde_json::json;
 
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions as dispatched_sessions_db;
-use crate::services::discord::session_identity::tmux_name_from_session_key;
+use crate::domain::session_identity::tmux_name_from_session_key;
 
 use super::{
     ProviderOutputEvidence, RawProviderTranscriptObservationMode,
