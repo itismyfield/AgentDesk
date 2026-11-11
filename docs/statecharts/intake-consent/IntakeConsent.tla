@@ -156,7 +156,8 @@ Drift(kind) ==
                    [] kind = "generation" -> [row EXCEPT !.generation = 2]
                    [] kind = "forceFail" -> [row EXCEPT !.status = "failed"]
                    [] OTHER -> row
-    /\ live' = IF kind = "retire" THEN FALSE ELSE live /\ drift' = TRUE
+    /\ live' = (IF kind = "retire" THEN FALSE ELSE live)
+    /\ drift' = TRUE
     /\ UNCHANGED <<cas, attempted, pc, snap, ticket, proof, spend, op, observed, ownerLock,
                    rowLock, txn, changed, bad, rearms, releases, restarted, fs>>
 ChangeConsent ==
