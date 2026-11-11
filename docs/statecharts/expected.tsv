@@ -44,6 +44,11 @@ intake-consent/IntakeConsentProposed.cfg	IntakeConsent	-	-
 intake-consent/IntakeConsentReuse.cfg	IntakeConsent	ProofConsumedOnce	-
 intake-consent/IntakeConsentScopeOpen.cfg	IntakeConsent	NoUnauthorizedIssue,NoEffectsThenRollback	-
 intake-consent/IntakeConsentStale.cfg	IntakeConsent	NoStaleProofWrite	-
+intake-readiness/IntakeReadinessChart.cfg	IntakeReadiness	-	-
+intake-readiness/IntakeReadinessCurrent.cfg	IntakeReadiness	-	-
+intake-readiness/IntakeReadinessEarlyTxEnd.cfg	IntakeReadiness	ApplyUsesLockedTransaction	-
+intake-readiness/IntakeReadinessProposed.cfg	IntakeReadiness	-	-
+intake-readiness/IntakeReadinessStaleSnapshot.cfg	IntakeReadiness	NoStaleSnapshot	-
 input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-
 input-single-path/InputCancelSelectionLegacyGuarded.cfg	InputCancelSelection	LegacyFrontRemoved	-
