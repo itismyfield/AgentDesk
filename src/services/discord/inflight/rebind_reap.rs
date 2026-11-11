@@ -338,6 +338,41 @@ pub(in crate::services::discord) fn reap_abandoned_rebind_origin_locked(
         == RebindReapOutcome::Reaped
 }
 
+/// The warm sweep's deadline reap; a row it removed resumes the channel's waiting input once.
+pub(in crate::services::discord) fn reap_rebind_origin_resuming(
+    shared: &std::sync::Arc<crate::services::discord::SharedData>,
+    provider: &ProviderKind,
+    snapshot: &InflightTurnState,
+    current_generation: u64,
+) -> bool {
+    let reaped = reap_abandoned_rebind_origin_locked(provider, snapshot, current_generation);
+    if reaped {
+        resume_after_reap(
+            shared,
+            provider,
+            snapshot.channel_id,
+            "rebind_origin_deadline_reap",
+        );
+    }
+    reaped
+}
+
+/// A reap removed the channel's row and released no token: unless a successor row already
+/// stands, nothing else resumes the input that row held.
+fn resume_after_reap(
+    shared: &std::sync::Arc<crate::services::discord::SharedData>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    reason: &'static str,
+) {
+    if load_inflight_state_read_only(provider, channel_id).is_none() {
+        let channel = poise::serenity_prelude::ChannelId::new(channel_id);
+        crate::services::discord::queue_io::input_owner::closed::closed(
+            shared, provider, channel, reason,
+        );
+    }
+}
+
 /// Locked re-validate-then-unlink for the dead-watcher rebind-origin reap
 /// path. The expensive tmux probe runs OUTSIDE this lock (via
 /// `spawn_blocking`); only cheap fs-only conditions are re-checked here, so
@@ -461,6 +496,33 @@ pub(in crate::services::discord) async fn sweep_reap_dead_watcher_rebind_origin(
         KeyedTeardown::Kept => return false,
     }
     reap_dead_watcher_rebind_origin_locked(provider, state, current_generation)
+}
+
+/// The warm sweep's proven-dead reap; a row it removed resumes the channel's waiting input once.
+pub(in crate::services::discord) async fn sweep_reap_dead_watcher_rebind_origin_resuming(
+    shared: &std::sync::Arc<crate::services::discord::SharedData>,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    age_secs: u64,
+    current_generation: u64,
+) -> bool {
+    let reap = sweep_reap_dead_watcher_rebind_origin(
+        shared,
+        provider,
+        state,
+        age_secs,
+        current_generation,
+    );
+    let reaped = reap.await;
+    if reaped {
+        resume_after_reap(
+            shared,
+            provider,
+            state.channel_id,
+            "rebind_origin_dead_watcher_reap",
+        );
+    }
+    reaped
 }
 
 /// Parse the persisted `started_at` (`now_string` localtime form) into a

@@ -124,7 +124,7 @@ pub(crate) fn evaluate(
 }
 
 pub(crate) fn expected_auth_profile(provider: &str, channel: &str, agent: &str) -> String {
-    let bindings = crate::services::discord::org_schema::list_profile_bindings();
+    let bindings = crate::services::provider_auth_profile::queries::list_profile_bindings();
     bindings
         .iter()
         .find(|b| b.provider == provider && b.channel_id.as_deref() == Some(channel))
@@ -135,7 +135,7 @@ pub(crate) fn expected_auth_profile(provider: &str, channel: &str, agent: &str) 
         })
         .map(|b| b.profile_id.clone())
         .or_else(|| {
-            crate::services::discord::org_schema::provider_auth_primary_profiles()
+            crate::services::provider_auth_profile::queries::provider_auth_primary_profiles()
                 .get(provider)
                 .cloned()
         })
@@ -251,7 +251,7 @@ pub(crate) fn spawn_probe(config: Config) {
 
 fn collect(config: &Config) -> ExecutionProbe {
     let observed_at_ms = chrono::Utc::now().timestamp_millis();
-    let catalog = crate::services::discord::org_schema::provider_auth_catalog();
+    let catalog = crate::services::provider_auth_profile::queries::provider_auth_catalog();
     let mut providers = BTreeMap::new();
     for entry in crate::services::provider::provider_registry() {
         let id = entry.id.to_owned();
@@ -360,3 +360,39 @@ fn collect(config: &Config) -> ExecutionProbe {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod profile_projection_tests {
+    use super::*;
+
+    #[test]
+    fn configured_primary_is_not_the_available_account_catalog() {
+        let runtime = crate::config::TestRuntimeRootGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        let home_path = std::fs::canonicalize(home.path()).unwrap();
+        let home_guard =
+            crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("HOME", &home_path);
+        let profile_home = home_path.join(".adk/profiles/codex/work");
+        std::fs::create_dir_all(&profile_home).unwrap();
+        let org = crate::runtime_layout::org_schema_path(&crate::config::runtime_root().unwrap());
+        std::fs::create_dir_all(org.parent().unwrap()).unwrap();
+        let schema = serde_json::json!({
+            "version": 1,
+            "agents": {},
+            "provider_auth_profiles": {"work": {"provider": "codex", "home": profile_home}},
+            "provider_auth_primary_profiles": {"codex": "default"},
+        });
+        std::fs::write(org, serde_yaml::to_string(&schema).unwrap()).unwrap();
+        let queries = crate::services::provider_auth_profile::queries::provider_auth_catalog();
+        assert!(queries.contains_key("work"));
+        assert!(
+            crate::services::provider_auth_profile::queries::list_profile_bindings().is_empty()
+        );
+        assert_eq!(
+            expected_auth_profile("codex", "unbound", "unbound"),
+            "default"
+        );
+        drop(home_guard);
+        drop(runtime);
+    }
+}

@@ -57,6 +57,7 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 
 | Area | Code SHA | Rules that break | Disposition |
 |---|---|---|---|
+| `outbound-port` (#7353 S21) | `92ef5b00b205679965c24c5c017f7237e8b5d57f` | NoNonceAmbiguous/NoNonceRestart: 응답 없는 생성 뒤 재시도나 재시작으로 nonce 없는 같은 intent가 두 번 게시됨; LossyKey·RecordBeforePost·NoReserve 변형은 기대 RED | 값 계약 이동 전(Before)·후(After) 같은 전이로 GREEN, nonce 강제 경로만 재시작·재시도에도 1회 게시; see [report](outbound-port/outbound-port.report.md) |
 | `input-single-path` boot custody (#8055) | `e285a5cff1e8f8eadfc87e297ad7a202531f3ed3` | frozen Current: silent completion and premature checkpoint; checkpoint/wake mutants remain expected RED | narrowed existing-Hold custody/ready design passes N=1/N=2; normal V1 local execution unchanged and outside the model; see [report](input-single-path/i8055-boot-design.report.md) |
 | `tui-o-writer` boot custody (#8055) | `e285a5cff1e8f8eadfc87e297ad7a202531f3ed3` | frozen Current: swallowed notice failure and visible refusal followed by checkpoint; no-ready-wake mutant stalls | existing custody plus ready wake; gateway/host authority checks are abstract inputs without a gate-equality assumption; see [report](tui-o-writer/i8055-writer-design.report.md) |
 | `tui-o-writer` input-route self-wake (#8055 P2) | `b1c74c75da` → `2d9fb9d663044929d9389647146067f24f706fe4` | host ready여도 Gateway Hold면 ready-only 재확인이 같은 원본의 self-wake를 다시 예약 | host ready와 Gateway를 함께 확인하는 cfg GREEN; 기존 owner 이벤트 공정성 아래 held 진행성 유지. [보고서](tui-o-writer/i8055-route-design.report.md) |

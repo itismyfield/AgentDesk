@@ -120,16 +120,7 @@ pub(crate) async fn stage(pool: &PgPool, request: StageRequest<'_>) -> Result<i6
     Ok(outbox_id)
 }
 
-pub(crate) async fn lock(
-    tx: &mut Transaction<'_, Postgres>,
-    id: &OwnerIdentity,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(id.advisory_key())
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
-}
+pub(crate) use crate::db::channel_custody_lock::lock;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwitchReadiness {
@@ -447,4 +438,21 @@ pub(crate) async fn refresh_stage_on_tx(
     let updated=sqlx::query("UPDATE intake_outbox d SET routing_home_revision=$2,target_instance_id=$3,routing_wait_owner_generation=$4,routing_not_before=CASE WHEN routing_wait_owner_generation IS DISTINCT FROM $4::BIGINT THEN NOW()+make_interval(secs=>$5::INT::DOUBLE PRECISION) ELSE routing_not_before END WHERE d.id=$1 AND d.routing_state='held' AND EXISTS(SELECT 1 FROM intake_outbox r WHERE r.id=d.routing_receipt_id AND r.replay_disposition='registered_not_started')")
         .bind(delivery).bind(home_revision).bind(target).bind(expected.map(|(_,g)|g)).bind(grace_seconds).execute(&mut **tx).await?;
     Ok(updated.rows_affected() == 1)
+}
+
+#[cfg(test)]
+mod lock_item_tests {
+    #[test]
+    fn custody_lock_is_the_database_function_item() {
+        use crate::db::channel_custody_lock::lock as database_lock;
+
+        fn same_item<T>(left: T, right: T) -> (T, T) {
+            (left, right)
+        }
+
+        assert_eq!(
+            std::mem::size_of_val(&same_item(database_lock, super::lock)),
+            0
+        );
+    }
 }

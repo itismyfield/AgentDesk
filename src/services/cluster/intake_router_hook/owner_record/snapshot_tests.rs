@@ -1,6 +1,6 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::cluster::intake_router_hook::owner_record::{self, output, plan};
+use crate::services::cluster::intake_router_hook::owner_record::{self, custody, output, plan};
 
 pub(crate) struct Fixture {
     pub db: TestPostgresDb,
