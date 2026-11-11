@@ -95,8 +95,8 @@ fn history(turn: &str, text: &str) -> Vec<u8> {
     .concat()
 }
 
-/// A host whose channel already bound a rollout with a turn open that Legacy sent a body from
-/// before the baseline, so that rollout stays Legacy's.
+/// A host whose channel already bound a rollout whose one turn Legacy answered before the
+/// baseline; a queued Legacy body holds every commit until `bind_new` binds the next rollout.
 async fn hosted_over_old(channel: u64) -> Takeover {
     let harness = fresh_on(channel);
     harness.gate.acquired();
@@ -104,11 +104,13 @@ async fn hosted_over_old(channel: u64) -> Takeover {
     p5::set_test_root(Some(harness._runtime.path()));
     let (old, _) = rollout(&harness, "rollout-old.jsonl", &metadata("s-codex"));
     bind_late(channel, &old);
-    append(&old, &[opening(), answer("msg_0", "old answer")].concat());
+    let answered = [opening(), answer("msg_0", "old answer"), turn_end()];
+    append(&old, &answered.concat());
     let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(channel).cloned());
     drop(candidate.unwrap().claim_body(channel));
     let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
     io.late_enabled.store(true, Ordering::SeqCst);
+    io.queued_bodies.store(1, Ordering::SeqCst);
     let tasks = start_codex(&harness, &io, &ready);
     polls(3).await;
     assert_eq!(
@@ -123,6 +125,12 @@ async fn hosted_over_old(channel: u64) -> Takeover {
         tasks,
         _reserved: reserved,
     }
+}
+
+/// Binds the next rollout once the old one's queued Legacy body went out.
+fn bind_new(io: &TestIo, channel: u64, path: &Path) {
+    io.queued_bodies.store(0, Ordering::SeqCst);
+    bind_late(channel, path);
 }
 
 fn legacy_sends(channel: u64) -> bool {
@@ -151,7 +159,7 @@ async fn a_new_rollout_before_any_output_commits_and_o_posts_its_answer_once() {
         _reserved,
     } = hosted_over_old(CODEX).await;
     let (path, source) = rollout(&harness, "rollout-new.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     polls(3).await;
     assert_eq!(
         adoption(CODEX),
@@ -180,7 +188,7 @@ async fn a_new_rollout_before_any_output_commits_and_o_posts_its_answer_once() {
         io.alarms.halted()
     );
     let (next, _) = rollout(&harness, "rollout-next.jsonl", &metadata("s-codex"));
-    bind_late(CODEX, &next);
+    bind_new(&io, CODEX, &next);
     polls(3).await;
     append(&next, &answer("msg_2", "the next answer"));
     polls(3).await;
@@ -200,7 +208,7 @@ async fn a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands() {
         _reserved,
     } = hosted_over_old(CODEX).await;
     let (path, source) = rollout(&harness, "rollout-new.jsonl", &metadata("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     polls(3).await;
     assert_eq!(
         adoption(CODEX),
@@ -264,8 +272,8 @@ async fn a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands() {
     assert_eq!(harness.port.posts(), expected);
 }
 
-/// A Legacy body sent after the baseline, finished or not, skips the rollout bound next without
-/// taking a new baseline on it; the rollout bound after that commits.
+/// A Legacy body sent after the baseline, finished or not, skips the rollout bound next; while that
+/// rollout's turn may hold the body, the rollout bound after it waits too instead of leaving it.
 #[tokio::test(start_paused = true)]
 async fn a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind() {
     for (channel, finished) in [(61_812_u64, true), (61_813, false)] {
@@ -282,7 +290,7 @@ async fn a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
         assert!(!claimed.owned);
         let held = (!finished).then_some(claimed);
         let (skipped, _) = rollout(&harness, "rollout-skipped.jsonl", &prompted("s-codex"));
-        bind_late(channel, &skipped);
+        bind_new(&io, channel, &skipped);
         polls(3).await;
         assert_eq!(adoption(channel), Adoption::Deferred, "finished={finished}");
         assert!(
@@ -291,16 +299,19 @@ async fn a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
         );
         drop(held);
 
-        let (taken, source) = rollout(&harness, "rollout-taken.jsonl", &prompted("s-codex"));
-        bind_late(channel, &taken);
+        let (taken, _) = rollout(&harness, "rollout-taken.jsonl", &prompted("s-codex"));
+        bind_new(&io, channel, &taken);
         polls(3).await;
         assert_eq!(
             adoption(channel),
-            Adoption::Committed,
+            Adoption::Deferred,
             "{:?}",
             io.alarms.halted()
         );
-        assert_eq!(init_sources(&harness, channel), [(source, 0)]);
+        assert!(
+            !harness.store.has_channel_dir(channel),
+            "finished={finished}"
+        );
     }
 }
 
@@ -326,7 +337,7 @@ async fn the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
             }
             Ok(())
         });
-        bind_late(channel, &path);
+        bind_new(&io, channel, &path);
         polls(3).await;
         if race == "output" {
             assert_eq!(
@@ -367,11 +378,12 @@ async fn the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
         }
         assert_eq!(adoption(channel), Adoption::Deferred, "{race}");
         assert!(!harness.store.has_channel_dir(channel), "{race}");
-        let (next, next_source) = rollout(&harness, "rollout-after.jsonl", &prompted("s-codex"));
-        bind_late(channel, &next);
+        // The raced rollout's open turn may hold that send, so the next rollout does not leave it.
+        let (next, _) = rollout(&harness, "rollout-after.jsonl", &prompted("s-codex"));
+        bind_new(&io, channel, &next);
         polls(3).await;
-        assert_eq!(adoption(channel), Adoption::Committed, "{race}");
-        assert_eq!(init_sources(&harness, channel), [(next_source, 0)]);
+        assert_eq!(adoption(channel), Adoption::Deferred, "{race}");
+        assert!(!harness.store.has_channel_dir(channel), "{race}");
     }
 }
 
@@ -395,7 +407,7 @@ async fn a_takeover_cut_off_before_its_era_seal_recovers_its_store_on_the_next_s
         None,
     );
     let (path, source) = rollout(&harness, "rollout-new.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     polls(3).await;
     drop(cut);
     assert_eq!(adoption(CODEX), Adoption::Held, "{:?}", io.alarms.halted());
@@ -660,4 +672,172 @@ async fn an_owed_turn_on_the_rollout_before_a_new_bind_goes_into_the_init() {
         "{:?}",
         io.alarms.halted()
     );
+}
+
+/// Moves the time the binding log records for `channel`'s binds back by `ago`, as if its Codex
+/// execution had started then.
+fn bound_ago(harness: &Harness, channel: u64, ago: chrono::TimeDelta) {
+    let log = (harness._runtime.path())
+        .join(p5::BINDING_EVENTS_DIR)
+        .join(format!("{channel}.log"));
+    let at = (Utc::now() - ago).to_rfc3339();
+    let lines: String = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["committed_at"] = at.clone().into();
+            format!("{event}\n")
+        })
+        .collect();
+    std::fs::write(&log, lines).unwrap();
+    p5::forget_channel_for_tests(channel);
+}
+
+/// Turn `t1` opened `opened` ago and ended `ended` ago, by Codex's clock.
+fn turn_ago(opened: i64, ended: i64) -> Vec<u8> {
+    let at = |secs| (Utc::now() - chrono::TimeDelta::seconds(secs)).to_rfc3339();
+    [
+        codex_line(
+            serde_json::json!({"type": "event_msg", "timestamp": at(opened),
+            "payload": {"type": "task_started", "turn_id": "t1"}}),
+        ),
+        codex_line(
+            serde_json::json!({"type": "response_item", "timestamp": at(opened),
+            "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}]}}),
+        ),
+        answer("msg_1", "ended early"),
+        codex_line(
+            serde_json::json!({"type": "event_msg", "timestamp": at(ended),
+            "payload": {"type": "task_complete", "turn_id": "t1"}}),
+        ),
+    ]
+    .concat()
+}
+
+/// A turn this execution ended before the baseline, behind Legacy's inflight row with no Legacy
+/// send, is posted from its opener once; with no Legacy custody left it was delivered.
+#[tokio::test(start_paused = true)]
+async fn a_turn_ended_before_the_baseline_is_skipped_only_on_delivery_evidence() {
+    for (channel, custody) in [(61_835_u64, Custody::Row), (61_836, Custody::Free)] {
+        let harness = fresh_on(channel);
+        harness.gate.acquired();
+        let _reserved = reserve(channel);
+        p5::set_test_root(Some(harness._runtime.path()));
+        let (path, source) = rollout(&harness, "rollout-ended.jsonl", &metadata("s-codex"));
+        bind_late(channel, &path);
+        bound_ago(&harness, channel, chrono::TimeDelta::seconds(10));
+        let opener = std::fs::metadata(&path).unwrap().len();
+        append(&path, &turn_ago(5, 3));
+        let end = std::fs::metadata(&path).unwrap().len();
+        let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+        io.late_enabled.store(true, Ordering::SeqCst);
+        *io.custody.lock().unwrap() = Ok(custody);
+        let _tasks = start_codex(&harness, &io, &ready);
+        polls(3).await;
+        assert_eq!(
+            adoption(channel),
+            Adoption::Committed,
+            "{:?}",
+            io.alarms.halted()
+        );
+        polls(3).await;
+        if custody == Custody::Row {
+            assert_eq!(init_sources(&harness, channel), [(source, opener)]);
+            let posts = ["ended early".to_owned(), completed_summary(&path)];
+            assert_eq!(harness.port.posts(), posts, "{:?}", io.alarms.halted());
+        } else {
+            assert_eq!(init_sources(&harness, channel), [(source, end)]);
+            assert!(
+                harness.port.posts().is_empty(),
+                "a delivered turn is not reposted"
+            );
+        }
+    }
+}
+
+/// A turn on the rollout bound before, opened before the baseline after a Legacy send and ended
+/// undelivered, keeps a new rollout's takeover waiting; once Legacy delivered both, it commits.
+#[tokio::test(start_paused = true)]
+async fn an_undelivered_turn_on_the_rollout_before_holds_the_next_rollouts_takeover() {
+    const CODEX: u64 = 61_837;
+    let harness = fresh_on(CODEX);
+    harness.gate.acquired();
+    let _reserved = reserve(CODEX);
+    p5::set_test_root(Some(harness._runtime.path()));
+    let (old, _) = rollout(&harness, "rollout-old.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &old);
+    append(&old, &[opening(), answer("msg_0", "old answer")].concat());
+    let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(CODEX).cloned());
+    let candidate = candidate.unwrap();
+    drop(candidate.claim_body(CODEX));
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    io.late_enabled.store(true, Ordering::SeqCst);
+    let _tasks = start_codex(&harness, &io, &ready);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Deferred,
+        "the old turn may be Legacy's"
+    );
+    append(&old, &turn_end());
+    let (path, source) = rollout(&harness, "rollout-new.jsonl", &prompted("s-codex"));
+    bind_late(CODEX, &path);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Deferred,
+        "the new rollout waits on the old turn"
+    );
+    assert!(!harness.store.has_channel_dir(CODEX));
+
+    append(
+        &path,
+        &[answer("msg_1", "the new answer"), turn_end()].concat(),
+    );
+    drop(candidate.claim_body(CODEX));
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    let end = std::fs::metadata(&path).unwrap().len();
+    assert_eq!(init_sources(&harness, CODEX), [(source, end)]);
+    assert!(
+        harness.port.posts().is_empty(),
+        "Legacy delivered both turns"
+    );
+}
+
+/// A turn whose records carry no time cannot be told from this execution's, so the takeover waits
+/// instead of starting past it at the end of the file.
+#[tokio::test(start_paused = true)]
+async fn a_turn_without_a_time_keeps_the_takeover_waiting() {
+    const CODEX: u64 = 61_838;
+    let Takeover {
+        harness,
+        io: _io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    let (path, _) = rollout(&harness, "rollout-undated.jsonl", &metadata("s-codex"));
+    let undated = [
+        codex_line(serde_json::json!({"type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "t1"}})),
+        codex_line(serde_json::json!({"type": "response_item",
+            "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}]}})),
+        codex_line(serde_json::json!({"type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "id": "msg_1",
+            "content": [{"type": "output_text", "text": "undated answer"}]}})),
+    ];
+    append(&path, &undated.concat());
+    bind_late(CODEX, &path);
+    polls(3).await;
+    assert_eq!(adoption(CODEX), Adoption::Deferred);
+    assert!(!harness.store.has_channel_dir(CODEX));
 }

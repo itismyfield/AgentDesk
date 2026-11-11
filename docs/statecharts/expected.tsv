@@ -203,6 +203,8 @@ tui-o-writer/WriterAdoptionWatcherNoGuard.cfg	WriterAdoption	NoEarlyDispatch	-
 tui-o-writer/WriterAdoptionBudgetMut.cfg	WriterAdoption	RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionHeadlessMut.cfg	WriterAdoption	HeadlessKept	-
 tui-o-writer/WriterAdoptionAdvanceOnEnd.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
+tui-o-writer/WriterAdoptionRelayedByTime.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
+tui-o-writer/WriterAdoptionSwallowOwed.cfg	WriterAdoption	NoCommitPastOwed	-
 input-single-path/InputOwnershipPersonBusy.cfg	InputOwnership	-
 input-single-path/InputOwnershipCBBefore.cfg	InputOwnership	CBCloseNotifiesOnce,CBNoStall	CBEventuallyDelivered
 input-single-path/InputOwnershipCBAfter.cfg	InputOwnership	-	-
