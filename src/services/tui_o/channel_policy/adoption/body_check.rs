@@ -6,10 +6,6 @@ use std::sync::{Arc, Mutex};
 
 use super::{Adoption, Candidate};
 
-pub(super) fn note_release(candidate: &Candidate) {
-    candidate.bodiless.store(true, Ordering::SeqCst);
-}
-
 /// The write that carried content to a sink.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SinkOp {

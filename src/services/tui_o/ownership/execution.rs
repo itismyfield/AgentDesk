@@ -1,7 +1,7 @@
 //! A boot snapshot authorizes a local channel host; every raw effect still checks PG.
 use super::OwnershipGate;
 use crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity;
-use crate::services::tui_o::channel_policy::Candidate;
+use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use serde_json::Value;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -70,10 +70,16 @@ pub(crate) struct View {
 }
 
 impl View {
-    pub(crate) fn held(reason: String) -> Self {
+    /// A view whose permit is unverified: the candidate follows the store, so a channel with no
+    /// store is refused rather than owned.
+    pub(crate) fn held(reason: String, stored: Adoption) -> Self {
+        let state = match stored {
+            Adoption::Committed | Adoption::Held => stored,
+            _ => Adoption::Refused,
+        };
         Self {
             permit: Err(reason),
-            candidate: Candidate::new(crate::services::tui_o::channel_policy::Adoption::Held),
+            candidate: Candidate::new(state),
             retained: None,
         }
     }

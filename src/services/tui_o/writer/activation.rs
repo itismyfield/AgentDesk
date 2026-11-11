@@ -1,5 +1,5 @@
 //! First activation of a selected channel with no O store: its `init` is written only while pending
-//! or deferred. A failed check releases only a pending one; after a failed write the store decides.
+//! or deferred. A failed check refuses only a pending one; after a failed write the store decides.
 
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
@@ -221,7 +221,7 @@ fn adopt(
         Err(detail) => {
             // A deferred channel stays deferred: its host decides whether the refusal is final.
             if *adoption == Adoption::Pending {
-                *adoption = Adoption::Released;
+                *adoption = Adoption::Refused;
             }
             return Err(detail);
         }
@@ -255,7 +255,7 @@ fn adopt(
 }
 
 /// After a failed write the store as it now reads decides: an init that recovers commits, no
-/// trace of the channel releases it, and anything else holds it.
+/// trace of the channel refuses it, and anything else holds it.
 pub(crate) fn settled(store: &OStore, channel: u64) -> Adoption {
     let recovered = match store.read_era() {
         Ok(Some(era)) => match store.open_channel(&era, channel) {
@@ -271,7 +271,7 @@ pub(crate) fn settled(store: &OStore, channel: u64) -> Adoption {
     };
     match recovered {
         Some(true) => Adoption::Committed,
-        None if !store.has_channel_dir(channel) => Adoption::Released,
+        None if !store.has_channel_dir(channel) => Adoption::Refused,
         _ => Adoption::Held,
     }
 }
