@@ -3142,6 +3142,7 @@ src/
 │   │   │   ├── supervisor_notice_tests.rs
 │   │   │   ├── supervisor_reader_notice_tests.rs
 │   │   │   ├── supervisor_tests.rs
+│   │   │   ├── supervisor_worker_tests.rs
 │   │   │   ├── unknown_notice.rs
 │   │   │   ├── unknown_notice_store.rs
 │   │   │   └── unknown_notice_tests.rs
