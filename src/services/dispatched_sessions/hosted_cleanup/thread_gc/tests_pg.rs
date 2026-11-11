@@ -114,7 +114,11 @@ async fn thread_gc_rechecks_turn_occupancy_and_deadline_after_missing_probe_pg()
             }
         })
         .await;
-        assert_eq!(deleted, [control.clone()], "{change}");
+        assert_eq!(
+            deleted.as_slice(),
+            std::slice::from_ref(&control),
+            "{change}"
+        );
         assert_deleted(&pool, &control).await;
         let expected = changed
             .lock()
@@ -183,7 +187,11 @@ async fn thread_gc_rechecks_snapshot_identity_after_missing_probe_pg() {
             }
         })
         .await;
-        assert_eq!(deleted, [control.clone()], "{change}");
+        assert_eq!(
+            deleted.as_slice(),
+            std::slice::from_ref(&control),
+            "{change}"
+        );
         assert_deleted(&pool, &control).await;
         let expected = changed
             .lock()
@@ -251,7 +259,7 @@ async fn thread_gc_keeps_unknown_host_and_probe_failure_before_delete_pg() {
         }
     })
     .await;
-    assert_eq!(deleted, [control.clone()]);
+    assert_eq!(deleted.as_slice(), std::slice::from_ref(&control));
     assert_deleted(&pool, &control).await;
     let mut actual = probed.lock().unwrap().clone();
     actual.sort();
