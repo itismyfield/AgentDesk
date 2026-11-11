@@ -69,10 +69,48 @@ struct Entry {
 
 #[cfg(unix)]
 #[derive(PartialEq, Eq)]
-struct Witness {
-    device: u64,
-    inode: u64,
-    bytes: Option<Vec<u8>>,
+enum Witness {
+    File {
+        device: u64,
+        inode: u64,
+        bytes: Option<Vec<u8>>,
+    },
+    Rollout(RolloutWitness),
+}
+
+#[cfg(unix)]
+#[derive(serde::Deserialize, PartialEq, Eq)]
+struct RolloutWitness {
+    rollout_path: PathBuf,
+    session_id: Option<String>,
+    codex_ownership: Option<RolloutProof>,
+    #[serde(skip)]
+    source: Option<(u64, u64)>,
+}
+
+#[cfg(unix)]
+#[derive(serde::Deserialize, PartialEq, Eq)]
+struct RolloutProof {
+    execution_nonce: String,
+    proof_seq: u64,
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+impl RolloutWitness {
+    fn capture(bytes: &[u8]) -> Option<Self> {
+        let mut identity: Self = serde_json::from_slice(bytes).ok()?;
+        if identity.rollout_path.as_os_str().is_empty() {
+            return None;
+        }
+        identity.source = match std::fs::metadata(&identity.rollout_path) {
+            Ok(metadata) if metadata.is_file() => Some((metadata.dev(), metadata.ino())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            _ => return None,
+        };
+        Some(identity)
+    }
 }
 
 #[cfg(unix)]
@@ -172,7 +210,13 @@ impl Entry {
             if extension == "owner" && bytes != owner.as_bytes() {
                 return Err("runtime hint owner mapping is ambiguous".into());
             }
-            Ok(Some(Witness {
+            // Discovery republishes the same proof atomically; its storage inode is not an execution.
+            if extension == "codex-tui-rollout.json"
+                && let Some(identity) = RolloutWitness::capture(&bytes)
+            {
+                return Ok(Some(Witness::Rollout(identity)));
+            }
+            Ok(Some(Witness::File {
                 device: metadata.dev(),
                 inode: metadata.ino(),
                 bytes: metadata.is_file().then_some(bytes),
@@ -976,6 +1020,56 @@ mod tests {
         crate::test_support::wait::await_within(successor, WAIT)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn rollout_execution_identity_changes_revoke_an_initial_publisher() {
+        use crate::services::tui_prompt_dedupe as dedupe;
+        let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+        let _state = dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for change in [
+            "nonce",
+            "proof_seq",
+            "path",
+            "session",
+            "declared_source",
+            "source",
+        ] {
+            let session = format!("fence-rollout-{change}-{}", uuid::Uuid::new_v4());
+            let source = root.path().join(format!("{change}.jsonl"));
+            std::fs::write(&source, "same transcript").unwrap();
+            let metadata = std::fs::metadata(&source).unwrap();
+            let mut value = serde_json::json!({
+                "rollout_path": source, "session_id": "native", "rollout_start_offset": 0,
+                "codex_ownership": {"execution_nonce": "nonce", "proof_seq": 7,
+                    "dev": metadata.dev(), "ino": metadata.ino()}
+            });
+            let _ = super::super::agentdesk_temp_dir();
+            let marker = super::super::session_temp_path(&session, "codex-tui-rollout.json");
+            std::fs::write(&marker, value.to_string()).unwrap();
+            let observation = TmuxPublisherObservation::capture(&session).unwrap();
+            match change {
+                "nonce" => value["codex_ownership"]["execution_nonce"] = "successor".into(),
+                "proof_seq" => value["codex_ownership"]["proof_seq"] = 8.into(),
+                "path" => {
+                    value["rollout_path"] =
+                        root.path().join("other.jsonl").display().to_string().into()
+                }
+                "session" => value["session_id"] = "successor".into(),
+                "declared_source" => value["codex_ownership"]["ino"] = (metadata.ino() + 1).into(),
+                "source" => {
+                    std::fs::rename(&source, source.with_extension("previous")).unwrap();
+                    std::fs::write(&source, "same transcript").unwrap();
+                    assert_ne!(std::fs::metadata(&source).unwrap().ino(), metadata.ino());
+                }
+                _ => unreachable!(),
+            }
+            std::fs::write(&marker, value.to_string()).unwrap();
+            let error = observation.acquire().unwrap_err();
+            assert!(error.contains("initial observation"), "{change}: {error}");
+        }
     }
 
     #[test]

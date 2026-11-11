@@ -161,6 +161,17 @@ async fn restore_disk_head(fixture: &mut CanaryFixture) -> QueueIdentity {
 }
 
 async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, stale: bool) {
+    restored_head_reaches_provider_with_capture(marker, warm, stale, None).await;
+}
+
+type CaptureEffect = fn(&CanaryFixture) -> Box<dyn FnOnce(bool) + Send>;
+
+async fn restored_head_reaches_provider_with_capture(
+    marker: HistoricalMarker,
+    warm: bool,
+    stale: bool,
+    after_capture: Option<CaptureEffect>,
+) {
     let mut fixture =
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
@@ -228,9 +239,13 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
     ));
     let _cli = fixture.cold_cli();
     let (request_tx, request_rx) = mpsc::channel();
+    let capture_effect = after_capture.map(|effect| effect(&fixture));
     let _request_setup = crate::services::discord::codex_absence::test_setup::install(
         CANARY_CHANNEL,
         Box::new(move |_| {
+            if let Some(effect) = capture_effect {
+                crate::services::codex::actual_submit_tests::after_initial_absence_capture(effect);
+            }
             let row = crate::services::discord::inflight::load_inflight_state_read_only_result(
                 &ProviderKind::Codex,
                 CANARY_CHANNEL,
@@ -461,6 +476,10 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
         "{marker:?}: real provider must cold-launch the restored head once; actual calls={calls:?}"
     );
     let new = new.expect("a provider hold is not a fresh launch");
+    assert!(
+        matches!(hold_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "a successful fresh submission must never enter preserving hold"
+    );
     assert_eq!(
         request_rx
             .try_recv()
