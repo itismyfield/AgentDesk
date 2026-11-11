@@ -14,7 +14,7 @@ use crate::services::tui_o::writer::adoption;
 use crate::services::tui_o::writer::binding::{
     BindingEvent, BindingEvents, BindingRecord, BindingTarget,
 };
-use crate::services::tui_o::writer::host::{FencedFacts, HostIo, release, until_owned};
+use crate::services::tui_o::writer::host::{Custody, FencedFacts, HostIo, release, until_owned};
 use crate::services::tui_o::writer::renumbered;
 use crate::services::tui_o::writer::rotation::bound_source;
 
@@ -86,15 +86,14 @@ pub(super) enum Plan<'p> {
 enum Start {
     /// The earliest turn of its execution, ended or not, that Legacy provably sent nothing of.
     Owed(u64),
-    /// The end of its last complete record: every turn predates its bind or ended before the
-    /// baseline was read.
+    /// The end of its last complete record: every turn predates its bind or Legacy delivered it.
     End(u64),
     /// Legacy may have sent part of that turn; it is judged again later.
     Legacy(String),
 }
 
-/// When the baseline's sends were read: a turn that ended before then was Legacy's to relay, and
-/// one opened after then holds no Legacy send while those sends stay unchanged.
+/// When the baseline's sends were read: a turn that ended before then and that Legacy holds no
+/// custody for was delivered, and one opened after then holds no Legacy send while they hold.
 #[derive(Clone, Copy)]
 pub(super) struct Since {
     at: DateTime<Utc>,
@@ -263,7 +262,10 @@ impl<I: HostIo> Takeover<'_, I> {
                 "the takeover rollout has no first user prompt yet".into(),
             )),
             Some(Verdict::Eligible(prefix)) => {
-                let owed = self.owed(&events, &bound, (at, since), sent_from);
+                let owed = match self.owed(&events, &bound, (at, since), sent_from) {
+                    Ok(owed) => owed,
+                    Err(taken) => return Err(taken),
+                };
                 self.fenced(at, &bound, Plan::Fresh(&prefix, &owed))
                     .await
                     .map_err(|taken| match taken {
@@ -312,13 +314,13 @@ impl<I: HostIo> Takeover<'_, I> {
             Start::Owed(start) | Start::End(start) => start,
             Start::Legacy(detail) => return Err(Taken::Retry(detail)),
         };
-        let mut sources = self.owed(events, bound, (at, since), sent_from);
+        let mut sources = self.owed(events, bound, (at, since), sent_from)?;
         sources.push(ranged(&bound.0, start)?);
         self.fenced(at, bound, Plan::Warm(&sources)).await
     }
 
-    /// Where O starts on `source`: at the earliest turn of the execution its bind names that did not
-    /// end before the baseline was read, ended or not, once no Legacy send can be part of it.
+    /// Where O starts on `source`: at the earliest turn of the execution its bind names, ended or
+    /// not, that Legacy is not shown to have delivered, once no Legacy send can be part of it.
     fn start_on(
         &self,
         events: &[BindingEvent],
@@ -331,14 +333,32 @@ impl<I: HostIo> Takeover<'_, I> {
             .iter()
             .find(|e| e.seq == *seq)
             .map(|e| e.committed_at);
-        let this_execution = |turn: &&Span| {
+        // A turn of unknown time cannot be told from this execution's, so it is never skipped.
+        let earlier = |turn: &&Span| {
             (turn.opened_at.zip(bound_at))
-                .is_some_and(|(opened, bound_at)| opened + BIND_CLOCK_SLACK >= bound_at)
+                .is_some_and(|(opened, bound_at)| opened + BIND_CLOCK_SLACK < bound_at)
         };
-        let relayed = |turn: &&Span| matches!(turn.ended_at, Some(Some(ended)) if ended + BIND_CLOCK_SLACK < since.at);
-        let Some(turn) = (turns.iter().filter(this_execution)).find(|turn| !relayed(turn)) else {
+        let turns: Vec<&Span> = turns.iter().filter(|turn| !earlier(turn)).collect();
+        let ended_before = |turn: &Span| matches!(turn.ended_at, Some(Some(end)) if end < since.at);
+        let last_ended = turns.iter().rposition(|turn| ended_before(turn));
+        // Legacy keeps one inflight row per channel, so its custody can owe only the last turn that
+        // ended before the baseline; with none held, every such turn was delivered.
+        let idle = matches!(
+            self.io.local_custody(self.channel, self.provider),
+            Ok(Custody::Free)
+        ) && !self.io.relaying(self.channel);
+        let delivered = |at: usize| ended_before(turns[at]) && (idle || Some(at) != last_ended);
+        let Some(turn) = (0..turns.len())
+            .find(|at| !delivered(*at))
+            .map(|at| turns[at])
+        else {
             return Ok(Start::End(complete));
         };
+        if turn.opened_at.is_none() {
+            return Ok(Start::Legacy(
+                "a turn the rollout does not date may be undelivered".into(),
+            ));
+        }
         if turn.ended_at.is_none() && sent_from.contains(source) {
             return Ok(Start::Legacy(
                 "a turn Legacy sent from is still open".into(),
@@ -351,25 +371,29 @@ impl<I: HostIo> Takeover<'_, I> {
             Ok(Start::Owed(turn.opened))
         } else {
             Ok(Start::Legacy(
-                "Legacy may have sent from the execution's earliest unrelayed turn".into(),
+                "Legacy may have sent from the execution's earliest undelivered turn".into(),
             ))
         }
     }
 
-    /// The source bound just before `bound`, from its earliest turn owed to O, when one is.
+    /// The source bound just before `bound`, from its earliest turn owed to O; a turn there that
+    /// Legacy may have sent part of retries the takeover instead of being left behind.
     fn owed(
         &self,
         events: &[BindingEvent],
         bound: &(SourceId, u64),
         (at, since): (Baseline, Since),
         sent_from: &[SourceId],
-    ) -> Vec<InitSource> {
+    ) -> Result<Vec<InitSource>, Taken> {
         let Some(previous) = bound_before(events, bound) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        match self.start_on(events, &previous, (at, since), sent_from) {
-            Ok(Start::Owed(start)) => ranged(&previous.0, start).into_iter().collect(),
-            _ => Vec::new(),
+        match self.start_on(events, &previous, (at, since), sent_from)? {
+            Start::Owed(start) => Ok(vec![ranged(&previous.0, start)?]),
+            Start::End(_) => Ok(Vec::new()),
+            Start::Legacy(detail) => {
+                Err(Taken::Retry(format!("the rollout bound before: {detail}")))
+            }
         }
     }
 
