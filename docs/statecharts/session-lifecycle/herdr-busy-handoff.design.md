@@ -1,6 +1,6 @@
 # Claude busy forward handoff — implementation slice A
 
-Implementation code SHA: `97292a8beb12d2ad2ee451d80be6852d2d845c02`. The following documentation commit changes no production code.
+Implementation code SHA: `bc5cd87fa24778737d23d98b4f959c19e1d42025`. The following documentation commit changes no production code.
 
 Code base: `07b57b5724f6bede32f7cc0cf00c7a23652ff3c2`; implementation starts on merge `92dd105adb37ec99df1496542f7641fc092d4c15`. This replaces the r2 proposal. The final implementation SHA and Rust evidence are recorded in `/home/adk/adk/lane-runs/i8077/report-impl-3.md`; model hash and actual cfg results are in the companion report.
 
