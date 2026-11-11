@@ -238,7 +238,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str, hosted: Option<Value>) -> Self {
-        let root = TestRuntimeRootGuard::new();
+        Self::with_root(tag, hosted, TestRuntimeRootGuard::new())
+    }
+
+    fn with_root(tag: &str, hosted: Option<Value>, root: TestRuntimeRootGuard) -> Self {
         let home = tempfile::tempdir().unwrap();
         let env = Guard::set_path_after_shared_test_env_lock("CLAUDE_CONFIG_DIR", home.path());
         let claude_bin = home.path().join("claude");

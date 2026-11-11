@@ -312,7 +312,8 @@ impl Drop for OldTmux {
 
 #[test]
 fn f3_a_person_draft_is_closed_without_reading_or_submitting_it_pg() {
-    let fx = Fixture::new("resume-f3-draft", None);
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let fx = Fixture::with_root("resume-f3-draft", None, root);
     let (session, path) = fx.seed_resumable(true);
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
