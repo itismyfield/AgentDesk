@@ -3,37 +3,30 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
 
-use serde::{Deserialize, Serialize};
-
 use super::{
     DEFAULT_PROFILE_ID, ProviderAuthProfileDef, extra_account_login_supported, intern_provider,
 };
 use crate::services::provider::ProviderKind;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub struct FallbackPolicy {
-    pub enabled: bool,
-    pub fallback_profile: Option<String>,
-    pub priority: Vec<String>,
-    pub include_remaining: bool,
-    pub cooldown_secs: u32,
+pub use crate::domain::provider_auth_profile::FallbackPolicy;
+
+pub(crate) trait FallbackPolicyRuntime {
+    fn validate(
+        &self,
+        provider: &ProviderKind,
+        catalog: &HashMap<String, ProviderAuthProfileDef>,
+    ) -> Result<(), String>;
+
+    fn candidates(
+        &self,
+        provider: &ProviderKind,
+        primary: &str,
+        catalog: &HashMap<String, ProviderAuthProfileDef>,
+    ) -> Vec<String>;
 }
 
-impl Default for FallbackPolicy {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            fallback_profile: None,
-            priority: Vec::new(),
-            include_remaining: true,
-            cooldown_secs: 300,
-        }
-    }
-}
-
-impl FallbackPolicy {
-    pub fn validate(
+impl FallbackPolicyRuntime for FallbackPolicy {
+    fn validate(
         &self,
         provider: &ProviderKind,
         catalog: &HashMap<String, ProviderAuthProfileDef>,
@@ -64,7 +57,7 @@ impl FallbackPolicy {
     }
 
     /// Current, explicit fallback, priority, sorted remainder; global home is opt-in.
-    pub fn candidates(
+    fn candidates(
         &self,
         provider: &ProviderKind,
         primary: &str,
