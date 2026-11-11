@@ -1,4 +1,16 @@
 //! Durable V2 data: the owner's queue, attempts, retained inputs and admission binds.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ClaudeHandoffJournal {
+    pub(crate) id: String,
+    pub(crate) logical: String,
+    pub(crate) session_key: String,
+    pub(crate) original: QueueIdentity,
+    pub(crate) pin: Option<serde_json::Value>,
+    pub(crate) ended: bool,
+    pub(crate) failures: u32,
+    pub(crate) notice_acked: bool,
+}
+
 use super::{HeadPhase, PendingQueueItem, QueueIdentity};
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +34,7 @@ pub(crate) struct SnapshotV2 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) owed_drop_receipts: Vec<OwedDrop>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) unfinished_handoff: Option<super::v2::claude_handoff::Journal>,
+    pub(crate) unfinished_handoff: Option<ClaudeHandoffJournal>,
 }
 
 /// A removed input's terminal receipt not yet in the database; acked once it is.

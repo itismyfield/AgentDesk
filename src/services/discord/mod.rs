@@ -256,8 +256,6 @@ pub(crate) use queue_io::input_ingress::{
     ADOPTS as OWNER_ADOPTS_FOR_TEST, execution as owner_execution_for_test,
     installed as input_owner_installed_for_test,
 };
-#[cfg(unix)]
-pub(crate) use queue_io::input_owner::held_watch::arm as arm_herdr_input_watch;
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_owner::origin::Execution as OwnerExecutionForTest;
 #[cfg(all(test, unix))]

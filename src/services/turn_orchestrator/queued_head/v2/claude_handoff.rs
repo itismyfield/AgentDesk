@@ -1,17 +1,7 @@
 //! A forward handoff owns no second input copy and never selects the old composer.
 use super::*;
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Journal {
-    pub(crate) id: String,
-    pub(crate) logical: String,
-    pub(crate) session_key: String,
-    pub(crate) original: QueueIdentity,
-    pub(crate) pin: Option<serde_json::Value>,
-    pub(crate) ended: bool,
-    pub(crate) failures: u32,
-    pub(crate) notice_acked: bool,
-}
+use super::ClaudeHandoffJournal as Journal;
 impl Owner {
     pub(crate) fn handoff(&self) -> Option<Journal> {
         self.snapshot.unfinished_handoff.clone()

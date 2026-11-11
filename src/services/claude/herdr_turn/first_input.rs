@@ -15,15 +15,7 @@ pub(super) fn submit(
     sender: &Sender<StreamMessage>,
 ) -> Result<Option<Submitted>, String> {
     let (logical, cancel) = (turn.owner.logical_key.as_str(), turn.cancel.as_deref());
-    write(
-        logical,
-        turn.channel_id,
-        cancel,
-        attached,
-        turn.prompt,
-        sender,
-    )
-    .map_err(SubmissionError::into_legacy)
+    write(logical, cancel, attached, turn.prompt, sender).map_err(SubmissionError::into_legacy)
 }
 
 /// The prompt through the owner waiting on this thread: it reserves the frame on the execution
@@ -54,17 +46,9 @@ pub(super) fn submit_owned(
     };
     let slot = Arc::new(std::sync::Mutex::new(None));
     let (ticket, cancel, sender) = (slot.clone(), turn.cancel.clone(), sender.clone());
-    let channel = turn.channel_id;
     let submit = Box::new(move |frame: String| {
         guarded_outcome::capture_preparation(|| {
-            let written = write(
-                &logical,
-                channel,
-                cancel.as_deref(),
-                attached,
-                &frame,
-                &sender,
-            )?;
+            let written = write(&logical, cancel.as_deref(), attached, &frame, &sender)?;
             let submitted = written
                 .ok_or_else(|| before_payload(&logical, "input cancelled before first key"))?;
             *ticket.lock().unwrap_or_else(|e| e.into_inner()) = Some(submitted);
@@ -84,7 +68,6 @@ pub(super) fn submit_owned(
 
 fn write(
     logical: &str,
-    channel: u64,
     cancel: Option<&CancelToken>,
     attached: Attached,
     prompt: &str,
@@ -133,9 +116,8 @@ fn write(
         InputRun::Applied => (),
         stopped @ (InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }) => {
             let pane = attached.target.clone();
-            crate::services::discord::arm_herdr_input_watch(
-                channel,
-                Box::new(move || {
+            crate::services::claude_tui::owner_input::record_preparation_watch(Box::new(
+                move || {
                     use crate::services::claude_tui::busy_inject::Screen;
                     match composer::when_ready(
                         || pane.capture_ansi(-80),
@@ -145,8 +127,8 @@ fn write(
                         InputRun::Applied => Screen::Ready,
                         _ => Screen::Unknown,
                     }
-                }),
-            );
+                },
+            ));
             return Err(before_payload(
                 logical,
                 &format!("Claude composer held before first key: {stopped:?}"),
@@ -467,7 +449,7 @@ mod regression_tests {
             Box::new(move |frame: String| {
                 guarded_outcome::capture_preparation(|| {
                     let (sender, receiver) = std::sync::mpsc::channel();
-                    let result = write(logical, channel, None, attached, &frame, &sender).map(drop);
+                    let result = write(logical, None, attached, &frame, &sender).map(drop);
                     drop(receiver);
                     result
                 })
@@ -522,7 +504,7 @@ mod regression_tests {
             Box::new(move |frame: String| {
                 guarded_outcome::capture_preparation(|| {
                     let (sender, receiver) = std::sync::mpsc::channel();
-                    let result = write(logical, channel, None, attached, &frame, &sender).map(drop);
+                    let result = write(logical, None, attached, &frame, &sender).map(drop);
                     drop(receiver);
                     result
                 })
