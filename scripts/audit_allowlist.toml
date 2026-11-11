@@ -41,7 +41,7 @@ direct_discord_sends = [
   # issue announcements keep this typed PATCH until the #1448 legacy
   # announce-token fallback is removed; deliver_outbound currently collapses
   # HTTP status / Discord error code into a string on edit failures.
-  "src/services/issue_announcements.rs#direct_discord_sends:c953e696eec38deb",
+  "src/services/issue_announcements.rs#direct_discord_sends:22929ae84677520c",
   # The recovery-notice direct gateway edit in the recovery_retry child handler,
   # sent only once a retry with history is queued.
   "src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs#direct_discord_sends:9d11d1d0a3eb499d",

@@ -21,6 +21,7 @@ dedup·nonce 권한과 receipt 기록 순서가 그대로인지 확인한다. `C
 - `NoDuplicatePost`: 같은 intent의 Discord 게시는 1번 이하.
 - `NoSilentLoss`: 요청이 모두 끝났는데 게시가 없으면 적어도 한 요청이 transient/permanent 실패를 들고 있다.
 - `NoSuccessWithoutReceipt`: sent/duplicate는 자기 intent의 실제 게시를 가리킨다.
+- `NoPostWithoutReservation`: 모든 게시 시도는 그 key의 예약을 쥔 요청만 한다(nonce가 중복을 가려도 잡는다).
 - `EveryRequestSettles`(PROPERTY): 모든 요청이 끝난다.
 
 ## 결과 (plain TLC, `scripts/ci/statecharts_tlc.py`)
@@ -34,7 +35,8 @@ dedup·nonce 권한과 receipt 기록 순서가 그대로인지 확인한다. `C
 | AfterNoNonceRestart | domain / none / 없음 / 없음 / 1 | NoDuplicatePost |
 | LossyKey | lossy / enforced / 있음 / 없음 / 1 | NoSilentLoss, NoSuccessWithoutReceipt |
 | RecordBeforePost | domain / enforced / 없음 / 게시 전 기록 / 0 | NoSilentLoss, NoSuccessWithoutReceipt |
-| NoReserve | domain / none / 없음 / 예약 생략 / 0 | NoDuplicatePost |
+| NoReserve | domain / none / 없음 / 예약 생략 / 0 | NoDuplicatePost, NoPostWithoutReservation |
+| NoReserveNonce | domain / enforced / 없음 / 예약 생략 / 0 | NoPostWithoutReservation |
 
 `EveryRequestSettles`는 모든 cfg에서 성립한다.
 NoNonce 두 cfg는 현재 코드의 알려진 한계다. 메모리 deduper는 재시작·재시도를 넘지 못하고, 그 경로의 중복 방지는 durable outbox와 nonce가 맡는다.
@@ -47,3 +49,30 @@ LossyKey는 Serenity ID → 값 ID 변환이 thread parent를 버리면 다른 i
 - split/compact/파일 fallback·thread parent 재시도: 같은 예약 안의 전송 변형이며 receipt 기록 위치는 같다.
 - durable `message_outbox`·delivery_record·receipt_index: 별도 소유자이며 이번 이동이 건드리지 않는다.
 - 취소(`CancelToken`): 호출자 의사에 따른 Skip이며 손실 규칙 대상이 아니다.
+
+## caller 흐름 (`OutboundCallerFlow.tla`)
+
+코드 SHA `ae9e46fdfe114591d20bce6abec816c0467f15d4`. routine 로그·이슈 공지·dispatch 완료 요약 caller가 결과를 어떻게 다루는지(재시도·fallback·관측 순서)와,
+send가 어느 deduper를 쓰는지를 본다. `Entry`: caller가 공유 deduper를 넘김(이동 전) / adapter port가 묶음(이동 후) / caller가 새 deduper를 만듦(변형).
+
+| 모델 값 | 범위 | 코드 |
+|---|---|---|
+| routine edit 결과 | ok / transient(→Err) / permanent·missing(→replacement send) / skip(→Err) | `src/services/routines/discord_log.rs:574-622` |
+| routine send | window 0(예약 없음), 결과 → Ok/Err | `discord_log.rs:572,626-650` |
+| 이슈 공지 send | review_notification(예약), Skip → Err | `src/services/issue_announcements.rs:393-420` |
+| dispatch 요약 send | review_notification(예약), Duplicate·Skip → Ok(()) | `src/services/dispatches/outbox_route.rs:491-515` |
+| 관측 | 매 raw HTTP 시도 begin/result 기록 뒤 반환 | `src/services/discord/outbound/raw_output.rs:136,153,190-200` |
+
+규칙: `ReplacementOnlyAfterAuthoritativeEditFailure`, `ObservedBeforeOutcome`, `NoDuplicatePost`, `OkHasReceipt`, `SettledOutcome`, PROPERTY `EveryRequestSettles`.
+
+| cfg | 깨진 규칙 |
+|---|---|
+| RoutineBefore / RoutineAfter | - |
+| IssueBefore / IssueAfter | - |
+| OutboxBefore / OutboxAfter | - |
+| RoutineFallbackOnTransient | ReplacementOnlyAfterAuthoritativeEditFailure |
+| RoutineObserveAfter | ObservedBeforeOutcome |
+| OutboxFreshDeduper | NoDuplicatePost |
+
+dispatch 요약의 Skip→Ok(())는 기존 동작이다. 같은 key의 예약을 쥔 다른 요청이 실패를 들고 재시도 권한을 가진다(`OutboundPort` NoSilentLoss). 모델은 이를 `ok_skip`으로 따로 둔다.
+모델 밖: 이슈 공지의 edit는 deduper를 거치지 않는 직접 edit이고 실패를 HTTP 상태와 함께 돌려준다(fallback 없음). routine 로그의 thread 생성·HealthRegistry 경로, durable 재시도 주기는 이번 이동과 무관하다.
