@@ -396,6 +396,7 @@ src/
 │   ├── auto_queue_log.rs
 │   ├── bot_role.rs
 │   ├── file_sync.rs
+│   ├── host_observation.rs
 │   ├── human_input.rs
 │   ├── intake_identity.rs
 │   ├── lifecycle.rs
@@ -3377,6 +3378,7 @@ src/
 │   │   ├── force_kill.rs
 │   │   ├── herdr_kill.rs
 │   │   ├── hook.rs
+│   │   ├── hosted_cleanup.rs
 │   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
