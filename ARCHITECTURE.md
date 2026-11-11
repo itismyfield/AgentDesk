@@ -380,6 +380,18 @@ src/
 ├── domain/
 │   ├── atomic_write/
 │   │   └── tests.rs
+│   ├── campaign/
+│   │   ├── candidate_seal.rs
+│   │   ├── definition.rs
+│   │   ├── evidence.rs
+│   │   ├── evidence_gate.rs
+│   │   ├── execution_pin.rs
+│   │   ├── mod.rs
+│   │   ├── model.rs
+│   │   ├── profile.rs
+│   │   ├── review_gate.rs
+│   │   ├── verification_run.rs
+│   │   └── workspace.rs
 │   ├── intake_consent/
 │   │   └── decision.rs
 │   ├── message_split/
