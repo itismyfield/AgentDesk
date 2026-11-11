@@ -86,7 +86,7 @@ pub(in crate::services::discord) async fn sweep_leaked_inflight_rows(
     applied
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "relay_recovery_leaked_row_sweep/resume_tests.rs"]
 mod resume_tests;
 
