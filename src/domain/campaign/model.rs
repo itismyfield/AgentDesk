@@ -26,13 +26,15 @@ macro_rules! domain_enum {
     };
 }
 domain_enum!(Repository { Adk, CookingHeart });
-domain_enum!(CampaignControl {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CampaignControl {
     Prepared,
     Running,
     Stopping,
     Stopped,
-    Succeeded
-});
+    Succeeded,
+}
 domain_enum!(StopMode {
     Immediate,
     FinishStage
@@ -87,7 +89,9 @@ domain_enum!(ActionState {
     Unknown
 });
 domain_enum!(ExecutionReadiness { Unavailable });
-domain_enum!(RejectionCode {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectionCode {
     InvalidDefinition,
     StaleDefinition,
     StaleRun,
@@ -102,8 +106,8 @@ domain_enum!(RejectionCode {
     GateNotPassed,
     MissingChangeReason,
     CompletedNodeChanged,
-    AlreadyExists
-});
+    AlreadyExists,
+}
 domain_enum!(ReasonCode {
     ExecutionUnavailable,
     ReviewResources,

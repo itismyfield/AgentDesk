@@ -5,8 +5,14 @@ use sqlx::{PgPool, Postgres, Row, Transaction, types::Json};
 
 use crate::domain::campaign::{
     definition::{self, DefinitionInput},
-    model::*,
+    model::{
+        CampaignControl, CampaignState, Command, CommandEnvelope, CommandResult, Decision, Event,
+        EventKind, EvidenceWrite, NodeRuntime, Rejection, RejectionCode, Run, command_fingerprint,
+    },
 };
+
+#[cfg(test)]
+use crate::domain::campaign::model::*;
 
 pub mod evidence_store;
 mod read;
