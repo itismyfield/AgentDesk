@@ -53,9 +53,9 @@ fn republish_after_capture(
             captured,
             "the fixture must reach verified-absence admission"
         );
-        let before_inode = fs::metadata(&marker).unwrap().ino();
-        let before: serde_json::Value =
-            serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        // Keep the old file alive through persist so its inode cannot be recycled.
+        let before_marker = fs::File::open(&marker).unwrap();
+        let before: serde_json::Value = serde_json::from_reader(&before_marker).unwrap();
         if advance_cursor {
             let offset = fs::metadata(&source).unwrap().len();
             assert!(dedupe::advance_tmux_runtime_binding_offset(
@@ -74,7 +74,13 @@ fn republish_after_capture(
         } else {
             dedupe::resolve_codex_claims();
         }
-        assert_ne!(fs::metadata(&marker).unwrap().ino(), before_inode);
+        let pinned = before_marker.metadata().unwrap();
+        let published = fs::metadata(&marker).unwrap();
+        assert_ne!(
+            (published.dev(), published.ino()),
+            (pinned.dev(), pinned.ino())
+        );
+        drop(before_marker);
         let after: serde_json::Value = serde_json::from_slice(&fs::read(marker).unwrap()).unwrap();
         for key in ["codex_ownership", "rollout_path", "session_id"] {
             assert_eq!(after[key], before[key], "same execution changed {key}");
