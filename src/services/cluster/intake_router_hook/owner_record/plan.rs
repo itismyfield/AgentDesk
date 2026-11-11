@@ -1,5 +1,6 @@
 //! A staged plan preserves its observed home and owner; promotion must recheck both.
 use super::{OwnerIdentity, custody, fallback::Target, snapshot};
+use crate::db::channel_custody_lock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
@@ -45,7 +46,7 @@ pub(crate) async fn save_on_tx(
     delivery: i64,
     observation: &snapshot::Shared,
 ) -> Result<Option<Plan>, sqlx::Error> {
-    custody::lock(tx, id).await?;
+    channel_custody_lock::lock(tx, id).await?;
     let Some(plan) = build(observation)? else {
         return Ok(None);
     };
@@ -112,7 +113,7 @@ pub(crate) async fn replan_held(
     context: &snapshot::Context,
 ) -> Result<Option<(i64, Plan)>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    custody::lock(&mut tx, id).await?;
+    channel_custody_lock::lock(&mut tx, id).await?;
     let fresh = snapshot::read_on_tx(&mut tx, id, context).await?;
     let Some(observed) = build(&fresh)? else {
         return Ok(None);
@@ -189,7 +190,7 @@ pub(crate) async fn replan_stale(
 
 async fn release_held(pool: &sqlx::PgPool, id: &OwnerIdentity) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
-    custody::lock(&mut tx, id).await?;
+    channel_custody_lock::lock(&mut tx, id).await?;
     let held: Vec<(i64, i64)> = sqlx::query_as("SELECT d.id,d.routing_receipt_id FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.provider=$1 AND d.channel_id=$2 AND d.routing_state='held' AND r.replay_disposition='registered_not_started' ORDER BY d.id FOR UPDATE OF d")
         .bind(id.provider()).bind(id.raw_channel_id()).fetch_all(&mut *tx).await?;
     let target = format!("channel:{}", id.raw_channel_id());

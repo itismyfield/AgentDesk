@@ -10,6 +10,7 @@ rules = [
   { prefix = "config::peer_filter", root = "src/lib.rs", layer = "vocabulary", reason = "설정의 peer-filter enum과 기본값만 정의한다.", evidence = ["src/config/peer_filter.rs:1", "src/config/peer_filter.rs:7"] },
   { prefix = "config::runtime_settings", root = "src/lib.rs", layer = "vocabulary", reason = "런타임 설정 DTO의 serde·기본값·빈 값 계약을 정의한다.", evidence = ["src/config/runtime_settings.rs:1", "src/config/runtime_settings.rs:6"] },
   { prefix = "db", root = "src/lib.rs", layer = "adapter", reason = "DB repository가 SQL 선택·기록·트랜잭션 경계를 소유한다.", evidence = ["src/db/mod.rs:1", "src/db/auto_queue/runs.rs:1"] },
+  { prefix = "db::channel_custody_lock", root = "src/lib.rs", layer = "adapter", reason = "호출자가 제공한 기존 PostgreSQL transaction에서 동일 channel owner key의 custody advisory lock을 획득한다.", evidence = ["src/db/channel_custody_lock.rs:5", "src/db/channel_custody_lock.rs:10"] },
   { prefix = "dispatch", root = "src/lib.rs", layer = "application", reason = "dispatch 생성·취소·완료 상태 전이의 업무 orchestration이다.", evidence = ["src/dispatch/mod.rs:1"] },
   { prefix = "domain", root = "src/lib.rs", layer = "vocabulary", reason = "공유 값 계약의 실제 소유 모듈만 등록한다.", evidence = ["src/domain/mod.rs:1"] },
   { prefix = "domain::atomic_write", root = "src/lib.rs", layer = "adapter", reason = "temp 생성·write·file sync·rename을 소유하며 단계와 미게시 I/O 오류를 반환한다. 상위 관측과 parent sync를 실행하지 않는다.", evidence = ["src/domain/atomic_write.rs:51", "src/domain/atomic_write.rs:85"] },
