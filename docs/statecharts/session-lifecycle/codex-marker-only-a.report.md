@@ -33,7 +33,7 @@ A-fence의 typed rollout witness(`src/services/tmux_common/runtime_hint_fence.rs
 | r5 HerdrHintADbFixed | 비교용 재실행: GREEN | r6에서 제외 | 2 runs, 1934 distinct |
 | r5 HerdrHintADbNoTimeout | 비교용 재실행: DGuardBound·DWaitProgress RED | r6에서 제외 | 3 runs, safety 12 / liveness 13 |
 
-최종 묶음은 **28 cfg / 71 TLC 실행, 기대 불일치 0, 실행 오류 0**이다. r4 A before 8 cfg/17회, r6 HerdrSession 종속 전체 17 cfg/46회, r5 비교 3 cfg/8회다. property 실행 전에 공식 checker의 fairness precheck를 적용했다. `WF_vars(AHintNext)`를 실제 사용하며 DB 응답 fairness로 무응답을 숨기지 않는다.
+최종 묶음은 **28 cfg / 71 TLC 실행, 기대 불일치 0, 실행 오류 0**이다. r4 A before 8 cfg/17회, r6 HerdrSession 직접 cfg 17개/46회, r5 비교 3 cfg/8회다. 이어 커밋 `3c64ad3da676b39005a5bf2ed7ff5c76e66ff684`에서 공식 `statecharts_tlc.py --base e9549f721d7a9910a52a19a5b9101c48fda27386 --head HEAD --jobs 2`를 실행했다. 선택기는 PendingRegistration의 간접 종속 7개까지 포함한 **24 cfg**를 실제 검사했고 기대 불일치/오류 0, exit 0이었다(`official-head-check.log`, 28.3초). 직접 cfg만 묶은 앞선 17개를 전체 종속 집합이라고 부르지 않는다. property 실행 전에 공식 checker의 fairness precheck를 적용했다. `WF_vars(AHintNext)`를 실제 사용하며 DB 응답 fairness로 무응답을 숨기지 않는다.
 
 새 fixed cfg들은 8 invariants(`ANoForeignMutation`, `ANoDuplicateEffects`, `ANoUnprovedGrant`, `ANoStaleGrant`, `ANoSilentLoss`, `ANoEarlyUnlink`, `ANoForeignExecution`, `ARetryBounded`)와 `AProgress`/`ALegacyProgress`를 검사한다. 독립 positive state witness 19개는 typed 8필드 변경 후 거절, cursor/storage republish 후 전달, 정상·오류 회복·crash·redelivery·경합의 grant/create/prompt=1 상태를 확인한다.
 
@@ -72,6 +72,7 @@ python3 scripts/ci/statecharts_tlc.py --base e9549f721d7a9910a52a19a5b9101c48fda
 
 공통 외부 루트는 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8057/`다.
 
+- `logs-adm-6/official-head-check.log`, `official-head-check.exit`: 커밋 head에서 간접 종속 포함 공식 선택 24 cfg, 기대 불일치 0, exit 0.
 - `logs-adm-6/model-checks-r6.log`, `model-results.json`: 최종 28 cfg/71회 결과. `raw-r6/{before,after,r5}/<cfg>/`에 fairness·각 safety/property 원시 stdout·실제 exit·result.json을 보존했다. 앞선 탐색 로그와 구분한다.
 - `logs-adm-6/run_model_checks.py`: 저장소 공식 `check_cfg`/`classify`를 import하고 `run_java`의 원시 결과만 보존하는 재현 harness. base expected를 git-show로 고정하며 새 cfg 기대만 추가한다.
 - `logs-adm-6/dumps-r6/{HerdrHintAIdentityFixed,HerdrHintALegacyProgress}/states.txt.dump`, `tlc.out`, `tlc.exit`: 최종 모델 전체 state dump와 직접 TLC exit 0.

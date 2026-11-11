@@ -285,7 +285,7 @@ A-fence의 typed rollout witness(`src/services/tmux_common/runtime_hint_fence.rs
 | r5 HerdrHintADbFixed | 비교용 재실행: GREEN | r6에서 제외 | 2 runs, 1934 distinct |
 | r5 HerdrHintADbNoTimeout | 비교용 재실행: DGuardBound·DWaitProgress RED | r6에서 제외 | 3 runs, safety 12 / liveness 13 |
 
-최종 묶음은 **28 cfg / 71 TLC 실행, 기대 불일치 0, 실행 오류 0**이다. r4 A before 8 cfg/17회, r6 HerdrSession 종속 전체 17 cfg/46회, r5 비교 3 cfg/8회다. property 실행 전에 공식 checker의 fairness precheck를 적용했다. `WF_vars(AHintNext)`를 실제 사용하며 DB 응답 fairness로 무응답을 숨기지 않는다.
+최종 묶음은 **28 cfg / 71 TLC 실행, 기대 불일치 0, 실행 오류 0**이다. r4 A before 8 cfg/17회, r6 HerdrSession 직접 cfg 17개/46회, r5 비교 3 cfg/8회다. 이어 커밋 `3c64ad3da676b39005a5bf2ed7ff5c76e66ff684`에서 공식 선택기를 실행해 PendingRegistration 간접 종속 7개까지 포함한 **24 cfg**, 기대 불일치/오류 0, exit 0을 확인했다(`logs-adm-6/official-head-check.log`, 28.3초). 앞선 17개는 직접 cfg 집합이다. property 실행 전에 공식 checker의 fairness precheck를 적용했다. `WF_vars(AHintNext)`를 실제 사용하며 DB 응답 fairness로 무응답을 숨기지 않는다.
 
 새 fixed cfg들은 8 invariants(`ANoForeignMutation`, `ANoDuplicateEffects`, `ANoUnprovedGrant`, `ANoStaleGrant`, `ANoSilentLoss`, `ANoEarlyUnlink`, `ANoForeignExecution`, `ARetryBounded`)와 `AProgress`/`ALegacyProgress`를 검사한다. 독립 positive state witness 19개는 typed 8필드 변경 후 거절, cursor/storage republish 후 전달, 정상·오류 회복·crash·redelivery·경합의 grant/create/prompt=1 상태를 확인한다.
 
