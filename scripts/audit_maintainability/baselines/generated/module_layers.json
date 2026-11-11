@@ -2,7 +2,7 @@
   "configuration_errors":[],
   "count_unit_version":1,
   "edge_count_unit":"static reference occurrences",
-  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha 59cb355c2e8ede7b82c3a0c49b3115796e4528cb --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
+  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha 3eee1b09c4053daff3b0dfe3f09a060fcca05a03 --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
   "indeterminate_dependencies":[
     {"count":1,"id":"3d29ca6b7465863f206febb861a0f441644c728f409182ccd49d175c2c2806b8","kind":"import","source":"src/lib.rs::crate::cli::discord","target":"src/lib.rs::crate::services"},
     {"count":1,"id":"47c075858c533c75543be0e9196aaa2eecd8c00d2951247879e8d5baff37f816","kind":"import","source":"src/lib.rs::crate::server::routes::reviews","target":"src/lib.rs::crate::services"},
@@ -12,7 +12,7 @@
   ],
   "indeterminate_edges":5,
   "indeterminate_occurrences":5,
-  "input_sha":"59cb355c2e8ede7b82c3a0c49b3115796e4528cb",
+  "input_sha":"3eee1b09c4053daff3b0dfe3f09a060fcca05a03",
   "mapping_sha256":"57d6e882c99b7cfe20aaedf1ca0188dbabe5ea6a5cc86102fc2b5a2fcde69e8a",
   "reverse_dependencies":[
     {"count":2,"id":"0035d7ca439517230bc6306b0881fc487fe95b44c2852a7e74379cb98436987d","kind":"path","source":"src/lib.rs::crate::config","target":"src/lib.rs::crate::config::session_hosts"},
@@ -7004,7 +7004,7 @@
     {"count":1,"id":"8b7c4436eb55faa789bdf4853bc7c6740292c005e0360afb5beb40aa334f5060"},
     {"count":2,"id":"8b817f758f634edae9405481439d5765aacfd248455792e68720a00226ac293b"},
     {"count":1,"id":"8b82cf7f400557836b2f3b7b4499a99081d1a407ee90e3d9170a020c70f0930d"},
-    {"count":3,"id":"8b86f7f3435d80325656844f3574bb845f4bad482e2827419578de8346924ea4"},
+    {"count":2,"id":"8b86f7f3435d80325656844f3574bb845f4bad482e2827419578de8346924ea4"},
     {"count":1,"id":"8b90b54f1ed7b50acee84557aafa97a1a890fb998e831b88c0633641ce19a205"},
     {"count":1,"id":"8b93ddf299e7debfc58908f09a9637b2de5247d7a3e336df8140d53f2e6573b9"},
     {"count":1,"id":"8ba19d89e37521ea328eb93bc1e88d7e3f110e68d3f9a3846e84ba2f1f7bfe60"},

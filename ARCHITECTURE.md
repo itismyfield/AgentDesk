@@ -388,6 +388,7 @@ src/
 │   │   └── value_methods.rs
 │   ├── session_identity/
 │   │   └── naming.rs
+│   ├── automation_contract.rs
 │   ├── bot_role.rs
 │   ├── file_sync.rs
 │   ├── human_input.rs
