@@ -49,10 +49,33 @@ pub trait LegacyView: Send + Sync + 'static {
     /// Legacy's delivered frontier within `eof`; `None` from a host that keeps no delivery record.
     fn frontier(&self, channel: u64, tmux: &str, eof: u64) -> Option<u64>;
     fn tail_running(&self, tmux: &str) -> bool;
+    /// Legacy's Codex delivery records of `tmux`'s current generation; none from a host that keeps
+    /// no record, so nothing is left out of a takeover on its word.
+    fn codex_delivered(&self, _channel: u64, _tmux: &str) -> Result<CodexDelivered, String> {
+        Ok(CodexDelivered::default())
+    }
     /// What restarts Legacy's own redrive cycle for the channel; unchanged when nothing can say.
     fn epoch(&self, _channel: u64) -> LegacyEpoch {
         LegacyEpoch::default()
     }
+}
+
+/// One Codex delivery Legacy recorded: rollout bytes it posted, and when, if the record says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CodexDelivery {
+    pub range: (u64, u64),
+    pub at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A channel's Codex delivery records of one tmux generation; they name no rollout file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CodexDelivered {
+    /// When the generation began; `None` when it cannot be read, and then no record is given.
+    pub generation_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// The durable delivered frontier, when that generation wrote it.
+    pub frontier: Option<CodexDelivery>,
+    /// Confirmed delivery receipts of that generation and tmux.
+    pub receipts: Vec<CodexDelivery>,
 }
 
 pub type LegacyTurnIdentity = (u64, String, Option<String>, Option<u64>, Option<String>);
