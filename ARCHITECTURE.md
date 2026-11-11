@@ -385,6 +385,7 @@ src/
 │   ├── bot_role.rs
 │   ├── file_sync.rs
 │   ├── human_input.rs
+│   ├── intake_identity.rs
 │   ├── lifecycle.rs
 │   ├── memory.rs
 │   ├── mod.rs
