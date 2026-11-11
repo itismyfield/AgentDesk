@@ -1,5 +1,5 @@
 //! Session-lifetime hosted execution record in `sessions.hosted_execution`; writes CAS the
-//! exact value last read. Ordinary cleanup deletes a row only through [`CleanupRow::deletable`].
+//! exact value last read. Ordinary cleanup deletes a row only through [`CleanupRow::record_deletable`].
 #![cfg_attr(not(test), allow(dead_code))]
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -12,9 +12,6 @@ use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityConflictKind, SessionIdentityKind,
     resolve_session_row_pg,
 };
-use crate::domain::session_identity::tmux_name_from_session_key;
-use crate::services::session_host::HostKind;
-use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
 #[cfg(unix)]
 #[path = "hosted_execution/http_force.rs"]
@@ -193,7 +190,7 @@ impl HostedRecord {
         known.map_or_else(|| Self::Unknown(raw.clone()), Self::Known)
     }
 
-    /// Payload-only gate; the row must also pass [`CleanupRow::deletable`].
+    /// Payload-only gate; the row must also pass [`CleanupRow::record_deletable`].
     pub(crate) fn deletable(&self) -> bool {
         match self {
             Self::Legacy => true,
@@ -638,20 +635,26 @@ impl CleanupRow {
         })
     }
 
-    /// A record must be a Retired owned by this row. A NULL record keeps the row while any
-    /// locator's `.host_kind` marker is not tmux: a lost field leaves that trace behind.
-    pub(crate) fn deletable(&self) -> bool {
+    /// Payload and canonical row ownership only; the service judges Legacy markers.
+    pub(crate) fn record_deletable(&self) -> bool {
         let record = HostedRecord::decode(self.raw.as_ref());
         record.deletable()
             && match &record {
-                HostedRecord::Legacy => self
-                    .session_key
-                    .iter()
-                    .chain(&self.aliases)
-                    .all(|key| no_foreign_host_marker(key)),
+                HostedRecord::Legacy => true,
                 HostedRecord::Known(known) => owner_matches_row(&known.owner, &self.identity),
                 HostedRecord::Unknown(_) => false,
             }
+    }
+
+    pub(crate) fn is_legacy(&self) -> bool {
+        self.raw.is_none()
+    }
+
+    pub(crate) fn locator_keys(&self) -> impl Iterator<Item = &str> {
+        self.session_key
+            .iter()
+            .chain(&self.aliases)
+            .map(String::as_str)
     }
 
     /// Binds `$2..$7` of a DELETE that re-checks the record, identity and key read here.
@@ -670,19 +673,10 @@ impl CleanupRow {
     }
 }
 
-/// A key with no tmux name has no marker; an unreadable or unknown marker is a trace.
-fn no_foreign_host_marker(session_key: &str) -> bool {
-    tmux_name_from_session_key(session_key).is_none_or(|name| {
-        matches!(
-            read_host_kind_marker(&name),
-            HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
-        )
-    })
-}
-
-/// Bulk cleanup of disconnected rows. Rows are judged, marker reads included, before one
-/// transaction deletes those still as read, so the count returns only after commit.
-pub(crate) async fn delete_disconnected_sessions_pg(pool: &PgPool) -> Result<u64, String> {
+/// Candidate snapshots in the same order used by bulk cleanup.
+pub(crate) async fn load_disconnected_cleanup_rows_pg(
+    pool: &PgPool,
+) -> Result<Vec<CleanupRow>, String> {
     let rows = sqlx::query(
         "SELECT s.id, s.session_key, s.provider, s.identity_kind, s.discord_token_hash,
                 s.channel_id, s.hosted_execution,
@@ -693,16 +687,20 @@ pub(crate) async fn delete_disconnected_sessions_pg(pool: &PgPool) -> Result<u64
     .fetch_all(pool)
     .await
     .map_err(|error| format!("{error}"))?;
-    let mut judged = Vec::new();
-    for row in &rows {
-        let row = CleanupRow::read(row).map_err(|error| format!("{error}"))?;
-        if row.deletable() {
-            judged.push(row);
-        }
-    }
+    rows.iter()
+        .map(CleanupRow::read)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("{error}"))
+}
+
+/// Applies the service's judged snapshots in one transaction with the original predicates.
+pub(crate) async fn delete_disconnected_sessions_pg(
+    pool: &PgPool,
+    judged: &[CleanupRow],
+) -> Result<u64, String> {
     let mut tx = pool.begin().await.map_err(|error| format!("{error}"))?;
     let mut deleted = 0;
-    for row in &judged {
+    for row in judged {
         let delete = sqlx::query(
             "DELETE FROM sessions
              WHERE id = $1 AND status = 'disconnected'
@@ -746,16 +744,8 @@ pub(crate) async fn load_cleanup_row_pg<'e>(
         .map_err(|error| format!("decode session hosted execution: {error}"))
 }
 
-impl CleanupRow {
-    /// No hosted record at all and no non-tmux marker on any locator.
-    pub(crate) fn is_legacy_tmux(&self) -> bool {
-        self.raw.is_none() && self.deletable()
-    }
-}
-
-/// Judges an explicit delete, marker files included, with no row lock held. A row
-/// cleanup must keep refuses the delete instead of reporting zero rows.
-pub(crate) async fn judge_session_delete_pg(
+/// Resolve an explicit delete locator without taking its mutation lock.
+pub(crate) async fn load_session_delete_candidate_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Option<CleanupRow>, String> {
@@ -765,36 +755,15 @@ pub(crate) async fn judge_session_delete_pg(
     let Some((session_id, _)) = resolved else {
         return Ok(None);
     };
-    let Some(row) = load_cleanup_row_pg(pool, session_id).await? else {
-        return Ok(None);
-    };
-    refuse_kept_row(&row)?;
-    wait_out_row_lock_pg(pool, session_key).await?;
-    // A marker written while another session held the lock is judged here, outside it.
-    match load_cleanup_row_pg(pool, session_id).await? {
-        None => Ok(None),
-        Some(current) if current != row => Err(changed_after_check(session_id)),
-        Some(current) => refuse_kept_row(&current).map(|()| Some(current)),
-    }
+    load_cleanup_row_pg(pool, session_id).await
 }
 
-fn refuse_kept_row(row: &CleanupRow) -> Result<(), String> {
-    if row.deletable() {
-        return Ok(());
-    }
-    Err(format!(
-        "session {} keeps a live, unowned or unreadable hosted execution record \
-         or a non-tmux host marker",
-        row.id
-    ))
-}
-
-fn changed_after_check(session_id: i64) -> String {
+pub(crate) fn changed_after_check(session_id: i64) -> String {
     format!("session {session_id} changed after its hosted execution check; retry the delete")
 }
 
 /// Takes the delete's row lock and drops it at once: the wait for any holder ends here.
-async fn wait_out_row_lock_pg(pool: &PgPool, session_key: &str) -> Result<(), String> {
+pub(crate) async fn wait_out_row_lock_pg(pool: &PgPool, session_key: &str) -> Result<(), String> {
     let mut tx = pool
         .begin()
         .await

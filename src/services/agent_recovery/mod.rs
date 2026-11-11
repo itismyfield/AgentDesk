@@ -137,6 +137,16 @@ impl RecoveryRuntime {
         )
     }
 
+    fn restore_events(&self, channel_id: &str) -> Vec<CheckpointEvent> {
+        let events: Vec<_> = self
+            .events(channel_id)
+            .iter()
+            .filter(|event| event.kind != CheckpointEventKind::Restore)
+            .cloned()
+            .collect();
+        last_n_events(&events, usize::MAX, READ_BYTE_CAP)
+    }
+
     #[cfg(test)]
     pub fn claim_turn(&mut self, channel_id: &str, turn_id: &str) {
         self.claimed_turns
@@ -398,36 +408,10 @@ impl RecoveryRuntime {
         summary: &str,
     ) -> Option<RestorePlan> {
         let binding = self.binding_for_channel(channel_id)?;
-        let policy = binding.policy.as_ref()?;
-        if self
-            .events(channel_id)
-            .iter()
-            .all(|event| event.kind != CheckpointEventKind::Complete)
-        {
-            let payload = CheckpointPayload::compact(
-                policy.fallback_agent_id.clone(),
-                "",
-                if fallback_succeeded {
-                    "fallback complete"
-                } else {
-                    "fallback failed"
-                },
-                "",
-                Vec::new(),
-                "",
-                "",
-            );
-            let _ = self.append_event(
-                channel_id,
-                &policy.fallback_agent_id,
-                CheckpointEventKind::Complete,
-                payload,
-            );
-        }
-        let events = self.last_n(channel_id);
+        binding.policy.as_ref()?;
+        let events = self.restore_events(channel_id);
         let mut plan = build_restore_plan(&binding, &events, fallback_succeeded, summary);
-        let restore_payload = events
-            .last()
+        let restore_payload = restore::latest_progress_or_complete(&events)
             .map(|event| event.payload.clone())
             .unwrap_or_else(|| {
                 CheckpointPayload::compact(
@@ -548,6 +532,8 @@ pub use durable::{
     try_restore_owner_durable,
 };
 
+#[cfg(test)]
+mod restore_window_tests;
 #[cfg(test)]
 mod tests;
 

@@ -208,6 +208,7 @@ src/
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
+│   │   ├── listing.rs
 │   │   ├── rebind_override.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
@@ -405,7 +406,9 @@ src/
 │   ├── automation_contract.rs
 │   ├── bot_role.rs
 │   ├── cluster_policy.rs
+│   ├── dispatch_route.rs
 │   ├── file_sync.rs
+│   ├── host_observation.rs
 │   ├── human_input.rs
 │   ├── intake_identity.rs
 │   ├── lifecycle.rs
@@ -778,7 +781,8 @@ src/
 │   │   ├── durable/
 │   │   │   ├── operations.rs
 │   │   │   ├── postgres_tests.rs
-│   │   │   └── provider_errors.rs
+│   │   │   ├── provider_errors.rs
+│   │   │   └── restore_window_tests.rs
 │   │   ├── accounts.rs
 │   │   ├── admission.rs
 │   │   ├── checkpoint.rs
@@ -790,6 +794,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── policy.rs
 │   │   ├── restore.rs
+│   │   ├── restore_window_tests.rs
 │   │   ├── tests.rs
 │   │   └── wakeup.rs
 │   ├── agents/
@@ -3383,10 +3388,17 @@ src/
 │   │   │   └── retry_wake_tests.rs
 │   │   ├── herdr_kill/
 │   │   │   └── effects.rs
+│   │   ├── hosted_cleanup/
+│   │   │   ├── thread_gc/
+│   │   │   │   └── tests_pg.rs
+│   │   │   └── thread_gc.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── force_kill.rs
 │   │   ├── herdr_kill.rs
 │   │   ├── hook.rs
+│   │   ├── hosted_cleanup.rs
+│   │   ├── listing.rs
+│   │   ├── listing_tests.rs
 │   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
@@ -4475,6 +4487,7 @@ src/
 │   │   │   └── statusline_tests.rs
 │   │   ├── quota.rs
 │   │   └── quota_tests.rs
+│   ├── agent_channels.rs
 │   ├── agent_identity.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
@@ -4558,6 +4571,7 @@ src/
 │   ├── service_error.rs
 │   ├── session_activity.rs
 │   ├── session_backend.rs
+│   ├── session_evidence.rs
 │   ├── session_forwarding.rs
 │   ├── session_host.rs
 │   ├── session_resume.rs

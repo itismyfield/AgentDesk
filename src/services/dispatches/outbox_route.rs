@@ -15,6 +15,7 @@
 use sqlx::PgPool;
 
 use crate::db::dispatches::outbox::CompletedDispatchInfo;
+pub(crate) use crate::domain::dispatch_route::use_counter_model_channel;
 use crate::services::dispatches::discord_delivery::{
     DispatchTransport, HttpDispatchTransport, discord_api_url,
     send_review_result_to_primary_with_transport,
@@ -713,26 +714,6 @@ pub(crate) fn parse_channel_id(channel: &str) -> Option<u64> {
 /// Public wrapper around the shared resolve_channel_alias.
 pub fn resolve_channel_alias_pub(alias: &str) -> Option<u64> {
     resolve_channel_alias(alias)
-}
-
-pub(crate) fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
-    // "review", "e2e-test" (#197), and "consultation" (#256) go to the counter-model channel.
-    // "review-decision" is routed back to the original implementation provider
-    // so it reuses the implementation-side thread rather than the reviewer channel.
-    //
-    // #3605 (T2): "scope-assessment" is intentionally NOT listed here. Unlike
-    // consultation, the assigned agent itself evaluates the scope, so the
-    // dispatch must stay on the assigned agent's PRIMARY channel (the default
-    // when this returns false).
-    //
-    // #3594 (T3): "plan-review" goes to the counter-model channel — like a
-    // review, the plan is checked by the counterpart model. "plan" itself is
-    // NOT listed (the assigned agent designs on its PRIMARY channel, mirroring
-    // implementation), so it is intentionally absent here.
-    matches!(
-        dispatch_type,
-        Some("review") | Some("e2e-test") | Some("consultation") | Some("plan-review")
-    )
 }
 
 // ── Message formatting ──────────────────────────────────────────
