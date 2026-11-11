@@ -119,9 +119,6 @@ pub(crate) struct Candidate {
     late_boundary: Arc<OnceLock<LateBoundary>>,
     turn_mark: Arc<Mutex<Option<TurnMark>>>,
     baseline_order: Arc<AtomicU64>,
-    /// Test builds: set when a claim released a pending adoption, cleared once a sink saw a body.
-    #[cfg(test)]
-    bodiless: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Candidate {
@@ -133,8 +130,6 @@ impl Candidate {
             late_boundary: Arc::default(),
             turn_mark: Arc::default(),
             baseline_order: Arc::default(),
-            #[cfg(test)]
-            bodiless: Arc::default(),
         }
     }
 
@@ -311,7 +306,7 @@ impl Candidate {
         }
     }
 
-    /// Leaves a pending adoption to Legacy until its host retries; true while it is deferred.
+    /// Holds a pending adoption's body until its host retries; true while it is deferred.
     pub(crate) fn defer(&self, channel: u64) -> bool {
         let mut state = self.lock();
         match *state {

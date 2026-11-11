@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::tui_o::channel_policy::Candidate;
+use crate::services::tui_o::channel_policy::racing_legacy_body;
 use crate::services::tui_o::cutover::claims_judged;
 use crate::services::tui_o::ownership::GatewayOwnership;
 use crate::services::tui_o::writer::host::{FencedFacts, HostParts};
@@ -271,13 +272,9 @@ async fn actual_completed_body_send_restarts_soft_clock_at_the_observed_tick() {
     let tasks = stalled.start();
     clock.started().await;
     clock.to(30 * MINUTE - TICK).await;
-    let sent = claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
-        "sent"
-    })
-    .await;
+    let sent = racing_legacy_body(CHANNEL, || async { "sent" }).await;
     assert_eq!(sent, Ok(BodySend::Sent("sent")));
     assert_eq!(candidate().sends(), (1, 1));
-    assert!(!claims_judged(CHANNEL).is_empty());
     clock.to(30 * MINUTE).await;
     clock.to(70 * MINUTE - TICK).await;
     stalled.assert_waiting("actual body progress restarted soft expiry");
@@ -499,7 +496,7 @@ async fn expired_rotation_is_released_before_an_unchanged_open_turn_refusal() {
     clock.to(SOFT + TICK).await;
     assert_eq!(
         adoption(CHANNEL),
-        Adoption::Released,
+        Adoption::Refused,
         "the next expired tick handles rotation before stale OpenTurn cache or B quiet"
     );
     assert!(!stalled.harness.store.has_channel_dir(CHANNEL));
@@ -516,7 +513,7 @@ async fn expired_rotation_is_released_before_an_unchanged_open_turn_refusal() {
     );
     assert_eq!(stalled.alarms().len(), 1, "no unrelated alarm was reported");
     clock.to(SOFT + 3 * TICK).await;
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Refused);
     assert_eq!(stalled.io.alarms.released(), released);
     assert_eq!(fence_calls(&stalled.io), 0);
     assert_eq!(stalled.harness.port.posts(), Vec::<String>::new());
@@ -695,10 +692,7 @@ async fn expired_adoption_legacy_attempts_are_judged_owned_and_o_posts_once() {
     clock.to(SOFT).await;
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     let sends = AtomicUsize::default();
-    let sent = claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
-        sends.fetch_add(1, Ordering::SeqCst)
-    })
-    .await;
+    let sent = racing_legacy_body(CHANNEL, || async { sends.fetch_add(1, Ordering::SeqCst) }).await;
     assert_eq!(sent, Ok(BodySend::OwnedByO));
     let judged = claims_judged(CHANNEL);
     assert!(
@@ -728,14 +722,11 @@ async fn a_real_body_transport_survives_soft_expiry_until_it_finishes() {
     let (started, at_transport) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     let transport = tokio::spawn(async move {
-        claim_then_send(
-            Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))),
-            || async move {
-                started.send(()).unwrap();
-                resumed.await.unwrap();
-                "legacy"
-            },
-        )
+        racing_legacy_body(CHANNEL, || async move {
+            started.send(()).unwrap();
+            resumed.await.unwrap();
+            "legacy"
+        })
         .await
     });
     at_transport.await.unwrap();
@@ -813,15 +804,12 @@ async fn normal_deferred_commit_rejects_a_real_send_started_before_its_fence() {
     let (entered, at_transport) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     let transport = tokio::spawn(async move {
-        claim_then_send(
-            Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))),
-            || async move {
-                sent.fetch_add(1, Ordering::SeqCst);
-                entered.send(()).unwrap();
-                resumed.await.unwrap();
-                "legacy"
-            },
-        )
+        racing_legacy_body(CHANNEL, || async move {
+            sent.fetch_add(1, Ordering::SeqCst);
+            entered.send(()).unwrap();
+            resumed.await.unwrap();
+            "legacy"
+        })
         .await
     });
     at_transport.await.unwrap();
@@ -879,14 +867,11 @@ async fn normal_deferred_commit_rejects_a_real_send_started_before_its_lock() {
                 .enable_all()
                 .build()
                 .unwrap();
-            runtime.block_on(claim_then_send(
-                Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))),
-                || async move {
-                    entered.send(()).unwrap();
-                    completed.await.unwrap();
-                    "legacy"
-                },
-            ))
+            runtime.block_on(racing_legacy_body(CHANNEL, || async move {
+                entered.send(()).unwrap();
+                completed.await.unwrap();
+                "legacy"
+            }))
         });
         at_transport.recv_timeout(Duration::from_secs(2)).unwrap();
         *save.lock().unwrap() = Some(worker);
@@ -1128,10 +1113,7 @@ async fn unselected_pending_and_recovered_channels_preserve_their_paths() {
     let tasks = start_host(&harness, &io, &ready);
     assert!(tasks.is_empty());
     tokio::time::advance(90 * MINUTE).await;
-    let sent = claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
-        "legacy"
-    })
-    .await;
+    let sent = racing_legacy_body(CHANNEL, || async { "legacy" }).await;
     assert_eq!(sent, Ok(BodySend::Sent("legacy")));
     assert!(io.calls().is_empty());
     assert!(!harness.store.has_channel_dir(CHANNEL));
@@ -1197,15 +1179,12 @@ async fn permanent_open_turn_and_held_body_reservation_block_for_120_minutes() {
             let (entered, at_transport) = tokio::sync::oneshot::channel();
             let (resume, resumed) = tokio::sync::oneshot::channel();
             let transport = tokio::spawn(async move {
-                claim_then_send(
-                    Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))),
-                    || async move {
-                        sent.fetch_add(1, Ordering::SeqCst);
-                        entered.send(()).unwrap();
-                        resumed.await.unwrap();
-                        "legacy"
-                    },
-                )
+                racing_legacy_body(CHANNEL, || async move {
+                    sent.fetch_add(1, Ordering::SeqCst);
+                    entered.send(()).unwrap();
+                    resumed.await.unwrap();
+                    "legacy"
+                })
                 .await
             });
             at_transport.await.unwrap();
@@ -1258,14 +1237,14 @@ async fn frontier_lost_or_misaligned_after_deferral_never_initializes_for_120_mi
         assert!(stalled.harness.port.posts().is_empty());
         assert_eq!(candidate().sends(), (0, 0));
         if frontier.is_none() {
-            assert_eq!(adoption(CHANNEL), Adoption::Released);
+            assert_eq!(adoption(CHANNEL), Adoption::Refused);
             assert_eq!(
                 stalled.alarms(),
                 [(
                     CHANNEL,
                     WriterAlarm::Released {
                         detail:
-                            "writer host: adoption held: the delivery record is not authoritative"
+                            "writer host: adoption refused: the delivery record is not authoritative"
                                 .into(),
                     },
                 )]

@@ -929,9 +929,9 @@ async fn a_channel_that_is_not_new_and_empty_is_held_without_any_store() {
             !ready.is_ready(CHANNEL) && harness.port.posts().is_empty(),
             "{why}"
         );
-        // Nothing was written, so Legacy keeps the channel; without a lease nothing was decided.
+        // Nothing was written, so the adoption is refused; without a lease nothing was decided.
         let left = if pg {
-            Adoption::Released
+            Adoption::Refused
         } else {
             Adoption::Pending
         };
@@ -1075,7 +1075,7 @@ impl LegacyView for Cursor {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall() {
+async fn a_closed_turn_legacy_has_not_delivered_is_taken_from_its_frontier_without_a_stall() {
     let closed = serde_json::json!({"type":"system", "subtype":"turn_duration", "durationMs":5});
     let debt = [row("m0", "undelivered"), format!("{closed}\n").into_bytes()].concat();
     for held in [Custody::Row, Custody::Free] {
@@ -1093,30 +1093,13 @@ async fn a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall
         *io.custody.lock().unwrap() = Ok(held);
         let tasks = start_host(&harness, &io, &ready);
         polls(3).await;
-        // Legacy may still send the turn from its frontier, so nothing is given up at boot.
-        assert_eq!(adoption(CHANNEL), Adoption::Deferred, "{held:?}");
-        assert_eq!(*io.alarms.0.lock().unwrap(), [], "{held:?}");
-        assert!(!harness.store.has_channel_dir(CHANNEL), "{held:?}");
-        assert_eq!(harness.port.posts(), Vec::<String>::new(), "{held:?}");
-        // A Legacy that never delivers it is given up once, only after the stall.
-        let minutes = |n: u64| std::time::Duration::from_secs(n * 60);
-        tokio::time::sleep(minutes(39)).await;
-        assert_eq!(adoption(CHANNEL), Adoption::Deferred, "{held:?}");
-        tokio::time::sleep(minutes(3)).await;
+        // A row only defers the first look; the next retry finds it idle.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        // Legacy sends no TUI body, so the turn it owes is O's from the frontier, unabandoned.
         assert_eq!(adoption(CHANNEL), Adoption::Committed, "{held:?}");
+        assert_eq!(*io.alarms.0.lock().unwrap(), [], "{held:?}");
         let init = harness.store.read_init(CHANNEL).unwrap().unwrap();
-        let (source, to) = (init.sources[0].source_id.clone(), debt.len() as u64);
-        let abandoned = WriterAlarm::Abandoned {
-            source,
-            from: 0,
-            to,
-        };
-        assert_eq!(
-            *io.alarms.0.lock().unwrap(),
-            [(CHANNEL, abandoned)],
-            "{held:?}"
-        );
-        assert_eq!(harness.port.posts(), Vec::<String>::new(), "{held:?}");
+        assert_eq!(init.sources[0].delivery_start, 0, "{held:?}");
         abort(tasks);
     }
 }

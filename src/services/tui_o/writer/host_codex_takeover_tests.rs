@@ -138,10 +138,10 @@ fn bind_new(io: &TestIo, channel: u64, path: &Path) {
     bind_late(channel, path);
 }
 
+/// A racing Legacy send counted by a direct claim, as the gate no longer starts one.
 fn legacy_sends(channel: u64) -> bool {
-    !o_owns_tui_output_for_channel_reserving(channel, Some(CodexTui))
-        .unwrap()
-        .owned
+    let candidate = test_override::with_channels(|boot| boot?.candidate(channel).cloned());
+    !candidate.unwrap().claim_body(channel).owned
 }
 
 /// Legacy holding Codex delivery records of a tmux generation.

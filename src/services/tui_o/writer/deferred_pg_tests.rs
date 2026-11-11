@@ -7,6 +7,7 @@ use crate::db::o_channel_activation::{activation_rows, fenced_activation_rows};
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::message_outbox::{OutboxMessage, enqueue_outbox_pg_returning_id_with_ttl};
+use crate::services::tui_o::channel_policy::racing_legacy_body;
 use crate::services::tui_o::writer::host::FencedFacts;
 use sqlx::PgPool;
 
@@ -697,23 +698,22 @@ async fn normal_deferred_rejects_headless_enqueue_completed_after_fence_pg() {
                 .block_on(async move {
                     let independent = independent_pool(&url).await;
                     let target = format!("channel:{CHANNEL}");
-                    let sent =
-                        claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
-                            enqueue_outbox_pg_returning_id_with_ttl(
-                                &independent,
-                                OutboxMessage {
-                                    target: &target,
-                                    content: "headless enqueued after fence",
-                                    bot: "notify",
-                                    source: "headless_turn",
-                                    reason_code: Some("headless.delivery"),
-                                    session_key: None,
-                                },
-                                0,
-                            )
-                            .await
-                        })
-                        .await;
+                    let sent = racing_legacy_body(CHANNEL, || async {
+                        enqueue_outbox_pg_returning_id_with_ttl(
+                            &independent,
+                            OutboxMessage {
+                                target: &target,
+                                content: "headless enqueued after fence",
+                                bot: "notify",
+                                source: "headless_turn",
+                                reason_code: Some("headless.delivery"),
+                                session_key: None,
+                            },
+                            0,
+                        )
+                        .await
+                    })
+                    .await;
                     let id = match sent {
                         Ok(BodySend::Sent(Ok(Some(id)))) => id,
                         other => panic!("post-fence Legacy enqueue must complete: {other:?}"),
@@ -756,9 +756,10 @@ async fn normal_deferred_rejects_headless_enqueue_completed_after_fence_pg() {
     .await
     .unwrap();
     assert_eq!(pending, 1, "one validated headless body remains queued");
+    // The racing send claimed the candidate directly, past the gate's claim log.
     assert_eq!(
         crate::services::tui_o::cutover::claims_judged(CHANNEL),
-        [false]
+        Vec::<bool>::new()
     );
     case.assert_waiting();
     case.stop().await;
@@ -787,7 +788,7 @@ async fn queued_headless_pending_and_processing_block_expired_handoff_until_work
     let clock = Clock::paused();
     case.start().await;
     let target = format!("channel:{CHANNEL}");
-    let enqueued = claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
+    let enqueued = racing_legacy_body(CHANNEL, || async {
         enqueue_outbox_pg_returning_id_with_ttl(
             &pool,
             OutboxMessage {
@@ -863,7 +864,7 @@ async fn queued_headless_pending_and_processing_block_expired_handoff_until_work
     assert_eq!(posts[0].1, "Bot deferred-headless-token");
     assert_eq!(posts[0].2["content"], "legacy headless");
     let second_enqueue = AtomicBool::new(false);
-    let judged = claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
+    let judged = racing_legacy_body(CHANNEL, || async {
         second_enqueue.store(true, Ordering::SeqCst);
     })
     .await;
@@ -919,25 +920,24 @@ async fn normal_deferred_rejects_headless_enqueue_completed_after_fence_from_a_p
                 .block_on(async move {
                     let independent = independent_pool(&url).await;
                     let target = format!("channel:{CHANNEL}");
-                    let sent =
-                        claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
-                            entered.send(()).unwrap();
-                            released.recv_timeout(Duration::from_secs(10)).unwrap();
-                            enqueue_outbox_pg_returning_id_with_ttl(
-                                &independent,
-                                OutboxMessage {
-                                    target: &target,
-                                    content: "preexisting reservation enqueued after fence",
-                                    bot: "notify",
-                                    source: "headless_turn",
-                                    reason_code: Some("headless.delivery"),
-                                    session_key: None,
-                                },
-                                0,
-                            )
-                            .await
-                        })
-                        .await;
+                    let sent = racing_legacy_body(CHANNEL, || async {
+                        entered.send(()).unwrap();
+                        released.recv_timeout(Duration::from_secs(10)).unwrap();
+                        enqueue_outbox_pg_returning_id_with_ttl(
+                            &independent,
+                            OutboxMessage {
+                                target: &target,
+                                content: "preexisting reservation enqueued after fence",
+                                bot: "notify",
+                                source: "headless_turn",
+                                reason_code: Some("headless.delivery"),
+                                session_key: None,
+                            },
+                            0,
+                        )
+                        .await
+                    })
+                    .await;
                     let id = match sent {
                         Ok(BodySend::Sent(Ok(Some(id)))) => id,
                         other => panic!("preexisting Legacy enqueue must complete: {other:?}"),
@@ -1015,9 +1015,10 @@ async fn normal_deferred_rejects_headless_enqueue_completed_after_fence_from_a_p
         pending, 1,
         "one actual queued headless body survives the completed reservation"
     );
+    // The racing send claimed the candidate directly, past the gate's claim log.
     assert_eq!(
         crate::services::tui_o::cutover::claims_judged(CHANNEL),
-        [false]
+        Vec::<bool>::new()
     );
     case.assert_waiting();
     case.stop().await;

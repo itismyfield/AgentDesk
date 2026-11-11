@@ -1611,10 +1611,11 @@ async fn a_stopped_turn_on_another_host_keeps_its_inflight_row() {
     }
 }
 
-/// A terminal or /stop with no answer to publish (empty, whitespace or TUI chrome only) leaves a
-/// pending adoption; one that publishes the body ends it first, and Legacy shows that body once.
+/// A pending adoption holds every terminal and /stop body, with or without an answer to publish:
+/// Legacy shows no body, nothing is committed, the row survives the finalize with its offset, and
+/// the adoption stays pending.
 #[tokio::test]
-async fn only_a_terminal_or_stop_with_text_ends_a_pending_adoption() {
+async fn a_pending_adoption_holds_every_terminal_and_stop_body() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
     use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
     use crate::services::tui_o::cutover::test_override;
@@ -1637,24 +1638,25 @@ async fn only_a_terminal_or_stop_with_text_ends_a_pending_adoption() {
         driver.body_check.set(check.clone()).unwrap();
         let (mut ctx, state) = driver.parts();
         ctx.cancelled = cancelled;
-        tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
-            .await
-            .expect("terminal outcome delivery must not hang");
+        let output =
+            tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+                .await
+                .expect("terminal outcome delivery must not hang");
+        let committed = output.terminal_delivery_committed;
+        rowless_receipt_tests::run_postlude(&driver, output, false, cancelled).await;
         let shown = driver.published_bodies.lock().unwrap().clone();
-        let with_body = body == DRIVER_BODY;
         let case = format!("cancelled={cancelled} body={body:?}: {shown:?}");
         check.assert_settled();
-        let expected = if with_body {
-            Adoption::Released
-        } else {
-            Adoption::Pending
-        };
-        assert_eq!(check.adoption(), expected, "{case}");
-        let bodies = shown
-            .iter()
-            .filter(|shown| shown.contains(DRIVER_BODY))
-            .count();
-        assert_eq!(bodies, usize::from(with_body), "{case}");
+        assert_eq!(check.adoption(), Adoption::Pending, "{case}");
+        assert!(
+            !shown.iter().any(|shown| shown.contains(DRIVER_BODY)),
+            "{case}"
+        );
+        assert!(!committed, "{case}");
+        let load = crate::services::discord::inflight::load_inflight_state_read_only;
+        let row = load(&ProviderKind::Claude, DRIVER_CHANNEL_ID);
+        let offset = row.map(|row| row.response_sent_offset);
+        assert_eq!(offset, Some(driver.inflight.response_sent_offset), "{case}");
     }
 }
 

@@ -401,3 +401,61 @@ async fn owner_execution_swap_seeds_a_late_candidate_with_an_unfixed_boundary_pg
     assert_eq!(first.late_boundary(), Some(fixed));
     pool.close().await;
 }
+
+/// An execution permit is no adoption: over a channel with no store a verified permit holds the
+/// body as awaiting adoption and an unverified one refuses it; only a store answers owned.
+#[tokio::test]
+async fn an_execution_view_answers_owned_only_over_a_store_backed_candidate() {
+    use crate::services::tui_o::cutover::{IdentityError, o_owns_tui_output_for_channel};
+    use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let (channel, kind) = (73_369_101, RuntimeHandoffKind::ClaudeTui);
+    let _channels = cutover::test_override::force_candidates(&[(channel, kind)]);
+    let snapshot = cutover::boot_snapshot().unwrap();
+    let pool = PgPool::connect_lazy("postgres://fixture@127.0.0.1:1/unused").unwrap();
+    let permit = Arc::new(OwnerPermit {
+        pool,
+        identity: OwnerIdentity::new("claude", &channel.to_string()),
+        executor: "mac-a".into(),
+        generation: 0,
+        session_ref: SessionRef::Fresh,
+        gate: Arc::new(super::super::OwnershipGate::for_execution(0)),
+    });
+    let answer = || o_owns_tui_output_for_channel(channel, Some(kind));
+    snapshot.install_execution(channel, Some(Ok(permit)));
+    assert_eq!(
+        answer(),
+        Err(IdentityError::AwaitingAdoption),
+        "verified, no store"
+    );
+    snapshot.install_execution(channel, Some(Err("unverified".into())));
+    assert_eq!(
+        answer(),
+        Err(IdentityError::AdoptionRefused),
+        "unverified, no store"
+    );
+
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path());
+    let at = chrono::Utc::now();
+    let init = |channel| {
+        let (sources, initial_anchor, build_digest) = (Vec::new(), 0, "b".into());
+        Ok(Initialized {
+            channel,
+            sources,
+            initial_anchor,
+            build_digest,
+            at,
+        })
+    };
+    store
+        .unwrap()
+        .unwrap()
+        .begin_era(&[channel], at, init)
+        .unwrap();
+    snapshot.install_execution(channel, Some(Err("unverified again".into())));
+    assert_eq!(
+        answer(),
+        Ok(true),
+        "an unverified permit over a store keeps O's body"
+    );
+}

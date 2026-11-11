@@ -20,7 +20,7 @@ pub(crate) use adoption::{
 };
 #[cfg(test)]
 pub(crate) use adoption::{
-    body_check::{BodyCheck, SinkOp},
+    body_check::{BodyCheck, SinkOp, racing_legacy_body},
     stored,
 };
 
