@@ -1,0 +1,25 @@
+%% Design diagram, hand-authored from IntakeConsent.tla; SC_RUN=mac-needed.
+stateDiagram-v2
+    [*] --> Claimed: Claim
+    Claimed --> Accepted: accepted CAS + live owner
+    Accepted --> Spawned: spawned CAS commits / sealed ticket
+    Spawned --> Scoped: Issue at existing worker scope
+    Scoped --> Entry: Take once + exact request
+    Scoped --> Spent: mismatching request or restart
+    Entry --> Spent: normal path drops authority before effects
+    Entry --> Rollback: pre-record failure / move proof
+    Entry --> Recording: set recording before record attempt
+    Recording --> Observed: by-value handoff / FS load and equality
+    Recording --> Spent: record or observation error / no rollback
+    Observed --> OwnerLock: begin DB transaction
+    Rollback --> OwnerLock: begin DB transaction
+    OwnerLock --> RowLock: SELECT FOR UPDATE
+    RowLock --> Prepared: exact payload + claim + owner stamp + marker CAS; existing retire fence
+    Prepared --> Held: hold commit
+    Prepared --> PendingRearm: rollback commit / preserve bookkeeping
+    Prepared --> Spent: rejected CAS or transaction abort
+    Held --> PendingReleased: exact stable receipt + live owner / commit once
+    PendingRearm --> Claimed: reclaim / keep marker
+    PendingReleased --> Claimed: reclaim / keep released marker
+    Held --> Held: second release is an idempotent no-op
+    Spent --> [*]
