@@ -388,6 +388,8 @@ src/
 │   │   ├── public_catalog.rs
 │   │   ├── tests.rs
 │   │   └── value_methods.rs
+│   ├── provider_auth_profile/
+│   │   └── inputs.rs
 │   ├── session_identity/
 │   │   └── naming.rs
 │   ├── atomic_write.rs
@@ -402,6 +404,7 @@ src/
 │   ├── mod.rs
 │   ├── process_incarnation.rs
 │   ├── provider.rs
+│   ├── provider_auth_profile.rs
 │   ├── session_identity.rs
 │   └── tool_text.rs
 ├── engine/
@@ -1748,6 +1751,8 @@ src/
 │   │   ├── model_catalog/
 │   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
+│   │   ├── org_schema/
+│   │   │   └── auth_selection_tests.rs
 │   │   ├── outbound/
 │   │   │   ├── completed_turn_ledger/
 │   │   │   │   ├── o_pending.rs
@@ -3587,8 +3592,13 @@ src/
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
+│   │   ├── repository/
+│   │   │   ├── document.rs
+│   │   │   └── tests.rs
 │   │   ├── direct_spawn_tests.rs
-│   │   └── fallback.rs
+│   │   ├── fallback.rs
+│   │   ├── queries.rs
+│   │   └── repository.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs
 │   │   ├── context.rs
