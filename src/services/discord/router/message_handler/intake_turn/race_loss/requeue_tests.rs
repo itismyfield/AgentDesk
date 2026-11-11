@@ -85,6 +85,8 @@ async fn busy_transition_is_durable_before_the_guard_is_released() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn persistence_failure_rolls_back_owner_return_and_preserves_dispatch_reservation() {
+    use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
+
     let tmp = tempfile::tempdir().expect("temp runtime root");
     let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
 
@@ -117,22 +119,42 @@ async fn persistence_failure_rolls_back_owner_return_and_preserves_dispatch_rese
             .pending_user_dispatch,
         Some(message_id)
     );
-    let blocking_root = tmp.path().join("blocking-root");
-    std::fs::write(&blocking_root, "not a directory").expect("blocking root file");
-    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &blocking_root) };
-
-    let outcome = shared
-        .mailbox(channel_id)
-        .return_dequeued_head(
-            user_intervention(message_id.get(), "must roll back"),
-            crate::services::turn_orchestrator::QueuePersistenceContext::new(
-                &provider,
-                &shared.token_hash,
-                None,
-            ),
-            taken.dispatch_lease.unwrap(),
-        )
+    let handle = shared.mailbox(channel_id);
+    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &provider,
+        &shared.token_hash,
+        None,
+    );
+    let tail = user_intervention(4_794_113, "queued behind reserved head");
+    assert!(
+        handle
+            .enqueue(tail.clone(), persistence.clone())
+            .await
+            .enqueued
+    );
+    let marker_before = crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+        &provider,
+        &shared.token_hash,
+        channel_id,
+    )
+    .expect("reserved head marker");
+    let lease = taken.dispatch_lease.unwrap();
+    let returned = user_intervention(message_id.get(), "must roll back");
+    fail_queue_saves(channel_id, 1);
+    let outcome = handle
+        .return_dequeued_head(returned.clone(), persistence.clone(), lease.clone())
         .await;
+    assert_eq!(
+        queue_save_faults(channel_id, false),
+        0,
+        "save fault must be consumed"
+    );
+    assert!(
+        outcome
+            .persistence_error
+            .as_deref()
+            .is_some_and(|error| { error.contains("injected pending queue save failure") })
+    );
     assert!(outcome.persistence_error.is_some());
     let surfaced = race_loss_persistence_failure(channel_id, outcome.persistence_error.as_deref())
         .expect_err("durable enqueue failure must reach the caller");
@@ -142,8 +164,52 @@ async fn persistence_failure_rolls_back_owner_return_and_preserves_dispatch_rese
             .contains("failed to persist queued intake")
     );
     let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
-    assert!(snapshot.intervention_queue.is_empty());
+    assert_eq!(snapshot.intervention_queue.len(), 1);
+    assert_eq!(snapshot.intervention_queue[0].message_id, tail.message_id);
+    assert_eq!(snapshot.intervention_queue[0].text, tail.text);
     assert_eq!(snapshot.pending_user_dispatch, Some(message_id));
+    let marker_after = crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+        &provider,
+        &shared.token_hash,
+        channel_id,
+    )
+    .expect("failed return preserves marker");
+    assert_eq!(marker_after.0.message_id, marker_before.0.message_id);
+    assert_eq!(marker_after.0.text, marker_before.0.text);
+    let (disk_queue, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+        &provider,
+        &shared.token_hash,
+        channel_id,
+    );
+    assert_eq!(
+        disk_queue
+            .iter()
+            .map(|item| item.message_id)
+            .collect::<Vec<_>>(),
+        vec![tail.message_id]
+    );
+    let retried = handle
+        .return_dequeued_head(returned, persistence, lease)
+        .await;
+    assert!(retried.enqueued && retried.persistence_error.is_none());
+    let snapshot = handle.snapshot().await;
+    assert_eq!(snapshot.pending_user_dispatch, None);
+    assert_eq!(
+        snapshot
+            .intervention_queue
+            .iter()
+            .map(|item| item.message_id)
+            .collect::<Vec<_>>(),
+        vec![message_id, tail.message_id]
+    );
+    assert!(
+        crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+            &provider,
+            &shared.token_hash,
+            channel_id,
+        )
+        .is_some()
+    );
 }
 
 #[allow(clippy::await_holding_lock)]
