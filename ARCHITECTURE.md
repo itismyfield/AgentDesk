@@ -1019,7 +1019,6 @@ src/
 │   │   │   └── warm_followup_owner_tests.rs
 │   │   ├── input/
 │   │   │   ├── tests/
-│   │   │   │   └── prompt_ready_setup_tests.rs
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
@@ -1032,6 +1031,8 @@ src/
 │   │   │   ├── timeout_draft_tests.rs
 │   │   │   └── user_receipt.rs
 │   │   ├── readiness/
+│   │   │   ├── compact.rs
+│   │   │   ├── compact_tests.rs
 │   │   │   ├── dialog.rs
 │   │   │   ├── evidence.rs
 │   │   │   ├── idle.rs

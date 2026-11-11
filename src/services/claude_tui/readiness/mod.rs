@@ -1,7 +1,7 @@
-//! Idle-only readiness authority. Busy injection and compact keep their existing entry paths.
+//! Current-source Idle readiness; external Busy injection keeps its own entry path.
+pub(crate) mod compact;
 mod dialog;
 mod evidence;
-#[cfg(unix)]
 pub(crate) mod idle;
 mod source;
 #[cfg(test)]
@@ -274,6 +274,7 @@ pub(crate) fn note_hook(
     {
         return;
     }
+    let _compact_wake = compact::HookWake;
     let Some(path) = payload["transcript_path"].as_str().map(PathBuf::from) else {
         return;
     };

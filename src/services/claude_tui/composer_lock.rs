@@ -76,6 +76,18 @@ pub(crate) struct ComposerPermit<'a> {
     _local: std::marker::PhantomData<(&'a str, std::rc::Rc<()>)>,
 }
 
+/// Passes a witness only while the same blocking composer fence is held.
+pub(crate) fn with_composer_permit<R>(
+    session: &str,
+    operation: impl for<'a> FnOnce(ComposerPermit<'a>) -> R,
+) -> R {
+    with_composer_mutation_lock(session, || {
+        operation(ComposerPermit {
+            _local: std::marker::PhantomData,
+        })
+    })
+}
+
 pub(crate) fn try_with_composer_permit<R>(
     session: &str,
     operation: impl for<'a> FnOnce(ComposerPermit<'a>) -> R,
@@ -207,19 +219,6 @@ pub(crate) fn admit_composer_write(
     }
 }
 
-/// Run a blocking hosted-turn operation under the pane's full turn lock.
-#[cfg(unix)]
-pub(crate) fn with_session_turn_lock<R>(tmux_session_name: &str, f: impl FnOnce() -> R) -> R {
-    let turn_lock = session_turn_lock(tmux_session_name);
-    let _turn_guard = turn_lock.lock().unwrap_or_else(|error| error.into_inner());
-    f()
-}
-
-#[cfg(not(unix))]
-pub(crate) fn with_session_turn_lock<R>(_tmux_session_name: &str, f: impl FnOnce() -> R) -> R {
-    f()
-}
-
 #[cfg(all(test, unix))]
 mod claude_tui_composer_lock_tests {
     use super::*;
@@ -346,12 +345,14 @@ mod claude_tui_composer_lock_tests {
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
                 for _ in 0..50 {
-                    with_session_turn_lock(session, || {
+                    let turn_lock = session_turn_lock(session);
+                    let _turn_guard = turn_lock.lock().unwrap_or_else(|e| e.into_inner());
+                    {
                         let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
                         max_concurrent.fetch_max(now, Ordering::SeqCst);
                         std::thread::sleep(Duration::from_micros(50));
                         inside.fetch_sub(1, Ordering::SeqCst);
-                    });
+                    }
                 }
             }));
         }

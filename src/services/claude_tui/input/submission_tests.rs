@@ -63,7 +63,7 @@ if [ "$2" = "$(cat "$d/hold" 2>/dev/null)" ] && [ ! -f "$d/held" ]; then
 fi
 case "$2" in
 display-message) for last do :; done; case "$last" in '#{pane_dead}'|'#{pane_in_mode}') echo 0 ;; *) echo 1 ;; esac ;;
-capture-pane) cat "$d/screen"; if [ -f "$d/next_screen" ]; then mv "$d/next_screen" "$d/screen"; fi ;;
+capture-pane) [ ! -f "$d/capture_fail" ] || exit 1; cat "$d/screen"; if [ -f "$d/next_screen" ]; then mv "$d/next_screen" "$d/screen"; fi ;;
 list-panes) if [ -f "$d/pane_model" ]; then if [ -f "$d/dead" ]; then echo 1; else echo 0; fi; fi ;;
 load-buffer|paste-buffer|send-keys)
   n=$(cat "$d/sent" 2>/dev/null || echo 0); echo $((n + 1)) > "$d/sent"

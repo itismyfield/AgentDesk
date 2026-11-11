@@ -893,3 +893,7 @@ fn startup_workspace_caller_uses_home_only_plan_before_every_dialog_key() {
         }
     }
 }
+
+#[cfg(unix)]
+#[path = "compact_tests.rs"]
+mod compact_tests;
