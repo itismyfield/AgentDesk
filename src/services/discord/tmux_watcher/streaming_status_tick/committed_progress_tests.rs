@@ -775,16 +775,16 @@ fn o_delegated_rollover_tick_writes_no_body() {
     });
 }
 
-/// A tick that writes no body (whitespace only, a frame the provider guard holds, or a display
-/// already shown) leaves a pending adoption; the tick that writes the body ends it first.
+/// A pending adoption holds every status tick body: whitespace, a guarded frame, a display already
+/// shown, and the body itself all leave it pending and write no body.
 #[test]
-fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
+fn a_pending_adoption_holds_every_status_tick_body() {
     use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
     use crate::services::tui_o::cutover::test_override;
     let _boot = test_override::force_channels(&[]);
     if !test_override::isolated_binding_case(concat!(
         module_path!(),
-        "::only_a_status_tick_that_writes_a_body_ends_a_pending_adoption"
+        "::a_pending_adoption_holds_every_status_tick_body"
     )) {
         return;
     }
@@ -794,7 +794,7 @@ fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
         for (case, body, expected) in [
             (16, " \n", Adoption::Pending),
             (18, "safe prefix [SYSTEM NOTIF", Adoption::Pending),
-            (17, "ADK-C1A watcher tick body\n", Adoption::Released),
+            (17, "ADK-C1A watcher tick body\n", Adoption::Pending),
         ] {
             let fx = seed_row(guard.root.path(), case, false, false);
             let shared = crate::services::discord::make_shared_data_for_tests();
@@ -821,7 +821,7 @@ fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
             assert_eq!(check.adoption(), expected, "{body:?}");
             let shown = rec.bodies.lock().unwrap().clone();
             let writes = shown.iter().filter(|c| c.contains(BODY)).count();
-            assert_eq!(writes > 0, expected == Adoption::Released, "{shown:?}");
+            assert_eq!(writes, 0, "{shown:?}");
         }
 
         let fx = seed_row(guard.root.path(), 19, false, false);
