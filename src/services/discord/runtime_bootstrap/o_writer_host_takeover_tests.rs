@@ -643,9 +643,8 @@ fn answered(dir: &std::path::Path, name: &str, text: &str) -> (SourceId, u64, u6
     (source_id_for("takeover", &path).unwrap(), opener, end)
 }
 
-/// Through the gateway's own delivery records: a Historical receipt of the rollout bound first,
-/// written by the pinned writer after the next bind at the very bytes where that rollout's turn
-/// ends, proves neither rollout's delivery, so both turns are taken from their openers.
+/// A Historical receipt of the first rollout, written by the pinned writer after the next bind at
+/// bytes where both turns end, proves neither delivery: both are taken from their openers.
 #[cfg(unix)]
 #[test]
 fn codex_takeover_counts_a_historical_receipt_for_no_rollout_pg() {

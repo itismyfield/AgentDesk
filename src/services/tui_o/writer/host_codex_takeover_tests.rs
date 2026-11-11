@@ -840,9 +840,8 @@ async fn a_turn_ended_before_the_baseline_is_skipped_only_on_delivery_evidence()
     }
 }
 
-/// A turn on the rollout bound before, opened before the baseline after a Legacy send and ended
-/// undelivered, keeps a new rollout's takeover waiting; a record of the new rollout's turn proves
-/// nothing once two rollouts were bound, so with Legacy sending it keeps waiting.
+/// An undelivered turn on the rollout bound before, after a Legacy send, holds the next rollout's
+/// takeover; a record dated after the second bind proves nothing, so it keeps waiting.
 #[tokio::test(start_paused = true)]
 async fn an_undelivered_turn_on_the_rollout_before_holds_the_next_rollouts_takeover() {
     const CODEX: u64 = 61_837;
