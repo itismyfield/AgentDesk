@@ -29,8 +29,13 @@ test("inventory refresh only pushes the current working branch", async (t) => {
             result: " M docs/generated/route-inventory.md\n"
           },
           {
-            match: (cmd, args) => cmd === "git" && args[0] === "-C" && args[1] === worktree &&
-              (["branch", "rev-parse"].includes(args[2])),
+            match: (cmd, args) => cmd === "git" &&
+              JSON.stringify(args) === JSON.stringify(["-C", worktree, "branch", "--show-current"]),
+            result: `${scenario.current}\n`
+          },
+          {
+            match: (cmd, args) => cmd === "git" &&
+              JSON.stringify(args) === JSON.stringify(["-C", worktree, "rev-parse", "--abbrev-ref", "HEAD"]),
             result: `${scenario.current}\n`
           },
           {
@@ -48,14 +53,17 @@ test("inventory refresh only pushes the current working branch", async (t) => {
         { completed_worktree_path: worktree, completed_branch: scenario.supplied }
       );
 
-      assert.equal(state.execCalls.filter((call) => call.args[2] === "commit").length, 1);
+      const probes = state.execCalls.filter((call) => call.args[2] === "rev-parse");
+      for (const probe of probes) assert.deepEqual(toPlain(probe.options), { timeout_ms: 10000 });
       const pushes = toPlain(state.execCalls.filter((call) => call.args[2] === "push"));
       const failures = state.logs.warn.filter((message) => message.startsWith("[inventory]"));
       if (scenario.error) {
-        assert.deepEqual(pushes, []);
+        assert.deepEqual(toPlain(state.execCalls.filter((call) => ["add", "commit", "push"].includes(call.args[2]))), []);
         assert.equal(failures.length, 1);
         assert.match(failures[0], scenario.error);
       } else {
+        assert.equal(probes.length, 1);
+        for (const command of ["add", "commit"]) assert.equal(state.execCalls.filter((call) => call.args[2] === command).length, 1);
         assert.deepEqual(pushes, [{ cmd: "git", args: ["-C", worktree, "push", "-u", "origin", branch], options: { timeout_ms: 20000 } }]);
         assert.deepEqual(failures, []);
         assert.ok(state.logs.info.some((message) => message.endsWith("auto-refreshed generated docs on " + branch)));
