@@ -1,3 +1,4 @@
+use crate::services::provider::ProviderRuntimeExt;
 #[cfg(target_os = "macos")]
 mod fd_usage;
 #[cfg(target_os = "macos")]

@@ -425,7 +425,7 @@ pub use settings::{
 pub(crate) use settings::resolve_role_binding as resolve_channel_role_binding;
 
 /// Discord message length limit
-pub(super) const DISCORD_MSG_LIMIT: usize = 2000;
+pub(super) use crate::domain::message_split::DISCORD_MSG_LIMIT;
 
 #[cfg(test)]
 pub(in crate::services::discord) use synthetic_headless_message_id::SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR;

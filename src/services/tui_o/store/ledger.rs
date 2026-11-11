@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use super::rotation::BoundaryEvidence;
 use super::{StoreError, damage};
-use crate::services::discord::runtime_store::fsync_parent_dir;
+use crate::domain::file_sync::fsync_parent_dir;
 use crate::services::tui_o::shadow::{SourceId, UnitKey};
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 

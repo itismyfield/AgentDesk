@@ -2,6 +2,7 @@ use super::super::super::queue_marker;
 use super::super::super::turn_view_reconciler::note_intake_turn_started_current_with_attempt as tv_start_current_with_attempt;
 use super::provider_dispatch::producer_panic;
 use super::*;
+use crate::services::provider::ProviderRuntimeExt;
 use crate::services::provider::session_prompt;
 
 mod feature_settings;

@@ -57,7 +57,7 @@
 | `GET` | `/api/channels/{channel_id}/monitoring` | `monitoring::list_monitoring` | `src/server/routes/monitoring.rs:69` | `src/server/routes/domains/runtime.rs:115` |
 | `POST` | `/api/channels/{channel_id}/monitoring` | `monitoring::upsert_monitoring` | `src/server/routes/monitoring.rs:19` | `src/server/routes/domains/runtime.rs:115` |
 | `DELETE` | `/api/channels/{channel_id}/monitoring/{key}` | `monitoring::remove_monitoring` | `src/server/routes/monitoring.rs:52` | `src/server/routes/domains/runtime.rs:119` |
-| `PATCH` | `/api/channels/{id}` | `provider_auth_profiles::patch_channel_auth_profile` | `src/server/routes/provider_auth_profiles.rs:368` | `src/server/routes/domains/integrations.rs:70` |
+| `PATCH` | `/api/channels/{id}` | `provider_auth_profiles::patch_channel_auth_profile` | `src/server/routes/provider_auth_profiles.rs:369` | `src/server/routes/domains/integrations.rs:70` |
 | `GET` | `/api/channels/{id}/queue` | `queue_api::list_channel_queue` | `src/server/routes/queue_api.rs:21` | `src/server/routes/domains/runtime.rs:106` |
 | `POST` | `/api/channels/{id}/relay-recovery` | `health_api::relay_recovery_handler` | `src/server/routes/health_api.rs:913` | `src/server/routes/domains/runtime.rs:111` |
 | `GET` | `/api/channels/{id}/watcher-state` | `queue_api::get_watcher_state` | `src/server/routes/queue_api.rs:273` | `src/server/routes/domains/runtime.rs:107` |
@@ -218,11 +218,11 @@
 | `POST` | `/api/pm-decision` | `kanban::pm_decision` | `src/server/routes/kanban.rs:1262` | `src/server/routes/domains/kanban.rs:60` |
 | `GET` | `/api/policies` | `agents_crud::list_policies` | `src/server/routes/agents_crud.rs:1055` | `src/server/routes/domains/agents.rs:46` |
 | `GET` | `/api/prompt-manifest/retention` | `prompt_manifest_retention::get_retention_status` | `src/server/routes/prompt_manifest_retention.rs:36` | `src/server/routes/domains/ops.rs:159` |
-| `GET` | `/api/provider-auth-profiles` | `provider_auth_profiles::list_provider_auth_profiles` | `src/server/routes/provider_auth_profiles.rs:58` | `src/server/routes/domains/integrations.rs:50` |
-| `POST` | `/api/provider-auth-profiles/{provider}/login-complete` | `provider_auth_profiles::login_complete` | `src/server/routes/provider_auth_profiles.rs:238` | `src/server/routes/domains/integrations.rs:58` |
-| `POST` | `/api/provider-auth-profiles/{provider}/login-start` | `provider_auth_profiles::login_start` | `src/server/routes/provider_auth_profiles.rs:169` | `src/server/routes/domains/integrations.rs:54` |
-| `PUT` | `/api/provider-auth-profiles/{provider}/primary` | `provider_auth_profiles::set_primary_profile` | `src/server/routes/provider_auth_profiles.rs:142` | `src/server/routes/domains/integrations.rs:62` |
-| `DELETE` | `/api/provider-auth-profiles/{provider}/{profile_id}` | `provider_auth_profiles::remove_profile` | `src/server/routes/provider_auth_profiles.rs:317` | `src/server/routes/domains/integrations.rs:66` |
+| `GET` | `/api/provider-auth-profiles` | `provider_auth_profiles::list_provider_auth_profiles` | `src/server/routes/provider_auth_profiles.rs:59` | `src/server/routes/domains/integrations.rs:50` |
+| `POST` | `/api/provider-auth-profiles/{provider}/login-complete` | `provider_auth_profiles::login_complete` | `src/server/routes/provider_auth_profiles.rs:239` | `src/server/routes/domains/integrations.rs:58` |
+| `POST` | `/api/provider-auth-profiles/{provider}/login-start` | `provider_auth_profiles::login_start` | `src/server/routes/provider_auth_profiles.rs:170` | `src/server/routes/domains/integrations.rs:54` |
+| `PUT` | `/api/provider-auth-profiles/{provider}/primary` | `provider_auth_profiles::set_primary_profile` | `src/server/routes/provider_auth_profiles.rs:143` | `src/server/routes/domains/integrations.rs:62` |
+| `DELETE` | `/api/provider-auth-profiles/{provider}/{profile_id}` | `provider_auth_profiles::remove_profile` | `src/server/routes/provider_auth_profiles.rs:318` | `src/server/routes/domains/integrations.rs:66` |
 | `GET` | `/api/provider-cli` | `provider_cli_api::get_provider_cli_status` | `src/server/routes/provider_cli_api.rs:29` | `src/server/routes/domains/runtime.rs:124` |
 | `PATCH` | `/api/provider-cli/{provider}` | `provider_cli_api::patch_provider_cli` | `src/server/routes/provider_cli_api.rs:90` | `src/server/routes/domains/ops.rs:274` |
 | `POST` | `/api/queue/cancel` | `auto_queue::cancel` | `src/server/routes/auto_queue.rs:164` | `src/server/routes/domains/ops.rs:256` |

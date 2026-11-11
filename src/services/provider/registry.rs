@@ -5,8 +5,7 @@ use crate::services::provider_auth::ProviderAuthSpec;
 use super::{ProviderCapabilities, ProviderDefaultBehavior, ProviderKind};
 pub use crate::domain::provider::{
     ProviderCatalogEntry, ProviderCompactionAdapter, ProviderExecutionAdapter,
-    ProviderReadinessAdapter, StreamJsonDialectId, derived_counterpart_ids,
-    public_provider_catalog,
+    ProviderReadinessAdapter, StreamJsonDialectId, public_provider_catalog,
 };
 use crate::domain::provider::{ProviderDescriptor, provider_catalog};
 

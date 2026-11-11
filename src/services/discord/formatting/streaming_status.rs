@@ -21,40 +21,9 @@ pub(super) fn char_count(s: &str) -> usize {
     s.chars().count()
 }
 
-/// Conservative unit policy for Discord's documented 2000-character limit.
-///
-/// Discord does not document a Unicode counting model, and this repository has
-/// no observed-delivery evidence that establishes one. The production-call
-/// inventory is: `formatting::delivery::{split_message, needs_multiple_messages}`;
-/// the streaming split, snapshot, and status truncation helpers in this module;
-/// `outbound::decision::decide_length`; `outbound::manual_delivery`'s oversize routing;
-/// `outbound::delivery::{truncate_with_marker, split_content}`;
-/// `single_message_panel::{compose_completion_footer_text,
-/// clamp_footer_status_block}`; `placeholder_live_events::status_panel`;
-/// `turn_end_wip_warning`'s bounded merge helpers;
-/// `tui_task_card::truncate_preview_at_boundary`; `tmux_placeholder_suppression`; and
-/// `http::discord_content_or_zwsp`. This is a caller index, not a claim about a
-/// Discord guarantee or a repository-wide invariant: `markdown_preview`
-/// uses scalar count while collecting candidate lines before its final
-/// unit-based clamp.
-pub(in crate::services::discord) fn discord_message_units(s: &str) -> usize {
-    s.encode_utf16().count()
-}
-
-pub(in crate::services::discord) fn byte_index_at_discord_message_units(
-    s: &str,
-    max_units: usize,
-) -> usize {
-    let mut units = 0;
-    for (index, character) in s.char_indices() {
-        let next_units = units + character.len_utf16();
-        if next_units > max_units {
-            return index;
-        }
-        units = next_units;
-    }
-    s.len()
-}
+pub(in crate::services::discord) use crate::domain::message_split::{
+    byte_index_at_discord_message_units, discord_message_units,
+};
 
 pub(in crate::services::discord) fn streaming_split_boundary(
     text: &str,

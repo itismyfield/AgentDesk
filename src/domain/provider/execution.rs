@@ -146,3 +146,14 @@ impl ProviderReadinessAdapter {
         }
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LegacyDispatchKind {
+    Claude,
+    Codex,
+    Gemini,
+    OpenCode,
+    Qwen,
+    StreamJsonCli(StreamJsonDialectId),
+    Unsupported(String),
+}
