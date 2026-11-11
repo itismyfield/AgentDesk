@@ -9,7 +9,7 @@ extra == <<registry, marker, phase, sends, startupSeen, held, otherInstalled,
 reuseVars == <<vars, extra>>
 
 \* evidenced is still HostedState::Pending with expected evidence (herdr_launch.rs:502-514).
-ReuseInit ==
+SessionReuseInit ==
     /\ srv = "up" /\ rec = InitialRecord /\ pane = IF rec = "pending" THEN "none" ELSE "agent"
     /\ fresh = FALSE /\ stray = 0 /\ launch = "idle" /\ input = "idle"
     /\ landed = "none" /\ closing = FALSE /\ crashes = 0 /\ lost = 0 /\ exits = 0
@@ -19,20 +19,24 @@ ReuseInit ==
 
 \* The row, pane and marker survive; only the process registry is lost.
 Restart ==
+    /\ UNCHANGED handoff
     /\ phase = "beforeRestart" /\ Crash
     /\ registry' = 0 /\ phase' = "afterCrash"
     /\ UNCHANGED <<marker, sends, startupSeen, held, otherInstalled, restores, restoredPending>>
 RestartBoot ==
+    /\ UNCHANGED handoff
     /\ phase = "afterCrash" /\ Boot /\ phase' = "waiting"
     /\ UNCHANGED <<registry, marker, sends, startupSeen, held, otherInstalled,
                     restores, restoredPending>>
 
 \* Exact unplaced resolution records the existing pane/evidence; no new provider is created.
 ResolveUnplaced ==
+    /\ UNCHANGED handoff
     /\ phase = "waiting" /\ srv = "up" /\ rec = "pending"
     /\ rec' = "evidenced" /\ pane' = "agent"
     /\ UNCHANGED <<srv, fresh, stray, launch, input, landed, closing, crashes, lost, exits, extra>>
 ResolveEvidence ==
+    /\ UNCHANGED handoff
     /\ phase = "waiting" /\ ProbeAgain /\ UNCHANGED extra
 
 \* A competing registration, marker replacement or row change precedes this input's check.
@@ -45,6 +49,7 @@ ReplaceMarker ==
     /\ UNCHANGED <<vars, registry, phase, sends, startupSeen, held, otherInstalled,
                     restores, restoredPending>>
 ReplaceRow ==
+    /\ UNCHANGED handoff
     /\ phase = "waiting" /\ Scenario = "bound" /\ rec = "evidenced" /\ rec' = "bound"
     /\ UNCHANGED <<srv, pane, fresh, stray, launch, input, landed, closing,
                     crashes, lost, exits, extra>>
@@ -58,6 +63,7 @@ ValidPending == rec = "evidenced" /\ marker = 1 /\ registry \in {0, 1}
 
 \* The source authority makes check-and-fill one action; an existing different nonce is refused.
 PrepareInput ==
+    /\ UNCHANGED handoff
     /\ ReadyToCheck
     /\ LET allowed == ~RestoreRegistration \/ ValidPending IN
        /\ phase' = IF allowed THEN "ready" ELSE "refused"
@@ -69,6 +75,7 @@ PrepareInput ==
     /\ UNCHANGED <<srv, rec, pane, fresh, stray, launch, landed, closing, crashes, lost, exits,
                     marker, sends, startupSeen, held, otherInstalled>>
 FirstInput ==
+    /\ UNCHANGED handoff
     /\ phase = "ready" /\ Send /\ phase' = "awaitStartup"
     /\ sends' = sends + 1 /\ held' = TRUE
     /\ UNCHANGED <<registry, marker, startupSeen, otherInstalled, restores, restoredPending>>
@@ -79,12 +86,15 @@ Startup ==
     /\ startupSeen' = TRUE /\ phase' = IF registry = 1 THEN "recorded" ELSE "held"
     /\ UNCHANGED <<vars, registry, marker, sends, held, otherInstalled, restores, restoredPending>>
 Finish ==
+    /\ UNCHANGED handoff
     /\ phase = "recorded" /\ Bind /\ phase' = "done" /\ held' = FALSE
     /\ UNCHANGED <<registry, marker, sends, startupSeen, otherInstalled, restores, restoredPending>>
 RetryHeld == phase = "held" /\ held /\ UNCHANGED reuseVars
-ReuseNext == Restart \/ RestartBoot \/ ResolveUnplaced \/ ResolveEvidence
+SessionReuseNext == Restart \/ RestartBoot \/ ResolveUnplaced \/ ResolveEvidence
              \/ InstallOther \/ ReplaceMarker \/ ReplaceRow \/ PrepareInput \/ FirstInput
              \/ Startup \/ Finish \/ RetryHeld
+ReuseInit == SessionReuseInit /\ HInit
+ReuseNext == SessionReuseNext /\ UNCHANGED handoff
 ReuseSpec == ReuseInit /\ [][ReuseNext]_reuseVars
              /\ WF_reuseVars(Restart) /\ WF_reuseVars(RestartBoot)
              /\ WF_reuseVars(ResolveUnplaced) /\ WF_reuseVars(ResolveEvidence)

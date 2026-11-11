@@ -11,7 +11,7 @@ The existing `HerdrSession` module now has a separate `HandoffSpec`; `HandoffPol
 | HerdrHandoffPersonBefore | none | GREEN |
 | HerdrHandoffFixed | none (11 invariants, 10 initial scenarios) | GREEN |
 
-The repository TLC checker checks the complete expected violation set, removing each violated rule and rerunning. All 6 selected configs, including the original `HerdrSession.cfg`, match `expected.tsv` (19 TLC runs). The fixed graph has 268 distinct states and depth 19. The original config still breaks exactly NoDeadlock, NoOrphanPane, PromptOnlyToAgent and RowMatchesPane; those historic findings are not repaired here.
+The repository TLC checker checks the complete expected violation set, removing each violated rule and rerunning. The first focused check covered 6 configs (19 TLC runs). The repository dependency selection also includes the 7 inherited Pending-registration configs; all 13 configs match expected.tsv (30 TLC runs), with the new handoff state frozen in initialization and every inherited action, and policy off. All original expected violations remain unchanged. The fixed graph has 268 distinct states and depth 19. The original config still breaks exactly NoDeadlock, NoOrphanPane, PromptOnlyToAgent and RowMatchesPane; those historic findings are not repaired here.
 
 Counterexamples against code:
 
@@ -37,4 +37,6 @@ export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/usr/bin/java
 python3 scripts/ci/statecharts_tlc.py --base 289f41b1d0f48fab0dc426e652308eced4326fce --head HEAD --jobs 2
 ```
 
-Raw logs, state dumps and positive reachability witnesses are in `/home/adk/adk/lane-runs/i8057/logs/h2/`; `model-evidence.json` verifies real exit, waiting, cleanup/wake, restart and refusal states were reached. The design and source-entry/action inventory are in `/home/adk/adk/lane-runs/i8057/design-h-2.md`.
+Raw logs, state dumps and positive reachability witnesses are in `/home/adk/adk/lane-runs/i8057/logs/h2/`; `model-evidence.json` verifies real exit, waiting, cleanup/wake, restart and refusal states were reached. The compatibility-only child initialization/UNCHANGED and explicit off constants do not add handoff behavior to Pending registration. The first dependency-wide run caught the missing inheritance initialization; its raw ERROR log is retained as `tlc-head-inheritance-red.log`, not counted as a semantic counterexample. The design and source-entry/action inventory are in `/home/adk/adk/lane-runs/i8057/design-h-2.md`.
+
+The r1 counterexamples instantiate target/hint/queue/person only; the restart scenarios assert the proposed r2 observation-only policy. They do not claim to prove r1 restart safety. Durable storage success and eventual controller/outbox scheduling are part of the fairness abstraction. Multi-original priority is checked against code and reserved for implementation tests, rather than inferred from this one-group graph. The Mermaid file is a manually drawn action summary; TLC results come from the repository checker.
