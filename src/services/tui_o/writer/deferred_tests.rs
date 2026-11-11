@@ -470,9 +470,8 @@ async fn a_record_past_legacys_frontier_is_taken_from_the_frontier_and_posted_on
     assert_eq!(open.harness.port.posts(), ["owed", "-# ✅ 완료", "next"]);
 }
 
-/// The held turn's own inflight row never blocks its adoption, while another turn's open intake
-/// does: the channel waits behind the intake, then with the row still there is taken from the
-/// frontier once the intake clears, and O posts the owed record once.
+/// The held turn's own row never blocks adoption while another turn's open intake does: once the
+/// intake clears, the row still there, O takes the channel from the frontier and posts once.
 #[tokio::test(start_paused = true)]
 async fn the_held_turns_own_row_passes_while_another_turns_open_intake_blocks() {
     let open = Open::new();

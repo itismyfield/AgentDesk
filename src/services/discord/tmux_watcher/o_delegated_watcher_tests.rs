@@ -61,9 +61,8 @@ async fn o_delegated_watcher_turn_shows_no_body_and_records_no_frontier() {
     );
 }
 
-/// A watcher terminal whose body waits on O's adoption is retried, never finalized: nothing shows
-/// and the row stays open. Once the adoption commits, with no new input, the next retry ends the
-/// turn through O and Legacy still shows nothing.
+/// A held watcher terminal is retried, never finalized, and shows nothing; once O adopts, the next
+/// retry ends the turn through O with no new input, and Legacy still shows nothing.
 #[tokio::test(flavor = "current_thread")]
 async fn a_held_watcher_terminal_retries_until_o_adopts_and_then_ends_through_o() {
     if !isolated_in(
