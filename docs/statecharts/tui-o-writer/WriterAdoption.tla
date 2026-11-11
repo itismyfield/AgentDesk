@@ -66,6 +66,8 @@ Duty == store # "none" /\ lp = 0
         /\ (adopt = "Held" \/ (adopt = "Committed" /\ oStart = "F"))
 Evidence == op >= 1 \/ lp >= 1 \/ Duty
 
+\* No wait marker is stored: a row passes, while another turn's open intake, pending start or
+\* terminal delivery blocks; waitMark only names the held turn's own row.
 OwnCustody == turn \in {"running", "held"}
 Exempt == Mut = "exemptAllRows" \/ (Fix # "main" /\ waitMark /\ turn = "held")
 Blocked == (otherCustody /\ Mut # "exemptAllRows") \/ (OwnCustody /\ ~Exempt)
