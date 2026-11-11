@@ -8,6 +8,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod memory;
 pub(crate) mod message_split;
 pub(crate) mod process_incarnation;
+pub(crate) mod outbound;
 pub(crate) mod provider;
 pub(crate) mod provider_auth_profile;
 pub(crate) mod session_identity;
