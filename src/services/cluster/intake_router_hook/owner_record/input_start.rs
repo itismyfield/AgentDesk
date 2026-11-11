@@ -1,5 +1,6 @@
 //! A committed source begin and a move-only owner guard for the first raw input.
 use super::{OwnerIdentity, custody};
+use crate::db::channel_custody_lock;
 use crate::db::replay_disposition::write::{self, BeginFrom, EffectProjection, ExactAttempt};
 use crate::services::discord::replay_policy::permit::{EffectTarget, StartPermit};
 use sha2::{Digest, Sha256};
@@ -118,7 +119,7 @@ impl OwnerStartPermit {
             .execute(&mut *tx)
             .await
             .map_err(error)?;
-        custody::lock(&mut tx, &self.identity)
+        channel_custody_lock::lock(&mut tx, &self.identity)
             .await
             .map_err(error)?;
         let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.owner_instance_id=d.owner_instance_id AND o.generation=d.owner_generation AND o.status='active' AND (o.routing_cleanup IS NULL OR $8::BOOLEAN) WHERE d.id=$1 AND d.routing_state='admitted' AND d.status='spawned' AND d.owner_instance_id=$2 AND d.owner_generation=$3 AND d.claim_owner=$4 AND r.id=$5 AND r.replay_episode_nonce=$6 AND r.replay_owner_incarnation=$7 AND r.replay_disposition='started_unclassified')")

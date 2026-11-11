@@ -1,5 +1,6 @@
 //! A shared PG observation is a plan input, never execution permission.
-use super::{OwnerIdentity, OwnerRecordSnapshot, custody, fallback};
+use super::{OwnerIdentity, OwnerRecordSnapshot, fallback};
+use crate::db::channel_custody_lock;
 use crate::services::cluster::{execution_requirements::ExecutionRequirements, readiness};
 use fallback::{Availability, Home, Target};
 use serde_json::{Value, json};
@@ -92,7 +93,7 @@ pub(crate) async fn read_on_tx(
     id: &OwnerIdentity,
     context: &Context,
 ) -> Result<Shared, sqlx::Error> {
-    custody::lock(tx, id).await?;
+    channel_custody_lock::lock(tx, id).await?;
     let home = home_rows(tx, id, &context.policy_channel).await?;
     let (now, nodes): (i64, Value) = sqlx::query_as(
         "SELECT (EXTRACT(EPOCH FROM NOW())*1000)::BIGINT,

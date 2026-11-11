@@ -1,7 +1,7 @@
 //! First init holds the existing execution key and intake fence through its local commit.
 use super::*;
+use crate::db::channel_custody_lock;
 use crate::domain::intake_identity::OwnerIdentity;
-use crate::services::cluster::intake_router_hook::owner_record::custody;
 
 pub(crate) async fn facts(
     pool: &PgPool,
@@ -14,7 +14,7 @@ pub(crate) async fn facts(
     sqlx::query("SET LOCAL lock_timeout='2s'")
         .execute(&mut *tx)
         .await?;
-    custody::lock(&mut tx, &OwnerIdentity::new(provider, channel)).await?;
+    channel_custody_lock::lock(&mut tx, &OwnerIdentity::new(provider, channel)).await?;
     let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND owner_instance_id=$3 AND generation=$4 AND status='active')")
         .bind(provider).bind(channel).bind(executor).bind(generation).fetch_one(&mut *tx).await?;
     if !valid {
