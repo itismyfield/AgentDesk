@@ -1,4 +1,5 @@
 //! A mapped Claude Legacy front closes its old pane before the ordinary idle launch claims it.
+#![cfg(unix)]
 use super::drive::Front;
 use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
 use crate::services::claude::session_handoff::{
