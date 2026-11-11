@@ -115,9 +115,17 @@ fn a_stop_fallback_resumes_the_waiting_input_once_after_its_cleanup() {
                 "{case:?}: row gone"
             );
 
+            // Only an emptied bus ends the count; a lagged or closed one could hide an event.
             let mut eligible = 0;
-            while let Ok(event) = events.try_recv() {
-                eligible += usize::from(event.channel_id == channel && event.queue_is_eligible());
+            loop {
+                match events.try_recv() {
+                    Ok(event) => {
+                        eligible +=
+                            usize::from(event.channel_id == channel && event.queue_is_eligible());
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                    Err(other) => panic!("{case:?}: completion bus unreadable: {other:?}"),
+                }
             }
             assert_eq!(eligible, 0, "{case:?}: the token release wakes no queue");
             if case.owned {

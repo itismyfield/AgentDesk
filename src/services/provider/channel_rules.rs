@@ -3,14 +3,6 @@
 use super::ProviderKind;
 use crate::config::OnboardingConfig;
 
-/// Legacy tmux identity uses the registry default, never live routing policy.
-pub(super) fn legacy_default() -> Option<ProviderKind> {
-    super::provider_registry()
-        .iter()
-        .find(|entry| entry.default_channel_provider)
-        .and_then(|entry| entry.kind())
-}
-
 pub(crate) fn warnings(config: &OnboardingConfig) -> Vec<String> {
     let mut warnings = Vec::new();
     let mut normalized = std::collections::BTreeMap::new();
@@ -56,6 +48,7 @@ pub(crate) fn warnings(config: &OnboardingConfig) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::provider::ProviderRuntimeExt;
 
     fn parse(yaml: &str) -> OnboardingConfig {
         serde_yaml::from_str(yaml).unwrap()

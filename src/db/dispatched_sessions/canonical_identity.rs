@@ -549,7 +549,7 @@ async fn load_canonical_for_update(
         // A different host or, on the same host, a renamed tmux session is a distinct
         // terminal; two spellings of one host:tmux pair are not.
         let terminals = [owner.session_key.as_str(), candidate.session_key.as_str()].map(|key| {
-            crate::services::discord::session_identity::SessionIdentity::parse(key).map(|parsed| {
+            crate::domain::session_identity::SessionIdentity::parse(key).map(|parsed| {
                 let host = parsed.host.to_ascii_lowercase();
                 (host.trim_end_matches(".local").to_owned(), parsed.tmux_name)
             })

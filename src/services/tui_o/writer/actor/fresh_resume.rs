@@ -1,6 +1,7 @@
 //! Rescope only at a new proven root, with no work or reader obligation left in flight.
 
 use super::*;
+use crate::services::provider::ProviderRuntimeExt;
 
 #[cfg(test)]
 static WORK: (AtomicUsize, std::sync::atomic::AtomicBool) = (

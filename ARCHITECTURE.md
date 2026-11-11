@@ -374,6 +374,8 @@ src/
 │   ├── test_support.rs
 │   └── types.rs
 ├── domain/
+│   ├── message_split/
+│   │   └── semantic_boundaries.rs
 │   ├── outbound/
 │   │   ├── ids.rs
 │   │   ├── key.rs
@@ -386,16 +388,22 @@ src/
 │   │   ├── capabilities.rs
 │   │   ├── catalog.rs
 │   │   ├── execution.rs
+│   │   ├── naming.rs
 │   │   ├── public_catalog.rs
-│   │   └── tests.rs
+│   │   ├── tests.rs
+│   │   └── value_methods.rs
+│   ├── session_identity/
+│   │   └── naming.rs
 │   ├── bot_role.rs
 │   ├── file_sync.rs
 │   ├── human_input.rs
 │   ├── lifecycle.rs
 │   ├── memory.rs
+│   ├── message_split.rs
 │   ├── mod.rs
 │   ├── outbound.rs
 │   ├── provider.rs
+│   ├── session_identity.rs
 │   └── tool_text.rs
 ├── engine/
 │   ├── ops/
@@ -1894,6 +1902,7 @@ src/
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── closed.rs
+│   │   │   │   ├── closed_tests.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
@@ -2054,6 +2063,8 @@ src/
 │   │   │   ├── destructive_warrant.rs
 │   │   │   ├── idle_tmux.rs
 │   │   │   └── tests.rs
+│   │   ├── relay_recovery_leaked_row_sweep/
+│   │   │   └── resume_tests.rs
 │   │   ├── replay_policy/
 │   │   │   ├── live/
 │   │   │   │   ├── observer_tests.rs
@@ -3027,6 +3038,7 @@ src/
 │   │   │   └── watcher_orphan_cleanup.rs
 │   │   ├── turn_finalizer/
 │   │   │   ├── cleanup/
+│   │   │   │   ├── already_finalized.rs
 │   │   │   │   └── terminal_release.rs
 │   │   │   ├── episode/
 │   │   │   │   ├── row_retirement.rs
@@ -3564,6 +3576,7 @@ src/
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
 │   │   ├── registry.rs
+│   │   ├── runtime.rs
 │   │   ├── session_probe.rs
 │   │   └── session_prompt.rs
 │   ├── provider_auth_profile/

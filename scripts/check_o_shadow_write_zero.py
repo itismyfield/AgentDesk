@@ -14,7 +14,7 @@ CRATE_ALLOW = {
     "crate::services::agent_protocol::RuntimeHandoffKind",
     "crate::services::discord::DISCORD_MSG_LIMIT",
     "crate::services::discord::response_sanitizer::is_standalone_tui_response_chrome",
-    "crate::services::discord::formatting::split_for_shadow",
+    "crate::domain::message_split::split_for_shadow",
     "crate::services::provider::ProviderKind::Claude",
     "crate::services::provider::ProviderKind::Codex",
     "crate::services::tui_o::repost::config::RepostConfig",

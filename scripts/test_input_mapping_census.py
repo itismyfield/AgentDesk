@@ -155,7 +155,7 @@ RELEASES = {
         "turn_finalizer/cleanup/terminal_release.rs": 1,
         "health/recovery.rs": 2,
         "turn_finalizer/guarded_finish_residue.rs": 1,
-        "turn_finalizer/cleanup.rs": 1,
+        "turn_finalizer/cleanup/already_finalized.rs": 1,
     },
 }
 

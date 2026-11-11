@@ -8,6 +8,9 @@ use super::{FinalizeContext, TerminalEvent, TurnKey};
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{RelayOwnerKind, clear_inflight_state_if_matches};
 
+mod already_finalized;
+pub(in crate::services::discord) use already_finalized::DuplicateCleanup;
+pub(super) use already_finalized::already_finalized_active_state;
 pub(in crate::services::discord) mod terminal_release;
 pub(in crate::services::discord) use terminal_release::rearm_queue_backstop_after_mailbox_release;
 
@@ -410,84 +413,6 @@ pub(super) fn ensure_synthetic_claim_marker_before_clear(
         &snapshot.started_at,
         snapshot.turn_start_offset,
     );
-}
-
-/// Late `AlreadyFinalized` losers still perform guarded active-state cleanup.
-/// This is narrower than `do_finalize`: only the same real turn id, or a row its own
-/// release proves is that episode's, can lose mailbox/inflight state.
-pub(super) async fn already_finalized_active_state(
-    key: TurnKey,
-    provider: &ProviderKind,
-    event: &TerminalEvent,
-    ctx: FinalizeContext,
-    shared: &Arc<SharedData>,
-    witness: super::episode::RuntimeWitness<'_>,
-) {
-    if key.user_msg_id == 0 {
-        return;
-    }
-
-    let Ok(expected_actor) = captured_recovery_actor(witness.claim_snapshot) else {
-        return;
-    };
-    // Recovery owns row retirement with its exact committed snapshot. A ledger
-    // duplicate must not adopt the currently loaded row as cleanup authority;
-    // only this call's own proven release may retire its episode's drifted row.
-    let clear_inflight = expected_actor.is_none();
-    let owned_role_override = snapshot_role_override(shared, key.channel_id);
-    let captured = match super::episode::claim_episode(
-        shared,
-        provider,
-        key,
-        clear_inflight,
-        expected_actor,
-        Some(witness),
-    )
-    .await
-    {
-        Ok(captured) => captured,
-        Err(()) => return,
-    };
-    let finish = if let Some(capture) = captured {
-        capture.publish_release(shared, key);
-        capture.finish
-    } else {
-        let kept = clear_inflight_state_if_matches(provider, key.channel_id.get(), key.user_msg_id);
-        super::episode::warn_same_id_row_kept(provider, key, kept);
-        super::super::mailbox_finish_turn_if_matches(
-            shared,
-            provider,
-            key.channel_id,
-            serenity::model::id::MessageId::new(key.user_msg_id),
-        )
-        .await
-    };
-    let Some(token) = finish.removed_token.as_ref() else {
-        return;
-    };
-    shared
-        .turn_finalizer
-        .note_mailbox_released(key, shared.clone());
-    rearm_queue_backstop_after_mailbox_release(
-        shared,
-        provider,
-        key.channel_id,
-        finish.has_pending,
-        "already_finalized_mailbox_release",
-    )
-    .await;
-
-    if ctx.allow_completion_cleanup && !matches!(event, TerminalEvent::Cancel) {
-        token.mark_completion_cleanup();
-    }
-    token
-        .cancelled
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    super::super::saturating_decrement_global_active(shared);
-    kick_thread_parents_after_turn_release(shared, provider, key.channel_id).await;
-    if !finish.has_pending {
-        remove_owned_role_override(shared, key.channel_id, owned_role_override);
-    }
 }
 
 #[cfg(not(test))]

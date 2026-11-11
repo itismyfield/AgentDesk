@@ -1,5 +1,6 @@
 //! Extra CLI auth-profile catalog + isolated vendor login.
 
+use crate::services::provider::ProviderRuntimeExt;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 

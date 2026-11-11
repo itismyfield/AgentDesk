@@ -81,6 +81,7 @@ pub(super) async fn do_finalize_with_probe(
         Some(super::episode::CapturedFinish {
             finish,
             snapshot: None,
+            row_cleared: false,
         })
     } else {
         match super::episode::claim_episode(
