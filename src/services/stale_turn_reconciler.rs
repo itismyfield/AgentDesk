@@ -2,9 +2,9 @@ use anyhow::{Result, anyhow};
 use sqlx::PgPool;
 use std::time::Duration;
 
+use crate::domain::session_identity::SessionIdentity;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::relay_recovery::AxisBSite;
-use crate::services::discord::session_identity::SessionIdentity;
 use crate::services::provider::ProviderKind;
 
 #[cfg(test)]

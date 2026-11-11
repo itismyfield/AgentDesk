@@ -2,7 +2,8 @@
 
 use super::{OutboxEnqueueError, OutboxMessage};
 use crate::db::agents::AgentChannelBindings;
-use crate::services::discord::{session_identity::SessionIdentity, session_notice};
+use crate::domain::session_identity::SessionIdentity;
+use crate::services::discord::session_notice;
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, Postgres, Row, Transaction};
