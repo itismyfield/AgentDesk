@@ -2,6 +2,8 @@
 
 코드 기준 SHA: `b20a366c8812348f14a9e08a7439cb8df6cfb09a` (S4-05 이동 전). 제안은 그 동작을 DB child의 private PreparedSweep와 서비스 조립으로 나누는 #7353 묶음7 계약이다. S4-18의300초 상수 이동은 상태·단위가 바뀌지 않아 이 모델 범위 밖이다.
 
+구현 대조 SHA: `ca0e458dd759a456b7dcb1009c0872c7d6bf8e0b`. DB의 `src/db/intake_outbox/pre_accept_sweep.rs`가 잠긴 transaction·원본·후보를 소유하고 `src/services/cluster/pre_accept_sweep.rs`가 같은 잠금 안의 live 관측과 commit을 조립한다. 아래 진입점 좌표는 이동 전 base이며, 구현 레그 보고서는 이동 후 좌표를 함께 제시한다.
+
 실행: 2026-11-12 05:06 KST. `statechart`(TLC 1.7.4, JAVA=/opt/homebrew/opt/openjdk/bin/java), 단일 worker. Current와 Proposed는 전체 bounds에서 GREEN이며 두 결함 변형만 아래 규칙을 깨뜨렸다. 모델은 실제 SQL/Rust 시험이 아니며, PG 경계 시험·뮤턴트 실행 결과는 구현 레그 보고서가 맡는다.
 
 ## 진입점 전수표와 모델 값 범위
