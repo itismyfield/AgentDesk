@@ -258,6 +258,7 @@ jobs:
               - 'src/compat/**'
               - 'src/config/**'
               - 'src/domain/file_sync.rs'
+              - 'src/domain/intake_consent.rs'
               - 'src/db/**'
               - 'src/dispatch/**'
               - 'src/engine/**'

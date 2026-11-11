@@ -228,6 +228,7 @@ src/
 │   ├── intake_outbox/
 │   │   ├── consent_handoff.rs
 │   │   ├── consent_handoff_tests.rs
+│   │   ├── consent_projection.rs
 │   │   ├── owner_fence_pg_tests.rs
 │   │   ├── postgres_tests.rs
 │   │   └── worker_status.rs
@@ -379,6 +380,8 @@ src/
 ├── domain/
 │   ├── atomic_write/
 │   │   └── tests.rs
+│   ├── intake_consent/
+│   │   └── decision.rs
 │   ├── message_split/
 │   │   └── semantic_boundaries.rs
 │   ├── outbound/
@@ -411,6 +414,7 @@ src/
 │   ├── file_sync.rs
 │   ├── host_observation.rs
 │   ├── human_input.rs
+│   ├── intake_consent.rs
 │   ├── intake_identity.rs
 │   ├── lifecycle.rs
 │   ├── memory.rs
@@ -1110,6 +1114,7 @@ src/
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
+│   │   │   ├── consent_scope.rs
 │   │   │   ├── consent_scope_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
@@ -2108,7 +2113,8 @@ src/
 │   │   │   │   ├── startup.rs
 │   │   │   │   ├── startup_tests.rs
 │   │   │   │   ├── transport.rs
-│   │   │   │   └── transport_tests.rs
+│   │   │   │   ├── transport_tests.rs
+│   │   │   │   └── worker_handoff.rs
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── queued/
 │   │   │   │   │   ├── transition_busy_tests/
@@ -4621,6 +4627,7 @@ src/
 ├── error.rs
 ├── eventbus.rs
 ├── high_risk_recovery.rs
+├── intake_consent_authority.rs
 ├── launch.rs
 ├── lib.rs
 ├── logging.rs
@@ -4673,6 +4680,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/error.rs` | Shared HTTP and policy error type with typed codes and JSON response helpers. |
 | `src/eventbus.rs` | In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow. |
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |
+| `src/intake_consent_authority.rs` | Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys. |
 | `src/launch.rs` | Starts the Tokio runtime and hands off to server boot. |
 | `src/lib.rs` | Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests. |
 | `src/logging.rs` | Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs. |

@@ -562,6 +562,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     })
 }
 pub(crate) mod consent_handoff;
+pub(crate) mod consent_projection;
 mod worker_status;
 #[cfg(test)]
 use worker_status::confirm_claim;
