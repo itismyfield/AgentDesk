@@ -4,6 +4,7 @@ use crate::services::session_host::ServerWitness;
 use crate::services::session_host::policy::consent::{
     ConsentKey, ConsentStore, IntentRef, Preview, Question,
 };
+use sha2::{Digest, Sha256};
 
 pub(crate) async fn setup(
     pool: &PgPool,
@@ -264,12 +265,23 @@ pub(crate) async fn hold_before_effects(
     expected: &crate::services::session_host::policy::consent::Consent,
     intent: &IntentRef,
 ) -> Result<(), String> {
+    let current = store
+        .load(&expected.key)?
+        .ok_or("consent custody missing")?;
+    if current != *expected || !current.unresolved_intents().contains(intent) {
+        return Err(
+            "before-effects consent custody does not identify this exact worker payload".into(),
+        );
+    }
+    let input = HoldInput::checked(
+        &project(row),
+        intent,
+        crate::services::session_host::policy::durable::key(&current.key)?,
+    )?;
     super::hold_before_effects(
         pool,
-        crate::services::cluster::intake_worker::BeforeEffects::for_test(row),
-        store,
-        expected,
-        intent,
+        crate::intake_consent_authority::BeforeEffects::for_test(row),
+        input,
     )
     .await
 }

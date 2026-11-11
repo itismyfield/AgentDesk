@@ -203,7 +203,9 @@ pub(super) fn successor_unproved_under(
 }
 
 pub(crate) fn commit(captured: &Captured, origin: &str) -> Result<(), String> {
+    let fence = tc::runtime_hint_fence::RuntimeHintFence::acquire(&captured.context.tmux_session)?;
     tc::with_tmux_source_authority(&captured.context.tmux_session, |authority| {
+        fence.validate(authority.session())?;
         if capture_under(authority)?.as_ref() != Some(captured) {
             return Err("ownership changed after clear capture".into());
         }
@@ -217,7 +219,12 @@ pub(crate) fn commit(captured: &Captured, origin: &str) -> Result<(), String> {
                     && context.owner_runtime_root == captured.context.owner_runtime_root
             })
         {
-            tc::cleanup_session_temp_files_under_source_authority(authority, authority.session());
+            tc::cleanup_session_temp_files_under_source_authority(
+                authority,
+                authority.session(),
+                #[cfg(unix)]
+                &fence,
+            )?;
         }
         if !vacant_under(authority) {
             return Err("clear target is not confirmed vacant".into());

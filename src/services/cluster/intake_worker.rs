@@ -34,8 +34,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 mod o_input;
 #[cfg(unix)]
-pub(crate) use o_input::{BeforeEffects, take_before_effects};
+pub(crate) use crate::intake_consent_authority::BeforeEffects;
 use o_input::{execute_before_effects as execute_intake_turn_core, hold_off_o_gateway};
+#[cfg(unix)]
+pub(crate) use o_input::{scope_key::WorkerScopeKey, take_before_effects};
 #[derive(Default)]
 struct MarkDoneMissCounters {
     stamp_handoff_observed: AtomicU64,

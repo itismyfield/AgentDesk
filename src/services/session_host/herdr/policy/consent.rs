@@ -4,6 +4,7 @@ use super::{
     super::contract::ServerWitness,
     durable::{self, Directory},
 };
+pub(crate) use crate::domain::intake_consent::IntentRef;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Component, PathBuf};
@@ -68,17 +69,6 @@ pub(crate) struct Preview {
     pub target_hash: [u8; 32],
     pub chain_hash: [u8; 32],
     pub checker_hash: [u8; 32],
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct IntentRef {
-    pub store: String,
-    pub id: String,
-    pub provider: String,
-    pub channel: u64,
-    pub source_message: u64,
-    pub fifo: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -6,6 +6,96 @@ use super::auxiliary_tests::{
 };
 use super::*;
 
+#[tokio::test(flavor = "current_thread")]
+async fn same_proof_discovery_after_capture_starts_fresh_once_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::same_proof_discovery_after_capture_starts_fresh_once_pg"
+    )) {
+        restored_head_reaches_provider_with_capture(
+            HistoricalMarker::OwnedMemory,
+            false,
+            true,
+            Some(|fixture| republish_after_capture(fixture, false)),
+        )
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cursor_progress_after_capture_starts_fresh_once_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::cursor_progress_after_capture_starts_fresh_once_pg"
+    )) {
+        restored_head_reaches_provider_with_capture(
+            HistoricalMarker::OwnedMemory,
+            false,
+            true,
+            Some(|fixture| republish_after_capture(fixture, true)),
+        )
+        .await;
+    }
+}
+
+fn republish_after_capture(
+    fixture: &CanaryFixture,
+    advance_cursor: bool,
+) -> Box<dyn FnOnce(bool) + Send> {
+    let marker = PathBuf::from(crate::services::tmux_common::session_temp_path(
+        CANARY_TMUX,
+        crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+    ));
+    let source = fixture.old_source.path.clone();
+    Box::new(move |captured| {
+        use std::os::unix::fs::MetadataExt;
+        assert!(
+            captured,
+            "the fixture must reach verified-absence admission"
+        );
+        // Keep the old file alive through persist so its inode cannot be recycled.
+        let before_marker = fs::File::open(&marker).unwrap();
+        let before: serde_json::Value = serde_json::from_reader(&before_marker).unwrap();
+        if advance_cursor {
+            let offset = fs::metadata(&source).unwrap().len();
+            assert!(dedupe::advance_tmux_runtime_binding_offset(
+                CANARY_TMUX,
+                source.to_str().unwrap(),
+                offset,
+            ));
+            crate::services::codex_tui::session::advance_codex_tui_rollout_marker_start_offset(
+                CANARY_TMUX,
+                &source,
+                offset,
+            )
+            .unwrap();
+            let binding = dedupe::runtime_binding_for_tmux_session(CANARY_TMUX).unwrap();
+            assert_eq!(binding.last_offset, offset);
+        } else {
+            dedupe::resolve_codex_claims();
+        }
+        let pinned = before_marker.metadata().unwrap();
+        let published = fs::metadata(&marker).unwrap();
+        assert_ne!(
+            (published.dev(), published.ino()),
+            (pinned.dev(), pinned.ino())
+        );
+        drop(before_marker);
+        let after: serde_json::Value = serde_json::from_slice(&fs::read(marker).unwrap()).unwrap();
+        for key in ["codex_ownership", "rollout_path", "session_id"] {
+            assert_eq!(after[key], before[key], "same execution changed {key}");
+        }
+        if advance_cursor {
+            assert_ne!(
+                after["rollout_start_offset"],
+                before["rollout_start_offset"]
+            );
+        } else {
+            assert_eq!(after, before, "discovery must republish the same proof");
+        }
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 enum LateChange {
     TurnNonce,
