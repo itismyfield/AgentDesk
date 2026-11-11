@@ -208,6 +208,7 @@ src/
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
+│   │   ├── listing.rs
 │   │   ├── rebind_override.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
@@ -3395,6 +3396,8 @@ src/
 │   │   ├── herdr_kill.rs
 │   │   ├── hook.rs
 │   │   ├── hosted_cleanup.rs
+│   │   ├── listing.rs
+│   │   ├── listing_tests.rs
 │   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
