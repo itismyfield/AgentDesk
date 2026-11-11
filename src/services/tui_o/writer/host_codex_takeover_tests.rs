@@ -674,9 +674,51 @@ async fn an_owed_turn_on_the_rollout_before_a_new_bind_goes_into_the_init() {
     );
 }
 
-/// A turn this execution opened and ended before the baseline, behind Legacy's inflight row with
-/// no Legacy send, is posted by O from its opener once; the same turn with no Legacy custody left
-/// was delivered, so nothing is posted again.
+/// Moves the time the binding log records for `channel`'s binds back by `ago`, as if its Codex
+/// execution had started then.
+fn bound_ago(harness: &Harness, channel: u64, ago: chrono::TimeDelta) {
+    let log = (harness._runtime.path())
+        .join(p5::BINDING_EVENTS_DIR)
+        .join(format!("{channel}.log"));
+    let at = (Utc::now() - ago).to_rfc3339();
+    let lines: String = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["committed_at"] = at.clone().into();
+            format!("{event}\n")
+        })
+        .collect();
+    std::fs::write(&log, lines).unwrap();
+    p5::forget_channel_for_tests(channel);
+}
+
+/// Turn `t1` opened `opened` ago and ended `ended` ago, by Codex's clock.
+fn turn_ago(opened: i64, ended: i64) -> Vec<u8> {
+    let at = |secs| (Utc::now() - chrono::TimeDelta::seconds(secs)).to_rfc3339();
+    [
+        codex_line(
+            serde_json::json!({"type": "event_msg", "timestamp": at(opened),
+            "payload": {"type": "task_started", "turn_id": "t1"}}),
+        ),
+        codex_line(
+            serde_json::json!({"type": "response_item", "timestamp": at(opened),
+            "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}]}}),
+        ),
+        answer("msg_1", "ended early"),
+        codex_line(
+            serde_json::json!({"type": "event_msg", "timestamp": at(ended),
+            "payload": {"type": "task_complete", "turn_id": "t1"}}),
+        ),
+    ]
+    .concat()
+}
+
+/// A turn this execution opened and ended seconds before the baseline, behind Legacy's inflight row
+/// with no Legacy send, is posted by O from its opener once; the same turn with no Legacy custody
+/// left was delivered, so nothing is posted again.
 #[tokio::test(start_paused = true)]
 async fn a_turn_ended_before_the_baseline_is_skipped_only_on_delivery_evidence() {
     for (channel, custody) in [(61_835_u64, Custody::Row), (61_836, Custody::Free)] {
@@ -686,11 +728,9 @@ async fn a_turn_ended_before_the_baseline_is_skipped_only_on_delivery_evidence()
         p5::set_test_root(Some(harness._runtime.path()));
         let (path, source) = rollout(&harness, "rollout-ended.jsonl", &metadata("s-codex"));
         bind_late(channel, &path);
+        bound_ago(&harness, channel, chrono::TimeDelta::seconds(10));
         let opener = std::fs::metadata(&path).unwrap().len();
-        append(
-            &path,
-            &[opening(), answer("msg_1", "ended early"), turn_end()].concat(),
-        );
+        append(&path, &turn_ago(5, 3));
         let end = std::fs::metadata(&path).unwrap().len();
         let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
         io.late_enabled.store(true, Ordering::SeqCst);
