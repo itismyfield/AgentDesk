@@ -16,6 +16,8 @@ pub(super) fn episode_fingerprint(nonce: Option<&str>) -> [u8; 32] {
 pub(in crate::services::discord) struct CapturedFinish {
     pub(in crate::services::discord) finish: crate::services::turn_orchestrator::FinishTurnResult,
     pub(super) snapshot: Option<SyntheticClaimSnapshot>,
+    /// This claim itself removed the episode's row.
+    pub(super) row_cleared: bool,
 }
 
 impl CapturedFinish {
@@ -126,6 +128,7 @@ pub(super) async fn claim_episode(
     // Only the separately gated reconciler may release that residual anchor.
     // Row cleanup is independently authorized by the captured row identity;
     // the lock-held recheck still preserves any successor that replaced it.
+    let mut row_cleared = false;
     if clear_inflight
         && let Some(row) = row
         && receipt.record_before_clear(shared, row).await
@@ -136,6 +139,7 @@ pub(super) async fn claim_episode(
             &super::super::inflight::InflightTurnIdentity::from_state(row),
             row.turn_nonce.as_deref(),
         );
+        row_cleared = outcome == super::super::inflight::GuardedClearOutcome::Cleared;
         if !matches!(
             outcome,
             super::super::inflight::GuardedClearOutcome::Cleared
@@ -145,7 +149,7 @@ pub(super) async fn claim_episode(
             warn_episode_row_retained(provider, key, Some(row), "cas", &reason, &finish);
         }
     } else if let (Some(loaded), Some(witness)) = (drifted, drift) {
-        row_retirement::retire_drifted_row(
+        row_cleared = row_retirement::retire_drifted_row(
             provider,
             key,
             observed.as_ref(),
@@ -174,6 +178,7 @@ pub(super) async fn claim_episode(
             snapshot
         }),
         finish,
+        row_cleared,
     }))
 }
 
@@ -750,9 +755,24 @@ impl TurnFinalizer {
         evidence: TerminalEvidence,
         shared: Arc<SharedData>,
     ) -> FinalizeOutcome {
+        let submitted = self.submit_cleaning(key, provider, event, ctx, evidence, shared);
+        submitted.await.0
+    }
+
+    /// `submit_terminal_evidence`, also naming what a late duplicate's own cleanup removed.
+    pub(super) async fn submit_cleaning(
+        &self,
+        key: TurnKey,
+        provider: ProviderKind,
+        event: TerminalEvent,
+        ctx: FinalizeContext,
+        evidence: TerminalEvidence,
+        shared: Arc<SharedData>,
+    ) -> (FinalizeOutcome, cleanup::DuplicateCleanup) {
+        let none = cleanup::DuplicateCleanup::default();
         let key = if evidence.episode_captured {
             if !key.matches_episode_nonce(evidence.turn_nonce.as_deref()) {
-                return FinalizeOutcome::Deferred;
+                return (FinalizeOutcome::Deferred, none);
             }
             key.with_episode_nonce(evidence.turn_nonce.as_deref())
         } else {
@@ -777,16 +797,16 @@ impl TurnFinalizer {
             })
             .is_err()
         {
-            return FinalizeOutcome::AlreadyFinalized;
+            return (FinalizeOutcome::AlreadyFinalized, none);
         }
         let Ok(out) = rx.await else {
-            return FinalizeOutcome::AlreadyFinalized;
+            return (FinalizeOutcome::AlreadyFinalized, none);
         };
         if matches!(out, FinalizeOutcome::AlreadyFinalized)
             && !(key.episode.is_none() && key.generation != shared.restart.current_generation)
             && !event.is_mute_settlement()
         {
-            cleanup::already_finalized_active_state(
+            let cleaned = cleanup::already_finalized_active_state(
                 key,
                 &provider,
                 &event,
@@ -798,8 +818,9 @@ impl TurnFinalizer {
                 },
             )
             .await;
+            return (out, cleaned);
         }
-        out
+        (out, none)
     }
 
     /// The policy close's own submission: a lost send or ACK is `Unconfirmed`, never the

@@ -1895,6 +1895,7 @@ src/
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── closed.rs
+│   │   │   │   ├── closed_tests.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
@@ -2055,6 +2056,8 @@ src/
 │   │   │   ├── destructive_warrant.rs
 │   │   │   ├── idle_tmux.rs
 │   │   │   └── tests.rs
+│   │   ├── relay_recovery_leaked_row_sweep/
+│   │   │   └── resume_tests.rs
 │   │   ├── replay_policy/
 │   │   │   ├── live/
 │   │   │   │   ├── observer_tests.rs
@@ -3028,6 +3031,7 @@ src/
 │   │   │   └── watcher_orphan_cleanup.rs
 │   │   ├── turn_finalizer/
 │   │   │   ├── cleanup/
+│   │   │   │   ├── already_finalized.rs
 │   │   │   │   └── terminal_release.rs
 │   │   │   ├── episode/
 │   │   │   │   ├── row_retirement.rs

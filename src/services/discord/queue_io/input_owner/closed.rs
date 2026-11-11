@@ -32,3 +32,25 @@ pub(in crate::services::discord) fn closed(
         reason,
     );
 }
+
+/// An operator repair removed the channel's row: its waiting input is resumed once.
+pub(crate) async fn repair_cleared_row(
+    registry: Option<&crate::services::discord::health::HealthRegistry>,
+    provider: &ProviderKind,
+    channel_id: u64,
+) {
+    let channel = ChannelId::new(channel_id);
+    let Some(registry) = registry else {
+        return;
+    };
+    if let Some(shared) = registry
+        .shared_for_provider_on_channel(provider, channel)
+        .await
+    {
+        closed(&shared, provider, channel, "stale_mailbox_repair");
+    }
+}
+
+#[cfg(test)]
+#[path = "closed_tests.rs"]
+mod tests;
