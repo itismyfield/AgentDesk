@@ -1,91 +1,9 @@
 //! One hard capability contract shared by dispatch and human intake.
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct ExecutionRequirements {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub os: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub arch: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub nodes: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub repositories: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub backends: Vec<String>,
-}
+pub(crate) use crate::domain::cluster_policy::ExecutionRequirements;
 
 impl ExecutionRequirements {
-    pub(crate) fn is_empty(&self) -> bool {
-        self == &Self::default()
-    }
-
-    pub(crate) fn parse(value: Value) -> Result<Self, String> {
-        let policy: Self = serde_json::from_value(value)
-            .map_err(|e| format!("invalid execution requirements: {e}"))?;
-        for values in [
-            &policy.os,
-            &policy.arch,
-            &policy.nodes,
-            &policy.tools,
-            &policy.repositories,
-            &policy.backends,
-        ] {
-            if values.len() > 32
-                || values.iter().any(|v| {
-                    v.is_empty()
-                        || v.len() > 128
-                        || v.trim() != v
-                        || v.chars().any(char::is_control)
-                })
-            {
-                return Err(
-                    "execution requirements contain too many, empty or invalid identifiers".into(),
-                );
-            }
-        }
-        if policy
-            .os
-            .iter()
-            .any(|v| !["windows", "linux", "macos"].contains(&v.as_str()))
-            || policy
-                .arch
-                .iter()
-                .any(|v| !["x86_64", "aarch64"].contains(&v.as_str()))
-            || policy
-                .backends
-                .iter()
-                .any(|v| !["process", "tmux"].contains(&v.as_str()))
-        {
-            return Err("unsupported execution OS, architecture or backend".into());
-        }
-        if policy.nodes.iter().chain(&policy.tools).any(|v| {
-            !v.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-        }) {
-            return Err("node/tool requirements must be simple identifiers".into());
-        }
-        if policy.repositories.iter().any(|v| {
-            let parts: Vec<_> = v.split('/').collect();
-            parts.len() != 2
-                || parts.iter().any(|p| {
-                    p.is_empty()
-                        || *p == "."
-                        || *p == ".."
-                        || !p
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-                })
-        }) {
-            return Err("repository requirements must use logical owner/repository IDs".into());
-        }
-        Ok(policy)
-    }
-
     pub(crate) fn explain(&self, node: &Value, now: i64) -> Vec<String> {
         if self.is_empty() {
             return Vec::new();
