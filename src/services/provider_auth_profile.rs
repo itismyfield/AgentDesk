@@ -8,8 +8,6 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
-
 use crate::services::provider::ProviderKind;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
@@ -17,55 +15,13 @@ use crate::utils::format::expand_tilde_string as expand_tilde;
 mod direct_spawn_tests;
 pub mod fallback;
 
-pub const DEFAULT_PROFILE_ID: &str = "default";
+use crate::domain::provider_auth_profile::ProfileOverrides;
+pub use crate::domain::provider_auth_profile::{
+    DEFAULT_PROFILE_ID, ProviderAuthOverlay, ProviderAuthProfileDef,
+};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ProviderAuthProfileDef {
-    pub provider: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub home: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct ProviderAuthOverlay {
-    pub profile_id: String,
-    pub provider: ProviderKind,
-    pub env: BTreeMap<String, String>,
-    pub unset: BTreeSet<String>,
-    pub home: Option<PathBuf>,
-}
-
-impl ProviderAuthOverlay {
-    pub fn default_for(provider: ProviderKind) -> Self {
-        Self {
-            profile_id: DEFAULT_PROFILE_ID.to_string(),
-            provider,
-            env: BTreeMap::new(),
-            unset: BTreeSet::new(),
-            home: None,
-        }
-    }
-
-    pub fn is_default(&self) -> bool {
-        self.profile_id == DEFAULT_PROFILE_ID && self.env.is_empty() && self.unset.is_empty()
-    }
-}
-
-impl fmt::Debug for ProviderAuthOverlay {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let redacted: BTreeMap<&String, &'static str> =
-            self.env.keys().map(|key| (key, "<redacted>")).collect();
-        f.debug_struct("ProviderAuthOverlay")
-            .field("profile_id", &self.profile_id)
-            .field("provider", &self.provider.as_str())
-            .field("env", &redacted)
-            .field("unset", &self.unset)
-            .field("home", &self.home)
-            .finish()
-    }
-}
+pub(crate) mod queries;
+pub(crate) mod repository;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthProfileError {
@@ -356,14 +312,10 @@ pub fn selected_profile_id<'a>(
     channel_auth_profile: Option<&'a str>,
     agent_auth_profile: Option<&'a str>,
 ) -> Option<&'a str> {
-    channel_auth_profile
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            agent_auth_profile
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        })
+    let input = ProfileOverrides::new(channel_auth_profile, agent_auth_profile);
+    input
+        .channel
+        .or(input.agent)
         .filter(|value| *value != DEFAULT_PROFILE_ID)
 }
 

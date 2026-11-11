@@ -37,21 +37,21 @@ pub(super) async fn upsert_rate_limit_cache_entry(
 }
 
 pub(super) async fn sync_named_profile_rate_limits(pg_pool: &PgPool) {
-    let catalog = crate::services::discord::org_schema::provider_auth_catalog();
+    let catalog = crate::services::provider_auth_profile::queries::provider_auth_catalog();
     let now = chrono::Utc::now().timestamp();
     for (profile_id, def) in catalog {
         let Ok(provider) = crate::services::provider_auth_profile::intern_provider(&def.provider)
         else {
             continue;
         };
-        if profile_id == crate::services::provider_auth_profile::DEFAULT_PROFILE_ID {
+        if profile_id == crate::domain::provider_auth_profile::DEFAULT_PROFILE_ID {
             continue;
         }
         let Ok(overlay) = crate::services::provider_auth_profile::resolve(
             provider.clone(),
             Some(&profile_id),
             None,
-            &crate::services::discord::org_schema::provider_auth_catalog(),
+            &crate::services::provider_auth_profile::queries::provider_auth_catalog(),
         ) else {
             continue;
         };
