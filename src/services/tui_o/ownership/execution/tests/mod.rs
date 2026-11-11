@@ -338,8 +338,7 @@ async fn owner_execution_swap_seeds_a_late_candidate_with_an_unfixed_boundary_pg
     }))
     .unwrap();
     let boot = BootChannels::validate(&config).unwrap();
-    let pending = crate::services::tui_o::channel_policy::Adoption::Pending;
-    let states = std::collections::BTreeMap::from([(channel, pending)]);
+    let states = std::collections::BTreeMap::from([(channel, Adoption::Pending)]);
     let seeded = boot.seeded(&config, |_, _| Ok(states)).unwrap();
     let _channels = cutover::test_override::force_boot(seeded);
     let snapshot = cutover::boot_snapshot().unwrap();
