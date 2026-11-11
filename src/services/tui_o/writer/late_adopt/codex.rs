@@ -336,7 +336,14 @@ impl<I: HostIo> Takeover<'_, I> {
             ));
         }
         let start = match self.start_on(bound, (at, since), (records, sent_from)) {
-            Ok(Start::Owed(start) | Start::End(start)) => start,
+            Ok(Start::Owed(start)) => {
+                remember(unresolved, &bound.0);
+                start
+            }
+            Ok(Start::End(start)) => {
+                unresolved.retain(|judged| *judged != bound.0);
+                start
+            }
             Ok(Start::Legacy(detail)) => {
                 remember(unresolved, &bound.0);
                 return Err(Taken::Retry(detail));
