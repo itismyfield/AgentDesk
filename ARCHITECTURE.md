@@ -1495,7 +1495,6 @@ src/
 │   │   │   │   ├── inflight_repair.rs
 │   │   │   │   ├── inflight_repair_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
-│   │   │   │   ├── legacy_send_tests.rs
 │   │   │   │   ├── live_agent_recovery.rs
 │   │   │   │   ├── retirement_await_tests.rs
 │   │   │   │   ├── runtime_lookup.rs
