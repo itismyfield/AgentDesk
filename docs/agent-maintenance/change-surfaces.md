@@ -1559,12 +1559,6 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Existing cohesive responsibilities may grow).
-  - `src/services/discord/terminal_ui_obligation.rs` (545 prod LoC; #3607
-    worker-local durable terminal-UI obligation sidecar store plus isolated
-    status-card reconciliation sweeper. The file owns
-    `discord_terminal_ui_obligations/<provider>/<channel_id>.json`, pure
-    record/reconcile predicates, and boot-resumed status-card edit convergence.
-    It is below the giant-file threshold).
   - `src/services/discord/turn_bridge/cancel_finalize_policy.rs` (131 prod
     lines; pure cancel/finalize-policy decisions extracted from `mod.rs` by
     #3479: `classify_turn_finished_dispatch_kind`,

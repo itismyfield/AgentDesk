@@ -235,6 +235,7 @@ src/
 │   ├── intake_outbox_dispatch_stamp/
 │   │   └── tests.rs
 │   ├── kanban_cards/
+│   │   ├── clock_columns.rs
 │   │   ├── crud.rs
 │   │   ├── labels.rs
 │   │   ├── listing.rs
@@ -1780,24 +1781,6 @@ src/
 │   │   │   │   └── o_pending_tests.rs
 │   │   │   ├── confirmation/
 │   │   │   │   └── terminal_notice_tests.rs
-│   │   │   ├── delivery_obligation/
-│   │   │   │   ├── state/
-│   │   │   │   │   ├── proof_access.rs
-│   │   │   │   │   ├── proof_input.rs
-│   │   │   │   │   ├── proof_tests.rs
-│   │   │   │   │   └── whole_proof.rs
-│   │   │   │   ├── codec_tests.rs
-│   │   │   │   ├── fence.rs
-│   │   │   │   ├── load.rs
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── protocol.rs
-│   │   │   │   ├── reader.rs
-│   │   │   │   ├── reader_tests.rs
-│   │   │   │   ├── schema.rs
-│   │   │   │   ├── state.rs
-│   │   │   │   ├── tests.rs
-│   │   │   │   ├── validation.rs
-│   │   │   │   └── validation_tests.rs
 │   │   │   ├── delivery_record/
 │   │   │   │   ├── content.rs
 │   │   │   │   ├── frontier.rs
@@ -2517,8 +2500,6 @@ src/
 │   │   ├── terminal_delivery_custody/
 │   │   │   ├── pg_tests.rs
 │   │   │   └── tests.rs
-│   │   ├── terminal_ui_obligation/
-│   │   │   └── sweep_tests.rs
 │   │   ├── tmux/
 │   │   │   ├── monitor_auto_turn_inflight.rs
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
@@ -3165,6 +3146,7 @@ src/
 │   │   │   ├── supervisor_notice_tests.rs
 │   │   │   ├── supervisor_reader_notice_tests.rs
 │   │   │   ├── supervisor_tests.rs
+│   │   │   ├── supervisor_worker_tests.rs
 │   │   │   ├── unknown_notice.rs
 │   │   │   ├── unknown_notice_store.rs
 │   │   │   └── unknown_notice_tests.rs
@@ -3353,7 +3335,6 @@ src/
 │   │   ├── task_supervisor.rs
 │   │   ├── terminal_coordinate.rs
 │   │   ├── terminal_delivery_custody.rs
-│   │   ├── terminal_ui_obligation.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
 │   │   ├── tmux_kill_policy.rs
