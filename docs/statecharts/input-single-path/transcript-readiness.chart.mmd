@@ -1,0 +1,22 @@
+%% Hand-authored projection, not generated TLC output.
+%% Production code SHA 574af580b0c5d6e6ce280994f4ed243463de5d2d.
+stateDiagram-v2
+    [*] --> Booting
+    Booting --> Observe : scoped SessionStart startup/resume/clear
+    [*] --> Observe : daemon restore of verified live source
+    Observe --> Waiting : Running or Unknown
+    Waiting --> Observe : scoped Stop wake or periodic transcript read
+    Observe --> DraftVeto : current Idle or first SessionStart proof
+    DraftVeto --> Held : Person draft / unread / protected focus
+    Held --> Observe : automatic observation and same-original wake
+    Held --> Held : persistent unread; progress boundary RED
+    DraftVeto --> Prepared : draft admission permits existing policy
+    Prepared --> Observe : source / turn / cancellation changed before first key
+    Prepared --> Running : revalidate + existing first-key fence + one submit
+    Running --> Observe : next current terminal
+    Running --> Settled : exact original receipt; no replay of Unknown
+    Settled --> Observe : next original
+    Observe --> CompactPending : occupancy crossing remembered
+    CompactPending --> Running : current terminal after Stop-equivalent boundary + Idle + draft admission
+    Observe --> ScreenStall : before model requires marker/busy/MCP confirmation
+    ScreenStall --> ScreenStall : 46 columns or redraw never confirms; progress RED
