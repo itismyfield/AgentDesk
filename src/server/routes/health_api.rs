@@ -809,7 +809,7 @@ pub async fn stale_mailbox_repair_handler(
                     && !snapshot.attached
                     && let Some(provider) = ProviderKind::from_str(&snapshot.provider)
                 {
-                    crate::services::discord::clear_inflight_state_for_channel(&provider, request.channel_id);
+                    if crate::services::discord::clear_inflight_state_for_channel(&provider, request.channel_id) { health::repair_cleared_row(state.health_registry.as_deref(), &provider, request.channel_id).await; }
                     inflight_cleared = true;
                 }
                 let after_watcher_inflight = if let Some(registry) = state.health_registry.as_ref() {

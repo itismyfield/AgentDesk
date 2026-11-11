@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) fn check_claude_cswap_global_conflict() -> Check {
-    let catalog = crate::services::discord::org_schema::provider_auth_catalog();
+    let catalog = crate::services::provider_auth_profile::queries::provider_auth_catalog();
     let named = crate::services::provider_auth_profile::named_claude_profile_ids(&catalog);
     if named.is_empty() {
         return Check::ok(
@@ -132,5 +132,38 @@ pub(super) fn check_credential_permissions(cfg: &config::Config) -> Check {
             "chmod 700 ~/.adk/release/credential".to_string(),
             "chmod 600 <credential-file>".to_string(),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_catalog_warns_without_a_primary_profile() {
+        let runtime = crate::config::TestRuntimeRootGuard::new();
+        let home = tempfile::tempdir().unwrap();
+        let home_path = std::fs::canonicalize(home.path()).unwrap();
+        let home_guard =
+            crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("HOME", &home_path);
+        let profile_home = home_path.join(".adk/profiles/claude/work");
+        std::fs::create_dir_all(&profile_home).unwrap();
+        let org = crate::runtime_layout::org_schema_path(&crate::config::runtime_root().unwrap());
+        std::fs::create_dir_all(org.parent().unwrap()).unwrap();
+        let schema = json!({
+            "version": 1,
+            "agents": {},
+            "provider_auth_profiles": {"work": {"provider": "claude", "home": profile_home}},
+            "provider_auth_primary_profiles": {},
+        });
+        std::fs::write(org, serde_yaml::to_string(&schema).unwrap()).unwrap();
+        let check = check_claude_cswap_global_conflict();
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(
+            check.evidence.unwrap()["named_claude_profiles"],
+            json!(["work"])
+        );
+        drop(home_guard);
+        drop(runtime);
     }
 }

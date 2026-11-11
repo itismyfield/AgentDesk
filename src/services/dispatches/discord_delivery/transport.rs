@@ -1,98 +1,18 @@
 use sqlx::PgPool;
 
+pub(crate) use crate::domain::outbound::port::{
+    DispatchMessagePostError, DispatchMessagePostErrorKind,
+};
+
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 
-// Dispatch delivery transport types.
-//
-// These are non-presentation domain transport types (delivery results, post
-// errors, follow-up classification) produced and consumed entirely within the
-// dispatch delivery service. They were previously defined in
-// `crate::server::dto::dispatches` (#3037 bucket 4); they now live beside the
-// transport logic that owns them. The route layer keeps access through the
-// `services::dispatches::discord_delivery` re-export facade.
+// Dispatch delivery result and follow-up types owned by this service; post errors
+// are the outbound port's and are re-exported for existing paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReviewFollowupKind {
     Pass,
     Unknown,
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DispatchMessagePostErrorKind {
-    MessageTooLong,
-    Other,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DispatchMessagePostError {
-    kind: DispatchMessagePostErrorKind,
-    detail: String,
-    http_status: Option<reqwest::StatusCode>,
-    discord_error_code: Option<i64>,
-}
-
-impl DispatchMessagePostError {
-    pub(crate) fn new(kind: DispatchMessagePostErrorKind, detail: String) -> Self {
-        Self {
-            kind,
-            detail,
-            http_status: None,
-            discord_error_code: None,
-        }
-    }
-
-    pub(crate) fn http(
-        kind: DispatchMessagePostErrorKind,
-        status: reqwest::StatusCode,
-        discord_error_code: Option<i64>,
-        detail: String,
-    ) -> Self {
-        Self {
-            kind,
-            detail,
-            http_status: Some(status),
-            discord_error_code,
-        }
-    }
-
-    pub(crate) fn kind(&self) -> DispatchMessagePostErrorKind {
-        self.kind
-    }
-
-    pub(crate) fn http_status(&self) -> Option<reqwest::StatusCode> {
-        self.http_status
-    }
-
-    pub(crate) fn discord_error_code(&self) -> Option<i64> {
-        self.discord_error_code
-    }
-
-    pub(crate) fn is_length_error(&self) -> bool {
-        self.kind == DispatchMessagePostErrorKind::MessageTooLong
-    }
-
-    /// Preserve retry authority across the canonical outbound-v3 boundary.
-    /// Discord 5xx/429/408 responses and failures without an authoritative
-    /// HTTP response are transient; deterministic payload/policy failures and
-    /// all other 4xx responses are terminal.
-    pub(crate) fn is_transient(&self) -> bool {
-        if self.is_length_error() {
-            return false;
-        }
-        self.http_status.is_none_or(|status| {
-            status.is_server_error()
-                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status == reqwest::StatusCode::REQUEST_TIMEOUT
-        })
-    }
-}
-
-impl std::fmt::Display for DispatchMessagePostError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.detail)
-    }
-}
-
-impl std::error::Error for DispatchMessagePostError {}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct DispatchNotifyDeliveryResult {

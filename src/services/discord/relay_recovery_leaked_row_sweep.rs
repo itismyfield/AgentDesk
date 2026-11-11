@@ -58,7 +58,14 @@ async fn recover_candidate(
         hosted_source: None,
         hosted_source_checked: false,
     };
-    tui_direct_pending_start::demote_leaked_foreign_inflight_if_current(&shared, &record).await
+    let recovery =
+        tui_direct_pending_start::demote_leaked_foreign_inflight_if_current(&shared, &record).await;
+    // A recovery that removed the row itself, releasing no token, resumes what that row held.
+    if recovery.resumes() {
+        let notice = super::super::queue_io::input_owner::closed::closed;
+        notice(&shared, provider, channel, "leaked_row_sweep");
+    }
+    recovery.cleared
 }
 
 pub(in crate::services::discord) async fn sweep_leaked_inflight_rows(
@@ -78,6 +85,10 @@ pub(in crate::services::discord) async fn sweep_leaked_inflight_rows(
     }
     applied
 }
+
+#[cfg(all(test, unix))]
+#[path = "relay_recovery_leaked_row_sweep/resume_tests.rs"]
+mod resume_tests;
 
 #[cfg(test)]
 mod tests {

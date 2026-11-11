@@ -379,6 +379,12 @@ src/
 │   │   └── tests.rs
 │   ├── message_split/
 │   │   └── semantic_boundaries.rs
+│   ├── outbound/
+│   │   ├── ids.rs
+│   │   ├── key.rs
+│   │   ├── policy.rs
+│   │   ├── port.rs
+│   │   └── result.rs
 │   ├── provider/
 │   │   ├── catalog/
 │   │   │   └── rows.rs
@@ -389,11 +395,15 @@ src/
 │   │   ├── public_catalog.rs
 │   │   ├── tests.rs
 │   │   └── value_methods.rs
+│   ├── provider_auth_profile/
+│   │   └── inputs.rs
 │   ├── session_identity/
 │   │   └── naming.rs
 │   ├── atomic_write.rs
 │   ├── auto_queue_log.rs
+│   ├── automation_contract.rs
 │   ├── bot_role.rs
+│   ├── cluster_policy.rs
 │   ├── file_sync.rs
 │   ├── human_input.rs
 │   ├── intake_identity.rs
@@ -401,8 +411,10 @@ src/
 │   ├── memory.rs
 │   ├── message_split.rs
 │   ├── mod.rs
+│   ├── outbound.rs
 │   ├── process_incarnation.rs
 │   ├── provider.rs
+│   ├── provider_auth_profile.rs
 │   ├── session_identity.rs
 │   └── tool_text.rs
 ├── engine/
@@ -1749,6 +1761,8 @@ src/
 │   │   ├── model_catalog/
 │   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
+│   │   ├── org_schema/
+│   │   │   └── auth_selection_tests.rs
 │   │   ├── outbound/
 │   │   │   ├── completed_turn_ledger/
 │   │   │   │   ├── o_pending.rs
@@ -1905,6 +1919,7 @@ src/
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── closed.rs
+│   │   │   │   ├── closed_tests.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
@@ -2065,6 +2080,8 @@ src/
 │   │   │   ├── destructive_warrant.rs
 │   │   │   ├── idle_tmux.rs
 │   │   │   └── tests.rs
+│   │   ├── relay_recovery_leaked_row_sweep/
+│   │   │   └── resume_tests.rs
 │   │   ├── replay_policy/
 │   │   │   ├── live/
 │   │   │   │   ├── observer_tests.rs
@@ -3038,6 +3055,7 @@ src/
 │   │   │   └── watcher_orphan_cleanup.rs
 │   │   ├── turn_finalizer/
 │   │   │   ├── cleanup/
+│   │   │   │   ├── already_finalized.rs
 │   │   │   │   └── terminal_release.rs
 │   │   │   ├── episode/
 │   │   │   │   ├── row_retirement.rs
@@ -3361,6 +3379,8 @@ src/
 │   │   │   └── selection_tests.rs
 │   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
+│   │   ├── force_kill/
+│   │   │   └── retry_wake_tests.rs
 │   │   ├── herdr_kill/
 │   │   │   └── effects.rs
 │   │   ├── canonical_identity.rs
@@ -3582,8 +3602,13 @@ src/
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
+│   │   ├── repository/
+│   │   │   ├── document.rs
+│   │   │   └── tests.rs
 │   │   ├── direct_spawn_tests.rs
-│   │   └── fallback.rs
+│   │   ├── fallback.rs
+│   │   ├── queries.rs
+│   │   └── repository.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs
 │   │   ├── context.rs
