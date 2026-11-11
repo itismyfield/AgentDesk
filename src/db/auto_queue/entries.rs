@@ -444,7 +444,7 @@ pub async fn update_entry_status_on_pg(
                 "auto-queue entry {entry_id} status update livelock: exceeded {MAX_STALE_RETRIES} stale retries (target={normalized})"
             ));
         }
-        let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+        let log_ctx = crate::domain::auto_queue_log::AutoQueueLogContext::new()
             .run(&current.run_id)
             .entry(entry_id)
             .card(&current.card_id)
@@ -690,7 +690,7 @@ pub async fn update_entry_status_on_pg(
             }
 
             if !is_allowed_entry_transition(&latest.status, normalized, trigger_source) {
-                let stale_log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+                let stale_log_ctx = crate::domain::auto_queue_log::AutoQueueLogContext::new()
                     .run(&latest.run_id)
                     .entry(entry_id)
                     .card(&latest.card_id)
@@ -798,7 +798,7 @@ pub async fn update_entry_status_on_pg_tx(
     let normalized = normalize_entry_status(new_status).map_err(|error| error.to_string())?;
     let current = load_entry_status_row_pg_tx(tx, entry_id).await?;
 
-    let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+    let log_ctx = crate::domain::auto_queue_log::AutoQueueLogContext::new()
         .run(&current.run_id)
         .entry(entry_id)
         .card(&current.card_id)
