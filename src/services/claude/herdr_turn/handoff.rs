@@ -118,14 +118,16 @@ fn current_session(
     let records = events::records_strict(channel)
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("handoff binding log corrupt: {e:?}"))?;
-    if !records
+    let Some(latest) = records
         .iter()
-        .any(|record| record.tmux_session == logical && record.provider == "claude")
-    {
+        .rev()
+        .find(|record| record.tmux_session == logical && record.provider == "claude")
+    else {
         return Ok(original.map(str::to_string));
-    }
+    };
     let (source, history) =
-        events::claude_history(channel, logical, None).map_err(|e| e.to_string())?;
+        events::claude_history(channel, logical, latest.execution_nonce.as_deref())
+            .map_err(|e| e.to_string())?;
     if history.awaiting.is_some() {
         return Err("handoff native session is still Pending".into());
     }
