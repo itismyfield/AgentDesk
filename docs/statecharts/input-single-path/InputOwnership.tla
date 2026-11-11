@@ -1307,8 +1307,12 @@ PersonJoins == ~wake => pastes = 1 /\ sentInto = "busy"
    (clear_store/mod.rs:595-598), or reads Cleared when the finalizer kept the row; dupClear = an
    episode an earlier finalize ended with its token published but its row kept
    (completion_postlude.rs:171-202), whose row the sweep's AlreadyFinalized duplicate cleanup
-   removes itself (cleanup/already_finalized.rs, episode.rs:129-143). A refused
-   archive keeps the row; a successor row runs its own finalizer.
+   removes itself (cleanup/already_finalized.rs, episode.rs:129-143); deadlineReap and
+   deadWatcherReap = the warm placeholder sweep's two rebind-origin reaps of a tokenless
+   ExternalAdopted row (placeholder_sweeper.rs:347, :357 -> rebind_reap.rs), whose unlink under the
+   row lock is the closer's last step. An owner downgrade (supervision.rs:167-181,
+   watcher_respawn.rs:860 -> orphan_relay_reclaim.rs) only clears the relay owner and keeps the row.
+   A refused archive keeps the row; a successor row runs its own finalizer.
    The owner refuses a start while a token, a row or a held barrier stands (owner_input.rs:196-197,
    :213-214, :677-681) with no watch; the supervisor wakes only on its idle transition with no token
    (supervisor.rs:663-673). One drive runs per channel; a wake during a run sets lane.again
@@ -1317,7 +1321,8 @@ PersonJoins == ~wake => pastes = 1 /\ sentInto = "busy"
    each successful closer notifies once after its barrier; a token-removing finalizer's publish is
    that notification. The slice reuses observer. *)
 CB == observer
-CBOps == {"finalizer", "tokenless", "noEpisode", "stopFallback", "repair", "staleCancel", "dupClear"}
+CBOps == {"finalizer", "tokenless", "noEpisode", "stopFallback", "repair", "staleCancel", "dupClear",
+          "deadlineReap", "deadWatcherReap"}
 CBAfter == Fix = "CBAfter"
 \* Whether the token step wakes the owner: stop's QueueEligible publish, or its reverted mutant.
 CBTokenWakes(k) == k = "stopFallback" /\ (~CBAfter \/ Mut = "cbTokenEligible")
@@ -1327,7 +1332,7 @@ CBForeignWake(k) == k = "dupClear"
 \* Whether the barrier step notifies; the no-notice and early mutants act on the archive closer
 \* and the stop, the early one moving that wake to the row step; the Cleared-only mutant notifies
 \* a stale cancel only when its own lifecycle clear removed the row.
-CBMutated(k) == k \in {"noEpisode", "stopFallback"}
+CBMutated(k) == k \in {"noEpisode", "stopFallback", "deadlineReap", "deadWatcherReap"}
 CBBarrierNotes(k) ==
     IF CBAfter
     THEN /\ ~(Mut \in {"cbNoNotify", "cbEarlyNotify"} /\ CBMutated(k))
@@ -1351,7 +1356,7 @@ CompletionWakeInit ==
             barrier |-> TRUE, native |-> "busy", phase |-> "open", wake |-> w, pending |-> TRUE,
             running |-> FALSE, claims |-> 0, pastes |-> 0, watched |-> FALSE, notes |-> 0,
             closes |-> 0, refusalNotes |-> 0, refusals |-> 0, successors |-> 0, dups |-> 0,
-            arrivals |-> 0, life |-> "none"]
+            arrivals |-> 0, life |-> "none", downgradeWakes |-> 0, downgraded |-> FALSE]
 
 \* Admission wakes (ingress.rs:457-459, start.rs:74); a look grants and claims, or is refused.
 \* The duplicate-claim mutant lets a second look claim while the first claim is unsettled.
@@ -1428,6 +1433,13 @@ CBCloseRefused ==
        IN observer' = [CB EXCEPT !.refusals = 1, !.wake = @ \/ n,
             !.refusalNotes = @ + (IF n THEN 1 ELSE 0)]
     /\ UNCHANGED ObserverLegacy
+\* An owner downgrade keeps the row and wakes nothing; its mutant wakes the owner anyway.
+CBDowngrade ==
+    /\ CB.row /\ ~CB.downgraded
+    /\ LET n == Mut = "cbDowngradeWake"
+       IN observer' = [CB EXCEPT !.downgraded = TRUE, !.wake = @ \/ n,
+            !.downgradeWakes = @ + (IF n THEN 1 ELSE 0)]
+    /\ UNCHANGED ObserverLegacy
 \* The closer finds another turn's row (UserMsgMismatch); that turn ends through its own finalizer.
 CBSuccessor ==
     /\ CB.phase = "open" /\ CB.row /\ CB.successors = 0 /\ CB.native = "idle"
@@ -1436,6 +1448,7 @@ CBSuccessor ==
     /\ UNCHANGED ObserverLegacy
 CBNext == CBLook \/ CBPaste \/ CBSettle \/ CBNothingLeft \/ CBArrival \/ CBWatchSees \/ CBNativeEnds
     \/ CBCloseToken \/ CBCloseRow \/ CBLifecycleClears \/ CBCloseBarrier \/ CBLateDuplicate \/ CBCloseRefused \/ CBSuccessor
+    \/ CBDowngrade
 CBSpec == CompletionWakeInit /\ [][CBNext]_vars
     /\ WF_vars(CBLook) /\ WF_vars(CBPaste) /\ WF_vars(CBSettle) /\ WF_vars(CBNothingLeft)
     /\ WF_vars(CBWatchSees) /\ WF_vars(CBNativeEnds) /\ WF_vars(CBCloseToken)
@@ -1449,6 +1462,7 @@ CBDeliverOnce == CB.pastes <= 1
 \* Closer wakes: at most one per finished close and none before its barrier.
 CBCloseNotifiesOnce == CB.notes <= CB.closes
 CBRefusalSilent == CB.refusalNotes = 0
+CBDowngradeQuiet == CB.downgradeWakes = 0
 CBEventuallyDelivered == <>(CB.pastes = 1)
 
 =============================================================================
