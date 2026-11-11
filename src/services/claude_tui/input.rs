@@ -1,8 +1,11 @@
 use std::process::Output;
+#[cfg(test)]
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+#[cfg(test)]
 use tokio::runtime::{Handle, RuntimeFlavor};
+#[cfg(test)]
 use tokio::sync::Notify;
 
 #[cfg(test)]
@@ -27,7 +30,7 @@ pub(crate) use user_receipt::revalidate_native_pin;
 pub(crate) use user_receipt::{PaneIdentity, UserReceipt};
 
 mod draft_hold;
-use draft_hold::{admit_automatic_write, dismiss_startup_dialog};
+use draft_hold::admit_automatic_write;
 pub(crate) use draft_hold::{composer_refusal, stranded_draft_is_ours};
 #[cfg(test)]
 mod final_ready_tests;
@@ -51,15 +54,15 @@ pub const FOLLOWUP_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
 /// ceiling, so a long turn no longer makes the next message vanish via
 /// `tui_warm_followup_busy_pre_submit`. The ceiling still bounds a genuinely
 /// wedged pane that never returns to a ready prompt.
-const PROMPT_READY_ACTIVE_TURN_WAIT_CEILING: Duration = Duration::from_secs(900);
 /// Maximum time we let the hook-event fast path block before falling back to
 /// the legacy pane-scrape polling loop. Fresh turns historically need a bit
 /// more headroom (cold start, MCP load) than follow-ups.
+#[cfg(test)]
 const FRESH_PROMPT_READY_EVENT_BUDGET: Duration = Duration::from_secs(10);
+#[cfg(test)]
 const FOLLOWUP_PROMPT_READY_EVENT_BUDGET: Duration = Duration::from_secs(5);
 /// Brief settle delay between hook arrival and the post-event snapshot check
 /// so the TUI has time to redraw the prompt marker after Stop.
-const PROMPT_READY_POST_EVENT_SETTLE: Duration = Duration::from_millis(50);
 /// The busy-turn `/compact` path gets exactly one passive confirmation capture.
 /// It intentionally never follows generic submit retry/cleanup behavior.
 const COMPACT_SUBMIT_PASSIVE_SETTLE: Duration = Duration::from_millis(120);
@@ -73,7 +76,6 @@ pub const PROMPT_READY_CANCELLED_ERROR: &str = "claude tui prompt readiness wait
 const PROMPT_READY_MCP_AUTH_ERROR_PREFIX: &str = "claude tui blocked on MCP server authentication";
 /// Settle delay before re-capturing to confirm an observed MCP-auth cold-boot
 /// banner is a stable blocking state and not a single half-rendered boot frame.
-const PROMPT_READY_MCP_AUTH_CONFIRM_SETTLE: Duration = Duration::from_millis(400);
 /// Cap on auto-dismiss key presses for Claude startup dialogs (resume-from-
 /// summary picker, workspace trust) per readiness wait. Startup can stack at
 /// most two dialogs back to back; if the pane still shows a dialog after this
@@ -94,7 +96,7 @@ pub enum PromptReadinessKind {
 #[cfg(test)]
 thread_local! {
     /// The follow-up readiness timeout this test thread uses instead of the configured one.
-    static FOLLOWUP_TIMEOUT_FOR_TESTS: std::cell::Cell<Option<Duration>> =
+    pub(crate) static FOLLOWUP_TIMEOUT_FOR_TESTS: std::cell::Cell<Option<Duration>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -118,53 +120,6 @@ fn followup_prompt_ready_timeout() -> Duration {
         .unwrap_or(FOLLOWUP_PROMPT_READY_TIMEOUT)
 }
 
-/// #tui-hook-ttl-buffer (REQ-006): claim the Claude hook registry key for this
-/// tmux session and report whether a fresh Stop / SubagentStop was already
-/// buffered. `claim_once` drains and drops the key so the consumed Stop cannot
-/// replay into a later turn (single-consumption). Returns `false` when no
-/// key/event matches or when the buffered events are not Stop kinds — in which case the caller falls
-/// through to the existing Notify fast path and polling fallback unchanged.
-///
-/// Key-match (REQ-001): for a hosted Claude launch the hook relay buffers under
-/// the PROVIDER session UUID (`config.session_id`, passed to the relay as
-/// `--session-id`), while the readiness layer only knows the tmux session name.
-/// Claiming `(claude, tmux_name)` would therefore MISS the buffered
-/// `(claude, provider_session_uuid)` Stop and the early-Stop race this block
-/// exists to rescue would still fall through. We resolve the provider session id
-/// for this tmux session via the launch-time mapping in `tui_prompt_dedupe` and
-/// claim that SAME key the hooks buffered under; we fall back to the tmux session
-/// name (REQ-001 fallback) when no mapping is known (e.g. a relay that reported
-/// only the tmux name).
-///
-/// `claim_matching_once` consumes every buffered Stop / SubagentStop and
-/// re-buffers any other fresh buffered events (e.g. a token payload a concurrent
-/// `/tui/wait` until=token might still want), so the readiness wait does not
-/// discard unrelated buffered events. Consumed Stops cannot replay into a later
-/// turn (single-consumption).
-fn claude_registry_stop_already_buffered(session_name: &str) -> bool {
-    use crate::services::claude_tui::hook_registry;
-    use crate::services::claude_tui::hook_server::HookEventKind;
-    // Prefer the provider session UUID the relay actually buffers under; fall
-    // back to the tmux session name when no launch mapping is recorded.
-    let provider_session_id =
-        crate::services::tui_prompt_dedupe::provider_session_for_tmux("claude", session_name);
-    let Some(key) = hook_registry::RegistryKey::new(
-        "claude",
-        provider_session_id.as_deref(),
-        Some(session_name),
-    ) else {
-        return false;
-    };
-    hook_registry::global()
-        .claim_matching_once(key, |event| {
-            matches!(
-                event.kind,
-                HookEventKind::Stop | HookEventKind::SubagentStop
-            )
-        })
-        .is_some()
-}
-
 impl PromptReadinessKind {
     fn timeout(self) -> Duration {
         match self {
@@ -173,6 +128,7 @@ impl PromptReadinessKind {
         }
     }
 
+    #[cfg(test)]
     fn event_budget(self) -> Duration {
         match self {
             Self::FreshTurn => FRESH_PROMPT_READY_EVENT_BUDGET,
@@ -211,9 +167,8 @@ impl PromptReadinessKind {
 /// `Pending` (event budget elapsed without the hook firing) falls through to
 /// the legacy pane-scrape loop using the remaining budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 enum HookFastPathOutcome {
-    PreSnapshotReady,
-    PreSnapshotSessionDead,
     Ready,
     Pending,
 }
@@ -570,10 +525,6 @@ pub(crate) fn claude_prompt_draft_backspace_budget_from_tail(pane_tail: &str) ->
     crate::services::tmux_common::tmux_capture_claude_tui_prompt_draft_backspace_budget(pane_tail)
 }
 
-pub(crate) fn claude_prompt_draft_is_idle_suggestion_tail(pane_tail: &str) -> bool {
-    crate::services::tmux_common::tmux_capture_indicates_claude_tui_idle_suggestion(pane_tail)
-}
-
 // #3034: test-only thin wrapper retained to pin the tmux_common backspace
 // budget contract from this module's test suite.
 #[allow(dead_code)]
@@ -647,184 +598,81 @@ fn wait_for_prompt_ready_inner(
     transcript_path: Option<&std::path::Path>,
 ) -> Result<(), String> {
     check_prompt_cancel(cancel_token)?;
-    let timeout = readiness.timeout();
-    let start = Instant::now();
-
-    // #3889/#4528: a cold pane can land on the MCP-authentication-required
-    // welcome screen, which paints composer chrome (so it reads READY) yet
-    // silently drops every prompt submission until the operator runs `/mcp`.
-    // Detect it up front and fail fast with an actionable, non-timeout reason.
-    // Only the hosted existing-session path supplies ProvenWarmFollowup after a
-    // recorded turn; a plain Followup intent is not proof that this warning is
-    // stale. The check only re-captures when the banner is actually present.
-    if !readiness.allows_stale_mcp_auth_warning() {
-        let snapshot = prompt_readiness_snapshot(session_name);
-        if let Some(confirmed) = confirm_mcp_auth_block(session_name, cancel_token, &snapshot)? {
-            log_prompt_ready_mcp_auth_block(session_name, readiness, &confirmed);
-            return Err(mcp_auth_required_error_message(session_name));
+    if !host_input::legacy_pane_alive(session_name) {
+        return Err("claude tui session died before prompt input was ready".into());
+    }
+    if readiness == PromptReadinessKind::FreshTurn {
+        for _ in 0..STARTUP_DIALOG_DISMISS_MAX_ATTEMPTS {
+            let snapshot = prompt_readiness_snapshot(session_name);
+            let Some(dialog) =
+                super::startup_dialog::detect_claude_startup_dialog(&snapshot.pane_tail)
+            else {
+                break;
+            };
+            draft_hold::dismiss_startup_dialog(session_name, readiness, &dialog, cancel_token)?;
+            std::thread::sleep(STARTUP_DIALOG_DISMISS_SETTLE);
         }
     }
-
-    // #tui-hook-ttl-buffer (REQ-006): consult the in-memory hook registry as an
-    // additive event source for an early Stop that landed before this wait
-    // began. The global `prompt_ready_notify()` used by the fast path below is
-    // edge-triggered, so a Stop fired in the gap between the prior turn and this
-    // wait would otherwise be lost and force a full polling fallback. We consume
-    // a FRESH (unexpired) Stop keyed by the PROVIDER session UUID the hooks
-    // buffer under (resolved from the tmux session, with the tmux name as the
-    // REQ-001 fallback), and `claim_matching_once` removes buffered Stops so
-    // they can never replay into a later turn (REQ-002/REQ-003).
-    //
-    // CRITICAL (verifier top regression risk — "stale Stop contaminates a new
-    // turn"): a buffered Stop is treated like an edge-triggered Notify wake, NOT
-    // as an unconditional ready signal. We REQUIRE the pane snapshot to confirm
-    // the prompt marker (the same gate the Notify fast path applies via its
-    // post-event snapshot) before returning ready. A stale Stop whose pane is
-    // still mid-turn therefore does NOT short-circuit; it falls through to the
-    // normal Notify + polling path.
-    if claude_registry_stop_already_buffered(session_name) {
-        check_prompt_cancel(cancel_token)?;
-        let snapshot = prompt_readiness_snapshot(session_name);
-        if prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
-            tracing::debug!(
-                tmux_session_name = session_name,
-                readiness = readiness.label(),
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "claude_tui prompt ready via buffered hook registry Stop confirmed by pane marker (early-Stop race avoided)"
-            );
-            return Ok(());
-        }
-        // Buffered Stop did not correspond to a ready pane (stale / mid-turn) —
-        // fall through to the existing Notify fast path and polling fallback.
-        tracing::debug!(
-            tmux_session_name = session_name,
-            readiness = readiness.label(),
-            "claude_tui buffered hook registry Stop did not confirm pane readiness; using standard fast path"
-        );
-    }
-
-    // #3889/#4528: an idle transcript must not bypass an auth block without
-    // recorded-turn warm provenance. Even proven warm reuse must still reject
-    // live busy chrome in the confirming pane capture.
-    if transcript_idle_confirms_prompt_ready_without_capture(session_name, transcript_path)
-        && pane_allows_prompt_readiness(session_name, readiness)
-    {
-        tracing::info!(
-            tmux_session_name = session_name,
-            readiness = readiness.label(),
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            "claude_tui prompt ready via idle transcript"
-        );
-        return Ok(());
-    }
-
-    if cancel_token.is_some() {
-        return wait_for_prompt_ready_polling(
-            session_name,
-            readiness,
-            timeout,
-            start,
-            cancel_token,
-            transcript_path,
-        );
-    }
-
-    // Event-driven fast path with subscribe-before-snapshot ordering.
-    //
-    // The pre-snapshot used to live OUTSIDE the `Notified` registration which
-    // left a narrow race: a Stop hook firing between the pre-snapshot and the
-    // first `notified()` poll would be dropped (`notify_waiters` does NOT
-    // buffer for not-yet-enabled waiters), and the call would then wait up to
-    // the full event budget before the polling fallback rescued it.
-    //
-    // We close that gap by calling `Notified::enable()` BEFORE the
-    // pre-snapshot — once enabled, any `notify_waiters` invocation is
-    // guaranteed to wake this specific permit, even if the wait has not yet
-    // been polled. See issue #2445.
-    let notify = crate::services::claude_tui::hook_server::prompt_ready_notify();
-    let (fast_path, post_event_snapshot) = run_prompt_ready_fast_path(
-        notify,
-        session_name.to_string(),
-        readiness,
-        readiness.event_budget(),
-    );
-
-    match fast_path {
-        HookFastPathOutcome::PreSnapshotReady => {
-            check_prompt_cancel(cancel_token)?;
-            tracing::debug!(
-                tmux_session_name = session_name,
-                readiness = readiness.label(),
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "claude_tui prompt ready on pre-snapshot (no event wait needed)"
-            );
-            return Ok(());
-        }
-        HookFastPathOutcome::PreSnapshotSessionDead => {
-            check_prompt_cancel(cancel_token)?;
-            return Err("claude tui session died before prompt input was ready".to_string());
-        }
-        HookFastPathOutcome::Ready | HookFastPathOutcome::Pending => {}
-    }
-
-    check_prompt_cancel(cancel_token)?;
-    if let Some(snapshot) = post_event_snapshot {
-        if prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
-            check_prompt_cancel(cancel_token)?;
-            // The live broadcast woke this waiter. Drain the parallel registry
-            // copy as consumed too, otherwise the same Stop can be replayed into
-            // the next follow-up wait.
-            let drained_buffered_stop = claude_registry_stop_already_buffered(session_name);
-            tracing::debug!(
-                tmux_session_name = session_name,
-                readiness = readiness.label(),
-                hook_event_fast_path_hit = matches!(fast_path, HookFastPathOutcome::Ready),
-                drained_buffered_stop,
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "claude_tui prompt ready via hook event fast path"
-            );
-            return Ok(());
-        }
-        // #3889/#4528: only proven warm reuse may treat this banner as stale.
-        // Every path still honors the live draft and busy state below.
-        if transcript_idle_snapshot_confirms_prompt_ready(readiness, &snapshot, transcript_path) {
-            check_prompt_cancel(cancel_token)?;
-            let drained_buffered_stop = claude_registry_stop_already_buffered(session_name);
-            tracing::info!(
-                tmux_session_name = session_name,
-                readiness = readiness.label(),
-                drained_buffered_stop,
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "claude_tui prompt ready via idle transcript fallback after hook fast path"
-            );
-            return Ok(());
-        }
-        if !snapshot.tmux_pane_alive {
-            check_prompt_cancel(cancel_token)?;
-            return Err("claude tui session died before prompt input was ready".to_string());
-        }
-    }
-
-    check_prompt_cancel(cancel_token)?;
-    if !matches!(fast_path, HookFastPathOutcome::Ready) {
-        // Fast path did not fire within its budget — keep the original warn
-        // visibility so missing Stop hooks remain debuggable.
-        tracing::warn!(
-            tmux_session_name = session_name,
-            readiness = readiness.label(),
-            event_budget_ms = readiness.event_budget().as_millis() as u64,
-            "claude_tui hook didn't fire within budget, falling back to pane-scrape polling"
-        );
-    }
-
-    wait_for_prompt_ready_polling(
+    match super::readiness::prepare(
         session_name,
-        readiness,
-        timeout,
-        start,
-        cancel_token,
         transcript_path,
-    )
+        cancel_token,
+        readiness.timeout(),
+        readiness != PromptReadinessKind::ProvenWarmFollowup,
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) if is_prompt_ready_cancelled_error(&error) => Err(error),
+        Err(error) => {
+            let error = format!("{error}; readiness={}", readiness.label());
+            if !host_input::legacy_pane_alive(session_name) {
+                return Err("claude tui session died before prompt input was ready".into());
+            }
+            if readiness == PromptReadinessKind::ProvenWarmFollowup {
+                super::readiness::watch_current(session_name);
+                return Err(SubmissionError::Held(PreparationHold::before(
+                    session_name,
+                    "idle_evidence_pending",
+                    error,
+                ))
+                .into_legacy());
+            }
+            let snapshot = prompt_readiness_snapshot(session_name);
+            if prompt_ready_timeout_should_clear_followup_draft(
+                readiness,
+                &snapshot,
+                crate::services::claude::claude_tui_followup_requeue_enabled(),
+            ) {
+                with_composer_cleanup_lock(session_name, || {
+                    if super::readiness::observe(session_name, transcript_path).is_some()
+                        && stranded_draft_is_ours(session_name, readiness) == Ok(true)
+                    {
+                        draft_hold::clear_prompt_draft(session_name);
+                    }
+                });
+            }
+            let capture = host_input::observe_draft(session_name);
+            crate::services::claude::debug_log_to(
+                "claude_tui.log",
+                &format!("idle evidence held session={session_name}"),
+            );
+            if let Some(reason) = composer_refusal(session_name, capture.as_deref()) {
+                super::readiness::watch_draft(session_name, transcript_path);
+                return Err(SubmissionError::Held(PreparationHold::before(
+                    session_name,
+                    reason,
+                    format!("{error}; reason={reason}"),
+                ))
+                .into_legacy());
+            }
+            super::readiness::watch_current(session_name);
+            Err(SubmissionError::Held(PreparationHold::before(
+                session_name,
+                "idle_evidence_pending",
+                error,
+            ))
+            .into_legacy())
+        }
+    }
 }
 
 /// Sync wrapper that awaits the global prompt-ready notify with a bounded
@@ -839,6 +687,7 @@ fn wait_for_prompt_ready_inner(
 // the regression suite; production drives readiness through the fast-path
 // caller. Retained as the canonical pinned implementation of the wake ordering.
 #[allow(dead_code)]
+#[cfg(test)]
 fn wait_for_prompt_ready_event(notify: Arc<Notify>, budget: Duration) -> HookFastPathOutcome {
     drive_fast_path_future(async move {
         let mut notified = std::pin::pin!(notify.notified());
@@ -860,48 +709,7 @@ fn wait_for_prompt_ready_event(notify: Arc<Notify>, budget: Duration) -> HookFas
 ///
 /// Returns the fast-path outcome plus, when relevant, the post-event snapshot
 /// the caller should consult before falling through to the polling loop.
-fn run_prompt_ready_fast_path(
-    notify: Arc<Notify>,
-    session_name: String,
-    readiness: PromptReadinessKind,
-    budget: Duration,
-) -> (HookFastPathOutcome, Option<PromptReadinessSnapshot>) {
-    let fut = async move {
-        let notified = notify.notified();
-        tokio::pin!(notified);
-        // Register the waker before taking the pre-snapshot so any Stop fired
-        // after this point — including during the snapshot syscalls — is
-        // guaranteed to wake us. `notify_waiters` does not buffer for
-        // not-yet-enabled waiters, so enabling here is the load-bearing step
-        // that closes the #2445 race.
-        notified.as_mut().enable();
-
-        let pre_snapshot = prompt_readiness_snapshot(&session_name);
-        if prompt_marker_confirms_prompt_ready(readiness, &pre_snapshot) {
-            return (HookFastPathOutcome::PreSnapshotReady, None);
-        }
-        if !pre_snapshot.tmux_pane_alive {
-            return (HookFastPathOutcome::PreSnapshotSessionDead, None);
-        }
-
-        let fast_path = tokio::select! {
-            _ = &mut notified => HookFastPathOutcome::Ready,
-            _ = tokio::time::sleep(budget) => HookFastPathOutcome::Pending,
-        };
-
-        if matches!(fast_path, HookFastPathOutcome::Ready) {
-            tokio::time::sleep(PROMPT_READY_POST_EVENT_SETTLE).await;
-        }
-        let post_event_snapshot = prompt_readiness_snapshot(&session_name);
-        (fast_path, Some(post_event_snapshot))
-    };
-
-    drive_fast_path_future(fut)
-}
-
-/// Run an async fast-path future to completion using the caller's runtime
-/// when possible, falling back to a dedicated thread with a fresh
-/// current-thread runtime otherwise.
+#[cfg(test)]
 fn drive_fast_path_future<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T> + Send + 'static,
@@ -929,6 +737,7 @@ where
 /// safe regardless of the caller's runtime flavor (multi-thread or current-
 /// thread). Returns the fallback (`Pending`-equivalent) value if we fail to
 /// spawn or build the runtime so the polling fallback can take over.
+#[cfg(test)]
 fn wait_on_dedicated_thread<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T> + Send + 'static,
@@ -971,210 +780,22 @@ where
 /// Helper trait so the dedicated-thread driver can produce the right
 /// "treat as Pending" sentinel regardless of which fast-path future flavor
 /// we are running.
+#[cfg(test)]
 trait FastPathFallback {
     fn fallback() -> Self;
 }
 
+#[cfg(test)]
 impl FastPathFallback for HookFastPathOutcome {
     fn fallback() -> Self {
         HookFastPathOutcome::Pending
     }
 }
 
+#[cfg(test)]
 impl FastPathFallback for (HookFastPathOutcome, Option<PromptReadinessSnapshot>) {
     fn fallback() -> Self {
         (HookFastPathOutcome::Pending, None)
-    }
-}
-
-fn wait_for_prompt_ready_polling(
-    session_name: &str,
-    readiness: PromptReadinessKind,
-    timeout: Duration,
-    start: Instant,
-    cancel_token: Option<&CancelToken>,
-    transcript_path: Option<&std::path::Path>,
-) -> Result<(), String> {
-    let mut wait_interval = Duration::from_millis(100);
-    let mut dialog_dismiss_attempts = 0usize;
-    let mut active_turn_extension_logged = false;
-    loop {
-        check_prompt_cancel(cancel_token)?;
-        // #3889/#4528: preserve the auth gate unless the caller supplied
-        // recorded-turn warm provenance. Short-circuit ordering keeps the pane
-        // capture off the non-idle poll cadence.
-        if transcript_idle_confirms_prompt_ready_without_capture(session_name, transcript_path)
-            && pane_allows_prompt_readiness(session_name, readiness)
-        {
-            tracing::info!(
-                tmux_session_name = session_name,
-                readiness = readiness.label(),
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "claude_tui prompt ready via idle transcript"
-            );
-            return Ok(());
-        }
-        let snapshot = prompt_readiness_snapshot(session_name);
-        check_prompt_cancel(cancel_token)?;
-        // #3889/#4528: plain Followup callers may point at a genuine cold pane,
-        // so only recorded-turn warm provenance can bypass the stable auth block.
-        if !readiness.allows_stale_mcp_auth_warning() {
-            if let Some(confirmed) = confirm_mcp_auth_block(session_name, cancel_token, &snapshot)?
-            {
-                log_prompt_ready_mcp_auth_block(session_name, readiness, &confirmed);
-                return Err(mcp_auth_required_error_message(session_name));
-            }
-        }
-        if prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
-            return Ok(());
-        }
-        // Resume, trust, and rate-limit dialogs make the highlighted `❯ 1. ...`
-        // option look like a composer draft. Handle them before transcript
-        // readiness so an idle transcript cannot accept input through a modal.
-        if let Some(dialog) =
-            crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog(
-                &snapshot.pane_tail,
-            )
-        {
-            use crate::services::claude_tui::startup_dialog::StartupDialogPlan;
-            match crate::services::claude_tui::startup_dialog::plan_startup_dialog_response(&dialog)
-            {
-                StartupDialogPlan::DismissWithEnter
-                    if dialog_dismiss_attempts < STARTUP_DIALOG_DISMISS_MAX_ATTEMPTS =>
-                {
-                    dialog_dismiss_attempts += 1;
-                    log_startup_dialog_dismiss(
-                        session_name,
-                        readiness,
-                        dialog.label(),
-                        dialog_dismiss_attempts,
-                    );
-                    dismiss_startup_dialog(session_name, readiness, &dialog, cancel_token)?;
-                    std::thread::sleep(STARTUP_DIALOG_DISMISS_SETTLE);
-                    check_prompt_cancel(cancel_token)?;
-                    continue;
-                }
-                StartupDialogPlan::DismissWithEnter => {
-                    // Dismiss budget exhausted with a dialog still on screen —
-                    // fall through to the regular timeout bookkeeping so the
-                    // canonical timeout error (with pane tail logging) fires.
-                }
-                StartupDialogPlan::FailUntrustedWorkspace { workspace } => {
-                    check_prompt_cancel(cancel_token)?;
-                    log_startup_dialog_untrusted_workspace(session_name, readiness, &workspace);
-                    return Err(format!(
-                        "claude tui startup blocked by workspace trust dialog for untrusted path '{workspace}'; refusing to auto-trust; fix the agent/channel workspace mapping so claude does not spawn there"
-                    ));
-                }
-            }
-        }
-        // #3889/#4528: apply the same provenance-aware auth policy to the
-        // transcript-idle fallback; draft and busy state still veto every kind.
-        if transcript_idle_snapshot_confirms_prompt_ready(readiness, &snapshot, transcript_path) {
-            tracing::info!(
-                tmux_session_name = session_name,
-                readiness = readiness.label(),
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "claude_tui prompt ready via idle transcript fallback"
-            );
-            return Ok(());
-        }
-        if !snapshot.tmux_pane_alive {
-            check_prompt_cancel(cancel_token)?;
-            return Err("claude tui session died before prompt input was ready".to_string());
-        }
-        if start.elapsed() >= timeout {
-            check_prompt_cancel(cancel_token)?;
-            // Extends #2416: a long PRIOR turn must not make us abandon this
-            // follow-up. The loop already resolves ready the instant the
-            // transcript goes Idle, so reaching the wall-clock `timeout` means
-            // the prior turn is still mid-flight. While the transcript confirms
-            // it is actively streaming (is_busy ⇒ Streaming/UserSubmitted; an
-            // Idle/Unknown read does NOT extend), keep waiting up to the absolute
-            // ceiling — the prompt returns once the turn finishes, so the
-            // follow-up is delivered sequentially instead of dropped.
-            let transcript_turn_state = transcript_path.map(|path| {
-                crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(path)
-            });
-            let transcript_turn_active = transcript_turn_state.is_some_and(|state| state.is_busy());
-            if active_turn_warrants_wait_extension(
-                snapshot.tmux_pane_alive,
-                transcript_turn_active,
-                start.elapsed(),
-                PROMPT_READY_ACTIVE_TURN_WAIT_CEILING,
-            ) {
-                if !active_turn_extension_logged {
-                    active_turn_extension_logged = true;
-                    tracing::info!(
-                        tmux_session_name = session_name,
-                        readiness = readiness.label(),
-                        base_timeout_secs = timeout.as_secs(),
-                        ceiling_secs = PROMPT_READY_ACTIVE_TURN_WAIT_CEILING.as_secs(),
-                        "claude_tui readiness wait extended: prior turn still streaming; waiting for it to finish instead of dropping the follow-up"
-                    );
-                }
-                std::thread::sleep(wait_interval);
-                check_prompt_cancel(cancel_token)?;
-                wait_interval = std::cmp::min(wait_interval * 2, Duration::from_millis(1000));
-                continue;
-            }
-            let previous_tui_turn_still_running =
-                crate::services::claude_tui::prompt_readiness::previous_turn_still_running(
-                    snapshot.tmux_pane_alive,
-                    snapshot.prompt_marker_detected,
-                    transcript_turn_state,
-                );
-            log_prompt_ready_timeout(
-                session_name,
-                readiness,
-                timeout,
-                &snapshot,
-                previous_tui_turn_still_running,
-            );
-            if prompt_ready_timeout_should_clear_followup_draft(
-                readiness,
-                &snapshot,
-                crate::services::claude::claude_tui_followup_requeue_enabled(),
-            ) {
-                tracing::warn!(
-                    tmux_session_name = session_name,
-                    readiness = readiness.label(),
-                    "claude_tui clearing stranded follow-up prompt draft after readiness timeout so retry can re-inject cleanly"
-                );
-                // F1: this cleanup runs OUTSIDE the send's composer critical
-                // section (the readiness wait completed with a timeout, so no
-                // submit lock is held). Route it through the shared composer lock
-                // so it is mutually exclusive with a busy-pane auto `/compact`.
-                // Inside it only a prompt AgentDesk typed is cleared; other text keeps every key.
-                let held = with_composer_cleanup_lock(session_name, || {
-                    match stranded_draft_is_ours(session_name, readiness) {
-                        Ok(true) => draft_hold::clear_prompt_draft(session_name),
-                        Ok(false) => {}
-                        Err(held) => return Some(held),
-                    }
-                    None
-                });
-                if let Some(Some(held)) = held {
-                    return Err(held);
-                }
-            }
-            return Err(format!(
-                "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason={}; previous_tui_turn_still_running={}; prompt_marker_detected={}; prompt_draft_detected={}; capture_available={}",
-                readiness.label(),
-                timeout.as_secs(),
-                prompt_ready_timeout_reason(&snapshot),
-                // Mirror the transcript-aware value recorded by the debug log.
-                // A conclusive Idle state reports false even when pane marker
-                // scraping is confused by persistent background-agent chrome.
-                previous_tui_turn_still_running,
-                snapshot.prompt_marker_detected,
-                snapshot.prompt_draft_detected,
-                snapshot.capture_available
-            ));
-        }
-        std::thread::sleep(wait_interval);
-        check_prompt_cancel(cancel_token)?;
-        wait_interval = std::cmp::min(wait_interval * 2, Duration::from_millis(1000));
     }
 }
 
@@ -1183,6 +804,7 @@ fn wait_for_prompt_ready_polling(
 /// AND the transcript confirms the prior turn is still actively streaming, and
 /// only up to an absolute `ceiling`. Pure so the policy is unit-testable without
 /// a live tmux pane.
+#[cfg(test)]
 fn active_turn_warrants_wait_extension(
     pane_alive: bool,
     transcript_turn_active: bool,
@@ -1299,18 +921,11 @@ fn snapshot_indicates_mcp_auth_block(snapshot: &PromptReadinessSnapshot) -> bool
 /// captured only at the confirm boundary. Only ProvenWarmFollowup ignores the
 /// auth warning; draft or busy evidence still blocks it. A blind capture cannot
 /// assert a draft, busy frame, or auth block.
-fn pane_allows_prompt_readiness(session_name: &str, readiness: PromptReadinessKind) -> bool {
-    snapshot_allows_prompt_readiness_for_turn(
-        readiness,
-        &prompt_readiness_snapshot(session_name),
-        Some(crate::services::tui_turn_state::TuiTurnState::Idle),
-    )
-}
-
 /// Actionable, NON-timeout error for a cold-boot stranded on the
 /// MCP-authentication-required welcome screen. The `run /mcp` remediation is
 /// embedded so the reason reaches the operator verbatim instead of a generic
 /// "transport error".
+#[cfg(test)]
 fn mcp_auth_required_error_message(session_name: &str) -> String {
     format!(
         "{PROMPT_READY_MCP_AUTH_ERROR_PREFIX}: the Claude Code cold-boot welcome screen is waiting on MCP server authentication and is silently dropping prompt submissions; run /mcp in tmux session '{session_name}' to authenticate the server, then resend"
@@ -1325,24 +940,6 @@ fn mcp_auth_required_error_message(session_name: &str) -> String {
 /// absent, or when it was a transient half-rendered boot frame that cleared on
 /// the re-capture (so a session still coming up is never aborted). Cancellation
 /// during the settle propagates via `?`.
-fn confirm_mcp_auth_block(
-    session_name: &str,
-    cancel_token: Option<&CancelToken>,
-    first: &PromptReadinessSnapshot,
-) -> Result<Option<PromptReadinessSnapshot>, String> {
-    if !snapshot_indicates_mcp_auth_block(first) {
-        return Ok(None);
-    }
-    std::thread::sleep(PROMPT_READY_MCP_AUTH_CONFIRM_SETTLE);
-    check_prompt_cancel(cancel_token)?;
-    let confirm = prompt_readiness_snapshot(session_name);
-    if snapshot_indicates_mcp_auth_block(&confirm) {
-        Ok(Some(confirm))
-    } else {
-        Ok(None)
-    }
-}
-
 /// Truthful root-cause attribution for a prompt-readiness timeout, derived from
 /// the final snapshot.
 ///
@@ -1353,6 +950,7 @@ fn confirm_mcp_auth_block(
 /// or a blind capture — so the returned error disagreed with the debug log,
 /// which already records the computed signals. We classify by the strongest
 /// evidence present in the snapshot instead.
+#[cfg(test)]
 fn prompt_ready_timeout_reason(snapshot: &PromptReadinessSnapshot) -> &'static str {
     if !snapshot.capture_available {
         // No usable pane capture: the readiness check was blind, so we cannot
@@ -1411,6 +1009,7 @@ fn prompt_ready_timeout_should_clear_followup_draft(
 /// an init-only / empty / rotated transcript reports `false` and the no-capture
 /// idle fast-path falls through to the `❯` marker polling path. The scan is
 /// bounded: it returns on the first recorded-turn line.
+#[cfg(test)]
 fn transcript_has_recorded_turn(transcript_path: &std::path::Path) -> bool {
     use std::io::BufRead;
     let Ok(file) = std::fs::File::open(transcript_path) else {
@@ -1442,6 +1041,7 @@ fn transcript_has_recorded_turn(transcript_path: &std::path::Path) -> bool {
 /// distinctions in `tui_turn_state::claude_envelope_turn_state`, minus the
 /// `system{init}` SESSION-start marker (which that classifier folds into the
 /// Idle family) and the `permission-mode`/`mode` housekeeping envelopes.
+#[cfg(test)]
 fn claude_jsonl_envelope_is_recorded_turn(json: &serde_json::Value) -> bool {
     match json.get("type").and_then(serde_json::Value::as_str) {
         Some("user" | "assistant" | "result") => true,
@@ -1453,31 +1053,7 @@ fn claude_jsonl_envelope_is_recorded_turn(json: &serde_json::Value) -> bool {
     }
 }
 
-fn transcript_idle_confirms_prompt_ready_without_capture(
-    session_name: &str,
-    transcript_path: Option<&std::path::Path>,
-) -> bool {
-    let Some(transcript_path) = transcript_path else {
-        return false;
-    };
-    if !host_input::legacy_pane_alive(session_name) {
-        return false;
-    }
-    // #3880 (A2): an init-only / empty / freshly-rotated transcript also
-    // classifies as `Idle` (`system{init}` is an Idle-class session-start
-    // marker), but after a warm `/clear` the composer is still re-mounting — so
-    // declaring ready here injects before the `❯` marker exists and the Enter is
-    // dropped. Require a genuine RECORDED turn before trusting this no-capture
-    // idle fast-path; the init-only / empty case falls through to the Notify +
-    // marker polling path that confirms the composer marker via a pane snapshot.
-    // A genuine completed-turn idle still fast-paths with no added latency.
-    if !transcript_has_recorded_turn(transcript_path) {
-        return false;
-    }
-    crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(transcript_path)
-        == crate::services::tui_turn_state::TuiTurnState::Idle
-}
-
+#[cfg(test)]
 fn transcript_idle_confirms_prompt_ready(
     snapshot: &PromptReadinessSnapshot,
     transcript_path: Option<&std::path::Path>,
@@ -1486,7 +1062,9 @@ fn transcript_idle_confirms_prompt_ready(
         return false;
     }
     if snapshot.prompt_draft_detected
-        && !claude_prompt_draft_is_idle_suggestion_tail(&snapshot.pane_tail)
+        && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_idle_suggestion(
+            &snapshot.pane_tail,
+        )
     {
         return false;
     }
@@ -1496,6 +1074,7 @@ fn transcript_idle_confirms_prompt_ready(
     })
 }
 
+#[cfg(test)]
 fn transcript_idle_snapshot_confirms_prompt_ready(
     readiness: PromptReadinessKind,
     snapshot: &PromptReadinessSnapshot,
@@ -1507,116 +1086,6 @@ fn transcript_idle_snapshot_confirms_prompt_ready(
             snapshot,
             Some(crate::services::tui_turn_state::TuiTurnState::Idle),
         )
-}
-
-fn log_startup_dialog_dismiss(
-    session_name: &str,
-    readiness: PromptReadinessKind,
-    dialog_label: &str,
-    attempt: usize,
-) {
-    tracing::info!(
-        tmux_session_name = session_name,
-        readiness = readiness.label(),
-        dialog = dialog_label,
-        attempt,
-        max_attempts = STARTUP_DIALOG_DISMISS_MAX_ATTEMPTS,
-        "claude_tui dismissing startup dialog with Enter"
-    );
-    crate::services::claude::debug_log_to(
-        "claude_tui.log",
-        &format!(
-            "startup dialog dismiss session={session_name} readiness={} dialog={dialog_label} attempt={attempt}/{STARTUP_DIALOG_DISMISS_MAX_ATTEMPTS}",
-            readiness.label(),
-        ),
-    );
-}
-
-fn log_startup_dialog_untrusted_workspace(
-    session_name: &str,
-    readiness: PromptReadinessKind,
-    workspace: &str,
-) {
-    tracing::warn!(
-        tmux_session_name = session_name,
-        readiness = readiness.label(),
-        workspace,
-        "claude_tui startup blocked by workspace trust dialog for untrusted path; failing fast"
-    );
-    crate::services::claude::debug_log_to(
-        "claude_tui.log",
-        &format!(
-            "startup dialog untrusted workspace session={session_name} readiness={} workspace={workspace}",
-            readiness.label(),
-        ),
-    );
-}
-
-fn log_prompt_ready_timeout(
-    session_name: &str,
-    readiness: PromptReadinessKind,
-    timeout: Duration,
-    snapshot: &PromptReadinessSnapshot,
-    previous_tui_turn_still_running: bool,
-) {
-    tracing::debug!(
-        tmux_session_name = session_name,
-        readiness = readiness.label(),
-        timeout_secs = timeout.as_secs(),
-        prompt_marker_detected = snapshot.prompt_marker_detected,
-        prompt_draft_detected = snapshot.prompt_draft_detected,
-        previous_tui_turn_still_running,
-        tmux_pane_alive = snapshot.tmux_pane_alive,
-        capture_available = snapshot.capture_available,
-        pane_tail = %snapshot.pane_tail,
-        "claude_tui prompt readiness timed out"
-    );
-    crate::services::claude::debug_log_to(
-        "claude_tui.log",
-        &format!(
-            "prompt readiness timeout session={} readiness={} timeout={}s prompt_marker_detected={} prompt_draft_detected={} previous_tui_turn_still_running={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
-            session_name,
-            readiness.label(),
-            timeout.as_secs(),
-            snapshot.prompt_marker_detected,
-            snapshot.prompt_draft_detected,
-            previous_tui_turn_still_running,
-            snapshot.tmux_pane_alive,
-            snapshot.capture_available,
-            snapshot.pane_tail
-        ),
-    );
-}
-
-/// #3889: record the confirmed MCP-auth cold-boot block. Logs the full pane tail
-/// (which carries the welcome box + warning banner) to `claude_tui.log` so the
-/// failure is diagnosable from a forensics file, not just a first-line WARN.
-fn log_prompt_ready_mcp_auth_block(
-    session_name: &str,
-    readiness: PromptReadinessKind,
-    snapshot: &PromptReadinessSnapshot,
-) {
-    tracing::warn!(
-        tmux_session_name = session_name,
-        readiness = readiness.label(),
-        prompt_marker_detected = snapshot.prompt_marker_detected,
-        prompt_draft_detected = snapshot.prompt_draft_detected,
-        tmux_pane_alive = snapshot.tmux_pane_alive,
-        capture_available = snapshot.capture_available,
-        pane_tail = %snapshot.pane_tail,
-        "claude_tui cold-boot stranded on MCP server authentication welcome screen; failing fast with an actionable reason instead of blind-waiting the readiness timeout"
-    );
-    crate::services::claude::debug_log_to(
-        "claude_tui.log",
-        &format!(
-            "prompt readiness mcp-auth block session={} readiness={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
-            session_name,
-            readiness.label(),
-            snapshot.tmux_pane_alive,
-            snapshot.capture_available,
-            snapshot.pane_tail
-        ),
-    );
 }
 
 fn prompt_ready_debug_tail(pane: &str) -> String {
@@ -2258,9 +1727,11 @@ line 37";
                 .to_string(),
         };
 
-        assert!(claude_prompt_draft_is_idle_suggestion_tail(
-            &snapshot.pane_tail
-        ));
+        assert!(
+            crate::services::tmux_common::tmux_capture_indicates_claude_tui_idle_suggestion(
+                &snapshot.pane_tail
+            )
+        );
         assert!(transcript_idle_confirms_prompt_ready(
             &snapshot,
             Some(file.path())

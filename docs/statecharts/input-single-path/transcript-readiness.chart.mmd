@@ -1,9 +1,12 @@
 %% Hand-authored projection, not generated TLC output.
-%% Production code SHA 574af580b0c5d6e6ce280994f4ed243463de5d2d.
+%% Implementation base SHA c3b660544bab3971630931b444c67a985f4c9169; A leaves CompactPending for B.
 stateDiagram-v2
     [*] --> Route
     Route --> BusyQueue : existing active hand_busy / native Running branches
-    BusyQueue --> NativeQueued : existing paste + Enter; no Idle readiness gate
+    BusyQueue --> BusySelected : claim original; Running selection
+    BusySelected --> BusyWritten : paste + Enter; AnyTurn even if Finish races
+    BusyWritten --> NativeQueued : publish receipt; original stays unavailable to Idle
+    BusyWritten --> BusyWritten : duplicate Idle wake while receipt delayed; no re-exposure
     NativeQueued --> Running : native consumes this original once
     Route --> Booting : fresh / clear / resume Idle entry
     Booting --> Observe : scoped SessionStart startup/resume/clear
@@ -17,7 +20,7 @@ stateDiagram-v2
     DraftVeto --> Prepared : existing draft admission permits Idle submission
     Prepared --> Observe : source / turn / latch revision / cancel changed
     Prepared --> Running : revalidate + existing first-key fence + one Idle submit
-    Running --> Continuation : suppressed root Stop; arm before notify / response
+    Running --> Continuation : memento or output-guard root Stop; arm before notify / block response
     Continuation --> Continuation : summary + timer read; no Idle submit / compact
     Continuation --> AwaitFinal : late assistant beyond suppression floor
     AwaitFinal --> Observe : later approved hard terminal or verified final Stop pair

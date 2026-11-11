@@ -1023,6 +1023,13 @@ src/
 │   │   │   ├── submission_tests.rs
 │   │   │   ├── timeout_draft_tests.rs
 │   │   │   └── user_receipt.rs
+│   │   ├── readiness/
+│   │   │   ├── evidence.rs
+│   │   │   ├── idle.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── readiness_tests.rs
+│   │   │   ├── source.rs
+│   │   │   └── wait.rs
 │   │   ├── session/
 │   │   │   ├── auto_compact_launch_tests.rs
 │   │   │   └── fast_launch_tests.rs
@@ -2230,6 +2237,7 @@ src/
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_busy_gate_tests.rs
+│   │   │   │   │   ├── owner_input_busy_race_tests.rs
 │   │   │   │   │   ├── owner_input_carried_restart_tests.rs
 │   │   │   │   │   ├── owner_input_codex_native_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs

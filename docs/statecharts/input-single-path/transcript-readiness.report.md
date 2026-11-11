@@ -115,3 +115,56 @@ TLC jar SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 
 No cargo, PG or production test binary ran. This is a design/model report, not runtime DoD acceptance.
 See transcript-readiness.design.md for the complete updated design, code coordinates, budgets and product test plan.
+
+## Implementation A refinement
+
+Implementation base c3b660544bab3971630931b444c67a985f4c9169. Busy selection, write and publication are separate actions. Finish can interleave before write or after write, and duplicate Idle wakes occur before receipt. ReexposeBusy deliberately returns the written original to the Idle route.
+
+Direct TLC results (all 33 selected configs rerun, no skip; the complete repository suite was not run):
+
+| cfg | expected to break | broken | seconds |
+|---|---|---|---|
+| input-single-path/InputPathBootDesign.cfg | - | - | 3.3 |
+| input-single-path/InputPathClean.cfg | - | - | 1.9 |
+| input-single-path/InputPathReadyAfterNarrow.cfg | - | - | 3.7 |
+| input-single-path/InputPathReadyBeforeNarrow.cfg | ReadyPendingEventuallyExecutes | ReadyPendingEventuallyExecutes | 3.1 |
+| input-single-path/InputPathReadyBlockBusy.cfg | ReadyBusyEventuallyQueues, ReadyPendingEventuallyExecutes | ReadyBusyEventuallyQueues, ReadyPendingEventuallyExecutes | 4.1 |
+| input-single-path/InputPathReadyBusyActive.cfg | - | - | 5.5 |
+| input-single-path/InputPathReadyBusyCompact.cfg | ReadyCompactAfterStopIdle | ReadyCompactAfterStopIdle | 9.7 |
+| input-single-path/InputPathReadyBusyFinishAfter.cfg | - | - | 5.2 |
+| input-single-path/InputPathReadyBusyFinishBefore.cfg | - | - | 5.3 |
+| input-single-path/InputPathReadyBusyNative.cfg | - | - | 5.4 |
+| input-single-path/InputPathReadyBusyReexpose.cfg | ReadyBusyKeyPlanPreserved, ReadyNoDuplicate | ReadyBusyKeyPlanPreserved, ReadyNoDuplicate | 8.1 |
+| input-single-path/InputPathReadyClear.cfg | - | - | 3.5 |
+| input-single-path/InputPathReadyCompact.cfg | - | - | 6.5 |
+| input-single-path/InputPathReadyDraft.cfg | - | - | 3.8 |
+| input-single-path/InputPathReadyDraftBypass.cfg | ReadyNoHumanDraftExecution | ReadyNoHumanDraftExecution | 6.4 |
+| input-single-path/InputPathReadyFresh.cfg | - | - | 3.5 |
+| input-single-path/InputPathReadyLostStop.cfg | - | - | 3.3 |
+| input-single-path/InputPathReadyNoLatch.cfg | ReadyNoContinuationEarlyInput, ReadyNoIdleRunningInjection | ReadyNoContinuationEarlyInput, ReadyNoIdleRunningInjection | 5.9 |
+| input-single-path/InputPathReadyNoLatchCompact.cfg | ReadyCompactAfterStopIdle, ReadyNoContinuationEarlyInput, ReadyNoIdleRunningInjection | ReadyCompactAfterStopIdle, ReadyNoContinuationEarlyInput, ReadyNoIdleRunningInjection | 11.3 |
+| input-single-path/InputPathReadyNoRevalidate.cfg | ReadyNoIdleRunningInjection | ReadyNoIdleRunningInjection | 5.8 |
+| input-single-path/InputPathReadyNoWake.cfg | ReadyPendingEventuallyExecutes | ReadyPendingEventuallyExecutes | 3.1 |
+| input-single-path/InputPathReadyPermanentUnread.cfg | ReadyPendingEventuallyExecutes | ReadyPendingEventuallyExecutes | 3.1 |
+| input-single-path/InputPathReadyRace.cfg | - | - | 4.1 |
+| input-single-path/InputPathReadyReplay.cfg | ReadyNoDuplicate, ReadyNoSilentLoss | ReadyNoDuplicate, ReadyNoSilentLoss | 10.0 |
+| input-single-path/InputPathReadyRestart.cfg | - | - | 4.6 |
+| input-single-path/InputPathReadyResume.cfg | - | - | 3.4 |
+| input-single-path/InputPathReadySuppressedCompact.cfg | - | - | 6.7 |
+| input-single-path/InputPathReadySuppressedStop.cfg | - | - | 3.6 |
+| input-single-path/InputPathReadyUnread.cfg | - | - | 3.9 |
+| input-single-path/InputPathStopGateLive.cfg | - | - | 14.0 |
+| session-lifecycle/HerdrBusyHandoffAfterBusy.cfg | - | - | 5.5 |
+| session-lifecycle/HerdrBusyHandoffAfterFirstRefusal.cfg | - | - | 5.6 |
+| session-lifecycle/HerdrBusyHandoffBlockedComposerBoundary.cfg | JournalProgress, MessageProgress | JournalProgress, MessageProgress | 5.4 |
+
+total 91.6s, 33 configs
+
+
+## 구현 A 재개 검증
+
+a2에서는 모델·cfg를 바꾸지 않았다. a1 직접 TLC 최종 실행의 33 cfg / 97 reported runs /
+21 GREEN / 12 expected RED / failed0 / skip0을 재사용한다. 저장된 실행 스냅샷의 TLA/CFG
+52개 파일이 현재 파일과 바이트 단위로 일치한다. compact GREEN은 분할 B까지 포함한 설계
+결과이며 A의 compact 제품 구현을 주장하지 않는다. partial-record/producer clock 검사는
+이 추상 모델의 새 활동 술어를 구체화하며 별도 Rust RED/GREEN 시험으로 검증한다.

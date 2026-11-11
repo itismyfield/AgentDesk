@@ -150,6 +150,17 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
             bound: true,
             physical: None,
         };
+        let path = attached.transcript.clone();
+        crate::services::claude_tui::readiness::tests::pre_source(logical, &path);
+        if name == "busy" {
+            std::fs::write(
+                &path,
+                "{\"type\":\"assistant\",\"message\":{\"content\":\"running\"}}\n",
+            )
+            .unwrap();
+        } else if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
         let (sender, _receiver) = std::sync::mpsc::channel();
         assert!(
             super::super::prompt_and_read(

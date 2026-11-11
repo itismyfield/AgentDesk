@@ -11,7 +11,8 @@ Race == Mode \in {"ready-race", "ready-no-revalidate"}
 Blind == Mode \in {"ready-unread", "ready-permanent-unread", "ready-draft-bypass"}
 Person == Mode \in {"ready-draft", "ready-draft-bypass"}
 NoWake == Mode = "ready-no-wake"
-Busy == Mode \in {"ready-busy-active", "ready-busy-native", "ready-block-busy"}
+Busy == Mode \in {"ready-busy-active", "ready-busy-native", "ready-block-busy", "ready-busy-finish-before",
+                  "ready-busy-finish-after", "ready-busy-reexpose"}
 Suppressed == Mode \in {"ready-suppressed-stop", "ready-no-latch",
                         "ready-suppressed-compact", "ready-no-latch-compact"}
 NoLatch == Mode \in {"ready-no-latch", "ready-no-latch-compact"}
@@ -23,7 +24,7 @@ Initial ==
      observed |-> "Unknown", seenEpoch |-> 0, seenTurn |-> 0,
      started |-> FALSE, needsStart |-> Fresh, terminal |-> 0,
      tail |-> "none", continuing |-> FALSE, stopBoundary |-> 0, softStage |-> 0,
-     stop |-> 0, oldStopLeft |-> 1, awake |-> TRUE,
+     stop |-> 0, oldStopLeft |-> 1, awake |-> TRUE, idleWakes |-> 2,
      human |-> Person, draft |-> IF Blind THEN "Unread" ELSE IF Person THEN "Person" ELSE "Empty",
      q |-> [i \in Ids |-> "queued"], effects |-> [i \in Ids |-> 0],
      writes |-> [i \in Ids |-> 0], busyWrites |-> [i \in Ids |-> 0],
@@ -53,7 +54,8 @@ SessionStart ==
     /\ r' = [r EXCEPT !.phase = "Idle", !.started = TRUE, !.awake = TRUE]
 Finish ==
     /\ r.phase = "Running"
-    /\ ~Busy \/ r.writes[1] > 0
+    /\ ~Busy \/ r.q[1] # "queued"
+    /\ Mode # "ready-busy-finish-after" \/ r.writes[1] > 0
     /\ ~Suppressed \/ r.softStage >= 4
     /\ r' = [r EXCEPT !.phase = "Idle", !.terminal = r.turn, !.tail = "hard",
                      !.continuing = FALSE, !.softStage = IF Suppressed THEN 5 ELSE @]
@@ -118,12 +120,26 @@ Submit ==
                      !.badDraft = @ \/ r.human,
                      !.badEarly = @ \/ (r.needsStart /\ ~r.started),
                      !.badContinuation = @ \/ (Suppressed /\ r.softStage < 5)]
-\* Existing busy paste+Enter queues the original in Claude; it does not declare Idle.
+\* Selection, first mutation, and publication are separate; AnyTurn can write after Finish.
+SelectBusy(i) ==
+    /\ Busy /\ i \in First /\ r.route[i] = "busy" /\ r.phase = "Running"
+    /\ r' = [r EXCEPT !.q[i] = "busy-selected"]
 BusyInject(i) ==
-    /\ Busy /\ Mode # "ready-block-busy" /\ i \in First /\ r.route[i] = "busy"
-    /\ r.phase = "Running" /\ r.draft = "Empty" /\ r.head = 0
-    /\ r' = [r EXCEPT !.q[i] = "native-queued", !.writes[i] = @ + 1,
+    /\ Busy /\ Mode # "ready-block-busy" /\ r.q[i] = "busy-selected"
+    /\ Mode # "ready-busy-finish-before" \/ r.phase = "Idle"
+    /\ r.draft = "Empty" /\ r.head = 0
+    /\ r' = [r EXCEPT !.q[i] = "busy-written", !.writes[i] = @ + 1,
                      !.busyWrites[i] = @ + 1, !.busyKeys[i] = "paste,Enter"]
+BusyPublish(i) ==
+    /\ r.q[i] = "busy-written"
+    /\ Mode # "ready-busy-finish-after" \/ r.phase = "Idle"
+    /\ r' = [r EXCEPT !.q[i] = "native-queued"]
+IdleWake ==
+    /\ r.phase = "Idle" /\ r.idleWakes > 0
+    /\ r' = [r EXCEPT !.awake = TRUE, !.idleWakes = @ - 1]
+ReexposeBusy(i) ==
+    /\ Mode = "ready-busy-reexpose" /\ r.q[i] = "busy-written" /\ r.phase = "Idle"
+    /\ r' = [r EXCEPT !.q[i] = "queued", !.route[i] = "idle", !.awake = TRUE]
 BusyAbsorb(i) ==
     /\ r.q[i] = "native-queued" /\ r.phase = "Running"
     /\ r' = [r EXCEPT !.q[i] = "sent", !.effects[i] = @ + 1]
@@ -151,17 +167,17 @@ CompactSubmit ==
                      !.badContinuation = @ \/ (Suppressed /\ r.softStage < 5)]
 Next == SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
         SuppressStop \/ SoftSummary \/ LateAssistant \/
-        NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/
-        (\E i \in Ids : Hold(i) \/ Prepare(i) \/ BusyInject(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
+        NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/ IdleWake \/
+        (\E i \in Ids : Hold(i) \/ Prepare(i) \/ SelectBusy(i) \/ BusyInject(i) \/ BusyPublish(i) \/ ReexposeBusy(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
 Fairness == WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
             WF_r(SuppressStop) /\ WF_r(SoftSummary) /\ WF_r(LateAssistant) /\
             WF_r(RecoverDraft) /\ WF_r(HumanClears) /\ WF_r(NativeStart) /\
             WF_r(Revoke) /\ WF_r(Submit) /\ WF_r(CompactSubmit) /\
             (\A i \in Ids : WF_r(Hold(i)) /\ WF_r(Prepare(i)) /\
-                           WF_r(BusyInject(i)) /\ WF_r(BusyAbsorb(i)) /\ WF_r(BusyConsume(i)) /\ WF_r(Receipt(i)))
+                           WF_r(SelectBusy(i)) /\ WF_r(BusyInject(i)) /\ WF_r(BusyPublish(i)) /\ WF_r(BusyAbsorb(i)) /\ WF_r(BusyConsume(i)) /\ WF_r(Receipt(i)))
 Spec == Init /\ [][Next]_r /\ Fairness
 TypeOK ==
-    /\ r.q \in [Ids -> {"queued", "held", "prepared", "native-queued", "sent", "done"}]
+    /\ r.q \in [Ids -> {"queued", "held", "prepared", "busy-selected", "busy-written", "native-queued", "sent", "done"}]
     /\ r.effects \in [Ids -> 0..2] /\ r.writes \in [Ids -> 0..2] /\ r.head \in 0..N
     /\ r.phase \in {"Booting", "Idle", "Running"}
 NoDuplicate == \A i \in Ids : r.effects[i] <= 1 /\ r.writes[i] <= 1
@@ -173,7 +189,7 @@ CompactAfterStopIdle == ~r.badCompact
 NoContinuationEarlyInput == ~r.badContinuation
 BusyKeyPlanPreserved == \A i \in Ids : r.busyWrites[i] > 0 =>
     (r.route[i] = "busy" /\ r.busyWrites[i] = 1 /\ r.busyKeys[i] = "paste,Enter")
-PendingEventuallyExecutes == \A i \in Ids : (r.q[i] \in {"queued", "held", "prepared", "native-queued"}) ~> (r.effects[i] >= 1)
+PendingEventuallyExecutes == \A i \in Ids : (r.q[i] \in {"queued", "held", "prepared", "busy-selected", "busy-written", "native-queued"}) ~> (r.effects[i] >= 1)
 CompactEventuallyExecutes == r.compactPending ~> (r.compacts = 1)
 BusyEventuallyQueues == Busy => <>(r.busyWrites[1] = 1)
 =============================================================================

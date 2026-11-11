@@ -195,6 +195,8 @@ daemon만 재시작하고 provider는 살아 있으면 새 Start를 기다리지
 :918-940 시험은 그 뒤 late assistant text를 같은 응답에 합친다. 이 두 계약은 다르다.
 readiness 전용 wrapper는 공유 observer/stream parser를 바꾸지 않고 아래 추가 조건을 적용한다.
 
+구현 A 추가 진입점: hook_server.rs의 output guard Hold/Blocked 조기 응답도 root Stop이면 공통 continuation 기록 함수를 호출한다. SubagentStop은 parent latch를 변경하지 않는다.
+
 | transcript 종류 | Idle readiness 승인 |
 |---|---|
 | complete type=result | current source+turn/floor 이후의 hard terminal. continuation barrier의 아래 해제 조건도 만족해야 함 |
@@ -409,3 +411,18 @@ hook fallback ≤1초 관측 지연과 실제 Person draft 대기는 screen-mark
 
 설계 리뷰는 Idle 준비와 불변 Busy 경로의 분리, suppression latch와 soft terminal의 결합, transient/영구 blind 경계를 확인한다.
 busy 동작 변경이나 “정책 변화 없이 영구 blind까지 GREEN”을 제안하지 않는다.
+
+구현 A caller 경합 시험: Busy 선택 직후와 paste 직후 각각 Finish를 강제하고 Enter 이후 receipt 장벽에서 중복 Idle wake 두 번을 넣는다. 장벽 중 owner.front=None, 이후 원본 user row/Enter/정산 각각1을 검사한다. B compact pending은 A에서 활성화하지 않는다.
+
+
+### 구현 A 재개: Idle focus와 continuation 증거
+
+Idle 일반 입력의 최종 focus/stash 검사는 `readiness/idle.rs`로 분리한다. MCP auth 배너는
+준비 신호가 아니므로 여기서는 modal로 취급하지 않는다. 실제 startup/interactive dialog와
+사람 composer 검사는 남기며, Busy의 `before_paste_by`·`inject_owned`·`screen::modal`은 변경하지 않는다.
+호출자가 없어진 기존 Idle `before_paste` wrapper만 제거한다. `/compact`는 분할 B 전까지 기존 경로다.
+
+AwaitResume의 새 활동은 suppression floor 이후에 시작한 완결 행이어야 한다. 행의 끝 offset만으로
+Stop 때 일부만 쓰인 옛 행의 뒤늦은 완성을 새 활동으로 인정하지 않는다. continuation은 producer
+활동 시각도 suppression 시각 이후인지 검사한다. 2.1.322의 timestamp 정밀도·생성/flush 순서는
+격리 실측하지 못한 [U]이며, 모델은 이 byte/clock 구체화를 열거하지 않는다.

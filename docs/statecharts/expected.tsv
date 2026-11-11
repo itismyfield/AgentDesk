@@ -129,6 +129,9 @@ input-single-path/InputPathReadySuppressedStop.cfg	InputPath	-	-
 input-single-path/InputPathReadySuppressedCompact.cfg	InputPath	-	-
 input-single-path/InputPathReadyNoLatch.cfg	InputPath	ReadyNoContinuationEarlyInput,ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyNoLatchCompact.cfg	InputPath	ReadyCompactAfterStopIdle,ReadyNoContinuationEarlyInput,ReadyNoIdleRunningInjection	-
+input-single-path/InputPathReadyBusyFinishBefore.cfg	InputPath	-	-
+input-single-path/InputPathReadyBusyFinishAfter.cfg	InputPath	-	-
+input-single-path/InputPathReadyBusyReexpose.cfg	InputPath	ReadyBusyKeyPlanPreserved,ReadyNoDuplicate	-
 input-single-path/InputPathReadyAfterNarrow.cfg	InputPath	-	-
 input-single-path/InputPathReadyFresh.cfg	InputPath	-	-
 input-single-path/InputPathReadyClear.cfg	InputPath	-	-
