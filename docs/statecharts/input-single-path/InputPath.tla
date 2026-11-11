@@ -508,11 +508,14 @@ ReadinessSpec == Init /\ [][ReadinessNext]_<<vars, bootIngressVars>> /\ Readines
 ReadyTypeOK == Readiness!TypeOK
 ReadyNoDuplicate == Readiness!NoDuplicate
 ReadyNoSilentLoss == Readiness!NoSilentLoss
-ReadyNoRunningInjection == Readiness!NoRunningInjection
+ReadyNoIdleRunningInjection == Readiness!NoIdleRunningInjection
 ReadyNoHumanDraftExecution == Readiness!NoHumanDraftExecution
 ReadyNoEarlyInput == Readiness!NoEarlyInput
 ReadyCompactAfterStopIdle == Readiness!CompactAfterStopIdle
 ReadyPendingEventuallyExecutes == Readiness!PendingEventuallyExecutes
 ReadyCompactEventuallyExecutes == Readiness!CompactEventuallyExecutes
+ReadyNoContinuationEarlyInput == Readiness!NoContinuationEarlyInput
+ReadyBusyKeyPlanPreserved == Readiness!BusyKeyPlanPreserved
+ReadyBusyEventuallyQueues == Readiness!BusyEventuallyQueues
 
 =============================================================================

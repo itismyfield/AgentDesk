@@ -1,22 +1,30 @@
 %% Hand-authored projection, not generated TLC output.
 %% Production code SHA 574af580b0c5d6e6ce280994f4ed243463de5d2d.
 stateDiagram-v2
-    [*] --> Booting
+    [*] --> Route
+    Route --> BusyQueue : existing active hand_busy / native Running branches
+    BusyQueue --> NativeQueued : existing paste + Enter; no Idle readiness gate
+    NativeQueued --> Running : native consumes this original once
+    Route --> Booting : fresh / clear / resume Idle entry
     Booting --> Observe : scoped SessionStart startup/resume/clear
-    [*] --> Observe : daemon restore of verified live source
-    Observe --> Waiting : Running or Unknown
-    Waiting --> Observe : scoped Stop wake or periodic transcript read
-    Observe --> DraftVeto : current Idle or first SessionStart proof
-    DraftVeto --> Held : Person draft / unread / protected focus
+    Route --> Observe : existing Idle entry / verified daemon restore
+    Observe --> Waiting : Running or Unknown in Idle-ready path
+    Waiting --> Observe : scoped wake or periodic current transcript read
+    Observe --> DraftVeto : current approved terminal Idle or first SessionStart proof
+    DraftVeto --> Held : existing draft / unread / protected focus veto
     Held --> Observe : automatic observation and same-original wake
     Held --> Held : persistent unread; progress boundary RED
-    DraftVeto --> Prepared : draft admission permits existing policy
-    Prepared --> Observe : source / turn / cancellation changed before first key
-    Prepared --> Running : revalidate + existing first-key fence + one submit
-    Running --> Observe : next current terminal
+    DraftVeto --> Prepared : existing draft admission permits Idle submission
+    Prepared --> Observe : source / turn / latch revision / cancel changed
+    Prepared --> Running : revalidate + existing first-key fence + one Idle submit
+    Running --> Continuation : suppressed root Stop; arm before notify / response
+    Continuation --> Continuation : summary + timer read; no Idle submit / compact
+    Continuation --> AwaitFinal : late assistant beyond suppression floor
+    AwaitFinal --> Observe : later approved hard terminal or verified final Stop pair
+    Running --> Observe : current approved terminal
     Running --> Settled : exact original receipt; no replay of Unknown
-    Settled --> Observe : next original
-    Observe --> CompactPending : occupancy crossing remembered
-    CompactPending --> Running : current terminal after Stop-equivalent boundary + Idle + draft admission
-    Observe --> ScreenStall : before model requires marker/busy/MCP confirmation
-    ScreenStall --> ScreenStall : 46 columns or redraw never confirms; progress RED
+    Settled --> Route : next original
+    Observe --> CompactPending : usage crossing remembered
+    CompactPending --> Running : approved terminal Idle + no continuation latch + draft admission
+    Observe --> ScreenStall : before model requires screen confirmation
+    ScreenStall --> ScreenStall : narrow / resize never confirms; progress RED

@@ -1,14 +1,15 @@
-%% Hand-authored boundary projection; no new close/cleanup authority.
-%% Production code SHA 574af580b0c5d6e6ce280994f4ed243463de5d2d.
+%% Hand-authored boundary projection; production SHA 574af580b0c5d6e6ce280994f4ed243463de5d2d.
 stateDiagram-v2
     [*] --> Bound
-    Bound --> Evidence : current execution / source / incarnation
-    Evidence --> Evidence : Running, Unknown, old Stop, compact SessionStart
-    Evidence --> DraftAdmission : matching first SessionStart or completed-turn Idle
+    Bound --> Busy : existing active or native Running selection
+    Busy --> NativeQueue : existing busy paste + Enter and receipt
+    Bound --> Evidence : Idle first-input selection
+    Evidence --> Evidence : stale source / soft summary / continuation pending
+    Evidence --> DraftAdmission : current SessionStart or approved terminal Idle
     DraftAdmission --> TypedHeld : existing composer veto before first key
     TypedHeld --> Evidence : same NotSentProof / hold_not_sent / wake
-    DraftAdmission --> FirstKey : proof revalidated; existing writer gate
+    DraftAdmission --> FirstKey : current proof and latch revision; existing writer gate
     FirstKey --> Receipt : existing payload and Enter
     Receipt --> Done : exact original receipt
     Receipt --> RetainedUnknown : existing crash contract
-    Bound --> ReverseExit : existing reverse return path; outside this readiness refinement
+    Bound --> ReverseExit : existing reverse return path; outside this refinement

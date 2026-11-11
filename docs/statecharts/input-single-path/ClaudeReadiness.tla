@@ -1,6 +1,6 @@
 -------------------------- MODULE ClaudeReadiness --------------------------
-\* Readiness refinement of InputPath; code baseline 574af580b0c5d6e6ce280994f4ed243463de5d2d.
-\* One record makes the refinement inert in the older InputPath configurations.
+\* Readiness refinement; production code baseline 574af580b0c5d6e6ce280994f4ed243463de5d2d.
+\* Idle submissions and the unchanged native busy queue have distinct actions.
 EXTENDS Naturals, FiniteSets
 CONSTANTS N, Mode
 VARIABLE r
@@ -11,25 +11,40 @@ Race == Mode \in {"ready-race", "ready-no-revalidate"}
 Blind == Mode \in {"ready-unread", "ready-permanent-unread", "ready-draft-bypass"}
 Person == Mode \in {"ready-draft", "ready-draft-bypass"}
 NoWake == Mode = "ready-no-wake"
-Compact == Mode \in {"ready-compact", "ready-busy-compact"}
+Busy == Mode \in {"ready-busy-active", "ready-busy-native", "ready-block-busy"}
+Suppressed == Mode \in {"ready-suppressed-stop", "ready-no-latch",
+                        "ready-suppressed-compact", "ready-no-latch-compact"}
+NoLatch == Mode \in {"ready-no-latch", "ready-no-latch-compact"}
+Compact == Mode \in {"ready-compact", "ready-busy-compact",
+                     "ready-suppressed-compact", "ready-no-latch-compact"}
 Initial ==
     [phase |-> IF Fresh THEN "Booting" ELSE "Running",
      epoch |-> 1, turn |-> IF Fresh THEN 0 ELSE 1,
      observed |-> "Unknown", seenEpoch |-> 0, seenTurn |-> 0,
      started |-> FALSE, needsStart |-> Fresh, terminal |-> 0,
+     tail |-> "none", continuing |-> FALSE, stopBoundary |-> 0, softStage |-> 0,
      stop |-> 0, oldStopLeft |-> 1, awake |-> TRUE,
      human |-> Person, draft |-> IF Blind THEN "Unread" ELSE IF Person THEN "Person" ELSE "Empty",
      q |-> [i \in Ids |-> "queued"], effects |-> [i \in Ids |-> 0],
+     writes |-> [i \in Ids |-> 0], busyWrites |-> [i \in Ids |-> 0],
+     busyKeys |-> [i \in Ids |-> "none"],
+     route |-> [i \in Ids |-> IF Busy /\ i = 1 THEN "busy" ELSE "idle"],
      head |-> 0, proofEpoch |-> 0, proofTurn |-> 0,
      nativeStarts |-> IF Race THEN 1 ELSE 0,
      restarts |-> IF Mode = "ready-restart" THEN 1 ELSE 0,
      compactPending |-> Compact, compacts |-> 0,
-     badRunning |-> FALSE, badDraft |-> FALSE, badEarly |-> FALSE, badCompact |-> FALSE]
+     badIdleRunning |-> FALSE, badDraft |-> FALSE, badEarly |-> FALSE,
+     badCompact |-> FALSE, badContinuation |-> FALSE]
 Init == r = Initial
+TerminalEligible ==
+    /\ ~r.continuing
+    /\ r.tail = "hard" \/ (r.tail = "summary" /\ r.stopBoundary = r.turn)
 CurrentEvidence ==
     /\ r.observed = "Idle" /\ r.seenEpoch = r.epoch /\ r.seenTurn = r.turn
     /\ (~r.needsStart \/ r.started)
-    /\ r.started \/ (r.terminal = r.turn /\ r.turn > 0)
+    /\ ~r.continuing
+    /\ (r.started /\ r.turn = 0) \/
+       (r.terminal = r.turn /\ r.turn > 0 /\ TerminalEligible)
 Ready == CurrentEvidence /\ ~Before
 First == {i \in Ids : r.q[i] \in {"queued", "held"} /\
           \A j \in 1..(i-1) : r.q[j] = "done"}
@@ -38,13 +53,29 @@ SessionStart ==
     /\ r' = [r EXCEPT !.phase = "Idle", !.started = TRUE, !.awake = TRUE]
 Finish ==
     /\ r.phase = "Running"
-    /\ r' = [r EXCEPT !.phase = "Idle", !.terminal = r.turn]
-\* The periodic observation runs even when no hook or mtime edge was seen.
+    /\ ~Busy \/ r.writes[1] > 0
+    /\ ~Suppressed \/ r.softStage >= 4
+    /\ r' = [r EXCEPT !.phase = "Idle", !.terminal = r.turn, !.tail = "hard",
+                     !.continuing = FALSE, !.softStage = IF Suppressed THEN 5 ELSE @]
+\* A raw matching Stop boundary is recorded together with continuation disposition.
+SuppressStop ==
+    /\ Suppressed /\ r.softStage = 0 /\ r.phase = "Running"
+    /\ r' = [r EXCEPT !.softStage = 1, !.stopBoundary = r.turn,
+                     !.continuing = ~NoLatch]
+SoftSummary ==
+    /\ Suppressed /\ r.softStage = 1
+    /\ r' = [r EXCEPT !.softStage = 2, !.tail = "summary", !.terminal = r.turn]
+\* Shared observer may report Idle for a summary while the provider is still Running.
 Observe ==
-    /\ r' = [r EXCEPT !.observed = IF r.phase = "Booting" THEN "Unknown" ELSE r.phase,
+    /\ r' = [r EXCEPT !.observed = IF r.tail = "summary" THEN "Idle"
+                                  ELSE IF r.phase = "Booting" THEN "Unknown" ELSE r.phase,
                      !.seenEpoch = r.epoch, !.seenTurn = r.turn,
+                     !.softStage = IF Suppressed /\ r.softStage = 2 THEN 3 ELSE @,
                      !.awake = IF NoWake THEN @ ELSE TRUE]
-\* Stop and duplicate/old delivery are wake hints; neither changes transcript evidence.
+LateAssistant ==
+    /\ Suppressed /\ r.softStage = 3
+    /\ r' = [r EXCEPT !.softStage = 4, !.tail = "assistant", !.terminal = 0]
+\* Stop replay can wake but cannot clear a continuation latch.
 Stop ==
     /\ r.phase = "Idle" /\ r.terminal = r.turn /\ r.turn > 0 /\ r.stop # r.turn
     /\ Mode \notin {"ready-lost-stop", "ready-no-wake"}
@@ -59,19 +90,18 @@ HumanClears ==
     /\ r.human /\ r.draft = "Person"
     /\ r' = [r EXCEPT !.human = FALSE, !.draft = "Empty", !.awake = TRUE]
 Hold(i) ==
-    /\ i \in First /\ r.head = 0 /\ r.awake
+    /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake
     /\ ~Ready \/ r.draft # "Empty"
     /\ r' = [r EXCEPT !.q[i] = "held", !.awake = FALSE]
 Prepare(i) ==
-    /\ i \in First /\ r.head = 0 /\ r.awake /\ Ready
+    /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake /\ Ready
     /\ r.draft = "Empty" \/ Mode = "ready-draft-bypass"
     /\ r' = [r EXCEPT !.q[i] = "prepared", !.head = i,
                      !.proofEpoch = r.epoch, !.proofTurn = r.turn]
-\* An observed native start between readiness and the first key revokes the proof.
-\* Atomic observation of an unreported native key is an explicit implementation limit.
 NativeStart ==
     /\ Race /\ r.head # 0 /\ r.nativeStarts > 0 /\ r.phase = "Idle"
-    /\ r' = [r EXCEPT !.phase = "Running", !.turn = @ + 1, !.nativeStarts = 0]
+    /\ r' = [r EXCEPT !.phase = "Running", !.turn = @ + 1, !.nativeStarts = 0,
+                     !.tail = "assistant"]
 ProofCurrent == Ready /\ r.proofEpoch = r.epoch /\ r.proofTurn = r.turn
 Revoke ==
     /\ r.head # 0 /\ (~ProofCurrent \/ r.draft # "Empty")
@@ -81,16 +111,30 @@ Submit ==
     /\ ProofCurrent \/ Mode = "ready-no-revalidate"
     /\ r.draft = "Empty" \/ Mode = "ready-draft-bypass"
     /\ r' = [r EXCEPT !.q[r.head] = "sent", !.effects[r.head] = @ + 1,
-                     !.head = 0, !.phase = "Running", !.turn = @ + 1,
+                     !.writes[r.head] = @ + 1, !.head = 0,
+                     !.phase = "Running", !.turn = @ + 1, !.tail = "assistant",
                      !.awake = FALSE,
-                     !.badRunning = @ \/ r.phase = "Running",
+                     !.badIdleRunning = @ \/ r.phase = "Running",
                      !.badDraft = @ \/ r.human,
-                     !.badEarly = @ \/ (r.needsStart /\ ~r.started)]
+                     !.badEarly = @ \/ (r.needsStart /\ ~r.started),
+                     !.badContinuation = @ \/ (Suppressed /\ r.softStage < 5)]
+\* Existing busy paste+Enter queues the original in Claude; it does not declare Idle.
+BusyInject(i) ==
+    /\ Busy /\ Mode # "ready-block-busy" /\ i \in First /\ r.route[i] = "busy"
+    /\ r.phase = "Running" /\ r.draft = "Empty" /\ r.head = 0
+    /\ r' = [r EXCEPT !.q[i] = "native-queued", !.writes[i] = @ + 1,
+                     !.busyWrites[i] = @ + 1, !.busyKeys[i] = "paste,Enter"]
+BusyAbsorb(i) ==
+    /\ r.q[i] = "native-queued" /\ r.phase = "Running"
+    /\ r' = [r EXCEPT !.q[i] = "sent", !.effects[i] = @ + 1]
+BusyConsume(i) ==
+    /\ r.q[i] = "native-queued" /\ r.phase = "Idle"
+    /\ r' = [r EXCEPT !.q[i] = "sent", !.effects[i] = @ + 1,
+                     !.phase = "Running", !.turn = @ + 1, !.tail = "assistant"]
 Receipt(i) ==
     /\ r.q[i] = "sent"
     /\ r' = [r EXCEPT !.q[i] = "done"]
-\* Pre-key daemon restart only: the originals survive, all ephemeral readiness is discarded.
-\* Post-key Unknown retention remains in InputPath/HerdrBusyHandoff, without replay here.
+\* Only pre-key daemon restart is refined here; post-key Unknown is never replayed.
 Restart ==
     /\ r.restarts > 0 /\ r.head = 0
     /\ r' = [r EXCEPT !.epoch = @ + 1, !.observed = "Unknown",
@@ -102,26 +146,34 @@ CompactSubmit ==
     /\ r.compactPending /\ r.head = 0 /\ r.draft = "Empty"
     /\ (Ready /\ r.terminal = r.turn /\ r.turn > 0) \/ Mode = "ready-busy-compact"
     /\ r' = [r EXCEPT !.compactPending = FALSE, !.compacts = @ + 1,
-                     !.phase = "Running", !.turn = @ + 1, !.awake = FALSE,
-                     !.badCompact = @ \/ r.phase # "Idle" \/ r.terminal # r.turn]
+                     !.phase = "Running", !.turn = @ + 1, !.tail = "assistant", !.awake = FALSE,
+                     !.badCompact = @ \/ r.phase # "Idle" \/ r.terminal # r.turn,
+                     !.badContinuation = @ \/ (Suppressed /\ r.softStage < 5)]
 Next == SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
+        SuppressStop \/ SoftSummary \/ LateAssistant \/
         NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/
-        (\E i \in Ids : Hold(i) \/ Prepare(i) \/ Receipt(i) \/ Replay(i))
+        (\E i \in Ids : Hold(i) \/ Prepare(i) \/ BusyInject(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
 Fairness == WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
+            WF_r(SuppressStop) /\ WF_r(SoftSummary) /\ WF_r(LateAssistant) /\
             WF_r(RecoverDraft) /\ WF_r(HumanClears) /\ WF_r(NativeStart) /\
             WF_r(Revoke) /\ WF_r(Submit) /\ WF_r(CompactSubmit) /\
-            (\A i \in Ids : WF_r(Hold(i)) /\ WF_r(Prepare(i)) /\ WF_r(Receipt(i)))
+            (\A i \in Ids : WF_r(Hold(i)) /\ WF_r(Prepare(i)) /\
+                           WF_r(BusyInject(i)) /\ WF_r(BusyAbsorb(i)) /\ WF_r(BusyConsume(i)) /\ WF_r(Receipt(i)))
 Spec == Init /\ [][Next]_r /\ Fairness
 TypeOK ==
-    /\ r.q \in [Ids -> {"queued", "held", "prepared", "sent", "done"}]
-    /\ r.effects \in [Ids -> 0..2] /\ r.head \in 0..N
+    /\ r.q \in [Ids -> {"queued", "held", "prepared", "native-queued", "sent", "done"}]
+    /\ r.effects \in [Ids -> 0..2] /\ r.writes \in [Ids -> 0..2] /\ r.head \in 0..N
     /\ r.phase \in {"Booting", "Idle", "Running"}
-NoDuplicate == \A i \in Ids : r.effects[i] <= 1
+NoDuplicate == \A i \in Ids : r.effects[i] <= 1 /\ r.writes[i] <= 1
 NoSilentLoss == \A i \in Ids : r.q[i] = "done" => r.effects[i] = 1
-NoRunningInjection == ~r.badRunning
+NoIdleRunningInjection == ~r.badIdleRunning
 NoHumanDraftExecution == ~r.badDraft
 NoEarlyInput == ~r.badEarly
 CompactAfterStopIdle == ~r.badCompact
-PendingEventuallyExecutes == \A i \in Ids : (r.q[i] \in {"queued", "held", "prepared"}) ~> (r.effects[i] >= 1)
+NoContinuationEarlyInput == ~r.badContinuation
+BusyKeyPlanPreserved == \A i \in Ids : r.busyWrites[i] > 0 =>
+    (r.route[i] = "busy" /\ r.busyWrites[i] = 1 /\ r.busyKeys[i] = "paste,Enter")
+PendingEventuallyExecutes == \A i \in Ids : (r.q[i] \in {"queued", "held", "prepared", "native-queued"}) ~> (r.effects[i] >= 1)
 CompactEventuallyExecutes == r.compactPending ~> (r.compacts = 1)
+BusyEventuallyQueues == Busy => <>(r.busyWrites[1] = 1)
 =============================================================================

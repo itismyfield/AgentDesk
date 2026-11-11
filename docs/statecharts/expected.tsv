@@ -122,6 +122,13 @@ input-single-path/InputOwnershipResetRawWriter.cfg	InputOwnershipReset	NoThirdPa
 input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDropped,NoDeadlock,NoSilentLoss	-
 input-single-path/InputPathClean.cfg	InputPath	-	-
 input-single-path/InputPathReadyBeforeNarrow.cfg	InputPath	-	ReadyPendingEventuallyExecutes
+input-single-path/InputPathReadyBusyActive.cfg	InputPath	-	-
+input-single-path/InputPathReadyBusyNative.cfg	InputPath	-	-
+input-single-path/InputPathReadyBlockBusy.cfg	InputPath	-	ReadyBusyEventuallyQueues,ReadyPendingEventuallyExecutes
+input-single-path/InputPathReadySuppressedStop.cfg	InputPath	-	-
+input-single-path/InputPathReadySuppressedCompact.cfg	InputPath	-	-
+input-single-path/InputPathReadyNoLatch.cfg	InputPath	ReadyNoContinuationEarlyInput,ReadyNoIdleRunningInjection	-
+input-single-path/InputPathReadyNoLatchCompact.cfg	InputPath	ReadyCompactAfterStopIdle,ReadyNoContinuationEarlyInput,ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyAfterNarrow.cfg	InputPath	-	-
 input-single-path/InputPathReadyFresh.cfg	InputPath	-	-
 input-single-path/InputPathReadyClear.cfg	InputPath	-	-
@@ -131,7 +138,7 @@ input-single-path/InputPathReadyDraft.cfg	InputPath	-	-
 input-single-path/InputPathReadyUnread.cfg	InputPath	-	-
 input-single-path/InputPathReadyPermanentUnread.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyRace.cfg	InputPath	-	-
-input-single-path/InputPathReadyNoRevalidate.cfg	InputPath	ReadyNoRunningInjection	-
+input-single-path/InputPathReadyNoRevalidate.cfg	InputPath	ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyRestart.cfg	InputPath	-	-
 input-single-path/InputPathReadyReplay.cfg	InputPath	ReadyNoDuplicate,ReadyNoSilentLoss	-
 input-single-path/InputPathReadyDraftBypass.cfg	InputPath	ReadyNoHumanDraftExecution	-
