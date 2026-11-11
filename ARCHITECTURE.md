@@ -1887,6 +1887,7 @@ src/
 │   │   ├── placeholder_sweeper/
 │   │   │   ├── abandon_guard.rs
 │   │   │   ├── panel_shape.rs
+│   │   │   ├── rebind_resume_tests.rs
 │   │   │   ├── retirement_tests.rs
 │   │   │   └── tick.rs
 │   │   ├── prompt_builder/

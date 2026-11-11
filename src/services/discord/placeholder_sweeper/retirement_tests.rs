@@ -183,3 +183,7 @@ async fn tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[cfg(unix)]
+#[path = "rebind_resume_tests.rs"]
+mod rebind_resume;

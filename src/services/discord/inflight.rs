@@ -120,8 +120,8 @@ pub(super) use self::rebind_reap::{
     DEAD_WATCHER_PROVEN_DEAD_SECS, INFLIGHT_STALENESS_THRESHOLD_SECS, RebindReapOutcome,
     emit_reap_abandoned_rebind_origin, inflight_state_is_stale,
     ownerless_external_input_inflight_is_stale, parse_started_at_unix, parse_updated_at_unix,
-    reap_abandoned_rebind_origin_locked, rebind_origin_deadline_secs_env,
-    should_reap_abandoned_rebind_origin, sweep_reap_dead_watcher_rebind_origin,
+    reap_rebind_origin_resuming, rebind_origin_deadline_secs_env,
+    should_reap_abandoned_rebind_origin, sweep_reap_dead_watcher_rebind_origin_resuming,
 };
 // Parent-internal helper (private in the parent before the move): re-imported so
 // inflight-core resolves it unchanged, WITHOUT widening it to the discord module.
