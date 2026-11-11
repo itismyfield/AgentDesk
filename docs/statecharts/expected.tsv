@@ -288,3 +288,6 @@ tui-o-writer/WriterWakeI8055Design.cfg	WriterWake	-	-
 tui-o-writer/WriterWakeI8055NoReadyWake.cfg	WriterWake	-	BootHeldEventuallyExecutes
 tui-o-writer/WriterWakeI8055RouteCurrent.cfg	WriterWake	BootRouteNoBlockedSelfWake	-
 tui-o-writer/WriterWakeI8055RouteDesign.cfg	WriterWake	-	-
+session-lifecycle/HerdrHintARetryFixed.cfg	HerdrSession	-	-
+session-lifecycle/HerdrHintARetryNoController.cfg	HerdrSession	-	AProgress
+session-lifecycle/HerdrHintARetryNoBudget.cfg	HerdrSession	-	AProgress

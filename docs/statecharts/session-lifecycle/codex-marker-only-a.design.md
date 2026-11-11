@@ -1,6 +1,6 @@
-# Codex Herdr marker-only A 설계 r3
+# Codex Herdr marker-only A 설계 r4
 
-상태: 구현 전 PLAN. **운영 코드 변경 0**. 코드 정본은 `289f41b1d0f48fab0dc426e652308eced4326fce`, 모델/문서 입력은 `dfba87a0ae2a576507f0863e81cfb8f1ead8bfdb`다. 두 SHA 사이 `src/` 차이는 없다. 이 문서는 r2의 A를 대체한다. B(HandoffWaiting·넘김 journal)와 C(종료 포트)는 보류하며, #8077 착지 뒤 공유 계약으로 다시 설계한다. 이 A에는 `/exit`, 화면 판독, pane close, kill, provider 종료 판정 기능이 없다. 아래 CleanupIntent는 파일 정리의 복구 기록이며 predecessor 종료 attempt가 아니다.
+상태: 구현 전 PLAN. **운영 코드 변경 0**. 코드 정본은 `289f41b1d0f48fab0dc426e652308eced4326fce`, 모델/문서 입력은 `89a8ea63c4b86c79247f1d68118815b1e3ce7a3f`다. 두 SHA 사이 `src/` 차이는 없다. 이 문서는 r3의 A를 대체한다. r3의 Legacy admission·물리 fence·boot discovery 계약은 유지하고, 일시 실패를 구동할 controller 수명을 보완한다. B(HandoffWaiting·넘김 journal)와 C(종료 포트)는 보류하며, #8077 착지 뒤 공유 계약으로 다시 설계한다. 이 A에는 `/exit`, 화면 판독, pane close, kill, provider 종료 판정 기능이 없다. 아래 CleanupIntent는 파일 정리의 복구 기록이며 predecessor 종료 attempt가 아니다.
 
 ## 1. P1 결정: Legacy 부재 증거를 좁은 admission에서 소비한다
 
@@ -24,9 +24,18 @@ Known Pending/Bound/Unknown은 A에서 변경하지 않는다. **Known Retired�
 
 projection은 `Reading::publish_if_current`의 기존 fresh snapshot 재검증 형태를 사용한다(`activity/unbound/live.rs:1084`). 그러나 기존 `local_legacy_absence_for_start`를 그대로 true로 간주하지 않는다. 그 함수는 exact/canonical divergence와 Idle/no_session을 요구하는 별도 경로다(`:412,1099`). 새 작은 `live/codex_marker_absence.rs` child에서 receipt의 **동일 Legacy 행 + owner + paths + front + epoch + 현재 부재**를 비교해 start 전용 `VerifiedMarkerAbsence`를 만든다. `activity_now()`의 일반 결과는 바꾸지 않고, 다른 reader는 계속 Unknown을 본다.
 
-`start_waits`의 inflight/rest 관문(`owner_input.rs:699`), 대상 pane 선택(`:710`), host/config/root/Source 검증을 모두 남긴다. 기존 activity가 Idle이거나, reason이 정확히 `hosted_active_or_unknown`이며 새 proof가 그 **유일한 Legacy 행 차이만** 해소할 때 통과한다. 다른 busy/Unknown 원인은 우회하지 않는다. 삭제나 DB mutation은 이 read-only projection에 넣지 않는다.
+`start_waits`의 inflight/rest 관문(`owner_input.rs:699`), 대상 pane 선택(`:710`), host/config/root/Source 검증을 모두 남긴다. 기존 activity가 Idle이거나, 새 child가 fresh 내부 snapshot의 **typed `LegacyMarkerOnly` 결과**를 내고 새 proof가 그 **유일한 Legacy 행 차이만** 해소할 때 통과한다. 공개 `Observed.reason`은 `session_identity_unresolved`다(`unbound/live.rs:1048`). `hosted_active_or_unknown`은 그 내부 hold leaf이며 공개 reason 문자열과 비교하지 않는다. `Reading`의 private unbound stamp/snapshot(`activity.rs:175`)를 볼 수 있는 새 live child가 내부 verdict를 sealed enum으로 변환한다. diagnostic용 `NoticeObservation.hold_leaf` 문자열만으로 permit을 만들지도 않는다. 다른 busy/Unknown 원인은 우회하지 않는다. 삭제나 DB mutation은 이 read-only projection에 넣지 않는다.
 
 admission은 물리 fence를 다시 취득하고 fresh proof를 재검증한 뒤 동일 front를 grant/claim한다(`queued_head/v2.rs:398,411`). fence guard는 typed 내부 start context로 Codex fresh/Pending CAS·host/spawn 게시까지 전달하고 그 뒤 해제한다. Source Mutex는 await를 가로질러 보유하지 않는다. 일반 프로세스/다른 owner·다른 nonce의 입력 권리를 이 permit으로 만들지 않는다. 기존 `herdr_launch.rs:425`의 Legacy/Retired 분기, `hosted_execution.rs:411`의 CAS, Startup/nonce/rollout/owner 입력 검증은 유지한다. 서버/socket create의 불명확한 결과와 prompt 재전송은 기존 Pending/owned-input 계약에 맡긴다.
+
+
+### A guard의 운반 경로와 history pin
+
+실제 운반은 `owner_input::start_front`의 A controller → `OwnerTurn`(`owner_input.rs:472`) → `StreamingTurn`(`provider_dispatch.rs:52`) → **CodexHerdrTurn 생성(`provider_dispatch.rs:613`)** → `CodexHerdrTurn`(`codex/herdr_turn.rs:65`) → fresh launch → Pending/host/spawn 게시다. `StreamingTurn`은 Clone이므로 물리 guard 자체를 Clone하지 않는다. 내부 carrier의 `Arc<Mutex<Option<AStartGuard>>>`만 운반하고, Codex 생성 경계에서 **take 한 번**으로 guard를 이동한다. 두 번째 take·owner/path/epoch 불일치는 거절한다. A carrier가 있는데 take 결과가 None이면 새 guard 재탐색으로 보충하지 않는다. A와 무관한 기존 일반 입력은 carrier=None인 정상 경로를 유지한다. 일반 StreamingTurn 생성자 `headless_turn.rs:1068`·`intake_turn.rs:2179`에도 None 연결을 포함하고, owner_input.rs:439/1025와 provider_dispatch.rs의 `..turn` 복사/Clone은 같은 carrier를 보존한다. 같은 guard를 기존 launch/clear_fresh에 전달해 중첩 flock을 열지 않는다. 공개 요청 payload나 persisted provenance JSON에는 권한 토큰을 직렬화하지 않는다.
+
+Claude도 같은 물리 marker writer다. direct `claude/tui_session_launch.rs:34` cleanup 앞에서 outer fence를 취득해 owner/runtime→prepared host/nonce 게시→create/respawn(`:67`)까지 유지한다. wrapper `claude.rs:2594` cleanup 앞에서 취득해 marker→create(`:2677`)→spawn stamp(`:2707`)까지 운반하고 output tail 전에 놓는다. 중앙 writer 각각을 잠그는 것으로 이 전체 구간을 대체하지 않는다. 실패 복구도 같은 guard의 under-fence API를 사용하며, 기존 종료/재생성 권한은 바꾸지 않는다. giant에는 이 guard 연결만 둔다.
+
+A debt가 참조한 terminal identity의 **직접 만료 지점**은 `queued_head/v2/retained.rs:78`의 24시간 retain이다. 여기에 `not_expired || A_debt.references(identity)` 조건을 붙인다. 관련 settled bind 만료(`source_admission.rs:618`)와 prune도 같은 참조 판정으로 보호한다. outbox ack/명시 정산까지 pin을 유지하며, terminal history를 재발행할 queued input으로 바꾸지 않는다. `migration::anchor_terminals(:56)`는 기존 unanchored 시각 보정만 유지한다. pin을 TTL 재시작이나 영구 전체 history 보관으로 구현하지 않는다.
 
 ## 2. 물리 fence, 삭제, durable 기록과 wake
 
@@ -63,6 +72,38 @@ front·epoch가 바뀌면 이전 event가 새 front에 grant하지 않는다. �
 
 wake transport는 at-least-once이며 물리 wake 0/1/2회를 구분한다. 논리 grant/create/prompt의 중복 0은 기존 drive 직렬화(`input_owner/drive.rs:88`), front grant/claim과 reservation/CAS를 유지해 보장한다. wake ack가 유실됐다고 입력을 다시 보내지 않는다. outbox ack는 기존 start의 결과/확정된 retained·terminal 상태와 연결하며 claim만 보고 완료라고 쓰지 않는다.
 
+### P1: 재구동 후보 비교와 선택
+
+| 후보 | 현재 장치와 필요한 변경 | 결정 |
+|---|---|---|
+| (가) 같은 controller future를 유지해 유한 재시도 | `drive.rs:101`은 `(handoff)(front).await`가 끝날 때까지 그 callback을 보유한다. callback 내부의 다음 반복은 추가 wake 없이 실행된다. A child에서 I/O 실패 최대 3회와 단계별 재관찰을 묶으면 됨 | **선택.** 기존 Handoff await를 재사용하는 가장 작은 변경 |
+| (나) held_watch/retained deadline에 intent 키 추가 | held_watch는 명시 arm 필요(`:88`), Gone이면 wake 없이 종료(`:64`). deadline은 head만 반환(`retained.rs:46`), tick 실패 뒤는 로그만(`drive.rs:150`). preclaim intent·예산·boot 실패를 모두 arm/rearm하도록 넓혀야 함 | 보류. 이 A에서는 screen probe·deadline 의미를 넓히지 않음 |
+| (다) boot/주기 sweep을 durable intent에 연결 | boot discovery는 유지하지만 다음 boot 자체는 현재 callback의 진행 원천이 아님. 기존 주기 작업에 소유/예산/종료를 연결하는 변경이 더 필요 | 보류. 새 sweep·timer·스위치·운영자 명령을 만들지 않음 |
+
+**재시도 원천은 이미 실행 중인 callback의 남은 continuation이다.** A controller는 intent 이전의 최초 시도부터 정산/ack까지 parent Handoff future 안에 남는다. 일시 오류를 START_WAITS/일반 Err로 반환해 `drive.rs:117`이 controller를 놓게 하지 않는다. 별도 task를 spawn하거나 sleep/polling하지 않는다. 기존 async I/O await가 완료되면 같은 future의 bounded loop가 재개된다. 따라서 first unlink 후 partial 오류에서도 receipt/outbox/wake가 생기기 전에 재관찰할 수 있다.
+
+정책은 **처음 오류 + 추가 오류 2회, 최대 3회 실패**다. 설정값은 추가하지 않는다. 오류 반환마다 남은 횟수를 소비하고, 세 번째 실패면 실패 정산으로 이동한다. 성공한 중간 step은 실패 횟수를 초기화하지 않는다. 잠깐 실패했더라도 이 예산 안에서 회복되지 않으면 자동 시도를 끝내고 명시 통지한다. 모든 오류가 언젠가 풀릴 때까지 기다린다는 계약이 아니다. lower I/O의 기존 반환/timeout 계약을 사용하고 새 타이머는 두지 않는다.
+
+각 continuation 전에 physical fence와 Source guard를 놓고, 다음 시도에서 같은 `namespace/cleanup-id/front/epoch`와 row/marker snapshot을 다시 검사한다. partial unlink는 처음 intent의 같은 path만 idempotent하게 이어간다. commit 전 실패는 현재 queue bytes를 재읽고, publish 결과가 불명확하면 기존 `commit::recover`로 original/candidate 중 무엇이 확정됐는지 확인한다. 읽기 불가/제3 상태를 미완료로 단정해 재삭제하지 않는다. budget 밖에서 blind retry하지 않는다.
+
+입력은 이 재시도 loop의 body가 아니다. pre-grant I/O만 재관찰하며, Ready 뒤에는 기존 owned reservation/턴 실행을 **한 번** 호출한다. 그 뒤에는 같은 controller의 ack-only 부분으로 이동한다. ack I/O가 실패하면 기록만 재관찰하고 prompt/launch를 다시 호출하지 않는다. ack 단계의 미확정 결과를 '미전송'이라고 통지하지 않는다.
+
+### 영구 실패의 정산과 boot 실패
+
+| 실패 | 종료·보존·통지 |
+|---|---|
+| unlink/probe 실패가 예산 3회를 소진, queue는 writable | 원문을 known-unsent retained + notice debt로 기존 queue commit에 보존하고, 기존 PG persistent-dedupe outbox에 명시 통지를 예약한 뒤 종료. generic 두 번 start_rejected 실패로 보내지 않음 |
+| queue publication 자체가 계속 실패 | last confirmed queue bytes와 candidate를 보존하며 성공/retained commit으로 표시하지 않음. 현재 front를 기존 `hold_front` 경로(`owner_input.rs:984`, `v2.rs:466`)로 보류하고 grant를 철회. 원문/intent를 메모리에서 지우거나 ack하지 않음. 별도 작은 storage-failure adapter가 **기존 PG outbox API**(`message_outbox.rs:238`)로 저장소 오류와 자동 시도 중지를 명시 통지. 이 경우 재전송 요청 문구를 쓰거나 원문이 terminal commit됐다고 주장하지 않음 |
+| boot 재관찰/adopt/tick 오류 | `owner_input::recover(:664)`가 `recovery::recover` 호출 전체와 초기 read 오류를 같은 bounded controller로 감싼다. `:681`의 로그-only 반환으로 끝내지 않음. 한번 발견한 채널/intent는 callback을 유지해 최대 3회 재관찰. 실패 시 위 원문 보존/통지 정산; 두 번째 restart/새 입력을 진행 조건으로 두지 않음 |
+| boot에서 원문 bytes 자체를 읽을 수 없음 | canonical channel/namespace 대상의 복구 실패를 통지하고 기존 파일을 그대로 둠. 알지 못하는 원문 id를 만들어 retained/terminal 처리하지 않음. '복구 완료' wake를 보내지 않음 |
+| prompt 효과 뒤 ack만 실패 | 기존 효과/Unknown 상태 보존, ack-only 재관찰/저장소 통지. NotSent proof·재전송 권한을 생성하지 않음 |
+
+storage-failure 통지는 새 저장소가 아니라 기존 non-turn outbox의 안정 key=`namespace/cleanup-id/stage`를 쓴다. routine/bot 입력으로 재수용되지 않는 기존 operational-alert provenance를 재사용한다. disk가 계속 실패해도 independent PG outbox가 동작하면 통지를 durable하게 예약할 수 있다. **PG/outbox도 영구 불능인 경우 통지 성공을 선언할 수 없으며**, 원문·intent를 보존한 storage hold/error다. 모델의 ANotice는 이 독립 통지 경로가 가능한 범위다. 무한 retry나 문서상 notified=true로 대체하지 않는다.
+
+controller의 단일 소유는 기존 channel drive/queue actor에 묶는다. boot와 drive가 같은 cleanup-id를 보더라도 owner의 current-control lease를 한 번만 얻는다. lease는 살아 있는 future의 weak token으로 확인하고, 취소/drop 뒤 stale 토큰을 새 실행 권한으로 쓰지 않는다. runtime restart 뒤에는 durable intent에서 새 controller를 시작하며 새 cleanup-id/입력은 만들지 않는다. 제어 실패가 정산된 현재 owner에서는 그 결과를 메모해 같은 front를 즉시 다시 grant하지 않는다. 외부 입력/다음 boot가 새 복구 판단을 시작할 때도 기존 원문과 증거부터 확인한다.
+
+모델에서는 `APartialUnlink`가 오류·예산 소비 후 `retry_wait`에 남고, **살아 있는 controller가 있을 때만 `ARetryContinue`가 enabled**다. `ARecover`도 controller를 요구한다. retry_wait는 새 사건 대기가 아니라 보유한 future의 다음 반복이다. controller를 놓는 cfg는 exact partial-unlink 상태에서 AProgress RED다. 영구 오류에서 예산을 없애는 cfg도 RED다.
+
 ### v3 codec·boot·source fence 전수 연결
 
 V2 struct의 unknown 필드 무시를 이용해 v2에 journal 필드만 덧붙이지 않는다. A 기록이 생기는 commit에서 **version 3**으로 승격하고, 기존 v1/v2는 읽어 보존한다. A가 없는 파일을 일괄 다시 쓰지 않는다. v3는 알려진 typed schema만 허용하고 unknown version/record는 fail-closed다. 기존 raw-byte CAS·rename·directory fsync·candidate recovery(`queued_head/v2/commit.rs:17`)를 재사용하며 새 저장소를 만들지 않는다.
@@ -89,28 +130,33 @@ V2 struct의 unknown 필드 무시를 이용해 v2에 journal 필드만 덧붙�
 
 `SnapshotV2::holds_input`의 확장은 입력 수가 아니라 **owner가 정산할 debt**를 뜻한다. outbox-only boot 대상은 될 수 있어도 payload 재발행 대상은 아니다. `Owner::fenced`와 catch-up의 owed/delivered 구분은 이 차이를 유지해야 한다. 이 reader 세트는 같은 A-admission 조각에 착지한다.
 
-## 3. 모델 결과와 범위
+## 3. 모델 결과와 증명 범위
 
-기존 `HerdrSession.tla`의 같은 변수 공간에 별도 `AHintSpec`을 추가했다. HandoffSpec/B·C cfg와 상속 Pending 모델은 바꾸지 않았다. hosted lookup 값은 **Missing / Legacy / Retired**로 분리했다. A의 before는 r2가 제안한 정리+wake 뒤 현재 admission을 그대로 쓴 반례이며, main에 정리 기능이 이미 있다는 뜻은 아니다.
+기존 AHintSpec에 controller/실패 횟수/실패 단계/continuation을 추가했다. 기존 cfg 파일과 expected 행은 **바이트 동일**하게 두고 RetryFixed/NoController/NoBudget 세 cfg·세 행만 추가했다. B·C는 그대로 보류다. hosted lookup/물리 fence/boot discovery 계약도 유지했다.
 
-| cfg | 실제 TLC exit | 규칙 결과 |
-|---|---|---|
-| HerdrHintALegacyBefore | 13 | AProgress RED: observe→intent→recheck→unlink 양쪽→commit→outbox→wake→admit→wait 영구 stutter |
-| HerdrHintAMissingBefore | 0 | 같은 준비에서 Missing은 진행. Legacy 차이를 분리한 대조군 |
-| HerdrHintAFixed | 0 | 15 case, 270 distinct states, 6 invariants + AProgress GREEN |
-| HerdrHintANoFrontCheck | 12 | ANoStaleGrant RED: proof 뒤 front 변경을 무시한 grant |
-| HerdrHintANoOutboxDiscovery | 13 | AProgress RED: outbox-only boot 상태를 발견하지 못함 |
+| 새 cfg | plain TLC 실제 exit | 저장소 checker | 의미 |
+|---|---:|---|---|
+| HerdrHintARetryFixed | 0 | 2 runs, GREEN | partial/intent/receipt commit/boot transient + unlink/commit/boot permanent 7 case |
+| HerdrHintARetryNoController | 13 | 2 runs, AProgress RED | canonical unlink 성공 뒤 legacy unlink 오류에서 callback을 놓으면 새 사건 없이 멈춤 |
+| HerdrHintARetryNoBudget | 13 | 2 runs, AProgress RED | controller가 있어도 영구 실패를 무한 재시도하면 정산되지 않음 |
 
-저장소 검사기로 위 5 cfg를 실제 검사했으며 **5 cfg/11 TLC runs**, expected set 일치다. PROPERTY에는 실제 `WF_vars(AHintNext)`가 적용된다. 원자적으로 묶지 않은 단계는 intent/재검증/각 unlink/receipt/outbox/wake/admission/ack이며, partial unlink, unlink 뒤 commit 전 crash, commit 뒤 outbox 전 crash, front·epoch 변경, 정리 후 파일·row 교체, wake 재전달을 별도 행동으로 넣었다. 17개 positive reachability witness를 실제 state dump에서 확인했다.
+RetryFixed는 7 invariants + AProgress, 110 distinct states, depth 19다. PROPERTY에는 실제 WF_vars(AHintNext)를 적용한다. `ARecover`는 보유 controller 없이 enabled되지 않는다. counterexample은 실제 오류 뒤 continuation 소유를 제거한 것이며, 주기 sweep을 이미 구현한 것으로 가정하지 않는다. 최종 전체 의존 cfg 실행 결과와 positive witness는 보고서에 남긴다.
 
-AProgress는 정상 Missing/Legacy에서는 전달, 부적격·교체/취소 경계에서는 원문 보존+명시 통지, 역사만 남은 outbox에서는 ack로 A control이 끝남을 검사한다. 무한한 저장 장애·연속 epoch 변경·무한 신규 front 선점이 없고 controller/notice가 결국 실행된다는 fairness 가정이 있다. 단일 원문, 양 경로, crash·교체·부분 실패 각 1회, wake 재전달 1회를 bound로 삼는다.
+**증명은 pre-payload 정리/commit/boot 재관찰의 bounded continuation liveness로 한정한다.** 정상 회복은 같은 원문을 기존 downstream에 한 번 넘기는 경로, 예산 소진은 custody 보존+통지의 control 종료다. `raw=retained`는 모델의 보존 추상화이며 파일 publication이 영구 실패했을 때 실제 RetainedInput commit이 성공했다는 뜻이 아니다. 그 경우는 위 storage hold/독립 통지 경로로 구분한다.
 
-모델의 `ACreate/APrompt`는 성공한 기존 downstream의 **효과 수 추상화**다. 실제 Pending/Startup/Bound, create reply 유실, 소스·파일 내용의 실제 보존, 두 프로세스 flock 구현, OS unlink/fsync 원자성은 구현 시험과 기존 Pending/Herdr 모델에 맡긴다. 물리 path set은 모델의 단일 공유 fence로 추상화했으므로 key 충돌/alias 구현이 GREEN으로 증명된 것은 아니다. 기존 HerdrSession의 네 historical violation은 보존하며, B·C의 r2 GREEN을 A의 새 증거로 쓰지 않는다.
+기존 ANoDuplicateEffects가 GREEN이어도 **wake 재배송/효과 뒤 crash의 end-to-end 중복 0 증명으로 인용하지 않는다.** ARedeliver는 카운터만 늘리며 admission을 재호출하지 않고, ACrash는 grant/create/prompt/ack 단계를 포함하지 않는다. 현재 post-grant는 단선 성공 경로다. 이번에는 여기에 새 proof를 덧붙이지 않고, 주장 범위를 줄인다. 실제 중복 방지는 기존 drive/front claim/reservation 계약과 구현 수용시험에서 증명해야 한다. retry loop도 payload 함수를 다시 부르지 않는지 별도로 시험한다.
+
+부모/파일 bytes·flock·DB 유일성·Source 직렬화의 실제 구현, 다중 원문, 실제 Startup/Bound, publish 결과 불명확, prompt 뒤 ack 전 crash는 모델 범위 밖이다. 기존 Pending/owned-input 모델과 테스트를 대체하지 않는다. 시간 자체나 새로운 sleep/timer는 모델링하지 않으며, 기존 I/O가 결과를 반환하고 independent notice가 진행된다는 조건 아래의 liveness다. PG와 파일 저장소 모두 영구 불능인 상태를 GREEN notified로 세지 않는다.
 
 ## 4. A 시험 계획·착지 조각·크기
 
 | 시험/뮤턴트 | 검증할 실제 효과 |
 |---|---|
+| 일시 partial/commit 실패, 새 사건 없음 | 초기 drive/recover 호출 1회만 하고 새 입력·재시작·별도 wake를 막는다. canonical unlink 뒤 legacy unlink 1~2회 실패 또는 intent/receipt commit Before/AfterRename 실패를 주고 I/O 회복. 같은 callback이 완료하고 Startup/Bound·hold 해제, 원문/키 전송 1. 첫 오류에서 return하는 뮤턴트 RED |
+| 영구 실패·boot 실패 | 오류 3회 뒤 controller가 끝남, 다음 자동 시도 0. unlink 영구 실패와 queue publication 영구 실패를 나눠 raw bytes·candidate 보존·PG outbox 통지 1. boot 복구 1회 호출 안에서 transient 회복/소진 확인. PG unavailable을 통지 성공으로 표시하지 않음 |
+| 공개 reason 회귀 | 실제 Observed=Unknown/session_identity_unresolved + private hosted_active_or_unknown Legacy로 typed permit 성공. 같은 공개 reason인 다른 private leaf는 거절, general activity는 Unknown 유지. public reason 문자열 비교 뮤턴트 RED |
+| guard 운반·history pin | StreamingTurn Clone 후 CodexHerdrTurn 경계에서 guard take는 1회, double take 거절, clear_fresh 중첩 lock 0. 24시간 경과 tick(:78)·expire_binds(:618)에도 A debt 참조 history/ids 보존, ack 뒤 기존 만료 재개 |
+| effect 뒤 ack 전 crash·중복 wake | 실제 owner fixture에서 prompt 뒤 ack 전 crash→boot→동일 outbox 재관찰 및 admission 재호출. grant/reserve/native submit 각각 1. 이 시험을 TLC의 단선 효과 카운터로 대체하지 않음 |
 | Missing vs Found Legacy PG 회귀 | synthetic kept 원문만 사용. 같은 codex_tui hint·tmux Missing·registry 없음에서 각각 cleanup→wake→start→Startup/Bound→hold 해제, grant/create/prompt=1·skip=0. 일반 사람 메시지 성공으로 대체하지 않음 |
 | P1 RED→GREEN | 기존 reader 그대로면 Legacy만 두 번째 drive에서 Wait::Event, 새 좁은 proof로 실제 시작. Legacy proof 소비 제거 뮤턴트 RED |
 | 다른 row/owner/nonce | 행이 Pending/Bound/Retired로 변경, owner/alias/token 불일치, raw NULL 변경, registry 삽입 시 새 grant/삭제 0. 기존 Known Retired nonce 조건 회귀 유지 |
@@ -127,9 +173,17 @@ AProgress는 정상 Missing/Legacy에서는 전달, 부적격·교체/취소 경
 
 ### 파일별 prod 순증 배분
 
-상수는 `/home/adk/skills/agentdesk-issue-pipeline/scripts/pr_cap_prod.py:15`의 **FILES=30, NET=1500**이다. PLAN 정지선은 +1200이다. A 전체는 **32 distinct prod 파일/+1100**으로 추정한다. 파일 상한 때문에 단일 리뷰 조각으로 내지 않는다. A 내부를 **A-fence(12파일/+275)**와 **A-admission(21파일/+825)** 두 리뷰 조각으로 나눈다. 기능 PR/착지 묶음 구성은 코디네이터가 정하며, 조각마다 별도 PR을 열자는 제안은 아니다. `herdr_launch.rs` 한 파일이 양쪽에 연결되므로 distinct는 32다. 둘 다 +1200 전이며, B·C 구현을 포함하지 않는다. 시험·생성 목록은 prod 수치와 별도로 보고한다.
+상수는 `/home/adk/skills/agentdesk-issue-pipeline/scripts/pr_cap_prod.py:15`의 **FILES=30, NET=1500**, PLAN 정지선은 **각 리뷰 +1200**이다. 분할 경계는 A-fence→A-admission 그대로다.
 
-A-fence는 기존 publisher/cleanup이 즉시 쓰는 직렬화 변경만 착지한다. 사용처 없는 새 cleanup 기능이나 v3 journal을 먼저 넣지 않는다. A-admission은 A-fence 위에서 codec/모든 reader/cleanup/projection/wake를 함께 활성화한다. reader만 덜 착지하거나 새 A 호출자를 분리해 미검증 상태로 활성화하지 않는다. 예산은 예상 prod code 순증이며 구현 diff가 +1200 또는 파일 상한에 접근하면 새 범위 합의 전에 멈춘다.
+| 조각 | r3 | r4 | 변화 |
+|---|---|---|---|
+| A-fence | 12파일/+275 | **14파일/+299** | Claude direct·wrapper outer guard 2파일/+24 |
+| A-admission | 21파일/+825 | **26파일/+998** | controller·typed 소비 보강 +97, 실제 운반·일반 생성자·만료·영구 저장 오류 통지 5파일/+76 |
+| 전체 distinct | 32파일/+1100 | **39파일/+1297** | +7파일/+197, herdr_launch.rs 한 파일은 양 조각 공통 |
+
+전체 +1297를 하나의 구현/리뷰 조각으로 쓰지 않는다. 각 조각은 30파일/+1500 및 PLAN +1200 아래이고, A-admission의 PLAN 여유는 +202다. 넘을 전망이면 먼저 범위/분할을 다시 보고한다. 기능 PR/착지 묶음은 코디네이터가 정하며 조각별 PR 제안이 아니다. B·C는 포함하지 않는다. 새 deadline/held_watch 수정은 선택하지 않았으므로 그 파일 수를 숨겨 놓지 않았다.
+
+A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리뷰한다. A-admission은 codec/모든 reader/controller/cleanup/projection/wake를 함께 활성화한다. dormant cleanup을 먼저 넣지 않는다. 아래 수치는 prod code 순증 추정이며 시험·생성물은 별도 보고한다.
 
 | 조각 | 파일 | +순증 | 책임 |
 |---|---|---:|---|
@@ -146,32 +200,39 @@ A-fence는 기존 publisher/cleanup이 즉시 쓰는 직렬화 변경만 착지�
 | A-fence | `src/services/herdr_launch.rs` | 10 | Pending CAS부터 host/spawn 게시까지 fence 연결 |
 | A-fence | `src/services/herdr_launch/runtime_marker.rs` | 8 | 기존 nonce 검사 유지·같은 fence 사용 |
 | A-admission | `src/services/codex/legacy_hint.rs` | 184 | 부재 witness 수집·정리·partial unlink 재관찰 |
-| A-admission | `src/services/discord/router/message_handler/provider_dispatch/owner_input/legacy_hint.rs` | 149 | pre-admission·receipt 검증·wake/거절 연결 |
-| A-admission | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs` | 8 | 작은 prelude와 typed guard 전달만 |
-| A-admission | `src/services/discord/turn_presence/activity.rs` | 3 | 읽기 전용 Reading 접근 연결 |
+| A-admission | `src/services/discord/router/message_handler/provider_dispatch/owner_input/legacy_hint.rs` | 209 | 동일 callback controller의 최대 3회 재관찰·boot 재사용·결과 분기 |
+| A-admission | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs` | 13 | controller 호출·held/typed guard 운반 연결만 |
+| A-admission | `src/services/discord/turn_presence/activity.rs` | 3 | Reading 기존 접근 사용·sealed typed admission 결과 연결 |
 | A-admission | `src/services/discord/turn_presence/activity/unbound/live.rs` | 2 | 새 child 연결만 |
-| A-admission | `src/services/discord/turn_presence/activity/unbound/live/codex_marker_absence.rs` | 60 | same-row Legacy 전용 읽기 전용 admission projection |
+| A-admission | `src/services/discord/turn_presence/activity/unbound/live/codex_marker_absence.rs` | 68 | private snapshot/leaf를 typed LegacyAbsence로 변환·public reason 비교 금지 |
 | A-admission | `src/db/dispatched_sessions/hosted_execution.rs` | 40 | 물리 대상에 대응하는 owner 후보의 읽기 전용 유일성 조회 |
 | A-admission | `src/services/turn_orchestrator/queued_head/v2_types.rs` | 45 | v3 CleanupIntent/CleanReceipt/WakeOutbox typed 필드 |
 | A-admission | `src/services/turn_orchestrator/queued_head/compat.rs` | 40 | v2/v3 Owned read view·holds_input·fail-closed codec |
 | A-admission | `src/services/turn_orchestrator/queued_head.rs` | 4 | legacy meta guard가 v3도 owned로 거절 |
-| A-admission | `src/services/turn_orchestrator/queued_head/v2.rs` | 10 | child 연결·v2 유지/v3 승격 초기화 |
+| A-admission | `src/services/turn_orchestrator/queued_head/v2.rs` | 18 | A 상태·terminal/blocked memo·child 연결 |
 | A-admission | `src/services/turn_orchestrator/queued_head/v2/sources.rs` | 15 | restore·namespace·source fence |
 | A-admission | `src/services/turn_orchestrator/queued_head/v2/legacy_hint.rs` | 174 | intent/receipt/outbox/ack CAS·정산 |
 | A-admission | `src/services/turn_orchestrator/queued_head/v2/commit.rs` | 8 | codec version 검증·기존 fsync/recover 유지 |
 | A-admission | `src/services/turn_orchestrator/queued_head/v2/origin.rs` | 8 | outbox-only origin debt 조회 |
-| A-admission | `src/services/turn_orchestrator/queued_head/v2/source_admission.rs` | 8 | 미정산 receipt 참조의 prune 방지 연결 |
+| A-admission | `src/services/turn_orchestrator/queued_head/v2/source_admission.rs` | 16 | prune_binds/expire_binds의 A debt 참조 pin |
 | A-admission | `src/services/turn_orchestrator/pending_queue_persistence/queued_recovery.rs` | 35 | v3 boot discovery·owed/delivered catch-up fence |
 | A-admission | `src/services/turn_orchestrator/dispatch_reservation.rs` | 4 | shutdown legacy drain의 v3 보호 |
-| A-admission | `src/services/discord/queue_io/input_owner/recovery.rs` | 15 | boot에서 intent/receipt/outbox를 재관찰·ack |
+| A-admission | `src/services/discord/queue_io/input_owner/recovery.rs` | 23 | boot adopt/tick 실패도 동일 retained controller로 반환·결과 전달 |
 | A-admission | `src/services/codex/herdr_turn.rs` | 8 | A start의 fence guard를 fresh launch로 전달만 |
 | A-admission | `src/services/herdr_launch.rs` | 5 | A guard 보유 중 Pending/host/spawn 게시 후 해제 |
+| A-fence | `src/services/claude/tui_session_launch.rs` | 12 | cleanup 전부터 prepared/host/nonce 게시와 create/respawn까지 outer guard |
+| A-fence | `src/services/claude.rs` | 12 | wrapper cleanup 전부터 create·spawn marker까지 outer guard 운반만 |
+| A-admission | `src/services/discord/router/message_handler/provider_dispatch.rs` | 18 | StreamingTurn Clone carrier·CodexHerdrTurn 생성 시 guard를 한 번 take |
+| A-admission | `src/services/turn_orchestrator/queued_head/v2/retained.rs` | 16 | tick의 terminal history 직접 만료(:78)에 debt pin 적용 |
+| A-admission | `src/services/discord/router/message_handler/provider_dispatch/owner_input/storage_failure.rs` | 40 | 영구 publication 실패의 기존 PG outbox 명시 통지·원문 그대로 보존 |
+| A-admission | `src/services/discord/router/message_handler/headless_turn.rs` | 1 | StreamingTurn 일반 생성자에 A carrier None 연결만 |
+| A-admission | `src/services/discord/router/message_handler/intake_turn.rs` | 1 | StreamingTurn 일반 생성자에 A carrier None 연결만 |
 
 `codex.rs`(3020), `provider_dispatch/owner_input.rs`(1586), `activity/unbound/live.rs`(1000줄 초과), `tmux_common.rs` 등 giant에는 guard 전달/child 연결만 둔다. DB helper는 현재 838줄인 hosted execution의 기존 읽기 책임 안이다. algorithm·OS fence·durable 전이는 새 작은 child가 소유한다. wrapper/legacy의 기존 정리·kill 조건을 확장하지 않는다.
 
 ## 5. 진입점 전수표
 
-다음 핵심 표에 기계 수집 appendices를 합친 범위다. 좌표는 코드 정본 SHA 기준 `src/services/` 상대 경로다. `git grep`의 raw 결과를 Rust production token으로 걸러 test-only/comment를 구분했다. parser의 uncertain test boundary 2건(`rehydration.rs:385`, `session_backend.rs:86`)은 공개하고 해당 생산 호출 좌표를 유지했다. 표의 비 Codex reader는 기존 소비·삭제 권한 불변을 확인하기 위해 포함했다.
+다음 핵심 표에 기계 수집 appendices를 합친 범위다. 좌표는 코드 정본 SHA 기준 `src/services/` 상대 경로다. `git grep`의 raw 결과를 Rust production token으로 걸러 test-only/comment를 구분했다. runtime 표의 uncertain test boundary 2건(`rehydration.rs:385`, `session_backend.rs:86`), 추가 표의 2건(`runtime_bootstrap/o_writer_host.rs:37`, `policy_close.rs:106`)을 공개하고 해당 생산 호출 좌표를 유지했다. 총 4건은 cfg(test) 인자/필드/variant 경계로 수동 확인했다. 표의 비 Codex reader는 기존 소비·삭제 권한 불변을 확인하기 위해 포함했다.
 
 | 진입점 | A 계약 | 모델 대응 |
 |---|---|---|
@@ -191,6 +252,11 @@ A-fence는 기존 publisher/cleanup이 즉시 쓰는 직렬화 변경만 착지�
 | `turn_presence/activity/unbound.rs:199,319`, `live.rs:1084` | 기존 일반 판정 유지, 새 start 전용 projection은 fresh Reading에만 적용 | lookup 분리·AAdmission |
 | `input_owner/drive.rs:88`, `queued_head/v2.rs:398,411` | 중복 wake는 직렬 drive/front claim에 합류 | ARedeliver/ANoDuplicateEffects |
 | `input_owner/ingress.rs:445,458`, `owner_input.rs:250` | 새 원문 Accepted wake·prefer_person 보존. A receipt는 다른 front 권한이 아님 | AChange(front) |
+| `claude/tui_session_launch.rs:34,67`, `claude.rs:2594,2677,2707` | cleanup 앞에서 outer guard, 실제 create/respawn·spawn stamp까지 운반 | AFenceContender의 실제 구현 의무 |
+| `provider_dispatch.rs:52,613`, `owner_input.rs:439,1025`, `headless_turn.rs:1068`, `intake_turn.rs:2179`, `codex/herdr_turn.rs:65` | Clone carrier와 한번 take, 실제 생성 경계 누락 없이 전달 | AGrant/ACreate 연결·구현 시험 |
+| `queued_head/v2/retained.rs:78`, `source_admission.rs:618` | 직접 terminal/bind TTL에서 A debt pin | 모델 범위 밖 실제 TTL 회귀 |
+| `queue_io/input_owner/drive.rs:101,117`, `owner_input.rs:664,681` | 기존 awaited callback/boot future를 놓지 않고 bounded continuation | APartialUnlink/ARetryContinue/ARecover |
+| `held_watch.rs:64,88`, `retained.rs:46` | 이번 retry 원천으로 사용하지 않음, 기존 동작 유지 | 모델에 가짜 arm/deadline 없음 |
 | boot discovery·source fence·outbox-only reader | 위 v3 reader 표 전체. token namespace·owed/delivered 보존 | ABoot/ARecover/AAck |
 
 ### runtime / 실행 등록 생산 심볼 전체
@@ -304,13 +370,13 @@ A-fence는 기존 publisher/cleanup이 즉시 쓰는 직렬화 변경만 착지�
 | source/cursor/owner 증거 삭제 | A는 확인된 codex_tui runtime hint만 unlink. broad cleanup을 A에서 재사용하지 않음 |
 | lock을 문서로만 선언 | A-fence부터 모든 실제 mutation caller를 사용처로 연결하고 두 프로세스 alias 경쟁 시험 전에는 A-admission 활성화 금지 |
 | 기존 clear/reset kill 권한 증가 | 기존 file:line 조건을 유지하고 outer fence/Retry 연결만 변경. 새 end 판정·kill 호출 없음 |
-| 잘못된 0/PASS | 15 case/270 상태/17 reachability witness와 Legacy/NoFront/NoBoot 실제 RED. Rust/운영 acceptance는 미실행으로 명시 |
+| 잘못된 0/PASS | RetryFixed 7 case와 NoController/NoBudget 실제 RED. 효과 뒤 crash/재admission 중복 증명은 범위 밖으로 축소. Rust/운영 acceptance 미실행 |
 
 ## 증거 위치
 
-외부 설계 정본 사본: `/home/adk/adk/lane-runs/i8057/design-h-3.md`.
-이 leg 원시 로그: `/home/adk/adk/lane-runs/i8057/logs/h3/`.
-TLC focused checker: `tlc-focused.log`; 실제 exit/state dump: `raw-final/`; positive witness: `model-evidence-final.json`.
+외부 설계 정본 사본: `/home/adk/adk/lane-runs/i8057/design-h-4.md`.
+이 leg 원시 로그: `/home/adk/adk/lane-runs/i8057/logs/h4/`. r3의 생산 전수표 raw는 동일 코드 SHA의 logs/h3에 보존한다.
+TLC focused checker: `tlc-focused-final.log`(3 cfg/6 runs); 실제 exit/state dump: `raw/`; positive witness: `model-evidence.json`.
 production inventory: `entrypoints.json`(122 refs), `extra-entrypoints.json`(65 refs), 각 raw grep와 parser diagnostics.
 이 187개는 서로 겹치는 reference 집합이므로 distinct entrypoint 수로 합산하지 않는다.
 설계/모델만 커밋하며 cargo·PG·clippy·prod static prepush는 실행하지 않는다. 최종 보고서에 실제 커밋 SHA·read-back·의존 cfg checker와 크기 출력을 남긴다.

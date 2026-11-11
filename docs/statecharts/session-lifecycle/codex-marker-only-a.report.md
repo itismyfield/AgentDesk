@@ -1,30 +1,28 @@
-# Codex marker-only A design r3
+# Codex marker-only A design r4
 
-Code SHA: `289f41b1d0f48fab0dc426e652308eced4326fce`; model input: `dfba87a0ae2a576507f0863e81cfb8f1ead8bfdb`. Production code is unchanged. The committed [design](codex-marker-only-a.design.md) specifies A only. Exit and HandoffWaiting B/C remain deferred; their old cfgs are untouched.
+Code SHA: `289f41b1d0f48fab0dc426e652308eced4326fce`; model/document input: `89a8ea63c4b86c79247f1d68118815b1e3ce7a3f`. Production code is unchanged. [Design](codex-marker-only-a.design.md) remains A only; B/C are deferred.
 
-`AHintSpec` extends the existing HerdrSession module using its existing handoff variable. It preserves the original session/Pending specifications and expected violations. Hosted lookup is explicitly Missing / Legacy / Retired. A-before is r2's proposed cleanup plus main's unchanged admission, rather than an assertion that main already performs that cleanup.
+The existing AHintSpec now distinguishes a live retained controller from a dropped callback. A failing pre-payload step consumes one of three failures and releases physical/Source guards. ARetryContinue needs the existing callback's controller; ARecover also needs it. The existing Drive awaits that callback at drive.rs:101. There is no new wake, timer, periodic sweep or input event in the retry path. Boot observation uses the same bounded controller.
 
-| cfg | actual exit | broken rule |
+| new cfg | actual plain TLC exit | checker result |
 |---|---:|---|
-| HerdrHintALegacyBefore | 13 | AProgress |
-| HerdrHintAMissingBefore | 0 | none |
-| HerdrHintAFixed | 0 | none |
-| HerdrHintANoFrontCheck | 12 | ANoStaleGrant |
-| HerdrHintANoOutboxDiscovery | 13 | AProgress |
+| HerdrHintARetryFixed | 0 | GREEN, 2 runs |
+| HerdrHintARetryNoController | 13 | AProgress RED, 2 runs |
+| HerdrHintARetryNoBudget | 13 | AProgress RED, 2 runs |
 
-The focused repository checker matches all five expected sets in 11 TLC runs. Fixed checks 6 invariants plus a real liveness PROPERTY with applied `WF_vars(AHintNext)`: 15 initial cases, 297 generated states, 270 distinct states, depth 18. State-dump checks confirm 17 positive witnesses, including both successful row kinds, partial unlink recovery, both commit crash gaps, a completed restart, stale front/epoch refusal, post-cleanup file/row replacement refusal, wake redelivery with one prompt, fence contention, and outbox-only boot acknowledgement. NoFrontCheck is a safety mutant; NoOutboxDiscovery is a progress mutant. The raw Legacy trace ends in admit→wait→stutter after the hint is gone and a wake was delivered.
+RetryFixed: 7 initial cases, 120 generated / 110 distinct states, depth 19. Seven invariants and AProgress with applied WF_vars(AHintNext) pass. Transient cases cover partial unlink, intent commit, receipt commit and boot reobservation. Permanent unlink/commit/boot failures exhaust three failures and terminate through preserved custody plus notice. NoController freezes after canonical unlink succeeded and legacy unlink failed, before receipt/outbox exists. NoBudget retains the future but loops forever on a permanent failure. Both REDs are semantic liveness counterexamples, not parser errors.
 
-The model separates intent commit, release/recheck, canonical unlink, legacy unlink, cleanup receipt commit, outbox creation, wake, fresh read-only admission, exact-front grant, create/prompt effects and ack. A crash after unlink cannot erase the earlier intent. A committed receipt without an outbox remains discoverable. A physical wake may be delivered twice; logical grant/create/prompt each stay at most one. Unknown ownership/probe failure yields zero hint deletions. Changed eligibility preserves the original and is explicitly notified; it is not a generic launch failure.
+The A recovery source is now explicit, rather than making ARecover unconditionally available after an error. The before cfgs and all previous expected.tsv rows remain byte-identical. The shared model is corrected, so its old configs are rerun with their same expected sets; the old graph counts are historical, not this head's results. Eleven positive state witnesses confirm pre-receipt continuation without an extra wake/restart and bounded notified termination; full dependency selection is in the external report.
 
-Bounds: one original, two paths, one crash, one partial-unlink error, one front/epoch/file/row disturbance, one wake redelivery. Durable storage/notification/controller scheduling eventually succeeds. There is no promise under permanent storage failure, infinite preemption or uncooperative writers. Known Retired is an A refusal control, not a replacement for the existing stricter Herdr nonce cleanup path.
+Proof scope is deliberately narrower than r3: this verifies bounded pre-payload continuation/termination and preserves the original on modeled failure. ANoDuplicateEffects remains a single-pass invariant. ARedeliver only increments a counter, and ACrash excludes grant/create/prompt/ack, so neither establishes end-to-end exactly-once behavior under wake replay or a crash after a prompt. Those scenarios require actual owner/front-claim/reservation/Startup tests. No stronger deduplication claim is made from the linear post-grant path.
 
-The physical union of per-entry locks, DB identity uniqueness, actual Source/OS lock ordering, real unlink/fsync behavior and full boot/source-dedup paths are implementation obligations, not results of this abstract model. `ACreate/APrompt` count the successful downstream effects; they do not replace the existing Pending/Startup/owned-input models or actual PG tests. No A action sends `/exit` or closes/kills a live execution. Existing B/C GREEN does not establish these A properties.
+ANotice abstracts a control outcome with preserved custody and an available independent notice sink. It is not proof that a RetainedInput commit succeeds when the queue filesystem is permanently unavailable. The design distinguishes retained commit from unchanged bytes/storage hold plus existing PG-outbox notice. If that independent sink is permanently unavailable too, the implementation must not report notified success. Actual file contents, fsync uncertainty, typed public/internal activity observations, physical lock identity, TTL pins, cross-process mutation and full Pending/Bound recovery remain implementation obligations.
 
-Reproduce with Java 21 and TLC 1.7.4:
+Reproduce with Java 21 / TLC 1.7.4:
 
 ```sh
 export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/usr/bin/java
-python3 scripts/ci/statecharts_tlc.py --base dfba87a0ae2a576507f0863e81cfb8f1ead8bfdb --head HEAD --jobs 2
+python3 scripts/ci/statecharts_tlc.py --base 89a8ea63c4b86c79247f1d68118815b1e3ce7a3f --head HEAD --jobs 2
 ```
 
-The Mermaid chart is a manually maintained action summary. Raw logs and state dumps are in `/home/adk/adk/lane-runs/i8057/logs/h3/`; `model-evidence-final.json` checks positive reachability. Full dependency selection and its actual head SHA are recorded in the external report. The design allocates A as A-fence (12 prod files/+275) then A-admission (21/+825), 32 distinct/+1100 total; neither includes B/C.
+The Mermaid file is a manually maintained summary. Raw logs/state dumps: `/home/adk/adk/lane-runs/i8057/logs/h4/`. A-fence estimate is 14 prod files/+299; A-admission is 26/+998. The 39 distinct/+1297 total is not one review slice.

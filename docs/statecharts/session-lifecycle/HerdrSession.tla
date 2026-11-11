@@ -399,14 +399,21 @@ HandoffProgress == <> (handoff.queue = "delivered" \/ (handoff.queue = "refused"
 \* Marker-only cleanup uses the existing handoff variable, independently of the
 \* deferred exit/journal specification. Lookup kind is evidence, not a Boolean.
 AInitial(c) ==
-    [case |-> c, phase |-> IF c = "outbox_only" THEN "boot" ELSE "observe",
+    [case |-> c, phase |-> IF c \in {"outbox_only", "boot_transient", "boot_permanent"} THEN "boot" ELSE "observe",
      lookup |-> IF c = "missing" THEN "Missing" ELSE IF c = "retired" THEN "Retired" ELSE "Legacy",
      owner |-> c # "owner_unknown", probe |-> c # "probe_error",
      canonical |-> c # "outbox_only", alias |-> c # "outbox_only",
      snapshot |-> TRUE, front |-> TRUE, epoch |-> TRUE, fence |-> FALSE,
-     intent |-> FALSE, committed |-> c = "outbox_only",
+     intent |-> c \in {"boot_transient", "boot_permanent"}, committed |-> c = "outbox_only",
      outbox |-> c = "outbox_only", acknowledged |-> FALSE,
-     up |-> c # "outbox_only", disturbed |-> FALSE, faulted |-> FALSE,
+     up |-> c \notin {"outbox_only", "boot_transient", "boot_permanent"}, disturbed |-> FALSE, faulted |-> FALSE,
+     controller |-> c \notin {"outbox_only", "boot_transient", "boot_permanent"}, failures |-> 0, resume |-> "recover",
+     failAt |-> IF c \in {"partial", "unlink_permanent"} THEN "unlink_alias"
+               ELSE IF c \in {"commit_transient", "commit_permanent"} THEN "commit"
+               ELSE IF c = "intent_transient" THEN "intent"
+               ELSE IF c \in {"boot_transient", "boot_permanent"} THEN "recover" ELSE "none",
+     failLeft |-> IF c \in {"unlink_permanent", "commit_permanent", "boot_permanent"} THEN 3
+                 ELSE IF c \in {"partial", "commit_transient", "intent_transient", "boot_transient"} THEN 1 ELSE 0,
      restarted |-> FALSE, contested |-> FALSE, proof |-> FALSE,
      raw |-> IF c = "outbox_only" THEN "settled" ELSE "queued",
      notified |-> FALSE, deletes |-> 0, unsafeDeletes |-> 0, wakes |-> 0,
@@ -424,8 +431,9 @@ AObserve ==
          !.fence = AValid]
 \* The queue intent is committed before the first unlink. Unlink is idempotent
 \* only for this intent's recorded paths and exact unchanged witnesses.
+AIoReady == handoff.phase # handoff.failAt \/ handoff.failLeft = 0
 AIntent ==
-    /\ handoff.phase = "intent" /\ handoff.up /\ handoff.fence
+    /\ handoff.phase = "intent" /\ handoff.up /\ handoff.fence /\ AIoReady
     /\ handoff' = [handoff EXCEPT !.intent = TRUE, !.fence = FALSE, !.phase = "recheck"]
 ARecheck ==
     /\ handoff.up /\ handoff.phase = "recheck" /\ handoff.intent
@@ -437,16 +445,27 @@ AUnlinkCanonical ==
          !.deletes = @ + (IF handoff.canonical THEN 1 ELSE 0),
          !.unsafeDeletes = @ + (IF AValid /\ handoff.fence THEN 0 ELSE 1), !.phase = "unlink_alias"]
 AUnlinkAlias ==
-    /\ handoff.up /\ handoff.phase = "unlink_alias" /\ handoff.fence /\ AValid
+    /\ handoff.up /\ handoff.phase = "unlink_alias" /\ handoff.fence /\ AValid /\ AIoReady
     /\ handoff' = [handoff EXCEPT !.alias = FALSE,
          !.deletes = @ + (IF handoff.alias THEN 1 ELSE 0),
          !.unsafeDeletes = @ + (IF AValid /\ handoff.fence THEN 0 ELSE 1), !.phase = "commit"]
+\* A failing step retains its existing callback future. Losing that controller
+\* is the mutant; no future wake or fresh input is assumed for a continuation.
 APartialUnlink ==
-    /\ handoff.up /\ handoff.case = "partial" /\ ~handoff.faulted
-    /\ handoff.phase = "unlink_alias"
-    /\ handoff' = [handoff EXCEPT !.faulted = TRUE, !.fence = FALSE, !.phase = "recover"]
+    /\ handoff.up /\ handoff.controller /\ handoff.phase = handoff.failAt /\ handoff.failLeft > 0
+    /\ handoff' = [handoff EXCEPT !.faulted = TRUE, !.fence = FALSE,
+         !.failLeft = IF HandoffPolicy = "a-no-retry-budget" THEN @ ELSE @ - 1,
+         !.failures = IF @ < 3 THEN @ + 1 ELSE @,
+         !.resume = IF handoff.phase = "intent" THEN "observe" ELSE "recover",
+         !.controller = HandoffPolicy # "a-no-retry-controller",
+         !.phase = IF handoff.failures = 2 /\ HandoffPolicy # "a-no-retry-budget"
+                   THEN "notice" ELSE "retry_wait"]
+ARetryContinue ==
+    /\ handoff.up /\ handoff.controller /\ handoff.phase = "retry_wait"
+    /\ (handoff.failures < 3 \/ HandoffPolicy = "a-no-retry-budget")
+    /\ handoff' = [handoff EXCEPT !.phase = handoff.resume]
 ACommit ==
-    /\ handoff.up /\ handoff.phase = "commit" /\ AValid
+    /\ handoff.up /\ handoff.phase = "commit" /\ AValid /\ AIoReady
     /\ ~handoff.canonical /\ ~handoff.alias
     /\ handoff' = [handoff EXCEPT !.committed = TRUE, !.fence = FALSE, !.phase = "outbox"]
 \* Receipt commit and outbox creation are separate recoverable steps. The receipt
@@ -482,7 +501,7 @@ APrompt ==
 AAck ==
     /\ handoff.up /\ handoff.phase = "ack"
     /\ handoff' = [handoff EXCEPT !.acknowledged = TRUE, !.outbox = FALSE,
-         !.intent = FALSE, !.phase = "done"]
+         !.intent = FALSE, !.controller = FALSE, !.phase = "done"]
 ARedeliver ==
     /\ handoff.up /\ handoff.case = "redelivery" /\ handoff.wakes = 1
     /\ handoff.phase \in {"admit", "grant", "create", "prompt", "ack", "done"}
@@ -491,14 +510,14 @@ ACrash ==
     /\ handoff.up /\ handoff.case = "crash" /\ ~handoff.restarted
     /\ handoff.phase \in {"commit", "outbox", "wake", "admit"}
     /\ handoff' = [handoff EXCEPT !.up = FALSE, !.restarted = TRUE,
-         !.fence = FALSE, !.proof = FALSE, !.phase = "boot"]
+         !.fence = FALSE, !.proof = FALSE, !.controller = FALSE, !.phase = "boot"]
 ABoot ==
     /\ ~handoff.up /\ handoff.phase = "boot"
     /\ (IF HandoffPolicy = "a-no-outbox-discovery" THEN handoff.raw = "queued" ELSE AHoldsInput)
     /\ handoff' = [handoff EXCEPT !.up = TRUE,
-         !.phase = IF handoff.committed THEN "outbox" ELSE "recover"]
+         !.controller = TRUE, !.phase = IF handoff.committed THEN "outbox" ELSE "recover"]
 ARecover ==
-    /\ handoff.up /\ handoff.phase = "recover" /\ handoff.intent
+    /\ handoff.up /\ handoff.phase = "recover" /\ handoff.intent /\ handoff.controller /\ AIoReady
     /\ handoff' = [handoff EXCEPT !.fence = AValid,
          !.phase = IF AValid THEN "unlink_canonical" ELSE "notice"]
 \* Queue-front and owner-epoch changes invalidate the receipt's consumer. A
@@ -523,11 +542,11 @@ AStale ==
 ANotice ==
     /\ handoff.up /\ handoff.phase = "notice"
     /\ handoff' = [handoff EXCEPT !.raw = "retained", !.notified = TRUE,
-         !.outbox = FALSE, !.intent = FALSE, !.acknowledged = TRUE, !.phase = "done"]
+         !.outbox = FALSE, !.intent = FALSE, !.acknowledged = TRUE, !.controller = FALSE, !.phase = "done"]
 ASteps == AObserve \/ AIntent \/ ARecheck \/ AUnlinkCanonical \/ AUnlinkAlias \/ APartialUnlink
        \/ ACommit \/ AOutbox \/ AWake \/ AAdmission \/ AGrant \/ ACreate \/ APrompt
        \/ AAck \/ ARedeliver \/ ACrash \/ ABoot \/ ARecover \/ AChange
-       \/ AFenceContender \/ AStale \/ ANotice
+       \/ AFenceContender \/ AStale \/ ANotice \/ ARetryContinue
 AHintNext == ASteps /\ UNCHANGED sessionVars
 AHintSpec == SessionInit /\ AInit /\ [][AHintNext]_vars /\ WF_vars(AHintNext)
 ANoForeignMutation ==
@@ -542,6 +561,7 @@ ANoSilentLoss ==
     /\ (handoff.raw = "retained" => handoff.notified)
     /\ (handoff.phase = "done" => handoff.raw # "queued")
 ANoEarlyUnlink == handoff.deletes > 0 => handoff.intent \/ handoff.acknowledged
+ARetryBounded == handoff.failures <= 3
 AProgress == <> (handoff.phase = "done")
 
 ====
