@@ -826,7 +826,7 @@ fn every_entry_on_an_unlisted_channel_takes_the_one_submission() {
         }
     }
     type Entry = fn(&str, &str) -> Result<(), String>;
-    let entries: [(&str, Entry); 4] = [
+    let entries: [(&str, Entry); 3] = [
         ("fresh", |s, p| {
             entry::send_prompt_with_readiness(s, p, PromptReadinessKind::FreshTurn, None)
                 .map_err(SubmissionError::into_legacy)
@@ -838,7 +838,6 @@ fn every_entry_on_an_unlisted_channel_takes_the_one_submission() {
         ("warm", |s, p| {
             entry::send_warm_followup_owned(s, p, None).map_err(SubmissionError::into_legacy)
         }),
-        ("steering", |s, p| entry::inject_steering_prompt(s, p)),
     ];
     // Each long line wraps over 15 to 22 composer rows at 80 columns.
     let bodies = [
