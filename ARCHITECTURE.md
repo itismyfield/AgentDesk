@@ -374,6 +374,8 @@ src/
 │   ├── test_support.rs
 │   └── types.rs
 ├── domain/
+│   ├── atomic_write/
+│   │   └── tests.rs
 │   ├── message_split/
 │   │   └── semantic_boundaries.rs
 │   ├── provider/
@@ -388,6 +390,8 @@ src/
 │   │   └── value_methods.rs
 │   ├── session_identity/
 │   │   └── naming.rs
+│   ├── atomic_write.rs
+│   ├── auto_queue_log.rs
 │   ├── bot_role.rs
 │   ├── file_sync.rs
 │   ├── human_input.rs
@@ -480,6 +484,9 @@ src/
 │   ├── terminal_cleanup.rs
 │   ├── transition_cleanup.rs
 │   └── transition_core.rs
+├── logging/
+│   ├── auto_queue.rs
+│   └── auto_queue_tests.rs
 ├── runtime_layout/
 │   ├── config_merge.rs
 │   ├── legacy_migration.rs
@@ -3277,6 +3284,7 @@ src/
 │   │   ├── restart_report.rs
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
+│   │   ├── runtime_store_atomic_write_tests.rs
 │   │   ├── runtime_store_checkpoint_lock_tests.rs
 │   │   ├── scheduled_turn.rs
 │   │   ├── scheduled_turn_tests.rs
@@ -4480,6 +4488,7 @@ src/
 │   ├── kanban_cards_snapshot_tests.rs
 │   ├── manual_steer.rs
 │   ├── mcp_config.rs
+│   ├── mcp_config_atomic_write_tests.rs
 │   ├── mcp_config_snapshot_tests.rs
 │   ├── message_outbox.rs
 │   ├── message_outbox_circuit_authority.rs
@@ -4624,6 +4633,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
+| `src/logging/` | Shared tracing adapters and tests for structured correlation fields. |
 | `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
 | `src/services/` | Core runtime services: provider runners, Discord bot, queueing, memory, and platform helpers. |
