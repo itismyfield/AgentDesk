@@ -388,6 +388,8 @@ src/
 │   │   ├── public_catalog.rs
 │   │   ├── tests.rs
 │   │   └── value_methods.rs
+│   ├── provider_auth_profile/
+│   │   └── inputs.rs
 │   ├── session_identity/
 │   │   └── naming.rs
 │   ├── atomic_write.rs
@@ -402,6 +404,7 @@ src/
 │   ├── mod.rs
 │   ├── process_incarnation.rs
 │   ├── provider.rs
+│   ├── provider_auth_profile.rs
 │   ├── session_identity.rs
 │   └── tool_text.rs
 ├── engine/
