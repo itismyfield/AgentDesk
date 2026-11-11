@@ -1,5 +1,6 @@
 //! Immutable admission provenance and an owner lock held by the actual output request.
-use super::{OwnerIdentity, custody};
+use super::OwnerIdentity;
+use crate::db::channel_custody_lock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -92,7 +93,7 @@ impl Scope {
             }
         }
         let mut tx = begin(&self.pool).await?;
-        custody::lock(&mut tx, &id).await?;
+        channel_custody_lock::lock(&mut tx, &id).await?;
         match artifact {
             Some(artifact) => {
                 let o = &artifact.origin;
@@ -213,7 +214,7 @@ pub(crate) async fn acquire_unstamped(
     .map(|provider| OwnerIdentity::new(provider.as_str(), channel));
     identities.sort_unstable_by_key(OwnerIdentity::advisory_key);
     for identity in &identities {
-        custody::lock(&mut tx, identity).await?;
+        channel_custody_lock::lock(&mut tx, identity).await?;
     }
     let managed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE channel_id=$1 AND routing_receipt_id IS NOT NULL)")
         .bind(channel).fetch_one(&mut *tx).await?;

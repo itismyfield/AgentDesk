@@ -75,3 +75,45 @@ fn execution_requirements_are_strict_and_share_dispatch_matching() {
             .is_empty()
     );
 }
+
+#[test]
+fn domain_kernels_leave_readiness_time_and_forwarding_to_live_policy() {
+    use crate::domain::cluster_policy::{AgentExecutionNode, supports_attachment_transfer};
+
+    let input = json!({"os":["linux"],"arch":["x86_64"],"backends":["process"]});
+    let parsed =
+        crate::domain::cluster_policy::ExecutionRequirements::parse(input.clone()).unwrap();
+    let policy = AgentExecutionNode {
+        default_node_id: Some("worker-1".into()),
+    };
+    let mut node = ready_node("worker-1", "linux");
+    node["capabilities"]["intake_worker"]["features"] =
+        json!(["execution_requirements_v1", "attachment_bundle_v1"]);
+    node["capabilities"]["execution_readiness"]["observed_at_ms"] = json!(1000);
+    node["capabilities"]["execution_readiness"]["expires_at_ms"] = json!(2000);
+    assert!(parsed.explain(&node, 1000).is_empty());
+    assert!(
+        parsed
+            .explain(&node, 2000)
+            .contains(&"execution_evidence_stale".into())
+    );
+    assert!(supports_attachment_transfer(&node));
+    node["status"] = json!("offline");
+    node["capabilities"]["execution_readiness"]["expires_at_ms"] = json!(0);
+    assert!(parsed.explain(&node, 1000).contains(&"node_offline".into()));
+    assert!(supports_attachment_transfer(&node));
+    assert_eq!(ExecutionRequirements::parse(input).unwrap(), parsed);
+    assert!(policy.validate().is_ok());
+
+    let remote_id = format!("policy-boundary-{}", uuid::Uuid::new_v4());
+    let mut remote = ready_node(&remote_id, "linux");
+    remote["capabilities"]["execution_readiness_version"] = json!(1);
+    remote["capabilities"]["intake_worker"]["features"] =
+        json!(["execution_requirements_v1", "attachment_bundle_v1"]);
+    assert!(supports_attachment_transfer(&remote));
+    assert!(parsed.intake_reasons(&remote).is_empty());
+    let observed = super::super::readiness::evaluate_declared(&remote, "claude", "default");
+    assert!(!observed.eligible);
+    assert!(observed.reasons.contains(&"forwarding_not_probed".into()));
+    assert!(supports_attachment_transfer(&remote));
+}

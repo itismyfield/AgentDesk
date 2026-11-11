@@ -42,7 +42,10 @@ impl Owner {
                 runtime_store::AtomicWriteContext::new("queued_input_v2"),
             )
             .and_then(|status| {
-                if status != runtime_store::durable_publish::FlushStatus::Flushed {
+                if matches!(
+                    status,
+                    runtime_store::durable_publish::FlushStatus::SyncFailed { .. }
+                ) {
                     sync_unconfirmed = true;
                     return Err("directory sync unconfirmed".into());
                 }
@@ -93,7 +96,10 @@ impl Owner {
                 &self.path,
                 runtime_store::AtomicWriteContext::new("queued_input_v2"),
             );
-            if status != runtime_store::durable_publish::FlushStatus::Flushed {
+            if matches!(
+                status,
+                runtime_store::durable_publish::FlushStatus::SyncFailed { .. }
+            ) {
                 return Err("candidate directory sync unavailable".into());
             }
             let (bytes, snapshot) = self.pending.take().ok_or("candidate disappeared")?;

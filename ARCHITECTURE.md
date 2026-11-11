@@ -317,6 +317,7 @@ src/
 │   ├── calendar_sync.rs
 │   ├── campaigns.rs
 │   ├── cancel_tombstones.rs
+│   ├── channel_custody_lock.rs
 │   ├── channel_home_preferences.rs
 │   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
@@ -378,6 +379,12 @@ src/
 │   │   └── tests.rs
 │   ├── message_split/
 │   │   └── semantic_boundaries.rs
+│   ├── outbound/
+│   │   ├── ids.rs
+│   │   ├── key.rs
+│   │   ├── policy.rs
+│   │   ├── port.rs
+│   │   └── result.rs
 │   ├── provider/
 │   │   ├── catalog/
 │   │   │   └── rows.rs
@@ -394,7 +401,9 @@ src/
 │   │   └── naming.rs
 │   ├── atomic_write.rs
 │   ├── auto_queue_log.rs
+│   ├── automation_contract.rs
 │   ├── bot_role.rs
+│   ├── cluster_policy.rs
 │   ├── file_sync.rs
 │   ├── host_observation.rs
 │   ├── human_input.rs
@@ -403,6 +412,7 @@ src/
 │   ├── memory.rs
 │   ├── message_split.rs
 │   ├── mod.rs
+│   ├── outbound.rs
 │   ├── process_incarnation.rs
 │   ├── provider.rs
 │   ├── provider_auth_profile.rs

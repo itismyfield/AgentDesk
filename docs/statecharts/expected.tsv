@@ -285,3 +285,11 @@ tui-o-writer/WriterWakeI8055Design.cfg	WriterWake	-	-
 tui-o-writer/WriterWakeI8055NoReadyWake.cfg	WriterWake	-	BootHeldEventuallyExecutes
 tui-o-writer/WriterWakeI8055RouteCurrent.cfg	WriterWake	BootRouteNoBlockedSelfWake	-
 tui-o-writer/WriterWakeI8055RouteDesign.cfg	WriterWake	-	-
+outbound-port/OutboundPortAfter.cfg	OutboundPort	-	-
+outbound-port/OutboundPortAfterInProcess.cfg	OutboundPort	-	-
+outbound-port/OutboundPortAfterNoNonceAmbiguous.cfg	OutboundPort	NoDuplicatePost	-
+outbound-port/OutboundPortAfterNoNonceRestart.cfg	OutboundPort	NoDuplicatePost	-
+outbound-port/OutboundPortBefore.cfg	OutboundPort	-	-
+outbound-port/OutboundPortLossyKey.cfg	OutboundPort	NoSilentLoss,NoSuccessWithoutReceipt	-
+outbound-port/OutboundPortNoReserve.cfg	OutboundPort	NoDuplicatePost	-
+outbound-port/OutboundPortRecordBeforePost.cfg	OutboundPort	NoSilentLoss,NoSuccessWithoutReceipt	-

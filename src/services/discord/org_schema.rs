@@ -128,13 +128,10 @@ fn load_org_schema_for_auth() -> Result<Option<OrgSchema>, String> {
 #[cfg(test)]
 #[path = "org_schema/auth_selection_tests.rs"]
 mod auth_selection_tests;
-pub(crate) use crate::domain::provider_auth_profile::ProfileBinding;
 #[cfg(test)]
 use crate::services::provider_auth_profile::queries::list_profile_bindings_from_schema;
-pub(crate) use crate::services::provider_auth_profile::queries::{
-    list_profile_bindings, provider_auth_catalog, provider_auth_fallback_policies,
-    provider_auth_primary_profiles,
-};
+#[cfg(test)]
+pub(crate) use crate::services::provider_auth_profile::queries::provider_auth_catalog;
 
 pub(crate) fn parse_org_schema(content: &str) -> Result<OrgSchema, String> {
     let schema: OrgSchema =
