@@ -7,10 +7,6 @@ use crate::services::provider_auth_profile::repository::document::{
     OrgChannelsConfig, load_org_document,
 };
 
-pub(crate) use crate::services::provider_auth_profile::repository::{
-    append_provider_auth_profile, remove_provider_auth_profile, set_agent_auth_profile,
-    set_channel_auth_profile, set_provider_primary_profile,
-};
 #[cfg(test)]
 pub(crate) use crate::services::provider_auth_profile::repository::{
     append_provider_auth_profile_at, remove_provider_auth_profile_at, set_agent_auth_profile_at,
