@@ -54,6 +54,7 @@ fn restart_drain_all_skips_receipts_only_v2_after_marker_only_mailbox_creation()
                 &ProviderKind::Claude,
                 TOKEN
             )
+            .ready
             .is_empty()
         );
         for channel in channels {

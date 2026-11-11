@@ -162,7 +162,7 @@ fn v2_boot_recovery_uses_shared_retained_ownership_cases() {
         );
         expected.push((channel, busy, case, path, bytes));
     }
-    let adopted = persistence::v2_channels(&ctx.provider, &ctx.token_hash);
+    let adopted = persistence::v2_channels(&ctx.provider, &ctx.token_hash).ready;
     let legacy = persistence::load_pending_queues_checked(&ctx.provider, &ctx.token_hash);
     assert!(legacy.queues.is_empty());
     for (channel, busy, case, path, bytes) in expected {

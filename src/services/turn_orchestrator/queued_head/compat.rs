@@ -28,6 +28,7 @@ impl SnapshotV2 {
             BindAt::Opaque => true,
         };
         !self.items.is_empty()
+            || self.has_control_debt()
             || !self.owed_drop_receipts.is_empty()
             || self.head_injection.is_some()
             || (self.retained_inputs.iter()).any(|entry| entry.owed_to_owner())
@@ -37,8 +38,11 @@ impl SnapshotV2 {
 
 pub(crate) fn inspect(content: &str) -> Result<SnapshotRead, String> {
     let value: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
-    if value.get("version").and_then(serde_json::Value::as_u64) == Some(2) {
-        let snapshot = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    if matches!(
+        value.get("version").and_then(serde_json::Value::as_u64),
+        Some(2 | 3)
+    ) {
+        let snapshot = super::v2::a_read_view::decode(value)?;
         return Ok(SnapshotRead::ReadOnlyV2(Box::new(snapshot)));
     }
     let (items, meta) = parse_snapshot(content)?;

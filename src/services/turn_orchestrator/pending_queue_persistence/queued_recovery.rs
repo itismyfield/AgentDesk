@@ -11,11 +11,19 @@ use std::io;
 #[path = "queued_recovery_tests.rs"]
 mod tests;
 
+#[cfg(unix)]
+#[path = "owned_recovery_discovery.rs"]
+mod discovery;
+#[cfg(unix)]
+pub(crate) use discovery::{OwnedRecoveryDiscovery, OwnedRecoveryFailure};
+
 #[derive(Default)]
 pub(crate) struct SnapshotCatalog {
     pub(crate) snapshots: HashMap<ChannelId, SnapshotRead>,
     pub(crate) quarantined: Vec<(ChannelId, String)>,
     pub(crate) scan_errors: Vec<String>,
+    #[cfg(unix)]
+    pub(crate) failed: Vec<OwnedRecoveryFailure>,
 }
 
 pub(crate) fn load_pending_queues_checked(
@@ -84,18 +92,15 @@ pub(crate) fn load_pending_queues_checked(
 /// Channels whose V2 queue file still holds an input, for the boot recovery that re-adopts them.
 /// An input-free file stays on disk untouched, and the channel's next input adopts it on demand.
 #[cfg(unix)]
-pub(crate) fn v2_channels(provider: &ProviderKind, token_hash: &str) -> Vec<ChannelId> {
-    let snapshots = read_catalog(provider, token_hash).snapshots.into_iter();
-    // Receipts and the admission sequence are history the untouched file keeps for that owner.
-    let v2 = snapshots.filter(|(_, snapshot)| snapshot.v2_holds_input());
-    v2.map(|(channel, _)| channel).collect()
+pub(crate) fn v2_channels(provider: &ProviderKind, token_hash: &str) -> OwnedRecoveryDiscovery {
+    OwnedRecoveryDiscovery::from_catalog(read_catalog(provider, token_hash))
 }
 
 /// Source ids a read-only V2 queue file keeps, so a binary that cannot write V2 never takes them
 /// again; a legacy, missing or unreadable file keeps none.
 #[derive(Default)]
 pub(crate) struct V2HeldSources {
-    /// Queued, attempted or retained inputs the owner still owes a delivery.
+    /// Unsettled inputs and control-only source ids kept in the owner's custody.
     pub(crate) owed: Vec<u64>,
     /// Inputs only the settled history holds: the owner confirmed their delivery.
     pub(crate) delivered: Vec<u64>,
@@ -125,7 +130,7 @@ pub(crate) fn v2_held_sources(
             .flat_map(|payload| payload.followers.iter());
         std::iter::once(&input.original).chain(followers)
     });
-    let owed: Vec<u64> = snapshot
+    let mut owed: Vec<u64> = snapshot
         .items
         .iter()
         .chain(attempted)
@@ -135,7 +140,15 @@ pub(crate) fn v2_held_sources(
     let settled =
         settled.flat_map(|terminal| terminal.identity.sources.iter().map(|s| s.message_id));
     // An id still owed stays owed even when an earlier delivery of it settled.
-    let delivered = settled.filter(|id| !owed.contains(id)).collect();
+    let delivered: Vec<u64> = settled.filter(|id| !owed.contains(id)).collect();
+    for id in snapshot
+        .control_identities()
+        .flat_map(|identity| identity.sources.iter().map(|source| source.message_id))
+    {
+        if !owed.contains(&id) && !delivered.contains(&id) {
+            owed.push(id);
+        }
+    }
     V2HeldSources { owed, delivered }
 }
 
@@ -188,6 +201,14 @@ pub(crate) fn read_catalog(provider: &ProviderKind, token_hash: &str) -> Snapsho
         {
             Ok(items) => items,
             Err(error) => {
+                #[cfg(unix)]
+                recovery.failed.push(OwnedRecoveryFailure::new(
+                    provider,
+                    token_hash,
+                    ChannelId::new(channel_id),
+                    path.clone(),
+                    error.clone(),
+                ));
                 recovery
                     .quarantined
                     .push((ChannelId::new(channel_id), error));

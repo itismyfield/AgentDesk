@@ -75,8 +75,7 @@ impl Owner {
         }
         super::migration::anchor_terminals(&mut next, now);
         super::source_admission::expire_binds(&mut next, now);
-        next.terminal_identities
-            .retain(|terminal| now.saturating_sub(terminal.settled_at_ms) < 86_400_000);
+        next.expire_terminals(now);
         self.commit(next)?;
         self.project_slots();
         Ok(())

@@ -37,6 +37,7 @@ pub(in crate::services::discord) async fn complete_active_reconcile(shared: &Arc
     #[cfg(unix)]
     for channel in
         crate::services::turn_orchestrator::v2_channels(&shared.provider, &shared.token_hash)
+            .observed_ready()
     {
         super::session_transition::wake_installed_owner(shared, channel).await;
     }
@@ -444,7 +445,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
 /// Standby start-up shared by `run_bot` and the restart acceptance test: the marker
 /// poller spawned here is what consumes this provider's shutdown-barrier slot.
-pub(in crate::services::discord) async fn start_standby_runtime(
+async fn start_standby_runtime(
     health_registry: &Arc<health::HealthRegistry>,
     provider: &ProviderKind,
     shared: &Arc<SharedData>,

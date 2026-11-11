@@ -59,6 +59,8 @@ mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_dispatch;
 mod queue_io;
+#[cfg(all(test, unix))]
+pub(crate) use queue_io::input_owner::recovery::recover as recover_input_owner_for_test;
 mod queue_marker;
 mod queue_overflow_dlq;
 mod queue_reactions;

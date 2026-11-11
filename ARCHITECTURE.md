@@ -1179,6 +1179,9 @@ src/
 │   │   │   ├── busy_tests.rs
 │   │   │   ├── composer_tests.rs
 │   │   │   └── first_input.rs
+│   │   ├── legacy_hint/
+│   │   │   ├── evidence.rs
+│   │   │   └── evidence_tests.rs
 │   │   ├── tui_session_launch/
 │   │   │   ├── first_input/
 │   │   │   │   └── tests.rs
@@ -1195,6 +1198,7 @@ src/
 │   │   ├── followup_reader.rs
 │   │   ├── herdr_guard_tests.rs
 │   │   ├── herdr_turn.rs
+│   │   ├── legacy_hint.rs
 │   │   ├── process_session_launch.rs
 │   │   ├── startup_update_tests.rs
 │   │   └── tui_session_launch.rs
@@ -3074,6 +3078,9 @@ src/
 │   │   ├── turn_presence/
 │   │   │   ├── activity/
 │   │   │   │   ├── unbound/
+│   │   │   │   │   ├── live/
+│   │   │   │   │   │   ├── codex_marker_absence.rs
+│   │   │   │   │   │   └── codex_marker_absence_tests.rs
 │   │   │   │   │   ├── binding_metadata.rs
 │   │   │   │   │   ├── binding_metadata_tests.rs
 │   │   │   │   │   ├── canonical_target.rs
@@ -4378,6 +4385,8 @@ src/
 │   │   ├── mailbox_unreachable_tests/
 │   │   │   └── health_barrier_tests.rs
 │   │   ├── pending_queue_persistence/
+│   │   │   ├── owned_recovery_discovery.rs
+│   │   │   ├── owned_recovery_gate_tests.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   ├── queued_recovery_tests.rs
 │   │   │   └── snapshot_io.rs
@@ -4395,7 +4404,10 @@ src/
 │   │   │   │   │   ├── context_tests.rs
 │   │   │   │   │   ├── front_tests.rs
 │   │   │   │   │   └── tests.rs
+│   │   │   │   ├── a_read_view.rs
+│   │   │   │   ├── a_read_view_tests.rs
 │   │   │   │   ├── actor.rs
+│   │   │   │   ├── admission_read_tests.rs
 │   │   │   │   ├── attempt.rs
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs

@@ -6,6 +6,7 @@ use sha2::Digest;
 use std::path::PathBuf;
 
 pub(crate) mod actor;
+pub(crate) mod a_read_view;
 mod attempt;
 mod commit;
 pub(crate) mod control;
@@ -163,6 +164,7 @@ impl Owner {
                 terminal_identities: vec![],
                 namespace: Some(namespace),
                 owed_drop_receipts: Vec::new(),
+                a_control: Vec::new(),
             },
         };
         let mut owner = Self {
@@ -583,3 +585,7 @@ mod tests;
 #[cfg(all(test, unix))]
 #[path = "v2/unit_tests.rs"]
 mod unit_tests;
+
+#[cfg(all(test, unix))]
+#[path = "v2/admission_read_tests.rs"]
+mod admission_read_tests;

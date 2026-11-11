@@ -309,6 +309,7 @@ fn adoption_forgets_the_ledger_entry_of_a_proven_unsent_paste() {
         };
         let snapshot = SnapshotV2 {
             version: 2,
+            a_control: Vec::new(),
             items: vec![],
             head_injection: None,
             retained_inputs: vec![RetainedInput {

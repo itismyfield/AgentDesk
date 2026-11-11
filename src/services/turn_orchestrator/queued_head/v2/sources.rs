@@ -32,7 +32,8 @@ impl Owner {
                     .terminal_identities
                     .iter()
                     .map(|e| e.identity.clone()),
-            );
+            )
+            .chain(self.snapshot.control_identities().cloned());
         known.any(|old| {
             old.sources.iter().any(|a| {
                 wanted.sources.iter().any(|b| {
@@ -46,7 +47,12 @@ impl Owner {
 
 pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> {
     let mut snapshot = match super::super::compat::inspect(raw)? {
-        super::super::compat::SnapshotRead::ReadOnlyV2(snapshot) => *snapshot,
+        super::super::compat::SnapshotRead::ReadOnlyV2(snapshot) => {
+            if snapshot.version == 3 {
+                return Err("queue V3 is read-only".into());
+            }
+            *snapshot
+        }
         super::super::compat::SnapshotRead::Legacy(items, meta) => {
             super::migration::legacy(items, meta)
         }

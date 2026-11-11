@@ -216,7 +216,7 @@ fn settled_history_leaves_cleared_unconfirmed_recovery_idle_without_hiding_input
         );
         assert!(loaded.queues.is_empty() && loaded.scan_errors.is_empty());
         assert_eq!(
-            v2_channels(&provider, TOKEN).contains(&channel),
+            v2_channels(&provider, TOKEN).ready.contains(&channel),
             !idle,
             "boot adoption: {extra}"
         );
@@ -261,4 +261,178 @@ fn settled_history_leaves_cleared_unconfirmed_recovery_idle_without_hiding_input
         );
         assert_eq!(fs::read(&path).unwrap(), bytes, "file preserved: {extra}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_discovery_preserves_named_failures_without_adopting_them() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let provider = ProviderKind::Codex;
+    let dir = namespace(&provider);
+    fs::create_dir_all(&dir).unwrap();
+    let mut originals = Vec::new();
+    for (channel, bytes) in [
+        (8_057_121, b"{invalid JSON".to_vec()),
+        (8_057_122, vec![0xff, 0xfe]),
+        (8_057_123, br#"{"version":99}"#.to_vec()),
+    ] {
+        let path = dir.join(format!("{channel}.json"));
+        fs::write(&path, &bytes).unwrap();
+        originals.push((ChannelId::new(channel), path, bytes));
+    }
+    let unreadable = dir.join("8057124.json");
+    fs::create_dir(&unreadable).unwrap();
+    seed(&dir, 8_057_125);
+    let owned_path = dir.join("8057126.json");
+    fs::write(
+        &owned_path,
+        serde_json::to_vec(&serde_json::json!({
+            "version":2, "items": [{"author_id":7,"message_id":8057127,"text":"kept"}],
+            "head_injection":null,"retained_inputs":[],"terminal_identities":[]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let discovery = v2_channels(&provider, TOKEN);
+    assert_eq!(discovery.ready, vec![ChannelId::new(8_057_126)]);
+    assert!(discovery.namespace_errors.is_empty());
+    assert_eq!(discovery.failed.len(), 4);
+    for failure in &discovery.failed {
+        assert_eq!(failure.provider, "codex");
+        assert_eq!(failure.namespace, format!("codex/{TOKEN}"));
+        assert_eq!(
+            failure.expected_path,
+            dir.join(format!("{}.json", failure.channel.get()))
+        );
+        assert_eq!(failure.stage, "catalog_unreadable");
+        assert!(!failure.error.is_empty());
+    }
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let writer = CapturedLogs(logs.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let ready = tracing::subscriber::with_default(subscriber, || discovery.observed_ready());
+    assert_eq!(ready, vec![ChannelId::new(8_057_126)]);
+    let captured = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        captured
+            .lines()
+            .filter(|line| line.contains("pending queue recovery quarantined channel"))
+            .count(),
+        4
+    );
+    assert!(captured.contains("catalog_unreadable") && captured.contains("codex/s2b-scan-errors"));
+    for (_, path, bytes) in originals {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    assert!(unreadable.is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_discovery_keeps_namespace_scan_failure_separate_from_named_channels() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let provider = ProviderKind::Codex;
+    let dir = namespace(&provider);
+    let (path, bytes) = seed(&dir, 8_057_131);
+    let _fault = scan_fault::arm(
+        &dir,
+        scan_fault::Point::ReadDir,
+        io::ErrorKind::PermissionDenied,
+    );
+    let discovery = v2_channels(&provider, TOKEN);
+    assert!(discovery.ready.is_empty() && discovery.failed.is_empty());
+    assert_eq!(discovery.namespace_errors.len(), 1);
+    assert!(discovery.namespace_errors[0].contains("read_dir"));
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn outbox_only_v3_is_discovered_without_reclassifying_delivered_sources_as_owed() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let provider = ProviderKind::Codex;
+    let dir = namespace(&provider);
+    fs::create_dir_all(&dir).unwrap();
+    let channel = ChannelId::new(8_057_141);
+    let identity = serde_json::json!({"primary":8057142,"queued_generation":7,
+        "sources":[{"message_id":8057142,"queued_generation":7}]});
+    let snapshot = serde_json::json!({
+        "version":3,"items":[],"head_injection":null,"retained_inputs":[],
+        "terminal_identities":[{"identity":identity,"settled_at_ms":1}],
+        "namespace":"marker-read","a_control":[{
+            "cleanup_id":"cleanup-discovery","identity":identity,
+            "front_receipt":"ticket-discovery","epoch":"epoch-discovery",
+            "expected":{"kind":"missing","owner":{"provider":"codex",
+                "discord_token_hash":TOKEN,"channel_id":channel.get().to_string(),
+                "logical_key":"logical-discovery","owner_node":"fixture-node",
+                "runtime_root":"/fixture"}},
+            "paths":[{"path":"/fixture/canonical.kind","parent":[1,2],
+                "entry":{"kind":"absent"}},
+                {"path":"/fixture/legacy.kind","parent":[1,4],"entry":{"kind":"absent"}}],
+            "stage":{"kind":"outbox","event_id":"stable-discovery-event"},"attempt":null
+        }]
+    });
+    let path = dir.join(format!("{}.json", channel.get()));
+    let bytes = serde_json::to_vec_pretty(&snapshot).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    let found = v2_channels(&provider, TOKEN);
+    assert_eq!(found.ready, vec![channel]);
+    assert!(found.failed.is_empty() && found.namespace_errors.is_empty());
+    let sources = v2_held_sources(&provider, TOKEN, channel);
+    assert!(sources.owed.is_empty());
+    assert_eq!(sources.delivered, vec![8_057_142]);
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn control_only_sources_stay_fenced_without_erasing_delivered_or_queued_provenance() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let provider = ProviderKind::Codex;
+    let dir = namespace(&provider);
+    fs::create_dir_all(&dir).unwrap();
+    let channel = ChannelId::new(8_057_151);
+    let identity = |id| {
+        serde_json::json!({"primary":id,"queued_generation":7,
+        "sources":[{"message_id":id,"queued_generation":7}]})
+    };
+    let control = |id| {
+        serde_json::json!({
+            "cleanup_id":format!("cleanup-{id}"),"identity":identity(id),
+            "front_receipt":null,"epoch":"epoch-source-fence",
+            "expected":{"kind":"missing","owner":{"provider":"codex",
+                "discord_token_hash":TOKEN,"channel_id":channel.get().to_string(),
+                "logical_key":"logical-source-fence","owner_node":"fixture-node",
+                "runtime_root":"/fixture"}},
+            "paths":[{"path":"/fixture/canonical.kind","parent":[1,2],
+                "entry":{"kind":"absent"}}],
+            "stage":{"kind":"outbox","event_id":format!("event-{id}")},"attempt":null
+        })
+    };
+    let mut repeated = control(8057153);
+    repeated["cleanup_id"] = serde_json::json!("cleanup-source-repeat");
+    repeated["stage"]["event_id"] = serde_json::json!("event-source-repeat");
+    let snapshot = serde_json::json!({
+        "version":3,"namespace":"marker-source-fence",
+        "items":[{"author_id":7,"message_id":8057154,"queued_generation":7,"text":"owed"}],
+        "head_injection":null,"retained_inputs":[],
+        "terminal_identities":[
+            {"identity":identity(8057152),"settled_at_ms":1},
+            {"identity":identity(8057154),"settled_at_ms":1}
+        ],
+        "a_control":[control(8057152),control(8057153),repeated,control(8057154)]
+    });
+    let path = dir.join(format!("{}.json", channel.get()));
+    let bytes = serde_json::to_vec_pretty(&snapshot).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    let projected = v2_held_sources(&provider, TOKEN, channel);
+    assert_eq!(projected.owed, vec![8_057_154, 8_057_153]);
+    assert_eq!(projected.delivered, vec![8_057_152]);
+    assert_eq!(fs::read(path).unwrap(), bytes);
 }

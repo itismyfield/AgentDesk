@@ -466,10 +466,7 @@ impl SnapshotV2 {
 
     /// Drops queued binds past the end, which a cut of the queue's tail left; run before a push.
     pub(super) fn prune_binds(&mut self) {
-        let len = self.items.len();
-        let stale =
-            |b: &AdmissionBind| matches!(b.at, BindAt::Queued { index, .. } if index >= len);
-        self.admission_binds.retain(|b| !stale(b));
+        self.prune_unpinned_binds();
     }
 
     /// Follows the removal of the queued item at `removed`.
@@ -616,10 +613,7 @@ pub(super) fn settle_binds(snapshot: &mut SnapshotV2, key: &AttemptRef, now: u64
 
 /// Settled binds leave with the terminal identities, after the same window.
 pub(super) fn expire_binds(snapshot: &mut SnapshotV2, now: u64) {
-    snapshot.admission_binds.retain(|b| match b.at {
-        BindAt::Settled { settled_at_ms, .. } => now.saturating_sub(settled_at_ms) < 86_400_000,
-        _ => true,
-    });
+    snapshot.expire_unpinned_binds(now);
 }
 
 impl Owner {

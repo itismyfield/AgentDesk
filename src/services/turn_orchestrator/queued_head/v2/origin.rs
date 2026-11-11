@@ -134,11 +134,12 @@ pub(crate) fn waiting_origin(
         }
         let len = snapshot.items.len();
         let waits = snapshot.admission_binds.iter().any(|b| {
-            let live = match b.at {
-                BindAt::Queued { index, .. } => index < len,
-                BindAt::Settled { .. } => false,
-                BindAt::Opaque | BindAt::Attempt { .. } => true,
-            };
+            let live = snapshot.control_references_bind(b)
+                || match b.at {
+                    BindAt::Queued { index, .. } => index < len,
+                    BindAt::Settled { .. } => false,
+                    BindAt::Opaque | BindAt::Attempt { .. } => true,
+                };
             live && origin_of(b).as_deref() == Some(origin)
         });
         if waits {
