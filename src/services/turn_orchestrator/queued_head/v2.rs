@@ -5,8 +5,8 @@ use super::{HeadPhase, PendingQueueItem, QueueIdentity};
 use sha2::Digest;
 use std::path::PathBuf;
 
-pub(crate) mod actor;
 pub(crate) mod a_read_view;
+pub(crate) mod actor;
 mod attempt;
 mod commit;
 pub(crate) mod control;

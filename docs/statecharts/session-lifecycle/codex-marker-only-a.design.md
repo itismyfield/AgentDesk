@@ -13,7 +13,7 @@
 | query 3초 / pass 9초 / notice 1초 / 합계 10초 | 제거 | DB future에 새 timeout/timeout_at을 씌우지 않음 |
 | 절대 deadline·clock·취소 타이머·만료된 worker | 제거 | monotonic deadline·시간 필드·새 timer/worker 취소 프로토콜 없음 |
 | CAS timeout→Indeterminate·late commit·same-nonce timeout 회복 | 제거 | 기존 CAS 결과/오류 계약 유지. 공통 launched/failure 소비자를 시간제 정책으로 확장하지 않음 |
-| `herdr_launch/fenced_wait.rs`와 D* 모델/cfg | 새로 도입하지 않음 | 현재 head에 존재하지 않음. 별도 r5 객체를 읽어 전 결과만 재현 |
+| r5의 fenced-wait child(신설하지 않음)와 D* 모델/cfg | 새로 도입하지 않음 | 현재 head에 존재하지 않음. 별도 r5 객체를 읽어 전 결과만 재현 |
 | 최대 3회 **반환된 오류** 예산과 같은 callback continuation | 유지 | 첫 오류+추가 두 오류. 성공한 중간 단계가 횟수를 초기화하지 않음 |
 | v3 공통 Owned read view·전 reader/source fence/history pin | 유지, ① | A 기록 생성 전에 reader를 모두 준비 |
 | `v2_channels` 생산 소비자 두 곳 | 유지, ①+② | `runtime_bootstrap/queued_recovery.rs:50` 및 `runtime_bootstrap.rs:39` 모두 배분 |
@@ -48,7 +48,7 @@ Known Retired는 A Legacy permit으로 우회하지 않는다. `herdr_launch/run
 
 ## 3. 관찰·정리·admission 전이
 
-새 작은 `codex/legacy_hint/evidence.rs`는 순수 증거 비교/관찰을, `codex/legacy_hint.rs`는 hint만의 cleanup을, `owner_input/legacy_hint.rs`는 bounded controller를, `queued_head/v2/legacy_hint.rs`는 durable 전이를 소유한다. `owner_input.rs:852` root preclaim 뒤 `:859` start_waits 전에 A prelude를 연결한다.
+새 작은 `codex/legacy_hint/evidence.rs`는 순수 증거 비교/관찰을, `codex/legacy_hint.rs`는 hint만의 cleanup을, owner_input의 ② 신설 legacy_hint child는 bounded controller를, queued_head v2의 ② 신설 legacy_hint child는 durable 전이를 소유한다. `owner_input.rs:852` root preclaim 뒤 `:859` start_waits 전에 A prelude를 연결한다.
 
 | 단계 | durable/효과 계약 | 모델 |
 |---|---|---|
@@ -175,16 +175,16 @@ notice key는 cleanup-id를 읽었으면 `A-io:v1:SHA256(provider, namespace, cl
 | ② 파일 | 순증 | 책임 |
 |---|---:|---|
 | `services/codex/legacy_hint.rs` | 79 | hint-only cleanup·partial 재관찰 및 별도 typed AStartResult/carrier 결과 sink |
-| `services/discord/router/message_handler/provider_dispatch/owner_input/legacy_hint.rs` (신규) | 209 | bounded controller·boot·known-unsent 본체 |
+| ② 신설 controller child (owner_input의 legacy_hint) | 209 | bounded controller·boot·known-unsent 본체 |
 | `services/discord/router/message_handler/provider_dispatch/owner_input.rs` | 13 | prelude/recover/carrier child 연결만 |
 | `db/dispatched_sessions/hosted_execution.rs` | 40 | owner 후보 read-only query, timeout/CAS 정책 추가 없음 |
 | `services/turn_orchestrator/queued_head/v2.rs` | 14 | durable child 연결 |
-| `services/turn_orchestrator/queued_head/v2/legacy_hint.rs` (신규) | 134 | intent/receipt/outbox/ack CAS·정산 |
+| ② 신설 durable child (queued_head v2의 legacy_hint) | 134 | intent/receipt/outbox/ack CAS·정산 |
 | `services/discord/queue_io/input_owner/recovery.rs` | 28 | A debt 재관찰·requeue 순서 |
 | `services/codex/herdr_turn.rs` | 14 | actual executor carrier take/거절 전달 |
 | `services/herdr_launch.rs` | 10 | row read 직후·모든 fresh effect 전 검증 연결 |
 | `services/discord/router/message_handler/provider_dispatch.rs` | 22 | carrier와 실제 CodexHerdrTurn 경계 |
-| `services/discord/router/message_handler/provider_dispatch/owner_input/storage_failure.rs` (신규) | 50 | pass/stage dedupe·기존 PG notice, timeout 없음 |
+| ② 신설 notice child (owner_input의 storage_failure) | 50 | pass/stage dedupe·기존 PG notice, timeout 없음 |
 | `services/discord/router/message_handler/headless_turn.rs` | 1 | 일반 carrier None |
 | `services/discord/router/message_handler/intake_turn.rs` | 1 | 일반 carrier None |
 | `services/discord/runtime_bootstrap/queued_recovery.rs` | 8 | failed controller + pass/gate 운반 |
