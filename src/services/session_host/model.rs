@@ -1,32 +1,6 @@
 use crate::services::platform::tmux::{PaneLiveness, SessionPresence};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum HostKind {
-    Tmux,
-    Process,
-    Herdr,
-}
-
-impl HostKind {
-    /// Name written to disk (inflight locator, `.host_kind` marker).
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Tmux => "tmux",
-            Self::Process => "process",
-            Self::Herdr => "herdr",
-        }
-    }
-
-    /// Exact inverse of `as_str`; any other text is `None`, never a tmux default.
-    pub(crate) fn from_persisted(value: &str) -> Option<Self> {
-        match value {
-            "tmux" => Some(Self::Tmux),
-            "process" => Some(Self::Process),
-            "herdr" => Some(Self::Herdr),
-            _ => None,
-        }
-    }
-}
+pub(crate) use crate::domain::host_observation::HostKind;
 
 /// Key a host finds a session by. The tmux name doubles as the process-registry
 /// key; a Herdr ref holds only the pane id, its endpoint lives on the host.

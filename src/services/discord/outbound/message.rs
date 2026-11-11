@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::policy::DiscordOutboundPolicy;
 use crate::domain::outbound::ids::{OutboundChannelId, OutboundMessageId, OutboundUserId};
+use crate::domain::outbound::intent::OutboundIntent;
 pub(crate) use crate::domain::outbound::key::{OutboundDedupKey, OutboundDeliveryId};
 use crate::domain::outbound::key::{OutboundOperationKey, OutboundTargetKey};
 
@@ -82,6 +83,36 @@ impl From<MessageId> for OutboundMessageId {
 impl From<UserId> for OutboundUserId {
     fn from(id: UserId) -> Self {
         Self::new(id.get())
+    }
+}
+
+impl From<OutboundIntent> for DiscordOutboundMessage {
+    fn from(intent: OutboundIntent) -> Self {
+        let target = match intent.target {
+            OutboundTargetKey::Channel { channel } => {
+                OutboundTarget::Channel(ChannelId::new(channel.get()))
+            }
+            OutboundTargetKey::Thread { parent, thread } => OutboundTarget::Thread {
+                parent: ChannelId::new(parent.get()),
+                thread: ChannelId::new(thread.get()),
+            },
+            OutboundTargetKey::DmUser { user } => OutboundTarget::DmUser(UserId::new(user.get())),
+        };
+        let operation = match intent.operation {
+            OutboundOperationKey::Send => OutboundOperation::Send,
+            OutboundOperationKey::Edit { message_id } => OutboundOperation::Edit {
+                message_id: MessageId::new(message_id.get()),
+            },
+        };
+        let mut message = Self::new(
+            intent.idempotency.correlation_id,
+            intent.idempotency.semantic_event_id,
+            intent.content,
+            target,
+            intent.policy,
+        );
+        message.operation = operation;
+        message
     }
 }
 

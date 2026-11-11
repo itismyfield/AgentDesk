@@ -1,10 +1,9 @@
-use crate::services::provider::ProviderRuntimeExt;
 use std::collections::BTreeMap;
 
 use anyhow::Result;
 use sqlx::{PgPool, Row as SqlxRow};
 
-use crate::services::provider::ProviderKind;
+use crate::domain::provider::ProviderKind;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentChannelBindings {
@@ -16,17 +15,15 @@ pub struct AgentChannelBindings {
 }
 
 impl AgentChannelBindings {
-    fn configured_provider_kind(&self) -> Option<ProviderKind> {
+    pub(crate) fn configured_provider_kind(&self) -> Option<ProviderKind> {
         self.provider.as_deref().and_then(ProviderKind::from_str)
     }
 
-    fn primary_provider_kind(&self) -> Option<ProviderKind> {
-        self.configured_provider_kind()
-            .or_else(ProviderKind::default_channel_provider)
-    }
-
-    pub(crate) fn resolved_primary_provider_kind(&self) -> Option<ProviderKind> {
-        let configured_provider = self.primary_provider_kind()?;
+    pub(crate) fn resolved_primary_provider_kind_with_provider(
+        &self,
+        primary: Option<ProviderKind>,
+    ) -> Option<ProviderKind> {
+        let configured_provider = primary?;
         if self
             .provider_specific_channel(&configured_provider)
             .is_some()
@@ -58,8 +55,11 @@ impl AgentChannelBindings {
         }
     }
 
-    pub fn primary_channel(&self) -> Option<String> {
-        if let Some(primary_provider) = self.resolved_primary_provider_kind() {
+    pub(crate) fn primary_channel_with_provider(
+        &self,
+        primary: Option<ProviderKind>,
+    ) -> Option<String> {
+        if let Some(primary_provider) = self.resolved_primary_provider_kind_with_provider(primary) {
             if let Some(channel) = self.provider_specific_channel(&primary_provider) {
                 return Some(channel);
             }
@@ -69,15 +69,19 @@ impl AgentChannelBindings {
             .or_else(|| self.claude_channel())
     }
 
-    pub fn counter_model_channel(&self) -> Option<String> {
-        self.resolved_primary_provider_kind().and_then(|provider| {
-            let primary_channel = self.provider_specific_channel(&provider)?;
-            provider
-                .preferred_counterparts()
-                .into_iter()
-                .find_map(|counterpart| self.provider_specific_channel(&counterpart))
-                .filter(|channel| channel != &primary_channel)
-        })
+    pub(crate) fn counter_model_channel_with_provider(
+        &self,
+        primary: Option<ProviderKind>,
+    ) -> Option<String> {
+        self.resolved_primary_provider_kind_with_provider(primary)
+            .and_then(|provider| {
+                let primary_channel = self.provider_specific_channel(&provider)?;
+                provider
+                    .preferred_counterparts()
+                    .into_iter()
+                    .find_map(|counterpart| self.provider_specific_channel(&counterpart))
+                    .filter(|channel| channel != &primary_channel)
+            })
     }
 
     pub fn channel_for_provider(&self, provider: Option<&str>) -> Option<String> {
@@ -86,34 +90,6 @@ impl AgentChannelBindings {
                 .provider_specific_channel(&kind)
                 .or_else(|| self.legacy_primary_channel()),
             _ => self.legacy_primary_channel(),
-        }
-    }
-
-    /// Explicit provider columns win over the legacy primary channel.
-    pub(crate) fn provider_for_channel(
-        &self,
-        matches: impl Fn(&str) -> bool,
-    ) -> Option<ProviderKind> {
-        let claude = self
-            .discord_channel_cc
-            .as_deref()
-            .is_some_and(|c| matches(c.trim()));
-        let codex = [
-            self.discord_channel_cdx.as_deref(),
-            self.discord_channel_alt.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|c| matches(c.trim()));
-        match (claude, codex) {
-            (true, false) => Some(ProviderKind::Claude),
-            (false, true) => Some(ProviderKind::Codex),
-            (true, true) => None,
-            (false, false) => self
-                .discord_channel_id
-                .as_deref()
-                .filter(|c| matches(c.trim()))
-                .and_then(|_| self.primary_provider_kind()),
         }
     }
 
@@ -291,7 +267,7 @@ mod tests {
     /// flips the `plan-review` assertion (→ primary), failing this test.
     #[test]
     fn dispatch_channel_counter_model_set_matches_outbox_router() {
-        use crate::services::dispatches::outbox_route::use_counter_model_channel;
+        use crate::domain::dispatch_route::use_counter_model_channel;
 
         // `resolve_agent_dispatch_channel_pg` now selects the counter-model vs
         // primary channel SOLELY via this shared predicate, so pinning the
@@ -382,24 +358,6 @@ pub async fn load_all_agent_channel_bindings_pg(
     Ok(bindings)
 }
 
-pub async fn resolve_agent_primary_channel_pg(
-    pool: &PgPool,
-    agent_id: &str,
-) -> Result<Option<String>, sqlx::Error> {
-    Ok(load_agent_channel_bindings_pg(pool, agent_id)
-        .await?
-        .and_then(|bindings| bindings.primary_channel()))
-}
-
-pub async fn resolve_agent_counter_model_channel_pg(
-    pool: &PgPool,
-    agent_id: &str,
-) -> Result<Option<String>, sqlx::Error> {
-    Ok(load_agent_channel_bindings_pg(pool, agent_id)
-        .await?
-        .and_then(|bindings| bindings.counter_model_channel()))
-}
-
 pub async fn resolve_agent_channel_for_provider_pg(
     pool: &PgPool,
     agent_id: &str,
@@ -408,31 +366,6 @@ pub async fn resolve_agent_channel_for_provider_pg(
     Ok(load_agent_channel_bindings_pg(pool, agent_id)
         .await?
         .and_then(|bindings| bindings.channel_for_provider(provider)))
-}
-
-pub async fn resolve_agent_dispatch_channel_pg(
-    pool: &PgPool,
-    agent_id: &str,
-    dispatch_type: Option<&str>,
-) -> Result<Option<String>, sqlx::Error> {
-    Ok(load_agent_channel_bindings_pg(pool, agent_id)
-        .await?
-        .and_then(|bindings| {
-            // #3594 (T3, codex R2 Finding 2): resolve the counter-model-vs-primary
-            // channel through the SINGLE source of truth
-            // `outbox_route::use_counter_model_channel` instead of a duplicated
-            // `matches!` set. Previously this set was `review|e2e-test|consultation`
-            // and had silently drifted from `use_counter_model_channel` (which also
-            // routes `plan-review` to the counter-model channel), so a `plan-review`
-            // dispatch was validated/routed against the PRIMARY channel at creation
-            // while delivery used the counter-model channel. Calling the shared
-            // predicate makes the two layers structurally impossible to drift again.
-            if crate::services::dispatches::outbox_route::use_counter_model_channel(dispatch_type) {
-                bindings.counter_model_channel()
-            } else {
-                bindings.primary_channel()
-            }
-        }))
 }
 
 /// Seeds a Claude-primary agent row with the given cc/cdx channel bindings.

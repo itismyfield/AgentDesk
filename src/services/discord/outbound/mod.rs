@@ -12,7 +12,6 @@ pub(crate) mod confirmation;
 pub(crate) mod decision;
 pub(crate) mod delivery;
 pub(in crate::services::discord) mod delivery_frontier_probe;
-pub(in crate::services::discord) mod delivery_obligation;
 pub(in crate::services::discord) mod delivery_record; // #3089 B0
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
@@ -22,6 +21,8 @@ pub(in crate::services::discord) mod o_delivery_evidence;
 mod o_delivery_manifest;
 pub(crate) mod o_writer_io;
 pub(in crate::services::discord) mod o_writer_legacy;
+#[cfg(test)]
+mod outbound_delivery_port_tests;
 pub(crate) mod policy;
 pub(in crate::services::discord) mod reaction_control;
 // Read-only projection over `delivery_record`'s evidence, without verdict authority.

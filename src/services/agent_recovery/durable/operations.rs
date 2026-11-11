@@ -88,7 +88,7 @@ pub(crate) async fn pending_operation(
     } else {
         OperationPlan::Restore(build_restore_plan(
             &binding,
-            &events,
+            &runtime.restore_events(channel),
             true,
             "fallback finished; owner runtime restart",
         ))

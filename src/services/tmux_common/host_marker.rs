@@ -3,19 +3,10 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::session_temp_path;
-use crate::services::session_host::HostKind;
+use crate::domain::host_observation::HostKind;
+pub(crate) use crate::domain::host_observation::HostKindMarker;
 
 const HOST_KIND_TEMP_EXT: &str = "host_kind";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HostKindMarker {
-    Absent,
-    Known(HostKind),
-    /// Present but empty, truncated or naming a host this binary does not know.
-    Unrecognized(String),
-    /// Present but unreadable; never reported as absent.
-    ReadFailed(String),
-}
 
 /// Reads only the canonical path: the pre-migration `/tmp` location never held this marker.
 pub(crate) fn read_host_kind_marker(session_name: &str) -> HostKindMarker {
