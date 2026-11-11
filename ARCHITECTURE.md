@@ -4575,7 +4575,6 @@ src/
 │   ├── tool_output_guard.rs
 │   ├── tui_prompt_control.rs
 │   ├── tui_prompt_dedupe.rs
-│   ├── tui_steering.rs
 │   ├── tui_turn_state.rs
 │   ├── turn_cancel_finalizer.rs
 │   ├── turn_cancel_queue_guard.rs
