@@ -691,6 +691,10 @@ async fn historical_takeover() {
     log.bind_now(&a);
     let (b, b_opener, b_end) = answered(rollouts.path(), "rollout-b.jsonl", "answer B");
     log.bind_now(&b);
+    // A was bound ten seconds ago and B five, so the receipt below is dated well inside B's span.
+    for (event, ago) in log.events.lock().unwrap().iter_mut().zip([10, 5]) {
+        event.committed_at = chrono::Utc::now() - chrono::TimeDelta::seconds(ago);
+    }
     assert_eq!((a_opener, a_end), (b_opener, b_end));
     let last_chunk = dr::ExactJsonlSourceIdentity {
         provider: "codex".into(),
