@@ -171,9 +171,8 @@ async fn a_pending_adoption_holds_every_recovery_notice_until_o_adopts() {
     .await;
 }
 
-/// A restart's captured recovery of a held body spends no restart budget: with tmux gone and the
-/// budget one attempt from spent, a pending, refused or unverified-execution channel keeps its
-/// row as it was and posts nothing, while an identity fault still counts and clears the row.
+/// A held body's captured recovery, tmux gone and one attempt left, keeps its row uncounted and
+/// posts nothing for a pending, refused or unverified channel; an identity fault still clears it.
 #[tokio::test(flavor = "current_thread")]
 async fn a_held_recovery_body_spends_no_restart_budget_and_keeps_its_row() {
     use crate::services::tui_o::cutover::test_override;
