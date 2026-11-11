@@ -925,12 +925,15 @@ src/
 │   │   │   ├── composer.rs
 │   │   │   ├── composer_tests.rs
 │   │   │   ├── first_input.rs
+│   │   │   ├── handoff.rs
 │   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
 │   │   │   ├── provider_terminal_tests.rs
 │   │   │   ├── start_offset.rs
 │   │   │   ├── start_offset_tests.rs
 │   │   │   └── terminal_replay.rs
+│   │   ├── session_handoff/
+│   │   │   └── pinned_tmux.rs
 │   │   ├── tui_session_launch/
 │   │   │   └── prepared.rs
 │   │   ├── active_usage.rs
@@ -1923,6 +1926,7 @@ src/
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── claude_handoff.rs
 │   │   │   │   ├── closed.rs
 │   │   │   │   ├── closed_tests.rs
 │   │   │   │   ├── drive.rs
@@ -4403,6 +4407,7 @@ src/
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── actor.rs
 │   │   │   │   ├── attempt.rs
+│   │   │   │   ├── claude_handoff.rs
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── control_tests.rs

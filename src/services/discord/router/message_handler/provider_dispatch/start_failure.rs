@@ -121,6 +121,9 @@ impl Failure {
                         return Err("failure row does not name the producer episode".into());
                     }
                 }
+                if owner.handoff_start_failed(&self.front, self.number, pin.clone())? {
+                    return Ok(Some(false));
+                }
                 owner.start_failed(&self.front, self.number, &self.members, pin, kind, &detail)
             })
             .await?;
