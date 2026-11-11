@@ -82,3 +82,27 @@ fn only_the_current_generation_of_the_same_tmux_gives_codex_records() {
     assert_eq!(in_g2.frontier, Some(delivered.clone()));
     assert_eq!(in_g2.receipts, [delivered]);
 }
+
+/// A receipt of another tmux whose generation marker has the very same mtime is still not given:
+/// the tmux name, not the generation, tells them apart.
+#[test]
+fn a_receipt_of_another_tmux_with_the_same_generation_is_not_given() {
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let (channel, tmux, other) = (7_651_402, "AgentDesk-codex-named", "AgentDesk-codex-twin");
+    let stamped = generation(tmux, 1_700_000_000);
+    assert_eq!(generation(other, 1_700_000_000), stamped);
+    let (frontier, receipt) = delivery(
+        (channel, other),
+        (10, 20),
+        stamped,
+        message_at(1_700_000_100),
+    );
+    dr::write_confirmed_delivery(&ProviderKind::Codex, channel, frontier, receipt).unwrap();
+    assert_eq!(codex_records(channel, other).receipts.len(), 1);
+    assert_eq!(
+        codex_records(channel, tmux).receipts,
+        [],
+        "another tmux's receipt is not this one's"
+    );
+}

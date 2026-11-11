@@ -6,6 +6,9 @@
 (*           span: the delivery of that turn (it implies dlv);                 *)
 (*   "bogus" a record whose bytes align to the turn but that belongs to an     *)
 (*           older generation or another source of the same generation.        *)
+(*   "hist"  a Historical receipt of an earlier source, dated inside this      *)
+(*           source's bind span: time alone names this source.                 *)
+(* early2[s][i]: the record is dated before the generation's second source.    *)
 (* P2 ships in the same PR, so after boot no TUI body is posted except where  *)
 (* the environment action Evidence stands for a delivery before the gate.     *)
 (*                                                                            *)
@@ -13,10 +16,14 @@
 (*      "d1"  first design: any aligned record, bind-time filter kept, walk    *)
 (*            stops at the newest evidenced source, local unresolved set.      *)
 (*      "r4"  exclude only turns at or below the current-generation floor of   *)
-(*            s, no bind-time filter, walk every source of the generation and  *)
-(*            the unresolved set.                                              *)
-(* Mut  "genIgnore" r4 trusting bogus records, "prebindFilter" r4 with the    *)
-(*      bind-time filter back, "stopAtEvidence" r4 with the d1 walk stop.     *)
+(*            s, records placed by date, no bind-time filter, walk every       *)
+(*            source of the generation and the unresolved set; the current     *)
+(*            source is remembered only on its own Retry.                      *)
+(*      "r5"  r4, but a record counts only while the generation bound one      *)
+(*            source, or for the first source when dated before the second;    *)
+(*            a current source judged owed is remembered too.                  *)
+(* Mut  "genIgnore" r5 trusting bogus records, "prebindFilter" r5 with the    *)
+(*      bind-time filter back.                                                 *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Rule, Mut, Scenario
@@ -24,11 +31,13 @@ CONSTANTS Rule, Mut, Scenario
 S == 1..3
 T == 1..2
 Cus == {"none", "row", "pending"}
-Ev == {"none", "cur", "bogus"}
+Ev == {"none", "cur", "bogus", "hist"}
 
-VARIABLES nb, nt, ended, early, dlv, ev, prebind, ingen, cus, readable, unres, done, start
+VARIABLES nb, nt, ended, early, dlv, ev, early2, prebind, ingen, cus, readable, unres, done, start,
+          blocked, judged
 
-vars == <<nb, nt, ended, early, dlv, ev, prebind, ingen, cus, readable, unres, done, start>>
+vars == <<nb, nt, ended, early, dlv, ev, early2, prebind, ingen, cus, readable, unres, done, start,
+          blocked, judged>>
 
 Exists(s, i) == s <= nb /\ i <= nt[s]
 NoTurnF == [i \in T |-> FALSE]
@@ -44,6 +53,7 @@ TypeOK ==
     /\ early \in [S -> [T -> BOOLEAN]]
     /\ dlv \in [S -> [T -> BOOLEAN]]
     /\ ev \in [S -> [T -> Ev]]
+    /\ early2 \in [S -> [T -> BOOLEAN]]
     /\ prebind \in [S -> [T -> BOOLEAN]]
     /\ ingen \in [S -> BOOLEAN]
     /\ cus \in [S -> [T -> Cus]]
@@ -51,6 +61,8 @@ TypeOK ==
     /\ unres \subseteq S
     /\ done \in BOOLEAN
     /\ start \in [S -> 0..3]
+    /\ blocked \in BOOLEAN
+    /\ judged \subseteq S
 
 (* One source's pre-boot history. A genuine record names a posted, ended turn; *)
 (* a turn below it may be unposted (order inversion), one above it may be      *)
@@ -60,18 +72,21 @@ SrcOk(r, isLast) ==
         /\ i > r.c => (~r.e[i] /\ ~r.d[i] /\ r.v[i] = "none" /\ ~r.p[i])
         /\ (i <= r.c /\ (~isLast \/ i < r.c)) => r.e[i]
         /\ r.v[i] = "cur" => (r.e[i] /\ r.d[i])
+        /\ r.v[i] # "hist"
+        /\ r.w[i] => r.v[i] = "cur"
         /\ ~r.e[i] => (~r.d[i] /\ r.v[i] = "none")
 
 SrcOpts(isLast) ==
-    {r \in [c : 0..2, e : [T -> BOOLEAN], d : [T -> BOOLEAN], v : [T -> Ev], p : [T -> BOOLEAN]] :
+    {r \in [c : 0..2, e : [T -> BOOLEAN], d : [T -> BOOLEAN], v : [T -> Ev], p : [T -> BOOLEAN],
+             w : [T -> BOOLEAN]] :
         SrcOk(r, isLast)}
 
-Empty == [c |-> 0, e |-> NoTurnF, d |-> NoTurnF, v |-> NoEvF, p |-> NoTurnF]
+Empty == [c |-> 0, e |-> NoTurnF, d |-> NoTurnF, v |-> NoEvF, p |-> NoTurnF, w |-> NoTurnF]
 
 AllInit ==
     \E n \in 1..2 :
     \E r1 \in SrcOpts(n = 1) :
-    \E r2 \in (IF n = 2 THEN SrcOpts(TRUE) ELSE {Empty}) :
+    \E r2 \in (IF n = 2 THEN {r \in SrcOpts(TRUE) : r.w = NoTurnF} ELSE {Empty}) :
     \E oldA \in (IF n = 2 THEN BOOLEAN ELSE {FALSE}) :
         LET R == [s \in S |-> IF s = 1 THEN r1 ELSE IF s = 2 THEN r2 ELSE Empty]
         IN /\ nb = n
@@ -79,6 +94,7 @@ AllInit ==
            /\ ended = [s \in S |-> R[s].e]
            /\ dlv = [s \in S |-> R[s].d]
            /\ ev = [s \in S |-> R[s].v]
+           /\ early2 = [s \in S |-> R[s].w]
            /\ prebind = [s \in S |-> R[s].p]
            /\ ingen = [s \in S |-> ~(s = 1 /\ oldA)]
            /\ cus = [s \in S |-> NoCusF]
@@ -90,6 +106,7 @@ OneTurn(evA, preA, cusA) ==
     /\ ended = [s \in S |-> [i \in T |-> s = 1 /\ i = 1]]
     /\ dlv = [s \in S |-> NoTurnF]
     /\ ev = [s \in S |-> [i \in T |-> IF s = 1 /\ i = 1 THEN evA ELSE "none"]]
+    /\ early2 = [s \in S |-> NoTurnF]
     /\ prebind = [s \in S |-> [i \in T |-> s = 1 /\ i = 1 /\ preA]]
     /\ ingen = [s \in S |-> TRUE]
     /\ cus = [s \in S |-> [i \in T |-> IF s = 1 /\ i = 1 THEN cusA ELSE "none"]]
@@ -100,6 +117,7 @@ RowPendingInit ==
     /\ ended = [s \in S |-> [i \in T |-> s = 1]]
     /\ dlv = [s \in S |-> NoTurnF]
     /\ ev = [s \in S |-> NoEvF]
+    /\ early2 = [s \in S |-> NoTurnF]
     /\ prebind = [s \in S |-> NoTurnF]
     /\ ingen = [s \in S |-> TRUE]
     /\ cus = [s \in S |-> IF s = 1 THEN [i \in T |-> IF i = 1 THEN "row" ELSE "pending"]
@@ -112,6 +130,7 @@ MovedInit ==
     /\ ended = [s \in S |-> [i \in T |-> s <= 2 /\ i = 1]]
     /\ dlv = [s \in S |-> NoTurnF]
     /\ ev = [s \in S |-> NoEvF]
+    /\ early2 = [s \in S |-> NoTurnF]
     /\ prebind = [s \in S |-> NoTurnF]
     /\ ingen = [s \in S |-> TRUE]
     /\ cus = [s \in S |-> NoCusF]
@@ -123,6 +142,8 @@ Init ==
          [] Scenario = "gen" -> OneTurn("bogus", FALSE, "none")
          [] Scenario = "pending" -> OneTurn("none", TRUE, "none")
          [] Scenario = "moved" -> MovedInit
+         [] Scenario = "hist" -> OneTurn("none", FALSE, "none")
+         [] Scenario = "genmove" -> OneTurn("none", FALSE, "none")
          [] OTHER -> AllInit
     \* every pre-boot turn that ended did so before the baseline sampled after boot
     /\ early = ended
@@ -134,35 +155,43 @@ Init ==
     /\ unres = {}
     /\ done = FALSE
     /\ start = [s \in S |-> 0]
+    \* custody holding the commit: the genmove trajectory starts held
+    /\ blocked = (Scenario = "genmove")
+    /\ judged = {}
 
 (* ---------------------------- environment ---------------------------------- *)
 EnvOK == ~done
-Frozen == <<nt, ended, early, dlv, ev, prebind, cus, readable, unres, done, start>>
+InGen == {s \in 1..nb : ingen[s]}
+FirstInGen == MinOf(InGen, 1)
 
 Bind ==
     /\ EnvOK /\ nb < 3
-    /\ Scenario \in {"rotate", "moved", "all"}
+    /\ Scenario \in {"rotate", "moved", "all", "hist", "genmove"}
     /\ nb' = nb + 1
     /\ ingen' = [ingen EXCEPT ![nb + 1] = TRUE]
-    /\ UNCHANGED Frozen
+    /\ UNCHANGED <<nt, ended, early, dlv, ev, early2, prebind, cus, readable, unres, done, start,
+                   blocked, judged>>
 
 NewTurn ==
     /\ EnvOK
-    /\ Scenario \notin {"moved", "gen", "pending"}
+    /\ Scenario \notin {"moved", "gen", "pending", "genmove"}
     /\ nt[nb] < 2
     /\ IF nt[nb] = 0 THEN TRUE ELSE ended[nb][nt[nb]]
-    /\ Scenario = "rotate" => (nb = 2 /\ nt[nb] = 0)
+    /\ Scenario \in {"rotate", "hist"} => (nb = 2 /\ nt[nb] = 0)
     /\ nt' = [nt EXCEPT ![nb] = @ + 1]
-    /\ UNCHANGED <<nb, ended, early, dlv, ev, prebind, ingen, cus, readable, unres, done, start>>
+    /\ UNCHANGED <<nb, ended, early, dlv, ev, early2, prebind, ingen, cus, readable, unres, done,
+                   start, blocked, judged>>
 
 EndTurn ==
     /\ EnvOK
-    /\ Scenario \in {"free", "rowpending", "all"}
+    /\ Scenario \in {"free", "rowpending", "all", "hist"}
     /\ IF nt[nb] = 0 THEN FALSE ELSE ~ended[nb][nt[nb]]
     /\ ended' = [ended EXCEPT ![nb][nt[nb]] = TRUE]
-    \* only r3 reads early; "all" checks r4, so its turns end before the baseline
-    /\ early' \in {[early EXCEPT ![nb][nt[nb]] = b] : b \in IF Scenario = "all" THEN {TRUE} ELSE BOOLEAN}
-    /\ UNCHANGED <<nb, nt, dlv, ev, prebind, ingen, cus, readable, unres, done, start>>
+    \* only r3 reads early; the other scenarios end their turns before the baseline
+    /\ early' \in {[early EXCEPT ![nb][nt[nb]] = b] :
+                     b \in IF Scenario \in {"free", "rowpending"} THEN BOOLEAN ELSE {TRUE}}
+    /\ UNCHANGED <<nb, nt, dlv, ev, early2, prebind, ingen, cus, readable, unres, done, start,
+                   blocked, judged>>
 
 (* Legacy observes or claims a turn asynchronously, or never (r3 trajectories). *)
 Observe ==
@@ -171,24 +200,54 @@ Observe ==
     /\ \E s \in S, i \in T :
           /\ Exists(s, i) /\ cus[s][i] = "none" /\ ~dlv[s][i]
           /\ \E c \in {"row", "pending"} : cus' = [cus EXCEPT ![s][i] = c]
-    /\ UNCHANGED <<nb, nt, ended, early, dlv, ev, prebind, ingen, readable, unres, done, start>>
+    /\ UNCHANGED <<nb, nt, ended, early, dlv, ev, early2, prebind, ingen, readable, unres, done,
+                   start, blocked, judged>>
 
-(* A Legacy delivery this run (before the gate): the floor moves. In "moved" *)
-(* it lands on the current source B only.                                    *)
+(* A Legacy delivery this run (before the gate): the floor moves, on the     *)
+(* current source B of the "moved" trajectory.                              *)
 Evidence ==
     /\ EnvOK
-    /\ Scenario \in {"moved", "all"}
+    /\ Scenario = "moved"
     /\ \E s \in S, i \in T :
           /\ Exists(s, i) /\ ended[s][i] /\ ~dlv[s][i] /\ ev[s][i] = "none"
           /\ Scenario = "moved" => s = 2
           /\ dlv' = [dlv EXCEPT ![s][i] = TRUE]
           /\ ev' = [ev EXCEPT ![s][i] = "cur"]
-    /\ UNCHANGED <<nb, nt, ended, early, prebind, ingen, cus, readable, unres, done, start>>
+          /\ early2' = [early2 EXCEPT ![s][i] = (Cardinality(InGen) = 1)]
+    /\ UNCHANGED <<nb, nt, ended, early, prebind, ingen, cus, readable, unres, done, start,
+                   blocked, judged>>
+
+(* An earlier source's long delivery finishes after a later source bound: its *)
+(* Historical receipt is dated in the later span, at bytes a turn there ends. *)
+Historical ==
+    /\ EnvOK
+    /\ Scenario \in {"hist", "all"}
+    /\ \E s \in S, i \in T :
+          /\ Exists(s, i) /\ s # FirstInGen /\ ingen[s]
+          /\ ended[s][i] /\ ~dlv[s][i] /\ ev[s][i] = "none"
+          /\ ev' = [ev EXCEPT ![s][i] = "hist"]
+    /\ UNCHANGED <<nb, nt, ended, early, dlv, early2, prebind, ingen, cus, readable, unres, done,
+                   start, blocked, judged>>
+
+(* The generation's start moves past the oldest older source's span. *)
+GenMove ==
+    /\ EnvOK
+    /\ Scenario = "genmove"
+    /\ \E s \in InGen : s < nb /\ s = FirstInGen /\ ingen' = [ingen EXCEPT ![s] = FALSE]
+    /\ UNCHANGED <<nb, nt, ended, early, dlv, ev, early2, prebind, cus, readable, unres, done,
+                   start, blocked, judged>>
 
 ReadOK ==
     /\ EnvOK
     /\ \E s \in S : ~readable[s] /\ readable' = [readable EXCEPT ![s] = TRUE]
-    /\ UNCHANGED <<nb, nt, ended, early, dlv, ev, prebind, ingen, cus, unres, done, start>>
+    /\ UNCHANGED <<nb, nt, ended, early, dlv, ev, early2, prebind, ingen, cus, unres, done, start,
+                   blocked, judged>>
+
+Unblock ==
+    /\ EnvOK /\ blocked
+    /\ blocked' = FALSE
+    /\ UNCHANGED <<nb, nt, ended, early, dlv, ev, early2, prebind, ingen, cus, readable, unres,
+                   done, start, judged>>
 
 (* ------------------------------ rules ------------------------------------- *)
 CustodyIdle == \A s \in S, i \in T : Exists(s, i) => cus[s][i] = "none"
@@ -196,15 +255,24 @@ EarlyEnded(s) == {i \in 1..nt[s] : ended[s][i] /\ early[s][i]}
 R3Delivered(s, i) == ended[s][i] /\ early[s][i] /\ (CustodyIdle \/ i # MaxOf(EarlyEnded(s)))
 R3First(s) == MinOf({i \in 1..nt[s] : ~R3Delivered(s, i)}, nt[s] + 1)
 
+\* the turns Legacy truly delivered and recorded for s in this generation
 CurFloor(s) == MaxOf({i \in 1..nt[s] : ev[s][i] = "cur"})
 AnyFloor(s) == MaxOf({i \in 1..nt[s] : ev[s][i] # "none"})
+\* r4 places a record by its date: a Historical receipt passes as this source's
+DatedFloor(s) == MaxOf({i \in 1..nt[s] : ev[s][i] \in {"cur", "hist"}})
+\* r5 counts a record only where its source is proven
+Proven(s, i) == ev[s][i] = "cur" /\ (Cardinality(InGen) = 1 \/ (s = FirstInGen /\ early2[s][i]))
+ProvenFloor(s) == MaxOf({i \in 1..nt[s] : Proven(s, i)})
 
 \* d1: aligned records of any generation or source, the bind-time filter
 D1First(s) == MinOf({i \in 1..nt[s] : i > AnyFloor(s) /\ ~prebind[s][i]}, nt[s] + 1)
-\* r4 and its mutants
-R4Floor(s) == IF Mut = "genIgnore" THEN AnyFloor(s) ELSE CurFloor(s)
-R4First(s) == MinOf({i \in 1..nt[s] : i > R4Floor(s) /\ ~(Mut = "prebindFilter" /\ prebind[s][i])},
-                    nt[s] + 1)
+\* r4, r5 and the r5 mutants
+NewFloor(s) ==
+    CASE Mut = "genIgnore" -> AnyFloor(s)
+      [] Rule = "r4" -> DatedFloor(s)
+      [] OTHER -> ProvenFloor(s)
+NewFirst(s) == MinOf({i \in 1..nt[s] : i > NewFloor(s) /\ ~(Mut = "prebindFilter" /\ prebind[s][i])},
+                     nt[s] + 1)
 
 Evidenced(F(_)) == {s \in 1..nb : F(s) > 0}
 StopAt(F(_)) == IF Evidenced(F) = {} THEN 1 ELSE MaxOf(Evidenced(F))
@@ -212,43 +280,52 @@ StopAt(F(_)) == IF Evidenced(F) = {} THEN 1 ELSE MaxOf(Evidenced(F))
 Walk ==
     CASE Rule = "r3" -> {s \in 1..nb : s + 1 >= nb}
       [] Rule = "d1" -> {s \in StopAt(AnyFloor)..nb : ingen[s]} \cup unres
-      [] Mut = "stopAtEvidence" -> {s \in StopAt(CurFloor)..nb : ingen[s]} \cup unres
-      [] OTHER -> {s \in 1..nb : ingen[s]} \cup unres
+      [] OTHER -> InGen \cup unres
 
 First(s) ==
     CASE Rule = "r3" -> R3First(s)
       [] Rule = "d1" -> D1First(s)
-      [] OTHER -> R4First(s)
+      [] OTHER -> NewFirst(s)
 
 Decided == [s \in S |-> IF s \in Walk /\ (s = nb \/ First(s) <= nt[s]) THEN First(s) ELSE 0]
 Named == {s \in S : Decided[s] # 0}
+Owed(s) == Decided[s] # 0 /\ First(s) <= nt[s]
 
-(* A source the attempt must read is unreadable: Retry. The sources judged so *)
-(* far (the current one first, then older ones down to the unreadable one)   *)
-(* join the unresolved set; r3 keeps none.                                   *)
-Judged == IF ~readable[nb] THEN {nb}
-          ELSE {s \in Named : \A r \in Named : (r > s) => readable[r]}
+(* A Retry: a source to read is unreadable, or custody holds the commit. The  *)
+(* sources judged so far join the unresolved set; r3 keeps none, and d1 and r4 *)
+(* keep the current source only on its own read failure.                       *)
+ReadJudged == IF ~readable[nb] THEN {nb}
+              ELSE {s \in Named : \A r \in Named : (r > s) => readable[r]}
+RetryJudged ==
+    IF \E s \in Named : ~readable[s] THEN ReadJudged
+    ELSE IF Rule = "r5" THEN {s \in Named : Owed(s)}
+    ELSE {s \in Named : Owed(s) /\ s # nb}
 
 RetryJudge ==
     /\ ~done
-    /\ \E s \in Named : ~readable[s]
+    /\ blocked \/ \E s \in Named : ~readable[s]
     /\ Rule # "r3"
-    /\ unres' = unres \cup Judged
-    /\ unres' # unres
-    /\ UNCHANGED <<nb, nt, ended, early, dlv, ev, prebind, ingen, cus, readable, done, start>>
+    /\ judged' = judged \cup (IF \E s \in Named : ~readable[s] THEN ReadJudged
+                              ELSE {s \in Named : Owed(s)})
+    /\ unres' = unres \cup RetryJudged
+    /\ <<unres', judged'>> # <<unres, judged>>
+    /\ UNCHANGED <<nb, nt, ended, early, dlv, ev, early2, prebind, ingen, cus, readable, done, start,
+                   blocked>>
 
 Commit ==
-    /\ ~done
+    /\ ~done /\ ~blocked
     /\ \A s \in Named : readable[s]
     /\ start' = Decided
     /\ done' = TRUE
-    /\ UNCHANGED <<nb, nt, ended, early, dlv, ev, prebind, ingen, cus, readable, unres>>
+    /\ UNCHANGED <<nb, nt, ended, early, dlv, ev, early2, prebind, ingen, cus, readable, unres,
+                   blocked, judged>>
 
 Next ==
-    \/ Bind \/ NewTurn \/ EndTurn \/ Observe \/ Evidence \/ ReadOK \/ RetryJudge \/ Commit
+    \/ Bind \/ NewTurn \/ EndTurn \/ Observe \/ Evidence \/ Historical \/ GenMove \/ ReadOK
+    \/ Unblock \/ RetryJudge \/ Commit
     \/ UNCHANGED vars
 
-Spec == Init /\ [][Next]_vars /\ WF_vars(Commit) /\ WF_vars(ReadOK)
+Spec == Init /\ [][Next]_vars /\ WF_vars(Commit) /\ WF_vars(ReadOK) /\ WF_vars(Unblock)
 
 (* ---------------------------- properties ---------------------------------- *)
 Taken(s, i) == start[s] # 0 /\ start[s] <= i
@@ -258,9 +335,14 @@ Taken(s, i) == start[s] # 0 /\ start[s] <= i
 LegacyOwes(s, i) == Exists(s, i) /\ ~dlv[s][i] /\ i > CurFloor(s) /\ ingen[s]
 
 NoAdoptionLoss == done => \A s \in S, i \in T : LegacyOwes(s, i) => Taken(s, i)
-NoRepostBelowFloor == done => \A s \in S, i \in T : (Exists(s, i) /\ i <= CurFloor(s)) => ~Taken(s, i)
+\* a turn whose recorded delivery is proven for its source is not posted again
+NoRepostBelowFloor == done => \A s \in S, i \in T :
+    (Exists(s, i) /\ i <= ProvenFloor(s)) => ~Taken(s, i)
 \* a source once judged owed or retried is named by the init unless its floor covers it
 UnresolvedKept == done => \A s \in unres : (Exists(s, 1) /\ CurFloor(s) < nt[s]) => start[s] # 0
+\* acceptance: a source an attempt judged owed keeps its unposted turns, generation or not
+JudgedOwedKept == done => \A s \in judged, i \in T :
+    (Exists(s, i) /\ ~dlv[s][i] /\ i > CurFloor(s)) => Taken(s, i)
 
 (* Residual, informational: a turn Legacy itself abandoned below its floor,   *)
 (* and one posted without a record.                                           *)
