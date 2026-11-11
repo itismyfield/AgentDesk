@@ -533,9 +533,8 @@ pub(crate) mod o_store {
         store.begin_era(channels, at, init).expect("an O store era");
     }
 
-    /// Commits the installed boot policy's adoption of `channel` as O's writer would, for a rig
-    /// whose turn was admitted unadopted and must end through O's delivery: the store's init
-    /// must read back before the candidate is confirmed.
+    /// Commits the installed adoption of `channel` as O's writer would, for a rig admitted
+    /// unadopted: the store's init must read back before the candidate is confirmed.
     pub(crate) fn adopt_installed(channel: u64) {
         let root = crate::config::runtime_root().expect("the test runtime root");
         commit_o_store(&root, &[channel]);
