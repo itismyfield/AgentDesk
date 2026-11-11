@@ -361,18 +361,21 @@ async fn pre_accept_sweep_modern_unknown_and_offline_nodes_fail_closed_pg() -> T
     org_profile(runtime.path(), "default")?;
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
-    let id = "sweep-modern-unknown";
-    worker(&pool, id, json!({"intake_worker":{"enabled":true,"providers":["claude"],"features":["execution_requirements_v1"]},"execution_readiness_version":1})).await?;
-    let source = failed_source(&pool, id, false).await?;
-    sqlx::query("UPDATE intake_outbox SET execution_requirements=$2 WHERE id=$1")
-        .bind(source)
-        .bind(json!({"os":["linux"]}))
-        .execute(&pool)
-        .await?;
+    let id = crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+    let mut node = modern_node(&id);
+    assert!(
+        node["capabilities"]
+            .as_object_mut()
+            .expect("modern capabilities")
+            .remove("execution_readiness")
+            .is_some()
+    );
+    worker(&pool, &id, node["capabilities"].clone()).await?;
+    let source = failed_source(&pool, &id, false).await?;
     for status in ["online", "offline"] {
         sqlx::query("UPDATE worker_nodes SET status=$1 WHERE instance_id=$2")
             .bind(status)
-            .bind(id)
+            .bind(&id)
             .execute(&pool)
             .await?;
         assert_eq!(
