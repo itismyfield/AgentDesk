@@ -3374,6 +3374,10 @@ src/
 │   │   │   └── retry_wake_tests.rs
 │   │   ├── herdr_kill/
 │   │   │   └── effects.rs
+│   │   ├── hosted_cleanup/
+│   │   │   ├── thread_gc/
+│   │   │   │   └── tests_pg.rs
+│   │   │   └── thread_gc.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── force_kill.rs
 │   │   ├── herdr_kill.rs
