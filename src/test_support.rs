@@ -1,6 +1,7 @@
 //! Test-only serialized runtimes, E/P lock holder records, and Rust source scanning for `include_str!` guards.
 //! The lexer handles comments and literals without resolving names or evaluating `cfg`.
 
+pub(crate) mod o_store;
 pub(crate) mod serial_runtime;
 pub(crate) mod wait;
 
