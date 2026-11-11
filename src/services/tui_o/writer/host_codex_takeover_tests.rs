@@ -716,9 +716,8 @@ fn turn_ago(opened: i64, ended: i64) -> Vec<u8> {
     .concat()
 }
 
-/// A turn this execution opened and ended seconds before the baseline, behind Legacy's inflight row
-/// with no Legacy send, is posted by O from its opener once; the same turn with no Legacy custody
-/// left was delivered, so nothing is posted again.
+/// A turn this execution ended before the baseline, behind Legacy's inflight row with no Legacy
+/// send, is posted from its opener once; with no Legacy custody left it was delivered.
 #[tokio::test(start_paused = true)]
 async fn a_turn_ended_before_the_baseline_is_skipped_only_on_delivery_evidence() {
     for (channel, custody) in [(61_835_u64, Custody::Row), (61_836, Custody::Free)] {
