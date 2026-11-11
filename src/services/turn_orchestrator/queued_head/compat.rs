@@ -8,6 +8,9 @@ pub(crate) enum SnapshotRead {
 }
 
 impl SnapshotRead {
+    pub(crate) fn unfinished_claude_handoff(&self) -> bool {
+        matches!(self, Self::ReadOnlyV2(v2) if v2.unfinished_handoff.is_some())
+    }
     /// Whether a V2 file holds input by [`SnapshotV2::holds_input`]; a legacy file never does here.
     pub(crate) fn v2_holds_input(&self) -> bool {
         matches!(self, Self::ReadOnlyV2(v2) if v2.holds_input())
