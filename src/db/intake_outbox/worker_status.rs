@@ -1,6 +1,6 @@
 //! Worker writes serialize stamped rows with the durable channel owner.
 use super::IntakeOutboxRow;
-use crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity;
+use crate::domain::intake_identity::OwnerIdentity;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 
 #[derive(sqlx::FromRow)]
