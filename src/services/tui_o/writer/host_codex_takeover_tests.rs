@@ -275,7 +275,7 @@ async fn a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands() {
 /// A Legacy body sent after the baseline, finished or not, skips the rollout bound next; while that
 /// rollout's turn may hold the body, the rollout bound after it waits too instead of leaving it.
 #[tokio::test(start_paused = true)]
-async fn a_legacy_body_after_the_baseline_keeps_that_rollouts_turn_and_the_next_bind_waiting() {
+async fn a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind() {
     for (channel, finished) in [(61_812_u64, true), (61_813, false)] {
         let Takeover {
             harness,
