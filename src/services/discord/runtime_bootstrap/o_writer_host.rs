@@ -4,6 +4,7 @@
 use super::*;
 use crate::services::tui_o::ownership::execution::OwnerPermit;
 use std::collections::BTreeMap;
+mod adoption_wake;
 mod owner_port;
 pub(super) use owner_port::prepare as prepare_owner_rest;
 type ExecutionPermits = BTreeMap<u64, Result<Arc<OwnerPermit>, String>>;
@@ -415,6 +416,11 @@ impl HostIo for GatewayHost {
             super::super::tui_direct_pending_start::turn_retirement::confirm_turn_channels;
         let confirmed = confirm(&kind, Some(&self.turn), || vec![channel]);
         super::super::turn_presence::supervisor::register(&kind, &confirmed);
+        #[cfg(test)]
+        let rest = self.rest.clone();
+        #[cfg(not(test))]
+        let rest = None;
+        adoption_wake::spawn(&self.shared, rest, kind, channel);
     }
 }
 

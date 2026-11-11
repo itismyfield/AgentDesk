@@ -149,7 +149,14 @@ impl PinnedTerminalTransport<'_> {
             pinned.release_without_receipt(failed.then_some(NotDelivered).unwrap_or(Unknown));
             false
         };
-        if committed && let Some(admitted) = self.admitted {
+        // A body O took is still delivered when O owes the admitted range from its start.
+        let owed = |admitted: &CodexRange| {
+            use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
+            let start = admitted.source.range.0;
+            let owes = crate::services::discord::recovery_paths::o_duty::owes;
+            failed && owes(channel.get(), Some(CodexTui), &admitted.rollout_path, start)
+        };
+        if let Some(admitted) = self.admitted.filter(|admitted| committed || owed(admitted)) {
             admitted.complete_parked_delivery();
         }
         let receipt = committed.then_some(message_id).flatten();
