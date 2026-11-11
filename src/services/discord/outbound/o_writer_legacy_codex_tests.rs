@@ -79,6 +79,6 @@ fn only_the_current_generation_of_the_same_tmux_gives_codex_records() {
         at: chrono::DateTime::from_timestamp(1_800_000_100, 0),
     };
     let in_g2 = codex_records(channel, tmux);
-    assert_eq!(in_g2.receipts, [delivered.clone()]);
-    assert_eq!(in_g2.frontier, Some(delivered));
+    assert_eq!(in_g2.frontier, Some(delivered.clone()));
+    assert_eq!(in_g2.receipts, [delivered]);
 }
