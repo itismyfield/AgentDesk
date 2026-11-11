@@ -182,7 +182,8 @@ async fn i8069_live_tui_marker_is_preserved_on_private_tmux() {
 #[tokio::test]
 async fn i8069_fresh_claim_clears_before_provider_and_keeps_new_nonce() {
     let rig = Rig::new();
-    clear_fresh(&rig.owner, NONCE).await.unwrap();
+    let fence = RuntimeHintFence::acquire(&rig.owner.logical_key).unwrap();
+    clear_fresh(&rig.owner, NONCE, &fence).unwrap();
     assert!(!rig.path(tc::TMUX_RUNTIME_KIND_TEMP_EXT).exists());
     assert_eq!(
         std::fs::read_to_string(rig.path("spawn_nonce")).unwrap(),
