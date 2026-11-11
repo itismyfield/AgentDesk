@@ -525,3 +525,9 @@ S04에서 정적 catalog helper의 실제 구현은 `domain::provider`로, 문�
 기존 Discord identity 경로와 services provider parser 경로는 같은 타입·함수의 재수출이다. 사용되지 않는 `legacy_key` 문자열 렌더링 accessor는 기존 호환 모듈에 남기며 새 suppression을 추가하지 않는다. DB·config·auth·runtime registry와 fallback 실행 순서는 이동하지 않는다. identity A consumer 12파일과 identity B consumer 11파일은 domain 정본 경로를 직접 사용하며 legacy 소비자는 기존 호환 경로를 유지한다.
 
 `domain::message_split`은 foundation에서 UTF-16 단위·fit predicate·chunker·code-fence 및 문장 경계 계산을 실제 소유한다. Discord formatting·semantic_boundaries는 같은 함수를 재수출하고 HTTP 전송·상태 전이는 기존 owner에 유지한다. S12의 shadow/unit_plan·writer/round_trip·writer/pieces 문자열 consumer 3곳만 정본 경로로 전환한다.
+
+`domain::atomic_write`는 temp 생성·write·file sync와 rename을 소유하는 adapter다.
+`prepare`가 반환한 synced temp와 원본 I/O 오류를 상위로 돌려주며,
+`runtime_store::atomic_write`가 rename 전 inflight 진단과 ENOSPC 기록을 수행한다.
+외부 consumer는 기존 관측 함수 경로를 유지하고, plain atomic write는 parent sync를 추가하지 않는다.
+S07 `domain::file_sync`의 Windows unflushed 성공 계약과 durable publication은 유지한다.

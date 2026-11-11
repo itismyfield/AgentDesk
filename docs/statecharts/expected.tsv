@@ -4,6 +4,8 @@
 # scripts/ci/statecharts_tlc.py fails when a run breaks a rule not listed here or a listed rule holds.
 # ExecutionAuthorityDeployed: statechart exit=1 (SameUnmanagedReadmits); ExecutionAuthority: exit=0.
 # BeforeGateway safety holds but temporary PROPERTY AdmissionResumes fails (13); fix3 passes (0).
+atomic-write/AtomicWrite.cfg	AtomicWrite	-	-
+atomic-write/AtomicWriteMissingObservation.cfg	AtomicWrite	DiskObservation	-
 catch-up-frontier/CatchUpFrontier.cfg	CatchUpFrontier	-	-
 catch-up-frontier/CatchUpFrontierMain.cfg	CatchUpFrontier	-	DeliveredInputsAdvanceCursor
 catch-up-frontier/CatchUpFrontierPendingPass.cfg	CatchUpFrontier	NoDeadlock,NoUndeliveredBehindCursor	-
