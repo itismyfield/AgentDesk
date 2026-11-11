@@ -24,6 +24,11 @@ execution-authority/ExecutionAuthorityWorker.cfg	ExecutionAuthority	-	-
 host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses	-
 host-migration/HostMigrationClean.cfg	HostMigration	-	-
 host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock	-
+hosted-cleanup/HostedCleanupAfter.cfg	HostedCleanup	-	-
+hosted-cleanup/HostedCleanupAfterGaps.cfg	HostedCleanup	AllAliasesRechecked,BulkLockWaitMarkerNotMissed,ExplicitActivePreserved,LegacyCurrentMarkerSafe	-
+hosted-cleanup/HostedCleanupBefore.cfg	HostedCleanup	-	-
+hosted-cleanup/HostedCleanupBeforeGaps.cfg	HostedCleanup	AllAliasesRechecked,BulkLockWaitMarkerNotMissed,ExplicitActivePreserved,LegacyCurrentMarkerSafe	-
+hosted-cleanup/HostedCleanupNoRecheck.cfg	HostedCleanup	BulkDisconnectedRechecked,ChangedRowRechecked,ExplicitAliasRechecked	-
 input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-
 input-single-path/InputCancelSelectionLegacyGuarded.cfg	InputCancelSelection	LegacyFrontRemoved	-

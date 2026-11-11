@@ -119,10 +119,10 @@ where
     let mut deleted = Vec::new();
     for row in candidates {
         // A live, unowned or unreadable record, or a non-tmux marker, is not a tmux session.
-        let Some(key) = row.session_key.clone().filter(|_| row.deletable()) else {
+        let Some(key) = row.session_key.clone() else {
             continue;
         };
-        if !crate::services::tmux_turn_liveness::idle_cleanup_session_is_unoccupied(pool, &key)
+        if !crate::services::tmux_turn_liveness::cleanup_row_is_unoccupied_pg(pool, &key, &row)
             .await
         {
             continue;

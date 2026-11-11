@@ -7,8 +7,35 @@ use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
 };
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedLookup, HostedLookupKey, HostedRecord, load_cleanup_row_pg, load_hosted_execution_pg,
+    CleanupRow, HostedLookup, HostedLookupKey, HostedRecord, load_cleanup_row_pg,
+    load_hosted_execution_pg,
 };
+use crate::domain::host_observation::{HostKind, HostKindMarker};
+use crate::domain::session_identity::tmux_name_from_session_key;
+use crate::services::tmux_common::host_marker::read_host_kind_marker;
+
+/// Legacy rows also require every locator's marker to be absent or tmux.
+pub(crate) fn cleanup_row_deletable(row: &CleanupRow) -> bool {
+    row.record_deletable()
+        && (!row.is_legacy()
+            || row.locator_keys().all(|key| {
+                tmux_name_from_session_key(key).is_none_or(|name| {
+                    matches!(
+                        read_host_kind_marker(&name),
+                        HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
+                    )
+                })
+            }))
+}
+
+/// Check the hosted record and marker before querying session occupancy.
+pub(crate) async fn cleanup_row_is_unoccupied_pg(
+    pool: &PgPool,
+    key: &str,
+    row: &CleanupRow,
+) -> bool {
+    cleanup_row_deletable(row) && super::idle_cleanup_session_is_unoccupied(pool, key).await
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CleanupHostRefusal {
@@ -45,7 +72,7 @@ async fn legacy_row_if_found_pg(
     };
     // The record is read again with every locator's marker, as ordinary cleanup reads it.
     match load_cleanup_row_pg(pool, session_id).await {
-        Ok(Some(row)) if row.is_legacy_tmux() => Ok(Some(session_id)),
+        Ok(Some(row)) if row.is_legacy() && cleanup_row_deletable(&row) => Ok(Some(session_id)),
         Ok(Some(_)) => Err(CleanupHostRefusal::NotLegacyTmux),
         Ok(None) => Ok(None),
         Err(_) => Err(CleanupHostRefusal::LookupFailed),

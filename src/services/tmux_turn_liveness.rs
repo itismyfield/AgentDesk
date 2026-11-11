@@ -6,6 +6,7 @@ use crate::services::provider::ProviderKind;
 
 #[path = "tmux_turn_liveness/cleanup_host.rs"]
 pub(crate) mod cleanup_host;
+pub(crate) use cleanup_host::cleanup_row_is_unoccupied_pg;
 #[cfg(test)]
 #[path = "tmux_turn_liveness/tests_pg.rs"]
 mod tests_pg;

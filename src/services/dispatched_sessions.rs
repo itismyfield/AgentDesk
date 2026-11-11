@@ -21,6 +21,7 @@ use serde_json::json;
 
 #[path = "dispatched_sessions/canonical_identity.rs"]
 mod canonical_identity;
+pub(crate) mod hosted_cleanup;
 mod output;
 pub use output::tmux_output;
 
@@ -170,7 +171,7 @@ pub async fn cleanup_sessions(
     State(state): State<AppState>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
-        return match dispatched_sessions_db::cleanup_disconnected_sessions_pg(pool).await {
+        return match hosted_cleanup::cleanup_disconnected_sessions_pg(pool).await {
             Ok(result) => Ok((StatusCode::OK, Json(json!({"ok": true, "deleted": result})))),
             Err(error) => {
                 Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database))
@@ -202,9 +203,7 @@ pub async fn delete_session(
     Query(params): Query<DeleteSessionQuery>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
-        return match dispatched_sessions_db::delete_session_by_key_pg(pool, &params.session_key)
-            .await
-        {
+        return match hosted_cleanup::delete_session_by_key_pg(pool, &params.session_key).await {
             Ok(result) => {
                 if let Some(session_id) = result.session_id {
                     crate::eventbus::emit_event(

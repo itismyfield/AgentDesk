@@ -2548,16 +2548,12 @@ pub(crate) async fn upsert_hook_session_pg(
         .map_err(|error| format!("upsert postgres session: {error:?}"))
 }
 
-pub(crate) async fn cleanup_disconnected_sessions_pg(pool: &PgPool) -> Result<u64, String> {
-    hosted_execution::delete_disconnected_sessions_pg(pool).await
-}
-
-pub(crate) async fn delete_session_by_key_pg(
+/// Applies an explicit delete after the service judged markers outside the row lock.
+pub(crate) async fn apply_session_delete_pg(
     pool: &PgPool,
     session_key: &str,
+    judged: Option<&hosted_execution::CleanupRow>,
 ) -> Result<DeleteSessionResult, String> {
-    // Markers are judged unlocked, also after any lock holder leaves; the delete re-checks the row.
-    let judged = hosted_execution::judge_session_delete_pg(pool, session_key).await?;
     let mut tx = pool
         .begin()
         .await
@@ -2571,7 +2567,7 @@ pub(crate) async fn delete_session_by_key_pg(
         .map_err(|error| format!("resolve session delete locator: {error:?}"))?;
     let deleted = match session_id {
         Some(session_id) => {
-            hosted_execution::delete_locked_session_pg(&mut tx, session_id, judged.as_ref()).await?
+            hosted_execution::delete_locked_session_pg(&mut tx, session_id, judged).await?
         }
         None => 0,
     };
