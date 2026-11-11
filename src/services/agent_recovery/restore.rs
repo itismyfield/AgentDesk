@@ -1,6 +1,6 @@
 use crate::services::provider::ProviderKind;
 
-use super::checkpoint::{CheckpointEvent, CheckpointEventKind, CheckpointPayload};
+use super::checkpoint::{CheckpointEvent, CheckpointPayload};
 use super::handoff::RecoveryIntake;
 use super::policy::ChannelRecoveryBinding;
 
@@ -33,14 +33,7 @@ pub fn session_mode_for_provider(provider: &ProviderKind) -> RestoreSessionMode 
 }
 
 pub fn latest_progress_or_complete(events: &[CheckpointEvent]) -> Option<&CheckpointEvent> {
-    events.iter().rev().find(|event| {
-        matches!(
-            event.kind,
-            CheckpointEventKind::Complete
-                | CheckpointEventKind::FallbackProgress
-                | CheckpointEventKind::OwnerProgress
-        )
-    })
+    events.iter().rev().find(|event| event.is_restore_source())
 }
 
 pub fn format_restore_packet(

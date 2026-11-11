@@ -1,0 +1,7 @@
+export const title = "Thread GC: 관측과 조건부 삭제";
+export const state = v => {
+  if (v.deleted) return `삭제됨${v.sawWaitMarker ? " · 새 turn" : (v.rowChanged ? " · row 변경" : "")}${v.markerAtDelete === "non-tmux" && v.snapshot.record === "legacy" ? " · marker 변경" : ""}${v.row.owner !== "local" ? " · owner 변경" : ""}${v.row.alias !== v.snapshot.alias ? " · alias 추가" : ""}`;
+  const changed = (v.markerWritten && v.snapshot.record === "legacy" ? " · marker 변경" : "") + (v.seen.owner === "local" && v.row.owner !== "local" ? " · owner 변경" : "") + (v.row.alias !== v.snapshot.alias ? " · alias 추가" : "");
+  return ({start:"후보 조회 전",candidate:"후보 snapshot", "host-ok":"host gate 통과", "occupancy-ok":"점유 없음 관측", "owner-ok":"로컬 owner 관측",ready:"tmux 없음 관측",applied:"조건부 DELETE 적용",done:"행 보존"})[v.phase] + changed + (v.sawWaitMarker ? " · 새 turn" : (v.rowChanged ? " · row 변경" : ""));
+};
+export const step = a => ({GCReadCandidate:"후보 snapshot 또는 조회 실패",GCObserveHost:"host와 Legacy marker 판단",GCObserveOccupancy:"DB 점유 조회",GCOccupancyLookupFailed:"점유 조회 실패",GCObserveOwner:"owner 파일 확인",GCProbe:"tmux presence 확인",GCNewTurn:"새 turn이 DB 조건 변경",GCRowProjectionChanges:"SQL이 비교하는 row 변경",GCKillFailed:"kill 실패로 tmux 유지",GCMarkerChanges:"관측 뒤 marker 변경",GCOwnerChanges:"관측 뒤 owner 변경",GCAliasAdded:"관측 뒤 alias 추가",GCConditionalDelete:"DELETE 조건 판정",GCAutocommit:"statement commit",GCStatementFailure:"statement rollback",GCRestart:"재시작 후 재관측",Done:"완료"})[a] ?? a;

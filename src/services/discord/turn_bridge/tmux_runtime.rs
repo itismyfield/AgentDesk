@@ -98,11 +98,6 @@ impl TmuxCleanupPolicy {
 /// upper-bound when the exit signal never fires. The constant is now a
 /// *safety net*, not the primary timing source.
 const PROVIDER_INTERRUPT_SETTLE: Duration = Duration::from_millis(750);
-// #3021 / codex P2: confirmation delay before treating a claude pane as
-// genuinely idle and skipping its SIGINT. Guards against a stale JSONL
-// turn-state read in the sub-second window after a follow-up prompt is
-// submitted but before claude flushes the new `user` envelope.
-const PROVIDER_IDLE_CONFIRM_DELAY: Duration = Duration::from_millis(400);
 /// Upper bound for the post-SIGINT grace period before we escalate to
 /// SIGKILL. Same #2426 rationale as `PROVIDER_INTERRUPT_SETTLE`: when the
 /// provider exits cleanly we observe its PID exit and proceed immediately.
@@ -360,70 +355,6 @@ async fn interrupt_on(
             );
             (false, None)
         }
-    };
-
-    // #3021 / codex P2: the JSONL turn-state probe can briefly read a stale
-    // terminal `result` in the sub-second window after a follow-up prompt is
-    // submitted but before claude flushes the new `user` envelope to the
-    // transcript — reporting ready_for_input=true for a turn that is actually
-    // still generating. Claude has no send-keys interrupt path, so skipping
-    // its SIGINT on that stale read would leave a cancelled turn running. The
-    // 750ms settle above already lets the envelope land for a genuinely active
-    // turn; require a second agreeing read before committing to "idle, skip
-    // SIGINT" so a freshly-submitted turn (which flips to Busy on the confirm
-    // read) is still interrupted, while a genuinely idle pane (#3021) stays
-    // ready across both reads and is correctly left alone. Only claude needs
-    // this — every other provider also has a send-keys/Escape interrupt, and
-    // the extra delay is confined to the idle-stop path where nothing is being
-    // interrupted anyway.
-    let (ready_for_input, provider_pid) = if ready_for_input
-        && matches!(provider, ProviderKind::Claude)
-    {
-        tokio::time::sleep(PROVIDER_IDLE_CONFIRM_DELAY).await;
-        let session_for_confirm = tmux_session_name.to_string();
-        let provider_for_confirm = provider.clone();
-        let confirm = tokio::task::spawn_blocking(move || {
-            let ready =
-                tmux_ready_for_input_without_tui_pane(&session_for_confirm, &provider_for_confirm);
-            let pid = provider_cli_pid_in_tmux(
-                &session_for_confirm,
-                &provider_for_confirm,
-                tracked_child_pid,
-            );
-            (ready, pid)
-        })
-        .await;
-        match confirm {
-            // Stay "idle" only if the confirmation agrees; otherwise treat the
-            // turn as active and interrupt with the freshly observed pid.
-            //
-            // codex review P2: use ONLY the confirm probe's freshly-observed
-            // pid — never fall back to the pre-confirm `provider_pid`. If the
-            // provider/pane exited during the 400ms confirm window the confirm
-            // pid is `None`; reviving the stale pre-confirm pid here would
-            // SIGINT a process that is no longer under the tmux pane (and could
-            // signal an unrelated process after PID reuse). A `None` confirm
-            // pid therefore correctly skips the SIGINT — there is nothing left
-            // to interrupt.
-            Ok((confirmed_ready, confirmed_pid)) => (confirmed_ready, confirmed_pid),
-            Err(error) => {
-                tracing::warn!(
-                    "provider turn interrupt idle-confirm join error: provider={} session={} reason={} error={}",
-                    provider.as_str(),
-                    tmux_session_name,
-                    reason,
-                    error
-                );
-                // On a confirm-probe failure we cannot re-validate the pid, so
-                // do NOT reuse the stale pre-confirm pid (same PID-reuse hazard
-                // codex flagged). Skip the SIGINT fallback; the cooperative
-                // cancel in `cancel_active_token` still runs, and the hard-stop
-                // path re-probes for a live, pane-validated pid afterward.
-                (false, None)
-            }
-        }
-    } else {
-        (ready_for_input, provider_pid)
     };
 
     let resolved_sigint_pid =

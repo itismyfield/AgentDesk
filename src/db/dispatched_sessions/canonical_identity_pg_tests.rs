@@ -8,12 +8,14 @@ use crate::db::dispatched_sessions::hosted_execution::tests::{
 };
 use crate::db::dispatched_sessions::hosted_execution::*;
 use crate::db::dispatched_sessions::{
-    HookSessionUpsert, cleanup_disconnected_sessions_pg, clear_session_id_by_key_pg,
-    delete_session_by_key_pg, disconnect_stale_fixed_session_by_key_pg,
+    HookSessionUpsert, clear_session_id_by_key_pg, disconnect_stale_fixed_session_by_key_pg,
     gc_stale_thread_sessions_with_probe_pg, load_force_kill_session_pg,
     load_provider_session_ids_pg, load_session_rebind_context_pg, rebind_session_provider_pg,
     refresh_session_heartbeat_by_key_to_unix_nanos_pg, session_last_seen_unix_nanos_pg,
     update_raw_provider_transcript_len_watermark_pg,
+};
+use crate::services::dispatched_sessions::hosted_cleanup::{
+    cleanup_disconnected_sessions_pg, delete_session_by_key_pg,
 };
 use crate::services::platform::tmux::SessionPresence;
 use serde_json::{Value, json};
@@ -3300,5 +3302,168 @@ async fn canonical_identity_hosted_handoff_preserves_both_rows_pg() {
             );
         }
     }
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn hosted_execution_cleanup_deletes_owned_retired_rows_with_non_tmux_markers_pg() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for (site_index, site) in ["bulk", "explicit", "gc"].into_iter().enumerate() {
+        let mut keys = Vec::new();
+        for (index, marker) in ["herdr", "process", "unknown", "unreadable"]
+            .into_iter()
+            .enumerate()
+        {
+            let name = format!("AgentDesk-claude-retired-{site}-{marker}");
+            let key = format!("test-host:{name}");
+            let channel = format!("431{site_index}{index}");
+            insert_session(&pool, &key, "disconnected", Some(&channel)).await;
+            set_identity(&pool, &key, &channel).await;
+            set_raw(
+                &pool,
+                &key,
+                Some(wire(&record(
+                    &owner(&channel),
+                    "retired",
+                    HostedState::Retired,
+                ))),
+            )
+            .await;
+            let path = crate::services::tmux_common::session_temp_path(&name, "host_kind");
+            if marker == "unreadable" {
+                std::fs::create_dir(path).unwrap();
+            } else {
+                std::fs::write(path, marker).unwrap();
+            }
+            keys.push(key);
+        }
+        match site {
+            "bulk" => assert_eq!(cleanup_disconnected_sessions_pg(&pool).await.unwrap(), 4),
+            "explicit" => {
+                for key in &keys {
+                    assert_eq!(
+                        delete_session_by_key_pg(&pool, key).await.unwrap().deleted,
+                        1
+                    );
+                }
+            }
+            _ => {
+                let deleted = gc_stale_thread_sessions_with_probe_pg(&pool, |_| async {
+                    SessionPresence::Missing
+                })
+                .await;
+                assert_eq!(deleted.len(), 4);
+            }
+        }
+        assert!(remaining_keys(&pool).await.is_empty(), "{site}");
+    }
+    pool.close().await;
+    db.drop().await;
+    drop(runtime);
+}
+
+#[tokio::test]
+async fn hosted_execution_cleanup_preserves_failed_and_unknown_marker_snapshots_pg() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for (index, marker) in ["unknown", "read-failed"].into_iter().enumerate() {
+        let name = format!("AgentDesk-claude-snapshot-{marker}");
+        let key = format!("test-host:{name}");
+        insert_session(&pool, &key, "disconnected", Some(&format!("432{index}"))).await;
+        let path = crate::services::tmux_common::session_temp_path(&name, "host_kind");
+        if marker == "read-failed" {
+            std::fs::write(path, [0xff, 0xfe]).unwrap();
+        } else {
+            std::fs::write(path, "future-host").unwrap();
+        }
+        let candidate = load_session_delete_candidate_pg(&pool, &key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(candidate.is_legacy());
+        assert!(candidate.record_deletable());
+        assert!(
+            !crate::services::tmux_turn_liveness::cleanup_host::cleanup_row_deletable(&candidate)
+        );
+        assert!(delete_session_by_key_pg(&pool, &key).await.is_err());
+    }
+    assert_eq!(cleanup_disconnected_sessions_pg(&pool).await.unwrap(), 0);
+    let deleted = gc_stale_thread_sessions_with_probe_pg(&pool, |_| async {
+        panic!("preserved markers must not reach the probe")
+    })
+    .await;
+    assert!(deleted.is_empty());
+    assert_eq!(remaining_keys(&pool).await.len(), 2);
+    pool.close().await;
+    db.drop().await;
+    drop(runtime);
+}
+
+#[tokio::test]
+async fn hosted_execution_cleanup_rechecks_candidate_snapshots_before_apply_pg() {
+    use crate::db::dispatched_sessions::apply_session_delete_pg;
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for (index, change) in ["raw", "status", "key"].into_iter().enumerate() {
+        let key = format!("snapshot-{change}");
+        let channel = format!("433{index}");
+        insert_session(&pool, &key, "disconnected", None).await;
+        set_identity(&pool, &key, &channel).await;
+        set_raw(
+            &pool,
+            &key,
+            Some(wire(&record(&owner(&channel), "old", HostedState::Retired))),
+        )
+        .await;
+        let candidate = load_session_delete_candidate_pg(&pool, &key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::services::tmux_turn_liveness::cleanup_host::cleanup_row_deletable(&candidate)
+        );
+        match change {
+            "raw" => set_raw(&pool, &key, Some(wire(&pending(&owner(&channel), "new")))).await,
+            "status" => {
+                sqlx::query("UPDATE sessions SET status = 'idle' WHERE session_key = $1")
+                    .bind(&key)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                sqlx::query("UPDATE sessions SET session_key = session_key || '-new' WHERE session_key = $1").bind(&key).execute(&pool).await.unwrap();
+            }
+        }
+        assert_eq!(
+            delete_disconnected_sessions_pg(&pool, &[candidate])
+                .await
+                .unwrap(),
+            0,
+            "{change}"
+        );
+    }
+    let key = "snapshot-explicit";
+    insert_session(&pool, key, "idle", None).await;
+    set_identity(&pool, key, "434").await;
+    set_raw(
+        &pool,
+        key,
+        Some(wire(&record(&owner("434"), "old", HostedState::Retired))),
+    )
+    .await;
+    let candidate = load_session_delete_candidate_pg(&pool, key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(crate::services::tmux_turn_liveness::cleanup_host::cleanup_row_deletable(&candidate));
+    set_raw(&pool, key, Some(wire(&pending(&owner("434"), "new")))).await;
+    let result = apply_session_delete_pg(&pool, key, Some(&candidate)).await;
+    assert!(result.is_err_and(|error| error.contains("changed after its hosted execution check")));
+    assert_eq!(remaining_keys(&pool).await.len(), 4);
+    pool.close().await;
     db.drop().await;
 }
