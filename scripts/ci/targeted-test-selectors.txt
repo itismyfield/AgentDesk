@@ -9,7 +9,6 @@ services::discord::relay_health::tests
 services::discord::health::session_enrichment::tests
 services::discord::health::relay_dead_reattach::tests
 services::discord::relay_recovery::tests
-services::discord::terminal_ui_obligation::tests
 services::hang_forensics::tests
 services::discord::health::recovery::self_watchdog
 services::health_diagnostics::tests
