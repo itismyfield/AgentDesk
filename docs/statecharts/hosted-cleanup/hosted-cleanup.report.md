@@ -28,7 +28,7 @@ All configs exceed the tool's 500-state chart budget. Core outputs therefore hav
 
 ## Actions and code correspondence
 
-Coordinates below compare the frozen baseline with the service ownership implementation. The entrypoint and neighboring-route census remains in the S4-11 lane report; this table maps the modeled boundary itself.
+Coordinates below compare the frozen baseline with the service ownership implementation at commit `2ddece1ebb2de1f66c4263c4bc29239b36250ec3`. They refer to those historical snapshots. The entrypoint and neighboring-route census remains in the S4-11 lane report; this table maps the modeled boundary itself.
 
 | Action | Before | After |
 |---|---|---|
@@ -39,7 +39,7 @@ Coordinates below compare the frozen baseline with the service ownership impleme
 | AddAlias | explicit CleanupRow equality includes ordered aliases; bulk SQL recheck does not | same row comparison and bulk SQL projection |
 | ReleasePriorLock | `hosted_execution.rs:772,797` | service `hosted_cleanup.rs:37`; DB wait primitive `hosted_execution.rs:766` |
 | ObserveAfterWait | `hosted_execution.rs:774,777` | `hosted_cleanup.rs:38–41` |
-| ConditionalApply | frozen-baseline bulk DELETE at line 707 and locked explicit DELETE at line 814 | `hosted_execution.rs:697,783`; explicit DB transaction `dispatched_sessions.rs:2552` |
+| ConditionalApply | frozen-baseline bulk DELETE at line 707 and locked explicit DELETE at line 814 | `hosted_execution.rs:697,783`; explicit DB transaction at historical S4-11 line 2552 of `src/db/dispatched_sessions.rs` |
 | Commit / Rollback | one bulk transaction; explicit wait transaction rolls back before actual mutation | same transaction boundaries and order |
 | Restart / Retry | discard uncommitted work and read candidates on a later cleanup invocation | same behavior; at most one modeled restart and transient failure |
 
