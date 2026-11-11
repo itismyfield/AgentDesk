@@ -1,4 +1,4 @@
-// Implementation code SHA bc5cd87fa24778737d23d98b4f959c19e1d42025; documentation-only follow-up.
+// Implementation code SHA 2575421331e507afe3372f66d8fe482a02b45d10; documentation-only follow-up.
 // Hand-authored projection of HerdrBusyHandoff slice A; see the TLC report.
 export const title = "Claude forward handoff: exact pane close, composer hold, boot recovery";
 export const state = (v) => {
