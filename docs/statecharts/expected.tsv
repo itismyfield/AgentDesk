@@ -129,6 +129,11 @@ input-single-path/InputPathStopNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopNotSentLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopBusyNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopProofOverStopLive.cfg	InputPath	-	StoppedLeaves
+session-lifecycle/HerdrHandoffFixed.cfg	HerdrSession	-	-
+session-lifecycle/HerdrHandoffHintBefore.cfg	HerdrSession	-	HandoffProgress
+session-lifecycle/HerdrHandoffPersonBefore.cfg	HerdrSession	-	-
+session-lifecycle/HerdrHandoffQueueBefore.cfg	HerdrSession	-	HandoffProgress
+session-lifecycle/HerdrHandoffTargetBefore.cfg	HerdrSession	NoBusyExit,NoLiteralIntoDraft,NoUnexpectedEnter,NoWrongExecutionExit	HandoffProgress
 session-lifecycle/HerdrPendingRegistrationAfter.cfg	HerdrPendingRegistration	-	-
 session-lifecycle/HerdrPendingRegistrationBefore.cfg	HerdrPendingRegistration	-	PendingReuseBound
 session-lifecycle/HerdrPendingRegistrationBound.cfg	HerdrPendingRegistration	-	-
