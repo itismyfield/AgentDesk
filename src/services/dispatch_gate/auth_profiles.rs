@@ -1,5 +1,6 @@
 //! Account selection for cached rate-limit pressure. Config reads happen at refresh.
 use super::*;
+use crate::services::provider_auth_profile::fallback::FallbackPolicyRuntime;
 static AGENT_FALLBACKS: OnceLock<RwLock<HashMap<String, Vec<String>>>> = OnceLock::new();
 static AGENT_PROFILE: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
 type PressureOverrides = (Option<bool>, Option<u64>, Option<i64>);

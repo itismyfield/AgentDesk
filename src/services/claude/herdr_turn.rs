@@ -19,6 +19,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedCasOutcome, HostedExecution, HostedLookup, HostedLookupKey,
     HostedOwner, HostedRecord, HostedState, bind_pg, load_hosted_execution_pg,
 };
+use crate::domain::provider_auth_profile::ProviderAuthOverlay;
 use crate::services::agent_protocol::{
     NativeTerminalKind, RuntimeHandoff, RuntimeHandoffKind, StreamMessage,
 };
@@ -44,7 +45,6 @@ use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, cancel_requested, herdr_provider_terminal_only,
     poll_output_file_until_result,
 };
-use crate::services::provider_auth_profile::ProviderAuthOverlay;
 use crate::services::session_backend::{
     StreamLineState, process_claude_transcript_line,
     read_claude_tui_output_file_until_result_with_harvest as read_output_file_until_result_with_harvest,
