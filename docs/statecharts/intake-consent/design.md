@@ -271,7 +271,7 @@ cargo는 PATH shim, DEBUG=0/STRIP=none의 dev/test profile, CARGO_TARGET_DIR 변
 | 소계 / 보수 여유 | +450 / +130 | 추가 파일 없음 |
 | **합계** | **16 / +580** | 범위 +400~750 |
 
-d1의 worker_status.rs 수정과 worker_status/authority.rs 신설 계획을 제거(-2파일)하고, actual proof capsule/service scope child/lib 등록 3파일과 ownership mapping 1파일을 추가(+4파일)해 16파일이다. CAS receipt/API는 없어지고 private key/capsule 경계 및 conditional imports 감사 여유가 늘어 d1 +520보다 +60을 잡았다. 시험/공식 생성 목록은 별도 cap 계산이며 손으로 baseline을 올리지 않는다. 1,372줄 intake_outbox.rs는 등록만, 새 독립 책임은 전용 파일에 둔다. 기존 worker 963줄에는 key typename wiring만 더한다.
+d1의 worker_status.rs 수정과 worker_status 산하 authority 모듈 신설 계획을 제거(-2파일)하고, actual proof capsule/service scope child/lib 등록 3파일과 ownership mapping 1파일을 추가(+4파일)해 16파일이다. CAS receipt/API는 없어지고 private key/capsule 경계 및 conditional imports 감사 여유가 늘어 d1 +520보다 +60을 잡았다. 시험/공식 생성 목록은 별도 cap 계산이며 손으로 baseline을 올리지 않는다. 1,372줄 intake_outbox.rs는 등록만, 새 독립 책임은 전용 파일에 둔다. 기존 worker 963줄에는 key typename wiring만 더한다.
 
 16파일·+580은 측정 구현 diff가 아니다. +1200 또는 30파일이 예상되거나 capsule child 배치가 더 큰 module relocation을 요구하면 중단하고 별도 설계한다. 안전 분할은 pure wire/projection을 기존 소비자와 함께 먼저 옮긴 조각, 이어 proof 봉인+issuer+service load+DB consumer를 동시 활성화한 조각이다. naked factory나 dormant public receipt를 중간 단계로 만들지 않는다.
 

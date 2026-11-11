@@ -3,18 +3,24 @@ const assert = require("node:assert/strict");
 
 const { loadPolicy } = require("./support/harness");
 
-function loadCiRecoveryScenario({ cardLifecycle, runConclusion = "failure", failedJob = "Script checks", log = "audit_maintainability: hard-gate direct_discord_sends failed" }) {
+function loadCiRecoveryScenario({
+  cardLifecycle = { status: "in_progress", completed_at: null },
+  runConclusion = "failure", failedJob = "Script checks",
+  log = "audit_maintainability: hard-gate direct_discord_sends failed",
+  prHead = { sha: "sha-1878" }, trackedSha = "sha-1878", runOverrides = {}, extraRuns = []
+}) {
   const upserts = [];
   const blockedReasons = [];
   const execCalls = [];
 
   const { policy, state } = loadPolicy("policies/ci-recovery.js", {
+    globals: { mergeObjectPatch: Object.assign },
     exec(cmd, args) {
       execCalls.push({ cmd, args });
       assert.equal(cmd, "gh");
       const joined = args.join(" ");
       if (joined.includes("pr view 1878") && joined.includes("--json headRefOid")) {
-        return "sha-1878";
+        return prHead.sha;
       }
       if (joined.includes("run list")) {
         return JSON.stringify([
@@ -23,8 +29,10 @@ function loadCiRecoveryScenario({ cardLifecycle, runConclusion = "failure", fail
             status: "completed",
             conclusion: runConclusion,
             headSha: "sha-1878",
-            event: "pull_request"
-          }
+            event: "pull_request",
+            ...runOverrides
+          },
+          ...extraRuns
         ]);
       }
       if (joined.includes("run view 187801") && joined.includes("--json jobs")) {
@@ -76,7 +84,7 @@ function loadCiRecoveryScenario({ cardLifecycle, runConclusion = "failure", fail
             worktree_path: "/tmp/card-1878",
             branch: "wt/card-1878",
             pr_number: 1878,
-            head_sha: "sha-1878",
+            head_sha: trackedSha,
             state: "wait-ci"
           };
         },
@@ -86,7 +94,7 @@ function loadCiRecoveryScenario({ cardLifecycle, runConclusion = "failure", fail
             number: 1878,
             repo: "test/repo",
             branch: "wt/card-1878",
-            sha: "sha-1878",
+            sha: trackedSha,
             worktree_path: "/tmp/card-1878"
           };
         },
@@ -109,6 +117,82 @@ function loadCiRecoveryScenario({ cardLifecycle, runConclusion = "failure", fail
 
   return { policy, state, upserts, blockedReasons, execCalls };
 }
+
+for (const runConclusion of ["success", "failure"]) {
+  for (const headSha of ["sha-old", "", null, undefined]) {
+    test(`ci-recovery ignores ${runConclusion} run with mismatched SHA ${String(headSha)}`, () => {
+      const { policy, state, blockedReasons, execCalls, upserts } = loadCiRecoveryScenario({
+        runConclusion, runOverrides: { headSha }
+      });
+      state.kv.set("ci:card-1878:last_run_id", "187800");
+      policy.onTick1min();
+
+      assert.deepEqual(state.logs.error, []);
+      assert.deepEqual(state.statusCalls, []);
+      assert.deepEqual(state.dispatchCreates, []);
+      assert.deepEqual(state.manualInterventions, []);
+      assert.deepEqual(blockedReasons, []);
+      assert.equal(state.kv.get("ci:card-1878:last_run_id"), "187800");
+      assert.equal(upserts.at(-1).trackingState, "wait-ci");
+      assert.equal(execCalls.filter((call) => call.args[0] === "run").length, 1);
+    });
+  }
+}
+
+for (const sha of ["", null, undefined]) {
+  test(`ci-recovery waits when the PR head is unavailable (${String(sha)})`, () => {
+    const { policy, state, blockedReasons } = loadCiRecoveryScenario({
+      prHead: { sha }, runConclusion: "success", runOverrides: { headSha: sha }
+    });
+    policy.onTick1min();
+
+    assert.deepEqual(state.logs.error, []);
+    assert.deepEqual(state.statusCalls, []);
+    assert.deepEqual(blockedReasons, []);
+    assert.equal(state.kv.has("ci:card-1878:last_run_id"), false);
+  });
+}
+
+test("ci-recovery ignores a running run from a different SHA", () => {
+  const { policy, state, blockedReasons } = loadCiRecoveryScenario({
+    runOverrides: { headSha: "sha-old", status: "in_progress" }
+  });
+  policy.onTick1min();
+
+  assert.deepEqual(state.logs.error, []);
+  assert.deepEqual(blockedReasons, []);
+  assert.equal(state.kv.has("ci:card-1878:last_run_id"), false);
+});
+
+test("ci-recovery keeps SHA-change reset while waiting for a matching run", () => {
+  const { policy, state, blockedReasons } = loadCiRecoveryScenario({
+    trackedSha: "sha-old", runOverrides: { headSha: "sha-old" }
+  });
+  state.kv.set("ci:card-1878:last_run_id", "187801");
+  state.kv.set("ci:card-1878:retry_count", "3");
+  policy.onTick1min();
+
+  assert.deepEqual(state.logs.error, []);
+  assert.equal(state.kv.has("ci:card-1878:last_run_id"), false);
+  assert.equal(state.kv.get("ci:card-1878:retry_count"), "0");
+  assert.equal(state.kv.get("ci:card-1878:head_sha"), "sha-1878");
+  assert.deepEqual(blockedReasons, [{ cardId: "card-1878", reason: "ci:waiting" }]);
+  assert.deepEqual(state.statusCalls, []);
+  assert.deepEqual(state.dispatchCreates, []);
+});
+
+test("ci-recovery selects a matching successful run after a stale failure", () => {
+  const { policy, state, blockedReasons } = loadCiRecoveryScenario({
+    runOverrides: { headSha: "sha-old" },
+    extraRuns: [{ databaseId: 187802, headSha: "sha-1878", status: "completed", conclusion: "success" }]
+  });
+  policy.onTick1min();
+
+  assert.deepEqual(state.logs.error, []);
+  assert.equal(state.statusCalls.at(-1).status, "done");
+  assert.deepEqual(blockedReasons, [{ cardId: "card-1878", reason: null }]);
+  assert.deepEqual(state.dispatchCreates, []);
+});
 
 test("ci-recovery marks failed checks on done fallback PRs as pending handoff", () => {
   const upserts = [];
@@ -242,6 +326,8 @@ test("ci-recovery leaves non-terminal fallback PR failures on the existing rewor
 
   policy.onTick1min();
 
+  assert.deepEqual(state.logs.error, []);
+  assert.equal(state.statusCalls.at(-1).status, "in_progress");
   assert.equal(state.dispatchCreates.length, 1);
   assert.equal(state.dispatchCreates[0].dispatchType, "rework");
   assert.equal(upserts.at(-1).trackingState, "wait-ci");

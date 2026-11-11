@@ -23,6 +23,7 @@ module.exports = function attachReviewTimeouts(timeouts, helpers) {
   var findRecentInflightForSession = helpers.findRecentInflightForSession;
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
+  var activeDispatchStatuses = "('pending', 'dispatched')";
 
   timeouts._section_C = function() {
       // ─── [C] 스테일 리뷰 (dispatch 완료인데 verdict 없음) ──
@@ -38,7 +39,7 @@ module.exports = function attachReviewTimeouts(timeouts, helpers) {
         "AND td.dispatch_type = 'review' AND td.status IN ('completed', 'failed') " +
         "AND kc.review_entered_at IS NOT NULL AND kc.review_entered_at < datetime('now', '-30 minutes') " +
         "AND NOT EXISTS (SELECT 1 FROM task_dispatches td2 WHERE td2.kanban_card_id = kc.id " +
-        "AND td2.dispatch_type IN ('review', 'review-decision') AND td2.status = 'pending')",
+        "AND td2.dispatch_type IN ('review', 'review-decision') AND td2.status IN " + activeDispatchStatuses + ")",
         [cReview]
       );
       for (var k = 0; k < staleReviews.length; k++) {
@@ -66,7 +67,7 @@ module.exports = function attachReviewTimeouts(timeouts, helpers) {
         "  SELECT 1 FROM task_dispatches td " +
         "  WHERE td.kanban_card_id = kc.id " +
         "  AND td.dispatch_type IN ('review', 'review-decision', 'e2e-test') " +
-        "  AND td.status IN ('pending', 'dispatched')" +
+        "  AND td.status IN " + activeDispatchStatuses +
         ") " +
         "AND NOT EXISTS (" +
         "  SELECT 1 FROM task_dispatches td " +
@@ -86,7 +87,7 @@ module.exports = function attachReviewTimeouts(timeouts, helpers) {
         "AND kc.review_entered_at IS NOT NULL " +
         "AND kc.review_entered_at < datetime('now', '-5 minutes') " +
         "AND td.dispatch_type = 'e2e-test' " +
-        "AND td.status IN ('pending', 'dispatched')",
+        "AND td.status IN " + activeDispatchStatuses,
         [nReview]
       );
 
