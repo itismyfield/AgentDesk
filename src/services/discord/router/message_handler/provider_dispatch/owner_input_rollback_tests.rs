@@ -817,6 +817,8 @@ async fn not_sent_intake_records_only_the_later_success_pg() {
         .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
         .unwrap();
     assert_eq!(result, Ok(()), "{}", rig.trace.text());
+    // O adopts the channel while the admitted turn runs, so the turn ends through its delivery.
+    crate::test_support::o_store::adopt_installed(rig.channel.get());
     wait("the submitted native user row", || {
         fs::read_to_string(&rig.transcript)
             .unwrap()
@@ -870,10 +872,11 @@ async fn not_sent_intake_records_only_the_later_success_pg() {
         1
     );
     assert!(
-        rig.mock
+        !rig.mock
             .written_texts()
             .iter()
-            .any(|s| s.contains("delivered exactly once"))
+            .any(|s| s.contains("delivered exactly once")),
+        "O delivers the adopted turn's answer, not Legacy"
     );
     drop(rig);
     pool.close().await;

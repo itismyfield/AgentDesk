@@ -23,3 +23,12 @@ pub(crate) fn commit_o_store(root: &Path, channels: &[u64]) {
     };
     store.begin_era(channels, at, init).expect("an O store era");
 }
+
+/// Commits the installed boot policy's adoption of `channel`, as O's writer would once its init is
+/// readable, for a rig whose turn was admitted unadopted and must end through O's delivery.
+pub(crate) fn adopt_installed(channel: u64) {
+    let candidate = crate::services::tui_o::channel_policy::boot()
+        .and_then(|boot| boot.candidate(channel).cloned())
+        .expect("the installed candidate");
+    assert!(candidate.confirm_store(), "the adoption commits");
+}
