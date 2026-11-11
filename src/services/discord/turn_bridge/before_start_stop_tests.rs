@@ -403,6 +403,7 @@ pub(in crate::services::discord::turn_bridge) async fn actual_fresh_exit(
         } else {
             crate::services::codex::herdr_turn::execute(
                 crate::services::codex::herdr_turn::CodexHerdrTurn {
+                    admission: None,
                     pool: &pool,
                     channel_id: owner.channel_id.parse().unwrap(),
                     owner,

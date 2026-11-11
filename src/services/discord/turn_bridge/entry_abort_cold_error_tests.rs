@@ -298,6 +298,7 @@ impl Cold {
                 crate::services::claude::herdr_turn::execute(turn, ports.as_ref(), sender)
             } else {
                 let turn = crate::services::codex::herdr_turn::CodexHerdrTurn {
+                    admission: None,
                     pool: &pool,
                     channel_id,
                     owner,

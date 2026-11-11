@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::cluster::node_registry::GatewayWaiterGuard;
+use crate::services::turn_orchestrator::{RecoveryGate, RecoveryPass};
 
 mod deferred_restart;
 mod framework_setup;
@@ -32,15 +33,32 @@ pub(in crate::services::discord) async fn restore_queued_and_inflight_for_tests(
 }
 
 /// Opens intake only after this active runtime restored its queues and inflight work.
-pub(in crate::services::discord) async fn complete_active_reconcile(shared: &Arc<SharedData>) {
+#[cfg(test)]
+pub(in crate::services::discord) async fn complete_active_reconcile(
+    shared: &Arc<SharedData>,
+) -> RecoveryGate {
+    complete_active_reconcile_in_pass(shared, &RecoveryPass::new(), RecoveryGate::Complete).await
+}
+
+pub(in crate::services::discord) async fn complete_active_reconcile_in_pass(
+    shared: &Arc<SharedData>,
+    pass: &RecoveryPass,
+    prior: RecoveryGate,
+) -> RecoveryGate {
+    if !prior.is_complete() {
+        return RecoveryGate::Held;
+    }
+    let (gate, ready) =
+        queued_recovery::recover_owned_in_pass(shared, &shared.provider, pass).await;
+    let gate = prior.combine(gate);
+    if !gate.is_complete() {
+        return gate;
+    }
     mark_reconcile_complete(shared);
-    #[cfg(unix)]
-    for channel in
-        crate::services::turn_orchestrator::v2_channels(&shared.provider, &shared.token_hash)
-            .observed_ready()
-    {
+    for channel in ready {
         super::session_transition::wake_installed_owner(shared, channel).await;
     }
+    RecoveryGate::Complete
 }
 
 mod recovery_flush;
@@ -341,15 +359,17 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         o_writer_host::spawn_execution(&shared, &provider, Some(tui_o));
         // REST workers persist the same mailbox state as Gateway runtimes.
         // Restore it before polling new intake; never replay Discord history.
-        queued_recovery::restore_worker_queues(&shared, &provider).await;
-        run_bot_maybe_spawn_intake_worker(&shared, &provider);
-        run_startup_diagnostic_after_reconcile_barrier_for_provider(
-            &provider,
-            startup_reconcile_remaining,
-            startup_doctor_started,
-            health_registry,
-            api_port,
-        )
+        queued_recovery::restore_worker_then(&shared, &provider, || async {
+            run_bot_maybe_spawn_intake_worker(&shared, &provider);
+            run_startup_diagnostic_after_reconcile_barrier_for_provider(
+                &provider,
+                startup_reconcile_remaining,
+                startup_doctor_started,
+                health_registry,
+                api_port,
+            )
+            .await;
+        })
         .await;
         // Its poller or SIGTERM handler takes the shutdown slot once; it takes no gateway lease.
         return;

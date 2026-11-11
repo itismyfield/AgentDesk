@@ -3,6 +3,9 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+mod legacy_hint;
+mod storage_failure;
+
 use super::StreamingTurn;
 use crate::services::claude_tui::busy_inject::Screen;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
@@ -462,6 +465,7 @@ async fn paste_busy(
             dispatch_type: None,
             force_fresh: false,
             submission: None,
+            admission: None,
         };
         execute_front(turn, std::sync::mpsc::channel().0, claim, owner, settled)
     }))
@@ -479,6 +483,7 @@ pub(in crate::services::discord) struct OwnerTurn {
     /// What the start's headless turn knows of its pane for the late native read.
     late: LateRead,
     refusal: std::sync::Arc<Mutex<Option<crate::services::turn_host::HerdrRefusal>>>,
+    admission: Option<crate::services::codex::legacy_hint::ACarrier>,
 }
 
 /// Whether the start's session id names the pane it writes to, and whether its fresh or snapshot
@@ -661,25 +666,12 @@ pub(in crate::services::discord) async fn admit_start(
 
 /// A restarted owner re-adopts the channel's V2 queue, settles a head whose window passed,
 /// projects history and posts owed notices, then wakes its drive.
-pub(in crate::services::discord) async fn recover(shared: &Shared, channel: ChannelId) {
-    use crate::services::discord::queue_io::input_owner::recovery;
-    use crate::services::tui_input::human_frame::history::v2::Registry;
-    let persistence = crate::services::discord::queue_dispatch::persistence_context;
-    let queue = crate::services::turn_orchestrator::v2_queue;
-    let queue = queue(&persistence(shared, &shared.provider, channel), channel);
-    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    let recovered = match (queue, Registry::runtime()) {
-        (Ok(queue), Ok(history)) => {
-            let at = (shared.provider.as_str(), channel.get(), now);
-            let pool = shared.pg_pool.as_ref();
-            recovery::recover(&shared.mailbox(channel), queue, history, pool, at).await
-        }
-        (Err(error), _) | (_, Err(error)) => Err(error),
-    };
-    match recovered {
-        Ok(_) => wake(shared, channel),
-        Err(error) => tracing::warn!(channel_id = channel.get(), %error, "owner recovery held"),
-    }
+pub(in crate::services::discord) async fn recover(
+    shared: &Shared,
+    target: crate::services::turn_orchestrator::OwnedRecoveryTarget,
+    pass: &crate::services::turn_orchestrator::RecoveryPass,
+) -> crate::services::turn_orchestrator::RecoveryGate {
+    legacy_hint::recover(shared, target, pass).await
 }
 
 /// Why a start waits unclaimed: a later event wakes it, or a read of its pane's native turn does.
@@ -691,7 +683,12 @@ enum Wait {
 
 /// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
 /// or the pane the start would take runs a native turn, cannot be read or cannot be named yet.
-async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
+async fn start_waits(
+    shared: &Shared,
+    channel: ChannelId,
+    context: &Value,
+    admission: Option<&legacy_hint::Prepared>,
+) -> Wait {
     use crate::services::discord::inflight::{TurnSource, load_inflight_state_read_only};
     use crate::services::discord::turn_presence::activity::{Activity, activity_now};
     let (provider, id) = (&shared.provider, channel.get());
@@ -700,6 +697,9 @@ async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
         .is_some_and(|row| row.turn_source != TurnSource::Managed);
     if row || rest(provider, id) {
         return Wait::Event;
+    }
+    if let Some(admission) = admission {
+        return admission.wait(shared, channel, context).await;
     }
     if crate::services::tui_o::turn_mode::transcript_turns(id) {
         let busy = activity_now(shared, provider, channel).await.activity != Activity::Idle;
@@ -855,10 +855,11 @@ async fn start_idle(
         channel,
     )
     .await?;
+    let prepared = legacy_hint::prepare(&shared, channel, &front, kept.as_ref()).await?;
     // A start waits unclaimed behind a turn it did not start; that turn's idle wakes the owner.
     let wait = match &kept {
         Some(context) if !InputOrigin::from_context(Some(context)).is_person() => {
-            start_waits(&shared, channel, context).await
+            start_waits(&shared, channel, context, prepared.as_ref()).await
         }
         Some(_) => Wait::Go,
         None => Wait::Go,
@@ -874,6 +875,10 @@ async fn start_idle(
     let (held, holder) = (front.clone(), mailbox.clone());
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
+    let admission = match &prepared {
+        Some(prepared) => Some(prepared.carrier(&mailbox, &claim).await?),
+        None => None,
+    };
     let (settled, answer) = tokio::sync::oneshot::channel();
     let origin = InputOrigin::from_context(kept.as_ref());
     let failed = super::start_failure::Failure::claimed(&mailbox, &claim);
@@ -886,6 +891,7 @@ async fn start_idle(
         origin,
         late: LateRead::default(),
         refusal: refusal.clone(),
+        admission: admission.clone(),
     };
     let now = (std::time::SystemTime::now(), std::time::Instant::now());
     let restore = crate::services::turn_orchestrator::pending_queue_item_to_intervention;
@@ -924,7 +930,8 @@ async fn start_idle(
         }
     };
     let typed = refusal.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if let Some(refusal) = typed
+    if admission.is_none()
+        && let Some(refusal) = typed
         && let Some(kind) = super::start_failure::confirmed(&refusal)
     {
         if failed
@@ -943,7 +950,7 @@ async fn start_idle(
         }
     }
     let turn_mode = crate::services::discord::router::intake_dispatch::TURN_MODE_AWAITED;
-    match (answer.await, started) {
+    let result = match (answer.await, started) {
         (_, Err(error)) if error == WRITER_HELD => {
             hold_start(&holder, channel, &held).await;
             if crate::services::tui_o::writer::host::channel_accepts(channel.get())
@@ -974,7 +981,11 @@ async fn start_idle(
         (Ok(settlement), _) => settlement,
         (Err(_), Err(error)) => Err(format!("NotSent({error:?})")),
         (Err(_), Ok(_)) => Err("NotSent(\"turn_not_started\")".into()),
+    };
+    if let (Some(prepared), Some(carrier)) = (&prepared, &admission) {
+        legacy_hint::finish(&shared, channel, &held, prepared, carrier).await;
     }
+    result
 }
 
 /// A start's settlement while its pane's native turn runs or cannot be read: nothing was sent.
@@ -1020,10 +1031,12 @@ pub(super) fn execute_owned(
         settled,
         origin,
         late,
+        admission,
         ..
     } = owner;
     let turn = StreamingTurn {
         shared: turn.shared.or(runtime.as_ref()),
+        admission: admission.or(turn.admission),
         ..turn
     };
     let session = turn.tmux_session_name.unwrap_or_default();

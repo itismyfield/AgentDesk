@@ -674,6 +674,8 @@ fn p4_final_dispatch_refuses_a_changed_driver_scope_pg() {
         let turn_host = crate::services::turn_host::TurnHost::Tmux;
         let provider = ProviderKind::Claude;
         let turn = StreamingTurn {
+#[cfg(unix)]
+admission: None,
             pool: Some(&host.pool), provider: &provider, prompt: "prepared", session_id: None,
             shared: None,
             working_dir: host._workspace.path().to_str().unwrap(), system_prompt: None,

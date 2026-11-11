@@ -86,6 +86,7 @@ fn run_case(case: Case) {
     rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,"source":"recent_unwrapped",
         "text":"earlier output\n\n›\n\n  gpt-5.5 xhigh · /fixture/workspace","revision":1,"truncated":false}}));
     let turn = CodexHerdrTurn {
+        admission: None,
         pool: &pool,
         owner,
         channel_id: 7272392,
@@ -141,6 +142,7 @@ fn run_case(case: Case) {
                     "actual Codex Herdr submit requires owner scope"
                 );
                 let turn = CodexHerdrTurn {
+                    admission: None,
                     pool: &effect_pool,
                     owner: effect_owner,
                     channel_id: 7272392,

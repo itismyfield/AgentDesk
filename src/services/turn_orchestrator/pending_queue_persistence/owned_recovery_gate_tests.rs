@@ -1,40 +1,4 @@
 use super::*;
-use sha2::{Digest, Sha256};
-
-struct RecoveryPass(String);
-
-#[derive(Debug, PartialEq, Eq)]
-enum RecoveryGate {
-    Complete,
-    Held,
-}
-
-impl RecoveryPass {
-    fn new() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
-    }
-
-    fn gate(&self, discovery: &OwnedRecoveryDiscovery) -> RecoveryGate {
-        if discovery.failed.is_empty() && discovery.namespace_errors.is_empty() {
-            RecoveryGate::Complete
-        } else {
-            RecoveryGate::Held
-        }
-    }
-
-    fn notice_key(&self, failure: &OwnedRecoveryFailure) -> String {
-        let identity = (
-            &failure.provider,
-            &failure.namespace,
-            failure.channel.get(),
-            failure.expected_path.as_os_str().as_encoded_bytes(),
-            &self.0,
-            failure.stage,
-        );
-        let bytes = serde_json::to_vec(&identity).unwrap();
-        format!("boot-queue-io:v1:{}", hex::encode(Sha256::digest(bytes)))
-    }
-}
 
 #[test]
 fn one_pass_keeps_catalog_notice_identity_across_error_changes() {
@@ -46,19 +10,19 @@ fn one_pass_keeps_catalog_notice_identity_across_error_changes() {
         "read permission denied".into(),
     );
     let pass = RecoveryPass::new();
-    let key = pass.notice_key(&failure);
+    let key = pass.notice_key(&failure).unwrap();
     for error in [
         "invalid UTF-8",
         "invalid JSON",
         "unsupported snapshot version",
     ] {
         failure.error = error.into();
-        assert_eq!(pass.notice_key(&failure), key);
+        assert_eq!(pass.notice_key(&failure).unwrap(), key);
     }
     assert_eq!(failure.stage, "catalog_unreadable");
-    assert_ne!(RecoveryPass::new().notice_key(&failure), key);
+    assert_ne!(RecoveryPass::new().notice_key(&failure).unwrap(), key);
     failure.channel = ChannelId::new(8_057_102);
-    assert_ne!(pass.notice_key(&failure), key);
+    assert_ne!(pass.notice_key(&failure).unwrap(), key);
 }
 
 #[test]
@@ -91,4 +55,30 @@ fn discovery_errors_hold_the_prepared_gate_until_the_next_read_recovers() {
         namespace_errors: vec![],
     };
     assert_eq!(pass.gate(&ready), RecoveryGate::Complete);
+}
+
+#[test]
+fn cloned_pass_keeps_normalized_catalog_key_and_held_gate_is_absorbing() {
+    let failure = OwnedRecoveryFailure::new(
+        &ProviderKind::Codex,
+        "gate-fixture",
+        ChannelId::new(8_057_104),
+        PathBuf::from("/fixture/discord_pending_queue/codex/gate-fixture/./8057104.json"),
+        "unreadable".into(),
+    );
+    let pass = RecoveryPass::new();
+    let key = pass.notice_key(&failure).unwrap();
+    let mut normalized = failure.clone();
+    normalized.expected_path =
+        PathBuf::from("/fixture/discord_pending_queue/codex/gate-fixture/8057104.json");
+    assert_eq!(pass.clone().notice_key(&normalized).unwrap(), key);
+    assert_eq!(pass.id(), pass.clone().id());
+    assert_eq!(
+        RecoveryGate::Complete.combine(RecoveryGate::Held),
+        RecoveryGate::Held
+    );
+    assert_eq!(
+        RecoveryGate::Held.combine(RecoveryGate::Complete),
+        RecoveryGate::Held
+    );
 }

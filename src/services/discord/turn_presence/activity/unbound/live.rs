@@ -927,7 +927,6 @@ pub(in crate::services::discord::turn_presence::activity) struct Stamp {
 }
 #[path = "canonical_target.rs"]
 mod canonical_target;
-#[cfg(test)]
 #[path = "live/codex_marker_absence.rs"]
 pub(in crate::services::discord::turn_presence::activity) mod codex_marker_absence;
 #[path = "completed_scheduled.rs"]

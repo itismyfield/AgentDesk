@@ -2,11 +2,11 @@ use super::*;
 use crate::services::codex::legacy_hint::evidence::AbsenceStamp;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(in crate::services::discord::turn_presence::activity) struct LegacyMarkerOnly;
+pub(in crate::services::discord) struct LegacyMarkerOnly;
 
 impl super::super::super::Reading {
     // Classifies a stored snapshot; publication and the physical fence remain caller obligations.
-    pub(in crate::services::discord::turn_presence::activity) fn marker_only_legacy(
+    pub(in crate::services::discord) fn marker_only_legacy(
         &self,
         expected: &AbsenceStamp,
         current: &AbsenceStamp,
@@ -45,9 +45,11 @@ impl super::super::super::Reading {
         let key =
             adk_session::build_namespaced_session_key(&shared.token_hash, &snapshot.provider, name);
         (row.record == HostedRecord::Legacy
-            && row.session_id() == expected.row
+            && matches!(&expected.expected,
+                crate::services::turn_orchestrator::MarkerRowExpectation::Legacy {
+                    row_id, exact_session_key, ..
+                } if row.session_id() == *row_id && key == *exact_session_key)
             && owner == expected.owner
-            && key == expected.exact_key
             && matches!(snapshot.files.row, Ok(None))
             && trace.process.is_none()
             && trace.runtime == Ok(None)
@@ -63,5 +65,6 @@ impl super::super::super::Reading {
     }
 }
 
+#[cfg(test)]
 #[path = "codex_marker_absence_tests.rs"]
 mod tests;

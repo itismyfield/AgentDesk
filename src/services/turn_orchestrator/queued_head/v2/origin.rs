@@ -30,9 +30,13 @@ impl SnapshotV2 {
         at_ms: u64,
     ) {
         for index in removed {
-            let Some(message_id) = self.items.get(index).map(|item| item.message_id) else {
+            let Some(item) = self.items.get(index) else {
                 continue;
             };
+            let message_id = item.message_id;
+            let identity = super::sources::identity(item);
+            self.a_control
+                .retain(|control| control.identity != identity);
             let origins = (self.admission_binds.iter())
                 .filter(|b| matches!(b.at, BindAt::Queued { index: at, .. } if at == index))
                 .filter_map(origin_of)

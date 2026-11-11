@@ -77,6 +77,7 @@ pub(crate) struct CodexHerdrTurn<'a> {
     pub goals: Option<bool>,
     pub compact_token_limit: Option<u64>,
     pub cancel: Option<Arc<CancelToken>>,
+    pub admission: Option<super::legacy_hint::ACarrier>,
 }
 
 /// What a turn takes from its caller: the launch host and the source attach.
@@ -148,6 +149,18 @@ pub(crate) fn execute(
     }
     let result = (|| {
         use crate::services::claude_tui::owner_input::Lineage;
+        let admission = turn
+            .admission
+            .as_ref()
+            .map(super::legacy_hint::ACarrier::take)
+            .transpose()?;
+        if let Some(admission) = &admission
+            && !matches!(turn.row, None | Some(HostedRecord::Legacy))
+        {
+            return Err(
+                admission.refuse("row", "marker carrier cannot enter an existing execution")
+            );
+        }
         let (nonce, lineage) = match turn.row {
             Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
                 not_held(&record.execution_nonce)?;
@@ -162,7 +175,10 @@ pub(crate) fn execute(
             Some(HostedRecord::Unknown(_)) => {
                 return Err("herdr turn: unreadable hosted record".into());
             }
-            _ => (fresh_launch(&turn, &runtime, ports)?, Lineage::Created),
+            _ => (
+                fresh_launch_admitted(&turn, &runtime, ports, admission)?,
+                Lineage::Created,
+            ),
         };
         first_prompt(&turn, &runtime, ports, &nonce, lineage, sender)
     })();
@@ -202,6 +218,15 @@ fn fresh_launch(
     runtime: &Handle,
     ports: &dyn CodexHerdrPorts,
 ) -> Result<String, String> {
+    fresh_launch_admitted(turn, runtime, ports, None)
+}
+
+fn fresh_launch_admitted(
+    turn: &CodexHerdrTurn<'_>,
+    runtime: &Handle,
+    ports: &dyn CodexHerdrPorts,
+    admission: Option<super::legacy_hint::AStartContext>,
+) -> Result<String, String> {
     let launchable = codex_herdr_launch_admissible()
         .map_err(|refused| format!("codex herdr launch refused: {refused:?}"))?;
     let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
@@ -220,7 +245,23 @@ fn fresh_launch(
         Ok(command)
     };
     let launch = launch_of(turn, Some(&home));
-    launched(runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host)))
+    let result = match admission {
+        Some(admission) => runtime.block_on(
+            crate::services::herdr_launch::launch_herdr_session_with_admission(
+                turn.pool, launch, prepare, host, admission,
+            ),
+        ),
+        None => runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host)),
+    };
+    if turn
+        .admission
+        .as_ref()
+        .is_some_and(super::legacy_hint::ACarrier::is_refused)
+        && let Err(crate::services::herdr_launch::HerdrLaunchError::NotSent(detail)) = &result
+    {
+        return Err(detail.clone());
+    }
+    launched(result)
 }
 
 /// A Pending execution whose first prompt never reached its composer: no hook of it is logged and

@@ -52,17 +52,21 @@ async fn marker_only_legacy_reads_private_snapshot_instead_of_public_reason_pg()
         )),
     ];
     std::fs::create_dir_all(paths[0].parent().unwrap()).unwrap();
+    let owner = HostedOwner {
+        provider: "codex".into(),
+        discord_token_hash: rig.shared.token_hash.clone(),
+        channel_id: id.to_string(),
+        logical_key: name,
+        owner_node: "test-node".into(),
+        runtime_root: rig.root.path().display().to_string(),
+    };
     let evidence = AbsenceStamp {
-        owner: HostedOwner {
-            provider: "codex".into(),
-            discord_token_hash: rig.shared.token_hash.clone(),
-            channel_id: id.to_string(),
-            logical_key: name,
-            owner_node: "test-node".into(),
-            runtime_root: rig.root.path().display().to_string(),
+        owner: owner.clone(),
+        expected: crate::services::turn_orchestrator::MarkerRowExpectation::Legacy {
+            owner: (&owner).into(),
+            row_id: row.session_id(),
+            exact_session_key: key,
         },
-        row: row.session_id(),
-        exact_key: key,
         front: QueueIdentity {
             primary: id,
             queued_generation: 1,
@@ -81,7 +85,12 @@ async fn marker_only_legacy_reads_private_snapshot_instead_of_public_reason_pg()
         Some(LegacyMarkerOnly)
     );
     let mut wrong = evidence.clone();
-    wrong.row += 1;
+    let crate::services::turn_orchestrator::MarkerRowExpectation::Legacy { row_id, .. } =
+        &mut wrong.expected
+    else {
+        unreachable!()
+    };
+    *row_id += 1;
     assert!(reading.marker_only_legacy(&wrong, &wrong).is_none());
     let snapshot = reading.unbound.as_mut().unwrap().snapshot.as_mut().unwrap();
     snapshot.exact = HostedLookup::Missing;

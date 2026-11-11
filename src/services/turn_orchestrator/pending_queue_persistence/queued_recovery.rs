@@ -11,11 +11,11 @@ use std::io;
 #[path = "queued_recovery_tests.rs"]
 mod tests;
 
-#[cfg(unix)]
 #[path = "owned_recovery_discovery.rs"]
 mod discovery;
 #[cfg(unix)]
-pub(crate) use discovery::{OwnedRecoveryDiscovery, OwnedRecoveryFailure};
+pub(crate) use discovery::{OwnedRecoveryDiscovery, OwnedRecoveryFailure, OwnedRecoveryTarget};
+pub(crate) use discovery::{RecoveryGate, RecoveryPass};
 
 #[derive(Default)]
 pub(crate) struct SnapshotCatalog {

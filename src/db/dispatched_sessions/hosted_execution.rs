@@ -301,6 +301,121 @@ pub(crate) async fn load_hosted_execution_pg(
     })
 }
 
+/// Every account's row that may name the same physical logical session, Legacy rows included.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MarkerOwnerCandidate {
+    pub(crate) session_id: i64,
+    pub(crate) session_key: Option<String>,
+    pub(crate) identity: [Option<String>; 4],
+    pub(crate) raw: Option<Value>,
+    pub(crate) aliases: Vec<String>,
+}
+
+pub(crate) async fn load_marker_owner_candidates_pg(
+    pool: &PgPool,
+    logical_key: &str,
+) -> Result<Vec<MarkerOwnerCandidate>, String> {
+    if logical_key.is_empty() {
+        return Err("empty marker owner logical key".into());
+    }
+    let rows = sqlx::query(
+        "SELECT s.id, s.session_key, s.provider, s.identity_kind, s.discord_token_hash,
+                s.channel_id, s.hosted_execution,
+                ARRAY(SELECT a.session_key FROM session_key_aliases a
+                      WHERE a.session_id = s.id ORDER BY a.session_key) AS aliases
+         FROM sessions s
+         WHERE s.hosted_execution->'owner'->>'logical_key' = $1
+            OR s.session_key = $1 OR right(s.session_key, length($1) + 1) = ':' || $1
+            OR EXISTS(SELECT 1 FROM session_key_aliases a WHERE a.session_id = s.id
+                AND (a.session_key = $1 OR right(a.session_key, length($1) + 1) = ':' || $1))
+         ORDER BY s.id",
+    )
+    .bind(logical_key)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("read marker owner candidates: {e}"))?;
+    rows.iter()
+        .map(|row| {
+            Ok(MarkerOwnerCandidate {
+                session_id: row.try_get("id")?,
+                session_key: row.try_get("session_key")?,
+                identity: [
+                    row.try_get("provider")?,
+                    row.try_get("identity_kind")?,
+                    row.try_get("discord_token_hash")?,
+                    row.try_get("channel_id")?,
+                ],
+                raw: row.try_get("hosted_execution")?,
+                aliases: row.try_get("aliases")?,
+            })
+        })
+        .collect::<Result<_, sqlx::Error>>()
+        .map_err(|e| format!("decode marker owner candidates: {e}"))
+}
+
+/// Reserving a sequence value grants no row or execution; the queue persists it before insertion.
+pub(crate) async fn reserve_marker_row_id_pg(pool: &PgPool) -> Result<i64, String> {
+    sqlx::query_scalar("SELECT nextval(pg_get_serial_sequence('sessions', 'id'))")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("reserve missing marker row: {e}"))
+}
+
+/// Inserts only the durably reserved placeholder; a conflicting owner's row is never adopted.
+pub(crate) async fn prepare_marker_missing_pg(
+    pool: &PgPool,
+    owner: &HostedOwner,
+    exact_key: &str,
+    reserved_id: i64,
+) -> Result<Option<HostedObservation>, String> {
+    if reserved_id <= 0
+        || owner.provider != "codex"
+        || !filled(&[
+            &owner.discord_token_hash,
+            &owner.channel_id,
+            &owner.logical_key,
+            &owner.owner_node,
+            &owner.runtime_root,
+        ])
+        || !exact_key.starts_with(&format!("{}/{}/", owner.provider, owner.discord_token_hash))
+        || !exact_key.ends_with(&format!(":{}", owner.logical_key))
+    {
+        return Err("invalid missing marker owner".into());
+    }
+    sqlx::query(
+        "INSERT INTO sessions (id, session_key, provider, status, identity_kind,
+                discord_token_hash, channel_id, hosted_execution)
+         VALUES ($1, $2, $3, 'idle', 'discord_channel', $4, $5, NULL)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(reserved_id)
+    .bind(exact_key)
+    .bind(&owner.provider)
+    .bind(&owner.discord_token_hash)
+    .bind(&owner.channel_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("prepare missing marker owner: {e}"))?;
+    let id = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM sessions WHERE id = $1 AND session_key = $2 AND provider = $3
+             AND identity_kind = 'discord_channel' AND discord_token_hash = $4
+             AND channel_id = $5 AND hosted_execution IS NULL",
+    )
+    .bind(reserved_id)
+    .bind(exact_key)
+    .bind(&owner.provider)
+    .bind(&owner.discord_token_hash)
+    .bind(&owner.channel_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("reobserve reserved marker row: {e}"))?;
+    Ok(id.map(|session_id| HostedObservation {
+        session_id,
+        raw: None,
+        record: HostedRecord::Legacy,
+    }))
+}
+
 /// The record states of a live execution.
 pub(crate) const LIVE: &[&str] = &["pending", "bound"];
 
@@ -805,3 +920,7 @@ pub(crate) async fn delete_locked_session_pg(
 #[cfg(test)]
 #[path = "hosted_execution_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "hosted_execution/marker_candidates_tests.rs"]
+mod marker_candidates_tests;

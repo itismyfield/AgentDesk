@@ -288,6 +288,7 @@ impl HerdrOwner {
         prompt: &'a str,
     ) -> crate::services::codex::herdr_turn::CodexHerdrTurn<'a> {
         crate::services::codex::herdr_turn::CodexHerdrTurn {
+            admission: None,
             pool,
             owner: self.record("codex", HostedState::Pending).owner,
             channel_id: self.channel,

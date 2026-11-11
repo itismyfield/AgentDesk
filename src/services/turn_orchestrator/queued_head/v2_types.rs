@@ -203,6 +203,7 @@ pub(crate) enum StartFailureKind {
     EndpointNotLocal,
     ExecutorNotWired,
     HostedHerdrUnconfigured,
+    MarkerAdmissionRefused,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct StartFailureDetail {

@@ -37,6 +37,7 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!("  [{ts}] ✓ Utility bot reconcile — skipped recovery");
         } else {
+            let pass = RecoveryPass::new();
             // #429: Recover restart-gap messages first so new user input gets queued
             // within seconds of bot ready instead of waiting behind slower
             // Discord API-heavy inflight/thread-map recovery passes.
@@ -45,12 +46,14 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
 
             gc_stale_fixed_working_sessions(&shared_for_tmux2).await;
 
-            let stale_cards_to_delete = super::queued_recovery::restore_queued_and_inflight_work(
-                &http_for_tmux,
-                &shared_for_tmux2,
-                &provider_for_restore,
-            )
-            .await;
+            let (stale_cards_to_delete, gate) =
+                super::queued_recovery::restore_queued_and_inflight_in_pass(
+                    &http_for_tmux,
+                    &shared_for_tmux2,
+                    &provider_for_restore,
+                    &pass,
+                )
+                .await;
 
             // #226: Collect channels that recovery already handled (spawned + ended watchers).
             // restore_tmux_watchers must skip these to prevent duplicate watcher creation.
@@ -117,10 +120,17 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
             .await;
 
             // #122: Reconcile phase complete — open intake
-            crate::services::discord::runtime_bootstrap::complete_active_reconcile(
-                &shared_for_restart_reports,
-            )
-            .await;
+            let gate =
+                crate::services::discord::runtime_bootstrap::complete_active_reconcile_in_pass(
+                    &shared_for_restart_reports,
+                    &pass,
+                    gate,
+                )
+                .await;
+            if !gate.is_complete() {
+                tracing::warn!(provider = %provider_for_restore.as_str(), "reconcile held; intake remains closed");
+                return;
+            }
             let ts = chrono::Local::now().format("%H:%M:%S");
             // #5462 S5 §7.2-4: every provider bot prints this line, so untagged
             // it cannot say WHICH intake opened — and the reconcile-window

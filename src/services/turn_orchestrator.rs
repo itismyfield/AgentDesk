@@ -87,7 +87,9 @@ use pending_queue_persistence::load_channel_pending_queue;
 #[cfg(test)]
 pub(crate) use pending_queue_persistence::save_channel_queue;
 #[cfg(unix)]
-pub(crate) use pending_queue_persistence::v2_channels;
+pub(crate) use pending_queue_persistence::{
+    OwnedRecoveryDiscovery, OwnedRecoveryFailure, OwnedRecoveryTarget, v2_channels,
+};
 pub(crate) use pending_queue_persistence::{
     PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens,
     load_channel_pending_dispatch_marker, load_channel_pending_dispatch_marker_checked,
@@ -95,6 +97,7 @@ pub(crate) use pending_queue_persistence::{
     pending_queue_item_to_intervention, remove_channel_pending_queue_files_all_tokens,
     save_channel_pending_dispatch_marker, v2_held_sources, warn_legacy_pending_queue_files,
 };
+pub(crate) use pending_queue_persistence::{RecoveryGate, RecoveryPass};
 #[cfg(test)]
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
@@ -110,7 +113,11 @@ use queue_cancellation::{
 use queue_enqueue::enqueue_behind;
 #[cfg(test)]
 pub(crate) use queue_enqueue::enqueue_intervention;
-pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim, prefix};
+pub(crate) use queued_head::{
+    HeadOutcome, HeadSettle, MarkerControl, MarkerEntry, MarkerNativeSource, MarkerOwner,
+    MarkerPathSnapshot, MarkerRowExpectation, MarkerStage, MarkerWitness, QueueIdentity,
+    QueueOwner, QueuedHeadClaim, prefix,
+};
 pub(crate) use queued_head::{OwedDrop, TurnBind, Waiting, v2_queue, waiting_origin};
 /// An owner's queue front: its slot's ticket and the original.
 pub(crate) type OwnerFront = (Option<String>, PendingQueueItem);

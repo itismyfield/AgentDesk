@@ -1,6 +1,6 @@
 mod command_streaming;
 mod direct_reader;
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) mod legacy_hint;
 pub(crate) use command_streaming::{CommandStreamingRequest, execute_command_streaming_observed};
 #[cfg(unix)]

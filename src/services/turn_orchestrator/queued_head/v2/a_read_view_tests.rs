@@ -20,6 +20,7 @@ fn control() -> Value {
             "sources":[{"message_id":42,"queued_generation":7}]},
         "front_receipt":"ticket-a",
         "epoch":"epoch-a",
+        "witness":{"nonce":null,"source":null},
         "expected":{"kind":"legacy","row_id":17,"exact_session_key":"logical-a",
             "owner":{"provider":"codex","discord_token_hash":"fixture-token",
                 "channel_id":"42","logical_key":"logical-a","owner_node":"fixture-node",

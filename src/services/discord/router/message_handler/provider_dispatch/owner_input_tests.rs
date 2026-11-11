@@ -332,6 +332,8 @@ impl Rig {
     ) -> Result<(), String> {
         let host = TurnHost::Tmux;
         let turn = StreamingTurn {
+            #[cfg(unix)]
+            admission: None,
             pool: self.pool.get(),
             shared: None,
             provider,

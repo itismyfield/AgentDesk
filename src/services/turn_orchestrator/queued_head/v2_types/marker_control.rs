@@ -1,6 +1,6 @@
 //! Wire values for unfinished marker cleanup; no repository or runtime operations.
 use super::{AttemptIdentity, QueueIdentity};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +23,7 @@ pub(crate) struct MarkerControl {
     pub(crate) epoch: String,
     pub(crate) expected: MarkerRowExpectation,
     pub(crate) paths: Vec<MarkerPathSnapshot>,
+    pub(crate) witness: MarkerWitness,
     pub(crate) stage: MarkerStage,
     pub(crate) attempt: Option<AttemptIdentity>,
 }
@@ -32,6 +33,8 @@ pub(crate) struct MarkerControl {
 pub(crate) enum MarkerRowExpectation {
     Missing {
         owner: MarkerOwner,
+        #[serde(default)]
+        reserved_row_id: Option<i64>,
     },
     Legacy {
         owner: MarkerOwner,
@@ -61,4 +64,28 @@ pub(crate) enum MarkerStage {
     Intent,
     Receipt,
     Outbox { event_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MarkerWitness {
+    #[serde(deserialize_with = "present")]
+    pub(crate) nonce: Option<String>,
+    #[serde(deserialize_with = "present")]
+    pub(crate) source: Option<MarkerNativeSource>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MarkerNativeSource {
+    pub(crate) path: PathBuf,
+    pub(crate) session: String,
+    pub(crate) nonce: String,
+    pub(crate) proof_seq: u64,
+    pub(crate) declared_file: [u64; 2],
+    pub(crate) file: [u64; 2],
+}
+
+fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(de: D) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(de)
 }

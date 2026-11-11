@@ -316,8 +316,10 @@ fn owned_discovery_preserves_named_failures_without_adopting_them() {
         .with_writer(move || writer.clone())
         .finish();
     crate::logging::test_capture::pin_callsite_interest();
-    let ready = tracing::subscriber::with_default(subscriber, || discovery.observed_ready());
-    assert_eq!(ready, vec![ChannelId::new(8_057_126)]);
+    let gate =
+        tracing::subscriber::with_default(subscriber, || RecoveryPass::new().gate(&discovery));
+    assert_eq!(gate, RecoveryGate::Held);
+    assert_eq!(discovery.ready, vec![ChannelId::new(8_057_126)]);
     let captured = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
     assert_eq!(
         captured

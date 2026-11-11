@@ -378,6 +378,43 @@ pub(crate) async fn launch_herdr_session(
     prepare: impl FnOnce(&PreparedIncarnation) -> Result<HerdrLaunchCommand, String>,
     host: Arc<dyn HerdrLaunchHost>,
 ) -> Result<HerdrLaunchOutcome, HerdrLaunchError> {
+    launch_herdr_session_inner(
+        pool,
+        launch,
+        prepare,
+        host,
+        #[cfg(unix)]
+        None,
+    )
+    .await
+}
+
+#[cfg(unix)]
+pub(crate) async fn launch_herdr_session_with_admission(
+    pool: &PgPool,
+    launch: HerdrLaunch,
+    prepare: impl FnOnce(&PreparedIncarnation) -> Result<HerdrLaunchCommand, String>,
+    host: Arc<dyn HerdrLaunchHost>,
+    admission: crate::services::codex::legacy_hint::AStartContext,
+) -> Result<HerdrLaunchOutcome, HerdrLaunchError> {
+    let result = launch_herdr_session_inner(pool, launch, prepare, host, Some(&admission)).await;
+    if let Err(error) = &result
+        && !admission.has_result()
+    {
+        return Err(HerdrLaunchError::NotSent(
+            admission.refuse("observe", format!("{error:?}")),
+        ));
+    }
+    result
+}
+
+async fn launch_herdr_session_inner(
+    pool: &PgPool,
+    launch: HerdrLaunch,
+    prepare: impl FnOnce(&PreparedIncarnation) -> Result<HerdrLaunchCommand, String>,
+    host: Arc<dyn HerdrLaunchHost>,
+    #[cfg(unix)] admission: Option<&crate::services::codex::legacy_hint::AStartContext>,
+) -> Result<HerdrLaunchOutcome, HerdrLaunchError> {
     let endpoint = admit(launch.endpoint.as_ref())?.clone();
     let mode = host.mode(&endpoint);
     let admitted = if mode == EndpointMode::LegacyDedicated {
@@ -396,6 +433,13 @@ pub(crate) async fn launch_herdr_session(
     .await
     .map_err(HerdrLaunchError::Prepare)?;
     let observed = load_row(pool, &owner).await?;
+    #[cfg(unix)]
+    if let Some(admission) = &admission {
+        admission
+            .validate(pool, &owner, &observed, &fence)
+            .await
+            .map_err(HerdrLaunchError::NotSent)?;
+    }
     if let HostedRecord::Known(record) = &observed.record
         && let Some(location) = awaiting_evidence(record, &endpoint)
     {

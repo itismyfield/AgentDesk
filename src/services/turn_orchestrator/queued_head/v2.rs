@@ -10,6 +10,7 @@ pub(crate) mod actor;
 mod attempt;
 mod commit;
 pub(crate) mod control;
+pub(crate) mod legacy_hint;
 mod migration;
 pub(crate) mod origin;
 pub(crate) mod projection;
@@ -35,6 +36,7 @@ pub(crate) struct Owner {
     front_grant: Option<Front>,
     /// The front a turn claimed from its grant; one reserve takes it.
     front_claim: Option<Front>,
+    a_claim_live: Option<legacy_hint::ClaimLife>,
     /// The current claim's process-unique number: another owner's or an earlier claim never reserves.
     claim_number: u64,
     /// The front a refusal before any key returned to wait for a real wake; never persisted.
@@ -176,6 +178,7 @@ impl Owner {
             unacknowledged: Vec::new(),
             front_grant: None,
             front_claim: None,
+            a_claim_live: None,
             held: None,
             claim_number: 0,
             incarnation: uuid::Uuid::new_v4(),
@@ -421,6 +424,7 @@ impl Owner {
             return None;
         }
         static CLAIMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        self.a_claim_live = None;
         self.claim_number = CLAIMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.front_claim = self.front_grant.take();
         self.front_claim.clone()
@@ -470,6 +474,7 @@ impl Owner {
             return Err("not the owner's unattempted front".into());
         }
         self.front_grant = None;
+        self.a_claim_live = None;
         self.held = Some(front.1.message_id);
         Ok(())
     }
@@ -481,6 +486,7 @@ impl Owner {
     /// Withdraws that right; only taking or replacing the queue front itself does.
     fn revoke_front(&mut self) {
         (self.front_grant, self.front_claim) = (None, None);
+        self.a_claim_live = None;
     }
 
     /// Whether any source the owner holds, queued, attempted, retained or settled, is `message`.

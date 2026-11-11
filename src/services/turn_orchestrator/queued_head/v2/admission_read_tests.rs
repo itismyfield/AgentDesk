@@ -16,6 +16,7 @@ fn control() -> MarkerControl {
         "identity":{"primary":42,"queued_generation":5,
             "sources":[{"message_id":42,"queued_generation":5}]},
         "front_receipt":"ticket-a","epoch":"epoch-a",
+        "witness":{"nonce":null,"source":null},
         "expected":{"kind":"legacy","row_id":17,"exact_session_key":"logical-a",
             "owner":{"provider":"codex","discord_token_hash":"fixture-token",
                 "channel_id":"8057101","logical_key":"logical-a","owner_node":"fixture-node",

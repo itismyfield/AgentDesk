@@ -96,8 +96,7 @@ async fn tell(
 #[path = "notice_tests.rs"]
 mod tests;
 
-#[cfg(test)]
-pub(crate) async fn drain_synchronously_for_tests(
+pub(crate) async fn drain_confirmed(
     pool: &sqlx::PgPool,
     handle: &ChannelMailboxHandle,
     provider: &str,
@@ -120,3 +119,6 @@ pub(crate) async fn drain_synchronously_for_tests(
         .await?;
     finish(pool, handle, provider, channel, &namespace, &owed).await
 }
+
+#[cfg(test)]
+pub(crate) use drain_confirmed as drain_synchronously_for_tests;

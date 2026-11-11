@@ -4,17 +4,21 @@ fn stamp(root: &Path) -> AbsenceStamp {
     let canonical = root.join("canonical");
     let legacy = root.join("legacy");
     std::fs::write(&canonical, "codex_tui").unwrap();
+    let owner = HostedOwner {
+        provider: "codex".into(),
+        discord_token_hash: "token".into(),
+        channel_id: "41".into(),
+        logical_key: "AgentDesk-codex-proof".into(),
+        owner_node: "node".into(),
+        runtime_root: root.display().to_string(),
+    };
     AbsenceStamp {
-        owner: HostedOwner {
-            provider: "codex".into(),
-            discord_token_hash: "token".into(),
-            channel_id: "41".into(),
-            logical_key: "AgentDesk-codex-proof".into(),
-            owner_node: "node".into(),
-            runtime_root: root.display().to_string(),
+        owner: owner.clone(),
+        expected: MarkerRowExpectation::Legacy {
+            owner: (&owner).into(),
+            row_id: 7,
+            exact_session_key: "exact-key".into(),
         },
-        row: 7,
-        exact_key: "exact-key".into(),
         front: QueueIdentity {
             primary: 41,
             queued_generation: 3,
@@ -37,13 +41,22 @@ fn marker_absence_requires_exact_row_owner_front_epoch_and_paths() {
     assert!(original.matches(&original.clone()));
     let mut changed = Vec::new();
     let mut row = original.clone();
-    row.row += 1;
+    let MarkerRowExpectation::Legacy { row_id, .. } = &mut row.expected else {
+        unreachable!()
+    };
+    *row_id += 1;
     changed.push(row);
     let mut owner = original.clone();
     owner.owner.discord_token_hash.push('x');
     changed.push(owner);
     let mut key = original.clone();
-    key.exact_key.push('x');
+    let MarkerRowExpectation::Legacy {
+        exact_session_key, ..
+    } = &mut key.expected
+    else {
+        unreachable!()
+    };
+    exact_session_key.push('x');
     changed.push(key);
     let mut front = original.clone();
     front.front.queued_generation += 1;

@@ -80,6 +80,8 @@ pub(super) struct StreamingTurn<'a> {
     pub force_fresh: bool,
     /// Pre-payload fence of a managed Claude TUI turn; only the Claude legacy driver reads it.
     pub submission: Option<&'a ManagedSubmission>,
+    #[cfg(unix)]
+    pub admission: Option<crate::services::codex::legacy_hint::ACarrier>,
 }
 
 pub(super) async fn observe_codex_turn(
@@ -625,6 +627,7 @@ mod herdr {
                 goals: turn.codex_goals,
                 compact_token_limit: turn.compact_token_limit,
                 cancel: Some(Arc::clone(&turn.cancel)),
+                admission: turn.admission.clone(),
             };
             return crate::services::codex::herdr_turn::execute(codex, &ports, sender);
         }
@@ -924,6 +927,8 @@ pub(super) mod tests {
         let provider = ProviderKind::from_str("agy").unwrap();
         let tools = vec!["Read".to_string()];
         let mut turn = StreamingTurn {
+            #[cfg(unix)]
+            admission: None,
             pool: None,
             shared: None,
             provider: &provider,
@@ -1020,6 +1025,8 @@ pub(super) mod tests {
             .await;
             let (sender, _receiver) = std::sync::mpsc::channel();
             let turn = StreamingTurn {
+                #[cfg(unix)]
+                admission: None,
                 pool: Some(&pool),
                 shared: None,
                 provider: &provider,

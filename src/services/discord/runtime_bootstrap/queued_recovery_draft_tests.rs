@@ -324,6 +324,7 @@ async fn restored_draft_hold(held_record: HeldRecord) {
 mod startup_order {
     use super::{Arc, ChannelId, Duration, MessageId, ProviderKind, SharedData};
     use crate::services::discord::{health, tmux as watcher_claim, turn_bridge};
+    use crate::services::turn_orchestrator::{RecoveryGate, RecoveryPass};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{LazyLock, Mutex};
 
@@ -439,13 +440,14 @@ mod startup_order {
     mod queued_recovery {
         use super::*;
 
-        pub(super) async fn restore_queued_and_inflight_work(
+        pub(super) async fn restore_queued_and_inflight_in_pass(
             http: &Arc<serenity::Http>,
             shared: &Arc<SharedData>,
             provider: &ProviderKind,
-        ) -> Vec<(ChannelId, MessageId, MessageId)> {
-            crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests(
-                http, shared, provider,
+            pass: &RecoveryPass,
+        ) -> (Vec<(ChannelId, MessageId, MessageId)>, RecoveryGate) {
+            crate::services::discord::runtime_bootstrap::queued_recovery::restore_queued_and_inflight_in_pass(
+                http, shared, provider, pass,
             )
             .await
         }

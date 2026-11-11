@@ -60,6 +60,18 @@ impl Owner {
         kind: StartFailureKind,
         detail: &str,
     ) -> Result<Option<bool>, String> {
+        self.start_failed_as(front, number, members, pin, (kind, detail, false))
+    }
+
+    #[cfg(unix)]
+    pub(super) fn start_failed_as(
+        &mut self,
+        front: &Front,
+        number: u64,
+        members: &[PendingQueueItem],
+        pin: Option<serde_json::Value>,
+        (kind, detail, unproved): (StartFailureKind, &str, bool),
+    ) -> Result<Option<bool>, String> {
         if self.pending.is_some() {
             return Err("start failure commit requires recovery".into());
         }
@@ -92,14 +104,21 @@ impl Owner {
                 (key, n)
             })
             .collect();
-        let retain = kind != StartFailureKind::Opaque || counts.iter().any(|(_, n)| *n >= 2);
+        let retain =
+            unproved || kind != StartFailureKind::Opaque || counts.iter().any(|(_, n)| *n >= 2);
         let mut next = self.snapshot.clone();
         if retain {
-            next.owe_queued(
-                0..members.len(),
-                crate::db::turns::TerminalOutcome::Failed,
-                origin::now_ms(),
-            );
+            if unproved {
+                let identities: Vec<_> = members.iter().map(sources::identity).collect();
+                next.a_control
+                    .retain(|control| !identities.contains(&control.identity));
+            } else {
+                next.owe_queued(
+                    0..members.len(),
+                    crate::db::turns::TerminalOutcome::Failed,
+                    origin::now_ms(),
+                );
+            }
             for (index, original) in members.iter().enumerate() {
                 next.retained_inputs.push(RetainedInput {
                     input: InputAttempt {
@@ -115,16 +134,25 @@ impl Owner {
                         preparation_hold: None,
                         legacy_attempt: None,
                     },
-                    reason: RetainedReason::Rejected {
-                        reason: format!("start_rejected: {detail}"),
-                        start_failure: Some(StartFailureDetail {
-                            kind,
-                            failures: counts[index].1,
-                        }),
+                    reason: if unproved {
+                        RetainedReason::Unconfirmed
+                    } else {
+                        RetainedReason::Rejected {
+                            reason: format!("start_rejected: {detail}"),
+                            start_failure: Some(StartFailureDetail {
+                                kind,
+                                failures: counts[index].1,
+                            }),
+                        }
                     },
-                    disposition: Some(RetainedDisposition::KnownNotSent),
+                    disposition: (!unproved).then_some(RetainedDisposition::KnownNotSent),
                     notice: NoticeIntent {
-                        kind: "retained_retry_required".into(),
+                        kind: if unproved {
+                            "unconfirmed"
+                        } else {
+                            "retained_retry_required"
+                        }
+                        .into(),
                         enqueued: false,
                     },
                 });

@@ -1345,6 +1345,8 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
     }));
     let provider = ProviderKind::Claude;
     let turn = StreamingTurn {
+        #[cfg(unix)]
+        admission: None,
         pool: None,
         shared: None,
         provider: &provider,

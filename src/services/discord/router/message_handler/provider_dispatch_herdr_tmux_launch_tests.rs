@@ -337,6 +337,8 @@ fn dispatched_return(owned: bool) {
     let (sender, _receiver) = std::sync::mpsc::channel();
     let provider = ProviderKind::Claude;
     let turn = StreamingTurn {
+        #[cfg(unix)]
+        admission: None,
         pool: Some(&fx.pool),
         shared: None,
         provider: &provider,

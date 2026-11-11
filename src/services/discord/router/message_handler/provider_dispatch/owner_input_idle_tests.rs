@@ -1241,6 +1241,8 @@ fn idle_turn(
     };
     let (host, provider) = (TurnHost::Tmux, ProviderKind::Claude);
     let turn = StreamingTurn {
+        #[cfg(unix)]
+        admission: None,
         pool: None,
         shared: None,
         provider: &provider,

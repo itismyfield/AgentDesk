@@ -8,26 +8,59 @@ mod s2a_tests;
 #[path = "queued_recovery_held.rs"]
 mod held;
 
-pub(super) async fn restore_worker_queues(shared: &Arc<SharedData>, provider: &ProviderKind) {
+pub(super) async fn restore_worker_then<F, Fut>(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    complete: F,
+) -> RecoveryGate
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let gate = restore_worker_queues(shared, provider).await;
+    if gate.is_complete() {
+        complete().await;
+    }
+    gate
+}
+
+async fn restore_worker_queues(shared: &Arc<SharedData>, provider: &ProviderKind) -> RecoveryGate {
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         tracing::error!(
             provider = provider.as_str(),
             "runner queue recovery needs Discord REST credentials"
         );
-        return;
+        return RecoveryGate::Held;
     };
-    let stale_cards = restore_queued_and_inflight_work(&http, shared, provider).await;
+    let pass = RecoveryPass::new();
+    let (stale_cards, gate) =
+        restore_queued_and_inflight_in_pass(&http, shared, provider, &pass).await;
     delete_stale_queued_placeholder_cards(&http, shared, &stale_cards).await;
-    complete_active_reconcile(shared).await;
-    spawn_turn_completion_idle_queue_listener(shared.clone(), provider.clone());
-    spawns::run_bot_spawn_queue_exit_clear_retry(shared);
+    let gate = complete_active_reconcile_in_pass(shared, &pass, gate).await;
+    if gate.is_complete() {
+        spawn_turn_completion_idle_queue_listener(shared.clone(), provider.clone());
+        spawns::run_bot_spawn_queue_exit_clear_retry(shared);
+    }
+    gate
 }
 
+#[cfg(test)]
 pub(super) async fn restore_queued_and_inflight_work(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) -> Vec<(ChannelId, MessageId, MessageId)> {
+    restore_queued_and_inflight_in_pass(http, shared, provider, &RecoveryPass::new())
+        .await
+        .0
+}
+
+pub(super) async fn restore_queued_and_inflight_in_pass(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    pass: &RecoveryPass,
+) -> (Vec<(ChannelId, MessageId, MessageId)>, RecoveryGate) {
     let (stale_cards, held) = restore_and_hold(http, shared, provider).await;
     #[cfg(unix)]
     {
@@ -45,14 +78,72 @@ pub(super) async fn restore_queued_and_inflight_work(
         }
     }
     held::spawn_retries(http, shared, provider, held);
-    // A V2 queue survives the restart in its owner's file: re-adopted, settled, then driven.
+    let (gate, _) = recover_owned_in_pass(shared, provider, pass).await;
+    (stale_cards, gate)
+}
+
+pub(super) async fn recover_owned_in_pass(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    pass: &RecoveryPass,
+) -> (RecoveryGate, Vec<ChannelId>) {
+    tracing::debug!(recovery_pass = %pass.id(), "observing owned queue recovery");
     #[cfg(unix)]
-    for channel in crate::services::turn_orchestrator::v2_channels(provider, &shared.token_hash)
-        .observed_ready()
     {
-        super::super::router::message_handler::owner_recover(shared, channel).await;
+        use crate::services::turn_orchestrator::{OwnedRecoveryDiscovery, OwnedRecoveryTarget};
+        // Reobserve catalog failures with one pass; a controller Held never restarts its budget.
+        for attempt in 0..3 {
+            let discovery: OwnedRecoveryDiscovery =
+                crate::services::turn_orchestrator::v2_channels(provider, &shared.token_hash);
+            let observed = pass.gate(&discovery);
+            let ready = discovery.ready.clone();
+            let targets = discovery
+                .ready
+                .into_iter()
+                .map(OwnedRecoveryTarget::Ready)
+                .chain(
+                    discovery
+                        .failed
+                        .into_iter()
+                        .map(OwnedRecoveryTarget::Failed),
+                );
+            let mut classified = std::collections::HashSet::new();
+            let mut gate = RecoveryGate::Complete;
+            for target in targets {
+                classified.insert(match &target {
+                    OwnedRecoveryTarget::Ready(channel) => *channel,
+                    OwnedRecoveryTarget::Failed(failure) => failure.channel,
+                });
+                let recovered =
+                    super::super::router::message_handler::owner_recover(shared, target, pass)
+                        .await;
+                gate = gate.combine(recovered);
+            }
+            if !gate.is_complete() || observed.is_complete() {
+                return (gate, ready);
+            }
+            if attempt == 2 {
+                let current =
+                    crate::services::turn_orchestrator::v2_channels(provider, &shared.token_hash);
+                let gate = pass.gate(&current);
+                let unseen = current
+                    .ready
+                    .iter()
+                    .any(|channel| !classified.contains(channel));
+                return (
+                    if unseen { RecoveryGate::Held } else { gate },
+                    current.ready,
+                );
+            }
+            tokio::task::yield_now().await;
+        }
+        unreachable!("bounded recovery observation returns on its final attempt")
     }
-    stale_cards
+    #[cfg(not(unix))]
+    {
+        let _ = (shared, provider);
+        (RecoveryGate::Complete, Vec::new())
+    }
 }
 
 /// The boot restore: its stale cards, and the channels whose merge failed with the rows they hold.
@@ -327,3 +418,7 @@ mod draft_tests;
 #[cfg(all(test, unix))]
 #[path = "queued_recovery_consent_tests.rs"]
 mod consent_tests;
+
+#[cfg(all(test, unix))]
+#[path = "queued_recovery_gate_tests.rs"]
+mod gate_tests;

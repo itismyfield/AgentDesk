@@ -2177,6 +2177,8 @@ pub(super) async fn handle_text_message(
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         super::provider_dispatch::execute(
                             super::provider_dispatch::StreamingTurn {
+                                #[cfg(unix)]
+                                admission: None,
                                 pool: execution_pool.as_ref(),
                                 shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,

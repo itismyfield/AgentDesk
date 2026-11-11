@@ -377,6 +377,7 @@ impl Fixture {
                 let (sender, receiver) = std::sync::mpsc::channel();
                 let owner_for_strict = owner.logical_key.clone();
                 let turn = CodexHerdrTurn {
+ admission: None,
                     pool,
                     owner,
                     channel_id: CHANNEL,
@@ -1062,6 +1063,8 @@ async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_
                     .await;
             let (sender, _receiver) = std::sync::mpsc::channel();
             let turn = StreamingTurn {
+                #[cfg(unix)]
+                admission: None,
                 pool: None,
                 shared: None,
                 provider: &provider,
@@ -1450,6 +1453,7 @@ fn a_turn_cancelled_before_its_stop_state_writes_nothing_pg() {
     let _admission = open_admission();
     let (sender, _receiver) = std::sync::mpsc::channel();
     let turn = CodexHerdrTurn {
+        admission: None,
         pool: &fx.pool,
         owner: fx.owner.clone(),
         channel_id: CHANNEL,
