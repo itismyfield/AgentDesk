@@ -4460,6 +4460,7 @@ src/
 │   ├── kanban_cards_snapshot_tests.rs
 │   ├── manual_steer.rs
 │   ├── mcp_config.rs
+│   ├── mcp_config_atomic_write_tests.rs
 │   ├── mcp_config_snapshot_tests.rs
 │   ├── message_outbox.rs
 │   ├── message_outbox_circuit_authority.rs
