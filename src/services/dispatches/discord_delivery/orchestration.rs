@@ -300,7 +300,7 @@ impl HttpDispatchTransport {
     pub(crate) fn from_runtime_with_pg(pg_pool: Option<PgPool>) -> Self {
         Self {
             announce_bot_token: crate::credential::read_bot_token(
-                crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
+                crate::domain::bot_role::UtilityBotRole::Announce.alias(),
             ),
             discord_api_base: discord_api_base_url(),
             thread_owner_user_id: resolve_dispatch_thread_owner_user_id(),
@@ -458,7 +458,7 @@ pub(crate) async fn sync_dispatch_status_reaction_with_pg(
     };
 
     let Some(token) = crate::credential::read_bot_token(
-        crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
+        crate::domain::bot_role::UtilityBotRole::Announce.alias(),
     ) else {
         return Err("no announce bot token".to_string());
     };

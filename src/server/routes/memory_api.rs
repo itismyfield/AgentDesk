@@ -54,9 +54,8 @@ pub(crate) fn detect_memory_backend() -> MemoryBackend {
         return MemoryBackend::Local;
     }
 
-    if crate::services::memory::backend_is_active(
-        crate::services::discord::settings::MemoryBackendKind::Memento,
-    ) {
+    if crate::services::memory::backend_is_active(crate::domain::memory::MemoryBackendKind::Memento)
+    {
         MemoryBackend::Memento
     } else {
         MemoryBackend::Local
@@ -400,8 +399,8 @@ async fn memento_remember(body: &RememberBody) -> Result<(), String> {
     let base = crate::services::discord::settings::memory_settings_for_binding(None);
     // Force memento regardless of the resolved binding default, since the
     // caller explicitly selected memento via backend detection.
-    let settings = crate::services::discord::settings::ResolvedMemorySettings {
-        backend: crate::services::discord::settings::MemoryBackendKind::Memento,
+    let settings = crate::domain::memory::ResolvedMemorySettings {
+        backend: crate::domain::memory::MemoryBackendKind::Memento,
         ..base
     };
     // The trait object does not expose `remember` directly — only the

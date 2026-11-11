@@ -1,8 +1,10 @@
+use crate::domain::provider::ProviderCompactionAdapter;
+use crate::services::provider::ProviderRuntimeExt;
 use std::collections::HashSet;
 
 use super::{
-    ProviderCompactionAdapter, ProviderKind, intern_provider_id, provider_registry,
-    public_provider_catalog, supported_provider_ids,
+    ProviderKind, intern_provider_id, provider_registry, public_provider_catalog,
+    supported_provider_ids,
 };
 
 const READY_CAPTURE: &str = "Ready for input (type message + Enter)\n> ";

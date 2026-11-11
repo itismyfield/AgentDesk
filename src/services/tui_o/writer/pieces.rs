@@ -5,7 +5,7 @@ pub use super::tool_cards::ToolCardInputs;
 use super::tool_cards::{ToolCardRun, ToolMeta};
 pub use super::turn_summary::SummaryInputs;
 use super::turn_summary::TurnSummaryRun;
-use crate::services::discord::formatting::split_for_shadow;
+use crate::domain::message_split::split_for_shadow;
 use crate::services::tui_o::shadow::identity::{RecordFact, UnitContent, classify_with_version};
 use crate::services::tui_o::shadow::seal::{SealOutcome, SealRegistry};
 use crate::services::tui_o::shadow::unit_plan::{UnitPlan, plan};
@@ -199,6 +199,9 @@ impl UnitDeriver {
                 }
                 RecordFact::Blocked(reason) => out.push(Derived::Blocked { reason }),
                 RecordFact::Announced(native_key, kind) => {
+                    if self.provider == ShadowProvider::Codex && codex_async_question(&value) {
+                        continue;
+                    }
                     let (channel_id, provider) = (self.channel, self.provider);
                     self.seals.announce(UnitKey {
                         channel_id,
@@ -368,6 +371,24 @@ impl UnitDeriver {
     }
 }
 
+// Async question UI has no response_item Body that could seal its announcement.
+fn codex_async_question(value: &serde_json::Value) -> bool {
+    let item = &value["payload"]["item"];
+    value["type"] == "event_msg"
+        && value["payload"]["type"] == "item_completed"
+        && item["type"] == "AgentMessage"
+        && item["delivery"] == "async"
+        && item["id"].as_str().is_some_and(|id| !id.is_empty())
+        && item.get("text").is_none()
+        && item.get("content").is_none()
+        && item["questions"].as_array().is_some_and(|questions| {
+            !questions.is_empty()
+                && questions
+                    .iter()
+                    .all(|question| question["title"].is_string())
+        })
+}
+
 // Code-mode `exec` reports only the script's outcome; a completed script may still hold a
 // failed command, so only a script failure decides the card result.
 fn code_mode_exec_failed(value: &serde_json::Value) -> Option<bool> {
@@ -380,3 +401,7 @@ fn code_mode_exec_failed(value: &serde_json::Value) -> Option<bool> {
 #[cfg(all(test, unix))]
 #[path = "input_notices/evidence_tests.rs"]
 mod notice_evidence_tests;
+
+#[cfg(test)]
+#[path = "async_question_tests.rs"]
+mod async_question_tests;

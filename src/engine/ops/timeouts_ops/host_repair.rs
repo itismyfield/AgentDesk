@@ -10,7 +10,7 @@ use sqlx::{Acquire, PgPool, Row};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, load_hosted_execution_pg,
 };
-use crate::services::discord::session_identity::tmux_name_from_session_key;
+use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::services::session_host::{
     AutomaticEffect, GuardVerdict, HostKind, HostLiveness, HostSessionRef, HostWitness,
     ResolvedSessionTarget, SessionTargetEvidence, SessionTargetEvidenceSource, SessionTargetInput,

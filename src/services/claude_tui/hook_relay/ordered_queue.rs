@@ -181,7 +181,7 @@ fn publish_atomic_file(path: &Path, bytes: &[u8], label: &str) -> Result<(), Str
         std::fs::rename(&temp_path, path)
             .map_err(|err| format!("publish {label} {}: {err}", path.display()))?;
         sync_atomic_stage(label, "parent", || {
-            crate::services::discord::runtime_store::fsync_parent_dir(path)
+            crate::domain::file_sync::fsync_parent_dir(path)
         })
     })();
     if result.is_err() {

@@ -98,6 +98,10 @@ pub trait HostIo: Send + Sync + 'static {
     fn relaying(&self, channel: u64) -> bool;
     /// Called once a first activation committed the channel, before it is ready for intake.
     fn adopted(&self, _channel: u64, _provider: ShadowProvider) {}
+    /// The writer can drain retained inputs now; called after publishing readiness.
+    fn input_ready(&self, channel: u64, provider: ShadowProvider) {
+        let _ = (channel, provider);
+    }
     /// The channel's re-post turn for one actor start; none leaves the writer as it was.
     fn repost(&self, _channel: u64, _port: &Arc<Self::Port>) -> Option<RepostTurn<Self>> {
         None
@@ -895,7 +899,15 @@ impl<I: HostIo> Hosted<'_, I> {
             }
         };
         let watched = (gate.subscribe(), resumed, self.stopping.clone());
-        let ended = publish(channel, self.claim, watched, (actor, &stop_tx), on_resumed);
+        let input_ready = || self.io.input_ready(channel, self.provider);
+        let ended = publish(
+            channel,
+            self.claim,
+            watched,
+            (actor, &stop_tx),
+            on_resumed,
+            input_ready,
+        );
         let cause = ended.await;
         drop(stop_tx);
         readiness.close_transition(channel, port);
@@ -981,16 +993,23 @@ async fn publish(
     (mut gate, mut resumed, stop): Published,
     (mut actor, stop_actor): (JoinHandle<Option<StopCause>>, &watch::Sender<bool>),
     on_resumed: impl FnOnce(),
+    input_ready: impl Fn(),
 ) -> Option<StopCause> {
     let readiness = &claim.readiness;
     let mut on_resumed = Some(on_resumed);
+    let mut was_ready = false;
     let ended = loop {
         let owned = gate.borrow_and_update().epoch().is_some();
         let up = *resumed.borrow_and_update();
         if up && let Some(on_resumed) = on_resumed.take() {
             on_resumed();
         }
-        readiness.set(channel, owned && up && !*stop.borrow());
+        let ready = owned && up && !*stop.borrow();
+        readiness.set(channel, ready);
+        if ready && !was_ready {
+            input_ready();
+        }
+        was_ready = ready;
         tokio::select! {
             changed = gate.changed() => if changed.is_err() {
                 stop_actor.send_replace(true);

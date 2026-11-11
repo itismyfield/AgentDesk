@@ -292,7 +292,7 @@ fn durable_directory(path: &Path) -> io::Result<()> {
     }
     #[cfg(test)]
     creation_fault("directory")?;
-    crate::services::discord::runtime_store::fsync_parent_dir(path)
+    crate::domain::file_sync::fsync_parent_dir(path)
 }
 
 impl PreparedIncarnation {
@@ -386,7 +386,7 @@ impl PreparedIncarnation {
                 fs::remove_file(&temp)?;
                 #[cfg(test)]
                 creation_fault("parent")?;
-                crate::services::discord::runtime_store::fsync_parent_dir(&path)
+                crate::domain::file_sync::fsync_parent_dir(&path)
             })();
             let _ = fs::remove_file(&temp);
             result
@@ -524,7 +524,7 @@ fn context_temp(path: &Path) -> bool {
 fn sync_archive_parent(path: &Path) -> io::Result<()> {
     #[cfg(test)]
     creation_fault("archive_parent")?;
-    crate::services::discord::runtime_store::fsync_parent_dir(path)
+    crate::domain::file_sync::fsync_parent_dir(path)
 }
 
 fn sweep(

@@ -210,6 +210,8 @@ struct CompletionState {
     listener_events: usize,
     backstop_cycles: usize,
     pending_requests: usize,
+    post_enqueue_snapshots: Vec<usize>,
+    owner_boot_holds: Vec<u64>,
 }
 
 #[derive(Default)]
@@ -305,6 +307,40 @@ impl KickoffCompletion {
         .expect("queue kickoff processing completed");
     }
 
+    pub(in crate::services::discord) async fn owner_boot_holds(
+        &self,
+        message: u64,
+        count: usize,
+        budget: Duration,
+    ) {
+        self.until(budget, |state| {
+            state
+                .owner_boot_holds
+                .iter()
+                .filter(|&&id| id == message)
+                .count()
+                >= count
+        })
+        .await;
+    }
+
+    pub(in crate::services::discord) async fn post_enqueue_snapshots(
+        &self,
+        queue_len: usize,
+        count: usize,
+        budget: Duration,
+    ) {
+        self.until(budget, |state| {
+            state
+                .post_enqueue_snapshots
+                .iter()
+                .filter(|&&len| len == queue_len)
+                .count()
+                >= count
+        })
+        .await;
+    }
+
     pub(in crate::services::discord) async fn listener_ready(&self, budget: Duration) {
         self.until(budget, |state| state.listener_ready).await;
     }
@@ -343,5 +379,20 @@ impl Drop for KickoffCompletion {
         {
             completions.remove(&self.channel);
         }
+    }
+}
+
+/// Records the initial snapshot only after its real generic kick task finished.
+pub(super) fn post_enqueue_snapshot_finished(channel: ChannelId, queue_len: usize) {
+    if let Some(state) = completion_state(channel) {
+        state.lock().unwrap().post_enqueue_snapshots.push(queue_len);
+        completion_notify(channel);
+    }
+}
+
+pub(in crate::services::discord) fn owner_boot_hold_finished(channel: ChannelId, message: u64) {
+    if let Some(state) = completion_state(channel) {
+        state.lock().unwrap().owner_boot_holds.push(message);
+        completion_notify(channel);
     }
 }

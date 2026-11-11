@@ -1,7 +1,7 @@
 use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::db::agents::AgentChannelBindings;
-use crate::services::discord::session_identity::SessionIdentity;
+use crate::domain::session_identity::SessionIdentity;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 
 pub(crate) fn parse_thread_channel_name(channel_name: &str) -> Option<(&str, &str)> {

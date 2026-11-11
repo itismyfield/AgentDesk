@@ -1,3 +1,4 @@
+use crate::services::provider::ProviderRuntimeExt;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};

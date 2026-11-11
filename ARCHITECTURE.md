@@ -374,8 +374,30 @@ src/
 │   ├── test_support.rs
 │   └── types.rs
 ├── domain/
+│   ├── message_split/
+│   │   └── semantic_boundaries.rs
+│   ├── provider/
+│   │   ├── catalog/
+│   │   │   └── rows.rs
+│   │   ├── capabilities.rs
+│   │   ├── catalog.rs
+│   │   ├── execution.rs
+│   │   ├── naming.rs
+│   │   ├── public_catalog.rs
+│   │   ├── tests.rs
+│   │   └── value_methods.rs
+│   ├── session_identity/
+│   │   └── naming.rs
+│   ├── bot_role.rs
+│   ├── file_sync.rs
+│   ├── human_input.rs
 │   ├── lifecycle.rs
-│   └── mod.rs
+│   ├── memory.rs
+│   ├── message_split.rs
+│   ├── mod.rs
+│   ├── provider.rs
+│   ├── session_identity.rs
+│   └── tool_text.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── db_ops/
@@ -573,7 +595,8 @@ src/
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
 │   │   │   ├── tui_output_readiness_tests.rs
-│   │   │   └── unread_tail_attribution_tests.rs
+│   │   │   ├── unread_tail_attribution_tests.rs
+│   │   │   └── writer_readiness.rs
 │   │   ├── kanban/
 │   │   │   └── card_delete.rs
 │   │   ├── receipt/
@@ -2081,6 +2104,7 @@ src/
 │   │   │   │   │   ├── owner_ingress_tests.rs
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
+│   │   │   │   ├── boot_custody.rs
 │   │   │   │   ├── home_order_tests.rs
 │   │   │   │   ├── initial_fresh_tests.rs
 │   │   │   │   ├── notice.rs
@@ -2173,6 +2197,7 @@ src/
 │   │   │   │   │   ├── owner_input_carried_restart_tests.rs
 │   │   │   │   │   ├── owner_input_codex_native_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs
+│   │   │   │   │   ├── owner_input_herdr_pending_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
 │   │   │   │   │   ├── owner_input_local_control_tests.rs
@@ -2226,6 +2251,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_herdr_activation_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_http_cancel_tests.rs
+│   │   │   │   ├── provider_dispatch_codex_herdr_pending_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
@@ -2292,6 +2318,13 @@ src/
 │   │   │   │   │   └── b1b_terminal_tests.rs
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── owner_execution/
+│   │   │   │   │   │   ├── boot_input_gateway_tests.rs
+│   │   │   │   │   │   ├── boot_input_more_tests.rs
+│   │   │   │   │   │   ├── boot_input_owner_ready_tests.rs
+│   │   │   │   │   │   ├── boot_input_payload_tests.rs
+│   │   │   │   │   │   ├── boot_input_placement_tests.rs
+│   │   │   │   │   │   ├── boot_input_race_tests.rs
+│   │   │   │   │   │   ├── boot_input_tests.rs
 │   │   │   │   │   │   ├── missing_halt_tests.rs
 │   │   │   │   │   │   ├── park_missing_tests.rs
 │   │   │   │   │   │   ├── park_reply_tests.rs
@@ -3057,6 +3090,7 @@ src/
 │   │   │   │   │   ├── midread_owner_tests.rs
 │   │   │   │   │   ├── newlive_ownership_file_tests.rs
 │   │   │   │   │   ├── receipt_tests.rs
+│   │   │   │   │   ├── retired_codex_runtime_marker_tests.rs
 │   │   │   │   │   ├── routine_owner.rs
 │   │   │   │   │   ├── routine_owner_tests.rs
 │   │   │   │   │   ├── routine_registered_receipt_tests.rs
@@ -3366,14 +3400,18 @@ src/
 │   ├── herdr_launch/
 │   │   ├── retired_hold/
 │   │   │   └── tests.rs
+│   │   ├── runtime_marker/
+│   │   │   └── tests.rs
 │   │   ├── policy.rs
 │   │   ├── policy_tests.rs
 │   │   ├── prepared.rs
 │   │   ├── retired_hold.rs
+│   │   ├── runtime_marker.rs
 │   │   ├── unplaced.rs
 │   │   └── unplaced_tests.rs
 │   ├── herdr_launch_tests/
-│   │   └── retired_hold_tests.rs
+│   │   ├── retired_hold_tests.rs
+│   │   └── runtime_marker_launch_tests.rs
 │   ├── imsg_reply/
 │   │   ├── admission.rs
 │   │   ├── contract.rs
@@ -3527,6 +3565,7 @@ src/
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
 │   │   ├── registry.rs
+│   │   ├── runtime.rs
 │   │   ├── session_probe.rs
 │   │   └── session_prompt.rs
 │   ├── provider_auth_profile/
@@ -4007,6 +4046,8 @@ src/
 │   │   │   ├── local_retry/
 │   │   │   │   └── notice_selection.rs
 │   │   │   ├── rotation/
+│   │   │   │   ├── archive_eof.rs
+│   │   │   │   ├── archive_eof_tests.rs
 │   │   │   │   ├── claude_boundary.rs
 │   │   │   │   ├── clear_end.rs
 │   │   │   │   ├── codex_end.rs
@@ -4033,8 +4074,11 @@ src/
 │   │   │   ├── adoption_terminal_tests.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── always_on_repost_tests.rs
+│   │   │   ├── archive_boot_compat_tests.rs
+│   │   │   ├── archive_boot_tests.rs
 │   │   │   ├── archived_host_tests.rs
 │   │   │   ├── archived_source_tests.rs
+│   │   │   ├── async_question_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── bo_post_tests.rs
 │   │   │   ├── boot.rs
@@ -4123,6 +4167,7 @@ src/
 │   │   │   ├── restart_replay_host_tests.rs
 │   │   │   ├── resume.rs
 │   │   │   ├── resume_tests.rs
+│   │   │   ├── resume_time_tests.rs
 │   │   │   ├── retire_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs

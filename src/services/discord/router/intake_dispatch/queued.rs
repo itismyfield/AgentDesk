@@ -95,6 +95,7 @@ pub(crate) async fn admit_queued_intake(
     let flags = (defer_watcher_resume, wait_for_completion);
     let submission = queued_submission(provider, channel_id, intervention, owner, flags);
     let admission = admit_text_intake(deps, &submission).await;
+    let writer_boot = matches!(&admission, IntakeAdmission::DeferredWriterBoot(_));
     let local_permit = match admission {
         #[cfg(unix)]
         IntakeAdmission::ConsentHeld(hold) => {
@@ -155,6 +156,8 @@ pub(crate) async fn admit_queued_intake(
             return QueuedAdmissionDisposition::RejectedNonPortableAttachment;
         }
         IntakeAdmission::DeferredOpenRoute { .. }
+        | IntakeAdmission::DeferredWriterBoot(_)
+        | IntakeAdmission::WriterBlocked { .. }
         | IntakeAdmission::DeferredTurnMode(_)
         | IntakeAdmission::ReplayDeferred(_)
         | IntakeAdmission::Blocked { .. } => {
@@ -194,6 +197,11 @@ pub(crate) async fn admit_queued_intake(
                 backstop_reason,
             )
             .await;
+            if writer_boot && crate::services::tui_o::writer::host::channel_accepts(channel_id.get()) {
+                super::super::super::queue_io::schedule_writer_ready_queue_kick(
+                    deps.shared.clone(), submission.provider.clone(), channel_id,
+                );
+            }
             return QueuedAdmissionDisposition::Deferred;
         }
     };
@@ -244,6 +252,7 @@ pub(crate) async fn start_owner_front(
             submission.owner = Some(owner);
             finish_admitted_local(deps, permit, submission).await
         }
+        IntakeAdmission::DeferredWriterBoot(_) => Err(super::WRITER_HELD.into()),
         IntakeAdmission::DeferredTurnMode(_) => Err(super::TURN_MODE_AWAITED.into()),
         _ => Err("NotSent(\"owner_front_not_admitted\")".into()),
     }

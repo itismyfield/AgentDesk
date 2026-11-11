@@ -53,6 +53,10 @@ mod pre_admission_control;
 mod provider_dispatch;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use self::provider_dispatch::hand_busy;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use self::provider_dispatch::{
+    owner_drive_for_test, start_idle_for_test,
+};
 mod provider_isolation;
 mod tui_followup;
 mod turn_lifecycle;

@@ -1247,8 +1247,12 @@ pub(in crate::services::discord) async fn handle_event(
             let owner_custody =
                 queue_io::input_ingress::adopt(&data.shared, &data.provider, channel_id).await
                     != Ok(false);
+            // The O-only adapter classifies once before this checkpoint, so a ready→Hold race
+            // cannot move it before a failed custody commit. Other admissions keep their policy.
+            let o_selected = crate::services::tui_o::cutover::boot_snapshot()
+                .is_some_and(|snapshot| snapshot.kind(channel_id.get()).is_some());
             let settle_checkpoint = settle_checkpoint || owner_custody;
-            if !settle_checkpoint {
+            if !settle_checkpoint && (!o_selected || attachment_local_permit.is_some()) {
                 checkpoint();
             }
 
@@ -1328,6 +1332,9 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             } else if settle_checkpoint {
                 super::dispatch_live_text_intake(&deps, submission, checkpoint).await?;
+            } else if o_selected {
+                super::intake_dispatch::dispatch_o_hold_intake(&deps, submission, checkpoint)
+                    .await?;
             } else {
                 super::dispatch_text_intake(&deps, submission).await?;
             }

@@ -3,7 +3,8 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use std::future::Future;
 
-use crate::services::discord::settings::{MemoryBackendKind, resolve_memory_settings};
+use crate::domain::memory::MemoryBackendKind;
+use crate::services::discord::settings::resolve_memory_settings;
 use crate::services::memory::sanitize_memento_workspace_segment;
 
 const MAX_SUMMARY_CHARS: usize = 220;

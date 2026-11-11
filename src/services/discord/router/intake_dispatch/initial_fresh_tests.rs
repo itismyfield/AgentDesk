@@ -417,7 +417,7 @@ async fn admission_case(case: Case) {
             shared: &fixture.shared, token: "Bot initial-fresh-test" };
         let admission = admit_text_intake(&deps, &input()).await;
         hosts.pop().unwrap().stop_and_join().await.unwrap();
-        assert!(matches!(admission, IntakeAdmission::Blocked { .. }),
+        assert!(matches!(admission, IntakeAdmission::Blocked { .. } | IntakeAdmission::WriterBlocked { .. }),
             "invalid recovered metadata may not grant initial input: {admission:?}");
         assert!(finished && pre_live, "the actual metadata guard must finish before publishing Live");
         assert!(readiness.submission(CANARY_CHANNEL).is_none());
@@ -582,7 +582,7 @@ async fn admission_case(case: Case) {
     }
     if let Case::Negative(refusal) = case {
         assert!(
-            matches!(admission, IntakeAdmission::Blocked { .. }),
+            matches!(admission, IntakeAdmission::Blocked { .. } | IntakeAdmission::WriterBlocked { .. }),
             "{refusal:?}: a false-resumed actor must hold actual input: {admission:?}"
         );
         let expected = match refusal {

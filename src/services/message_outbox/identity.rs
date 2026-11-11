@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::services::discord::bot_role::UtilityBotRole;
+use crate::domain::bot_role::UtilityBotRole;
 
 /// Actionable operational alerts are delivered by the announce bot first so
 /// the channel's resident AgentDesk role receives a human-visible notice. The

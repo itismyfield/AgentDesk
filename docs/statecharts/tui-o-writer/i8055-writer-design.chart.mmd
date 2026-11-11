@@ -1,0 +1,29 @@
+---
+title: "Writer ready 전후 입력 보관과 동일 입력 재회수"
+---
+stateDiagram-v2
+  s0: 입력 도착 전
+  s1: 입력 처리 중 #183; 승인 판정 전
+  s2: 입력 처리 중 #183; 보관 결과 대기
+  s3: 거절 또는 보관 실패 #183; 안내 중
+  s4: 입력 보관 완료 #183; writer 대기
+  s5: 안내 실패 #183; 처리 미완료
+  s6: 보관 완료 #183; ready #183; wake 대기
+  s7: 보관 완료 #183; 실행 준비
+  s8: 거절 안내 완료 #183; 실행 없음
+  s9: 동일 입력 1회 실행
+  [*] --> s0
+  s0 --> s1: BootNext
+  s1 --> s2: BootNext
+  s1 --> s3: BootNext
+  s2 --> s4: BootNext
+  s2 --> s3: BootNext
+  s3 --> s5: BootNext
+  s4 --> s6: BootNext
+  s2 --> s7: BootNext
+  s5 --> s3: BootNext
+  s3 --> s8: BootNext
+  s6 --> s4: BootNext
+  s6 --> s7: BootNext
+  s7 --> s4: BootNext
+  s7 --> s9: BootNext

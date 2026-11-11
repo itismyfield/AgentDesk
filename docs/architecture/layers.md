@@ -7,7 +7,7 @@
 
 | 층 | 책임 | 대표 근거 |
 |---|---|---|
-| vocabulary (0) | 순수 값·정적 계약 | `domain::lifecycle`, `queue_contract`, `phase_gate`, Discord `bot_role`·`session_identity` |
+| vocabulary (0) | 순수 값·정적 계약 | `domain::lifecycle`, `queue_contract`, `phase_gate`, Discord `bot_role`, `domain::session_identity` |
 | foundation (1) | 순수 계산·경로·문자열 구현 | `runtime_layout::paths`, `cli::restart_terminal_proof`, 검토된 `utils` leaf |
 | adapter (2) | 저장·provider·process/platform 실행 | `db`, `services::provider`, `services::platform` |
 | application (3) | 업무 정책·상태 전이 orchestration | `engine`, `kanban`, `dispatch`, `services::auto_queue` |
@@ -28,6 +28,7 @@ HTTP extractor·AppState·응답 변환을 소유한 `auto_queue::route`는 asse
 책임이 다른 하위 모듈은 긴 prefix로 구분한다. 아직 검토하지 않았거나
 책임을 정하지 못한 모듈은 사유와 함께 미분류로 남긴다.
 `domain::lifecycle`이 재시작 mode enum·정적 변환을 소유하며 vocabulary다.
+`domain::memory`(vocabulary)가 memory backend 값·기본값을, `utils::discord`(foundation)가 token hash 계산을 소유하고 `services::discord::settings`는 둘을 재노출한다.
 `services::discord::restart_mode`는 같은 타입을 재노출하는 vocabulary 호환 shim이고,
 `cli::restart_terminal_proof`의 nonce·경로·파일 증거 판정은 foundation이다.
 두 leaf는 부모의 Discord/최종 조립 책임보다 긴 prefix 규칙으로 분류한다.
@@ -296,6 +297,22 @@ domain은 services 실행 타입을 참조하지 않으며 기존 known 층과 r
 새 병합 source anchor에서 `--update-reductions`와 일반 `--check`를 실행하며, 과거 C3 매핑으로 C4 편입을 다시 승인하지 않는다.
 C5·C6도 이전 조각의 실제 squash와 검토한 accepted를 대조하는 같은 착지 절차를 적용한다.
 
+### Utility bot 역할 값 소유권 이동
+
+`UtilityBotRole`의 실제 소유는 `domain::bot_role`이다. 기존 enum·정적 구현·T2 시험을
+바이트 동일하게 이동했으며 Announce=0/Notify=1, ALL 순서, alias·credential label·emoji·
+oversize attachment 정책과 Display/FromStr 계약을 보존한다. 기존 serde 구현은 없다.
+`services::discord::bot_role`은 같은 타입을 재노출하는 단일 `pub use` 호환 경로이며,
+domain의 생산 의존은 표준 라이브러리뿐이다. 기존 vocabulary 층과 rank는 유지한다.
+
+바깥 18 consumer 파일의 작성 경로 25개만 정본으로 바꿨다. S01 source
+`da4f9e6ad1b5ed0c8ab2faa1788c1e4bbdf0ae1a`와 같은 도구로 비교한 결과
+W588→563, G488→464 ID·871→836회이며, canonical target도
+`services::discord::bot_role`에서 `domain::bot_role`로 이동했다.
+기존 Discord·legacy 소비자의 작성 경로와 동작은 유지한다.
+`cli/direct.rs`의 역할 경로 한 줄은 같은 이슈 S4 조각의 startup 변경과 구간이 분리된
+공동 파일 사용 승인을 받아 치환했다. 기준선은 source 커밋 뒤 공식 감소 갱신만 적용한다.
+
 ### Config·runtime·core와 model/org 저장 경계
 
 `config` 본체와 `runtime_layout`, live reload·credential·eventbus·logging은
@@ -493,3 +510,18 @@ zero-rule 부채 역시 이 대응으로 검사한다. mapping을 지우거나 �
 역사 측정은 금지 설정을 제외한 `Cargo.toml`과 `src/**/*.rs`만 Git archive에서
 추출했고 도구/helper도 tool SHA로 고정했다. 읽기 실패와 모듈 도달 오류는 0이었다.
 재현 명령·archive/source/tool SHA256·검색 원문·graph는 캠페인 보고서의 증거 목록에 있다.
+
+`domain::provider`가 ProviderKind enum과 정적 catalog·이름·별칭·CLI 순서·counterpart·공개 serde 값을 소유한다. 준비 조각, 추출 미완료 — runtime 책임은 S04가 adapter 경계로 전환한다. 기존 services::provider 경로는 같은 타입을 재수출하며 config·auth·cache·registry resolver와 runtime inherent impl은 adapter에 유지한다.
+`domain::file_sync`는 parent directory fsync·flush 판정과 시험 probe의 adapter 소유자이며, Discord runtime_store는 같은 함수를 재수출한다. S07의 13 consumer 파일만 정본 경로를 사용하고 syscall 순서·오류·Windows의 unflushed 성공·상위 ENOSPC 관측은 유지한다.
+`domain::tool_text`는 foundation에서 민감값 마스킹과 allowed-tools 정규화의 실제 구현·정적 tool catalog를 소유하며, 기존 Discord formatting 경로는 같은 함수·catalog를 재노출한다.
+`domain::human_input`이 HumanInputDelivery·HumanInputError·ExternalHold와 정적 hold 사유를 실제 소유하며 vocabulary다. 기존 health 경로는 같은 타입을 재노출하고 Registry·HumanInputRequest·전달 실행은 기존 Discord owner에 유지한다.
+
+S04에서 정적 catalog helper의 실제 구현은 `domain::provider`로, 문자열 naming 계산은 foundation child `domain::provider::naming`으로 옮겼다. config·auth·cache·runtime registry 조회는 `services::provider::ProviderRuntimeExt` adapter 경계가 소유한다. 기존 서비스 경로는 같은 값·함수·trait의 재수출이며 legacy 소비자는 유지한다. 별도 crate 추출 완료를 선언하지 않는다.
+
+### Session identity 소유 경계
+
+`domain::session_identity` vocabulary가 legacy/namespaced session key의 값과 parse, tmux tail 추출을 소유한다. `domain::session_identity::naming` foundation은 정적 provider catalog로 tmux provider/channel과 legacy default를 계산하고 `SessionIdentity::provider_and_channel`의 순수 impl을 소유한다. provider catalog 순서·기본값, 마지막 colon·slash alias·trim·malformed 처리 결과는 보존한다.
+
+기존 Discord identity 경로와 services provider parser 경로는 같은 타입·함수의 재수출이다. 사용되지 않는 `legacy_key` 문자열 렌더링 accessor는 기존 호환 모듈에 남기며 새 suppression을 추가하지 않는다. DB·config·auth·runtime registry와 fallback 실행 순서는 이동하지 않는다. identity A consumer 12파일만 정본 경로로 전환하고 identity B와 legacy 소비자는 기존 경로를 유지한다.
+
+`domain::message_split`은 foundation에서 UTF-16 단위·fit predicate·chunker·code-fence 및 문장 경계 계산을 실제 소유한다. Discord formatting·semantic_boundaries는 같은 함수를 재수출하고 HTTP 전송·상태 전이는 기존 owner에 유지한다. S12의 shadow/unit_plan·writer/round_trip·writer/pieces 문자열 consumer 3곳만 정본 경로로 전환한다.

@@ -4,7 +4,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ANNOUNCE = "crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT"
-NOTIFY = "crate::services::discord::bot_role::UtilityBotRole::Notify.alias()"
+NOTIFY = "crate::domain::bot_role::UtilityBotRole::Notify.alias()"
 
 
 def collapse(text: str) -> str:

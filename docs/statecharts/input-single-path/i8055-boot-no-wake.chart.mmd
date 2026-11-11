@@ -1,0 +1,37 @@
+---
+title: "부팅 중 입력 보관과 checkpoint"
+---
+stateDiagram-v2
+  direction LR
+  state "Legend" as legend {
+    lg0: Path to the BootHeldEventuallyExecutes bug
+    lg1: Repeats forever, so BootHeldEventuallyExecutes breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  state "At the same time" as all {
+    state "Writer" as r0 {
+      s0: 부팅 중
+      s1: 원본 복구 중
+      s2: 입력 준비됨
+      [*] --> s0
+      s0 --> s1: 복구 시작 [when 디스크 보관, 깨움 대기]
+      s1 --> s2: 준비 완료, 깨우기 없음
+    }
+    --
+    state "Input" as r1 {
+      s3: 입력 도착 전
+      s4: 사용자에게 거절 표시
+      s5: 디스크 보관, 깨움 대기
+      [*] --> s3
+      s3 --> s4: 복구 중 입력의 보관 결과를 확정
+      s4 --> s5: 같은 source를 catch-up이 회수
+    }
+  }
+  class s0 bugPath
+  class s1 bugPath
+  class s2 repeats
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s5 repeats
