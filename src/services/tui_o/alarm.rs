@@ -361,7 +361,7 @@ impl AlarmNotifier for OutboxNotifier {
                     crate::services::message_outbox::OutboxMessage {
                         target: &target,
                         content: &alarm.text,
-                        bot: crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+                        bot: crate::domain::bot_role::UtilityBotRole::Notify.alias(),
                         source: ALARM_SOURCE,
                         reason_code: Some(&reason_code),
                         session_key: Some(&session_key),

@@ -7,8 +7,8 @@ use crate::db::session_agent_resolution::{
 use crate::db::session_status::{
     is_live_status, is_user_wait_status, normalize_incoming_session_status,
 };
+use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{ForceKillRow, TurnLifecycleTarget, force_kill_turn_for_row};
 use axum::{

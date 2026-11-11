@@ -31,6 +31,7 @@ mod runtime_profile;
 mod session_repair;
 #[cfg(all(test, unix))]
 mod unread_tail_attribution_tests;
+mod writer_readiness;
 use public_projection::public_health_json;
 use runtime_profile::attach_runtime_profile;
 

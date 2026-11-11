@@ -354,7 +354,7 @@ fn sync(file: &File, stage: Stage) -> Result<(), String> {
 }
 fn sync_parent(path: &Path, stage: Stage) -> Result<(), String> {
     checkpoint(stage)?;
-    crate::services::discord::runtime_store::fsync_parent_dir(path).map_err(|e| e.to_string())
+    crate::domain::file_sync::fsync_parent_dir(path).map_err(|e| e.to_string())
 }
 fn checkpoint(_stage: Stage) -> Result<(), String> {
     #[cfg(test)]

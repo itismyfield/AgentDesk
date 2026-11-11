@@ -24,6 +24,7 @@ impl std::error::Error for QueuedTransitionBusyHandoff {}
 pub(crate) use crate::services::cluster::intake_router_hook::owner_record::custody as routed;
 
 mod attachment;
+mod boot_custody;
 #[cfg(test)]
 mod home_order_tests;
 #[cfg(test)]
@@ -41,6 +42,7 @@ mod skill;
 mod tests;
 
 pub(crate) use attachment::{prepare_admitted_live_attachments, resolve_attachment_admission};
+pub(in crate::services::discord) use boot_custody::{WRITER_HELD, writer_boot_held};
 use notice::notify_blocked_intake;
 pub(crate) use queued::{
     QueuedAdmissionDisposition, admit_queued_intake, finish_admitted_queued_intake,
@@ -114,6 +116,14 @@ pub(crate) enum IntakeAdmission {
         >,
     ),
     Local(LocalAdmissionPermit),
+    /// A local gateway retains an input while its execution writer is held.
+    DeferredWriterBoot(
+        Result<crate::services::cluster::attachment_transfer::uploads::PendingUploads, String>,
+    ),
+    /// An O Hold without local custody authority; it never settles a live checkpoint.
+    WriterBlocked {
+        reason: IntakeBlockedReason,
+    },
     Forwarded {
         target_instance_id: String,
         outbox_id: i64,
@@ -289,8 +299,13 @@ pub(crate) async fn admit_text_intake(
                 turn_mode_uploads(deps, submission, &channel_id).await,
             );
         }
+        if boot_custody::can_hold(provider, destination.get()) {
+            return IntakeAdmission::DeferredWriterBoot(
+                turn_mode_uploads(deps, submission, &channel_id).await,
+            );
+        }
         let reason = IntakeBlockedReason::RoutingDependencyFailed { detail };
-        return IntakeAdmission::Blocked { reason };
+        return IntakeAdmission::WriterBlocked { reason };
     }
     let effective_config =
         crate::services::cluster::intake_router_hook::effective_intake_routing_config();
@@ -614,6 +629,27 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
     })
 }
 
+/// The gate's O-only pre-checkpoint path: only the new Hold outcomes defer its checkpoint.
+/// Other admissions keep that gate's existing pre-effect checkpoint policy.
+pub(crate) fn dispatch_o_hold_intake<'a, 'b: 'a>(
+    deps: &'a IntakeDeps<'b>,
+    submission: IntakeSubmission,
+    checkpoint: impl FnOnce() + Send + 'a,
+) -> BoxedIntake<'a> {
+    Box::pin(async move {
+        let admission = admit_text_intake(deps, &submission).await;
+        if matches!(
+            &admission,
+            IntakeAdmission::DeferredWriterBoot(_) | IntakeAdmission::WriterBlocked { .. }
+        ) {
+            finish_deferred(deps, admission, submission, checkpoint).await
+        } else {
+            checkpoint();
+            finish_text_intake_admission(deps, admission, submission).await
+        }
+    })
+}
+
 /// An attachment the gateway did not admit locally. Only a turn-mode deferral moves the checkpoint,
 /// once the queue holds it; every other outcome leaves the checkpoint where it was.
 pub(crate) async fn finish_nonlocal_attachment_admission(
@@ -621,7 +657,12 @@ pub(crate) async fn finish_nonlocal_attachment_admission(
     admission: IntakeAdmission,
     submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
-    let waits = matches!(admission, IntakeAdmission::DeferredTurnMode(_));
+    let waits = matches!(
+        admission,
+        IntakeAdmission::DeferredTurnMode(_)
+            | IntakeAdmission::DeferredWriterBoot(_)
+            | IntakeAdmission::WriterBlocked { .. }
+    );
     #[cfg(unix)]
     let waits = waits || matches!(admission, IntakeAdmission::ConsentHeld(_));
     if !waits {
@@ -647,7 +688,10 @@ fn admission_waits_for_custody(admission: &IntakeAdmission) -> bool {
     }
     matches!(
         admission,
-        IntakeAdmission::ReplayDeferred(_) | IntakeAdmission::DeferredTurnMode(_)
+        IntakeAdmission::ReplayDeferred(_)
+            | IntakeAdmission::DeferredTurnMode(_)
+            | IntakeAdmission::DeferredWriterBoot(_)
+            | IntakeAdmission::WriterBlocked { .. }
     )
 }
 
@@ -658,8 +702,11 @@ async fn finish_deferred(
     submission: IntakeSubmission,
     checkpoint: impl FnOnce(),
 ) -> Result<(), super::super::Error> {
+    let refused = matches!(&admission, IntakeAdmission::WriterBlocked { .. });
     finish_text_intake_admission(deps, admission, submission).await?;
-    checkpoint();
+    if !refused {
+        checkpoint();
+    }
     Ok(())
 }
 
@@ -669,6 +716,12 @@ pub(crate) async fn finish_text_intake_admission(
     mut submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
     match admission {
+        IntakeAdmission::DeferredWriterBoot(prepared) => {
+            boot_custody::retain(deps, submission, prepared).await?;
+        }
+        IntakeAdmission::WriterBlocked { ref reason } => {
+            notify_blocked_intake(deps, &submission, reason).await;
+        }
         #[cfg(unix)]
         IntakeAdmission::ConsentHeld(hold) => {
             super::herdr_consent::admission::hold_live(deps, submission, *hold).await?;
@@ -782,7 +835,14 @@ fn local_turn<'a, 'b: 'a>(
 ) -> BoxedIntake<'a, super::IntakeExecution> {
     #[cfg(all(test, unix))]
     if let Some(result) = super::herdr_consent::admission::tests::final_local(&submission) {
-        return Box::pin(async move { result });
+        return Box::pin(async move {
+            if matches!(&result, Ok(super::IntakeExecution::Executed))
+                && let Some(owner) = submission.owner
+            {
+                owner.complete_locally().await;
+            }
+            result
+        });
     }
     let (queued_drain, queued) = match submission.origin {
         IntakeOrigin::QueuedDrain(route) => (true, route),
@@ -976,11 +1036,18 @@ fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_ms
             user_msg_id,
             "[intake_dispatch] distinct open route deferred; local execution fenced"
         ),
-        IntakeAdmission::Blocked { reason } => tracing::warn!(
-            ?reason,
+        IntakeAdmission::Blocked { reason } | IntakeAdmission::WriterBlocked { reason } => {
+            tracing::warn!(
+                ?reason,
+                channel_id,
+                user_msg_id,
+                "[intake_dispatch] unsafe placement blocked; local execution fenced"
+            )
+        }
+        IntakeAdmission::DeferredWriterBoot(_) => tracing::info!(
             channel_id,
             user_msg_id,
-            "[intake_dispatch] unsafe placement blocked; local execution fenced"
+            "[intake_dispatch] queued until writer readiness"
         ),
         IntakeAdmission::DeferredTurnMode(_) => tracing::info!(
             channel_id,

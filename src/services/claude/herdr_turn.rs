@@ -501,7 +501,7 @@ pub(crate) fn release_hold(nonce: &str) -> HoldRelease {
     if !removed {
         return HoldRelease::Released;
     }
-    match crate::services::discord::runtime_store::fsync_parent_dir(&path) {
+    match crate::domain::file_sync::fsync_parent_dir(&path) {
         Ok(()) => HoldRelease::Released,
         Err(error) => HoldRelease::NotDurable(error.to_string()),
     }
@@ -572,7 +572,7 @@ pub(crate) fn hold(nonce: &str) -> Result<PathBuf, String> {
             file.write_all(chrono::Utc::now().to_rfc3339().as_bytes())?;
             file.sync_all()
         })
-        .and_then(|()| crate::services::discord::runtime_store::fsync_parent_dir(&path));
+        .and_then(|()| crate::domain::file_sync::fsync_parent_dir(&path));
     written.map_err(|error| format!("herdr turn: input hold not recorded: {error}"))?;
     Ok(path)
 }

@@ -12,9 +12,10 @@ use serde_json::{Value, json};
 use super::AppState;
 use super::agents_turn_target::{AgentTurnTarget, resolve_agent_turn_target};
 use super::auth::HumanInputCaller;
+use crate::domain::human_input::{HumanInputDelivery, HumanInputError};
 use crate::services::discord::health::{
-    HealthRegistry, HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
-    deliver_with_reply, preflight_human_input,
+    HealthRegistry, HumanInputRequest, deliver_human_input, deliver_with_reply,
+    preflight_human_input,
 };
 use crate::services::imsg_reply;
 

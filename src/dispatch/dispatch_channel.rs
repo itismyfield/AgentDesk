@@ -1,4 +1,5 @@
 use crate::services::provider::ProviderKind;
+use crate::services::provider::ProviderRuntimeExt;
 
 pub(super) fn dispatch_uses_alt_channel(dispatch_type: &str) -> bool {
     matches!(dispatch_type, "review" | "e2e-test" | "consultation")

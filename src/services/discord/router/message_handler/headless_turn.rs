@@ -3,6 +3,7 @@ use super::provider_dispatch::producer_panic;
 use super::*;
 use crate::services::discord::adk_session::build_namespaced_session_key;
 use crate::services::discord::live_bridge::register_without_requeue as register_headless_original;
+use crate::services::provider::ProviderRuntimeExt;
 
 mod replay_start;
 use replay_start::take_session_retry_context;

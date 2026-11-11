@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 
 use super::{StoreError, damage};
-use crate::services::discord::runtime_store::fsync_parent_dir;
+use crate::domain::file_sync::fsync_parent_dir;
 
 /// Creates `dir` if absent (a symlink is refused) and flushes its entry in the parent.
 pub(super) fn ensure_dir(dir: &Path) -> io::Result<()> {

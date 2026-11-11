@@ -27,7 +27,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::shadow::SourceId;
-use crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES;
+use crate::domain::file_sync::PARENT_DIR_FSYNC_FLUSHES;
 use ledger::{LedgerEntry, LedgerState, Unsent};
 
 #[cfg(test)]

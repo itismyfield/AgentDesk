@@ -98,7 +98,7 @@ async fn ensure_channel_is_role_mapped(channel_id: ChannelId) -> AppResult<()> {
     }
 
     let token = match crate::credential::read_bot_token(
-        crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
+        crate::domain::bot_role::UtilityBotRole::Announce.alias(),
     ) {
         Some(token) => token,
         None => {
@@ -187,7 +187,7 @@ pub async fn channel_messages(
     ensure_channel_is_role_mapped(channel_id).await?;
 
     let token = match crate::credential::read_bot_token(
-        crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
+        crate::domain::bot_role::UtilityBotRole::Announce.alias(),
     ) {
         Some(t) => t,
         None => {
@@ -411,7 +411,7 @@ pub async fn channel_info(
     ensure_channel_is_role_mapped(channel_id).await?;
 
     let token = match crate::credential::read_bot_token(
-        crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
+        crate::domain::bot_role::UtilityBotRole::Announce.alias(),
     ) {
         Some(t) => t,
         None => {

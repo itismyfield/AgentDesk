@@ -573,6 +573,9 @@ async fn cleanup(
 ) -> Recovery {
     #[cfg(test)]
     CLEANUPS.with(|n| n.set(n.get() + 1));
+    if let Err(error) = crate::services::herdr_launch::runtime_marker::clear_retired(record).await {
+        return report(row, Recovery::RetiredCleanupPending(error));
+    }
     let nonce = record.execution_nonce.clone();
     let outcome = tokio::task::spawn_blocking(move || retired_hold::release(&nonce)).await;
     let result = match outcome {

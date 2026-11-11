@@ -508,7 +508,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     open_gap(step_index, marker.replace("{run_id}", run_id) if marker else None)
                 window.mark_prompt_sent()
                 prompt_count += 1
-                entry = driver._record_send(result, next(k for k in ("send_prompt", "send_discord_prompt", "send_provider_hold_prompt") if k in step))
+                entry = driver._record_send(result, next(k for k in ("send_prompt", "send_discord_prompt", "send_provider_hold_prompt") if k in step), prompt)
                 try:
                     sent = client.send(args.channel_id, prompt)
                     driver._ack_send(entry, sent)
@@ -692,6 +692,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
             except Exception as error:
                 result.update(status="fail", reason=f"Herdr teardown failed: {error}")
         driver._update_record_window_snapshot(result, window)
+        result["track_marker_prompts"] = scenario["id"] in {"E-50", "E-51"}
         driver._record_marker_counts(result, window, [m.replace("{run_id}", run_id) for m in scenario.get("report_marker_counts", [])])
         driver._refresh_agent_mode_record(result, scenario=scenario, declared_agent_mode=result["agent_mode"], dry_run=False)
         driver._refresh_coverage_class_record(result, scenario=scenario, declared_coverage_class=result["coverage_class"], dry_run=False)

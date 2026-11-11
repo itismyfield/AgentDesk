@@ -183,8 +183,7 @@ fn update<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, S
     let result = apply(&mut store)?;
     let raw = serde_json::to_string(&store).map_err(|error| error.to_string())?;
     crate::services::discord::runtime_store::atomic_write(&path, &raw)?;
-    crate::services::discord::runtime_store::fsync_parent_dir(&path)
-        .map_err(|error| error.to_string())?;
+    crate::domain::file_sync::fsync_parent_dir(&path).map_err(|error| error.to_string())?;
     Ok(result)
 }
 

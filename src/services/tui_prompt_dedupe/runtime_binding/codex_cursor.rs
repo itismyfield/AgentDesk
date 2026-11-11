@@ -367,7 +367,7 @@ fn persist_checkpoint(
         previous_offset,
         binding.last_offset,
     );
-    crate::services::discord::runtime_store::fsync_parent_dir(Path::new(&path))
+    crate::domain::file_sync::fsync_parent_dir(Path::new(&path))
 }
 
 pub(crate) fn advance_tmux_runtime_binding_offset_under_source_authority(

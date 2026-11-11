@@ -12,7 +12,7 @@ use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityConflictKind, SessionIdentityKind,
     resolve_session_row_pg,
 };
-use crate::services::discord::session_identity::tmux_name_from_session_key;
+use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::services::session_host::HostKind;
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 

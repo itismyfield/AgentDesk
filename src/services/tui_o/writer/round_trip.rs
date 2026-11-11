@@ -2,7 +2,7 @@
 //! assumes. It bypasses the ledger, so it only targets an approved test channel.
 
 use super::{DiscordPort, PostOutcome};
-use crate::services::discord::formatting::split_for_shadow;
+use crate::domain::message_split::split_for_shadow;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoundTrip {

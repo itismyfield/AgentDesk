@@ -4,8 +4,8 @@ use sha2::{Digest, Sha256};
 
 use super::PieceDigest;
 use super::identity::UnitContent;
+use crate::domain::message_split::split_for_shadow;
 use crate::services::discord::DISCORD_MSG_LIMIT;
-use crate::services::discord::formatting::split_for_shadow;
 
 /// A planned unit: the pieces O would post, or why it posts nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]

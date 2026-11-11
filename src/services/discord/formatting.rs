@@ -1,10 +1,8 @@
 use poise::serenity_prelude as serenity;
-use regex::Regex;
 use serenity::{ChannelId, CreateAttachment, MessageId};
-use std::collections::HashSet;
+use std::sync::Arc;
 #[cfg(test)]
-use std::sync::Mutex;
-use std::sync::{Arc, LazyLock};
+use std::sync::{LazyLock, Mutex};
 
 use super::{
     DISCORD_MSG_LIMIT, SharedData,
@@ -221,14 +219,8 @@ pub(super) use self::delivery::{
     send_long_message_raw, split_message,
 };
 
-/// Legacy split pieces and their UTF-16 unit counts, reused unchanged by the output shadow.
-pub(in crate::services) fn split_for_shadow(text: &str) -> Vec<(String, usize)> {
-    let with_units = |piece: String| {
-        let units = discord_message_units(&piece);
-        (piece, units)
-    };
-    split_message(text).into_iter().map(with_units).collect()
-}
+#[cfg(test)]
+pub(in crate::services) use crate::domain::message_split::split_for_shadow;
 
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::delivery::{

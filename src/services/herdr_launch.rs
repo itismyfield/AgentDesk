@@ -4,6 +4,7 @@
 pub(crate) mod policy;
 mod prepared;
 pub(crate) mod retired_hold;
+pub(crate) mod runtime_marker;
 pub(crate) mod unplaced;
 
 use crate::config::session_hosts::EndpointMode;
@@ -487,6 +488,12 @@ pub(crate) async fn launch_herdr_session(
         crate::services::discord::stamp_spawn_markers(&owner.logical_key, Some(&incarnation))
             .map_err(|error| HerdrLaunchError::Marker(error.to_string()))
     });
+    let markers = match markers {
+        Ok(_) => runtime_marker::clear_fresh(&owner, &nonce)
+            .await
+            .map_err(HerdrLaunchError::Marker),
+        Err(error) => Err(error),
+    };
     if let Err(error) = markers {
         return Err(retire_unsent(pool, &owner, &nonce, error).await);
     }

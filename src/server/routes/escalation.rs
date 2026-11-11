@@ -555,12 +555,10 @@ async fn emit_escalation_with_base_url(
     };
 
     let token = match crate::credential::read_bot_token(
-        crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+        crate::domain::bot_role::UtilityBotRole::Notify.alias(),
     )
     .or_else(|| {
-        crate::credential::read_bot_token(
-            crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
-        )
+        crate::credential::read_bot_token(crate::domain::bot_role::UtilityBotRole::Announce.alias())
     }) {
         Some(token) => token,
         None => {

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::identity::{PieceKey, marker, payload_sha256, piece_of};
 use super::send::RepostIds;
-use crate::services::discord::runtime_store::fsync_parent_dir;
+use crate::domain::file_sync::fsync_parent_dir;
 use crate::services::tui_o::shadow::UnitKey;
 use crate::services::tui_o::store::ledger::PieceRecord;
 

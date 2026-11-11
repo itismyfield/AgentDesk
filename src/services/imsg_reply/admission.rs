@@ -11,7 +11,7 @@ use crate::db::imsg_reply::{
     AdmissionIdentity, AdmissionSettlement, Obligation, read_obligation, reserve_admission,
     reserve_admission_for_source, settle_admission,
 };
-use crate::services::discord::health::{HumanInputDelivery, HumanInputError};
+use crate::domain::human_input::{HumanInputDelivery, HumanInputError};
 
 pub(crate) type AdmissionResponse = (StatusCode, Json<Value>);
 

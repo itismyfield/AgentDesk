@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::provider::ProviderRuntimeExt;
 
 pub(crate) fn channel_supports_provider(
     provider: &ProviderKind,
