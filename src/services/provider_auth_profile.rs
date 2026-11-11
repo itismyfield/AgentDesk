@@ -526,8 +526,15 @@ pub fn default_home_path(provider: &ProviderKind) -> Option<PathBuf> {
 }
 
 pub fn extra_accounts_root() -> Result<PathBuf, AuthProfileError> {
-    dirs::home_dir()
-        .map(|home| home.join(".adk").join("profiles"))
+    // Test fixtures isolate managed homes through HOME, including on Windows.
+    #[cfg(test)]
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir);
+    #[cfg(not(test))]
+    let home = dirs::home_dir();
+    home.map(|home| home.join(".adk").join("profiles"))
         .ok_or(AuthProfileError::UserHomeUnavailable)
 }
 

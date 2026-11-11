@@ -269,9 +269,9 @@ fn b6_reader_observes_native_user_appended_after_applied_and_seal() {
         None,
         "seal is not a UUID"
     );
-    let (started, receive_started) = std::sync::mpsc::sync_channel(1);
     let (sender, _receiver) = std::sync::mpsc::channel();
     let (reader_token, reader_path) = (token.clone(), path.clone());
+    let appended = std::sync::Once::new();
     let reader = std::thread::spawn(move || {
         crate::services::session_backend::read_claude_tui_output_file_until_result_with_harvest(
             &reader_path.display().to_string(),
@@ -279,25 +279,24 @@ fn b6_reader_observes_native_user_appended_after_applied_and_seal() {
             sender,
             Some(reader_token),
             crate::services::provider::SessionProbe::process(move || {
-                let _ = started.try_send(());
+                // Append after the reader observes empty EOF, without a scheduler timeout.
+                appended.call_once(|| {
+                    let mut file = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&reader_path)
+                        .unwrap();
+                    writeln!(file, "{}", user("own", "late-a")).unwrap();
+                    writeln!(
+                        file,
+                        "{{\"type\":\"system\",\"subtype\":\"stop_hook_summary\"}}"
+                    )
+                    .unwrap();
+                });
                 true
             }),
         )
         .unwrap()
     });
-    receive_started
-        .recv_timeout(std::time::Duration::from_secs(4))
-        .unwrap();
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    writeln!(file, "{}", user("own", "late-a")).unwrap();
-    writeln!(
-        file,
-        "{{\"type\":\"system\",\"subtype\":\"stop_hook_summary\"}}"
-    )
-    .unwrap();
     assert!(matches!(
         reader.join().unwrap().0,
         crate::services::provider::ReadOutputResult::Completed { .. }

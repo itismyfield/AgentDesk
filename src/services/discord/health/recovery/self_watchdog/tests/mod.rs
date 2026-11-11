@@ -391,69 +391,72 @@ fn runtime_stall_exits_three_times_before_external_observation_limit() {
 
 #[test]
 fn scheduling_runtime_and_db_progress_cannot_extend_silence_deadline() {
-    let _serial = hang_forensics::counter_test_lock();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .unwrap();
-    let _entered = runtime.enter();
-    let _armed = hang_forensics::spawn_runtime_liveness_beacon();
-    let db = runtime.spawn(async {
-        loop {
-            hang_forensics::DbProbeGuard::new().finish(true);
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    });
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
     let policy = WatchdogPolicy {
         probe_limit: Duration::from_millis(45),
         ..policy()
     };
     let started = Instant::now();
-    let mut threads = Threads::default();
-    let (exit_tx, exit_rx) = mpsc::channel();
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let recorded = seen.clone();
-    threads.0.push(std::thread::spawn(move || {
-        driver::run(
-            &policy,
-            WatchdogMode::Enforce,
-            WatchdogState::new(started),
-            started,
-            driver::Hooks {
-                probe: |deadline| driver::tcp_probe(&addr, "127.0.0.1", deadline),
-                snapshot: hang_forensics::snapshot,
-                dump: || Ok(()),
-                log: move |state: &WatchdogState,
-                           decision: &Decision,
-                           sample: Option<&driver::Sample>,
-                           _| {
-                    recorded.lock().unwrap().push((
-                        *decision,
-                        state.fast_failures,
-                        sample.map(|sample| sample.current),
-                    ))
-                },
-                exit: move |reason, _| exit_tx.send((reason, Instant::now())).unwrap(),
+    let deadline = started + policy.blackout_limit;
+    let clock = ManualClock {
+        at: Cell::new(started),
+        spawn_cost: Duration::ZERO,
+        dump_started: None,
+        waits: RefCell::new(Vec::new()),
+    };
+    let ticks = Cell::new(0);
+    let mut seen = Vec::new();
+    let mut exit = None;
+    driver::run_with_clock(
+        &policy,
+        WatchdogMode::Enforce,
+        WatchdogState::new(started),
+        started,
+        driver::Hooks {
+            probe: |probe_deadline| {
+                assert!(
+                    probe_deadline <= deadline,
+                    "progress cannot renew the deadline"
+                );
+                clock.at.set(probe_deadline);
+                (
+                    HealthProbeOutcome::NoResponse {
+                        elapsed_ms: 45,
+                        error: "silent health handler".into(),
+                    },
+                    probe_deadline,
+                )
             },
-        );
-    }));
-    let (reason, exited_at) = exit_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("live beacon cannot pardon silent health");
-    db.abort();
-    assert_eq!(reason, Reason::HealthResponseBlackoutLimit);
-    assert!(exited_at <= started + policy.blackout_limit + OS_ALLOWANCE);
-    let seen = seen.lock().unwrap();
+            snapshot: || {
+                ticks.set(ticks.get() + 1);
+                Breadcrumbs {
+                    db_probes_started: ticks.get(),
+                    runtime_ticks: ticks.get(),
+                    ..scheduling()
+                }
+            },
+            dump: || Ok(()),
+            log: |state: &WatchdogState,
+                  decision: &Decision,
+                  sample: Option<&driver::Sample>,
+                  at| {
+                assert!(at <= deadline);
+                seen.push((
+                    *decision,
+                    state.fast_failures,
+                    sample.map(|sample| sample.current),
+                ));
+            },
+            exit: |reason, at| exit = Some((reason, at)),
+        },
+        &clock,
+    );
+    assert_eq!(exit, Some((Reason::HealthResponseBlackoutLimit, deadline)));
     assert!(seen.iter().all(|(_, fast, _)| *fast == 0));
     let probes: Vec<_> = seen.iter().filter_map(|(_, _, crumbs)| *crumbs).collect();
     assert!(probes.len() >= 3);
     assert!(probes.last().unwrap().db_probes_started > probes.first().unwrap().db_probes_started);
-    assert!(probes.last().unwrap().runtime_ticks > 0);
+    assert!(probes.last().unwrap().runtime_ticks > probes.first().unwrap().runtime_ticks);
     assert!(probes.last().unwrap().runtime_tick_age_ms.unwrap() < 5_000);
-    drop(listener);
 }
 
 #[test]

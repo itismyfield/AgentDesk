@@ -41,10 +41,31 @@ impl Fixture {
         verify(ShadowProvider::Codex, &self.cursor, SystemTime::now())
     }
 
-    fn replace_archive(&self, bytes: &[u8]) {
+    fn replacement(&self, bytes: &[u8]) -> PathBuf {
         let replacement = self.dir.path().join("replacement.zst");
         fs::write(&replacement, bytes).unwrap();
-        fs::rename(replacement, &self.archive).unwrap();
+        // Windows has no inode/ctime fingerprint; give the replacement an observable mtime.
+        #[cfg(windows)]
+        File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new().set_modified(
+                    fs::metadata(&self.archive)
+                        .unwrap()
+                        .modified()
+                        .unwrap()
+                        .min(SystemTime::now())
+                        - std::time::Duration::from_secs(1),
+                ),
+            )
+            .unwrap();
+        replacement
+    }
+
+    fn replace_archive(&self, bytes: &[u8]) {
+        fs::rename(self.replacement(bytes), &self.archive).unwrap();
     }
 }
 
@@ -182,8 +203,7 @@ fn archive_replacement_is_rejected_at_open_decode_and_commit_boundaries() {
     for point in [TestPoint::Opened, TestPoint::Decoded] {
         let fixture = Fixture::new(b"line\n");
         let archive = fixture.archive.clone();
-        let replacement = fixture.dir.path().join("other.zst");
-        fs::write(&replacement, fs::read(&archive).unwrap()).unwrap();
+        let replacement = fixture.replacement(&fs::read(&archive).unwrap());
         let result = with_hook(
             move |seen| {
                 if seen == point {
