@@ -147,7 +147,11 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
                     tail.assistant = text;
                 }
             }
-            "permission-mode" => return None,
+            "permission-mode" => {
+                tail.end = End::None;
+                tail.terminal = 0;
+                tail.empty = false;
+            }
             "progress" => {
                 tail.empty = false;
                 tail.activity = offset;

@@ -314,7 +314,16 @@ fn output_guard_hold_and_blocked_fence_timer_and_late_assistant_before_final() {
         );
         r.append(json!({"type":"system","subtype":"stop_hook_summary"}));
         r.terminal();
-        assert!(wait(&r.session, None, None, Duration::ZERO).is_err());
+        assert!(
+            prepare(
+                &r.session,
+                None,
+                None,
+                Duration::ZERO,
+                super::super::input::PromptReadinessKind::ProvenWarmFollowup
+            )
+            .is_err()
+        );
         assert!(!r.ready());
         assert!(r.send().is_err());
         assert!(tmux.sends().is_empty());
@@ -469,12 +478,12 @@ fn fresh_payload_waits_for_session_start_and_running_idle_path_sends_no_key() {
 }
 
 pub(crate) fn pre_source(session: &str, path: &Path) {
-    let source = Source {
+    let source = Source::current(session, Some(path)).unwrap_or_else(|| Source {
         session: session.into(),
         nonce: source::nonce(session).flatten(),
         native: path.file_stem().unwrap().to_string_lossy().into_owned(),
         path: path.into(),
-    };
+    });
     let mut state = ledger();
     state
         .entries
@@ -687,4 +696,200 @@ fn completing_a_pre_stop_partial_record_is_not_new_continuation_activity() {
     r.assistant("actual resumed activity");
     r.terminal();
     assert!(r.ready());
+}
+
+#[cfg(unix)]
+#[test]
+fn permission_mode_is_a_barrier_until_later_completion_not_a_permanent_veto() {
+    use super::super::input::submission::tests::{ScriptedTmux, view};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|b| b.set(Some(Duration::ZERO)));
+    let r = Rig::new();
+    let tmux = ScriptedTmux::new(&view("", false));
+    tmux.set_dead(false);
+    r.append(json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{}}]}}));
+    r.append(json!({"type":"permission-mode","mode":"bypassPermissions"}));
+    r.append(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"done"}]}}));
+    r.assistant("actual completion");
+    r.terminal();
+    assert_eq!(
+        r.send(),
+        Ok(()),
+        "a past permission marker must not hide a later terminal"
+    );
+    assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
+    r.append(json!({"type":"permission-mode","mode":"default"}));
+    assert!(r.send().is_err());
+    r.assistant("still Running after marker");
+    assert!(r.send().is_err());
+    assert_eq!(
+        tmux.sends(),
+        ["load", "paste", "Enter"],
+        "no later input while marker-last or Running"
+    );
+    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|b| b.set(None));
+}
+
+#[cfg(unix)]
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+#[cfg(unix)]
+#[test]
+fn late_startup_picker_enters_once_before_start_and_then_submits_one_original() {
+    use super::super::input::{
+        self, PromptReadinessKind,
+        submission::tests::{ScriptedTmux, view},
+    };
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    {
+        let mut state = ledger();
+        state
+            .entries
+            .retain(|source, _| source.session != r.session);
+        state.starts.retain(|(session, _), _| session != &r.session);
+    }
+    let tmux = ScriptedTmux::new("Claude is booting…");
+    tmux.set_dead(false);
+    fs::write(
+        tmux.directory().join("next_screen"),
+        "Resume from summary\n❯ 1. Resume from summary\nEnter to confirm",
+    )
+    .unwrap();
+    let socket = tmux.directory().join("dialog.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let script = format!(
+        "if [ \"$1\" = Enter ] && [ ! -f {done} ]; then\n touch {done}\n python3 -c \"import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect({socket}); s.sendall(b'D'); assert s.recv(1)==b'1'\"\nfi\n",
+        done = shell_quote(&tmux.directory().join("dialog_done")),
+        socket = shell_quote(&socket)
+    );
+    fs::write(tmux.directory().join("on_key"), script).unwrap();
+    let screen = tmux.directory().join("screen");
+    let sends = tmux.directory().join("sends");
+    let session = r.session.clone();
+    let path = r.path.clone();
+    let ctx = r.ctx.clone();
+    let controller = std::thread::spawn(move || {
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut tag = [0];
+        peer.read_exact(&mut tag).unwrap();
+        if tag == [b'C'] {
+            return false;
+        }
+        assert_eq!(
+            fs::read_to_string(&sends).unwrap(),
+            "Enter\n",
+            "dialog key precedes every payload"
+        );
+        assert!(
+            observe(&session, Some(&path)).is_none(),
+            "no Start evidence yet"
+        );
+        fs::write(screen, view("", false)).unwrap();
+        peer.write_all(b"1").unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        assert_eq!(
+            fs::read_to_string(&sends).unwrap(),
+            "Enter\n",
+            "empty screen alone must not admit payload before Start"
+        );
+        note_hook(
+            "claude",
+            &HookEventKind::SessionStart,
+            &session,
+            &json!({"session_id":ctx.expected_native_session_id,"transcript_path":path,"source":"startup"}),
+            Some(&ctx),
+            Some(Utc::now()),
+            false,
+        );
+        true
+    });
+    let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+    let (done, wait) = std::sync::mpsc::channel();
+    let timeout = token.clone();
+    let timer = std::thread::spawn(move || {
+        if wait.recv_timeout(Duration::from_secs(5)).is_err() {
+            timeout
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let result = input::send_prompt_with_readiness(
+        &r.session,
+        "one original",
+        PromptReadinessKind::FreshTurn,
+        Some(&token),
+    );
+    let _ = done.send(());
+    if result.is_err() {
+        if let Ok(mut peer) = UnixStream::connect(&socket) {
+            let _ = peer.write_all(b"C");
+        }
+    }
+    crate::test_support::wait::join_within(timer, Duration::from_secs(6));
+    let handled = crate::test_support::wait::join_within(controller, Duration::from_secs(6));
+    assert_eq!(result, Ok(()));
+    assert!(handled);
+    assert_eq!(tmux.sends(), ["Enter", "load", "paste", "Enter"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_workspace_caller_uses_home_only_plan_before_every_dialog_key() {
+    use super::super::input::{
+        self, PromptReadinessKind,
+        submission::tests::{ScriptedTmux, view},
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let home = dirs::home_dir().unwrap().join("startup-fixture");
+    for (workspace, accepted) in [
+        ("/".to_owned(), false),
+        ("/outside-home".to_owned(), false),
+        (String::new(), false),
+        (home.display().to_string(), true),
+    ] {
+        let r = Rig::new();
+        let dialog = if workspace.is_empty() {
+            "Quick safety check\nEnter to confirm".into()
+        } else {
+            format!("Accessing workspace:\n{workspace}\nQuick safety check\nEnter to confirm")
+        };
+        let tmux = ScriptedTmux::new(&dialog);
+        tmux.set_dead(false);
+        let empty = tmux.directory().join("empty");
+        fs::write(&empty, view("", false)).unwrap();
+        fs::write(
+            tmux.directory().join("on_key"),
+            format!(
+                "if [ \"$1\" = Enter ]; then cp {} {}; fi\n",
+                shell_quote(&empty),
+                shell_quote(&tmux.directory().join("screen"))
+            ),
+        )
+        .unwrap();
+        let result = input::send_prompt_with_readiness(
+            &r.session,
+            "one original",
+            PromptReadinessKind::FreshTurn,
+            None,
+        );
+        if accepted {
+            assert_eq!(result, Ok(()));
+            assert_eq!(tmux.sends(), ["Enter", "load", "paste", "Enter"]);
+        } else {
+            assert!(
+                result.is_err(),
+                "unsafe workspace {workspace:?} must be refused"
+            );
+            assert!(
+                tmux.sends().is_empty(),
+                "unsafe workspace must get zero keys"
+            );
+        }
+    }
 }

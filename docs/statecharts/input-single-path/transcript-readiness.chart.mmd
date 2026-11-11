@@ -10,6 +10,8 @@ stateDiagram-v2
     BusyWritten --> BusyWritten : duplicate Idle wake while receipt delayed; no re-exposure
     NativeQueued --> Running : native consumes this original once
     Route --> Booting : fresh / clear / resume Idle entry
+    Booting --> StartupDialog : dialog appears during bounded wait
+    StartupDialog --> Booting : approved existing plan + one bounded dialog Enter
     Booting --> Observe : scoped SessionStart startup/resume/clear
     Route --> Observe : existing Idle entry / verified daemon restore
     Observe --> Waiting : Running or Unknown in Idle-ready path
@@ -25,6 +27,7 @@ stateDiagram-v2
     Continuation --> Continuation : summary + timer read; no Idle submit / compact
     Continuation --> AwaitFinal : late assistant beyond suppression floor
     AwaitFinal --> Observe : later approved hard terminal or verified final Stop pair
+    Running --> Running : permission metadata clears terminal; continue reading later records
     Running --> Observe : current approved terminal
     Running --> Settled : exact original receipt; no replay of Unknown
     Settled --> Route : next original

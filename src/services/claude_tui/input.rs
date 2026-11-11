@@ -31,6 +31,7 @@ pub(crate) use user_receipt::{PaneIdentity, UserReceipt};
 
 mod draft_hold;
 use draft_hold::admit_automatic_write;
+pub(super) use draft_hold::dismiss_startup_dialog;
 pub(crate) use draft_hold::{composer_refusal, stranded_draft_is_ours};
 #[cfg(test)]
 mod final_ready_tests;
@@ -76,15 +77,6 @@ pub const PROMPT_READY_CANCELLED_ERROR: &str = "claude tui prompt readiness wait
 const PROMPT_READY_MCP_AUTH_ERROR_PREFIX: &str = "claude tui blocked on MCP server authentication";
 /// Settle delay before re-capturing to confirm an observed MCP-auth cold-boot
 /// banner is a stable blocking state and not a single half-rendered boot frame.
-/// Cap on auto-dismiss key presses for Claude startup dialogs (resume-from-
-/// summary picker, workspace trust) per readiness wait. Startup can stack at
-/// most two dialogs back to back; if the pane still shows a dialog after this
-/// many Enters something unexpected is on screen and we fall back to the
-/// normal timeout path instead of blindly mashing Enter.
-const STARTUP_DIALOG_DISMISS_MAX_ATTEMPTS: usize = 5;
-/// Settle delay after dismissing a startup dialog so the TUI can redraw
-/// (either the next dialog or the composer prompt) before the next snapshot.
-const STARTUP_DIALOG_DISMISS_SETTLE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptReadinessKind {
@@ -601,27 +593,16 @@ fn wait_for_prompt_ready_inner(
     if !host_input::legacy_pane_alive(session_name) {
         return Err("claude tui session died before prompt input was ready".into());
     }
-    if readiness == PromptReadinessKind::FreshTurn {
-        for _ in 0..STARTUP_DIALOG_DISMISS_MAX_ATTEMPTS {
-            let snapshot = prompt_readiness_snapshot(session_name);
-            let Some(dialog) =
-                super::startup_dialog::detect_claude_startup_dialog(&snapshot.pane_tail)
-            else {
-                break;
-            };
-            draft_hold::dismiss_startup_dialog(session_name, readiness, &dialog, cancel_token)?;
-            std::thread::sleep(STARTUP_DIALOG_DISMISS_SETTLE);
-        }
-    }
     match super::readiness::prepare(
         session_name,
         transcript_path,
         cancel_token,
         readiness.timeout(),
-        readiness != PromptReadinessKind::ProvenWarmFollowup,
+        readiness,
     ) {
         Ok(_) => Ok(()),
         Err(error) if is_prompt_ready_cancelled_error(&error) => Err(error),
+        Err(error) if !is_prompt_ready_timeout_error(&error) => Err(error),
         Err(error) => {
             let error = format!("{error}; readiness={}", readiness.label());
             if !host_input::legacy_pane_alive(session_name) {

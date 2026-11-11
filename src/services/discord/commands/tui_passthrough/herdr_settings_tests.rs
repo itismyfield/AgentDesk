@@ -1203,8 +1203,15 @@ fn herdr_effort_on_long_history_names_read_failure_and_closes_selector_pg() {
             .unwrap();
         use crate::services::claude_tui::input::TuiInputAction::{Enter, Literal};
         let plan = [Literal("next prompt".into()), Enter];
+        let logical = fx.logical.clone();
+        let source = crate::config::runtime_root()
+            .unwrap()
+            .join("next-input.jsonl");
+        crate::services::claude_tui::readiness::tests::pre_source(&logical, &source);
         let next = tokio::task::spawn_blocking(move || {
-            crate::services::claude::herdr_turn::composer::run(&target, &plan, None)
+            crate::services::claude::herdr_turn::composer::run_ready(
+                &logical, &source, &target, &plan, None,
+            )
         });
         let next = await_within(next, WAIT_CAP).await.unwrap();
         assert!(

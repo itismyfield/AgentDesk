@@ -1,4 +1,5 @@
 //! Idle-only readiness authority. Busy injection and compact keep their existing entry paths.
+mod dialog;
 mod evidence;
 #[cfg(unix)]
 pub(crate) mod idle;
@@ -254,8 +255,6 @@ impl Reservation {
     }
 }
 pub(crate) use wait::prepare;
-#[cfg(test)]
-pub(crate) use wait::wait;
 
 /// Both root output blocking and feedback continuation use this same fence before replying.
 pub(crate) fn note_hook(

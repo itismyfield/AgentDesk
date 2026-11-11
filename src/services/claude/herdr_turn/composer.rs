@@ -150,24 +150,13 @@ pub(crate) fn when_idle(
     }
 }
 
-/// [`run`] for an `/exit`, which also sends nothing while a draft is stashed.
+/// Sends `/exit` only after its existing composer and stash checks.
 pub(crate) fn run_exit(target: &HerdrTarget, plan: &[TuiInputAction]) -> InputRun {
     let capture = || target.capture_ansi(-80);
     when_ready_to_exit(capture, None, || run_herdr(target, plan, None))
 }
 
-/// Runs `send` once an ANSI `capture` shows an empty ready Claude composer; a person's draft, a
-/// dialog or a busy screen sends nothing, on any host.
-#[cfg(test)]
-pub(crate) fn when_ready(
-    capture: impl FnMut() -> Option<String>,
-    cancel: Option<&CancelToken>,
-    send: impl FnOnce() -> InputRun,
-) -> InputRun {
-    ready_then(capture, cancel, false, send)
-}
-
-/// [`when_ready`] for an `/exit`, which also sends nothing while a draft is stashed.
+/// The existing exit wait also refuses a stashed draft.
 pub(crate) fn when_ready_to_exit(
     capture: impl FnMut() -> Option<String>,
     cancel: Option<&CancelToken>,
@@ -194,16 +183,3 @@ fn ready_then(
 #[cfg(test)]
 #[path = "composer_tests.rs"]
 mod composer_tests;
-
-#[cfg(test)]
-pub(crate) fn run(
-    target: &HerdrTarget,
-    plan: &[TuiInputAction],
-    cancel: Option<&CancelToken>,
-) -> InputRun {
-    when_ready(
-        || target.capture_ansi(-80),
-        cancel,
-        || run_herdr(target, plan, cancel),
-    )
-}

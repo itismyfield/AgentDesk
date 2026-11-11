@@ -195,20 +195,26 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
         );
     }
     let ready_screen = pane("✻ Baked for 2s", "").replace("❯", "\x1b[36m❯\x1b[0m");
-    assert!(
-        matches!(
-            observation(Some(&ready_screen), false),
-            ControlFlow::Break(true)
-        ),
-        "human_finished_composer_ready_contract"
-    );
     rig.answer("pane.read", serde_json::json!({"type":"pane_read", "read":{"pane_id":PANE, "source":"recent_unwrapped", "text":ready_screen, "revision":2, "truncated":false}}));
     let plan = [
         TuiInputAction::PasteBuffer("after human draft".into()),
         TuiInputAction::Enter,
     ];
+    crate::services::claude_tui::readiness::tests::pre_source(
+        logical,
+        &root.path().join("same-transcript.jsonl"),
+    );
     assert!(
-        matches!(run(&target, &plan, None), InputRun::Applied),
+        matches!(
+            run_ready(
+                logical,
+                &root.path().join("same-transcript.jsonl"),
+                &target,
+                &plan,
+                None
+            ),
+            InputRun::Applied
+        ),
         "human_finished_actual_send_contract"
     );
     assert_eq!(rig.sends().len(), 2);
@@ -236,12 +242,19 @@ fn herdr_claude_composer_waits_from_busy_to_ready_before_exactly_one_submit() {
         TuiInputAction::PasteBuffer("cold start input".into()),
         TuiInputAction::Enter,
     ];
+    let path = root.path().join("live-turn.jsonl");
+    crate::services::claude_tui::readiness::tests::pre_source(logical, &path);
+    std::fs::write(
+        &path,
+        "{\"type\":\"assistant\",\"message\":{\"content\":\"running\"}}\n",
+    )
+    .unwrap();
     let cancel = CancelToken::new();
     cancel
         .cancelled
         .store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
-        run(&target, &plan, Some(&cancel)),
+        run_ready(logical, &path, &target, &plan, Some(&cancel)),
         InputRun::Cancelled { confirmed: 0 },
         "cancel_before_composer_capture_contract"
     );
@@ -262,15 +275,23 @@ fn herdr_claude_composer_waits_from_busy_to_ready_before_exactly_one_submit() {
             "revision":1, "truncated":false
         }})
     };
-    rig.answer_sequence(
+    rig.answer(
         "pane.read",
-        [
-            response(pane("✳ Architecting… (12s · esc to interrupt)", "")),
-            response(pane("✻ Baked for 2s", "")),
-        ],
+        response(pane("✳ Architecting… (12s · esc to interrupt)", "")),
     );
+    let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = writes.clone();
+    rig.on_send(move |_| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    let completed = path.clone();
+    let finish = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 0);
+        std::fs::write(completed, "{\"type\":\"assistant\",\"message\":{\"content\":\"done\"}}\n{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n").unwrap();
+    });
     assert_eq!(
-        run(&target, &plan, Some(&cancel)),
+        run_ready(logical, &path, &target, &plan, Some(&cancel)),
         InputRun::Applied,
         "busy_then_ready_composer_applies_contract"
     );
@@ -279,14 +300,15 @@ fn herdr_claude_composer_waits_from_busy_to_ready_before_exactly_one_submit() {
         2,
         "busy_then_ready_composer_sends_two_contract"
     );
+    crate::test_support::wait::join_within(finish, Duration::from_secs(5));
     let reads = rig
         .requests()
         .iter()
         .filter(|request| request["method"] == "pane.read")
         .count();
     assert_eq!(
-        reads, 2,
-        "busy_then_ready_composer_reads_both_screens_contract"
+        reads, 1,
+        "terminal_signal_admits_while_old_busy_chrome_is_visible"
     );
 }
 
@@ -297,11 +319,14 @@ fn an_exit_is_never_sent_over_a_stashed_draft() {
     let clear = pane("✻ Baked for 2s", "");
     let stash_row = format!("{:>50}", "\u{203a} stashed");
     let stashed = clear.replacen("\n\n", &format!("\n{stash_row}\n"), 1);
-    for (capture, exit, sent) in [
+    for (i, (capture, exit, sent)) in [
         (&stashed, true, false),
         (&stashed, false, true),
         (&clear, true, true),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let called = std::cell::Cell::new(false);
         let send = || {
             called.set(true);
@@ -310,8 +335,75 @@ fn an_exit_is_never_sent_over_a_stashed_draft() {
         let capture = || Some(capture.clone());
         let run = match exit {
             true => when_ready_to_exit(capture, None, send),
-            false => when_ready(capture, None, send),
+            false => {
+                let source = tempfile::tempdir().unwrap();
+                let logical = format!("stash-composer-{i}");
+                let path = source.path().join("turn.jsonl");
+                crate::services::claude_tui::readiness::tests::pre_source(&logical, &path);
+                when_idle(&logical, &path, capture, None, send)
+            }
         };
         assert_eq!(called.get(), sent, "exit {exit}: {run:?}");
     }
+}
+
+#[test]
+fn herdr_ready_revalidates_a_source_changed_by_the_capture_before_any_key() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let rig = HerdrRig::start();
+    let _registry = rig.registry_on_this_thread();
+    let context = rig.context(NONCE);
+    rig.run_provider(&context, false);
+    let logical = "composer-source-flip";
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(logical, "host_kind"),
+        "herdr",
+    )
+    .unwrap();
+    let (_, target) = bound_target(&rig, logical);
+    let _admission = crate::services::herdr_admission::force_for_test(
+        crate::services::herdr_admission::Admission::new(true, Some(root.path().join("no-stop"))),
+    );
+    let path = root.path().join("original.jsonl");
+    crate::services::claude_tui::readiness::tests::pre_source(logical, &path);
+    let original = path.clone();
+    std::fs::write(
+        &path,
+        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+    )
+    .unwrap();
+    let replacement = root.path().join("replacement.jsonl");
+    std::fs::write(
+        &replacement,
+        "{\"type\":\"assistant\",\"message\":{\"content\":\"new source is Running\"}}\n",
+    )
+    .unwrap();
+    rig.answer("pane.read", serde_json::json!({"type":"pane_read", "read":{"pane_id":PANE,"source":"recent_unwrapped","text":pane("✻ Baked for 2s", ""),"revision":1,"truncated":false}}));
+    let switched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = switched.clone();
+    rig.on_reply(move |_| {
+        if seen.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        std::fs::rename(&replacement, &original).unwrap();
+    });
+    let plan = [
+        TuiInputAction::PasteBuffer("one original".into()),
+        TuiInputAction::Enter,
+    ];
+    let result = run_ready(logical, &path, &target, &plan, None);
+    eprintln!(
+        "changed_source_got_keys={} outcome={result:?}",
+        rig.sends().len()
+    );
+    assert!(
+        switched.load(std::sync::atomic::Ordering::SeqCst),
+        "must reach the real capture after current-source observation"
+    );
+    assert!(
+        rig.sends().is_empty(),
+        "source changed after observation must get zero keys"
+    );
+    assert!(matches!(result, InputRun::Refused(_)));
 }

@@ -63,7 +63,7 @@ if [ "$2" = "$(cat "$d/hold" 2>/dev/null)" ] && [ ! -f "$d/held" ]; then
 fi
 case "$2" in
 display-message) for last do :; done; case "$last" in '#{pane_dead}'|'#{pane_in_mode}') echo 0 ;; *) echo 1 ;; esac ;;
-capture-pane) cat "$d/screen" ;;
+capture-pane) cat "$d/screen"; if [ -f "$d/next_screen" ]; then mv "$d/next_screen" "$d/screen"; fi ;;
 list-panes) if [ -f "$d/pane_model" ]; then if [ -f "$d/dead" ]; then echo 1; else echo 0; fi; fi ;;
 load-buffer|paste-buffer|send-keys)
   n=$(cat "$d/sent" 2>/dev/null || echo 0); echo $((n + 1)) > "$d/sent"
@@ -76,7 +76,8 @@ load-buffer|paste-buffer|send-keys)
   fi
   [ "$(cat "$d/fail" 2>/dev/null)" != "$n" ] || exit 1
   if [ "$key" = Enter ] && [ -f "$d/on_enter" ]; then cat "$d/on_enter" >> "$(cat "$d/on_enter_target")"; fi
-  if [ "$key" = Enter ] && [ -f "$d/die_on_enter" ]; then touch "$d/dead"; fi ;;
+  if [ "$key" = Enter ] && [ -f "$d/die_on_enter" ]; then touch "$d/dead"; fi
+  if [ -f "$d/on_key" ]; then sh "$d/on_key" "$key"; fi ;;
 esac
 exit 0
 "#
@@ -89,6 +90,10 @@ exit 0
         let tmux = Self { dir, _path: path };
         tmux.show(screen);
         tmux
+    }
+
+    pub(crate) fn directory(&self) -> &Path {
+        self.dir.path()
     }
 
     pub(crate) fn show(&self, screen: &str) {
