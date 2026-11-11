@@ -437,7 +437,9 @@ fn an_older_record_of_the_origin_text_leaves_the_handoff_unbound() {
 fn durable_write_failure_preserves_the_previous_held_input_snapshot() {
     use crate::domain::atomic_write::{Stage, tests::FaultGuard};
 
-    let env_lock = crate::config::shared_test_env_lock().lock().unwrap();
+    let env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let root = tempfile::tempdir().unwrap();
     let root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",

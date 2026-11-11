@@ -52,7 +52,9 @@ fn opencode_publication_failures_keep_config_state_and_observations() {
         return;
     }
     assert!(!crate::services::disk_monitor::enospc_recent());
-    let env_lock = crate::config::shared_test_env_lock().lock().unwrap();
+    let env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
