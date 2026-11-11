@@ -239,6 +239,9 @@ pub(crate) fn commit(captured: &Captured, origin: &str) -> Result<(), String> {
         if bytes.len() > 1024 {
             return Err("retirement exceeds limit".into());
         }
-        crate::services::discord::runtime_store::atomic_write(&path()?, &bytes)
+        crate::domain::atomic_write::prepare(&path()?, &bytes)
+            .and_then(|prepared| prepared.publish())
+            .map(|crate::domain::atomic_write::Published| ())
+            .map_err(crate::services::disk_monitor::atomic_write_error)
     })
 }

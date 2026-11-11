@@ -432,3 +432,41 @@ fn an_older_record_of_the_origin_text_leaves_the_handoff_unbound() {
     assert_eq!(seen, PromptObservation::SuppressedDiscordDuplicate);
     assert_eq!(slot("t1"), Some(NativeTurnOwner::Answer));
 }
+
+#[test]
+fn durable_write_failure_preserves_the_previous_held_input_snapshot() {
+    use crate::domain::atomic_write::{Stage, tests::FaultGuard};
+
+    let env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let state_lock = locked();
+    std::mem::forget(reserve_discord_handoff("codex", TMUX, ORIGIN));
+    assert_eq!(hook(INPUT, "t1"), PromptObservation::ParkedForHandoff);
+    let path = durable_path("codex", TMUX).unwrap();
+    let old = std::fs::read(&path).unwrap();
+    for stage in [
+        Stage::CreateTemp,
+        Stage::Write,
+        Stage::FileSync,
+        Stage::Rename,
+    ] {
+        let fault = FaultGuard::new(&path, stage, 28);
+        sync_durable("codex", TMUX);
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        assert!(crate::services::disk_monitor::enospc_recent());
+        drop(fault);
+    }
+    sync_durable("codex", TMUX);
+    let saved: DurableHandoff = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(saved.reservation.parked.len(), 1);
+    reset_state_for_tests();
+    drop(state_lock);
+    drop(root_guard);
+    drop(env_lock);
+}

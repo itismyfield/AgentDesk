@@ -1,6 +1,7 @@
 //! First init holds the existing execution key and intake fence through its local commit.
 use super::*;
-use crate::services::cluster::intake_router_hook::owner_record::{OwnerIdentity, custody};
+use crate::domain::intake_identity::OwnerIdentity;
+use crate::services::cluster::intake_router_hook::owner_record::custody;
 
 pub(crate) async fn facts(
     pool: &PgPool,

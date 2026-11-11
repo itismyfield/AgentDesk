@@ -1,7 +1,7 @@
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
 };
-use crate::services::discord::session_identity::SessionIdentity;
+use crate::domain::session_identity::SessionIdentity;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HookIdentityError {
