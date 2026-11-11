@@ -44,7 +44,7 @@ async fn r1_fresh_turn_mark_excludes_a_completed_previous_turn_body() {
     assert_eq!(candidate.turn_mark().unwrap().sends, (2, 2));
 
     let (path, source) = rollout(&harness, "fresh-turn.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     ready_work().await;
     assert_eq!(
         adoption(CODEX),
@@ -61,7 +61,7 @@ async fn r2_a_body_started_after_the_turn_mark_still_skips_the_rollout() {
     const CODEX: u64 = 61_851;
     let Takeover {
         harness,
-        io: _io,
+        io,
         tasks: _tasks,
         _reserved,
     } = hosted_over_old(CODEX).await;
@@ -73,7 +73,7 @@ async fn r2_a_body_started_after_the_turn_mark_still_skips_the_rollout() {
     assert_eq!(candidate.turn_mark().unwrap().sends, admitted.sends);
 
     let (path, _) = rollout(&harness, "same-turn.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     ready_work().await;
     assert_eq!(adoption(CODEX), Adoption::Deferred);
     assert!(!harness.store.has_channel_dir(CODEX));
@@ -96,7 +96,7 @@ async fn r3_a_previous_turn_body_in_flight_retries_then_commits_after_it_finishe
     let candidate = mark(CODEX);
     assert_eq!(candidate.turn_mark().unwrap().sends, (2, 1));
     let (path, source) = rollout(&harness, "in-flight.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     ready_work().await;
     assert!(
         io.calls().contains(&("fence", CODEX)),
@@ -125,7 +125,7 @@ async fn r4_sends_are_captured_before_the_unlocked_binding_read() {
     const CODEX: u64 = 61_853;
     let Takeover {
         harness,
-        io: _io,
+        io,
         tasks: _tasks,
         _reserved,
     } = hosted_over_old(CODEX).await;
@@ -137,7 +137,7 @@ async fn r4_sends_are_captured_before_the_unlocked_binding_read() {
             "binding IO holds no adoption lock"
         );
         drop(candidate.claim_body(CODEX));
-        bind_late(CODEX, &path);
+        bind_new(&io, CODEX, &path);
         binding_seq(CODEX)
     }));
     let captured = candidate.turn_mark().unwrap();
@@ -170,21 +170,22 @@ async fn r5_a_skip_baseline_supersedes_the_older_turn_mark() {
     let candidate = mark(CODEX);
     drop(candidate.claim_body(CODEX));
     let (skipped, _) = rollout(&harness, "skip-first.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &skipped);
+    bind_new(&io, CODEX, &skipped);
     ready_work().await;
     assert_eq!(adoption(CODEX), Adoption::Deferred);
     assert!(!harness.store.has_channel_dir(CODEX));
 
-    let (next, source) = rollout(&harness, "after-skip.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &next);
+    // The skipped rollout's open turn may hold that body, so the next bind waits on it too.
+    let (next, _) = rollout(&harness, "after-skip.jsonl", &prompted("s-codex"));
+    bind_new(&io, CODEX, &next);
     ready_work().await;
     assert_eq!(
         adoption(CODEX),
-        Adoption::Committed,
+        Adoption::Deferred,
         "{:?}",
         io.alarms.halted()
     );
-    assert_eq!(init_sources(&harness, CODEX), [(source, 0)]);
+    assert!(!harness.store.has_channel_dir(CODEX));
 }
 
 #[tokio::test(start_paused = true)]
@@ -192,7 +193,7 @@ async fn r6_a_reused_codex_session_does_not_mark_or_discard_legacy_history() {
     const CODEX: u64 = 61_855;
     let Takeover {
         harness,
-        io: _io,
+        io,
         tasks: _tasks,
         _reserved,
     } = hosted_over_old(CODEX).await;
@@ -206,7 +207,7 @@ async fn r6_a_reused_codex_session_does_not_mark_or_discard_legacy_history() {
         );
     }
     let (path, _) = rollout(&harness, "reuse.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     ready_work().await;
     assert_eq!(adoption(CODEX), Adoption::Deferred);
     assert!(!harness.store.has_channel_dir(CODEX));
@@ -230,7 +231,7 @@ async fn an_eligible_mark_retries_a_transient_commit_failure_before_the_five_sec
         Err("one transient intake fence failure".into())
     });
     let (path, source) = rollout(&harness, "retry.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     ready_work().await;
     assert!(tried.load(Ordering::SeqCst));
     assert_eq!(adoption(CODEX), Adoption::Deferred);
@@ -259,7 +260,7 @@ async fn a_failed_later_admission_read_restores_the_host_baseline_after_a_retry(
     const CODEX: u64 = 61_860;
     let Takeover {
         harness,
-        io: _io,
+        io,
         tasks: _tasks,
         _reserved,
     } = hosted_over_old(CODEX).await;
@@ -273,7 +274,7 @@ async fn a_failed_later_admission_read_restores_the_host_baseline_after_a_retry(
         Err("one transient commit failure before the later admission".into())
     });
     let (path, _) = rollout(&harness, "failed-later-mark.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     ready_work().await;
     assert!(tried.load(Ordering::SeqCst));
     assert_eq!(adoption(CODEX), Adoption::Deferred);

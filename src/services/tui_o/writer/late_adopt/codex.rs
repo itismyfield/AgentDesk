@@ -261,6 +261,10 @@ impl<I: HostIo> Takeover<'_, I> {
             Some(Verdict::Eligible(prefix)) if prefix.prompt_end.is_none() => Err(Taken::Retry(
                 "the takeover rollout has no first user prompt yet".into(),
             )),
+            // A Legacy send since the baseline resamples it before the earlier rollout is judged.
+            Some(Verdict::Eligible(_)) if self.sends_moved(at) => Err(Taken::Skip(
+                "a Legacy body send started since the baseline".into(),
+            )),
             Some(Verdict::Eligible(prefix)) => {
                 let owed = match self.owed(&events, &bound, (at, since), sent_from) {
                     Ok(owed) => owed,
@@ -293,6 +297,12 @@ impl<I: HostIo> Takeover<'_, I> {
         result
     }
 
+    /// Whether a Legacy body send started since `at` read the sends.
+    fn sends_moved(&self, at: Baseline) -> bool {
+        let _adoption = self.candidate.lock();
+        self.candidate.sends().0 != at.sends.0
+    }
+
     /// Takes `bound` at its frontier, with the source bound before it when that one is owed.
     async fn warm(
         &self,
@@ -301,11 +311,7 @@ impl<I: HostIo> Takeover<'_, I> {
         (at, since): (Baseline, Since),
         sent_from: &[SourceId],
     ) -> Result<(), Taken> {
-        let sends = {
-            let _adoption = self.candidate.lock();
-            self.candidate.sends()
-        };
-        if sends.0 != at.sends.0 {
+        if self.sends_moved(at) {
             return Err(Taken::Skip(
                 "a Legacy body send started since the baseline".into(),
             ));

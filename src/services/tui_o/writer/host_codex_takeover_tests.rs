@@ -95,8 +95,8 @@ fn history(turn: &str, text: &str) -> Vec<u8> {
     .concat()
 }
 
-/// A host whose channel already bound a rollout with a turn open that Legacy sent a body from
-/// before the baseline, so that rollout stays Legacy's.
+/// A host whose channel already bound a rollout whose one turn Legacy answered before the
+/// baseline; a queued Legacy body holds every commit until `bind_new` binds the next rollout.
 async fn hosted_over_old(channel: u64) -> Takeover {
     let harness = fresh_on(channel);
     harness.gate.acquired();
@@ -104,11 +104,13 @@ async fn hosted_over_old(channel: u64) -> Takeover {
     p5::set_test_root(Some(harness._runtime.path()));
     let (old, _) = rollout(&harness, "rollout-old.jsonl", &metadata("s-codex"));
     bind_late(channel, &old);
-    append(&old, &[opening(), answer("msg_0", "old answer")].concat());
+    let answered = [opening(), answer("msg_0", "old answer"), turn_end()];
+    append(&old, &answered.concat());
     let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(channel).cloned());
     drop(candidate.unwrap().claim_body(channel));
     let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
     io.late_enabled.store(true, Ordering::SeqCst);
+    io.queued_bodies.store(1, Ordering::SeqCst);
     let tasks = start_codex(&harness, &io, &ready);
     polls(3).await;
     assert_eq!(
@@ -123,6 +125,12 @@ async fn hosted_over_old(channel: u64) -> Takeover {
         tasks,
         _reserved: reserved,
     }
+}
+
+/// Binds the next rollout once the old one's queued Legacy body went out.
+fn bind_new(io: &TestIo, channel: u64, path: &Path) {
+    io.queued_bodies.store(0, Ordering::SeqCst);
+    bind_late(channel, path);
 }
 
 fn legacy_sends(channel: u64) -> bool {
@@ -151,7 +159,7 @@ async fn a_new_rollout_before_any_output_commits_and_o_posts_its_answer_once() {
         _reserved,
     } = hosted_over_old(CODEX).await;
     let (path, source) = rollout(&harness, "rollout-new.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     polls(3).await;
     assert_eq!(
         adoption(CODEX),
@@ -180,7 +188,7 @@ async fn a_new_rollout_before_any_output_commits_and_o_posts_its_answer_once() {
         io.alarms.halted()
     );
     let (next, _) = rollout(&harness, "rollout-next.jsonl", &metadata("s-codex"));
-    bind_late(CODEX, &next);
+    bind_new(&io, CODEX, &next);
     polls(3).await;
     append(&next, &answer("msg_2", "the next answer"));
     polls(3).await;
@@ -200,7 +208,7 @@ async fn a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands() {
         _reserved,
     } = hosted_over_old(CODEX).await;
     let (path, source) = rollout(&harness, "rollout-new.jsonl", &metadata("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     polls(3).await;
     assert_eq!(
         adoption(CODEX),
@@ -264,10 +272,10 @@ async fn a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands() {
     assert_eq!(harness.port.posts(), expected);
 }
 
-/// A Legacy body sent after the baseline, finished or not, skips the rollout bound next without
-/// taking a new baseline on it; the rollout bound after that commits.
+/// A Legacy body sent after the baseline, finished or not, skips the rollout bound next; while that
+/// rollout's turn may hold the body, the rollout bound after it waits too instead of leaving it.
 #[tokio::test(start_paused = true)]
-async fn a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind() {
+async fn a_legacy_body_after_the_baseline_keeps_that_rollouts_turn_and_the_next_bind_waiting() {
     for (channel, finished) in [(61_812_u64, true), (61_813, false)] {
         let Takeover {
             harness,
@@ -282,7 +290,7 @@ async fn a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
         assert!(!claimed.owned);
         let held = (!finished).then_some(claimed);
         let (skipped, _) = rollout(&harness, "rollout-skipped.jsonl", &prompted("s-codex"));
-        bind_late(channel, &skipped);
+        bind_new(&io, channel, &skipped);
         polls(3).await;
         assert_eq!(adoption(channel), Adoption::Deferred, "finished={finished}");
         assert!(
@@ -291,16 +299,19 @@ async fn a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
         );
         drop(held);
 
-        let (taken, source) = rollout(&harness, "rollout-taken.jsonl", &prompted("s-codex"));
-        bind_late(channel, &taken);
+        let (taken, _) = rollout(&harness, "rollout-taken.jsonl", &prompted("s-codex"));
+        bind_new(&io, channel, &taken);
         polls(3).await;
         assert_eq!(
             adoption(channel),
-            Adoption::Committed,
+            Adoption::Deferred,
             "{:?}",
             io.alarms.halted()
         );
-        assert_eq!(init_sources(&harness, channel), [(source, 0)]);
+        assert!(
+            !harness.store.has_channel_dir(channel),
+            "finished={finished}"
+        );
     }
 }
 
@@ -326,7 +337,7 @@ async fn the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
             }
             Ok(())
         });
-        bind_late(channel, &path);
+        bind_new(&io, channel, &path);
         polls(3).await;
         if race == "output" {
             assert_eq!(
@@ -367,11 +378,12 @@ async fn the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
         }
         assert_eq!(adoption(channel), Adoption::Deferred, "{race}");
         assert!(!harness.store.has_channel_dir(channel), "{race}");
-        let (next, next_source) = rollout(&harness, "rollout-after.jsonl", &prompted("s-codex"));
-        bind_late(channel, &next);
+        // The raced rollout's open turn may hold that send, so the next rollout does not leave it.
+        let (next, _) = rollout(&harness, "rollout-after.jsonl", &prompted("s-codex"));
+        bind_new(&io, channel, &next);
         polls(3).await;
-        assert_eq!(adoption(channel), Adoption::Committed, "{race}");
-        assert_eq!(init_sources(&harness, channel), [(next_source, 0)]);
+        assert_eq!(adoption(channel), Adoption::Deferred, "{race}");
+        assert!(!harness.store.has_channel_dir(channel), "{race}");
     }
 }
 
@@ -395,7 +407,7 @@ async fn a_takeover_cut_off_before_its_era_seal_recovers_its_store_on_the_next_s
         None,
     );
     let (path, source) = rollout(&harness, "rollout-new.jsonl", &prompted("s-codex"));
-    bind_late(CODEX, &path);
+    bind_new(&io, CODEX, &path);
     polls(3).await;
     drop(cut);
     assert_eq!(adoption(CODEX), Adoption::Held, "{:?}", io.alarms.halted());
@@ -711,23 +723,33 @@ async fn a_turn_ended_before_the_baseline_is_skipped_only_on_delivery_evidence()
 #[tokio::test(start_paused = true)]
 async fn an_undelivered_turn_on_the_rollout_before_holds_the_next_rollouts_takeover() {
     const CODEX: u64 = 61_837;
-    let Takeover {
-        harness,
-        io,
-        tasks: _tasks,
-        _reserved,
-    } = hosted_over_old(CODEX).await;
-    append(
-        &harness._runtime.path().join("rollout-old.jsonl"),
-        &turn_end(),
+    let harness = fresh_on(CODEX);
+    harness.gate.acquired();
+    let _reserved = reserve(CODEX);
+    p5::set_test_root(Some(harness._runtime.path()));
+    let (old, _) = rollout(&harness, "rollout-old.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &old);
+    append(&old, &[opening(), answer("msg_0", "old answer")].concat());
+    let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(CODEX).cloned());
+    let candidate = candidate.unwrap();
+    drop(candidate.claim_body(CODEX));
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    io.late_enabled.store(true, Ordering::SeqCst);
+    let _tasks = start_codex(&harness, &io, &ready);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Deferred,
+        "the old turn may be Legacy's"
     );
+    append(&old, &turn_end());
     let (path, source) = rollout(&harness, "rollout-new.jsonl", &prompted("s-codex"));
     bind_late(CODEX, &path);
     polls(3).await;
     assert_eq!(
         adoption(CODEX),
         Adoption::Deferred,
-        "the old turn may be Legacy's"
+        "the new rollout waits on the old turn"
     );
     assert!(!harness.store.has_channel_dir(CODEX));
 
@@ -735,8 +757,7 @@ async fn an_undelivered_turn_on_the_rollout_before_holds_the_next_rollouts_takeo
         &path,
         &[answer("msg_1", "the new answer"), turn_end()].concat(),
     );
-    let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(CODEX).cloned());
-    drop(candidate.unwrap().claim_body(CODEX));
+    drop(candidate.claim_body(CODEX));
     tokio::time::sleep(Duration::from_secs(5)).await;
     polls(3).await;
     assert_eq!(
