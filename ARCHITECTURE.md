@@ -1801,6 +1801,7 @@ src/
 │   │   │   ├── o_writer_io.rs
 │   │   │   ├── o_writer_late_tmux_tests.rs
 │   │   │   ├── o_writer_legacy.rs
+│   │   │   ├── o_writer_legacy_codex_tests.rs
 │   │   │   ├── o_writer_repost_io.rs
 │   │   │   ├── o_writer_repost_io_tests.rs
 │   │   │   ├── policy.rs
@@ -4039,6 +4040,7 @@ src/
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── codex/
+│   │   │   │   │   ├── delivered.rs
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── claude.rs

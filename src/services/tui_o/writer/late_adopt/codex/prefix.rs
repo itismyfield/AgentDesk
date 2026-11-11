@@ -43,6 +43,8 @@ pub(in crate::services::tui_o::writer::late_adopt) struct Span {
     pub(in crate::services::tui_o::writer::late_adopt) opened_at: Option<DateTime<Utc>>,
     /// `None` while open; a turn the next opener supersedes ends when that opener was written.
     pub(in crate::services::tui_o::writer::late_adopt) ended_at: Option<Option<DateTime<Utc>>>,
+    /// Where the record that ended it ends, or where the opener superseding it starts.
+    pub(in crate::services::tui_o::writer::late_adopt) ended_end: Option<u64>,
 }
 
 /// A rollout's turns in order, ended or not, and the end of its last complete record.
@@ -50,6 +52,39 @@ pub(in crate::services::tui_o::writer::late_adopt) struct Span {
 pub(in crate::services::tui_o::writer::late_adopt) struct Frontier {
     pub(in crate::services::tui_o::writer::late_adopt) turns: Vec<Span>,
     pub(in crate::services::tui_o::writer::late_adopt) complete: u64,
+    /// Where each record ends, in order.
+    ends: Vec<u64>,
+}
+
+/// How far a delivery's own time may trail the Codex clock of the turn end it posted.
+const DELIVERY_CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::seconds(1);
+
+impl Frontier {
+    /// Where a delivered `(from, to)` leaves these bytes as one turn's delivery: both ends on
+    /// record ends inside that turn's window, and a dated delivery no earlier than its end.
+    pub(in crate::services::tui_o::writer::late_adopt) fn closes(
+        &self,
+        (from, to): (u64, u64),
+        at: Option<DateTime<Utc>>,
+    ) -> Option<u64> {
+        let on_record = |offset: u64| offset == 0 || self.ends.binary_search(&offset).is_ok();
+        if from >= to || to > self.complete || !on_record(from) || !on_record(to) {
+            return None;
+        }
+        let turns = &self.turns;
+        let at_turn = turns
+            .iter()
+            .rposition(|t| t.ended_end.is_some_and(|end| end <= to))?;
+        let (turn, end) = (&turns[at_turn], turns[at_turn].ended_end?);
+        let before = match at_turn.checked_sub(1) {
+            Some(previous) => turns[previous].ended_end?,
+            None => 0,
+        };
+        let past_next = turns.get(at_turn + 1).is_some_and(|next| next.opened < to);
+        let early = matches!((at, turn.ended_at),
+            (Some(at), Some(Some(ended))) if at + DELIVERY_CLOCK_SLACK < ended);
+        (!past_next && !early && before <= from && from < end).then_some(to)
+    }
 }
 
 /// Reads `source` for its turns. A turn end only ends its turn and never moves where delivery
@@ -63,9 +98,11 @@ pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
         .rposition(|b| *b == b'\n')
         .map_or(0, |at| at + 1);
     let (mut turns, mut start, mut metas) = (Vec::<Span>::new(), 0, 0);
+    let mut ends = Vec::new();
     for line in bytes[..complete].split_inclusive(|b| *b == b'\n') {
         let at = start;
         start += line.len() as u64;
+        ends.push(start);
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
@@ -88,11 +125,13 @@ pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
                 RecordFact::TurnStart(_) => {
                     if let Some(turn) = turns.last_mut().filter(|turn| turn.ended_at.is_none()) {
                         turn.ended_at = Some(written);
+                        turn.ended_end = Some(at);
                     }
                     turns.push(Span {
                         opened: at,
                         opened_at: written,
                         ended_at: None,
+                        ended_end: None,
                     });
                 }
                 RecordFact::Prompt(..)
@@ -103,11 +142,13 @@ pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
                         opened: at,
                         opened_at: written,
                         ended_at: None,
+                        ended_end: None,
                     });
                 }
                 RecordFact::Idle(_) => {
                     if let Some(turn) = turns.last_mut().filter(|turn| turn.ended_at.is_none()) {
                         turn.ended_at = Some(written);
+                        turn.ended_end = Some(start);
                     }
                 }
                 _ => {}
@@ -121,6 +162,7 @@ pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
     Ok(Frontier {
         turns,
         complete: complete as u64,
+        ends,
     })
 }
 

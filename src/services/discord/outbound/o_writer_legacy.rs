@@ -9,7 +9,9 @@ use super::super::SharedData;
 use super::delivery_record as dr;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyEpoch, LegacyView};
+use crate::services::tui_o::writer::adoption::{
+    CodexDelivered, CodexDelivery, LegacyCursor, LegacyEpoch, LegacyView,
+};
 
 pub(in crate::services::discord) struct LegacyRelay {
     shared: Arc<SharedData>,
@@ -84,6 +86,10 @@ impl LegacyView for LegacyRelay {
         super::super::tui_prompt_relay::claude_idle_tail_running(tmux)
     }
 
+    fn codex_delivered(&self, channel: u64, tmux: &str) -> Result<CodexDelivered, String> {
+        Ok(codex_records(channel, tmux))
+    }
+
     /// What `relay_auto_heal` restarts a redrive episode on, read without writing the inflight row.
     fn epoch(&self, channel: u64) -> LegacyEpoch {
         let id = ChannelId::new(channel);
@@ -108,9 +114,57 @@ impl LegacyView for LegacyRelay {
     }
 }
 
+/// Only records of `tmux`'s current generation, as Legacy's own floor reads them; a receipt is
+/// dated by its Discord message.
+fn codex_records(channel: u64, tmux: &str) -> CodexDelivered {
+    let generation = dr::current_generation_mtime_ns(tmux);
+    if generation == 0 {
+        return CodexDelivered::default();
+    }
+    let mut delivered = CodexDelivered {
+        generation_since: Some(chrono::DateTime::from_timestamp_nanos(generation)),
+        ..CodexDelivered::default()
+    };
+    let Some(record) = dr::read_record(&ProviderKind::Codex, channel) else {
+        return delivered;
+    };
+    let dated = |id: Option<u64>| id.filter(|id| *id != 0).map(message_time);
+    delivered.frontier = (record.delivered_frontier)
+        .filter(|frontier| frontier.generation_mtime_ns == generation)
+        .map(|frontier| CodexDelivery {
+            range: frontier.range,
+            at: dated(frontier.panel_msg_id),
+        });
+    delivered.receipts = (record.confirmed_deliveries.iter())
+        .filter(|receipt| {
+            let source = &receipt.source;
+            source.is_authoritative()
+                && source.provider == ProviderKind::Codex.as_str()
+                && source.tmux_session_name == tmux
+                && source.generation_mtime_ns == generation
+                && receipt.delivery_channel_id == source.delivery_channel_id
+                && receipt.message_id != 0
+        })
+        .map(|receipt| CodexDelivery {
+            range: receipt.source.range,
+            at: Some(message_time(receipt.message_id)),
+        })
+        .collect();
+    delivered
+}
+
+/// When Discord created the message with this id.
+fn message_time(id: u64) -> chrono::DateTime<chrono::Utc> {
+    *poise::serenity_prelude::MessageId::new(id).created_at()
+}
+
 #[cfg(all(test, unix))]
 #[path = "o_writer_late_tmux_tests.rs"]
 mod late_tmux;
+
+#[cfg(all(test, unix))]
+#[path = "o_writer_legacy_codex_tests.rs"]
+mod codex_records_tests;
 
 #[cfg(test)]
 mod late_lookup_tests {
