@@ -591,6 +591,7 @@ impl ChannelMailboxHandle {
     /// Returns `token: None` when the active turn's `user_message_id`
     /// does not match `expected_user_message_id` (or no active turn
     /// exists at all).
+    #[cfg(test)]
     pub(crate) async fn cancel_active_turn_if_user_message_with_reason(
         &self,
         expected_user_message_id: MessageId,
@@ -881,46 +882,6 @@ impl ChannelMailboxHandle {
         })
     }
 
-    pub(crate) async fn requeue_front(
-        &self,
-        intervention: Intervention,
-        persistence: QueuePersistenceContext,
-    ) -> RequeueInterventionResult {
-        self.requeue_front_inner(intervention, persistence, None)
-            .await
-    }
-
-    pub(crate) async fn restore_dequeued_head(
-        &self,
-        intervention: Intervention,
-        persistence: QueuePersistenceContext,
-        dispatch_lease: Arc<DispatchLease>,
-    ) -> RequeueInterventionResult {
-        self.requeue_front_inner(intervention, persistence, Some(dispatch_lease))
-            .await
-    }
-
-    async fn requeue_front_inner(
-        &self,
-        intervention: Intervention,
-        persistence: QueuePersistenceContext,
-        dispatch_lease: Option<Arc<DispatchLease>>,
-    ) -> RequeueInterventionResult {
-        self.request(|reply| ChannelMailboxMsg::RequeueFront {
-            intervention,
-            persistence,
-            dispatch_lease,
-            reply,
-        })
-        .await
-        .unwrap_or(RequeueInterventionResult {
-            enqueued: false,
-            refusal_reason: Some(EnqueueRefusalReason::ActorUnreachable),
-            queue_exit_events: Vec::new(),
-            persistence_error: None,
-        })
-    }
-
     pub(crate) async fn cancel_queued_primary_message(
         &self,
         target: impl Into<QueuedCancelTarget>,
@@ -959,6 +920,7 @@ impl ChannelMailboxHandle {
             })
     }
 
+    #[cfg(test)]
     pub(crate) async fn hard_stop(&self) -> FinishTurnResult {
         self.request(|reply| ChannelMailboxMsg::HardStop { reply })
             .await
@@ -1004,6 +966,7 @@ impl ChannelMailboxHandle {
     /// active-turn anchor when its token is already `cancelled` (force purge),
     /// so a force cancel does not leave a stale anchor that blocks the next
     /// dispatch. Pass `false` for a pure queue drain.
+    #[cfg(test)]
     pub(crate) async fn purge_queue(
         &self,
         persistence: QueuePersistenceContext,
@@ -1314,6 +1277,7 @@ enum ChannelMailboxMsg {
     /// #2374 Codex round-1 fix (HIGH-1) — identity-guarded cancel by
     /// active `user_message_id`. See
     /// `ChannelMailboxHandle::cancel_active_turn_if_user_message_with_reason`.
+    #[cfg(test)]
     CancelActiveTurnIfUserMessageWithReason {
         expected_user_message_id: MessageId,
         reason: String,
@@ -1386,6 +1350,7 @@ enum ChannelMailboxMsg {
         intervention: Intervention,
         persistence: QueuePersistenceContext,
         dispatch_lease: Option<Arc<DispatchLease>>,
+        preserve_marker: bool,
         reply: oneshot::Sender<RequeueInterventionResult>,
     },
     AbandonPendingDispatch {
@@ -1434,6 +1399,7 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<policy_close::PolicyMailboxOutcome>,
     },
     ClaimPolicyTail(policy_close::tail::TailClaim),
+    #[cfg(test)]
     HardStop {
         reply: oneshot::Sender<FinishTurnResult>,
     },
@@ -1911,6 +1877,7 @@ fn input_mailbox_step(
             let token = matching_cancel_token(&state, &expected_token);
             let _ = reply.send(StopCancel::decide(token, reason));
         }
+        #[cfg(test)]
         ChannelMailboxMsg::CancelActiveTurnIfUserMessageWithReason {
             expected_user_message_id,
             reason,
@@ -2337,6 +2304,7 @@ fn input_mailbox_step(
             intervention,
             persistence,
             dispatch_lease,
+            preserve_marker,
             reply,
         } => {
             let result = front_requeue::restore_dequeued(
@@ -2345,6 +2313,7 @@ fn input_mailbox_step(
                 intervention,
                 persistence,
                 dispatch_lease,
+                preserve_marker,
             );
             let _ = reply.send(result);
         }
@@ -2462,6 +2431,7 @@ fn input_mailbox_step(
         msg @ (ChannelMailboxMsg::PolicyClose { .. } | ChannelMailboxMsg::ClaimPolicyTail(_)) => {
             policy_close::answer(&mut state, channel_id, msg, own_recovery_done);
         }
+        #[cfg(test)]
         ChannelMailboxMsg::HardStop { reply } => {
             let persistence = state.last_persistence.clone();
             let _ = reply.send(finalize_turn_state(

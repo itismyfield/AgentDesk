@@ -10,6 +10,205 @@ fn item(id: u64, channel: u64) -> PendingQueueItem {
     .unwrap()
 }
 
+async fn runtime(registry: &HealthRegistry, channel: ChannelId, token: &str) {
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().token_hash = token.into();
+    shared.settings.write().await.allowed_channel_ids = vec![channel.get()];
+    registry.register("claude".into(), shared).await;
+}
+
+async fn owned_queue(
+    channel: ChannelId,
+    token: &str,
+) -> (ChannelMailboxHandle, std::path::PathBuf) {
+    let handle = ChannelMailboxRegistry::default().handle(channel);
+    let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, token, None);
+    let (path, namespace) = v2_queue(&persistence, channel).unwrap();
+    handle.v2_adopt(path.clone(), namespace).await.unwrap();
+    for id in 1..=2 {
+        let input = item(channel.get() * 10 + id, channel.get());
+        assert_eq!(
+            format!(
+                "{:?}",
+                handle.v2_admit_ticket(input, format!("ticket-{id}")).await
+            ),
+            "Ok(Queued)"
+        );
+    }
+    (handle, path)
+}
+
+fn target(channel: ChannelId) -> TurnLifecycleTarget {
+    TurnLifecycleTarget {
+        provider: Some(ProviderKind::Claude),
+        channel_id: Some(channel),
+        tmux_name: String::new(),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sessionless_force_cancel_purges_owner_and_preserves_other_queues() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(7_904_001);
+    let registry = Arc::new(HealthRegistry::new());
+    runtime(&registry, ChannelId::new(7_904_002), "unrelated-token").await;
+    runtime(&registry, channel, "owner-token").await;
+    let (_other_owner, other_path) = owned_queue(channel, "other-owner").await;
+    let (_other_channel, channel_path) =
+        owned_queue(ChannelId::new(7_904_002), "owner-token").await;
+    let other_bytes = std::fs::read(&other_path).unwrap();
+    let channel_bytes = std::fs::read(&channel_path).unwrap();
+    let (handle, path) = owned_queue(channel, "owner-token").await;
+    assert_eq!(committed_and_filed(&handle, &path).await, (2, 2));
+    let counts = force_purge_channel_mailbox(Some(&registry), &target(channel), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            counts.drained,
+            counts.queue_len_after,
+            counts.refused_reason
+        ),
+        (2, Some(0), None)
+    );
+    assert_eq!(committed_and_filed(&handle, &path).await, (0, 0));
+    assert_eq!(std::fs::read(other_path).unwrap(), other_bytes);
+    assert_eq!(std::fs::read(channel_path).unwrap(), channel_bytes);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sessionless_force_cancel_without_initial_owner_measures_empty_legacy_queue_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = ChannelId::new(7_904_003);
+    let handle = ChannelMailboxRegistry::default().handle(channel);
+    assert!(handle.try_capture_v2().await.unwrap().is_none());
+    assert!(handle.snapshot().await.intervention_queue.is_empty());
+    let counts = force_purge_and_settle(None, &target(channel), None, Some(&pool))
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            counts.drained,
+            counts.queue_len_after,
+            counts.refused_reason
+        ),
+        (0, Some(0), None)
+    );
+    assert!(handle.snapshot().await.intervention_queue.is_empty());
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sessionless_force_cancel_with_ambiguous_runtime_refuses_and_preserves_owner() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(7_904_004);
+    let registry = Arc::new(HealthRegistry::new());
+    runtime(&registry, channel, "owner-token").await;
+    runtime(&registry, channel, "other-token").await;
+    let (handle, path) = owned_queue(channel, "owner-token").await;
+    let bytes = std::fs::read(&path).unwrap();
+    let counts = force_purge_channel_mailbox(Some(&registry), &target(channel), None)
+        .await
+        .unwrap();
+    assert_eq!((counts.drained, counts.queue_len_after), (0, Some(2)));
+    assert!(
+        counts
+            .refused_reason
+            .unwrap()
+            .contains("another queue file")
+    );
+    assert_eq!(committed_and_filed(&handle, &path).await, (2, 2));
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_key_force_cancel_keeps_its_namespace_despite_another_runtime() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(7_904_005);
+    let registry = Arc::new(HealthRegistry::new());
+    runtime(&registry, channel, "wrong-token").await;
+    let (handle, path) = owned_queue(channel, "owner-token").await;
+    let counts = force_purge_channel_mailbox(
+        Some(&registry),
+        &target(channel),
+        Some("claude/owner-token/host:session"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (
+            counts.drained,
+            counts.queue_len_after,
+            counts.refused_reason
+        ),
+        (2, Some(0), None)
+    );
+    assert_eq!(committed_and_filed(&handle, &path).await, (0, 0));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sessionless_force_cancel_refuses_owner_replaced_after_runtime_resolution() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(7_904_006);
+    let registry = Arc::new(HealthRegistry::new());
+    runtime(&registry, channel, "old-owner").await;
+    let (_new_handle, new_path) = owned_queue(channel, "new-owner").await;
+    let (handle, old_path) = owned_queue(channel, "old-owner").await;
+    let old_bytes = std::fs::read(&old_path).unwrap();
+    let new_bytes = std::fs::read(&new_path).unwrap();
+    let replacement = handle.clone();
+    let replacement_path = new_path.clone();
+    set_pre_purge_probe_for_test(
+        channel,
+        Box::new(move || {
+            Box::pin(async move {
+                replacement
+                    .v2_adopt(replacement_path, "claude/new-owner".into())
+                    .await
+                    .unwrap();
+            })
+        }),
+    );
+    let counts = force_purge_channel_mailbox(Some(&registry), &target(channel), None)
+        .await
+        .unwrap();
+    assert_eq!((counts.drained, counts.queue_len_after), (0, Some(2)));
+    assert!(
+        counts
+            .refused_reason
+            .unwrap()
+            .contains("another queue file")
+    );
+    assert_eq!(committed_and_filed(&handle, &new_path).await, (2, 2));
+    assert_eq!(std::fs::read(old_path).unwrap(), old_bytes);
+    assert_eq!(std::fs::read(new_path).unwrap(), new_bytes);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_input_after_purge_capture_is_preserved_with_a_refusal_reason() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(7_904_007);
+    let (handle, path) = owned_queue(channel, "owner-token").await;
+    let arrival = handle.clone();
+    let captured = move || async move {
+        arrival
+            .v2_admit_ticket(item(79_040_073, channel.get()), "late-ticket".into())
+            .await
+            .unwrap();
+    };
+    let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, "owner-token", None);
+    let (purge, reason) = purge_v2(&handle, persistence, captured)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((purge.drained, purge.queue_len_after), (0, 3));
+    assert!(reason.unwrap().contains("changed since the capture"));
+    assert_eq!(committed_and_filed(&handle, &path).await, (3, 3));
+}
+
 /// The forced purge removes what the owner queued, so nothing the cancel meant to drop runs
 /// after it: the owner has no front left to start.
 #[tokio::test(flavor = "current_thread")]
@@ -52,10 +251,12 @@ async fn a_forced_cancel_settles_each_removed_origin_at_its_removal_instant_pg()
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let (provider, channel) = (ProviderKind::Claude, ChannelId::new(7_340_401));
+    let registry = Arc::new(HealthRegistry::new());
+    runtime(&registry, channel, "owner-token").await;
     let handle = ChannelMailboxRegistry::default().handle(channel);
-    let persistence = QueuePersistenceContext::new(&provider, "", None);
+    let persistence = QueuePersistenceContext::new(&provider, "owner-token", None);
     let (path, namespace) = v2_queue(&persistence, channel).unwrap();
-    handle.v2_adopt(path, namespace).await.unwrap();
+    handle.v2_adopt(path.clone(), namespace).await.unwrap();
     let id = 8_000_000_000_000_340_401;
     let context = serde_json::json!({"metadata":{"human_input":{"origin_id":"G-forced"}}});
     let admitted =
@@ -67,9 +268,18 @@ async fn a_forced_cancel_settles_each_removed_origin_at_its_removal_instant_pg()
         tmux_name: String::new(),
     };
     let before = chrono::Utc::now();
-    let purged = force_purge_and_settle(None, &target, None, Some(&pool)).await;
+    assert_eq!(committed_and_filed(&handle, &path).await, (1, 1));
+    let purged = force_purge_and_settle(Some(&registry), &target, None, Some(&pool)).await;
     let after = chrono::Utc::now();
-    assert_eq!(purged.map(|counts| counts.drained), Some(1));
+    assert_eq!(
+        purged.map(|counts| (
+            counts.drained,
+            counts.queue_len_after,
+            counts.refused_reason
+        )),
+        Some((1, Some(0), None))
+    );
+    assert_eq!(committed_and_filed(&handle, &path).await, (0, 0));
 
     type Row = (
         Option<String>,

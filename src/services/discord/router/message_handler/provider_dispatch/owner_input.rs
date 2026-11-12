@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use super::StreamingTurn;
 use crate::services::claude_tui::busy_inject::Screen;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
+use crate::services::discord::queue_io::input_owner::claude_handoff::{self, bound_herdr};
 use crate::services::discord::queue_io::input_owner::drive::{
     Drive, Front, FrontClaim, Handoff, Settled as Owed, claim_turn,
 };
@@ -18,9 +19,9 @@ use crate::services::discord::queue_io::input_owner::{pump, target};
 use crate::services::discord::router::intake_dispatch::WRITER_HELD;
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::session_host::{HerdrTarget, herdr_endpoints};
+use crate::services::session_host::HerdrTarget;
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
-use crate::services::turn_host::{HerdrTurnPlan, TurnHost};
+use crate::services::turn_host::TurnHost;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 use serde_json::{Value, json};
 
@@ -145,19 +146,6 @@ fn other_account(provider: &str, session: &str) -> bool {
     overlay.is_ok_and(|overlay| !matches(session, &overlay.profile_id))
 }
 
-/// A Bound Herdr row's gated pane, its physical writer `socket#pane` and its attempt target.
-fn bound_herdr(plan: &HerdrTurnPlan) -> Option<(HerdrTarget, String, Value)> {
-    use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
-    let HostedRecord::Known(record) = &plan.row.as_ref()?.record else {
-        return None;
-    };
-    let at = (record.location.as_ref()).filter(|_| record.state == HostedState::Bound)?;
-    let pane = herdr_endpoints().target(record)?;
-    let target = json!({"host":"herdr","owner":record.owner.logical_key,"root":at.socket_addr,
-        "execution_nonce":record.execution_nonce});
-    Some((pane, format!("{}#{}", at.socket_addr, at.pane_id), target))
-}
-
 /// The channel's owner drive: a front goes into the turn that runs, else to `idle`, the start of
 /// a turn that claims it.
 pub(in crate::services::discord) fn owner_drive(
@@ -203,6 +191,12 @@ pub(in crate::services::discord) fn owner_drive(
                 return Err(WRITER_HELD.into());
             }
             let synthetic = !front_origin(&mailbox, &front).await?.is_person();
+            if !synthetic
+                && claude_handoff::prepare(runtime.as_ref(), &mailbox, &provider, channel, &front)
+                    .await?
+            {
+                return idle(front).await;
+            }
             let active = match mailbox.has_active_turn().await {
                 // Without a registry this read considers only a durable external holder.
                 Ok(false) if !synthetic => Ok(
@@ -677,7 +671,10 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
         (Err(error), _) | (_, Err(error)) => Err(error),
     };
     match recovered {
-        Ok(_) => wake(shared, channel),
+        Ok(_) => {
+            claude_handoff::recover(shared.clone(), channel);
+            wake(shared, channel);
+        }
         Err(error) => tracing::warn!(channel_id = channel.get(), %error, "owner recovery held"),
     }
 }

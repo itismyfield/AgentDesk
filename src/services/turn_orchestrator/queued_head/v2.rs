@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 pub(crate) mod actor;
 mod attempt;
+pub(crate) mod claude_handoff;
 mod commit;
 pub(crate) mod control;
 mod migration;
@@ -163,6 +164,7 @@ impl Owner {
                 terminal_identities: vec![],
                 namespace: Some(namespace),
                 owed_drop_receipts: Vec::new(),
+                unfinished_handoff: None,
             },
         };
         let mut owner = Self {
@@ -236,6 +238,15 @@ impl Owner {
         attempt: AttemptIdentity,
         payload: PreparedPayload,
     ) -> Result<AttemptRef, String> {
+        if let Some(journal) = &next.unfinished_handoff {
+            if attempt.target.host != "herdr"
+                || attempt.target.owner != journal.logical
+                || !journal.ended
+            {
+                return Err("NotSent(\"handoff_not_ready\")".into());
+            }
+            next.unfinished_handoff = None;
+        }
         let original = next.items.first().ok_or("empty queue")?.clone();
         let identity = sources::identity(&original);
         let key = AttemptRef {
