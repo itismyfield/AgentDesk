@@ -41,6 +41,7 @@ tmux에는 compact JSON **한 개 `AGENTDESK_IDENTITY` 세션 환경 변수**를
 DB `identity_kind`는 현 `discord_channel`/`scheduled_snapshot`을 유지한다(`db/dispatched_sessions/canonical_identity.rs:4-27`). `name_kind`는 이름 입력/metadata의 분류이며 DB enum 확장이 아니다. row ID는 기존 launch/hook 순서상 optional이고, 기존 launch admission·binding context/nonce로 최초 소유를 입증한다.
 
 - 관리 판정은 현재 owner scope/provider/token/channel과 실행 nonce/실제 host 증거가 일치해야 한다. legacy는 기존 `.owner`·`.channel`·row/inflight/binding의 일치 증거로 읽고, prefix만으로 새 권한을 주지 않는다. legacy 호환을 빌미로 cleanup/TTL/lease/dispatch 보호를 넓히지 않는다.
+- S1 `owner_scope`는 length-framed domain tag·canonical runtime root 문자열·기존 `platform::shell::hostname_short()`를 SHA256으로 해시한다. 설정 snapshot 설치 전후에 범위가 달라지지 않으며 기존 runtime-root/host namespace를 따른다. 이 해시는 권한 증거의 범위 식별자이며 비밀이 아니다.
 - **S1 마지막 관문**: `services/platform/tmux.rs`의 kill 내부 공통 경로(`:370,390`, 공개 wrapper `:420-442`)와 send/paste(`:462,470,484,511`)는 이름이 `AgentDesk-`로 시작하지 않으면 `AGENTDESK_IDENTITY.owner_scope == current_runtime_scope`일 때만 명령을 보낸다. marker 없음/손상/조회 실패/다른 scope는 Refused이고 tmux mutation 0이다. 상위의 더 강한 nonce/host guard도 유지한다. legacy prefix를 통과시키는 부분은 main 범위를 유지하는 호환 예외이며 foreign 관리 권한의 새 근거가 아니다.
 - 생성과 표식 부착은 `new-session -e` 한 명령이다. 중복 이름은 tmux가 원자적으로 거부하며 기존 세션에 표식을 쓰지 않는다. create의 실패·전송 불명은 기존 session presence/Unknown 계약을 유지한다. 별도 set-option/read-back 실패 상태나 자기 생성 kill 우회 helper는 만들지 않는다.
 - 표식은 `show-environment -t '=name' AGENTDESK_IDENTITY`의 성공 출력에서 정확한 `AGENTDESK_IDENTITY=값`을 한 번 분리해 JSON으로 읽는다. 값 안의 `=`는 보존한다. 누락·손상·미지원 schema·조회 실패 및 `set-environment -u` 뒤 `-AGENTDESK_IDENTITY` 출력은 Unknown이며 조작을 거부한다. pane-target은 기존 `=name:`을 유지한다.
@@ -289,7 +290,7 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 | `src/services/dispatched_sessions/force_kill.rs:87` | force kill의 canonical row/provider 및 owner host 조회 | S/M |
 | `src/services/dispatched_sessions/tmux_cleanup.rs:40` | cleanup row/provider 조회 또는 preserve 로그용 채널 표시 | S/M |
 | `src/services/dispatched_sessions/tmux_cleanup.rs:526` | cleanup row/provider 조회 또는 preserve 로그용 채널 표시 | S/M |
-| `src/services/message_outbox/identity.rs:88` | DM 이름인지 확인하여 delivery bot provider 선택 | S/B/M |
+| `src/services/message_outbox/identity.rs` | DM 이름인지 확인하여 delivery bot provider 선택 | S/B/M |
 | `src/services/message_outbox/session_notice.rs:57` | provider/channel/namespace 검증하여 session notice bot fallback 선택 | S/B/M |
 | `src/services/provider/cancel_token_cleanup/authority.rs:100` | published provider와 이름 provider 불일치 경고; 권한은 아님 | B/M |
 | `src/services/provider/cancel_token_cleanup/executor.rs:327` | channel을 추출하여 unified-thread cleanup 억제 여부 조회 | T/S/M |
@@ -1172,9 +1173,9 @@ C=실제 채널/합성 thread/DM hint를 담을 수 있는 저장 문자열; R=r
 
 Skill pipeline으로 차트도 추출했다. fixed 각각 52 states/76 steps, 도식은 8 states/7 arrows이며 같은 도식 상태 안의 48 steps를 숨긴다. 별도 view는 probe·nonce 재확인·late hook/retry의 같은 상태 전이를 접는다. 승격 제거 도식은 반례를 표시한다. wrapper의 janitor shell에 금지된 `rm -rf`가 있어 wrapper를 실행하지 않고 같은 skill의 `worker.ts` pipeline을 직접 실행했다. skill 파일은 변경하지 않았다.
 
-- [tmux 도식](statecharts/session-lifecycle/tmux-naming.chart.mmd)
-- [Herdr 도식](statecharts/session-lifecycle/herdr-naming.chart.mmd)
-- [승격 제거 반례 도식](statecharts/session-lifecycle/tmux-naming-without-promotion.chart.mmd)
+- [tmux 도식](https://github.com/itismyfield/AgentDesk/blob/01053c2be0/docs/statecharts/session-lifecycle/tmux-naming.chart.mmd)
+- [Herdr 도식](https://github.com/itismyfield/AgentDesk/blob/01053c2be0/docs/statecharts/session-lifecycle/herdr-naming.chart.mmd)
+- [승격 제거 반례 도식](https://github.com/itismyfield/AgentDesk/blob/01053c2be0/docs/statecharts/session-lifecycle/tmux-naming-without-promotion.chart.mmd)
 
 ## 반례와 남은 실제 재생
 

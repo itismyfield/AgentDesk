@@ -77,6 +77,9 @@ fn wait_for_tmux_output(
 
 mod availability;
 pub(crate) mod health_probe;
+pub(crate) mod session_identity;
+#[cfg(all(test, unix))]
+pub(crate) mod session_identity_tests;
 #[cfg(unix)]
 pub(crate) mod session_inventory;
 
@@ -157,8 +160,19 @@ pub fn create_session(
     working_dir: Option<&str>,
     shell_command: &str,
 ) -> Result<Output, String> {
+    let identity = crate::services::session_identity_metadata::runtime_identity(session_name)?;
+    create_session_with_identity(session_name, working_dir, shell_command, &identity)
+}
+
+pub(crate) fn create_session_with_identity(
+    session_name: &str,
+    working_dir: Option<&str>,
+    shell_command: &str,
+    identity: &crate::domain::session_identity::managed::ManagedIdentity,
+) -> Result<Output, String> {
     let mut cmd = tmux_command().map_err(|e| format!("Failed to create tmux session: {e}"))?;
     cmd.args(["new-session", "-d", "-s", session_name]);
+    cmd.args(["-e", &identity.environment_assignment()?]);
     if let Some(dir) = working_dir {
         cmd.args(["-c", dir]);
     }
@@ -373,6 +387,9 @@ fn kill_session_output_internal(session_name: &str, reason: &str) -> std::io::Re
         tracing::warn!("  [{ts}] ⚠ refusing tmux kill for blank session name reason={reason}");
         return Ok(failed_output("refusing tmux kill for blank session name\n"));
     }
+    if let Err(error) = session_identity::require_managed(session_name) {
+        return Ok(failed_output(&error));
+    }
     log_kill_request(session_name, reason);
     let output = tmux_output(["kill-session", "-t", &exact_target(session_name)]);
     match &output {
@@ -397,6 +414,11 @@ fn kill_session_output_internal_with_timeout(
         tracing::warn!("  [{ts}] ⚠ refusing tmux kill for blank session name reason={reason}");
         return Err("refusing tmux kill for blank session name".to_string());
     }
+    session_identity::require_managed_with_program(
+        session_name,
+        std::path::Path::new("tmux"),
+        timeout,
+    )?;
     log_kill_request(session_name, reason);
     let output = tmux_command()
         .map_err(|e| format!("tmux kill-session spawn failed: {e}"))
@@ -460,6 +482,7 @@ pub fn kill_session_checked(session_name: &str, reason: &str) -> Result<(), Stri
 ///
 /// `keys` are passed as separate arguments — typically `["some-text", "Enter"]`.
 pub fn send_keys(session_name: &str, keys: &[&str]) -> Result<Output, String> {
+    session_identity::require_managed(session_name)?;
     let target = exact_target(session_name);
     let mut args = vec!["send-keys", "-t", &target];
     args.extend(keys);
@@ -472,6 +495,11 @@ pub fn send_keys_timeout(
     keys: &[&str],
     timeout: Duration,
 ) -> Result<Output, String> {
+    session_identity::require_managed_with_program(
+        session_name,
+        std::path::Path::new("tmux"),
+        timeout,
+    )?;
     let target = exact_target(session_name);
     let mut args = vec!["send-keys", "-t", &target];
     args.extend(keys);
@@ -482,6 +510,7 @@ pub fn send_keys_timeout(
 
 /// Send literal text to a tmux session without interpreting tmux key names.
 pub fn send_literal(session_name: &str, text: &str) -> Result<Output, String> {
+    session_identity::require_managed(session_name)?;
     let target = exact_target(session_name);
     tmux_output(["send-keys", "-t", &target, "-l", "--", text])
         .map_err(|e| format!("tmux send-keys -l failed: {e}"))
@@ -509,6 +538,7 @@ pub fn load_buffer(buffer_name: &str, text: &str) -> Result<Output, String> {
 
 /// Paste a named tmux buffer to the active pane.
 pub fn paste_buffer(session_name: &str, buffer_name: &str, delete: bool) -> Result<Output, String> {
+    session_identity::require_managed(session_name)?;
     let target = exact_target(session_name);
     let args = paste_buffer_args(buffer_name, &target, delete);
     tmux_output(&args).map_err(|e| format!("tmux paste-buffer failed: {e}"))
@@ -1318,6 +1348,16 @@ mod timeout_tests {
         // matching the subcommand positionally via $1.
         writeln!(file, "while [ \"${{1#-}}\" != \"$1\" ]; do shift; done")
             .expect("flag skip preamble");
+        let identity =
+            crate::services::session_identity_metadata::runtime_identity("timeout-fixture")
+                .unwrap();
+        let assignment =
+            crate::services::process::shell_escape(&identity.environment_assignment().unwrap());
+        writeln!(
+            file,
+            "if [ \"$1\" = show-environment ]; then printf '%s\\n' {assignment}; exit 0; fi"
+        )
+        .expect("identity fixture");
         writeln!(file, "{body}").expect("body");
         let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
         permissions.set_mode(0o755);

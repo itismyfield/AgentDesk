@@ -89,12 +89,21 @@ pub(super) fn prepare_and_create_claude_tui_session(
             },
         )?;
         // A returned session's dead pane is started again in place, never replaced.
-        let start = match respawn {
-            true => crate::services::platform::tmux::respawn_dead_pane,
-            false => crate::services::platform::tmux::create_session,
-        };
         fence.validate_tmux_publisher(tmux_session_name)?;
-        let result = start(tmux_session_name, Some(working_dir), &command)?;
+        let result = if respawn {
+            crate::services::platform::tmux::respawn_dead_pane(
+                tmux_session_name,
+                Some(working_dir),
+                &command,
+            )?
+        } else {
+            crate::services::platform::tmux::create_session_with_identity(
+                tmux_session_name,
+                Some(working_dir),
+                &command,
+                &prepared.tmux_identity()?,
+            )?
+        };
         Ok((result, prepared))
     })();
     let (tmux_result, incarnation) = match launch_result {

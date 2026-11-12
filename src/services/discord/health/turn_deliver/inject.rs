@@ -658,21 +658,31 @@ impl Owner {
             Some((reply, episode)) => reply.bind_episode(episode, Some(&input.nonce)).await,
             None => true,
         };
-        let pane = pane(input.channel, &session);
         let effect = tokio::task::spawn_blocking({
             let (input, session, turn_id) = (input.clone(), session.clone(), turn_id.clone());
-            move || match native_turn {
-                _ if !bound => InjectAttempt::NotSent(imsg_reply::UNBOUND),
-                None => run_received(
-                    (&pane, herdr.as_ref()),
-                    &session,
-                    &transcript,
-                    turn_id,
-                    &input,
-                ),
-                Some(native) => {
-                    let target = (session.as_str(), transcript.as_path(), native.as_str());
-                    run_codex(&pane, target, turn_id, message, &input)
+            move || {
+                let pane = if herdr.is_some() && native_turn.is_none() {
+                    None
+                } else {
+                    pane(input.channel, &session).ok()
+                };
+                match native_turn {
+                    _ if !bound => InjectAttempt::NotSent(imsg_reply::UNBOUND),
+
+                    None => run_received(
+                        (pane.as_ref(), herdr.as_ref()),
+                        &session,
+                        &transcript,
+                        turn_id,
+                        &input,
+                    ),
+                    Some(native) => {
+                        let target = (session.as_str(), transcript.as_path(), native.as_str());
+                        match pane.as_ref() {
+                            Some(pane) => run_codex(pane, target, turn_id, message, &input),
+                            None => InjectAttempt::NotSent("unverified_session_owner"),
+                        }
+                    }
                 }
             }
         });
@@ -789,12 +799,18 @@ fn run(
     turn_id: Option<String>,
     input: &Input,
 ) -> InjectAttempt {
-    run_with(pane, (session, transcript), turn_id, input, false)
+    run_with(
+        (Some(pane.0), pane.1),
+        (session, transcript),
+        turn_id,
+        input,
+        false,
+    )
 }
 
 /// The live owner's effect: a paste the transcript never received stays Unconfirmed.
 fn run_received(
-    pane: (&busy_inject::Pane, Option<&HerdrTarget>),
+    pane: (Option<&busy_inject::Pane>, Option<&HerdrTarget>),
     session: &str,
     transcript: &std::path::Path,
     turn_id: Option<String>,
@@ -804,7 +820,7 @@ fn run_received(
 }
 
 fn run_with(
-    (pane, herdr): (&busy_inject::Pane, Option<&HerdrTarget>),
+    (pane, herdr): (Option<&busy_inject::Pane>, Option<&HerdrTarget>),
     (session, transcript): (&str, &std::path::Path),
     turn_id: Option<String>,
     input: &Input,
@@ -815,6 +831,9 @@ fn run_with(
     if let Some(herdr) = herdr {
         return herdr::run(herdr, session, transcript, turn_id, input);
     }
+    let Some(pane) = pane else {
+        return InjectAttempt::NotSent("unverified_session_owner");
+    };
     let nonce = &input.nonce;
     let request = busy_inject::Request {
         session,
@@ -971,9 +990,12 @@ fn unconfirmed(
 }
 
 /// Tests reach only the scripted tmux their channel forced, never the real server.
-fn pane(channel_id: u64, session: &str) -> busy_inject::Pane {
+fn pane(channel_id: u64, session: &str) -> Result<busy_inject::Pane, String> {
     #[cfg(test)]
-    let program = test_hook::forced(channel_id).map_or_else(|| "agentdesk-no-tmux".into(), |f| f.1);
+    let program = test_hook::forced(channel_id).map_or_else(
+        || "agentdesk-no-tmux".into(),
+        |f| crate::services::platform::tmux::session_identity_tests::managed_fixture_program(f.1),
+    );
     #[cfg(not(test))]
     let program = {
         let _ = channel_id;

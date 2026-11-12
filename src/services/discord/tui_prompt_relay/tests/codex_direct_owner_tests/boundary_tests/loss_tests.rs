@@ -387,7 +387,13 @@ async fn injected_new_turn_delivers(root: PathBuf, channel: u64, hook_first: boo
     let target = a.clone();
     let session = tmux.clone();
     let injected = tokio::task::spawn_blocking(move || {
-        let pane = inject::Pane::with_program(&session, program);
+        let pane = inject::Pane::with_program(
+            &session,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                program,
+            ),
+        )
+        .expect("managed scripted pane");
         let ledger = NativeLedger {
             session: session.clone(),
             target: target.clone(),

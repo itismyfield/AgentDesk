@@ -35,9 +35,12 @@ impl Fixture {
     fn pane(&self) -> TmuxPane {
         let mut pane = TmuxPane::with_program(
             &format!("submit-{}", self.0.path().display()),
-            self.0.path().join("tmux"),
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                self.0.path().join("tmux"),
+            ),
             Duration::from_secs(5),
-        );
+        )
+        .expect("managed scripted pane");
         pane.attest_test_nonce("submit-test");
         pane
     }
