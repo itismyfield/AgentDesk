@@ -176,7 +176,7 @@ pub(super) fn low_level_unbound_adapter(
         fn final_ready(&self, _: &str) -> bool {
             false
         }
-        fn pane_busy(&self, _: &str) -> bool {
+        fn claude_busy(&self, _: &str) -> bool {
             false
         }
         fn liveness(&self, _: ShadowProvider, _: u64, _: &str) -> SessionLiveness {

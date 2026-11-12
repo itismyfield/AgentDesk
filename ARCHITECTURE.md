@@ -963,6 +963,14 @@ src/
 │   │   ├── tui_session_launch.rs
 │   │   └── tui_session_launch_geometry_tests.rs
 │   ├── claude_tui/
+│   │   ├── activity/
+│   │   │   ├── hooks.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── poll.rs
+│   │   │   ├── source.rs
+│   │   │   ├── tools.rs
+│   │   │   ├── transcript.rs
+│   │   │   └── transcript_tests.rs
 │   │   ├── busy_inject/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
@@ -1019,7 +1027,6 @@ src/
 │   │   │   ├── warm_followup.rs
 │   │   │   └── warm_followup_owner_tests.rs
 │   │   ├── input/
-│   │   │   ├── tests/
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
@@ -3142,6 +3149,9 @@ src/
 │   │   │   │   │   ├── superseded_measurement_tests.rs
 │   │   │   │   │   ├── unit_tests.rs
 │   │   │   │   │   └── watcher_runtime_tests.rs
+│   │   │   │   ├── claude_activity.rs
+│   │   │   │   ├── claude_activity_leaf_tests.rs
+│   │   │   │   ├── claude_activity_tests.rs
 │   │   │   │   ├── closed_boundary.rs
 │   │   │   │   ├── effect_reads.rs
 │   │   │   │   ├── effect_reads_tests.rs
