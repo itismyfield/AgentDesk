@@ -854,6 +854,13 @@ src/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
 │   │   │   ├── slot_reset_host_pg_tests.rs
 │   │   │   └── verified_reset_pg_tests.rs
+│   │   ├── transactions/
+│   │   │   ├── completion.rs
+│   │   │   ├── consultation.rs
+│   │   │   ├── dispatch_failure.rs
+│   │   │   ├── entries.rs
+│   │   │   ├── phase_gates.rs
+│   │   │   └── retry.rs
 │   │   ├── activate_command.rs
 │   │   ├── activate_preflight.rs
 │   │   ├── activate_route.rs
@@ -886,6 +893,7 @@ src/
 │   │   ├── run_completion_activate_pg_tests.rs
 │   │   ├── runtime.rs
 │   │   ├── slot_routes.rs
+│   │   ├── transactions.rs
 │   │   ├── view.rs
 │   │   └── view_admin_routes.rs
 │   ├── automation_candidate_materializer/
@@ -3489,6 +3497,8 @@ src/
 │   │   ├── test_support.rs
 │   │   ├── token_store.rs
 │   │   └── transport_tests.rs
+│   ├── kanban_cards/
+│   │   └── entry_transactions.rs
 │   ├── legacy_body_census/
 │   │   ├── cache.rs
 │   │   ├── collector.rs
