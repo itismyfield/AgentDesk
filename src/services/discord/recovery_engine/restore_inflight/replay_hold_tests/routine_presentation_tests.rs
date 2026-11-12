@@ -125,94 +125,101 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
         pool.close().await;
     }
     if evidence.starts_with("drain_race_") {
-        let mut transaction = pool.begin().await.unwrap();
-        sqlx::query("LOCK TABLE intake_outbox IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *transaction)
-            .await
-            .unwrap();
-        let task_shared = shared.clone();
-        let task_row = serialized.clone();
-        let task = tokio::spawn(async move {
-            super::super::settle_routine_no_visible(&task_shared, &ProviderKind::Claude, &task_row)
+        Box::pin(async {
+            let mut transaction = pool.begin().await.unwrap();
+            sqlx::query("LOCK TABLE intake_outbox IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *transaction)
                 .await
-        });
-        await_within(
-            async {
-                loop {
-                    let blocked: bool = sqlx::query_scalar(
-                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-                     WHERE datname=current_database() AND wait_event_type='Lock'
-                     AND pid<>pg_backend_pid() AND query LIKE '%intake_outbox%')",
-                    )
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-                    if blocked {
-                        break;
+                .unwrap();
+            let task_shared = shared.clone();
+            let task_row = serialized.clone();
+            let task = tokio::spawn(async move {
+                super::super::settle_routine_no_visible(
+                    &task_shared,
+                    &ProviderKind::Claude,
+                    &task_row,
+                )
+                .await
+            });
+            await_within(
+                async {
+                    loop {
+                        let blocked: bool = sqlx::query_scalar(
+                            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                         WHERE datname=current_database() AND wait_event_type='Lock'
+                         AND pid<>pg_backend_pid() AND query LIKE '%intake_outbox%')",
+                        )
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                        if blocked {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
                     }
-                    tokio::task::yield_now().await;
-                }
-            },
-            WAIT_CAP,
-        )
-        .await;
-        let actor = if evidence == "drain_race_actor" {
-            let actor = Arc::new(CancelToken::new());
-            assert!(
-                shared
-                    .mailbox(ChannelId::new(channel))
-                    .try_start_turn(
-                        actor.clone(),
-                        serenity::UserId::new(7),
-                        serenity::MessageId::new(original.user_msg_id),
-                    )
-                    .await
-            );
-            Some(actor)
-        } else {
-            let mut locked = inflight::lock_inflight_episode(
-                &provider,
-                channel,
-                &inflight::InflightEpisodePin::from_state(&serialized),
+                },
+                WAIT_CAP,
             )
-            .unwrap();
-            let advanced = locked.state().clone();
-            assert!(matches!(
-                locked.persist_verified_under_guard(&advanced, "receipt_generation_race"),
-                inflight::GuardedSaveOutcome::Saved
-            ));
-            None
-        };
-        let expected = std::fs::read(&path).unwrap();
-        transaction.commit().await.unwrap();
-        assert!(await_within(task, WAIT_CAP).await.unwrap());
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            expected,
-            "receipt await cannot authorize a stale adoption"
-        );
-        let kept = inflight::load_inflight_state(&provider, channel).unwrap();
-        assert_eq!(kept.restart_mode, serialized.restart_mode);
-        assert!(!kept.terminal_delivery_committed);
-        if let Some(actor) = actor {
-            let snapshot = shared.mailbox(ChannelId::new(channel)).snapshot().await;
-            assert!(Arc::ptr_eq(snapshot.cancel_token.as_ref().unwrap(), &actor));
-        }
-        assert!(
-            discord
-                .calls()
-                .iter()
-                .all(|c| !c.route.starts_with("POST ") && !c.route.starts_with("PATCH "))
-        );
-        assert_eq!(
-            format!(
-                "{:x}",
-                Sha256::digest(std::fs::read(output.path()).unwrap())
-            ),
-            raw_hash
-        );
-        pool.close().await;
-        db.drop().await;
+            .await;
+            let actor = if evidence == "drain_race_actor" {
+                let actor = Arc::new(CancelToken::new());
+                assert!(
+                    shared
+                        .mailbox(ChannelId::new(channel))
+                        .try_start_turn(
+                            actor.clone(),
+                            serenity::UserId::new(7),
+                            serenity::MessageId::new(original.user_msg_id),
+                        )
+                        .await
+                );
+                Some(actor)
+            } else {
+                let mut locked = inflight::lock_inflight_episode(
+                    &provider,
+                    channel,
+                    &inflight::InflightEpisodePin::from_state(&serialized),
+                )
+                .unwrap();
+                let advanced = locked.state().clone();
+                assert!(matches!(
+                    locked.persist_verified_under_guard(&advanced, "receipt_generation_race"),
+                    inflight::GuardedSaveOutcome::Saved
+                ));
+                None
+            };
+            let expected = std::fs::read(&path).unwrap();
+            transaction.commit().await.unwrap();
+            assert!(await_within(task, WAIT_CAP).await.unwrap());
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                expected,
+                "receipt await cannot authorize a stale adoption"
+            );
+            let kept = inflight::load_inflight_state(&provider, channel).unwrap();
+            assert_eq!(kept.restart_mode, serialized.restart_mode);
+            assert!(!kept.terminal_delivery_committed);
+            if let Some(actor) = actor {
+                let snapshot = shared.mailbox(ChannelId::new(channel)).snapshot().await;
+                assert!(Arc::ptr_eq(snapshot.cancel_token.as_ref().unwrap(), &actor));
+            }
+            assert!(
+                discord
+                    .calls()
+                    .iter()
+                    .all(|c| !c.route.starts_with("POST ") && !c.route.starts_with("PATCH "))
+            );
+            assert_eq!(
+                format!(
+                    "{:x}",
+                    Sha256::digest(std::fs::read(output.path()).unwrap())
+                ),
+                raw_hash
+            );
+            pool.close().await;
+            db.drop().await;
+        })
+        .await;
         return;
     }
     let live_actor = if evidence == "drain_live" {
