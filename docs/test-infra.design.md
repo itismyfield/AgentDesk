@@ -10,6 +10,9 @@
 그 인스턴스에서 얻는 E2E 단언을 기능 지도의 조합 칸과 연결하는 것이다.
 실제 Discord·별도 봇·기존 길드를 쓰는 것은 #8124의 **11-12 15:43 KST 사용자 확정**이다.
 앞선 댓글의 가짜 Discord 우선 검토는 이 결정으로 대체됐다. 운영 봇 공유·별도 길드는 선택지가 아니다.
+현재 release 경로의 근거는 `scripts/deploy-release.sh:153`의 release label 기본값과
+`scripts/refresh_release_launchd_plist.py:15`의 release plist 생성이다. dev 인스턴스 부재는 #8124의 현황 기록을 입력으로 받았으며,
+이 조사에서 launchd·운영 디렉터리를 다시 열어 확인하지 않았다.
 
 ## 1. 테스트 인스턴스 — #8124
 
@@ -80,6 +83,8 @@ provider 인증은 독립 config home에 사전 준비하며 운영 credential �
 권고는 **세 앱**이다: `Test Discord Claude`, `Test Discord Codex`, `Test Discord Driver`.
 앞의 둘은 제품 수신/출력, Driver는 입력·관측·시험 실패 알림을 담당한다. utility/notify 봇은 추가하지 않는다.
 최소 단일 provider만 보면 수신 1 + Driver 1로 두 앱이지만, 두 provider 정규 경로를 고정 구성으로 덮으려면 세 앱이 필요하다.
+전체 matrix도 수신 봇 provider를 바꾸며 매번 재기동하면 두 앱으로 순차 실행할 수 있다.
+따라서 세 앱은 이론적 최소가 아니라 고정 provider 구성·작성자 검증·반복 실행을 단순하게 하는 권고다.
 
 근거: `src/config.rs:241`의 bot provider는 단일 값이고,
 `src/services/discord/settings/read.rs:339`는 token으로 launch configs를 중복 제거한다.
@@ -119,6 +124,9 @@ Driver는 `ADK_TEST_DISCORD_DRIVER_TOKEN`으로 설계한다. token 값/항목 �
 I3에 **Driver token으로 실제 Discord REST 입력/조회/thread 생성**을 하는 instance adapter를 넣고,
 receipt의 세 앱 ID를 기존 author override(`scripts/e2e/tui_relay/assertions.py:27`)로 전달한다.
 사용자 입력 경로의 회귀는 headless deliver API로 대체하지 않는다.
+다만 Driver 입력은 실제 Gateway를 지나는 **allowed-bot 공통 경로** 증거다.
+인간 인증·취소 시 입력 보존은 bot 분기와 다르다(`src/services/discord/router/intake_gate.rs:514`, `:526`, `:839`).
+claim에 `input_source: allowed_bot`을 붙이고, 인간 전용 동작은 별도 gap으로 남긴다.
 Driver가 allowed_bot_ids에 있으므로 SETUP/TEARDOWN marker를 보내면 새 턴을 깨울 수 있다.
 bookkeeping은 local run ID·새 message snowflake·관측 창에만 기록한다. 실패 알림도 provider가 보는 parent/thread로 보내지 않는다.
 
@@ -162,11 +170,13 @@ Herdr에서 E-1/E-35는 not-applicable이다(`scripts/deploy-release.sh:4514`, `
 | 새 main/배포 SHA 뒤 | 같은 SHA의 테스트 인스턴스, 회귀 핵심 묶음(반응·busy 주입·fresh thread·thread host/output) | 운영 스모크와 별개. stale candidate 결과를 현재 배포의 PASS로 재사용하지 않음 |
 | 6시간마다(실측 후 활성) | 테스트 인스턴스의 live 시나리오 회전 조각; E-1/2/3/5/15/16/20/22/23/50/51/52/54/60/62/64 및 신규 회귀 | 각 시나리오의 실제 지원 cell/host만 선택. 한 번에 20분·8 provider 턴 상한 초안 |
 | 야간 1개 예약 창 | 테스트 인스턴스에서 E-8/9/12/14/17/18/19/30/31/61/63 같은 restart/cancel/복원 조각, 긴 E-36 별도 조각 | dcserver restart override는 시험 receipt PID만. 운영 restart wrapper 금지. 매일 전 matrix를 돈다는 약속은 하지 않음 |
-| 별도 capability/장기 기능 창 | E-4/6/7/10/11/13/21/35/37/53 및 나머지 지원 live 조합 | direct TUI·dual cell·scheduled wake·durable·model 기능을 독립 예산으로 순환. pipe 지원 미준비는 명시 gap |
+| 별도 capability/장기 기능 창 | E-4/6/7/10/13/21/35/37/53 및 나머지 지원 live 조합 | direct TUI·scheduled wake·durable·model 기능을 독립 예산으로 순환. pipe 지원 미준비는 명시 gap |
 
 fixture E-24/25와 gap E-26/27/28은 offline/인벤토리에서 관리하고 live 실적에서 제외한다.
 43개 모두를 지원하는 인스턴스라고 선언하지 않는다. phase-1은 TUI 두 provider×tmux/herdr이며 pipe/원격/DM 등은 적용표에 미지원으로 드러낸다.
 같은 봇 세트 임대가 바쁘면 주기 실행이 물러난다. 배포·레인 검증이 우선이며 무한 catch-up으로 다음 창을 채우지 않는다.
+E-11은 두 provider 턴 동시 실행을 요구하므로 phase-1 활성 턴1 계약에서는 gap이다.
+동일 인스턴스·두 채널을 유지한 채 활성 턴2인 별도 예약 예외는 자원 실측과 사용자 선택 뒤에만 연다.
 
 ### 2.2 새 단언과 실제 관측
 
