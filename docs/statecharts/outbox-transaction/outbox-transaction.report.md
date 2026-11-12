@@ -79,7 +79,7 @@ Savepoint begin 오류는 outer 실패로 전파한다(`body_census.rs:113`). UP
 ## 범위 밖과 남은 기존 한계
 
 - 다중 target fan-out, 다른 run들의 operator end batch, 전체 run lock ordering/SQL predicate, 일반 producer의 임의 재호출/TTL/exact 충돌 알고리즘, commit 응답 유실은 이 작은 모델의 exactly-once 증명 범위가 아니다. INSERT 포트 이동 때 SQL·partial index·dedupe·conflict predicate를 유지하고 기존 PG/새 동등성 시험으로 검증한다.
-- 특히 operator end는 `cancel_run/terminalize_tx.rs:48~55`에서 후보를 읽고 advisory를 얻은 뒤 :113~119에서 조건부 UPDATE하며, :174~177은 **batch rows_affected>0**일 때 후보 run 전부에 안내한다. 이는 canonical `runs.rs:416/:440/:498`의 per-run 성공 guard와 다르다. 이 모델의 canonical exactly-once를 그 batch로 확대하지 않는다. 후보가 lock 대기 동안 terminal이 되는 다중 run 경계는 별도 기존 경로 후속이며 이번 설계에서 per-run 새 guard/삭제/권한을 추가하지 않는다. operator end의 entry 0 공지도 기존대로 유지한다.
+- 특히 operator end는 `cancel_run/terminalize_tx.rs:49~56`에서 후보를 읽고 advisory를 얻은 뒤 :114~120에서 조건부 UPDATE하며, :175~178은 **batch rows_affected>0**일 때 후보 run 전부에 안내한다. 이는 canonical `runs.rs:416/:440/:498`의 per-run 성공 guard와 다르다. 이 모델의 canonical exactly-once를 그 batch로 확대하지 않는다. 후보가 lock 대기 동안 terminal이 되는 다중 run 경계는 별도 기존 경로 후속이며 이번 설계에서 per-run 새 guard/삭제/권한을 추가하지 않는다. operator end의 entry 0 공지도 기존대로 유지한다.
 - SQL snapshot과 runtime config, census snapshot, producer stamp 사이에는 전역 원자적 snapshot이 없다. 관측 뒤 설정 변화는 소급하지 않는다. metadata UPDATE/savepoint 실패로 저장이 빠지면 기존 delivery_tag UnknownBody fallback을 유지한다(`body_census.rs:23~100`). 이것을 NonBody/실행 허가/삭제 준비 PASS로 바꾸지 않는다.
 - replay hold 경로에는 원래 display/census가 없다. 이 경로의 private proof/ExactAttempt/LocalSnapshot 발급·incarnation·CAS는 S4-15이며 이 모델에 새 권한을 넣지 않는다.
 - `PreparedCompletion`은 제안 API다. borrow가 살아 있는 동안의 tx 일치를 모델링했지만 drop 후 잘못 commit하는 모든 Rust 프로그램을 타입만으로 금지했다고 주장하지 않는다. 실제 caller의 Err 전파/rollback과 다른 tx 적용 불가를 구현 검증으로 넘긴다.
