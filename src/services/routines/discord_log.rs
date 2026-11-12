@@ -18,7 +18,9 @@ use super::store::{ClaimedRoutineRun, RecoveredRoutineRun, RoutineRecord, Routin
 
 mod census;
 mod failure_alert;
+mod presentation;
 
+#[cfg(test)]
 const RUN_LOG_SECTION_ORDER: [&str; 4] = ["started", "js_inputs", "js_action", "outcome"];
 
 #[derive(Clone)]
@@ -87,93 +89,6 @@ impl RoutineDiscordLogger {
         .await
     }
 
-    pub async fn log_run_started(
-        &self,
-        store: &RoutineStore,
-        claimed: &ClaimedRoutineRun,
-    ) -> RoutineDiscordLogStatus {
-        if super::legacy_body_census::applies(&claimed.script_ref) {
-            return RoutineDiscordLogStatus::skipped();
-        }
-        let status = self
-            .log_run_section(
-                store,
-                Some(&claimed.routine_id),
-                Some(&claimed.name),
-                claimed.agent_id.as_deref(),
-                claimed.discord_thread_id.as_deref(),
-                &claimed.run_id,
-                "started",
-                &run_started_section(claimed),
-            )
-            .await;
-        self.persist_run_log_status(store, &claimed.run_id, &status)
-            .await;
-        status
-    }
-
-    pub async fn log_run_js_inputs(
-        &self,
-        store: &RoutineStore,
-        claimed: &ClaimedRoutineRun,
-        observation_count: usize,
-        automation_inventory_count: usize,
-        checkpoint: Option<&Value>,
-    ) -> RoutineDiscordLogStatus {
-        if super::legacy_body_census::applies(&claimed.script_ref) {
-            return RoutineDiscordLogStatus::skipped();
-        }
-        let status = self
-            .log_run_section(
-                store,
-                Some(&claimed.routine_id),
-                Some(&claimed.name),
-                claimed.agent_id.as_deref(),
-                claimed.discord_thread_id.as_deref(),
-                &claimed.run_id,
-                "js_inputs",
-                &run_js_inputs_section(
-                    claimed,
-                    observation_count,
-                    automation_inventory_count,
-                    checkpoint,
-                ),
-            )
-            .await;
-        self.persist_run_log_status(store, &claimed.run_id, &status)
-            .await;
-        status
-    }
-
-    pub async fn log_run_js_action(
-        &self,
-        store: &RoutineStore,
-        claimed: &ClaimedRoutineRun,
-        action: &str,
-        summary: Option<&str>,
-        prompt: Option<&str>,
-        checkpoint_update: bool,
-    ) -> RoutineDiscordLogStatus {
-        if super::legacy_body_census::applies(&claimed.script_ref) {
-            return RoutineDiscordLogStatus::skipped();
-        }
-        let status = self
-            .log_run_section(
-                store,
-                Some(&claimed.routine_id),
-                Some(&claimed.name),
-                claimed.agent_id.as_deref(),
-                claimed.discord_thread_id.as_deref(),
-                &claimed.run_id,
-                "js_action",
-                &run_js_action_section(claimed, action, summary, prompt, checkpoint_update),
-            )
-            .await;
-        self.persist_run_log_status(store, &claimed.run_id, &status)
-            .await;
-        status
-    }
-
     pub async fn log_run_outcome(
         &self,
         store: &RoutineStore,
@@ -201,35 +116,11 @@ impl RoutineDiscordLogger {
             return status;
         };
 
-        if super::legacy_body_census::applies(&routine.script_ref) {
-            let status = self.log_census_outcome(store, &routine, outcome).await;
+        let status = self.log_public_run_outcome(store, &routine, outcome).await;
+        if status.status != "skipped" {
             self.persist_run_log_status(store, &outcome.run_id, &status)
                 .await;
-            return status;
         }
-
-        let discord_log_warning = match store.get_run_discord_log_failure(&outcome.run_id).await {
-            Ok(Some(failure)) => failure.error,
-            Ok(None) => None,
-            Err(error) => Some(format!(
-                "failed to inspect prior discord log status: {error}"
-            )),
-        };
-
-        let status = self
-            .log_run_section(
-                store,
-                Some(&routine.id),
-                Some(&routine.name),
-                routine.agent_id.as_deref(),
-                routine.discord_thread_id.as_deref(),
-                &outcome.run_id,
-                "outcome",
-                &run_outcome_section(&routine, outcome, discord_log_warning.as_deref()),
-            )
-            .await;
-        self.persist_run_log_status(store, &outcome.run_id, &status)
-            .await;
         status
     }
 
@@ -401,60 +292,6 @@ impl RoutineDiscordLogger {
             dedupe_ttl_secs,
         )
         .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn log_run_section(
-        &self,
-        store: &RoutineStore,
-        routine_id: Option<&str>,
-        routine_name: Option<&str>,
-        agent_id: Option<&str>,
-        discord_thread_id: Option<&str>,
-        run_id: &str,
-        section_key: &str,
-        section_text: &str,
-    ) -> RoutineDiscordLogStatus {
-        let state = match store
-            .record_run_discord_log_section(run_id, section_key, section_text)
-            .await
-        {
-            Ok(state) => state,
-            Err(error) => return RoutineDiscordLogStatus::failed(error),
-        };
-        let content = routine_run_progress_message(&render_run_log_sections(&state.sections));
-        let target = match self
-            .resolve_routine_log_target(
-                Some(store),
-                routine_id,
-                routine_name,
-                agent_id,
-                discord_thread_id,
-            )
-            .await
-        {
-            Ok(Some(target)) => target,
-            Ok(None) => return RoutineDiscordLogStatus::skipped(),
-            Err(error) => return RoutineDiscordLogStatus::failed(error),
-        };
-
-        match self
-            .send_or_edit_run_log(&target, state.message_id.as_deref(), &content)
-            .await
-        {
-            Ok(message_id) => {
-                if state.message_id.as_deref() != Some(message_id.as_str()) {
-                    if let Err(error) = store
-                        .record_run_discord_message_id(run_id, &message_id)
-                        .await
-                    {
-                        return RoutineDiscordLogStatus::failed(error);
-                    }
-                }
-                RoutineDiscordLogStatus::ok()
-            }
-            Err(error) => RoutineDiscordLogStatus::failed(error),
-        }
     }
 
     async fn resolve_routine_log_target(
@@ -818,7 +655,7 @@ impl RoutineDiscordLogStatus {
         }
     }
 
-    fn failed(error: impl ToString) -> Self {
+    pub(super) fn failed(error: impl ToString) -> Self {
         let warning = error.to_string();
         let warning_code = classify_warning(&warning);
         tracing::warn!(warning, warning_code, "routine discord log failed");
@@ -1163,31 +1000,14 @@ fn recovery_message(recovered: &RecoveredRoutineRun) -> String {
     )
 }
 
-/// Operator-facing message for a routine that has been stuck in `paused` past
-/// the configured threshold (#3564). The duration and `last` result help the
-/// operator decide whether to resume manually or leave it paused.
+/// Show a stale pause's duration and history; its raw failure stays in the run record.
 fn stale_paused_message(routine: &RoutineRecord, paused_for_secs: i64) -> String {
-    let last_result = routine
-        .last_result
-        .as_deref()
-        .map(|value| compact(value, 160))
-        .unwrap_or_else(|| "없음".to_string());
-    routine_log_block_message(
-        "루틴 paused 고착",
-        vec![(
-            "기본",
-            vec![
-                field_line(
-                    "reason",
-                    "paused 상태가 임계값 이상 지속됨 - 수동 resume 또는 점검이 필요합니다",
-                ),
-                field_line("routine", &compact(&routine.name, 80)),
-                field_line("id", short_id(&routine.id)),
-                field_line("script", &script_ref_for_message(&routine.script_ref, 120)),
-                field_line("paused_for", &humanize_secs(paused_for_secs)),
-                field_line("last", &last_result),
-            ],
-        )],
+    presentation::attention_message(
+        routine,
+        &format!(
+            "일시정지가 {} 지속됨 · 수동 resume 또는 점검이 필요합니다",
+            humanize_secs(paused_for_secs)
+        ),
     )
 }
 
@@ -1220,7 +1040,7 @@ fn run_started_message(claimed: &ClaimedRoutineRun) -> String {
     routine_run_progress_message(&run_started_section(claimed))
 }
 
-fn run_started_section(claimed: &ClaimedRoutineRun) -> String {
+pub(super) fn run_started_section(claimed: &ClaimedRoutineRun) -> String {
     routine_log_section(
         "루틴 실행 시작",
         vec![(
@@ -1250,7 +1070,7 @@ fn run_js_inputs_message(
     ))
 }
 
-fn run_js_inputs_section(
+pub(super) fn run_js_inputs_section(
     claimed: &ClaimedRoutineRun,
     observation_count: usize,
     automation_inventory_count: usize,
@@ -1342,7 +1162,7 @@ fn run_js_action_message(
     ))
 }
 
-fn run_js_action_section(
+pub(super) fn run_js_action_section(
     claimed: &ClaimedRoutineRun,
     action: &str,
     summary: Option<&str>,
@@ -1379,7 +1199,7 @@ fn run_outcome_message(routine: &RoutineRecord, outcome: &RoutineRunOutcome) -> 
     routine_run_progress_message(&run_outcome_section(routine, outcome, None))
 }
 
-fn run_outcome_section(
+pub(super) fn run_outcome_section(
     routine: &RoutineRecord,
     outcome: &RoutineRunOutcome,
     discord_log_warning: Option<&str>,
@@ -1489,6 +1309,7 @@ fn routine_run_progress_message(body: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn render_run_log_sections(sections: &Value) -> String {
     let Some(object) = sections.as_object() else {
         return String::new();
@@ -1649,10 +1470,11 @@ mod tests {
         let routine = stale_paused_routine_fixture();
         let message = stale_paused_message(&routine, 86_400 + 6 * 3_600);
 
-        assert!(message.contains("루틴 paused 고착"));
+        assert!(message.contains("일시정지가"));
         assert!(message.contains("family-profile-probe-obujang"));
-        assert!(message.contains("paused_for: 1d 6h"));
-        assert!(message.contains("last: routine agent turn timed out after 900 seconds"));
+        assert!(message.contains("1d 6h"));
+        assert!(message.contains("/routines"));
+        assert!(!message.contains("routine agent turn timed out after 900 seconds"));
         assert!(message.contains("수동 resume"));
     }
 
@@ -1661,8 +1483,9 @@ mod tests {
         let mut routine = stale_paused_routine_fixture();
         routine.last_result = None;
         let message = stale_paused_message(&routine, 2_700);
-        assert!(message.contains("paused_for: 45m"));
-        assert!(message.contains("last: 없음"));
+        assert!(message.contains("45m"));
+        assert!(message.contains("/routines"));
+        assert!(!message.contains("last:"));
     }
 
     #[test]

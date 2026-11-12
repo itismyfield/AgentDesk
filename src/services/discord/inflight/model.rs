@@ -377,6 +377,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// lifecycle/error/cancel notifications still post.
     #[serde(default)]
     pub silent_turn: bool,
+    /// Wire-only routine policy and exact terminal classification survive recovery.
+    #[serde(default)]
+    pub routine_presentation: super::super::routine_presentation::RoutinePresentation,
     /// Active dispatch ID for long-turn diagnostics.
     #[serde(default)]
     pub dispatch_id: Option<String>,
@@ -1139,6 +1142,7 @@ impl InflightTurnState {
             native_turn_id: None,
             delivery_bot: None,
             silent_turn: false,
+            routine_presentation: Default::default(),
             dispatch_id: None,
             turn_nonce: Some(uuid::Uuid::new_v4().to_string()),
             last_watcher_relayed_offset: None,

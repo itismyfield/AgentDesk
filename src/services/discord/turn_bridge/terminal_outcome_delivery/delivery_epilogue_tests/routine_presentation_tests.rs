@@ -25,6 +25,14 @@ async fn i8117_no_reply_settles_without_body_banner_or_retry() {
     .await;
     assert!(output.terminal_delivery_committed);
     assert!(
+        output.status_panel_terminal_committed,
+        "a quiet success can settle the session status"
+    );
+    assert!(
+        !output.bridge_should_emit_completion,
+        "quiet success needs no footer POST"
+    );
+    assert!(
         driver.published_bodies.lock().unwrap().is_empty(),
         "NO_REPLY must make no body call"
     );
@@ -140,6 +148,14 @@ async fn i8117_no_visible_respects_existing_owner_and_raw_range() {
         assert_eq!(output.inflight_state.turn_start_offset, Some(120));
         assert_eq!(output.inflight_state.last_offset, 9876);
         assert!(driver.published_bodies.lock().unwrap().is_empty());
+        assert_eq!(
+            driver
+                .shared
+                .tmux_relay_coord(channel)
+                .confirmed_end_offset
+                .load(Ordering::Acquire),
+            if other_owner { 0 } else { 9876 }
+        );
         if other_owner {
             assert_eq!(
                 format!("{:?}", cell.read()),
@@ -155,4 +171,50 @@ async fn i8117_no_visible_respects_existing_owner_and_raw_range() {
             );
         }
     }
+}
+
+#[test]
+fn i8117_guarded_stream_save_keeps_terminal_evidence_across_concurrent_progress() {
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+    driver.inflight.full_response = "한글 진행\nNO_REPLY".into();
+    driver.inflight.turn_start_offset = Some(1234);
+    driver.inflight.last_offset = 5678;
+    pin(&mut driver.inflight, "missing");
+    let mut baseline = driver.inflight.clone();
+    let mut local = baseline.clone();
+    local.routine_presentation.observe_terminal("NO_REPLY");
+    let mut durable = baseline.clone();
+    durable.session_id = Some("concurrent-session-stamp".into());
+    crate::services::discord::inflight::save_inflight_state(&durable).unwrap();
+    let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&baseline);
+    let (message, len) = (baseline.current_msg_id, baseline.current_msg_len);
+    let result =
+        crate::services::discord::inflight::save_stream_tick_state_preserving_current_message_races(
+            &mut baseline,
+            &mut local,
+            &expected,
+            message,
+            len,
+            "routine_presentation_test",
+        );
+    assert_eq!(
+        result,
+        crate::services::discord::inflight::GuardedSaveOutcome::Saved
+    );
+    let saved = crate::services::discord::inflight::load_inflight_state_read_only(
+        &ProviderKind::Claude,
+        DRIVER_CHANNEL_ID,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap()["routine_presentation"]["terminal"],
+        "no_reply"
+    );
+    assert_eq!(
+        saved.session_id.as_deref(),
+        Some("concurrent-session-stamp")
+    );
+    assert_eq!(saved.full_response, "한글 진행\nNO_REPLY");
+    assert_eq!(saved.turn_start_offset, Some(1234));
+    assert_eq!(saved.last_offset, 5678);
 }

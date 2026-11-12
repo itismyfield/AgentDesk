@@ -24,6 +24,30 @@ pub(super) struct DeliveryEpilogueState<'a> {
     pub(super) busy_requeue_outcome: &'a mut Option<followup_requeue::FollowupRequeueOutcome>,
 }
 
+pub(super) fn settle_no_visible_result(
+    shared: &SharedData,
+    owner: ChannelId,
+    inflight: &InflightTurnState,
+    end: Option<u64>,
+) -> bool {
+    match bridge_delivery_lease_for_inflight(
+        shared,
+        owner,
+        shared.restart.current_generation,
+        inflight,
+        end,
+    ) {
+        BridgeLeaseAcquire::Held(lease) => lease.commit_and_advance(
+            shared,
+            owner,
+            inflight.tmux_session_name.as_deref(),
+            crate::services::discord::LeaseOutcome::Delivered,
+        ),
+        BridgeLeaseAcquire::NoRange => true,
+        BridgeLeaseAcquire::Skip => false,
+    }
+}
+
 #[rustfmt::skip]
 pub(super) async fn handle_delivery_epilogue(
     message: DeliveryEpilogueMessage,
@@ -49,6 +73,9 @@ pub(super) async fn handle_delivery_epilogue(
     let bridge_tui_gate_outcome_early = ctx.bridge_tui_gate_outcome_early;
     let terminal_delivery_committed = ctx.terminal_delivery_committed;
     let terminal_body_visible = ctx.terminal_body_visible;
+    let no_visible_result = ctx.terminal_delivery_committed && !terminal_body_visible
+        && state.inflight_state.routine_presentation.terminal_presentation()
+            == crate::services::discord::routine_presentation::TerminalPresentation::NoVisibleResult;
     let preserve_inflight_for_cleanup_retry = ctx.preserve_inflight_for_cleanup_retry;
     // A protected request settles its dispatch only after an ordinary classification.
     let pool = shared_owned.pg_pool.as_ref();
@@ -274,7 +301,7 @@ pub(super) async fn handle_delivery_epilogue(
         );
         status_panel_terminal_committed = status_panel_completion_ready_after_terminal_body(
             terminal_delivery_committed,
-            terminal_body_visible,
+            terminal_body_visible || no_visible_result,
             preserve_inflight_for_cleanup_retry,
         ) && projection_allowed;
         if status_panel_terminal_committed {
@@ -288,7 +315,7 @@ pub(super) async fn handle_delivery_epilogue(
     }
 
     *state.response_sent_offset = response_sent_offset;
-    *state.bridge_should_emit_completion = bridge_should_emit_completion && projection_allowed && !ctx.already_receipted;
+    *state.bridge_should_emit_completion = bridge_should_emit_completion && projection_allowed && !ctx.already_receipted && !no_visible_result;
     *state.status_panel_terminal_committed = status_panel_terminal_committed;
 
     DeliveryEpilogueOutcome::Continue

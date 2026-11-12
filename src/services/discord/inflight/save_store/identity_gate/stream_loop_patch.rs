@@ -357,6 +357,11 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         &mut updated.has_post_tool_text,
     );
     apply_local_change_if_durable_unchanged(
+        &persisted_baseline.routine_presentation,
+        &state.routine_presentation,
+        &mut updated.routine_presentation,
+    );
+    apply_local_change_if_durable_unchanged(
         &persisted_baseline.long_running_placeholder_active,
         &state.long_running_placeholder_active,
         &mut updated.long_running_placeholder_active,

@@ -75,11 +75,11 @@ async fn i8117_loggerless_actions_keep_run_api_diagnostics_pg() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn i8117_failed_paused_notices_are_safe_and_nonturn_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let store = store(&pool);
-    let root = tempfile::tempdir().unwrap();
-    let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
     for status in ["failed", "paused"] {
         let routine = store
@@ -167,6 +167,8 @@ async fn i8117_due_manual_and_poll_store_without_diagnostic_wire_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let store = store(&pool);
+    sqlx::raw_sql("CREATE TABLE diagnostic_updates(run_id text); CREATE FUNCTION capture_diagnostics() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO diagnostic_updates VALUES(NEW.id); RETURN NEW; END $$; CREATE TRIGGER capture_diagnostics AFTER UPDATE OF discord_log_sections ON routine_runs FOR EACH ROW EXECUTE FUNCTION capture_diagnostics();")
+        .execute(&pool).await.unwrap();
     let loader = RoutineScriptLoader::new().unwrap();
     let path = root.path().join("diagnostics.js");
     std::fs::write(&path, "agentdesk.routines.register({name:'fixture',tick(ctx){return {action:'complete',result:{ok:true}};}});").unwrap();
@@ -205,6 +207,13 @@ async fn i8117_due_manual_and_poll_store_without_diagnostic_wire_pg() {
             );
         }
         let runs = store.list_runs(&routine.id, 10).await.unwrap();
+        let updates: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM diagnostic_updates WHERE run_id=$1")
+                .bind(&runs[0].id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(updates, 4, "each diagnostic section is stored once");
         let sections = runs[0].discord_log_sections.as_object().unwrap();
         assert_eq!(sections.len(), 4, "{sections:?}");
         assert!(
