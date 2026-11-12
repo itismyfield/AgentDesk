@@ -164,7 +164,13 @@ pub(crate) fn read(root: &Path, channel: u64) -> Result<Vec<RestartEnd>, String>
         {
             continue;
         }
-        witnesses.push(read_one(&file, channel)?);
+        match read_one(&file, channel) {
+            Ok(witness) => witnesses.push(witness),
+            Err(reason) => {
+                let end_id = file.file_name().unwrap_or_default().to_string_lossy();
+                tracing::warn!(%end_id, %reason, "[tui_o] skipping invalid restart end");
+            }
+        }
     }
     witnesses.sort_by(|a, b| {
         (a.binding_seq, a.cutoff, &a.end_id).cmp(&(b.binding_seq, b.cutoff, &b.end_id))

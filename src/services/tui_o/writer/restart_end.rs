@@ -60,6 +60,16 @@ impl std::ops::Deref for VerifiedEnd {
 }
 
 impl VerifiedEnd {
+    pub(crate) fn renewed(&self) -> Option<Self> {
+        let mut renewed = self.clone();
+        renewed.snapshot = Some(checked_snapshot(self)?);
+        Some(renewed)
+    }
+
+    pub(crate) fn native_snapshot(&self) -> Option<&Fingerprint> {
+        self.snapshot.as_ref()
+    }
+
     pub(crate) fn native_current(&self, source: &SourceId) -> bool {
         self.snapshot
             .as_ref()
@@ -80,37 +90,80 @@ impl VerifiedEnd {
 }
 
 fn prefix_matches(end: &RestartEnd) -> Result<Option<Fingerprint>, String> {
-    let file = match std::fs::File::open(&end.source.path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    };
-    let before = file.metadata().map_err(|error| error.to_string())?;
-    if file_match(&end.source, file_identity(&before)) == FileMatch::Other
-        || before.len() < end.cutoff
-    {
-        return Ok(None);
-    }
-    let snapshot = Fingerprint::of(&before).map_err(|error| error.to_string())?;
-    let mut hash = Sha256::new();
-    let mut input = file.take(end.cutoff);
-    let mut read = 0;
-    let mut bytes = [0; 8192];
-    loop {
-        let count = input.read(&mut bytes).map_err(|error| error.to_string())?;
-        if count == 0 {
-            break;
+    for _ in 0..2 {
+        let file = match std::fs::File::open(&end.source.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        let before = file.metadata().map_err(|error| error.to_string())?;
+        if file_match(&end.source, file_identity(&before)) == FileMatch::Other
+            || before.len() < end.cutoff
+        {
+            return Ok(None);
         }
-        hash.update(&bytes[..count]);
-        read += count as u64;
+        let snapshot = Fingerprint::of(&before).map_err(|error| error.to_string())?;
+        let mut hash = Sha256::new();
+        let read = std::io::copy(&mut file.take(end.cutoff), &mut hash)
+            .map_err(|error| error.to_string())?;
+        #[cfg(test)]
+        AFTER_HASH.with_borrow_mut(|hook| {
+            if let Some(hook) = hook.take() {
+                hook();
+            }
+        });
+        let after = std::fs::metadata(&end.source.path).map_err(|error| error.to_string())?;
+        let after = Fingerprint::of(&after).map_err(|error| error.to_string())?;
+        if (after.dev, after.ino) != (snapshot.dev, snapshot.ino)
+            || after.len < end.cutoff
+            || (after.len == snapshot.len && after != snapshot)
+        {
+            return Err("restart prefix changed while being verified".into());
+        }
+        if read != end.cutoff || hex::encode(hash.finalize()) != end.prefix_hash {
+            return Ok(None);
+        }
+        // A growth observation needs a fresh read before it can replace the verified snapshot.
+        if after.len != snapshot.len {
+            continue;
+        }
+        return Ok(Some(after));
     }
-    let after = std::fs::metadata(&end.source.path).map_err(|error| error.to_string())?;
-    let after = Fingerprint::of(&after).map_err(|error| error.to_string())?;
-    if after != snapshot {
-        return Err("restart prefix changed while being verified".into());
-    }
-    Ok((read == end.cutoff && hex::encode(hash.finalize()) == end.prefix_hash).then_some(snapshot))
+    Err("restart prefix changed while being verified".into())
 }
+
+fn rejected(end: &RestartEnd, reason: impl std::fmt::Display) {
+    tracing::warn!(end_id = %end.end_id, reason = %reason, "restart end not applied");
+}
+
+fn checked_snapshot(end: &RestartEnd) -> Option<Fingerprint> {
+    for _ in 0..2 {
+        match prefix_matches(end) {
+            Ok(snapshot) => {
+                if snapshot.is_none() {
+                    rejected(end, "prefix missing or mismatched");
+                }
+                return snapshot;
+            }
+            Err(reason) => {
+                rejected(end, &reason);
+                if reason != "restart prefix changed while being verified" {
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_HASH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+#[path = "restart_end_repair_tests.rs"]
+mod repair_tests;
 
 /// Called on a worker before folding native records; the current resume nonce may be newer.
 pub(crate) fn validated(
@@ -120,11 +173,12 @@ pub(crate) fn validated(
 ) -> Result<Vec<VerifiedEnd>, String> {
     let mut checked = Vec::new();
     for mut end in ends {
-        if history
+        if !history
             .iter()
             .any(|event| scope_matches(&end, event, binding))
-            && let Some(snapshot) = prefix_matches(&end)?
         {
+            rejected(&end, "binding scope mismatch");
+        } else if let Some(snapshot) = checked_snapshot(&end) {
             end.source = binding.source.clone();
             checked.push(VerifiedEnd {
                 end,
@@ -174,11 +228,21 @@ pub(super) struct Projection {
     version: Option<(u64, u64)>,
     ends: Vec<VerifiedEnd>,
     applied: HashSet<String>,
+    missed: HashSet<String>,
     windows: HashMap<String, Window>,
 }
 
 impl Projection {
     fn take(&mut self, source: &SourceId, through: u64) -> Option<Ended> {
+        for end in &self.ends {
+            if same_source(&end.source, source)
+                && through > end.cutoff
+                && !self.applied.contains(&end.end_id)
+                && self.missed.insert(end.end_id.clone())
+            {
+                rejected(end, "capture passed the unapplied cutoff");
+            }
+        }
         let key = source_key(source);
         let window = self.windows.get_mut(&key)?;
         let end = self.ends.iter().find(|end| {
@@ -259,6 +323,12 @@ impl Projection {
                         window.keys.clear();
                         window.idle = true;
                     }
+                    TurnEvent::None if matches!(fact, RecordFact::Idle(_)) => {
+                        window.open_after = None;
+                        window.native_id = None;
+                        window.keys.clear();
+                        window.idle = true;
+                    }
                     TurnEvent::None
                         if matches!(fact, RecordFact::TurnStart(_))
                             || (row.is_none() && matches!(fact, RecordFact::Prompt(true, _)))
@@ -292,6 +362,21 @@ impl Projection {
     }
 }
 
+fn version<B: BindingEvents>(channel: u64, bindings: &B) -> (u64, u64) {
+    (
+        *restart_end::subscribe(channel).borrow(),
+        *bindings.subscribe(channel).borrow(),
+    )
+}
+
+pub(super) fn capture_current<B: BindingEvents>(
+    deriver: &mut UnitDeriver,
+    channel: u64,
+    bindings: &B,
+) -> bool {
+    deriver.restart_projection().version == Some(version(channel, bindings))
+}
+
 /// Loading precedes both boot replay and capture, so no unit crosses its end before sealing.
 pub(super) async fn refresh<P, L, A, B>(
     writer: &mut ChannelWriter<P, L, A>,
@@ -306,10 +391,7 @@ where
     B: BindingEvents,
 {
     let channel = writer.channel();
-    let version = (
-        *restart_end::subscribe(channel).borrow(),
-        *bindings.subscribe(channel).borrow(),
-    );
+    let version = version(channel, bindings);
     if deriver.restart_projection().version == Some(version) {
         return Ok(());
     }
@@ -322,6 +404,7 @@ where
         .filter(|end| end.provider == provider)
         .collect();
     if ends.is_empty() {
+        deriver.restart_projection().ends.clear();
         deriver.restart_projection().version = Some(version);
         return Ok(());
     }
@@ -345,24 +428,24 @@ where
                 .iter()
                 .any(|event| scope_matches(&end, event, &binding))
             {
+                rejected(&end, "binding scope mismatch");
                 continue;
             }
             let captured = cursor.is_some_and(|cursor| {
                 cursor.captured_through == end.cutoff && cursor.prefix_hash == end.prefix_hash
             });
             end.source = binding.source;
-            let snapshot = prefix_matches(&end)?;
+            let snapshot = checked_snapshot(&end);
             checked.push(VerifiedEnd {
                 end,
                 snapshot,
                 captured,
             });
         }
-        Ok::<_, String>(checked)
+        checked
     })
     .await
-    .map_err(|error| halted(error.to_string()))?
-    .map_err(halted)?;
+    .map_err(|error| halted(error.to_string()))?;
     let projection = deriver.restart_projection();
     projection.ends = checked;
     projection.version = Some(version);
@@ -394,7 +477,7 @@ mod tests {
     use crate::services::tui_o::store::spool::Cursor;
     use serde_json::json;
 
-    fn record(start: u64, value: serde_json::Value) -> CapturedRecord {
+    pub(super) fn record(start: u64, value: serde_json::Value) -> CapturedRecord {
         let line = serde_json::to_vec(&value).unwrap();
         CapturedRecord {
             start,
@@ -403,14 +486,14 @@ mod tests {
         }
     }
 
-    fn prompt(start: u64, id: &str) -> CapturedRecord {
+    pub(super) fn prompt(start: u64, id: &str) -> CapturedRecord {
         record(
             start,
             json!({"type":"user","uuid":id,"message":{"role":"user","content":"work"}}),
         )
     }
 
-    fn tool(start: u64) -> CapturedRecord {
+    pub(super) fn tool(start: u64) -> CapturedRecord {
         record(
             start,
             json!({"type":"assistant","uuid":"tool-row","apiBlockIndex":0,
@@ -420,12 +503,12 @@ mod tests {
         )
     }
 
-    fn append_record(bytes: &mut Vec<u8>, record: &CapturedRecord) {
+    pub(super) fn append_record(bytes: &mut Vec<u8>, record: &CapturedRecord) {
         bytes.extend_from_slice(&record.line);
         bytes.push(b'\n');
     }
 
-    fn end(
+    pub(super) fn end(
         binding: &SourceBinding,
         opener: &CapturedRecord,
         last: &CapturedRecord,
@@ -446,7 +529,7 @@ mod tests {
         }
     }
 
-    fn history(end: &RestartEnd) -> Vec<BindingEvent> {
+    pub(super) fn history(end: &RestartEnd) -> Vec<BindingEvent> {
         let now = chrono::Utc::now();
         vec![BindingEvent {
             seq: end.binding_seq,

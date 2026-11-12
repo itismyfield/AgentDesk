@@ -154,7 +154,8 @@ fn old_schema_unknown_fields_and_corruption_are_not_rewritten() {
     }
     for bytes in invalid {
         fs::write(&target, &bytes).unwrap();
-        assert!(read(root.path(), witness.channel).is_err());
+        assert!(read_one(&target, witness.channel).is_err());
+        assert!(read(root.path(), witness.channel).unwrap().is_empty());
         assert!(append(root.path(), &witness).is_err());
         assert_eq!(fs::read(&target).unwrap(), bytes);
     }
@@ -209,10 +210,70 @@ fn foreign_channel_and_wrong_record_filename_are_rejected() {
     let witness = witness(root.path(), "end");
     append(root.path(), &witness).unwrap();
     let target = path(root.path(), &witness);
+    let original = fs::read(&target).unwrap();
     let foreign = dir(root.path(), witness.channel + 1);
     fs::create_dir_all(&foreign).unwrap();
-    fs::copy(&target, foreign.join(name(&witness.end_id))).unwrap();
-    assert!(read(root.path(), witness.channel + 1).is_err());
-    fs::rename(&target, target.with_file_name("wrong.json")).unwrap();
-    assert!(read(root.path(), witness.channel).is_err());
+    let foreign_target = foreign.join(name(&witness.end_id));
+    fs::copy(&target, &foreign_target).unwrap();
+    assert!(read_one(&foreign_target, witness.channel + 1).is_err());
+    assert!(read(root.path(), witness.channel + 1).unwrap().is_empty());
+    assert_eq!(fs::read(&foreign_target).unwrap(), original);
+    let renamed = target.with_file_name("wrong.json");
+    fs::rename(&target, &renamed).unwrap();
+    assert!(read_one(&renamed, witness.channel).is_err());
+    assert!(read(root.path(), witness.channel).unwrap().is_empty());
+    assert_eq!(fs::read(&renamed).unwrap(), original);
+}
+
+#[test]
+fn a_corrupt_record_does_not_hide_a_valid_end() {
+    let root = tempfile::tempdir().unwrap();
+    let good = witness(root.path(), "good");
+    append(root.path(), &good).unwrap();
+    let corrupt = dir(root.path(), good.channel).join(".DS_Store");
+    let bytes = b"not a restart end";
+    fs::write(&corrupt, bytes).unwrap();
+
+    assert_eq!(read(root.path(), good.channel).unwrap(), [good.clone()]);
+    assert_eq!(read_durable(root.path(), good.channel).unwrap(), [good]);
+    assert_eq!(fs::read(corrupt).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_record_does_not_hide_a_valid_end() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct RestorePermissions(PathBuf, fs::Permissions);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            fs::set_permissions(&self.0, self.1.clone()).unwrap();
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let good = witness(root.path(), "good");
+    let unreadable = witness(root.path(), "unreadable");
+    append(root.path(), &good).unwrap();
+    append(root.path(), &unreadable).unwrap();
+    let target = path(root.path(), &unreadable);
+    let _restore = RestorePermissions(target.clone(), fs::metadata(&target).unwrap().permissions());
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        fs::read(&target).is_err(),
+        "the fixture must deny record reads"
+    );
+
+    assert_eq!(read(root.path(), good.channel).unwrap(), [good.clone()]);
+    assert_eq!(read_durable(root.path(), good.channel).unwrap(), [good]);
+}
+
+#[test]
+fn directory_io_failure_remains_a_read_error() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join(DIR_NAME)).unwrap();
+    fs::write(dir(root.path(), 81092), b"not a directory").unwrap();
+
+    assert!(read(root.path(), 81092).is_err());
+    assert!(read_durable(root.path(), 81092).is_err());
 }

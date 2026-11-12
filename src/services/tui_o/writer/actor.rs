@@ -344,7 +344,9 @@ where
         {
             Ok(()) => true,
             Err(alarm) => {
-                resumed.send_replace(false);
+                if !sources_resumed {
+                    resumed.send_replace(false);
+                }
                 tracing::warn!(?alarm, "[tui_o] restart witness remains unreadable");
                 false
             }
@@ -872,6 +874,13 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Applies new binds first, so a bound source is read in the same poll as its predecessor.
     fn read_sources(&mut self) -> Vec<UnitKey> {
+        if !super::restart_end::capture_current(
+            &mut self.deriver,
+            self.writer.channel(),
+            self.bindings.as_ref(),
+        ) {
+            return Vec::new();
+        }
         if self.writer.is_stopped() || !self.sources_allowed() {
             return Vec::new();
         }
@@ -954,6 +963,14 @@ mod test_support {
             scope_hold: None,
             boot_previous_nonce: None,
         };
+        super::super::restart_end::refresh(
+            &mut actor.writer,
+            &mut actor.deriver,
+            actor.bindings.as_ref(),
+            provider,
+        )
+        .await
+        .unwrap();
         actor
             .sources
             .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)

@@ -88,7 +88,7 @@ pub struct InputFacts {
     prefix: Option<Sha256>,
     prefix_through: u64,
     restart_stale: bool,
-    physical_end: bool,
+    physical_end_id: Option<String>,
     physical_snapshot: Option<Fingerprint>,
 }
 
@@ -155,7 +155,7 @@ impl InputFacts {
             prefix: (offset == 0).then(Sha256::new),
             prefix_through: offset,
             restart_stale: false,
-            physical_end: false,
+            physical_end_id: None,
             physical_snapshot: None,
         })
     }
@@ -265,7 +265,7 @@ impl InputFacts {
     }
 
     pub(crate) fn restart_ended(&self) -> bool {
-        self.physical_end && self.state == TurnState::Idle
+        self.physical_end_id.is_some() && self.state == TurnState::Idle
     }
 
     pub(crate) fn restart_proof_current(&self) -> bool {
@@ -276,6 +276,30 @@ impl InputFacts {
             (Some(kept), Ok(now)) => kept == &now,
             _ => false,
         }
+    }
+
+    pub(crate) fn restart_proof_grew(&self) -> bool {
+        self.physical_snapshot.as_ref().is_some_and(|kept| {
+            Fingerprint::path(&self.binding.source)
+                .is_ok_and(|now| (now.dev, now.ino) == (kept.dev, kept.ino) && now.len > kept.len)
+        })
+    }
+
+    /// Worker-only: recheck the applied end's native prefix without replaying the reader.
+    pub(crate) fn renew_restart_proof(&mut self) -> bool {
+        let Some(index) = self
+            .restart_ends
+            .iter()
+            .position(|end| Some(&end.end_id) == self.physical_end_id.as_ref())
+        else {
+            return false;
+        };
+        let Some(renewed) = self.restart_ends[index].renewed() else {
+            return false;
+        };
+        self.physical_snapshot = renewed.native_snapshot().cloned();
+        self.restart_ends[index] = renewed;
+        self.physical_snapshot.is_some()
     }
 
     fn apply_restart_ends(&mut self, boundary: u64, snapshot: Option<&Fingerprint>) {
@@ -302,9 +326,10 @@ impl InputFacts {
                 (
                     end.native_current(&self.binding.source),
                     end.accepts_prefix(self.prefix.as_ref(), &self.binding.source),
+                    end.end_id.clone(),
                 )
             });
-        let Some((current, prefix)) = proof else {
+        let Some((current, prefix, end_id)) = proof else {
             return;
         };
         if !current {
@@ -321,7 +346,7 @@ impl InputFacts {
             self.local = false;
             self.last_close_aborted = None;
             self.queued.closed();
-            self.physical_end = true;
+            self.physical_end_id = Some(end_id);
             self.physical_snapshot = snapshot.cloned();
         }
     }
@@ -385,6 +410,7 @@ impl InputFacts {
             end.channel == self.binding.channel_id
                 && end.provider == self.binding.provider
                 && end.source == self.binding.source
+                && Some(&end.end_id) != self.physical_end_id.as_ref()
                 && end.cutoff >= self.capture.captured_through()
                 && !end.native_current(&self.binding.source)
         }) {
@@ -524,7 +550,7 @@ impl InputFacts {
     }
 
     fn mark(&mut self, next: TurnState, range: (u64, u64), closed: Option<String>, value: &Value) {
-        self.physical_end = false;
+        self.physical_end_id = None;
         self.physical_snapshot = None;
         match &next {
             TurnState::Open { native_turn_id } => {

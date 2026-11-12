@@ -4230,6 +4230,7 @@ src/
 │   │   │   ├── replay_metadata_tests.rs
 │   │   │   ├── repost_turn_tests.rs
 │   │   │   ├── restart_end.rs
+│   │   │   ├── restart_end_repair_tests.rs
 │   │   │   ├── restart_end_tests.rs
 │   │   │   ├── restart_replay_host_tests.rs
 │   │   │   ├── resume.rs

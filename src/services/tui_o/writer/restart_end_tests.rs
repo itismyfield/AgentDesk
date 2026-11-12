@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 use super::{POLL_INTERVAL, run_channel};
 use crate::services::tui_o::ownership::OwnershipGate;
@@ -34,6 +34,8 @@ const NEW_SUMMARY: &str = "-# ⏱️ 7초";
 struct Port {
     posts: Mutex<Vec<String>>,
     history: Mutex<Vec<SeenMessage>>,
+    after_post: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    posted: Notify,
 }
 
 impl Port {
@@ -51,6 +53,15 @@ impl Port {
     fn posted(&self) -> Vec<String> {
         self.posts.lock().unwrap().clone()
     }
+    async fn wait_for_posts(&self, count: usize) {
+        loop {
+            let posted = self.posted.notified();
+            if self.posts.lock().unwrap().len() >= count {
+                return;
+            }
+            posted.await;
+        }
+    }
 }
 
 impl DiscordPort for Port {
@@ -59,6 +70,11 @@ impl DiscordPort for Port {
     }
     fn post(&self, _: u64, content: String) -> impl Future<Output = PostOutcome> + Send + 'static {
         let message = self.record_post(content);
+        let after_post = self.after_post.lock().unwrap().take();
+        if let Some(after_post) = after_post {
+            after_post();
+        }
+        self.posted.notify_waiters();
         async move { PostOutcome::Created(message) }
     }
     async fn history_after(&self, _: u64, after: u64) -> Result<Vec<SeenMessage>, String> {
@@ -157,6 +173,9 @@ struct Harness {
 
 impl Harness {
     fn new(channel: u64) -> Self {
+        Self::build(channel, false)
+    }
+    fn build(channel: u64, late_end: bool) -> Self {
         let runtime = tempfile::tempdir().unwrap();
         let path = runtime.path().join("native.jsonl");
         let opener = prompt("old-question", "2026-11-12T00:00:00Z");
@@ -181,31 +200,42 @@ impl Harness {
                 })
             })
             .unwrap();
-        restart_end::append(
-            runtime.path(),
-            &RestartEnd {
-                end_id: format!("effort-{channel}"),
-                channel,
-                provider: ShadowProvider::Claude,
-                tmux_session: PANE.into(),
-                execution_nonce: "a".repeat(32),
-                binding_seq: 1,
-                source: source.clone(),
-                cutoff: old.len() as u64,
-                prefix_hash: hex::encode(Sha256::digest(&old)),
-                open_after: opener.len() as u64,
-                native_turn_id: Some("old-question".into()),
-            },
-        )
-        .unwrap();
+        let witness = RestartEnd {
+            end_id: format!("effort-{channel}"),
+            channel,
+            provider: ShadowProvider::Claude,
+            tmux_session: PANE.into(),
+            execution_nonce: "a".repeat(32),
+            binding_seq: 1,
+            source: source.clone(),
+            cutoff: old.len() as u64,
+            prefix_hash: hex::encode(Sha256::digest(&old)),
+            open_after: opener.len() as u64,
+            native_turn_id: Some("old-question".into()),
+        };
         let new = [prompt("new-question", "2026-11-12T00:01:00Z"), body("new-body", NEW_BODY),
             native(json!({"type":"system","subtype":"stop_hook_summary","timestamp":"2026-11-12T00:01:07Z"}))].concat();
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(&new)
-            .unwrap();
+        let port = Arc::<Port>::default();
+        let publish = {
+            let runtime = runtime.path().to_owned();
+            move || {
+                assert_eq!(
+                    restart_end::append(&runtime, &witness),
+                    Ok(restart_end::Appended::Durable)
+                );
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(&new)
+                    .unwrap();
+            }
+        };
+        if late_end {
+            *port.after_post.lock().unwrap() = Some(Box::new(publish));
+        } else {
+            publish();
+        }
         let events = vec![
             Self::bound(channel, 1, &source, false),
             Self::bound(channel, 2, &source, true),
@@ -220,7 +250,7 @@ impl Harness {
             channel,
             runtime,
             store,
-            port: Arc::default(),
+            port,
             gate,
             alarms: Alarms::default(),
             bindings,
@@ -390,4 +420,120 @@ async fn witness_is_applied_before_seal() {
 #[tokio::test(start_paused = true)]
 async fn prepared_post_survives_restart_without_duplicate() {
     exercise(810_921_102, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_end_published_during_post_precedes_the_next_live_capture() {
+    let _live = crate::config_live_reload::test_live_guard(
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
+    );
+    crate::config_live_reload::install(crate::config::Config {
+        tui_o: Some(crate::services::tui_o::shadow::tap::TuiOConfig::default()),
+        ..crate::config::Config::default()
+    });
+    let channel = 810_921_103;
+    crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::set_ready_for_tests(
+        channel, false,
+    );
+    let harness = Harness::build(channel, true);
+    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        harness.runtime.path(),
+    );
+    assert!(
+        restart_end::read(harness.runtime.path(), channel)
+            .unwrap()
+            .is_empty()
+    );
+    let (stop, actor, mut ready) = harness.start();
+    ready.wait_for(|ready| *ready).await.unwrap();
+    harness.port.wait_for_posts(3).await;
+    stop.send_replace(true);
+    assert!(actor.await.unwrap().is_none());
+
+    assert!(harness.alarms.0.lock().unwrap().is_empty());
+    let restored = harness.channel();
+    let ledger = restored.ledger();
+    assert_eq!(
+        restart_end::read(harness.runtime.path(), channel)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(ledger.summary_turn_marks().contains("new-body:0#turn"));
+    assert!(
+        ledger
+            .latest_piece(&key(channel, "old-body:0#turn_end", UnitKind::Tool), 0)
+            .is_none()
+    );
+    let (_, summary) = ledger
+        .latest_piece(&key(channel, "new-body:0#turn_end", UnitKind::Tool), 0)
+        .expect("the next native turn owns its summary even when the end arrives inside POST");
+    assert_eq!(summary.payload, NEW_SUMMARY);
+    assert!(matches!(summary.outcome, Some(PieceOutcome::Posted(_))));
+    assert_eq!(harness.port.posted(), [OLD_BODY, NEW_BODY, NEW_SUMMARY]);
+    assert_eq!(ledger.next_serial(), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_warm_actor_keeps_readiness_while_restart_storage_blocks_capture() {
+    let _live = crate::config_live_reload::test_live_guard(
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
+    );
+    crate::config_live_reload::install(crate::config::Config {
+        tui_o: Some(crate::services::tui_o::shadow::tap::TuiOConfig::default()),
+        ..crate::config::Config::default()
+    });
+    let channel = 810_921_104;
+    crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::set_ready_for_tests(
+        channel, false,
+    );
+    let harness = Harness::build(channel, true);
+    let publish = harness.port.after_post.lock().unwrap().take().unwrap();
+    let runtime = harness.runtime.path().to_owned();
+    *harness.port.after_post.lock().unwrap() = Some(Box::new(move || {
+        publish();
+        let directory = runtime
+            .join(restart_end::DIR_NAME)
+            .join(channel.to_string());
+        std::fs::rename(&directory, runtime.join("held-end-records")).unwrap();
+        std::fs::write(directory, b"not a readable directory").unwrap();
+    }));
+    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        harness.runtime.path(),
+    );
+    let (stop, actor, mut ready) = harness.start();
+    ready.wait_for(|ready| *ready).await.unwrap();
+    assert!(
+        *ready.borrow(),
+        "the writer must first become ready without any end"
+    );
+    harness.port.wait_for_posts(1).await;
+    for _ in 0..2 {
+        tokio::time::advance(POLL_INTERVAL).await;
+        stop.send_replace(false);
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+    let stayed_ready = *ready.borrow();
+    let posted = harness.port.posted();
+    stop.send_replace(true);
+    assert!(actor.await.unwrap().is_none());
+
+    assert!(
+        restart_end::read(harness.runtime.path(), channel).is_err(),
+        "the fixture must leave a directory-wide read error"
+    );
+    assert!(
+        stayed_ready,
+        "a warm writer retains readiness while retrying witness storage"
+    );
+    assert_eq!(
+        posted,
+        [OLD_BODY],
+        "unverified new native records stay uncaptured"
+    );
+    assert_eq!(harness.channel().ledger().next_serial(), 1);
 }

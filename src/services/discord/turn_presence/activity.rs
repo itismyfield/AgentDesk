@@ -696,6 +696,17 @@ fn judge_with_policy(
     if !caught_up {
         return progress(at(&guard, observed(Activity::Unknown, "catching_up")));
     }
+    if effort_restart::needs_refresh(&guard) {
+        let outcome = std::mem::replace(&mut guard.outcome, Outcome::Rebuilding);
+        return rebuild(
+            watch,
+            guard,
+            ports,
+            channel,
+            key,
+            Some(Reload::Proof(outcome)),
+        );
+    }
     match fact.state {
         TurnState::Idle if effort_restart::closed(&guard) => {
             at(&guard, observed(Activity::Idle, "effort_restart_ended"))
@@ -800,6 +811,7 @@ fn no_turn_evidence(ports: &dyn Ports, key: &Key) -> Observed {
 }
 
 enum Reload {
+    Proof(Outcome),
     Full(SourceBinding, Resume),
     Tail(Box<tail::TailReader>),
 }
@@ -829,6 +841,7 @@ fn rebuild(
         #[cfg(all(test, unix))]
         crate::services::tui_o::shadow::capture::io_trace::take();
         let (outcome, grown) = match resume {
+            Some(Reload::Proof(outcome)) => effort_restart::refresh(outcome, worker_ports.as_ref(), &key),
             Some(Reload::Full(binding, resume)) => {
                 read_from(InputFacts::resume(binding, &resume), false, worker_ports.as_ref(), &key)
             }

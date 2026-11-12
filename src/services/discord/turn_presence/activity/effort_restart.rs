@@ -14,8 +14,31 @@ pub(super) fn version_changed(watch: &mut Watch, ports: &dyn Ports, channel: u64
     changed
         || facts(watch).is_some_and(|facts| {
             facts.restart_needs_reload()
-                || (facts.restart_ended() && !facts.restart_proof_current())
+                || (facts.restart_ended()
+                    && !facts.restart_proof_current()
+                    && !facts.restart_proof_grew())
         })
+}
+
+pub(super) fn needs_refresh(watch: &Watch) -> bool {
+    facts(watch).is_some_and(|facts| facts.restart_ended() && !facts.restart_proof_current())
+}
+
+pub(super) fn refresh(
+    mut outcome: Outcome,
+    ports: &dyn Ports,
+    key: &Key,
+) -> (Outcome, super::Grown) {
+    let facts = match &mut outcome {
+        Outcome::Source { facts, .. } => Some(facts.as_mut()),
+        Outcome::Tail(reader) => Some(&mut reader.facts),
+        _ => None,
+    };
+    if facts.is_some_and(InputFacts::renew_restart_proof) {
+        (outcome, None)
+    } else {
+        super::locate(ports, key.channel, key)
+    }
 }
 
 pub(super) fn read(_ports: &LivePorts, channel: u64) -> Result<Vec<RestartEnd>, String> {

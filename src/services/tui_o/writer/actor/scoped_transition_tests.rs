@@ -135,6 +135,14 @@ where
         Some(initial_nonce)
     );
     assert_eq!(actor.writer.suspension.is_empty(), inspect);
+    super::super::restart_end::refresh(
+        &mut actor.writer,
+        &mut actor.deriver,
+        actor.bindings.as_ref(),
+        ShadowProvider::Codex,
+    )
+    .await
+    .unwrap();
     actor
         .sources
         .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)
@@ -263,6 +271,14 @@ where
     }
     assert_eq!(actor.scope_hold, None);
     actor.observe_waiting(false);
+    super::super::restart_end::refresh(
+        &mut actor.writer,
+        &mut actor.deriver,
+        actor.bindings.as_ref(),
+        ShadowProvider::Codex,
+    )
+    .await
+    .unwrap();
     actor
         .sources
         .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)

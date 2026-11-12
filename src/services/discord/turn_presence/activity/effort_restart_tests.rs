@@ -79,9 +79,8 @@ fn old_end_cannot_close_new_open() {
     scripted.run();
     assert_eq!(ask().0, observed(Activity::Idle, "effort_restart_ended"));
     append(&fixture.binding.source.path, &[prompt("old")]);
-    assert_eq!(ask().0, observed(Activity::Unknown, "catching_up"));
-    scripted.run();
     assert_eq!(ask().0, observed(Activity::Busy, "open"));
+    assert!(lock(&scripted.jobs).is_empty());
 }
 
 #[test]
@@ -570,4 +569,95 @@ fn append_after_validation_reloads_on_the_existing_worker() {
     scripted.run();
     assert_eq!(scripted.reads.load(Ordering::SeqCst), 1);
     assert_eq!(ask().0, observed(Activity::Idle, "effort_restart_ended"));
+}
+
+#[test]
+fn streaming_append_keeps_presence_rebuilds_bounded() {
+    let fixture = Fixture::new(8_109_220_120, &[prompt("old")]);
+    let cutoff = std::fs::metadata(&fixture.binding.source.path)
+        .unwrap()
+        .len();
+    let scripted = Scripted::new(&fixture, vec![fixture.end("old", cutoff, cutoff)]);
+    let ports: Arc<dyn Ports> = scripted.clone();
+    let watch = Arc::new(Mutex::new(Watch::default()));
+    let ask = || {
+        judge(
+            &watch,
+            &ports,
+            fixture.key.provider,
+            fixture.key.channel,
+            Target::Bound(LABEL.into()),
+        )
+    };
+    assert_eq!(ask().0, observed(Activity::Unknown, "catching_up"));
+    scripted.run();
+    assert_eq!(ask().0, observed(Activity::Idle, "effort_restart_ended"));
+    let mut proof_jobs = 0;
+    for tick in 0..8 {
+        append(
+            &fixture.binding.source.path,
+            &[json!({"type":"summary","summary":format!("append-{tick}")})],
+        );
+        if ask().0 == observed(Activity::Unknown, "catching_up") {
+            scripted.run();
+            proof_jobs += 1;
+        }
+        assert_eq!(ask().0, observed(Activity::Idle, "effort_restart_ended"));
+    }
+    assert_eq!(
+        proof_jobs, 8,
+        "append proofs are renewed on the existing worker"
+    );
+    assert!(
+        scripted.reads.load(Ordering::SeqCst) <= 2,
+        "streaming append rebuilt {} times",
+        scripted.reads.load(Ordering::SeqCst)
+    );
+}
+
+#[test]
+fn append_proof_rejects_an_earlier_body_rewrite() {
+    let fixture = Fixture::new(
+        8_109_220_130,
+        &[
+            prompt("old"),
+            json!({"type":"summary","summary":"z".repeat(8192)}),
+        ],
+    );
+    let open_after = format!("{}\n", prompt("old")).len() as u64;
+    let cutoff = std::fs::metadata(&fixture.binding.source.path)
+        .unwrap()
+        .len();
+    let scripted = Scripted::new(&fixture, vec![fixture.end("old", open_after, cutoff)]);
+    let ports: Arc<dyn Ports> = scripted.clone();
+    let watch = Arc::new(Mutex::new(Watch::default()));
+    let ask = || {
+        judge(
+            &watch,
+            &ports,
+            fixture.key.provider,
+            fixture.key.channel,
+            Target::Bound(LABEL.into()),
+        )
+    };
+    assert_eq!(ask().0, observed(Activity::Unknown, "catching_up"));
+    scripted.run();
+    assert_eq!(ask().0, observed(Activity::Idle, "effort_restart_ended"));
+    let bytes = std::fs::read_to_string(&fixture.binding.source.path).unwrap();
+    let rewritten = bytes.replacen("work", "edit", 1);
+    assert_ne!(bytes, rewritten);
+    assert_eq!(bytes.len(), rewritten.len());
+    std::fs::write(&fixture.binding.source.path, rewritten).unwrap();
+    append(
+        &fixture.binding.source.path,
+        &[json!({"type":"summary","summary":"new suffix"})],
+    );
+    assert_eq!(ask().0, observed(Activity::Unknown, "catching_up"));
+    scripted.run();
+    assert_eq!(ask().0, observed(Activity::Busy, "open"));
+    assert_eq!(
+        scripted.reads.load(Ordering::SeqCst),
+        2,
+        "invalid proof requires full native replay"
+    );
 }
