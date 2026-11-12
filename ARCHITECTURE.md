@@ -3859,6 +3859,7 @@ src/
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
 │   │   ├── session_record.rs
+│   │   ├── surface_policy.rs
 │   │   ├── test_support.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
@@ -3963,7 +3964,10 @@ src/
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
 │   │   │   │   └── body_check.rs
+│   │   │   ├── children/
+│   │   │   │   └── tests.rs
 │   │   │   ├── adoption.rs
+│   │   │   ├── children.rs
 │   │   │   ├── late_reservation_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── cutover/
@@ -4035,6 +4039,8 @@ src/
 │   │   │   ├── spool/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
+│   │   │   ├── thread_children/
+│   │   │   │   └── retirement.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
 │   │   │   ├── clear_end_tests.rs
@@ -4055,6 +4061,8 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── spool.rs
 │   │   │   ├── spool_transition_tests.rs
+│   │   │   ├── thread_children.rs
+│   │   │   ├── thread_children_tests.rs
 │   │   │   ├── tool_card_switch.rs
 │   │   │   ├── tool_card_switch_recovery_tests.rs
 │   │   │   └── tool_card_switch_tests.rs
