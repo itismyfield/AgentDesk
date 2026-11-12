@@ -271,7 +271,6 @@ pub(super) async fn handle_stream_content_message(
                             let session_died_retry = result == "__session_died_retry__";
                             if !session_died_retry && !ctx.herdr_aborted {
                                 inflight_state.routine_presentation.observe_terminal(&result);
-                                state_dirty = true;
                             }
                             if !session_died_retry { ctx.cancel_token.native_stop.completed(); }
                             if session_died_retry {
