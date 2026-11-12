@@ -63,6 +63,9 @@ fn stdin_boundary_rejects_release_aliases_and_link_targets_without_writes() {
         .join(".ADK/ReLeAsE")
         .join(uuid::Uuid::new_v4().to_string());
     fs::create_dir_all(release.join("credential")).unwrap();
+    for directory in [&release, &release.join("credential")] {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     assert!(credential_write(&release, "driver_bot_token", b"fake-sentinel".as_slice()).is_err());
     assert!(!release.join("credential/driver_bot_token").exists());
 }
