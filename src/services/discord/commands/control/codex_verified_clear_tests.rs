@@ -181,6 +181,7 @@ fn codex_verified_clear_ends_the_incarnation_releases_its_pin_and_keeps_owed_out
         .unwrap();
     let channel = fixture.channel();
     let init = Initialized {
+        policy_parent: None,
         channel: channel.get(),
         sources: vec![],
         initial_anchor: 101,

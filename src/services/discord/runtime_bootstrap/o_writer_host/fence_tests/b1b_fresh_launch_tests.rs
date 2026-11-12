@@ -319,6 +319,7 @@ async fn scenario(retained: bool, before: BeforeInput) {
     let era = store
         .begin_era(&[CANARY_CHANNEL], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: sources.clone(),
                 initial_anchor: 0,

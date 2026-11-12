@@ -13,10 +13,14 @@ pub(crate) mod input_notice_floor;
 pub mod ledger;
 pub mod rotation;
 pub mod spool;
+pub(crate) mod thread_children;
 pub(crate) mod tool_card_switch;
 
 #[cfg(all(test, unix))]
 mod input_notice_store_tests;
+
+#[cfg(test)]
+mod thread_children_tests;
 
 use std::collections::BTreeMap;
 use std::io;
@@ -63,6 +67,8 @@ pub struct Initialized {
     pub initial_anchor: u64,
     pub build_digest: String,
     pub at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_parent: Option<u64>,
 }
 
 /// How a channel's `init` came to be, kept beside its fields; one written without it is `Fresh`.
@@ -316,6 +322,16 @@ impl OStore {
         init: &Initialized,
         origin: InitOrigin,
     ) -> Result<(), StoreError> {
+        self.init_channel_checked(
+            init,
+            origin,
+            crate::services::tui_o::cutover::boot_snapshot().as_ref(),
+            None,
+            thread_children::OUTPUT_ENABLED,
+        )
+    }
+
+    fn publish_init(&self, init: &Initialized, origin: InitOrigin) -> Result<(), StoreError> {
         let sealed = self.read_era()?.map(|era| era.initial_channels);
         if sealed.is_some_and(|channels| channels.contains(&init.channel)) {
             return Err(damage("era channel cannot be initialized again"));
@@ -617,6 +633,7 @@ mod tests {
     pub(super) fn initialized(channel: u64, sources: Vec<InitSource>) -> Initialized {
         let (initial_anchor, build_digest, at) = (100, "build-a".to_string(), Utc::now());
         Initialized {
+            policy_parent: None,
             channel,
             sources,
             initial_anchor,

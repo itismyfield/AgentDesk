@@ -137,6 +137,7 @@ async fn scenario(
     store
         .begin_era(&[channel], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![],
                 initial_anchor: 100,

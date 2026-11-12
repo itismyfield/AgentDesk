@@ -293,6 +293,7 @@ impl Fixture {
         self.store
             .begin_era(&[self.pane.channel.get()], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![InitSource {
                         source_id: self.a(),

@@ -112,6 +112,7 @@ impl Fixture {
             .unwrap();
         o.begin_era(&[CHANNEL], Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: Vec::new(),
                 initial_anchor: 100,

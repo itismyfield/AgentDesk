@@ -346,6 +346,7 @@ fn hosted_as(
 fn empty_init(channel: u64) -> Initialized {
     let (initial_anchor, build_digest, at) = (100, "b".to_string(), Utc::now());
     Initialized {
+        policy_parent: None,
         channel,
         sources: Vec::new(),
         initial_anchor,

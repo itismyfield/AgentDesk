@@ -53,6 +53,7 @@ fn seed_o_store() {
     let at = chrono::Utc::now();
     let init = |channel| {
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources: Vec::new(),
             initial_anchor: 7,

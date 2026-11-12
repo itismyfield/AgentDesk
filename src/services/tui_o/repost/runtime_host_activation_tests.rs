@@ -299,6 +299,7 @@ async fn f6_default_host_reaches_repost_pg_statements_pg() {
     store
         .begin_era(&[channel], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: Vec::new(),
                 initial_anchor: 100,
@@ -532,6 +533,7 @@ async fn d4act_host_stop_during_pending_finish_prevents_retry_pg() {
         store
             .begin_era(&[channel], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: Vec::new(),
                     initial_anchor: 100,
@@ -902,6 +904,7 @@ async fn d4act2_gateway_repost_host_stop_and_rollback_quiescence_pg() {
         let era = store
             .begin_era(&[channel], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: Vec::new(),
                     initial_anchor: 100,

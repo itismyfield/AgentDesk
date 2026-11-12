@@ -124,6 +124,7 @@ pub(super) fn idle_follow_seals_generic_resolution(
         store
             .begin_era(&[pane.channel], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![initial(record.source.clone(), old_len)],
                     initial_anchor: 100,
@@ -248,6 +249,7 @@ pub(super) fn actual_end_retires_only_its_old_reader(pane: &Pane) {
                 initial(backlog.clone(), 0),
             ];
             store.begin_era(&[pane.channel], chrono::Utc::now(), |channel| Ok(Initialized {
+                policy_parent: None,
                 channel, sources: sources.clone(), initial_anchor: 100,
                 build_digest: "actual-codex-end-retirement".into(), at: chrono::Utc::now(),
             })).unwrap();

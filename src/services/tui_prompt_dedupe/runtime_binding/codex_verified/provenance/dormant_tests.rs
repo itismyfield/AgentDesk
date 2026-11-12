@@ -82,6 +82,7 @@ impl Fixture {
         let era = o
             .begin_era(&[7], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![],
                     initial_anchor: 1,

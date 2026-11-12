@@ -200,6 +200,7 @@ impl Fixture {
         store
             .begin_era(&[channel], Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![InitSource {
                         source_id: source.clone(),

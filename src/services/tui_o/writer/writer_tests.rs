@@ -313,6 +313,7 @@ impl Harness {
         let init = |channel| {
             let (initial_anchor, build_digest, at) = (100, "b".to_string(), Utc::now());
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: sources.clone(),
                 initial_anchor,

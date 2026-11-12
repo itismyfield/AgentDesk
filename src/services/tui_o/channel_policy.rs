@@ -15,6 +15,7 @@ use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::writer::WriterAlarm;
 
 mod adoption;
+mod children;
 pub(crate) use adoption::{
     Adoption, BodyClaimed, Candidate, ClaimReason, LateBoundary, LegacySend, Site,
 };
@@ -28,6 +29,8 @@ pub(crate) use adoption::{
 pub(crate) struct BootChannels {
     /// The selection and, on the home, each committed channel the selection left out.
     channels: BTreeSet<u64>,
+    bindings: BTreeSet<u64>,
+    children: children::ChildEntries,
     selected: BTreeSet<u64>,
     /// Every TUI binding in the boot config, selected or not.
     tui_bindings: BTreeSet<u64>,
@@ -244,6 +247,8 @@ impl BootChannels {
         let (site, configured_id) = site(config, !channels.is_empty())?;
         Ok(Self {
             selected: channels.clone(),
+            bindings: agent_bindings(config).map(|(id, _, _)| id).collect(),
+            children: children::ChildEntries::default(),
             tui_bindings: crate::services::provider_hosting::tui_binding_ids(config)
                 .flatten()
                 .collect(),
@@ -630,15 +635,8 @@ pub(crate) fn install(config: &Config) -> Result<()> {
     let installed = match BOOT.get() {
         Some(installed) => installed,
         None => {
-            let stored = |channels: &BTreeSet<u64>, committed: bool| {
-                let root = crate::config::runtime_root();
-                if committed {
-                    adoption::stored_with_committed(root.as_deref(), channels)
-                } else {
-                    Ok(adoption::stored(root.as_deref(), channels))
-                }
-            };
-            let seeded = candidate.clone().seeded(config, stored)?;
+            let root = crate::config::runtime_root();
+            let seeded = children::seeded_from_store(candidate.clone(), config, root.as_deref())?;
             seeded.refuse_explicit_off(config)?;
             BOOT.get_or_init(|| seeded)
         }

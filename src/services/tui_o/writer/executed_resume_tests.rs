@@ -203,6 +203,7 @@ async fn deliver(
     store
         .begin_era(&[cold.channel], Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![InitSource {
                     source_id: source.clone(),
@@ -495,6 +496,7 @@ async fn resume_companion_live_era_advances_past_exact_terminals_and_restarts_wi
     store
         .begin_era(&[channel], Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: Vec::new(),
                 initial_anchor: 100,

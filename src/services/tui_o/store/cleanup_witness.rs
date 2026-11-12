@@ -142,6 +142,7 @@ mod tests {
             .unwrap();
         let now = chrono::Utc::now();
         let init = Initialized {
+            policy_parent: None,
             channel: 7,
             at: now,
             initial_anchor: 0,

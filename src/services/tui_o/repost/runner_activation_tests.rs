@@ -37,6 +37,7 @@ impl Writer {
             .unwrap();
         store
             .init_channel(&Initialized {
+                policy_parent: None,
                 channel: CHANNEL,
                 sources: Vec::new(),
                 initial_anchor: 40,

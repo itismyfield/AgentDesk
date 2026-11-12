@@ -746,6 +746,7 @@ mod settle_over_http {
             let (sources, build_digest, at) = (Vec::new(), "b".to_owned(), Utc::now());
             let initial_anchor = 100;
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources,
                 initial_anchor,

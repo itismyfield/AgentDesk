@@ -141,6 +141,7 @@ async fn owner_boot_live_input_waits_in_custody_and_starts_once_after_distinct_g
     store
         .begin_era(&[channel], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![],
                 initial_anchor: 100,

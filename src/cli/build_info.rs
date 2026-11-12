@@ -11,6 +11,8 @@ pub(crate) fn build_info_json() -> serde_json::Value {
         // CONSUMED-BY: scripts/deploy-release.sh (`_binary_build_flag … o_tui_writer`).
         // Every build runs the O writer for its boot-selected channels.
         "o_tui_writer": true,
+        // A reader alone cannot restore child gates, writers and source readiness.
+        "o_store_thread_children": crate::services::tui_o::store::thread_children::OUTPUT_ENABLED,
         // CONSUMED-BY: scripts/deploy-release.sh (`_binary_build_flag … o_ledger_operator_resume`).
         // Every build includes the ledger reader and the guarded writer consumer.
         "o_ledger_operator_resume": true,
@@ -52,6 +54,7 @@ mod tests {
             serde_json::json!(crate::services::tui_o::store::spool::READABLE_IDENTITY_VERSIONS)
         );
         assert_eq!(info["o_tui_writer"], true);
+        assert_eq!(info["o_store_thread_children"], false);
         assert_eq!(info["o_ledger_operator_resume"], true);
         assert_eq!(info["o_ledger_input_notice"], true);
     }

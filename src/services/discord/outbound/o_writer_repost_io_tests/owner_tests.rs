@@ -51,6 +51,7 @@ async fn owner_repost_real_http_revocation_preserves_unresolved_and_stops_pg() {
         .unwrap()
         .unwrap();
     let init = Initialized {
+        policy_parent: None,
         channel: 73369490,
         sources: Vec::new(),
         initial_anchor: 0,

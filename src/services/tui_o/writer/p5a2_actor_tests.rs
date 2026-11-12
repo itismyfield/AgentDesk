@@ -24,6 +24,7 @@ fn enabled(root: &Path) -> OStore {
 }
 fn initialized(channel: u64, sources: Vec<InitSource>) -> Initialized {
     Initialized {
+        policy_parent: None,
         channel,
         sources,
         initial_anchor: 1,

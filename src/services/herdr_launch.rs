@@ -289,6 +289,7 @@ pub(crate) fn o_store_for_test(
         .unwrap();
     let init = |channel| {
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources: Vec::new(),
             initial_anchor: 1,

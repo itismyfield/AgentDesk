@@ -25,6 +25,7 @@ impl OldSourceSnapshot {
         let era = store
             .begin_era(&[CANARY_CHANNEL], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![InitSource {
                         source_id: fixture.old_source.clone(),

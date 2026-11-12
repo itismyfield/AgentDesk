@@ -15,6 +15,7 @@ fn init(channel: u64, sources: &[&SourceId]) -> Initialized {
         prefix_hash: hex::encode(Sha256::digest(b"")),
     };
     Initialized {
+        policy_parent: None,
         channel,
         sources: sources.iter().map(init_source).collect(),
         initial_anchor: 100,

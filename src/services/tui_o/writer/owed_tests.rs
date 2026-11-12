@@ -295,6 +295,7 @@ fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId) {
     let initialized = |channel| {
         let (sources, build_digest, at) = (vec![init.clone()], "b".to_string(), Utc::now());
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources,
             initial_anchor: 100,

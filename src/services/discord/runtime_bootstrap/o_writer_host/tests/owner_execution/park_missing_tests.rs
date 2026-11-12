@@ -65,6 +65,7 @@ fn missing_store_with(
     let era = store
         .begin_era(&[channel], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![InitSource {
                     source_id: source.clone(),

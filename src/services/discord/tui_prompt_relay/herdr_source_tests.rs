@@ -888,6 +888,7 @@ fn the_o_switch_takes_a_herdr_channel_only_on_the_source_its_launch_logged_pg() 
             ino,
         };
         let init = Initialized {
+            policy_parent: None,
             channel: herdr.channel,
             sources: vec![InitSource {
                 source_id,

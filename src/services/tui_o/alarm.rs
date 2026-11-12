@@ -852,6 +852,7 @@ mod postgres_tests {
         store
             .begin_era(&[CHANNEL], now, |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![],
                     initial_anchor: 100,

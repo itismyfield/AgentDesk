@@ -985,7 +985,7 @@ try:
     data = json.loads(run.stdout)
 except Exception:
     data = None
-value = data.get(field) if isinstance(data, dict) and data.get("schema") == 1 else None
+value = data.get(field) if isinstance(data, dict) and type(data.get("schema")) is int and data["schema"] == 1 else None
 print("true" if value is True else "false" if value is False else "unknown")
 PY
 )" || value=unknown
@@ -1045,6 +1045,18 @@ _binary_would_revert_o_ledger() {
         [ "$(_binary_build_flag "$1" "$field")" = "true" ] || return 0
     done
     return 1
+}
+
+_binary_would_revert_o_child_store() {
+    # A floor of any kind requires the actual target's complete child-output capability.
+    local floor="$ADK_REL/o_store/thread_children.floor"
+    [ -e "$floor" ] || [ -L "$floor" ] || return 1
+    [ "$(_binary_build_flag "$1" o_store_thread_children)" = "true" ] || return 0
+    return 1
+}
+
+_rollback_would_revert_o_child_store() {
+    _binary_would_revert_o_child_store "${REL_BINARY_BACKUP:-}"
 }
 
 _rollback_would_revert_o_writer() {
@@ -1250,6 +1262,12 @@ _rollback_release_binary() {
 
     if _rollback_would_revert_o_ledger; then
         echo "🛑 ROLLBACK REFUSED — O ledger floor requires a compatible reader"
+        echo "   The new binary stays live; $rel_backup is preserved. Fix forward with a compatible build."
+        return 0
+    fi
+
+    if _rollback_would_revert_o_child_store; then
+        echo "🛑 ROLLBACK REFUSED — O child store floor requires a complete child-output reader"
         echo "   The new binary stays live; $rel_backup is preserved. Fix forward with a compatible build."
         return 0
     fi
@@ -2770,6 +2788,11 @@ fi
 # The binary itself reports its O ledger reader; refuse before anything is staged.
 if _binary_would_revert_o_ledger "$SOURCE_BINARY"; then
     echo "✗ O ledger floor refuses this build's incompatible reader" >&2
+    exit 1
+fi
+
+if _binary_would_revert_o_child_store "$SOURCE_BINARY"; then
+    echo "✗ O child store floor refuses this build's incomplete child-output capability" >&2
     exit 1
 fi
 

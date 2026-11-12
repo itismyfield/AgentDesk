@@ -35,6 +35,7 @@ async fn d4b_two_hosted_channels_repost_by_default_with_wire_controls_pg() {
         let era = store
             .begin_era(&[channel], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: Vec::new(),
                     initial_anchor: 100,

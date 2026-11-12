@@ -201,6 +201,7 @@ async fn production_readiness_fallback_withholds_real_writer_effects() {
     let era = store
         .begin_era(&[channel], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![],
                 initial_anchor: 100,

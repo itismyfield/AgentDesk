@@ -105,6 +105,7 @@ impl Fixture {
         store
             .begin_era(&[7], Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: Vec::new(),
                     initial_anchor: 10,

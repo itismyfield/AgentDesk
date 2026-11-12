@@ -110,6 +110,7 @@ async fn owner_cleanup_boot_diagnostics_wait_for_execution_read_pg() {
         .unwrap();
         store
             .init_channel(&crate::services::tui_o::store::Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![],
                 initial_anchor: 0,

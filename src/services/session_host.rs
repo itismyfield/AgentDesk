@@ -24,6 +24,7 @@ mod consumer_guard;
 mod herdr_gate;
 mod herdr_host;
 mod herdr_registry;
+pub(crate) mod surface_policy;
 #[cfg(all(test, unix))]
 pub(crate) use herdr_registry::HerdrRegistry;
 #[cfg(test)]

@@ -552,6 +552,7 @@ async fn native_footer(driver: &TerminalDeliveryDriver, path: &std::path::Path) 
     store
         .begin_era(&[DRIVER_CHANNEL_ID], at, |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: Vec::new(),
                 initial_anchor: 1,

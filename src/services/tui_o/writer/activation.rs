@@ -286,6 +286,7 @@ fn create(
         return Err("the channel has store files but no init".into());
     }
     let init = Initialized {
+        policy_parent: None,
         channel,
         sources,
         initial_anchor: 0,

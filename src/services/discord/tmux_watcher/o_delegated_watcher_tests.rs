@@ -330,6 +330,7 @@ mod self_started_publish_tests {
         let source = source_id_for("native-session", std::path::Path::new(&h.path)).unwrap();
         let mut capture = SourceCapture::open(source.clone(), start).unwrap();
         let initialized = Initialized {
+            policy_parent: None,
             channel: h.channel.get(),
             sources: vec![InitSource {
                 source_id: source,

@@ -278,6 +278,7 @@ fn seal_era(root: &Path) {
     let other = 640099;
     let init = |channel| {
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources: Vec::new(),
             initial_anchor: 0,

@@ -785,6 +785,7 @@ mod operations_shape {
             .unwrap();
         let now = chrono::Utc::now();
         let initialized = Initialized {
+            policy_parent: None,
             channel: CHANNEL,
             sources: vec![init],
             initial_anchor: 0,
@@ -940,6 +941,7 @@ mod operations_shape {
             .unwrap();
         let now = chrono::Utc::now();
         let initialized = Initialized {
+            policy_parent: None,
             channel: CHANNEL,
             sources: Vec::new(),
             initial_anchor: 0,

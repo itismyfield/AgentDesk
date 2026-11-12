@@ -137,6 +137,7 @@ fn cleanup_before_first_poll_and_panic_releases_absent_store() {
 #[cfg(unix)]
 fn init() -> Initialized {
     Initialized {
+        policy_parent: None,
         channel: 41,
         sources: Vec::new(),
         initial_anchor: 0,

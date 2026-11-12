@@ -22,6 +22,7 @@ pub(in crate::services::tui_o::writer::actor) fn fixture()
     let era = owner
         .begin_era(&[7], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: Vec::new(),
                 initial_anchor: 1,

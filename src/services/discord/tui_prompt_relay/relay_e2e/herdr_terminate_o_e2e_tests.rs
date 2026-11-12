@@ -616,6 +616,7 @@ fn begin_era(source: &SourceId, build: &str) -> (OStore, crate::services::tui_o:
     };
     let init = |channel| {
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources: vec![source.clone()],
             initial_anchor: 100,

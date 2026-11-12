@@ -63,6 +63,7 @@ async fn owner_cleanup_gateway_starts_unmanaged_writer_after_first_prepare_failu
     store
         .begin_era(&[channel], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![],
                 initial_anchor: 100,

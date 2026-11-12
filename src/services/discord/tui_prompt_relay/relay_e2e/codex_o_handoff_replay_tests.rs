@@ -125,6 +125,7 @@ fn codex_o_replays_restored_parked_input_without_legacy_body() {
         let source = source_id_for(SESSION, &path).unwrap();
         let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path()).unwrap().unwrap();
         let era = store.begin_era(&[CHANNEL], chrono::Utc::now(), |channel| Ok(Initialized {
+            policy_parent: None,
             channel, sources: vec![InitSource { source_id: source.clone(),
                 delivery_start: header.len() as u64, prefix_hash: hex::encode(Sha256::digest(header.as_bytes())) }],
             initial_anchor: 100, build_digest: "test".into(), at: chrono::Utc::now(),

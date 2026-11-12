@@ -407,3 +407,14 @@ outbox-transaction/OutboxTransactionFreshTask.cfg	OutboxTransaction	CensusObserv
 outbox-transaction/OutboxTransactionPreSource.cfg	OutboxTransaction	SourceDecisionUsesObservation	-
 outbox-transaction/OutboxTransactionForeignTx.cfg	OutboxTransaction	SameTransaction	-
 outbox-transaction/OutboxTransactionForeignProviderConnection.cfg	OutboxTransaction	SameProviderConnection	-
+tui-o-writer/WriterThreadPrepBefore.cfg	WriterThreadPrep	SharedSnapshot	-
+tui-o-writer/WriterThreadPrepFixed.cfg	WriterThreadPrep	-	-
+tui-o-writer/WriterThreadPrepUnshared.cfg	WriterThreadPrep	SharedSnapshot	-
+tui-o-writer/WriterThreadPrepAlias.cfg	WriterThreadPrep	OwnCandidate	-
+tui-o-writer/WriterThreadPrepRest.cfg	WriterThreadPrep	RecordedRestZero	-
+tui-o-writer/WriterThreadPrepReverse.cfg	WriterThreadPrep	FloorBeforeInit	-
+tui-o-writer/WriterThreadPrepRollback.cfg	WriterThreadPrep	OldTargetRefused	-
+execution-authority/ExecutionChildViewBefore.cfg	ExecutionChildView	-	ChildRecordRead
+execution-authority/ExecutionChildViewFixed.cfg	ExecutionChildView	-	-
+execution-authority/ExecutionChildViewAlias.cfg	ExecutionChildView	ChildOwnPermit	-
+execution-authority/ExecutionChildViewRest.cfg	ExecutionChildView	ChildRecordedNoRest	-
