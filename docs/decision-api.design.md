@@ -1,6 +1,5 @@
 # 판정 API 공통 접점 설계 r2
 
-<!-- doc-path-refs: proposed src/services/decision_gate/mod.rs src/services/decision_gate/types.rs src/config/decision_gate.rs src/services/decision_gate/policy.rs -->
 <!-- doc-path-refs: external scripts/decide.py decide.py -->
 
 기준: 2026-11-12, main `4e0db0cccd59169a09f25fe162d8cc1b2755e96e`. 설계만 작성했으며 구현·빌드·Gemini 호출·키 조회는 하지 않았다. 이 문서는 #8127, #7438 S2b, #8117이 공유할 접점의 정본이다. 각 소비자의 업무 정책은 해당 소비자에 남긴다.
