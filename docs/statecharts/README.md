@@ -57,6 +57,7 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 
 | Area | Code SHA | Rules that break | Disposition |
 |---|---|---|---|
+| `session-lifecycle` effort 즉시 재기동 (#8109 design) | `193a57168f` | Current has no interrupt; seven proposed guard mutants keep expected RED (notice, queue, wake, continuation priority, duplicate reply) | Existing TmuxSession extended; 8 GREEN + 7 expected RED configs, continuation once per actual interrupted root. Capability/session/applied evidence remain explicit port assumptions. [report](session-lifecycle/effort-restart.report.md) |
 | `intake-readiness` (#7353 S4-05) | `b20a366c8812348f14a9e08a7439cb8df6cfb09a` | StaleSnapshot: lock 전 profile/cache 재사용; EarlyTxEnd: 다른 transaction으로 적용 | Current/Proposed GREEN; 같은 lock→live 관측→write/commit 유지, modern unknown/offline fail-closed·legacy 호환 보존. [보고서](intake-readiness/intake-readiness.report.md) |
 | `intake-consent` (#7353 S4-07 r2 PLAN) | `08e2336e47986d70d0cbe95e56215858377aed5c` | unexecuted r2: Current private issue / d1 public receipt / r2 keyed scope have distinct actions; d1 predicts effects-then-rollback RED | `SC_RUN=mac-needed`; no FS-currentness claim, see [report](intake-consent/intake-consent.report.md) |
 | `intake-consent` (#7353 S4-07 r3 checked) | `df492f9412` | Current·Proposed GREEN; D1Public·ScopeOpen break NoUnauthorizedIssue and NoEffectsThenRollback; same-process claimed rearm included | 9 cfg expected results matched; FS observation gap retained, see [report](intake-consent/intake-consent.report.md) |
