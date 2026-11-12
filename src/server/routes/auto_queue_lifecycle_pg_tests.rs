@@ -1113,8 +1113,8 @@ mod tests {
         let app = test_router(pool.clone());
         let path = "/queue/runs/run-1/restore";
 
-        let (status, body) = request_json_response(&app, Method::POST, path, Some(json!({}))).await;
-        assert_ne!(status, StatusCode::OK, "{body}");
+        let (_, body) = request_json_response(&app, Method::POST, path, Some(json!({}))).await;
+        assert_eq!(body["ok"], false, "{body}");
         assert_eq!(run_status(&pool, "run-1").await, "cancelled");
         for entry in ["entry-a", "entry-b", "entry-c"] {
             assert_eq!(entry_status(&pool, entry).await, "skipped", "{entry}");

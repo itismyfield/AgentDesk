@@ -305,6 +305,56 @@ async fn completion_notice_reads_default_after_targets_and_census_after_insert_p
     db.drop().await;
 }
 
+/// The notice targets are read after the completing UPDATE: a channel change that commits
+/// while that UPDATE waits on the run row reaches the notice.
+#[tokio::test]
+async fn completion_notice_reads_targets_after_the_completing_update_pg() {
+    let _isolation = Isolation::new(Some(config("claude", false)));
+    let (db, pool) = completable_run("targets", &["7353151"]).await;
+    let mut row_lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM auto_queue_runs WHERE id = 'run-1' FOR UPDATE")
+        .execute(&mut *row_lock)
+        .await
+        .unwrap();
+    let finalizer = spawn_finalize(&pool);
+    await_table_waiter_on_rows(&pool).await;
+    sqlx::query("UPDATE agents SET discord_channel_id = '7353152' WHERE id = 'agent-0'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    row_lock.commit().await.unwrap();
+
+    let outcome = await_within(finalizer, WAIT_CAP).await.unwrap().unwrap();
+    assert_eq!(outcome, RunCompletionOutcome::Completed);
+    let targets: Vec<_> = notices(&pool).await.into_iter().map(|n| n.0).collect();
+    assert_eq!(targets, vec!["channel:7353152".to_string()]);
+    pool.close().await;
+    db.drop().await;
+}
+
+/// Waits until some session is parked on a row lock (`transactionid` wait).
+async fn await_table_waiter_on_rows(pool: &PgPool) {
+    await_within(
+        async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks
+                                     WHERE NOT granted AND locktype = 'transactionid')",
+                )
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if waiting {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        },
+        WAIT_CAP,
+    )
+    .await
+}
+
 /// Each target reads its own default: a reload between two notices reaches only the second.
 #[tokio::test]
 async fn completion_notice_targets_read_the_default_one_row_at_a_time_pg() {

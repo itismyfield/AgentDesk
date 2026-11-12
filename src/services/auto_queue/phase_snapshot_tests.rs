@@ -27,8 +27,8 @@ fn snapshot_activation_persists_published_routing_pg() {
     });
 }
 
-/// Re-checking an existing live dispatch attaches the pending entry to it in the create tx,
-/// with the requested slot, instead of creating a second dispatch.
+/// A live dispatch that appears while the create waits on the run token is found by the
+/// in-tx re-check, which attaches the pending entry to it with the requested slot.
 #[tokio::test]
 async fn existing_dispatch_recheck_attaches_the_pending_entry_pg() {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -38,10 +38,9 @@ async fn existing_dispatch_recheck_attaches_the_pending_entry_pg() {
          VALUES ('attach-agent', 'Attach', 'claude', '42');
          INSERT INTO auto_queue_runs (id, repo, agent_id, status)
          VALUES ('attach-run', 'repo', 'attach-agent', 'active');
-         INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
-         VALUES ('attach-card', 'Attach', 'in_progress', 'attach-agent');
-         INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status)
-         VALUES ('d-existing', 'attach-card', 'attach-agent', 'implementation', 'pending');
+         INSERT INTO kanban_cards (id, title, status, assigned_agent_id, metadata)
+         VALUES ('attach-card', 'Attach', 'in_progress', 'attach-agent',
+                 '{\"sandbox_preflight\":true,\"production_mutation_allowed\":false}'::jsonb);
          INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status)
          VALUES ('attach-entry', 'attach-run', 'attach-card', 'attach-agent', 'pending');",
     )
@@ -49,17 +48,60 @@ async fn existing_dispatch_recheck_attaches_the_pending_entry_pg() {
     .await
     .unwrap();
 
-    let id = create_activate_dispatch_for_entry_pg(
-        &pool,
-        "attach-card",
-        "attach-agent",
-        "implementation",
-        "Attach",
-        &serde_json::json!({}),
-        ActivateDispatchEntryAttachment::new("attach-entry", Some(2), "test_existing_attach"),
+    let mut token = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || 'attach-run'))")
+        .execute(&mut *token)
+        .await
+        .unwrap();
+    let creator_pool = pool.clone();
+    let creator = tokio::spawn(async move {
+        create_activate_dispatch_for_entry_pg(
+            &creator_pool,
+            "attach-card",
+            "attach-agent",
+            "implementation",
+            "Attach",
+            &serde_json::json!({}),
+            ActivateDispatchEntryAttachment::new("attach-entry", Some(2), "test_existing_attach"),
+        )
+        .await
+    });
+    crate::test_support::wait::await_within(
+        async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks
+                                     WHERE locktype = 'advisory' AND NOT granted)",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting || creator.is_finished() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        },
+        crate::test_support::wait::WAIT_CAP,
     )
+    .await;
+    assert!(
+        !creator.is_finished(),
+        "the create must wait on the run token: {:?}",
+        creator.await
+    );
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status)
+         VALUES ('d-existing', 'attach-card', 'attach-agent', 'implementation', 'pending')",
+    )
+    .execute(&pool)
     .await
     .unwrap();
+    token.commit().await.unwrap();
+    let id = crate::test_support::wait::await_within(creator, crate::test_support::wait::WAIT_CAP)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(id, "d-existing");
     let entry: (String, Option<String>, Option<i64>) = sqlx::query_as(
         "SELECT status, dispatch_id, slot_index::BIGINT FROM auto_queue_entries

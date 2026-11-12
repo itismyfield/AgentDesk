@@ -11,10 +11,16 @@ struct RuntimeDatabase {
 }
 
 impl RuntimeDatabase {
-    fn install(database_url: &str) -> Self {
-        let live = crate::config_live_reload::test_live_guard(
-            crate::config::test_env_lock::acquire_shared_test_env_lock(),
-        );
+    /// Takes the shared test-env lock, so it must run before the test database is created.
+    fn lock() -> Self {
+        Self {
+            _live: crate::config_live_reload::test_live_guard(
+                crate::config::test_env_lock::acquire_shared_test_env_lock(),
+            ),
+        }
+    }
+
+    fn install(&self, database_url: &str) {
         let url = url::Url::parse(database_url).unwrap();
         let mut config = crate::config::Config::default();
         config.database.enabled = true;
@@ -26,7 +32,6 @@ impl RuntimeDatabase {
         config.database.pool_max = 2;
         config.database.foreground_reserve = 0;
         crate::config_live_reload::install(config);
-        Self { _live: live }
     }
 }
 
@@ -48,9 +53,10 @@ async fn state(pool: &PgPool) -> (String, String, String, Option<String>, i64, i
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_completion_completes_run_in_the_dispatch_tx_or_rolls_back_all_pg() {
+    let runtime = RuntimeDatabase::lock();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let _runtime = RuntimeDatabase::install(&db.database_url);
+    runtime.install(&db.database_url);
     sqlx::raw_sql(
         "INSERT INTO agents (id, name, provider, discord_channel_id)
          VALUES ('agent-runtime', 'Runtime', 'claude', '7353801');
