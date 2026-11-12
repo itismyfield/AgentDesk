@@ -1,0 +1,4 @@
+{"accessor": "configured_channel_ids", "owned_paths": ["src/config/session_hosts.rs", "src/config/session_hosts/"], "rule": "configured_channel_ids", "schema_version": 1, "sites": [
+    {"accessor": "configured_channel_ids", "count": 1, "enclosing_fn": "clear_session_id_by_key_pg", "line": 2249, "normalized_hash": "990dc3682aee7579f149f804ca828d9505ee8e64ed3ef113f30d61f9e6cc422d", "owned_paths": ["src/config/session_hosts.rs", "src/config/session_hosts/"], "path": "src/db/dispatched_sessions.rs", "rule": "configured_channel_ids"},
+    {"accessor": "configured_channel_ids", "count": 1, "enclosing_fn": "clear_stale_session_id_pg", "line": 2212, "normalized_hash": "990dc3682aee7579f149f804ca828d9505ee8e64ed3ef113f30d61f9e6cc422d", "owned_paths": ["src/config/session_hosts.rs", "src/config/session_hosts/"], "path": "src/db/dispatched_sessions.rs", "rule": "configured_channel_ids"}
+]}
