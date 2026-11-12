@@ -95,6 +95,63 @@ pub(in crate::services::discord) fn queued_head_covers(
     listed_target(channel, parent)
 }
 
+/// An owned Claude tmux input on an open gate displays its busy result once it is known.
+pub(in crate::services::discord::router) fn defer_owned_busy_view(
+    owned: bool,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    parent: Option<ChannelId>,
+) -> bool {
+    owned
+        && *provider == ProviderKind::Claude
+        && crate::config::session_hosts::herdr_endpoint(channel.get()).is_none()
+        && queued_head_covers(channel, parent)
+}
+
+pub(super) async fn queue_commit_options(
+    data: &Data,
+    live: &LiveText<'_>,
+) -> super::super::intake_queue_transaction::IntakeQueueCommitOptions {
+    super::super::intake_queue_transaction::IntakeQueueCommitOptions {
+        defer_pending_reaction: !live.message.author.bot
+            && !live.author_is_allowed_automation
+            && defer_owned_busy_view(
+                owner_takes(&data.shared, live.channel_id).await,
+                &data.provider,
+                live.channel_id,
+                live.parent,
+            ),
+        ..Default::default()
+    }
+}
+
+/// Re-read the exact waiting front and its merged originals before publishing a handback.
+#[cfg(unix)]
+pub(in crate::services::discord::router) async fn handback_originals(
+    shared: &SharedData,
+    channel: ChannelId,
+    front: &crate::services::discord::queue_io::input_owner::drive::Front,
+) -> Vec<crate::services::turn_orchestrator::PendingQueueItem> {
+    let front = front.clone();
+    shared
+        .mailbox(channel)
+        .v2_request(move |slot| {
+            let Some(owner) = slot.as_ref() else {
+                return Ok(Vec::new());
+            };
+            if !owner.front().is_some_and(|current| {
+                current.0 == front.0
+                    && current.1.message_id == front.1.message_id
+                    && current.1.queued_generation == front.1.queued_generation
+            }) {
+                return Ok(Vec::new());
+            }
+            Ok(std::iter::once(front.1).chain(owner.followers()).collect())
+        })
+        .await
+        .unwrap_or_default()
+}
+
 /// Whether a thread may take a message its gated parent passed on; a parent injection that owns
 /// or ended it blocks the promotion, and an allowed one records the thread's intake.
 pub(super) fn thread_may_take(

@@ -1010,7 +1010,7 @@ pub(in crate::services::discord) async fn handle_event(
                                 is_allowed_bot,
                             ),
                             intervention: busy_queue::spec(&live),
-                            options: IntakeQueueCommitOptions::default(),
+                            options: busy_inject::queue_commit_options(data, &live).await,
                         },
                     )
                     .await

@@ -1,0 +1,10 @@
+stateDiagram-v2
+    [*] --> New
+    New --> AcceptedUnmarked: EmptyMailbox or BusyActiveTurn / eligible owner
+    New --> AcceptedQueued: gate closed, Herdr, Codex or bot / mailbox
+    AcceptedUnmarked --> AcceptedUnmarked: restart preserves durable queue and receipt
+    AcceptedUnmarked --> Plus: submitted
+    AcceptedUnmarked --> Mailbox: HandedBack or pre-injection NotSent fallback
+    AcceptedUnmarked --> Question: Unconfirmed
+    AcceptedQueued --> Mailbox: adapter / V2 source still queued
+    AcceptedQueued --> Invisible: before / empty V1 list hides queued V2 source
