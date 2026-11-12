@@ -123,3 +123,7 @@ pub(crate) async fn finalize_run_if_ready_pg(
     }
     Ok(outcome)
 }
+
+#[cfg(test)]
+#[path = "completion_tests.rs"]
+mod tests;

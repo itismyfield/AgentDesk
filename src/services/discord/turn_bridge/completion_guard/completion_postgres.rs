@@ -1416,5 +1416,9 @@ mod runtime_completion_policy_tests {
 mod replay_hold_tests;
 
 #[cfg(test)]
+#[path = "completion_postgres_terminal_sync_tests.rs"]
+mod terminal_sync_tests;
+
+#[cfg(test)]
 #[path = "completion_postgres_snapshot_tests.rs"]
 mod snapshot_tests;
