@@ -21,6 +21,12 @@ SCRIPT_TEST_INPUTS = ("scripts/**", "tests/**")
 # Broad script/test roots cover imported helpers and fixture-copy dependencies.
 # Source assertions retain their explicit source inputs instead of hiding them.
 SELF_TEST_INPUTS: dict[str, tuple[str, ...]] = {
+    "Isolated instance declaration tests": (
+        "scripts/dev-instance.sh",
+        "scripts/dev_instance/**",
+        "tests/test_dev_instance*.py",
+        "docs/dev-instance.md",
+    ),
     "Script checks input selection contract": (
         "scripts/ci/script_check_inputs.py",
         "tests/test_script_check_inputs.py",

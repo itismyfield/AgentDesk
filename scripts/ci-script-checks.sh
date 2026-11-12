@@ -269,6 +269,10 @@ else
 fi
 fi
 
+if run_check guards "Isolated instance declaration tests"; then
+"$PYTHON" -m unittest tests.test_dev_instance tests.test_dev_instance_files
+fi
+
 if run_check guards "PG audit guard"; then
 ./scripts/pg-audit.sh
 fi

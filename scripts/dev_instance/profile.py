@@ -1,5 +1,6 @@
 """Explicit, non-secret feature profiles; no ambient ADK environment copying."""
 
+import json
 import re
 
 from .files import InstanceError
@@ -24,6 +25,10 @@ def exact_keys(value, keys):
         raise InstanceError("invalid declaration fields")
 
 
+def same_json(left, right):
+    return json.dumps(left, sort_keys=True, allow_nan=False) == json.dumps(right, sort_keys=True, allow_nan=False)
+
+
 def snowflake(value):
     if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]{0,19}", value):
         raise InstanceError("test IDs must be positive u64 strings")
@@ -33,8 +38,10 @@ def snowflake(value):
 
 
 def validate_profile(profile):
+    if isinstance(profile, dict) and set(profile) == {"schema_version", "name", "bots", "channels"}:
+        raise Unevaluable("missing feature declarations")
     exact_keys(profile, {"schema_version", "name", "bots", "channels", "features"})
-    if profile["schema_version"] != 1 or profile["name"] != "tui-live":
+    if type(profile["schema_version"]) is not int or profile["schema_version"] != 1 or profile["name"] != "tui-live":
         raise InstanceError("unsupported profile")
     exact_keys(profile["bots"], {"claude", "codex", "driver"})
     bot_ids = [snowflake(value) for value in profile["bots"].values()]
@@ -84,14 +91,16 @@ def require_preconditions(manifest, witness):
         "applied_env": manifest["applied_env"],
         "features": manifest["profile"]["features"],
         "host": "local",
-        "execution_node": manifest["postgres"]["role"],
+        "execution_node": manifest["execution_node_id"],
     }
-    if witness != expected:
+    if not same_json(witness, expected):
         raise Unevaluable("precondition witness mismatch")
     features = manifest["profile"]["features"]
     if (not all(features[key] for key in ("tui_writer", "tui_turn", "capacity_aware"))
             or manifest["applied_env"]["ADK_BUSY_INJECT"] == "off"
             or manifest["applied_env"]["ADK_INTAKE_ROUTING_MODE"] != "enforce"
+            or manifest["applied_env"]["ADK_QUEUED_HEAD_INJECT"] != "1"
+            or manifest["applied_env"]["ADK_TURN_PRESENCE_TAIL"] != "1"
             or set(manifest["applied_env"]["ADK_BUSY_INJECT_DISCORD_CHANNELS"].split(","))
             != set(manifest["profile"]["channels"])):
         raise Unevaluable("required feature gate is off")

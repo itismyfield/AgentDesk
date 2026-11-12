@@ -13,6 +13,8 @@ CREDENTIAL_NAMES = frozenset({"claude_bot_token", "codex_bot_token", "driver_bot
 LAYOUT_DIRS = (
     "config", "runtime", "data", "logs", "outputs", "policies", "workspaces",
     "credential", "postgres", "postgres/data", "postgres/socket",
+    "routines", "config/agents", "workspaces/claude", "workspaces/codex",
+    "data/memory", "data/memory/shared", "data/memory/long-term", "data/memory/auto",
 )
 
 
@@ -31,6 +33,8 @@ def safe_absolute(path: str | Path) -> Path:
             mode = current.lstat().st_mode
         except FileNotFoundError:
             continue
+        except OSError:
+            raise InstanceError("path ancestor is not a readable directory") from None
         if stat.S_ISLNK(mode):
             raise InstanceError("symlink paths are not allowed")
     if any(a == ".adk" and b == "release" for a, b in zip(candidate.parts, candidate.parts[1:])):
@@ -178,12 +182,32 @@ def write_private_json(root: str | Path, relative: str | Path, data: object) -> 
     _write_private(safe_absolute(root), relative, (json.dumps(data, indent=2, sort_keys=True) + "\n").encode())
 
 
+def write_private_text(root: str | Path, relative: str | Path, text: str) -> None:
+    _write_private(safe_absolute(root), relative, text.encode())
+
+
+def read_regular_text(path: str | Path) -> str:
+    path = safe_absolute(path)
+    parent = _open_dir(path.parent)
+    try:
+        descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(descriptor, "rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise InstanceError("declaration must be a regular file")
+            data = source.read(1024 * 1024 + 1)
+            if len(data) > 1024 * 1024:
+                raise InstanceError("declaration file is too large")
+            return data.decode("utf-8")
+    finally:
+        os.close(parent)
+
+
 def write_credential(root: str | Path, name: str, stream) -> None:
     root = safe_absolute(root)
     if name not in CREDENTIAL_NAMES:
         raise InstanceError("unknown credential name")
     validate_tree(root)
-    value = stream.read(4097)
+    value = stream.read(4098)
     if isinstance(value, str):
         value = value.encode()
     if not isinstance(value, bytes):
