@@ -634,7 +634,7 @@ fn rig_cancelled_after_claim() -> Rig {
 #[test]
 fn an_idle_handoff_ends_at_settlement_while_its_ai_turn_runs() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let rig = rig("oi-turn", 7_272_538, "normal", view("", false), BUSY);
+    let rig = rig("oi-turn", 7_272_538, "normal", view("", false), IDLE);
     let mut next = rig.original.clone();
     next.message_id += 1;
     next.source_message_ids = vec![next.message_id];
@@ -1096,7 +1096,7 @@ fn startup_enter_is_the_attempts_first_key() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let dialog = "Resume from summary\n❯ 1. Resume from summary\n  2. Resume full session\n\
         Enter to confirm · Esc to cancel\n";
-    let rig = rig("oc-dialog", 7_272_515, "normal", dialog.into(), IDLE);
+    let rig = rig("oc-dialog", 7_272_515, "startup", dialog.into(), IDLE);
     let _driver = rig.trace_driver();
     fs::write(rig.renderer.join("body"), "").unwrap();
     fs::write(rig.renderer.join("after"), view("", false)).unwrap();
@@ -1894,11 +1894,7 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
     let path = rig.transcript();
     let past = json!({"type":"user","uuid":"past","sessionId":"receipt-sid","message":{"role":"user","content":PROMPT}});
     use std::io::Write;
-    writeln!(
-        fs::OpenOptions::new().append(true).open(&path).unwrap(),
-        "{past}"
-    )
-    .unwrap();
+    fs::write(&path, format!("{past}\n{IDLE}")).unwrap();
     let before = fs::metadata(&path).unwrap().len();
     fs::write(rig.renderer.join("native-sid"), "receipt-sid").unwrap();
     fs::write(rig.renderer.join("native-uuid"), "dispatch-idle-a").unwrap();
@@ -1914,6 +1910,7 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
             relay_last_offset: None,
         },
     );
+    crate::services::claude_tui::readiness::tests::pre_source(&rig.name, &path);
     let claim = rig.claim(&rig.granted_front()).unwrap();
     let registration = rig.registration(
         &ProviderKind::Claude,

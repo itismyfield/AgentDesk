@@ -306,6 +306,8 @@ while True:
         if mode == 'swallow' and not (root/'swallowed').exists():
             (root/'swallowed').write_text('1'); pending=b''; continue
         body=(root/'body').read_text()
+        if mode == 'startup' and not body:
+            pending=b''; render('after'); continue
         if (root/'unabsorbed').exists():
             row={'type':'queue-operation','operation':'enqueue','content':body}
             if (root/'native-sid').exists(): row['sessionId']=(root/'native-sid').read_text()
