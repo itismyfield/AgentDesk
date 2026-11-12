@@ -90,7 +90,7 @@ async fn only_a_row_no_live_turn_holds_is_left_to_the_adoption_wake() {
     .await;
 }
 
-/// A row the boot kept for a pending adoption is settled by the commit's own wake alone.
+/// A row the boot kept for a pending adoption is settled by the adopted writer's ready wake alone.
 #[tokio::test(flavor = "current_thread")]
 async fn an_adoption_commit_settles_the_kept_row_once_without_a_legacy_body_pg() {
     with_isolated_runtime_root(|| async move {
@@ -137,7 +137,7 @@ async fn an_adoption_commit_settles_the_kept_row_once_without_a_legacy_body_pg()
             boot: None,
         };
         let began = std::time::Instant::now();
-        host.adopted(channel, ShadowProvider::Claude);
+        host.input_ready(channel, ShadowProvider::Claude);
         let settled = async {
             while inflight::load_inflight_state(&provider, channel).is_some() {
                 tokio::task::yield_now().await;

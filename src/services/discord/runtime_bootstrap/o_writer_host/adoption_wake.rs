@@ -1,4 +1,4 @@
-//! Once O commits a channel's adoption, the recovery row kept for that wait is judged once more.
+//! Once O's adopted writer turns ready, the recovery row kept for the adoption is judged again.
 //! A row a live turn here holds is left alone: its bridge or watcher reads ownership again itself.
 
 use super::*;

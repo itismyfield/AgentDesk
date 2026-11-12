@@ -400,6 +400,12 @@ impl HostIo for GatewayHost {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
         };
+        // Each time the adopted writer turns ready, the row kept for its adoption is judged again.
+        #[cfg(test)]
+        let rest = self.rest.clone();
+        #[cfg(not(test))]
+        let rest = None;
+        adoption_wake::spawn(&self.shared, rest, provider.clone(), channel);
         super::super::queue_io::schedule_writer_ready_queue_kick(
             self.shared.clone(),
             provider,
@@ -416,11 +422,6 @@ impl HostIo for GatewayHost {
             super::super::tui_direct_pending_start::turn_retirement::confirm_turn_channels;
         let confirmed = confirm(&kind, Some(&self.turn), || vec![channel]);
         super::super::turn_presence::supervisor::register(&kind, &confirmed);
-        #[cfg(test)]
-        let rest = self.rest.clone();
-        #[cfg(not(test))]
-        let rest = None;
-        adoption_wake::spawn(&self.shared, rest, kind, channel);
     }
 }
 
