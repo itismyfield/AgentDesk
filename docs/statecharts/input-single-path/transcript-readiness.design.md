@@ -1,6 +1,6 @@
 # Claude Idle 입력 준비 확정 — #8080 설계 d2
 
-구현 A+B 및 compact 완료 수리 source SHA: 01d6532dce19bf3f2c60783a15077113b6e113e3. 최신 compact 완료 계약과 검증은 [보고서](transcript-readiness.report.md)의 B 완료 수리 절을 따른다.
+구현 A+B 및 compact 완료 수리 source SHA: e46154b856cdc6ce4f00b3a628c045e26e16fd0e. 최신 compact 완료 계약과 검증은 [보고서](transcript-readiness.report.md)의 B 완료 수리 절을 따른다.
 
 설계 d2 시점 Prod 기준 SHA: 574af580b0c5d6e6ce280994f4ed243463de5d2d.
 main: 4f30c67d9a48eacad96a99faff9fd442d0d4dd3c.
@@ -444,3 +444,5 @@ Stop 때 일부만 쓰인 옛 행의 뒤늦은 완성을 새 활동으로 인정
 ### A 리뷰 수리의 준비 경계
 
 permission-mode는 현재 terminal을 무효화하되 뒤의 정상 완료까지 거절하지 않는다. bounded 준비 대기는 readiness/dialog.rs에서 기존 startup plan·5회 해제 한도·500ms settle·composer lock·cancel을 반복 적용한다. 이 UI 처리는 준비 증거가 아니며 SourceStart/Idle 확인은 별도다. Herdr 첫 입력의 시험은 실제 run_ready와 현재 source를 사용하고 옛 test-only run/when_ready wrapper는 제거했다. /resume B 뒤 늦은 /clear X의 typed ingress 판정 연결(P2)은 별도 후속이며 이번에 변경하지 않았다.
+
+완료 retirement는 자기 닫힌 출력까지의 historical prefix를 사용한다. 현재 Idle proof는 이후 native activity가 없는 tail을 별도로 요구한다. 완료 뒤 새 user/assistant가 timer read보다 먼저 와도 자기 fence는 종결하며 Running 주입은0이다. 새 턴의 실제 terminal 뒤에는 Submit 훅 유실과 무관하게 일반 준비가 진행한다.

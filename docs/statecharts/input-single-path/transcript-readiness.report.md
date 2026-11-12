@@ -220,7 +220,7 @@ Busy hand_busy / native Running writes and #8077 custody / exact-close / first-i
 
 ## B 완료 수리 / own compact completion
 
-Current implementation source SHA `01d6532dce19bf3f2c60783a15077113b6e113e3`; repair base `eee9d323e23576b7e6eb98cf92890ac9726d60da`. The older B1 synthetic native-terminal assumption above is disproved by the coordinator's isolated Claude Code 2.1.322 capture. The committed redacted fixture is tests/fixtures/claude_compact/local-command-2.1.322.jsonl (post-compact rows 46 through 64, no assistant/stop-hook-summary/turn-duration). The lane did not access an operational session or run that target CLI itself.
+Current implementation source SHA `e46154b856cdc6ce4f00b3a628c045e26e16fd0e`; repair base `eee9d323e23576b7e6eb98cf92890ac9726d60da`. The older B1 synthetic native-terminal assumption above is disproved by the coordinator's isolated Claude Code 2.1.322 capture. The committed redacted fixture is tests/fixtures/claude_compact/local-command-2.1.322.jsonl (post-compact rows 46 through 64, no assistant/stop-hook-summary/turn-duration). The lane did not access an operational session or run that target CLI itself.
 
 Only confirmed Enter creates a local-control ticket. The persistent worker accepts one source-bound /compact command followed by a closed local stdout/stderr envelope after its reserved file offset. Success also needs a manual compact boundary and the known Compacted stdout. Failure is completion with success=false. Current source/native/path/nonce/file and Start are rechecked; generation is rechecked and held stable through memory-only exact-token publication. No file/source-authority I/O is done under the generation leaf lock. The worker never sends another key during completion. PostCompact remains ignored; SessionStart(compact) can only wake the existing worker and never authorizes readiness.
 
@@ -228,14 +228,14 @@ Continuation latches and recovery floors remain intact. A recovery floor already
 
 | Model action / contract | Production coordinate |
 |---|---|
-| Submitted worker remains alive | src/services/claude_tui/readiness/compact.rs:201 |
+| Submitted worker remains alive | src/services/claude_tui/readiness/compact.rs:202 |
 | completion parse / source checks before publication | src/services/claude_tui/readiness/compact.rs:86 |
 | closed local-command output classifier | src/services/claude_tui/readiness/compact/completion.rs:13 |
-| exact reservation / Start / recovery publication | src/services/claude_tui/readiness/compact/completion.rs:112 |
+| exact reservation / Start / recovery publication | src/services/claude_tui/readiness/compact/completion.rs:121 |
 | completion proof consumption | src/services/claude_tui/readiness/mod.rs:158 |
 | generation gate permits same-cycle re-arm | src/services/claude_compact_trigger.rs:243 |
 | memory-only generation guarded publication | src/services/claude_compact_trigger.rs:424 |
-| same file new Start invalidates completion | src/services/claude_tui/readiness/mod.rs:375 |
+| same file new Start invalidates completion | src/services/claude_tui/readiness/mod.rs:376 |
 
 `CompactCompletionEvidence` emits no native terminal. `FinishSelfCompactFence` provides the owned completion proof; PROPERTY `ReadySelfCompactEventuallyReleases` states that a confirmed self compact followed by completion evidence eventually lets the next Idle original execute. Direct TLC: 39 cfg / 111 reported runs, GREEN24 / expected RED15 / unexpected0 / skip0, 104s. All 58 TLA/cfg source files match the executed snapshot. This is a specification check and manual code correspondence, not code extraction. Source/generation invalidation, Unknown transport, recovery, NotSent, and draft admission are caller-test boundaries; unconditional progress is not claimed after an ambiguous write or a foreign generation.
 
@@ -247,3 +247,5 @@ Continuation latches and recovery floors remain intact. A recovery floor already
 | InputPathReadyCompactNoCompletion.cfg | expected RED | ReadySelfCompactEventuallyReleases |
 | InputPathReadyNoLatchCompact.cfg | expected RED | ReadyCompactAfterStopIdle,ReadyNoContinuationEarlyInput,ReadyNoIdleRunningInjection |
 | InputPathReadySuppressedCompact.cfg | GREEN | - |
+
+Completion retirement reads the owned historical prefix; current Idle evidence separately rejects later native activity. A new native turn winning the timer cannot hide the completed control or authorize Running injection; its later hard terminal can advance the next original without UserPromptSubmit. Caller compact_completed_prefix_cannot_hide_a_new_native_turn_or_require_its_submit_hook covers this interleaving. TLA/cfg bytes are unchanged; retirement and CurrentEvidence remain separate obligations.
