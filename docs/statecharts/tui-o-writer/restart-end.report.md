@@ -2,7 +2,7 @@
 
 기준 소스는 `7d5900ca70ff6a1279a3fd93b4d88bf8f29a7f09`다. 기존 `WriterWake.tla`에 `RestartSpec` 투영을 더했다. 기존 세 Init은 `restart`를 dormant로 고정하고 기존 Next는 이를 보존한다. 기존 11 cfg의 규칙·상수는 바꾸지 않았다. `TmuxSession.tla`의 EffortCloseInterrupted/old-debt 투영은 confirmed end를 oracle로 이미 받으므로 수정하지 않았다. 이번 투영은 그 oracle 아래의 historical binding·old opener/cutoff·seal·Prepared replay 계약을 세분한다.
 
-S2 원본은 공식 CI checker 22/22 기대 일치로 완료됐다. S2d는 확인/영수증/POST 응답/crash 전이를 보강한 RestartSpec 12 cfg를 공식 도구로 다시 실행해 4 GREEN과 8 expected RED를 확인했다. 아래 규칙 정의는 약화하지 않았다. S2d 최종 커밋 뒤 root가 기존 11개와 RestartSpec 12개, 총23 cfg의 CI 기대 집합을 확인해야 하며, 이 하위 작업은 CI checker를 중복 실행하지 않았다.
+S2 원본은 공식 CI checker 22/22 기대 일치로 완료됐다. S2d는 확인/영수증/POST 응답/crash 전이를 보강한 RestartSpec 12 cfg를 공식 도구로 다시 실행해 4 GREEN과 8 expected RED를 확인했다. 아래 규칙 정의는 약화하지 않았다. root는 dabfc34dd38a10873f083362346e8b9dd9874331에서 기존 11개와 RestartSpec 12개, 총23 cfg의 CI 기대 집합 일치를 확인했다. 명령은 `python3 scripts/ci/statecharts_tlc.py --base 2031a2e9 --head HEAD --jobs 2`이며 원문은 lane artifact의 logs/s2e-statecharts-ci.log다.
 
 ## 값과 소스 경계
 
@@ -78,4 +78,4 @@ export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew
 ~/.claude/skills/statechart/scripts/statechart docs/statecharts/tui-o-writer/WriterWake.tla --config docs/statecharts/tui-o-writer/WriterRestartEndFixed.cfg --view docs/statecharts/tui-o-writer/restart-end.view.mjs --out /tmp/i8109-s2-writer-new
 ```
 
-S2d 원시 로그는 lane artifact의 logs/s2d-sc-*-checked.log 및 sc-out/s2d-*-checked/tlc*.out에 있다. WitnessLost의 view 표시 최종 실행은 logs/s2d-sc-WitnessLost-view.log 및 sc-out/s2d-WitnessLost-view/다. 구조화 요약은 s2d-statechart-results.json이다. 이전 S2 CI22/22와 S2d의 아직 미실행인 root CI23을 구분한다. parent가 커밋 뒤 CI 결과를 구현 보고서에 추가한다.
+S2d 원시 로그는 lane artifact의 logs/s2d-sc-*-checked.log 및 sc-out/s2d-*-checked/tlc*.out에 있다. WitnessLost의 view 표시 최종 실행은 logs/s2d-sc-WitnessLost-view.log 및 sc-out/s2d-WitnessLost-view/다. 구조화 요약은 s2d-statechart-results.json이다. 이전 S2 CI22/22와 보강 모델의 root CI23/23 기대 집합 일치를 구분한다. 이 문서 정정은 모델·cfg·view를 바꾸지 않는다.
