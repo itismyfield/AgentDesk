@@ -31,7 +31,7 @@ Liveness는 `WF(RWork(c))`를 caller별로, `WF(RRestart)`를 재접속에 둔�
 |값 또는 행동|file:line 근거|모델 대응|
 |---|---|---|
 |두 동시 caller, 같은 campaign/key/input|`src/db/server_campaigns/storage_tests.rs:150,153,235,239`|RC={1,2}; 실제 caller 개수 상한이라는 뜻은 아님|
-|begin→key/run lock|`src/db/server_campaigns/mod.rs:142,166,172,177`|RBegin→RAcquire. INSERT ON CONFLICT의 대기와 두 row lock을 한 직렬화 경계로 추상화|
+|begin→key/run lock|[base의 mod.rs 142·166·172·177행](https://github.com/itismyfield/AgentDesk/blob/0051e898e4e43012c232c244a521c5a280765fb8/src/db/server_campaigns/mod.rs#L142)|RBegin→RAcquire. INSERT ON CONFLICT의 대기와 두 row lock을 한 직렬화 경계로 추상화|
 |receipt absent / same fingerprint / different fingerprint|`mod.rs:181,190,193`|absent는 facts로, same은 replay로. different는 kernel 이전의 rollback/error 가지로 추상화; fingerprint bytes 자체는 모델링하지 않음|
 |state joined projection와 BeginReview stored seal|`mod.rs:207,210,213,216`; `read.rs:42,85`; `evidence_store.rs:70,78,88`|RReadFacts가 lock 안 version summary를 관측. missing/mismatch seal의 StaleBinding은 rejected outcome으로 추상화|
 |create/command 결정|`mod.rs:218,220,227,236`; `control.rs:252,286`|RDecide. create/command의 concrete command kind는 boundary에서 opaque|

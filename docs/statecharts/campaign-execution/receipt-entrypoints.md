@@ -95,7 +95,7 @@ production DB create/execute 호출자는 위 3곳뿐이다. 전체 src의 serve
 |host 재전달|`host_gate.rs:761` recovery_snapshot; :780~785 Finished 중 미delivered만 재offer; mark_delivered :745|외부 효과 exactly once는 기존 CampaignVerification 담당. DB receipt/commit 모델의 exactly once와 구분|
 |DB 재연결/서버 재시작 대표|`read.rs:76,85` persisted projection + `mod.rs:181` persisted receipt; fixture reconnect `storage_tests.rs:94~96`|in-memory 결정 상태를 유지하지 않는다. commit 전 crash는 PG transaction rollback, commit 후 응답 loss는 receipt replay. 실제 process restart 실험은 이번에 실행하지 않음|
 
-`src/services/campaign_execution/recovery.rs`는 없고 server startup/worker registry에도 server campaign 복구 loop가 없다. root 공개는 dormant adapter뿐 (`lib.rs:286~293`). 옛 `src/db/campaigns.rs`의 legacy campaign CRUD는 별도 경로이며 이번에 바꾸지 않는다.
+`src/services/campaign_execution/recovery.rs` (없음). server startup/worker registry에도 server campaign 복구 loop가 없다. root 공개는 dormant adapter뿐 (`lib.rs:286~293`). 옛 `src/db/campaigns.rs`의 legacy campaign CRUD는 별도 경로이며 이번에 바꾸지 않는다.
 
 ### legacy ledger의 pause/resume/cancel은 별도 상태·테이블
 
@@ -113,7 +113,7 @@ production DB create/execute 호출자는 위 3곳뿐이다. 전체 src의 serve
 - 옛 Run JSON에 없는 `verifications`, `prerequisites`, `fences`, `seals`, `environments`는 `src/domain/campaign/model.rs:284,287,289,292,295`의 serde default로 빈 map이다. 옛 Attempt.execution은 :206 default로 None, StopIntent.finish_grants는 :259 default로 빈 Vec다. 그 외 quality_failures/repair_cycles/series/current_attempt 등 저장 필드는 바꾸지 않는다. 모든 숫자 필드의 임의 default 수용을 새로 만들지 않는다.
 - NodeFence의 epoch/interruption/counted_failure는 :315~321의 기존 구조와 default를 유지한다. 빈 fences map이면 `src/services/campaign_execution/stage_fsm.rs:48`의 기존 map_or/default fence를 계속 쓴다. 옛 map이 빈다는 이유로 저장 failure budget을 reset하지 않는다.
 - 옛 Rejection JSON의 definition_error 부재는 `src/domain/campaign/model.rs:126` default로 None. 기존 `src/services/campaign_execution/model_tests.rs:215~249`가 옛 receipt outcome JSON을 왕복한다. `CommandOutcome` enum 표현과 response_status/body는 같은 DB 정의(:40~58)를 유지한다.
-- `src/services/campaign_execution/model_tests.rs:253`은 command bytes/fingerprint, :268은 WorkspaceObservation bytes를 고정한다. receipt replay는 `src/db/server_campaigns/mod.rs:193~205`의 saved status/body를 사용해 새 renderer/현재 state/default로 다시 만들지 않는다. 기존 receipt 테이블 스키마 `migrations/postgres/0161_server_campaigns.sql:99~105`에 대한 schema/migration 변경은 없다.
+- `src/services/campaign_execution/model_tests.rs:253`은 command bytes/fingerprint, :268은 WorkspaceObservation bytes를 고정한다. receipt replay는 [base의 mod.rs 193~205행](https://github.com/itismyfield/AgentDesk/blob/0051e898e4e43012c232c244a521c5a280765fb8/src/db/server_campaigns/mod.rs#L193-L205)의 saved status/body를 사용해 새 renderer/현재 state/default로 다시 만들지 않는다. 기존 receipt 테이블 스키마 `migrations/postgres/0161_server_campaigns.sql:99~105`에 대한 schema/migration 변경은 없다.
 - 다음 구현 레그에서 추가할 옛 Run fixture는 새 default map/optional 필드만 JSON에서 뺀 행을 읽고 budget/attempt/fence·기존 receipt 재생을 확인하면 된다. 이는 현재 main도 통과해야 하는 호환 동등성 시험이며 main 버그 RED로 세지 않는다.
 
 ## 5. 모델 값 범위와 코드의 연결
@@ -124,7 +124,7 @@ production DB create/execute 호출자는 위 3곳뿐이다. 전체 src의 serve
 |phase=begin/locked/receipt/read/decided/written/committed/rolledback/replay/conflict|mod.rs:142,172,181,207,218,240,253,144 및 ? rollback|
 |receipt=None / same fingerprint / other fingerprint|mod.rs:181~205. key row lock 안에서 기존 receipt 읽음|
 |outcome=Changed / Noop / Rejected / NotFound|mod.rs:238~250; control.rs:732~744; write.rs:57~59|
-|campaign=absent / present (Prepared/Running/Stopping/Stopped/Succeeded)|read.rs:85 optional + domain/model.rs:31~37. 현재 production create는 초기 Prepared, active run은 옛 저장 행/fixture로도 존재 가능|
+|campaign=absent / present (Prepared/Running/Stopping/Stopped/Succeeded)|read.rs:85 optional + src/domain/campaign/model.rs:31~37. 현재 production create는 초기 Prepared, active run은 옛 저장 행/fixture로도 존재 가능|
 |request=Create / Edit / Stop / Resume / Retry / Internal|mod.rs:98~102, dto.rs:34~52, domain model.rs:364~474. 내부 kind는 위 모든 command 표에서 opaque 대표 가능|
 |snapshot revision/control_version/event_sequence|model.rs:351~359; Run :276~279. decision은 lock 후 read한 고정 state 사용|
 |seal=present-match / missing-or-mismatch|mod.rs:210~216; evidence_store.rs:88~101|
@@ -157,4 +157,4 @@ production DB create/execute 호출자는 위 3곳뿐이다. 전체 src의 serve
 - `storage_tests.rs:27~43`의 create/execute helper를 새 service facade로 연결하면 stage/recovery/verification store 시험 대부분이 새 경로를 거친다.
 - HTTP fixture의 직접 DB 호출은 `src/server/routes/server_campaigns/http_tests.rs:326,1002`, routes 본체 호출은  :122/:154/:174. fixture도 새 service 경유로 적응해야 한다.
 - private apply 직접 시험은  `storage_tests.rs:400,476` 의 두 곳이다. 새 prepare/apply를 **같은 열린 tx에서** 통과시키고 기존 명시 rollback/lock wait timeout/commit의 의미를 지킨다. DB 내 cfg(test) service 재수출은 대안이며 production 역의존 0과 구분한다.
-- serde/wire는  `domain/model.rs:126` Rejection.definition_error default, :206 Attempt.execution default, :259 StopIntent.finish_grants default, :284~296 Run maps defaults를 바꾸지 않는다. receipt schema  `migrations/postgres/0161_server_campaigns.sql:99~105`는 저장 response 필수이며 renderer 재실행이나 행 재작성을 하지 않는다.
+- serde/wire는  `src/domain/campaign/model.rs:126` Rejection.definition_error default, :206 Attempt.execution default, :259 StopIntent.finish_grants default, :284~296 Run maps defaults를 바꾸지 않는다. receipt schema  `migrations/postgres/0161_server_campaigns.sql:99~105`는 저장 response 필수이며 renderer 재실행이나 행 재작성을 하지 않는다.
