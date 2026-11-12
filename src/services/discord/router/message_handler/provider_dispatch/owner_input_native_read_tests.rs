@@ -9,8 +9,8 @@ const PERMISSION_MODE: &str =
     "{\"type\":\"permission-mode\",\"permissionMode\":\"bypassPermissions\"}\n";
 const START_WAITS: &str = "NotSent(\"synthetic_waits_idle\")";
 
-/// The rig's tmux behind a script: a capture shows `screen` if it exists, liveness reads are
-/// counted, read `park-at` waits for `release`, and one read fails after `fail-after` cwd reads.
+/// The shim counts native source and liveness reads separately; only a third source lookup fails.
+/// A selected liveness read can wait for an explicit release.
 struct Shim {
     dir: std::path::PathBuf,
 }
@@ -27,16 +27,16 @@ impl Shim {
              case \"$*\" in *capture-pane*) [ -f \"$d/screen\" ] && {{ cat \"$d/screen\"; exit 0; }} ;; esac\n\
              case \"$*\" in *pane_current_path*)\n\
                c=$(cat \"$d/cwds\" 2>/dev/null || echo 0); echo $((c+1)) > \"$d/cwds\"\n\
+               if [ -f \"$d/source-limit\" ] && [ ! -f \"$d/failed\" ] && \
+                  [ \"$c\" -ge \"$(cat \"$d/source-limit\")\" ]; then\n\
+                 : > \"$d/failed\"; echo 'native source requery refused' >&2; exit 1\n\
+               fi\n\
                if [ -f \"$d/busy-armed\" ] && [ -f \"$(cat \"$d/row-path\")\" ]; then\n\
                  rm -f \"$d/busy-armed\"; cat \"$d/busy-rows\" >> \"$(cat \"$d/transcript\")\"\n\
                fi ;;\n\
              esac\n\
              case \"$*\" in *list-panes*pane_dead*)\n\
                n=$(cat \"$d/reads\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$d/reads\"\n\
-               if [ -f \"$d/fail-after\" ] && [ ! -f \"$d/failed\" ] && \
-                  [ \"$(cat \"$d/cwds\" 2>/dev/null || echo 0)\" -ge \"$(cat \"$d/fail-after\")\" ]; then\n\
-                 : > \"$d/failed\"; echo 'probe failed' >&2; exit 1\n\
-               fi\n\
                if [ \"$(cat \"$d/park-at\" 2>/dev/null)\" = \"$n\" ]; then\n\
                  : > \"$d/parked\"; while [ ! -f \"$d/release\" ]; do sleep 0.02; done\n\
                fi ;;\n\
@@ -64,10 +64,9 @@ impl Shim {
         fs::write(self.dir.join("park-at"), "2").unwrap();
     }
 
-    /// The first liveness read after the late read resolved its transcript fails once, as a tmux
-    /// probe error; the early and the late read each resolve it through the pane's cwd.
-    fn fail_after_late_read(&self) {
-        fs::write(self.dir.join("fail-after"), "2").unwrap();
+    /// A third source resolution fails; independent physical-liveness checks stay available.
+    fn guard_cached_source(&self) {
+        fs::write(self.dir.join("source-limit"), "2").unwrap();
     }
 
     /// The next read made while the channel's inflight row `row` exists, so after a claim, finds a
@@ -161,7 +160,7 @@ async fn start_meets(id: u64, case: Read) {
         Read::Armed => BUSY.to_string(),
         Read::Unlooked => IDLE.to_string(),
         _ if early => format!("{IDLE}{PERMISSION_MODE}"),
-        Read::ReadyTail => format!("{IDLE}{PERMISSION_MODE}"),
+        Read::ReadyTail => format!("{PERMISSION_MODE}{IDLE}"),
         _ => IDLE.to_string(),
     };
     fs::write(&native, initial).unwrap();
@@ -179,7 +178,7 @@ async fn start_meets(id: u64, case: Read) {
         Read::Unlooked => {}
         _ if early => shim.composer_busy(),
         Read::Late | Read::LateBusy => shim.park_second_read(),
-        Read::ReadAgain => shim.fail_after_late_read(),
+        Read::ReadAgain => shim.guard_cached_source(),
         _ => {}
     }
     let channels = [OriginChannel {
@@ -202,7 +201,15 @@ async fn start_meets(id: u64, case: Read) {
         crate::services::discord::queue_io::input_owner::drive::wake(drive);
         runs_once(&rig, &pool, ORIGIN, &mut settled, bridge, append).await;
         if case == Read::ReadAgain {
-            assert!(shim.dir.join("failed").exists(), "no liveness read failed");
+            assert_eq!(
+                fs::read_to_string(shim.dir.join("cwds")).unwrap().trim(),
+                "2",
+                "native source must use the cached late read"
+            );
+            assert!(
+                !shim.dir.join("failed").exists(),
+                "native source must not be resolved a third time"
+            );
         }
         drop(rig);
         pool.close().await;
