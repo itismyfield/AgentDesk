@@ -6,7 +6,7 @@ use sqlx::postgres::PgRow;
 
 use super::{
     ENTRY_STATUS_DONE, ENTRY_STATUS_FAILED, ENTRY_STATUS_SKIPPED, EntryStatusUpdateResult,
-    record_entry_dispatch_history_on_pg,
+    record_entry_dispatch_history_on_pg, restore_entry_dispatch_link_on_pg_tx,
 };
 
 /// Whether a changed entry now in `status` owes a run-completion attempt on its tx. `done` goes
@@ -249,23 +249,14 @@ impl DispatchTerminalEntryRow {
         }
         if preserve_dispatch_link {
             if let Some(linked_dispatch_id) = self.linked_dispatch_id.as_deref() {
-                sqlx::query(
-                    "UPDATE auto_queue_entries
-                     SET dispatch_id = $1,
-                         slot_index = $2
-                     WHERE id = $3
-                       AND dispatch_id IS NULL
-                       AND status = $4",
+                restore_entry_dispatch_link_on_pg_tx(
+                    tx,
+                    entry_id,
+                    linked_dispatch_id,
+                    self.slot_index,
+                    new_status,
                 )
-                .bind(linked_dispatch_id)
-                .bind(self.slot_index)
-                .bind(entry_id)
-                .bind(new_status)
-                .execute(&mut **tx)
-                .await
-                .map_err(|error| {
-                    format!("restore postgres auto-queue entry lineage for {entry_id}: {error}")
-                })?;
+                .await?;
             }
         }
         Ok(())

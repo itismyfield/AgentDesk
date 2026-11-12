@@ -1138,6 +1138,34 @@ async fn load_entry_status_row_pg_tx(
     })
 }
 
+/// Puts back the dispatch link a terminal entry write cleared, when the caller keeps lineage.
+async fn restore_entry_dispatch_link_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: &str,
+    linked_dispatch_id: &str,
+    slot_index: Option<i64>,
+    status: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE auto_queue_entries
+         SET dispatch_id = $1,
+             slot_index = $2
+         WHERE id = $3
+           AND dispatch_id IS NULL
+           AND status = $4",
+    )
+    .bind(linked_dispatch_id)
+    .bind(slot_index)
+    .bind(entry_id)
+    .bind(status)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("restore postgres auto-queue entry lineage for {entry_id}: {error}")
+    })?;
+    Ok(())
+}
+
 async fn record_entry_dispatch_history_on_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: &str,
