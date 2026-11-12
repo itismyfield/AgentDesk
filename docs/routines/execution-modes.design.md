@@ -1,27 +1,35 @@
-# 루틴 실행 방식 네 가지 설계 r2 (#8117)
+# 루틴 실행 방식 네 가지 설계 r2b (#8117)
 
-기준 main `5bcbb82297f5cc3ab8897b81ddb9891459e0321b`, worktree `inv/i8117-routine-modes`, 2026-11-12 KST. 조사·설계 산출물이며 **프로덕션 변경·cargo 빌드/시험·운영 실행은 하지 않았다.** 이슈의 「내용」·DoD가 수용 기준이다. 코드 좌표는 이 SHA 기준이다. r1 문서 head는 `e69051beeb6a268aba286461c3fb67c641ffcc2c`이고 r2는 문서·모델만 개정한다. 사전 판정 API·키 조회도 실행하지 않았다.
+기준 main `5bcbb82297f5cc3ab8897b81ddb9891459e0321b`, worktree `inv/i8117-routine-modes`, 2026-11-12 KST. 조사·설계 산출물이며 **프로덕션 변경·cargo 빌드/시험·운영 실행은 하지 않았다.** 이슈의 「내용」·DoD가 수용 기준이다. 코드 좌표는 이 SHA 기준이다. r1 문서 head는 `e69051beeb6a268aba286461c3fb67c641ffcc2c`이고 r2 head는 `a81f5c9fe8e844cdb02762f51fe5c821a76be230`이며 r2b는 사용자 답을 문서·모델에 적용한다. 사전 판정 API·키 조회도 실행하지 않았다.
 
 ## 변경 이력 r2
 
 리뷰 1라운드는 CLEAN(P0/P1 0)이며 본문 P2-1~11을 모두 반영했다. r2가 설계 리뷰 2라운드 상한이다. 이후 남는 지적은 구현 RED·뮤턴트·수용 기준으로 이관하며 설계 리뷰를 반복하지 않는다.
 
-- P2-1 → 「스택 PR·조각·크기」: 기능 전체 한 PR 문구를 없애고 9개 스택 PR, PR당 1~2조각·30파일/+1500·PLAN +1200 미만으로 고정했다. E는 마지막이다.
+- P2-1 → 「스택 PR·조각·크기」: 기능 전체 한 PR 문구를 없애고 10개 스택 PR, PR당 1~2조각·30파일/+1500·PLAN +1200 미만으로 고정했다. E는 마지막이다.
 - P2-2 → 「headless」와 D: primary mailbox 양방향 대기, `primary_busy`, routine-owned thread/DM만 actor retire, 반대 방향 입력 RED를 추가했다.
 - P2-3 → 「상태 차트」: owner Submit를 만료/복구와 독립시켜 first-key 경합 및 cancel_after_key mutant를 검사한다.
 - P2-4 → 「진입점 전수표」의 모델 열, 「상태 차트」: TerminalLeavesNothingQueued·unconditional LateDispatch·3개 비공허 mutant와 Consumed 분류를 추가했다.
-- P2-5 → 「사건×방식 알림」과 사용자 결정3: headless 심각 알림의 primary outbox 예외, script/interrupted dashboard-only, classification TTL을 고정했다.
+- P2-5 → 「사건×방식 알림」: script/interrupted dashboard-only·classification TTL을 고정했고, headless 정책은 아래 r2b 사용자 결정3으로 대체했다.
 - P2-6 → 「레거시 계약 행렬」·「thread」: 시작 전 일시 오류 60/600초 같은 thread deferral, primary fallback0, current_attempt_started_at 기준을 명시했다.
 - P2-7 → 「C1/C2와 본문 비교」: 현재6 실물 비교, legacy는 terminal NO_REPLY만 억제·그 외 full 유지, 7개 이전은 B+C1만으로 분리했다.
 - P2-8 → 「channel」: Codex 기존 Busy routes와 하나의 busy_participation 훅, unsupported Held→idle/deadline 처분을 고정했다.
 - P2-9 → 「단순 스크립트」: 기존 process group/identity lifecycle을 재사용하여 소유 PGID TERM→유예→KILL, 정상 종료 hook·강제 재시작 한계를 적었다.
 - P2-10 → 「giant 배치」: headless_turn.rs·terminal_outcome_delivery.rs·inflight.rs를 책임 순증0 목록에 추가했다.
-- P2-11 → 「UX A/A 기본과 B delta」: script B의 새 spawn 권한 비용과 channel A의 O 편집/A′ 단계 비용을 명시했다.
+- P2-11 → 「확정 UX」: r2에서 비교한 채널 표시·스크립트 등록 선택지는 아래 r2b 사용자 결정1·2로 닫았다.
 - 사용자 승인 댓글(11-12 15:58 KST) → 「선택적 사전 판정」: 기본off·적용방식/자료/공통 CLI/rc2·3 fallback/skip 이력·현재7 대상 조사·시험을 추가했다.
+
+### r2b 사용자 결정 1·2·3 적용
+
+11-12 16:13 KST 사용자 답(이슈 댓글·`user-decisions-1613.md`)을 적용했다. 새 리뷰 라운드가 아니며 열린 결정은0개다.
+
+- 결정1 → 「channel」「확정 UX」「사건×방식 알림」「E/이전」: 채널 전용 표시·라벨/O 편집·별도 스레드를 제거하고 기존 Discord 입력과 같은 owner·표시·순서를 유지한다. 결과 귀속은 run API/대시보드에만 둔다.
+- 결정2 → 「단순 스크립트 등록」「API」「결정 완료」: 동일 루틴 폼/API의 executable·argv·cwd 직접 등록을 확정했다.
+- 결정3 → 「헤드리스 실패 알림과 N+1 대응」「진입점 전수표」「사건표」「H/크기」「상태 차트」: 기본N3의 알림/명령봇 전이를 분리하고 기존 Announce 게시→intake 경로·전송 불확실 처분을 고정했다. E 표시 비용은 줄이고 H를 별도 PR로 분할했다.
 
 ## 결론과 선행 조건
 
-루틴 정의의 실행 방식은 `headless | thread | channel | script` 하나로 고른다. 실행 방식과 process/tmux라는 백엔드를 구별한다. 현재 process 실행도 Discord 스레드를 만들고 일반 relay와 진단 logger가 각각 게시한다. **현재 운영 7개는 모두 유효 방식 `thread`로 보존 매핑**하며 process 선호·고정 스레드·일정·paused 상태를 그대로 유지한다. 구형 정의의 null-mode provenance를 보존하여 동적 DM action 등 과거 계약을 자동 승격으로 깨뜨리지 않는다. 별도 운영자 전환 명령이나 실행 중지 절차는 필요 없다. 가장 먼저 기존 metadata provenance만으로 B+C1을 착지하여 7개의 진단 소음을 없애고, 방식 확장은 스택으로 뒤따른다. 사용자 선택은 아직 미확정이므로 channel A·script 등록 A를 기본 설계로 구체화한다.
+루틴 정의의 실행 방식은 `headless | thread | channel | script` 하나로 고른다. 실행 방식과 process/tmux라는 백엔드를 구별한다. 현재 process 실행도 Discord 스레드를 만들고 일반 relay와 진단 logger가 각각 게시한다. **현재 운영 7개는 모두 유효 방식 `thread`로 보존 매핑**하며 process 선호·고정 스레드·일정·paused 상태를 그대로 유지한다. 구형 정의의 null-mode provenance를 보존하여 동적 DM action 등 과거 계약을 자동 승격으로 깨뜨리지 않는다. 별도 운영자 전환 명령이나 실행 중지 절차는 필요 없다. 가장 먼저 기존 metadata provenance만으로 B+C1을 착지하여 7개의 진단 소음을 없애고, 방식 확장은 스택으로 뒤따른다. 채널은 사람이 Discord에 입력한 것과 동일하게 처리하고, 스크립트 직접 등록은 확정했다. 헤드리스 연속 실패1..N은 알림만, N+1은 기존 명령봇 경로로 별도 대응 턴을 요청한다.
 
 #8114의 `design-1.md`와 후속 `design-boundary-delta-1.md` 계약을 전제로 한다. `InputIdentity`, `CurrentSource::{Ready,AwaitedClear,Unknown}`, `ObserverOwnership`, 공통 ClaudeBusy operation과 기존 adapter의 key-time guard를 재설계하지 않는다. #8115의 기본 실행 노드 지정 에이전트 새 스레드 세션 수리가 완료된다는 것을 thread 방식의 전제로 둔다. 설계·fixture 준비는 병행 가능하고 channel 활성 호출은 #8114 착지 후 통합한다.
 
@@ -31,12 +39,12 @@
 
 | 방식 | 실행·세션 | Discord에서 보임 | Discord에서 안 보임 | run 이력·대시보드 |
 |---|---|---|---|---|
-| headless | 매 실행 새 process 세션·synthetic session key. primary mailbox는 공유하므로 양방향 입력이 대기할 수 있음 | 권고 A: 연속 실패 임계·paused·stale-paused의 안전 알림만 primary outbox. 업무 iMessage는 별개 | 본문·배너·진단·NO_REPLY·routine thread 생성0 | 실행/대기/primary_busy·원인·사전 판정·실패 카드 |
+| headless | 매 실행 새 process 세션·synthetic session key. primary mailbox는 공유하므로 양방향 입력이 대기할 수 있음 | 실패1..N은 primary 알림만, N+1은 명령봇 기존 intake의 대응 턴1회. paused/stale/classification은 알림만. 업무 iMessage는 별개 | 본문·배너·진단·NO_REPLY·routine thread 생성0 | 실행/대기/primary_busy·원인·사전 판정·실패 카드 |
 | thread | 루틴당 지정 스레드 하나. 매 실행 새 provider 세션 | explicit C2=최종 결과, legacy C1=terminal NO_REPLY만0·그 외 full 유지; 조치 알림 | 공통 run/script/count/checkpoint/action/prompt/preview/banner0. 중간 진행 전체 억제는 explicit C2만 | 진단·원문·답 링크/배달 상태 |
-| channel | 에이전트 본 채널의 현재 세션. 없으면 기존 cold start; Busy면 같은 owner로 프롬프트 주입 | 본 채널 기존 답·작은 루틴 출처 표시·공유 처리 표시·실패/paused 알림 | 별도 routine thread/세션, prompt 재게시, 중복 preview, 새 세션 진단 | 같은 original/attempt의 수용·합류/다음 턴 이관·공유 답 참조·오류 |
+| channel | 에이전트 본 채널의 현재 세션. 없으면 기존 cold start; Busy면 같은 owner로 프롬프트 주입 | 사람 Discord 입력과 같은 기존 답·표시·순서 | 루틴 전용 진행/출처/공유 라벨·O 편집·별도 thread·원문 재게시·추가 루틴 전용 새 세션 진단0 | 같은 original/attempt의 수용·합류/다음 턴 이관·공유 답 참조·오류 |
 | script | QuickJS의 종결 action 또는 직접 command 실행. AgentDesk provider 턴 0 | 없음 | agent/session/thread/성공 로그·stdout/stderr 원문 | 결과·stdout/stderr·종료 코드/신호·timeout·실패/paused 알림 카드 |
 
-사전 판정의 prejudge_no_work skip도 provider 턴0이다. ‘실행 한 번에 에이전트 턴 정확히 1’은 **agent action이 실제 수용되어 성공한 run의 원문 1회 실행**, 모든 run의 중복 실행 0으로 검증한다. JS complete/skip/pause, script 모드, 시작 전 실패·취소는 턴 0이며 성공한 agent 실행으로 세지 않는다. channel Busy는 한 프롬프트가 이미 진행 중인 native 턴에 합류할 수 있어 새 native 턴 수를 무조건 1로 강제할 수 없다. run에 `execution_count=0|1|unknown`, `completion_evidence`를 구별해 기록하고, unknown을 0/PASS로 표시하지 않는다. `Consumed` 명령 처리는 `outcome_kind=command_consumed`, agent count0인 별도 종결로 투영하며 agent 실행 1 성공과 구분한다.
+사전 판정의 prejudge_no_work skip도 provider 턴0이다. ‘실행 한 번에 에이전트 턴 정확히 1’은 **agent action이 실제 수용되어 성공한 run의 원문 1회 실행**, 모든 run의 중복 실행 0으로 검증한다. JS complete/skip/pause, script 모드, 시작 전 실패·취소는 턴 0이며 성공한 agent 실행으로 세지 않는다. channel Busy는 한 프롬프트가 이미 진행 중인 native 턴에 합류할 수 있어 새 native 턴 수를 무조건 1로 강제할 수 없다. run에 `execution_count=0|1|unknown`, `completion_evidence`를 구별해 기록하고, unknown을 0/PASS로 표시하지 않는다. N+1의 명령봇 대응은 실패한 원 run의 retry가 아니라 별도 기존 채널 입력이며 원 run의 execution_count를 늘리지 않는다. `Consumed` 명령 처리는 `outcome_kind=command_consumed`, agent count0인 별도 종결로 투영하며 agent 실행 1 성공과 구분한다.
 
 main은 Started 후 timeout/provider 오류에도 같은 run에서 새 턴을 재실행한다(`agent_executor.rs:361-515,653-815`, `store.rs:2383-2429`). 새 모드에서는 **positive NotSent인 제출 전 재시도만 허용**하고, Started/MayHaveSent 이후 새 turn retry·다른 agent fallback을 금지한다. 실패 알림과 다음 정상 예약 슬롯으로 종결한다. 이미 진행 중인 구형 run은 최초 snapshot의 구형 정책으로 drain한다. 활성 6개는 현재 retry=0/fallback 없음이므로 정상 이전의 재시도 동작은 변하지 않는다. 이것을 빼면 모델의 ‘한 번’은 현재 코드를 검증한 것이 아니다.
 
@@ -94,7 +102,13 @@ main은 Started 후 timeout/provider 오류에도 같은 run에서 새 턴을 �
 | `src/server/routes/routines/handlers.rs:202-248,294-375` attach/pause/resume/detach | attach default=fresh, pause/resume/detach store 변경. detach는 in-flight 거절 | RoutineLifecycleEvent 로그: 부착·일시정지·재개·분리 | agent 없어도 script 루틴 가능; logger agent 없음이면 skip  | 범위 밖: definition CRUD; paused 종결 표시는 SkipOrPause로 대표 |
 | `src/server/mod.rs:2739-2764`; `routines/discord_log.rs:286-324` stale paused | threshold>0만 scan, routine id+TTL dedupe | thread 있으면 일시정지 장기 알림, 없으면 tracing warn만 | stale_paused_alert_secs=0 disable  | NoSilentLoss의 표시 전제; TTL/알림 표면은 범위 밖 |
 | `src/server/mod.rs:2766-2807` failure auto-resume | failure pause만 cutoff 후 자동 resume, manual/migration-invalid 제외 | tracing info만, lifecycle Discord log 호출 없음 | failure_pause_auto_resume_secs>0이면 terminal failure pause+후일 resume; 0이면 자동 pause 없음  | 범위 밖: 다음 definition state; 현재 run 재실행0 |
-| `routines/discord_log/failure_alert.rs:47-104` 연속 실패 | latest stored terminal failed streak 정확히 threshold에서 한 번, interrupted 무시, nonfailed reset | routine·id·script·last_error·next_slot actionable 알림 | max_consecutive_failures 기본3(문서),0 disable; pause knob와 독립  | NoSilentLoss; 임계/TTL/outbox는 범위 밖 |
+| `routines/discord_log/failure_alert.rs:47-104` 연속 실패 | latest stored terminal failed streak 정확히 threshold에서 한 번, interrupted 무시, nonfailed reset | routine·id·script·last_error·next_slot actionable 알림 | max_consecutive_failures 기본3(문서),0 disable; pause knob와 독립  | escalation RecordRun의 이력 count/reset 출처. 현행 exactly-threshold 알림과 새 N+1은 구별; TTL 자체는 모델 밖 |
+| `src/cli/direct.rs:327-378`; `src/server/routes/agents.rs:1027-1064`; `discord/agent_handoff.rs:285-370` 명령봇 실제 게시 | send-to-agent 기본 start_turn=false 및 POST agents/{id}/message가 Announce backend로 실제 메시지 게시; --start-turn/handoff는 direct start로 별개 | bot=announce 실제 본 채널 메시지. 이번 N+1은 이 backend의 primary target/기존 권한을 재사용 | runtime 쓰기0인 조사; incident source는 이미 등록된 routine-runtime 유지 | escalation: RecordRun → LoadOutbox → PostOutbox; 실제 전달을 실행한 증거는 아님 |
+| `discord/outbound/send_gate.rs:30-68,220-239,279-294,404-433`; `src/server/outbox_actionable_delivery.rs:22-38,117-133,158-192`; `discord/outbound/source_registry.rs:112` | 기존 source 권한·bot resolution·outbox→manual delivery. generic retry는 post-accept Unknown을 구별하지 못함 | 실제 Discord post. routine_consecutive_failures는 OperationalAlert 표지가 붙어 턴0 | N+1의 새 routine_failure_incident 목적 키만 분리; source/권한 확대0, Notify fallback0 | escalation: PostOutbox(ACK/Unknown); positive NotSent 분기는 구현 RED, 모델 생략. H의 같은-row 상태 확장이 필요한 현행 틈 |
+| `discord/router/intake_gate/gate.rs:84-120`; `discord/dispatch_policy.rs:226-263`; `discord/router/intake_gate.rs:527,830-832,1325-1329` 봇 intake | 실제 Announce ID는 기존 예외로 허용, OperationalAlert/monitor는 거절; 실제 message/author id와 봇 취소/merge 정책 유지 | 기존 사람 입력과 같은 owner 응답 표면; 새 루틴 표시0 | 허용목록 추가·사람 origin 위장0; bot author는 실제 flag로 유지 | escalation: ExistingBotIntake; Notify0/Announce1의 코드 근거 |
+| `discord/router/intake_dispatch.rs:784-824`; `discord/queue_io/input_owner/ingress.rs:395-473`; `discord/router/message_handler/input_payload.rs:92-113` | permit→기존 original admission/wake. :407-413의 bot 추론은 announce가 whitelist 밖이면 실제 author.bot를 잃는 좁은 결함 | 별도 routine 게시 없음 | H에서 인증된 IntakeRequest author flag를 owned_original로 보존; 기존 경로/권한 불변 | escalation: ExistingBotIntake; 실제 sender provenance는 모델 전제이며 H RED 필요 |
+| `discord/router/message_handler/provider_dispatch/owner_input.rs:831-920`; `discord/router/intake_dispatch/queued.rs:235-260`; `discord/router/message_handler.rs:310-329`; `discord/router/message_handler/intake_turn.rs:2173-2212`; `discord/router/message_handler/provider_dispatch.rs:465-510` | 같은 front/original→start_owner_front→handle_text_message→기존 provider execute | 기존 채널 답·표시·Busy/queue 순서 | N+1은 기존 명령봇 입력이며 routine-start로 복제0 | escalation: ExistingOwnerStarts; 실패 원 run의 Submit/RetryStarted와 별개 |
+
 | `routines/discord_log.rs:90-231,407-457` 진단 로그 조립 | started/js_inputs/js_action/outcome을 routine_runs.discord_log_sections에 각각 저장, 저장 message id로 edit | `루틴 실행 로그` 코드블록: run/script/count/checkpoint/action/prompt/result/error/agent/retry/response preview | strategy/flag에 따른 suppress 없음; **process도 동일**  | Finish의 recorded/notified; Discord 문자열은 범위 밖 |
 | `routines/discord_log.rs:545-650` 진단 실제 transport | 직접 outbound HTTP edit/send, without_idempotency; transient edit 실패는 error, permanent/confirmed missing은 replacement POST | 시작 summary가 편집되며 재게시될 수 있음 | agent 본문 relay와 별개 책임이며 삭제할 수용 대상 진단 경로  | 범위 밖: HTTP/outbound-port 기존 모델; run 원문 재실행과 분리 |
 | `routines/discord_log.rs:460-542,652-720` log target/thread | saved thread 있으면 사용; 없으면 store 최신 thread 재확인→create+persist; 실패면 primary fallback | JS-only여도 agent 연결돼 있으면 log thread가 생김 | 새 headless/script는 이 logger 경로까지 막아야 Discord 0 가능  | 범위 밖: surface 생성; thread create 실패는 FailBeforeSubmit로 대표 |
@@ -135,7 +149,7 @@ main은 Started 후 timeout/provider 오류에도 같은 run에서 새 턴을 �
 
 `memento-intake-check-20260925`는 09-25 08:57 단 1회 succeeded이고 paused 상태다. 구형 run에는 `execution_mode`가 없으므로 process라고 단정할 수 없다(이슈의 “최근 실행 전부 headless” 일반화에 예외). 새 기본값은 thread·fresh, paused·next_due_at 등 원상 보존. `memento-scope-audit`/`dependency-update-watcher`는 과거 run의 thread id와 현재 row가 다르므로 migration 때 현재 row의 id를 보존하고 과거 run id를 덮어쓰지 않는다.
 
-권고 이전 순서: (0) additive schema/read compatibility+진단 저장·노출을 먼저 출시, scheduler를 멈추지 않고 각 새 run이 claim 시 모드를 snapshot; (1) enabled 6개와 paused 1개를 자동 보존 매핑(effective thread/fresh, legacy provenance 유지)하되 due·status·lease·thread id 불변; (2) 진단 Discord 억제를 전부 활성화; (3) 낮은 빈도 dependency-update-watcher → memento-scope-audit → memento-daily-report → memento-hygiene → family-morning-briefing-yohoejang → family-morning-briefing-obujang 순으로 기존 다음 정기 실행을 관측. paused intake는 재개/실행하지 않고 API read compatibility로 확인. 관측 순서가 배치별 수동 설정 변경을 뜻하지 않으며 자동 일괄 보존 mapping이 기본이다. headless/channel/script 전환은 새 선택 기능 사용자의 명시적 편집일 때만.
+초기 보존 원칙(구체적 착지 순서는 아래 스택 PR/이전 절): (0) additive schema/read compatibility+진단 저장·노출을 먼저 출시, scheduler를 멈추지 않고 각 새 run이 claim 시 모드를 snapshot; (1) enabled 6개와 paused 1개를 자동 보존 매핑(effective thread/fresh, legacy provenance 유지)하되 due·status·lease·thread id 불변; (2) 진단 Discord 억제를 전부 활성화; (3) 낮은 빈도 dependency-update-watcher → memento-scope-audit → memento-daily-report → memento-hygiene → family-morning-briefing-yohoejang → family-morning-briefing-obujang 순으로 기존 다음 정기 실행을 관측. paused intake는 재개/실행하지 않고 API read compatibility로 확인. 관측 순서가 배치별 수동 설정 변경을 뜻하지 않으며 자동 일괄 보존 mapping이 기본이다. headless/channel/script 전환은 새 선택 기능 사용자의 명시적 편집일 때만.
 
 ## Discord 실물: 11-12 family-morning-briefing-obujang
 
@@ -181,7 +195,7 @@ QuickJS agent action → 선택 prejudge(기본off, no면skip0) → 기존 provi
 
 완료 writeback도 격리한다. 기존 `scheduled_turn::ChannelEffects` 판정(`scheduled_turn.rs:100-143`)에 persisted routine-isolation 관측을 연결해 completion postlude의 같은 suppress 결정을 재사용한다(`turn_bridge/completion_postlude/channel_writeback.rs:84-105,198`, `completion_postlude.rs:322,406,609`). routine을 ScheduledTurnMark로 사칭하지 않고 inflight의 routine run-spec/presentation에 isolation을 pin한다. 복구·provider 재시도·memory/feedback postlude도 이 관측으로 같은 결정을 내린다. process cancel은 기존 exact episode/token을 쓴다. actor retirement는 아래 소유 surface 가드를 추가한다. D0의 RED는 primary session id/history/uploads/clear boundary/runtime binding이 시작·완료·재시작 뒤 보존되고 별도 per-run key에만 새 provider 세션이 기록되는 것이다.
 
-백엔드 미지원은 명시 실패이며 tmux/채널로 조용히 fallback하지 않는다. 새 headless는 Claude/Codex process 지원 범위부터 제공한다. 기존 thread는 현 지원 provider를 유지한다. 외부 업무 전송은 routine의 명시 도구 호출 범위이며 이 게시 억제가 업무 iMessage 발송까지 막지 않는다. 단일 실패는 대시보드, 연속 실패 임계·paused·stale-paused는 권고 A에 따라 primary outbox로 알린다. 어느 경우에도 routine thread 생성 경로는 호출하지 않는다.
+백엔드 미지원은 명시 실패이며 tmux/채널로 조용히 fallback하지 않는다. 새 headless는 Claude/Codex process 지원 범위부터 제공한다. 기존 thread는 현 지원 provider를 유지한다. 외부 업무 전송은 routine의 명시 도구 호출 범위이며 이 게시 억제가 업무 iMessage 발송까지 막지 않는다. 실패1..N은 primary에 알림만 보내고 정확히N+1에서 기존 명령봇을 통해 별도 대응 턴을 요청한다. paused·stale-paused·classification 알림 자체는 턴을 만들지 않는다. 아래 사건표와 전송 계약을 따른다. 어느 경우에도 routine thread 생성 경로는 호출하지 않는다.
 
 
 **mailbox 공유는 세션 격리와 별개 계약이다.** `router/turn_start.rs:230-266`과 `headless_turn/process_mailbox.rs:35-62`는 channel 단위 mailbox를 쓴다. 헤드리스가 돌면 본 채널 사람 입력은 기존 Busy/queue 정책으로 그 작업 뒤에서 대기한다(`health/turn_deliver.rs:199-284`). 반대로 사람이 먼저 600초 넘게 일하면 루틴은 provider spawn0인 채 deferral을 소진하고 `primary_busy`로 끝난다. UI mode 설명에 이 두 방향을 적는다. run 전용 mailbox key는 후속 검토이며 가짜 Discord channel id로 우회하지 않는다.
@@ -210,7 +224,7 @@ QuickJS agent action → 선택 prejudge(기본off, no면skip0) → 기존 provi
 
 #8114가 제공하는 operation 순서 그대로: actual operation 취득 → `InputIdentity`와 `CurrentSource`/observer 증거 → original/frame+history registration → owner ready → optional draft park → payload-start → host-gated paste+Enter → Enter-terminal Completion → 기존 settlement와 receipt diagnostic. tmux의 pinned if-shell/first-key stop 및 Herdr per-mutation pin/physical lease는 adapter 내부다. 새 공통 caller에 Herdr/tmux endpoint 분기나 raw send를 넣지 않는다. RemoteTui는 기존 placement로 해당 node owner에 보낸다. 같은 participation 결과는 기존 `CodexBusy`/`CodexHerdrBusy`에도 적용한다(`input_owner/target.rs:87-89`, `provider_dispatch/owner_input.rs:1504-1540`). Claude만 허용하는 predicate로 Codex를 차단하지 않는다. 미지원 host/capability는 즉시 실패 대신 기존 `synthetic_waits_idle` same-original Held로 둔다. idle로 회복되어 기존 idle path가 가능하면1회 제출하고, 계속 미지원이면 delivery deadline에서 exact-withdraw ACK 후 `channel_input_unavailable` failed로 닫는다. fresh fallback/새 leaf는 없다. #8114 착지 뒤 파일 이동된 `busy_target.rs`/`owned_busy.rs`와 공통 operation API를 먼저 읽고 이 훅 한 곳에 연결하며 옛 네 좌표의 host 분기를 다시 복제하지 않는다.
 
-Busy의 `Submitted`는 transport ACK이고 run 성공이 아니다. 기존 `tui_prompt_dedupe/injected_steer.rs:198-222,243-249`의 동일 frame/attempt `Joined|Handed` 및 연결 native terminal/O 결과를 run의 읽기 projection으로 연결한다. 현재 routine observer의 자기 logical turn 기대(`input_owner/routine.rs:216-247`)를 shared native turn attribution에 맞게 작은 child에서 적응한다. 최근 채널 answer 복사나 별도 routine reader는 금지한다. 답이 사용자와 routine 여럿을 함께 처리할 수 있으며 같은 Discord 메시지 링크를 여러 run이 참조할 수 있다.
+Busy의 `Submitted`는 transport ACK이고 run 성공이 아니다. 기존 `tui_prompt_dedupe/injected_steer.rs:198-222,243-249`의 동일 frame/attempt `Joined|Handed` 및 연결 native terminal/O 결과를 run의 읽기 projection으로 연결한다. 현재 routine observer의 자기 logical turn 기대(`input_owner/routine.rs:216-247`)를 shared native turn attribution에 맞게 작은 child에서 적응한다. 최근 채널 answer 복사나 별도 routine reader는 금지한다. 답이 사용자와 routine 여럿을 함께 처리할 수 있으며 같은 Discord 메시지 링크를 여러 run이 참조할 수 있다. 이 귀속은 API/대시보드의 내부 기록에만 표시한다. 기존 입력 경로에 프롬프트를 넘긴 뒤에는 사람 Discord 입력과 동일하게 돌며 루틴 전용 진행/출처/공유 라벨, O 편집, 답 복사·별도 스레드를 추가하지 않는다. 내부 `RoutineChannel` origin은 권한/소유 증거로만 쓰고 화면 라벨로 투영하지 않는다. 사람 입력으로 origin을 위장하지 않는다.
 
 ### 주입 실패·시간 경계·복구
 
@@ -219,7 +233,7 @@ Busy의 `Submitted`는 transport ACK이고 run 성공이 아니다. 기존 `tui_
 | key=0이며 source/modal/writer 원인 거절 | 같은 original/ticket Held, #8114 reobserve/기존 held_watch가 실제 회복 때 wake | 대시보드 전달 대기+원인. 원래 run deadline 안에서만 재시도 | 새 ticket·timer paste·idle 기다리기만 하는 가짜 Busy 지원 |
 | 확정 NotSent이며 provider 준비/예약 충돌 | 기존 60초/600초 start-deferral 및 남은 pre-start retry budget, target/mode snapshot 유지 | timeout이 되면 같은 취소/실패 경로 | backend 전환·deadline 재설정 |
 | Held deadline 경합 | owner actor 안에서 exact namespace+ticket+original/context 확인 후 기존 cancel/first-key fence로 **해당 원문만** 철회 | 철회 commit 확인 뒤 failed. 이미 key 가능하면 다음 행으로 정산 | run row만 failed로 바꾸고 원문이 나중에 실행되게 남기기 |
-| paste/Enter가 도달했을 가능성 | 기존 MayHaveSent/Unknown 정산만; Enter-terminal 뒤 재전송 없음 | deadline까지 증거가 없으면 failed(`completion_unconfirmed`)와 알림. 늦은 증거는 같은 run에 보충하며 성공/실행을 새로 만들지 않음 | Unknown→Held downgrade, 다른 agent로 재실행 |
+| paste/Enter가 도달했을 가능성 | 기존 MayHaveSent/Unknown 정산만; Enter-terminal 뒤 재전송 없음 | deadline까지 증거가 없으면 failed(`completion_unconfirmed`)와 사건표 가시성(channel 추가 알림0·기존 owner 표시). 늦은 증거는 같은 run에 보충하며 성공/실행을 새로 만들지 않음 | Unknown→Held downgrade, 다른 agent로 재실행 |
 | 수용/합류 후 provider 오류·timeout | 같은 native episode의 기존 정산, 새 turn을 시작하지 않음 | failed와 원인·증거. 채널 답은 기존 owner가 필요하면 계속 처리 | 사용자 대화/채널 session reset·kill·clear |
 | 서버 재시작/lease 만료 | 새-mode owner run은 같은 ticket 복원 후 제출 전이면 exact-withdraw ACK를 먼저 받음. 그동안 running/recovering 유지. post-key는 기존 정산/no resend | 철회 확인 뒤 interrupted; post-key는 interrupted/unconfirmed와 보충 증거. 다음 정기 슬롯은 기존 in-flight 해제 뒤 별도 run | interrupted만 쓰고 known-unsent queued 원문을 남겨 late dispatch하게 함·현재 설정으로 target 재추론·매칭 안 된 세션 reap |
 
@@ -242,26 +256,15 @@ liveness의 환경 가정은 기존 tick/owner actor/저장소가 결국 다시 
 
 새 explicit thread/headless는 항상 fresh, channel은 자기 채널 continuity다. null-mode 구형 definition을 자동 explicit thread로 승격해 동적 DM을 깨뜨리지 않는다. 정책 강화는 mode 재분류와 구별하며 checkpoint/next_due/status/thread id는 보존한다.
 
-## 선례 없는 UX 두 안 비교 (각 한 라운드)
+## 확정 UX (11-12 16:13 KST)
 
-### 채널 표시·순서
+### 채널: 결정됨 — Discord 입력과 동일
 
-A(권고): 본 채널의 기존 답을 공유한다. 실제 입력 제출이 확인되면 `⏱ 루틴 · 작업 감시` 출처 한 줄, cold/idle 답에는 루틴명, Busy 공유 답에는 `함께 처리: 작업 감시`만 붙인다. 원문/프롬프트·진단은 노출하지 않는다. 표시도 기존 notice/O formatter를 통해 보내고 새 본문 emitter를 만들지 않는다. 표시 전송 실패는 입력을 다시 보내는 사유가 아니다. 비용은 provenance 표시와 정확한 run→native attribution뿐 아니라 이미 열린 O 답의 공유 라벨 편집이다. 입력 출처 한 줄만 먼저 보이는 A′를 E의 중간 커밋으로 둘 수 있으나 A 최종 수용은 같은 PR 안에서 공유 라벨까지 완성한다. O 편집을 별도 단계로 미루면 미완료라고 표시하며 A 완료로 세지 않는다. 위험은 사용자 대화와 루틴 결과가 한 답에 섞이는 것이며 선택 UI에 이를 미리 적는다.
+프롬프트 주입 뒤 답의 소유·표시·순서는 기존 입력 경로 그대로다. granted physical writer는 비선점이고 그 다음은 기존 owner priority와 원문 순서를 따른다(`queued_head/v2.rs:122`). 입력의 내부 origin/capability는 유지하지만 루틴 전용 진행·‘함께 처리’·O 라벨 편집·별도 스레드를 만들지 않는다. 사람 본문에는 routine-only NO_REPLY/FinalOnly 필터를 적용하지 않는다. 어떤 run이 같은 답을 참조하는지는 run API/대시보드에서만 확인한다. r2의 A/A′/B 표시 비교는 종료했고 모두 구현 범위에서 제외했다. E는 정확한 입력·결과 귀속만 구현한다.
 
-B: 같은 채널 세션에서 일하되 결과를 루틴별 스레드로 복사한다. 시야는 분리되지만 공유 native answer에서 루틴 부분을 떼는 근거가 없고 새 배달·중복 위험, 구조 응답 계약 비용이 크다. 요구한 채널 실행의 입력/출력 소유와 가장 잘 맞는 A를 권한다.
+### 단순 스크립트: 직접 등록 A 확정
 
-순서는 wall-clock/예약 시간으로 재정렬하지 않는다. 이미 granted된 physical writer는 비선점, 그 다음은 기존 owner priority(`queued_head/v2.rs:122`의 사람 입력 우선)와 원문 순서를 쓴다. 루틴끼리는 기존 큐 순서이며 합쳐서 새 원문을 만들지 않는다. 화면의 출처 표시는 실제 제출/수용 순서이고 입력 도착 시각과 다를 수 있다. O가 이미 열어둔 답을 편집하면 기존 내용을 재게시하지 않고 공유 처리 라벨만 갱신한다. 사용자의 본문은 routine-only NO_REPLY/FinalOnly 필터로 지우지 않는다.
-
-### 단순 스크립트 등록
-
-A(권고): 루틴 생성 폼/API에서 executable path·argv 배열·cwd를 직접 등록한다. 예: `{"execution_mode":"script","runner":{"kind":"command","program":"/bin/bash","args":["scripts/report.sh"],"cwd":"/workspace/reports"}}`. 셸 문법은 사용자가 `/bin/bash` 등의 인자로 명시했을 때만 해석된다. agent_id는 선택적 귀속이며 provider 사용 0이다. 기존 JS도 `runner.kind=quickjs`로 등록할 수 있다. 비용은 작은 command runner·출력 UI, 위험은 실행 노드에 파일이 있어야 한다는 것과 셸 내부 side effect의 exactly-once 한계다.
-
-B: JS `portable.entrypoint`를 일반화해 셸마다 JS wrapper를 요구한다. 현 QuickJS에는 spawn API가 없으므로 이 안은 wrapper 파일뿐 아니라 샌드박스에 새 spawn 권한/API를 노출하는 추가 범위가 필요하다. A보다 실행 권한 표면과 검증 비용이 넓고 agent 실행/직접 실행도 혼동된다. 임의 셸 등록이라는 요구에 맞는 A를 권한다. 새 원격 실행기·관리자 allowlist·운영자 수동 launchd 정리를 필수로 붙이지 않는다.
-
-
-### 사용자 선택이 B일 때 달라지는 부분
-
-권고 A/A를 설계·크기 기본값으로 쓴다. channel B를 고르면 입력 owner/Busy 정책은 그대로지만 공유 답에서 routine 부분을 나누는 명시 구조 결과 계약과 기존 outbox의 별도 thread 배달 계획을 추가해야 한다. 단순 복사로 같은 답을 두 번 보내지 않도록 해당 범위만 구현 브리프 delta로 잡는다. script B를 고르면 QuickJS spawn API 권한·sandbox validation이 추가되므로 F의 직접 command 등록 예산을 그대로 재사용하지 않는다. 답이 없다는 이유로 운영자 수동 전환이나 새 실행 경로를 도입하지 않는다.
+같은 루틴 생성 폼/API에서 executable path·argv 배열·cwd를 직접 등록한다. 예: `{"execution_mode":"script","runner":{"kind":"command","program":"/bin/bash","args":["scripts/report.sh"],"cwd":"/workspace/reports"}}`. 셸 문법은 사용자가 `/bin/bash` 등의 인자로 명시했을 때만 해석된다. agent_id는 선택적 귀속이며 provider 사용0이다. 기존 JS도 `runner.kind=quickjs`로 등록한다. 실행 노드 파일 존재·셸 내부 side effect의 exactly-once 한계는 F의 등록 검증·출력 이력에서 드러낸다. 비교했던 JS wrapper/spawn 권한 확대 B는 채택하지 않는다. 새 원격 실행기·관리자 allowlist·수동 launchd 정리를 필수로 붙이지 않는다.
 
 ## 단순 스크립트 범위와 실행 결과
 
@@ -299,7 +302,7 @@ A+PJ RED는 fake CLI로 disabled/script/complete/skip/pause 호출0, rc0yes→ag
 
 ### 정의와 구형 복원
 
-새 정의의 정본은 `routines.execution_mode` enum과 discriminated `runner` JSON이며 `prejudge`는 선택 설정(defaultoff)이다.
+새 정의의 정본은 `routines.execution_mode` enum과 discriminated `runner` JSON이며 `prejudge`는 선택 설정(defaultoff)이다. 루틴별 `headless_failure_notice_limit`은 정수1..100, 기본3이다(0으로 사용자 정책을 끄지 않음). 기존 전역 `max_consecutive_failures`는 thread/legacy 알림의 이전 의미로 유지하고, 새 N 필드와 같은 의미라고 해석하지 않는다. 구형 row/누락 client에는3을 투영한다. 값 변경은 다음 streak부터 적용하며 첫 failed run의 run_spec에 N을 pin한다. 성공 등으로 reset되기 전에는 그 N을 쓴다.
 
 ```json
 {"execution_mode":"thread","runner":{"kind":"quickjs","script_ref":"family.js"},"agent_id":"family","discord_thread_id":"existing-thread","timeout_secs":1800}
@@ -317,10 +320,10 @@ mode=script만 command runner를 허용하고 다른 셋은 quickjs agent 판단
 
 | 현재 API | 추가/변경 |
 |---|---|
-| POST `/api/routines` | mode·runner·선택 prejudge(question/threshold/defaultoff), schedule/timeout/name 선택 폼과 동일. 기존 body mode 누락은 구형 quickjs fresh 호환 생성, response에 effective mode/호환 상태 표시 |
-| PATCH `/api/routines/{id}` | mode/runner 변경은 다음 claim부터. omitted 유지·명시 null 의미 구분. mode를 초기화하는 null은 새 정의에서 422. mode/strategy 동시 상충은 422 |
-| GET 목록·단일 | explicit/effective mode, legacy compatibility, runner, 현재 thread/channel 링크, existing last_run. command에 가짜 script_ref를 만들지 않음 |
-| GET `/api/routines/{id}/runs` | 기존 result/attempts/log sections + immutable run_spec·diagnostics·실행/수용/배달 상태. 구형 rows는 없음을 unknown/legacy로 표시 |
+| POST `/api/routines` | mode·runner·선택 prejudge(question/threshold/defaultoff)·headless_failure_notice_limit(default3), schedule/timeout/name 선택 폼과 동일. 기존 body mode 누락은 구형 quickjs fresh 호환 생성, response에 effective mode/호환 상태 표시 |
+| PATCH `/api/routines/{id}` | mode/runner 변경은 다음 claim부터. N omitted는 유지, null/범위 밖은422이며 N 변경은 다음 streak부터. omitted 유지·명시 null 의미 구분. mode를 초기화하는 null은 새 정의에서 422. mode/strategy 동시 상충은 422 |
+| GET 목록·단일 | explicit/effective mode, legacy compatibility, runner, N과 유효 streak N, 현재 thread/channel 링크, existing last_run. command에 가짜 script_ref를 만들지 않음 |
+| GET `/api/routines/{id}/runs` | 기존 result/attempts/log sections + immutable run_spec·diagnostics·실행/수용/배달 상태·실패 streak/notice/escalation 상태와 기존 outbox id. 구형 rows는 없음을 unknown/legacy로 표시 |
 | GET `/api/routines/runs/search`, metrics | 기존 검색에 mode/오류 class 활용. 0 output과 unconfirmed 구분, script exit 요약 포함 |
 | 신규 GET `/api/routines/{id}/runs/{run_id}` | 같은 store 권한으로 해당 run 상세만 반환. 현재 API에는 별도 detail 없음. 대시보드·실패 알림 안정 링크를 위해 추가 |
 | run-now·pause/resume/detach | 기존 공통 claim/close 사용. 새 모드가 별도 실행 진입점을 만들지 않음 |
@@ -332,7 +335,7 @@ mode=script만 command runner를 허용하고 다른 셋은 quickjs agent 판단
 
 현재 `RoutinesPageView.tsx:27-29`는 모든 row에 Discord thread가 있다고 설명하고 `RoutinesTimelineWidget.tsx:925-1027`는 결과 drawer를 갖는다. 새 화면은 mode badge/생성·편집 폼, thread/channel만 Discord 링크, headless/script는 이력 링크를 보여 준다. 새 책임은 `RoutineExecutionModeEditor.tsx`, `RoutineRunDiagnostics.tsx`, `RoutineScriptOutput.tsx`로 분리한다. giant widget은 badge/link/open glue만 변경한다.
 
-run drawer는 ‘결과’와 ‘진단’ 탭으로 구분한다. 결과에는 최종 결과·공유 답 링크·exit 및 실패 요약, 진단에는 run id·script/runner·관측 개수·checkpoint/action·prompt 원문·attempt·Held 원인·receipt/O 정산·backend·Discord 배달 상태와 prejudge skip/fallback·확률·비용/지연을 둔다. prompt는 접힌 상세이며 기존 UI가 갖는 데이터 접근 범위를 그대로 따른다. headless/script 실패·paused는 루틴 목록의 붉은 상태/알림 카드와 run deep link로 볼 수 있다. headless mode 설명에는 primary mailbox 공유와 심각 알림 예외를 명시한다. thread/channel 알림은 기존 message_outbox를 쓰고 링크+루틴명+안전 원인 한 줄만 게시한다. status=failed와 notice delivery 실패를 각각 남겨 알림이 실패했다고 본문을 재실행하지 않는다. 새 모드에서 진단 기록의 실패를 ‘Discord가 조용해서 정상’으로 감추지 않는다.
+run drawer는 ‘결과’와 ‘진단’ 탭으로 구분한다. 결과에는 최종 결과·공유 답 링크·exit 및 실패 요약, 진단에는 run id·script/runner·관측 개수·checkpoint/action·prompt 원문·attempt·Held 원인·receipt/O 정산·backend·Discord 배달 상태와 prejudge skip/fallback·확률·비용/지연을 둔다. prompt는 접힌 상세이며 기존 UI가 갖는 데이터 접근 범위를 그대로 따른다. headless/script 실패·paused는 루틴 목록의 붉은 상태/알림 카드와 run deep link로 볼 수 있다. headless mode 설명에는 primary mailbox 공유·N 설정(기본3)·1..N 알림/N+1 별도 대응 턴을 명시한다. thread 알림은 기존 message_outbox로 링크+루틴명+안전 원인 한 줄을 게시한다. channel에는 루틴 전용 게시를 추가하지 않고 기존 입력/owner 표시를 그대로 둔다. headless 상세에는 streak N과 notice/command 전송·불확실 상태를 각각 표시한다. status=failed와 notice delivery 실패를 각각 남겨 알림이 실패했다고 본문을 재실행하지 않는다. 새 모드에서 진단 기록의 실패를 ‘Discord가 조용해서 정상’으로 감추지 않는다.
 
 ## 진단 제거 뒤 어디서 보는가: 실물 기반 수용 예
 
@@ -343,29 +346,40 @@ run drawer는 ‘결과’와 ‘진단’ 탭으로 구분한다. 결과에는 
 | headless 아침 브리핑 성공 | Discord 메시지 0. 대시보드 ‘성공 · 외부 전달 작업 완료’, 응답 진단/완료 증거 | e4f43597 run의 위 4개 메시지와 thread 생성 0 | run 상세에 prompt/attempt/process 및 실제 외부 전달 주장은 도구/결과 증거와 구분 |
 | thread 동일 e4f43597, final=NO_REPLY | Discord 메시지 0, 이력 ‘성공 · 표시할 결과 없음’ | 진단 1,912/1,900자, 364자 진행+배너, 412자 preview 모두 0 | run 상세에서 기존 started/js_inputs/js_action/outcome 정보 유지 |
 | thread 결과 있는 실행 | 기존 지정 thread에 결과 한 번. legacy C1은 non-NO_REPLY full 보존, explicit C2는 최종 결과 | prompt/response preview 재게시/새 세션 시작0(중간 진행 전체 억제는 C2) | result와 같은 turn의 배달 링크·진단 탭 |
-| channel 사용자 조사 중 작업 감시 | 본 채널 `⏱ 루틴 · 작업 감시`; 원래 답에 `함께 처리: 작업 감시` | 별도 routine thread·원문 재게시·공유 답 복사 0 | 해당 run의 same ticket/frame Joined→native terminal/O 링크. 사용자 입력과 공유됨 표시 |
-| channel source 불명/Held | 대시보드 ‘전달 대기 · 현재 입력 대상 확인 중’→회복 시 1회, deadline 시 ‘실패 · 제출 확인 불가’ | key0 거절 중 원문 유실/새 input 복사/채널 session kill 0 | exact target/current-source/NotSent 또는 Unknown·철회 증거, 실패 알림 한 줄 |
+| channel 사용자 조사 중 작업 감시 | 원래 사람이 Discord에 입력한 것과 동일한 기존 채널 답/표시 | 루틴 전용 진행/출처/공유 라벨·O 편집·별도 thread·원문 재게시0 | 해당 run의 same ticket/frame Joined→native terminal/O 링크. 사용자 입력과의 공유 귀속은 run API/대시보드에만 표시 |
+| channel source 불명/Held | 대시보드 ‘전달 대기 · 현재 입력 대상 확인 중’→회복 시 1회, deadline 시 ‘실패 · 제출 확인 불가’ | key0 거절 중 원문 유실/새 input 복사/채널 session kill 0 | exact target/current-source/NotSent 또는 Unknown·철회 증거. Discord는 기존 입력/owner 표시만 |
 | script `/bin/bash report.sh`, exit2 | 대시보드 ‘실패 · 종료 코드 2’, stdout `검사 3건`, stderr `입력 파일 없음` | Discord 성공/진단 0, provider turn0 | runner/argv/cwd·출력·exit2·시간·잘림·재시작 여부 |
-| 실패 실제 51bbf441 timeout | thread/channel: ‘Memento 정리가 30분 안에 끝나지 않았어요. [실행 보기]’; headless: 단일 실패는 카드·paused/임계는 primary 안전 알림; script: 카드만 | 1,531자 진단 코드블록·script/prompt 노출 0 | API error=timed out after 1800 seconds, backend, exact attempt·last evidence |
+| 실패 실제 51bbf441 timeout | thread: ‘Memento 정리가 30분 안에 끝나지 않았어요. [실행 보기]’; channel: 기존 입력 표시; headless N3: 실패1/2/3 알림만, 4회차 명령봇 대응 요청; script: 카드만 | 1,531자 진단 코드블록·script/prompt 노출 0 | API error=timed out after 1800 seconds, backend, exact attempt·last evidence |
 
-## 사건×방식 알림 (권고 A 고정)
+## 사건×방식 알림 (16:13 확정 정책)
 
-모든 사건은 run API·대시보드에 보인다. 아래 표는 추가 Discord 표면이며 `P=에이전트 본 채널 기존 outbox`, `T=지정 루틴 thread 기존 outbox`, `—=대시보드만`이다. 어느 셀도 진단 코드블록·prompt·stdout/stderr를 게시하지 않는다. headless 알림은 thread 생성0이다. 사용자 결정3의 B(완전0)를 고르면 headless 열 전체를 —로 바꾸며 저장·실행은 그대로다.
+모든 사건은 run API·대시보드에 남는다. `P=primary 기존 outbox의 Notify 알림만(턴0)`, `A=primary 명령봇 Announce→기존 intake 대응 턴`, `T=기존 지정 thread outbox`, `—=대시보드만`이다. channel 열은 **추가 루틴 게시0**이며 기존 일반 Discord 입력/owner의 답·오류 표시는 그대로다. 진단 코드블록·prompt·stdout/stderr를 알림에 넣지 않는다. headless의 모든 행은 thread 생성0이다.
 
-| 사건 | headless(에이전트 있음) | thread | channel | script(귀속 agent 유무 무관) |
+| 사건 | headless | thread | channel 추가 게시 | script |
 |---|---|---|---|---|
-| 단일 run 실패/primary_busy/thread_unavailable 소진 | — (paused면 paused행) | T 안전 요약1 | P 안전 요약1 | — |
-| 연속 실패 임계(기존 threshold, 기본3/0disable) | P 임계 도달1 | T 임계 도달1 | P 임계 도달1 | — |
-| paused(JS/자동/migration_invalid) | P 전이1 | T 전이1 | P 전이1 | — |
-| stale-paused(기존 TTL/threshold) | P 기존 TTL1 | T 기존 TTL1 | P 기존 TTL1 | — |
-| interrupted(boot/lease/재시작) | — | — | — | — |
-| completion_unconfirmed | — (임계/paused면 해당행) | T 실패 요약1 | P 실패 요약1 | — |
-| result_classification_unavailable | P 루틴당 TTL1 | T 루틴당 TTL1 | P 루틴당 TTL1 | — |
+| terminal failed run, streak1..N (primary_busy/소진 포함) | P 각 failed run1, 턴0 | T 안전 요약1 | — | — |
+| 정확히N+1회 연속 실패 | A streak당1, 원 run retry0 | 기존 threshold 정책대로 T; 새 escalation0 | — | — |
+| N+1 초과 연속 실패 | P 알림만(기존 TTL 중복억제), 추가 대응 턴0 | 기존 threshold 정책 유지 | — | — |
+| paused(JS/자동/migration_invalid) | P 전이1, 턴0 | T 전이1 | — | — |
+| stale-paused | P 기존 TTL1, 턴0 | T 기존 TTL1 | — | — |
+| interrupted(boot/lease/재시작) | —, streak 중립 | — | — | — |
+| completion_unconfirmed | terminal failed면 같은 실패 행에 합산, 별도 trigger0 | T 실패 요약1 | — | — |
+| result_classification_unavailable | P routine당24h1, 이 사건 자체는 턴0 | T routine당24h1 | — | — |
 | auto-resume | — | — | — | — |
 
-classification 알림 TTL은 기존 message_outbox TTL seam에서 routine당24시간1회로 고정한다. C1 분류 불가이면 full을 보존하고 degraded 진단으로 남기며, explicit FinalOnly가 결과를 확정할 수 없으면 failed로 기록한다. 둘 다 이 사건의 TTL 정책을 사용하고 새 턴 재실행은0이다. 같은 오류3run은 알림1행이며 반복 진단은 각 run에 남는다. failed streak는 실제 failed run만 세며, 같은 classification 원인의 일반실패/임계/자동paused는 classification TTL 사건으로 우선 정리해 3run이어도 outbox1행을 유지한다. 별도 manual paused처럼 원인이 다른 사건은 표대로 유지한다. 기존 사건 키/formatting을 쓰고 두번째 알림 정본을 만들지 않는다. 새 dedup store를 만들지 않는다. 실패·paused·임계 정책의 실제 운영 값은 읽지 않았으며 기존 코드의 threshold/TTL 의미를 유지한다. headless는 성공 본문0이지만 권고 A의 조치 알림 예외가 있다는 점을 숨기지 않는다.
+thread의 기존 연속실패 임계는 전역 threshold 기본3/0disable이며 정확히임계 도달1이라는 이전 의미를 유지한다. 새 headless N과 다르다. classification은 C1에서 full 보존+degraded, explicit FinalOnly에서 확정불가 failed다. 반복 classification notice는 기존 outbox routine당24h TTL1로 합치되 **실제 failed 카운트와 N+1 escalation을 억제하지 않는다.** 같은 failed run의 일반 notice/paused/classification은 안전 요약1건으로 합칠 수 있지만 N+1 command는 별도 목적 키로 반드시 기록한다. 새 dedup store를 만들지 않는다.
 
-RED: headless3연속 실패에서 primary target·thread create0, paused/stale도 같은 표면, script/interrupted outbox0, classification3회 TTL 내1행·만료 뒤1행, auto-resume outbox0. 알림 전송 실패는 진단에 별도로 남기며 원문/agent를 재실행하지 않는다. 이번 관측은 기존 별도 알림의 실제 도착 완료를 입증하지 않았으므로 구현의 fake outbox 시험과 후속 배달 증거가 필요하다.
+### 헤드리스 실패 알림과 N+1 대응
+
+카운터 권위는 기존 run 이력이다(`discord_log/failure_alert.rs:19-40`): terminal failed만 세며 attempt 실패/NotSent deferral은 세지 않는다. running/interrupted는 건너뛰고 succeeded/skipped/paused는 기존 의미대로0으로 reset한다. 재시도 뒤 succeeded인 run은0이다. 별도 연속실패 DB 카운터를 만들지 않고 failed streak의 첫 run id와 pin된 N을 projection한다. 현행 LIMIT=N+1로는 긴 streak의 첫 ID를 못 찾으므로 마지막 nonfailed 경계와 첫 failed ID까지 읽는 SQL helper를 child에 둔다. N 변경은 reset 후 새 streak부터이며 같은 streak 중 PATCH로 두 번째 escalation을 만들지 않는다. 이력 보존/삭제 경계에서는 이미 존재하는 outbox 사건 키와 run snapshot을 보존하고 과거 실패를 새 사건으로 재구성하지 않는다.
+
+N=3 예: 실패1·2·3은 Notify 알림만, 실패4는 Announce 명령 메시지1건, 실패5부터는 알림만이다. 성공 후 실패1부터 다시 센다. 기존 pause/일정/auto-resume 규칙은 유지하므로 paused 동안에는 다음 실패 run을 만들어 N+1을 억지로 채우지 않는다. JS paused terminal reset과 failed run 뒤 routine만 자동paused인 경우를 구별한다(후자는 실제 stored failed로 카운트). 대응 메시지는 `[실행 보기](run deep link) · <루틴명> · <허용목록의 안전 원인 한 줄> · 4회 연속 실패(N+1)`이다. 동적 원문/셸 출력/secret/프롬프트를 넣지 않는다. 대응은 진단·조치 요청이고 실패한 routine prompt 재실행이 아니다. 해당 Announce intake 자체는 routine_run이 아니므로 이 카운터를 올리지 않아 재귀 escalation이 없다. 봇 턴도 기존 입력의 Busy/queue·권한·순서 정책을 그대로 따른다.
+
+경로는 `agentdesk send-to-agent`의 **기본 실제 Discord post**가 쓰는 기존 Announce backend와 같은 입력 provenance를 재사용한다. `--start-turn`/handoff의 direct health start로 우회하지 않는다. Notify는 non-turn OperationalAlert로 유지하고 N+1 Announce는 실제 bot author/message identity를 쓰는 기존 agent-message 게시 계약을 따른다(`/message` body에 /handoff metadata/source가 전달된다고 가정하지 않음). 같은 등록 source=`routine-runtime`, bot=`announce`, 새 reason=`routine_failure_incident`이며 기존 non-turn `routine_consecutive_failures` reason을 재사용하지 않는다. OperationalAlert로 표기해 intake가 차단하거나 새로운 bot allowlist/권한을 추가하면 수용 실패다. 실제 Announce가 allowed_bot_ids 바깥이어도 기존 gate 예외가 허용한다. 다만 현행 ingress의 bot 재추론 결함은 H에서 인증된 author.bot를 IntakeRequest→owned_original에 전달해 보존한다. 허용목록 추가·본문 marker를 권한으로 쓰는 해법은 없다. 자세한 현행 좌표는 위 전수표에 고정한다.
+
+streak 첫 failed run id로 기존 message_outbox 사건 키 `routine:{id}:failure_incident:{first_failed_run_id}`를 고정하고 기존 persistent dedupe transaction으로 terminal 저장/incident 예약을 결합한다. incident row에는 만료 없는 기존 보존 계약을 사용한다. **현행 generic outbox는 post-accept Unknown에서 재시도할 수 있어 그대로 exactly1이라고 주장하지 않는다.** H는 같은 outbox row의 기존 전송 경계에 stable Discord nonce·durable posting/ACK/unknown 상태를 최소 확장한다. 기존 source/bot/target 검증 뒤 post 전에 posting을 commit하고 ACK는 같은 row에 기록한다. 작은 incident 본문에 한해 기존 manual v3의 `with_create_nonce` 경계(`outbound/manual_delivery.rs:606-613`)를 typed purpose로 확장한다. headless_nonce의 기존 source=headless_turn 제한(`outbound/manual_delivery/headless_nonce.rs:71-97`)을 임의 source 전체로 넓히지 않는다. HTTP200/in-flight/skipped만으로는 ACK가 아니며 nonempty 실제 Discord message ID와 nonce/claim CAS가 필요하다. positive NotSent만 같은 사건 재시도, MayHaveSent/ACK 저장 실패·post 뒤 재시작은 `completion_unconfirmed`로 종결해 대시보드에 남기고 자동 재게시0이다. transport row는 기존 held+NULL expiry로 계속 dedupe fence를 보존하고, 진단 projection만 completion_unconfirmed terminal로 닫는다. failed로 내려 partial unique key를 풀거나 GC로 지우지 않는다(`message_outbox.rs:293,766-788`). nonce가 보존된 같은 기존 전송기의 권위 있는 확인만 보충 가능하며 새 receipt store/입력 owner/별도 sender를 만들지 않는다. 기존 routing_notice의 다른 owner pointer는 가져다 쓰지 않는다. ACK는 Discord 게시 증거이지 native 대응 턴 완료 증거가 아니다. 원 run은 이미 failed이며 대응 턴 성공까지 run liveness를 연장하지 않는다. 불확실 전송에서 대응 턴이 생긴다고 보장하지 않는다.
+
+RED: N3에서 failure1/2/3 Notify만·4 Announce1·5추가turn0, N1 경계, outcome 재로그/동시 poll/재시작 중복0, success/reset·interrupted중립·N변경streak고정, paused/stale/classification 자체command0. 실제 Announce 메시지가 기존 intake를 통과해 owner/native1로 가는 fixture와 Notify 차단 positive control이 필요하다. Unknown은 completion_unconfirmed/재게시0, outbox 전송오류와 원 run 실패를 각각 남긴다. mutant는 off-by-one·Notify도trigger·OperationalAlert provenance·--start-turn우회·post후blind retry·같은streak반복·성공reset누락이다. 모델은 이 사건 전이를 검사하며 실제 Discord 배달은 구현 시험/자연 슬롯 후속 증거가 필요하다.
 
 ## 스택 PR·조각·크기·RED 계약
 
@@ -374,32 +388,35 @@ RED: headless3연속 실패에서 primary target·thread create0, paused/stale�
 | 스택 순서 / 조각 | 주요 prod 파일·책임 | 조각 추정 FILES / NET | PR 합집합 FILES / NET | 수정 전 RED와 원인 제거 mutant |
 |---|---|---:|---:|---|
 | PR1 B+C1 | B: run_diagnostics.rs·discord_log/presentation.rs·discord_log.rs/failure_alert.rs·runtime.rs·server/mod.rs·store/diagnostics.rs·API detail/census 연결. C1: routine_presentation.rs·Claude terminal/result 및 bridge terminal/banner의 작은 child/glue | B10/+700, C1 5–7/+350 | **13–15/+1050** | logger/agent 없어도 진단 API 저장; 진단/preview/banner0; 실행단위 실패·census 결과 보존; terminal NO_REPLY 본문0·non-NO_REPLY legacy full 유지. 저장 생략/preview복원/NO_REPLY 전 진행 fallback/알림누락 mutant RED |
-| PR2 A+PJ(사전판정) | A: migration·execution_mode.rs·store/execution_modes.rs·store/agent_start.rs·loader/context·API/helpers/part_06. PJ: shared decision_gate.rs·services mod glue·routines/prejudge.rs·agent action 입력/진단 | A11/+650, PJ5/+450 | **14–16/+1100** | nullable PATCH·old process/persistent/DM·in-flight snapshot, 기본off·rc0no skip0·rc2/3 fallback·요청1. current row JOIN/rc2 skip/attempt재호출/기본on mutant |
+| PR2 A+PJ(사전판정) | A: migration·execution_mode.rs·N 필드/snapshot/검증·store/execution_modes.rs·store/agent_start.rs·loader/context·API/helpers/part_06. PJ: shared decision_gate.rs·services mod glue·routines/prejudge.rs·agent action 입력/진단 | A11/+700, PJ5/+450 | **14–16/+1150** | nullable PATCH·old process/persistent/DM·in-flight snapshot·N누락3/범위/다음streak, 기본off·rc0no skip0·rc2/3 fallback·요청1. current row JOIN/rc2 skip/attempt재호출/기본on mutant |
+| PR2b H(실패 대응) | discord_log/failure_escalation child·기존 failure_alert/store 이력projection·message_outbox 기존 전송 child/nonce상태·agent_handoff Announce backend glue·intake 실제 author flag·detail docs | 16/+1140(상향1180 전 분할) | **16/+1140** | N3의1..3Notify/4Announce/5턴0·N1·성공reset·interrupted중립·streak N pin·재로그/재시작/동시성·Unknown no-repost·실제bot intake. threshold조기/Notifytrigger/OperationalAlert/dropACK후retry/reset누락 mutant |
 | PR3a D0 | headless_turn/isolated_context.rs·headless_turn.rs glue·routine_metadata·inflight isolation child·scheduled_turn ChannelEffects·completion_postlude/channel_writeback·memory_lifecycle | 8–10/+750 | **8–10/+750** | primary session/history/uploads/boundary/binding 시작·완료·복구 불변, per-run key만 새 session. shared clear/writeback·memory effect 복원 mutant |
 | PR3b D | agent_executor/launch.rs·execution.rs·surface.rs·run_policy.rs·owner_input/session_control/runtime glue·fresh_session_reaper·start_deferral·headless_turn/process_mailbox | 12–14/+1000 | **12–14/+1000** | headless↔user 양방향 queue·primary actor idle후 보존, owned thread/DM retire positive; primary_busy600·thread5xx→same thread60/600·full actual-start timeout·primaryfallback0·Started후retry0. retire scope 제거/claimdeadline/primaryfallback/Startedretry mutant |
 | PR4 E0 | agent_executor/settlement.rs·store/recovery.rs·agent_executor/owner_input/store/server glue·input_owner/routine settlement·queued_head/v2 exact withdrawal | 10/+800 | **10/+800** | first-key↔deadline/recovery 양 순서, ACK 전running·terminal queue0. cancel_after_key·row만terminal·ambiguousID·withdraw전inflight해제 mutant |
 | PR5 F | command_runner.rs/output·runner_spec·runtime/loader/API glue·migrated validator·기존 process/stream_child lifecycle 재사용·runner owned group child·SIGTERM/managed/legacy exit hook | 13–16/+1100 | **13–16/+1100** | 실제 child exit/large output/timeout2초의 두 sleep PID와 groupGone·foreign alive·정상shutdown1·crash no-respawn. child-onlykill/먼저reap/재시작spawn/agentfallback/pipe무한drain mutant |
 | PR6a C2 | streaming FinalOnly·Codex final_answer·TUI O presentation child, stream_tick/terminal/session banner의 기존 owner 연결, source phase 보존 | 10–12/+650 | **10–12/+650** | process/TUI/Codex final vs commentary·lease/frontier/restart identity·ordinary human 보존. full_response=final/raw range화면offset/새reader mutant |
-| PR6b G | api/routines.ts·barrel·RoutinesPageView/widget/Home glue·ModeEditor/RunDiagnostics/ScriptOutput·run deep-link·prejudge controls·docs·보존 projection | 9–11/+1000 | **9–11/+1000** | 7개 thread/status/due/backend/paused 보존·4선택·legacy읽기·prejudge기본off·mode별링크/알림표·exit/unknown 표시. process→headless/pausedresume/unknown=0 mutant |
-| PR7 E(#8114 뒤 마지막) | agent_executor/channel.rs/channel_settlement·owner_input glue·origin/target/routine·공통 busy_participation 훅·injected_steer 기존projection·O 공유 라벨 child | 9–11/+1050 | **9–11/+1050** | Claude/Codex managed/external/late Busy Joined/Handed1·unsupportedBusy→idle1/Helddeadline·공유 답1·세션kill0. Claude-only predicate/선행veto/Submitted성공/Unknown재주입/channel_teardown mutant |
+| PR6b G | api/routines.ts·barrel·RoutinesPageView/widget/Home glue·ModeEditor/RunDiagnostics/ScriptOutput·run deep-link·prejudge controls·N 설정/대응상태·docs·보존 projection | 9–11/+1050 | **9–11/+1050** | 7개 thread/status/due/backend/paused 보존·4선택·legacy읽기·prejudge기본off·mode별링크/알림표·N3→4대응/unknown 표시. process→headless/pausedresume/unknown=0 mutant |
+| PR7 E(#8114 뒤 마지막) | agent_executor/channel.rs/channel_settlement·owner_input glue·origin/target/routine·공통 busy_participation 훅·injected_steer 내부 결과귀속 projection(표시/O 편집 없음) | 8–10/+850 | **8–10/+850** | Claude/Codex managed/external/late Busy Joined/Handed1·unsupportedBusy→idle1/Helddeadline·공유 답1·루틴 전용표시/게시/O편집0·세션kill0. Claude-only predicate/선행veto/Submitted성공/Unknown재주입/channel_teardown mutant |
 
-review 제안 순서 B+C1→A→D0+D→E0→F→G+C2→E를 유지하되 **D0+D의 기존 +1650은 PR3a/3b로, G+C2의 +1650(상세화 전 약1450)도 PR6a/6b로 분할**했다. UI가 약속하는 C2가 먼저 착지하도록 PR6 그룹 안에서 C2→G로 둔다. 파일 겹침만으로 NET이 줄었다고 꾸미지 않는다. 최대 계획+1100으로 PLAN까지100 여유이며 구현 중 상향되면 추가 분할한다. F의 shutdown이 기존 helper 재사용 범위를 넘으면 lifecycle child를 별도 PR로 떼고 cap을 올리지 않는다. E가 #8114를 기다려도 PR1의 기존7 소음 제거는 지연되지 않는다.
+review 제안 순서 B+C1→A→H→D0+D→E0→F→G+C2→E를 유지하되 **D0+D의 기존 +1650은 PR3a/3b로, G+C2의 +1650(상세화 전 약1450)도 PR6a/6b로 분할**했다. UI가 약속하는 C2가 먼저 착지하도록 PR6 그룹 안에서 C2→G로 둔다. 파일 겹침만으로 NET이 줄었다고 꾸미지 않는다. N 필드 추가로 A+PJ는+1150으로 PLAN까지50 여유이며, escalation H는 PR2b +1140으로 분리했다(transport/provenance 포함, 상향1180 전 H1/H2로 분할; H2 전에는 N+1 미완료 기능을 노출하지 않음). E는 표시/O 편집 제거로+1050→+850이다. 최대 계획+1150이며 구현 중 상향되면 추가 분할한다. F의 shutdown이 기존 helper 재사용 범위를 넘으면 lifecycle child를 별도 PR로 떼고 cap을 올리지 않는다. E가 #8114를 기다려도 PR1의 기존7 소음 제거는 지연되지 않는다.
 
 PR1은 `valid_routine_metadata`와 기존 execution_mode process를 presentation 함수 한 곳에서 읽으며 schema/run_spec을 기다리지 않는다. A가 착지하면 같은 함수가 run_spec 우선·legacy metadata fallback으로 흡수한다. PR3a/b와 PR6a/b는 부모/선행 head에서 검증한 스택이고 활성화는 구현된 capability만 자동 적용한다. 운영자 수동 switch는 없다.
 
 ### giant 배치와 검증
 
-새 독립 책임 순증0 대상: `agent_executor.rs`2326, runtime1144, store4207, discord_log2101, session_control1157, loader3266 외에 **headless_turn.rs1545, terminal_outcome_delivery.rs1016, inflight.rs6314**도 포함한다(현재 source 실측; 과거 baseline 숫자를 현재 줄수로 쓰지 않음). parent에는 필드/mod/호출 교체만 두고 정책·분류·새 branch는 child에 둔다. 각 PR의 maintainability/giant ratchet을 통과해야 하며 giant를 예산 회피용으로 키우지 않는다. API 문서 경로는 `src/server/routes/docs/inventory/endpoints/part_06.rs:405-648`, taxonomy, `routes/domains/ops.rs`다.
+새 독립 책임 순증0 대상: `agent_executor.rs`2326, runtime1144, store4207, discord_log2101, session_control1157, loader3266 외에 **headless_turn.rs1545, terminal_outcome_delivery.rs1016, inflight.rs6314, message_outbox.rs1459, intake_gate.rs1388**도 포함한다(현재 source 실측; 과거 baseline 숫자를 현재 줄수로 쓰지 않음). parent에는 필드/mod/호출 교체만 두고 정책·분류·새 branch는 child에 둔다. 각 PR의 maintainability/giant ratchet을 통과해야 하며 giant를 예산 회피용으로 키우지 않는다. API 문서 경로는 `src/server/routes/docs/inventory/endpoints/part_06.rs:405-648`, taxonomy, `routes/domains/ops.rs`다.
+
+H의 새 독립 책임은 `src/services/routines/discord_log/failure_escalation.rs`, `src/services/message_outbox/routine_incident.rs`, `src/server/outbox_actionable_delivery/routine_incident.rs`, `src/services/discord/outbound/manual_delivery/routine_incident_nonce.rs`로 분리한다. 기존 parent에는 mod/typed 호출만 둔다. H의 +1140은 정책/이력 child2개+250, snapshot/API/result4개+135(선행 A와 겹쳐도 상쇄하지 않은 상한), 같은 outbox row migration/helper3개+330, delivery/worker/typed result3개+205, 기존 writer nonce/실제 sender flag4개+220의 보수 합계다. N+1을 예약하는 producer는 terminal 저장 경계 한 곳이며 logger 재진입은 동일 사건 키를 읽기만 한다. H1/H2로 나눌 경우 H2가 준비될 때 자동 capability로 함께 노출하며 운영자 수동 스위치는 없다.
 
 각 PR은 공식 `pr_cap_prod.py <parent> <head>`와 `pr_cap_check.sh`로 크기를 측정하고 대상 RED→GREEN·caller-cut mutant·원복 바이트 동일·static-only를 남긴다. 새로운 Rust test id의 CI 선택을 확인하고 구현 묶음 끝 전체 clippy/필수 native gate를 수행한다. 이 설계 레인은 Rust/PG/실제 command·Gemini를 실행하지 않았다. TLC GREEN은 구현 GREEN이 아니다.
 
 ## 기존 7개 무중단 이전 순서 (DoD 3)
 
 1. **PR1 B+C1**: 기존 metadata provenance만으로 진단 저장/공개 결과 분리·실행단위 실패 알림·Claude process terminal NO_REPLY0/banner0를 함께 착지한다. 7개 mode/row/schedule을 바꾸지 않는다. active6의 아래 exact turn full/final 비교를 활성화 전 증거로 쓴다. 기본 legacy는 non-NO_REPLY full 보존이라 표본 밖 보고를 버리지 않는다. #8114·A·D·C2를 기다리지 않는다.
-2. **PR2 A+PJ**: additive mode/runner/run_spec과 defaultoff prejudge를 도입한다. 기존 fresh는 effective thread, null-mode provenance·동적DM/persistent·현재 thread·status/next_due/checkpoint를 보존하고 정의를 복제하지 않는다. current7의 prejudge는 enabled0/7(기본off7/7)이다. 진행 중 run은 원 snapshot으로 drain한다.
-3. **PR3a→3b→4→5**: headless context isolation/양방향 mailbox 계약·thread transient deferral/no-primary-fallback·Started 재실행 금지·owner exact withdrawal·command group lifecycle을 차례로 착지한다. 새 정책은 각 PR 이후 새 claim부터이며 실행 중 run의 target/시계를 바꾸지 않는다.
+2. **PR2 A+PJ**: additive mode/runner/run_spec과 defaultoff prejudge를 도입한다. 기존 fresh는 effective thread, null-mode provenance·동적DM/persistent·현재 thread·status/next_due/checkpoint를 보존하고 정의를 복제하지 않는다. current7의 prejudge는 enabled0/7(기본off7/7)이다. headless N은 기존 thread 동작을 바꾸지 않는 additive 기본3이다. 진행 중 run은 원 snapshot으로 drain한다.
+3. **PR2b H→PR3a→3b→4→5**: H가 N+1 기존 명령봇 대응·불확실 전송 종결을 먼저 준비한다. 현재7은 thread라 새 headless escalation이 켜지지 않는다. headless context isolation/양방향 mailbox 계약·thread transient deferral/no-primary-fallback·Started 재실행 금지·owner exact withdrawal·command group lifecycle을 차례로 착지한다. 새 정책은 각 PR 이후 새 claim부터이며 실행 중 run의 target/시계를 바꾸지 않는다.
 4. **PR6a C2→6b G**: provider별 FinalOnly를 검증한 뒤 explicit mode 선택 UI와 진단/출력/사전 판정 폼을 노출한다. headless·script의 준비된 기능과 channel 미지원 capability 표시는 서버 응답에 따라 자동이며 운영 수동 enable 절차는 없다. 기존7에 C2를 강제하지 않는다.
-5. **PR7 E**: #8114 head/API를 pin한 뒤 Claude/Codex Busy participation·정확한 shared answer 정산·A 표시를 기존 owner에 연결한다. 사용자 선택이 B이면 위 B delta만 별도로 구체화한다.
+5. **PR7 E**: #8114 head/API를 pin한 뒤 Claude/Codex Busy participation·정확한 shared answer 귀속만 기존 owner에 연결한다. 표시는 사람 Discord 입력과 동일하고 루틴 전용 표시/O 편집/별도 게시0이다.
 6. 구현 후 자연 슬롯 관측 우선순위는 dependency-update-watcher→memento-scope-audit→daily-report→hygiene→family-yohoejang→family-obujang이다. 실제 시각을 옮기거나 run-now를 강제하지 않는다. paused intake는 **API 읽기 검증만** 하고 resume/실행0이다. 가족의 업무 iMessage와 Discord 본문0은 별개 증거로 확인한다. 신규 script 등록이 기존 launchd를 자동 삭제/병행 실행하지 않는다.
 
 ## C1/C2 활성화 전 실물 대조와 사전 판정 대상
@@ -446,28 +463,30 @@ r1(off agent49/127·script15/33) 뒤 수정한 같은 r2 source에서 18cfg를 �
 
 모든 변수/정규화된 failure kind는 위 진입점 표의 값/분기에서 유래한다. 표의 모델 action 열에 미모델링 사유를 적었고, command 비0 종료는 provider 없는 FailBeforeSubmit 대표 실패로만 검사하여 실제 OS process group을 모델링했다고 주장하지 않는다. 세션/본문/알림/OS 검증은 각 PR RED에서 필요하다. 수정 전 r1 결과와 r2 결과·뮤턴트 원시 로그·재현 명령·공정성/생략 범위는 [모델 보고서](../statecharts/routine-run/routine-run.report.md)에 있다.
 
-## 사용자 결정 필요
+### r2b: 여러 run 사이의 N/N+1 모델
 
-1. 채널 방식에서 사용자 대화와 루틴 결과가 섞일 때 표시를 정한다.
-   - A: 기존 본 채널 답을 공유하고 제출 출처/‘함께 처리: 루틴명’을 표시한다.
-   - B: 같은 세션에서 일하되 구조 결과 계약으로 별도 스레드에 루틴 결과를 나눈다.
-   - 추천 A: 기존 답 소유를 보존한다. O 라벨 편집 비용을 E에 포함하고 A′ 입력표시만으로 완료 처리하지 않는다.
-2. 단순 스크립트 등록 형태를 정한다.
-   - A: executable·argv 배열·cwd를 루틴 폼/API에서 직접 등록한다.
-   - B: JS wrapper와 sandbox spawn API를 추가해 등록한다.
-   - 추천 A: 별도 QuickJS 권한 확대 없이 launchd 대체 목적에 맞는다.
-3. 헤드리스의 Discord 완전0 여부를 정한다.
-   - A: 성공/진단 본문은0, 연속 실패 임계·paused·stale-paused·classification TTL 알림만 기존 outbox로 primary에 보낸다(스레드 생성0).
-   - B: 모든 사건을 대시보드에만 남겨 Discord 메시지를 완전히0으로 한다.
-   - 추천 A: 일상 소음을 없애면서 반복 실패·멈춘 작업을 알아차릴 수 있다. 이 설계의 사건 표는 A를 기본으로 구체화했다.
+연속 실패 카운터/명령봇 전이는 원 run의 exactly1과 다른 수명이라 작은 `RoutineFailureEscalation.tla`로 분리했다. 기존 RoutineRun source와18cfg는 바이트 동일해 r2 증거를 승계하며 중복 실행하지 않았다. 추가10cfg는 같은 새 source에서 지정 CLI로 실제 검사해 **5 GREEN/5 기대 RED**, 공식 checker10/10 기대집합 일치(35 TLC 실행,91.2초)다. 정상 ACK+허용 bot의 N1=76states/131steps, N3=90/155 GREEN이며 `ConfirmedIncidentsReachExistingOwner`까지 검사한다. Unknown N1=147/262, N3=167/298 및 IntakeRefused=63/107은 안전·typed outcome 종결만 GREEN이고 실제 대응 턴 성공은 아니다.
 
-사용자1/2의 답은 아직 없으며 권고 A/A를 기본안으로 썼다. 사전 판정 단계 도입은 별도 승인됐으나 현재7을 켜라는 승인은 아니다. r2 뒤 남는 P2는 구현 시험·수용 기준에 넘기며 질문/설계 리뷰를 반복하지 않는다.
+NotifyTriggers는 OrdinaryNotifyDoesNotStart, OffByOne은 TriggerOnlyAtNPlusOne, Duplicate는 AtMostOneTriggerPerStreak/AtMostOneRemediationPerIncident/AllEligibleStreaksOffered, NoReset은 CounterMatchesHistory/AllEligibleStreaksOffered, BlindUnknown은 NoBlindUnknownRepost/NoDuplicateDiscordMessage에서 각각 RED다. 원시 `sc-out-r2b/`의 cfg별 보고서/trace와 공식 checker를 보존한다. 새 source SHA256 `511bbb35abf2af5f943d79189cd56403a052d84e8dccc8d4ab836e1452049527`.
+
+모델은 이력 failed N+2→interrupted→succeeded→다음 failed N+1→skipped→failed→paused 경계와 outbox/owner interleaving을 검사하며 N은1/3, 카운터는N+2에서 포화한다. WF(history read/기존 delivery)가 계속 가능한 단계의 진행을 가정한다. 실제 first failed UUID SQL·첫 run snapshot N·N PATCH·CAS·GC·인증된 author flag·positive NotSent retry·provider callback 재귀는 H의 수정 전 RED이며 모델의 stable logical key 가정으로 대신 증명하지 않는다. Unknown에는 자동 probe/recovery 가정을 넣지 않고 completion_unconfirmed로 종결하며 원 run은 이미 failed다. [cfg별 결과·코드대조·명령·한계](../statecharts/routine-run/routine-failure-escalation.report.md)와 [기본 차트](../statecharts/routine-run/routine-failure-escalation.chart.mmd)를 따른다.
+
+## 결정 완료
+
+11-12 16:13 KST 사용자 답(이슈 #8117 댓글, coordinator 사본 `user-decisions-1613.md`)으로 **3건 완료·열린 결정0**이다.
+
+1. 채널 표시: A/B 모두 채택하지 않고 프롬프트 주입 뒤 사람이 Discord에 입력한 것과 동일 처리. 루틴 전용 진행/출처/공유 라벨·O 편집·별도 thread0, 귀속은 run API/대시보드만.
+2. 단순 스크립트: A 확정. 같은 루틴 폼/API에서 executable·argv·cwd 직접 등록.
+3. 조용한 headless: N(설정 가능, 기본3)회까지 primary 알림만, N+1에 기존 명령봇 Announce→intake 대응 턴1회. paused/stale/classification 자체는 알림만이며 성공 시 카운터0.
+
+사전 판정 단계 도입도 별도 승인됐으나 현재7을 켜라는 승인은 아니다. r2b는 사용자 답 적용이며 새 설계 리뷰가 아니다. r2 뒤 남는 P2는 구현 시험·수용 기준에 넘기고 질문/설계 리뷰를 반복하지 않는다.
 
 ## 리뷰 집중 항목과 남는 한계
 
 - 경계 시각: claim snapshot/PATCH, first-key↔deadline cancel, terminal↔timeout 동시성을 같은 actor/기존 row fence로 판정한다. 단순 시각 비교로 원문을 버리지 않는지 E0/E 시험이 담당한다.
 - 동시성 경합: machine 정책 managed-active/early/late/route 네 접점이 같은 capability를 소비하는지, shared answer attribution과 O lease가 하나인지 검토한다. 중복된 frame registration/본문 emitter가 생기면 차단이다.
 - 옛 형식 복원: legacy process 키·missing metadata·persistent/DM·과거 thread id·in-flight mode edit를 A/D/G에서 고정한다. 현재 row를 과거 run에 투영하지 않는다. 동적 DM 구형 정의는 자동 explicit-mode 승격 없이 유지한다.
+- N+1 전송: generic outbox의 Unknown 재게시와 실제 Announce bot provenance 재추론은 현재 미충족이다. H의 같은-row posting/ACK/unknown 및 인증된 sender flag RED로 막으며, 모델 GREEN을 실제 native 대응/Discord 도착 증거로 쓰지 않는다.
 - 문서로만 선언한 가드: C1/C2 source projection과 exact-withdraw는 현 main에 없는 구현 책임이며 PR1/C2/E0의 RED·뮤턴트로 검증해야 한다. #8114 약속을 구현 완료 증거로 쓰지 않는다.
 - 잘못된 0/PASS: script0·start-failure0·unknown·actual accepted1·Discord no-visible-result를 구별한다. O/transport ACK만으로 succeeded로 올리지 않는다. 이 조사에서 알림 도착·구형 paused backend는 미확인이다. r2의 exact terminal 비교6/6과 현재 prejudge 대상0/7을 성공 전달/실행 증거와 구별한다.
 - 기존 결함 범위: 이름 기반 orphan reaper(`fresh_session_reaper.rs:25-153`)와 best-effort session ownership stamp(`launch.rs:273-285`)를 더 넓히지 않는다. channel에는 reset/kill/reap 권한을 주지 않으며 process cancel은 기존 exact turn만 사용한다.
@@ -480,3 +499,5 @@ r1(off agent49/127·script15/33) 뒤 수정한 같은 r2 source에서 18cfg를 �
 <!-- doc-path-refs: proposed src/services/decision_gate.rs src/services/routines/prejudge.rs -->
 
 <!-- doc-path-refs: proposed src/services/discord/router/message_handler/provider_dispatch/owner_input/busy_target.rs src/services/discord/router/message_handler/intake_turn/owned_busy.rs -->
+
+<!-- doc-path-refs: proposed src/services/routines/discord_log/failure_escalation.rs src/services/message_outbox/routine_incident.rs src/server/outbox_actionable_delivery/routine_incident.rs src/services/discord/outbound/manual_delivery/routine_incident_nonce.rs -->

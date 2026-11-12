@@ -156,6 +156,16 @@ input-single-path/InputPathStopNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopNotSentLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopBusyNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopProofOverStopLive.cfg	InputPath	-	StoppedLeaves
+routine-run/RoutineFailureEscalationBlindUnknown.cfg	RoutineFailureEscalation	NoBlindUnknownRepost,NoDuplicateDiscordMessage	-
+routine-run/RoutineFailureEscalationDuplicate.cfg	RoutineFailureEscalation	AllEligibleStreaksOffered,AtMostOneRemediationPerIncident,AtMostOneTriggerPerStreak	-
+routine-run/RoutineFailureEscalationIntakeRefused.cfg	RoutineFailureEscalation	-	-
+routine-run/RoutineFailureEscalationN1.cfg	RoutineFailureEscalation	-	-
+routine-run/RoutineFailureEscalationN3.cfg	RoutineFailureEscalation	-	-
+routine-run/RoutineFailureEscalationNoReset.cfg	RoutineFailureEscalation	AllEligibleStreaksOffered,CounterMatchesHistory	-
+routine-run/RoutineFailureEscalationNotifyTriggers.cfg	RoutineFailureEscalation	OrdinaryNotifyDoesNotStart	-
+routine-run/RoutineFailureEscalationOffByOne.cfg	RoutineFailureEscalation	TriggerOnlyAtNPlusOne	-
+routine-run/RoutineFailureEscalationUnknownN1.cfg	RoutineFailureEscalation	-	-
+routine-run/RoutineFailureEscalationUnknownN3.cfg	RoutineFailureEscalation	-	-
 routine-run/RoutineRunBeforeHeld.cfg	RoutineRun	-	EveryRunTerminates
 routine-run/RoutineRunBeforeRetry.cfg	RoutineRun	NoDuplicateTurn,SuccessfulAgentExactlyOne	-
 routine-run/RoutineRunCancelAfterKey.cfg	RoutineRun	NoLateDispatch	-

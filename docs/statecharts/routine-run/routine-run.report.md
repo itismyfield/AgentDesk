@@ -153,3 +153,7 @@ export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew
 [공통 agent](routine-run.chart.mmd)·[script](routine-run-script.chart.mmd)·[사전 판정](routine-run-prejudge.chart.mmd), [first-key 취소 mutant](routine-run-cancel-after-key.chart.mmd)·[shared cleanup mutant](routine-run-channel-teardown.chart.mmd)·[script agent mutant](routine-run-script-agent.chart.mmd)·[Consumed mutant](routine-run-consumed-as-agent.chart.mmd), [before retry](routine-run-before-retry.chart.mmd)·[before Held](routine-run-before-held.chart.mmd)·[unknown 재전송](routine-run-resend-unknown.chart.mmd)·[기한 철회 생략](routine-run-no-deadline-cancel.chart.mmd)·[복구 철회 생략](routine-run-no-recovery-cancel.chart.mmd)·[조용한 폐기](routine-run-drop-held.chart.mmd).
 
 최종 모델 SHA256 `1afd1bc11f42c7909d7490e1b719096c53f8eaf526309f0b1d5df26d8800b5b3`. expected.tsv의18행과 실제 위반 집합이 일치한다.
+
+## r2b 사용자 결정: 여러 run 사이의 실패 에스컬레이션
+
+per-run exact1 모델의 소스와18cfg는 변경하지 않았다. 연속 실패 N/N+1과 별도 Announce 사고 대응 original은 [별도 모델 보고서](routine-failure-escalation.report.md)에서 검사한다. 원 routine 재실행·두 번째 routine 턴으로 합치지 않으며 Unknown의 eventual remediation 효과를 보장하지 않는다.
