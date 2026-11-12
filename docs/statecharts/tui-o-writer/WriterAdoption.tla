@@ -250,7 +250,8 @@ OtherTurnEnds == /\ otherCustody /\ otherCustody' = FALSE
 \* A process restart keeps the row and seeds adoption from the store (channel_policy.rs:285-351).
 \* A running turn's bridge is restored and judges again (restore_inflight.rs:2378); a held row
 \* waits for the boot recovery.
-Restart == /\ Booted /\ restarts < 3 /\ turn \in {"running", "held"}
+\* Assumed: no restart lands inside a queued input's claim (it lasts under one wake backoff).
+Restart == /\ Booted /\ restarts < 3 /\ turn \in {"running", "held"} /\ ~claim
            /\ restarts' = restarts + 1 /\ recovered' = FALSE
            /\ adopt' = Seed(store)
            /\ rejected' = (rejected \/ Seed(store) = "Refused")
@@ -295,8 +296,9 @@ WakeGiveUp == /\ Booted /\ turn = "held" /\ woke /\ claim /\ tries >= Retries /\
               /\ UNCHANGED <<store, adopt, oStart, turn, waitMark, otherCustody, lp, op,
                               rowCleared, dispatchSettled, attempts, restarts, recovered,
                               rejected, commitWithOther, hturn, hp>>
-\* A queued input's kick claims the mailbox while the row is held, once (the wake races it).
-ClaimOpens == /\ WakeModel /\ Booted /\ turn = "held" /\ ~opened
+\* A queued input's kick claims the mailbox while the row is held, once (the wake races it). It
+\* races the wake of this process's ready transition, before a restart or a second recovery.
+ClaimOpens == /\ WakeModel /\ Booted /\ turn = "held" /\ ~opened /\ restarts = 0 /\ ~wakeRead
               /\ opened' = TRUE /\ claim' = TRUE
               /\ FixedBase /\ UNCHANGED <<mk, wakeRead, tries, woke>>
               /\ UNCHANGED <<store, adopt, oStart, turn, waitMark, otherCustody, lp, op,
