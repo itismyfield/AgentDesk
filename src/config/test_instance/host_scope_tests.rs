@@ -67,6 +67,16 @@ fn host_scope_rejects_foreign_receipt_socket_and_node() {
     let scope = load(&manifest_path, &root, &config_path).unwrap();
     assert_eq!(scope.tmux.socket, root.join("runtime/tmux/socket"));
     assert!(scope.herdr.home.starts_with(&root));
+    let original = read_json(&manifest_path).unwrap();
+    for relative in ["config/renamed.yaml", "agentdesk.yaml"] {
+        let candidate = root.join(relative);
+        write(&candidate, &read_json(&config_path).unwrap());
+        let mut changed = original.clone();
+        changed["config_path"] = json!(candidate);
+        write(&manifest_path, &changed);
+        assert!(load(&manifest_path, &root, &candidate).is_err());
+    }
+    write(&manifest_path, &original);
     for (relative, key, value) in [
         (
             "receipt.json",
