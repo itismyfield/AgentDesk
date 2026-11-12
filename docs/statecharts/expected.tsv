@@ -398,3 +398,8 @@ outbound-port/OutboundPortRecordBeforePost.cfg	OutboundPort	NoSilentLoss,NoSucce
 session-lifecycle/HerdrHintARetryFixed.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHintARetryNoController.cfg	HerdrSession	-	AProgress
 session-lifecycle/HerdrHintARetryNoBudget.cfg	HerdrSession	-	AProgress
+turn-view/EmptyMailbox.cfg	TurnView	-	-
+turn-view/BusyActiveBefore.cfg	TurnView	OneBusyResult	-
+turn-view/BusyActiveFixed.cfg	TurnView	-	-
+turn-view/BusyActiveNoFallback.cfg	TurnView	OneBusyResult,NoInvisibleSettled	AcceptedEventuallyVisible
+turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible

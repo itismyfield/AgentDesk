@@ -260,6 +260,26 @@ pub(in crate::services::discord) fn owner_drive(
                 ingress::handoff_held(shared, &provider, ChannelId::new(channel), &original, hold)
                     .await;
             }
+            if !synthetic
+                && let (Some(shared), Err(error)) = (&runtime, &result)
+                && error.starts_with("NotSent(")
+            {
+                let originals = super::super::super::intake_gate::busy_inject::handback_originals(
+                    shared,
+                    ChannelId::new(channel),
+                    &original,
+                )
+                .await;
+                super::super::busy_retry::note_busy_result(
+                    shared,
+                    &provider,
+                    ChannelId::new(channel),
+                    &originals,
+                    &[],
+                    &result,
+                )
+                .await;
+            }
             #[cfg(test)]
             tests::idle::observe_root_recovery_handoff(channel, original.1.message_id, &result);
             result
