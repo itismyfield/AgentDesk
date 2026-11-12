@@ -57,6 +57,8 @@ A restart keeps the turn: a running turn's bridge is restored and judges again (
 | AdvanceOnEnd | stage1, a warm takeover that moves the frontier past a turn Codex ended but nobody delivered | `HeldBodyNotSkipped`, `RowClearedHasEvidence`; liveness `HeldTurnAnswered` |
 | RelayedByTime | stage1, a turn that ended before the baseline counted delivered by time alone | `HeldBodyNotSkipped`, `RowClearedHasEvidence`; liveness `HeldTurnAnswered` |
 | SwallowOwed | stage1, the new rollout committed while the one before still owes a retry | `NoCommitPastOwed` |
+| NoSerial | stage1, a second recovery of the kept row without the restore lock and disk recheck | `MarkerAtMostOnce` |
+| NoRetry | stage1, the adoption wake ends at its first judgement when a claim holds the row | liveness `RowEventuallySettled` |
 
 Main's violations are code paths on the baseline. Legacy posts the Deferred turn (the 11-08 trace: Deferred seed, a bound rollout with output skipped, warm input, Legacy W14/W10). Without a runtime root, or with an execution view and no store, the gate answers owned (`adoption.rs:419-421`, `channel_gate.rs:461-471`), so the bridge commits and the watcher settles with nothing posted. GateOnly holds the body but the warm channel never commits, or commits at end of file and skips the held turn.
 
@@ -68,4 +70,6 @@ Main's violations are code paths on the baseline. Legacy posts the Deferred turn
 - The output lock and delivery lease (`terminal_outcome_delivery.rs:735-757`) prevent duplicates; a held body takes no lease.
 - Turn presence keeps a held turn Busy; that is `turn-presence`'s `EventuallyStableBusy`.
 - Census instrumentation (denominators, end evidence) is an observation contract checked by Rust tests.
+- A transiently failed recovery send is not modelled (`Answer` is the gate's answer only); the wake's retry after one is fixed by the Rust test `a_transient_recovery_failure_is_judged_again_and_settles_the_kept_row_pg`.
+- The kick's claim is assumed to end within one wake backoff (`WakeDefer` clears it); a longer claim exhausts the wake and leaves the row to a restart.
 - tmux presence: with tmux alive the recovery budget never clears a row, so only the absent case is modelled.
