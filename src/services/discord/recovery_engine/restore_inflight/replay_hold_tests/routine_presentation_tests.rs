@@ -9,6 +9,8 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
     let mut shared = shared_on(&pool).await;
     let drain = evidence.starts_with("drain");
     let old_generation = if drain {
+        // Each isolated root needs its own allocator epoch, not the prior root cache.
+        crate::services::discord::runtime_store::set_process_generation_for_tests(None);
         crate::services::discord::runtime_store::allocate_process_generation()
     } else {
         0
