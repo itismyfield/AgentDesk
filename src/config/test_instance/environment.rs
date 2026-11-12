@@ -275,7 +275,10 @@ pub(crate) fn validate_config(config: &crate::config::Config) -> Result<(), Stri
     if let Some(snapshot) = scope()?
         && (config.server.local_base_url() != snapshot.api
             || !config.mcp_servers.is_empty()
-            || config.memory.backend != "file")
+            || config
+                .memory
+                .as_ref()
+                .is_none_or(|memory| memory.backend != "file" || !memory.mcp.endpoint.is_empty()))
     {
         return Err(rejected());
     }

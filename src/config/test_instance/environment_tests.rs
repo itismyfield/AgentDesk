@@ -144,7 +144,7 @@ fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
         }
         let _home = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "HOME",
-            "/synthetic/foreign-home",
+            std::ffi::OsStr::new("/synthetic/foreign-home"),
         );
         assert!(configure_tmux_command(&mut Command::new("/bin/false")).is_err());
         return;

@@ -128,13 +128,20 @@ fn instance_api_and_monitoring_stay_on_receipt_endpoint() {
         "all_proxy",
     ] {
         proxy_guards.push(
-            crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(key, &foreign_url),
+            crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+                key,
+                std::ffi::OsStr::new(&foreign_url),
+            ),
         );
     }
-    let _no_proxy =
-        crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock("NO_PROXY", "");
-    let _lower_no_proxy =
-        crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock("no_proxy", "");
+    let _no_proxy = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "NO_PROXY",
+        std::ffi::OsStr::new(""),
+    );
+    let _lower_no_proxy = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "no_proxy",
+        std::ffi::OsStr::new(""),
+    );
     let redirect = foreign_url.clone();
     let worker = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(8);
@@ -194,7 +201,7 @@ fn instance_api_and_monitoring_stay_on_receipt_endpoint() {
     }
     let _override = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "ADK_API_URL",
-        &foreign_url,
+        std::ffi::OsStr::new(&foreign_url),
     );
     assert!(crate::cli::monitoring::start(900004, "foreign", "foreign").is_err());
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
