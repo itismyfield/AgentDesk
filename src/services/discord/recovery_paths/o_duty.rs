@@ -28,11 +28,12 @@ pub(in crate::services::discord) fn owes(channel: u64, path: &str, start: u64) -
     })
 }
 
-/// `owes` for a row's own channel, transcript and turn start.
+/// `owes` for a row's own channel, transcript and turn start; a row without its start is not owed.
 pub(in crate::services::discord) fn owes_row(state: &InflightTurnState) -> bool {
-    let start = state.turn_start_offset.unwrap_or(state.last_offset);
     let path = state.output_path.as_deref().unwrap_or_default();
-    owes(state.channel_id, path, start)
+    state
+        .turn_start_offset
+        .is_some_and(|start| owes(state.channel_id, path, start))
 }
 
 /// Settles a stale leak O owes: the row's response offset moves to `end` as a delivered tail does.
