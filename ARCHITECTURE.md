@@ -1296,8 +1296,6 @@ src/
 │   │   ├── verified_tail.rs
 │   │   └── warm_followup.rs
 │   ├── decision_gate/
-│   │   ├── fixtures/
-│   │   │   └── comment_shape.json
 │   │   ├── runtime/
 │   │   │   ├── gemini.rs
 │   │   │   ├── key.rs
