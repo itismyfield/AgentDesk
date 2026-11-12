@@ -256,8 +256,11 @@ fn identity_checked_panes_refuse_unmarked_submission_target() {
         .send_literal(&name, "unexpected");
     let after = rig.snapshot(&name);
     let _ = rig.raw(&["kill-session", "-t", &exact_target(&name)]);
-    assert!(busy.is_err(), "direct busy Pane must check ownership");
-    assert!(actor.is_err(), "input actor Pane must check ownership");
+    assert_eq!(
+        (busy.is_err(), actor.is_err()),
+        (true, true),
+        "both direct Pane constructors must check ownership"
+    );
     assert!(
         submit.is_err(),
         "submission transport must refuse before a key"

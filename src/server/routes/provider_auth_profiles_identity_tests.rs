@@ -44,7 +44,7 @@ fn identity_login_retry_replaces_only_a_marked_auth_session() {
     let _ = rig.raw(&["kill-session", "-t", &format!("={session}")]);
     assert!(
         marker.status.success(),
-        "auth producer must attach identity at create"
+        "auth producer must attach identity at create; retry={retry:?}"
     );
     let identity = crate::domain::session_identity::managed::ManagedIdentity::decode_environment(
         std::str::from_utf8(&marker.stdout).unwrap(),
