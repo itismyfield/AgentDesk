@@ -296,6 +296,7 @@ pub(crate) fn refuse_service_management() -> Result<(), String> {
 pub(crate) fn validate_config(config: &crate::config::Config) -> Result<(), String> {
     if let Some(snapshot) = scope()?
         && (config.server.local_base_url() != snapshot.api
+            || config.server.host != "127.0.0.1"
             || !config.mcp_servers.is_empty()
             || config
                 .memory
