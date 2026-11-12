@@ -1,8 +1,3 @@
-use crate::db::agents::{
-    resolve_agent_channel_for_provider_pg, resolve_agent_dispatch_channel_pg,
-    resolve_agent_primary_channel_pg,
-};
-use crate::dispatch::dispatch_destination_provider_override;
 use sqlx::{PgPool, Row as SqlxRow};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,7 +119,7 @@ pub(crate) async fn load_card_issue_info_pg(
     .map(|value| value.unwrap_or_default())
 }
 
-async fn latest_completed_review_provider_pg(
+pub(crate) async fn latest_completed_review_provider_pg(
     pool: &PgPool,
     card_id: &str,
 ) -> Result<Option<String>, String> {
@@ -173,64 +168,6 @@ async fn latest_completed_review_provider_pg(
     }
 
     Ok(None)
-}
-
-async fn resolve_agent_channel_with_provider_override_pg(
-    pool: &PgPool,
-    agent_id: &str,
-    dispatch_type: Option<&str>,
-    provider_override: Option<&str>,
-) -> Result<Option<String>, String> {
-    if let Some(provider) = provider_override.filter(|provider| !provider.trim().is_empty()) {
-        if let Some(channel) = resolve_agent_channel_for_provider_pg(pool, agent_id, Some(provider))
-            .await
-            .map_err(|error| {
-                format!("resolve postgres provider channel for {agent_id} ({provider}): {error}")
-            })?
-        {
-            return Ok(Some(channel));
-        }
-    }
-
-    resolve_agent_dispatch_channel_pg(pool, agent_id, dispatch_type)
-        .await
-        .map_err(|error| format!("resolve postgres dispatch channel for {agent_id}: {error}"))
-}
-
-pub(crate) async fn resolve_dispatch_delivery_channel_pg(
-    pool: &PgPool,
-    agent_id: &str,
-    card_id: &str,
-    dispatch_type: Option<&str>,
-    dispatch_context: Option<&str>,
-) -> Result<Option<String>, String> {
-    let provider_override = if dispatch_type == Some("review") {
-        dispatch_destination_provider_override(dispatch_type, dispatch_context)
-    } else if dispatch_type == Some("review-decision") {
-        match dispatch_destination_provider_override(dispatch_type, dispatch_context) {
-            Some(provider) => Some(provider),
-            None => latest_completed_review_provider_pg(pool, card_id).await?,
-        }
-    } else {
-        None
-    };
-
-    resolve_agent_channel_with_provider_override_pg(
-        pool,
-        agent_id,
-        dispatch_type,
-        provider_override.as_deref(),
-    )
-    .await
-}
-
-pub(crate) async fn resolve_review_followup_channel_pg(
-    pool: &PgPool,
-    agent_id: &str,
-) -> Result<Option<String>, String> {
-    resolve_agent_primary_channel_pg(pool, agent_id)
-        .await
-        .map_err(|error| format!("resolve postgres primary review channel for {agent_id}: {error}"))
 }
 
 #[cfg(test)]

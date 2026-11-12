@@ -6,9 +6,19 @@ use crate::db::dispatched_sessions::hosted_execution::{HostedExecution, HostedOw
 use crate::services::platform::tmux::{self, SessionPresence};
 use crate::services::session_host::HostKind;
 use crate::services::tmux_common::{self as tc, host_marker};
+use tc::runtime_hint_fence::RuntimeHintFence;
 
-pub(super) async fn clear_fresh(owner: &HostedOwner, nonce: &str) -> Result<(), String> {
-    clear(owner, nonce).await
+pub(super) fn clear_fresh(
+    owner: &HostedOwner,
+    nonce: &str,
+    fence: &RuntimeHintFence,
+) -> Result<(), String> {
+    if owner.provider != "codex" {
+        return Ok(());
+    }
+    tc::with_tmux_source_authority(&owner.logical_key, |_| {
+        clear_owned(&owner.logical_key, nonce, fence)
+    })
 }
 
 pub(crate) async fn clear_retired(record: &HostedExecution) -> Result<(), String> {
@@ -24,7 +34,8 @@ async fn clear(owner: &HostedOwner, nonce: &str) -> Result<(), String> {
     }
     let (logical, nonce) = (owner.logical_key.clone(), nonce.to_owned());
     tokio::task::spawn_blocking(move || {
-        tc::with_tmux_source_authority(&logical, |_| clear_owned(&logical, &nonce))
+        let fence = RuntimeHintFence::acquire(&logical)?;
+        tc::with_tmux_source_authority(&logical, |_| clear_owned(&logical, &nonce, &fence))
     })
     .await
     .map_err(|error| format!("runtime marker cleanup task: {error}"))?
@@ -52,7 +63,8 @@ fn read_runtime(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-fn clear_owned(logical: &str, nonce: &str) -> Result<(), String> {
+fn clear_owned(logical: &str, nonce: &str, fence: &RuntimeHintFence) -> Result<(), String> {
+    fence.validate(logical)?;
     let mut markers = Vec::new();
     for path in runtime_paths(logical) {
         if let Some(bytes) = read_runtime(&path)? {
@@ -80,7 +92,7 @@ fn clear_owned(logical: &str, nonce: &str) -> Result<(), String> {
     {
         return Err("runtime marker session vacancy is not proven".into());
     }
-    // The source lock also fences successor nonce publication; keep every unjudged file intact.
+    // Recheck the execution and bytes under both locks before deleting either location.
     if !owned()
         || markers.iter().any(|(path, bytes)| {
             !read_runtime(path).is_ok_and(|current| current.as_deref() == Some(bytes.as_slice()))
@@ -88,6 +100,7 @@ fn clear_owned(logical: &str, nonce: &str) -> Result<(), String> {
     {
         return Err("runtime marker changed during cleanup".into());
     }
+    fence.validate(logical)?;
     for (path, _) in markers {
         std::fs::remove_file(path).map_err(|error| format!("remove runtime marker: {error}"))?;
     }

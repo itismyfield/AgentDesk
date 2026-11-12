@@ -2,11 +2,13 @@
 //! turn reads busy, notices when unknown affects a token or waiting input, and idle queue wakeups.
 
 use std::collections::{BTreeSet, HashMap};
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::FutureExt;
 use poise::serenity_prelude::ChannelId;
 use tokio::task::{AbortHandle, JoinSet};
 use tokio::time::Instant;
@@ -318,6 +320,7 @@ impl<E: Effects> Supervisor<E> {
     async fn run(mut self) {
         let mut workers = JoinSet::new();
         loop {
+            self.reap_workers(&mut workers);
             for channel in self.effects.channels() {
                 if self.channels.contains_key(&channel) {
                     continue;
@@ -327,14 +330,31 @@ impl<E: Effects> Supervisor<E> {
                     effects: self.effects.clone(),
                     channels: HashMap::from([(channel, presence)]),
                 };
-                workers.spawn(worker.run_channel());
+                // Preserve the channel key when the worker unwinds.
+                workers.spawn(async move {
+                    (
+                        channel,
+                        AssertUnwindSafe(worker.run_channel()).catch_unwind().await,
+                    )
+                });
             }
-            while let Some(result) = workers.try_join_next() {
-                if let Err(error) = result {
+            tokio::time::sleep(TICK).await;
+        }
+    }
+
+    fn reap_workers(&mut self, workers: &mut JoinSet<(u64, std::thread::Result<()>)>) {
+        while let Some(result) = workers.try_join_next() {
+            match result {
+                Ok((channel, outcome)) => {
+                    self.channels.remove(&channel);
+                    if outcome.is_err() {
+                        tracing::error!(channel, "[turn_presence] channel supervisor panicked");
+                    }
+                }
+                Err(error) => {
                     tracing::error!(%error, "[turn_presence] channel supervisor failed");
                 }
             }
-            tokio::time::sleep(TICK).await;
         }
     }
 

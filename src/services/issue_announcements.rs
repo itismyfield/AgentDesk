@@ -259,9 +259,10 @@ async fn resolve_announcement_channel_pg(
     let Some(agent_id) = agent_id.and_then(trim_non_empty) else {
         return Ok(None);
     };
-    let Some(channel_id) = crate::db::agents::resolve_agent_primary_channel_pg(pool, &agent_id)
-        .await
-        .map_err(|error| format!("resolve announcement channel for {agent_id}: {error}"))?
+    let Some(channel_id) =
+        crate::services::agent_channels::resolve_agent_primary_channel_pg(pool, &agent_id)
+            .await
+            .map_err(|error| format!("resolve announcement channel for {agent_id}: {error}"))?
     else {
         return Ok(None);
     };

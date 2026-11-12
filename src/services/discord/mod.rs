@@ -138,7 +138,6 @@ mod synthetic_headless_message_id;
 mod task_notification_delivery;
 pub(in crate::services::discord) mod task_supervisor;
 mod terminal_coordinate;
-mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
 #[cfg(all(test, unix))]

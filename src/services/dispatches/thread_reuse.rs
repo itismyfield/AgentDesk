@@ -7,7 +7,9 @@
 use serde_json::Value;
 use sqlx::{PgPool, Row as SqlxRow};
 
-use crate::db::agents::{resolve_agent_counter_model_channel_pg, resolve_agent_primary_channel_pg};
+use crate::services::agent_channels::{
+    resolve_agent_counter_model_channel_pg, resolve_agent_primary_channel_pg,
+};
 use crate::services::dispatches::discord_delivery::{
     get_mapped_thread_for_channel_pg, get_thread_for_channel_pg,
     set_thread_for_channel_map_only_pg, set_thread_for_channel_pg,
