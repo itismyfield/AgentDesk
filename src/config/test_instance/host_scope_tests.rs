@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::session_hosts::test_instance_validation::validate_hosts;
 use serde_json::json;
 
 pub(crate) fn fixture() -> (tempfile::TempDir, PathBuf) {
@@ -64,7 +65,7 @@ fn host_scope_rejects_foreign_receipt_socket_and_node() {
     let (_temp, root) = fixture();
     let manifest_path = root.join("manifest.json");
     let config_path = root.join("config/agentdesk.yaml");
-    let scope = load(&manifest_path, &root, &config_path).unwrap();
+    let scope = load_instance_declaration(&manifest_path, &root, &config_path).unwrap();
     assert_eq!(scope.tmux.socket, root.join("runtime/tmux/socket"));
     assert!(scope.herdr.home.starts_with(&root));
     let original = read_json(&manifest_path).unwrap();
@@ -74,7 +75,7 @@ fn host_scope_rejects_foreign_receipt_socket_and_node() {
         let mut changed = original.clone();
         changed["config_path"] = json!(candidate);
         write(&manifest_path, &changed);
-        assert!(load(&manifest_path, &root, &candidate).is_err());
+        assert!(load_instance_declaration(&manifest_path, &root, &candidate).is_err());
     }
     write(&manifest_path, &original);
     for (relative, key, value) in [
@@ -101,7 +102,7 @@ fn host_scope_rejects_foreign_receipt_socket_and_node() {
         *changed.pointer_mut(key).unwrap() = value;
         write(&path, &changed);
         assert!(
-            load(&manifest_path, &root, &config_path).is_err(),
+            load_instance_declaration(&manifest_path, &root, &config_path).is_err(),
             "{relative}:{key}"
         );
         write(&path, &original);
@@ -118,13 +119,13 @@ fn host_scope_rejects_linked_manifest_and_socket_ancestor() {
     let real = root.join("declaration.json");
     std::fs::rename(&manifest, &real).unwrap();
     symlink(&real, &manifest).unwrap();
-    assert!(load(&manifest, &root, &config).is_err());
+    assert!(load_instance_declaration(&manifest, &root, &config).is_err());
     std::fs::remove_file(&manifest).unwrap();
     std::fs::rename(&real, &manifest).unwrap();
     let socket_dir = root.join("runtime/tmux");
     std::fs::remove_dir(&socket_dir).unwrap();
     symlink(root.join("runtime/herdr"), &socket_dir).unwrap();
-    assert!(load(&manifest, &root, &config).is_err());
+    assert!(load_instance_declaration(&manifest, &root, &config).is_err());
 }
 
 #[test]

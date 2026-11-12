@@ -123,7 +123,7 @@ static RETIRED_WARNING: Once = Once::new();
 
 // Config loading validates before install; both stages use this same resolution.
 fn normalized(config: &Config) -> Result<Config> {
-    super::test_instance::validate_session_hosts(config).map_err(anyhow::Error::msg)?;
+    test_instance_validation::validate_session_hosts(config).map_err(anyhow::Error::msg)?;
     let mut effective = config.clone();
     user_default::resolve(&mut effective, || {
         std::env::var_os("HOME").map(PathBuf::from)
@@ -481,3 +481,39 @@ mod tests;
 #[cfg(test)]
 #[path = "session_hosts/user_default_validator_tests.rs"]
 mod user_default_validator_tests;
+
+pub(crate) mod test_instance_validation {
+    use super::{Config, EndpointMode};
+
+    pub(crate) fn validate_session_hosts(config: &Config) -> Result<(), String> {
+        let Some(instance) = crate::config::test_instance::current()? else {
+            return Ok(());
+        };
+        validate_hosts(config, &instance.instance_id, &instance.herdr)
+    }
+
+    pub(crate) fn validate_hosts(
+        config: &Config,
+        instance: &str,
+        expected: &crate::config::test_instance::HerdrHost,
+    ) -> Result<(), String> {
+        let hosts = &config.session_hosts.herdr;
+        if config.cluster.instance_id.as_deref() != Some(instance)
+            || hosts.endpoints.iter().any(|(key, endpoint)| {
+                endpoint.mode != EndpointMode::LegacyDedicated
+                    || key != &expected.endpoint_key
+                    || endpoint.execution_node != instance
+                    || endpoint.socket_path != expected.socket
+                    || endpoint.herdr_home != expected.home
+                    || endpoint.herdr_session != expected.session
+            })
+            || hosts
+                .channels
+                .values()
+                .any(|key| key != &expected.endpoint_key)
+        {
+            return Err("test Herdr configuration differs from its receipt".into());
+        }
+        Ok(())
+    }
+}

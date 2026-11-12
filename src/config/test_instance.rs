@@ -49,7 +49,7 @@ pub(crate) fn initialize() -> Result<(), String> {
                     .map(PathBuf::from)
                     .ok_or_else(rejected)
             };
-            let instance = load(
+            let instance = load_instance_declaration(
                 &env_path(MARKER)?,
                 &env_path("AGENTDESK_ROOT_DIR")?,
                 &env_path("AGENTDESK_CONFIG")?,
@@ -117,7 +117,11 @@ fn read_json(path: &Path) -> Result<Value, String> {
     serde_json::from_slice(&std::fs::read(path).map_err(|_| rejected())?).map_err(|_| rejected())
 }
 
-fn load(path: &Path, root: &Path, config_path: &Path) -> Result<TestInstance, String> {
+fn load_instance_declaration(
+    path: &Path,
+    root: &Path,
+    config_path: &Path,
+) -> Result<TestInstance, String> {
     checked_path(root)?;
     if std::fs::canonicalize(root).map_err(|_| rejected())? != root
         || path != root.join("manifest.json")
@@ -245,38 +249,6 @@ pub(crate) fn validate_tmux_target(target: &str) -> io::Result<()> {
                 .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_'))
     {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, rejected()));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_session_hosts(config: &super::Config) -> Result<(), String> {
-    let Some(instance) = current()? else {
-        return Ok(());
-    };
-    validate_hosts(config, &instance.instance_id, &instance.herdr)
-}
-
-fn validate_hosts(
-    config: &super::Config,
-    instance: &str,
-    expected: &HerdrHost,
-) -> Result<(), String> {
-    let hosts = &config.session_hosts.herdr;
-    if config.cluster.instance_id.as_deref() != Some(instance)
-        || hosts.endpoints.iter().any(|(key, endpoint)| {
-            endpoint.mode != super::session_hosts::EndpointMode::LegacyDedicated
-                || key != &expected.endpoint_key
-                || endpoint.execution_node != instance
-                || endpoint.socket_path != expected.socket
-                || endpoint.herdr_home != expected.home
-                || endpoint.herdr_session != expected.session
-        })
-        || hosts
-            .channels
-            .values()
-            .any(|key| key != &expected.endpoint_key)
-    {
-        return Err("test Herdr configuration differs from its receipt".into());
     }
     Ok(())
 }

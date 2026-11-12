@@ -129,6 +129,10 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
         call: &HerdrCall,
         witness: Option<&ServerWitness>,
     ) -> HerdrOutcome {
+        let frame = self
+            .framing
+            .encode(call)
+            .map_err(HerdrTransportError::NotSent)?;
         if let Some(owner) =
             test_instance::owned_herdr(&self.socket_path).map_err(HerdrTransportError::NotSent)?
         {
@@ -145,13 +149,13 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
                     true
                 }
                 HerdrRequest::SessionSnapshot {} => false,
-                HerdrRequest::PaneGet { pane_id }
-                | HerdrRequest::PaneProcessInfo { pane_id }
-                | HerdrRequest::PaneRead { pane_id, .. }
-                | HerdrRequest::PaneClose { pane_id }
-                | HerdrRequest::PaneSendText { pane_id, .. }
-                | HerdrRequest::PaneSendKeys { pane_id, .. }
-                | HerdrRequest::PaneSendInput { pane_id, .. } => owner.contains_pane(pane_id),
+                _ => {
+                    let wire: serde_json::Value = serde_json::from_slice(&frame)
+                        .map_err(|error| HerdrTransportError::NotSent(error.to_string()))?;
+                    wire.pointer("/params/pane_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|pane_id| owner.contains_pane(pane_id))
+                }
             };
             if !admitted {
                 return Err(HerdrTransportError::NotSent(
@@ -159,10 +163,6 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
                 ));
             }
         }
-        let frame = self
-            .framing
-            .encode(call)
-            .map_err(HerdrTransportError::NotSent)?;
         let mut writer = &stream;
         if let Err(failure) = wire::write_frame(&mut writer, &frame) {
             let detail = format!(

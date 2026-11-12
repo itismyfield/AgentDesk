@@ -746,6 +746,34 @@ fn write_instance_owner(value: &Value) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
+struct WirePaneTarget(Option<&'static str>);
+
+impl super::super::wire::HerdrFraming for WirePaneTarget {
+    fn encode(&self, call: &HerdrCall) -> Result<Vec<u8>, String> {
+        let mut value = serde_json::to_value(call).map_err(|error| error.to_string())?;
+        let params = value["params"].as_object_mut().ok_or("missing params")?;
+        match self.0 {
+            Some(pane) => {
+                params.insert("pane_id".into(), json!(pane));
+            }
+            None => {
+                params.remove("pane_id");
+            }
+        }
+        let mut bytes = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    fn read_frame(
+        &self,
+        reader: &mut dyn BufRead,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, super::super::wire::FrameError> {
+        super::super::wire::HerdrFraming::read_frame(&LineJsonFraming, reader, max_bytes)
+    }
+}
+
 #[test]
 fn test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreign_receipts() {
     use crate::config::test_instance;
@@ -845,6 +873,39 @@ fn test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreig
         );
         assert!(pair_before_input.load(Ordering::SeqCst));
         assert!(process_reads.load(Ordering::SeqCst) > 0);
+        for target in [Some("unowned:pane"), None] {
+            let configured = HerdrEndpoint::new(
+                &instance.instance_id,
+                &instance.herdr.endpoint_key,
+                &server.path,
+                &instance.herdr.session,
+            )
+            .unwrap();
+            let transport = HerdrSocketTransport::new(
+                &configured,
+                HerdrSocketConfig::default(),
+                WirePaneTarget(target),
+            )
+            .with_peer_reader(Box::new(|_| {
+                let pid = std::process::id();
+                Ok((pid, start_of(pid)))
+            }));
+            let call = host.call(HerdrRequest::PaneSendInput {
+                pane_id: "w1:p1".into(),
+                text: "sentinel".into(),
+                keys: vec!["enter".into()],
+            });
+            let before = server.methods();
+            assert!(matches!(
+                transport.call_with_witness(&call, &witness),
+                Err(contract::HerdrTransportError::NotSent(_))
+            ));
+            assert_eq!(
+                server.methods(),
+                before,
+                "unowned or missing wire target issued RPC"
+            );
+        }
         let methods = server.methods();
         let created = methods
             .iter()
