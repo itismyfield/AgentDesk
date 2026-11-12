@@ -83,6 +83,33 @@ class ScriptCheckInputSelection(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertNotIn(title, self.cli(SCRIPT_CHECK_CHANGED_FILES=json.dumps([path])))
 
+    def test_user_feature_map_inputs_select_both_checks(self) -> None:
+        titles = {"User feature map static check", "User feature map generation contract"}
+        self.assertTrue(titles <= selector.SELF_TEST_INPUTS.keys())
+        paths = (
+            "docs/user-feature-map.rows.yaml", "docs/user-feature-map.md",
+            "docs/generated/user-feature-coverage.json", "docs/source-of-truth.md",
+            "docs/test-infra.design.md", "docs/e2e/multi-provider-e2e.md",
+            "tests/e2e/tui_relay/scenarios/README.md",
+            "tests/e2e/tui_relay/scenarios/E-50-claude-clear-and-turns.yaml",
+            "tests/e2e/tui_relay/scenarios/retired/E-retired.yaml",
+            "scripts/e2e/tui_relay/assertion_registry.py", "scripts/e2e/run_tui_relay.py",
+            "scripts/generate_user_feature_map.py", "tests/test_generate_user_feature_map.py",
+            "tests/test_user_feature_map_static.py",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                skipped = self.cli(SCRIPT_CHECK_CHANGED_FILES=json.dumps([path]))
+                self.assertTrue(titles.isdisjoint(skipped), skipped)
+
+    def test_user_feature_map_unknown_selection_executes_both_checks(self) -> None:
+        titles = {"User feature map static check", "User feature map generation contract"}
+        self.assertTrue(titles <= selector.SELF_TEST_INPUTS.keys())
+        for changes in ("", "[]", "malformed"):
+            with self.subTest(changes=changes):
+                done = self.fixture_runner(SCRIPT_CHECK_CHANGED_FILES=changes)
+                self.assertTrue(titles <= self.executed(done))
+
     def test_added_deleted_and_renamed_paths_need_no_file_to_exist(self) -> None:
         fixture = {"alpha": ("tools/alpha/**",), "beta": ("tools/beta/**",)}
         with patch.object(selector, "SELF_TEST_INPUTS", fixture):
