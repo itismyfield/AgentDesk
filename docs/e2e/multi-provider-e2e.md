@@ -253,6 +253,111 @@ Remaining exact gaps:
   `E-28` is the `unsupported-known-gap` row because those worker roles cannot
   execute shell/tool commands in the current E2E contract.
 
+## User-feature coverage metadata
+
+The handwritten [feature rows](../user-feature-map.rows.yaml) define user-visible
+contracts and explicit applicable combinations. The generator combines them
+with scenario claims to produce the [feature map](../user-feature-map.md) and
+[coverage JSON](../generated/user-feature-coverage.json). Both outputs are
+generated; their counts describe supported live specifications, not execution
+PASS or result freshness.
+
+```yaml
+feature_coverage:
+  schema: 1
+  claims:
+    - feature_id: message-delivery
+      host: tmux
+      provider: claude
+      surface: channel
+      state: idle
+      qualifiers: {turn_origin: managed, output_path: unspecified, input_source: legacy_automation}
+      assertion_ids: [provider_text_present, no_duplicate_marker, no_duplicate_content]
+```
+
+The rows file uses `schema: 1`, a nonempty `features` list and top-level
+`removal_reasons: [{key, reason}]`. Each feature supplies `feature_id`, `title`,
+`visible_contract`, `verification`, `owner`, `chart` and a nonempty `applicable`
+list. This excerpt shows the nested requirement and source-rule shape:
+
+```yaml
+features:
+  - feature_id: message-delivery
+    # title, visible_contract, verification, owner and chart accompany this excerpt.
+    applicable:
+      - host: tmux
+        provider: claude
+        surface: channel
+        state: idle
+        qualifiers: {turn_origin: managed, output_path: unspecified, input_source: legacy_automation}
+        required_assertion_ids: [provider_text_present, no_duplicate_marker, no_duplicate_content]
+    assertion_sources:
+      provider_text_present: [human, allowed_bot, legacy_automation]
+    pending_assertions: []
+```
+
+`assertion_sources` maps required operation names to their allowed input-source
+lists. A missing operation is described in `pending_assertions` as
+`{assertion_id, issue, reason, input_sources}`; its `input_sources` list supplies
+the same applicability rule. An unresolved operation keeps its applicable cell
+unsupported. Tuple qualifiers require `turn_origin` (`managed`/`native`),
+`output_path` (`legacy`/`tui_o`/`unspecified`) and `input_source`
+(`human`/`allowed_bot`/`legacy_automation`). Optional `execution_node`
+(`default`/`preferred`) and `ownership` (`unowned`/`bound`) also participate in
+the exact stable tuple key.
+
+Each claim matches one exact row combination, including all qualifiers.
+`assertion_ids` are operation names from the pure exported
+`ASSERTION_OPTIONS` in `scripts/e2e/tui_relay/assertion_registry.py`; they must
+also be actual action keys in that scenario's `assertions`. They are not
+invocation IDs, and assertion entries still accept only `requires_feature`
+as sibling metadata. `wait_for_*` steps do not count as assertion operations.
+
+Supported claim cell mappings are `claude-tui` → `tmux/claude`,
+`codex-tui` → `tmux/codex`, `claude-herdr` → `herdr/claude`, and
+`codex-herdr` → `herdr/codex`. Pipe and empty orchestration cell lists do not
+establish a TUI combination. A claim must include every matching row's
+`required_assertion_ids`; thread and busy combinations also automatically need
+`surface_thread_observed` and `state_busy_observed`, respectively. Unimplemented
+operations belong in row `pending_assertions` with issue/reason/source
+applicability and leave the combination missing. A declaration of a witness
+in metadata cannot satisfy its implementation requirement.
+
+`input_source` separates human, allowed-bot and legacy automation contracts.
+Allowed-bot or legacy automation claims cannot satisfy human-only merging,
+queued acknowledgement, authentication, preservation, thread-routing or node
+eligibility requirements. `E-50`/`E-51` use the legacy send API transport and
+claim only common delivery with `input_source: legacy_automation`.
+`output_path: unspecified` means no specific Legacy/`tui_o` output receipt is
+observed; it cannot satisfy a row requiring either specific profile. Their
+clear acknowledgement wait does not establish full reset/clear coverage.
+
+The generator rejects unknown feature claims, duplicate feature/claim IDs, invalid axes and
+qualifiers, claims outside the row inventory or scenario cells, unsupported or
+unexecuted assertion IDs, and missing required witnesses. Fixture, known-gap
+and retired specifications are tracked separately and do not fill live cells.
+Feature/applicable/required-assertion reductions require a new removal reason
+matching the exact removed stable key compared with the explicit base commit.
+Keys are `feature:<feature_id>`, `applicable:<feature_id>:<canonical tuple JSON>`
+and `required:<feature_id>:<canonical tuple JSON>:<operation>`; canonical tuple
+JSON contains the four axes and sorted qualifiers. An old key or old general
+reason cannot authorize a later reduction. An unresolved base
+is an error. Only a valid base without the rows file is initial bootstrap, and
+the current feature/applicable inventory must still be nonempty.
+
+Regenerate and verify from the repository root with Python 3.11+ and PyYAML:
+
+```bash
+python3 scripts/generate_user_feature_map.py --write --base-ref origin/main
+python3 scripts/generate_user_feature_map.py --check --base-ref origin/main
+```
+
+CI passes `TEST_LANE_BASELINE_REF`/`GFP_BASE_SHA` explicitly. Static checks use
+a valid local `origin/main` when CI selection context is absent. The generator
+checks source hashes and exact output bytes; handwritten edits to either
+generated output fail. This adds static integrity checks without scheduling
+live execution or a new live merge-blocking gate.
+
 ## Driver
 
 Full matrix baseline:

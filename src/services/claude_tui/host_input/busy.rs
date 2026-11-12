@@ -71,7 +71,7 @@ impl BusyOperation {
         timing: &'static busy_inject::Timing,
         declared: bool,
         cancel: Arc<CancelToken>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let (target, writer) = herdr.map_or_else(
             || (InputTarget::Tmux(session.into()), None),
             |(target, writer)| (InputTarget::Herdr(target), Some(writer)),
@@ -86,11 +86,11 @@ impl BusyOperation {
         declared: bool,
         cancel: Arc<CancelToken>,
         writer: Option<String>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let (submit, host_tag): (BusySubmit, Option<&'static str>) = match target {
             InputTarget::Tmux(session) => {
                 let adapter = tmux::Adapter {
-                    pane: busy_inject::Pane::with_program(&session, program),
+                    pane: busy_inject::Pane::with_program(&session, program)?,
                     timing,
                     declared,
                     cancel,
@@ -109,7 +109,7 @@ impl BusyOperation {
                 (Box::new(move |request| adapter.submit(request)), None)
             }
         };
-        Self { submit, host_tag }
+        Ok(Self { submit, host_tag })
     }
 
     pub(crate) fn submit(&self, request: &Request<'_>) -> BusyReport {

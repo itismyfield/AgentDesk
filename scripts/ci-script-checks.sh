@@ -269,6 +269,10 @@ else
 fi
 fi
 
+if run_check guards "User feature map static check"; then
+"$PYTHON" -m unittest tests.test_user_feature_map_static
+fi
+
 if run_check guards "PG audit guard"; then
 ./scripts/pg-audit.sh
 fi
@@ -558,6 +562,19 @@ if run_check guards "Relay-authority named-target floor contract (#5071)"; then
 "$PYTHON" -m unittest tests.test_check_relay_authority_contract
 fi
 
+if run_check contracts "User feature map generation contract"; then
+feature_map_base="${TEST_LANE_BASELINE_REF:-${GFP_BASE_SHA:-}}"
+if [ -z "$feature_map_base" ]; then
+  if [ -n "${CI:-}${GITHUB_ACTIONS:-}${GFP_EVENT_NAME:-}${GITHUB_EVENT_NAME:-}" ]; then
+    echo "ERROR: CI feature map check requires TEST_LANE_BASELINE_REF or GFP_BASE_SHA" >&2
+    exit 1
+  fi
+  feature_map_base=origin/main
+fi
+"$PYTHON" scripts/generate_user_feature_map.py --check --base-ref "$feature_map_base"
+"$PYTHON" -m unittest tests.test_generate_user_feature_map
+fi
+
 if run_check contracts "Fast compile check PR/main/nightly split contract (#4747)"; then
 "$PYTHON" -m unittest tests.test_fast_check_ci_wiring
 fi
@@ -825,6 +842,12 @@ fi
 
 if run_check cargo "Maintainability audit tests"; then
 "$PYTHON" -m unittest tests.test_audit_maintainability tests.test_module_layer_baseline_records tests.test_module_layer_measurement tests.test_module_layer_ratchet tests.test_module_layer_classification
+fi
+
+if run_check guards "Low-level accessor ratchet tests"; then
+"$PYTHON" -m unittest tests.test_low_level_accessors
+"$PYTHON" -m unittest tests.test_low_level_accessor_baseline
+"$PYTHON" -m unittest tests.test_low_level_accessor_wiring
 fi
 
 if run_check cargo "Maintainability audit"; then

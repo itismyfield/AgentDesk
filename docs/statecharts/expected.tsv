@@ -418,3 +418,5 @@ execution-authority/ExecutionChildViewBefore.cfg	ExecutionChildView	-	ChildRecor
 execution-authority/ExecutionChildViewFixed.cfg	ExecutionChildView	-	-
 execution-authority/ExecutionChildViewAlias.cfg	ExecutionChildView	ChildOwnPermit	-
 execution-authority/ExecutionChildViewRest.cfg	ExecutionChildView	ChildRecordedNoRest	-
+session-lifecycle/SessionIdentityGateAfter.cfg	SessionIdentityGate	-	-
+session-lifecycle/SessionIdentityGateBefore.cfg	SessionIdentityGate	NoForeignMutation	-
