@@ -1,7 +1,7 @@
 # TmuxSession
 
-TLC reached 142 states and 517 steps. The chart draws 10 states and 16 arrows.
-The chart does not draw 396 steps that stay in one chart state.
+TLC reached 142 states and 413 steps. The chart draws 10 states and 16 arrows.
+The chart does not draw 292 steps that stay in one chart state.
 
 ## EffortContinuationEventuallyInjected breaks
 TLC's counterexample is in tlc-EffortContinuationEventuallyInjected.out. It has 10 steps:

@@ -1,7 +1,7 @@
 # TmuxSession
 
-TLC reached 342 states and 1305 steps. The chart draws 11 states and 20 arrows.
-The chart does not draw 956 steps that stay in one chart state.
+TLC reached 342 states and 1097 steps. The chart draws 11 states and 20 arrows.
+The chart does not draw 748 steps that stay in one chart state.
 
 ## EffortContinuationFirst breaks
 The shortest path has 7 steps:

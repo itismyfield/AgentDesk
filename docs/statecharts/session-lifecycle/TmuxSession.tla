@@ -256,6 +256,8 @@ EffortInit(mode) ==
         binding |-> 0, daemonGeneration |-> 0, sameSession |-> TRUE, revision |-> 0,
         failed |-> FALSE, failureVisible |-> FALSE, noticeFailed |-> FALSE,
         priorityBroken |-> FALSE, debt |-> 1, debtPosts |-> 0]
+EffortOriginalNeverFinishes == effort.mode \in
+    {"nonfinishing", "nonfinishing-failure", "no-interrupt", "no-close"}
 EffortRebooting == effort.phase \in {"requested", "interrupted", "stopped", "booting"}
 EffortRequest ==
     /\ UNCHANGED vars
@@ -280,6 +282,7 @@ EffortInputArrives ==
 EffortInterrupt ==
     /\ UNCHANGED vars
     /\ effort.phase = "requested" /\ effort.active # "none" /\ effort.root < 2
+    /\ effort.mode # "no-interrupt"
     /\ effort' = [effort EXCEPT !.root = @ + 1, !.pending = effort.root + 1,
         !.active = "none", !.phase = "interrupted", !.presence = "Unknown",
         !.noticeIntents[effort.root + 1] = IF effort.mode = "no-notice" THEN 0 ELSE 1]
@@ -302,7 +305,7 @@ EffortDuplicateNotice ==
 \* HostTerminated is a mute settlement: the reader still owns committed output.
 EffortCloseInterrupted ==
     /\ UNCHANGED vars
-    /\ effort.phase = "interrupted"
+    /\ effort.phase = "interrupted" /\ effort.mode # "no-close"
     /\ effort' = [effort EXCEPT !.closed = @ \cup {effort.root}, !.phase = "stopped",
         !.row = FALSE, !.placeholder = FALSE, !.watcher = "none"]
 EffortNoActiveTurn ==
@@ -325,7 +328,7 @@ EffortStopTui ==
         !.users = IF effort.mode = "drop-queue" THEN <<>> ELSE @]
 EffortLaunchFails ==
     /\ UNCHANGED vars
-    /\ effort.phase = "booting" /\ effort.mode \in {"failure", "retry"} /\ ~effort.failureVisible
+    /\ effort.phase = "booting" /\ effort.mode \in {"failure", "retry", "nonfinishing-failure"} /\ ~effort.failureVisible
     /\ effort' = [effort EXCEPT !.phase = "failed", !.failed = TRUE, !.failureVisible = TRUE,
         !.wake = TRUE]
 EffortRetryFailed ==
@@ -336,7 +339,7 @@ EffortRetryFailed ==
 \* This summarizes verified rebind + writer ready, never process-spawn alone.
 EffortResume ==
     /\ UNCHANGED vars
-    /\ effort.phase = "booting" /\ effort.mode # "failure"
+    /\ effort.phase = "booting" /\ effort.mode \notin {"failure", "nonfinishing-failure"}
     /\ (effort.mode # "retry" \/ effort.failureVisible)
     /\ effort' = [effort EXCEPT !.phase = "ready", !.binding = @ + 1,
         !.revision = effort.changes, !.watcher = "new", !.presence = "Idle",
@@ -360,6 +363,7 @@ EffortAdmitUser ==
            !.priorityBroken = @ \/ effort.pending > 0]
 EffortFinish ==
     /\ UNCHANGED vars
+    /\ (effort.active # "original" \/ ~EffortOriginalNeverFinishes)
     /\ effort.active # "none" /\ effort.phase \in {"running", "waiting", "waiting-herdr", "requested", "ready"}
     /\ LET task == IF effort.active = "original" THEN 0
                    ELSE IF effort.active = "continuation" THEN effort.root ELSE effort.user + 2
@@ -375,7 +379,11 @@ EffortDeliverOldDebt ==
     /\ UNCHANGED vars
     /\ effort.debt = 1
     /\ effort' = [effort EXCEPT !.debt = 0, !.debtPosts = @ + 1]
-EffortRest == UNCHANGED allVars
+\* Only a physically idle provider or an explicit failed restart is a normal rest state.
+EffortRest ==
+    /\ effort.phase = "failed"
+       \/ (effort.phase \in {"running", "ready", "waiting", "waiting-herdr"} /\ effort.active = "none")
+    /\ UNCHANGED allVars
 EffortNext == EffortRequest \/ EffortSecondRequest \/ EffortInputArrives \/ EffortInterrupt
     \/ EffortNoticeFails \/ EffortTellInterrupted \/ EffortDuplicateNotice \/ EffortCloseInterrupted
     \/ EffortNoActiveTurn \/ EffortCurrentHerdrApply \/ EffortCurrentNextTurn \/ EffortStopTui \/ EffortLaunchFails
@@ -410,6 +418,10 @@ EffortDropQueueSpec == EffortInit("drop-queue") /\ [][EffortNext]_allVars /\ Eff
 EffortNoNoticeSpec == EffortInit("no-notice") /\ [][EffortNext]_allVars /\ EffortFair
 EffortDuplicateNoticeSpec == EffortInit("notice-twice") /\ [][EffortNext]_allVars /\ EffortFair
 EffortRepostSpec == EffortInit("repost") /\ [][EffortNext]_allVars /\ EffortFair
+EffortNonFinishingSpec == EffortInit("nonfinishing") /\ [][EffortNext]_allVars /\ EffortFair
+EffortNonFinishingFailureSpec == EffortInit("nonfinishing-failure") /\ [][EffortNext]_allVars /\ EffortFair
+EffortNoInterruptSpec == EffortInit("no-interrupt") /\ [][EffortNext]_allVars /\ EffortFair
+EffortNoCloseSpec == EffortInit("no-close") /\ [][EffortNext]_allVars /\ EffortFair
 EffortReplyOnce == (\A t \in EffortTasks : effort.replies[t] <= 1) /\ effort.debtPosts <= 1
 EffortOldDebtNotLost == effort.debt = 1 \/ effort.debtPosts = 1
 EffortOldDebtEventuallyPosted == (effort.debt = 1) ~> (effort.debtPosts = 1)
@@ -433,6 +445,8 @@ EffortContinuationEventuallyInjected == \A r \in EffortRoots :
     (r \in effort.resumed) ~> (effort.continuations[r] = 1)
 EffortPendingEventuallyProcessed == \A i \in EffortPeople :
     (effort.phase = "ready" /\ i <= effort.arrived) ~> (effort.userCounts[i] = 1)
-EffortFailureVisible == (effort.phase = "booting" /\ effort.mode \in {"failure", "retry"} /\ ~effort.failureVisible) ~> effort.failureVisible
+EffortFailureVisible == (effort.phase = "booting" /\ effort.mode \in {"failure", "retry", "nonfinishing-failure"} /\ ~effort.failureVisible) ~> effort.failureVisible
+
+EffortRequestResolves == (effort.changes > 0) ~> (effort.phase \in {"ready", "failed"})
 
 ====
