@@ -1037,10 +1037,12 @@ src/
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   ├── relay_receipts.rs
-│   │   │   └── resume_renumber_tests.rs
+│   │   │   ├── resume_renumber_tests.rs
+│   │   │   └── same_session_source_tests.rs
 │   │   ├── host_input/
 │   │   │   ├── busy/
 │   │   │   │   ├── herdr.rs
+│   │   │   │   ├── herdr_tests.rs
 │   │   │   │   └── tmux.rs
 │   │   │   ├── busy.rs
 │   │   │   └── transport.rs
@@ -2262,6 +2264,7 @@ src/
 │   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── intake_dispatch.rs
+│   │   │   │   │   ├── owned_busy.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── replay_start.rs
@@ -2344,6 +2347,8 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_busy_entry_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_busy_late_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
@@ -3945,6 +3950,10 @@ src/
 │   │   │   └── pane.rs
 │   │   ├── human_frame/
 │   │   │   ├── history/
+│   │   │   │   ├── notice_owner/
+│   │   │   │   │   ├── census/
+│   │   │   │   │   │   └── census_tests.rs
+│   │   │   │   │   └── census.rs
 │   │   │   │   ├── v2/
 │   │   │   │   │   ├── carried.rs
 │   │   │   │   │   ├── carried_tests.rs
@@ -4100,6 +4109,7 @@ src/
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── notice_activation_tests.rs
+│   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
 │   │   │   │   ├── notice_work.rs

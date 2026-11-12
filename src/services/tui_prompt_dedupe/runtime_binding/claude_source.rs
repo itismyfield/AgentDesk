@@ -110,6 +110,41 @@ pub(super) struct Candidate<'a> {
 }
 
 impl Candidate<'_> {
+    /// Pins a launch's stat only after the opened transcript proves that exact registered file.
+    fn promote_registered(&self) -> io::Result<()> {
+        let Some(proposal) = self.proposal.as_ref() else {
+            return Ok(());
+        };
+        let SpawnNonceMarker::Known(nonce) = observe_spawn_nonce_marker(self.tmux_session) else {
+            return Ok(());
+        };
+        let Some(registered) = binding_events::unverified_current_source(
+            proposal.channel_id,
+            self.tmux_session,
+            &nonce,
+        )?
+        else {
+            return Ok(());
+        };
+        if registered.session_id != self.payload_session_id
+            || registered.path != Path::new(&self.bound.output_path)
+        {
+            return Ok(());
+        }
+        let (Checked::Verified(source), _) = self.check()? else {
+            return Ok(());
+        };
+        if source != registered {
+            return Ok(());
+        }
+        #[cfg(test)]
+        after_check();
+        if binding_events::codex::source_file_matches(&source) {
+            binding_events::record_verified(proposal, &source)?;
+        }
+        Ok(())
+    }
+
     /// Checks the candidate and logs the outcome; `true` when the binding may follow it.
     /// `skip` and `failure` are set as `adopt_continuation` documents.
     pub(super) fn judge(
@@ -365,16 +400,16 @@ impl Candidate<'_> {
     }
 }
 
-/// Lets a prompt of the session a pane is bound to, named by the pane's own launch command,
-/// supersede the Pending it outlived; the binding and its hook routing stay as they are.
-pub(crate) fn reclaim_with_current_prompt(session_id: &str, hook: &HookSignal) -> bool {
+/// Verifies the launch source on its own hook; a prompt may also reclaim a Pending it outlived.
+/// The binding, cursor and hook routing stay as they are.
+pub(crate) fn reclaim_with_current_prompt(session_id: &str, hook: &HookSignal) -> io::Result<bool> {
     let session_id = session_id.trim();
     let payload_path = hook.transcript_path.as_deref().map(str::trim);
     let Some(payload_path) = payload_path
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
     else {
-        return false;
+        return Ok(false);
     };
     let opened = source_verify::observe_transcript(&payload_path);
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -382,7 +417,7 @@ pub(crate) fn reclaim_with_current_prompt(session_id: &str, hook: &HookSignal) -
     let mut skip = None;
     let key = PromptKey::new("claude", session_id);
     let Some((tmux, binding)) = AdoptSkip::bound_pane(&state, &key, &mut skip) else {
-        return false;
+        return Ok(false);
     };
     let bound = binding.value.clone();
     let claude = bound.runtime_kind == RuntimeHandoffKind::ClaudeTui;
@@ -392,7 +427,7 @@ pub(crate) fn reclaim_with_current_prompt(session_id: &str, hook: &HookSignal) -
         bound.session_id.as_deref().map(|bound| bound == session_id),
         output.parent().and_then(Path::parent),
     ) else {
-        return false;
+        return Ok(false);
     };
     let candidate = source_verify::normalize_payload_path(root, &payload_path);
     let candidate = candidate.display().to_string();
@@ -402,7 +437,7 @@ pub(crate) fn reclaim_with_current_prompt(session_id: &str, hook: &HookSignal) -
     };
     let channel_id = state.channel_by_tmux.get(&tmux).map(|e| e.value);
     let Some(channel_id) = channel_id.filter(|id| *id != 0) else {
-        return false;
+        return Ok(false);
     };
     let proposal = Proposal {
         channel_id,
@@ -424,7 +459,8 @@ pub(crate) fn reclaim_with_current_prompt(session_id: &str, hook: &HookSignal) -
         hook,
         opened: &opened,
     };
-    candidate.reclaim()
+    candidate.promote_registered()?;
+    Ok(candidate.reclaim())
 }
 
 fn refused(rejection: SourceRejection) -> Checked {

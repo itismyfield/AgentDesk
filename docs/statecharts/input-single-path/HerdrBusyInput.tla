@@ -7,16 +7,52 @@ CONSTANTS Policy, Host, OReady, InitialBlock, Clears, RestartAt, ReplacePane, Mu
 VARIABLE s
 vars == <<s>>
 
+\* Existing cfgs keep their verified-source premise; producer cfgs start from a fresh launch.
+FreshProducer == Mutant \in {"ProducerFresh", "ProducerAbsent", "ProducerReplacement",
+                            "ProducerIgnoreIdentity", "ProducerWrongFirst", "ProducerLegacy"}
+ProducerEnabled == Mutant # "ProducerAbsent"
+RegisteredIdentity == [path |-> "transcript", dev |-> 1, ino |-> 1]
+OpenedIdentity == [path |-> "transcript", dev |-> 1,
+                   ino |-> IF Mutant \in {"ProducerReplacement", "ProducerIgnoreIdentity"}
+                           THEN 2 ELSE 1]
+FirstSessionMatches == Mutant # "ProducerWrongFirst"
+HasStat == Mutant # "ProducerLegacy"
+
 Init == s = [phase |-> "queued", up |-> TRUE, awake |-> TRUE,
              blocked |-> InitialBlock, notice |-> FALSE, watch |-> FALSE,
              effects |-> 0, proof |-> FALSE, restarts |-> 0,
              generation |-> 1, target |-> 1, replaced |-> FALSE,
              wrongTarget |-> FALSE, observed |-> FALSE, diagnostic |-> FALSE,
-             route |-> "none", busyEffects |-> 0]
+             route |-> "none", busyEffects |-> 0,
+             registered |-> ~FreshProducer, hookSeen |-> FALSE, earlyHook |-> FALSE,
+             verified |-> ~FreshProducer, globalPin |-> ~FreshProducer,
+             nonceCurrentPin |-> ~FreshProducer, repeatSeen |-> FALSE,
+             pinCount |-> 0, pinIdentity |-> RegisteredIdentity]
 
 HostReady == Host = "tmux" \/ (Policy = "fixed" /\ Mutant # "ExcludeHerdr")
 Eligible == HostReady /\ (Host = "tmux" \/ OReady)
             /\ ~s.blocked /\ s.target = s.generation
+            /\ (Host = "tmux" \/ (s.globalPin /\ s.nonceCurrentPin))
+
+\* A launch Stat is unverified. A hook before registration waits for another authentic hook.
+RegisterStat == /\ FreshProducer /\ ~s.registered
+                /\ s' = [s EXCEPT !.registered = TRUE]
+AuthenticHook == /\ FreshProducer /\ ~s.hookSeen
+                 /\ IF s.registered
+                    THEN s' = [s EXCEPT !.hookSeen = TRUE]
+                    ELSE /\ ~s.earlyHook
+                         /\ s' = [s EXCEPT !.earlyHook = TRUE]
+\* The hook publisher compares the identity read from its opened fd with the recorded Stat.
+PromoteVerified == /\ FreshProducer /\ ProducerEnabled
+                   /\ s.registered /\ s.hookSeen /\ ~s.verified /\ HasStat
+                   /\ FirstSessionMatches
+                   /\ (OpenedIdentity = RegisteredIdentity \/ Mutant = "ProducerIgnoreIdentity")
+                   /\ s' = [s EXCEPT !.verified = TRUE, !.globalPin = TRUE,
+                                      !.nonceCurrentPin = TRUE, !.pinCount = @ + 1,
+                                      !.pinIdentity = OpenedIdentity]
+\* A second serialized hook observes the pin and appends no duplicate record.
+RepeatVerifiedHook == /\ FreshProducer /\ s.verified /\ s.hookSeen /\ ~s.repeatSeen
+                      /\ s' = [s EXCEPT !.repeatSeen = TRUE]
 
 \* Common target observation precedes an unrelated legacy tmux diagnostic in early intake.
 ObserveEarly == /\ Entry = "early" /\ s.phase = "queued" /\ ~s.observed
@@ -77,18 +113,29 @@ Replay == /\ Mutant = "ReplayUnknown" /\ s.phase = "uncertain"
 Drop == /\ Mutant = "DropHeld" /\ s.phase = "held"
         /\ s' = [s EXCEPT !.phase = "lost"]
 Wait == UNCHANGED vars
-Next == ObserveEarly \/ LegacyDiagnostic \/ Drive \/ ExistingIdle
+Next == RegisterStat \/ AuthenticHook \/ PromoteVerified \/ RepeatVerifiedHook
+        \/ ObserveEarly \/ LegacyDiagnostic \/ Drive \/ ExistingIdle
         \/ Effect \/ NativeProof \/ Settle \/ Notify \/ ClearBlock \/ RetryHeld
         \/ Crash \/ Boot \/ Replace \/ Replay \/ Drop \/ Wait
-Fairness == WF_vars(ObserveEarly) /\ WF_vars(LegacyDiagnostic) /\ WF_vars(Drive)
+Fairness == WF_vars(RegisterStat) /\ WF_vars(AuthenticHook) /\ WF_vars(PromoteVerified) /\ WF_vars(RepeatVerifiedHook)
+            /\ WF_vars(ObserveEarly) /\ WF_vars(LegacyDiagnostic) /\ WF_vars(Drive)
             /\ WF_vars(ExistingIdle) /\ WF_vars(Effect) /\ WF_vars(NativeProof)
             /\ WF_vars(Settle) /\ WF_vars(Notify) /\ WF_vars(ClearBlock)
             /\ WF_vars(RetryHeld) /\ WF_vars(Crash) /\ WF_vars(Boot) /\ WF_vars(Replace)
 Spec == Init /\ [][Next]_vars /\ Fairness
 
-TypeOK == /\ s.phase \in {"queued", "held", "idle", "may", "sent", "uncertain", "done", "lost"}
+TypeOK == /\ s.pinCount \in 0..1
+          /\ s.phase \in {"queued", "held", "idle", "may", "sent", "uncertain", "done", "lost"}
           /\ s.effects \in 0..2 /\ s.restarts \in 0..1
           /\ s.generation \in 1..2 /\ s.target = 1
+VerifiedPinMatchesRegistered == FreshProducer /\ s.verified =>
+                                s.pinIdentity = RegisteredIdentity
+NoPinWithoutVerifiedFirst == FreshProducer /\ s.verified => FirstSessionMatches /\ HasStat
+SinglePin == s.pinCount <= 1
+VerifiedPinHistoryAgrees == s.verified = (s.globalPin /\ s.nonceCurrentPin)
+RepeatHookEventuallyObserved == s.verified ~> s.repeatSeen
+ProducerEventuallyVerified == <> (s.globalPin /\ s.nonceCurrentPin)
+AuthenticHookReached == <> (s.registered /\ s.hookSeen)
 InputAtMostOnce == s.effects <= 1
 NoSilentLoss == s.phase # "lost"
 CompletedExactlyOnce == s.phase = "done" => s.effects = 1 /\ s.proof

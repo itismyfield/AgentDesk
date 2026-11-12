@@ -288,10 +288,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 }
             }
         }
-        self.writer.notice_owners =
-            crate::services::tui_input::human_frame::history::notice_owner::Batch::prepare(
-                self.writer.store(),
-            );
+        let mut owners = std::mem::take(&mut self.writer.notice_owners);
+        owners.refresh(self.writer.store());
+        self.writer.notice_owners = owners;
         let (mut eligible, mut deferred) = (Vec::new(), Vec::new());
         for evidence in evidence {
             let id = (
