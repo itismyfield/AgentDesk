@@ -368,6 +368,8 @@ outbound-port/OutboundPortRecordBeforePost.cfg	OutboundPort	NoSilentLoss,NoSucce
 session-lifecycle/HerdrHintARetryFixed.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHintARetryNoController.cfg	HerdrSession	-	AProgress
 session-lifecycle/HerdrHintARetryNoBudget.cfg	HerdrSession	-	AProgress
+session-lifecycle/SessionIdentityGateAfter.cfg	SessionIdentityGate	-	-
+session-lifecycle/SessionIdentityGateBefore.cfg	SessionIdentityGate	NoForeignMutation	-
 outbox-transaction/OutboxTransactionCurrent.cfg	OutboxTransaction	-	-
 outbox-transaction/OutboxTransactionService.cfg	OutboxTransaction	-	-
 outbox-transaction/OutboxTransactionPreobserve.cfg	OutboxTransaction	ProviderObservationPointPreserved,InsertUsesObservedDesignation	-
