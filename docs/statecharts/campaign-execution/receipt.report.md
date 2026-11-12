@@ -2,7 +2,7 @@
 
 코드 기준: `0051e898e4e43012c232c244a521c5a280765fb8` (S4-16 merge 직후). 2026-11-12 KST 설계 조사. production 코드·DB schema 변경, cargo 및 Rust 시험 실행은 없다.
 
-기존 `CampaignVerification.tla`의 실행 영수증은 host journal의 start/result 증거다. DB의 `server_campaign_receipts` 명령 영수증과 transaction commit을 뜻하지 않는다. 같은 모델 파일에 `ReceiptSpec` 모드를 추가해 이 경계를 검사했다. 기존 18개 cfg는 `receiptTx = "inactive"`를 유지하므로 verification 전이와 기존 expected 결과를 바꾸지 않는다. 새 모드는 기존 verification 변수를 고정하고 순수 kernel 호출을 `RDecide`로 추상화한다. 따라서 이 결과는 모든 kernel 전이를 transaction과 직접 곱한 상태 공간의 증명이 아니다. 기존 cfg가 kernel 규칙을, 새 cfg가 그 주위 receipt/lock/commit 규칙을 검사한다.
+기존 `CampaignVerification.tla`의 실행 영수증은 host journal의 start/result 증거다. DB의 `server_campaign_receipts` 명령 영수증과 transaction commit을 뜻하지 않는다. 같은 모델 파일에 `ReceiptSpec` 모드를 추가해 이 경계를 검사했다. 기존 17개 cfg는 `receiptTx = "inactive"`를 유지하므로 verification 전이와 기존 expected 결과를 바꾸지 않는다. 새 모드는 기존 verification 변수를 고정하고 순수 kernel 호출을 `RDecide`로 추상화한다. 따라서 이 결과는 모든 kernel 전이를 transaction과 직접 곱한 상태 공간의 증명이 아니다. 기존 cfg가 kernel 규칙을, 새 cfg가 그 주위 receipt/lock/commit 규칙을 검사한다.
 
 ## 상태 차트
 
@@ -71,7 +71,7 @@ SplitWrite의 공통 prefix 0~5는 begin→lock→receipt 없음→locked facts�
 
 |범위 밖|관계와 남은 검증|
 |---|---|
-|kernel 모든 command의 실제 데이터·quality budget 수치|순수 결정 본체를 이동하지 않고 소유 유지하므로 기존 18 cfg와 control/stage/verification/failure_budget Rust 동등성 시험이 맡음. 새 모델은 호출의 facts/commit 경계만 검사|
+|kernel 모든 command의 실제 데이터·quality budget 수치|순수 결정 본체를 이동하지 않고 소유 유지하므로 기존 17 cfg와 control/stage/verification/failure_budget Rust 동등성 시험이 맡음. 새 모델은 호출의 facts/commit 경계만 검사|
 |host start/result journal와 실제 프로세스 중복|기존 CampaignVerification의 verification mode가 담당. DB 명령 receipt와 혼동하지 않음|
 |HTTP bytes, fingerprint 충돌, 옛 receipt JSON|형식 변경 없음. saved status/body 재생 및 다른 fingerprint rollback은 기존 storage/http/model 시험이 맡음. 새 모델의 same-input replay는 이 byte-level 동등성의 증명이 아님|
 |옛 Run의 default maps/optional execution|restore 경계는 read.rs decode와 domain serde default에 유지. next implementation의 옛 행 fixture 동등성 시험으로 검증|
@@ -92,3 +92,43 @@ export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew
 다른 cfg는 ReceiptChart / ReceiptEarlyFacts / ReceiptSplitWrite 접미사로 바꾸고 매번 빈 새 out 경로를 사용한다. 정상/Chart exit 0, EarlyFacts/SplitWrite exit 1이 기대값이다. 원시 로그는 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i7353/sc-out-s417/{receipt-final,chart-final,early-facts-final,split-write-final}/tlc.out` 및 부정 대조의 `tlc-<rule>.out`에 있다. 각 `.tool.report.md`는 도구 출력을 그대로 보존했다. model report/README는 code SHA와 해석을 덧붙인다.
 
 그림은 한 chart state에 머무는 begin/대기/완료의 일부 단계와 별도 idle step을 생략한다. Chart는 crash 없는 projection이며 full cfg에서 crash/restart를 검사한다. 초기 상태에서 모든 chart state가 도달 가능하고, 각 상태의 진행·rollback 출구를 유지한다. 29개 화살표는 쓰기/renderer/receipt와 rollback 경계를 각각 보여주기 위해 유지했다.
+
+## 전체 cfg 회귀 검증
+
+검증 head: `73dfb0310cd34398fe849eeb05ffd16679d3582a`. 다음 명령은 최종 증거 커밋 전에 실행했다. 이후 변경은 보고서뿐이며 모델·cfg·expected 23개 입력 SHA256은 동일하다.
+
+```sh
+unset TMUX TMUX_PANE
+export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew/opt/openjdk/bin/java
+python3 scripts/ci/statecharts_tlc.py --base 0051e898e4 --head HEAD --jobs 2
+```
+
+실제 선택은 **기존 17 + 신규 4 = 21 cfg**, 21/21 expected MATCH, exit 0이다. 기존 cfg는 변경하지 않았고 기존 expectation도 수정하지 않았다. 새 PROPERTY에는 이전 ReceiptSpec이 없어 base 실행 결과를 만들지 않았다. 기존 모델의 고정 expectation과 수정 후 결과를 아래에 같이 남긴다.
+
+| cfg | expected to break | broken | seconds |
+|---|---|---|---|
+| campaign-execution/CampaignVerification.cfg | - | - | 195.3 |
+| campaign-execution/CampaignVerificationChart.cfg | - | - | 12.6 |
+| campaign-execution/CampaignVerificationClaimKept.cfg | ImmediateRevokes, NoStartWithoutAuthority | ImmediateRevokes, NoStartWithoutAuthority | 274.0 |
+| campaign-execution/CampaignVerificationFactsRefused.cfg | DeliveredEventually, StopNowCompletes, UnsealedClosed, VSettles | DeliveredEventually, StopNowCompletes, UnsealedClosed, VSettles | 61.2 |
+| campaign-execution/CampaignVerificationFencedStartBefore.cfg | DeliveredEventually, StopFinishCompletes, VSettles | DeliveredEventually, StopFinishCompletes, VSettles | 47.5 |
+| campaign-execution/CampaignVerificationFinishDeadBefore.cfg | StopFinishCompletes | StopFinishCompletes | 96.2 |
+| campaign-execution/CampaignVerificationIndeterminate.cfg | StopFinishCompletes, StopNowCompletes, VSettles | StopFinishCompletes, StopNowCompletes, VSettles | 86.1 |
+| campaign-execution/CampaignVerificationIndeterminateSettled.cfg | - | - | 135.5 |
+| campaign-execution/CampaignVerificationInterruptBefore.cfg | StopFinishCompletes | StopFinishCompletes | 92.0 |
+| campaign-execution/CampaignVerificationLateLaunch.cfg | - | - | 85.3 |
+| campaign-execution/CampaignVerificationLateLaunchBefore.cfg | FinishScopeKept | FinishScopeKept | 93.6 |
+| campaign-execution/CampaignVerificationNoRedelivery.cfg | DeliveredEventually, StopFinishCompletes, StopNowCompletes, VSettles | DeliveredEventually, StopFinishCompletes, StopNowCompletes, VSettles | 40.9 |
+| campaign-execution/CampaignVerificationNotSentBefore.cfg | NoCancelWhileAuthorized | NoCancelWhileAuthorized | 297.9 |
+| campaign-execution/CampaignVerificationOverwrite.cfg | FillOnce | FillOnce | 33.7 |
+| campaign-execution/CampaignVerificationQuietSession.cfg | StopFinishCompletes | StopFinishCompletes | 107.6 |
+| campaign-execution/CampaignVerificationReceipt.cfg | - | - | 6.2 |
+| campaign-execution/CampaignVerificationReceiptChart.cfg | - | - | 4.8 |
+| campaign-execution/CampaignVerificationReceiptEarlyFacts.cfg | ReceiptDecisionUsesLockedFacts | ReceiptDecisionUsesLockedFacts | 6.7 |
+| campaign-execution/CampaignVerificationReceiptSplitWrite.cfg | ReceiptAtomicEffects, ReceiptEffectAtMostOnce, ReceiptRollbackHasNoEffect | ReceiptAtomicEffects, ReceiptEffectAtMostOnce, ReceiptRollbackHasNoEffect | 10.0 |
+| campaign-execution/CampaignVerificationSettleBefore.cfg | StopFinishCompletes, UnsealedClosed, VSettles | StopFinishCompletes, UnsealedClosed, VSettles | 188.3 |
+| campaign-execution/CampaignVerificationTwoValues.cfg | - | - | 26.9 |
+
+total 969.5s, 21 configs
+
+원시 checker stdout/stderr: `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i7353/logs/s417-statecharts-ci.log`. 신규4의 per-config 시간은 6.2/4.8/6.7/10.0초다. 기존 NotSentBefore는 297.9초로 300초 상한에 가깝고, 전체 로컬 969.5초는 README의 15분 권고보다 길다. PR workflow의 실제 job 제한도 `.github/workflows/statecharts-tlc.yml:33`에서 15분이므로, 이 Mac의 로컬 16.2분은 그 상한을 넘는다. hosted runner에서는 아직 실행하지 않아 시간 통과를 주장하지 않는다. 이 시간 여유는 남은 CI 관측 항목이다. 기존 모델 범위를 줄이거나 timeout/기대 위반을 바꾸지 않았다.
