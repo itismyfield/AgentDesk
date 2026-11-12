@@ -120,6 +120,7 @@ fn differing_section(expected: &Config, actual: &Config) -> &'static str {
     first_difference!(
         runtime_source,
         server,
+        decision_gate,
         discord,
         providers,
         shared_prompt,

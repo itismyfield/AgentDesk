@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+pub(crate) mod decision_gate;
 mod runtime_settings;
 mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
@@ -71,6 +72,8 @@ pub struct Config {
     #[serde(skip)]
     pub(crate) runtime_source: Option<RuntimeConfigSource>,
     pub server: ServerConfig,
+    #[serde(default)]
+    pub decision_gate: decision_gate::DecisionGateConfig,
     #[serde(default)]
     pub discord: DiscordConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2408,6 +2411,7 @@ impl Default for Config {
         Self {
             runtime_source: None,
             server: ServerConfig::default(),
+            decision_gate: decision_gate::DecisionGateConfig::default(),
             discord: DiscordConfig::default(),
             providers: std::collections::BTreeMap::new(),
             shared_prompt: None,
@@ -2480,6 +2484,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 
 pub(crate) fn validate_config(config: &Config) -> Result<()> {
     runtime_validation::validate(config)?;
+    config.decision_gate.validate()?;
     crate::services::tui_o::channel_policy::BootChannels::validate(config)?;
     config.cluster.runtime_profile.validate(&config.cluster)?;
     session_hosts::validate(config)?;
