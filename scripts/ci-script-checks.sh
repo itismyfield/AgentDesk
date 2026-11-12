@@ -270,7 +270,12 @@ fi
 fi
 
 if run_check guards "Isolated instance declaration tests"; then
-"$PYTHON" -m unittest tests.test_dev_instance tests.test_dev_instance_files
+cargo build --bin agentdesk
+instance_test_bin="$(cd "${CARGO_TARGET_DIR:-$PWD/target}/debug" && pwd -P)"
+export PATH="$instance_test_bin:$PATH"
+"$PYTHON" -m unittest tests.test_dev_instance
+"$PYTHON" -m unittest tests.test_dev_instance_files
+"$PYTHON" -m unittest tests.test_dev_instance_credential
 fi
 
 if run_check guards "PG audit guard"; then

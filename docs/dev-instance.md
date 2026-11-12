@@ -77,9 +77,10 @@ scripts/dev-instance.sh validate --instance <uuid> --require-credentials
 ```
 
 허용 파일명은 `claude_bot_token`, `codex_bot_token`, `driver_bot_token`뿐이다.
-Rust `write_secret_file`과 같은 디렉터리0700/파일0600·fsync 규약을 Python stdlib로
-보존하며, fresh leaf만 생성한다. 기존 Rust helper를 CLI로 호출할 수 없어 이 선언
-도구에서 같은 파일 규약을 구현했다. root/ancestor/leaf symlink·hardlink credential·
+PATH 첫 디렉터리의 레인 바이너리 `agentdesk dev-instance credential-write`가 stdin을
+받아 기존 Rust `write_secret_file`의 공유 정책·저장 코어로 쓴다. 디렉터리0700/
+파일0600·fsync 및 fresh leaf를 적용하며 Python 직접 쓰기 fallback은 없다.
+바이너리가 없으면 `BLOCKED_BINARY`(exit 4)다. root/ancestor/leaf symlink·hardlink credential·
 외부 절대경로·unknown credential·legacy credential subtree를 거부한다. 기존
 reader의 migration은 사용하지 않는다. 실행 후 제품이 만드는 legacy symlink의
 처리는 I2/I3 startup 경계에서 별도로 정해야 한다.

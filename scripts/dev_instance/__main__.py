@@ -7,7 +7,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from .files import InstanceError, instance_root, safe_absolute, write_credential
+from .files import BlockedBinary, InstanceError, instance_root, safe_absolute, write_credential
 from .manifest import child_environment, prepare, read_json, validate
 from .profile import Unevaluable, require_preconditions
 
@@ -55,6 +55,9 @@ def main(argv=None):
                 result = {"status": "DECLARATION_VALID", "live_ready": False, "instance_id": args.instance}
         print(json.dumps(result, sort_keys=True))
         return 0
+    except BlockedBinary:
+        print(json.dumps({"status": "BLOCKED_BINARY"}))
+        return 4
     except Unevaluable:
         print(json.dumps({"status": "UNEVALUABLE(precondition)"}))
         return 3

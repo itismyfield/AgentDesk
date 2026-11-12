@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -22,6 +23,10 @@ class InstanceError(ValueError):
     """A declaration or instance file violates the isolated-instance contract."""
 
 
+class BlockedBinary(InstanceError):
+    """The lane binary needed for shared credential storage is unavailable."""
+
+
 def safe_absolute(path: str | Path) -> Path:
     candidate = Path(path)
     if not candidate.is_absolute() or ".." in candidate.parts:
@@ -37,7 +42,7 @@ def safe_absolute(path: str | Path) -> Path:
             raise InstanceError("path ancestor is not a readable directory") from None
         if stat.S_ISLNK(mode):
             raise InstanceError("symlink paths are not allowed")
-    if any(a == ".adk" and b == "release" for a, b in zip(candidate.parts, candidate.parts[1:])):
+    if any(a.casefold() == ".adk" and b.casefold() == "release" for a, b in zip(candidate.parts, candidate.parts[1:])):
         raise InstanceError("release subtree is not allowed")
     return candidate
 
@@ -118,7 +123,7 @@ def _validate_directory(descriptor: int, relative: tuple[str, ...]) -> None:
         metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
         if stat.S_ISLNK(metadata.st_mode):
             raise InstanceError("instance tree contains a symlink")
-        if name in {"credential", "credentials"} and child != ("credential",):
+        if name.casefold() in {"credential", "credentials"} and child != ("credential",):
             raise InstanceError("legacy credential subtree is not allowed")
         if relative == ("credential",):
             if name not in CREDENTIAL_NAMES or not stat.S_ISREG(metadata.st_mode):
@@ -167,6 +172,8 @@ def create_layout(root: str | Path) -> None:
 
 
 def _write_private(root: Path, relative: str | Path, data: bytes) -> None:
+    if _child_parts(relative)[0].casefold() == "credential":
+        raise InstanceError("credentials require the shared Rust writer")
     validate_tree(root)
     parent, name = _open_parent(root, relative)
     try:
@@ -225,6 +232,10 @@ def write_credential(root: str | Path, name: str, stream) -> None:
     if name not in CREDENTIAL_NAMES:
         raise InstanceError("unknown credential name")
     validate_tree(root)
+    first_path = os.environ.get("PATH", "").split(os.pathsep)[0]
+    binary = Path(first_path) / "agentdesk"
+    if not first_path or not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
+        raise BlockedBinary("lane binary is unavailable")
     value = _token_bytes(stream.read(4098))
     parent = _open_dir(root / "credential")
     try:
@@ -235,4 +246,15 @@ def write_credential(root: str | Path, name: str, stream) -> None:
                     raise InstanceError("credentials must be distinct")
     finally:
         os.close(parent)
-    _write_private(root, Path("credential") / name, value)
+    try:
+        result = subprocess.run(
+            [str(binary), "dev-instance", "credential-write", "--root", str(root), "--name", name],
+            input=value, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, timeout=10, check=False,
+        )
+    except OSError:
+        raise BlockedBinary("lane binary cannot be executed") from None
+    except subprocess.TimeoutExpired:
+        raise InstanceError("shared credential writer timed out") from None
+    if result.returncode != 0:
+        raise InstanceError("shared credential writer failed")

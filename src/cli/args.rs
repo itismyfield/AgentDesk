@@ -23,6 +23,8 @@ struct Cli {
 pub(crate) enum Commands {
     /// Start Discord bot server(s)
     Dcserver(DcserverArgs),
+    /// Write an isolated instance credential from stdin
+    DevInstance(super::dev_instance::DevInstanceArgs),
     /// Run the initial setup wizard
     Init,
     /// Re-run the configuration wizard

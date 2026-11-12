@@ -56,6 +56,14 @@ fn private_file(file: &File) -> Result<(), StoreError> {
     Ok(())
 }
 impl PrivateDirectory {
+    pub(crate) fn create_new(&self, filename: &str) -> Result<File, StoreError> {
+        open_at(
+            self.directory.as_raw_fd(),
+            &name(filename)?,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(|_| StoreError::Open)
+    }
     pub(crate) fn open(path: &Path) -> Result<Self, StoreError> {
         if !path.is_absolute() {
             return Err(StoreError::Open);

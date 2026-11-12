@@ -76,6 +76,27 @@ class InstanceFilesTests(unittest.TestCase):
         with self.assertRaisesRegex(InstanceError, "symlink"):
             validate_tree(self.root)
 
+    def test_case_aliases_of_release_and_legacy_credentials_are_rejected(self):
+        marker = self.base / "external-marker"
+        marker.write_bytes(b"outside unchanged")
+        cases = (
+            (self.base / ".ADK/ReLeAsE/config/profile.json", False),
+            (self.root / "config/Credential/unknown_token", True),
+            (self.root / "runtime/CREDENTIALS/unknown_token", True),
+        )
+        for path, inside_root in cases:
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"forbidden unchanged")
+            with self.subTest(path=path.relative_to(self.base)):
+                try:
+                    with self.assertRaises(InstanceError):
+                        validate_tree(self.root) if inside_root else safe_absolute(path)
+                finally:
+                    self.assertEqual(path.read_bytes(), b"forbidden unchanged")
+                    self.assertEqual(marker.read_bytes(), b"outside unchanged")
+                    path.unlink()
+                    path.parent.rmdir()
+
     def test_credentials_require_three_distinct_private_files(self):
         validate_tree(self.root)
         with self.assertRaisesRegex(InstanceError, "three"):
