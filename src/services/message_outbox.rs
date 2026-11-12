@@ -829,7 +829,25 @@ pub(crate) async fn enqueue_outbox_pg_on_tx_with_attachment(
     message: OutboxMessage<'_>,
     attachment: Option<OutboxAttachment<'_>>,
 ) -> Result<i64, OutboxEnqueueError> {
-    plain::enqueue_on_tx(tx, message, attachment, false).await
+    enqueue_plain_on_tx(tx, message, attachment, false).await
+}
+
+// V and D stay here; the plain child inserts and records the census on the same transaction.
+async fn enqueue_plain_on_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    message: OutboxMessage<'_>,
+    attachment: Option<OutboxAttachment<'_>>,
+    explicit_completion: bool,
+) -> Result<i64, OutboxEnqueueError> {
+    validate_outbox_source(message.source)?;
+    let notice = session_notice::designation(
+        &mut **tx,
+        message,
+        attachment.is_some(),
+        explicit_completion,
+    )
+    .await?;
+    plain::insert_on_tx(tx, message, attachment, notice).await
 }
 
 pub(crate) async fn enqueue_lifecycle_notification_pg(

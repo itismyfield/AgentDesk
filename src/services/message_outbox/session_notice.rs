@@ -175,5 +175,5 @@ pub(crate) async fn enqueue_session_notice_pg_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     message: OutboxMessage<'_>,
 ) -> Result<i64, OutboxEnqueueError> {
-    super::plain::enqueue_on_tx(tx, message, None, true).await
+    super::enqueue_plain_on_tx(tx, message, None, true).await
 }

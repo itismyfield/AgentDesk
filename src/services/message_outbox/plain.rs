@@ -1,28 +1,21 @@
-//! Plain enqueue on the caller's transaction: V, normalize, D, INSERT, then census C.
+//! Plain row write after V and D: normalize, INSERT, then capture and store the census.
 
 use super::{
     OutboxAttachment, OutboxEnqueueError, OutboxMessage, attachments, body_census,
-    normalized_reason_code, normalized_session_key, session_notice, validate_outbox_source,
+    normalized_reason_code, normalized_session_key,
 };
 use crate::db::message_outbox::{census, notice};
+use serde_json::Value;
 
-pub(super) async fn enqueue_on_tx(
+pub(super) async fn insert_on_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     message: OutboxMessage<'_>,
     attachment: Option<OutboxAttachment<'_>>,
-    explicit_completion: bool,
+    designation: Option<Value>,
 ) -> Result<i64, OutboxEnqueueError> {
-    validate_outbox_source(message.source)?;
     let (filename, content_type, data) = attachments::parts(attachment);
     let reason_code = normalized_reason_code(message.reason_code);
     let session_key = normalized_session_key(message.target, message.session_key);
-    let designation = session_notice::designation(
-        &mut **tx,
-        message,
-        attachment.is_some(),
-        explicit_completion,
-    )
-    .await?;
     let id = notice::insert_plain(
         &mut **tx,
         notice::PlainRow {
