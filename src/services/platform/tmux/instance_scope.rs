@@ -99,7 +99,9 @@ pub(super) fn hook_tmux_prefix() -> io::Result<String> {
     for (key, value) in command.get_envs() {
         if let Some(value) = value {
             words.push(super::sh_single_quote(&format!(
-                "{}={}", key.to_string_lossy(), value.to_string_lossy()
+                "{}={}",
+                key.to_string_lossy(),
+                value.to_string_lossy()
             )));
         }
     }

@@ -222,7 +222,10 @@ fn load(path: &Path, root: &Path, config_path: &Path) -> Result<TestInstance, St
 pub(crate) fn configure_tmux_command(command: &mut Command) -> io::Result<()> {
     if let Some(instance) = current().map_err(io::Error::other)? {
         command
-            .env("AGENTDESK_TEST_MANIFEST", instance.root.join("manifest.json"))
+            .env(
+                "AGENTDESK_TEST_MANIFEST",
+                instance.root.join("manifest.json"),
+            )
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env("TMUX_TMPDIR", &instance.tmux.tmpdir)

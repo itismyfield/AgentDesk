@@ -140,6 +140,8 @@ src/
 │   │   └── user_default_validator_tests.rs
 │   ├── test_env/
 │   │   └── teardown_probe.rs
+│   ├── test_instance/
+│   │   └── host_scope_tests.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
 │   ├── cluster_role.rs
@@ -163,6 +165,7 @@ src/
 │   ├── session_hosts_tests.rs
 │   ├── snapshot_reader_tests.rs
 │   ├── test_env.rs
+│   ├── test_instance.rs
 │   ├── tool_activity_display.rs
 │   └── writer_channels_tests.rs
 ├── db/
@@ -3584,6 +3587,8 @@ src/
 │   │   │   ├── production_probe_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── tmux/
+│   │   │   ├── instance_scope/
+│   │   │   │   └── host_command_tests.rs
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
 │   │   │   ├── session_inventory/
@@ -3591,6 +3596,7 @@ src/
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
+│   │   │   ├── instance_scope.rs
 │   │   │   ├── liveness.rs
 │   │   │   └── session_inventory.rs
 │   │   ├── binary_resolver.rs
