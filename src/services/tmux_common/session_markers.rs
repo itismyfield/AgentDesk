@@ -122,10 +122,33 @@ pub(crate) fn claude_session_auth(
     Ok(own.map(|(_, profile)| profile.to_owned()))
 }
 
+#[cfg(test)]
 pub(crate) fn write_tmux_runtime_kind_marker(
     tmux_session_name: &str,
     runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind,
 ) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let fence = runtime_hint_fence::RuntimeHintFence::acquire(tmux_session_name)?;
+        write_tmux_runtime_kind_marker_under_fence(&fence, tmux_session_name, runtime_kind)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(
+            session_temp_path(tmux_session_name, TMUX_RUNTIME_KIND_TEMP_EXT),
+            runtime_kind.as_str(),
+        )
+        .map_err(|error| format!("write runtime kind marker: {error}"))
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn write_tmux_runtime_kind_marker_under_fence(
+    fence: &runtime_hint_fence::RuntimeHintFence,
+    tmux_session_name: &str,
+    runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind,
+) -> Result<(), String> {
+    fence.validate(tmux_session_name)?;
     let path = session_temp_path(tmux_session_name, TMUX_RUNTIME_KIND_TEMP_EXT);
     std::fs::write(&path, runtime_kind.as_str())
         .map_err(|e| format!("Failed to write tmux runtime kind marker: {}", e))

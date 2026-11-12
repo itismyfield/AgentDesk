@@ -204,8 +204,19 @@ pub(super) fn commit_live_direct_resume_fallback(
 
     #[cfg(unix)]
     {
+        let Ok(fence) =
+            tmux_common::runtime_hint_fence::RuntimeHintFence::acquire(tmux_session_name)
+        else {
+            return false;
+        };
+        if fence.validate_tmux_publisher(tmux_session_name).is_err() {
+            return false;
+        }
         let Some(fallback) = fallback else {
             return tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+                if fence.validate_tmux_publisher(tmux_session_name).is_err() {
+                    return false;
+                }
                 if candidate.as_ref().is_some_and(|binding| {
                     !dedupe::codex_restore_source_current(
                         tmux_session_name,
@@ -251,6 +262,9 @@ pub(super) fn commit_live_direct_resume_fallback(
             });
         };
         tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+            if fence.validate_tmux_publisher(tmux_session_name).is_err() {
+                return false;
+            }
             if !dedupe::codex_restore_source_current(
                 tmux_session_name,
                 std::path::Path::new(&fallback.binding.output_path),
@@ -314,7 +328,8 @@ pub(super) fn commit_live_direct_resume_fallback(
                         binding,
                     );
                 if !verified || registered {
-                    tmux_common::write_tmux_runtime_kind_marker(
+                    tmux_common::write_tmux_runtime_kind_marker_under_fence(
+                        &fence,
                         tmux_session_name,
                         RuntimeHandoffKind::CodexTui,
                     )

@@ -231,6 +231,7 @@ src/
 │   │   ├── consent_projection.rs
 │   │   ├── owner_fence_pg_tests.rs
 │   │   ├── postgres_tests.rs
+│   │   ├── pre_accept_sweep.rs
 │   │   └── worker_status.rs
 │   ├── intake_outbox_dispatch_stamp/
 │   │   └── tests.rs
@@ -1148,6 +1149,8 @@ src/
 │   │   │   ├── sampler.rs
 │   │   │   ├── store.rs
 │   │   │   └── tests.rs
+│   │   ├── pre_accept_sweep/
+│   │   │   └── tests.rs
 │   │   ├── readiness/
 │   │   │   └── tests.rs
 │   │   ├── stream_relay/
@@ -1178,6 +1181,7 @@ src/
 │   │   ├── machine_resources.rs
 │   │   ├── mod.rs
 │   │   ├── node_registry.rs
+│   │   ├── pre_accept_sweep.rs
 │   │   ├── readiness.rs
 │   │   ├── registry_adapter_sink.rs
 │   │   ├── relay_producer_registry.rs
@@ -1921,6 +1925,9 @@ src/
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
 │   │   │   ├── input_owner/
+│   │   │   │   ├── claude_handoff/
+│   │   │   │   │   └── tests/
+│   │   │   │   │       └── actual_close_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── codex.rs
 │   │   │   │   │   ├── codex_herdr_tests.rs
@@ -2296,6 +2303,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
@@ -3875,6 +3883,7 @@ src/
 │   ├── tmux_common/
 │   │   ├── claude_footer.rs
 │   │   ├── host_marker.rs
+│   │   ├── runtime_hint_fence.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   ├── cleanup_host.rs

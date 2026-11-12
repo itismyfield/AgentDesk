@@ -211,7 +211,11 @@ fn prepare_codex_tui_launch_script(
         options,
         report,
         warm,
-        (overlay, prepared),
+        (
+            overlay,
+            prepared,
+            crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence::acquire(tmux)?,
+        ),
     )
 }
 
@@ -584,7 +588,14 @@ mod tests {
             &options,
             (Some(CANARY_CHANNEL), None),
             false,
-            (&overlay, prepared),
+            (
+                &overlay,
+                prepared,
+                crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence::acquire(
+                    CANARY_TMUX,
+                )
+                .unwrap(),
+            ),
         )
         .unwrap();
         let output = std::process::Command::new("/bin/bash")

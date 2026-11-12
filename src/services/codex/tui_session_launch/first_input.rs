@@ -30,12 +30,14 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
         end_observation,
     } = input;
     let CodexTuiLaunchScript {
+        fence,
         prepared,
         script_path,
         owner_path,
         rollout_modified_since,
         handoff,
     } = launch;
+    fence.validate_tmux_publisher(tmux_session_name)?;
     end_observation.prepare(&prepared.context);
     let command = format!("bash {}", shell_escape(&script_path));
     let tmux_result = match crate::services::claude_tui::owner_input::launch_hook() {
@@ -76,12 +78,14 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
         &prepared.context,
         session_selection,
     )?;
+    fence.validate_tmux_publisher(tmux_session_name)?;
     prepared.finish_spawn(crate::services::discord::stamp_spawn_markers(
         tmux_session_name,
         Some(&prepared),
     ))?;
 
     end_observation.spawned(&prepared.context);
+    drop(fence);
 
     Ok(Submitted {
         prepared,
@@ -203,6 +207,7 @@ pub(in crate::services::codex) fn publish_codex_tui_launch_script(
     launch: (
         &crate::services::provider_auth_profile::ProviderAuthOverlay,
         PreparedIncarnation,
+        crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence,
     ),
 ) -> Result<CodexTuiLaunchScript, String> {
     let (report_channel_id, report_provider) = report;
@@ -211,14 +216,16 @@ pub(in crate::services::codex) fn publish_codex_tui_launch_script(
     if herdr_configured_for_tui_launch(report_channel_id) {
         return Err(HERDR_NOT_ADMITTED.to_string());
     }
-    let (auth_overlay, prepared) = launch;
+    let (auth_overlay, prepared, fence) = launch;
+    fence.validate_tmux_publisher(tmux_session_name)?;
     let policy = prepared
         .context
         .source_policy
         .as_deref()
         .ok_or("missing launch policy")?;
     write_tmux_owner_marker(tmux_session_name)?;
-    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+    crate::services::tmux_common::write_tmux_runtime_kind_marker_under_fence(
+        &fence,
         tmux_session_name,
         crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
     )?;
@@ -321,6 +328,7 @@ pub(in crate::services::codex) fn publish_codex_tui_launch_script(
         prompt,
     );
     Ok(CodexTuiLaunchScript {
+        fence,
         prepared,
         script_path,
         owner_path,
