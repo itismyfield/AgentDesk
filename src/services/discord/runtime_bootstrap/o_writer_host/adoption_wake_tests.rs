@@ -155,6 +155,7 @@ async fn an_adoption_commit_settles_the_kept_row_once_without_a_legacy_body_pg()
 }
 
 thread_local! {
+    static KICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static JUDGED: std::cell::RefCell<Option<tokio::sync::mpsc::UnboundedSender<bool>>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -163,6 +164,11 @@ thread_local! {
 pub(super) fn judged(judged: &Result<Vec<InflightTurnState>, Held>) {
     let claimed = matches!(judged, Err(Held::Claimed));
     JUDGED.with(|slot| slot.borrow().as_ref().map(|tx| tx.send(claimed)));
+}
+
+/// Counts the wake's queue kicks for the input a claim gave back.
+pub(super) fn kicked() {
+    KICKS.with(|kicks| kicks.set(kicks.get() + 1));
 }
 
 /// An O-owned channel's kept row whose tmux is gone, recovered through `recorder`.
@@ -251,6 +257,14 @@ async fn a_claim_that_lets_go_after_the_wake_saw_it_still_settles_the_kept_row_p
         );
         rig.shared.mailbox(id).finish_turn(persistence).await;
         rig.settled().await;
+        // The input that gave its claim back is kicked again once the row is gone.
+        let kicked = async {
+            while KICKS.with(std::cell::Cell::get) == 0 {
+                tokio::task::yield_now().await;
+            }
+        };
+        await_within(kicked, WAIT_CAP).await;
+        assert_eq!(KICKS.with(std::cell::Cell::get), 1);
         let contents = rig.recorder.contents();
         assert_eq!(contents.len(), 1, "{contents:?}");
         assert!(!contents[0].contains(BODY), "{contents:?}");
@@ -270,6 +284,7 @@ async fn a_transient_recovery_failure_is_judged_again_and_settles_the_kept_row_p
         let http = Some(Arc::clone(&rig.recorder.http));
         spawn(&rig.shared, http, ProviderKind::Claude, channel);
         rig.settled().await;
+        assert_eq!(KICKS.with(std::cell::Cell::get), 0, "no claim, no kick");
         assert_eq!(first.posts(), 2, "{:?}", rig.recorder.contents());
         rig.drop_db().await;
     })

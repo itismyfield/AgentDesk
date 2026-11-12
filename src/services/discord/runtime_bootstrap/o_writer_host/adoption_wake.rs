@@ -77,6 +77,8 @@ async fn wake(
     }
     // A queued input that gave its claim back while the row stood runs once the row is gone.
     if claimed && inflight::load_inflight_state(provider, channel).is_none() {
+        #[cfg(test)]
+        tests::kicked();
         let kick = crate::services::discord::queue_io::schedule_writer_ready_queue_kick;
         kick(
             Arc::clone(shared),
