@@ -249,9 +249,8 @@ fn init_sources(store: &OStore, channel: u64) -> Vec<(SourceId, u64)> {
         .collect()
 }
 
-/// Over the open intake of the turn Legacy's mailbox runs and its Codex pending start an intake
-/// insert waits on the fence through the write and turn mode stays off; a body claimed between
-/// custody's reads waits, then is O's.
+/// Over its mailbox turn's open intake and Codex pending start, an intake insert waits on the fence
+/// through the write and turn mode stays off; a body claimed between custody's reads ends O's.
 #[test]
 fn codex_takeover_holds_the_gateway_fence_through_its_write_and_its_adoption_lock_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
