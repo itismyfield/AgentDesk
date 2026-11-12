@@ -35,6 +35,7 @@ impl Rig {
 
     pub(crate) fn raw(&self, args: &[&str]) -> Output {
         Command::new(self.dir.path().join("tmux"))
+            .env_remove("AGENTDESK_IDENTITY")
             .args(args)
             .output()
             .unwrap()
@@ -254,8 +255,22 @@ fn identity_checked_panes_refuse_unmarked_submission_target() {
     use crate::services::claude_tui::host_input::InputTransport;
     let submit = crate::services::tui_input::submission_tmux::SubmissionTmux
         .send_literal(&name, "unexpected");
+    let submitted = crate::services::claude_tui::input::send_prompt_with_readiness(
+        &name,
+        "unexpected",
+        crate::services::claude_tui::input::PromptReadinessKind::ProvenWarmFollowup,
+        None,
+    );
     let after = rig.snapshot(&name);
     let _ = rig.raw(&["kill-session", "-t", &exact_target(&name)]);
+    use crate::services::claude_tui::guarded_outcome::SubmissionError;
+    use crate::services::claude_tui::host_input::{InputRefusal, InputRun};
+    assert_eq!(
+        submitted,
+        Err(SubmissionError::Guarded(InputRun::Refused(
+            InputRefusal::IdentityMismatch
+        )))
+    );
     assert_eq!(
         (busy.is_err(), actor.is_err()),
         (true, true),
