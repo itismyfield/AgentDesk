@@ -65,8 +65,8 @@ impl Ports for Fake {
         }
         self.ready.load(Ordering::SeqCst)
     }
-    fn claude_busy(&self, _: &str) -> bool {
-        self.busy.load(Ordering::SeqCst)
+    fn claude_busy(&self, _: &str) -> claude_activity::Busy {
+        self.busy.load(Ordering::SeqCst).into()
     }
     fn spawn(&self, job: Job) -> bool {
         self.spawns.fetch_add(1, Ordering::SeqCst);

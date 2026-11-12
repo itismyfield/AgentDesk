@@ -156,7 +156,7 @@ async fn same_tool_hook_is_busy_across_narrow_resize_footer_and_capture_failure(
     let ports = LivePorts {
         root: events::test_root(),
     };
-    assert!(ports.claude_busy(&r.session));
+    assert!(ports.claude_busy(&r.session).is_busy());
     for width in [46, 22, 80, 46] {
         tmux.show(&format!(
             "{}\n❯\n{}\n  ⏵⏵ bypass permissions on\n  (shift+tab to cycle)\n  context 1%\n",
@@ -164,12 +164,12 @@ async fn same_tool_hook_is_busy_across_narrow_resize_footer_and_capture_failure(
             "─".repeat(width)
         ));
         assert!(
-            ports.claude_busy(&r.session),
+            ports.claude_busy(&r.session).is_busy(),
             "same accepted hook/transcript, width={width}"
         );
     }
     fs::write(tmux.directory().join("capture_fail"), "1").unwrap();
-    assert!(ports.claude_busy(&r.session));
+    assert!(ports.claude_busy(&r.session).is_busy());
     assert!(tmux.sends().is_empty());
 }
 

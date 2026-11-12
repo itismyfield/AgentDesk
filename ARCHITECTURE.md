@@ -3151,6 +3151,7 @@ src/
 │   │   │   │   │   └── watcher_runtime_tests.rs
 │   │   │   │   ├── claude_activity.rs
 │   │   │   │   ├── claude_activity_leaf_tests.rs
+│   │   │   │   ├── claude_activity_p2_tests.rs
 │   │   │   │   ├── claude_activity_tests.rs
 │   │   │   │   ├── closed_boundary.rs
 │   │   │   │   ├── effect_reads.rs

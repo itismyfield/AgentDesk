@@ -275,7 +275,7 @@ impl Ports for Immediate {
     fn final_ready(&self, session: &str) -> bool {
         self.0.final_ready(session)
     }
-    fn claude_busy(&self, session: &str) -> bool {
+    fn claude_busy(&self, session: &str) -> claude_activity::Busy {
         self.0.claude_busy(session)
     }
     fn liveness(&self, _: ShadowProvider, _: u64, _: &str) -> SessionLiveness {
@@ -353,3 +353,6 @@ async fn stale_six_hundred_second_presence_consumes_tools_and_closes_without_fra
         "activity/presence did not capture or send keys"
     );
 }
+
+#[path = "claude_activity_p2_tests.rs"]
+mod p2;

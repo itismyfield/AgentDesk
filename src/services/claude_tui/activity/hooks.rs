@@ -88,7 +88,7 @@ pub(crate) fn note_hook(
             entry.continuation = frame.stamp.len;
         }
         if matches!(kind, HookEventKind::PreToolUse | HookEventKind::PostToolUse)
-            && frame.terminal == 0
+            && (!frame.caught_up() || frame.terminal == 0)
             && let Some(id) = payload["tool_use_id"].as_str()
         {
             entry.tools.record(

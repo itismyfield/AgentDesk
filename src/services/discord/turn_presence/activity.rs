@@ -119,7 +119,7 @@ trait Ports: Send + Sync + 'static {
     #[cfg(all(test, unix))]
     fn session_present(&self, session: &str) -> bool;
     fn final_ready(&self, session: &str) -> bool;
-    fn claude_busy(&self, session: &str) -> bool;
+    fn claude_busy(&self, session: &str) -> claude_activity::Busy;
     fn liveness(&self, provider: ShadowProvider, channel: u64, session: &str) -> SessionLiveness;
     /// False when the worker could not start.
     fn spawn(&self, job: Job) -> bool;
@@ -152,6 +152,7 @@ struct Stamp {
     key: Key,
     generation: u64,
     revision: u64,
+    activity: Option<crate::services::claude_tui::activity::Snapshot>,
     source: Option<String>,
     notice: NoticeObservation,
     closed: Result<ClosedBoundary, NoBoundary>,
@@ -255,7 +256,8 @@ impl Reading {
         }
         let guard = lock(watch);
         let current = guard.key.as_ref() == Some(&stamp.key)
-            && (guard.generation, guard.revision) == (stamp.generation, stamp.revision);
+            && (guard.generation, guard.revision) == (stamp.generation, stamp.revision)
+            && claude_activity::current(&stamp.activity);
         if !current {
             #[cfg(unix)]
             if let Some(admission) = &self.admission {
@@ -295,6 +297,7 @@ impl Reading {
             },
             generation: 0,
             revision: 0,
+            activity: None,
             source: source.map(str::to_string),
             notice: NoticeObservation::legacy(observed.reason, session),
             closed: Err(NoBoundary::because("unread")),
@@ -322,6 +325,7 @@ impl Reading {
             key,
             generation: 1,
             revision: 0,
+            activity: None,
             source: None,
             notice: NoticeObservation::legacy(observed.reason, "overtaken"),
             closed: Err(NoBoundary::because("unread")),
@@ -348,6 +352,7 @@ fn at(guard: &Watch, answer: Observed) -> Answer {
         key,
         generation: guard.generation,
         revision: guard.revision,
+        activity: None,
         source,
         notice: guard.notice.clone().observed(answer),
         closed: closed_boundary::closed_boundary(guard, answer),
@@ -691,11 +696,8 @@ fn judge_with_policy(
             at(&guard, observed(Activity::Busy, "open"))
         }
         TurnState::Open { .. } if provider == ShadowProvider::Claude => {
-            ask_pane(watch, guard, &key, strict, || {
-                match ports.claude_busy(&key.session) {
-                    true => observed(Activity::Busy, "open_activity_busy"),
-                    false => observed(Activity::Unknown, "open_without_progress"),
-                }
+            claude_activity::supplement(watch, guard, &key, strict, || {
+                ports.claude_busy(&key.session)
             })
         }
         TurnState::Open { .. } => at(&guard, observed(Activity::Unknown, "open_without_progress")),
@@ -1040,7 +1042,7 @@ impl Ports for LivePorts {
         self.scoped(|| claude_activity::ready(session))
     }
 
-    fn claude_busy(&self, session: &str) -> bool {
+    fn claude_busy(&self, session: &str) -> claude_activity::Busy {
         self.scoped(|| claude_activity::busy(session))
     }
 
