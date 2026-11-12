@@ -991,11 +991,13 @@ fn unconfirmed(
 
 /// Tests reach only the scripted tmux their channel forced, never the real server.
 fn pane(channel_id: u64, session: &str) -> Result<busy_inject::Pane, String> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     let program = test_hook::forced(channel_id).map_or_else(
         || "agentdesk-no-tmux".into(),
         |f| crate::services::platform::tmux::session_identity_tests::managed_fixture_program(f.1),
     );
+    #[cfg(all(test, not(unix)))]
+    let program = test_hook::forced(channel_id).map_or_else(|| "agentdesk-no-tmux".into(), |f| f.1);
     #[cfg(not(test))]
     let program = {
         let _ = channel_id;
