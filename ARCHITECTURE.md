@@ -244,6 +244,9 @@ src/
 │   │   ├── mod.rs
 │   │   ├── soft_delete.rs
 │   │   └── transitions.rs
+│   ├── message_outbox/
+│   │   ├── census.rs
+│   │   └── notice.rs
 │   ├── o_channel_activation/
 │   │   └── owner.rs
 │   ├── o_piece_delivery/
@@ -339,6 +342,7 @@ src/
 │   ├── intake_outbox_open_status.rs
 │   ├── intake_outbox_status.rs
 │   ├── kanban.rs
+│   ├── message_outbox.rs
 │   ├── mod.rs
 │   ├── o_channel_activation.rs
 │   ├── o_channel_activation_fence_tests.rs
@@ -3542,6 +3546,8 @@ src/
 │   │   ├── diagnostics.rs
 │   │   ├── identity.rs
 │   │   ├── identity_tests.rs
+│   │   ├── plain.rs
+│   │   ├── plain_tests.rs
 │   │   └── session_notice.rs
 │   ├── observability/
 │   │   ├── events/
