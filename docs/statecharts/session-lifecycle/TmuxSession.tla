@@ -207,4 +207,28 @@ RowOnlyWithTurn == (srv = "up" /\ turn = "idle") => row = "none"
 \* or killing that session right now.
 RowNamesSession ==
     (srv = "up" /\ row = "held" /\ turn \notin {"starting", "recreating", "stopping"}) => sess # "none"
+
+\* A bounded projection of the proposed registration transaction; original Init/Next stay unchanged.
+Naming == INSTANCE SessionNaming WITH n <- msg
+NamingInit ==
+    /\ srv = "up" /\ sess = "live" /\ exitKind = "normal" /\ row = "none"
+    /\ turn = "idle" /\ delivered = "none" /\ restored = "no"
+    /\ crashes = 0 /\ deaths = 0 /\ probeFails = 0
+    /\ Naming!Init("tmux")
+NamingNext == Naming!Next("fixed") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails>>
+NamingWithoutPromotion == Naming!Next("no-promotion") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails>>
+NamingWithoutAbsenceGuard == Naming!Next("no-absence") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails>>
+NamingWithoutNonceCAS == Naming!Next("no-nonce-cas") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails>>
+NamingDuplicateKill == Naming!Next("double-kill") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails>>
+NamingWithoutPromotionNonceGuard == Naming!Next("no-promotion-nonce") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails>>
+PromotionNonceWasCurrent == Naming!PromotionNonceWasCurrent
+PrimaryTailIsCurrentPhysical == Naming!PrimaryTailIsCurrentPhysical
+PrimaryNamesCurrentLogical == Naming!PrimaryNamesCurrentLogical
+HostTargetMatchesCurrent == Naming!HostTargetMatchesCurrent
+LiveOldNotPromoted == Naming!LiveOldNotPromoted
+OldAliasRetained == Naming!OldAliasRetained
+PrimaryNotAlias == Naming!PrimaryNotAlias
+NoDuplicateKill == Naming!NoDuplicateKill
+LateOldHookRejected == Naming!LateOldHookRejected
+
 ====
