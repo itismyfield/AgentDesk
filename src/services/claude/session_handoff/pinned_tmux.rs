@@ -116,6 +116,15 @@ impl Control {
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn scoped_control_refusal_for_test(
+    program: &std::path::Path,
+) -> Result<(), String> {
+    Control::attach_with(std::process::Command::new(program), "AgentDesk-release")
+        .await
+        .map(|_| ())
+}
+
 fn id(value: &str, prefix: char) -> bool {
     value
         .strip_prefix(prefix)

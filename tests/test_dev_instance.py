@@ -208,6 +208,7 @@ class InstanceDeclarationTests(unittest.TestCase):
         environment = calls[0][1]["env"]
         self.assertEqual(environment["HERDR_SOCKET_PATH"], manifest["hosts"]["herdr"]["socket"])
         self.assertEqual(environment["HERDR_CONFIG_PATH"], str(root / "herdr-home/config.toml"))
+        self.assertEqual(environment["XDG_CONFIG_HOME"], str(root / "herdr-home/xdg"))
         self.assertNotIn(SENTINEL, json.dumps(environment))
         self.assertTrue(calls[0][1]["close_fds"])
         receipt_path = root / OWNER_FILE

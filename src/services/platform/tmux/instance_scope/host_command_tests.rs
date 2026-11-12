@@ -144,6 +144,21 @@ fn exercise_instance_entries() {
     );
     let log = std::env::var_os("ADK_I2_TMUX_LOG").unwrap();
     let before = std::fs::read(&log).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let refusal = runtime
+        .block_on(
+            crate::services::claude::session_handoff::pinned_tmux::scoped_control_refusal_for_test(
+                &instance.root.join("absent-control-program"),
+            ),
+        )
+        .unwrap_err();
+    assert!(
+        refusal.contains("test instance host declaration rejected"),
+        "{refusal}"
+    );
     for foreign in [
         "AgentDesk-release".to_string(),
         "%7".into(),
