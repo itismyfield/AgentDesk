@@ -165,10 +165,14 @@ src/
 ├── db/
 │   ├── auto_queue/
 │   │   ├── entries/
-│   │   │   └── dispatch_failure.rs
+│   │   │   ├── dispatch_failure.rs
+│   │   │   └── status_write.rs
+│   │   ├── phase_gates/
+│   │   │   └── reconcile_write.rs
 │   │   ├── run_owner_guard/
 │   │   │   └── writes.rs
 │   │   ├── claim.rs
+│   │   ├── completion_write.rs
 │   │   ├── consultation.rs
 │   │   ├── entries.rs
 │   │   ├── mod.rs
@@ -856,6 +860,7 @@ src/
 │   │   │   └── verified_reset_pg_tests.rs
 │   │   ├── transactions/
 │   │   │   ├── completion.rs
+│   │   │   ├── completion_tests.rs
 │   │   │   ├── consultation.rs
 │   │   │   ├── dispatch_failure.rs
 │   │   │   ├── entries.rs
@@ -2878,6 +2883,7 @@ src/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   ├── completion_postgres.rs
 │   │   │   │   ├── completion_postgres_snapshot_tests.rs
+│   │   │   │   ├── completion_postgres_terminal_sync_tests.rs
 │   │   │   │   ├── replay_hold_tests.rs
 │   │   │   │   └── span_tests.rs
 │   │   │   ├── completion_postlude/

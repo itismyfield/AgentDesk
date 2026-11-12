@@ -512,7 +512,7 @@ pub(crate) async fn attach_retry_dispatch_on_pg_tx(
     dispatch_type: &str,
     title: &str,
 ) -> Result<(), String> {
-    let locked_owner_run = claim.locked_owner_run().map(str::to_string);
+    let locked_owner_run = claim.locked_owner_run().map(|run_id| run_id.to_string());
     let locked_owner_run = locked_owner_run.as_deref();
     let owner = match claim.owner_before_failed_sync {
         Some(owner) => {
@@ -608,7 +608,7 @@ pub(crate) async fn attach_retry_dispatch_on_pg_tx(
     if let Some(owner) = owner {
         if owner.entry_status == crate::db::auto_queue::ENTRY_STATUS_FAILED {
             // `pending` and `dispatched` targets never owe a run-completion attempt.
-            let pending = crate::db::auto_queue::write_entry_status_on_pg_tx(
+            let pending = crate::db::auto_queue::entries::write_entry_status_on_pg_tx(
                 tx,
                 &owner.entry_id,
                 crate::db::auto_queue::ENTRY_STATUS_PENDING,
@@ -647,7 +647,7 @@ pub(crate) async fn attach_retry_dispatch_on_pg_tx(
             }
         }
 
-        let attached = crate::db::auto_queue::write_entry_status_on_pg_tx(
+        let attached = crate::db::auto_queue::entries::write_entry_status_on_pg_tx(
             tx,
             &owner.entry_id,
             crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
