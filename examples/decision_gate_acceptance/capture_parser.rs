@@ -38,14 +38,14 @@ pub fn validate_views(fixture: &Value) -> Result<(), &'static str> {
             "/src/services/decision_gate/types.rs"
         )),
         true,
-    ) != include_str!("generated/types.rs")
+    ) != include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/decision_gate_capture_parser/generated/types.rs"))
         || enabled(
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/src/services/decision_gate/runtime/parser.rs"
             )),
             false,
-        ) != include_str!("generated/parser.rs")
+        ) != include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/decision_gate_capture_parser/generated/parser.rs"))
     {
         return Err("capture_parser_source_drift");
     }

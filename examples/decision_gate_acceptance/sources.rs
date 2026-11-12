@@ -29,7 +29,7 @@ pub mod services {
         pub mod capture_parser {
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/tests/support/decision_gate_capture_parser/mod.rs"
+                "/examples/decision_gate_acceptance/capture_parser.rs"
             ));
         }
         pub(crate) mod types {

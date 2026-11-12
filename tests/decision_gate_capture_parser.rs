@@ -10,7 +10,7 @@ pub mod services {
         pub mod capture_parser {
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/tests/support/decision_gate_capture_parser/mod.rs"
+                "/examples/decision_gate_acceptance/capture_parser.rs"
             ));
         }
         pub use capture_parser::types;
@@ -169,4 +169,133 @@ async fn valid_capture_marks_common_parser_compatibility() {
     .expect("json");
     assert_eq!(manifest["parser_compatible"], true);
     assert!(manifest["fixture_mapping"].is_string());
+}
+
+mod acceptance_sample_leaks {
+    use regex::Regex;
+    use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeSet;
+
+    fn fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "fixtures/decision_gate/acceptance_samples.json"
+        ))
+        .expect("fixed acceptance samples")
+    }
+
+    fn assert_shortcut_bounded(name: &str, predictions: &[&str], fixture: &Value) {
+        let samples = fixture["samples"].as_array().expect("samples");
+        assert_eq!(predictions.len(), samples.len());
+        let correct = predictions
+            .iter()
+            .zip(samples)
+            .filter(|(prediction, sample)| Some(**prediction) == sample["expected"].as_str())
+            .count();
+        println!(
+            "{name}: correct={correct}/{} accuracy={:.6}",
+            samples.len(),
+            correct as f64 / samples.len() as f64
+        );
+        assert!(predictions.contains(&"duplicate"));
+        assert!(predictions.contains(&"new"));
+        assert!(correct * 4 <= samples.len() * 3);
+    }
+
+    #[test]
+    fn review_normal_path_regex_is_not_a_label_shortcut() {
+        let fixture = fixture();
+        let rule = Regex::new("정상|무관|관계없이|보존").expect("fixed review rule");
+        let predictions: Vec<_> = fixture["samples"]
+            .as_array()
+            .expect("samples")
+            .iter()
+            .map(|sample| {
+                if rule.is_match(sample["background"].as_str().expect("background")) {
+                    "new"
+                } else {
+                    "duplicate"
+                }
+            })
+            .collect();
+        assert_shortcut_bounded("normal_path_regex", &predictions, &fixture);
+    }
+
+    fn tokens(rule: &Regex, text: &str) -> BTreeSet<String> {
+        rule.find_iter(&text.to_lowercase())
+            .map(|word| word.as_str().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn candidate_word_overlap_is_not_a_label_shortcut() {
+        let fixture = fixture();
+        let words = Regex::new("[a-z0-9_]+|[가-힣]+").expect("fixed token rule");
+        let predictions: Vec<_> = fixture["samples"]
+            .as_array()
+            .expect("samples")
+            .iter()
+            .map(|sample| {
+                let input = format!(
+                    "{} {}",
+                    sample["title"].as_str().expect("title"),
+                    sample["background"].as_str().expect("background")
+                );
+                let query = tokens(&words, &input);
+                let max_overlap = fixture["issue_sets"][sample["issue_set"].as_str().expect("set")]
+                    .as_array()
+                    .expect("candidates")
+                    .iter()
+                    .map(|issue| {
+                        let candidate = tokens(&words, issue["title"].as_str().expect("title"));
+                        query.intersection(&candidate).count() as f64
+                            / query.union(&candidate).count() as f64
+                    })
+                    .fold(0.0, f64::max);
+                // Fixed before sample edits: one-fifth Jaccard, without stemming or label fitting.
+                if max_overlap >= 0.20 {
+                    "duplicate"
+                } else {
+                    "new"
+                }
+            })
+            .collect();
+        assert_shortcut_bounded("candidate_word_jaccard_ge_0.20", &predictions, &fixture);
+    }
+
+    fn sort_keys(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                fields.values_mut().for_each(sort_keys);
+                fields.sort_keys();
+            }
+            Value::Array(values) => values.iter_mut().for_each(sort_keys),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn labels_ids_keys_and_candidate_sets_are_unchanged() {
+        let fixture = fixture();
+        let labels: Vec<_> = fixture["samples"]
+            .as_array()
+            .expect("samples")
+            .iter()
+            .map(|sample| {
+                json!({
+                    "sample_id": sample["sample_id"],
+                    "expected": sample["expected"],
+                    "key": sample["key"],
+                    "issue_set": sample["issue_set"]
+                })
+            })
+            .collect();
+        let mut contract = json!({"issue_sets": fixture["issue_sets"], "labels": labels});
+        sort_keys(&mut contract);
+        let serialized = serde_json::to_vec(&contract).expect("canonical contract");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(serialized)),
+            "b3a696a62e6dbdbf20a661b7a40ea6c17ad23fc41bafd7bcf77d3bc7ed092f87"
+        );
+    }
 }

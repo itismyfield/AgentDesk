@@ -57,7 +57,7 @@ batch 지연을 표본 지연으로 합산하지 않는다. 재시도와 redirec
 원시 캡처의 네 view는 서비스 parser로 모두 검증한 뒤에만 기록한다. manifest의
 `parser_compatible: true`는 그 검증의 성공이며, 고정 예시 수치가 담긴 기존 시험과의
 원시 대조 완료를 뜻하지 않는다. 실패하면 manifest와 fixture를 기록하지 않는다.
-`tests/support/decision_gate_capture_parser/`는 같은 parser의 `cfg(test)` 분기만 켠
+`capture_parser.rs`와 `tests/support/decision_gate_capture_parser/generated/`는 같은 parser의 `cfg(test)` 분기만 켠
 시험용 연결이다. 생성된 parser·타입이 원본의 해당 변환과 다르면 검증을 거부한다.
 타입의 공개 범위는 시험 vocabulary 접근을 위해서만 넓히며 production은 바꾸지 않는다.
 실제 라우트의 `issue_duplicate::check_with_fetch` 소스에 고정 후보 closure를
@@ -87,5 +87,4 @@ fixture를 교체한다. 현재 시험은 합성 표식과 정확한 관측 예�
 제목+배경 대비 후보 제목의 최대 단어 Jaccard가 0.20 이상이면 duplicate로 보는
 고정 규칙을 사용한다. 토큰은 소문자 ASCII 단어/숫자/밑줄 또는 연속 한글이며,
 두 규칙의 정확도는 각각 0.75 이하여야 한다. 라벨·key·후보 목록도 고정한다.
-로컬 회귀 검증은 `python3 -m unittest discover -s tests -p test_decision_gate_acceptance_samples.py`
-및 `cargo test --offline -p agentdesk --test decision_gate_capture_parser`로 실행한다.
+로컬 회귀 검증은 `cargo test --offline -p agentdesk --test decision_gate_capture_parser`로 실행한다.
