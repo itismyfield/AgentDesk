@@ -106,7 +106,7 @@ fn exercise_instance_entries() {
     crate::config::test_instance::initialize().unwrap();
     let instance = crate::config::test_instance::current().unwrap().unwrap();
     let name = std::env::var("ADK_I2_TMUX_SESSION").unwrap();
-    let fake = instance.root.join("tmux");
+    let fake = instance.root.join("fixture-worktree/target/debug/tmux");
     assert!(
         tmux::create_session(&name, None, "true")
             .unwrap()

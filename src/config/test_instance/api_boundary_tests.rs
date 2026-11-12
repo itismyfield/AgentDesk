@@ -53,6 +53,8 @@ fn pin_listener(root: &Path) -> TcpListener {
 }
 
 fn receive(stream: &mut TcpStream) -> String {
+    // Accepted sockets can inherit the listener's nonblocking mode on macOS.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();

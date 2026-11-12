@@ -429,12 +429,6 @@ fn a_returned_resume_without_its_resumed_start_types_nothing() {
 #[test]
 fn test_instance_failed_presence_never_becomes_missing_on_an_absent_default_socket() {
     let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let sockets = tempfile::tempdir().unwrap();
-    let _tmpdir = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "TMUX_TMPDIR",
-        sockets.path(),
-    );
-    let _attached = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock("TMUX");
     if crate::config::test_instance::requested() {
         crate::config::test_instance::initialize().unwrap();
         let name = format!(
@@ -454,6 +448,12 @@ fn test_instance_failed_presence_never_becomes_missing_on_an_absent_default_sock
         );
         return;
     }
+    let sockets = tempfile::tempdir().unwrap();
+    let _tmpdir = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "TMUX_TMPDIR",
+        sockets.path(),
+    );
+    let _attached = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock("TMUX");
     const NAME: &str = "adk-test-presence-unknown";
     let _presence =
         InjectedPresenceGuard::set(HostSessionRef::tmux(NAME), HostPresence::ProbeFailed);
@@ -514,7 +514,8 @@ new-session|respawn-pane)
   echo 'synthetic tmux refusal after child capture' >&2
   exit 1 ;;
 list-panes) echo 1 ;;
-has-session) exit 1 ;;
+has-session)
+  case "$*" in *-native-true:*) exit 0 ;; *) echo "can't find session" >&2; exit 1 ;; esac ;;
 *) exit 0 ;;
 esac
 "#,
@@ -550,10 +551,10 @@ esac
                     None,
                     "http://127.0.0.1:9".into(),
                 );
+                let error = result.unwrap_err();
                 assert!(
-                    result
-                        .unwrap_err()
-                        .contains("synthetic tmux refusal after child capture")
+                    error.contains("synthetic tmux refusal after child capture"),
+                    "returned={returned}: {error}"
                 );
                 assert!(instance.root.join("native.executed").is_file());
                 scope::assert_environment_capture(
