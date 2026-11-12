@@ -377,3 +377,5 @@ outbox-transaction/OutboxTransactionFreshTask.cfg	OutboxTransaction	CensusObserv
 outbox-transaction/OutboxTransactionPreSource.cfg	OutboxTransaction	SourceDecisionUsesObservation	-
 outbox-transaction/OutboxTransactionForeignTx.cfg	OutboxTransaction	SameTransaction	-
 outbox-transaction/OutboxTransactionForeignProviderConnection.cfg	OutboxTransaction	SameProviderConnection	-
+session-lifecycle/SessionIdentityGateAfter.cfg	SessionIdentityGate	-	-
+session-lifecycle/SessionIdentityGateBefore.cfg	SessionIdentityGate	NoForeignMutation	-
