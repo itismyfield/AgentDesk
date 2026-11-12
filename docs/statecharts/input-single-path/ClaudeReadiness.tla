@@ -6,7 +6,8 @@ CONSTANTS N, Mode
 VARIABLE r
 Ids == 1..N
 Before == Mode = "ready-before-narrow"
-ClearPreSource == Mode \in {"ready-clear-pending-before", "ready-clear-pending-after", "ready-clear-pending-recheck"}
+ClearHeld == Mode \in {"ready-clear-held-before", "ready-clear-held-after"}
+ClearPreSource == ClearHeld \/ Mode \in {"ready-clear-pending-before", "ready-clear-pending-after", "ready-clear-pending-recheck"}
 Fresh == ClearPreSource \/ Mode \in {"ready-fresh", "ready-clear", "ready-resume", "ready-late-dialog", "ready-preflight-only"}
 Dialog == Mode \in {"ready-late-dialog", "ready-preflight-only"}
 Permission == Mode \in {"ready-permission-later", "ready-permission-poison"}
@@ -30,10 +31,11 @@ Initial ==
      oldBinding |-> ClearPreSource, filePublished |-> ~ClearPreSource,
      durableClear |-> ClearPreSource, pendingSeq |-> IF ClearPreSource THEN 1 ELSE 0,
      proofPending |-> 0, pendingChanges |-> IF Mode = "ready-clear-pending-recheck" THEN 1 ELSE 0,
-     badClear |-> FALSE,
+     badClear |-> FALSE, heldOnce |-> FALSE,
      tail |-> "none", continuing |-> FALSE, stopBoundary |-> 0, softStage |-> 0,
-     stop |-> 0, oldStopLeft |-> 1, awake |-> TRUE, idleWakes |-> 2,
-     human |-> Person, draft |-> IF Blind THEN "Unread" ELSE IF Person THEN "Person" ELSE "Empty",
+     stop |-> 0, oldStopLeft |-> IF ClearHeld THEN 0 ELSE 1, awake |-> TRUE,
+     idleWakes |-> IF ClearHeld THEN 0 ELSE 2,
+     human |-> Person \/ ClearHeld, draft |-> IF Blind THEN "Unread" ELSE IF Person \/ ClearHeld THEN "Person" ELSE "Empty",
      q |-> [i \in Ids |-> "queued"], effects |-> [i \in Ids |-> 0],
      writes |-> [i \in Ids |-> 0], busyWrites |-> [i \in Ids |-> 0],
      busyKeys |-> [i \in Ids |-> "none"],
@@ -98,7 +100,7 @@ Observe ==
                                   ELSE IF r.phase = "Booting" THEN "Unknown" ELSE r.phase,
                      !.seenEpoch = r.epoch, !.seenTurn = r.turn,
                      !.softStage = IF Suppressed /\ r.softStage = 2 THEN 3 ELSE @,
-                     !.awake = IF NoWake THEN @ ELSE TRUE]
+                     !.awake = IF NoWake \/ (ClearHeld /\ r.heldOnce) THEN @ ELSE TRUE]
 LateAssistant ==
     /\ Suppressed /\ r.softStage = 3
     /\ r' = [r EXCEPT !.softStage = 4, !.tail = "assistant", !.terminal = 0]
@@ -114,12 +116,19 @@ RecoverDraft ==
     /\ r.draft = "Unread" /\ Mode # "ready-permanent-unread"
     /\ r' = [r EXCEPT !.draft = IF r.human THEN "Person" ELSE "Empty", !.awake = TRUE]
 HumanClears ==
-    /\ r.human /\ r.draft = "Person"
-    /\ r' = [r EXCEPT !.human = FALSE, !.draft = "Empty", !.awake = TRUE]
+    /\ r.human /\ r.draft = "Person" /\ (~ClearHeld \/ r.heldOnce)
+    /\ r' = [r EXCEPT !.human = FALSE, !.draft = "Empty",
+                     !.awake = IF ClearHeld THEN @ ELSE TRUE]
 Hold(i) ==
     /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake
+    /\ ~ClearHeld \/ Ready
     /\ ~Ready \/ r.draft # "Empty"
-    /\ r' = [r EXCEPT !.q[i] = "held", !.awake = FALSE]
+    /\ r' = [r EXCEPT !.q[i] = "held", !.awake = FALSE,
+                     !.heldOnce = @ \/ ClearHeld]
+WatchHeld ==
+    /\ ClearHeld /\ r.heldOnce /\ r.q[1] = "held" /\ r.draft = "Empty"
+    /\ Ready /\ (~r.oldBinding \/ Mode # "ready-clear-held-before")
+    /\ r' = [r EXCEPT !.awake = TRUE]
 Prepare(i) ==
     /\ ~CompactCompletion \/ ~r.compactPending
     /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake /\ Ready
@@ -209,11 +218,11 @@ CompactCompletionEvidence ==
 FinishSelfCompactFence ==
     /\ r.compactFence /\ r.compactEvidence /\ Mode # "ready-compact-no-completion"
     /\ r' = [r EXCEPT !.compactFence = FALSE, !.compactReady = TRUE, !.awake = TRUE]
-Next == ChangeClearPending \/ PublishClearFile \/ CompactCompletionEvidence \/ FinishSelfCompactFence \/ PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
+Next == WatchHeld \/ ChangeClearPending \/ PublishClearFile \/ CompactCompletionEvidence \/ FinishSelfCompactFence \/ PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
         SuppressStop \/ SoftSummary \/ LateAssistant \/
         NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/ IdleWake \/
         (\E i \in Ids : Hold(i) \/ Prepare(i) \/ SelectBusy(i) \/ BusyInject(i) \/ BusyPublish(i) \/ ReexposeBusy(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
-Fairness == WF_r(ChangeClearPending) /\ WF_r(PublishClearFile) /\ WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
+Fairness == WF_r(WatchHeld) /\ WF_r(ChangeClearPending) /\ WF_r(PublishClearFile) /\ WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
             WF_r(SuppressStop) /\ WF_r(SoftSummary) /\ WF_r(LateAssistant) /\
             WF_r(RecoverDraft) /\ WF_r(HumanClears) /\ WF_r(NativeStart) /\
             WF_r(Revoke) /\ WF_r(Submit) /\ WF_r(CompactSubmit) /\
@@ -235,6 +244,7 @@ CompactAfterStopIdle == ~r.badCompact
 NoContinuationEarlyInput == ~r.badContinuation
 BusyKeyPlanPreserved == \A i \in Ids : r.busyWrites[i] > 0 =>
     (r.route[i] = "busy" /\ r.busyWrites[i] = 1 /\ r.busyKeys[i] = "paste,Enter")
+ClearHeldEventuallySends == ClearHeld => ((r.heldOnce /\ r.draft = "Empty") ~> (r.effects[1] = 1))
 PendingEventuallyExecutes == \A i \in Ids : (r.q[i] \in {"queued", "held", "prepared", "busy-selected", "busy-written", "native-queued"}) ~> (r.effects[i] >= 1)
 CompactEventuallyExecutes == r.compactPending ~> (r.compacts = 1)
 SelfCompactEventuallyReleases == (r.compacts = 1 /\ r.compactEvidence) ~> (\E i \in Ids : r.writes[i] > 0)

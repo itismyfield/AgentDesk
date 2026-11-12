@@ -385,7 +385,7 @@ fn wait_for_prompt_ready_inner(
                 return Err("claude tui session died before prompt input was ready".into());
             }
             if readiness == PromptReadinessKind::ProvenWarmFollowup {
-                super::readiness::watch_current(session_name);
+                super::readiness::watch_current(session_name, transcript_path);
                 return Err(SubmissionError::Held(PreparationHold::before(
                     session_name,
                     "idle_evidence_pending",
@@ -421,7 +421,7 @@ fn wait_for_prompt_ready_inner(
                 ))
                 .into_legacy());
             }
-            super::readiness::watch_current(session_name);
+            super::readiness::watch_current(session_name, transcript_path);
             Err(SubmissionError::Held(PreparationHold::before(
                 session_name,
                 "idle_evidence_pending",

@@ -260,3 +260,26 @@ Merge source baseline: ca4ba220aa35c4d4c31d417bcbd9659eb7e1da89. The refinement 
 Clear repair implementation source SHA: d0d8d711b8be5668aacf90a7cd7c362e15ef7ec0. Final normal Rust source includes the unchanged-path native-ID fallback. Targeted callers and negative evidence tests are described in the lane report.
 
 Direct TLC:62 configs/226 calls, GREEN34, expected RED28, unexpected0. The required base/head invocation selected79 configs and completed270 calls. The concrete nonce/channel/path checks are exercised by caller tests; the model separates old binding, Pending seq and new file publication.
+
+## Clear first-input Held watch refinement
+
+Code base SHA: b63a97c5115bf469c85996242d61732557122427 (the before/None watcher).
+Candidate first_input.rs SHA256: b27be5fb6760f3875ff9703c8abe4b7ed7ee5be861d80086ba9e3b7b8137bbe3.
+Repository checker run: `TLA2TOOLS=/home/adk/.cache/tla2tools/tla2tools.jar python3 scripts/ci/statecharts_tlc.py --base 193a57168f --head HEAD --jobs 2`.
+81 configs / 274 TLC invocations / 40 GREEN / 41 expected RED / unexpected0.
+The working model inputs were checked; committed-head selection is verified separately before reporting completion.
+
+| cfg | expected / actual | liveness violation |
+|---|---|---|
+| InputPathReadyClearHeldBefore.cfg | RED / RED | ReadyClearHeldEventuallySends |
+| InputPathReadyClearHeldAfter.cfg | GREEN / GREEN | none |
+
+ClearHeld forces a first-input draft veto only after current clear readiness was observed.
+Recovering the composer does not itself wake, and the ordinary Observe action cannot wake this Held input.
+Old Stop and external IdleWake are disabled in this scenario. Only the level watch may wake it.
+The before watch asks for the implicit source and stays blocked behind the old runtime binding.
+The after watch preserves the attached path and reuses current clear/Pending authority.
+Submit creates the first new file; PublishClearFile changes the old binding later.
+Stable current nonce/path/Start/Pending and fair watch execution are liveness premises.
+Runtime owned-caller tests check changed nonce/path, transient capture failure, exact original custody and one paste/Enter.
+The model does not grant replacement-source authority or change Unknown replay, Busy injection or draft/focus policy.

@@ -2,6 +2,7 @@
 %% Implementation source SHA e46154b856cdc6ce4f00b3a628c045e26e16fd0e; compact completion repair of eee9d323e23576b7e6eb98cf92890ac9726d60da.
 %% Confirmed own local command completion only; Unknown transfer remains fenced.
 %% Clear implementation source d0d8d711b8be5668aacf90a7cd7c362e15ef7ec0: old binding and new file publication are distinct.
+%% Clear Held watch base SHA b63a97c5115bf469c85996242d61732557122427; candidate first_input.rs SHA256 b27be5fb6760f3875ff9703c8abe4b7ed7ee5be861d80086ba9e3b7b8137bbe3
 stateDiagram-v2
     [*] --> Route
     Route --> BusyQueue : existing active hand_busy / native Running branches
@@ -26,7 +27,12 @@ stateDiagram-v2
     Waiting --> Observe : scoped wake or periodic current transcript read
     Observe --> DraftVeto : current approved terminal Idle or first SessionStart proof
     DraftVeto --> Held : existing draft / unread / protected focus veto
-    Held --> Observe : automatic observation and same-original wake
+    Held --> Observe : ordinary source observation and same-original wake
+    Held --> ClearHeldWatch : clear first input remembers its attached path
+    ClearHeldWatch --> DraftVeto : recovered veto; observe Some(captured path) and current proof
+    ClearHeldWatch --> ClearHeldWatch : draft / unread / source changed; no keys
+    ClearHeldWatch --> ClearHeldCycle : before uses None with retained old binding
+    ClearHeldCycle --> ClearHeldCycle : no payload or file birth; liveness RED
     Held --> Held : persistent unread; progress boundary RED
     DraftVeto --> Prepared : existing draft admission permits Idle submission
     Prepared --> Observe : source / turn / latch revision / cancel changed

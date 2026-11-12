@@ -512,6 +512,7 @@ ReadyNoIdleRunningInjection == Readiness!NoIdleRunningInjection
 ReadyNoHumanDraftExecution == Readiness!NoHumanDraftExecution
 ReadyNoEarlyInput == Readiness!NoEarlyInput
 ReadyNoClearAuthorityViolation == Readiness!NoClearAuthorityViolation
+ReadyClearHeldEventuallySends == Readiness!ClearHeldEventuallySends
 ReadyCompactAfterStopIdle == Readiness!CompactAfterStopIdle
 ReadyPendingEventuallyExecutes == Readiness!PendingEventuallyExecutes
 ReadyCompactEventuallyExecutes == Readiness!CompactEventuallyExecutes

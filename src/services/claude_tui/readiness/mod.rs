@@ -514,18 +514,19 @@ pub(crate) fn empty_draft(capture: &str) -> bool {
         super::busy_inject::screen::Composer::Empty
     )
 }
-pub(crate) fn watch_draft(session: &str, _path: Option<&Path>) {
-    watch(session, true);
+pub(crate) fn watch_draft(session: &str, path: Option<&Path>) {
+    watch(session, path, true);
 }
-pub(crate) fn watch_current(session: &str) {
-    watch(session, false);
+pub(crate) fn watch_current(session: &str, path: Option<&Path>) {
+    watch(session, path, false);
 }
-fn watch(session: &str, draft_required: bool) {
+fn watch(session: &str, path: Option<&Path>, draft_required: bool) {
     #[cfg(unix)]
     {
         let session = session.to_owned();
+        let path = path.map(Path::to_path_buf);
         super::owner_input::record_preparation_watch(Box::new(move || {
-            if observe(&session,None).is_some()
+            if observe(&session,path.as_deref()).is_some()
                 && (!draft_required || super::host_input::observe_draft(&session).as_deref()
                     .is_some_and(|capture| empty_draft(capture)
                         && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture))) {
@@ -534,5 +535,5 @@ fn watch(session: &str, draft_required: bool) {
         }));
     }
     #[cfg(not(unix))]
-    let _ = (session, draft_required);
+    let _ = (session, path, draft_required);
 }

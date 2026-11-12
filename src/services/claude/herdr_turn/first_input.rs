@@ -117,10 +117,11 @@ fn write(
         stopped @ (InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }) => {
             let pane = attached.target.clone();
             let watched_session = logical.to_owned();
+            let watched_path = attached.transcript.clone();
             crate::services::claude_tui::owner_input::record_preparation_watch(Box::new(
                 move || {
                     use crate::services::claude_tui::busy_inject::Screen;
-                    if crate::services::claude_tui::readiness::observe(&watched_session,None).is_some()
+                    if crate::services::claude_tui::readiness::observe(&watched_session,Some(&watched_path)).is_some()
                         && pane.capture_ansi(-80).as_deref().is_some_and(|capture|
                             crate::services::claude_tui::readiness::empty_draft(capture)
                             && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture)) {
@@ -260,6 +261,8 @@ pub(super) fn observe(
     Ok(())
 }
 
+#[cfg(test)]
+mod clear_held_tests;
 #[cfg(test)]
 mod tests;
 

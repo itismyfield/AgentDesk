@@ -143,17 +143,17 @@ fn run(
         let park = match super::super::readiness::idle::before_paste(&pane, stash_allowed) {
             Ok(park) => park,
             Err(veto) => {
-                super::super::readiness::watch_current(session);
+                super::super::readiness::watch_current(session, None);
                 modal.set(veto == busy_inject::Veto::Modal);
                 return refused(Refusal::NotReady);
             }
         };
         let Some(proof) = super::super::readiness::observe(session, None) else {
-            super::super::readiness::watch_current(session);
+            super::super::readiness::watch_current(session, None);
             return refused(Refusal::NotReady);
         };
         let Some(reservation) = super::super::readiness::reserve(proof) else {
-            super::super::readiness::watch_current(session);
+            super::super::readiness::watch_current(session, None);
             return refused(Refusal::NotReady);
         };
         if authority.claim(session).is_err() {
@@ -162,7 +162,7 @@ fn run(
         }
         // A stop that took the writer token's gate first leaves the pane without a key.
         if !reservation.current() {
-            super::super::readiness::watch_current(session);
+            super::super::readiness::watch_current(session, None);
             reservation.not_sent();
             return refused(Refusal::NotReady);
         }

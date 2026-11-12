@@ -160,6 +160,8 @@ input-single-path/InputPathReadyBusyReexpose.cfg	InputPath	ReadyBusyKeyPlanPrese
 input-single-path/InputPathReadyAfterNarrow.cfg	InputPath	-	-
 input-single-path/InputPathReadyFresh.cfg	InputPath	-	-
 input-single-path/InputPathReadyClear.cfg	InputPath	-	-
+input-single-path/InputPathReadyClearHeldAfter.cfg	InputPath	-
+input-single-path/InputPathReadyClearHeldBefore.cfg	InputPath	-	ReadyClearHeldEventuallySends
 input-single-path/InputPathReadyClearPendingAfter.cfg	InputPath	-	-
 input-single-path/InputPathReadyClearPendingBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyClearPendingRecheck.cfg	InputPath	-	-
