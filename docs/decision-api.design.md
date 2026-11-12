@@ -1,6 +1,6 @@
 # 판정 API 공통 접점 설계 d1
 
-<!-- doc-path-refs: proposed src/services/decision_gate/mod.rs src/services/decision_gate/types.rs src/config/decision_gate.rs scripts/with-decision-key.py -->
+<!-- doc-path-refs: proposed src/services/decision_gate/mod.rs src/services/decision_gate/types.rs src/config/decision_gate.rs src/cli/decision_key_exec.rs -->
 <!-- doc-path-refs: external scripts/decide.py decide.py -->
 
 기준: 2026-11-12, main `4e0db0cccd59169a09f25fe162d8cc1b2755e96e`. 설계만 작성했으며 구현·빌드·Gemini 호출·키 조회는 하지 않았다. 이 문서는 #8127, #7438 S2b, #8117이 공유할 접점의 정본이다. 각 소비자의 업무 정책은 해당 소비자에 남긴다.
@@ -59,6 +59,8 @@ enum DecisionValue {
 }
 ```
 
+호출 반환형은 `DecisionAttempt { result: DecisionResult, observation: DecisionObservation }`으로 위 세 갈래를 그대로 보존한다. 작은 부가 진단 `DecisionObservation`에는 template_version·단조 시계 elapsed_ms·`input_tokens: Option<u64>`만 둔다. 토큰 수는 CLI와 같은 `usage.total_input_tokens`/`totalInputTokens`에서 읽고 누락·Off·결과 유실이면 `None`으로 둔다. 미확인을 0토큰 성공으로 만들지 않는다. 이 메타정보도 자동 로깅하지 않으며 루틴 소비자가 안전한 run 진단으로 투영한다.
+
 `OffReason`: `MissingKey`, `GlobalDisabled`, `FeatureDisabled`, `RepositoryDisabled`, `PolicyUnavailable`. `NoAnswerReason`: `InvalidRequest`, `Timeout`, `Transport`, `Authentication`, `RateLimited`, `ProviderError`, `Blocked`, `MissingAnswer`, `InvalidResponse`, `ClientUnavailable`. 이들은 고정 enum이며 HTTP body·URL·오류 문자열을 담지 않는다.
 
 `Off`는 기능을 사용할 수 없는 설정/키 상태, `NoAnswer`는 활성화된 접점에서 사용할 수 있는 답을 얻지 못한 상태다. 둘 다 업무 오류로 처리하지 않고 호출자는 원래 규칙을 실행한다. 키 없음을 `NoAnswer`로 합치지 않는다. 설정만으로 판단할 수 있는 `availability(scope)`를 후보 수집 전에 사용하고, `decide` 내부에서도 같은 조건식을 쓴다. 따라서 off일 때는 GitHub 후보 조회도 0회다.
@@ -93,7 +95,7 @@ REST는 `POST https://generativelanguage.googleapis.com/v1beta/decisions`, 모�
 
 키 정본 참조는 `op://AgentDesk/Gemini API/credential`이며 **프로세스에 전달할 환경변수 이름은 `GEMINI_API_KEY`뿐**이다. 승인된 기동 wrapper가 `agent-op`으로 읽어 메모리/환경으로 전달한다. Rust는 환경변수만 확인하고 요청마다 `agent-op`이나 1Password에 접근하지 않는다. wrapper의 키 조회에는 짧은 상한을 두며 agent-op 부재·금고 항목 없음·읽기 실패 시 환경변수 없이 서버를 기동한다. 조회 실패가 `set -e`나 `agent-op run` 실패로 이어져 기동을 막지 않게 한다. 구체적인 기동 wrapper 차이는 구현 때 코드로 고정한다(운영 설정 파일 편집을 허용하는 것은 아니다).
 
-기동 배선의 코드 전제: 현 main의 plist 생성기 `src/cli/init.rs:507`은 바이너리와 `dcserver`를 직접 실행하고, `:495`는 환경 파일 항목을 plist에 렌더링한다. 따라서 키를 환경 파일에 추가하면 안 된다. 제안 wrapper `scripts/with-decision-key.py`를 release bin에 함께 설치하고 생성기의 ProgramArguments 앞에 배선한다. wrapper는 이미 주입된 환경변수를 우선하고, 없으면 `agent-op`을 **3초 상한**으로 한 번 실행하여 stdout을 메모리에만 받고 stderr는 외부에 내보내지 않는다. 성공/실패 모두 원래 바이너리를 exec하며, 실패 때는 키 없이 exec한다. 생성 plist에는 wrapper/바이너리 경로만 넣고 키는 넣지 않는다. wrapper 설치·생성기 배선·가짜 agent-op의 성공/없음/오류/timeout 시험까지 G 조각에 포함한다. 실제 plist 생성·운영 배포는 본 레인의 작업이 아니다. wrapper를 거치지 않는 직접 실행은 명시적 환경 주입이 없으면 Off로 기동한다.
+기동 배선의 코드 전제: 현 main의 plist 생성기 `src/cli/init.rs:507`은 바이너리와 `dcserver`를 직접 실행하고, `:495`는 환경 파일 항목을 plist에 렌더링한다. 따라서 키를 환경 파일에 추가하면 안 된다. 제안 wrapper `src/cli/decision_key_exec.rs`는 **같은 바이너리의 내부 기동 진입점**으로 두어 별도 Python/셸 도구를 필수 설치하지 않는다. 생성기의 ProgramArguments에 이 진입점→`dcserver` 순서를 배선한다. wrapper는 이미 주입된 환경변수를 우선하고, 없으면 `agent-op`을 **3초 상한**으로 한 번 실행하여 stdout을 메모리에만 받고 stderr는 외부에 내보내지 않는다. timeout 때 직접 소유한 조회 child만 회수하고, 성공/실패 모두 원래 바이너리의 일반 `dcserver` 진입점을 exec한다. 성공 시 child 환경변수로 키를 넘기고 실패 시 키 없이 exec하여 재귀 키 조회를 만들지 않는다. 생성 plist에는 바이너리 경로·내부 모드만 넣고 키는 넣지 않는다. wrapper·CLI 내부 분기/생성기 배선·가짜 agent-op의 성공/없음/오류/timeout 시험까지 G 조각에 포함한다. 실제 plist 생성·운영 배포는 본 레인의 작업이 아니다. wrapper를 거치지 않는 직접 실행은 명시적 환경 주입이 없으면 Off로 기동한다.
 
 mac-book/mac-mini 모두 같은 참조·환경변수·실패 경로를 사용한다. 호스트별 키나 파일 사본을 만들지 않는다. 키 없는 CI·다른 사람의 설치에서도 빌드/시험/기동이 가능하게 한다. 본 조사에서 값·항목 내용의 출력/조회는 0회이며 환경변수 값은 이 문서에도 남기지 않는다.
 
@@ -167,7 +169,7 @@ mac-book/mac-mini 모두 같은 참조·환경변수·실패 경로를 사용한
 | `:291` HTTP 10초+키 20초, 전체 35초 | 공통 deadline 2초, 요청 중 키 조회 0 | 35/10/20초를 2초로 교체. pause나 다음 tick 대기를 넣지 않음 |
 | `:291` 타입·유한 범위 검증 | provider 경계에서 한 번만 수행. bool=noul>=0.5, p_yes=noul | routine 측 이중 wire 검증을 만들지 않고 typed 값 사용 |
 | `:293` skip 이력·checkpoint/next_due/API/화면 사유 | 기존 Skip 경로 `runtime.rs:711`, reason `:719`, skip_run `:721` 사용 | `prejudge_no_work` 유지. 접점은 run 종결을 소유하지 않음 |
-| `:293` 질문/입력 안전 요약/hash/bytes/임계값/답/elapsed 등의 run 진단 | 접점 로그는 값 0, 소비자 run 진단은 안전한 기본 투영만 사용. raw body/stderr/비밀 0 | CLI version/model/rc를 adapter/template version·typed outcome/reason으로 교체. Off와 NoAnswer를 별도 범주로 저장 |
+| `:293` 질문/입력 안전 요약/hash/bytes/임계값/답/elapsed 등의 run 진단 | 접점 로그는 값 0, 소비자 run 진단은 안전한 기본 투영과 observation 사용. raw body/stderr/비밀 0 | CLI version/model/rc를 adapter/template version·typed outcome/reason으로 교체. Off와 NoAnswer를 별도 범주로 저장하고 미확인 토큰은 null |
 | `:293` agent 완료 timeout을 단축하지 않음 | 판정 deadline과 current_attempt_started_at은 별도 시계 | 35초 문구만 교체하고 시작 시각 분리 유지 |
 | `:299` fake CLI RED·rc2/3·35초·누적 1회 | 공통 fake transport로 Off/NoAnswer/Answer, 소비자 경계에서 호출/skip 검증 | missing CLI→MissingKey, 35초→2초. Off/NoAnswer를 skip으로 바꾸는 mutant 추가 |
 
