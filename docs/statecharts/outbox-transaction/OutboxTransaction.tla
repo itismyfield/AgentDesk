@@ -5,7 +5,7 @@
 EXTENDS Naturals
 CONSTANTS Boundary, Mutation, Cases
 ASSUME Boundary \in {"current", "service"}
-ASSUME Mutation \in {"none", "preobserve", "pre-source", "split-insert", "early-census", "fresh-task"}
+ASSUME Mutation \in {"none", "preobserve", "pre-source", "split-insert", "early-census", "fresh-task", "foreign-tx", "foreign-provider-connection"}
 ASSUME Cases \subseteq {"completion", "no-target", "no-entry", "lifecycle",
                        "headless", "exact", "dynamic", "padded", "replay", "circuit"}
 ASSUME Cases # {}
@@ -17,16 +17,19 @@ HasDisplay == s.case \in {"completion", "lifecycle", "exact"}
 HasCensus == s.case \notin {"replay", "circuit"}
 Headless == s.case = "headless"
 StaticSource == s.case # "dynamic"
-NextAfterValidation == IF Completion \/ s.case = "replay" THEN "bindings"
-                       ELSE IF s.case = "exact" THEN "bindings" ELSE "begin"
-NextAfterProvider == IF s.case = "exact" /\ ~s.active THEN "begin" ELSE "insert"
+NextAfterValidation == IF Completion \/ s.case = "replay" THEN "provider-route"
+                       ELSE IF s.case = "exact" THEN "provider-route" ELSE "begin"
+NextAfterProvider == IF s.case = "exact" /\ ~s.active THEN "begin" ELSE "insert-route"
 
 Init == \E c \in Cases, tag \in {"absent", "body"}, available \in BOOLEAN:
     s = [pc |-> "start", case |-> c, taskTag |-> tag,
          known |-> TRUE, default |-> "claude", member |-> FALSE, host |-> "absent",
-         snapshotAvailable |-> available, bindingsTx |-> 0,
+         snapshotAvailable |-> available, bindingsTx |-> 0, bindingsConnection |-> 0,
+         providerTargetTx |-> 0, providerTargetConnection |-> 0, bindingsRead |-> FALSE,
+         expectedProviderTx |-> 0, expectedProviderConnection |-> 0,
+         insertTargetTx |-> 0, insertTargetConnection |-> 0, insertedConnection |-> 0,
          prepared |-> "none", handoffTx |-> 0, executor |-> "db",
-         drift |-> "none", restarts |-> 0, active |-> FALSE, tx |-> 0,
+         drift |-> "none", restarts |-> 0, active |-> FALSE, ownerTx |-> 0, ownerConnection |-> 0,
          completePending |-> FALSE, slotPending |-> FALSE, noticePending |-> 0,
          completeDurable |-> FALSE, slotDurable |-> FALSE, noticeDurable |-> 0,
          knownUsed |-> FALSE, knownRef |-> FALSE, allowed |-> FALSE,
@@ -44,11 +47,11 @@ Start ==
              !.earlySnapshot = s.snapshotAvailable]
 Begin ==
     /\ s.pc = "begin"
-    /\ s' = [s EXCEPT !.active = TRUE, !.tx = s.restarts + 1,
+    /\ s' = [s EXCEPT !.active = TRUE, !.ownerTx = s.restarts + 1, !.ownerConnection = s.restarts + 1,
              !.pc = IF Completion THEN "complete"
                     ELSE IF s.case = "replay" THEN "validate"
-                    ELSE IF s.case = "exact" THEN "insert"
-                    ELSE IF s.case = "dynamic" THEN "validate-inner" ELSE "bindings"]
+                    ELSE IF s.case = "exact" THEN "insert-route"
+                    ELSE IF s.case = "dynamic" THEN "validate-inner" ELSE "provider-route"]
 Complete ==
     /\ s.pc = "complete"
     /\ s' = [s EXCEPT !.pc = IF s.completeDurable THEN "rollback"
@@ -64,7 +67,7 @@ ReleaseSlot ==
 ReturnPreparation ==
     /\ s.pc = "handoff" /\ s.active
     /\ s' = [s EXCEPT !.pc = "validate", !.prepared = "borrowed",
-             !.handoffTx = s.tx, !.executor = "service"]
+             !.handoffTx = s.ownerTx, !.executor = "service"]
 Validate ==
     /\ s.pc = "validate"
     /\ s' = [s EXCEPT !.knownRef = s.known, !.knownUsed = s.known,
@@ -76,11 +79,20 @@ ValidateInner ==
     /\ s.pc = "validate-inner"
     /\ LET used == IF Mutation = "pre-source" THEN s.knownUsed ELSE s.known
        IN s' = [s EXCEPT !.knownRef = s.known, !.knownUsed = used,
-                !.allowed = used, !.pc = IF used THEN "bindings" ELSE "rollback"]
+                !.allowed = used, !.pc = IF used THEN "provider-route" ELSE "rollback"]
+RouteProvider ==
+    /\ s.pc = "provider-route"
+    /\ LET tx == IF s.case = "exact" THEN 0 ELSE s.ownerTx
+           connection == IF s.case = "exact" THEN 3 ELSE s.ownerConnection
+       IN s' = [s EXCEPT !.expectedProviderTx = tx, !.expectedProviderConnection = connection,
+                 !.providerTargetTx = tx,
+                 !.providerTargetConnection = IF Mutation = "foreign-provider-connection" THEN 9 ELSE connection,
+                 !.pc = IF HasDisplay THEN "bindings" ELSE NextAfterProvider]
 LoadBindings ==
     /\ s.pc = "bindings"
-    /\ s' = [s EXCEPT !.bindingsTx = s.tx,
-             !.pc = IF HasDisplay THEN "provider1" ELSE NextAfterProvider]
+    /\ s' = [s EXCEPT !.bindingsTx = s.providerTargetTx,
+             !.bindingsConnection = s.providerTargetConnection, !.bindingsRead = TRUE,
+             !.pc = "provider1"]
 BindingQueryError ==
     /\ s.pc = "bindings" /\ HasDisplay
     /\ s' = [s EXCEPT !.pc = "rollback"]
@@ -99,9 +111,14 @@ ObserveProvider2 ==
                              (IF Mutation = "preobserve" THEN s.earlyDefault ELSE s.default)
                           ELSE "unread",
              !.pc = NextAfterProvider]
+RouteInsert ==
+    /\ s.pc = "insert-route"
+    /\ s' = [s EXCEPT !.insertTargetTx = IF Mutation \in {"foreign-tx", "split-insert"} THEN 9 ELSE s.ownerTx,
+             !.insertTargetConnection = IF Mutation \in {"foreign-tx", "split-insert"} THEN 9 ELSE s.ownerConnection,
+             !.pc = "insert"]
 Insert ==
     /\ s.pc = "insert" /\ s.active /\ s.allowed
-    /\ s' = [s EXCEPT !.noticePending = 1, !.insertedTx = s.tx,
+    /\ s' = [s EXCEPT !.noticePending = 1, !.insertedTx = s.insertTargetTx, !.insertedConnection = s.insertTargetConnection,
              !.noticeHint = IF HasDisplay /\ s.default1 = s.default2 THEN s.default1 ELSE "none",
              !.noticeDurable = IF Mutation = "split-insert" THEN @ + 1 ELSE @,
              !.pc = IF HasCensus THEN "census" ELSE "commit"]
@@ -172,27 +189,30 @@ Restart ==
              !.defaultRef1 = "unread", !.defaultRef2 = "unread",
              !.censusUsed = "unread", !.censusRef = "unread",
              !.prepared = "none", !.handoffTx = 0, !.executor = "db",
-             !.censusStored = FALSE, !.insertedTx = 0, !.bindingsTx = 0, !.returned = "none"]
+             !.censusStored = FALSE, !.insertedTx = 0, !.bindingsTx = 0, !.bindingsConnection = 0,
+             !.providerTargetTx = 0, !.providerTargetConnection = 0, !.bindingsRead = FALSE,
+             !.insertTargetTx = 0, !.insertTargetConnection = 0, !.insertedConnection = 0, !.returned = "none"]
 Done == /\ s.pc = "done" /\ UNCHANGED vars
 Next == Start \/ Begin \/ Complete \/ ReleaseSlot \/ ReturnPreparation \/ Validate \/ ValidateInner
-        \/ LoadBindings \/ BindingQueryError \/ ObserveProvider1
-        \/ ObserveProvider2 \/ Insert \/ InsertError \/ ObserveCensus \/ ObserveProducer
+        \/ RouteProvider \/ LoadBindings \/ BindingQueryError \/ ObserveProvider1
+        \/ ObserveProvider2 \/ RouteInsert \/ Insert \/ InsertError \/ ObserveCensus \/ ObserveProducer
         \/ SavepointBegin \/ SavepointBeginError \/ Metadata \/ MetadataOuterError
         \/ Commit \/ Rollback \/ ChangeSettings \/ Restart \/ Done
 Spec == Init /\ [][Next]_vars
 
 TypeOK == /\ s.noticeDurable \in 0..2 /\ s.noticePending \in 0..1
-          /\ s.restarts \in 0..1 /\ s.tx \in 0..2
+          /\ s.restarts \in 0..1 /\ s.ownerTx \in 0..2
 AtomicCompletion == Completion =>
     /\ (s.noticeDurable > 0 => s.completeDurable /\ s.slotDurable)
     /\ (s.completeDurable => s.slotDurable /\ s.noticeDurable = (IF NeedsNotice THEN 1 ELSE 0))
 RollbackHasNoNewNotice == Completion /\ s.returned = "rollback" /\ ~s.completeDurable => s.noticeDurable = 0
 CommittedNoticeExactlyOnce == Completion /\ s.completeDurable /\ NeedsNotice => s.noticeDurable = 1
-SameTransaction == s.noticePending = 1 => s.insertedTx = s.tx
+SameTransaction == s.noticePending = 1 =>
+                   s.insertedTx = s.ownerTx /\ s.insertedConnection = s.ownerConnection
 PreparationKeepsBorrow == s.prepared = "borrowed" =>
-                         s.active /\ s.handoffTx = s.tx /\ s.executor = "service"
-SameProviderConnection == HasDisplay /\ s.defaultRef1 # "unread" =>
-                          s.bindingsTx = (IF s.case = "exact" THEN 0 ELSE s.tx)
+                         s.active /\ s.handoffTx = s.ownerTx /\ s.executor = "service"
+SameProviderConnection == s.bindingsRead =>
+    s.bindingsTx = s.expectedProviderTx /\ s.bindingsConnection = s.expectedProviderConnection
 SourceDecisionUsesObservation == /\ s.knownUsed = s.knownRef
                                  /\ (s.allowed => (s.case # "padded" /\ (StaticSource \/ s.knownUsed)))
 ProviderObservationPointPreserved == s.default1 = s.defaultRef1 /\ s.default2 = s.defaultRef2

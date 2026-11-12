@@ -3,6 +3,7 @@ export const state = ({s}) => ({
   start: "호출 시작", begin: "기존 transaction 시작", complete: "완료 상태 갱신",
   release: "slot 해제", silent: "공지 대상 없는 완료", handoff: "잠긴 tx borrow를 서비스로 반환",
   validate: "source 검증", "validate-inner": "tx 안 source 재검증",
+  "provider-route": "provider SQL 실행 connection 선택", "insert-route": "INSERT 실행 tx·connection 선택",
   bindings: "같은 connection에서 provider 행 조회", provider1: "첫 행 live default 관측",
   provider2: "다음 행 live default 관측", insert: "관측 값으로 안내문 INSERT",
   census: "INSERT 뒤 같은 task에서 census 관측", producer: "producer host·boot 관측",

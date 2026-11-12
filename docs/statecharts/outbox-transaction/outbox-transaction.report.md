@@ -2,7 +2,7 @@
 
 코드 SHA `5c3ed37cddc80036fa8a274419b0219f49926704`. production 변경 0, cargo/PG/소스 스캔 시험 0이다. 이 보고서는 설계 모델의 실행 결과이며 제안 구현의 시험 결과가 아니다.
 
-`sc=not-run(statechart-cli-missing)`은 브리프에서 지정한 statechart 생성/시각화 실행 상태다. WSL에 `~/.claude/skills/statechart/scripts/statechart`와 `/home/adk/skills/statechart`가 없으며 Node는 v18.19.1(README 요구 23.6+)이다. **검증 엔진은 사용 가능해서 repository의 `scripts/ci/statecharts_tlc.py`로 plain TLC 7/7 expected outcomes를 확인했다.** statechart wrapper 실행·생성 Mermaid PASS로 바꿔 쓰지 않는다. view 소스는 Mac 실행용으로 준비했으며 `.chart.mmd`는 생성하지 않았다.
+`sc=not-run(statechart-cli-missing)`은 브리프에서 지정한 statechart 생성/시각화 실행 상태다. WSL에 `~/.claude/skills/statechart/scripts/statechart`와 `/home/adk/skills/statechart`가 없으며 Node는 v18.19.1(README 요구 23.6+)이다. **검증 엔진은 사용 가능해서 repository의 `scripts/ci/statecharts_tlc.py`로 plain TLC 9/9 expected outcomes를 확인했다.** statechart wrapper 실행·생성 Mermaid PASS로 바꿔 쓰지 않는다. view 소스는 Mac 실행용으로 준비했으며 `.chart.mmd`는 생성하지 않았다.
 
 모델 작성/실행은 2026-11-12 09:12~09:31 KST에 끝냈다(30분 이내). Java 21.0.13, TLC 1.7.4 jar SHA256 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`. 원시 로그는 `/home/adk/adk/lane-runs/i7353/logs/design-s41314-1/`에 있다. 설정 파일·운영 DB·runtime 데이터는 열지 않았다.
 
@@ -24,9 +24,9 @@ Current는 기존 DB orchestration이다. Service는 slot release 뒤 `ReturnPre
 |AtomicCompletion|PASS / PASS|canonical 완료·slot·notice가 함께 commit. `src/db/auto_queue/runs.rs:440,:493,:498`→`src/services/message_outbox.rs:860`의 같은 tx|
 |RollbackHasNoNewNotice|PASS / PASS|미커밋 실패/restart면 새 notice 0; 이전에 커밋한 row는 지우지 않음|
 |CommittedNoticeExactlyOnce|PASS / PASS|canonical 완료, entry와 target이 있는 단일 distinct target의 notice 정확히 1. terminal 재확인 `runs.rs:416~418`이 완료 뒤 restart를 막음|
-|SameTransaction|PASS / PASS|INSERT는 기존 tx로 실행(`message_outbox.rs:875`)|
+|SameTransaction|PASS / PASS|모델이 선언한 owner tx/connection과 실행 대상 INSERT tx/connection ID 관계만 확인. Rust/PG 연결 증명은 아님|
 |PreparationKeepsBorrow|PASS / PASS|Service 준비 객체가 살아 있는 동안 active tx/동일 tx id 유지; 구현은 private borrow와 PG로 검증 예정|
-|SameProviderConnection|PASS / PASS|completion/plain은 같은 tx/connection. exact는 본래 tx 전 acquire(:377~384)임을 별도 값으로 유지|
+|SameProviderConnection|PASS / PASS|모델이 선언한 expected tx/connection과 실제 SELECT 대상 ID의 관계 확인. exact의 pre-tx connection은 별도 ID이며 실제 backend PID 증명은 아님|
 |SourceDecisionUsesObservation|PASS / PASS|각 V 지점의 관측값을 사용. TTL/persistent의 tx 안 재검증을 pre-tx 결과로 대체하지 않음(:438/:551, :242/:275)|
 |ProviderObservationPointPreserved|PASS / PASS|각 row의 live default를 원래 위치에서 읽음. `session_notice.rs:99`→`agent_channels.rs:18~20,:59`|
 |InsertUsesObservedDesignation|PASS / PASS|INSERT의 provider hint는 관측한 행들의 합의값/불일치 None. 관측 뒤 reload는 소급하지 않음|
@@ -41,11 +41,13 @@ Savepoint begin 오류는 outer 실패로 전파한다(`body_census.rs:113`). UP
 
 |cfg|expected broken|TLC 실제 broken|결과|
 |---|---|---|---|
+|ForeignTx|SameTransaction|동일|expected RED|
+|ForeignProviderConnection|SameProviderConnection|동일|expected RED|
 |Current|없음|없음|GREEN|
 |Service|없음|없음|GREEN|
 |PreSource|SourceDecisionUsesObservation|동일|expected RED|
 |Preobserve|ProviderObservationPointPreserved, InsertUsesObservedDesignation|동일|expected RED|
-|SplitInsert|AtomicCompletion, CommittedNoticeExactlyOnce, RollbackHasNoNewNotice|동일|expected RED|
+|SplitInsert|AtomicCompletion, CommittedNoticeExactlyOnce, RollbackHasNoNewNotice, SameTransaction|동일|expected RED|
 |EarlyCensus|CensusObservationPointPreserved|동일|expected RED|
 |FreshTask|CensusObservationPointPreserved|동일|expected RED|
 
@@ -104,3 +106,11 @@ cd docs/statecharts/outbox-transaction
 ```
 
 상세 설계는 `/home/adk/adk/lane-runs/i7353/design-s41314-1.md`. S13 + S14a~d 5조각, prod 합집합 60파일, 순증 예산 +1340/보정 +476. 실제 구현·테스트·독립 리뷰는 후속 레그다.
+
+## S13 착수 전 P2 보강
+
+기준 `1e94361e442b07c21a1f09c720fae15c98bf3f6e`의 리뷰 P2 두 건을 반영했다. 전수표의 pool 호출 23행을 callee의 pool 시그니처/실제 begin에 대조하여 caller tx 없음과 callee 소유를 구별했다. reactivation의 done/non-done 분기와 per-entry 별도 tx도 적었다.
+
+ownerTx/ownerConnection, provider/insert 실행 target, 실행 결과에 기록하는 tx/connection ID를 분리했다. foreign-tx는 다른 INSERT tx/connection(9), foreign-provider-connection은 다른 SELECT connection(9)을 선택한다. SameTransaction/SameProviderConnection이 각각 RED다. split-insert도 이제 SameTransaction이 함께 RED다. 이는 모델이 선언한 연결 관계의 검출력 보강이며 실제 Rust/PG의 connection 증거가 아니다.
+
+보강 전 7 cfg는 Current/Service GREEN, 5 expected RED였고 SameTransaction은 split-insert에서 GREEN이었다. 보강 후 9 cfg는 Current/Service GREEN, 기존 5 + foreign 2 expected RED이며 split-insert의 SameTransaction도 RED다. 모든 cfg를 plain TLC로 재실행했고 `logs/s13-1/tlc-*.log`에 raw trace/상태 수, `tlc-commands.json`에 명령/exit를 남겼다. 전체 broken 집합은 `p2-checker.log`로 확인했다. 앞 절의 상태 수·시간·trace state 개수는 보강 전 설계 실행의 기록이다.
