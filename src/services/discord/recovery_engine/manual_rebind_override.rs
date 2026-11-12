@@ -109,6 +109,7 @@ fn validate_output_path(provider: &ProviderKind, output_path: &str) -> Result<St
     if output_path.is_empty() {
         return Err("output_path override must not be empty".to_string());
     }
+    crate::config::test_instance::environment::validate_path(Path::new(output_path))?;
     let canonical = std::fs::canonicalize(output_path)
         .map_err(|_| "output_path override must exist".to_string())?;
     let metadata =
@@ -295,6 +296,20 @@ mod tests {
                 assert!(
                     ManualRebindOverrides::validated(&ProviderKind::Claude, default.to_str(), None)
                         .is_err()
+                );
+                let projects = named.parent().unwrap();
+                let saved = instance.root.join("owned-claude-projects");
+                std::fs::rename(projects, &saved).unwrap();
+                std::os::unix::fs::symlink(&saved, projects).unwrap();
+                assert!(
+                    ManualRebindOverrides::validated(&ProviderKind::Claude, named.to_str(), None)
+                        .is_err()
+                );
+                std::fs::remove_file(projects).unwrap();
+                std::fs::rename(&saved, projects).unwrap();
+                assert!(
+                    ManualRebindOverrides::validated(&ProviderKind::Claude, named.to_str(), None)
+                        .is_ok()
                 );
             },
         );

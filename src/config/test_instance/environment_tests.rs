@@ -132,6 +132,9 @@ fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
         for (key, value) in [
             ("HOME", "/synthetic/foreign-home"),
             ("MEMENTO_ACCESS_KEY", "synthetic-secret"),
+            ("OPENAI_API_KEY", "synthetic-secret"),
+            ("BASH_ENV", "/synthetic/foreign-env"),
+            ("XDG_DATA_HOME", "/synthetic/foreign-data"),
         ] {
             assert!(
                 ProcessBackend::new()

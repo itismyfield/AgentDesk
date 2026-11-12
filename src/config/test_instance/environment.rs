@@ -131,7 +131,29 @@ impl Environment {
 }
 
 fn forbidden(key: &str) -> bool {
-    key.starts_with("MEMENTO_")
+    matches!(
+        key,
+        "ANTHROPIC_API_KEY"
+            | "OPENAI_API_KEY"
+            | "XAI_API_KEY"
+            | "DASHSCOPE_API_KEY"
+            | "GEMINI_API_KEY"
+            | "GOOGLE_API_KEY"
+            | "NVIDIA_API_KEY"
+            | "CLAUDE_CODE_OAUTH_TOKEN"
+            | "BASH_ENV"
+            | "ENV"
+            | "ZDOTDIR"
+            | "USERPROFILE"
+            | "XDG_DATA_HOME"
+            | "XDG_STATE_HOME"
+            | "XDG_CACHE_HOME"
+            | "XDG_RUNTIME_DIR"
+            | "QWEN_HOME"
+            | "GEMINI_CLI_HOME"
+            | "GROK_HOME"
+            | "OPENCODE_CONFIG"
+    ) || key.starts_with("MEMENTO_")
         || key.starts_with("OP_")
         || key.starts_with("AGENT_OP_")
         || key.contains("DISCORD") && (key.ends_with("TOKEN") || key.ends_with("KEY"))
