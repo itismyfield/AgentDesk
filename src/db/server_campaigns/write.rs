@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::campaign_execution::verification_run::Slot;
+use crate::domain::campaign::verification_run::Slot;
 
 fn kept<T: PartialEq>(old: &Slot<T>, new: &Slot<T>) -> bool {
     old.bound().is_none_or(|value| new.bound() == Some(value))

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::definition::valid_id;
 use super::model::Repository;
-use super::profile::{Candidate, Checkout, ContractError, VerificationCheckoutKind, Workspace};
+use super::profile::{Candidate, ContractError, VerificationCheckoutKind, Workspace};
 use super::verification_run::BoundSubject;
 use crate::services::git::GitCommand;
 
@@ -18,17 +18,7 @@ pub struct AdkWorkspaceKey {
     pub series: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceObservation {
-    pub repository: Repository,
-    pub repository_identity: String,
-    pub host: String,
-    pub path: String,
-    pub head_sha: String,
-    pub tracked_dirty: bool,
-    pub untracked_dirty: bool,
-    pub observed_at: DateTime<Utc>,
-}
+pub use crate::domain::campaign::workspace::WorkspaceObservation;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WorkspaceError {
@@ -86,21 +76,6 @@ impl AdkWorkspaceKey {
 
     pub fn scratch_dir(&self, root: &Path, execution_id: &str) -> PathBuf {
         self.node_dir(root).join("scratch").join(execution_id)
-    }
-}
-
-impl WorkspaceObservation {
-    pub fn checkout(&self) -> Checkout {
-        Checkout {
-            host: self.host.clone(),
-            path: self.path.clone(),
-            observed_sha: self.head_sha.clone(),
-            observed_at: self.observed_at,
-        }
-    }
-
-    pub fn clean(&self) -> bool {
-        !self.tracked_dirty && !self.untracked_dirty
     }
 }
 

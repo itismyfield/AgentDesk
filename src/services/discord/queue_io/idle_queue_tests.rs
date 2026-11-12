@@ -889,15 +889,17 @@ async fn race_loss_requeue_does_not_rekick_until_holding_turn_completes_4078() {
                         !started,
                         "the mailbox holder has not completed, so the dequeued turn loses the race"
                     );
-                    let requeued_msg = intervention.message_id;
-                    let requeue = with_post_enqueue_idle_queue_kick_suppressed(
-                        mailbox_enqueue_intervention(&shared, &provider, channel, intervention),
-                    )
-                    .await;
-                    assert!(requeue.enqueued, "race-loss path requeues the message");
-                    let _ =
-                        mailbox_abandon_pending_dispatch(&shared, &provider, channel, requeued_msg)
-                            .await;
+                    let requeue = shared
+                        .mailbox(channel)
+                        .return_dequeued_head(
+                            intervention,
+                            queue_persistence_context(&shared, &provider, channel),
+                            taken
+                                .dispatch_lease
+                                .expect("the taken head owns its return"),
+                        )
+                        .await;
+                    assert!(requeue.enqueued, "race-loss owner returns the message");
                     schedule_race_loss_requeue_post_enqueue_idle_recheck(
                         shared.clone(),
                         provider.clone(),

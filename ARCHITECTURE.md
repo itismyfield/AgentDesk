@@ -381,6 +381,18 @@ src/
 ├── domain/
 │   ├── atomic_write/
 │   │   └── tests.rs
+│   ├── campaign/
+│   │   ├── candidate_seal.rs
+│   │   ├── definition.rs
+│   │   ├── evidence.rs
+│   │   ├── evidence_gate.rs
+│   │   ├── execution_pin.rs
+│   │   ├── mod.rs
+│   │   ├── model.rs
+│   │   ├── profile.rs
+│   │   ├── review_gate.rs
+│   │   ├── verification_run.rs
+│   │   └── workspace.rs
 │   ├── intake_consent/
 │   │   └── decision.rs
 │   ├── message_split/
@@ -928,6 +940,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
+│   │   │   │   ├── clear_held_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── boot_host_tests.rs
 │   │   │   ├── coldstop_input_tests.rs
@@ -1019,7 +1032,6 @@ src/
 │   │   │   ├── warm_followup.rs
 │   │   │   └── warm_followup_owner_tests.rs
 │   │   ├── input/
-│   │   │   ├── tests/
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
@@ -2144,6 +2156,7 @@ src/
 │   │   │   │   │   ├── transition_busy_tests/
 │   │   │   │   │   │   └── retry_tests.rs
 │   │   │   │   │   ├── clear_discard_tests.rs
+│   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── codex_turn_hold.rs

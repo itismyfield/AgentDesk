@@ -42,10 +42,11 @@ pub(crate) use super::closed_verdict::MailboxRefusal;
 use super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxState,
     ClaimObservation, EnqueueInterventionResult, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
-    GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS, HydratePendingQueueResult,
-    Intervention, MailboxUnreachable, QueuePersistenceContext, RecoveryKickoffResult,
-    RequeueInterventionResult, TryStartTurnResult,
+    GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS, Intervention,
+    QueuePersistenceContext, RecoveryKickoffResult, RequeueInterventionResult, TryStartTurnResult,
 };
+#[cfg(test)]
+use super::{HydratePendingQueueResult, MailboxUnreachable};
 use crate::services::provider::CancelToken;
 
 /// Actor-side verdict for [`ChannelMailboxMsg::CloseIfIdle`], invoked from the
@@ -161,8 +162,9 @@ pub(super) fn gate_closed_arm(
         M::CancelActiveTurnWithReason { .. }
         | M::CancelActiveTurnIfCurrent { .. }
         | M::CancelActiveTurnIfCurrentWithReason { .. }
-        | M::CancelActiveTurnIfCurrentUnlessHerdr { .. }
-        | M::CancelActiveTurnIfUserMessageWithReason { .. } => "CancelActiveTurn",
+        | M::CancelActiveTurnIfCurrentUnlessHerdr { .. } => "CancelActiveTurn",
+        #[cfg(test)]
+        M::CancelActiveTurnIfUserMessageWithReason { .. } => "CancelActiveTurn",
         M::CancelActiveBackgroundTurnIfCurrent { .. } => "CancelActiveBackgroundTurnIfCurrent",
         M::HasPendingSoftQueue { .. } => "HasPendingSoftQueue",
         M::AbandonPendingDispatch { .. } => "AbandonPendingDispatch",
@@ -170,6 +172,7 @@ pub(super) fn gate_closed_arm(
         M::FinishTurnIfMatches { .. } => "FinishTurnIfMatches",
         M::ReleaseWitnessedEpisode(_) => "ReleaseWitnessedEpisode",
         M::FinishTurnIfToken { .. } => "FinishTurnIfToken",
+        #[cfg(test)]
         M::HardStop { .. } => "HardStop",
         M::FinishCancelledTurn { .. } => "FinishCancelledTurn",
         M::RestartDrain { .. } => "RestartDrain",
@@ -336,6 +339,7 @@ pub(crate) struct PurgeQueueResult {
 
 impl ChannelMailboxHandle {
     /// Like `hydrate_pending_queue_from_disk`, but an unreachable actor is an error.
+    #[cfg(test)]
     pub(crate) async fn try_hydrate_pending_queue_from_disk(
         &self,
         persistence: QueuePersistenceContext,

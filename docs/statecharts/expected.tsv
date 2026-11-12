@@ -369,6 +369,11 @@ input-single-path/InputPathBootDesign.cfg	InputPath	-	-
 input-single-path/InputPathBootDesignTwo.cfg	InputPath	-	-
 input-single-path/InputPathBootEarlyCheckpoint.cfg	InputPath	BootCheckpointBacked	-
 input-single-path/InputPathBootNoReadyWake.cfg	InputPath	-	BootHeldEventuallyExecutes
+input-single-path/ReservedIdEnqueueBefore.cfg	ReservedIdEnqueue	NoReservationQueueOverlap	-
+input-single-path/ReservedIdEnqueueFixed.cfg	ReservedIdEnqueue	-	-
+input-single-path/ReservedIdEnqueueGuardOnly.cfg	ReservedIdEnqueue	NoLostReturn	EventuallyExecuted
+input-single-path/ReservedIdEnqueueLive.cfg	ReservedIdEnqueue	-	-
+input-single-path/ReservedIdEnqueueReleased.cfg	ReservedIdEnqueue	-	-
 tui-o-writer/WriterWakeI8055Current.cfg	WriterWake	BootCheckpointOnlyAccepted,BootNoSilentLoss	-
 tui-o-writer/WriterWakeI8055Design.cfg	WriterWake	-	-
 tui-o-writer/WriterWakeI8055NoReadyWake.cfg	WriterWake	-	BootHeldEventuallyExecutes

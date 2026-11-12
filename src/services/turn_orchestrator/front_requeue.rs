@@ -1,10 +1,13 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use poise::serenity_prelude::MessageId;
 
 use super::{
-    EnqueueInterventionResult, EnqueueRefusalReason, Intervention, MAX_INTERVENTIONS_PER_CHANNEL,
-    QueueExitEvent, QueueExitKind, ensure_source_message_ids, prune_interventions,
+    ChannelMailboxHandle, ChannelMailboxMsg, DispatchLease, EnqueueInterventionResult,
+    EnqueueRefusalReason, Intervention, MAX_INTERVENTIONS_PER_CHANNEL, QueueExitEvent,
+    QueueExitKind, QueuePersistenceContext, RequeueInterventionResult, ensure_source_message_ids,
+    prune_interventions,
 };
 
 pub(super) fn intervention_identity_ids(intervention: &Intervention) -> HashSet<MessageId> {
@@ -71,6 +74,7 @@ pub(super) fn restore_dequeued(
     intervention: Intervention,
     persistence: super::QueuePersistenceContext,
     dispatch_lease: Option<std::sync::Arc<super::DispatchLease>>,
+    preserve_marker: bool,
 ) -> super::RequeueInterventionResult {
     use super::{
         RequeueInterventionResult, absorb_disk_queue_error, clear_pending_user_dispatch,
@@ -99,6 +103,14 @@ pub(super) fn restore_dequeued(
         let stored = state.pending_user_dispatch_lease.as_ref()?;
         (identity_ids.contains(&pending) && Arc::ptr_eq(lease, stored)).then_some(pending)
     });
+    if preserve_marker && authorized_pending_restore.is_none() {
+        return RequeueInterventionResult {
+            enqueued: false,
+            refusal_reason: Some(EnqueueRefusalReason::SourceIdPendingOrActive),
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        };
+    }
     let previous_queue = state.intervention_queue.clone();
     let requeue_result = requeue_intervention_front(
         &mut state.intervention_queue,
@@ -129,12 +141,14 @@ pub(super) fn restore_dequeued(
         }
     } else {
         if let Some(pending) = authorized_pending_restore {
-            consume_pending_dispatch_marker_if_matches(
-                state,
-                channel_id,
-                pending,
-                "restore_dequeued_head",
-            );
+            if !preserve_marker {
+                consume_pending_dispatch_marker_if_matches(
+                    state,
+                    channel_id,
+                    pending,
+                    "restore_dequeued_head",
+                );
+            }
             clear_pending_user_dispatch(state);
         }
         // A restore ends a drain round, up to a cap of unclaimed returns per head.
@@ -145,5 +159,70 @@ pub(super) fn restore_dequeued(
             queue_exit_events: requeue_result.queue_exit_events,
             persistence_error: None,
         }
+    }
+}
+
+impl ChannelMailboxHandle {
+    pub(crate) async fn requeue_front(
+        &self,
+        intervention: Intervention,
+        persistence: QueuePersistenceContext,
+    ) -> RequeueInterventionResult {
+        self.requeue_front_inner(intervention, persistence, None)
+            .await
+    }
+
+    pub(crate) async fn restore_dequeued_head(
+        &self,
+        intervention: Intervention,
+        persistence: QueuePersistenceContext,
+        dispatch_lease: Arc<DispatchLease>,
+    ) -> RequeueInterventionResult {
+        self.requeue_front_inner(intervention, persistence, Some(dispatch_lease))
+            .await
+    }
+
+    /// Returns only the current lease owner's head, keeping its durable marker.
+    pub(crate) async fn return_dequeued_head(
+        &self,
+        intervention: Intervention,
+        persistence: QueuePersistenceContext,
+        dispatch_lease: Arc<DispatchLease>,
+    ) -> RequeueInterventionResult {
+        self.requeue_front_with_marker(intervention, persistence, Some(dispatch_lease), true)
+            .await
+    }
+
+    pub(super) async fn requeue_front_inner(
+        &self,
+        intervention: Intervention,
+        persistence: QueuePersistenceContext,
+        dispatch_lease: Option<Arc<DispatchLease>>,
+    ) -> RequeueInterventionResult {
+        self.requeue_front_with_marker(intervention, persistence, dispatch_lease, false)
+            .await
+    }
+
+    async fn requeue_front_with_marker(
+        &self,
+        intervention: Intervention,
+        persistence: QueuePersistenceContext,
+        dispatch_lease: Option<Arc<DispatchLease>>,
+        preserve_marker: bool,
+    ) -> RequeueInterventionResult {
+        self.request(|reply| ChannelMailboxMsg::RequeueFront {
+            intervention,
+            persistence,
+            dispatch_lease,
+            preserve_marker,
+            reply,
+        })
+        .await
+        .unwrap_or(RequeueInterventionResult {
+            enqueued: false,
+            refusal_reason: Some(EnqueueRefusalReason::ActorUnreachable),
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        })
     }
 }
