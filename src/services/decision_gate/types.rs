@@ -43,6 +43,7 @@ pub(crate) enum DecisionValue {
         p_yes: f64,
     },
     Choice(String),
+    #[cfg(test)]
     Score(f64),
 }
 

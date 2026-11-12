@@ -77,7 +77,7 @@ where
         return proceed("bypassed", "allow_duplicate");
     }
     let Some(gate) = gate else {
-        return proceed("off", "not_installed");
+        return proceed("off", off_reason(OffReason::NotInstalled));
     };
     let scope = Scope {
         feature: Feature::IssueDuplicate,
