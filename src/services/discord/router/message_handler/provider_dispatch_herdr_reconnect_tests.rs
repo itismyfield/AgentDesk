@@ -537,47 +537,46 @@ fn awaiting_clear_adoption_blocks_stale_same_session_close_until_pre_source_is_v
     let (announced, observed) = std::sync::mpsc::channel();
     let (release, wait) = std::sync::mpsc::channel();
     let (contended, blocked) = std::sync::mpsc::channel();
-    let closed = std::sync::atomic::AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        let (logical, log_root) = (logical.clone(), log_root.clone());
-        let publisher = scope.spawn(move || {
-            dedupe::binding_events::set_test_root(log_root.as_deref());
-            readiness::CLEAR_AFTER_PUBLICATION.with_borrow_mut(|slot| {
-                *slot = Some(Box::new(move || {
-                    announced.send(()).unwrap();
-                    wait.recv_timeout(LIMIT).expect("release clear adoption");
-                }))
-            });
-            readiness::adopt_awaiting_clear(&logical, &nonce, &path)
+    let closed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let publisher = std::thread::spawn(move || {
+        dedupe::binding_events::set_test_root(log_root.as_deref());
+        readiness::CLEAR_AFTER_PUBLICATION.with_borrow_mut(|slot| {
+            *slot = Some(Box::new(move || {
+                announced.send(()).unwrap();
+                wait.recv_timeout(LIMIT).expect("release clear adoption");
+            }))
         });
-        observed
-            .recv_timeout(LIMIT)
-            .expect("pre-source cache published while authority is held");
-        let (logical, closed) = (fx.logical().to_owned(), &closed);
-        let closer = scope.spawn(move || {
-            tc::SOURCE_AUTHORITY_CONTENDED.with_borrow_mut(|slot| {
-                *slot = Some(Box::new(move || {
-                    contended.send(()).unwrap();
-                }))
-            });
-            tc::with_tmux_source_authority(&logical, |authority| {
-                let now =
-                    dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
-                        .unwrap();
-                if now == old {
-                    closed.fetch_add(1, Ordering::SeqCst);
-                }
-                now.session_id
-            })
-        });
-        blocked
-            .recv_timeout(LIMIT)
-            .expect("same-session close authorization blocked on source authority");
-        assert_eq!(closed.load(Ordering::SeqCst), 0);
-        release.send(()).unwrap();
-        assert!(publisher.join().unwrap());
-        assert_eq!(closer.join().unwrap(), Some(cleared));
+        readiness::adopt_awaiting_clear(&logical, &nonce, &path)
     });
+    observed
+        .recv_timeout(LIMIT)
+        .expect("pre-source cache published while authority is held");
+    let (logical, closed_in_thread) = (fx.logical().to_owned(), Arc::clone(&closed));
+    let closer = std::thread::spawn(move || {
+        tc::SOURCE_AUTHORITY_CONTENDED.with_borrow_mut(|slot| {
+            *slot = Some(Box::new(move || {
+                contended.send(()).unwrap();
+            }))
+        });
+        tc::with_tmux_source_authority(&logical, |authority| {
+            let now =
+                dedupe::runtime_binding_for_tmux_session_under_source_authority(authority).unwrap();
+            if now == old {
+                closed_in_thread.fetch_add(1, Ordering::SeqCst);
+            }
+            now.session_id
+        })
+    });
+    blocked
+        .recv_timeout(LIMIT)
+        .expect("same-session close authorization blocked on source authority");
+    assert_eq!(closed.load(Ordering::SeqCst), 0);
+    release.send(()).unwrap();
+    assert!(crate::test_support::wait::join_within(publisher, LIMIT));
+    assert_eq!(
+        crate::test_support::wait::join_within(closer, LIMIT),
+        Some(cleared)
+    );
     assert_eq!(
         closed.load(Ordering::SeqCst),
         0,
