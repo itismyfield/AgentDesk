@@ -248,3 +248,31 @@ fn model_rejection_definition_error_is_backward_compatible_and_preserves_typed_d
         outcome
     );
 }
+
+#[test]
+fn command_fingerprint_and_serde_preserve_storage_bytes() {
+    let command = Command::Resume {
+        expected_revision: 7,
+        expected_run: "run".into(),
+    };
+    let bytes = br#"{"command":"resume","expected_revision":7,"expected_run":"run"}"#;
+    assert_eq!(serde_json::to_vec(&command).unwrap(), bytes);
+    assert_eq!(serde_json::from_slice::<Command>(bytes).unwrap(), command);
+    assert_eq!(
+        crate::services::campaign_execution::control::command_fingerprint(&command).unwrap(),
+        blake3::hash(bytes).to_hex().to_string()
+    );
+}
+
+#[test]
+fn workspace_observation_preserves_storage_bytes_and_checkout() {
+    let bytes = br#"{"repository":"adk","repository_identity":"itismyfield/AgentDesk","host":"mac","path":"/work","head_sha":"candidate","tracked_dirty":false,"untracked_dirty":true,"observed_at":"2026-11-12T00:00:00Z"}"#;
+    let observation: WorkspaceObservation = serde_json::from_slice(bytes).unwrap();
+    assert_eq!(serde_json::to_vec(&observation).unwrap(), bytes);
+    assert!(!observation.clean());
+    let checkout = observation.checkout();
+    assert_eq!(checkout.host, observation.host);
+    assert_eq!(checkout.path, observation.path);
+    assert_eq!(checkout.observed_sha, observation.head_sha);
+    assert_eq!(checkout.observed_at, observation.observed_at);
+}
