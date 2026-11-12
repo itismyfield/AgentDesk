@@ -1025,6 +1025,12 @@ src/
 │   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   ├── relay_receipts.rs
 │   │   │   └── resume_renumber_tests.rs
+│   │   ├── host_input/
+│   │   │   ├── busy/
+│   │   │   │   ├── herdr.rs
+│   │   │   │   └── tmux.rs
+│   │   │   ├── busy.rs
+│   │   │   └── transport.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── fresh_hold_tests.rs
@@ -1934,9 +1940,11 @@ src/
 │   │   │   │   │   └── tests/
 │   │   │   │   │       └── actual_close_tests.rs
 │   │   │   │   ├── effect/
+│   │   │   │   │   ├── claude.rs
 │   │   │   │   │   ├── codex.rs
 │   │   │   │   │   ├── codex_herdr_tests.rs
 │   │   │   │   │   ├── herdr.rs
+│   │   │   │   │   ├── herdr_safety_tests.rs
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
@@ -2249,6 +2257,8 @@ src/
 │   │   │   │   │   ├── owner_input_carried_restart_tests.rs
 │   │   │   │   │   ├── owner_input_codex_native_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs
+│   │   │   │   │   ├── owner_input_common_operation_tests.rs
+│   │   │   │   │   ├── owner_input_herdr_busy_operation_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_pending_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
