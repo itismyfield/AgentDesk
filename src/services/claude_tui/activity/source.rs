@@ -22,6 +22,21 @@ pub(super) struct Source {
 }
 impl Source {
     pub(super) fn current(session: &str) -> Option<Self> {
+        Self::read(session, || {
+            dedupe::runtime_binding_for_tmux_session(session)
+        })
+    }
+    pub(super) fn current_under(
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    ) -> Option<Self> {
+        Self::read(authority.session(), || {
+            dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
+        })
+    }
+    fn read(
+        session: &str,
+        binding: impl FnOnce() -> Option<dedupe::TuiRuntimeBinding>,
+    ) -> Option<Self> {
         let context::SpawnNonceMarker::Known(nonce) = context::observe_spawn_nonce_marker(session)
         else {
             return None;
@@ -30,7 +45,7 @@ impl Source {
         if ctx.tmux_session != session {
             return None;
         }
-        let binding = dedupe::runtime_binding_for_tmux_session(session)?;
+        let binding = binding()?;
         if binding.runtime_kind != RuntimeHandoffKind::ClaudeTui {
             return None;
         }

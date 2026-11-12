@@ -16,6 +16,8 @@ pub(crate) struct Child {
     pub tool_id: String,
     pub tool_name: String,
     pub agent_id: Option<String>,
+    task_id: Option<String>,
+    asynchronous: bool,
     pub subagent: bool,
     pub finished: Option<bool>,
     at: DateTime<Utc>,
@@ -37,6 +39,10 @@ impl Children {
         self.overflow |= previous.overflow;
         for (key, old) in &previous.slots {
             let slot = self.slots.entry(key.clone()).or_insert_with(|| old.clone());
+            slot.child.asynchronous |= old.child.asynchronous;
+            if slot.child.task_id.is_none() {
+                slot.child.task_id.clone_from(&old.child.task_id);
+            }
             if old.child.finished.is_some() {
                 slot.child.finished = old.child.finished;
             }
@@ -106,6 +112,8 @@ impl Children {
                         tool_id: id.into(),
                         tool_name: block["name"].as_str().unwrap_or("Background").into(),
                         agent_id: None,
+                        task_id: None,
+                        asynchronous: block["input"]["run_in_background"] == true,
                         subagent,
                         finished: None,
                         at,
@@ -143,9 +151,18 @@ impl Children {
                 slot.child.finished = Some(false);
                 continue;
             }
-            if events::tool_use_result_is_async_launch(aggregate) {
+            let task = aggregate["toolUseResult"]["backgroundTaskId"]
+                .as_str()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned);
+            if events::tool_use_result_is_async_launch(aggregate) || task.is_some() {
+                slot.child.asynchronous = true;
                 slot.child.agent_id = events::agent_id_from_tool_use_result(aggregate);
-            } else if events::summary_from_tool_use_result(aggregate).is_some() {
+                slot.child.task_id = task;
+            } else if !slot.child.asynchronous
+                || events::summary_from_tool_use_result(aggregate).is_some()
+            {
                 slot.child.finished = Some(true);
             }
         }
@@ -161,7 +178,11 @@ impl Children {
         }
         if let Some((id, agent, success)) = notice(row)
             && let Some(slot) = self.unique_tool(id)
-            && agent.is_none_or(|agent| slot.child.agent_id.as_deref() == Some(agent))
+            && if slot.child.subagent {
+                agent.is_none_or(|agent| slot.child.agent_id.as_deref() == Some(agent))
+            } else {
+                agent.is_some_and(|task| slot.child.task_id.as_deref() == Some(task))
+            }
         {
             slot.child.finished = Some(success);
         }
@@ -342,6 +363,8 @@ mod tests {
                         tool_id: id.into(),
                         tool_name: "Agent".into(),
                         agent_id: Some(id.into()),
+                        task_id: None,
+                        asynchronous: true,
                         subagent: true,
                         finished: None,
                         at,
@@ -382,6 +405,7 @@ mod tests {
         for row in [
             serde_json::json!({"type":"assistant","message":{"content":text}}),
             serde_json::json!({"type":"user","message":{"content":text}}),
+            serde_json::json!({"type":"user","isMeta":true,"message":{"content":text.replace("<task-id>a</task-id>", "<task-id>other</task-id>")}}),
         ] {
             children.observe_record(Some(&turn), &row);
             assert!(children.slots.values().all(|s| s.child.finished.is_none()));

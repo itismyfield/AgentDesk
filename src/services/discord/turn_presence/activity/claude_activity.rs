@@ -2,6 +2,17 @@
 use super::*;
 use crate::services::claude_tui::activity::{self, Foreground, Snapshot};
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static BUSY_SOURCE_ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce() -> bool>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(super) fn busy_source_permitted() -> bool {
+    BUSY_SOURCE_ACQUIRED
+        .with_borrow_mut(Option::take)
+        .is_none_or(|hook| hook())
+}
+
 pub(super) struct Busy {
     active: bool,
     token: Option<Snapshot>,
@@ -33,6 +44,9 @@ pub(super) fn busy(session: &str) -> Busy {
 }
 pub(super) fn current(token: &Option<Snapshot>) -> bool {
     token.as_ref().is_none_or(Snapshot::current)
+}
+pub(super) fn publication_current(token: &Option<Snapshot>) -> bool {
+    token.as_ref().is_none_or(Snapshot::try_current)
 }
 pub(super) fn supplement(
     watch: &Mutex<Watch>,

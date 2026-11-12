@@ -246,3 +246,98 @@ async fn restart_with_unassigned_async_ack_never_publishes_an_empty_child_set() 
     assert!(pending);
     assert_eq!(keep(&r), "UnprovenInteractiveState");
 }
+
+fn feed(r: &Rig, live: &PlaceholderLiveEvents, row: Value) {
+    r.append(row.clone());
+    live.push_status_events(
+        ChannelId::new(r.ctx.channel_id.unwrap()),
+        crate::services::discord::placeholder_live_events::status_events_from_json_for_footer_mode(
+            &row, true,
+        ),
+    );
+}
+fn notify(r: &Rig, live: &PlaceholderLiveEvents, tool: &str, task: &str) {
+    let xml = format!(
+        "<task-notification><task-id>{task}</task-id><tool-use-id>{tool}</tool-use-id><status>completed</status><summary>done</summary></task-notification>"
+    );
+    r.append(json!({"type":"user","isMeta":true,"message":{"content":xml}}));
+    live.push_status_events(ChannelId::new(r.ctx.channel_id.unwrap()),
+        crate::services::discord::placeholder_live_events::status_events_from_task_notification_xml_for_footer_mode(&xml, true));
+}
+#[tokio::test]
+async fn bash_task_id_completion_clears_collector_and_footer_without_reopening() {
+    let _root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+    let r = named();
+    let live = PlaceholderLiveEvents::default();
+    feed(
+        &r,
+        &live,
+        json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"bash-one","name":"Bash","input":{"run_in_background":true,"description":"work"}}]}}),
+    );
+    feed(
+        &r,
+        &live,
+        json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"bash-one","content":"running"}]},"toolUseResult":{"backgroundTaskId":"task-one","stdout":"","stderr":""}}),
+    );
+    complete_parent(&live, &r).await;
+    assert_eq!(
+        collector::observe(&r.session).background,
+        collector::Background::ChildPending
+    );
+    assert!(footer(&live, &r));
+    notify(&r, &live, "bash-one", "other-task");
+    assert_eq!(
+        collector::observe(&r.session).background,
+        collector::Background::ChildPending,
+        "wrong task cannot complete exact tool"
+    );
+    notify(&r, &live, "other-tool", "task-one");
+    assert_eq!(
+        collector::observe(&r.session).background,
+        collector::Background::ChildPending,
+        "wrong tool cannot complete exact task"
+    );
+    notify(&r, &live, "bash-one", "task-one");
+    let done = collector::observe(&r.session);
+    assert_eq!(done.background, collector::Background::Clear);
+    assert!(done.children.iter().all(|c| c.finished == Some(true)));
+    for _ in 0..2 {
+        assert!(!footer(&live, &r));
+    }
+}
+#[tokio::test]
+async fn batched_sync_results_remain_terminal_through_collector_footer_refresh() {
+    let _root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+    let r = named();
+    let live = PlaceholderLiveEvents::default();
+    for id in ["a", "b", "c"] {
+        feed(
+            &r,
+            &live,
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":"Task","input":{"description":id,"subagent_type":id}}]}}),
+        );
+    }
+    assert_eq!(collector::observe(&r.session).children.len(), 3);
+    feed(
+        &r,
+        &live,
+        json!({"type":"user","message":{"content":[
+        {"type":"tool_result","tool_use_id":"a","is_error":false},
+        {"type":"tool_result","tool_use_id":"b","is_error":false},
+        {"type":"tool_result","tool_use_id":"c","is_error":false},
+        {"type":"tool_result","tool_use_id":"ordinary","is_error":false}]},
+        "toolUseResult":{"agentId":"agent-a","totalToolUseCount":7,"totalTokens":4200,"totalDurationMs":21000}}),
+    );
+    complete_parent(&live, &r).await;
+    let done = collector::observe(&r.session);
+    assert_eq!(done.children.len(), 3);
+    assert!(
+        done.children.iter().all(|c| c.finished == Some(true)),
+        "every synchronous exact result is terminal"
+    );
+    assert_eq!(done.background, collector::Background::Clear);
+    for _ in 0..2 {
+        assert!(!footer(&live, &r));
+        crate::services::discord::placeholder_live_events::footer_activity_tests::assert_terminal_subagent_count(&live, ChannelId::new(r.ctx.channel_id.unwrap()), 3);
+    }
+}

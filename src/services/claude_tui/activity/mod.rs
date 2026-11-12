@@ -173,6 +173,31 @@ impl Snapshot {
             .get(source)
             .is_some_and(|entry| entry.revision == self.revision && entry.turn == self.turn)
     }
+
+    /// Watch holders must not wait on authority or a collector that is waiting on authority.
+    pub(crate) fn try_current(&self) -> bool {
+        let Some(source) = &self.source else {
+            return false;
+        };
+        crate::services::tmux_common::try_with_tmux_source_authority(&source.session, |authority| {
+            if self.expires.is_some_and(|until| Utc::now() >= until)
+                || Source::current_under(authority).as_ref() != Some(source)
+                || source.stamp() != self.stamp
+            {
+                return false;
+            }
+            let state = match LEDGER.try_lock() {
+                Ok(state) => state,
+                Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return false,
+            };
+            state
+                .entries
+                .get(source)
+                .is_some_and(|entry| entry.revision == self.revision && entry.turn == self.turn)
+        })
+        .unwrap_or(false)
+    }
 }
 pub(crate) fn observe(session: &str) -> Snapshot {
     poll::start();

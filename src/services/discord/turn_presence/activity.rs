@@ -257,7 +257,7 @@ impl Reading {
         let guard = lock(watch);
         let current = guard.key.as_ref() == Some(&stamp.key)
             && (guard.generation, guard.revision) == (stamp.generation, stamp.revision)
-            && claude_activity::current(&stamp.activity);
+            && claude_activity::publication_current(&stamp.activity);
         if !current {
             #[cfg(unix)]
             if let Some(admission) = &self.admission {
@@ -399,6 +399,10 @@ pub(super) fn with_busy_source(
         };
         let seq = ports.binding_seq(channel).ok()?;
         let watch = lock(&WATCHES).get(&channel)?.clone();
+        #[cfg(test)]
+        if !claude_activity::busy_source_permitted() {
+            return None;
+        }
         let mut guard = lock(&watch);
         let key = guard.key.as_ref()?;
         if key.channel != channel

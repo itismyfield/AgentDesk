@@ -5,6 +5,20 @@ use std::sync::Arc;
 
 pub(in crate::services::discord) const START: i64 = 1_700_000_000;
 
+pub(in crate::services::discord) fn assert_terminal_subagent_count(
+    live: &PlaceholderLiveEvents,
+    channel: ChannelId,
+    expected: usize,
+) {
+    let entry = live.status_by_channel.get(&channel).unwrap();
+    let state = entry.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(state.subagents.len(), expected, "no duplicate slots");
+    assert!(state.subagents.iter().all(|slot| slot.finished.is_some()));
+    let ids: std::collections::HashSet<_> =
+        state.subagents.iter().map(|s| &s.tool_use_id).collect();
+    assert_eq!(ids.len(), expected);
+}
+
 pub(in crate::services::discord) fn six_tool_fixture(
     mode: ToolActivityDisplay,
     channel: ChannelId,
