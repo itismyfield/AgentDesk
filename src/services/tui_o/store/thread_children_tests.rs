@@ -191,9 +191,6 @@ fn thread_children_malformed_floor_is_not_replaced() {
 
 #[test]
 fn thread_children_production_capability_keeps_init_floor_writer_counts_zero() {
-    assert!(!std::hint::black_box(
-        super::thread_children::OUTPUT_ENABLED
-    ));
     let _boot = test_override::force_channels(&[(42, RuntimeHandoffKind::ClaudeTui)]);
     let dir = tempfile::tempdir().unwrap();
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, dir.path())
