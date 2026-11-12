@@ -37,16 +37,30 @@ impl RoutineDiscordLogger {
             "paused" => "일시정지됨 · 실행 이력을 확인해 주세요",
             _ => return RoutineDiscordLogStatus::skipped(),
         };
-        self.log_to_routine_target(
-            Some(store),
-            Some(&routine.id),
-            Some(&routine.name),
-            routine.agent_id.as_deref(),
-            routine.discord_thread_id.as_deref(),
-            RUN_ATTENTION_REASON,
-            &format!("routine:{}:run:{}:attention", routine.id, outcome.run_id),
-            &attention_message(routine, summary),
-        )
-        .await
+        let target = match self
+            .resolve_routine_log_target(
+                Some(store),
+                Some(&routine.id),
+                Some(&routine.name),
+                routine.agent_id.as_deref(),
+                routine.discord_thread_id.as_deref(),
+            )
+            .await
+        {
+            Ok(Some(target)) => target,
+            Ok(None) => return RoutineDiscordLogStatus::skipped(),
+            Err(error) => return RoutineDiscordLogStatus::failed(error),
+        };
+        match crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+            &self.pool,
+            crate::services::message_outbox::OutboxMessage {
+                target: &target.target, content: &attention_message(routine, summary), bot: &target.bot,
+                source: "routine-runtime", reason_code: Some(RUN_ATTENTION_REASON),
+                session_key: Some(&format!("routine:{}:run:{}:attention", routine.id, outcome.run_id)),
+            },
+        ).await {
+            Ok(_) => RoutineDiscordLogStatus::ok(),
+            Err(error) => RoutineDiscordLogStatus::failed(format!("failed to enqueue routine discord log: {error}")),
+        }
     }
 }

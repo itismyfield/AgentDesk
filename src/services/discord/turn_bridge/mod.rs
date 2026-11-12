@@ -207,11 +207,14 @@ use status_panel::{
     record_status_panel_events, status_panel_completion_ready_after_terminal_body,
     status_panel_message_id_for_turn,
 };
+pub(in crate::services::discord) use terminal_delivery::{
+    BridgeLeaseAcquire, bridge_delivery_lease_for_inflight,
+};
 use terminal_delivery::{
-    BridgeLeaseAcquire, bridge_delivery_lease_for_inflight, bridge_delivery_lease_key_for_inflight,
-    bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
-    bridge_epilogue_skip_save_is_identity_guarded, empty_sink_commits_fully_consumed_response,
-    empty_sink_preserves_retry, mirror_frozen_prefix_ids, send_ordered_long_terminal_response,
+    bridge_delivery_lease_key_for_inflight, bridge_epilogue_clears_inflight,
+    bridge_epilogue_marks_watcher_delivered, bridge_epilogue_skip_save_is_identity_guarded,
+    empty_sink_commits_fully_consumed_response, empty_sink_preserves_retry,
+    mirror_frozen_prefix_ids, send_ordered_long_terminal_response,
     should_complete_work_dispatch_after_terminal_delivery,
     should_fail_dispatch_after_terminal_delivery, silent_turn_skip_marks_committed,
     terminal_delivery_should_send_new_chunks, turn_bridge_replace_outcome_committed,

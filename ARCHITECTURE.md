@@ -2020,6 +2020,8 @@ src/
 │   │   │   │   ├── codex_spawn.rs
 │   │   │   │   └── normalized_writer.rs
 │   │   │   ├── restore_inflight/
+│   │   │   │   ├── replay_hold_tests/
+│   │   │   │   │   └── routine_presentation_tests.rs
 │   │   │   │   ├── host_probe_tests.rs
 │   │   │   │   ├── kickoff_identity.rs
 │   │   │   │   ├── kickoff_identity_tests.rs
@@ -2028,6 +2030,7 @@ src/
 │   │   │   │   ├── replay_decision.rs
 │   │   │   │   ├── replay_hold.rs
 │   │   │   │   ├── replay_hold_tests.rs
+│   │   │   │   ├── routine_presentation.rs
 │   │   │   │   └── scheduled_body_restore_tests.rs
 │   │   │   ├── terminal_text_idempotency/
 │   │   │   │   └── anchor_identity.rs

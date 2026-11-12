@@ -2,6 +2,60 @@ use super::*;
 use serde_json::json;
 
 #[tokio::test(flavor = "current_thread")]
+async fn i8117_attention_survives_expiry_and_concurrent_loggers_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let store = store(&pool);
+    let routine = store
+        .attach_routine(new_routine("attention-expiry", None, Some("6551999")))
+        .await
+        .unwrap();
+    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    for run in 0..2 {
+        let claimed = store.claim_run_now(&routine.id).await.unwrap().unwrap();
+        store
+            .fail_run(&claimed.run_id, "failure fixture", None, None)
+            .await
+            .unwrap();
+        let outcome = RoutineRunOutcome {
+            run_id: claimed.run_id,
+            routine_id: routine.id.clone(),
+            script_ref: routine.script_ref.clone(),
+            action: "error".into(),
+            status: "failed".into(),
+            result_json: None,
+            error: Some("failure fixture".into()),
+            fresh_context_guaranteed: false,
+        };
+        logger.log_run_outcome(&store, &outcome).await;
+        sqlx::query("UPDATE message_outbox SET created_at=NOW()-INTERVAL '10 minutes', dedupe_expires_at=CASE WHEN dedupe_expires_at IS NULL THEN NULL ELSE NOW()-INTERVAL '1 second' END WHERE source='routine-runtime'")
+            .execute(&pool).await.unwrap();
+        let fresh = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+        let (left, right) = tokio::join!(
+            fresh.log_run_outcome(&store, &outcome),
+            logger.log_run_outcome(&store, &outcome)
+        );
+        assert_eq!(left.status, "ok");
+        assert_eq!(right.status, "ok");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_outbox WHERE source='routine-runtime'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            count,
+            run + 1,
+            "same run attention survives TTL expiry; a new run gets its own row"
+        );
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn i8117_loggerless_actions_keep_run_api_diagnostics_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;

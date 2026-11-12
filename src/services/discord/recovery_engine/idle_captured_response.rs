@@ -90,6 +90,9 @@ pub(in crate::services::discord) async fn recover_idle_partial_response_from_rea
     let Some(provider) = row.provider_kind() else {
         return false;
     };
+    if super::restore_inflight::settle_routine_no_visible(shared, &provider, row).await {
+        return true;
+    }
     // Typed admission saves a canonical path, while the idle caller retains
     // the runtime binding's spelling. Resolve it before the exact row checks;
     // the captured FD, range and generation still govern pinned publication.

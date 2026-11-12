@@ -1,0 +1,12 @@
+stateDiagram-v2
+    [*] --> 성공저장: native NO_REPLY 저장
+    성공저장 --> 재시작: 프로세스 재시작
+    재시작 --> 복구: inflight 복원
+    복구 --> 재게시: 이전 정책
+    복구 --> 조용한정산: C1 판정 소비
+    재게시: 본문 1회 게시 · 규칙 위반
+    조용한정산: 본문 0 · 기존 lease와 정산
+    조용한정산 --> 요청보존: replay hold 있음
+    조용한정산 --> 이력완료: replay hold 없음
+    classDef breaks fill:#fdd,stroke:#b00
+    class 재게시 breaks
