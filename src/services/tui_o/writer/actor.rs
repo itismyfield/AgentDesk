@@ -334,14 +334,46 @@ where
         if actor.writer.is_stopped() {
             break;
         }
+        let restart_ready = match super::restart_end::refresh(
+            &mut actor.writer,
+            &mut actor.deriver,
+            actor.bindings.as_ref(),
+            provider,
+        )
+        .await
+        {
+            Ok(()) => true,
+            Err(alarm) => {
+                resumed.send_replace(false);
+                tracing::warn!(?alarm, "[tui_o] restart witness remains unreadable");
+                false
+            }
+        };
+        if restart_ready && sources_resumed {
+            resumed.send_replace(true);
+        }
         let mut fresh = Vec::new();
-        if !sources_resumed && actor.sources_allowed() && actor.start_notice_migration() {
+        if !sources_resumed
+            && restart_ready
+            && actor.sources_allowed()
+            && actor.start_notice_migration()
+        {
             let phase = actor.writer.boot.phase("resume");
             let (writer, deriver) = (&mut actor.writer, &mut actor.deriver);
             let restored = match &mut actor.verified {
                 Some(log) => actor.sources.resume(writer, deriver, log),
                 None => actor.sources.resume(writer, deriver, &mut actor.owed),
             };
+            match &mut actor.verified {
+                Some(log) => {
+                    super::restart_end::finish(actor.writer.store(), &mut actor.deriver, log)
+                }
+                None => super::restart_end::finish(
+                    actor.writer.store(),
+                    &mut actor.deriver,
+                    &mut actor.owed,
+                ),
+            }
             let restored = restored.and_then(|()| actor.sources.follow(&mut actor.writer));
             if let Err(alarm) = restored {
                 actor.writer.stop(alarm);
@@ -407,7 +439,11 @@ where
             actor.writer.repost_turn().await;
         }
         actor.collect_settled();
-        let fresh = actor.read_sources();
+        let fresh = if restart_ready {
+            actor.read_sources()
+        } else {
+            Vec::new()
+        };
         actor.prepare_notices(&fresh).await;
         actor.poll_transition(sources_resumed, &unsettled).await;
         actor.observe_waiting(sources_resumed);
@@ -842,8 +878,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let (writer, deriver) = (&mut self.writer, &mut self.deriver);
         let read = (self.sources.follow(writer))
             .and_then(|()| match &mut self.verified {
-                Some(log) => self.sources.capture(writer, deriver, log),
-                None => self.sources.capture(writer, deriver, &mut self.owed),
+                Some(log) => self
+                    .sources
+                    .capture(writer, deriver, log)
+                    .map(|()| super::restart_end::finish(writer.store(), deriver, log)),
+                None => self
+                    .sources
+                    .capture(writer, deriver, &mut self.owed)
+                    .map(|()| super::restart_end::finish(writer.store(), deriver, &mut self.owed)),
             })
             .and_then(|()| self.sources.tend(writer));
         if let Err(alarm) = read {
@@ -852,6 +894,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         self.persist_notice_evidence()
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "restart_end_tests.rs"]
+mod restart_end_tests;
 
 #[cfg(test)]
 thread_local! {

@@ -382,3 +382,14 @@ session-lifecycle/EffortRestartNonFinishing.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartNonFinishingFailure.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartNoInterrupt.cfg	TmuxSession	NoDeadlock	EffortRequestResolves
 session-lifecycle/EffortRestartNoClose.cfg	TmuxSession	NoDeadlock	EffortRequestResolves
+tui-o-writer/WriterRestartEndCurrent.cfg	WriterWake	-	RestartExactEndEventuallyCloses
+tui-o-writer/WriterRestartEndFixed.cfg	WriterWake	-	-
+tui-o-writer/WriterRestartEndPrefix.cfg	WriterWake	-	-
+tui-o-writer/WriterRestartEndNative.cfg	WriterWake	-	-
+tui-o-writer/WriterRestartEndGuarded.cfg	WriterWake	-	-
+tui-o-writer/WriterRestartEndUnscoped.cfg	WriterWake	RestartExactEndOnly	-
+tui-o-writer/WriterRestartEndLate.cfg	WriterWake	RestartNewPromptNotAbsorbed,RestartWitnessBeforeSeal	-
+tui-o-writer/WriterRestartEndNewOpen.cfg	WriterWake	RestartOldEndCannotCloseNewOpen	-
+tui-o-writer/WriterRestartEndDropPrepared.cfg	WriterWake	RestartPreparedNotLost	-
+tui-o-writer/WriterRestartEndRepost.cfg	WriterWake	RestartReplyOnce	-
+tui-o-writer/WriterRestartEndCurrentNonce.cfg	WriterWake	-	RestartExactEndEventuallyCloses

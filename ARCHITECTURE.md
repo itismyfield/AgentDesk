@@ -3146,6 +3146,9 @@ src/
 │   │   │   │   ├── closed_boundary.rs
 │   │   │   │   ├── effect_reads.rs
 │   │   │   │   ├── effect_reads_tests.rs
+│   │   │   │   ├── effort_restart.rs
+│   │   │   │   ├── effort_restart_baseline_tests.rs
+│   │   │   │   ├── effort_restart_tests.rs
 │   │   │   │   ├── notice_identity.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
@@ -4029,6 +4032,8 @@ src/
 │   │   │   ├── local_retry_ledger_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume_ledger_tests.rs
+│   │   │   ├── restart_end.rs
+│   │   │   ├── restart_end_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── spool.rs
@@ -4224,6 +4229,8 @@ src/
 │   │   │   ├── replay.rs
 │   │   │   ├── replay_metadata_tests.rs
 │   │   │   ├── repost_turn_tests.rs
+│   │   │   ├── restart_end.rs
+│   │   │   ├── restart_end_tests.rs
 │   │   │   ├── restart_replay_host_tests.rs
 │   │   │   ├── resume.rs
 │   │   │   ├── resume_tests.rs

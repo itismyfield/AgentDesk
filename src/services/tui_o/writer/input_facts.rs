@@ -1,9 +1,13 @@
 //! Dormant input adapter: replay O's parent transcript facts without storing turn state.
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
+use super::restart_end::VerifiedEnd;
 use crate::services::codex_tui::rollout_index::strict_parent_session;
-use crate::services::tui_o::shadow::capture::{SourceCapture, observation::ObservationCapture};
+use crate::services::tui_o::shadow::capture::{
+    Fingerprint, SourceCapture, observation::ObservationCapture,
+};
 use crate::services::tui_o::shadow::identity::{RecordFact, classify, row_key};
 use crate::services::tui_o::shadow::seal::{TurnEvent, TurnTracker};
 use crate::services::tui_o::shadow::{
@@ -56,6 +60,7 @@ pub enum Ordered {
 pub struct Resume {
     pub after: u64,
     pub carried: TurnState,
+    pub open_after: Option<u64>,
 }
 
 pub struct InputFacts {
@@ -78,6 +83,13 @@ pub struct InputFacts {
     local: bool,
     /// Queued inputs received and not yet run to a close.
     queued: queued::QueuedInputs,
+    open_after: Option<u64>,
+    restart_ends: Vec<VerifiedEnd>,
+    prefix: Option<Sha256>,
+    prefix_through: u64,
+    restart_stale: bool,
+    physical_end: bool,
+    physical_snapshot: Option<Fingerprint>,
 }
 
 impl InputFacts {
@@ -138,6 +150,13 @@ impl InputFacts {
             opened: false,
             local: false,
             queued: queued::QueuedInputs::default(),
+            open_after: None,
+            restart_ends: Vec::new(),
+            prefix: (offset == 0).then(Sha256::new),
+            prefix_through: offset,
+            restart_stale: false,
+            physical_end: false,
+            physical_snapshot: None,
         })
     }
 
@@ -146,6 +165,7 @@ impl InputFacts {
         let mut facts = Self::open_at(binding, resume.after)?;
         facts.awaiting_boundary = true;
         facts.carried = resume.carried.clone();
+        facts.open_after = resume.open_after;
         Ok(facts)
     }
 
@@ -157,6 +177,7 @@ impl InputFacts {
         let mut facts = Self::open_observation_at(binding, resume.after)?;
         facts.awaiting_boundary = true;
         facts.carried = resume.carried.clone();
+        facts.open_after = resume.open_after;
         Ok(facts)
     }
     /// Carries a typed block only after the previous observation authenticates the handoff.
@@ -166,7 +187,8 @@ impl InputFacts {
         };
         old.validate_handoff().map_err(|e| e.to_string())?;
         let resume = self.resume_point().ok_or("not a typed block")?;
-        let next = Self::resume_observation(self.binding.clone(), resume)?;
+        let mut next = Self::resume_observation(self.binding.clone(), resume)?;
+        next.set_restart_ends(self.restart_ends.clone());
         old.validate_handoff().map_err(|e| e.to_string())?;
         Ok(next)
     }
@@ -229,6 +251,81 @@ impl InputFacts {
         &self.binding
     }
 
+    /// Installs ends whose source, binding provenance and prefix a worker already checked.
+    pub(crate) fn set_restart_ends(&mut self, mut ends: Vec<VerifiedEnd>) {
+        ends.sort_by(|a, b| {
+            (a.cutoff, a.open_after, &a.end_id).cmp(&(b.cutoff, b.open_after, &b.end_id))
+        });
+        self.restart_ends = ends;
+        self.restart_stale = false;
+    }
+
+    pub(crate) fn restart_needs_reload(&self) -> bool {
+        self.restart_stale
+    }
+
+    pub(crate) fn restart_ended(&self) -> bool {
+        self.physical_end && self.state == TurnState::Idle
+    }
+
+    pub(crate) fn restart_proof_current(&self) -> bool {
+        match (
+            &self.physical_snapshot,
+            Fingerprint::path(&self.binding.source),
+        ) {
+            (Some(kept), Ok(now)) => kept == &now,
+            _ => false,
+        }
+    }
+
+    fn apply_restart_ends(&mut self, boundary: u64, snapshot: Option<&Fingerprint>) {
+        if self.restart_stale {
+            return;
+        }
+        let Some(native_turn_id) = self.open_turn() else {
+            return;
+        };
+        let proof = self
+            .restart_ends
+            .iter()
+            .find(|end| {
+                end.channel == self.binding.channel_id
+                    && end.provider == self.binding.provider
+                    && end.source == self.binding.source
+                    && end.cutoff == boundary
+                    && Some(end.open_after) == self.open_after
+                    && end.open_after <= end.cutoff
+                    && end.native_turn_id.as_ref() == native_turn_id
+                    && self.prefix_through == boundary
+            })
+            .map(|end| {
+                (
+                    end.native_current(&self.binding.source),
+                    end.accepts_prefix(self.prefix.as_ref(), &self.binding.source),
+                )
+            });
+        let Some((current, prefix)) = proof else {
+            return;
+        };
+        if !current {
+            self.restart_stale = true;
+            return;
+        }
+        if prefix && snapshot.is_some() {
+            self.tracker = TurnTracker::starting_at(0);
+            self.state = TurnState::Idle;
+            self.carried = TurnState::Unknown;
+            self.awaiting_boundary = false;
+            self.open_after = None;
+            self.opened = false;
+            self.local = false;
+            self.last_close_aborted = None;
+            self.queued.closed();
+            self.physical_end = true;
+            self.physical_snapshot = snapshot.cloned();
+        }
+    }
+
     /// The last poll's ordered facts.
     pub fn events(&self) -> &[Ordered] {
         &self.events
@@ -284,11 +381,37 @@ impl InputFacts {
             strict_parent_session(&self.binding.source.path, &self.binding.source.session_id)
                 .map_err(|e| e.to_string())?;
         }
+        if self.restart_ends.iter().any(|end| {
+            end.channel == self.binding.channel_id
+                && end.provider == self.binding.provider
+                && end.source == self.binding.source
+                && end.cutoff >= self.capture.captured_through()
+                && !end.native_current(&self.binding.source)
+        }) {
+            self.restart_stale = true;
+        }
+        let snapshot = if self.restart_ends.is_empty() {
+            None
+        } else {
+            Some(Fingerprint::path(&self.binding.source).map_err(|(_, error)| error)?)
+        };
         let batch = match self.capture.poll(max_bytes, end) {
             CaptureOutcome::Batch(batch) => batch,
             CaptureOutcome::Anomaly(anomaly) => return Err(anomaly.detail),
         };
         for record in batch.records {
+            self.apply_restart_ends(record.start, snapshot.as_ref());
+            // Only contiguous raw records from byte zero authenticate a durable prefix.
+            if self.prefix_through != record.start
+                || record.end - record.start != record.line.len() as u64 + 1
+            {
+                self.prefix = None;
+            }
+            if let Some(hash) = &mut self.prefix {
+                hash.update(&record.line);
+                hash.update(b"\n");
+            }
+            self.prefix_through = record.end;
             if record.line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
@@ -345,7 +468,11 @@ impl InputFacts {
                                 false => self.state.clone(),
                             };
                             let after = record.end;
-                            self.resume = Some(Resume { after, carried });
+                            self.resume = Some(Resume {
+                                after,
+                                carried,
+                                open_after: self.open_after,
+                            });
                             return Err(reason.clone());
                         }
                         let anonymous_open = matches!(fact, RecordFact::TurnStart(_))
@@ -381,6 +508,7 @@ impl InputFacts {
             }
         }
         let through = self.capture.captured_through();
+        self.apply_restart_ends(through, snapshot.as_ref());
         let complete = self.capture.caught_up().map_err(|e| e.to_string())?;
         let state = if !complete && self.state == TurnState::Idle {
             TurnState::Unknown
@@ -396,15 +524,19 @@ impl InputFacts {
     }
 
     fn mark(&mut self, next: TurnState, range: (u64, u64), closed: Option<String>, value: &Value) {
+        self.physical_end = false;
+        self.physical_snapshot = None;
         match &next {
             TurnState::Open { native_turn_id } => {
                 self.opened = true;
+                self.open_after = Some(range.1);
                 self.events.push(Ordered::Opened {
                     range,
                     native_turn_id: native_turn_id.clone(),
                 })
             }
             _ if self.state != TurnState::Idle => {
+                self.open_after = None;
                 let aborted = aborted(self.binding.provider, value);
                 let opened = self.opened;
                 self.last_close_aborted = opened.then_some(aborted);

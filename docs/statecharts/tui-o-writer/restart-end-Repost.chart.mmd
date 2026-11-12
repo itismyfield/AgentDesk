@@ -1,0 +1,74 @@
+---
+title: "같은 source의 exact End witness와 준비된 답"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: boot
+    lg1: done
+    lg2: work
+    lg3: Breaks RestartReplyOnce
+    lg4: Path to the RestartReplyOnce bug
+  }
+  class lg0 yellow
+  class lg1 teal
+  class lg2 blue
+  class lg3 breaks
+  class lg4 bugPath
+  s0: 답 준비됨, 옛 TUI 실행 중
+  s1: 물리 종료 확인, witness 읽기 전
+  s2: 기존 Prepared의 POST 확인 대기
+  s3: witness 설치 후 옛 opener 읽기
+  s4: writer 재시작, durable 기록 유지
+  s5: old cutoff 앞, 새 prompt 읽기 전
+  s6: writer 재시작, POST 확인 미완료
+  s7: 옛 Open만 Idle, 다음 record 읽기
+  s8: 새 Open 유지, old prefix seal 전
+  s9: durable Prepared, 게시 대기
+  s10: 기존 게시 확인, 중복 없음
+  s11: 같은 답이 두 번 게시됨
+  [*] --> s0
+  s0 --> s1: old incarnation의 실제 종료 기록
+  s0 --> s2: 기존 Prepared identity로 게시
+  s1 --> s2: 기존 Prepared identity로 게시
+  s1 --> s3: historical binding과 prefix 검증 후 witness 설치
+  s1 --> s4: writer process가 중단됨 [이전 재시작 없음]
+  s2 --> s0: 기존 게시를 확인하고 ack
+  s2 --> s1: 기존 게시를 확인하고 ack
+  s2 --> s6: writer process가 중단됨 [이전 재시작 없음]
+  s3 --> s4: writer process가 중단됨 [이전 재시작 없음]
+  s3 --> s5: old opener 재생
+  s3 --> s2: 기존 Prepared identity로 게시
+  s4 --> s1: 같은 source와 ledger를 다시 읽음
+  s5 --> s4: writer process가 중단됨 [이전 재시작 없음]
+  s5 --> s2: 기존 Prepared identity로 게시
+  s5 --> s7: cutoff에서 old opener만 reset
+  s2 --> s3: 기존 게시를 확인하고 ack
+  s6 --> s2: 같은 source와 ledger를 다시 읽음
+  s2 --> s5: 기존 게시를 확인하고 ack
+  s7 --> s4: writer process가 중단됨 [이전 재시작 없음]
+  s7 --> s2: 기존 Prepared identity로 게시
+  s7 --> s8: cutoff 뒤 새 prompt 처리
+  s2 --> s2: historical binding과 prefix 검증 후 witness 설치 or old opener 재생 or cutoff에서 old opener만 reset or cutoff 뒤 새 prompt 처리 or old prefix seal, 기존 ledger debt 보존
+  s2 --> s7: 기존 게시를 확인하고 ack
+  s8 --> s4: writer process가 중단됨 [이전 재시작 없음]
+  s8 --> s9: old prefix seal, 기존 ledger debt 보존
+  s8 --> s2: 기존 Prepared identity로 게시
+  s9 --> s4: writer process가 중단됨 [이전 재시작 없음]
+  s9 --> s2: 기존 Prepared identity로 게시
+  s2 --> s8: 기존 게시를 확인하고 ack
+  s2 --> s10: 기존 게시를 확인하고 ack
+  s8 --> s10: old prefix seal, 기존 ledger debt 보존
+  s10 --> s4: writer process가 중단됨 [이전 재시작 없음]
+  s2 --> s11: 기존 POST를 확인하지 않고 다시 게시
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s4 yellow
+  class s6 yellow
+  class s6 bugPath
+  class s9 blue
+  class s10 teal
+  class s11 breaks
+  class s11 bugPath
