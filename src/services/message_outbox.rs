@@ -21,15 +21,7 @@ pub(crate) use identity::{
 pub(crate) const LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS: i64 = 5 * 60;
 pub(crate) const LIFECYCLE_NOTIFIER_SOURCE: &str = "lifecycle_notifier";
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct OutboxMessage<'a> {
-    pub target: &'a str,
-    pub content: &'a str,
-    pub bot: &'a str,
-    pub source: &'a str,
-    pub reason_code: Option<&'a str>,
-    pub session_key: Option<&'a str>,
-}
+pub(crate) use crate::domain::outbound::outbox::OutboxMessage;
 
 fn encoded_output_origin(
     origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
