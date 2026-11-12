@@ -69,11 +69,10 @@ stateDiagram-v2
     Interrupt --> CloseInterrupted
     CloseInterrupted --> StopTui
     StopTui --> Resume
-    Resume --> Continue
-    Continue --> EarlyRelease: mutant · 제출 0인데 barrier 해제
-    Continue --> DoubleAdmission: mutant · C 접수 2회
-    state "custody 규칙 위반" as EarlyRelease
-    state "at-most-once 규칙 위반" as DoubleAdmission
+    Resume --> EarlyRelease: Continue mutant · 제출 0인데 barrier 해제
+    Resume --> DoubleAdmission: Continue mutant · C 접수 2회
+    state "Continue: custody 규칙 위반" as EarlyRelease
+    state "Continue: at-most-once 규칙 위반" as DoubleAdmission
 ```
 
 전체 raw diff, 승인 파일 diff, 바이너리 SHA256, PG 실행 환경, exact 시험별 선택·통과 수, source 복원 SHA는 레인 보고서 `report-impl-s3.md`에 남긴다.
