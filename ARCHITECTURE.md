@@ -32,6 +32,8 @@ src/
 │   │   ├── replay_recovery_tests.rs
 │   │   ├── startup.rs
 │   │   └── startup_audit_tests.rs
+│   ├── dev_instance/
+│   │   └── tests.rs
 │   ├── direct/
 │   │   ├── auto_queue_add.rs
 │   │   └── create_from_issue_pg_tests.rs
@@ -84,6 +86,7 @@ src/
 │   ├── dcserver_pg_bootstrap.rs
 │   ├── dcserver_restart_marker.rs
 │   ├── dcserver_restart_wait.rs
+│   ├── dev_instance.rs
 │   ├── direct.rs
 │   ├── discord.rs
 │   ├── discord_thread_create.rs
@@ -142,6 +145,7 @@ src/
 │   ├── cluster_role.rs
 │   ├── config_path.rs
 │   ├── daemon_snapshot_pg_tests.rs
+│   ├── decision_gate.rs
 │   ├── disk_write.rs
 │   ├── disk_write_snapshot_tests.rs
 │   ├── late_live_reload_tests.rs
@@ -421,6 +425,7 @@ src/
 │   ├── provider_auth_profile/
 │   │   └── inputs.rs
 │   ├── session_identity/
+│   │   ├── managed.rs
 │   │   └── naming.rs
 │   ├── atomic_write.rs
 │   ├── auto_queue_log.rs
@@ -739,6 +744,7 @@ src/
 │   │   ├── pr_summary.rs
 │   │   ├── prompt_manifest_retention.rs
 │   │   ├── provider_auth_profiles.rs
+│   │   ├── provider_auth_profiles_identity_tests.rs
 │   │   ├── provider_cli_api.rs
 │   │   ├── queue_api.rs
 │   │   ├── queue_api_forwarding_tests.rs
@@ -964,6 +970,7 @@ src/
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
 │   │   ├── c1_teardown_tests.rs
+│   │   ├── capability_probe.rs
 │   │   ├── first_input.rs
 │   │   ├── fresh_notice.rs
 │   │   ├── fresh_notice_tests.rs
@@ -998,6 +1005,7 @@ src/
 │   │   ├── busy_inject_tests/
 │   │   │   └── common_glyph_tests.rs
 │   │   ├── hook_bundle/
+│   │   │   ├── launch_settings.rs
 │   │   │   ├── statusline.rs
 │   │   │   └── statusline_tests.rs
 │   │   ├── hook_relay/
@@ -1050,6 +1058,8 @@ src/
 │   │   │   └── user_receipt.rs
 │   │   ├── session/
 │   │   │   ├── auto_compact_launch_tests.rs
+│   │   │   ├── effort.rs
+│   │   │   ├── effort_launch_tests.rs
 │   │   │   └── fast_launch_tests.rs
 │   │   ├── source_verify/
 │   │   │   └── renumber.rs
@@ -1220,6 +1230,7 @@ src/
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── command_streaming.rs
 │   │   ├── direct_reader.rs
+│   │   ├── effort.rs
 │   │   ├── followup_reader.rs
 │   │   ├── herdr_guard_tests.rs
 │   │   ├── herdr_turn.rs
@@ -1294,6 +1305,19 @@ src/
 │   │   ├── verified_hold.rs
 │   │   ├── verified_tail.rs
 │   │   └── warm_followup.rs
+│   ├── decision_gate/
+│   │   ├── runtime/
+│   │   │   ├── gemini.rs
+│   │   │   ├── key.rs
+│   │   │   ├── parser.rs
+│   │   │   ├── request.rs
+│   │   │   └── tests.rs
+│   │   ├── mod.rs
+│   │   ├── parser_tests.rs
+│   │   ├── policy.rs
+│   │   ├── runtime.rs
+│   │   ├── tests.rs
+│   │   └── types.rs
 │   ├── discord/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
@@ -1349,6 +1373,8 @@ src/
 │   │   │   │   ├── provider_settings/
 │   │   │   │   │   └── revision_tests.rs
 │   │   │   │   ├── allowall_tests.rs
+│   │   │   │   ├── effort.rs
+│   │   │   │   ├── effort_settings_tests.rs
 │   │   │   │   ├── provider_settings.rs
 │   │   │   │   └── provider_settings_snapshot_tests.rs
 │   │   │   ├── control/
@@ -1442,6 +1468,7 @@ src/
 │   │   │   ├── command_policy.rs
 │   │   │   ├── config.rs
 │   │   │   ├── control.rs
+│   │   │   ├── effort_capability.rs
 │   │   │   ├── fast_mode.rs
 │   │   │   ├── goals.rs
 │   │   │   ├── help.rs
@@ -1795,7 +1822,8 @@ src/
 │   │   │   └── closed_actor_tests.rs
 │   │   ├── model_catalog/
 │   │   │   ├── bounded_cache_file.rs
-│   │   │   └── claude.rs
+│   │   │   ├── claude.rs
+│   │   │   └── effort.rs
 │   │   ├── org_schema/
 │   │   │   └── auth_selection_tests.rs
 │   │   ├── outbound/
@@ -3164,6 +3192,9 @@ src/
 │   │   │   │   ├── closed_boundary.rs
 │   │   │   │   ├── effect_reads.rs
 │   │   │   │   ├── effect_reads_tests.rs
+│   │   │   │   ├── effort_restart.rs
+│   │   │   │   ├── effort_restart_baseline_tests.rs
+│   │   │   │   ├── effort_restart_tests.rs
 │   │   │   │   ├── notice_identity.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
@@ -3600,6 +3631,8 @@ src/
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
 │   │   │   ├── liveness.rs
+│   │   │   ├── session_identity.rs
+│   │   │   ├── session_identity_tests.rs
 │   │   │   └── session_inventory.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
@@ -4058,6 +4091,8 @@ src/
 │   │   │   ├── local_retry_ledger_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume_ledger_tests.rs
+│   │   │   ├── restart_end.rs
+│   │   │   ├── restart_end_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── spool.rs
@@ -4254,6 +4289,9 @@ src/
 │   │   │   ├── replay.rs
 │   │   │   ├── replay_metadata_tests.rs
 │   │   │   ├── repost_turn_tests.rs
+│   │   │   ├── restart_end.rs
+│   │   │   ├── restart_end_repair_tests.rs
+│   │   │   ├── restart_end_tests.rs
 │   │   │   ├── restart_replay_host_tests.rs
 │   │   │   ├── resume.rs
 │   │   │   ├── resume_tests.rs
@@ -4617,6 +4655,7 @@ src/
 │   ├── session_evidence.rs
 │   ├── session_forwarding.rs
 │   ├── session_host.rs
+│   ├── session_identity_metadata.rs
 │   ├── session_resume.rs
 │   ├── session_selector_validity.rs
 │   ├── settings.rs
@@ -4655,6 +4694,7 @@ src/
 │   └── mod.rs
 ├── utils/
 │   ├── secret_file/
+│   │   ├── fresh_tests.rs
 │   │   └── private_directory.rs
 │   ├── api.rs
 │   ├── async_bridge.rs

@@ -166,6 +166,16 @@ impl ToolCardRun {
             notice_origin: None,
         })]
     }
+
+    pub(super) fn end_keys(&mut self, keys: &BTreeSet<UnitKey>) -> Vec<Derived> {
+        let (ended, remaining) = std::mem::take(&mut self.rows)
+            .into_iter()
+            .partition(|row| keys.contains(&row.key));
+        self.rows = ended;
+        let out = self.close();
+        self.rows = remaining;
+        out
+    }
 }
 
 fn units(text: &str) -> usize {

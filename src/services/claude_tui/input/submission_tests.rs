@@ -56,6 +56,7 @@ impl ScriptedTmux {
         let dir = tempfile::tempdir().unwrap();
         let script = r#"#!/bin/sh
 d='@D@'
+case "$*" in *show-environment*AGENTDESK_IDENTITY*) printf '%s\n' '@IDENTITY@'; exit 0 ;; esac
 echo "$*" >> "$d/argv"
 if [ "$2" = "$(cat "$d/hold" 2>/dev/null)" ] && [ ! -f "$d/held" ]; then
   touch "$d/held"; n=0
@@ -80,7 +81,8 @@ load-buffer|paste-buffer|send-keys)
 esac
 exit 0
 "#
-        .replace("@D@", &dir.path().display().to_string());
+        .replace("@D@", &dir.path().display().to_string())
+        .replace("@IDENTITY@", &crate::services::session_identity_metadata::runtime_identity("scripted-transport").unwrap().environment_assignment().unwrap());
         let program = dir.path().join("tmux");
         fs::write(&program, script).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
@@ -727,10 +729,18 @@ paste-buffer) echo paste >> "$d/events" ;;
 send-keys) for last do :; done; echo "$last" >> "$d/events" ;;
 esac
 "#
-    .replace("@D@", &dir.path().display().to_string());
+    .replace("@D@", &dir.path().display().to_string())
+    .replace(
+        "@IDENTITY@",
+        &crate::services::session_identity_metadata::runtime_identity("scripted-transport")
+            .unwrap()
+            .environment_assignment()
+            .unwrap(),
+    );
     let program = dir.path().join("tmux");
     fs::write(&program, script).unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::services::platform::tmux::session_identity_tests::mark_fixture_program(program);
     let transcript = dir.path().join("transcript");
     fs::write(
         &transcript,

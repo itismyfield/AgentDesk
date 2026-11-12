@@ -1,6 +1,8 @@
 ---------------------------- MODULE WriterWake ----------------------------
 EXTENDS Naturals
 CONSTANTS ParkRule, Case
+VARIABLE restart
+RestartDormant == restart = [mode |-> "dormant"]
 VARIABLES presence, loss, drain, unsealed, successor, writer, parked, alarm,
           boots, restarted, input, newSource, posted, oldDebt
 vars == <<presence, loss, drain, unsealed, successor, writer, parked, alarm,
@@ -90,7 +92,7 @@ bootVars == <<bootHandler, bootCustody, bootNotice, bootCheckpoint, bootExecutio
 VARIABLES routeGateway, routeCheck, routeBadWake
 routeVars == <<routeGateway, routeCheck, routeBadWake>>
 RouteDormant == /\ routeGateway = TRUE /\ routeCheck = FALSE /\ routeBadWake = FALSE
-bootAll == <<vars, bootVars, routeVars>>
+bootAll == <<vars, bootVars, routeVars, restart>>
 BootDormant ==
     /\ bootHandler = "dormant" /\ bootCustody = FALSE /\ bootNotice = FALSE
     /\ bootCheckpoint = FALSE /\ bootExecutions = 0 /\ bootWake = FALSE
@@ -98,9 +100,9 @@ BootDormant ==
     /\ bootNoticeFails = FALSE /\ bootCatchup = FALSE /\ bootRestarted = FALSE
     /\ bootHeld = FALSE /\ bootReason = "none"
 
-Init == BaseInit /\ BootDormant /\ RouteDormant
-Next == BaseNext /\ UNCHANGED <<bootVars, routeVars>>
-Spec == Init /\ [][Next]_vars
+Init == BaseInit /\ BootDormant /\ RouteDormant /\ RestartDormant
+Next == BaseNext /\ UNCHANGED <<bootVars, routeVars, restart>>
+Spec == Init /\ [][Next]_bootAll
         /\ WF_vars(ResumePark) /\ WF_vars(ResumeHalt) /\ WF_vars(HostEnds)
         /\ WF_vars(PeriodicBoot) /\ WF_vars(InputArrives) /\ WF_vars(AdmitInput)
         /\ WF_vars(NewSessionSource) /\ WF_vars(PostFirstReply)
@@ -119,6 +121,7 @@ RetainedSpoolDelivered == (writer = "running" /\ oldDebt = 1) ~> (oldDebt = 0)
 WaitingInputGetsFirstReply == (input = "held") ~> (posted = 1)
 
 BootInit ==
+    /\ RestartDormant
     /\ BaseInit
     /\ bootHandler = "unseen" /\ bootCustody = FALSE /\ bootNotice = FALSE
     /\ bootCheckpoint = FALSE /\ bootExecutions = 0 /\ bootWake = FALSE
@@ -224,23 +227,23 @@ BootRestartRaw ==
     /\ UNCHANGED <<bootHandler, bootCustody, bootNotice, bootCheckpoint, bootExecutions,
                    bootPermanent, bootPersistFails, bootNoticeFails, bootCatchup,
                    bootHeld, bootReason>>
-GatewayArrival == GatewayArrivalRaw /\ UNCHANGED <<vars, routeVars>>
-GatewayClassify == GatewayClassifyRaw /\ UNCHANGED <<vars, routeVars>>
-GatewayCustody == GatewayCustodyRaw /\ UNCHANGED <<vars, routeVars>>
-GatewayCustodyFailure == GatewayCustodyFailureRaw /\ UNCHANGED <<vars, routeVars>>
-NoticeFailure == NoticeFailureRaw /\ UNCHANGED <<vars, routeVars>>
-NoticeDelivered == NoticeDeliveredRaw /\ UNCHANGED <<vars, routeVars>>
-NoticeRetry == NoticeRetryRaw /\ UNCHANGED <<vars, routeVars>>
-GatewayComplete == GatewayCompleteRaw /\ UNCHANGED <<vars, routeVars>>
-WriterReady == WriterReadyRaw /\ UNCHANGED <<vars, routeVars>>
-ReadyWake == ReadyWakeRaw /\ UNCHANGED <<vars, routeVars>>
-ExecuteSource == ExecuteSourceRaw /\ UNCHANGED <<vars, routeVars>>
-CatchupSameSource == CatchupSameSourceRaw /\ UNCHANGED <<vars, routeVars>>
-BootRestart == BootRestartRaw /\ UNCHANGED <<vars, routeVars>>
+GatewayArrival == GatewayArrivalRaw /\ UNCHANGED <<vars, routeVars, restart>>
+GatewayClassify == GatewayClassifyRaw /\ UNCHANGED <<vars, routeVars, restart>>
+GatewayCustody == GatewayCustodyRaw /\ UNCHANGED <<vars, routeVars, restart>>
+GatewayCustodyFailure == GatewayCustodyFailureRaw /\ UNCHANGED <<vars, routeVars, restart>>
+NoticeFailure == NoticeFailureRaw /\ UNCHANGED <<vars, routeVars, restart>>
+NoticeDelivered == NoticeDeliveredRaw /\ UNCHANGED <<vars, routeVars, restart>>
+NoticeRetry == NoticeRetryRaw /\ UNCHANGED <<vars, routeVars, restart>>
+GatewayComplete == GatewayCompleteRaw /\ UNCHANGED <<vars, routeVars, restart>>
+WriterReady == WriterReadyRaw /\ UNCHANGED <<vars, routeVars, restart>>
+ReadyWake == ReadyWakeRaw /\ UNCHANGED <<vars, routeVars, restart>>
+ExecuteSource == ExecuteSourceRaw /\ UNCHANGED <<vars, routeVars, restart>>
+CatchupSameSource == CatchupSameSourceRaw /\ UNCHANGED <<vars, routeVars, restart>>
+BootRestart == BootRestartRaw /\ UNCHANGED <<vars, routeVars, restart>>
 BootDone == UNCHANGED bootAll
 BootNext ==
     /\ (GatewayArrival \/ GatewayClassify \/ GatewayCustody \/ GatewayCustodyFailure \/ NoticeFailure \/ NoticeDelivered \/ NoticeRetry \/ GatewayComplete \/ WriterReady \/ ReadyWake \/ ExecuteSource \/ CatchupSameSource \/ BootRestart \/ BootDone)
-    /\ UNCHANGED routeVars
+    /\ UNCHANGED <<routeVars, restart>>
 BootSpec == BootInit /\ [][BootNext]_bootAll
             /\ WF_bootAll(GatewayArrival) /\ WF_bootAll(GatewayClassify)
             /\ WF_bootAll(GatewayCustody) /\ WF_bootAll(GatewayCustodyFailure)
@@ -260,6 +263,7 @@ BootHeldEventuallyExecutes == bootHeld ~> (bootExecutions = 1)
 \* No clock or periodic wake is modeled. Gateway progress and a later existing owner event
 \* are explicit environment obligations, not promises of the two self-wake checks.
 RouteInit ==
+    /\ RestartDormant
     /\ BaseInit
     /\ bootHandler = "done" /\ bootCustody = TRUE /\ bootNotice = FALSE
     /\ bootCheckpoint = TRUE /\ bootExecutions = 0 /\ bootWake = TRUE
@@ -276,6 +280,7 @@ RouteOwnerHold ==
                    bootExecutions, bootReady, bootPermanent, bootPersistFails,
                    bootNoticeFails, bootCatchup, bootRestarted, bootHeld, bootReason,
                    routeGateway, routeBadWake>>
+    /\ UNCHANGED restart
 RouteSelfWakeRecheck ==
     /\ routeCheck /\ bootExecutions = 0
     /\ LET current == Case = "boot_route_current"
@@ -287,10 +292,12 @@ RouteSelfWakeRecheck ==
                    bootExecutions, bootReady, bootPermanent, bootPersistFails,
                    bootNoticeFails, bootCatchup, bootRestarted, bootHeld, bootReason,
                    routeGateway>>
+    /\ UNCHANGED restart
 \* A source/owner fact becoming eligible is not itself this code's notification.
 RouteGatewayOpens ==
     /\ ~routeGateway /\ routeGateway' = TRUE
     /\ UNCHANGED <<vars, bootVars, routeCheck, routeBadWake>>
+    /\ UNCHANGED restart
 \* Existing owner/start/reconcile notifications remain an external event, not a self-poll.
 RouteExistingOwnerWake ==
     /\ bootReady /\ routeGateway /\ bootCustody /\ ~routeCheck
@@ -299,6 +306,7 @@ RouteExistingOwnerWake ==
                    bootExecutions, bootReady, bootPermanent, bootPersistFails,
                    bootNoticeFails, bootCatchup, bootRestarted, bootHeld, bootReason,
                    routeVars>>
+    /\ UNCHANGED restart
 RouteExecute ==
     /\ bootReady /\ routeGateway /\ bootCustody /\ bootWake
     /\ ~routeCheck /\ bootExecutions = 0
@@ -306,9 +314,10 @@ RouteExecute ==
     /\ UNCHANGED <<vars, bootHandler, bootCustody, bootNotice, bootCheckpoint,
                    bootReady, bootPermanent, bootPersistFails, bootNoticeFails,
                    bootCatchup, bootRestarted, bootHeld, bootReason, routeVars>>
+    /\ UNCHANGED restart
 RouteDone == UNCHANGED bootAll
-RouteNext == RouteOwnerHold \/ RouteSelfWakeRecheck \/ RouteGatewayOpens \/
-             RouteExistingOwnerWake \/ RouteExecute \/ RouteDone
+RouteNext == (RouteOwnerHold \/ RouteSelfWakeRecheck \/ RouteGatewayOpens \/
+             RouteExistingOwnerWake \/ RouteExecute \/ RouteDone) /\ UNCHANGED restart
 RouteSpec == RouteInit /\ [][RouteNext]_bootAll
              /\ WF_bootAll(RouteOwnerHold) /\ WF_bootAll(RouteSelfWakeRecheck)
              /\ WF_bootAll(RouteGatewayOpens) /\ WF_bootAll(RouteExistingOwnerWake)
@@ -316,4 +325,158 @@ RouteSpec == RouteInit /\ [][RouteNext]_bootAll
 BootRouteNoBlockedSelfWake == ~routeBadWake
 BootRouteEligibleHeldExecutes ==
     (bootHeld /\ bootReady /\ routeGateway) ~> (bootExecutions = 1)
+
+\* One source, one old opener, a later prompt, and one bounded writer process restart.
+RestartExactScope == restart.scope = "exact"
+RestartCheckedScope == RestartExactScope \/
+    (Case = "restart-unscoped" /\ restart.scope \in {"nonce", "cutoff"})
+RestartFrame == UNCHANGED <<vars, bootVars, routeVars>>
+RestartInit ==
+    /\ BaseInit /\ BootDormant /\ RouteDormant
+    /\ \E scope \in (IF Case = "restart-guarded"
+                     THEN {"nonce", "cutoff", "source", "prefix", "opener"}
+                     ELSE IF Case = "restart-unscoped" THEN {"nonce", "cutoff"}
+                     ELSE {"exact"}) :
+       \E seen \in (IF Case = "restart-fixed" THEN {0, 1} ELSE {0}) :
+       restart = [scope |-> scope, stage |-> "start", physicalEnd |-> FALSE,
+           witness |-> FALSE, witnessEver |-> FALSE, installed |-> FALSE,
+           accepted |-> FALSE, applied |-> FALSE, oldIdle |-> FALSE,
+           open |-> 0, opener |-> 0, nativeRead |-> FALSE, nativeWrites |-> 0,
+           newPrompt |-> (Case \in {"restart-fixed", "restart-late", "restart-new-open",
+                                   "restart-current-nonce", "restart-repost", "restart-drop-prepared"}),
+           currentNonce |-> (IF Case \in {"restart-fixed", "restart-late", "restart-new-open",
+                                        "restart-current-nonce", "restart-repost", "restart-drop-prepared"}
+                            THEN 2 ELSE 1),
+           promptRead |-> FALSE, newOpened |-> FALSE, absorbed |-> FALSE,
+           sealTried |-> FALSE, installedAtSeal |-> FALSE,
+           prepared |-> (Case \in {"restart-fixed", "restart-repost", "restart-drop-prepared"}),
+           preparedEver |-> (Case \in {"restart-fixed", "restart-repost", "restart-drop-prepared"}),
+           effects |-> seen, acked |-> FALSE, restarted |-> FALSE, effectBeforeCrash |-> FALSE,
+           freshPrepared |-> FALSE, confirmed |-> "none", response |-> "none", receipt |-> "none",
+           live |-> TRUE, replayed |-> FALSE]
+
+\* Authority is a historical binding, old nonce, source identity and validated prefix cut.
+RestartPhysicalEnd ==
+    /\ RestartFrame /\ restart.stage = "start"
+    /\ restart' = [restart EXCEPT !.physicalEnd = TRUE, !.stage = "install",
+        !.witness = Case \notin {"restart-current", "restart-native"},
+        !.witnessEver = Case \notin {"restart-current", "restart-native"}]
+RestartInstall ==
+    /\ RestartFrame /\ restart.stage = "install"
+    /\ LET scopeOK == RestartCheckedScope /\
+              (Case # "restart-current-nonce" \/ restart.currentNonce = 1)
+       IN restart' = [restart EXCEPT
+          !.installed = restart.witness /\ Case # "restart-late",
+          !.accepted = scopeOK /\ Case # "restart-late",
+          !.live = scopeOK,
+          !.stage = IF scopeOK THEN "old" ELSE "held"]
+RestartReadOld ==
+    /\ RestartFrame /\ restart.stage = "old"
+    /\ restart' = [restart EXCEPT !.open = 1, !.opener = 1, !.stage = "boundary"]
+\* This runs before the next record whose start is at/after cutoff, or at cutoff EOF.
+RestartBoundary ==
+    /\ RestartFrame /\ restart.stage = "boundary"
+    /\ LET native == Case = "restart-native"
+           apply == restart.installed /\ restart.accepted /\ restart.open = 1 /\ restart.opener = 1
+       IN restart' = [restart EXCEPT !.stage = "new",
+          !.applied = @ \/ apply,
+          !.oldIdle = @ \/ apply \/ native,
+          !.nativeRead = @ \/ native,
+          !.open = IF apply \/ native THEN 0 ELSE @]
+\* Prompt inside Open is ignored by TurnTracker; only the reset lets the new prompt open.
+RestartReadNew ==
+    /\ RestartFrame /\ restart.stage = "new"
+    /\ restart' = [restart EXCEPT !.stage = "seal",
+        !.promptRead = restart.newPrompt,
+        !.absorbed = @ \/ (restart.newPrompt /\ restart.open # 0),
+        !.newOpened = restart.newPrompt /\ restart.open = 0,
+        !.open = IF restart.newPrompt /\ restart.open = 0 THEN 2 ELSE @,
+        !.opener = IF restart.newPrompt /\ restart.open = 0 THEN 2 ELSE @]
+RestartSeal ==
+    /\ RestartFrame /\ restart.stage = "seal"
+    /\ restart' = [restart EXCEPT !.stage = "ready", !.sealTried = TRUE,
+        !.installedAtSeal = restart.installed,
+        !.prepared = @ \/ restart.oldIdle,
+        !.preparedEver = @ \/ restart.oldIdle,
+        !.freshPrepared = @ \/ (restart.oldIdle /\ ~restart.preparedEver)]
+RestartLateInstall ==
+    /\ RestartFrame /\ Case = "restart-late" /\ restart.stage = "ready" /\ ~restart.installed
+    /\ restart' = [restart EXCEPT !.installed = TRUE, !.accepted = TRUE,
+        !.applied = TRUE, !.oldIdle = TRUE,
+        !.open = IF restart.open = 1 THEN 0 ELSE @]
+RestartReplayOld ==
+    /\ RestartFrame /\ restart.stage = "ready" /\ restart.newOpened /\ ~restart.replayed
+    /\ restart' = [restart EXCEPT !.replayed = TRUE,
+        !.open = IF Case = "restart-new-open" THEN 0 ELSE @]
+\* Prepared and Posted identities survive; network effect may precede its ledger ack.
+RestartPost ==
+    /\ RestartFrame /\ restart.live /\ restart.prepared /\ ~restart.acked
+    /\ (~restart.restarted \/ restart.stage = "ready")
+    /\ (restart.freshPrepared \/
+        (Case = "restart-repost" /\ restart.restarted /\ restart.effectBeforeCrash))
+    /\ \E outcome \in {"created", "uncertain"} :
+       restart' = [restart EXCEPT !.effects = Min2(@ + 1), !.freshPrepared = FALSE,
+           !.confirmed = "none", !.response = outcome]
+\* A readable exact-history verdict is observed before a restored Prepared may be retried.
+RestartConfirm ==
+    /\ RestartFrame /\ restart.live /\ restart.prepared /\ ~restart.acked
+    /\ ~restart.freshPrepared /\ restart.response # "created"
+    /\ restart.confirmed \in {"none", "unknown"}
+    /\ (~restart.restarted \/ restart.stage = "ready")
+    /\ restart' = [restart EXCEPT
+        !.confirmed = IF restart.effects > 0 THEN "posted" ELSE "missing"]
+RestartHistoryUnavailable ==
+    /\ RestartFrame /\ restart.live /\ restart.prepared /\ ~restart.acked
+    /\ ~restart.freshPrepared /\ restart.response # "created"
+    /\ restart.confirmed \in {"none", "unknown"}
+    /\ restart' = [restart EXCEPT !.confirmed = "unknown"]
+RestartRecordMissing ==
+    /\ RestartFrame /\ restart.live /\ restart.confirmed = "missing" /\ ~restart.acked
+    /\ restart' = [restart EXCEPT !.receipt = "missing", !.confirmed = "none"]
+RestartPrepareRetry ==
+    /\ RestartFrame /\ restart.live /\ restart.receipt = "missing" /\ ~restart.acked
+    /\ restart' = [restart EXCEPT !.receipt = "none", !.freshPrepared = TRUE,
+        !.confirmed = "none", !.response = "none"]
+RestartRecordPosted ==
+    /\ RestartFrame /\ restart.live /\ restart.prepared /\ ~restart.acked
+    /\ (restart.response = "created" \/ restart.confirmed = "posted")
+    /\ restart' = [restart EXCEPT !.acked = TRUE, !.receipt = "posted",
+        !.confirmed = "none", !.response = "none", !.freshPrepared = FALSE]
+RestartCrash ==
+    /\ RestartFrame /\ restart.physicalEnd /\ ~restart.restarted
+    /\ restart' = [restart EXCEPT !.restarted = TRUE, !.stage = "boot", !.live = FALSE,
+        !.effectBeforeCrash = restart.effects > 0,
+        !.freshPrepared = FALSE, !.confirmed = "none", !.response = "none",
+        !.witness = IF Case = "restart-witness-lost" THEN FALSE ELSE @,
+        !.installed = FALSE, !.accepted = FALSE, !.applied = FALSE, !.oldIdle = FALSE,
+        !.open = 0, !.opener = 0, !.nativeRead = FALSE, !.promptRead = FALSE,
+        !.newOpened = FALSE, !.replayed = FALSE, !.sealTried = FALSE, !.installedAtSeal = FALSE,
+        !.prepared = IF Case = "restart-drop-prepared" /\ ~restart.acked THEN FALSE ELSE @]
+RestartBoot ==
+    /\ RestartFrame /\ restart.stage = "boot"
+    /\ restart' = [restart EXCEPT !.stage = "install"]
+RestartRest == UNCHANGED bootAll
+RestartNext == RestartPhysicalEnd \/ RestartInstall \/ RestartReadOld \/ RestartBoundary \/
+    RestartReadNew \/ RestartSeal \/ RestartLateInstall \/ RestartReplayOld \/
+    RestartPost \/ RestartConfirm \/ RestartHistoryUnavailable \/ RestartRecordMissing \/
+    RestartPrepareRetry \/ RestartRecordPosted \/ RestartCrash \/ RestartBoot \/ RestartRest
+RestartSpec == RestartInit /\ [][RestartNext]_bootAll
+    /\ WF_bootAll(RestartPhysicalEnd) /\ WF_bootAll(RestartInstall)
+    /\ WF_bootAll(RestartReadOld) /\ WF_bootAll(RestartBoundary)
+    /\ WF_bootAll(RestartReadNew) /\ WF_bootAll(RestartSeal)
+    /\ WF_bootAll(RestartLateInstall) /\ WF_bootAll(RestartPost)
+    /\ WF_bootAll(RestartConfirm) /\ WF_bootAll(RestartRecordMissing)
+    /\ WF_bootAll(RestartPrepareRetry) /\ WF_bootAll(RestartRecordPosted)
+    /\ WF_bootAll(RestartBoot)
+RestartReplyOnce == restart.effects <= 1
+RestartExactEndOnly == restart.applied => RestartExactScope
+RestartNewPromptNotAbsorbed == ~restart.absorbed
+RestartOldEndCannotCloseNewOpen == restart.newOpened => restart.open = 2
+RestartWitnessBeforeSeal == (restart.sealTried /\ restart.witnessEver) => restart.installedAtSeal
+RestartPreparedNotLost == (restart.preparedEver /\ ~restart.acked) => restart.prepared
+RestartWitnessSurvivesBoot == restart.witnessEver => restart.witness
+RestartNoNativeForgery == restart.nativeWrites = 0 /\ (restart.nativeRead => Case = "restart-native")
+RestartExactEndEventuallyCloses == (restart.physicalEnd /\ RestartExactScope) ~> restart.oldIdle
+RestartPreparedEventuallyPosted == restart.prepared ~> restart.acked
+
 =============================================================================
