@@ -50,10 +50,14 @@ pub fn claude_transcript_path_candidates(
         return Err("invalid Claude session_id UUID".to_string());
     }
     let filename = format!("{session_id}.jsonl");
-    Ok(claude_project_dir_candidates_for_cwd(cwd, claude_home)?
+    claude_project_dir_candidates_for_cwd(cwd, claude_home)?
         .into_iter()
-        .map(|project_dir| project_dir.join(&filename))
-        .collect())
+        .map(|project_dir| {
+            let path = project_dir.join(&filename);
+            crate::config::test_instance::environment::validate_path(&path)?;
+            Ok(path)
+        })
+        .collect()
 }
 
 // #3034: test-only single-candidate helper; production resolves transcripts via
@@ -90,6 +94,7 @@ pub fn claude_project_dir_candidates_for_cwd(
     let mut project_dirs = Vec::new();
     for path in path_candidates {
         let project_dir = home.join(encode_project_path(&path));
+        crate::config::test_instance::environment::validate_path(&project_dir)?;
         if !project_dirs.contains(&project_dir) {
             project_dirs.push(project_dir);
         }
@@ -167,6 +172,9 @@ fn claude_transcript_files_for_cwd_since(
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            if crate::config::test_instance::environment::validate_path(&path).is_err() {
+                continue;
+            }
             // #2843 multi-session fix: skip transcripts already claimed by a
             // *different* live session's binding. Without this, concurrent
             // Claude TUI sessions sharing one cwd all collapse onto the single

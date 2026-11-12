@@ -465,3 +465,67 @@ fn codex_warm_submit_and_cold_launch_hold_a_discord_handoff_reservation() {
 fn codex_capacity_preflight_holds_when_rollout_advances_before_cold_launch() {
     assert_codex_capacity_cold_chain(true);
 }
+
+#[cfg(unix)]
+#[test]
+fn test_instance_codex_wrapper_script_executes_declared_environment_and_argv() {
+    use crate::config::TestEnvVarGuard as Guard;
+    use crate::services::provider_auth_profile::instance_env_tests as scope;
+    scope::with_instance(
+        concat!(
+            module_path!(),
+            "::test_instance_codex_wrapper_script_executes_declared_environment_and_argv"
+        ),
+        || {
+            let instance = crate::config::test_instance::current().unwrap().unwrap();
+            let binary = scope::fake_provider(&instance.root, "codex");
+            let wrapper = scope::fake_provider(&instance.root, "wrapper");
+            let _binary =
+                Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &binary);
+            let _wrapper = Guard::set_path_after_shared_test_env_lock(
+                "ADK_TEST_PROCESS_WRAPPER_EXE",
+                &wrapper,
+            );
+            let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+            scope::capturing_tmux(&instance.root);
+            let name = format!("{}-codex-wrapper-env", instance.tmux.prefix);
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let result = execute_streaming_local_tmux(
+                "instance Codex wrapper prompt",
+                None,
+                None,
+                None,
+                None,
+                None,
+                instance.root.to_str().unwrap(),
+                tx,
+                None,
+                &name,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("synthetic tmux refusal after child capture")
+            );
+            assert!(instance.root.join("native.executed").is_file());
+            scope::assert_environment_capture(
+                &std::fs::read(instance.root.join("native.capture")).unwrap(),
+                &instance.root,
+                "native-capture",
+            );
+            let argv = std::fs::read_to_string(instance.root.join("wrapper.argv")).unwrap();
+            assert_eq!(argv.lines().next(), Some("codex-tmux-wrapper"));
+            assert!(
+                argv.lines()
+                    .any(|argument| argument == binary.to_str().unwrap())
+            );
+            assert!(argv.lines().any(|argument| argument == "--input-fifo"));
+        },
+    );
+}

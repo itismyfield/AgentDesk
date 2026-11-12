@@ -142,6 +142,18 @@ fn test_instance_provider_rejects_default_unknown_foreign_and_linked_homes() {
                 assert!(resolve(provider, Some(&id), None, &catalog).is_ok());
             }
             assert!(resolve(ProviderKind::Qwen, Some("test-qwen"), None, &catalog).is_err());
+            let instance = crate::config::test_instance::current().unwrap().unwrap();
+            let org = instance.root.join("config/org.yaml");
+            let saved = instance.root.join("saved-org.json");
+            let foreign = instance.root.join("foreign-org.json");
+            std::fs::copy(&org, &foreign).unwrap();
+            std::fs::rename(&org, &saved).unwrap();
+            symlink(&foreign, &org).unwrap();
+            assert!(queries::provider_auth_catalog().is_empty());
+            std::fs::remove_file(&org).unwrap();
+            std::fs::rename(&saved, &org).unwrap();
+            assert_eq!(queries::provider_auth_catalog().len(), 2);
+
             let mut credential = Command::new("/bin/false");
             credential.env("MEMENTO_ACCESS_KEY", "synthetic-child");
             assert!(
@@ -210,11 +222,39 @@ fn test_instance_restart_discovery_reads_only_declared_provider_homes() {
                 Some(named.join(format!("rollout-{session}.jsonl")))
             );
             assert!(find_rollout_by_session_id_under(&foreign, session).is_none());
+            let owned = named.join(format!("rollout-{session}.jsonl"));
+            let saved = instance.root.join("owned-rollout.jsonl");
+            std::fs::rename(&owned, &saved).unwrap();
+            std::os::unix::fs::symlink(foreign.join(format!("rollout-{session}.jsonl")), &owned)
+                .unwrap();
+            assert!(find_rollout_by_session_id(session).is_none());
+            std::fs::remove_file(&owned).unwrap();
+            std::fs::rename(&saved, &owned).unwrap();
+            let nested = "00112233-4455-4677-8899-aabbccddeeff";
+            std::fs::write(foreign.join(format!("rollout-{nested}.jsonl")), b"{}\n").unwrap();
+            std::os::unix::fs::symlink(&foreign, named.join("foreign-date")).unwrap();
+            assert!(find_rollout_by_session_id(nested).is_none());
+            std::fs::remove_file(named.join("foreign-date")).unwrap();
+
             let claude = overlay(ProviderKind::Claude).home.unwrap();
             let transcript = claude_transcript_path(&instance.root, session, None).unwrap();
             std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
             std::fs::write(&transcript, b"{}\n").unwrap();
             assert!(transcript.starts_with(&claude));
+            let saved = instance.root.join("owned-transcript.jsonl");
+            std::fs::rename(&transcript, &saved).unwrap();
+            std::os::unix::fs::symlink(&saved, &transcript).unwrap();
+            assert!(claude_transcript_path(&instance.root, session, None).is_err());
+            std::fs::remove_file(&transcript).unwrap();
+            std::fs::rename(&saved, &transcript).unwrap();
+            let project = transcript.parent().unwrap();
+            let saved = instance.root.join("owned-project");
+            std::fs::rename(project, &saved).unwrap();
+            std::os::unix::fs::symlink(&saved, project).unwrap();
+            assert!(claude_transcript_path(&instance.root, session, None).is_err());
+            std::fs::remove_file(project).unwrap();
+            std::fs::rename(&saved, project).unwrap();
+
             assert_eq!(
                 claude_transcript_path(&instance.root, session, Some(&claude)).unwrap(),
                 transcript
@@ -240,7 +280,11 @@ pub(crate) fn fake_provider(root: &Path, provider: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let binary = root.join("fixture-worktree/target/debug").join(provider);
     let argv = root.join(format!("{provider}.argv"));
-    let version = if provider == "claude" { "2.1.0 (Claude Code)" } else { "codex-cli 0.160.0" };
+    let version = if provider == "claude" {
+        "2.1.0 (Claude Code)"
+    } else {
+        "codex-cli 0.160.0"
+    };
     let body = format!(
         "#!/bin/bash\nif [ \"$1\" = --version ]; then echo '{version}'; exit 0; fi\nif [ \"$1 $2\" = 'resume --help' ]; then echo '--no-daemon --dangerously-bypass-hook-trust'; exit 0; fi\nprintf '%s\\n' \"$@\" > {}\nset -- native-capture\n{CAPTURE}\n",
         crate::services::process::shell_escape(&argv.to_string_lossy()),
@@ -248,4 +292,31 @@ pub(crate) fn fake_provider(root: &Path, provider: &str) -> PathBuf {
     std::fs::write(&binary, body).unwrap();
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
     binary
+}
+
+pub(crate) fn capturing_tmux(root: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let tmux = root.join("fixture-worktree/target/debug/tmux");
+    std::fs::write(
+        &tmux,
+        r#"#!/bin/bash
+while [ "$1" = -u ] || [ "$1" = -S ]; do
+  if [ "$1" = -S ]; then shift 2; else shift; fi
+done
+printf '%s\n' "$*" >> "$AGENTDESK_ROOT_DIR/tmux.calls"
+case "$1" in
+new-session|respawn-pane)
+  for command in "$@"; do :; done
+  /bin/bash -c "$command" > "$AGENTDESK_ROOT_DIR/native.capture" || exit 42
+  touch "$AGENTDESK_ROOT_DIR/native.executed"
+  echo 'synthetic tmux refusal after child capture' >&2
+  exit 1 ;;
+list-panes) echo 1 ;;
+has-session) exit 1 ;;
+*) exit 0 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
 }

@@ -1567,6 +1567,10 @@ fn execute_streaming_local_tmux(
 
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
+    #[cfg(test)]
+    let exe = std::env::var_os("ADK_TEST_PROCESS_WRAPPER_EXE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(exe);
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path

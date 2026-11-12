@@ -246,6 +246,7 @@ fn load_instance_declaration(
 
 pub(crate) fn configure_tmux_command(command: &mut Command) -> io::Result<()> {
     if let Some(instance) = current().map_err(io::Error::other)? {
+        environment::validate_path(&instance.root).map_err(io::Error::other)?;
         command
             .env(
                 "AGENTDESK_TEST_MANIFEST",

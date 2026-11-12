@@ -71,6 +71,7 @@ fn instance_startup_rejects_home_api_label_memento_and_old_declarations() {
 #[test]
 fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
     if std::env::var_os("I2B_BACKEND_CHILD").is_some() {
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         initialize().unwrap();
         assert!(crate::bootstrap::initialize().is_err());
         use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
@@ -89,6 +90,63 @@ fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
         };
         assert!(ProcessBackend::new().create_session(&config).is_err());
         assert!(!foreign.exists());
+        let capture = root.join("backend-env");
+        let wrapper = root.join("fake-wrapper");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n{} > '{}'\n",
+                crate::services::provider_auth_profile::instance_env_tests::CAPTURE,
+                capture.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = SessionConfig {
+            agentdesk_exe: wrapper.to_string_lossy().into_owned(),
+            output_path: root.join("backend-output").to_string_lossy().into_owned(),
+            ..config
+        };
+        let handle = ProcessBackend::new().create_session(&config).unwrap();
+        if let crate::services::session_backend::SessionHandle::Process { child, .. } = handle {
+            assert!(
+                child
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .wait()
+                    .unwrap()
+                    .success()
+            );
+        } else {
+            panic!("expected a real child");
+        }
+        crate::services::provider_auth_profile::instance_env_tests::assert_environment_capture(
+            &std::fs::read(&capture).unwrap(),
+            root,
+            "tmux-wrapper",
+        );
+        std::fs::remove_file(&capture).unwrap();
+        for (key, value) in [
+            ("HOME", "/synthetic/foreign-home"),
+            ("MEMENTO_ACCESS_KEY", "synthetic-secret"),
+        ] {
+            assert!(
+                ProcessBackend::new()
+                    .create_session_with_command_env(&config, |command| {
+                        command.env(key, value);
+                    })
+                    .is_err()
+            );
+            assert!(!capture.exists());
+        }
+        let _home = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "HOME",
+            "/synthetic/foreign-home",
+        );
+        assert!(configure_tmux_command(&mut Command::new("/bin/false")).is_err());
         return;
     }
     let (_temp, root) = tests::fixture();

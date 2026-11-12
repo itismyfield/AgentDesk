@@ -64,7 +64,7 @@ pub(crate) fn find_rollout_by_session_id_under(
     }
     let suffix = format!("-{trimmed}.jsonl");
     let mut best: Option<(SystemTime, PathBuf)> = None;
-    for path in rollout_files_under(sessions_dir) {
+    for path in scoped_rollout_files(sessions_dir) {
         let matches = path
             .file_name()
             .and_then(|value| value.to_str())
@@ -96,7 +96,7 @@ pub(super) fn latest_rollout_for_cwd_and_session_since(
     }
     let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let mut best: Option<(SystemTime, PathBuf)> = None;
-    for path in rollout_files_under(sessions_dir) {
+    for path in scoped_rollout_files(sessions_dir) {
         let Some(modified) = std::fs::metadata(&path)
             .and_then(|meta| meta.modified())
             .ok()
@@ -117,6 +117,38 @@ pub(super) fn latest_rollout_for_cwd_and_session_since(
         }
     }
     best.map(|(_, path)| path)
+}
+
+fn scoped_rollout_files(root: &Path) -> Vec<PathBuf> {
+    if !crate::config::test_instance::requested() {
+        return rollout_files_under(root);
+    }
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        if crate::config::test_instance::environment::validate_path(&directory).is_err() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if crate::config::test_instance::environment::validate_path(&path).is_err() {
+                continue;
+            }
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+            {
+                files.push(path);
+            }
+        }
+    }
+    files
 }
 
 fn test_sessions_directory_admitted(sessions_dir: &Path) -> bool {

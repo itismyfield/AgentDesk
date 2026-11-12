@@ -222,7 +222,9 @@ pub(crate) fn configure_child_command(command: &mut Command) -> Result<(), Strin
             .envs(&snapshot.flags)
             .envs(&snapshot.required)
             .env("LANG", "C.UTF-8")
-            .env("LC_ALL", "C.UTF-8");
+            .env("LC_ALL", "C.UTF-8")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE");
     }
     Ok(())
 }

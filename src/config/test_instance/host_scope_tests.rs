@@ -86,6 +86,11 @@ pub(crate) fn command(root: &Path) -> Command {
     let env = environment::Environment::load(root, &manifest, &config).unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command.env_clear().envs(&env.required).envs(&env.flags);
+    for key in ["POSTGRES_TEST_DATABASE_URL_BASE", "AGENTDESK_REQUIRE_PG"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
     command
 }
 
