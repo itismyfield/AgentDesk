@@ -428,24 +428,56 @@ fn a_returned_resume_without_its_resumed_start_types_nothing() {
 
 #[test]
 fn test_instance_failed_presence_never_becomes_missing_on_an_absent_default_socket() {
-    const NAME: &str = "adk-test-presence-unknown";
-    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let sockets = tempfile::tempdir().unwrap();
-    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
-    let remove = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock;
-    let _tmpdir = set("TMUX_TMPDIR", sockets.path());
-    let _attached = remove("TMUX");
-    let _original_marker = remove("AGENTDESK_TEST_MANIFEST");
+    let _tmpdir = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "TMUX_TMPDIR",
+        sockets.path(),
+    );
+    let _attached = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock("TMUX");
+    if crate::config::test_instance::requested() {
+        crate::config::test_instance::initialize().unwrap();
+        let name = format!(
+            "{}-claude-presence",
+            crate::config::test_instance::current()
+                .unwrap()
+                .unwrap()
+                .tmux
+                .prefix
+        );
+        let _presence =
+            InjectedPresenceGuard::set(HostSessionRef::tmux(&name), HostPresence::ProbeFailed);
+        assert!(
+            super::session_exists(&name)
+                .unwrap_err()
+                .contains("unobserved")
+        );
+        return;
+    }
+    const NAME: &str = "adk-test-presence-unknown";
     let _presence =
         InjectedPresenceGuard::set(HostSessionRef::tmux(NAME), HostPresence::ProbeFailed);
     assert_eq!(super::session_exists(NAME), Ok(false));
-    {
-        let _marker = set(
-            "AGENTDESK_TEST_MANIFEST",
-            &sockets.path().join("missing-manifest.json"),
-        );
-        let error = super::session_exists(NAME).unwrap_err();
-        assert!(error.contains("unobserved"), "{error}");
-    }
+    let (_temp, root) = crate::config::test_instance::tests::fixture();
+    let filter = concat!(
+        module_path!(),
+        "::test_instance_failed_presence_never_becomes_missing_on_an_absent_default_socket"
+    )
+    .strip_prefix("agentdesk::")
+    .unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", filter, "--nocapture"])
+        .env("AGENTDESK_TEST_MANIFEST", root.join("manifest.json"))
+        .env("AGENTDESK_ROOT_DIR", &root)
+        .env("AGENTDESK_CONFIG", root.join("config/agentdesk.yaml"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
     assert_eq!(super::session_exists(NAME), Ok(false));
 }

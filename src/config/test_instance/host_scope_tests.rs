@@ -189,6 +189,7 @@ fn initialized_test_scope_names_sessions_and_refuses_herdr_runtime() {
     };
     use std::os::unix::net::UnixListener;
 
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     if std::env::var_os(MARKER).is_none() {
         let (_temp, root) = fixture();
         let output = Command::new(std::env::current_exe().unwrap())
@@ -218,7 +219,6 @@ fn initialized_test_scope_names_sessions_and_refuses_herdr_runtime() {
     }
     initialize().unwrap();
     let instance = current().unwrap().unwrap();
-    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _marker = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock(MARKER);
     assert!(requested());
     assert_eq!(

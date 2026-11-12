@@ -3,6 +3,7 @@ use super::*;
 #[cfg(unix)]
 #[test]
 fn test_instance_tmux_entries_use_private_socket_and_refuse_foreign_targets() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     const NAME: &str = "services::platform::tmux::instance_scope::tests::test_instance_tmux_entries_use_private_socket_and_refuse_foreign_targets";
     if crate::config::test_instance::requested() {
         exercise_instance_entries();
