@@ -222,14 +222,21 @@ class RequiredListGuardWiringTest(unittest.TestCase):
         self.assertEqual(job["if"], "${{ !github.event.pull_request.draft && !cancelled() }}")
         checkout = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@"))
         self.assertEqual(checkout["with"]["fetch-depth"], 0)
-        steps = [step for step in job["steps"] if "list_merge_guard.py" in step.get("run", "")]
-        self.assertEqual(len(steps), 1, "union requires an unconditional guard step")
-        step = steps[0]
+        step = next(step for step in job["steps"] if step.get("run") == "./scripts/ci-script-checks.sh")
         self.assertNotIn("if", step)
         self.assertFalse(step.get("continue-on-error", False))
-        self.assertEqual(step["env"]["BASE_SHA"], "${{ github.event.pull_request.base.sha }}")
-        self.assertEqual(step["env"]["HEAD_SHA"], "${{ github.event.pull_request.head.sha }}")
-        self.assertIn("git merge-base", step["run"])
+        self.assertEqual(step["env"]["GFP_BASE_SHA"], "${{ github.event.pull_request.base.sha }}")
+        self.assertEqual(step["env"]["GFP_HEAD_SHA"], "${{ github.event.pull_request.head.sha }}")
+        self.assertEqual(step["env"]["GFP_EVENT_NAME"], "${{ github.event_name }}")
+        self.assertEqual(step["env"]["SCRIPT_CHECK_SHARD"], "contracts")
+        title = "Union list merge guard and required CI contract"
+        script = (ROOT / "scripts/ci-script-checks.sh").read_text()
+        registration = f'if run_check contracts "{title}"; then\n'
+        body = script.split(registration, 1)[1].split('"$PYTHON" -m unittest tests.test_list_merge_guard\n', 1)[0]
+        from scripts.ci.script_check_inputs import skipped_checks
+        for paths in ('["README.md"]', '["docs/statecharts/expected.tsv"]', '[".gitattributes"]'):
+            self.assertNotIn(title, skipped_checks({"GITHUB_EVENT_NAME": "pull_request",
+                              "SCRIPT_CHECK_CHANGES_RESULT": "success", "SCRIPT_CHECK_CHANGED_FILES": paths}))
         with tempfile.TemporaryDirectory(prefix="list-wiring-") as directory:
             repo = MergeRepo(Path(directory))
             repo.merge(theirs={EXPECTED: SEED[EXPECTED] + "zz/New.cfg\tNew\t-\t-\n"})
@@ -237,15 +244,21 @@ class RequiredListGuardWiringTest(unittest.TestCase):
             scripts.mkdir(exist_ok=True, parents=True)
             for name in ("list_merge_guard.py", "statecharts_tlc.py", "nextest_ci.py", "nextest_required.py"):
                 shutil.copyfile(ROOT / "scripts/ci" / name, scripts / name)
-            env = {**os.environ, "BASE_SHA": repo.ours, "HEAD_SHA": repo.theirs}
-            good = subprocess.run(["bash", "-euo", "pipefail", "-c", step["run"]],
+            env = {**os.environ, "GFP_EVENT_NAME": "pull_request", "GFP_BASE_SHA": repo.ours,
+                   "GFP_HEAD_SHA": repo.theirs, "PYTHON": sys.executable}
+            good = subprocess.run(["bash", "-euo", "pipefail", "-c", body],
                                   cwd=repo.root, env=env, capture_output=True, text=True)
             self.assertEqual(good.returncode, 0, good.stdout + good.stderr)
             repo.write(EXPECTED, SEED[EXPECTED])
-            bad = subprocess.run(["bash", "-euo", "pipefail", "-c", step["run"]],
+            bad = subprocess.run(["bash", "-euo", "pipefail", "-c", body],
                                  cwd=repo.root, env=env, capture_output=True, text=True)
             self.assertNotEqual(bad.returncode, 0)
             self.assertIn("missing keys", bad.stderr)
+            env.pop("GFP_HEAD_SHA")
+            missing_ref = subprocess.run(["bash", "-euo", "pipefail", "-c", body],
+                                         cwd=repo.root, env=env, capture_output=True, text=True)
+            self.assertNotEqual(missing_ref.returncode, 0)
+            self.assertIn("needs its head SHA", missing_ref.stderr)
 
 
 if __name__ == "__main__":
