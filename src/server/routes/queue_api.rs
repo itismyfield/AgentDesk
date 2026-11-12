@@ -1161,7 +1161,7 @@ mod cancel_queue_preserve_pg_tests {
     /// A forced cancel with no session row names no owner queue file, so the V2 owner refuses its
     /// purge: the reply names why and counts the owner's queue, the depth health detail reports.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_sessionless_force_cancel_reports_the_refusal_and_the_owner_depth_pg() {
+    async fn a_sessionless_force_cancel_purges_the_owner_queue_and_reports_the_owner_depth_pg() {
         use crate::services::turn_orchestrator::{PendingQueueItem, v2_queue};
         let temp = tempfile::tempdir().expect("runtime root");
         let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
@@ -1195,11 +1195,11 @@ mod cancel_queue_preserve_pg_tests {
         let (status, body) = post_cancel(&app, channel.get(), true).await;
         assert_eq!(status, StatusCode::OK, "cancel response: {body}");
         assert_explicit_null(&body, "session_key");
-        let reason = "the request names another queue file than the owner's";
-        assert_eq!(body["queue_purge_refused_reason"], reason, "{body}");
+        assert_explicit_null(&body, "queue_purge_refused_reason");
+        assert_eq!(body["queue_purged"], 1, "{body}");
         assert_eq!(
-            body["queued_remaining"], 1,
-            "the owner kept its input: {body}"
+            body["queued_remaining"], 0,
+            "the owner's queue was emptied: {body}"
         );
         let mut request = Request::builder().uri("/health/detail");
         request = request.header(header::AUTHORIZATION, format!("Bearer {AUTH_TOKEN}"));
