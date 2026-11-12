@@ -95,7 +95,7 @@ fn test_instance_provider_resolver_command_and_shell_share_scope() {
                     "provider-argument",
                 );
                 let script = format!(
-                    "{}\n[ -z \"${{MEMENTO_MCP_TOKEN+x}}\" ] && [ -z \"${{AGENT_OP_TEST_SECRET+x}}\" ] || exit 71\n{}",
+                    "{}\n[ -z \"${{MEMENTO_MCP_TOKEN+x}}\" ] && [ -z \"${{AGENT_OP_TEST_SECRET+x}}\" ] && [ -z \"${{XDG_DATA_HOME+x}}\" ] && [ -z \"${{CLAUDE_CODE_OAUTH_TOKEN+x}}\" ] || exit 71\n{}",
                     overlay_shell_env_lines(&overlay).unwrap(),
                     CAPTURE
                 );
@@ -108,6 +108,8 @@ fn test_instance_provider_resolver_command_and_shell_share_scope() {
                     .env("OP_SERVICE_ACCOUNT_TOKEN", "synthetic-parent")
                     .env("MEMENTO_MCP_TOKEN", "synthetic-parent")
                     .env("AGENT_OP_TEST_SECRET", "synthetic-parent")
+                    .env("XDG_DATA_HOME", "/synthetic/herdr-data")
+                    .env("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-parent")
                     .output()
                     .unwrap();
                 assert_child_environment(output, &instance.root, "provider-argument");

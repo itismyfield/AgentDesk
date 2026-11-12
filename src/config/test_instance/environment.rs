@@ -257,7 +257,7 @@ pub(crate) fn shell_environment() -> Result<String, String> {
     };
     // A long-lived tmux server can retain credentials absent from this process.
     let mut script = String::from(
-        "unset QWEN_HOME GEMINI_CLI_HOME GROK_HOME OPENCODE_CONFIG ANTHROPIC_API_KEY OPENAI_API_KEY XAI_API_KEY DASHSCOPE_API_KEY GEMINI_API_KEY GOOGLE_API_KEY NVIDIA_API_KEY MEMENTO_ACCESS_KEY OP_SERVICE_ACCOUNT_TOKEN OP_CONNECT_TOKEN AGENTDESK_TOKEN DISCORD_TOKEN DISCORD_BOT_TOKEN CLAUDE_BOT_TOKEN CODEX_BOT_TOKEN DRIVER_BOT_TOKEN TMUX TMUX_PANE\n",
+        "unset BASH_ENV ENV ZDOTDIR USERPROFILE XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR CLAUDE_CODE_OAUTH_TOKEN QWEN_HOME GEMINI_CLI_HOME GROK_HOME OPENCODE_CONFIG ANTHROPIC_API_KEY OPENAI_API_KEY XAI_API_KEY DASHSCOPE_API_KEY GEMINI_API_KEY GOOGLE_API_KEY NVIDIA_API_KEY MEMENTO_ACCESS_KEY OP_SERVICE_ACCOUNT_TOKEN OP_CONNECT_TOKEN AGENTDESK_TOKEN DISCORD_TOKEN DISCORD_BOT_TOKEN CLAUDE_BOT_TOKEN CODEX_BOT_TOKEN DRIVER_BOT_TOKEN TMUX TMUX_PANE\n",
     );
     script.push_str("for adk_instance_env_key in $(/usr/bin/env | /usr/bin/sed -n 's/^\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/\\1/p'); do\ncase \"$adk_instance_env_key\" in MEMENTO_*|OP_*|AGENT_OP_*|*DISCORD*TOKEN|*DISCORD*KEY|*_BOT_TOKEN) unset \"$adk_instance_env_key\";; esac\ndone\nunset adk_instance_env_key\n");
     for (key, value) in snapshot.flags.iter().chain(&snapshot.required) {
