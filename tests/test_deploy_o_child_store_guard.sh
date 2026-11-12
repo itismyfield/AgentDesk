@@ -25,6 +25,7 @@ REL_BINARY_BACKUP="$TEST_ROOT/target"
 export REL_BINARY="$TEST_ROOT/current"
 export PLIST_REL=fixture
 export ADK_DEFAULT_LOOPBACK=127.0.0.1
+export AGENTDESK_DEPLOY_FORCE_ROLLBACK=1
 # Deliberately stale manifest cannot make an incompatible actual binary compatible.
 printf '{"o_store_thread_children":true}\n' > "$ADK_REL/runtime/release-source.json"
 _rollback_would_brick_on_migration() { return 1; }

@@ -66,7 +66,7 @@ impl ChildEntries {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn resolve_legacy(
         &self,
         boot: &BootChannels,
@@ -202,5 +202,5 @@ impl BootChannels {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

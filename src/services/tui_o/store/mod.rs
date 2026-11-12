@@ -19,7 +19,7 @@ pub(crate) mod tool_card_switch;
 #[cfg(all(test, unix))]
 mod input_notice_store_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod thread_children_tests;
 
 use std::collections::BTreeMap;
