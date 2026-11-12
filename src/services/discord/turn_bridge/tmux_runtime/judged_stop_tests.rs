@@ -638,11 +638,17 @@ fn real_tmux_cells(condition: &str) {
     let probe = real_tmux(&sockets, &["has-session", "-t", "=p6asb-none:"]);
     let realized = match (condition, &probe) {
         ("live", _) => {
+            let identity = crate::services::session_identity_metadata::runtime_identity(&session)
+                .unwrap()
+                .environment_assignment()
+                .unwrap();
             let args = [
                 "new-session",
                 "-d",
                 "-s",
                 &session,
+                "-e",
+                &identity,
                 "-x",
                 "80",
                 "-y",

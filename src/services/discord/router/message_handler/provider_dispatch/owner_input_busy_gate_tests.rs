@@ -76,7 +76,13 @@ fn raw_busy_paste(rig: &Rig) -> busy_inject::Report {
         text: PROMPT,
     };
     busy_inject::inject_owned(
-        &busy_inject::Pane::with_program(&rig.name, rig.program.clone()),
+        &busy_inject::Pane::with_program(
+            &rig.name,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                rig.program.clone(),
+            ),
+        )
+        .expect("managed scripted pane"),
         &request,
         &OWNER_TIMING,
         false,
