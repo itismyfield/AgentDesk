@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use crate::services::claude_tui::guarded_outcome::{self, OwnedWarmOutcome, SubmissionError};
+pub(crate) mod capability_probe;
 mod process_session_launch;
 pub(crate) use process_session_launch::execute_streaming_local_process;
 
@@ -2689,10 +2690,16 @@ fn execute_streaming_local_tmux(
 
     // Launch tmux session with script file (avoids command length limits)
     fence.validate_tmux_publisher(tmux_session_name)?;
-    let tmux_result = crate::services::platform::tmux::create_session(
+    let tmux_result = crate::services::platform::tmux::create_session_with_identity(
         tmux_session_name,
         Some(working_dir),
         &format!("bash {}", shell_escape(&script_path)),
+        &crate::services::session_identity_metadata::provider_identity(
+            tmux_session_name,
+            "claude",
+            report_channel_id,
+            "wrapper",
+        )?,
     )?;
 
     if !tmux_result.status.success() {

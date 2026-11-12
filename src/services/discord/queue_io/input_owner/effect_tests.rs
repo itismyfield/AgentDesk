@@ -159,7 +159,9 @@ fn an_owned_paste_beside_an_unparkable_draft_notices_its_original_once() {
         let leaf = BusyClaude {
             operation: crate::services::claude_tui::host_input::BusyOperation::new(
                 crate::services::claude_tui::host_input::InputTarget::legacy_tmux(&session),
-                dir.path().join("tmux"),
+                crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                    dir.path().join("tmux"),
+                ),
                 &busy_inject::TIMING,
                 false,
                 Arc::new(crate::services::provider::CancelToken::new()),

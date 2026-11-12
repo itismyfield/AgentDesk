@@ -113,6 +113,8 @@ class _LayerSrcTree(_FakeSrcTree):
         graph = module_layers.analyze(root, occurrence_projection=occurrences)
         snapshots.write_baseline(root / snapshots.BASELINE,
                                  snapshots.baseline(graph, snapshots.load_mapping(root), "fixture", occurrences))
+        from audit_maintainability.checks import low_level_accessors, low_level_accessor_baseline
+        low_level_accessor_baseline.write_baselines(root, low_level_accessors.scan(root))
         return root
 
 class GiantFilesCheck(unittest.TestCase):
@@ -1247,6 +1249,7 @@ class HarnessCli(unittest.TestCase):
                 "source_of_truth_alias_writes",
                 "git_subprocess_callsites",
                 "module_layers",
+                "low_level_accessors",
             },
         )
         self.assertEqual(
@@ -1268,10 +1271,10 @@ class HarnessCli(unittest.TestCase):
             yaml_text = HARNESS.render_yaml(specs, findings)
             json_payload = json.loads(HARNESS.render_json(specs, findings))
         self.assertIn("hard_gate_enabled: true", yaml_text)
-        self.assertIn("hard_gate_count: 8", yaml_text)
+        self.assertIn("hard_gate_count: 9", yaml_text)
         self.assertIn("baseline_gate_count: 3", yaml_text)
         self.assertIs(json_payload["hard_gate_enabled"], True)
-        self.assertEqual(json_payload["hard_gate_count"], 8)
+        self.assertEqual(json_payload["hard_gate_count"], 9)
         self.assertEqual(json_payload["baseline_gate_count"], 3)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:

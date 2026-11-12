@@ -17,6 +17,7 @@ pub(crate) fn driver(
         None,
         None,
         None,
+        None,
         context.provider_root.as_ref().unwrap().to_str().unwrap(),
         sender,
         Some(token),
@@ -42,6 +43,7 @@ pub(crate) fn cold_driver(
     execute_streaming_local_tui_tmux(
         "resume prompt",
         Some(native_session),
+        None,
         None,
         None,
         None,

@@ -106,6 +106,7 @@ fn command_supports_json(command: &Commands) -> bool {
 
         // Text-only / operational commands — no JSON output path.
         Commands::Dcserver(_)
+        | Commands::DevInstance(_)
         | Commands::Init
         | Commands::Reconfigure
         | Commands::EmitLaunchdPlist(..)
@@ -145,6 +146,9 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         ));
     }
     match command {
+        Commands::DevInstance(args) => {
+            super::dev_instance::execute(args).map_err(anyhow::Error::msg)
+        }
         Commands::Dcserver(DcserverArgs { token }) => {
             let token = token.or_else(|| std::env::var("AGENTDESK_TOKEN").ok());
             super::handle_dcserver(token);

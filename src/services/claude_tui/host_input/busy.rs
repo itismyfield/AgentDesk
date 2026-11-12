@@ -105,8 +105,17 @@ impl BusyOperation {
     ) -> Self {
         let (submit, host_tag): (BusySubmit, Option<&'static str>) = match target {
             InputTarget::Tmux(session) => {
+                let pane = match busy_inject::Pane::with_program(&session, program) {
+                    Ok(pane) => pane,
+                    Err(reason) => {
+                        return Self {
+                            submit: Box::new(move |_| BusyReport::refused(reason.clone())),
+                            host_tag: None,
+                        };
+                    }
+                };
                 let adapter = tmux::Adapter {
-                    pane: busy_inject::Pane::with_program(&session, program),
+                    pane,
                     timing,
                     declared,
                     cancel,
