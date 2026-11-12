@@ -1582,7 +1582,45 @@ impl Fixture {
         let own = |event: &crate::services::tui_prompt_dedupe::binding_events::BindingEvent| {
             event.execution_nonce.as_deref() == Some(nonce)
         };
-        events.into_iter().filter(own).collect()
+        let logged: Vec<_> = events.into_iter().filter(own).collect();
+        let [launch, promotion] = logged.as_slice() else {
+            panic!("one resume and one verified promotion are required: {logged:#?}");
+        };
+        use crate::services::tui_prompt_dedupe::binding_events::{BindingCause, BindingTarget};
+        assert_eq!(launch.cause, BindingCause::Resume);
+        assert!(matches!(launch.new, BindingTarget::Source(_)));
+        assert_eq!(
+            promotion.new, launch.new,
+            "the same exact source is verified"
+        );
+        assert_eq!(launch.execution_nonce.as_deref(), Some(nonce));
+        assert_eq!(promotion.execution_nonce, launch.execution_nonce);
+        assert_eq!(launch.evidence.hook_event.as_deref(), Some("session_start"));
+        assert_eq!(
+            promotion.evidence.hook_event.as_deref(),
+            Some("user_prompt_submit")
+        );
+        assert_eq!(
+            serde_json::to_value(promotion.cause).unwrap(),
+            json!("same_session_verified")
+        );
+        let log_root = crate::services::tui_prompt_dedupe::binding_events::test_root().unwrap();
+        let path = log_root
+            .join(crate::services::tui_prompt_dedupe::binding_events::BINDING_EVENTS_DIR)
+            .join(format!("{CHANNEL}.log"));
+        let flags: Vec<_> = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|line| line["execution_nonce"] == json!(nonce))
+            .map(|line| {
+                line.get("verified")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(flags, [false, true], "only the promotion row is verified");
+        logged
     }
 
     fn launch_script(&self) -> String {
@@ -1644,7 +1682,7 @@ fn f1_a_tmux_session_resumes_on_herdr_under_its_own_id_after_its_claude_exits_pg
     );
     assert!(!script.contains("'--session-id'"), "{script}");
     let logged = fx.logged_by(&nonce);
-    assert_eq!(logged.len(), 1, "{logged:#?}");
+    assert_eq!(logged.len(), 2, "{logged:#?}");
     use crate::services::tui_prompt_dedupe::binding_events::{BindingCause, BindingTarget};
     assert_eq!(logged[0].cause, BindingCause::Resume);
     assert!(matches!(&logged[0].new, BindingTarget::Source(source) if source.path == path));
@@ -1765,8 +1803,8 @@ fn f8_a_named_account_session_resumes_from_its_own_home_pg() {
     let logged = fx.logged_by(&nonce);
     use crate::services::tui_prompt_dedupe::binding_events::BindingTarget;
     assert!(
-        matches!(&logged[..], [event] if matches!(&event.new,
-        BindingTarget::Source(source) if source.path == path)),
+        matches!(&logged[..], [event, promotion] if matches!(&event.new,
+        BindingTarget::Source(source) if source.path == path) && promotion.new == event.new),
         "{logged:#?}"
     );
 }
@@ -1912,7 +1950,8 @@ fn f5c_a_resumed_start_not_logged_is_answered_only_once_its_record_lands_pg() {
     let logged = fx.logged_by(&nonce);
     use crate::services::tui_prompt_dedupe::binding_events::BindingCause;
     assert!(
-        matches!(&logged[..], [event] if event.cause == BindingCause::Resume),
+        matches!(&logged[..], [event, promotion] if event.cause == BindingCause::Resume
+            && promotion.new == event.new),
         "{logged:#?}"
     );
 }
