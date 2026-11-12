@@ -46,7 +46,7 @@ fn immutable_retry_and_boot_preserve_one_end_after_source_grows() {
     fs::write(&witness.source.path, b"open\nbody\nnew-open\n").unwrap();
     assert_eq!(append(root.path(), &witness), Ok(Appended::Durable));
     let restored = read_durable(root.path(), witness.channel).unwrap();
-    assert_eq!(restored, [witness.clone()]);
+    assert_eq!(restored.as_slice(), std::slice::from_ref(&witness));
     assert_eq!(read(root.path(), witness.channel).unwrap(), restored);
     fs::remove_file(&witness.source.path).unwrap();
     assert_eq!(
@@ -173,15 +173,17 @@ fn consumers_retry_directory_durability_before_using_an_end() {
         None,
     );
     assert_eq!(
-        read(root.path(), witness.channel).unwrap(),
-        [witness.clone()]
+        read(root.path(), witness.channel).unwrap().as_slice(),
+        std::slice::from_ref(&witness)
     );
     assert!(read_durable(root.path(), witness.channel).is_err());
     assert!(append(root.path(), &witness).is_err());
     drop(failure);
     assert_eq!(
-        read_durable(root.path(), witness.channel).unwrap(),
-        [witness.clone()]
+        read_durable(root.path(), witness.channel)
+            .unwrap()
+            .as_slice(),
+        std::slice::from_ref(&witness)
     );
     assert_eq!(append(root.path(), &witness), Ok(Appended::Durable));
 }

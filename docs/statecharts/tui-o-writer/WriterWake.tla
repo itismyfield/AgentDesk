@@ -227,19 +227,19 @@ BootRestartRaw ==
     /\ UNCHANGED <<bootHandler, bootCustody, bootNotice, bootCheckpoint, bootExecutions,
                    bootPermanent, bootPersistFails, bootNoticeFails, bootCatchup,
                    bootHeld, bootReason>>
-GatewayArrival == GatewayArrivalRaw /\ UNCHANGED <<vars, routeVars>>
-GatewayClassify == GatewayClassifyRaw /\ UNCHANGED <<vars, routeVars>>
-GatewayCustody == GatewayCustodyRaw /\ UNCHANGED <<vars, routeVars>>
-GatewayCustodyFailure == GatewayCustodyFailureRaw /\ UNCHANGED <<vars, routeVars>>
-NoticeFailure == NoticeFailureRaw /\ UNCHANGED <<vars, routeVars>>
-NoticeDelivered == NoticeDeliveredRaw /\ UNCHANGED <<vars, routeVars>>
-NoticeRetry == NoticeRetryRaw /\ UNCHANGED <<vars, routeVars>>
-GatewayComplete == GatewayCompleteRaw /\ UNCHANGED <<vars, routeVars>>
-WriterReady == WriterReadyRaw /\ UNCHANGED <<vars, routeVars>>
-ReadyWake == ReadyWakeRaw /\ UNCHANGED <<vars, routeVars>>
-ExecuteSource == ExecuteSourceRaw /\ UNCHANGED <<vars, routeVars>>
-CatchupSameSource == CatchupSameSourceRaw /\ UNCHANGED <<vars, routeVars>>
-BootRestart == BootRestartRaw /\ UNCHANGED <<vars, routeVars>>
+GatewayArrival == GatewayArrivalRaw /\ UNCHANGED <<vars, routeVars, restart>>
+GatewayClassify == GatewayClassifyRaw /\ UNCHANGED <<vars, routeVars, restart>>
+GatewayCustody == GatewayCustodyRaw /\ UNCHANGED <<vars, routeVars, restart>>
+GatewayCustodyFailure == GatewayCustodyFailureRaw /\ UNCHANGED <<vars, routeVars, restart>>
+NoticeFailure == NoticeFailureRaw /\ UNCHANGED <<vars, routeVars, restart>>
+NoticeDelivered == NoticeDeliveredRaw /\ UNCHANGED <<vars, routeVars, restart>>
+NoticeRetry == NoticeRetryRaw /\ UNCHANGED <<vars, routeVars, restart>>
+GatewayComplete == GatewayCompleteRaw /\ UNCHANGED <<vars, routeVars, restart>>
+WriterReady == WriterReadyRaw /\ UNCHANGED <<vars, routeVars, restart>>
+ReadyWake == ReadyWakeRaw /\ UNCHANGED <<vars, routeVars, restart>>
+ExecuteSource == ExecuteSourceRaw /\ UNCHANGED <<vars, routeVars, restart>>
+CatchupSameSource == CatchupSameSourceRaw /\ UNCHANGED <<vars, routeVars, restart>>
+BootRestart == BootRestartRaw /\ UNCHANGED <<vars, routeVars, restart>>
 BootDone == UNCHANGED bootAll
 BootNext ==
     /\ (GatewayArrival \/ GatewayClassify \/ GatewayCustody \/ GatewayCustodyFailure \/ NoticeFailure \/ NoticeDelivered \/ NoticeRetry \/ GatewayComplete \/ WriterReady \/ ReadyWake \/ ExecuteSource \/ CatchupSameSource \/ BootRestart \/ BootDone)
@@ -280,6 +280,7 @@ RouteOwnerHold ==
                    bootExecutions, bootReady, bootPermanent, bootPersistFails,
                    bootNoticeFails, bootCatchup, bootRestarted, bootHeld, bootReason,
                    routeGateway, routeBadWake>>
+    /\ UNCHANGED restart
 RouteSelfWakeRecheck ==
     /\ routeCheck /\ bootExecutions = 0
     /\ LET current == Case = "boot_route_current"
@@ -291,10 +292,12 @@ RouteSelfWakeRecheck ==
                    bootExecutions, bootReady, bootPermanent, bootPersistFails,
                    bootNoticeFails, bootCatchup, bootRestarted, bootHeld, bootReason,
                    routeGateway>>
+    /\ UNCHANGED restart
 \* A source/owner fact becoming eligible is not itself this code's notification.
 RouteGatewayOpens ==
     /\ ~routeGateway /\ routeGateway' = TRUE
     /\ UNCHANGED <<vars, bootVars, routeCheck, routeBadWake>>
+    /\ UNCHANGED restart
 \* Existing owner/start/reconcile notifications remain an external event, not a self-poll.
 RouteExistingOwnerWake ==
     /\ bootReady /\ routeGateway /\ bootCustody /\ ~routeCheck
@@ -303,6 +306,7 @@ RouteExistingOwnerWake ==
                    bootExecutions, bootReady, bootPermanent, bootPersistFails,
                    bootNoticeFails, bootCatchup, bootRestarted, bootHeld, bootReason,
                    routeVars>>
+    /\ UNCHANGED restart
 RouteExecute ==
     /\ bootReady /\ routeGateway /\ bootCustody /\ bootWake
     /\ ~routeCheck /\ bootExecutions = 0
@@ -310,6 +314,7 @@ RouteExecute ==
     /\ UNCHANGED <<vars, bootHandler, bootCustody, bootNotice, bootCheckpoint,
                    bootReady, bootPermanent, bootPersistFails, bootNoticeFails,
                    bootCatchup, bootRestarted, bootHeld, bootReason, routeVars>>
+    /\ UNCHANGED restart
 RouteDone == UNCHANGED bootAll
 RouteNext == (RouteOwnerHold \/ RouteSelfWakeRecheck \/ RouteGatewayOpens \/
              RouteExistingOwnerWake \/ RouteExecute \/ RouteDone) /\ UNCHANGED restart
