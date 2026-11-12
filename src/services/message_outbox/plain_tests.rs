@@ -93,12 +93,12 @@ async fn await_lock_waiter(pool: &PgPool, relation: &str) {
     .await
 }
 
-async fn lock_table(pool: &PgPool, relation: &str) -> sqlx::Transaction<'static, sqlx::Postgres> {
+async fn lock_table(
+    pool: &PgPool,
+    statement: &'static str,
+) -> sqlx::Transaction<'static, sqlx::Postgres> {
     let mut gate = pool.begin().await.unwrap();
-    sqlx::query(&format!("LOCK TABLE {relation} IN ACCESS EXCLUSIVE MODE"))
-        .execute(&mut *gate)
-        .await
-        .unwrap();
+    sqlx::query(statement).execute(&mut *gate).await.unwrap();
     gate
 }
 
@@ -115,8 +115,8 @@ async fn plain_enqueue_reads_default_after_rows_and_census_after_insert_pg() {
     .execute(&pool)
     .await
     .unwrap();
-    let agents_gate = lock_table(&pool, "agents").await;
-    let outbox_gate = lock_table(&pool, "message_outbox").await;
+    let agents_gate = lock_table(&pool, "LOCK TABLE agents IN ACCESS EXCLUSIVE MODE").await;
+    let outbox_gate = lock_table(&pool, "LOCK TABLE message_outbox IN ACCESS EXCLUSIVE MODE").await;
     let producer_pool = pool.clone();
     let producer = tokio::spawn(async move {
         let mut tx = producer_pool.begin().await.unwrap();

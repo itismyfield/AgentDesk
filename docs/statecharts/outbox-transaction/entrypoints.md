@@ -26,12 +26,12 @@ V=source known-agent 검증; D=eligible display의 provider SQL와 행별 live d
 |`src/services/message_outbox.rs:386` exact/origin|:384|V :371→cancel :373→D :377(pool acquire, tx 전)→begin :384→INSERT→새 행 C :413→commit :416|headless 및 generic exact DTO, exact key·원문 session/nonce|
 |`src/services/message_outbox.rs:569` TTL-on-tx|외부 tx 또는 :480|pool V :438→duplicate :442→cancel :468→begin; core V :551→expired-key UPDATE :565→D :567→INSERT→새 행 C :600→commit :490|generic DTO/TTL/attachment/origin|
 |`src/services/message_outbox.rs:668` held stage|:663|V :648(tx 전); key release :664→D :666(tx 안)→INSERT held→새 행 C :693→충돌 기존 id 조회 :699→commit :709|legacy circuit 또는 generic stage|
-|`src/services/message_outbox.rs:860` plain/completion|외부 tx; 아래 완료 폐쇄 포함|V :848→D :852→INSERT→C :877→savepoint store :878; 모두 같은 tx. wrapper session_notice.rs:182에서 explicit_completion=true|일반 plain producer / 자동큐 system 완료|
+|`src/services/message_outbox.rs:860` plain/completion|외부 tx; 아래 완료 폐쇄 포함|V :848→D :852→INSERT→C :877→savepoint store :878; 모두 같은 tx. wrapper `enqueue_session_notice_pg_on_tx`에서 explicit_completion=true. S14a 뒤 같은 순서의 조립은 `src/services/message_outbox/plain.rs`(`enqueue_on_tx`), SQL은 `src/db/message_outbox/notice.rs`·`src/db/message_outbox/census.rs`|일반 plain producer / 자동큐 system 완료|
 |`src/services/message_outbox.rs:930` lifecycle|:913|V :889→중복조회 :893(tx 전); key release :914→D :915(정규화한 reason/session DTO)→INSERT→새 행 C :951→commit :954|lifecycle 고정 source|
 |`src/db/replay_disposition/hold_notice/outbox.rs:22` replay hold|write/hold_notice.rs:21 또는 :128|V :17 tx 안; session만 :19 정규화; D/C 없음. 영구 dedupe와 payload 동일성 조건 :28 유지|replay lifecycle 상수 DTO, routing bot/session|
 |`src/services/message_outbox_circuit_authority.rs:317` stamped held|:299|V :281(tx 전)→channel/owner/authority fence :300~307→expired-held delete :309→INSERT→commit :346. D/C 없음|circuit producer stall_watchdog DTO|
 
-직접 source 검증 호출: message_outbox.rs **:242, :275, :371, :438, :551, :648, :812, :848, :889**, replay hold/outbox.rs **:17**, circuit_authority.rs **:281**, redrive **message_outbox_recovery.rs:67**. 마지막은 새 INSERT 없이 row 상태를 바꾸는 운영자 명령이다. validate_outbox_source 본체 :63→source_registry :197/:206와 direct-send gate send_gate.rs:447도 아래에 분리했다.
+직접 source 검증 호출: message_outbox.rs **:242, :275, :371, :438, :551, :648, :812, :848, :889**, replay hold_notice/outbox.rs **:17**, message_outbox_circuit_authority.rs **:281**, redrive **message_outbox_recovery.rs:67**. 마지막은 새 INSERT 없이 row 상태를 바꾸는 운영자 명령이다. validate_outbox_source 본체 :63→source_registry :197/:206와 direct-send gate send_gate.rs:447도 아래에 분리했다.
 
 ## Production 호출 행 전체
 
@@ -104,7 +104,7 @@ V=source known-agent 검증; D=eligible display의 provider SQL와 행별 live d
 |`src/services/message_outbox.rs:839` (`enqueue_outbox_pg_on_tx_with_attachment`)|`src/services/message_outbox.rs:835`|V/D/C는 선택 API의 아래 경로표를 따름(자체 선관측 없음)|상위 원문 DTO 전달; lifecycle wrapper만 lifecycle_notifier 고정|
 |`src/services/message_outbox.rs:848` (`enqueue_plain_on_tx`)|`src/services/message_outbox.rs:843`|V·D tx 안; C 새 INSERT 뒤 같은 tx|상위 원문 DTO 전달; lifecycle wrapper만 lifecycle_notifier 고정|
 |`src/services/message_outbox.rs:889` (`enqueue_lifecycle_notification_pg`)|pool tx 시작 message_outbox.rs:913|V tx 전; 경로에 따라 tx 안 V 재검증; D/C는 INSERT 표|상위 원문 DTO 전달; lifecycle wrapper만 lifecycle_notifier 고정|
-|`src/services/message_outbox/session_notice.rs:186` (`enqueue_session_notice_pg_on_tx`)|`src/services/message_outbox/session_notice.rs:183`|V/D/C는 선택 API의 아래 경로표를 따름(자체 선관측 없음)|자동큐 explicit-completion opt-in; 상위 raw DTO를 같은 tx plain helper로 전달|
+|`src/services/message_outbox/session_notice.rs` (`enqueue_session_notice_pg_on_tx`)|`src/services/message_outbox/plain.rs` (`enqueue_on_tx`)|V/D/C는 선택 API의 아래 경로표를 따름(자체 선관측 없음)|자동큐 explicit-completion opt-in; 상위 raw DTO를 같은 tx plain helper로 전달|
 |`src/services/message_outbox_circuit_authority.rs:281` (`stage_held`)|caller tx 없음; pool API의 tx 시작은 아래 INSERT 경로표|V/D/C는 선택 API의 아래 경로표를 따름(자체 선관측 없음)|상위 circuit 경보 producer DTO; 소유자/authority SQL fence 유지|
 |`src/services/message_outbox_recovery.rs:67` (`redrive_failed_rows`)|`src/services/message_outbox_recovery.rs:61`|tx 안 :61→:67; INSERT 없음|운영자 redrive 명령; 기존 DB row source를 tx 안에서 다시 검증|
 |`src/services/observability/turn_lifecycle.rs:410` (`emit_turn_lifecycle`)|caller tx 없음; pool API의 tx 시작은 아래 INSERT 경로표|V/D/C는 선택 API의 아래 경로표를 따름(자체 선관측 없음)|TurnEvent lifecycle 시스템; lifecycle_notifier|
@@ -233,7 +233,7 @@ tx 인수는 기존 tx를 그대로 전달한다. pool-owning 함수의 begin은
 
 |관측 지점|입력/관측 시점과 tx 관계|값/단락 평가|
 |---|---|---|
-|`source_registry.rs:206`→`settings/content.rs:493`|V 각 호출 시점(위 경로마다 전/안이 다름); raw source, 상위 producer/명령 입력|빈 문자열·padded는 exact=false로 live 읽기 없음. static_allowed여도 exact=true이면 known-agent를 계산. 등록 agent id의 정확한 대소문자 일치/부재|
+|`source_registry.rs` (`validate_send_source_for`)→`settings/content.rs:493`|V 각 호출 시점(위 경로마다 전/안이 다름); raw source, 상위 producer/명령 입력|빈 문자열·padded는 exact=false로 live 읽기 없음. static_allowed여도 exact=true이면 known-agent를 계산. 등록 agent id의 정확한 대소문자 일치/부재|
 |`discord/agentdesk_config.rs:601~603`, loader :120~121|설정 snapshot 관측; SQL connection과 무관|runtime config 존재하면 Some(true/false) 우선; Some(false)에서 org fallback하지 않음|
 |`settings/content.rs:497~500`→`discord/org_schema.rs:591~598`|runtime config None 뒤 org 경로 exists/load; SQL tx로 잠기지 않음|org map 포함/부재 또는 unavailable→false. 이 레인은 실제 파일/설정값을 열지 않음|
 |`message_outbox/session_notice.rs:78~99`|D: 같은 전달 connection으로 agents SELECT; exact만 pool acquire로 tx 전|raw bindings 0/1/복수; empty rows면 locator fallback :87; 존재하나 ambiguous/unknown인 row는 None이며 locator fallback하지 않음; 첫 실패에서 루프 중단|
@@ -265,7 +265,7 @@ tx 인수는 기존 tx를 그대로 전달한다. pool-owning 함수의 begin은
 |`src/services/discord/outbound/raw_output.rs:29`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/outbound/raw_output.rs:144`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/outbound/source_registry.rs:150`|관측 leaf/경로: 위 표 참조|
-|`src/services/discord/outbound/source_registry.rs:206`|관측 leaf/경로: 위 표 참조|
+|`src/services/discord/outbound/source_registry.rs` (`validate_send_source_for`)|관측 leaf/경로: 위 표 참조|
 |`src/services/discord/session_relay_sink.rs:294`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/settings/content.rs:493`|관측 leaf/경로: 위 표 참조|
 |`src/services/discord/settings/content.rs:494`|관측 leaf/경로: 위 표 참조|
@@ -369,14 +369,14 @@ tx 인수는 기존 tx를 그대로 전달한다. pool-owning 함수의 begin은
 |`src/services/cluster/intake_router_hook/owner_record/event_tests.rs:38`|extra-calls.git-grep.txt|`routing_event_real_outbox_history_and_failed_pointer_reuse_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/cluster/intake_router_hook/owner_record/event_tests.rs:262`|i7353-d1314-calls.txt|`general`|src/services/cluster/intake_router_hook/owner_record/event_tests.rs:261|
 |`src/services/cluster/intake_router_hook/owner_record/event_tests.rs:264`|dto.git-grep.txt|`general`|src/services/cluster/intake_router_hook/owner_record/event_tests.rs:261|
-|`src/services/discord/outbound/source_registry.rs:260`|extra-calls.git-grep.txt|`imessage_input_notice_is_authorized_and_classified_as_nonbody`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/services/discord/outbound/source_registry.rs:271`|extra-calls.git-grep.txt|`producer_contract_lists_every_loopback_source`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/services/discord/outbound/source_registry.rs:278`|extra-calls.git-grep.txt|`producer_contract_lists_every_loopback_source`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/services/discord/outbound/source_registry.rs:294`|extra-calls.git-grep.txt|`new_sources_are_loopback_only`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/services/discord/outbound/source_registry.rs:301`|extra-calls.git-grep.txt|`new_sources_are_loopback_only`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/services/discord/outbound/source_registry.rs:311`|extra-calls.git-grep.txt|`original_external_contract_and_fail_closed_variants_are_pinned`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/services/discord/outbound/source_registry.rs:313`|extra-calls.git-grep.txt|`original_external_contract_and_fail_closed_variants_are_pinned`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/services/discord/outbound/source_registry.rs:321`|extra-calls.git-grep.txt|`original_external_contract_and_fail_closed_variants_are_pinned`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/services/discord/outbound/source_registry.rs`|extra-calls.git-grep.txt|`imessage_input_notice_is_authorized_and_classified_as_nonbody`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/services/discord/outbound/source_registry.rs`|extra-calls.git-grep.txt|`producer_contract_lists_every_loopback_source`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/services/discord/outbound/source_registry.rs`|extra-calls.git-grep.txt|`producer_contract_lists_every_loopback_source`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/services/discord/outbound/source_registry.rs`|extra-calls.git-grep.txt|`new_sources_are_loopback_only`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/services/discord/outbound/source_registry.rs`|extra-calls.git-grep.txt|`new_sources_are_loopback_only`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/services/discord/outbound/source_registry.rs`|extra-calls.git-grep.txt|`original_external_contract_and_fail_closed_variants_are_pinned`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/services/discord/outbound/source_registry.rs`|extra-calls.git-grep.txt|`original_external_contract_and_fail_closed_variants_are_pinned`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/services/discord/outbound/source_registry.rs`|extra-calls.git-grep.txt|`original_external_contract_and_fail_closed_variants_are_pinned`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/relay_recovery_circuit_alert_producer.rs:274`|extra-calls.git-grep.txt|`activate_unknown_status_fails_safe_without_reopen_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs:133`|dto.git-grep.txt|`takeover`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs:141`|i7353-d1314-calls.txt|`takeover`|fixture가 pool API에 위임; fixture 자체 관측 없음|
