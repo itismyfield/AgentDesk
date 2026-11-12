@@ -587,6 +587,14 @@ if run_check contracts "Script checks input selection contract"; then
 "$PYTHON" -m unittest tests.test_script_check_inputs
 fi
 
+if run_check contracts "Statechart index drift"; then
+"$PYTHON" scripts/ci/statechart_index.py --check
+fi
+
+if run_check contracts "Statechart index generator tests"; then
+"$PYTHON" -m unittest tests.test_statechart_index
+fi
+
 if run_check contracts "Giant deadline warning reporter contract"; then
 # Verbose output lets the shard contract confirm every acceptance test ran unskipped.
 "$PYTHON" -m unittest -v tests.test_report_giant_deadlines
