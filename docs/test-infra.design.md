@@ -1,6 +1,8 @@
 # 사용자 결과를 확인하는 시험 기반 통합 설계
 
 설계 기준: `4e0db0cccd59169a09f25fe162d8cc1b2755e96e` (2026-11-12).
+개정: **r2: 리뷰 CLEAN P2 11 이관·새 방향 단일 호스트 flock 임대·root credential**.
+설계 리뷰는 CLEAN으로 종료됐다. 아래 P2 계약은 각 구현 조각의 RED·수용 시험으로 이관하며 설계 재리뷰 라운드를 열지 않는다.
 대상: [#8124](https://github.com/itismyfield/AgentDesk/issues/8124),
 [#8120](https://github.com/itismyfield/AgentDesk/issues/8120),
 [#8123](https://github.com/itismyfield/AgentDesk/issues/8123).
@@ -18,7 +20,9 @@
 
 ### 1.1 실행 계약과 격리 축
 
-레인에서 자기 worktree의 고정 HEAD를 빌드하고 띄우는 신규 진입 명령은 다음과 같이 설계한다. **지금 실행하는 명령이 아니다.**
+시험 인스턴스는 **지정 시험 호스트 한 곳**에서만 실행한다(기본값 제안 mac-mini, §5 확인).
+다른 호스트 레인은 고정 HEAD를 `refs/review/*`로 push하고, 시험 호스트가 해당 SHA를 자기 worktree로 checkout해 빌드·실행한다.
+미커밋 변경·다른 호스트의 기존 바이너리는 시험하지 않는다. 시험 호스트에서 쓰는 신규 진입 명령은 다음과 같다. **지금 실행하는 명령이 아니다.**
 
 ```sh
 scripts/dev-instance.sh up "$PWD" --lane g8120 --build --profile tui-live
@@ -36,16 +40,22 @@ scripts/dev-instance.sh up "$PWD" --lane g8120 --build --profile tui-live
 | HTTP·self API | 프로필에서 loopback 전용 시험 포트 풀(초안 18791–18806)을 배정, `server.port`에 명시; self API도 같은 값 | 기본 release 포트·운영 주소·이미 점유한 포트, 실제 health의 instance/head 불일치 |
 | runtime·파일 | `~/.adk/dev/instances/<instance-id>/` 안의 config/runtime/data/logs/outputs/policies/workspaces; `AGENTDESK_ROOT_DIR`와 명시 config를 함께 지정 | release subtree, 외부로 나가는 symlink·절대경로, 누락 config의 fallback |
 | PostgreSQL | 인스턴스 전용 local cluster·소켓 디렉터리·DB·role; 초안 loopback 25432–25447. 운영 cluster를 공유하지 않음 | 15432·5432·운영 DSN, 상속 `DATABASE_URL`·`PG*`, 소유 receipt 없는 cluster. DB 미기동을 SQLite/메모리 성공으로 대체 금지 |
-| Discord | 테스트 Claude 수신 봇·Codex 수신 봇·Driver 세 앱의 고정 ID와 전용 채널 allowlist | 다른 앱 ID, 같은 token의 수신/driver 겸용, 시험 영역 밖 View/Send 권한 |
+| Discord | 테스트 Claude 수신 봇·Codex 수신 봇·Driver 세 앱의 고정 ID와 전용 채널 allowlist; root credential 파일 공급 | 다른 앱 ID, 같은 token의 수신/driver 겸용, 시험 영역 밖 View/Send 권한, token env 상속 |
 | tmux | `TMUX`·`TMUX_PANE` 제거, 전용 `TMUX_TMPDIR` 아래 실제 socket 선택; 신규 instance prefix를 세션 이름 생성·탐색에 함께 적용 | 기본 socket·`AgentDesk-*` 기존 세션 탐색/채택/키 송신·전역 kill |
-| Herdr | 시험 전용 daemon·endpoint·workspace 및 tab/pane namespace; `legacy_dedicated` 모드의 socket/home/session·local execution node를 명시 | 사용자 endpoint·기본 endpoint로 fallback, 기존 사용자 workspace 채택 |
+| Herdr | wrapper가 직접 띄워 receipt에 기록한 daemon·endpoint·workspace; `legacy_dedicated` 모드의 socket/home/session·local execution node를 명시 | user_default/autostart·기본 endpoint fallback, 기존 사용자 workspace 채택, receipt 없는 daemon |
 | HOME·provider | 자식용 HOME/TMPDIR/XDG_CONFIG_HOME, `CLAUDE_CONFIG_DIR`·`CODEX_HOME` 및 provider 출력·rollout 경로를 instance에 귀속 | 실제 HOME의 설정/skills/MCP/rollout을 쓰거나 운영 세션을 발견·재부착 |
+| 기능 프로필(P2-1) | 비밀이 아닌 기능 플래그를 **키 이름 단위 allowlist**로 시험 프로필에 명시; 채널 ID는 시험 ID로 치환. receipt에 실제 적용값 기록 | 운영 env 파일 복사·임의 ADK_* wildcard 상속, 플래그 누락/게이트 off를 제품 결함 RED로 집계 |
+| launchd·CLI API | 미등록 `com.agentdesk.test.<id>` label·고유 release-tmux 이름, `AGENTDESK_API_URL`/`ADK_API_URL` 모두 시험 API, PATH 첫 항목은 레인 바이너리 | release label/default API, doctor/restart의 launchd·tmux fallback |
+| 공유 인증·자원 | Discord token·agent-op 자격·`MEMENTO_ACCESS_KEY`는 자식 env에서 제거. 독립 provider 인증 및 keychain 경계 확인; build/provider는 nice 또는 taskpolicy -b와 headroom 적용 | 공유 Memento 자동 연결, 확인되지 않은 keychain 로그인/로그아웃, 자원 예산 없는 실행 |
 | 실행 노드·외부 연결 | 시험 DB의 local node만 seed. 원격 node·peer bootstrap·루틴·캠페인 worker·connector는 기본 off | 운영 cluster/remote host/API·공유 MCP에 쓰기. 원격 배치를 확인하려면 독립 시험 노드 프로필을 별도 승인·구현 |
 
 프로필과 receipt는 비밀을 포함하지 않는다. receipt에는 instance ID, canonical root, worktree/head,
 binary hash, API/PG port, PG data dir/role, bots/channel IDs, tmux socket/prefix,
 Herdr endpoint/workspace, child PID·시작 identity를 기록한다.
-`env -i`에 준하는 allowlist로 자식 환경을 만들고 필요한 PATH·locale·시험 HOME·인증만 주입한다.
+`env -i`에 준하는 allowlist로 PATH·locale·시험 HOME·API/label·독립 provider 인증·**명시 기능 프로필**을 만든다.
+`ADK_BUSY_INJECT_DISCORD_CHANNELS`는 시험 채널 allowlist로 선언한다. preferred node/capacity_aware와 tui_o 관련 기능도 시나리오가 요구하는 상태를 명시한다.
+운영 파일은 읽지 않고 코드의 키·기본값과 비밀 없는 시험 선언을 대조한다. 기타 운영 ADK_* 키 보존은 자동 복사가 아니라 프로필 항목 추가로 수행한다.
+적용 플래그·host·실행 노드의 precondition witness가 없으면 `UNEVALUABLE(precondition)`이며 회귀 RED가 아니다.
 provider 인증은 독립 config home에 사전 준비하며 운영 credential 파일을 복사하지 않는다.
 계정이 같으면 사용량은 공유되므로 §2 예산으로 제어한다. 인증 준비 안 됨은 `BLOCKED_AUTH`이지 skip/PASS가 아니다.
 
@@ -60,15 +70,32 @@ provider 인증은 독립 config home에 사전 준비하며 운영 credential �
 | 파일 경로 | `src/config.rs:2378`의 절대경로는 root 재귀속 없이 그대로 사용 | data·prompt·workspace·policy·routine·o_store·provider output 경로 전수표를 만들고 생성/열기 경계에 동일 root 검사 |
 | API | `src/config.rs:164`의 `server.port`; `src/cli/dcserver.rs:1147`, `:1183`의 HTTP/self API | endpoint를 receipt에서만 공급하고 health에서 실제 bound port·instance·head를 read-back |
 | DB | `src/config.rs:707`의 database 설정; `src/db/postgres.rs:190`에서 `DATABASE_URL`이 config보다 우선 | DB 접속 전에 test manifest endpoint/DB/user와 실제 connect options 일치. 독립 PG 권한으로 운영 DB 연결 자체가 불가능해야 함 |
-| bot token | `src/services/discord/agentdesk_config.rs:141`은 inline/credential fallback; `src/cli/run.rs:148`은 단일 `AGENTDESK_TOKEN` 경로 | config 다중 봇용 신규 `token_env`를 구현. test mode는 inline/credential fallback 금지, missing env 즉시 실패. 단일 CLI token은 상속 제거 |
+| bot token | `src/services/discord/agentdesk_config.rs:141`은 inline/credential fallback; `src/credential.rs:46`은 runtime root 기준; `src/runtime_layout/paths.rs:11`은 `<bot>_bot_token` 경로 | 신규 token_env를 만들지 않음. root credential만 허용, inline/단일 AGENTDESK_TOKEN 상속 금지. canonical ancestor·파일/권한은 별도 검증 |
 | tmux | `src/domain/provider/naming.rs:6`의 고정 `AgentDesk` prefix; `src/services/platform/tmux.rs:30`은 `-u`만 지정 | 공통 command 생성과 raw tmux 진입점 전수 확인. socket·prefix를 launch/scan/attach/cancel/clear/recovery 모두에 전달 |
 | Herdr | `src/services/herdr_launch.rs:56`, `src/config/session_hosts.rs:158`은 host 선택 시 exact channel 조회 | 시험 endpoint 설정과 실제 session host가 일치. 기본 endpoint는 test mode에서 오류 |
 | provider 설정 sync | `src/bootstrap.rs:43`, `src/lib.rs:267`의 일반 RunServer initialize는 MCP sync 수행 | 명시 `dcserver` 경로는 이 initialize를 통과하지 않는 현재 동작 유지. 이를 무조건 발생하는 dcserver 부작용으로 오인하지 않음. HOME·provider home 격리는 별도로 필요 |
 | HOME·host 탐색 | `src/services/provider_auth_profile.rs:189`, `:485`의 profile home; `src/services/codex/tui_session_launch.rs:149`의 HOME fallback; `src/services/cluster/session_discovery.rs:707`의 tmux 스캔 | test HOME 아래 named profile만 허용. 시험 Herdr home은 `src/services/session_host/herdr/managed_config/path.rs:47`의 개인 경로 보호와 충돌하지 않는 형제 경로로 배치 |
 | store·Herdr default | `src/services/tui_o/store/mod.rs:182`의 root/o_store; `src/config/session_hosts/user_default.rs:31`의 기본 socket | root와 HOME을 모두 강제. 시험 프로필에서 user_default 빈 endpoint 금지 |
+| launchd·doctor | `src/cli/dcserver.rs:15`, `:255`, `:681`, `:734`의 release label/restart fallback; `src/cli/doctor/orchestrator.rs:1712`의 fix restart | 미등록 test label과 고유 `AGENTDESK_RELEASE_TMUX_SESSION` 필수. test startup에서 release/누락 label 거부, 직접 doctor/restart fallback 거부. 후계 dcserver도 supervisor의 lease FD를 받아야 함 |
+| CLI 기본 API | `src/cli/monitoring.rs:3`, `:32`는 기본8791; `src/cli/client.rs:16`은 env/root 사용 | dcserver·provider 자식 모두 두 API env를 시험 주소로 명시; monitoring 등록도 시험 endpoint만 사용 |
+| Memento | `src/config.rs:2323`, `:2354`는 env key만으로 공유 MCP 자동 삽입 가능 | provisioner 외 자식에서 MEMENTO_ACCESS_KEY 제거; test config의 mcp_servers.memento는 startup 거부 |
+| Herdr daemon | `src/services/session_host/herdr/launch_host.rs:641`은 UserDefault에서 autostart; `src/services/session_host/herdr/autostart/spawn.rs:244`는 env_clear/setsid | legacy_dedicated 유지, test mode autostart 금지. wrapper receipt daemon만 사용·정리. env_clear/setsid를 FD close 증거로 쓰지 않음 |
+| keychain·자원 | provider HOME 격리만으로 macOS keychain 항목 분리는 코드에서 입증되지 않음 | 준비 단계에서 값 없이 항목 이름/소유 범위가 독립인지 확인 전 BLOCKED_AUTH. 운영 항목을 이번 조사에서 열지 않음; 동일 호스트 자원 경합은 nice/taskpolicy·headroom·§2 한도로 제한 |
 | 하네스 재시작·CLI | `scripts/e2e/tui_relay/restart_guard.py:10`, `:19`는 미확인 포트를 release로 선택; `scripts/e2e/tui_relay/herdr.py:27`, `:69`, `:247`은 기본 CLI 경로/endpoint 사용 가능 | 신규 instance adapter는 restart target을 receipt PID로만 결정하고 endpoint·lane absolute binary를 전달. 미지정은 시작 전 오류. 기존 release/dev 분기를 시험 인스턴스에 사용하지 않음 |
 | 기존 dcserver 중복 정리 | `src/cli/dcserver.rs:291`은 root marker substring 판정, `:454`는 종료 경로; `src/cli/dcserver/replay_recovery.rs:28`은 root별 lock | 신규 test startup은 고정 길이 UUID root와 정확한 instance identity 검증을 먼저 적용. substring을 test cleanup 권한으로 쓰지 않음. 기존 일반 경로의 결함 범위는 넓히지 않고 별도 후속으로 남김 |
 | 실행·복원·정리 | 기존 session 이름/host 경로는 여러 소비자가 사용 | up뿐 아니라 서버 재시작·startup recovery·provider respawn·cancel/stop/clear/down에 같은 manifest가 전달되는지 전수표·음성 시험으로 확인 |
+
+호스트 전체 프로세스 스캔도 I2 격리 전수표에 포함한다(P2-4). `ps -ax*`·`pgrep` 호출 전체를 조사하고 **root·socket·receipt 밖 PID를 읽거나 종료하지 않는 test 경계**를 적용한다.
+
+| 진입점 | 현재 선택 방식·남은 반례 | test mode 계약 |
+| --- | --- | --- |
+| `src/cli/dcserver.rs:305`, `:272`, `:291`, `:454` | pgrep 후보·ps eww·root substring으로 중복 종료 | 전역 duplicate cleanup을 비활성화하고 supervisor/lease 경로만 사용 |
+| `src/services/discord/tmux_reaper.rs:700`, `:752`, `:776`, `:728` | 전체 ps-axo·ppid1·wrapper argv로 kill, root 검사 없음 | test orphan reaper off. release output-file의 고아 줄을 선택하지 않는 음성 시험; receipt reap만 허용 |
+| `src/services/session_backend.rs:445` | 전체 PID/PPID에서 wrapper 자식 선택 | receipt wrapper baseline 선확인 후 범위가 제한된 조회 |
+| `src/services/discord/turn_bridge/tmux_runtime/process_table.rs:224` | 전체 command 조회 후 pane descendant 선택 | 시험 socket pane identity 선확인, receipt 자식 PID만 조회·선택 |
+| `src/services/process.rs:611` → `src/services/provider_cli/session_guard.rs:190` | 전체 ps aux에서 존재 확인 | receipt PID 대상 조회로 대체. 개별 PID의 args/etime/pgid 조회도 같은 소유 경계 적용 |
+
+main의 전역 스캔/정리 동작은 이 조각에서 확대하지 않는다. test 진입점의 차단·범위 제한만 수용하며, 일반 경로의 기존 결함은 후속으로 남긴다.
 
 **운영에 닿지 않는 증명은 아직 얻지 않았다.** 구현 수용 때에는 (1) wrapper가 만든 resolved manifest,
 (2) child가 검증한 effective targets, (3) 독립 PG role/cluster·socket·Herdr 소유권,
@@ -97,10 +124,15 @@ Driver ID만 수신 봇의 `allowed_bot_ids`에 넣는다(`intake_gate.rs:352`).
 
 사용자에게 한 번에 준비를 요청할 것은 세 앱 생성·기존 길드 초대·아래 권한 적용·1Password 항목 추가다.
 금고는 `AgentDesk`, **항목 이름은 위 세 이름**, 필드는 `token`으로 제안한다(현재 존재 여부 미확인).
-비밀 참조만 있는 env mapping을 wrapper가 만들고 `agent-op run`으로 주입한다.
-수신 env 이름은 `ADK_TEST_DISCORD_CLAUDE_TOKEN`, `ADK_TEST_DISCORD_CODEX_TOKEN`,
-Driver는 `ADK_TEST_DISCORD_DRIVER_TOKEN`으로 설계한다. token 값/항목 내용은 문서·manifest·argv·로그에 남기지 않는다.
-빈 값·다른 앱 ID는 접속 전/identity 조회에서 오류다. token을 출력하는 debug·shell xtrace는 허용하지 않는다.
+`agent-op` provisioner가 token을 stdin/pipe로 받아 fresh instance root의 `credential/`에만 쓴다.
+설정 bot 키 `claude`, `codex`의 정확한 파일명은 `claude_bot_token`, `codex_bot_token`; Driver는 별도 `driver_bot_token`을 직접 읽고 daemon bot 목록에 넣지 않는다.
+기존 `write_secret_file`(`src/utils/secret_file.rs:41`, `:96`)로 디렉터리0700·파일0600을 만든다.
+root guard는 env PathBuf를 반환할 뿐 ancestor canonical 검증은 하지 않는다. wrapper가 root/ancestor/leaf symlink·외부 경로를 검사하고 unknown legacy credential subtree는 거부한다.
+기존 reader의 leaf 검사(`src/utils/secret_file.rs:124`)·legacy migration(`src/runtime_layout/mod.rs:357`)만으로 이 검증을 대신하지 않는다.
+dcserver·provider·tmux/Herdr·Driver에는 Discord token env·agent-op 자격을 전달하지 않는다. token 값/항목 내용은 문서·manifest·argv·로그에 남기지 않는다.
+빈 파일·다른 앱 ID는 접속 전/identity 조회에서 오류다. `down`은 제품/Driver 종료 뒤 credential 파일을 제거한다.
+시험 자식 env와 ps env/argv에 sentinel token이 없는지 검사하며, env 정리 제거 뮤턴트는 RED여야 한다.
+root credential은 같은 UID의 임의 파일읽기를 막는 sandbox가 아니라 **환경변수 전파 방지**다. debug·shell xtrace는 허용하지 않는다.
 
 기존 `@everyone`·운영 role의 길드 권한을 변경하는 방식은 쓰지 않는다.
 테스트 앱 전용 role/member overwrite로 non-test category/channel의 effective View/Send를 막고 테스트 category에서만 허용한다.
@@ -117,16 +149,31 @@ Driver는 `ADK_TEST_DISCORD_DRIVER_TOKEN`으로 설계한다. token 값/항목 �
 현재 `src/services/discord/runtime_bootstrap/framework_setup.rs:35`는 guild 등록을 호출한다.
 별도 앱의 command namespace인지 SDK 호출 경로와 실제 시험 앱의 command read-back으로 확인한다.
 운영 command 목록을 변경하거나 운영 API로 확인하지 않는다.
+앱의 guild 명령은 운영 채널에도 목록으로 보일 수 있다. 준비 때 Discord Integrations에서 **시험 앱 명령을 시험 category로 제한**한다.
+`src/services/discord/runtime_bootstrap/gateway_runtime/command_guard.rs:29`의 담당 채널 외 ephemeral 거절도 유지하고, 비허용 채널을 모사한 음성 시험에서 거절·시험 PG 변화0을 확인한다(운영 채널에 시험 명령을 보내지 않음).
 초기 프로필은 public thread만 포함하며 DM·private thread는 기능 지도에 gap으로 남긴다.
 
 세 앱만으로 기존 하네스를 그대로 쓸 수는 없다. `src/server/routes/discord.rs:189`의 message GET은 announce credential을 읽고,
 `scripts/e2e/tui_relay/discord.py:125`의 control 전송은 notify 봇을 지정한다.
-I3에 **Driver token으로 실제 Discord REST 입력/조회/thread 생성**을 하는 instance adapter를 넣고,
+I3b에 **Driver credential로 실제 Discord REST 입력/조회/thread 생성**을 하는 instance adapter를 넣고,
 receipt의 세 앱 ID를 기존 author override(`scripts/e2e/tui_relay/assertions.py:27`)로 전달한다.
+세 ID는 필수다. 누락·운영 기본 bot ID·receipt 불일치·중복이면 **첫 전송 전 `UNEVALUABLE(identity)`·전송0건**으로 닫는다(P2-6).
 사용자 입력 경로의 회귀는 headless deliver API로 대체하지 않는다.
 다만 Driver 입력은 실제 Gateway를 지나는 **allowed-bot 공통 경로** 증거다.
-인간 인증·취소 시 입력 보존은 bot 분기와 다르다(`src/services/discord/router/intake_gate.rs:514`, `:526`, `:839`).
-claim에 `input_source: allowed_bot`을 붙이고, 인간 전용 동작은 별도 gap으로 남긴다.
+claim에 `input_source: allowed_bot`을 붙이고 아래 분기를 명시한다(P2-7).
+
+| 인간과 다른 지점 | 코드 근거 | 시험·coverage 계약 |
+| --- | --- | --- |
+| bot identity·slash 분류 | `src/services/discord/router/intake_gate.rs:314`, `:352`, `:368`; `src/services/discord/router/intake_gate/gate.rs:84` | self 무시·허용 bot ID 검사, 등록 slash 텍스트 제외는 인간만. Driver의 command 결과를 인간 slash UX로 승격 금지 |
+| 텍스트 provenance admission | `src/services/discord/dispatch_policy.rs:126`, `:255`; `src/services/discord/router/intake_gate.rs:496` | 평문 Driver 입력은 통과한다고 가정하지 않음. 현재 허용되는 DISPATCH envelope로 보내고 실제 admission witness 확인 |
+| auth·취소 보존 | `src/services/discord/router/intake_gate.rs:514`, `:526` | auth bypass·preserve_on_cancel=false. 인간 인증/입력 보존 coverage0 |
+| 봇 전용 dedup | `src/services/discord/router/intake_gate.rs:767` | 30초 dedup이 있는 입력임을 기록. 인간 dedup과 동일하다고 주장하지 않음 |
+| 연속 입력 병합 | `src/services/discord/router/intake_gate.rs:832`; `src/services/discord/router/intake_gate/gate.rs:161` | bot은 병합하지 않음. 단일 입력 또는 명시한 병합 창 밖 간격으로 공통 경로 시험; 인간 병합 coverage0 |
+| queued ack 카드 | `src/services/discord/router/intake_gate.rs:1036` | 인간만 카드 생성. Driver reaction 증거로 인간 ack 카드 칸을 채우지 않음 |
+| dispatch thread guard | `src/services/discord/router/intake_gate.rs:839` | allowed bot의 parent 입력만 별도 큐 경로. 인간 parent/thread routing coverage로 승격 금지 |
+| source generation·노드 적격성 | `src/services/discord/router/intake_queue_transaction.rs:124`; `src/services/cluster/intake_router_hook/placement.rs:79`; `src/services/cluster/intake_worker_capabilities.rs:220` | 인간 user_instruction과 bot/automation source가 다르고 preserve_on_cancel이 노드 적격성까지 전달됨. 인간 source/배치 coverage0 |
+
+생성기는 input_source와 필수 단언의 source applicability를 대조한다. 인간 전용 병합/ack/auth/보존 및 인간 thread-routing 계약은 allowed_bot claim으로 채울 수 없다.
 Driver가 allowed_bot_ids에 있으므로 SETUP/TEARDOWN marker를 보내면 새 턴을 깨울 수 있다.
 bookkeeping은 local run ID·새 message snowflake·관측 창에만 기록한다. 실패 알림도 provider가 보는 parent/thread로 보내지 않는다.
 
@@ -134,23 +181,37 @@ bookkeeping은 local run ID·새 message snowflake·관측 창에만 기록한�
 
 | 안 | 흐름 | 비용 | 위험·평가 |
 | --- | --- | --- | --- |
-| **A. 전용 parent 2개(권고)** | Claude/Codex parent 아래 임시 public thread를 만든다. 같은 parent의 host를 시험 프로필로 tmux/herdr 번갈아 지정 | 채널 두 개·최초 권한 설정, 전용 봇 세 앱 | 운영 스모크와 물리적으로 분리. 운영 봇 View deny를 처음부터 증명하기 쉽다. host 전환 때 child/session 잔여가 없어야 함 |
+| **A. 전용 parent 2개(채택 기본값)** | Claude/Codex parent 아래 임시 public thread를 만든다. 같은 parent의 host를 시험 프로필로 tmux/herdr 번갈아 지정 | 채널 두 개·최초 권한 설정, 전용 봇 세 앱 | 운영 스모크와 물리적으로 분리. 운영 봇 View deny를 처음부터 증명하기 쉽다. host 전환 때 child/session 잔여가 없어야 함 |
 | B. 기존 e2e 채널 8개 임대 | 실제 channel ID 기준 중앙 임대를 운영 스모크·수동 E2E·테스트 인스턴스 모두가 획득 | 새 parent 없음. 모든 기존 진입점에 임대 적용, provider/host별 배치 점검 필요 | 운영 봇도 보고 있으므로 token 세트 임대만으로 중복 수신을 막을 수 없다. 임대 동안 **운영 봇 View 권한까지** 배타 전환해야 하며 실패 시 양쪽 수신. 운영 권한 조작이 생겨 현재 목적에 부적합 |
 
 같은 테스트 봇 세트로 여러 dcserver를 띄워 채널 필터만 나누는 것은 금지한다.
-권고 동시성은 **전체 호스트를 통틀어 테스트 봇 세트 1개 = 인스턴스 1개**, 호스트당 1개, provider 활성 턴 1개다.
-CI·레인·주기 실행이 동일 임대에 들어간다. 추가 동시성은 별도 봇 세트와 전용 채널 세트를 준비한 뒤 확대한다.
+동시성은 **지정 시험 호스트의 봇 세트1 = 인스턴스1**, provider 활성 턴1이다. CI·레인·주기 실행은 시험 호스트의 같은 큐/lock을 사용한다.
+다른 호스트는 ref 제출만 하며 시험 control 디렉터리에 접근하는 SSH lease helper는 만들지 않는다.
+전체 동시성 확대는 별도 봇/채널 세트와 자원 예산이 준비된 뒤의 별도 선택이다.
 
-중앙 임대 저장소는 운영 runtime 밖의 지정 시험 호스트 `~/.adk/dev/control/` 하나로 둔다.
-원자 `mkdir`/exclusive-create로 bot-set + channel-set을 한 번에 획득하고, local host/instance 예약도 같은 순서로 잡는다.
-다른 호스트의 레인은 제한된 SSH helper로 **이 시험 디렉터리만** 접근한다.
-TTL 만료만으로 임대를 빼앗지 않는다. 보유 host의 정확한 receipt PID·시작 identity가 종료됐음을 확인할 수 없으면 `BUSY/OWNER_UNKNOWN`으로 둔다.
-대기 job은 실행 0건을 PASS로 쓰지 않고 `DEFERRED_BUSY`와 다음 예약을 남긴다.
+임대는 `~/.adk/dev/control/<bot-set>.lease` **고정 파일 inode의 커널 flock**이다.
+supervisor는 Python 표준 `fcntl.flock(LOCK_EX|LOCK_NB)`을 쓰고, dcserver는 기존 libc 사용 선례
+(`Cargo.toml:109`, `src/cli/dcserver/replay_recovery.rs:28`)를 따라 상속 FD를 검증·보유한다. shell flock 설치·새 분산 잠금은 필요 없다.
+supervisor가 FD를 보유한 채 child **exec로 dcserver에 동일 open-file-description FD를 상속**한다.
+wrapper/owner 기록 전후 crash에도 살아 있는 dcserver가 lock을 유지하므로 새 인스턴스는 `DEFERRED_BUSY`다.
+owner JSON은 진단 receipt이며 배타권 정본은 커널 lock이다. 파일이 남고 holder가 없으면 재획득할 수 있다.
+r1의 mkdir owner 게시·owner 이전·원격 생존 확인·TTL·OWNER_UNKNOWN 교착 설계는 이 모델로 대체한다(P2-5).
 
-`down`은 receipt에 든 자기 dcserver·provider·PG·Herdr만 순서대로 종료하고, 종료 확인 뒤 임대를 해제한다.
-고아 회수는 dry-run 목록→소유 identity 검증→자기 자식의 종료 확인→자기 root 보관/삭제 순서다.
-이름 패턴 kill·공유 tmux server 종료·다른 lane 디렉터리 삭제는 추가하지 않는다.
-죽은 owner가 입증된 고아만 자동 회수하고, host 불통은 알림과 보류다. 이 새 수명/임대 계약은 §4 조각 0의 모델·독립 리뷰 대상이다.
+FD 상속은 supervisor→dcserver exec에만 허용한다. dcserver는 startup에서 root/instance·FD의 device/inode·lease witness를 확인하고,
+**provider/daemon을 띄우기 전에 FD_CLOEXEC를 다시 설정**한다. 자기 FD는 계속 보유하며 token처럼 provider env에 넣지 않는다.
+`env_clear`/`setsid` 또는 daemon 동작만으로 FD가 닫힌다고 가정하지 않는다.
+상속 lock의 해제는 **close-only**다. 다른 보유자가 살아 있을 때 명시적 LOCK_UN을 호출하지 않고 lease 파일을 unlink/rename-replace하지 않는다.
+root별 기존 dcserver singleton은 별도로 유지한다. 후계 dcserver도 supervisor 경유로 같은 lease FD를 받아야 Gateway에 붙을 수 있다.
+supervisor 자체도 동시에 한 dcserver만 spawn한다. 후계는 이전 PID·Gateway 종료를 확인한 뒤 시작하며 같은 FD를 두 live dcserver에 복제 전달하지 않는다.
+test mode의 직접 launchd/tmux restart fallback은 금지한다.
+
+`reap`는 고정 lease 파일의 device/inode를 지정한 `lsof`로 **정확한 FD 보유 후보**를 식별한다.
+lsof 결과만으로 kill하거나 잠금 해제를 판정하지 않는다. 배타권은 비차단 flock 재획득, 정리 권한은 receipt의 PID·시작 baseline·root·socket/endpoint 일치로 판정한다.
+`src/services/process.rs:184`의 baseline 없는 matches=true 경로를 쓰지 않고 baseline 필수 검사/tri-state probe를 사용한다.
+probe 오류·receipt 불일치는 HOLD이며 임의 PID 종료 권한을 추가하지 않는다.
+`down`/`reap`는 자기 dcserver·provider·PG·tmux socket·Herdr receipt 자원만 종료하고 credential을 제거한다.
+daemon이 lease FD를 보유한다고 기대하지 않으므로 lock 재획득 뒤 남은 receipt 자원을 정리하기 전에는 새 Gateway를 시작하지 않는다.
+이름 패턴 kill·공유 tmux server 종료·다른 lane 디렉터리 삭제는 없다. 수명/상속 crash 가정과 RED는 §4 조각0/I3a로 이관한다.
 
 ## 2. Discord E2E 상시화 — #8120
 
@@ -165,7 +226,7 @@ Herdr에서 E-1/E-35는 not-applicable이다(`scripts/deploy-release.sh:4514`, `
 
 | 시점·주기 초안 | 인스턴스·대상 | 제한·판정 |
 | --- | --- | --- |
-| 매 변경 머지 전 | candidate worktree 테스트 인스턴스. 변경 feature claim 및 네 회귀의 관련 host/provider 조합 | 아래 신규 단언의 실제 실행 1회 이상. 변경 영향과 무관한 전체 matrix 강제 없음 |
+| 머지 전 권고 증거 수집 | 시험 호스트가 candidate ref의 worktree를 빌드. 변경 feature claim 및 네 회귀의 관련 host/provider 조합 | 관련 실물1회와 증거 첨부를 권고. **새 머지 차단 게이트는 기본 off**이며 도입은 §5 사용자 결정. E1 자체 수용의 live 증거 요구와 구분 |
 | 배포 직후 | 기존 운영 E-50/E-51 유지; 지원되는 경우 기존 E-1/E-35 | 현재 추가 시간 예산 300초(`deploy-release.sh:3959`) 유지. 운영 봇·채널의 설정을 이 작업에서 확대하지 않음 |
 | 새 main/배포 SHA 뒤 | 같은 SHA의 테스트 인스턴스, 회귀 핵심 묶음(반응·busy 주입·fresh thread·thread host/output) | 운영 스모크와 별개. stale candidate 결과를 현재 배포의 PASS로 재사용하지 않음 |
 | 6시간마다(실측 후 활성) | 테스트 인스턴스의 live 시나리오 회전 조각; E-1/2/3/5/15/16/20/22/23/50/51/52/54/60/62/64 및 신규 회귀 | 각 시나리오의 실제 지원 cell/host만 선택. 한 번에 20분·8 provider 턴 상한 초안 |
@@ -181,6 +242,16 @@ E-11은 두 provider 턴 동시 실행을 요구하므로 phase-1 활성 턴1 �
 동일 인스턴스·두 채널을 유지한 채 활성 턴2인 별도 예약 예외는 자원 실측과 사용자 선택 뒤에만 연다.
 
 ### 2.2 새 단언과 실제 관측
+
+모든 제품 단언 앞에 `environment_preconditions` witness를 둔다(P2-1).
+선언값과 실제 적용값을 분리하고 instance/head/boot incarnation·관측 시각·channel/provider/host를 붙인다.
+busy 주입은 `ADK_BUSY_INJECT_DISCORD_CHANNELS`의 해당 시험 채널 게이트 열림·실제 busy turn·host를 확인한다
+(`src/services/discord/router/intake_gate/busy_inject.rs:24`, `:41`, `:59`).
+fresh thread는 preferred node 지정·ready·v1 slot 광고 없음 및 capacity_aware 경로 진입을 함께 확인한다
+(`src/services/cluster/intake_router_hook/placement.rs:24`, `:96`, `src/services/cluster/execution_capacity.rs:48`, `:56`).
+thread→parent binding과 O/Legacy의 evaluated output receipt도 필수다. `AGENTDESK_E2E_FEATURES`의 운영자 선언은 runtime witness가 아니다.
+전제 없음/미관측은 `UNEVALUABLE(precondition)`·coverage0이며 제품 회귀 RED로 집계하지 않는다.
+플래그를 뺀 음성 실행과 witness 검사를 제거한 원인 뮤턴트가 이 분류를 검증해야 한다.
 
 신규 ID는 구현 착수 때 충돌 없는 번호를 정한다. 기존 E-63은 최종 순서/1회만 본다
 (`tests/e2e/tui_relay/scenarios/E-63-input-order-across-restart.yaml:17`, `:101`).
@@ -201,9 +272,20 @@ Claude에서 확인한 결함을 Codex에도 존재한다고 단정하지 않되
 주입 지연은 기존 첫 prompt→Discord relay body latency(`docs/e2e/multi-provider-e2e.md:482`)와 다른 지표다.
 같은 host monotonic clock의 receipt 차이를 주입 상한에 쓰고, Discord created_at→수신은 별도 외부 전달 지연으로 남긴다.
 
-반응 관측은 **독립 Driver의 실제 Discord Gateway observer**를 시험 채널에 한정해 추가한다.
+반응 관측 구현은 **기존 serenity를 쓰는 Rust 관측 전용 example 바이너리 + Python NDJSON 소비**로 확정한다(P2-9).
+신규 경로는 `tests/e2e/tui_relay/discord_observer.rs`, Cargo target은 `e2e-discord-observer`인 명시적 `[[example]]`(test=false/bench=false)다.
+기존 `Cargo.toml:47`의 serenity/client/gateway 및 tokio/serde_json을 재사용하며 Python websocket 구현·새 websocket 의존은 추가하지 않는다.
+시험 호스트 wrapper가 `cargo build --example e2e-discord-observer`로 만든 실행물의 경로·SHA를 receipt에 고정한다. E1 PLAN에서 실제 prod 분류/크기를 측정한다.
+Driver credential 파일로 인증하고, 시험 채널/앱 identity를 검증한 뒤 관측한다. 기본 실행/인자 누락은 live 연결하지 않는다.
+
 시험 시작 snapshot과 reaction add/remove 이벤트를 message ID·actor ID·Gateway session/sequence로 보존한다.
 sequence 연속성은 채널/reaction 필터 **전의 전체 Dispatch stream**에서 검사한다.
+**SDK seam 수용 조건:** 조사한 serenity0.12.5 공개 RawEventHandler는 Event만 주고 원시 `s`는 노출하지 않으며 callback은 별도 task로 dispatch된다.
+따라서 callback local counter를 Gateway sequence/수신 순서로 이름 붙이지 않는다.
+E1의 첫 계약은 SDK 수신 경계에서 원시 sequence·순서를 확보하는 seam을 입증하는 것이다.
+기존 공개 callback만으로 strict 이력을 구현할 수 없으면 해당 claim은 `BLOCKED_CAPABILITY`/`UNEVALUABLE(observer-sequence)`로 남기고,
+단순 snapshot/재연결 감지로 전체 이력 PASS를 대체하지 않는다. 필요한 SDK seam 수정·크기는 E1 PLAN에 명시하며 이 문서에서 무검증 API를 약속하지 않는다.
+녹화한 Dispatch stream의 gap/역순·재연결 주입은 반드시 UNEVALUABLE, 정상 stream은 actor별 이력으로 나오는 RED·뮤턴트 계약이다.
 REST snapshot의 `me`는 Driver 자신이므로 provider 증거로 쓰지 않는다. 새 메시지부터 provider user_id 이벤트를 잇거나 reaction-user 조회로 초기 actor를 확인한다.
 observer ready 이전 입력, 재연결 누락/sequence gap, REST 재동기화로 복구할 수 없는 중간 이력은 `UNEVALUABLE`이다.
 현재 제품 Gateway에는 reaction intent가 없다(`src/services/discord/runtime_bootstrap.rs:100`, `:685`).
@@ -256,7 +338,7 @@ usage를 얻을 수 없는 provider는 `unknown`으로 두고 턴·시간 상한
 ### 3.1 표와 정본
 
 수기 정본은 신규 `docs/user-feature-map.rows.yaml`, 시나리오 정본은 기존 YAML이다.
-신규 generator가 `docs/user-feature-map.md`와 machine-readable coverage JSON을 함께 만든다.
+신규 generator가 `docs/user-feature-map.md`와 `docs/generated/user-feature-coverage.json`을 함께 만든다.
 수기 문서의 '덮는 칸'을 따로 편집하지 않는다. source-of-truth 및 runbook에는 이 지도 링크만 추가한다.
 
 | 열 | 관리 주체·의미 |
@@ -287,24 +369,45 @@ feature_coverage:
       provider: claude
       surface: thread
       state: busy
-      qualifiers: {turn_origin: managed, output_path: tui_o}
-      assertion_ids: [busy-before-end, injection-latency, injection-reaction]
+      qualifiers: {turn_origin: managed, output_path: tui_o, input_source: allowed_bot}
+      assertion_ids: [busy_injected_before_turn_end, injection_latency_within, reaction_history_matches, surface_thread_observed, state_busy_observed]
 ```
 
-`assertion_ids`는 runner가 지원하며 실제 report에 개별 결과를 남기는 안정 ID를 참조한다.
+위 예시 operation은 E1의 **미구현 계약 예시**이므로 M1에서 claim으로 등록하지 않는다.
+M1의 assertion ID는 기존 runner의 **operation명**이다. `ASSERTION_OPTIONS`를 신규 순수 모듈
+`scripts/e2e/tui_relay/assertion_registry.py`로 옮겨 driver와 generator가 함께 import한다
+(`scripts/e2e/run_tui_relay.py:1073`, `:1093`). full driver import·AST scrape·표 복제는 하지 않는다.
+현재 assertion sibling은 requires_feature만 허용하므로 임의 invocation id를 YAML에 넣지 않는다(`run_tui_relay.py:1106`).
+개별 실행 occurrence ID/report join은 E1에서 구현한다. M1은 operation 참조 무결성과 선언 coverage만 제공한다.
 수기 row의 조합·qualifier별 `required_assertion_ids`가 필수 목록의 기계 판독 정본이다.
+아직 없는 필수 operation은 row의 `pending_assertions`에 issue/미구현 사유·input_source 범위를 함께 명시하고 gap으로 둔다. registry에 가짜 지원 operation을 올리지 않는다.
 claim은 그 목록을 모두 포함해야 coverage 한 칸으로 센다. 예를 들어 reaction 단언을 뺀 busy-input claim은 검사 실패다.
 generator는 feature unknown·중복 ID·잘못된 축·수기 applicable 밖 claim·없는 assertion·필수 단언 누락을 실패시킨다.
 `cells`의 무조건 Cartesian product나 wildcard로 thread/busy coverage를 부풀리지 않는다.
+P2-8의 네 검사는 다음과 같이 고정한다.
+
+1. claim host×provider가 **그 시나리오의 cells**에서 가능한 명시 조합이어야 한다. M1은 검증된 네 TUI cell 매핑만 사용하며 pipe/빈 orchestration cells는 임의 추론하지 않는다.
+2. `claim.assertion_ids ⊆ (해당 YAML assertions의 실제 action keys ∩ exported runner registry)`여야 한다. registry에만 있거나 YAML에만 있는 ID 모두 실패한다.
+3. thread/busy claim에는 `surface_thread_observed`/`state_busy_observed` witness를 자동 필수로 포함한다. 미구현 witness는 gap이며 metadata 선언만으로 통과시키지 않는다.
+4. `--base-ref` 대비 feature/applicable/required assertion 감축은 제거 대상 안정 key와 맞는 새 `removal_reason`이 없으면 `--check` 실패다. 옛 일반 사유를 다음 감축에 재사용하지 못하며 base ref 조회 실패도 실패다.
+
+human-only 필수 계약과 allowed_bot claim을 연결하면 coverage0이며, 잘못된 claim은 진단한다(P2-7).
 coverage 조건은 live class + 지원되는 실행 lane + 해당 claim의 필수 단언 연결이며,
 fixture/known-gap/retired는 별도 수치다. 선언 coverage는 실행 PASS와 구분한다.
 
 신규 `scripts/generate_user_feature_map.py --check`는 읽기/생성 결과를 비교해 drift가 있으면 실패한다.
-공식 write 모드만 생성물을 갱신한다. CI contracts와 prepush static 배선에서 이 검사를 반드시 선택한다.
-수기 행의 계약/적용 조합과 시나리오 claim이 어긋나면 문서 검사 실패다. 필수 feature·축을 빼서 빈 칸 수를 낮추는 수정도 리뷰 대상이다.
+공식 `--write` 모드만 생성물을 갱신한다. CI contracts와 prepush static 배선에서 이 검사를 반드시 선택한다.
+수기 행의 계약/적용 조합과 시나리오 claim이 어긋나면 문서 검사 실패다. feature·축·필수 단언 감축은 위 base-diff 사유 검사와 리뷰를 함께 거친다.
+CI 진입점은 `scripts/ci-script-checks.sh` contracts와 `scripts/ci/script_check_inputs.py:23`의 입력 선택이다.
+외부 prepush는 guards의 한 줄 Python audit/unittest만 추출하므로 contracts 등록만으로 static에 걸렸다고 하지 않는다.
+guards에 한 줄 `"$PYTHON" -m unittest tests.test_user_feature_map_static`를 등록하고, 이 시험이 실제 저장소 generator `--check --base-ref <base>`를 subprocess로 실행한다.
+contracts에는 본 검사와 RED 세트를 둔다. 입력 선택은 rows/생성물/scenario/registry/generator/tests를 포함하고 docs-only·선택 정보 부재에도 빠지지 않아야 한다.
+base는 CI의 `TEST_LANE_BASELINE_REF`/`GFP_BASE_SHA`로 명시 전달하고, 로컬 static은 검증 가능한 origin/main base를 사용한다. base 부재·조회 실패를 초기 지도0/PASS로 축약하지 않는다.
+base commit이 유효하나 rows가 아직 없는 **최초 도입**은 명시 bootstrap으로 처리한다. 이때도 §3.1 전체 기능 행이 존재하고 비어 있지 않아야 하며, commit 조회 오류와 구별한다.
+감축 사유는 제거된 feature/tuple/qualifier/assertion의 안정 key에 대응시켜 base의 옛 사유로 새 감축을 허용하지 않는다.
 생성 JSON은 schema_version·applicable·covered·missing·unsupported·by_feature와 source hash를 담는다.
 빈 칸 = 적용 tuple − 지원 live claim이며, 실행 증거의 freshness/head/instance는 별도 summary join이다.
-join key는 scenario×cell×claim tuple×qualifiers×assertion ID다. 같은 네 축의 managed/native·output path를 섞지 않는다.
+E1 실행 join key는 scenario×cell×claim tuple×qualifiers×assertion operation/occurrence다. 같은 네 축의 managed/native·output path·input_source를 섞지 않는다.
 브리핑/캠페인은 이 JSON을 읽고 수기 숫자 사본을 만들지 않는다.
 
 ### 3.3 먼저 채울 빈 칸과 main에 이미 있는 것
@@ -329,12 +432,27 @@ E-14의 thread 선언이나 E-50/E-51의 herdr cell만으로 위 칸이 채워�
 
 ## 4. 조각·순서·RED 계약
 
-이번 문서 변경의 상태 차트는 **해당 없음**(제품 상태 전이를 바꾸지 않는 조사·설계).
-다만 제안한 instance lifecycle/lease에는 상태가 생기므로 구현 **조각 0단계**에서 작은 모델을 먼저 둔다.
-`Absent → Reserved → Starting → Ready → Stopping → Reaped`와 `OwnerUnknown/Failed`를 모델링하고,
-동일 bot-set 소비자 최대 1, 살아 있는 owner 임대 탈취 0, foreign cleanup 0,
-죽은 owner의 확인 가능한 자원은 결국 회수됨을 검사한다. partition·PID 재사용·down 중 crash·시작 일부 실패를 넣는다.
-모델의 값·진입점은 구현 조사 전수표에서 가져오고, 새 cleanup 권한은 수용 시험이 있는 자기 receipt 범위로만 제한한다.
+### 4.1 조각0 — flock 상속 모델의 가정 표
+
+상태 차트는 **해당**이다. r2에서는 기존 중앙 임대 모델을 아래 가정 표로 대체하며 TLC는 구현 조각0에서 실행한다.
+설계 CLEAN 판정은 끝났으므로 별도 설계 리뷰를 추가하지 않는다. 모델·반례·뮤턴트는 구현 조각의 수용 증거다.
+모델 경로는 `docs/statecharts/test-instance-lease/`로 제안한다.
+
+| r2 가정/상태 | 구현·모델 행동 | 깨뜨릴 RED/뮤턴트 |
+| --- | --- | --- |
+| 지정 단일 호스트, 고정 lease inode | 다른 호스트는 ref 제출만; supervisor의 nonblocking flock 획득이 유일한 진입 | inode unlink/교체로 서로 다른 lock에 동시 진입하면 NoDualGateway 실패 |
+| KernelHeld → ExecInherited → Ready → Stopping → Released | supervisor→dcserver의 동일 FD 상속; 양쪽 close 뒤 마지막 holder가 없어야 release | exec에서 CLOEXEC 유지로 child가 lock을 잃으면 wrapper crash 뒤 두 서버 반례 |
+| owner receipt는 진단만 | owner 기록 전/중 crash, receipt 누락에도 kernel lock은 그대로. holder 모두 사망 시 재획득 | receipt 없는 파일을 영구 OWNER_UNKNOWN으로 간주하거나 죽은 wrapper 기록만 보고 살아 있는 child lock 탈취 |
+| daemon/provider는 holder 아님 | dcserver가 자식 spawn 전에 CLOEXEC 복구. FD holder와 auxiliary receipt 자원을 별도 상태로 모델링 | FD 전파 방치로 lease가 daemon에 묶이거나, daemon이 항상 fd를 닫는다고 가정해 잘못된 해제 |
+| close-only·동시 Gateway child1 | LOCK_UN 없이 FD close; 이전 dcserver 종료 후 후계 exec | 명시 LOCK_UN/동일 FD의 두 live dcserver 복제 전달로 NoDualGateway 실패 |
+| reap 소유권·생존성 | lsof의 inode/FD 후보 + receipt baseline/root/socket 대조, 배타권은 flock 재획득. ProbeError=HOLD | foreign PID 선택·baseline 없는 matches 허용·보유자 남은 채 credential/root 삭제 |
+
+불변식은 bot-set당 live Gateway dcserver≤1, 살아 있는 상속 holder의 임대 탈취0, foreign cleanup0이다.
+생존성은 holder가 모두 끝나고 소유 자원 조회가 가능하면 다음 run/자기 고아 정리가 결국 진행됨이다.
+wrapper SIGKILL·dcserver 단독 생존·owner 기록 전후 crash·부분 기동·down 중 crash·후계 전환을 포함한다.
+r1의 SSH helper·원격 owner·TTL 상태/분산 복구 모델은 제거한다. flock만으로 auxiliary 정리나 임의 PID kill 안전까지 증명하지 않는다.
+
+### 4.2 구현 조각과 P2 수용 계약
 
 모든 리뷰 조각은 **prod 30파일 / 순 코드 +1500 이내**, **+1200에서 코드를 더 쓰기 전에 PLAN_READY**다.
 아래는 추정치이며 test/fixture/generated/docs 제외 기준은 `pr_cap_prod.py` 정본을 따른다.
@@ -342,44 +460,55 @@ E-14의 thread 선언이나 E-50/E-51의 herdr cell만으로 위 칸이 채워�
 
 | 조각 | 범위·착지 가능 조건 | 추정 prod | RED → GREEN·수용 증거 |
 | --- | --- | --- | --- |
-| 0 | lifecycle/lease 모델·소유 진입점 전수표·독립 설계 리뷰 | 0–2파일 / +0–150 | 현재 read→O_TRUNC lease 동시 획득 반례와 잘못된 orphan 회수 모델 RED; 새 규칙 GREEN. 현재 `scripts/e2e/tui_relay/lease.py:32`를 다중 레인 안전장치로 재사용하지 않음 |
-| M1 (#8123) | 전체 기능 행·metadata schema·generator·CI/static 검사. instance 없이 먼저 착지 가능 | 3–6 / +450–750 | 잘못된 claim·없는 assertion·문서 drift·fixture live 둔갑이 검사 FAIL; 원복 GREEN. 실행 칸은 여전히 미검증으로 표시 |
-| I1 (#8124 최소 선행) | startup test manifest·config/root/DB/env token 검증·독립 PG routing | 8–14 / +700–1050 | inherited DSN·missing config·sibling fallback·외부 path·잘못된 bot identity가 접속 전 FAIL. live 가능으로 노출하지 않는 opt-in 경계부터 |
-| I2 (#8124 최소 선행) | tmux/socket·Herdr·provider HOME·recovery/clear/cancel의 격리 전달 | 8–14 / +750–1100 | default socket/endpoint·다른 instance receipt·복원 경로의 fallback FAIL. 기존 운영 default 동작 유지 |
-| I3 (#8124 수용) | launcher·중앙 임대·down/reap·자원 상한·전용 봇/채널 준비·Driver REST/author/instance adapter·host self-check | 5–9 / +750–1100 | 두 lane 경합·부분 기동 crash·PID 재사용·owner 불통 RED. **자기 worktree의 실제 Discord 1턴**, 운영 target 접근 0의 경계 증거, 자기 자원 down/reap GREEN |
-| E1 (#8120) | Driver reaction observer·주입/host 관측 adapter·네 회귀 YAML·필수 assertion 결과 | 5–9 / +700–1050 | 각 제품 수리 전 코드에서 실제 시험 인스턴스 실행 1회 FAIL, 수리 후 동일 프로필 GREEN. 기존 버그가 먼저 고쳐지면 원인 제거 mutant로 RED와 원복 byte hash 증명 |
+| 0 | §4.1 flock/FD 수명 모델·현재 lock/후계/정리 진입점 전수표. TLC는 구현 때 | 0–1파일 / +0–100 | wrapper crash/상속 누락/LOCK_UN/동시 후계/외부 cleanup 반례와 원인 뮤턴트 RED → 고정 모델 GREEN |
+| M1 (#8123) | 전체 기능 행·metadata schema·순수 registry export·generator·CI/static 검사. instance 없이 착지 | 5파일 / +550–850 | P2-7/8의 cells 교집합·witness·source·base 감축·생성 drift·선택 배선 RED/뮤턴트. 새 실행 단언 미등록, 네 결함 칸은 gap |
+| I1 (#8124 최소 선행) | startup test manifest·config/root/독립 PG·root credential·명시 기능 프로필 | 8–12 / +600–950 | P2-1/2: 플래그 누락은 UNEVALUABLE; 외부 path/DSN·inline token·token env 상속·unknown legacy credential 거부. sentinel env 노출 제거 뮤턴트 RED |
+| I2 (#8124 최소 선행) | tmux/socket·Herdr 수동 기동·provider HOME·label/API/Memento·전체 scan 경계·복원/clear/cancel | 10–16 / +800–1100 | P2-3/4: 누락 label/default API·Memento·autostart·release orphan 줄·foreign receipt가 경계를 넘지 않음. monitoring은 시험 API, down 뒤 자기 Herdr0. keychain 미확인은 BLOCKED_AUTH |
+| I3a (#8124 수명) | **시험 호스트 launcher/supervisor·상속 flock·down/reap·자원 상한·health read-back**. Driver REST 미포함 | 4–7 / +550–850 | P2-5/10: up→ready→down/reap, identity 조회까지만. 동시 acquire1000회 성공1, wrapper SIGKILL 후 dcserver 생존 시 새 acquire 거부, orphan 보유자 종료 뒤 재획득·자기 자원 정리 |
+| I3b (#8124 실물 수용) | **Driver REST·author/instance adapter·admission envelope·실제1턴**. lifecycle은 I3a 재사용 | 3–5 / +400–700 | P2-6/7: import/첫 전송 전 ID 누락·운영 기본값·receipt mismatch는 전송0/UNEVALUABLE. 자기 ref의 시험 호스트 worktree 실제 Discord1턴과 root credential·host/output identity 증거 |
+| E1 (#8120) | Rust serenity observer/example·필수 SDK 관측 seam·주입/host/precondition adapter·네 회귀 YAML | 5–10 / +800–1150(관측 seam 실측 전 추정) | P2-1/9: precondition 누락·녹화 Dispatch gap/역순·observer epoch 오류는 UNEVALUABLE. 실제 수리 전 FAIL/수리 후 GREEN. SDK seam 미입증은 strict-history gap이며 PLAN에서 크기 재평가 |
 | S1 (#8120·#8123) | 단일 supervisor 주기·예산·outbox/알림·summary·지도 소비·brief/review 틀 배선 | 4–8 / +650–1000 | 0건/skip/옛 head/누락 단언/timeout·usage unknown·알림 단절을 PASS 못 하는 RED; 실제 예약 1회+무인 실패 전달 1회 GREEN |
 
 I2나 E1의 진입점 전수조사에서 +1200을 넘길 것이 보이면 host별/observer별로 먼저 분할한다.
+I3a의 acquire1000회 시험은 attempt별로 lease 파일을 독립 open하고, winner가 barrier 동안 lock을 유지한 상태의 경합을 뜻한다.
+I3b는 assertions 모듈 import 전에 세 양의 u64 ID·상호 구별·credential identity·receipt·운영 기본값 불일치를 검증한다. gate FAIL의 summary는 UNEVALUABLE(identity)이며 전송0건이다.
+P2-8은 cells 밖 host/provider, registry/YAML 교집합 밖 ID, thread/busy witness 제거, 감축 사유 제거의 네 fixture와 검사 제거 뮤턴트를 각각 RED로 고정한다.
+P2-3/4의 운영 상태 음성 시험은 합성 release 경로/프로세스 표/비허용 채널 fixture로 수행하며 운영 파일·프로세스·Discord 채널을 실제 조작하지 않는다.
 휴면 prod 코드를 미리 쌓아 clippy no-growth를 깨지 않는다. 각 opt-in 기능은 실제 호출자와 거부 경로를 함께 착지한다.
 각 구현 조각은 대상 시험·원인 제거 mutant(원복 바이트 동일)·필요 clippy·static gates 및 리뷰 ref read-back을 증거로 낸다.
 **E2E는 YAML·fixture·dry-run·관측 로그만으로 완료되지 않고 실제 독립 인스턴스 실행 1회가 증거**다.
 RED 확보를 위해 main의 기존 버그를 되살린 운영 서버를 띄우지 않는다. 시험 인스턴스에만 수리 전 head/원인 mutant를 쓴다.
 
 #7335의 현재 본문 하단 **11-02 사용자 overkill-trim**은 Codex Herdr 생성·후속·회수·취소 live 각 1회 증거만 남긴다.
-I3의 instance 자체 수용(최소1턴)은 먼저 가능하고, 그 인스턴스로 #7335의 남은 capability 증거를 확보하거나 동일 조건의 기존 근거를 재사용한 뒤 Codex E1 claim을 활성화한다.
+I3a의 수명 수용과 I3b의 instance 자체 수용(최소1턴)은 먼저 가능하고, 그 인스턴스로 #7335의 남은 capability 증거를 확보하거나 동일 조건의 기존 근거를 재사용한 뒤 Codex E1 claim을 활성화한다.
 옛 허위 green/부분 증거 하네스 정교화 전체를 선행으로 요구하지 않는다.
 새 wrapper의 필수 assertion gate는 이 묶음의 좁은 책임이다. #7335 live 증거 미확보 Codex 조합만 `BLOCKED_CAPABILITY`이며, instance 기반 전체 착지를 막거나 통과로 치지 않는다.
 
 사용자 순서 #8121 → #8120·#8123 → #8122 → #8124에서 #8121은 이슈 댓글상 완료(coord-tools `79bfde4`, 12/12)다.
-**권고 최소 경로:** M1과 E1 명세/RED 계약을 먼저 정리하고 #8122 설계와 병렬 진행 → I1/I2/I3의 작은 독립 인스턴스 선행 → E1 실제 RED/GREEN → S1.
+**기본 최소 경로:** M1과 E1 명세/RED 계약을 먼저 정리하고 #8122 설계와 병렬 진행 → 조각0·I1/I2/I3a/I3b의 작은 독립 인스턴스 선행 → E1 실제 RED/GREEN → S1.
 즉 #8124의 검증을 풀어 주는 조각만 앞당기고, #8120 전체를 기다리게 하지 않는다. M1의 착지는 인스턴스 없이 가능하다.
-순서를 엄격히 유지한다면 M1 → E1 metadata/observer 명세(완료 아님) → #8122 → I1–I3 → E1 live/S1로 나눌 수 있다.
+순서 예외는 통보하고 이의가 있으면 M1 → E1 metadata/observer 명세(완료 아님) → #8122 → I1–I3b → E1 live/S1의 엄격 순서로 진행한다.
 어느 경로든 #8120을 먼저 완료 처리하거나, #8124 없이 머지 전 live 검증을 했다고 기록하지 않는다.
 
 ## 5. 사용자 결정·미확인 준비물
 
-기술 조사/문서 착지를 막는 결정은 없다. 구현 발사 전에 아래를 한 번에 확인한다.
+M1 착지와 r2 문서 제출을 막는 결정은 없다. 선택은 아래 두 부류로 나누고, 필수 준비물은 실제 live 단계에서 한 번에 요청한다(P2-11).
 
-| 선택 | 권고·이유 | 미확정이면 가능한 일 |
+| 분류 | 항목·진행 기본값 | 확인/질문 시점·미확정 처분 |
 | --- | --- | --- |
-| 전용 채널 vs 기존 8개 임대 | 전용 public parent 2개. 기존 채널 임대는 운영 봇 Discord 권한 전환까지 필요 | M1·모델·비밀 없는 startup 검증 가능; live 불가 |
-| 봇·금고 준비 | 수신 Claude/Codex+Driver 3앱 및 §1.3 세 항목. 실제 앱/채널 ID·유효 권한·알림 DM recipient와 독립 provider 인증 준비 | env token/identity 음성 검사까지 가능. 실제 token/항목 내용 요청·출력 금지 |
-| 실행 호스트·계정·한도 | 중앙 시험 임대 호스트 1곳, 글로벌 instance 1·활성 턴1; 6시간 회전/야간 및 하루60분·24턴은 실측 전 초안 | 대표 묶음 각1회 비용 측정 후 한도 확정. 실측 없는 영구 주기 활성화 금지 |
-| 회귀 뒤 배포 처분 | 알림 우선, 기존 운영 fail-open 유지. 다음 배포 자동 차단은 별도 선택 | 실패/heartbeat·outbox 무인 알림은 구현 가능 |
-| 사용자 우선순서의 최소 선행 예외 | #8124 I1–I3만 E1 live보다 먼저. M1/#8122는 병렬 | 엄격 순서 대안은 §4와 같으며 #8120 완료가 늦어짐을 명시 |
+| **기본값으로 진행·확인 요청** | 전용 public parent2개(A안). 기존8개 임대는 채택하지 않음 | 기존 사용자 결정에 맞춰 통보한다. 채널 방식 자체를 다시 질문하지 않음 |
+| **기본값 제안·확인 요청** | 지정 시험 호스트 **mac-mini(집 상주·24GB)** 한 곳. 모든 다른 레인은 review ref 제출, 해당 호스트 worktree에서 빌드/실행 | 사용자에게 호스트를 확인하되 M1/모델/격리 구현은 계속 진행. headroom·nice/taskpolicy 및 global instance1/활성턴1로 운영 경합 제한 |
+| **기본값으로 진행·확인 요청** | 실패 알림 우선·기존 운영 fail-open 유지, 다음 배포 자동 차단 off | 자동 배포 차단으로 바꾸려면 별도 결정. 알림/summary 구현은 진행 |
+| **기본값으로 진행·확인 요청** | 6시간 회전/야간·하루60분/24턴은 실측 전 초안, 영구 주기 off | 대표 묶음 실측 후 확정 요청. unknown token 사용량은0으로 쓰지 않고 토큰 실측 DoD 미완료 |
+| **기본값으로 진행·확인 요청** | M1/#8122 병렬·I1–I3b 최소 선행 | 통보 후 이의가 있으면 §4 엄격 순서. 별도 승인 대기로 구현 준비를 멈추지 않음 |
+| **반드시 물어야 함** | 머지 전 실제 실행을 **모든 관련 PR의 새 차단 게이트**로 강제할지 | 기본은 권고/증거 첨부·차단 아님. 사용자 결정 전 게이트를 켜지 않음. E1 자체 수용의 실물 증거는 별개 |
+| **반드시 물어야 함** | 운영 봇 Administrator/다른 권한 때문에 시험 category 경계를 만족하지 못할 때 운영 권한 변경 | 운영 권한을 자동 변경하지 않음. 해당 live 기동만 HOLD하고 사용자에게 선택 요청 |
+| **반드시 준비를 요청** | 세 시험 앱·§1.3 금고 항목·독립 provider 인증/키체인·시험 채널·명령 Integrations 제한·알림 recipient | I3a identity 조회/I3b live 전 한 번에 요청. token 값/금고 내용은 요청·출력하지 않고 항목 생성/권한만 안내. 준비 안 됨은 BLOCKED_AUTH/권한 HOLD |
+| **반드시 물어야 함(확대 시)** | 활성턴2(E-11)·추가 bot-set/호스트·원격/DM/private-thread 확대 | 초기 gap 유지. 자원/권한/coverage 실측 없이 자동 확대하지 않음 |
+
+운영과 다른 비밀 없는 기능 플래그는 키/시험 적용값 목록을 제시해 한 번 확인한다. 운영 env 파일을 읽어 복사하지 않는다.
 
 운영 접근 없이 알 수 없는 live 권한·앱 생성 상태·provider 비용은 미확인으로 남긴다.
 설계 파일 커밋은 이 결정들의 승인이나 #8120/#8123/#8124의 구현 완료를 뜻하지 않는다.
 
-<!-- doc-path-refs: proposed scripts/dev-instance.sh docs/user-feature-map.rows.yaml docs/user-feature-map.md scripts/generate_user_feature_map.py -->
+<!-- doc-path-refs: proposed scripts/dev-instance.sh docs/user-feature-map.rows.yaml docs/user-feature-map.md docs/generated/user-feature-coverage.json scripts/generate_user_feature_map.py scripts/e2e/tui_relay/assertion_registry.py tests/test_generate_user_feature_map.py tests/test_user_feature_map_static.py tests/e2e/tui_relay/discord_observer.rs docs/statecharts/test-instance-lease/ -->
