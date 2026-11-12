@@ -189,6 +189,7 @@ impl HerdrOwner {
             timing: &crate::services::claude_tui::busy_inject::TIMING,
             until_done: None,
             native_pin_submitted: None,
+            observation: None,
         };
         created(
             registration,

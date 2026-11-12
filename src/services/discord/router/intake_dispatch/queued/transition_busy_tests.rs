@@ -17,7 +17,22 @@ struct UploadHook {
     release: tokio::sync::oneshot::Receiver<()>,
 }
 thread_local! { static UPLOAD_TAKE: RefCell<Option<UploadHook>> = const { RefCell::new(None) }; }
-pub(in crate::services::discord::router) async fn after_upload_take(channel: ChannelId) {
+pub(in crate::services::discord::router) struct UploadTakeProbe(ChannelId);
+
+impl UploadTakeProbe {
+    pub(in crate::services::discord::router) fn pause(
+        self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        pause_upload_take(self.0)
+    }
+}
+
+pub(in crate::services::discord::router) async fn after_upload_take(
+    channel: ChannelId,
+) -> UploadTakeProbe {
     let hook = UPLOAD_TAKE.with(|slot| {
         if slot
             .borrow()
@@ -33,6 +48,7 @@ pub(in crate::services::discord::router) async fn after_upload_take(channel: Cha
         hook.entered.send(()).unwrap();
         hook.release.await.unwrap();
     }
+    UploadTakeProbe(channel)
 }
 fn pause_upload_take(
     channel: ChannelId,

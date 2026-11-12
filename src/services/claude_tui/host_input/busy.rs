@@ -3,13 +3,14 @@ mod herdr;
 mod tmux;
 pub(crate) use tmux::{cause, loads};
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{InputRefusal, InputTarget};
 use crate::services::claude_tui::busy_inject::{self, Request, Screen, Veto};
 use crate::services::provider::CancelToken;
 use crate::services::session_host::HerdrTarget;
+use crate::services::turn_host::TurnHost;
 
 pub(crate) type BusyProbe = Box<dyn FnMut() -> Screen + Send>;
 
@@ -64,6 +65,21 @@ pub(crate) struct BusyOperation {
 }
 
 impl BusyOperation {
+    /// Observes a supplied host once; it never resolves another execution for that logical key.
+    pub(crate) fn observe_hosted(
+        channel: u64,
+        logical: &str,
+        host: &TurnHost,
+        token_hash: &str,
+    ) -> BusyObservation {
+        match host {
+            TurnHost::Tmux => BusyObservation::only(BusyState::Legacy),
+            TurnHost::Herdr(plan) => herdr::observe(channel, logical, plan, token_hash),
+            // Lifecycle refusals and returns keep the existing driver's recovery policy.
+            TurnHost::Return(_) | TurnHost::Refused(_) => BusyObservation::only(BusyState::Idle),
+        }
+    }
+
     pub(crate) fn for_session(
         session: &str,
         herdr: Option<(HerdrTarget, String)>,
@@ -98,7 +114,11 @@ impl BusyOperation {
                 (Box::new(move |request| adapter.submit(request)), None)
             }
             InputTarget::Herdr(target) => {
-                let adapter = herdr::Adapter { target, writer };
+                let adapter = herdr::Adapter {
+                    target,
+                    writer,
+                    observation: None,
+                };
                 (
                     Box::new(move |request| adapter.submit(request)),
                     Some("herdr"),
@@ -120,6 +140,133 @@ impl BusyOperation {
 
     pub(crate) fn host_tag(&self) -> Option<&'static str> {
         self.host_tag
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BusyState {
+    Legacy,
+    Idle,
+    Held,
+    Busy,
+}
+
+/// The immutable target read for this front and the source its later key must still name.
+#[derive(Clone)]
+pub(crate) struct BusyObservation {
+    context: Option<Arc<herdr::Context>>,
+    state: BusyState,
+    source: Option<herdr::Source>,
+}
+
+impl BusyObservation {
+    fn only(state: BusyState) -> Self {
+        Self {
+            context: None,
+            state,
+            source: None,
+        }
+    }
+
+    pub(crate) fn state(&self) -> BusyState {
+        self.state
+    }
+
+    pub(crate) fn transcript(&self) -> Option<&Path> {
+        self.source.as_ref().map(|source| source.id.path.as_path())
+    }
+
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        self.source
+            .as_ref()
+            .map(|source| source.id.session_id.as_str())
+    }
+
+    pub(crate) fn target(&self) -> Option<serde_json::Value> {
+        self.context
+            .as_ref()
+            .map(|context| context.attempt_target.clone())
+    }
+
+    pub(crate) fn source(&self) -> Option<serde_json::Value> {
+        self.source.as_ref().map(|source| {
+            serde_json::json!({
+                "kind":"existing", "session_id":source.id.session_id,
+                "transcript":source.id.path, "file":[source.id.dev, source.id.ino],
+                "offset":source.offset,
+            })
+        })
+    }
+
+    pub(crate) fn herdr(&self) -> Option<(HerdrTarget, String)> {
+        self.context
+            .as_ref()
+            .map(|context| (context.target.clone(), context.writer.clone()))
+    }
+
+    pub(crate) fn probe(&self) -> BusyProbe {
+        let context = self.context.clone();
+        Box::new(
+            move || match context.as_ref().map(|context| context.read()) {
+                Some(read) if read.state == BusyState::Busy || read.cleared => Screen::Ready,
+                _ => Screen::Unknown,
+            },
+        )
+    }
+
+    pub(crate) fn prepare_busy(
+        &self,
+        program: PathBuf,
+        timing: &'static busy_inject::Timing,
+        declared: bool,
+        cancel: Arc<CancelToken>,
+    ) -> BusyOperation {
+        let Some(context) = self.context.as_ref() else {
+            return BusyOperation::new(
+                InputTarget::Refused(InputRefusal::Unknown),
+                program,
+                timing,
+                declared,
+                cancel,
+                None,
+            );
+        };
+        let adapter = herdr::Adapter {
+            target: context.target.clone(),
+            writer: Some(context.writer.clone()),
+            observation: Some(self.clone()),
+        };
+        BusyOperation {
+            submit: Box::new(move |request| adapter.submit(request)),
+            host_tag: Some("herdr"),
+        }
+    }
+
+    fn admits(&self, request: &Request<'_>) -> bool {
+        let Some(expected) = self
+            .source
+            .as_ref()
+            .filter(|source| source.id.path == request.transcript)
+        else {
+            return false;
+        };
+        let Some(context) = self.context.as_ref() else {
+            return false;
+        };
+        if request.session != context.logical {
+            return false;
+        }
+        let read = context.read();
+        matches!(read.state, BusyState::Busy | BusyState::Idle)
+            && read.source.is_some_and(|source| source.id == expected.id)
+    }
+
+    fn held(&self) -> BusyReport {
+        BusyReport::outcome(BusyOutcome::NotSent {
+            reason: "busy_source_unavailable".into(),
+            waits: true,
+            probe: Some(self.probe()),
+        })
     }
 }
 
