@@ -41,6 +41,7 @@ pub(crate) enum BindingCause {
     Compact,
     Continuation,
     Fork,
+    SameSessionVerified,
     Unknown,
 }
 /// `Resolved` completes the named Pending; bare `Rejected` is audit only.

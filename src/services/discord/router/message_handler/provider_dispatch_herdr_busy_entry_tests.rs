@@ -55,6 +55,16 @@ thread_local! {
     static WORKER_GUARDS: std::cell::RefCell<Vec<Box<dyn std::any::Any>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+// Restore PATH before discarding this fixture's process-wide probe answer.
+struct ScopedTmuxPath(Option<Guard>);
+
+impl Drop for ScopedTmuxPath {
+    fn drop(&mut self) {
+        drop(self.0.take());
+        crate::services::platform::tmux::invalidate_availability_cache();
+    }
+}
+
 struct Intake {
     shared: Arc<SharedData>,
     mailbox: ChannelMailboxHandle,
@@ -69,7 +79,7 @@ struct Intake {
         crate::config_live_reload::TestLiveGuard,
     ),
     _routing: Guard,
-    _tmux: Guard,
+    _tmux: ScopedTmuxPath,
     _boot: test_override::ChannelsGuard,
 }
 
@@ -226,7 +236,10 @@ impl Intake {
         )
         .unwrap();
         std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let no_tmux = Guard::prepend_path_after_shared_test_env_lock(fx.cwd.path());
+        let no_tmux = ScopedTmuxPath(Some(
+            Guard::prepend_path_after_shared_test_env_lock(fx.cwd.path()),
+        ));
+        crate::services::platform::tmux::invalidate_availability_cache();
         let session_hosts_guard = crate::config::session_hosts::force_config_for_test(&config);
         crate::config_live_reload::install(config.clone());
         let boot = BootChannels::validate(&config)
@@ -482,7 +495,11 @@ impl Drop for Intake {
 
 #[test]
 fn a_managed_herdr_busy_input_observes_early_once_without_a_late_read_pg() {
-    let fx = Fixture::new("busy-early-entry", None);
+    let fx = Fixture::with_root(
+        "busy-early-entry",
+        None,
+        crate::config::TestRuntimeRootGuard::new(),
+    );
     let launcher = Arc::new(Launcher::default());
     let (_, started) = reconnect::launch(&fx, &launcher);
     let before = fx.rig.sends().len();
@@ -568,7 +585,11 @@ mod late_tests;
 
 #[test]
 fn an_early_new_herdr_execution_cannot_borrow_its_old_global_pin_pg() {
-    let fx = Fixture::new("busy-entry-new-nonce-old-pin", None);
+    let fx = Fixture::with_root(
+        "busy-entry-new-nonce-old-pin",
+        None,
+        crate::config::TestRuntimeRootGuard::new(),
+    );
     let launcher = Arc::new(Launcher::default());
     let (old_nonce, started) = reconnect::launch(&fx, &launcher);
     let before = fx.rig.sends().len();
@@ -958,7 +979,11 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
     use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
     use crate::services::tui_prompt_dedupe::binding_events;
 
-    let fx = Fixture::new("busy-old-stat-before-authentic-hook", None);
+    let fx = Fixture::with_root(
+        "busy-old-stat-before-authentic-hook",
+        None,
+        crate::config::TestRuntimeRootGuard::new(),
+    );
     let launcher = Arc::new(Launcher::default());
     let (nonce, started) = reconnect::launch(&fx, &launcher);
     let before = fx.rig.sends().len();
@@ -1255,7 +1280,11 @@ fn a_pinless_idle_input_delegates_without_another_authentic_hook_pg() {
     use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
     use crate::services::tui_prompt_dedupe::binding_events;
 
-    let fx = Fixture::new("pinless-idle-no-later-hook", None);
+    let fx = Fixture::with_root(
+        "pinless-idle-no-later-hook",
+        None,
+        crate::config::TestRuntimeRootGuard::new(),
+    );
     let launcher = Arc::new(Launcher::default());
     let (nonce, started) = reconnect::launch(&fx, &launcher);
     let before = fx.rig.sends().len();
@@ -1353,7 +1382,11 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
     use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
     use crate::services::tui_prompt_dedupe::binding_events;
 
-    let fx = Fixture::new("pinless-held-to-idle-no-later-hook", None);
+    let fx = Fixture::with_root(
+        "pinless-held-to-idle-no-later-hook",
+        None,
+        crate::config::TestRuntimeRootGuard::new(),
+    );
     let launcher = Arc::new(Launcher::default());
     let (nonce, started) = reconnect::launch(&fx, &launcher);
     let before = fx.rig.sends().len();

@@ -239,7 +239,10 @@ impl ChannelStore {
             return Ok(None);
         };
         if !matches!(expected.boundary, Boundary::Pending { .. })
-            || *cause == BindingCause::Unknown
+            || matches!(
+                cause,
+                BindingCause::Unknown | BindingCause::SameSessionVerified
+            )
             || event.seq <= expected.seq
             || event.channel_id != self.init.channel
             || event.channel_id != candidate.channel

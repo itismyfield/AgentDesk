@@ -12,7 +12,7 @@ use crate::services::claude_tui::source_verify::{
 use crate::services::tui_prompt_dedupe::binding_context::{
     SpawnNonceMarker, observe_spawn_nonce_marker,
 };
-use binding_events::{Committed, SourceId};
+use binding_events::{BindingCause, Committed, SourceId};
 
 /// What a registration writes to the binding event log before it publishes the binding.
 #[derive(Clone, Debug)]
@@ -140,7 +140,11 @@ impl Candidate<'_> {
         #[cfg(test)]
         after_check();
         if binding_events::codex::source_file_matches(&source) {
-            binding_events::record_verified(proposal, &source)?;
+            let mut proposal = *proposal;
+            if matches!(proposal.cause, CauseSource::Hook(BindingCause::Unknown)) {
+                proposal.cause = CauseSource::Hook(BindingCause::SameSessionVerified);
+            }
+            binding_events::record_verified(&proposal, &source)?;
         }
         Ok(())
     }
