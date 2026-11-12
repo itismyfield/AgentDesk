@@ -7,6 +7,7 @@ mod attachments;
 pub(crate) mod body_census;
 mod diagnostics;
 mod identity;
+mod plain;
 use diagnostics::{warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure};
 mod session_notice;
 pub(crate) use attachments::{OutboxAttachment, StoredOutboxAttachment, decode_claimed_attachment};
@@ -828,47 +829,7 @@ pub(crate) async fn enqueue_outbox_pg_on_tx_with_attachment(
     message: OutboxMessage<'_>,
     attachment: Option<OutboxAttachment<'_>>,
 ) -> Result<i64, OutboxEnqueueError> {
-    enqueue_plain_on_tx(tx, message, attachment, false).await
-}
-
-async fn enqueue_plain_on_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    message: OutboxMessage<'_>,
-    attachment: Option<OutboxAttachment<'_>>,
-    explicit_completion: bool,
-) -> Result<i64, OutboxEnqueueError> {
-    validate_outbox_source(message.source)?;
-    let (filename, content_type, data) = attachments::parts(attachment);
-    let reason_code = normalized_reason_code(message.reason_code);
-    let session_key = normalized_session_key(message.target, message.session_key);
-    let notice = session_notice::designation(
-        &mut **tx,
-        message,
-        attachment.is_some(),
-        explicit_completion,
-    )
-    .await?;
-    let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO message_outbox
-         (target, content, bot, source, reason_code, session_key, attachment_filename, attachment_content_type, attachment_data, session_notice)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         RETURNING id",
-    )
-    .bind(message.target)
-    .bind(message.content)
-    .bind(message.bot)
-    .bind(message.source)
-    .bind(reason_code)
-    .bind(session_key.as_deref())
-    .bind(filename)
-    .bind(content_type)
-    .bind(data)
-    .bind(notice)
-    .fetch_one(&mut **tx)
-    .await?;
-    let census = body_census::capture(message.source);
-    body_census::store(tx, id, census.as_ref()).await?;
-    Ok(id)
+    plain::enqueue_on_tx(tx, message, attachment, false).await
 }
 
 pub(crate) async fn enqueue_lifecycle_notification_pg(
