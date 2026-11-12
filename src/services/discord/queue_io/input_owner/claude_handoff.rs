@@ -387,6 +387,7 @@ pub(crate) fn bound_herdr(
 
 #[cfg(test)]
 mod tests {
+    mod actual_close_tests;
     use super::*;
     use crate::db::dispatched_sessions::hosted_execution::{
         HostedLookup, HostedLookupKey, HostedObservation, load_hosted_execution_pg,
@@ -396,6 +397,7 @@ mod tests {
     use crate::services::turn_orchestrator::{PendingQueueItem, QueuePersistenceContext};
     use poise::serenity_prelude::{MessageId, UserId};
     struct Forced {
+        real_close: bool,
         key: String,
         row: HostedObservation,
         attempts: usize,
@@ -428,6 +430,9 @@ mod tests {
     pub(super) fn close_result(channel: u64) -> Option<Result<(), String>> {
         let mut all = FORCED.lock().unwrap();
         let f = all.get_mut(&channel)?;
+        if f.real_close {
+            return None;
+        }
         f.attempts += 1;
         Some(Err(
             "fixed close failure; no legacy input transport exists".into()
@@ -479,6 +484,7 @@ mod tests {
         FORCED.lock().unwrap().insert(
             channel.get(),
             Forced {
+                real_close: false,
                 key,
                 row,
                 attempts: 0,
@@ -620,6 +626,7 @@ mod tests {
         FORCED.lock().unwrap().insert(
             channel.get(),
             Forced {
+                real_close: false,
                 key: key.clone(),
                 row,
                 attempts: 0,

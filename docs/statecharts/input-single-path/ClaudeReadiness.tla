@@ -6,7 +6,10 @@ CONSTANTS N, Mode
 VARIABLE r
 Ids == 1..N
 Before == Mode = "ready-before-narrow"
-Fresh == Mode \in {"ready-fresh", "ready-clear", "ready-resume", "ready-late-dialog", "ready-preflight-only"}
+Clear == Mode \in {"ready-clear", "ready-clear-before", "ready-clear-restart", "ready-clear-forged",
+                    "ready-clear-no-revalidate", "ready-clear-drop-cursor", "ready-clear-split", "ready-clear-consumed",
+                    "ready-clear-volatile", "ready-clear-volatile-before"}
+Fresh == Clear \/ Mode \in {"ready-fresh", "ready-clear", "ready-resume", "ready-late-dialog", "ready-preflight-only"}
 Dialog == Mode \in {"ready-late-dialog", "ready-preflight-only"}
 Permission == Mode \in {"ready-permission-later", "ready-permission-poison"}
 Race == Mode \in {"ready-race", "ready-no-revalidate"}
@@ -26,6 +29,10 @@ Initial ==
      epoch |-> 1, turn |-> IF Fresh THEN 0 ELSE 1,
      observed |-> "Unknown", seenEpoch |-> 0, seenTurn |-> 0,
      started |-> FALSE, needsStart |-> Fresh, terminal |-> 0,
+     oldBinding |-> Clear, preSource |-> ~Clear, clearDone |-> FALSE,
+     clearProof |-> Mode \notin {"ready-clear-forged", "ready-clear-no-revalidate"},
+     durableClear |-> Mode \in {"ready-clear-consumed", "ready-clear-volatile", "ready-clear-volatile-before"},
+     clearConsumed |-> Mode = "ready-clear-consumed", oldCursor |-> 7, badClear |-> FALSE,
      tail |-> "none", continuing |-> FALSE, stopBoundary |-> 0, softStage |-> 0,
      stop |-> 0, oldStopLeft |-> 1, awake |-> TRUE, idleWakes |-> 2,
      human |-> Person, draft |-> IF Blind THEN "Unread" ELSE IF Person THEN "Person" ELSE "Empty",
@@ -35,7 +42,7 @@ Initial ==
      route |-> [i \in Ids |-> IF Busy /\ i = 1 THEN "busy" ELSE "idle"],
      head |-> 0, proofEpoch |-> 0, proofTurn |-> 0,
      nativeStarts |-> IF Race THEN 1 ELSE 0,
-     restarts |-> IF Mode = "ready-restart" THEN 1 ELSE 0,
+     restarts |-> IF Mode \in {"ready-restart", "ready-clear-restart"} THEN 1 ELSE 0,
      compactPending |-> Compact, compacts |-> 0,
      compactFence |-> FALSE, compactEvidence |-> FALSE, compactReady |-> FALSE,
      badIdleRunning |-> FALSE, badDraft |-> FALSE, badEarly |-> FALSE,
@@ -54,12 +61,29 @@ CurrentEvidence ==
     /\ (r.started /\ r.turn = 0) \/ r.compactReady \/
        (r.terminal = r.turn /\ r.turn > 0 /\ TerminalEligible)
 Ready == CurrentEvidence /\ ~Before /\ ~r.poisoned
+         /\ (~Clear \/ (~r.oldBinding /\ r.preSource /\ r.clearDone))
 First == {i \in Ids : r.q[i] \in {"queued", "held"} /\
           \A j \in 1..(i-1) : r.q[j] = "done"}
 SessionStart ==
     /\ r.phase = "Booting"
+    /\ Mode \notin {"ready-clear-volatile", "ready-clear-volatile-before"}
     /\ ~Dialog \/ r.dialog = "Dismissed"
-    /\ r' = [r EXCEPT !.phase = "Idle", !.started = TRUE, !.awake = TRUE]
+    /\ r' = [r EXCEPT !.phase = IF Clear THEN @ ELSE "Idle", !.started = TRUE,
+                     !.durableClear = @ \/ (Clear /\ r.clearProof), !.awake = TRUE]
+\* The nonce, latest Pending and authenticated durable hook are checked in one authority hold.
+ClearRetire ==
+    /\ Clear /\ ~r.clearDone /\ ~r.clearConsumed /\ Mode \notin {"ready-clear-before", "ready-clear-volatile-before"}
+    /\ r.started \/ r.durableClear
+    /\ r.clearProof \/ Mode = "ready-clear-no-revalidate"
+    /\ r.restarts = 0
+    /\ r' = [r EXCEPT !.oldBinding = FALSE,
+                     !.preSource = Mode # "ready-clear-split", !.clearDone = TRUE, !.clearConsumed = TRUE,
+                     !.phase = "Idle", !.started = TRUE, !.awake = TRUE,
+                     !.oldCursor = IF Mode = "ready-clear-drop-cursor" THEN 0 ELSE @,
+                     !.badClear = @ \/ ~r.clearProof]
+ClearAdopt ==
+    /\ Clear /\ r.clearDone /\ ~r.preSource
+    /\ r' = [r EXCEPT !.preSource = TRUE]
 PollDialog ==
     /\ Dialog /\ r.phase = "Booting"
     /\ r.dialog = "Boot" \/ (r.dialog = "Picker" /\ Mode # "ready-preflight-only")
@@ -173,6 +197,7 @@ Receipt(i) ==
 \* Only pre-key daemon restart is refined here; post-key Unknown is never replayed.
 Restart ==
     /\ r.restarts > 0 /\ r.head = 0
+    /\ ~Clear \/ (r.durableClear /\ ~r.clearDone)
     /\ r' = [r EXCEPT !.epoch = @ + 1, !.observed = "Unknown",
                      !.started = FALSE, !.awake = FALSE, !.restarts = 0]
 Replay(i) ==
@@ -193,11 +218,11 @@ CompactCompletionEvidence ==
 FinishSelfCompactFence ==
     /\ r.compactFence /\ r.compactEvidence /\ Mode # "ready-compact-no-completion"
     /\ r' = [r EXCEPT !.compactFence = FALSE, !.compactReady = TRUE, !.awake = TRUE]
-Next == CompactCompletionEvidence \/ FinishSelfCompactFence \/ PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
+Next == ClearRetire \/ ClearAdopt \/ CompactCompletionEvidence \/ FinishSelfCompactFence \/ PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
         SuppressStop \/ SoftSummary \/ LateAssistant \/
         NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/ IdleWake \/
         (\E i \in Ids : Hold(i) \/ Prepare(i) \/ SelectBusy(i) \/ BusyInject(i) \/ BusyPublish(i) \/ ReexposeBusy(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
-Fairness == WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
+Fairness == WF_r(Restart) /\ WF_r(ClearRetire) /\ WF_r(ClearAdopt) /\ WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
             WF_r(SuppressStop) /\ WF_r(SoftSummary) /\ WF_r(LateAssistant) /\
             WF_r(RecoverDraft) /\ WF_r(HumanClears) /\ WF_r(NativeStart) /\
             WF_r(Revoke) /\ WF_r(Submit) /\ WF_r(CompactSubmit) /\
@@ -209,6 +234,9 @@ TypeOK ==
     /\ r.effects \in [Ids -> 0..2] /\ r.writes \in [Ids -> 0..2] /\ r.head \in 0..N
     /\ r.phase \in {"Booting", "Idle", "Running"}
     /\ r.dialogKeys \in 0..1 /\ r.permissionStage \in 0..3
+NoUnsafeClearRetire == ~r.badClear
+ClearCursorPreserved == r.oldCursor = 7
+ClearAtomic == Clear => (r.oldBinding = ~r.preSource)
 NoDuplicate == \A i \in Ids : r.effects[i] <= 1 /\ r.writes[i] <= 1
 NoSilentLoss == \A i \in Ids : r.q[i] = "done" => r.effects[i] = 1
 NoIdleRunningInjection == ~r.badIdleRunning

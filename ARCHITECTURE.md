@@ -381,14 +381,30 @@ src/
 ├── domain/
 │   ├── atomic_write/
 │   │   └── tests.rs
+│   ├── campaign/
+│   │   ├── candidate_seal.rs
+│   │   ├── definition.rs
+│   │   ├── evidence.rs
+│   │   ├── evidence_gate.rs
+│   │   ├── execution_pin.rs
+│   │   ├── mod.rs
+│   │   ├── model.rs
+│   │   ├── profile.rs
+│   │   ├── review_gate.rs
+│   │   ├── verification_run.rs
+│   │   └── workspace.rs
 │   ├── intake_consent/
 │   │   └── decision.rs
 │   ├── message_split/
 │   │   └── semantic_boundaries.rs
 │   ├── outbound/
+│   │   ├── outbox/
+│   │   │   ├── identity.rs
+│   │   │   └── source.rs
 │   │   ├── ids.rs
 │   │   ├── intent.rs
 │   │   ├── key.rs
+│   │   ├── outbox.rs
 │   │   ├── policy.rs
 │   │   ├── port.rs
 │   │   └── result.rs
@@ -1046,6 +1062,8 @@ src/
 │   │   ├── readiness/
 │   │   │   ├── compact/
 │   │   │   │   └── completion.rs
+│   │   │   ├── source/
+│   │   │   │   └── clear.rs
 │   │   │   ├── compact.rs
 │   │   │   ├── compact_tests.rs
 │   │   │   ├── dialog.rs
@@ -1937,6 +1955,9 @@ src/
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
 │   │   │   ├── input_owner/
+│   │   │   │   ├── claude_handoff/
+│   │   │   │   │   └── tests/
+│   │   │   │   │       └── actual_close_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── codex.rs
 │   │   │   │   │   ├── codex_herdr_tests.rs
@@ -2151,6 +2172,7 @@ src/
 │   │   │   │   │   ├── transition_busy_tests/
 │   │   │   │   │   │   └── retry_tests.rs
 │   │   │   │   │   ├── clear_discard_tests.rs
+│   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── codex_turn_hold.rs
@@ -2312,6 +2334,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs

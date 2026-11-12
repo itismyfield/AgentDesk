@@ -58,6 +58,8 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 | Area | Code SHA | Rules that break | Disposition |
 |---|---|---|---|
 | input-single-path / session-lifecycle Idle readiness (#8080 A+B completion) | e46154b856cdc6ce4f00b3a628c045e26e16fd0e | BeforeNarrow, compact-no-completion and guard mutants are expected RED | Direct TLC 39 cfg / 111 reported runs: GREEN24, expected RED15, unexpected0. [Report](input-single-path/transcript-readiness.report.md), [design](input-single-path/transcript-readiness.design.md) |
+| `outbox-transaction` (#7353 S4-13·14 design) | `5c3ed37cddc80036fa8a274419b0219f49926704` | PreSource·Preobserve·SplitInsert·EarlyCensus·FreshTask are expected negative controls | Plain TLC 9 cfg matched after tx/connection P2 controls; canonical Current/Service GREEN. `statechart` wrapper unavailable on WSL (`sc=not-run`); [report](outbox-transaction/outbox-transaction.report.md) |
+| `input-single-path` reserved id enqueue (#8091) | `0b9af5833990e6ee41d3428fa2d37ba5289c22e9` | Before: reservation/queue overlap; proposed guard alone: race-loss caller drops the returned input | Fixed model and live/released controls pass; actor guard plus lease-authorized owner return; see [report](input-single-path/reserved-id-enqueue.report.md). |
 | `intake-readiness` (#7353 S4-05) | `b20a366c8812348f14a9e08a7439cb8df6cfb09a` | StaleSnapshot: lock 전 profile/cache 재사용; EarlyTxEnd: 다른 transaction으로 적용 | Current/Proposed GREEN; 같은 lock→live 관측→write/commit 유지, modern unknown/offline fail-closed·legacy 호환 보존. [보고서](intake-readiness/intake-readiness.report.md) |
 | `intake-consent` (#7353 S4-07 r2 PLAN) | `08e2336e47986d70d0cbe95e56215858377aed5c` | unexecuted r2: Current private issue / d1 public receipt / r2 keyed scope have distinct actions; d1 predicts effects-then-rollback RED | `SC_RUN=mac-needed`; no FS-currentness claim, see [report](intake-consent/intake-consent.report.md) |
 | `intake-consent` (#7353 S4-07 r3 checked) | `df492f9412` | Current·Proposed GREEN; D1Public·ScopeOpen break NoUnauthorizedIssue and NoEffectsThenRollback; same-process claimed rearm included | 9 cfg expected results matched; FS observation gap retained, see [report](intake-consent/intake-consent.report.md) |
@@ -124,3 +126,7 @@ upper bound of about 65 seconds from the server `idle_in_transaction_session_tim
 Routing/staging can still wait for that guard; admission here does not mean durable staging has completed.
 
 The Claude readiness refinement also checks terminal-free self-compact completion: [before](input-single-path/InputPathReadyCompactNoCompletion.cfg) breaks next-input liveness; [after](input-single-path/InputPathReadyCompactCompletion.cfg) satisfies it. Source, generation, reservation and Unknown-transfer guards remain caller obligations documented in [the readiness report](input-single-path/transcript-readiness.report.md).
+
+AwaitingClear's authenticated, one-use source retirement is refined in
+[input readiness](input-single-path/transcript-readiness.design.md#awaitingclear-adoption),
+including restart, forged proof, cursor loss and split-publication counterexamples.

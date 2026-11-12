@@ -16,7 +16,7 @@ fn eventually(what: &str, ready: impl Fn() -> bool) {
 }
 
 /// O's cursor over all of `path`, with the prefix hash its writer keeps.
-fn read_through(path: &Path, session: &str) {
+pub(super) fn read_through(path: &Path, session: &str) {
     use crate::services::tui_o::store::spool::{Cursor, source_key};
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::MetadataExt;
@@ -131,12 +131,13 @@ fn moves_to_herdr_resuming(fx: &Fixture, session: &str, path: &Path) {
     let answered = json!({"type": "assistant", "sessionId": session,
         "timestamp": "2026-10-01T00:00:01Z", "message": {"role": "assistant",
         "stop_reason": "end_turn", "content": [{"type": "text", "text": "beta"}]}});
-    append(path, &[said, answered]);
+    let done = json!({"type":"system", "subtype":"turn_duration", "sessionId":session});
+    append(path, &[said, answered, done]);
     read_through(path, session);
     *fx.session.lock().unwrap() = Some(session.to_owned());
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
         if let Some(started) = fx.start_provider_as(&launcher, true, "resume") {
             let expected = (session.to_owned(), path.to_path_buf());
@@ -145,7 +146,7 @@ fn moves_to_herdr_resuming(fx: &Fixture, session: &str, path: &Path) {
         }
     });
     assert_eq!(result, Ok(()));
-    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 1);
+    assert_eq!(ports.old_tmux.closes(), 1);
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     assert_eq!(fx.rig.sends(), prompt_sends());
     assert_eq!(fx.row(), Some(HostedState::Bound));
@@ -158,7 +159,7 @@ fn moves_to_herdr_resuming(fx: &Fixture, session: &str, path: &Path) {
 }
 
 // The tmux launch records its session's account, each `/clear` of that execution moves the record
-// on to its new session, and the move to Herdr resumes the last one after one `/exit`.
+// on to its new session, and the move to Herdr resumes the last one after one exact close.
 fn clears_then_moves_to_herdr(tag: &str, clears: usize) {
     let fx = Fixture::new(tag, None);
     let (launched, nonce) = launch_tmux(&fx, None);
@@ -216,7 +217,7 @@ fn a_failed_launch_under_another_account_never_moves_the_running_session_s_accou
         .unwrap();
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {});
     let lift = "DROP TRIGGER refuse_pending ON sessions";
     fx.rt
@@ -225,7 +226,7 @@ fn a_failed_launch_under_another_account_never_moves_the_running_session_s_accou
     let error = result.unwrap_err();
     assert!(error.contains("pending install refused"), "{error}");
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
-    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.old_tmux.closes(), 0);
     let recorded = fx.session_auth().unwrap();
     let (fresh, profile) = recorded.split_once('\n').unwrap();
     assert_eq!(profile, "work");
@@ -282,7 +283,7 @@ fn dispatched_return(owned: bool) {
     *fx.session.lock().unwrap() = Some(s_a.to_owned());
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let fresh = Mutex::new(None);
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
         if let Some(started) = fx.start_provider(&launcher, true) {
@@ -291,7 +292,7 @@ fn dispatched_return(owned: bool) {
         }
     });
     assert_eq!(result, Ok(()));
-    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.old_tmux.closes(), 0);
     let herdr = fresh.into_inner().unwrap().unwrap();
     let s_b = herdr.session.clone();
     assert!(s_b != s_a && herdr.path.starts_with(&home), "{s_b}");

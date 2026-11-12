@@ -160,7 +160,7 @@ impl ChannelMailboxState {
         self.claim_log.record(vec![message]);
     }
 
-    /// Pre-hydrate refusal: injected input first, then active-turn duplicates, then the claim CAS.
+    /// Refuses injected, cleared, reserved or active input before hydrate, then checks the claim CAS.
     pub(super) fn enqueue_refusal(
         &self,
         intervention: &Intervention,
@@ -171,6 +171,13 @@ impl ChannelMailboxState {
             .or_else(|| {
                 super::clear_fence::refuses(self, intervention)
                     .then_some(EnqueueRefusalReason::SupersededByClear)
+            })
+            .or_else(|| {
+                (self.pending_user_dispatch == Some(intervention.message_id)
+                    || self
+                        .pending_user_dispatch_source_ids
+                        .contains(&intervention.message_id))
+                .then_some(EnqueueRefusalReason::SourceIdPendingOrActive)
             })
             .or_else(|| active_turn_enqueue_refusal(self, intervention))
             .or_else(|| {

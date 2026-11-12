@@ -7,6 +7,9 @@ use super::{
 use crate::services::discord::Intervention;
 use crate::services::provider::ProviderKind;
 
+mod race_loss;
+pub(in crate::services::discord::router) use race_loss::hand_back_race_lost;
+
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum QueuedAdmissionDisposition {
     Admitted(AdmittedQueuedIntake),
@@ -354,6 +357,10 @@ pub(crate) async fn finish_admitted_queued_intake(
                 Ok(owner.restore(deps).await)
             }
             Err(error) => {
+                let error = match error.downcast::<race_loss::RaceLostReturn>() {
+                    Ok(handoff) => return owner.return_race_lost(deps, *handoff).await,
+                    Err(error) => error,
+                };
                 #[cfg(unix)]
                 let error =
                     match error.downcast::<super::super::herdr_consent::admission::QueuedHold>() {

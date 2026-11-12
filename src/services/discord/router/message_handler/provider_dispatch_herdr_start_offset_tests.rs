@@ -31,8 +31,7 @@ fn records(session: &str, at: chrono::DateTime<chrono::Utc>) -> [Value; 3] {
             at,
         ),
         timestamped(
-            json!({"type":"system", "subtype":"stop_hook_summary", "sessionId":session,
-            "hookCount":1,"hasOutput":true}),
+            json!({"type":"system", "subtype":"turn_duration", "sessionId":session}),
             at,
         ),
     ]

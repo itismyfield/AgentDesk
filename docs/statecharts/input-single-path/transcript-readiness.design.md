@@ -446,3 +446,22 @@ Stop 때 일부만 쓰인 옛 행의 뒤늦은 완성을 새 활동으로 인정
 permission-mode는 현재 terminal을 무효화하되 뒤의 정상 완료까지 거절하지 않는다. bounded 준비 대기는 readiness/dialog.rs에서 기존 startup plan·5회 해제 한도·500ms settle·composer lock·cancel을 반복 적용한다. 이 UI 처리는 준비 증거가 아니며 SourceStart/Idle 확인은 별도다. Herdr 첫 입력의 시험은 실제 run_ready와 현재 source를 사용하고 옛 test-only run/when_ready wrapper는 제거했다. /resume B 뒤 늦은 /clear X의 typed ingress 판정 연결(P2)은 별도 후속이며 이번에 변경하지 않았다.
 
 완료 retirement는 자기 닫힌 출력까지의 historical prefix를 사용한다. 현재 Idle proof는 이후 native activity가 없는 tail을 별도로 요구한다. 완료 뒤 새 user/assistant가 timer read보다 먼저 와도 자기 fence는 종결하며 Running 주입은0이다. 새 턴의 실제 terminal 뒤에는 Submit 훅 유실과 무관하게 일반 준비가 진행한다.
+
+## AwaitingClear adoption
+
+An authenticated SessionStart(clear) certifies the exact canonical context, latest
+Pending record and publication time under source authority. The certificate is
+atomically persisted and survives a daemon restart. A bare Pending or an older
+context, nonce, sequence, source or unreadable certificate cannot retire a binding.
+
+The Herdr first-input boundary revalidates that certificate and Pending under the
+same source authority, persists its one-use fence, then publishes the new pre-source
+through the existing AwaitFirst binding publisher. Retirement and pre-source adoption
+are one observable source transition. The O writer remains the sole cursor owner;
+this transition neither deletes nor resets an old O cursor. A consumed certificate
+without volatile readiness after a crash stays Held and cannot bootstrap again.
+Other stop, cancellation, launch and exact-close paths retain their existing owners.
+
+The clear refinement checks live adoption, pre-input restart, missing certification,
+consumed certification, missing revalidation, cursor loss and split publication.
+The normal cases retain immediate one-time input after a valid Pending clear.

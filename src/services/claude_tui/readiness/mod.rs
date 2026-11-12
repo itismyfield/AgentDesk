@@ -1,5 +1,7 @@
 //! Current-source Idle readiness; external Busy injection keeps its own entry path.
 pub(crate) mod compact;
+#[cfg(unix)]
+pub(crate) use source::adopt_awaiting_clear;
 mod dialog;
 mod evidence;
 pub(crate) mod idle;
@@ -336,6 +338,10 @@ pub(crate) fn note_hook(
             }
         }
     }
+    #[cfg(unix)]
+    if *kind == HookEventKind::SessionStart && payload["source"] == "clear" {
+        source::note_clear(context, published, native, &path);
+    }
     let mut state = ledger();
     if *kind == HookEventKind::SessionStart {
         if let (Some(ctx), Some(at)) = (context, published)
@@ -520,3 +526,9 @@ fn watch(session: &str, draft_required: bool) {
     #[cfg(not(unix))]
     let _ = (session, draft_required);
 }
+
+#[cfg(all(test, unix))]
+pub(crate) use source::CLEAR_AFTER_PUBLICATION;
+
+#[cfg(unix)]
+pub(crate) use source::clear_wakeable;

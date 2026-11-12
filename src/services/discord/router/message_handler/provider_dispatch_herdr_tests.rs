@@ -18,7 +18,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     SourceRef,
 };
 use crate::services::claude::herdr_turn::{self, AttachRequest, HerdrTurn, HerdrTurnPorts};
-use crate::services::claude::session_handoff::{EarlierExecution, ExitSend, Liveness};
+use crate::services::claude::session_handoff::EarlierExecution;
 use crate::services::claude_tui::hook_server::HookEvent;
 use crate::services::claude_tui::hook_server::observation_ingress::tests::{Ingress, claude, uuid};
 use crate::services::claude_tui::host_input::{
@@ -135,37 +135,9 @@ fn expected(nonce: &str) -> ExpectedExecution {
     }
 }
 
-/// The legacy tmux Claude a resume ends first: running while `alive`; an `/exit` ends it unless
-/// `stays`, and a person's draft (`draft`) keeps it untouched.
-#[derive(Default)]
-struct OldTmux {
-    alive: AtomicBool,
-    stays: AtomicBool,
-    draft: AtomicBool,
-    exits: AtomicUsize,
-}
-
-struct OldTmuxView(Arc<OldTmux>);
-
-impl EarlierExecution for OldTmuxView {
-    fn liveness(&mut self) -> Liveness {
-        match self.0.alive.load(Ordering::SeqCst) {
-            true => Liveness::Running,
-            false => Liveness::Ended,
-        }
-    }
-
-    fn send_exit(&mut self) -> ExitSend {
-        if self.0.draft.load(Ordering::SeqCst) {
-            return ExitSend::Untouched("a person's draft".into());
-        }
-        self.0.exits.fetch_add(1, Ordering::SeqCst);
-        if !self.0.stays.load(Ordering::SeqCst) {
-            self.0.alive.store(false, Ordering::SeqCst);
-        }
-        ExitSend::Sent
-    }
-}
+#[path = "provider_dispatch_herdr_exact_close_tests.rs"]
+pub(crate) mod exact_close_tests;
+use exact_close_tests::OldTmux;
 
 /// The production attach and reconcile, with this test's launch host and hook receiver.
 struct Ports<'a> {
@@ -187,7 +159,7 @@ struct Ports<'a> {
 
 impl HerdrTurnPorts for Ports<'_> {
     fn earlier_tmux<'a>(&self, _logical: &'a str) -> Box<dyn EarlierExecution + 'a> {
-        Box::new(OldTmuxView(self.old_tmux.clone()))
+        self.old_tmux.view()
     }
 
     fn auth_overlay(&self, logical: &str) -> Result<ProviderAuthOverlay, String> {
@@ -266,7 +238,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str, hosted: Option<Value>) -> Self {
-        let root = TestRuntimeRootGuard::new();
+        Self::with_root(tag, hosted, TestRuntimeRootGuard::new())
+    }
+
+    fn with_root(tag: &str, hosted: Option<Value>, root: TestRuntimeRootGuard) -> Self {
         let home = tempfile::tempdir().unwrap();
         let env = Guard::set_path_after_shared_test_env_lock("CLAUDE_CONFIG_DIR", home.path());
         let claude_bin = home.path().join("claude");
@@ -363,10 +338,19 @@ impl Fixture {
         std::fs::write(marker, "herdr").unwrap();
         let session = uuid();
         let transcript = self.ingress.transcript(&session);
+        append(
+            &transcript,
+            &[
+                json!({"type":"user","sessionId":session,"message":{"role":"user","content":"previous turn"}}),
+                json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}),
+                json!({"type":"system","subtype":"turn_duration","sessionId":session}),
+            ],
+        );
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
             self.logical(),
             claude(&transcript, &session),
         );
+        crate::services::claude_tui::readiness::tests::pre_source(self.logical(), &transcript);
         HostedExecution {
             schema: 1,
             state: HostedState::Bound,
@@ -421,7 +405,10 @@ impl Fixture {
             attaches: Mutex::default(),
             cancel_after_attach: false,
             cancel: &self.cancel,
-            old_tmux: Arc::default(),
+            old_tmux: Arc::new(OldTmux::new(
+                self.logical(),
+                self.session.lock().unwrap().clone(),
+            )),
             overlay: self.overlay.lock().unwrap().clone(),
             lease: None,
         }
@@ -709,9 +696,10 @@ struct Started {
 impl Started {
     fn hook(&self, fx: &Fixture, event: &str, payload: &Value) -> u16 {
         let uri = format!("/hooks/claude/{event}?session_id={}", self.session);
+        let request_id = uuid();
         let sent = fx
             .ingress
-            .send_envelope(&uri, payload, None, Some(&self.envelope));
+            .send_envelope(&uri, payload, Some(&request_id), Some(&self.envelope));
         sent.0
     }
 }
@@ -1544,7 +1532,8 @@ impl Fixture {
         let answered = json!({"type": "assistant", "sessionId": session,
             "timestamp": "2026-10-01T00:00:01Z", "message": {"role": "assistant",
             "stop_reason": "end_turn", "content": [{"type": "text", "text": "alpha"}]}});
-        append(&path, &[said, answered]);
+        let done = json!({"type":"system","subtype":"turn_duration","sessionId":session});
+        append(&path, &[said, answered, done]);
         let marker = crate::services::tmux_common::session_temp_path(self.logical(), "host_kind");
         std::fs::write(marker, "tmux").unwrap();
         crate::services::tui_prompt_dedupe::register_tmux_channel(self.logical(), CHANNEL);
@@ -1613,7 +1602,7 @@ impl Fixture {
     }
 }
 
-// A tmux session moves to Herdr under its own id: one `/exit`, a resume of the same session bound
+// A tmux session moves to Herdr under its own id: one exact close, a resume of the same session bound
 // by its own start, one prompt, and every earlier transcript byte kept in front.
 #[test]
 fn f1_a_tmux_session_resumes_on_herdr_under_its_own_id_after_its_claude_exits_pg() {
@@ -1622,7 +1611,7 @@ fn f1_a_tmux_session_resumes_on_herdr_under_its_own_id_after_its_claude_exits_pg
     let before = std::fs::read(&path).unwrap();
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
         if let Some(started) = fx.start_provider_as(&launcher, true, "resume") {
             assert_eq!((&started.session, &started.path), (&session, &path));
@@ -1630,8 +1619,10 @@ fn f1_a_tmux_session_resumes_on_herdr_under_its_own_id_after_its_claude_exits_pg
         }
     });
     assert_eq!(result, Ok(()));
-    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 1);
-    assert!(!ports.old_tmux.alive.load(Ordering::SeqCst));
+    assert_eq!(ports.old_tmux.closes(), 1);
+    assert!(!ports.old_tmux.exists());
+    assert!(ports.old_tmux.peer_exists());
+    ports.old_tmux.assert_no_input();
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     assert_eq!(fx.rig.sends(), prompt_sends());
     assert_eq!(fx.row(), Some(HostedState::Bound));
@@ -1671,14 +1662,14 @@ fn f6_a_session_of_another_account_starts_fresh_and_ends_nothing_pg() {
     std::fs::write(marker, "another-account").unwrap();
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
         if let Some(started) = fx.start_provider(&launcher, true) {
             fx.answer(&started);
         }
     });
     assert_eq!(result, Ok(()));
-    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.old_tmux.closes(), 0);
     let script = fx.launch_script();
     assert!(!script.contains(&session), "{script}");
     assert!(script.contains("'--session-id'"), "{script}");
@@ -1708,10 +1699,10 @@ fn f6b_a_fresh_launch_that_never_ran_does_not_vouch_for_the_earlier_session_pg()
     *launcher.create_fails.lock().unwrap() =
         Some(HerdrCreateOutcome::NotSent("connect refused".into()));
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let (first, _) = fx.turn(&HostedRecord::Legacy, &ports, || {});
     assert!(first.unwrap_err().contains("NotSent"));
-    assert!(ports.old_tmux.alive.load(Ordering::SeqCst));
+    assert!(ports.old_tmux.exists());
     assert_eq!(fx.row(), Some(HostedState::Retired));
     assert_eq!(
         fx.session.lock().unwrap().as_deref(),
@@ -1725,7 +1716,7 @@ fn f6b_a_fresh_launch_that_never_ran_does_not_vouch_for_the_earlier_session_pg()
         }
     });
     assert_eq!(second, Ok(()));
-    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.old_tmux.closes(), 0);
     let script = fx.launch_script();
     assert!(!script.contains(&session), "{script}");
     assert!(script.contains("'--session-id'"), "{script}");
@@ -1750,7 +1741,7 @@ fn f8_a_named_account_session_resumes_from_its_own_home_pg() {
         .unwrap();
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
         if let Some(started) = fx.start_provider_as(&launcher, true, "resume") {
             assert_eq!((&started.session, &started.path), (&session, &path));
@@ -1758,7 +1749,7 @@ fn f8_a_named_account_session_resumes_from_its_own_home_pg() {
         }
     });
     assert_eq!(result, Ok(()));
-    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 1);
+    assert_eq!(ports.old_tmux.closes(), 1);
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     assert_eq!(fx.rig.sends(), prompt_sends());
     assert_eq!(fx.row(), Some(HostedState::Bound));
@@ -1786,14 +1777,14 @@ fn f2_a_session_whose_transcript_is_gone_starts_fresh_and_ends_nothing_pg() {
     *fx.session.lock().unwrap() = Some(gone.clone());
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
         if let Some(started) = fx.start_provider(&launcher, true) {
             fx.answer(&started);
         }
     });
     assert_eq!(result, Ok(()));
-    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.old_tmux.closes(), 0);
     let nonce = launcher.nonces.lock().unwrap()[0].clone();
     let context =
         crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", &nonce)
@@ -1806,37 +1797,6 @@ fn f2_a_session_whose_transcript_is_gone_starts_fresh_and_ends_nothing_pg() {
     assert!(fx.launch_script().contains("'--session-id'"));
 }
 
-// An old Claude holding a person's draft, or one that outlives its exit, keeps running; the
-// turn stops before any create and nothing is killed.
-#[test]
-fn f3_an_old_claude_that_does_not_exit_keeps_its_session_and_nothing_launches_pg() {
-    for (tag, draft) in [("resume-f3-draft", true), ("resume-f3-stays", false)] {
-        let fx = Fixture::new(tag, None);
-        fx.seed_resumable(true);
-        let launcher = Arc::new(Launcher::default());
-        let ports = fx.ports(&launcher);
-        ports.old_tmux.alive.store(true, Ordering::SeqCst);
-        ports.old_tmux.draft.store(draft, Ordering::SeqCst);
-        ports.old_tmux.stays.store(true, Ordering::SeqCst);
-        let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {});
-        let error = result.unwrap_err();
-        let says = if draft {
-            "kept running"
-        } else {
-            "did not exit"
-        };
-        assert!(error.contains(says), "{error}");
-        assert_eq!(
-            ports.old_tmux.exits.load(Ordering::SeqCst),
-            usize::from(!draft)
-        );
-        assert!(ports.old_tmux.alive.load(Ordering::SeqCst));
-        assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
-        assert!(fx.rig.sends().is_empty());
-        assert_eq!(fx.record(), HostedRecord::Legacy);
-    }
-}
-
 // A transcript O holds no cursor on would be posted again from its start: nothing launches
 // and the old Claude is left running.
 #[test]
@@ -1845,11 +1805,11 @@ fn f4_a_transcript_o_does_not_read_is_never_resumed_pg() {
     fx.seed_resumable(false);
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {});
     let error = result.unwrap_err();
     assert!(error.contains("O reads no cursor"), "{error}");
-    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.old_tmux.closes(), 0);
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
     assert_eq!(fx.record(), HostedRecord::Legacy);
 }
@@ -1862,7 +1822,7 @@ fn f5a_a_resumed_start_logged_before_the_attach_lets_the_next_turn_attach_pg() {
     fx.seed_resumable(true);
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     // This turn never sees the start: it stops after the hook was answered, before any attach.
     let (_quiet, unseen) = tokio::sync::broadcast::channel(1);
     *ports.hooks.lock().unwrap() = Some(unseen);
@@ -1881,7 +1841,11 @@ fn f5a_a_resumed_start_logged_before_the_attach_lets_the_next_turn_attach_pg() {
         .unwrap()
         .take()
         .expect("the provider started");
-    let ports = fx.ports(&launcher);
+    let old = ports.old_tmux.clone();
+    let before = old.closes();
+    assert_eq!(before, 1);
+    let mut ports = fx.ports(&launcher);
+    ports.old_tmux = old;
     let (second, _) = fx.turn(&fx.record(), &ports, || fx.answer(&started));
     assert_eq!(second, Ok(()));
     assert_eq!(ports.attaches.lock().unwrap().len(), 1);
@@ -1889,10 +1853,12 @@ fn f5a_a_resumed_start_logged_before_the_attach_lets_the_next_turn_attach_pg() {
     assert_eq!(fx.row(), Some(HostedState::Bound));
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     assert_eq!(
-        ports.old_tmux.exits.load(Ordering::SeqCst),
+        ports.old_tmux.closes() - before,
         0,
         "a Pending ends nothing"
     );
+    assert!(ports.old_tmux.peer_exists());
+    ports.old_tmux.assert_no_input();
 }
 
 // A resumed start whose transcript cannot be looked at is not answered as logged; once it can, the
@@ -1921,7 +1887,7 @@ fn f5c_a_resumed_start_not_logged_is_answered_only_once_its_record_lands_pg() {
         .unwrap();
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
         let Some(started) = fx.start_provider_as(&launcher, false, "resume") else {
             return;
@@ -1957,7 +1923,7 @@ fn f5b_a_resume_stopped_before_its_start_was_recorded_stays_pending_pg() {
     fx.seed_resumable(true);
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let (first, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
         if fx.start_provider_as(&launcher, false, "resume").is_some() {
             fx.cancel_now();
@@ -1966,15 +1932,20 @@ fn f5b_a_resume_stopped_before_its_start_was_recorded_stays_pending_pg() {
     let first = first.unwrap_err();
     assert!(first.contains("no SessionStart"), "{first}");
     assert_eq!(fx.row(), Some(HostedState::Pending));
-    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 1);
-    let ports = fx.ports(&launcher);
+    assert_eq!(ports.old_tmux.closes(), 1);
+    let old = ports.old_tmux.clone();
+    let before = old.closes();
+    let mut ports = fx.ports(&launcher);
+    ports.old_tmux = old;
     let (second, _) = fx.turn(&fx.record(), &ports, || {});
     let second = second.unwrap_err();
     assert!(second.contains("no logged start"), "{second}");
     assert!(ports.attaches.lock().unwrap().is_empty());
     assert!(fx.rig.sends().is_empty());
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
-    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.old_tmux.closes() - before, 0);
+    assert!(ports.old_tmux.peer_exists());
+    ports.old_tmux.assert_no_input();
     assert_eq!(fx.row(), Some(HostedState::Pending));
 }
 
@@ -1986,7 +1957,7 @@ fn f7_a_resume_does_not_take_a_fresh_start_of_its_session_for_its_own_pg() {
     fx.seed_resumable(true);
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    ports.old_tmux.start();
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
         if fx.start_provider_as(&launcher, true, "startup").is_some() {
             std::thread::sleep(Duration::from_millis(1500));
