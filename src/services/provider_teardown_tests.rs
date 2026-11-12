@@ -67,12 +67,20 @@ pub(crate) mod test_support {
             let reason = crate::services::tmux_common::session_temp_path(name, "exit_reason");
             std::fs::write(dir.path().join("reason_path"), reason).unwrap();
             std::fs::write(dir.path().join("session_name"), format!("{name}\n")).unwrap();
+            let identity =
+                crate::services::session_identity_metadata::runtime_identity(name).unwrap();
+            std::fs::write(
+                dir.path().join("identity"),
+                identity.environment_assignment().unwrap(),
+            )
+            .unwrap();
             let binary = dir.path().join("tmux");
             let mut file = std::fs::File::create(&binary).expect("fake tmux");
             writeln!(
                 file,
                 "#!/bin/sh\n[ \"$1\" = -u ] && shift\nd=\"$(dirname \"$0\")\"\n\
                  [ \"$1\" = -N ] && shift\n\
+                 if [ \"$1\" = show-environment ]; then [ ! -f \"$d/missing\" ] && [ ! -f \"$d/probe_fails\" ] && [ \"$3\" = \"=$(cat \"$d/session_name\")\" ] || exit 1; cat \"$d/identity\"; exit 0; fi\n\
                  echo \"$*\" >> \"$d/calls\"\ncase \"$1\" in\n\
                  has-session) [ -f \"$d/probe_fails\" ] && {{ echo \"error connecting to $d/socket (Permission denied)\" >&2; exit 1; }}\n\
                  [ -f \"$d/missing\" ] && {{ echo \"can't find session: $3\" >&2; exit 1; }}; exit 0 ;;\nlist-panes) if [ -f \"$d/pane_dead\" ]; then echo 1; else echo 0; fi; exit 0 ;;\n\
