@@ -16,7 +16,8 @@ Init == \E c1, noReply, held \in BOOLEAN:
              prejudgeDone |-> (~PrejudgeEnabled \/ Mode = "script"),
              prejudgeCalls |-> 0, prejudgeResult |-> "none",
              c1 |-> c1, noReply |-> noReply, replayHeld |-> held,
-             bodyPosts |-> 0, rawHash |-> 17, restarted |-> FALSE, recoverySettled |-> FALSE, episodePresent |-> TRUE]
+             bodyPosts |-> 0, rawHash |-> 17, restarted |-> FALSE, recoverySettled |-> FALSE, episodePresent |-> TRUE,
+             drainMarker |-> FALSE]
 
 CompleteScript ==
     /\ ~s.recovering
@@ -201,10 +202,13 @@ AwaitRecoveryCommit == s.status = "running" /\ s.recovering /\ UNCHANGED s
 RecoveryFinish == RecoverWithdraw \/ RecoverUnsent \/ RecoverWithoutWithdraw \/ RecoverUncertain
 RestartCompleted ==
     /\ s.status = "succeeded" /\ s.outcomeKind = "agent" /\ ~s.restarted
-    /\ s' = [s EXCEPT !.restarted = TRUE, !.recovering = TRUE]
+    /\ \E drain \in BOOLEAN:
+         s' = [s EXCEPT !.restarted = TRUE, !.recovering = TRUE, !.drainMarker = drain]
 RestoreCompleted ==
     /\ s.status = "succeeded" /\ s.recovering
+    /\ ~(Policy = "before_drain_settlement" /\ s.drainMarker /\ s.c1 /\ s.noReply)
     /\ s' = [s EXCEPT !.recovering = FALSE, !.recoverySettled = TRUE, !.episodePresent = s.replayHeld,
+                      !.drainMarker = FALSE,
                       !.bodyPosts = IF Policy = "before_recovery_presentation" /\ s.c1 /\ s.noReply
                                    THEN @ + 1 ELSE @]
 Restart == s.status = "running" /\ UNCHANGED s
@@ -218,7 +222,7 @@ Next == Prejudge \/ Admit \/ OwnerAccept \/ RefuseBeforeKey \/ RearmKnownUnsent 
         \/ Expire \/ Finish \/ BeginRecovery \/ RecoveryFinish \/ AwaitRecoveryCommit
         \/ LateDispatch \/ TeardownChannel \/ AwaitHeld \/ Restart \/ RestartCompleted \/ RestoreCompleted \/ Done
 Spec == Init /\ [][Next]_vars /\ WF_vars(Expire) /\ WF_vars(Finish)
-        /\ WF_vars(RecoveryFinish)
+        /\ WF_vars(RecoveryFinish) /\ WF_vars(RestoreCompleted)
 
 NoDuplicateTurn == s.acceptedTurns <= 1
 SuccessfulAgentExactlyOne == (s.status = "succeeded" /\ s.outcomeKind = "agent") => s.acceptedTurns = 1
@@ -237,4 +241,5 @@ NoReplyRecoveryBodyZero == (s.c1 /\ s.noReply) => s.bodyPosts = 0
 RecoveryPreservesRaw == s.rawHash = 17
 HeldEpisodeSurvives == s.replayHeld => s.episodePresent
 EveryRunTerminates == <>(s.status \in Terminal)
+QuietRestartEventuallySettles == (s.c1 /\ s.noReply /\ s.restarted) ~> s.recoverySettled
 =============================================================================

@@ -24,16 +24,31 @@ pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_vis
     if crate::services::provider::cancel_requested(owner.cancel_token.as_deref()) {
         return false;
     }
-    // A live actor, an unknown format, or a planned restart retains its existing authority.
+    // Live actors and unknown formats retain their existing authority.
     if owner.cancel_token.is_some()
         || saved.rebind_origin
-        || saved.restart_mode.is_some()
         || saved.runtime_kind_unknown_on_disk
         || saved.version > inflight::inflight_state_version()
     {
         return true;
     }
     let mut row = saved.clone();
+    if row.restart_mode.is_some() {
+        let Some(adopted) = shared
+            .mailbox(channel)
+            .commit_captured_ready_delivery(CapturedReadyDeliveryCommit {
+                shared: shared.clone(),
+                state: row,
+                actor: None,
+                quiet_restart_generation: Some(shared.restart.current_generation),
+                delivery: RecoveryRelayOutcome::Delivered.into(),
+            })
+            .await
+        else {
+            return true;
+        };
+        row = adopted.state;
+    }
     if !super::replay_hold::hydrate_replay_hold(
         shared.pg_pool.as_ref(),
         &mut row,
@@ -64,6 +79,7 @@ pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_vis
             shared: shared.clone(),
             state: row,
             actor: None,
+            quiet_restart_generation: None,
             delivery: RecoveryRelayOutcome::Delivered.into(),
         })
         .await
@@ -99,4 +115,50 @@ pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_vis
     )
     .await;
     true
+}
+
+/// Called by the serialized mailbox actor; the row lock rechecks the saved success and epoch.
+pub(super) fn adopt_quiet_drain_restart(
+    expected: &inflight::InflightTurnState,
+    generation: u64,
+    actor: Option<&Arc<CancelToken>>,
+) -> Option<inflight::InflightTurnState> {
+    let provider = expected.provider_kind()?;
+    let mut locked = inflight::lock_inflight_episode(
+        &provider,
+        expected.channel_id,
+        &inflight::InflightEpisodePin::from_state(expected),
+    )
+    .ok()?;
+    let current = locked.state();
+    let marker_generation = current.restart_generation?;
+    if actor.is_some()
+        || provider != ProviderKind::Claude
+        || current.save_generation != expected.save_generation
+        || current.restart_mode != Some(crate::services::discord::InflightRestartMode::DrainRestart)
+        || current.restart_mode != expected.restart_mode
+        || current.restart_generation != expected.restart_generation
+        || marker_generation == 0
+        || marker_generation >= generation
+        || current.born_generation == 0
+        || current.born_generation >= generation
+        || current.user_msg_id == 0
+        || current.request_owner_user_id == 0
+        || current.rebind_origin
+        || current.runtime_kind_unknown_on_disk
+        || current.version > inflight::inflight_state_version()
+        || current.terminal_receipt.is_some()
+        || current.tui_terminal_kind == Some(NativeTerminalKind::Aborted)
+        || current.routine_presentation.terminal_presentation()
+            != TerminalPresentation::NoVisibleResult
+    {
+        return None;
+    }
+    let mut adopted = current.clone();
+    adopted.clear_restart_mode();
+    matches!(
+        locked.persist_verified_under_guard(&adopted, "routine_quiet_drain_adoption"),
+        inflight::GuardedSaveOutcome::Saved
+    )
+    .then(|| locked.state().clone())
 }

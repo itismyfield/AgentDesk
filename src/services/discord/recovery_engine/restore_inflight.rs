@@ -53,6 +53,7 @@ pub(super) use output_paths::detect_live_tmux_output_path;
 mod replay_hold;
 #[path = "restore_inflight/routine_presentation.rs"]
 mod routine_presentation;
+pub(super) use routine_presentation::adopt_quiet_drain_restart;
 pub(super) use routine_presentation::settle_routine_no_visible;
 
 #[path = "restore_inflight/replay_decision.rs"]

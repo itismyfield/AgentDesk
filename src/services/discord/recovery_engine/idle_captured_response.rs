@@ -360,6 +360,7 @@ async fn settle_captured_ready_delivery(
             shared: shared.clone(),
             state: state.clone(),
             actor: actor.cloned(),
+            quiet_restart_generation: None,
             delivery,
         })
         .await

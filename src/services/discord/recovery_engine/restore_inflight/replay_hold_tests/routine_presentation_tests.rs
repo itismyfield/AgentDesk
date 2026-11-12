@@ -6,7 +6,13 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let (db, pool) = fixture().await;
-    let shared = shared_on(&pool).await;
+    let mut shared = shared_on(&pool).await;
+    let drain = evidence.starts_with("drain");
+    let old_generation = if drain {
+        crate::services::discord::runtime_store::allocate_process_generation()
+    } else {
+        0
+    };
     let provider = ProviderKind::Claude;
     let channel = 1_479_811_700_000_100_000;
     let name = provider.build_tmux_session_name("routine-restart");
@@ -22,6 +28,7 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
     let _present = InjectedPresenceGuard::set(HostSessionRef::tmux(&name), HostPresence::Missing);
     let output = tempfile::NamedTempFile::new().unwrap();
     let mut original = row(channel, name);
+    original.born_generation = old_generation;
     original.full_response = if evidence == "empty" {
         ""
     } else {
@@ -77,12 +84,44 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
     };
     let raw_hash = format!("{:x}", Sha256::digest(bytes.as_bytes()));
     inflight::save_inflight_state_create_new(&original).unwrap();
+    if drain {
+        let report = inflight::mark_restart_mode_blocking(
+            provider.clone(),
+            crate::services::discord::InflightRestartMode::DrainRestart,
+        )
+        .await;
+        assert_eq!(report.marked, 1);
+        assert!(report.failed.is_empty() && !report.incomplete);
+        Arc::get_mut(&mut shared)
+            .unwrap()
+            .restart
+            .current_generation = old_generation + 1;
+    }
     let serialized = inflight::load_inflight_state(&provider, channel).unwrap();
+    if drain {
+        assert_eq!(serialized.restart_generation, Some(old_generation));
+    }
     assert_eq!(
         serialized.routine_presentation,
         original.routine_presentation
     );
     let discord = o_cut_recorder::start(channel).await;
+    let live_actor = if evidence == "drain_live" {
+        let actor = Arc::new(CancelToken::new());
+        assert!(
+            shared
+                .mailbox(ChannelId::new(channel))
+                .try_start_turn(
+                    actor.clone(),
+                    serenity::UserId::new(7),
+                    serenity::MessageId::new(original.user_msg_id),
+                )
+                .await
+        );
+        Some(actor)
+    } else {
+        None
+    };
     let lease = if evidence == "lease_busy" {
         match crate::services::discord::turn_bridge::NoVisibleResultLease::acquire(
             &shared,
@@ -110,6 +149,26 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
     } else {
         restore_inflight_turns(&discord.http, &shared, &provider).await;
     }
+    if let Some(actor) = live_actor {
+        let kept = inflight::load_inflight_state(&provider, channel).unwrap();
+        assert_eq!(
+            serde_json::to_value(&kept).unwrap(),
+            serde_json::to_value(&serialized).unwrap()
+        );
+        let snapshot = shared.mailbox(ChannelId::new(channel)).snapshot().await;
+        assert!(Arc::ptr_eq(snapshot.cancel_token.as_ref().unwrap(), &actor));
+        assert!(discord.contents().is_empty());
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(output.path()).unwrap())
+            ),
+            raw_hash
+        );
+        pool.close().await;
+        db.drop().await;
+        return;
+    }
     if let Some(lease) = lease {
         let kept = inflight::load_inflight_state(&provider, channel).unwrap();
         assert!(
@@ -134,6 +193,14 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
         let remaining = inflight::load_inflight_state(&provider, channel);
         if held {
             let remaining = remaining.expect("a hold retains the request episode");
+            if drain {
+                assert!(
+                    remaining.restart_mode.is_none(),
+                    "the completed drain marker must be consumed"
+                );
+                assert_eq!(remaining.turn_nonce, original.turn_nonce);
+                assert_eq!(remaining.born_generation, original.born_generation);
+            }
             assert!(
                 remaining.terminal_delivery_completed(),
                 "quiet debt must be settled"
@@ -265,4 +332,20 @@ async fn i8117_recovery_quiet_without_progress_is_terminal_pg() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn i8117_drain_restart_quiet_settles_pg() {
+    for committed in [false, true] {
+        for held in [false, true] {
+            for captured in [false, true] {
+                restored(committed, held, "drain", true, captured).await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn i8117_drain_restart_live_actor_preserves_marker_pg() {
+    restored(false, false, "drain_live", true, true).await;
 }
