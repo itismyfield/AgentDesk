@@ -73,9 +73,15 @@ fn request_json(method: &str, path: &str, body: Option<Value>) -> Result<Value, 
         {
             Err("test instance API redirect rejected".to_string())
         }
-        Ok(response) => response
-            .into_json()
-            .map_err(|error| format!("monitoring API response parse failed: {error}")),
+        Ok(response) => {
+            if crate::config::test_instance::requested() && (300..400).contains(&response.status())
+            {
+                return Err("test instance API redirect rejected".to_string());
+            }
+            response
+                .into_json()
+                .map_err(|error| format!("monitoring API response parse failed: {error}"))
+        }
         Err(ureq::Error::Status(code, response)) => {
             let body = match response.into_string() {
                 Ok(body) => body,

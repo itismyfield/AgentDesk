@@ -68,6 +68,9 @@ fn request_json_at(
     if config::test_instance::requested() && (300..400).contains(&resp.status()) {
         return Err("test instance API redirect rejected".to_string());
     }
+    if crate::config::test_instance::requested() && (300..400).contains(&resp.status()) {
+        return Err("test instance API redirect rejected".to_string());
+    }
     resp.into_json().map_err(|e| format!("Parse error: {e}"))
 }
 
