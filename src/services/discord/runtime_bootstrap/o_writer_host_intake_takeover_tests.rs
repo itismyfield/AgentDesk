@@ -174,7 +174,7 @@ async fn intake_takeover(provider: ShadowProvider, channel: u64) {
     assert_eq!(candidate(channel).peek(), Adoption::Committed);
     let sources = init_sources(&OStore::existing(&root).unwrap(), channel);
     let sources: Vec<_> = sources.into_iter().map(|(source, _)| source).collect();
-    assert_eq!(sources, [taken.clone()]);
+    assert_eq!(sources, std::slice::from_ref(&taken));
 
     let answer = match provider {
         Claude => {
