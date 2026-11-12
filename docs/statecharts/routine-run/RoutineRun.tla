@@ -1,21 +1,24 @@
 ----------------------------- MODULE RoutineRun -----------------------------
 EXTENDS Naturals
-CONSTANTS Mode, Policy
+CONSTANTS Mode, Policy, PrejudgeEnabled
 
 VARIABLE s
 vars == <<s>>
 Terminal == {"succeeded", "failed", "interrupted", "skipped", "paused"}
 Unsent == {"none", "input_pending", "accepted", "NotSent", "retry_scheduled"}
 
-Init == s = [status |-> "running", action |-> IF Mode = "script" THEN "complete" ELSE "agent",
+Init == s = [mode |-> Mode, status |-> "running", action |-> IF Mode = "script" THEN "complete" ELSE "agent",
              input |-> "none", queued |-> FALSE, acceptedTurns |-> 0,
              lateAcceptedTurns |-> 0, expired |-> FALSE, recorded |-> FALSE,
-             notified |-> FALSE, retryCount |-> 0, sharedDestroyed |-> FALSE, recovering |-> FALSE]
+             notified |-> FALSE, retryCount |-> 0, sharedDestroyed |-> FALSE, recovering |-> FALSE,
+             keyPending |-> FALSE, outcomeKind |-> "pending", reason |-> "none",
+             prejudgeDone |-> (~PrejudgeEnabled \/ Mode = "script"),
+             prejudgeCalls |-> 0, prejudgeResult |-> "none"]
 
 CompleteScript ==
     /\ ~s.recovering
     /\ s.status = "running" /\ s.action = "complete" /\ s.input = "none"
-    /\ s' = [s EXCEPT !.status = "succeeded", !.recorded = TRUE]
+    /\ s' = [s EXCEPT !.status = "succeeded", !.recorded = TRUE, !.outcomeKind = "script"]
 
 SkipOrPause ==
     /\ ~s.recovering
@@ -23,12 +26,13 @@ SkipOrPause ==
     /\ \E result \in {"skipped", "paused"}:
          s' = [s EXCEPT !.status = result,
                         !.action = IF result = "paused" THEN "pause" ELSE "skip",
-                        !.recorded = TRUE, !.notified = result = "paused"]
+                        !.recorded = TRUE, !.notified = result = "paused", !.outcomeKind = "script"]
 
 Admit ==
     /\ ~s.recovering
-    /\ s.status = "running" /\ s.action = "agent" /\ s.input = "none" /\ ~s.expired
-    /\ s' = [s EXCEPT !.input = "input_pending", !.queued = TRUE]
+    /\ s.status = "running" /\ s.input = "none" /\ ~s.expired /\ s.prejudgeDone
+    /\ (s.action = "agent" \/ (Mode = "script" /\ Policy = "script_agent"))
+    /\ s' = [s EXCEPT !.input = "input_pending", !.queued = TRUE, !.action = "agent"]
 
 OwnerAccept ==
     /\ ~s.recovering
@@ -47,27 +51,32 @@ RearmKnownUnsent ==
     /\ s' = [s EXCEPT !.input = "accepted"]
 
 Submit ==
-    /\ ~s.recovering
-    /\ s.status = "running" /\ s.input = "accepted" /\ ~s.expired
+    /\ s.status = "running" /\ s.input = "accepted" /\ s.queued
     /\ s.acceptedTurns < 2
     /\ \E accepted \in {0, 1}:
          s' = [s EXCEPT !.input = "MayHaveSent", !.queued = FALSE,
-                        !.acceptedTurns = @ + accepted]
+                        !.acceptedTurns = @ + accepted, !.keyPending = accepted = 0]
 
 ObserveAccepted ==
     /\ ~s.recovering
-    /\ s.status = "running" /\ s.input = "MayHaveSent" /\ s.acceptedTurns > 0
+    /\ s.status = "running" /\ s.input = "MayHaveSent" /\ s.acceptedTurns > 0 /\ ~s.keyPending
     /\ s' = [s EXCEPT !.input = "started"]
 
 ObserveNotSent ==
     /\ ~s.recovering
-    /\ s.status = "running" /\ s.input = "MayHaveSent" /\ s.acceptedTurns = 0
-    /\ s' = [s EXCEPT !.input = "NotSent", !.queued = TRUE]
+    /\ s.status = "running" /\ s.input = "MayHaveSent" /\ s.keyPending
+    /\ s' = [s EXCEPT !.input = "NotSent", !.queued = TRUE, !.keyPending = FALSE]
+
+NativeAccept ==
+    /\ s.keyPending /\ s.input \in {"MayHaveSent", "cancelled"}
+    /\ s.acceptedTurns < 2
+    /\ s' = [s EXCEPT !.keyPending = FALSE, !.acceptedTurns = @ + 1,
+                      !.lateAcceptedTurns = @ + IF s.status \in Terminal /\ s.input = "cancelled" THEN 1 ELSE 0]
 
 CompleteAgent ==
     /\ ~s.recovering
     /\ s.status = "running" /\ s.input = "started"
-    /\ s' = [s EXCEPT !.status = "succeeded", !.recorded = TRUE]
+    /\ s' = [s EXCEPT !.status = "succeeded", !.recorded = TRUE, !.outcomeKind = "agent"]
 
 ProviderFailure ==
     /\ ~s.recovering
@@ -113,10 +122,46 @@ DropHeld ==
     /\ s' = [s EXCEPT !.status = "failed", !.input = "cancelled", !.queued = FALSE]
 
 LateDispatch ==
-    /\ Policy \in {"no_deadline_cancel", "no_recovery_cancel"}
-    /\ s.status \in Terminal /\ s.queued
+    /\ s.status \in Terminal /\ s.queued /\ s.acceptedTurns < 2
     /\ s' = [s EXCEPT !.input = "MayHaveSent", !.queued = FALSE,
-                      !.acceptedTurns = @ + 1, !.lateAcceptedTurns = @ + 1]
+                      !.acceptedTurns = @ + 1, !.lateAcceptedTurns = @ + 1, !.keyPending = FALSE]
+
+Prejudge ==
+    /\ ~s.recovering /\ ~s.expired /\ s.status = "running"
+    /\ Mode # "script" /\ PrejudgeEnabled /\ ~s.prejudgeDone
+    /\ s.action = "agent" /\ s.input = "none" /\ s.prejudgeCalls = 0
+    /\ \E result \in {"rc0_no", "rc0_yes", "rc2", "rc3"}:
+         IF result = "rc0_no"
+         THEN s' = [s EXCEPT !.prejudgeDone = TRUE, !.prejudgeCalls = 1,
+                            !.prejudgeResult = result, !.status = "skipped", !.action = "skip",
+                            !.reason = "prejudge_no_work", !.outcomeKind = "script", !.recorded = TRUE]
+         ELSE s' = [s EXCEPT !.prejudgeDone = TRUE, !.prejudgeCalls = 1, !.prejudgeResult = result]
+
+FailureKinds == {"thread_setup_permanent", "js_error", "migration_invalid", "command_nonzero", "deferral_exhausted"}
+FailBeforeSubmit(kind) ==
+    /\ ~s.recovering /\ s.status = "running" /\ s.input = "none"
+    /\ kind \in FailureKinds
+    /\ (kind # "command_nonzero" \/ Mode = "script")
+    /\ s' = [s EXCEPT !.status = "failed", !.reason = kind,
+                      !.recorded = TRUE, !.notified = TRUE, !.outcomeKind = "failed"]
+
+ConsumeCommand ==
+    /\ ~s.recovering /\ ~s.expired /\ s.status = "running" /\ s.prejudgeDone
+    /\ s.action = "agent" /\ s.input = "none"
+    /\ s' = [s EXCEPT !.status = "succeeded", !.recorded = TRUE,
+                      !.action = IF Policy = "consumed_as_agent" THEN "agent" ELSE "complete",
+                      !.outcomeKind = IF Policy = "consumed_as_agent" THEN "agent" ELSE "command_consumed"]
+
+CancelAfterKey ==
+    /\ Policy = "cancel_after_key" /\ s.status = "running"
+    /\ (s.expired \/ s.recovering) /\ s.input = "MayHaveSent" /\ s.keyPending
+    /\ s' = [s EXCEPT !.status = "failed", !.input = "cancelled", !.queued = FALSE,
+                      !.recorded = TRUE, !.notified = TRUE, !.recovering = FALSE]
+
+TeardownChannel ==
+    /\ Policy = "channel_teardown" /\ Mode = "channel"
+    /\ s.status \in Terminal /\ ~s.sharedDestroyed
+    /\ s' = [s EXCEPT !.sharedDestroyed = TRUE]
 
 AwaitHeld ==
     /\ ~s.recovering
@@ -154,19 +199,26 @@ Restart == s.status = "running" /\ UNCHANGED s
 Done == s.status \in Terminal /\ UNCHANGED s
 
 Finish == CompleteScript \/ SkipOrPause \/ CompleteAgent \/ ProviderFailure
-          \/ CancelUnsentAtDeadline \/ CloseUncertainAtDeadline \/ DropHeld
-Next == Admit \/ OwnerAccept \/ RefuseBeforeKey \/ RearmKnownUnsent \/ Submit
-        \/ ObserveAccepted \/ ObserveNotSent \/ RetryStarted \/ ResendUnknown
+          \/ CancelUnsentAtDeadline \/ CloseUncertainAtDeadline \/ DropHeld \/ CancelAfterKey
+          \/ (\E kind \in FailureKinds: FailBeforeSubmit(kind)) \/ ConsumeCommand
+Next == Prejudge \/ Admit \/ OwnerAccept \/ RefuseBeforeKey \/ RearmKnownUnsent \/ Submit
+        \/ NativeAccept \/ ObserveAccepted \/ ObserveNotSent \/ RetryStarted \/ ResendUnknown
         \/ Expire \/ Finish \/ BeginRecovery \/ RecoveryFinish \/ AwaitRecoveryCommit
-        \/ LateDispatch \/ AwaitHeld \/ Restart \/ Done
+        \/ LateDispatch \/ TeardownChannel \/ AwaitHeld \/ Restart \/ Done
 Spec == Init /\ [][Next]_vars /\ WF_vars(Expire) /\ WF_vars(Finish)
         /\ WF_vars(RecoveryFinish)
 
 NoDuplicateTurn == s.acceptedTurns <= 1
-SuccessfulAgentExactlyOne == (s.status = "succeeded" /\ s.action = "agent") => s.acceptedTurns = 1
+SuccessfulAgentExactlyOne == (s.status = "succeeded" /\ s.outcomeKind = "agent") => s.acceptedTurns = 1
 ScriptHasNoAgentTurn == (Mode = "script" \/ s.action \in {"skip", "pause"}) => s.acceptedTurns = 0
 NoSilentLoss == s.status \in Terminal =>
                   (s.recorded /\ (s.status \in {"failed", "interrupted", "paused"} => s.notified))
+TerminalLeavesNothingQueued == s.status \in Terminal => ~s.queued
+PrejudgeAtMostOnce == s.prejudgeCalls <= 1
+ScriptHasNoPrejudge == Mode = "script" => s.prejudgeCalls = 0
+PrejudgeSkipHasNoAgent == s.reason = "prejudge_no_work" =>
+                           (s.status = "skipped" /\ s.acceptedTurns = 0 /\ ~s.queued)
+CommandConsumedHasNoAgent == s.outcomeKind = "command_consumed" => s.acceptedTurns = 0
 NoLateDispatch == s.lateAcceptedTurns = 0
 SharedSessionPreserved == ~s.sharedDestroyed
 EveryRunTerminates == <>(s.status \in Terminal)
