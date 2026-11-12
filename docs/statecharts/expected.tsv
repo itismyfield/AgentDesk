@@ -373,3 +373,12 @@ turn-view/BusyActiveBefore.cfg	TurnView	OneBusyResult	-
 turn-view/BusyActiveFixed.cfg	TurnView	-	-
 turn-view/BusyActiveNoFallback.cfg	TurnView	OneBusyResult,NoInvisibleSettled	AcceptedEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
+outbox-transaction/OutboxTransactionCurrent.cfg	OutboxTransaction	-	-
+outbox-transaction/OutboxTransactionService.cfg	OutboxTransaction	-	-
+outbox-transaction/OutboxTransactionPreobserve.cfg	OutboxTransaction	ProviderObservationPointPreserved,InsertUsesObservedDesignation	-
+outbox-transaction/OutboxTransactionSplitInsert.cfg	OutboxTransaction	AtomicCompletion,CommittedNoticeExactlyOnce,RollbackHasNoNewNotice,SameTransaction	-
+outbox-transaction/OutboxTransactionEarlyCensus.cfg	OutboxTransaction	CensusObservationPointPreserved	-
+outbox-transaction/OutboxTransactionFreshTask.cfg	OutboxTransaction	CensusObservationPointPreserved	-
+outbox-transaction/OutboxTransactionPreSource.cfg	OutboxTransaction	SourceDecisionUsesObservation	-
+outbox-transaction/OutboxTransactionForeignTx.cfg	OutboxTransaction	SameTransaction	-
+outbox-transaction/OutboxTransactionForeignProviderConnection.cfg	OutboxTransaction	SameProviderConnection	-
