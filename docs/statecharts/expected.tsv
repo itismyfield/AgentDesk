@@ -157,6 +157,8 @@ input-single-path/InputPathStopNotSentLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopBusyNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopProofOverStopLive.cfg	InputPath	-	StoppedLeaves
 routine-run/RoutineFailureEscalationBlindUnknown.cfg	RoutineFailureEscalation	NoBlindUnknownRepost,NoDuplicateDiscordMessage	-
+routine-run/RoutineFailureEscalationBypassIntake.cfg	RoutineFailureEscalation	OnlyExistingAcceptedBotIntake	-
+routine-run/RoutineFailureEscalationDropEventKey.cfg	RoutineFailureEscalation	AllEligibleStreaksOffered,AtMostOneRemediationPerIncident,AtMostOneTriggerPerStreak	-
 routine-run/RoutineFailureEscalationDuplicate.cfg	RoutineFailureEscalation	AllEligibleStreaksOffered,AtMostOneRemediationPerIncident,AtMostOneTriggerPerStreak	-
 routine-run/RoutineFailureEscalationIntakeRefused.cfg	RoutineFailureEscalation	-	-
 routine-run/RoutineFailureEscalationN1.cfg	RoutineFailureEscalation	-	-

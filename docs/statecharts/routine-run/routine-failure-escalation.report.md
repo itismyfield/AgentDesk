@@ -1,6 +1,16 @@
-# 연속 실패 N/N+1 에스컬레이션 모델 (r2b)
+# 연속 실패 N/N+1 에스컬레이션 모델 (r2c: 재로그·intake 가드)
 
-코드 기준 `5bcbb82297f5cc3ab8897b81ddb9891459e0321b`, 사용자 결정 적용 r2b, 2026-11-12 KST. 실행 단위 RoutineRun의 exact1과 별개인 **여러 terminal routine run 사이의 실패 정책**만 모델링했다. 기존 RoutineRun.tla+18cfg19파일은 HEAD와 바이트 동일이며 소스 SHA256 `1afd1bc11f42c7909d7490e1b719096c53f8eaf526309f0b1d5df26d8800b5b3`를 보존했다. Rust·cargo·운영 실행·API·키 호출은 하지 않았다.
+코드 기준 `5bcbb82297f5cc3ab8897b81ddb9891459e0321b`, 사용자 결정 적용 r2b 및 마지막 리뷰 P2-B 보강 r2c, 2026-11-12 KST. 실행 단위 RoutineRun의 exact1과 별개인 **여러 terminal routine run 사이의 실패 정책**만 모델링했다. 기존 RoutineRun.tla+18cfg19파일은 HEAD와 바이트 동일이며 소스 SHA256 `1afd1bc11f42c7909d7490e1b719096c53f8eaf526309f0b1d5df26d8800b5b3`를 보존했다. Rust·cargo·운영 실행·API·키 호출은 하지 않았다.
+
+## r2c: 사건 키와 허용 봇 가드가 실제로 막는 경로
+
+r2b의 사건 키 가드는 같은 run의 producer 재진입을 모델링하지 않아 제거해도 GREEN이었다. r2c는 모든 cfg에 `RelogRun`을 추가했다. cursor-1의 동일 latest failed run을 한 번 더 평가하되 카운터·cursor를 증가시키지 않는다. 같은 firstFailed 사건 키를 기존 요청에서 확인하므로 outbox가 pending·sent·unknown인 동안에도 새 incident 요청이 생기지 않는다. `relogged`는 탐색을 한 번의 replay로 제한하는 모델 경계이며 runtime에 새로 저장할 권위가 아니다. 일반 알림의 TTL 재게시 횟수는 모델링하지 않는다.
+
+`UnseenIncident(first)`는 최초 RecordRun과 RelogRun이 공유한다. 이를 제거한 `drop_event_key`는 동일 run 재진입3step에서 AtMostOneTriggerPerStreak RED다. 이것으로 주어진 사건 키의 재진입 가드가 공허하지 않음을 확인했다. **실제 SQL의 first failed UUID·snapshot N·동시 CAS·GC 정확성은 여전히 H RED**이며 이 결과로 완료했다고 세지 않는다. 현재 `FirstFailedBefore` helper도 invariant에 사용하지 않는다.
+
+IntakeRefused는 허용되지 않은 봇의 효과0인 control이다. `bypass_intake_gate`는 그 control에서 AllowedBot 검사를 제거하며6step OnlyExistingAcceptedBotIntake RED다. 정상 ACK는 메시지 게시 증거이고 대응 효과와 다르다. owner 효과는 기존 bot intake 수용 뒤 ExistingOwnerStarts에서만 기록하며, 실제 provider key/receipt·Busy absorption 증거를 모델이 새로 만들어 주지 않는다.
+
+r2b 모델 SHA256 `511bbb35abf2af5f943d79189cd56403a052d84e8dccc8d4ab836e1452049527`의10cfg 결과는 `i8117/sc-out-r2b/`에 보존한다. r2c의 GREEN은 이전 결과를 재사용하지 않고 동일 새 source로12cfg를 모두 실행했다. 기존 per-run RoutineRun source+18cfg19파일은 계속 byte-identical이다.
 
 ## 사용자 계약과 모델 경계
 
@@ -11,6 +21,9 @@
 - 정상 ACK+허용 봇 cfg는 기존 intake/owner가 계속 진행할 수 있다는 공정성 아래 `ConfirmedIncidentsReachExistingOwner`까지 확인한다. **IntakeRefused는 native0의 안전·전송 결과 종결만 GREEN**이며 턴 발생 성공의 증거가 아니다.
 - Unknown cfg는 같은 outbox row를 held 상태로 보존하고 대시보드 `completion_unconfirmed` 결과를 종결한다. blind repost하지 않는다. 실제 Discord가 받았을 수도 없을 수도 있으므로 owner effect0/1이 모두 가능하다. eventual remediation 턴을 보장하는 property는 이 cfg에 넣지 않았다. 원 routine run은 이미 failed terminal이다.
 
+
+여기서 notify-only는 알림 역할·효과의 표현이다. 기존 구현의 Announce+OperationalAlert와 Notify fallback을 실제 bot=Notify 하나로 바꾸겠다는 뜻이 아니다. non-turn reason/표지 분류는 H의 RED이며 기존 Announce 정의를 보존한다.
+
 현행 generic routine outbox는 이 Unknown 계약을 충족하지 않는다. TransientFailure를 Failed로 평탄화하고 retry할 수 있으며 routine-runtime은 headless nonce helper 대상이 아니다. 따라서 이 GREEN은 H 조각이 같은 기존 outbox row에 stable nonce/ACK/unknown 보존을 최소 확장한 **제안 모델**의 결과다. routing_notice의 다른 owner 권위를 빌리거나 새 receipt/probe를 가정하지 않는다.
 
 ## 실제 source와 변수/action 연결
@@ -18,18 +31,19 @@
 | source | 변수/action 및 범위 |
 |---|---|
 | `routines/discord_log/failure_alert.rs:19-40` | RecordRun/count. immutable Program prefix에서 running/interrupted 제외 후 leading failed count를 별도 reference FailedBefore로 계산하여 CounterMatchesHistory 검사 |
+| `failure_alert.rs:31-35`, `message_outbox.rs:230-258,287-296` | RelogRun/UnseenIncident. 동일 latest terminal run의 logger 재진입은 counter를 늘리지 않고 같은 logical incident key를 재사용. 오래된 run callback의 SQL/CAS 거절은 H RED |
 | `failure_alert.rs:45-68`, `src/config.rs:2135-2138,2216-2217` | 현재는 global threshold 기본3에서 정확히 한 번 알림. r2b의 per-routine N와 first-failed snapshot은 신규 설계이며 cfg의 상수N으로 축약 |
 | `routines/store.rs:3228-3267` | 실제 저장 terminal 기준. checkpoint 오류가 겉으로 succeeded인 outcome을 failed로 바꿀 수도 있으므로 in-memory status를 정본으로 삼지 않음 |
 | `message_outbox.rs:230-258,287-296` | requests/requestCounts/immutable streak key: 기존 persistent outbox enqueue transaction이 같은 event key를 재사용함. 모델의 sequence는 새 durable incident ledger가 아님 |
 | `src/domain/bot_role.rs:9-14` | notices와 NotifyIntakeStarts mutant. Notify는 턴 입력 아님; Announce만 명령 역할 |
 | `src/cli/direct.rs:363-374`, `discord/agent_handoff.rs:340-370` | 기존 send-to-agent의 실제 Announce 게시 선례. 새 direct turn-start를 호출하지 않음 |
 | `src/server/outbox_worker.rs:75-113`, `outbox_actionable_delivery.rs:117-133`, `discord/outbound/send_gate.rs:404-433` | LoadOutbox→PostOutbox. 기존 delivery IDs와 writer/source/bot/target 권한을 유지 |
-| `discord/router/intake_gate.rs:325-363,764-813`, `intake_gate/gate.rs:84-120`, `dispatch_policy.rs:226-261` | ExistingBotIntake/AllowedBot. 인증된 실제 봇 identity·메시지 ID를 사용하고 body 표지나 whitelist 재추론으로 권한을 만들지 않음 |
+| `discord/router/intake_gate.rs:325-363,764-813`, `intake_gate/gate.rs:84-120`, `dispatch_policy.rs:226-261` | ExistingBotIntake/AllowedBot. 인증된 실제 봇 identity·메시지 ID를 사용하고 기존 gate의 실제 봇 identity와 허용 조건을 그대로 사용. 전역 author_is_bot 변경은 H 범위 밖 |
 | `discord/router/intake_dispatch.rs:784-824`, `queue_io/input_owner/ingress.rs:395-473`, `provider_dispatch/owner_input.rs:831-920` | ExistingOwnerStarts. 기존 admission/claim/Busy 경로의 계속 가능한 effect를 추상화. 실제 host/current-source/key-time 증거는 별도 수용 시험 |
 | `src/domain/outbound/result.rs:103-105`, `src/services/discord/outbound/manual_delivery.rs:650-654`, `src/services/discord/outbound/manual_delivery/headless_nonce.rs:71-97` | 현재 generic Unknown→Failed/retry gap. BlindUnknownRepost mutant가 이를 H의 금지 계약으로 드러냄 |
 | `message_outbox.rs:292-294,766-770` | Unknown은 failed/cancelled로 바꾸면 key가 해제됨. held+NULLexpiry로 key/row를 남기는 H 계약을 row=held와 completion_unconfirmed로 추상화. GC 실제 실행은 모델 밖 |
 
-접두사 `routines/`는 `src/services/routines/`, `discord/`는 `src/services/discord/`이며 `message_outbox.rs`는 `src/services/message_outbox.rs`다. firstFailed는 Program의 logical run index를 UUID처럼 취급한다. **실제 SQL이 first failed UUID를 정확히 읽는지, 첫 실패 snapshotN를 고정하는지, 동시 latest-terminal CAS·GC·author.bot provenance는 이 모델의 증명 범위 밖이고 H 수정 전 RED다.** FirstFailedBefore reference helper는 현재 invariant에 사용하지 않으며 firstID 정확성 증거로 세지 않는다. 모델은 주어진 stable logical incident key의 반복 방지만 검사한다.
+접두사 `routines/`는 `src/services/routines/`, `discord/`는 `src/services/discord/`이며 `message_outbox.rs`는 `src/services/message_outbox.rs`다. firstFailed는 Program의 logical run index를 UUID처럼 취급한다. **실제 SQL이 first failed UUID를 정확히 읽는지, 첫 실패 snapshotN를 고정하는지, 동시 latest-terminal CAS·GC·기존 Announce admission 보존은 이 모델의 증명 범위 밖이고 H 수정 전 RED다. 전역 author_is_bot 수리는 P2-F에 따라 H에서 제외하고 별도 후속으로 둔다.** FirstFailedBefore reference helper는 현재 invariant에 사용하지 않으며 firstID 정확성 증거로 세지 않는다. 모델은 주어진 stable logical incident key의 반복 방지만 검사한다.
 
 ## 검사한 경계와 실제 결과
 
@@ -37,23 +51,27 @@ Program은 첫 streak의 failed N+2개→interrupted→succeeded→다음 streak
 
 | cfg | states / steps | 실제 결과 |
 |---|---:|---|
-| `RoutineFailureEscalationBlindUnknown.cfg` | 445 / 811 | NoBlindUnknownRepost, NoDuplicateDiscordMessage RED |
-| `RoutineFailureEscalationDuplicate.cfg` | 259 / 528 | AtMostOneTriggerPerStreak, AllEligibleStreaksOffered, AtMostOneRemediationPerIncident RED |
-| `RoutineFailureEscalationIntakeRefused.cfg` | 63 / 107 | GREEN |
-| `RoutineFailureEscalationN1.cfg` | 76 / 131 | GREEN |
-| `RoutineFailureEscalationN3.cfg` | 90 / 155 | GREEN |
-| `RoutineFailureEscalationNoReset.cfg` | 70 / 120 | CounterMatchesHistory, AllEligibleStreaksOffered RED |
-| `RoutineFailureEscalationNotifyTriggers.cfg` | 174 / 351 | OrdinaryNotifyDoesNotStart RED |
-| `RoutineFailureEscalationOffByOne.cfg` | 100 / 175 | TriggerOnlyAtNPlusOne RED |
-| `RoutineFailureEscalationUnknownN1.cfg` | 147 / 262 | GREEN |
-| `RoutineFailureEscalationUnknownN3.cfg` | 167 / 298 | GREEN |
+| `RoutineFailureEscalationBlindUnknown.cfg` | 677 / — | NoBlindUnknownRepost, NoDuplicateDiscordMessage RED |
+| `RoutineFailureEscalationBypassIntake.cfg` | 199 / 432 | OnlyExistingAcceptedBotIntake RED |
+| `RoutineFailureEscalationDropEventKey.cfg` | 442 / 919 | AtMostOneTriggerPerStreak, AllEligibleStreaksOffered, AtMostOneRemediationPerIncident RED |
+| `RoutineFailureEscalationDuplicate.cfg` | 397 / 969 | AtMostOneTriggerPerStreak, AllEligibleStreaksOffered, AtMostOneRemediationPerIncident RED |
+| `RoutineFailureEscalationIntakeRefused.cfg` | 97 / 203 | GREEN |
+| `RoutineFailureEscalationN1.cfg` | 117 / 248 | GREEN |
+| `RoutineFailureEscalationN3.cfg` | 145 / 310 | GREEN |
+| `RoutineFailureEscalationNoReset.cfg` | 115 / 245 | CounterMatchesHistory, AllEligibleStreaksOffered RED |
+| `RoutineFailureEscalationNotifyTriggers.cfg` | 279 / 698 | OrdinaryNotifyDoesNotStart RED |
+| `RoutineFailureEscalationOffByOne.cfg` | 165 / 360 | TriggerOnlyAtNPlusOne RED |
+| `RoutineFailureEscalationUnknownN1.cfg` | 225 / 490 | GREEN |
+| `RoutineFailureEscalationUnknownN3.cfg` | 265 / 582 | GREEN |
 
-지정 statechart CLI로10cfg 동일 source를 실행했다. **5 GREEN·5 기대 RED**이며 모든 cfg가 실제 상태/전이를 탐색했다. 기본 N3는90states/155steps, N1은76/131이다. Unknown N3/N1도 각각167/298,147/262로 안전과 typed outcome 종결을 검사했다. Unknown을 전달/owner 성공으로 세지 않았다.
+지정 statechart CLI로12cfg 동일 source를 실행했다. **5 GREEN·7 기대 RED**이며 모든 cfg가 실제 상태/전이를 탐색했다. 기본 N3는145states/310steps, N1은117/248이다. Unknown N3/N1도 각각265/582,225/490로 안전과 typed outcome 종결을 검사했다. Unknown을 전달/owner 성공으로 세지 않았다. BlindUnknown은677states로 chart budget500을 넘겨 bug path만 그렸고 tool은 전체 edge 수를 출력하지 않아 표에 —로 적었다. 규칙 검사는 끝났으며 생략/0/PASS가 아니다.
 
-공식 checker 결과: 동일 바이트10cfg 전부 expected 집합 일치·exit0, 총91.2초(35회의 plain TLC 실행 및 각 cfg fairness precheck). 원시 증거 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8117/sc-out-r2b/<cfg>/`의 report.md·tlc.out·chart.mmd, `results.json`, `model-execution-summary.json`, `official-checker.stdout.log`, exact-byte 입력 `ci-root/`다. NoReset/OffByOne은 라벨만 교정하여 `<cfg>-labels/`에도 실행했다(모델 전이/계수 동일).
+공식 checker 결과: 동일 바이트12cfg 전부 expected 집합 일치·exit0, 총45.9초(44회의 plain TLC 실행 및 각 cfg fairness precheck). 원시 증거 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8117/sc-out-r2c/<cfg>/`의 report.md·tlc.out·chart.mmd, `results.json`, `model-execution-summary.json`, `official-checker.stdout.log`, exact-byte 입력 `ci-root/`다. DropEventKey/BypassIntake는 라벨만 교정하여 `<cfg>-labels/`에도 실행했다(모델 전이/계수 동일).
 
 ## mutant 최단 반례와 코드 대조
 
+- DropEventKey: 첫 N+1 요청 뒤 같은 run RelogRun에서3step AtMostOneTriggerPerStreak RED. 마지막에는 총 요청 수 오류, 두 번째 owner 처리까지12step AtMostOneRemediationPerIncident RED다. pending/sent/unknown 동안 동일 사건의 재진입을 새 요청으로 바꾸지 않아야 한다.
+- BypassIntake: 정상 메시지 ACK→허용 검사 우회→기존 owner 효과까지6step OnlyExistingAcceptedBotIntake RED. ACK만 있는 IntakeRefused control은 효과0이다.
 - NotifyTriggers: 첫 failed 알림→잘못된 notify intake로2step OrdinaryNotifyDoesNotStart RED. 기존 Notify/OperationalAlert는 intake가 거부해야 한다.
 - OffByOne: N3에서 세 번째 failed에 요청해3step TriggerOnlyAtNPlusOne RED. 정확한 네 번째 failed이어야 한다.
 - Duplicate: 같은 streak에 별도 enqueue를 허용하면3step AtMostOneTriggerPerStreak RED, 끝에서 총 요청 수가 어긋나 AllEligibleStreaksOffered RED, 두 번째 기존 owner 처리까지12step AtMostOneRemediationPerIncident RED. 실제 first-failed event key와 기존 persistent dedupe를 유지해야 한다.
@@ -66,16 +84,16 @@ Program은 첫 streak의 failed N+2개→interrupted→succeeded→다음 streak
 
 WF(RecordRun)은 이 고정된 terminal event history를 결국 읽는다는 가정, WF(Delivery)는 계속 가능한 기존 outbox/intake/owner 단계가 진행한다는 가정이다. Unknown에는 자동 probe/recovery 공정성을 추가하지 않았다. 결과를 completion_unconfirmed로 기록하면 attempt는 종결되지만 durable held row/key는 남는다. 정상 ACK+허용 봇의 owner 효과 속성은 위 명시된 가용성 가정 아래만 적용하며 native process 실행 관측의 대체가 아니다.
 
-view는 Done self-loop만 숨긴다. 같은 화면의 세부 전이를 CLI가 합쳤으며 broken rule 조합은 서로 다른 라벨로 남겼다. 기본 N3/N1 차트9상태14화살표, Unknown N3/N1 차트9상태15화살표다. TTL 경과·nonce/ACK CAS·N PATCH·outbox worker 경쟁·실제 Discord rate limit·GC·author provenance·provider 실패 재귀·동일 native turn 합류는 H 시험 범위다.
+view는 Done self-loop만 숨긴다. guarded RelogRun처럼 화면 내용이 바뀌지 않는 전이는 CLI가 같은 라벨 안에서 합친다. 같은 화면의 세부 전이를 CLI가 합쳤으며 broken rule 조합은 서로 다른 라벨로 남겼다. 기본 N3/N1 차트9상태14화살표, Unknown N3/N1 차트9상태15화살표다. TTL 경과·nonce/ACK CAS·N PATCH·outbox worker 경쟁·실제 Discord rate limit·GC·기존 Announce admission 보존·provider 실패 재귀·동일 native turn 합류는 H 시험 범위다.
 
 ```sh
 export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew/opt/openjdk/bin/java
 ~/.claude/skills/statechart/scripts/statechart docs/statecharts/routine-run/RoutineFailureEscalation.tla \
   --config docs/statecharts/routine-run/RoutineFailureEscalationN3.cfg \
   --view docs/statecharts/routine-run/routine-failure-escalation.view.mjs \
-  --out /tmp/i8117-r2b-new
+  --out /tmp/i8117-r2c-new
 ```
 
-[기본 N3](routine-failure-escalation.chart.mmd)·[Unknown](routine-failure-escalation-unknown.chart.mmd)·[일반 알림 오동작](routine-failure-escalation-notify.chart.mmd)·[경계 오류](routine-failure-escalation-boundary.chart.mmd)·[중복 요청](routine-failure-escalation-duplicate.chart.mmd)·[reset 누락](routine-failure-escalation-reset.chart.mmd)·[Unknown 재게시](routine-failure-escalation-blind-unknown.chart.mmd).
+[기본 N3](routine-failure-escalation.chart.mmd)·[Unknown](routine-failure-escalation-unknown.chart.mmd)·[일반 알림 오동작](routine-failure-escalation-notify.chart.mmd)·[경계 오류](routine-failure-escalation-boundary.chart.mmd)·[중복 요청](routine-failure-escalation-duplicate.chart.mmd)·[reset 누락](routine-failure-escalation-reset.chart.mmd)·[Unknown 재게시](routine-failure-escalation-blind-unknown.chart.mmd)·[사건 키 제거](routine-failure-escalation-event-key.chart.mmd)·[intake 우회](routine-failure-escalation-intake-gate.chart.mmd).
 
-최종 escalation 모델 SHA256 `511bbb35abf2af5f943d79189cd56403a052d84e8dccc8d4ab836e1452049527`.
+최종 escalation 모델 SHA256 `90af6e1d8903701c869f1aad2dcf71069405b6583fd33c317425eaee96cc7f22`.

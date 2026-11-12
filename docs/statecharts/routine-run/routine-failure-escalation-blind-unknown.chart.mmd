@@ -5,56 +5,44 @@ stateDiagram-v2
   state "Legend" as legend {
     lg0: uncertain
     lg1: normal
-    lg2: Breaks NoBlindUnknownRepost or NoDuplicateDiscordMessage
-    lg3: Path to the NoBlindUnknownRepost or NoDuplicateDiscordMessage bug
+    lg2: Breaks NoDuplicateDiscordMessage
+    lg3: Breaks NoBlindUnknownRepost in some cases
+    lg4: Path to the NoBlindUnknownRepost or NoDuplicateDiscordMessage bug
   }
   class lg0 orange
   class lg1 blue
   class lg2 breaks
-  class lg3 bugPath
+  class lg3 mayBreak
+  class lg4 bugPath
   s0: 예약 실행 이력 대기
   s1: 실패 누적
   s2: N+1 복구 요청 저장됨
   s3: 기존 outbox 전송 대기
   s4: 전송 불확실#183;재게시 없이 종결
-  s5: 허용 봇 입력 수용
-  s6: 복구 요청 결과 기록
-  s7: 불확실 전송 재게시
-  s8: 불확실 전송 재게시 #183; Discord 중복 게시
-  s9: 추가 실패#183;알림만
-  s10: 성공#183;비실패로 카운터 초기화
+  s5: 불확실 전송 재게시
+  s6: 불확실 전송 재게시 #183; Discord 중복 게시
   [*] --> s0
   s0 --> s1: 실패 알림만#183;턴 0
   s1 --> s2: N+1회#183;명령봇 복구 요청
   s2 --> s3: 기존 outbox가 전송 시작
   s3 --> s4: 명령봇으로 게시
-  s4 --> s6: 수용할 봇 메시지 없음
-  s4 --> s7: 확인 없이 같은 메시지 재게시
-  s4 --> s5: 기존 Discord intake 통과
-  s5 --> s6: 기존 owner가 별도 복구 턴 시작
-  s6 --> s1: 전송 결과 종결
-  s7 --> s8: 명령봇으로 게시
-  s1 --> s9: 실패 알림만#183;턴 0
-  s6 --> s9: 전송 결과 종결
-  s9 --> s10: 비실패 terminal#183;카운터 0
-  s6 --> s10: 전송 결과 종결
-  s10 --> s1: 실패 알림만#183;턴 0
-  s6 --> s2: 전송 결과 종결
-  s1 --> s10: 비실패 terminal#183;카운터 0
+  s4 --> s5: 확인 없이 같은 메시지 재게시
+  s5 --> s6: 명령봇으로 게시
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 blue
   class s0 bugPath
+  class s1 blue
   class s1 bugPath
+  class s2 blue
   class s2 bugPath
   class s3 blue
   class s3 bugPath
   class s4 orange
   class s4 bugPath
   class s5 orange
-  class s6 orange
-  class s7 breaks
-  class s7 bugPath
-  class s8 breaks
-  class s8 bugPath
-  class s9 orange
-  class s10 orange
+  class s5 mayBreak
+  class s5 bugPath
+  class s6 blue
+  class s6 breaks
+  class s6 bugPath
