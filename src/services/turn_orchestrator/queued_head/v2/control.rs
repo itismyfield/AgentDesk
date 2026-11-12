@@ -39,7 +39,6 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         | M::CancelActiveTurnIfCurrent { .. }
         | M::CancelActiveTurnIfCurrentWithReason { .. }
         | M::CancelActiveTurnIfCurrentUnlessHerdr { .. }
-        | M::CancelActiveTurnIfUserMessageWithReason { .. }
         | M::CancelActiveBackgroundTurnIfCurrent { .. }
         | M::TryStartTurn { .. }
         | M::RestoreActiveTurn { .. }
@@ -51,7 +50,6 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         | M::ReleaseWitnessedEpisode(_)
         | M::PolicyClose { .. }
         | M::ClaimPolicyTail(_)
-        | M::HardStop { .. }
         | M::FinishCancelledTurn { .. }
         | M::CloseIfIdle { .. }
         | M::Injection(_)
@@ -61,6 +59,9 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         M::PurgeQueueIfUnchanged(request) => request.run_v2(state, channel_id),
         #[cfg(unix)]
         M::CaptureOwnQueue(request) => request.refuse_v2(),
+        #[cfg(test)]
+        M::CancelActiveTurnIfUserMessageWithReason { .. }
+        | M::HardStop { .. } => return Some(msg),
         #[cfg(test)]
         M::AgeActiveTurnForTest { .. }
         | M::AgeInboundWaitsForTest { .. }
@@ -244,6 +245,13 @@ fn cancel(
                 super::origin::now_ms(),
             );
             let item = next.items.remove(at + first);
+            if next
+                .unfinished_handoff
+                .as_ref()
+                .is_some_and(|j| j.original == sources::identity(&item))
+            {
+                next.unfinished_handoff = None;
+            }
             next.unbind_item(at + first);
             match owner.commit(next) {
                 Ok(()) => {
@@ -280,6 +288,9 @@ fn clear(owner: &mut Owner) -> ClearChannelResult {
     let at = super::origin::now_ms();
     next.owe_queued(first..next.items.len(), TerminalOutcome::Cancelled, at);
     let discarded: Vec<PendingQueueItem> = next.items.drain(first..).collect();
+    if first == 0 {
+        next.unfinished_handoff = None;
+    }
     if first == 0 && !discarded.is_empty() {
         owner.revoke_front();
     }
@@ -404,6 +415,9 @@ impl Owner {
         let at = super::origin::now_ms();
         next.owe_queued(first..next.items.len(), TerminalOutcome::Cancelled, at);
         let queued: Vec<_> = next.items.drain(first..).collect();
+        if first == 0 {
+            next.unfinished_handoff = None;
+        }
         if first == 0 && !queued.is_empty() {
             self.revoke_front();
         }

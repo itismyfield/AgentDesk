@@ -855,7 +855,7 @@ fn stream_json_request(turn: &StreamingTurn<'_>) -> Result<ProviderTurnRequest, 
 
 #[cfg(test)]
 #[path = "provider_dispatch_herdr_tests.rs"]
-mod herdr_tests;
+pub(crate) mod herdr_tests;
 
 #[cfg(test)]
 #[path = "provider_dispatch_codex_herdr_tests.rs"]

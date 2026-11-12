@@ -197,9 +197,7 @@ pub fn replay_receipt(
     Ok(receipt.result.clone())
 }
 
-pub fn command_fingerprint(command: &Command) -> Result<String, serde_json::Error> {
-    serde_json::to_vec(command).map(|bytes| blake3::hash(&bytes).to_hex().to_string())
-}
+pub use crate::domain::campaign::model::command_fingerprint;
 
 // The store looks up this campaign/key receipt under the same transaction lock.
 pub fn decide_with_receipt(

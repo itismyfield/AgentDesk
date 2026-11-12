@@ -59,6 +59,15 @@ impl Drop for WakeHook {
 // finds no row to clear refuses and resumes nothing.
 #[tokio::test(flavor = "current_thread")]
 async fn a_stale_turn_repair_resumes_the_owner_once_after_its_row_clear() {
+    check_stale_turn_resume(cfg!(unix), 7_753_301).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stale_turn_repair_resumes_once_without_a_unix_input_owner() {
+    check_stale_turn_resume(false, 7_753_303).await;
+}
+
+async fn check_stale_turn_resume(owner: bool, first_channel: u64) {
     let tempdir = tempfile::tempdir().expect("runtime root tempdir");
     let _env = TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", tempdir.path());
     let provider = ProviderKind::Claude;
@@ -69,10 +78,16 @@ async fn a_stale_turn_repair_resumes_the_owner_once_after_its_row_clear() {
         .await;
     let output = tempdir.path().join("resumed-stale-turn.jsonl");
     std::fs::write(&output, result_line("")).expect("write ready output fixture");
-    for (channel, row) in [(7_753_301, true), (7_753_302, false)] {
+    for (channel, row) in [(first_channel, true), (first_channel + 1, false)] {
         let channel = ChannelId::new(channel);
         let tmux = format!("AgentDesk-claude-resumed-{channel}");
-        v2_attempted_front(&shared, &provider, channel, true).await;
+        if owner {
+            v2_attempted_front(&shared, &provider, channel, true).await;
+        }
+        assert_eq!(
+            crate::services::discord::queue_io::input_owner::closed::owned(&shared, channel).await,
+            owner
+        );
         if row {
             seed_idle_inflight(&provider, channel, 0, &tmux, &output, 0, "resumed");
         }
@@ -101,9 +116,18 @@ async fn a_stale_turn_repair_resumes_the_owner_once_after_its_row_clear() {
         );
         let expected = usize::from(row);
         assert_eq!(
-            wakes.load(Ordering::SeqCst),
+            completion.started_requests(),
             expected,
-            "{channel}: resume notices"
+            "repair resume requests"
         );
+        if owner {
+            assert_eq!(
+                wakes.load(Ordering::SeqCst),
+                expected,
+                "{channel}: resume notices"
+            );
+        } else {
+            assert_eq!(wakes.load(Ordering::SeqCst), 0, "no Unix owner installed");
+        }
     }
 }

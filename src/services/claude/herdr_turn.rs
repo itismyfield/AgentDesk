@@ -2,6 +2,8 @@
 //! gated prompt after SessionStart, never resent or relaunched; an unclear send holds later ones.
 
 mod first_input;
+mod handoff;
+use handoff::launched_source;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -583,96 +585,6 @@ fn composer_settled(run: &InputRun) -> bool {
         run,
         InputRun::Applied | InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }
     )
-}
-
-/// The session a launch resumes: the turn's own one while it last ran under the overlay's account,
-/// its transcript exists under the overlay's home and O reads that file; otherwise a new one.
-fn resumed_session(
-    turn: &HerdrTurn<'_>,
-    overlay: &ProviderAuthOverlay,
-) -> Result<Option<String>, String> {
-    let Some(session) = turn.session_id.filter(|_| !turn.force_fresh) else {
-        return Ok(None);
-    };
-    // As on tmux, a session of another account is never continued under this one.
-    let logical = &turn.owner.logical_key;
-    let profile = &overlay.profile_id;
-    if !crate::services::tmux_common::claude_session_auth_matches(logical, session, profile)? {
-        return Ok(None);
-    }
-    let working_dir = Path::new(turn.working_dir);
-    let home = overlay.home.as_deref();
-    let Some(source) = session_handoff::transcript_file(working_dir, session, home)? else {
-        use crate::services::claude_tui::transcript_tail::claude_transcript_path;
-        let missing = claude_transcript_path(working_dir, session, home)?;
-        let channel = Some(turn.channel_id);
-        super::fresh_notice::announce(Some(turn.pool), channel, session, &missing);
-        return Ok(None);
-    };
-    if !session_handoff::o_reads(turn.channel_id, &source)? {
-        return Err(format!(
-            "herdr turn: O reads no cursor on {}, so a resume would post it again",
-            source.path.display()
-        ));
-    }
-    Ok(Some(session.to_owned()))
-}
-
-/// A new execution: create, evidence, SessionStart, then attach; no prompt before the attach.
-/// A resume first ends the legacy tmux execution of the same session by its own `/exit`.
-fn launched_source(
-    turn: &HerdrTurn<'_>,
-    runtime: &Handle,
-    ports: &dyn HerdrTurnPorts,
-) -> Result<Attached, String> {
-    let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
-    let working_dir = Path::new(turn.working_dir);
-    let hook_endpoint = turn
-        .hook_endpoint
-        .clone()
-        .ok_or("herdr turn: no hook endpoint")?;
-    let logical = &turn.owner.logical_key;
-    let overlay = ports.auth_overlay(logical)?;
-    let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay);
-    let resumed = resumed_session(turn, &overlay)?;
-    let home = overlay.home.as_deref();
-    let session_id = match &resumed {
-        Some(session) => session.clone(),
-        None => super::fresh_claude_tui_session_resolution(working_dir, home)?.session_id,
-    };
-    if resumed.is_some() {
-        session_handoff::end_by_exit(
-            &mut *ports.earlier_tmux(logical),
-            session_handoff::EXIT_WAIT,
-        )?;
-    }
-    let prepare = |prepared: &PreparedIncarnation| {
-        let (system, model) = (turn.system_prompt, turn.model);
-        let (session, hooks) = (session_id.as_str(), hook_endpoint.clone());
-        let command = super::tui_session_launch::prepare_claude_herdr_launch(
-            prepared,
-            working_dir,
-            session,
-            system,
-            model,
-            hooks,
-            &auth,
-        )?;
-        // The account this session runs under, which a later resume of it checks.
-        let profile = &overlay.profile_id;
-        crate::services::tmux_common::write_claude_session_auth(logical, session, profile)?;
-        Ok(command)
-    };
-    // Subscribed before the create, so the launch's SessionStart cannot pass unseen.
-    let mut hooks = ports.hook_events();
-    let mut launch = launch(turn, Some(session_id.clone()), resumed.is_some());
-    launch.provider_root = home.map(|home| home.join("projects"));
-    let outcome = runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host));
-    let nonce = launched(outcome)?;
-    let resume = resumed.is_some().then_some(nonce.as_str());
-    let cancel = turn.cancel.as_deref();
-    session_started(runtime, &mut hooks, (&session_id, resume), cancel)?;
-    attach(turn, runtime, ports, &nonce, &session_id)
 }
 
 fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>, resume: bool) -> HerdrLaunch {

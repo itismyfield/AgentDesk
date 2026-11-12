@@ -385,6 +385,18 @@ src/
 ├── domain/
 │   ├── atomic_write/
 │   │   └── tests.rs
+│   ├── campaign/
+│   │   ├── candidate_seal.rs
+│   │   ├── definition.rs
+│   │   ├── evidence.rs
+│   │   ├── evidence_gate.rs
+│   │   ├── execution_pin.rs
+│   │   ├── mod.rs
+│   │   ├── model.rs
+│   │   ├── profile.rs
+│   │   ├── review_gate.rs
+│   │   ├── verification_run.rs
+│   │   └── workspace.rs
 │   ├── intake_consent/
 │   │   └── decision.rs
 │   ├── message_split/
@@ -942,12 +954,15 @@ src/
 │   │   │   ├── composer.rs
 │   │   │   ├── composer_tests.rs
 │   │   │   ├── first_input.rs
+│   │   │   ├── handoff.rs
 │   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
 │   │   │   ├── provider_terminal_tests.rs
 │   │   │   ├── start_offset.rs
 │   │   │   ├── start_offset_tests.rs
 │   │   │   └── terminal_replay.rs
+│   │   ├── session_handoff/
+│   │   │   └── pinned_tmux.rs
 │   │   ├── tui_session_launch/
 │   │   │   └── prepared.rs
 │   │   ├── active_usage.rs
@@ -1919,6 +1934,9 @@ src/
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
 │   │   │   ├── input_owner/
+│   │   │   │   ├── claude_handoff/
+│   │   │   │   │   └── tests/
+│   │   │   │   │       └── actual_close_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── codex.rs
 │   │   │   │   │   ├── codex_herdr_tests.rs
@@ -1926,6 +1944,7 @@ src/
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── claude_handoff.rs
 │   │   │   │   ├── closed.rs
 │   │   │   │   ├── closed_tests.rs
 │   │   │   │   ├── drive.rs
@@ -2132,6 +2151,7 @@ src/
 │   │   │   │   │   ├── transition_busy_tests/
 │   │   │   │   │   │   └── retry_tests.rs
 │   │   │   │   │   ├── clear_discard_tests.rs
+│   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── codex_turn_hold.rs
@@ -2292,6 +2312,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
@@ -4415,6 +4436,7 @@ src/
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── actor.rs
 │   │   │   │   ├── attempt.rs
+│   │   │   │   ├── claude_handoff.rs
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── control_tests.rs
