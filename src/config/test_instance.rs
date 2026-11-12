@@ -276,4 +276,5 @@ fn validate_hosts(
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+pub(crate) #[path = "test_instance/host_scope_tests.rs"]
+mod tests;

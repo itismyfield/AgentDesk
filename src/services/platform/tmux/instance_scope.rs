@@ -92,13 +92,15 @@ pub(super) fn hook_tmux_prefix() -> io::Result<String> {
     }
     let mut words = vec!["env".into()];
     for (key, value) in command.get_envs() {
-        match value {
-            Some(value) => words.push(super::sh_single_quote(&format!(
-                "{}={}",
-                key.to_string_lossy(),
-                value.to_string_lossy()
-            ))),
-            None => words.extend(["-u".into(), super::sh_single_quote(&key.to_string_lossy())]),
+        if value.is_none() {
+            words.extend(["-u".into(), super::sh_single_quote(&key.to_string_lossy())]);
+        }
+    }
+    for (key, value) in command.get_envs() {
+        if let Some(value) = value {
+            words.push(super::sh_single_quote(&format!(
+                "{}={}", key.to_string_lossy(), value.to_string_lossy()
+            )));
         }
     }
     words.push("tmux".into());
@@ -111,4 +113,5 @@ pub(super) fn hook_tmux_prefix() -> io::Result<String> {
 }
 
 #[cfg(all(test, unix))]
+#[path = "instance_scope/host_command_tests.rs"]
 mod tests;
