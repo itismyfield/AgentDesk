@@ -210,6 +210,7 @@ struct CompletionState {
     listener_events: usize,
     backstop_cycles: usize,
     pending_requests: usize,
+    started_requests: usize,
     post_enqueue_snapshots: Vec<usize>,
     owner_boot_holds: Vec<u64>,
 }
@@ -257,7 +258,11 @@ impl DeferredRequestAck {
 
 pub(super) fn deferred_request_started(channel: ChannelId) -> Option<DeferredRequestAck> {
     completion_state(channel).map(|state| {
-        state.lock().unwrap().pending_requests += 1;
+        {
+            let mut state = state.lock().unwrap();
+            state.pending_requests += 1;
+            state.started_requests += 1;
+        }
         DeferredRequestAck { channel, state }
     })
 }
@@ -363,6 +368,10 @@ impl KickoffCompletion {
     ) {
         self.until(budget, |state| state.backstop_cycles >= cycles)
             .await;
+    }
+
+    pub(in crate::services::discord) fn started_requests(&self) -> usize {
+        self.completion.state.lock().unwrap().started_requests
     }
 
     pub(in crate::services::discord) fn pending_requests(&self) -> usize {
