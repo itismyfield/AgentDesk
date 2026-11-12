@@ -1,8 +1,23 @@
 # #8114 구현 전 host boundary 판단
 
-판정: **기존 경계의 확장이 필요하다. 원 설계 7 prod/+450를 그대로 승인할 수 없으며 DESIGN_DELTA로 경계·크기 계획을 고정한 뒤 구현하는 것이 맞다.** 새 trait는 필수가 아니다. 기존 `claude_tui::host_input::InputTransport`를 확장하는 쪽이 가장 작은 후보이며 Herdr Core 전용 메서드/상태는 필요 없다.
+경계 재계획 당시 판정: **기존 경계의 확장이 필요하다. 원 설계 7 prod/+450를 그대로 승인할 수 없으며 DESIGN_DELTA로 경계·크기 계획을 고정한 뒤 구현하는 것이 맞다.** 새 trait는 필수가 아니다. 기존 `claude_tui::host_input::InputTransport`를 확장하는 쪽이 가장 작은 후보이며 Herdr Core 전용 메서드/상태는 필요 없다.
 
 기준 HEAD `6e9bf145ce5f649bda77a9ffd6c071d54cc9b254`. 새 사용자 댓글 `logs/issue-comments-impl-1.txt`를 읽었다. 프로덕션 편집·빌드·운영/금지 설정 접근 없음.
+
+## 현재 구현 재개의 Slice1·Slice2 경계
+
+현재 승인 PLAN은 **두 조각 누적 prod 13파일 / 순 코드 +850 상한**이다(11-12 15:0x 재개 지시). 아래 승인 전 비용 범위의 +900 표시는 조사 당시 추정이며 허용 예산이 아니다. 새 trait·flag·Herdr Core 구현은 포함하지 않는다.
+
+| 조각 | 활성 호출과 완료 범위 | 이번 조각에 포함하지 않는 동작 |
+|---|---|---|
+| Slice1 — 기존 Busy 동작 공통화 | 기존 owner `ClaudeBusy`/`ClaudeHerdrBusy`를 한 `ClaudeBusy`와 `host_input::busy::BusyOperation::for_session` factory로 연결한다. 양쪽 기존 활성 호출이 공통 `BusyClaude` leaf의 frame 검사·panic 포착·notice·watch·settlement를 지나며, tmux `inject_owned`/서버 guard와 Herdr gate IO adapter는 보존한다. | source/identity 새 관측, observer 승인, `reobserve` 회복 분기, early/late Busy 신규 승인은 활성화하지 않는다. |
+| Slice2 — 관측과 early/late 승인 | exact source/observer capability와 같은 operation의 `reobserve`를 연결하고, early 관측을 tmux diagnostic 앞에 두며 late Busy 판독에 같은 결과를 사용한다. 검증된 awaited clear는 기존 Idle 위임을 보존한다. | 새 host 의미를 common caller에 추가하거나 Unknown을 Busy 권한으로 승격하지 않는다. |
+
+아래 typed source/observer/reobserve 및 early/late 수용 기준은 Slice2의 계약이다. Slice1은 이미 선택된 owner Busy 송신을 공통 operation으로 옮기는 동작 보존 조각이다. 기존 합산 파일·크기 추정은 두 조각의 설계 범위를 설명하며, Slice1이 Slice2의 관측 승인을 구현한 것으로 보고하지 않는다.
+
+### d2: Held 재관측의 verified awaited clear
+
+`reobserve()`의 verified `AwaitedClear`는 Busy 송신 권한이 아니며, **같은 target/front/generation의 아직 소유된 pre-key Held**에 한해 기존 Idle 경로를 다시 평가하도록 깨운다. `UnknownKeep` 또는 clear가 이미 discard한 원문을 그 wake로 부활·재송신하지 않는다. 예약 시험은 `held_unknown_reobserves_verified_clear_then_delegates_idle`이다. 이 시험은 source Unknown으로 보류한 원문이 같은 대상을 유지한 채 검증된 clear를 관측하면 native end를 기다리지 않고 기존 Idle에 위임되는지와 UnknownKeep/discard 대조군의 key0을 검증한다.
 
 ## 지금 경계로 이미 가능한 것
 
@@ -42,7 +57,7 @@
 | `InputIdentity` | tmux adapter는 기존 spawn/pane epoch+account 판독, Herdr adapter는 Bound record+HerdrTarget/physical writer | logical/native/execution nonce/host target와 physical writer를 하나의 operation에 고정. common code에서 endpoint 재선택/설정 probe 금지 |
 | `CurrentSource::{Ready,AwaitedClear,Unknown}` | 해당 host의 source adapter가 existing runtime binding/claude_history를 읽고 normalize | Ready는 native/path/dev/ino+current nonce history 조건을 만족. AwaitedClear는 기존 public `claude::herdr_turn::awaited_clear:320` 등 현재 Pending 증거를 전달하고 old source Busy로 오인하지 않음. 새 API가 #8080 private Source를 공개하지 않음 |
 | `ObserverOwnership::{CallerReader,TranscriptO,Unavailable}` | host adapter factory가 기존 tmux busy observer 또는 confirmed+accepts O 증거를 반환 | common은 ownership capability로 `until_done`/declared를 정함. Herdr 이름을 보고 observer를 생략하지 않음. TranscriptO는 실제 O-ready 가드, CallerReader는 준비된 observer를 포함. Unavailable은 key0 Held |
-| read-only `reobserve()` | 같은 operation의 exact target/current-source adapter | Held watch가 동일 target+front/generation을 다시 판독. native Busy 상태 자체는 Ready를 막지 않음. AwaitedClear/Unknown이면 보류 유지 |
+| read-only `reobserve()` | 같은 operation의 exact target/current-source adapter | Held watch가 동일 target+front/generation을 다시 판독. native Busy 상태 자체는 Ready를 막지 않음. verified AwaitedClear는 Busy 권한 없이 같은 소유 원문의 기존 Idle 재평가를 깨우고, source Unknown은 보류 유지. UnknownKeep/clear-discard 원문은 부활하지 않음 |
 | prepared input IO | 기존 InputTransport+MutationGate의 tmux/Herdr adapter | host-specific capture/draft verdict 및 guarded load/park/paste/Enter만 맡음. common은 프레임/원문 소유·source offset·receipt scope·NotSent/Unknown 정산을 한 번만 수행 |
 
 `AwaitedClear`는 새 persistent 상태가 아니라 현재 source observation의 결과다. 새 launch/clear/실행을 생성하거나 pending source를 임의 채택하는 권한을 주지 않는다. `ObserverOwnership` 역시 새 게시 소유자가 아니라 이미 존재하는 reader/O 소유의 관측 증거다. producer가 불명확하면 Unavailable이며 native busy가 끝나야만 회복된다고 가정하지 않는다.
@@ -68,9 +83,9 @@ tmux의 hook-free/legacy source 승인 조건은 이번에 Herdr의 stricter non
 | `claude_tui/host_input/interactive_session.rs` 신규 | typed capability 자료/host factory, 현재 두 host adapter의 identity/source/ownership 관측. 독립 parent 책임 추가 없음 | +300 |
 | `claude_tui/busy_inject.rs` | owned busy 공통 preflight/frame ledger/receipt 부분 재사용 가능하게 연결. legacy caller 정책은 유지 | +130 |
 | `claude_tui/busy_inject/stash.rs` | 기존 pinned/server-guarded IO를 adapter에서 재사용하는 최소 노출/연결. guard 조건 완화 0 | +75 |
-| 직접 합계/추정 여유 | 대략 +573, 경계 타입·관측/ownership 이동 오차 포함 | **+850 (상한 목표 +900)** |
+| 직접 합계/추정 여유 | 대략 +573, 경계 타입·관측/ownership 이동 오차 포함 | **+850 (두 조각 누적 상한)** |
 
-위 표의 이번 대상은 최대 12개이고, boundary export/factory의 최소 glue가 별도 파일에 필요할 수 있어 계획 상한 13개를 둔다. `busy_retry.rs` 적응은 이번 대상에서 제외하며 #8113 착지 뒤 델타로만 다룬다. `effect/herdr.rs` 삭제를 택해도 삭제 파일은 cap에 센다. 독립 호스트/소스 메서드를 giant parent 본문에 더해 파일 수만 줄이지 않는다. 이 PLAN은 +450 이내라는 원 약속을 철회하고, 추가 4~6 prod/+250~450 비용을 명시한다. 구현 중 13파일/+900 예상 밖 책임이나 guard 재설계가 나오면 다시 DESIGN_DELTA로 멈추며 +1200 PLAN 선을 넘겨 진행하지 않는다.
+위 표의 이번 대상은 최대 12개이고, boundary export/factory의 최소 glue가 별도 파일에 필요할 수 있어 계획 상한 13개를 둔다. `busy_retry.rs` 적응은 이번 대상에서 제외하며 #8113 착지 뒤 델타로만 다룬다. `effect/herdr.rs` 삭제를 택해도 삭제 파일은 cap에 센다. 독립 호스트/소스 메서드를 giant parent 본문에 더해 파일 수만 줄이지 않는다. 이 PLAN은 +450 이내라는 원 약속을 철회하고, 추가 4~6 prod/+250~450 비용을 명시한다. 구현 중 13파일/+850 예상 밖 책임이나 guard 재설계가 나오면 다시 DESIGN_DELTA로 멈추며 +1200 PLAN 선을 넘겨 진행하지 않는다.
 
 ### tmux safeguard 보존 좌표와 필수 RED
 
@@ -99,10 +114,10 @@ tmux의 hook-free/legacy source 승인 조건은 이번에 Herdr의 stricter non
 - 임의 fake 세 번째 adapter를 공통 flow에 주입하는 시험으로, core 분기/새 route 추가 없이 observation→effect→settlement를 실행할 수 있어야 한다. 실제 Herdr Core capability/상태/구현을 만드는 시험은 아니다.
 
 
-## 이번 레인의 정지 판정과 다음 입력
+## 재개 전 레인의 정지 판정과 다음 입력
 
 코디네이터 브리프의 “새 경계가 필요하면 30분 안에 DESIGN_DELTA로 멈춘다”에 해당한다. source/target/clear 관측 capability와 공통 ClaudeBusy 선택은 기존 trait 메서드 추가를 선택하더라도 원 계획의 책임 경계를 바꾸므로 구현 전에 재계획한다. 프로덕션 파일·Rust 시험·fixture 편집 0, cargo/PG/운영 입력 실행 0이다.
 
 다음 단계에 권고하는 입력은 기존 InputTarget/InputTransport 경계 확장과 공통 ClaudeBusy op 계약을 고정하는 것이다. 원 설계의 FrontClaim/physical lease/Held/Enter-terminal/receipt 재사용과 P2 early/clear 수용 기준은 유지한다. Herdr Core 구현과 #7583 전체 호스트 추상화는 계속 범위 밖이다.
 
-최대 13 prod/+850은 새 PLAN 후보이며 상한 승인이 아니다. PLAN +1200 및 prod30/+1500은 유지한다. raw host 분기 이동이나 generic run_legacy로 안전 원자성을 희생하는 대체는 채택하지 않는다. P2 문서·모델 보완은 같은 docs-only 커밋에 남기며 구현 완료로 보고하지 않는다.
+최대 13 prod/+850은 두 조각 누적 PLAN으로 승인됐다. Slice1의 행동 보존 리뷰 뒤에만 Slice2를 활성화한다. PLAN +1200 및 prod30/+1500은 유지한다. raw host 분기 이동이나 generic run_legacy로 안전 원자성을 희생하는 대체는 채택하지 않는다. P2 문서·모델 보완은 같은 docs-only 커밋에 남기며 구현 완료로 보고하지 않는다.

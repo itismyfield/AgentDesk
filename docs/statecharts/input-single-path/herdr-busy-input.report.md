@@ -155,3 +155,11 @@ python3 /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8114/logs/sc-impl
   --root /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8114/logs/sc-impl1/tlc-ci \
   --jobs 1
 ```
+
+## 구현 재개 2 — 모델 불변 대조
+
+| 대상 | 고정 기준과 현재 대조 | 처리 |
+|---|---|---|
+| `HerdrBusyInput.tla` + 30 cfg (31파일) | `ce57f3325b0df4863152203b9ea028d8f2131cc4`의 바이트 및 `logs/sc-impl1/final-hashes-and-counts.json`의 SHA256와 31/31 일치 | TLA/cfg 변경 0, TLC 재실행 0. 이전 30cfg·119 TLC/fairness30 증거를 그대로 보존 |
+
+Slice1은 기존 owner Busy route/IO를 같은 operation으로 옮기는 동작 보존 조각이며 source/identity/reobserve·early/late 신규 승인은 Slice2다. 새 상태·전이를 도입하지 않았으므로 모델의 최초 code baseline `5bcbb82297f5cc3ab8897b81ddb9891459e0321b`와 P2 입력 baseline `6e9bf145ce5f649bda77a9ffd6c071d54cc9b254` 표시는 바꾸지 않는다. 현재 구현 head의 Rust 검증을 수행했다는 뜻이 아니며, 재사용 범위는 바이트가 같은 TLA/cfg 증거뿐이다. 해시 원문은 `logs/model-impl2-hashes.json`, 담당 결과와 읽은 공식 검증 명령은 `logs/model-impl2.md`에 있다.

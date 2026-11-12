@@ -6,11 +6,11 @@
 
 ## 구현 재개 시 설계 경계 변경 알림 (2026-11-12 14:4x)
 
-P2 early/clear 보완은 아래 본문에 반영했다. 새 사용자 요구의 “세 번째 호스트는 호스트 구현 하나만 변경”은 원 설계의 host-specific owner routes/leaf 유지와 양립하지 않는다. 현재 `InteractiveSessionHost`/`InputTransport`는 nonce/current-source/verified-clear 위임을 제공하지 않으므로 기존 경계를 확장하는 별도 계약이 필요하다. 프로덕션 구현을 시작하기 전에 `DESIGN_DELTA`로 멈춘다. `herdr-busy-input.boundary-delta.md`가 재계획 정본이며, 아래 7파일/+450과 시험표는 승인된 원 계획과 그 P2 보완이다. 새 경계 확장 규모를 승인한 것으로 읽지 않는다.
+P2 early/clear 보완은 아래 본문에 반영했다. 새 사용자 요구의 “세 번째 호스트는 호스트 구현 하나만 변경”은 원 설계의 host-specific owner routes/leaf 유지와 양립하지 않는다. 당시 `InteractiveSessionHost`/`InputTransport`가 nonce/current-source/verified-clear 위임을 제공하지 않아 별도 경계가 필요하므로 `DESIGN_DELTA`로 멈췄다. 현재 재개는 `herdr-busy-input.boundary-delta.md`의 Slice1(기존 Busy route/operation 공통화)과 Slice2(exact source/observer/reobserve·early/late 승인) 구분을 따른다. Slice1은 새 관측 승인을 활성화하지 않는다. 아래 7파일/+450과 시험표는 원 계획과 P2 보완의 이력이며, 새 경계 확장 규모를 승인한 것으로 읽지 않는다.
 
 ## 결론과 범위
 
-**#8080 자동 해결이 아니다. 구현 1조각, prod 7파일/순증 약 +450 이내를 제안한다.**
+**#8080 자동 해결이 아니다. 원 v1의 1조각·prod 7파일/순증 약 +450 추정은 이력이며, 현재 구현 조각은 boundary-delta의 Slice1/Slice2 구분을 따른다.**
 이미 존재하는 `owner admission → FrontClaim → physical writer pump → host leaf → settlement/receipt → O writer` 한 경로에 Herdr의 외부/late Busy 관측을 연결한다. 새 큐, 새 전송기, 수동 스위치/런북, 운영자 복구 명령, 새 영구 ledger는 필요 없다.
 
 관측된 운영 원문은 first key 전 `herdr_composer_not_ready / Refused(Unknown)` 후 약 4분 대기다. 기존 코드가 정상 Busy 화면도 idle-ready로 인정하지 않으며, Herdr를 Busy 등록에서 제외해 idle first_input로 보내는 원인 사슬은 코드로 확인됐다. 다만 원문 한 줄만으로 당시 capture 실패·draft·modal 등 Unknown의 세부 원인을 구별할 수는 없다. 운영 로그 재열람/운영 재현은 하지 않았다.
@@ -53,6 +53,7 @@ P2 early/clear 보완은 아래 본문에 반영했다. 새 사용자 요구의 
 - 검증된 같은 nonce의 `awaited_clear(channel,logical,nonce)`는 Busy strict source 관측보다 먼저 기존 HerdrIdle/clear readiness로 위임한다(`herdr_turn.rs:293,320-390`). 첫 prompt가 새 JSONL을 만드는 정상 clear는 old pin/runtime binding·새 JSONL 부재 상태에서도 이 위임을 따라야 한다. 일반 old pin+new nonce·미검증 Pending은 계속 Held다. `awaited_clear`를 다시 구현하거나 #8080 private readiness API를 공개하지 않는다.
 - `bound_source`의 기존 증거 순서(`claude/herdr_turn.rs:288-304`)와 공통 runtime binding/`claude_history` 읽기 primitive를 재사용한다. 이 조각에서 #8080의 private idle-readiness Source API를 별도 공개하지 않는다. `bound_herdr`만으로 process live나 source-current가 입증됐다고 간주하지 않는다. 실제 mutation은 기존 Herdr pin/gate가 같은 incarnation을 재검사한다.
 - unknown source·missing transcript·capture/modal의 회복은 기존 `held_watch`에 같은 exact target/current-source probe를 연결한다. native Busy여도 source와 pane의 제출 근거가 회복되면 probe는 Ready를 반환한다. endpoint 재선택·tmux fallback은 없다. 기존 source-publication helper는 active turn을 기다리고 Busy면 wake를 생략하므로(`rehydration.rs:403-440`) 이 liveness의 근거로 사용하지 않는다.
+- Slice2의 d2 `reobserve`가 verified awaited clear를 읽으면 Busy 권한을 주지 않고 같은 target/front/generation의 소유된 pre-key Held를 깨워 기존 Idle을 재평가한다. UnknownKeep/clear-discard 원문은 부활·재송신하지 않는다. 예약 시험은 `held_unknown_reobserves_verified_clear_then_delegates_idle`이다.
 - early intake의 작업은 작은 `intake_turn/owned_busy.rs`에 둔다. 이 helper는 tmux-only `tui_busy_followup_diagnostic` 호출 앞에서 기존 host 경계의 exact target/source 관측을 받아 early handoff를 결정한다. giant `intake_turn.rs`는 공통 policy/관측 helper를 호출하고 기존 `into_busy_pane`로 넘기는 glue만 가진다.
 - late `execute_owned`도 같은 관측 helper를 사용한다. Herdr Running+O confirmed/accepts이면 `Registration::observed(...busy=true,until_done=None)`를 만들고 기존 pump/effect로 보낸다. **tmux의 busy observer를 Herdr에 붙이지 않는다.**
 - managed/external inflight의 기존 `hand_busy`와 early `into_busy_pane`도 같은 source 관측을 사용하도록 정리한다. 이미 Herdr를 지원하는 host leaf는 바꾸지 않는다.
@@ -121,9 +122,9 @@ P2 early/clear 보완은 아래 본문에 반영했다. 새 사용자 요구의 
 
 main `owner_input.rs:1320-1322`는 Claude first-key native-stop gate를 tmux routes에만 적용한다. `effect/herdr.rs:83-118`는 기존 Herdr pin/owner payload fence를 쓴다. 이번 설계는 이 차이를 “동일”이라고 선언하거나 독립 stop 프로토콜을 새로 만들지 않는다. 공통 front/claim·payload fence를 우회하지 않는 회귀를 추가하고, 기존 Herdr stop 세부 차이는 main 기존 경계로 기록한다.
 
-## 구현 조각·크기·시험·뮤턴트
+## 원 v1의 구현 조각·크기·시험·뮤턴트 (이력)
 
-**S1 한 조각으로 완결한다.** 전송/소유 코드는 이미 있어 2개 이상의 동작 조각으로 나누면 같은 entry 계약을 중간에 끊고 dormant helper를 만들 이익이 없다. 계획 상한 +1200보다 충분히 작게 prod **7파일/+450**(보수 추정), 시험 5~7파일/+600~900, 모델/설계 문서는 prod 집계 제외. 구현 중 실측 +1200 접근 또는 독립 계약 확장 발견 시 PLAN으로 멈춘다.
+원 v1은 기존 전송/소유 경로 연결을 한 조각·prod **7파일/+450**로 추정했다. 현재는 boundary-delta의 Slice1(기존 Busy 동작 보존 공통화)과 Slice2(관측·early/late 승인)로 나누며, 아래 파일·크기는 원 추정의 이력이다. 모델/설계 문서는 prod 집계에서 제외하고, 실제 구현의 독립 계약 확장이나 +1200 PLAN 선 접근은 다시 보고한다.
 
 | 파일(신규 표기) | 작업 | prod 순증 추정 |
 |---|---|---:|
@@ -147,6 +148,7 @@ main `owner_input.rs:1320-1322`는 Claude first-key native-stop gate를 tmux rou
 | `intake_turn/owned_busy_tests::herdr_busy_diagnostic_uses_owner_front` | 실제 tmux diagnostic 앞 관문. tmux pane/liveness 성공 stub 없이 Herdr socket만 사용 | early=1, late=0, one front/ticket, paste/Enter 각1; intake exclusion 복원 또는 기존 diagnostic 종속 mutant→RED |
 | `effect/herdr_tests` 및 real owner drive `modal_or_missing_source_recovers_while_turn_stays_busy` | modal 컨트롤은 기존 동작. managed busy + missing source → source publication만 오고 native Busy 유지: 기존 rehydration wake 없음 → RED | 0 keys+visible Held 후 exact-source probe recovery→1회; watch/held marker 제거 또는 idle-only probe mutant→RED |
 | `owner_input_herdr_busy_entry_tests::verified_clear_delegates_idle` | same nonce clear Pending+old pin/binding+새 JSONL 부재, actual execute_owned 경유 | 기존 Idle write 이후 Resolved; 모든 입력에 Busy strict guard 적용 mutant→RED |
+| `held_unknown_reobserves_verified_clear_then_delegates_idle` (Slice2 예약) | pre-key source Unknown Held 이후 같은 target/front/generation의 verified awaited clear 관측; 아직 미실행 | Busy 승인 없이 기존 Idle 재평가 wake; UnknownKeep/clear-discard 대조군 resurrect/key=0, native-end 의존 wake mutant→RED |
 | `provider_dispatch/owner_input_busy_recovery_tests` | O not-ready/source/old nonce fixture는 기존 0 keys 컨트롤 | O/source ready 및 fresh-registry boot wake로 end 없이 1회; O guard 제거/nonce 무시→RED |
 | `effect/herdr_tests` 기존 ACK·foreign·draft 컨트롤과 새 uncertain restart | ACK 없는 Enter/partial write를 Held로 바꾼 mutant만 RED | receipt 없어도 no resend; uncertain→Held mutant→두 번째 paste로 RED |
 | `tui_o/writer` 기존 socket/transcript rig 통합 | 새 entry가 호출되지 않아 before-native-end 수용 기대 RED | user row 및 queued_command/enqueue 두 모양, terminal 뒤 output 1회; legacy tmux observer 호출 0, reader/nonce 오염 mutant→RED |

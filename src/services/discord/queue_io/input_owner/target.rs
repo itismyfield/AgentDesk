@@ -45,8 +45,6 @@ pub(crate) enum Phase {
 pub(crate) enum Route {
     ClaudeBusy,
     ClaudeIdle,
-    /// A busy Claude pane hosted on Herdr: health's gated busy transaction.
-    ClaudeHerdrBusy,
     /// A busy Codex tmux pane: main's Codex busy transaction aimed at the open model turn.
     CodexBusy,
     /// An idle Codex tmux pane: the owner's pinned paste and Enter after one composer read.
@@ -81,9 +79,8 @@ pub(crate) fn route(
     }
     Some(match (provider, host, phase) {
         ("claude" | "codex", "tmux" | "herdr", Phase::Absent) => Route::Cold,
-        ("claude", "tmux", Phase::Busy) => Route::ClaudeBusy,
+        ("claude", "tmux" | "herdr", Phase::Busy) => Route::ClaudeBusy,
         ("claude", "tmux", Phase::Idle) => Route::ClaudeIdle,
-        ("claude", "herdr", Phase::Busy) => Route::ClaudeHerdrBusy,
         ("codex", "tmux", Phase::Busy) => Route::CodexBusy,
         ("codex", "tmux", Phase::Idle) => Route::CodexIdle,
         ("codex", "herdr", Phase::Busy) => Route::CodexHerdrBusy,
@@ -135,7 +132,7 @@ mod tests {
         assert_eq!(local("codex", "herdr", Phase::Absent), Some(Route::Cold));
         assert_eq!(
             local("claude", "herdr", Phase::Busy),
-            Some(Route::ClaudeHerdrBusy)
+            Some(Route::ClaudeBusy)
         );
         assert_eq!(local("codex", "tmux", Phase::Busy), Some(Route::CodexBusy));
         assert_eq!(
