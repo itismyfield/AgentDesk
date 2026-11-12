@@ -289,7 +289,8 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             "nextest run --lib --profile ci --no-tests fail -E "
             "test(=services::discord::health::turn_deliver::inject::queued_reconcile::"
             "mismatched_file_identity_refuses_transcript_proof) | "
-            "test(=cli::args::tests::cli_parse_fits_in_the_windows_default_main_thread_stack)"
+            "test(=cli::args::tests::cli_parse_fits_in_the_windows_default_main_thread_stack) | "
+            "test(=services::tui_input::human_frame::history::notice_owner::census::tests::native_census_without_unix_change_witness_scans_each_time)"
         )
         success = self.run_fixture(runner=True)
         self.assertEqual(success.result.returncode, 0, success.result.stderr)
