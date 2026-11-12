@@ -170,6 +170,14 @@ impl Case {
     }
 
     async fn run(&self, actor: &mut Host) {
+        crate::services::tui_o::writer::restart_end::refresh(
+            &mut actor.writer,
+            &mut actor.deriver,
+            actor.bindings.as_ref(),
+            ShadowProvider::Claude,
+        )
+        .await
+        .unwrap();
         let fresh = actor.read_sources();
         actor.prepare_notices(&fresh).await;
         actor

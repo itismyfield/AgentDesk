@@ -32,9 +32,11 @@ pub(super) struct TurnSummaryRun {
     /// Claude turns are per transcript, so another transcript's unclosed turn cannot absorb this one.
     source: Option<PathBuf>,
     parked: HashMap<PathBuf, Turn>,
+    current_source: Option<PathBuf>,
 }
 
 struct Turn {
+    source: Option<PathBuf>,
     id: Option<String>,
     session_id: Option<String>,
     started: Option<DateTime<Utc>>,
@@ -52,11 +54,13 @@ impl TurnSummaryRun {
             open: None,
             source: None,
             parked: HashMap::new(),
+            current_source: None,
         }
     }
 
     /// Records that follow come from the transcript at `path` until the next call.
     pub(super) fn enter(&mut self, path: &Path) {
+        self.current_source = Some(path.to_owned());
         if self.provider != ShadowProvider::Claude || self.source.as_deref() == Some(path) {
             return;
         }
@@ -77,6 +81,7 @@ impl TurnSummaryRun {
 
     fn open(&mut self, value: &Value, id: Option<String>) {
         self.open = Some(Turn {
+            source: self.current_source.clone(),
             id,
             session_id: value
                 .get("sessionId")
@@ -88,6 +93,17 @@ impl TurnSummaryRun {
             used: None,
             failed: false,
         });
+    }
+
+    pub(super) fn physical_end(&mut self, path: &Path) {
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|turn| turn.source.as_deref() == Some(path))
+        {
+            self.open = None;
+        }
+        self.parked.remove(path);
     }
 
     pub(super) fn prompt(&mut self, value: &Value) {
