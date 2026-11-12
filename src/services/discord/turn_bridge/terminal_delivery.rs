@@ -464,7 +464,7 @@ pub(super) fn next_bridge_lease_holder() -> crate::services::discord::LeaseHolde
 /// none of them awaits or calls back into the other actor. The heartbeat lives on
 /// its own task and only `renew`s our OWN lease; it is `stop()`ped before commit.
 /// So the bridge never blocks on the watcher and vice-versa.
-pub(in crate::services::discord) struct BridgeDeliveryLease {
+pub(super) struct BridgeDeliveryLease {
     cell: std::sync::Arc<crate::services::discord::DeliveryLeaseCell>,
     holder: crate::services::discord::LeaseHolder,
     key: crate::services::discord::DeliveryLeaseKey,
@@ -492,7 +492,7 @@ pub(super) enum PinnedBridgeCommit {
 
 /// The result of attempting to acquire the bridge delivery lease for a terminal
 /// delivery point.
-pub(in crate::services::discord) enum BridgeLeaseAcquire {
+pub(super) enum BridgeLeaseAcquire {
     /// We hold the lease; proceed to deliver, then `commit_and_advance`.
     Held(BridgeDeliveryLease),
     /// A different live holder (the watcher, or another bridge path) owns the
@@ -594,7 +594,7 @@ pub(super) fn bridge_delivery_lease_key_for_inflight(
     )
 }
 
-pub(in crate::services::discord) fn bridge_delivery_lease_for_inflight(
+pub(super) fn bridge_delivery_lease_for_inflight(
     shared: &SharedData,
     watcher_owner_channel_id: ChannelId,
     generation: u64,
@@ -703,7 +703,7 @@ impl BridgeDeliveryLease {
     /// `true` iff the commit succeeded. `false` is legitimate when this attempt was
     /// reclaimed and a successor acquired the same key and range; in that case the
     /// successor remains authoritative and the frontier is not advanced.
-    pub(in crate::services::discord) fn commit_and_advance(
+    pub(super) fn commit_and_advance(
         mut self,
         shared: &SharedData,
         watcher_owner_channel_id: ChannelId,

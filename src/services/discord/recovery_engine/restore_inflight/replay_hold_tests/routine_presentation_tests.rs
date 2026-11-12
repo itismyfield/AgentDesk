@@ -84,14 +84,13 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
     );
     let discord = o_cut_recorder::start(channel).await;
     let lease = if evidence == "lease_busy" {
-        match crate::services::discord::turn_bridge::bridge_delivery_lease_for_inflight(
+        match crate::services::discord::turn_bridge::NoVisibleResultLease::acquire(
             &shared,
             ChannelId::new(channel),
-            shared.restart.current_generation,
             &serialized,
             Some(serialized.last_offset),
         ) {
-            crate::services::discord::turn_bridge::BridgeLeaseAcquire::Held(lease) => Some(lease),
+            Some(lease) => Some(lease),
             _ => panic!("the competing owner must hold the real lease"),
         }
     } else {

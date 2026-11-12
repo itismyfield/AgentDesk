@@ -2,9 +2,7 @@
 use super::*;
 use crate::services::agent_protocol::NativeTerminalKind;
 use crate::services::discord::routine_presentation::TerminalPresentation;
-use crate::services::discord::turn_bridge::{
-    BridgeLeaseAcquire, bridge_delivery_lease_for_inflight,
-};
+use crate::services::discord::turn_bridge::NoVisibleResultLease;
 
 pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_visible(
     shared: &Arc<SharedData>,
@@ -55,16 +53,10 @@ pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_vis
     let Some(lease_owner) = inflight::opt_channel_id(row.delivery_record_owner_channel_id()) else {
         return true;
     };
-    let lease = match bridge_delivery_lease_for_inflight(
-        shared,
-        lease_owner,
-        shared.restart.current_generation,
-        &row,
-        Some(row.last_offset),
-    ) {
-        BridgeLeaseAcquire::Held(lease) => Some(lease),
-        BridgeLeaseAcquire::NoRange => None,
-        BridgeLeaseAcquire::Skip => return true,
+    let Some(lease) =
+        NoVisibleResultLease::acquire(shared, lease_owner, &row, Some(row.last_offset))
+    else {
+        return true;
     };
     let Some(committed) = shared
         .mailbox(channel)
@@ -79,14 +71,7 @@ pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_vis
         return true;
     };
     row = committed.state;
-    if let Some(lease) = lease
-        && !lease.commit_and_advance(
-            shared,
-            lease_owner,
-            row.tmux_session_name.as_deref(),
-            crate::services::discord::LeaseOutcome::Delivered,
-        )
-    {
+    if !lease.commit_and_advance(shared, lease_owner, row.tmux_session_name.as_deref()) {
         return true;
     }
     // A replay hold consumes only the body debt; its request episode is not ours to release.

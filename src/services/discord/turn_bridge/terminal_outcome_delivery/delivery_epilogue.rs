@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, atomic::Ordering};
 
+use super::super::terminal_delivery::BridgeDeliveryLease;
 use super::*;
 
 pub(super) enum DeliveryEpilogueMessage {
@@ -22,6 +23,46 @@ pub(super) struct DeliveryEpilogueState<'a> {
     pub(super) bridge_should_emit_completion: &'a mut bool,
     pub(super) status_panel_terminal_committed: &'a mut bool,
     pub(super) busy_requeue_outcome: &'a mut Option<followup_requeue::FollowupRequeueOutcome>,
+}
+
+/// A recovery acknowledgement holds the existing range lease until its actor CAS finishes.
+pub(in crate::services::discord) struct NoVisibleResultLease(Option<BridgeDeliveryLease>);
+
+impl NoVisibleResultLease {
+    pub(in crate::services::discord) fn acquire(
+        shared: &SharedData,
+        owner: ChannelId,
+        inflight: &InflightTurnState,
+        end: Option<u64>,
+    ) -> Option<Self> {
+        match bridge_delivery_lease_for_inflight(
+            shared,
+            owner,
+            shared.restart.current_generation,
+            inflight,
+            end,
+        ) {
+            BridgeLeaseAcquire::Held(lease) => Some(Self(Some(lease))),
+            BridgeLeaseAcquire::NoRange => Some(Self(None)),
+            BridgeLeaseAcquire::Skip => None,
+        }
+    }
+
+    pub(in crate::services::discord) fn commit_and_advance(
+        self,
+        shared: &SharedData,
+        owner: ChannelId,
+        tmux_session_name: Option<&str>,
+    ) -> bool {
+        self.0.is_none_or(|lease| {
+            lease.commit_and_advance(
+                shared,
+                owner,
+                tmux_session_name,
+                crate::services::discord::LeaseOutcome::Delivered,
+            )
+        })
+    }
 }
 
 pub(super) fn settle_no_visible_result(

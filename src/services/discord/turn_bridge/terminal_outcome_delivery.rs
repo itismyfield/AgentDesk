@@ -45,6 +45,7 @@ mod cancel_prompt_replace;
 mod completion_proof;
 mod contracts;
 mod delivery_epilogue;
+pub(in crate::services::discord) use delivery_epilogue::NoVisibleResultLease;
 #[cfg(test)]
 mod delivery_epilogue_tests;
 mod empty_response_recovery;
