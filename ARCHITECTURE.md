@@ -142,6 +142,7 @@ src/
 │   ├── cluster_role.rs
 │   ├── config_path.rs
 │   ├── daemon_snapshot_pg_tests.rs
+│   ├── decision_gate.rs
 │   ├── disk_write.rs
 │   ├── disk_write_snapshot_tests.rs
 │   ├── late_live_reload_tests.rs
@@ -1294,6 +1295,21 @@ src/
 │   │   ├── verified_hold.rs
 │   │   ├── verified_tail.rs
 │   │   └── warm_followup.rs
+│   ├── decision_gate/
+│   │   ├── fixtures/
+│   │   │   └── comment_shape.json
+│   │   ├── runtime/
+│   │   │   ├── gemini.rs
+│   │   │   ├── key.rs
+│   │   │   ├── parser.rs
+│   │   │   ├── request.rs
+│   │   │   └── tests.rs
+│   │   ├── mod.rs
+│   │   ├── parser_tests.rs
+│   │   ├── policy.rs
+│   │   ├── runtime.rs
+│   │   ├── tests.rs
+│   │   └── types.rs
 │   ├── discord/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
