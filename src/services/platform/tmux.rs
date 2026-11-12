@@ -1348,16 +1348,6 @@ mod timeout_tests {
         // matching the subcommand positionally via $1.
         writeln!(file, "while [ \"${{1#-}}\" != \"$1\" ]; do shift; done")
             .expect("flag skip preamble");
-        let identity =
-            crate::services::session_identity_metadata::runtime_identity("timeout-fixture")
-                .unwrap();
-        let assignment =
-            crate::services::process::shell_escape(&identity.environment_assignment().unwrap());
-        writeln!(
-            file,
-            "if [ \"$1\" = show-environment ]; then printf '%s\\n' {assignment}; exit 0; fi"
-        )
-        .expect("identity fixture");
         writeln!(file, "{body}").expect("body");
         let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
         permissions.set_mode(0o755);
@@ -1374,14 +1364,20 @@ mod timeout_tests {
         let _path = PathOverride::prepend(temp.path());
 
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "missing") };
-        assert_eq!(session_presence("agentdesk-test"), SessionPresence::Missing);
+        assert_eq!(
+            session_presence("AgentDesk-timeout-fixture"),
+            SessionPresence::Missing
+        );
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "failed") };
         assert_eq!(
-            session_presence("agentdesk-test"),
+            session_presence("AgentDesk-timeout-fixture"),
             SessionPresence::ProbeFailed
         );
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "present") };
-        assert_eq!(session_presence("agentdesk-test"), SessionPresence::Present);
+        assert_eq!(
+            session_presence("AgentDesk-timeout-fixture"),
+            SessionPresence::Present
+        );
         unsafe { std::env::remove_var("FAKE_TMUX_MODE") };
     }
 
@@ -1476,7 +1472,7 @@ mod timeout_tests {
         // `Missing`, so the two arms stay observably distinct.
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "missing") };
         assert_eq!(
-            readiness("agentdesk-test"),
+            readiness("AgentDesk-timeout-fixture"),
             IndependentTmuxReadiness::Missing,
             "a confirmed missing session must still read as Missing"
         );
@@ -1484,7 +1480,7 @@ mod timeout_tests {
         // An unexpected tmux failure classifies as `ProbeFailed`; it must not
         // reach destructive callers as absence.
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "failed") };
-        let probe_failed = readiness("agentdesk-test");
+        let probe_failed = readiness("AgentDesk-timeout-fixture");
         unsafe { std::env::remove_var("FAKE_TMUX_MODE") };
         assert_eq!(
             probe_failed,
@@ -1542,14 +1538,20 @@ mod timeout_tests {
 
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "failed") };
         assert_eq!(
-            pane_liveness("agentdesk-test"),
+            pane_liveness("AgentDesk-timeout-fixture"),
             PaneLiveness::ProbeError,
             "an unexpected has-session failure is unknown, not confirmed death"
         );
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "missing") };
-        assert_eq!(pane_liveness("agentdesk-test"), PaneLiveness::DeadOrAbsent);
+        assert_eq!(
+            pane_liveness("AgentDesk-timeout-fixture"),
+            PaneLiveness::DeadOrAbsent
+        );
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "present") };
-        assert_eq!(pane_liveness("agentdesk-test"), PaneLiveness::Live);
+        assert_eq!(
+            pane_liveness("AgentDesk-timeout-fixture"),
+            PaneLiveness::Live
+        );
         unsafe { std::env::remove_var("FAKE_TMUX_MODE") };
     }
 
@@ -1560,7 +1562,7 @@ mod timeout_tests {
         let _path = PathOverride::prepend(temp.path());
 
         let error = send_keys_timeout(
-            "agentdesk-test",
+            "AgentDesk-timeout-fixture",
             &["/compact", "Enter"],
             Duration::from_millis(20),
         )
@@ -1576,7 +1578,7 @@ mod timeout_tests {
         let _path = PathOverride::prepend(temp.path());
 
         let output = send_keys_timeout(
-            "agentdesk-test",
+            "AgentDesk-timeout-fixture",
             &["/compact", "Enter"],
             Duration::from_secs(1),
         )
@@ -1597,7 +1599,7 @@ mod timeout_tests {
         let _path = PathOverride::prepend(temp.path());
 
         let error = kill_session_output_timeout(
-            "agentdesk-test",
+            "AgentDesk-timeout-fixture",
             "test timeout",
             Duration::from_millis(20),
         )
