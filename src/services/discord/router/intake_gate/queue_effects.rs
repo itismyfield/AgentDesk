@@ -22,7 +22,22 @@ async fn queued_interventions(
 ) -> Vec<Intervention> {
     if let Some(mailbox) = shared.mailbox_peek(channel)
         && let Ok(Some(items)) = mailbox
-            .v2_request(|slot| Ok(slot.as_ref().map(|owner| owner.snapshot.items.clone())))
+            .v2_request(|slot| {
+                Ok(slot.as_ref().map(|owner| {
+                    let from = owner
+                        .snapshot
+                        .head_injection
+                        .as_ref()
+                        .map_or(0, |head| head.members().count());
+                    owner
+                        .snapshot
+                        .items
+                        .iter()
+                        .skip(from)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                }))
+            })
             .await
     {
         let (now, instant) = (std::time::SystemTime::now(), std::time::Instant::now());

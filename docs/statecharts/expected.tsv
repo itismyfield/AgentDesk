@@ -382,3 +382,5 @@ outbox-transaction/OutboxTransactionFreshTask.cfg	OutboxTransaction	CensusObserv
 outbox-transaction/OutboxTransactionPreSource.cfg	OutboxTransaction	SourceDecisionUsesObservation	-
 outbox-transaction/OutboxTransactionForeignTx.cfg	OutboxTransaction	SameTransaction	-
 outbox-transaction/OutboxTransactionForeignProviderConnection.cfg	OutboxTransaction	SameProviderConnection	-
+turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
+turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
