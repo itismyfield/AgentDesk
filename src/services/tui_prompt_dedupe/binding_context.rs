@@ -461,12 +461,6 @@ impl PreparedIncarnation {
         )
     }
 
-    pub(crate) fn tmux_identity(
-        &self,
-    ) -> Result<crate::domain::session_identity::managed::ManagedIdentity, String> {
-        crate::services::session_identity_metadata::binding_identity(&self.context)
-    }
-
     pub(crate) fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {
         result.map(|_| ()).map_err(|error| {
             crate::services::platform::tmux::kill_session(

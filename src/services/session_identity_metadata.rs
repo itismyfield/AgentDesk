@@ -59,3 +59,9 @@ pub(crate) fn provider_identity(
     identity.name_kind = name_kind.into();
     Ok(identity)
 }
+
+impl crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation {
+    pub(crate) fn tmux_identity(&self) -> Result<ManagedIdentity, String> {
+        binding_identity(&self.context)
+    }
+}

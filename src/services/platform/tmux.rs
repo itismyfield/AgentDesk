@@ -717,6 +717,7 @@ pub struct EnumeratedSession {
 }
 
 /// A tmux session and the PID of the tmux server that owns it.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionServer {
     pub session_name: String,
@@ -773,6 +774,7 @@ pub fn list_sessions_with_pane_command() -> Result<Vec<EnumeratedSession>, Strin
 }
 
 /// List every tmux session along with its owning tmux server PID.
+#[cfg(target_os = "macos")]
 pub fn list_sessions_with_server_pid() -> Result<Vec<SessionServer>, String> {
     let mut command = tmux_command().map_err(|e| format!("tmux list-sessions failed: {e}"))?;
     command.env_remove("TMUX");
@@ -788,6 +790,7 @@ pub fn list_sessions_with_server_pid() -> Result<Vec<SessionServer>, String> {
     )))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_sessions_with_server_pid(text: &str) -> Vec<SessionServer> {
     let mut sessions = Vec::new();
     for line in text.lines() {
