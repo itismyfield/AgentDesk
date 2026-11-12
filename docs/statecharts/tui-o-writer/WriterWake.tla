@@ -337,6 +337,7 @@ RestartInit ==
                      THEN {"nonce", "cutoff", "source", "prefix", "opener"}
                      ELSE IF Case = "restart-unscoped" THEN {"nonce", "cutoff"}
                      ELSE {"exact"}) :
+       \E seen \in (IF Case = "restart-fixed" THEN {0, 1} ELSE {0}) :
        restart = [scope |-> scope, stage |-> "start", physicalEnd |-> FALSE,
            witness |-> FALSE, witnessEver |-> FALSE, installed |-> FALSE,
            accepted |-> FALSE, applied |-> FALSE, oldIdle |-> FALSE,
@@ -350,7 +351,8 @@ RestartInit ==
            sealTried |-> FALSE, installedAtSeal |-> FALSE,
            prepared |-> (Case \in {"restart-fixed", "restart-repost", "restart-drop-prepared"}),
            preparedEver |-> (Case \in {"restart-fixed", "restart-repost", "restart-drop-prepared"}),
-           effects |-> 0, acked |-> FALSE, restarted |-> FALSE, effectBeforeCrash |-> FALSE,
+           effects |-> seen, acked |-> FALSE, restarted |-> FALSE, effectBeforeCrash |-> FALSE,
+           freshPrepared |-> FALSE, confirmed |-> "none", response |-> "none", receipt |-> "none",
            live |-> TRUE, replayed |-> FALSE]
 
 \* Authority is a historical binding, old nonce, source identity and validated prefix cut.
@@ -395,7 +397,8 @@ RestartSeal ==
     /\ restart' = [restart EXCEPT !.stage = "ready", !.sealTried = TRUE,
         !.installedAtSeal = restart.installed,
         !.prepared = @ \/ restart.oldIdle,
-        !.preparedEver = @ \/ restart.oldIdle]
+        !.preparedEver = @ \/ restart.oldIdle,
+        !.freshPrepared = @ \/ (restart.oldIdle /\ ~restart.preparedEver)]
 RestartLateInstall ==
     /\ RestartFrame /\ Case = "restart-late" /\ restart.stage = "ready" /\ ~restart.installed
     /\ restart' = [restart EXCEPT !.installed = TRUE, !.accepted = TRUE,
@@ -409,17 +412,42 @@ RestartReplayOld ==
 RestartPost ==
     /\ RestartFrame /\ restart.live /\ restart.prepared /\ ~restart.acked
     /\ (~restart.restarted \/ restart.stage = "ready")
-    /\ (restart.effects = 0 \/
-        (Case = "restart-repost" /\ restart.restarted /\ restart.effectBeforeCrash /\ restart.effects = 1))
-    /\ restart' = [restart EXCEPT !.effects = @ + 1]
+    /\ (restart.freshPrepared \/
+        (Case = "restart-repost" /\ restart.restarted /\ restart.effectBeforeCrash))
+    /\ \E outcome \in {"created", "uncertain"} :
+       restart' = [restart EXCEPT !.effects = Min2(@ + 1), !.freshPrepared = FALSE,
+           !.confirmed = "none", !.response = outcome]
+\* A readable exact-history verdict is observed before a restored Prepared may be retried.
 RestartConfirm ==
-    /\ RestartFrame /\ restart.live /\ restart.prepared /\ ~restart.acked /\ restart.effects > 0
+    /\ RestartFrame /\ restart.live /\ restart.prepared /\ ~restart.acked
+    /\ ~restart.freshPrepared /\ restart.response # "created"
+    /\ restart.confirmed \in {"none", "unknown"}
     /\ (~restart.restarted \/ restart.stage = "ready")
-    /\ restart' = [restart EXCEPT !.acked = TRUE]
+    /\ restart' = [restart EXCEPT
+        !.confirmed = IF restart.effects > 0 THEN "posted" ELSE "missing"]
+RestartHistoryUnavailable ==
+    /\ RestartFrame /\ restart.live /\ restart.prepared /\ ~restart.acked
+    /\ ~restart.freshPrepared /\ restart.response # "created"
+    /\ restart.confirmed \in {"none", "unknown"}
+    /\ restart' = [restart EXCEPT !.confirmed = "unknown"]
+RestartRecordMissing ==
+    /\ RestartFrame /\ restart.live /\ restart.confirmed = "missing" /\ ~restart.acked
+    /\ restart' = [restart EXCEPT !.receipt = "missing", !.confirmed = "none"]
+RestartPrepareRetry ==
+    /\ RestartFrame /\ restart.live /\ restart.receipt = "missing" /\ ~restart.acked
+    /\ restart' = [restart EXCEPT !.receipt = "none", !.freshPrepared = TRUE,
+        !.confirmed = "none", !.response = "none"]
+RestartRecordPosted ==
+    /\ RestartFrame /\ restart.live /\ restart.prepared /\ ~restart.acked
+    /\ (restart.response = "created" \/ restart.confirmed = "posted")
+    /\ restart' = [restart EXCEPT !.acked = TRUE, !.receipt = "posted",
+        !.confirmed = "none", !.response = "none", !.freshPrepared = FALSE]
 RestartCrash ==
     /\ RestartFrame /\ restart.physicalEnd /\ ~restart.restarted
     /\ restart' = [restart EXCEPT !.restarted = TRUE, !.stage = "boot", !.live = FALSE,
         !.effectBeforeCrash = restart.effects > 0,
+        !.freshPrepared = FALSE, !.confirmed = "none", !.response = "none",
+        !.witness = IF Case = "restart-witness-lost" THEN FALSE ELSE @,
         !.installed = FALSE, !.accepted = FALSE, !.applied = FALSE, !.oldIdle = FALSE,
         !.open = 0, !.opener = 0, !.nativeRead = FALSE, !.promptRead = FALSE,
         !.newOpened = FALSE, !.replayed = FALSE, !.sealTried = FALSE, !.installedAtSeal = FALSE,
@@ -430,13 +458,16 @@ RestartBoot ==
 RestartRest == UNCHANGED bootAll
 RestartNext == RestartPhysicalEnd \/ RestartInstall \/ RestartReadOld \/ RestartBoundary \/
     RestartReadNew \/ RestartSeal \/ RestartLateInstall \/ RestartReplayOld \/
-    RestartPost \/ RestartConfirm \/ RestartCrash \/ RestartBoot \/ RestartRest
+    RestartPost \/ RestartConfirm \/ RestartHistoryUnavailable \/ RestartRecordMissing \/
+    RestartPrepareRetry \/ RestartRecordPosted \/ RestartCrash \/ RestartBoot \/ RestartRest
 RestartSpec == RestartInit /\ [][RestartNext]_bootAll
     /\ WF_bootAll(RestartPhysicalEnd) /\ WF_bootAll(RestartInstall)
     /\ WF_bootAll(RestartReadOld) /\ WF_bootAll(RestartBoundary)
     /\ WF_bootAll(RestartReadNew) /\ WF_bootAll(RestartSeal)
     /\ WF_bootAll(RestartLateInstall) /\ WF_bootAll(RestartPost)
-    /\ WF_bootAll(RestartConfirm) /\ WF_bootAll(RestartBoot)
+    /\ WF_bootAll(RestartConfirm) /\ WF_bootAll(RestartRecordMissing)
+    /\ WF_bootAll(RestartPrepareRetry) /\ WF_bootAll(RestartRecordPosted)
+    /\ WF_bootAll(RestartBoot)
 RestartReplyOnce == restart.effects <= 1
 RestartExactEndOnly == restart.applied => RestartExactScope
 RestartNewPromptNotAbsorbed == ~restart.absorbed

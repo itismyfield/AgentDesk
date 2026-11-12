@@ -1,7 +1,7 @@
 # WriterWake
 
-TLC reached 152 states and 324 steps. The chart draws 8 states and 12 arrows.
-The chart does not draw 220 steps that stay in one chart state.
+TLC reached 240 states and 636 steps. The chart draws 8 states and 12 arrows.
+The chart does not draw 508 steps that stay in one chart state.
 
 ## RestartExactEndOnly breaks
 The shortest path has 4 steps:

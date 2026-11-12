@@ -14,61 +14,85 @@ stateDiagram-v2
   class lg2 blue
   class lg3 breaks
   class lg4 bugPath
-  s0: 답 준비됨, 옛 TUI 실행 중
+  s0: 기존 Prepared, 결과 미확인
   s1: 물리 종료 확인, witness 읽기 전
-  s2: 기존 Prepared의 POST 확인 대기
-  s3: witness 설치 후 옛 opener 읽기
+  s2: witness 설치 후 옛 opener 읽기
+  s3: 부재 확인 receipt, 새 Prepared 전
   s4: writer 재시작, durable 기록 유지
   s5: old cutoff 앞, 새 prompt 읽기 전
-  s6: writer 재시작, POST 확인 미완료
+  s6: durable Prepared receipt, POST 허가
   s7: 옛 Open만 Idle, 다음 record 읽기
-  s8: 새 Open 유지, old prefix seal 전
-  s9: durable Prepared, 게시 대기
-  s10: 기존 게시 확인, 중복 없음
-  s11: 같은 답이 두 번 게시됨
+  s8: 기존 Prepared의 POST 확인 대기
+  s9: 새 Open 유지, old prefix seal 전
+  s10: 기존 POST 발견, Posted receipt 전
+  s11: durable Prepared, 게시 대기
+  s12: writer 재시작, POST 확인 미완료
+  s13: 기존 게시 확인, 중복 없음
+  s14: 같은 답이 두 번 게시됨
   [*] --> s0
   s0 --> s1: old incarnation의 실제 종료 기록
-  s0 --> s2: 기존 Prepared identity로 게시
-  s1 --> s2: 기존 Prepared identity로 게시
-  s1 --> s3: historical binding과 prefix 검증 후 witness 설치
+  s0 --> s0: 읽기 가능한 history로 부재 확인
+  s1 --> s2: historical binding과 prefix 검증 후 witness 설치
   s1 --> s4: writer process가 중단됨 [이전 재시작 없음]
-  s2 --> s0: 기존 게시를 확인하고 ack
-  s2 --> s1: 기존 게시를 확인하고 ack
-  s2 --> s6: writer process가 중단됨 [이전 재시작 없음]
-  s3 --> s4: writer process가 중단됨 [이전 재시작 없음]
-  s3 --> s5: old opener 재생
-  s3 --> s2: 기존 Prepared identity로 게시
+  s0 --> s3: 확인된 부재를 ledger에 기록
+  s1 --> s3: 확인된 부재를 ledger에 기록
+  s2 --> s4: writer process가 중단됨 [이전 재시작 없음]
+  s2 --> s5: old opener 재생
+  s3 --> s6: 같은 unit의 새 Prepared receipt 기록
   s4 --> s1: 같은 source와 ledger를 다시 읽음
   s5 --> s4: writer process가 중단됨 [이전 재시작 없음]
-  s5 --> s2: 기존 Prepared identity로 게시
   s5 --> s7: cutoff에서 old opener만 reset
-  s2 --> s3: 기존 게시를 확인하고 ack
-  s6 --> s2: 같은 source와 ledger를 다시 읽음
-  s2 --> s5: 기존 게시를 확인하고 ack
+  s3 --> s4: writer process가 중단됨 [이전 재시작 없음]
+  s2 --> s3: 확인된 부재를 ledger에 기록
+  s6 --> s8: 새 Prepared receipt의 허가로 POST 시작
+  s5 --> s3: 확인된 부재를 ledger에 기록
+  s6 --> s4: writer process가 중단됨 [이전 재시작 없음]
   s7 --> s4: writer process가 중단됨 [이전 재시작 없음]
-  s7 --> s2: 기존 Prepared identity로 게시
-  s7 --> s8: cutoff 뒤 새 prompt 처리
-  s2 --> s2: historical binding과 prefix 검증 후 witness 설치 or old opener 재생 or cutoff에서 old opener만 reset or cutoff 뒤 새 prompt 처리 or old prefix seal, 기존 ledger debt 보존
-  s2 --> s7: 기존 게시를 확인하고 ack
-  s8 --> s4: writer process가 중단됨 [이전 재시작 없음]
-  s8 --> s9: old prefix seal, 기존 ledger debt 보존
-  s8 --> s2: 기존 Prepared identity로 게시
+  s7 --> s9: cutoff 뒤 새 prompt 처리
+  s8 --> s0: POST 결과를 durable Posted receipt로 기록
+  s8 --> s10: 정확한 기존 POST를 history에서 확인
+  s4 --> s3: 같은 source와 ledger를 다시 읽음
+  s8 --> s1: POST 결과를 durable Posted receipt로 기록
+  s8 --> s12: writer process가 중단됨 [이전 재시작 없음]
+  s7 --> s3: 확인된 부재를 ledger에 기록
   s9 --> s4: writer process가 중단됨 [이전 재시작 없음]
-  s9 --> s2: 기존 Prepared identity로 게시
-  s2 --> s8: 기존 게시를 확인하고 ack
-  s2 --> s10: 기존 게시를 확인하고 ack
-  s8 --> s10: old prefix seal, 기존 ledger debt 보존
-  s10 --> s4: writer process가 중단됨 [이전 재시작 없음]
-  s2 --> s11: 기존 POST를 확인하지 않고 다시 게시
+  s9 --> s11: old prefix seal, 기존 ledger debt 보존
+  s10 --> s0: POST 결과를 durable Posted receipt로 기록
+  s10 --> s1: POST 결과를 durable Posted receipt로 기록
+  s10 --> s12: writer process가 중단됨 [이전 재시작 없음]
+  s8 --> s2: POST 결과를 durable Posted receipt로 기록
+  s11 --> s4: writer process가 중단됨 [이전 재시작 없음]
+  s9 --> s3: 확인된 부재를 ledger에 기록
+  s12 --> s8: 같은 source와 ledger를 다시 읽음
+  s8 --> s5: POST 결과를 durable Posted receipt로 기록
+  s10 --> s2: POST 결과를 durable Posted receipt로 기록
+  s11 --> s3: 확인된 부재를 ledger에 기록
+  s8 --> s8: historical binding과 prefix 검증 후 witness 설치 or old opener 재생 or cutoff에서 old opener만 reset or cutoff 뒤 새 prompt 처리 or old prefix seal, 기존 ledger debt 보존
+  s10 --> s5: POST 결과를 durable Posted receipt로 기록
+  s8 --> s7: POST 결과를 durable Posted receipt로 기록
+  s10 --> s7: POST 결과를 durable Posted receipt로 기록
+  s8 --> s9: POST 결과를 durable Posted receipt로 기록
+  s8 --> s13: POST 결과를 durable Posted receipt로 기록
+  s10 --> s9: POST 결과를 durable Posted receipt로 기록
+  s9 --> s13: old prefix seal, 기존 ledger debt 보존
+  s10 --> s13: POST 결과를 durable Posted receipt로 기록
+  s13 --> s4: writer process가 중단됨 [이전 재시작 없음]
+  s8 --> s14: confirm 허가 없이 기존 Prepared 재게시
+  s10 --> s14: confirm 허가 없이 기존 Prepared 재게시
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 bugPath
   class s1 bugPath
-  class s2 blue
-  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
   class s4 yellow
-  class s6 yellow
+  class s6 blue
   class s6 bugPath
-  class s9 blue
-  class s10 teal
-  class s11 breaks
-  class s11 bugPath
+  class s8 blue
+  class s8 bugPath
+  class s10 blue
+  class s11 blue
+  class s12 yellow
+  class s12 bugPath
+  class s13 teal
+  class s14 breaks
+  class s14 bugPath

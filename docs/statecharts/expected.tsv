@@ -393,3 +393,4 @@ tui-o-writer/WriterRestartEndNewOpen.cfg	WriterWake	RestartOldEndCannotCloseNewO
 tui-o-writer/WriterRestartEndDropPrepared.cfg	WriterWake	RestartPreparedNotLost	-
 tui-o-writer/WriterRestartEndRepost.cfg	WriterWake	RestartReplyOnce	-
 tui-o-writer/WriterRestartEndCurrentNonce.cfg	WriterWake	-	RestartExactEndEventuallyCloses
+tui-o-writer/WriterRestartEndWitnessLost.cfg	WriterWake	RestartWitnessSurvivesBoot,RestartWitnessBeforeSeal	-
