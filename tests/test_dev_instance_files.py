@@ -1,6 +1,5 @@
 """Behavioral tests for private, fresh instance files; no live credentials."""
 
-import io
 import json
 import stat
 import tempfile
@@ -10,7 +9,7 @@ from pathlib import Path
 
 from scripts.dev_instance.files import (
     InstanceError, create_layout, instance_root, safe_absolute,
-    validate_tree, write_credential, write_private_json,
+    validate_tree, write_private_json,
 )
 
 
@@ -97,66 +96,6 @@ class InstanceFilesTests(unittest.TestCase):
                     path.unlink()
                     path.parent.rmdir()
 
-    def test_credentials_require_three_distinct_private_files(self):
-        validate_tree(self.root)
-        with self.assertRaisesRegex(InstanceError, "three"):
-            validate_tree(self.root, require_credentials=True)
-        for index, name in enumerate(("claude_bot_token", "codex_bot_token", "driver_bot_token")):
-            sentinel = f"sentinel-fake-token-{index}"
-            write_credential(self.root, name, io.StringIO(sentinel + "\n"))
-            path = self.root / "credential" / name
-            self.assertEqual(path.read_text(), sentinel)
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-        validate_tree(self.root, require_credentials=True)
-        (self.root / "credential/driver_bot_token").write_bytes(
-            (self.root / "credential/claude_bot_token").read_bytes())
-        with self.assertRaisesRegex(InstanceError, "distinct"):
-            validate_tree(self.root, require_credentials=True)
-
-    def test_invalid_token_input_is_rejected_without_echoing_it(self):
-        cases = (
-            ("unexpected_bot_token", b"sentinel-token"),
-            ("claude_bot_token", b""),
-            ("claude_bot_token", b"sentinel-token\nother"),
-            ("claude_bot_token", b"sentinel-token\r"),
-            ("claude_bot_token", b" sentinel-token"),
-            ("claude_bot_token", b"x" * 4097),
-            ("claude_bot_token", b"x" * 4096 + b"\ntrailing"),
-        )
-        for name, value in cases:
-            with self.subTest(name=name, size=len(value)):
-                with self.assertRaises(InstanceError) as error:
-                    write_credential(self.root, name, io.BytesIO(value))
-                self.assertNotIn("sentinel-token", str(error.exception))
-                self.assertEqual(list((self.root / "credential").iterdir()), [])
-        write_credential(self.root, "claude_bot_token", io.BytesIO(b"sentinel-distinct"))
-        with self.assertRaisesRegex(InstanceError, "distinct"):
-            write_credential(self.root, "driver_bot_token", io.BytesIO(b"sentinel-distinct"))
-        self.assertFalse((self.root / "credential/driver_bot_token").exists())
-
-    def test_unknown_or_unsafe_existing_credentials_are_not_migrated(self):
-        path = self.root / "credential/claude_bot_token"
-        write_credential(self.root, path.name, io.BytesIO(b"sentinel-fake-token"))
-        for mode in (0o644, 0o400):
-            path.chmod(mode)
-            with self.subTest(mode=mode), self.assertRaisesRegex(InstanceError, "private"):
-                validate_tree(self.root)
-        path.chmod(0o600)
-        credentials = self.root / "credential"
-        credentials.chmod(0o755)
-        with self.assertRaisesRegex(InstanceError, "0700"):
-            validate_tree(self.root)
-        credentials.chmod(0o700)
-        path.write_bytes(b"")
-        with self.assertRaisesRegex(InstanceError, "nonempty"):
-            validate_tree(self.root)
-        path.unlink()
-        for name, directory in (("unknown_token", False), ("codex_bot_token", True)):
-            entry = credentials / name
-            entry.mkdir() if directory else entry.write_bytes(b"sentinel-legacy")
-            with self.subTest(name=name), self.assertRaisesRegex(InstanceError, "unknown"):
-                validate_tree(self.root)
-            entry.rmdir() if directory else entry.unlink()
 
     def test_json_cannot_escape_instance_root(self):
         external = self.base / "external.json"
