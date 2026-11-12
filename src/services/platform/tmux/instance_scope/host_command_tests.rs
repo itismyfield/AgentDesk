@@ -24,9 +24,9 @@ done
 case "$1 $*" in
   *pane_width*) printf '80 30\n';;
   *pane_id*) printf '%%7\n';;
-  *pane_pid*) printf '99\n';;
   *pane_dead*|list-panes*) printf '0\n';;
   *pane_current_command*) printf '%s|claude|99\nAgentDesk-release|claude|100\n' "$ADK_I2_TMUX_SESSION";;
+  *pane_pid*) printf '99\n';;
   *session_name*pid*) printf '%s|99\nAgentDesk-release|100\n' "$ADK_I2_TMUX_SESSION";;
   list-sessions*) printf '%s\nAgentDesk-release\n' "$ADK_I2_TMUX_SESSION";;
   capture-pane*) printf 'captured test pane\n';;

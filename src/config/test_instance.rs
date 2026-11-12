@@ -25,7 +25,7 @@ pub(crate) struct TmuxHost {
     pub(crate) prefix: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HerdrHost {
     pub(crate) socket: PathBuf,
@@ -280,6 +280,233 @@ fn validate_hosts(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(unix)]
+mod owner {
+    use super::*;
+    use crate::services::herdr_launch::HerdrLaunchEndpoint;
+    use crate::services::session_host::{ServerWitness, StartIdentity};
+    use crate::utils::secret_file::private_directory::PrivateDirectory;
+    use serde::Serialize;
+
+    const FILE: &str = "herdr-owner.json";
+
+    #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub(crate) struct OwnerReceipt {
+        schema_version: u8,
+        instance_id: String,
+        endpoint: HerdrHost,
+        binary_sha256: String,
+        daemon: Daemon,
+        workspaces: Vec<OwnedPane>,
+    }
+
+    #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct Daemon {
+        pid: u32,
+        start_identity: RecordedStart,
+    }
+
+    #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+    #[serde(tag = "platform", rename_all = "lowercase", deny_unknown_fields)]
+    enum RecordedStart {
+        Darwin { seconds: u64, micros: u64 },
+        Linux { ticks: u64 },
+    }
+
+    #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct OwnedPane {
+        workspace_id: String,
+        pane_id: String,
+    }
+
+    fn identifier(value: &str) -> bool {
+        !value.is_empty()
+            && value.len() <= 256
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_:.".contains(&b))
+    }
+
+    impl OwnerReceipt {
+        pub(crate) fn pid(&self) -> u32 {
+            self.daemon.pid
+        }
+
+        pub(crate) fn matches_peer(&self, pid: u32, start: &StartIdentity) -> bool {
+            self.pid() == pid
+                && match (&self.daemon.start_identity, start) {
+                    (
+                        RecordedStart::Darwin { seconds, micros },
+                        StartIdentity::Darwin {
+                            seconds: actual_seconds,
+                            micros: actual_micros,
+                        },
+                    ) => seconds == actual_seconds && micros == actual_micros,
+                    (RecordedStart::Linux { ticks }, StartIdentity::LinuxTicks(actual)) => {
+                        ticks == actual
+                    }
+                    _ => false,
+                }
+        }
+
+        pub(crate) fn matches_witness(&self, witness: &ServerWitness) -> bool {
+            self.endpoint.socket == witness.socket && self.matches_peer(witness.pid, &witness.start)
+        }
+
+        pub(crate) fn contains_pane(&self, pane: &str) -> bool {
+            self.workspaces.iter().any(|owned| owned.pane_id == pane)
+        }
+
+        fn valid(&self, instance: &TestInstance) -> bool {
+            let start = match self.daemon.start_identity {
+                RecordedStart::Darwin { seconds, micros } => seconds > 0 && micros < 1_000_000,
+                RecordedStart::Linux { ticks } => ticks > 0,
+            };
+            let mut workspaces = std::collections::HashSet::new();
+            let mut panes = std::collections::HashSet::new();
+            self.schema_version == 1
+                && self.instance_id == instance.instance_id
+                && self.endpoint == instance.herdr
+                && self.pid() > 0
+                && start
+                && self.binary_sha256.len() == 64
+                && self
+                    .binary_sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && self.workspaces.iter().all(|pane| {
+                    identifier(&pane.workspace_id)
+                        && identifier(&pane.pane_id)
+                        && workspaces.insert(&pane.workspace_id)
+                        && panes.insert(&pane.pane_id)
+                })
+        }
+    }
+
+    fn read(instance: &TestInstance, directory: &PrivateDirectory) -> Result<OwnerReceipt, String> {
+        let bytes = directory
+            .read(FILE)
+            .map_err(|_| rejected())?
+            .ok_or_else(rejected)?;
+        let receipt: OwnerReceipt = serde_json::from_slice(&bytes).map_err(|_| rejected())?;
+        if !receipt.valid(instance) {
+            return Err(rejected());
+        }
+        Ok(receipt)
+    }
+
+    pub(crate) fn owned_herdr(socket: &Path) -> Result<Option<OwnerReceipt>, String> {
+        let Some(instance) = current()? else {
+            return Ok(None);
+        };
+        if socket != instance.herdr.socket {
+            return Err(rejected());
+        }
+        checked_path(socket)?;
+        let directory =
+            PrivateDirectory::open(&instance.root.join("runtime")).map_err(|_| rejected())?;
+        read(instance, &directory).map(Some)
+    }
+
+    pub(crate) fn validate_herdr_create_target(cwd: &Path, label: &str) -> Result<(), String> {
+        let Some(instance) = current()? else {
+            return Ok(());
+        };
+        let (logical, nonce) = label
+            .split_once('#')
+            .map_or((label, None), |(l, n)| (l, Some(n)));
+        validate_tmux_target(logical).map_err(|_| rejected())?;
+        if nonce.is_some_and(|nonce| {
+            nonce.len() != 32
+                || !nonce
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }) || !cwd.starts_with(&instance.root)
+            || !cwd.is_dir()
+        {
+            return Err(rejected());
+        }
+        checked_path(cwd)?;
+        if std::fs::canonicalize(cwd).map_err(|_| rejected())? != cwd {
+            return Err(rejected());
+        }
+        Ok(())
+    }
+
+    pub(crate) struct OwnedCreateGuard {
+        instance: &'static TestInstance,
+        directory: PrivateDirectory,
+        _lock: std::fs::File,
+        baseline: OwnerReceipt,
+    }
+
+    pub(crate) fn begin_herdr_create(
+        endpoint: &HerdrLaunchEndpoint,
+        witness: &ServerWitness,
+        label: &str,
+        cwd: &Path,
+    ) -> Result<Option<OwnedCreateGuard>, String> {
+        let Some(instance) = current()? else {
+            return Ok(None);
+        };
+        validate_herdr_create_target(cwd, label)?;
+        if endpoint.execution_node != instance.instance_id
+            || endpoint.config_key != instance.herdr.endpoint_key
+            || endpoint.socket_addr != instance.herdr.socket.to_string_lossy()
+            || endpoint.herdr_session != instance.herdr.session
+        {
+            return Err(rejected());
+        }
+        let directory =
+            PrivateDirectory::open(&instance.root.join("runtime")).map_err(|_| rejected())?;
+        let lock = directory.lock("herdr-owner.lock").map_err(|_| rejected())?;
+        let baseline = read(instance, &directory)?;
+        if !baseline.matches_witness(witness) {
+            return Err(rejected());
+        }
+        Ok(Some(OwnedCreateGuard {
+            instance,
+            directory,
+            _lock: lock,
+            baseline,
+        }))
+    }
+
+    impl OwnedCreateGuard {
+        pub(crate) fn record_created(
+            &mut self,
+            workspace_id: &str,
+            pane_id: &str,
+        ) -> Result<(), String> {
+            if !identifier(workspace_id)
+                || !identifier(pane_id)
+                || self
+                    .baseline
+                    .workspaces
+                    .iter()
+                    .any(|pane| pane.workspace_id == workspace_id || pane.pane_id == pane_id)
+                || read(self.instance, &self.directory)? != self.baseline
+            {
+                return Err(rejected());
+            }
+            self.baseline.workspaces.push(OwnedPane {
+                workspace_id: workspace_id.into(),
+                pane_id: pane_id.into(),
+            });
+            let bytes = serde_json::to_vec(&self.baseline).map_err(|_| rejected())?;
+            self.directory
+                .write_atomic(FILE, &bytes)
+                .map_err(|_| rejected())
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) use owner::{begin_herdr_create, owned_herdr, validate_herdr_create_target};
+
+#[cfg(all(test, unix))]
 #[path = "test_instance/host_scope_tests.rs"]
 pub(crate) mod tests;

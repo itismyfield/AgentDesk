@@ -2,14 +2,30 @@ use super::*;
 use serde_json::json;
 
 pub(crate) fn fixture() -> (tempfile::TempDir, PathBuf) {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("adk-i2-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let root = temp
         .path()
         .canonicalize()
         .unwrap()
         .join(uuid::Uuid::new_v4().to_string());
-    for directory in ["config", "runtime/tmux", "runtime/herdr", "herdr-home"] {
+    for directory in [
+        "",
+        "config",
+        "runtime",
+        "runtime/tmux",
+        "runtime/herdr",
+        "herdr-home",
+    ] {
         std::fs::create_dir_all(root.join(directory)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.join(directory), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
     }
     let id = root.file_name().unwrap().to_str().unwrap();
     let manifest = json!({
@@ -296,5 +312,75 @@ fn initialized_test_scope_names_sessions_and_refuses_herdr_runtime() {
     assert_eq!(
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
+    );
+    exercise_owner_receipt(instance);
+}
+
+#[cfg(unix)]
+fn exercise_owner_receipt(instance: &'static TestInstance) {
+    use crate::services::herdr_launch::HerdrLaunchEndpoint;
+    use crate::services::session_host::ServerWitness;
+    use crate::utils::secret_file::private_directory::PrivateDirectory;
+    let directory = PrivateDirectory::open(&instance.root.join("runtime")).unwrap();
+    let socket = &instance.herdr.socket;
+    assert!(owned_herdr(socket).is_err());
+    assert!(owned_herdr(Path::new("/synthetic/release/socket")).is_err());
+    let mut value = json!({"schema_version":1,"instance_id":instance.instance_id,
+        "endpoint":instance.herdr,"binary_sha256":"a".repeat(64),
+        "daemon":{"pid":42,"start_identity":{"platform":"darwin","seconds":1000,"micros":0}},
+        "workspaces":[]});
+    let publish = |value: &Value| {
+        directory
+            .write_atomic("herdr-owner.json", &serde_json::to_vec(value).unwrap())
+            .unwrap()
+    };
+    for (pointer, replacement) in [
+        ("/schema_version", json!(2)),
+        ("/instance_id", json!("foreign")),
+        ("/daemon/pid", json!(0)),
+        ("/daemon/start_identity/micros", json!(1_000_000)),
+        ("/binary_sha256", json!("not-a-hash")),
+        (
+            "/workspaces",
+            json!([{"workspace_id":"w1","pane_id":"w1:p1"},{"workspace_id":"w1","pane_id":"w1:p2"}]),
+        ),
+    ] {
+        let mut foreign = value.clone();
+        *foreign.pointer_mut(pointer).unwrap() = replacement;
+        publish(&foreign);
+        assert!(owned_herdr(socket).is_err(), "{pointer}");
+    }
+    publish(&value);
+    let receipt = owned_herdr(socket).unwrap().unwrap();
+    let mut witness = ServerWitness::for_test(42);
+    witness.socket = socket.clone();
+    assert!(receipt.matches_witness(&witness));
+    assert!(!receipt.contains_pane("w1:p1"));
+    let endpoint = HerdrLaunchEndpoint {
+        execution_node: instance.instance_id.clone(),
+        config_key: instance.herdr.endpoint_key.clone(),
+        socket_addr: socket.display().to_string(),
+        herdr_session: instance.herdr.session.clone(),
+    };
+    let label = format!("{}-claude-test#{}", instance.tmux.prefix, "a".repeat(32));
+    let mut guard = begin_herdr_create(&endpoint, &witness, &label, &instance.root)
+        .unwrap()
+        .unwrap();
+    assert!(begin_herdr_create(&endpoint, &witness, &label, &instance.root).is_err());
+    assert!(
+        owned_herdr(socket)
+            .unwrap()
+            .unwrap()
+            .matches_witness(&witness)
+    );
+    guard.record_created("w1", "w1:p1").unwrap();
+    assert!(owned_herdr(socket).unwrap().unwrap().contains_pane("w1:p1"));
+    assert!(guard.record_created("w1", "w1:p1").is_err());
+    value["binary_sha256"] = json!("b".repeat(64));
+    publish(&value);
+    assert!(guard.record_created("w2", "w2:p1").is_err());
+    assert_eq!(
+        read_json(&instance.root.join("runtime/herdr-owner.json")).unwrap(),
+        value
     );
 }

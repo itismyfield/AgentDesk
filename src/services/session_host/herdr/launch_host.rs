@@ -560,11 +560,15 @@ impl SocketHerdrLaunchHost {
             &ServerWitness,
         ) -> Result<(), String>,
     ) -> HerdrCreateOutcome {
-        if crate::config::test_instance::requested() {
-            return HerdrCreateOutcome::NotSent(
-                "test Herdr runtime receipt is not admitted".into(),
-            );
-        }
+        let mut ownership = match crate::config::test_instance::begin_herdr_create(
+            request.endpoint,
+            request.witness,
+            request.label,
+            request.cwd,
+        ) {
+            Ok(ownership) => ownership,
+            Err(detail) => return HerdrCreateOutcome::NotSent(detail),
+        };
         let Some(configured) = self.endpoint(request.endpoint) else {
             return HerdrCreateOutcome::NotSent("endpoint is not configured".into());
         };
@@ -588,6 +592,11 @@ impl SocketHerdrLaunchHost {
             pane_id: pane.pane_id.clone(),
             detail,
         };
+        if let Some(ownership) = &mut ownership
+            && let Err(detail) = ownership.record_created(&pane.workspace_id, &pane.pane_id)
+        {
+            return unconfirmed(detail);
+        }
         if !same_dir(request.cwd, pane.cwd.as_deref()) {
             return unconfirmed(format!("pane opened in {:?}", pane.cwd));
         }
