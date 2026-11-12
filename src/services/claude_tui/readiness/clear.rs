@@ -105,7 +105,10 @@ pub(super) fn current(source: &Source) -> Option<Option<Evidence>> {
     let Some(binding) = tui_prompt_dedupe::runtime_binding_for_tmux_session(&source.session) else {
         return Some(None);
     };
-    if binding.session_id.as_deref() == Some(source.native.as_str())
+    if binding
+        .session_id
+        .as_deref()
+        .is_none_or(|native| native == source.native)
         && Path::new(binding.relay_output_path()) == source.path
     {
         Some(None)
