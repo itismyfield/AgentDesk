@@ -135,7 +135,7 @@ where
         Some(initial_nonce)
     );
     assert_eq!(actor.writer.suspension.is_empty(), inspect);
-    super::super::restart_end::refresh(
+    crate::services::tui_o::writer::restart_end::refresh(
         &mut actor.writer,
         &mut actor.deriver,
         actor.bindings.as_ref(),
@@ -271,7 +271,7 @@ where
     }
     assert_eq!(actor.scope_hold, None);
     actor.observe_waiting(false);
-    super::super::restart_end::refresh(
+    crate::services::tui_o::writer::restart_end::refresh(
         &mut actor.writer,
         &mut actor.deriver,
         actor.bindings.as_ref(),
