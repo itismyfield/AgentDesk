@@ -234,7 +234,10 @@ fn a_corrupt_record_does_not_hide_a_valid_end() {
     let bytes = b"not a restart end";
     fs::write(&corrupt, bytes).unwrap();
 
-    assert_eq!(read(root.path(), good.channel).unwrap(), [good.clone()]);
+    assert_eq!(
+        read(root.path(), good.channel).unwrap().as_slice(),
+        std::slice::from_ref(&good)
+    );
     assert_eq!(read_durable(root.path(), good.channel).unwrap(), [good]);
     assert_eq!(fs::read(corrupt).unwrap(), bytes);
 }
@@ -264,7 +267,10 @@ fn an_unreadable_record_does_not_hide_a_valid_end() {
         "the fixture must deny record reads"
     );
 
-    assert_eq!(read(root.path(), good.channel).unwrap(), [good.clone()]);
+    assert_eq!(
+        read(root.path(), good.channel).unwrap().as_slice(),
+        std::slice::from_ref(&good)
+    );
     assert_eq!(read_durable(root.path(), good.channel).unwrap(), [good]);
 }
 
