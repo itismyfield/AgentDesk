@@ -114,6 +114,8 @@ pub(in crate::services::discord) mod o_cut_recorder;
 mod o_recovery_cut_tests;
 #[path = "recovery_engine/restore_inflight.rs"]
 mod restore_inflight;
+#[path = "recovery_engine/restore_serial.rs"]
+mod restore_serial;
 pub(crate) use completion_delivery::CapturedReadyDeliveryCommit;
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_admitted_restart.rs"]
@@ -228,9 +230,10 @@ pub(in crate::services::discord) use self::completion_delivery::{
 #[cfg(unix)]
 use self::restore_inflight::detect_live_tmux_output_path;
 pub(in crate::services::discord) use self::restore_inflight::{
-    finish_recovered_turn_mailbox, restore_inflight_states, restore_inflight_turns,
+    finish_recovered_turn_mailbox, restore_inflight_turns,
 };
 use self::restore_persist_outcome::{RestorePersistOutcome, restore_codex_rollout_output_path};
+pub(in crate::services::discord) use self::restore_serial::restore_serially;
 pub(super) use self::runtime::reregister_active_turn_from_inflight;
 pub(in crate::services::discord) use self::terminal_text_idempotency::RecoveryDeliveryContext;
 use self::tmux_probe::observe_liveness_with_retry;

@@ -145,6 +145,7 @@ pub(super) fn run_bot_build_shared_data(
         restart: RestartLifecycle {
             replay_restart: std::sync::OnceLock::new(),
             recovering_channels: dashmap::DashMap::new(),
+            restore_locks: dashmap::DashMap::new(),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             intake_worker_lifecycle:
                 crate::services::cluster::intake_worker::IntakeWorkerLifecycle::default(),

@@ -1356,6 +1356,7 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
         restart: RestartLifecycle {
             replay_restart: std::sync::OnceLock::new(),
             recovering_channels: dashmap::DashMap::new(),
+            restore_locks: dashmap::DashMap::new(),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             intake_worker_lifecycle: Default::default(),
             finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

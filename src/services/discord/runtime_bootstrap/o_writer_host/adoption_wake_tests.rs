@@ -55,9 +55,8 @@ async fn only_a_row_no_live_turn_holds_is_left_to_the_adoption_wake() {
         let row = kept_row(channel);
         let tmux = row.tmux_session_name.clone().unwrap();
         let kept = |shared: Arc<SharedData>| async move {
-            kept_rows(&shared, &ProviderKind::Claude, channel)
-                .await
-                .len()
+            let kept = kept_rows(&shared, &ProviderKind::Claude, channel).await;
+            kept.map_or(0, |rows| rows.len())
         };
         let cases = [
             ("no watcher", None, 1),
@@ -116,7 +115,7 @@ async fn an_adoption_commit_settles_the_kept_row_once_without_a_legacy_body_pg()
         let _dead = InjectedLivenessGuard::set(session.clone(), HostLiveness::DeadOrAbsent);
         let _gone = InjectedPresenceGuard::set(session, HostPresence::Missing);
         let recorder = o_cut_recorder::start(channel).await;
-        let restore = crate::services::discord::recovery_engine::restore_inflight_states;
+        let restore = crate::services::discord::recovery_engine::restore_serially;
         restore(&recorder.http, &shared, &provider, vec![row.clone()]).await;
         let still = inflight::load_inflight_state(&provider, channel);
         assert_eq!(still.map(|row| row.recovery_relay_attempts), Some(0));
@@ -151,6 +150,128 @@ async fn an_adoption_commit_settles_the_kept_row_once_without_a_legacy_body_pg()
         assert!(!contents[0].contains(BODY), "{contents:?}");
         pool.close().await;
         db.drop().await;
+    })
+    .await;
+}
+
+thread_local! {
+    static JUDGED: std::cell::RefCell<Option<tokio::sync::mpsc::UnboundedSender<bool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Reports each wake judgement to a test waiting on it: whether a claim held the row.
+pub(super) fn judged(judged: &Result<Vec<InflightTurnState>, Held>) {
+    let claimed = matches!(judged, Err(Held::Claimed));
+    JUDGED.with(|slot| slot.borrow().as_ref().map(|tx| tx.send(claimed)));
+}
+
+/// An O-owned channel's kept row whose tmux is gone, recovered through `recorder`.
+struct Rig {
+    shared: Arc<SharedData>,
+    row: InflightTurnState,
+    recorder: o_cut_recorder::DiscordRecorder,
+    db: crate::dispatch::test_support::DispatchPostgresTestDb,
+    pool: sqlx::PgPool,
+    _owned: test_override::ChannelsGuard,
+    _dead: crate::services::session_host::test_support::InjectedLivenessGuard,
+    _gone: crate::services::session_host::test_support::InjectedPresenceGuard,
+}
+
+impl Rig {
+    async fn new(channel: u64, first: Arc<o_cut_recorder::FirstPost>) -> Self {
+        use crate::services::session_host::test_support::{
+            InjectedLivenessGuard, InjectedPresenceGuard,
+        };
+        use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "adoption_wake_retry",
+            "kept row wake retry",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let _owned = test_override::force_channels(&[(channel, ClaudeTui)]);
+        let row = kept_row(channel);
+        let session = HostSessionRef::tmux(row.tmux_session_name.as_deref().unwrap());
+        let _dead = InjectedLivenessGuard::set(session.clone(), HostLiveness::DeadOrAbsent);
+        let _gone = InjectedPresenceGuard::set(session, HostPresence::Missing);
+        let recorder = o_cut_recorder::start_first_post(channel, first).await;
+        Self {
+            shared,
+            row,
+            recorder,
+            db,
+            pool,
+            _owned,
+            _dead,
+            _gone,
+        }
+    }
+
+    async fn settled(&self) {
+        let provider = ProviderKind::Claude;
+        let channel = self.row.channel_id;
+        let settled = async {
+            while inflight::load_inflight_state(&provider, channel).is_some() {
+                tokio::task::yield_now().await;
+            }
+        };
+        await_within(settled, WAIT_CAP).await;
+    }
+
+    async fn drop_db(self) {
+        self.pool.close().await;
+        self.db.drop().await;
+    }
+}
+
+/// A queued input's claim that lets go after the wake saw it leaves the row to a later
+/// judgement of the same wake: no new ready, input or restart is needed to settle it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_claim_that_lets_go_after_the_wake_saw_it_still_settles_the_kept_row_pg() {
+    with_isolated_runtime_root(|| async move {
+        let channel = 9_765_121;
+        let rig = Rig::new(channel, Arc::default()).await;
+        let (tx, mut judged) = tokio::sync::mpsc::unbounded_channel();
+        JUDGED.with(|slot| *slot.borrow_mut() = Some(tx));
+        let id = ChannelId::new(channel);
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        let (owner, message) = (serenity::UserId::new(1), serenity::MessageId::new(10));
+        let claim = crate::services::discord::mailbox_try_start_turn;
+        assert!(claim(&rig.shared, id, token, owner, message).await);
+        let http = Some(Arc::clone(&rig.recorder.http));
+        spawn(&rig.shared, http, ProviderKind::Claude, channel);
+        let first = await_within(judged.recv(), WAIT_CAP).await;
+        assert_eq!(first, Some(true), "the claim holds the first judgement");
+        let persistence = crate::services::discord::queue_persistence_context(
+            &rig.shared,
+            &ProviderKind::Claude,
+            id,
+        );
+        rig.shared.mailbox(id).finish_turn(persistence).await;
+        rig.settled().await;
+        let contents = rig.recorder.contents();
+        assert_eq!(contents.len(), 1, "{contents:?}");
+        assert!(!contents[0].contains(BODY), "{contents:?}");
+        JUDGED.with(|slot| *slot.borrow_mut() = None);
+        rig.drop_db().await;
+    })
+    .await;
+}
+
+/// A recovery send that fails transiently is judged again by the same wake and then settles.
+#[tokio::test(flavor = "current_thread")]
+async fn a_transient_recovery_failure_is_judged_again_and_settles_the_kept_row_pg() {
+    with_isolated_runtime_root(|| async move {
+        let channel = 9_765_131;
+        let first = o_cut_recorder::FirstPost::failing();
+        let rig = Rig::new(channel, Arc::clone(&first)).await;
+        let http = Some(Arc::clone(&rig.recorder.http));
+        spawn(&rig.shared, http, ProviderKind::Claude, channel);
+        rig.settled().await;
+        assert_eq!(first.posts(), 2, "{:?}", rig.recorder.contents());
+        rig.drop_db().await;
     })
     .await;
 }
