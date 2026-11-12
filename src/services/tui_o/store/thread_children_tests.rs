@@ -32,9 +32,12 @@ fn thread_children_outside_config_without_parent_writes_nothing() {
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, dir.path())
         .unwrap()
         .unwrap();
+    let scope = crate::services::tui_o::cutover::boot_snapshot()
+        .unwrap()
+        .init_scope_view();
     assert!(
         store
-            .init_fixture_channel_as(&fixture(43), InitOrigin::Fresh)
+            .init_channel_as(&fixture(43), InitOrigin::Fresh, &scope)
             .is_err()
     );
     assert!(!store.has_channel_dir(43));
@@ -198,14 +201,17 @@ fn thread_children_production_capability_keeps_init_floor_writer_counts_zero() {
         .unwrap();
     let mut init = fixture(43);
     init.policy_parent = Some(42);
+    let scope = crate::services::tui_o::cutover::boot_snapshot()
+        .unwrap()
+        .init_scope_view();
     assert!(
         store
-            .init_fixture_channel_as(&init, InitOrigin::Fresh)
+            .init_channel_as(&init, InitOrigin::Fresh, &scope)
             .is_err()
     );
     assert!(
         store
-            .begin_fixture_era_as(&init, InitOrigin::Fresh)
+            .begin_era_as(&init, InitOrigin::Fresh, &scope)
             .is_err()
     );
     assert_eq!(store.channels_with_init().unwrap().len(), 0);
