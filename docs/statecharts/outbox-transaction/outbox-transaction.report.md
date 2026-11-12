@@ -51,7 +51,7 @@ Savepoint begin 오류는 outer 실패로 전파한다(`body_census.rs:113`). UP
 |EarlyCensus|CensusObservationPointPreserved|동일|expected RED|
 |FreshTask|CensusObservationPointPreserved|동일|expected RED|
 
-검사기는 각 실패 invariant를 제외하고 다시 실행해 전체 broken 집합을 수집한다. 최초 원시 TLC trace만으로 다른 규칙도 실패한다고 추정하지 않았다. 최종 checker rc 0, 7 cfg, 15 TLC safety runs, 8.7초. 개별 원시 TLC는 positive rc 0, negative rc 12다. 원시 로그와 commands는 `statecharts-final.log`, `tlc-*.log`, `tlc-commands.json`, `raw-tlc-summary.txt`다.
+검사기는 각 실패 invariant를 제외하고 다시 실행해 전체 broken 집합을 수집한다. 최초 원시 TLC trace만으로 다른 규칙도 실패한다고 추정하지 않았다. P2 보강 뒤 checker rc 0, 9 cfg, 20 TLC safety runs, 12.2초. 개별 원시 TLC는 positive rc 0, negative rc 12다. 보강 뒤 원시 로그는 `/home/adk/adk/lane-runs/i7353/logs/s13-1/`의 `p2-checker.log`, `tlc-*.log`, `tlc-commands.json`이다. 모델의 tx/connection ID 관계 검출 결과이며 실제 Rust/PG 연결 증명은 아니다.
 
 반례는 **잘못된 이동의 negative control**이며 현재 코드 버그 5건이라는 뜻이 아니다. 각 trace를 코드로 다음처럼 대조했다.
 

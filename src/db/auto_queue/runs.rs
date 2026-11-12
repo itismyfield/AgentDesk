@@ -41,7 +41,7 @@ pub(crate) async fn queue_run_completion_notify_on_pg(
         let target = format!("channel:{channel_id}");
         crate::services::message_outbox::enqueue_session_notice_pg_on_tx(
             tx,
-            crate::services::message_outbox::OutboxMessage {
+            crate::domain::outbound::outbox::OutboxMessage {
                 target: &target,
                 content: &content,
                 bot: crate::domain::bot_role::UtilityBotRole::Notify.alias(),

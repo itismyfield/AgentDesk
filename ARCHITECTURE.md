@@ -386,9 +386,13 @@ src/
 │   ├── message_split/
 │   │   └── semantic_boundaries.rs
 │   ├── outbound/
+│   │   ├── outbox/
+│   │   │   ├── identity.rs
+│   │   │   └── source.rs
 │   │   ├── ids.rs
 │   │   ├── intent.rs
 │   │   ├── key.rs
+│   │   ├── outbox.rs
 │   │   ├── policy.rs
 │   │   ├── port.rs
 │   │   └── result.rs

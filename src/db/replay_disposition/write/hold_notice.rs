@@ -3,7 +3,7 @@
 use super::{ExactAttempt, settle};
 use super::{WriteError, commit, refused};
 use crate::db::replay_disposition::hold_notice::{self, HoldNotice, NoticeRouting, outbox};
-use crate::services::message_outbox::OutboxMessage;
+use crate::domain::outbound::outbox::OutboxMessage;
 use sqlx::PgPool;
 use sqlx::Row;
 
