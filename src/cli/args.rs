@@ -719,6 +719,7 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = vec![
             "dcserver",
+            "dev-instance",
             "init",
             "reconfigure",
             "emit-launchd-plist",
