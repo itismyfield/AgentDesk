@@ -1,5 +1,4 @@
 //! One restart's continuation identity survives admission retries and daemon generations.
-use super::PendingQueueItem;
 use serde::{Deserialize, Serialize};
 
 pub(crate) const SOURCE: &str = "agentdesk_effort_continue";
@@ -18,25 +17,25 @@ pub(crate) struct Request {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct EffortRestart {
+pub(crate) struct EffortRestart<Original> {
     pub(crate) operation: String,
     pub(crate) native_session: String,
     pub(crate) interrupted_episode: Option<String>,
     pub(crate) desired_revision: u64,
     pub(crate) ready: bool,
-    pub(crate) continuation: Option<Continuation>,
+    pub(crate) continuation: Option<Continuation<Original>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct Continuation {
+pub(crate) struct Continuation<Original> {
     pub(crate) ticket: String,
-    pub(crate) original: PendingQueueItem,
+    pub(crate) original: Original,
     #[serde(default)]
     pub(crate) submitted: bool,
 }
 
-impl EffortRestart {
-    pub(crate) fn pending(&self) -> Option<&Continuation> {
+impl<Original> EffortRestart<Original> {
+    pub(crate) fn pending(&self) -> Option<&Continuation<Original>> {
         self.continuation.as_ref().filter(|c| !c.submitted)
     }
 

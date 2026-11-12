@@ -38,7 +38,7 @@ pub(crate) struct SnapshotV2 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) unfinished_handoff: Option<ClaudeHandoffJournal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) effort_restart: Option<effort_restart::EffortRestart>,
+    pub(crate) effort_restart: Option<effort_restart::EffortRestart<PendingQueueItem>>,
 }
 
 /// A removed input's terminal receipt not yet in the database; acked once it is.

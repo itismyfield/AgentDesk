@@ -19,7 +19,7 @@ impl Owner {
         request: Option<Request>,
         channel: u64,
         generation: u64,
-    ) -> Result<EffortRestart, String> {
+    ) -> Result<EffortRestart<PendingQueueItem>, String> {
         self.recover()?;
         let Some(request) = request else {
             return self

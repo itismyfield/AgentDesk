@@ -49,3 +49,33 @@ C-only intent는 `src/services/turn_orchestrator/queued_head/compat.rs`의 `hold
 두 모델 mutant의 최단 경로는 Initial → Request → Interrupt → CloseInterrupted → StopTui → Resume → Continue의 7상태다. 마지막 상태에서 각각 미제출 C의 barrier가 0이 되거나 접수 계수가 2가 된다. 기존 UserFirst 모델은 `EffortContinuationFirst` 위반을 그대로 보인다. 실제 코드의 tail enqueue 반례는 두 사용자를 먼저 저장한 뒤 C를 넣으면 사용자 101이 먼저 front가 되는 Rust RED로 재생했다.
 
 검증 명령은 `python3 scripts/ci/statecharts_tlc.py --root <격리 사본> --java /opt/homebrew/opt/openjdk/bin/java --jar ~/.local/share/tla2tools/tla2tools-1.7.4.jar --timeout 50`이다. 사본에는 EffortRestart cfg 19개, TmuxSession cfg/tla와 원본 `expected.tsv`의 해당 행만 넣는다. 원시 로그와 trace는 레인 보고서의 증거 목록에 있다. 새 expected/baseline/allowlist 항목은 추가하지 않았다.
+
+## 실행 증거
+
+| 검증 | 결과 |
+|---|---|
+| 대상 exact filter, 실제 PostgreSQL 17.11 | 선택 27 = 통과 27, 실패 0, skip 0 |
+| source ID 재사용 / 접수 즉시 barrier 해제 / C 2회 prepend / compat 조건 제거 | 각각 실행 RED, 원본 SHA256 복원 |
+| Claude native continuation 억제 제거 | 격리 fake provider에서 RED, 실제 모델 요청 0 |
+| clippy workspace/all-targets/all-features | 수정 파일 경고 0 |
+| production cap (기본 / exclude-test-modules) | 두 방식 모두 13파일, 순증 314줄 |
+
+모델 mutant의 실패 경로를 같은 접수 상태에서 분기해 표시한다. 실제 코드의 mutation 실행과 모델 trace는 레인 보고서의 서로 다른 로그로 구분한다.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Request
+    Request --> Interrupt
+    Interrupt --> CloseInterrupted
+    CloseInterrupted --> StopTui
+    StopTui --> Resume
+    Resume --> Continue
+    Continue --> EarlyRelease: mutant · 제출 0인데 barrier 해제
+    Continue --> DoubleAdmission: mutant · C 접수 2회
+    state "custody 규칙 위반" as EarlyRelease
+    state "at-most-once 규칙 위반" as DoubleAdmission
+```
+
+전체 raw diff, 승인 파일 diff, 바이너리 SHA256, PG 실행 환경, exact 시험별 선택·통과 수, source 복원 SHA는 레인 보고서 `report-impl-s3.md`에 남긴다.
+
+Continuation의 원본 입력 타입은 generic으로 주입한다. durable 타입 모듈은 PendingQueueItem을 import하지 않으며 기존 상위 snapshot·owner가 구체 타입을 공급한다. 직렬화 필드와 기존 snapshot 형태는 동일하다.
