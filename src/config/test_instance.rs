@@ -121,7 +121,7 @@ fn load(path: &Path, root: &Path, config_path: &Path) -> Result<TestInstance, St
     checked_path(root)?;
     if std::fs::canonicalize(root).map_err(|_| rejected())? != root
         || path != root.join("manifest.json")
-        || config_path != root.join("config/agentdesk.yaml")
+        || config_path != crate::runtime_layout::config_file_path(root)
     {
         return Err(rejected());
     }
