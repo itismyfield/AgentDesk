@@ -735,3 +735,23 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 - 임의 외부 사용자가 native TUI에서 시작한 turn에 managed token이 없을 수 있다. `tmux_runtime/session_stop.rs:35` SessionStop은 authoritative binding+parent InputFacts Open으로 찾아 exact observed session을 interrupt한다. 이 경우 자동 continuation debt key는 native turn ID+execution nonce/source opener로 만들고 discord user message 0을 고유 ID처럼 쓰지 않는다.
 - restart 중 `/stop`·`/clear`·Terminate가 이기면 effort intent는 captured incarnation mismatch로 종료한다. `/clear`의 명시적 discard 정책은 보존하되 old effort debt가 다음 fresh session에 부활하지 않도록 exact native ID 확인으로 닫는다. 이 조건은 scoped acceptance test 대상이며 새로운 broad kill/clear 권한은 부여하지 않는다.
 
+
+후속 조각의 아직 생성하지 않은 모듈은 아래 경로로 제안한다. 각 파일을 구현하는 조각에서 해당 proposed 표기를 제거한다.
+
+<!-- doc-path-refs: proposed src/services/codex/herdr_turn/resume.rs -->
+<!-- doc-path-refs: proposed src/services/codex/tui_session_launch/launch_policy/resume.rs -->
+<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/cancel.rs -->
+<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/herdr.rs -->
+<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/mod.rs -->
+<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/notice.rs -->
+<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/recovery.rs -->
+<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/state.rs -->
+<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/tmux.rs -->
+<!-- doc-path-refs: proposed src/services/discord/herdr_terminate/effort_restart.rs -->
+<!-- doc-path-refs: proposed src/services/discord/queue_io/input_owner/effort_continue.rs -->
+<!-- doc-path-refs: proposed src/services/discord/turn_presence/activity/effort_restart.rs -->
+<!-- doc-path-refs: proposed src/services/tui_o/store/restart_end.rs -->
+<!-- doc-path-refs: proposed src/services/tui_o/writer/restart_end.rs -->
+<!-- doc-path-refs: proposed src/services/turn_orchestrator/queued_head/v2/effort_continue.rs -->
+<!-- doc-path-refs: proposed src/services/turn_orchestrator/queued_head/v2_types/effort_restart.rs -->
+<!-- doc-path-refs: proposed v2_types/effort_restart.rs -->
