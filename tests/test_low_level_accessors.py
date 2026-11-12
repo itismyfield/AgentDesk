@@ -246,6 +246,19 @@ class LowLevelAccessorsTest(unittest.TestCase):
                 self.assertEqual({row["enclosing_fn"] for row in rows if row["rule"] == "boot_channels"},
                                  {"host"})
 
+    def test_typed_closure_boot_binding_does_not_hide_outer_host_receiver(self):
+        for body in ("boot.channels()", "{ boot.channels() }"):
+            with self.subTest(body=body):
+                rows = self.scan(
+                    "fn host(boot: &crate::config::session_hosts::BootSessionHosts) {\n"
+                    "    let output = |boot: &crate::services::tui_o::channel_policy::BootChannels| "
+                    + body + ";\n    boot.channels();\n}"
+                )
+                host_rows = [row for row in rows if row["rule"] == "boot_channels"]
+                self.assertEqual(self.count(host_rows), 1)
+                self.assertEqual(host_rows[0]["enclosing_fn"], "host")
+                self.assertEqual(host_rows[0]["line"], 3)
+
     def test_registered_launch_and_inventory_accessors_are_detected(self):
         rows = self.scan("""fn caller() {
             crate::services::herdr_launch::herdr_configured_for_tui_launch(Some(channel));

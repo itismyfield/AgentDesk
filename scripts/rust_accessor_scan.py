@@ -273,6 +273,18 @@ def boot_bindings(ts, metadata, aliases, matched, *, module=(), exports=None):
                     else:
                         lo, hi = i, matched[scope[-1]] if scope else len(ts)
                         where, owner = scope, function
+                        pipe = next((j for j in range(i - 1, -1, -1) if values[j] == "|"), -1)
+                        if pipe >= 0 and not any(v in {";", "=", "{", "}"} for v in values[pipe + 1:i]):
+                            closing = next((j for j in range(i + 1, len(ts)) if values[j] == "|"), None)
+                            if closing is not None:
+                                lo = closing + 1
+                                if values[lo] == "{":
+                                    hi = matched[lo]
+                                    where, owner = metadata[lo + 1]
+                                else:
+                                    hi = lo
+                                    while hi < len(ts) and values[hi] not in {";", ",", ")", "]", "}"}:
+                                        hi = matched[hi] + 1 if hi in matched else hi + 1
                     bindings.append((values[i - 1], resolved[-1], owner, where, lo, hi))
         if token.kind == "code" and resolve([token.value], scope, aliases, module=module, exports=exports)[-1] == "with_boot":
             opening = call_arguments(values, i)
