@@ -1,0 +1,69 @@
+---
+title: "Campaign command: locked decision and atomic receipt"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: pending
+    lg1: Breaks ReceiptAtomicEffects or ReceiptEffectAtMostOnce
+    lg2: Breaks ReceiptRollbackHasNoEffect in some cases
+    lg3: Path to the ReceiptAtomicEffects or ReceiptEffectAtMostOnce or ReceiptRollbackHasNoEffect bug
+  }
+  class lg0 orange
+  class lg1 breaks
+  class lg2 mayBreak
+  class lg3 bugPath
+  s0: no caller holds the lock#59; durable effect 0, receipt absent
+  s1: reading the saved receipt#59; durable effect 0, receipt absent
+  s2: reading locked facts#59; durable effect 0, receipt absent
+  s3: deciding from locked facts#59; durable effect 0, receipt absent
+  s4: writing state and evidence in the transaction#59; durable effect 0, receipt absent
+  s5: rendering the saved response#59; durable effect 1, receipt absent
+  s6: no caller holds the lock#59; durable effect 1, receipt absent#59; rollback left a durable effect
+  s7: reading the saved receipt#59; durable effect 1, receipt absent#59; rollback left a durable effect
+  s8: reading locked facts#59; durable effect 1, receipt absent#59; rollback left a durable effect
+  s9: deciding from locked facts#59; durable effect 1, receipt absent#59; rollback left a durable effect
+  s10: writing state and evidence in the transaction#59; durable effect 1, receipt absent#59; rollback left a durable effect
+  s11: rendering the saved response#59; durable effect 2, receipt absent#59; rollback left a durable effect
+  [*] --> s0
+  s0 --> s0: a request begins a transaction
+  s0 --> s1: one caller acquires the campaign and run locks
+  s1 --> s2: the caller checks the receipt before deciding
+  s2 --> s3: the caller reads state and stored seal inside the lock
+  s3 --> s4: the service decides without releasing the lock
+  s4 --> s5: state and evidence escape before receipt commit
+  s5 --> s6: a failure rolls back and releases the locks
+  s6 --> s6: a request begins a transaction
+  s6 --> s7: one caller acquires the campaign and run locks
+  s7 --> s8: the caller checks the receipt before deciding
+  s8 --> s9: the caller reads state and stored seal inside the lock
+  s9 --> s10: the service decides without releasing the lock
+  s10 --> s11: state and evidence escape before receipt commit
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 orange
+  class s0 bugPath
+  class s1 orange
+  class s1 bugPath
+  class s2 orange
+  class s2 bugPath
+  class s3 orange
+  class s3 bugPath
+  class s4 orange
+  class s4 bugPath
+  class s5 orange
+  class s5 breaks
+  class s5 bugPath
+  class s6 orange
+  class s6 mayBreak
+  class s6 bugPath
+  class s7 orange
+  class s7 bugPath
+  class s8 orange
+  class s8 bugPath
+  class s9 orange
+  class s9 bugPath
+  class s10 orange
+  class s10 bugPath
+  class s11 orange
+  class s11 breaks
+  class s11 bugPath
