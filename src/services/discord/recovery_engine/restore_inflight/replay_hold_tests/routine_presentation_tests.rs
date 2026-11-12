@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::discord::routine_presentation::RoutinePresentation;
+use crate::test_support::wait::{WAIT_CAP, await_within};
 use sha2::{Digest, Sha256};
 
 async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, captured: bool) {
@@ -84,6 +85,12 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
     } else {
         None
     };
+    if evidence == "drain_missing_receipt" {
+        original.replay_receipt_id = Some(i64::MAX);
+    }
+    if evidence == "drain_unprojected_hold" {
+        original.replay_receipt_id = None;
+    }
     let raw_hash = format!("{:x}", Sha256::digest(bytes.as_bytes()));
     inflight::save_inflight_state_create_new(&original).unwrap();
     if drain {
@@ -108,6 +115,106 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
         original.routine_presentation
     );
     let discord = o_cut_recorder::start(channel).await;
+    let path = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &provider,
+        channel,
+    );
+    let before = std::fs::read(&path).unwrap();
+    if evidence == "drain_closed_pool" {
+        pool.close().await;
+    }
+    if evidence.starts_with("drain_race_") {
+        let mut transaction = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE intake_outbox IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        let task_shared = shared.clone();
+        let task_row = serialized.clone();
+        let task = tokio::spawn(async move {
+            super::super::settle_routine_no_visible(&task_shared, &ProviderKind::Claude, &task_row)
+                .await
+        });
+        await_within(
+            async {
+                loop {
+                    let blocked: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                     WHERE datname=current_database() AND wait_event_type='Lock'
+                     AND pid<>pg_backend_pid() AND query LIKE '%intake_outbox%')",
+                    )
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if blocked {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            },
+            WAIT_CAP,
+        )
+        .await;
+        let actor = if evidence == "drain_race_actor" {
+            let actor = Arc::new(CancelToken::new());
+            assert!(
+                shared
+                    .mailbox(ChannelId::new(channel))
+                    .try_start_turn(
+                        actor.clone(),
+                        serenity::UserId::new(7),
+                        serenity::MessageId::new(original.user_msg_id),
+                    )
+                    .await
+            );
+            Some(actor)
+        } else {
+            let mut locked = inflight::lock_inflight_episode(
+                &provider,
+                channel,
+                &inflight::InflightEpisodePin::from_state(&serialized),
+            )
+            .unwrap();
+            let advanced = locked.state().clone();
+            assert!(matches!(
+                locked.persist_verified_under_guard(&advanced, "receipt_generation_race"),
+                inflight::GuardedSaveOutcome::Saved
+            ));
+            None
+        };
+        let expected = std::fs::read(&path).unwrap();
+        transaction.commit().await.unwrap();
+        assert!(await_within(task, WAIT_CAP).await.unwrap());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            expected,
+            "receipt await cannot authorize a stale adoption"
+        );
+        let kept = inflight::load_inflight_state(&provider, channel).unwrap();
+        assert_eq!(kept.restart_mode, serialized.restart_mode);
+        assert!(!kept.terminal_delivery_committed);
+        if let Some(actor) = actor {
+            let snapshot = shared.mailbox(ChannelId::new(channel)).snapshot().await;
+            assert!(Arc::ptr_eq(snapshot.cancel_token.as_ref().unwrap(), &actor));
+        }
+        assert!(
+            discord
+                .calls()
+                .iter()
+                .all(|c| !c.route.starts_with("POST ") && !c.route.starts_with("PATCH "))
+        );
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(output.path()).unwrap())
+            ),
+            raw_hash
+        );
+        pool.close().await;
+        db.drop().await;
+        return;
+    }
     let live_actor = if evidence == "drain_live" {
         let actor = Arc::new(CancelToken::new());
         assert!(
@@ -150,6 +257,34 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
         ).await);
     } else {
         restore_inflight_turns(&discord.http, &shared, &provider).await;
+    }
+    if matches!(evidence, "drain_missing_receipt" | "drain_closed_pool") {
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "unverified receipt must preserve the marker and save generation"
+        );
+        let kept = inflight::load_inflight_state(&provider, channel).unwrap();
+        assert_eq!(kept.restart_mode, serialized.restart_mode);
+        assert_eq!(kept.restart_generation, serialized.restart_generation);
+        assert_eq!(kept.save_generation, serialized.save_generation);
+        assert!(!kept.terminal_delivery_committed);
+        assert!(
+            discord
+                .calls()
+                .iter()
+                .all(|c| !c.route.starts_with("POST ") && !c.route.starts_with("PATCH "))
+        );
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(output.path()).unwrap())
+            ),
+            raw_hash
+        );
+        pool.close().await;
+        db.drop().await;
+        return;
     }
     if let Some(actor) = live_actor {
         let kept = inflight::load_inflight_state(&provider, channel).unwrap();
@@ -350,4 +485,26 @@ async fn i8117_drain_restart_quiet_settles_pg() {
 #[tokio::test]
 async fn i8117_drain_restart_live_actor_preserves_marker_pg() {
     restored(false, false, "drain_live", true, true).await;
+}
+
+#[tokio::test]
+async fn i8117_drain_missing_receipt_preserves_marker_pg() {
+    restored(false, false, "drain_missing_receipt", true, true).await;
+}
+
+#[tokio::test]
+async fn i8117_drain_closed_pool_preserves_marker_pg() {
+    restored(false, true, "drain_closed_pool", true, true).await;
+}
+
+#[tokio::test]
+async fn i8117_receipt_lookup_races_refuse_adoption_pg() {
+    for evidence in ["drain_race_actor", "drain_race_generation"] {
+        restored(false, true, evidence, true, true).await;
+    }
+}
+
+#[tokio::test]
+async fn i8117_drain_unprojected_hold_settles_pg() {
+    restored(false, true, "drain_unprojected_hold", true, true).await;
 }

@@ -33,6 +33,16 @@ pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_vis
         return true;
     }
     let mut row = saved.clone();
+    if (row.restart_mode.is_some() && shared.pg_pool.is_none())
+        || !super::replay_hold::hydrate_replay_hold(
+            shared.pg_pool.as_ref(),
+            &mut row,
+            shared.restart.replay_restart.get(),
+        )
+        .await
+    {
+        return true;
+    }
     if row.restart_mode.is_some() {
         let Some(adopted) = shared
             .mailbox(channel)
@@ -48,15 +58,6 @@ pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_vis
             return true;
         };
         row = adopted.state;
-    }
-    if !super::replay_hold::hydrate_replay_hold(
-        shared.pg_pool.as_ref(),
-        &mut row,
-        shared.restart.replay_restart.get(),
-    )
-    .await
-    {
-        return true;
     }
     let current = inflight::load_inflight_state_read_only(provider, row.channel_id);
     if current.as_ref().is_none_or(|current| {
@@ -155,6 +156,10 @@ pub(in crate::services::discord::recovery_engine) fn adopt_quiet_drain_restart(
         return None;
     }
     let mut adopted = current.clone();
+    adopted.replay_receipt_id = expected.replay_receipt_id;
+    adopted
+        .replay_hold_reasons
+        .clone_from(&expected.replay_hold_reasons);
     adopted.clear_restart_mode();
     matches!(
         locked.persist_verified_under_guard(&adopted, "routine_quiet_drain_adoption"),

@@ -5,6 +5,9 @@ stateDiagram-v2
     재시작 --> DrainRestart: 정상 종료 표식
     DrainRestart --> 영구보존: 이전 정책 · 정산 진행 없음
     DrainRestart --> 복구: 구세대 완료 행을 잠금 안에서 인수
+    DrainRestart --> 표식보존: receipt 미확인 · 수정 후
+    DrainRestart --> 보호표식유실: 미확인 receipt보다 먼저 인수 · 이전 정책
+    보호표식유실: 정산 0 · 표식 소실
     복구 --> 재게시: 이전 정책
     복구 --> 조용한정산: C1 판정 소비
     재게시: 본문 1회 게시 · 규칙 위반
@@ -13,4 +16,4 @@ stateDiagram-v2
     조용한정산 --> 요청보존: replay hold 있음
     조용한정산 --> 이력완료: replay hold 없음
     classDef breaks fill:#fdd,stroke:#b00
-    class 재게시,영구보존 breaks
+    class 재게시,영구보존,보호표식유실 breaks

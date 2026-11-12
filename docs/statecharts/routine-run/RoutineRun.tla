@@ -7,7 +7,7 @@ vars == <<s>>
 Terminal == {"succeeded", "failed", "interrupted", "skipped", "paused"}
 Unsent == {"none", "input_pending", "accepted", "NotSent", "retry_scheduled"}
 
-Init == \E c1, noReply, held \in BOOLEAN:
+Init == \E c1, noReply, held, verified \in BOOLEAN:
  s = [mode |-> Mode, status |-> "running", action |-> IF Mode = "script" THEN "complete" ELSE "agent",
              input |-> "none", queued |-> FALSE, acceptedTurns |-> 0,
              lateAcceptedTurns |-> 0, expired |-> FALSE, recorded |-> FALSE,
@@ -17,7 +17,7 @@ Init == \E c1, noReply, held \in BOOLEAN:
              prejudgeCalls |-> 0, prejudgeResult |-> "none",
              c1 |-> c1, noReply |-> noReply, replayHeld |-> held,
              bodyPosts |-> 0, rawHash |-> 17, restarted |-> FALSE, recoverySettled |-> FALSE, episodePresent |-> TRUE,
-             drainMarker |-> FALSE]
+             drainMarker |-> FALSE, drainRequired |-> FALSE, receiptVerified |-> verified]
 
 CompleteScript ==
     /\ ~s.recovering
@@ -203,14 +203,19 @@ RecoveryFinish == RecoverWithdraw \/ RecoverUnsent \/ RecoverWithoutWithdraw \/ 
 RestartCompleted ==
     /\ s.status = "succeeded" /\ s.outcomeKind = "agent" /\ ~s.restarted
     /\ \E drain \in BOOLEAN:
-         s' = [s EXCEPT !.restarted = TRUE, !.recovering = TRUE, !.drainMarker = drain]
+         s' = [s EXCEPT !.restarted = TRUE, !.recovering = TRUE, !.drainMarker = drain, !.drainRequired = drain]
 RestoreCompleted ==
     /\ s.status = "succeeded" /\ s.recovering
+    /\ s.receiptVerified
     /\ ~(Policy = "before_drain_settlement" /\ s.drainMarker /\ s.c1 /\ s.noReply)
     /\ s' = [s EXCEPT !.recovering = FALSE, !.recoverySettled = TRUE, !.episodePresent = s.replayHeld,
                       !.drainMarker = FALSE,
                       !.bodyPosts = IF Policy = "before_recovery_presentation" /\ s.c1 /\ s.noReply
                                    THEN @ + 1 ELSE @]
+ConsumeUnverifiedMarker ==
+    /\ Policy = "before_receipt_check" /\ s.recovering /\ s.drainMarker
+    /\ s.c1 /\ s.noReply /\ ~s.receiptVerified
+    /\ s' = [s EXCEPT !.drainMarker = FALSE]
 Restart == s.status = "running" /\ UNCHANGED s
 Done == s.status \in Terminal /\ UNCHANGED s
 
@@ -220,7 +225,7 @@ Finish == CompleteScript \/ SkipOrPause \/ CompleteAgent \/ ProviderFailure
 Next == Prejudge \/ Admit \/ OwnerAccept \/ RefuseBeforeKey \/ RearmKnownUnsent \/ Submit
         \/ NativeAccept \/ ObserveAccepted \/ ObserveNotSent \/ RetryStarted \/ ResendUnknown
         \/ Expire \/ Finish \/ BeginRecovery \/ RecoveryFinish \/ AwaitRecoveryCommit
-        \/ LateDispatch \/ TeardownChannel \/ AwaitHeld \/ Restart \/ RestartCompleted \/ RestoreCompleted \/ Done
+        \/ LateDispatch \/ TeardownChannel \/ AwaitHeld \/ Restart \/ RestartCompleted \/ RestoreCompleted \/ ConsumeUnverifiedMarker \/ Done
 Spec == Init /\ [][Next]_vars /\ WF_vars(Expire) /\ WF_vars(Finish)
         /\ WF_vars(RecoveryFinish) /\ WF_vars(RestoreCompleted)
 
@@ -241,5 +246,6 @@ NoReplyRecoveryBodyZero == (s.c1 /\ s.noReply) => s.bodyPosts = 0
 RecoveryPreservesRaw == s.rawHash = 17
 HeldEpisodeSurvives == s.replayHeld => s.episodePresent
 EveryRunTerminates == <>(s.status \in Terminal)
-QuietRestartEventuallySettles == (s.c1 /\ s.noReply /\ s.restarted) ~> s.recoverySettled
+QuietRestartEventuallySettles == (s.c1 /\ s.noReply /\ s.restarted /\ s.receiptVerified) ~> s.recoverySettled
+UnverifiedReceiptKeepsMarker == (s.c1 /\ s.noReply /\ s.drainRequired /\ ~s.receiptVerified) => s.drainMarker
 =============================================================================
