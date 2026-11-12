@@ -35,6 +35,8 @@ is only for the approved first corpus and refuses to overwrite any existing
 rule file. Do not hand-edit or increase these approval files.
 The audit also compares approval hash counts against the PR base, so editing
 the source and approval files together cannot admit new debt.
+Missing baseline files produce one warning and skip this check in partial
+repositories. Malformed existing snapshots remain errors.
 
 ## Route SRP
 

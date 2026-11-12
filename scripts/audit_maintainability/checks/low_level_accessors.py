@@ -146,10 +146,16 @@ def scan(repo):
 
 
 def _run(_allowlist):
-    from .low_level_accessor_baseline import baseline_growth, load_baselines
+    from .low_level_accessor_baseline import DIRECTORY, baseline_growth, load_baselines
     try:
+        try:
+            accepted = load_baselines(common.REPO_ROOT)
+        except FileNotFoundError as exc:
+            yield Finding("low_level_accessors", "warn", str(DIRECTORY), None,
+                          "accessor baseline missing; skipping accessor ratchet",
+                          {"missing_path": str(exc.filename)})
+            return
         rows = scan(common.REPO_ROOT)
-        accepted = load_baselines(common.REPO_ROOT)
         errors = compare(accepted, rows) + baseline_growth(common.REPO_ROOT, accepted)
         for error in errors:
             yield Finding("low_level_accessors", "error", "scripts/audit_maintainability/baselines/generated/low_level_accessors", None, error)

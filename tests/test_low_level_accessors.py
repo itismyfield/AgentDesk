@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 import importlib
 from pathlib import Path
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -67,13 +68,56 @@ class LowLevelAccessorsTest(unittest.TestCase):
         self.assertTrue(any(finding.severity == "info" and finding.extra.get("enclosing_fn") == "added"
                             for finding in findings), findings)
 
-    def test_audit_runner_returns_error_finding_when_baseline_is_missing(self):
-        self.scan("fn original() { herdr_endpoint(channel); }")
+    def test_audit_runner_warns_once_and_skips_scan_when_baseline_is_missing(self):
+        baseline = self.repo / "scripts/audit_maintainability/baselines/generated/low_level_accessors"
+        self.write("src/consumer.rs", "fn original() { herdr_endpoint(channel); }")
+        for directory_exists in (False, True):
+            with self.subTest(directory_exists=directory_exists):
+                if directory_exists:
+                    baseline.mkdir(parents=True)
+                with mock.patch.object(self.check.common, "REPO_ROOT", self.repo), \
+                        mock.patch.object(self.check, "scan", return_value=[]) as scan:
+                    findings = list(self.check._run(set()))
+                self.assertEqual([(finding.rule, finding.severity) for finding in findings],
+                                 [("low_level_accessors", "warn")])
+                scan.assert_not_called()
+                self.assertEqual(list(baseline.glob("*.json")), [])
+
+    def test_missing_baseline_warning_is_nonblocking_in_harness_subprocess(self):
+        self.write("src/consumer.rs", "fn original() { herdr_endpoint(channel); }")
+        code = """
+import importlib.util
+from pathlib import Path
+import sys
+root, fixture = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / 'scripts'))
+spec = importlib.util.spec_from_file_location('fixture_audit_harness', root / 'scripts/audit_maintainability.py')
+HARNESS = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(HARNESS)
+from audit_maintainability.checks import low_level_accessors
+low_level_accessors.common.REPO_ROOT = fixture
+HARNESS.CHECK_MODULES = ('audit_maintainability.checks.low_level_accessors',)
+raise SystemExit(HARNESS.main(['--check', '--format', 'json', '--allowlist', str(fixture / 'absent.toml')]))
+"""
+        result = subprocess.run([sys.executable, "-c", code, str(ROOT), str(self.repo)],
+                                cwd=ROOT, text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 1, result.stderr)
+        self.assertIn("warning", lines[0])
+        self.assertIn("low_level_accessors", lines[0])
+
+    def test_audit_runner_returns_error_for_present_malformed_baseline(self):
+        generator = importlib.import_module("audit_maintainability.checks.low_level_accessor_baseline")
+        rows = self.scan("fn original() { herdr_endpoint(channel); }")
+        generator.write_baselines(self.repo, rows)
+        self.write("scripts/audit_maintainability/baselines/generated/low_level_accessors/herdr_endpoint.json",
+                   "{malformed JSON")
         with mock.patch.object(self.check.common, "REPO_ROOT", self.repo):
             findings = list(self.check._run(set()))
         self.assertTrue(any(finding.rule == "low_level_accessors" and finding.severity == "error"
                             for finding in findings), findings)
-        self.assertFalse((self.repo / "scripts/audit_maintainability/baselines/generated/low_level_accessors").exists())
+        self.assertFalse(any(finding.severity == "warn" for finding in findings), findings)
 
     def test_new_site_and_same_total_replacement_are_errors(self):
         old = self.scan("fn old() { crate::config::session_hosts::herdr_endpoint(channel); }")
