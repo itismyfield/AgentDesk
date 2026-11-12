@@ -367,6 +367,9 @@ fn exercise_owner_receipt(instance: &'static TestInstance) {
         .unwrap()
         .unwrap();
     assert!(begin_herdr_create(&endpoint, &witness, &label, &instance.root).is_err());
+    assert!(Command::new("python3").args(["-c", "import fcntl,sys\nf=open(sys.argv[1],'r+b')\ntry: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError: sys.exit(0)\nsys.exit(1)"])
+        .arg(instance.root.join("runtime/herdr-owner.lock"))
+        .status().unwrap().success());
     assert!(
         owned_herdr(socket)
             .unwrap()

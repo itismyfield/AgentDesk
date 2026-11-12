@@ -170,9 +170,15 @@ class InstanceDeclarationTests(unittest.TestCase):
             self.assertTrue((root / relative).is_dir())
 
     def test_manual_herdr_owner_records_only_spawned_daemon_and_rejects_adoption(self):
+        import socket
         from scripts.dev_instance.host import start_herdr, OWNER_FILE
+        short = tempfile.TemporaryDirectory(prefix="h-", dir="/private/tmp" if sys.platform == "darwin" else "/tmp")
+        self.addCleanup(short.cleanup)
+        self.base = Path(short.name).resolve() / ".adk/dev/instances"
+        self.base.mkdir(parents=True)
         manifest = self.prepare()
         root = Path(manifest["root"])
+        os.utime(root / "herdr-home/config.toml", (1, 1))
         binary = self.home / "fake-herdr"
         binary.write_text("#!/bin/sh\nexit 0\n")
         binary.chmod(0o700)
@@ -199,6 +205,9 @@ class InstanceDeclarationTests(unittest.TestCase):
 
         def spawn(argv, **options):
             calls.append((argv, options))
+            listener = socket.socket(socket.AF_UNIX)
+            self.addCleanup(listener.close)
+            listener.bind(options["env"]["HERDR_SOCKET_PATH"])
             return child
 
         owner = start_herdr(self.base, self.instance_id, binary,
@@ -231,9 +240,32 @@ class InstanceDeclarationTests(unittest.TestCase):
             owner.close()
         self.assertEqual(child.signals, 0)
         receipt_path.write_text(json.dumps(receipt))
+        from scripts.dev_instance.host import _owner_lock
+        with _owner_lock(root):
+            with self.assertRaises(InstanceError):
+                owner.close()
+        self.assertEqual(child.signals, 0)
+        updated = {**receipt, "workspaces": [{"workspace_id": "owned-workspace", "pane_id": "owned-pane"}]}
+        receipt_path.write_text(json.dumps(updated))
         owner.close()
         self.assertEqual(child.signals, 1)
         self.assertIsNotNone(child.poll())
+
+    def test_herdr_unprepared_config_is_unevaluable_without_spawning(self):
+        from scripts.dev_instance.host import start_herdr
+        import time
+        manifest = self.prepare()
+        config = Path(manifest["root"]) / "herdr-home/config.toml"
+        future = time.time_ns() + 60_000_000_000
+        os.utime(config, ns=(future, future))
+        binary = self.home / "fake-herdr"
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o700)
+        spawned = []
+        with self.assertRaises(Unevaluable):
+            start_herdr(self.base, self.instance_id, binary, {},
+                        spawn=lambda *args, **kwargs: spawned.append(args))
+        self.assertEqual(spawned, [])
 
     def test_failed_herdr_start_reaps_owned_child_or_returns_its_handle(self):
         from scripts.dev_instance.host import start_herdr, HerdrCleanupPending, OWNER_FILE
@@ -243,6 +275,7 @@ class InstanceDeclarationTests(unittest.TestCase):
         for held in (False, True):
             self.instance_id = str(uuid.uuid4())
             manifest = self.prepare()
+            os.utime(Path(manifest["root"]) / "herdr-home/config.toml", (1, 1))
 
             class Child:
                 pid = 812401

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+HERDR_CONFIG = "[session]\nresume_agents_on_restore = false\n"
+
 
 def declared_hosts(root: Path, instance_id: str) -> dict:
     return {

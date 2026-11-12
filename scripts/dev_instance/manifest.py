@@ -6,7 +6,7 @@ import socket
 import subprocess
 from pathlib import Path
 
-from .config import build_config, declared_hosts
+from .config import HERDR_CONFIG, build_config, declared_hosts
 from .files import (InstanceError, LAYOUT_DIRS, create_layout, instance_root, read_regular_text,
                     safe_absolute, validate_tree, write_private_json, write_private_text)
 from .profile import same_json, validate_profile
@@ -142,6 +142,7 @@ def prepare(base, instance_id, worktree, profile, ambient, api_port=None, pg_por
     create_layout(root)
     for relative in HOST_DIRS:
         (root / relative).mkdir(mode=0o700)
+    write_private_text(root, "herdr-home/config.toml", HERDR_CONFIG)
     for provider in ("claude", "codex"):
         write_private_text(root, f"config/agents/{provider}.md", "Isolated test agent.\n")
     config = build_config(root, profile, manifest["api"]["port"], manifest["postgres"]["port"], instance_id)

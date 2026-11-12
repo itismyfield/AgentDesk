@@ -425,12 +425,11 @@ mod owner {
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         }) || !cwd.starts_with(&instance.root)
-            || !cwd.is_dir()
         {
             return Err(rejected());
         }
         checked_path(cwd)?;
-        if std::fs::canonicalize(cwd).map_err(|_| rejected())? != cwd {
+        if !cwd.is_dir() || std::fs::canonicalize(cwd).map_err(|_| rejected())? != cwd {
             return Err(rejected());
         }
         Ok(())
