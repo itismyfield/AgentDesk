@@ -96,6 +96,7 @@ fn startup_lookup_logs_once_with_fixed_availability_and_sigterm_restore() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("fixture-startup-sentinel"));
         let output = String::from_utf8(output.stdout).unwrap();
         assert!(!output.contains("fixture-startup-sentinel"));
         assert!(output.contains(expected), "{output}");
@@ -145,7 +146,9 @@ fn startup_lookup_logs_once_with_fixed_availability_and_sigterm_restore() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("fixture-startup-sentinel"));
     let output = String::from_utf8(output.stdout).unwrap();
+    assert!(!output.contains("fixture-startup-sentinel"));
     assert!(output.contains("boot=false"), "{output}");
     assert!(output.contains("restored=true"), "{output}");
     assert_eq!(

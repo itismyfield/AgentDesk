@@ -12,6 +12,7 @@ fn stub(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
 async fn fake_lookup_success_missing_auth_and_timeout_are_fixed_safe_classes() {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("calls");
+    let arguments = dir.path().join("arguments");
     for (body, expected, has_key) in [
         ("printf fixture-lookup-sentinel", KeyLookupOutcome::On, true),
         ("exit 0", KeyLookupOutcome::NoKey, false),
@@ -22,7 +23,11 @@ async fn fake_lookup_success_missing_auth_and_timeout_are_fixed_safe_classes() {
         ),
         ("exec /bin/sleep 30", KeyLookupOutcome::LookupTimeout, false),
     ] {
-        let body = format!("printf 'x' >> '{}'\n{body}", marker.display());
+        let body = format!(
+            "printf 'x' >> '{}'\nprintf '%s\\n' \"$@\" > '{}'\n{body}",
+            marker.display(),
+            arguments.display()
+        );
         let executable = stub(dir.path(), &body);
         let mut command = Command::new(executable);
         let start = std::time::Instant::now();
@@ -31,6 +36,12 @@ async fn fake_lookup_success_missing_auth_and_timeout_are_fixed_safe_classes() {
         assert_eq!(key.is_some(), has_key);
         assert!(!format!("{key:?}/{outcome:?}").contains("fixture-lookup-sentinel"));
         assert!(start.elapsed() < Duration::from_secs(10));
+        let actual_arguments = std::fs::read_to_string(&arguments).unwrap();
+        assert_eq!(
+            actual_arguments,
+            "read\nop://AgentDesk/Gemini API/credential\n"
+        );
+        assert!(!actual_arguments.contains("fixture-lookup-sentinel"));
     }
     assert_eq!(std::fs::read(marker).unwrap(), b"xxxx");
 }
