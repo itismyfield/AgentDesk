@@ -1105,7 +1105,8 @@ pub(crate) fn admit_owned_codex_prompt(
     plan_prompt_submit(prompt).map_err(Err)?;
     let command = crate::services::platform::binary_resolver::runtime_command("tmux")
         .map_err(|_| Ok(Veto::PaneUnavailable))?;
-    let pane = super::busy_inject::Pane::with_program(session_name, command.get_program().into());
+    let pane = super::busy_inject::Pane::with_program(session_name, command.get_program().into())
+        .map_err(|_| Ok(Veto::PaneUnavailable))?;
     let capture = super::busy_inject::owned_composer_capture(&pane).map_err(Ok)?;
     Ok((owned_prompt_plan(prompt).map_err(Err)?, capture))
 }

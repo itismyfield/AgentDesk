@@ -181,3 +181,5 @@ pub use remote_stub as remote;
 
 #[cfg(test)]
 mod provider_output_guard_tests;
+
+pub(crate) mod session_identity_metadata;
