@@ -1037,7 +1037,8 @@ src/
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   ├── relay_receipts.rs
-│   │   │   └── resume_renumber_tests.rs
+│   │   │   ├── resume_renumber_tests.rs
+│   │   │   └── same_session_source_tests.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── fresh_hold_tests.rs

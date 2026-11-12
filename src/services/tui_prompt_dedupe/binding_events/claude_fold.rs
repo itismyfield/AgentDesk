@@ -147,6 +147,38 @@ pub(super) struct ClaudeFold {
     awaiting_seq: Option<u64>,
 }
 
+/// The current execution's stat identity, only while no verified pin or other waiting session owns it.
+pub(crate) fn unverified_current_source(
+    channel_id: u64,
+    tmux_session: &str,
+    nonce: &str,
+) -> io::Result<Option<super::SourceId>> {
+    let mut found = None;
+    super::commit_with(channel_id, |writer| {
+        if let Some(pane) = writer.panes.get(tmux_session)
+            && !pane.verified
+            && pane.nonce.as_deref() == Some(nonce)
+            && let Some(source) = &pane.current
+        {
+            let history = pane.claude.history(Some(nonce), writer.tainted);
+            if history.complete
+                && history
+                    .current
+                    .as_ref()
+                    .is_some_and(|v| v.session == source.session_id)
+                && history
+                    .awaiting
+                    .as_ref()
+                    .is_none_or(|v| v.session == source.session_id)
+            {
+                found = Some(source.clone());
+            }
+        }
+        super::Planned::Keep(super::Committed::Unchanged)
+    })?;
+    Ok(found)
+}
+
 impl ClaudeFold {
     /// `tainted`: an unreadable line or seq gap came right before this record.
     pub(super) fn apply(
