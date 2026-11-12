@@ -38,6 +38,7 @@ fn b2_legacy_warm_submit_and_reader_collect_the_actual_token() {
     );
     std::fs::write(&path, &past).unwrap();
     let tmux = ScriptedTmux::new(&view("", false));
+    tmux.set_dead(false);
     tui_prompt_dedupe::register_tmux_runtime_binding(
         session,
         TuiRuntimeBinding {
@@ -119,6 +120,7 @@ fn a_legacy_warm_submit_keys_only_through_its_tokens_first_key_gate() {
         )
         .unwrap();
         let tmux = ScriptedTmux::new(&view("", false));
+        tmux.set_dead(false);
         tui_prompt_dedupe::register_tmux_runtime_binding(
             &session,
             TuiRuntimeBinding {
