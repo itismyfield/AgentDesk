@@ -20,6 +20,7 @@ pub mod codex_tmux_wrapper;
 pub mod codex_tui;
 // Storage primitives remain dormant until the input actor is wired.
 pub mod cswap;
+pub mod decision_gate;
 pub mod discord;
 pub mod discord_config_audit;
 #[allow(dead_code)]
