@@ -264,7 +264,13 @@ impl Tui {
 
     fn run_text(&self, text: &str, timing: &Timing) -> Report {
         let session = self.session();
-        let pane = Pane::with_program(&session, self.dir.path().join("tmux"));
+        let pane = Pane::with_program(
+            &session,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                self.dir.path().join("tmux"),
+            ),
+        )
+        .expect("managed scripted pane");
         let nonce = self.next_nonce();
         let request = Request {
             session: &session,
@@ -383,7 +389,13 @@ fn an_unlisted_channel_sends_without_stashing_a_visible_draft() {
     for channel in [None, Some(2)] {
         let tui = Tui::new("draft");
         let session = tui.session();
-        let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+        let pane = Pane::with_program(
+            &session,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                tui.dir.path().join("tmux"),
+            ),
+        )
+        .expect("managed scripted pane");
         let nonce = tui.next_nonce();
         let request = Request {
             session: &session,
@@ -449,7 +461,13 @@ mod environment_tests {
             let tui = Tui::new("human draft A");
             tui.put("attached", "4");
             let session = tui.session();
-            let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+            let pane = Pane::with_program(
+                &session,
+                crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                    tui.dir.path().join("tmux"),
+                ),
+            )
+            .expect("managed scripted pane");
             let nonce = tui.next_nonce();
             let request = Request {
                 session: &session,

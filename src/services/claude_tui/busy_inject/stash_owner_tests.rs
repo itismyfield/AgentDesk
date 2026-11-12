@@ -92,7 +92,11 @@ impl Rig {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
-        let pane = Pane::with_program(name, shim);
+        let pane = Pane::with_program(
+            name,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(shim),
+        )
+        .expect("managed scripted pane");
         let nonce = hex(name);
         let root = crate::services::tmux_common::current_tmux_owner_marker();
         let context = serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),"execution_nonce":&nonce,"tmux_session":name,"channel_id":742701,"owner_runtime_root":root,"host":"leaf-test","expected_native_session_id":null,"launch_mode":"fresh","provider_root":null});
@@ -364,7 +368,7 @@ fn an_unscoped_leaf_on_an_owner_held_target_sends_no_key() {
         let (name, shim) = (name.clone(), shim.clone());
         let spawned = std::thread::spawn(move || {
             submit(
-                &Pane::with_program(&name, shim),
+                &Pane::with_program(&name, crate::services::platform::tmux::session_identity_tests::managed_fixture_program(shim)).expect("managed scripted pane"),
                 "4a0held",
                 TEXT,
                 &FAST,

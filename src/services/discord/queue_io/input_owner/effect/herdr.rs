@@ -29,7 +29,8 @@ impl BusyClaudeHerdr {
                 false,
                 std::sync::Arc::new(crate::services::provider::CancelToken::new()),
                 Some(self.writer),
-            ),
+            )
+            .expect("Herdr operation does not look up a tmux identity"),
             session: self.session,
             transcript: self.transcript,
             channel: self.channel,

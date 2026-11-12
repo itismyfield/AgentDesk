@@ -142,7 +142,9 @@ fn run(
         if cancel_requested(request.cancel) {
             return InputRun::Cancelled { confirmed: 0 };
         }
-        let pane = busy_inject::Pane::with_program(session, "tmux".into());
+        let Ok(pane) = busy_inject::Pane::with_program(session, "tmux".into()) else {
+            return InputRun::Refused(InputRefusal::IdentityMismatch);
+        };
         let park = match busy_inject::before_paste(&pane, stash_allowed) {
             Ok(park) => park,
             Err(veto) => {

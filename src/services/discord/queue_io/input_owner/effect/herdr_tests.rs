@@ -494,7 +494,13 @@ fn the_tmux_owner_parks_only_what_the_herdr_owner_parks() {
         tmux.clear();
         tmux.show(&screen);
         let (session, nonce) = (format!("owner-park-{at}"), format!("0a1b2c3{at}"));
-        let pane = busy_inject::Pane::with_program(&session, "tmux".into());
+        let pane = busy_inject::Pane::with_program(
+            &session,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                "tmux".into(),
+            ),
+        )
+        .expect("managed scripted pane");
         let request = busy_inject::Request {
             session: &session,
             transcript: &transcript,

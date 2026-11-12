@@ -1450,7 +1450,7 @@ fn run(
                     r.timing,
                     declared,
                     turn.cancel.clone(),
-                ),
+                )?,
                 session: session()?.into(),
                 transcript: r.transcript,
                 channel: turn.channel_id,
@@ -1466,7 +1466,7 @@ fn run(
         target::Route::ClaudeIdle => (
             turn.prompt.into(),
             effect::idle_claude(
-                busy_inject::Pane::with_program(session()?, r.program),
+                busy_inject::Pane::with_program(session()?, r.program)?,
                 session()?.into(),
                 turn.channel_id,
                 turn.cancel.clone(),
@@ -1476,7 +1476,7 @@ fn run(
             codex_herdr_frame(turn.prompt)
                 .map_err(|error| format!("NotSent(\"invalid_prompt: {error}\")"))?,
             effect::idle_codex(
-                busy_inject::Pane::with_program(session()?, r.program),
+                busy_inject::Pane::with_program(session()?, r.program)?,
                 session()?.into(),
                 turn.channel_id,
             ),
@@ -1504,7 +1504,7 @@ fn run(
             };
             let leaf = match (route, r.herdr) {
                 (target::Route::CodexBusy, _) => BusyCodex {
-                    pane: busy_inject::Pane::with_program(session()?, r.program),
+                    pane: busy_inject::Pane::with_program(session()?, r.program)?,
                     timing: &TIMING,
                     input,
                 }
