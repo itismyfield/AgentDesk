@@ -178,3 +178,5 @@ pub(in crate::services::discord) async fn enforce_slash_command_policy(
     }
     Ok(true)
 }
+
+pub(super) mod effort_capability;

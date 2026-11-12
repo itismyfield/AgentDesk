@@ -1,0 +1,23 @@
+---
+title: "Effort 변경: 같은 세션을 다시 열고 중단 작업 이어하기"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoDeadlock in some cases
+    lg1: Path to the EffortRequestResolves or NoDeadlock bug
+    lg2: Repeats forever, so EffortRequestResolves breaks
+  }
+  class lg0 mayBreak
+  class lg1 bugPath
+  class lg2 repeats
+  s0: 원 작업#183;자연 완료 없음
+  s1: 변경 요청#183;원 작업 실행 중
+  [*] --> s0
+  s0 --> s1: effort 변경 요청
+  s0 --> s0: 보존한 옛 답 게시
+  s1 --> s1: 새 사용자 입력 보존
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 mayBreak
+  class s1 bugPath
+  class s1 repeats

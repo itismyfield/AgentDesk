@@ -171,6 +171,14 @@ fn host(o: &OStore, port: Arc<Port>, alarms: Alarms, cap: u64) -> Host {
     }
 }
 fn resume(actor: &mut Host) {
+    futures::FutureExt::now_or_never(crate::services::tui_o::writer::restart_end::refresh(
+        &mut actor.writer,
+        &mut actor.deriver,
+        actor.bindings.as_ref(),
+        ShadowProvider::Claude,
+    ))
+    .expect("empty restart history refreshes synchronously")
+    .unwrap();
     actor
         .sources
         .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)
