@@ -75,15 +75,7 @@ async fn provider_hint(
     channel: &str,
     session_key: Option<&str>,
 ) -> Result<Option<ProviderKind>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
-           FROM agents
-          WHERE $1 IN (BTRIM(discord_channel_id), BTRIM(discord_channel_alt),
-                       BTRIM(discord_channel_cc), BTRIM(discord_channel_cdx))",
-    )
-    .bind(channel)
-    .fetch_all(connection)
-    .await?;
+    let rows = crate::db::message_outbox::notice::provider_rows(connection, channel).await?;
     if rows.is_empty() {
         return Ok(locator_hint(session_key));
     }

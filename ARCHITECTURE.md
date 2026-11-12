@@ -248,6 +248,9 @@ src/
 │   │   ├── mod.rs
 │   │   ├── soft_delete.rs
 │   │   └── transitions.rs
+│   ├── message_outbox/
+│   │   ├── census.rs
+│   │   └── notice.rs
 │   ├── o_channel_activation/
 │   │   └── owner.rs
 │   ├── o_piece_delivery/
@@ -304,6 +307,7 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
 │   ├── server_campaigns/
+│   │   ├── command_transaction.rs
 │   │   ├── evidence_store.rs
 │   │   ├── evidence_store_tests.rs
 │   │   ├── mod.rs
@@ -342,6 +346,7 @@ src/
 │   ├── intake_outbox_open_status.rs
 │   ├── intake_outbox_status.rs
 │   ├── kanban.rs
+│   ├── message_outbox.rs
 │   ├── mod.rs
 │   ├── o_channel_activation.rs
 │   ├── o_channel_activation_fence_tests.rs
@@ -899,6 +904,8 @@ src/
 │   │   ├── adk_observe/
 │   │   │   ├── ci.rs
 │   │   │   └── ci_tests.rs
+│   │   ├── commands/
+│   │   │   └── transaction_tests.rs
 │   │   ├── adk_observe.rs
 │   │   ├── adk_observe_tests.rs
 │   │   ├── adk_profile.rs
@@ -909,6 +916,7 @@ src/
 │   │   ├── adk_workspace_tests.rs
 │   │   ├── candidate_seal.rs
 │   │   ├── candidate_seal_tests.rs
+│   │   ├── commands.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
 │   │   ├── definition.rs
@@ -3567,6 +3575,8 @@ src/
 │   │   ├── diagnostics.rs
 │   │   ├── identity.rs
 │   │   ├── identity_tests.rs
+│   │   ├── plain.rs
+│   │   ├── plain_tests.rs
 │   │   └── session_notice.rs
 │   ├── observability/
 │   │   ├── events/
