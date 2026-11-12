@@ -230,8 +230,7 @@ async fn preferred_leader_wins_but_unconfigured_agent_keeps_legacy_placement_pg(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ready_primary_without_advertised_slots_starts_there_but_other_unbounded_nodes_never_absorb_pg()
- {
+async fn ready_primary_without_slots_starts_there_but_unbounded_others_never_absorb_pg() {
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
     seed_agent_with_preference(&pool, "default-agent", "8661", json!([])).await;
