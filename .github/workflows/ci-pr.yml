@@ -1261,6 +1261,24 @@ jobs:
           PR_CAP_CI: "1"
           PR_CAP_MODE: ${{ vars.PR_CAP_MODE || 'enforce' }}
           BASH_ENV: /dev/null
+      - name: Check generated documentation at PR head
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/landing-regen-head" "$PR_HEAD_SHA"
+          python3 scripts/landing/regen_after_merge.py --check \
+            --worktree "$RUNNER_TEMP/landing-regen-head" --artifact-dir target/landing-regen
+      - name: Upload landing regeneration diff
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: landing-regeneration-${{ github.run_attempt }}
+          path: target/landing-regen/
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload giant-file progress evidence
         if: always()
         uses: actions/upload-artifact@v4

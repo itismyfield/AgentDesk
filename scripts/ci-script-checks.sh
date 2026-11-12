@@ -833,3 +833,7 @@ mkdir -p target
 "$PYTHON" scripts/audit_maintainability.py --check > target/maintainability-audit.yaml
 echo "Wrote target/maintainability-audit.yaml"
 fi
+
+if run_check contracts "Landing regeneration contracts"; then
+"$PYTHON" -m unittest -v tests.test_landing_regeneration
+fi
