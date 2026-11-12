@@ -419,3 +419,5 @@ outbox-transaction/OutboxTransactionFreshTask.cfg	OutboxTransaction	CensusObserv
 outbox-transaction/OutboxTransactionPreSource.cfg	OutboxTransaction	SourceDecisionUsesObservation	-
 outbox-transaction/OutboxTransactionForeignTx.cfg	OutboxTransaction	SameTransaction	-
 outbox-transaction/OutboxTransactionForeignProviderConnection.cfg	OutboxTransaction	SameProviderConnection	-
+input-single-path/InputPathReadyModalWatchBefore.cfg	InputPath	ReadyNoModalOpenWake	-
+input-single-path/InputPathReadyModalWatchAfter.cfg	InputPath	-	-

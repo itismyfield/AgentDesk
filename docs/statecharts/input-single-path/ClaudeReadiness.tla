@@ -15,6 +15,7 @@ Race == Mode \in {"ready-race", "ready-no-revalidate"}
 Blind == Mode \in {"ready-unread", "ready-permanent-unread", "ready-draft-bypass"}
 Person == Mode \in {"ready-draft", "ready-draft-bypass"}
 NoWake == Mode = "ready-no-wake"
+ModalWatch == Mode \in {"ready-modal-watch-before", "ready-modal-watch-after"}
 Busy == Mode \in {"ready-busy-active", "ready-busy-native", "ready-block-busy", "ready-busy-finish-before",
                   "ready-busy-finish-after", "ready-busy-reexpose"}
 Suppressed == Mode \in {"ready-suppressed-stop", "ready-no-latch",
@@ -32,9 +33,10 @@ Initial ==
      durableClear |-> ClearPreSource, pendingSeq |-> IF ClearPreSource THEN 1 ELSE 0,
      proofPending |-> 0, pendingChanges |-> IF Mode = "ready-clear-pending-recheck" THEN 1 ELSE 0,
      badClear |-> FALSE, heldOnce |-> FALSE,
+     modalOpen |-> ModalWatch, modalHeld |-> FALSE, badModalWake |-> FALSE,
      tail |-> "none", continuing |-> FALSE, stopBoundary |-> 0, softStage |-> 0,
-     stop |-> 0, oldStopLeft |-> IF ClearHeld THEN 0 ELSE 1, awake |-> TRUE,
-     idleWakes |-> IF ClearHeld THEN 0 ELSE 2,
+     stop |-> 0, oldStopLeft |-> IF ClearHeld \/ ModalWatch THEN 0 ELSE 1, awake |-> TRUE,
+     idleWakes |-> IF ClearHeld \/ ModalWatch THEN 0 ELSE 2,
      human |-> Person \/ ClearHeld, draft |-> IF Blind THEN "Unread" ELSE IF Person \/ ClearHeld THEN "Person" ELSE "Empty",
      q |-> [i \in Ids |-> "queued"], effects |-> [i \in Ids |-> 0],
      writes |-> [i \in Ids |-> 0], busyWrites |-> [i \in Ids |-> 0],
@@ -100,7 +102,7 @@ Observe ==
                                   ELSE IF r.phase = "Booting" THEN "Unknown" ELSE r.phase,
                      !.seenEpoch = r.epoch, !.seenTurn = r.turn,
                      !.softStage = IF Suppressed /\ r.softStage = 2 THEN 3 ELSE @,
-                     !.awake = IF NoWake \/ (ClearHeld /\ r.heldOnce) THEN @ ELSE TRUE]
+                     !.awake = IF NoWake \/ (ClearHeld /\ r.heldOnce) \/ (ModalWatch /\ r.modalHeld) THEN @ ELSE TRUE]
 LateAssistant ==
     /\ Suppressed /\ r.softStage = 3
     /\ r' = [r EXCEPT !.softStage = 4, !.tail = "assistant", !.terminal = 0]
@@ -122,14 +124,24 @@ HumanClears ==
 Hold(i) ==
     /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake
     /\ ~ClearHeld \/ Ready
-    /\ ~Ready \/ r.draft # "Empty"
+    /\ ~Ready \/ r.draft # "Empty" \/ (ModalWatch /\ r.modalOpen)
     /\ r' = [r EXCEPT !.q[i] = "held", !.awake = FALSE,
-                     !.heldOnce = @ \/ ClearHeld]
+                     !.heldOnce = @ \/ ClearHeld,
+                     !.modalHeld = @ \/ (ModalWatch /\ r.modalOpen)]
+\* Source evidence and modal focus are independent; close itself emits no owner wake.
+CloseModal ==
+    /\ ModalWatch /\ r.modalHeld /\ r.modalOpen
+    /\ r' = [r EXCEPT !.modalOpen = FALSE]
+WatchModal ==
+    /\ ModalWatch /\ r.modalHeld /\ ~r.awake /\ Ready
+    /\ Mode = "ready-modal-watch-before" \/ ~r.modalOpen
+    /\ r' = [r EXCEPT !.awake = TRUE, !.badModalWake = @ \/ r.modalOpen]
 WatchHeld ==
     /\ ClearHeld /\ r.heldOnce /\ r.q[1] = "held" /\ r.draft = "Empty"
     /\ Ready /\ (~r.oldBinding \/ Mode # "ready-clear-held-before")
     /\ r' = [r EXCEPT !.awake = TRUE]
 Prepare(i) ==
+    /\ ~ModalWatch \/ ~r.modalOpen
     /\ ~CompactCompletion \/ ~r.compactPending
     /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake /\ Ready
     /\ r.draft = "Empty" \/ Mode = "ready-draft-bypass"
@@ -218,11 +230,11 @@ CompactCompletionEvidence ==
 FinishSelfCompactFence ==
     /\ r.compactFence /\ r.compactEvidence /\ Mode # "ready-compact-no-completion"
     /\ r' = [r EXCEPT !.compactFence = FALSE, !.compactReady = TRUE, !.awake = TRUE]
-Next == WatchHeld \/ ChangeClearPending \/ PublishClearFile \/ CompactCompletionEvidence \/ FinishSelfCompactFence \/ PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
+Next == CloseModal \/ WatchModal \/ WatchHeld \/ ChangeClearPending \/ PublishClearFile \/ CompactCompletionEvidence \/ FinishSelfCompactFence \/ PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
         SuppressStop \/ SoftSummary \/ LateAssistant \/
         NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/ IdleWake \/
         (\E i \in Ids : Hold(i) \/ Prepare(i) \/ SelectBusy(i) \/ BusyInject(i) \/ BusyPublish(i) \/ ReexposeBusy(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
-Fairness == WF_r(WatchHeld) /\ WF_r(ChangeClearPending) /\ WF_r(PublishClearFile) /\ WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
+Fairness == WF_r(CloseModal) /\ WF_r(WatchModal) /\ WF_r(WatchHeld) /\ WF_r(ChangeClearPending) /\ WF_r(PublishClearFile) /\ WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
             WF_r(SuppressStop) /\ WF_r(SoftSummary) /\ WF_r(LateAssistant) /\
             WF_r(RecoverDraft) /\ WF_r(HumanClears) /\ WF_r(NativeStart) /\
             WF_r(Revoke) /\ WF_r(Submit) /\ WF_r(CompactSubmit) /\
@@ -234,6 +246,8 @@ TypeOK ==
     /\ r.effects \in [Ids -> 0..2] /\ r.writes \in [Ids -> 0..2] /\ r.head \in 0..N
     /\ r.phase \in {"Booting", "Idle", "Running"}
     /\ r.dialogKeys \in 0..1 /\ r.permissionStage \in 0..3
+NoModalOpenWake == ~r.badModalWake
+ModalCloseEventuallySends == ModalWatch => ((r.modalHeld /\ ~r.modalOpen) ~> (r.effects[1] = 1))
 NoDuplicate == \A i \in Ids : r.effects[i] <= 1 /\ r.writes[i] <= 1
 NoSilentLoss == \A i \in Ids : r.q[i] = "done" => r.effects[i] = 1
 NoIdleRunningInjection == ~r.badIdleRunning
