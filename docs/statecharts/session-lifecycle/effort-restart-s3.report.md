@@ -58,7 +58,7 @@ C-only intent는 `src/services/turn_orchestrator/queued_head/compat.rs`의 `hold
 | source ID 재사용 / 접수 즉시 barrier 해제 / C 2회 prepend / compat 조건 제거 | 각각 실행 RED, 원본 SHA256 복원 |
 | Claude native continuation 억제 제거 | 격리 fake provider에서 RED, 실제 모델 요청 0 |
 | clippy workspace/all-targets/all-features | 수정 파일 경고 0 |
-| production cap (기본 / exclude-test-modules) | 두 방식 모두 13파일, 순증 314줄 |
+| production cap (기본 / exclude-test-modules) | 두 방식 모두 13파일, 순증 313줄 |
 
 모델 mutant의 실패 경로를 같은 접수 상태에서 분기해 표시한다. 실제 코드의 mutation 실행과 모델 trace는 레인 보고서의 서로 다른 로그로 구분한다.
 
