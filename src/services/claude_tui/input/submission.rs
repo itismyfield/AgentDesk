@@ -23,6 +23,15 @@ pub(super) fn send(
     guarded_outcome::capture_preparation(|| {
         // An invalid prompt fails here, before any readiness wait or key.
         let text = payload_text(prompt)?;
+        #[cfg(unix)]
+        if readiness == PromptReadinessKind::ProvenWarmFollowup
+            && !cancel_requested(cancel)
+            && busy_inject::Pane::with_program(session, "tmux".into()).is_err()
+        {
+            let run = InputRun::Refused(InputRefusal::IdentityMismatch);
+            guarded_outcome::finish(&run);
+            return SubmissionError::from_run(run);
+        }
         wait_for_prompt_ready(session, readiness, cancel)
             .map_err(|error| preparation_hold::readiness_failure(session, error))?;
         submit(session, prompt, &text, readiness, cancel)
