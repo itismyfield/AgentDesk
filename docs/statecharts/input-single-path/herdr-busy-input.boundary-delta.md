@@ -1,8 +1,10 @@
 # #8114 구현 전 host boundary 판단
 
+<!-- doc-path-refs: proposed src/services/discord/router/message_handler/provider_dispatch/owner_input/busy_target.rs src/services/discord/router/message_handler/intake_turn/owned_busy.rs src/services/claude_tui/host_input/interactive_session.rs -->
+
 경계 재계획 당시 판정: **기존 경계의 확장이 필요하다. 원 설계 7 prod/+450를 그대로 승인할 수 없으며 DESIGN_DELTA로 경계·크기 계획을 고정한 뒤 구현하는 것이 맞다.** 새 trait는 필수가 아니다. 기존 `claude_tui::host_input::InputTransport`를 확장하는 쪽이 가장 작은 후보이며 Herdr Core 전용 메서드/상태는 필요 없다.
 
-기준 HEAD `6e9bf145ce5f649bda77a9ffd6c071d54cc9b254`. 새 사용자 댓글 `logs/issue-comments-impl-1.txt`를 읽었다. 프로덕션 편집·빌드·운영/금지 설정 접근 없음.
+기준 HEAD `6e9bf145ce5f649bda77a9ffd6c071d54cc9b254`. 아래 미생성 child 경로는 계획 후보이며 이번 Slice1 구현 파일이 아니다. 역사 좌표 링크는 조사 기준 main 스냅샷을 고정한다. 새 사용자 댓글 `logs/issue-comments-impl-1.txt`를 읽었다. 프로덕션 편집·빌드·운영/금지 설정 접근 없음.
 
 ## 현재 구현 재개의 Slice1·Slice2 경계
 
@@ -21,7 +23,7 @@
 
 ## 지금 경계로 이미 가능한 것
 
-- `session_host/traits.rs:9-36 InteractiveSessionHost`는 kind, presence/liveness, 화면 capture, text/keys, cwd/pid IO를 제공한다. 그러나 호출 대상은 `HostSessionRef {kind,name}`뿐이다(`model.rs:8-11`). `HostedRuntimeLocator`도 nonce/generation/provider source identity를 **명시적으로 운반하지 않는다**(`model.rs:155-157`). 이 trait만 호출해 Bound incarnation·논리 세션·native source를 복원할 수 없다.
+- [InteractiveSessionHost (조사 기준) L9–L33](https://github.com/itismyfield/AgentDesk/blob/5bcbb82297f5cc3ab8897b81ddb9891459e0321b/src/services/session_host/traits.rs#L9-L33)는 kind, presence/liveness, 화면 capture, text/keys, cwd/pid IO를 제공한다. 그러나 호출 대상은 `HostSessionRef {kind,name}`뿐이다(`model.rs:8-11`). `HostedRuntimeLocator`도 nonce/generation/provider source identity를 **명시적으로 운반하지 않는다**(`model.rs:155-157`). 이 trait만 호출해 Bound incarnation·논리 세션·native source를 복원할 수 없다.
 - `session_host/resolve.rs:239-260 resolve_session_target`은 found sessions row+inflight+marker의 host-location을 fail-closed로 정규화한다. provider source 판정·Busy 여부·input gate는 아니다. 새 caller에서 raw 채널 설정으로 이 resolver를 대체하면 안 된다.
 - 실제 registry의 Herdr `InteractiveSessionHost`는 `ReadOnlyHerdrHost`이고 입력을 의도적으로 거절한다(`herdr_registry.rs:49-87`). `sole_host:311`는 endpoint가 하나일 때만 host를 주므로 이를 공통 입력 factory로 오용하면 multi-endpoint와 exact target gate를 잃는다.
 - `claude_tui/host_input.rs:154-169 InputTransport`는 입력 IO와 capture/boolean alive만 제공한다. 실제 tmux/Herdr 구현이 이미 있으며, `run_plan:365-389`/`Plan::step:411-424`는 하나의 순차 paste+Enter 흐름과 매 write 전 `MutationGate`를 제공한다. **전송만** 새로 만들 필요는 없다.
