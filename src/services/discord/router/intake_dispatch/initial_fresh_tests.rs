@@ -40,18 +40,6 @@ impl IntakeSubmission {
     }
 }
 
-impl IntakeAdmission {
-    pub(in crate::services::discord) fn forwarded_for_tests(&self) -> Option<(&str, i64)> {
-        match self {
-            Self::Forwarded {
-                target_instance_id,
-                outbox_id,
-            } => Some((target_instance_id, *outbox_id)),
-            _ => None,
-        }
-    }
-}
-
 fn input() -> IntakeSubmission {
     let message = serenity::MessageId::new(CANARY_CHANNEL + 7163);
     IntakeSubmission {
