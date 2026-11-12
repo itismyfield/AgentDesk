@@ -54,7 +54,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE` | `src/services/codex_tui/session/source_observation.rs` | Validated once at startup; no active nonce or new launch reparses mutable env. |
 | `AGENTDESK_CODEX_FIRST_EVENT_TIMEOUT_SECS` | `src/services/codex_tmux_wrapper.rs` |  |
 | `AGENTDESK_CODEX_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs` |  |
-| `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs` |  |
+| `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex/effort.rs` |  |
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex/command_streaming.rs` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs` |  |
 | `AGENTDESK_CONFIG` | `src/config/config_path/selection.rs`, `src/config/test_env.rs`, `src/config/test_instance.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` | `$AGENTDESK_CONFIG` selects an explicit config path before the normal root search. |

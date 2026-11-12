@@ -185,6 +185,7 @@ fn s0o_resume_mismatch_and_new_source_discard_evidence() {
     reader.bootstrap().unwrap();
     reader.meta.carry(&Resume {
         after: 0,
+        open_after: None,
         carried: TurnState::Open {
             native_turn_id: Some("B".into()),
         },

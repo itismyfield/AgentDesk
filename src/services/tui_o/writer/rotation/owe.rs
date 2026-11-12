@@ -108,15 +108,18 @@ impl<B: BindingEvents> Sources<B> {
         version: u32,
     ) -> Vec<Derived> {
         deriver.enter_source(source);
+        let mut ended = deriver.restart_before(source, record);
         if !deriver.input_notices_enabled() {
-            return deriver.derive_with_version(record, version);
+            ended.extend(deriver.derive_with_version(record, version));
+            return ended;
         }
         let origin = if super::super::input_notices::needs_origin(record) {
             self.notice_origin(source, record)
         } else {
             Err("input notice candidate absent".into())
         };
-        deriver.derive_scoped(record, source, version, origin)
+        ended.extend(deriver.derive_scoped(record, source, version, origin));
+        ended
     }
 
     pub(crate) fn notice_origin(

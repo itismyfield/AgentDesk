@@ -1,0 +1,27 @@
+---
+title: "같은 source의 exact End witness와 준비된 답"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: boot
+    lg1: work
+  }
+  class lg0 yellow
+  class lg1 blue
+  s0: 옛 Open, native closer 없음
+  s1: 물리 종료 확인, witness 읽기 전
+  s2: witness를 확인하지 못해 보류 [재시작 가능]
+  s3: writer 재시작, durable 기록 유지
+  s4: witness를 확인하지 못해 보류 [재시작 기회 소진]
+  [*] --> s0
+  s0 --> s1: old incarnation의 실제 종료 기록
+  s1 --> s2: historical scope를 검증하지 못해 보류
+  s1 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s2 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s3 --> s1: 같은 source와 ledger를 다시 읽음
+  s1 --> s4: historical scope를 검증하지 못해 보류
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 yellow
+  class s4 blue

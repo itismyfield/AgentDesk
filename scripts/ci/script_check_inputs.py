@@ -24,6 +24,15 @@ SELF_TEST_INPUTS: dict[str, tuple[str, ...]] = {
     "Isolated instance declaration tests": (
         "scripts/dev-instance.sh",
         "scripts/dev_instance/**",
+        "tests/test_dev_instance.py",
+        "tests/test_dev_instance_files.py",
+        "docs/dev-instance.md",
+    ),
+    "Isolated instance credential binary tests": (
+        "Cargo.toml",
+        "Cargo.lock",
+        "scripts/dev-instance.sh",
+        "scripts/dev_instance/**",
         "src/cli/args.rs",
         "src/cli/dev_instance.rs",
         "src/cli/dev_instance/**",

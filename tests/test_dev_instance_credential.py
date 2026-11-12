@@ -1,5 +1,6 @@
 """Exercise Python credential commands through the actual lane Rust binary."""
 
+import io
 import json
 import os
 from pathlib import Path
@@ -9,16 +10,22 @@ import sys
 import unittest
 
 from tests import test_dev_instance as declaration_fixture
+from tests import test_dev_instance_files as files_fixture
+from scripts.dev_instance.files import InstanceError, validate_tree, write_credential
+
+
+def require_lane_binary(test):
+    directory = Path(os.environ.get("PATH", "").split(os.pathsep)[0])
+    binary = directory / "agentdesk"
+    test.assertTrue(directory.is_absolute() and binary.is_file() and os.access(binary, os.X_OK),
+                    "BLOCKED_BINARY: place the built lane agentdesk directory first on PATH")
+    return directory
 
 
 class InstanceCredentialCliTests(unittest.TestCase):
     def setUp(self):
-        first_path = os.environ.get("PATH", "").split(os.pathsep)[0]
-        self.binary_directory = Path(first_path)
+        self.binary_directory = require_lane_binary(self)
         self.binary = self.binary_directory / "agentdesk"
-        self.assertTrue(self.binary_directory.is_absolute(), "lane binary PATH entry must be absolute")
-        self.assertTrue(self.binary.is_file() and os.access(self.binary, os.X_OK),
-                        "build the lane agentdesk binary and place its directory first on PATH")
         self.fixture = declaration_fixture.InstanceDeclarationTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
@@ -83,6 +90,76 @@ class InstanceCredentialCliTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn(token, result.stdout + result.stderr)
                 self.assertFalse((self.root / "credential/claude_bot_token").exists())
+
+
+class InstanceCredentialFilesTests(unittest.TestCase):
+    def setUp(self):
+        require_lane_binary(self)
+        self.fixture = files_fixture.InstanceFilesTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.root = self.fixture.root
+
+    def test_credentials_require_three_distinct_private_files(self):
+        validate_tree(self.root)
+        with self.assertRaisesRegex(InstanceError, "three"):
+            validate_tree(self.root, require_credentials=True)
+        for index, name in enumerate(("claude_bot_token", "codex_bot_token", "driver_bot_token")):
+            sentinel = f"sentinel-fake-token-{index}"
+            write_credential(self.root, name, io.StringIO(sentinel + "\n"))
+            path = self.root / "credential" / name
+            self.assertEqual(path.read_text(), sentinel)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        validate_tree(self.root, require_credentials=True)
+        (self.root / "credential/driver_bot_token").write_bytes(
+            (self.root / "credential/claude_bot_token").read_bytes())
+        with self.assertRaisesRegex(InstanceError, "distinct"):
+            validate_tree(self.root, require_credentials=True)
+
+    def test_invalid_token_input_is_rejected_without_echoing_it(self):
+        cases = (
+            ("unexpected_bot_token", b"sentinel-token"),
+            ("claude_bot_token", b""),
+            ("claude_bot_token", b"sentinel-token\nother"),
+            ("claude_bot_token", b"sentinel-token\r"),
+            ("claude_bot_token", b" sentinel-token"),
+            ("claude_bot_token", b"x" * 4097),
+            ("claude_bot_token", b"x" * 4096 + b"\ntrailing"),
+        )
+        for name, value in cases:
+            with self.subTest(name=name, size=len(value)):
+                with self.assertRaises(InstanceError) as error:
+                    write_credential(self.root, name, io.BytesIO(value))
+                self.assertNotIn("sentinel-token", str(error.exception))
+                self.assertEqual(list((self.root / "credential").iterdir()), [])
+        write_credential(self.root, "claude_bot_token", io.BytesIO(b"sentinel-distinct"))
+        with self.assertRaisesRegex(InstanceError, "distinct"):
+            write_credential(self.root, "driver_bot_token", io.BytesIO(b"sentinel-distinct"))
+        self.assertFalse((self.root / "credential/driver_bot_token").exists())
+
+    def test_unknown_or_unsafe_existing_credentials_are_not_migrated(self):
+        path = self.root / "credential/claude_bot_token"
+        write_credential(self.root, path.name, io.BytesIO(b"sentinel-fake-token"))
+        for mode in (0o644, 0o400):
+            path.chmod(mode)
+            with self.subTest(mode=mode), self.assertRaisesRegex(InstanceError, "private"):
+                validate_tree(self.root)
+        path.chmod(0o600)
+        credentials = self.root / "credential"
+        credentials.chmod(0o755)
+        with self.assertRaisesRegex(InstanceError, "0700"):
+            validate_tree(self.root)
+        credentials.chmod(0o700)
+        path.write_bytes(b"")
+        with self.assertRaisesRegex(InstanceError, "nonempty"):
+            validate_tree(self.root)
+        path.unlink()
+        for name, directory in (("unknown_token", False), ("codex_bot_token", True)):
+            entry = credentials / name
+            entry.mkdir() if directory else entry.write_bytes(b"sentinel-legacy")
+            with self.subTest(name=name), self.assertRaisesRegex(InstanceError, "unknown"):
+                validate_tree(self.root)
+            entry.rmdir() if directory else entry.unlink()
 
 
 if __name__ == "__main__":

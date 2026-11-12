@@ -1,0 +1,46 @@
+---
+title: "같은 source의 exact End witness와 준비된 답"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: boot
+    lg1: work
+    lg2: Breaks RestartExactEndOnly
+    lg3: Path to the RestartExactEndOnly bug
+  }
+  class lg0 yellow
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  s0: 옛 Open, native closer 없음
+  s1: 물리 종료 확인, witness 읽기 전
+  s2: witness 설치 후 옛 opener 읽기
+  s3: writer 재시작, durable 기록 유지
+  s4: old cutoff 앞, 새 prompt 읽기 전
+  s5: 다른 nonce 또는 cutoff를 닫음
+  s6: writer 재시작, POST 확인 미완료
+  s7: 기존 Prepared의 POST 확인 대기
+  [*] --> s0
+  s0 --> s1: old incarnation의 실제 종료 기록
+  s1 --> s2: historical binding과 prefix 검증 후 witness 설치
+  s1 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s2 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s2 --> s4: old opener 재생
+  s3 --> s1: 같은 source와 ledger를 다시 읽음
+  s4 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s4 --> s5: cutoff에서 old opener만 reset
+  s5 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s5 --> s6: writer process가 중단됨 [이전 재시작 없음]
+  s6 --> s7: 같은 source와 ledger를 다시 읽음
+  s7 --> s5: cutoff에서 old opener만 reset
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 yellow
+  class s4 bugPath
+  class s5 breaks
+  class s5 bugPath
+  class s6 yellow
+  class s7 blue
