@@ -967,6 +967,7 @@ src/
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
 │   │   ├── c1_teardown_tests.rs
+│   │   ├── capability_probe.rs
 │   │   ├── first_input.rs
 │   │   ├── fresh_notice.rs
 │   │   ├── fresh_notice_tests.rs
@@ -1001,6 +1002,7 @@ src/
 │   │   ├── busy_inject_tests/
 │   │   │   └── common_glyph_tests.rs
 │   │   ├── hook_bundle/
+│   │   │   ├── launch_settings.rs
 │   │   │   ├── statusline.rs
 │   │   │   └── statusline_tests.rs
 │   │   ├── hook_relay/
@@ -1053,6 +1055,8 @@ src/
 │   │   │   └── user_receipt.rs
 │   │   ├── session/
 │   │   │   ├── auto_compact_launch_tests.rs
+│   │   │   ├── effort.rs
+│   │   │   ├── effort_launch_tests.rs
 │   │   │   └── fast_launch_tests.rs
 │   │   ├── source_verify/
 │   │   │   └── renumber.rs
@@ -1223,6 +1227,7 @@ src/
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── command_streaming.rs
 │   │   ├── direct_reader.rs
+│   │   ├── effort.rs
 │   │   ├── followup_reader.rs
 │   │   ├── herdr_guard_tests.rs
 │   │   ├── herdr_turn.rs
@@ -1352,6 +1357,8 @@ src/
 │   │   │   │   ├── provider_settings/
 │   │   │   │   │   └── revision_tests.rs
 │   │   │   │   ├── allowall_tests.rs
+│   │   │   │   ├── effort.rs
+│   │   │   │   ├── effort_settings_tests.rs
 │   │   │   │   ├── provider_settings.rs
 │   │   │   │   └── provider_settings_snapshot_tests.rs
 │   │   │   ├── control/
@@ -1445,6 +1452,7 @@ src/
 │   │   │   ├── command_policy.rs
 │   │   │   ├── config.rs
 │   │   │   ├── control.rs
+│   │   │   ├── effort_capability.rs
 │   │   │   ├── fast_mode.rs
 │   │   │   ├── goals.rs
 │   │   │   ├── help.rs
@@ -1798,7 +1806,8 @@ src/
 │   │   │   └── closed_actor_tests.rs
 │   │   ├── model_catalog/
 │   │   │   ├── bounded_cache_file.rs
-│   │   │   └── claude.rs
+│   │   │   ├── claude.rs
+│   │   │   └── effort.rs
 │   │   ├── org_schema/
 │   │   │   └── auth_selection_tests.rs
 │   │   ├── outbound/
@@ -3157,6 +3166,9 @@ src/
 │   │   │   │   ├── closed_boundary.rs
 │   │   │   │   ├── effect_reads.rs
 │   │   │   │   ├── effect_reads_tests.rs
+│   │   │   │   ├── effort_restart.rs
+│   │   │   │   ├── effort_restart_baseline_tests.rs
+│   │   │   │   ├── effort_restart_tests.rs
 │   │   │   │   ├── notice_identity.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
@@ -4044,6 +4056,8 @@ src/
 │   │   │   ├── local_retry_ledger_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume_ledger_tests.rs
+│   │   │   ├── restart_end.rs
+│   │   │   ├── restart_end_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── spool.rs
@@ -4240,6 +4254,9 @@ src/
 │   │   │   ├── replay.rs
 │   │   │   ├── replay_metadata_tests.rs
 │   │   │   ├── repost_turn_tests.rs
+│   │   │   ├── restart_end.rs
+│   │   │   ├── restart_end_repair_tests.rs
+│   │   │   ├── restart_end_tests.rs
 │   │   │   ├── restart_replay_host_tests.rs
 │   │   │   ├── resume.rs
 │   │   │   ├── resume_tests.rs
