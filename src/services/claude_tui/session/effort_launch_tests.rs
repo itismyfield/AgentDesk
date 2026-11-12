@@ -1,0 +1,113 @@
+//! The generated settings and argv are the launch contract; no provider CLI starts.
+use super::*;
+
+fn with_launch(check: impl FnOnce(&ClaudeTuiLaunchConfig)) {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _context = crate::services::claude_compact_context::state_test_guard();
+    let root = tempfile::tempdir().unwrap();
+    let provider = root.path().join("launch-fixture.yaml");
+    fs::write(
+        &provider,
+        serde_yaml::to_string(&serde_json::json!({
+            "server": {}, "data": {"dir": root.path().join("data")}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _env = [
+        set("AGENTDESK_CONFIG", &provider),
+        set("AGENTDESK_ROOT_DIR", root.path()),
+    ];
+    check(&ClaudeTuiLaunchConfig {
+        tmux_session_name: format!("fixture-claude-effort-{}", uuid::Uuid::new_v4()),
+        working_dir: root.path().to_path_buf(),
+        claude_bin: ClaudeBinary::from_tmux_wrapper_argv("/fixture/claude"),
+        agentdesk_exe: PathBuf::from("/fixture/agentdesk"),
+        hook_endpoint: "http://127.0.0.1:1".into(),
+        session_id: "81090000-0000-4000-8000-000000000001".into(),
+        system_prompt: None,
+        model: Some("claude-opus-4-8".into()),
+        resume: true,
+    });
+}
+
+fn read_launch(files: &ClaudeTuiSessionFiles) -> (serde_json::Value, String) {
+    (
+        serde_json::from_slice(&fs::read(&files.hook_settings_path).unwrap()).unwrap(),
+        fs::read_to_string(&files.launch_script_path).unwrap(),
+    )
+}
+
+#[test]
+fn ultra_persists_and_normal_effort_turns_ultracode_off() {
+    with_launch(|config| {
+        for requested in ["ultra", "ultra", "low", "medium", "high", "xhigh", "max"] {
+            let files =
+                prepare_claude_tui_launch_with_settings(config, None, Some(requested)).unwrap();
+            let (settings, script) = read_launch(&files);
+            assert_eq!(
+                settings["ultracode"],
+                requested == "ultra",
+                "{requested}: {settings}"
+            );
+            assert!(script.contains(&format!("'--resume' '{}'", config.session_id)));
+            assert_eq!(script.matches("'--settings'").count(), 1);
+            if requested == "ultra" {
+                assert!(
+                    !script.contains("'--effort'"),
+                    "ultra uses settings: {script}"
+                );
+            } else {
+                assert!(
+                    script.contains(&format!("'--effort' '{requested}'")),
+                    "{script}"
+                );
+            }
+            assert!(
+                script.contains("unset CLAUDE_CODE_EFFORT_LEVEL\n"),
+                "{script}"
+            );
+            files.cleanup_best_effort();
+        }
+    });
+}
+
+#[test]
+fn merged_settings_keep_hooks_fast() {
+    with_launch(|config| {
+        for (requested, fast) in [("ultra", true), ("high", false)] {
+            let files =
+                prepare_claude_tui_launch_with_settings(config, Some(fast), Some(requested))
+                    .unwrap();
+            let (settings, script) = read_launch(&files);
+            assert_eq!(settings["ultracode"], requested == "ultra");
+            assert_eq!(settings["fastMode"], fast);
+            for event in ["SessionStart", "UserPromptSubmit", "Stop", "PostToolUse"] {
+                assert!(settings["hooks"][event].is_array(), "{event}: {settings}");
+            }
+            assert!(settings["statusLine"].is_object());
+            assert_eq!(script.matches("'--settings'").count(), 1);
+            files.cleanup_best_effort();
+        }
+    });
+}
+
+#[test]
+fn raw_ultracode_is_not_a_channel_ultra_alias() {
+    with_launch(|config| {
+        assert!(prepare_claude_tui_launch_with_settings(config, None, Some("ultracode")).is_err());
+    });
+}
+
+#[test]
+fn unset_channel_effort_preserves_the_cli_effort_setting() {
+    with_launch(|config| {
+        let files = prepare_claude_tui_launch_with_settings(config, None, None).unwrap();
+        let (settings, script) = read_launch(&files);
+        assert!(settings.get("ultracode").is_none());
+        assert!(!script.contains("'--effort'"));
+        assert!(!script.contains("unset CLAUDE_CODE_EFFORT_LEVEL\n"));
+        files.cleanup_best_effort();
+    });
+}
