@@ -44,6 +44,8 @@ class DeadlineEntrypointsTest(unittest.TestCase):
             shutil.copy2(ROOT / "scripts" / filename, scripts / filename)
         shutil.copytree(ROOT / "scripts/audit_maintainability", scripts / "audit_maintainability",
                         ignore=shutil.ignore_patterns("__pycache__"))
+        # The fixture runs against its own synthetic baseline, so the repo's pending layer moves must not be checked against it.
+        (scripts / "audit_maintainability/layer_moves.toml").write_text("schema_version = 1\nmoves = []\n")
         (scripts / "ci").mkdir()
         shutil.copy2(ROOT / "scripts/ci/rust_test_sources.py", scripts / "ci/rust_test_sources.py")
         tree = ast.parse((scripts / "generate_inventory_docs.py").read_text())
