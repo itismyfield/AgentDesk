@@ -29,6 +29,18 @@ pub(crate) fn execute(args: DevInstanceArgs) -> Result<(), String> {
     }
 }
 
+pub(crate) fn reject_argument_error() {
+    if std::env::args()
+        .skip(1)
+        .find(|argument| !argument.starts_with('-'))
+        .as_deref()
+        == Some("dev-instance")
+    {
+        eprintln!("credential write rejected");
+        std::process::exit(1);
+    }
+}
+
 fn credential_write(root: &Path, name: &str, input: impl Read) -> Result<(), String> {
     write_credential(root, name, input).map_err(|_| "credential write rejected".to_string())
 }

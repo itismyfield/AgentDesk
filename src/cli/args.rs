@@ -603,6 +603,7 @@ pub(crate) fn parse() -> ParseOutcome {
             }
             let has_args = std::env::args().count() > 1;
             if has_args {
+                super::dev_instance::reject_argument_error();
                 error.print().ok();
                 std::process::exit(1);
             }

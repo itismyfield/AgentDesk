@@ -71,6 +71,19 @@ class InstanceCredentialCliTests(unittest.TestCase):
         self.assertEqual(list((self.root / "credential").iterdir()), [])
         self.assertNotIn(token, result.stdout + result.stderr)
 
+    def test_rust_entrypoint_rejects_inline_arguments_without_echoing_secrets(self):
+        token = b"FAKE_INLINE_ARGUMENT_NEVER_ECHO"
+        for prefix in ([], ["--json"]):
+            with self.subTest(prefix=prefix):
+                result = subprocess.run(
+                    [str(self.binary), *prefix, "dev-instance", "credential-write", "--root", str(self.root),
+                     "--name", "claude_bot_token", token.decode()],
+                    env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                    input=b"", capture_output=True, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(token, result.stdout + result.stderr)
+                self.assertFalse((self.root / "credential/claude_bot_token").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
