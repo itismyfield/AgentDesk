@@ -6,7 +6,7 @@ from hashlib import sha256
 import json
 
 from ci.rust_test_sources import Inventory, crate_roots, walk
-from rust_accessor_scan import (Token, boot_bindings, call_arguments, exports_for,
+from ..rust_accessor_scan import (Token, boot_bindings, call_arguments, exports_for,
                                 imports, pairs, receiver_start, resolve, scopes, tokens)
 from .. import common
 from ..common import Finding
