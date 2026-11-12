@@ -3,6 +3,41 @@
 This directory stores committed no-regression baselines for audit checks that
 are not ready to require zero findings.
 
+## Low-level Host Accessors
+
+`generated/low_level_accessors/*.json` freezes the production call/reference
+sites for raw endpoint, launch-selection and boot-inventory access outside
+their owners. Each rule records its accessor and exact owner paths. Output
+membership stays with `scripts/check_tui_o_writer_census.py`; naming and
+reaction policy migrations keep their existing guards.
+
+The scanner follows the non-test Rust module graph, including inline cfg
+gates, and retains literal values and operator order in each call hash.
+Comments, formatting, imports and definitions do not create sites. Calls and
+function-value references through import aliases do. A site is identified by
+rule, source path, enclosing function and normalized call hash, with a count
+for duplicate occurrences. Adding a site fails even when another site is
+removed in the same change.
+
+Run the audit with `python3 scripts/audit_maintainability.py --check`.
+After removing calls, regenerate the approval files with:
+
+```sh
+python3 scripts/audit_maintainability/checks/low_level_accessor_baseline.py --reduce
+python3 scripts/audit_maintainability/checks/low_level_accessor_baseline.py --check-baseline
+```
+
+For a pure file/function rename, use `--relabel` instead of `--reduce` and
+retain its printed old/new mapping with the review evidence. Relabeling
+requires the exact same `(rule, normalized call hash)` multiset, including
+each hash's count; it cannot admit a new call or owner scope. `--initialize`
+is only for the approved first corpus and refuses to overwrite any existing
+rule file. Do not hand-edit or increase these approval files.
+The audit also compares approval hash counts against the PR base, so editing
+the source and approval files together cannot admit new debt.
+Missing baseline files produce one warning and skip this check in partial
+repositories. Malformed existing snapshots remain errors.
+
 ## Route SRP
 
 `route_srp.json` records the current route SRP finding count and per-file
