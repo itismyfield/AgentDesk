@@ -1,6 +1,6 @@
 # #8114 Herdr Claude busy 입력 단일 경로 설계 v1
 
-<!-- doc-path-refs: proposed src/services/discord/router/message_handler/provider_dispatch/owner_input/busy_target.rs src/services/discord/router/message_handler/intake_turn/owned_busy.rs src/services/discord/router/message_handler/provider_dispatch/owner_input/claude_pane.rs -->
+<!-- doc-path-refs: proposed src/services/discord/router/message_handler/provider_dispatch/owner_input/busy_target.rs src/services/discord/router/message_handler/provider_dispatch/owner_input/claude_pane.rs -->
 
 기준: main/lane `5bcbb82297f5cc3ab8897b81ddb9891459e0321b`, 2026-11-12 KST.
 #8080 대조: `refs/review/i8080-land1=b63a97c5115bf469c85996242d61732557122427`.

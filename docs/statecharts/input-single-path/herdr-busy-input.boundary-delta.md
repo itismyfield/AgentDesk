@@ -1,6 +1,6 @@
 # #8114 구현 전 host boundary 판단
 
-<!-- doc-path-refs: proposed src/services/discord/router/message_handler/provider_dispatch/owner_input/busy_target.rs src/services/discord/router/message_handler/intake_turn/owned_busy.rs src/services/claude_tui/host_input/interactive_session.rs -->
+<!-- doc-path-refs: proposed src/services/discord/router/message_handler/provider_dispatch/owner_input/busy_target.rs src/services/claude_tui/host_input/interactive_session.rs -->
 
 경계 재계획 당시 판정: **기존 경계의 확장이 필요하다. 원 설계 7 prod/+450를 그대로 승인할 수 없으며 DESIGN_DELTA로 경계·크기 계획을 고정한 뒤 구현하는 것이 맞다.** 새 trait는 필수가 아니다. 기존 `claude_tui::host_input::InputTransport`를 확장하는 쪽이 가장 작은 후보이며 Herdr Core 전용 메서드/상태는 필요 없다.
 

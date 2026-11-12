@@ -1507,10 +1507,10 @@ fn coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg() {
 #[path = "provider_dispatch_live_end_tests.rs"]
 pub(super) mod live_end;
 
-#[path = "provider_dispatch_herdr_fresh_notice_tests.rs"]
-mod fresh_notice_tests;
 #[path = "provider_dispatch_herdr_busy_entry_tests.rs"]
 mod busy_entry_tests;
+#[path = "provider_dispatch_herdr_fresh_notice_tests.rs"]
+mod fresh_notice_tests;
 #[path = "provider_dispatch_herdr_start_offset_tests.rs"]
 mod start_offset_tests;
 #[path = "provider_dispatch_herdr_tmux_launch_tests.rs"]
