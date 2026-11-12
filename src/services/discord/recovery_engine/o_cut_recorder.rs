@@ -61,6 +61,7 @@ pub(in crate::services::discord) struct FirstPost {
     pub(in crate::services::discord) release: tokio::sync::Semaphore,
     hold: bool,
     fail: bool,
+    fail_all: bool,
     posts: std::sync::atomic::AtomicUsize,
 }
 
@@ -71,6 +72,7 @@ impl Default for FirstPost {
             release: tokio::sync::Semaphore::new(0),
             hold: false,
             fail: false,
+            fail_all: false,
             posts: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -87,6 +89,14 @@ impl FirstPost {
     pub(in crate::services::discord) fn failing() -> Arc<Self> {
         Arc::new(Self {
             fail: true,
+            ..Self::default()
+        })
+    }
+
+    /// Every POST, not only the first, answers 500.
+    pub(in crate::services::discord) fn failing_always() -> Arc<Self> {
+        Arc::new(Self {
+            fail_all: true,
             ..Self::default()
         })
     }
@@ -158,14 +168,13 @@ async fn serve_with(
                 return (StatusCode::NO_CONTENT, String::new()).into_response();
             }
             let order = std::sync::atomic::Ordering::SeqCst;
-            if let Some(first) = first.filter(|_| method == Method::POST)
-                && first.posts.fetch_add(1, order) == 0
-            {
-                if first.hold {
+            if let Some(first) = first.filter(|_| method == Method::POST) {
+                let earlier = first.posts.fetch_add(1, order);
+                if earlier == 0 && first.hold {
                     first.arrived.notify_one();
                     first.release.acquire().await.unwrap().forget();
                 }
-                if first.fail {
+                if (earlier == 0 && first.fail) || first.fail_all {
                     return (StatusCode::INTERNAL_SERVER_ERROR, "{}").into_response();
                 }
             }

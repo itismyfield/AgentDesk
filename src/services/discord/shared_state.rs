@@ -627,6 +627,11 @@ pub(in crate::services) struct RestartLifecycle {
     pub(in crate::services) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,
     /// Per-channel restore lock: one recovery at a time sends for and settles a channel's row.
     pub(in crate::services) restore_locks: dashmap::DashMap<u64, Arc<tokio::sync::Mutex<()>>>,
+    /// The recovery relay outcome an adoption wake waits for, per channel it is restoring.
+    pub(in crate::services::discord) wake_outcomes: dashmap::DashMap<
+        u64,
+        Option<crate::services::discord::recovery_paths::shared::RecoveryRelayOutcome>,
+    >,
     /// Global shutdown flag — when set, watchers exit quietly via cancel path
     pub(in crate::services) shutting_down: Arc<std::sync::atomic::AtomicBool>,
     /// Provider-local intake tick activity; the deferred-restart poller uses

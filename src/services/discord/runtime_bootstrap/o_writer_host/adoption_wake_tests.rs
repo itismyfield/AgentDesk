@@ -290,3 +290,50 @@ async fn a_transient_recovery_failure_is_judged_again_and_settles_the_kept_row_p
     })
     .await;
 }
+
+/// Recovery sends that keep failing are judged once and again after 1, 2 and 3 s; then the wake
+/// ends with the row and its restart budget as they were, and kicks nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn a_wake_whose_sends_keep_failing_ends_after_three_retries_and_keeps_the_row_pg() {
+    with_isolated_runtime_root(|| async move {
+        let channel = 9_765_141;
+        let first = o_cut_recorder::FirstPost::failing_always();
+        let rig = Rig::new(channel, Arc::clone(&first)).await;
+        let (tx, mut judged) = tokio::sync::mpsc::unbounded_channel();
+        JUDGED.with(|slot| *slot.borrow_mut() = Some(tx));
+        let http = Arc::clone(&rig.recorder.http);
+        let times = async {
+            let mut at = Vec::new();
+            while at.len() < 4 && judged.recv().await.is_some() {
+                at.push(std::time::Instant::now());
+            }
+            at
+        };
+        let woke = wake(&http, &rig.shared, &ProviderKind::Claude, channel);
+        let ((), at) = tokio::join!(await_within(woke, WAIT_CAP), await_within(times, WAIT_CAP));
+        assert_eq!(at.len(), 4, "the first judgement and three retries");
+        for (gap, pair) in at.windows(2).enumerate() {
+            let backoff = BACKOFF * (gap as u32 + 1);
+            assert!(
+                pair[1] - pair[0] >= backoff,
+                "retry {gap} waited {backoff:?}"
+            );
+        }
+        assert_eq!(first.posts(), 4, "{:?}", rig.recorder.contents());
+        let row = inflight::load_inflight_state(&ProviderKind::Claude, channel);
+        let kept = row.expect("the exhausted wake keeps the row");
+        assert_eq!(
+            kept.recovery_relay_attempts, 0,
+            "and spends no restart budget"
+        );
+        let contents = rig.recorder.contents();
+        assert!(
+            !contents.iter().any(|text| text.contains(BODY)),
+            "{contents:?}"
+        );
+        assert_eq!(KICKS.with(std::cell::Cell::get), 0, "no claim, no kick");
+        JUDGED.with(|slot| *slot.borrow_mut() = None);
+        rig.drop_db().await;
+    })
+    .await;
+}

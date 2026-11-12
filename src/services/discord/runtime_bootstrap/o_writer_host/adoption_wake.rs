@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::services::discord::inflight::{self, InflightTurnState};
+use crate::services::discord::recovery_paths::shared::RecoveryRelayOutcome;
 use std::sync::atomic::Ordering;
 
 /// Judgements after the first, when a claim held the row or its send failed transiently.
@@ -64,13 +65,29 @@ async fn wake(
             Err(Held::Watched) => return,
         };
         let Some(row) = row else { break };
+        // A wake's failed send spends no restart budget: the row goes in uncounted, the recovery's
+        // own outcome decides a retry, and a count it persisted for this run is put back.
+        let mut uncounted = row.clone();
+        uncounted.recovery_relay_attempts = 0;
+        shared.restart.wake_outcomes.insert(channel, None);
         let restore = crate::services::discord::recovery_engine::restore_serially;
-        restore(http, shared, provider, vec![row.clone()]).await;
-        let after = inflight::load_inflight_state(provider, channel);
-        let transient = after.is_some_and(|now| {
-            Identity::from_state(&now) == Identity::from_state(&row)
-                && now.recovery_relay_attempts > row.recovery_relay_attempts
-        });
+        restore(http, shared, provider, vec![uncounted]).await;
+        let outcome = shared
+            .restart
+            .wake_outcomes
+            .remove(&channel)
+            .and_then(|(_, o)| o);
+        let transient = outcome == Some(RecoveryRelayOutcome::TransientFailure);
+        let same =
+            |now: &InflightTurnState| Identity::from_state(now) == Identity::from_state(&row);
+        let Some(mut now) = inflight::load_inflight_state(provider, channel).filter(same) else {
+            break;
+        };
+        if now.recovery_relay_attempts != row.recovery_relay_attempts {
+            now.recovery_relay_attempts = row.recovery_relay_attempts;
+            let reason = "o_adoption_wake_uncounted";
+            let _ = inflight::save_inflight_state_if_identity_unchanged(&mut now, reason);
+        }
         if !transient {
             break;
         }
