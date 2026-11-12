@@ -345,6 +345,8 @@ Herdr는 본문 paste+Enter를 이미 지원하며 owner용 busy leaf도 이미 
 
 B1 공개 seam의 조사 좌표는 `readiness/mod.rs:61` Proof, `:66` observe, `:225` reserve, `:257` current, `:270` not_sent다. reserve가 pending/revision을 바꾸므로 판독만 하다가 reservation을 남기면 기존 Idle driver의 새 reserve를 막는다. 같은 proof의 현재성을 검사하고 pre-key 분류 token을 돌려준 뒤, driver가 자기 증거를 다시 얻는 경계다. 실제 함수·파일좌표는 구현 레인의 최종 source에서 재확인한다.
 
+Proof observation에는 공개 runtime binding의 실제 입력 `output_path`를 명시하고 reservation 뒤 같은 runtime kind/path인지 재검증한다. 별도 relay path가 Idle이더라도 Busy 입력 path의 위임 근거로 빌리지 않는다. 기존 Idle driver가 사용하는 path와 일치시키며 private Source는 다루지 않는다.
+
 B안(등록 전 hook과 이후 Stat의 durable 관계를 producer에 새로 보존해 후속 hook 없이 pin 발행)은 보류한다. nonce/UUID/path/dev/ino/first-record, NotDurable, rotation/cursor 계약과 B1/2b 변경 승인이 별도로 필요하기 때문이다. A안은 Busy producer 의미를 수정하지 않는다.
 
 A안 크기 승인은 ownS2+675 + S1+162에 +40~70을 더한 +877~907 예상이다(`CAP_MARGIN i8114 907/850`). +935(기존+850의10%)를 넘으면 PLAN_READY에서 멈춘다. 최종 실제 cap·Rust RED/GREEN·뮤턴트·static gate는 구현 레인의 별도 보고서가 맡는다.

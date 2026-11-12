@@ -316,7 +316,6 @@ fn an_idle_relay_does_not_delegate_a_busy_input_source() {
     let source = live_source(&fx);
     let rig = HerdrRig::start();
     let registry = rig.registry_on_this_thread();
-    pane(&rig);
     let context: tui_prompt_dedupe::binding_context::BindingContext =
         serde_json::from_value(json!({
             "schema":1,"provider":"claude","created_at":chrono::Utc::now(),
@@ -326,7 +325,17 @@ fn an_idle_relay_does_not_delegate_a_busy_input_source() {
             "provider_root":fx.root.path()
         }))
         .unwrap();
-    tui_prompt_dedupe::binding_context::PreparedIncarnation::create(context).unwrap();
+    let prepared =
+        tui_prompt_dedupe::binding_context::PreparedIncarnation::create(context).unwrap();
+    rig.run_provider(&prepared.path, false);
+    let marker = crate::services::tmux_common::session_temp_path(LOGICAL, "host_kind");
+    std::fs::write(marker, "herdr").unwrap();
+    rig.answer(
+        "pane.read",
+        json!({"type":"pane_read","read":{
+        "pane_id":PANE,"source":"recent_unwrapped","format":"text",
+        "text":"Working\n❯ \n","revision":1,"truncated":false}}),
+    );
     let relay = fx.root.path().join("idle-relay.jsonl");
     std::fs::File::create(&relay).unwrap();
     let mut projection = tui_prompt_dedupe::runtime_binding_for_tmux_session(LOGICAL).unwrap();

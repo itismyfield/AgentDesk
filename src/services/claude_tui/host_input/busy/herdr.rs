@@ -294,13 +294,28 @@ impl Context {
         if !current() {
             return false;
         }
-        let Some(proof) = readiness::observe(&self.logical, None) else {
+        let Some(binding) = tui_prompt_dedupe::runtime_binding_for_tmux_session(&self.logical)
+            .filter(|binding| binding.runtime_kind == RuntimeHandoffKind::ClaudeTui)
+        else {
+            return false;
+        };
+        let Some(proof) = readiness::observe(
+            &self.logical,
+            Some(std::path::Path::new(&binding.output_path)),
+        ) else {
             return false;
         };
         let Some(reservation) = readiness::reserve(proof) else {
             return false;
         };
-        let valid = reservation.current() && current();
+        let valid = reservation.current()
+            && current()
+            && tui_prompt_dedupe::runtime_binding_for_tmux_session(&self.logical).is_some_and(
+                |present| {
+                    present.runtime_kind == binding.runtime_kind
+                        && present.output_path == binding.output_path
+                },
+            );
         reservation.not_sent();
         valid
     }
