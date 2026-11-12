@@ -406,3 +406,12 @@ input-single-path/InputPathReadyCompactNoCompletion.cfg	InputPath	ReadySelfCompa
 session-lifecycle/HerdrHintARetryFixed.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHintARetryNoController.cfg	HerdrSession	-	AProgress
 session-lifecycle/HerdrHintARetryNoBudget.cfg	HerdrSession	-	AProgress
+outbox-transaction/OutboxTransactionCurrent.cfg	OutboxTransaction	-	-
+outbox-transaction/OutboxTransactionService.cfg	OutboxTransaction	-	-
+outbox-transaction/OutboxTransactionPreobserve.cfg	OutboxTransaction	ProviderObservationPointPreserved,InsertUsesObservedDesignation	-
+outbox-transaction/OutboxTransactionSplitInsert.cfg	OutboxTransaction	AtomicCompletion,CommittedNoticeExactlyOnce,RollbackHasNoNewNotice,SameTransaction	-
+outbox-transaction/OutboxTransactionEarlyCensus.cfg	OutboxTransaction	CensusObservationPointPreserved	-
+outbox-transaction/OutboxTransactionFreshTask.cfg	OutboxTransaction	CensusObservationPointPreserved	-
+outbox-transaction/OutboxTransactionPreSource.cfg	OutboxTransaction	SourceDecisionUsesObservation	-
+outbox-transaction/OutboxTransactionForeignTx.cfg	OutboxTransaction	SameTransaction	-
+outbox-transaction/OutboxTransactionForeignProviderConnection.cfg	OutboxTransaction	SameProviderConnection	-
