@@ -19,13 +19,15 @@ Keys(seq) == {seq[i] : i \in 1..Len(seq)}
 
 VARIABLE s
 vars == <<s>>
-Init == s = [threshold |-> N, cursor |-> 1, count |-> 0, firstFailed |-> 0,
+Init == s = [threshold |-> N, allowedBot |-> AllowedBot, cursor |-> 1, count |-> 0, firstFailed |-> 0,
              requests |-> <<>>, requestCounts |-> <<>>, notices |-> 0,
              lastNotice |-> 0, noticeInjected |-> FALSE, badNoticeTurn |-> FALSE,
-             duplicateAdded |-> FALSE, worker |-> 1, phase |-> "idle",
+             duplicateAdded |-> FALSE, relogged |-> FALSE, worker |-> 1, phase |-> "idle",
              row |-> "none", outcome |-> "none", messages |-> 0,
              postAttempts |-> 0, maxMessages |-> 0, blindRepost |-> FALSE,
              intakeAccepted |-> FALSE, nativeKeys |-> <<>>, outcomes |-> <<>>]
+
+UnseenIncident(first) == Policy = "drop_event_key" \/ first \notin Keys(s.requests)
 
 RecordRun ==
     /\ s.cursor <= Len(Program)
@@ -36,14 +38,22 @@ RecordRun ==
            count == IF failed THEN Min(s.count+1, N+2) ELSE IF reset THEN 0 ELSE s.count
            first == IF failed /\ s.count = 0 THEN s.cursor ELSE IF reset THEN 0 ELSE s.firstFailed
            boundary == IF Policy = "off_by_one" THEN N ELSE N+1
-           trigger == failed /\ count = boundary /\ first \notin Keys(s.requests)
+           trigger == failed /\ count = boundary /\ UnseenIncident(first)
            notice == failed /\ ~trigger
        IN s' = [s EXCEPT !.cursor = @ + 1, !.count = count, !.firstFailed = first,
                          !.requests = IF trigger THEN Append(@, first) ELSE @,
                          !.requestCounts = IF trigger THEN Append(@, count) ELSE @,
                          !.notices = @ + IF notice THEN 1 ELSE 0,
                          !.lastNotice = IF notice THEN s.cursor ELSE 0,
-                         !.noticeInjected = FALSE]
+                         !.noticeInjected = FALSE, !.relogged = FALSE]
+
+RelogRun ==
+    /\ s.cursor > 1 /\ Program[s.cursor-1] = "failed" /\ ~s.relogged
+    /\ LET boundary == IF Policy = "off_by_one" THEN N ELSE N+1
+           trigger == s.count = boundary /\ UnseenIncident(s.firstFailed)
+       IN s' = [s EXCEPT !.relogged = TRUE,
+                         !.requests = IF trigger THEN Append(@, s.firstFailed) ELSE @,
+                         !.requestCounts = IF trigger THEN Append(@, s.count) ELSE @]
 
 NotifyIntakeStarts ==
     /\ Policy = "ordinary_notify_triggers" /\ s.lastNotice > 0 /\ ~s.noticeInjected
@@ -76,7 +86,7 @@ BlindUnknownRepost ==
     /\ s' = [s EXCEPT !.phase = "pending", !.row = "pending", !.blindRepost = TRUE]
 
 ExistingBotIntake ==
-    /\ s.phase = "posted" /\ s.messages > 0 /\ AllowedBot
+    /\ s.phase = "posted" /\ s.messages > 0 /\ (AllowedBot \/ Policy = "bypass_intake_gate")
     /\ s' = [s EXCEPT !.phase = "accepted", !.intakeAccepted = TRUE]
 
 NoAcceptedBotInput ==
@@ -95,7 +105,7 @@ Finished == s.cursor > Len(Program) /\ s.worker > Len(s.requests) /\ s.phase = "
 Done == Finished /\ UNCHANGED s
 Delivery == LoadOutbox \/ PostOutbox \/ ExistingBotIntake \/ NoAcceptedBotInput
             \/ ExistingOwnerStarts \/ RecordAttemptOutcome
-Next == RecordRun \/ NotifyIntakeStarts \/ DuplicateTrigger \/ Delivery \/ BlindUnknownRepost \/ Done
+Next == RecordRun \/ RelogRun \/ NotifyIntakeStarts \/ DuplicateTrigger \/ Delivery \/ BlindUnknownRepost \/ Done
 Spec == Init /\ [][Next]_vars /\ WF_vars(RecordRun) /\ WF_vars(Delivery)
 
 CounterMatchesHistory == s.count = FailedBefore(s.cursor-1)

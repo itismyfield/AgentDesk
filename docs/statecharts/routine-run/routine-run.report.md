@@ -39,7 +39,7 @@ JS complete/skip/pause, command 소비, 제출 전 실패, 사전 판정 no-work
 
 기본 `PrejudgeEnabled=FALSE`는 r1 실행을 보존한다. headless/thread/channel에서만 optional TRUE를 적용한다. script가 자료를 모으고 agent action을 요청한 뒤, **agent admission 전에 Prejudge가 한 번** 질문한다. `Admit`·`ConsumeCommand`는 판정이 꺼져 있거나 완료되어야 진행한다.
 
-Prejudge 결과는 스킬 스크립트의 종료 코드와 답을 추상화했다. `rc0_no`는 정상 응답+설정 confidence threshold 충족+답=false인 경우만 뜻한다. 이때 기존 skip 종결을 사용하여 reason=prejudge_no_work, agent0, queue0을 기록한다. `rc0_yes`는 진행, rc2(키/네트워크/API/차단/답 없음)와 rc3(신뢰도 미달)는 답을 사용하지 않고 원래 agent 흐름으로 돌아간다. 실패가 skip을 만들거나 이 호출 때문에 run을 보류하지 않는다. 실제 API 호출·비밀값 접근은 하지 않았다.
+Prejudge 결과는 스킬 스크립트의 종료 코드와 답을 추상화했다. `rc0_no`는 정상 응답+설정 confidence threshold 충족+답=false인 경우만 뜻한다. 이때 기존 skip 종결을 사용하여 reason=prejudge_no_work, agent0, queue0을 기록한다. `rc0_yes`는 진행, 키가 있는 enabled 상태의 rc2(네트워크/API/차단/답 없음)와 rc3(신뢰도 미달)는 답을 사용하지 않고 원래 agent 흐름으로 돌아간다. 실패가 skip을 만들거나 이 호출 때문에 run을 보류하지 않는다. 실제 API 호출·비밀값 접근은 하지 않았다.
 
 정본 스킬 `/Users/itismyfield/ObsidianVault/RemoteVault/99_Skills/gemini-decision/SKILL.md`와 `~/ObsidianVault/RemoteVault/99_Skills/gemini-decision/scripts/decide.py:4-5,106-120,122-136`의 계약을 따랐다. 세 enabled cfg에서 no/yes/rc2/rc3를 모두 탐색했고, script enabled cfg는 호출0을 확인했다. 입력 원문·질문·신뢰도·비용 측정값은 모델 밖이며 설계의 run 이력 계약이 보관한다.
 
@@ -157,3 +157,5 @@ export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew
 ## r2b 사용자 결정: 여러 run 사이의 실패 에스컬레이션
 
 per-run exact1 모델의 소스와18cfg는 변경하지 않았다. 연속 실패 N/N+1과 별도 Announce 사고 대응 original은 [별도 모델 보고서](routine-failure-escalation.report.md)에서 검사한다. 원 routine 재실행·두 번째 routine 턴으로 합치지 않으며 Unknown의 eventual remediation 효과를 보장하지 않는다.
+
+후속 PJ는 #8127 공통 gate를 pin하며, **키 없음 ≡ PrejudgeEnabled=FALSE**다. Off(no_key)는 판정 CLI·네트워크 호출0이며 NoAnswer와 구별한다. 기존 per-run 모델 소스/cfg는 변경하지 않는다.
