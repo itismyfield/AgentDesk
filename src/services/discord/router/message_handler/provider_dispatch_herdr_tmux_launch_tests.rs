@@ -16,7 +16,7 @@ fn eventually(what: &str, ready: impl Fn() -> bool) {
 }
 
 /// O's cursor over all of `path`, with the prefix hash its writer keeps.
-fn read_through(path: &Path, session: &str) {
+pub(super) fn read_through(path: &Path, session: &str) {
     use crate::services::tui_o::store::spool::{Cursor, source_key};
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::MetadataExt;
@@ -131,7 +131,8 @@ fn moves_to_herdr_resuming(fx: &Fixture, session: &str, path: &Path) {
     let answered = json!({"type": "assistant", "sessionId": session,
         "timestamp": "2026-10-01T00:00:01Z", "message": {"role": "assistant",
         "stop_reason": "end_turn", "content": [{"type": "text", "text": "beta"}]}});
-    append(path, &[said, answered]);
+    let done = json!({"type":"system", "subtype":"turn_duration", "sessionId":session});
+    append(path, &[said, answered, done]);
     read_through(path, session);
     *fx.session.lock().unwrap() = Some(session.to_owned());
     let launcher = Arc::new(Launcher::default());

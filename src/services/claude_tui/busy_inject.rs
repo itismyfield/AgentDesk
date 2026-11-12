@@ -409,16 +409,6 @@ pub(crate) fn modal(capture: &str) -> bool {
     screen::modal(capture)
 }
 
-/// Read once before any key: whether a visible draft is parked with C-s. An unread composer
-/// deliberately proceeds without C-s.
-#[cfg(unix)]
-pub(in crate::services::claude_tui) fn before_paste(
-    pane: &Pane,
-    stash_allowed: bool,
-) -> Result<bool, Veto> {
-    before_paste_by(pane, listed(stash_allowed), false).map(|seen| seen.park)
-}
-
 /// One read of a held pane by the owned entry's own screen check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Screen {

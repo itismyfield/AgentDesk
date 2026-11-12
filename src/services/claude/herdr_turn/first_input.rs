@@ -96,7 +96,30 @@ fn write(
     };
     let HerdrInputRun::Ran(run) = observed_input(cancel, start, || {
         crate::services::claude_tui::composer_lock::with_composer_mutation_lock(logical, || {
-            composer::run(&attached.target, &plan, cancel)
+            if attached.awaiting_clear {
+                match composer::wait_for(cancel, Duration::from_secs(10), || {
+                    if crate::services::claude_tui::readiness::adopt_awaiting_clear(
+                        logical,
+                        &attached.nonce,
+                        path,
+                    ) {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    }
+                }) {
+                    Ok(()) => (),
+                    Err(composer::WaitStop::Cancelled) => {
+                        return InputRun::Cancelled { confirmed: 0 };
+                    }
+                    Err(composer::WaitStop::TimedOut) => {
+                        return InputRun::Refused(
+                            crate::services::claude_tui::host_input::InputRefusal::Unknown,
+                        );
+                    }
+                }
+            }
+            composer::run_ready(logical, path, &attached.target, &plan, cancel)
         })
     })?
     else {
@@ -116,17 +139,29 @@ fn write(
         InputRun::Applied => (),
         stopped @ (InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }) => {
             let pane = attached.target.clone();
+            let watched_session = logical.to_owned();
+            let clearing = attached.awaiting_clear;
+            let epoch = attached.nonce.clone();
+            let clear_path = path.to_path_buf();
             crate::services::claude_tui::owner_input::record_preparation_watch(Box::new(
                 move || {
                     use crate::services::claude_tui::busy_inject::Screen;
-                    match composer::when_ready(
-                        || pane.capture_ansi(-80),
-                        None,
-                        || InputRun::Applied,
-                    ) {
-                        InputRun::Applied => Screen::Ready,
-                        _ => Screen::Unknown,
-                    }
+                    let ready = if clearing {
+                        crate::services::claude_tui::readiness::clear_wakeable(
+                            &watched_session,
+                            &epoch,
+                            &clear_path,
+                        )
+                    } else {
+                        crate::services::claude_tui::readiness::observe(&watched_session, None)
+                            .is_some()
+                    };
+                    if ready
+                        && pane.capture_ansi(-80).as_deref().is_some_and(|capture|
+                            crate::services::claude_tui::readiness::empty_draft(capture)
+                            && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture)) {
+                        Screen::Ready
+                    } else { Screen::Unknown }
                 },
             ));
             return Err(before_payload(
@@ -388,6 +423,7 @@ mod regression_tests {
                 baseline_event_seq: None,
             },
         };
+        crate::services::claude_tui::readiness::tests::pre_source(logical, transcript);
         (
             owner,
             Attached {
@@ -396,6 +432,7 @@ mod regression_tests {
                 transcript: transcript.to_path_buf(),
                 target: herdr_endpoints().target(&record).unwrap(),
                 bound: true,
+                awaiting_clear: false,
                 physical: None,
             },
         )

@@ -340,6 +340,7 @@ fn owned_herdr_claude_launch_reserves_the_observed_execution_and_its_pane() {
     let turn = owner.claude_turn(&pool);
     let record = owner.record("claude", HostedState::Bound);
     let transcript = owner._dir.path().join("launched.jsonl");
+    crate::services::claude_tui::readiness::tests::pre_source(&owner.logical, &transcript);
     let _entered = owner.runtime.enter();
     let result = crate::services::claude::herdr_turn::owned_prompt_for_tests(
         &turn,
@@ -436,6 +437,7 @@ fn owned_herdr_claude_idle_writes_the_bound_source_once() {
         "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
     )
     .unwrap();
+    crate::services::claude_tui::readiness::tests::pre_source(&owner.logical, &transcript);
     let _entered = owner.runtime.enter();
     let result = crate::services::claude::herdr_turn::owned_prompt_for_tests(
         &turn,

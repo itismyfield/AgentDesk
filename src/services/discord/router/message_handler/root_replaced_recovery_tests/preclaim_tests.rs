@@ -174,10 +174,20 @@ fn claimed_turn(
             .unwrap();
             let payload = json!({"session_id":session,"source":"startup",
                 "transcript_path":transcript});
+            use crate::services::claude_tui::hook_server::relay_receipts::{
+                RELAY_DEADLINE_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_REQUEST_ID_HEADER,
+            };
+            let published = chrono::Utc::now();
             let request = axum::http::Request::post(format!(
                 "/hooks/claude/SessionStart?session_id={session}"
             ))
             .header("content-type", "application/json")
+            .header(RELAY_REQUEST_ID_HEADER, uuid())
+            .header(RELAY_PUBLISHED_AT_HEADER, published.to_rfc3339())
+            .header(
+                RELAY_DEADLINE_HEADER,
+                (published + chrono::Duration::minutes(5)).to_rfc3339(),
+            )
             .header(
                 crate::services::tui_prompt_dedupe::binding_context::BINDING_HEADER,
                 envelope,

@@ -15,6 +15,7 @@ use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding};
 use crate::services::tui_o::writer::adoption::{Hold, logged};
 use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents, ChannelBindingLog};
 use crate::services::tui_o::writer::input_facts::{InputFacts, Resume, TurnState};
+mod claude_activity;
 
 pub(in crate::services::discord) mod notice_identity;
 use notice_identity::{NoticeObservation, progress};
@@ -23,7 +24,7 @@ use notice_identity::{NoticeObservation, progress};
 const CHUNK_BUDGET: u64 = 4 * 1024 * 1024;
 /// Cold sources above this boundary use bounded observation when enabled.
 const MAX_TRANSCRIPT_BYTES: u64 = 256 * 1024 * 1024;
-/// An open turn whose transcript has not grown for this long needs the pane to read busy.
+/// An open turn quiet this long needs current provider activity to supplement its transcript.
 const STALE_OPEN_AFTER: Duration = Duration::from_secs(600);
 const UNREADABLE_RETRY_AFTER: Duration = Duration::from_secs(30);
 /// A worker poll this large either completes a record or stops at a trailing partial line.
@@ -118,7 +119,7 @@ trait Ports: Send + Sync + 'static {
     #[cfg(all(test, unix))]
     fn session_present(&self, session: &str) -> bool;
     fn final_ready(&self, session: &str) -> bool;
-    fn pane_busy(&self, session: &str) -> bool;
+    fn claude_busy(&self, session: &str) -> claude_activity::Busy;
     fn liveness(&self, provider: ShadowProvider, channel: u64, session: &str) -> SessionLiveness;
     /// False when the worker could not start.
     fn spawn(&self, job: Job) -> bool;
@@ -151,6 +152,7 @@ struct Stamp {
     key: Key,
     generation: u64,
     revision: u64,
+    activity: Option<crate::services::claude_tui::activity::Snapshot>,
     source: Option<String>,
     notice: NoticeObservation,
     closed: Result<ClosedBoundary, NoBoundary>,
@@ -254,7 +256,8 @@ impl Reading {
         }
         let guard = lock(watch);
         let current = guard.key.as_ref() == Some(&stamp.key)
-            && (guard.generation, guard.revision) == (stamp.generation, stamp.revision);
+            && (guard.generation, guard.revision) == (stamp.generation, stamp.revision)
+            && claude_activity::publication_current(&stamp.activity);
         if !current {
             #[cfg(unix)]
             if let Some(admission) = &self.admission {
@@ -294,6 +297,7 @@ impl Reading {
             },
             generation: 0,
             revision: 0,
+            activity: None,
             source: source.map(str::to_string),
             notice: NoticeObservation::legacy(observed.reason, session),
             closed: Err(NoBoundary::because("unread")),
@@ -321,6 +325,7 @@ impl Reading {
             key,
             generation: 1,
             revision: 0,
+            activity: None,
             source: None,
             notice: NoticeObservation::legacy(observed.reason, "overtaken"),
             closed: Err(NoBoundary::because("unread")),
@@ -347,6 +352,7 @@ fn at(guard: &Watch, answer: Observed) -> Answer {
         key,
         generation: guard.generation,
         revision: guard.revision,
+        activity: None,
         source,
         notice: guard.notice.clone().observed(answer),
         closed: closed_boundary::closed_boundary(guard, answer),
@@ -393,6 +399,10 @@ pub(super) fn with_busy_source(
         };
         let seq = ports.binding_seq(channel).ok()?;
         let watch = lock(&WATCHES).get(&channel)?.clone();
+        #[cfg(test)]
+        if !claude_activity::busy_source_permitted() {
+            return None;
+        }
         let mut guard = lock(&watch);
         let key = guard.key.as_ref()?;
         if key.channel != channel
@@ -690,11 +700,8 @@ fn judge_with_policy(
             at(&guard, observed(Activity::Busy, "open"))
         }
         TurnState::Open { .. } if provider == ShadowProvider::Claude => {
-            ask_pane(watch, guard, &key, strict, || {
-                match ports.pane_busy(&key.session) {
-                    true => observed(Activity::Busy, "open_pane_busy"),
-                    false => observed(Activity::Unknown, "open_without_progress"),
-                }
+            claude_activity::supplement(watch, guard, &key, strict, || {
+                ports.claude_busy(&key.session)
             })
         }
         TurnState::Open { .. } => at(&guard, observed(Activity::Unknown, "open_without_progress")),
@@ -1036,14 +1043,11 @@ impl Ports for LivePorts {
         if tests::pane_ready_for_tests(session) {
             return true;
         }
-        use crate::services::claude_tui::input::{final_prompt_ready, prompt_readiness_snapshot};
-        final_prompt_ready(&prompt_readiness_snapshot(session))
+        self.scoped(|| claude_activity::ready(session))
     }
 
-    fn pane_busy(&self, session: &str) -> bool {
-        crate::services::platform::tmux::capture_pane(session, -40).is_some_and(|pane| {
-            crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&pane)
-        })
+    fn claude_busy(&self, session: &str) -> claude_activity::Busy {
+        self.scoped(|| claude_activity::busy(session))
     }
 
     fn spawn(&self, job: Job) -> bool {
@@ -1076,3 +1080,6 @@ pub(in crate::services::discord) mod effect_reads;
 mod tail;
 #[cfg(unix)]
 mod unbound;
+
+#[cfg(all(test, unix))]
+mod claude_activity_tests;

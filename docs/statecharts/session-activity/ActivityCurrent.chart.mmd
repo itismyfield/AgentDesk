@@ -1,0 +1,23 @@
+---
+title: "Claude activity: source evidence, recovery and stop boundary"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the EventuallyConverges or EventuallyReacquires bug
+    lg1: Repeats forever, so EventuallyConverges or EventuallyReacquires breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: Provider busy: unknown, watcher absent
+  s1: Provider busy: unknown after lease expiry, watcher absent
+  s2: Provider busy: unknown after one recovery cycle, watcher absent
+  [*] --> s0
+  s0 --> s0: ignore old incarnation hook or check stop authority or submission hook arrives
+  s0 --> s1: expire hints and recheck
+  s1 --> s2: new source progress renews lease
+  s1 --> s1: send stop if authorized
+  s2 --> s2: pane busy signal unavailable
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s2 repeats

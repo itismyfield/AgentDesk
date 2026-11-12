@@ -4,6 +4,7 @@
 pub(crate) mod ids;
 pub(crate) mod intent;
 pub(crate) mod key;
+pub(crate) mod outbox;
 pub(crate) mod policy;
 pub(crate) mod port;
 pub(crate) mod result;

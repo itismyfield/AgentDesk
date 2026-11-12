@@ -85,6 +85,7 @@ fn run_case(refuse_commit: bool) {
         .connect_lazy("postgres://localhost/unused_cold_submit_test")
         .unwrap();
     let transcript = root.path().join("not-created.jsonl");
+    crate::services::claude_tui::readiness::tests::pre_source(logical, &transcript);
     let prompt = "reply _ literal\nattachment + voice";
     let attached = Attached {
         nonce: NONCE.into(),
@@ -92,6 +93,7 @@ fn run_case(refuse_commit: bool) {
         transcript: transcript.clone(),
         target,
         bound: true,
+        awaiting_clear: false,
         physical: None,
     };
     let (tx, rx) = std::sync::mpsc::channel();

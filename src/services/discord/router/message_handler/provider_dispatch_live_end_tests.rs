@@ -366,10 +366,6 @@ fn claude_live_turn<R>(
         binding.session_id.unwrap(),
         PathBuf::from(binding.output_path),
     );
-    super::append(
-        &path,
-        &[json!({"type": "system", "subtype": "init", "sessionId": session})],
-    );
     let url = fx.db.as_ref().unwrap().database_url.clone();
     let mut seen = None;
     let (result, messages) = fx.turn(&record, &fx.ports(&launcher), || {

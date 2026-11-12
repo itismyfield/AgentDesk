@@ -279,7 +279,9 @@ fn owner_refusal_before_any_key_is_a_typed_not_sent() {
     let rig = Rig::new("a4-swap-ready");
     let swap = rig.swap();
     let before = move |rig: &Rig| {
-        assert!(super::super::before_paste(&rig.pane, true).is_ok());
+        assert!(
+            crate::services::claude_tui::readiness::idle::before_paste(&rig.pane, true).is_ok()
+        );
         swap.replace();
     };
     let (outcome, proof, starts) = rig.run(&FAST, true, usize::MAX, false, before, || {});

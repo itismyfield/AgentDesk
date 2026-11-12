@@ -398,9 +398,13 @@ src/
 │   ├── message_split/
 │   │   └── semantic_boundaries.rs
 │   ├── outbound/
+│   │   ├── outbox/
+│   │   │   ├── identity.rs
+│   │   │   └── source.rs
 │   │   ├── ids.rs
 │   │   ├── intent.rs
 │   │   ├── key.rs
+│   │   ├── outbox.rs
 │   │   ├── policy.rs
 │   │   ├── port.rs
 │   │   └── result.rs
@@ -975,6 +979,19 @@ src/
 │   │   ├── tui_session_launch.rs
 │   │   └── tui_session_launch_geometry_tests.rs
 │   ├── claude_tui/
+│   │   ├── activity/
+│   │   │   ├── background/
+│   │   │   │   └── child.rs
+│   │   │   ├── background.rs
+│   │   │   ├── events.rs
+│   │   │   ├── hooks.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── poll.rs
+│   │   │   ├── processes.rs
+│   │   │   ├── source.rs
+│   │   │   ├── tools.rs
+│   │   │   ├── transcript.rs
+│   │   │   └── transcript_tests.rs
 │   │   ├── busy_inject/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
@@ -1037,8 +1054,6 @@ src/
 │   │   │   ├── warm_followup.rs
 │   │   │   └── warm_followup_owner_tests.rs
 │   │   ├── input/
-│   │   │   ├── tests/
-│   │   │   │   └── prompt_ready_setup_tests.rs
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
@@ -1050,6 +1065,20 @@ src/
 │   │   │   ├── submission_tests.rs
 │   │   │   ├── timeout_draft_tests.rs
 │   │   │   └── user_receipt.rs
+│   │   ├── readiness/
+│   │   │   ├── compact/
+│   │   │   │   └── completion.rs
+│   │   │   ├── source/
+│   │   │   │   └── clear.rs
+│   │   │   ├── compact.rs
+│   │   │   ├── compact_tests.rs
+│   │   │   ├── dialog.rs
+│   │   │   ├── evidence.rs
+│   │   │   ├── idle.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── readiness_tests.rs
+│   │   │   ├── source.rs
+│   │   │   └── wait.rs
 │   │   ├── session/
 │   │   │   ├── auto_compact_launch_tests.rs
 │   │   │   └── fast_launch_tests.rs
@@ -2250,6 +2279,7 @@ src/
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_busy_gate_tests.rs
+│   │   │   │   │   ├── owner_input_busy_race_tests.rs
 │   │   │   │   │   ├── owner_input_carried_restart_tests.rs
 │   │   │   │   │   ├── owner_input_codex_native_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs
@@ -3157,6 +3187,11 @@ src/
 │   │   │   │   │   ├── superseded_measurement_tests.rs
 │   │   │   │   │   ├── unit_tests.rs
 │   │   │   │   │   └── watcher_runtime_tests.rs
+│   │   │   │   ├── claude_activity.rs
+│   │   │   │   ├── claude_activity_b1_tests.rs
+│   │   │   │   ├── claude_activity_leaf_tests.rs
+│   │   │   │   ├── claude_activity_p2_tests.rs
+│   │   │   │   ├── claude_activity_tests.rs
 │   │   │   │   ├── closed_boundary.rs
 │   │   │   │   ├── effect_reads.rs
 │   │   │   │   ├── effect_reads_tests.rs
@@ -3897,6 +3932,7 @@ src/
 │   │   ├── runtime_hint_fence.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
+│   │   ├── claude_idle.rs
 │   │   ├── cleanup_host.rs
 │   │   └── tests_pg.rs
 │   ├── tui_input/

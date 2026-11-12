@@ -2482,7 +2482,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/campaign_execution/verification_run.rs`
 - `src/services/claude.rs`
 - `src/services/claude_tui/hook_relay/ordered_queue.rs`
-- `src/services/claude_tui/input.rs`
 - `src/services/codex.rs`
 - `src/services/codex_tmux_wrapper.rs`
 - `src/services/codex_tui/input.rs`

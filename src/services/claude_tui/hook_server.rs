@@ -222,6 +222,7 @@ pub fn hook_receiver_router() -> Router {
 }
 
 pub(crate) fn hook_receiver_router_with_state(state: HookServerState) -> Router {
+    super::readiness::initialize();
     Router::new()
         .route("/hooks/{provider}/{event}", post(receive_hook))
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
@@ -317,6 +318,11 @@ async fn receive_hook(
             "binding_observation": format!("{ingress:?}") });
         return finish_hook_receipt(&state, receipt_ticket, StatusCode::ACCEPTED, body, true);
     }
+    let activity_accepted = matches!(
+        ingress,
+        observation_ingress::IngressOutcome::Proceed(_)
+            | observation_ingress::IngressOutcome::Durable(_)
+    );
     // Keep the launch-time query UUID as the hook wait/routing identity while
     // it is registered; replacing it would strand callers already waiting on
     // that stable key. After restart or a partial artifact cutover, fall back
@@ -369,6 +375,26 @@ async fn receive_hook(
                         output_bytes = inspection.byte_len,
                         output_chars = inspection.char_len,
                         "blocked Claude completion containing harness control data"
+                    );
+                    super::readiness::note_hook(
+                        &provider,
+                        &HookEventKind::from_path(&event),
+                        &session_id,
+                        &payload,
+                        hook_event::original_context(&headers).as_ref(),
+                        headers
+                            .get(relay_receipts::RELAY_PUBLISHED_AT_HEADER)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse::<chrono::DateTime<chrono::Utc>>().ok()),
+                        true,
+                    );
+                    super::activity::note_hook(
+                        activity_accepted,
+                        &headers,
+                        &provider,
+                        &HookEventKind::from_path(&event),
+                        &payload,
+                        true,
                     );
                     return finish_hook_receipt(
                         &state,
@@ -462,6 +488,27 @@ async fn receive_hook(
             event.kind,
             HookEventKind::Stop | HookEventKind::SubagentStop
         );
+    super::readiness::note_hook(
+        &event.provider,
+        &event.kind,
+        &event.session_id,
+        &event.payload,
+        event.original_context.as_ref(),
+        headers
+            .get(relay_receipts::RELAY_PUBLISHED_AT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+            .map(|v| v.to_utc()),
+        stop_flush_injected,
+    );
+    super::activity::note_hook(
+        activity_accepted,
+        &headers,
+        &event.provider,
+        &event.kind,
+        &event.payload,
+        stop_flush_injected,
+    );
     if should_signal_prompt_ready(&event.provider, &event.kind) && !stop_flush_injected {
         // Wake any task currently awaiting prompt readiness. `notify_waiters`
         // is edge-triggered: signals fired with no current waiters are

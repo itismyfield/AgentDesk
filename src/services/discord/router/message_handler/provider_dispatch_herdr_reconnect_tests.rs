@@ -148,6 +148,24 @@ pub(super) fn clear_pending(fx: &Fixture, cleared: &str) -> std::path::PathBuf {
     crate::services::tmux_common::with_tmux_source_authority(fx.logical(), |_| {
         binding_events::record_pending(&proposal).unwrap();
     });
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        SpawnNonceMarker, observe_spawn_nonce_marker,
+    };
+    let SpawnNonceMarker::Known(nonce) = observe_spawn_nonce_marker(fx.logical()) else {
+        panic!("the launched execution has a nonce");
+    };
+    let envelope = HookBindingEnvelope::capture_from_env("claude", |name| {
+        (name == "AGENTDESK_BINDING_CONTEXT").then(|| context_of(&nonce).into_os_string())
+    })
+    .encode()
+    .unwrap();
+    let cleared_start = Started {
+        session: cleared.into(),
+        path: path.clone(),
+        envelope,
+    };
+    let _registry = fx.rig.registry_on_this_thread();
+    assert_eq!(cleared_start.hook(fx, "SessionStart", &payload), 202);
     path
 }
 
@@ -383,4 +401,245 @@ fn a_clear_pending_naming_another_transcript_takes_no_prompt_pg() {
     assert_eq!(sends, 2, "no prompt after the launch's: {result:?}");
     let error = result.unwrap_err();
     assert!(error.contains("names another transcript"), "{error}");
+}
+
+#[test]
+fn awaiting_clear_after_real_readiness_restart_sends_once_and_preserves_old_cursor_pg() {
+    let fx = Fixture::new("clear-proof-boot", None);
+    let launcher = Arc::new(Launcher::default());
+    let (_, started) = launch(&fx, &launcher);
+    super::tmux_launch_tests::read_through(&started.path, &started.session);
+    let cursor_dir = crate::config::runtime_root()
+        .unwrap()
+        .join("o_store")
+        .join(CHANNEL.to_string())
+        .join("cursor");
+    let cursor = std::fs::read_dir(cursor_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let old_cursor = std::fs::read(&cursor).unwrap();
+    let cleared = uuid();
+    let path = clear_pending(&fx, &cleared);
+    crate::services::claude_tui::readiness::tests::forget_session(fx.logical());
+    assert_eq!(restart_and_reconnect(&fx).published, 1);
+    assert_eq!(cleared_turn(&fx, &launcher, &cleared, &path), Ok(()));
+    assert_eq!(fx.rig.sends().len(), 4, "one paste and Enter after restart");
+    assert_eq!(
+        std::fs::read(&cursor).unwrap(),
+        old_cursor,
+        "old cursor is unchanged"
+    );
+}
+
+#[test]
+fn awaiting_clear_revalidates_nonce_pending_and_authenticated_proof_before_any_retirement_pg() {
+    use crate::services::claude_tui::readiness;
+    use crate::services::tui_prompt_dedupe::binding_context::observe_spawn_nonce_marker;
+    for invalid in [
+        "fake-proof",
+        "nonce",
+        "pending",
+        "missing-proof",
+        "consumed",
+        "newer-start",
+    ] {
+        let fx = Fixture::new(&format!("clear-refused-{invalid}"), None);
+        let launcher = Arc::new(Launcher::default());
+        let (nonce, _) = launch(&fx, &launcher);
+        let cleared = uuid();
+        let path = clear_pending(&fx, &cleared);
+        let previous =
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
+        let certified = PathBuf::from(crate::services::tmux_common::session_temp_path(
+            fx.logical(),
+            "claude_clear_ready",
+        ));
+        assert!(
+            certified.is_file(),
+            "actual hook persisted clear certification"
+        );
+        match invalid {
+            "nonce" => std::fs::write(
+                crate::services::tmux_common::session_temp_path(fx.logical(), "spawn_nonce"),
+                uuid::Uuid::new_v4().simple().to_string(),
+            )
+            .unwrap(),
+            "pending" => forge(0, |event| event["cause"] = json!("unknown")),
+            "missing-proof" => std::fs::remove_file(&certified).unwrap(),
+            "newer-start" => {
+                let proof: Value =
+                    serde_json::from_slice(&std::fs::read(&certified).unwrap()).unwrap();
+                let published: chrono::DateTime<chrono::Utc> =
+                    serde_json::from_value(proof["published"].clone()).unwrap();
+                readiness::tests::restore_bound_start(
+                    fx.logical(),
+                    published + chrono::Duration::nanoseconds(1),
+                );
+            }
+            "fake-proof" | "consumed" => {
+                let mut value: Value =
+                    serde_json::from_slice(&std::fs::read(&certified).unwrap()).unwrap();
+                if invalid == "fake-proof" {
+                    value["pending"]["seq"] = json!(u64::MAX);
+                } else {
+                    value["consumed"] = json!(true);
+                    readiness::tests::forget_session(fx.logical());
+                }
+                std::fs::write(&certified, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            _ => panic!("unexpected invalid fixture"),
+        }
+        assert!(
+            !readiness::adopt_awaiting_clear(fx.logical(), &nonce, &path),
+            "{invalid}"
+        );
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical()),
+            previous,
+            "{invalid}: retirement count is zero"
+        );
+        assert!(
+            readiness::observe(fx.logical(), Some(&path)).is_none(),
+            "{invalid}: Held"
+        );
+        if invalid == "nonce" {
+            assert_ne!(
+                observe_spawn_nonce_marker(fx.logical()),
+                crate::services::tui_prompt_dedupe::binding_context::SpawnNonceMarker::Known(nonce)
+            );
+        } else {
+            assert!(cleared_turn(&fx, &launcher, &cleared, &path).is_err());
+            assert_eq!(
+                fx.rig.sends().len(),
+                2,
+                "{invalid}: no new payload callback"
+            );
+        }
+    }
+}
+
+#[test]
+fn awaiting_clear_adoption_blocks_stale_same_session_close_until_pre_source_is_visible_pg() {
+    use crate::services::claude_tui::readiness;
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_prompt_dedupe as dedupe;
+    let fx = Fixture::new("clear-atomic", None);
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, _) = launch(&fx, &launcher);
+    let old = dedupe::runtime_binding_for_tmux_session(fx.logical()).unwrap();
+    let cleared = uuid();
+    let path = clear_pending(&fx, &cleared);
+    let logical = fx.logical().to_owned();
+    let log_root = dedupe::binding_events::test_root();
+    let (announced, observed) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let (contended, blocked) = std::sync::mpsc::channel();
+    let closed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let publisher = std::thread::spawn(move || {
+        dedupe::binding_events::set_test_root(log_root.as_deref());
+        readiness::CLEAR_AFTER_PUBLICATION.with_borrow_mut(|slot| {
+            *slot = Some(Box::new(move || {
+                announced.send(()).unwrap();
+                wait.recv_timeout(LIMIT).expect("release clear adoption");
+            }))
+        });
+        readiness::adopt_awaiting_clear(&logical, &nonce, &path)
+    });
+    observed
+        .recv_timeout(LIMIT)
+        .expect("pre-source cache published while authority is held");
+    let (logical, closed_in_thread) = (fx.logical().to_owned(), Arc::clone(&closed));
+    let closer = std::thread::spawn(move || {
+        tc::SOURCE_AUTHORITY_CONTENDED.with_borrow_mut(|slot| {
+            *slot = Some(Box::new(move || {
+                contended.send(()).unwrap();
+            }))
+        });
+        tc::with_tmux_source_authority(&logical, |authority| {
+            let now =
+                dedupe::runtime_binding_for_tmux_session_under_source_authority(authority).unwrap();
+            if now == old {
+                closed_in_thread.fetch_add(1, Ordering::SeqCst);
+            }
+            now.session_id
+        })
+    });
+    blocked
+        .recv_timeout(LIMIT)
+        .expect("same-session close authorization blocked on source authority");
+    assert_eq!(closed.load(Ordering::SeqCst), 0);
+    release.send(()).unwrap();
+    assert!(crate::test_support::wait::join_within(publisher, LIMIT));
+    assert_eq!(
+        crate::test_support::wait::join_within(closer, LIMIT),
+        Some(cleared)
+    );
+    assert_eq!(
+        closed.load(Ordering::SeqCst),
+        0,
+        "stale source cannot authorize a close callback"
+    );
+}
+
+#[test]
+fn awaiting_clear_certification_supersedes_an_older_or_same_tick_volatile_start_pg() {
+    for equal_tick in [false, true] {
+        let fx = Fixture::new(&format!("clear-start-race-{equal_tick}"), None);
+        let launcher = Arc::new(Launcher::default());
+        launch(&fx, &launcher);
+        let cleared = uuid();
+        let path = clear_pending(&fx, &cleared);
+        let proof =
+            crate::services::tmux_common::session_temp_path(fx.logical(), "claude_clear_ready");
+        let proof: Value = serde_json::from_slice(&std::fs::read(proof).unwrap()).unwrap();
+        let published: chrono::DateTime<chrono::Utc> =
+            serde_json::from_value(proof["published"].clone()).unwrap();
+        let prior = if equal_tick {
+            published
+        } else {
+            published - chrono::Duration::nanoseconds(1)
+        };
+        crate::services::claude_tui::readiness::tests::restore_bound_start(fx.logical(), prior);
+        assert_eq!(
+            cleared_turn(&fx, &launcher, &cleared, &path),
+            Ok(()),
+            "equal_tick={equal_tick}"
+        );
+        assert_eq!(fx.rig.sends().len(), 4, "one new paste and Enter");
+        assert_eq!(
+            crate::services::claude_tui::readiness::tests::retained_sources(fx.logical()),
+            1,
+            "only the new current source remains"
+        );
+    }
+}
+
+#[test]
+fn awaiting_clear_missing_or_consumed_proof_cannot_use_a_missing_binding_fallback_pg() {
+    for consumed in [false, true] {
+        let fx = Fixture::new(&format!("clear-no-fallback-{consumed}"), None);
+        let launcher = Arc::new(Launcher::default());
+        launch(&fx, &launcher);
+        let cleared = uuid();
+        let path = clear_pending(&fx, &cleared);
+        let proof =
+            crate::services::tmux_common::session_temp_path(fx.logical(), "claude_clear_ready");
+        if consumed {
+            let mut value: Value = serde_json::from_slice(&std::fs::read(&proof).unwrap()).unwrap();
+            value["consumed"] = json!(true);
+            std::fs::write(&proof, serde_json::to_vec(&value).unwrap()).unwrap();
+        } else {
+            std::fs::remove_file(&proof).unwrap();
+        }
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(fx.logical());
+        assert!(cleared_turn(&fx, &launcher, &cleared, &path).is_err());
+        assert_eq!(
+            fx.rig.sends().len(),
+            2,
+            "an invalid clear cannot reach the payload callback"
+        );
+    }
 }

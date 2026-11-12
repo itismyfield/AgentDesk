@@ -1034,21 +1034,13 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
-    use super::spy::{Spy, SpyGuard, SpyState, exit};
+    use super::spy::{Spy, SpyState, exit};
     use super::*;
-    use crate::services::claude_tui::input::{CompactSubmitOutcome, send_compact_while_busy};
     use crate::services::session_host::{SessionTargetInput, TargetSource, UnknownHost};
 
     const EMPTY_COMPOSER: &str = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
     const BUSY: &str = "\u{2733} Architecting\u{2026}";
     const DRAFT: &str = "\u{276f} 남은 초안 한글";
-
-    fn state(captures: &[Option<&str>]) -> SpyState {
-        SpyState {
-            captures: captures.iter().map(|c| c.map(str::to_string)).collect(),
-            ..SpyState::default()
-        }
-    }
 
     fn run(spy: &mut Spy, gate: &dyn MutationGate, actions: &[TuiInputAction]) -> InputRun {
         let target = InputTarget::legacy_tmux("p6a1-spy-session");
@@ -1084,18 +1076,6 @@ mod tests {
             source: TargetSource::SessionRecord,
             name: "AgentDesk-claude-p6a1".to_string(),
         }
-    }
-
-    #[test]
-    fn compact_literal_failure_never_sends_enter() {
-        let mut failing = state(&[Some(EMPTY_COMPOSER)]);
-        failing.fail_send = Some((0, Err("broken pipe".to_string())));
-        let guard = SpyGuard::install(failing);
-        assert_eq!(
-            send_compact_while_busy("p6a1-spy-compact"),
-            CompactSubmitOutcome::AmbiguousAfterMutation
-        );
-        assert_eq!(guard.calls(), ["capture", "alive", "literal:/compact"]);
     }
 
     #[test]

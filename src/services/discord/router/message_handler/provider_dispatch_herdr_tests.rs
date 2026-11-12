@@ -338,10 +338,19 @@ impl Fixture {
         std::fs::write(marker, "herdr").unwrap();
         let session = uuid();
         let transcript = self.ingress.transcript(&session);
+        append(
+            &transcript,
+            &[
+                json!({"type":"user","sessionId":session,"message":{"role":"user","content":"previous turn"}}),
+                json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}),
+                json!({"type":"system","subtype":"turn_duration","sessionId":session}),
+            ],
+        );
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
             self.logical(),
             claude(&transcript, &session),
         );
+        crate::services::claude_tui::readiness::tests::pre_source(self.logical(), &transcript);
         HostedExecution {
             schema: 1,
             state: HostedState::Bound,
@@ -687,9 +696,10 @@ struct Started {
 impl Started {
     fn hook(&self, fx: &Fixture, event: &str, payload: &Value) -> u16 {
         let uri = format!("/hooks/claude/{event}?session_id={}", self.session);
+        let request_id = uuid();
         let sent = fx
             .ingress
-            .send_envelope(&uri, payload, None, Some(&self.envelope));
+            .send_envelope(&uri, payload, Some(&request_id), Some(&self.envelope));
         sent.0
     }
 }
@@ -1524,7 +1534,8 @@ impl Fixture {
         let answered = json!({"type": "assistant", "sessionId": session,
             "timestamp": "2026-10-01T00:00:01Z", "message": {"role": "assistant",
             "stop_reason": "end_turn", "content": [{"type": "text", "text": "alpha"}]}});
-        append(&path, &[said, answered]);
+        let done = json!({"type":"system","subtype":"turn_duration","sessionId":session});
+        append(&path, &[said, answered, done]);
         let marker = crate::services::tmux_common::session_temp_path(self.logical(), "host_kind");
         std::fs::write(marker, "tmux").unwrap();
         crate::services::tui_prompt_dedupe::register_tmux_channel(self.logical(), CHANNEL);
