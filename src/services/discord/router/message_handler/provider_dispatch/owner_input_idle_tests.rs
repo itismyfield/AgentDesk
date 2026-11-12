@@ -1465,6 +1465,7 @@ impl AttachedOwner {
         .unwrap();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(self.rig.transcript(), &path).unwrap();
+        crate::services::claude_tui::readiness::tests::pre_source(&self.rig.name, &path);
         let context = crate::config::runtime_root()
             .unwrap()
             .join("runtime/binding_contexts/claude")

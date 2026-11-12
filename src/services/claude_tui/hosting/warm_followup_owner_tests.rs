@@ -37,6 +37,7 @@ fn b2_legacy_warm_submit_and_reader_collect_the_actual_token() {
         user("past")
     );
     std::fs::write(&path, &past).unwrap();
+    let tmux = ScriptedTmux::new(&view("", false));
     tui_prompt_dedupe::register_tmux_runtime_binding(
         session,
         TuiRuntimeBinding {
@@ -50,7 +51,6 @@ fn b2_legacy_warm_submit_and_reader_collect_the_actual_token() {
         },
     );
     crate::services::claude_tui::readiness::tests::pre_source(session, &path);
-    let tmux = ScriptedTmux::new(&view("", false));
     tmux.on_enter(&path,&format!("{}\n{}\n{}",user("warm-a"),
         serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"finished"}]}}),
         serde_json::json!({"type":"system","subtype":"stop_hook_summary"})));
@@ -118,6 +118,7 @@ fn a_legacy_warm_submit_keys_only_through_its_tokens_first_key_gate() {
             "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
         )
         .unwrap();
+        let tmux = ScriptedTmux::new(&view("", false));
         tui_prompt_dedupe::register_tmux_runtime_binding(
             &session,
             TuiRuntimeBinding {
@@ -131,7 +132,6 @@ fn a_legacy_warm_submit_keys_only_through_its_tokens_first_key_gate() {
             },
         );
         crate::services::claude_tui::readiness::tests::pre_source(&session, &path);
-        let tmux = ScriptedTmux::new(&view("", false));
         tmux.on_enter(&path,&format!("{}\n{}\n{}",user("gate-a"),
             serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}),
             serde_json::json!({"type":"system","subtype":"stop_hook_summary"})));
