@@ -837,6 +837,8 @@ fn write_dcserver_lock_pid(mut file: &fs::File) -> std::io::Result<()> {
 }
 
 pub fn handle_dcserver(token: Option<String>) {
+    // SAFETY: CLI dispatch has not started threads or children; capture precedes census and Tokio.
+    let decision_key = unsafe { services::decision_gate::capture_initial_key() };
     #[cfg(windows)]
     if let Err(error) = crate::services::platform::windows_job::own_runtime_children() {
         eprintln!("Failed to establish Windows runtime process ownership: {error}");
@@ -942,6 +944,9 @@ pub fn handle_dcserver(token: Option<String>) {
     println!("  ▸ Status : Connecting...");
 
     rt.block_on(async move {
+        if !decision_boot::initialize(decision_key).await {
+            return;
+        }
         println!();
 
         // ── AgentDesk HTTP server ──────────────────────────────────
@@ -1383,3 +1388,6 @@ mod tests {
         );
     }
 }
+
+#[path = "dcserver_decision_boot.rs"]
+mod decision_boot;

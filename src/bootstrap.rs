@@ -70,7 +70,6 @@ pub(crate) fn install_boot_snapshots(
     selection: crate::config::session_hosts::migration::HostsBootSelection,
 ) -> Result<()> {
     crate::config::validate_config(config)?;
-    tracing::debug!(decision_gate = ?crate::services::decision_gate::availability(), "Optional adapter availability");
     crate::services::tui_o::channel_policy::install(config)?;
     crate::services::provider_hosting::install_provider_hosting_config(config);
     crate::config::session_hosts::install_selected(selection);

@@ -8,6 +8,8 @@ use serde_json::json;
 use sqlx::Row;
 use std::collections::BTreeSet;
 
+mod issue_duplicate;
+
 use super::AppState;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::github;
@@ -50,6 +52,8 @@ pub struct CreateIssueBody {
     pub block_on: Option<Vec<i64>>,
     pub announcement_channel_id: Option<String>,
     pub dry_run: Option<bool>,
+    #[serde(default)]
+    pub allow_duplicate: bool,
 }
 
 const ISSUE_FORMAT_VERSION: u32 = 1;
@@ -243,6 +247,8 @@ fn issue_create_capabilities() -> serde_json::Value {
     json!({
         "auto_dispatch": false,
         "block_on": true,
+        "allow_duplicate": true,
+        "duplicate_candidate_status": 409,
         "unsupported_features": ISSUE_CREATE_UNSUPPORTED_FEATURES,
     })
 }
@@ -278,6 +284,7 @@ fn issue_validation_error(error: String, dry_run: bool) -> (StatusCode, Json<ser
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({
                 "dry_run": true,
+                "duplicate_check": {"outcome": "not_run", "reason": "dry_run"},
                 "error": error,
                 "validation_warnings": [warning],
                 "capabilities": issue_create_capabilities(),
@@ -296,9 +303,35 @@ fn issue_validation_error(error: String, dry_run: bool) -> (StatusCode, Json<ser
 
 /// POST /api/github/issues/create
 pub async fn create_issue(
+    state: State<AppState>,
+    body: Json<CreateIssueBody>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    create_issue_with_check(
+        state,
+        body,
+        |repo, title, background, allow_duplicate| async move {
+            issue_duplicate::check(
+                crate::services::decision_gate::installed().map(AsRef::as_ref),
+                &repo,
+                &title,
+                &background,
+                allow_duplicate,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+async fn create_issue_with_check<F, Fut>(
     State(state): State<AppState>,
     Json(body): Json<CreateIssueBody>,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    check: F,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)>
+where
+    F: FnOnce(String, String, String, bool) -> Fut,
+    Fut: std::future::Future<Output = issue_duplicate::DuplicateCheck>,
+{
     let dry_run = body.dry_run.unwrap_or(false);
     let unsupported_features = requested_unsupported_issue_create_features(&body);
     if !dry_run && !unsupported_features.is_empty() {
@@ -338,6 +371,7 @@ pub async fn create_issue(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({
                     "dry_run": true,
+                    "duplicate_check": {"outcome": "not_run", "reason": "dry_run"},
                     "error": error,
                     "validation_warnings": validation_warnings,
                     "capabilities": issue_create_capabilities(),
@@ -379,6 +413,7 @@ pub async fn create_issue(
             StatusCode::OK,
             Json(json!({
                 "dry_run": true,
+                "duplicate_check": {"outcome": "not_run", "reason": "dry_run"},
                 "issue": {
                     "number": null,
                     "url": null,
@@ -422,6 +457,28 @@ pub async fn create_issue(
     let block_on_issue_numbers = match normalize_block_on_issue_numbers(&body) {
         Ok(block_on_issue_numbers) => block_on_issue_numbers,
         Err(error) => return Ok(issue_validation_error(error, dry_run)),
+    };
+
+    let duplicate_check = match check(
+        repo.clone(),
+        title.clone(),
+        body.background.clone(),
+        body.allow_duplicate,
+    )
+    .await
+    {
+        issue_duplicate::DuplicateCheck::Proceed(meta) => meta,
+        issue_duplicate::DuplicateCheck::Candidate(candidate) => {
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "code": "duplicate_candidate",
+                    "created": false,
+                    "candidate": candidate,
+                    "retry": {"allow_duplicate": true},
+                })),
+            ));
+        }
     };
 
     let applied_labels = body
@@ -482,6 +539,7 @@ pub async fn create_issue(
                     "block_on": block_on_issue_numbers,
                     "issue_creation_origin": result.origin,
                     "issue_creation_mode": result.mode,
+                    "duplicate_check": duplicate_check,
                     "kanban_card_sync": kanban,
                     "announcement_sync": announcement,
                     "issue_format_version": ISSUE_FORMAT_VERSION,
@@ -561,6 +619,7 @@ mod tests {
             block_on: None,
             announcement_channel_id: None,
             dry_run: None,
+            allow_duplicate: false,
         }
     }
 
