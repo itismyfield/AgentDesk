@@ -45,11 +45,11 @@ A temporal run must report temporal checking and a clean finish or exit 13 with 
 Constant or state-only PROPERTY formulas that TLC optimizes away from temporal checking are refused; use INVARIANT for state predicates.
 ExecutionAuthorityMain expects `AdmissionResumes` to break, while ExecutionAuthority expects it to hold.
 
-Add a new model only with small constants that finish within the CI limits (5 minutes per config, 15 minutes per job).
+Add a new model only with small constants that finish within the CI limits (5 minutes per config, 30 minutes per PR job).
 The 300-second config budget includes the fairness precheck, every safety rerun and every property; timeout always fails.
 The precheck uses a Java 11+ source-file launcher and adds one JVM per config that declares PROPERTY.
 Measure the full checker and its per-config times before and after adding liveness.
-If a config exceeds that budget or the suite approaches 15 minutes, reduce its PR bounds and move the larger cfg
+If a config exceeds that budget or the suite approaches 30 minutes, reduce its PR bounds and move the larger cfg
 to a separate nightly-only root with its own `expected.tsv` and explicit timeout/job budget.
 Wire that root into the scheduled workflow before moving it; do not omit a config from the current manifest to hide a timeout.
 
