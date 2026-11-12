@@ -1,20 +1,14 @@
-//! Whether O owes a turn's body: O owns the channel and its init covers the turn's transcript from
+//! Whether O owes a turn's body on a channel it owns: its init covers the turn's transcript from
 //! at or before the turn's start, so Legacy may settle the turn without sending its body.
 
-use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::inflight::{self, GuardedSaveOutcome, InflightTurnState};
 use crate::services::provider::ProviderKind;
 
-/// O owns `channel` and its init holds `path`'s file with delivery starting at or before `start`.
-pub(in crate::services::discord) fn owes(
-    channel: u64,
-    kind: Option<RuntimeHandoffKind>,
-    path: &str,
-    start: u64,
-) -> bool {
-    use crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
+/// `channel`'s init holds `path`'s file with delivery starting at or before `start`; the caller
+/// has already seen O own the channel.
+pub(in crate::services::discord) fn owes(channel: u64, path: &str, start: u64) -> bool {
     use crate::services::tui_o::shadow::capture::file_identity;
-    if path.is_empty() || peek_o_owns_tui_output_for_channel(channel, kind) != Ok(true) {
+    if path.is_empty() {
         return false;
     }
     let root = crate::config::runtime_root();
@@ -34,11 +28,11 @@ pub(in crate::services::discord) fn owes(
     })
 }
 
-/// `owes` for a row's own channel, kind, transcript and turn start.
+/// `owes` for a row's own channel, transcript and turn start.
 pub(in crate::services::discord) fn owes_row(state: &InflightTurnState) -> bool {
     let start = state.turn_start_offset.unwrap_or(state.last_offset);
     let path = state.output_path.as_deref().unwrap_or_default();
-    owes(state.channel_id, state.runtime_kind, path, start)
+    owes(state.channel_id, path, start)
 }
 
 /// Settles a stale leak O owes: the row's response offset moves to `end` as a delivered tail does.

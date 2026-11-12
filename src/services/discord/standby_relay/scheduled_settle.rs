@@ -74,3 +74,7 @@ pub(super) fn terminal_result_is_error(output_path: &str, start: u64) -> Option<
 #[cfg(test)]
 #[path = "scheduled_settle_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "o_owed_settle_tests.rs"]
+mod o_owed_settle_tests;
