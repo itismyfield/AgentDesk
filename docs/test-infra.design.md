@@ -511,4 +511,4 @@ M1 착지와 r2 문서 제출을 막는 결정은 없다. 선택은 아래 두 �
 운영 접근 없이 알 수 없는 live 권한·앱 생성 상태·provider 비용은 미확인으로 남긴다.
 설계 파일 커밋은 이 결정들의 승인이나 #8120/#8123/#8124의 구현 완료를 뜻하지 않는다.
 
-<!-- doc-path-refs: proposed scripts/dev-instance.sh tests/e2e/tui_relay/discord_observer.rs docs/statecharts/test-instance-lease/ -->
+<!-- doc-path-refs: proposed tests/e2e/tui_relay/discord_observer.rs docs/statecharts/test-instance-lease/ -->

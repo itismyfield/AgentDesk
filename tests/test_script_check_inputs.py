@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import shlex
 import subprocess
 import sys
@@ -217,6 +219,38 @@ class ScriptCheckInputSelection(unittest.TestCase):
             return subprocess.run(["/bin/bash", str(runner)], cwd=root,
                                   env=self.env(PYTHON=sys.executable, SCRIPT_CHECK_SHARD="guards", **extra),
                                   capture_output=True, text=True, timeout=30)
+
+    def test_isolated_guards_execute_real_declarations_without_rust_tools(self) -> None:
+        aggregate = (ROOT / "scripts/ci-script-checks.sh").read_text()
+        sections = re.split(r"(?=^if run_check )", aggregate, flags=re.MULTILINE)
+        blocks = [block for block in sections[1:]
+                  if ' "Isolated instance ' in block.splitlines()[0]]
+        self.assertTrue(blocks, "isolated instance checks must be registered")
+        expected = sum(unittest.defaultTestLoader.loadTestsFromName(name).countTestCases()
+                       for name in ("tests.test_dev_instance", "tests.test_dev_instance_files"))
+        self.assertGreater(expected, 0)
+        with tempfile.TemporaryDirectory(prefix="isolated-guards-without-rust-") as directory:
+            root = Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            for name in ("cat", "mktemp", "rm"):
+                target = shutil.which(name)
+                self.assertIsNotNone(target)
+                (tools / name).symlink_to(target)
+            runner = root / "checks.sh"
+            runner.write_text(sections[0] + "".join(blocks))
+            done = subprocess.run(
+                ["/bin/bash", str(runner)], cwd=ROOT,
+                env={"PATH": str(tools), "PYTHON": sys.executable, "BASH_ENV": "/dev/null",
+                     "GITHUB_EVENT_NAME": "pull_request", "SCRIPT_CHECK_SHARD": "guards",
+                     "SCRIPT_CHECK_CHANGES_RESULT": "success",
+                     "SCRIPT_CHECK_CHANGED_FILES": json.dumps(["scripts/dev_instance/files.py"])},
+                capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        counts = [int(value) for value in re.findall(r"^Ran (\d+) tests? in ", done.stderr,
+                                                    flags=re.MULTILINE)]
+        self.assertEqual(sum(counts), expected, done.stdout + done.stderr)
+        self.assertNotRegex(done.stderr, r"skipped=|FAILED|BLOCKED_BINARY")
 
     def executed(self, done: subprocess.CompletedProcess[str]) -> set[str]:
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)

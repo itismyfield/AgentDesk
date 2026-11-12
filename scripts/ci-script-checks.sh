@@ -273,6 +273,18 @@ if run_check guards "User feature map static check"; then
 "$PYTHON" -m unittest tests.test_user_feature_map_static
 fi
 
+if run_check guards "Isolated instance declaration tests"; then
+"$PYTHON" -m unittest tests.test_dev_instance
+"$PYTHON" -m unittest tests.test_dev_instance_files
+fi
+
+if run_check cargo "Isolated instance credential binary tests"; then
+cargo build --bin agentdesk
+instance_test_bin="$(cd "${CARGO_TARGET_DIR:-$PWD/target}/debug" && pwd -P)"
+export PATH="$instance_test_bin:$PATH"
+"$PYTHON" -m unittest tests.test_dev_instance_credential
+fi
+
 if run_check guards "PG audit guard"; then
 ./scripts/pg-audit.sh
 fi
