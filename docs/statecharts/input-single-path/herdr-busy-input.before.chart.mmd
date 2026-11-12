@@ -1,0 +1,19 @@
+---
+title: "Busy Claude input uses the same owner on either host"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the HealthyBusyEventuallyInjected bug
+    lg1: Repeats forever, so HealthyBusyEventuallyInjected breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: Original owned front
+  s1: Held before any key
+  s2: Held visibly, before any key
+  [*] --> s0
+  s0 --> s1: try existing busy writer
+  s1 --> s2: show existing held status
+  class s0 bugPath
+  class s1 bugPath
+  class s2 repeats
