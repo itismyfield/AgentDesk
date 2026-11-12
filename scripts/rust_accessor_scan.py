@@ -241,6 +241,21 @@ def call_arguments(values, index):
 def boot_bindings(ts, metadata, aliases, matched, *, module=(), exports=None):
     """Recognize explicit boot types and with_boot closure parameters, without type inference."""
     values, bindings = [t.value for t in ts], []
+    functions = []
+    for i, token in enumerate(ts[:-1]):
+        if token.kind != "code" or token.value != "fn" or not values[i + 1].isidentifier():
+            continue
+        opening = i + 2
+        while opening < len(ts) and values[opening] not in {"(", "{", ";"}:
+            opening += 1
+        if opening == len(ts) or values[opening] != "(":
+            continue
+        closing = matched[opening]
+        body = closing + 1
+        while body < len(ts) and values[body] not in {"{", ";"}:
+            body += 1
+        if body < len(ts) and values[body] == "{":
+            functions.append((opening, closing, body, matched[body]))
     for i, token in enumerate(ts):
         scope, function = metadata[i]
         if token.kind == "code" and token.value == ":" and i and values[i - 1].isidentifier():
@@ -251,7 +266,14 @@ def boot_bindings(ts, metadata, aliases, matched, *, module=(), exports=None):
             for name in names:
                 resolved = resolve([name], scope, aliases, module=module, exports=exports)
                 if resolved[-1] in {"BootSessionHosts", "BootChannels"}:
-                    bindings.append((values[i - 1], resolved[-1], function, scope, 0, len(ts)))
+                    region = next((r for r in functions if r[0] < i < r[1]), None)
+                    if region:
+                        lo, hi = region[2:]
+                        where, owner = metadata[lo + 1]
+                    else:
+                        lo, hi = i, matched[scope[-1]] if scope else len(ts)
+                        where, owner = scope, function
+                    bindings.append((values[i - 1], resolved[-1], owner, where, lo, hi))
         if token.kind == "code" and resolve([token.value], scope, aliases, module=module, exports=exports)[-1] == "with_boot":
             opening = call_arguments(values, i)
             if opening is not None:

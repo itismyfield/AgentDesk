@@ -236,6 +236,16 @@ class LowLevelAccessorsTest(unittest.TestCase):
                 self.assertNotEqual(old[0]["normalized_hash"], new[0]["normalized_hash"])
                 self.assertTrue(self.check.compare(old, new))
 
+    def test_boot_receiver_type_bindings_do_not_leak_between_functions(self):
+        host = "fn host(boot: &crate::config::session_hosts::BootSessionHosts) { boot.channels(); }"
+        output = "fn output(boot: &crate::services::tui_o::channel_policy::BootChannels) { boot.channels(); }"
+        for functions in ((host, output), (output, host)):
+            with self.subTest(first=functions[0]):
+                rows = self.scan("\n".join(functions))
+                self.assertEqual(self.count(rows, "boot_channels"), 1)
+                self.assertEqual({row["enclosing_fn"] for row in rows if row["rule"] == "boot_channels"},
+                                 {"host"})
+
     def test_registered_launch_and_inventory_accessors_are_detected(self):
         rows = self.scan("""fn caller() {
             crate::services::herdr_launch::herdr_configured_for_tui_launch(Some(channel));
