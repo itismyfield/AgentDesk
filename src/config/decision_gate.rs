@@ -10,17 +10,15 @@ pub struct DecisionGateConfig {
     pub repositories: BTreeMap<String, Repository>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Features {
-    pub issue_duplicate: FeaturePolicy<5000>,
-    pub host_assignment: FeaturePolicy<2000>,
-    pub routine_precheck: FeaturePolicy<2000>,
+    pub issue_duplicate: FeaturePolicy,
+    pub host_assignment: FeaturePolicy,
+    pub routine_precheck: FeaturePolicy,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(default)]
-pub struct FeaturePolicy<const DEFAULT_DEADLINE_MS: u64> {
+pub struct FeaturePolicy {
     pub enabled: bool,
     pub deadline_ms: u64,
 }
@@ -49,19 +47,61 @@ impl Default for DecisionGateConfig {
 impl Default for Features {
     fn default() -> Self {
         Self {
-            issue_duplicate: FeaturePolicy::default(),
-            host_assignment: FeaturePolicy::default(),
-            routine_precheck: FeaturePolicy::default(),
+            issue_duplicate: FeaturePolicy {
+                enabled: true,
+                deadline_ms: 5000,
+            },
+            host_assignment: FeaturePolicy {
+                enabled: true,
+                deadline_ms: 2000,
+            },
+            routine_precheck: FeaturePolicy {
+                enabled: true,
+                deadline_ms: 2000,
+            },
         }
     }
 }
 
-impl<const DEFAULT_DEADLINE_MS: u64> Default for FeaturePolicy<DEFAULT_DEADLINE_MS> {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            deadline_ms: DEFAULT_DEADLINE_MS,
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct FeatureOverrides {
+    enabled: Option<bool>,
+    deadline_ms: Option<u64>,
+}
+
+impl FeatureOverrides {
+    fn apply(self, policy: &mut FeaturePolicy) {
+        if let Some(enabled) = self.enabled {
+            policy.enabled = enabled;
         }
+        if let Some(deadline_ms) = self.deadline_ms {
+            policy.deadline_ms = deadline_ms;
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Features {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Overrides {
+            issue_duplicate: FeatureOverrides,
+            host_assignment: FeatureOverrides,
+            routine_precheck: FeatureOverrides,
+        }
+        let overrides = Overrides::deserialize(deserializer)?;
+        let mut features = Self::default();
+        overrides
+            .issue_duplicate
+            .apply(&mut features.issue_duplicate);
+        overrides
+            .host_assignment
+            .apply(&mut features.host_assignment);
+        overrides
+            .routine_precheck
+            .apply(&mut features.routine_precheck);
+        Ok(features)
     }
 }
 
