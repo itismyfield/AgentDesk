@@ -4,6 +4,10 @@
 #8080 대조: `refs/review/i8080-land1=b63a97c5115bf469c85996242d61732557122427`.
 이 문서는 조사·설계이며 prod 수정·cargo 빌드/시험·운영 상태 조회를 하지 않았다.
 
+## 구현 재개 시 설계 경계 변경 알림 (2026-11-12 14:4x)
+
+P2 early/clear 보완은 아래 본문에 반영했다. 새 사용자 요구의 “세 번째 호스트는 호스트 구현 하나만 변경”은 원 설계의 host-specific owner routes/leaf 유지와 양립하지 않는다. 현재 `InteractiveSessionHost`/`InputTransport`는 nonce/current-source/verified-clear 위임을 제공하지 않으므로 기존 경계를 확장하는 별도 계약이 필요하다. 프로덕션 구현을 시작하기 전에 `DESIGN_DELTA`로 멈춘다. `herdr-busy-input.boundary-delta.md`가 재계획 정본이며, 아래 7파일/+450과 시험표는 승인된 원 계획과 그 P2 보완이다. 새 경계 확장 규모를 승인한 것으로 읽지 않는다.
+
 ## 결론과 범위
 
 **#8080 자동 해결이 아니다. 구현 1조각, prod 7파일/순증 약 +450 이내를 제안한다.**
@@ -37,7 +41,8 @@
 1. `intake_turn.rs:1109-1113`의 `defer_busy_view`와 `:1751-1768`의 native Busy handoff가 Herdr를 구성 predicate로 제외한다.
 2. `provider_dispatch/owner_input.rs:1060-1086`는 late 관측의 live/running을 tmux에 한정한다. Bound Herdr는 alive=true이지만 busy=false로 등록돼 `Route::HerdrIdle`이 된다.
 3. 이 route는 `take_owned:1285-1293`의 Existing launch hook → Herdr `first_input::write` → idle-only composer로 내려간다. 정상 active footer에도 idle-ready 근거가 없으면 `composer.rs:125-130`가 Unknown으로 접는다.
-4. busy로 등록되면 기존 `Route::ClaudeHerdrBusy`는 idle composer를 거치지 않고 modal·원문 소유·writer·exact target을 확인해 기존 `run_herdr`로 paste+Enter할 수 있다.
+4. early diagnostic도 `tui_followup.rs:455-491`에서 tmux session 필수·tmux liveness를 요구한다. Herdr는 이 diagnostic 앞의 공통 exact-target/source 관측으로 early handoff를 결정해야 하며 기존 diagnostic 결과만 기다리면 안 된다.
+5. busy로 등록되면 기존 `Route::ClaudeHerdrBusy`는 idle composer를 거치지 않고 modal·원문 소유·writer·exact target을 확인해 기존 `run_herdr`로 paste+Enter할 수 있다.
 
 ### 한 경로와 모듈 배치
 
@@ -45,9 +50,10 @@
 
 - tmux는 기존 `claude_followup_transcript` 및 native JSONL Busy 규칙을 유지한다.
 - Herdr는 실제 `TurnHost::Herdr(plan)`, `bound_herdr(plan)`의 Bound/location/nonce target과 현재 attached runtime binding을 사용한다. source는 logical key로만 임의 최신 JSONL을 찾지 않고 `binding_events::claude_history(channel,logical,Some(nonce))`와 verified pin/history의 현재 source를 대조한다. native session·path·file identity가 현재 Bound incarnation과 맞아야 Running이다. `claude_history`의 첫 반환 pin은 nonce 필터가 아니므로 그것만 신뢰하면 안 된다. `history.complete`, `history.awaiting.is_none()`, 해당 nonce의 `history.current`와 `current.pin`을 요구하고, current.session/native session, current.pin/전역 verified pin/runtime binding의 session/path/dev/ino를 모두 대조한다. 다른 nonce에서 `current=None`이면 Held다(`claude_fold.rs:288-295`).
+- 검증된 같은 nonce의 `awaited_clear(channel,logical,nonce)`는 Busy strict source 관측보다 먼저 기존 HerdrIdle/clear readiness로 위임한다(`herdr_turn.rs:293,320-390`). 첫 prompt가 새 JSONL을 만드는 정상 clear는 old pin/runtime binding·새 JSONL 부재 상태에서도 이 위임을 따라야 한다. 일반 old pin+new nonce·미검증 Pending은 계속 Held다. `awaited_clear`를 다시 구현하거나 #8080 private readiness API를 공개하지 않는다.
 - `bound_source`의 기존 증거 순서(`claude/herdr_turn.rs:288-304`)와 공통 runtime binding/`claude_history` 읽기 primitive를 재사용한다. 이 조각에서 #8080의 private idle-readiness Source API를 별도 공개하지 않는다. `bound_herdr`만으로 process live나 source-current가 입증됐다고 간주하지 않는다. 실제 mutation은 기존 Herdr pin/gate가 같은 incarnation을 재검사한다.
 - unknown source·missing transcript·capture/modal의 회복은 기존 `held_watch`에 같은 exact target/current-source probe를 연결한다. native Busy여도 source와 pane의 제출 근거가 회복되면 probe는 Ready를 반환한다. endpoint 재선택·tmux fallback은 없다. 기존 source-publication helper는 active turn을 기다리고 Busy면 wake를 생략하므로(`rehydration.rs:403-440`) 이 liveness의 근거로 사용하지 않는다.
-- early intake의 작업은 작은 `intake_turn/owned_busy.rs`에 둔다. giant `intake_turn.rs`는 공통 policy/관측 helper를 호출하고 기존 `into_busy_pane`로 넘기는 glue만 가진다.
+- early intake의 작업은 작은 `intake_turn/owned_busy.rs`에 둔다. 이 helper는 tmux-only `tui_busy_followup_diagnostic` 호출 앞에서 기존 host 경계의 exact target/source 관측을 받아 early handoff를 결정한다. giant `intake_turn.rs`는 공통 policy/관측 helper를 호출하고 기존 `into_busy_pane`로 넘기는 glue만 가진다.
 - late `execute_owned`도 같은 관측 helper를 사용한다. Herdr Running+O confirmed/accepts이면 `Registration::observed(...busy=true,until_done=None)`를 만들고 기존 pump/effect로 보낸다. **tmux의 busy observer를 Herdr에 붙이지 않는다.**
 - managed/external inflight의 기존 `hand_busy`와 early `into_busy_pane`도 같은 source 관측을 사용하도록 정리한다. 이미 Herdr를 지원하는 host leaf는 바꾸지 않는다.
 - 기존 legacy canary 환경 gate를 owner Busy 전송의 새 승인 조건으로 쓰지 않는다. 현재 tmux owner Busy처럼 source/owner 근거로 전달하고, `defer_busy_view`의 gate는 #8113 표시 정책과 연결한다. 설정 변경·운영자 활성화는 필요 없다.
@@ -138,8 +144,9 @@ main `owner_input.rs:1320-1322`는 Claude first-key native-stop gate를 tmux rou
 |---|---|---|
 | `owner_input_herdr_busy_entry_tests::external_busy_reaches_before_native_end` | Bound/O-ready/busy JSONL+busy ANSI, real owner+socket rig; end 없음인데 0 sends/held → RED | 1 paste+1 Enter, settlement; Herdr exclusion 복원→RED |
 | 같은 모듈 `idle_to_busy_before_dispatch_uses_busy_route` | actual execute_owned, late native Busy가 HerdrIdle → RED | same target Busy effect; tmux-only live/running 복원→RED |
-| `intake_turn/owned_busy_tests::herdr_busy_diagnostic_uses_owner_front` | 실제 early diagnostic 이후 분기. queued_head_covers 단위시험으로 대체 안 함 | one front/ticket, no legacy offered; intake exclusion 복원→RED |
+| `intake_turn/owned_busy_tests::herdr_busy_diagnostic_uses_owner_front` | 실제 tmux diagnostic 앞 관문. tmux pane/liveness 성공 stub 없이 Herdr socket만 사용 | early=1, late=0, one front/ticket, paste/Enter 각1; intake exclusion 복원 또는 기존 diagnostic 종속 mutant→RED |
 | `effect/herdr_tests` 및 real owner drive `modal_or_missing_source_recovers_while_turn_stays_busy` | modal 컨트롤은 기존 동작. managed busy + missing source → source publication만 오고 native Busy 유지: 기존 rehydration wake 없음 → RED | 0 keys+visible Held 후 exact-source probe recovery→1회; watch/held marker 제거 또는 idle-only probe mutant→RED |
+| `owner_input_herdr_busy_entry_tests::verified_clear_delegates_idle` | same nonce clear Pending+old pin/binding+새 JSONL 부재, actual execute_owned 경유 | 기존 Idle write 이후 Resolved; 모든 입력에 Busy strict guard 적용 mutant→RED |
 | `provider_dispatch/owner_input_busy_recovery_tests` | O not-ready/source/old nonce fixture는 기존 0 keys 컨트롤 | O/source ready 및 fresh-registry boot wake로 end 없이 1회; O guard 제거/nonce 무시→RED |
 | `effect/herdr_tests` 기존 ACK·foreign·draft 컨트롤과 새 uncertain restart | ACK 없는 Enter/partial write를 Held로 바꾼 mutant만 RED | receipt 없어도 no resend; uncertain→Held mutant→두 번째 paste로 RED |
 | `tui_o/writer` 기존 socket/transcript rig 통합 | 새 entry가 호출되지 않아 before-native-end 수용 기대 RED | user row 및 queued_command/enqueue 두 모양, terminal 뒤 output 1회; legacy tmux observer 호출 0, reader/nonce 오염 mutant→RED |
@@ -165,7 +172,9 @@ main `owner_input.rs:1320-1322`는 Claude first-key native-stop gate를 tmux rou
 
 기존 `InputOwnership`는 host 차원이 없어 Herdr 제외를 표현하지 않았고, `InputPath`의 unread/HerdrNoCtrlS와 `HerdrBusyHandoff.Blocked`는 인접 경계이지 이 결함을 직접 모델링한 가정은 아니다. 새 projection은 기존 owner 모델의 front/lease/settlement를 유지하면서 host dispatch 공백을 추가한다. “실패하면 Held로 돌아감”은 proven-before-key에만 적용한다.
 
-모델 실측: 최종 22cfg(전/후 8쌍+뮤턴트 6), 11 GREEN/11 expected RED. 공식 plain checker 22/22 기대 집합 일치(exit 0), TLC 86회+fairness precheck 22회, 미검사 속성 0. healthy Herdr Before는 `HealthyBusyEventuallyInjected` RED, Fixed GREEN; temporary held ClearedBefore는 `ClearedHoldEventuallyInjected` RED, Cleared GREEN. 단순 delivered-or-visible-hold는 Before도 GREEN이므로 이 결과를 즉시 주입 해결로 세지 않았다. restart/replacement Before의 `ScenarioReached` RED는 옛 host gate가 그 시나리오 경계에 도달하지 못함을 뜻하며 main의 restart 자체 결함 증명은 아니다.
+D1 당시 모델 실측: 22cfg(전/후 8쌍+뮤턴트 6), 11 GREEN/11 expected RED. 공식 plain checker 22/22 기대 집합 일치(exit 0), TLC 86회+fairness precheck 22회, 미검사 속성 0. healthy Herdr Before는 `HealthyBusyEventuallyInjected` RED, Fixed GREEN; temporary held ClearedBefore는 `ClearedHoldEventuallyInjected` RED, Cleared GREEN. 단순 delivered-or-visible-hold는 Before도 GREEN이므로 이 결과를 즉시 주입 해결로 세지 않았다. restart/replacement Before의 `ScenarioReached` RED는 옛 host gate가 그 시나리오 경계에 도달하지 못함을 뜻하며 main의 restart 자체 결함 증명은 아니다.
+
+구현 재개 P2 모델 실측: 30cfg(기존22의 기대집합 불변+신규8), GREEN16/expected RED14. 공식 checker 30/30 기대집합 일치(exit0), TLC119회+fairness30회, 미검사0. earlyBefore는 ordering/healthy RED, earlyFixed GREEN, diagnostic-first mutant는 ordering RED. verified awaited_clear Before/Fixed는 기존 Idle 위임을 보존해 둘 다 GREEN이고 strict-Busy mutant만 RED다. source/trait 경계는 아직 DESIGN_DELTA로 구현 전 정지 상태다.
 
 독립 설계 검토 결과: 첫 검토 P1 1건/P2 2건 중 source wake의 native-end 의존, nonce로 제한되지 않는 전역 pin, 기존 active route로 우회할 수 있는 RED fixture를 위 설계와 시험에 반영했다. 델타 검토 PASS, 남은 지적 없음. 원시 검토는 레인 `logs/design-review-1.md`, `logs/design-review-delta-1.md`에 보존한다.
 
@@ -205,6 +214,7 @@ Herdr는 본문 paste+Enter를 이미 지원하며 owner용 busy leaf도 이미 
 | owner drive managed/external inflight `provider_dispatch/owner_input.rs:151 owner_drive`, `:200 active`, `:232 hand_busy` | `:309 hand_busy`가 `turn_host::for_turn`으로 tmux/Herdr 모두 지원. `:77 bound_herdr`로 alive, caller busy=true로 phase Busy | inflight row names logical session/output path/session id `:315-338`; Registration::observed source file(dev,ino)/offset `:103-108`, claim `:356` | owner effect는 Enter ACK를 Submitted, receipt는 진단으로 async | effect.rs:107 run: proven pre-key hold는 hold_not_sent+watch, Submitted deliver, uncertain은 Unknown/재송신 없음 |
 | owner busy tmux `owner_input.rs:1446 Route::ClaudeBusy`→`input_owner/effect.rs:164 BusyClaude` | tmux leaf; host route `target.rs:84` | `effect.rs:212 inject_owned`: AnyTurn+screen-proven+person draft park. native stop first-key `:218`; lock/ledger/source/target owner scope | `:213 collect_receipt` 공통 exact transcript 비동기; Enter에서 transaction 완료 `:258` | modal/unread/copy mode는 watch `:241-255`; load 실제 buffer 실패만 cause watch. uncertain은 notice+Unknown |
 | owner busy Herdr `owner_input.rs:1483 Route::ClaudeHerdrBusy`→`input_owner/effect/herdr.rs:14 BusyClaudeHerdr` | route `target.rs:86`; Bound target/physical writer로 제한 | leaf `:37 bind_writer`; `:49 ANSI capture` 1회, modal veto+watch `:52`, transcript metadata/ledger `:62-72`, owner ready `:78`, person draft CtrlS `:83-90`, start_payload `:92` | `:103 run_herdr` paste+Enter ACK→Submitted; `:123 receipt`가 공통 await_receipt 비동기 | first gate refused & no stash→Held :109-112; stash 이후 failure/uncertain→Failed/WriteUncertain. 현재 leaf는 tmux의 first-key cancel gate를 쓰지 않음(`owner_input.rs:1320` 명시); 새 경로에서 넓히지 말고 공유 경로 동등성 검증 필요 |
+| early diagnostic 선행 관문 `tui_followup.rs:455-491` | 현재 session 필수 및 `TuiHosting`·hook endpoint·tmux live pane 전부 필요; Herdr socket만 있으면 None | host-neutral owned target/source 관측을 이 관문 전에 수행하고 early로 결정 | legacy tmux diagnostic은 기존 범위 유지 | 실제 intake 시험에서 tmux 성공 stub 없이 early=1/late=0/paste+Enter 각1; diagnostic 종속 mutant RED |
 | intake pre-submit external busy `intake_turn.rs:1751-1768`→`OwnerTurn::into_busy_pane` | **tmux만 허용 `:1754 herdr_endpoint.is_none`**, Herdr는 defer_before_submit | tmux followup transcript + logical session. `owner_input.rs:529 into_busy_pane` 자체는 generic host resolve와 observed Busy 재검증 | 이후 paste_busy→same owner transaction | 미관측은 NotSent; Herdr는 `hosted_tui_busy_pre_submit`로 원문 전면 보류 |
 | owner late execution `provider_dispatch/owner_input.rs:1000 부근 execute_owned`, `:1060 live`, `:1065 running` | **live는 TurnHost::Tmux 한정**. Herdr는 `live=false`, `running=None`→`:1086 read_as(...busy=false)`; bound_herdr alive=true여서 HerdrIdle | tmux는 native transcript busy일 때 busy_observer와 Busy registration. Herdr는 native busy를 여기서 읽지 않음 | HerdrIdle는 `:1288` Existing launch hook에 넘겨 provider first_input 수행 | 현재 Herdr busy는 idle composer Refused→Held; 무한 정지는 watch/turn boundary에 따라 해소되지만 턴 종료를 기다림 |
 | owner idle/new first submit `owner_input.rs:1285-1293`→created hook | Cold/HerdrIdle만 driver가 관측 execution을 handover | tmux created `claude/first_input.rs:70 submit_owned` target/source 넘김. Herdr `claude/herdr_turn/first_input.rs:23 submit_owned` logical+nonce target, bound transcript source metadata, physical writer | `effect.rs:361 created`는 driver write 결과를 owner settlement로 변환. first_input response observer는 별도 lifetime | Held는 owner hold_not_sent+준비 watch. post-key uncertainty는 resend 없음 |

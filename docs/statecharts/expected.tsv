@@ -49,6 +49,14 @@ intake-readiness/IntakeReadinessCurrent.cfg	IntakeReadiness	-	-
 intake-readiness/IntakeReadinessEarlyTxEnd.cfg	IntakeReadiness	ApplyUsesLockedTransaction	-
 intake-readiness/IntakeReadinessProposed.cfg	IntakeReadiness	-	-
 intake-readiness/IntakeReadinessStaleSnapshot.cfg	IntakeReadiness	NoStaleSnapshot	-
+input-single-path/HerdrBusyInputAwaitedClearBefore.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyInputAwaitedClearBusy.cfg	HerdrBusyInput	VerifiedClearNeverBusy	VerifiedClearEventuallyDelegates
+input-single-path/HerdrBusyInputAwaitedClearFixed.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyInputAwaitedClearUnverifiedBefore.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyInputAwaitedClearUnverifiedFixed.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyInputEarlyBefore.cfg	HerdrBusyInput	NoUnrelatedEarlyDiagnostic	HealthyBusyEventuallyInjected
+input-single-path/HerdrBusyInputEarlyDiagnosticFirst.cfg	HerdrBusyInput	NoUnrelatedEarlyDiagnostic	-
+input-single-path/HerdrBusyInputEarlyFixed.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputBefore.cfg	HerdrBusyInput	-	HealthyBusyEventuallyInjected
 input-single-path/HerdrBusyInputBlocked.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputBlockedBefore.cfg	HerdrBusyInput	-	-

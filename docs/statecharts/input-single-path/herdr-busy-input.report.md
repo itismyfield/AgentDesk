@@ -21,6 +21,8 @@ There is no explicit `herdr && busy => hold` rule in the existing models. This i
 | Model action/value | Production coordinate / required design behavior |
 |---|---|
 | `HostReady`, `Drive` | `router/message_handler/intake_turn.rs:1109-1113,1751-1766` and `router/message_handler/provider_dispatch/owner_input.rs:1060-1086`: make the existing owned busy predicates/read host-aware. `intake_gate/busy_inject.rs:82-99` is the legacy offer and retains its Herdr exclusion; `owner_takes` keeps owner traffic on one path. |
+| `ObserveEarly`, `LegacyDiagnostic` | `intake_turn.rs:1551-1552`: observe an eligible common busy target before entering the legacy tmux diagnostic block. This is entry ordering, without a new host/readiness classification policy. |
+| `ClearState`, `ExistingIdle` | `claude/herdr_turn.rs:293,320,365`: a verified same-execution `awaited_clear` delegates to the existing Idle/cleared-source path in both main and the proposal. It must never be fed to strict Busy source validation. |
 | `OReady` | `tui_o/turn_mode.rs:41`, `tui_o/writer/host.rs:372`: confirmed transcript turn mode and a writer that currently accepts the channel are prerequisites for the Herdr extension. Configuration alone is insufficient. |
 | No extra answer observer | `tui_prompt_dedupe/injected_steer.rs:243-249`: confirmed O owns the row's answer. The design calls the existing owned busy path with no extra `until_done`/legacy busy observer. |
 | `InitialBlock`, `Notify`, `RetryHeld` | The existing preparation failure remains an owned original; publish its held state, watch readiness and wake the same front after a genuine pre-key cause clears. |
@@ -40,9 +42,9 @@ There is no explicit `herdr && busy => hold` rule in the existing models. This i
 - People, allowed bots and person-origin synthetic inputs enter through the same admitted owner. Machine start/dispatch inputs do not obtain a new right to interrupt a native busy turn. Admission/source classification is tested by the implementation slice, not duplicated as a new owner in this model.
 - Cancel/Terminate/clear/stop retain their existing revocation/fence policies; this design adds no control operation. Their before-first-key cancellation and native stop proofs remain in `InputPath`/`InputNativeStop`. The implementation must run those adjacent contracts after sharing the busy writer.
 
-## TLC results
+## TLC results — initial design snapshot
 
-All 22 configs were run against the exact proposed model source. Eight baseline/proposal scenario pairs plus six one-rule mutants finished; no property is listed as unchecked. Every cfg selects only applicable temporal properties, avoiding a vacuous constant formula that TLC optimizes away.
+At the initial design snapshot, all 22 configs were run against that snapshot's exact model source. The current P2 extension and its fresh results are recorded below; the old table is historical evidence. Eight baseline/proposal scenario pairs plus six one-rule mutants finished; no property is listed as unchecked. Every cfg selects only applicable temporal properties, avoiding a vacuous constant formula that TLC optimizes away.
 
 | cfg suffix | exit | states / steps | Broken rules | Coverage |
 |---|---:|---:|---|---|
@@ -109,3 +111,47 @@ Manifest registration command: `python3 /Users/itismyfield/.adk/release/lane-run
 
 
 Chart-label correction: the sent state now reads `본문·Enter 기록, 영수증 대기` (body and Enter written, receipt pending); only `NativeProof` establishes the provider receipt. Before and Cleared were regenerated with the official statechart tool into `logs/sc-out-chart-labels` (expected exits 1 and 0, respectively). The TLA module and all 22 cfg SHA256 values remain identical to the 22-cfg/86-run CI check. `logs/sc-out-chart-labels/hashes-and-runs.json` records the old/new view hashes and unchanged source hashes; the earlier SHA file remains the historical proof record. No all-cfg source recheck was needed for this display-label change.
+
+
+## P2 extension — early observation and existing clear delegation
+
+Implementation-resume baseline: `6e9bf145ce5f649bda77a9ffd6c071d54cc9b254` (the prior design-only commit). This extension remains design-only. The target-host boundary is pending the parent lane's `DESIGN_DELTA`; these results neither establish a new host classification policy nor claim implemented Rust behavior.
+
+The model now makes two existing entry boundaries explicit:
+
+1. `Entry=early` denotes an eligible common-target busy candidate. `ObserveEarly` runs before the unrelated legacy tmux diagnostic. `NoUnrelatedEarlyDiagnostic` catches placing the common path inside/after that diagnostic, even when eventual delivery would otherwise succeed. The parameter does not mean that every early Idle/Cold input is Busy and does not select a host.
+2. `ClearState=verified` means the existing same-nonce `awaited_clear` helper has authorized the pending clear. Both Before and Fixed delegate to `ExistingIdle`; **main already supports this path and both controls must be GREEN**. `VerifiedClearNeverBusy` and `VerifiedClearEventuallyDelegates` prevent a proposed strict Busy guard from blocking it. `IgnoreClear` is a deliberately broken proposal mutant, not a historical main bug. `ClearState=unverified` conveys no delegation authority; its controls set `InitialBlock=TRUE` to represent the independently uncertain common source observation. They do not introduce a new policy that every absent/unverified clear forces Held.
+
+`ExistingIdle` is a delegation boundary. Its write action abstracts the existing Idle readiness/clear-source creation contract; a clear marker grants no direct permission to write keys. Exact source creation, nonce/target checks and Idle readiness remain required Rust integration contracts. The model does not invent those host rules.
+
+| New cfg suffix | exit | states / steps | Broken rules | Coverage |
+|---|---:|---:|---|---|
+| EarlyBefore | 1 | 4 / 7 | NoUnrelatedEarlyDiagnostic, HealthyBusyEventuallyInjected | 완료 |
+| EarlyFixed | 0 | 6 / 11 | 없음 | 완료 |
+| EarlyDiagnosticFirst | 1 | 6 / 11 | NoUnrelatedEarlyDiagnostic | 완료 |
+| AwaitedClearBefore | 0 | 5 / 9 | 없음 | 완료 |
+| AwaitedClearFixed | 0 | 5 / 9 | 없음 | 완료 |
+| AwaitedClearBusy | 1 | 5 / 9 | VerifiedClearNeverBusy, VerifiedClearEventuallyDelegates | 완료 |
+| AwaitedClearUnverifiedBefore | 0 | 3 / 5 | 없음 | 완료 |
+| AwaitedClearUnverifiedFixed | 0 | 3 / 5 | 없음 | 완료 |
+
+
+Early counterexample: original front → legacy tmux diagnostic before common target observation; the ordering invariant breaks immediately. The main Before also retains the healthy busy input. Fixed observes the common target first and writes through the one existing owner path. The `DiagnosticFirst` mutant still eventually writes once, proving the ordering invariant adds coverage beyond healthy-delivery liveness.
+
+Verified clear controls: original front → existing Idle delegation → body/Enter write → native receipt settlement, exactly once. The bad strict-Busy proposal instead writes through Busy and never reaches existing Idle. The direct main Before and Fixed both pass; there is no claim that main's pending clear path was broken.
+
+- [Early Fixed chart](herdr-busy-input.early.chart.mmd), [early Before counterexample](herdr-busy-input.early-before.chart.mmd).
+- [Existing clear delegation](herdr-busy-input.clear.chart.mmd), [strict-Busy proposal mutant](herdr-busy-input.clear-busy-mutant.chart.mmd).
+- New P2 wrapper logs and original exit reports: `logs/sc-impl1/p2-final/`. Earlier `logs/sc-impl1/AwaitedClearBefore/` modeled an incorrect first draft that treated main's clear as a Busy hold; it is superseded and must not be used as main evidence.
+- The original 22 expected.tsv rows remain byte-identical. Their 22 observed violation sets remain identical after adding `Entry=late`, `ClearState=none`. Exactly 8 new P2 manifest rows are added; no old expected set is weakened.
+- The official plain checker runs all 30 final configs against byte-identical isolated source copies at `logs/sc-impl1/tlc-ci`. Its per-invocation JVM stdout/config/exit is preserved in `logs/sc-impl1/tlc-ci-raw`, including the applied-fairness checks. Final checker: exit 0; 30/30 expected sets match, 16 GREEN and 14 expected RED, 119 actual TLC runs plus 30 applied-fairness prechecks in 108.4 seconds. All 149 JVM stdout/config/exit records are retained; final model/config/view hashes and raw exit distribution are in `logs/sc-impl1/final-hashes-and-counts.json`. No property is unexecuted, no model process remains, and no Rust build/test/runtime operation was performed.
+
+Reproduce the final isolated checker with raw capture:
+
+```sh
+export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar
+export JAVA=/opt/homebrew/opt/openjdk/bin/java
+python3 /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8114/logs/sc-impl1/run-ci-with-raw.py \
+  --root /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8114/logs/sc-impl1/tlc-ci \
+  --jobs 1
+```
