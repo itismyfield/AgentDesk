@@ -1,13 +1,8 @@
 use super::*;
 
 impl EntryDispatchFailureResult {
-    /// Apply one dispatch failure inside a caller-owned transaction.
-    ///
-    /// Locking the entry and its run makes the retry decision and transition audit one
-    /// ordered write; a changed `failed` entry is where the service then attempts run
-    /// completion on the same tx. When the run is not live, the entry becomes terminal
-    /// instead of blocking the owning dispatch terminal write or creating a
-    /// terminal-run / pending-entry split brain.
+    /// One dispatch failure on a caller-owned tx: retry decision and transition audit under the
+    /// entry and run locks; a non-live run makes the entry terminal instead of blocking.
     pub(crate) async fn write_on_pg_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         entry_id: &str,

@@ -1078,9 +1078,8 @@ mod tests {
         .expect("count entry transitions")
     }
 
-    /// Restore writes each entry's decision in one tx: `done` for a finished card, `pending`
-    /// for a card needing a new dispatch, and `pending` then an eager re-attach for a card
-    /// with a live dispatch. A failed write leaves the run cancelled and every entry skipped.
+    /// Restore writes `done`, `pending` and a live-dispatch re-attach per entry in one tx; a
+    /// failed write leaves the run cancelled and every entry skipped.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn restore_route_writes_done_existing_and_new_dispatch_entries_atomically_pg() {
         let pg_db = TestPostgresDb::create().await;

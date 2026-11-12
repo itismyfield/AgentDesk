@@ -232,8 +232,7 @@ async fn run_entry_readiness_on_pg_tx(
 ///
 /// The only other `completed` writers are the destructive admin owners pinned by
 /// `run_completion_contract_tests`: the operator `end` command and the two resets.
-///
-/// This is the DB half of the canonical completion writer: the service stages the notice
+/// This is the DB half of the canonical completion writer; the service stages the notice
 /// through the returned [`PreparedCompletion`] on this same tx.
 pub(crate) async fn prepare_run_completion_on_pg_tx<'borrow, 'conn>(
     tx: &'borrow mut sqlx::Transaction<'conn, sqlx::Postgres>,

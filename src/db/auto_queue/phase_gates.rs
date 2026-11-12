@@ -460,9 +460,9 @@ pub(crate) async fn write_phase_gate_reconcile_on_pg_tx(
     //
     //   - For `final_phase` gates the JS hook calls `completeRunAndNotify`
     //     after clearing the gate. This Rust bypass path instead resumes a
-    //     paused run, and the service then calls `maybe_finalize_run_if_ready_pg`
-    //     for every cleared gate. That helper completes and queues the notification
-    //     only when no pending/dispatched entries or other blocking gates remain.
+    //     paused run and the service then calls `maybe_finalize_run_if_ready_pg` for every
+    //     cleared gate. That helper completes and queues the notification only
+    //     when no pending/dispatched entries or other blocking gates remain.
     //
     //   - Non-final gate activation (kicking off the next phase's first
     //     dispatch) is owned by the JS hook's `activateRun` host call and

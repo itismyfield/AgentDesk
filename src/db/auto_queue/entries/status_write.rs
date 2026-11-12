@@ -9,9 +9,8 @@ use super::{
     record_entry_dispatch_history_on_pg,
 };
 
-/// Whether a changed entry now in `status` owes a run-completion attempt on its tx.
-/// `done` completes through the completed-dispatch finalizer, and `user_cancelled` keeps the
-/// run resumable so the operator can move the entry back to `pending`.
+/// Whether a changed entry now in `status` owes a run-completion attempt on its tx. `done` goes
+/// through the completed-dispatch finalizer; `user_cancelled` keeps the run resumable.
 pub(super) fn run_finalize_due(status: &str) -> bool {
     matches!(status, ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED)
 }
