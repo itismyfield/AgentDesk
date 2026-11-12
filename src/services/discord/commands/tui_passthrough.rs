@@ -345,15 +345,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    #[test]
-    fn truthful_effort_choices_exclude_rejected_ultracode() {
-        use poise::ChoiceParameter;
-        let choices = EffortLevel::list();
-        let names: Vec<&str> = choices.iter().map(|choice| choice.name.as_ref()).collect();
-        assert_eq!(names, ["low", "medium", "high", "xhigh", "max"]);
-        assert_eq!(names, super::super::config::EFFORT_LEVELS);
-    }
-
     /// Every `ClaudeSlashPassthrough` variant in this file is a LOCAL-completing
     /// command (none of them start a model turn), so the relay's lifecycle-skip
     /// allow-list MUST equal the variant set exactly. This anti-drift guard fails

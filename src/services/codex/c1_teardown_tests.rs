@@ -79,6 +79,7 @@ fn an_existing_session_is_recreated_only_under_its_clearance() {
             None,
             None,
             None,
+            None,
             "/tmp",
             tx,
             None,
@@ -131,6 +132,7 @@ fn a_cleared_existing_session_is_relaunched_exactly_once() {
     let clearance = cleared(NAME);
     let result = execute_streaming_local_tmux(
         "hello",
+        None,
         None,
         None,
         None,

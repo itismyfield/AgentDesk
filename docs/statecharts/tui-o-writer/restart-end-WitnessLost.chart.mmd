@@ -1,0 +1,69 @@
+---
+title: "같은 source의 exact End witness와 준비된 답"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: done
+    lg1: work
+    lg2: Breaks RestartWitnessBeforeSeal or RestartWitnessSurvivesBoot
+    lg3: Path to the RestartWitnessBeforeSeal or RestartWitnessSurvivesBoot bug
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  s0: 옛 Open, native closer 없음
+  s1: 물리 종료 확인, witness 읽기 전
+  s2: witness 설치 후 옛 opener 읽기
+  s3: durable witness가 crash에서 유실됨
+  s4: old cutoff 앞, 새 prompt 읽기 전
+  s5: 옛 Open만 Idle, 다음 record 읽기
+  s6: old prefix seal 전
+  s7: durable Prepared receipt, POST 허가
+  s8: 기존 Prepared의 POST 확인 대기
+  s9: 기존 POST 발견, Posted receipt 전
+  s10: 기존 게시 확인, 중복 없음
+  s11: durable witness 유실 뒤 witness 없는 seal [재시작 기회 소진]
+  s12: durable witness 유실 뒤 witness 없는 seal
+  [*] --> s0
+  s0 --> s1: old incarnation의 실제 종료 기록
+  s1 --> s2: historical binding과 prefix 검증 후 witness 설치
+  s1 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s2 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s2 --> s4: old opener 재생
+  s3 --> s3: 같은 source와 ledger를 다시 읽음 or witness 설치 없이 source 재생 or old opener 재생 or closer 없이 old Open 유지 or cutoff 뒤 새 prompt 처리
+  s4 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s4 --> s5: cutoff에서 old opener만 reset
+  s5 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s5 --> s6: cutoff 뒤 새 prompt 처리
+  s6 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s6 --> s7: old prefix seal, 기존 ledger debt 보존
+  s7 --> s8: 새 Prepared receipt의 허가로 POST 시작
+  s7 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s8 --> s10: POST 결과를 durable Posted receipt로 기록
+  s8 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s8 --> s9: 정확한 기존 POST를 history에서 확인
+  s3 --> s11: old prefix seal, 기존 ledger debt 보존
+  s9 --> s10: POST 결과를 durable Posted receipt로 기록
+  s9 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s10 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s3 --> s12: old prefix seal, 기존 ledger debt 보존
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s3 breaks
+  class s3 bugPath
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s10 teal
+  class s11 blue
+  class s11 breaks
+  class s11 bugPath
+  class s12 breaks
