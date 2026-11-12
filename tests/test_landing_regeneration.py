@@ -28,7 +28,7 @@ class LandingRegeneration(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="landing-regen-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.count = 0
         self.git("init", "-b", "main")
         self.git("config", "user.name", "Landing fixture")
