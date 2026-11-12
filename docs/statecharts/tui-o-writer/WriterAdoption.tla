@@ -30,7 +30,7 @@ vars == <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
 \*            codex.rs:229-230 (bound rollout already has output), fresh source or rollout
 \*   store    adoption.rs:414-439 (init, damaged or era-only, none)
 \*   adopt    adoption.rs:16-28; Refused is the stage-1 refusal state
-\*   custody  o_writer_host.rs:306-339, deferred.rs:89-92 (all kinds block alike)
+\*   custody  o_writer_host.rs:317-350, deferred.rs:89-92 (all kinds block alike)
 \*   attempts inflight.rs:341-344, recovery_paths/shared.rs:156-171 (tmux absent)
 \*   otherIntake  another turn's open intake row read under the intake fence
 \*            (o_channel_activation.rs fenced rows, o_channel_activation/owner.rs:25)
