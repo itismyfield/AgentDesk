@@ -88,7 +88,7 @@ def start_herdr(base, instance_id, binary, ambient, *, spawn=subprocess.Popen,
     write_private_text(root, home.relative_to(root) / "config.toml", HERDR_CONFIG)
     environment = child_environment(manifest, ambient)
     environment.update({
-        "HOME": str(home), "XDG_CONFIG_HOME": str(home / "xdg-config"),
+        "HOME": str(home), "XDG_CONFIG_HOME": str(home / "xdg"),
         "XDG_STATE_HOME": str(home / "state"), "XDG_DATA_HOME": str(home / "data"),
         "XDG_CACHE_HOME": str(home / "cache"), "XDG_RUNTIME_DIR": str(root / "runtime/herdr"),
         "HERDR_CONFIG_PATH": str(home / "config.toml"),

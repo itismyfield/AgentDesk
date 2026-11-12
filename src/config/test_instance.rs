@@ -236,12 +236,14 @@ pub(crate) fn configure_tmux_command(command: &mut Command) -> io::Result<()> {
 }
 
 pub(crate) fn validate_tmux_target(target: &str) -> io::Result<()> {
-    if let Some(instance) = current().map_err(io::Error::other)? {
-        if target != instance.tmux.prefix
-            && !target.starts_with(&format!("{}-", instance.tmux.prefix))
-        {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, rejected()));
-        }
+    if let Some(instance) = current().map_err(io::Error::other)?
+        && ((target != instance.tmux.prefix
+            && !target.starts_with(&format!("{}-", instance.tmux.prefix)))
+            || !target
+                .chars()
+                .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_'))
+    {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, rejected()));
     }
     Ok(())
 }

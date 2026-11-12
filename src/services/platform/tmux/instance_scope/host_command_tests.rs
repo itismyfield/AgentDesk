@@ -149,6 +149,8 @@ fn exercise_instance_entries() {
         "%7".into(),
         format!("{}-x:1.0", instance.tmux.prefix),
         format!("{}foreign", instance.tmux.prefix),
+        format!("{}-x;kill-server", instance.tmux.prefix),
+        format!("{}-x\nsend-keys -t AgentDesk-release", instance.tmux.prefix),
     ] {
         assert!(tmux::create_session(&foreign, None, "true").is_err());
         assert!(tmux::respawn_dead_pane(&foreign, None, "true").is_err());
