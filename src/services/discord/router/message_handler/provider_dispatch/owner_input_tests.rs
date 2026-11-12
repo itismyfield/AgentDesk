@@ -113,6 +113,12 @@ pub(super) fn owned(
     let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
     fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
     fs::write(marker, &nonce).unwrap();
+    if provider == "claude" {
+        crate::services::claude_tui::readiness::tests::pre_source(
+            name,
+            &renderer.join("transcript"),
+        );
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
