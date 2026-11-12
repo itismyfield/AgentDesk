@@ -55,14 +55,13 @@ async fn i8117_actual_bridge_uses_exact_terminal_not_progress_or_preview() {
             if legacy { encoded.as_object_mut().unwrap().remove("routine_presentation"); }
             row = serde_json::from_value(encoded).unwrap();
             inflight::save_inflight_state(&row).unwrap();
-            assert!(fixture.shared.ui.placeholder_live_events.set_session_panel_lifecycle_event(
-                fixture.channel, Some("fixture-routine-nonce"), "session_fresh",
-                &json!({"provider_session_id":"fixture-routine-session","tmux_reused":false}),
-            ));
-            let armed = fixture.shared.ui.placeholder_live_events.claim_session_banner_prefix_line(
-                fixture.channel, &ProviderKind::Claude, &turn,
-            ).expect("fixture has a real fresh-session prefix");
-            assert!(armed.contains("🆕 새 세션 시작"));
+            use crate::services::observability::turn_lifecycle::{
+                SessionStrategyDetails, TurnEvent, TurnLifecycleEmit, emit_turn_lifecycle,
+            };
+            emit_turn_lifecycle(&pool, TurnLifecycleEmit::new(
+                &turn, fixture.channel.to_string(),
+                TurnEvent::SessionFresh(SessionStrategyDetails::fresh("fixture")), "fresh fixture",
+            )).await.unwrap().expect("fresh lifecycle is durable before bridge refresh");
             crate::services::discord::increment_global_active(&fixture.shared, "i8117_bridge");
             let (completion, completed) = tokio::sync::oneshot::channel();
             let shown = Arc::new(RecordingDirectGateway::default());
