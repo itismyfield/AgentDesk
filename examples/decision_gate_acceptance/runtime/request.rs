@@ -1,1 +1,1 @@
-../../../src/services/decision_gate/runtime/request.rs
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/services/decision_gate/runtime/request.rs"));

@@ -39,6 +39,20 @@ pub(crate) mod services {
             ));
         }
         pub(crate) mod runtime {
+            const _: () = {
+                let original = include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/services/decision_gate/runtime.rs"
+                ));
+                let snapshot = include_bytes!("runtime/mod.rs");
+                assert!(original.len() == snapshot.len(), "run sync_runtime.py");
+                let mut index = 0;
+                while index < original.len() {
+                    assert!(original[index] == snapshot[index], "run sync_runtime.py");
+                    index += 1;
+                }
+            };
+
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/examples/decision_gate_acceptance/runtime/mod.rs"

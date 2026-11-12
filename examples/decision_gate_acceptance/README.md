@@ -48,8 +48,11 @@ cargo run -p agentdesk --example decision_gate_acceptance -- --self-test --out /
 batch 지연을 표본 지연으로 합산하지 않는다. 재시도와 redirect는 없다.
 
 `sources.rs`는 기존 공통 판정 소스와 설정 DTO·redact 구현을 그대로 포함한다.
-`runtime/`의 상대 심볼릭 링크는 원본의 하위 모듈 탐색 경로를 보존한다. 비Unix
-빌드는 이 harness 모듈을 제외해 기본 빌드가 심볼릭 링크 지원에 의존하지 않는다.
+하위 모듈은 일반 include 파일로 원본을 참조한다. `runtime/mod.rs`만 하위 모듈
+경로를 보존하는 생성 snapshot이며, 원본 runtime.rs와 바이트가 다르면 컴파일이
+실패한다. 원본을 바꿨을 때 `python3 examples/decision_gate_acceptance/sync_runtime.py`로
+재생성한다. 감사 snapshot이 모든 경로를 정규 파일로 요구하므로 symlink를 쓰지 않는다.
+비Unix 빌드는 harness 모듈을 제외한다.
 실제 라우트의 `issue_duplicate::check_with_fetch` 소스에 고정 후보 closure를
 주입한다. 관찰 wrapper는 공통 gate의 observation을 보관하고 결과는 그대로
 반환한다. 실제 표본은 원래 gate의 HTTP 경로로 직접 전송하며, 관찰 wrapper는
