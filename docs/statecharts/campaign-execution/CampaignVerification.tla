@@ -32,9 +32,9 @@ VARIABLES
     act, init, res,
     lsrc, lcv, lep, llegit, fresh, handle,
     journal, jres, delivered, proc, starts,
-    badStart
+    badStart, receiptTx
 
-sys == <<up, crashes>>
+sys == <<up, crashes, receiptTx>>
 ctl == <<control, stop, cv, acked, confirmed>>
 gate == <<gateCv, gateEpoch>>
 node == <<kind, stage, epoch, interrupted, attA, attR, grant, revoked, launch, prov>>
@@ -42,12 +42,13 @@ vv == <<subject, first, plan, inb, vstate>>
 ph == <<act, init, res>>
 drv == <<lsrc, lcv, lep, llegit, fresh, handle>>
 host == <<journal, jres, delivered, proc, starts>>
-vars == <<sys, ctl, gate, node, vv, ph, drv, host, badStart>>
+verificationVars == <<up, crashes, ctl, gate, node, vv, ph, drv, host, badStart>>
+vars == <<verificationVars, receiptTx>>
 
 P == IF TwoPhase THEN {1, 2} ELSE {1}
 All(v) == [p \in P |-> v]
 
-Init ==
+VerificationInit ==
     /\ up = TRUE /\ crashes = 0
     /\ control = "running" /\ stop = "none" /\ cv = 0 /\ acked = FALSE /\ confirmed = FALSE
     /\ gateCv = 0 /\ gateEpoch = 1
@@ -61,6 +62,8 @@ Init ==
     /\ journal = All("none") /\ jres = All("none") /\ delivered = All(FALSE)
     /\ proc = All("none") /\ starts = All(0)
     /\ badStart = FALSE
+
+Init == VerificationInit /\ receiptTx = "inactive"
 
 Cur == IF stage = "impl" THEN attA ELSE IF stage = "review" THEN attR ELSE "none"
 CurOpen == Cur = "open"
@@ -186,7 +189,7 @@ CrashMidInitiate(p) ==
         /\ badStart' = (badStart \/ (spawned /\ ~llegit[p]))
     /\ up' = FALSE /\ crashes' = crashes + 1
     /\ lsrc' = All("none") /\ fresh' = All(FALSE) /\ handle' = All(FALSE)
-    /\ UNCHANGED <<ctl, node, vv, ph, lcv, lep, llegit, jres, delivered>>
+    /\ UNCHANGED <<ctl, node, vv, ph, lcv, lep, llegit, jres, delivered, receiptTx>>
 RecordIndet(p) ==
     /\ up /\ FactOK /\ journal[p] = "indet" /\ act[p] = "pending"
     /\ act' = [act EXCEPT ![p] = "unknown"] /\ init' = [init EXCEPT ![p] = "indet"]
@@ -318,8 +321,8 @@ ConfirmStopped ==
 Crash ==
     /\ up /\ crashes < MaxCrash /\ up' = FALSE /\ crashes' = crashes + 1
     /\ lsrc' = All("none") /\ fresh' = All(FALSE) /\ handle' = All(FALSE)
-    /\ UNCHANGED <<ctl, gate, node, vv, ph, lcv, lep, llegit, host, badStart>>
-Restart == ~up /\ up' = TRUE /\ UNCHANGED <<crashes, ctl, gate, node, vv, ph, drv, host, badStart>>
+    /\ UNCHANGED <<ctl, gate, node, vv, ph, lcv, lep, llegit, host, badStart, receiptTx>>
+Restart == ~up /\ up' = TRUE /\ UNCHANGED <<crashes, ctl, gate, node, vv, ph, drv, host, badStart, receiptTx>>
 Idle == up /\ UNCHANGED vars
 
 Driver ==
@@ -369,4 +372,114 @@ StopFinishCompletes == (control = "stopping" /\ stop = "finish") ~> (control = "
 UnsealedClosed == (control = "stopped" /\ subject = "none") ~> (vstate = "cancelled")
 VSettles == <>(vstate # "open")
 DeliveredEventually == \A p \in P : (journal[p] \in {"finished", "settled"}) ~> delivered[p]
+
+\* DB command receipts are distinct from the external execution receipts above.
+\* The transaction mode freezes the verification kernel and explores its commit boundary.
+RC == {1, 2}
+RAll(value) == [c \in RC |-> value]
+RTerminal == {"done", "rolled_back"}
+RInit(outcomes) ==
+    /\ VerificationInit
+    /\ \E outcome \in outcomes : receiptTx = [
+        server |-> TRUE, crashes |-> 0, owner |-> 0,
+        pc |-> RAll("begin"), snapshot |-> RAll(0), observedLocked |-> RAll(FALSE),
+        pending |-> RAll(FALSE), pendingReceipt |-> RAll(FALSE), leaked |-> RAll(FALSE),
+        saved |-> "none", outcome |-> outcome, effects |-> 0, earlyFacts |-> FALSE,
+        badFact |-> FALSE, badRollback |-> FALSE]
+
+RBegin(c, early) ==
+    /\ receiptTx.server /\ receiptTx.pc[c] = "begin"
+    /\ receiptTx' = [receiptTx EXCEPT !.pc[c] = "waiting",
+        !.snapshot[c] = IF early THEN receiptTx.effects ELSE @, !.earlyFacts = early]
+    /\ UNCHANGED verificationVars
+RAcquire(c) ==
+    /\ receiptTx.server /\ receiptTx.pc[c] = "waiting" /\ receiptTx.owner = 0
+    /\ receiptTx' = [receiptTx EXCEPT !.owner = c, !.pc[c] = "lookup"]
+    /\ UNCHANGED verificationVars
+RLookup(c) ==
+    /\ receiptTx.server /\ receiptTx.pc[c] = "lookup" /\ receiptTx.owner = c
+    /\ receiptTx' = [receiptTx EXCEPT
+        !.pc[c] = IF receiptTx.saved = "none" THEN "facts" ELSE "replay"]
+    /\ UNCHANGED verificationVars
+RReadFacts(c, early) ==
+    /\ receiptTx.server /\ receiptTx.pc[c] = "facts" /\ receiptTx.owner = c
+    /\ receiptTx' = [receiptTx EXCEPT !.pc[c] = "decide",
+        !.snapshot[c] = IF early THEN @ ELSE receiptTx.effects,
+        !.observedLocked[c] = ~early]
+    /\ UNCHANGED verificationVars
+RDecide(c) ==
+    /\ receiptTx.server /\ receiptTx.pc[c] = "decide"
+    /\ receiptTx' = [receiptTx EXCEPT !.pc[c] = "persist",
+        !.badFact = @ \/ receiptTx.owner # c \/ ~receiptTx.observedLocked[c]
+                     \/ receiptTx.snapshot[c] # receiptTx.effects]
+    /\ UNCHANGED verificationVars
+RPersist(c, split) ==
+    /\ receiptTx.server /\ receiptTx.pc[c] = "persist" /\ receiptTx.owner = c
+    /\ LET changed == receiptTx.outcome = "changed"
+       IN receiptTx' = [receiptTx EXCEPT !.pc[c] = "render", !.pending[c] = changed,
+            !.effects = IF split /\ changed THEN @ + 1 ELSE @,
+            !.leaked[c] = split /\ changed]
+    /\ UNCHANGED verificationVars
+RRender(c) ==
+    /\ receiptTx.server /\ receiptTx.pc[c] = "render" /\ receiptTx.owner = c
+    /\ receiptTx' = [receiptTx EXCEPT !.pc[c] = "receipt"]
+    /\ UNCHANGED verificationVars
+RWriteReceipt(c) ==
+    /\ receiptTx.server /\ receiptTx.pc[c] = "receipt" /\ receiptTx.owner = c
+    /\ receiptTx' = [receiptTx EXCEPT !.pc[c] = "commit", !.pendingReceipt[c] = TRUE]
+    /\ UNCHANGED verificationVars
+RCommit(c, split) ==
+    /\ receiptTx.server /\ receiptTx.pc[c] \in {"commit", "replay"} /\ receiptTx.owner = c
+    /\ receiptTx.pc[c] = "commit" => receiptTx.pendingReceipt[c]
+    /\ LET freshReceipt == receiptTx.pc[c] = "commit"
+       IN receiptTx' = [receiptTx EXCEPT !.pc[c] = "done", !.owner = 0,
+            !.saved = IF freshReceipt THEN receiptTx.outcome ELSE @,
+            !.effects = IF freshReceipt /\ receiptTx.pending[c] /\ ~split THEN @ + 1 ELSE @,
+            !.pending[c] = FALSE, !.pendingReceipt[c] = FALSE, !.leaked[c] = FALSE]
+    /\ UNCHANGED verificationVars
+RRollback(c) ==
+    /\ receiptTx.server /\ receiptTx.pc[c] \notin RTerminal \cup {"begin"}
+    /\ receiptTx' = [receiptTx EXCEPT !.pc[c] = "rolled_back",
+        !.owner = IF @ = c THEN 0 ELSE @,
+        !.pending[c] = FALSE, !.pendingReceipt[c] = FALSE,
+        !.badRollback = @ \/ receiptTx.leaked[c]]
+    /\ UNCHANGED verificationVars
+RCrash ==
+    /\ receiptTx.server /\ receiptTx.crashes < MaxCrash
+    /\ receiptTx' = [receiptTx EXCEPT !.server = FALSE, !.crashes = @ + 1, !.owner = 0,
+        !.pc = [c \in RC |-> IF receiptTx.pc[c] = "rolled_back" THEN "rolled_back" ELSE "begin"],
+        !.observedLocked = RAll(FALSE), !.pending = RAll(FALSE), !.pendingReceipt = RAll(FALSE),
+        !.badRollback = @ \/ (\E c \in RC : receiptTx.leaked[c])]
+    /\ UNCHANGED verificationVars
+RRestart ==
+    /\ ~receiptTx.server /\ receiptTx' = [receiptTx EXCEPT !.server = TRUE]
+    /\ UNCHANGED verificationVars
+RIdle == receiptTx.server /\ UNCHANGED vars
+RWork(c, early, split) ==
+    \/ RBegin(c, early) \/ RAcquire(c) \/ RLookup(c) \/ RReadFacts(c, early)
+    \/ RDecide(c) \/ RPersist(c, split) \/ RRender(c) \/ RWriteReceipt(c)
+    \/ RCommit(c, split) \/ RRollback(c)
+RNext(early, split) == (\E c \in RC : RWork(c, early, split)) \/ RCrash \/ RRestart \/ RIdle
+RNormalInit == RInit({"changed", "unchanged", "rejected", "notfound"})
+RChangedInit == RInit({"changed"})
+RNormalNext == RNext(FALSE, FALSE)
+REarlyNext == RNext(TRUE, FALSE)
+RSplitNext == RNext(FALSE, TRUE)
+ReceiptSpec == RNormalInit /\ [][RNormalNext]_vars
+    /\ (\A c \in RC : WF_vars(RWork(c, FALSE, FALSE))) /\ WF_vars(RRestart)
+ReceiptChartSpec == RChangedInit /\ [][RNormalNext]_vars
+    /\ (\A c \in RC : WF_vars(RWork(c, FALSE, FALSE))) /\ WF_vars(RRestart)
+ReceiptEarlyFactsSpec == RChangedInit /\ [][REarlyNext]_vars
+    /\ (\A c \in RC : WF_vars(RWork(c, TRUE, FALSE))) /\ WF_vars(RRestart)
+ReceiptSplitWriteSpec == RChangedInit /\ [][RSplitNext]_vars
+    /\ (\A c \in RC : WF_vars(RWork(c, FALSE, TRUE))) /\ WF_vars(RRestart)
+
+ReceiptEffectAtMostOnce == receiptTx.effects <= 1
+ReceiptAtomicEffects == receiptTx.effects = (IF receiptTx.saved = "changed" THEN 1 ELSE 0)
+ReceiptRollbackHasNoEffect == ~receiptTx.badRollback
+ReceiptDecisionUsesLockedFacts == ~receiptTx.badFact
+ReceiptSingleLock == \A c \in RC :
+    receiptTx.pc[c] \in {"lookup", "facts", "decide", "persist", "render", "receipt", "commit", "replay"}
+        => receiptTx.owner = c
+ReceiptCallsComplete == <>(\A c \in RC : receiptTx.pc[c] \in RTerminal)
 =========================================================================

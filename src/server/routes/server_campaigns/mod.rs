@@ -15,6 +15,7 @@ use crate::{
     db::server_campaigns as store,
     error::{AppError, AppResult, ErrorCode},
     services::campaign_execution::{
+        commands,
         model::{CampaignState, Command, CommandEnvelope},
         view,
     },
@@ -119,7 +120,7 @@ pub(super) async fn create(
     protocol::key(&input.idempotency_key)?;
     id(&input.id)?;
     protocol::saved(
-        store::create(
+        commands::create(
             pool(&state)?,
             &input.id,
             &input.definition,
@@ -151,7 +152,7 @@ pub(super) async fn edit(
         },
     };
     protocol::saved(
-        store::execute(pool(&state)?, &campaign_id, &envelope, protocol::edited)
+        commands::execute(pool(&state)?, &campaign_id, &envelope, protocol::edited)
             .await
             .map_err(store_error)?,
     )
@@ -171,7 +172,7 @@ pub(super) async fn command(
         command: input.command.into_domain()?,
     };
     protocol::saved(
-        store::execute(pool(&state)?, &campaign_id, &envelope, protocol::commanded)
+        commands::execute(pool(&state)?, &campaign_id, &envelope, protocol::commanded)
             .await
             .map_err(store_error)?,
     )
