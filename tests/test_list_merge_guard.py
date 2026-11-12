@@ -18,10 +18,38 @@ GUARD = ROOT / "scripts/ci/list_merge_guard.py"
 EXPECTED = "docs/statecharts/expected.tsv"
 REASONS = "scripts/ci/test-removal-justifications.txt"
 FILES = (EXPECTED, REASONS)
-SEED = {
-    EXPECTED: "# configs\na/A.cfg\tA\t-\t-\nz/Z.cfg\tZ\t-\t-\n",
-    REASONS: "# reasons\nagentdesk a::test | removed | original\nagentdesk z::test | removed | retained\n",
-}
+FIXTURE = ROOT / "tests/fixtures/list_merge/delete-modify"
+
+
+def fixture_state(side):
+    return {path: (FIXTURE / side / Path(path).name).read_text() for path in FILES}
+
+
+SEED = fixture_state("base")
+
+
+def production_body():
+    script = (ROOT / "scripts/ci-script-checks.sh").read_text()
+    registration = 'if run_check contracts "Union list merge guard and required CI contract"; then\n'
+    return script.split(registration, 1)[1].split('"$PYTHON" -m unittest tests.test_list_merge_guard\n', 1)[0]
+
+
+def install_guard(repo):
+    scripts = repo.root / "scripts/ci"
+    scripts.mkdir(exist_ok=True, parents=True)
+    for name in ("list_merge_guard.py", "statecharts_tlc.py", "nextest_ci.py", "nextest_required.py", "merge_candidate.py"):
+        source = ROOT / "scripts/ci" / name
+        if source.exists():
+            shutil.copyfile(source, scripts / name)
+
+
+def run_production(repo, **overrides):
+    env = {**os.environ, "GFP_EVENT_NAME": "pull_request", "GFP_BASE_SHA": repo.base,
+           "GFP_HEAD_SHA": repo.theirs, "GFP_CANDIDATE_SHA": repo.git("rev-parse", "HEAD").stdout.strip(),
+           "PYTHON": sys.executable}
+    env.update(overrides)
+    return subprocess.run(["bash", "-euo", "pipefail", "-c", production_body()],
+                          cwd=repo.root, env=env, capture_output=True, text=True)
 
 
 class MergeRepo:
@@ -81,8 +109,7 @@ class UnionMergeGuardTest(unittest.TestCase):
         self.assertIn(message, result.stdout + result.stderr)
 
     def test_delete_modify_resurrection(self):
-        self.repo.merge({REASONS: SEED[REASONS].replace("agentdesk a::test | removed | original\n", "")},
-                        {REASONS: SEED[REASONS].replace("original", "changed")})
+        self.repo.merge(fixture_state("ours"), fixture_state("theirs"))
         self.assertEqual(self.repo.merged.returncode, 0)
         self.assertIn("changed", (self.repo.root / REASONS).read_text())
         self.assert_rejected("delete/modify")
@@ -228,11 +255,10 @@ class RequiredListGuardWiringTest(unittest.TestCase):
         self.assertEqual(step["env"]["GFP_BASE_SHA"], "${{ github.event.pull_request.base.sha }}")
         self.assertEqual(step["env"]["GFP_HEAD_SHA"], "${{ github.event.pull_request.head.sha }}")
         self.assertEqual(step["env"]["GFP_EVENT_NAME"], "${{ github.event_name }}")
+        self.assertEqual(step["env"]["GFP_CANDIDATE_SHA"], "${{ github.sha }}")
         self.assertEqual(step["env"]["SCRIPT_CHECK_SHARD"], "contracts")
         title = "Union list merge guard and required CI contract"
-        script = (ROOT / "scripts/ci-script-checks.sh").read_text()
-        registration = f'if run_check contracts "{title}"; then\n'
-        body = script.split(registration, 1)[1].split('"$PYTHON" -m unittest tests.test_list_merge_guard\n', 1)[0]
+        body = production_body()
         from scripts.ci.script_check_inputs import skipped_checks
         for paths in ('["README.md"]', '["docs/statecharts/expected.tsv"]', '[".gitattributes"]'):
             self.assertNotIn(title, skipped_checks({"GITHUB_EVENT_NAME": "pull_request",
@@ -240,12 +266,10 @@ class RequiredListGuardWiringTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="list-wiring-") as directory:
             repo = MergeRepo(Path(directory))
             repo.merge(theirs={EXPECTED: SEED[EXPECTED] + "zz/New.cfg\tNew\t-\t-\n"})
-            scripts = repo.root / "scripts/ci"
-            scripts.mkdir(exist_ok=True, parents=True)
-            for name in ("list_merge_guard.py", "statecharts_tlc.py", "nextest_ci.py", "nextest_required.py"):
-                shutil.copyfile(ROOT / "scripts/ci" / name, scripts / name)
+            install_guard(repo)
             env = {**os.environ, "GFP_EVENT_NAME": "pull_request", "GFP_BASE_SHA": repo.ours,
-                   "GFP_HEAD_SHA": repo.theirs, "PYTHON": sys.executable}
+                   "GFP_HEAD_SHA": repo.theirs, "GFP_CANDIDATE_SHA": repo.git("rev-parse", "HEAD").stdout.strip(),
+                   "PYTHON": sys.executable}
             good = subprocess.run(["bash", "-euo", "pipefail", "-c", body],
                                   cwd=repo.root, env=env, capture_output=True, text=True)
             self.assertEqual(good.returncode, 0, good.stdout + good.stderr)
@@ -259,6 +283,84 @@ class RequiredListGuardWiringTest(unittest.TestCase):
                                          cwd=repo.root, env=env, capture_output=True, text=True)
             self.assertNotEqual(missing_ref.returncode, 0)
             self.assertIn("needs its head SHA", missing_ref.stderr)
+
+
+class CandidateProvenanceTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="list-candidate-")
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = MergeRepo(Path(self.tmp.name))
+        install_guard(self.repo)
+
+    def test_stale_event_base_preserves_main_only_rows(self):
+        main = SEED[EXPECTED].replace("z/Z.cfg", "m/Main.cfg\tMain\t-\t-\nz/Z.cfg")
+        self.repo.merge({EXPECTED: main}, {EXPECTED: SEED[EXPECTED] + "zz/Head.cfg\tHead\t-\t-\n"})
+        self.assertEqual(self.repo.merged.returncode, 0)
+        result = run_production(self.repo)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ours=" + self.repo.ours, result.stdout)
+
+    def test_candidate_must_equal_checked_out_head(self):
+        self.repo.merge()
+        result = run_production(self.repo, GFP_CANDIDATE_SHA=self.repo.theirs)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("not checked-out HEAD", result.stderr)
+
+    def test_candidate_must_have_exactly_two_parents(self):
+        self.repo.merge()
+        tree = self.repo.git("rev-parse", "HEAD^{tree}").stdout.strip()
+        for parents in ((self.repo.ours,), (self.repo.ours, self.repo.theirs, self.repo.base)):
+            with self.subTest(parents=len(parents)):
+                args = [arg for parent in parents for arg in ("-p", parent)]
+                candidate = self.repo.git("commit-tree", tree, *args, "-m", "invalid parent count").stdout.strip()
+                self.repo.git("checkout", "-q", "--detach", candidate)
+                result = run_production(self.repo)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("provenance mismatch", result.stderr)
+
+    def test_second_parent_must_equal_event_head(self):
+        self.repo.merge()
+        result = run_production(self.repo, GFP_HEAD_SHA=self.repo.base)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("provenance mismatch", result.stderr)
+
+    def test_event_base_must_be_ancestor_of_first_parent(self):
+        self.repo.merge()
+        tree = self.repo.git("rev-parse", self.repo.base + "^{tree}").stdout.strip()
+        unrelated = self.repo.git("commit-tree", tree, "-m", "unrelated root").stdout.strip()
+        result = run_production(self.repo, GFP_BASE_SHA=unrelated)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("provenance mismatch", result.stderr)
+
+    def test_delete_modify_fixture_is_rejected_by_production_shell(self):
+        self.repo.merge(fixture_state("ours"), fixture_state("theirs"))
+        self.assertEqual(self.repo.merged.returncode, 0)
+        result = run_production(self.repo)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("delete/modify", result.stderr)
+        result = subprocess.run([sys.executable, str(GUARD), "--base", self.repo.base,
+                                 "--ours", self.repo.ours, "--theirs", self.repo.theirs,
+                                 "--merged", str(self.repo.root), "--repo", str(self.repo.root)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("delete/modify", result.stderr)
+
+    def test_local_api_worktree_tree_and_exit_codes(self):
+        self.repo.merge()
+        argv = [sys.executable, str(GUARD), "--base", self.repo.base, "--ours", self.repo.ours,
+                "--theirs", self.repo.theirs, "--repo", str(self.repo.root)]
+        for merged in (str(self.repo.root), self.repo.git("rev-parse", "HEAD^{tree}").stdout.strip()):
+            with self.subTest(merged=merged):
+                result = subprocess.run([*argv, "--merged", merged], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.repo.write(EXPECTED, "# empty result\n")
+        result = subprocess.run([*argv, "--merged", str(self.repo.root)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        invalid = argv.copy()
+        invalid[invalid.index("--base") + 1] = "missing-ref"
+        result = subprocess.run([*invalid, "--merged", str(self.repo.root)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("git", result.stderr)
 
 
 if __name__ == "__main__":

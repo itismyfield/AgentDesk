@@ -567,14 +567,7 @@ if run_check contracts "Script checks shard ownership + result mirror contract";
 fi
 
 if run_check contracts "Union list merge guard and required CI contract"; then
-list_guard_base=HEAD
-list_guard_head=HEAD
-if [ "${GFP_EVENT_NAME:-${GITHUB_EVENT_NAME:-}}" = pull_request ]; then
-  list_guard_base="${GFP_BASE_SHA:?PR list guard needs its base SHA}"
-  list_guard_head="${GFP_HEAD_SHA:?PR list guard needs its head SHA}"
-fi
-list_guard_ancestor="$(git merge-base "$list_guard_base" "$list_guard_head")"
-"$PYTHON" scripts/ci/list_merge_guard.py "$list_guard_ancestor" "$list_guard_base" "$list_guard_head"
+"$PYTHON" scripts/ci/list_merge_guard.py --ci
 "$PYTHON" -m unittest tests.test_list_merge_guard
 fi
 
