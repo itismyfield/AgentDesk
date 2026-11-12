@@ -1,0 +1,27 @@
+---
+title: "Fresh Claude source의 verified pin 발행"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks VerifiedPinMatchesRegistered
+    lg1: Path to the VerifiedPinMatchesRegistered bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: fresh source 등록 전
+  s1: 등록 전 hook은 승격 대기
+  s2: 같은 UUID의 Stat 등록
+  s3: authentic hook, pin 없음
+  s4: 잘못된 replacement pin
+  [*] --> s0
+  s0 --> s1: 같은 session authentic hook
+  s0 --> s2: launch Stat 등록
+  s1 --> s2: launch Stat 등록
+  s2 --> s3: 같은 session authentic hook
+  s3 --> s4: opened fd와 first record 검증 후 pin
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 breaks
+  class s4 bugPath
