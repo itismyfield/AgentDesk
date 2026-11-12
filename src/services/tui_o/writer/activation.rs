@@ -19,6 +19,8 @@ use crate::services::tui_o::store::{InitOrigin, InitSource, Initialized, OStore}
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ActivationFacts {
     pub open_intake: i64,
+    /// Of `open_intake`, the rows naming the message of the turn Legacy's mailbox runs.
+    pub own_turn_intake: i64,
     pub runner_sessions: i64,
     pub node_override: Option<String>,
 }
@@ -121,8 +123,8 @@ fn activate_as(
     result
 }
 
-/// As `activate_with` for a Codex takeover whose first prompt Legacy already took in: that turn's
-/// open intake rows stay Legacy's, so only they stop blocking. Queued bodies refuse under the lock.
+/// As `activate_with` for a Codex takeover whose first prompt Legacy already took in: only the open
+/// intake rows of the turn Legacy runs stop blocking. Queued bodies refuse under the lock.
 pub fn activate_codex_takeover(
     store: &OStore,
     channel: u64,
@@ -156,8 +158,9 @@ pub fn activate_takeover(
     sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
     origin: InitOrigin,
 ) -> Result<(), String> {
+    // Another turn's open intake, or a row not proven the running turn's, still blocks.
     let facts = ActivationFacts {
-        open_intake: 0,
+        open_intake: facts.open_intake - facts.own_turn_intake,
         ..facts
     };
     let sources = || match queued_bodies {

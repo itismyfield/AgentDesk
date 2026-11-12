@@ -4,11 +4,11 @@ CONSTANTS Fix, Mut
 VARIABLES sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
           recovered, rejected, commitWithOther, hturn, hp, nativeEnded,
-          endedBeforeBase, prevOwed, commitPastOwed
+          endedBeforeBase, prevOwed, commitPastOwed, otherIntake
 vars == <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
           recovered, rejected, commitWithOther, hturn, hp, nativeEnded,
-          endedBeforeBase, prevOwed, commitPastOwed>>
+          endedBeforeBase, prevOwed, commitPastOwed, otherIntake>>
 
 \* Code baseline 13f9acdd9a; the stage-1 adoption plan r2 with its r2.1 corrections.
 \* One TUI-bound channel with one turn, plus one non-TUI (headless) channel in the same config.
@@ -30,8 +30,10 @@ vars == <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
 \*            codex.rs:229-230 (bound rollout already has output), fresh source or rollout
 \*   store    adoption.rs:414-439 (init, damaged or era-only, none)
 \*   adopt    adoption.rs:16-28; Refused is the stage-1 refusal state
-\*   custody  o_writer_host.rs:306-339, deferred.rs:89-92 (all kinds block alike)
+\*   custody  o_writer_host.rs:317-350, deferred.rs:89-92 (all kinds block alike)
 \*   attempts inflight.rs:341-344, recovery_paths/shared.rs:156-171 (tmux absent)
+\*   otherIntake  another turn's open intake row read under the intake fence
+\*            (o_channel_activation.rs fenced rows, o_channel_activation/owner.rs:25)
 
 Booted == Fix = "main" \/ sel \in {"default", "defaultOff"}
 Selected == sel \in {"default", "lateOff"}
@@ -70,7 +72,7 @@ Evidence == op >= 1 \/ lp >= 1 \/ Duty
 \* terminal delivery blocks; waitMark only names the held turn's own row.
 OwnCustody == turn \in {"running", "held"}
 Exempt == Mut = "exemptAllRows" \/ (Fix # "main" /\ waitMark /\ turn = "held")
-Blocked == (otherCustody /\ Mut # "exemptAllRows") \/ (OwnCustody /\ ~Exempt)
+Blocked == ((otherCustody \/ otherIntake) /\ Mut # "exemptAllRows") \/ (OwnCustody /\ ~Exempt)
 
 Init ==
     /\ sel \in {"default", "explicitOff", "listExcl", "lateOff", "defaultOff"}
@@ -83,13 +85,14 @@ Init ==
     /\ oStart = IF store = "init" THEN "F" ELSE "none"
     /\ rejected = (adopt = "Refused")
     /\ turn = "none" /\ waitMark = FALSE /\ otherCustody \in BOOLEAN
+    /\ otherIntake \in IF Fix = "stage1" THEN BOOLEAN ELSE {FALSE}
     /\ lp = 0 /\ op = 0 /\ rowCleared = FALSE /\ dispatchSettled = FALSE
     /\ attempts = 0 /\ restarts = 0 /\ recovered = FALSE /\ commitWithOther = FALSE
     /\ hturn = "none" /\ hp = 0 /\ nativeEnded = FALSE /\ endedBeforeBase = FALSE
     /\ prevOwed \in BOOLEAN /\ commitPastOwed = FALSE
 
 Fixed == UNCHANGED <<sel, site, root, exec, bound, nativeEnded, endedBeforeBase, prevOwed,
-                     commitPastOwed>>
+                     commitPastOwed, otherIntake>>
 
 \* Discord intake on the TUI channel opens a turn (intake_dispatch.rs:281-294).
 Input == /\ Booted /\ turn = "none" /\ turn' = "running"
@@ -150,9 +153,10 @@ WatcherDispatch ==
 
 Commit(start) ==
     /\ adopt' = "Committed" /\ store' = "init" /\ oStart' = start
-    /\ commitWithOther' = (commitWithOther \/ otherCustody)
+    /\ commitWithOther' = (commitWithOther \/ otherCustody \/ otherIntake)
     /\ commitPastOwed' = (commitPastOwed \/ prevOwed)
-    /\ UNCHANGED <<sel, site, root, exec, bound, nativeEnded, endedBeforeBase, prevOwed>>
+    /\ UNCHANGED <<sel, site, root, exec, bound, nativeEnded, endedBeforeBase, prevOwed,
+                    otherIntake>>
     /\ UNCHANGED <<turn, waitMark, otherCustody, lp, op, rowCleared, dispatchSettled,
                     attempts, restarts, recovered, rejected, hturn, hp>>
 
@@ -174,14 +178,20 @@ NativeEnd == /\ turn \in {"running", "held"} /\ ~nativeEnded /\ nativeEnded' = T
              /\ UNCHANGED <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
                              otherCustody, lp, op, rowCleared, dispatchSettled, attempts,
                              restarts, recovered, rejected, commitWithOther, hturn, hp,
-                             prevOwed, commitPastOwed>>
+                             prevOwed, commitPastOwed, otherIntake>>
 
 \* Legacy finishes the earlier rollout's turn, or a later read proves it unsent.
 PrevDrains == /\ prevOwed /\ prevOwed' = FALSE
               /\ UNCHANGED <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
                               otherCustody, lp, op, rowCleared, dispatchSettled, attempts,
                               restarts, recovered, rejected, commitWithOther, hturn, hp,
-                              nativeEnded, endedBeforeBase, commitPastOwed>>
+                              nativeEnded, endedBeforeBase, commitPastOwed, otherIntake>>
+\* Late takeover of the source Legacy runs a turn on (late_adopt/codex.rs:284,363 and :440, which
+\* claude.rs:84 takes): Legacy's running turn is taken, another turn's open intake still blocks.
+\* lateExemptIntake lets every open intake row pass, as activation.rs activate_takeover did.
+TakeoverBlocked == otherCustody \/ (otherIntake /\ Mut # "lateExemptIntake")
+LateTakeover == /\ Fix = "stage1" /\ adopt \in {"Deferred", "Pending"} /\ ~TakeoverBlocked
+                /\ OwedClear /\ Commit(IF bound # "fresh" /\ SkipsEnded THEN "EOF" ELSE "F")
 \* Stale handoff at the end of file (deferred.rs:26-29); not guaranteed to happen.
 EofHandoff == /\ Fix # "stage1" /\ adopt = "Deferred" /\ bound = "withOutput" /\ ~Blocked
               /\ Commit(IF turn = "none" THEN "F" ELSE "EOF")
@@ -238,9 +248,18 @@ HeadlessTerminal == /\ hturn = "running"
                                     rowCleared, dispatchSettled, attempts, restarts,
                                     recovered, rejected, commitWithOther>>
 
+\* Another turn's open intake row is routed or ends.
+OtherIntakeEnds == /\ otherIntake /\ otherIntake' = FALSE
+                   /\ UNCHANGED <<sel, site, root, exec, bound, store, adopt, oStart, turn,
+                                   waitMark, otherCustody, lp, op, rowCleared, dispatchSettled,
+                                   attempts, restarts, recovered, rejected, commitWithOther,
+                                   hturn, hp, nativeEnded, endedBeforeBase, prevOwed,
+                                   commitPastOwed>>
+
 Rest == UNCHANGED vars
 Next == Input \/ TerminalBody \/ ReEval \/ RecoveryBody \/ WatcherDispatch \/ FreshAdopt
         \/ WarmAdoptF \/ EofHandoff \/ Reject \/ OPost \/ OtherTurnEnds \/ Restart \/ NativeEnd \/ PrevDrains
+        \/ LateTakeover \/ OtherIntakeEnds
         \/ HeadlessInput \/ HeadlessTerminal \/ Rest
 
 \* Writer, recovery and turn-end actions are fair. Input, Restart, Reject, the stale handoff,
@@ -249,6 +268,7 @@ Spec == Init /\ [][Next]_vars
         /\ WF_vars(TerminalBody) /\ WF_vars(ReEval) /\ WF_vars(RecoveryBody)
         /\ WF_vars(FreshAdopt) /\ WF_vars(WarmAdoptF) /\ WF_vars(OPost)
         /\ WF_vars(OtherTurnEnds) /\ WF_vars(HeadlessTerminal) /\ WF_vars(PrevDrains)
+        /\ WF_vars(LateTakeover) /\ WF_vars(OtherIntakeEnds)
 
 NoLegacyBodyOnTui == lp = 0
 AnswerAtMostOnce == op + lp <= 1
@@ -264,4 +284,7 @@ HeldTurnAnswered == [](turn = "held" /\ Adoptable => <>(op = 1 \/ rejected))
 AdoptionSettles == [](adopt = "Deferred" /\ Adoptable /\ turn # "none"
                       => <>(adopt = "Committed" \/ rejected))
 RowEventuallySettled == [](op = 1 => <>rowCleared)
+\* A late takeover held by another turn's open intake commits once that input ends.
+TakeoverSettles == [](otherIntake /\ Adoptable /\ adopt \in {"Deferred", "Pending"}
+                      => <>(adopt = "Committed" \/ rejected))
 =============================================================================

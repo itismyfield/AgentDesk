@@ -50,6 +50,7 @@ impl HostIo for PgIo {
             .map_err(|error| error.to_string())?;
         Ok(ActivationFacts {
             open_intake: rows.open_intake,
+            own_turn_intake: 0,
             runner_sessions: rows.foreign_sessions,
             node_override: None,
         })
@@ -57,7 +58,7 @@ impl HostIo for PgIo {
 
     async fn intake_fence(&self, channel: u64, _: ShadowProvider) -> Result<FencedFacts, String> {
         let (hold, rows, queued_bodies) =
-            fenced_activation_rows(&self.pool, &channel.to_string(), "gateway")
+            fenced_activation_rows(&self.pool, &channel.to_string(), "gateway", None)
                 .await
                 .map_err(|error| error.to_string())?;
         self.fenced
@@ -68,6 +69,7 @@ impl HostIo for PgIo {
             hold,
             facts: ActivationFacts {
                 open_intake: rows.open_intake,
+                own_turn_intake: rows.own_turn_intake,
                 runner_sessions: rows.foreign_sessions,
                 node_override: None,
             },

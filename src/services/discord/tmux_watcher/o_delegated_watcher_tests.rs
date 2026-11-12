@@ -127,6 +127,61 @@ async fn a_held_watcher_terminal_retries_until_o_adopts_and_then_ends_through_o(
     );
 }
 
+/// A refused adoption holds the watcher terminal as well: the gate answers refused from the start,
+/// the watcher reads the same range again instead of finalizing it, and the turn's row stays open.
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_watcher_terminal_is_read_again_and_never_finalized() {
+    if !isolated_in(
+        "o_delegated_watcher_tests",
+        "a_refused_watcher_terminal_is_read_again_and_never_finalized",
+        &[],
+    ) {
+        return;
+    }
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::cutover::{
+        IdentityError, peek_o_owns_tui_output_for_channel_tmux, test_override,
+    };
+    let seed = turn("T0", T0);
+    let mut h = Harness::new(26, &seed).await;
+    let f = seed.len() as u64;
+    h.commit(0, f);
+    let _bound = test_override::bind_claude_tui_session(&h.tmux, &h.path);
+    let _refused = test_override::force_candidates(&[(h.channel.get(), ClaudeTui)]);
+    let candidate = test_override::with_channels(|boot| boot?.candidate(h.channel.get()).cloned());
+    candidate.unwrap().release(h.channel.get());
+    let gate = peek_o_owns_tui_output_for_channel_tmux(h.channel.get(), Some(&h.tmux));
+    assert_eq!(gate, Err(IdentityError::AdoptionRefused));
+    h.row_at(f);
+    h.spawn(f);
+    h.append(turn("T1", BODY).as_bytes());
+    let end = h.len();
+    let reads = |h: &Harness| {
+        let frames = h.frames().into_iter();
+        frames
+            .filter(|frame| (frame.0, frame.1) == (f, end))
+            .count()
+    };
+    h.until("the refused terminal's range read again", |h| reads(h) >= 3)
+        .await;
+    let gave_up = Harness::logged("rewind cap exceeded");
+    assert!(
+        gave_up.is_empty(),
+        "a refused turn is not given up: {gave_up:?}"
+    );
+    let seen = h.observe(&[BODY]);
+    assert_eq!(
+        seen.copies,
+        vec![Vec::<u64>::new()],
+        "nothing shows the refused body"
+    );
+    assert_eq!(
+        seen.row,
+        Some((f, false)),
+        "the refused turn's row stays open"
+    );
+}
+
 const TASK_SUMMARY: &str = "ADK-O background task finished";
 
 fn task_value() -> serde_json::Value {
