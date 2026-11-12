@@ -51,17 +51,19 @@ pub(crate) fn note_hook(
             .as_str()
             .map(std::path::Path::new)
             != Some(source.path.as_path())
-        || payload["agent_id"].is_string()
-        || payload["agent_transcript_path"].is_string()
+        || ((payload["agent_id"].is_string() || payload["agent_transcript_path"].is_string())
+            && *kind != HookEventKind::SubagentStop)
     {
         return;
     }
     super::poll::start();
-    let Some(frame) = read_source(&source) else {
+    let Some(mut frame) = read_source(&source) else {
         return;
     };
-    if !matches!(kind, HookEventKind::PreToolUse | HookEventKind::PostToolUse)
-        && frame.caught_up()
+    if !matches!(
+        kind,
+        HookEventKind::PreToolUse | HookEventKind::PostToolUse | HookEventKind::SubagentStop
+    ) && frame.caught_up()
         && frame.turn.as_ref().is_some_and(|turn| {
             at < turn.at
                 || payload["prompt_id"]
@@ -70,6 +72,9 @@ pub(crate) fn note_hook(
         })
     {
         return;
+    }
+    if *kind == HookEventKind::SubagentStop {
+        frame.children.stop(&source, payload, at);
     }
     let mut state = ledger();
     if Source::current(&source.session).as_ref() != Some(&source) {

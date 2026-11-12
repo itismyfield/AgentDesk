@@ -964,9 +964,14 @@ src/
 │   │   └── tui_session_launch_geometry_tests.rs
 │   ├── claude_tui/
 │   │   ├── activity/
+│   │   │   ├── background/
+│   │   │   │   └── child.rs
+│   │   │   ├── background.rs
+│   │   │   ├── events.rs
 │   │   │   ├── hooks.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── poll.rs
+│   │   │   ├── processes.rs
 │   │   │   ├── source.rs
 │   │   │   ├── tools.rs
 │   │   │   ├── transcript.rs
@@ -3150,6 +3155,7 @@ src/
 │   │   │   │   │   ├── unit_tests.rs
 │   │   │   │   │   └── watcher_runtime_tests.rs
 │   │   │   │   ├── claude_activity.rs
+│   │   │   │   ├── claude_activity_b1_tests.rs
 │   │   │   │   ├── claude_activity_leaf_tests.rs
 │   │   │   │   ├── claude_activity_p2_tests.rs
 │   │   │   │   ├── claude_activity_tests.rs
@@ -3893,6 +3899,7 @@ src/
 │   │   ├── runtime_hint_fence.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
+│   │   ├── claude_idle.rs
 │   │   ├── cleanup_host.rs
 │   │   └── tests_pg.rs
 │   ├── tui_input/

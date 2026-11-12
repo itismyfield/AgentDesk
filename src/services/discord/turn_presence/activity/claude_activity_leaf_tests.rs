@@ -356,3 +356,6 @@ async fn stale_six_hundred_second_presence_consumes_tools_and_closes_without_fra
 
 #[path = "claude_activity_p2_tests.rs"]
 mod p2;
+
+#[path = "claude_activity_b1_tests.rs"]
+mod b1;

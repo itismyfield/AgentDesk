@@ -9,7 +9,7 @@ use std::{
 };
 
 const READ_LIMIT: u64 = 4 * 1024 * 1024;
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct Turn {
     pub floor: u64,
     pub prompt: Option<String>,
@@ -29,6 +29,7 @@ pub(super) struct Frame {
     pub progress: Option<(u64, DateTime<Utc>)>,
     pub through: u64,
     pub partial: Vec<u8>,
+    pub children: super::background::Children,
 }
 impl Frame {
     pub(super) fn caught_up(&self) -> bool {
@@ -62,6 +63,7 @@ pub(super) fn read(source: &Source, previous: Option<Frame>) -> Option<Frame> {
         progress: None,
         through: 0,
         partial: Vec::new(),
+        children: Default::default(),
     });
     if stamp.len < frame.stamp.len
         || (stamp.len == frame.stamp.len && stamp.modified != frame.stamp.modified)
@@ -128,7 +130,7 @@ pub(super) fn read(source: &Source, previous: Option<Frame>) -> Option<Frame> {
             frame.progress = None;
             continue;
         }
-        if row["type"] == "user" && results.is_empty() {
+        if row["type"] == "user" && results.is_empty() && row["isMeta"] != true {
             frame.turn = time(&row).map(|at| Turn {
                 floor,
                 prompt: row["uuid"].as_str().map(str::to_owned),
@@ -182,6 +184,7 @@ pub(super) fn read(source: &Source, previous: Option<Frame>) -> Option<Frame> {
                 frame.progress = time(&row).map(|at| (offset, at));
             }
         }
+        frame.children.observe_record(frame.turn.as_ref(), &row);
     }
     (source.stamp().as_ref() == Some(&frame.stamp)).then_some(frame)
 }

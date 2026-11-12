@@ -1,4 +1,8 @@
 //! Source-scoped observation only. Input, queue, stop and close owners retain every effect.
+mod background;
+pub(crate) mod events;
+pub(crate) mod processes;
+pub(crate) use background::{Background, Child};
 mod hooks;
 mod poll;
 mod source;
@@ -48,11 +52,12 @@ fn entry<'a>(state: &'a mut Ledger, source: &Source) -> Option<&'a mut Entry> {
         .retain(|old, _| old.session != source.session || old == source);
     if state.entries.len() >= SOURCE_LIMIT && !state.entries.contains_key(source) {
         // A fully replayed terminal can be rebuilt from the pinned file before accepting any Pre.
-        state.entries.retain(|_, entry| {
-            entry
-                .frame
-                .as_ref()
-                .is_none_or(|frame| !frame.caught_up() || frame.terminal == 0)
+        state.entries.retain(|key, entry| {
+            entry.frame.as_ref().is_none_or(|frame| {
+                !frame.caught_up()
+                    || frame.terminal == 0
+                    || frame.children.state(key) != Background::Clear
+            })
         });
         if state.entries.len() >= SOURCE_LIMIT {
             return None;
@@ -61,6 +66,10 @@ fn entry<'a>(state: &'a mut Ledger, source: &Source) -> Option<&'a mut Entry> {
     Some(state.entries.entry(source.clone()).or_default())
 }
 fn fold(entry: &mut Entry, frame: &Frame) {
+    let mut frame = frame.clone();
+    if let Some(previous) = &entry.frame {
+        frame.children.merge(&previous.children);
+    }
     if frame.stamp.len < entry.high_water
         || entry
             .stamp
@@ -72,15 +81,17 @@ fn fold(entry: &mut Entry, frame: &Frame) {
     entry.high_water = entry.high_water.max(frame.stamp.len);
     entry.turn = frame.turn.clone();
     entry.stamp = Some(frame.stamp.clone());
-    entry.tools.reconcile(frame);
-    entry.frame = Some(frame.clone());
+    entry.tools.reconcile(&frame);
+    entry.frame = Some(frame);
 }
 fn read_source(source: &Source) -> Option<Frame> {
     let previous = ledger()
         .entries
         .get(source)
         .and_then(|entry| entry.frame.clone());
-    transcript::read(source, previous)
+    let mut frame = transcript::read(source, previous)?;
+    frame.children.refresh(source);
+    Some(frame)
 }
 fn installable(entry: &Entry, source: &Source, frame: &Frame) -> bool {
     source.stamp().as_ref() == Some(&frame.stamp)
@@ -124,6 +135,8 @@ fn foreground(entry: &Entry, frame: &Frame, now: DateTime<Utc>) -> Foreground {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     pub foreground: Foreground,
+    pub background: Background,
+    pub children: Vec<Child>,
     source: Option<Source>,
     turn: Option<Turn>,
     revision: u64,
@@ -134,6 +147,8 @@ impl Snapshot {
     fn unknown() -> Self {
         Self {
             foreground: Foreground::Unknown,
+            background: Background::Unknown,
+            children: Vec::new(),
             source: None,
             turn: None,
             revision: 0,
@@ -185,29 +200,69 @@ fn observe_at(session: &str, now: DateTime<Utc>) -> Snapshot {
     if *entry != before {
         entry.revision += 1;
     }
-    let foreground = foreground(entry, &frame, now);
-    let expires = match foreground {
-        Foreground::Tool => entry.tools.lease_end(&frame, now),
-        Foreground::Generating => frame
-            .progress
-            .map(|(_, at)| at + chrono::Duration::seconds(2)),
-        Foreground::Submitted => frame.turn.as_ref().map(|turn| turn.at + tools::TOOL_LEASE),
-        _ => None,
-    };
-    let snapshot = Snapshot {
-        foreground,
-        expires,
-        source: Some(source),
-        turn: frame.turn,
-        revision: entry.revision,
-        stamp: Some(frame.stamp),
-    };
+    let snapshot = make_snapshot(source, entry, now);
     drop(state);
     if snapshot.current() {
         snapshot
     } else {
         Snapshot::unknown()
     }
+}
+
+fn make_snapshot(source: Source, entry: &Entry, now: DateTime<Utc>) -> Snapshot {
+    let Some(frame) = &entry.frame else {
+        return Snapshot::unknown();
+    };
+    let foreground = foreground(entry, frame, now);
+    let expires = match foreground {
+        Foreground::Tool => entry.tools.lease_end(frame, now),
+        Foreground::Generating => frame
+            .progress
+            .map(|(_, at)| at + chrono::Duration::seconds(2)),
+        Foreground::Submitted => frame.turn.as_ref().map(|turn| turn.at + tools::TOOL_LEASE),
+        _ => None,
+    };
+    let coherent = !entry.tainted && frame.caught_up() && frame.turn.is_some();
+    let background = if coherent {
+        frame.children.state(&source)
+    } else {
+        Background::Unknown
+    };
+    let children = if coherent {
+        frame.children.children()
+    } else {
+        Vec::new()
+    };
+    Snapshot {
+        foreground,
+        background,
+        children,
+        expires,
+        source: Some(source),
+        turn: frame.turn.clone(),
+        revision: entry.revision,
+        stamp: Some(frame.stamp.clone()),
+    }
+}
+/// Footer reads use the timer's cached observation and never replay a rollout on its hot path.
+pub(crate) fn cached_for_channel(channel: u64) -> Option<Snapshot> {
+    let candidates: Vec<_> = ledger()
+        .entries
+        .keys()
+        .filter(|source| source.channel == channel)
+        .cloned()
+        .collect();
+    let mut current = candidates.into_iter().filter(|source| {
+        source.stamp().is_some() && Source::current(&source.session).as_ref() == Some(source)
+    });
+    let source = current.next()?;
+    if current.next().is_some() {
+        return None;
+    }
+    let state = ledger();
+    let snapshot = make_snapshot(source.clone(), state.entries.get(&source)?, Utc::now());
+    drop(state);
+    snapshot.current().then_some(snapshot)
 }
 
 #[cfg(test)]

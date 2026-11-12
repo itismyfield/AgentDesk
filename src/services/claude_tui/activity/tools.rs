@@ -151,6 +151,7 @@ mod tests {
             progress: None,
             through: 200,
             partial: Vec::new(),
+            children: Default::default(),
         }
     }
     #[test]

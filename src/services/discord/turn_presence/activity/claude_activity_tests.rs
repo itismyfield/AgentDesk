@@ -18,6 +18,9 @@ struct Rig {
 }
 impl Rig {
     fn new() -> Self {
+        Self::named(format!("activity-{}", uuid::Uuid::new_v4().simple()))
+    }
+    fn named(session: String) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let previous_root = events::test_root();
         events::set_test_root(Some(dir.path()));
@@ -25,7 +28,6 @@ impl Rig {
         let project = root.join("project");
         fs::create_dir_all(&project).unwrap();
         let native = uuid::Uuid::new_v4().to_string();
-        let session = format!("activity-{}", uuid::Uuid::new_v4().simple());
         let path = project.join(format!("{native}.jsonl"));
         let ctx: context::BindingContext = serde_json::from_value(json!({
             "schema":1,"provider":"claude","created_at":Utc::now(),
@@ -100,12 +102,15 @@ impl Rig {
         .unwrap();
     }
     async fn hook(&self, kind: &str) {
+        let payload = json!({"session_id":self.ctx.expected_native_session_id,
+            "transcript_path":self.path,"hook_event_name":kind,"tool_use_id":"tool-a","tool_name":"Bash"});
+        self.hook_payload(kind, payload).await;
+    }
+    async fn hook_payload(&self, kind: &str, payload: Value) {
         let envelope = context::HookBindingEnvelope {
             context: context::CapturedContext::Captured(self.ctx.clone()),
             observed: context::ObservedHookProcess::default(),
         };
-        let payload = json!({"session_id":self.ctx.expected_native_session_id,
-            "transcript_path":self.path,"hook_event_name":kind,"tool_use_id":"tool-a","tool_name":"Bash"});
         let response =
             hook_server::hook_receiver_router_with_state(hook_server::HookServerState::new())
                 .oneshot(
