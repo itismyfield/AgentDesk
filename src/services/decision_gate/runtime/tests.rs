@@ -56,8 +56,10 @@ fn request() -> DecisionRequest {
     }
 }
 fn fixture() -> String {
-    let data: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/comment_shape.json")).unwrap();
+    let data: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/decision_gate/comment_shape.json"
+    ))
+    .unwrap();
     data["choice"].to_string()
 }
 fn gate(endpoint: String, source: PolicySource) -> DecisionGate {

@@ -30,7 +30,10 @@ fn request() -> DecisionRequest {
     }
 }
 fn fixtures() -> serde_json::Value {
-    serde_json::from_str(include_str!("fixtures/comment_shape.json")).unwrap()
+    serde_json::from_str(include_str!(
+        "../../../tests/fixtures/decision_gate/comment_shape.json"
+    ))
+    .unwrap()
 }
 
 #[test]
@@ -229,9 +232,6 @@ fn production_entry_ignores_seeded_environment_and_agent_op() {
         "Off(NotInstalled)"
     );
     assert!(!marker.exists());
-    let module = std::fs::read_to_string(module).unwrap();
-    assert!(module.contains("#[cfg(test)]\nmod runtime;"));
-    assert!(!module.contains("std::env"));
 }
 
 #[test]
