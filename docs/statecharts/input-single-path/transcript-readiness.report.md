@@ -256,3 +256,7 @@ Completion retirement reads the owned historical prefix; current Idle evidence s
 Merge source baseline: ca4ba220aa35c4d4c31d417bcbd9659eb7e1da89. The refinement preserves the old runtime binding until the first new transcript is registered. A current clear Start and the same execution's published canonical Pending permit only an explicit new path. Proofs retain the Pending seq and Start revision; reserve/current recheck both. Readiness observes an already published fold and never reloads or repairs the writer log.
 
 `InputPathReadyClearPendingBefore.cfg` separates `oldBinding` from `filePublished` and breaks `ReadyPendingEventuallyExecutes`: no payload means no file and therefore no new binding. `InputPathReadyClearPendingAfter.cfg` passes safety and that liveness property. `InputPathReadyClearPendingRecheck.cfg` changes the Pending seq after Prepare; the stale proof is revoked, and a fresh proof progresses. The diagrams are hand-authored projections; the lane report records actual TLC runs and fingerprints.
+
+Clear repair implementation source SHA: d0d8d711b8be5668aacf90a7cd7c362e15ef7ec0. Final normal Rust source includes the unchanged-path native-ID fallback. Targeted callers and negative evidence tests are described in the lane report.
+
+Direct TLC:62 configs/226 calls, GREEN34, expected RED28, unexpected0. The required base/head invocation selected79 configs and completed270 calls. The concrete nonce/channel/path checks are exercised by caller tests; the model separates old binding, Pending seq and new file publication.

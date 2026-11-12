@@ -1034,6 +1034,8 @@ src/
 │   │   ├── readiness/
 │   │   │   ├── compact/
 │   │   │   │   └── completion.rs
+│   │   │   ├── clear.rs
+│   │   │   ├── clear_tests.rs
 │   │   │   ├── compact.rs
 │   │   │   ├── compact_tests.rs
 │   │   │   ├── dialog.rs
