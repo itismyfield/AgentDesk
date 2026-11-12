@@ -1,4 +1,9 @@
-//! Single authorization registry for Discord outbound source labels.
+//! Authorization combines static source policy with the live agent registry.
+
+use crate::domain::outbound::outbox::source::is_allowed_static_source;
+pub(crate) fn is_static_notice_kind(source: &str) -> bool {
+    crate::domain::outbound::outbox::source::is_static_notice_kind(source)
+}
 
 pub(crate) const IMESSAGE_INPUT_NOTICE_SOURCE: &str = "imessage_input_notice";
 
@@ -42,103 +47,6 @@ impl SendCallerClass {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum StaticSendSource {
-    KanbanRules,
-    TriageRules,
-    ReviewAutomation,
-    AutoQueue,
-    Pipeline,
-    System,
-    Timeouts,
-    LifecycleNotifier,
-    RoutingTransition,
-    RoutineRuntime,
-    ScheduledMessage,
-    HeadlessTurn,
-    SloAlerter,
-    AutoQueueMonitor,
-    Inventory,
-    GithubSync,
-    CatchUpTooOld,
-    BootCustodyNotice,
-    QueueOverflowNotice,
-    RetainedInputNotice,
-    ImessageInputNotice,
-    OutboxDeliveryAlert,
-    LongTurnWatchdog,
-    RelaySignalRollup,
-    DispatchWatchdog,
-    StallWatchdog,
-    TuiOAlarm,
-    AdoptFenceForwardNotice,
-    AgentdeskCli,
-    Operator,
-    Dashboard,
-}
-
-#[derive(Copy, Clone, Debug)]
-struct SourcePolicy {
-    #[allow(dead_code)]
-    source: StaticSendSource,
-    label: &'static str,
-    caller_mask: u8,
-}
-
-const LOOPBACK: u8 = SendCallerClass::LoopbackInternal.mask();
-const CLI: u8 = SendCallerClass::Cli.mask();
-const DASHBOARD: u8 = SendCallerClass::Dashboard.mask();
-
-macro_rules! policy {
-    ($source:ident, $label:literal, $mask:expr) => {
-        SourcePolicy {
-            source: StaticSendSource::$source,
-            label: $label,
-            caller_mask: $mask,
-        }
-    };
-}
-
-const POLICIES: &[SourcePolicy] = &[
-    policy!(KanbanRules, "kanban-rules", LOOPBACK),
-    policy!(TriageRules, "triage-rules", LOOPBACK),
-    policy!(ReviewAutomation, "review-automation", LOOPBACK),
-    policy!(AutoQueue, "auto-queue", LOOPBACK),
-    policy!(Pipeline, "pipeline", LOOPBACK),
-    policy!(System, "system", LOOPBACK),
-    policy!(Timeouts, "timeouts", LOOPBACK),
-    policy!(LifecycleNotifier, "lifecycle_notifier", LOOPBACK),
-    policy!(RoutingTransition, "routing_transition", LOOPBACK),
-    policy!(RoutineRuntime, "routine-runtime", LOOPBACK),
-    policy!(ScheduledMessage, "scheduled_message", LOOPBACK),
-    policy!(HeadlessTurn, "headless_turn", LOOPBACK),
-    policy!(SloAlerter, "slo_alerter", LOOPBACK),
-    policy!(AutoQueueMonitor, "auto-queue-monitor", LOOPBACK),
-    policy!(Inventory, "inventory", LOOPBACK),
-    policy!(GithubSync, "github_sync", LOOPBACK),
-    policy!(CatchUpTooOld, "catch_up_too_old", LOOPBACK),
-    policy!(BootCustodyNotice, "boot_custody_notice", LOOPBACK),
-    policy!(QueueOverflowNotice, "queue_overflow_notice", LOOPBACK),
-    policy!(RetainedInputNotice, "retained_input_notice", LOOPBACK),
-    policy!(ImessageInputNotice, "imessage_input_notice", LOOPBACK),
-    policy!(OutboxDeliveryAlert, "outbox_delivery_alert", LOOPBACK),
-    policy!(LongTurnWatchdog, "long_turn_watchdog", LOOPBACK),
-    policy!(RelaySignalRollup, "relay_signal_rollup", LOOPBACK),
-    policy!(DispatchWatchdog, "dispatch_watchdog", LOOPBACK),
-    // #4460: stall watchdog now MENTIONS the owner instead of force-terminating
-    // a suspected-stall turn — it posts a rate-limited outbox alert.
-    policy!(StallWatchdog, "stall_watchdog", LOOPBACK),
-    policy!(TuiOAlarm, "tui_o_alarm", LOOPBACK),
-    policy!(
-        AdoptFenceForwardNotice,
-        "adopt_fence_forward_notice",
-        LOOPBACK
-    ),
-    policy!(AgentdeskCli, "agentdesk-cli", CLI),
-    policy!(Operator, "operator", CLI),
-    policy!(Dashboard, "dashboard", DASHBOARD),
-];
-
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("source `{label}` is not allowed for {caller:?}")]
 pub struct SendSourcePolicyError {
@@ -153,56 +61,13 @@ pub(crate) fn is_registered_nonbody_source(source: &str) -> bool {
         && is_static_notice_kind(source)
 }
 
-pub(crate) fn is_static_notice_kind(source: &str) -> bool {
-    let Some(policy) = POLICIES
-        .iter()
-        .find(|policy| policy.label == source && policy.caller_mask & LOOPBACK != 0)
-    else {
-        return false;
-    };
-    use StaticSendSource::*;
-    matches!(
-        policy.source,
-        KanbanRules
-            | TriageRules
-            | ReviewAutomation
-            | AutoQueue
-            | Pipeline
-            | System
-            | Timeouts
-            | LifecycleNotifier
-            | RoutingTransition
-            | RoutineRuntime
-            | ScheduledMessage
-            | SloAlerter
-            | AutoQueueMonitor
-            | Inventory
-            | GithubSync
-            | CatchUpTooOld
-            | BootCustodyNotice
-            | QueueOverflowNotice
-            | RetainedInputNotice
-            | ImessageInputNotice
-            | OutboxDeliveryAlert
-            | LongTurnWatchdog
-            | RelaySignalRollup
-            | DispatchWatchdog
-            | StallWatchdog
-            | TuiOAlarm
-            | AdoptFenceForwardNotice
-    )
-}
-
 /// Exact, case-sensitive and fail-closed source authorization.
 pub fn validate_send_source_for(
     source: &str,
     caller: SendCallerClass,
 ) -> Result<(), SendSourcePolicyError> {
     let exact = !source.is_empty() && source.trim() == source;
-    let static_allowed = exact
-        && POLICIES
-            .iter()
-            .any(|policy| policy.label == source && policy.caller_mask & caller.mask() != 0);
+    let static_allowed = exact && is_allowed_static_source(source, caller.mask());
     let known_agent = exact && crate::services::discord::settings::is_known_agent(source);
     if static_allowed || known_agent {
         Ok(())
@@ -216,7 +81,8 @@ pub fn validate_send_source_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{POLICIES, SendCallerClass, validate_send_source_for};
+    use super::{SendCallerClass, validate_send_source_for};
+    use crate::domain::outbound::outbox::source::static_source_count;
 
     const CURRENT_LOOPBACK_LABELS: &[&str] = &[
         "kanban-rules",
@@ -280,10 +146,7 @@ mod tests {
             );
         }
         assert_eq!(
-            POLICIES
-                .iter()
-                .filter(|p| p.caller_mask == super::LOOPBACK)
-                .count(),
+            static_source_count(SendCallerClass::LoopbackInternal.mask()),
             CURRENT_LOOPBACK_LABELS.len() + NEW_LOOPBACK_LABELS.len()
         );
     }
