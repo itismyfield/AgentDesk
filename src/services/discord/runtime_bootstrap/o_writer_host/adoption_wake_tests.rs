@@ -304,7 +304,7 @@ async fn a_wake_whose_sends_keep_failing_ends_after_three_retries_and_keeps_the_
         let http = Arc::clone(&rig.recorder.http);
         let times = async {
             let mut at = Vec::new();
-            while at.len() < 4 && judged.recv().await.is_some() {
+            while at.len() < 4 && await_within(judged.recv(), WAIT_CAP).await.is_some() {
                 at.push(std::time::Instant::now());
             }
             at

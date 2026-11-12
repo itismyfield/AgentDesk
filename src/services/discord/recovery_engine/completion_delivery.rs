@@ -333,27 +333,6 @@ pub(super) async fn relay_recovery_body_to_placeholder(
     text: &str,
     recovery_context: Option<&RecoveryDeliveryContext>,
 ) -> RecoveryRelayOutcome {
-    let relay = body_to_placeholder(
-        http,
-        shared,
-        state,
-        channel_id,
-        placeholder,
-        text,
-        recovery_context,
-    );
-    noted(shared, state.channel_id, relay.await)
-}
-
-async fn body_to_placeholder(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    state: &super::inflight::InflightTurnState,
-    channel_id: ChannelId,
-    placeholder: Option<MessageId>,
-    text: &str,
-    recovery_context: Option<&RecoveryDeliveryContext>,
-) -> RecoveryRelayOutcome {
     let marker = match o_recovery_marker(state, channel_id) {
         Ok(marker) => marker,
         Err(error) => return RecoveryRelayOutcome::held(&error),
@@ -384,7 +363,7 @@ async fn body_to_placeholder(
             claim,
         ),
     );
-    match registered_notice(
+    let outcome = match registered_notice(
         BodySource::from_state(state),
         BodySite::RecoveryNotice,
         text,
@@ -396,7 +375,8 @@ async fn body_to_placeholder(
         // O took the channel since the peek; the retry shows its marker instead.
         Ok(BodySend::OwnedByO) => RecoveryRelayOutcome::TransientFailure,
         Err(error) => RecoveryRelayOutcome::held(&error),
-    }
+    };
+    noted(shared, state.channel_id, outcome)
 }
 
 /// `relay_recovery_terminal_notice` for notices that carry the recovered body.
