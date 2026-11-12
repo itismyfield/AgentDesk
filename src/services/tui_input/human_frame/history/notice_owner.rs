@@ -1,8 +1,13 @@
 //! Notice attribution is historical and source-bound; it grants no input or stop authority.
 use super::*;
+use crate::services::tui_o::shadow::capture::Fingerprint;
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 use std::collections::{HashMap, HashSet};
+
+mod census;
+#[cfg(all(test, unix))]
+pub(crate) use census::tests::{Stage as CensusStage, fail_once as fail_census_once};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Decision {
@@ -18,7 +23,7 @@ struct Scope {
     origin: NoticeOrigin,
     executions: HashMap<PathBuf, Stamp>,
     through: u64,
-    native_stamp: Option<Stamp>,
+    native_stamp: Option<Fingerprint>,
     exact: Answers,
     census: Answers,
 }
@@ -27,6 +32,7 @@ struct Scope {
 pub(crate) struct Batch {
     stamp: Option<Stamp>,
     scopes: Vec<Scope>,
+    native: census::Cache,
 }
 
 fn file_stamp(path: &Path) -> Option<Stamp> {
@@ -51,19 +57,25 @@ fn same_scope(a: &NoticeOrigin, b: &NoticeOrigin) -> bool {
 }
 
 impl Batch {
+    #[cfg(test)]
     pub(crate) fn prepare(store: &ChannelStore) -> Self {
+        let mut batch = Self::default();
+        batch.refresh(store);
+        batch
+    }
+
+    pub(crate) fn refresh(&mut self, store: &ChannelStore) {
         let before = stamp();
-        let snapshot = path().and_then(|p| match std::fs::read(p) {
-            Ok(bytes) => compat::parse(&bytes),
+        let snapshot = path().and_then(|p| match std::fs::read(&p) {
+            Ok(bytes) if bytes.len() <= 256 * 1024 => compat::reuse(&p, bytes, compat::parse),
+            Ok(bytes) => compat::parse(&bytes).map(std::sync::Arc::new),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Ok(serde_json::json!({"entries":[]}))
+                Ok(std::sync::Arc::new(serde_json::json!({"entries":[]})))
             }
             Err(e) => Err(e.to_string()),
         });
-        let mut batch = Self {
-            stamp: before,
-            scopes: Vec::new(),
-        };
+        self.stamp = before;
+        self.scopes = Vec::new();
         let mut native = HashMap::new();
         for evidence in store.ledger().input_notices().evidence.values() {
             if evidence.unit_key.as_ref().is_some_and(|key| {
@@ -82,7 +94,7 @@ impl Batch {
             let Some(origin) = evidence.origin.as_deref() else {
                 continue;
             };
-            if batch.scopes.iter().any(|s| same_scope(&s.origin, origin)) {
+            if self.scopes.iter().any(|s| same_scope(&s.origin, origin)) {
                 continue;
             }
             let (through, native_stamp, rows) = native
@@ -91,31 +103,30 @@ impl Batch {
                     let cursor = store.cursor(&origin.record.source);
                     let through = cursor.map_or(0, |c| c.captured_through);
                     let prefix = cursor.map_or("", |c| c.prefix_hash.as_str());
-                    let before = file_stamp(&origin.record.source.path);
-                    let rows = native_rows(origin, 0, through, prefix);
-                    let after = file_stamp(&origin.record.source.path);
-                    (through, after, if before == after { rows } else { None })
+                    let (stamp, rows) = self.native.read(&origin.record.source, through, prefix);
+                    (through, stamp, rows)
                 });
             let mut executions = HashMap::new();
             let (exact, census) = snapshot
                 .as_ref()
                 .ok()
                 .and_then(|v| candidates(v, origin, store.init().channel, &mut executions).ok())
-                .map(|(entries, blocked)| attribute(&entries, &blocked, rows.as_deref()))
+                .map(|(entries, blocked)| {
+                    attribute(&entries, &blocked, rows.as_deref().map(Vec::as_slice))
+                })
                 .unwrap_or_default();
-            batch.scopes.push(Scope {
+            self.scopes.push(Scope {
                 origin: origin.clone(),
                 executions,
                 through: *through,
-                native_stamp: *native_stamp,
+                native_stamp: native_stamp.clone(),
                 exact,
                 census,
             });
         }
         if before != stamp() {
-            batch.scopes.clear();
+            self.scopes.clear();
         }
-        batch
     }
 
     pub(crate) fn decision(&self, origin: &NoticeOrigin, row: &str, prompt: &str) -> Decision {
@@ -140,7 +151,10 @@ impl Batch {
             return *answer;
         }
         let source = &origin.record.source;
-        let valid = scope.native_stamp.is_some() && file_stamp(&source.path) == scope.native_stamp;
+        let valid = scope
+            .native_stamp
+            .as_ref()
+            .is_some_and(|held| census::fingerprint(source).as_ref() == Some(held));
         if !valid || origin.record.end > scope.through {
             return Decision::Pending("native_census_unavailable");
         }
@@ -343,62 +357,6 @@ fn historical_match(
             .as_array()
             .is_some_and(|s| !s.is_empty())
         && expectation)
-}
-
-fn native_rows(origin: &NoticeOrigin, from: u64, through: u64, prefix: &str) -> Option<Vec<Taken>> {
-    use std::io::{BufRead, Read};
-    #[cfg(test)]
-    CENSUS_READS.with(|count| count.set(count.get() + 1));
-    let source = &origin.record.source;
-    let file = std::fs::File::open(&source.path).ok()?;
-    let meta = file.metadata().ok()?;
-    (file_id(&meta) == [source.dev, source.ino] && meta.len() >= through && from <= through)
-        .then_some(())?;
-    let mut reader = std::io::BufReader::new(file.take(through));
-    let mut digest = Sha256::new();
-    let (mut rows, mut line, mut at) = (Vec::new(), Vec::new(), 0);
-    while reader.read_until(b'\n', &mut line).ok()? > 0 {
-        let offset = at;
-        at += line.len() as u64;
-        line.ends_with(b"\n").then_some(())?;
-        digest.update(&line);
-        if offset < from {
-            (at <= from).then_some(())?;
-            line.clear();
-            continue;
-        }
-        let value: serde_json::Value = serde_json::from_slice(&line).ok()?;
-        line.clear();
-        let text = if value["type"] == "user"
-            && value["isMeta"] != true
-            && !crate::services::tui_o::shadow::identity::record_is_compact_summary(&value)
-        {
-            match &value["message"]["content"] {
-                serde_json::Value::String(text) => Some(text.clone()),
-                serde_json::Value::Array(blocks) => blocks
-                    .iter()
-                    .map(|b| (b["type"] == "text").then(|| b["text"].as_str()))
-                    .collect::<Option<Option<Vec<_>>>>()
-                    .flatten()
-                    .map(|v| v.join("\n")),
-                _ => None,
-            }
-        } else if value["type"] == "attachment" && value["attachment"]["type"] == "queued_command" {
-            value["attachment"]["prompt"].as_str().map(str::to_owned)
-        } else {
-            None
-        };
-        if let Some(text) = text {
-            let uuid = value["uuid"].as_str()?;
-            rows.push(Taken {
-                offset,
-                uuid: uuid.into(),
-                hashes: class_hashes(&text),
-                user: value["type"] == "user",
-            });
-        }
-    }
-    (at == through && hex::encode(digest.finalize()) == prefix).then_some(rows)
 }
 
 fn attribute(entries: &[Entry], blocked: &Blocked, rows: Option<&[Taken]>) -> (Answers, Answers) {

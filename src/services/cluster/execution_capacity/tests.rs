@@ -246,7 +246,7 @@ fn execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector(
         node("full", 2, 2, None),
         json!({"instance_id":"legacy"}),
     ];
-    rank(&mut nodes);
+    rank(&mut nodes, None);
     assert_eq!(nodes.len(), 2);
     let candidates = super::super::intake_routing::candidates_from_worker_nodes_json(&nodes);
     let selection =
@@ -258,7 +258,7 @@ fn execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector(
         }
     );
     let mut tied = vec![node("a", 0, 2, Some("2026-09-20")), node("z", 0, 2, None)];
-    rank(&mut tied);
+    rank(&mut tied, None);
     assert_eq!(
         tied[0]["instance_id"], "z",
         "never assigned wins a utilization tie"

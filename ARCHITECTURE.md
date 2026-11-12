@@ -3935,6 +3935,10 @@ src/
 │   │   │   └── pane.rs
 │   │   ├── human_frame/
 │   │   │   ├── history/
+│   │   │   │   ├── notice_owner/
+│   │   │   │   │   ├── census/
+│   │   │   │   │   │   └── census_tests.rs
+│   │   │   │   │   └── census.rs
 │   │   │   │   ├── v2/
 │   │   │   │   │   ├── carried.rs
 │   │   │   │   │   ├── carried_tests.rs
@@ -4090,6 +4094,7 @@ src/
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── notice_activation_tests.rs
+│   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
 │   │   │   │   ├── notice_work.rs
