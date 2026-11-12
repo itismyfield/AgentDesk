@@ -69,7 +69,10 @@ pub async fn run_due_tick(
                     error: Some(message),
                     fresh_context_guaranteed: false,
                 };
-                super::run_diagnostics::finish(store, discord_logger, &outcome).await;
+                super::run_diagnostics::outcome(store, &outcome).await;
+                if let Some(logger) = discord_logger {
+                    logger.log_run_outcome(store, &outcome).await;
+                }
                 outcomes.push(outcome);
             } else {
                 tracing::warn!(
@@ -89,7 +92,10 @@ pub async fn run_due_tick(
         .await
         {
             Ok(Some(outcome)) => {
-                super::run_diagnostics::finish(store, discord_logger, &outcome).await;
+                super::run_diagnostics::outcome(store, &outcome).await;
+                if let Some(logger) = discord_logger {
+                    logger.log_run_outcome(store, &outcome).await;
+                }
                 outcomes.push(outcome);
             }
             Ok(None) => {

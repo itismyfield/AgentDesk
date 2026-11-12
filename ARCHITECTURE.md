@@ -3708,6 +3708,8 @@ src/
 │   │   │   └── discovery.rs
 │   │   ├── reliability_pg_tests/
 │   │   │   └── run_diagnostics_tests.rs
+│   │   ├── run_diagnostics/
+│   │   │   └── formatting.rs
 │   │   ├── store/
 │   │   │   └── agent_start.rs
 │   │   ├── action.rs
