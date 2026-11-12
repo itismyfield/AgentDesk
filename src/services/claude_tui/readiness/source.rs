@@ -43,7 +43,8 @@ impl Source {
             let path = PathBuf::from(binding.relay_output_path());
             if let (Some(explicit), Some(latest)) = (explicit, latest.as_ref())
                 && explicit == latest.path
-                && (path != latest.path || binding.session_id.as_deref() != Some(latest.native.as_str()))
+                && (path != latest.path
+                    || binding.session_id.as_deref() != Some(latest.native.as_str()))
                 && super::clear::evidence(latest).is_some()
             {
                 return Some(latest.clone());
