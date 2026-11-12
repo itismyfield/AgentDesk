@@ -517,6 +517,27 @@ pub(crate) fn empty_draft(capture: &str) -> bool {
 pub(crate) fn watch_draft(session: &str, path: Option<&Path>) {
     watch(session, path, true);
 }
+// Current source evidence survives a UI modal; retry only after its focus is released.
+pub(crate) fn watch_modal(session: &str, path: Option<&Path>) {
+    #[cfg(unix)]
+    {
+        let session = session.to_owned();
+        let path = path.map(Path::to_path_buf);
+        super::owner_input::record_preparation_watch(Box::new(move || {
+            if observe(&session, path.as_deref()).is_some()
+                && super::host_input::observe_draft(&session)
+                    .as_deref()
+                    .is_some_and(|capture| !idle::focus_modal(capture))
+            {
+                super::busy_inject::Screen::Ready
+            } else {
+                super::busy_inject::Screen::Unknown
+            }
+        }));
+    }
+    #[cfg(not(unix))]
+    let _ = (session, path);
+}
 pub(crate) fn watch_current(session: &str, path: Option<&Path>) {
     watch(session, path, false);
 }
