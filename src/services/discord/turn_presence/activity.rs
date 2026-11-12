@@ -19,6 +19,7 @@ mod claude_activity;
 
 pub(in crate::services::discord) mod notice_identity;
 use notice_identity::{NoticeObservation, progress};
+mod effort_restart;
 
 /// New bytes one effect-point poll may read before it answers `catching_up`.
 const CHUNK_BUDGET: u64 = 4 * 1024 * 1024;
@@ -89,6 +90,7 @@ struct Watch {
     notice: NoticeObservation,
     through: u64,
     grew_at: Instant,
+    restart_version: u64,
 }
 
 impl Default for Watch {
@@ -101,6 +103,7 @@ impl Default for Watch {
             notice: NoticeObservation::legacy("not_observed", ""),
             through: 0,
             grew_at: Instant::now(),
+            restart_version: 0,
         }
     }
 }
@@ -123,6 +126,15 @@ trait Ports: Send + Sync + 'static {
     fn liveness(&self, provider: ShadowProvider, channel: u64, session: &str) -> SessionLiveness;
     /// False when the worker could not start.
     fn spawn(&self, job: Job) -> bool;
+    fn restart_version(&self, _channel: u64) -> u64 {
+        0
+    }
+    fn restart_ends(
+        &self,
+        _channel: u64,
+    ) -> Result<Vec<crate::services::tui_o::store::restart_end::RestartEnd>, String> {
+        Ok(Vec::new())
+    }
 }
 
 static WATCHES: LazyLock<Mutex<HashMap<u64, Arc<Mutex<Watch>>>>> = LazyLock::new(Default::default);
@@ -430,11 +442,12 @@ pub(super) fn with_busy_source(
         {
             return None;
         }
-        let busy = crate::services::tui_turn_state::observe_provider_jsonl_turn_state(
-            provider,
-            std::path::Path::new(&binding.output_path),
-        )
-        .is_busy();
+        let busy = !effort_restart::closed_at_eof(&guard)
+            && crate::services::tui_turn_state::observe_provider_jsonl_turn_state(
+                provider,
+                std::path::Path::new(&binding.output_path),
+            )
+            .is_busy();
         if busy {
             guard.revision += 1;
             let (observed, stamp) = at(&guard, observed(Activity::Busy, "observer_source_busy"));
@@ -614,7 +627,8 @@ fn judge_with_policy(
     guard.notice = notice;
     let retry =
         matches!(guard.outcome, Outcome::Unreadable { retry_at } if Instant::now() >= retry_at);
-    if guard.key.as_ref() != Some(&key) || retry {
+    let restart_changed = effort_restart::version_changed(&mut guard, ports.as_ref(), channel);
+    if guard.key.as_ref() != Some(&key) || retry || restart_changed {
         guard.key = Some(key.clone());
         return rebuild(watch, guard, ports, channel, key, None);
     }
@@ -692,7 +706,21 @@ fn judge_with_policy(
     if !caught_up {
         return progress(at(&guard, observed(Activity::Unknown, "catching_up")));
     }
+    if effort_restart::needs_refresh(&guard) {
+        let outcome = std::mem::replace(&mut guard.outcome, Outcome::Rebuilding);
+        return rebuild(
+            watch,
+            guard,
+            ports,
+            channel,
+            key,
+            Some(Reload::Proof(outcome)),
+        );
+    }
     match fact.state {
+        TurnState::Idle if effort_restart::closed(&guard) => {
+            at(&guard, observed(Activity::Idle, "effort_restart_ended"))
+        }
         TurnState::Idle if allows_idle => at(&guard, observed(Activity::Idle, "closed")),
         TurnState::Idle => at(&guard, observed(Activity::Unknown, "no_turn_boundary")),
         TurnState::Open { .. } if fact.local => at(&guard, observed(Activity::Idle, "local_only")),
@@ -790,6 +818,7 @@ fn no_turn_evidence(ports: &dyn Ports, key: &Key) -> Observed {
 }
 
 enum Reload {
+    Proof(Outcome),
     Full(SourceBinding, Resume),
     Tail(Box<tail::TailReader>),
 }
@@ -819,11 +848,12 @@ fn rebuild(
         #[cfg(all(test, unix))]
         crate::services::tui_o::shadow::capture::io_trace::take();
         let (outcome, grown) = match resume {
+            Some(Reload::Proof(outcome)) => effort_restart::refresh(outcome, worker_ports.as_ref(), &key),
             Some(Reload::Full(binding, resume)) => {
-                read_from(InputFacts::resume(binding, &resume), false)
+                read_from(InputFacts::resume(binding, &resume), false, worker_ports.as_ref(), &key)
             }
             Some(Reload::Tail(mut reader)) => match reader.resume() {
-                Ok(()) => read_tail(*reader, &key),
+                Ok(()) => read_tail(*reader, &key, worker_ports.as_ref()),
                 Err(_) => (Outcome::Halted, None),
             },
             None => locate(worker_ports.as_ref(), channel, &key),
@@ -900,7 +930,7 @@ fn locate(ports: &dyn Ports, channel: u64, key: &Key) -> (Outcome, Grown) {
                 source,
             };
             match tail::TailReader::open(binding, tail::limits(channel)) {
-                Ok(reader) => read_tail(reader, key),
+                Ok(reader) => read_tail(reader, key, ports),
                 Err(_) => (unreadable(), None),
             }
         }
@@ -911,14 +941,17 @@ fn locate(ports: &dyn Ports, channel: u64, key: &Key) -> (Outcome, Grown) {
                 source,
             };
             match InputFacts::open(binding) {
-                Ok(facts) => read_from(Ok(facts), true),
+                Ok(facts) => read_from(Ok(facts), true, ports, key),
                 Err(_) => (unreadable(), None),
             }
         }
     }
 }
 
-fn read_tail(mut reader: tail::TailReader, key: &Key) -> (Outcome, Grown) {
+fn read_tail(mut reader: tail::TailReader, key: &Key, ports: &dyn Ports) -> (Outcome, Grown) {
+    if effort_restart::install(&mut reader.facts, ports, key).is_err() {
+        return (effort_restart::unreadable(), None);
+    }
     let result = reader.bootstrap();
     let (start, end, remaining, bytes) = reader.diagnostics();
     tracing::debug!(source = %reader.facts.binding().source.path.display(), seq = key.seq, mode = "tail", start, end, remaining, forward_bytes = bytes, result = ?result, "activity rebuild");
@@ -934,10 +967,16 @@ pub(super) fn initialize_tail() {
     let _ = tail::enabled();
 }
 
-/// Reads to the end, resuming past each typed `Blocked` record; any other error halts.
-fn read_from(facts: Result<InputFacts, String>, mut from_start: bool) -> (Outcome, Grown) {
-    let Ok(mut facts) = facts else {
-        return (Outcome::Halted, None);
+/// Reads native records to the end, resuming typed blocks; native parse errors halt.
+fn read_from(
+    facts: Result<InputFacts, String>,
+    mut from_start: bool,
+    ports: &dyn Ports,
+    key: &Key,
+) -> (Outcome, Grown) {
+    let mut facts = match effort_restart::worker_facts(facts, ports, key) {
+        Ok(facts) => facts,
+        Err(outcome) => return (outcome, None),
     };
     let mut through = 0;
     loop {
@@ -946,9 +985,13 @@ fn read_from(facts: Result<InputFacts, String>, mut from_start: bool) -> (Outcom
                 let Some(resume) = facts.resume_point().cloned() else {
                     return (Outcome::Halted, None);
                 };
-                match InputFacts::resume(facts.binding().clone(), &resume) {
+                match effort_restart::worker_facts(
+                    InputFacts::resume(facts.binding().clone(), &resume),
+                    ports,
+                    key,
+                ) {
                     Ok(next) => (facts, from_start, through) = (next, false, 0),
-                    Err(_) => return (Outcome::Halted, None),
+                    Err(outcome) => return (outcome, None),
                 }
             }
             Ok(fact) if fact.through > through => through = fact.through,
@@ -999,6 +1042,15 @@ impl LivePorts {
 }
 
 impl Ports for LivePorts {
+    fn restart_version(&self, channel: u64) -> u64 {
+        effort_restart::version(channel)
+    }
+    fn restart_ends(
+        &self,
+        channel: u64,
+    ) -> Result<Vec<crate::services::tui_o::store::restart_end::RestartEnd>, String> {
+        self.scoped(|| effort_restart::read(self, channel))
+    }
     fn liveness(&self, provider: ShadowProvider, channel: u64, session: &str) -> SessionLiveness {
         let provider = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
@@ -1080,6 +1132,10 @@ pub(in crate::services::discord) mod effect_reads;
 mod tail;
 #[cfg(unix)]
 mod unbound;
+
+#[cfg(all(test, unix))]
+#[path = "activity/effort_restart_baseline_tests.rs"]
+mod effort_restart_baseline_tests;
 
 #[cfg(all(test, unix))]
 mod claude_activity_tests;

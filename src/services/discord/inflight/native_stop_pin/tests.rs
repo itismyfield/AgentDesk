@@ -88,13 +88,18 @@ fn writer_state_with_busy(
     let line = |uuid: &str| {
         serde_json::json!({"type":"user","uuid":uuid,"sessionId":"persisted-sid","message":{"role":"user","content":"own"}}).to_string() + "\n"
     };
-    let past = line("same-text-past");
+    let past = line("same-text-past") + "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n";
     std::fs::write(&path, &past).unwrap();
-    let spawn_nonce = if busy.is_some() {
-        uuid::Uuid::new_v4().simple().to_string()
-    } else {
-        "live-pane-incarnation".into()
-    };
+    let spawn_nonce = uuid::Uuid::new_v4().simple().to_string();
+    let context = serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),
+        "execution_nonce":spawn_nonce,"tmux_session":session,"channel_id":channel,
+        "owner_runtime_root":crate::services::tmux_common::current_tmux_owner_marker(),
+        "host":"native-stop-busy-fixture","expected_native_session_id":null,
+        "launch_mode":"fresh","provider_root":null});
+    crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
+        serde_json::from_value(context).unwrap(),
+    )
+    .unwrap();
     std::fs::write(
         crate::services::tmux_common::session_temp_path(&session, "spawn_nonce"),
         spawn_nonce,
@@ -117,6 +122,7 @@ fn writer_state_with_busy(
             relay_last_offset: None,
         },
     );
+    crate::services::claude_tui::readiness::tests::pre_source(&session, &path);
     let token = Arc::new(CancelToken::new());
     let old_actor = Arc::downgrade(&token);
     token.bind_claude_tmux_session(&session);
@@ -376,20 +382,6 @@ async fn hand_busy_children(
     crate::services::claude_tui::input::submission::tests::wait("queued-renderer-started", || {
         renderer.join("ready").exists()
     });
-    let nonce = std::fs::read_to_string(crate::services::tmux_common::session_temp_path(
-        session,
-        "spawn_nonce",
-    ))
-    .unwrap();
-    let context = serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),
-        "execution_nonce":nonce,"tmux_session":session,"channel_id":state.channel_id,
-        "owner_runtime_root":crate::services::tmux_common::current_tmux_owner_marker(),
-        "host":"native-stop-busy-fixture","expected_native_session_id":null,
-        "launch_mode":"fresh","provider_root":null});
-    crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
-        serde_json::from_value(context).unwrap(),
-    )
-    .unwrap();
     let channel = ChannelId::new(state.channel_id);
     let mailbox = shared.mailbox(channel);
     assert!(

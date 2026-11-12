@@ -16,6 +16,12 @@ const IDLE: &str = include_str!("../../../../../tests/fixtures/tui_input/claude-
 fn user(text: &str, id: &str) -> String {
     json!({"type":"user","uuid":id,"sessionId":"receipt-sid","message":{"role":"user","content":text}}).to_string()
 }
+fn completed_user(text: &str, id: &str) -> String {
+    format!(
+        "{}\n{{\"type\":\"system\",\"subtype\":\"turn_duration\"}}\n",
+        user(text, id)
+    )
+}
 fn binding(session: &str, path: &std::path::Path) {
     tui_prompt_dedupe::register_tmux_runtime_binding(
         session,
@@ -29,6 +35,7 @@ fn binding(session: &str, path: &std::path::Path) {
             relay_last_offset: None,
         },
     );
+    crate::services::claude_tui::readiness::tests::pre_source(session, path);
 }
 fn ready() -> SpyGuard {
     SpyGuard::install(SpyState {
@@ -83,7 +90,7 @@ fn b1_fresh_writer_pins_after_real_boundary_for_existing_and_enoent() {
         tmux.clear();
         let session = format!("b1-fresh-{exists}");
         let path = dir.path().join(format!("{exists}.jsonl"));
-        let past = format!("{}\n", user("own", "past"));
+        let past = completed_user("own", "past");
         if exists {
             std::fs::write(&path, &past).unwrap();
         }
@@ -108,7 +115,7 @@ fn b2_idle_leaf_collects_for_turn_without_enabling_cancel_gate() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("idle.jsonl");
-    let past = format!("{}\n", user("own", "past"));
+    let past = completed_user("own", "past");
     std::fs::write(&path, &past).unwrap();
     let session = "b2-idle";
     binding(session, &path);
@@ -215,7 +222,7 @@ fn b5_crlf_wrapper_is_exact_but_replacement_inode_is_rejected() {
         let session = format!("b5-exact-{replace}");
         let path = dir.path().join(format!("{replace}.jsonl"));
         let frame = format!("head\r\n{}\r\ntail", "긴 입력 ".repeat(500));
-        std::fs::write(&path, format!("{}\n", user(&frame, "past"))).unwrap();
+        std::fs::write(&path, completed_user(&frame, "past")).unwrap();
         binding(&session, &path);
         tmux.on_enter(
             &path,
@@ -581,9 +588,21 @@ fn p2_new_pane_rearms_a_rejected_token_but_same_pane_cannot() {
     let tmux = ScriptedTmux::new(&view("", false));
     let _spy = ready();
     let token = Arc::new(CancelToken::new());
+    let terminal = || {
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{{\"type\":\"system\",\"subtype\":\"turn_duration\"}}"
+        )
+        .unwrap();
+    };
     tmux.on_enter(&path, &user("foreign", "first-foreign"));
     fresh(session, &path, "own", &token).unwrap();
     assert_eq!(observed(&token, &path), Some(Err(())));
+    terminal();
     // Another Applied attempt on the same pane must not erase the first foreign user.
     tmux.on_enter(&path, &user("own", "same-pane-a"));
     fresh(session, &path, "own", &token).unwrap();
@@ -592,11 +611,23 @@ fn p2_new_pane_rearms_a_rejected_token_but_same_pane_cannot() {
         Some(Err(())),
         "same incarnation remains immutable"
     );
-    std::fs::write(
-        crate::services::tmux_common::session_temp_path(session, "spawn_nonce"),
-        "new-incarnation",
+    terminal();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let context = serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),
+        "execution_nonce":nonce,"tmux_session":session,"channel_id":null,
+        "owner_runtime_root":crate::services::tmux_common::current_tmux_owner_marker(),
+        "host":"receipt-rearm-test","expected_native_session_id":"receipt-sid",
+        "launch_mode":"fresh","provider_root":null});
+    crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
+        serde_json::from_value(context).unwrap(),
     )
     .unwrap();
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(session, "spawn_nonce"),
+        nonce,
+    )
+    .unwrap();
+    crate::services::claude_tui::readiness::tests::pre_source(session, &path);
     tmux.on_enter(&path, &user("own", "new-pane-a"));
     fresh(session, &path, "own", &token).unwrap();
     assert!(

@@ -515,12 +515,20 @@ fn watch(session: &str, draft_required: bool) {
     {
         let session = session.to_owned();
         super::owner_input::record_preparation_watch(Box::new(move || {
-            if observe(&session,None).is_some()
-                && (!draft_required || super::host_input::observe_draft(&session).as_deref()
-                    .is_some_and(|capture| empty_draft(capture)
-                        && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture))) {
+            if observe(&session, None).is_some()
+                && super::host_input::observe_draft(&session)
+                    .as_deref()
+                    .is_some_and(|capture| {
+                        !idle::focus_modal(capture)
+                            && (empty_draft(capture)
+                                || (!draft_required
+                                    && super::busy_inject::screen::parkable(capture)))
+                    })
+            {
                 super::busy_inject::Screen::Ready
-            } else { super::busy_inject::Screen::Unknown }
+            } else {
+                super::busy_inject::Screen::Unknown
+            }
         }));
     }
     #[cfg(not(unix))]

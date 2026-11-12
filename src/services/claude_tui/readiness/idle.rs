@@ -57,11 +57,20 @@ pub(crate) fn before_paste(
     {
         return Err(Veto::PaneUnavailable);
     }
+    let proven = stash_allowed || super::super::submission_fence::idle_stash_scope().is_some();
     let Some(capture) = pane.capture() else {
-        return Ok(false);
+        return if proven {
+            Err(Veto::ScreenUnread)
+        } else {
+            Ok(false)
+        };
     };
     if focus_modal(&capture) {
         return Err(Veto::Modal);
     }
-    Ok(stash_allowed && screen::parkable(&capture))
+    let park = stash_allowed && screen::parkable(&capture);
+    if proven && !park && !super::empty_draft(&capture) {
+        return Err(Veto::ScreenUnread);
+    }
+    Ok(park)
 }

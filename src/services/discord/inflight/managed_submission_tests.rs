@@ -20,6 +20,13 @@ fn ready_pane() -> String {
 }
 
 pub(super) fn managed_row(channel: u64) -> (InflightTurnState, ManagedSubmission) {
+    let session = format!("AgentDesk-claude-zp1-{channel}");
+    let path = crate::config::runtime_root()
+        .unwrap()
+        .join("managed-ready")
+        .join(channel.to_string())
+        .join("native.jsonl");
+    crate::services::claude_tui::readiness::tests::pre_source(&session, &path);
     let mut state = InflightTurnState::new(
         ProviderKind::Claude,
         channel,

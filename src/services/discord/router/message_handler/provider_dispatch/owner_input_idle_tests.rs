@@ -303,6 +303,7 @@ fn rehydrate(rig: &Rig, session: &str) {
         relay_last_offset: None,
     };
     register_tmux_runtime_binding(&rig.name, binding);
+    crate::services::claude_tui::readiness::tests::pre_source(&rig.name, &rig.transcript());
 }
 
 /// A's idle handoff settles before its AI turn ends; B uses that pane's binding while the
@@ -1476,6 +1477,7 @@ impl AttachedOwner {
             "export AGENTDESK_BINDING_CONTEXT='{}'\ncd '{}'\nexec 'claude' '--session-id' '{session}'\n",
             context.display(), project.display(),
         )).unwrap();
+        crate::services::claude_tui::readiness::tests::pre_source(&self.rig.name, &path);
         (session, path)
     }
 

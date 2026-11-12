@@ -30,6 +30,7 @@ fn both_codex_tmux_entries_refuse_a_herdr_channel_before_any_tmux_call_or_cleanu
                 None,
                 None,
                 None,
+                None,
                 "/tmp",
                 sender,
                 None,
@@ -44,6 +45,7 @@ fn both_codex_tmux_entries_refuse_a_herdr_channel_before_any_tmux_call_or_cleanu
             ),
             true => execute_streaming_local_tmux(
                 "q",
+                None,
                 None,
                 None,
                 None,

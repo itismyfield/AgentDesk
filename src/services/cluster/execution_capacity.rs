@@ -52,9 +52,16 @@ pub(crate) fn automatic_enabled() -> bool {
 }
 
 /// Order available bounded candidates by occupancy ratio, oldest assignment,
-/// then identity. Legacy/unbounded nodes never absorb automatic overflow.
-pub(crate) fn rank(nodes: &mut Vec<Value>) {
+/// then identity. Legacy/unbounded nodes never absorb automatic overflow; only
+/// the agent's own primary stays when it advertises no slots, as that is not overflow.
+pub(crate) fn rank(nodes: &mut Vec<Value>, primary: Option<&str>) {
     nodes.retain(|node| {
+        if node
+            .pointer("/capabilities/execution_capacity")
+            .is_none_or(Value::is_null)
+        {
+            return primary.is_some() && node["instance_id"].as_str() == primary;
+        }
         node.pointer("/capabilities/execution_capacity/version") == Some(&json!(1))
             && node
                 .pointer("/capabilities/execution_capacity/slots")

@@ -113,6 +113,12 @@ pub(super) fn owned(
     let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
     fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
     fs::write(marker, &nonce).unwrap();
+    if provider == "claude" {
+        crate::services::claude_tui::readiness::tests::pre_source(
+            name,
+            &renderer.join("transcript"),
+        );
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -287,6 +293,14 @@ impl Rig {
         transcript: &Path,
         execution: Execution,
     ) -> Registration {
+        if *provider == ProviderKind::Claude && phase == target::Phase::Idle {
+            let binding =
+                crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&self.name);
+            let path = binding
+                .as_ref()
+                .map_or(transcript, |binding| Path::new(binding.relay_output_path()));
+            crate::services::claude_tui::readiness::tests::pre_source(&self.name, path);
+        }
         let root = crate::services::tmux_common::current_tmux_owner_marker();
         // A live pane's attempt names the transcript it was observed on.
         let source = if phase == target::Phase::Busy {
@@ -628,7 +642,7 @@ fn rig_cancelled_after_claim() -> Rig {
 #[test]
 fn an_idle_handoff_ends_at_settlement_while_its_ai_turn_runs() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let rig = rig("oi-turn", 7_272_538, "normal", view("", false), BUSY);
+    let rig = rig("oi-turn", 7_272_538, "normal", view("", false), IDLE);
     let mut next = rig.original.clone();
     next.message_id += 1;
     next.source_message_ids = vec![next.message_id];
@@ -1890,7 +1904,7 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
     use std::io::Write;
     writeln!(
         fs::OpenOptions::new().append(true).open(&path).unwrap(),
-        "{past}"
+        "{past}\n{IDLE}"
     )
     .unwrap();
     let before = fs::metadata(&path).unwrap().len();
