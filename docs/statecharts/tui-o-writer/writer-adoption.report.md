@@ -58,7 +58,8 @@ A restart keeps the turn: a running turn's bridge is restored and judges again (
 | RelayedByTime | stage1, a turn that ended before the baseline counted delivered by time alone | `HeldBodyNotSkipped`, `RowClearedHasEvidence`; liveness `HeldTurnAnswered` |
 | SwallowOwed | stage1, the new rollout committed while the one before still owes a retry | `NoCommitPastOwed` |
 | NoSerial | stage1, a second recovery of the kept row without the restore lock and disk recheck | `MarkerAtMostOnce` |
-| NoRetry | stage1, the adoption wake ends at its first judgement when a claim holds the row | liveness `RowEventuallySettled` |
+| NoRetry | stage1, the adoption wake gives up at its first judgement when a claim holds the row; the claim still ends | liveness `RowEventuallySettled` |
+| Retries4 | stage1, a fourth wake retry allowed | `TriesBound` |
 
 Main's violations are code paths on the baseline. Legacy posts the Deferred turn (the 11-08 trace: Deferred seed, a bound rollout with output skipped, warm input, Legacy W14/W10). Without a runtime root, or with an execution view and no store, the gate answers owned (`adoption.rs:419-421`, `channel_gate.rs:461-471`), so the bridge commits and the watcher settles with nothing posted. GateOnly holds the body but the warm channel never commits, or commits at end of file and skips the held turn.
 
@@ -71,5 +72,6 @@ Main's violations are code paths on the baseline. Legacy posts the Deferred turn
 - Turn presence keeps a held turn Busy; that is `turn-presence`'s `EventuallyStableBusy`.
 - Census instrumentation (denominators, end evidence) is an observation contract checked by Rust tests.
 - A transiently failed recovery send is not modelled (`Answer` is the gate's answer only); the wake's retry after one is fixed by the Rust test `a_transient_recovery_failure_is_judged_again_and_settles_the_kept_row_pg`.
-- The kick's claim is assumed to end within one wake backoff (`WakeDefer` clears it); a longer claim exhausts the wake and leaves the row to a restart.
+- The kick's claim is assumed to stay open across at most `MaxSpan` judgements, within the wake's retry window (`MaxSpan` = `Retries`); the claim ends on its own (`ClaimEnds`) at any judgement. Only Stage1, NoRetry and Retries4 explore an open claim; the other configs start without one to keep their state space. A claim outlasting the window exhausts the wake (`WakeGiveUp`) and leaves the row to the next ready transition or a restart; that path is explored with `NoRetry`.
+- A wake's transient send failures spend no restart budget; that and the four judgements with 1, 2, 3 s backoff are fixed by the Rust test `a_wake_whose_sends_keep_failing_ends_after_three_retries_and_keeps_the_row_pg`.
 - tmux presence: with tmux alive the recovery budget never clears a row, so only the absent case is modelled.

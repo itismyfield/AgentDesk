@@ -227,6 +227,7 @@ tui-o-writer/WriterAdoptionSwallowOwed.cfg	WriterAdoption	NoCommitPastOwed	-
 tui-o-writer/WriterAdoptionLateExemptIntake.cfg	WriterAdoption	OtherCustodyBlocks	-
 tui-o-writer/WriterAdoptionNoSerial.cfg	WriterAdoption	MarkerAtMostOnce	-
 tui-o-writer/WriterAdoptionNoRetry.cfg	WriterAdoption	-	RowEventuallySettled
+tui-o-writer/WriterAdoptionRetries4.cfg	WriterAdoption	TriesBound	-
 # CodexLateDelivery (Codex late takeover start point): R3*, D1*, R4* and R5* reproduce the reviewed rules' losses; R6* pass; R6 mutants each break NoAdoptionLoss; R6Residual lists what r6 leaves to Legacy.
 tui-o-writer/CodexLateDeliveryR3Free.cfg	CodexLateDelivery	NoAdoptionLoss	-
 tui-o-writer/CodexLateDeliveryR3RowPending.cfg	CodexLateDelivery	NoAdoptionLoss	-

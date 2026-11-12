@@ -309,7 +309,11 @@ async fn a_wake_whose_sends_keep_failing_ends_after_three_retries_and_keeps_the_
             }
             at
         };
-        let woke = wake(&http, &rig.shared, &ProviderKind::Claude, channel);
+        // Ending the wake drops the sender, so fewer judgements show as a short list, not a wait.
+        let woke = async {
+            wake(&http, &rig.shared, &ProviderKind::Claude, channel).await;
+            JUDGED.with(|slot| *slot.borrow_mut() = None);
+        };
         let ((), at) = tokio::join!(await_within(woke, WAIT_CAP), await_within(times, WAIT_CAP));
         assert_eq!(at.len(), 4, "the first judgement and three retries");
         for (gap, pair) in at.windows(2).enumerate() {
