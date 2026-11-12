@@ -228,3 +228,56 @@ async fn preferred_leader_wins_but_unconfigured_agent_keeps_legacy_placement_pg(
     pool.close().await;
     fixture.drop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_primary_without_advertised_slots_starts_there_but_other_unbounded_nodes_never_absorb_pg()
+ {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    seed_agent_with_preference(&pool, "default-agent", "8661", json!([])).await;
+    // No node advertises execution_capacity, as when cluster.execution_slots is unset.
+    for (id, os) in [
+        ("leader-1", "macos"),
+        ("win", "windows"),
+        ("linux", "linux"),
+    ] {
+        let caps = ready_node(id, os)["capabilities"].clone();
+        seed_worker_node_with_capabilities(&pool, id, json!([]), "online", caps).await;
+    }
+    set_primary(&pool, "win").await;
+    let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "8662");
+    ctx.policy_channel_id = "8661";
+    assert!(matches!(try_route_intake(&pool, &ctx).await,
+        IntakeRouterDecision::Forwarded { target_instance_id, .. } if target_instance_id == "win"));
+
+    set_primary(&pool, "leader-1").await;
+    ctx.channel_id = "8663";
+    assert!(matches!(
+        try_route_intake(&pool, &ctx).await,
+        IntakeRouterDecision::RanLocal {
+            reason: RanLocalReason::AgentDefaultIsLeader
+        }
+    ));
+
+    // An unready primary does not let other unbounded nodes take its work.
+    set_primary(&pool, "win").await;
+    sqlx::query("UPDATE worker_nodes SET status='offline' WHERE instance_id='win'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    ctx.channel_id = "8664";
+    assert!(matches!(
+        try_route_intake(&pool, &ctx).await,
+        IntakeRouterDecision::Blocked {
+            reason: IntakeBlockedReason::RoutingDependencyFailed { detail }
+        } if detail.starts_with("no ready runner has capacity")
+    ));
+    let targets: Vec<String> =
+        sqlx::query_scalar("SELECT target_instance_id FROM intake_outbox ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(targets, vec!["win".to_string()]);
+    pool.close().await;
+    fixture.drop().await;
+}
