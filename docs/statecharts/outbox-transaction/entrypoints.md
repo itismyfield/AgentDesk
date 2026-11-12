@@ -7,12 +7,12 @@
 |검색|원시 일치 행|선언/주석 제외 production|시험 fixture|
 |---|---:|---:|---:|
 |enqueue/stage/lifecycle/session/validate 함수 정규식|184|66|91|
-|stage_held / replay enqueue_on_tx / validate_send_source_for 정규식|34|6|26|
+|stage_held / replay enqueue_on_tx / validate_send_source_for / enqueue_plain_on_tx 정규식|37|8|26|
 |`enqueue` 별칭(custody_notice.rs:10→:105)|1|1|0|
 |`INSERT INTO message_outbox`(대소문자 무시, Rust 파일)|12|8|4|
 |`OutboxMessage\s*\{`|79|30|49|
 
-주 검색 184행에는 선언 27행이 포함된다. 추가 검색 34행에는 선언 2행이 포함된다. source validation wrapper의 :64는 추가 검색에만 든다. `message_outbox_redrive_audit`·`message_outbox_circuit_authority` INSERT는 message_outbox 행이 아니므로 위 INSERT 집계에 포함하지 않는다. source 목록/코드 주석은 호출로 세지 않는다. 별칭 전수 검색에서 발견한 production outbox enqueue alias는 custody :10 하나이며 실제 호출 :105를 추가했다.
+주 검색 184행에는 선언 27행이 포함된다. 추가 검색 37행에는 선언 3행이 포함된다. source validation wrapper의 :64는 추가 검색에만 든다. `message_outbox_redrive_audit`·`message_outbox_circuit_authority` INSERT는 message_outbox 행이 아니므로 위 INSERT 집계에 포함하지 않는다. source 목록/코드 주석은 호출로 세지 않는다. 별칭 전수 검색에서 발견한 production outbox enqueue alias는 custody :10 하나이며 실제 호출 :105를 추가했다.
 
 원시 로그: `/home/adk/adk/lane-runs/i7353/logs/design-s41314-1/`의 `i7353-d1314-calls.txt`, `extra-calls.git-grep.txt`, `i7353-d1314-inserts.txt`, `dto.git-grep.txt`, `inventory-annotated.json`. 정규식/범위는 `commands.md`에 고정한다.
 
@@ -101,8 +101,10 @@ V=source known-agent 검증; D=eligible display의 provider SQL와 행별 live d
 |`src/services/message_outbox.rs:812` (`enqueue_outbox_best_effort`)|caller tx 없음; pool API의 tx 시작은 아래 INSERT 경로표|V tx 전; 경로에 따라 tx 안 V 재검증; D/C는 INSERT 표|상위 원문 DTO 전달; lifecycle wrapper만 lifecycle_notifier 고정|
 |`src/services/message_outbox.rs:814` (`enqueue_outbox_best_effort`)|caller tx 없음; pool API의 tx 시작은 아래 INSERT 경로표|V/D/C는 선택 API의 아래 경로표를 따름(자체 선관측 없음)|상위 원문 DTO 전달; lifecycle wrapper만 lifecycle_notifier 고정|
 |`src/services/message_outbox.rs:831` (`enqueue_outbox_pg_on_tx`)|`src/services/message_outbox.rs:828`|V/D/C는 선택 API의 아래 경로표를 따름(자체 선관측 없음)|상위 원문 DTO 전달; lifecycle wrapper만 lifecycle_notifier 고정|
+|`src/services/message_outbox.rs:839` (`enqueue_outbox_pg_on_tx_with_attachment`)|`src/services/message_outbox.rs:835`|V/D/C는 선택 API의 아래 경로표를 따름(자체 선관측 없음)|상위 원문 DTO 전달; lifecycle wrapper만 lifecycle_notifier 고정|
 |`src/services/message_outbox.rs:848` (`enqueue_plain_on_tx`)|`src/services/message_outbox.rs:843`|V·D tx 안; C 새 INSERT 뒤 같은 tx|상위 원문 DTO 전달; lifecycle wrapper만 lifecycle_notifier 고정|
 |`src/services/message_outbox.rs:889` (`enqueue_lifecycle_notification_pg`)|pool tx 시작 message_outbox.rs:913|V tx 전; 경로에 따라 tx 안 V 재검증; D/C는 INSERT 표|상위 원문 DTO 전달; lifecycle wrapper만 lifecycle_notifier 고정|
+|`src/services/message_outbox/session_notice.rs:186` (`enqueue_session_notice_pg_on_tx`)|`src/services/message_outbox/session_notice.rs:183`|V/D/C는 선택 API의 아래 경로표를 따름(자체 선관측 없음)|자동큐 explicit-completion opt-in; 상위 raw DTO를 같은 tx plain helper로 전달|
 |`src/services/message_outbox_circuit_authority.rs:281` (`stage_held`)|caller tx 없음; pool API의 tx 시작은 아래 INSERT 경로표|V/D/C는 선택 API의 아래 경로표를 따름(자체 선관측 없음)|상위 circuit 경보 producer DTO; 소유자/authority SQL fence 유지|
 |`src/services/message_outbox_recovery.rs:67` (`redrive_failed_rows`)|`src/services/message_outbox_recovery.rs:61`|tx 안 :61→:67; INSERT 없음|운영자 redrive 명령; 기존 DB row source를 tx 안에서 다시 검증|
 |`src/services/observability/turn_lifecycle.rs:410` (`emit_turn_lifecycle`)|caller tx 없음; pool API의 tx 시작은 아래 INSERT 경로표|V/D/C는 선택 API의 아래 경로표를 따름(자체 선관측 없음)|TurnEvent lifecycle 시스템; lifecycle_notifier|

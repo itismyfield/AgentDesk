@@ -63,7 +63,7 @@ Savepoint begin 오류는 outer 실패로 전파한다(`body_census.rs:113`). UP
 
 ## 전수표·입력·관측 범위
 
-[entrypoints.md](entrypoints.md)는 INSERT 8곳, production 호출 73행, DTO 생성 30곳 및 tx/입력 작성자/관측 leaf의 전수표다. 호출 이름만 보지 않고 `enqueue` alias(:105), replay private helper, circuit stage, 운영자 redrive, generic direct-send validator를 추가 검색했다. fixture와 선언은 production 수에 넣지 않았다. canonical 완료의 DB caller 재귀 폐쇄는 DB 8 + 상위 20파일이며 선택 설계가 이 조립을 서비스 child로 옮기는 비용을 포함한다.
+[entrypoints.md](entrypoints.md)는 INSERT 8곳, production 호출 75행, DTO 생성 30곳 및 tx/입력 작성자/관측 leaf의 전수표다. 호출 이름만 보지 않고 `enqueue` alias(:105), replay private helper, circuit stage, 운영자 redrive, generic direct-send validator를 추가 검색했다. fixture와 선언은 production 수에 넣지 않았다. canonical 완료의 DB caller 재귀 폐쇄는 DB 8 + 상위 20파일이며 선택 설계가 이 조립을 서비스 child로 옮기는 비용을 포함한다.
 
 |값 동치류|전수표의 코드 근거|모델/시험 분담|
 |---|---|---|
