@@ -67,7 +67,7 @@ async fn skip_live_auto_queue_entries_for_card_on_pg_tx(
         let entry_id: String = row.try_get("id").map_err(|error| {
             anyhow::anyhow!("decode postgres auto-queue entry for {card_id}: {error}")
         })?;
-        let result = crate::db::auto_queue::update_entry_status_on_pg_tx(
+        let result = crate::services::auto_queue::transactions::update_entry_status_on_pg_tx(
             tx,
             &entry_id,
             crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
@@ -201,7 +201,7 @@ async fn cancel_active_dispatches_for_card_on_pg_tx(
         // PG bookkeeping mirrors SQLite: transition rows are recorded and
         // single-entry runs can finalize. Preserve the dispatch link afterward
         // for abandoned-dispatch lineage.
-        counts.skipped_auto_queue_entries += crate::db::auto_queue::sync_dispatch_terminal_entries_on_pg_tx(
+        counts.skipped_auto_queue_entries += crate::services::auto_queue::transactions::sync_dispatch_terminal_entries_on_pg_tx(
             tx,
             &dispatch_id,
             crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
