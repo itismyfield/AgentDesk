@@ -10,7 +10,12 @@ pub(in super::super) struct Done {
 }
 
 /// A closed local output ends the command; success also requires a manual boundary.
-pub(in super::super) fn read(path: &Path, floor: &Stamp, native: &str) -> Option<bool> {
+pub(in super::super) fn read(
+    path: &Path,
+    floor: &Stamp,
+    native: &str,
+    idle_only: bool,
+) -> Option<bool> {
     let stamp = Stamp::read(path)?;
     if stamp.file != floor.file || stamp.len <= floor.len {
         return None;
@@ -85,6 +90,10 @@ pub(in super::super) fn read(path: &Path, floor: &Stamp, native: &str) -> Option
             | "cost-state"
             | "queue-operation" => {}
             _ => return None,
+        }
+        // Retire the completed control even if a new native turn beat this timer read.
+        if output.is_some() && !idle_only {
+            break;
         }
         row.clear();
     }

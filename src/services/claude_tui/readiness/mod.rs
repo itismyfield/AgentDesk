@@ -163,7 +163,8 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
             entry
                 .recovery
                 .is_none_or(|recovery| Some(recovery) == done.recovery)
-                && compact::completion::read(&source.path, &done.floor, &source.native).is_some()
+                && compact::completion::read(&source.path, &done.floor, &source.native, true)
+                    .is_some()
         });
     let ready = compact_ready
         || (native_idle

@@ -363,7 +363,8 @@ fn compact_failure_output_releases_only_the_submitted_control_without_claiming_s
         compact::completion::read(
             &r.path,
             &floor,
-            r.ctx.expected_native_session_id.as_deref().unwrap()
+            r.ctx.expected_native_session_id.as_deref().unwrap(),
+            true
         ),
         Some(false)
     );
@@ -433,6 +434,9 @@ fn compact_completion_does_not_release_unknown_foreign_source_or_newer_reservati
                 entry.pending = entry.pending.map(|(floor, token)| (floor, token + 100));
             }
             _ => {}
+        }
+        if mode == "other-command" {
+            r.append(json!({"type":"user","message":{"content":"<command-name>/compact</command-name>"}}));
         }
         compact_records(&r, false);
         if mode == "native" {
@@ -537,7 +541,8 @@ fn compact_stdout_error_is_completion_without_success_and_new_submit_keeps_its_o
         compact::completion::read(
             &r.path,
             &floor,
-            r.ctx.expected_native_session_id.as_deref().unwrap()
+            r.ctx.expected_native_session_id.as_deref().unwrap(),
+            true
         ),
         Some(false)
     );
@@ -597,6 +602,30 @@ fn compact_completion_retains_the_recovery_floor_already_proven_by_its_reservati
     compact_records(&r, false);
     assert_eq!(poll(&mut pending, &r.session), Outcome::Completed);
     assert_eq!(ledger().entries.get(&source).unwrap().recovery, recovery);
+    tmux.show(&view("", false));
+    assert_eq!(r.send(), Ok(()));
+    assert_eq!(
+        tmux.sends(),
+        ["/compact", "Enter", "load", "paste", "Enter"]
+    );
+}
+
+#[test]
+fn compact_completed_prefix_cannot_hide_a_new_native_turn_or_require_its_submit_hook() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    r.assistant("done");
+    r.terminal();
+    let tmux = pane();
+    let mut pending = Pending::capture(&r.session).unwrap();
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Submitted);
+    compact_records(&r, false);
+    r.append(json!({"type":"user","message":{"content":"a new busy original"}}));
+    r.assistant("new turn still running");
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Completed);
+    assert!(!r.ready());
+    assert_eq!(tmux.sends(), ["/compact", "Enter"]);
+    r.terminal();
     tmux.show(&view("", false));
     assert_eq!(r.send(), Ok(()));
     assert_eq!(

@@ -83,7 +83,8 @@ impl Pending {
             let Some(floor) = &reservation.stamp else {
                 return Outcome::Obsolete;
             };
-            let Some(result) = completion::read(&self.source.path, floor, &self.source.native)
+            let Some(result) =
+                completion::read(&self.source.path, floor, &self.source.native, false)
             else {
                 return Outcome::Pending;
             };
