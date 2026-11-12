@@ -160,6 +160,14 @@ pub(crate) fn managed_fixture_program(program: std::path::PathBuf) -> std::path:
     wrapper
 }
 
+/// Keeps a PATH-first stub's entry path while supplying its managed-session evidence.
+pub(crate) fn mark_fixture_program(program: std::path::PathBuf) {
+    let stub = program.with_file_name(format!("tmux-stub-{}", uuid::Uuid::new_v4()));
+    std::fs::rename(&program, &stub).unwrap();
+    let wrapper = managed_fixture_program(stub);
+    std::fs::rename(wrapper, program).unwrap();
+}
+
 #[test]
 fn identity_parser_preserves_equals_unicode_and_rejects_unknown_records() {
     use crate::domain::session_identity::managed::ManagedIdentity;

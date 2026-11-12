@@ -740,6 +740,7 @@ esac
     let program = dir.path().join("tmux");
     fs::write(&program, script).unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::services::platform::tmux::session_identity_tests::mark_fixture_program(program);
     let transcript = dir.path().join("transcript");
     fs::write(
         &transcript,
