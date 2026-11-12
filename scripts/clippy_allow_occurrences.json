@@ -330,7 +330,7 @@
     {
       "path": "src/services/discord/relay_owner_observability.rs",
       "lint": "too_many_arguments",
-      "count": 4
+      "count": 3
     },
     {
       "path": "src/services/discord/relay_recovery_auto_heal_apply.rs",

@@ -2,9 +2,10 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Row};
 
-use crate::db::agents::{resolve_agent_channel_for_provider_pg, resolve_agent_dispatch_channel_pg};
+use crate::db::agents::resolve_agent_channel_for_provider_pg;
 use crate::db::auto_queue::run_owner_guard as owner_guard;
 use crate::engine::PolicyEngine;
+use crate::services::agent_channels::resolve_agent_dispatch_channel_pg;
 
 use super::dispatch_channel::{
     dispatch_destination_provider_override, dispatch_uses_alt_channel, resolve_dispatch_channel_id,

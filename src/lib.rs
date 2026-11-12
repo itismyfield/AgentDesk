@@ -99,6 +99,7 @@ pub(crate) mod credential;
 mod db;
 mod dispatch;
 mod domain;
+mod intake_consent_authority;
 // Policy-engine loader/runtime helpers cover hot-reload and test-only entry
 // points outside the default server launch path.
 mod engine;

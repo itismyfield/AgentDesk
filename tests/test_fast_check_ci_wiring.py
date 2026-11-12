@@ -47,7 +47,6 @@ CFG_SHIM_CONSUMERS = (
     "src/services/discord/runtime_bootstrap/recovery_flush.rs",
     "src/services/discord/turn_finalizer.rs",
     "src/services/discord/turn_finalizer/delivery_lease.rs",
-    "src/services/discord/terminal_ui_obligation.rs",
     "src/services/discord/destructive_cancel_gate.rs",
     "src/services/discord/inflight/save_store/create_monotonic_observer.rs",
     "src/services/discord/placeholder_live_events/tests.rs",

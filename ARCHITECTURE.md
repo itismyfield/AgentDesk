@@ -208,6 +208,7 @@ src/
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
+│   │   ├── listing.rs
 │   │   ├── rebind_override.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
@@ -227,12 +228,15 @@ src/
 │   ├── intake_outbox/
 │   │   ├── consent_handoff.rs
 │   │   ├── consent_handoff_tests.rs
+│   │   ├── consent_projection.rs
 │   │   ├── owner_fence_pg_tests.rs
 │   │   ├── postgres_tests.rs
+│   │   ├── pre_accept_sweep.rs
 │   │   └── worker_status.rs
 │   ├── intake_outbox_dispatch_stamp/
 │   │   └── tests.rs
 │   ├── kanban_cards/
+│   │   ├── clock_columns.rs
 │   │   ├── crud.rs
 │   │   ├── labels.rs
 │   │   ├── listing.rs
@@ -377,6 +381,8 @@ src/
 ├── domain/
 │   ├── atomic_write/
 │   │   └── tests.rs
+│   ├── intake_consent/
+│   │   └── decision.rs
 │   ├── message_split/
 │   │   └── semantic_boundaries.rs
 │   ├── outbound/
@@ -405,8 +411,11 @@ src/
 │   ├── automation_contract.rs
 │   ├── bot_role.rs
 │   ├── cluster_policy.rs
+│   ├── dispatch_route.rs
 │   ├── file_sync.rs
+│   ├── host_observation.rs
 │   ├── human_input.rs
+│   ├── intake_consent.rs
 │   ├── intake_identity.rs
 │   ├── lifecycle.rs
 │   ├── memory.rs
@@ -1109,6 +1118,7 @@ src/
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
+│   │   │   ├── consent_scope.rs
 │   │   │   ├── consent_scope_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
@@ -1127,6 +1137,8 @@ src/
 │   │   │   ├── network.rs
 │   │   │   ├── sampler.rs
 │   │   │   ├── store.rs
+│   │   │   └── tests.rs
+│   │   ├── pre_accept_sweep/
 │   │   │   └── tests.rs
 │   │   ├── readiness/
 │   │   │   └── tests.rs
@@ -1158,6 +1170,7 @@ src/
 │   │   ├── machine_resources.rs
 │   │   ├── mod.rs
 │   │   ├── node_registry.rs
+│   │   ├── pre_accept_sweep.rs
 │   │   ├── readiness.rs
 │   │   ├── registry_adapter_sink.rs
 │   │   ├── relay_producer_registry.rs
@@ -1775,24 +1788,6 @@ src/
 │   │   │   │   └── o_pending_tests.rs
 │   │   │   ├── confirmation/
 │   │   │   │   └── terminal_notice_tests.rs
-│   │   │   ├── delivery_obligation/
-│   │   │   │   ├── state/
-│   │   │   │   │   ├── proof_access.rs
-│   │   │   │   │   ├── proof_input.rs
-│   │   │   │   │   ├── proof_tests.rs
-│   │   │   │   │   └── whole_proof.rs
-│   │   │   │   ├── codec_tests.rs
-│   │   │   │   ├── fence.rs
-│   │   │   │   ├── load.rs
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── protocol.rs
-│   │   │   │   ├── reader.rs
-│   │   │   │   ├── reader_tests.rs
-│   │   │   │   ├── schema.rs
-│   │   │   │   ├── state.rs
-│   │   │   │   ├── tests.rs
-│   │   │   │   ├── validation.rs
-│   │   │   │   └── validation_tests.rs
 │   │   │   ├── delivery_record/
 │   │   │   │   ├── content.rs
 │   │   │   │   ├── frontier.rs
@@ -1919,6 +1914,9 @@ src/
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
 │   │   │   ├── input_owner/
+│   │   │   │   ├── claude_handoff/
+│   │   │   │   │   └── tests/
+│   │   │   │   │       └── actual_close_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── codex.rs
 │   │   │   │   │   ├── codex_herdr_tests.rs
@@ -2126,7 +2124,8 @@ src/
 │   │   │   │   ├── startup.rs
 │   │   │   │   ├── startup_tests.rs
 │   │   │   │   ├── transport.rs
-│   │   │   │   └── transport_tests.rs
+│   │   │   │   ├── transport_tests.rs
+│   │   │   │   └── worker_handoff.rs
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── queued/
 │   │   │   │   │   ├── transition_busy_tests/
@@ -2293,6 +2292,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
@@ -2513,8 +2513,6 @@ src/
 │   │   ├── terminal_delivery_custody/
 │   │   │   ├── pg_tests.rs
 │   │   │   └── tests.rs
-│   │   ├── terminal_ui_obligation/
-│   │   │   └── sweep_tests.rs
 │   │   ├── tmux/
 │   │   │   ├── monitor_auto_turn_inflight.rs
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
@@ -3161,6 +3159,7 @@ src/
 │   │   │   ├── supervisor_notice_tests.rs
 │   │   │   ├── supervisor_reader_notice_tests.rs
 │   │   │   ├── supervisor_tests.rs
+│   │   │   ├── supervisor_worker_tests.rs
 │   │   │   ├── unknown_notice.rs
 │   │   │   ├── unknown_notice_store.rs
 │   │   │   └── unknown_notice_tests.rs
@@ -3349,7 +3348,6 @@ src/
 │   │   ├── task_supervisor.rs
 │   │   ├── terminal_coordinate.rs
 │   │   ├── terminal_delivery_custody.rs
-│   │   ├── terminal_ui_obligation.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
 │   │   ├── tmux_kill_policy.rs
@@ -3393,10 +3391,17 @@ src/
 │   │   │   └── retry_wake_tests.rs
 │   │   ├── herdr_kill/
 │   │   │   └── effects.rs
+│   │   ├── hosted_cleanup/
+│   │   │   ├── thread_gc/
+│   │   │   │   └── tests_pg.rs
+│   │   │   └── thread_gc.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── force_kill.rs
 │   │   ├── herdr_kill.rs
 │   │   ├── hook.rs
+│   │   ├── hosted_cleanup.rs
+│   │   ├── listing.rs
+│   │   ├── listing_tests.rs
 │   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
@@ -3867,6 +3872,7 @@ src/
 │   ├── tmux_common/
 │   │   ├── claude_footer.rs
 │   │   ├── host_marker.rs
+│   │   ├── runtime_hint_fence.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   ├── cleanup_host.rs
@@ -4486,6 +4492,7 @@ src/
 │   │   │   └── statusline_tests.rs
 │   │   ├── quota.rs
 │   │   └── quota_tests.rs
+│   ├── agent_channels.rs
 │   ├── agent_identity.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
@@ -4569,6 +4576,7 @@ src/
 │   ├── service_error.rs
 │   ├── session_activity.rs
 │   ├── session_backend.rs
+│   ├── session_evidence.rs
 │   ├── session_forwarding.rs
 │   ├── session_host.rs
 │   ├── session_resume.rs
@@ -4634,6 +4642,7 @@ src/
 ├── error.rs
 ├── eventbus.rs
 ├── high_risk_recovery.rs
+├── intake_consent_authority.rs
 ├── launch.rs
 ├── lib.rs
 ├── logging.rs
@@ -4686,6 +4695,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/error.rs` | Shared HTTP and policy error type with typed codes and JSON response helpers. |
 | `src/eventbus.rs` | In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow. |
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |
+| `src/intake_consent_authority.rs` | Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys. |
 | `src/launch.rs` | Starts the Tokio runtime and hands off to server boot. |
 | `src/lib.rs` | Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests. |
 | `src/logging.rs` | Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs. |

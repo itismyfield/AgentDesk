@@ -1,0 +1,58 @@
+---
+title: "Hosted cleanup: 관측과 조건부 삭제"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ExplicitActivePreserved
+    lg1: Breaks AllAliasesRechecked or BulkLockWaitMarkerNotMissed or LegacyCurrentMarkerSafe in some cases
+    lg2: Path to the AllAliasesRechecked or BulkLockWaitMarkerNotMissed or ExplicitActivePreserved or LegacyCurrentMarkerSafe bug
+  }
+  class lg0 breaks
+  class lg1 mayBreak
+  class lg2 bugPath
+  s0: 다음 정리 대기
+  s1: DB 후보 읽음
+  s2: lock 종료 후 재관측
+  s3: 삭제 판정 완료
+  s4: 다른 row lock 대기
+  s5: lock 종료 후 재관측 #183; row 변경
+  s6: 삭제 판정 완료 #183; alias 추가
+  s7: transaction 조건부 적용 #183; alias 추가
+  s8: 삭제 판정 완료 #183; row 변경
+  s9: transaction 조건부 적용 #183; row 변경
+  s10: transaction 조건부 적용
+  s11: 삭제됨 (bulk, 관측 absent, 현재 unknown)
+  s12: 삭제됨 (explicit, 관측 absent, 현재 absent)
+  [*] --> s0
+  s0 --> s1: DB 후보 snapshot
+  s1 --> s3: host marker 관측
+  s1 --> s4: host marker 관측
+  s1 --> s2: host marker 관측
+  s2 --> s5: 새 turn 또는 재spawn
+  s3 --> s6: 다른 host marker가 있는 alias 추가
+  s4 --> s4: lock 보유자가 marker 기록
+  s5 --> s8: row와 marker 재관측
+  s6 --> s7: 조건부 재검증 및 삭제
+  s4 --> s3: 먼저 잡은 row lock 해제
+  s7 --> s11: transaction commit
+  s8 --> s9: 조건부 재검증 및 삭제
+  s3 --> s10: 조건부 재검증 및 삭제
+  s9 --> s12: transaction commit
+  s10 --> s11: transaction commit
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 bugPath
+  class s8 bugPath
+  class s9 bugPath
+  class s10 bugPath
+  class s11 mayBreak
+  class s11 bugPath
+  class s12 breaks
+  class s12 bugPath

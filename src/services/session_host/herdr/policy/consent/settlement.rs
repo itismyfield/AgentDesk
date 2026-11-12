@@ -1,6 +1,7 @@
 //! Custody owners confirm their durable effects before consent metadata can stop holding an intent.
 
 use super::{Consent, ConsentStore, IntentRef, State, durable};
+use crate::domain::intake_consent::{IntentResolution, is_unresolved};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,10 +73,13 @@ impl Consent {
         self.intents
             .iter()
             .filter(|intent| {
-                matches!(
-                    self.resolution(intent),
-                    None | Some(Resolution::Returned { .. } | Resolution::Adopted { .. })
-                )
+                is_unresolved(self.resolution(intent).map(|resolution| match resolution {
+                    Resolution::Returned { .. } => IntentResolution::Returned,
+                    Resolution::Adopted { .. } => IntentResolution::Adopted,
+                    Resolution::Released | Resolution::Discarded | Resolution::Closed { .. } => {
+                        IntentResolution::Settled
+                    }
+                }))
             })
             .cloned()
             .collect()

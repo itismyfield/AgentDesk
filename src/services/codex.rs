@@ -1245,6 +1245,7 @@ fn cleanup_existing_codex_tui_session(
 /// Paths and timing produced while preparing a Codex Direct TUI launch script.
 #[cfg(unix)]
 struct CodexTuiLaunchScript {
+    fence: crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence,
     prepared: crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation,
     script_path: String,
     owner_path: String,
@@ -1425,6 +1426,10 @@ fn execute_streaming_local_tmux(
     if crate::services::herdr_launch::herdr_configured_for_tui_launch(report_channel_id) {
         return Err(crate::services::herdr_launch::HERDR_NOT_ADMITTED.to_string());
     }
+    let publisher_observation =
+        crate::services::tmux_common::runtime_hint_fence::TmuxPublisherObservation::capture(
+            tmux_session_name,
+        )?;
     let auth_overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
         ProviderKind::Codex,
         tmux_session_name,
@@ -1517,7 +1522,15 @@ fn execute_streaming_local_tmux(
         teardown_tmux(teardown, tmux_session_name, "codex_provider", code, reason)?;
     }
 
-    crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
+    let fence = publisher_observation.acquire()?;
+    fence.validate_tmux_publisher(tmux_session_name)?;
+    if crate::services::herdr_launch::herdr_configured_for_tui_launch(report_channel_id) {
+        return Err(crate::services::herdr_launch::HERDR_NOT_ADMITTED.to_string());
+    }
+    crate::services::tmux_common::cleanup_session_temp_files_under_fence(
+        &fence,
+        tmux_session_name,
+    )?;
     crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(tmux_session_name)
         .cleanup_best_effort();
 
@@ -1543,7 +1556,8 @@ fn execute_streaming_local_tmux(
     std::fs::write(&prompt_path, prompt)
         .map_err(|e| format!("Failed to write prompt file: {}", e))?;
     write_tmux_owner_marker(tmux_session_name)?;
-    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+    crate::services::tmux_common::write_tmux_runtime_kind_marker_under_fence(
+        &fence,
         tmux_session_name,
         crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper,
     )?;
@@ -1585,6 +1599,7 @@ fn execute_streaming_local_tmux(
     std::fs::write(&script_path, &script_content)
         .map_err(|e| format!("Failed to write launch script: {}", e))?;
 
+    fence.validate_tmux_publisher(tmux_session_name)?;
     let tmux_result = crate::services::platform::tmux::create_session(
         tmux_session_name,
         Some(working_dir),
@@ -1609,10 +1624,12 @@ fn execute_streaming_local_tmux(
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
     // Give the wrapper a fresh nonce for the status-panel session boundary.
+    fence.validate_tmux_publisher(tmux_session_name)?;
     if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name, None) {
         tracing::warn!("failed to write spawn nonce for {tmux_session_name}: {e}");
     }
 
+    drop(fence);
     if let Some(ref token) = cancel_token {
         token.bind_unmanaged_session_name(tmux_session_name);
     }

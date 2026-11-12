@@ -203,4 +203,4 @@ async fn probe_target(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use sqlx::{Acquire, PgConnection, PgPool, Postgres, Row, Transaction};
 
 use crate::config::{AgentChannel, AgentDef};
+use crate::domain::provider::ProviderKind;
 
 const LEGACY_AGENT_PREFIX: &str = "openclaw-";
 
@@ -114,11 +115,8 @@ async fn upsert_agent_from_config_pg(
 ) -> Result<(), String> {
     let discord_channel_cc = agent.channels.get("claude").and_then(AgentChannel::target);
     let discord_channel_cdx = agent.channels.get("codex").and_then(AgentChannel::target);
-    let provider_primary = match crate::services::provider::ProviderKind::from_str(&agent.provider)
-    {
-        Some(crate::services::provider::ProviderKind::Claude)
-        | Some(crate::services::provider::ProviderKind::Codex)
-        | None => None,
+    let provider_primary = match ProviderKind::from_str(&agent.provider) {
+        Some(ProviderKind::Claude) | Some(ProviderKind::Codex) | None => None,
         Some(_) => agent
             .channels
             .get(&agent.provider)
