@@ -21,6 +21,14 @@ seconds with content comparison, independently of native filesystem notification
 
 | Field | Class | Read or captured by |
 |---|---|---|
+| `decision_gate.enabled` | live | `src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot) |
+| `decision_gate.features.issue_duplicate.enabled` | live | `src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot) |
+| `decision_gate.features.issue_duplicate.deadline_ms` | live | `src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot) |
+| `decision_gate.features.host_assignment.enabled` | live | `src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot) |
+| `decision_gate.features.host_assignment.deadline_ms` | live | `src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot) |
+| `decision_gate.features.routine_precheck.enabled` | live | `src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot) |
+| `decision_gate.features.routine_precheck.deadline_ms` | live | `src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot) |
+| `decision_gate.repositories.*.enabled` | live | `src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot) |
 | `server.port` | restart | `src/server/mod.rs` run (listener bind); also seeded as kv server_port by `src/services/settings/startup.rs` startup_reseed |
 | `server.host` | restart | `src/server/mod.rs` run (bind addr) |
 | `server.auth_token` | restart | `src/server/routes/auth.rs` auth_middleware (AppState.config Arc built in server::run) |
