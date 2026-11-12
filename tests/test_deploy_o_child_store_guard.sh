@@ -22,9 +22,9 @@ done
 ADK_REL="$TEST_ROOT/release"
 mkdir -p "$ADK_REL/o_store" "$ADK_REL/runtime"
 REL_BINARY_BACKUP="$TEST_ROOT/target"
-REL_BINARY="$TEST_ROOT/current"
-PLIST_REL=fixture
-ADK_DEFAULT_LOOPBACK=127.0.0.1
+export REL_BINARY="$TEST_ROOT/current"
+export PLIST_REL=fixture
+export ADK_DEFAULT_LOOPBACK=127.0.0.1
 # Deliberately stale manifest cannot make an incompatible actual binary compatible.
 printf '{"o_store_thread_children":true}\n' > "$ADK_REL/runtime/release-source.json"
 _rollback_would_brick_on_migration() { return 1; }
@@ -74,7 +74,7 @@ PY
         : > "$TEST_ROOT/calls"
         # Execute the real common pre-stage block used by external, source and peer artifacts.
         block="$(sed -n '/^# The binary itself reports its O ledger reader/,/^# Rebuild dashboard/{ /^# Rebuild dashboard/!p; }' "$DEPLOY_SH")"
-        if ( SOURCE_BINARY="$REL_BINARY_BACKUP"; eval "$block"; echo artifact_stage >> "$TEST_ROOT/calls" ) > "$TEST_ROOT/stage.out" 2>&1; then rc=0; else rc=$?; fi
+        if ( export SOURCE_BINARY="$REL_BINARY_BACKUP"; eval "$block"; echo artifact_stage >> "$TEST_ROOT/calls" ) > "$TEST_ROOT/stage.out" 2>&1; then rc=0; else rc=$?; fi
         if [ "$floor" != absent ] && [ "$kind" != true ]; then
             test "$rc" -ne 0
             test ! -s "$TEST_ROOT/calls"
