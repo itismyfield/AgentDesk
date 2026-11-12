@@ -1,31 +1,9 @@
 use super::*;
 
-pub async fn record_entry_dispatch_failure_on_pg(
-    pool: &PgPool,
-    entry_id: &str,
-    max_retries: i64,
-    trigger_source: &str,
-) -> Result<EntryDispatchFailureResult, String> {
-    let mut tx = pool.begin().await.map_err(|error| {
-        format!("begin postgres auto-queue dispatch failure transaction: {error}")
-    })?;
-    let result =
-        EntryDispatchFailureResult::record_on_pg_tx(&mut tx, entry_id, max_retries, trigger_source)
-            .await?;
-    tx.commit().await.map_err(|error| {
-        format!("commit postgres auto-queue dispatch failure {entry_id}: {error}")
-    })?;
-    Ok(result)
-}
-
 impl EntryDispatchFailureResult {
-    /// Apply one dispatch failure inside a caller-owned transaction.
-    ///
-    /// Locking the entry and its run makes the retry decision, transition audit,
-    /// and conditional run finalization one ordered write. When the run is not
-    /// live, the entry becomes terminal instead of blocking the owning dispatch
-    /// terminal write or creating a terminal-run / pending-entry split brain.
-    pub async fn record_on_pg_tx(
+    /// One dispatch failure on a caller-owned tx: retry decision and transition audit under the
+    /// entry and run locks; a non-live run makes the entry terminal instead of blocking.
+    pub(crate) async fn write_on_pg_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         entry_id: &str,
         max_retries: i64,
@@ -132,20 +110,20 @@ impl EntryDispatchFailureResult {
             trigger_source,
         )
         .await?;
-        let result = Self {
-            run_id: current.run_id.clone(),
+        Ok(Self {
+            run_id: current.run_id,
             from_status: ENTRY_STATUS_DISPATCHED.to_string(),
             to_status: target_status.to_string(),
             retry_count,
             retry_limit,
             failure_transition_id: Some(failure_transition_id),
             changed: true,
-        };
+        })
+    }
 
-        if target_status == ENTRY_STATUS_FAILED {
-            maybe_finalize_run_after_terminal_entry_pg(tx, &current.run_id, target_status).await?;
-        }
-        Ok(result)
+    /// Whether this write left an entry `failed` that owes a run-completion attempt.
+    pub(crate) fn run_finalize_due(&self) -> bool {
+        self.changed && self.to_status == ENTRY_STATUS_FAILED
     }
 }
 
@@ -212,6 +190,7 @@ async fn load_entry_status_row_pg_tx_for_dispatch_failure(
 mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::auto_queue::transactions::record_entry_dispatch_failure_on_pg;
 
     async fn seed_failure_entry(
         pool: &PgPool,

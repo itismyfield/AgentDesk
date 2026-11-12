@@ -379,7 +379,8 @@ fn complete_run_raw(
     };
     let run_id_owned = run_id.to_string();
     let result = run_async_bridge_pg(pool, move |pool| async move {
-        crate::db::auto_queue::finalize_run_if_ready_pg(&pool, &run_id_owned).await
+        crate::services::auto_queue::transactions::finalize_run_if_ready_pg(&pool, &run_id_owned)
+            .await
     });
 
     match result {
@@ -514,7 +515,7 @@ fn record_consultation_dispatch_raw(
     let source_owned = source.to_string();
     let metadata_json_owned = metadata_json.to_string();
     let result = run_async_bridge_pg(pool, move |pool| async move {
-        crate::db::auto_queue::record_consultation_dispatch_on_pg(
+        crate::services::auto_queue::transactions::record_consultation_dispatch_on_pg(
             &pool,
             &entry_id_owned,
             &card_id_owned,
@@ -557,7 +558,7 @@ fn record_entry_dispatch_failure_raw(
     let entry_id_owned = entry_id.to_string();
     let source_owned = source.to_string();
     let result = run_async_bridge_pg(pool, move |pool| async move {
-        crate::db::auto_queue::record_entry_dispatch_failure_on_pg(
+        crate::services::auto_queue::transactions::record_entry_dispatch_failure_on_pg(
             &pool,
             &entry_id_owned,
             max_retries,
@@ -621,7 +622,7 @@ fn update_entry_status_raw(
     let status_owned = status.to_string();
     let source_owned = source.to_string();
     let result = run_async_bridge_pg(pool, move |pool| async move {
-        crate::db::auto_queue::update_entry_status_on_pg(
+        crate::services::auto_queue::transactions::update_entry_status_on_pg(
             &pool,
             &entry_id_owned,
             &status_owned,
