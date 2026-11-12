@@ -807,6 +807,20 @@ fn test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreig
             .restore_resume(&endpoint)
             .admitted_witness()
             .expect("owned E7 off");
+        let before = server.methods();
+        let call = host.call(HerdrRequest::PaneSendInput {
+            pane_id: "unowned:pane".into(),
+            text: "sentinel".into(),
+            keys: vec!["enter".into()],
+        });
+        let transport = &host.endpoint(&endpoint).unwrap().1;
+        assert_eq!(
+            transport.call_with_witness(&call, &witness),
+            Err(contract::HerdrTransportError::NotSent(
+                "test Herdr request names an unowned workspace".into()
+            ))
+        );
+        assert_eq!(server.methods(), before, "unjournaled pane issued RPC");
         let request = HerdrCreateRequest {
             endpoint: endpoint.clone(),
             label: label.clone(),
@@ -814,6 +828,15 @@ fn test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreig
             command: "bash /run/launch.sh".into(),
             restore_off_witness: witness.clone(),
         };
+        let guard = test_instance::begin_herdr_create(&endpoint, &witness, &label, &cwd)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            host.create(&request),
+            HerdrCreateOutcome::NotSent("test instance host declaration rejected".into())
+        );
+        assert_eq!(server.methods(), before, "contended create issued RPC");
+        drop(guard);
         assert_eq!(
             host.create(&request),
             HerdrCreateOutcome::Created {

@@ -106,8 +106,17 @@ tmux는 `runtime/tmux/socket`을 명시적으로 선택하며 `AdkTest-<uuid>` n
 수동 Herdr 소유 helper는 직접 spawn한 child handle과 시작 identity를
 `runtime/herdr-owner.json`에 기록한다. receipt만으로 다른 PID를 정리하지 않는다.
 기동 실패 정리가 끝나지 않으면 오류가 소유 child handle을 보존한다. supervisor가
-이를 이어받아 종료를 확인해야 한다. workspace 생성·복원·입력의 runtime receipt
-연결 전에는 제품의 Herdr transport를 거부하며 workspace 목록은 비어 있다.
+이를 이어받아 종료를 확인해야 한다. Python close는 create와 동일한 kernel flock을
+획득하고 immutable daemon 항목과 현재 시작 identity를 대조한다.
+
+제품 Herdr transport는 owner receipt의 전용 socket·daemon PID/시작 identity와
+실제 peer가 일치할 때 ping과 자기 create를 허용한다. create는
+`runtime/herdr-owner.lock`을 유지하고 반환된 workspace/pane 쌍을 atomic 게시한
+뒤에만 해당 pane 입력으로 진행한다. 개별 pane 조회·입력·close는 기록된 pane만
+허용하며 전체 snapshot·기존 workspace 채택·residue 정리는 거부한다.
+canonical Herdr config는 prepare 단계에서 만들며 수동 spawn 전에 동일 bytes와
+1초 preparation margin을 확인한다. margin 미충족은 `UNEVALUABLE`이다.
+실제 E7 provenance/age/read-back 통과는 supervisor의 별도 수용 조건이다.
 
 **아직 live 가능하지 않다.** HOME/provider·label/API/Memento·프로세스 scan과
 복원/clear/cancel 연결 완결은 I2b, lease·실제 up/down과 health 확인은 I3a 책임이다.

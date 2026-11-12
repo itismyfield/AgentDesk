@@ -281,7 +281,7 @@ fn initialized_test_scope_names_sessions_and_refuses_herdr_runtime() {
     };
     assert_eq!(
         host.create(&request),
-        HerdrCreateOutcome::NotSent("test Herdr runtime receipt is not admitted".into())
+        HerdrCreateOutcome::NotSent("test instance host declaration rejected".into())
     );
     assert_eq!(
         host.channel_panes(&launch, "foreign-workspace", &witness),
