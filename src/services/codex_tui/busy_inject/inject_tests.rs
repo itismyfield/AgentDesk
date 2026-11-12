@@ -461,7 +461,13 @@ impl Fake {
 
     fn run_with_nonce(&self, ledger: &FakeLedger, text: &str, nonce: &str) -> Outcome {
         let session = self.session();
-        let pane = Pane::with_program(&session, self.dir.path().join("tmux"));
+        let pane = Pane::with_program(
+            &session,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                self.dir.path().join("tmux"),
+            ),
+        )
+        .expect("managed scripted pane");
         let request = Request {
             session: &session,
             rollout: &self.rollout,

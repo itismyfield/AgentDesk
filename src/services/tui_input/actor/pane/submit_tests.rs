@@ -5,10 +5,14 @@ use std::os::unix::fs::PermissionsExt;
 
 use super::*;
 
-struct Fixture(tempfile::TempDir);
+struct Fixture {
+    dir: tempfile::TempDir,
+    _runtime: crate::config::TestRuntimeRootGuard,
+}
 
 impl Fixture {
     fn new() -> Self {
+        let runtime = crate::config::TestRuntimeRootGuard::new();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/i01-tmp");
         fs::create_dir_all(&root).unwrap();
         let dir = tempfile::tempdir_in(root).unwrap();
@@ -29,21 +33,27 @@ impl Fixture {
         let program = dir.path().join("tmux");
         fs::write(&program, script).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-        Self(dir)
+        Self {
+            dir,
+            _runtime: runtime,
+        }
     }
 
     fn pane(&self) -> TmuxPane {
         let mut pane = TmuxPane::with_program(
-            &format!("submit-{}", self.0.path().display()),
-            self.0.path().join("tmux"),
+            &format!("submit-{}", self.dir.path().display()),
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                self.dir.path().join("tmux"),
+            ),
             Duration::from_secs(5),
-        );
+        )
+        .expect("managed scripted pane");
         pane.attest_test_nonce("submit-test");
         pane
     }
 
     fn calls(&self, command: &str) -> usize {
-        fs::read_to_string(self.0.path().join("log"))
+        fs::read_to_string(self.dir.path().join("log"))
             .unwrap_or_default()
             .lines()
             .filter(|line| *line == command)

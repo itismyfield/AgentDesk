@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 93
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 94
 - Platform and third-party variables: 41
 
 ## AgentDesk variables
@@ -71,6 +71,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_HEADLESS_DURABLE_OUTBOX` | `src/services/discord/turn_bridge/headless_delivery/durable_outbox.rs` |  |
 | `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER` | `src/services/claude_tui/hook_relay.rs` |  |
 | `AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER` | `src/services/claude_tui/hook_relay.rs` |  |
+| `AGENTDESK_IDENTITY` | `src/domain/session_identity/managed.rs` |  |
 | `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs`, `src/services/tui_prompt_dedupe/binding_context.rs` | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
 | `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs`, `src/services/kakao/account.rs` |  |
 | `AGENTDESK_KAKAO_CALENDAR_ACCOUNTS` | `src/services/kakao/account.rs` | Separate allowlist: enabling calendar never implicitly grants all message accounts. |

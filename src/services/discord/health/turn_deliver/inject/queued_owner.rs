@@ -153,8 +153,13 @@ pub(super) async fn queued_attempt(
                 let herdr = target.herdr.clone();
                 let native_turn = target.native_turn.clone();
                 move || {
+                    let pane = if herdr.is_some() {
+                        Err(String::new())
+                    } else {
+                        pane(input.channel, &session)
+                    };
                     provider.run(
-                        (&pane(input.channel, &session), herdr.as_ref()),
+                        (&pane, herdr.as_ref()),
                         (&session, &transcript, native_turn.as_deref()),
                         turn_id,
                         MessageId::new(primary),
@@ -323,9 +328,14 @@ async fn v2_queued_attempt(
         .v2_effect(now, move |_frame| {
             let _source = source;
             let target = target;
+            let pane = if target.herdr.is_some() {
+                Err(String::new())
+            } else {
+                pane(input.channel, &target.session)
+            };
             let delivered = matches!(
                 provider.run(
-                    (&pane(input.channel, &target.session), target.herdr.as_ref()),
+                    (&pane, target.herdr.as_ref()),
                     (
                         &target.session,
                         &target.transcript,

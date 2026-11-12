@@ -387,6 +387,8 @@ session-lifecycle/EffortRestartNonFinishing.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartNonFinishingFailure.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartNoInterrupt.cfg	TmuxSession	NoDeadlock	EffortRequestResolves
 session-lifecycle/EffortRestartNoClose.cfg	TmuxSession	NoDeadlock	EffortRequestResolves
+session-lifecycle/SessionIdentityGateAfter.cfg	SessionIdentityGate	-	-
+session-lifecycle/SessionIdentityGateBefore.cfg	SessionIdentityGate	NoForeignMutation	-
 tui-o-writer/WriterRestartEndCurrent.cfg	WriterWake	-	RestartExactEndEventuallyCloses
 tui-o-writer/WriterRestartEndFixed.cfg	WriterWake	-	-
 tui-o-writer/WriterRestartEndPrefix.cfg	WriterWake	-	-

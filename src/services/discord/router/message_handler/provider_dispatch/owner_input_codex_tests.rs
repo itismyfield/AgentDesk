@@ -925,8 +925,11 @@ fn a_codex_start_only_refusal_keeps_custody_and_releases_buffer_and_ledger() {
         BusyCodex {
             pane: crate::services::claude_tui::busy_inject::Pane::with_program(
                 &rig.name,
-                rig.program.clone(),
-            ),
+                crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                    rig.program.clone(),
+                ),
+            )
+            .expect("managed scripted pane"),
             timing: &crate::services::codex_tui::busy_inject::TIMING,
             input,
         }
