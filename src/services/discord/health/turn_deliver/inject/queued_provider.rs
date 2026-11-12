@@ -41,7 +41,7 @@ impl QueuedProvider {
 
     pub(super) fn run(
         self,
-        pane: (&busy_inject::Pane, Option<&HerdrTarget>),
+        pane: (&Result<busy_inject::Pane, String>, Option<&HerdrTarget>),
         (session, transcript, native_turn): (&str, &Path, Option<&str>),
         turn_id: Option<String>,
         message: MessageId,
@@ -50,11 +50,14 @@ impl QueuedProvider {
         if let Some(host) = pane.1 {
             return self.run_herdr(host, session, transcript, turn_id, input);
         }
+        let Ok(checked) = pane.0 else {
+            return InjectAttempt::NotSent("unverified_session_owner");
+        };
         match self {
-            Self::Claude => super::run(pane, session, transcript, turn_id, input),
+            Self::Claude => super::run((checked, None), session, transcript, turn_id, input),
             Self::Codex => match native_turn {
                 Some(turn) => run_codex(
-                    pane.0,
+                    checked,
                     (session, transcript, turn),
                     turn_id,
                     Some(message),
@@ -74,12 +77,12 @@ impl QueuedProvider {
         input: &Input,
     ) -> InjectAttempt {
         match self {
-            Self::Claude => super::run(
-                (&pane(input.channel, session), Some(host)),
-                session,
-                transcript,
+            Self::Claude => super::run_with(
+                (None, Some(host)),
+                (session, transcript),
                 turn_id,
                 input,
+                false,
             ),
             Self::Codex => InjectAttempt::NotSent("provider_unsupported"),
         }
@@ -145,7 +148,7 @@ impl QueuedProvider {
 impl<K: Clone> ReceiptAdapter<K> {
     pub(super) fn run(
         &self,
-        pane: (&busy_inject::Pane, Option<&HerdrTarget>),
+        pane: (&Result<busy_inject::Pane, String>, Option<&HerdrTarget>),
         target: (&str, &Path, Option<&str>),
         turn: Option<String>,
         message: MessageId,

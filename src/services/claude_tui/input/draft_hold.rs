@@ -129,7 +129,7 @@ pub(super) fn dismiss_startup_dialog(
             use crate::services::claude_tui::{busy_inject, owner_input};
             owner_input::ready_payload().map_err(|refusal| format!("{refusal:?}"))?;
             owner_input::keyed();
-            let pane = busy_inject::Pane::with_program(session_name, "tmux".into());
+            let pane = busy_inject::Pane::with_program(session_name, "tmux".into())?;
             return (busy_inject::stash::enter(&pane))
                 .then_some(())
                 .ok_or_else(|| "owner startup Enter was not applied".into());
