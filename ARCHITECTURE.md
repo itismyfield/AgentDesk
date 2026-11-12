@@ -32,6 +32,8 @@ src/
 │   │   ├── replay_recovery_tests.rs
 │   │   ├── startup.rs
 │   │   └── startup_audit_tests.rs
+│   ├── dev_instance/
+│   │   └── tests.rs
 │   ├── direct/
 │   │   ├── auto_queue_add.rs
 │   │   └── create_from_issue_pg_tests.rs
@@ -84,6 +86,7 @@ src/
 │   ├── dcserver_pg_bootstrap.rs
 │   ├── dcserver_restart_marker.rs
 │   ├── dcserver_restart_wait.rs
+│   ├── dev_instance.rs
 │   ├── direct.rs
 │   ├── discord.rs
 │   ├── discord_thread_create.rs
@@ -4638,6 +4641,7 @@ src/
 │   └── mod.rs
 ├── utils/
 │   ├── secret_file/
+│   │   ├── fresh_tests.rs
 │   │   └── private_directory.rs
 │   ├── api.rs
 │   ├── async_bridge.rs
