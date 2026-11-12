@@ -1835,6 +1835,50 @@ mod tests {
         self.assertLessEqual(set(names), set(out["pg"]))
         self.assertEqual(out["non_pg"], ["db::tests::pure"])
 
+    def test_function_gated_tests_in_production_modules_are_split_by_pg_reach(self):
+        module = "services::cluster::intake_worker::o_input"
+        names = [f"{module}::{name}" for name in (
+            "effects_cannot_acquire_late_before_effects_authority_pg",
+            "scoped_reclaim_preserves_once_marker_across_process_tokens_pg",
+        )]
+        pure = f"{module}::pure_pg"
+        self.tree({
+            "src/lib.rs": "mod services; mod db;\n",
+            "src/services.rs": "pub mod cluster { pub mod intake_worker { pub mod o_input; } }\n",
+            "src/services/cluster/intake_worker/o_input.rs": """
+pub fn production() {}
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn effects_cannot_acquire_late_before_effects_authority_pg() {
+    crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+}
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn scoped_reclaim_preserves_once_marker_across_process_tokens_pg() {
+    crate::db::auto_queue::test_support::open().await;
+}
+#[cfg(test)]
+#[test]
+fn pure_pg() { production(); }
+""",
+            "src/db.rs": "pub mod auto_queue { #[cfg(test)] pub mod test_support; }\n",
+            "src/db/auto_queue/test_support.rs": """
+pub struct TestPostgresDb;
+impl TestPostgresDb {
+    pub async fn create() -> Self { connect_test_pool(); Self }
+}
+pub async fn open() { TestPostgresDb::create().await; }
+""",
+        })
+        self.assertEqual(set(rts.lib_inventory(self.root).tests), {*names, pure})
+        (self.root / "universe.json").write_text(json.dumps(nextest_list([*names, pure])))
+        rc, err = self.cli("classify", "--json-out", self.root / "selection.json",
+                           "--list", self.root / "universe.json")
+        self.assertEqual(rc, 0, err)
+        out = json.loads((self.root / "selection.json").read_text())
+        self.assertEqual(set(out["pg"]), set(names), out)
+        self.assertEqual(out["non_pg"], [pure])
+
     def test_recognised_test_missing_from_the_inventory_fails_the_cli(self):
         bin_tests = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn bin_only() {}\n}\n"
         self.tree({"src/main.rs": "mod cli;\n", "src/cli.rs": bin_tests})

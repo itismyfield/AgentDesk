@@ -8,6 +8,7 @@ pub(super) fn execute_streaming_local_process_codex(
     prompt: &str,
     model: Option<&str>,
     fast_mode_enabled: Option<bool>,
+    effort: Option<&str>,
     goals_enabled: Option<bool>,
     session_id: Option<&str>,
     working_dir: &str,
@@ -107,7 +108,7 @@ pub(super) fn execute_streaming_local_process_codex(
         .with_resume_session_id(session_id)
         .with_developer_instructions(developer_instructions)
         .with_model(model)
-        .with_reasoning_effort(codex_reasoning_effort_from_env().as_deref())
+        .with_reasoning_effort(effort::resolve(effort, None).as_deref())
         .with_compact_token_limit(compact_token_limit)
         .with_readonly_mode(false)
         .with_fast_mode_enabled(fast_mode_enabled)

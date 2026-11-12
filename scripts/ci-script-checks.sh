@@ -269,6 +269,18 @@ else
 fi
 fi
 
+if run_check guards "Isolated instance declaration tests"; then
+"$PYTHON" -m unittest tests.test_dev_instance
+"$PYTHON" -m unittest tests.test_dev_instance_files
+fi
+
+if run_check cargo "Isolated instance credential binary tests"; then
+cargo build --bin agentdesk
+instance_test_bin="$(cd "${CARGO_TARGET_DIR:-$PWD/target}/debug" && pwd -P)"
+export PATH="$instance_test_bin:$PATH"
+"$PYTHON" -m unittest tests.test_dev_instance_credential
+fi
+
 if run_check guards "PG audit guard"; then
 ./scripts/pg-audit.sh
 fi
@@ -825,6 +837,12 @@ fi
 
 if run_check cargo "Maintainability audit tests"; then
 "$PYTHON" -m unittest tests.test_audit_maintainability tests.test_module_layer_baseline_records tests.test_module_layer_measurement tests.test_module_layer_ratchet tests.test_module_layer_classification
+fi
+
+if run_check guards "Low-level accessor ratchet tests"; then
+"$PYTHON" -m unittest tests.test_low_level_accessors
+"$PYTHON" -m unittest tests.test_low_level_accessor_baseline
+"$PYTHON" -m unittest tests.test_low_level_accessor_wiring
 fi
 
 if run_check cargo "Maintainability audit"; then
