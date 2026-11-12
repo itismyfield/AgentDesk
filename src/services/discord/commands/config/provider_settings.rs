@@ -201,6 +201,7 @@ pub(in crate::services::discord) async fn update_channel_model_override(
     next_override: Option<String>,
 ) -> io::Result<bool> {
     shared.check_settings_owner(provider, channel_id).await?;
+    let channel_name = super::effort::channel_name(shared, channel_id).await;
     let mut settings = shared.settings.write().await;
     let current = shared
         .overrides
@@ -210,6 +211,19 @@ pub(in crate::services::discord) async fn update_channel_model_override(
     if same_model_override(current.as_deref(), next_override.as_deref()) {
         return Ok(false);
     }
+    let role = shared.dispatch.role_overrides.entry(channel_id);
+    let dispatch_role = match &role {
+        dashmap::mapref::entry::Entry::Occupied(entry) => Some(*entry.get()),
+        dashmap::mapref::entry::Entry::Vacant(_) => None,
+    };
+    let model = super::effort::model_for_write(
+        provider,
+        channel_id,
+        channel_name.as_deref(),
+        dispatch_role,
+        next_override.as_deref(),
+    );
+    super::effort::check_saved_model(&settings, channel_id, provider, model.as_deref())?;
     // A local Claude TUI takes the new model by restarting on its session, keeping its context.
     let relaunch = claude_local_tui_relaunch_applies(provider, channel_id);
     let reset = !relaunch
@@ -255,59 +269,6 @@ pub(in crate::services::discord) async fn update_channel_model_override(
             .remove(&channel_id);
     }
     sync_session_reset_pending(shared, channel_id);
-    Ok(true)
-}
-
-/// The effort levels a Claude TUI launch accepts.
-pub(in crate::services::discord) const EFFORT_LEVELS: [&str; 5] =
-    ["low", "medium", "high", "xhigh", "max"];
-
-/// The saved effort level a local Claude TUI on the channel launches with, if it is one the CLI takes.
-pub(in crate::services::discord) async fn channel_effort_level(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-) -> Option<String> {
-    if !matches!(provider, ProviderKind::Claude) {
-        return None;
-    }
-    let settings = shared.settings.read().await;
-    let level = settings
-        .channel_effort_levels
-        .get(&channel_id.get().to_string())?;
-    EFFORT_LEVELS
-        .contains(&level.as_str())
-        .then(|| level.clone())
-}
-
-/// Saves the effort level a local Claude TUI launches with and asks for its same-session relaunch;
-/// a Herdr channel and the non-TUI drivers refuse it with the setting left as it was.
-pub(in crate::services::discord) async fn update_channel_effort(
-    shared: &Arc<SharedData>,
-    token: &str,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-    level: &str,
-) -> io::Result<bool> {
-    shared.check_settings_owner(provider, channel_id).await?;
-    if !claude_local_tui_relaunch_applies(provider, channel_id) {
-        return Err(io::Error::other(
-            "/effort는 로컬 Claude TUI 채널에서만 저장할 수 있습니다.",
-        ));
-    }
-    let mut settings = shared.settings.write().await;
-    let key = channel_id.get().to_string();
-    if settings.channel_effort_levels.get(&key).map(String::as_str) == Some(level) {
-        return Ok(false);
-    }
-    let mut candidate = settings.clone();
-    candidate
-        .channel_effort_levels
-        .insert(key.clone(), level.to_string());
-    candidate.channel_relaunch_pending.insert(key);
-    candidate.try_save_bot_settings(token)?;
-    super::super::control::forget_relaunch_failures(channel_id);
-    *settings = candidate;
     Ok(true)
 }
 

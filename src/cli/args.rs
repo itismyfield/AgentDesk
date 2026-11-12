@@ -23,6 +23,8 @@ struct Cli {
 pub(crate) enum Commands {
     /// Start Discord bot server(s)
     Dcserver(DcserverArgs),
+    /// Write an isolated instance credential from stdin
+    DevInstance(super::dev_instance::DevInstanceArgs),
     /// Run the initial setup wizard
     Init,
     /// Re-run the configuration wizard
@@ -601,6 +603,7 @@ pub(crate) fn parse() -> ParseOutcome {
             }
             let has_args = std::env::args().count() > 1;
             if has_args {
+                super::dev_instance::reject_argument_error();
                 error.print().ok();
                 std::process::exit(1);
             }
@@ -716,6 +719,7 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = vec![
             "dcserver",
+            "dev-instance",
             "init",
             "reconfigure",
             "emit-launchd-plist",

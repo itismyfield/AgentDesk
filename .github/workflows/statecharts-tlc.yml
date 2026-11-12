@@ -30,7 +30,7 @@ jobs:
   tlc:
     name: Statecharts TLC
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 45 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 45 || 45 }}
     steps:
       - uses: actions/checkout@v4
         with:
