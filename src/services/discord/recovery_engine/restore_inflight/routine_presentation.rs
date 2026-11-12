@@ -118,7 +118,7 @@ pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_vis
 }
 
 /// Called by the serialized mailbox actor; the row lock rechecks the saved success and epoch.
-pub(super) fn adopt_quiet_drain_restart(
+pub(in crate::services::discord::recovery_engine) fn adopt_quiet_drain_restart(
     expected: &inflight::InflightTurnState,
     generation: u64,
     actor: Option<&Arc<CancelToken>>,
