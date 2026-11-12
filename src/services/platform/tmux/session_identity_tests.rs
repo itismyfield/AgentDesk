@@ -100,6 +100,25 @@ fn identity_marker_is_present_at_creation_and_unset_is_refused() {
         &format!("={name}"),
         "AGENTDESK_IDENTITY",
     ]);
+    let before_duplicate = rig.snapshot(&name);
+    let mut other = crate::services::session_identity_metadata::runtime_identity(&name).unwrap();
+    other.owner_scope = "e".repeat(64);
+    let duplicate = create_session_with_identity(&name, None, "cat", &other).unwrap();
+    let after_duplicate = rig.raw(&[
+        "show-environment",
+        "-t",
+        &format!("={name}"),
+        "AGENTDESK_IDENTITY",
+    ]);
+    assert!(
+        !duplicate.status.success(),
+        "duplicate creation must fail atomically"
+    );
+    assert_eq!(
+        marker.stdout, after_duplicate.stdout,
+        "an existing marker must never be adopted or overwritten"
+    );
+    assert_eq!(before_duplicate, rig.snapshot(&name));
     let first_send = send_keys(&name, &[""]);
     assert!(
         rig.raw(&[
