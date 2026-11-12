@@ -1566,3 +1566,130 @@ async fn a_fresh_rollout_judged_owed_stays_owed_past_a_generation_move() {
     polls(3).await;
     assert_eq!(posted(&harness, "fresh answer"), 1);
 }
+
+/// The edited placeholder's receipt is recorded and the process restarts before any init: the next
+/// start still takes the first rollout, O alone posts each answer once and a restart posts nothing.
+#[tokio::test(start_paused = true)]
+async fn an_edited_placeholder_receipt_before_a_restart_still_leaves_the_first_rollout_owed() {
+    const CODEX: u64 = 61_888;
+    let Takeover {
+        harness,
+        io,
+        tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    *io.custody.lock().unwrap() = Ok(Custody::Active);
+    let (a, a_source) = rollout(&harness, "rollout-a.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &a);
+    let opener = len(&a);
+    let at = Utc::now().to_rfc3339();
+    let turn = |id: &str, text: &str| {
+        let line = |value| codex_line(value);
+        [
+            line(serde_json::json!({"type": "event_msg", "timestamp": at,
+                "payload": {"type": "task_started", "turn_id": "t1"}})),
+            line(serde_json::json!({"type": "response_item", "timestamp": at,
+                "payload": {"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}]}})),
+            answer(id, text),
+            line(serde_json::json!({"type": "event_msg", "timestamp": at,
+                "payload": {"type": "task_complete", "turn_id": "t1"}})),
+        ]
+        .concat()
+    };
+    append(&a, &turn("msg_1", "answer A"));
+    polls(3).await;
+    let placeholder = receipt((opener, len(&a)));
+    let (b, b_source) = rollout(&harness, "rollout-b.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &b);
+    append(&b, &turn("msg_2", "answer B"));
+    recorded(&io, vec![placeholder.clone()]);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Deferred,
+        "custody blocks the commit"
+    );
+    assert!(
+        !harness.store.has_channel_dir(CODEX),
+        "no init before the restart"
+    );
+    abort(tasks);
+    drop(_reserved);
+    polls(1).await;
+
+    let _reserved = reserve(CODEX);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    io.late_enabled.store(true, Ordering::SeqCst);
+    recorded(&io, vec![placeholder]);
+    let tasks = start_codex(&harness, &io, &ready);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(
+        init_sources(&harness, CODEX),
+        [(a_source.clone(), opener), (b_source, opener)]
+    );
+    assert!(
+        !legacy_sends(CODEX),
+        "Legacy sends no body once O committed"
+    );
+    polls(3).await;
+    assert_eq!(posted(&harness, "answer A"), 1);
+    assert_eq!(posted(&harness, "answer B"), 1);
+    restart_posts_nothing(&harness, tasks, &a_source).await;
+    assert_eq!(posted(&harness, "answer A"), 1);
+}
+
+/// A rollout whose turn is still open when the next one is bound is taken from that turn's opener;
+/// its late end is O's to post once, Legacy sends none, and a restart posts nothing.
+#[tokio::test(start_paused = true)]
+async fn an_open_turn_left_by_a_rotation_is_taken_and_its_late_end_posted_once() {
+    const CODEX: u64 = 61_889;
+    let Takeover {
+        harness,
+        io,
+        tasks,
+        _reserved,
+    } = hosted_unbound(CODEX).await;
+    *io.custody.lock().unwrap() = Ok(Custody::Active);
+    let (a, a_source) = rollout(&harness, "rollout-a.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &a);
+    let opener = len(&a);
+    append(&a, &[opening(), answer("msg_1", "early part")].concat());
+    polls(3).await;
+    let (b, b_source) = rollout(&harness, "rollout-b.jsonl", &prompted("s-codex"));
+    bind_late(CODEX, &b);
+    *io.custody.lock().unwrap() = Ok(Custody::Free);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(
+        init_sources(&harness, CODEX),
+        [(a_source.clone(), opener), (b_source, 0)]
+    );
+    assert!(
+        !legacy_sends(CODEX),
+        "Legacy sends no body once O committed"
+    );
+    append(&a, &[answer("msg_3", "late part"), turn_end()].concat());
+    polls(3).await;
+    assert_eq!(
+        posted(&harness, "early part"),
+        1,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(posted(&harness, "late part"), 1, "{:?}", io.alarms.halted());
+    restart_posts_nothing(&harness, tasks, &a_source).await;
+    assert_eq!(posted(&harness, "late part"), 1);
+}
