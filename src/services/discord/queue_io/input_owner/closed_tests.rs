@@ -22,6 +22,15 @@ impl Drop for WakeHook {
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_repair_row_clear_resumes_the_owner_once_only_when_it_removed_a_row() {
+    check_repair_resume(cfg!(unix), 7_753_401).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn repair_row_clear_resumes_once_without_a_unix_input_owner() {
+    check_repair_resume(false, 7_753_403).await;
+}
+
+async fn check_repair_resume(owner: bool, first_channel: u64) {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let provider = ProviderKind::Claude;
     let shared = discord::make_shared_data_for_tests();
@@ -29,15 +38,18 @@ async fn a_repair_row_clear_resumes_the_owner_once_only_when_it_removed_a_row() 
     registry
         .register("claude".to_string(), shared.clone())
         .await;
-    for (id, row) in [(7_753_401u64, true), (7_753_402, false)] {
+    for (id, row) in [(first_channel, true), (first_channel + 1, false)] {
         let channel = ChannelId::new(id);
-        let dir = discord::runtime_store::discord_pending_queue_root().unwrap();
-        let file = dir.join(format!("claude/repair-wake/{id}.json"));
-        shared
-            .mailbox(channel)
-            .v2_adopt(file, "repair-wake".into())
-            .await
-            .unwrap();
+        if owner {
+            let dir = discord::runtime_store::discord_pending_queue_root().unwrap();
+            let file = dir.join(format!("claude/repair-wake/{id}.json"));
+            shared
+                .mailbox(channel)
+                .v2_adopt(file, "repair-wake".into())
+                .await
+                .unwrap();
+        }
+        assert_eq!(super::owned(&shared, channel).await, owner);
         if row {
             let state = inflight::InflightTurnState::new(
                 provider.clone(),
@@ -78,9 +90,18 @@ async fn a_repair_row_clear_resumes_the_owner_once_only_when_it_removed_a_row() 
         );
         let expected = usize::from(row);
         assert_eq!(
-            wakes.load(Ordering::SeqCst),
+            completion.started_requests(),
             expected,
-            "{id}: resume notices"
+            "repair resume requests"
         );
+        if owner {
+            assert_eq!(
+                wakes.load(Ordering::SeqCst),
+                expected,
+                "{id}: resume notices"
+            );
+        } else {
+            assert_eq!(wakes.load(Ordering::SeqCst), 0, "no Unix owner installed");
+        }
     }
 }

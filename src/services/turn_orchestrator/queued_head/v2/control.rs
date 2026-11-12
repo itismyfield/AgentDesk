@@ -39,7 +39,6 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         | M::CancelActiveTurnIfCurrent { .. }
         | M::CancelActiveTurnIfCurrentWithReason { .. }
         | M::CancelActiveTurnIfCurrentUnlessHerdr { .. }
-        | M::CancelActiveTurnIfUserMessageWithReason { .. }
         | M::CancelActiveBackgroundTurnIfCurrent { .. }
         | M::TryStartTurn { .. }
         | M::RestoreActiveTurn { .. }
@@ -51,7 +50,6 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         | M::ReleaseWitnessedEpisode(_)
         | M::PolicyClose { .. }
         | M::ClaimPolicyTail(_)
-        | M::HardStop { .. }
         | M::FinishCancelledTurn { .. }
         | M::CloseIfIdle { .. }
         | M::Injection(_)
@@ -61,6 +59,9 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         M::PurgeQueueIfUnchanged(request) => request.run_v2(state, channel_id),
         #[cfg(unix)]
         M::CaptureOwnQueue(request) => request.refuse_v2(),
+        #[cfg(test)]
+        M::CancelActiveTurnIfUserMessageWithReason { .. }
+        | M::HardStop { .. } => return Some(msg),
         #[cfg(test)]
         M::AgeActiveTurnForTest { .. }
         | M::AgeInboundWaitsForTest { .. }

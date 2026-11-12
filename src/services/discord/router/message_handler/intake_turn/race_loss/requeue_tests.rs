@@ -84,7 +84,9 @@ async fn busy_transition_is_durable_before_the_guard_is_released() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn persistence_failure_rolls_back_queue_and_clears_dispatch_reservation() {
+async fn persistence_failure_rolls_back_owner_return_and_preserves_dispatch_reservation() {
+    use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
+
     let tmp = tempfile::tempdir().expect("temp runtime root");
     let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
 
@@ -117,19 +119,42 @@ async fn persistence_failure_rolls_back_queue_and_clears_dispatch_reservation() 
             .pending_user_dispatch,
         Some(message_id)
     );
-    let blocking_root = tmp.path().join("blocking-root");
-    std::fs::write(&blocking_root, "not a directory").expect("blocking root file");
-    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &blocking_root) };
-
-    let outcome = enqueue_race_loss_requeued_intervention(
-        &shared,
+    let handle = shared.mailbox(channel_id);
+    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
         &provider,
+        &shared.token_hash,
+        None,
+    );
+    let tail = user_intervention(4_794_113, "queued behind reserved head");
+    assert!(
+        handle
+            .enqueue(tail.clone(), persistence.clone())
+            .await
+            .enqueued
+    );
+    let marker_before = crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+        &provider,
+        &shared.token_hash,
         channel_id,
-        message_id,
-        user_intervention(message_id.get(), "must roll back"),
-        QueuedIntakeCause::RaceLoss,
     )
-    .await;
+    .expect("reserved head marker");
+    let lease = taken.dispatch_lease.unwrap();
+    let returned = user_intervention(message_id.get(), "must roll back");
+    fail_queue_saves(channel_id, 1);
+    let outcome = handle
+        .return_dequeued_head(returned.clone(), persistence.clone(), lease.clone())
+        .await;
+    assert_eq!(
+        queue_save_faults(channel_id, false),
+        0,
+        "save fault must be consumed"
+    );
+    assert!(
+        outcome
+            .persistence_error
+            .as_deref()
+            .is_some_and(|error| { error.contains("injected pending queue save failure") })
+    );
     assert!(outcome.persistence_error.is_some());
     let surfaced = race_loss_persistence_failure(channel_id, outcome.persistence_error.as_deref())
         .expect_err("durable enqueue failure must reach the caller");
@@ -139,8 +164,52 @@ async fn persistence_failure_rolls_back_queue_and_clears_dispatch_reservation() 
             .contains("failed to persist queued intake")
     );
     let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
-    assert!(snapshot.intervention_queue.is_empty());
+    assert_eq!(snapshot.intervention_queue.len(), 1);
+    assert_eq!(snapshot.intervention_queue[0].message_id, tail.message_id);
+    assert_eq!(snapshot.intervention_queue[0].text, tail.text);
+    assert_eq!(snapshot.pending_user_dispatch, Some(message_id));
+    let marker_after = crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+        &provider,
+        &shared.token_hash,
+        channel_id,
+    )
+    .expect("failed return preserves marker");
+    assert_eq!(marker_after.0.message_id, marker_before.0.message_id);
+    assert_eq!(marker_after.0.text, marker_before.0.text);
+    let (disk_queue, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+        &provider,
+        &shared.token_hash,
+        channel_id,
+    );
+    assert_eq!(
+        disk_queue
+            .iter()
+            .map(|item| item.message_id)
+            .collect::<Vec<_>>(),
+        vec![tail.message_id]
+    );
+    let retried = handle
+        .return_dequeued_head(returned, persistence, lease)
+        .await;
+    assert!(retried.enqueued && retried.persistence_error.is_none());
+    let snapshot = handle.snapshot().await;
     assert_eq!(snapshot.pending_user_dispatch, None);
+    assert_eq!(
+        snapshot
+            .intervention_queue
+            .iter()
+            .map(|item| item.message_id)
+            .collect::<Vec<_>>(),
+        vec![message_id, tail.message_id]
+    );
+    assert!(
+        crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+            &provider,
+            &shared.token_hash,
+            channel_id,
+        )
+        .is_some()
+    );
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -396,4 +465,175 @@ async fn c1_actor_unreachable_race_loss_clears_only_matching_pending_attempt() {
         "refused intake clears its pending reaction"
     );
     shared.mailboxes.remove_fixture_for_test(channel);
+}
+
+#[tokio::test]
+async fn reserved_id_receipt_is_refused_without_touching_owner_or_other_ids() {
+    use crate::services::turn_orchestrator::{EnqueueRefusalReason, QueuePersistenceContext};
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(8_091_101);
+    let handle = shared.mailbox(channel);
+    let ctx = QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None);
+    let mut head = user_intervention(8_091_102, "reserved");
+    let absorbed = MessageId::new(8_091_104);
+    head.source_message_ids.insert(0, absorbed);
+    assert!(handle.enqueue(head.clone(), ctx.clone()).await.enqueued);
+    let taken = handle.take_next_soft(ctx.clone()).await;
+    assert!(taken.dispatch_lease.is_some());
+    let refused = enqueue_race_loss_requeued_intervention(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        head.message_id,
+        head.clone(),
+        QueuedIntakeCause::RaceLoss,
+    )
+    .await;
+    assert!(
+        !refused.enqueued,
+        "a receipt cannot return another caller's reserved head"
+    );
+    assert_eq!(
+        refused.refusal_reason,
+        Some(EnqueueRefusalReason::SourceIdPendingOrActive)
+    );
+    let absorbed_receipt = handle
+        .enqueue(user_intervention(absorbed.get(), "absorbed"), ctx.clone())
+        .await;
+    assert!(!absorbed_receipt.enqueued);
+    assert_eq!(
+        absorbed_receipt.refusal_reason,
+        Some(EnqueueRefusalReason::SourceIdPendingOrActive)
+    );
+    let snapshot = handle.snapshot().await;
+    assert!(snapshot.intervention_queue.is_empty());
+    assert_eq!(snapshot.pending_user_dispatch, Some(head.message_id));
+    assert!(
+        crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+            &ProviderKind::Claude,
+            &shared.token_hash,
+            channel,
+        )
+        .is_some()
+    );
+    assert!(
+        handle
+            .enqueue(user_intervention(8_091_103, "other"), ctx)
+            .await
+            .enqueued
+    );
+    shared.mailboxes.remove_fixture_for_test(channel);
+}
+
+#[tokio::test]
+async fn released_reservation_and_completed_turn_accept_fresh_receipts() {
+    use crate::services::turn_orchestrator::QueuePersistenceContext;
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(8_091_201);
+    let handle = shared.mailbox(channel);
+    let ctx = QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None);
+    let head = user_intervention(8_091_202, "released");
+    assert!(handle.enqueue(head.clone(), ctx.clone()).await.enqueued);
+    let taken = handle.take_next_soft(ctx.clone()).await;
+    assert!(taken.dispatch_lease.is_some());
+    assert!(
+        handle
+            .abandon_pending_dispatch(head.message_id, ctx.clone())
+            .await
+    );
+    assert!(handle.enqueue(head.clone(), ctx.clone()).await.enqueued);
+    let taken = handle.take_next_soft(ctx.clone()).await;
+    assert!(taken.intervention.is_some());
+    assert!(
+        handle
+            .try_start_turn(
+                Arc::new(crate::services::provider::CancelToken::new()),
+                head.author_id,
+                head.message_id
+            )
+            .await
+    );
+    handle.finish_turn(ctx.clone()).await;
+    assert!(handle.enqueue(head, ctx).await.enqueued);
+    shared.mailboxes.remove_fixture_for_test(channel);
+}
+
+#[tokio::test]
+async fn owner_return_preserves_marker_rejects_wrong_lease_and_runs_once() {
+    use crate::services::turn_orchestrator::{EnqueueRefusalReason, QueuePersistenceContext};
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(8_091_301);
+    let other = ChannelId::new(8_091_311);
+    let handle = shared.mailbox(channel);
+    let ctx = QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None);
+    let head = user_intervention(8_091_302, "owner return");
+    assert!(handle.enqueue(head.clone(), ctx.clone()).await.enqueued);
+    let taken = handle.take_next_soft(ctx.clone()).await;
+    assert!(
+        shared
+            .mailbox(other)
+            .enqueue(user_intervention(8_091_312, "other owner"), ctx.clone())
+            .await
+            .enqueued
+    );
+    let foreign = shared.mailbox(other).take_next_soft(ctx.clone()).await;
+    let denied = handle
+        .return_dequeued_head(head.clone(), ctx.clone(), foreign.dispatch_lease.unwrap())
+        .await;
+    assert_eq!(
+        denied.refusal_reason,
+        Some(EnqueueRefusalReason::SourceIdPendingOrActive)
+    );
+    let returned = handle
+        .return_dequeued_head(head.clone(), ctx.clone(), taken.dispatch_lease.unwrap())
+        .await;
+    assert!(returned.enqueued && returned.persistence_error.is_none());
+    assert!(
+        crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+            &ProviderKind::Claude,
+            &shared.token_hash,
+            channel,
+        )
+        .is_some(),
+        "return itself must not consume the marker"
+    );
+    let taken = handle.take_next_soft(ctx.clone()).await;
+    let (returned, receipt) = tokio::join!(
+        handle.return_dequeued_head(head.clone(), ctx.clone(), taken.dispatch_lease.unwrap()),
+        handle.enqueue(head.clone(), ctx.clone()),
+    );
+    assert!(returned.enqueued && returned.persistence_error.is_none());
+    assert!(!receipt.enqueued);
+    assert!(matches!(
+        receipt.refusal_reason,
+        Some(
+            EnqueueRefusalReason::SourceIdPendingOrActive
+                | EnqueueRefusalReason::SourceIdAlreadyQueued
+        )
+    ));
+    assert!(handle.snapshot().await.pending_user_dispatch.is_none());
+    let replay = handle.enqueue(head.clone(), ctx.clone()).await;
+    assert!(!replay.enqueued);
+    assert_eq!(handle.snapshot().await.intervention_queue.len(), 1);
+    let next = handle.take_next_soft(ctx.clone()).await;
+    assert_eq!(next.intervention.unwrap().message_id, head.message_id);
+    assert!(
+        handle
+            .try_start_turn(
+                Arc::new(crate::services::provider::CancelToken::new()),
+                head.author_id,
+                head.message_id
+            )
+            .await
+    );
+    handle.finish_turn(ctx.clone()).await;
+    assert!(handle.take_next_soft(ctx).await.intervention.is_none());
+    shared.mailboxes.remove_fixture_for_test(channel);
+    shared.mailboxes.remove_fixture_for_test(other);
 }
