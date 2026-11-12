@@ -249,8 +249,9 @@ fn init_sources(store: &OStore, channel: u64) -> Vec<(SourceId, u64)> {
         .collect()
 }
 
-/// Over Legacy's open intake and Codex pending start an intake insert waits on the fence through
-/// the write and turn mode stays off; a body claimed between custody's reads waits, then is O's.
+/// Over the open intake of the turn Legacy's mailbox runs and its Codex pending start an intake
+/// insert waits on the fence through the write and turn mode stays off; a body claimed between
+/// custody's reads waits, then is O's.
 #[test]
 fn codex_takeover_holds_the_gateway_fence_through_its_write_and_its_adoption_lock_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -270,7 +271,7 @@ async fn gateway_takeover() {
     let local = local.map_or("takeover-local", String::as_str);
     let log = Log::new(64_700_501);
     let io = Late {
-        host: test_host::over(shared, Duration::ZERO, Some(local)),
+        host: test_host::over(Arc::clone(&shared), Duration::ZERO, Some(local)),
         log: Arc::clone(&log),
         stub: None,
     };
@@ -283,7 +284,15 @@ async fn gateway_takeover() {
     let gate = OwnershipGate::default();
     gate.acquired();
 
-    open_intake(&pool, fenced_channel, "codex").await;
+    open_intake_as(&pool, fenced_channel, "codex", &fenced_channel.to_string()).await;
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    let (owner, message) = (
+        serenity::UserId::new(1),
+        serenity::MessageId::new(fenced_channel),
+    );
+    let claim = crate::services::discord::mailbox_try_start_turn;
+    let channel = serenity::ChannelId::new(fenced_channel);
+    assert!(claim(&shared, channel, token, owner, message).await);
     let record = pending(Codex, fenced_channel);
     persist(&record).unwrap();
     let taken = rollout(rollouts.path(), "rollout-taken.jsonl");

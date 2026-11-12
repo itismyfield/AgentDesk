@@ -125,7 +125,7 @@ async fn takeover() {
     }
     persist(&pending(Codex, queued)).unwrap();
     persist(&pending(Claude, held)).unwrap();
-    open_intake(&pool, foreign, "codex").await;
+    open_intake_as(&pool, foreign, "codex", &foreign.to_string()).await;
     super::o_writer_session(
         &pool,
         "takeover-foreign",
@@ -180,6 +180,13 @@ async fn takeover() {
         "a pending start alone still refuses the strict entry: {strict:?}"
     );
 
+    // Each open row names the message its mailbox runs, except the Codex channel's for now.
+    for channel in [terminal, foreign] {
+        let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+        let (owner, message) = (UserId::new(1), MessageId::new(channel));
+        let claim = crate::services::discord::mailbox_try_start_turn;
+        assert!(claim(&shared, ChannelId::new(channel), token, owner, message).await);
+    }
     let refusals = [
         (codex, "1 open intake rows"),
         (terminal, "Legacy retains delivery custody"),

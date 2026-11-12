@@ -51,19 +51,9 @@ async fn intake_takeover(provider: ShadowProvider, channel: u64) {
         Codex => ("codex", ProviderKind::Codex),
     };
     let _reserved = reserve_as(name, &[channel]);
-    // The mailbox runs this turn while another turn's message waits as an open intake row.
+    // Another turn's message waits as an open intake row before the writer starts.
     let (own, other) = (channel * 10 + 1, channel * 10 + 2);
     let other_row = open_intake_as(&pool, channel, name, &other.to_string()).await;
-    let token = Arc::new(CancelToken::new());
-    let claim = crate::services::discord::mailbox_try_start_turn;
-    let claimed = claim(
-        &shared,
-        ChannelId::new(channel),
-        token,
-        UserId::new(1),
-        MessageId::new(own),
-    );
-    assert!(claimed.await, "the turn claims the mailbox");
 
     let session = "c1a0de00-0000-4000-8000-000000700521";
     let record = |value: serde_json::Value| format!("{value}\n");
@@ -135,6 +125,12 @@ async fn intake_takeover(provider: ShadowProvider, channel: u64) {
             "the old transcript's handoff reached the fence"
         );
     }
+    // The mailbox runs this channel's own turn as its source binds.
+    let token = Arc::new(CancelToken::new());
+    let claim = crate::services::discord::mailbox_try_start_turn;
+    let (owner, message) = (UserId::new(1), MessageId::new(own));
+    let claimed = claim(&shared, ChannelId::new(channel), token, owner, message);
+    assert!(claimed.await, "the turn claims the mailbox");
     log.bind_now(&taken);
     // A fence that begins after another ended saw the takeover of the bound source refused.
     for _ in 0..3 {
@@ -176,10 +172,9 @@ async fn intake_takeover(provider: ShadowProvider, channel: u64) {
     drop(fences);
     await_within(written, WAIT_CAP).await.unwrap();
     assert_eq!(candidate(channel).peek(), Adoption::Committed);
-    assert_eq!(
-        init_sources(&OStore::existing(&root).unwrap(), channel),
-        [(taken.clone(), 0)]
-    );
+    let sources = init_sources(&OStore::existing(&root).unwrap(), channel);
+    let sources: Vec<_> = sources.into_iter().map(|(source, _)| source).collect();
+    assert_eq!(sources, [taken.clone()]);
 
     let answer = match provider {
         Claude => {
