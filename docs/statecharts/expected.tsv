@@ -90,6 +90,12 @@ input-single-path/HerdrBusyInputDropHeld.cfg	HerdrBusyInput	NoSilentLoss	BusyRes
 input-single-path/HerdrBusyInputExcludeHerdr.cfg	HerdrBusyInput	-	HealthyBusyEventuallyInjected
 input-single-path/HerdrBusyInputFixed.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputNoBootWake.cfg	HerdrBusyInput	-	BusyResolvedWithoutTurnEnd
+input-single-path/HerdrBusyInputProducerAbsent.cfg	HerdrBusyInput	-	ProducerEventuallyVerified,HealthyBusyEventuallyInjected
+input-single-path/HerdrBusyInputProducerFresh.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyInputProducerIgnoreIdentity.cfg	HerdrBusyInput	VerifiedPinMatchesRegistered	-
+input-single-path/HerdrBusyInputProducerLegacy.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyInputProducerReplacement.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyInputProducerWrongFirst.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputRebindTarget.cfg	HerdrBusyInput	NoForeignTarget	-
 input-single-path/HerdrBusyInputReplace.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputReplaceBefore.cfg	HerdrBusyInput	-	ScenarioReached

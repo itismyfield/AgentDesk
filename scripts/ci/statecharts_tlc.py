@@ -479,7 +479,7 @@ def main(argv: list[str] | None = None) -> int:
         print("NO_TARGETS: no configs selected; TLC was not run.", flush=True)
         for problem in problems:
             print(f"FAIL {problem}", file=sys.stderr)
-        return 1 if problems else 0
+        return 1
     if not args.jar or not Path(args.jar).is_file():
         parser.error("tla2tools.jar not found: pass --jar or set TLA2TOOLS")
     results = []

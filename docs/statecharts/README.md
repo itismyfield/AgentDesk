@@ -34,6 +34,7 @@ A change that adds a config, breaks a rule or closes a known gap updates `expect
 The first three TSV fields retain their meaning (config, module, expected invariant/deadlock violations).
 An optional fourth field lists expected liveness violations; use comma-separated PROPERTY names or `-`.
 An unlisted violation or an expected violation that now holds fails the check.
+An empty selection prints `NO_TARGETS`, runs no TLC, and returns nonzero; it is not a checked result.
 
 `PROPERTY` and `PROPERTIES` require `SPECIFICATION <name>` instead of `INIT`/`NEXT`.
 Before model checking, the same TLC jar interprets the selected Spec and must find at least one applied temporal assumption.
@@ -57,6 +58,7 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 
 | Area | Code SHA | Rules that break | Disposition |
 |---|---|---|---|
+| `input-single-path` fresh Claude source producer (#8114 Slice2b) | `1c4742af92ef9c5223bfee19c17294864243336f` merged with Slice2 | Absent producer liveness and replacement identity mutant are expected RED | Six producer cfg have independent expected rows; existing30 and dynamic24 contracts retained. Fresh registration alone grants no pin; [report](input-single-path/herdr-producer.report.md). |
 | `input-single-path` Slice2 dynamic reobserve (#8114) | `5b99644e2eab6279c31404ba9fbb561bfaecc3cc` (read-only snapshot) | Inactive wake Before and wake/source/observer/identity/resurrection mutants are expected RED | Original30 unchanged + dynamic24 checked; same-front clear wakes existing Idle, UnknownKeep/discard never resurrect; [report](input-single-path/herdr-busy-reobserve.report.md). |
 | `input-single-path` Herdr Claude busy input (#8114 design) | `5bcbb82297f5cc3ab8897b81ddb9891459e0321b` | Before: healthy Herdr input remains visibly held without a turn-end wake; replay/notice/custody/wake/incarnation mutants are expected RED | Proposed one-owner writer path: 30 cfg checked (original 22 unchanged + early-order/awaited-clear 8), verified clear Before/Fixed both GREEN, O-ready prerequisite, no blind uncertain replay; [report](input-single-path/herdr-busy-input.report.md), [설계](input-single-path/herdr-busy-input.design.md), [경계 델타](input-single-path/herdr-busy-input.boundary-delta.md). |
 | `turn-view` busy input (#8113) | `5bcbb82297f5cc3ab8897b81ddb9891459e0321b` + repair | BusyActiveBefore adds a queue marker before the busy result | BusyActiveFixed includes the NotSent fallback and V2 queue membership; NoFallback and QueueMembershipBefore expose invisible input; [report](turn-view/turn-view.report.md). |
