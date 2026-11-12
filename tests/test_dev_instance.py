@@ -124,6 +124,19 @@ class InstanceDeclarationTests(unittest.TestCase):
                 self.assertTrue(Path(binding[key]).is_relative_to(root))
                 self.assertTrue(Path(binding[key]).exists())
 
+    def test_execution_node_identity_matches_config_and_preferred_node(self):
+        manifest = self.prepare()
+        root = self.base / self.instance_id
+        receipt = read_json(root / "receipt.json")
+        config = read_json(root / "config/agentdesk.yaml")
+        self.assertEqual(receipt["execution_node_id"], self.instance_id)
+        self.assertEqual(config["cluster"]["instance_id"], self.instance_id)
+        self.assertEqual(config["cluster"]["gateway_preferred_instance_id"], self.instance_id)
+        self.assertEqual(validate(self.base, self.instance_id, {}), manifest)
+        witness = self.witness(manifest)
+        witness["execution_node"] = self.instance_id
+        require_preconditions(manifest, witness)
+
     def test_missing_feature_flags_are_unevaluable_before_creating_root(self):
         selected = profile()
         del selected["features"]

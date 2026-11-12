@@ -98,7 +98,7 @@ def declared_manifest(base, instance_id, worktree, head, profile, api_port, pg_p
                      "socket_dir": str(root / "postgres/socket"),
                      "database": db_identity, "role": db_identity, "cluster_started": False},
         "config_path": str(root / "config/agentdesk.yaml"),
-        "execution_node_id": "test-" + instance_id,
+        "execution_node_id": instance_id,
         "preferred_node_seed_required": True,
     }
 
