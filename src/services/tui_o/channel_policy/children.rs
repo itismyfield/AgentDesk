@@ -209,7 +209,8 @@ impl BootChannels {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&channel)
-            .map(|entry| entry.held)
+            .and_then(|entry| entry.candidate.as_ref())
+            .map(|candidate| candidate.peek() == Adoption::Held)
     }
 
     /// Called once per shared view before provider dispatch; recorded relationships need no REST.
