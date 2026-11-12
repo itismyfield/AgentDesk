@@ -190,7 +190,8 @@ pub(in crate::services::discord) fn owner_drive(
                 }
                 return Err(WRITER_HELD.into());
             }
-            let synthetic = !front_origin(&mailbox, &front).await?.is_person();
+            let origin = front_origin(&mailbox, &front).await?;
+            let synthetic = !origin.is_person();
             if !synthetic
                 && claude_handoff::prepare(runtime.as_ref(), &mailbox, &provider, channel, &front)
                     .await?
@@ -241,7 +242,10 @@ pub(in crate::services::discord) fn owner_drive(
                 Ok(false) => idle(front).await,
                 Err(unreachable) => Err(format!("{unreachable:?}")),
             };
-            if synthetic && result.as_ref().err().map(String::as_str) == Some(START_WAITS) {
+            if synthetic
+                && origin != InputOrigin::EffortContinue
+                && result.as_ref().err().map(String::as_str) == Some(START_WAITS)
+            {
                 let held = original.clone();
                 mailbox
                     .v2_request(move |slot| {
