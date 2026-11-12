@@ -1,0 +1,53 @@
+%% Implementation code SHA 62141396080f1db13e4341ef2ac26cb7abd0bbf4; documentation-only follow-up.
+%% Hand-authored projection of slice A; actual TLC evidence is in the companion report.
+%% Code base 07b57b5724f6bede32f7cc0cf00c7a23652ff3c2; 26 cfg / 130 TLC runs.
+stateDiagram-v2
+    [*] --> Probe
+    Probe --> Begin: active or idle front / actor grant recheck
+    Begin --> Closing: durable journal and exact old identity
+    Closing --> CloseHeld: close failed / no old keys
+    CloseHeld --> Closing: backoff wake and fresh identity check
+    Closing --> Checking: same control connection / kill exact pane
+    Checking --> Ended: provider identity positively absent
+    Ended --> Bound: latest durable native ID / existing resume guards
+    Bound --> FirstHeld: composer pre-key refusal / typed Held and proof
+    FirstHeld --> Bound: level screen wake / same queued original
+    Bound --> Reserved: existing composer and owner gate
+    Reserved --> MayHaveSent: durable Bootstrap commit
+    MayHaveSent --> Effect: backend keys
+    Effect --> Receipt: durable native receipt / owner observes it
+    Receipt --> Done: exact attempt settlement
+    Done --> Complete: no owed original
+    MayHaveSent --> Unknown: daemon crash before first key
+    Effect --> Unknown: daemon crash before receipt settlement
+    Unknown --> Retained: existing main tick / Unconfirmed
+    Retained --> Complete: original in retained once / no live journal
+    Begin --> Cancelled: explicit cancel or clear
+    FirstHeld --> Cancelled: explicit cancel or clear
+    Cancelled --> Complete: no owed original
+    state Restart {
+        [*] --> Census: input OR unfinished journal
+        Census --> Awake: explicit boot wake
+        Awake --> Closing: unfinished old close
+        Awake --> Complete: Bound and original no longer owed
+    }
+    note right of CloseHeld
+      Fixed unread screen and permanent close failure preserve Held.
+      No close-success fairness; no old fallback, C-s, or old payload.
+    end note
+    note right of Closing
+      Same tmux control connection and exact pane metadata.
+      EOF discards authority; no PID signal or blind number replay.
+      Close acknowledgment does not prove transcript flush.
+    end note
+    note right of FirstHeld
+      Existing composer/Person draft guard remains.
+      Positive no-key proof reaches hold_not_sent and wake.
+      No native-first capability in slice A.
+    end note
+    note right of Unknown
+      Accepted crash exception: main Bootstrap to Unknown to retained.
+      NoRetained covers crash-free executions.
+      Unknown is never blindly replayed.
+    end note
+    Complete --> [*]

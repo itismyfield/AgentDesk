@@ -119,8 +119,11 @@ pub(crate) async fn run(
             }
         })?;
     let completion = outcome.result.unwrap_or_else(Completion::WriteUncertain);
-    if let Some(proof) = outcome.not_sent {
+    if let Some(mut proof) = outcome.not_sent {
         let held = matches!(&completion, Completion::Held(_));
+        if held && let Some((channel, probe)) = proof.take_preparation_watch() {
+            super::held_watch::arm(channel, probe);
+        }
         mailbox
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("V2 not adopted")?;

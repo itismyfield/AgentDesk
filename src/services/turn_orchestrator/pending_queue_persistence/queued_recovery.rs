@@ -51,7 +51,8 @@ pub(crate) fn load_pending_queues_checked(
             // Only retained inputs no owner owes leave this file input-free; any other V2 file
             // keeps its quarantine report as before.
             SnapshotRead::ReadOnlyV2(ref v2)
-                if !v2.retained_inputs.is_empty() && !snapshot.v2_holds_input() =>
+                if (!v2.retained_inputs.is_empty() || v2.unfinished_handoff.is_some())
+                    && !snapshot.v2_holds_input() =>
             {
                 recovery.v2_idle.push(channel);
                 continue;
@@ -87,7 +88,10 @@ pub(crate) fn load_pending_queues_checked(
 pub(crate) fn v2_channels(provider: &ProviderKind, token_hash: &str) -> Vec<ChannelId> {
     let snapshots = read_catalog(provider, token_hash).snapshots.into_iter();
     // Receipts and the admission sequence are history the untouched file keeps for that owner.
-    let v2 = snapshots.filter(|(_, snapshot)| snapshot.v2_holds_input());
+    let v2 = snapshots.filter(|(_, snapshot)| {
+        snapshot.v2_holds_input()
+            || (*provider == ProviderKind::Claude && snapshot.unfinished_claude_handoff())
+    });
     v2.map(|(channel, _)| channel).collect()
 }
 

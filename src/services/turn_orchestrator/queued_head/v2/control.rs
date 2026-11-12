@@ -244,6 +244,13 @@ fn cancel(
                 super::origin::now_ms(),
             );
             let item = next.items.remove(at + first);
+            if next
+                .unfinished_handoff
+                .as_ref()
+                .is_some_and(|j| j.original == sources::identity(&item))
+            {
+                next.unfinished_handoff = None;
+            }
             next.unbind_item(at + first);
             match owner.commit(next) {
                 Ok(()) => {
@@ -280,6 +287,9 @@ fn clear(owner: &mut Owner) -> ClearChannelResult {
     let at = super::origin::now_ms();
     next.owe_queued(first..next.items.len(), TerminalOutcome::Cancelled, at);
     let discarded: Vec<PendingQueueItem> = next.items.drain(first..).collect();
+    if first == 0 {
+        next.unfinished_handoff = None;
+    }
     if first == 0 && !discarded.is_empty() {
         owner.revoke_front();
     }
@@ -404,6 +414,9 @@ impl Owner {
         let at = super::origin::now_ms();
         next.owe_queued(first..next.items.len(), TerminalOutcome::Cancelled, at);
         let queued: Vec<_> = next.items.drain(first..).collect();
+        if first == 0 {
+            next.unfinished_handoff = None;
+        }
         if first == 0 && !queued.is_empty() {
             self.revoke_front();
         }
