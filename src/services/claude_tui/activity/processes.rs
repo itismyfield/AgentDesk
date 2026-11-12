@@ -1,8 +1,10 @@
 //! Descendants only veto cleanup; failure and absence never establish idle.
+#[cfg(unix)]
 use crate::services::{
     platform::tmux,
     process::{self, ProcessIdentity, ProcessIdentityProbe},
 };
+#[cfg(unix)]
 use std::{
     process::{Command, Stdio},
     time::Duration,
@@ -15,9 +17,18 @@ pub(crate) enum Descendants {
     Unknown,
 }
 pub(crate) fn observe(session: &str) -> Descendants {
-    let Some(root) = tmux::pane_pid(session) else {
+    let Some((root, text)) = process_table(session) else {
         return Descendants::Unknown;
     };
+    ancestry(root, &text)
+}
+#[cfg(not(unix))]
+fn process_table(_: &str) -> Option<(u32, String)> {
+    None
+}
+#[cfg(unix)]
+fn process_table(session: &str) -> Option<(u32, String)> {
+    let root = tmux::pane_pid(session)?;
     let birth = ProcessIdentity::capture(root);
     let mut command = Command::new("ps");
     command
@@ -29,20 +40,15 @@ pub(crate) fn observe(session: &str) -> Descendants {
         process::wait_with_output_timeout(child, Duration::from_secs(2), "activity ancestry")
             .map_err(|_| ())
     });
-    let Ok(output) = output else {
-        return Descendants::Unknown;
-    };
+    let output = output.ok()?;
     if !output.status.success()
         || output.stdout.len() > 4 * 1024 * 1024
         || birth.probe(root) != ProcessIdentityProbe::Same
         || tmux::pane_pid(session) != Some(root)
     {
-        return Descendants::Unknown;
+        return None;
     }
-    let Ok(text) = std::str::from_utf8(&output.stdout) else {
-        return Descendants::Unknown;
-    };
-    ancestry(root, text)
+    Some((root, String::from_utf8(output.stdout).ok()?))
 }
 fn ancestry(root: u32, text: &str) -> Descendants {
     let mut rows = Vec::new();
@@ -79,5 +85,7 @@ mod tests {
         for text in ["", "bad ps", "7 1\n"] {
             assert_eq!(ancestry(5, text), Descendants::Unknown);
         }
+        #[cfg(not(unix))]
+        assert_eq!(observe("unsupported-pane"), Descendants::Unknown);
     }
 }

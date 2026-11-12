@@ -49,5 +49,6 @@ mod tests {
             reason(Background::Clear, Descendants::NoneObserved),
             "UnprovenInteractiveState"
         );
+        assert_eq!(reason(Background::Clear, Descendants::Unknown), UNPROVEN);
     }
 }
