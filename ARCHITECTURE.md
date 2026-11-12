@@ -145,6 +145,7 @@ src/
 │   ├── cluster_role.rs
 │   ├── config_path.rs
 │   ├── daemon_snapshot_pg_tests.rs
+│   ├── decision_gate.rs
 │   ├── disk_write.rs
 │   ├── disk_write_snapshot_tests.rs
 │   ├── late_live_reload_tests.rs
@@ -429,6 +430,7 @@ src/
 │   ├── provider_auth_profile/
 │   │   └── inputs.rs
 │   ├── session_identity/
+│   │   ├── managed.rs
 │   │   └── naming.rs
 │   ├── atomic_write.rs
 │   ├── auto_queue_log.rs
@@ -747,6 +749,7 @@ src/
 │   │   ├── pr_summary.rs
 │   │   ├── prompt_manifest_retention.rs
 │   │   ├── provider_auth_profiles.rs
+│   │   ├── provider_auth_profiles_identity_tests.rs
 │   │   ├── provider_cli_api.rs
 │   │   ├── queue_api.rs
 │   │   ├── queue_api_forwarding_tests.rs
@@ -1323,6 +1326,19 @@ src/
 │   │   ├── verified_hold.rs
 │   │   ├── verified_tail.rs
 │   │   └── warm_followup.rs
+│   ├── decision_gate/
+│   │   ├── runtime/
+│   │   │   ├── gemini.rs
+│   │   │   ├── key.rs
+│   │   │   ├── parser.rs
+│   │   │   ├── request.rs
+│   │   │   └── tests.rs
+│   │   ├── mod.rs
+│   │   ├── parser_tests.rs
+│   │   ├── policy.rs
+│   │   ├── runtime.rs
+│   │   ├── tests.rs
+│   │   └── types.rs
 │   ├── discord/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
@@ -3628,6 +3644,8 @@ src/
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
 │   │   │   ├── liveness.rs
+│   │   │   ├── session_identity.rs
+│   │   │   ├── session_identity_tests.rs
 │   │   │   └── session_inventory.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
@@ -4644,6 +4662,7 @@ src/
 │   ├── session_evidence.rs
 │   ├── session_forwarding.rs
 │   ├── session_host.rs
+│   ├── session_identity_metadata.rs
 │   ├── session_resume.rs
 │   ├── session_selector_validity.rs
 │   ├── settings.rs

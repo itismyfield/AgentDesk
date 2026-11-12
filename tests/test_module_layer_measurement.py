@@ -288,6 +288,8 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
                                 for row in self._snapshot(root)["reverse_dependencies"]))
 
     def test_runner_blocks_new_body_dependency_with_comments_or_const_parameter_types(self):
+        from tests.test_audit_maintainability import HARNESS
+
         contexts = ({}, {"prefix": "// standalone comment\n"},
                     {"prefix": "const BEFORE: () = (); // trailing comment\n"},
                     {"local": "let _before = (); // local trailing comment\n"},
@@ -302,7 +304,8 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
                 self.assertEqual(result, 1, stderr)
                 self.assertTrue(any(row["severity"] == "error"
                                     for row in report["checks"]["module_layers"]["findings"]))
-                self.assertEqual(len(report["checks"]), 15)
+                self.assertEqual(set(report["checks"]),
+                                 {spec.key for spec in HARNESS.load_check_specs()})
                 self.assertFalse(any(row["severity"] == "error" for key, check in report["checks"].items()
                                      if key != "module_layers" for row in check["findings"]))
 

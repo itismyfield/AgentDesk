@@ -75,6 +75,7 @@ impl SubmissionTmux {
 
 impl InputTransport for SubmissionTmux {
     fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
+        crate::services::platform::tmux::session_identity::require_managed(session)?;
         let target = format!("={session}:");
         super::writer_lease::content("tmux", session, || {
             self.run(&["send-keys", "-t", &target, "-l", "--", text])
@@ -96,6 +97,7 @@ impl InputTransport for SubmissionTmux {
         buffer: &str,
         delete: bool,
     ) -> Result<Output, String> {
+        crate::services::platform::tmux::session_identity::require_managed(session)?;
         let target = format!("={session}:");
         let mut args = vec!["paste-buffer", "-p", "-r"];
         if delete {
@@ -106,6 +108,7 @@ impl InputTransport for SubmissionTmux {
     }
 
     fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String> {
+        crate::services::platform::tmux::session_identity::require_managed(session)?;
         let target = format!("={session}:");
         let mut args = vec!["send-keys", "-t", &target];
         args.extend(keys.iter().map(|key| tmux_key_name(*key)));

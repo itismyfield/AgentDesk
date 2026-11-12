@@ -93,11 +93,24 @@ while True:
     }
 
     pub(crate) fn tmux(&self, args: &[&str]) -> String {
-        let output = Command::new(&self.real)
-            .args(["-L", &self.socket, "-f", "/dev/null"])
-            .args(args)
-            .output()
+        let mut command = Command::new(&self.real);
+        command.args(["-L", &self.socket, "-f", "/dev/null"]);
+        if args.first() == Some(&"new-session") {
+            let identity = crate::services::session_identity_metadata::runtime_identity(
+                "managed-transport-fixture",
+            )
             .unwrap();
+            command
+                .args([
+                    "new-session",
+                    "-e",
+                    &identity.environment_assignment().unwrap(),
+                ])
+                .args(&args[1..]);
+        } else {
+            command.args(args);
+        }
+        let output = command.output().unwrap();
         assert!(output.status.success(), "tmux {args:?}: {output:?}");
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }

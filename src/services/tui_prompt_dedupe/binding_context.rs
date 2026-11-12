@@ -755,6 +755,9 @@ pub(crate) mod tests {
         let stub = "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/tmux.calls\"\n";
         fs::write(root.join("tmux"), stub).unwrap();
         fs::set_permissions(root.join("tmux"), fs::Permissions::from_mode(0o700)).unwrap();
+        crate::services::platform::tmux::session_identity_tests::mark_fixture_program(
+            root.join("tmux"),
+        );
         Guard::prepend_path_after_shared_test_env_lock(root)
     }
     pub(crate) fn launch_failures(
