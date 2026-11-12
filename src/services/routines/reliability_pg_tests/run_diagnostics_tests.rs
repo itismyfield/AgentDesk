@@ -180,15 +180,30 @@ async fn i8117_due_manual_and_poll_store_without_diagnostic_wire_pg() {
         definition.script_ref = script.clone();
         let routine = store.attach_routine(definition).await.unwrap();
         if manual {
-            let claimed = store.claim_run_now(&routine.id).await.unwrap().unwrap();
-            super::super::run_diagnostics::started(&store, &claimed).await;
-            let outcome =
-                super::super::execute_claimed_script_run(&store, &loader, None, claimed, false)
-                    .await
-                    .unwrap()
-                    .unwrap();
-            super::super::run_diagnostics::outcome(&store, &outcome).await;
-            logger.log_run_outcome(&store, &outcome).await;
+            let mut config = crate::config::Config::default();
+            config.routines.enabled = true;
+            config.routines.dir = root.path().into();
+            config.routines.additional_dirs.clear();
+            config.routines.max_consecutive_failures = 0;
+            config.policies.dir = root.path().join("empty-policies");
+            std::fs::create_dir_all(&config.policies.dir).unwrap();
+            let broadcast_tx = crate::eventbus::new_broadcast();
+            let state = crate::app_state::AppState {
+                pg_pool: Some(pool.clone()),
+                engine: crate::engine::PolicyEngine::new(&config).unwrap(),
+                config: Arc::new(config),
+                batch_buffer: crate::eventbus::spawn_batch_flusher(broadcast_tx.clone()),
+                broadcast_tx,
+                health_registry: None,
+                cluster_instance_id: None,
+            };
+            let axum::Json(response) = crate::server::routes::routines::run_routine_now(
+                axum::extract::State(state),
+                axum::extract::Path(routine.id.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response["outcome"]["status"], "succeeded");
         } else {
             assert_eq!(
                 run_due_tick(

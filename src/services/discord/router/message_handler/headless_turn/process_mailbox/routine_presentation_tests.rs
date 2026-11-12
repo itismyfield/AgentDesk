@@ -59,6 +59,10 @@ async fn i8117_actual_bridge_uses_exact_terminal_not_progress_or_preview() {
                 fixture.channel, Some("fixture-routine-nonce"), "session_fresh",
                 &json!({"provider_session_id":"fixture-routine-session","tmux_reused":false}),
             ));
+            let armed = fixture.shared.ui.placeholder_live_events.claim_session_banner_prefix_line(
+                fixture.channel, &ProviderKind::Claude, &turn,
+            ).expect("fixture has a real fresh-session prefix");
+            assert!(armed.contains("🆕 새 세션 시작"));
             crate::services::discord::increment_global_active(&fixture.shared, "i8117_bridge");
             let (completion, completed) = tokio::sync::oneshot::channel();
             let shown = Arc::new(RecordingDirectGateway::default());
@@ -135,7 +139,7 @@ async fn i8117_actual_bridge_uses_exact_terminal_not_progress_or_preview() {
                     .collect();
                 assert_eq!(bodies.len(), 1, "{wire:?}");
                 if legacy {
-                    assert!(bodies[0].1.contains("🆕 새 세션 시작"), "legacy banner contract");
+                    assert!(bodies[0].1.contains("🆕 새 세션 시작"), "legacy banner contract: {wire:?}");
                     assert!(bodies[0].1.ends_with("보고 메시지1\n진행2\n진행3\n진행4"));
                 } else {
                     assert_eq!(bodies[0].1, "보고 메시지1\n진행2\n진행3\n진행4");
