@@ -1,6 +1,10 @@
 schema_version = 1
 
 rules = [
+  { prefix = "config::decision_gate", root = "src/lib.rs", layer = "vocabulary", reason = "판정 접점 설정 DTO·기본값·repo 정규화와 유효 범위를 소유한다.", evidence = ["src/config/decision_gate.rs:1"] },
+  { prefix = "services::decision_gate", root = "src/lib.rs", layer = "adapter", reason = "미설치 가용성과 비활성 메모리 키·HTTP 경계를 소유한다.", evidence = ["src/services/decision_gate/mod.rs:1"] },
+  { prefix = "services::decision_gate::types", root = "src/lib.rs", layer = "vocabulary", reason = "질문·세 갈래 결과·안전 사유의 닫힌 값 계약이다.", evidence = ["src/services/decision_gate/types.rs:1"] },
+  { prefix = "services::decision_gate::policy", root = "src/lib.rs", layer = "foundation", reason = "주입된 설정 DTO와 scope만으로 스위치·deadline을 순수 투영한다.", evidence = ["src/services/decision_gate/policy.rs:1"] },
   { prefix = "", root = "src/lib.rs", layer = "assembly", reason = "라이브러리 진입점이 CLI와 서버 부팅을 최종 조립한다.", evidence = ["src/lib.rs:255"] },
   { prefix = "intake_consent_authority", root = "src/lib.rs", layer = "adapter", reason = "DB row 기반 opaque before-effects 증거를 소유하며 발급 runtime은 child에 둔다.", evidence = ["src/intake_consent_authority.rs:6"] },
   { prefix = "intake_consent_authority::issuer", root = "src/lib.rs", layer = "application", reason = "private worker key를 소비해 기존 task-local 발급·소비 순서를 조립한다.", evidence = ["src/services/cluster/intake_worker/consent_scope.rs:10"] },

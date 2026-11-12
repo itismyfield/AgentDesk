@@ -1902,7 +1902,7 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
     let path = rig.transcript();
     let past = json!({"type":"user","uuid":"past","sessionId":"receipt-sid","message":{"role":"user","content":PROMPT}});
     use std::io::Write;
-    writeln!(
+    write!(
         fs::OpenOptions::new().append(true).open(&path).unwrap(),
         "{past}\n{IDLE}"
     )
@@ -1928,6 +1928,10 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
         target::Phase::Idle,
         &path,
         Execution::LocalTui,
+    );
+    assert!(
+        crate::services::claude_tui::readiness::observe(&rig.name, Some(&path)).is_some(),
+        "Idle source before dispatch"
     );
     let (settled, _) = tokio::sync::oneshot::channel();
     let mut written_token = None;

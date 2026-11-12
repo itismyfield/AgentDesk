@@ -990,10 +990,17 @@ fn managed_stash_holds_when_the_final_composer_capture_is_unreadable() {
     }
     let _root = crate::config::TestRuntimeRootGuard::new();
     let dir = tempfile::tempdir().unwrap();
+    let identity =
+        crate::services::session_identity_metadata::runtime_identity("unreadable-composer")
+            .unwrap()
+            .environment_assignment()
+            .unwrap();
+    fs::write(dir.path().join("identity"), identity).unwrap();
     let program = dir.path().join("tmux");
-    fs::write(&program, "#!/bin/sh\nd=$(dirname \"$0\")\ncase \"$*\" in *pane_dead*) printf '0\\n' ;; *capture-pane*) [ -f \"$d/capture\" ] && cat \"$d/capture\" ;; *) exit 1 ;; esac\n").unwrap();
+    fs::write(&program, "#!/bin/sh\nd=$(dirname \"$0\")\ncase \"$*\" in *show-environment*) cat \"$d/identity\" ;; *pane_dead*) printf '0\\n' ;; *capture-pane*) [ -f \"$d/capture\" ] && cat \"$d/capture\" ;; *) exit 1 ;; esac\n").unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
-    let pane = super::super::busy_inject::Pane::with_program("unreadable-composer", program);
+    let pane =
+        super::super::busy_inject::Pane::with_program("unreadable-composer", program).unwrap();
     let unread = Err(super::super::busy_inject::Veto::ScreenUnread);
     assert_eq!(idle::before_paste(&pane, true), unread);
     assert_eq!(idle::before_paste(&pane, false), Ok(false));

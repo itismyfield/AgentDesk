@@ -158,7 +158,13 @@ fn an_owned_paste_beside_an_unparkable_draft_notices_its_original_once() {
         let counted = raised.clone();
         let nonce = busy_inject::fresh_nonce();
         let leaf = BusyClaude {
-            pane: busy_inject::Pane::with_program(&session, dir.path().join("tmux")),
+            pane: busy_inject::Pane::with_program(
+                &session,
+                crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                    dir.path().join("tmux"),
+                ),
+            )
+            .expect("managed scripted pane"),
             session: session.clone(),
             transcript: dir.path().join("transcript.jsonl"),
             channel: 7_676_400 + at,
