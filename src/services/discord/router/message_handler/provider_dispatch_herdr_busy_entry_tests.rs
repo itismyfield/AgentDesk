@@ -1104,9 +1104,12 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
         .iter()
         .filter(|result| result.as_str() == "loop-settled")
         .count();
-    let next_look = intake.runtime.block_on(async {
-        held_watch::watch_observed(source_retry_drive(&intake), original.message_id).1
-    });
+    let next_look = {
+        let runtime_scope = intake.runtime.enter();
+        let look = held_watch::watch_observed(source_retry_drive(&intake), original.message_id).1;
+        drop(runtime_scope);
+        look
+    };
     // The authentic ingress owns its own runtime; send outside Intake's block_on.
     assert_eq!(
         started.hook(
