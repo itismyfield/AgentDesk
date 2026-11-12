@@ -1350,7 +1350,7 @@
       "expected": "duplicate",
       "key": "issue_8201",
       "title": "재연결한 tui_o가 ACK 이전 메시지를 다시 Discord에 게시한다",
-      "background": "연결이 복구될 때 저장해 둔 마지막 ACK cursor를 읽지 않아 이미 전달한 출력부터 재전송한다. 재접속 시작 cursor 복원으로 해결하려 한다.",
+      "background": "일반 연결 상태에서는 메시지가 한 번씩 도착하고 ACK 저장도 정상적으로 완료된다. 연결이 복구될 때 저장해 둔 마지막 ACK cursor를 읽지 않아 이미 전달한 출력부터 재전송한다. 재접속 시작 cursor 복원으로 해결하려 한다.",
       "issue_set": "small",
       "rationale": "ACK cursor 복원 누락으로 인한 재접속 중복 게시라는 같은 원인과 해결 범위다."
     },
@@ -1359,7 +1359,7 @@
       "expected": "duplicate",
       "key": "issue_8202",
       "title": "cancel 직후 남은 drain callback이 입력을 다시 처리한다",
-      "background": "입력 큐에서 취소는 끝났는데 미리 예약한 drain 작업이 살아 있어 같은 사용자 입력의 소비가 두 번 시작된다. 취소 때 예약 drain을 무효화한다.",
+      "background": "사용자에게 취소 확인을 보내는 경로와 화면의 대기 표시 해제는 정상적으로 끝난다. 입력 큐에서 취소는 끝났는데 미리 예약한 drain 작업이 살아 있어 같은 사용자 입력의 소비가 두 번 시작된다. 취소 때 예약 drain을 무효화한다.",
       "issue_set": "small",
       "rationale": "취소 후 예약 drain 실행이라는 동일한 입력 이중 소비 경로다."
     },
@@ -1368,7 +1368,7 @@
       "expected": "duplicate",
       "key": "issue_8203",
       "title": "dcserver를 내린 뒤 소유 worker process group이 살아 있다",
-      "background": "서버 종료에서 자식 process group의 종료 대기를 건너뛰어 worker가 고아로 남는다. 종료 경로에서 소유 자식 그룹 회수를 기다리도록 한다.",
+      "background": "기동 후 요청을 받아 응답하고 상태를 기록하는 경로는 정상적으로 작동한다. 서버 종료에서 자식 process group의 종료 대기를 건너뛰어 worker가 고아로 남는다. 종료 경로에서 소유 자식 그룹 회수를 기다리도록 한다.",
       "issue_set": "small",
       "rationale": "서버 종료 시 소유 process group 미회수와 같은 문제다."
     },
@@ -1377,7 +1377,7 @@
       "expected": "duplicate",
       "key": "issue_8204",
       "title": "GitHub 페이지네이션의 겹치는 issue가 Kanban 카드를 두 개 만든다",
-      "background": "열린 issue 동기화에서 앞 페이지 끝과 다음 페이지 시작에 같은 번호가 포함되면 upsert 전에 중복 제거가 없어 카드가 두 번 생긴다.",
+      "background": "한 페이지 안에서 새 번호를 가져와 제목과 상태를 갱신하는 경로는 정상이다. 열린 issue 동기화에서 앞 페이지 끝과 다음 페이지 시작에 같은 번호가 포함되면 upsert 전에 중복 제거가 없어 카드가 두 번 생긴다.",
       "issue_set": "small",
       "rationale": "동기화 페이지 경계의 동일 issue 중복 upsert를 고친다."
     },
@@ -1386,7 +1386,7 @@
       "expected": "duplicate",
       "key": "issue_8205",
       "title": "DST 전환 당일 루틴이 같은 시각에 두 번 예약된다",
-      "background": "scheduler가 next_due를 UTC가 아닌 local time으로 저장하므로 일광 절약 시간 전환 때 같은 실행을 두 번 만든다. 저장 기준을 UTC로 통일한다.",
+      "background": "다음 예정 시각을 지역 시각으로 직렬화하고 다시 읽는 탓에 일광 절약 시간 전환 구간을 두 개의 예약으로 해석한다. 예정값을 협정 세계시로 기록하고 실행 시각을 하나로 계산한다.",
       "issue_set": "small",
       "rationale": "next_due의 local time 저장이 만든 DST 중복 예약과 동일하다."
     },
@@ -1458,7 +1458,7 @@
       "expected": "new",
       "key": "none",
       "title": "tui_o 재접속 배너가 모바일 화면에서 두 줄로 겹쳐 보임",
-      "background": "ACK cursor와 메시지 전송은 정상이다. 재접속 상태 배너의 CSS max-width가 없어 좁은 화면에서 텍스트가 버튼 위로 겹친다. 배너 레이아웃만 고친다.",
+      "background": "재접속 상태 배너의 CSS max-width가 없어 좁은 화면에서 텍스트가 버튼 위로 겹친다. 모바일 폭에 맞춘 줄바꿈과 배너 레이아웃을 적용한다.",
       "issue_set": "small",
       "rationale": "재접속이라는 단어는 같지만 화면 CSS 문제이며 ACK 복원과 무관하다."
     },
@@ -1467,7 +1467,7 @@
       "expected": "new",
       "key": "none",
       "title": "cancel 버튼에 키보드 포커스를 옮길 수 없음",
-      "background": "입력 큐의 취소와 drain은 정상이다. 웹 화면 cancel 버튼에 tabIndex=-1이 들어가 키보드 사용자가 접근할 수 없다. 버튼 접근성을 고친다.",
+      "background": "웹 화면 cancel 버튼에 tabIndex=-1이 들어가 키보드 사용자가 접근할 수 없다. Tab 순서에 버튼을 포함하고 포커스 표시를 추가한다.",
       "issue_set": "small",
       "rationale": "cancel UI 접근성 문제이며 예약 drain의 이중 소비와 다르다."
     },
@@ -1476,7 +1476,7 @@
       "expected": "new",
       "key": "none",
       "title": "dcserver worker 실행 파일의 Windows 경로에서 공백이 잘못 인용됨",
-      "background": "서버 종료나 process group 회수와 관계없이 시작 단계에서 Program Files 경로를 토큰 두 개로 분리해 worker가 실행되지 않는다. Windows argv quoting을 수정한다.",
+      "background": "시작 단계에서 Program Files 경로를 토큰 두 개로 분리해 worker가 실행되지 않는다. Windows argv quoting을 수정해 공백을 포함한 실행 파일 이름을 한 인자로 전달한다.",
       "issue_set": "small",
       "rationale": "worker라는 대상만 같고 시작 argv 처리 문제로 종료 미회수와 무관하다."
     },
@@ -1485,7 +1485,7 @@
       "expected": "new",
       "key": "none",
       "title": "GitHub 동기화 요청이 429 Retry-After를 무시해 API 한도를 더 소모함",
-      "background": "페이지별 issue upsert와 카드 개수는 정상이다. GitHub 429에서 Retry-After를 무시하고 다음 요청을 즉시 보내므로 대기 시간을 적용해야 한다.",
+      "background": "GitHub 429에서 Retry-After를 무시하고 다음 요청을 즉시 보내므로 API 한도를 더 소모한다. 응답이 지정한 시간을 기다린 뒤 다음 동기화 요청을 보낸다.",
       "issue_set": "small",
       "rationale": "GitHub 동기화의 rate limit 대기 정책이며 페이지 경계 중복과 다르다."
     },
@@ -1494,7 +1494,7 @@
       "expected": "new",
       "key": "none",
       "title": "루틴 next_due가 지난 경우 목록 API에 연체 분 수를 표시하고 싶다",
-      "background": "루틴 실행과 UTC 저장은 정상이며 DST 중복도 없다. 사용자가 지연을 확인할 수 있도록 목록 응답에 overdue_minutes를 새로 제공하는 표시 기능이다.",
+      "background": "루틴의 예정 시각을 넘긴 항목이 목록에서 다른 항목과 같게 보여 지연 시간을 파악하기 어렵다. 목록 응답에 overdue_minutes를 새로 제공하고 연체 분 수를 표시한다.",
       "issue_set": "small",
       "rationale": "next_due 용어만 겹치고 관측용 새 필드 기능으로 DST 저장 결함과 다르다."
     },
@@ -1503,7 +1503,7 @@
       "expected": "new",
       "key": "none",
       "title": "설정 reload가 잘못된 YAML 행 번호를 사용자에게 알려주지 않음",
-      "background": "repo alias와 정책 정규화는 정상이다. YAML 구문 오류가 있을 때 오류 위치가 빠져 수정할 행을 찾기 어렵다. validation 응답에 line과 column을 포함한다.",
+      "background": "YAML 구문 오류가 있을 때 오류 위치가 빠져 수정할 행을 찾기 어렵다. validation 응답에 line과 column을 포함하고 설정 편집기에서 해당 위치를 표시한다.",
       "issue_set": "small",
       "rationale": "reload 오류 진단 표현이며 repo alias 정규화와 다르다."
     },
@@ -1512,7 +1512,7 @@
       "expected": "new",
       "key": "none",
       "title": "tmux capture에서 ANSI 색상 escape가 Markdown 코드 블록 밖에 노출됨",
-      "background": "UTF-8 문자는 완전하게 보존된다. tmux capture의 ANSI escape 제거가 빠져 Discord 출력에 제어 문자열이 그대로 보인다. ANSI stripping을 추가한다.",
+      "background": "tmux capture의 ANSI escape 제거가 빠져 Discord 출력에 제어 문자열이 그대로 보인다. 본문의 일반 텍스트는 보존하면서 색상 제어 escape만 제거한다.",
       "issue_set": "large",
       "rationale": "같은 capture 경로지만 문자 경계가 아닌 ANSI escape 정제라는 별도 원인이다."
     },
@@ -1521,7 +1521,7 @@
       "expected": "new",
       "key": "none",
       "title": "Kanban label 필터 URL을 다른 사람과 공유할 수 없음",
-      "background": "카드 label update와 metadata 저장은 정상이다. 선택한 label 필터를 로컬 상태에만 두어 URL을 복사하면 필터가 사라진다. query string 동기화를 추가한다.",
+      "background": "선택한 label 필터를 로컬 상태에만 두어 URL을 복사하면 필터가 사라진다. query string에 필터를 기록해 공유와 새로고침 뒤에도 선택을 보존한다.",
       "issue_set": "large",
       "rationale": "label 용어만 같으며 필터 URL 공유 기능으로 metadata 손실과 다르다."
     },
@@ -1530,7 +1530,7 @@
       "expected": "new",
       "key": "none",
       "title": "결정 API의 429 응답을 rate_limited 대신 provider_error로 분류함",
-      "background": "deadline과 늦은 응답 폐기는 정상이다. HTTP 429 상태 코드 매핑이 빠져 안전 reason enum이 provider_error가 된다. 상태 코드별 분류를 고친다.",
+      "background": "HTTP 429 상태 코드 매핑이 빠져 안전 reason enum이 provider_error가 된다. 429를 rate_limited로 매핑하고 응답 사유에 이 분류를 제공한다.",
       "issue_set": "large",
       "rationale": "결정 API 오류 분류 문제이며 timeout 뒤 결과 채택 문제와 다르다."
     },
@@ -1539,7 +1539,7 @@
       "expected": "new",
       "key": "none",
       "title": "CI required lane의 Windows 임시 경로에 한글이 있으면 fixture 실행이 실패함",
-      "background": "required job 선택과 test 개수는 정상이다. Windows runner에서 임시 fixture 경로를 UTF-8로 잘못 변환해 파일을 열지 못한다. 경로 인코딩을 수정한다.",
+      "background": "Windows runner에서 임시 fixture 경로를 UTF-8로 잘못 변환해 파일을 열지 못한다. 한글이 들어간 임시 디렉터리를 운영체제 경로 타입으로 전달하도록 수정한다.",
       "issue_set": "large",
       "rationale": "CI라는 단어만 겹치고 실행 중 Windows 경로 인코딩 문제다."
     },
@@ -1548,7 +1548,7 @@
       "expected": "new",
       "key": "none",
       "title": "회의록 제목 검색에서 한글 초성 검색을 지원하고 싶다",
-      "background": "회의록 저장 버전 충돌과 무관하다. 기존 제목 검색은 완전한 문자열만 일치하므로 초성 검색을 새로 추가하려 한다.",
+      "background": "기존 제목 검색은 완전한 문자열만 일치하므로 초성만 입력하면 찾을 수 없다. 결과의 날짜순 정렬을 보존하며 한글 초성 검색을 추가한다.",
       "issue_set": "large",
       "rationale": "회의록 검색 기능 추가이며 저장 동시성 결함과 다르다."
     },
@@ -1557,7 +1557,7 @@
       "expected": "new",
       "key": "none",
       "title": "Discord 첨부 MIME type이 text/plain으로 고정되어 이미지 미리보기가 나오지 않음",
-      "background": "임시 파일은 업로드 완료까지 보존되고 ENOENT도 없다. 실제 PNG 파일을 text/plain으로 전송하여 미리보기가 사라지므로 MIME type 검출을 고친다.",
+      "background": "실제 PNG 파일을 text/plain으로 전송하여 이미지 미리보기가 사라진다. 파일 형식에서 MIME type을 검출하고 업로드 요청까지 해당 값을 보존한다.",
       "issue_set": "large",
       "rationale": "첨부라는 대상만 같고 MIME 판정 문제로 temp file 수명과 다르다."
     }

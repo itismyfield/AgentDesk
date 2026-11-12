@@ -67,6 +67,7 @@ pub(super) async fn capture(out: &Path, relay: &transport::Relay, fake: bool) ->
             fixture[target]["usage"] = usage.clone();
         }
     }
+    services::decision_gate::capture_parser::validate_views(&fixture)?;
     write_safe(out, "raw-rest-body.json", &raw)?;
     write_json(out, "comment_shape.json", &fixture)?;
     write_json(
@@ -83,6 +84,7 @@ pub(super) async fn capture(out: &Path, relay: &transport::Relay, fake: bool) ->
                 {"name":"q_score", "type":"score", "levels":3}
             ],
             "request_count":1,
+            "parser_compatible":true,
             "fixture_mapping":"answers.<question> becomes <fixture>.answers.q without modifying answer fields; batch usage is preserved for each view"
         }),
     )

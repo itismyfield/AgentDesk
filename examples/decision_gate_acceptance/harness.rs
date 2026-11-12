@@ -1,6 +1,7 @@
 #[path = "sources.rs"]
-mod sources;
-pub(crate) use sources::{config, github, services, utils};
+pub mod sources;
+pub use sources::services;
+pub(crate) use sources::{config, github, utils};
 #[path = "capture.rs"]
 mod capture;
 #[path = "../../src/server/routes/github/issue_duplicate.rs"]

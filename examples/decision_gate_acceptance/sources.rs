@@ -24,8 +24,14 @@ pub(crate) mod github {
     }
 }
 
-pub(crate) mod services {
-    pub(crate) mod decision_gate {
+pub mod services {
+    pub mod decision_gate {
+        pub mod capture_parser {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/decision_gate_capture_parser/mod.rs"
+            ));
+        }
         pub(crate) mod types {
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),

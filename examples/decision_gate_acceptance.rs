@@ -2,9 +2,11 @@
 
 #[cfg(unix)]
 #[path = "decision_gate_acceptance/harness.rs"]
-mod harness;
+pub mod harness;
 #[cfg(unix)]
-pub(crate) use harness::{config, github, issue_duplicate, services, transport, utils};
+pub use harness::services;
+#[cfg(unix)]
+pub(crate) use harness::{config, github, issue_duplicate, transport, utils};
 
 fn main() {
     #[cfg(unix)]
