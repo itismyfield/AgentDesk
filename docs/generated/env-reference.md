@@ -127,7 +127,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `COKACDIR_DEBUG` | `src/services/claude.rs` | Global runtime debug flag — set by COKACDIR_DEBUG=1 at startup. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs` |  |
 | `DATABASE_URL` | `src/db/postgres.rs` |  |
-| `GEMINI_API_KEY` | `src/services/decision_gate/runtime/key.rs` | # Safety Call only on the initial single-threaded binary path, before starting children. |
+| `GEMINI_API_KEY` | `src/services/decision_gate/runtime/key_initial_env.rs` | # Safety Call only before the binary starts threads or children. |
 | `GEMINI_CLIENT_ID` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLIENT_SECRET` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs` |  |

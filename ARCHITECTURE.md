@@ -82,6 +82,7 @@ src/
 │   ├── client.rs
 │   ├── dcserver.rs
 │   ├── dcserver_decision_boot.rs
+│   ├── dcserver_decision_boot_tests.rs
 │   ├── dcserver_pg_bootstrap.rs
 │   ├── dcserver_restart_marker.rs
 │   ├── dcserver_restart_wait.rs
@@ -1303,6 +1304,7 @@ src/
 │   │   ├── runtime/
 │   │   │   ├── gemini.rs
 │   │   │   ├── key.rs
+│   │   │   ├── key_initial_env.rs
 │   │   │   ├── key_tests.rs
 │   │   │   ├── parser.rs
 │   │   │   ├── request.rs
