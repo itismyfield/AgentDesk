@@ -3,6 +3,16 @@
 from pathlib import Path
 
 
+def declared_hosts(root: Path, instance_id: str) -> dict:
+    return {
+        "tmux": {"socket": str(root / "runtime/tmux/socket"),
+                 "tmpdir": str(root / "runtime/tmux"), "prefix": "AdkTest-" + instance_id},
+        "herdr": {"socket": str(root / "runtime/herdr/socket"),
+                  "home": str(root / "herdr-home"), "session": "adk-test-" + instance_id,
+                  "endpoint_key": "test-" + instance_id},
+    }
+
+
 def build_config(root: Path, profile: dict, api_port: int, pg_port: int,
                  instance_id: str) -> dict:
     features = profile["features"]
@@ -11,6 +21,7 @@ def build_config(root: Path, profile: dict, api_port: int, pg_port: int,
     database_name = "adktest_" + instance_id.replace("-", "")
     api_url = f"http://127.0.0.1:{api_port}"
     capacity = features["capacity_aware"]
+    herdr = declared_hosts(root, instance_id)["herdr"]
     agents = []
     bots = {}
     for provider, channel in zip(("claude", "codex"), channels):
@@ -105,6 +116,10 @@ def build_config(root: Path, profile: dict, api_port: int, pg_port: int,
             },
             "mcp": {"endpoint": "", "access_key_env": ""},
         },
-        "session_hosts": {"herdr": {"endpoints": {}, "channels": {}}},
+        "session_hosts": {"herdr": {"endpoints": {herdr["endpoint_key"]: {
+            "mode": "legacy_dedicated", "execution_node": instance_id,
+            "socket_path": herdr["socket"], "herdr_home": herdr["home"],
+            "herdr_session": herdr["session"],
+        }}, "channels": {}}},
         "config_hot_reload": False,
     }

@@ -18,7 +18,8 @@ impl SubmissionTmux {
             scope
                 .spawn(|| {
                     let mut command = runtime_command("tmux").map_err(|e| e.to_string())?;
-                    command.arg("-u").args(args);
+                    crate::services::platform::tmux::input_command(&mut command, args)
+                        .map_err(|e| e.to_string())?;
                     tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()

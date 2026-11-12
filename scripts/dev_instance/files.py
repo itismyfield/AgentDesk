@@ -16,6 +16,7 @@ LAYOUT_DIRS = (
     "credential", "postgres", "postgres/data", "postgres/socket",
     "routines", "config/agents", "workspaces/claude", "workspaces/codex",
     "data/memory", "data/memory/shared", "data/memory/long-term", "data/memory/auto",
+    "runtime/tmux", "runtime/herdr", "herdr-home",
 )
 
 

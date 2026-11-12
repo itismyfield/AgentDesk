@@ -78,6 +78,11 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
     }
 
     fn dial(&self) -> Result<Dialled, HerdrTransportError> {
+        if crate::config::test_instance::requested() {
+            return Err(HerdrTransportError::NotSent(
+                "test Herdr runtime receipt is not admitted".into(),
+            ));
+        }
         let not_sent = |error: std::io::Error| HerdrTransportError::NotSent(error.to_string());
         let stream = UnixStream::connect(&self.socket_path).map_err(not_sent)?;
         stream

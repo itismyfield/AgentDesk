@@ -123,6 +123,7 @@ static RETIRED_WARNING: Once = Once::new();
 
 // Config loading validates before install; both stages use this same resolution.
 fn normalized(config: &Config) -> Result<Config> {
+    super::test_instance::validate_session_hosts(config).map_err(anyhow::Error::msg)?;
     let mut effective = config.clone();
     user_default::resolve(&mut effective, || {
         std::env::var_os("HOME").map(PathBuf::from)

@@ -6,7 +6,7 @@ import socket
 import subprocess
 from pathlib import Path
 
-from .config import build_config
+from .config import build_config, declared_hosts
 from .files import (InstanceError, LAYOUT_DIRS, create_layout, instance_root, read_regular_text,
                     safe_absolute, validate_tree, write_private_json, write_private_text)
 from .profile import same_json, validate_profile
@@ -99,6 +99,7 @@ def declared_manifest(base, instance_id, worktree, head, profile, api_port, pg_p
                      "database": db_identity, "role": db_identity, "cluster_started": False},
         "config_path": str(root / "config/agentdesk.yaml"),
         "execution_node_id": instance_id,
+        "hosts": declared_hosts(root, instance_id),
         "preferred_node_seed_required": True,
     }
 
@@ -115,6 +116,8 @@ def child_environment(manifest, ambient):
         "AGENTDESK_ROOT_DIR": manifest["root"], "AGENTDESK_CONFIG": manifest["config_path"],
         "AGENTDESK_API_URL": manifest["api"]["self_url"],
         "ADK_API_URL": manifest["api"]["self_url"],
+        "AGENTDESK_TEST_MANIFEST": str(Path(manifest["root"]) / MANIFEST_NAME),
+        "TMUX_TMPDIR": manifest["hosts"]["tmux"]["tmpdir"],
     })
     return environment
 
@@ -122,7 +125,7 @@ def child_environment(manifest, ambient):
 def receipt_for(manifest):
     return {key: manifest[key] for key in (
         "schema_version", "status", "live_ready", "instance_id", "root", "worktree",
-        "head", "api", "postgres", "applied_env", "execution_node_id", "preferred_node_seed_required"
+        "head", "api", "postgres", "applied_env", "execution_node_id", "preferred_node_seed_required", "hosts"
     )} | {"features": manifest["profile"]["features"],
          "bots": manifest["profile"]["bots"], "channels": manifest["profile"]["channels"]}
 

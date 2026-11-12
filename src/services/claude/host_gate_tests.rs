@@ -425,3 +425,27 @@ fn a_returned_resume_without_its_resumed_start_types_nothing() {
     }
     crate::services::tmux_common::cleanup_session_temp_files(NAME);
 }
+
+#[test]
+fn test_instance_failed_presence_never_becomes_missing_on_an_absent_default_socket() {
+    const NAME: &str = "adk-test-presence-unknown";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let sockets = tempfile::tempdir().unwrap();
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let remove = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock;
+    let _tmpdir = set("TMUX_TMPDIR", sockets.path());
+    let _attached = remove("TMUX");
+    let _original_marker = remove("AGENTDESK_TEST_MANIFEST");
+    let _presence =
+        InjectedPresenceGuard::set(HostSessionRef::tmux(NAME), HostPresence::ProbeFailed);
+    assert_eq!(super::session_exists(NAME), Ok(false));
+    {
+        let _marker = set(
+            "AGENTDESK_TEST_MANIFEST",
+            &sockets.path().join("missing-manifest.json"),
+        );
+        let error = super::session_exists(NAME).unwrap_err();
+        assert!(error.contains("unobserved"), "{error}");
+    }
+    assert_eq!(super::session_exists(NAME), Ok(false));
+}

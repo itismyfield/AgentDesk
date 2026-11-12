@@ -255,6 +255,7 @@ mod high_risk_recovery;
 use anyhow::{Context, Result};
 
 pub fn run_from_args() -> Result<()> {
+    config::test_instance::initialize().map_err(anyhow::Error::msg)?;
     services::process_boot::initialize();
     // A failure-marker handoff restarts this executable as a short-lived writer.
     // Dispatch it before Clap so no public/hidden CLI surface is needed and the
