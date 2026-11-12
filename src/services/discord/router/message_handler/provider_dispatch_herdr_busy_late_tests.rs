@@ -171,7 +171,7 @@ async fn late_unknown(
 }
 
 async fn awaited(fx: &Fixture, nonce: &str, session: &str) -> PathBuf {
-    let path = reconnect::clear_pending(fx, session);
+    let path = tokio::task::block_in_place(|| reconnect::clear_pending(fx, session));
     assert!(!path.exists(), "a clear Pending precedes its new JSONL");
     let clear = crate::services::claude::herdr_turn::awaited_clear(CHANNEL, fx.logical(), nonce)
         .expect("the same execution's canonical clear is verified");
@@ -191,7 +191,7 @@ async fn awaited(fx: &Fixture, nonce: &str, session: &str) -> PathBuf {
     path
 }
 
-fn write_on_enter(
+pub(super) fn write_on_enter(
     fx: &Fixture,
     intake: &Intake,
     session: &str,
@@ -227,7 +227,7 @@ fn write_on_enter(
                 json!({"type":"user","uuid":"p2-clear-user","sessionId":session,
                     "timestamp":now,"message":{"role":"user","content":body.lock().unwrap().clone()}}),
                 json!({"type":"assistant","uuid":"p2-clear-answer","sessionId":session,
-                    "timestamp":now,"message":{"id":"p2-clear-answer","role":"assistant",
+                    "apiBlockIndex":0,"timestamp":now,"message":{"id":"p2-clear-answer","role":"assistant",
                         "content":[{"type":"text","text":"the cleared session answered"}],"stop_reason":"end_turn"}}),
                 json!({"type":"system","subtype":"turn_duration","sessionId":session,"timestamp":now}),
             ]);
@@ -504,16 +504,19 @@ fn a_verified_clear_waits_for_its_held_attempts_own_unwind_pg() {
             host::channel_accepts(CHANNEL),
             "the held attempt still has its O observer"
         );
-        // The gate retains the exact token and durable row captured at the real late entry.
-        intake
-            .mailbox
-            .restore_active_turn(
-                token.clone(),
-                UserId::new(original.author_id),
-                MessageId::new(original.message_id),
-            )
-            .await;
-        inflight::save_inflight_state(&row).unwrap();
+        tokio::time::timeout(LIMIT, async {
+            loop {
+                if intake.mailbox.has_active_turn().await == Ok(false)
+                    && inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL)
+                        .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the actual held attempt finishes its initial cleanup");
         let session = uuid();
         let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
             fx.cwd.path(),
@@ -524,6 +527,21 @@ fn a_verified_clear_waits_for_its_held_attempts_own_unwind_pg() {
         let (retried, release) = dispatch::OwnerTurn::pause_late(CHANNEL);
         let heads = write_on_enter(&fx, &intake, &session, &path, true);
         assert_eq!(awaited(&fx, &nonce, &session).await, path);
+        // Hold the captured episode after clear's own cleanup, so that cleanup cannot release it.
+        intake
+            .mailbox
+            .restore_active_turn(
+                token.clone(),
+                UserId::new(original.author_id),
+                MessageId::new(original.message_id),
+            )
+            .await;
+        inflight::save_inflight_state(&row).unwrap();
+        assert_eq!(intake.mailbox.has_active_turn().await, Ok(true));
+        assert!(
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL)
+                .is_some_and(|live| live.turn_nonce == row.turn_nonce)
+        );
         let since = std::time::Instant::now();
         for _ in 0..2 {
             let (_, observed) =

@@ -338,10 +338,54 @@ fn held_front(
 }
 
 #[cfg(test)]
+type DriveResults = std::collections::HashMap<u64, Vec<String>>;
+#[cfg(test)]
+static DRIVE_RESULTS: std::sync::LazyLock<Mutex<DriveResults>> =
+    std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+pub(super) fn note_drive_result(channel: u64, result: &Result<(), String>) {
+    DRIVE_RESULTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(channel)
+        .or_default()
+        .push(format!("{result:?}"));
+}
+
+#[cfg(test)]
+pub(super) fn observe_settlement(channel: u64, previous: Option<Owed>) -> Option<Owed> {
+    previous.map(|previous| {
+        let observed: Owed = std::sync::Arc::new(move || {
+            let previous = previous.clone();
+            Box::pin(async move {
+                previous().await;
+                DRIVE_RESULTS
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .entry(channel)
+                    .or_default()
+                    .push("loop-settled".into());
+            })
+        });
+        observed
+    })
+}
+
+#[cfg(test)]
 mod probes {
     use super::*;
 
     impl OwnerTurn {
+        pub(in crate::services::discord) fn drive_results(channel: u64) -> Vec<String> {
+            DRIVE_RESULTS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&channel)
+                .cloned()
+                .unwrap_or_default()
+        }
+
         #[cfg(test)]
         pub(in crate::services::discord) fn probes(channel: u64) -> (usize, usize) {
             COUNTS

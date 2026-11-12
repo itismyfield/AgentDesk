@@ -247,6 +247,8 @@ pub(in crate::services::discord) fn owner_drive(
                 Ok(false) => idle(front).await,
                 Err(unreachable) => Err(format!("{unreachable:?}")),
             };
+            #[cfg(test)]
+            owned_busy::note_drive_result(channel, &result);
             if synthetic && result.as_ref().err().map(String::as_str) == Some(START_WAITS) {
                 let held = original.clone();
                 mailbox
@@ -305,7 +307,8 @@ pub(in crate::services::discord) fn owner_drive(
         settled
     });
     #[cfg(test)]
-    let settled = tests::idle::observe_settlement(channel, settled);
+    let settled =
+        owned_busy::observe_settlement(channel, tests::idle::observe_settlement(channel, settled));
     std::sync::Arc::new(Drive {
         mailbox,
         channel,
@@ -1083,7 +1086,7 @@ pub(super) fn execute_owned(
     {
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux);
     }
-    let registered = (|| {
+    let registered = owned_busy::late(&turn, origin, &mailbox, claim.front(), || {
         let live = read.unwrap_or_else(|| {
             matches!(turn.host, TurnHost::Tmux)
                 && pane_liveness(session) == PaneLiveness::Live
@@ -1115,7 +1118,7 @@ pub(super) fn execute_owned(
                 Registration::read_as(mailbox.clone(), kind, at, front, (observer, read))
             }
         }
-    })();
+    });
     match registered {
         Ok(owner) => execute_front(turn, sender, claim, owner, settled),
         Err(error) => {

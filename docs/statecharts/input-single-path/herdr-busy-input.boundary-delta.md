@@ -123,3 +123,10 @@ tmux의 hook-free/legacy source 승인 조건은 이번에 Herdr의 stricter non
 다음 단계에 권고하는 입력은 기존 InputTarget/InputTransport 경계 확장과 공통 ClaudeBusy op 계약을 고정하는 것이다. 원 설계의 FrontClaim/physical lease/Held/Enter-terminal/receipt 재사용과 P2 early/clear 수용 기준은 유지한다. Herdr Core 구현과 #7583 전체 호스트 추상화는 계속 범위 밖이다.
 
 최대 13 prod/+850은 두 조각 누적 PLAN으로 승인됐다. Slice1의 행동 보존 리뷰 뒤에만 Slice2를 활성화한다. PLAN +1200 및 prod30/+1500은 유지한다. raw host 분기 이동이나 generic run_legacy로 안전 원자성을 희생하는 대체는 채택하지 않는다. P2 문서·모델 보완은 같은 docs-only 커밋에 남기며 구현 완료로 보고하지 않는다.
+
+
+## A안 — 공개 Idle 위임 승인 (2026-11-13)
+
+[주 설계 A안 절](herdr-busy-input.design.md#a안--busy-strict-권한과-공개-idle-위임-분리-2026-11-13-승인)을 현재 승인 경계로 따른다. Busy의 strict pin/observer/physical-target 계약을 유지하면서 public B1 Proof/reserve/current의 검증 결과만 Idle 위임에 쓴다. 판독 reservation은 pre-key 반환하고 기존 Idle driver가 실제 송신을 다시 준비한다. 같은 owner/target/front/generation/nonce의 Held 재관측도 현재 공개 Idle 근거로만 깨우며 UnknownKeep/discard 원문은 부활하지 않는다. producer 변경으로 후속 hook0을 보완하는 B안은 별도 검토로 보류했다. 새 production 파일·trait·flag는 추가하지 않는다.
+
+기존60 모델은 그대로이고 [A안 별도 projection](herdr-cold-idle.report.md)이 cold pin0+validIdle+hook0, stale proof/reservation, 같은 owner 재관측을 검사한다. 최종 Rust 동작·cap 판정은 구현 보고서의 증거와 구분한다.

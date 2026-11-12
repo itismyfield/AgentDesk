@@ -1,0 +1,22 @@
+---
+title: "pin 없이 공개 Idle 증거로 기존 입력 위임"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the HealthyIdleProgress bug
+    lg1: Repeats forever, so HealthyIdleProgress breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: pin0, 현재 준비 근거 확인
+  s1: 공개 Idle 증거 관측
+  s2: 같은 원문 보류
+  s3: 같은 원문 보류 표시
+  [*] --> s0
+  s0 --> s1: 공개 B1 근거 판독
+  s1 --> s2: 같은 proof 예약 또는 보류
+  s2 --> s3: 보류 표시
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 repeats

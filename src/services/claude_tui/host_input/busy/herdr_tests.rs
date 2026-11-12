@@ -308,3 +308,65 @@ fn a_bound_observation_requires_this_accounts_node_and_runtime_owner() {
     }
     assert!(rig.sends().is_empty());
 }
+
+#[test]
+fn an_idle_relay_does_not_delegate_a_busy_input_source() {
+    use crate::services::claude_tui::readiness;
+    let fx = BindingFixture::new();
+    let source = live_source(&fx);
+    let rig = HerdrRig::start();
+    let registry = rig.registry_on_this_thread();
+    pane(&rig);
+    let context: tui_prompt_dedupe::binding_context::BindingContext =
+        serde_json::from_value(json!({
+            "schema":1,"provider":"claude","created_at":chrono::Utc::now(),
+            "execution_nonce":N1,"tmux_session":LOGICAL,"channel_id":CHANNEL,
+            "owner_runtime_root":crate::services::tmux_common::current_tmux_owner_marker(),
+            "expected_native_session_id":source.session_id,"launch_mode":"resume",
+            "provider_root":fx.root.path()
+        }))
+        .unwrap();
+    tui_prompt_dedupe::binding_context::PreparedIncarnation::create(context).unwrap();
+    let relay = fx.root.path().join("idle-relay.jsonl");
+    std::fs::File::create(&relay).unwrap();
+    let mut projection = tui_prompt_dedupe::runtime_binding_for_tmux_session(LOGICAL).unwrap();
+    projection.relay_output_path = Some(relay.display().to_string());
+    tui_prompt_dedupe::register_tmux_runtime_binding(LOGICAL, projection);
+    assert!(readiness::observe(LOGICAL, Some(&relay)).is_none());
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&relay)
+        .unwrap();
+    for row in [
+        json!({"type":"user","sessionId":source.session_id,"timestamp":chrono::Utc::now(),
+            "message":{"role":"user","content":"the relay's prior input"}}),
+        json!({"type":"assistant","sessionId":source.session_id,"timestamp":chrono::Utc::now(),
+            "apiBlockIndex":0,"message":{"id":"relay-answer","role":"assistant",
+            "content":[{"type":"text","text":"the relay's prior answer"}]}}),
+        json!({"type":"system","subtype":"turn_duration","sessionId":source.session_id,
+            "timestamp":chrono::Utc::now()}),
+    ] {
+        writeln!(file, "{row}").unwrap();
+    }
+    assert!(
+        readiness::observe(LOGICAL, None).is_some(),
+        "the other relay has a valid public Idle proof"
+    );
+    assert!(readiness::observe(LOGICAL, Some(&source.path)).is_none());
+    assert!(
+        crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&source.path).is_busy()
+    );
+    let observation =
+        BusyOperation::observe_hosted(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+    assert_eq!(
+        observation.state(),
+        BusyState::Held,
+        "a different relay's Idle proof cannot delegate this busy input path"
+    );
+    assert_eq!(
+        current(observation.context.as_ref().unwrap()).unwrap().id,
+        source
+    );
+    assert!(rig.sends().is_empty());
+    drop(registry);
+}

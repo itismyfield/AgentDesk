@@ -208,7 +208,7 @@ impl BusyObservation {
         let context = self.context.clone();
         Box::new(
             move || match context.as_ref().map(|context| context.read()) {
-                Some(read) if read.state == BusyState::Busy || read.cleared => Screen::Ready,
+                Some(read) if read.state == BusyState::Busy || read.idle_verified => Screen::Ready,
                 _ => Screen::Unknown,
             },
         )

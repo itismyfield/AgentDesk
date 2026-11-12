@@ -329,3 +329,24 @@ Herdr는 본문 paste+Enter를 이미 지원하며 owner용 busy leaf도 이미 
 ## 원시 자료
 
 외부 조사 logs 폴더에 `pr-6692.json`, `pr-6644.json`, `issue-5845.json`, `issue-8077.json`, `issue-8080.json`, `issue-8113.json`, `issue-8114.json`을 남겼다. 원문 코드는 [#6692 busy-inject 스냅샷 L221–L237](https://github.com/itismyfield/AgentDesk/blob/4efe552ec80b7a881fc4326b076d3c65df5cc96c/src/services/claude_tui/busy_inject.rs#L221-L237)과 [#8080 transcript readiness 설계 스냅샷 L58–L60](https://github.com/itismyfield/AgentDesk/blob/b63a97c5115bf469c85996242d61732557122427/docs/statecharts/input-single-path/transcript-readiness.design.md#L58-L60)에서 확인할 수 있다. cargo/프로덕션 테스트는 실행하지 않았다.
+
+
+## A안 — Busy strict 권한과 공개 Idle 위임 분리 (2026-11-13 승인)
+
+코디네이터가 `design-delta-impl4-idle.md`의 최소 A안을 승인했다. 기준 source는 `6d44fde3c30fa107e33d3cfc4644de4a35f135a4`다. 정상 cold launch는 authentic hook→Stat/Bound→native hard terminal/Idle 순서와 등록 뒤 hook0에 도달할 수 있다. Busy 전용 verified pin을 먼저 요구하면 공개 B1 Idle Proof로 허용되는 이 입력도 Held로 소비하므로 진행 회귀가 된다. pin0을 Busy 쓰기 권한으로 바꾸지 않고 기존 Idle 위임을 복원한다.
+
+| 경계 | A안이 소비하는 근거와 처분 | 보존하는 계약 |
+|---|---|---|
+| Busy 승인 | captured exact target/nonce, 실제 O owner/writer 수용, global+nonce current pin, runtime/source/opened identity 모두 필요 | pin0/nativeBusy·Unknown·wrong nonce·moved target은 key0 Held. Busy pin 조건 완화0 |
+| Idle 분류 | 기존 public `readiness::observe`의 opaque Proof→`reserve`→`Reservation::current`를 사용한다. 분류용 pre-key reservation은 `not_sent`로 반환한다 | private Source 공개·복제0. stale proof/target/current mismatch는 Held. 분류가 Busy paste나 first-key를 허가하지 않음 |
+| Idle 실행 | 분류가 현재 Idle을 위임하면 기존 Idle driver가 새 준비·reservation·current·first-key·전송·receipt 계약을 수행 | 분류용 proof/token을 실제 송신 권한으로 재사용0. transport 기록과 native receipt를 구분 |
+| Held 재관측 | 같은 owner/target/front/generation/nonce의 아직 소유된 pre-key 원문만 새 공개 Idle 근거로 재평가 wake | 초기 Held 결과를 영구 cache하지 않음. UnknownKeep·clear-discard original 부활0. verified awaited_clear 기존 위임 유지 |
+| S1/producer | 기존 공통 Busy operation/route, physical writer, tmux adapter, B1/2b publisher를 그대로 소비 | 새 production 파일·trait·flag·Herdr Core 상태0. hook 합성·metadata 사전 생성·수동 pin 발행0 |
+
+B1 공개 seam의 조사 좌표는 `readiness/mod.rs:61` Proof, `:66` observe, `:225` reserve, `:257` current, `:270` not_sent다. reserve가 pending/revision을 바꾸므로 판독만 하다가 reservation을 남기면 기존 Idle driver의 새 reserve를 막는다. 같은 proof의 현재성을 검사하고 pre-key 분류 token을 돌려준 뒤, driver가 자기 증거를 다시 얻는 경계다. 실제 함수·파일좌표는 구현 레인의 최종 source에서 재확인한다.
+
+B안(등록 전 hook과 이후 Stat의 durable 관계를 producer에 새로 보존해 후속 hook 없이 pin 발행)은 보류한다. nonce/UUID/path/dev/ino/first-record, NotDurable, rotation/cursor 계약과 B1/2b 변경 승인이 별도로 필요하기 때문이다. A안은 Busy producer 의미를 수정하지 않는다.
+
+A안 크기 승인은 ownS2+675 + S1+162에 +40~70을 더한 +877~907 예상이다(`CAP_MARGIN i8114 907/850`). +935(기존+850의10%)를 넘으면 PLAN_READY에서 멈춘다. 최종 실제 cap·Rust RED/GREEN·뮤턴트·static gate는 구현 레인의 별도 보고서가 맡는다.
+
+새 [cold Idle 모델 보고서](herdr-cold-idle.report.md)는 pin0+후속hook0의 Before/Fixed 진행, Busy/Unknown/nonce/target 보류, same front/generation 재관측과 stale Proof/current 거절을 검사한다. 기존60cfg와 expected RED27은 바꾸지 않는다. 모델은 Rust 실행 성공을 뜻하지 않으며, 실제 cold/late/회복 시험의 동일 원문·키수·정산 증거가 필요하다.

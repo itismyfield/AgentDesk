@@ -11,7 +11,8 @@ use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
 use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyView};
 use crate::services::tui_o::writer::host::{
-    self, HostParts, ManagedWriterHandle, test_io::TestHost,
+    self, HostParts, ManagedWriterHandle,
+    test_io::{Alarms, TestHost},
 };
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, OwnerFront, PendingQueueItem};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
@@ -59,9 +60,14 @@ struct Intake {
     mailbox: ChannelMailboxHandle,
     runtime: tokio::runtime::Runtime,
     hosts: Vec<ManagedWriterHandle>,
+    alarms: Alarms,
     server: tokio::task::JoinHandle<()>,
     _api: discord::admin_host_guard::tests::Recorder,
-    _config: Guard,
+    _config: (
+        Guard,
+        crate::config::session_hosts::ForcedSessionHosts,
+        crate::config_live_reload::TestLiveGuard,
+    ),
     _routing: Guard,
     _tmux: Guard,
     _boot: test_override::ChannelsGuard,
@@ -192,6 +198,7 @@ impl Intake {
     }
 
     fn with_expected_pin(fx: &Fixture, started: &Started, expected: ExpectedPin) -> Self {
+        let live_guard = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
         let label = fx.logical().strip_prefix("AgentDesk-claude-").unwrap();
         let config: crate::config::Config = serde_json::from_value(json!({
             "server": {}, "providers": {"claude": {"runtime": "tui"}},
@@ -220,14 +227,13 @@ impl Intake {
         .unwrap();
         std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
         let no_tmux = Guard::prepend_path_after_shared_test_env_lock(fx.cwd.path());
-        crate::config::session_hosts::install(&config).unwrap();
+        let session_hosts_guard = crate::config::session_hosts::force_config_for_test(&config);
         crate::config_live_reload::install(config.clone());
-        crate::services::provider_hosting::install_provider_hosting_config(&config);
-        crate::services::tui_o::channel_policy::install(&config).unwrap();
         let boot = BootChannels::validate(&config)
             .unwrap()
             .adopted(Adoption::Pending);
         let worker_boot = boot.clone();
+        let worker_config = config.clone();
         let on_thread = fx.rig.thread_installer(NODE, KEY, fx.rig.socket(), SESSION);
         let log_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -243,6 +249,9 @@ impl Intake {
                         Box::new(test_override::force_boot(worker_boot.clone()))
                             as Box<dyn std::any::Any>,
                         Box::new(open_admission()),
+                        Box::new(crate::config::session_hosts::force_config_for_test(
+                            &worker_config,
+                        )),
                     ]);
                 });
             })
@@ -250,9 +259,8 @@ impl Intake {
             .build()
             .unwrap();
         let boot_guard = test_override::force_boot(boot);
-        let (shared, mailbox, hosts, server, api) = runtime.block_on(async {
+        let (shared, mailbox, hosts, server, api, alarms) = runtime.block_on(async {
             let api = discord::admin_host_guard::tests::Recorder::start().await;
-            discord::internal_api::init(api.port, Some(fx.pool.clone()));
             let mock = discord_mock::DiscordMockState::new();
             mock.allow_channel(CHANNEL);
             mock.name_channel(CHANNEL, label);
@@ -346,7 +354,7 @@ impl Intake {
                 discord::queue_persistence_context(&shared, &ProviderKind::Claude, channel);
             mailbox.v2_ensure_channel(&pending, channel).await.unwrap();
             assert_eq!(mailbox.has_active_turn().await, Ok(false));
-            (shared, mailbox, hosts, server, api)
+            (shared, mailbox, hosts, server, api, alarms)
         });
         Self {
             shared,
@@ -354,12 +362,24 @@ impl Intake {
             runtime,
             hosts,
             server,
+            alarms,
             _api: api,
-            _config: configured,
+            _config: (configured, session_hosts_guard, live_guard),
             _routing: routing,
             _tmux: no_tmux,
             _boot: boot_guard,
         }
+    }
+
+    fn writer_state(&self) -> String {
+        let readiness = host::process_readiness();
+        let live: Vec<_> = self.hosts.iter().map(ManagedWriterHandle::live).collect();
+        format!(
+            "ready={}, hosted={}, live={live:?}, alarms={:?}",
+            readiness.is_ready(CHANNEL),
+            readiness.is_hosted(CHANNEL),
+            self.alarms.0.lock().unwrap()
+        )
     }
 
     async fn front(&self) -> OwnerFront {
@@ -394,18 +414,17 @@ impl Intake {
         self.mailbox
             .restore_active_turn(token.clone(), UserId::new(7), MessageId::new(MESSAGE - 1))
             .await;
+        let key = discord::adk_session::turn_session_key(
+            &self.shared,
+            ChannelId::new(CHANNEL),
+            &ProviderKind::Claude,
+        )
+        .await
+        .expect("the holder uses the actual canonical key");
         let mut row = inflight::InflightTurnState::new(
             ProviderKind::Claude,
             CHANNEL,
-            Some(
-                discord::adk_session::turn_session_key(
-                    &self.shared,
-                    ChannelId::new(CHANNEL),
-                    &ProviderKind::Claude,
-                )
-                .await
-                .expect("the holder uses the actual canonical key"),
-            ),
+            Some("busy-entry-holder".into()),
             7,
             MESSAGE - 1,
             0,
@@ -416,9 +435,20 @@ impl Intake {
             None,
             0,
         );
+        row.session_key = Some(key.clone());
         row.turn_nonce = token.turn_nonce().map(str::to_owned);
         row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
         inflight::save_inflight_state(&row).unwrap();
+        let saved = inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL)
+            .expect("the managed holder is durable");
+        assert_eq!(saved.channel_id, CHANNEL);
+        assert_eq!(saved.user_msg_id, MESSAGE - 1);
+        assert_eq!(saved.session_key.as_deref(), Some(key.as_str()));
+        assert_eq!(saved.turn_nonce.as_deref(), token.turn_nonce());
+        assert_eq!(saved.runtime_kind, row.runtime_kind);
+        assert_eq!(saved.session_id.as_deref(), Some(started.session.as_str()));
+        assert_eq!(saved.tmux_session_name.as_deref(), Some(fx.logical()));
+        assert_eq!(saved.output_path.as_deref(), started.path.to_str());
         assert_eq!(self.mailbox.has_active_turn().await, Ok(true));
     }
 }
@@ -427,6 +457,18 @@ impl Drop for Intake {
     fn drop(&mut self) {
         let hosts = std::mem::take(&mut self.hosts);
         self.runtime.block_on(async {
+            use crate::services::discord::queue_io::input_owner::held_watch;
+            held_watch::arm(
+                CHANNEL,
+                Box::new(|| crate::services::claude_tui::busy_inject::Screen::Gone),
+            );
+            let (_, ended) = held_watch::watch_observed(source_retry_drive(self), MESSAGE);
+            let ended = tokio::time::timeout(LIMIT, ended).await.unwrap().unwrap();
+            assert_eq!(
+                ended.verdict,
+                held_watch::Verdict::End,
+                "the fixture ends its global channel watch before dropping its runtime"
+            );
             for handle in hosts {
                 tokio::time::timeout(LIMIT, handle.stop_and_join())
                     .await
@@ -451,8 +493,8 @@ fn a_managed_herdr_busy_input_observes_early_once_without_a_late_read_pg() {
     append(
         &started.path,
         &[
-            json!({"type":"user","sessionId":started.session,"message":{"role":"user","content":"keep working"}}),
-            json!({"type":"assistant","sessionId":started.session,"message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}),
+            json!({"type":"user","uuid":uuid(),"sessionId":started.session,"message":{"role":"user","content":"keep working"}}),
+            json!({"type":"assistant","uuid":uuid(),"apiBlockIndex":0,"sessionId":started.session,"message":{"id":"i8114-working-message","role":"assistant","content":[{"type":"text","text":"working"}]}}),
         ],
     );
     let screen = include_str!(concat!(
@@ -532,12 +574,15 @@ fn an_early_new_herdr_execution_cannot_borrow_its_old_global_pin_pg() {
     let before = fx.rig.sends().len();
     let _registry = fx.rig.registry_on_this_thread();
     let _admission = open_admission();
+    let gate = crate::services::discord::router::intake_gate::busy_inject::test_support::open_gate(
+        CHANNEL,
+    );
     let intake = Intake::new(&fx, &started);
     append(
         &started.path,
         &[
-            json!({"type":"user","sessionId":started.session,"message":{"role":"user","content":"keep working"}}),
-            json!({"type":"assistant","sessionId":started.session,"message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}),
+            json!({"type":"user","uuid":uuid(),"sessionId":started.session,"message":{"role":"user","content":"keep working"}}),
+            json!({"type":"assistant","uuid":uuid(),"apiBlockIndex":0,"sessionId":started.session,"message":{"id":"i8114-working-message","role":"assistant","content":[{"type":"text","text":"working"}]}}),
         ],
     );
     let screen = include_str!(concat!(
@@ -682,6 +727,7 @@ fn an_early_new_herdr_execution_cannot_borrow_its_old_global_pin_pg() {
         );
         assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     });
+    drop(gate);
 }
 
 #[derive(Clone, Copy)]
@@ -697,7 +743,6 @@ fn assert_registered_source_unverified(
     hosted: &crate::services::turn_host::TurnHost,
 ) {
     use crate::services::agent_protocol::RuntimeHandoffKind;
-    use crate::services::claude_tui::host_input::busy::{BusyOperation, BusyState};
     use crate::services::tui_prompt_dedupe::{self, binding_events};
     use std::os::unix::fs::MetadataExt;
 
@@ -760,10 +805,10 @@ fn assert_registered_source_unverified(
         crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&started.path),
         crate::services::tui_turn_state::TuiTurnState::Idle
     );
-    assert_eq!(
-        BusyOperation::observe_hosted(CHANNEL, fx.logical(), hosted, &shared.token_hash).state(),
-        BusyState::Held,
-        "the same strict observer holds an otherwise ready unverified registration"
+    assert!(
+        crate::services::claude_tui::readiness::observe(fx.logical(), Some(&started.path))
+            .is_some(),
+        "the pinless source has the existing public Idle proof"
     );
 }
 
@@ -795,7 +840,7 @@ async fn source_input_settled(
     original: &PendingQueueItem,
     heads: &Arc<Mutex<Vec<Value>>>,
 ) -> Value {
-    tokio::time::timeout(LIMIT, async {
+    let finished = tokio::time::timeout(LIMIT, async {
         loop {
             let attempted = heads.lock().unwrap().iter().find_map(|head| {
                 (head["original"]["message_id"] == original.message_id)
@@ -823,8 +868,87 @@ async fn source_input_settled(
             tokio::task::yield_now().await;
         }
     })
-    .await
-    .expect("the unchanged original settles through the production source watch")
+    .await;
+    match finished {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let (front, snapshot) = intake
+                .mailbox
+                .v2_request(|slot| {
+                    let owner = slot.as_ref().ok_or("no owner")?;
+                    let front = owner.front().map(|front| {
+                        json!({"ticket":front.0,
+                    "message":front.1.message_id,"generation":front.1.queued_generation})
+                    });
+                    Ok((front, owner.json()?))
+                })
+                .await
+                .unwrap();
+            let active = intake.mailbox.has_active_turn().await;
+            let row = inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL)
+                .map(|row| (row.user_msg_id, row.turn_nonce, row.session_key));
+            panic!(
+                "source-watch settlement {error:?}: front={front:?}, snapshot={snapshot}, active={active:?}, row={row:?}, probes={:?}, writer={}, heads={:?}, drive_results_all={:?}",
+                super::super::OwnerTurn::probes(CHANNEL),
+                intake.writer_state(),
+                heads.lock().unwrap(),
+                super::super::OwnerTurn::drive_results(CHANNEL)
+            );
+        }
+    }
+}
+
+fn assert_idle_tmux_queries(logical: &str) {
+    let path = crate::config::runtime_root()
+        .unwrap()
+        .join("i8114-tmux.calls");
+    let calls =
+        std::fs::read_to_string(path).expect("the existing Idle path records its tmux reads");
+    let expected = format!("-u has-session -t ={logical}:");
+    let mut sessions = Vec::new();
+    let mut versions = 0;
+    for call in calls.lines() {
+        if call == "-u -V" {
+            versions += 1;
+        } else {
+            assert_eq!(
+                call, expected,
+                "Idle may only observe its exact logical session: {calls}"
+            );
+            sessions.push(call);
+        }
+    }
+    assert_eq!(
+        sessions,
+        [expected.as_str(), expected.as_str()],
+        "the two existing Idle observations keep their exact order and target: {calls}"
+    );
+    eprintln!(
+        "isolated Idle tmux queries: has-session={}, version={versions}; {calls}",
+        sessions.len()
+    );
+}
+
+async fn idle_turn_unwound(intake: &Intake) {
+    let finished = tokio::time::timeout(LIMIT, async {
+        while intake.mailbox.has_active_turn().await != Ok(false) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if finished.is_err() {
+        let token = intake
+            .mailbox
+            .cancel_token()
+            .await
+            .unwrap()
+            .and_then(|token| token.turn_nonce().map(str::to_string));
+        let row = inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL)
+            .map(|row| (row.user_msg_id, row.turn_nonce));
+        panic!(
+            "the submitted native terminal did not unwind its Idle turn: token={token:?}, row={row:?}"
+        );
+    }
 }
 
 #[test]
@@ -841,14 +965,17 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
     assert_eq!(before, 2);
     let registry = fx.rig.registry_on_this_thread();
     let admission = open_admission();
+    let gate = crate::services::discord::router::intake_gate::busy_inject::test_support::open_gate(
+        CHANNEL,
+    );
     let intake = Intake::with_expected_pin(&fx, &started, ExpectedPin::Registered);
     append(
         &started.path,
         &[
-            json!({"type":"user","sessionId":started.session,
+            json!({"type":"user","uuid":uuid(),"sessionId":started.session,
                 "message":{"role":"user","content":"keep working"}}),
-            json!({"type":"assistant","sessionId":started.session,
-                "message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}),
+            json!({"type":"assistant","uuid":uuid(),"apiBlockIndex":0,"sessionId":started.session,
+                "message":{"id":"i8114-working-message","role":"assistant","content":[{"type":"text","text":"working"}]}}),
         ],
     );
     assert!(
@@ -876,9 +1003,35 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
             .unwrap()
             .push(snapshot["head_injection"].clone());
     });
-    let original = intake.runtime.block_on(async {
+    let (ticket, original) = intake.runtime.block_on(async {
+        let key = discord::adk_session::turn_session_key(
+            &intake.shared,
+            ChannelId::new(CHANNEL),
+            &ProviderKind::Claude,
+        )
+        .await
+        .unwrap();
+        let hosted = crate::services::turn_host::for_turn(
+            Some(&fx.pool),
+            &ProviderKind::Claude,
+            CHANNEL,
+            Some(&key),
+        )
+        .await;
+        assert_eq!(
+            BusyOperation::observe_hosted(
+                CHANNEL,
+                fx.logical(),
+                &hosted,
+                &intake.shared.token_hash
+            )
+            .state(),
+            BusyState::Held,
+            "the same strict observer holds the unverified Busy source"
+        );
         let counts = dispatch::OwnerTurn::probes(CHANNEL);
         let front = intake.front().await;
+        let ticket = front.0.clone();
         let original = front.1.clone();
         let (entered, resume) =
             crate::services::discord::router::intake_dispatch::after_upload_take(ChannelId::new(
@@ -929,13 +1082,30 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
                 .unwrap()
                 .is_none()
         );
-        assert!(host::channel_accepts(CHANNEL));
+        assert!(host::channel_accepts(CHANNEL), "{}", intake.writer_state());
         assert!(
             crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&started.path)
                 .is_busy()
         );
         assert_eq!(fx.rig.sends().len(), before);
-        original
+        let same = intake
+            .mailbox
+            .v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.front()))
+            .await
+            .unwrap()
+            .expect("the held original still leads");
+        assert_eq!(same.0, ticket);
+        assert_eq!(same.1.message_id, original.message_id);
+        assert_eq!(same.1.queued_generation, original.queued_generation);
+        (ticket, original)
+    });
+    let drives_before = dispatch::OwnerTurn::drive_results(CHANNEL).len();
+    let settled_before = dispatch::OwnerTurn::drive_results(CHANNEL)
+        .iter()
+        .filter(|result| result.as_str() == "loop-settled")
+        .count();
+    let next_look = intake.runtime.block_on(async {
+        held_watch::watch_observed(source_retry_drive(&intake), original.message_id).1
     });
     // The authentic ingress owns its own runtime; send outside Intake's block_on.
     assert_eq!(
@@ -980,10 +1150,34 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
             BusyState::Busy,
             "pin promotion admits the still-busy native source"
         );
+        let looked = tokio::time::timeout(LIMIT, next_look).await;
+        let snapshot = intake.mailbox.v2_request(|slot| {
+            let owner = slot.as_ref().ok_or("no owner")?;
+            let front = owner.front().map(|front| json!({"ticket":front.0,
+                "message":front.1.message_id,"generation":front.1.queued_generation}));
+            Ok((front, owner.json()?))
+        }).await.unwrap();
+        let drives = dispatch::OwnerTurn::drive_results(CHANNEL);
+        eprintln!("promotion after-hook watch={:?}, expected_ticket={ticket:?}, owner={snapshot:?}, probes={:?}, writer={}, heads={}, drive_results={:?}",
+            looked.as_ref().map(|result| result.as_ref().map(|look| (look.generation, look.verdict))),
+            dispatch::OwnerTurn::probes(CHANNEL), intake.writer_state(), heads.lock().unwrap().len(),
+            &drives[drives_before..]);
+        let looked = looked.expect("the production watch reobserves its promoted source").unwrap();
+        assert_eq!(looked.verdict, Verdict::Wake, "the promoted source wakes its unchanged front");
         source_input_settled(&intake, &original, &heads).await;
         assert_eq!(fx.rig.sends().len() - before, 2);
         assert_eq!(heads.lock().unwrap().len(), 2);
         assert_eq!(intake.mailbox.has_active_turn().await, Ok(true));
+        tokio::time::timeout(LIMIT, async {
+            loop {
+                let results = dispatch::OwnerTurn::drive_results(CHANNEL);
+                if results.iter().filter(|result| result.as_str() == "loop-settled").count() > settled_before
+                    && results[drives_before..].windows(2).any(|pair| pair[0] == "Ok(())" && pair[1] == "loop-settled") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the production drive observes no front after this successful handoff");
         let counts = dispatch::OwnerTurn::probes(CHANNEL);
         let next = intake.front_for(MESSAGE + 1).await;
         let next_original = next.1.clone();
@@ -1033,7 +1227,7 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
                 }
             }
         }
-        assert!(host::channel_accepts(CHANNEL));
+        assert!(host::channel_accepts(CHANNEL), "{}", intake.writer_state());
         assert_eq!(intake.mailbox.has_active_turn().await, Ok(true));
         assert!(
             crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&started.path)
@@ -1043,9 +1237,255 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
         let tmux = crate::config::runtime_root()
             .unwrap()
             .join("i8114-tmux.calls");
-        assert!(std::fs::read_to_string(tmux).unwrap_or_default().is_empty());
+        let tmux_calls = std::fs::read_to_string(tmux).unwrap_or_default();
+        assert!(tmux_calls.is_empty(), "isolated tmux calls: {tmux_calls}");
     });
     drop(intake);
+    drop(gate);
+    drop(admission);
+    drop(registry);
+}
+
+#[test]
+fn a_pinless_idle_input_delegates_without_another_authentic_hook_pg() {
+    use crate::services::claude_tui::readiness;
+    use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
+    use crate::services::tui_prompt_dedupe::binding_events;
+
+    let fx = Fixture::new("pinless-idle-no-later-hook", None);
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let before = fx.rig.sends().len();
+    assert_eq!(before, 2);
+    let registry = fx.rig.registry_on_this_thread();
+    let admission = open_admission();
+    let gate = crate::services::discord::router::intake_gate::busy_inject::test_support::open_gate(
+        CHANNEL,
+    );
+    let intake = Intake::with_expected_pin(&fx, &started, ExpectedPin::Registered);
+    let (pin, history) =
+        binding_events::claude_history(CHANNEL, fx.logical(), Some(&nonce)).unwrap();
+    assert!(pin.is_none());
+    assert!(history.complete && history.awaiting.is_none());
+    assert!(history.current.unwrap().pin.is_none());
+    let proof = readiness::observe(fx.logical(), Some(&started.path))
+        .expect("the real cold source has the existing B1 Idle proof");
+    let reservation = readiness::reserve(proof).expect("that exact public proof reserves");
+    assert!(
+        reservation.current(),
+        "the source remains current through reservation"
+    );
+    reservation.not_sent();
+    assert!(readiness::observe(fx.logical(), Some(&started.path)).is_some());
+    let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
+    intake.runtime.block_on(async {
+        let counts = dispatch::OwnerTurn::probes(CHANNEL);
+        let front = intake.front().await;
+        let original = front.1.clone();
+        let result = tokio::time::timeout(
+            LIMIT,
+            dispatch::start_idle_for_test(intake.shared.clone(), ChannelId::new(CHANNEL), front),
+        )
+        .await
+        .expect("the actual intake terminates");
+        assert_eq!(
+            result,
+            Ok(()),
+            "a valid existing Idle proof delegates the pinless input without a later hook"
+        );
+        let after = dispatch::OwnerTurn::probes(CHANNEL);
+        assert_eq!(
+            after.0 - counts.0,
+            1,
+            "the actual early entry inspected this input"
+        );
+        source_input_settled(&intake, &original, &heads).await;
+        let sends = fx.rig.sends();
+        assert_eq!(
+            sends.len() - before,
+            2,
+            "the original is pasted and entered once"
+        );
+        assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
+        assert_eq!(sends[before + 1]["keys"], json!(["enter"]));
+        {
+            let heads = heads.lock().unwrap();
+            assert_eq!(heads.len(), 2);
+            for head in heads.iter() {
+                assert_eq!(head["original"]["message_id"], original.message_id);
+                assert_eq!(
+                    head["original"]["queued_generation"],
+                    original.queued_generation
+                );
+                assert_eq!(head["attempt"]["target"]["execution_nonce"], nonce);
+            }
+        }
+        let (pin, history) =
+            binding_events::claude_history(CHANNEL, fx.logical(), Some(&nonce)).unwrap();
+        assert!(
+            pin.is_none(),
+            "the Idle delegation did not need another authentic hook"
+        );
+        assert!(history.complete && history.awaiting.is_none());
+        assert!(history.current.unwrap().pin.is_none());
+        idle_turn_unwound(&intake).await;
+        assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
+        assert_eq!(
+            crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&started.path),
+            crate::services::tui_turn_state::TuiTurnState::Idle
+        );
+        assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+        assert_idle_tmux_queries(fx.logical());
+    });
+    drop(intake);
+    drop(gate);
+    drop(admission);
+    drop(registry);
+}
+
+#[test]
+fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
+    use crate::services::claude_tui::readiness;
+    use crate::services::discord::queue_io::input_owner::held_watch::{self, Verdict};
+    use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
+    use crate::services::tui_prompt_dedupe::binding_events;
+
+    let fx = Fixture::new("pinless-held-to-idle-no-later-hook", None);
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let before = fx.rig.sends().len();
+    assert_eq!(before, 2);
+    let registry = fx.rig.registry_on_this_thread();
+    let admission = open_admission();
+    let gate = crate::services::discord::router::intake_gate::busy_inject::test_support::open_gate(
+        CHANNEL,
+    );
+    let intake = Intake::with_expected_pin(&fx, &started, ExpectedPin::Registered);
+    append(
+        &started.path,
+        &[
+            json!({"type":"user","uuid":uuid(),"sessionId":started.session,
+                "timestamp":chrono::Utc::now().to_rfc3339(),
+                "message":{"role":"user","content":"keep working"}}),
+            json!({"type":"assistant","uuid":uuid(),"apiBlockIndex":0,"sessionId":started.session,
+                "timestamp":chrono::Utc::now().to_rfc3339(),
+                "message":{"id":"i8114-working-message","role":"assistant","content":[{"type":"text","text":"working"}]}}),
+        ],
+    );
+    assert!(
+        crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&started.path).is_busy()
+    );
+    assert!(readiness::observe(fx.logical(), Some(&started.path)).is_none());
+    let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
+    intake.runtime.block_on(async {
+        let counts = dispatch::OwnerTurn::probes(CHANNEL);
+        let front = intake.front().await;
+        let original = front.1.clone();
+        let result = tokio::time::timeout(
+            LIMIT,
+            dispatch::start_idle_for_test(intake.shared.clone(), ChannelId::new(CHANNEL), front),
+        )
+        .await
+        .expect("the actual Busy admission completes its hold");
+        assert!(result.is_err_and(|error| error.starts_with("NotSent(")));
+        let held_reads = dispatch::OwnerTurn::probes(CHANNEL);
+        assert_eq!((held_reads.0 - counts.0, held_reads.1 - counts.1), (1, 0));
+        assert_eq!(fx.rig.sends().len(), before);
+        assert!(heads.lock().unwrap().is_empty());
+        assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
+        let held = intake
+            .mailbox
+            .v2_request(|slot| slot.as_ref().ok_or("no owner")?.json())
+            .await
+            .unwrap();
+        assert_eq!(held["items"], json!([original]), "{held}");
+        assert!(held["head_injection"].is_null(), "{held}");
+        assert_eq!(held["retained_inputs"], json!([]), "{held}");
+        let operations = intake.shared.turn_view_reconciler.ops();
+        assert!(operations.iter().any(|operation| {
+            operation.add
+                && operation.emoji == '📬'
+                && operation.target.channel_id.get() == CHANNEL
+                && operation.target.message_id.get() == original.message_id
+        }));
+        let drive = source_retry_drive(&intake);
+        let (_, observed) = held_watch::watch_observed(drive, original.message_id);
+        let look = tokio::time::timeout(LIMIT, observed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(look.verdict, Verdict::Keep);
+        assert!(host::channel_accepts(CHANNEL), "{}", intake.writer_state());
+        assert!(readiness::observe(fx.logical(), Some(&started.path)).is_none());
+        assert_eq!(fx.rig.sends().len(), before);
+        assert!(
+            binding_events::pinned_source(CHANNEL, fx.logical())
+                .unwrap()
+                .is_none()
+        );
+
+        // The existing native turn ends; no hook, queue wake or source publication is supplied.
+        append(
+            &started.path,
+            &[
+                json!({"type":"system","subtype":"turn_duration","sessionId":started.session,
+                "timestamp":chrono::Utc::now().to_rfc3339()}),
+            ],
+        );
+        assert_eq!(
+            crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&started.path),
+            crate::services::tui_turn_state::TuiTurnState::Idle
+        );
+        assert!(
+            readiness::observe(fx.logical(), Some(&started.path)).is_some(),
+            "the same pinless source now has its existing public Idle proof"
+        );
+        source_input_settled(&intake, &original, &heads).await;
+        let after = dispatch::OwnerTurn::probes(CHANNEL);
+        assert_eq!(
+            (after.0 - counts.0, after.1 - counts.1),
+            (2, 1),
+            "the held watch retries through actual intake and its Idle owner"
+        );
+        let sends = fx.rig.sends();
+        assert_eq!(
+            sends.len() - before,
+            2,
+            "the original is pasted and entered once"
+        );
+        assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
+        assert_eq!(sends[before + 1]["keys"], json!(["enter"]));
+        {
+            let heads = heads.lock().unwrap();
+            assert_eq!(heads.len(), 2);
+            for head in heads.iter() {
+                assert_eq!(head["original"]["message_id"], original.message_id);
+                assert_eq!(
+                    head["original"]["queued_generation"],
+                    original.queued_generation
+                );
+                assert_eq!(head["attempt"]["target"]["execution_nonce"], nonce);
+            }
+        }
+        let (pin, history) =
+            binding_events::claude_history(CHANNEL, fx.logical(), Some(&nonce)).unwrap();
+        assert!(
+            pin.is_none(),
+            "the watch consumes public Idle without a later authentic hook"
+        );
+        assert!(history.complete && history.awaiting.is_none());
+        assert!(history.current.unwrap().pin.is_none());
+        idle_turn_unwound(&intake).await;
+        assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
+        assert_eq!(
+            crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&started.path),
+            crate::services::tui_turn_state::TuiTurnState::Idle
+        );
+        assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+        assert_idle_tmux_queries(fx.logical());
+    });
+    drop(intake);
+    drop(gate);
     drop(admission);
     drop(registry);
 }

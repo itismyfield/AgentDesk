@@ -165,15 +165,15 @@ pub(super) struct Context {
 pub(super) struct Reading {
     pub(super) state: BusyState,
     pub(super) source: Option<Source>,
-    pub(super) cleared: bool,
+    pub(super) idle_verified: bool,
 }
 
 impl Reading {
-    fn clear() -> Self {
+    fn idle() -> Self {
         Self {
             state: BusyState::Idle,
             source: None,
-            cleared: true,
+            idle_verified: true,
         }
     }
 
@@ -181,7 +181,7 @@ impl Reading {
         Self {
             state: BusyState::Held,
             source: None,
-            cleared: false,
+            idle_verified: false,
         }
     }
 }
@@ -239,8 +239,8 @@ impl Context {
         if !self.target.execution_alive() {
             return Reading::held();
         }
-        if self.cleared() {
-            return Reading::clear();
+        if self.cleared() || self.idle_ready() {
+            return Reading::idle();
         }
         if crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
             self.channel,
@@ -254,7 +254,7 @@ impl Context {
         crate::services::tmux_common::try_with_tmux_source_authority(&self.logical, |authority| {
             // A clear delegates before a new file exists; no pane socket is read under this lock.
             if self.cleared() {
-                return Some(Reading::clear());
+                return Some(Reading::idle());
             }
             let source = self.current_source(authority)?;
             let state =
@@ -273,11 +273,36 @@ impl Context {
             Some(Reading {
                 state,
                 source: Some(source),
-                cleared: false,
+                idle_verified: false,
             })
         })
         .flatten()
         .unwrap_or_else(Reading::held)
+    }
+
+    // This only delegates; the Idle driver reserves and checks again before its first key.
+    fn idle_ready(&self) -> bool {
+        use crate::services::claude_tui::readiness;
+        use crate::services::tui_prompt_dedupe::binding_context::{
+            SpawnNonceMarker, observe_spawn_nonce_marker,
+        };
+        let current = || {
+            self.target.execution_alive()
+                && matches!(observe_spawn_nonce_marker(&self.logical),
+                    SpawnNonceMarker::Known(nonce) if nonce == self.nonce)
+        };
+        if !current() {
+            return false;
+        }
+        let Some(proof) = readiness::observe(&self.logical, None) else {
+            return false;
+        };
+        let Some(reservation) = readiness::reserve(proof) else {
+            return false;
+        };
+        let valid = reservation.current() && current();
+        reservation.not_sent();
+        valid
     }
 
     fn cleared(&self) -> bool {
