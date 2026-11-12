@@ -524,9 +524,7 @@ pub(super) async fn handle_stream_content_message(
                                     managed_turn.expect("eligible active usage has managed turn identity"),
                                     &provider,
                                     model.as_deref(),
-                                    Some(input_tokens),
-                                    Some(cache_create_tokens),
-                                    Some(cache_read_tokens),
+                                    (Some(input_tokens), Some(cache_create_tokens), Some(cache_read_tokens)),
                                     context_compact_percent,
                                     context_compact_lower_bound_tokens,
                                 );

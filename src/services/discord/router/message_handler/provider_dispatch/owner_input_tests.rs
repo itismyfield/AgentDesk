@@ -2092,3 +2092,6 @@ fn busy_native_pin_submitted_write_arms_before_its_answer_observer() {
     );
     assert_eq!(events, ["paste", "Enter"]);
 }
+
+#[path = "owner_input_busy_race_tests.rs"]
+mod busy_race_tests;

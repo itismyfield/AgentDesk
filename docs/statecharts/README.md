@@ -57,6 +57,7 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 
 | Area | Code SHA | Rules that break | Disposition |
 |---|---|---|---|
+| input-single-path / session-lifecycle Idle readiness and clear Pending (#8080) | d0d8d711b8be5668aacf90a7cd7c362e15ef7ec0 | BeforeNarrow, compact-no-completion, clear-pending-before and guard mutants are expected RED | Latest clear-Held refinement: checker81 cfg/274 calls, GREEN40/expected RED41/unexpected0; clear-Held before RED/after GREEN. Historical direct TLC62 cfg/226 calls. [Report](input-single-path/transcript-readiness.report.md), [design](input-single-path/transcript-readiness.design.md) |
 | `outbox-transaction` (#7353 S4-13·14 design) | `5c3ed37cddc80036fa8a274419b0219f49926704` | PreSource·Preobserve·SplitInsert·EarlyCensus·FreshTask are expected negative controls | Plain TLC 9 cfg matched after tx/connection P2 controls; canonical Current/Service GREEN. `statechart` wrapper unavailable on WSL (`sc=not-run`); [report](outbox-transaction/outbox-transaction.report.md) |
 | `input-single-path` reserved id enqueue (#8091) | `0b9af5833990e6ee41d3428fa2d37ba5289c22e9` | Before: reservation/queue overlap; proposed guard alone: race-loss caller drops the returned input | Fixed model and live/released controls pass; actor guard plus lease-authorized owner return; see [report](input-single-path/reserved-id-enqueue.report.md). |
 | `intake-readiness` (#7353 S4-05) | `b20a366c8812348f14a9e08a7439cb8df6cfb09a` | StaleSnapshot: lock 전 profile/cache 재사용; EarlyTxEnd: 다른 transaction으로 적용 | Current/Proposed GREEN; 같은 lock→live 관측→write/commit 유지, modern unknown/offline fail-closed·legacy 호환 보존. [보고서](intake-readiness/intake-readiness.report.md) |
@@ -122,3 +123,5 @@ keep custody reads and their existing properties; this pair adds no liveness pro
 The model abstracts the full raw wait into `output = held`; the real guard has an effective
 upper bound of about 65 seconds from the server `idle_in_transaction_session_timeout`.
 Routing/staging can still wait for that guard; admission here does not mean durable staging has completed.
+
+The Claude readiness refinement also checks terminal-free self-compact completion: [before](input-single-path/InputPathReadyCompactNoCompletion.cfg) breaks next-input liveness; [after](input-single-path/InputPathReadyCompactCompletion.cfg) satisfies it. Source, generation, reservation and Unknown-transfer guards remain caller obligations documented in [the readiness report](input-single-path/transcript-readiness.report.md).
