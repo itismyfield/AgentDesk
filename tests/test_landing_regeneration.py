@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -206,6 +207,66 @@ for name in ('route-inventory', 'worker-inventory', 'env-reference', 'cli-refere
         self.git("add", "--", *REGEN.OUTPUTS)
         self.git("commit", "-m", "reviewed generated correction")
         self.run_regen(check=True)
+
+    def test_check_rejects_committed_output_deletion_and_records_addition(self) -> None:
+        self.run_regen()
+        self.git("add", "--", *REGEN.OUTPUTS)
+        self.git("commit", "-m", "current generated docs")
+        name = "docs/generated/env-reference.md"
+        self.git("rm", "--", name)
+        self.git("commit", "-m", "delete generated output")
+        report = self.run_regen(expected=1, check=True)
+        self.assertEqual(report["status"], "DRIFT")
+        diff = (self.root / "artifacts/2/head.diff").read_text()
+        self.assertIn("--- /dev/null", diff)
+        self.assertIn("+++ b/" + name, diff)
+        self.assertIn("+canonical", diff)
+        self.assertEqual((self.root / name).read_text(), "canonical\n")
+
+    def test_evidence_failure_and_restore_write_errors_do_not_stop_other_restores(self) -> None:
+        original_diff = REGEN.write_diff
+        original_write = Path.write_bytes
+        cases = ((2, True, None), (3, True, None), (2, True, 0),
+                 (3, True, 2), (2, False, 1), (3, False, 2))
+        for number, (failed_generator, diff_error, failed_restore) in enumerate(cases):
+            with self.subTest(generator=failed_generator, diff_error=diff_error, restore=failed_restore):
+                for command in REGEN.COMMANDS[1:]:
+                    self.write(command[0], "")
+                self.write(REGEN.COMMANDS[failed_generator - 1][0], "raise SystemExit(9)\n")
+                before = REGEN.snapshot(self.root)
+                state = {"restoring": False, "attempts": []}
+                artifact = self.root / f"fault-artifacts/{number}"
+
+                def record_diff(*args):
+                    state["restoring"] = True
+                    if diff_error:
+                        raise OSError("injected diff I/O error")
+                    return original_diff(*args)
+
+                def restore_write(path, data):
+                    if state["restoring"] and str(path.relative_to(self.root)) in REGEN.OUTPUTS:
+                        name = str(path.relative_to(self.root))
+                        state["attempts"].append(name)
+                        if failed_restore is not None and name == REGEN.OUTPUTS[failed_restore]:
+                            raise OSError("injected restore I/O error")
+                    return original_write(path, data)
+
+                with patch.object(REGEN, "write_diff", side_effect=record_diff), \
+                     patch.object(Path, "write_bytes", new=restore_write):
+                    self.assertEqual(REGEN.regenerate(self.root, artifact, check=True), 2)
+                self.assertEqual(state["attempts"], list(REGEN.OUTPUTS))
+                report = json.loads((artifact / "manifest.json").read_text())
+                self.assertEqual((report["status"], report["exit_code"]), ("CHECK_FAIL", 2))
+                if diff_error:
+                    self.assertIn("injected diff I/O error", str(report["evidence_errors"]))
+                expected_errors = {} if failed_restore is None else {
+                    REGEN.OUTPUTS[failed_restore]: "injected restore I/O error"}
+                self.assertEqual(report.get("restore_errors", {}), expected_errors)
+                for name in REGEN.OUTPUTS:
+                    if failed_restore is None or name != REGEN.OUTPUTS[failed_restore]:
+                        self.assertEqual((self.root / name).read_bytes(), before[name])
+                for name, data in before.items():
+                    (self.root / name).write_bytes(data)
 
     def test_markerless_legacy_doc_is_not_silently_overwritten(self) -> None:
         self.write("ARCHITECTURE.md", "legacy manual architecture\n")

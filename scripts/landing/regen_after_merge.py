@@ -79,13 +79,14 @@ def outside_hashes(root: Path) -> dict[str, str]:
             if path and path not in OUTPUTS and (root / path).is_file()}
 
 
-def write_diff(path: Path, before: dict[str, bytes], after: dict[str, bytes]) -> None:
+def write_diff(path: Path, before: dict[str, bytes | None], after: dict[str, bytes]) -> None:
     with path.open("w", encoding="utf-8") as stream:
         for name in OUTPUTS:
             stream.writelines(difflib.unified_diff(
-                before[name].decode().splitlines(keepends=True),
+                (before[name] or b"").decode().splitlines(keepends=True),
                 after[name].decode().splitlines(keepends=True),
-                fromfile=f"a/{name}", tofile=f"b/{name}"))
+                fromfile="/dev/null" if before[name] is None else f"a/{name}",
+                tofile=f"b/{name}"))
 
 
 def regenerate(root: Path, artifact: Path, check: bool, check_merge: bool = False) -> int:
@@ -142,9 +143,11 @@ def regenerate(root: Path, artifact: Path, check: bool, check_merge: bool = Fals
             raise ValueError("generator changed an unowned tracked path")
         if any(CONFLICT.search(data) for data in after.values()):
             raise ValueError("conflict markers remain after regeneration")
-        head_diff = git(root, "diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD", "--", *OUTPUTS)
-        (artifact / "head.diff").write_bytes(head_diff)
-        if check and head_diff:
+        tracked = set(git(root, "ls-tree", "-r", "--name-only", "-z", "HEAD", "--", *OUTPUTS).decode().split("\0"))
+        head_before = {name: git(root, "show", f"HEAD:{name}") if name in tracked else None for name in OUTPUTS}
+        report["head_missing_outputs"] = [name for name in OUTPUTS if head_before[name] is None]
+        write_diff(artifact / "head.diff", head_before, after)
+        if check and any(head_before[name] != after[name] for name in OUTPUTS):
             report["status"] = "DRIFT"
             result = 1
         else:
@@ -157,23 +160,35 @@ def regenerate(root: Path, artifact: Path, check: bool, check_merge: bool = Fals
         report["error"] = str(error)
         print(f"regeneration failed: {error}", file=sys.stderr)
     finally:
-        if before:
-            after = snapshot(root)
-            write_diff(artifact / "regeneration.diff", before, after)
-            report["files"] = {
-                name: {"before_sha256": digest(before[name]), "after_sha256": digest(after[name]),
-                       "added": sum(1 for line in difflib.ndiff(before[name].decode().splitlines(),
-                                                               after[name].decode().splitlines())
-                                    if line.startswith("+ ")),
-                       "removed": sum(1 for line in difflib.ndiff(before[name].decode().splitlines(),
-                                                                 after[name].decode().splitlines())
-                                      if line.startswith("- "))}
-                for name in OUTPUTS}
+        try:
+            if before:
+                after = snapshot(root)
+                report["files"] = {
+                    name: {"before_sha256": digest(before[name]), "after_sha256": digest(after[name]),
+                           "added": sum(1 for line in difflib.ndiff(before[name].decode().splitlines(),
+                                                                   after[name].decode().splitlines())
+                                        if line.startswith("+ ")),
+                           "removed": sum(1 for line in difflib.ndiff(before[name].decode().splitlines(),
+                                                                     after[name].decode().splitlines())
+                                          if line.startswith("- "))}
+                    for name in OUTPUTS}
+                write_diff(artifact / "regeneration.diff", before, after)
+        except (OSError, ValueError) as error:
+            report["evidence_errors"] = [str(error)]
+            report["status"], result = "CHECK_FAIL", 2
+        finally:
             if result == 2:
                 for name, data in before.items():
-                    (root / name).write_bytes(data)
+                    try:
+                        (root / name).write_bytes(data)
+                    except OSError as error:
+                        report.setdefault("restore_errors", {})[name] = str(error)
         report["exit_code"] = result
-        (artifact / "manifest.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        try:
+            (artifact / "manifest.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        except OSError as error:
+            report["status"], result = "CHECK_FAIL", 2
+            print(f"manifest write failed: {error}", file=sys.stderr)
     print(f"{report['status']} artifact={artifact}")
     return result
 
