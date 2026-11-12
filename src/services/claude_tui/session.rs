@@ -468,6 +468,9 @@ fn write_launch_script(
     if effort.explicit() {
         env_exports.push_str("unset CLAUDE_CODE_EFFORT_LEVEL\n");
     }
+    if effort.explicit() && resumed {
+        env_exports.push_str("export CLAUDE_CODE_RESUME_INTERRUPTED_TURN=0\n");
+    }
     // #5172 R1: snapshot the YAML provider setting for each new launch. Its
     // absolute value is independent of the launch model and later model changes.
     // #5935: an unset provider setting exports nothing — the inherited window is
