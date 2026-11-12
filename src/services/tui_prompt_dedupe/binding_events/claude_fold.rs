@@ -139,6 +139,22 @@ pub(crate) fn binding_events_judged_since(
         .collect())
 }
 
+/// Observes only a fold already published by the writer; never reloads, repairs or syncs a log.
+pub(crate) fn published_claude_history(
+    channel: u64,
+    session: &str,
+    nonce: &str,
+) -> Option<(u64, SourceHistory)> {
+    let path = log_path(channel).ok()??;
+    let logs = lock_logs();
+    let writer = logs.get(&path)?.writer.as_ref()?;
+    let pane = writer.panes.get(session)?;
+    Some((
+        writer.last_seq,
+        pane.claude.history(Some(nonce), writer.tainted),
+    ))
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct ClaudeFold {
     nonce: Option<String>,

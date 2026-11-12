@@ -511,6 +511,7 @@ ReadyNoSilentLoss == Readiness!NoSilentLoss
 ReadyNoIdleRunningInjection == Readiness!NoIdleRunningInjection
 ReadyNoHumanDraftExecution == Readiness!NoHumanDraftExecution
 ReadyNoEarlyInput == Readiness!NoEarlyInput
+ReadyNoClearAuthorityViolation == Readiness!NoClearAuthorityViolation
 ReadyCompactAfterStopIdle == Readiness!CompactAfterStopIdle
 ReadyPendingEventuallyExecutes == Readiness!PendingEventuallyExecutes
 ReadyCompactEventuallyExecutes == Readiness!CompactEventuallyExecutes

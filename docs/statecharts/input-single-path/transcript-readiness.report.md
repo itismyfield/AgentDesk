@@ -249,3 +249,10 @@ Continuation latches and recovery floors remain intact. A recovery floor already
 | InputPathReadySuppressedCompact.cfg | GREEN | - |
 
 Completion retirement reads the owned historical prefix; current Idle evidence separately rejects later native activity. A new native turn winning the timer cannot hide the completed control or authorize Running injection; its later hard terminal can advance the next original without UserPromptSubmit. Caller compact_completed_prefix_cannot_hide_a_new_native_turn_or_require_its_submit_hook covers this interleaving. TLA/cfg bytes are unchanged; retirement and CurrentEvidence remain separate obligations.
+
+
+## Clear Pending before file publication
+
+Merge source baseline: ca4ba220aa35c4d4c31d417bcbd9659eb7e1da89. The refinement preserves the old runtime binding until the first new transcript is registered. A current clear Start and the same execution's published canonical Pending permit only an explicit new path. Proofs retain the Pending seq and Start revision; reserve/current recheck both. Readiness observes an already published fold and never reloads or repairs the writer log.
+
+`InputPathReadyClearPendingBefore.cfg` separates `oldBinding` from `filePublished` and breaks `ReadyPendingEventuallyExecutes`: no payload means no file and therefore no new binding. `InputPathReadyClearPendingAfter.cfg` passes safety and that liveness property. `InputPathReadyClearPendingRecheck.cfg` changes the Pending seq after Prepare; the stale proof is revoked, and a fresh proof progresses. The diagrams are hand-authored projections; the lane report records actual TLC runs and fingerprints.

@@ -1,6 +1,7 @@
 %% Hand-authored projection, not generated TLC output.
 %% Implementation source SHA e46154b856cdc6ce4f00b3a628c045e26e16fd0e; compact completion repair of eee9d323e23576b7e6eb98cf92890ac9726d60da.
 %% Confirmed own local command completion only; Unknown transfer remains fenced.
+%% Clear refinement baseline ca4ba220aa35c4d4c31d417bcbd9659eb7e1da89: old binding and new file publication are distinct.
 stateDiagram-v2
     [*] --> Route
     Route --> BusyQueue : existing active hand_busy / native Running branches
@@ -13,6 +14,13 @@ stateDiagram-v2
     Booting --> StartupDialog : dialog appears during bounded wait
     StartupDialog --> Booting : approved existing plan + one bounded dialog Enter
     Booting --> Observe : scoped SessionStart startup/resume/clear
+    Booting --> AwaitClearProof : current clear; old runtime binding retained
+    AwaitClearProof --> DraftVeto : explicit new path + current clear Start + published canonical Pending
+    Prepared --> AwaitClearProof : Pending seq or latest clear source changed; zero payload
+    Prepared --> NewFileUnpublished : revalidated clear proof; one original before JSONL birth
+    NewFileUnpublished --> Observe : transcript registration publishes new binding
+    AwaitClearProof --> ClearCycle : before model requires new runtime binding
+    ClearCycle --> ClearCycle : no payload, no new file, no binding; liveness RED
     Route --> Observe : existing Idle entry / verified daemon restore
     Observe --> Waiting : Running or Unknown in Idle-ready path
     Waiting --> Observe : scoped wake or periodic current transcript read

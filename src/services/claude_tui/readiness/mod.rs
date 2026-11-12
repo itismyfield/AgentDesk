@@ -1,4 +1,5 @@
 //! Current-source Idle readiness; external Busy injection keeps its own entry path.
+mod clear;
 pub(crate) mod compact;
 mod dialog;
 mod evidence;
@@ -23,6 +24,7 @@ use std::sync::{Condvar, LazyLock, Mutex, MutexGuard};
 struct Entry {
     revision: u64,
     start: bool,
+    clear_start: bool,
     pending: Option<(u64, u64)>,
     submitted: bool,
     compact_ticket: Option<u64>,
@@ -60,9 +62,11 @@ pub(crate) struct Proof {
     source: Source,
     stamp: Option<Stamp>,
     revision: u64,
+    clear: Option<clear::Evidence>,
 }
 pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
     let source = Source::current(session, path)?;
+    let clear = clear::current(&source)?;
     let mut tail = evidence::read(&source.path);
     if tail.as_ref().is_some_and(|tail| {
         tail.native
@@ -216,15 +220,19 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
         source,
         stamp: tail.map(|t| t.stamp),
         revision: entry.revision,
+        clear,
     };
     drop(state);
-    (Source::current(session, path).as_ref() == Some(&proof.source)).then_some(proof)
+    (Source::current(session, path).as_ref() == Some(&proof.source)
+        && clear::current(&proof.source) == Some(proof.clear.clone()))
+    .then_some(proof)
 }
 pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
     let current = observe(&proof.source.session, Some(&proof.source.path))?;
     if current.source != proof.source
         || current.stamp != proof.stamp
         || current.revision != proof.revision
+        || current.clear != proof.clear
     {
         return None;
     }
@@ -238,23 +246,30 @@ pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
     let revision = entry.revision;
     let recovery = entry.recovery;
     changed(&mut state);
-    Some(Reservation {
+    let reservation = Reservation {
         source: proof.source,
         stamp: proof.stamp,
         revision,
         recovery,
-    })
+        clear: proof.clear,
+    };
+    drop(state);
+    #[cfg(all(test, unix))]
+    tests::clear_tests::after_reserve();
+    Some(reservation)
 }
 pub(crate) struct Reservation {
     source: Source,
     stamp: Option<Stamp>,
     revision: u64,
     recovery: Option<(u64, DateTime<Utc>)>,
+    clear: Option<clear::Evidence>,
 }
 impl Reservation {
     pub(crate) fn current(&self) -> bool {
         Source::current(&self.source.session, Some(&self.source.path)).as_ref()
             == Some(&self.source)
+            && clear::current(&self.source) == Some(self.clear.clone())
             && Stamp::read(&self.source.path) == self.stamp
             && ledger()
                 .entries
@@ -374,6 +389,7 @@ pub(crate) fn note_hook(
             });
             let entry = state.entries.entry(source).or_default();
             entry.start = true;
+            entry.clear_start = payload["source"] == "clear";
             entry.compact_done = None;
             entry.recovery = None;
             entry.revision += 1;
