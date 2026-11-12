@@ -297,7 +297,7 @@ async fn f6_default_host_reaches_repost_pg_statements_pg() {
         .unwrap()
         .unwrap();
     store
-        .begin_era(&[channel], chrono::Utc::now(), |channel| {
+        .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
             Ok(Initialized {
                 policy_parent: None,
                 channel,
@@ -531,7 +531,7 @@ async fn d4act_host_stop_during_pending_finish_prevents_retry_pg() {
             .unwrap()
             .unwrap();
         store
-            .begin_era(&[channel], chrono::Utc::now(), |channel| {
+            .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
                     policy_parent: None,
                     channel,
@@ -902,7 +902,7 @@ async fn d4act2_gateway_repost_host_stop_and_rollback_quiescence_pg() {
             .unwrap()
             .unwrap();
         let era = store
-            .begin_era(&[channel], chrono::Utc::now(), |channel| {
+            .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
                     policy_parent: None,
                     channel,

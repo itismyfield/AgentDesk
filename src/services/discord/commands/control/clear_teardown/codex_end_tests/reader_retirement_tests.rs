@@ -122,7 +122,7 @@ pub(super) fn idle_follow_seals_generic_resolution(
             .unwrap();
         let old_len = std::fs::metadata(&record.source.path).unwrap().len();
         store
-            .begin_era(&[pane.channel], chrono::Utc::now(), |channel| {
+            .begin_fixture_era(&[pane.channel], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
                     policy_parent: None,
                     channel,
@@ -248,7 +248,7 @@ pub(super) fn actual_end_retires_only_its_old_reader(pane: &Pane) {
                 initial(record.source.clone(), std::fs::metadata(&record.source.path).unwrap().len()),
                 initial(backlog.clone(), 0),
             ];
-            store.begin_era(&[pane.channel], chrono::Utc::now(), |channel| Ok(Initialized {
+            store.begin_fixture_era(&[pane.channel], chrono::Utc::now(), |channel| Ok(Initialized {
                 policy_parent: None,
                 channel, sources: sources.clone(), initial_anchor: 100,
                 build_digest: "actual-codex-end-retirement".into(), at: chrono::Utc::now(),

@@ -304,7 +304,7 @@ fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId) {
         })
     };
     store
-        .begin_era(&[channel], Utc::now(), initialized)
+        .begin_fixture_era(&[channel], Utc::now(), initialized)
         .unwrap();
     (runtime, store, source)
 }

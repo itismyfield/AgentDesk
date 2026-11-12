@@ -2395,8 +2395,9 @@ src/
 │   │   │   │   │   └── owner_execution.rs
 │   │   │   │   └── owner_port.rs
 │   │   │   ├── owner_execution/
-│   │   │   │   └── tests/
-│   │   │   │       └── mod.rs
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── mod.rs
+│   │   │   │   └── child_view_tests.rs
 │   │   │   ├── queued_placeholders/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── n3bc_tests.rs
@@ -4040,7 +4041,7 @@ src/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── thread_children/
-│   │   │   │   └── retirement.rs
+│   │   │   │   └── retirement_tests.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
 │   │   │   ├── clear_end_tests.rs

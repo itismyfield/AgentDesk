@@ -59,7 +59,7 @@ async fn owner_repost_real_http_revocation_preserves_unresolved_and_stops_pg() {
         at: chrono::Utc::now(),
     };
     store
-        .begin_era_as(&init, crate::services::tui_o::store::InitOrigin::Fresh)
+        .begin_fixture_era_as(&init, crate::services::tui_o::store::InitOrigin::Fresh)
         .unwrap();
     let era = store.read_era().unwrap().unwrap();
     let mut opened = store.open_channel(&era, 73369490).unwrap().unwrap();

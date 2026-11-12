@@ -321,7 +321,9 @@ impl Harness {
                 at,
             })
         };
-        store.begin_era(&[channel_id], Utc::now(), init).unwrap();
+        store
+            .begin_fixture_era(&[channel_id], Utc::now(), init)
+            .unwrap();
         let port = Arc::new(FakePort::default());
         let ledger = runtime
             .path()

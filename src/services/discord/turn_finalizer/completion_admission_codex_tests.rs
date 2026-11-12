@@ -214,7 +214,7 @@ fn init_from_start(
         at: chrono::Utc::now(),
     };
     let store = store.unwrap().unwrap();
-    store.init_channel_as(&init, origin).unwrap();
+    store.init_fixture_channel_as(&init, origin).unwrap();
     assert_eq!(store.read_init_origin(CHANNEL).unwrap(), origin);
 }
 

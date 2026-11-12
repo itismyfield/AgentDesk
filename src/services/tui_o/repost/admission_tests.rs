@@ -165,7 +165,7 @@ fn d4act_not_sent_replays_as_settled_without_reclassifying_legacy_records() {
         .unwrap()
         .unwrap();
     let era = store
-        .begin_era(&[CHANNEL], Utc::now(), |channel| {
+        .begin_fixture_era(&[CHANNEL], Utc::now(), |channel| {
             Ok(Initialized {
                 policy_parent: None,
                 channel,

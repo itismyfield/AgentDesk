@@ -31,6 +31,7 @@ pub(crate) struct BootChannels {
     channels: BTreeSet<u64>,
     bindings: BTreeSet<u64>,
     children: children::ChildEntries,
+    init_scope: Arc<OnceLock<Arc<crate::services::session_host::surface_policy::InitScope>>>,
     selected: BTreeSet<u64>,
     /// Every TUI binding in the boot config, selected or not.
     tui_bindings: BTreeSet<u64>,
@@ -249,6 +250,7 @@ impl BootChannels {
             selected: channels.clone(),
             bindings: agent_bindings(config).map(|(id, _, _)| id).collect(),
             children: children::ChildEntries::default(),
+            init_scope: Arc::default(),
             tui_bindings: crate::services::provider_hosting::tui_binding_ids(config)
                 .flatten()
                 .collect(),
@@ -427,6 +429,7 @@ impl BootChannels {
         self.execution(channel)
             .map(|view| view.candidate)
             .or_else(|| self.candidate(channel).cloned())
+            .map(|candidate| candidate.with_init_scope(self.init_scope_view()))
     }
 
     pub(crate) fn install_execution(

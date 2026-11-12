@@ -198,7 +198,7 @@ impl Fixture {
         let source = self.fold().verified.unwrap().source;
         let channel = self.context.channel_id.unwrap();
         store
-            .begin_era(&[channel], Utc::now(), |channel| {
+            .begin_fixture_era(&[channel], Utc::now(), |channel| {
                 Ok(Initialized {
                     policy_parent: None,
                     channel,

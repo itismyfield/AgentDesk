@@ -20,7 +20,7 @@ pub(in crate::services::tui_o::writer::actor) fn fixture()
         .unwrap()
         .unwrap();
     let era = owner
-        .begin_era(&[7], chrono::Utc::now(), |channel| {
+        .begin_fixture_era(&[7], chrono::Utc::now(), |channel| {
             Ok(Initialized {
                 policy_parent: None,
                 channel,

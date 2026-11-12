@@ -33,7 +33,7 @@ async fn d4b_two_hosted_channels_repost_by_default_with_wire_controls_pg() {
             .unwrap()
             .unwrap();
         let era = store
-            .begin_era(&[channel], chrono::Utc::now(), |channel| {
+            .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
                     policy_parent: None,
                     channel,

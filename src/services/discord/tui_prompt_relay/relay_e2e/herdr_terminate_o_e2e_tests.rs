@@ -624,7 +624,9 @@ fn begin_era(source: &SourceId, build: &str) -> (OStore, crate::services::tui_o:
             at: Utc::now(),
         })
     };
-    let era = store.begin_era(&[CHANNEL_ID], Utc::now(), init).unwrap();
+    let era = store
+        .begin_fixture_era(&[CHANNEL_ID], Utc::now(), init)
+        .unwrap();
     (store, era)
 }
 

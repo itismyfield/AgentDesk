@@ -61,7 +61,9 @@ fn seed_o_store() {
             at,
         })
     };
-    store.begin_era(&[DRIVER_CHANNEL_ID], at, init).unwrap();
+    store
+        .begin_fixture_era(&[DRIVER_CHANNEL_ID], at, init)
+        .unwrap();
 }
 
 struct Case {

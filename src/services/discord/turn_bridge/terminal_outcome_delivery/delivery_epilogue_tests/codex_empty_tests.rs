@@ -550,7 +550,7 @@ async fn native_footer(driver: &TerminalDeliveryDriver, path: &std::path::Path) 
         .unwrap();
     let at = chrono::Utc::now();
     store
-        .begin_era(&[DRIVER_CHANNEL_ID], at, |channel| {
+        .begin_fixture_era(&[DRIVER_CHANNEL_ID], at, |channel| {
             Ok(Initialized {
                 policy_parent: None,
                 channel,

@@ -110,7 +110,7 @@ impl Fixture {
         let o = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
             .unwrap()
             .unwrap();
-        o.begin_era(&[CHANNEL], Utc::now(), |channel| {
+        o.begin_fixture_era(&[CHANNEL], Utc::now(), |channel| {
             Ok(Initialized {
                 policy_parent: None,
                 channel,

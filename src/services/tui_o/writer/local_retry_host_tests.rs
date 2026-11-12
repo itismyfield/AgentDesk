@@ -29,7 +29,7 @@ async fn local_retry_host_recovers_after_transient_halts_and_a_stopped_host_send
         .unwrap()
         .unwrap();
     let era = store
-        .begin_era(&[channel], chrono::Utc::now(), |channel| {
+        .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
             Ok(Initialized {
                 policy_parent: None,
                 channel,

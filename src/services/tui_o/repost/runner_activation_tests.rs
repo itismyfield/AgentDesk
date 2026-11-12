@@ -36,7 +36,7 @@ impl Writer {
             .unwrap()
             .unwrap();
         store
-            .init_channel(&Initialized {
+            .init_fixture_channel(&Initialized {
                 policy_parent: None,
                 channel: CHANNEL,
                 sources: Vec::new(),

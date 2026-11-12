@@ -189,7 +189,7 @@ fn codex_verified_clear_ends_the_incarnation_releases_its_pin_and_keeps_owed_out
         at: chrono::Utc::now(),
     };
     let era = store
-        .begin_era(&[channel.get()], init.at, |_| Ok(init.clone()))
+        .begin_fixture_era(&[channel.get()], init.at, |_| Ok(init.clone()))
         .unwrap();
     let mut owed = store.open_channel(&era, channel.get()).unwrap().unwrap();
     owed.append_ledger(LedgerEntry::Prepared {

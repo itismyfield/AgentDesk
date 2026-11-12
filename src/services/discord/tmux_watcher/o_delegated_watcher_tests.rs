@@ -344,9 +344,9 @@ mod self_started_publish_tests {
         let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root)
             .unwrap()
             .unwrap();
-        store.init_channel(&initialized).unwrap();
+        store.init_fixture_channel(&initialized).unwrap();
         store
-            .begin_era(&[h.channel.get()], chrono::Utc::now(), |_| {
+            .begin_fixture_era(&[h.channel.get()], chrono::Utc::now(), |_| {
                 Ok(initialized.clone())
             })
             .unwrap();

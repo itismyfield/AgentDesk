@@ -5,10 +5,9 @@ use std::io;
 
 use super::{InitOrigin, Initialized, OStore, StoreError, durable};
 use crate::domain::file_sync::fsync_parent_dir;
+use crate::services::session_host::surface_policy::InitScope;
 use crate::services::session_host::surface_policy::VerifiedSurface;
-use crate::services::tui_o::channel_policy::BootChannels;
 
-pub(crate) const OUTPUT_ENABLED: bool = false;
 const FLOOR: &str = "thread_children.floor";
 const CONTENT: &[u8] = b"1\n";
 
@@ -17,11 +16,11 @@ impl OStore {
         &self,
         init: &Initialized,
         origin: InitOrigin,
-        boot: Option<&BootChannels>,
+        scope: &InitScope,
         verified: Option<&VerifiedSurface>,
         enabled: bool,
     ) -> Result<(), StoreError> {
-        let outside = boot.is_some_and(|boot| !boot.configured_binding(init.channel));
+        let outside = !scope.configured(init.channel);
         let reject = |why: &str| StoreError::Rejected(why.into());
         if outside {
             let parent = init
@@ -29,7 +28,7 @@ impl OStore {
                 .ok_or_else(|| reject("unconfigured channel requires policy_parent"))?;
             if !enabled
                 || !verified.is_some_and(|surface| {
-                    surface.matches(init.channel, parent, boot.and_then(|b| b.kind(parent)))
+                    surface.matches(init.channel, parent, scope.kind(parent))
                 })
             {
                 return Err(reject(
@@ -65,10 +64,46 @@ impl OStore {
             ));
         }
         // A failed init never lowers the durable deployment floor.
-        File::open(&path)?.sync_all()?;
+        File::open(self.root.join(FLOOR))?.sync_all()?;
         fsync_parent_dir(&path)
     }
 }
 
 #[cfg(test)]
-mod retirement;
+mod retirement_tests;
+
+#[cfg(test)]
+impl OStore {
+    fn fixture_scope(channels: &[u64]) -> std::sync::Arc<InitScope> {
+        std::sync::Arc::new(InitScope::fixture(channels))
+    }
+
+    pub(crate) fn init_fixture_channel(&self, init: &Initialized) -> Result<(), StoreError> {
+        self.init_channel(init, &Self::fixture_scope(&[init.channel]))
+    }
+
+    pub(crate) fn init_fixture_channel_as(
+        &self,
+        init: &Initialized,
+        origin: InitOrigin,
+    ) -> Result<(), StoreError> {
+        self.init_channel_as(init, origin, &Self::fixture_scope(&[init.channel]))
+    }
+
+    pub(crate) fn begin_fixture_era_as(
+        &self,
+        init: &Initialized,
+        origin: InitOrigin,
+    ) -> Result<(), StoreError> {
+        self.begin_era_as(init, origin, &Self::fixture_scope(&[init.channel]))
+    }
+
+    pub(crate) fn begin_fixture_era(
+        &self,
+        channels: &[u64],
+        at: chrono::DateTime<chrono::Utc>,
+        init_for: impl FnMut(u64) -> Result<Initialized, StoreError>,
+    ) -> Result<super::OEra, StoreError> {
+        self.begin_era(channels, at, &Self::fixture_scope(channels), init_for)
+    }
+}

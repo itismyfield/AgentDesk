@@ -34,7 +34,7 @@ fn thread_children_outside_config_without_parent_writes_nothing() {
         .unwrap();
     assert!(
         store
-            .init_channel_as(&fixture(43), InitOrigin::Fresh)
+            .init_fixture_channel_as(&fixture(43), InitOrigin::Fresh)
             .is_err()
     );
     assert!(!store.has_channel_dir(43));
@@ -97,7 +97,7 @@ fn init_child(store: &OStore, parent: bool, enabled: bool, proof: bool) -> Resul
     store.init_channel_checked(
         &init,
         InitOrigin::Fresh,
-        Some(&boot()),
+        &boot().init_scope_view(),
         proof.then_some(&verified),
         enabled,
     )
@@ -201,8 +201,16 @@ fn thread_children_production_capability_keeps_init_floor_writer_counts_zero() {
         .unwrap();
     let mut init = fixture(43);
     init.policy_parent = Some(42);
-    assert!(store.init_channel_as(&init, InitOrigin::Fresh).is_err());
-    assert!(store.begin_era_as(&init, InitOrigin::Fresh).is_err());
+    assert!(
+        store
+            .init_fixture_channel_as(&init, InitOrigin::Fresh)
+            .is_err()
+    );
+    assert!(
+        store
+            .begin_fixture_era_as(&init, InitOrigin::Fresh)
+            .is_err()
+    );
     assert_eq!(store.channels_with_init().unwrap().len(), 0);
     assert!(store.read_era().unwrap().is_none());
     assert!(!dir.path().join("o_store/thread_children.floor").exists());
@@ -215,22 +223,31 @@ fn thread_children_production_capability_keeps_init_floor_writer_counts_zero() {
 
 #[test]
 fn thread_children_concurrent_floor_publication_is_idempotent() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, dir.path())
-        .unwrap()
-        .unwrap();
-    let barrier = std::sync::Barrier::new(2);
-    let successes = std::thread::scope(|scope| {
-        let first = scope.spawn(|| {
+    let dir = std::sync::Arc::new(tempfile::tempdir().unwrap());
+    let store = std::sync::Arc::new(
+        OStore::open_if_enabled(&StoreConfig { enabled: true }, dir.path())
+            .unwrap()
+            .unwrap(),
+    );
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let (store, barrier, root) = (store.clone(), barrier.clone(), dir.clone());
+        workers.push(std::thread::spawn(move || {
+            let _root = root;
             barrier.wait();
             init_child(&store, true, true, true).is_ok()
-        });
-        let second = scope.spawn(|| {
-            barrier.wait();
-            init_child(&store, true, true, true).is_ok()
-        });
-        usize::from(first.join().unwrap()) + usize::from(second.join().unwrap())
-    });
+        }));
+    }
+    let successes: usize = workers
+        .into_iter()
+        .map(|worker| {
+            usize::from(crate::test_support::wait::join_within(
+                worker,
+                std::time::Duration::from_secs(5),
+            ))
+        })
+        .sum();
     assert_eq!(successes, 1);
     assert_eq!(
         std::fs::read(dir.path().join("o_store/thread_children.floor")).unwrap(),
@@ -254,7 +271,13 @@ fn thread_children_raw_parent_and_wrong_provider_are_rejected_before_floor() {
         init.policy_parent = Some(parent);
         assert!(
             store
-                .init_channel_checked(&init, InitOrigin::Fresh, Some(&boot()), Some(&valid), true)
+                .init_channel_checked(
+                    &init,
+                    InitOrigin::Fresh,
+                    &boot().init_scope_view(),
+                    Some(&valid),
+                    true
+                )
                 .is_err()
         );
     }
@@ -271,7 +294,13 @@ fn thread_children_raw_parent_and_wrong_provider_are_rejected_before_floor() {
     init.policy_parent = Some(42);
     assert!(
         store
-            .init_channel_checked(&init, InitOrigin::Fresh, Some(&boot()), Some(&wrong), true)
+            .init_channel_checked(
+                &init,
+                InitOrigin::Fresh,
+                &boot().init_scope_view(),
+                Some(&wrong),
+                true
+            )
             .is_err()
     );
     assert_eq!(

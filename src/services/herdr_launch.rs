@@ -297,7 +297,9 @@ pub(crate) fn o_store_for_test(
             at: chrono::Utc::now(),
         })
     };
-    let era = store.begin_era(channels, chrono::Utc::now(), init).unwrap();
+    let era = store
+        .begin_fixture_era(channels, chrono::Utc::now(), init)
+        .unwrap();
     (store, era)
 }
 

@@ -286,7 +286,9 @@ fn seal_era(root: &Path) {
             at: chrono::Utc::now(),
         })
     };
-    store.begin_era(&[other], chrono::Utc::now(), init).unwrap();
+    store
+        .begin_fixture_era(&[other], chrono::Utc::now(), init)
+        .unwrap();
 }
 
 async fn failure_after_publication() {

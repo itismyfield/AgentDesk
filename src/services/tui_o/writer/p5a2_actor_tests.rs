@@ -179,7 +179,7 @@ impl Fixture {
         let bytes = std::fs::read(&path).unwrap();
         use sha2::{Digest, Sha256};
         owner
-            .begin_era(&[channel], chrono::Utc::now(), |c| {
+            .begin_fixture_era(&[channel], chrono::Utc::now(), |c| {
                 Ok(initialized(
                     c,
                     vec![crate::services::tui_o::store::InitSource {

@@ -754,7 +754,9 @@ mod settle_over_http {
                 at,
             })
         };
-        let era = store.begin_era(&[channel], Utc::now(), init).unwrap();
+        let era = store
+            .begin_fixture_era(&[channel], Utc::now(), init)
+            .unwrap();
         let mut recorded = store.open_channel(&era, channel).unwrap().unwrap();
         for (serial, &msg_id) in (0u64..).zip(posted) {
             let anchor_id = recorded.ledger().anchor();

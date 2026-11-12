@@ -182,6 +182,36 @@ pub(super) fn seeded_from_store(
 }
 
 impl BootChannels {
+    pub(crate) fn init_scope_view(
+        &self,
+    ) -> Arc<crate::services::session_host::surface_policy::InitScope> {
+        self.init_scope
+            .get_or_init(|| {
+                Arc::new(
+                    crate::services::session_host::surface_policy::InitScope::from_boot(
+                        &self.bindings,
+                        &self.kinds,
+                    ),
+                )
+            })
+            .clone()
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn record_child_fixture(&self, init: &Initialized) {
+        self.children.record(self, init, Adoption::Committed);
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn child_fixture_held(&self, channel: u64) -> Option<bool> {
+        self.children
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&channel)
+            .map(|entry| entry.held)
+    }
+
     /// Called once per shared view before provider dispatch; recorded relationships need no REST.
     pub(crate) fn refresh_child_records(&self) {
         if self

@@ -347,7 +347,7 @@ async fn admission_case(case: Case) {
         .unwrap()
         .unwrap();
     let era = store
-        .begin_era(&[CANARY_CHANNEL], Utc::now(), |channel| {
+        .begin_fixture_era(&[CANARY_CHANNEL], Utc::now(), |channel| {
             Ok(Initialized {
                 policy_parent: None,
                 channel,

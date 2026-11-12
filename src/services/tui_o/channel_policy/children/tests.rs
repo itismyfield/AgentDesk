@@ -174,16 +174,6 @@ fn thread_children_missing_refresh_record_holds_same_candidate() {
 }
 
 #[test]
-fn thread_children_refresh_reader_precedes_provider_return() {
-    let source = include_str!("../../../discord/runtime_bootstrap/owner_execution.rs");
-    let refresh = source.split("pub(super) async fn refresh(").nth(1).unwrap();
-    assert!(
-        refresh.find("snapshot.refresh_child_records()").unwrap()
-            < refresh.find("_ => return").unwrap()
-    );
-}
-
-#[test]
 fn thread_children_unresolved_non_o_reader_waits_for_existing_refresh_then_resolves_once() {
     let boot = BootChannels::validate(&config()).unwrap();
     let clone = boot.clone();
@@ -226,4 +216,24 @@ fn thread_children_unresolved_non_o_reader_waits_for_existing_refresh_then_resol
     assert!(!entries[&43].held);
     assert!(entries[&43].boot_discovered);
     assert!(entries[&43].candidate.is_none());
+}
+
+#[test]
+fn thread_children_boot_candidates_carry_the_immutable_init_scope() {
+    let boot = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Committed);
+    let first = boot.output_candidate(42).unwrap();
+    let second = boot.output_candidate(44).unwrap();
+    assert!(first.bound_init_scope());
+    assert!(second.bound_init_scope());
+    let one = first.init_scope(42).unwrap();
+    let two = second.init_scope(44).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&one, &two));
+    assert!(one.configured(42));
+    assert!(!one.configured(43));
+    assert_eq!(one.kind(42), Some(RuntimeHandoffKind::ClaudeTui));
+    assert!(boot.output_candidate(43).is_none());
+    *first.lock() = Adoption::Held;
+    assert_eq!(second.peek(), Adoption::Committed);
 }

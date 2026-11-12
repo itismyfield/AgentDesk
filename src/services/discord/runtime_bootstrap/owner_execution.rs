@@ -114,6 +114,8 @@ pub(super) async fn prepare(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
     }
 }
 
+#[cfg(all(test, unix))]
+mod child_view_tests;
 #[cfg(test)]
 mod tests;
 

@@ -45,3 +45,37 @@ impl VerifiedSurface {
         })
     }
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct InitScope {
+    bindings: std::collections::BTreeSet<u64>,
+    kinds: std::collections::BTreeMap<u64, RuntimeHandoffKind>,
+}
+
+impl InitScope {
+    pub(crate) fn from_boot(
+        bindings: &std::collections::BTreeSet<u64>,
+        kinds: &std::collections::BTreeMap<u64, RuntimeHandoffKind>,
+    ) -> Self {
+        Self {
+            bindings: bindings.clone(),
+            kinds: kinds.clone(),
+        }
+    }
+
+    pub(crate) fn configured(&self, channel: u64) -> bool {
+        self.bindings.contains(&channel)
+    }
+
+    pub(crate) fn kind(&self, channel: u64) -> Option<RuntimeHandoffKind> {
+        self.kinds.get(&channel).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(channels: &[u64]) -> Self {
+        Self {
+            bindings: channels.iter().copied().collect(),
+            kinds: Default::default(),
+        }
+    }
+}

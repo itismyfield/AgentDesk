@@ -160,9 +160,11 @@ fn cleanup_settles_published_init_and_orphan_before_releasing() {
             .unwrap()
             .unwrap();
         if sealed {
-            store.begin_era(&[41], init().at, |_| Ok(init())).unwrap();
+            store
+                .begin_fixture_era(&[41], init().at, |_| Ok(init()))
+                .unwrap();
         } else {
-            store.init_channel(&init()).unwrap();
+            store.init_fixture_channel(&init()).unwrap();
         }
         drop(guard);
         assert_eq!(

@@ -153,7 +153,9 @@ mod tests {
             }],
             build_digest: "test".into(),
         };
-        let era = store.begin_era(&[7], now, |_| Ok(init.clone())).unwrap();
+        let era = store
+            .begin_fixture_era(&[7], now, |_| Ok(init.clone()))
+            .unwrap();
         let channel = store.open_channel(&era, 7).unwrap().unwrap();
         let witness = CleanupWitness {
             source: source.clone(),

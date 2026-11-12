@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use super::shadow::SourceId;
 use crate::domain::file_sync::PARENT_DIR_FSYNC_FLUSHES;
+use crate::services::session_host::surface_policy::InitScope;
 use ledger::{LedgerEntry, LedgerState, Unsent};
 
 #[cfg(test)]
@@ -312,23 +313,22 @@ impl OStore {
 
     /// Lays out the channel and an empty ledger, then publishes `init` exactly once.
     /// An era channel is never initialized again, even when its `init` is gone.
-    pub fn init_channel(&self, init: &Initialized) -> Result<(), StoreError> {
-        self.init_channel_as(init, InitOrigin::Fresh)
+    pub(crate) fn init_channel(
+        &self,
+        init: &Initialized,
+        scope: &InitScope,
+    ) -> Result<(), StoreError> {
+        self.init_channel_as(init, InitOrigin::Fresh, scope)
     }
 
     /// As `init_channel`, recording `origin`; a `Fresh` init keeps its old bytes.
-    pub fn init_channel_as(
+    pub(crate) fn init_channel_as(
         &self,
         init: &Initialized,
         origin: InitOrigin,
+        scope: &InitScope,
     ) -> Result<(), StoreError> {
-        self.init_channel_checked(
-            init,
-            origin,
-            crate::services::tui_o::cutover::boot_snapshot().as_ref(),
-            None,
-            thread_children::OUTPUT_ENABLED,
-        )
+        self.init_channel_checked(init, origin, scope, None, false)
     }
 
     fn publish_init(&self, init: &Initialized, origin: InitOrigin) -> Result<(), StoreError> {
@@ -354,10 +354,15 @@ impl OStore {
 
     /// A first activation's `init`: a later channel of a sealed era, or else the channel the era is
     /// sealed over. Opening the store finishes a takeover's seal a crash cut off after its `init`.
-    pub fn begin_era_as(&self, init: &Initialized, origin: InitOrigin) -> Result<(), StoreError> {
+    pub(crate) fn begin_era_as(
+        &self,
+        init: &Initialized,
+        origin: InitOrigin,
+        scope: &InitScope,
+    ) -> Result<(), StoreError> {
         let _sealing = SEALING.lock().unwrap_or_else(PoisonError::into_inner);
         let sealed = self.read_era()?.is_some();
-        self.init_channel_as(init, origin)?;
+        self.init_channel_as(init, origin, scope)?;
         if sealed {
             return Ok(());
         }
@@ -371,10 +376,11 @@ impl OStore {
 
     /// First writer start: initializes only channels still lacking `init`, then seals `o_era` once.
     /// A sealed era is returned unchanged; a damaged pre-era `init` stops the switch.
-    pub fn begin_era(
+    pub(crate) fn begin_era(
         &self,
         channels: &[u64],
         switch_at: DateTime<Utc>,
+        scope: &InitScope,
         mut init_for: impl FnMut(u64) -> Result<Initialized, StoreError>,
     ) -> Result<OEra, StoreError> {
         if let Some(era) = self.read_era()? {
@@ -386,7 +392,7 @@ impl OStore {
                 if init.channel != channel {
                     return Err(StoreError::Rejected("init for another channel".into()));
                 }
-                self.init_channel(&init)?;
+                self.init_channel(&init, scope)?;
             }
         }
         let initial_channels = channels.to_vec();
@@ -644,7 +650,7 @@ mod tests {
 
     pub(super) fn sealed(store: &OStore, channels: &[u64]) -> OEra {
         store
-            .begin_era(channels, Utc::now(), |channel| {
+            .begin_fixture_era(channels, Utc::now(), |channel| {
                 Ok(initialized(channel, Vec::new()))
             })
             .unwrap()
@@ -751,18 +757,23 @@ mod tests {
         let runtime = tempfile::tempdir().unwrap();
         let store = enabled(runtime.path());
         let survivor = initialized(1, Vec::new());
-        store.init_channel(&survivor).unwrap();
+        store.init_fixture_channel(&survivor).unwrap();
         let mut asked = Vec::new();
         let era = store
-            .begin_era(&[1, 2], Utc::now(), |channel| {
+            .begin_fixture_era(&[1, 2], Utc::now(), |channel| {
                 asked.push(channel);
                 Ok(initialized(channel, Vec::new()))
             })
             .unwrap();
         assert_eq!((asked, era.initial_channels.clone()), (vec![2], vec![1, 2]));
         assert_eq!(store.read_init(1).unwrap(), Some(survivor.clone()));
-        assert!(store.init_channel(&initialized(1, Vec::new())).is_err());
-        let again = store.begin_era(&[1, 2, 3], Utc::now(), |_| panic!("era already sealed"));
+        assert!(
+            store
+                .init_fixture_channel(&initialized(1, Vec::new()))
+                .is_err()
+        );
+        let again =
+            store.begin_fixture_era(&[1, 2, 3], Utc::now(), |_| panic!("era already sealed"));
         assert_eq!(again.unwrap(), era);
         assert_eq!(store.read_init(1).unwrap(), Some(survivor));
     }
@@ -798,11 +809,15 @@ mod tests {
         }
         assert_eq!(
             store
-                .begin_era(&[1, 2, 3], Utc::now(), |_| panic!("re-init"))
+                .begin_fixture_era(&[1, 2, 3], Utc::now(), |_| panic!("re-init"))
                 .unwrap(),
             era
         );
-        assert!(store.init_channel(&initialized(1, Vec::new())).is_err());
+        assert!(
+            store
+                .init_fixture_channel(&initialized(1, Vec::new()))
+                .is_err()
+        );
         assert!(!dir(1).join(INIT_FILE).exists());
         assert!(store.open_channel(&era, 9).unwrap().is_none());
     }
@@ -819,9 +834,9 @@ mod tests {
         let store = enabled(runtime.path());
         let takeover = InitOrigin::LateCodexTakeover;
         let init = initialized(1, Vec::new());
-        store.init_channel_as(&init, takeover).unwrap();
+        store.init_fixture_channel_as(&init, takeover).unwrap();
         store
-            .init_channel_as(&initialized(2, Vec::new()), takeover)
+            .init_fixture_channel_as(&initialized(2, Vec::new()), takeover)
             .unwrap();
         assert_eq!(
             enabled(runtime.path()).read_era().unwrap(),

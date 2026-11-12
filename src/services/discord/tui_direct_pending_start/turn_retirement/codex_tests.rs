@@ -243,7 +243,7 @@ fn init_takeover(channel: u64, sources: &[crate::services::tui_o::shadow::Source
     };
     let store = store.unwrap().unwrap();
     store
-        .init_channel_as(&init, InitOrigin::LateCodexTakeover)
+        .init_fixture_channel_as(&init, InitOrigin::LateCodexTakeover)
         .unwrap();
 }
 
