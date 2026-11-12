@@ -87,6 +87,10 @@ class InstanceFilesTests(unittest.TestCase):
             self.assertEqual(path.read_text(), sentinel)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         validate_tree(self.root, require_credentials=True)
+        (self.root / "credential/driver_bot_token").write_bytes(
+            (self.root / "credential/claude_bot_token").read_bytes())
+        with self.assertRaisesRegex(InstanceError, "distinct"):
+            validate_tree(self.root, require_credentials=True)
 
     def test_invalid_token_input_is_rejected_without_echoing_it(self):
         cases = (

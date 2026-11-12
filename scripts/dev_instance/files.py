@@ -99,6 +99,13 @@ def validate_tree(root: str | Path, require_credentials: bool = False) -> None:
             try:
                 if set(os.listdir(credentials)) != CREDENTIAL_NAMES:
                     raise InstanceError("all three root credentials are required")
+                values = []
+                for name in sorted(CREDENTIAL_NAMES):
+                    leaf = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=credentials)
+                    with os.fdopen(leaf, "rb") as source:
+                        values.append(_token_bytes(source.read(4098)))
+                if len(set(values)) != 3:
+                    raise InstanceError("credentials must be distinct")
             finally:
                 os.close(credentials)
     finally:
@@ -202,12 +209,7 @@ def read_regular_text(path: str | Path) -> str:
         os.close(parent)
 
 
-def write_credential(root: str | Path, name: str, stream) -> None:
-    root = safe_absolute(root)
-    if name not in CREDENTIAL_NAMES:
-        raise InstanceError("unknown credential name")
-    validate_tree(root)
-    value = stream.read(4098)
+def _token_bytes(value) -> bytes:
     if isinstance(value, str):
         value = value.encode()
     if not isinstance(value, bytes):
@@ -215,6 +217,15 @@ def write_credential(root: str | Path, name: str, stream) -> None:
     value = value.removesuffix(b"\n")
     if not value or len(value) > 4096 or any(c in value for c in (b"\n", b"\r", b"\x00")) or value.strip() != value:
         raise InstanceError("credential input must be one nonempty bounded line")
+    return value
+
+
+def write_credential(root: str | Path, name: str, stream) -> None:
+    root = safe_absolute(root)
+    if name not in CREDENTIAL_NAMES:
+        raise InstanceError("unknown credential name")
+    validate_tree(root)
+    value = _token_bytes(stream.read(4098))
     parent = _open_dir(root / "credential")
     try:
         for existing in os.listdir(parent):
