@@ -1,0 +1,48 @@
+---
+title: "재시도: 잠금 뒤 관측하고 같은 transaction에서 적용"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: 완료
+    lg1: 재시도
+  }
+  class lg0 teal
+  class lg1 blue
+  s0: 시작 전
+  s1: 원본 행 잠금 대기
+  s2: 결과 commit
+  s3: 원본 잠김#183;예산 확인
+  s4: 종료
+  s5: 소유자 잠금 대기
+  s6: worker 잠금 대기
+  s7: 모든 잠금 유지#183;요구 파싱
+  s8: 모든 잠금 뒤 인증 관측
+  s9: 파싱 오류 rollback
+  s10: forwarding#183;시각 관측
+  s11: 관측한 후보로 적용
+  [*] --> s0
+  s0 --> s1: transaction 시작
+  s1 --> s2: 원본 행 잠금
+  s1 --> s3: 원본 행 잠금
+  s2 --> s4: 같은 transaction commit
+  s3 --> s5: family 예산 확인
+  s5 --> s6: 소유자 잠금 또는 기존 비소유 경로
+  s6 --> s7: worker 공유 잠금
+  s7 --> s8: 실행 요구 파싱
+  s7 --> s9: 실행 요구 파싱
+  s8 --> s10: 현재 인증 profile 관측
+  s9 --> s4: 오류 rollback
+  s10 --> s11: 현재 forwarding#183;TTL 관측
+  s11 --> s2: 선택 후보 INSERT 또는 no-target 갱신
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 teal
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s11 blue

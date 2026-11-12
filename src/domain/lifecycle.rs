@@ -1,4 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// Heartbeat grace shared by stale-turn reconciliation and campaign live status.
+pub(crate) const STALE_TURN_GRACE: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
