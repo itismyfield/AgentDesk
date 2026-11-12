@@ -517,8 +517,10 @@ fn binds(sources: &[&SourceId]) -> Vec<u8> {
     sources.iter().enumerate().flat_map(event).collect()
 }
 
+/// A source bound while a non-late adoption waited refuses the channel: the body stays held with
+/// a refusal alarm, nothing retries it here, and only a restart seeds the adoption again.
 #[tokio::test(start_paused = true)]
-async fn a_source_bound_while_waiting_leaves_the_channel_to_legacy() {
+async fn a_source_bound_while_waiting_refuses_the_channel_until_a_restart() {
     for resumed in [false, true] {
         let open = Open::new();
         let runtime = open.harness._runtime.path().to_path_buf();

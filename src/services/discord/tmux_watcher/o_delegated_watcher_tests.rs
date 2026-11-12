@@ -162,7 +162,8 @@ async fn a_refused_watcher_terminal_is_read_again_and_never_finalized() {
             .filter(|frame| (frame.0, frame.1) == (f, end))
             .count()
     };
-    h.until("the refused terminal's range read again", |h| reads(h) >= 3)
+    // Past the rewind cap (3) by two, so a refused retry counted as a rewind would give up first.
+    h.until("the refused terminal's range read again", |h| reads(h) >= 5)
         .await;
     let gave_up = Harness::logged("rewind cap exceeded");
     assert!(
