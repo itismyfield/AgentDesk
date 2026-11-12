@@ -1,6 +1,7 @@
 //! Durable observation metadata has no enqueue, retry, or output authority.
 use serde_json::{Value, json};
-use sqlx::{Acquire, Postgres, Transaction};
+
+pub(super) use crate::db::message_outbox::census::store;
 
 /// Capture provenance only; enqueue success is never a transport observation.
 pub(super) fn capture(source: &str) -> Option<Value> {
@@ -98,42 +99,6 @@ fn restore(stored: &Value) -> Option<Value> {
     tag.entry("producer_process_host")
         .or_insert_with(|| stored["producer"]["host"].clone());
     Some(Value::Object(tag))
-}
-
-/// Isolate optional-column failures without aborting the original enqueue transaction.
-/// A failed savepoint BEGIN makes sqlx roll back the outer transaction, so that error ends the enqueue.
-pub(super) async fn store(
-    tx: &mut Transaction<'_, Postgres>,
-    id: i64,
-    census: Option<&Value>,
-) -> Result<(), sqlx::Error> {
-    let Some(census) = census else {
-        return Ok(());
-    };
-    let mut observation = tx.begin().await?;
-    if sqlx::query("UPDATE message_outbox SET body_census=$2 WHERE id=$1")
-        .bind(id)
-        .bind(census)
-        .execute(&mut *observation)
-        .await
-        .is_err()
-    {
-        // A failed rollback or release still leaves sqlx's queued ROLLBACK TO SAVEPOINT at the
-        // outer depth, so the caller's next statement or COMMIT reaches the server and reports.
-        if observation.rollback().await.is_err() {
-            tracing::warn!(outbox_id = id, "outbox observation rollback failed");
-        }
-        tracing::warn!(
-            outbox_id = id,
-            "outbox observation not stored; delivery will remain unknown"
-        );
-    } else if observation.commit().await.is_err() {
-        tracing::warn!(
-            outbox_id = id,
-            "outbox observation savepoint release failed"
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]

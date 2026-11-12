@@ -364,6 +364,10 @@ campaign-execution/CampaignVerificationOverwrite.cfg	CampaignVerification	FillOn
 campaign-execution/CampaignVerificationQuietSession.cfg	CampaignVerification	-	StopFinishCompletes
 campaign-execution/CampaignVerificationSettleBefore.cfg	CampaignVerification	-	StopFinishCompletes,UnsealedClosed,VSettles
 campaign-execution/CampaignVerificationTwoValues.cfg	CampaignVerification	-	-
+campaign-execution/CampaignVerificationReceipt.cfg	CampaignVerification	-	-
+campaign-execution/CampaignVerificationReceiptChart.cfg	CampaignVerification	-	-
+campaign-execution/CampaignVerificationReceiptEarlyFacts.cfg	CampaignVerification	ReceiptDecisionUsesLockedFacts	-
+campaign-execution/CampaignVerificationReceiptSplitWrite.cfg	CampaignVerification	ReceiptAtomicEffects,ReceiptEffectAtMostOnce,ReceiptRollbackHasNoEffect	-
 input-single-path/InputPathBootCurrent.cfg	InputPath	BootCheckpointBacked,BootNoSilentLoss	-
 input-single-path/InputPathBootDesign.cfg	InputPath	-	-
 input-single-path/InputPathBootDesignTwo.cfg	InputPath	-	-
