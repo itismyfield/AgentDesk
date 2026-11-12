@@ -93,7 +93,7 @@ def scopes(ts, matched):
     _, namespaces = _namespaces(ts, matched)
     metadata, stack = [], []
     for i, token in enumerate(ts):
-        function = next((names[x] for x in reversed(stack) if x in names), "<module>")
+        function = "::".join(names[x] for x in stack if x in names) or "<module>"
         namespace = [namespaces[x] for x in stack if x in namespaces]
         metadata.append((tuple(stack), "::".join([*namespace, function])))
         if token.kind == "code" and token.value == "{":

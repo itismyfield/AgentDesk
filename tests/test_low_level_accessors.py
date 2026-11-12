@@ -117,6 +117,19 @@ class LowLevelAccessorsTest(unittest.TestCase):
         self.assertEqual(self.count(new), 1)
         self.assertTrue(self.check.compare(old, new))
 
+    def test_nested_same_named_function_replacement_is_new_site(self):
+        old = self.scan("""
+            fn a() { fn inner() { herdr_endpoint(id); } }
+            fn b() { fn inner() {} }
+        """)
+        new = self.scan("""
+            fn a() { fn inner() {} }
+            fn b() { fn inner() { herdr_endpoint(id); } }
+        """)
+        self.assertEqual(self.count(old), 1)
+        self.assertEqual(self.count(new), 1)
+        self.assertTrue(self.check.compare(old, new))
+
     def test_cross_file_super_import_alias_is_detected(self):
         self.write("src/lib.rs", """
             use crate::config::session_hosts::herdr_endpoint as raw;
@@ -361,7 +374,7 @@ class LowLevelAccessorsTest(unittest.TestCase):
             fn inner() { herdr_endpoint(inside); }
             herdr_endpoint(outside);
         }""")
-        self.assertEqual({row["enclosing_fn"] for row in rows}, {"outer", "inner"})
+        self.assertEqual({row["enclosing_fn"] for row in rows}, {"outer", "outer::inner"})
 
     def test_relabel_allows_only_identical_hash_multiset(self):
         old = [self.row()]
