@@ -156,6 +156,16 @@ input-single-path/InputPathStopNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopNotSentLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopBusyNoGateLive.cfg	InputPath	-	StoppedLeaves
 input-single-path/InputPathStopProofOverStopLive.cfg	InputPath	-	StoppedLeaves
+outbound-port/RoutineRunBeforeHeld.cfg	RoutineRun	-	EveryRunTerminates
+outbound-port/RoutineRunBeforeRetry.cfg	RoutineRun	NoDuplicateTurn,SuccessfulAgentExactlyOne	-
+outbound-port/RoutineRunChannel.cfg	RoutineRun	-	-
+outbound-port/RoutineRunDropHeld.cfg	RoutineRun	NoSilentLoss	-
+outbound-port/RoutineRunHeadless.cfg	RoutineRun	-	-
+outbound-port/RoutineRunNoDeadlineCancel.cfg	RoutineRun	NoLateDispatch	-
+outbound-port/RoutineRunNoRecoveryCancel.cfg	RoutineRun	NoLateDispatch	-
+outbound-port/RoutineRunResendUnknown.cfg	RoutineRun	NoDuplicateTurn,SuccessfulAgentExactlyOne	-
+outbound-port/RoutineRunScript.cfg	RoutineRun	-	-
+outbound-port/RoutineRunThread.cfg	RoutineRun	-	-
 session-lifecycle/HerdrBusyHandoffAfterActiveEntry.cfg	HerdrBusyHandoff	-	-
 session-lifecycle/HerdrBusyHandoffAfterActiveRace.cfg	HerdrBusyHandoff	-	-
 session-lifecycle/HerdrBusyHandoffAfterBusy.cfg	HerdrBusyHandoff	-	-
