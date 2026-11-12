@@ -18,6 +18,9 @@ fn test_instance_tmux_entries_use_private_socket_and_refuse_foreign_targets() {
   for argument do printf 'ARG=%s\n' "$argument"; done
   printf 'TMUX=%s\nTMUX_PANE=%s\nTMUX_TMPDIR=%s\n' "${TMUX-unset}" "${TMUX_PANE-unset}" "$TMUX_TMPDIR"
 } >> "$ADK_I2_TMUX_LOG"
+case " $* " in
+  *" attach-session "*) printf '%%begin 1 1 0\n%%end 1 1 0\n'; cat >/dev/null; exit 0;;
+esac
 while [ "$1" = '-S' ] || [ "$1" = '-u' ]; do
   if [ "$1" = '-S' ]; then shift 2; else shift; fi
 done
@@ -62,6 +65,16 @@ esac
         .filter(|block| !block.is_empty())
         .collect();
     assert!(!blocks.is_empty(), "missing real entry calls: {calls}");
+    let attaches: Vec<_> = blocks
+        .iter()
+        .filter(|block| block.contains("ARG=attach-session\n"))
+        .collect();
+    assert_eq!(
+        attaches.len(),
+        1,
+        "normal control attach did not spawn: {calls}"
+    );
+    assert!(attaches[0].contains(&format!("ARG=={name}\n")));
     for call in blocks {
         assert!(
             call.contains(&format!(
@@ -143,16 +156,24 @@ fn exercise_instance_entries() {
             .unwrap()
             .success()
     );
-    let log = std::env::var_os("ADK_I2_TMUX_LOG").unwrap();
-    let before = std::fs::read(&log).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
+    runtime
+        .block_on(
+            crate::services::claude::session_handoff::pinned_tmux::scoped_control_attach_for_test(
+                &fake, &name,
+            ),
+        )
+        .unwrap();
+    let log = std::env::var_os("ADK_I2_TMUX_LOG").unwrap();
+    let before = std::fs::read(&log).unwrap();
     let refusal = runtime
         .block_on(
-            crate::services::claude::session_handoff::pinned_tmux::scoped_control_refusal_for_test(
+            crate::services::claude::session_handoff::pinned_tmux::scoped_control_attach_for_test(
                 &instance.root.join("absent-control-program"),
+                "AgentDesk-release",
             ),
         )
         .unwrap_err();

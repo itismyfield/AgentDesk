@@ -12,6 +12,7 @@ static INSTANCE: OnceLock<Result<TestInstance, String>> = OnceLock::new();
 #[derive(Debug)]
 pub(crate) struct TestInstance {
     pub(crate) root: PathBuf,
+    config_path: PathBuf,
     pub(crate) instance_id: String,
     pub(crate) tmux: TmuxHost,
     pub(crate) herdr: HerdrHost,
@@ -68,6 +69,18 @@ pub(crate) fn current() -> Result<Option<&'static TestInstance>, String> {
         None if requested() => Err(rejected()),
         None => Ok(None),
     }
+}
+
+pub(crate) fn configure_reentry_command(command: &mut Command) -> Result<(), String> {
+    if let Some(instance) = current()? {
+        command
+            .env(MARKER, instance.root.join("manifest.json"))
+            .env("AGENTDESK_ROOT_DIR", &instance.root)
+            .env("AGENTDESK_CONFIG", &instance.config_path);
+    } else {
+        command.env_remove("AGENTDESK_ROOT_DIR");
+    }
+    Ok(())
 }
 
 fn rejected() -> String {
@@ -218,6 +231,7 @@ fn load_instance_declaration(
     }
     Ok(TestInstance {
         root: root.into(),
+        config_path: config_path.into(),
         instance_id: id.into(),
         tmux,
         herdr,

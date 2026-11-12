@@ -117,12 +117,13 @@ impl Control {
 }
 
 #[cfg(test)]
-pub(crate) async fn scoped_control_refusal_for_test(
+pub(crate) async fn scoped_control_attach_for_test(
     program: &std::path::Path,
+    logical: &str,
 ) -> Result<(), String> {
-    Control::attach_with(std::process::Command::new(program), "AgentDesk-release")
-        .await
-        .map(|_| ())
+    let control = Control::attach_with(std::process::Command::new(program), logical).await?;
+    control.finish().await;
+    Ok(())
 }
 
 fn id(value: &str, prefix: char) -> bool {
