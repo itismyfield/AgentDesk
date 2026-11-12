@@ -17,9 +17,15 @@ use crate::services::tui_o::shadow::ShadowProvider::{self, Claude, Codex};
 use crate::services::tui_o::store::{OStore, StoreConfig};
 use crate::services::tui_o::writer::activation::{activate_codex_takeover, activate_with};
 use crate::services::tui_o::writer::host::{Custody, FencedFacts, HostIo};
+use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 /// One open intake row through the production insert, as an accepted Discord message leaves it.
 async fn open_intake(pool: &PgPool, channel: u64, provider: &str) -> i64 {
+    open_intake_as(pool, channel, provider, &format!("message-{channel}")).await
+}
+
+/// As `open_intake`, for the Discord message `message`.
+async fn open_intake_as(pool: &PgPool, channel: u64, provider: &str, message: &str) -> i64 {
     let payload = InsertPendingPayload {
         target_instance_id: "worker".into(),
         forwarded_by_instance_id: "leader".into(),
@@ -27,7 +33,7 @@ async fn open_intake(pool: &PgPool, channel: u64, provider: &str) -> i64 {
         execution_requirements: json!({}),
         attachment_refs: json!([]),
         channel_id: channel.to_string(),
-        user_msg_id: format!("message-{channel}"),
+        user_msg_id: message.into(),
         replay_source_message_ids: None,
         request_owner_id: "user".into(),
         request_owner_name: None,
@@ -83,7 +89,8 @@ async fn fenced(host: &impl HostIo, channel: u64, provider: ShadowProvider) -> F
 }
 
 /// Legacy's open intake row and pending start stop only the strict entry; terminal custody, a
-/// queued body or another node's session still stop the Codex entry.
+/// queued body, another node's session or a row not of the turn Legacy's mailbox runs still stop
+/// the Codex entry.
 #[test]
 fn codex_takeover_passes_open_intake_and_a_pending_start_the_strict_entry_refuses_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -101,19 +108,15 @@ async fn takeover() {
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let local = crate::services::cluster::node_registry::SELF_INSTANCE_ID.get();
     let local = local.map_or("custody-local", String::as_str);
-    let host = test_host::over(shared, Duration::ZERO, Some(local));
+    let host = test_host::over(shared.clone(), Duration::ZERO, Some(local));
     let stores = tempfile::tempdir().unwrap();
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, stores.path());
     let store = store.unwrap().unwrap();
     let (codex, claude, terminal, queued) = (64_700_401, 64_700_402, 64_700_403, 64_700_404);
     let (held, foreign) = (64_700_405, 64_700_406);
     for (channel, provider) in [(codex, Codex), (claude, Claude), (terminal, Codex)] {
-        open_intake(
-            &pool,
-            channel,
-            if provider == Codex { "codex" } else { "claude" },
-        )
-        .await;
+        let name = if provider == Codex { "codex" } else { "claude" };
+        open_intake_as(&pool, channel, name, &channel.to_string()).await;
         persist(&pending(provider, channel)).unwrap();
         assert_eq!(
             host.local_custody(channel, provider),
@@ -178,6 +181,7 @@ async fn takeover() {
     );
 
     let refusals = [
+        (codex, "1 open intake rows"),
         (terminal, "Legacy retains delivery custody"),
         (queued, "1 queued Legacy bodies"),
         (foreign, "1 sessions on another node"),
@@ -207,12 +211,18 @@ async fn takeover() {
         assert!(!store.has_channel_dir(channel));
     }
 
+    // Once the mailbox runs the turn of the row's message, that row stops blocking.
+    let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+    let (owner, message) = (UserId::new(1), MessageId::new(codex));
+    let claim = crate::services::discord::mailbox_try_start_turn;
+    assert!(claim(&shared, ChannelId::new(codex), token, owner, message).await);
     let FencedFacts {
         hold,
         facts,
         queued_bodies,
     } = fenced(&host, codex, Codex).await;
     hold.release().await.unwrap();
+    assert_eq!((facts.open_intake, facts.own_turn_intake), (1, 1));
     let candidate = Candidate::new(Adoption::Deferred);
     let custody = || Ok(host.local_custody(codex, Codex)?.blocks_takeover());
     let codex_entry = activate_codex_takeover(

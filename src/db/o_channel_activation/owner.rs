@@ -8,6 +8,7 @@ pub(crate) async fn facts(
     channel: &str,
     executor: &str,
     generation: i64,
+    own_turn: Option<&str>,
 ) -> Result<(IntakeFence, ActivationRows, i64), sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET LOCAL lock_timeout='2s'")
@@ -24,6 +25,8 @@ pub(crate) async fn facts(
         .await?;
     let open_intake = sqlx::query_scalar(AssertSqlSafe(format!("SELECT COUNT(*) FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND NOT replay_only AND routing_receipt_id IS NULL AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})")))
         .bind(provider).bind(channel).fetch_one(&mut *tx).await?;
+    let own_turn_intake = sqlx::query_scalar(AssertSqlSafe(format!("SELECT COUNT(*) FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND user_msg_id=$3 AND NOT replay_only AND routing_receipt_id IS NULL AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})")))
+        .bind(provider).bind(channel).bind(own_turn).fetch_one(&mut *tx).await?;
     let queued = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE target=$1 AND source='headless_turn' AND status IN ('pending','processing')")
         .bind(format!("channel:{channel}")).fetch_one(&mut *tx).await?;
     Ok((
@@ -32,6 +35,7 @@ pub(crate) async fn facts(
         },
         ActivationRows {
             open_intake,
+            own_turn_intake,
             foreign_sessions: 0,
         },
         queued,

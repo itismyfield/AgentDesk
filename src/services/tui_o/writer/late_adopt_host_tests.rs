@@ -263,6 +263,7 @@ async fn late_adopt_final_blocker_wins_over_transient_and_corruption_does_not_wa
         let f = Late::new();
         *f.io.facts.lock().unwrap() = Ok(ActivationFacts {
             open_intake: 1,
+            own_turn_intake: 0,
             runner_sessions: i64::from(!override_node),
             node_override: override_node.then(|| "other node".into()),
         });

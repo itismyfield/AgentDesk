@@ -391,6 +391,8 @@ impl LegacyView for Delivered {
 struct Rest {
     http: Arc<serenity::Http>,
     posts: Arc<Mutex<Vec<String>>>,
+    /// The number of messages posted so far.
+    posted: Arc<watch::Sender<usize>>,
     server: tokio::task::AbortHandle,
 }
 
@@ -398,10 +400,11 @@ impl Rest {
     async fn start(channel: u64) -> Self {
         use axum::{body::Bytes, http::Method, http::Uri, response::IntoResponse};
         let posts: Arc<Mutex<Vec<String>>> = Arc::default();
-        let recorded = Arc::clone(&posts);
+        let posted = Arc::new(watch::channel(0).0);
+        let (recorded, counted) = (Arc::clone(&posts), Arc::clone(&posted));
         let app = axum::Router::new().fallback(axum::routing::any(
             move |method: Method, uri: Uri, body: Bytes| {
-                let recorded = Arc::clone(&recorded);
+                let (recorded, counted) = (Arc::clone(&recorded), Arc::clone(&counted));
                 async move {
                     let bot = json!({"id": "1", "username": "o-bot", "discriminator": "0001",
                         "avatar": null, "bot": true});
@@ -416,6 +419,7 @@ impl Rest {
                     let content = payload["content"].as_str().unwrap_or_default().to_owned();
                     let mut posts = recorded.lock().unwrap();
                     posts.push(content.clone());
+                    counted.send_replace(posts.len());
                     let message = json!({"id": (900_001 + posts.len() as u64).to_string(),
                         "channel_id": channel.to_string(), "content": content, "author": bot,
                         "timestamp": "2026-11-01T00:00:00+00:00", "edited_timestamp": null,
@@ -436,6 +440,7 @@ impl Rest {
         Self {
             http: Arc::new(http),
             posts,
+            posted,
             server: server.abort_handle(),
         }
     }
@@ -518,7 +523,8 @@ async fn busy_takeover() {
 
     let local = crate::services::cluster::node_registry::SELF_INSTANCE_ID.get();
     let local = local.map_or("takeover-local", String::as_str);
-    let prepared = test_host::claude_parts(&shared, Arc::clone(&rest.http), local);
+    let kind = ProviderKind::Claude;
+    let prepared = test_host::rest_parts(&shared, &kind, Arc::clone(&rest.http), local);
     let Ok(gateway) = Arc::try_unwrap(prepared.io) else {
         panic!("the gateway host is shared")
     };
@@ -792,3 +798,6 @@ async fn edited_placeholder_takeover() {
     pool.close().await;
     fixture.drop().await;
 }
+
+#[path = "o_writer_host_intake_takeover_tests.rs"]
+mod intake;
