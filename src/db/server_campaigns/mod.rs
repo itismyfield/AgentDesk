@@ -1,12 +1,18 @@
+use crate::services::campaign_execution::control;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Row, Transaction, types::Json};
 
-use crate::services::campaign_execution::{
-    control,
+use crate::domain::campaign::{
     definition::{self, DefinitionInput},
-    model::*,
+    model::{
+        CampaignControl, CampaignState, Command, CommandEnvelope, CommandResult, Decision, Event,
+        EventKind, EvidenceWrite, NodeRuntime, Rejection, RejectionCode, Run, command_fingerprint,
+    },
 };
+
+#[cfg(test)]
+use crate::domain::campaign::model::*;
 
 pub mod evidence_store;
 mod read;
@@ -155,7 +161,7 @@ async fn apply(
             "create:{}",
             blake3::hash(&serde_json::to_vec(&(id, input))?).to_hex()
         ),
-        Request::Command(command) => format!("command:{}", control::command_fingerprint(command)?),
+        Request::Command(command) => format!("command:{}", command_fingerprint(command)?),
     };
     sqlx::query(
         "INSERT INTO server_campaign_keys (campaign_id) VALUES ($1) ON CONFLICT DO NOTHING",

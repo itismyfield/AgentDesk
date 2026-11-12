@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction, types::Json};
 
-use crate::services::campaign_execution::{
+use crate::domain::campaign::{
     candidate_seal::CandidateSeal,
     evidence::{EvidenceDecision, EvidenceEnvelope, EvidenceStatus},
     model::AttemptBinding,

@@ -74,6 +74,19 @@ async fn enqueue(shared: &Arc<SharedData>, channel_id: ChannelId, item: Interven
     assert!(outcome.enqueued, "fixture enqueue refused: {outcome:?}");
 }
 
+// Older snapshots can contain this copy; current admission refuses reserved ids.
+async fn legacy_copy(shared: &Arc<SharedData>, channel: ChannelId, mut item: Intervention) {
+    item.source_message_queued_generations = item.source_message_queued_generations();
+    item.source_text_segments = item.source_text_segments();
+    shared
+        .mailbox(channel)
+        .replace_queue(
+            vec![item],
+            queue_persistence_context(shared, &ProviderKind::Claude, channel),
+        )
+        .await;
+}
+
 async fn actor_take(shared: &Arc<SharedData>, channel_id: ChannelId) -> TakeNextSoftResult {
     shared
         .mailbox(channel_id)
@@ -380,8 +393,8 @@ async fn an_absorbed_copy_requeued_before_the_claim_is_settled_by_the_merged_del
             .map(|item| item.source_message_ids.clone()),
         Some(vec![MessageId::new(h), MessageId::new(p)])
     );
-    // A catch-up copy of H lands in the dequeue -> claim window.
-    enqueue(&shared, channel_id, queued(h, "absorbed request")).await;
+    // Restore a stale copy from before reserved-id admission was enforced.
+    legacy_copy(&shared, channel_id, queued(h, "absorbed request")).await;
     let token = Arc::new(CancelToken::new());
     let nonce = token.turn_nonce().expect("turn nonce").to_owned();
     assert!(
@@ -462,14 +475,14 @@ async fn absorbed_copy_merge(delayed: bool, restore: &str) {
             .map(|item| item.source_message_ids.clone()),
         Some(vec![MessageId::new(h), MessageId::new(p)])
     );
-    // A catch-up copy of H lands in the dequeue -> claim window.
+    // Restore a stale copy from before reserved-id admission was enforced.
     let mut copy = queued(h, "absorbed request");
     copy.merge_consecutive = true;
     copy.created_at -= std::time::Duration::from_secs(2);
     if let Some(us) = &mut copy.source_message_queued_generations[0].enqueued_at_epoch_us {
         *us -= 2_000_000;
     }
-    enqueue(&shared, channel_id, copy).await;
+    legacy_copy(&shared, channel_id, copy).await;
     let token = Arc::new(CancelToken::new());
     let nonce = token.turn_nonce().expect("turn nonce").to_owned();
     assert!(

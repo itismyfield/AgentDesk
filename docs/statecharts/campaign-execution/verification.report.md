@@ -4,6 +4,8 @@ Code reference: `975200a8e73aa169b22f4d5c91e90bc54dd93693`. Design reference: bu
 The commands that record verification facts do not exist yet, and the execution path is dormant in production.
 This is a design model: it checks the rules the new commands must follow against the landed state machine. It is not a test of the code.
 
+Current ownership: the `model.rs` and `verification_run.rs` value contracts below now live in `src/domain/campaign/model.rs` and `src/domain/campaign/verification_run.rs`. The service paths re-export the same values; numbered findings retain the historical code reference above.
+
 ## What is modelled
 
 One node, one registered verification execution (V) with a preparation phase and a test phase, the Work attempt that owns V and the Review attempt that may consume it.
