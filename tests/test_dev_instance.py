@@ -234,6 +234,51 @@ class InstanceDeclarationTests(unittest.TestCase):
         self.assertEqual(child.signals, 1)
         self.assertIsNotNone(child.poll())
 
+    def test_failed_herdr_start_reaps_owned_child_or_returns_its_handle(self):
+        from scripts.dev_instance.host import start_herdr, HerdrCleanupPending, OWNER_FILE
+        binary = self.home / "fake-herdr"
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o700)
+        for held in (False, True):
+            self.instance_id = str(uuid.uuid4())
+            manifest = self.prepare()
+
+            class Child:
+                pid = 812401
+                signals = []
+                ended = False
+
+                def poll(self):
+                    return 0 if self.ended else None
+
+                def terminate(self):
+                    self.signals.append("term")
+
+                def kill(self):
+                    self.signals.append("kill")
+                    self.ended = not held
+
+                def wait(self, timeout):
+                    if self.ended:
+                        return 0
+                    raise subprocess.TimeoutExpired("fake-herdr", timeout)
+
+            child = Child()
+
+            def unavailable(pid):
+                raise InstanceError("identity unavailable")
+
+            expected = HerdrCleanupPending if held else InstanceError
+            with self.assertRaises(expected) as failure:
+                start_herdr(self.base, self.instance_id, binary, {},
+                            spawn=lambda *args, **kwargs: child, identity=unavailable)
+            self.assertEqual(child.signals, ["term", "kill"])
+            self.assertFalse((Path(manifest["root"]) / OWNER_FILE).exists())
+            if held:
+                self.assertIs(failure.exception.child, child)
+            else:
+                self.assertIsNotNone(child.poll())
+
     def test_missing_feature_flags_are_unevaluable_before_creating_root(self):
         selected = profile()
         del selected["features"]

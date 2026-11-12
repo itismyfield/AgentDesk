@@ -15,6 +15,7 @@ API_PORTS = range(18791, 18807)
 PG_PORTS = range(25432, 25448)
 MANIFEST_NAME = "manifest.json"
 RECEIPT_NAME = "receipt.json"
+HOST_DIRS = ("runtime/tmux", "runtime/herdr", "herdr-home")
 
 
 def reject_database_env(ambient):
@@ -139,6 +140,8 @@ def prepare(base, instance_id, worktree, profile, ambient, api_port=None, pg_por
                                  allocate_port(api_port, API_PORTS), allocate_port(pg_port, PG_PORTS))
     safe_absolute(base).mkdir(mode=0o700, parents=True, exist_ok=True)
     create_layout(root)
+    for relative in HOST_DIRS:
+        (root / relative).mkdir(mode=0o700)
     for provider in ("claude", "codex"):
         write_private_text(root, f"config/agents/{provider}.md", "Isolated test agent.\n")
     config = build_config(root, profile, manifest["api"]["port"], manifest["postgres"]["port"], instance_id)
@@ -152,7 +155,7 @@ def validate(base, instance_id, ambient, require_credentials=False, check_ports=
     reject_database_env(ambient)
     root = instance_root(base, instance_id)
     validate_tree(root, require_credentials=require_credentials)
-    if any(not (root / relative).is_dir() for relative in LAYOUT_DIRS):
+    if any(not (root / relative).is_dir() for relative in (*LAYOUT_DIRS, *HOST_DIRS)):
         raise InstanceError("declared instance directory is missing")
     manifest = read_json(root / MANIFEST_NAME)
     try:

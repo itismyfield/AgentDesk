@@ -14,6 +14,24 @@ OWNER_FILE = "runtime/herdr-owner.json"
 HERDR_CONFIG = "[session]\nresume_agents_on_restore = false\n"
 
 
+class HerdrCleanupPending(InstanceError):
+    def __init__(self, child):
+        super().__init__("owned daemon cleanup pending")
+        self.child = child
+
+
+def _stop_owned(child):
+    child.terminate()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            raise HerdrCleanupPending(child) from None
+
+
 def process_start(pid):
     """Read only the child PID returned by this wrapper's spawn handle."""
     if sys.platform == "darwin":
@@ -52,11 +70,7 @@ class HerdrOwner:
             raise InstanceError("daemon receipt changed; cleanup refused")
         if self.identity(self.child.pid) != self.record["daemon"]["start_identity"]:
             raise InstanceError("daemon identity changed; cleanup refused")
-        self.child.terminate()
-        try:
-            self.child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            raise InstanceError("owned daemon still running") from None
+        _stop_owned(self.child)
 
 
 def start_herdr(base, instance_id, binary, ambient, *, spawn=subprocess.Popen,
@@ -98,7 +112,6 @@ def start_herdr(base, instance_id, binary, ambient, *, spawn=subprocess.Popen,
     except Exception:
         # Only the handle just spawned is available here; no PID is recovered from disk.
         if child.poll() is None:
-            child.terminate()
-            child.wait(timeout=5)
+            _stop_owned(child)
         raise
     return HerdrOwner(manifest, child, identity, record)
