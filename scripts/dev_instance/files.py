@@ -16,6 +16,9 @@ LAYOUT_DIRS = (
     "credential", "postgres", "postgres/data", "postgres/socket",
     "routines", "config/agents", "workspaces/claude", "workspaces/codex",
     "data/memory", "data/memory/shared", "data/memory/long-term", "data/memory/auto",
+    "home", "tmp", "xdg", "home/.adk", "home/.adk/profiles",
+    "home/.adk/profiles/claude", "home/.adk/profiles/claude/test-claude",
+    "home/.adk/profiles/codex", "home/.adk/profiles/codex/test-codex",
 )
 
 

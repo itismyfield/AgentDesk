@@ -6,7 +6,7 @@ import socket
 import subprocess
 from pathlib import Path
 
-from .config import HERDR_CONFIG, build_config, declared_hosts
+from .config import HERDR_CONFIG, build_config, build_org, declared_hosts, provider_home
 from .files import (InstanceError, LAYOUT_DIRS, create_layout, instance_root, read_regular_text,
                     safe_absolute, validate_tree, write_private_json, write_private_text)
 from .profile import same_json, validate_profile
@@ -108,7 +108,14 @@ def declared_manifest(base, instance_id, worktree, head, profile, api_port, pg_p
 def child_environment(manifest, ambient):
     reject_database_env(ambient)
     # Build from constants and validated declarations; ambient secrets never enter.
-    environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+    root = safe_absolute(manifest["root"])
+    expected = declared_manifest(root.parent, manifest["instance_id"], manifest["worktree"],
+                                 manifest["head"], manifest["profile"],
+                                 manifest["api"]["port"], manifest["postgres"]["port"])
+    if not same_json(manifest, expected):
+        raise InstanceError("child environment differs from its declaration")
+    environment = {"PATH": str(safe_absolute(manifest["worktree"]) / "target/debug") + ":/usr/bin:/bin",
+                   "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
     flags = validate_profile(manifest["profile"])
     if not same_json(flags, manifest["applied_env"]):
         raise InstanceError("applied environment differs from profile")
@@ -119,6 +126,12 @@ def child_environment(manifest, ambient):
         "ADK_API_URL": manifest["api"]["self_url"],
         "AGENTDESK_TEST_MANIFEST": str(Path(manifest["root"]) / MANIFEST_NAME),
         "TMUX_TMPDIR": manifest["hosts"]["tmux"]["tmpdir"],
+        "HOME": str(root / "home"), "TMPDIR": str(root / "tmp"),
+        "XDG_CONFIG_HOME": str(root / "xdg"),
+        "CLAUDE_CONFIG_DIR": str(provider_home(root, "claude")),
+        "CODEX_HOME": str(provider_home(root, "codex")),
+        "AGENTDESK_DCSERVER_LABEL": "com.agentdesk.test." + manifest["instance_id"],
+        "AGENTDESK_RELEASE_TMUX_SESSION": "AdkTest-" + manifest["instance_id"] + "-dcserver",
     })
     return environment
 
@@ -147,6 +160,7 @@ def prepare(base, instance_id, worktree, profile, ambient, api_port=None, pg_por
         write_private_text(root, f"config/agents/{provider}.md", "Isolated test agent.\n")
     config = build_config(root, profile, manifest["api"]["port"], manifest["postgres"]["port"], instance_id)
     write_private_json(root, "config/agentdesk.yaml", config)
+    write_private_json(root, "config/org.yaml", build_org(root, profile))
     write_private_json(root, MANIFEST_NAME, manifest)
     write_private_json(root, RECEIPT_NAME, receipt_for(manifest))
     return manifest
@@ -170,6 +184,8 @@ def validate(base, instance_id, ambient, require_credentials=False, check_ports=
         if not same_json(config, build_config(root, manifest["profile"], manifest["api"]["port"],
                                              manifest["postgres"]["port"], instance_id)):
             raise InstanceError("explicit config differs from its declaration")
+        if not same_json(read_json(root / "config/org.yaml"), build_org(root, manifest["profile"])):
+            raise InstanceError("org catalog differs from its declaration")
     except (KeyError, TypeError, AttributeError):
         raise InstanceError("invalid startup manifest") from None
     if check_ports:

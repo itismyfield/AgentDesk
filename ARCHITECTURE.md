@@ -141,6 +141,9 @@ src/
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── test_instance/
+│   │   ├── api_boundary_tests.rs
+│   │   ├── environment.rs
+│   │   ├── environment_tests.rs
 │   │   └── host_scope_tests.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
@@ -3541,6 +3544,7 @@ src/
 │   │   ├── memento.rs
 │   │   ├── memento_anchor.rs
 │   │   ├── memento_endpoint.rs
+│   │   ├── memento_instance_tests.rs
 │   │   ├── memento_scope.rs
 │   │   ├── memento_scope_tests.rs
 │   │   ├── memento_throttle.rs
@@ -3659,6 +3663,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── direct_spawn_tests.rs
 │   │   ├── fallback.rs
+│   │   ├── instance_env_tests.rs
 │   │   ├── queries.rs
 │   │   └── repository.rs
 │   ├── provider_cli/

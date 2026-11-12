@@ -175,6 +175,9 @@ impl ProcessBackend {
         config: &SessionConfig,
         apply_command_env: impl FnOnce(&mut Command),
     ) -> Result<SessionHandle, String> {
+        for path in [&config.output_path, &config.prompt_path, &config.working_dir] {
+            crate::config::test_instance::environment::validate_path(std::path::Path::new(path))?;
+        }
         // 1. Ensure output file exists (empty)
         let output = std::fs::OpenOptions::new()
             .create(true)
@@ -228,6 +231,7 @@ impl ProcessBackend {
             .stdout(Stdio::null()) // wrapper writes to file, not stdout
             .stderr(Stdio::inherit()); // show wrapper logs
         apply_command_env(&mut cmd);
+        crate::config::test_instance::environment::configure_child_command(&mut cmd)?;
 
         #[cfg(unix)]
         {

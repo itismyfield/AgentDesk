@@ -1182,7 +1182,7 @@ fn execute_streaming_direct(
         ProviderKind::Codex,
         report_channel_id,
     )?;
-    crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay);
+    crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay)?;
     crate::services::process::configure_child_process_group(&mut command);
 
     let mut child = command
@@ -1438,7 +1438,7 @@ fn execute_streaming_local_tmux(
         tmux_session_name,
     )?;
     let auth_env_lines =
-        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay)?;
     let session_exists = tmux_present_bool(tmux_session_name);
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,

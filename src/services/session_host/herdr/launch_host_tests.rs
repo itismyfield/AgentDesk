@@ -779,7 +779,7 @@ fn test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreig
     use crate::config::test_instance;
     if !test_instance::requested() {
         let (_temp, root) = test_instance::tests::fixture();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::config::test_instance::tests::command(&root)
             .args(["--exact", concat!(module_path!(),
                 "::test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreign_receipts")
                 .strip_prefix("agentdesk::").unwrap(), "--nocapture"])

@@ -443,6 +443,99 @@ class InstanceDeclarationTests(unittest.TestCase):
                 finally:
                     path.write_text(original)
 
+    def test_child_environment_pins_provider_homes_and_service_identity(self):
+        manifest = self.prepare()
+        root = Path(manifest["root"])
+        ambient = {key: SENTINEL for key in (
+            "HOME", "TMPDIR", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
+            "AGENTDESK_DCSERVER_LABEL", "AGENTDESK_RELEASE_TMUX_SESSION",
+            "MEMENTO_ACCESS_KEY", "OP_SERVICE_ACCOUNT_TOKEN", "DISCORD_TOKEN",
+        )}
+        child = subprocess.run(
+            ["/bin/sh", "-c", 'exec "$1" -c "import os,json; print(json.dumps(dict(os.environ)))"',
+             "fake-provider", sys.executable],
+            env=child_environment(manifest, ambient), capture_output=True, text=True, check=True)
+        observed = json.loads(child.stdout)
+        expected = {
+            "HOME": str(root / "home"), "TMPDIR": str(root / "tmp"),
+            "XDG_CONFIG_HOME": str(root / "xdg"),
+            "CLAUDE_CONFIG_DIR": str(root / "home/.adk/profiles/claude/test-claude"),
+            "CODEX_HOME": str(root / "home/.adk/profiles/codex/test-codex"),
+            "AGENTDESK_DCSERVER_LABEL": "com.agentdesk.test." + self.instance_id,
+            "AGENTDESK_RELEASE_TMUX_SESSION": "AdkTest-" + self.instance_id + "-dcserver",
+            "PATH": str(self.worktree / "target/debug") + ":/usr/bin:/bin",
+            "AGENTDESK_API_URL": manifest["api"]["self_url"],
+            "ADK_API_URL": manifest["api"]["self_url"],
+            "AGENTDESK_TEST_MANIFEST": str(root / "manifest.json"),
+        }
+        for key, value in expected.items():
+            self.assertEqual(observed.get(key), value, key)
+        self.assertNotIn(SENTINEL, child.stdout + child.stderr)
+        for key in ("HOME", "TMPDIR", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+            self.assertTrue(Path(observed[key]).is_dir(), key)
+        self.assertNotEqual(observed["HOME"], manifest["hosts"]["herdr"]["home"])
+
+    def test_prepared_org_catalog_binds_only_named_instance_profiles(self):
+        manifest = self.prepare()
+        root = Path(manifest["root"])
+        org = read_json(root / "config/org.yaml")
+        config = read_json(root / "config/agentdesk.yaml")
+        self.assertEqual(set(org["provider_auth_profiles"]), {"test-claude", "test-codex"})
+        self.assertEqual(set(org["channels"]["by_id"]), set(manifest["profile"]["channels"]))
+        for provider, channel in zip(("claude", "codex"), manifest["profile"]["channels"]):
+            named = "test-" + provider
+            home = str(root / "home/.adk/profiles" / provider / named)
+            self.assertEqual(org["provider_auth_profiles"][named], {
+                "provider": provider, "home": home, "env": {},
+            })
+            self.assertEqual(org["provider_auth_primary_profiles"][provider], named)
+            self.assertEqual(org["agents"][provider]["auth_profile"], named)
+            self.assertEqual(org["channels"]["by_id"][channel]["auth_profile"], named)
+            agent = next(item for item in config["agents"] if item["provider"] == provider)
+            self.assertEqual(agent["auth_profile"], named)
+            self.assertEqual(agent["channels"][provider]["auth_profile"], named)
+            self.assertEqual(list(Path(home).iterdir()), [], "independent auth remains unprepared")
+        self.assertEqual(validate(self.base, self.instance_id, {}), manifest)
+
+    def test_child_environment_refuses_changed_declaration_before_launch(self):
+        manifest = self.prepare()
+        for mutate in (
+            lambda value: value["api"].update(self_url="http://127.0.0.1:8791"),
+            lambda value: value.update(config_path=str(self.home / "foreign.json")),
+            lambda value: value["hosts"]["tmux"].update(tmpdir=str(self.home / "foreign-tmux")),
+        ):
+            changed = copy.deepcopy(manifest)
+            mutate(changed)
+            with self.assertRaises(InstanceError):
+                child_environment(changed, {})
+
+    def test_org_drift_and_legacy_preparation_cannot_pass_validation(self):
+        manifest = self.prepare()
+        root = Path(manifest["root"])
+        path = root / "config/org.yaml"
+        original = path.read_text()
+        for mutate in (
+            lambda org: org["provider_auth_profiles"]["test-claude"].update(home=str(self.home)),
+            lambda org: org["provider_auth_primary_profiles"].update(claude="default"),
+            lambda org: org["agents"]["codex"].update(auth_profile="default"),
+            lambda org: org["channels"]["by_id"]["900004"].update(auth_profile="unknown"),
+        ):
+            changed = json.loads(original)
+            mutate(changed)
+            path.write_text(json.dumps(changed))
+            try:
+                with self.assertRaises(InstanceError):
+                    validate(self.base, self.instance_id, {})
+            finally:
+                path.write_text(original)
+        path.unlink()
+        with self.assertRaises(InstanceError):
+            validate(self.base, self.instance_id, {})
+        path.write_text(original)
+        (root / "home/.adk/profiles/codex/test-codex").rmdir()
+        with self.assertRaisesRegex(InstanceError, "directory is missing"):
+            validate(self.base, self.instance_id, {})
+
     def test_missing_explicit_config_has_no_sibling_fallback(self):
         self.prepare()
         root = self.base / self.instance_id

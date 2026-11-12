@@ -6,6 +6,8 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 use serde_json::Value;
 
+pub(crate) mod environment;
+
 const MARKER: &str = "AGENTDESK_TEST_MANIFEST";
 static INSTANCE: OnceLock<Result<TestInstance, String>> = OnceLock::new();
 
@@ -16,6 +18,7 @@ pub(crate) struct TestInstance {
     pub(crate) instance_id: String,
     pub(crate) tmux: TmuxHost,
     pub(crate) herdr: HerdrHost,
+    environment: environment::Environment,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -55,6 +58,7 @@ pub(crate) fn initialize() -> Result<(), String> {
                 &env_path("AGENTDESK_ROOT_DIR")?,
                 &env_path("AGENTDESK_CONFIG")?,
             )?;
+            instance.environment.verify()?;
             crate::domain::provider::naming::install_test_prefix(&instance.tmux.prefix)?;
             Ok(instance)
         })
@@ -72,6 +76,7 @@ pub(crate) fn current() -> Result<Option<&'static TestInstance>, String> {
 }
 
 pub(crate) fn configure_reentry_command(command: &mut Command) -> Result<(), String> {
+    environment::configure_child_command(command)?;
     if let Some(instance) = current()? {
         command
             .env(MARKER, instance.root.join("manifest.json"))
@@ -235,6 +240,7 @@ fn load_instance_declaration(
         instance_id: id.into(),
         tmux,
         herdr,
+        environment: environment::Environment::load(root, &manifest, &config)?,
     })
 }
 
@@ -496,3 +502,8 @@ pub(crate) use owner::{begin_herdr_create, owned_herdr, validate_herdr_create_ta
 #[cfg(all(test, unix))]
 #[path = "test_instance/host_scope_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(all(test, unix))]
+mod environment_tests;
+#[cfg(all(test, unix))]
+mod api_boundary_tests;

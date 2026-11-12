@@ -76,8 +76,9 @@ pub fn claude_project_dir_candidates_for_cwd(
     let home = claude_home
         .map(Path::to_path_buf)
         .or_else(default_claude_home)
-        .ok_or_else(|| "Claude home directory is unavailable".to_string())?
-        .join("projects");
+        .ok_or_else(|| "Claude home directory is unavailable".to_string())?;
+    crate::config::test_instance::environment::validate_provider_home("claude", &home)?;
+    let home = home.join("projects");
     let mut path_candidates = Vec::new();
     if let Ok(canonical) = std::fs::canonicalize(cwd) {
         path_candidates.push(canonical);
@@ -413,6 +414,11 @@ pub(crate) fn encode_project_path(path: &Path) -> String {
 /// transcript through the same resolver the readers here use, instead of
 /// matching a hardcoded `~/.claude` the override would walk away from.
 pub(crate) fn default_claude_home() -> Option<PathBuf> {
+    if crate::config::test_instance::requested() {
+        return crate::config::test_instance::environment::provider_home("claude")
+            .ok()
+            .flatten();
+    }
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)

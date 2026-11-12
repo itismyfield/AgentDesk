@@ -13,6 +13,11 @@ use super::rollout_files_under;
 /// anywhere under the home rather than only under `sessions/` — Codex keeps
 /// other state there too, and none of it is AgentDesk's to rewrite.
 pub(crate) fn default_codex_home() -> Option<PathBuf> {
+    if crate::config::test_instance::requested() {
+        return crate::config::test_instance::environment::provider_home("codex")
+            .ok()
+            .flatten();
+    }
     std::env::var_os("CODEX_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -50,6 +55,9 @@ pub(crate) fn find_rollout_by_session_id_under(
     sessions_dir: &Path,
     session_id: &str,
 ) -> Option<PathBuf> {
+    if !test_sessions_directory_admitted(sessions_dir) {
+        return None;
+    }
     let trimmed = session_id.trim();
     if trimmed.is_empty() {
         return None;
@@ -83,6 +91,9 @@ pub(super) fn latest_rollout_for_cwd_and_session_since(
     modified_since: SystemTime,
     sessions_dir: &Path,
 ) -> Option<PathBuf> {
+    if !test_sessions_directory_admitted(sessions_dir) {
+        return None;
+    }
     let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let mut best: Option<(SystemTime, PathBuf)> = None;
     for path in rollout_files_under(sessions_dir) {
@@ -106,6 +117,12 @@ pub(super) fn latest_rollout_for_cwd_and_session_since(
         }
     }
     best.map(|(_, path)| path)
+}
+
+fn test_sessions_directory_admitted(sessions_dir: &Path) -> bool {
+    !crate::config::test_instance::requested()
+        || crate::config::test_instance::environment::provider_home("codex")
+            .is_ok_and(|home| home.is_some_and(|home| sessions_dir == home.join("sessions")))
 }
 
 fn rollout_session_cwd_matches(path: &Path, cwd: &Path) -> bool {

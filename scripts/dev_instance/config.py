@@ -5,6 +5,34 @@ from pathlib import Path
 HERDR_CONFIG = "[session]\nresume_agents_on_restore = false\n"
 
 
+def provider_home(root: Path, provider: str) -> Path:
+    return root / "home/.adk/profiles" / provider / f"test-{provider}"
+
+
+def build_org(root: Path, profile: dict) -> dict:
+    providers = ("claude", "codex")
+    return {
+        "version": 1, "name": "Isolated test instance",
+        "provider_auth_profiles": {
+            f"test-{provider}": {"provider": provider, "home": str(provider_home(root, provider)), "env": {}}
+            for provider in providers
+        },
+        "provider_auth_primary_profiles": {provider: f"test-{provider}" for provider in providers},
+        "agents": {
+            provider: {"display_name": f"Test {provider.title()}", "provider": provider,
+                       "prompt_file": str(root / "config/agents" / f"{provider}.md"),
+                       "workspace": str(root / "workspaces" / provider),
+                       "peer_agents": False, "auth_profile": f"test-{provider}"}
+            for provider in providers
+        },
+        "channels": {"by_id": {
+            channel: {"agent": provider, "provider": provider, "peer_agents": False,
+                      "workspace": str(root / "workspaces" / provider), "auth_profile": f"test-{provider}"}
+            for provider, channel in zip(providers, profile["channels"])
+        }},
+    }
+
+
 def declared_hosts(root: Path, instance_id: str) -> dict:
     return {
         "tmux": {"socket": str(root / "runtime/tmux/socket"),
@@ -31,12 +59,14 @@ def build_config(root: Path, profile: dict, api_port: int, pg_port: int,
             "id": provider,
             "name": f"Test {provider.title()}",
             "provider": provider,
+            "auth_profile": f"test-{provider}",
             "peer_directory": False,
             "peer_keywords": [],
             "preferred_intake_node_labels": [],
             "channels": {provider: {
                 "id": channel,
                 "provider": provider,
+                "auth_profile": f"test-{provider}",
                 "runtime": "tui",
                 "peer_agents": False,
                 "workspace": str(root / "workspaces" / provider),

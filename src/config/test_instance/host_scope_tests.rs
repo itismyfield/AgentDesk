@@ -19,6 +19,11 @@ pub(crate) fn fixture() -> (tempfile::TempDir, PathBuf) {
         "runtime/tmux",
         "runtime/herdr",
         "herdr-home",
+        "home/.adk/profiles/claude/test-claude",
+        "home/.adk/profiles/codex/test-codex",
+        "tmp",
+        "xdg",
+        "fixture-worktree/target/debug",
     ] {
         std::fs::create_dir_all(root.join(directory)).unwrap();
         #[cfg(unix)]
@@ -31,8 +36,9 @@ pub(crate) fn fixture() -> (tempfile::TempDir, PathBuf) {
     let id = root.file_name().unwrap().to_str().unwrap();
     let manifest = json!({
         "schema_version":1,"status":"DECLARED","live_ready":false,"instance_id":id,
-        "root":root,"worktree":"/fixture/worktree","head":"a".repeat(40),"profile":{
-            "features":{},"bots":{},"channels":[]},"applied_env":{},"api":{},"postgres":{},
+        "root":root,"worktree":root.join("fixture-worktree"),"head":"a".repeat(40),"profile":{
+            "features":{},"bots":{},"channels":[]},"applied_env":{},
+        "api":{"host":"127.0.0.1","port":18791,"self_url":"http://127.0.0.1:18791"},"postgres":{},
         "config_path":root.join("config/agentdesk.yaml"),"execution_node_id":id,
         "preferred_node_seed_required":true,"hosts":{
             "tmux":{"socket":root.join("runtime/tmux/socket"),"tmpdir":root.join("runtime/tmux"),
@@ -51,9 +57,36 @@ pub(crate) fn fixture() -> (tempfile::TempDir, PathBuf) {
     write(
         &root.join("config/agentdesk.yaml"),
         &json!({"cluster":{
-        "instance_id":id,"gateway_preferred_instance_id":id}}),
+        "instance_id":id,"gateway_preferred_instance_id":id},
+        "server":{"host":"127.0.0.1","port":18791},"mcp_servers":{},
+        "memory":{"backend":"file","mcp":{"endpoint":""}}}),
+    );
+    let mut profiles = serde_json::Map::new();
+    let mut primary = serde_json::Map::new();
+    let mut agents = serde_json::Map::new();
+    for provider in ["claude", "codex"] {
+        let name = format!("test-{provider}");
+        profiles.insert(name.clone(), json!({"provider":provider,"home":root.join(format!("home/.adk/profiles/{provider}/{name}")),"env":{}}));
+        primary.insert(provider.into(), json!(name));
+        agents.insert(
+            provider.into(),
+            json!({"display_name":provider,"provider":provider,"auth_profile":name}),
+        );
+    }
+    write(
+        &root.join("config/org.yaml"),
+        &json!({"version":1,"agents":agents,"provider_auth_profiles":profiles,"provider_auth_primary_profiles":primary}),
     );
     (temp, root)
+}
+
+pub(crate) fn command(root: &Path) -> Command {
+    let manifest = read_json(&root.join("manifest.json")).unwrap();
+    let config = read_json(&root.join("config/agentdesk.yaml")).unwrap();
+    let env = environment::Environment::load(root, &manifest, &config).unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.env_clear().envs(&env.required).envs(&env.flags);
+    command
 }
 
 fn write(path: &Path, value: &Value) {
@@ -219,7 +252,7 @@ fn initialized_test_scope_names_sessions_and_refuses_herdr_runtime() {
     let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     if std::env::var_os(MARKER).is_none() {
         let (_temp, root) = fixture();
-        let output = Command::new(std::env::current_exe().unwrap())
+        let output = command(&root)
             .args([
                 "--exact",
                 concat!(

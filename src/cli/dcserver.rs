@@ -21,6 +21,7 @@ const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
 
 #[cfg(target_os = "macos")]
 pub fn current_launchd_domain() -> Option<String> {
+    config::test_instance::environment::refuse_service_management().ok()?;
     let output = std::process::Command::new("id").arg("-u").output().ok()?;
     if !output.status.success() {
         return None;
@@ -49,6 +50,9 @@ pub fn current_launchd_domain() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 pub fn is_launchd_job_loaded(label: &str) -> bool {
+    if config::test_instance::environment::refuse_service_management().is_err() {
+        return false;
+    }
     if let Some(domain) = current_launchd_domain() {
         let target = format!("{domain}/{label}");
         if std::process::Command::new("launchctl")
@@ -75,6 +79,9 @@ pub fn is_launchd_job_loaded(label: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 fn launchd_domain_available(domain: &str) -> bool {
+    if config::test_instance::environment::refuse_service_management().is_err() {
+        return false;
+    }
     std::process::Command::new("launchctl")
         .args(["print", domain])
         .stdout(std::process::Stdio::null())
@@ -98,11 +105,17 @@ pub(crate) fn current_dcserver_tmux_fallback_session() -> String {
 }
 
 pub(crate) fn is_tmux_fallback_session_loaded(session_name: &str) -> bool {
+    if config::test_instance::environment::refuse_service_management().is_err() {
+        return false;
+    }
     crate::services::platform::tmux::has_session(session_name)
 }
 
 #[cfg(target_os = "macos")]
 pub fn kickstart_launchd_job(label: &str) -> bool {
+    if config::test_instance::environment::refuse_service_management().is_err() {
+        return false;
+    }
     let Some(domain) = current_launchd_domain() else {
         return false;
     };
@@ -125,6 +138,9 @@ const SYSTEMD_SERVICE_NAME: &str = "agentdesk-dcserver";
 
 #[cfg(target_os = "linux")]
 pub fn is_systemd_service_active() -> bool {
+    if config::test_instance::environment::refuse_service_management().is_err() {
+        return false;
+    }
     std::process::Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", SYSTEMD_SERVICE_NAME])
         .status()
@@ -139,6 +155,9 @@ pub fn is_systemd_service_active() -> bool {
 
 #[cfg(target_os = "linux")]
 pub fn is_systemd_service_enabled() -> bool {
+    if config::test_instance::environment::refuse_service_management().is_err() {
+        return false;
+    }
     std::process::Command::new("systemctl")
         .args(["--user", "is-enabled", "--quiet", SYSTEMD_SERVICE_NAME])
         .status()
@@ -153,6 +172,9 @@ pub fn is_systemd_service_enabled() -> bool {
 
 #[cfg(target_os = "linux")]
 pub fn restart_systemd_service() -> bool {
+    if config::test_instance::environment::refuse_service_management().is_err() {
+        return false;
+    }
     std::process::Command::new("systemctl")
         .args(["--user", "restart", SYSTEMD_SERVICE_NAME])
         .status()
@@ -166,6 +188,7 @@ pub fn restart_systemd_service() -> bool {
 }
 
 pub fn restart_systemd_dcserver_and_verify(timeout: Duration) -> Result<(), String> {
+    config::test_instance::environment::refuse_service_management()?;
     let stdout_path =
         dcserver_stdout_log_path().ok_or_else(|| "dcserver stdout log path missing".to_string())?;
     let start_offset = fs::metadata(&stdout_path).map(|m| m.len()).unwrap_or(0);
@@ -183,6 +206,9 @@ const WINDOWS_SERVICE_NAME: &str = "AgentDeskDcserver";
 
 #[cfg(target_os = "windows")]
 pub fn is_windows_service_installed() -> bool {
+    if config::test_instance::environment::refuse_service_management().is_err() {
+        return false;
+    }
     std::process::Command::new("sc")
         .args(["query", WINDOWS_SERVICE_NAME])
         .output()
@@ -197,6 +223,9 @@ pub fn is_windows_service_installed() -> bool {
 
 #[cfg(target_os = "windows")]
 pub fn is_windows_service_running() -> bool {
+    if config::test_instance::environment::refuse_service_management().is_err() {
+        return false;
+    }
     let output = match std::process::Command::new("sc")
         .args(["query", WINDOWS_SERVICE_NAME])
         .output()
@@ -216,6 +245,9 @@ pub fn is_windows_service_running() -> bool {
 
 #[cfg(target_os = "windows")]
 pub fn restart_windows_service() -> bool {
+    if config::test_instance::environment::refuse_service_management().is_err() {
+        return false;
+    }
     // Try NSSM first, fall back to sc.exe
     let nssm = std::process::Command::new("nssm")
         .args(["restart", WINDOWS_SERVICE_NAME])
@@ -241,6 +273,7 @@ pub fn restart_windows_service() -> bool {
 }
 
 pub fn restart_windows_dcserver_and_verify(timeout: Duration) -> Result<(), String> {
+    config::test_instance::environment::refuse_service_management()?;
     let stdout_path =
         dcserver_stdout_log_path().ok_or_else(|| "dcserver stdout log path missing".to_string())?;
     let start_offset = fs::metadata(&stdout_path).map(|m| m.len()).unwrap_or(0);
@@ -416,6 +449,7 @@ pub fn verify_dcserver_ready_since(start_offset: u64, timeout: Duration) -> Resu
 }
 
 pub fn restart_launchd_dcserver_and_verify(label: &str, timeout: Duration) -> Result<(), String> {
+    config::test_instance::environment::refuse_service_management()?;
     let stdout_path =
         dcserver_stdout_log_path().ok_or_else(|| "dcserver stdout log path missing".to_string())?;
     let start_offset = fs::metadata(&stdout_path).map(|m| m.len()).unwrap_or(0);
@@ -428,6 +462,7 @@ pub fn restart_launchd_dcserver_and_verify(label: &str, timeout: Duration) -> Re
 }
 
 pub fn rollback_to_previous_release(label: &str, timeout: Duration) -> Result<PathBuf, String> {
+    config::test_instance::environment::refuse_service_management()?;
     let previous_link =
         previous_release_link_path().ok_or_else(|| "previous release link missing".to_string())?;
     let current_link =
@@ -565,6 +600,7 @@ pub fn handle_restart_dcserver(
     };
     const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
+    config::test_instance::environment::refuse_service_management()?;
     let report_context = report_context_override.or_else(restart_report_context_from_env);
     if report_context.is_none() {
         eprintln!(

@@ -880,7 +880,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         ProviderKind::Claude,
         report_channel_id,
     )?;
-    crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay);
+    crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay)?;
 
     let mut child = command.spawn().map_err(|e| {
         debug_log(&format!(
@@ -1721,7 +1721,7 @@ fn execute_streaming_local_tui_tmux(
         tmux_session_name,
     )?;
     let auth_env_lines =
-        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay)?;
     // The account's own home holds its sessions; the selector and the launch context read it.
     let claude_home = auth_overlay.home.as_deref();
     let session_exists = host_gate::session_exists(tmux_session_name)?;
@@ -2418,7 +2418,7 @@ fn execute_streaming_local_tmux(
         tmux_session_name,
     )?;
     let auth_env_lines =
-        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay)?;
     let session_exists = host_gate::session_exists(tmux_session_name)?;
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,

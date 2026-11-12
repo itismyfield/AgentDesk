@@ -50,7 +50,7 @@ pub(super) fn launched_source(
         .ok_or("herdr turn: no hook endpoint")?;
     let logical = &turn.owner.logical_key;
     let overlay = ports.auth_overlay(logical)?;
-    let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay);
+    let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay)?;
     let requested = if turn.force_fresh {
         None
     } else {

@@ -13,7 +13,7 @@ pub(super) fn spawn_server(
     let mut cmd = Command::new(bin);
     crate::services::platform::apply_binary_resolution(&mut cmd, resolution);
     configure_child_process_group(&mut cmd);
-    crate::services::provider_auth_profile::apply_overlay_to_command(&mut cmd, overlay);
+    crate::services::provider_auth_profile::apply_overlay_to_command(&mut cmd, overlay)?;
     cmd.arg("serve")
         .arg("--hostname")
         .arg("127.0.0.1")

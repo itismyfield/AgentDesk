@@ -2330,7 +2330,7 @@ fn env_var_is_present(name: &str) -> bool {
 }
 
 fn default_memento_mcp_server() -> Option<(String, McpServerConfig)> {
-    env_var_is_present(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR).then(|| {
+    (!test_instance::requested() && env_var_is_present(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR)).then(|| {
         (
             DEFAULT_MEMENTO_MCP_SERVER_NAME.to_string(),
             McpServerConfig {
@@ -2480,6 +2480,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 }
 
 pub(crate) fn validate_config(config: &Config) -> Result<()> {
+    test_instance::environment::validate_config(config).map_err(anyhow::Error::msg)?;
     runtime_validation::validate(config)?;
     crate::services::tui_o::channel_policy::BootChannels::validate(config)?;
     config.cluster.runtime_profile.validate(&config.cluster)?;

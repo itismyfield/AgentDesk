@@ -122,6 +122,7 @@ fn load_org_schema_for_auth() -> Result<Option<OrgSchema>, String> {
     let Some(path) = org_schema_path() else {
         return Ok(None);
     };
+    crate::config::test_instance::environment::validate_path(&path)?;
     crate::services::provider_auth_profile::repository::read_org_schema(&path)
 }
 

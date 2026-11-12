@@ -465,7 +465,7 @@ fn test_instance_failed_presence_never_becomes_missing_on_an_absent_default_sock
     )
     .strip_prefix("agentdesk::")
     .unwrap();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = crate::config::test_instance::tests::command(&root)
         .args(["--exact", filter, "--nocapture"])
         .env("AGENTDESK_TEST_MANIFEST", root.join("manifest.json"))
         .env("AGENTDESK_ROOT_DIR", &root)

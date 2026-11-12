@@ -31,6 +31,9 @@ mod scope;
 #[cfg(test)]
 #[path = "memento_scope_tests.rs"]
 mod scope_tests;
+#[cfg(all(test, unix))]
+#[path = "memento_instance_tests.rs"]
+pub(super) mod instance_tests;
 #[path = "memento_transport.rs"]
 mod transport;
 use endpoint::{mcp_url, normalize_memento_endpoint};
@@ -96,6 +99,9 @@ impl MementoBackend {
     }
 
     fn runtime_config(&self) -> Result<MementoRuntimeConfig, String> {
+        if crate::config::test_instance::requested() {
+            return Err("Memento is unavailable in a test instance".to_string());
+        }
         let root = crate::config::runtime_root().ok_or_else(|| {
             "AGENTDESK runtime root is unavailable; skipping memento backend".to_string()
         })?;

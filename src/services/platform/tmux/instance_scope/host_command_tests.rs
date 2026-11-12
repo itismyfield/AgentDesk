@@ -11,7 +11,7 @@ fn test_instance_tmux_entries_use_private_socket_and_refuse_foreign_targets() {
     }
     use std::os::unix::fs::PermissionsExt;
     let (_temp, root) = crate::config::test_instance::tests::fixture();
-    let fake = root.join("tmux");
+    let fake = root.join("fixture-worktree/target/debug/tmux");
     std::fs::write(&fake, r##"#!/bin/sh
 {
   printf 'CALL\n'
@@ -41,14 +41,13 @@ esac
         "AdkTest-{}-claude-test",
         root.file_name().unwrap().to_str().unwrap()
     );
-    let output = Command::new(std::env::current_exe().unwrap())
+    let output = crate::config::test_instance::tests::command(&root)
         .args(["--exact", NAME, "--nocapture"])
         .env("AGENTDESK_TEST_MANIFEST", root.join("manifest.json"))
         .env("AGENTDESK_ROOT_DIR", &root)
         .env("AGENTDESK_CONFIG", root.join("config/agentdesk.yaml"))
         .env("ADK_I2_TMUX_LOG", &log)
         .env("ADK_I2_TMUX_SESSION", &name)
-        .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
         .env("TMUX", "/synthetic/release/socket,42,0")
         .env("TMUX_PANE", "%99")
         .output()
