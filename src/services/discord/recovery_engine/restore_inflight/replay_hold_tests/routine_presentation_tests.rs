@@ -447,7 +447,8 @@ async fn i8117_recovery_full_controls_pg() {
     for held in [false, true] {
         for evidence in ["legacy", "full", "missing", "ambiguous"] {
             for captured in [false, true] {
-                restored(false, held, evidence, false, captured).await;
+                // Each full-body fixture stays off the test runtime's stack frame.
+                Box::pin(restored(false, held, evidence, false, captured)).await;
             }
         }
     }
