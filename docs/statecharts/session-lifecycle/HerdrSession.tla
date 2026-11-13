@@ -564,4 +564,25 @@ ANoEarlyUnlink == handoff.deletes > 0 => handoff.intent \/ handoff.acknowledged
 ARetryBounded == handoff.failures <= 3
 AProgress == <> (handoff.phase = "done")
 
+\* A bounded projection of the proposed registration transaction; original Init/Next stay unchanged.
+Naming == INSTANCE SessionNaming WITH n <- handoff
+NamingInit ==
+    /\ SessionInit
+    /\ Naming!Init("herdr")
+NamingNext == Naming!Next("fixed") /\ UNCHANGED sessionVars
+NamingWithoutPromotion == Naming!Next("no-promotion") /\ UNCHANGED sessionVars
+NamingWithoutAbsenceGuard == Naming!Next("no-absence") /\ UNCHANGED sessionVars
+NamingWithoutNonceCAS == Naming!Next("no-nonce-cas") /\ UNCHANGED sessionVars
+NamingDuplicateKill == Naming!Next("double-kill") /\ UNCHANGED sessionVars
+NamingWithoutPromotionNonceGuard == Naming!Next("no-promotion-nonce") /\ UNCHANGED sessionVars
+PromotionNonceWasCurrent == Naming!PromotionNonceWasCurrent
+PrimaryTailIsCurrentPhysical == Naming!PrimaryTailIsCurrentPhysical
+PrimaryNamesCurrentLogical == Naming!PrimaryNamesCurrentLogical
+HostTargetMatchesCurrent == Naming!HostTargetMatchesCurrent
+LiveOldNotPromoted == Naming!LiveOldNotPromoted
+OldAliasRetained == Naming!OldAliasRetained
+PrimaryNotAlias == Naming!PrimaryNotAlias
+NoDuplicateKill == Naming!NoDuplicateKill
+LateOldHookRejected == Naming!LateOldHookRejected
+
 ====

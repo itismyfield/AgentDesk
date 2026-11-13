@@ -410,3 +410,16 @@ outbox-transaction/OutboxTransactionFreshTask.cfg	OutboxTransaction	CensusObserv
 outbox-transaction/OutboxTransactionPreSource.cfg	OutboxTransaction	SourceDecisionUsesObservation	-
 outbox-transaction/OutboxTransactionForeignTx.cfg	OutboxTransaction	SameTransaction	-
 outbox-transaction/OutboxTransactionForeignProviderConnection.cfg	OutboxTransaction	SameProviderConnection	-
+
+session-lifecycle/HerdrSessionNamingDuplicateKill.cfg	HerdrSession	NoDuplicateKill	-
+session-lifecycle/HerdrSessionNamingFixed.cfg	HerdrSession	-	-
+session-lifecycle/HerdrSessionNamingWithoutAbsenceGuard.cfg	HerdrSession	LiveOldNotPromoted	-
+session-lifecycle/HerdrSessionNamingWithoutNonceCAS.cfg	HerdrSession	PrimaryNamesCurrentLogical,PrimaryNotAlias,LateOldHookRejected,NoDeadlock	-
+session-lifecycle/HerdrSessionNamingWithoutPromotion.cfg	HerdrSession	PrimaryNamesCurrentLogical,PrimaryNotAlias,NoDeadlock	-
+session-lifecycle/HerdrSessionNamingWithoutPromotionNonceGuard.cfg	HerdrSession	PromotionNonceWasCurrent	-
+session-lifecycle/TmuxSessionNamingDuplicateKill.cfg	TmuxSession	NoDuplicateKill	-
+session-lifecycle/TmuxSessionNamingFixed.cfg	TmuxSession	-	-
+session-lifecycle/TmuxSessionNamingWithoutAbsenceGuard.cfg	TmuxSession	LiveOldNotPromoted	-
+session-lifecycle/TmuxSessionNamingWithoutNonceCAS.cfg	TmuxSession	PrimaryTailIsCurrentPhysical,PrimaryNotAlias,LateOldHookRejected,NoDeadlock	-
+session-lifecycle/TmuxSessionNamingWithoutPromotion.cfg	TmuxSession	PrimaryTailIsCurrentPhysical,PrimaryNotAlias,NoDeadlock	-
+session-lifecycle/TmuxSessionNamingWithoutPromotionNonceGuard.cfg	TmuxSession	PromotionNonceWasCurrent	-

@@ -130,7 +130,7 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 
 ## 상태 모델
 
-기존 `TmuxSession.tla`·`HerdrSession.tla`에 NamingInit/NamingNext와 SessionNaming projection을 추가했다. 기존 Init/Next·cfg는 그대로 유지한다. 새 fixed cfg는 기존 lifecycle 변수를 고정한 **등록 transaction의 bounded projection**이며 기존 세션/턴/입력 전이를 전부 함께 검증한 것은 아니다. tmux는 primary 꼬리=현재 physical name, Herdr는 primary=current logical name + host target=pane ID 불변식을 구별한다. 결과·mutant 반례·명령·한계는 부록 G 및 `logs/r2-statechart/`에 있다. PG/Rust/실제 재시작 결합 검증은 S2 수용 시험으로 남는다.
+기존 `TmuxSession.tla`·`HerdrSession.tla`의 NamingInit/NamingNext와 SessionNaming projection은 설계 ref에서 작성했고 S2에서 저장소에 이식했다. 기존 Init/Next·cfg는 그대로 유지한다. 새 fixed cfg는 기존 lifecycle 변수를 고정한 **등록 transaction의 bounded projection**이며 기존 세션/턴/입력 전이를 전부 함께 검증한 것은 아니다. tmux는 primary 꼬리=현재 physical name, Herdr는 primary=current logical name + host target=pane ID 불변식을 구별한다. 결과·mutant 반례·명령·한계는 부록 G 및 `logs/r2-statechart/`에 있다. PG/Rust/실제 재시작 결합 검증은 S2 수용 시험으로 남는다.
 
 ## 구현 조각과 크기
 
@@ -1185,7 +1185,7 @@ Skill pipeline으로 차트도 추출했다. fixed 각각 52 states/76 steps, �
 
 ## 재현
 
-저장소 모델·관련 cfg·SessionNaming 모듈·view를 새 scratch로 복사한 뒤 직접 TLC를 실행한다. 전체 cfg 실행 명령은 외부 로그의 `run_all.py`에 있고 cfg마다 stdout에 명령 원문이 남아 있다. 차트는 다음과 같이 같은 skill worker로 새 stage에 만든다(stage는 먼저 빈 디렉터리로 생성):
+S2에서 이식한 저장소 모델·관련 cfg·SessionNaming 모듈·view를 새 scratch로 복사한 뒤 직접 TLC를 실행한다. 전체 cfg 실행 명령은 외부 로그의 `run_all.py`에 있고 cfg마다 stdout에 명령 원문이 남아 있다. 차트는 다음과 같이 같은 skill worker로 새 stage에 만든다(stage는 먼저 빈 디렉터리로 생성):
 
 ```sh
 TLA2TOOLS=/tmp/i8119-r2-models/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk@25/bin/java node --disable-warning=ExperimentalWarning /Users/itismyfield/.codex/skills/statechart/scripts/worker.ts /tmp/i8119-new-chart-stage /tmp/i8119-r2-models/TmuxSession.tla /tmp/i8119-r2-models/TmuxSessionNamingFixed.cfg /tmp/i8119-r2-models/session-naming.view.mjs

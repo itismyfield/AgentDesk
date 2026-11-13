@@ -1,0 +1,20 @@
+---
+title: "이름 이전 등록 트랜잭션: 유한 모델(기존 수명 전체 아님)"
+---
+stateDiagram-v2
+  s0: 옛 세션 실행 중
+  s1: 새 이름 요청, 옛 실행 유지
+  s2: 옛 host 종료, 부재 확인 대기
+  s3: 옛 host 부재 확인
+  s4: 새 실행 준비, DB 등록 전
+  s5: 새 primary와 옛 alias 원자 등록
+  s6: 등록 nonce 충돌, 자기 successor만 정리
+  s7: 새 실행 종료, 재요청은 무효
+  [*] --> s0
+  s0 --> s1: 새 이름을 요청함
+  s1 --> s2: 옛 host가 자연 종료됨
+  s2 --> s3: 옛 host 부재를 확인함
+  s3 --> s4: 부재와 nonce를 확인하고 successor를 준비함
+  s4 --> s5: 새 primary와 옛 alias를 원자 커밋함
+  s5 --> s7: 현재 primary가 가리키는 실행을 종료함
+  s4 --> s6: nonce 충돌로 자기 successor만 정리함
