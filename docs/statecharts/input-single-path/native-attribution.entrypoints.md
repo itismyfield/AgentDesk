@@ -778,3 +778,5 @@ B1에는 mailbox turn lease acquire/release, inflight create/delete, owner kick�
 | `native.rs::Registry::ack_native_cleanup` → `turn_completion_events::publish_queue_eligible_completion_event` | cleanup admission / DebtWake | full ticket + 동일 outcome + 철회 안내 ack. row barrier 뒤 first cleanup만 wake. 기존 ledger admission plan 연결은 B2b-2 |
 
 결과·cleanup metadata를 저장하는 leaf는 기존 frame registry lock/transaction을 쓴다. 독립 DB·전역 guard·새 실행 소유자는 없다. boot/custody-only 소비 및 Cancel/Terminate/clear/stop/release의 production 연결은 본 전수표의 기존 경로 그대로 B2b-2 잔여다.
+
+Start의 기존 production wake 호출은 `turn_finalizer.rs::actor_loop`에서 `actor_state.rs::handle_start`로 같은 동작을 옮겼다. `publish_claimed_queue_eligible` 두 호출은 기존 admission의 Kick이며 새 큐 정책이 아니다. Native cleanup 포트는 row runtime 선확인→actor CAS→row 재확인→lock-held snapshot CAS 순서이고, generic pin이 담지 않는 execution nonce의 ABA는 B2b-2 잔여다.

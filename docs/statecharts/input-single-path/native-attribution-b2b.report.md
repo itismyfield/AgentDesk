@@ -4,7 +4,7 @@
 
 ## +1100 정지선과 분할
 
-공식 측정기의 staged tree 실측 prod4파일/+436(공백·주석·시험 제외)에서 생산 코드 추가를 멈췄다. 정지 후 변경은 pre-key current-generation 거절 1줄 보강·회귀·검증 수리와 문서다. 아래 잔여는 B2a 보고서의 각 행을 그대로 쓰며, core에 포함되지 않은 기존 actor ledger/admission 연결을 별도로 남긴다.
+공식 측정기의 staged tree 실측 prod4파일/+436(공백·주석·시험 제외)에서 생산 코드 추가를 멈췄다. 정지 후 변경은 pre-key current-generation 거절과 runtime row 선확인 순서의 검증 수리·회귀·문서다. 아래 잔여는 B2a 보고서의 각 행을 그대로 쓰며, core에 포함되지 않은 기존 actor ledger/admission 연결을 별도로 남긴다.
 
 | 잔여 | 순 코드 추정 | 코드에 남은 연결 |
 |---|---:|---|
@@ -37,7 +37,7 @@
 
 - Registry는 full registration/ticket 일치로 AnyKey receipt와 cleanup ack를 저장한다. cleanup ack는 동일 outcome과 철회 안내 선행을 요구한다. V3의 기존 flatten 확장 공간을 사용하며 V1/V2 예외를 넓히지 않는다.
 - NativePrepared는 key 전에 명시 episode·현재 generation·actor Arc·monotonic cutoff를 capture한다. follower는 actor를 빌릴 수 없다. source None→검증된 binding 외의 ticket 변경은 거절한다. AnyKey marker가 없으면 native 후보가 있어도 완료로 바꾸지 않는다.
-- NativeCleanup은 admission의 같은 capture 증거를 먼저 저장하고 exact lease CAS를 호출한다. lease가 이미 없는 정리 재제출은 row debt만 처리한다. 후속 actor가 있으면 거절한다. row는 provider/channel/episode/generation/session/path/execution nonce와 captured start/offset을 확인하고 기존 lock-held snapshot CAS로 지운다.
+- NativeCleanup은 admission의 같은 capture 증거를 먼저 저장하고 exact lease CAS를 호출한다. lease가 이미 없는 정리 재제출은 row debt만 처리한다. 후속 actor가 있으면 거절한다. row는 lease 해제 전에 provider/channel/episode/generation/session/path/execution nonce와 captured start/offset을 재확인하고, release 뒤 다시 읽어 기존 lock-held snapshot CAS로 지운다. 검토에서 발견한 runtime 교체 뒤 선-release를 이 순서로 막았고 fixture의 global_active 기대값을 0에서 1로 강화했다.
 - 철회 안내는 full namespace/ticket의 persistent outbox dedupe→ack 순서다. follower의 lease/row/global_active/queue wake 권한은 없다. Native release는 generic cancelled를 켜지 않는다.
 - Native 메시지는 기존 finalizer actor에서 직렬 실행하고 panic을 Err로 돌려 durable debt를 보존한다. 현재는 비활성 검증 경계이며 기존 ledger/admission 및 production observer와의 연결은 B2b-2다.
 
@@ -48,3 +48,13 @@
 Cancel·stop(mailbox_finish/owned_input_stop), Terminate(HostTerminated/row_retirement), clear(clear_channel/checked_purge/execution_cleanup), operator release(turn_lease::OperatorRelease::claim), boot/circuit_removal/rebind_reap는 운영 변경0이다. 전체 목록은 [d1 전수표](native-attribution.entrypoints.md)에 유지한다. 새 수동 명령·kill·전역 guard·시간 자동 종결은 없다.
 
 [정리 상태도](native-attribution-b2b.chart.mmd)는 Prepared→Result→Released→RowGone→Admitted→Wake를 보여 준다. source/receipt/FIFO 상세 분기, boot 및 인접 종료는 기존 모델/전수표로 남기고 이 작은 도식에서 숨겼다. native idle WARN이나 운영 liveness를 이 도식의 종료 상태로 추론하지 않는다.
+
+## B2b-1 회귀와 뮤턴트 증거
+
+초기 native 선택28=실행28=통과28·ignored0, 실제 PG17.11. 이 결과 뒤 runtime 교체에 대한 새 fixture의 lease 보존 기대값을 강화했다. no-key, 결과 선저장, 조기 wake, actor, monotonic cutoff, row source, source 확인 전 release, full-ticket 안내 dedupe, cleanup ticket/result/notice의 11종 원인 제거는 각각 선택1=실행1=실패1·ignored0이었다. 같은 mutation binary의 정상 모드는28/28 GREEN이다. 컴파일 오류·저장소 fixture 오류를 kill로 세지 않았다. 임시 변경2파일은 canonical SHA256과 원복 바이트가 모두 같다. 원시 `b2b-mutants-results.json`, `b2b-mutant-*.txt`, `b2b-mutation-canonical-sha.json`, `b2b-mutation-restored.json`. 정본 재빌드/회귀 및 플랫폼/정적 검증의 최종 증거는 레인 보고서 `report-impl-b2b-1.md`에 남긴다.
+
+row 읽기 오류는 release 전에 보이면 lease를 유지한다. release 뒤 crash는 기존 exact mailbox primitive를 수행한 fixture로 재생하고, 기존 claim_normal_episode가 released actor를 재claim하지 못해 row를 남기는 것을 확인한 뒤 동일 Native 작업이 row debt만 끝내도록 검사한다. 시험 hook·set_var·static·고정 sleep을 추가하지 않았다.
+
+## 남겨 둔 동시성 경계
+
+현행 snapshot CAS의 full episode pin은 `inflight/episode_guard.rs:9`의 필드와 `clear_store/snapshot.rs:120` 이후의 save_generation/updated_at을 비교한다. hosted_execution_nonce는 pin 필드가 아니다. 정상 save는 `save_store.rs:1287`에서 canonical lock 아래 generation을 올리므로 runtime 변경이 끼면 CAS가 거절한다. 그러나 동일 episode/birth 필드와 generation을 재사용하는 삭제→재생성의 incarnation ABA는 native 전용 lock-held runtime witness 또는 인접 결과 CAS 연결이 더 필요하다. 이를 현재 비활성 기반의 완성된 가드라고 선언하지 않는다. B2b-2의 actor/admission·boot/adjacent 수용 항목이며 그 전에 production으로 켜지 않는다.

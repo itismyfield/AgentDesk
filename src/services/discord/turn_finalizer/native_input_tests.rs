@@ -357,15 +357,17 @@ async fn native_8148_b2b_cleanup_retries_row_error_without_second_release_or_ear
             .await
             .is_err()
     );
-    assert!(
+    assert!(Arc::ptr_eq(
         shared
             .mailbox(key.channel_id)
             .snapshot()
             .await
             .cancel_token
-            .is_none()
-    );
-    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+            .as_ref()
+            .unwrap(),
+        &actor
+    ));
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 1);
     assert!(
         !actor.cancelled.load(Ordering::SeqCst),
         "native release is neutral"
@@ -379,6 +381,26 @@ async fn native_8148_b2b_cleanup_retries_row_error_without_second_release_or_ear
     assert!(!pending.cleanup_complete);
     assert_eq!(std::fs::read(&path).unwrap(), b"{corrupt row");
     std::fs::write(&path, bytes).unwrap();
+    // Replay a crash after the exact lease step, before its row and wake steps.
+    let released = crate::test_support::wait::await_within(
+        super::super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+            &shared, &ProviderKind::Claude, key.channel_id,
+            serenity::model::id::MessageId::new(key.user_msg_id),
+            actor.turn_nonce().map(str::to_owned), cleanup.started_before, Some(actor.clone()),
+        ), crate::test_support::wait::WAIT_CAP,
+    ).await;
+    assert!(
+        released
+            .removed_token
+            .as_ref()
+            .is_some_and(|removed| Arc::ptr_eq(removed, &actor))
+    );
+    assert!(released.persistence_error.is_none());
+    actor.mark_completion_cleanup();
+    assert!(super::super::super::saturating_decrement_global_active(
+        &shared
+    ));
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
     assert!(
         super::super::episode::claim_normal_episode(
             &shared,
@@ -665,10 +687,17 @@ async fn native_8148_b2b_row_replacement_and_cutoff_keep_cleanup_debt() {
                 .cleanup_complete
         );
         assert!(events.try_recv().is_err());
-        assert_eq!(
-            shared.restart.global_active.load(Ordering::SeqCst),
-            usize::from(!replacement)
-        );
+        assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(
+            shared
+                .mailbox(key.channel_id)
+                .snapshot()
+                .await
+                .cancel_token
+                .as_ref()
+                .unwrap(),
+            &actor
+        ));
     }
 }
 

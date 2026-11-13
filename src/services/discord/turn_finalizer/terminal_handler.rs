@@ -591,6 +591,42 @@ impl NativeCleanup {
             && row.hosted_execution_nonce.as_deref() == source.target["execution_nonce"].as_str()
     }
 
+    fn row_snapshot(
+        &self,
+        key: &TurnKey,
+    ) -> Result<Option<super::super::inflight::InflightTurnState>, String> {
+        let evidence = &self.admission.evidence;
+        let captured = self.row.as_ref().ok_or("native row capture missing")?;
+        let source = evidence
+            .ticket
+            .source
+            .as_ref()
+            .ok_or("native source missing")?;
+        let root =
+            super::super::inflight::inflight_runtime_root().ok_or("native runtime root missing")?;
+        let path = super::super::inflight::inflight_state_path(
+            &root,
+            &ProviderKind::Claude,
+            key.channel_id.get(),
+        );
+        let row = match std::fs::read(&path) {
+            Ok(raw) => {
+                let current: super::super::inflight::InflightTurnState =
+                    serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+                if !Self::matches_row(&current, *key, source)
+                    || current.started_at != captured.started_at
+                    || current.turn_start_offset != captured.turn_start_offset
+                {
+                    return Ok(None);
+                }
+                current
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => captured.clone(),
+            Err(error) => return Err(error.to_string()),
+        };
+        Ok(Some(row))
+    }
+
     pub(super) async fn drive(
         &self,
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
@@ -647,6 +683,9 @@ impl NativeCleanup {
                     return Ok(false);
                 }
                 if current.cancel_token.is_some() {
+                    if self.row_snapshot(key)?.is_none() {
+                        return Ok(false);
+                    }
                     let finish = super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
                         shared, &ProviderKind::Claude, key.channel_id,
                         serenity::model::id::MessageId::new(key.user_msg_id),
@@ -664,33 +703,8 @@ impl NativeCleanup {
                     }
                 }
             }
-            let captured = self.row.as_ref().ok_or("native row capture missing")?;
-            let source = evidence
-                .ticket
-                .source
-                .as_ref()
-                .ok_or("native source missing")?;
-            let root = super::super::inflight::inflight_runtime_root()
-                .ok_or("native runtime root missing")?;
-            let path = super::super::inflight::inflight_state_path(
-                &root,
-                &ProviderKind::Claude,
-                key.channel_id.get(),
-            );
-            let row = match std::fs::read(&path) {
-                Ok(raw) => {
-                    let current: super::super::inflight::InflightTurnState =
-                        serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
-                    if !Self::matches_row(&current, *key, source)
-                        || current.started_at != captured.started_at
-                        || current.turn_start_offset != captured.turn_start_offset
-                    {
-                        return Ok(false);
-                    }
-                    current
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => captured.clone(),
-                Err(error) => return Err(error.to_string()),
+            let Some(row) = self.row_snapshot(key)? else {
+                return Ok(false);
             };
             let (cleared, detail) =
                 GuardedClearOutcome::for_snapshot_with_detail(&ProviderKind::Claude, &row);
