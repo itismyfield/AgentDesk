@@ -12,7 +12,7 @@
 |---|---|---|
 | 대기열 원본 1·2, lease 없음/있음, actor token·nonce | `src/services/turn_orchestrator.rs:1936`, `:1989`, `:2015`, `:2028`, `:2042`, `:2061`; `episode_identity.rs:142` | Inject, BootRestore, Settle |
 | native Unknown/Open/Idle 및 record range | `src/services/tui_o/writer/input_facts.rs:22`, `:39`, `:552`; `shadow/seal.rs:98` | ExternalStart, OwnStart, Duration, Reconstruct |
-| Waiting/Dequeued/Attached/Running; enqueue/dequeue/remove/absorbed/command | `src/services/tui_o/writer/input_facts/queued.rs:9`, `:19`, `:93`, `:147`, `:198` | Enqueue, Dequeue, Withdraw, MidTurnJoin |
+| Waiting/Dequeued/Attached/Running; enqueue/dequeue/remove/absorbed/command | `src/services/tui_o/writer/input_facts/queued.rs:9`, `:60`; `src/services/tui_o/writer/input_facts/native.rs:13`, `:33` (B1에서 기존 classifier만 이동) | Enqueue, Dequeue, Withdraw, MidTurnJoin |
 | assistant end_turn은 strict idle과 다름 | `src/services/tui_o/shadow/identity.rs:70`; `src/services/tui_turn_state.rs:15` | AssistantEnd, Duration |
 | 원본/attempt·source inode·실행 nonce·receipt | `src/services/tui_input/human_frame/history/v2.rs:12`, `:323`, `:395`; `history.rs:622`, `:706` | Inject, Enqueue, Reconstruct, Bind |
 | inflight 없음/같은 episode/후속 episode, 세대 old/current | `src/services/discord/inflight/model.rs`의 `InflightTurnState`; `save_store/identity_gate/guarded_read.rs:7`; `clear_store/snapshot.rs` | ProjectionSave, ProjectionClear, StaleEvidence |

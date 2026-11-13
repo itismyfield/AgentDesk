@@ -16,7 +16,7 @@ P2 두 건만 구현·검증했고 운영 ticket/result producer와 native 완�
 ## 코드에서 확인한 추가 표면
 
 1. `writer/input_facts.rs:527`의 aggregate queue는 모든 record를 읽지만 `:528`의 `Ordered::Input`은 `[adk:tok=`가 있는 줄만 내보낸다. 평범한 external enqueue/dequeue/popAll을 `events()`만으로 복원할 수 없다. 기존 token consumer를 유지하면서 같은 capture에서 native queue/user/command/closer의 순서·범위를 내보내야 한다.
-2. `writer/input_facts/queued.rs:69,198`은 body 기반 aggregate이며 `find`가 첫 후보를 고른다. 이를 ticket별 완료 권한으로 사용하지 않는다. FIFO의 외부 입력도 유지하고 exact receipt/원본 key·source를 결합해 twins를 Pending으로 둬야 한다.
+2. `writer/input_facts/queued.rs`의 `find`와 분류기(재산정 당시 :69/:198, B1 이동 뒤 `native.rs::classify`)는 body 기반 aggregate이며 `find`가 첫 후보를 고른다. 이를 ticket별 완료 권한으로 사용하지 않는다. FIFO의 외부 입력도 유지하고 exact receipt/원본 key·source를 결합해 twins를 Pending으로 둬야 한다.
 3. `human_frame/history.rs::row_owner`는 `owner_in:773`→`taken_rows:797`에서 파일을 다시 읽는다. 매 record마다 호출하면 두 번째 반복 scan이 된다. 기존 pairing 의미를 이미 capture한 순서 있는 자료에 재사용할 포트가 필요하다.
 4. `turn_presence/activity.rs:964`의 worker와 `:1014`의 LivePorts에는 SharedData/terminal sink가 없다. effect poll `:638`, worker `:976`, tail reader 경로를 모두 잇고 같은 binding/generation/revision만 제출해야 한다. giant 본문에 새 fold를 넣지 않는다.
 5. `provider_dispatch/owner_input.rs:470,539,882,1246`에서 새 lease primary와 `hand_busy:311` follower의 권한을 구분해 첫 key 전까지 운반해야 한다. 특히 into_busy_pane은 paste_busy가 새 CancelToken을 만드는 경로이므로 현재 mailbox 조회만으로 Some을 합성하지 않는다.

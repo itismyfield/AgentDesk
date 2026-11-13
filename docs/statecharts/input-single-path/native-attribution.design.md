@@ -29,7 +29,7 @@ main에서 재사용할 보장:
 
 | 보장 | main 코드 좌표 | 남은 일 |
 |---|---|---|
-| Claude 내부 큐 Waiting/Dequeued/Attached/Running, remove 이유별 구분 | `src/services/tui_o/writer/input_facts/queued.rs:9`, `:19`, `:93`, `:147`, `:198` | 현재 aggregate owed를 입력 ticket별 실행/철회 증거로 내보내기 |
+| Claude 내부 큐 Waiting/Dequeued/Attached/Running, remove 이유별 구분 | `src/services/tui_o/writer/input_facts/queued.rs:9`, `:60`; `src/services/tui_o/writer/input_facts/native.rs:13`, `:33` (B1에서 기존 classifier만 이동) | 현재 aggregate owed를 입력 ticket별 실행/철회 증거로 내보내기 |
 | native Open/Idle와 record 순서·범위 | `src/services/tui_o/writer/input_facts.rs:39`, `:355`, `:552` | 해당 입력이 속한 run의 종료와 결합 |
 | assistant end_turn 단독은 strict idle이 아님 | `src/services/tui_turn_state/completion_scan.rs:196` | `stop_hook_summary`·`turn_duration` 중복을 같은 close로 처리; end_turn부터 닫지 않기 |
 | 원본/attempt·source inode·실행 nonce 검증 | `src/services/tui_input/human_frame/history/v2.rs:12`, `:23`, `:323`, `:395` | episode nonce와 input settlement의 영속 연결 |
