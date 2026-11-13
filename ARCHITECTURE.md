@@ -2353,6 +2353,7 @@ src/
 │   │   │   │   ├── provider_isolation_seed_save_tests.rs
 │   │   │   │   ├── root_replaced_recovery_tests.rs
 │   │   │   │   ├── s1_entry_tests.rs
+│   │   │   │   ├── session_key_promotion_pipe_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
 │   │   │   │   ├── turn_context.rs
