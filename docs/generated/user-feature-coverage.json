@@ -1,0 +1,756 @@
+{
+  "applicable": 23,
+  "by_feature": {
+    "busy-input": {
+      "applicable": 4,
+      "covered": 0,
+      "missing": 4,
+      "pending_assertions": [
+        {
+          "assertion_id": "busy_injected_before_turn_end",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8114 / #8120",
+          "reason": "실제 busy·host submit·provider 관측·반응 이력 단언이 미구현이다. 내부 API 성공은 대체 증거가 아니다."
+        },
+        {
+          "assertion_id": "injection_latency_within",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8114 / #8120",
+          "reason": "실제 busy·host submit·provider 관측·반응 이력 단언이 미구현이다. 내부 API 성공은 대체 증거가 아니다."
+        },
+        {
+          "assertion_id": "reaction_history_matches",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8114 / #8120",
+          "reason": "실제 busy·host submit·provider 관측·반응 이력 단언이 미구현이다. 내부 API 성공은 대체 증거가 아니다."
+        },
+        {
+          "assertion_id": "state_busy_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8114 / #8120",
+          "reason": "실제 busy·host submit·provider 관측·반응 이력 단언이 미구현이다. 내부 API 성공은 대체 증거가 아니다."
+        }
+      ],
+      "tuples": [
+        {
+          "host": "herdr",
+          "key": "applicable:busy-input:{\"host\":\"herdr\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"busy\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "busy_injected_before_turn_end",
+            "injection_latency_within",
+            "reaction_history_matches",
+            "state_busy_observed"
+          ],
+          "scenario_ids": [],
+          "state": "busy",
+          "status": "unsupported",
+          "surface": "channel"
+        },
+        {
+          "host": "herdr",
+          "key": "applicable:busy-input:{\"host\":\"herdr\",\"provider\":\"codex\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"busy\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "codex",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "busy_injected_before_turn_end",
+            "injection_latency_within",
+            "reaction_history_matches",
+            "state_busy_observed"
+          ],
+          "scenario_ids": [],
+          "state": "busy",
+          "status": "unsupported",
+          "surface": "channel"
+        },
+        {
+          "host": "tmux",
+          "key": "applicable:busy-input:{\"host\":\"tmux\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"busy\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "busy_injected_before_turn_end",
+            "injection_latency_within",
+            "reaction_history_matches",
+            "state_busy_observed"
+          ],
+          "scenario_ids": [],
+          "state": "busy",
+          "status": "unsupported",
+          "surface": "channel"
+        },
+        {
+          "host": "tmux",
+          "key": "applicable:busy-input:{\"host\":\"tmux\",\"provider\":\"codex\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"busy\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "codex",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "busy_injected_before_turn_end",
+            "injection_latency_within",
+            "reaction_history_matches",
+            "state_busy_observed"
+          ],
+          "scenario_ids": [],
+          "state": "busy",
+          "status": "unsupported",
+          "surface": "channel"
+        }
+      ],
+      "unsupported": 4
+    },
+    "campaigns": {
+      "applicable": 1,
+      "covered": 0,
+      "missing": 1,
+      "pending_assertions": [
+        {
+          "assertion_id": "campaign_progress_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8120",
+          "reason": "캠페인 실행 증거와 사용자 표시를 연결하는 단언 미구현이다."
+        }
+      ],
+      "tuples": [
+        {
+          "host": "tmux",
+          "key": "applicable:campaigns:{\"host\":\"tmux\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "campaign_progress_observed"
+          ],
+          "scenario_ids": [],
+          "state": "idle",
+          "status": "unsupported",
+          "surface": "channel"
+        }
+      ],
+      "unsupported": 1
+    },
+    "cancel-stop": {
+      "applicable": 1,
+      "covered": 0,
+      "missing": 1,
+      "pending_assertions": [
+        {
+          "assertion_id": "cancel_effect_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8120",
+          "reason": "중지 효과와 인간 입력 보존의 실행 관측 단언이 없다."
+        },
+        {
+          "assertion_id": "cancel_preservation_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8120",
+          "reason": "중지 효과와 인간 입력 보존의 실행 관측 단언이 없다."
+        }
+      ],
+      "tuples": [
+        {
+          "host": "tmux",
+          "key": "applicable:cancel-stop:{\"host\":\"tmux\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "cancel_effect_observed",
+            "cancel_preservation_observed"
+          ],
+          "scenario_ids": [],
+          "state": "idle",
+          "status": "unsupported",
+          "surface": "channel"
+        }
+      ],
+      "unsupported": 1
+    },
+    "dm": {
+      "applicable": 1,
+      "covered": 0,
+      "missing": 1,
+      "pending_assertions": [
+        {
+          "assertion_id": "dm_surface_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8120",
+          "reason": "초기 phase-1은 channel/thread만 지원하므로 DM 실제 실행과 단언이 미지원이다."
+        }
+      ],
+      "tuples": [
+        {
+          "host": "tmux",
+          "key": "applicable:dm:{\"host\":\"tmux\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"dm\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "dm_surface_observed"
+          ],
+          "scenario_ids": [],
+          "state": "idle",
+          "status": "unsupported",
+          "surface": "dm"
+        }
+      ],
+      "unsupported": 1
+    },
+    "effort-model": {
+      "applicable": 1,
+      "covered": 0,
+      "missing": 1,
+      "pending_assertions": [
+        {
+          "assertion_id": "effort_model_effect_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8120",
+          "reason": "UI 표시와 실제 다음 턴 설정을 잇는 단언 미구현이다."
+        }
+      ],
+      "tuples": [
+        {
+          "host": "tmux",
+          "key": "applicable:effort-model:{\"host\":\"tmux\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "effort_model_effect_observed"
+          ],
+          "scenario_ids": [],
+          "state": "idle",
+          "status": "unsupported",
+          "surface": "channel"
+        }
+      ],
+      "unsupported": 1
+    },
+    "herdr-handoff": {
+      "applicable": 1,
+      "covered": 0,
+      "missing": 1,
+      "pending_assertions": [
+        {
+          "assertion_id": "host_handoff_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8120",
+          "reason": "label이나 cell 선언만으로 실제 endpoint·session의 넘김을 관측하지 않는다."
+        }
+      ],
+      "tuples": [
+        {
+          "host": "herdr",
+          "key": "applicable:herdr-handoff:{\"host\":\"herdr\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "host_handoff_observed"
+          ],
+          "scenario_ids": [],
+          "state": "idle",
+          "status": "unsupported",
+          "surface": "channel"
+        }
+      ],
+      "unsupported": 1
+    },
+    "message-delivery": {
+      "applicable": 4,
+      "covered": 4,
+      "missing": 0,
+      "pending_assertions": [],
+      "tuples": [
+        {
+          "host": "herdr",
+          "key": "applicable:message-delivery:{\"host\":\"herdr\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"legacy_automation\",\"output_path\":\"unspecified\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "legacy_automation",
+            "output_path": "unspecified",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "no_duplicate_content",
+            "no_duplicate_marker",
+            "provider_text_present"
+          ],
+          "scenario_ids": [
+            "E-50"
+          ],
+          "state": "idle",
+          "status": "covered",
+          "surface": "channel"
+        },
+        {
+          "host": "herdr",
+          "key": "applicable:message-delivery:{\"host\":\"herdr\",\"provider\":\"codex\",\"qualifiers\":{\"input_source\":\"legacy_automation\",\"output_path\":\"unspecified\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "codex",
+          "qualifiers": {
+            "input_source": "legacy_automation",
+            "output_path": "unspecified",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "no_duplicate_content",
+            "no_duplicate_marker",
+            "provider_text_present"
+          ],
+          "scenario_ids": [
+            "E-51"
+          ],
+          "state": "idle",
+          "status": "covered",
+          "surface": "channel"
+        },
+        {
+          "host": "tmux",
+          "key": "applicable:message-delivery:{\"host\":\"tmux\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"legacy_automation\",\"output_path\":\"unspecified\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "legacy_automation",
+            "output_path": "unspecified",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "no_duplicate_content",
+            "no_duplicate_marker",
+            "provider_text_present"
+          ],
+          "scenario_ids": [
+            "E-50"
+          ],
+          "state": "idle",
+          "status": "covered",
+          "surface": "channel"
+        },
+        {
+          "host": "tmux",
+          "key": "applicable:message-delivery:{\"host\":\"tmux\",\"provider\":\"codex\",\"qualifiers\":{\"input_source\":\"legacy_automation\",\"output_path\":\"unspecified\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "codex",
+          "qualifiers": {
+            "input_source": "legacy_automation",
+            "output_path": "unspecified",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "no_duplicate_content",
+            "no_duplicate_marker",
+            "provider_text_present"
+          ],
+          "scenario_ids": [
+            "E-51"
+          ],
+          "state": "idle",
+          "status": "covered",
+          "surface": "channel"
+        }
+      ],
+      "unsupported": 0
+    },
+    "reaction-display": {
+      "applicable": 4,
+      "covered": 0,
+      "missing": 4,
+      "pending_assertions": [
+        {
+          "assertion_id": "reaction_history_matches",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8113 / #8120",
+          "reason": "message/actor별 전체 반응 이벤트와 실제 busy witness를 아직 관측하지 않는다."
+        },
+        {
+          "assertion_id": "state_busy_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8113 / #8120",
+          "reason": "message/actor별 전체 반응 이벤트와 실제 busy witness를 아직 관측하지 않는다."
+        }
+      ],
+      "tuples": [
+        {
+          "host": "herdr",
+          "key": "applicable:reaction-display:{\"host\":\"herdr\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"busy\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "reaction_history_matches",
+            "state_busy_observed"
+          ],
+          "scenario_ids": [],
+          "state": "busy",
+          "status": "unsupported",
+          "surface": "channel"
+        },
+        {
+          "host": "herdr",
+          "key": "applicable:reaction-display:{\"host\":\"herdr\",\"provider\":\"codex\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"busy\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "codex",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "reaction_history_matches",
+            "state_busy_observed"
+          ],
+          "scenario_ids": [],
+          "state": "busy",
+          "status": "unsupported",
+          "surface": "channel"
+        },
+        {
+          "host": "tmux",
+          "key": "applicable:reaction-display:{\"host\":\"tmux\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"busy\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "reaction_history_matches",
+            "state_busy_observed"
+          ],
+          "scenario_ids": [],
+          "state": "busy",
+          "status": "unsupported",
+          "surface": "channel"
+        },
+        {
+          "host": "tmux",
+          "key": "applicable:reaction-display:{\"host\":\"tmux\",\"provider\":\"codex\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"busy\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "codex",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "reaction_history_matches",
+            "state_busy_observed"
+          ],
+          "scenario_ids": [],
+          "state": "busy",
+          "status": "unsupported",
+          "surface": "channel"
+        }
+      ],
+      "unsupported": 4
+    },
+    "reset-clear": {
+      "applicable": 1,
+      "covered": 0,
+      "missing": 1,
+      "pending_assertions": [
+        {
+          "assertion_id": "clear_ack_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8120",
+          "reason": "E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 witness도 미구현이다."
+        },
+        {
+          "assertion_id": "fresh_session_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8120",
+          "reason": "E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 witness도 미구현이다."
+        }
+      ],
+      "tuples": [
+        {
+          "host": "tmux",
+          "key": "applicable:reset-clear:{\"host\":\"tmux\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "clear_ack_observed",
+            "fresh_session_observed"
+          ],
+          "scenario_ids": [],
+          "state": "idle",
+          "status": "unsupported",
+          "surface": "channel"
+        }
+      ],
+      "unsupported": 1
+    },
+    "routines": {
+      "applicable": 1,
+      "covered": 0,
+      "missing": 1,
+      "pending_assertions": [
+        {
+          "assertion_id": "routine_fired_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8120",
+          "reason": "시각·실행 identity·전달 결과를 연결하는 명세 단언 미구현이다."
+        }
+      ],
+      "tuples": [
+        {
+          "host": "tmux",
+          "key": "applicable:routines:{\"host\":\"tmux\",\"provider\":\"claude\",\"qualifiers\":{\"input_source\":\"human\",\"output_path\":\"tui_o\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"channel\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "input_source": "human",
+            "output_path": "tui_o",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "routine_fired_observed"
+          ],
+          "scenario_ids": [],
+          "state": "idle",
+          "status": "unsupported",
+          "surface": "channel"
+        }
+      ],
+      "unsupported": 1
+    },
+    "threads": {
+      "applicable": 4,
+      "covered": 0,
+      "missing": 4,
+      "pending_assertions": [
+        {
+          "assertion_id": "actual_host_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8115 / #8118 / #8120",
+          "reason": "fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가."
+        },
+        {
+          "assertion_id": "fresh_thread_node_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8115 / #8118 / #8120",
+          "reason": "fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가."
+        },
+        {
+          "assertion_id": "output_binding_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8115 / #8118 / #8120",
+          "reason": "fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가."
+        },
+        {
+          "assertion_id": "state_busy_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8115 / #8118 / #8120",
+          "reason": "fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가."
+        },
+        {
+          "assertion_id": "surface_thread_observed",
+          "input_sources": [
+            "human"
+          ],
+          "issue": "#8115 / #8118 / #8120",
+          "reason": "fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가."
+        }
+      ],
+      "tuples": [
+        {
+          "host": "herdr",
+          "key": "applicable:threads:{\"host\":\"herdr\",\"provider\":\"claude\",\"qualifiers\":{\"execution_node\":\"preferred\",\"input_source\":\"human\",\"output_path\":\"tui_o\",\"ownership\":\"bound\",\"turn_origin\":\"managed\"},\"state\":\"busy\",\"surface\":\"thread\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "execution_node": "preferred",
+            "input_source": "human",
+            "output_path": "tui_o",
+            "ownership": "bound",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "actual_host_observed",
+            "fresh_thread_node_observed",
+            "output_binding_observed",
+            "state_busy_observed",
+            "surface_thread_observed"
+          ],
+          "scenario_ids": [],
+          "state": "busy",
+          "status": "unsupported",
+          "surface": "thread"
+        },
+        {
+          "host": "herdr",
+          "key": "applicable:threads:{\"host\":\"herdr\",\"provider\":\"claude\",\"qualifiers\":{\"execution_node\":\"preferred\",\"input_source\":\"human\",\"output_path\":\"tui_o\",\"ownership\":\"unowned\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"thread\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "execution_node": "preferred",
+            "input_source": "human",
+            "output_path": "tui_o",
+            "ownership": "unowned",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "actual_host_observed",
+            "fresh_thread_node_observed",
+            "output_binding_observed",
+            "surface_thread_observed"
+          ],
+          "scenario_ids": [],
+          "state": "idle",
+          "status": "unsupported",
+          "surface": "thread"
+        },
+        {
+          "host": "tmux",
+          "key": "applicable:threads:{\"host\":\"tmux\",\"provider\":\"claude\",\"qualifiers\":{\"execution_node\":\"preferred\",\"input_source\":\"human\",\"output_path\":\"tui_o\",\"ownership\":\"bound\",\"turn_origin\":\"managed\"},\"state\":\"busy\",\"surface\":\"thread\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "execution_node": "preferred",
+            "input_source": "human",
+            "output_path": "tui_o",
+            "ownership": "bound",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "actual_host_observed",
+            "fresh_thread_node_observed",
+            "output_binding_observed",
+            "state_busy_observed",
+            "surface_thread_observed"
+          ],
+          "scenario_ids": [],
+          "state": "busy",
+          "status": "unsupported",
+          "surface": "thread"
+        },
+        {
+          "host": "tmux",
+          "key": "applicable:threads:{\"host\":\"tmux\",\"provider\":\"claude\",\"qualifiers\":{\"execution_node\":\"preferred\",\"input_source\":\"human\",\"output_path\":\"tui_o\",\"ownership\":\"unowned\",\"turn_origin\":\"managed\"},\"state\":\"idle\",\"surface\":\"thread\"}",
+          "non_live_scenario_ids": [],
+          "provider": "claude",
+          "qualifiers": {
+            "execution_node": "preferred",
+            "input_source": "human",
+            "output_path": "tui_o",
+            "ownership": "unowned",
+            "turn_origin": "managed"
+          },
+          "required_assertion_ids": [
+            "actual_host_observed",
+            "fresh_thread_node_observed",
+            "output_binding_observed",
+            "surface_thread_observed"
+          ],
+          "scenario_ids": [],
+          "state": "idle",
+          "status": "unsupported",
+          "surface": "thread"
+        }
+      ],
+      "unsupported": 4
+    }
+  },
+  "covered": 4,
+  "missing": 19,
+  "scenario_counts": {
+    "active": 43,
+    "fixture": 2,
+    "live": 38,
+    "retired": 3,
+    "unsupported-known-gap": 3
+  },
+  "schema_version": 1,
+  "source_hash": "31568e40346cc8dcb42ed0601ef151d7e3a1276cf6275d02bf03d7e8acf7f956",
+  "unsupported": 19
+}

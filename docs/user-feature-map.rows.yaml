@@ -1,0 +1,484 @@
+# 수기 기능 정본. coverage 숫자는 공식 generator만 계산한다.
+schema: 1
+features:
+- feature_id: message-delivery
+  title: 메시지 전달
+  visible_contract: 입력별 provider 본문 marker가 순서대로 정확히 한 번 도착한다. E-50/E-51의 공통 전달 명세이며 인간 인증·병합·보존·clear ack·구체 output
+    path는 증명하지 않는다.
+  verification: '독립 instance receipt 지정 E2E: message-delivery; 선언 검사: python3 scripts/generate_user_feature_map.py
+    --check --base-ref origin/main'
+  owner: src/services/discord
+  chart: '해당 없음: 이 행은 관측 계약이며 M1에 상태 전이 구현 없음'
+  applicable:
+  - host: tmux
+    provider: claude
+    surface: channel
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: unspecified
+      input_source: legacy_automation
+    required_assertion_ids:
+    - provider_text_present
+    - no_duplicate_marker
+    - no_duplicate_content
+  - host: tmux
+    provider: codex
+    surface: channel
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: unspecified
+      input_source: legacy_automation
+    required_assertion_ids:
+    - provider_text_present
+    - no_duplicate_marker
+    - no_duplicate_content
+  - host: herdr
+    provider: claude
+    surface: channel
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: unspecified
+      input_source: legacy_automation
+    required_assertion_ids:
+    - provider_text_present
+    - no_duplicate_marker
+    - no_duplicate_content
+  - host: herdr
+    provider: codex
+    surface: channel
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: unspecified
+      input_source: legacy_automation
+    required_assertion_ids:
+    - provider_text_present
+    - no_duplicate_marker
+    - no_duplicate_content
+  assertion_sources: {}
+  pending_assertions: []
+- feature_id: busy-input
+  title: busy 중 입력 주입
+  visible_contract: 현재 턴 종료 전 후속 입력이 실제 host에 정확히 한 번 주입되고 수신→submit 지연이 상한 안이다. Claude Herdr 우선, tmux·Codex 대응군.
+  verification: '독립 instance receipt 지정 E2E: busy-input; 선언 검사: python3 scripts/generate_user_feature_map.py --check
+    --base-ref origin/main'
+  owner: src/services/discord/router/intake_gate/busy_inject.rs
+  chart: '해당 없음: 이 행은 관측 계약이며 M1에 상태 전이 구현 없음'
+  applicable:
+  - host: herdr
+    provider: claude
+    surface: channel
+    state: busy
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - busy_injected_before_turn_end
+    - injection_latency_within
+    - reaction_history_matches
+  - host: herdr
+    provider: codex
+    surface: channel
+    state: busy
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - busy_injected_before_turn_end
+    - injection_latency_within
+    - reaction_history_matches
+  - host: tmux
+    provider: claude
+    surface: channel
+    state: busy
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - busy_injected_before_turn_end
+    - injection_latency_within
+    - reaction_history_matches
+  - host: tmux
+    provider: codex
+    surface: channel
+    state: busy
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - busy_injected_before_turn_end
+    - injection_latency_within
+    - reaction_history_matches
+  assertion_sources: {}
+  pending_assertions:
+  - assertion_id: busy_injected_before_turn_end
+    issue: '#8114 / #8120'
+    reason: 실제 busy·host submit·provider 관측·반응 이력 단언이 미구현이다. 내부 API 성공은 대체 증거가 아니다.
+    input_sources:
+    - human
+  - assertion_id: injection_latency_within
+    issue: '#8114 / #8120'
+    reason: 실제 busy·host submit·provider 관측·반응 이력 단언이 미구현이다. 내부 API 성공은 대체 증거가 아니다.
+    input_sources:
+    - human
+  - assertion_id: reaction_history_matches
+    issue: '#8114 / #8120'
+    reason: 실제 busy·host submit·provider 관측·반응 이력 단언이 미구현이다. 내부 API 성공은 대체 증거가 아니다.
+    input_sources:
+    - human
+  - assertion_id: state_busy_observed
+    issue: '#8114 / #8120'
+    reason: 실제 busy·host submit·provider 관측·반응 이력 단언이 미구현이다. 내부 API 성공은 대체 증거가 아니다.
+    input_sources:
+    - human
+- feature_id: reaction-display
+  title: 입력 반응 표시
+  visible_contract: tmux/Claude managed busy 입력의 ➕ 반응은 한 번이고 📬 추가·제거는 없다. Herdr·Codex를 대응군으로 유지한다.
+  verification: '독립 instance receipt 지정 E2E: reaction-display; 선언 검사: python3 scripts/generate_user_feature_map.py
+    --check --base-ref origin/main'
+  owner: src/services/discord/router/intake_queue_transaction.rs
+  chart: '해당 없음: 이 행은 관측 계약이며 M1에 상태 전이 구현 없음'
+  applicable:
+  - host: tmux
+    provider: claude
+    surface: channel
+    state: busy
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - reaction_history_matches
+  - host: tmux
+    provider: codex
+    surface: channel
+    state: busy
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - reaction_history_matches
+  - host: herdr
+    provider: claude
+    surface: channel
+    state: busy
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - reaction_history_matches
+  - host: herdr
+    provider: codex
+    surface: channel
+    state: busy
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - reaction_history_matches
+  assertion_sources: {}
+  pending_assertions:
+  - assertion_id: reaction_history_matches
+    issue: '#8113 / #8120'
+    reason: message/actor별 전체 반응 이벤트와 실제 busy witness를 아직 관측하지 않는다.
+    input_sources:
+    - human
+  - assertion_id: state_busy_observed
+    issue: '#8113 / #8120'
+    reason: message/actor별 전체 반응 이벤트와 실제 busy witness를 아직 관측하지 않는다.
+    input_sources:
+    - human
+- feature_id: cancel-stop
+  title: 취소·중지
+  visible_contract: 중지 뒤 추가 본문이 오지 않고 인간 입력은 취소 보존 계약대로 남는다.
+  verification: '독립 instance receipt 지정 E2E: cancel-stop; 선언 검사: python3 scripts/generate_user_feature_map.py --check
+    --base-ref origin/main'
+  owner: src/services/discord/commands
+  chart: '해당 없음: 이 행은 관측 계약이며 M1에 상태 전이 구현 없음'
+  applicable:
+  - host: tmux
+    provider: claude
+    surface: channel
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - cancel_effect_observed
+    - cancel_preservation_observed
+  assertion_sources:
+    cancel_preservation_observed:
+    - human
+  pending_assertions:
+  - assertion_id: cancel_effect_observed
+    issue: '#8120'
+    reason: 중지 효과와 인간 입력 보존의 실행 관측 단언이 없다.
+    input_sources:
+    - human
+  - assertion_id: cancel_preservation_observed
+    issue: '#8120'
+    reason: 중지 효과와 인간 입력 보존의 실행 관측 단언이 없다.
+    input_sources:
+    - human
+- feature_id: reset-clear
+  title: reset·clear
+  visible_contract: clear acknowledgement와 새 세션 identity, 이후 첫 응답을 함께 확인한다. wait step과 marker만으로 ack 전체를 세지 않는다.
+  verification: '독립 instance receipt 지정 E2E: reset-clear; 선언 검사: python3 scripts/generate_user_feature_map.py --check
+    --base-ref origin/main'
+  owner: src/services/discord/commands
+  chart: '해당 없음: 이 행은 관측 계약이며 M1에 상태 전이 구현 없음'
+  applicable:
+  - host: tmux
+    provider: claude
+    surface: channel
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - clear_ack_observed
+    - fresh_session_observed
+  assertion_sources: {}
+  pending_assertions:
+  - assertion_id: clear_ack_observed
+    issue: '#8120'
+    reason: E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 witness도 미구현이다.
+    input_sources:
+    - human
+  - assertion_id: fresh_session_observed
+    issue: '#8120'
+    reason: E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 witness도 미구현이다.
+    input_sources:
+    - human
+- feature_id: threads
+  title: 새 스레드·host·출력
+  visible_contract: preferred node ready·v1 slots 없음에서 새 thread 첫 입력이 시작된다. 실제 host·source binding·tui_o 출력·후속/취소를
+    확인하고 source not bound를 실패로 본다.
+  verification: '독립 instance receipt 지정 E2E: threads; 선언 검사: python3 scripts/generate_user_feature_map.py --check
+    --base-ref origin/main'
+  owner: src/services/cluster/intake_router_hook/placement.rs
+  chart: '해당 없음: 이 행은 관측 계약이며 M1에 상태 전이 구현 없음'
+  applicable:
+  - host: tmux
+    provider: claude
+    surface: thread
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+      execution_node: preferred
+      ownership: unowned
+    required_assertion_ids:
+    - fresh_thread_node_observed
+    - actual_host_observed
+    - output_binding_observed
+  - host: tmux
+    provider: claude
+    surface: thread
+    state: busy
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+      execution_node: preferred
+      ownership: bound
+    required_assertion_ids:
+    - fresh_thread_node_observed
+    - actual_host_observed
+    - output_binding_observed
+  - host: herdr
+    provider: claude
+    surface: thread
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+      execution_node: preferred
+      ownership: unowned
+    required_assertion_ids:
+    - fresh_thread_node_observed
+    - actual_host_observed
+    - output_binding_observed
+  - host: herdr
+    provider: claude
+    surface: thread
+    state: busy
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+      execution_node: preferred
+      ownership: bound
+    required_assertion_ids:
+    - fresh_thread_node_observed
+    - actual_host_observed
+    - output_binding_observed
+  assertion_sources:
+    fresh_thread_node_observed:
+    - human
+  pending_assertions:
+  - assertion_id: actual_host_observed
+    issue: '#8115 / #8118 / #8120'
+    reason: fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
+    input_sources:
+    - human
+  - assertion_id: fresh_thread_node_observed
+    issue: '#8115 / #8118 / #8120'
+    reason: fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
+    input_sources:
+    - human
+  - assertion_id: output_binding_observed
+    issue: '#8115 / #8118 / #8120'
+    reason: fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
+    input_sources:
+    - human
+  - assertion_id: state_busy_observed
+    issue: '#8115 / #8118 / #8120'
+    reason: fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
+    input_sources:
+    - human
+  - assertion_id: surface_thread_observed
+    issue: '#8115 / #8118 / #8120'
+    reason: fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
+    input_sources:
+    - human
+- feature_id: dm
+  title: DM 대화
+  visible_contract: DM 입력의 올바른 provider 응답과 대화 격리를 확인한다.
+  verification: '독립 instance receipt 지정 E2E: dm; 선언 검사: python3 scripts/generate_user_feature_map.py --check --base-ref
+    origin/main'
+  owner: src/services/discord
+  chart: '해당 없음: 이 행은 관측 계약이며 M1에 상태 전이 구현 없음'
+  applicable:
+  - host: tmux
+    provider: claude
+    surface: dm
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - dm_surface_observed
+  assertion_sources: {}
+  pending_assertions:
+  - assertion_id: dm_surface_observed
+    issue: '#8120'
+    reason: 초기 phase-1은 channel/thread만 지원하므로 DM 실제 실행과 단언이 미지원이다.
+    input_sources:
+    - human
+- feature_id: routines
+  title: 루틴
+  visible_contract: 예약된 루틴이 지정 시각·대상에 한 번 실행되고 결과가 보인다.
+  verification: '독립 instance receipt 지정 E2E: routines; 선언 검사: python3 scripts/generate_user_feature_map.py --check
+    --base-ref origin/main'
+  owner: src/services
+  chart: '해당 없음: 이 행은 관측 계약이며 M1에 상태 전이 구현 없음'
+  applicable:
+  - host: tmux
+    provider: claude
+    surface: channel
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - routine_fired_observed
+  assertion_sources: {}
+  pending_assertions:
+  - assertion_id: routine_fired_observed
+    issue: '#8120'
+    reason: 시각·실행 identity·전달 결과를 연결하는 명세 단언 미구현이다.
+    input_sources:
+    - human
+- feature_id: herdr-handoff
+  title: Herdr 넘김
+  visible_contract: 넘긴 세션의 실제 host가 Herdr이며 후속 응답과 취소가 같은 세션으로 이어진다.
+  verification: '독립 instance receipt 지정 E2E: herdr-handoff; 선언 검사: python3 scripts/generate_user_feature_map.py
+    --check --base-ref origin/main'
+  owner: src/services/herdr_launch.rs
+  chart: '해당 없음: 이 행은 관측 계약이며 M1에 상태 전이 구현 없음'
+  applicable:
+  - host: herdr
+    provider: claude
+    surface: channel
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - host_handoff_observed
+  assertion_sources: {}
+  pending_assertions:
+  - assertion_id: host_handoff_observed
+    issue: '#8120'
+    reason: label이나 cell 선언만으로 실제 endpoint·session의 넘김을 관측하지 않는다.
+    input_sources:
+    - human
+- feature_id: effort-model
+  title: effort·model 변경
+  visible_contract: 선택한 effort/model이 다음 턴의 실제 provider 설정에 적용되고 표시와 일치한다.
+  verification: '독립 instance receipt 지정 E2E: effort-model; 선언 검사: python3 scripts/generate_user_feature_map.py --check
+    --base-ref origin/main'
+  owner: src/services/discord/commands
+  chart: '해당 없음: 이 행은 관측 계약이며 M1에 상태 전이 구현 없음'
+  applicable:
+  - host: tmux
+    provider: claude
+    surface: channel
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - effort_model_effect_observed
+  assertion_sources: {}
+  pending_assertions:
+  - assertion_id: effort_model_effect_observed
+    issue: '#8120'
+    reason: UI 표시와 실제 다음 턴 설정을 잇는 단언 미구현이다.
+    input_sources:
+    - human
+- feature_id: campaigns
+  title: 캠페인
+  visible_contract: 캠페인 진행과 결과가 실제 수행한 작업·실패·대기 상태를 구분해 보인다.
+  verification: '독립 instance receipt 지정 E2E: campaigns; 선언 검사: python3 scripts/generate_user_feature_map.py --check
+    --base-ref origin/main'
+  owner: src/services
+  chart: '해당 없음: 이 행은 관측 계약이며 M1에 상태 전이 구현 없음'
+  applicable:
+  - host: tmux
+    provider: claude
+    surface: channel
+    state: idle
+    qualifiers:
+      turn_origin: managed
+      output_path: tui_o
+      input_source: human
+    required_assertion_ids:
+    - campaign_progress_observed
+  assertion_sources: {}
+  pending_assertions:
+  - assertion_id: campaign_progress_observed
+    issue: '#8120'
+    reason: 캠페인 실행 증거와 사용자 표시를 연결하는 단언 미구현이다.
+    input_sources:
+    - human
+removal_reasons: []
