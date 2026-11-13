@@ -1,0 +1,27 @@
+---
+title: "Codex ready, busy, end and /stop judged from the rollout, the Stop hook and the process"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the CodexPendingEventuallyDelivered bug
+    lg1: Repeats forever, so CodexPendingEventuallyDelivered breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: Booting: wait for this launch's Codex process (launch 1, 0 turn(s) started)
+  s1: Idle: the rollout proves the end (launch 1, 0 turn(s) started)
+  s2: Ready proven: read again before the first key (launch 1, 0 turn(s) started)
+  s3: Idle, rollout archived: no signal can prove the end (launch 1, 0 turn(s) started)
+  s4: Turn running: the busy entry stays available (launch 1, 1 turn(s) started)
+  s5: Idle, every end signal lost (launch 1, 1 turn(s) started)
+  s6: Idle, rollout archived: no signal can prove the end (launch 1, 1 turn(s) started)
+  [*] --> s0
+  s0 --> s1: Codex becomes the pane's running process
+  s1 --> s2: the next input proves ready
+  s1 --> s3: Codex archives the idle rollout to .zst
+  s2 --> s4: the input is written, or its proof no longer holds
+  s4 --> s5: the turn ends in the TUI
+  s5 --> s6: Codex archives the idle rollout to .zst
+  class s0 bugPath
+  class s1 bugPath
+  class s3 repeats
