@@ -116,6 +116,13 @@ pub(super) enum FinalizeMsg {
         completion_admission_plan: CompletionAdmissionPlan,
         shared: std::sync::Weak<SharedData>,
     },
+    #[cfg(all(test, unix))]
+    Native {
+        work: Box<super::terminal_handler::NativeCleanup>,
+        history: crate::services::tui_input::human_frame::history::v2::Registry,
+        shared: Arc<SharedData>,
+        ack: oneshot::Sender<Result<bool, String>>,
+    },
     MailboxReleased {
         key: TurnKey,
         shared: Arc<SharedData>,
@@ -181,4 +188,109 @@ pub(super) enum FinalizeMsg {
         generation: u64,
         ack: oneshot::Sender<bool>,
     },
+}
+
+/// Registers the exact start and applies only its pending admission edges.
+pub(super) fn handle_start(
+    msg: FinalizeMsg,
+    ledger: &mut HashMap<LedgerKey, LedgerEntry>,
+    pending_admission: &mut HashMap<LedgerKey, PendingCompletionAdmission>,
+    cached_shared: &mut Option<std::sync::Weak<SharedData>>,
+) {
+    let FinalizeMsg::Start {
+        key,
+        recovery_lease,
+        provider,
+        relay_owner,
+        completion_admission_plan,
+        shared,
+    } = msg
+    else {
+        return;
+    };
+    // #3016 phase-5a: prime the reconcile cache from the very
+    // FIRST register so a FRESH actor whose first watcher-owned
+    // turn never submits its own terminal still gets the
+    // far-backstop tick. `is_none()` guard: the `Terminal` arm
+    // stays authoritative (always overwrites with the live Arc);
+    // a dead `Weak` here just skips reconcile harmlessly until a
+    // live submission re-primes it.
+    if cached_shared.is_none() {
+        *cached_shared = Some(shared.clone());
+    }
+    // #3016 phase-5a: a watcher-owned handoff arms the FAR
+    // backstop so a never-terminated turn is visible to the
+    // reconciler. `get_or_insert`: set ONCE — a repeat `Start`
+    // must never push an armed deadline forward (the EPIC's
+    // never-finalizing bug, mirrored from the gate-timeout arm).
+    let arm_watcher_backstop = relay_owner == RelayOwnerKind::Watcher;
+    // A `Start` consumes only pre-ledger edges for its exact
+    // generation. Older generation authority remains isolated
+    // until TTL GC instead of pre-settling the current turn.
+    let exact_key = key.exact_key();
+    let pending = take_exact_pending_completion_admission(pending_admission, exact_key);
+    let deadline = arm_watcher_backstop.then(|| Instant::now() + WATCHER_REGISTER_BACKSTOP);
+    let (lease, plan) = (recovery_lease, completion_admission_plan);
+    let entry = ledger.entry(exact_key).or_insert_with(|| {
+        LedgerEntry::registered(key, provider.clone(), relay_owner, lease, plan, deadline)
+    });
+    if entry.phase != Phase::Finalized {
+        entry.relay_owner = relay_owner;
+        entry.provider = provider;
+        entry.turn_key = key;
+        entry
+            .completion_admission
+            .update_plan(completion_admission_plan);
+        apply_pending_completion_admission(entry, pending);
+        if arm_watcher_backstop {
+            entry
+                .watcher_backstop_deadline
+                .get_or_insert_with(|| Instant::now() + WATCHER_REGISTER_BACKSTOP);
+        }
+        if let Some(shared) = shared.upgrade() {
+            publish_claimed_queue_eligible(&shared, entry);
+        }
+    } else if let Some(pending) = pending {
+        apply_pending_completion_admission(entry, Some(pending));
+        if let Some(shared) = shared.upgrade() {
+            publish_claimed_queue_eligible(&shared, entry);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl TurnFinalizer {
+    pub(super) async fn submit_native(
+        &self,
+        work: super::terminal_handler::NativeCleanup,
+        history: crate::services::tui_input::human_frame::history::v2::Registry,
+        shared: Arc<SharedData>,
+    ) -> Result<bool, String> {
+        let (ack, result) = oneshot::channel();
+        self.tx
+            .send(FinalizeMsg::Native {
+                work: Box::new(work),
+                history,
+                shared,
+                ack,
+            })
+            .map_err(|_| "native finalizer unavailable")?;
+        result
+            .await
+            .map_err(|_| "native finalizer reply unavailable")?
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(super) async fn handle_native(
+    work: super::terminal_handler::NativeCleanup,
+    history: crate::services::tui_input::human_frame::history::v2::Registry,
+    shared: Arc<SharedData>,
+    ack: oneshot::Sender<Result<bool, String>>,
+) {
+    let result = std::panic::AssertUnwindSafe(work.drive(&history, &shared))
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err("native finalizer panicked; durable debt retained".into()));
+    let _ = ack.send(result);
 }

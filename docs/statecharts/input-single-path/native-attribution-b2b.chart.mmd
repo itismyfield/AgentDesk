@@ -1,0 +1,14 @@
+stateDiagram-v2
+    [*] --> Prepared: explicit primary/follower, before key
+    Prepared --> Prepared: no key, original retained
+    Prepared --> Candidate: durable AnyKey, same O capture
+    Candidate --> Result: exact ticket and current actor admission
+    Result --> Released: exact actor / nonce / cutoff CAS
+    Result --> Pending: successor actor, no cleanup
+    Released --> Pending: row unreadable / changed / CAS miss
+    Pending --> Released: repair and resubmit same durable result
+    Released --> RowGone: exact snapshot CAS or proven absence
+    RowGone --> Admitted: outcome + notice ack + cleanup CAS
+    Admitted --> Wake: primary first cleanup only
+    Admitted --> [*]: follower, parent unchanged
+    Wake --> [*]

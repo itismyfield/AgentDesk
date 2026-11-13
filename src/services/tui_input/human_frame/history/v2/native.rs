@@ -304,6 +304,107 @@ impl Registry {
         })
     }
 
+    #[cfg(all(test, unix))]
+    pub(crate) fn native_ticket(&self, namespace: &str, key: &Value) -> Result<Ticket, String> {
+        self.inspect(|snapshot| {
+            let registration = snapshot
+                .live
+                .iter()
+                .map(|b| &b.registration)
+                .chain(snapshot.planned.iter())
+                .chain(
+                    snapshot
+                        .passive
+                        .iter()
+                        .filter_map(|p| p.registration.as_ref()),
+                )
+                .find(|r| r.namespace == namespace && r.key == *key)
+                .ok_or("native registration missing")?;
+            let current = registration
+                .native_settlement
+                .as_ref()
+                .ok_or("native ticket missing")?;
+            current.validate(registration)?;
+            Ok(current.ticket.clone())
+        })
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn note_native_any_key(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+    ) -> Result<(), String> {
+        self.native_transaction(namespace, &ticket.key, |registration| {
+            let current = registration
+                .native_settlement
+                .as_mut()
+                .ok_or("native ticket missing")?;
+            if current.ticket != *ticket || current.outcome.is_some() {
+                return Err("native key receipt ticket mismatch".into());
+            }
+            current.extra.insert("any_key".into(), Value::Bool(true));
+            Ok(())
+        })
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn native_settlement(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+    ) -> Result<Settlement, String> {
+        self.inspect(|snapshot| {
+            let registration = snapshot
+                .live
+                .iter()
+                .map(|b| &b.registration)
+                .chain(snapshot.planned.iter())
+                .chain(
+                    snapshot
+                        .passive
+                        .iter()
+                        .filter_map(|p| p.registration.as_ref()),
+                )
+                .find(|r| r.namespace == namespace && r.key == ticket.key)
+                .ok_or("native registration missing")?;
+            let current = registration
+                .native_settlement
+                .as_ref()
+                .ok_or("native ticket missing")?;
+            current.validate(registration)?;
+            if current.ticket != *ticket {
+                return Err("native settlement ticket mismatch".into());
+            }
+            Ok(current.clone())
+        })
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn ack_native_cleanup(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+        outcome: &Outcome,
+    ) -> Result<bool, String> {
+        self.native_transaction(namespace, &ticket.key, |registration| {
+            let current = registration
+                .native_settlement
+                .as_mut()
+                .ok_or("native ticket missing")?;
+            if current.ticket != *ticket
+                || current.outcome.as_ref() != Some(outcome)
+                || (outcome.disposition == Disposition::WithdrawnNotExecuted
+                    && !current.withdrawal_notice)
+            {
+                return Err("native cleanup admission missing".into());
+            }
+            let first = !current.cleanup_complete;
+            current.cleanup_complete = true;
+            Ok(first)
+        })
+    }
+
     fn native_transaction<T>(
         &self,
         namespace: &str,

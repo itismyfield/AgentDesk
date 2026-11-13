@@ -763,3 +763,18 @@ B1에는 mailbox turn lease acquire/release, inflight create/delete, owner kick�
 | `src/services/discord/turn_presence/activity/native_input.rs:24` | `snapshot` |
 | `src/services/discord/turn_presence/activity/native_input.rs:7` | `prepare` |
 | `src/services/discord/turn_finalizer/terminal_handler.rs:321` | `capture(` |
+
+## B2b-1 비활성 정리 포트 (기준 8698df14b)
+
+아래는 `cfg(all(test, unix))` 검증 경계다. 운영 진입점은 아직 없다. 기존 baseline 전수표의 production 소유를 바꾸지 않는다.
+
+| 포트 | 모델 행동 | 권한/변수 값 출처 |
+|---|---|---|
+| `terminal_handler.rs::NativePrepared::capture` | Prepare / explicit primary pin | 기존 full Ticket, TurnKey, 현재 generation 및 producer가 준 actor Arc. follower None은 cleanup 권한 없음 |
+| `native.rs::Registry::note_native_any_key` | AnyKey | 등록·full ticket CAS 뒤 settlement의 확장 metadata `any_key=true`. marker 없음은 NotSent/Unknown 원본 유지 |
+| `actor_state.rs::TurnFinalizer::submit_native` → `handle_native` | ObserveProof / DebtCommit | 검증된 same-capture Evidence만 Result. 기존 finalizer actor 메시지 순서, panic은 debt 보존 |
+| `terminal_handler.rs::NativeCleanup::drive` → `mailbox_finish.rs::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion` | Settle / DebtRelease | actor Arc·nonce·message ID·pre-key monotonic cutoff exact CAS. 실제 removed_token만 global_active 차감 |
+| `NativeCleanup::drive` → `inflight/clear_store/snapshot.rs::GuardedClearOutcome::for_snapshot_with_detail` | ProjectionClear / DebtRow | captured episode/runtime/start/offset, 최신 save_generation은 기존 lock-held CAS. read/parse 오류는 Missing 성공이 아님 |
+| `native.rs::Registry::ack_native_cleanup` → `turn_completion_events::publish_queue_eligible_completion_event` | cleanup admission / DebtWake | full ticket + 동일 outcome + 철회 안내 ack. row barrier 뒤 first cleanup만 wake. 기존 ledger admission plan 연결은 B2b-2 |
+
+결과·cleanup metadata를 저장하는 leaf는 기존 frame registry lock/transaction을 쓴다. 독립 DB·전역 guard·새 실행 소유자는 없다. boot/custody-only 소비 및 Cancel/Terminate/clear/stop/release의 production 연결은 본 전수표의 기존 경로 그대로 B2b-2 잔여다.

@@ -489,3 +489,6 @@ turn-presence/TurnPresenceRetiredRestartBeforeLiveness.cfg	TurnPresence	-	NewInp
 turn-presence/TurnPresenceRetiredRestartFixed.cfg	TurnPresence	-	-
 turn-presence/TurnPresenceRetiredSweep.cfg	TurnPresence	RetiredOnlyQuietNotUnknown	NewInputEventuallyStarts
 turn-presence/TurnPresenceRetiredUnsafe.cfg	TurnPresence	NoForeignMarkerRemoval,NoLiveMarkerRemoval	-
+input-single-path/NativeAttributionDebtBefore.cfg	NativeInputAttribution	NativeRowBarrier	NativeDebtEventuallyDrained
+input-single-path/NativeAttributionDebtFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionDebtNoRetry.cfg	NativeInputAttribution	-	NativeDebtEventuallyDrained

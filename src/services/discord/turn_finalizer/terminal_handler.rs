@@ -311,6 +311,7 @@ pub(super) async fn handle_policy_close(
 
 /// An inactive native admission carries separate result and cleanup authority.
 #[cfg(all(test, unix))]
+#[derive(Clone)]
 struct NativeAdmission {
     evidence: crate::services::tui_o::writer::input_facts::native::Evidence,
     cleanup: Option<(TurnKey, Arc<CancelToken>)>,
@@ -411,6 +412,304 @@ impl NativeAdmission {
             evidence: evidence.clone(),
             cleanup,
         })
+    }
+}
+
+/// Explicit intent captures its own actor before keys; an empty lease never grants ownership.
+#[cfg(all(test, unix))]
+struct NativePrepared {
+    namespace: String,
+    ticket: crate::services::tui_input::human_frame::history::v2::native::Ticket,
+    key: TurnKey,
+    actor: Option<Arc<CancelToken>>,
+    started_before: std::time::Instant,
+}
+
+#[cfg(all(test, unix))]
+impl NativePrepared {
+    async fn capture(
+        history: &crate::services::tui_input::human_frame::history::v2::Registry,
+        namespace: &str,
+        ticket: crate::services::tui_input::human_frame::history::v2::native::Ticket,
+        key: TurnKey,
+        actor: Option<Arc<CancelToken>>,
+        shared: &Arc<SharedData>,
+    ) -> Result<Self, String> {
+        history.native_settlement(namespace, &ticket)?;
+        let started_before = std::time::Instant::now();
+        if key.channel_id.get() != ticket.channel_id
+            || ticket.key["identity"]["primary"] != key.user_msg_id
+        {
+            return Err("native pre-key identity mismatch".into());
+        }
+        match &ticket.owning_episode {
+            None if actor.is_some() => return Err("native follower cannot borrow actor".into()),
+            None => {}
+            Some(episode) => {
+                let expected = actor.as_ref().ok_or("native primary actor missing")?;
+                let mailbox = shared
+                    .mailbox_peek(key.channel_id)
+                    .ok_or("native mailbox missing")?;
+                let current = mailbox.snapshot().await;
+                if key.generation != shared.restart.current_generation
+                    || key.generation != episode.generation
+                    || key.user_msg_id != episode.user_message_id
+                    || !key.matches_episode_nonce(Some(&episode.turn_nonce))
+                    || expected.turn_nonce() != Some(episode.turn_nonce.as_str())
+                    || current.active_user_message_id.map(|id| id.get()) != Some(key.user_msg_id)
+                    || !current
+                        .cancel_token
+                        .as_ref()
+                        .is_some_and(|a| Arc::ptr_eq(a, expected))
+                {
+                    return Err("native pre-key actor mismatch".into());
+                }
+            }
+        }
+        Ok(Self {
+            namespace: namespace.into(),
+            ticket,
+            key,
+            actor,
+            started_before,
+        })
+    }
+
+    fn bound_ticket(
+        &self,
+        history: &crate::services::tui_input::human_frame::history::v2::Registry,
+    ) -> Result<crate::services::tui_input::human_frame::history::v2::native::Ticket, String> {
+        let current = history.native_ticket(&self.namespace, &self.ticket.key)?;
+        if current.channel_id != self.ticket.channel_id
+            || current.owning_episode != self.ticket.owning_episode
+            || current.extra != self.ticket.extra
+            || (self.ticket.source.is_some() && current.source != self.ticket.source)
+        {
+            return Err("native prepared ticket changed".into());
+        }
+        Ok(current)
+    }
+
+    fn any_key(
+        &self,
+        history: &crate::services::tui_input::human_frame::history::v2::Registry,
+    ) -> Result<(), String> {
+        history.note_native_any_key(&self.namespace, &self.bound_ticket(history)?)
+    }
+
+    async fn admit(
+        &self,
+        observed: &crate::services::tui_o::writer::input_facts::native::Observation,
+        current: &crate::services::tui_o::writer::input_facts::native::Observation,
+        index: usize,
+        current_target: &serde_json::Value,
+        history: &crate::services::tui_input::human_frame::history::v2::Registry,
+        shared: &Arc<SharedData>,
+    ) -> Result<NativeCleanup, String> {
+        let ticket = self.bound_ticket(history)?;
+        let settlement = history.native_settlement(&self.namespace, &ticket)?;
+        if settlement.extra.get("any_key") != Some(&serde_json::Value::Bool(true)) {
+            return Err("native original has no key receipt".into());
+        }
+        let current_actor = match shared.mailbox_peek(self.key.channel_id) {
+            Some(mailbox) => mailbox.snapshot().await.cancel_token,
+            None => None,
+        };
+        let admission = NativeAdmission::capture(
+            observed,
+            current,
+            index,
+            current_target,
+            self.key,
+            self.actor.as_ref(),
+            current_actor.as_ref(),
+        )?;
+        if admission.evidence.namespace != self.namespace || admission.evidence.ticket != ticket {
+            return Err("native candidate is not prepared input".into());
+        }
+        let row = self.actor.as_ref().and_then(|_| {
+            super::super::inflight::load_inflight_state(
+                &ProviderKind::Claude,
+                self.key.channel_id.get(),
+            )
+        });
+        NativeCleanup::capture(admission, row, self.started_before)
+    }
+}
+
+/// A captured native result retains its row debt until the snapshot CAS succeeds.
+#[cfg(all(test, unix))]
+#[derive(Clone)]
+pub(super) struct NativeCleanup {
+    admission: NativeAdmission,
+    row: Option<super::super::inflight::InflightTurnState>,
+    started_before: std::time::Instant,
+}
+
+#[cfg(all(test, unix))]
+impl NativeCleanup {
+    fn capture(
+        admission: NativeAdmission,
+        row: Option<super::super::inflight::InflightTurnState>,
+        started_before: std::time::Instant,
+    ) -> Result<Self, String> {
+        let row = match &admission.cleanup {
+            Some((key, _)) => {
+                let row = row.ok_or("native primary row missing")?;
+                let source = admission
+                    .evidence
+                    .ticket
+                    .source
+                    .as_ref()
+                    .ok_or("native source missing")?;
+                if !Self::matches_row(&row, *key, source) {
+                    return Err("native row episode/runtime mismatch".into());
+                }
+                Some(row)
+            }
+            None => None,
+        };
+        Ok(Self {
+            admission,
+            row,
+            started_before,
+        })
+    }
+
+    fn matches_row(
+        row: &super::super::inflight::InflightTurnState,
+        key: TurnKey,
+        source: &crate::services::tui_input::human_frame::history::v2::Source,
+    ) -> bool {
+        row.provider == "claude"
+            && row.channel_id == key.channel_id.get()
+            && row.effective_finalizer_turn_id() == key.user_msg_id
+            && row.born_generation == key.generation
+            && key.matches_episode_nonce(row.turn_nonce.as_deref())
+            && row.session_id.as_deref() == Some(source.session_id.as_str())
+            && row.output_path.as_deref() == source.transcript.to_str()
+            && row.hosted_execution_nonce.as_deref() == source.target["execution_nonce"].as_str()
+    }
+
+    pub(super) async fn drive(
+        &self,
+        history: &crate::services::tui_input::human_frame::history::v2::Registry,
+        shared: &Arc<SharedData>,
+    ) -> Result<bool, String> {
+        use super::super::inflight::GuardedClearOutcome;
+        use crate::services::tui_input::human_frame::history::v2::native::{Disposition, Outcome};
+        let evidence = &self.admission.evidence;
+        let outcome = Outcome {
+            disposition: evidence.disposition.clone(),
+            range: Some([evidence.range.0, evidence.range.1]),
+            extra: serde_json::Map::from_iter([(
+                "native_proof".into(),
+                serde_json::to_value(evidence).map_err(|e| e.to_string())?,
+            )]),
+        };
+        history.record_native_outcome(&evidence.namespace, &evidence.ticket, &outcome)?;
+        let settlement = history.native_settlement(&evidence.namespace, &evidence.ticket)?;
+        if settlement.cleanup_complete {
+            return Ok(true);
+        }
+        if outcome.disposition == Disposition::WithdrawnNotExecuted && !settlement.withdrawal_notice
+        {
+            let pool = shared
+                .pg_pool
+                .as_ref()
+                .ok_or("native withdrawal outbox unavailable")?;
+            let stable = serde_json::to_vec(&(&evidence.namespace, &evidence.ticket))
+                .map_err(|e| e.to_string())?;
+            let dedupe = format!("native-withdrawal:{}", blake3::hash(&stable));
+            crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+                pool,
+                crate::services::message_outbox::OutboxMessage {
+                    target: &format!("channel:{}", evidence.ticket.channel_id),
+                    content: "입력이 실행 전에 철회되었습니다.",
+                    bot: "claude",
+                    source: "retained_input_notice",
+                    reason_code: None,
+                    session_key: Some(&dedupe),
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            history.ack_native_withdrawal_notice(&evidence.namespace, &evidence.ticket)?;
+        }
+        if let Some((key, actor)) = &self.admission.cleanup {
+            if let Some(mailbox) = shared.mailbox_peek(key.channel_id) {
+                let current = mailbox.snapshot().await;
+                if current
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|current| !Arc::ptr_eq(current, actor))
+                {
+                    return Ok(false);
+                }
+                if current.cancel_token.is_some() {
+                    let finish = super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+                        shared, &ProviderKind::Claude, key.channel_id,
+                        serenity::model::id::MessageId::new(key.user_msg_id),
+                        evidence.ticket.owning_episode.as_ref().map(|e| e.turn_nonce.clone()),
+                        self.started_before, Some(actor.clone()),
+                    ).await;
+                    if let Some(removed) = finish.removed_token.as_ref() {
+                        removed.mark_completion_cleanup();
+                        super::super::saturating_decrement_global_active(shared);
+                    } else {
+                        return Ok(false);
+                    }
+                    if finish.persistence_error.is_some() {
+                        return Ok(false);
+                    }
+                }
+            }
+            let captured = self.row.as_ref().ok_or("native row capture missing")?;
+            let source = evidence
+                .ticket
+                .source
+                .as_ref()
+                .ok_or("native source missing")?;
+            let root = super::super::inflight::inflight_runtime_root()
+                .ok_or("native runtime root missing")?;
+            let path = super::super::inflight::inflight_state_path(
+                &root,
+                &ProviderKind::Claude,
+                key.channel_id.get(),
+            );
+            let row = match std::fs::read(&path) {
+                Ok(raw) => {
+                    let current: super::super::inflight::InflightTurnState =
+                        serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+                    if !Self::matches_row(&current, *key, source)
+                        || current.started_at != captured.started_at
+                        || current.turn_start_offset != captured.turn_start_offset
+                    {
+                        return Ok(false);
+                    }
+                    current
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => captured.clone(),
+                Err(error) => return Err(error.to_string()),
+            };
+            let (cleared, detail) =
+                GuardedClearOutcome::for_snapshot_with_detail(&ProviderKind::Claude, &row);
+            if !matches!(
+                (cleared, detail.reason),
+                (GuardedClearOutcome::Cleared, _) | (GuardedClearOutcome::Missing, "not_found")
+            ) {
+                return Ok(false);
+            }
+        }
+        let first = history.ack_native_cleanup(&evidence.namespace, &evidence.ticket, &outcome)?;
+        if first && let Some((key, _)) = &self.admission.cleanup {
+            super::super::turn_completion_events::publish_queue_eligible_completion_event(
+                shared,
+                key.channel_id,
+                Some(key.user_msg_id),
+            );
+        }
+        Ok(true)
     }
 }
 

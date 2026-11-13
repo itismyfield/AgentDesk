@@ -12,7 +12,7 @@ vars == <<pc, native, members, nativeQueue, stage, lease, rows, pending,
           generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
 
 ReviewModes == {"FollowerBefore", "FollowerFixed", "BootBefore", "BootFixed",
-                "BootFailureFixed", "BootIgnoreFailure"}
+                "BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry"}
 ReviewBoot == Mode \in {"BootBefore", "BootFixed", "BootFailureFixed", "BootIgnoreFailure"}
 
 Init == /\ pc = 0 /\ native = "Idle" /\ members = {} /\ nativeQueue = <<>>
@@ -27,7 +27,7 @@ Init == /\ pc = 0 /\ native = "Idle" /\ members = {} /\ nativeQueue = <<>>
         /\ review \in [phase : {IF ReviewBoot THEN "Prepare" ELSE IF Mode \in ReviewModes THEN "Registered" ELSE "Dormant"},
              outcome : {"Executed", "Withdrawn"}, commits : {0, 1}, result : {"None", "Executed"},
              row : {TRUE}, preserved : {FALSE}, prepared : {FALSE}, head : {FALSE},
-             failed : {Mode \in {"BootFailureFixed", "BootIgnoreFailure"}}, notice : {0},
+             failed : {Mode \in {"BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry"}}, notice : {0},
              parentLease : {1}, parentRow : {TRUE}, parentActive : {1}]
         /\ review.commits = IF review.result = "Executed" THEN 1 ELSE 0
         /\ ~ReviewBoot => review.result = "None"
@@ -272,4 +272,30 @@ NoBootTicketLoss == ~ReviewBoot \/ review.row \/ review.preserved
 FailureKeepsRow == ~review.failed \/ review.row
 FollowerEventuallySettles == (Mode \in {"FollowerBefore", "FollowerFixed"}) => <>(review.phase = "Done")
 BootEventuallyRestores == (Mode \in {"BootBefore", "BootFixed"}) => <>review.head
+
+\* The native cleanup port: a corrupt row remains debt after the exact lease was released.
+DebtCommit == /\ review.phase = "Registered"
+              /\ review' = [review EXCEPT !.phase = "Result", !.result = "Executed", !.commits = 1]
+              /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+DebtRelease == /\ review.phase = "Result"
+               /\ review' = [review EXCEPT !.phase = "Row", !.parentLease = 0, !.parentActive = 0]
+               /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+DebtRow == /\ review.phase = "Row"
+           /\ review' = IF review.failed
+                THEN [review EXCEPT !.phase = IF Mode = "DebtBefore" THEN "Done" ELSE "Blocked",
+                     !.head = Mode = "DebtBefore"]
+                ELSE [review EXCEPT !.phase = "Wake", !.row = FALSE]
+           /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+DebtRepair == /\ review.phase = "Blocked" /\ Mode # "DebtNoRetry"
+              /\ review' = [review EXCEPT !.phase = "Row", !.failed = FALSE]
+              /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+DebtWake == /\ review.phase = "Wake"
+            /\ review' = [review EXCEPT !.phase = "Done", !.head = TRUE]
+            /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+DebtNext == DebtCommit \/ DebtRelease \/ DebtRow \/ DebtRepair \/ DebtWake
+DebtSpec == Init /\ [][DebtNext]_vars /\ WF_vars(DebtCommit) /\ WF_vars(DebtRelease)
+            /\ WF_vars(DebtRow) /\ WF_vars(DebtRepair) /\ WF_vars(DebtWake)
+NativeRowBarrier == review.head => ~review.row
+NativeResultBeforeRelease == review.parentLease = 0 => review.result = "Executed"
+NativeDebtEventuallyDrained == <>(review.head /\ ~review.row)
 =============================================================================
