@@ -617,3 +617,146 @@ async fn key_promotion_synthetic_scope_does_not_publish_canonical_registration_p
     assert!(rig.present());
     rig.finish().await;
 }
+
+#[tokio::test]
+async fn key_promotion_registration_conflict_keeps_replaced_incarnation_pg() {
+    let rig = PromotionRig::new(81190309).await;
+    sqlx::query("UPDATE sessions SET status='idle' WHERE id=$1")
+        .bind(rig.id)
+        .execute(&rig.pool)
+        .await
+        .unwrap();
+    assert!(!super::unix::observe_old(
+        rig.id,
+        &rig.key,
+        rig.channel.get()
+    ));
+    assert!(
+        rig.raw(&["kill-session", "-t", &format!("={}", rig.name)])
+            .status
+            .success()
+    );
+    assert!(super::unix::observe_old(
+        rig.id,
+        &rig.key,
+        rig.channel.get()
+    ));
+    let name = format!("s2-successor-{}", rig.channel.get());
+    let _cleanup = SessionCleanup {
+        program: rig.program.clone(),
+        names: [name.clone(), name.clone()],
+    };
+    let scope = RegistrationScope::enter(
+        Some(&rig.pool),
+        &rig.shared.token_hash,
+        &ProviderKind::Claude,
+        rig.channel.get(),
+        Some(&name),
+        Some("racing-a"),
+        Some(false),
+    )
+    .unwrap();
+    let prepare = || {
+        PreparedIncarnation::create(BindingContext {
+            schema: 1,
+            provider: "claude".into(),
+            created_at: chrono::Utc::now(),
+            execution_nonce: uuid::Uuid::new_v4().simple().to_string(),
+            tmux_session: name.clone(),
+            channel_id: Some(rig.channel.get()),
+            owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
+            host: None,
+            expected_native_session_id: None,
+            launch_mode: "fresh".into(),
+            provider_root: None,
+            first_prompt_digest: None,
+            source_policy: None,
+        })
+        .unwrap()
+    };
+    let launch = |prepared: &PreparedIncarnation| {
+        let identity = prepared
+            .tmux_identity()
+            .unwrap()
+            .environment_assignment()
+            .unwrap();
+        assert!(
+            rig.raw(&["new-session", "-d", "-s", &name, "-e", &identity, "cat"])
+                .status
+                .success()
+        );
+        crate::services::tmux_common::write_tmux_owner_marker(&name).unwrap();
+        crate::services::tmux_common::host_marker::record_tmux_host_marker(&name);
+        crate::services::discord::stamp_spawn_markers(&name, Some(prepared))
+    };
+    let a = prepare();
+    let stamped_a = launch(&a);
+    assert!(stamped_a.is_ok());
+    let a_pid = rig
+        .raw(&[
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={name}:"),
+            "#{pane_pid}",
+        ])
+        .stdout;
+    assert!(
+        rig.raw(&["kill-session", "-t", &format!("={name}")])
+            .status
+            .success()
+    );
+    let b = prepare();
+    let isolated = RegistrationScope::enter(
+        Some(&rig.pool),
+        &rig.shared.token_hash,
+        &ProviderKind::Claude,
+        rig.channel.get(),
+        Some(&name),
+        Some("replacement"),
+        None,
+    )
+    .unwrap();
+    b.finish_spawn(launch(&b)).unwrap();
+    drop(isolated);
+    let b_pid = rig
+        .raw(&[
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={name}:"),
+            "#{pane_pid}",
+        ])
+        .stdout;
+    assert!(!b_pid.is_empty());
+    assert_ne!(a_pid, b_pid);
+    sqlx::query(
+        "UPDATE sessions SET active_turn_nonce='replacement', status='turn_active' WHERE id=$1",
+    )
+    .bind(rig.id)
+    .execute(&rig.pool)
+    .await
+    .unwrap();
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s WHERE id=$1")
+            .bind(rig.id)
+            .fetch_one(&rig.pool)
+            .await
+            .unwrap();
+    assert!(a.finish_spawn(stamped_a).is_err());
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s WHERE id=$1")
+            .bind(rig.id)
+            .fetch_one(&rig.pool)
+            .await
+            .unwrap();
+    assert_eq!(before, after, "actor CAS must roll back every DB change");
+    assert!(
+        rig.raw(&["has-session", "-t", &format!("={name}")])
+            .status
+            .success(),
+        "a refused stale registration must not kill its replacement incarnation"
+    );
+    drop(scope);
+    rig.finish().await;
+}
