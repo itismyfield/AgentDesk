@@ -394,10 +394,17 @@ fn old_clear_release_cannot_release_a_new_pending_on_the_same_native_source() {
     let first = reserve(observe(&r.rig.session, Some(&r.path(&native))).unwrap()).unwrap();
     let old = first.clear.clone().unwrap();
     first.not_sent();
+    let intermediate = uuid::Uuid::new_v4().to_string();
+    r.pending(&intermediate, r.channel, &r.path(&intermediate));
     r.pending(&native, r.channel, &r.path(&native));
     r.start(&native, "clear");
     let latest = reserve(observe(&r.rig.session, Some(&r.path(&native))).unwrap()).unwrap();
     assert!(latest.current());
+    assert_ne!(
+        old,
+        latest.clear.as_ref().unwrap().clone(),
+        "the later Pending has distinct evidence"
+    );
     super::super::clear::release(&latest.source, Some(&old));
     drop(latest);
     forget_session(&r.rig.session);
