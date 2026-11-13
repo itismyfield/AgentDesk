@@ -128,3 +128,5 @@ upper bound of about 65 seconds from the server `idle_in_transaction_session_tim
 Routing/staging can still wait for that guard; admission here does not mean durable staging has completed.
 
 The Claude readiness refinement also checks terminal-free self-compact completion: [before](input-single-path/InputPathReadyCompactNoCompletion.cfg) breaks next-input liveness; [after](input-single-path/InputPathReadyCompactCompletion.cfg) satisfies it. Source, generation, reservation and Unknown-transfer guards remain caller obligations documented in [the readiness report](input-single-path/transcript-readiness.report.md).
+
+The managed idle-stash readiness refinement keeps a person draft intact through the existing C-s round trip: [before](input-single-path/InputPathReadyManagedStashBefore.cfg) breaks queued-input liveness; [after](input-single-path/InputPathReadyManagedStashAfter.cfg) preserves the draft and sends once after current source readiness. [Evidence](input-single-path/readiness-managed-stash.report.md).

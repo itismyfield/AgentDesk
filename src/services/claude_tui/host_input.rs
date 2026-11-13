@@ -813,6 +813,8 @@ mod spy {
         pub cancel_on: Option<(&'static str, usize, std::sync::Arc<CancelToken>)>,
         /// Sees each send (load, literal, paste or keys) just before the pane would receive it.
         pub on_send: Option<SendHook>,
+        /// The fixture may publish its provider startup before the first input liveness read.
+        pub on_alive: Option<SendHook>,
     }
 
     pub(crate) type SendHook = Box<dyn FnMut(&str)>;
@@ -830,6 +832,7 @@ mod spy {
                 sends: 0,
                 cancel_on: None,
                 on_send: None,
+                on_alive: None,
             }
         }
     }
@@ -939,9 +942,12 @@ mod spy {
             state.capture()
         }
 
-        fn pane_alive(&mut self, _session: &str) -> bool {
+        fn pane_alive(&mut self, session: &str) -> bool {
             let mut state = self.0.borrow_mut();
             state.record("alive".to_string());
+            if let Some(hook) = state.on_alive.as_mut() {
+                hook(session);
+            }
             !state.dead
         }
 

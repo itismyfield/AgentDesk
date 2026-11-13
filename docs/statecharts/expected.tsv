@@ -454,3 +454,5 @@ outbox-transaction/OutboxTransactionForeignTx.cfg	OutboxTransaction	SameTransact
 outbox-transaction/OutboxTransactionForeignProviderConnection.cfg	OutboxTransaction	SameProviderConnection	-
 input-single-path/InputPathReadyModalWatchBefore.cfg	InputPath	ReadyNoModalOpenWake	-
 input-single-path/InputPathReadyModalWatchAfter.cfg	InputPath	-	-
+input-single-path/InputPathReadyManagedStashBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes
+input-single-path/InputPathReadyManagedStashAfter.cfg	InputPath	-	-

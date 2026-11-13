@@ -24,7 +24,7 @@ pub(crate) fn prepare(
             && (readiness == PromptReadinessKind::ProvenWarmFollowup
                 || super::super::host_input::observe_draft(session)
                     .as_deref()
-                    .is_some_and(super::empty_draft))
+                    .is_some_and(|capture| composer_prepared(session, capture)))
         {
             return Ok(proof);
         }
@@ -42,4 +42,24 @@ pub(crate) fn prepare(
             )
             .unwrap_or_else(|e| e.into_inner());
     }
+}
+
+// Existing managed stash authority may park a draft; source readiness is still required first.
+fn composer_prepared(session: &str, capture: &str) -> bool {
+    if super::empty_draft(capture) {
+        return true;
+    }
+    #[cfg(unix)]
+    if let Some((fence, context)) = super::super::submission_fence::idle_stash_scope()
+        && context.available
+        && context.target == session
+        && fence.idle_stash_admits(session)
+        && (fence.stash_any_channel()
+            || super::super::busy_inject::stash_enabled(Some(context.channel)))
+    {
+        return super::super::busy_inject::screen::parkable(capture);
+    }
+    #[cfg(not(unix))]
+    let _ = session;
+    false
 }
