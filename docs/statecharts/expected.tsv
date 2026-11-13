@@ -240,9 +240,13 @@ input-single-path/InputPathReadyClearForged.cfg	InputPath	-	-
 input-single-path/InputPathReadyClearHeldAfter.cfg	InputPath	-
 input-single-path/InputPathReadyClearHeldBefore.cfg	InputPath	-	ReadyClearHeldEventuallySends
 input-single-path/InputPathReadyClearNoRevalidate.cfg	InputPath	ReadyNoUnsafeClearRetire	-
+input-single-path/InputPathReadyClearOldOutput.cfg	InputPath	-	-
+input-single-path/InputPathReadyClearOldOutputBefore.cfg	InputPath	ReadyNoUnsafeClearRetire	-
 input-single-path/InputPathReadyClearPendingAfter.cfg	InputPath	-	-
 input-single-path/InputPathReadyClearPendingBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyClearPendingRecheck.cfg	InputPath	-	-
+input-single-path/InputPathReadyClearReplay.cfg	InputPath	-	-
+input-single-path/InputPathReadyClearReplayBefore.cfg	InputPath	ReadyNoDuplicate,ReadyNoSilentLoss	-
 input-single-path/InputPathReadyClearRestart.cfg	InputPath	-	-
 input-single-path/InputPathReadyClearSplit.cfg	InputPath	ReadyClearAtomic	-
 input-single-path/InputPathReadyClearVolatile.cfg	InputPath	-	-
@@ -522,7 +526,3 @@ turn-presence/TurnPresenceRetiredRestartBeforeLiveness.cfg	TurnPresence	-	NewInp
 turn-presence/TurnPresenceRetiredRestartFixed.cfg	TurnPresence	-	-
 turn-presence/TurnPresenceRetiredSweep.cfg	TurnPresence	RetiredOnlyQuietNotUnknown	NewInputEventuallyStarts
 turn-presence/TurnPresenceRetiredUnsafe.cfg	TurnPresence	NoForeignMarkerRemoval,NoLiveMarkerRemoval	-
-input-single-path/InputPathReadyClearReplay.cfg	InputPath	-	-
-input-single-path/InputPathReadyClearReplayBefore.cfg	InputPath	ReadyNoDuplicate,ReadyNoSilentLoss	-
-input-single-path/InputPathReadyClearOldOutput.cfg	InputPath	-	-
-input-single-path/InputPathReadyClearOldOutputBefore.cfg	InputPath	ReadyNoUnsafeClearRetire	-
