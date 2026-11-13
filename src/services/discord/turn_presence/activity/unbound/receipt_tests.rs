@@ -490,13 +490,14 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
     assert_eq!(body["status"], "started");
     turn.entered().await;
     let row = inflight::load_inflight_state(&ProviderKind::Claude, parent).unwrap();
+    assert!(!row.routine_presentation.holds_body());
     assert_eq!(
         body["turn_id"],
         format!("discord:{parent}:{}", row.user_msg_id)
     );
     let (again, refused) = post_start(&app, agent).await;
     assert_eq!(again, axum::http::StatusCode::CONFLICT, "{refused}");
-    turn.finish(&pool).await;
+    turn.finish(&pool, false).await;
     let mut codex =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     Arc::get_mut(&mut codex).unwrap().provider = ProviderKind::Codex;
