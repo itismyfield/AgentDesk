@@ -1,3 +1,4 @@
+pub(crate) mod agent_handoff;
 pub(crate) mod atomic_write;
 pub(crate) mod auto_queue_log;
 pub(crate) mod automation_contract;

@@ -7,32 +7,8 @@ use super::bot_role::UtilityBotRole;
 use super::health::{self, HealthRegistry};
 use super::router::{HeadlessTurnStartError, HeadlessTurnStartOutcome};
 use crate::db::agents::AgentChannelBindings;
+use crate::domain::agent_handoff::AgentHandoffChannelKind;
 use crate::services::provider::ProviderKind;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AgentHandoffChannelKind {
-    Cc,
-    Cdx,
-}
-
-impl AgentHandoffChannelKind {
-    pub(crate) fn parse(value: Option<&str>) -> Result<Self, AgentHandoffError> {
-        match value.map(str::trim).filter(|value| !value.is_empty()) {
-            None | Some("cc") => Ok(Self::Cc),
-            Some("cdx") => Ok(Self::Cdx),
-            Some(_) => Err(AgentHandoffError::bad_request(
-                "channel_kind must be cc or cdx",
-            )),
-        }
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Cc => "cc",
-            Self::Cdx => "cdx",
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct AgentHandoffResponse {
@@ -677,10 +653,44 @@ mod tests {
     }
 
     #[test]
+    fn channel_kind_preserves_existing_input_contract() {
+        for (input, expected) in [
+            (None, AgentHandoffChannelKind::Cc),
+            (Some(""), AgentHandoffChannelKind::Cc),
+            (Some(" \t\n"), AgentHandoffChannelKind::Cc),
+            (Some("cc"), AgentHandoffChannelKind::Cc),
+            (Some(" \tcc\n"), AgentHandoffChannelKind::Cc),
+            (Some("cdx"), AgentHandoffChannelKind::Cdx),
+            (Some(" \tcdx\n"), AgentHandoffChannelKind::Cdx),
+        ] {
+            let kind = AgentHandoffChannelKind::parse(input).unwrap();
+            assert_eq!(kind, expected, "{input:?}");
+            assert_eq!(
+                kind.as_str(),
+                if expected == AgentHandoffChannelKind::Cc {
+                    "cc"
+                } else {
+                    "cdx"
+                }
+            );
+        }
+    }
+
+    #[test]
     fn channel_kind_rejects_unknown_value() {
-        let error = AgentHandoffChannelKind::parse(Some("notify")).unwrap_err();
-        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(error.body()["error"], "channel_kind must be cc or cdx");
+        for input in ["notify", "CC", "Cdx", "CDX", " ccx ", "cc cdx"] {
+            let error = AgentHandoffChannelKind::parse(Some(input)).unwrap_err();
+            assert_eq!(
+                error,
+                crate::domain::agent_handoff::InvalidChannelKind,
+                "{input:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                "channel_kind must be cc or cdx",
+                "{input:?}"
+            );
+        }
     }
 
     #[test]

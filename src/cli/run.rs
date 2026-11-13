@@ -14,13 +14,11 @@ use super::args::{
 
 fn agent_handoff_channel_kind(
     value: AgentHandoffChannelKindArg,
-) -> crate::services::discord::agent_handoff::AgentHandoffChannelKind {
+) -> crate::domain::agent_handoff::AgentHandoffChannelKind {
     match value {
-        AgentHandoffChannelKindArg::Cc => {
-            crate::services::discord::agent_handoff::AgentHandoffChannelKind::Cc
-        }
+        AgentHandoffChannelKindArg::Cc => crate::domain::agent_handoff::AgentHandoffChannelKind::Cc,
         AgentHandoffChannelKindArg::Cdx => {
-            crate::services::discord::agent_handoff::AgentHandoffChannelKind::Cdx
+            crate::domain::agent_handoff::AgentHandoffChannelKind::Cdx
         }
     }
 }

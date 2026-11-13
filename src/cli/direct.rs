@@ -328,7 +328,7 @@ pub(crate) async fn cmd_send_to_agent(
     from_agent_id: &str,
     to_agent_id: &str,
     message: &str,
-    channel_kind: crate::services::discord::agent_handoff::AgentHandoffChannelKind,
+    channel_kind: crate::domain::agent_handoff::AgentHandoffChannelKind,
     prefix: bool,
     expect_reply: bool,
     start_turn: bool,

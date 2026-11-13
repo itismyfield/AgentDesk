@@ -151,11 +151,11 @@ fn start_turn_raw(
     let opts: TurnStartOptions = serde_json::from_str(options_json).unwrap_or_default();
 
     let channel_kind_str = opts.channel_kind.as_deref().unwrap_or("cc");
-    let channel_kind = match crate::services::discord::agent_handoff::AgentHandoffChannelKind::parse(
-        Some(channel_kind_str),
-    ) {
+    let channel_kind = match crate::domain::agent_handoff::AgentHandoffChannelKind::parse(Some(
+        channel_kind_str,
+    )) {
         Ok(kind) => kind,
-        Err(e) => return err_json(&e.one_line(), "error"),
+        Err(e) => return err_json(&e.to_string(), "error"),
     };
     let from_agent_id = opts
         .from_agent_id
