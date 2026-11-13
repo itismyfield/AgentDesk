@@ -14,7 +14,7 @@ pub(super) async fn create(
     command: HerdrLaunchCommand,
     host: &Arc<dyn HerdrLaunchHost>,
     create_permit: Option<crate::services::session_host::policy::permit::CreatePermit>,
-    in_flight: &Arc<unplaced::LaunchInFlight>,
+    (in_flight, checked): (&Arc<unplaced::LaunchInFlight>, clear_epoch::Checked),
 ) -> Result<Created, HerdrLaunchError> {
     let nonce = in_flight.nonce();
     // The worker keeps the launch in flight even if this call's awaiter is dropped.
@@ -42,6 +42,10 @@ pub(super) async fn create(
         let sent_at = SystemTime::now();
         let created = on_blocking_thread(host, move |host| {
             let _held = held;
+            let _permit = match checked.begin_effect() {
+                Ok(permit) => permit,
+                Err(detail) => return HerdrCreateOutcome::NotSent(detail),
+            };
             host.create_user_default(&request)
         })
         .await;
@@ -63,6 +67,10 @@ pub(super) async fn create(
         let sent_at = SystemTime::now();
         let created = on_blocking_thread(host, move |host| {
             let _held = held;
+            let _permit = match checked.begin_effect() {
+                Ok(permit) => permit,
+                Err(detail) => return HerdrCreateOutcome::NotSent(detail),
+            };
             host.create(&request)
         })
         .await;

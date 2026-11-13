@@ -1,6 +1,9 @@
 //! A terminated Herdr execution's output stays O's: its sealed tail posts once, a successor bind
 //! keeps it, an announced unit stays unsealed, and the service writes or posts nothing of O's.
 
+#[path = "herdr_terminate_o_e2e_tests/late_clear_tests.rs"]
+mod late_clear_tests;
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};

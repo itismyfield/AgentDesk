@@ -50,15 +50,30 @@ fn bound_target(rig: &HerdrRig, logical: &str) -> (HostedOwner, HerdrTarget) {
 
 #[test]
 fn cold_herdr_submit_returns_before_source_and_emits_init_before_one_paste_enter() {
-    run_case(false);
+    run_case(false, false, false, false);
 }
 
 #[test]
 fn cold_herdr_payload_commit_refusal_preserves_raw_and_hold_with_zero_keys() {
-    run_case(true);
+    run_case(true, false, false, false);
 }
 
-fn run_case(refuse_commit: bool) {
+#[test]
+fn clear_before_actual_claude_herdr_submit_sends_no_keys() {
+    run_case(false, true, false, false);
+}
+
+#[test]
+fn claude_created_submit_worker_keeps_origin_clear_scope() {
+    run_case(false, false, true, false);
+}
+
+#[test]
+fn clear_between_claude_submit_check_and_effect_sends_no_keys() {
+    run_case(false, false, false, true);
+}
+
+fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_checked: bool) {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let rig = HerdrRig::start();
@@ -92,7 +107,7 @@ fn run_case(refuse_commit: bool) {
         transcript: transcript.clone(),
         target,
         bound: true,
-        physical: None,
+        physical: worker_clear.then(|| (rig.socket().display().to_string(), PANE.into())),
     };
     let (tx, rx) = std::sync::mpsc::channel();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
@@ -103,6 +118,7 @@ fn run_case(refuse_commit: bool) {
         .unwrap()
         .join("runtime/discord_pending_queue/cold-matrix/727398-herdr-owner.json");
     let effect_mailbox = mailbox.clone();
+    let install_worker = rig.thread_installer(NODE, KEY, rig.socket(), SESSION);
     let (_, result) = runtime
         .block_on(
             mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
@@ -147,6 +163,33 @@ fn run_case(refuse_commit: bool) {
                     hook_endpoint: None,
                     cancel: None,
                 };
+                let _launching =
+                    crate::services::herdr_launch::clear_epoch::Launching::enter(&turn.owner)
+                        .unwrap();
+                let _clear = clear_first.then(|| {
+                    crate::services::herdr_launch::clear_epoch::begin_clear(
+                        &turn.owner.provider,
+                        &turn.owner.discord_token_hash,
+                        1,
+                    )
+                });
+                let saved_clear = Arc::new(std::sync::Mutex::new(None));
+                let _check = clear_checked.then(|| {
+                    let saved = saved_clear.clone();
+                    let owner = turn.owner.clone();
+                    crate::services::herdr_launch::clear_epoch::tests::watch(
+                        &turn.owner,
+                        crate::services::herdr_launch::clear_epoch::tests::Point::Checked,
+                        move || {
+                            *saved.lock().unwrap() =
+                                Some(crate::services::herdr_launch::clear_epoch::begin_clear(
+                                    &owner.provider,
+                                    &owner.discord_token_hash,
+                                    1,
+                                ));
+                        },
+                    )
+                });
 
                 let _watch = refuse_commit.then(|| {
                     use crate::services::discord::runtime_store::durable_probe::{
@@ -160,13 +203,76 @@ fn run_case(refuse_commit: bool) {
                         },
                     )
                 });
-                submit(&turn, attached, &tx)
+                if worker_clear {
+                    let owner = turn.owner.clone();
+                    let frame = frame.clone();
+                    let runtime = tokio::runtime::Handle::current();
+                    let hook: crate::services::claude_tui::owner_input::LaunchHook =
+                        Box::new(move |_, _, _, _, submit| {
+                            let _clear = crate::services::herdr_launch::clear_epoch::begin_clear(
+                                &owner.provider,
+                                &owner.discord_token_hash,
+                                1,
+                            );
+                            crate::test_support::wait::join_within(
+                                std::thread::spawn(move || {
+                                    install_worker();
+                                    let _runtime = runtime.enter();
+                                    submit(frame).map_err(SubmissionError::into_legacy)
+                                }),
+                                std::time::Duration::from_secs(10),
+                            )
+                        });
+                    submit_owned(
+                        &turn,
+                        hook,
+                        crate::services::claude_tui::owner_input::Lineage::Created,
+                        attached,
+                        &tx,
+                    )
+                    .map(Some)
+                } else {
+                    let result = submit(&turn, attached, &tx);
+                    if !clear_first && result.is_ok() {
+                        let clear = crate::services::herdr_launch::clear_epoch::begin_clear(
+                            &turn.owner.provider,
+                            &turn.owner.discord_token_hash,
+                            1,
+                        );
+                        assert!(
+                            !clear.overlapped_startup(),
+                            "physical submit ends startup before Source observation"
+                        );
+                    }
+                    result
+                }
             }),
         )
         .unwrap();
     let owner_snapshot = runtime
         .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
         .unwrap();
+    if worker_clear {
+        assert!(
+            rig.sends().is_empty(),
+            "worker must retain the origin epoch scope"
+        );
+        let error = result.err().expect("worker must reject the origin epoch");
+        assert!(error.contains("clear changed"), "{error}");
+        return;
+    }
+    if clear_first || clear_checked {
+        assert!(
+            rig.sends().is_empty(),
+            "clear precedes actual Claude paste/Enter"
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            owner_snapshot["head_injection"]["payload_window"]["kind"],
+            "bootstrap"
+        );
+        return;
+    }
     if refuse_commit {
         assert_eq!(
             rig.sends().len(),

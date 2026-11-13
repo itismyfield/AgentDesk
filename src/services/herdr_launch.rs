@@ -1,6 +1,7 @@
 //! Herdr launch preparation for one channel's canonical row.
 //! Durable Pending and user-default grants precede create; retries only probe.
 
+pub(crate) mod clear_epoch;
 #[cfg(unix)]
 mod codex_resume;
 pub(crate) mod policy;
@@ -384,6 +385,8 @@ pub(crate) async fn launch_herdr_session(
     prepare: impl FnOnce(&PreparedIncarnation) -> Result<HerdrLaunchCommand, String>,
     host: Arc<dyn HerdrLaunchHost>,
 ) -> Result<HerdrLaunchOutcome, HerdrLaunchError> {
+    let launching =
+        clear_epoch::Launching::for_launch(&launch.owner).map_err(HerdrLaunchError::Prepare)?;
     let endpoint = admit(launch.endpoint.as_ref())?.clone();
     let mode = host.mode(&endpoint);
     let admitted = if mode == EndpointMode::LegacyDedicated {
@@ -523,6 +526,14 @@ pub(crate) async fn launch_herdr_session(
     if let Err(error) = markers {
         return Err(retire_unsent(pool, &owner, &nonce, error).await);
     }
+    let checked = match launching.scope().check_epoch() {
+        Ok(checked) => checked,
+        Err(detail) => {
+            return Err(
+                retire_unsent(pool, &owner, &nonce, HerdrLaunchError::NotSent(detail)).await,
+            );
+        }
+    };
 
     let prepared::Created {
         witness,
@@ -535,7 +546,7 @@ pub(crate) async fn launch_herdr_session(
         command,
         &host,
         create_permit,
-        &in_flight,
+        (&in_flight, checked),
     )
     .await?;
     let indeterminate = |detail: String| HerdrLaunchOutcome::Indeterminate {

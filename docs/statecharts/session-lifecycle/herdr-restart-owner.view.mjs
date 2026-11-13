@@ -1,6 +1,6 @@
 export const title = "Herdr restart B ports: immediate clear epoch, drain earlier effect grants";
 const qs = (s) => Object.values(s.q ?? {});
-const settled = (s) => qs(s).every(q => !["queued", "inflight"].includes(q));
+const settled = (s) => qs(s).every(q => !["queued", "claimed", "inflight"].includes(q));
 const tail = (s) => qs(s).includes("queued") ? "; an input waits" : qs(s).includes("incoming") ? "; an input may still arrive" : "";
 const baseState = (v) => {
   const s = v.s;
@@ -56,13 +56,24 @@ const baseState = (v) => {
 };
 export const state = (v) => {
   const s = v.s;
+  const members = (value) => Object.values(value ?? {});
+  const claim = s.claimPhase === "none" ? "" : `; initial claim ${s.claimPhase}`
+    + (members(s.claimObserved).includes(3) ? "; claim read stole the later input" : "")
+    + (members(s.claimPayload).includes(3) ? "; payload offers the later input" : "")
+    + (members(s.claimReserved).includes(3) ? "; reservation stole the later input" : "")
+    + ({ incoming: "; later input may arrive", queued: "; later input waits separately", inflight: "; later input awaits its own receipt", delivered: "; later input delivered", retained: "; later input retained", cancelled: "; later input explicitly dropped" }[s.q?.[3]] ?? "");
   const failures = [s.opSeedless && "known ticket entered the seedless path", s.opDuplicate && "known operation inserted another seed", s.unsafeEffect && "physical effect used no live permission", s.undrainedClear && "clear completed before an older startup or grant drained"].filter(Boolean);
-  if (!failures.length) return baseState(v);
-  const names = { incoming: "not yet arrived", queued: "waiting", inflight: "receipt pending", delivered: "delivered", retained: "retained", cancelled: "explicitly dropped", lost: "lost" };
+  if (!failures.length) return baseState(v) + claim;
+  const names = { incoming: "not yet arrived", queued: "waiting", claimed: "in the fixed claim", inflight: "receipt pending", delivered: "delivered", retained: "retained", cancelled: "explicitly dropped", lost: "lost" };
   const originals = qs(s).map((q, i) => `original ${i + 1} ${names[q] ?? q}`).join(", ");
-  return `${baseState(v)}; ${failures.join("; ")}; ${originals}`;
+  return `${baseState(v)}${claim}; ${failures.join("; ")}; ${originals}`;
 };
 export const step = (action, from, to) => ({
+  ClaimRead: "Read the fixed head and followers",
+  ClaimBadPayload: "Offer the later arrival as an extra follower",
+  ClaimReserve: "Reserve exactly the claim's ordered originals",
+  ClaimReject: "Refuse mismatching originals before any reserve",
+  ClaimDone: "Finish the claimed unit's own receipts",
   Request: to.s.cmd === "notice" ? "Refuse before any effect" : to.s.seed === "queued" ? "Commit the seed original (acceptance)" : "Seed not admitted: restart anyway",
   Admit: "Accept an input into the owner queue",
   OwnerParks: "Owner drive parks until a wake",

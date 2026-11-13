@@ -51,7 +51,9 @@ pub(super) fn submit_owned(
         nonce.to_owned(),
     );
     let (pool, owner, runtime) = (turn.pool.clone(), turn.owner.clone(), Handle::current());
+    let epoch_scope = clear_epoch::current();
     let submit = Box::new(move |frame: String| {
+        let _epoch = clear_epoch::install(epoch_scope);
         let at = (logical.as_str(), channel, nonce.as_str());
         let written = write(
             at,
@@ -117,6 +119,12 @@ fn write(
     target: impl FnOnce() -> Result<HerdrTarget, String>,
     restore: impl FnOnce() -> Result<(), String>,
 ) -> Result<Option<Submitted>, SubmissionError> {
+    let epoch_scope = clear_epoch::current();
+    let checked = epoch_scope
+        .as_ref()
+        .map(|scope| scope.check_epoch())
+        .transpose()
+        .map_err(|_| owned_hold("clear_epoch_changed"))?;
     let owned = crate::services::claude_tui::owner_input::active();
     let plan = if owned {
         crate::services::codex_tui::input::owned_prompt_plan(prompt)?
@@ -159,7 +167,40 @@ fn write(
     })?;
     #[cfg(test)]
     crate::services::provider::herdr_before_start::test_input_boundary(cancel);
-    let run = observed_input(cancel, nonce, || None, || run_herdr(&target, &plan, cancel))?;
+    let mut denied = false;
+    let run = observed_input(
+        cancel,
+        nonce,
+        || None,
+        || {
+            let _permit = match checked
+                .as_ref()
+                .map(|checked| checked.begin_effect())
+                .transpose()
+            {
+                Ok(permit) => permit,
+                Err(_) => {
+                    denied = true;
+                    return PlanRun {
+                        run: InputRun::Refused(
+                            crate::services::codex_tui::host_input::InputRefusal::Conflict,
+                        ),
+                        composer_mutated: false,
+                        enter_attempted: false,
+                    };
+                }
+            };
+            run_herdr(&target, &plan, cancel)
+        },
+    );
+    if let Some(scope) = epoch_scope {
+        scope.finish_start();
+    }
+    let run = run?;
+    if denied {
+        release_closed_hold(logical, nonce);
+        return Err(owned_hold("clear_epoch_changed"));
+    }
     let run = match run {
         crate::services::provider::herdr_before_start::InputRun::Ran(run) => run,
         crate::services::provider::herdr_before_start::InputRun::Closed => {

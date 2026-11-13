@@ -46,7 +46,9 @@ pub(super) fn submit_owned(
     };
     let slot = Arc::new(std::sync::Mutex::new(None));
     let (ticket, cancel, sender) = (slot.clone(), turn.cancel.clone(), sender.clone());
+    let epoch_scope = clear_epoch::current();
     let submit = Box::new(move |frame: String| {
+        let _epoch = clear_epoch::install(epoch_scope);
         guarded_outcome::capture_preparation(|| {
             let written = write(&logical, cancel.as_deref(), attached, &frame, &sender)?;
             let submitted = written
@@ -73,6 +75,12 @@ fn write(
     prompt: &str,
     sender: &Sender<StreamMessage>,
 ) -> Result<Option<Submitted>, SubmissionError> {
+    let epoch_scope = clear_epoch::current();
+    let checked = epoch_scope
+        .as_ref()
+        .map(|scope| scope.check_epoch())
+        .transpose()
+        .map_err(|error| before_payload(logical, &error))?;
     let path = attached.transcript.as_path();
     let transcript = path.display().to_string();
     let length = || std::fs::metadata(path).map_or(0, |meta| meta.len());
@@ -94,12 +102,33 @@ fn write(
         start.offset = before;
         start
     };
-    let HerdrInputRun::Ran(run) = observed_input(cancel, start, || {
+    let mut denied = None;
+    let result = observed_input(cancel, start, || {
         crate::services::claude_tui::composer_lock::with_composer_mutation_lock(logical, || {
+            let _permit = match checked
+                .as_ref()
+                .map(|checked| checked.begin_effect())
+                .transpose()
+            {
+                Ok(permit) => permit,
+                Err(detail) => {
+                    denied = Some(detail);
+                    return InputRun::Refused(
+                        crate::services::claude_tui::host_input::InputRefusal::Conflict,
+                    );
+                }
+            };
             composer::run(&attached.target, &plan, cancel)
         })
-    })?
-    else {
+    });
+    if let Some(scope) = epoch_scope {
+        scope.finish_start();
+    }
+    if let Some(detail) = denied {
+        before_start::release_claude_hold(logical, &held);
+        return Err(before_payload(logical, &detail));
+    }
+    let HerdrInputRun::Ran(run) = result? else {
         before_start::release_claude_hold(logical, &held);
         return Ok(None);
     };

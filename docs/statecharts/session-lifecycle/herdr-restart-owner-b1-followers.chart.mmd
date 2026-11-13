@@ -1,0 +1,20 @@
+stateDiagram-v2
+    state "Initial head and follower claimed" as A
+    state "Restart accepted; earlier unit stays claimed" as B
+    state "Later input waits separately" as C
+    state "Read only the frozen unit" as G
+    state "Reserve only the frozen unit" as H
+    state "Caller offers the later input as a follower" as E
+    state "Snapshot grew after the later input" as D
+    state "Later input reserved with the earlier unit" as F
+    [*] --> A
+    A --> B: Request
+    B --> C: Admit later input
+    C --> G: Read fixed followers
+    G --> H: Compare ordered originals, reserve
+    C --> E: Offer mismatching payload
+    E --> C: Reject before reserve
+    C --> D: Recompute followers mutant
+    E --> F: Remove member comparison mutant
+    classDef breaks fill:#fbd5d5,stroke:#a21d27,color:#551015
+    class D,F breaks

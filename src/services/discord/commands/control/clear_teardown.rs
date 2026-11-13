@@ -64,16 +64,25 @@ pub(super) async fn end_session(
     channel_id: serenity::ChannelId,
     (tmux, session_key): (Option<&str>, Option<&str>),
     mut transition: Option<OwnedMutexGuard<()>>,
+    clear_epoch: &crate::services::herdr_launch::clear_epoch::ClearGuard,
     report: &mut ClearReport,
 ) {
     #[cfg(unix)]
-    if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
-        && end_herdr(shared, session_key, &mut transition, report).await
-    {
-        return;
+    if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
+        drop(transition.take());
+        clear_epoch.wait_idle().await;
+        if end_herdr(shared, session_key, &mut transition, report).await {
+            return;
+        }
     }
     #[cfg(not(unix))]
-    let _ = (shared, channel_id, session_key, &mut transition);
+    let _ = (
+        shared,
+        channel_id,
+        session_key,
+        &mut transition,
+        clear_epoch,
+    );
     let managed = managed_session_clear_behavior(provider);
     if let (ManagedSessionClearBehavior::ResetManagedProcess, Some(name)) = (managed, tmux) {
         use crate::services::tui_prompt_dedupe::clear_relaunch;
@@ -158,7 +167,14 @@ async fn end_herdr(
             (id, HostedRecord::Known(record)) if record.state != HostedState::Retired => {
                 Some((id, record.execution_nonce))
             }
-            (_, HostedRecord::Known(_) | HostedRecord::Legacy) => return false,
+            (id, HostedRecord::Known(record)) => {
+                drop(transition.take());
+                let cleared = clear_retired_selector_pg(pool, id, &record).await;
+                note_retired_selector(cleared, report);
+                report.execution = Some(super::clear_report::ExecutionCleanup::Retired);
+                return true;
+            }
+            (_, HostedRecord::Legacy) => return false,
             (_, HostedRecord::Unknown(_)) => None,
         },
         HostedLookup::Missing => return false,

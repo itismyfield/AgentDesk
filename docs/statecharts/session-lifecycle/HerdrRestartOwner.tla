@@ -1,10 +1,10 @@
 ---- MODULE HerdrRestartOwner ----
-\* B implementation ports over 588241083ccf4c2cda6d147e89e1d9fd10725387.
+\* B1 effect permissions and fixed owner claims over the earlier B1/B2 port model.
 \* The restart command commits one seed original behind the owner's in-flight unit, closes
 \* the exact old execution and wakes the owner; the owner's ordinary Herdr turn launches the
 \* successor with that seed as its first input. A user clear bumps the channel's clear epoch
 \* and wins over a launching turn. Not a model of a new Core or host trait.
-EXTENDS Naturals, FiniteSets
+EXTENDS Naturals, FiniteSets, Sequences
 CONSTANTS Policy, Mutant, N, StartKind, Dispatch, CloseReply, LaunchReply, Busy,
           ClearOn, CrashOn, Rollback, SeedMode, HeadBusy,
           RecoveryPolicy, ReplayMode, OpPolicy, EffectPolicy
@@ -12,6 +12,10 @@ VARIABLE s
 vars == <<s>>
 Ids == 1..N
 SeedId == N + 1
+\* One pre-existing owner claim: its head and first follower precede the late third input.
+ClaimMembers == IF HeadBusy THEN <<1, 2>> ELSE <<>>
+ClaimSet == {ClaimMembers[i] : i \in DOMAIN ClaimMembers}
+ActiveClaim == s.claimPhase \in {"claimed", "prepared", "reserved"}
 NeedsClose == StartKind \in {"Bound", "PendingPlaced"}
 \* Refused before any effect: unreadable rows and an unplaced Pending only.
 Refusable == StartKind \in {"Unknown", "PendingUnplaced"}
@@ -35,16 +39,19 @@ Init == s = [cmd |-> "idle", seed |-> "none", gate |-> FALSE, excl |-> FALSE,
              clearExcl |-> FALSE, clearEffective |-> FALSE, staleCreate |-> FALSE,
              seedAfterClear |-> FALSE, stalePane |-> FALSE, resumedPreClear |-> FALSE,
              seedRevived |-> FALSE, crashed |-> FALSE, binary |-> "new",
-             accepted |-> IF HeadBusy THEN Ids ELSE {1}, receipts |-> {},
-             q |-> [i \in Ids |-> IF HeadBusy THEN "inflight" ELSE IF i = 1 THEN "queued" ELSE "incoming"],
+             claimPhase |-> IF HeadBusy THEN "claimed" ELSE "none",
+             claimObserved |-> <<>>, claimPayload |-> <<>>, claimReserved |-> <<>>, badOffered |-> FALSE,
+             accepted |-> IF HeadBusy THEN ClaimSet ELSE {1}, receipts |-> {},
+             q |-> [i \in Ids |-> IF HeadBusy /\ i \in ClaimSet THEN "claimed"
+                                  ELSE IF ~HeadBusy /\ i = 1 THEN "queued" ELSE "incoming"],
              effects |-> [i \in Ids |-> 0]]
 
 SeedPending == s.seed \in {"queued", "claimed"}
 \* An input whose delivery to the old execution began before the restart was accepted.
-UnitPending == \E i \in Ids : s.q[i] = "inflight"
+UnitPending == \E i \in Ids : s.q[i] \in {"claimed", "inflight"}
 FrontInput(i) == /\ (~SeedPending \/ Mutant = "SeedBehind") /\ s.launcher = 0
                  /\ s.q[i] = "queued"
-                 /\ \A j \in 1..(i-1) : s.q[j] \notin {"queued", "inflight"}
+                 /\ \A j \in 1..(i-1) : s.q[j] \notin {"queued", "claimed", "inflight"}
 OwnerFree == s.awake /\ ~s.excl /\ ~s.clearExcl /\ ~s.clearing
 \* The in-memory gate keeps the seed unstarted until the command released its exclusion.
 SeedHeld == s.gate /\ Mutant # "NoGate"
@@ -61,7 +68,7 @@ FrontFails(l) == [s EXCEPT !.launcher = 0, !.lphase = "none",
                            !.visible = @ \/ (l = SeedId /\ s.seed = "claimed" /\ Mutant # "NoNotice"),
                            !.q = [i \in Ids |-> IF i = l /\ s.q[i] = "queued" THEN "retained" ELSE s.q[i]]]
 
-\* restart.rs:219 refuses today. The design tries the seed first: its commit is the acceptance
+\* The B2 restart port remains future work. Its seed commit is the acceptance
 \* point when it is admitted; without it the terminate's fence is.
 Request == /\ s.cmd = "idle"
            /\ s' = IF Policy = "before" \/ Refusable
@@ -76,7 +83,25 @@ Admit(i) == /\ s.cmd # "idle" /\ s.q[i] = "incoming"
 OwnerParks == /\ s.awake
               /\ s.excl \/ s.clearExcl \/ s.clearing \/ (s.seed = "queued" /\ SeedHeld)
               /\ s' = [s EXCEPT !.awake = FALSE]
-\* The in-flight unit's own receipt settles it; the seed sits right behind that unit.
+\* The front claim freezes its ordered originals. A later arrival is not its follower.
+ClaimRead == /\ s.claimPhase = "claimed"
+             /\ s' = [s EXCEPT !.claimObserved = ClaimMembers, !.claimPayload = ClaimMembers,
+                               !.claimPhase = "prepared"]
+\* A caller can offer a mismatching payload once; reserve must reject it, then retry normally.
+ClaimBadPayload == /\ s.claimPhase = "claimed" /\ ~s.badOffered /\ 3 \in s.accepted
+                   /\ s' = [s EXCEPT !.claimObserved = ClaimMembers,
+                                     !.claimPayload = Append(ClaimMembers, 3),
+                                     !.badOffered = TRUE, !.claimPhase = "prepared"]
+ClaimReserve == /\ s.claimPhase = "prepared" /\ s.oldLive
+                /\ s.claimPayload = ClaimMembers
+                /\ s' = [s EXCEPT !.claimReserved = s.claimPayload, !.claimPhase = "reserved",
+                                  !.q = [i \in Ids |-> IF i \in {s.claimPayload[j] : j \in DOMAIN s.claimPayload}
+                                                        THEN "inflight" ELSE s.q[i]]]
+ClaimReject == /\ s.claimPhase = "prepared" /\ s.claimPayload # ClaimMembers
+               /\ s' = [s EXCEPT !.claimPayload = <<>>, !.claimPhase = "claimed"]
+ClaimDone == /\ s.claimPhase = "reserved" /\ \A i \in ClaimSet : s.q[i] # "inflight"
+             /\ s' = [s EXCEPT !.claimPhase = "done"]
+\* The unit's own receipt settles it; the seed sits behind the fixed head and followers.
 InflightSettle(i) == /\ s.q[i] = "inflight" /\ s.oldLive /\ Mutant # "PrependOverHead"
                      /\ s' = [s EXCEPT !.q[i] = "delivered", !.effects[i] = @ + 1]
 \* terminate_scoped bound to the row's owner and dispatch: transition, fence, exact close,
@@ -93,9 +118,10 @@ Retire == /\ s.cmd = "retiring"
           /\ s' = [s EXCEPT !.row = "Retired", !.cmd = "postlude",
                            !.inflight = IF Mutant = "NoSettle" THEN @ ELSE FALSE,
                            !.settled = IF Mutant = "NoSettle" THEN @ ELSE TRUE,
+                           !.claimPhase = IF ActiveClaim /\ Mutant # "PrependOverHead" THEN "revoked" ELSE @,
                            !.q = [i \in Ids |->
                                     IF s.q[i] = "queued" /\ Mutant = "DropQueue" THEN "lost"
-                                    ELSE IF s.q[i] = "inflight" /\ Mutant # "PrependOverHead"
+                                    ELSE IF s.q[i] \in {"claimed", "inflight"} /\ Mutant # "PrependOverHead"
                                     THEN "retained" ELSE s.q[i]]]
 \* after_retire, still inside the exclusion. A clear epoch that moved since acceptance means
 \* a clear overtook this restart: the selector is forgotten as that clear would have done.
@@ -174,7 +200,7 @@ LaunchBegin(l) ==
                     !.ready = @ \/ (Mutant = "ReadyOnAdmit" /\ l = SeedId),
                     !.falseReady = @ \/ (Mutant = "ReadyOnAdmit" /\ l = SeedId),
                     !.resumedPreClear = @ \/ (Superseded /\ s.selector = "kept")]
-\* herdr_launch.rs:482: Pending is installed over a vacant row before any create.
+\* Pending is installed over a vacant row before create; B1 report maps the actual leaf ports.
 InstallPending == /\ s.lphase = "begun" /\ Vacant
                   /\ s' = [s EXCEPT !.row = "NewPending", !.lphase = "pending",
                                    !.created = "no", !.creates = 0]
@@ -281,6 +307,7 @@ Crash ==
          requeue == Mutant = "RequeueUncertain"
      IN s' = [s EXCEPT !.crashed = TRUE, !.cmd = "dead", !.gate = FALSE, !.excl = FALSE,
                        !.awake = TRUE, !.binary = IF Rollback THEN "old" ELSE "new",
+                       !.claimPhase = IF ActiveClaim THEN "revoked" ELSE @,
                        !.launcher = 0, !.lphase = "none", !.lEpoch = s.epoch,
                        !.checked = FALSE, !.permission = FALSE, !.effectKind = "none", !.effectBegan = FALSE,
                        !.row = IF s.lphase = "pending" THEN "Retired" ELSE @,
@@ -289,10 +316,11 @@ Crash ==
                        !.visible = @ \/ (l = SeedId /\ sent /\ ~requeue),
                        !.q = [i \in Ids |->
                                 IF s.q[i] = "inflight" THEN "retained"
+                                ELSE IF s.q[i] = "claimed" THEN "queued"
                                 ELSE IF i = l /\ sent /\ ~requeue THEN "retained"
                                 ELSE s.q[i]]]
 
-\* !clear, control.rs:510. Its first act bumps the clear epoch; it holds the transition when
+\* The control clear entry first advances its epoch; it holds the transition when
 \* that is free and proceeds without it after the 3 second wait otherwise.
 ClearRequest == /\ ClearOn # "off" /\ s.clear = "none" /\ ~s.clearRequested /\ s.cmd # "idle"
               /\ (ClearOn = "serial" => ~s.excl) /\ (ClearOn = "overtake" => s.excl)
@@ -306,8 +334,9 @@ ClearDiscard ==
   /\ s.clear = "begun"
   /\ LET cancels == Early /\ ~(s.effectBegan /\ s.effectKind = "submit")
                   /\ Mutant \notin {"ClearKeepsClaim", "MainClear"}
-         gone(i) == s.q[i] = "inflight" \/ (s.q[i] = "queued" /\ (i # s.launcher \/ cancels))
+         gone(i) == s.q[i] \in {"claimed", "inflight"} \/ (s.q[i] = "queued" /\ (i # s.launcher \/ cancels))
      IN s' = [s EXCEPT !.clear = "discarded", !.clearEffective = TRUE,
+                       !.claimPhase = IF ActiveClaim THEN "revoked" ELSE @,
                        !.seed = IF @ = "queued" \/ (@ = "claimed" /\ cancels) THEN "cancelled" ELSE @,
                        !.receipts = @ \cup {i \in Ids : gone(i)},
                        !.q = [i \in Ids |-> IF gone(i) THEN "cancelled" ELSE s.q[i]]]
@@ -343,7 +372,8 @@ ReplayRequest == /\ ReplayMode # "off" /\ ~s.opSeen /\ s.cmd # "idle" /\ s.seed 
                                   !.opDuplicate = OpPolicy = "duplicate"]
 Wait == UNCHANGED s
 
-Next == \/ Request \/ OwnerParks \/ TakeExclusion \/ CloseExact \/ CloseFails \/ Retire
+Next == \/ ClaimRead \/ ClaimBadPayload \/ ClaimReserve \/ ClaimReject \/ ClaimDone
+        \/ Request \/ OwnerParks \/ TakeExclusion \/ CloseExact \/ CloseFails \/ Retire
         \/ Postlude \/ Answer \/ Fail \/ Withdraw \/ NotifyFailure \/ SeedRefused \/ SeedToOld
         \/ SeedJoin \/ InstallPending \/ AbortUnsent \/ CheckCreateEpoch \/ BeginCreateEffect \/ Create \/ LaunchNotSent
         \/ LaunchUncertain \/ ReplayCreate \/ AbortSubmit \/ CheckSubmitEpoch \/ BeginSubmitEffect \/ SubmitEffect \/ SettleReceipt
@@ -355,6 +385,7 @@ Next == \/ Request \/ OwnerParks \/ TakeExclusion \/ CloseExact \/ CloseFails \/
 \* Each step of the command, the owner and a started clear eventually runs while it stays
 \* enabled. Crash, a clear's arrival and a parked drive are not fair: they may never happen.
 Spec == /\ Init /\ [][Next]_vars
+        /\ WF_vars(ClaimRead) /\ WF_vars(ClaimReserve) /\ WF_vars(ClaimReject) /\ WF_vars(ClaimDone)
         /\ WF_vars(Request) /\ WF_vars(TakeExclusion) /\ WF_vars(CloseExact)
         /\ WF_vars(CloseFails) /\ WF_vars(Retire) /\ WF_vars(Postlude) /\ WF_vars(Answer)
         /\ WF_vars(Fail) /\ WF_vars(Withdraw) /\ WF_vars(NotifyFailure)
@@ -371,7 +402,7 @@ Spec == /\ Init /\ [][Next]_vars
 
 Settled(i) == \/ s.q[i] \in {"delivered", "retained"}
               \/ (s.q[i] = "cancelled" /\ i \in s.receipts)
-InputCustody == \A i \in s.accepted : s.q[i] \in {"queued", "inflight"} \/ Settled(i)
+InputCustody == \A i \in s.accepted : s.q[i] \in {"queued", "claimed", "inflight"} \/ Settled(i)
 InputAtMostOnce == \A i \in Ids : s.effects[i] <= 1
 NoOldPaneInput == s.oldInputs = 0
 \* The greeting never reaches the execution the restart was meant to end.
@@ -409,4 +440,10 @@ EffectHasLivePermission == ~s.unsafeEffect
 EndedSeedRecovers == (s.crashed /\ SeedPending /\ OldTarget /\ ~s.oldLive /\ ~s.excl /\ s.binary = "new")
                      ~> (s.row = "Retired" \/ Successor \/ (~SeedPending /\ s.visible))
 ClearRequestCompletes == s.clearRequested ~> (s.clear \in {"done", "gaveup", "held", "unconfirmed"})
+
+\* B1's in-memory ordered snapshot and reserve's exact payload comparison.
+ClaimedMembersFixed == s.claimObserved = <<>> \/ s.claimObserved = ClaimMembers
+ReservationUsesClaim == s.claimReserved = <<>> \/ s.claimReserved = ClaimMembers
+ClaimedUnitResolves == ActiveClaim ~> s.claimPhase \in {"done", "revoked"}
+
 ====

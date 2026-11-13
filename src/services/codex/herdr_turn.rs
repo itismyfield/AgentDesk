@@ -39,7 +39,8 @@ use crate::services::codex_tui::session::{
 use crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerprint;
 use crate::services::discord::UnplacedLease;
 use crate::services::herdr_launch::{
-    HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint, HerdrLaunchHost, launch_herdr_session,
+    HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint, HerdrLaunchHost, clear_epoch,
+    launch_herdr_session,
     unplaced::{self, Resolution, Unplaced},
 };
 use crate::services::provider::cancel_token_claude_interrupt::{
@@ -129,6 +130,7 @@ pub(crate) fn execute(
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
     let runtime = Handle::try_current().map_err(|error| format!("herdr turn: {error}"))?;
+    let _launching = clear_epoch::Launching::enter(&turn.owner)?;
     // The turn takes its stop state before launch, so a stop is recorded whatever the switch says;
     // a stop that cancelled it first, or another turn's state, leaves it to write nothing.
     if (herdr_stop_settlement_available()
@@ -576,7 +578,9 @@ fn followup(
             );
             let cancel = turn.cancel.clone();
             let channel = turn.channel_id;
+            let epoch_scope = clear_epoch::current();
             let submit = Box::new(move |frame: String| {
+                let _epoch = clear_epoch::install(epoch_scope);
                 let draft = owned_composer(&target, cancel.as_deref())?;
                 if crate::services::tui_input::human_frame::history::v2::scoped_source()
                     .is_some_and(|source| source.is_err())
@@ -625,6 +629,12 @@ fn followup_write(
     target: &HerdrTarget,
     plan: &[crate::services::codex_tui::input::TuiInputAction],
 ) -> Result<bool, SubmissionError> {
+    let epoch_scope = clear_epoch::current();
+    let checked = epoch_scope
+        .as_ref()
+        .map(|scope| scope.check_epoch())
+        .transpose()
+        .map_err(|_| owned_hold("clear_epoch_changed"))?;
     hold(nonce).inspect_err(|_| {
         if crate::services::claude_tui::owner_input::active() {
             crate::services::claude_tui::owner_input::vetoed("hold_unavailable");
@@ -639,7 +649,35 @@ fn followup_write(
             ..start
         })
     };
-    let run = observed_input(cancel, nonce, start, || run_herdr(target, plan, cancel))?;
+    let mut denied = false;
+    let run = observed_input(cancel, nonce, start, || {
+        let _permit = match checked
+            .as_ref()
+            .map(|checked| checked.begin_effect())
+            .transpose()
+        {
+            Ok(permit) => permit,
+            Err(_) => {
+                denied = true;
+                return PlanRun {
+                    run: InputRun::Refused(
+                        crate::services::codex_tui::host_input::InputRefusal::Conflict,
+                    ),
+                    composer_mutated: false,
+                    enter_attempted: false,
+                };
+            }
+        };
+        run_herdr(target, plan, cancel)
+    });
+    if let Some(scope) = epoch_scope {
+        scope.finish_start();
+    }
+    let run = run?;
+    if denied {
+        release_closed_hold(logical, nonce);
+        return Err(owned_hold("clear_epoch_changed"));
+    }
     let run = match run {
         crate::services::provider::herdr_before_start::InputRun::Ran(run) => run,
         crate::services::provider::herdr_before_start::InputRun::Closed => {

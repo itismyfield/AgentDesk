@@ -1998,6 +1998,8 @@ src/
 │   │   │   │   ├── claude_handoff/
 │   │   │   │   │   └── tests/
 │   │   │   │   │       └── actual_close_tests.rs
+│   │   │   │   ├── drive_tests/
+│   │   │   │   │   └── claimed_followers_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── claude.rs
 │   │   │   │   │   ├── codex.rs
@@ -2803,6 +2805,8 @@ src/
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── cancel_backstop_e2e_tests/
 │   │   │   │   │   └── autoheal.rs
+│   │   │   │   ├── herdr_terminate_o_e2e_tests/
+│   │   │   │   │   └── late_clear_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests/
 │   │   │   │   │   ├── herdr_direct_actual_client_tests.rs
 │   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
@@ -3538,10 +3542,14 @@ src/
 │   │   ├── request_batch_tests.rs
 │   │   └── session_state.rs
 │   ├── herdr_launch/
+│   │   ├── clear_epoch/
+│   │   │   ├── launch_pg_tests.rs
+│   │   │   └── tests.rs
 │   │   ├── retired_hold/
 │   │   │   └── tests.rs
 │   │   ├── runtime_marker/
 │   │   │   └── tests.rs
+│   │   ├── clear_epoch.rs
 │   │   ├── codex_resume.rs
 │   │   ├── policy.rs
 │   │   ├── policy_tests.rs

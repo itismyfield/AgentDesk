@@ -225,12 +225,18 @@ impl Pane {
                     .unwrap()
             });
             let mut report = ClearReport::default();
+            let epoch = crate::services::herdr_launch::clear_epoch::begin_clear(
+                ProviderKind::Codex.as_str(),
+                &shared.token_hash,
+                self.channel,
+            );
             end_session(
                 &shared,
                 &ProviderKind::Codex,
                 serenity::ChannelId::new(self.channel),
                 (Some(&self.name), None),
                 guard,
+                &epoch,
                 &mut report,
             )
             .await;

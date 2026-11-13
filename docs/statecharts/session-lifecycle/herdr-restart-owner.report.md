@@ -1,3 +1,5 @@
+> **이전 e1 모델의 historical 보고서다.** 현재 B1의 고정 followers·실제 효과 허가 연결과 새 source 검증은 [B1 delta 보고서](herdr-restart-owner-b1.report.md)를 따른다. 이 아래63cfg 증거를 현재 source 전체 PASS로 재사용하지 않는다.
+
 # Herdr restart B1/B2 포트 모델: clear 허가 시각 계약
 
 조사 기준 `588241083ccf4c2cda6d147e89e1d9fd10725387`(A+r3 병합). 정본은 [설계3.1~3.9](../../herdr-parity-restart.design.md)와 [B 분할 계획](../../herdr-parity-restart-b-split.plan.md)이다.

@@ -34,7 +34,7 @@ use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::discord::UnplacedLease;
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchEndpoint,
-    HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
+    HerdrLaunchHost, HerdrLaunchOutcome, clear_epoch, launch_herdr_session,
     unplaced::{self, Resolution, Unplaced},
 };
 use crate::services::provider::cancel_token_claude_interrupt::{
@@ -237,6 +237,7 @@ pub(crate) fn execute(
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
     let runtime = Handle::try_current().map_err(|error| format!("herdr turn: {error}"))?;
+    let _launching = clear_epoch::Launching::enter(&turn.owner)?;
     // The turn takes its stop state before launch, so a stop is recorded whatever the switch says;
     // a stop that cancelled it first, or another turn's state, leaves it to write nothing.
     if (herdr_stop_settlement_available()

@@ -519,6 +519,12 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     // A pane effect holding the transition is waited out for the usual window, then overtaken.
     let _completion =
         super::super::session_transition::SessionTransitionCompletion::new(shared, channel_id);
+    // Clear registration must reopen before completion wakes the next owner input.
+    let clear_epoch = crate::services::herdr_launch::clear_epoch::begin_clear(
+        provider.as_str(),
+        &shared.token_hash,
+        channel_id.get(),
+    );
     let transition = shared.session_transition_lock(channel_id);
     let wait = super::super::session_transition::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT;
     let transition_guard = tokio::time::timeout(wait, transition.lock_owned()).await;
@@ -537,14 +543,15 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
             .map(|ch_name| provider.build_tmux_session_name(ch_name))
     };
     #[cfg(unix)]
-    if herdr_recovery::clear(
-        shared,
-        provider,
-        channel_id,
-        transition_guard.as_ref().ok(),
-        &mut report,
-    )
-    .await
+    if !clear_epoch.overlapped_startup()
+        && herdr_recovery::clear(
+            shared,
+            provider,
+            channel_id,
+            transition_guard.as_ref().ok(),
+            &mut report,
+        )
+        .await
     {
         return Ok(report);
     }
@@ -602,6 +609,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
         channel_id,
         session,
         transition,
+        &clear_epoch,
         &mut report,
     )
     .await;

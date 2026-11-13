@@ -18,11 +18,29 @@ fn cold_codex_herdr_pending_restore_refusal_proves_not_sent_before_payload_pg() 
     run_case(Case::RestoreRefused);
 }
 
-#[derive(PartialEq, Eq)]
+#[test]
+fn clear_before_actual_codex_herdr_submit_sends_no_keys_pg() {
+    run_case(Case::ClearBefore);
+}
+
+#[test]
+fn codex_created_submit_worker_keeps_origin_clear_scope_pg() {
+    run_case(Case::WorkerClear);
+}
+
+#[test]
+fn clear_between_codex_submit_check_and_effect_sends_no_keys_pg() {
+    run_case(Case::ClearChecked);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Case {
     Submitted,
     CommitRefused,
     RestoreRefused,
+    ClearBefore,
+    WorkerClear,
+    ClearChecked,
 }
 
 fn run_case(case: Case) {
@@ -126,6 +144,8 @@ fn run_case(case: Case) {
     let effect_pool = pool.clone();
     let effect_owner = turn.owner.clone();
     let effect_endpoint = turn.endpoint.clone();
+    let effect_record = record.clone();
+    let install_worker = rig.thread_installer(NODE, KEY, rig.socket(), SESSION);
     let commit_path = crate::config::runtime_root()
         .unwrap()
         .join("runtime/discord_pending_queue/cold-matrix/727399-herdr-owner.json");
@@ -156,6 +176,33 @@ fn run_case(case: Case) {
                     compact_token_limit: None,
                     cancel: None,
                 };
+                let _launching =
+                    crate::services::herdr_launch::clear_epoch::Launching::enter(&turn.owner)
+                        .unwrap();
+                let _clear = (case == Case::ClearBefore).then(|| {
+                    crate::services::herdr_launch::clear_epoch::begin_clear(
+                        &turn.owner.provider,
+                        &turn.owner.discord_token_hash,
+                        turn.channel_id,
+                    )
+                });
+                let saved_clear = Arc::new(std::sync::Mutex::new(None));
+                let _check = (case == Case::ClearChecked).then(|| {
+                    let saved = saved_clear.clone();
+                    let owner = turn.owner.clone();
+                    crate::services::herdr_launch::clear_epoch::tests::watch(
+                        &turn.owner,
+                        crate::services::herdr_launch::clear_epoch::tests::Point::Checked,
+                        move || {
+                            *saved.lock().unwrap() =
+                                Some(crate::services::herdr_launch::clear_epoch::begin_clear(
+                                    &owner.provider,
+                                    &owner.discord_token_hash,
+                                    7272392,
+                                ));
+                        },
+                    )
+                });
                 let _watch = refuse_commit.then(|| {
                     use crate::services::discord::runtime_store::durable_probe::{
                         Plan, Step, Watch,
@@ -168,7 +215,48 @@ fn run_case(case: Case) {
                         },
                     )
                 });
-                submit(&turn, &tokio::runtime::Handle::current(), nonce)
+                if case == Case::WorkerClear {
+                    let owner = turn.owner.clone();
+                    let frame = frame.clone();
+                    let runtime = tokio::runtime::Handle::current();
+                    let hook: crate::services::claude_tui::owner_input::LaunchHook =
+                        Box::new(move |_, _, _, _, submit| {
+                            let _clear = crate::services::herdr_launch::clear_epoch::begin_clear(
+                                &owner.provider,
+                                &owner.discord_token_hash,
+                                7272392,
+                            );
+                            crate::test_support::wait::join_within(
+                                std::thread::spawn(move || {
+                                    install_worker();
+                                    let _runtime = runtime.enter();
+                                    submit(frame).map_err(SubmissionError::into_legacy)
+                                }),
+                                std::time::Duration::from_secs(10),
+                            )
+                        });
+                    submit_owned(
+                        &turn,
+                        hook,
+                        crate::services::claude_tui::owner_input::Lineage::Created,
+                        &effect_record,
+                    )
+                    .map(Some)
+                } else {
+                    let result = submit(&turn, &tokio::runtime::Handle::current(), nonce);
+                    if case == Case::Submitted && result.is_ok() {
+                        let clear = crate::services::herdr_launch::clear_epoch::begin_clear(
+                            &turn.owner.provider,
+                            &turn.owner.discord_token_hash,
+                            turn.channel_id,
+                        );
+                        assert!(
+                            !clear.overlapped_startup(),
+                            "physical submit ends startup before Source observation"
+                        );
+                    }
+                    result
+                }
             }),
         )
         .unwrap();
@@ -176,6 +264,31 @@ fn run_case(case: Case) {
         .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
         .unwrap();
     let result = outcome.result;
+    if case == Case::WorkerClear {
+        assert!(
+            rig.sends().is_empty(),
+            "worker must retain the origin epoch scope"
+        );
+        let error = result.err().expect("worker must reject the origin epoch");
+        assert!(error.contains("clear_epoch_changed"), "{error}");
+        return;
+    }
+    if matches!(case, Case::ClearBefore | Case::ClearChecked) {
+        assert!(
+            rig.sends().is_empty(),
+            "clear precedes actual Codex paste/Enter"
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            owner_snapshot["head_injection"]["payload_window"]["kind"],
+            "bootstrap"
+        );
+        assert!(
+            outcome.not_sent.is_some(),
+            "actual owner observes the epoch veto"
+        );
+        return;
+    }
     if case == Case::RestoreRefused {
         assert!(
             result
