@@ -1,4 +1,19 @@
 use super::*;
+use crate::config::TestRuntimeRootGuard;
+
+fn original(channel: u64, n: u64) -> PendingQueueItem {
+    let mut item = super::original(channel, n);
+    item.merge_consecutive = true;
+    item
+}
+
+async fn merged_owner(registry: &ChannelMailboxRegistry, channel: u64) -> ChannelMailboxHandle {
+    let mailbox = owner(registry, channel, 0).await;
+    for n in 0..2 {
+        arrive(&mailbox, channel, n).await;
+    }
+    mailbox
+}
 
 async fn claim(mailbox: &ChannelMailboxHandle) -> FrontClaim {
     let front = mailbox
@@ -56,7 +71,7 @@ async fn claim_followers_are_fixed_after_same_author_arrival() {
     let _root = TestRuntimeRootGuard::new();
     let registry = ChannelMailboxRegistry::default();
     let channel = 7_272_781;
-    let mailbox = owner(&registry, channel, 2).await;
+    let mailbox = merged_owner(&registry, channel).await;
     let claim = claim(&mailbox).await;
     assert_eq!(
         claim.followers().len(),
@@ -101,7 +116,7 @@ async fn claimed_reserve_refuses_a_later_arrival_as_a_follower() {
     let _root = TestRuntimeRootGuard::new();
     let registry = ChannelMailboxRegistry::default();
     let channel = 7_272_782;
-    let mailbox = owner(&registry, channel, 2).await;
+    let mailbox = merged_owner(&registry, channel).await;
     let claim = claim(&mailbox).await;
     arrive(&mailbox, channel, 2).await;
     let before = snapshot(&mailbox).await;
@@ -139,7 +154,7 @@ async fn cancelling_a_late_arrival_preserves_the_claimed_unit() {
     let _root = TestRuntimeRootGuard::new();
     let registry = ChannelMailboxRegistry::default();
     let channel = 7_272_783;
-    let mailbox = owner(&registry, channel, 2).await;
+    let mailbox = merged_owner(&registry, channel).await;
     let claim = claim(&mailbox).await;
     arrive(&mailbox, channel, 2).await;
     let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(

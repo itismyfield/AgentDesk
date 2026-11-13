@@ -405,6 +405,9 @@ mod retired_selector {
             let target = crate::services::session_host::herdr_endpoints()
                 .target(&record)
                 .unwrap();
+            target
+                .pin(crate::services::session_host::HerdrMutation::Input)
+                .unwrap();
             let clear = start_clear(&seeded);
             wait_for_clear_epoch(&record, &clear).await;
             assert!(
@@ -425,10 +428,27 @@ mod retired_selector {
                 !clear.is_finished(),
                 "an issued grant stays live through physical I/O"
             );
+            let end_check = rig.pause_end_check();
             drop(permit);
             scope.finish_start();
             drop(scope);
             drop(startup);
+            tokio::time::timeout(std::time::Duration::from_secs(10), end_check.arrived)
+                .await
+                .expect("the exact end must reach its provider-exit check")
+                .unwrap();
+            assert!(
+                !clear.is_finished(),
+                "clear waits for provider-exit confirmation"
+            );
+            let writes = rig.writes();
+            assert_eq!(writes.len(), 2, "one permitted submit and one exact end");
+            assert_eq!(writes[0].0, "pane.send_keys");
+            assert_eq!(
+                writes[0].1, writes[1].1,
+                "both effects target the same pane"
+            );
+            end_check.release.send(()).unwrap();
             let report = tokio::time::timeout(std::time::Duration::from_secs(10), clear)
                 .await
                 .unwrap()
@@ -436,11 +456,10 @@ mod retired_selector {
             assert!(!report.end_unconfirmed, "{report:?}");
             assert_eq!(herdr::row(&seeded.pool, &seeded.key).await, retired());
             assert_eq!(seeded.selected().await, None);
-            let methods: Vec<_> = rig.writes().into_iter().map(|(method, _)| method).collect();
             assert_eq!(
-                methods,
-                ["pane.send_keys", "pane.close"],
-                "the permitted submit precedes exact end"
+                rig.writes(),
+                writes,
+                "confirmation sends no additional effects"
             );
             seeded.done().await;
         });
