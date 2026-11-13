@@ -6,6 +6,7 @@ Fixed classification at owner settlement:
 | drive handoff 대기(owner_input.rs:167–193), claim 실패(:514–523), owner_front_not_admitted 전체, headless claim 실패(headless_turn.rs:214–224), 비allowlist HerdrRefusal, wrapper 안의 NotSent 결과 | SchedulingHeld — 횟수 미포함, 슬롯 미소비. 오늘 동작 그대로 |
 | allowlist 4종(host_refusal.rs:28–37에서 typed 보존) | ConfirmedKind, 첫 실패에서 보관 |
 | wrapper 생성 뒤 reserve 전의 비NotSent Err(Herdr gate 미확인, context I/O, tmux 생성 실패 등), panic, (Err(_), Ok(_)) 무응답 | StartFailedBeforeInput — 2회 예산 |
+| restored ended Claude handoff 저널의 launch 실패 | durable failures + deadline, 기존 지수 백오프, 5회 상한에서 기존 StartFailedBeforeInput 보관·알림; Retired 새 입력은 저널 없이 보통 launch |
 | Forwarded / ConsumedToHold / SkippedDuplicate | 다른 경로가 이미 소비했을 수 있으므로 KnownNotSent 보관 금지 |
 
 Allowlist: ProviderUnsupported, EndpointNotLocal, actual ExecutorNotWired after switch-on,
