@@ -275,5 +275,72 @@ class ClassificationAdmissionTest(unittest.TestCase):
         self.assertEqual(report.read_bytes(), self.path.read_bytes())
 
 
+class RetiredEndPrivacyTest(unittest.TestCase):
+    def test_real_sources_require_observer_key_and_keep_proof_opaque(self):
+        proof = ROOT / "src/domain/retired_end.rs"
+        key = ROOT / "src/services/session_host/herdr_gate/legacy_return/issuer_key.rs"
+        fixture = """
+mod domain {
+    #[path = PROOF_PATH]
+    pub(crate) mod retired_end;
+}
+mod services {
+    pub(crate) mod session_host {
+        pub(crate) use herdr_gate::legacy_return;
+        mod herdr_gate {
+            pub(crate) mod legacy_return {
+                #[path = KEY_PATH]
+                pub(crate) mod issuer_key;
+                pub(crate) fn observed() -> crate::domain::retired_end::RetiredEnd<u8> {
+                    crate::domain::retired_end::issuer::issue(issuer_key::ObservationKey(()), 7)
+                }
+            }
+        }
+    }
+}
+use domain::retired_end::{RetiredEnd, issuer};
+use services::session_host::legacy_return::{self, issuer_key::ObservationKey};
+fn require_default<T: Default>() {}
+fn require_clone<T: Clone>() {}
+fn require_copy<T: Copy>() {}
+fn sibling() {
+    assert!(legacy_return::observed().matches(&7));
+    PROBE
+}
+""".replace("PROOF_PATH", json.dumps(str(proof))).replace("KEY_PATH", json.dumps(str(key)))
+        probes = [
+            ("proof tuple", "let _ = RetiredEnd(7_u8);", ("E0423",)),
+            ("proof field", "let _ = RetiredEnd { 0: 7_u8 };", ("E0451",)),
+            ("key tuple", "let _ = ObservationKey(());", ("E0423",)),
+            ("key field", "let _ = ObservationKey { 0: () };", ("E0451",)),
+            ("keyed factory", "let _ = issuer::issue(ObservationKey(()), 7_u8);", ("E0423",)),
+            ("proof Default", "require_default::<RetiredEnd<u8>>();", ("E0277",)),
+            ("proof Clone", "require_clone::<RetiredEnd<u8>>();", ("E0277",)),
+            ("proof Copy", "require_copy::<RetiredEnd<u8>>();", ("E0277",)),
+            ("key Default", "require_default::<ObservationKey>();", ("E0277",)),
+            ("key Clone", "require_clone::<ObservationKey>();", ("E0277",)),
+            ("key Copy", "require_copy::<ObservationKey>();", ("E0277",)),
+        ]
+        with TemporaryDirectory() as temporary:
+            source = Path(temporary) / "privacy.rs"
+
+            def compile_probe(probe):
+                source.write_text(fixture.replace("PROBE", probe))
+                return subprocess.run(
+                    ["rustc", "--edition=2024", "--crate-type=lib", "--emit=metadata",
+                     "--out-dir", temporary, str(source)], capture_output=True, text=True)
+
+            positive = compile_probe("")
+            self.assertEqual(positive.returncode, 0, "positive control: " + positive.stderr)
+            for name, probe, codes in probes:
+                with self.subTest(probe=name):
+                    result = compile_probe(probe)
+                    self.assertNotEqual(result.returncode, 0, "unauthorized construction: " + name)
+                    self.assertTrue(any(f"error[{code}]" in result.stderr for code in codes),
+                                    result.stderr)
+                    self.assertNotIn("error[E0432]", result.stderr)
+                    self.assertNotIn("error[E0433]", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

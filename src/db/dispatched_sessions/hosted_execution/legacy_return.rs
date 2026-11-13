@@ -1,6 +1,6 @@
 //! Offline conversion of one exact retired row to the existing legacy representation.
 use super::*;
-use crate::services::session_host::legacy_return::RetiredEnd;
+use crate::domain::retired_end::RetiredEnd;
 
 /// The caller must keep dcserver stopped and publish the tmux marker only after this commits.
 /// The archive is one slot for this row's lifetime; a later incarnation does not overwrite it.
@@ -9,7 +9,7 @@ pub(crate) async fn return_legacy_pg(
     observed: &HostedObservation,
     owner: &HostedOwner,
     old_nonce: &str,
-    ended: &RetiredEnd,
+    ended: &RetiredEnd<HostedExecution>,
 ) -> Result<HostedCasOutcome, HostedTransitionError> {
     let known = match &observed.record {
         HostedRecord::Known(known) if known.state == HostedState::Retired => known,

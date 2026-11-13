@@ -17,5 +17,6 @@ pub(crate) mod outbound;
 pub(crate) mod process_incarnation;
 pub(crate) mod provider;
 pub(crate) mod provider_auth_profile;
+pub(crate) mod retired_end;
 pub(crate) mod session_identity;
 pub(crate) mod tool_text;
