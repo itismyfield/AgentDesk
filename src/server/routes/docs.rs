@@ -900,6 +900,40 @@ mod tests {
         assert_eq!(dry_run.status, Some(200));
         assert_eq!(dry_run.response["capabilities"]["auto_dispatch"], false);
         assert_eq!(dry_run.response["capabilities"]["block_on"], true);
+        assert_eq!(dry_run.response["capabilities"]["allow_duplicate"], true);
+        assert_eq!(
+            dry_run.response["capabilities"]["duplicate_candidate_status"],
+            409
+        );
+        let allow_duplicate = endpoint
+            .params
+            .get("allow_duplicate")
+            .expect("duplicate override must be documented");
+        assert!(!allow_duplicate.required);
+        assert_eq!(allow_duplicate.default, Some(json!(false)));
+        assert_eq!(
+            dry_run.response["duplicate_check"],
+            json!({"outcome": "not_run", "reason": "dry_run"})
+        );
+        let duplicate = endpoint
+            .error_example
+            .as_ref()
+            .expect("duplicate candidate response must be documented");
+        assert_eq!(duplicate.status, Some(409));
+        assert_eq!(duplicate.response["code"], "duplicate_candidate");
+        assert_eq!(duplicate.response["created"], false);
+        assert_eq!(duplicate.response["candidate"]["probability"], 0.8);
+        assert_eq!(duplicate.response["retry"]["allow_duplicate"], true);
+        assert!(
+            endpoint
+                .description
+                .contains("creates no issue, kanban card, or announcement")
+        );
+        assert!(
+            endpoint
+                .description
+                .contains("Off or NoAnswer continues creation")
+        );
         assert_eq!(
             dry_run.response["capabilities"]["unsupported_features"],
             json!(["auto_dispatch"])

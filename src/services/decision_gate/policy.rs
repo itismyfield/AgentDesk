@@ -11,10 +11,12 @@ pub(super) fn resolve(config: &DecisionGateConfig, scope: &Scope) -> Result<Dura
             config.features.issue_duplicate.enabled,
             config.features.issue_duplicate.deadline_ms,
         ),
+        #[cfg(test)]
         Feature::HostAssignment => (
             config.features.host_assignment.enabled,
             config.features.host_assignment.deadline_ms,
         ),
+        #[cfg(test)]
         Feature::RoutinePrecheck => (
             config.features.routine_precheck.enabled,
             config.features.routine_precheck.deadline_ms,
