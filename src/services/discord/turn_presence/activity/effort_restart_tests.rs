@@ -179,8 +179,8 @@ impl Ports for Scripted {
     fn final_ready(&self, _: &str) -> bool {
         false
     }
-    fn pane_busy(&self, _: &str) -> bool {
-        false
+    fn claude_busy(&self, _: &str) -> claude_activity::Busy {
+        false.into()
     }
     fn liveness(&self, _: ShadowProvider, _: u64, _: &str) -> SessionLiveness {
         SessionLiveness::Alive
