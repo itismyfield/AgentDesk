@@ -1,0 +1,22 @@
+---
+title: "Herdr /restart: exact close, new incarnation, original input custody"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+  }
+  class lg0 teal
+  class lg1 blue
+  s0: Old session and original queued input
+  s1: Restart excludes old input and captures exact pane
+  s2: Failure awaiting a visible result
+  s3: Visible failure#59; originals remain owned
+  [*] --> s0
+  s0 --> s1: User /restart is accepted under transition and fence
+  s1 --> s2: Unknown or changed identity refuses close
+  s2 --> s3: Show the failure and retain input custody
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 teal

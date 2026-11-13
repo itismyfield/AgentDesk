@@ -1,0 +1,26 @@
+---
+title: "Herdr /restart: exact close, new incarnation, original input custody"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Path to the RestartAvailable bug
+    lg3: Repeats forever, so RestartAvailable breaks
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 bugPath
+  class lg3 repeats
+  s0: Old session and original queued input
+  s1: Failure awaiting a visible result
+  s2: Visible failure#59; originals remain owned
+  [*] --> s0
+  s0 --> s1: User /restart is refused before cancellation
+  s1 --> s2: Show the failure and retain input custody
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 teal
+  class s2 repeats

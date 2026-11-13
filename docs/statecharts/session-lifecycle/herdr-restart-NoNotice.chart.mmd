@@ -1,0 +1,24 @@
+---
+title: "Herdr /restart: exact close, new incarnation, original input custody"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Restart
+    lg1: Path to the AcceptedInputResolves or RequestResolves or RestartAvailable bug
+    lg2: Repeats forever, so AcceptedInputResolves or RequestResolves or RestartAvailable breaks
+  }
+  class lg0 blue
+  class lg1 bugPath
+  class lg2 repeats
+  s0: Old session and original queued input
+  s1: Restart excludes old input and captures exact pane
+  s2: Failure awaiting a visible result
+  [*] --> s0
+  s0 --> s1: User /restart is accepted under transition and fence
+  s1 --> s2: Exact close is unconfirmed
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 repeats

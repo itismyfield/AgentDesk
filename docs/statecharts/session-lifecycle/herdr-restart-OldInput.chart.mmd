@@ -1,0 +1,45 @@
+---
+title: "Herdr /restart: exact close, new incarnation, original input custody"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Breaks NoOldPaneInput
+    lg3: Path to the NoOldPaneInput bug
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  s0: Old session and original queued input
+  s1: Restart excludes old input and captures exact pane
+  s2: Old pane received a restart input
+  s3: Exact close confirmed#59; settle old inflight
+  s4: Old incarnation retired#59; originals still held
+  s5: Fresh incarnation Pending before create
+  s6: New pane created#59; wait for evidence and binding
+  s7: One new Ready session#59; originals await the owner
+  s8: One new Ready session#59; originals settled once
+  [*] --> s0
+  s0 --> s1: User /restart is accepted under transition and fence
+  s1 --> s2: Stale input permission types into old pane
+  s1 --> s3: Close only the captured pane
+  s3 --> s4: Retire and settle only the old token
+  s4 --> s5: Commit new incarnation before create
+  s5 --> s6: Create reply is observed once
+  s6 --> s7: Evidence and binding admit the successor
+  s7 --> s8: Submit an original to the successor once
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 teal
+  class s8 teal

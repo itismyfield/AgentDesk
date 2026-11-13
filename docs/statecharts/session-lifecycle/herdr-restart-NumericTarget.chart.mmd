@@ -1,0 +1,33 @@
+---
+title: "Herdr /restart: exact close, new incarnation, original input custody"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Breaks NoForeignClose
+    lg3: Path to the NoForeignClose bug
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  s0: Old session and original queued input
+  s1: Restart excludes old input and captures exact pane
+  s2: Reused numeric target was closed
+  s3: Failure awaiting a visible result
+  s4: Visible failure#59; originals remain owned
+  [*] --> s0
+  s0 --> s1: User /restart is accepted under transition and fence
+  s1 --> s2: Reuse a numeric target after replacement
+  s1 --> s3: Unknown or changed identity refuses close
+  s3 --> s4: Show the failure and retain input custody
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath
+  class s3 blue
+  class s4 teal
