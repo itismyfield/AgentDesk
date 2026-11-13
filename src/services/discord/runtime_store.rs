@@ -150,19 +150,18 @@ pub(super) fn shared_agent_knowledge_path() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-pub use crate::services::process_generation::set_process_generation_for_tests;
-#[cfg(test)]
 pub(crate) use crate::services::process_generation::{
     ADVANCED_ROUTE_FOR_TESTS, GenerationAllocationRoute,
     allocate_and_publish_process_generation_for_tests, process_generation_allocation_for_tests,
     publish_process_generation_allocation_for_tests,
 };
 pub(crate) use crate::services::process_generation::{
-    ProcessGenerationAllocation, allocate_process_generation_binding, process_generation_binding,
+    ProcessGenerationAllocation, process_generation_binding,
 };
+pub use crate::services::process_generation::{allocate_process_generation, process_generation};
+#[cfg(test)]
 pub use crate::services::process_generation::{
-    allocate_process_generation, generation_path, load_generation, next_process_generation,
-    process_generation,
+    generation_path, load_generation, next_process_generation, set_process_generation_for_tests,
 };
 
 pub(super) fn last_message_root() -> Option<PathBuf> {
