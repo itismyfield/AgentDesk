@@ -119,8 +119,7 @@ fn current_source_requires_the_bound_nonce_and_current_runtime_binding() {
     let rig = HerdrRig::start();
     let _registry = rig.registry_on_this_thread();
     pane(&rig);
-    let observation =
-        observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+    let observation = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     let context = observation.context.as_ref().unwrap();
     assert_eq!(current(context).unwrap().id, source);
     let wrong_nonce = Context {
@@ -152,8 +151,7 @@ fn current_source_rejects_a_replaced_transcript_inode() {
     let rig = HerdrRig::start();
     let _registry = rig.registry_on_this_thread();
     pane(&rig);
-    let observation =
-        observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+    let observation = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     let context = observation.context.as_ref().unwrap();
     assert_eq!(current(context).unwrap().id, source);
     let replacement = source.path.with_extension("replacement");
@@ -181,8 +179,7 @@ fn an_owned_live_source_waits_while_its_actual_output_writer_is_absent() {
     assert!(!crate::services::tui_o::writer::host::channel_accepts(
         CHANNEL
     ));
-    let observation =
-        observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+    let observation = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     let context = observation.context.as_ref().unwrap();
     assert!(context.target.execution_alive());
     assert_eq!(current(context).unwrap().id, source);
@@ -203,8 +200,7 @@ fn a_captured_target_rejects_the_other_execution_running_in_its_pane() {
     let stop = fx.root.path().join("no-stop");
     let _admission = force_for_test(Admission::new(true, Some(stop)));
     pane(&rig);
-    let observation =
-        observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+    let observation = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     let context = observation.context.as_ref().unwrap();
     assert!(context.target.execution_alive());
     context.target.pin(HerdrMutation::Input).unwrap();
@@ -227,8 +223,7 @@ fn a_held_source_probe_wakes_verified_clear_before_its_new_transcript_exists() {
     let _registry = rig.registry_on_this_thread();
     pane(&rig);
     std::fs::remove_file(&source.path).unwrap();
-    let observation =
-        observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+    let observation = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     assert_eq!(observation.state(), BusyState::Held);
     let mut probe = observation.probe();
     assert!(matches!(probe(), Screen::Unknown));
@@ -368,8 +363,7 @@ fn an_idle_relay_does_not_delegate_a_busy_input_source() {
     assert!(
         crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&source.path).is_busy()
     );
-    let observation =
-        observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+    let observation = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     assert_eq!(
         observation.state(),
         BusyState::Held,
