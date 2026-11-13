@@ -9,7 +9,7 @@ pub(crate) mod effort_continue;
 pub(crate) mod held_watch;
 pub(crate) mod ingress;
 #[cfg(all(test, unix))]
-pub(crate) mod native_intent;
+mod native_intent_tests;
 pub(crate) mod notice;
 pub(crate) mod origin;
 pub(crate) mod pump;

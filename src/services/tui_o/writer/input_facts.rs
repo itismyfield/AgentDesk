@@ -14,10 +14,9 @@ use crate::services::tui_o::shadow::{
     CaptureOutcome, CaptureSource, ShadowProvider, SourceBinding,
 };
 
-#[cfg(test)]
 pub(crate) mod native;
 mod queued;
-pub(crate) use queued::{Record as QueueRecord, classify as classify_queued_record};
+pub(crate) use native::{QueueRecord, classify as classify_queued_record};
 pub mod reactions;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

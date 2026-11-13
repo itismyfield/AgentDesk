@@ -12,7 +12,7 @@
 | `pump::submit_native_front` → `Owner::native_intent` | explicit Primary(원본 id/nonce/generation) 또는 Follower를 기존 payload attribution에 실어 durable reserve 뒤 첫-key leaf 전에 검사한다. 잘못된 primary는 NotSent이며 unarmed boot restore가 원본을 돌려놓는다. | 성공한 lease claim의 캡처를 넘길 실제 owner_input caller. 현재 mailbox 조회로 Primary를 합성하지 않는다. |
 | RuntimeReady·unknown restore | 기존 `prepare_history/bind_source`와 queue 복원이 intent를 보존한다. merged frame에서도 episode id는 head 원본과 같아야 한다. | 첫 native ticket/v3 저장 및 운영 writer 활성화. B1 테스트의 일반 frame 등록은 envelope2다. |
 
-모든 새 native 증거/intent API는 `cfg(test)` 경계에 있다. 운영 경로에는 동일한 attribution을 전달하는 pump 분리만 적용한다. native 결과 기록·episode/actor CAS·row 삭제·wake·boot 소비·WARN·실제 herdr e2e는 B2다. `turn_bridge` 본문과 다른 레인 소유 파일은 수정하지 않는다.
+모든 새 native 증거/intent API는 항목별 `cfg(test)` 경계에 있다. 기존 classifier가 native leaf의 production caller이므로 감사 whole-file skip 집합과 pin을 늘리지 않는다. 운영 경로에는 기존 record classifier의 동일 코드 이동과 동일 attribution을 전달하는 pump 분리만 적용한다. native 결과 기록·episode/actor CAS·row 삭제·wake·boot 소비·WARN·실제 herdr e2e는 B2다. `turn_bridge` 본문과 다른 레인 소유 파일은 수정하지 않는다.
 
 증거는 namespace, 전체 ticket, 원래 run id/시작 위치, membership row/범위, strict closer 범위와 disposition을 운반한다. 응답 범위는 membership 이후이며 앞 외부 턴 본문을 포함하지 않는다. end_turn만으로 완료하지 않고 연속 closer는 한 종료다. native disposition은 배송 receipt가 아니다.
 

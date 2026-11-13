@@ -103,7 +103,7 @@ pub(crate) async fn submit_native_front(
     mailbox: &ChannelMailboxHandle,
     claim: Option<FrontClaim>,
     prepared: PreparedPayload,
-    intent: super::native_intent::Intent,
+    intent: crate::services::tui_input::human_frame::history::v2::native::Intent,
     clock: Clock,
     leaf: Leaf,
 ) -> Result<Completion, String> {

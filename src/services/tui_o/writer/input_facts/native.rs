@@ -1,10 +1,82 @@
-//! Read-only native membership from the records O already captured; activation supplies the sink.
-use super::{Ordered, QueueRecord, SourceBinding, classify_queued_record};
+//! Claude native input record classification and inactive source-bound membership evidence.
+#[cfg(test)]
+use self::classify as classify_queued_record;
+#[cfg(test)]
+use super::{Ordered, SourceBinding};
+#[cfg(test)]
 use crate::services::tui_input::human_frame::history::v2::native::{
     Disposition, Ticket, frame_hashes,
 };
 use serde_json::Value;
 
+/// What one record says about the queue.
+pub(crate) enum QueueRecord {
+    Enqueue(String),
+    /// Removed without running (`remove` other than mid-turn absorption).
+    Withdraw(String),
+    /// Handed to another agent (`remove`, `delivered_to_agent`); Claude writes no dequeue for it.
+    Delivered(String),
+    /// Every queued input pulled back to the prompt.
+    WithdrawAll,
+    Dequeue,
+    /// Taken into the turn (`remove`, `absorbed_mid_turn`); Claude writes no dequeue for it, and its
+    /// `queued_command` row may come before it, after it, or not at all.
+    Absorbed(String),
+    /// A human prompt command (`queued_command`, `prompt` mode, human origin).
+    Human(String),
+    /// Any other `queued_command`, such as a background task's notification drained mid-turn.
+    Command(String),
+    /// A user prompt row, or a meta row (a notification opening its own turn).
+    Prompt(String),
+}
+
+pub(crate) fn classify(value: &Value) -> Option<QueueRecord> {
+    let text = |key: &str| value.get(key).and_then(body);
+    match value["type"].as_str()? {
+        "queue-operation" => match value["operation"].as_str()? {
+            "enqueue" => Some(QueueRecord::Enqueue(text("content")?)),
+            "remove" if value["reason"] == "absorbed_mid_turn" => {
+                Some(QueueRecord::Absorbed(text("content")?))
+            }
+            "remove" if value["reason"] == "delivered_to_agent" => {
+                Some(QueueRecord::Delivered(text("content")?))
+            }
+            "remove" => Some(QueueRecord::Withdraw(text("content")?)),
+            "popAll" => Some(QueueRecord::WithdrawAll),
+            "dequeue" => Some(QueueRecord::Dequeue),
+            _ => None,
+        },
+        "attachment" if value["attachment"]["type"] == "queued_command" => {
+            let command = &value["attachment"];
+            let human = command["commandMode"] == "prompt" && command["origin"]["kind"] == "human";
+            let prompt = body(&command["prompt"])?;
+            match human {
+                true => Some(QueueRecord::Human(prompt)),
+                false => Some(QueueRecord::Command(prompt)),
+            }
+        }
+        "user" => body(&value["message"]["content"]).map(QueueRecord::Prompt),
+        _ => None,
+    }
+}
+
+/// A body as Claude records it: a string, or its text blocks joined.
+fn body(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.trim().to_string()),
+        Value::Array(blocks) => {
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter(|block| block["type"] == "text")
+                .filter_map(|block| block["text"].as_str())
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n").trim().to_string())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct Registration {
     pub(crate) namespace: String,
@@ -13,18 +85,21 @@ pub(crate) struct Registration {
     pub(crate) receipts: Vec<String>,
 }
 
+#[cfg(test)]
 pub(super) struct Record {
     pub(super) range: (u64, u64),
     pub(super) value: Value,
     pub(super) boundaries: Vec<Ordered>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Run {
     pub(crate) start: u64,
     pub(crate) native_id: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Evidence {
     pub(crate) namespace: String,
@@ -37,6 +112,7 @@ pub(crate) struct Evidence {
     pub(crate) disposition: Disposition,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Waiting,
@@ -45,6 +121,7 @@ enum Stage {
     Running,
     Removed,
 }
+#[cfg(test)]
 struct Input {
     body: String,
     owner: Option<usize>,
@@ -55,6 +132,7 @@ struct Input {
     absorbed: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 struct Member {
     run: Run,
@@ -62,11 +140,13 @@ struct Member {
     row: Option<String>,
 }
 
+#[cfg(test)]
 fn same_body(a: &str, b: &str) -> bool {
     let hashes = frame_hashes(a);
     frame_hashes(b).iter().any(|hash| hashes.contains(hash))
 }
 
+#[cfg(test)]
 pub(super) fn fold(
     binding: &SourceBinding,
     records: &[Record],
@@ -324,6 +404,7 @@ pub(super) fn fold(
         .collect())
 }
 
+#[cfg(test)]
 fn settle_removed(
     input: &mut Input,
     end: u64,
