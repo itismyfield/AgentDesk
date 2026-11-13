@@ -90,19 +90,19 @@ fn writer_state_with_busy(
     };
     let past = line("same-text-past") + "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n";
     std::fs::write(&path, &past).unwrap();
-    let spawn_nonce = uuid::Uuid::new_v4().simple().to_string();
-    let context = serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),
-        "execution_nonce":spawn_nonce,"tmux_session":session,"channel_id":channel,
-        "owner_runtime_root":crate::services::tmux_common::current_tmux_owner_marker(),
-        "host":"native-stop-busy-fixture","expected_native_session_id":null,
-        "launch_mode":"fresh","provider_root":null});
-    crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
-        serde_json::from_value(context).unwrap(),
-    )
-    .unwrap();
+    let incarnation =
+        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::prepare_at(
+            "claude",
+            &session,
+            Some(channel),
+            Some("persisted-sid"),
+            false,
+            Some(dir.clone()),
+        )
+        .unwrap();
     std::fs::write(
         crate::services::tmux_common::session_temp_path(&session, "spawn_nonce"),
-        spawn_nonce,
+        &incarnation.context.execution_nonce,
     )
     .unwrap();
     std::fs::write(
@@ -382,6 +382,16 @@ async fn hand_busy_children(
     crate::services::claude_tui::input::submission::tests::wait("queued-renderer-started", || {
         renderer.join("ready").exists()
     });
+    let nonce = std::fs::read_to_string(crate::services::tmux_common::session_temp_path(
+        session,
+        "spawn_nonce",
+    ))
+    .unwrap();
+    let context =
+        crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", &nonce)
+            .unwrap();
+    assert_eq!(context.tmux_session, session);
+    assert_eq!(context.channel_id, Some(state.channel_id));
     let channel = ChannelId::new(state.channel_id);
     let mailbox = shared.mailbox(channel);
     assert!(
@@ -487,6 +497,10 @@ fn actual_busy_input_restart_and_native_stop_keep_only_the_birth_episode_pg() {
     use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
     use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _host = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_INSTANCE_ID",
+        std::ffi::OsStr::new("native-stop-busy-fixture"),
+    );
     let fixture = Fixture::after_shared_test_env_lock();
     let shim = fixture.root.path().join("tmux");
     let script = std::fs::read_to_string(&shim).unwrap().replacen("#!/bin/sh\n", &format!(

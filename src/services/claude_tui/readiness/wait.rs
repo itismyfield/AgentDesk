@@ -24,7 +24,10 @@ pub(crate) fn prepare(
         let dialog_pending = dialogs.poll(session, cancel)?;
         if !dialog_pending
             && let Some(proof) = observe(session, path)
-            && draft_prepared(session, readiness)
+            && (readiness == PromptReadinessKind::ProvenWarmFollowup
+                || super::super::host_input::observe_draft(session)
+                    .as_deref()
+                    .is_some_and(|capture| composer_prepared(session, capture)))
         {
             return Ok(proof);
         }
@@ -44,21 +47,22 @@ pub(crate) fn prepare(
     }
 }
 
-fn draft_prepared(session: &str, readiness: PromptReadinessKind) -> bool {
-    if readiness == PromptReadinessKind::ProvenWarmFollowup {
+// Existing managed stash authority may park a draft; source readiness is still required first.
+fn composer_prepared(session: &str, capture: &str) -> bool {
+    if super::empty_draft(capture) {
         return true;
     }
-    // Managed stash validates and parks the draft under its existing writer lock.
     #[cfg(unix)]
-    if super::super::submission_fence::idle_stash_scope().is_some_and(|(fence, context)| {
-        context.available
-            && context.target == session
-            && (fence.stash_any_channel()
-                || super::super::busy_inject::stash_enabled(Some(context.channel)))
-    }) {
-        return true;
+    if let Some((fence, context)) = super::super::submission_fence::idle_stash_scope()
+        && context.available
+        && context.target == session
+        && fence.idle_stash_admits(session)
+        && (fence.stash_any_channel()
+            || super::super::busy_inject::stash_enabled(Some(context.channel)))
+    {
+        return super::super::busy_inject::screen::parkable(capture);
     }
-    super::super::host_input::observe_draft(session)
-        .as_deref()
-        .is_some_and(super::empty_draft)
+    #[cfg(not(unix))]
+    let _ = session;
+    false
 }

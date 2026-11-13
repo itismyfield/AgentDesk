@@ -133,6 +133,8 @@ Routing/staging can still wait for that guard; admission here does not mean dura
 
 The Claude readiness refinement also checks terminal-free self-compact completion: [before](input-single-path/InputPathReadyCompactNoCompletion.cfg) breaks next-input liveness; [after](input-single-path/InputPathReadyCompactCompletion.cfg) satisfies it. Source, generation, reservation and Unknown-transfer guards remain caller obligations documented in [the readiness report](input-single-path/transcript-readiness.report.md).
 
+The managed idle-stash readiness refinement keeps a person draft intact through the existing C-s round trip: [before](input-single-path/InputPathReadyManagedStashBefore.cfg) breaks queued-input liveness; [after](input-single-path/InputPathReadyManagedStashAfter.cfg) preserves the draft and sends once after current source readiness. [Evidence](input-single-path/readiness-managed-stash.report.md).
+
 AwaitingClear's authenticated, one-use source retirement is refined in
 [input readiness](input-single-path/transcript-readiness.design.md#awaitingclear-adoption),
 including restart, forged proof, cursor loss and split-publication counterexamples.
