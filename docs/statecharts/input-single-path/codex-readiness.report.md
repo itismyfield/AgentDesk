@@ -36,7 +36,7 @@ Value ranges come from the entry-point table of the design (section 1): `NativeE
 
 ## Results
 
-`scripts/ci/statecharts_tlc.py` on the 49 configs: GREEN 23, expected RED 26, unexpected 0. The `statechart` command gave the same rule sets; every run ended with exit 0 (23) or 1 (26).
+`scripts/ci/statecharts_tlc.py` on the 55 configs: GREEN 28, expected RED 27, unexpected 0. The `statechart` command gave the same rule sets; every run ended with exit 0 (28) or 1 (27).
 
 ### Before and after, per scenario and host (pane unread unless noted)
 
@@ -46,14 +46,14 @@ Value ranges come from the entry-point table of the design (section 1): `NativeE
 |---|---|---|---|
 | narrow pane only | `BeforeNarrow` RED L | `BeforeTmuxNarrow` GREEN (the pane is replaced after 45 s) | `AfterNarrow`, `AfterNarrowHerdr` GREEN |
 | a person's turn | `BeforePerson` RED L | `BeforeTmuxPerson` (readable pane) RED `CodexNoRunningKill` | `AfterPerson`, `AfterPersonHerdr` GREEN |
-| end record lost, Stop hook seen | `BeforeLostRecord` RED L | `BeforeTmuxLostRecord` RED L | `AfterLostRecord` GREEN |
-| end record and Stop hook lost | `BeforeLostBoth` RED L | `BeforeTmuxLostBoth` RED L | `AfterLostBothBusy` GREEN with the busy entry; `AfterLostBothHeld` RED L without it |
-| unnamed end record | `BeforeUnnamed` RED L | `BeforeTmuxUnnamed` GREEN | `AfterUnnamedHook`, `AfterUnnamed` GREEN |
+| end record lost, Stop hook seen | `BeforeLostRecord` RED L | `BeforeTmuxLostRecord` RED L | `AfterLostRecord`, `AfterLostRecordHerdr` GREEN |
+| end record and Stop hook lost | `BeforeLostBoth` RED L | `BeforeTmuxLostBoth` RED L | `AfterLostBothBusy`, `AfterLostBothBusyHerdr` GREEN with the busy entry; `AfterLostBothHeld` RED L without it |
+| unnamed end record | `BeforeUnnamed` RED L | `BeforeTmuxUnnamed` GREEN | with the Stop hook `AfterUnnamedHook`, `AfterUnnamedHookHerdr` GREEN; without it `AfterUnnamed` (tmux) GREEN, `AfterUnnamedHerdr` RED L before #8128, `AfterUnnamedHerdr8128` GREEN |
 | rollout archived to `.zst` | `BeforeCompressed` RED L | `BeforeTmuxCompressed` GREEN | `AfterCompressed` GREEN; `AfterCompressedHerdr` RED L before #8128, `AfterCompressedHerdr8128` GREEN |
-| dcserver restart after a lost end record, busy entry available | `BeforeRestart` RED L | `BeforeTmuxRestart` GREEN | `AfterRestart` GREEN |
+| dcserver restart after a lost end record, busy entry available | `BeforeRestart` RED L | `BeforeTmuxRestart` GREEN | `AfterRestart`, `AfterRestartHerdr` GREEN |
 | process exit | `BeforeExit` RED L | `BeforeTmuxExit` GREEN | `AfterExit`, `AfterExitHerdr` GREEN |
 
-Liveness, RED before and GREEN after: all eight scenarios on Herdr except the archived rollout before #8128, and the two lost-end-record scenarios on tmux (with the busy entry for the both-lost case). `CodexReadyBeforeWide` (Herdr, readable pane) is GREEN: the pane judgment is correct when it can be read, so the design must replace what the pane covered and not only remove it.
+Liveness, RED before and GREEN after, same host on both sides: on Herdr the narrow pane, a person's turn, the lost end record, both lost with the busy entry, the unnamed end with a Stop hook, the restart and the exit; on tmux the two lost-end-record scenarios (with the busy entry for the both-lost case). On Herdr an unreadable rollout (archived, or an unnamed end without a Stop hook) stays RED until #8128. `CodexReadyBeforeWide` (Herdr, readable pane) is GREEN: the pane judgment is correct when it can be read, so the design must replace what the pane covered and not only remove it.
 
 tmux before is not a liveness defect on an unread pane. Its defects are the relaunch cost, the kill of a turn a person started while a follow-up waits (`BeforeTmuxPerson`), and follow-ups that stay queued while the lenient reader keeps saying busy after a lost end record.
 
@@ -62,7 +62,7 @@ tmux before is not a liveness defect on an unread pane. Its defects are the rela
 | cfg | Breaks | Meaning |
 |---|---|---|
 | `CodexReadyAfterLostBothHeld` | L | a turn that reads open, both end signals lost, no busy entry: the input stays held. Opening the relaunch here kills running turns (`CodexReadyReclaimOpen`) |
-| `CodexReadyAfterCompressedHerdr` | L | Herdr has no replacement path before #8128; the input is refused |
+| `CodexReadyAfterCompressedHerdr`, `CodexReadyAfterUnnamedHerdr` | L | Herdr has no replacement path before #8128; the input is refused |
 | `CodexReadyAfterSilentTool` | `CodexNoEarlyInput` | dcserver restarts between a person's Enter and the `task_started` record; the UserPromptSubmit evidence is lost |
 | `CodexReadyAfterArchivedSilentTurn` | `CodexNoEarlyInput`, `CodexNoRunningKill` | an archived rollout, a person's turn, a silent model turn without children, and a restart together |
 
