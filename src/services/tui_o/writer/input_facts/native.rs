@@ -202,10 +202,11 @@ pub(super) fn fold(
                     range,
                     native_turn_id,
                 } => {
-                    run = Some(Run {
+                    let opened = Run {
                         start: range.0,
                         native_id: native_turn_id.clone(),
-                    });
+                    };
+                    run = Some(opened.clone());
                     for input in &mut inputs {
                         if !matches!(input.stage, Stage::Taken | Stage::Attached) {
                             continue;
@@ -221,7 +222,7 @@ pub(super) fn fold(
                         let prompt_matches = classify_queued_record(&record.value)
                             .is_some_and(|event| matches!(event, QueueRecord::Prompt(body) if same_body(&body, &input.body)));
                         member[owner] = Some(Member {
-                            run: run.as_ref().expect("opened run").clone(),
+                            run: opened.clone(),
                             range: if prompt_matches {
                                 record.range
                             } else {
