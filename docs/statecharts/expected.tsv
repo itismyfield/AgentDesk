@@ -334,6 +334,13 @@ session-lifecycle/HerdrBusyHandoffStaleIntake.cfg	HerdrBusyHandoff	NoOldKeys	-
 session-lifecycle/HerdrBusyHandoffUntypedHeld.cfg	HerdrBusyHandoff	NoRetained	-
 session-lifecycle/HerdrHandoffFixed.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHandoffHintBefore.cfg	HerdrSession	-	HandoffProgress
+session-lifecycle/HerdrHandoffLaunchBefore.cfg	HerdrHandoffLaunch	BoundedRetries	FrontProgress
+session-lifecycle/HerdrHandoffLaunchFixed.cfg	HerdrHandoffLaunch	-	-
+session-lifecycle/HerdrHandoffLaunchFresh.cfg	HerdrHandoffLaunch	-	-
+session-lifecycle/HerdrHandoffLaunchImmediateWake.cfg	HerdrHandoffLaunch	Backoff	-
+session-lifecycle/HerdrHandoffLaunchNoCount.cfg	HerdrHandoffLaunch	BoundedRetries	FrontProgress
+session-lifecycle/HerdrHandoffLaunchRetiredJournal.cfg	HerdrHandoffLaunch	RetiredIsFresh	-
+session-lifecycle/HerdrHandoffLaunchSuccess.cfg	HerdrHandoffLaunch	-	-
 session-lifecycle/HerdrHandoffPersonBefore.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHandoffQueueBefore.cfg	HerdrSession	-	HandoffProgress
 session-lifecycle/HerdrHandoffTargetBefore.cfg	HerdrSession	NoBusyExit,NoLiteralIntoDraft,NoUnexpectedEnter,NoWrongExecutionExit	HandoffProgress
