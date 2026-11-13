@@ -148,10 +148,12 @@ fn exercise_instance_entries() {
     )
     .unwrap();
     assert!(health.output().unwrap().status.success());
-    let busy = crate::services::claude_tui::busy_inject::Pane::with_program(&name, fake.clone());
+    let busy =
+        crate::services::claude_tui::busy_inject::Pane::with_program(&name, fake.clone()).unwrap();
     assert!(busy.capture().is_some());
     assert!(
         TmuxPane::with_program(&name, fake.clone(), std::time::Duration::from_secs(2))
+            .unwrap()
             .capture()
             .is_ok()
     );
@@ -215,12 +217,13 @@ fn exercise_instance_entries() {
         );
         assert!(
             crate::services::claude_tui::busy_inject::Pane::with_program(&foreign, fake.clone())
-                .capture()
+                .ok()
+                .and_then(|pane| pane.capture())
                 .is_none()
         );
         assert!(
             TmuxPane::with_program(&foreign, fake.clone(), std::time::Duration::from_secs(2))
-                .capture()
+                .and_then(|mut pane| pane.capture())
                 .is_err()
         );
         assert!(SubmissionTmux.pane_size(&foreign).is_none());
