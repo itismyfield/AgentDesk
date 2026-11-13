@@ -1537,6 +1537,15 @@ fn execute_streaming_local_tmux(
     crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(tmux_session_name)
         .cleanup_best_effort();
 
+    let prepared =
+        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::prepare(
+            "codex",
+            tmux_session_name,
+            report_channel_id,
+            session_id,
+            session_id.is_some(),
+        )?;
+
     std::fs::write(&output_path, "").map_err(|e| format!("Failed to create output file: {}", e))?;
 
     // Create the named input FIFO that the wrapper reads followups from. A FIFO
@@ -1582,6 +1591,7 @@ fn execute_streaming_local_tmux(
         report_provider,
     );
     env_lines.push_str(&auth_env_lines);
+    env_lines.push_str(&prepared.env_lines());
 
     let script_content = render_codex_wrapper_tmux_script(
         &env_lines,
@@ -1604,16 +1614,13 @@ fn execute_streaming_local_tmux(
         .map_err(|e| format!("Failed to write launch script: {}", e))?;
 
     fence.validate_tmux_publisher(tmux_session_name)?;
+    let mut identity = prepared.tmux_identity()?;
+    identity.name_kind = "wrapper".into();
     let tmux_result = crate::services::platform::tmux::create_session_with_identity(
         tmux_session_name,
         Some(working_dir),
         &format!("bash {}", shell_escape(&script_path)),
-        &crate::services::session_identity_metadata::provider_identity(
-            tmux_session_name,
-            "codex",
-            report_channel_id,
-            "wrapper",
-        )?,
+        &identity,
     )?;
 
     if !tmux_result.status.success() {
@@ -1633,11 +1640,11 @@ fn execute_streaming_local_tmux(
     // Keep tmux session alive after process exits for post-mortem analysis
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
-    // Give the wrapper a fresh nonce for the status-panel session boundary.
     fence.validate_tmux_publisher(tmux_session_name)?;
-    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name, None) {
-        tracing::warn!("failed to write spawn nonce for {tmux_session_name}: {e}");
-    }
+    // A wrapper publication failure stays held; completion receives only published evidence.
+    let stamped = crate::services::discord::stamp_spawn_markers(tmux_session_name, Some(&prepared))
+        .map_err(|error| format!("Held(marker_publication_failed): {error}"))?;
+    prepared.finish_spawn(Ok(stamped))?;
 
     drop(fence);
     if let Some(ref token) = cancel_token {

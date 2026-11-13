@@ -16,7 +16,8 @@ Init(kind) ==
         nonceContested |-> FALSE, registeredFromNonce |-> "",
         tx |-> "idle", snapshotNonce |-> "", stagedPrimary |-> "old",
         stagedNonce |-> "", stagedAliases |-> {}, hostWitness |-> "same", witnessChanged |-> FALSE,
-        slotIncarnation |-> "none", replacementSeen |-> FALSE] : nonce \in {"old", ""}}
+        slotIncarnation |-> "none", replacementSeen |-> FALSE,
+        restarts |-> 0, crashDurable |-> <<"old", nonce, {}>>] : nonce \in {"old", ""}}
 
 RequestNewName ==
     /\ n.stage = "old"
@@ -111,6 +112,18 @@ TxRollback(mode) ==
     /\ n' = [n EXCEPT !.tx = "rolled-back", !.stage = "held", !.fresh = FALSE,
          !.stagedPrimary = n.primary, !.stagedAliases = n.aliases, !.stagedNonce = n.rowNonce]
 
+DaemonCrashes ==
+    /\ n.stage \in {"prepared", "registered"} /\ n.restarts = 0
+    /\ n.tx \in {"snapshot", "locators", "identity", "rows", "updated", "aliased", "committed"}
+    /\ n' = [n EXCEPT !.stage = "restarting", !.tx = "crashed", !.fresh = FALSE,
+        !.restarts = 1, !.crashDurable = <<n.primary, n.rowNonce, n.aliases>>,
+        !.stagedPrimary = n.primary, !.stagedNonce = n.rowNonce, !.stagedAliases = n.aliases]
+
+RestartReadsDurableRow ==
+    /\ n.stage = "restarting"
+    /\ n' = [n EXCEPT !.stage = IF n.primary = "new" THEN "registered" ELSE "held",
+        !.tx = IF n.primary = "new" THEN "committed" ELSE "rolled-back"]
+
 LateOldNonceHook(mode) ==
     /\ n.stage \in {"registered", "stopped"} /\ ~n.oldHookSeen
     /\ n' = [n EXCEPT !.oldHookSeen = TRUE, !.staleRejected = mode # "no-nonce-cas",
@@ -134,6 +147,8 @@ Next(mode) == RequestNewName \/ OldHostEnds \/ ObserveOldHost \/ ProbeFails \/ P
     \/ TxPreserveAlias \/ TxCommit(mode) \/ TxRollback(mode)
     \/ LateOldNonceHook(mode) \/ StopCurrent \/ RetryStop(mode) \/ Done
 
+NextWithRestart == Next("fixed") \/ DaemonCrashes \/ RestartReadsDurableRow
+
 PrimaryTailIsCurrentPhysical == n.current # "none" => n.primary = n.target
 PrimaryNamesCurrentLogical == n.current # "none" => n.primary = n.current
 HostTargetMatchesCurrent == n.target = Physical(n.host, n.current)
@@ -146,5 +161,6 @@ LateOldHookRejected == n.oldHookSeen => n.staleRejected /\ n.rowNonce = "new"
 RollbackHasNoPartialPromotion == n.tx = "rolled-back" => n.primary = "old" /\ n.aliases = {}
 RegistrationRefusalDoesNotKill == n.stage = "held" => n.kills = 0
 SameNameReplacementPreserved == n.replacementSeen => n.slotIncarnation = "b"
+RestartKeepsDurableIdentity == n.restarts = 1 => <<n.primary, n.rowNonce, n.aliases>> = n.crashDurable
 CanonicalPrimaryEventuallyCurrent == (n.stage = "prepared") ~> (n.stage = "held" \/ (n.primary = "new" /\ n.rowNonce = "new" /\ "old" \in n.aliases))
 ====

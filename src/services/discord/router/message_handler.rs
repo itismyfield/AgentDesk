@@ -367,6 +367,9 @@ pub(in crate::services::discord) fn hold_input_effect_for_tests(
 mod session_strategy_lifecycle_tests;
 
 #[cfg(all(test, unix))]
+mod session_key_promotion_pipe_tests;
+
+#[cfg(all(test, unix))]
 mod turn_mark_admission_tests;
 
 #[cfg(all(test, unix))]

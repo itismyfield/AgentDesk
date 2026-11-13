@@ -2,6 +2,7 @@ export const title = "이름 이전 등록 트랜잭션: 유한 모델(기존 �
 export const state = (v) => {
   const n = v.msg && typeof v.msg === "object" ? v.msg : v.handoff;
   if (n.oldLive) return n.stage === "old" ? "옛 세션 실행 중" : (n.fresh ? "옛 세션 실행 중 새 세션 생성" : "새 이름 요청, 옛 실행 유지");
+  if (n.stage === "restarting") return "crash 후 durable row 재탐색";
   if (n.stage === "requested") return n.absence === "absent" ? "옛 host 부재 확인" : "옛 host 종료, 부재 확인 대기";
   if (n.stage === "held") return n.replacementSeen ? (n.slotIncarnation === "b" ? "Held: 후속 incarnation 보존" : "거절 cleanup이 후속 incarnation 종료") : "Held: fresh 슬롯 보류, kill 없음";
   if (n.stage === "prepared" && n.replacementSeen) return "동일 이름을 다른 incarnation이 점유, A 등록 재검증";
@@ -12,6 +13,8 @@ export const state = (v) => {
 const record = (v) => v.msg && typeof v.msg === "object" ? v.msg : v.handoff;
 export const step = (_action, from, to) => {
   const a = record(from), b = record(to);
+  if (b.stage === "restarting" && a.stage !== b.stage) return "daemon crash: staged 상태 폐기, durable identity 보존";
+  if (a.stage === "restarting" && b.stage !== a.stage) return b.stage === "held" ? "미커밋 fresh 슬롯은 Held로 복구" : "commit된 새 primary로 복구";
   if (!a.replacementSeen && b.replacementSeen) return "동일 이름을 새 nonce가 재사용함";
   if (a.tx !== b.tx && b.stage === "prepared") return ({snapshot:"old row/primary/nonce를 관측함",locators:"두 locator를 정렬해 잠금",identity:"그 뒤 identity를 잠금",rows:"row와 alias를 잠그고 snapshot 재검증",updated:"허용 actor CAS 뒤 새 primary로 UPDATE",aliased:"UPDATE 뒤 옛 key를 alias로 보존"})[b.tx] || "등록 증거 재확인";
   if (a.stage === "old" && b.stage === "requested") return "새 이름을 요청함";

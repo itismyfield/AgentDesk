@@ -457,7 +457,7 @@ NamingInit ==
     /\ turn = "idle" /\ delivered = "none" /\ restored = "no"
     /\ crashes = 0 /\ deaths = 0 /\ probeFails = 0
     /\ Naming!Init("tmux")
-NamingNext == Naming!Next("fixed") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+NamingNext == Naming!NextWithRestart /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
 NamingWithoutPromotion == Naming!Next("no-promotion") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
 NamingWithoutAbsenceGuard == Naming!Next("no-absence") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
 NamingWithoutNonceCAS == Naming!Next("no-nonce-cas") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
@@ -478,4 +478,5 @@ CanonicalPrimaryEventuallyCurrent == Naming!CanonicalPrimaryEventuallyCurrent
 RollbackHasNoPartialPromotion == Naming!RollbackHasNoPartialPromotion
 RegistrationRefusalDoesNotKill == Naming!RegistrationRefusalDoesNotKill
 SameNameReplacementPreserved == Naming!SameNameReplacementPreserved
+RestartKeepsDurableIdentity == Naming!RestartKeepsDurableIdentity
 ====

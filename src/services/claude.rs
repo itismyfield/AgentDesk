@@ -2613,6 +2613,15 @@ fn execute_streaming_local_tmux(
         tmux_session_name,
     )?;
 
+    let prepared =
+        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::prepare(
+            "claude",
+            tmux_session_name,
+            report_channel_id,
+            resume_session_id,
+            resume_session_id.is_some(),
+        )?;
+
     // Create output file (empty)
     std::fs::write(&output_path, "").map_err(|e| format!("Failed to create output file: {}", e))?;
 
@@ -2663,6 +2672,7 @@ fn execute_streaming_local_tmux(
         auto_compact_window,
     );
     env_lines.push_str(&auth_env_lines);
+    env_lines.push_str(&prepared.env_lines());
 
     let mut escaped_claude_bin = String::new();
     claude_bin.append_shell_escaped_to(&mut escaped_claude_bin);
@@ -2696,16 +2706,13 @@ fn execute_streaming_local_tmux(
 
     // Launch tmux session with script file (avoids command length limits)
     fence.validate_tmux_publisher(tmux_session_name)?;
+    let mut identity = prepared.tmux_identity()?;
+    identity.name_kind = "wrapper".into();
     let tmux_result = crate::services::platform::tmux::create_session_with_identity(
         tmux_session_name,
         Some(working_dir),
         &format!("bash {}", shell_escape(&script_path)),
-        &crate::services::session_identity_metadata::provider_identity(
-            tmux_session_name,
-            "claude",
-            report_channel_id,
-            "wrapper",
-        )?,
+        &identity,
     )?;
 
     if !tmux_result.status.success() {
@@ -2726,18 +2733,11 @@ fn execute_streaming_local_tmux(
     // Keep tmux session alive after process exits for post-mortem analysis
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
-    // #3087: stamp a per-spawn nonce in a SEPARATE marker. The status-panel
-    // session-instance key reads this nonce (unique per spawn) instead of the
-    // `.generation` mtime, so a missing/duplicate mtime can never collapse two
-    // distinct spawns into one instance key. Write errors are logged (not
-    // silently swallowed) since a missing nonce degrades the panel-reset
-    // boundary to best-effort.
     fence.validate_tmux_publisher(tmux_session_name)?;
-    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name, None) {
-        debug_log(&format!(
-            "failed to write spawn nonce for {tmux_session_name}: {e}"
-        ));
-    }
+    // A wrapper publication failure stays held; completion receives only published evidence.
+    let stamped = crate::services::discord::stamp_spawn_markers(tmux_session_name, Some(&prepared))
+        .map_err(|error| format!("Held(marker_publication_failed): {error}"))?;
+    prepared.finish_spawn(Ok(stamped))?;
 
     drop(fence);
     session_prompt::claude_args(args);

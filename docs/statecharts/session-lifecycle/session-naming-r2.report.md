@@ -142,3 +142,25 @@ registration callback의 거절은 marker-publication 실패 cleanup에 합치�
 공식 statechart worker로 Fixed 두 호스트의 도식을 갱신했다. 각각 444 states/1128 steps, 도식 16 states/21 arrows이며 같은 도식 상태 안의 596 steps를 숨긴다. chart에는 Held의 fresh 슬롯 보류와 후속 incarnation 보존을 따로 표시한다. wrapper의 금지된 janitor 명령을 실행하지 않고 같은 skill의 worker.ts를 직접 사용했다.
 
 진입점 전수표는 `s2-registration-entrypoints.log`다. Rust의 거절 경계는 PreparedIncarnation::finish_spawn → scoped completion → session_locator::created의 반환이며, marker-publication 실패의 기존 kill과 분리된다. 같은 이름 슬롯 교체의 실제 PG 반례는 A의 DB CAS 거절과 B의 물리 생존을 동시에 검사한다. 여러 채널, 무제한 재시도, S3의 Held 슬롯 정리, marker-publication 실패의 기존 name-only cleanup 경합은 이 projection 범위 밖이다.
+
+
+## S2 pipe 수리: 유한 crash/restart projection
+
+Fixed의 NamingNext만 `NextWithRestart`로 확장했다. commit 전 snapshot/locator/identity/row/UPDATE/alias 단계에서 daemon이 죽으면 staged 값을 폐기하고 새 탐색은 미등록 fresh 슬롯을 kill 없이 Held로 둔다. commit 뒤에는 durable primary/nonce/alias를 읽고 같은 등록 실행으로 돌아온다. `RestartKeepsDurableIdentity`가 crash 직전 durable 3-tuple을 보존하며 기존 liveness PROPERTY도 통과한다.
+
+| 코드 진입점 | 유한 모델 값/관계 |
+|---|---|
+| `canonical_identity.rs:229` begin, :321 commit 및 Transaction drop rollback | commit 전 6단계와 committed 단계 각각의 crash 절단점 |
+| `session_locator.rs:19` current_row → canonical row 재조회 | RestartReadsDurableRow는 durable primary/nonce/alias를 재사용 |
+| `session_locator.rs:195,244` process-local host cache와 registration scope | 재시작이 pending witness를 보존한다고 가정하지 않음; 미등록 실행은 Held |
+| `key_promotion.rs:198,204` 같은 transaction의 primary/alias 변경 | crash 직전 durable tuple은 old 또는 완전한 new |
+
+`restarts` 0/1은 위 단일 transaction 절단점 하나의 유한 projection이며 운영 재시작 횟수 제한이 아니다. 여러 crash, DB 자체 복구, 실제 CLI reconnect·파일 재수집·host cache 재구축 전체는 검증하지 않는다.
+
+| cfg | 수리 전 | 수리 후 |
+|---|---|---|
+| Tmux/Herdr NamingFixed 2개 | crash 행동 없음 | NextWithRestart 및 새 invariant, 기존 safety/liveness GREEN |
+| guard mutant 10개 | 원래 Naming Next(mode) | 기존 projection과 기대 위반 그대로 유지; crash와 guard fault의 조합 탐색은 하지 않음 |
+| scratch restart nonce overwrite 2개 | — | RestartKeepsDurableIdentity RED |
+
+원문은 `s2-l5-tlc-final.log`(12 cfg), `s2-l5-{Tmux,Herdr}-restart-mutant.log`, `s2-l5-{tmux,herdr}-chart/done/report.md`다. 각 Fixed는 1,010 states로 skill의 chart budget 500을 넘어서 새 chart.mmd를 생성하지 않았다. 기존 도식은 crash 없는 기본 승격 projection(444 states)의 그림으로 유지한다. 처음 모든 mutant Next에 crash를 합친 시도는 no-promotion의 기존 deadlock 반례를 crash로 탈출해 expected와 달라졌다. expected를 바꾸지 않고 Fixed crash projection과 원래 guard-fault projection을 분리했다. scratch Herdr 상수 누락은 도구 오류로 수용 RED에 세지 않았다. 기존 expected 행 변경 0이다.

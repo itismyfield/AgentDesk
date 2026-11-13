@@ -569,7 +569,7 @@ Naming == INSTANCE SessionNaming WITH n <- handoff
 NamingInit ==
     /\ SessionInit
     /\ Naming!Init("herdr")
-NamingNext == Naming!Next("fixed") /\ UNCHANGED sessionVars
+NamingNext == Naming!NextWithRestart /\ UNCHANGED sessionVars
 NamingWithoutPromotion == Naming!Next("no-promotion") /\ UNCHANGED sessionVars
 NamingWithoutAbsenceGuard == Naming!Next("no-absence") /\ UNCHANGED sessionVars
 NamingWithoutNonceCAS == Naming!Next("no-nonce-cas") /\ UNCHANGED sessionVars
@@ -590,4 +590,5 @@ CanonicalPrimaryEventuallyCurrent == Naming!CanonicalPrimaryEventuallyCurrent
 RollbackHasNoPartialPromotion == Naming!RollbackHasNoPartialPromotion
 RegistrationRefusalDoesNotKill == Naming!RegistrationRefusalDoesNotKill
 SameNameReplacementPreserved == Naming!SameNameReplacementPreserved
+RestartKeepsDurableIdentity == Naming!RestartKeepsDurableIdentity
 ====
