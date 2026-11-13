@@ -240,6 +240,14 @@ async fn native_rewrite_after_cached_preflight_is_rechecked_before_notice_post()
     actor.prepare_notices(&[]).await;
     assert_eq!(scans(), 2);
     drain(&mut actor).await;
+    assert_eq!(
+        c.notices(),
+        0,
+        "the final-refusal retry deadline still holds"
+    );
+    assert_eq!(notice_debt(&mut actor), 1);
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    drain(&mut actor).await;
     assert_eq!(c.notices(), 1);
     assert_eq!(notice_debt(&mut actor), 0);
 }

@@ -4037,7 +4037,8 @@ src/
 │   │   │   │   ├── notice_owner/
 │   │   │   │   │   ├── census/
 │   │   │   │   │   │   └── census_tests.rs
-│   │   │   │   │   └── census.rs
+│   │   │   │   │   ├── census.rs
+│   │   │   │   │   └── generation.rs
 │   │   │   │   ├── v2/
 │   │   │   │   │   ├── carried.rs
 │   │   │   │   │   ├── carried_tests.rs
@@ -4155,6 +4156,7 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── ledger/
 │   │   │   │   ├── input_notices/
+│   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   └── input_notices.rs
 │   │   │   ├── spool/
@@ -4206,6 +4208,8 @@ src/
 │   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
+│   │   │   │   ├── notice_settlement.rs
+│   │   │   │   ├── notice_settlement_tests.rs
 │   │   │   │   ├── notice_work.rs
 │   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs
@@ -4247,6 +4251,7 @@ src/
 │   │   │   │   ├── history_tests.rs
 │   │   │   │   ├── migration.rs
 │   │   │   │   ├── migration_tests.rs
+│   │   │   │   ├── retry.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── late_adopt/
 │   │   │   │   ├── claude/
