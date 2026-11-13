@@ -1,5 +1,5 @@
 ---
-title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -74,9 +74,9 @@ stateDiagram-v2
   s16 --> s19: Treat known operation as seedless capacity failure
   s17 --> s19: Observe the create epoch
   s18 --> s20: Treat known operation as seedless capacity failure
-  s18 --> s21: Create once under live effect permission
+  s18 --> s21: Complete the previously granted create
   s19 --> s20: Compare live epoch and retain create permission
-  s20 --> s22: Create once under live effect permission
+  s20 --> s22: Complete the previously granted create
   s21 --> s22: Treat known operation as seedless capacity failure
   s21 --> s23: Create again after an unknown reply
   s21 --> s8: Create unknown: keep Pending, fail visibly
@@ -91,7 +91,6 @@ stateDiagram-v2
   s22 --> s26: Create unknown: keep Pending, fail visibly
   s25 --> s26: Treat known operation as seedless capacity failure
   s25 --> s23: Create again after an unknown reply
-  s24 --> s24: Create unknown: keep Pending, fail visibly
   s26 --> s24: Create again after an unknown reply
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
@@ -141,8 +140,8 @@ stateDiagram-v2
   class s23 breaks
   class s23 bugPath
   class s24 breaks
-  class s24 bugPath
   class s24 repeats
   class s25 teal
   class s26 teal
   class s26 breaks
+  class s26 bugPath

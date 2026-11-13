@@ -1,5 +1,5 @@
 ---
-title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -131,13 +131,13 @@ stateDiagram-v2
   s28 --> s31: Treat known operation as seedless capacity failure
   s29 --> s22: Daemon dies and boots
   s29 --> s31: Observe the create epoch
-  s30 --> s17: Daemon dies and boots
   s30 --> s32: Treat known operation as seedless capacity failure
-  s30 --> s33: Create once under live effect permission
+  s30 --> s33: Complete the previously granted create
+  s30 --> s17: Daemon dies and boots
   s31 --> s22: Daemon dies and boots
   s31 --> s32: Compare live epoch and retain create permission
+  s32 --> s35: Complete the previously granted create
   s32 --> s22: Daemon dies and boots
-  s32 --> s35: Create once under live effect permission
   s33 --> s34: Observe the input epoch
   s33 --> s35: Treat known operation as seedless capacity failure
   s33 --> s17: Daemon dies and boots
@@ -148,12 +148,12 @@ stateDiagram-v2
   s35 --> s22: Daemon dies and boots
   s36 --> s17: Daemon dies and boots
   s36 --> s38: Treat known operation as seedless capacity failure
-  s36 --> s39: Submit the first input under live permission
+  s36 --> s39: Complete the previously granted first input
   s37 --> s22: Daemon dies and boots
   s37 --> s38: Compare live epoch and retain input permission
   s17 --> s33: Claim the seed on its recovered exact successor
   s38 --> s22: Daemon dies and boots
-  s38 --> s40: Submit the first input under live permission
+  s38 --> s40: Complete the previously granted first input
   s39 --> s40: Treat known operation as seedless capacity failure
   s39 --> s41: Commit the input's receipt
   s39 --> s42: Daemon dies and boots

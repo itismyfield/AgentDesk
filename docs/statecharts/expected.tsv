@@ -379,7 +379,7 @@ session-lifecycle/HerdrRestartOwnerBefore.cfg	HerdrRestartOwner	-	RestartAvailab
 session-lifecycle/HerdrRestartOwnerClearAny.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerClearDuringLaunch.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerClearKeepsClaim.cfg	HerdrRestartOwner	NoSeedAfterClear	-
-session-lifecycle/HerdrRestartOwnerClearNoWait.cfg	HerdrRestartOwner	NoResumeAfterClear	ClearForgets
+session-lifecycle/HerdrRestartOwnerClearNoWait.cfg	HerdrRestartOwner	NoResumeAfterClear,NoSessionAfterClear	ClearForgets
 session-lifecycle/HerdrRestartOwnerClearOvertake.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerClearSerial.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerClearSkipsRetired.cfg	HerdrRestartOwner	NoResumeAfterClear	ClearForgets
@@ -402,7 +402,7 @@ session-lifecycle/HerdrRestartOwnerIntentField.cfg	HerdrRestartOwner	-	RequestRe
 session-lifecycle/HerdrRestartOwnerLaunchNotSent.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerLaunchUnknown.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerLeakLaunching.cfg	HerdrRestartOwner	-	ClearCompletes,ClearForgets,ClearRequestCompletes
-session-lifecycle/HerdrRestartOwnerMainClear.cfg	HerdrRestartOwner	NoSeedAfterClear,NoSessionAfterClear,NoStaleCreate	ClearForgets
+session-lifecycle/HerdrRestartOwnerMainClear.cfg	HerdrRestartOwner	EffectHasLivePermission,NoSeedAfterClear,NoSessionAfterClear,NoStaleCreate	ClearForgets
 session-lifecycle/HerdrRestartOwnerNoGate.cfg	HerdrRestartOwner	NoOldPaneInput	RestartAvailable
 session-lifecycle/HerdrRestartOwnerNoLaunchCheck.cfg	HerdrRestartOwner	EffectHasLivePermission,NoStaleCreate	-
 session-lifecycle/HerdrRestartOwnerNoNotice.cfg	HerdrRestartOwner	-	RequestResolves
@@ -411,7 +411,7 @@ session-lifecycle/HerdrRestartOwnerNoPermit.cfg	HerdrRestartOwner	EffectHasLiveP
 session-lifecycle/HerdrRestartOwnerNoPermitDetach.cfg	HerdrRestartOwner	NoInheritedDispatch,NoOperationSeedless	AcceptedInputResolves,EndedSeedRecovers,RequestResolves
 session-lifecycle/HerdrRestartOwnerNoSettle.cfg	HerdrRestartOwner	InflightSettledBeforeReady	-
 session-lifecycle/HerdrRestartOwnerNoSubmitCheck.cfg	HerdrRestartOwner	EffectHasLivePermission,NoSeedAfterClear	-
-session-lifecycle/HerdrRestartOwnerNoSupersedeCheck.cfg	HerdrRestartOwner	NoResumeAfterClear,NoSeedAfterClear	ClearForgets
+session-lifecycle/HerdrRestartOwnerNoSupersedeCheck.cfg	HerdrRestartOwner	NoResumeAfterClear	ClearForgets
 session-lifecycle/HerdrRestartOwnerNoWake.cfg	HerdrRestartOwner	-	AcceptedInputResolves,RequestResolves,RestartAvailable
 session-lifecycle/HerdrRestartOwnerOldInput.cfg	HerdrRestartOwner	NoOldPaneInput	-
 session-lifecycle/HerdrRestartOwnerPrependOverHead.cfg	HerdrRestartOwner	-	AcceptedInputResolves,RequestResolves,RestartAvailable

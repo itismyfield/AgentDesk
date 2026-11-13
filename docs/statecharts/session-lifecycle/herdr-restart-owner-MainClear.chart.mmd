@@ -1,23 +1,21 @@
 ---
-title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
 ---
 stateDiagram-v2
   state "Legend" as legend {
     lg0: Result
     lg1: Restart
     lg2: Owner
-    lg3: Breaks NoSeedAfterClear or NoSessionAfterClear or NoStaleCreate
-    lg4: Breaks NoSessionAfterClear in some cases
-    lg5: Path to the ClearForgets or NoSeedAfterClear or NoSessionAfterClear or NoStaleCreate bug
-    lg6: Repeats forever, so ClearForgets breaks
+    lg3: Breaks EffectHasLivePermission or NoSeedAfterClear or NoSessionAfterClear or NoStaleCreate
+    lg4: Path to the ClearForgets or EffectHasLivePermission or NoSeedAfterClear or NoSessionAfterClear or NoStaleCreate bug
+    lg5: Repeats forever, so ClearForgets breaks
   }
   class lg0 teal
   class lg1 blue
   class lg2 purple
   class lg3 breaks
-  class lg4 mayBreak
-  class lg5 bugPath
-  class lg6 repeats
+  class lg4 bugPath
+  class lg5 repeats
   s0: Old session and a queued input
   s1: Seed committed#59; gate holds it
   s2: Restart holds the transition and fence
@@ -27,24 +25,32 @@ stateDiagram-v2
   s6: Owner turn began a launch
   s7: Seed waits for the owner
   s8: Owner turn installed Pending
-  s9: Clear requested#59; epoch serializer pending
+  s9: Clear requested#59; epoch update pending
   s10: CheckEpoch observed#59; live BeginEffect still required
   s11: Clear began: epoch bumped#59; a turn is launching
   s12: BeginEffect holds create authority
   s13: Clear discarded the queue#59; a turn is launching
-  s14: Clear requested#59; wait for the accepted physical effect
+  s14: Clear requested#59; epoch may advance while an earlier grant lives
   s15: Create answered#59; first input not submitted
-  s16: Clear reported a hold and left the launch running
-  s17: CheckEpoch observed#59; live input authority still required
-  s18: A launch older than the clear created a session
-  s19: BeginEffect holds input authority
-  s20: First input submitted#59; receipt not committed
-  s21: Receipt committed#59; source not bound
-  s22: The seed ran after a clear began
-  s23: One new Ready session#59; inputs await the owner
-  s24: One new Ready session#59; inputs settled once
-  s25: Clear began: epoch bumped#59; a new session lives
-  s26: Clear discarded the queue#59; a new session lives
+  s16: Clear reported a hold and left the launch running#59; clear completed before an older startup or grant drained#59; original 1 explicitly dropped
+  s17: A new create grant ignored the clear epoch
+  s18: CheckEpoch observed#59; live input authority still required
+  s19: A new create grant ignored the clear epoch#59; physical effect used no live permission#59; original 1 waiting
+  s20: BeginEffect holds input authority
+  s21: A new create grant ignored the clear epoch#59; clear completed before an older startup or grant drained#59; original 1 explicitly dropped
+  s22: A new create grant ignored the clear epoch#59; physical effect used no live permission#59; original 1 explicitly dropped
+  s23: First input submitted#59; receipt not committed
+  s24: A new create grant ignored the clear epoch#59; physical effect used no live permission#59; clear completed before an older startup or grant drained#59; original 1 explicitly dropped
+  s25: A new seed grant was issued after clear
+  s26: A new seed grant was issued after clear#59; physical effect used no live permission#59; original 1 waiting
+  s27: Receipt committed#59; source not bound
+  s28: A new seed grant was issued after clear#59; physical effect used no live permission#59; original 1 explicitly dropped
+  s29: One new Ready session#59; inputs await the owner
+  s30: A new seed grant was issued after clear#59; clear completed before an older startup or grant drained#59; original 1 explicitly dropped
+  s31: A new seed grant was issued after clear#59; physical effect used no live permission#59; clear completed before an older startup or grant drained#59; original 1 explicitly dropped
+  s32: One new Ready session#59; inputs settled once
+  s33: Clear began: epoch bumped#59; a new session lives
+  s34: Clear discarded the queue#59; a new session lives
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
@@ -58,52 +64,73 @@ stateDiagram-v2
   s7 --> s6: Owner starts the front: register the launch
   s8 --> s9: User requests clear
   s8 --> s10: Observe the create epoch
-  s9 --> s9: Install Pending over the vacant row or Observe the create epoch or Observe the input epoch
-  s9 --> s11: Acquire the serializer and bump the clear epoch
+  s9 --> s9: Install Pending over the vacant row or Observe the create epoch or Reply to the command
+  s9 --> s11: Advance epoch and mark clearing, including while old I/O is granted
   s10 --> s9: User requests clear
   s10 --> s12: Compare live epoch and retain create permission
   s11 --> s11: Install Pending over the vacant row
   s11 --> s13: Clear discards the queue and the launching input
   s11 --> s10: Observe the create epoch
-  s9 --> s10: Acquire the serializer and bump the clear epoch
+  s9 --> s10: Advance epoch and mark clearing, including while old I/O is granted
   s9 --> s14: Compare live epoch and retain create permission or Compare live epoch and retain input permission
   s12 --> s14: User requests clear
-  s12 --> s15: Create once under live effect permission
-  s13 --> s16: Clear's teardown acts on the row
+  s12 --> s15: Complete the previously granted create
+  s13 --> s16: Clear drains earlier grants and tears down their exact session
   s13 --> s10: Observe the create epoch
-  s14 --> s9: Create once under live effect permission or Submit the first input under live permission
+  s10 --> s17: Compare live epoch and retain create permission
+  s14 --> s12: Advance epoch and mark clearing, including while old I/O is granted
+  s14 --> s9: Complete the previously granted create or Complete the previously granted first input
   s15 --> s9: User requests clear
-  s15 --> s17: Observe the input epoch
-  s10 --> s16: Clear's teardown acts on the row
-  s12 --> s18: Create once under live effect permission
-  s17 --> s9: User requests clear
-  s17 --> s19: Compare live epoch and retain input permission
-  s12 --> s16: Clear's teardown acts on the row
-  s11 --> s17: Observe the input epoch
-  s9 --> s17: Acquire the serializer and bump the clear epoch
-  s19 --> s14: User requests clear
-  s19 --> s20: Submit the first input under live permission
-  s16 --> s18: Create once under live effect permission
-  s13 --> s17: Observe the input epoch
-  s20 --> s9: User requests clear
-  s20 --> s21: Commit the input's receipt
-  s17 --> s16: Clear's teardown acts on the row
-  s19 --> s22: Submit the first input under live permission
-  s18 --> s22: Submit the first input under live permission
-  s21 --> s23: Bind the source
-  s21 --> s9: User requests clear
-  s19 --> s16: Clear's teardown acts on the row
-  s23 --> s24: Submit an input to the successor once
-  s16 --> s16: Observe the input epoch or Compare live epoch and retain input permission
-  s16 --> s22: Submit the first input under live permission
-  s9 --> s25: Acquire the serializer and bump the clear epoch
-  s11 --> s25: Bind the source
-  s25 --> s26: Clear discards the queue and the launching input
-  s13 --> s26: Bind the source
-  s26 --> s24: Clear's teardown acts on the row
-  s22 --> s22: Commit the input's receipt or Bind the source
+  s15 --> s18: Observe the input epoch
+  s10 --> s16: Clear drains earlier grants and tears down their exact session
+  s12 --> s11: Complete the previously granted create
+  s17 --> s19: Complete the previously granted create
+  s18 --> s9: User requests clear
+  s18 --> s20: Compare live epoch and retain input permission
+  s16 --> s21: Compare live epoch and retain create permission
+  s12 --> s16: Clear drains earlier grants and tears down their exact session
+  s12 --> s13: Complete the previously granted create
+  s17 --> s21: Clear drains earlier grants and tears down their exact session
+  s17 --> s22: Complete the previously granted create
+  s11 --> s18: Observe the input epoch
+  s19 --> s22: Clear discards the queue and the launching input
+  s9 --> s18: Advance epoch and mark clearing, including while old I/O is granted
+  s20 --> s14: User requests clear
+  s20 --> s23: Complete the previously granted first input
+  s21 --> s24: Complete the previously granted create
+  s13 --> s18: Observe the input epoch
+  s22 --> s24: Clear drains earlier grants and tears down their exact session
+  s18 --> s25: Compare live epoch and retain input permission
+  s19 --> s26: Compare live epoch and retain input permission
+  s14 --> s20: Advance epoch and mark clearing, including while old I/O is granted
+  s23 --> s9: User requests clear
+  s23 --> s27: Commit the input's receipt
+  s19 --> s19: Observe the input epoch
+  s18 --> s16: Clear drains earlier grants and tears down their exact session
+  s22 --> s28: Compare live epoch and retain input permission
+  s20 --> s11: Complete the previously granted first input
+  s25 --> s26: Complete the previously granted first input
+  s26 --> s28: Clear discards the queue and the launching input
+  s27 --> s29: Bind the source
+  s27 --> s9: User requests clear
+  s16 --> s30: Compare live epoch and retain input permission
+  s24 --> s31: Compare live epoch and retain input permission
+  s20 --> s16: Clear drains earlier grants and tears down their exact session
+  s20 --> s13: Complete the previously granted first input
+  s25 --> s30: Clear drains earlier grants and tears down their exact session
+  s25 --> s28: Complete the previously granted first input
+  s28 --> s31: Clear drains earlier grants and tears down their exact session
+  s29 --> s32: Submit an input to the successor once
+  s26 --> s26: Complete the previously granted first input
+  s30 --> s31: Complete the previously granted first input
+  s9 --> s33: Advance epoch and mark clearing, including while old I/O is granted
+  s11 --> s33: Bind the source
+  s33 --> s34: Clear discards the queue and the launching input
+  s13 --> s34: Bind the source
+  s28 --> s28: Commit the input's receipt
+  s34 --> s32: Clear drains earlier grants and tears down their exact session
+  s31 --> s31: Bind the source
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
-  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 blue
   class s0 bugPath
   class s1 blue
@@ -118,8 +145,6 @@ stateDiagram-v2
   class s5 bugPath
   class s6 bugPath
   class s7 purple
-  class s7 bugPath
-  class s8 bugPath
   class s9 bugPath
   class s10 bugPath
   class s11 bugPath
@@ -127,16 +152,31 @@ stateDiagram-v2
   class s13 bugPath
   class s14 bugPath
   class s16 teal
-  class s16 mayBreak
+  class s16 breaks
   class s16 bugPath
+  class s17 breaks
   class s17 bugPath
-  class s18 breaks
   class s18 bugPath
+  class s19 breaks
   class s19 bugPath
+  class s21 teal
+  class s21 breaks
   class s22 breaks
-  class s22 bugPath
-  class s22 repeats
-  class s23 teal
   class s24 teal
-  class s25 teal
-  class s26 teal
+  class s24 breaks
+  class s25 breaks
+  class s25 bugPath
+  class s26 breaks
+  class s26 bugPath
+  class s28 breaks
+  class s28 bugPath
+  class s29 teal
+  class s30 teal
+  class s30 breaks
+  class s31 teal
+  class s31 breaks
+  class s31 bugPath
+  class s31 repeats
+  class s32 teal
+  class s33 teal
+  class s34 teal

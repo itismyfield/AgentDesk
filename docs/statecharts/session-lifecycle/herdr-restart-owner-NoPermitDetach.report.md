@@ -1,7 +1,7 @@
 # HerdrRestartOwner
 
-TLC reached 189 states and 550 steps. The chart draws 54 states and 107 arrows.
-The chart does not draw 254 steps that stay in one chart state.
+TLC reached 205 states and 590 steps. The chart draws 54 states and 107 arrows.
+The chart does not draw 270 steps that stay in one chart state.
 
 ## NoOperationSeedless breaks
 The shortest path has 2 steps:

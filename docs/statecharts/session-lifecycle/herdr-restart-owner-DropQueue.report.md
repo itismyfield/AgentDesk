@@ -24,10 +24,10 @@ TLC's counterexample is in tlc-AcceptedInputResolves.out. It has 16 steps:
 8. Install Pending over the vacant row: Accepted input lost its owner
 9. Observe the create epoch: Accepted input lost its owner
 10. Compare live epoch and retain create permission: Accepted input lost its owner
-11. Create once under live effect permission: Accepted input lost its owner
+11. Complete the previously granted create: Accepted input lost its owner
 12. Observe the input epoch: Accepted input lost its owner
 13. Compare live epoch and retain input permission: Accepted input lost its owner
-14. Submit the first input under live permission: Accepted input lost its owner
+14. Complete the previously granted first input: Accepted input lost its owner
 15. Commit the input's receipt: Accepted input lost its owner
 16. Bind the source: Accepted input lost its owner
 The run stops in "Accepted input lost its owner" forever.

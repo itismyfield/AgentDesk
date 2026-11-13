@@ -1,5 +1,5 @@
 ---
-title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -19,7 +19,6 @@ stateDiagram-v2
   [*] --> s0
   s0 --> s1: Refuse before any effect
   s1 --> s2: Show the result
-  s1 --> s1: Submit an input to the still-current session
   s2 --> s3: Submit an input to the still-current session
   s1 --> s3: Show the result
   class s0 blue
@@ -27,5 +26,6 @@ stateDiagram-v2
   class s1 blue
   class s1 bugPath
   class s2 teal
+  class s2 bugPath
   class s3 teal
   class s3 repeats

@@ -1,5 +1,5 @@
 ---
-title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -23,33 +23,35 @@ stateDiagram-v2
   s6: Owner turn began a launch
   s7: Seed waits for the owner
   s8: Owner turn installed Pending
-  s9: Clear requested#59; epoch serializer pending
+  s9: Clear requested#59; epoch update pending
   s10: CheckEpoch observed#59; live BeginEffect still required
   s11: Clear began: epoch bumped#59; a turn is launching
   s12: Clear discarded the queue#59; a turn is launching
   s13: Create authority was observed but not retained
   s14: Create answered#59; first input not submitted#59; physical effect used no live permission#59; original 1 waiting
-  s15: Clear requested#59; epoch serializer pending#59; physical effect used no live permission#59; original 1 waiting
-  s16: CheckEpoch observed#59; live input authority still required#59; physical effect used no live permission#59; original 1 waiting
-  s17: Clear began: epoch bumped#59; a turn is launching#59; physical effect used no live permission#59; original 1 waiting
-  s18: A launch older than the clear created a session#59; physical effect used no live permission#59; original 1 waiting
-  s19: BeginEffect holds input authority#59; physical effect used no live permission#59; original 1 waiting
-  s20: Clear discarded the queue#59; a turn is launching#59; physical effect used no live permission#59; original 1 explicitly dropped
-  s21: A launch older than the clear created a session#59; physical effect used no live permission#59; original 1 explicitly dropped
-  s22: Clear requested#59; wait for the accepted physical effect#59; physical effect used no live permission#59; original 1 waiting
-  s23: First input submitted#59; receipt not committed#59; physical effect used no live permission#59; original 1 waiting
-  s24: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 waiting
-  s25: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped
-  s26: CheckEpoch observed#59; live input authority still required#59; physical effect used no live permission#59; original 1 explicitly dropped
-  s27: Receipt committed#59; source not bound#59; physical effect used no live permission#59; original 1 waiting
-  s28: Exclusion released#59; superseded reply pending#59; physical effect used no live permission#59; original 1 explicitly dropped
-  s29: One new Ready session#59; inputs await the owner#59; physical effect used no live permission#59; original 1 waiting
-  s30: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 delivered
-  s31: Clear ended#59; selector forgotten#59; physical effect used no live permission#59; original 1 explicitly dropped
-  s32: Clear requested#59; epoch serializer pending#59; physical effect used no live permission#59; original 1 delivered
-  s33: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered
-  s34: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered
-  s35: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 explicitly dropped
+  s15: A new create grant ignored the clear epoch
+  s16: Clear requested#59; epoch update pending#59; physical effect used no live permission#59; original 1 waiting
+  s17: CheckEpoch observed#59; live input authority still required#59; physical effect used no live permission#59; original 1 waiting
+  s18: Clear began: epoch bumped#59; a turn is launching#59; physical effect used no live permission#59; original 1 waiting
+  s19: A new create grant ignored the clear epoch#59; physical effect used no live permission#59; original 1 waiting
+  s20: BeginEffect holds input authority#59; physical effect used no live permission#59; original 1 waiting
+  s21: Clear discarded the queue#59; a turn is launching#59; physical effect used no live permission#59; original 1 explicitly dropped
+  s22: A new create grant ignored the clear epoch#59; physical effect used no live permission#59; original 1 explicitly dropped
+  s23: Clear requested#59; epoch may advance while an earlier grant lives#59; physical effect used no live permission#59; original 1 waiting
+  s24: First input submitted#59; receipt not committed#59; physical effect used no live permission#59; original 1 waiting
+  s25: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 waiting
+  s26: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped
+  s27: CheckEpoch observed#59; live input authority still required#59; physical effect used no live permission#59; original 1 explicitly dropped
+  s28: Receipt committed#59; source not bound#59; physical effect used no live permission#59; original 1 waiting
+  s29: Exclusion released#59; superseded reply pending#59; physical effect used no live permission#59; original 1 explicitly dropped
+  s30: BeginEffect holds input authority#59; physical effect used no live permission#59; original 1 explicitly dropped
+  s31: One new Ready session#59; inputs await the owner#59; physical effect used no live permission#59; original 1 waiting
+  s32: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 delivered
+  s33: Clear ended#59; selector forgotten#59; physical effect used no live permission#59; original 1 explicitly dropped
+  s34: Clear requested#59; epoch update pending#59; physical effect used no live permission#59; original 1 delivered
+  s35: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered
+  s36: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered
+  s37: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 explicitly dropped
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
@@ -63,52 +65,59 @@ stateDiagram-v2
   s7 --> s6: Owner starts the front: register the launch
   s8 --> s9: User requests clear
   s8 --> s10: Observe the create epoch
-  s9 --> s11: Acquire the serializer and bump the clear epoch
+  s9 --> s11: Advance epoch and mark clearing, including while old I/O is granted
   s10 --> s13: Compare live epoch and retain create permission
   s10 --> s9: User requests clear
   s11 --> s12: Clear discards the queue and the launching input
   s11 --> s11: Install Pending over the vacant row
   s11 --> s10: Observe the create epoch
   s13 --> s9: User requests clear
-  s13 --> s14: Create once under live effect permission
-  s9 --> s10: Acquire the serializer and bump the clear epoch
+  s13 --> s14: Complete the previously granted create
+  s9 --> s10: Advance epoch and mark clearing, including while old I/O is granted
   s12 --> s10: Observe the create epoch
-  s9 --> s13: Acquire the serializer and bump the clear epoch
-  s9 --> s15: Create once under live effect permission
-  s14 --> s15: User requests clear
-  s14 --> s16: Observe the input epoch
-  s13 --> s18: Create once under live effect permission
-  s15 --> s17: Acquire the serializer and bump the clear epoch
-  s16 --> s15: User requests clear
-  s16 --> s19: Compare live epoch and retain input permission
-  s13 --> s21: Create once under live effect permission
-  s17 --> s20: Clear discards the queue and the launching input
-  s17 --> s24: Clear epoch moved: do not submit or Bind the source
+  s9 --> s13: Advance epoch and mark clearing, including while old I/O is granted
+  s9 --> s16: Complete the previously granted create
+  s10 --> s15: Compare live epoch and retain create permission
+  s14 --> s16: User requests clear
+  s14 --> s17: Observe the input epoch
+  s13 --> s18: Complete the previously granted create
+  s15 --> s19: Complete the previously granted create
+  s16 --> s18: Advance epoch and mark clearing, including while old I/O is granted
+  s17 --> s16: User requests clear
+  s17 --> s20: Compare live epoch and retain input permission
+  s13 --> s21: Complete the previously granted create
+  s15 --> s22: Complete the previously granted create
   s18 --> s21: Clear discards the queue and the launching input
-  s15 --> s16: Acquire the serializer and bump the clear epoch
-  s15 --> s22: Compare live epoch and retain input permission
-  s19 --> s22: User requests clear
-  s19 --> s23: Submit the first input under live permission
-  s20 --> s25: Clear epoch moved: do not submit or Bind the source
-  s16 --> s24: Clear epoch moved: do not submit
-  s16 --> s26: Clear discards the queue and the launching input
-  s22 --> s15: Submit the first input under live permission
-  s23 --> s15: User requests clear
-  s23 --> s27: Commit the input's receipt
-  s24 --> s25: Clear discards the queue and the launching input
-  s25 --> s28: Clear's teardown acts on the row
-  s26 --> s25: Clear epoch moved: do not submit
-  s27 --> s29: Bind the source
-  s27 --> s15: User requests clear
-  s28 --> s31: Reply to the command
-  s29 --> s30: Submit an input to the successor once
-  s25 --> s31: Clear's teardown acts on the row
-  s15 --> s32: Submit an input to the successor once
-  s15 --> s24: Acquire the serializer and bump the clear epoch
-  s32 --> s33: Acquire the serializer and bump the clear epoch
-  s33 --> s34: Clear discards the queue and the launching input
-  s25 --> s35: Clear's teardown acts on the row
-  s34 --> s30: Clear's teardown acts on the row
+  s18 --> s25: Clear epoch moved: do not submit or Bind the source
+  s19 --> s22: Clear discards the queue and the launching input
+  s16 --> s17: Advance epoch and mark clearing, including while old I/O is granted
+  s16 --> s23: Compare live epoch and retain input permission
+  s20 --> s23: User requests clear
+  s20 --> s24: Complete the previously granted first input
+  s21 --> s26: Clear epoch moved: do not submit or Bind the source
+  s17 --> s25: Clear epoch moved: do not submit
+  s17 --> s27: Clear discards the queue and the launching input
+  s23 --> s20: Advance epoch and mark clearing, including while old I/O is granted
+  s23 --> s16: Complete the previously granted first input
+  s24 --> s16: User requests clear
+  s24 --> s28: Commit the input's receipt
+  s25 --> s26: Clear discards the queue and the launching input
+  s26 --> s29: Clear drains earlier grants and tears down their exact session
+  s27 --> s26: Clear epoch moved: do not submit
+  s20 --> s30: Clear discards the queue and the launching input
+  s20 --> s18: Complete the previously granted first input
+  s28 --> s31: Bind the source
+  s28 --> s16: User requests clear
+  s29 --> s33: Reply to the command
+  s30 --> s21: Complete the previously granted first input
+  s31 --> s32: Submit an input to the successor once
+  s26 --> s33: Clear drains earlier grants and tears down their exact session
+  s16 --> s34: Submit an input to the successor once
+  s16 --> s25: Advance epoch and mark clearing, including while old I/O is granted
+  s34 --> s35: Advance epoch and mark clearing, including while old I/O is granted
+  s35 --> s36: Clear discards the queue and the launching input
+  s26 --> s37: Clear drains earlier grants and tears down their exact session
+  s36 --> s32: Clear drains earlier grants and tears down their exact session
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath
@@ -132,10 +141,10 @@ stateDiagram-v2
   class s14 breaks
   class s14 bugPath
   class s15 breaks
+  class s15 bugPath
   class s16 breaks
   class s17 breaks
   class s18 breaks
-  class s18 bugPath
   class s19 breaks
   class s20 breaks
   class s21 breaks
@@ -145,11 +154,9 @@ stateDiagram-v2
   class s25 breaks
   class s26 breaks
   class s27 breaks
-  class s28 teal
   class s28 breaks
   class s29 teal
   class s29 breaks
-  class s30 teal
   class s30 breaks
   class s31 teal
   class s31 breaks
@@ -161,3 +168,7 @@ stateDiagram-v2
   class s34 breaks
   class s35 teal
   class s35 breaks
+  class s36 teal
+  class s36 breaks
+  class s37 teal
+  class s37 breaks

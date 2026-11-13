@@ -1,4 +1,4 @@
-export const title = "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission";
+export const title = "Herdr restart B ports: immediate clear epoch, drain earlier effect grants";
 const qs = (s) => Object.values(s.q ?? {});
 const settled = (s) => qs(s).every(q => !["queued", "inflight"].includes(q));
 const tail = (s) => qs(s).includes("queued") ? "; an input waits" : qs(s).includes("incoming") ? "; an input may still arrive" : "";
@@ -11,8 +11,8 @@ const baseState = (v) => {
   if (qs(s).includes("lost")) return "Accepted input lost its owner";
   if (Object.values(s.effects ?? {}).some(n => n > 1)) return "Original input executed twice";
   if ((s.oldLive ? 1 : 0) + s.panes > 1) return "Two live sessions";
-  if (s.seedAfterClear) return "The seed ran after a clear began";
-  if (s.staleCreate) return "A launch older than the clear created a session";
+  if (s.seedAfterClear) return "A new seed grant was issued after clear";
+  if (s.staleCreate) return "A new create grant ignored the clear epoch";
   if (s.resumedPreClear) return "A launch resumed the conversation a clear ended";
   if (s.seedRevived) return "A cleared seed was queued again";
   if (s.falseSuperseded) return "A delivered seed was reported as cleared";
@@ -22,7 +22,7 @@ const baseState = (v) => {
   if (s.ready && s.inflight) return "Ready while the old turn is unsettled";
   if (s.seed === "stripped") return "Restart record vanished without a result";
   if (s.clear === "held") return "Clear reported a hold and left the launch running";
-  if (s.clearRequested && s.clear === "none") return s.permission ? "Clear requested; wait for the accepted physical effect" : "Clear requested; epoch serializer pending";
+  if (s.clearRequested && s.clear === "none") return s.permission ? "Clear requested; epoch may advance while an earlier grant lives" : "Clear requested; epoch update pending";
   if (s.crashed && ["Bound", "PendingPlaced"].includes(s.row) && !s.oldLive && s.seed === "queued") return "Idle ended execution; the seed owner must repair the row";
   if (s.lphase === "pending" && s.effectBegan) return s.permission ? "BeginEffect holds create authority" : "Create authority was observed but not retained";
   if (s.lphase === "pending" && s.checked) return "CheckEpoch observed; live BeginEffect still required";
@@ -30,7 +30,7 @@ const baseState = (v) => {
   if (s.lphase === "created" && s.checked) return "CheckEpoch observed; live input authority still required";
   if (s.clear === "begun" || s.clear === "discarded") {
     const what = s.clear === "begun" ? "Clear began: epoch bumped" : "Clear discarded the queue";
-    const where = s.excl ? "; restart holds the transition" : (s.launcher && s.lphase === "none") ? "; a finished launch never released its registration" : s.launcher ? "; a turn is launching" : s.panes ? "; a new session lives" : s.oldLive ? "; the old session lives" : "; no session";
+    const where = s.permission ? `; epoch advanced while earlier ${s.effectKind} grant remains live` : s.excl ? "; restart holds the transition" : (s.launcher && s.lphase === "none") ? "; a finished launch never released its registration" : s.launcher ? "; a turn is launching" : s.panes ? "; a new session lives" : s.oldLive ? "; the old session lives" : "; no session";
     return what + where;
   }
   if (s.launcher && s.lphase === "none") return "A finished launch never released its registration";
@@ -56,7 +56,7 @@ const baseState = (v) => {
 };
 export const state = (v) => {
   const s = v.s;
-  const failures = [s.opSeedless && "known ticket entered the seedless path", s.opDuplicate && "known operation inserted another seed", s.unsafeEffect && "physical effect used no live permission"].filter(Boolean);
+  const failures = [s.opSeedless && "known ticket entered the seedless path", s.opDuplicate && "known operation inserted another seed", s.unsafeEffect && "physical effect used no live permission", s.undrainedClear && "clear completed before an older startup or grant drained"].filter(Boolean);
   if (!failures.length) return baseState(v);
   const names = { incoming: "not yet arrived", queued: "waiting", inflight: "receipt pending", delivered: "delivered", retained: "retained", cancelled: "explicitly dropped", lost: "lost" };
   const originals = qs(s).map((q, i) => `original ${i + 1} ${names[q] ?? q}`).join(", ");
@@ -88,14 +88,14 @@ export const step = (action, from, to) => ({
   AbortUnsent: "Clear epoch moved: retire the unsent Pending",
   CheckCreateEpoch: "Observe the create epoch",
   BeginCreateEffect: "Compare live epoch and retain create permission",
-  Create: "Create once under live effect permission",
+  Create: "Complete the previously granted create",
   LaunchNotSent: "Create not sent: fail the input visibly",
   LaunchUncertain: "Create unknown: keep Pending, fail visibly",
   ReplayCreate: "Create again after an unknown reply",
   AbortSubmit: "Clear epoch moved: do not submit",
   CheckSubmitEpoch: "Observe the input epoch",
   BeginSubmitEffect: "Compare live epoch and retain input permission",
-  SubmitEffect: "Submit the first input under live permission",
+  SubmitEffect: "Complete the previously granted first input",
   SettleReceipt: "Commit the input's receipt",
   BindSource: "Bind the source",
   Adopt: "Probe adopts the Pending pane",
@@ -109,9 +109,9 @@ export const step = (action, from, to) => ({
   ResolveUnplaced: "Resolver settles the unplaced Pending",
   Crash: "Daemon dies and boots",
   ClearRequest: "User requests clear",
-  ClearBegin: "Acquire the serializer and bump the clear epoch",
+  ClearBegin: "Advance epoch and mark clearing, including while old I/O is granted",
   ClearDiscard: "Clear discards the queue and the launching input",
-  ClearEnd: "Clear's teardown acts on the row",
+  ClearEnd: "Clear drains earlier grants and tears down their exact session",
   Wait: "Wait",
 }[action] ?? action);
 export const group = (v) => (v.s.ready || v.s.visible || ["done", "gaveup", "unconfirmed", "held"].includes(v.s.clear)) ? "Result" : (v.s.cmd === "dead" || v.s.cmd === "done") ? "Owner" : "Restart";

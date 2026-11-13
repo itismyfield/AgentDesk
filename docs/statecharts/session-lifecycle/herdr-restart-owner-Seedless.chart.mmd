@@ -1,5 +1,5 @@
 ---
-title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -41,10 +41,10 @@ stateDiagram-v2
   s8 --> s10: Observe the create epoch
   s9 --> s7: Accept an input into the owner queue
   s10 --> s11: Compare live epoch and retain create permission
-  s11 --> s12: Create once under live effect permission
+  s11 --> s12: Complete the previously granted create
   s12 --> s13: Observe the input epoch
   s13 --> s14: Compare live epoch and retain input permission
-  s14 --> s15: Submit the first input under live permission
+  s14 --> s15: Complete the previously granted first input
   s15 --> s16: Commit the input's receipt
   s16 --> s5: Bind the source
   s5 --> s17: Reply to the command

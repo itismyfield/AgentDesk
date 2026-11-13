@@ -27,8 +27,9 @@ Init == s = [cmd |-> "idle", seed |-> "none", gate |-> FALSE, excl |-> FALSE,
              creates |-> 0, launcher |-> 0, lphase |-> "none", lEpoch |-> 0,
              seedEffects |-> 0, oldSeed |-> FALSE, oldInputs |-> 0,
              opSeen |-> FALSE, opSeedless |-> FALSE, opDuplicate |-> FALSE,
-             checked |-> FALSE, permission |-> FALSE, effectKind |-> "none",
+             checked |-> FALSE, permission |-> FALSE, effectKind |-> "none", grantEpoch |-> 0, grantValid |-> FALSE,
              effectBegan |-> FALSE, unsafeEffect |-> FALSE, clearRequested |-> FALSE,
+             undrainedClear |-> FALSE, knownUnknownClear |-> FALSE,
              ready |-> FALSE, falseReady |-> FALSE, visible |-> FALSE, answered |-> FALSE,
              falseSuperseded |-> FALSE, epoch |-> 0, clearing |-> FALSE, clear |-> "none",
              clearExcl |-> FALSE, clearEffective |-> FALSE, staleCreate |-> FALSE,
@@ -44,7 +45,7 @@ UnitPending == \E i \in Ids : s.q[i] = "inflight"
 FrontInput(i) == /\ (~SeedPending \/ Mutant = "SeedBehind") /\ s.launcher = 0
                  /\ s.q[i] = "queued"
                  /\ \A j \in 1..(i-1) : s.q[j] \notin {"queued", "inflight"}
-OwnerFree == s.awake /\ ~s.excl /\ ~s.clearExcl
+OwnerFree == s.awake /\ ~s.excl /\ ~s.clearExcl /\ ~s.clearing
 \* The in-memory gate keeps the seed unstarted until the command released its exclusion.
 SeedHeld == s.gate /\ Mutant # "NoGate"
 OldTarget == s.row \in {"Bound", "PendingPlaced"}
@@ -73,7 +74,7 @@ Admit(i) == /\ s.cmd # "idle" /\ s.q[i] = "incoming"
             /\ s' = [s EXCEPT !.accepted = @ \cup {i}, !.q[i] = "queued", !.awake = TRUE]
 \* A drive that finds the transition taken or the seed gated parks until the next wake.
 OwnerParks == /\ s.awake
-              /\ s.excl \/ s.clearExcl \/ (s.seed = "queued" /\ SeedHeld)
+              /\ s.excl \/ s.clearExcl \/ s.clearing \/ (s.seed = "queued" /\ SeedHeld)
               /\ s' = [s EXCEPT !.awake = FALSE]
 \* The in-flight unit's own receipt settles it; the seed sits right behind that unit.
 InflightSettle(i) == /\ s.q[i] = "inflight" /\ s.oldLive /\ Mutant # "PrependOverHead"
@@ -184,25 +185,26 @@ Unclaim == [s EXCEPT !.launcher = IF Mutant = "LeakLaunching" THEN @ ELSE 0, !.l
                      !.checked = FALSE, !.permission = FALSE, !.effectKind = "none", !.effectBegan = FALSE,
                      !.seed = IF @ = "claimed" THEN "queued" ELSE @]
 \* A launch whose epoch moved retires its own unsent Pending instead of creating.
-AbortUnsent == /\ s.lphase = "pending" /\ Stale /\ ChecksLaunch
+AbortUnsent == /\ s.lphase = "pending" /\ (Stale \/ s.clearing) /\ ChecksLaunch /\ ~s.effectBegan
                /\ s' = [Unclaim EXCEPT !.row = "Retired"]
-\* CheckEpoch observes only. BeginEffect must compare the live epoch while
-\* holding the same serializer ClearBegin uses, through the physical effect.
+\* CheckEpoch observes only. Grant issuance and clear epoch updates share a mutex.
+\* A granted effect keeps its counter, not that mutex, through physical completion.
 CheckCreateEpoch == /\ s.lphase = "pending" /\ ~s.checked /\ ~(Stale /\ ChecksLaunch)
                     /\ s' = [s EXCEPT !.checked = TRUE]
 BeginCreateEffect == /\ s.lphase = "pending" /\ s.checked /\ ~s.effectBegan
-                     /\ ~(Stale /\ ChecksLaunch) \/ EffectPolicy = "check_only_create"
+                     /\ ~((Stale \/ s.clearing) /\ ChecksLaunch) \/ EffectPolicy = "check_only_create"
                      /\ s' = [s EXCEPT !.effectBegan = TRUE, !.effectKind = "create",
-                                      !.permission = EffectPolicy # "check_only_create"]
+                                      !.permission = EffectPolicy # "check_only_create",
+                                      !.grantEpoch = s.epoch, !.grantValid = ~Stale /\ ~s.clearing,
+                                      !.staleCreate = @ \/ Stale \/ s.clearing]
 Create == /\ s.lphase = "pending" /\ s.effectBegan /\ s.effectKind = "create"
           /\ s.permission \/ EffectPolicy = "check_only_create"
           /\ LET pane == LaunchReply # "NotSent"
              IN s' = [s EXCEPT !.creates = @ + 1, !.lphase = "created",
-                              !.unsafeEffect = @ \/ ~s.permission, !.permission = FALSE,
+                              !.unsafeEffect = @ \/ ~s.permission \/ ~s.grantValid, !.permission = FALSE,
                               !.effectBegan = FALSE, !.effectKind = "none", !.checked = FALSE,
                               !.panes = @ + (IF pane THEN 1 ELSE 0),
-                              !.staleCreate = @ \/ (Stale /\ pane),
-                              !.stalePane = @ \/ (Stale /\ pane),
+                                                            !.stalePane = @ \/ (Stale /\ pane),
                               !.created = IF LaunchReply = "Created" THEN "yes"
                                           ELSE IF LaunchReply = "NotSent" THEN "notsent" ELSE "unknown"]
 LaunchNotSent == /\ s.lphase = "created" /\ s.created = "notsent"
@@ -215,23 +217,25 @@ ReplayCreate == /\ Mutant = "ReplayUnknown" /\ s.row = "NewPending" /\ s.created
                 /\ s.creates < 2
                 /\ s' = [s EXCEPT !.creates = @ + 1, !.panes = @ + 1, !.unsafeEffect = TRUE]
 \* The first input's three steps: the physical submit, the owner's receipt, the source bind.
-AbortSubmit == /\ s.lphase = "created" /\ s.created = "yes" /\ Stale /\ ChecksSubmit
+AbortSubmit == /\ s.lphase = "created" /\ s.created = "yes" /\ (Stale \/ s.clearing) /\ ChecksSubmit /\ ~s.effectBegan
                /\ s' = Unclaim
 CheckSubmitEpoch == /\ s.lphase = "created" /\ s.created = "yes" /\ ~s.checked /\ ~(Stale /\ ChecksSubmit)
                     /\ s' = [s EXCEPT !.checked = TRUE]
 BeginSubmitEffect == /\ s.lphase = "created" /\ s.created = "yes" /\ s.checked /\ ~s.effectBegan
-                     /\ ~(Stale /\ ChecksSubmit)
+                     /\ ~((Stale \/ s.clearing) /\ ChecksSubmit)
                      /\ s' = [s EXCEPT !.effectBegan = TRUE, !.effectKind = "submit",
-                                      !.permission = EffectPolicy # "early_release_submit"]
+                                      !.permission = EffectPolicy # "early_release_submit",
+                                      !.grantEpoch = s.epoch, !.grantValid = ~Stale /\ ~s.clearing,
+                                      !.seedAfterClear = @ \/ (s.launcher = SeedId /\ (Superseded \/ s.clearing))]
 SubmitEffect == /\ s.lphase = "created" /\ s.created = "yes" /\ s.effectBegan /\ s.effectKind = "submit"
                 /\ s.permission \/ EffectPolicy = "early_release_submit"
                 /\ s' = IF s.launcher = SeedId
                         THEN [s EXCEPT !.lphase = "sent", !.seedEffects = @ + 1,
-                                       !.unsafeEffect = @ \/ ~s.permission, !.permission = FALSE,
+                                       !.unsafeEffect = @ \/ ~s.permission \/ ~s.grantValid, !.permission = FALSE,
                                        !.effectBegan = FALSE, !.effectKind = "none", !.checked = FALSE,
-                                       !.seedAfterClear = @ \/ Superseded]
+                                       !.seedAfterClear = @]
                         ELSE [s EXCEPT !.lphase = "sent", !.effects[s.launcher] = @ + 1,
-                                       !.unsafeEffect = @ \/ ~s.permission, !.permission = FALSE,
+                                       !.unsafeEffect = @ \/ ~s.permission \/ ~s.grantValid, !.permission = FALSE,
                                        !.effectBegan = FALSE, !.effectKind = "none", !.checked = FALSE]
 SettleReceipt == /\ s.lphase = "sent"
                  /\ s' = IF s.launcher = SeedId
@@ -294,23 +298,28 @@ ClearRequest == /\ ClearOn # "off" /\ s.clear = "none" /\ ~s.clearRequested /\ s
               /\ (ClearOn = "serial" => ~s.excl) /\ (ClearOn = "overtake" => s.excl)
               /\ (ClearOn = "launch" => s.launcher # 0)
               /\ s' = [s EXCEPT !.clearRequested = TRUE]
-ClearBegin == /\ s.clearRequested /\ s.clear = "none" /\ ~s.permission
+ClearBegin == /\ s.clearRequested /\ s.clear = "none"
               /\ s' = [s EXCEPT !.clear = "begun", !.epoch = 1, !.clearing = TRUE,
                                !.clearExcl = ~s.excl, !.stalePane = @ \/ s.panes > 0]
 \* The queue is discarded with receipts and a launching turn's unsubmitted input with it.
 ClearDiscard ==
   /\ s.clear = "begun"
-  /\ LET cancels == Early /\ Mutant \notin {"ClearKeepsClaim", "MainClear"}
+  /\ LET cancels == Early /\ ~(s.effectBegan /\ s.effectKind = "submit")
+                  /\ Mutant \notin {"ClearKeepsClaim", "MainClear"}
          gone(i) == s.q[i] = "inflight" \/ (s.q[i] = "queued" /\ (i # s.launcher \/ cancels))
      IN s' = [s EXCEPT !.clear = "discarded", !.clearEffective = TRUE,
                        !.seed = IF @ = "queued" \/ (@ = "claimed" /\ cancels) THEN "cancelled" ELSE @,
                        !.receipts = @ \cup {i \in Ids : gone(i)},
                        !.q = [i \in Ids |-> IF gone(i) THEN "cancelled" ELSE s.q[i]]]
-Finished(t, how) == [t EXCEPT !.clear = how, !.clearing = FALSE, !.clearExcl = FALSE, !.awake = TRUE]
+Finished(t, how) == [t EXCEPT !.clear = how, !.clearing = FALSE, !.clearExcl = FALSE, !.awake = TRUE,
+  !.undrainedClear = @ \/ (s.launcher # 0 /\ s.lEpoch < s.epoch)
+                        \/ (s.effectBegan /\ s.grantEpoch < s.epoch),
+  !.knownUnknownClear = how = "unconfirmed" /\ s.created = "unknown"
+                        /\ s.launcher = 0 /\ ~s.permission /\ ~s.effectBegan]
 \* The teardown waits for a launching turn to end, then acts on the row it reads.
 ClearEnd ==
   /\ s.clear = "discarded"
-  /\ s.launcher = 0 \/ Mutant \in {"ClearNoWait", "MainClear"}
+  /\ (s.launcher = 0 /\ ~s.permission) \/ Mutant \in {"ClearNoWait", "MainClear"}
   /\ s' = IF s.launcher # 0 /\ Mutant = "MainClear" THEN Finished(s, "held")
           ELSE IF OldTarget /\ s.excl THEN Finished(s, "gaveup")
           ELSE IF OldTarget
@@ -376,11 +385,13 @@ ReadyEvidence == ~s.falseReady
 NoInheritedDispatch == ~s.inherit
 \* The restart writes no dispatch outcome and creates no retry dispatch.
 NoDispatchRepost == s.retries = 0
-\* After a clear began, the seed is never submitted and no launch of an older epoch creates.
+\* After clear advances its epoch, no new grant may authorize an old launch/seed.
+\* Effects already granted before that advance may finish while clear drains them.
 NoSeedAfterClear == ~s.seedAfterClear
 NoStaleCreate == ~s.staleCreate
 \* A clear that ended leaves no session a turn older than it launched.
-NoSessionAfterClear == (s.clear \in {"done", "gaveup", "held"} /\ ~s.excl) => ~s.stalePane
+NoSessionAfterClear == (s.clear \in {"done", "gaveup", "held", "unconfirmed"} /\ ~s.excl)
+                       => ~s.undrainedClear /\ (s.knownUnknownClear \/ ~s.stalePane)
 \* No launch after a clear began resumes the conversation that clear ended.
 NoResumeAfterClear == ~s.resumedPreClear
 NoSeedRevival == ~s.seedRevived

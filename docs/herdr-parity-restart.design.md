@@ -106,11 +106,11 @@ O-a는 child 활성화 전체가 아니고 S3는 command launch/취소 hook 자�
 
 | 출처 | file:line | 수락·재시작 중 처리 |
 |---|---|---|
-| Discord 사람의 일반 메시지 | `src/services/discord/router/intake_queue_transaction.rs:35`, `:121`, `src/services/discord/router/intake_gate.rs:366` | Human, 원본 message/source IDs·queued generation 유지. 등록 slash는 일반 메시지 큐에 중복 투입하지 않음 |
-| Discord 허용 봇 | `src/services/discord/router/intake_gate.rs:347`, `src/services/discord/router/intake_queue_transaction.rs:43` | AllowedBot/announce만 기존 정책대로 접수. 재시작 중 입력 custody는 사람과 동일, 명령 권한은 기존 auth 그대로 |
-| 기타 봇 | `src/services/discord/router/intake_queue_transaction.rs:39`, `src/services/discord/router/intake_gate.rs:347` | OtherBot의 기존 비접수 정책 유지. 수락하지 않은 입력을 loss=0 계수에 넣어 가짜 성공으로 만들지 않음 |
-| TUI에서 시작된 실제 턴 | `src/services/discord/tui_prompt_relay/synthetic_start.rs:2044`, `src/services/discord/herdr_terminate.rs:477` | O/합성 start로 관측한 old inflight를 captured token 기준 결산. 이미 시작된 턴은 중단 경고 대상 |
-| TUI의 아직 제출하지 않은 수동 draft/직접 키 | `src/services/session_host/herdr_gate.rs:555`, `src/services/discord/commands/restart.rs:276` | AgentDesk가 수락한 queued original과 구별. 종료할 pane의 draft·진행 중 턴은 기존 tmux restart처럼 중단될 수 있음. 직접 키 입력 자체를 무손실 접수했다고 주장하지 않음 |
+| Discord 사람의 일반 메시지 | `src/services/discord/router/intake_queue_transaction.rs:37`, `:49`, `:121`, `src/services/discord/router/intake_gate.rs:369` | Human, 원본 message/source IDs·queued generation 유지. 등록 slash는 일반 메시지 큐에 중복 투입하지 않음 |
+| Discord 허용 봇 | `src/services/discord/router/intake_gate.rs:355`, `src/services/discord/router/intake_queue_transaction.rs:38`, `:45` | AllowedBot/announce만 기존 정책대로 접수. 재시작 중 입력 custody는 사람과 동일, 명령 권한은 기존 auth 그대로 |
+| 기타 봇 | `src/services/discord/router/intake_queue_transaction.rs:47`, `src/services/discord/router/intake_gate.rs:361` | OtherBot의 기존 비접수 정책 유지. 수락하지 않은 입력을 loss=0 계수에 넣어 가짜 성공으로 만들지 않음 |
+| TUI에서 시작된 실제 턴 | `src/services/discord/tui_prompt_relay/synthetic_start/claim.rs:54`, `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs:618`, `src/services/discord/herdr_terminate.rs:477` | O/합성 start로 관측한 old inflight를 captured token 기준 결산. 이미 시작된 턴은 중단 경고 대상 |
+| TUI의 아직 제출하지 않은 수동 draft/직접 키 | `src/services/claude/herdr_turn/composer.rs:59`, `src/services/session_host/herdr_gate.rs:549`, `src/services/discord/commands/restart.rs:276` | AgentDesk가 수락한 queued original과 구별. 종료할 pane의 draft·진행 중 턴은 기존 tmux restart처럼 중단될 수 있음. 직접 키 입력 자체를 무손실 접수했다고 주장하지 않음 |
 | HTTP·루틴·iMessage 시작 | `src/services/discord/router/message_handler/headless_turn.rs:159`, `src/services/turn_host.rs:177` | 현재 herdr 거절 유지(#8125). 일반 ingress는 restart seed source를 가진 시작을 만들 수 없어야 함(3.1 8단계) |
 | restart 인사말 | `src/services/discord/commands/restart.rs:13`, `src/services/discord/queue_io/input_owner/start.rs:13` | 인증된 명령의 stable operation ID에서 유도한 한 ticket/original. restart 명령만 owner 큐의 전송 중 단위 바로 뒤(없으면 맨 앞)에 적재하고, 종료 대상이 Retired일 때만 successor의 첫 입력으로 제출 |
 
@@ -165,7 +165,7 @@ owner original/ticket/receipt, 그리고 **owner의 기존 herdr 턴 경로**(Di
 
 ### 3.0 방향 판정: owner 큐 seed 방향 채택
 
-(r3 주: 아래 표는 r2의 방향 비교다. 채택 열의 clear·dispatch·비용 칸은 r3에서 3.3·3.4·4절이 대체한다. seed의 위치는 "큐 head"에서 "전송 중 단위 바로 뒤"로 정밀해졌다.)
+(r3 주: 아래 표는 r2의 방향 비교다. 채택 열의 clear·dispatch·비용 칸은 r3에서 3.3·3.4·4절이 대체한다. seed의 위치는 "큐 head"에서 "전송 중 단위 바로 뒤"로 정밀해졌다. B 구현 전 재조사한 최신 비용과 분할 경계는 [B 분할 계획](herdr-parity-restart-b-split.plan.md)이 대체한다.)
 
 r1(현 방향)은 restart 명령이 exclusion 안에서 lower `launch_herdr_session`을 직접 부르고 그 뒤 seed를 넣는다.
 리뷰 d1의 새 방향은 restart가 종료와 seed 적재까지만 하고, successor launch는 owner의 턴 경로가 seed를 첫 입력으로 처리하며 한다.
@@ -186,7 +186,7 @@ r1(현 방향)은 restart 명령이 exclusion 안에서 lower `launch_herdr_sess
 | 남는 위험 | P2-1 수리 경로(자기 successor 종료)와 lock 순서 | seed의 시작 경로가 headless다. herdr에서 headless 시작은 지금 전부 거절이라(`headless_turn.rs:159`) 그 뒤 구간이 생산에서 돈 적이 없다. B 첫 커밋에서 실제 진입 시험으로 확인한다(3.1 8단계) |
 
 채택 근거는 세 가지다. (1) launch를 새로 조립하지 않고 매일 도는 경로를 쓴다. (2) P2-1의 원인(긴 exclusion 안의 launch)이 구조에서 사라지고,
-P2-6의 원인(새 내구 필드)도 사라진다. (3) 비용이 절반 아래이고 분할이 필요 없다. 같은 모델에서 r1의 순서를 변형(`R1Launch`)으로 넣으면
+P2-6의 원인(새 내구 필드)도 사라진다. (3) r2 당시 비용 추정은 직접 launch보다 작았다. 최신 조사에서는 clear 효과 허가와 idle 복구 비용을 포함해 두 조각으로 나눈다(4절). 같은 모델에서 r1의 순서를 변형(`R1Launch`)으로 넣으면
 `NoResumeAfterClear`가 깨진다(6절).
 
 ### 3.1 채택 흐름 (r3)
@@ -297,7 +297,8 @@ clear는 seed가 큐에 있든, owner가 seed로 새 세션을 띄우는 중이�
 `CheckEpoch`는 관찰이고 효과 허가가 아니다. epoch 갱신과 `BeginEffect`는 같은 채널 상태 mutex 아래 직렬화한다.
 `BeginEffect`는 epoch와 clearing 상태를 다시 검사한 뒤 효과 카운터를 올려 허가를 발급한다. 허가는 실제 create·submit이 끝날 때까지 살아 있어야 한다.
 clear보다 먼저 허가된 I/O는 clear 시작 뒤에도 끝날 수 있다. clear는 startup과 허가된 I/O를 기다린 뒤 그 실행을 exact 종료하고 selector를 지운 다음 완료한다.
-clear 뒤 새 허가는 0이다. 등록이 먼저 끝나도 startup과 겹친 사실은 clear guard에 sticky로 남겨 Retired 특수 보류 경로가 다시 선택되지 않게 한다.
+clear 중에는 새 startup을 active count에 더하지 않고 새 효과 허가도 발급하지 않는다. clear 완료 뒤 owner의 다음 입력은 새 epoch에서 정상 처리한다.
+등록이 먼저 끝나도 startup과 겹친 사실은 clear guard에 sticky로 남겨 Retired 특수 보류 경로가 다시 선택되지 않게 한다.
 async task의 TLS를 await 너머 설치하지 않는다. sync execute의 등록 Arc를 create worker와 별도 blocking thread의 CreatedSubmit에 명시 전달한다.
 
 | 누가 | 하는 일 | 좌표(붙일 자리) |
@@ -430,10 +431,16 @@ A(Codex resume 경계)는 `0060c4dd50f68a7509217c29986dc58ff5e64d16`에 구현�
 12. create 응답 불명은 재전송 0, Pending 보존, 보이는 실패다.
 13. tmux 채널의 `/restart`와 herdr 채널의 인접 관리 가드는 변하지 않는다.
 
-## 4. 구현 분할과 크기 (r3)
+## 4. 구현 분할과 크기
 
-A는 그대로다(다른 레인). B는 **두 리뷰 단위**로 나눈다. 합계 추정은 prod 22~26파일, 순증 +715~980이다(상한 30파일/+1500, 분할 기준 +1200).
-합계는 분할 기준 아래지만 clear 수리가 restart와 독립이고 모든 herdr launch에 영향을 주므로 따로 리뷰한다. 순서는 B-clear → B-main이다.
+**B 구현 전 재조사:** 생산 순증 +1124~1463(중심 +1294)로 +1200 PLAN_READY 선을 넘는다.
+생산 코드를 쓰기 전에 B1(clear 효과 허가·claimed followers, prod11~13/+334~493)과
+B2(seed·명령·복구 활성화, prod16~22/+790~970, B1 head 기준)로 나눈다.
+파일별 비용·누락되었던 worker/idle 복구 비용·수용 문장별 시험 대응은 [B 분할 계획](herdr-parity-restart-b-split.plan.md)에 있다.
+아래 r3 추정 표는 이전 설계의 비교 기록이며 최신 크기 판단에는 쓰지 않는다.
+
+A는 `0060c4dd`에서 구현됐고 리뷰 중이다. r3도 B를 **두 리뷰 단위**로 나눴다. 당시 합계 추정은 prod 22~26파일, 순증 +715~980이었다(상한 30파일/+1500, 분할 기준 +1200).
+당시 합계는 분할 기준 아래였지만 clear 수리가 restart와 독립이고 모든 herdr launch에 영향을 주므로 따로 리뷰하기로 했다. 순서는 B-clear → B-main이었다.
 조각마다 첫 production WIP 커밋 직후 `pr_cap_prod.py`로 다시 잰다. 함수·시험을 옮겨 수치를 맞추지 않는다.
 
 | 조각 | 범위 | 순증 추정 | 수용 경계 |

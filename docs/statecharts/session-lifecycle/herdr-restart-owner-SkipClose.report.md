@@ -15,7 +15,7 @@ The shortest path has 10 steps:
 7. Install Pending over the vacant row: Owner turn installed Pending
 8. Observe the create epoch: CheckEpoch observed; live BeginEffect still required
 9. Compare live epoch and retain create permission: BeginEffect holds create authority
-10. Create once under live effect permission: Two live sessions
+10. Complete the previously granted create: Two live sessions
 
 ## Rules that hold
 InputCustody, InputAtMostOnce, NoOldPaneInput, NoFalseReady, SeedAtMostOnce, NoBlindCreate, InflightSettledBeforeReady, ReadyEvidence, NoInheritedDispatch, NoDispatchRepost, NoSeedAfterClear, NoStaleCreate, NoSessionAfterClear, NoResumeAfterClear, NoSeedRevival, NoFalseSuperseded, NoOperationSeedless, NoOperationDuplicateSeed, EffectHasLivePermission, NoDeadlock, RequestResolves, CommandAnswers, RestartAvailable, AcceptedInputResolves, ClearForgets, ClearCompletes, EndedSeedRecovers, ClearRequestCompletes

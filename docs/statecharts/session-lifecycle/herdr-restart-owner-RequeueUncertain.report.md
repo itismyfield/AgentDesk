@@ -1,7 +1,7 @@
 # HerdrRestartOwner
 
-TLC reached 95 states and 231 steps. The chart draws 25 states and 41 arrows.
-The chart does not draw 123 steps that stay in one chart state.
+TLC reached 103 states and 247 steps. The chart draws 25 states and 41 arrows.
+The chart does not draw 131 steps that stay in one chart state.
 
 ## SeedAtMostOnce breaks
 The shortest path has 19 steps:
@@ -15,16 +15,16 @@ The shortest path has 19 steps:
 7. Install Pending over the vacant row: Owner turn installed Pending
 8. Observe the create epoch: CheckEpoch observed; live BeginEffect still required
 9. Compare live epoch and retain create permission: BeginEffect holds create authority
-10. Create once under live effect permission: Create answered; first input not submitted
+10. Complete the previously granted create: Create answered; first input not submitted
 11. Observe the input epoch: CheckEpoch observed; live input authority still required
 12. Compare live epoch and retain input permission: BeginEffect holds input authority
-13. Submit the first input under live permission: First input submitted; receipt not committed
+13. Complete the previously granted first input: First input submitted; receipt not committed
 14. Daemon dies and boots: After boot: seed waits
 15. Probe adopts the Pending pane: After boot: seed waits
 16. Claim the seed on its recovered exact successor: Create answered; first input not submitted
 17. Observe the input epoch: CheckEpoch observed; live input authority still required
 18. Compare live epoch and retain input permission: BeginEffect holds input authority
-19. Submit the first input under live permission: Restart seed executed twice
+19. Complete the previously granted first input: Restart seed executed twice
 
 ## Rules that hold
 InputCustody, InputAtMostOnce, NoOldPaneInput, NoFalseReady, NoBlindCreate, SingleSession, InflightSettledBeforeReady, ReadyEvidence, NoInheritedDispatch, NoDispatchRepost, NoSeedAfterClear, NoStaleCreate, NoSessionAfterClear, NoResumeAfterClear, NoSeedRevival, NoFalseSuperseded, NoOperationSeedless, NoOperationDuplicateSeed, EffectHasLivePermission, NoDeadlock, RequestResolves, CommandAnswers, RestartAvailable, AcceptedInputResolves, ClearForgets, ClearCompletes, EndedSeedRecovers, ClearRequestCompletes

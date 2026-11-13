@@ -21,10 +21,10 @@ The shortest path has 18 steps:
 7. Install Pending over the vacant row: Owner turn installed Pending
 8. Observe the create epoch: CheckEpoch observed; live BeginEffect still required
 9. Compare live epoch and retain create permission: BeginEffect holds create authority
-10. Create once under live effect permission: Create answered; first input not submitted
+10. Complete the previously granted create: Create answered; first input not submitted
 11. Observe the input epoch: CheckEpoch observed; live input authority still required
 12. Compare live epoch and retain input permission: BeginEffect holds input authority
-13. Submit the first input under live permission: First input submitted; receipt not committed
+13. Complete the previously granted first input: First input submitted; receipt not committed
 14. Commit the input's receipt: Receipt committed; source not bound
 15. Bind the source: One new Ready session; inputs await the owner
 16. Submit an input to the successor once: One new Ready session; inputs settled once

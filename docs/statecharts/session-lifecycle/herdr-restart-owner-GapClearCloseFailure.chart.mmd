@@ -1,5 +1,5 @@
 ---
-title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -15,7 +15,7 @@ stateDiagram-v2
   s0: Old session and a queued input
   s1: Seed committed#59; gate holds it
   s2: Restart holds the transition and fence
-  s3: Clear requested#59; epoch serializer pending
+  s3: Clear requested#59; epoch update pending
   s4: Close refused, unconfirmed or row moved on
   s5: Clear began: epoch bumped#59; restart holds the transition
   s6: Failure answered#59; seed still to withdraw
@@ -31,22 +31,21 @@ stateDiagram-v2
   s1 --> s2: Terminate takes transition and fence
   s2 --> s3: User requests clear
   s2 --> s4: Close refused, unconfirmed or row moved on
-  s3 --> s5: Acquire the serializer and bump the clear epoch
-  s3 --> s3: Close refused, unconfirmed or row moved on
+  s3 --> s5: Advance epoch and mark clearing, including while old I/O is granted
   s4 --> s3: User requests clear
   s4 --> s6: Answer the failure, release
   s5 --> s7: Clear discards the queue and the launching input
   s6 --> s8: Withdraw the seed
-  s7 --> s2: Clear's teardown acts on the row
+  s7 --> s2: Clear drains earlier grants and tears down their exact session
   s8 --> s9: Submit an input to the still-current session
   s5 --> s10: Answer the failure, release
-  s3 --> s10: Acquire the serializer and bump the clear epoch
-  s7 --> s4: Clear's teardown acts on the row
+  s3 --> s10: Advance epoch and mark clearing, including while old I/O is granted
+  s7 --> s4: Clear drains earlier grants and tears down their exact session
   s7 --> s11: Answer the failure, release
   s6 --> s9: Withdraw the seed
   s10 --> s11: Clear discards the queue and the launching input
-  s11 --> s6: Clear's teardown acts on the row
-  s11 --> s13: Clear's teardown acts on the row
+  s11 --> s6: Clear drains earlier grants and tears down their exact session
+  s11 --> s13: Clear drains earlier grants and tears down their exact session
   s6 --> s12: Withdraw the seed
   s6 --> s13: Withdraw the seed
   class s0 blue

@@ -1,5 +1,5 @@
 ---
-title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -59,15 +59,15 @@ stateDiagram-v2
   s11 --> s12: Observe the create epoch
   s12 --> s6: Daemon dies and boots
   s12 --> s13: Compare live epoch and retain create permission
+  s13 --> s14: Complete the previously granted create
   s13 --> s6: Daemon dies and boots
-  s13 --> s14: Create once under live effect permission
   s14 --> s15: Observe the input epoch
   s14 --> s16: Daemon dies and boots
   s15 --> s16: Daemon dies and boots
   s15 --> s17: Compare live epoch and retain input permission
   s16 --> s18: Probe adopts the Pending pane
   s17 --> s16: Daemon dies and boots
-  s17 --> s19: Submit the first input under live permission
+  s17 --> s19: Complete the previously granted first input
   s18 --> s20: Submit an input to the successor once
   s19 --> s21: Commit the input's receipt
   s19 --> s22: Daemon dies and boots

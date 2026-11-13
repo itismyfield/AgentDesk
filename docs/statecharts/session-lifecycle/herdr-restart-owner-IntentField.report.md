@@ -1,7 +1,7 @@
 # HerdrRestartOwner
 
-TLC reached 82 states and 206 steps. The chart draws 25 states and 40 arrows.
-The chart does not draw 130 steps that stay in one chart state.
+TLC reached 92 states and 226 steps. The chart draws 25 states and 40 arrows.
+The chart does not draw 148 steps that stay in one chart state.
 
 ## RequestResolves breaks
 TLC's counterexample is in tlc-RequestResolves.out. It has 4 steps:

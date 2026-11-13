@@ -3,18 +3,19 @@
 기준은 A `0060c4dd50f68a7509217c29986dc58ff5e64d16`와 병합한 r3 설계 `a7957913f0a80c80061445c7ba74e4e3a4029303`다.
 이 문서는 **PLAN_READY를 위한 구현 전 계획**이다. 생산 소스 변경·Rust/PG 시험·cargo 빌드는 0이다.
 최신 수용 문장은 [정본 3.9](herdr-parity-restart.design.md#39-수용-기준-문장-b가-표로-대조할-것)에 있다.
+조각명·범위·크기는 이 문서가 정본 4절의 이전 r3 추정 표를 대체한다.
 
 ## 크기 게이트
 
 | 구현 묶음 | 실제 연결 근거 | 예상 순 코드 |
 |---|---|---:|
-| queue admission·상태·철회·gate 및 claim followers | `src/services/turn_orchestrator/queued_head/v2/source_admission.rs:708`, `src/services/turn_orchestrator/queued_head/v2.rs:395`, `src/services/discord/queue_io/input_owner/start.rs:13` | +354~448 |
-| clear epoch·효과 허가·startup 추적 | `src/services/herdr_launch/prepared.rs:43`, `src/services/claude/herdr_turn/first_input.rs:99`, `src/services/codex/herdr_turn/first_input.rs:162`, `src/services/discord/commands/control/clear_teardown.rs:137` | +320~440 |
+| queue admission·상태·철회·gate 및 claim followers | `src/services/turn_orchestrator/queued_head/v2/source_admission.rs:627`, `src/services/turn_orchestrator/queued_head/v2.rs:395`, `src/services/discord/queue_io/input_owner/start.rs:13` | +354~448 |
+| clear epoch·효과 허가·startup 추적·owner 폐기 보정 여유 | `src/services/herdr_launch/prepared.rs:43`, `src/services/claude/herdr_turn/first_input.rs:99`, `src/services/codex/herdr_turn/first_input.rs:162`, `src/services/discord/commands/control/clear_teardown.rs:137` | +320~465 |
 | 공개 명령·operation 응답·detached 종료/postlude | `src/services/discord/commands/restart.rs:259`, `src/services/discord/herdr_terminate/http_force.rs:30`, `src/services/discord/herdr_terminate/retired_exclusion.rs:100` | +250~300 |
 | idle close-crash 복구·seed permit·headless/Codex 배선 | `src/services/discord/herdr_terminate.rs:217`, `src/services/discord/router/message_handler/headless_turn.rs:147`, `src/services/discord/router/message_handler/provider_dispatch.rs:614` | +200~250 |
-| 합계 | 독립 조사에서 API·소유·worker 경계를 대조한 추정 | **+1124~1438 (중심 +1281)** |
+| 합계 | 독립 조사에서 API·소유·worker 경계를 대조한 추정 | **+1124~1463 (중심 +1294)** |
 
-r3의 +480~620 추정에는 아래 비용이 충분히 들어 있지 않았다.
+초기 방향 비교의 +480~620 및 r3 합계 +715~980 추정에는 아래 비용이 충분히 들어 있지 않았다.
 
 - 완료 operation의 기존 ticket 선조회, alias operation의 내구 bind와 만료 receipt 처리.
 - inflight가 없는 Bound·PendingPlaced의 close 뒤 crash를 permit 자체가 복구하는 경로.
@@ -26,7 +27,7 @@ r3의 +480~620 추정에는 아래 비용이 충분히 들어 있지 않았다.
 
 ## B1 — clear 효과 허가와 claimed followers
 
-**예상 prod 11파일 / 순증 +334~468.** restart 명령은 아직 활성화하지 않는다.
+**예상 prod 11~13파일 / 순증 +334~493.** restart 명령은 아직 활성화하지 않는다.
 
 | 생산 파일 | 변경 | 예상 순 코드 |
 |---|---|---:|
@@ -41,17 +42,21 @@ r3의 +480~620 추정에는 아래 비용이 충분히 들어 있지 않았다.
 | `src/services/discord/commands/control/clear_teardown.rs` | transition 해제 후 startup/effects 대기, row 재읽기, Retired selector CAS | +50~65 |
 | `src/services/discord/commands/control/herdr_recovery.rs` | sticky startup overlap이면 기존 Held 특수 경로 대신 일반 clear | +6~10 |
 | `src/services/turn_orchestrator/queued_head/v2.rs` | claim 시 followers 고정, reserve에서 같은 ordered originals 대조, revoke 때 해제 | +14~28 |
+| 조건부 `src/services/turn_orchestrator/queued_head/v2/control.rs`, `src/services/discord/mailbox_finish.rs` | claimed 미제출 단위와 clear receipt 결산이 기존 동작으로 충족되는지 실제 진입 시험으로 확인; 부족할 때만 보정 | +0~25 |
 
 합계 범위에는 clear 묶음의 불확실성 여유를 포함한다. giant에는 선언·연결·거절 분기만 둔다.
 SnapshotV2·serde variant·turn 필드 추가는 0이다. followers는 비내구 Owner 상태에만 둔다.
 
 효과 계약은 `CheckEpoch → BeginEffect → 실제 I/O`다. BeginEffect와 clear epoch 갱신은 같은 mutex 아래 직렬화한다.
+startup 등록도 같은 상태 아래에서 clearing을 확인한다. clear 중에는 새 active count를 더하지 않고 거절·보류하며, clear 완료 뒤 새 입력은 정상 등록한다.
 허가가 먼저면 I/O는 끝날 수 있고 clear는 그 반환을 기다린 뒤 세션을 exact 종료한다. clear가 먼저면 허가와 실제 I/O는 0이다.
 허가는 물리 I/O가 끝날 때까지 살아 있어야 한다. 허가를 받자마자 놓고 backend를 호출하면 clear 완료 뒤 효과가 발생할 수 있다.
 
 sync execute의 TLS에는 registration Arc를 둔다. async launch는 await 너머 TLS를 설치하지 않고 worker로 Arc만 넘긴다.
 `src/services/discord/health/turn_deliver/inject/first_input.rs:114`의 별도 blocking thread에는 CreatedSubmit가 Arc를 명시 전달한다.
 startup 완료는 물리 첫 제출 반환 때 내려 AI 답변 완료나 Source 대기를 clear가 기다리지 않게 한다.
+그 뒤 늦은 source/bind 완료는 기존 exact row/nonce CAS에 의해 clear가 끝낸 세션이나 selector를 되살리지 못해야 한다.
+모델이 launcher 종료를 bind까지 추상화한다면 이 시각 차이는 모델의 증명 범위에서 제외하고 실제 진입 시험으로 확인한다.
 
 B1은 기존 일반 launch·clear·claim 경로가 즉시 소비한다. restart seed와 새 headless 권한은 B2까지 만들지 않는다.
 
@@ -92,11 +97,11 @@ seed 없는 crash는 r3의 기존 tmux 수준 계약을 유지한다. 새 영속
 | 3 reserved seed·일반 headless 거절 | general start와 stored owner bind permit | `ordinary_ingress_cannot_admit_restart_seed`, `restart_seed_uses_herdr_owner_without_tmux_effects_pg` | B2 |
 | 4 시작 row 전수 | Missing/Legacy/Bound/PendingPlaced/Unplaced/Retired/Unknown/Conflict | `restart_start_row_matrix_pg` | B2 |
 | 5 dispatch·뒤 입력 parity | tmux/herdr 각각 dispatch 진행→restart→seed 결산→backlog 완료, ID·상태·게시 수 | `restart_dispatch_seed_and_backlog_match_tmux_pg` | B2 |
-| 6 clear 허가 시각·효과·최종 세션 | Check/Begin/Effect 사이 실제 create·submit, clear entry | `clear_after_pending_before_create_sends_no_create_pg`, `authorized_create_finishes_then_clear_exact_closes_pg`, `authorized_submit_is_terminated_before_clear_returns_pg` | B1, B2 통합 |
-| 7 Full/설정 대기 seedless | admission 실패 뒤 exact 종료와 원본 수·실패 문구 | `restart_seedless_capacity_and_configuration_wait_pg` | B2 |
+| 6 clear 허가 시각·효과·최종 세션 | Check/Begin/Effect 사이 실제 create·submit, 별도 CreatedSubmit thread의 scope 전달, startup이 먼저 끝나도 clear overlap 유지, 늦은 bind의 부활 방지 | `clear_after_pending_before_create_sends_no_create_pg`, `authorized_create_finishes_then_clear_exact_closes_pg`, `authorized_submit_is_terminated_before_clear_returns_pg`, `created_submit_worker_keeps_effect_permission_pg`, `clear_startup_overlap_stays_sticky_after_submit_returns_pg`, `late_source_bind_after_clear_cannot_revive_session_pg`, `clear_blocks_new_startup_until_completion_pg` | B1, B2 통합 |
+| 7 Full/설정 대기 seedless | Full/V2 미채택/설정 대기/effort 미결 뒤 exact 종료와 원본 수·의도·실패 문구; commit 미확인은 postlude에서 같은 ticket으로 상태 확정 | `restart_seedless_capacity_and_configuration_wait_pg`, `restart_effort_wait_keeps_intent_and_restarts_pg`, `restart_unknown_admission_commit_resolves_same_ticket_pg` | B2 |
 | 8 보호 prefix·고정 followers | 실제 claim→뒤 arrival→pump→reserve→settle | `claim_followers_are_fixed_after_same_author_arrival`, `claimed_reserve_refuses_a_later_arrival_as_a_follower`, `restart_seed_is_durable_after_claimed_unit` | B1/B2 |
 | 9 crash·liveness | idle Bound/Placed close 직후, launch/submit/receipt/bind, fail 뒤 철회 전 재부팅 | `restart_idle_close_crash_repairs_without_close_pg`, `restart_seed_crash_phase_matrix_pg` | B2 |
-| 10 ticket 상태·operation 재처리 | 완료/진행/alias/Conflict/Gone/Cancelled/Failed 재호출, count 불변 | `restart_completed_operation_keeps_effect_counts_pg`, `restart_seed_context_conflict_is_not_seedless` | B2 |
+| 10 ticket 상태·operation 재처리 | Queued/Attempt/Settled/Retained/Pending/Cancelled/Failed별 응답, Gone≠clear, 진행/완료/alias 재호출 count 불변 | `restart_completed_operation_keeps_effect_counts_pg`, `restart_seed_context_conflict_is_not_seedless`, `restart_ticket_status_replies_never_guess_ready_or_clear_pg` | B2 |
 | 11 옛 바이너리/형식 | 기존 SnapshotV2 deserialize·reserved source 비인식 경로의 보이는 거절 | `restart_seed_legacy_snapshot_and_rollback_visible_refusal` | B2 |
 | 12 create 응답 불명 | 실제 launch host Unknown, create 재전송0·Pending 유지 | `restart_create_unknown_keeps_pending_without_replay_pg` | B2 |
 | 13 tmux/인접 guard | 실제 tmux restart와 Cancel/Terminate/clear/stop/operator reset | `restart_tmux_and_adjacent_management_guards_unchanged_pg` | B1/B2 |

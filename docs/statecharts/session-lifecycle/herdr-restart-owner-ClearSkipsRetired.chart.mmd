@@ -1,5 +1,5 @@
 ---
-title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -24,35 +24,36 @@ stateDiagram-v2
   s5: Exclusion released#59; reply pending
   s6: Owner turn began a launch
   s7: Owner turn installed Pending
-  s8: Clear requested#59; epoch serializer pending
-  s9: Clear began: epoch bumped#59; a turn is launching
-  s10: Clear began: epoch bumped#59; no session
-  s11: Clear discarded the queue#59; no session
-  s12: Exclusion released#59; superseded reply pending
-  s13: Clear discarded the queue#59; a turn is launching
-  s14: A launch resumed the conversation a clear ended
-  s15: Clear ended#59; selector still kept
+  s8: Seed waits for the owner
+  s9: Clear requested#59; epoch update pending
+  s10: Clear began: epoch bumped#59; a turn is launching
+  s11: Clear began: epoch bumped#59; no session
+  s12: Clear discarded the queue#59; no session
+  s13: Exclusion released#59; superseded reply pending
+  s14: Clear discarded the queue#59; a turn is launching
+  s15: A launch resumed the conversation a clear ended
+  s16: Clear ended#59; selector still kept
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
   s2 --> s3: Close only the captured pane
   s3 --> s4: Retire CAS and settle the old turn
-  s3 --> s3: Accept an input into the owner queue
   s4 --> s5: Disconnect keeping selector, release, wake
   s5 --> s6: Owner starts the front: register the launch
+  s5 --> s5: Accept an input into the owner queue
   s6 --> s7: Install Pending over the vacant row
-  s7 --> s8: User requests clear
-  s6 --> s8: User requests clear
-  s8 --> s9: Acquire the serializer and bump the clear epoch
-  s8 --> s8: Install Pending over the vacant row or Reply to the command
-  s9 --> s10: Clear epoch moved: retire the unsent Pending
-  s10 --> s11: Clear discards the queue and the launching input
-  s11 --> s12: Clear's teardown acts on the row
-  s9 --> s13: Clear discards the queue and the launching input
-  s12 --> s12: Accept an input into the owner queue
-  s13 --> s11: Clear epoch moved: retire the unsent Pending
-  s12 --> s14: Owner starts the front: register the launch
-  s11 --> s15: Clear's teardown acts on the row
+  s5 --> s8: Reply to the command
+  s7 --> s9: User requests clear
+  s8 --> s6: Owner starts the front: register the launch
+  s9 --> s10: Advance epoch and mark clearing, including while old I/O is granted
+  s10 --> s11: Clear epoch moved: retire the unsent Pending
+  s11 --> s12: Clear discards the queue and the launching input
+  s12 --> s13: Clear drains earlier grants and tears down their exact session
+  s10 --> s14: Clear discards the queue and the launching input
+  s13 --> s13: Accept an input into the owner queue
+  s14 --> s12: Clear epoch moved: retire the unsent Pending
+  s13 --> s15: Owner starts the front: register the launch
+  s12 --> s16: Clear drains earlier grants and tears down their exact session
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath
@@ -66,21 +67,21 @@ stateDiagram-v2
   class s4 bugPath
   class s5 blue
   class s5 bugPath
-  class s6 blue
   class s6 bugPath
-  class s7 blue
   class s7 bugPath
+  class s8 purple
   class s8 bugPath
   class s9 bugPath
-  class s10 blue
   class s10 bugPath
+  class s11 blue
   class s11 bugPath
-  class s12 teal
   class s12 bugPath
-  class s13 purple
+  class s13 teal
   class s13 bugPath
-  class s14 teal
-  class s14 breaks
+  class s14 purple
   class s14 bugPath
   class s15 teal
-  class s15 repeats
+  class s15 breaks
+  class s15 bugPath
+  class s16 teal
+  class s16 repeats
