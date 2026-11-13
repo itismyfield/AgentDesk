@@ -269,6 +269,8 @@ input-single-path/NativePreparationPopAllBefore.cfg	NativeInputPreparation	PopAl
 input-single-path/NativePreparationPopAllFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationReceiptBefore.cfg	NativeInputPreparation	NoForeignReceiptProof	EvidenceEventuallyOwn
 input-single-path/NativePreparationReceiptFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationTypedBefore.cfg	NativeInputPreparation	NoUntypedAdmission	-
+input-single-path/NativePreparationTypedFixed.cfg	NativeInputPreparation	-	-
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
 input-single-path/ReservedIdEnqueueBefore.cfg	ReservedIdEnqueue	NoReservationQueueOverlap	-

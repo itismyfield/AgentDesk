@@ -3172,6 +3172,7 @@ src/
 │   │   │   ├── finalize.rs
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── guarded_finish_residue.rs
+│   │   │   ├── native_input_tests.rs
 │   │   │   ├── policy_commit.rs
 │   │   │   ├── reconcile.rs
 │   │   │   ├── terminal_handler.rs
@@ -3231,6 +3232,7 @@ src/
 │   │   │   │   ├── effort_restart.rs
 │   │   │   │   ├── effort_restart_baseline_tests.rs
 │   │   │   │   ├── effort_restart_tests.rs
+│   │   │   │   ├── native_input.rs
 │   │   │   │   ├── notice_identity.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
@@ -3239,7 +3241,8 @@ src/
 │   │   │   ├── activity_tests/
 │   │   │   │   ├── effect_tests.rs
 │   │   │   │   ├── large_tests.rs
-│   │   │   │   └── local_control_tests.rs
+│   │   │   │   ├── local_control_tests.rs
+│   │   │   │   └── native_input_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_notice_tests.rs
 │   │   │   ├── activity_tests.rs

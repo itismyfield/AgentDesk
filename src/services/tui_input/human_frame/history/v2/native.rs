@@ -1,7 +1,6 @@
 //! Native input evidence stays attached to its original registration through projection.
 use super::*;
 
-#[cfg(test)]
 pub(crate) fn frame_hashes(text: &str) -> Vec<String> {
     super::super::class_hashes(text)
 }
@@ -15,15 +14,14 @@ pub(crate) struct Episode {
     pub(crate) extra: serde_json::Map<String, Value>,
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Intent {
     Primary(Episode),
     Follower,
 }
 
-#[cfg(test)]
 impl Intent {
+    #[cfg(test)]
     pub(crate) fn attribution(&self, sources: &[String]) -> serde_json::Value {
         serde_json::json!({"sources": sources, "native_intent": self})
     }
@@ -179,7 +177,6 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
 }
 
 impl Registry {
-    #[cfg(test)]
     pub(crate) fn native_evidence_registrations(
         &self,
     ) -> Result<Vec<crate::services::tui_o::writer::input_facts::native::Registration>, String>
@@ -225,26 +222,35 @@ impl Registry {
         })
     }
 
-    // Writers stay test-only until native input activation installs their production caller.
+    /// The cold effect calls this before arming only when its payload carries explicit intent.
+    pub(crate) fn prepare_native_intent(
+        &self,
+        namespace: &str,
+        key: &Value,
+        channel: u64,
+        intent: &Intent,
+    ) -> Result<(), String> {
+        let episode = intent.episode(
+            key["identity"]["primary"]
+                .as_u64()
+                .ok_or("missing primary")?,
+        )?;
+        self.native_transaction(namespace, key, |registration| {
+            let ticket = Ticket {
+                key: key.clone(),
+                channel_id: channel,
+                source: registration.source.clone(),
+                owning_episode: episode,
+                extra: Default::default(),
+            };
+            prepare_ticket(registration, &ticket)
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn prepare_native(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
         self.native_transaction(namespace, &ticket.key, |registration| {
-            let candidate = Settlement {
-                ticket: ticket.clone(),
-                outcome: None,
-                withdrawal_notice: false,
-                cleanup_complete: false,
-                warned: false,
-                extra: Default::default(),
-            };
-            candidate.validate(registration)?;
-            if let Some(existing) = &registration.native_settlement {
-                return (existing.ticket == *ticket)
-                    .then_some(())
-                    .ok_or("native ticket changed".into());
-            }
-            registration.native_settlement = Some(candidate);
-            Ok(())
+            prepare_ticket(registration, ticket)
         })
     }
 
@@ -298,7 +304,6 @@ impl Registry {
         })
     }
 
-    #[cfg(test)]
     fn native_transaction<T>(
         &self,
         namespace: &str,
@@ -338,4 +343,23 @@ impl Registry {
             Ok(result)
         })
     }
+}
+
+fn prepare_ticket(registration: &mut Registration, ticket: &Ticket) -> Result<(), String> {
+    let candidate = Settlement {
+        ticket: ticket.clone(),
+        outcome: None,
+        withdrawal_notice: false,
+        cleanup_complete: false,
+        warned: false,
+        extra: Default::default(),
+    };
+    candidate.validate(registration)?;
+    if let Some(existing) = &registration.native_settlement {
+        return (existing.ticket == *ticket)
+            .then_some(())
+            .ok_or("native ticket changed".into());
+    }
+    registration.native_settlement = Some(candidate);
+    Ok(())
 }

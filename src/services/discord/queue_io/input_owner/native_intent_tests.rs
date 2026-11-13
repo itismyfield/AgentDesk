@@ -79,7 +79,33 @@ async fn native_8148_b1_prekey_primary_and_busy_follower_intent_survive_unknown_
                     "expected_transcript":null, "binding_watermark":null}
             }),
         };
+        let boundary_expected = expected.clone();
         let leaf = Box::new(move |_: String| {
+            let before_key =
+                crate::services::tui_input::human_frame::history::v2::Registry::runtime()
+                    .unwrap()
+                    .json()
+                    .unwrap();
+            assert_eq!(
+                before_key["version"], 3,
+                "cold effect must prepare before entering the provider leaf"
+            );
+            let candidates: Vec<_> = before_key["planned"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["native_settlement"]["ticket"]["channel_id"] == channel)
+                .collect();
+            assert_eq!(candidates.len(), 1);
+            let prepared = &candidates[0]["native_settlement"];
+            assert_eq!(
+                prepared["ticket"]["owning_episode"],
+                serde_json::to_value(&boundary_expected).unwrap()
+            );
+            assert_eq!(prepared["ticket"]["channel_id"], channel);
+            assert!(prepared["ticket"]["source"].is_null());
+            assert!(prepared["outcome"].is_null());
+            assert_eq!(prepared["cleanup_complete"], false);
             let observed =
                 tokio::runtime::Handle::current().block_on(inside.v2_request(move |slot| {
                     let owner = slot.as_mut().unwrap();
@@ -104,8 +130,20 @@ async fn native_8148_b1_prekey_primary_and_busy_follower_intent_survive_unknown_
                     );
                     assert_eq!(
                         history.json()?["version"],
-                        2,
-                        "B1 does not activate native ticket writes"
+                        3,
+                        "explicit intent reaches the pre-key ticket port"
+                    );
+                    let saved = history.json()?;
+                    let ticket = &saved["live"][0]["registration"]["native_settlement"];
+                    assert_eq!(
+                        ticket["ticket"]["owning_episode"],
+                        serde_json::to_value(&before).unwrap()
+                    );
+                    assert!(ticket["outcome"].is_null());
+                    assert_eq!(ticket["cleanup_complete"], false);
+                    assert_eq!(
+                        ticket["ticket"]["source"],
+                        saved["live"][0]["registration"]["source"]
                     );
                     Ok(before)
                 }));

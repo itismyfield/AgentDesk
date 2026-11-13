@@ -308,3 +308,112 @@ pub(super) async fn handle_policy_close(
     }
     outcome
 }
+
+/// An inactive native admission carries separate result and cleanup authority.
+#[cfg(all(test, unix))]
+struct NativeAdmission {
+    evidence: crate::services::tui_o::writer::input_facts::native::Evidence,
+    cleanup: Option<(TurnKey, Arc<CancelToken>)>,
+}
+
+#[cfg(all(test, unix))]
+impl NativeAdmission {
+    fn capture(
+        observed: &crate::services::tui_o::writer::input_facts::native::Observation,
+        current: &crate::services::tui_o::writer::input_facts::native::Observation,
+        index: usize,
+        current_target: &serde_json::Value,
+        key: TurnKey,
+        captured_actor: Option<&Arc<CancelToken>>,
+        current_actor: Option<&Arc<CancelToken>>,
+    ) -> Result<Self, String> {
+        use crate::services::tui_input::human_frame::history::v2::native::Disposition;
+        if observed.binding != current.binding
+            || observed.generation != current.generation
+            || observed.binding_seq != current.binding_seq
+            || observed.revision != current.revision
+            || observed.through != current.through
+        {
+            return Err("native observation superseded".into());
+        }
+        let evidence = observed
+            .evidence
+            .get(index)
+            .ok_or("native candidate missing")?;
+        let source = evidence
+            .ticket
+            .source
+            .as_ref()
+            .ok_or("native source missing")?;
+        source.validate(&evidence.ticket.key)?;
+        if observed.binding.provider != crate::services::tui_o::shadow::ShadowProvider::Claude
+            || source.target != *current_target
+            || evidence.namespace.is_empty()
+            || evidence.ticket.channel_id != observed.binding.channel_id
+            || source.provider != "claude"
+            || source.session_id != observed.binding.source.session_id
+            || source.transcript != observed.binding.source.path
+            || source.file != [observed.binding.source.dev, observed.binding.source.ino]
+            || evidence.range.0 < source.offset
+            || evidence.range.0 >= evidence.range.1
+            || evidence.range.1 > observed.through
+        {
+            return Err("native proof source/range mismatch".into());
+        }
+        match evidence.disposition {
+            Disposition::Executed | Disposition::Cancelled => {
+                let membership = evidence
+                    .membership_range
+                    .ok_or("native membership missing")?;
+                let closer = evidence.closer_range.ok_or("native closer missing")?;
+                if evidence.run.is_none()
+                    || membership.0 < source.offset
+                    || membership.0 >= membership.1
+                    || membership.1 != evidence.range.0
+                    || closer.0 < membership.1
+                    || closer.0 >= closer.1
+                    || closer.1 != evidence.range.1
+                {
+                    return Err("native run boundary mismatch".into());
+                }
+            }
+            Disposition::WithdrawnNotExecuted | Disposition::TransferredUnverified => {
+                if evidence.run.is_some()
+                    || evidence.membership_range.is_some()
+                    || evidence.closer_range.is_some()
+                    || evidence.membership_row.is_some()
+                {
+                    return Err("native withdrawal carries run authority".into());
+                }
+            }
+            Disposition::OperatorReleased => {
+                return Err("native observation is not operator release".into());
+            }
+        }
+        let cleanup = match &evidence.ticket.owning_episode {
+            None => None,
+            Some(episode) => {
+                let actor = captured_actor.ok_or("native primary actor missing")?;
+                if key.episode.is_none()
+                    || key.channel_id.get() != evidence.ticket.channel_id
+                    || key.user_msg_id != episode.user_message_id
+                    || key.generation != episode.generation
+                    || !key.matches_episode_nonce(Some(&episode.turn_nonce))
+                    || actor.turn_nonce() != Some(episode.turn_nonce.as_str())
+                    || !current_actor.is_some_and(|current| Arc::ptr_eq(current, actor))
+                {
+                    return Err("native primary episode/actor mismatch".into());
+                }
+                Some((key, actor.clone()))
+            }
+        };
+        Ok(Self {
+            evidence: evidence.clone(),
+            cleanup,
+        })
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "native_input_tests.rs"]
+mod native_input_tests;

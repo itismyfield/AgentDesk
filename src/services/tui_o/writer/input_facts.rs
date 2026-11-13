@@ -91,7 +91,6 @@ pub struct InputFacts {
     restart_stale: bool,
     physical_end_id: Option<String>,
     physical_snapshot: Option<Fingerprint>,
-    #[cfg(test)]
     native_records: Option<Vec<native::Record>>,
 }
 
@@ -160,7 +159,6 @@ impl InputFacts {
             restart_stale: false,
             physical_end_id: None,
             physical_snapshot: None,
-            #[cfg(test)]
             native_records: None,
         })
     }
@@ -453,7 +451,6 @@ impl InputFacts {
             let row = row_key(&value);
             let was_open = matches!(self.state, TurnState::Open { .. });
             let range = (record.start, record.end);
-            #[cfg(test)]
             let event_start = self.events.len();
             for fact in classify(self.binding.provider, &value) {
                 self.saw_turn_evidence |= !matches!(fact, RecordFact::Prompt(false, _));
@@ -532,7 +529,6 @@ impl InputFacts {
             let open = matches!(self.state, TurnState::Open { .. });
             let provider = self.binding.provider;
             self.queued.read(provider, &value, open, open && !was_open);
-            #[cfg(test)]
             if let Some(records) = &mut self.native_records
                 && (classify_queued_record(&value).is_some() || self.events.len() > event_start)
             {
@@ -566,21 +562,30 @@ impl InputFacts {
         })
     }
 
-    #[cfg(test)]
+    pub(crate) fn native_capture_enabled(&self) -> bool {
+        self.native_records.is_some()
+    }
+
     pub(crate) fn observe_native(&mut self) -> Result<(), String> {
-        if self.capture.captured_through() != 0 || self.native_records.is_some() {
+        if !matches!(&self.capture, Capture::Full(_))
+            || self.capture.captured_through() != 0
+            || self.prefix.is_none()
+            || self.native_records.is_some()
+        {
             return Err("native capture must start before the first record".into());
         }
         self.native_records = Some(Vec::new());
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn native_evidence(
         &self,
         registrations: &[native::Registration],
     ) -> Result<Vec<native::Evidence>, String> {
-        if self.halted.is_some() || self.prefix.is_none() {
+        if !matches!(&self.capture, Capture::Full(_))
+            || self.halted.is_some()
+            || self.prefix.is_none()
+        {
             return Err("native evidence requires an authenticated complete prefix".into());
         }
         native::fold(

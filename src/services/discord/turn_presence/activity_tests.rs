@@ -1930,3 +1930,6 @@ pub(super) fn resumed_notice_observations(
     let boundary = strict_reading(&probe).notice_observation();
     (resumed, jobs, boundary)
 }
+
+#[path = "activity_tests/native_input_tests.rs"]
+mod native_input_tests;

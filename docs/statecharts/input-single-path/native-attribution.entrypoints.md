@@ -1,6 +1,6 @@
 # Native input attribution — 진입점 전수표
 
-기준 코드: `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba`. 생산 코드 변경 0.
+최초 설계 전수표의 기준 코드: `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba`. 아래 기존 mutation 표는 그 기준을 유지한다. A/B1/B2a 추가 포트는 마지막 절에 구분한다.
 
 `git grep -n -E <pattern> -- src`의 전 저장소 결과에서 시험 파일·`cfg(test)` 구간·주석을 제외한 호출 및 선언 전수다. 선언/공통 wrapper도 생략하지 않았다. 같은 함수의 여러 호출은 각각 남겼다. 각 표의 모델 행동은 원래 경로의 의미이며 이번 설계가 모든 경로를 변경한다는 뜻이 아니다. 본문의 핵심 actor 분기 표와 함께 읽는다. 메모리/DB getter는 상태를 바꾸지 않아 제외한다. `GuardedClearOutcome::for_snapshot*` 등 별칭의 실제 제거 구현도 inflight 표의 leaf에서 덮는다.
 
@@ -733,3 +733,33 @@ A의 boot fixture는 실제 prepare→custody→reaper 뒤 시험 소비자가 �
 | `src/services/tui_input/human_frame/history/v2/native.rs:183` `native_evidence_registrations` | 기존 abandoned no-key 등록과 결과/cleanup 완료를 새 membership 후보에서 제외. 저장된 결과·boot custody 소비는 B2다. |
 
 B1에는 mailbox turn lease acquire/release, inflight create/delete, owner kick의 새 진입점이 없다. 기존 전수표는 유지한다. `NativeInputPreparation.phase`의 Intent/Prepared/Unknown/NotSent는 위 준비 경계의 추상 이름이며 별도 운영 상태 파일·전역 guard가 아니다. 이 모델의 result=None은 B1이 native finalization을 켜지 않는 범위이며 B2 결과/CAS/row/wake 진행성을 대신하지 않는다.
+
+
+## B2a 추가 포트 (B1 head 이후)
+
+| 코드 접점 | 모델 행동·권한 | 이번 변경 |
+|---|---|---|
+| `src/services/turn_orchestrator/queued_head/v2/sources.rs::Owner::prepare_history` → `history/v2/native.rs::Registry::prepare_native_intent` | Prepare. 기존 cold effect의 prepare-before-arm 경계 | 명시 intent가 있을 때만 v3 ticket 보존. 운영 intent producer는 아직 없음. lease/inflight/kick 변경0 |
+| `src/services/tui_o/writer/input_facts.rs::{observe_native,native_evidence}` 및 `input_facts/native.rs::fold` | Enqueue/Dequeue/Withdraw/MidTurnJoin/OwnStart/Duration | 동일 full capture의 후보만; receipt·source·FIFO 유일성, popAll은 debt 없음 |
+| `src/services/discord/turn_presence/activity.rs::{read_from,read_tail}` → `activity/native_input.rs::prepare` | Reconstruct. full prefix 없으면 native 후보 없음 | worker/tail 설치. aggregate activity 판정·lease 변화 없음 |
+| `activity.rs::{judge_with_policy,install}` → `activity/native_input.rs::{observe,snapshot}` | ObserveProof 전 read-only 후보 | 현재 binding/generation/seq/revision/through만 stamp. result writer/actor/wake 연결0 |
+| `src/services/discord/turn_finalizer/terminal_handler.rs::NativeAdmission::capture` | typed admission의 비활성 정밀화 | cfg(all(test,unix)). source/range/target/episode/actor 검증만, mutator 없음 |
+
+새 lease 취득/해제·inflight 생성/삭제·queue kick 진입점은 없다. `activity::Watch`의 generation/revision과 `Key.seq`, `InputFacts`의 complete-line through, 기존 `SourceBinding/Source` 및 A ticket/episode 필드만 모델 값으로 사용한다. source 분류와 Cancel/Terminate/clear/stop/turn-lease release 전수는 d1 설계 표와 위 baseline mutation 표를 유지하며 B2b에서 공통 결과 CAS에 연결한다.
+
+### B2a 좌표 고정
+
+| file:line (수리 후 정본) | 함수 |
+|---|---|
+| `src/services/turn_orchestrator/queued_head/v2/sources.rs:177` | `prepare_history` |
+| `src/services/tui_input/human_frame/history/v2/native.rs:226` | `prepare_native_intent` |
+| `src/services/tui_o/writer/input_facts.rs:569` | `observe_native` |
+| `src/services/tui_o/writer/input_facts.rs:581` | `native_evidence` |
+| `src/services/tui_o/writer/input_facts/native.rs:173` | `fold` |
+| `src/services/discord/turn_presence/activity.rs:970` | `read_from` |
+| `src/services/discord/turn_presence/activity.rs:949` | `read_tail` |
+| `src/services/discord/turn_presence/activity.rs:583` | `judge_with_policy` |
+| `src/services/discord/turn_presence/activity.rs:885` | `install(watch` |
+| `src/services/discord/turn_presence/activity/native_input.rs:24` | `snapshot` |
+| `src/services/discord/turn_presence/activity/native_input.rs:7` | `prepare` |
+| `src/services/discord/turn_finalizer/terminal_handler.rs:321` | `capture(` |

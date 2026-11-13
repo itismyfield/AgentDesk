@@ -10,7 +10,6 @@ pub(super) fn identity(item: &PendingQueueItem) -> QueueIdentity {
 }
 
 impl Owner {
-    #[cfg(test)]
     pub(crate) fn native_intent(
         &self,
     ) -> Result<Option<crate::services::tui_input::human_frame::history::v2::native::Episode>, String>
@@ -184,13 +183,36 @@ impl Owner {
             .head_injection
             .as_ref()
             .ok_or("no selected input")?;
+        let namespace = self
+            .snapshot
+            .namespace
+            .as_deref()
+            .ok_or("missing namespace")?;
         history.prepare(
-            self.snapshot
-                .namespace
-                .as_deref()
-                .ok_or("missing namespace")?,
+            namespace,
             &serde_json::to_value(input).map_err(|e| e.to_string())?,
-        )
+        )?;
+        if let Some(value) = input
+            .payload
+            .as_ref()
+            .and_then(|p| p.attribution.get("native_intent"))
+        {
+            use crate::services::tui_input::human_frame::history::v2::native::Intent;
+            let intent: Intent =
+                serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            self.native_intent()?;
+            let key = serde_json::json!({"identity":input.identity,"attempt":input.attempt});
+            if key["attempt"]["provider"] != "claude" {
+                return Err("native intent requires Claude".into());
+            }
+            history.prepare_native_intent(
+                namespace,
+                &key,
+                input.original.channel_id.ok_or("native channel missing")?,
+                &intent,
+            )?;
+        }
+        Ok(())
     }
     #[cfg(test)]
     pub(crate) fn bind_source(

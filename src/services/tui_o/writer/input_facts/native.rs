@@ -1,9 +1,6 @@
 //! Claude native input record classification and inactive source-bound membership evidence.
-#[cfg(test)]
 use self::classify as classify_queued_record;
-#[cfg(test)]
 use super::{Ordered, SourceBinding};
-#[cfg(test)]
 use crate::services::tui_input::human_frame::history::v2::native::{
     Disposition, Ticket, frame_hashes,
 };
@@ -76,7 +73,6 @@ fn body(value: &Value) -> Option<String> {
     }
 }
 
-#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct Registration {
     pub(crate) namespace: String,
@@ -85,22 +81,47 @@ pub(crate) struct Registration {
     pub(crate) receipts: Vec<String>,
 }
 
-#[cfg(test)]
+impl Registration {
+    pub(crate) fn matches(&self, binding: &SourceBinding) -> bool {
+        binding.provider == super::ShadowProvider::Claude
+            && self.ticket.channel_id == binding.channel_id
+            && self.ticket.source.as_ref().is_some_and(|s| {
+                s.provider == "claude"
+                    && s.session_id == binding.source.session_id
+                    && s.transcript == binding.source.path
+                    && s.file == [binding.source.dev, binding.source.ino]
+                    && s.target == self.ticket.key["attempt"]["target"]
+                    && s.target["execution_nonce"]
+                        .as_str()
+                        .is_some_and(|n| !n.is_empty())
+            })
+    }
+}
+
+/// A candidate batch is read-only; its stamp is rechecked before any future actor mutation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct Observation {
+    pub(crate) binding: SourceBinding,
+    pub(crate) generation: u64,
+    pub(crate) binding_seq: u64,
+    pub(crate) revision: u64,
+    pub(crate) through: u64,
+    pub(crate) evidence: Vec<Evidence>,
+}
+
 pub(super) struct Record {
     pub(super) range: (u64, u64),
     pub(super) value: Value,
     pub(super) boundaries: Vec<Ordered>,
 }
 
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Run {
     pub(crate) start: u64,
     pub(crate) native_id: Option<String>,
 }
 
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Evidence {
     pub(crate) namespace: String,
     pub(crate) ticket: Ticket,
@@ -112,7 +133,6 @@ pub(crate) struct Evidence {
     pub(crate) disposition: Disposition,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Waiting,
@@ -121,7 +141,6 @@ enum Stage {
     Running,
     Removed,
 }
-#[cfg(test)]
 struct Input {
     body: String,
     owner: Option<usize>,
@@ -130,10 +149,15 @@ struct Input {
     fifo: bool,
     command: bool,
     absorbed: bool,
-    pending: Option<((u64, u64), Option<String>)>,
+    pending: Option<PendingMembership>,
 }
 
-#[cfg(test)]
+#[derive(Clone)]
+struct PendingMembership {
+    range: (u64, u64),
+    row: Option<String>,
+}
+
 #[derive(Clone)]
 struct Member {
     run: Run,
@@ -141,13 +165,11 @@ struct Member {
     row: Option<String>,
 }
 
-#[cfg(test)]
 fn same_body(a: &str, b: &str) -> bool {
     let hashes = frame_hashes(a);
     frame_hashes(b).iter().any(|hash| hashes.contains(hash))
 }
 
-#[cfg(test)]
 pub(super) fn fold(
     binding: &SourceBinding,
     records: &[Record],
@@ -156,20 +178,10 @@ pub(super) fn fold(
     if binding.provider != super::ShadowProvider::Claude {
         return Ok(vec![]);
     }
-    let matches_source = |r: &&Registration| {
-        r.ticket.channel_id == binding.channel_id
-            && r.ticket.source.as_ref().is_some_and(|s| {
-                s.provider == "claude"
-                    && s.session_id == binding.source.session_id
-                    && s.transcript == binding.source.path
-                    && s.file == [binding.source.dev, binding.source.ino]
-                    && s.target == r.ticket.key["attempt"]["target"]
-                    && s.target["execution_nonce"]
-                        .as_str()
-                        .is_some_and(|n| !n.is_empty())
-            })
-    };
-    let registered: Vec<_> = registrations.iter().filter(matches_source).collect();
+    let registered: Vec<_> = registrations
+        .iter()
+        .filter(|r| r.matches(binding))
+        .collect();
     let mut inputs: Vec<Input> = vec![];
     let mut run: Option<Run> = None;
     let mut member: Vec<Option<Member>> = vec![None; registered.len()];
@@ -203,7 +215,7 @@ pub(super) fn fold(
                         if !accepts_row(registration, &record.value) || member[owner].is_some() {
                             continue;
                         }
-                        let Some((pending_range, pending_row)) = &input.pending else {
+                        let Some(pending) = &input.pending else {
                             continue;
                         };
                         let prompt_matches = classify_queued_record(&record.value)
@@ -213,12 +225,12 @@ pub(super) fn fold(
                             range: if prompt_matches {
                                 record.range
                             } else {
-                                *pending_range
+                                pending.range
                             },
                             row: if prompt_matches {
                                 record.value["uuid"].as_str().map(str::to_string)
                             } else {
-                                pending_row.clone()
+                                pending.row.clone()
                             },
                         });
                         input.stage = Stage::Running;
@@ -305,7 +317,10 @@ pub(super) fn fold(
                     input.fifo = false;
                     if input.stage == Stage::Waiting {
                         input.stage = Stage::Taken;
-                        input.pending = Some((record.range, None));
+                        input.pending = Some(PendingMembership {
+                            range: record.range,
+                            row: None,
+                        });
                     }
                 } else {
                     unmatched_dequeue = true;
@@ -418,10 +433,10 @@ pub(super) fn fold(
                     input.command |= command;
                     input.absorbed |= absorption;
                     input.fifo = false;
-                    input.pending = Some((
-                        record.range,
-                        record.value["uuid"].as_str().map(str::to_string),
-                    ));
+                    input.pending = Some(PendingMembership {
+                        range: record.range,
+                        row: record.value["uuid"].as_str().map(str::to_string),
+                    });
                     input.stage = if run.is_some() {
                         Stage::Running
                     } else {
@@ -453,7 +468,6 @@ pub(super) fn fold(
         .collect())
 }
 
-#[cfg(test)]
 fn accepts_row(registration: &Registration, value: &Value) -> bool {
     registration.receipts.is_empty()
         || value["uuid"]
@@ -461,7 +475,6 @@ fn accepts_row(registration: &Registration, value: &Value) -> bool {
             .is_some_and(|uuid| registration.receipts.iter().any(|known| known == uuid))
 }
 
-#[cfg(test)]
 fn settle_removed(
     input: &mut Input,
     end: u64,
