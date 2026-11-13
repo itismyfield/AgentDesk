@@ -228,6 +228,7 @@ fn init_takeover(channel: u64, sources: &[crate::services::tui_o::shadow::Source
     let root = crate::config::runtime_root().unwrap();
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root);
     let init = Initialized {
+        policy_parent: None,
         channel,
         sources: (sources.iter())
             .map(|source| InitSource {
@@ -242,7 +243,7 @@ fn init_takeover(channel: u64, sources: &[crate::services::tui_o::shadow::Source
     };
     let store = store.unwrap().unwrap();
     store
-        .init_channel_as(&init, InitOrigin::LateCodexTakeover)
+        .init_fixture_channel_as(&init, InitOrigin::LateCodexTakeover)
         .unwrap();
 }
 

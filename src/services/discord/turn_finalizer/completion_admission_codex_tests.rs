@@ -202,6 +202,7 @@ fn init_from_start(
     use crate::services::tui_o::store::{InitSource, Initialized, OStore, StoreConfig};
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root);
     let init = Initialized {
+        policy_parent: None,
         channel: CHANNEL,
         sources: vec![InitSource {
             source_id: source.clone(),
@@ -213,7 +214,7 @@ fn init_from_start(
         at: chrono::Utc::now(),
     };
     let store = store.unwrap().unwrap();
-    store.init_channel_as(&init, origin).unwrap();
+    store.init_fixture_channel_as(&init, origin).unwrap();
     assert_eq!(store.read_init_origin(CHANNEL).unwrap(), origin);
 }
 

@@ -186,8 +186,9 @@ impl Harness {
             .unwrap()
             .unwrap();
         store
-            .begin_era(&[channel], Utc::now(), |channel| {
+            .begin_fixture_era(&[channel], Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![InitSource {
                         source_id: source.clone(),

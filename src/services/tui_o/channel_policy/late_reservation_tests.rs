@@ -137,6 +137,7 @@ fn cleanup_before_first_poll_and_panic_releases_absent_store() {
 #[cfg(unix)]
 fn init() -> Initialized {
     Initialized {
+        policy_parent: None,
         channel: 41,
         sources: Vec::new(),
         initial_anchor: 0,
@@ -159,9 +160,11 @@ fn cleanup_settles_published_init_and_orphan_before_releasing() {
             .unwrap()
             .unwrap();
         if sealed {
-            store.begin_era(&[41], init().at, |_| Ok(init())).unwrap();
+            store
+                .begin_fixture_era(&[41], init().at, |_| Ok(init()))
+                .unwrap();
         } else {
-            store.init_channel(&init()).unwrap();
+            store.init_fixture_channel(&init()).unwrap();
         }
         drop(guard);
         assert_eq!(
