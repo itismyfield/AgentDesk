@@ -7,8 +7,10 @@ use sha2::{Digest, Sha256};
 
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId, SourceRange, UnitKey, UnitKind};
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
+pub(super) mod settlement;
+pub use settlement::{Settled, Settlement};
 
-type RecordId = (SourceId, u64, u64);
+pub(crate) type RecordId = (SourceId, u64, u64);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoticeEvidence {
@@ -52,6 +54,10 @@ pub struct MigrationSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NoticeEntry {
+    Settled {
+        record: SourceRange,
+        settlement: Box<Settlement>,
+    },
     Materialized {
         evidence: Box<NoticeEvidence>,
     },
@@ -77,6 +83,8 @@ pub struct MigrationDebt {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NoticeState {
+    pub settled: HashMap<RecordId, Settlement>,
+
     pub migration: Option<MigrationSnapshot>,
     pub frozen_at: Option<chrono::DateTime<chrono::Utc>>,
     pub evidence: HashMap<RecordId, NoticeEvidence>,
@@ -189,6 +197,7 @@ impl MigrationSnapshot {
 impl NoticeState {
     pub(super) fn apply(&mut self, entry: NoticeEntry) -> Result<Option<UnitKey>, String> {
         match entry {
+            NoticeEntry::Settled { record, settlement } => return self.settle(record, *settlement),
             NoticeEntry::MigrationStarted { snapshot } => {
                 let mut sources = HashSet::new();
                 if snapshot.sources.iter().any(|source| {
@@ -241,7 +250,15 @@ impl NoticeState {
                         return Err("input notice UUID changed its content".into());
                     }
                 }
+                let terminal_key = self
+                    .settled
+                    .contains_key(&id)
+                    .then(|| next.unit_key.clone())
+                    .flatten();
                 self.evidence.insert(id, next);
+                if terminal_key.is_some() {
+                    return Ok(terminal_key);
+                }
             }
             NoticeEntry::LegacyImported { input_key, msg_id } => {
                 let mut digest = None;

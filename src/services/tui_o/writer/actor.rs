@@ -519,6 +519,7 @@ where
 }
 
 mod fresh_resume;
+mod notice_settlement;
 mod notice_work;
 #[cfg(test)]
 pub(crate) use fresh_resume::work_for_tests;

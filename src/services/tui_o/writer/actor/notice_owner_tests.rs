@@ -891,3 +891,6 @@ async fn notice_owner_keeps_distinct_v2_identities_with_same_nonce() {
 async fn notice_owner_keeps_distinct_v2_namespaces_with_same_nonce() {
     repeated_nonce_case(true).await;
 }
+
+#[path = "notice_settlement_tests.rs"]
+mod settlement_regression;

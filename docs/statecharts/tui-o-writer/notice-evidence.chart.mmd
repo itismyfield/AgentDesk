@@ -1,7 +1,7 @@
 stateDiagram-v2
     [*] --> Absent
     Absent --> Pending: complete native record materialized durably
-    Pending --> Pending: reason rotates / durable first log only
+    Pending --> Pending: reason rotates / first log per process only
     Pending --> Excluded: exact Owned or existing no-notice policy proof
     Pending --> Expired: same exemption proof + proven closed session
     Pending --> Prepared: direct Unowned + final admission + migration ready
@@ -9,7 +9,7 @@ stateDiagram-v2
     EffectUnknown --> Posted: existing history confirmation
     Prepared --> Posted: confirmed POST
     Pending --> Pending: session boundary without exemption proof
-    Pending --> Pending: restart replays evidence and logged bit
+    Pending --> Pending: restart replays evidence; one new log allowed
     Excluded --> Excluded: restart preserves terminal proof
     Expired --> Expired: restart preserves terminal proof
     Posted --> Posted: restart preserves posted identity

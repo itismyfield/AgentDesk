@@ -2,10 +2,10 @@
 
 기준: `79bebdd4eaa29b289bf88412825baa7d70a6ac77` (2026-11-13 12:00 KST main).
 정본 입력: `/home/adk/adk/lane-runs/i8112/issue-and-comments.md` 전체.
-상태: **설계, 독립 리뷰 전**. production 변경·cargo·운영 변경·배포는 하지 않았다.
+상태: 독립 설계 리뷰 CLEAN 후 구현. 리뷰의 네 권고(scope 세대 캐시, retained Discord proof 범위, 메모리 로그, source 경계 fairness)를 구현 계약에 반영했다. 운영 변경·배포는 하지 않는다.
 
 목표는 입력 접수나 실행 권한을 바꾸지 않고, notice 게시 의무가 없다는 증거가 있는
-record를 durable 종결하고 나머지 record의 pending 로그를 수명 전체에서 한 번으로 제한하는 것이다.
+record를 durable 종결하고 나머지 record의 pending 로그를 실행 수명에서 한 번으로 제한하는 것이다. 재시작 뒤 추가 한 번은 허용한다.
 세션이 바뀌었다거나 오래되었다는 사실만으로 직접 입력의 게시 의무를 없애지 않는다.
 
 ## 관측과 main에 이미 있는 기능
@@ -65,7 +65,7 @@ relevant 99, sha256 약 300, pane_liveness 314+207, legacy-body-census-writer 73
 | durable state의 이관 소비 | `O/store/ledger/input_notices.rs:246`, `:284`; `O/store/ledger.rs:449` | Imported→Excluded, unresolved는 감사 부채; 새로운 proof 없는 무조건 청소 불가 |
 | 실제 게시/재시도/확인 | `O/writer/deliver.rs:589`, `:621`, `:850`; `O/writer/local_retry/notice_selection.rs:12` | Prepared/Posted/NotFound/Ambiguous; unresolved POST와 local retry는 만료로 대체 불가 |
 | debt/retention/queued 소비 | `O/writer/actor/notice_work.rs:390`, `:434`, `:457`; `O/writer/actor.rs:729`, `:835` | debt count와 raw-independent/notice-only 판정 모두 새 terminal을 보아야 함 |
-| memory reset/로그 수명 | `O/writer/deliver.rs:204`, `:265`; `O/writer/actor/notice_work.rs:267`, `:330`, `:353` | 현 HashMap<RecordId,String>은 restart와 eligible 전환에 지워짐; record 평생 1회를 보장하지 않음 |
+| memory reset/로그 수명 | `O/writer/deliver.rs:204`, `:265`; `O/writer/actor/notice_work.rs:267`, `:330`, `:353` | 기준 main의 HashMap<RecordId,String>은 restart와 eligible 전환에 지워짐; 새 구현은 nonterminal 동안 유지 |
 
 모델 값은 이 표에서만 추상화했다. RecordId는 `(SourceId,start,end)`, InputClass는
 native 귀속 증거의 owned/direct 또는 기존 renderer가 거부하는 policy, proof unknown은
@@ -111,7 +111,7 @@ main은 이미 **resume + exact expected native session**인 경우를 처리한
 순서:
 
 1. 기존 원본 검증을 통과한 Materialized를 읽고 이미 terminal인 record를 제거한다.
-2. 원본만으로 **기존 정책상** notice 불필요인 record를 origin 복구·tmux authority 전에 종결한다.
+2. 원본만으로 **기계 입력/local-only 정책상** notice 불필요인 record를 origin 복구·tmux authority 전에 종결한다. retained Discord 헤더 bool은 Policy proof로 사용하지 않는다.
    새 명확한 Discord 입력은 기존 Ok(None) 경로를 유지한다. 재생된 pending에 대해서만 감사 종결을 쓴다.
 3. retained injection은 source-bound native receipt 또는 stable census의 Owned를 확인한다.
    원본 UUID/frame digest, full source identity, namespace+전체 attempt key, source expectation,
@@ -133,13 +133,15 @@ main은 이미 **resume + exact expected native session**인 경우를 처리한
 
 ### Durable 종결과 만료 규칙
 
-새 `NoticeEntry::Settled { record, disposition, proof }`를 도입한다.
-disposition은 `not_required` 또는 `expired`; Posted/기존 Excluded/LegacyImported는 그대로 terminal이다.
-proof는 버전 있는 typed enum으로 원본 digest와 정책 종류 또는 정확한 native ownership 증거,
+새 `NoticeEntry::Settled { record, settlement }`를 도입했다.
+settlement는 typed proof와 optional `expired_after`를 갖는다. None은 not_required, 검증된 boundary seq가
+있으면 expired이며 Posted/기존 Excluded/LegacyImported는 그대로 terminal이다.
+proof는 unknown field를 거절하는 typed enum으로 원본 digest와 정책 종류 또는 정확한 native ownership 증거,
 그리고 expired인 경우 경계 seq/이전 source와 execution을 가진다. 단순 reason 문자열은 허용하지 않는다.
 `NoticeState`에 RecordId별 terminal map과 열린 record index를 재생한다. raw evidence는 삭제하지 않는다.
 키 있는 종결은 기존 Excluded 소비자에도 반영하되 하나의 ledger entry apply로 함께 바뀐다.
 키 없는 non-notice도 record terminal로 감사 가능하다. 같은 proof 재생은 멱등, 충돌은 violation이다.
+terminal 뒤 native key 보강은 같은 ledger apply에서 Excluded 인덱스에도 반영해 종결을 다시 열지 않는다.
 
 | 조건 | 허용 동작 | 금지 동작 |
 |---|---|---|
@@ -168,17 +170,26 @@ format floor `1\n`은 notice 기능이 필요한 ledger라는 현재 의미로 �
 호환되지 않는 구 binary로의 rollback은 ledger를 읽지 못할 수 있다. 자동 변환/삭제/구 binary 배포 허용을
 추가하지 않으며, unsupported-entry의 파일 bytes 보존을 시험 계약으로 둔다.
 
+### 구현 진입점 보완 (현재 코드)
+
+| 읽기/갱신 지점 | 값과 역할 |
+|---|---|
+| `store/ledger/input_notices/settlement.rs`의 revision/terminal/settle/apply | revision은 immutable evidence의 optional 필드 존재 bit와 unresolved bit; terminal map은 source/range별 proof와 optional boundary seq |
+| `history/notice_owner/generation.rs`의 WorkCache::select/track_contexts/retry | scope별 history/native/context/binding fingerprint와 cursor, record revision, 실행별 quick retry 사용 여부/기한 |
+| `history/notice_owner.rs`의 Scope::current/Batch::refresh/decision/owned_proof | scope 재사용, context unreadable 진단, full source/UUID 귀속 proof; 정상 정착은 source 교체 불필요 |
+| `writer/actor/notice_settlement.rs`의 changed_notices/settle_notice/boundary | source+UUID 또는 machine/local-only Policy 종결, strict original+successor binding 검증, no prepared send |
+| `writer/actor/notice_work.rs`의 prepare_notices/defer_notice | changed record만 raw clone/authority 준비; 최초 삽입만 로그하고 eligible 때 맵 유지 |
+
 ### pending 로그
 
-새 `NoticeEntry::PendingObserved { record, first_reason }`를 최초 defer 전에 한 번 append한다.
-`NoticeState`는 record별 durable logged set을 복원한다. 이미 logged이면 사유가 회전하거나
-eligible→pending을 왕복해도 다시 info를 쓰지 않는다. actor 메모리 맵의 last reason은 진단용으로만
-갱신하고 로그의 생사를 결정하지 않는다. 재시작도 같은 record를 재로깅하지 않는다.
-append 뒤 log 전 crash는 로그 0회일 수 있으나 감사 entry가 남는다. append 실패는 성공 로그를 남기지 않는다.
+기존 `notice_pending` 메모리 맵을 nonterminal record가 남는 실행 수명 동안 유지한다.
+최초 삽입에만 info를 쓰고 이후에는 reason만 갱신한다. eligible→pending 왕복에서 맵을 지우지 않고,
+terminal이 된 record만 제거한다. 재시작은 맵이 비어 추가 한 번을 허용한다.
+정보 로그 억제를 위한 durable ledger entry는 추가하지 않는다.
 
-선택적인 60초 요약은 channel/pending_records/not_required/expired/incomplete/prepared 수를
-한 줄로 쓰되 `remains pending` 문자열은 개별 첫 발생에만 쓴다. timer는 관측용이며 만료/재시도 근거가 아니다.
-요약 0은 활성 index와 실제 ledger/owed의 차집합을 확인한 결과여야 하며 log map 크기로 계산하지 않는다.
+이번 구현은 별도 주기 요약 로그를 추가하지 않는다. pending 수는 ledger의 Settled/Excluded/Posted와
+미정착 evidence 및 owed에서 계산하며 log map 크기로 계산하지 않는다. `remains pending`은 실행별 최초
+defer에만 쓴다. 운영의 채널별 record 수는 coordinator가 배포 뒤 ledger 기준으로 대조한다.
 
 ## 상태 차트와 liveness 범위
 
@@ -190,7 +201,7 @@ blocked self-wake 규칙을 함께 검사한다. 기존 BootSpec과 InputNoticeS
 수정 없이 재검증했다. 개별 record 만료 모델이 pairing 알고리즘을 대신 증명한다고 주장하지 않는다.
 
 INVARIANT: 직접 입력 게시 정확히 1, 조용한 유실 0, 면제 proof 없는 종결 0,
-게시해야 할 direct의 만료 0, Prepared 보존, 재생 시 terminal 보존, record당 pending 로그 최대 1.
+게시해야 할 direct의 만료 0, Prepared 보존, 재생 시 terminal 보존, record당 실행 수명별 pending 로그 최대 1(재시작 후 추가 1 허용).
 PROPERTY: `EveryPendingTerminates`는 pending → eventually Posted/Excluded/Expired이다.
 세 경로 중 Excluded는 notice 불필요의 정착이며 입력 실행/답변 완료와는 별개다.
 
@@ -208,11 +219,14 @@ GREEN의 환경 전제는 필요한 원본/귀속 증거가 결국 확보되고,
 | AfterOwned / AfterPolicy / AfterDirect | 모든 safety/선택 PROPERTY GREEN | 동일 |
 | NoSettle (원인 제거) | EveryPendingTerminates RED | 동일 |
 | ExpireUnproven | NoQuietLoss, NoExpireOwedDirect, DirectEventuallyPosted RED | 동일 |
-| ReasonLog / DropLog | PendingLoggedOnce RED | 동일 |
+| ReasonLog | PendingLoggedOnce RED | 동일 |
+| DropLog (이제 수용하는 재시작 초기화) | 실행별 1회 GREEN | 동일 |
+| SameSource / Boundary | source 유지/별도 경계 fairness 모두 GREEN | 동일 |
+| WaitBoundary | source 유지 중 EveryPendingTerminates RED | 동일 |
 | DropReplay | ReplayKeepsTerminal RED | 동일 |
 | Unavailable | EveryPendingTerminates RED | 동일 |
 
-14 config, checker 실패 0(예상 RED 포함), fairness precheck·singleton temporal 실행을 포함한다.
+17 config, checker 실패 0(예상 RED 포함), fairness precheck·singleton temporal 실행을 포함한다.
 모델 GREEN은 Rust 회귀 시험 통과나 운영 pending 0/CPU 개선의 증거가 아니다.
 
 ## CPU와 배포 뒤 수치 계약
@@ -223,14 +237,19 @@ terminal index를 prepare, Batch::refresh, migration work, debt 계산에 공통
 전체 356이 아니라 열린 record/scope 수에 비례한다. 전체 evidence의 가벼운 set membership 순회는
 남을 수 있으나 종결된 record에 대한 원본 clone·SHA·origin 복구·context/pane 조회는 0이어야 한다.
 
-추가 "변화 없음" record verdict 캐시는 이번 설계에 넣지 않는다. Busy/Pending을 cached verdict로
-고정하면 복구 이벤트를 놓칠 수 있고, A의 native fingerprint 캐시와 다른 무효화 계약이 필요하다.
-정착 후에도 열린 집합이 클 경우 별도 측정으로 snapshot generation 캐시를 설계한다.
+메모리상 scope별 dependency 세대 캐시를 둔다. evidence revision, history/native/context/binding의
+파일 fingerprint, capture cursor를 비교해 같으면 원본 clone·origin 복구·snapshot/context·authority
+재계산을 생략한다. context가 아직 없을 때도 경로를 관찰해 생성/교체가 세대를 바꾸게 한다.
+관측 불가능한 오류/authority busy에는 5초 간격의 제한 재평가를 허용한다. 같은 source 파일을 읽던
+일시 native I/O 오류에는 기존 즉시 복구 계약을 지키는 재시도 한 번을 허용하고, 반복 오류는 5초로 제한한다.
+최종 게시 admission은 캐시하지 않으며 실제 POST 때 기존 fence/snapshot 검증을 다시 한다.
+A의 native census 캐시와 역할이 다르고, pending verdict 자체가 영구 결론으로 승격되지 않는다.
+
 legacy-body-census-writer의 독립 CPU는 이번 notice 정착만으로 해소됐다고 주장하지 않는다.
 
 | 배포 뒤 동일 10분 창의 지표 | 이전 | 목표/판정 |
 |---|---|---|
-| 개별 `input notice remains pending` 줄 | 2,802/10분 | 동일 record 신규 줄 0; 총 줄 ≤ 창 안에서 처음 PendingObserved를 쓴 distinct record 수. 기존 미로깅 record의 최초 1회는 별도 집계 |
+| 개별 `input notice remains pending` 줄 | 2,802/10분 | 동일 record 신규 줄 0; 총 줄 ≤ 창 안에서 실행별 처음 defer된 distinct record 수. 기존 미로깅 record와 재시작의 최초 1회는 별도 집계 |
 | adk-cc pending record | 356 (header 시작 311) | proof가 있는 Discord/정책 record는 0 pending; 종료 시 `356 - 실제 terminal + 신규 - 신규 terminal` 대조. 311 전부 proof 확인 시 기존 잔여 상한 45 |
 | 나머지 10채널 | 채널별 수 미제공 | 배포 전/후 distinct RecordId 수를 각 채널별로 남김. 합계/로그줄을 record 수로 오인하지 않음 |
 | known terminal 재평가 | tick마다 evidence 스캔 | origin/owner/SHA/pane 수행 0, 재시작 후에도 동일 |
@@ -242,7 +261,7 @@ legacy-body-census-writer의 독립 CPU는 이번 notice 정착만으로 해소�
 
 | 조각 | 파일 계획 | prod 순 코드 추정 |
 |---|---|---|
-| S1 durable terminal/logged proof와 replay | ledger/input_notices.rs, 새 input_notices/settlement.rs, ledger.rs 연결 | +250 |
+| S1 durable terminal proof와 replay | ledger/input_notices.rs, 새 input_notices/settlement.rs, ledger.rs 연결 | +250 |
 | S2 원본/귀속 proof와 세션 경계 정착 | 새 history/notice_owner/settlement.rs, notice_owner.rs 연결, 새 actor/notice_settlement.rs, notice_work.rs 연결 | +400 |
 | S3 terminal 소비/로그/계측 | migration.rs, admission.rs, notice_work.rs, deliver.rs의 선언/연결 | +120 |
 | 시험 | 기존 input_notices/tests.rs와 notice_owner_tests.rs, 새 notice_settlement_tests.rs, notice_work_tests.rs | 테스트 +450~650 (prod cap 제외) |
@@ -258,15 +277,14 @@ prod 약 10파일 / +770, 불확실성 여유 +300까지도 PLAN 선 +1200 이�
 | 신규/복원 Discord exact row | valid UUID+source receipt, fresh/same-source resume/과거 incarnation 각각. receipt 없는 foreign nonce/path/file/offset은 계속 보존 |
 | 직접 twin 보존 | 동일 body/전체 frame 뒤의 다른 UUID는 정확히 POST 1; receipt/정착에 이전 attempt 재사용 금지 |
 | 11-10형 오래된 record | closed+no-obligation proof만 expired, 같은 시각/경계의 owed direct는 게시/복구 계속 |
-| 로그 | reason 4종 회전, eligible 왕복, 재시작 전후 모두 PendingObserved/로그 ≤1; 로깅 실패·원본 충돌 경계 포함 |
+| 로그 | reason 4종 회전, eligible 왕복, 실행별 로그 ≤1(재시작 후 추가1 허용); 로깅 실패·원본 충돌 경계 포함 |
 | 경계/경합 | clear 직전/직후, A→B→A, context/history/native stamp를 판정 직후 변경, Prepared/uncertain POST 중 경계 변경: 직접 입력 소실·중복 0 |
 | 옛 형식/복원 | floor1·V1·V2 passive/PreSource·key 없는 evidence; terminal append crash 전후; unknown variant 구 reader는 bytes 동일하게 거절 |
 | 무거운 반복 비용 | 356 fixture 중 311에 실제 면제 proof 부여. 정착 후 반복 prepare에서 settled record별 origin/owner/SHA/pane 재계산 0, 새 direct fixture는 게시 |
 | migration/retention | unresolved candidate 예약 유지; terminal은 migration completeness를 막지 않음; raw 독립성/debt/owed가 같은 terminal 판단 사용 |
-| 원인 제거 뮤턴트 | 정착 연결 제거→pending 재현, logged 조회 제거→사유 회전/재시작 로그 재현, expiry 면제 guard 제거→direct 소실; 복원 bytes SHA256 동일 |
+| 원인 제거 뮤턴트 | 정착 연결 제거→pending 재현, 최초 삽입 guard 제거→사유 회전 로그 재현, expiry 면제 guard 제거→direct 소실; 복원 bytes SHA256 동일 |
 
 구현 검증은 cargo-shim + 지정 profile, 기본 시험 병렬, 필요한 PG 시험은 pg_throwaway로 실행한다.
 notice/input 접수 기존 시험을 재사용하고 자기 파일 clippy 경고 0을 확인한다. 새 lib 시험 ID는
 required PR job이 선택하도록 공식 inventory/lane check로 확인한다. source_scan_readers failed 0 및
-prepush --static-only의 PREPUSH_STATIC_OK 후에만 REVIEW_READY를 낸다. 설계 단계에서는 이 시험들을
-실행하지 않았으므로 0 tests/PASS로 표기하지 않는다. 독립 설계 리뷰가 끝나기 전 구현을 시작하지 않는다.
+prepush --static-only의 PREPUSH_STATIC_OK 후에만 REVIEW_READY를 낸다. 구현 검증 결과와 실행 수는 레인 report-impl-b1.md에 기록하며 미실행을 0 tests/PASS로 표기하지 않는다.

@@ -6,6 +6,7 @@ use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 use std::collections::{HashMap, HashSet};
 
 mod census;
+pub(crate) mod generation;
 #[cfg(all(test, unix))]
 pub(crate) use census::tests::{Stage as CensusStage, fail_once as fail_census_once};
 
@@ -16,16 +17,52 @@ pub(crate) enum Decision {
     Pending(&'static str),
 }
 
-type Stamp = ([u64; 2], u64, std::time::SystemTime);
+type Stamp = Fingerprint;
+struct ContextObservation {
+    stamp: Option<Stamp>,
+    unavailable: bool,
+}
+type Contexts = HashMap<PathBuf, ContextObservation>;
 type Answers = HashMap<String, (u64, Vec<String>, Decision)>;
 
 struct Scope {
     origin: NoticeOrigin,
-    executions: HashMap<PathBuf, Stamp>,
+    executions: Contexts,
+    history_stamp: Option<Stamp>,
+    binding_stamp: Option<Fingerprint>,
+    observed_native: Option<Fingerprint>,
+    prefix: String,
+    owners: HashMap<String, String>,
+    retry_at: Option<tokio::time::Instant>,
     through: u64,
     native_stamp: Option<Fingerprint>,
     exact: Answers,
     census: Answers,
+}
+
+impl Scope {
+    fn current(&self, store: &ChannelStore, history: &Option<Stamp>) -> bool {
+        let cursor = store.cursor(&self.origin.record.source);
+        self.history_stamp == *history
+            && self.binding_stamp
+                == crate::services::tui_prompt_dedupe::binding_events::log_path(
+                    store.init().channel,
+                )
+                .ok()
+                .flatten()
+                .as_deref()
+                .and_then(generation::fingerprint)
+            && self.observed_native == generation::fingerprint(&self.origin.record.source.path)
+            && self.through == cursor.map_or(0, |c| c.captured_through)
+            && self.prefix == cursor.map_or("", |c| c.prefix_hash.as_str())
+            && self
+                .executions
+                .iter()
+                .all(|(p, observed)| file_stamp(p) == observed.stamp)
+            && self
+                .retry_at
+                .is_none_or(|at| tokio::time::Instant::now() < at)
+    }
 }
 
 #[derive(Default)]
@@ -36,8 +73,7 @@ pub(crate) struct Batch {
 }
 
 fn file_stamp(path: &Path) -> Option<Stamp> {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((file_id(&meta), meta.len(), meta.modified().ok()?))
+    generation::fingerprint(path)
 }
 
 fn stamp() -> Option<Stamp> {
@@ -46,6 +82,7 @@ fn stamp() -> Option<Stamp> {
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static SNAPSHOT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static CENSUS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -66,18 +103,18 @@ impl Batch {
 
     pub(crate) fn refresh(&mut self, store: &ChannelStore) {
         let before = stamp();
-        let snapshot = path().and_then(|p| match std::fs::read(&p) {
-            Ok(bytes) if bytes.len() <= 256 * 1024 => compat::reuse(&p, bytes, compat::parse),
-            Ok(bytes) => compat::parse(&bytes).map(std::sync::Arc::new),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Ok(std::sync::Arc::new(serde_json::json!({"entries":[]})))
-            }
-            Err(e) => Err(e.to_string()),
-        });
-        self.stamp = before;
-        self.scopes = Vec::new();
+        self.stamp = before.clone();
+        let mut previous = std::mem::take(&mut self.scopes);
+        let mut snapshot = None;
         let mut native = HashMap::new();
         for evidence in store.ledger().input_notices().evidence.values() {
+            if store.ledger().input_notices().settled.contains_key(&(
+                evidence.record.source.clone(),
+                evidence.record.start,
+                evidence.record.end,
+            )) {
+                continue;
+            }
             if evidence.unit_key.as_ref().is_some_and(|key| {
                 store.ledger().excluded(key).is_some()
                     || store.ledger().latest_piece(key, 0).is_some_and(|(_, p)| {
@@ -97,6 +134,27 @@ impl Batch {
             if self.scopes.iter().any(|s| same_scope(&s.origin, origin)) {
                 continue;
             }
+            if let Some(at) = previous
+                .iter()
+                .position(|s| same_scope(&s.origin, origin) && s.current(store, &before))
+            {
+                self.scopes.push(previous.swap_remove(at));
+                continue;
+            }
+            let snapshot = snapshot.get_or_insert_with(|| {
+                #[cfg(test)]
+                SNAPSHOT_READS.with(|c| c.set(c.get() + 1));
+                path().and_then(|p| match std::fs::read(&p) {
+                    Ok(bytes) if bytes.len() <= 256 * 1024 => {
+                        compat::reuse(&p, bytes, compat::parse)
+                    }
+                    Ok(bytes) => compat::parse(&bytes).map(std::sync::Arc::new),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(std::sync::Arc::new(serde_json::json!({"entries":[]})))
+                    }
+                    Err(e) => Err(e.to_string()),
+                })
+            });
             let (through, native_stamp, rows) = native
                 .entry(origin.record.source.clone())
                 .or_insert_with(|| {
@@ -107,17 +165,41 @@ impl Batch {
                     (through, stamp, rows)
                 });
             let mut executions = HashMap::new();
-            let (exact, census) = snapshot
+            let attributed = snapshot
                 .as_ref()
                 .ok()
                 .and_then(|v| candidates(v, origin, store.init().channel, &mut executions).ok())
                 .map(|(entries, blocked)| {
                     attribute(&entries, &blocked, rows.as_deref().map(Vec::as_slice))
-                })
-                .unwrap_or_default();
+                });
+            let transient = native_stamp.is_none()
+                && generation::fingerprint(&origin.record.source.path).is_some_and(|fp| {
+                    fp.dev == origin.record.source.dev && fp.ino == origin.record.source.ino
+                });
+            let unstable = attributed.is_none()
+                || rows.is_none()
+                || executions.values().any(|e| e.unavailable);
+            let (exact, census, owners) = attributed.unwrap_or_default();
             self.scopes.push(Scope {
                 origin: origin.clone(),
                 executions,
+                history_stamp: before.clone(),
+                binding_stamp: crate::services::tui_prompt_dedupe::binding_events::log_path(
+                    store.init().channel,
+                )
+                .ok()
+                .flatten()
+                .as_deref()
+                .and_then(generation::fingerprint),
+                observed_native: generation::fingerprint(&origin.record.source.path),
+                prefix: store
+                    .cursor(&origin.record.source)
+                    .map_or(String::new(), |c| c.prefix_hash.clone()),
+                owners,
+                retry_at: unstable.then(|| {
+                    tokio::time::Instant::now()
+                        + tokio::time::Duration::from_secs(if transient { 0 } else { 5 })
+                }),
                 through: *through,
                 native_stamp: native_stamp.clone(),
                 exact,
@@ -127,6 +209,34 @@ impl Batch {
         if before != stamp() {
             self.scopes.clear();
         }
+    }
+
+    pub(crate) fn transient(&self, source: &crate::services::tui_o::shadow::SourceId) -> bool {
+        self.scopes.iter().any(|s| {
+            s.origin.record.source == *source
+                && s.native_stamp.is_none()
+                && s.observed_native
+                    .as_ref()
+                    .is_some_and(|fp| fp.dev == source.dev && fp.ino == source.ino)
+        })
+    }
+
+    pub(crate) fn owned_proof(
+        &self,
+        origin: &NoticeOrigin,
+        row: &str,
+        prompt: &str,
+    ) -> Option<String> {
+        (self.decision(origin, row, prompt) == Decision::Owned)
+            .then(|| {
+                self.scopes
+                    .iter()
+                    .find(|s| same_scope(&s.origin, origin))?
+                    .owners
+                    .get(row)
+                    .cloned()
+            })
+            .flatten()
     }
 
     pub(crate) fn decision(&self, origin: &NoticeOrigin, row: &str, prompt: &str) -> Decision {
@@ -139,9 +249,12 @@ impl Batch {
         if scope
             .executions
             .iter()
-            .any(|(path, stamp)| file_stamp(path).as_ref() != Some(stamp))
+            .any(|(path, stamp)| file_stamp(path).as_ref() != stamp.stamp.as_ref())
         {
             return Decision::Pending("execution_context_changed");
+        }
+        if scope.executions.values().any(|e| e.unavailable) {
+            return Decision::Pending("execution_context_unavailable");
         }
         let hashes = class_hashes(prompt);
         if let Some((offset, frames, answer)) = scope.exact.get(row)
@@ -177,7 +290,7 @@ fn candidates(
     value: &serde_json::Value,
     origin: &NoticeOrigin,
     channel: u64,
-    executions: &mut HashMap<PathBuf, Stamp>,
+    executions: &mut Contexts,
 ) -> Result<(Vec<Entry>, Blocked), String> {
     let source = &origin.record.source;
     let same = |e: &Entry| {
@@ -265,7 +378,7 @@ fn relevant(
     registration: &serde_json::Value,
     origin: &NoticeOrigin,
     channel: u64,
-    executions: &mut HashMap<PathBuf, Stamp>,
+    executions: &mut Contexts,
 ) -> bool {
     let attempt = &registration["key"]["attempt"];
     attempt["provider"] == "claude"
@@ -278,32 +391,37 @@ fn resumed_execution(
     target: &serde_json::Value,
     origin: &NoticeOrigin,
     channel: u64,
-    executions: &mut HashMap<PathBuf, Stamp>,
+    executions: &mut Contexts,
 ) -> bool {
     use crate::services::tui_prompt_dedupe::binding_context;
-    let proof = || {
-        let nonce = target["execution_nonce"].as_str()?;
-        let path = binding_context::context_path("claude", nonce).ok()?;
-        let before = file_stamp(&path)?;
-        let context = binding_context::execution_context("claude", nonce).ok()?;
-        // The attachment's nonce stays historical; this immutable launch names the resumed source.
-        (target["host"] == "tmux"
-            && context.tmux_session == origin.logical_session
-            && context.channel_id == Some(channel)
-            && target["root"] == context.owner_runtime_root
-            && context.launch_mode == "resume"
-            && context.expected_native_session_id.as_deref()
-                == Some(origin.record.source.session_id.as_str())
-            && file_stamp(&path) == Some(before))
-        .then_some((path, before))
+    let Some(nonce) = target["execution_nonce"].as_str() else {
+        return false;
     };
-    match proof() {
-        Some((path, stamp)) => {
-            executions.insert(path, stamp);
-            true
-        }
-        None => false,
-    }
+    let Ok(path) = binding_context::context_path("claude", nonce) else {
+        return false;
+    };
+    let before = file_stamp(&path);
+    let context = binding_context::execution_context("claude", nonce);
+    executions.insert(
+        path.clone(),
+        ContextObservation {
+            stamp: before.clone(),
+            unavailable: context.is_err(),
+        },
+    );
+    let Ok(context) = context else {
+        return false;
+    };
+    // The attachment's nonce stays historical; the immutable launch must name this source.
+    before.is_some()
+        && target["host"] == "tmux"
+        && context.tmux_session == origin.logical_session
+        && context.channel_id == Some(channel)
+        && target["root"] == context.owner_runtime_root
+        && matches!(context.launch_mode.as_str(), "resume" | "fresh")
+        && context.expected_native_session_id.as_deref()
+            == Some(origin.record.source.session_id.as_str())
+        && file_stamp(&path) == before
 }
 
 fn historical_match(
@@ -359,7 +477,12 @@ fn historical_match(
         && expectation)
 }
 
-fn attribute(entries: &[Entry], blocked: &Blocked, rows: Option<&[Taken]>) -> (Answers, Answers) {
+fn attribute(
+    entries: &[Entry],
+    blocked: &Blocked,
+    rows: Option<&[Taken]>,
+) -> (Answers, Answers, HashMap<String, String>) {
+    let mut owners = HashMap::new();
     let mut exact: Answers = HashMap::new();
     let mut occupied = HashSet::new();
     for entry in entries {
@@ -374,6 +497,7 @@ fn attribute(entries: &[Entry], blocked: &Blocked, rows: Option<&[Taken]>) -> (A
         }
         for uuid in &receipts {
             let decision = if receipts.len() == 1 && entry.append.is_none() {
+                owners.insert((*uuid).to_owned(), entry.id.clone());
                 Decision::Owned
             } else {
                 Decision::Pending("ambiguous_registration")
@@ -386,7 +510,7 @@ fn attribute(entries: &[Entry], blocked: &Blocked, rows: Option<&[Taken]>) -> (A
     }
     let from = entries.iter().map(|e| e.offset).min().unwrap_or(0);
     let Some(rows) = rows else {
-        return (exact, HashMap::new());
+        return (exact, HashMap::new(), owners);
     };
     let mut free: Vec<_> = entries
         .iter()
@@ -412,6 +536,7 @@ fn attribute(entries: &[Entry], blocked: &Blocked, rows: Option<&[Taken]>) -> (A
                 Decision::Pending("ambiguous_registration")
             } else if let Some(first) = matching.first() {
                 let id = first.id.clone();
+                owners.insert(row.uuid.clone(), id.clone());
                 free.retain(|e| e.id != id);
                 Decision::Owned
             } else {
@@ -419,5 +544,5 @@ fn attribute(entries: &[Entry], blocked: &Blocked, rows: Option<&[Taken]>) -> (A
             };
         census.insert(row.uuid.clone(), (row.offset, row.hashes.clone(), decision));
     }
-    (exact, census)
+    (exact, census, owners)
 }

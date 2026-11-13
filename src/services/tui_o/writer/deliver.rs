@@ -202,6 +202,8 @@ impl<H> Drop for LeaseReturn<H> {
 
 pub struct ChannelWriter<P, L, A> {
     pub(super) notice_owners: crate::services::tui_input::human_frame::history::notice_owner::Batch,
+    pub(super) notice_cache:
+        crate::services::tui_input::human_frame::history::notice_owner::generation::WorkCache,
     pub(super) notice_pending: HashMap<(SourceId, u64, u64), String>,
     pub(super) boot: super::boot::Trace,
     pub(super) suspension: super::suspension::Suspension,
@@ -263,6 +265,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         let posts = Some(with_in_flight(shared));
         let mut writer = Self {
             notice_owners: Default::default(),
+            notice_cache: Default::default(),
             notice_pending: HashMap::new(),
             boot: super::boot::Trace::new(channel, None, 0, 0),
             suspension: super::suspension::Suspension::default(),

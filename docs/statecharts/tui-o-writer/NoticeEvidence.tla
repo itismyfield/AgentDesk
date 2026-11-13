@@ -1,12 +1,12 @@
 --------------------------- MODULE NoticeEvidence ---------------------------
 EXTENDS WriterWake, FiniteSets
-CONSTANTS NoticeMode, InputClass, EvidenceReturns
+CONSTANTS NoticeMode, InputClass, EvidenceReturns, SessionBoundary
 VARIABLE n
 all == <<bootAll, n>>
 
 \* One retained record; classes and evidence availability come from the entrypoint table.
 NoticeInit == n = [phase |-> "absent", proof |-> "unknown", closed |-> FALSE,
-    reason |-> "authority_busy", logged |-> FALSE, logs |-> 0,
+    reason |-> "authority_busy", logged |-> FALSE, logs |-> 0, bootLogs |-> 0,
     posts |-> 0, prepared |-> FALSE, effect |-> FALSE, crashed |-> FALSE,
     savedTerminal |-> FALSE]
 Terminal == n.phase \in {"posted", "excluded", "expired"}
@@ -25,7 +25,7 @@ RecoverProof == /\ n.phase = "pending" /\ n.proof = "unknown" /\ EvidenceReturns
                 /\ (NoticeMode # "before" \/ InputClass = "direct")
                 /\ n' = [n EXCEPT !.proof = InputClass]
                 /\ UNCHANGED bootAll
-CloseSession == /\ n.phase # "absent" /\ ~n.closed
+CloseSession == /\ SessionBoundary /\ n.phase # "absent" /\ ~n.closed
                 /\ n' = [n EXCEPT !.closed = TRUE]
                 /\ UNCHANGED bootAll
 Defer == /\ n.phase = "pending"
@@ -34,10 +34,14 @@ Defer == /\ n.phase = "pending"
             n' = [n EXCEPT !.reason = reason, !.logged = TRUE,
                 !.logs = IF ~n.logged \/
                             (NoticeMode = "reason-log" /\ reason # n.reason)
+                         THEN Min2(@ + 1) ELSE @,
+                !.bootLogs = IF ~n.logged \/
+                            (NoticeMode = "reason-log" /\ reason # n.reason)
                          THEN Min2(@ + 1) ELSE @]
          /\ UNCHANGED bootAll
 Settle == /\ n.phase = "pending" /\ Exempt /\ ~n.prepared
           /\ NoticeMode \notin {"before", "no-settle"}
+          /\ (NoticeMode # "wait-boundary" \/ n.closed)
           /\ n' = [n EXCEPT !.phase = IF n.closed THEN "expired" ELSE "excluded"]
           /\ UNCHANGED bootAll
 \* The mutant treats a session boundary as sufficient to discard an unknown direct input.
@@ -59,7 +63,7 @@ Confirm == /\ n.prepared /\ n.effect /\ n.phase = "pending"
 Crash == /\ n.phase # "absent" /\ ~n.crashed
          /\ n' = [n EXCEPT !.crashed = TRUE, !.savedTerminal = Terminal,
              !.phase = IF NoticeMode = "drop-replay" /\ Terminal THEN "pending" ELSE @,
-             !.logged = IF NoticeMode = "drop-log" THEN FALSE ELSE @]
+             !.logged = FALSE, !.bootLogs = 0]
          /\ UNCHANGED bootAll
 
 NoticeNext == ParentHold \/ ParentRecheck \/ ParentOpens \/ ParentWake \/ ParentExecute
@@ -68,7 +72,7 @@ NoticeNext == ParentHold \/ ParentRecheck \/ ParentOpens \/ ParentWake \/ Parent
 NoticeSpec == RouteInit /\ NoticeInit /\ [][NoticeNext]_all
     /\ WF_all(ParentHold) /\ WF_all(ParentRecheck) /\ WF_all(ParentOpens)
     /\ WF_all(ParentWake) /\ WF_all(ParentExecute)
-    /\ WF_all(Materialize) /\ WF_all(RecoverProof) /\ WF_all(CloseSession)
+    /\ WF_all(Materialize) /\ WF_all(RecoverProof)
     /\ WF_all(Settle) /\ WF_all(Prepare) /\ WF_all(Post) /\ WF_all(Confirm)
 
 NoticeType == n.phase \in {"absent", "pending", "excluded", "expired", "posted"}
@@ -80,7 +84,9 @@ NoExpireOwedDirect == InputClass = "direct" => n.phase \notin {"excluded", "expi
 NoPostExempt == InputClass # "direct" => n.posts = 0
 PreparedKept == n.prepared => n.phase \in {"pending", "posted"}
 ReplayKeepsTerminal == n.savedTerminal => Terminal
-PendingLoggedOnce == n.logs <= 1
+PendingLoggedOnce == n.bootLogs <= 1 /\ n.logs <= 2
 EveryPendingTerminates == (n.phase = "pending") ~> Terminal
 DirectEventuallyPosted == (n.phase = "pending" /\ InputClass = "direct") ~> (n.phase = "posted")
+BoundaryHappens == <>n.closed
+BoundarySpec == NoticeSpec /\ WF_all(CloseSession)
 =============================================================================
