@@ -272,6 +272,33 @@ with os.fdopen(fd) as stream:
             Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper);
         crate::services::discord::inflight::save_inflight_state(&row).unwrap();
         test_queue::queue_original(&self.shared, self.channel).await;
+        let mut queued: Vec<_> = self
+            .shared
+            .mailbox(self.channel)
+            .snapshot()
+            .await
+            .intervention_queue
+            .into_iter()
+            .collect();
+        for item in &mut queued {
+            item.source_message_queued_generations = vec![
+                crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
+                    item.message_id,
+                    item.queued_generation,
+                ),
+            ];
+        }
+        self.shared
+            .mailbox(self.channel)
+            .replace_queue(
+                queued,
+                crate::services::discord::queue_persistence_context(
+                    &self.shared,
+                    &ProviderKind::Claude,
+                    self.channel,
+                ),
+            )
+            .await;
         self.queue_bytes()
     }
     fn queue_bytes(&self) -> Vec<u8> {
