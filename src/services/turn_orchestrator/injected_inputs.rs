@@ -204,9 +204,8 @@ pub(super) fn reserve(
     {
         return ReserveOutcome::Backlog;
     }
-    use crate::services::discord::busy_followup_retry_store::{
-        BacklogLayers, LayerSnapshot, RetryClass, input_class,
-    };
+    use crate::domain::input_retry::{BacklogLayers, LayerSnapshot, RetryClass};
+    use crate::services::discord::busy_followup_retry_store::input_class;
     let classify = |queue: &[Intervention]| -> Vec<RetryClass> {
         let class = |item| input_class(&persistence.provider, channel_id, item);
         queue.iter().map(class).collect()

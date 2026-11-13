@@ -7,6 +7,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serenity::model::id::MessageId;
 
+#[cfg(test)]
+use crate::domain::input_retry::{BacklogLayers, LayerSnapshot};
+use crate::domain::input_retry::{RetryClass, UnavailableReason};
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
 
@@ -112,21 +115,6 @@ impl RetryBudget {
     }
 }
 
-/// Why an input cannot run or be skipped. Consumers branch on this, never on the detail.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum UnavailableReason {
-    RootUnavailable,
-    ReadFailed,
-    MalformedRecord,
-    /// Some latch fields present, or one written as null.
-    IncompleteRecord,
-    InvalidNotice,
-    /// The reads do not cover exactly the input's identity.
-    IncompleteView,
-    /// Preparation is held until the existing observer confirms input readiness.
-    IdleDraftRelease,
-}
-
 /// A refused read: the coded reason and a detail kept for diagnostics only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) struct ReadRefusal {
@@ -192,17 +180,6 @@ pub(super) fn read_source_in_root(
             SourceRead::Unreadable(ReadRefusal::new(UnavailableReason::ReadFailed, error))
         }
     }
-}
-
-/// How the automatic paths may treat one queued input.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RetryClass {
-    /// Runnable; it also holds back inputs that arrived later.
-    Ready,
-    /// Budget spent: kept, never auto-submitted, and never holds back later inputs.
-    Parked,
-    /// State unknown: neither run nor skipped, and it holds back later inputs.
-    Unavailable(UnavailableReason),
 }
 
 /// Unavailable over Parked over Ready, decided only after every read; the first refusal names
@@ -389,34 +366,6 @@ pub(in crate::services::discord) fn auto_pick(classes: &[RetryClass]) -> Option<
         }
     }
     None
-}
-
-/// Whether nothing but parked inputs sits in one queue layer.
-pub(crate) fn parked_only(classes: &[RetryClass]) -> bool {
-    classes.iter().all(|class| *class == RetryClass::Parked)
-}
-
-/// One queue layer as the injection check read it.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum LayerSnapshot<'a> {
-    Classes(&'a [RetryClass]),
-    Unreadable,
-}
-
-/// The backlog a later input would pass. Both layers are required; one left unchecked refuses.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct BacklogLayers<'a> {
-    pub memory: Option<LayerSnapshot<'a>>,
-    pub disk: Option<LayerSnapshot<'a>>,
-}
-
-impl BacklogLayers<'_> {
-    /// Only layers read as parked-only admit a later input past them.
-    pub fn admits_later_input(&self) -> bool {
-        [self.memory, self.disk].iter().all(
-            |layer| matches!(layer, Some(LayerSnapshot::Classes(classes)) if parked_only(classes)),
-        )
-    }
 }
 
 #[cfg(test)]

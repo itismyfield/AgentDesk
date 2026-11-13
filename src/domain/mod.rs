@@ -8,6 +8,7 @@ pub(crate) mod dispatch_route;
 pub(crate) mod file_sync;
 pub(crate) mod host_observation;
 pub(crate) mod human_input;
+pub(crate) mod input_retry;
 pub(crate) mod intake_consent;
 pub(crate) mod intake_identity;
 pub(crate) mod lifecycle;

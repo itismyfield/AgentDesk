@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub(in crate::services::discord) use crate::domain::input_retry::{RetryClass, parked_only};
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
@@ -17,7 +18,6 @@ use serenity::model::id::{ChannelId, MessageId, UserId};
 #[cfg(test)]
 mod hold_release_tests;
 mod policy;
-pub(crate) use policy::{BacklogLayers, LayerSnapshot, RetryClass, parked_only};
 use policy::{CheckedInputView, SourceRead, read_source_in_root};
 pub(in crate::services::discord) use policy::{auto_pick, decode_checked};
 
