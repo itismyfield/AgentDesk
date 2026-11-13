@@ -505,6 +505,6 @@ pub(crate) use owner::{begin_herdr_create, owned_herdr, validate_herdr_create_ta
 pub(crate) mod tests;
 
 #[cfg(all(test, unix))]
-mod environment_tests;
-#[cfg(all(test, unix))]
 mod api_boundary_tests;
+#[cfg(all(test, unix))]
+mod environment_tests;

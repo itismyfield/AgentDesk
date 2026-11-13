@@ -26,14 +26,14 @@ mod anchor;
 pub(crate) use anchor::{SessionAnchorRequest, load_session_anchor_prompt};
 #[path = "memento_endpoint.rs"]
 mod endpoint;
+#[cfg(all(test, unix))]
+#[path = "memento_instance_tests.rs"]
+pub(super) mod instance_tests;
 #[path = "memento_scope.rs"]
 mod scope;
 #[cfg(test)]
 #[path = "memento_scope_tests.rs"]
 mod scope_tests;
-#[cfg(all(test, unix))]
-#[path = "memento_instance_tests.rs"]
-pub(super) mod instance_tests;
 #[path = "memento_transport.rs"]
 mod transport;
 use endpoint::{mcp_url, normalize_memento_endpoint};

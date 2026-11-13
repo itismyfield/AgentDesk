@@ -175,7 +175,11 @@ impl ProcessBackend {
         config: &SessionConfig,
         apply_command_env: impl FnOnce(&mut Command),
     ) -> Result<SessionHandle, String> {
-        for path in [&config.output_path, &config.prompt_path, &config.working_dir] {
+        for path in [
+            &config.output_path,
+            &config.prompt_path,
+            &config.working_dir,
+        ] {
             crate::config::test_instance::environment::validate_path(std::path::Path::new(path))?;
         }
         // 1. Ensure output file exists (empty)

@@ -2330,18 +2330,20 @@ fn env_var_is_present(name: &str) -> bool {
 }
 
 fn default_memento_mcp_server() -> Option<(String, McpServerConfig)> {
-    (!test_instance::requested() && env_var_is_present(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR)).then(|| {
-        (
-            DEFAULT_MEMENTO_MCP_SERVER_NAME.to_string(),
-            McpServerConfig {
-                url: DEFAULT_MEMENTO_MCP_URL.to_string(),
-                auth: Some(McpServerAuthConfig {
-                    auth_type: McpServerAuthType::Bearer,
-                    token_env_var: Some(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR.to_string()),
-                }),
-            },
-        )
-    })
+    (!test_instance::requested() && env_var_is_present(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR)).then(
+        || {
+            (
+                DEFAULT_MEMENTO_MCP_SERVER_NAME.to_string(),
+                McpServerConfig {
+                    url: DEFAULT_MEMENTO_MCP_URL.to_string(),
+                    auth: Some(McpServerAuthConfig {
+                        auth_type: McpServerAuthType::Bearer,
+                        token_env_var: Some(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR.to_string()),
+                    }),
+                },
+            )
+        },
+    )
 }
 
 impl Config {
