@@ -364,7 +364,8 @@ async fn direct_phase(fx: &Fixture, path: &Path, original: &hosted_source::Hoste
     assert_eq!(
         mock.post_snapshot()
             .iter()
-            .filter(|(_, text)| text == r"-# ⌨️ ordinary direct prompt \[codex\-t14\]")
+            .filter(|(_, text)| text
+                == "-# ⌨️ tui direct input\n```\nordinary direct prompt [codex-t14]\n```")
             .count(),
         1,
         "one actual observed-prompt announcement"

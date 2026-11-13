@@ -296,67 +296,38 @@ pub(super) fn format_ssh_direct_prompt_notification(
     let prompt = strip_terminal_controls(prompt)
         .replace("\r\n", "\n")
         .replace(['\r', '\u{2028}', '\u{2029}'], "\n");
-    let mut output = String::from("-# ⌨️ ");
-    let mut units = discord_message_units(&output);
-    // Each source scalar owns one checkpoint, including hidden blank-line whitespace.
-    // Line prefixes and escape/mention guards stay attached to the same scalar.
+    const HEADER: &str = "-# ⌨️ tui direct input\n";
+    let header_units = discord_message_units(HEADER);
+    let total_chars = prompt.chars().count();
     let mut checkpoints = Vec::new();
-    'lines: for (line_index, line) in prompt.split_inclusive('\n').enumerate() {
-        let has_text = !line.trim().is_empty();
-        let mut at_token_start = true;
-        let mut in_url = false;
-        for (index, ch) in line.char_indices() {
-            if ch.is_whitespace() {
-                at_token_start = true;
-                in_url = false;
-            } else if at_token_start {
-                in_url =
-                    line[index..].starts_with("http://") || line[index..].starts_with("https://");
-                at_token_start = false;
-            }
-            let escaped = match ch {
-                '\n' => "\n".to_string(),
-                _ if !has_text => String::new(),
-                '@' => "@\u{200b}".to_string(),
-                '<' => "‹".to_string(),
-                '>' => "›".to_string(),
-                _ if in_url => ch.to_string(),
-                '\\' | '`' | '*' | '_' | '~' | '|' | '[' | ']' | '#' | '-' | '+' | '.' | '('
-                | ')' | '!' => format!("\\{ch}"),
-                _ => ch.to_string(),
-            };
-            let prefix = if line_index > 0 && index == 0 && has_text {
-                "-# "
-            } else {
-                ""
-            };
-            let escaped = format!("{prefix}{escaped}");
-            let next_units = units + discord_message_units(&escaped);
-            if next_units > DISCORD_MSG_LIMIT {
-                break 'lines;
-            }
-            checkpoints.push((output.len(), units));
-            output.push_str(&escaped);
-            units = next_units;
+    let mut body_units = 0;
+    let mut backtick_run = 0;
+    let mut fence_len = 3;
+    // Each checkpoint reserves complete fences longer than every backtick run in its body.
+    for (index, ch) in prompt.char_indices() {
+        backtick_run = if ch == '`' { backtick_run + 1 } else { 0 };
+        fence_len = fence_len.max(backtick_run + 1);
+        body_units += ch.len_utf16();
+        if header_units + body_units + 2 * fence_len + 2 > DISCORD_MSG_LIMIT {
+            break;
         }
-    }
-    let mut omitted = prompt.chars().count() - checkpoints.len();
-    if omitted == 0 {
-        return output;
+        checkpoints.push((index + ch.len_utf8(), body_units, fence_len));
     }
     loop {
-        let prefix = if output.ends_with('\n') { "-# " } else { "" };
-        let suffix = format!("{prefix}… (이하 {omitted}자)");
-        if units + discord_message_units(&suffix) <= DISCORD_MSG_LIMIT {
-            output.push_str(&suffix);
-            return output;
+        let (end, body_units, fence_len) = checkpoints.last().copied().unwrap_or((0, 0, 3));
+        let omitted = total_chars - checkpoints.len();
+        let suffix = if omitted == 0 {
+            String::new()
+        } else {
+            format!("\n-# … (이하 {omitted}자)")
+        };
+        if header_units + body_units + 2 * fence_len + 2 + discord_message_units(&suffix)
+            <= DISCORD_MSG_LIMIT
+        {
+            let fence = "`".repeat(fence_len);
+            return format!("{HEADER}{fence}\n{}\n{fence}{suffix}", &prompt[..end]);
         }
-        let (end, previous_units) = checkpoints
-            .pop()
-            .expect("the notice header leaves room for the omission marker");
-        output.truncate(end);
-        units = previous_units;
-        omitted += 1;
+        checkpoints.pop();
     }
 }
 
