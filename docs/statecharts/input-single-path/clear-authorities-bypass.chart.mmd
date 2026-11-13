@@ -1,0 +1,44 @@
+---
+title: "공개 준비 증거와 clear 채택 증거"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: unsafe
+    lg1: normal
+    lg2: Breaks ClearAdoptionBeforeKey or PublicReadyDoesNotAdopt
+    lg3: Path to the ClearAdoptionBeforeKey or PublicReadyDoesNotAdopt bug
+  }
+  class lg0 pink
+  class lg1 teal
+  class lg2 breaks
+  class lg3 bugPath
+  s0: 현재 실행의 시작 증거 대기
+  s1: 공개 준비 증거 관측
+  s2: 공개 준비 확인, 채택 대기
+  s3: 채택 없이 본문과 Enter 전달
+  s4: 채택 없이 전달 후 binding 변경
+  s5: 채택 없이 전달 후 공개 준비와 binding 변경
+  [*] --> s0
+  s0 --> s1: 인증된 시작 기록
+  s1 --> s2: 현재 ledger 준비 확인
+  s2 --> s2: 현재 입력 준비
+  s2 --> s3: 본문과 Enter 전달
+  s3 --> s3: 프로바이더 턴 종료 or 현재 ledger 준비 확인
+  s3 --> s4: 새 transcript 게시
+  s4 --> s5: 현재 ledger 준비 확인
+  s3 --> s5: 새 transcript 게시
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 teal
+  class s0 bugPath
+  class s1 teal
+  class s1 bugPath
+  class s2 teal
+  class s2 bugPath
+  class s3 pink
+  class s3 breaks
+  class s3 bugPath
+  class s4 pink
+  class s4 breaks
+  class s5 pink
+  class s5 breaks
+  class s5 bugPath

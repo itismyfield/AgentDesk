@@ -63,6 +63,12 @@ hosted-cleanup/ThreadGCAfterGaps.cfg	HostedCleanup	GCAliasesRechecked,GCCurrentL
 hosted-cleanup/ThreadGCBefore.cfg	HostedCleanup	-	-
 hosted-cleanup/ThreadGCBeforeGaps.cfg	HostedCleanup	GCAliasesRechecked,GCCurrentLegacyMarkerSafe,GCCurrentOwnerLocal	-
 hosted-cleanup/ThreadGCNoRecheck.cfg	HostedCleanup	GCConditionalRefusalsKept,GCNewTurnKept	-
+input-single-path/ClaudeReadinessDualBypass.cfg	ClaudeReadiness	ClearAdoptionBeforeKey,PublicReadyDoesNotAdopt	-
+input-single-path/ClaudeReadinessDualCoupled.cfg	ClaudeReadiness	-	PublicLedgerReadyEventually
+input-single-path/ClaudeReadinessDualInvalid.cfg	ClaudeReadiness	-	-
+input-single-path/ClaudeReadinessDualRecovery.cfg	ClaudeReadiness	-	-
+input-single-path/ClaudeReadinessDualStaleLedger.cfg	ClaudeReadiness	-	-
+input-single-path/ClaudeReadinessDualValid.cfg	ClaudeReadiness	-	-
 input-single-path/HerdrBusyInputAwaitedClearBefore.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputAwaitedClearBusy.cfg	HerdrBusyInput	VerifiedClearNeverBusy	VerifiedClearEventuallyDelegates
 input-single-path/HerdrBusyInputAwaitedClearFixed.cfg	HerdrBusyInput	-	-
