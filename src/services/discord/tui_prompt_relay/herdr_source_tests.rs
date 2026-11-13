@@ -888,6 +888,7 @@ fn the_o_switch_takes_a_herdr_channel_only_on_the_source_its_launch_logged_pg() 
             ino,
         };
         let init = Initialized {
+            policy_parent: None,
             channel: herdr.channel,
             sources: vec![InitSource {
                 source_id,
@@ -903,11 +904,15 @@ fn the_o_switch_takes_a_herdr_channel_only_on_the_source_its_launch_logged_pg() 
             .unwrap()
             .unwrap();
         let channels = [herdr.channel];
-        let (era, excluded) =
-            begin_era_checked(&store, &channels, chrono::Utc::now(), &BindingLog, |_| {
-                Ok(init.clone())
-            })
-            .unwrap();
+        let (era, excluded) = begin_era_checked(
+            &store,
+            &crate::services::session_host::surface_policy::InitScope::fixture(&channels),
+            &channels,
+            chrono::Utc::now(),
+            &BindingLog,
+            |_| Ok(init.clone()),
+        )
+        .unwrap();
         let reason = "no binding event binds a source attached at the switch";
         let left = Excluded {
             channel: herdr.channel,

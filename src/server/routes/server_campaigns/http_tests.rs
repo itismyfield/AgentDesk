@@ -323,10 +323,15 @@ async fn create_edit_command_receipts_replay_exact_status_body_after_new_pool_pg
             expected_revision: 1,
         },
     };
-    let old_response = store::execute(&h.pool, "campaign", &old_command, old_renderer)
-        .await
-        .unwrap()
-        .response;
+    let old_response = crate::services::campaign_execution::commands::execute(
+        &h.pool,
+        "campaign",
+        &old_command,
+        old_renderer,
+    )
+    .await
+    .unwrap()
+    .response;
     let edit = edit_body("edit", 1, "Edited");
     let edited = request(
         &h.app,
@@ -999,9 +1004,14 @@ async fn http_stop_targets_run_definition_after_events_and_replays_original_rece
             },
         },
     };
-    store::execute(&h.pool, "campaign", &envelope, protocol::commanded)
-        .await
-        .unwrap();
+    crate::services::campaign_execution::commands::execute(
+        &h.pool,
+        "campaign",
+        &envelope,
+        protocol::commanded,
+    )
+    .await
+    .unwrap();
     let stopped = request(
         &h.app,
         "POST",

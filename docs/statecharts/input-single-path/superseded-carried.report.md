@@ -21,7 +21,7 @@ Code SHA: `b5e0f2115f` plus this repair. Models: `InputOwnershipConsumedWaiting.
 | `adopt` | hook adoption after the transcript exists | `hook_server/adoption_retry.rs`, `tui_prompt_dedupe::record_hook_adopted_claude_session_id` |
 | `observer` (`pollingA`/`fixedA`/`fixedB`) | `owner_observer` build, `rebound_source` poll/grace | `warm_followup.rs` |
 | `aMeta` | `/clear` cost-state appended to the old transcript | `tests/fixtures/hook_payload/claude-2.1.316.transcript-prefix.jsonl` case `suffix_after_cli_clear` |
-| `receiptA` | the writer's receipt pin for this submit | `provider/native_stop.rs:116-140`, `input_owner/effect.rs:333-345` |
+| `receiptA` | the writer's receipt pin for this submit | `provider/native_stop.rs:116-140`, [writer receipt scope (5bcbb82297 기준) L333–L345](https://github.com/itismyfield/AgentDesk/blob/5bcbb82297f5cc3ab8897b81ddb9891459e0321b/src/services/discord/queue_io/input_owner/effect.rs#L333-L345) |
 
 ## Results (plain TLC 1.7.4, `scripts/ci/statecharts_tlc.py --base origin/main`)
 

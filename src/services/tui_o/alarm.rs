@@ -850,8 +850,9 @@ mod postgres_tests {
             .unwrap();
         let now = chrono::Utc::now();
         store
-            .begin_era(&[CHANNEL], now, |channel| {
+            .begin_fixture_era(&[CHANNEL], now, |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![],
                     initial_anchor: 100,

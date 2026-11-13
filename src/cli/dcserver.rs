@@ -1383,3 +1383,6 @@ mod tests {
         );
     }
 }
+
+#[path = "dcserver_decision_boot.rs"]
+pub(crate) mod decision_boot;

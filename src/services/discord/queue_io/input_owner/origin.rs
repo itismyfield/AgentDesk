@@ -6,6 +6,7 @@ pub(crate) enum InputOrigin {
     Discord,
     Imessage,
     HttpStart,
+    EffortContinue,
     Routine,
     #[cfg(test)]
     DirectHeadless,
@@ -28,6 +29,9 @@ impl InputOrigin {
 
     /// Old headless iMessage contexts and new ones follow the same person policy as the queue.
     pub(crate) fn from_context(context: Option<&serde_json::Value>) -> Self {
+        if super::effort_continue::is_continuation(context) {
+            return Self::EffortContinue;
+        }
         if crate::services::turn_orchestrator::ChannelMailboxHandle::person_input(context) {
             return if context.is_some() {
                 Self::Imessage
@@ -69,10 +73,11 @@ impl InputOrigin {
     }
 
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Discord,
         Self::Imessage,
         Self::HttpStart,
+        Self::EffortContinue,
         Self::Routine,
         Self::DirectHeadless,
     ];
