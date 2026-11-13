@@ -6,16 +6,16 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 mod gemini;
-mod key;
+pub(super) mod key;
 mod parser;
 mod request;
-pub(super) use key::{KeyLookupOutcome, SecretString};
+pub(crate) use key::{KeyLookupOutcome, SecretString};
 pub(super) use parser::parse_response;
 
 pub(super) type PolicySource = Arc<dyn Fn() -> Option<DecisionGateConfig> + Send + Sync>;
 static INSTALLED: OnceLock<Arc<DecisionGate>> = OnceLock::new();
 
-pub(super) struct DecisionGate {
+pub(crate) struct DecisionGate {
     source: PolicySource,
     key: Option<SecretString>,
     client: Option<reqwest::Client>,
@@ -44,8 +44,22 @@ impl DecisionGate {
         }
     }
 
-    pub(super) fn availability(&self, scope: &Scope) -> Result<Duration, OffReason> {
+    pub(crate) fn availability(&self, scope: &Scope) -> Result<Duration, OffReason> {
         self.policy_for(scope)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        config: DecisionGateConfig,
+        key: Option<&str>,
+        endpoint: String,
+    ) -> Self {
+        let mut gate = Self::new(
+            Arc::new(move || Some(config.clone())),
+            key.and_then(|value| SecretString::new(value.into())),
+        );
+        gate.endpoint = endpoint;
+        gate
     }
 
     fn policy_for(&self, scope: &Scope) -> Result<Duration, OffReason> {
@@ -56,7 +70,7 @@ impl DecisionGate {
         policy::resolve(&config, scope)
     }
 
-    pub(super) async fn decide(&self, request: &DecisionRequest) -> DecisionAttempt {
+    pub(crate) async fn decide(&self, request: &DecisionRequest) -> DecisionAttempt {
         let start = Instant::now();
         let result = self.attempt(request, start).await;
         let (result, input_tokens) = match result {
@@ -105,7 +119,7 @@ pub(super) fn install(gate: Arc<DecisionGate>, outcome: KeyLookupOutcome) -> boo
     true
 }
 
-pub(super) fn installed() -> Option<&'static Arc<DecisionGate>> {
+pub(crate) fn installed() -> Option<&'static Arc<DecisionGate>> {
     INSTALLED.get()
 }
 

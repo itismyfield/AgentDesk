@@ -45,6 +45,30 @@ class MessageOutboxInsertAuditTests(unittest.TestCase):
             self.assertEqual(len(findings), 1)
             self.assertTrue(findings[0].startswith(f"{relative}:"))
 
+    def test_db_plain_notice_insert_is_allowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_insert(root, "src/db/message_outbox/notice.rs")
+            self.assertEqual(audit(root), [])
+
+    def test_db_plain_notice_adjacent_producers_are_rejected(self):
+        relatives = {
+            "src/db/message_outbox.rs",
+            "src/db/message_outbox/census.rs",
+            "src/db/message_outbox/notice_retry.rs",
+            "src/db/message_outbox/notices.rs",
+            "src/db/message_outbox/notice/producer.rs",
+            "src/db/message_outbox/notice_tests.rs",
+            "src/db/message_outbox_notice.rs",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in relatives:
+                self.write_insert(root, relative)
+            findings = audit(root)
+            self.assertEqual(len(findings), len(relatives))
+            self.assertEqual({finding.split(":", 1)[0] for finding in findings}, relatives)
+
     def test_new_production_insert_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

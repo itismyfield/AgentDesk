@@ -55,6 +55,7 @@ fn promptless(root: &Path, channel: u64) -> SourceBinding {
 fn taken(root: &Path, channel: u64, source: &SourceId) {
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root);
     let init = Initialized {
+        policy_parent: None,
         channel,
         sources: vec![InitSource {
             source_id: source.clone(),
@@ -69,7 +70,7 @@ fn taken(root: &Path, channel: u64, source: &SourceId) {
     store
         .unwrap()
         .unwrap()
-        .init_channel_as(&init, origin)
+        .init_fixture_channel_as(&init, origin)
         .unwrap();
 }
 

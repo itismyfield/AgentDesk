@@ -970,6 +970,10 @@ fn herdr_first_input_and_effort_never_submit_mixed_content_pg() {
         use crate::services::claude_tui::owner_input::{self, Lineage};
         use crate::services::session_host::herdr_socket_rig_tests::HerdrRequest;
         let fx = Fixture::new(&rig).await;
+        crate::services::claude_tui::readiness::tests::pre_source(
+            &fx.logical,
+            &crate::config::runtime_root().unwrap().join("not-created.jsonl"),
+        );
         // Normal submission must leave a ready composer; only /effort opens the overlay.
         rig.answer_after_send("pane.read", screen(READY));
         let submitted = Arc::new(std::sync::Mutex::new((String::new(), Vec::<String>::new())));

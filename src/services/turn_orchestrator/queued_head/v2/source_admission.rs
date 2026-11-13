@@ -219,7 +219,7 @@ impl Custody {
             }
             State::New => {}
         }
-        let (next, outcome) = owner.fresh_candidate(&self.original)?;
+        let (next, outcome) = owner.fresh_candidate(&self.original, false)?;
         let Some(next) = next else {
             self.state = State::Done;
             return Ok(outcome);
@@ -274,7 +274,7 @@ impl Custody {
             return Ok(owner.acknowledge(&receipt).unwrap_or(Admitted::Duplicate));
         }
         owner.unacknowledged.retain(|(r, _)| *r != receipt);
-        let (next, outcome) = owner.fresh_candidate(&self.original)?;
+        let (next, outcome) = owner.fresh_candidate(&self.original, false)?;
         let Some(mut next) = next else {
             return Err(AdmitError::SourceAlreadyKnown);
         };
@@ -600,6 +600,7 @@ pub(super) fn settle_binds(snapshot: &mut SnapshotV2, key: &AttemptRef, now: u64
     let members: Vec<QueueIdentity> = input
         .map(|input| input.members().map(sources::identity).collect())
         .unwrap_or_default();
+    super::effort_continue::submitted(snapshot, &members);
     for bind in &mut snapshot.admission_binds {
         if let BindAt::Attempt { identity, attempt } = &bind.at
             && members.contains(identity)
@@ -647,6 +648,7 @@ impl Owner {
     fn fresh_candidate(
         &self,
         original: &PendingQueueItem,
+        continuation: bool,
     ) -> Result<(Option<SnapshotV2>, Admitted), AdmitError> {
         if self.pending.is_some() {
             return Err(AdmitError::NotCommitted("owner recovery required".into()));
@@ -743,7 +745,7 @@ impl Owner {
                 .collect();
             fresh.text = super::super::super::join_source_text_segments(&segments);
         }
-        if next.items.len() >= 30 {
+        if super::effort_continue::queue_full(next.items.len(), continuation) {
             return Err(AdmitError::Full);
         }
         next.prune_binds();
@@ -919,6 +921,12 @@ impl Owner {
         ticket: Ticket,
         execution: serde_json::Value,
     ) -> Result<Admitted, AdmitError> {
+        let continuation = ChannelMailboxHandle::effort_input(Some(&execution));
+        if continuation
+            && let Some(outcome) = self.check_effort_admission(original, &ticket, &execution)?
+        {
+            return Ok(outcome);
+        }
         let receipt = ticket.receipt_for(&canonical(original));
         let expected = super::super::v2_types::AdmissionContext {
             original: Some(canonical(original)),
@@ -948,7 +956,7 @@ impl Owner {
         if self.snapshot.admission_receipts.contains(&receipt) {
             return Custody::with_ticket(original, ticket).advance(self);
         }
-        let (next, outcome) = self.fresh_candidate(original)?;
+        let (next, outcome) = self.fresh_candidate(original, continuation)?;
         let Some(mut next) = next else {
             return Err(AdmitError::SourceAlreadyKnown);
         };
@@ -959,6 +967,9 @@ impl Owner {
             .find(|b| b.receipt == receipt)
             .ok_or_else(|| AdmitError::NotCommitted("admission bind absent".into()))?;
         bind.context = Some(expected);
+        if continuation {
+            super::effort_continue::prepend(&mut next);
+        }
         match self.admit_commit(next, Some(receipt.clone())) {
             Err(AdmitError::Pending) => {
                 self.unacknowledged.push((receipt, outcome));

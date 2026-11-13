@@ -36,7 +36,7 @@ pub(super) fn managed_row(channel: u64) -> (InflightTurnState, ManagedSubmission
         channel + 11,
         "managed prompt".into(),
         None,
-        Some(format!("AgentDesk-claude-zp1-{channel}")),
+        Some(session),
         None,
         None,
         0,

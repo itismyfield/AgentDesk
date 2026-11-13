@@ -9,7 +9,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/github/issues/create",
             "github",
-            "Create a GitHub issue with server-enforced issue markdown format. Successful creation returns HTTP 201 Created (not 200) with the issue payload. block_on records positive GitHub issue-number dependencies for auto-queue via the rendered `## 의존성` section and kanban metadata. dry_run returns 200 OK with rendered_body, no side effects, and capabilities that show auto_dispatch is not supported by this public contract.",
+            "Create a GitHub issue with server-enforced issue markdown format. Successful creation returns HTTP 201 Created (not 200) with the issue payload. block_on records positive GitHub issue-number dependencies for auto-queue via the rendered `## 의존성` section and kanban metadata. dry_run returns 200 OK with rendered_body, no side effects, and capabilities that show auto_dispatch is not supported by this public contract. Before creation, the latest 254 open issues may be checked for duplicate scope using title and background only. HTTP 409 duplicate_candidate creates no issue, kanban card, or announcement; inspect candidate and retry with allow_duplicate=true when needed. Off or NoAnswer continues creation with a safe duplicate_check reason; it does not establish that the issue is new. Validation errors return HTTP 422.",
         )
         .with_params([
             (
@@ -78,11 +78,20 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 ),
             ),
             (
+                "allow_duplicate",
+                body_param(
+                    "boolean",
+                    false,
+                    "Skip duplicate candidate lookup and decision after normal input validation; use after inspecting HTTP 409 duplicate_candidate",
+                )
+                .with_default(false),
+            ),
+            (
                 "dry_run",
                 body_param(
                     "boolean",
                     false,
-                    "Preview validation, rendered markdown, and labels without creating GitHub issue, kanban card, or announcement; does not check gh CLI availability",
+                    "Preview validation, rendered markdown, and labels without creating GitHub issue, kanban card, or announcement; does not check gh CLI availability or perform duplicate candidate lookup or decision",
                 )
                 .with_default(false),
             ),
@@ -110,7 +119,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 },
                 "applied_labels": ["agent:adk-backend"],
                 "issue_format_version": 1,
-                "pmd_format_version": 1
+                "pmd_format_version": 1,
+                "duplicate_check": {"outcome": "clear", "reason": "no_open_issues"}
             }),
         )
         .with_dry_run_example(
@@ -142,18 +152,26 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "capabilities": {
                     "auto_dispatch": false,
                     "block_on": true,
+                    "allow_duplicate": true,
+                    "duplicate_candidate_status": 409,
                     "unsupported_features": ["auto_dispatch"]
                 },
                 "block_on": [3718],
                 "unsupported_features": [],
                 "issue_format_version": 1,
-                "pmd_format_version": 1
+                "pmd_format_version": 1,
+                "duplicate_check": {"outcome": "not_run", "reason": "dry_run"}
             }),
         )
         .with_error_example(
-            422,
-            json!({"body": {"repo": "ADK", "title": "no DoD", "background": "bg", "content": ["item"], "dod": []}}),
-            json!({"error": "dod must contain at least one item"}),
+            409,
+            json!({"repo": "ADK", "title": "Fix relay ordering", "background": "Messages arrive out of order", "content": ["preserve order"], "dod": ["messages stay ordered"]}),
+            json!({
+                "code": "duplicate_candidate",
+                "created": false,
+                "candidate": {"number": 819, "title": "Preserve relay order", "probability": 0.8},
+                "retry": {"allow_duplicate": true}
+            }),
         )
         .with_curl("curl -X POST http://localhost:8787/api/github/issues/create -H 'Content-Type: application/json' -d '{\"repo\":\"ADK\",\"title\":\"Example\",\"background\":\"bg\",\"content\":[\"do thing\"],\"dod\":[\"it works\"]}'"),
         ep("POST", "/api/github/repos", "github", "Register GitHub repo").with_example(

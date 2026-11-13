@@ -8,6 +8,8 @@ pub mod metadata;
 pub mod soft_delete;
 pub mod transitions;
 
+#[cfg(test)]
+pub(crate) use crate::services::kanban_cards::entry_transactions::soft_delete_card_pg;
 pub use crud::*;
 pub use labels::*;
 pub use listing::*;

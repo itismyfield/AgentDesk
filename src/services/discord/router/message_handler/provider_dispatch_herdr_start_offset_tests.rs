@@ -18,7 +18,7 @@ fn timestamped(mut value: Value, at: chrono::DateTime<chrono::Utc>) -> Value {
     value
 }
 
-fn records(session: &str, at: chrono::DateTime<chrono::Utc>) -> [Value; 3] {
+fn records(session: &str, at: chrono::DateTime<chrono::Utc>) -> [Value; 4] {
     [
         timestamped(
             json!({"type":"user", "sessionId":session,
@@ -28,6 +28,10 @@ fn records(session: &str, at: chrono::DateTime<chrono::Utc>) -> [Value; 3] {
         timestamped(
             json!({"type":"assistant", "sessionId":session,
             "message":{"role":"assistant", "content":[{"type":"text", "text":"답"}]}}),
+            at,
+        ),
+        timestamped(
+            json!({"type":"system", "subtype":"turn_duration", "sessionId":session}),
             at,
         ),
         timestamped(

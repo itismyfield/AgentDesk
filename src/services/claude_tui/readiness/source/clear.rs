@@ -1,8 +1,8 @@
-//! Certified clear adoption uses the existing binding publisher and leaves O cursors to O.
+//! Durable Pending certificates restore readiness without replacing runtime bindings.
 use super::super::{changed, ledger};
 use super::{Source, binding_context, nonce};
 use crate::services::tmux_common::{self, TmuxSourceAuthority};
-use crate::services::tui_prompt_dedupe::{self as dedupe, TuiRuntimeBinding, binding_events};
+use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events};
 use binding_context::BindingContext;
 use binding_events::{BindingEvent, BindingTarget};
 use chrono::{DateTime, Utc};
@@ -141,135 +141,179 @@ pub(crate) fn note(
     });
 }
 
-/// Retirement and pre-source publication share source authority; a consumed receipt never bootstraps twice.
-pub(crate) fn adopt(session: &str, epoch: &str, path: &Path) -> bool {
-    tmux_common::with_tmux_source_authority(session, |authority| {
-        adopt_under(authority, epoch, path)
-    })
-}
-fn adopt_under(authority: &TmuxSourceAuthority<'_>, epoch: &str, path: &Path) -> bool {
-    let session = authority.session();
-    if resolved(authority, epoch, path) {
-        return true;
+fn verified_with(
+    session: &str,
+    binding: impl FnOnce() -> Option<dedupe::TuiRuntimeBinding>,
+) -> Option<(Certified, Source)> {
+    let proof = load(session)?;
+    let source = proof.source()?;
+    let epoch = source.nonce.as_deref()?;
+    if !proof.current(session, epoch, &source.path) {
+        return None;
     }
-    let Some(mut proof) = load(session) else {
-        return false;
-    };
-    if !proof.current(session, epoch, path) {
-        return false;
-    }
-    let Some(source) = proof.source() else {
-        return false;
-    };
-    let Some(channel) = proof.context.channel_id else {
-        return false;
-    };
-    let mut state = ledger();
-    if proof.consumed {
-        return observed(authority).is_some_and(|binding| projected(&binding, &source))
-            && local(&state, &source, proof.published);
-    }
-    if state
-        .entries
-        .get(&source)
-        .is_some_and(|entry| entry.submitted || entry.pending.is_some())
+    let binding = binding()?;
+    let old = proof.pending.old.as_ref()?;
+    if binding.runtime_kind != crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+        || binding.session_id.as_deref() != Some(old.session_id.as_str())
+        || Path::new(binding.relay_output_path()) != old.path
     {
-        return false;
+        return None;
     }
-    let key = (session.to_owned(), epoch.to_owned());
-    if state
-        .starts
-        .get(&key)
-        .is_some_and(|(at, _)| *at > proof.published)
-    {
-        return false;
-    }
-    let Some(old) = observed(authority) else {
-        return false;
-    };
-    if let Some(old) = &old {
-        let same_new = old.session_id.as_deref() == Some(source.native.as_str())
-            && Path::new(old.relay_output_path()) == source.path;
-        let same_old = proof.pending.old.as_ref().is_some_and(|from| {
-            old.session_id.as_deref() == Some(from.session_id.as_str())
-                && Path::new(old.relay_output_path()) == from.path
-        });
-        if old.runtime_kind != crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
-            || (!same_new && !same_old)
-        {
-            return false;
-        }
-    }
-    // Persist the one-use fence before publication; a crash in between stays Held.
-    proof.consumed = true;
-    if save(session, &proof).is_none() {
-        return false;
-    }
-    let binding = TuiRuntimeBinding {
-        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
-        output_path: source.path.display().to_string(),
-        session_id: Some(source.native.clone()),
-        relay_output_path: None,
-        input_fifo_path: None,
-        last_offset: 0,
-        relay_last_offset: None,
-    };
-    let published = dedupe::pane_registration::register_claude_pane_under_source_authority(
-        authority,
-        channel,
-        binding,
-        dedupe::Record::AwaitFirst,
-    )
-    .is_some_and(dedupe::Persisted::published);
-    if !published {
-        return false;
-    }
-    #[cfg(test)]
-    if let Some(hook) = AFTER_PUBLICATION.with_borrow_mut(Option::take) {
-        hook();
-    }
-    state.entries.retain(|old, _| {
-        old.session != source.session || old.nonce != source.nonce || old == &source
-    });
-    state.starts.insert(key, (proof.published, source.clone()));
-    let entry = state.entries.entry(source).or_default();
-    entry.start = true;
-    entry.recovery = None;
-    entry.revision += 1;
-    changed(&mut state);
-    true
+    Some((proof, source))
 }
 
-fn observed(authority: &TmuxSourceAuthority<'_>) -> Option<Option<TuiRuntimeBinding>> {
-    use dedupe::RuntimeObservation;
-    match dedupe::runtime_observation_under_source_authority(authority) {
-        RuntimeObservation::Missing => Some(None),
-        RuntimeObservation::Present(binding) | RuntimeObservation::Expired(binding) => {
-            Some(Some(binding))
-        }
-        RuntimeObservation::Withheld(_) => None,
-    }
-}
-fn projected(binding: &Option<TuiRuntimeBinding>, source: &Source) -> bool {
-    binding.as_ref().is_some_and(|binding| {
-        binding.runtime_kind == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
-            && binding.session_id.as_deref() == Some(source.native.as_str())
-            && Path::new(binding.relay_output_path()) == source.path
+fn verified(session: &str) -> Option<(Certified, Source)> {
+    verified_with(session, || {
+        dedupe::runtime_binding_for_tmux_session(session)
     })
 }
-fn local(state: &super::super::Ledger, source: &Source, published: DateTime<Utc>) -> bool {
+fn verified_under(authority: &TmuxSourceAuthority<'_>) -> Option<(Certified, Source)> {
+    verified_with(authority.session(), || {
+        dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
+    })
+}
+/// The durable identity fences old output even when a consumed proof cannot restore local readiness.
+pub(in crate::services::claude_tui::readiness) fn restore(session: &str) -> Option<Source> {
+    let (proof, source) = verified(session)?;
+    restore_verified(proof, source)
+}
+fn restore_verified(proof: Certified, source: Source) -> Option<Source> {
+    let session = source.session.as_str();
+    let key = (session.to_owned(), source.nonce.clone()?);
+    let mut state = ledger();
+    let newer = state
+        .starts
+        .get(&key)
+        .is_some_and(|(at, _)| *at > proof.published);
+    if !proof.consumed
+        && !newer
+        && state
+            .entries
+            .get(&source)
+            .is_none_or(|entry| !entry.submitted && entry.pending.is_none())
+        && !local(&state, &source, proof.published)
+    {
+        state.entries.retain(|old, _| {
+            old.session != source.session || old.nonce != source.nonce || old == &source
+        });
+        state.starts.insert(key, (proof.published, source.clone()));
+        let entry = state.entries.entry(source.clone()).or_default();
+        entry.start = true;
+        entry.clear_start = true;
+        entry.recovery = None;
+        entry.revision += 1;
+        changed(&mut state);
+    }
+    Some(source)
+}
+
+fn local(state: &super::super::Ledger, source: &Source, at: DateTime<Utc>) -> bool {
     let Some(epoch) = &source.nonce else {
         return false;
     };
     state
         .starts
         .get(&(source.session.clone(), epoch.clone()))
-        .is_some_and(|(at, current)| *at == published && current == source)
+        .is_some_and(|(seen, current)| *seen == at && current == source)
         && state
             .entries
             .get(source)
-            .is_some_and(|entry| entry.start && !entry.submitted && entry.pending.is_none())
+            .is_some_and(|entry| entry.start && entry.clear_start)
 }
+
+pub(in crate::services::claude_tui::readiness) fn usable(source: &Source) -> bool {
+    eligible(source, verified(&source.session))
+}
+pub(in crate::services::claude_tui::readiness) fn usable_under(
+    source: &Source,
+    authority: &TmuxSourceAuthority<'_>,
+) -> bool {
+    eligible(source, verified_under(authority))
+}
+fn eligible(source: &Source, current: Option<(Certified, Source)>) -> bool {
+    let Some((proof, current)) = current else {
+        return false;
+    };
+    if current != *source {
+        return false;
+    }
+    let state = ledger();
+    local(&state, source, proof.published)
+        && (!proof.consumed
+            || state
+                .entries
+                .get(source)
+                .is_some_and(|entry| entry.pending.is_some() && !entry.submitted))
+}
+
+/// Consuming a reservation fences a crash before the first key; known non-delivery may release it.
+pub(in crate::services::claude_tui::readiness) fn claim(
+    source: &Source,
+    expected: &super::super::clear::Evidence,
+) -> bool {
+    tmux_common::with_tmux_source_authority(&source.session, |authority| {
+        if super::super::clear::evidence_under(source, authority).as_ref() != Some(expected) {
+            return false;
+        }
+        let Some((mut proof, current)) = verified_under(authority) else {
+            return false;
+        };
+        if current != *source || proof.consumed {
+            return false;
+        }
+        proof.consumed = true;
+        save(&source.session, &proof).is_some()
+    })
+}
+
+pub(in crate::services::claude_tui::readiness) fn release(source: &Source) {
+    tmux_common::with_tmux_source_authority(&source.session, |authority| {
+        let Some((mut proof, current)) = verified_under(authority) else {
+            return;
+        };
+        if current == *source && proof.consumed {
+            proof.consumed = false;
+            if save(&source.session, &proof).is_none() {
+                tracing::warn!(
+                    session = source.session,
+                    "clear reservation release could not be persisted"
+                );
+            }
+        }
+    });
+}
+
+/// Adoption publishes only local pre-source evidence; the runtime binding and cursors stay old.
+pub(crate) fn adopt(session: &str, epoch: &str, path: &Path) -> bool {
+    tmux_common::with_tmux_source_authority(session, |authority| {
+        if resolved(authority, epoch, path) {
+            return true;
+        }
+        let Some((proof, source)) = verified_under(authority) else {
+            return false;
+        };
+        let Some(source) = restore_verified(proof, source) else {
+            return false;
+        };
+        if source.nonce.as_deref() != Some(epoch)
+            || source.path != path
+            || !usable_under(&source, authority)
+        {
+            return false;
+        }
+        #[cfg(test)]
+        if let Some(hook) = AFTER_PUBLICATION.with_borrow_mut(Option::take) {
+            hook();
+        }
+        true
+    })
+}
+
+pub(crate) fn wakeable(session: &str, epoch: &str, path: &Path) -> bool {
+    nonce(session) == Some(Some(epoch.into()))
+        && super::super::observe(session, Some(path)).is_some()
+}
+
 fn resolved(authority: &TmuxSourceAuthority<'_>, epoch: &str, path: &Path) -> bool {
     let session = authority.session();
     if nonce(session) != Some(Some(epoch.into())) {
@@ -291,47 +335,4 @@ fn resolved(authority: &TmuxSourceAuthority<'_>, epoch: &str, path: &Path) -> bo
                 pin.path == path && binding_events::codex::source_file_matches(&pin)
             })
     })
-}
-
-/// A wake only asks the owner to retry; the input boundary revalidates and consumes again.
-pub(crate) fn wakeable(session: &str, epoch: &str, path: &Path) -> bool {
-    let stage = tmux_common::with_tmux_source_authority(session, |authority| {
-        if resolved(authority, epoch, path) {
-            return Some(false);
-        }
-        let proof = load(session)?;
-        if !proof.current(session, epoch, path) {
-            return None;
-        }
-        let source = proof.source()?;
-        let state = ledger();
-        if state
-            .starts
-            .get(&(session.into(), epoch.into()))
-            .is_some_and(|(at, _)| *at > proof.published)
-        {
-            return None;
-        }
-        if proof.consumed {
-            return (observed(authority).is_some_and(|binding| projected(&binding, &source))
-                && local(&state, &source, proof.published))
-            .then_some(false);
-        }
-        let old = observed(authority)?;
-        if let Some(binding) = &old {
-            let from = proof.pending.old.as_ref().is_some_and(|from| {
-                binding.session_id.as_deref() == Some(from.session_id.as_str())
-                    && Path::new(binding.relay_output_path()) == from.path
-            });
-            if !projected(&old, &source) && !from {
-                return None;
-            }
-        }
-        Some(true)
-    });
-    match stage {
-        Some(true) => true,
-        Some(false) => super::super::observe(session, Some(path)).is_some(),
-        None => false,
-    }
 }

@@ -538,6 +538,8 @@ fn awaiting_clear_adoption_blocks_stale_same_session_close_until_pre_source_is_v
     let (release, wait) = std::sync::mpsc::channel();
     let (contended, blocked) = std::sync::mpsc::channel();
     let closed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let closer_nonce = nonce.clone();
+    let closer_log_root = log_root.clone();
     let publisher = std::thread::spawn(move || {
         dedupe::binding_events::set_test_root(log_root.as_deref());
         readiness::CLEAR_AFTER_PUBLICATION.with_borrow_mut(|slot| {
@@ -553,6 +555,7 @@ fn awaiting_clear_adoption_blocks_stale_same_session_close_until_pre_source_is_v
         .expect("pre-source cache published while authority is held");
     let (logical, closed_in_thread) = (fx.logical().to_owned(), Arc::clone(&closed));
     let closer = std::thread::spawn(move || {
+        dedupe::binding_events::set_test_root(closer_log_root.as_deref());
         tc::SOURCE_AUTHORITY_CONTENDED.with_borrow_mut(|slot| {
             *slot = Some(Box::new(move || {
                 contended.send(()).unwrap();
@@ -561,10 +564,21 @@ fn awaiting_clear_adoption_blocks_stale_same_session_close_until_pre_source_is_v
         tc::with_tmux_source_authority(&logical, |authority| {
             let now =
                 dedupe::runtime_binding_for_tmux_session_under_source_authority(authority).unwrap();
-            if now == old {
+            let pending = crate::services::claude::herdr_turn::awaited_clear(
+                CHANNEL,
+                &logical,
+                &closer_nonce,
+            )
+            .unwrap();
+            let old_ready = now.session_id.as_deref() == Some(pending.session_id.as_str());
+            let new_ready = pending.transcript.as_deref().is_some_and(|path| {
+                Path::new(path).file_stem().and_then(|s| s.to_str())
+                    == Some(pending.session_id.as_str())
+            });
+            if old_ready {
                 closed_in_thread.fetch_add(1, Ordering::SeqCst);
             }
-            now.session_id
+            (now == old, old_ready, new_ready)
         })
     });
     blocked
@@ -575,7 +589,7 @@ fn awaiting_clear_adoption_blocks_stale_same_session_close_until_pre_source_is_v
     assert!(crate::test_support::wait::join_within(publisher, LIMIT));
     assert_eq!(
         crate::test_support::wait::join_within(closer, LIMIT),
-        Some(cleared)
+        (true, false, true)
     );
     assert_eq!(
         closed.load(Ordering::SeqCst),

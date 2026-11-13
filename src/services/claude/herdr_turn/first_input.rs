@@ -143,6 +143,7 @@ fn write(
             let clearing = attached.awaiting_clear;
             let epoch = attached.nonce.clone();
             let clear_path = path.to_path_buf();
+            let watched_path = attached.transcript.clone();
             crate::services::claude_tui::owner_input::record_preparation_watch(Box::new(
                 move || {
                     use crate::services::claude_tui::busy_inject::Screen;
@@ -153,8 +154,11 @@ fn write(
                             &clear_path,
                         )
                     } else {
-                        crate::services::claude_tui::readiness::observe(&watched_session, None)
-                            .is_some()
+                        crate::services::claude_tui::readiness::observe(
+                            &watched_session,
+                            Some(&watched_path),
+                        )
+                        .is_some()
                     };
                     if ready
                         && pane.capture_ansi(-80).as_deref().is_some_and(|capture|
@@ -296,6 +300,8 @@ pub(super) fn observe(
     Ok(())
 }
 
+#[cfg(test)]
+mod clear_held_tests;
 #[cfg(test)]
 mod tests;
 

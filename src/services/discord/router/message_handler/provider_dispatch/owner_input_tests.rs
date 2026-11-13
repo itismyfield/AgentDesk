@@ -17,6 +17,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "owner_input_common_operation_tests.rs"]
+mod common_operation_tests;
+
 pub(super) const PROMPT: &str = "owner busy question";
 pub(super) const AUTHOR: &str = "7";
 pub(super) const NAME: &str = "tester";
@@ -1104,7 +1107,7 @@ fn startup_enter_is_the_attempts_first_key() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let dialog = "Resume from summary\n❯ 1. Resume from summary\n  2. Resume full session\n\
         Enter to confirm · Esc to cancel\n";
-    let rig = rig("oc-dialog", 7_272_515, "normal", dialog.into(), IDLE);
+    let rig = rig("oc-dialog", 7_272_515, "startup", dialog.into(), IDLE);
     let _driver = rig.trace_driver();
     fs::write(rig.renderer.join("body"), "").unwrap();
     // A menu confirmation is not a native user turn; keep its renderer record off the transcript.
@@ -1929,6 +1932,7 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
             relay_last_offset: None,
         },
     );
+    crate::services::claude_tui::readiness::tests::pre_source(&rig.name, &path);
     let claim = rig.claim(&rig.granted_front()).unwrap();
     let registration = rig.registration(
         &ProviderKind::Claude,

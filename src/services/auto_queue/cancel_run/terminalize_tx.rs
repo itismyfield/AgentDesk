@@ -4,6 +4,7 @@
 use sqlx::{Postgres, Row, Transaction};
 
 use crate::dispatch::CancelTransitionMeta;
+use crate::services::auto_queue::transactions;
 
 /// State changes applied by [`terminalize_selected_runs_on_pg_tx`] before commit.
 pub(super) struct TerminalizeTxOutcome {
@@ -130,7 +131,7 @@ pub(super) async fn terminalize_selected_runs_on_pg_tx(
             current_status.as_str(),
             "pending" | "dispatched" | "user_cancelled"
         ) {
-            crate::db::auto_queue::update_entry_status_on_pg_tx(
+            transactions::update_entry_status_on_pg_tx(
                 tx,
                 &entry_id,
                 crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
@@ -173,7 +174,7 @@ pub(super) async fn terminalize_selected_runs_on_pg_tx(
 
     if completes_run && terminalized_runs > 0 {
         for run_id in &locked_run_ids {
-            crate::db::auto_queue::queue_run_completion_notify_on_pg(tx, run_id).await?;
+            transactions::queue_run_completion_notify_on_pg(tx, run_id).await?;
         }
     }
 

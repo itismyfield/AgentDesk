@@ -15,6 +15,8 @@ use scope::Lineage;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+#[path = "owner_input_herdr_busy_operation_tests.rs"]
+mod busy_operation;
 #[path = "owner_input_herdr_pending_tests.rs"]
 mod pending;
 

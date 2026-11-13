@@ -158,13 +158,17 @@ fn an_owned_paste_beside_an_unparkable_draft_notices_its_original_once() {
         let counted = raised.clone();
         let nonce = busy_inject::fresh_nonce();
         let leaf = BusyClaude {
-            pane: busy_inject::Pane::with_program(
-                &session,
+            operation: crate::services::claude_tui::host_input::BusyOperation::new(
+                crate::services::claude_tui::host_input::InputTarget::legacy_tmux(&session),
                 crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
                     dir.path().join("tmux"),
                 ),
+                &busy_inject::TIMING,
+                false,
+                Arc::new(crate::services::provider::CancelToken::new()),
+                None,
             )
-            .expect("managed scripted pane"),
+            .expect("managed scripted operation"),
             session: session.clone(),
             transcript: dir.path().join("transcript.jsonl"),
             channel: 7_676_400 + at,
@@ -173,10 +177,7 @@ fn an_owned_paste_beside_an_unparkable_draft_notices_its_original_once() {
             name: "ann".into(),
             nonce: nonce.clone(),
             text: "owned question".into(),
-            timing: &busy_inject::TIMING,
-            declared: false,
             draft_notice: Some(Box::new(move || *counted.lock().unwrap() += 1)),
-            cancel: Arc::new(crate::services::provider::CancelToken::new()),
         }
         .leaf();
         let frame = busy_inject::frame("discord", "200", "ann", &nonce, "owned question");
