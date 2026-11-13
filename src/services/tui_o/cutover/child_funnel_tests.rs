@@ -1,6 +1,5 @@
-//! Site × child: each census funnel's O test again with its channel as a recorded thread child of
-//! a selected parent, so a funnel that reads only boot membership posts the child's body. W10 builds
-//! its own boot and keeps its child case beside it.
+//! Each census funnel's O test re-run with its channel as a recorded thread child of a selected
+//! parent. W10 builds its own boot and keeps its child case beside it.
 
 use super::test_override::funnel_as_child;
 
