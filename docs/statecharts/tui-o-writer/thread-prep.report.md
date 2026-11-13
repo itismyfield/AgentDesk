@@ -23,3 +23,5 @@ Safety checks: own candidate and permit identity, recorded REST0, floor before i
 Counterexample replay: the Rust snapshot clone, record-first reader, independent child candidate and init failure fixtures follow the same transitions; deploy fixtures exercise the actual rollback and common artifact pre-stage blocks. O-b must add child admission/ready, REST failure → recovery legacy once and boot-discovered late adoption replays.
 
 Logs: `/home/adk/adk/lane-runs/i8118/logs/tlc`. Plain TLC 1.7.4 JAR; 11 cfg checked in under 1 minute on 2026-11-12. Model validation is limited to this projection and is not evidence of production child activation.
+
+The activation contract these projections left to O-b is modelled in [thread-active.report.md](thread-active.report.md).
