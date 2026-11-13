@@ -1,4 +1,4 @@
-//! A shared, derived reader view. It does not add children to output membership.
+//! A shared, derived view of thread children: each one's own adoption under its parent's policy.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -19,6 +19,47 @@ struct ChildEntry {
     boot_discovered: bool,
 }
 
+/// A resolved child of an O parent, as every snapshot clone reads it.
+#[derive(Clone, Debug)]
+pub(crate) struct Child {
+    pub(crate) parent: u64,
+    pub(crate) kind: RuntimeHandoffKind,
+    pub(crate) candidate: Candidate,
+}
+
+impl Child {
+    /// Who has the child's body now: O (`true`), or Legacy while a late reservation waits for its
+    /// open turn. `None` is an undecided adoption, which is held and never handed to Legacy.
+    pub(crate) fn body_owner(&self) -> Option<bool> {
+        match self.candidate.peek() {
+            state if state.owned() => Some(true),
+            Adoption::Deferred if self.candidate.late_adopt_origin() => Some(false),
+            _ => None,
+        }
+    }
+}
+
+/// A known child whose relationship is unresolved, conflicting or unreadable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ChildHeld;
+
+impl ChildEntry {
+    /// `None` once the child resolved under a parent O does not select.
+    fn read(&self) -> Option<Result<Child, ChildHeld>> {
+        let (Some(parent), false, false) = (self.parent, self.held, self.conflict) else {
+            return Some(Err(ChildHeld));
+        };
+        let candidate = self.candidate.clone()?;
+        Some(self.kind.map_or(Err(ChildHeld), |kind| {
+            Ok(Child {
+                parent,
+                kind,
+                candidate,
+            })
+        }))
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct ChildEntries {
     entries: Arc<Mutex<BTreeMap<u64, ChildEntry>>>,
@@ -28,7 +69,7 @@ pub(super) struct ChildEntries {
 impl ChildEntries {
     fn record(&self, boot: &BootChannels, init: &Initialized, adoption: Adoption) {
         let parent = init.policy_parent;
-        let kind = parent.and_then(|parent| boot.kind(parent));
+        let kind = parent.and_then(|parent| boot.kinds.get(&parent).copied());
         let held = parent.is_none_or(|parent| {
             parent == 0 || parent == init.channel || !boot.configured_binding(parent)
         }) || kind.is_none();
@@ -80,25 +121,39 @@ impl ChildEntries {
         let Ok(_refresh) = self.refresh.try_lock() else {
             return;
         };
-        let mut entries = self.entries.lock().unwrap();
-        for (&channel, entry) in &mut *entries {
-            if entry.parent.is_some() || entry.conflict {
-                continue;
-            }
+        let unresolved = |entry: &ChildEntry| entry.parent.is_none() && !entry.conflict;
+        // The checked read runs with no entry lock held, so the gate never waits on REST.
+        let pending: Vec<(u64, bool)> = self
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, entry)| unresolved(entry))
+            .map(|(&channel, entry)| (channel, entry.boot_discovered))
+            .collect();
+        for (channel, boot_discovered) in pending {
             let Ok(surface) = checked(channel) else {
                 continue;
             };
             let (destination, parent, kind) = surface.relationship();
-            if destination != channel || boot.kind(parent).is_some_and(|expected| expected != kind)
-            {
+            let expected = boot.kinds.get(&parent).copied();
+            let mut entries = self.entries.lock().unwrap();
+            // The entry may have been resolved or replaced while the read was in flight.
+            let Some(entry) = entries
+                .get_mut(&channel)
+                .filter(|entry| unresolved(entry) && entry.boot_discovered == boot_discovered)
+            else {
+                continue;
+            };
+            if destination != channel || expected.is_some_and(|expected| expected != kind) {
                 entry.conflict = true;
                 continue;
             }
             entry.parent = Some(parent);
             entry.kind = Some(kind);
             entry.held = false;
-            entry.candidate = boot.kind(parent).map(|_| {
-                if entry.boot_discovered {
+            entry.candidate = expected.map(|_| {
+                if boot_discovered {
                     Candidate::reserved_late()
                 } else {
                     Candidate::new(Adoption::Pending)
@@ -230,6 +285,44 @@ impl BootChannels {
 
     pub(crate) fn configured_binding(&self, channel: u64) -> bool {
         self.bindings.contains(&channel)
+    }
+
+    /// What the shared view holds for `channel`: `None` leaves it to boot membership.
+    pub(crate) fn child(&self, channel: u64) -> Option<Result<Child, ChildHeld>> {
+        let entries = self
+            .children
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        entries.get(&channel)?.read()
+    }
+
+    /// Boot membership plus every known child, held ones included so no reader drops them.
+    pub(crate) fn output_channels(&self) -> std::collections::BTreeSet<u64> {
+        let entries = self
+            .children
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let children = entries
+            .iter()
+            .filter(|(_, entry)| entry.read().is_some())
+            .map(|(&channel, _)| channel);
+        self.channels.iter().copied().chain(children).collect()
+    }
+
+    /// Whether O may host `channel` here: a boot TUI member or a resolved child of one.
+    pub(crate) fn hosts_output(&self, channel: u64) -> bool {
+        super::owns_output(&self.channels, channel, self.kinds.get(&channel).copied())
+            || matches!(self.child(channel), Some(Ok(_)))
+    }
+
+    /// The channel whose boot policy governs `channel`: a child's parent, or the channel itself.
+    pub(crate) fn policy_channel(&self, channel: u64) -> u64 {
+        match self.child(channel) {
+            Some(Ok(child)) => child.parent,
+            _ => channel,
+        }
     }
 }
 

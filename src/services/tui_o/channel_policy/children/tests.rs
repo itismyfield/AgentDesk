@@ -52,8 +52,12 @@ async fn thread_children_recorded_store_only_boot_and_refresh_need_no_rest() {
     assert!(!boot.channels().contains(&43));
     assert!(boot.execution(43).is_none());
     let _forced = test_override::force_boot(boot);
-    // The O-a view never grants child output membership or borrows a parent permit.
-    assert_eq!(crate::services::tui_o::cutover::boot_ownership().len(), 2);
+    // The recorded child is hosted under its own adoption; it borrows no parent permit.
+    let owned = crate::services::tui_o::cutover::boot_ownership();
+    assert_eq!(owned.len(), 3);
+    let (_, kind, candidate) = owned.iter().find(|(id, _, _)| *id == 43).unwrap();
+    assert_eq!(*kind, Some(RuntimeHandoffKind::ClaudeTui));
+    assert_eq!(candidate.as_ref().unwrap().peek(), Adoption::Committed);
     use crate::services::tui_o::cutover::{BodyClaim, BodySend, BodySite, claim_then_send_at};
     let mut sends = 0;
     let sent = claim_then_send_at(
@@ -65,10 +69,10 @@ async fn thread_children_recorded_store_only_boot_and_refresh_need_no_rest() {
     )
     .await
     .unwrap();
-    assert!(matches!(sent, BodySend::Sent(())));
-    assert_eq!(sends, 1);
+    assert!(matches!(sent, BodySend::OwnedByO));
+    assert_eq!(sends, 0, "Legacy sends no body for a child O owns");
     assert!(
-        !crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
             43,
             Some(RuntimeHandoffKind::ClaudeTui)
         )
@@ -236,4 +240,165 @@ fn thread_children_boot_candidates_carry_the_immutable_init_scope() {
     assert!(boot.output_candidate(43).is_none());
     *first.lock() = Adoption::Held;
     assert_eq!(second.peek(), Adoption::Committed);
+}
+
+fn thread(
+    channel: u64,
+    parent: u64,
+) -> crate::services::session_host::surface_policy::VerifiedSurface {
+    let channel = serde_json::from_value(serde_json::json!({
+        "id": channel.to_string(), "parent_id": parent.to_string(), "type": 11, "name": "fixture"
+    }))
+    .unwrap();
+    crate::services::session_host::surface_policy::VerifiedSurface::from_discord(
+        &channel,
+        RuntimeHandoffKind::ClaudeTui,
+    )
+    .unwrap()
+}
+
+fn unresolved(boot: &BootChannels, channel: u64, boot_discovered: bool) {
+    boot.children.entries.lock().unwrap().insert(
+        channel,
+        ChildEntry {
+            parent: None,
+            kind: None,
+            candidate: None,
+            held: true,
+            conflict: false,
+            record_unreadable: false,
+            boot_discovered,
+        },
+    );
+}
+
+/// Whether Legacy sent a body offered for `channel` at a census body site.
+async fn legacy_sent(
+    channel: u64,
+    kind: RuntimeHandoffKind,
+) -> Result<bool, crate::services::tui_o::cutover::IdentityError> {
+    use crate::services::tui_o::cutover::{BodyClaim, BodySend, BodySite, claim_then_send_at};
+    let claim = Some(BodyClaim::new(channel, Some(kind)));
+    let sent = claim_then_send_at(BodySite::BridgeTerminal, claim, || async {}).await?;
+    Ok(matches!(sent, BodySend::Sent(())))
+}
+
+#[tokio::test]
+async fn thread_children_gate_never_hands_an_unresolved_or_undecided_child_to_legacy() {
+    use crate::services::tui_o::cutover::IdentityError;
+    use RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    let boot = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Committed);
+    boot.children
+        .record(&boot, &init(43, Some(42)), Adoption::Committed);
+    boot.children
+        .record(&boot, &init(45, Some(42)), Adoption::Committed);
+    boot.children
+        .record(&boot, &init(45, Some(44)), Adoption::Committed);
+    for (channel, boot_discovered) in [(46, true), (47, false), (48, true), (49, true)] {
+        unresolved(&boot, channel, boot_discovered);
+    }
+    let _forced = test_override::force_boot(boot.clone());
+    assert_eq!(
+        legacy_sent(46, ClaudeTui).await,
+        Err(IdentityError::ChildHeld)
+    );
+    boot.children
+        .resolve_legacy(&boot, |channel| match channel {
+            46 => Err(()),
+            49 => Ok(thread(49, 99)),
+            channel => Ok(thread(channel, 42)),
+        });
+    // Unresolved and conflicting children are held; a kind other than the parent's is refused.
+    assert_eq!(
+        legacy_sent(46, ClaudeTui).await,
+        Err(IdentityError::ChildHeld)
+    );
+    assert_eq!(
+        legacy_sent(45, ClaudeTui).await,
+        Err(IdentityError::ChildHeld)
+    );
+    assert!(matches!(
+        legacy_sent(43, CodexTui).await,
+        Err(IdentityError::KindMismatch { .. })
+    ));
+    // An undecided adoption is held as it is: the claim does not release it to Legacy.
+    let undecided = boot.child(47).unwrap().unwrap().candidate;
+    assert_eq!(
+        legacy_sent(47, ClaudeTui).await,
+        Err(IdentityError::ChildHeld)
+    );
+    assert_eq!(undecided.peek(), Adoption::Pending);
+    // A late reservation leaves its open turn to Legacy and counts that send.
+    let late = boot.child(48).unwrap().unwrap().candidate;
+    assert_eq!(legacy_sent(48, ClaudeTui).await, Ok(true));
+    assert_eq!((late.peek(), late.sends()), (Adoption::Deferred, (1, 1)));
+    // A thread whose parent O does not select stays an ordinary Legacy channel.
+    assert!(boot.child(49).is_none());
+    assert_eq!(legacy_sent(49, ClaudeTui).await, Ok(true));
+    // The parent and the sibling keep their own state throughout.
+    assert_eq!(legacy_sent(43, ClaudeTui).await, Ok(false));
+    assert_eq!(boot.candidate(42).unwrap().peek(), Adoption::Committed);
+    assert_eq!(boot.candidate(42).unwrap().sends(), (0, 0));
+}
+
+#[test]
+fn thread_children_intake_holds_a_child_until_its_own_writer_is_ready() {
+    use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+    const PARENT: u64 = 8_118_142;
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "server": {},
+        "agents": [{"id":"a","name":"A","channels":{"claude":{"id":PARENT.to_string(),"runtime":"tui"}}}],
+        "tui_o":{"writer":{"all_tui":false,"channels":[PARENT]}}
+    }))
+    .unwrap();
+    let boot = BootChannels::validate(&config)
+        .unwrap()
+        .adopted(Adoption::Committed);
+    let (owned, held, undecided, late) = (PARENT + 1, PARENT + 2, PARENT + 3, PARENT + 4);
+    boot.children
+        .record(&boot, &init(owned, Some(PARENT)), Adoption::Committed);
+    unresolved(&boot, held, true);
+    unresolved(&boot, undecided, false);
+    unresolved(&boot, late, true);
+    boot.children.resolve_legacy(&boot, |channel| {
+        (channel != held).then(|| thread(channel, PARENT)).ok_or(())
+    });
+    let _forced = test_override::force_boot(boot.clone());
+    let hold = |channel| matches!(intake_route::route("claude", channel), IntakeRoute::Hold(_));
+    // No writer hosts these ids in this process, so an O-owned child waits instead of placing.
+    assert!(hold(owned) && hold(held) && hold(undecided));
+    assert_eq!(intake_route::route("claude", late), IntakeRoute::Unselected);
+    assert!(matches!(
+        intake_route::route_for_placement("claude", undecided),
+        IntakeRoute::Hold(_)
+    ));
+    let adoption = boot.child(undecided).unwrap().unwrap().candidate.peek();
+    assert_eq!(adoption, Adoption::Pending, "a placement releases no child");
+    let waiting = intake_route::held_channels("claude");
+    assert!(waiting.contains(&owned.to_string()) && waiting.contains(&undecided.to_string()));
+    assert!(waiting.contains(&held.to_string()));
+    assert!(!waiting.contains(&late.to_string()));
+}
+
+#[test]
+fn thread_children_resolution_reads_outside_the_entry_lock_and_rechecks_the_entry() {
+    let boot = BootChannels::validate(&config()).unwrap();
+    unresolved(&boot, 46, true);
+    let mut reads = 0;
+    boot.children.resolve_legacy(&boot, |channel| {
+        reads += 1;
+        assert!(
+            boot.children.entries.try_lock().is_ok(),
+            "the checked read holds no entry lock"
+        );
+        // A conflicting record lands while the read is in flight.
+        boot.children
+            .record(&boot, &init(channel, Some(44)), Adoption::Committed);
+        Ok(thread(channel, 42))
+    });
+    assert_eq!(reads, 1);
+    assert!(matches!(boot.child(46), Some(Err(ChildHeld))));
+    assert!(boot.children.entries.lock().unwrap()[&46].parent.is_none());
 }

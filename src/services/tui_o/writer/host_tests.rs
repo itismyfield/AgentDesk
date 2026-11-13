@@ -22,6 +22,9 @@ mod late_cleanup;
 mod late_host;
 #[path = "repair_io_tests.rs"]
 mod repair_io;
+#[cfg(unix)]
+#[path = "thread_child_host_tests.rs"]
+mod thread_child;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
 #[cfg(unix)]
 use chrono::{DateTime, TimeDelta};

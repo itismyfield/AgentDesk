@@ -77,9 +77,8 @@ pub(super) async fn prepare(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
         _ => return,
     };
     let channels: Vec<_> = snapshot
-        .channels()
-        .iter()
-        .copied()
+        .output_channels()
+        .into_iter()
         .filter(|ch| snapshot.kind(*ch) == Some(kind))
         .collect();
     if channels.is_empty() {
@@ -157,7 +156,7 @@ pub(super) async fn refresh(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
     };
     let local =
         super::o_writer_host::local_id(snapshot.configured_id(), Duration::from_secs(10)).await;
-    for &channel in snapshot.channels() {
+    for channel in snapshot.output_channels() {
         if snapshot.kind(channel) != Some(kind) {
             continue;
         }

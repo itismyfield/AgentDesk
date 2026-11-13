@@ -24,6 +24,8 @@ pub(crate) enum IdentityError {
     },
     #[error("TUI-bound channel is outside the O writer selection")]
     UnselectedTui,
+    #[error("thread child has no resolved parent policy or decided adoption")]
+    ChildHeld,
 }
 
 /// How a caller uses the answer: before a body Legacy would send, or only to read ownership.
@@ -445,10 +447,17 @@ fn decide_with_snapshot(
     if channel_id == 0 {
         return Err(IdentityError::UnknownChannel);
     }
-    // Membership comes before runtime lookup so unrelated Legacy channels stay independent.
-    if !snapshot.channels().contains(&channel_id) {
-        return outside_selection(snapshot, channel_id, ClaimReason::NonMember);
-    }
+    // A known thread child is judged under its parent's kind, never as a plain non-member.
+    let child = match snapshot.child(channel_id) {
+        Some(child) => Some(child.map_err(|_| IdentityError::ChildHeld)?),
+        None => {
+            // Membership comes before runtime lookup so unrelated Legacy channels stay independent.
+            if !snapshot.channels().contains(&channel_id) {
+                return outside_selection(snapshot, channel_id, ClaimReason::NonMember);
+            }
+            None
+        }
+    };
     let kind = resolve_kind().ok_or(IdentityError::UnknownKind)?;
     let expected = snapshot.kind(channel_id);
     if expected != Some(kind) {
@@ -470,10 +479,7 @@ fn decide_with_snapshot(
         });
     }
     // The body and its host share both state and sends.
-    let Some(candidate) = snapshot.candidate(channel_id) else {
-        return Ok(legacy(ClaimReason::NoCandidate));
-    };
-    Ok(match usage {
+    let judged = |candidate: &channel_policy::Candidate| match usage {
         Use::Body => match origin {
             Some(origin) => candidate.claim_body_from(channel_id, origin),
             None => candidate.claim_body(channel_id),
@@ -490,7 +496,16 @@ fn decide_with_snapshot(
                 },
             }
         }
-    })
+    };
+    // A child has its own adoption; an undecided one is held, as a claim would release it.
+    if let Some(child) = child {
+        child.body_owner().ok_or(IdentityError::ChildHeld)?;
+        return Ok(judged(&child.candidate));
+    }
+    let Some(candidate) = snapshot.candidate(channel_id) else {
+        return Ok(legacy(ClaimReason::NoCandidate));
+    };
+    Ok(judged(candidate))
 }
 
 #[cfg(test)]

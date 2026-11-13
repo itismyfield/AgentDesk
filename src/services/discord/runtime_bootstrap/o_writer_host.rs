@@ -443,11 +443,9 @@ fn parts(
             execution: boot
                 .as_ref()
                 .map(|snapshot| {
-                    snapshot
-                        .channels()
-                        .iter()
-                        .filter_map(|ch| snapshot.execution(*ch).map(|view| (*ch, view.permit)))
-                        .collect()
+                    let channels = snapshot.output_channels();
+                    let held = |ch: u64| snapshot.execution(ch).map(|view| (ch, view.permit));
+                    channels.into_iter().filter_map(held).collect()
                 })
                 .unwrap_or_default(),
             alarms,
@@ -868,8 +866,9 @@ pub(super) async fn resume_gateway(
     let owned = crate::services::tui_o::cutover::boot_ownership()
         .into_iter()
         .filter(|(channel, _, _)| {
+            // A child is served wherever its parent channel is allowed.
             snapshot.execution(*channel).is_none()
-                && (allowed.is_empty() || allowed.contains(channel))
+                && (allowed.is_empty() || allowed.contains(&snapshot.policy_channel(*channel)))
         })
         .collect();
     // Reject changes during sampling; the host follows this gate after the sample.

@@ -70,7 +70,9 @@ fn held_with(
         let held = judge(provider, channel, kind) != IntakeRoute::Gateway;
         held.then(|| channel.to_string())
     };
-    owned.iter().filter_map(held).collect()
+    let unresolved = super::held_children();
+    let unresolved = unresolved.iter().map(u64::to_string);
+    owned.iter().filter_map(held).chain(unresolved).collect()
 }
 
 /// A known destination reads only its own adoption, so another channel's adoption in progress
@@ -85,6 +87,9 @@ fn route_parsed_with(
     judge: impl FnOnce(&str, u64, RuntimeHandoffKind) -> IntakeRoute,
 ) -> IntakeRoute {
     match channel() {
+        Some(channel) if super::child_held(channel) => {
+            IntakeRoute::Hold(format!("O thread {channel} has no resolved parent policy"))
+        }
         Some(channel) => match super::owned_kind(channel) {
             Some(kind) => judge(provider, channel, kind),
             None => IntakeRoute::Unselected,

@@ -399,8 +399,10 @@ impl BootChannels {
         &self.turn
     }
 
+    /// The boot kind of a member, or of the parent a resolved child inherits its policy from.
     pub(crate) fn kind(&self, channel: u64) -> Option<RuntimeHandoffKind> {
-        self.kinds.get(&channel).copied()
+        let configured = self.kinds.get(&channel).copied();
+        configured.or_else(|| Some(self.child(channel)?.ok()?.kind))
     }
 
     pub(crate) fn site(&self) -> &Site {
@@ -429,6 +431,7 @@ impl BootChannels {
         self.execution(channel)
             .map(|view| view.candidate)
             .or_else(|| self.candidate(channel).cloned())
+            .or_else(|| Some(self.child(channel)?.ok()?.candidate))
             .map(|candidate| candidate.with_init_scope(self.init_scope_view()))
     }
 
@@ -485,12 +488,19 @@ impl BootChannels {
             }
             Some(Err(reason)) => View::held(reason),
             Some(Ok(permit)) => {
-                let selected = BTreeSet::from([channel]);
-                let state =
-                    adoption::stored(crate::config::runtime_root().as_deref(), &selected)[&channel];
+                // A child keeps its one adoption across permits; only a member is seeded anew.
+                let candidate = match self.child(channel) {
+                    Some(Ok(child)) => child.candidate,
+                    _ => {
+                        let selected = BTreeSet::from([channel]);
+                        let root = crate::config::runtime_root();
+                        let state = adoption::stored(root.as_deref(), &selected)[&channel];
+                        self.seed_candidate(channel, state)
+                    }
+                };
                 View {
                     permit: Ok(permit),
-                    candidate: self.seed_candidate(channel, state),
+                    candidate,
                     retained: None,
                 }
             }

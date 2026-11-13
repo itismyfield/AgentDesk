@@ -2450,7 +2450,8 @@ src/
 │   │   │   │   │   │   ├── missing_halt_tests.rs
 │   │   │   │   │   │   ├── park_missing_tests.rs
 │   │   │   │   │   │   ├── park_reply_tests.rs
-│   │   │   │   │   │   └── refresh_tests.rs
+│   │   │   │   │   │   ├── refresh_tests.rs
+│   │   │   │   │   │   └── thread_child_tests.rs
 │   │   │   │   │   └── owner_execution.rs
 │   │   │   │   └── owner_port.rs
 │   │   │   ├── owner_execution/
@@ -4349,6 +4350,7 @@ src/
 │   │   │   ├── suspension.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── thread_child_host_tests.rs
 │   │   │   ├── tool_card_accuracy_tests.rs
 │   │   │   ├── tool_card_actor_replay_tests.rs
 │   │   │   ├── tool_card_actor_tests.rs

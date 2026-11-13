@@ -31,8 +31,8 @@ pub(crate) fn gateway_only_channels(
         return Some(0);
     }
     let boot = boot?;
-    let owned = boot
-        .channels()
+    let channels = boot.output_channels();
+    let owned = channels
         .iter()
         .filter(|id| boot.kind(**id) == Some(kind))
         .filter(|id| {
@@ -64,6 +64,26 @@ mod tests {
             assert_eq!(count("claude", HostRole::Gateway), Some(0));
             assert_eq!(count("gemini", HostRole::Runner), Some(0));
         });
+        // A recorded thread child is one more writer a non-gateway role leaves to the gateway.
+        #[cfg(unix)]
+        {
+            let child = serde_json::from_value(serde_json::json!({
+                "channel":9,"policy_parent":1,"sources":[],"initial_anchor":0,
+                "build_digest":"fixture","at":"2026-11-12T00:00:00Z"
+            }))
+            .unwrap();
+            test_override::with_channels(|boot| {
+                boot.unwrap().record_child_fixture(&child);
+                assert_eq!(
+                    gateway_only_channels("claude", HostRole::Runner, boot),
+                    Some(3)
+                );
+                assert_eq!(
+                    gateway_only_channels("codex", HostRole::Runner, boot),
+                    Some(1)
+                );
+            });
+        }
         // An unknown list is not an empty one: health must keep the reason without evidence.
         assert_eq!(
             gateway_only_channels("claude", HostRole::Runner, None),

@@ -32,10 +32,9 @@ pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<C
         let Some(snapshot) = snapshot else {
             return Vec::new();
         };
-        let channels = snapshot.channels();
-        let judged = |&channel: &u64| {
+        let judged = |channel: u64| {
             let kind = snapshot.kind(channel);
-            let hosted = channel_policy::owns_output(channels, channel, kind);
+            let hosted = snapshot.hosts_output(channel);
             let blocked = snapshot
                 .execution(channel)
                 .is_some_and(|view| view.permit.is_err());
@@ -44,7 +43,7 @@ pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<C
                 .filter(|_| hosted && !blocked);
             (channel, kind, candidate)
         };
-        channels.iter().map(judged).collect()
+        snapshot.output_channels().into_iter().map(judged).collect()
     };
     test_override::with_channels(evaluate)
 }
@@ -55,8 +54,9 @@ fn owned_channels() -> Vec<(u64, RuntimeHandoffKind)> {
         let Some(snapshot) = snapshot else {
             return Vec::new();
         };
-        let owned = |&channel: &u64| Some((channel, owned_in(snapshot, channel)?));
-        snapshot.channels().iter().filter_map(owned).collect()
+        let owned = |channel: u64| Some((channel, owned_in(snapshot, channel)?));
+        let channels = snapshot.output_channels();
+        channels.into_iter().filter_map(owned).collect()
     })
 }
 
@@ -70,11 +70,36 @@ fn owned_in(snapshot: &BootChannels, channel: u64) -> Option<RuntimeHandoffKind>
     if snapshot.execution(channel).is_some() {
         return kind;
     }
-    let hosted = channel_policy::owns_output(snapshot.channels(), channel, kind);
-    snapshot
-        .output_candidate(channel)
-        .filter(|c| hosted && c.peek().owned())?;
-    kind
+    // A child is O's unless its late reservation still waits for Legacy's open turn.
+    let kept = match snapshot.child(channel) {
+        Some(Ok(child)) => child.body_owner() != Some(false),
+        _ => snapshot
+            .output_candidate(channel)
+            .is_some_and(|c| c.peek().owned()),
+    };
+    kind.filter(|_| kept && snapshot.hosts_output(channel))
+}
+
+/// Whether the shared view knows `channel` as a child it cannot resolve: held, never Legacy's.
+fn child_held(channel: u64) -> bool {
+    test_override::with_channels(|snapshot| {
+        snapshot.is_some_and(|snapshot| matches!(snapshot.child(channel), Some(Err(_))))
+    })
+}
+
+/// Every known child that cannot be resolved; they carry no kind, so no provider may claim them.
+fn held_children() -> Vec<u64> {
+    test_override::with_channels(|snapshot| {
+        let Some(snapshot) = snapshot else {
+            return Vec::new();
+        };
+        let held = |channel: &u64| matches!(snapshot.child(*channel), Some(Err(_)));
+        snapshot
+            .output_channels()
+            .into_iter()
+            .filter(held)
+            .collect()
+    })
 }
 
 /// The boot turn selection while a selected Codex channel O owns has not confirmed turn mode.
@@ -133,7 +158,9 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
             return Ok(());
         };
         // An unparseable destination may be any selected channel.
-        if channel.is_some_and(|channel| !snapshot.channels().contains(&channel)) {
+        let child = channel.and_then(|channel| snapshot.child(channel));
+        if channel.is_some_and(|channel| !snapshot.channels().contains(&channel)) && child.is_none()
+        {
             return Ok(());
         }
         if let Some(channel) = channel
@@ -147,7 +174,8 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
                 "O channel {channel} is served only on O home {home}"
             ));
         }
-        if let Some(channel) = channel
+        // A placement never releases a child's adoption to Legacy.
+        if let Some(channel) = channel.filter(|_| child.is_none())
             && let Some(candidate) = snapshot.candidate(channel)
         {
             candidate.claim(channel);
