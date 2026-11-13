@@ -21,15 +21,14 @@ impl<'a> MakeWriter<'a> for CapturingWriter {
     }
 }
 
-fn io<F>(
-    path: PathBuf,
-    fsync: F,
-) -> GenerationIo<
-    impl FnOnce(&Path) -> Result<GenerationFileLock, String>,
-    impl FnOnce(&Path) -> CounterRead,
-    impl FnOnce(&Path, &str) -> Result<(), String>,
+type TestGenerationIo<F> = GenerationIo<
+    fn(&Path) -> Result<GenerationFileLock, String>,
+    fn(&Path) -> CounterRead,
+    fn(&Path, &str) -> Result<(), String>,
     F,
->
+>;
+
+fn io<F>(path: PathBuf, fsync: F) -> TestGenerationIo<F>
 where
     F: FnOnce(&Path) -> std::io::Result<()>,
 {
