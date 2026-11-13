@@ -170,7 +170,9 @@ pub(super) async fn origin_deferred(
 }
 
 #[cfg(unix)]
-pub(crate) use unix::{RegistrationScope, created};
+pub(crate) use unix::RegistrationScope;
+#[cfg(all(unix, test))]
+use unix::created;
 
 #[cfg(unix)]
 mod unix {
