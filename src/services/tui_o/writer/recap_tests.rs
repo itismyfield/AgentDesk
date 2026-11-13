@@ -110,22 +110,6 @@ fn away_summary_classifies_and_renders_subtext() {
             .payload,
         "-# 🧭 recap\n-# first\n-# \n-# last"
     );
-    let mut long = value.clone();
-    long["content"] = json!("🧭".repeat(2200));
-    let work = UnitDeriver::new(CHANNEL, ShadowProvider::Claude).derive(&captured(&long));
-    let expected = crate::domain::message_split::split_for_shadow(&format!(
-        "-# 🧭 recap\n-# {}",
-        "🧭".repeat(2200)
-    ));
-    assert!(expected.len() > 1);
-    assert_eq!(work.len(), expected.len());
-    for (item, (text, units)) in work.iter().zip(expected) {
-        let Derived::Piece(piece) = item else {
-            panic!("{item:?}");
-        };
-        assert_eq!(piece.payload, text);
-        assert!(units <= 2000);
-    }
     let mut changed = value;
     changed["content"] = json!("changed recap");
     assert!(matches!(
@@ -291,4 +275,119 @@ async fn recap_survives_next_prompt_without_turn_side_effects() {
             .count(),
         1
     );
+}
+
+#[test]
+fn recap_split_pieces_keep_subtext_and_body() {
+    let texts = [
+        "🧭".repeat(2200),
+        "a".repeat(1987),
+        "a".repeat(1988),
+        "a".repeat(5000),
+        format!("{} a sentence. {}", "x".repeat(1000), "y".repeat(3500)),
+        format!(
+            "{}\nsecond {}end",
+            "🧭".repeat(1200),
+            " spaced ".repeat(650)
+        ),
+    ];
+    for text in texts {
+        let mut value = fixture();
+        value["content"] = json!(text);
+        let facts = identity::classify(ShadowProvider::Claude, &value);
+        let RecordFact::Unit(_, _, content) = &facts[0] else {
+            panic!("{facts:?}");
+        };
+        let crate::services::tui_o::shadow::unit_plan::UnitPlan::Pieces(planned) =
+            crate::services::tui_o::shadow::unit_plan::plan(content).unwrap()
+        else {
+            panic!("missing plan");
+        };
+        let mut derive = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
+        let row = captured(&value);
+        let work = derive.derive(&row);
+        assert_eq!(work.len(), planned.len());
+        let mut first = true;
+        let mut restored = String::new();
+        for (item, digest) in work.iter().zip(planned) {
+            let Derived::Piece(piece) = item else {
+                panic!("{item:?}");
+            };
+            let units = piece.payload.encode_utf16().count();
+            assert!(units <= 2000, "piece units={units}");
+            assert_eq!(digest.units as usize, units);
+            assert_eq!(
+                digest.sha256,
+                hex::encode(sha2::Sha256::digest(piece.payload.as_bytes()))
+            );
+            for line in piece.payload.split('\n') {
+                let body = line
+                    .strip_prefix("-# ")
+                    .unwrap_or_else(|| panic!("missing subtext prefix: {line:?}"));
+                if first {
+                    assert_eq!(body, "🧭 recap");
+                    first = false;
+                } else {
+                    restored.push_str(body);
+                }
+            }
+        }
+        assert!(!first);
+        assert_eq!(
+            restored,
+            text.lines().collect::<String>(),
+            "body must survive wrapping"
+        );
+        assert!(derive.derive(&row).is_empty());
+    }
+}
+
+#[test]
+fn recap_trailing_config_hint_is_removed_only_at_end() {
+    let value = fixture();
+    assert!(
+        value["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("(disable recaps in /config)")
+    );
+    assert_eq!(
+        one_piece(&UnitDeriver::new(CHANNEL, ShadowProvider::Claude).derive(&captured(&value)))
+            .payload,
+        expected()
+    );
+    let cases = [
+        (
+            "A synthetic completed recap.\n\n(disable recaps in /config)\n",
+            "-# 🧭 recap\n-# A synthetic completed recap.",
+        ),
+        (
+            "Keep (disable recaps in /config) here and continue.",
+            "-# 🧭 recap\n-# Keep (disable recaps in /config) here and continue.",
+        ),
+        (
+            "A synthetic recap. (disable recaps in /config).",
+            "-# 🧭 recap\n-# A synthetic recap. (disable recaps in /config).",
+        ),
+    ];
+    for (text, expected) in cases {
+        let mut value = fixture();
+        value["content"] = json!(text);
+        assert_eq!(
+            one_piece(&UnitDeriver::new(CHANNEL, ShadowProvider::Claude).derive(&captured(&value)))
+                .payload,
+            expected
+        );
+    }
+    for text in [
+        "(disable recaps in /config)",
+        " \n(disable recaps in /config)\n\t ",
+    ] {
+        let mut value = fixture();
+        value["content"] = json!(text);
+        assert!(
+            matches!(UnitDeriver::new(CHANNEL, ShadowProvider::Claude).derive(&captured(&value)).as_slice(),
+            [Derived::Excluded { reason, .. }] if reason == "empty_payload")
+        );
+    }
 }
