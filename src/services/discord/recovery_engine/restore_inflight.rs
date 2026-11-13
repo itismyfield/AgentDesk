@@ -146,7 +146,8 @@ pub(in crate::services::discord) async fn restore_inflight_states(
         {
             continue;
         }
-        if settle_routine_no_visible(shared, provider, &state).await {
+        // Keep quiet-settlement storage off the generic recovery future's stack.
+        if Box::pin(settle_routine_no_visible(shared, provider, &state)).await {
             continue;
         }
         // An unverified projected receipt waits for another pass without persisting a read error.

@@ -20,7 +20,8 @@ fn i8117_real_headless_start_pins_only_routine_process_policy_pg() {
             let reservation = health::reserve_headless_agent_turn(channel);
             host.start(channel, source, Some(metadata), reservation).await.unwrap();
             let row = crate::services::discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
-            assert_eq!(serde_json::to_value(row).unwrap()["routine_presentation"]["policy"], policy);
+            assert_eq!(serde_json::to_value(&row.routine_presentation).unwrap()["policy"], policy);
+            assert_eq!(serde_json::to_value(row).unwrap().get("routine_presentation").is_some(), policy == "claude_process_c1");
         }
         host.close().await;
     });

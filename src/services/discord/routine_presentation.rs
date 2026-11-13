@@ -34,6 +34,10 @@ pub(super) enum TerminalPresentation {
 }
 
 impl RoutinePresentation {
+    pub(super) fn is_legacy_default(&self) -> bool {
+        self.policy == Policy::Legacy && self.terminal == TerminalEvidence::Missing
+    }
+
     pub(super) fn at_start(
         provider: &ProviderKind,
         source: Option<&str>,

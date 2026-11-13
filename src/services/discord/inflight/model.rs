@@ -378,7 +378,10 @@ pub(in crate::services::discord) struct InflightTurnState {
     #[serde(default)]
     pub silent_turn: bool,
     /// Wire-only routine policy and exact terminal classification survive recovery.
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "super::super::routine_presentation::RoutinePresentation::is_legacy_default"
+    )]
     pub routine_presentation: super::super::routine_presentation::RoutinePresentation,
     /// Active dispatch ID for long-turn diagnostics.
     #[serde(default)]

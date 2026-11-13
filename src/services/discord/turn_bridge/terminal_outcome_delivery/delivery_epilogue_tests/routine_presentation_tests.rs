@@ -101,8 +101,14 @@ fn i8117_restart_preserves_policy_evidence_and_raw_coordinates() {
         .remove("routine_presentation");
     let legacy: InflightTurnState = serde_json::from_value(legacy).unwrap();
     assert_eq!(
-        serde_json::to_value(legacy).unwrap()["routine_presentation"]["policy"],
+        serde_json::to_value(&legacy.routine_presentation).unwrap()["policy"],
         "legacy"
+    );
+    assert!(
+        serde_json::to_value(legacy)
+            .unwrap()
+            .get("routine_presentation")
+            .is_none()
     );
 }
 
