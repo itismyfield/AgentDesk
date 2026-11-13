@@ -381,6 +381,7 @@ fn provider_background_subtext_never_recovers_or_becomes_actionable_too_old() {
     for (text, age_secs) in [
         "-# ✅ Background command \"short task\" completed (exit code 0)",
         "-# ⌨️ first \\*\\*bold\\*\\*\n-# second\n-# third",
+        "-# ⌨️ tui direct input\n```\nfirst **bold**\nsecond\nthird\n```",
     ]
     .into_iter()
     .flat_map(|text| [60, 3_600].map(|age_secs| (text, age_secs)))
