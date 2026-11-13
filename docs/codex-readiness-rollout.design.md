@@ -376,8 +376,8 @@ marker 정의를 바꿀 때 영향을 받는 소비자(1.6의 전수에서 "판�
 | 3 | `composer_status` 판정 호출자 0: 삭제 뒤 컴파일 + 호출자 표 갱신 | — | 표 |
 | 신호 유실·늦음 | 종료 기록 지연 뒤 추가, 종료 기록 없음+Stop 훅, 이름 없는 종료, `.zst`로 교체, 재시작(증거 맵 비움), 프로세스 종료 | — | 각각 한 번 전달 또는 형식 있는 대체 경로 1회, 무한 보류 0 |
 | 재개 floor | 끊긴 턴이 든 rollout을 재개한 실행 → 준비. 재시작 시뮬레이션(메모리 증거 비움) 뒤에도 같다 | Open으로 보류(RED) | Ready |
-| 시간 초과 교체(P1-2) | `absence_launch` 시험 묶음: rollout Open + pane 읽힘 + 45초 경과 | `Replacement::begin` 1회(RED) | `Replacement::begin` 0회, busy 경로 1회 |
-| 시간 초과 교체 | rollout Open + readonly launch 옵션(busy 경로 불가) + 600초 정지 + 자식 없음 | 교체 1회(RED) | 교체 0회, 사유 있는 보류 1회 |
+| 시간 초과 교체(P1-2) | `absence_launch` 시험 묶음(`try_codex_tui_warm_followup` 진입점. Discord 사전 확인을 거치지 않는 호출): rollout Open + pane 읽힘 + 45초 경과 | `Replacement::begin` 1회(RED) | `Replacement::begin` 0회, busy 경로 1회 |
+| 시간 초과 교체 | 같은 진입점: rollout Open + readonly launch 옵션(busy 경로 불가) + 600초 정지 + 자식 없음 | 교체 1회(RED) | 교체 0회, 사유 있는 보류 1회 |
 | Enter 구간(P2-5) | UserPromptSubmit 훅 기록 뒤 `task_started`가 아직 없는 rollout(앞 턴 `Ended`) → 준비 대기 | 화면이 읽히면 대기, 안 읽히면 시간 초과 | `Busy`, 키 0. `task_started`·종료 기록을 추가하면 한 번 전달 |
 | Stop 훅 무효화(P2-6) | Stop 훅 뒤 같은 턴의 `item_completed` 추가 | — | `Busy` |
 | herdr 단계 4(P2-1) | herdr spy: rollout `.zst` + 600초 경과 + 자식 없음 | 화면 시간 초과 | `SourceUnprovable` 거절 1회, 키 0회 |
