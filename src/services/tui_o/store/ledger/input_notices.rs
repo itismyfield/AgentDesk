@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId, SourceRange, UnitKey, UnitKind};
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 pub(super) mod settlement;
+pub(crate) use settlement::policy_proven;
 pub use settlement::{Settled, Settlement};
 
 pub(crate) type RecordId = (SourceId, u64, u64);

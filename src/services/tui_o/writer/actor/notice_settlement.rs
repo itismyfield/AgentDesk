@@ -110,42 +110,44 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return false;
         };
         let digest = hex::encode(sha2::Sha256::digest(prompt.as_bytes()));
-        let (proof, expired_after) =
-            if crate::services::discord::input_notice_content(prompt).is_none() {
-                (
-                    Settled::Policy {
-                        prompt_sha256: digest,
-                    },
-                    None,
-                )
-            } else {
-                let (Some(origin), Some(key)) =
-                    (evidence.origin.as_deref(), evidence.unit_key.as_ref())
-                else {
-                    return false;
-                };
-                let Some(owner) =
-                    self.writer
-                        .notice_owners
-                        .owned_proof(origin, &key.native_key, prompt)
-                else {
-                    return false;
-                };
-                let expired = self
-                    .bindings
-                    .binding_history(self.writer.channel())
-                    .ok()
-                    .and_then(|events| boundary(&events, origin));
-                (
-                    Settled::Owned {
-                        origin: Box::new(origin.clone()),
-                        native_key: key.native_key.clone(),
-                        prompt_sha256: digest,
-                        owner,
-                    },
-                    expired,
-                )
+        let (proof, expired_after) = if crate::services::discord::input_notice_content(prompt)
+            .is_none()
+            && crate::services::tui_o::store::ledger::input_notices::policy_proven(prompt)
+        {
+            (
+                Settled::Policy {
+                    prompt_sha256: digest,
+                },
+                None,
+            )
+        } else {
+            let (Some(origin), Some(key)) =
+                (evidence.origin.as_deref(), evidence.unit_key.as_ref())
+            else {
+                return false;
             };
+            let Some(owner) =
+                self.writer
+                    .notice_owners
+                    .owned_proof(origin, &key.native_key, prompt)
+            else {
+                return false;
+            };
+            let expired = self
+                .bindings
+                .binding_history(self.writer.channel())
+                .ok()
+                .and_then(|events| boundary(&events, origin));
+            (
+                Settled::Owned {
+                    origin: Box::new(origin.clone()),
+                    native_key: key.native_key.clone(),
+                    prompt_sha256: digest,
+                    owner,
+                },
+                expired,
+            )
+        };
         self.writer
             .record(LedgerEntry::InputNotice {
                 entry: Box::new(NoticeEntry::Settled {

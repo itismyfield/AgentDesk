@@ -133,6 +133,9 @@ main은 이미 **resume + exact expected native session**인 경우를 처리한
 ### Durable 종결과 만료 규칙
 
 새 `NoticeEntry::Settled { record, settlement }`를 도입했다.
+Policy의 early settlement는 neutral parser로 증명 가능한 기존 machine/local-only 모양의 충분조건으로 제한한다.
+렌더러가 추가로 거절하는 복합 wrapper/Provider Session Reuse 모양은 기존 complete admission에서 처리한다.
+ledger가 Discord renderer를 역방향 호출하지 않으며, 충분조건 밖의 불완전 record는 증거를 보존한다.
 settlement는 typed proof와 optional `expired_after`를 갖는다. None은 not_required, 검증된 boundary seq가
 있으면 expired이며 Posted/기존 Excluded/LegacyImported는 그대로 terminal이다.
 proof는 unknown field를 거절하는 typed enum으로 원본 digest와 정책 종류 또는 정확한 native ownership 증거,

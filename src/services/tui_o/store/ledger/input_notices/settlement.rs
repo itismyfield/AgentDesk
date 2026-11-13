@@ -23,6 +23,40 @@ pub struct Settlement {
     pub expired_after: Option<u64>,
 }
 
+// This sufficient subset uses the neutral parser; other policy shapes keep normal admission.
+pub(crate) fn policy_proven(prompt: &str) -> bool {
+    use crate::services::tui_prompt_control as control;
+    if control::classify_local_only_slash_control(prompt).is_some() {
+        return true;
+    }
+    let clean = control::strip_terminal_controls(prompt);
+    let mut text = control::strip_leading_injection_wrapper(clean.trim_start()).trim_start();
+    if ["task-notification", "subagent_notification"]
+        .iter()
+        .any(|tag| {
+            text.strip_prefix(&format!("<{tag}")).is_some_and(|tail| {
+                tail.starts_with('>') || tail.chars().next().is_some_and(char::is_whitespace)
+            })
+        })
+        || [
+            "This session is being continued from a previous conversation",
+            "Please continue the conversation from where we left it off",
+        ]
+        .iter()
+        .any(|opening| text.starts_with(opening))
+    {
+        return true;
+    }
+    if let Some(tail) = text.strip_prefix("<local-command-caveat>")
+        && let Some((_, rest)) = tail.split_once("</local-command-caveat>")
+    {
+        text = rest.trim_start();
+    }
+    text.starts_with("<command-name>")
+        || text.starts_with("<command-message>")
+        || text.starts_with("/loop ")
+}
+
 impl NoticeState {
     pub(crate) fn revision(&self, id: &RecordId) -> u64 {
         self.evidence.get(id).map_or(0, |e| {
@@ -69,7 +103,7 @@ impl NoticeState {
         match &settlement.proof {
             Settled::Policy { prompt_sha256 } => {
                 if *prompt_sha256 != digest
-                    || crate::services::discord::input_notice_content(prompt).is_some()
+                    || !policy_proven(prompt)
                     || settlement.expired_after.is_some()
                 {
                     return Err("settled notice policy is not a machine or local-only input".into());

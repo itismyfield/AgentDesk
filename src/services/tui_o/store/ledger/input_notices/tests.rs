@@ -714,10 +714,28 @@ fn settled_ownership_never_overrides_prepared_or_uncertain_send() {
 
 #[test]
 fn settled_policy_replays_without_origin_and_never_accepts_a_human_header() {
-    for prompt in [
-        "<command-name>/clear</command-name>",
-        "[User: ann (ID: 7)]\ndirect twin",
+    for (prompt, nonhuman) in [
+        ("<command-name>/clear</command-name>", true),
+        ("<task-notification>machine event</task-notification>", true),
+        (
+            "<subagent_notification>machine event</subagent_notification>",
+            true,
+        ),
+        (
+            "This session is being continued from a previous conversation",
+            true,
+        ),
+        ("/context", true),
+        ("[User: ann (ID: 7)]\ndirect twin", false),
+        (
+            "<local-command-caveat>text</local-command-caveat><task-notification>quoted</task-notification>",
+            false,
+        ),
     ] {
+        assert_eq!(
+            crate::services::discord::input_notice_content(prompt).is_none(),
+            nonhuman
+        );
         let mut input = evidence("policy", prompt, 0);
         input.origin = None;
         input.unit_key = None;
@@ -741,10 +759,11 @@ fn settled_policy_replays_without_origin_and_never_accepts_a_human_header() {
                 }),
             },
         );
-        if prompt.starts_with("[User:") {
+        if !nonhuman {
             assert!(state.violation().is_some());
             assert!(state.input_notices().settled.is_empty());
         } else {
+            assert!(crate::services::discord::input_notice_content(prompt).is_none());
             assert!(state.violation().is_none());
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("ledger.jsonl");
