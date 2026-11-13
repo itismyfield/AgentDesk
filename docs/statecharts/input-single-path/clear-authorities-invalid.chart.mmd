@@ -1,0 +1,22 @@
+---
+title: "공개 준비 증거와 clear 채택 증거"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: held
+    lg1: normal
+  }
+  class lg0 yellow
+  class lg1 teal
+  s0: 현재 실행의 시작 증거 대기
+  s1: 공개 준비 증거 관측
+  s2: 공개 준비 확인, 채택 대기
+  s3: 채택 거절, 원본 보류
+  [*] --> s0
+  s0 --> s1: 인증된 시작 기록
+  s1 --> s2: 현재 ledger 준비 확인
+  s2 --> s3: 디스크 증명 거절
+  class s0 teal
+  class s1 teal
+  class s2 teal
+  class s3 yellow

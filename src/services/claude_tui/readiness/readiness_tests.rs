@@ -911,3 +911,34 @@ fn startup_workspace_caller_uses_home_only_plan_before_every_dialog_key() {
 #[cfg(unix)]
 #[path = "compact_tests.rs"]
 mod compact_tests;
+
+// A process restart forgets volatile readiness without deleting durable hook evidence.
+pub(crate) fn forget_session(session: &str) {
+    let mut state = ledger();
+    state.entries.retain(|source, _| source.session != session);
+    state.starts.retain(|(logical, _), _| logical != session);
+}
+
+// Reproduce the interval after durable certification and before volatile Start publication.
+pub(crate) fn restore_bound_start(session: &str, at: DateTime<Utc>) {
+    let binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(session).unwrap();
+    let nonce = source::nonce(session).flatten().unwrap();
+    let bound = Source {
+        session: session.into(),
+        nonce: Some(nonce.clone()),
+        native: binding.session_id.unwrap(),
+        path: binding.output_path.into(),
+    };
+    let mut state = ledger();
+    state.entries.entry(bound.clone()).or_default();
+    state.starts.insert((session.into(), nonce), (at, bound));
+}
+
+pub(crate) fn retained_sources(session: &str) -> usize {
+    let nonce = source::nonce(session).flatten();
+    ledger()
+        .entries
+        .keys()
+        .filter(|source| source.session == session && source.nonce == nonce)
+        .count()
+}

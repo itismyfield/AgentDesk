@@ -170,7 +170,7 @@ impl<B: BindingEvents> Sources<B> {
                 && matches!(
                     &event.record,
                     BindingRecord::Bound { new: BindingTarget::Source(source), cause, .. }
-                        if *cause != BindingCause::Unknown && *source == link.source
+                        if !matches!(cause, BindingCause::Unknown | BindingCause::SameSessionVerified) && *source == link.source
                 )
         });
         if !valid_event || superseded || !verified_first(&link.source) {

@@ -239,7 +239,6 @@ impl ChannelStore {
             return Ok(None);
         };
         if !matches!(expected.boundary, Boundary::Pending { .. })
-            || *cause == BindingCause::Unknown
             || event.seq <= expected.seq
             || event.channel_id != self.init.channel
             || event.channel_id != candidate.channel
@@ -254,6 +253,24 @@ impl ChannelStore {
         {
             return Ok(None);
         }
+        let (parent, boundary) = match cause {
+            BindingCause::Fork | BindingCause::Continuation | BindingCause::Compact => {
+                (Some(candidate.parent.clone()), Boundary::Undecided)
+            }
+            BindingCause::Resume => {
+                let parent = parent_hint
+                    .clone()
+                    .filter(|p| p != source && self.cursor(p).is_some());
+                let boundary = if parent.is_some() {
+                    Boundary::Undecided
+                } else {
+                    expected.boundary.clone()
+                };
+                (parent, boundary)
+            }
+            BindingCause::Clear | BindingCause::Startup => (None, Boundary::Owed { from: 0 }),
+            _ => return Ok(None),
+        };
         let file = OpenOptions::new()
             .read(true)
             .append(true)
@@ -271,20 +288,7 @@ impl ChannelStore {
         if link != expected {
             return Ok(None);
         }
-        let parent = match cause {
-            BindingCause::Fork | BindingCause::Continuation | BindingCause::Compact => {
-                Some(candidate.parent.clone())
-            }
-            BindingCause::Resume => parent_hint
-                .clone()
-                .filter(|p| p != source && self.cursor(p).is_some()),
-            _ => None,
-        };
-        link.boundary = match cause {
-            BindingCause::Clear | BindingCause::Startup => Boundary::Owed { from: 0 },
-            _ if parent.is_some() => Boundary::Undecided,
-            _ => expected.boundary.clone(),
-        };
+        link.boundary = boundary;
         link.parent = parent;
         link.hot_candidate = None;
         link.seq = event.seq;

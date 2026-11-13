@@ -1,0 +1,21 @@
+---
+title: "Fresh Claude source의 verified pin 발행"
+---
+stateDiagram-v2
+  s0: fresh source 등록 전
+  s1: 등록 전 hook은 승격 대기
+  s2: 같은 UUID의 Stat 등록
+  s3: authentic hook, pin 없음
+  s4: 같은 opened file Verified pin
+  s5: strict pin 승인
+  s6: 본문과 Enter 기록, 수신 대기
+  s7: 전달 확인
+  [*] --> s0
+  s0 --> s1: 같은 session authentic hook
+  s0 --> s2: launch Stat 등록
+  s1 --> s2: launch Stat 등록
+  s2 --> s3: 같은 session authentic hook
+  s3 --> s4: opened fd와 first record 검증 후 pin
+  s4 --> s5: strict source 승인 후 입력 시도
+  s5 --> s6: payload와 Enter 한 번
+  s6 --> s7: 전달 확정

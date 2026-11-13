@@ -327,6 +327,7 @@ impl Rig {
             // The rig's AI turn ends as soon as it is read.
             until_done: Some(Box::new(|| Ok(()))),
             native_pin_submitted: None,
+            observation: None,
         }
     }
 
@@ -1038,6 +1039,7 @@ fn prepared_before_launch(rig: &Rig) -> Registration {
         timing: &OWNER_TIMING,
         until_done: None,
         native_pin_submitted: None,
+        observation: None,
     }
 }
 

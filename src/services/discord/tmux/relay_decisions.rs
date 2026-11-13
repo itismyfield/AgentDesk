@@ -28,15 +28,20 @@ pub(in crate::services::discord) async fn sniff_background_agent_pending_for_com
         return false;
     };
     let tmux_session_name = tmux_session_name.to_string();
+    let claude = !matches!(crate::services::provider::parse_provider_and_channel_from_tmux_name(&tmux_session_name), Some((provider,_)) if provider != ProviderKind::Claude);
     tokio::time::timeout(
         BACKGROUND_AGENT_PENDING_SNIFF_TIMEOUT,
         tokio::task::spawn_blocking(move || {
-            crate::services::tmux_common::sniff_background_agent_pending(&tmux_session_name)
+            if matches!(crate::services::provider::parse_provider_and_channel_from_tmux_name(&tmux_session_name), Some((provider,_)) if provider != ProviderKind::Claude) {
+                return crate::services::tmux_common::sniff_background_agent_pending(&tmux_session_name);
+            }
+            let snapshot=crate::services::claude_tui::activity::observe(&tmux_session_name);
+            !snapshot.current() || snapshot.background!=crate::services::claude_tui::activity::Background::Clear
         }),
     )
     .await
-    .unwrap_or(Ok(false))
-    .unwrap_or(false)
+    .unwrap_or(Ok(claude))
+    .unwrap_or(claude)
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

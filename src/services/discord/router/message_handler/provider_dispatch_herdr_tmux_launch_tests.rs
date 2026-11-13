@@ -16,7 +16,7 @@ fn eventually(what: &str, ready: impl Fn() -> bool) {
 }
 
 /// O's cursor over all of `path`, with the prefix hash its writer keeps.
-fn read_through(path: &Path, session: &str) {
+pub(super) fn read_through(path: &Path, session: &str) {
     use crate::services::tui_o::store::spool::{Cursor, source_key};
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::MetadataExt;

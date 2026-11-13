@@ -4,11 +4,11 @@
 # scripts/ci/statecharts_tlc.py fails when a run breaks a rule not listed here or a listed rule holds.
 # ExecutionAuthorityDeployed: statechart exit=1 (SameUnmanagedReadmits); ExecutionAuthority: exit=0.
 # BeforeGateway safety holds but temporary PROPERTY AdmissionResumes fails (13); fix3 passes (0).
-# Applies to: intake-consent/IntakeConsentBookkeeping.cfg, intake-consent/IntakeConsentCurrent.cfg, intake-consent/IntakeConsentD1Public.cfg, intake-consent/IntakeConsentForge.cfg, intake-consent/IntakeConsentOwnerOnly.cfg, intake-consent/IntakeConsentProposed.cfg, intake-consent/IntakeConsentReuse.cfg, intake-consent/IntakeConsentScopeOpen.cfg, intake-consent/IntakeConsentStale.cfg
 # S4-07 r2 predictions only; SC_RUN=mac-needed; see intake-consent report.
-# Applies to: tui-o-writer/WriterAdoptionMain.cfg, tui-o-writer/WriterAdoptionGateOnly.cfg, tui-o-writer/WriterAdoptionStage1.cfg, tui-o-writer/WriterAdoptionOwnedMut.cfg, tui-o-writer/WriterAdoptionUnadoptedOwned.cfg, tui-o-writer/WriterAdoptionExemptAll.cfg, tui-o-writer/WriterAdoptionWatcherNoGuard.cfg, tui-o-writer/WriterAdoptionBudgetMut.cfg, tui-o-writer/WriterAdoptionHeadlessMut.cfg
 # WriterAdoption (TUI Legacy body, stage 1): Main and GateOnly document the gaps; Stage1 passes; the rest drop one stage-1 guard.
 # CodexLateDelivery (Codex late takeover start point): R3*, D1*, R4* and R5* reproduce the reviewed rules' losses; R6* pass; R6 mutants each break NoAdoptionLoss; R6Residual lists what r6 leaves to Legacy.
+# Applies to: intake-consent/IntakeConsentBookkeeping.cfg, intake-consent/IntakeConsentCurrent.cfg, intake-consent/IntakeConsentD1Public.cfg, intake-consent/IntakeConsentForge.cfg, intake-consent/IntakeConsentOwnerOnly.cfg, intake-consent/IntakeConsentProposed.cfg, intake-consent/IntakeConsentReuse.cfg, intake-consent/IntakeConsentScopeOpen.cfg, intake-consent/IntakeConsentStale.cfg
+# Applies to: tui-o-writer/WriterAdoptionMain.cfg, tui-o-writer/WriterAdoptionGateOnly.cfg, tui-o-writer/WriterAdoptionStage1.cfg, tui-o-writer/WriterAdoptionOwnedMut.cfg, tui-o-writer/WriterAdoptionUnadoptedOwned.cfg, tui-o-writer/WriterAdoptionExemptAll.cfg, tui-o-writer/WriterAdoptionWatcherNoGuard.cfg, tui-o-writer/WriterAdoptionBudgetMut.cfg, tui-o-writer/WriterAdoptionHeadlessMut.cfg
 atomic-write/AtomicWrite.cfg	AtomicWrite	-	-
 atomic-write/AtomicWriteMissingObservation.cfg	AtomicWrite	DiskObservation	-
 campaign-execution/CampaignVerification.cfg	CampaignVerification	-	-
@@ -87,6 +87,12 @@ hosted-cleanup/ThreadGCAfterGaps.cfg	HostedCleanup	GCAliasesRechecked,GCCurrentL
 hosted-cleanup/ThreadGCBefore.cfg	HostedCleanup	-	-
 hosted-cleanup/ThreadGCBeforeGaps.cfg	HostedCleanup	GCAliasesRechecked,GCCurrentLegacyMarkerSafe,GCCurrentOwnerLocal	-
 hosted-cleanup/ThreadGCNoRecheck.cfg	HostedCleanup	GCConditionalRefusalsKept,GCNewTurnKept	-
+input-single-path/ClaudeReadinessDualBypass.cfg	ClaudeReadiness	ClearAdoptionBeforeKey,PublicReadyDoesNotAdopt	-
+input-single-path/ClaudeReadinessDualCoupled.cfg	ClaudeReadiness	-	PublicLedgerReadyEventually
+input-single-path/ClaudeReadinessDualInvalid.cfg	ClaudeReadiness	-	-
+input-single-path/ClaudeReadinessDualRecovery.cfg	ClaudeReadiness	-	-
+input-single-path/ClaudeReadinessDualStaleLedger.cfg	ClaudeReadiness	-	-
+input-single-path/ClaudeReadinessDualValid.cfg	ClaudeReadiness	-	-
 input-single-path/HerdrBusyInputAwaitedClearBefore.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputAwaitedClearBusy.cfg	HerdrBusyInput	VerifiedClearNeverBusy	VerifiedClearEventuallyDelegates
 input-single-path/HerdrBusyInputAwaitedClearFixed.cfg	HerdrBusyInput	-	-
@@ -104,6 +110,12 @@ input-single-path/HerdrBusyInputEarlyFixed.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputExcludeHerdr.cfg	HerdrBusyInput	-	HealthyBusyEventuallyInjected
 input-single-path/HerdrBusyInputFixed.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputNoBootWake.cfg	HerdrBusyInput	-	BusyResolvedWithoutTurnEnd
+input-single-path/HerdrBusyInputProducerAbsent.cfg	HerdrBusyInput	-	ProducerEventuallyVerified,HealthyBusyEventuallyInjected
+input-single-path/HerdrBusyInputProducerFresh.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyInputProducerIgnoreIdentity.cfg	HerdrBusyInput	VerifiedPinMatchesRegistered	-
+input-single-path/HerdrBusyInputProducerLegacy.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyInputProducerReplacement.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyInputProducerWrongFirst.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputRebindTarget.cfg	HerdrBusyInput	NoForeignTarget	-
 input-single-path/HerdrBusyInputReplace.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputReplaceBefore.cfg	HerdrBusyInput	-	ScenarioReached
@@ -117,6 +129,53 @@ input-single-path/HerdrBusyInputTmux.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputTmuxBefore.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputWriterHeld.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputWriterHeldBefore.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyReobserveBusyClear.cfg	HerdrBusyReobserve	BusyNeedsExactSourceObserver,ClearIsNotBusyAuthority	VerifiedClearReevaluatesIdle
+input-single-path/HerdrBusyReobserveClearEarlyBefore.cfg	HerdrBusyReobserve	-	HealthyRecoveryDelivers,VerifiedClearReevaluatesIdle
+input-single-path/HerdrBusyReobserveClearEarlyFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveClearLateBefore.cfg	HerdrBusyReobserve	-	HealthyRecoveryDelivers,VerifiedClearReevaluatesIdle
+input-single-path/HerdrBusyReobserveClearLateFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveClearObserverHeldFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveDiscardFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveDiscardResurrect.cfg	HerdrBusyReobserve	WakeNeedsSameOwner,NoResurrection	-
+input-single-path/HerdrBusyReobserveForeignFrontFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveForeignGenerationFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveForeignNonceFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveForeignTargetFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveIgnoreGeneration.cfg	HerdrBusyReobserve	WakeNeedsSameOwner	VisibleResolution
+input-single-path/HerdrBusyReobserveIgnoreNonce.cfg	HerdrBusyReobserve	WakeNeedsSameOwner	VisibleResolution
+input-single-path/HerdrBusyReobserveNoClearWake.cfg	HerdrBusyReobserve	-	HealthyRecoveryDelivers,VerifiedClearReevaluatesIdle
+input-single-path/HerdrBusyReobserveNoObserver.cfg	HerdrBusyReobserve	BusyNeedsExactSourceObserver	ScenarioObserved
+input-single-path/HerdrBusyReobserveObserverHeldFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveSourceLateBefore.cfg	HerdrBusyReobserve	-	HealthyRecoveryDelivers
+input-single-path/HerdrBusyReobserveSourceLateFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveSourceMismatchFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveUnknownKeepResurrect.cfg	HerdrBusyReobserve	WakeNeedsSameOwner,NoResurrection,AtMostOnce,SettledExactlyOnce	-
+input-single-path/HerdrBusyReobserveUnknownkeepFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveWriterLateBefore.cfg	HerdrBusyReobserve	-	HealthyRecoveryDelivers
+input-single-path/HerdrBusyReobserveWriterLateFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrColdIdleBusyFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleColdBefore.cfg	HerdrColdIdle	-	HealthyIdleProgress
+input-single-path/HerdrColdIdleColdFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleDiscardFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleForeignFrontFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleForeignGenerationFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleForeignNonceFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleIgnoreCurrentProof.cfg	HerdrColdIdle	IdleDelegationNeedsCurrentProof	-
+input-single-path/HerdrColdIdleIgnoreCurrentReservation.cfg	HerdrColdIdle	IdleDelegationNeedsCurrentProof	-
+input-single-path/HerdrColdIdleIgnoreFront.cfg	HerdrColdIdle	IdleDelegationNeedsSameOwner,WakeNeedsSameOwner	-
+input-single-path/HerdrColdIdleIgnoreGeneration.cfg	HerdrColdIdle	IdleDelegationNeedsSameOwner,WakeNeedsSameOwner	-
+input-single-path/HerdrColdIdleIgnoreNonce.cfg	HerdrColdIdle	IdleDelegationNeedsSameOwner,WakeNeedsSameOwner	-
+input-single-path/HerdrColdIdleMovedTargetFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleNoRelease.cfg	HerdrColdIdle	IdleReservationReleased	HealthyIdleProgress
+input-single-path/HerdrColdIdleNoWake.cfg	HerdrColdIdle	-	HealthyIdleProgress
+input-single-path/HerdrColdIdleReobserveBefore.cfg	HerdrColdIdle	-	HealthyIdleProgress
+input-single-path/HerdrColdIdleReobserveFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleResurrect.cfg	HerdrColdIdle	IdleDelegationNeedsSameOwner,NoResurrection,WakeNeedsSameOwner	-
+input-single-path/HerdrColdIdleStaleProofFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleStaleReservationFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleUnknownFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleUnknownKeepFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrColdIdleWrongNonceFixed.cfg	HerdrColdIdle	-	-
 input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-
 input-single-path/InputCancelSelectionLegacyGuarded.cfg	InputCancelSelection	LegacyFrontRemoved	-
@@ -257,11 +316,20 @@ input-single-path/InputPathReadyBusyFinishBefore.cfg	InputPath	-	-
 input-single-path/InputPathReadyBusyNative.cfg	InputPath	-	-
 input-single-path/InputPathReadyBusyReexpose.cfg	InputPath	ReadyBusyKeyPlanPreserved,ReadyNoDuplicate	-
 input-single-path/InputPathReadyClear.cfg	InputPath	-	-
+input-single-path/InputPathReadyClearBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes
+input-single-path/InputPathReadyClearConsumed.cfg	InputPath	-	-
+input-single-path/InputPathReadyClearDropCursor.cfg	InputPath	ReadyClearCursorPreserved	-
+input-single-path/InputPathReadyClearForged.cfg	InputPath	-	-
 input-single-path/InputPathReadyClearHeldAfter.cfg	InputPath	-
 input-single-path/InputPathReadyClearHeldBefore.cfg	InputPath	-	ReadyClearHeldEventuallySends
+input-single-path/InputPathReadyClearNoRevalidate.cfg	InputPath	ReadyNoUnsafeClearRetire	-
 input-single-path/InputPathReadyClearPendingAfter.cfg	InputPath	-	-
 input-single-path/InputPathReadyClearPendingBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyClearPendingRecheck.cfg	InputPath	-	-
+input-single-path/InputPathReadyClearRestart.cfg	InputPath	-	-
+input-single-path/InputPathReadyClearSplit.cfg	InputPath	ReadyClearAtomic	-
+input-single-path/InputPathReadyClearVolatile.cfg	InputPath	-	-
+input-single-path/InputPathReadyClearVolatileBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyCompact.cfg	InputPath	-	-
 input-single-path/InputPathReadyCompactCompletion.cfg	InputPath	-	-
 input-single-path/InputPathReadyCompactNoCompletion.cfg	InputPath	ReadySelfCompactEventuallyReleases	-
@@ -396,6 +464,22 @@ routine-run/RoutineRunScriptAgent.cfg	RoutineRun	ScriptHasNoAgentTurn	-
 routine-run/RoutineRunScriptPrejudgeIgnored.cfg	RoutineRun	-	-
 routine-run/RoutineRunThread.cfg	RoutineRun	-	-
 routine-run/RoutineRunThreadPrejudge.cfg	RoutineRun	-	-
+session-activity/ActivityBackground.cfg	SessionActivity	-	-
+session-activity/ActivityCurrent.cfg	SessionActivity	-	EventuallyConverges,EventuallyReacquires
+session-activity/ActivityCurrentBackground.cfg	SessionActivity	NoIdleKillWhileBusy	-
+session-activity/ActivityFinish.cfg	SessionActivity	-	-
+session-activity/ActivityLiveKill.cfg	SessionActivity	NoIdleKillWhileBusy	-
+session-activity/ActivityMissing.cfg	SessionActivity	-	-
+session-activity/ActivityNoLeaseRecovery.cfg	SessionActivity	-	EventuallyConverges,EventuallyReacquires
+session-activity/ActivityNoTombstone.cfg	SessionActivity	NoLatePreReopensClosedTool	-
+session-activity/ActivityPermanentUnread.cfg	SessionActivity	-	EventuallyConverges,EventuallyReacquires
+session-activity/ActivityPhysicalRace.cfg	SessionActivity	NoEscUnlessGenerationOrForegroundTool	-
+session-activity/ActivityPhysicalRaceCurrent.cfg	SessionActivity	NoEscUnlessGenerationOrForegroundTool	-
+session-activity/ActivityProposed.cfg	SessionActivity	-	-
+session-activity/ActivityRestart.cfg	SessionActivity	-	-
+session-activity/ActivityStopWitness.cfg	SessionActivity	NeverEscape	-
+session-activity/ActivitySubmitted.cfg	SessionActivity	-	-
+session-activity/ActivityToolPair.cfg	SessionActivity	-	-
 session-lifecycle/EffortRestartCoalesce.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartCurrentHerdr.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartCurrentTmux.cfg	TmuxSession	-	-
@@ -621,3 +705,8 @@ turn-presence/TurnPresenceRetiredRestartBeforeLiveness.cfg	TurnPresence	-	NewInp
 turn-presence/TurnPresenceRetiredRestartFixed.cfg	TurnPresence	-	-
 turn-presence/TurnPresenceRetiredSweep.cfg	TurnPresence	RetiredOnlyQuietNotUnknown	NewInputEventuallyStarts
 turn-presence/TurnPresenceRetiredUnsafe.cfg	TurnPresence	NoForeignMarkerRemoval,NoLiveMarkerRemoval	-
+turn-view/BusyActiveBefore.cfg	TurnView	OneBusyResult	-
+turn-view/BusyActiveFixed.cfg	TurnView	-	-
+turn-view/BusyActiveNoFallback.cfg	TurnView	OneBusyResult,NoInvisibleSettled	AcceptedEventuallyVisible
+turn-view/EmptyMailbox.cfg	TurnView	-	-
+turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible

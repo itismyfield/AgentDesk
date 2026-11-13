@@ -16,6 +16,28 @@ pub(in crate::services::discord::router) fn queue_pending_reaction_for(
     super::super::intake_queue_transaction::queue_pending_reaction_for(&outcome)
 }
 
+async fn queued_interventions(
+    shared: &SharedData,
+    channel: serenity::ChannelId,
+) -> Vec<Intervention> {
+    if let Some(mailbox) = shared.mailbox_peek(channel)
+        && let Ok(Some(items)) = mailbox
+            .v2_request(|slot| Ok(slot.as_ref().map(|owner| owner.snapshot.items.clone())))
+            .await
+    {
+        let (now, instant) = (std::time::SystemTime::now(), std::time::Instant::now());
+        return items
+            .into_iter()
+            .map(|item| {
+                crate::services::turn_orchestrator::pending_queue_item_to_intervention(
+                    item, now, instant,
+                )
+            })
+            .collect();
+    }
+    mailbox_snapshot(shared, channel).await.intervention_queue
+}
+
 /// #3182: add the queue-pending reaction (📬 standalone / ➕ merged) and
 /// self-heal the late-add race.
 ///
@@ -58,11 +80,13 @@ pub(super) async fn add_queue_pending_reaction_self_healing(
         return false;
     }
     let still_queued = {
-        let snapshot = mailbox_snapshot(&data.shared, channel_id).await;
-        snapshot.intervention_queue.iter().any(|intervention| {
-            intervention.message_id == user_msg_id
-                || intervention.source_message_ids.contains(&user_msg_id)
-        })
+        queued_interventions(&data.shared, channel_id)
+            .await
+            .iter()
+            .any(|intervention| {
+                intervention.message_id == user_msg_id
+                    || intervention.source_message_ids.contains(&user_msg_id)
+            })
     };
     if !still_queued {
         crate::services::discord::queue_marker::note_removed_current(
@@ -198,8 +222,8 @@ async fn repair_queued_source_pending_reaction_from_mailbox(
     message_id: serenity::MessageId,
     policy: super::super::intake_queue_transaction::IntakeQueuePendingReactionPolicy,
 ) -> Option<PendingReactionRepair> {
-    let snapshot = mailbox_snapshot(shared, channel_id).await;
-    let intervention = snapshot.intervention_queue.iter().find(|intervention| {
+    let queue = queued_interventions(shared, channel_id).await;
+    let intervention = queue.iter().find(|intervention| {
         intervention.message_id == message_id
             || intervention.source_message_ids.contains(&message_id)
     })?;
@@ -236,14 +260,14 @@ async fn repair_queued_source_pending_reaction_from_mailbox(
     )
     .await;
     if delivered {
-        let still_queued = mailbox_snapshot(shared, channel_id)
-            .await
-            .intervention_queue
-            .iter()
-            .any(|intervention| {
-                intervention.message_id == message_id
-                    || intervention.source_message_ids.contains(&message_id)
-            });
+        let still_queued =
+            queued_interventions(shared, channel_id)
+                .await
+                .iter()
+                .any(|intervention| {
+                    intervention.message_id == message_id
+                        || intervention.source_message_ids.contains(&message_id)
+                });
         if !still_queued {
             crate::services::discord::queue_marker::note_removed_queued_generation(
                 shared,

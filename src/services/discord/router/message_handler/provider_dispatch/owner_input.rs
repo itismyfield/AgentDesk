@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use super::StreamingTurn;
 use crate::services::claude_tui::busy_inject::Screen;
 use crate::services::claude_tui::host_input::BusyOperation;
+use crate::services::claude_tui::host_input::busy::BusyObservation;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
 use crate::services::discord::queue_io::input_owner::claude_handoff::{self, bound_herdr};
 use crate::services::discord::queue_io::input_owner::drive::{
@@ -24,6 +25,9 @@ use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use crate::services::turn_host::TurnHost;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 use serde_json::{Value, json};
+
+#[path = "../intake_turn/owned_busy.rs"]
+pub(in crate::services::discord) mod owned_busy;
 
 /// What the owner verified about a channel's target before its turn reached dispatch.
 pub(super) struct Registration {
@@ -47,6 +51,7 @@ pub(super) struct Registration {
     until_done: Option<UntilDone>,
     /// Only a successfully settled write may attach its native input to this birth episode.
     native_pin_submitted: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    observation: Option<BusyObservation>,
 }
 
 /// Reads an idle submit's AI turn to its end on the turn's sender and returns its outcome.
@@ -131,6 +136,7 @@ impl Registration {
             timing: &busy_inject::TIMING,
             until_done,
             native_pin_submitted: None,
+            observation: None,
         })
     }
 }
@@ -242,6 +248,8 @@ pub(in crate::services::discord) fn owner_drive(
                 Ok(false) => idle(front).await,
                 Err(unreachable) => Err(format!("{unreachable:?}")),
             };
+            #[cfg(test)]
+            owned_busy::note_drive_result(channel, &result);
             if synthetic
                 && origin != InputOrigin::EffortContinue
                 && result.as_ref().err().map(String::as_str) == Some(START_WAITS)
@@ -264,6 +272,26 @@ pub(in crate::services::discord) fn owner_drive(
                 ingress::handoff_held(shared, &provider, ChannelId::new(channel), &original, hold)
                     .await;
             }
+            if !synthetic
+                && let (Some(shared), Err(error)) = (&runtime, &result)
+                && error.starts_with("NotSent(")
+            {
+                let originals = super::super::super::intake_gate::busy_inject::handback_originals(
+                    shared,
+                    ChannelId::new(channel),
+                    &original,
+                )
+                .await;
+                super::super::busy_retry::note_busy_result(
+                    shared,
+                    &provider,
+                    ChannelId::new(channel),
+                    &originals,
+                    &[],
+                    &result,
+                )
+                .await;
+            }
             #[cfg(test)]
             tests::idle::observe_root_recovery_handoff(channel, original.1.message_id, &result);
             result
@@ -283,7 +311,8 @@ pub(in crate::services::discord) fn owner_drive(
         settled
     });
     #[cfg(test)]
-    let settled = tests::idle::observe_settlement(channel, settled);
+    let settled =
+        owned_busy::observe_settlement(channel, tests::idle::observe_settlement(channel, settled));
     std::sync::Arc::new(Drive {
         mailbox,
         channel,
@@ -1061,35 +1090,39 @@ pub(super) fn execute_owned(
     {
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux);
     }
-    let live = read.unwrap_or_else(|| {
-        matches!(turn.host, TurnHost::Tmux)
-            && pane_liveness(session) == PaneLiveness::Live
-            && !other_account(turn.provider.as_str(), session)
+    let registered = owned_busy::late(&turn, origin, &mailbox, claim.front(), || {
+        let live = read.unwrap_or_else(|| {
+            matches!(turn.host, TurnHost::Tmux)
+                && pane_liveness(session) == PaneLiveness::Live
+                && !other_account(turn.provider.as_str(), session)
+        });
+        let running = (live && !synthetic)
+            .then(|| running_transcript(&turn, session))
+            .flatten();
+        match &running {
+            Some(transcript) => {
+                let kind = (turn.provider.as_str(), origin, true);
+                let at = (
+                    turn.host,
+                    session,
+                    Some((transcript.as_str(), turn.session_id)),
+                );
+                Registration::observed(mailbox.clone(), kind, at, &claim.front().1, None).map(
+                    |mut owner| {
+                        owner.until_done = busy_observer(&turn, &sender, &mut owner);
+                        owner
+                    },
+                )
+            }
+            None => {
+                let observer = live.then(|| observer(&turn, &sender)).flatten();
+                let kind = (turn.provider.as_str(), origin, false);
+                let at = (turn.host, session, None);
+                let front = &claim.front().1;
+                Registration::read_as(mailbox.clone(), kind, at, front, (observer, read))
+            }
+        }
     });
-    let running = (live && !synthetic)
-        .then(|| running_transcript(&turn, session))
-        .flatten();
-    let registered = match &running {
-        Some(transcript) => {
-            let kind = (turn.provider.as_str(), origin, true);
-            let at = (
-                turn.host,
-                session,
-                Some((transcript.as_str(), turn.session_id)),
-            );
-            Registration::observed(mailbox, kind, at, &claim.front().1, None).map(|mut owner| {
-                owner.until_done = busy_observer(&turn, &sender, &mut owner);
-                owner
-            })
-        }
-        None => {
-            let observer = live.then(|| observer(&turn, &sender)).flatten();
-            let kind = (turn.provider.as_str(), origin, false);
-            let at = (turn.host, session, None);
-            let front = &claim.front().1;
-            Registration::read_as(mailbox, kind, at, front, (observer, read))
-        }
-    };
     match registered {
         Ok(owner) => execute_front(turn, sender, claim, owner, settled),
         Err(error) => {
@@ -1107,20 +1140,9 @@ fn late_probe(
     mailbox: ChannelMailboxHandle,
     (channel, nonce): (u64, Option<String>),
 ) -> crate::services::discord::queue_io::input_owner::held_watch::ScreenProbe {
-    use crate::services::discord::inflight::load_inflight_state_read_only_result as row_now;
-    Box::new(move || match native_read(&provider, &target) {
-        Screen::Ready => {
-            let active = futures::executor::block_on(mailbox.has_active_turn());
-            let own = |row: &crate::services::discord::inflight::InflightTurnState| {
-                nonce.is_some() && row.turn_nonce == nonce
-            };
-            match (active, row_now(&provider, channel)) {
-                (Ok(false), Ok(row)) if !row.as_ref().is_some_and(own) => Screen::Ready,
-                _ => Screen::Unknown,
-            }
-        }
-        read => read,
-    })
+    let kind = provider.clone();
+    let read = Box::new(move || native_read(&provider, &target));
+    owned_busy::unwound(kind, read, mailbox, (channel, nonce))
 }
 
 /// The transcript of a Claude tmux pane whose turn is running now, resolved by the pane's identity.
@@ -1447,14 +1469,22 @@ fn run(
         target::Route::ClaudeBusy => (
             busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
             BusyClaude {
-                operation: BusyOperation::for_session(
-                    session()?,
-                    r.herdr,
-                    r.program,
-                    r.timing,
-                    declared,
-                    turn.cancel.clone(),
-                )?,
+                operation: match r.observation {
+                    Some(observation) => Ok(observation.prepare_busy(
+                        r.program,
+                        r.timing,
+                        declared,
+                        turn.cancel.clone(),
+                    )),
+                    None => BusyOperation::for_session(
+                        session()?,
+                        r.herdr,
+                        r.program,
+                        r.timing,
+                        declared,
+                        turn.cancel.clone(),
+                    ),
+                }?,
                 session: session()?.into(),
                 transcript: r.transcript,
                 channel: turn.channel_id,

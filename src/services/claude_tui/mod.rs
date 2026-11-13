@@ -1,3 +1,4 @@
+pub(crate) mod activity;
 pub(crate) mod busy_inject;
 #[cfg(all(test, unix))]
 mod busy_inject_tests;

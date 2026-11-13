@@ -97,6 +97,7 @@ fn run_case(refuse_commit: bool) {
         transcript: transcript.clone(),
         target,
         bound: true,
+        awaiting_clear: false,
         physical: None,
     };
     let (tx, rx) = std::sync::mpsc::channel();

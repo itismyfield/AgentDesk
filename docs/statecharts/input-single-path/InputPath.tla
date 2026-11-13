@@ -524,4 +524,7 @@ ReadyNoContinuationEarlyInput == Readiness!NoContinuationEarlyInput
 ReadyBusyKeyPlanPreserved == Readiness!BusyKeyPlanPreserved
 ReadyBusyEventuallyQueues == Readiness!BusyEventuallyQueues
 
+ReadyNoUnsafeClearRetire == Readiness!NoUnsafeClearRetire
+ReadyClearCursorPreserved == Readiness!ClearCursorPreserved
+ReadyClearAtomic == Readiness!ClearAtomic
 =============================================================================

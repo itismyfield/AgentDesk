@@ -1,0 +1,39 @@
+---
+title: "pin 없이 공개 Idle 증거로 기존 입력 위임"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks IdleDelegationNeedsCurrentProof
+    lg1: Path to the IdleDelegationNeedsCurrentProof bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: pin0, 현재 준비 근거 확인
+  s1: 공개 Idle 증거 관측
+  s2: 관측 뒤 근거 바뀜
+  s3: 현재 근거와 다른 예약
+  s4: 변한 근거의 거절 누락
+  s5: 판독 reservation 반환
+  s6: 기존 Idle driver에 위임
+  s7: 같은 원문 보류
+  s8: 같은 원문 보류 표시
+  [*] --> s0
+  s0 --> s1: 공개 B1 근거 판독
+  s1 --> s2: 관측한 source 또는 revision 변경
+  s2 --> s3: 같은 proof 예약 또는 보류
+  s3 --> s4: 변한 근거의 거절 누락
+  s4 --> s5: pre-key 판독 예약 반환
+  s5 --> s6: 기존 Idle 경로가 입력을 맡음
+  s6 --> s7: 기존 driver가 현재 근거 거절
+  s7 --> s8: 보류 표시
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 breaks
+  class s6 bugPath
+  class s7 breaks
+  class s8 breaks

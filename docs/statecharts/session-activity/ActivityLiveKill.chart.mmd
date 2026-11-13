@@ -1,0 +1,18 @@
+---
+title: "Claude activity: source evidence, recovery and stop boundary"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoIdleKillWhileBusy
+    lg1: Path to the NoIdleKillWhileBusy bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Provider idle: unknown, watcher absent
+  s1: Cleanup killed active work
+  [*] --> s0
+  s0 --> s1: attempt idle cleanup
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 breaks
+  class s1 bugPath
