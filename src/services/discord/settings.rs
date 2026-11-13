@@ -6,6 +6,7 @@ use serenity::ChannelId;
 
 use poise::serenity_prelude as serenity;
 
+#[cfg(test)]
 use crate::runtime_layout;
 use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::provider::ProviderKind;

@@ -441,7 +441,7 @@ pub(super) fn resolve_role_binding(
     channel_name: Option<&str>,
 ) -> Option<RoleBinding> {
     crate::services::channel_roles::config_projection::org_role_binding(channel_id, channel_name)
-        .map(Into::into)
+        .map(|projection| projection.into())
 }
 
 pub(super) fn load_shared_prompt_path() -> Option<String> {

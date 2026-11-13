@@ -279,8 +279,8 @@ agents:
     #[test]
     fn memory_backend_availability_is_observed_again_for_each_resolution() {
         isolated(|| {
-            let fixture = Fixture::new();
-            let path = crate::runtime_layout::memory_backend_path(fixture.root());
+            let runtime = crate::config::TestRuntimeRootGuard::new();
+            let path = crate::runtime_layout::memory_backend_path(runtime.path());
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, serde_json::json!({
                 "version": 2, "backend": "memento",

@@ -175,7 +175,8 @@ pub(crate) fn resolve_role_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
 ) -> Option<RoleBinding> {
-    crate::services::channel_roles::resolve_role_binding(channel_id, channel_name).map(Into::into)
+    crate::services::channel_roles::resolve_role_binding(channel_id, channel_name)
+        .map(|projection| projection.into())
 }
 
 /// Resolve the prompt-cache TTL bucket (#1088) for a Discord channel.
