@@ -130,4 +130,4 @@ fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않�
 - `state_busy_observed` (#8115 / #8118 / #8120; human): fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
 - `surface_thread_observed` (#8115 / #8118 / #8120; human): fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
 
-source_hash: `31568e40346cc8dcb42ed0601ef151d7e3a1276cf6275d02bf03d7e8acf7f956`
+source_hash: `18edd40f135f23b65d5b62167b2762bd5dcc2686a547526fc4cd05e4923f2dfc`

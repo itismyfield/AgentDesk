@@ -28,8 +28,11 @@ src/
 │   │   ├── snapshot_reader_tests.rs
 │   │   └── transport.rs
 │   ├── dcserver/
+│   │   ├── replay_recovery/
+│   │   │   └── issuer_key.rs
 │   │   ├── replay_recovery.rs
 │   │   ├── replay_recovery_tests.rs
+│   │   ├── replay_root_issuer.rs
 │   │   ├── startup.rs
 │   │   └── startup_audit_tests.rs
 │   ├── dev_instance/
@@ -412,6 +415,7 @@ src/
 │   ├── intake_consent/
 │   │   └── decision.rs
 │   ├── message_split/
+│   │   ├── literal_code_block.rs
 │   │   └── semantic_boundaries.rs
 │   ├── outbound/
 │   │   ├── outbox/
@@ -436,6 +440,12 @@ src/
 │   │   └── value_methods.rs
 │   ├── provider_auth_profile/
 │   │   └── inputs.rs
+│   ├── replay_evidence/
+│   │   ├── recovery/
+│   │   │   ├── root.rs
+│   │   │   └── snapshot.rs
+│   │   ├── live.rs
+│   │   └── recovery.rs
 │   ├── session_identity/
 │   │   ├── managed.rs
 │   │   └── naming.rs
@@ -458,6 +468,7 @@ src/
 │   ├── process_incarnation.rs
 │   ├── provider.rs
 │   ├── provider_auth_profile.rs
+│   ├── replay_evidence.rs
 │   ├── session_identity.rs
 │   └── tool_text.rs
 ├── engine/
@@ -2190,10 +2201,13 @@ src/
 │   │   │   └── resume_tests.rs
 │   │   ├── replay_policy/
 │   │   │   ├── live/
+│   │   │   │   ├── issuer_key.rs
 │   │   │   │   ├── observer_tests.rs
 │   │   │   │   ├── seal.rs
 │   │   │   │   ├── stderr.rs
 │   │   │   │   └── tap.rs
+│   │   │   ├── recovery/
+│   │   │   │   └── issuer_key.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── live.rs
@@ -3772,6 +3786,9 @@ src/
 │   ├── recovery_defer/
 │   │   ├── cursor.rs
 │   │   └── tests.rs
+│   ├── replay_evidence/
+│   │   ├── live_issuer.rs
+│   │   └── recovery_issuer.rs
 │   ├── review_decision/
 │   │   ├── accept.rs
 │   │   ├── adapters.rs

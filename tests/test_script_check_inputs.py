@@ -311,6 +311,14 @@ class ScriptCheckInputSelection(unittest.TestCase):
         })
         self.assertEqual(done.stdout.count("skipped: 입력 변경 없음 ("), len(selector.SELF_TEST_INPUTS) - 1)
 
+    def test_runner_continuous_manifest_input_executes_tui_relay_harness(self) -> None:
+        path = "docs/e2e-continuous/bundles.schema1.json"
+        title = "TUI relay e2e harness unit tests (#5065/#5997)"
+        self.assertNotIn(title, self.cli(SCRIPT_CHECK_CHANGED_FILES=json.dumps([path])))
+        done = self.fixture_runner(SCRIPT_CHECK_CHANGED_FILES=json.dumps([path]))
+        self.assertEqual(self.executed(done), {"fixture current source", title})
+        self.assertNotIn(f"skipped: 입력 변경 없음 ({title})", done.stdout)
+
     def test_runner_main_nightly_dispatch_and_unknown_changes_execute_every_bundle(self) -> None:
         cases = ({"GITHUB_EVENT_NAME": event} for event in ("push", "schedule", "workflow_dispatch"))
         for case in (*cases, {"SCRIPT_CHECK_CHANGES_RESULT": "skipped"},

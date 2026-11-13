@@ -553,7 +553,10 @@ async fn cursor_past_prompt(root: PathBuf, channel: u64, tmux: &str, answer_firs
     let input = fx.sent(PROMPT);
     assert_eq!(input.len(), 1, "one active input mirror");
     let content: serde_json::Value = serde_json::from_str(&input[0].2).unwrap();
-    assert_eq!(content["content"], format!("-# ⌨️ {PROMPT}"));
+    assert_eq!(
+        content["content"],
+        format!("-# ⌨️ tui direct input\n```\n{PROMPT}\n```")
+    );
     let anchor = fx
         .codex
         .row()
@@ -1341,13 +1344,13 @@ fn notify_prompt_entrypoints_use_the_channel_provider_and_preserve_direct_text()
                     "first **bold**\nsecond\nthird",
                     false,
                     "-# ⌨️ ",
-                    Some("-# ⌨️ first \\*\\*bold\\*\\*\n-# second\n-# third"),
+                    Some("-# ⌨️ tui direct input\n```\nfirst **bold**\nsecond\nthird\n```"),
                 ),
                 (
                     "steer `now`\nmore",
                     true,
                     "-# ⌨️ ",
-                    Some("-# ⌨️ steer \\`now\\`\n-# more"),
+                    Some("-# ⌨️ tui direct input\n```\nsteer `now`\nmore\n```"),
                 ),
                 ("/loop 5m inspect\nnext", false, "-# 🔁 ", None),
                 ("/compact", false, "-# 🧹 ", None),
@@ -1383,7 +1386,8 @@ fn notify_prompt_entrypoints_use_the_channel_provider_and_preserve_direct_text()
                     "old prompt header returned: {content:?}"
                 );
                 if prefix == "-# ⌨️ " {
-                    assert!(content.lines().all(|line| line.starts_with("-# ")));
+                    assert!(content.starts_with("-# ⌨️ tui direct input\n```\n"));
+                    assert!(content.ends_with("\n```"));
                     assert!(!crate::services::discord::session_notice::is_inline(
                         content
                     ));
