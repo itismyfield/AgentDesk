@@ -18,11 +18,13 @@ pub(crate) trait Released: Send + Sized + 'static {
     fn released(self) -> BoxFuture<'static, Self>;
 }
 
-/// What an HTTP force selected besides key and nonce: the execution's whole owner and its row's
-/// dispatch, none included. The operator route and a clear expect neither.
+/// The selected owner and row dispatch. HTTP force also binds the captured dispatch; restart
+/// can leave another dispatch on the row while settling only the captured turn.
+#[derive(Clone)]
 pub(crate) struct Expected {
     pub(crate) owner: HostedOwner,
     pub(crate) dispatch: Option<String>,
+    pub(crate) captured_dispatch: bool,
 }
 
 /// Runs the scoped terminate bound to `expected`, on a retire `postlude` under the held exclusion

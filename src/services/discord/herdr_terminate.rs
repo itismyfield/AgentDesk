@@ -1,6 +1,7 @@
 //! Explicit termination of one Herdr execution, by the operator route, a user clear or an HTTP
 //! force cancel, and the close of an execution no row records.
 pub(crate) mod http_force;
+pub(crate) mod restart_recovery;
 mod retired_exclusion;
 pub(crate) mod root_replaced;
 
@@ -432,8 +433,8 @@ pub(crate) async fn terminate_explicit_herdr_for_test(
     terminate_explicit_herdr(request, shared, pool).await
 }
 
-/// The service up to its settlement. An HTTP `expected` binds the run to what the caller selected:
-/// the row's owner, and the dispatch the captured turn and the row's active one must both be.
+/// The service up to settlement: `expected` fixes the owner and row dispatch. Its captured flag
+/// also requires the captured turn to own that dispatch; restart can leave a different one on the row.
 async fn terminate_scoped(
     request: OperatorTerminate,
     shared: Arc<SharedData>,
@@ -499,7 +500,7 @@ async fn terminate_scoped(
     let captured = turn.as_ref().and_then(|turn| turn.dispatch_id.as_ref());
     if expected
         .as_ref()
-        .is_some_and(|e| captured != e.dispatch.as_ref())
+        .is_some_and(|e| e.captured_dispatch && captured != e.dispatch.as_ref())
     {
         return Err(Refused("captured turn runs another dispatch".into()));
     }
@@ -605,7 +606,9 @@ async fn terminate_scoped(
     Ok(RetiredExclusion::new(
         parts,
         row,
-        expected.and_then(|e| e.dispatch),
+        expected
+            .filter(|e| e.captured_dispatch)
+            .and_then(|e| e.dispatch),
         provider,
         channel,
     ))

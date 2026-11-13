@@ -112,6 +112,8 @@ use queue_enqueue::enqueue_behind;
 pub(crate) use queue_enqueue::enqueue_intervention;
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim, prefix};
 pub(crate) use queued_head::{OwedDrop, TurnBind, Waiting, v2_queue, waiting_origin};
+#[cfg(unix)]
+pub(crate) mod restart_operation;
 /// An owner's queue front: its slot's ticket and the original.
 pub(crate) type OwnerFront = (Option<String>, PendingQueueItem);
 #[derive(Clone, Debug)]

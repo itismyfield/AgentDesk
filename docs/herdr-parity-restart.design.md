@@ -2,7 +2,7 @@
 
 기준: `origin/main` = `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba`, 2026-11-13 KST.
 대상 이슈: [#8128](https://github.com/itismyfield/AgentDesk/issues/8128).
-**이 문서의 변경은 설계·모델이다. A 구현은 별도 검증되었고, B1(clear 효과 허가·followers)은 구현 검증 중이며 B2(restart 활성화)는 후속이다.**
+**r3 목표 계약과 선행 A/B1 증거를 구별한다. B2a 종료·postlude·Gate source는 P2 커밋 `5b8811fd4e` 뒤 checkout에 적용됐으나 현재 Rust/PG PASS는0이다. seed·admission·일반 boot 복구·새 Ready는 B2b 미완이다.**
 
 이 문서의 목표는 인증된 `/restart`와 같은 구현을 쓰는 `!restart`에서 기존 실행을 끝내고,
 가능하면 같은 대화를 새 incarnation으로 이어 시작하는 것이다. 진행 중인 턴은 기존 tmux와 같이
@@ -15,7 +15,7 @@
 
 **r2(2026-11-13):** 설계 리뷰 d1의 방향 제안을 판정해 3·4절을 다시 썼다. restart는 인사말 seed를 owner 큐 head에 먼저 적재하고
 옛 실행을 정확히 끝낸 뒤 owner를 깨우는 데까지만 하며, successor launch는 owner의 기존 herdr 턴 경로가 한다.
-1절의 진입점 표는 r1 그대로다.
+1절의 r1 기준선 표는 보존하고, 현재 B2a 연결은 뒤의 1.1절과 입력 출처 표에서 갱신한다.
 
 **r3(2026-11-13):** 사용자 결정 4건(#8128 댓글, 20:15)과 설계 리뷰 d2의 P2 5건을 반영했다.
 dispatch 실행 중에도 재시작하고(3.3), `!clear`는 새 세션이 뜨는 중에도 이기며(3.4), seed를 넣을 수 없어도 종료 전에 거절하지 않는다(3.6).
@@ -31,11 +31,11 @@ S3의 continuation custody/barrier는 main의 `51508b1f8ec75f0cb6254ce49a3d46442
 O-a는 child 활성화 전체가 아니고 S3는 command launch/취소 hook 자체가 아니다.
 따라서 이 선행 착지만으로 herdr `/restart`가 충족됐다고 표시하지 않는다.
 
-아래 좌표는 모두 위 기준 SHA의 코드다. `D`는 `src/services/discord/`, `S`는 `src/services/`,
+아래 첫 표는 위 기준 SHA의 **r1 역사적 기준선**이며, 현재 B2a 동작은 1.1절이 우선한다. 표의 herdr 거절을 현재 `/restart` 전체의 동작으로 읽지 않는다. `D`는 `src/services/discord/`, `S`는 `src/services/`,
 `DB`는 `src/db/`를 뜻한다. 경로를 생략한 두 번째 좌표도 같은 행의 파일이다.
 설계 모델의 운영 값 범위는 이 표에서만 가져온다. 모델의 단계명은 이 호출 순서의 투영이며 새 생산 enum이 아니다.
 
-| 경로/소비자 | file:line | 현재 동작·값·이번 범위 |
+| 경로/소비자 | file:line | r1 기준선 동작·값·범위 |
 |---|---|---|
 | 슬래시 등록·인증 | `src/services/discord/commands/restart.rs:352`, `:312`, `:315`, `:318` | `cmd_restart` → auth → slash policy → 공통 `restart_channel` |
 | 텍스트 명령 | `src/services/discord/commands/text_commands.rs:129`, `src/services/discord/commands/restart.rs:336` | 인증된 intake의 `!restart`, 원 명령 메시지에 reply(`:343`) |
@@ -102,25 +102,44 @@ O-a는 child 활성화 전체가 아니고 S3는 command launch/취소 hook 자�
 | TUI passthrough | `src/services/discord/commands/tui_passthrough.rs:176` | channel guard로 tmux passthrough 거절. `/model`·`/compact` 후속과 guard를 공유하므로 전역 우회 금지 |
 | I/O 관측의 대기 한계 | `src/services/session_host/herdr/transport.rs:30`, `:84`, `:159`, `src/services/claude/herdr_turn.rs:63`, `src/services/codex/herdr_turn.rs:56` | 기존 socket read/write timeout·read deadline, Claude SessionStart/Codex composer/source wait를 재사용. DB·알림/작업 scheduler의 진행은 별도 liveness 전제 |
 
+### 1.1 B2a 현재 연결 전수표
+
+조사 기준은 `5b8811fd4efd57f1de15df806002afc868a9523d` 뒤 **미커밋 B2a source가 적용된 checkout**이다. 아래 child는 proposed가 아니라 실제 파일이다. 연결 유무를 읽기 전용으로 확인했으며 Rust/PG PASS는 아직0이다. [B2a 모델 보고서](statecharts/session-lifecycle/herdr-restart-owner-b2a.report.md)의 모듈·액션 대응과 입력 분류가 같은 경계를 설명한다.
+
+| 진입점/모듈 | 현재 file:line | B2a 실제 동작·후속 범위 |
+|---|---|---|
+| slash 등록·인증 | `src/services/discord/commands/restart.rs:380`, `:334`, `:337`, `:346` | interaction ID를 operation으로 사용. 기존 auth/slash policy 유지 |
+| `!restart` | `src/services/discord/commands/text_commands.rs:129`; `src/services/discord/commands/restart.rs:355`, `:371` | 기존 intake 뒤 message ID로 같은 공통 restart, 원 명령 메시지에 reply |
+| Herdr 전용 분기 | `src/services/discord/commands/restart.rs:262`, `:283`, `:298`; `src/services/discord/commands/restart/herdr.rs:28` | cfg(unix) Herdr 설정 채널은 기존 tmux reset/seed 전에 child로 분기·return. global managed guard는 유지 |
+| Operation·Gate | `src/services/turn_orchestrator/restart_operation.rs:3`, `:10`; `src/services/discord/commands/restart/herdr.rs:39`, `:43`, `:46`, `:54` | provider/token namespace+channel+요청 ID, 완료 결과 먼저 조회/획득 뒤 재확인. 첫 프로세스 메모리만이며 seedless crash 뒤 영속 같은op 보장0 |
+| detached worker·결과 cache | `src/services/discord/commands/restart/herdr.rs:57`, `:58`, `:59`, `:65`, `:66`; `src/services/discord/queue_io/input_owner/restart_gate.rs:22`, `:76` | snapshot→warn→spawn→종료 결과 저장→Gate 해제. caller 취소에도 worker를 보존하는 범위는 spawn 뒤, warn await 전후까지 무조건 완료라고 주장하지 않음 |
+| 선택·dispatch 결합 | `src/services/discord/commands/restart/herdr.rs:85`, `:105`, `:108`, `:124`, `:130`; `src/services/discord/herdr_terminate/restart_recovery.rs:20` | Known/placed/owner 동일만, row dispatch와 captured dispatch equality를 별도로 보유. Missing/unknown/unplaced는 seed 없이 보이는 실패 |
+| live exact 종료 | `src/services/discord/commands/restart/herdr.rs:156`; `src/services/discord/herdr_terminate/http_force.rs:62`; `src/services/discord/herdr_terminate.rs:478`, `:483`, `:520`, `:549`, `:590`, `:595`, `:597` | 기존 captured actor/token·transition·nonce fence·row 재확인·exact close·종료 확인·retire를 소비. 선취소·queue purge·직접 launch0 |
+| idle close 직후 crash의 명시 재진입 | `src/services/discord/commands/restart/herdr.rs:141`; `src/services/discord/herdr_terminate/restart_recovery.rs:32`, `:74`, `:90`, `:111`, `:134`, `:140`, `:149`, `:152` | 새 명시 요청이 Ended Bound/placed Pending을 fence 아래 다시 확인하고 retire/settle, close 재전송0. Retired는 proof(`:118`, `:125`)로 정리 재개. autonomous boot repair가 아님 |
+| captured turn 결산 | `src/services/discord/herdr_terminate.rs:315`, `:338`, `:355`, `:604`; `src/services/discord/herdr_terminate/restart_recovery.rs:152` | HostTerminated finalizer로 captured snapshot/token을 결산. restart child가 retry dispatch를 만들지 않음. tmux와 dispatch 최종 상태·재시도·게시 수 동등성은 PG 미검증 |
+| clear 우선 postlude | `src/services/discord/commands/restart/herdr.rs:206`, `:207`, `:215`, `:223`, `:229`; `src/services/herdr_launch/clear_epoch.rs:46`, `:57` | snapshot epoch을 disconnect 전후 확인. 겹친 clear면 exact retired selector CAS 삭제; 아니면 selector 보존. CAS=false만으로 종료를 실패로 돌리지 않음 |
+| selector 보존 disconnect | `src/services/discord/herdr_terminate/retired_exclusion.rs:100`, `:113`; `src/db/dispatched_sessions/hosted_execution/http_force.rs:34`, `:44`, `:45`, `:55` | exclusion 아래 row owner/nonce/dispatch 조건으로 disconnect. 새 세션·다른 dispatch를 지우는 권한을 추가하지 않음 |
+| owner hold·release wake | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:175`, `:181`, `:613`; `src/services/discord/queue_io/input_owner/restart_gate.rs:76`, `:82`, `:83` | Gate 중 front hold, 결과 cache 뒤 Gate Drop의 notify/owner wake. 원본과 대기 큐를 재생성·폐기하지 않음 |
+| `!clear`·`/clear` | `src/services/discord/commands/text_commands.rs:100`; `src/services/discord/commands/control.rs:523`, `:530`; `src/services/herdr_launch/clear_epoch.rs:65`; `src/services/discord/commands/control/clear_teardown.rs:73` | 즉시 epoch 증가/clearing, transition timeout 후에도 진행, B1 startup/effect 대기. B2a postlude는 이를 재확인 |
+| 모듈 연결 | `src/services/discord/commands/restart.rs:14`; `src/services/discord/herdr_terminate.rs:4`; `src/services/discord/queue_io/input_owner/mod.rs:15`; `src/services/turn_orchestrator.rs:115` | 작은 child 선언. 새 V2/serde·trait·Core0 |
+| seed·일반 boot 미완 | `src/services/discord/commands/restart.rs:298`, `:312`; `src/services/discord/commands/restart/herdr.rs:26`; `src/services/discord/router/message_handler/headless_turn.rs:159`; `src/services/discord/runtime_bootstrap/queued_recovery.rs:50` | Herdr는 기존 tmux seed 전에 return하여 인사말 미시작을 응답. seed/admission/우선순위·일반 boot의 restart debt·successor Ready는 B2b |
+
 ### 입력 출처와 불변식의 수락 경계
 
-| 출처 | file:line | 수락·재시작 중 처리 |
+| 출처 | 현재 file:line | B2a 수락·재시작 중 처리 |
 |---|---|---|
-| Discord 사람의 일반 메시지 | `src/services/discord/router/intake_queue_transaction.rs:37`, `:49`, `:121`, `src/services/discord/router/intake_gate.rs:369` | Human, 원본 message/source IDs·queued generation 유지. 등록 slash는 일반 메시지 큐에 중복 투입하지 않음 |
-| Discord 허용 봇 | `src/services/discord/router/intake_gate.rs:355`, `src/services/discord/router/intake_queue_transaction.rs:38`, `:45` | AllowedBot/announce만 기존 정책대로 접수. 재시작 중 입력 custody는 사람과 동일, 명령 권한은 기존 auth 그대로 |
-| 기타 봇 | `src/services/discord/router/intake_queue_transaction.rs:47`, `src/services/discord/router/intake_gate.rs:361` | OtherBot의 기존 비접수 정책 유지. 수락하지 않은 입력을 loss=0 계수에 넣어 가짜 성공으로 만들지 않음 |
-| TUI에서 시작된 실제 턴 | `src/services/discord/tui_prompt_relay/synthetic_start/claim.rs:54`, `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs:618`, `src/services/discord/herdr_terminate.rs:477` | O/합성 start로 관측한 old inflight를 captured token 기준 결산. 이미 시작된 턴은 중단 경고 대상 |
-| TUI의 아직 제출하지 않은 수동 draft/직접 키 | `src/services/claude/herdr_turn/composer.rs:59`, `src/services/session_host/herdr_gate.rs:549`, `src/services/discord/commands/restart.rs:276` | AgentDesk가 수락한 queued original과 구별. 종료할 pane의 draft·진행 중 턴은 기존 tmux restart처럼 중단될 수 있음. 직접 키 입력 자체를 무손실 접수했다고 주장하지 않음 |
-| HTTP·루틴·iMessage 시작 | `src/services/discord/router/message_handler/headless_turn.rs:159`, `src/services/turn_host.rs:177` | 현재 herdr 거절 유지(#8125). 일반 ingress는 restart seed source를 가진 시작을 만들 수 없어야 함(3.1 8단계) |
-| restart 인사말 | `src/services/discord/commands/restart.rs:13`, `src/services/discord/queue_io/input_owner/start.rs:13` | 인증된 명령의 stable operation ID에서 유도한 한 ticket/original. restart 명령만 owner 큐의 전송 중 단위 바로 뒤(없으면 맨 앞)에 적재하고, 종료 대상이 Retired일 때만 successor의 첫 입력으로 제출 |
+| Discord 사람의 `/restart`·`!restart` | `src/services/discord/commands/restart.rs:334`, `:337`, `:346`, `:355`, `:371`; `src/services/discord/router/intake_gate.rs:516` | 기존 auth/policy 뒤 operation 고정, 같은 Herdr 종료 분기. 명령 자체를 인사말 seed로 접수하지 않음 |
+| Discord 사람의 일반 메시지 | `src/services/discord/router/intake_queue_transaction.rs:36`, `:43`, `:121`; `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:175` | owner에 접수된 original/receipt는 Gate 동안 hold, 해제 뒤 wake. 기존 captured 진행 턴은 중단 경고·HostTerminated 결산 대상 |
+| Discord 허용 봇/announce | `src/services/discord/router/intake_gate.rs:355`, `:491`, `:496`, `:514`, `:526`; `src/services/discord/router/intake_queue_transaction.rs:38`, `:45` | 기존 turn 필터·허용 봇 인증 예외·텍스트 명령 정책 유지. owner에 이미 접수한 original custody만 포함; 기존 cancel-preservation 차이를 사람과 같다고 확대하지 않음 |
+| 기타 봇 | `src/services/discord/router/intake_gate.rs:361`; `src/services/discord/router/intake_queue_transaction.rs:47` | 기존 비접수 정책 유지. 미접수 입력을 loss=0 계수에 넣지 않음 |
+| TUI 관측·claim된 실제 턴 | `src/services/discord/tui_prompt_relay/synthetic_start/claim.rs:54`; `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs:618`; `src/services/discord/herdr_terminate.rs:478` | old inflight를 captured actor/token/snapshot으로 결산. TUI가 친 문자 `/restart`를 Discord 명령으로 새로 해석하는 경로0 |
+| TUI 미제출 draft/직접 키 | `src/services/claude/herdr_turn/composer.rs:59`; `src/services/session_host/herdr_gate.rs:549`; `src/services/discord/commands/restart.rs:291` | durable queued original과 별개. pane 종료 때 중단될 수 있으며 직접 키 전체를 무손실 접수했다고 주장하지 않음 |
+| API·HTTP·루틴·iMessage 일반 시작 | `src/services/discord/router/message_handler/headless_turn.rs:159`, `:165`; `src/services/turn_host.rs:191` | 기존 executor_not_wired 거절 유지. 명시 Terminate API는 기존 별도 endpoint이며 restart seed 권한으로 확대하지 않음 |
+| restart 인사말·일반 boot | `src/services/discord/commands/restart.rs:298`, `:312`; `src/services/discord/commands/restart/herdr.rs:26`; `src/services/discord/runtime_bootstrap/queued_recovery.rs:50` | B2a 인사말 생성0. seed·admission·우선순위와 일반 boot의 restart 복구는 B2b 미완 |
 
-수락한 입력은 owner의 durable original/attempt로 보유한 입력이다. 재시작 요청의 수락 선형화는
-**seed 원본이 owner 큐에 내구 commit된 시점**이다(r2). seed를 넣지 못한 재시작에서는 종료의 fence 획득이다(r3, 3.6).
-그 뒤 seed 뒤의 대기 입력은 seed를 앞지르지 못하고, pane 수준의 쓰기 차단은 old channel transition + old nonce termination fence가 맡는다.
-재시작이 실패로 확정되면 옛 세션을 다시 쓴다(3.9-2).
-수락 전 이미 시작된 send는 기존 receipt로 `NotSent / acknowledged / uncertain`을 결산한다.
-`NotSent`만 새 target에서 시도할 수 있고, uncertain은 보존·표시하며 맹목 재전송하지 않는다.
-명령 텍스트가 도착한 시각부터 모든 native 키를 막았다는 더 강한 보장은 현재 코드에 없다.
+수락 입력은 owner durable original/attempt로 보유한 입력이다. **B2a의 old pane 입력 차단 선형화는 transition+old nonce termination fence 획득**이며, 명령 수신·Gate 획득·종료 확인을 seed 내구 수락과 같게 취급하지 않는다. B2a에는 seed 내구 수락 자체가 없다. 이미 시작된 send는 기존 receipt로 `NotSent / acknowledged / uncertain`을 결산하며 uncertain은 맹목 재전송하지 않는다. queue/history purge는 추가하지 않는다.
+
+r3 목표의 **seed 내구 commit 수락**, 전송 중 단위 바로 뒤 적재·우선 실행·successor Ready 및 seed를 통한 crash 복구는 아래3절의 B2b 미완 계약이다. 기존 일반 boot 큐/inflight 복원이 그 새 동작을 이미 제공한다고 주장하지 않는다.
 
 ## 2. 사용자 수준 비교
 
@@ -572,4 +591,4 @@ r1 보고서는 [`session-lifecycle/herdr-restart.report.md`](statecharts/sessio
 - r2 (2026-11-13, `f3c745ebc9`): 리뷰 d1의 방향 제안을 판정해 owner 큐 seed 방향을 채택(적재 → 종료 순서). P2-1·P2-3·P2-4·P2-6 반영, P2-2·P2-5는 A 접점만 기록, 사용자 결정 항목 U1~U4, B 크기 재추정, `HerdrRestartOwner` 모델 42 cfg.
 - r3 (2026-11-13): 사용자 결정 4건 반영(dispatch 중 재시작, clear 우선, 인사말 순서는 불가피 차이, seed 불가 시에도 재시작)과 리뷰 d2의 P2 5건(전송 중 단위 뒤 적재, ticket 상태와 clear epoch, seed 제출 세 단계, 옛 pane 전달 기준, tmux 차이 전수). B를 B-clear·B-main으로 분할, 모델 63 cfg.
 
-<!-- doc-path-refs: proposed herdr_turn/restart_resume.rs src/services/discord/commands/restart/herdr.rs src/services/discord/herdr_terminate/restart.rs src/services/discord/queue_io/input_owner/restart_seed.rs src/services/turn_orchestrator/queued_head/v2/source_admission/restart_seed.rs -->
+<!-- doc-path-refs: proposed herdr_turn/restart_resume.rs src/services/discord/herdr_terminate/restart.rs src/services/discord/queue_io/input_owner/restart_seed.rs src/services/turn_orchestrator/queued_head/v2/source_admission/restart_seed.rs -->

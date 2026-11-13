@@ -80,6 +80,7 @@ pub(super) async fn herdr_force(
     let expected = Expected {
         owner: record.owner,
         dispatch: info.dispatch_id.clone(),
+        captured_dispatch: true,
     };
     let (effects_pool, key) = (pool.clone(), info.session_key.clone());
     let bound = (request, expected);

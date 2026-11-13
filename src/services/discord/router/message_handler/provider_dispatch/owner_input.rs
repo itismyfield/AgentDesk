@@ -170,6 +170,17 @@ pub(in crate::services::discord) fn owner_drive(
         Box::pin(async move {
             use crate::services::discord::queue_io::input_ingress as ingress;
             let original = front.clone();
+            #[cfg(unix)]
+            if runtime.as_ref().is_some_and(|shared| {
+                crate::services::discord::queue_io::input_owner::restart_gate::inflight(
+                    provider.as_str(),
+                    &shared.token_hash,
+                    channel,
+                )
+            }) {
+                hold_start(&mailbox, ChannelId::new(channel), &front).await;
+                return Err(WRITER_HELD.into());
+            }
             if crate::services::discord::router::intake_dispatch::writer_boot_held(
                 &provider, channel,
             )

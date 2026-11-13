@@ -38,6 +38,28 @@ fn cell(key: &Key) -> Arc<Cell> {
     cell
 }
 
+/// The restart postlude keeps this cell alive across a predecessor's exact termination.
+#[cfg(unix)]
+pub(crate) struct Epoch(Arc<Cell>, Option<u64>);
+
+#[cfg(unix)]
+pub(crate) fn snapshot(provider: &str, token_hash: &str, channel: u64) -> Epoch {
+    let cell = cell(&(provider.into(), token_hash.into(), channel));
+    let epoch = {
+        let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        (state.clearing == 0).then_some(state.epoch)
+    };
+    Epoch(cell, epoch)
+}
+
+#[cfg(unix)]
+impl Epoch {
+    pub(crate) fn unchanged(&self) -> bool {
+        let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.clearing == 0 && self.1 == Some(state.epoch)
+    }
+}
+
 pub(crate) struct ClearGuard(Arc<Cell>);
 
 pub(crate) fn begin_clear(provider: &str, token_hash: &str, channel: u64) -> ClearGuard {

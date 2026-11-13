@@ -1,4 +1,4 @@
-export const title = "Herdr restart B ports: immediate clear epoch, drain earlier effect grants";
+export const title = "Herdr B2a: detached exact end, cache result, release and wake";
 const qs = (s) => Object.values(s.q ?? {});
 const settled = (s) => qs(s).every(q => !["queued", "claimed", "inflight"].includes(q));
 const tail = (s) => qs(s).includes("queued") ? "; an input waits" : qs(s).includes("incoming") ? "; an input may still arrive" : "";
@@ -62,13 +62,27 @@ export const state = (v) => {
     + (members(s.claimPayload).includes(3) ? "; payload offers the later input" : "")
     + (members(s.claimReserved).includes(3) ? "; reservation stole the later input" : "")
     + ({ incoming: "; later input may arrive", queued: "; later input waits separately", inflight: "; later input awaits its own receipt", delivered: "; later input delivered", retained: "; later input retained", cancelled: "; later input explicitly dropped" }[s.q?.[3]] ?? "");
+  const a = s.aPhase === "none" ? (s.aInitiallyEnded ? "; stored row was already ended before this request" : "") : "; detached operation " + s.aPhase
+    + (s.aInitiallyEnded ? "; explicit restart found an ended idle execution" : "")
+    + (s.aCallerGone ? "; caller cancelled, worker still owns the operation" : "")
+    + (s.aReplayed ? "; completed memory result reused" : "")
+    + (s.aCloseCalls > 1 ? "; operation sent another close" : "")
+    + (s.aInitiallyEnded && s.aCloseCalls ? "; ended entry received a new close" : "")
+    + (s.aPhase === "complete" && s.aCache === "none" ? "; gate released without a result" : "")
+    + (s.aPhase === "complete" && !s.aWakeAtRelease ? "; gate released without waking the owner" : "");
   const failures = [s.opSeedless && "known ticket entered the seedless path", s.opDuplicate && "known operation inserted another seed", s.unsafeEffect && "physical effect used no live permission", s.undrainedClear && "clear completed before an older startup or grant drained"].filter(Boolean);
-  if (!failures.length) return baseState(v) + claim;
+  if (!failures.length) return baseState(v) + claim + a;
   const names = { incoming: "not yet arrived", queued: "waiting", claimed: "in the fixed claim", inflight: "receipt pending", delivered: "delivered", retained: "retained", cancelled: "explicitly dropped", lost: "lost" };
   const originals = qs(s).map((q, i) => `original ${i + 1} ${names[q] ?? q}`).join(", ");
-  return `${baseState(v)}${claim}; ${failures.join("; ")}; ${originals}`;
+  return `${baseState(v)}${claim}${a}; ${failures.join("; ")}; ${originals}`;
 };
 export const step = (action, from, to) => ({
+  B2aRepairEnded: "Under the captured fence, retire the already-ended execution without close",
+  B2aCancelCaller: "The caller cancels; the detached worker continues",
+  B2aObserveResult: "The detached worker obtains its terminal result",
+  B2aCacheResult: "Remember the completed result in this process",
+  B2aReleaseGate: "Release the operation gate and wake the owner",
+  B2aReplayCompleted: "Return the same process's remembered result",
   ClaimRead: "Read the fixed head and followers",
   ClaimBadPayload: "Offer the later arrival as an extra follower",
   ClaimReserve: "Reserve exactly the claim's ordered originals",

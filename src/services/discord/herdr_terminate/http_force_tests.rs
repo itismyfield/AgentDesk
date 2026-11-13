@@ -1,6 +1,12 @@
 //! The forced turn cancel through the production router on the fake Herdr rig and a throwaway PG:
 //! its dispatch, session and queue effects happen only once the scoped run retired and settled.
 
+#[path = "http_force_tests/restart_channel_tests.rs"]
+mod restart_channel_tests;
+
+#[path = "http_force_tests/restart_refusal_tests.rs"]
+mod restart_refusal_tests;
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

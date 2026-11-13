@@ -1497,6 +1497,7 @@ src/
 │   │   │   ├── node/
 │   │   │   │   └── home_pg_tests.rs
 │   │   │   ├── restart/
+│   │   │   │   ├── herdr.rs
 │   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
 │   │   │   │   ├── autocomplete.rs
@@ -1726,6 +1727,9 @@ src/
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── herdr_terminate/
+│   │   │   ├── http_force_tests/
+│   │   │   │   ├── restart_channel_tests.rs
+│   │   │   │   └── restart_refusal_tests.rs
 │   │   │   ├── root_replaced/
 │   │   │   │   └── preclaim.rs
 │   │   │   ├── http_force.rs
@@ -1740,6 +1744,8 @@ src/
 │   │   │   ├── http_force_writer_tests.rs
 │   │   │   ├── missing_marker_tests.rs
 │   │   │   ├── missing_marker_turn_tests.rs
+│   │   │   ├── restart_recovery.rs
+│   │   │   ├── restart_recovery_tests.rs
 │   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
@@ -2043,6 +2049,8 @@ src/
 │   │   │   │   ├── pump.rs
 │   │   │   │   ├── pump_tests.rs
 │   │   │   │   ├── recovery.rs
+│   │   │   │   ├── restart_gate.rs
+│   │   │   │   ├── restart_gate_tests.rs
 │   │   │   │   ├── routine.rs
 │   │   │   │   ├── start.rs
 │   │   │   │   ├── start_tests.rs
@@ -2334,6 +2342,8 @@ src/
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   ├── owner_input_idle_tests/
+│   │   │   │   │   │   └── restart_gate_tests.rs
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_busy_gate_tests.rs
 │   │   │   │   │   ├── owner_input_busy_race_tests.rs
@@ -3573,6 +3583,7 @@ src/
 │   ├── herdr_launch/
 │   │   ├── clear_epoch/
 │   │   │   ├── launch_pg_tests.rs
+│   │   │   ├── projection_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── retired_hold/
 │   │   │   └── tests.rs
@@ -4481,6 +4492,7 @@ src/
 │   │   │   └── source_tests.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── codex_hook/
+│   │   │   │   ├── herdr_resume_cause_tests.rs
 │   │   │   │   └── herdr_resume_tests.rs
 │   │   │   ├── codex_policy/
 │   │   │   │   ├── absent_open.rs
@@ -4651,6 +4663,8 @@ src/
 │   │   ├── registry_purge.rs
 │   │   ├── remint_fence.rs
 │   │   ├── reply_results.rs
+│   │   ├── restart_operation.rs
+│   │   ├── restart_operation_tests.rs
 │   │   ├── source_generation.rs
 │   │   ├── source_generation_origin_tests.rs
 │   │   ├── test_support_tests.rs

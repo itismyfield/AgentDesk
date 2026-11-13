@@ -10,6 +10,9 @@ use super::super::{
     mailbox_has_active_turn,
 };
 
+#[cfg(unix)]
+mod herdr;
+
 const RESTART_SEED_PROMPT: &str = "안녕하세요. 세션 재시작 완료.";
 
 /// Outcome of resolving the reload action against the current session state.
@@ -256,32 +259,48 @@ where
 
 /// The restart `/restart` and `!restart` share once the sender is authorized; every
 /// reply goes through `say`.
-async fn restart_channel<Say, SayFut>(
-    serenity_ctx: &serenity::Context,
+async fn restart_channel<Say, SayFut, Seed, SeedFut>(
+    http: &Arc<serenity::Http>,
     data: &Data,
     channel_id: serenity::ChannelId,
-    user_name: &str,
-    command_name: &'static str,
+    identity: (&str, &'static str, u64),
     say: Say,
+    start_seed: Seed,
 ) -> Result<(), Error>
 where
     Say: Fn(String) -> SayFut,
     SayFut: std::future::Future<Output = Result<(), Error>>,
+    Seed: FnOnce() -> SeedFut,
+    SeedFut: std::future::Future<Output = RestartSeedStatus>,
 {
+    let (user_name, command_name, operation_id) = identity;
+    #[cfg(not(unix))]
+    let _ = operation_id;
     log_command_received!(channel_id.get(), user_name, command_name);
     say("♻ 세션 재시작 중...".into()).await?;
 
+    #[cfg(unix)]
+    if crate::services::herdr_launch::herdr_configured_for_tui_launch(Some(channel_id.get())) {
+        let response = herdr::run(
+            data.shared.clone(),
+            data.provider.clone(),
+            channel_id,
+            &operation_id.to_string(),
+            || async {
+                if mailbox_has_active_turn(&data.shared, channel_id).await {
+                    say("⚠ 진행 중 턴 1회 손실 가능 — 안전하게 중단합니다.".into()).await?;
+                }
+                Ok(())
+            },
+        )
+        .await?;
+        say(response).await?;
+        return Ok(());
+    }
     let action = resolve_restart_action(&data.shared, channel_id).await;
     let (shared, provider) = (&data.shared, &data.provider);
     let warn = || say("⚠ 진행 중 턴 1회 손실 가능 — 안전하게 중단합니다.".into());
-    let restarted = restart_managed_session(
-        &serenity_ctx.http,
-        shared,
-        provider,
-        channel_id,
-        command_name,
-        warn,
-    );
+    let restarted = restart_managed_session(http, shared, provider, channel_id, command_name, warn);
     let tmux_name = match restarted.await? {
         Ok(tmux_name) => tmux_name,
         Err(reason) => {
@@ -290,7 +309,7 @@ where
         }
     };
 
-    let seed_status = start_restart_seed_turn(serenity_ctx, data, channel_id, command_name).await;
+    let seed_status = start_seed().await;
     say(build_restart_response(
         provider,
         &action,
@@ -321,12 +340,12 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
     let say = |text: String| async move { ctx.say(text).await.map(|_| ()).map_err(Error::from) };
     let serenity_ctx = ctx.serenity_context();
     restart_channel(
-        serenity_ctx,
+        &serenity_ctx.http,
         ctx.data(),
         ctx.channel_id(),
-        user_name,
-        command_name,
+        (user_name, command_name, ctx.id()),
         say,
+        || start_restart_seed_turn(serenity_ctx, ctx.data(), ctx.channel_id(), command_name),
     )
     .await
 }
@@ -345,7 +364,15 @@ pub(super) async fn run_text_restart(
             .map(|_| ())
             .map_err(Error::from)
     };
-    restart_channel(ctx, data, channel_id, &msg.author.name, "!restart", say).await
+    restart_channel(
+        &ctx.http,
+        data,
+        channel_id,
+        (&msg.author.name, "!restart", msg.id.get()),
+        say,
+        || start_restart_seed_turn(ctx, data, channel_id, "!restart"),
+    )
+    .await
 }
 
 /// Restart the current provider session immediately.
@@ -465,3 +492,27 @@ mod host_guard_tests {
 
 #[cfg(test)]
 mod seed_tests;
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use herdr::probe_restart_disconnect_for_tests;
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) async fn restart_channel_for_tests(
+    http: &Arc<serenity::Http>,
+    data: &Data,
+    channel: serenity::ChannelId,
+    identity: (&str, &'static str, u64),
+) -> Result<Vec<String>, Error> {
+    async fn forbidden_seed() -> RestartSeedStatus {
+        panic!("a Herdr restart must not invoke the legacy greeting seed");
+    }
+    let replies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let written = replies.clone();
+    let say = move |text: String| {
+        written.lock().unwrap().push(text);
+        std::future::ready(Ok::<(), Error>(()))
+    };
+    restart_channel(http, data, channel, identity, say, forbidden_seed).await?;
+    let replies = replies.lock().unwrap().clone();
+    Ok(replies)
+}

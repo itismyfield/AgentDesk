@@ -290,6 +290,7 @@ pub(crate) fn unbound(rig: &herdr::P11TerminationRig, node: &Node) -> Expected {
     Expected {
         owner,
         dispatch: None,
+        captured_dispatch: true,
     }
 }
 

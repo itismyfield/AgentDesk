@@ -23,14 +23,20 @@ Refusable == StartKind \in {"Unknown", "PendingUnplaced"}
 Seeded == SeedMode = "ok"
 Healthy == ~Refusable /\ CloseReply = "confirmed" /\ LaunchReply = "Created"
            /\ ClearOn = "off" /\ ~CrashOn /\ Seeded
-Init == s = [cmd |-> "idle", seed |-> "none", gate |-> FALSE, excl |-> FALSE,
-             row |-> StartKind, oldLive |-> NeedsClose, selector |-> "kept",
+Init == \E endedBeforeRequest \in {FALSE, TRUE} : s = [cmd |-> "idle", seed |-> "none", gate |-> FALSE, excl |-> FALSE,
+             row |-> StartKind, oldLive |-> NeedsClose /\ (Seeded \/ CrashOn \/ ~endedBeforeRequest), selector |-> "kept",
              rowDispatch |-> Dispatch /\ NeedsClose, retries |-> 0, inherit |-> FALSE,
-             inflight |-> Busy /\ NeedsClose, settled |-> ~(Busy /\ NeedsClose),
+             inflight |-> Busy /\ NeedsClose /\ (Seeded \/ CrashOn \/ ~endedBeforeRequest),
+             settled |-> ~(Busy /\ NeedsClose /\ (Seeded \/ CrashOn \/ ~endedBeforeRequest)),
              warned |-> FALSE, awake |-> FALSE, panes |-> 0, created |-> "no",
              creates |-> 0, launcher |-> 0, lphase |-> "none", lEpoch |-> 0,
              seedEffects |-> 0, oldSeed |-> FALSE, oldInputs |-> 0,
              opSeen |-> FALSE, opSeedless |-> FALSE, opDuplicate |-> FALSE,
+             aStarted |-> FALSE, aPhase |-> "none", aGate |-> FALSE, aCache |-> "none", aOutcome |-> "none",
+             aCallerGone |-> FALSE, aReplayed |-> FALSE, aCloseCalls |-> 0, aRepairCalls |-> 0,
+             aInitiallyEnded |-> ~Seeded /\ NeedsClose /\ ~CrashOn /\ endedBeforeRequest,
+             aPostDone |-> FALSE, aPostEpoch |-> 0, aPostSelector |-> "kept",
+             aPostDispatch |-> FALSE, aPostSettled |-> TRUE, aCacheAtRelease |-> "none", aWakeAtRelease |-> FALSE,
              checked |-> FALSE, permission |-> FALSE, effectKind |-> "none", grantEpoch |-> 0, grantValid |-> FALSE,
              effectBegan |-> FALSE, unsafeEffect |-> FALSE, clearRequested |-> FALSE,
              undrainedClear |-> FALSE, knownUnknownClear |-> FALSE,
@@ -52,7 +58,7 @@ UnitPending == \E i \in Ids : s.q[i] \in {"claimed", "inflight"}
 FrontInput(i) == /\ (~SeedPending \/ Mutant = "SeedBehind") /\ s.launcher = 0
                  /\ s.q[i] = "queued"
                  /\ \A j \in 1..(i-1) : s.q[j] \notin {"queued", "claimed", "inflight"}
-OwnerFree == s.awake /\ ~s.excl /\ ~s.clearExcl /\ ~s.clearing
+OwnerFree == s.awake /\ ~s.excl /\ ~s.clearExcl /\ ~s.clearing /\ ~s.aGate
 \* The in-memory gate keeps the seed unstarted until the command released its exclusion.
 SeedHeld == s.gate /\ Mutant # "NoGate"
 OldTarget == s.row \in {"Bound", "PendingPlaced"}
@@ -73,7 +79,9 @@ FrontFails(l) == [s EXCEPT !.launcher = 0, !.lphase = "none",
 Request == /\ s.cmd = "idle"
            /\ s' = IF Policy = "before" \/ Refusable
                    THEN [s EXCEPT !.cmd = "notice", !.awake = TRUE]
-                   ELSE [s EXCEPT !.seed = IF Seeded THEN "queued" ELSE "none",
+                   ELSE [s EXCEPT !.aStarted = ~Seeded, !.aPhase = IF Seeded THEN @ ELSE "working",
+                                  !.aGate = ~Seeded,
+                                  !.seed = IF Seeded THEN "queued" ELSE "none",
                                   !.gate = NeedsClose, !.awake = TRUE,
                                   !.warned = Busy /\ NeedsClose,
                                   !.cmd = IF NeedsClose THEN "seeded" ELSE "answering"]
@@ -81,7 +89,7 @@ Admit(i) == /\ s.cmd # "idle" /\ s.q[i] = "incoming"
             /\ s' = [s EXCEPT !.accepted = @ \cup {i}, !.q[i] = "queued", !.awake = TRUE]
 \* A drive that finds the transition taken or the seed gated parks until the next wake.
 OwnerParks == /\ s.awake
-              /\ s.excl \/ s.clearExcl \/ s.clearing \/ (s.seed = "queued" /\ SeedHeld)
+              /\ s.excl \/ s.clearExcl \/ s.clearing \/ s.aGate \/ (s.seed = "queued" /\ SeedHeld)
               /\ s' = [s EXCEPT !.awake = FALSE]
 \* The front claim freezes its ordered originals. A later arrival is not its follower.
 ClaimRead == /\ s.claimPhase = "claimed"
@@ -110,7 +118,9 @@ TakeExclusion == /\ s.cmd = "seeded" /\ ~s.clearExcl
                  /\ s' = [s EXCEPT !.excl = TRUE, !.cmd = "closing"]
 \* The terminate names the old nonce: a row that moved on refuses.
 CloseExact == /\ s.cmd = "closing" /\ CloseReply = "confirmed" /\ OldTarget
-              /\ s' = [s EXCEPT !.oldLive = IF Mutant = "SkipClose" THEN @ ELSE FALSE,
+              /\ (Seeded \/ s.oldLive)
+              /\ s' = [s EXCEPT !.aCloseCalls = IF Seeded THEN @ ELSE @ + 1,
+                               !.oldLive = IF Mutant = "SkipClose" THEN @ ELSE FALSE,
                                !.cmd = "retiring"]
 CloseFails == /\ s.cmd = "closing" /\ (CloseReply # "confirmed" \/ ~OldTarget)
               /\ s' = [s EXCEPT !.cmd = "failing"]
@@ -125,9 +135,13 @@ Retire == /\ s.cmd = "retiring"
                                     THEN "retained" ELSE s.q[i]]]
 \* after_retire, still inside the exclusion. A clear epoch that moved since acceptance means
 \* a clear overtook this restart: the selector is forgotten as that clear would have done.
+B2aPostludeRecord(t) == IF Seeded THEN t ELSE
+  [t EXCEPT !.aPhase = "result_ready", !.aOutcome = IF Superseded THEN "superseded" ELSE "ended",
+            !.aPostDone = TRUE, !.aPostEpoch = s.epoch, !.aPostSelector = t.selector,
+            !.aPostDispatch = t.rowDispatch, !.aPostSettled = t.settled]
 Postlude ==
   /\ s.cmd = "postlude"
-  /\ s' = IF Mutant = "R1Launch"
+  /\ s' = B2aPostludeRecord(IF Mutant = "R1Launch"
           THEN [s EXCEPT !.excl = FALSE, !.gate = FALSE, !.awake = TRUE, !.row = "NewBound",
                          !.panes = 1, !.stalePane = Superseded, !.rowDispatch = FALSE,
                          !.seed = IF @ = "queued" THEN "delivered" ELSE @,
@@ -145,7 +159,7 @@ Postlude ==
                                   ELSE IF @ = "queued" /\ Mutant # "NoSupersedeCheck" THEN "cancelled"
                                   ELSE @,
                          !.seedRevived = Superseded /\ Mutant = "ReloadSeed" /\ Seeded,
-                         !.cmd = "answering"]
+                         !.cmd = "answering"])
 \* The reply reads the clear epoch, never the seed's absence: a seed already delivered or
 \* failed is not a clear.
 Answer ==
@@ -308,6 +322,9 @@ Crash ==
      IN s' = [s EXCEPT !.crashed = TRUE, !.cmd = "dead", !.gate = FALSE, !.excl = FALSE,
                        !.awake = TRUE, !.binary = IF Rollback THEN "old" ELSE "new",
                        !.claimPhase = IF ActiveClaim THEN "revoked" ELSE @,
+                       !.aGate = FALSE, !.aCache = "none", !.aOutcome = "none",
+                       !.aPhase = IF s.aStarted THEN "lost" ELSE @,
+                       !.aCacheAtRelease = "none", !.aWakeAtRelease = FALSE,
                        !.launcher = 0, !.lphase = "none", !.lEpoch = s.epoch,
                        !.checked = FALSE, !.permission = FALSE, !.effectKind = "none", !.effectBegan = FALSE,
                        !.row = IF s.lphase = "pending" THEN "Retired" ELSE @,
@@ -370,9 +387,33 @@ ReplayRequest == /\ ReplayMode # "off" /\ ~s.opSeen /\ s.cmd # "idle" /\ s.seed 
                  /\ s' = [s EXCEPT !.opSeen = TRUE,
                                   !.opSeedless = OpPolicy = "seedless",
                                   !.opDuplicate = OpPolicy = "duplicate"]
+\* A new explicit restart can retire an already-ended idle row without sending another close.
+B2aRepairEnded == /\ ~Seeded /\ s.aStarted /\ s.cmd = "closing" /\ s.excl
+                  /\ OldTarget /\ ~s.oldLive /\ CloseReply = "confirmed"
+                  /\ s' = [s EXCEPT !.row = "Retired", !.cmd = "postlude", !.inflight = FALSE,
+                                    !.settled = TRUE, !.aRepairCalls = @ + 1,
+                                    !.claimPhase = IF ActiveClaim THEN "revoked" ELSE @,
+                                    !.q = [i \in Ids |-> IF s.q[i] \in {"claimed", "inflight"}
+                                                          THEN "retained" ELSE s.q[i]]]
+\* Caller cancellation does not cancel the detached operation that owns this gate.
+B2aCancelCaller == /\ s.aStarted /\ ~s.crashed /\ ~s.aCallerGone /\ s.aPhase # "complete"
+                   /\ s' = [s EXCEPT !.aCallerGone = TRUE]
+B2aObserveResult == /\ s.aStarted /\ ~s.crashed /\ s.aPhase = "working" /\ ~s.excl
+                    /\ s.cmd = "answering" \/ (s.visible /\ s.cmd \in {"withdrawing", "done"})
+                    /\ s' = [s EXCEPT !.aPhase = "result_ready",
+                                      !.aOutcome = IF Superseded THEN "superseded"
+                                                   ELSE IF s.visible THEN "failed" ELSE "ended"]
+B2aCacheResult == /\ s.aPhase = "result_ready" /\ ~s.crashed
+                  /\ s' = [s EXCEPT !.aCache = s.aOutcome, !.aPhase = "cached"]
+B2aReleaseRecord(t) == [t EXCEPT !.aCacheAtRelease = t.aCache, !.aWakeAtRelease = t.awake]
+B2aReleaseGate == /\ s.aPhase = "cached" /\ s.aCache # "none" /\ ~s.crashed
+                  /\ s' = B2aReleaseRecord([s EXCEPT !.aGate = FALSE, !.aPhase = "complete", !.awake = TRUE])
+B2aReplayCompleted == /\ s.aPhase = "complete" /\ ~s.crashed /\ ~s.aReplayed
+                      /\ s' = [s EXCEPT !.aReplayed = TRUE]
 Wait == UNCHANGED s
 
-Next == \/ ClaimRead \/ ClaimBadPayload \/ ClaimReserve \/ ClaimReject \/ ClaimDone
+Next == \/ B2aRepairEnded \/ B2aCancelCaller \/ B2aObserveResult \/ B2aCacheResult
+        \/ B2aReleaseGate \/ B2aReplayCompleted \/ ClaimRead \/ ClaimBadPayload \/ ClaimReserve \/ ClaimReject \/ ClaimDone
         \/ Request \/ OwnerParks \/ TakeExclusion \/ CloseExact \/ CloseFails \/ Retire
         \/ Postlude \/ Answer \/ Fail \/ Withdraw \/ NotifyFailure \/ SeedRefused \/ SeedToOld
         \/ SeedJoin \/ InstallPending \/ AbortUnsent \/ CheckCreateEpoch \/ BeginCreateEffect \/ Create \/ LaunchNotSent
@@ -385,6 +426,8 @@ Next == \/ ClaimRead \/ ClaimBadPayload \/ ClaimReserve \/ ClaimReject \/ ClaimD
 \* Each step of the command, the owner and a started clear eventually runs while it stays
 \* enabled. Crash, a clear's arrival and a parked drive are not fair: they may never happen.
 Spec == /\ Init /\ [][Next]_vars
+        /\ WF_vars(B2aRepairEnded) /\ WF_vars(B2aObserveResult) /\ WF_vars(B2aCacheResult)
+        /\ WF_vars(B2aReleaseGate)
         /\ WF_vars(ClaimRead) /\ WF_vars(ClaimReserve) /\ WF_vars(ClaimReject) /\ WF_vars(ClaimDone)
         /\ WF_vars(Request) /\ WF_vars(TakeExclusion) /\ WF_vars(CloseExact)
         /\ WF_vars(CloseFails) /\ WF_vars(Retire) /\ WF_vars(Postlude) /\ WF_vars(Answer)
@@ -446,4 +489,15 @@ ClaimedMembersFixed == s.claimObserved = <<>> \/ s.claimObserved = ClaimMembers
 ReservationUsesClaim == s.claimReserved = <<>> \/ s.claimReserved = ClaimMembers
 ClaimedUnitResolves == ActiveClaim ~> s.claimPhase \in {"done", "revoked"}
 
+\* The cache is process memory; a daemon crash terminates these obligations without retaining it.
+B2aCachePrecedesGateRelease == s.aPhase = "complete"
+  => s.aCache # "none" /\ s.aCache = s.aOutcome /\ s.aCacheAtRelease # "none" /\ s.aWakeAtRelease
+B2aNoRepeatClose == s.aCloseCalls <= 1
+B2aIdleRepairSendsNoClose == s.aInitiallyEnded => s.aCloseCalls = 0
+B2aPostludeContract == s.aPostDone =>
+  /\ (s.aPostEpoch = 0 => s.aPostSelector = "kept")
+  /\ (s.aPostEpoch # 0 => s.aPostSelector = "forgotten")
+  /\ ~s.aPostDispatch /\ s.aPostSettled
+B2aDetachedResultResolves == s.aStarted ~> (s.aPhase = "complete" \/ s.crashed)
+B2aCancelledCallerResolves == s.aCallerGone ~> (s.aPhase = "complete" \/ s.crashed)
 ====

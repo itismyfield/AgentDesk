@@ -1,6 +1,6 @@
 # Herdr restart B2 재측정과 분할 제안
 
-상태: PLAN_READY 제안. 코디네이터 승인 전 생산 확장을 동결한다.
+상태: B2a/B2b 분할 승인(2026-11-14 02:5x). B2a 종료·disconnect 조각을 먼저 구현하며, A·B1·B2a·B2b는 함께 착지한다.
 기준 B1은 `a7b38ee46a867119b075d9159f626e1dcb422840`, main 병합 기준은
 `fc4b3dd8474603d2696bf79fa9472d8334445977`(main `8896695e659467a2243fe7b09123e26ba8f033b8`)이다.
 이 문서는 [기존 B 분할 계획](herdr-parity-restart-b-split.plan.md)의 B2 비용을 실측으로 보정한다.
@@ -136,4 +136,4 @@ checkout의 source는 main 병합 기준으로 복원했다. review ref에 제�
 stash나 다른 worktree를 쓰지 않았으며 아카이브와 복원 결과를 각각 manifest로 남겼다.
 첫 B2 생산 커밋은 이월 P2의 해당 계약·시험이 함께 들어가는 시점에 만든다.
 
-<!-- doc-path-refs: proposed src/services/turn_orchestrator/restart_operation.rs src/services/discord/commands/restart/herdr.rs src/services/discord/herdr_terminate/restart_recovery.rs src/services/turn_orchestrator/queued_head/v2/source_admission/restart_seed.rs -->
+<!-- doc-path-refs: proposed src/services/turn_orchestrator/queued_head/v2/source_admission/restart_seed.rs -->

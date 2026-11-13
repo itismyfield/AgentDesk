@@ -2931,3 +2931,6 @@ pub(crate) fn claimed_root_recovery_launch(
 
 #[path = "owner_input_busy_gate_tests.rs"]
 mod busy_gate;
+
+#[path = "owner_input_idle_tests/restart_gate_tests.rs"]
+mod restart_gate;
