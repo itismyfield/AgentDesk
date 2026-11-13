@@ -527,7 +527,7 @@ fn singleton_positive_control(path: std::path::PathBuf, lock: std::sync::Arc<std
             with self.subTest(name=name):
                 codes = {"E0308"} if name.startswith("wrong_") else {"E0451", "E0423", "E0616"}
                 if name == "wrong_root_key" and sys.platform == "win32":
-                    codes = {"E0425"}
+                    codes = {"E0433"}
                 self.assert_refused(body, codes)
 
     def test_replay_authority_has_no_default_clone_or_copy_escape(self):
