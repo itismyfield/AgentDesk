@@ -95,8 +95,11 @@ impl Node {
         let _ = std::fs::remove_dir_all(runtime_store::discord_pending_queue_root().unwrap());
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
-        let (shared, registry) =
-            super::super::super::host_teardown_gate::test_support::runtime(&pool).await;
+        let mut shared =
+            super::super::super::host_teardown_gate::test_support::shared_on(&pool).await;
+        let registry = Arc::new(HealthRegistry::new());
+        Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+        registry.register("claude".into(), shared.clone()).await;
         let key = format!(
             "claude/{}/{}:AgentDesk-claude-e07",
             shared.token_hash,
