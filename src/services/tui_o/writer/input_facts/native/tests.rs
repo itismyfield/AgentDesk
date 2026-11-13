@@ -189,7 +189,7 @@ fn native_8148_b1_withdraw_transfer_popall_and_late_dequeue_keep_next_input() {
             remove["reason"] = json!(operation);
         }
         f.append(&[remove, queue("enqueue", "second")]);
-        if operation != "delivered_to_agent" {
+        if operation == "remove" {
             f.append(&[queue("dequeue", "")]);
         }
         f.append(&[
@@ -214,6 +214,101 @@ fn native_8148_b1_withdraw_transfer_popall_and_late_dequeue_keep_next_input() {
             next.run.as_ref().unwrap().native_id.as_deref(),
             Some("second")
         );
+    }
+}
+
+#[test]
+fn native_8148_b2_known_receipt_rejects_the_first_foreign_row() {
+    let f = Fixture::new();
+    let ticket = f.register("receipt", "same");
+    f.append(&[
+        queue("enqueue", "same"),
+        queue("dequeue", ""),
+        user("one", "same"),
+        close(),
+    ]);
+    assert_eq!(
+        f.history.receipt(
+            "native-b1",
+            &ticket.key,
+            (&f.binding.source.path, 0, "user", Some("two"), "same")
+        ),
+        Some(true)
+    );
+    assert!(
+        f.read().is_empty(),
+        "the first close cannot override the registered receipt"
+    );
+    f.append(&[user("two", "same"), close()]);
+    let proof = f.read();
+    assert_eq!(proof.len(), 1);
+    assert_eq!(
+        proof[0].run.as_ref().unwrap().native_id.as_deref(),
+        Some("two")
+    );
+    assert_eq!(proof[0].disposition, Disposition::Executed);
+}
+
+#[test]
+fn native_8148_b2_popall_does_not_create_a_dequeue_debt() {
+    let f = Fixture::new();
+    let first = f.register("popall", "first");
+    f.register("after-popall", "second");
+    f.append(&[
+        user("ext", "external"),
+        queue("enqueue", "first"),
+        queue("popAll", ""),
+        queue("enqueue", "second"),
+        close(),
+        queue("dequeue", ""),
+        user("second", "second"),
+        close(),
+    ]);
+    let proof = f.read();
+    assert_eq!(proof.len(), 2);
+    assert_eq!(
+        proof
+            .iter()
+            .find(|p| p.ticket == first)
+            .unwrap()
+            .disposition,
+        Disposition::WithdrawnNotExecuted
+    );
+    assert_eq!(
+        proof
+            .iter()
+            .find(|p| p.ticket != first)
+            .unwrap()
+            .run
+            .as_ref()
+            .unwrap()
+            .native_id
+            .as_deref(),
+        Some("second")
+    );
+}
+
+#[test]
+fn native_8148_b2_taken_and_attached_join_the_next_opener() {
+    for taken in [false, true] {
+        let f = Fixture::new();
+        f.register("next-run", "b");
+        f.append(&[user("a", "first"), close(), queue("enqueue", "b")]);
+        if taken {
+            f.append(&[queue("dequeue", "")]);
+        } else {
+            f.append(&[absorbed("b")]);
+        }
+        assert!(f.read().is_empty());
+        f.append(&[user("u-b", "a notification turn"),
+            json!({"type":"assistant","uuid":"answer","apiBlockIndex":0,"message":{"id":"answer","content":[{"type":"text","text":"answer"}]}}), close()]);
+        let proof = f.read();
+        assert_eq!(proof.len(), 1, "taken={taken}");
+        assert_eq!(
+            proof[0].run.as_ref().unwrap().native_id.as_deref(),
+            Some("u-b")
+        );
+        assert_eq!(proof[0].disposition, Disposition::Executed);
     }
 }
 

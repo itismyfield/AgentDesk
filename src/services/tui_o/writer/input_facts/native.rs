@@ -130,6 +130,7 @@ struct Input {
     fifo: bool,
     command: bool,
     absorbed: bool,
+    pending: Option<((u64, u64), Option<String>)>,
 }
 
 #[cfg(test)]
@@ -176,6 +177,7 @@ pub(super) fn fold(
     let mut ambiguous = vec![false; registered.len()];
     let mut unmatched_dequeue = false;
     for record in records {
+        let mut opened_members = Vec::new();
         if record.value["sessionId"]
             .as_str()
             .is_some_and(|sid| sid != binding.source.session_id)
@@ -192,6 +194,36 @@ pub(super) fn fold(
                         start: range.0,
                         native_id: native_turn_id.clone(),
                     });
+                    for input in &mut inputs {
+                        if !matches!(input.stage, Stage::Taken | Stage::Attached) {
+                            continue;
+                        }
+                        let Some(owner) = input.owner else { continue };
+                        let registration = registered[owner];
+                        if !accepts_row(registration, &record.value) || member[owner].is_some() {
+                            continue;
+                        }
+                        let Some((pending_range, pending_row)) = &input.pending else {
+                            continue;
+                        };
+                        let prompt_matches = classify_queued_record(&record.value)
+                            .is_some_and(|event| matches!(event, QueueRecord::Prompt(body) if same_body(&body, &input.body)));
+                        member[owner] = Some(Member {
+                            run: run.as_ref().expect("opened run").clone(),
+                            range: if prompt_matches {
+                                record.range
+                            } else {
+                                *pending_range
+                            },
+                            row: if prompt_matches {
+                                record.value["uuid"].as_str().map(str::to_string)
+                            } else {
+                                pending_row.clone()
+                            },
+                        });
+                        input.stage = Stage::Running;
+                        opened_members.push(owner);
+                    }
                 }
                 Ordered::Closed { range, aborted, .. } => {
                     if let Some(closing) = run.take() {
@@ -265,6 +297,7 @@ pub(super) fn fold(
                     fifo: true,
                     command: false,
                     absorbed: false,
+                    pending: None,
                 });
             }
             QueueRecord::Dequeue => {
@@ -272,6 +305,7 @@ pub(super) fn fold(
                     input.fifo = false;
                     if input.stage == Stage::Waiting {
                         input.stage = Stage::Taken;
+                        input.pending = Some((record.range, None));
                     }
                 } else {
                     unmatched_dequeue = true;
@@ -287,6 +321,7 @@ pub(super) fn fold(
                             &mut results,
                             Disposition::WithdrawnNotExecuted,
                         );
+                        input.fifo = false;
                     }
                 }
             }
@@ -358,7 +393,10 @@ pub(super) fn fold(
                     None
                 };
                 let owner = receipt
-                    .or_else(|| at.and_then(|at| inputs[at].owner))
+                    .or_else(|| {
+                        at.and_then(|at| inputs[at].owner)
+                            .filter(|i| accepts_row(registered[*i], &record.value))
+                    })
                     .or_else(|| {
                         (matches.is_empty()
                             && !absorption
@@ -370,10 +408,20 @@ pub(super) fn fold(
                         .flatten()
                     });
                 if let Some(at) = at {
+                    if inputs[at]
+                        .owner
+                        .is_some_and(|i| !accepts_row(registered[i], &record.value))
+                    {
+                        continue;
+                    }
                     let input = &mut inputs[at];
                     input.command |= command;
                     input.absorbed |= absorption;
                     input.fifo = false;
+                    input.pending = Some((
+                        record.range,
+                        record.value["uuid"].as_str().map(str::to_string),
+                    ));
                     input.stage = if run.is_some() {
                         Stage::Running
                     } else {
@@ -382,7 +430,8 @@ pub(super) fn fold(
                 }
                 if let (Some(owner), Some(current)) = (owner, &run) {
                     if let Some(old) = &member[owner] {
-                        if old.run != *current || at.is_none() {
+                        if old.run != *current || (at.is_none() && !opened_members.contains(&owner))
+                        {
                             ambiguous[owner] = true;
                             results[owner] = None;
                         }
@@ -402,6 +451,14 @@ pub(super) fn fold(
         .enumerate()
         .filter_map(|(i, result)| (!ambiguous[i]).then_some(result).flatten())
         .collect())
+}
+
+#[cfg(test)]
+fn accepts_row(registration: &Registration, value: &Value) -> bool {
+    registration.receipts.is_empty()
+        || value["uuid"]
+            .as_str()
+            .is_some_and(|uuid| registration.receipts.iter().any(|known| known == uuid))
 }
 
 #[cfg(test)]

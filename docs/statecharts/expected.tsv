@@ -263,6 +263,12 @@ input-single-path/NativePreparationBorrowBusy.cfg	NativeInputPreparation	Followe
 input-single-path/NativePreparationDropNotSent.cfg	NativeInputPreparation	NoSilentLoss	-
 input-single-path/NativePreparationFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationKeyBeforePrepare.cfg	NativeInputPreparation	NoKeyBeforePrepare	-
+input-single-path/NativePreparationOpenBefore.cfg	NativeInputPreparation	-	EvidenceEventuallyOwn
+input-single-path/NativePreparationOpenFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationPopAllBefore.cfg	NativeInputPreparation	PopAllNoDebt	EvidenceEventuallyOwn
+input-single-path/NativePreparationPopAllFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationReceiptBefore.cfg	NativeInputPreparation	NoForeignReceiptProof	EvidenceEventuallyOwn
+input-single-path/NativePreparationReceiptFixed.cfg	NativeInputPreparation	-	-
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
 input-single-path/ReservedIdEnqueueBefore.cfg	ReservedIdEnqueue	NoReservationQueueOverlap	-
