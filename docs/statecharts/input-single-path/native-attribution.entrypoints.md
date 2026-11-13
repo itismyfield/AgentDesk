@@ -716,7 +716,6 @@
 | `src/services/tui_input/human_frame/history/v2/native.rs:174` `record_native_outcome` | cfg(test) 계약 API: 등록+전체 ticket 일치, None follower 포함 | 운영 producer 연결 |
 | `src/services/turn_orchestrator/episode_identity.rs:162`, `src/services/discord/turn_finalizer/episode.rs:47`, `src/services/discord/inflight/clear_store/identity.rs:252` | 기존 exact episode/actor/row CAS를 유지 | Some episode만 이 경로 호출; None follower는 정리 권한 없음 |
 | `src/services/discord/queue_io/input_owner/drive.rs:88` `wake` | 기존 owner wake·claim 계약을 통합 fixture에서 실제 호출 | 결과/cleanup 소비 후 운영 wake 연결 |
-
 | `src/services/tui_input/human_frame/history/v2/native.rs:152` `prepare_native` | Inject 준비: cfg(test) 최초 ticket과 envelope3를 같은 transaction으로 저장 | 운영 호출 연결은 B |
 | `src/services/tui_input/human_frame/history/v2/native.rs:200` `ack_native_withdrawal_notice` | NoticeAck: cfg(test) 영속 outbox enqueue 뒤 철회 안내 ack | 운영 호출 연결은 B |
 
