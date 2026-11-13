@@ -870,6 +870,10 @@ if run_check guards "Low-level accessor ratchet tests"; then
 "$PYTHON" -m unittest tests.test_low_level_accessor_wiring
 fi
 
+if run_check guards "Repeated condition advisory tests"; then
+"$PYTHON" -m unittest tests.test_duplicate_conditions
+fi
+
 if run_check cargo "Maintainability audit"; then
 mkdir -p target
 # The default stdout format is the YAML artifact; --check findings go to stderr.
