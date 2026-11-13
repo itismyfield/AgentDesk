@@ -109,7 +109,7 @@ enum Read {
     /// Session markers over an idle composer read idle.
     ReadyTail,
     /// Idle at both reads; a later read of the pane's liveness fails once.
-    ReadAgain,
+    CachedSource,
     /// A native turn opens after each claim, three times; the pane then reads idle.
     LateAgain,
     /// As `Early`, for a start naming no pane: its session has no name, and Discord names it.
@@ -178,7 +178,7 @@ async fn start_meets(id: u64, case: Read) {
         Read::Unlooked => {}
         _ if early => shim.composer_busy(),
         Read::Late | Read::LateBusy => shim.park_second_read(),
-        Read::ReadAgain => shim.guard_cached_source(),
+        Read::CachedSource => shim.guard_cached_source(),
         _ => {}
     }
     let channels = [OriginChannel {
@@ -193,14 +193,14 @@ async fn start_meets(id: u64, case: Read) {
     let name = ProviderKind::Claude.build_tmux_session_name(&format!("a1-rollback-{id}"));
     let headless = format!("[session-strategy] channel={id}");
     let (drive, mut settled) = rig.drive();
-    if matches!(case, Read::ReadyTail | Read::ReadAgain) {
+    if matches!(case, Read::ReadyTail | Read::CachedSource) {
         let (completed, bridge) = tokio::sync::oneshot::channel();
         *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
             .lock()
             .unwrap() = Some((rig.channel, completed));
         crate::services::discord::queue_io::input_owner::drive::wake(drive);
         runs_once(&rig, &pool, ORIGIN, &mut settled, bridge, append).await;
-        if case == Read::ReadAgain {
+        if case == Read::CachedSource {
             assert_eq!(
                 fs::read_to_string(shim.dir.join("cwds")).unwrap().trim(),
                 "2",
@@ -450,7 +450,7 @@ async fn an_idle_late_read_is_registered_without_reading_the_pane_again_pg() {
     native_read_pg(
         "an_idle_late_read_is_registered_without_reading_the_pane_again_pg",
         7_772_107,
-        Read::ReadAgain,
+        Read::CachedSource,
     )
     .await;
 }
