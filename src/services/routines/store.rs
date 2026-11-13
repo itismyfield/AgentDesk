@@ -1,9 +1,11 @@
 use anyhow::{Result, anyhow};
 mod agent_start;
 mod execution_modes;
+#[macro_use]
 mod failure_escalation;
 use chrono::{DateTime, Utc};
-pub(crate) use failure_escalation::{FAILURE_INCIDENT_REASON_CODE, HEADLESS_FAILURE_REASON_CODE};
+#[cfg(test)]
+pub(crate) use failure_escalation::incident_content;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -410,6 +412,9 @@ pub struct RoutineRunRecord {
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Incident state on a headless streak's first failed run; only `list_runs` reads it.
+    #[sqlx(default)]
+    pub failure_incident: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
@@ -985,19 +990,21 @@ impl RoutineStore {
 
     pub async fn list_runs(&self, routine_id: &str, limit: i64) -> Result<Vec<RoutineRunRecord>> {
         let limit = clamp_api_limit(usize::try_from(limit).ok()) as i64;
-        sqlx::query_as(
+        sqlx::query_as(concat!(
             r#"
             SELECT id, routine_id, status, action, turn_id, lease_expires_at,
                    retry_count, next_retry_at, attempts,
                    result_json, error, discord_log_status, discord_log_error,
                    discord_message_id, discord_log_sections, run_spec, started_at,
-                   finished_at, created_at, updated_at
+                   finished_at, created_at, updated_at, "#,
+            failure_incident_projection!(),
+            r#"
             FROM routine_runs
             WHERE routine_id = $1
             ORDER BY started_at DESC, created_at DESC
             LIMIT $2
-            "#,
-        )
+            "#
+        ))
         .bind(routine_id)
         .bind(limit)
         .fetch_all(&*self.pool)

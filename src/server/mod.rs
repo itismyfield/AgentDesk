@@ -2519,6 +2519,16 @@ where
                 continue;
             }
         }
+        if crate::services::message_outbox::routine_incident::is_incident(
+            &row.source,
+            row.reason_code.as_deref(),
+        ) {
+            outbox_actionable_delivery::routine_incident::deliver(pg_pool, row, || {
+                deliver(row.clone())
+            })
+            .await;
+            continue;
+        }
         let (status, err_text) = match &row.attachment {
             Err(error) => ("invalid_attachment".to_string(), error.to_string()),
             Ok(_) => deliver(row.clone()).await,

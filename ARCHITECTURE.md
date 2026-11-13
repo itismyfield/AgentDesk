@@ -566,6 +566,8 @@ src/
 │   │   ├── mod.rs
 │   │   └── storage_jobs.rs
 │   ├── outbox_actionable_delivery/
+│   │   ├── routine_incident.rs
+│   │   ├── routine_incident_pg_tests.rs
 │   │   ├── routing_notice.rs
 │   │   └── session_notice.rs
 │   ├── outbox_worker/
@@ -1894,7 +1896,8 @@ src/
 │   │   │   │   ├── image_delivery.rs
 │   │   │   │   ├── image_delivery_tests.rs
 │   │   │   │   ├── production_nonce_tests.rs
-│   │   │   │   └── resolved.rs
+│   │   │   │   ├── resolved.rs
+│   │   │   │   └── routine_incident_nonce.rs
 │   │   │   ├── o_writer_repost_io_tests/
 │   │   │   │   └── owner_tests.rs
 │   │   │   ├── turn_output_controller/
@@ -3642,6 +3645,7 @@ src/
 │   │   ├── identity_tests.rs
 │   │   ├── plain.rs
 │   │   ├── plain_tests.rs
+│   │   ├── routine_incident.rs
 │   │   └── session_notice.rs
 │   ├── observability/
 │   │   ├── events/

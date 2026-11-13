@@ -14,6 +14,11 @@ use super::PendingMessageOutboxRow;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::outbound::source_registry::RETIRED_SEND_SOURCES;
 
+#[path = "outbox_actionable_delivery/routine_incident.rs"]
+pub(super) mod routine_incident;
+#[cfg(test)]
+#[path = "outbox_actionable_delivery/routine_incident_pg_tests.rs"]
+mod routine_incident_pg_tests;
 #[path = "outbox_actionable_delivery/routing_notice.rs"]
 mod routing_notice;
 #[path = "outbox_actionable_delivery/session_notice.rs"]

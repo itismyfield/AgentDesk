@@ -17,6 +17,23 @@ const SAFE_FAILURE_CLASSES: [(&str, &str); 4] = [
     ("deferred", "시작 대기 소진"),
 ];
 
+/// Run API column: the incident reserved on this run as a streak's first failure. An ack proves the
+/// Discord post only, so it never reads as a linked turn; `unknown` is `completion_unconfirmed`.
+macro_rules! failure_incident_projection {
+    () => {
+        "(SELECT CASE
+            WHEN m.transport_state = 'acked' THEN 'posted_turn_unconfirmed'
+            WHEN m.transport_state = 'unknown' THEN 'completion_unconfirmed'
+            WHEN m.transport_state = 'posting' THEN 'posting'
+            WHEN m.status = 'failed' THEN 'delivery_failed'
+            ELSE 'reserved' END
+          FROM message_outbox m
+          WHERE m.reason_code = 'routine_failure_incident'
+            AND m.session_key = 'routine:' || routine_runs.routine_id || ':failure_incident:' || routine_runs.id
+          ORDER BY m.id DESC LIMIT 1) AS failure_incident"
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HeadlessFailureEvent {
     /// Streak 1..=N: a non-turn notice per failed run.
@@ -56,6 +73,14 @@ fn pinned_limit(spec: Option<&Value>) -> usize {
         .and_then(|limit| usize::try_from(limit).ok())
         .filter(|limit| *limit >= 1)
         .unwrap_or(DEFAULT_HEADLESS_FAILURE_NOTICE_LIMIT as usize)
+}
+
+/// The N+1 command-bot message: ordinary Announce input, so it carries no non-turn provenance.
+pub(crate) fn incident_content(name: &str, class: &str, k: usize, paused: &str) -> String {
+    format!(
+        "[실행 보기](/routines) · {name} · {class} · {k}회 연속 실패(N+1){paused}\n\
+         원인을 진단하고 조치해 주세요. 실패한 루틴을 다시 실행하지는 마세요."
+    )
 }
 
 fn failure_class(result: Option<&Value>) -> &'static str {
@@ -138,10 +163,7 @@ impl RoutineStore {
         let k = streak.len();
         let enqueued = match event {
             HeadlessFailureEvent::Incident => {
-                let content = format!(
-                    "[실행 보기](/routines) · {name} · {class} · {k}회 연속 실패(N+1){paused}\n\
-                     원인을 진단하고 조치해 주세요. 실패한 루틴을 다시 실행하지는 마세요."
-                );
+                let content = incident_content(&name, class, k, paused);
                 enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx(
                     tx,
                     OutboxMessage {

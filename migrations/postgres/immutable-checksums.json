@@ -935,6 +935,11 @@
       "path": "migrations/postgres/0191_routine_execution_modes.sql",
       "sha256": "4fd309ed67c2ba10a6ab877fd5631b46dc9d21d2c20201a225cf980a67ab5d7a",
       "version": 191
+    },
+    {
+      "path": "migrations/postgres/0192_routine_incident_transport.sql",
+      "sha256": "9ba2af307e7be8165dbf20c96da2ba29688a2af41aca63e99a75a689b371188d",
+      "version": 192
     }
   ],
   "version": 1

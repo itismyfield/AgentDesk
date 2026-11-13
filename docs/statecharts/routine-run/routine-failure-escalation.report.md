@@ -94,7 +94,7 @@ export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew
   --out /tmp/i8117-r2c-new
 ```
 
-[기본 N3](routine-failure-escalation.chart.mmd)·[Unknown](routine-failure-escalation-unknown.chart.mmd)·[일반 알림 오동작](routine-failure-escalation-notify.chart.mmd)·[경계 오류](routine-failure-escalation-boundary.chart.mmd)·[중복 요청](routine-failure-escalation-duplicate.chart.mmd)·[reset 누락](routine-failure-escalation-reset.chart.mmd)·[Unknown 재게시](routine-failure-escalation-blind-unknown.chart.mmd)·[사건 키 제거](routine-failure-escalation-event-key.chart.mmd)·[intake 우회](routine-failure-escalation-intake-gate.chart.mmd).
+[기본 N3](routine-failure-escalation.chart.mmd)·[일반 알림 오동작](routine-failure-escalation-notify.chart.mmd)·[경계 오류](routine-failure-escalation-boundary.chart.mmd)·[중복 요청](routine-failure-escalation-duplicate.chart.mmd)·[reset 누락](routine-failure-escalation-reset.chart.mmd)·[Unknown 재게시](routine-failure-escalation-blind-unknown.chart.mmd)·[사건 키 제거](routine-failure-escalation-event-key.chart.mmd)·[intake 우회](routine-failure-escalation-intake-gate.chart.mmd).
 
 최종 escalation 모델 SHA256 `90af6e1d8903701c869f1aad2dcf71069405b6583fd33c317425eaee96cc7f22`.
 
@@ -112,5 +112,49 @@ export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew
 | RelogRun | close_run 은 running run 만 닫는다(두 번째 close 는 false). 로거 재진입(`log_run_outcome`·`alert_consecutive_failures`)은 headless 에서 아무것도 넣지 않는다 | H1 |
 | OrdinaryNotifyDoesNotStart | `routine_headless_failure` 를 actionable/non-turn 목록에 등록(`domain/outbound/outbox/identity.rs`), `routine_failure_incident` 는 두 목록 모두 제외 | H1 |
 | LoadOutbox / PostOutbox / ExistingBotIntake | 기존 outbox worker → Announce → intake, 대상 `agent:<id>`(primary) | 기존 경로 |
-| NoBlindUnknownRepost / NoDuplicateDiscordMessage / completion_unconfirmed | 미구현 — 현재 generic outbox 는 Unknown 을 retry 할 수 있다 | **H2** |
+| NoBlindUnknownRepost / NoDuplicateDiscordMessage / completion_unconfirmed | 아래 H2 절 | H2 |
 | headless 모드 노출 | `execution_mode.rs` `is_available` 이 아직 false 라 headless run 을 API로 만들 수 없다 | 휴면 |
+
+## H2 전송 계층 (PR2b 2조각)
+
+H1 의 `PostOutbox` 한 걸음을 같은 outbox row 의 전송 단계로 나눴다. 모델 SHA256 `f1c34b6db81febbd1a52e5a97ca34901a4da769a1d7be8a07b8ab27ce2041153`(이전 `90af6e1d…`).
+
+| 이전(H1) | 이후(H2) | 대응 구현 |
+|---|---|---|
+| `PostOutbox`: pending → posted 한 걸음, Unknown 이면 바로 held+completion_unconfirmed | `BeginPosting`(post 전에 row=posting 저장) → `DiscordAttempt`(같은 row nonce, 결과 ack·not_sent·may_have_sent·ack_lost·crash) → `SettleAttempt` | `message_outbox/routine_incident.rs` `begin_posting`, `server/outbox_actionable_delivery/routine_incident.rs` `deliver`·`outcome` |
+| 정상 ACK = `Delivered` | ACK = `posted_turn_unconfirmed`, `turn_linked` 는 `ExistingOwnerStarts` 에서만 | run API `failure_incident` 투영(`store/failure_escalation.rs` `failure_incident_projection!`) |
+| post 뒤 재시작 없음 | crash → `abandoned` → `SweepAbandoned` 가 posting 을 unknown 으로 종결 | `close_abandoned_posting`(outbox worker 의 시간당 GC 단계) |
+| positive NotSent 없음 | not_sent → 같은 row pending 재시도(모델은 1회로 제한) | `release_not_sent` + 기존 `failure_action` |
+| 불변식 8개 + 2 속성 | `MayHaveSentKeepsFence`(게시 가능 row 는 failed 로 내려 dedupe 를 풀지 않음), `TurnLinkedOnlyAfterOwnerStart` 추가 | migration 0192 트리거·CHECK |
+| 뮤턴트 정책 7개 | `drop_ack_retry`·`held_activation`·`unknown_to_failed`·`ack_turn_linked` 추가 | 같은 이름의 구현 뮤턴트(PG 시험) |
+
+16cfg 실행(같은 source, `statechart` CLI): **5 GREEN·11 기대 RED**. 원시 출력 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8117/sc-out-h2/<cfg>/`.
+
+| cfg | states / steps | 결과 |
+|---|---|---|
+| N1 / N3 | 157 / 338, 193 / 420 | GREEN(ConfirmedIncidentsReachExistingOwner 포함) |
+| IntakeRefused | 137 / 293 | GREEN — ACK 뒤 owner 효과 0, 결과는 posted_turn_unconfirmed |
+| UnknownN1 / UnknownN3 | 1,707 / —, 1,975 / — | GREEN(안전·EveryAttemptTerminates만; chart 예산 500 초과로 chart 없음) |
+| BlindUnknown | 6,209 / — | NoBlindUnknownRepost, NoDuplicateDiscordMessage RED |
+| DropAckRetry | 217 / 473 | NoDuplicateDiscordMessage RED |
+| HeldActivation | 5,429 / — | NoDuplicateDiscordMessage RED |
+| UnknownToFailed | 1,707 / — | MayHaveSentKeepsFence RED |
+| AckTurnLinked | 137 / 293 | TurnLinkedOnlyAfterOwnerStart RED |
+| BypassIntake·DropEventKey·Duplicate·NoReset·NotifyTriggers·OffByOne | 251·604·541·151·375·221 | H1 과 같은 불변식 RED |
+
+[ACK 뒤 intake 거절](routine-failure-escalation-intake-refused.chart.mmd)·[ACK 버리고 재시도](routine-failure-escalation-drop-ack.chart.mmd)·[held 재활성화](routine-failure-escalation-held-activation.chart.mmd)·[unknown→failed](routine-failure-escalation-unknown-to-failed.chart.mmd)·[ACK=턴 연결](routine-failure-escalation-ack-turn-linked.chart.mmd).
+
+### 진입점과 가드
+
+| 진입점 | 좌표 | 사건 row 에 대한 동작 |
+|---|---|---|
+| outbox drain | `src/server/mod.rs:2522` `is_incident` 분기 → `server/outbox_actionable_delivery/routine_incident.rs:50` `deliver` | circuit fence 뒤 posting CAS, post, ACK/unknown/NotSent 정산. 일반 settle(`mark_message_outbox_sent_pg`·retry) 을 타지 않는다 |
+| Discord nonce | `outbound/manual_delivery/routine_incident_nonce.rs`, `headless_nonce.rs:15`, `resolved.rs:161`, `manual_delivery.rs:613` `with_create_nonce` | trusted outbox + `routine-runtime` + incident correlation 일 때만 row id 로 고정 nonce. headless_turn 제한은 그대로 |
+| staging activation·activate_or_confirm·cancel | `src/services/message_outbox.rs:707,723,740` | 0192 트리거가 transport_state 가 있는 row 의 status 변경·삭제를 건너뛴다(rows_affected 0) |
+| circuit activation·revoke | `src/services/message_outbox_circuit_authority.rs:416,533,573` | circuit 좌표가 NULL 이라 대상이 아니고, 트리거가 한 번 더 막는다 |
+| 운영자 redrive | `src/services/message_outbox_recovery.rs:170` `reset_failed_row` | failed 만 되살린다. unknown 은 held, ack 는 sent 라 대상 아님 |
+| GC·보존 | `src/services/message_outbox.rs:759` `gc_stale_outbox_rows`, `src/services/maintenance/jobs/db_retention.rs:204` | NULL expiry 는 held/sent 정리에서 빠지고, 트리거가 DELETE 를 건너뛴다 |
+| 재시작 뒤 posting | `src/server/outbox_worker.rs:63` `close_abandoned_posting` | claimed_at 10분 경과 posting 을 unknown 으로 종결. 같은 lease 의 늦은 ACK 는 unknown→acked 만 허용 |
+
+모델은 Discord nonce 창(수 분)이 재게시를 막아 준다고 가정하지 않는다. 실제 Discord 도착·native 대응 턴은 이 모델과 PG 시험의 증명 범위 밖이다.
+

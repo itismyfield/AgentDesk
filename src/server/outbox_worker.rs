@@ -59,6 +59,14 @@ pub(super) async fn message_outbox_loop(
                     tracing::warn!("[outbox] gc failed: {error}");
                 }
             }
+            if let Err(error) =
+                crate::services::message_outbox::routine_incident::close_abandoned_posting(
+                    pg_pool.as_ref(),
+                )
+                .await
+            {
+                tracing::warn!("[outbox] abandoned incident posting sweep failed: {error}");
+            }
             next_gc_at = std::time::Instant::now() + Duration::from_secs(3600);
         }
         if drain_message_outbox_once(&pg_pool, &health_registry, &claim_owner).await == 0 {

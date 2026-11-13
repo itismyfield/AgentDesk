@@ -250,4 +250,38 @@ mod tests {
             "DISPATCH:real handoff",
         ));
     }
+
+    #[test]
+    fn routine_incident_is_announce_turn_input_and_still_needs_a_required_mention() {
+        let announce = 1001;
+        let incident =
+            crate::services::routines::store::incident_content("quiet", "시간 초과", 4, "");
+        assert!(should_admit_turn_message(
+            &[],
+            Some(announce),
+            announce,
+            true,
+            &incident
+        ));
+        let notice = crate::services::discord::dispatch_policy::prepend_operational_alert_origin(
+            "루틴 quiet · 시간 초과 · 3회 연속 실패",
+        );
+        assert!(!should_admit_turn_message(
+            &[],
+            Some(announce),
+            announce,
+            true,
+            &notice
+        ));
+        let channel = serenity::ChannelId::new(6551001);
+        let mut settings = DiscordBotSettings::default();
+        let agent_bot = serenity::UserId::new(2002);
+        assert!(!should_skip_for_missing_required_mention(
+            &settings, channel, false, &incident, agent_bot
+        ));
+        settings.require_mention_channel_ids.push(channel.get());
+        assert!(should_skip_for_missing_required_mention(
+            &settings, channel, false, &incident, agent_bot
+        ));
+    }
 }

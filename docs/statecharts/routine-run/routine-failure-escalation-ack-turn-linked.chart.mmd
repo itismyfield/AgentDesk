@@ -1,0 +1,43 @@
+---
+title: "연속 실패 알림과 한 번의 복구 요청"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: normal
+    lg1: Breaks TurnLinkedOnlyAfterOwnerStart
+    lg2: Path to the TurnLinkedOnlyAfterOwnerStart bug
+  }
+  class lg0 blue
+  class lg1 breaks
+  class lg2 bugPath
+  s0: 예약 실행 이력 대기
+  s1: 실패 누적
+  s2: N+1 복구 요청 저장됨
+  s3: 기존 outbox 전송 대기
+  s4: posting 저장#183;같은 nonce로 게시
+  s5: Discord 응답 정산 대기
+  s6: ACK만으로 턴 연결 표시
+  [*] --> s0
+  s0 --> s1: 실패 알림만#183;턴 0
+  s1 --> s2: N+1회#183;명령봇 복구 요청
+  s2 --> s3: 기존 outbox가 전송 시작
+  s3 --> s4: 게시 전 posting 저장
+  s4 --> s5: 명령봇으로 게시 시도
+  s5 --> s6: ACK#183;NotSent#183;불확실 정산
+  s6 --> s3: 기존 outbox가 전송 시작
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
+  class s6 breaks
+  class s6 bugPath
