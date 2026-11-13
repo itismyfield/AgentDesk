@@ -192,6 +192,21 @@ while os.read(0, 1) != b"\x1b":
             .status
             .success()
     }
+    fn pane_pid(&self) -> u32 {
+        let pane = self.raw(&[
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={}:", self.name),
+            "#{pane_pid}",
+        ]);
+        assert!(pane.status.success());
+        std::str::from_utf8(&pane.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
     pub(crate) async fn queue(&self) -> Vec<u8> {
         let token =
             test_turn::start(&self.shared, self.channel, self.channel.get() + 1, "new").await;
@@ -213,7 +228,7 @@ while os.read(0, 1) != b"\x1b":
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while !String::from_utf8_lossy(
             &self
-                .raw(&["capture-pane", "-p", "-t", &format!("={}", self.name)])
+                .raw(&["capture-pane", "-p", "-t", &format!("={}:", self.name)])
                 .stdout,
         )
         .contains("Thinking")
@@ -224,19 +239,7 @@ while os.read(0, 1) != b"\x1b":
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let pane = self.raw(&[
-            "display-message",
-            "-p",
-            "-t",
-            &format!("={}", self.name),
-            "#{pane_pid}",
-        ]);
-        let pid = std::str::from_utf8(&pane.stdout)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        token.store_child_pid(pid);
+        token.store_child_pid(self.pane_pid());
         let mut row = crate::services::discord::inflight::load_inflight_state(
             &ProviderKind::Claude,
             self.channel.get(),
@@ -433,15 +436,7 @@ async fn key_promotion_live_and_foreign_namespace_keep_primary_and_execution_pg(
             .fetch_one(&rig.pool)
             .await
             .unwrap();
-    let pid = rig
-        .raw(&[
-            "display-message",
-            "-p",
-            "-t",
-            &format!("={}", rig.name),
-            "#{pane_pid}",
-        ])
-        .stdout;
+    let pid = rig.pane_pid();
     assert!(!super::unix::observe_old(
         rig.id,
         &rig.key,
@@ -492,17 +487,7 @@ async fn key_promotion_live_and_foreign_namespace_keep_primary_and_execution_pg(
         Some(rig.key.clone())
     );
     drop(other);
-    assert_eq!(
-        pid,
-        rig.raw(&[
-            "display-message",
-            "-p",
-            "-t",
-            &format!("={}", rig.name),
-            "#{pane_pid}"
-        ])
-        .stdout
-    );
+    assert_eq!(pid, rig.pane_pid());
     let after: serde_json::Value =
         sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s WHERE id=$1")
             .bind(rig.id)
