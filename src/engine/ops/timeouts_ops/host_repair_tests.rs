@@ -900,6 +900,7 @@ async fn policy_tick_calls_owner_without_js_candidate_or_repair_decisions_pg() {
     db.drop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn key_promotion_current_primary_policy_kill_and_repair_have_effect_pg() {
     let rig = crate::services::discord::session_locator::tests::PromotionRig::new(81190305).await;
