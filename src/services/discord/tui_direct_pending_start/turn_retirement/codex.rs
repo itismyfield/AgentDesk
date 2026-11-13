@@ -49,7 +49,7 @@ pub(in crate::services::discord) fn confirm_current(
     channel: u64,
     config: &TurnConfig,
 ) -> Confirmation {
-    if !config.selects(channel) {
+    if !config.selects(crate::services::tui_o::cutover::policy_channel(channel)) {
         return Confirmation::Unselected;
     }
     let late = crate::services::tui_o::cutover::boot_ownership()
@@ -97,7 +97,8 @@ pub(in crate::services::discord) fn confirm_codex_channel(
     config: Option<&TurnConfig>,
     takeover: Option<&SourceBinding>,
 ) -> Confirmation {
-    if !config.is_some_and(|config| config.selects(channel)) {
+    let policy = crate::services::tui_o::cutover::policy_channel(channel);
+    if !config.is_some_and(|config| config.selects(policy)) {
         return Confirmation::Unselected;
     }
     let provider = ProviderKind::Codex;

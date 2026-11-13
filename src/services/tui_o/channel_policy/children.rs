@@ -330,6 +330,12 @@ impl BootChannels {
             _ => channel,
         }
     }
+
+    /// Whether `channel`'s writer reads dormant: a thread child reads as its parent does.
+    pub(crate) fn dormant(&self, channel: u64) -> bool {
+        self.dormant_channels()
+            .contains(&self.policy_channel(channel))
+    }
 }
 
 #[cfg(all(test, unix))]

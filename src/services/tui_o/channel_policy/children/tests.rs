@@ -477,3 +477,30 @@ fn thread_children_retirement_yields_to_any_input_and_survives_only_as_a_readabl
     assert!(restarted.commit_child_retirement(&fresh).is_err());
     assert!(!restarted.child_dormant(43) && !mark.exists());
 }
+
+#[test]
+fn thread_children_codex_turn_selection_follows_the_parents_policy() {
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "server": {},
+        "agents": [{"id":"a","name":"A","channels":{"claude":{"id":"42","runtime":"tui"},"codex":{"id":"44","runtime":"tui"}}}],
+        "tui_o":{"writer":{"all_tui":false,"channels":[42,44]},"turn":{"channels":[44]}}
+    })).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    store(root.path(), &init(45, Some(44)));
+    store(root.path(), &init(43, Some(42)));
+    let boot = seeded_from_store(
+        BootChannels::validate(&config).unwrap(),
+        &config,
+        Some(root.path()),
+    )
+    .unwrap();
+    let _forced = test_override::force_boot(boot);
+    use crate::services::tui_o::cutover;
+    // The Codex parent's thread waits for turn mode as its parent does; a sibling parent's does not.
+    assert!(cutover::turn_selected(44) && cutover::turn_selected(45));
+    assert!(!cutover::turn_selected(42) && !cutover::turn_selected(43));
+    assert!(cutover::codex_turn_awaited(45).is_some());
+    assert!(cutover::codex_turn_awaited(43).is_none());
+    assert_eq!(cutover::policy_channel(45), 44);
+    assert_eq!(cutover::policy_channel(46), 46);
+}

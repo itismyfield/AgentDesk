@@ -325,6 +325,7 @@ fn boot_selection(config: &Config) -> (Vec<u64>, bool, Vec<u64>) {
     turn_mode::confirm_selected(
         Some(&turn),
         || channels.clone(),
+        |channel| channel,
         |channel| {
             offered.push(channel);
             false

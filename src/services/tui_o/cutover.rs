@@ -136,12 +136,19 @@ pub(crate) fn codex_turn_awaited(
         return None;
     }
     let turn = test_override::with_channels(|snapshot| snapshot.map(|s| s.turn().clone()));
-    turn.filter(|turn| turn.selects(channel))
+    turn.filter(|turn| turn.selects(policy_channel(channel)))
 }
 
 /// Whether the boot turn selection names `channel`, so a Codex input there may wait for turn mode.
 pub(crate) fn turn_selected(channel: u64) -> bool {
-    test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.turn().selects(channel)))
+    test_override::with_channels(|snapshot| {
+        snapshot.is_some_and(|s| s.turn().selects(s.policy_channel(channel)))
+    })
+}
+
+/// The channel whose boot policy governs `channel`: a resolved thread child's parent, or itself.
+pub(crate) fn policy_channel(channel: u64) -> u64 {
+    test_override::with_channels(|snapshot| snapshot.map_or(channel, |s| s.policy_channel(channel)))
 }
 
 /// Fresh local Codex admission precedes provider effects.

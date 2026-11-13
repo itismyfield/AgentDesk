@@ -222,7 +222,8 @@ pub(in crate::services::discord) fn confirm_turn_channels(
         }
     };
     let retire = |channel| !takeover(channel) && retire(channel);
-    crate::services::tui_o::turn_mode::confirm_selected(config, owned, retire)
+    let policy = crate::services::tui_o::cutover::policy_channel;
+    crate::services::tui_o::turn_mode::confirm_selected(config, owned, policy, retire)
 }
 
 /// Boot confirmation over the channels whose O adoption this provider's boot policy committed.

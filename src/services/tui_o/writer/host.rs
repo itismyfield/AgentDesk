@@ -861,7 +861,7 @@ impl<I: HostIo> Hosted<'_, I> {
         let bindings = Arc::clone(&self.bindings);
         let watches = (stop, resumed_tx, unsettled_tx, owing);
         let readers = crate::services::tui_o::channel_policy::boot()
-            .filter(|boot| boot.dormant_channels().contains(&channel))
+            .filter(|boot| boot.dormant(channel))
             .map(|_| ReaderConfig { dormant: true });
         let suspension = writer.suspension.clone();
         let spawn =
