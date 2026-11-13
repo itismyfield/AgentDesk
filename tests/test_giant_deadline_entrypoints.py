@@ -47,7 +47,8 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         # The fixture runs against its own synthetic baseline, so the repo's pending layer moves must not be checked against it.
         (scripts / "audit_maintainability/layer_moves.toml").write_text("schema_version = 1\nmoves = []\n")
         (scripts / "ci").mkdir()
-        shutil.copy2(ROOT / "scripts/ci/rust_test_sources.py", scripts / "ci/rust_test_sources.py")
+        for filename in ("rust_test_sources.py", "merge_candidate.py"):
+            shutil.copy2(ROOT / "scripts/ci" / filename, scripts / "ci" / filename)
         tree = ast.parse((scripts / "generate_inventory_docs.py").read_text())
         purposes = next(ast.literal_eval(node.value) for node in tree.body
                         if isinstance(node, ast.Assign)
