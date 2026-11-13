@@ -658,54 +658,57 @@ async fn recovery_hold_notice_serializes_with_the_live_hold_writer_pg() {
 
 #[tokio::test]
 async fn recovery_enqueue_failure_keeps_original_tuple_and_delivery_custody_pg() {
-    let (db, pool) = fixture().await;
-    let attempt = start(&pool, "recovery-rollback").await;
-    write::withhold(
-        &pool,
-        &attempt,
-        "activity",
-        &serde_json::json!({"captured":"kept"}),
-    )
-    .await
-    .unwrap();
-    let before = snapshot(&pool, attempt.receipt_id()).await;
-    reject(&pool, "message_outbox").await;
-    assert!(
-        write::recover_hold_notice(
+    for table in ["message_outbox", "intake_outbox"] {
+        let (db, pool) = fixture().await;
+        let attempt = start(&pool, "recovery-rollback").await;
+        write::withhold(
             &pool,
-            attempt.receipt_id(),
-            "claude",
-            "123456789",
-            None,
-            None,
-            ROUTING
+            &attempt,
+            "activity",
+            &serde_json::json!({"captured":"kept"}),
         )
         .await
-        .is_err()
-    );
-    assert_eq!(snapshot(&pool, attempt.receipt_id()).await, before);
-    sqlx::raw_sql(AssertSqlSafe(
-        "DROP TRIGGER reject_notice ON message_outbox",
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    assert!(
-        write::recover_hold_notice(
-            &pool,
-            attempt.receipt_id(),
-            "claude",
-            "123456789",
-            None,
-            None,
-            ROUTING
-        )
+        .unwrap();
+        let before = snapshot(&pool, attempt.receipt_id()).await;
+        reject(&pool, table).await;
+        assert!(
+            write::recover_hold_notice(
+                &pool,
+                attempt.receipt_id(),
+                "claude",
+                "123456789",
+                None,
+                None,
+                ROUTING
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(snapshot(&pool, attempt.receipt_id()).await, before);
+        sqlx::raw_sql(AssertSqlSafe(match table {
+            "message_outbox" => "DROP TRIGGER reject_notice ON message_outbox",
+            _ => "DROP TRIGGER reject_notice ON intake_outbox",
+        }))
+        .execute(&pool)
         .await
-        .is_ok()
-    );
-    assert_eq!(snapshot(&pool, attempt.receipt_id()).await.2, 1);
-    pool.close().await;
-    db.drop().await;
+        .unwrap();
+        assert!(
+            write::recover_hold_notice(
+                &pool,
+                attempt.receipt_id(),
+                "claude",
+                "123456789",
+                None,
+                None,
+                ROUTING
+            )
+            .await
+            .is_ok()
+        );
+        assert_eq!(snapshot(&pool, attempt.receipt_id()).await.2, 1);
+        pool.close().await;
+        db.drop().await;
+    }
 }
 
 #[tokio::test]
