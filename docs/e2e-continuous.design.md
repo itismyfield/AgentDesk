@@ -114,6 +114,12 @@ YAML hash·38 live 목록·P의 실제 host·controlled ingress provenance·공�
 `python3 -m unittest -v tests.test_e2e_continuous_manifest`는 누락/중복/fixture 혼입·거짓 PASS·
 미실측 비용 0·human 승격·배포 hold 뮤턴트를 거부한다. manifest 자체는 실행/coverage 증거가 아니다.
 
+managed 대조군 `R-inject-managed`는 manifest의 `control_occurrences`에 별도 등록한다.
+R2 회전에서 한 번, F에서는 포함한 회전 조각의 control ID 합집합으로 한 번 실행하며,
+F의 control 목록은 추가 중복 실행 목록이 아니라 그 합집합의 expected 목록이다.
+대조군 결과는 `coverage_scenario=R-inject-managed`와 managed busy key로만 집계하고
+native `R-inject` 회귀 coverage에 합산하지 않는다. P의 6 occurrence·13 prompt·계획 10턴은 그대로다.
+
 ### 2.3 비용 측정 후에만 주기 선택
 
 초기 설정은 `enabled=false`, `rotation_interval_s=null`, `daily_full_at=null`,

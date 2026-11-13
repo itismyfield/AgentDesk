@@ -187,7 +187,8 @@
         "native_turns": null,
         "tokens": null
       },
-      "enabled": false
+      "enabled": false,
+      "control_occurrences": []
     },
     "R2": {
       "scenarios": [
@@ -206,7 +207,10 @@
         "native_turns": null,
         "tokens": null
       },
-      "enabled": false
+      "enabled": false,
+      "control_occurrences": [
+        "R-inject-managed"
+      ]
     },
     "R3": {
       "scenarios": [
@@ -225,7 +229,8 @@
         "native_turns": null,
         "tokens": null
       },
-      "enabled": false
+      "enabled": false,
+      "control_occurrences": []
     },
     "R4": {
       "scenarios": [
@@ -249,7 +254,8 @@
         "native_turns": null,
         "tokens": null
       },
-      "enabled": false
+      "enabled": false,
+      "control_occurrences": []
     },
     "R5": {
       "scenarios": [
@@ -267,7 +273,8 @@
         "native_turns": null,
         "tokens": null
       },
-      "enabled": false
+      "enabled": false,
+      "control_occurrences": []
     },
     "F": {
       "includes": [
@@ -298,7 +305,11 @@
         "native_turns": null,
         "tokens": null
       },
-      "enabled": false
+      "enabled": false,
+      "control_occurrences": [
+        "R-inject-managed"
+      ],
+      "control_selection": "union_included_controls_once"
     }
   },
   "new_scenarios": {
@@ -854,6 +865,26 @@
         "claude-tui",
         "codex-pipe",
         "codex-tui"
+      ]
+    }
+  },
+  "control_occurrences": {
+    "R-inject-managed": {
+      "provider": "claude",
+      "host": "herdr",
+      "surface": "channel",
+      "state": "busy",
+      "busy_basis": "managed",
+      "origin": "controlled_ingress",
+      "coverage_scenario": "R-inject-managed",
+      "operations": [
+        "inject_before_turn_end",
+        "injection_latency",
+        "exactly_once"
+      ],
+      "preconditions": [
+        "managed_active_claim_or_inflight",
+        "human_branch_entered"
       ]
     }
   }
