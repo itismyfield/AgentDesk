@@ -38,7 +38,7 @@
 | `src/services/discord/restart_report.rs:144` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs:119` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/runtime_bootstrap/gateway_lease_recovery.rs:344` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
-| `src/services/discord/runtime_store.rs:542` | 함수 포인터 등록; 실행 runtime_store.rs:612 |
+| `src/services/process_generation.rs:370` | 함수 포인터 등록; 실행 src/services/process_generation.rs:441 |
 | `src/services/discord/status_panel_orphan_store.rs:165` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/status_panel_singleton_store.rs:69` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/status_panel_singleton_store.rs:94` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
@@ -69,7 +69,7 @@
 | AtomicWrite.cfg | 0 | 위반 없음 | GREEN (448 distinct states, depth 7): OldPreserved, NoPartialPublication, OutcomeMatchesPublication, DiskObservation, DirectorySemantics |
 | AtomicWriteMissingObservation.cfg | 12 | Invariant: DiskObservation | RED: CreateDir에서 ENOSPC 오류 후 record 없이 Err |
 
-반례 코드 대조: 뮤턴트는 기존 classify_io_error의 `record_enospc_now` 및 ENOSPC 관측이 빠졌다고 가정한다. 현재 runtime_store.rs:860–866에서는 errno 28이면 기록과 warn 뒤 문자열을 반환하므로 현재 코드의 결함으로 확인되지 않았다. 현재 모델은 GREEN이며 동작 변경 없이 경계를 이동한다. 구현 뒤 같은 규칙을 다시 확인한다.
+반례 코드 대조: 뮤턴트는 기존 classify_io_error의 `record_enospc_now` 및 ENOSPC 관측이 빠졌다고 가정한다. 현재 src/services/durable_publish.rs:7–15에서는 errno 28이면 기록과 warn 뒤 문자열을 반환하므로 현재 코드의 결함으로 확인되지 않았다. 현재 모델은 GREEN이며 동작 변경 없이 경계를 이동한다. 구현 뒤 같은 규칙을 다시 확인한다.
 
 ## 단계·관측 경계
 

@@ -147,7 +147,7 @@ control/relaunch_effort_tests.rs의 다음 새 턴 재기동 기대는 기존 /f
 
 기존 persistent outbox는 enqueue 중복을 막는 수단이다(message_outbox.rs:238-315). 그것만으로 Discord visible exactly-once까지 이미 구현됐다고 주장하지 않는다. retained_input_notice 패턴을 참고하되 일반 lifecycle_notifier가 항상 nonce를 받는다고 가정하지 않는다(outbound/manual_delivery/headless_nonce.rs:31-41,178).
 
-effort notice child는 old interrupted episode에 묶인 stable event/nonce와 전달 receipt를 intent에 보존하고 기존 nonce outbound port를 사용한다(gateway.rs:320, restart_report.rs:439-451, outbound/manual_delivery.rs:532-560). HTTP 결과 유실은 기존 durable delivery/history 관측으로 같은 event를 reconcile한 뒤에만 재시도한다. 다른 nonce·새 outbox key·unkeyed say로 우회하지 않는다. accepted message ID 또는 exact duplicate receipt를 얻기 전에는 notice settled로 쓰지 않는다. 영구 모호성은 debt/실패로 남기고 GREEN으로 선언하지 않는다. 이 adapter는 일반 outbox 전체를 고치는 작업이 아니며 S4의 lost-reply+restart 시험과 실제 wire nonce 증거가 수용 조건이다.
+effort notice child는 old interrupted episode에 묶인 stable event/nonce와 전달 receipt를 intent에 보존하고 기존 nonce outbound port를 사용한다(gateway.rs:320, src/services/discord/restart_report.rs:77-80, outbound/manual_delivery.rs:532-560). HTTP 결과 유실은 기존 durable delivery/history 관측으로 같은 event를 reconcile한 뒤에만 재시도한다. 다른 nonce·새 outbox key·unkeyed say로 우회하지 않는다. accepted message ID 또는 exact duplicate receipt를 얻기 전에는 notice settled로 쓰지 않는다. 영구 모호성은 debt/실패로 남기고 GREEN으로 선언하지 않는다. 이 adapter는 일반 outbox 전체를 고치는 작업이 아니며 S4의 lost-reply+restart 시험과 실제 wire nonce 증거가 수용 조건이다.
 
 ## 이미 main에서 충족된 것
 
