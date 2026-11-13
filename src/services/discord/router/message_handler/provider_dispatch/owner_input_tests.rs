@@ -1107,6 +1107,12 @@ fn startup_enter_is_the_attempts_first_key() {
     let rig = rig("oc-dialog", 7_272_515, "normal", dialog.into(), IDLE);
     let _driver = rig.trace_driver();
     fs::write(rig.renderer.join("body"), "").unwrap();
+    // A menu confirmation is not a native user turn; keep its renderer record off the transcript.
+    fs::write(
+        rig.renderer.join("record-path"),
+        rig.renderer.join("startup-ui.jsonl").display().to_string(),
+    )
+    .unwrap();
     fs::write(rig.renderer.join("after"), view("", false)).unwrap();
     let pane = rig.f.tmux(&[
         "display-message",
@@ -1132,6 +1138,7 @@ fn startup_enter_is_the_attempts_first_key() {
     let result = created_first_prompt(&rig);
     assert!(result.is_err(), "{result:?}");
     rig.assert_hooks_completed();
+    assert_eq!(fs::read_to_string(rig.transcript()).unwrap(), IDLE);
     assert_eq!(rig.events(), ["Enter"], "startup key only; the load failed");
     let trace =
         fs::read_to_string(rig.f.root.path().join(format!("{}-owner/trace", rig.name))).unwrap();
