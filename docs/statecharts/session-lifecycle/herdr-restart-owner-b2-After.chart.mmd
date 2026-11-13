@@ -1,0 +1,176 @@
+---
+title: "Herdr restart B2: preserve the claimed prefix, one greeting and a visible result"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Owner
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 purple
+  s0: Old session and a queued input
+  s1: Seed committed#59; gate holds it#59; input order greeting then original 1
+  s2: Restart holds the transition and fence#59; input order greeting then original 1
+  s3: Seed committed#59; gate holds it#59; prior operation result read#59; input order greeting then original 1
+  s4: Restart holds the transition and fence#59; prior operation result read#59; input order greeting then original 1
+  s5: Exact close confirmed#59; retire and settle#59; input order greeting then original 1
+  s6: Seed committed#59; gate holds it#59; repeated operation answered#59; input order greeting then original 1
+  s7: Restart holds the transition and fence#59; repeated operation answered#59; input order greeting then original 1
+  s8: Old execution retired#59; exclusion still held#59; input order greeting then original 1
+  s9: Exact close confirmed#59; retire and settle#59; prior operation result read#59; input order greeting then original 1
+  s10: Exclusion released#59; reply pending#59; input order greeting then original 1
+  s11: Old execution retired#59; exclusion still held#59; prior operation result read#59; input order greeting then original 1
+  s12: Exact close confirmed#59; retire and settle#59; repeated operation answered#59; input order greeting then original 1
+  s13: Owner turn began a launch#59; input order greeting then original 1
+  s14: Exclusion released#59; reply pending#59; prior operation result read#59; input order greeting then original 1
+  s15: Seed waits for the owner#59; input order greeting then original 1
+  s16: Old execution retired#59; exclusion still held#59; repeated operation answered#59; input order greeting then original 1
+  s17: Owner turn installed Pending#59; input order greeting then original 1
+  s18: Owner turn began a launch#59; prior operation result read#59; input order greeting then original 1
+  s19: Exclusion released#59; reply pending#59; repeated operation answered#59; input order greeting then original 1
+  s20: Seed waits for the owner#59; prior operation result read#59; input order greeting then original 1
+  s21: CheckEpoch observed#59; live BeginEffect still required#59; input order greeting then original 1
+  s22: Owner turn installed Pending#59; prior operation result read#59; input order greeting then original 1
+  s23: Owner turn began a launch#59; repeated operation answered#59; input order greeting then original 1
+  s24: Seed waits for the owner#59; repeated operation answered#59; input order greeting then original 1
+  s25: BeginEffect holds create authority#59; input order greeting then original 1
+  s26: CheckEpoch observed#59; live BeginEffect still required#59; prior operation result read#59; input order greeting then original 1
+  s27: Owner turn installed Pending#59; repeated operation answered#59; input order greeting then original 1
+  s28: BeginEffect holds create authority#59; prior operation result read#59; input order greeting then original 1
+  s29: CheckEpoch observed#59; live BeginEffect still required#59; repeated operation answered#59; input order greeting then original 1
+  s30: Create answered#59; first input not submitted#59; input order greeting then original 1
+  s31: BeginEffect holds create authority#59; repeated operation answered#59; input order greeting then original 1
+  s32: CheckEpoch observed#59; live input authority still required#59; input order greeting then original 1
+  s33: Create answered#59; first input not submitted#59; prior operation result read#59; input order greeting then original 1
+  s34: BeginEffect holds input authority#59; input order greeting then original 1
+  s35: CheckEpoch observed#59; live input authority still required#59; prior operation result read#59; input order greeting then original 1
+  s36: Create answered#59; first input not submitted#59; repeated operation answered#59; input order greeting then original 1
+  s37: BeginEffect holds input authority#59; prior operation result read#59; input order greeting then original 1
+  s38: CheckEpoch observed#59; live input authority still required#59; repeated operation answered#59; input order greeting then original 1
+  s39: First input submitted#59; receipt not committed#59; input order greeting then original 1
+  s40: BeginEffect holds input authority#59; repeated operation answered#59; input order greeting then original 1
+  s41: First input submitted#59; receipt not committed#59; prior operation result read#59; input order greeting then original 1
+  s42: Receipt committed#59; source not bound
+  s43: First input submitted#59; receipt not committed#59; repeated operation answered#59; input order greeting then original 1
+  s44: One new Ready session#59; inputs await the owner
+  s45: Receipt committed#59; source not bound#59; prior operation result read
+  s46: One new Ready session#59; inputs settled once
+  s47: One new Ready session#59; inputs await the owner#59; prior operation result read
+  s48: Receipt committed#59; source not bound#59; repeated operation answered
+  s49: One new Ready session#59; inputs settled once#59; prior operation result read
+  s50: One new Ready session#59; inputs await the owner#59; repeated operation answered
+  s51: One new Ready session#59; inputs settled once#59; repeated operation answered
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s1 --> s2: Terminate takes transition and fence
+  s1 --> s3: Read the original operation result before re-entering
+  s2 --> s4: Read the original operation result before re-entering
+  s2 --> s5: Close only the captured pane
+  s3 --> s4: Terminate takes transition and fence
+  s3 --> s6: Return or join the existing durable ticket
+  s4 --> s7: Return or join the existing durable ticket
+  s4 --> s9: Close only the captured pane
+  s5 --> s8: Retire CAS and settle the old turn
+  s5 --> s9: Read the original operation result before re-entering
+  s6 --> s7: Terminate takes transition and fence
+  s7 --> s12: Close only the captured pane
+  s8 --> s10: Disconnect keeping selector, release, wake
+  s8 --> s11: Read the original operation result before re-entering
+  s9 --> s11: Retire CAS and settle the old turn
+  s9 --> s12: Return or join the existing durable ticket
+  s10 --> s13: Owner starts the front: register the launch
+  s10 --> s14: Read the original operation result before re-entering
+  s10 --> s15: Reply to the command
+  s11 --> s14: Disconnect keeping selector, release, wake
+  s11 --> s16: Return or join the existing durable ticket
+  s12 --> s16: Retire CAS and settle the old turn
+  s13 --> s17: Install Pending over the vacant row
+  s13 --> s18: Read the original operation result before re-entering
+  s14 --> s18: Owner starts the front: register the launch
+  s14 --> s19: Return or join the existing durable ticket
+  s14 --> s20: Reply to the command
+  s15 --> s13: Owner starts the front: register the launch
+  s15 --> s20: Read the original operation result before re-entering
+  s16 --> s19: Disconnect keeping selector, release, wake
+  s17 --> s21: Observe the create epoch
+  s17 --> s22: Read the original operation result before re-entering
+  s18 --> s22: Install Pending over the vacant row
+  s18 --> s23: Return or join the existing durable ticket
+  s19 --> s23: Owner starts the front: register the launch
+  s19 --> s24: Reply to the command
+  s20 --> s18: Owner starts the front: register the launch
+  s20 --> s24: Return or join the existing durable ticket
+  s21 --> s25: Compare live epoch and retain create permission
+  s21 --> s26: Read the original operation result before re-entering
+  s22 --> s26: Observe the create epoch
+  s22 --> s27: Return or join the existing durable ticket
+  s23 --> s27: Install Pending over the vacant row
+  s24 --> s23: Owner starts the front: register the launch
+  s25 --> s28: Read the original operation result before re-entering
+  s25 --> s30: Complete the previously granted create
+  s26 --> s28: Compare live epoch and retain create permission
+  s26 --> s29: Return or join the existing durable ticket
+  s27 --> s29: Observe the create epoch
+  s28 --> s31: Return or join the existing durable ticket
+  s28 --> s33: Complete the previously granted create
+  s29 --> s31: Compare live epoch and retain create permission
+  s30 --> s32: Observe the input epoch
+  s30 --> s33: Read the original operation result before re-entering
+  s31 --> s36: Complete the previously granted create
+  s32 --> s34: Compare live epoch and retain input permission
+  s32 --> s35: Read the original operation result before re-entering
+  s33 --> s35: Observe the input epoch
+  s33 --> s36: Return or join the existing durable ticket
+  s34 --> s37: Read the original operation result before re-entering
+  s34 --> s39: Complete the previously granted first input
+  s35 --> s37: Compare live epoch and retain input permission
+  s35 --> s38: Return or join the existing durable ticket
+  s36 --> s38: Observe the input epoch
+  s37 --> s40: Return or join the existing durable ticket
+  s37 --> s41: Complete the previously granted first input
+  s38 --> s40: Compare live epoch and retain input permission
+  s39 --> s41: Read the original operation result before re-entering
+  s39 --> s42: Commit the input's receipt
+  s40 --> s43: Complete the previously granted first input
+  s41 --> s43: Return or join the existing durable ticket
+  s41 --> s45: Commit the input's receipt
+  s42 --> s44: Bind the source
+  s42 --> s45: Read the original operation result before re-entering
+  s43 --> s48: Commit the input's receipt
+  s44 --> s46: Submit an input to the successor once
+  s44 --> s47: Read the original operation result before re-entering
+  s45 --> s47: Bind the source
+  s45 --> s48: Return or join the existing durable ticket
+  s46 --> s49: Read the original operation result before re-entering
+  s47 --> s49: Submit an input to the successor once
+  s47 --> s50: Return or join the existing durable ticket
+  s48 --> s50: Bind the source
+  s49 --> s51: Return or join the existing durable ticket
+  s50 --> s51: Submit an input to the successor once
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s11 blue
+  class s12 blue
+  class s14 blue
+  class s15 purple
+  class s16 blue
+  class s19 blue
+  class s20 purple
+  class s24 purple
+  class s44 teal
+  class s46 teal
+  class s47 teal
+  class s49 teal
+  class s50 teal
+  class s51 teal

@@ -18,7 +18,9 @@
 | 이월 P2·epoch·Expected 연결 포함 현재 WIP | 17 | +616 |
 | 미작성 명령·idle 복구·owner 배선·Codex·귀속 판정 | 추가 | +426~602 |
 | fixture 산입 여유 | 추가 | +10~30 |
-| 재측정 합계 | 약 23~29 | **+1052~1248** |
+| 최초 재측정 합계 | 약 23~29 | **+1052~1248** |
+| 동결 뒤 발견한 alias 응답 미확인 권한 구별 | 추가 | 약 +10 |
+| 알려진 보정 포함 | 약 23~29 | **+1062~1258** |
 
 아카이브한 WIP의 `source_admission/restart_seed.rs` (proposed) 순증은 +498이다. 기존 +315~375 예상에는
 operation identity/context 검증, alias의 원자적 receipt+bind, transport 응답 미확인과
