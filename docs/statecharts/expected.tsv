@@ -237,6 +237,16 @@ input-single-path/ManagedObserverRebindGraceBeforeAdoption.cfg	ManagedObserverRe
 input-single-path/ManagedObserverRebindGraceBeforeAdoptionNoHandoff.cfg	ManagedObserverRebind	-	SubmittedEventuallyCloses
 input-single-path/ManagedObserverRebindMetaIsInput.cfg	ManagedObserverRebind	FixedAOnlyOnEvidenceOrGrace	SubmittedEventuallyCloses
 input-single-path/ManagedObserverRebindSinglePoll.cfg	ManagedObserverRebind	FixedAOnlyOnEvidenceOrGrace	SubmittedEventuallyCloses
+tui-o-writer/NoticeEvidenceAfterDirect.cfg	NoticeEvidence	-	-
+tui-o-writer/NoticeEvidenceAfterOwned.cfg	NoticeEvidence	-	-
+tui-o-writer/NoticeEvidenceAfterPolicy.cfg	NoticeEvidence	-	-
+tui-o-writer/NoticeEvidenceBefore.cfg	NoticeEvidence	-	EveryPendingTerminates
+tui-o-writer/NoticeEvidenceDropLog.cfg	NoticeEvidence	PendingLoggedOnce	-
+tui-o-writer/NoticeEvidenceDropReplay.cfg	NoticeEvidence	ReplayKeepsTerminal	-
+tui-o-writer/NoticeEvidenceExpireUnproven.cfg	NoticeEvidence	NoQuietLoss,NoExpireOwedDirect	DirectEventuallyPosted
+tui-o-writer/NoticeEvidenceNoSettle.cfg	NoticeEvidence	-	EveryPendingTerminates
+tui-o-writer/NoticeEvidenceReasonLog.cfg	NoticeEvidence	PendingLoggedOnce	-
+tui-o-writer/NoticeEvidenceUnavailable.cfg	NoticeEvidence	-	EveryPendingTerminates
 tui-o-writer/WriterParkedAliasFixed.cfg	WriterParkedAlias	-	-
 tui-o-writer/WriterParkedAliasMain.cfg	WriterParkedAlias	HaltRepeatZero,NoHaltForConfirmedOld	FirstReplyExactlyOnce
 tui-o-writer/WriterReboundBirth.cfg	WriterRebound	ActiveLossVisible,CurrentNeverHistorical,UnknownNeedsAbsence,ReadyAfterFollow,ParkedReboundHalts	-
