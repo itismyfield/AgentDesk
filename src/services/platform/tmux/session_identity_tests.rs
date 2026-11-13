@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
 pub(crate) struct Rig {
@@ -14,9 +15,10 @@ impl Rig {
         let binary = crate::services::platform::binary_resolver::runtime_command("tmux").unwrap();
         let binary =
             crate::services::process::shell_escape(&binary.get_program().to_string_lossy());
+        let socket = format!("i8119-s1-{}", uuid::Uuid::new_v4().simple());
         std::fs::write(
             &program,
-            format!("#!/bin/sh\nexec {binary} -L i8119-s1 -f /dev/null \"$@\"\n"),
+            format!("#!/bin/sh\nexec {binary} -L {socket} -f /dev/null \"$@\"\n"),
         )
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -48,6 +50,12 @@ impl Rig {
             self.raw(&["display-message", "-p", "-t", &target, "#{pane_pid}"])
                 .stdout,
         )
+    }
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        let _ = self.raw(&["kill-server"]);
     }
 }
 
@@ -280,6 +288,24 @@ fn identity_checked_panes_refuse_unmarked_submission_target() {
             relay_last_offset: None,
         },
     );
+    assert!(crate::services::claude_tui::readiness::observe(&name, None).is_none());
+    // New activity after the restored baseline supplies the current-source Idle proof.
+    let mut tail = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(
+        tail,
+        "{}",
+        serde_json::json!({"type":"assistant", "message":{"content":"ready"}})
+    )
+    .unwrap();
+    writeln!(
+        tail,
+        "{}",
+        serde_json::json!({"type":"system", "subtype":"turn_duration"})
+    )
+    .unwrap();
     crate::services::claude_tui::input::wait_for_prompt_ready(
         &name,
         crate::services::claude_tui::input::PromptReadinessKind::ProvenWarmFollowup,

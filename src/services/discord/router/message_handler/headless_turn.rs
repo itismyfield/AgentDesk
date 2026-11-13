@@ -417,14 +417,13 @@ async fn start_reserved_headless_turn_admitted(
         metadata.as_ref(),
         tmux_session_label.as_deref(),
     );
-    let canonical_registration = session_key_basis_override.is_none();
     let adk_session_key =
         build_adk_session_key(shared, channel_id, &provider, session_key_basis_override).await;
-    if canonical_registration {
-        tmux_session_name = adk_session_key
-            .as_deref()
-            .and_then(super::super::super::session_identity::tmux_name_from_session_key);
-    }
+    let canonical_registration = super::super::super::session_locator::headless_registration(
+        &mut tmux_session_name,
+        adk_session_key.as_deref(),
+        session_key_basis_override.is_none() && tmux_session_label.is_none(),
+    );
     if !scheduled_snapshot_turn
         && valid_routine_metadata(metadata.as_ref()).is_some()
         && let (Some(pool), Some(binding), Some(session_key)) = (

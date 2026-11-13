@@ -127,6 +127,19 @@ pub(super) fn candidates(
     )
 }
 
+/// Only an unlabelled physical tmux start follows the canonical row's actual name.
+pub(super) fn headless_registration(
+    tmux_name: &mut Option<String>,
+    session_key: Option<&str>,
+    canonical: bool,
+) -> bool {
+    if !canonical || tmux_name.is_none() {
+        return false;
+    }
+    *tmux_name = session_key.and_then(super::session_identity::tmux_name_from_session_key);
+    true
+}
+
 pub(super) async fn channel_key(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -144,6 +157,7 @@ pub(super) async fn channel_key(
     };
     #[cfg(unix)]
     if matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
+        && !crate::services::herdr_launch::herdr_configured_for_tui_launch(Some(channel))
         && unix::observe_old(id, &primary, channel)
     {
         return Some(preferred);
