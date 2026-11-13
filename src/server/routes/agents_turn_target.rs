@@ -181,7 +181,7 @@ pub(super) async fn start_headless_turn_on_target(
     prompt: String,
     source: Option<String>,
     metadata: Option<serde_json::Value>,
-) -> Result<(String, &'static str), crate::services::discord::HeadlessTurnStartError> {
+) -> Result<(String, &'static str), crate::domain::turn_start::HeadlessTurnStartError> {
     let channel_name_hint = (!target.primary_channel.chars().all(|ch| ch.is_ascii_digit()))
         .then_some(target.primary_channel);
     crate::services::discord::health::start_headless_agent_turn(

@@ -310,8 +310,8 @@ pub(crate) fn input_queue_path_for_test(shared: &SharedData, channel: u64) -> st
 }
 pub(crate) use crate::domain::lifecycle::InflightRestartMode;
 pub(crate) use router::{
-    HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus, IntakeExecution,
-    IntakeRequest, TurnKind, checkpoint_waits_for_admission, execute_intake_turn_core,
+    IntakeExecution, IntakeRequest, TurnKind, checkpoint_waits_for_admission,
+    execute_intake_turn_core,
 };
 #[cfg(unix)]
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;

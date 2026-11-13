@@ -2,10 +2,9 @@ use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
+use crate::domain::runtime_stop::{FINISH_UNOBSERVED_PATH, TOKEN_SUPERSEDED_PATH};
 use crate::services::discord::SharedData;
-use crate::services::discord::health::{
-    FINISH_UNOBSERVED_PATH, HealthRegistry, TOKEN_SUPERSEDED_PATH,
-};
+use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::host_teardown_gate::{
     ChannelTeardown, backfill_inflight_after_guard, guard_tmux_name, nameless_runtime_teardown,
     row_gate, runtime_target_holds, runtime_teardown,
@@ -420,7 +419,7 @@ async fn stop_turn_with_policy(
             None
         };
         if let Some(runtime) = runtime {
-            use crate::services::discord::health::InflightDisposition;
+            use crate::domain::runtime_stop::InflightDisposition;
             if runtime.inflight == InflightDisposition::PreservedByNativeStop {
                 return stop_result::native_preserved(runtime, tmux_session_observed);
             }
@@ -791,7 +790,7 @@ pub(crate) mod policy_observability_tests {
 
     #[test]
     fn compute_queue_preserved_detects_disk_and_memory_loss() {
-        use crate::services::discord::health::PendingQueueSnapshot;
+        use crate::domain::queue_snapshot::PendingQueueSnapshot;
 
         let pre = PendingQueueSnapshot {
             queue_depth: 1,
@@ -847,7 +846,7 @@ pub(crate) mod policy_observability_tests {
     /// Depth is not enough — a swapped queue keeps the same depth.
     #[test]
     fn dropped_queue_message_ids_names_the_lost_user_instructions() {
-        use crate::services::discord::health::PendingQueueSnapshot;
+        use crate::domain::queue_snapshot::PendingQueueSnapshot;
 
         fn snapshot(message_ids: Vec<u64>) -> PendingQueueSnapshot {
             PendingQueueSnapshot {
@@ -1020,7 +1019,7 @@ async fn resolve_tmux_session_observed(
 async fn pending_queue_pre_snapshot(
     health_registry: Option<&HealthRegistry>,
     target: &TurnLifecycleTarget,
-) -> Option<crate::services::discord::health::PendingQueueSnapshot> {
+) -> Option<crate::domain::queue_snapshot::PendingQueueSnapshot> {
     let registry = health_registry?;
     let provider = target.provider.as_ref()?;
     let channel_id = target.channel_id?;
@@ -1035,7 +1034,7 @@ async fn pending_queue_pre_snapshot(
 async fn pending_queue_post_snapshot(
     health_registry: Option<&HealthRegistry>,
     target: &TurnLifecycleTarget,
-) -> Option<crate::services::discord::health::PendingQueueSnapshot> {
+) -> Option<crate::domain::queue_snapshot::PendingQueueSnapshot> {
     pending_queue_pre_snapshot(health_registry, target).await
 }
 
@@ -1053,8 +1052,8 @@ async fn pending_queue_post_snapshot(
 /// Returns empty when either side is unobservable — an unknown queue is not
 /// evidence of a drop.
 fn dropped_queue_message_ids(
-    pre: Option<&crate::services::discord::health::PendingQueueSnapshot>,
-    post: Option<&crate::services::discord::health::PendingQueueSnapshot>,
+    pre: Option<&crate::domain::queue_snapshot::PendingQueueSnapshot>,
+    post: Option<&crate::domain::queue_snapshot::PendingQueueSnapshot>,
 ) -> Vec<u64> {
     let (Some(pre), Some(post)) = (pre, post) else {
         return Vec::new();
@@ -1069,8 +1068,8 @@ fn dropped_queue_message_ids(
 /// Preservation requires measured memory and disk state on both sides of the cancel.
 fn compute_queue_preserved(
     cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
-    pre: Option<&crate::services::discord::health::PendingQueueSnapshot>,
-    post: Option<&crate::services::discord::health::PendingQueueSnapshot>,
+    pre: Option<&crate::domain::queue_snapshot::PendingQueueSnapshot>,
+    post: Option<&crate::domain::queue_snapshot::PendingQueueSnapshot>,
 ) -> Option<bool> {
     let _ = cleanup_policy;
     let (pre, post) = (pre?, post?);

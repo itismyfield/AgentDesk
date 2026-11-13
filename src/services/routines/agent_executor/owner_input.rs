@@ -1,6 +1,6 @@
 //! One exhaustive start consumer; owner custody stays running until an exact observer is bound.
 use super::*;
-use crate::services::discord::HeadlessTurnStartStatus;
+use crate::domain::turn_start::HeadlessTurnStartStatus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AgentStartDisposition {

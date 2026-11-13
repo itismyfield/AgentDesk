@@ -1,3 +1,5 @@
+pub use crate::domain::queue_snapshot::PendingQueueSnapshot;
+
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -57,8 +59,8 @@ pub(crate) use stop_judgement::{
     stop_provider_channel_runtime_with_policy,
 };
 pub use stop_result::{
-    FINISH_UNOBSERVED_PATH, FinishCancelledMailboxResult, IdleTmuxStaleTurnRepairResult,
-    InflightDisposition, RuntimeTurnStopResult, TOKEN_SUPERSEDED_PATH,
+    FinishCancelledMailboxResult, IdleTmuxStaleTurnRepairResult, InflightDisposition,
+    RuntimeTurnStopResult,
 };
 
 mod carried_turn_close;
@@ -108,22 +110,6 @@ use watchdog_pass::{
     ExplicitBackgroundWatchdogClear, cleanup_then_submit_explicit_background_watchdog_cancel,
     revalidate_and_clear_explicit_background_inflight,
 };
-
-#[derive(Clone, Debug, Default)]
-pub struct PendingQueueSnapshot {
-    pub queue_depth: usize,
-    pub disk_present: Option<bool>,
-    // #3034: populated for diagnostics/observability; not read by the queue
-    // preservation check (which only compares depth + presence).
-    #[allow(dead_code)]
-    pub disk_path: Option<std::path::PathBuf>,
-    /// #5176: the primary Discord message id of every queued intervention, in
-    /// queue order. Depth alone told operators that a cancel lost "one item"
-    /// and nothing else — not which user instruction vanished, and not whether
-    /// a same-depth queue had actually been swapped out underneath them. A
-    /// user-message-lossless contract cannot be audited by counting.
-    pub message_ids: Vec<u64>,
-}
 
 /// Drain scheduling and measured depth; unresolved runtimes and refused hydration have no depth.
 #[derive(Clone, Copy, Debug, Default)]

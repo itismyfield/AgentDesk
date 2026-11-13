@@ -32,7 +32,7 @@ impl TurnLifecycleStopResult {
 }
 
 pub(super) fn native_preserved(
-    runtime: crate::services::discord::health::RuntimeTurnStopResult,
+    runtime: crate::domain::runtime_stop::RuntimeTurnStopResult,
     observed: Option<String>,
 ) -> TurnLifecycleStopResult {
     TurnLifecycleStopResult {

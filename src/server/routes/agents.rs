@@ -885,15 +885,15 @@ pub async fn start_agent_turn(
                 Json(json!({"ok":true, "turn_id":turn_id, "status":status})),
             )
         }
-        Err(crate::services::discord::HeadlessTurnStartError::Conflict(error)) => (
+        Err(crate::domain::turn_start::HeadlessTurnStartError::Conflict(error)) => (
             StatusCode::CONFLICT,
             Json(json!({"ok": false, "error": error, "status": "conflict"})),
         ),
-        Err(crate::services::discord::HeadlessTurnStartError::InvalidTarget(error)) => (
+        Err(crate::domain::turn_start::HeadlessTurnStartError::InvalidTarget(error)) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"ok": false, "error": error, "status": "invalid_target"})),
         ),
-        Err(crate::services::discord::HeadlessTurnStartError::Internal(error)) => (
+        Err(crate::domain::turn_start::HeadlessTurnStartError::Internal(error)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "ok": false,

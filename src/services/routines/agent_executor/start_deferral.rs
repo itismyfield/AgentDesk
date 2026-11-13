@@ -1,7 +1,7 @@
 //! Transient agent-start failures (provider runtime not registered yet, busy mailbox) park the
 //! run as `deferred` on a short cadence instead of failing it, until a bounded window closes.
 use super::*;
-use crate::services::discord::HeadlessTurnStartError;
+use crate::domain::turn_start::HeadlessTurnStartError;
 
 /// Delay between deferred start attempts.
 pub(super) const START_DEFER_RETRY_SECS: i64 = 60;

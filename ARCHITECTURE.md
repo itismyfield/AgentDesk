@@ -468,9 +468,12 @@ src/
 │   ├── process_incarnation.rs
 │   ├── provider.rs
 │   ├── provider_auth_profile.rs
+│   ├── queue_snapshot.rs
 │   ├── replay_evidence.rs
+│   ├── runtime_stop.rs
 │   ├── session_identity.rs
-│   └── tool_text.rs
+│   ├── tool_text.rs
+│   └── turn_start.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── db_ops/

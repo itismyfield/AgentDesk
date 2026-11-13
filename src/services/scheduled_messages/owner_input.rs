@@ -1,6 +1,6 @@
 //! Accepted custody preserves the launch barrier; only actual observer evidence may settle it.
 use super::*;
-use crate::services::discord::{HeadlessTurnStartOutcome, HeadlessTurnStartStatus};
+use crate::domain::turn_start::{HeadlessTurnStartOutcome, HeadlessTurnStartStatus};
 
 #[derive(Debug)]
 pub(super) enum AgentTurnStartDisposition {
