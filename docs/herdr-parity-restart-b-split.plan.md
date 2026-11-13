@@ -1,7 +1,7 @@
 # Herdr restart B 구현 분할 계획
 
 기준은 A `0060c4dd50f68a7509217c29986dc58ff5e64d16`와 병합한 r3 설계 `a7957913f0a80c80061445c7ba74e4e3a4029303`다.
-이 문서는 **PLAN_READY를 위한 구현 전 계획**이다. 생산 소스 변경·Rust/PG 시험·cargo 빌드는 0이다.
+이 문서는 `2d0a40d3`에서 승인받은 **PLAN_READY 구현 전 계획**이다. 당시 생산 소스 변경·Rust/PG 시험·cargo 빌드는 0이었다. 현재 B1 구현 검증 중이며, B1만으로 restart는 활성화하지 않는다.
 최신 수용 문장은 [정본 3.9](herdr-parity-restart.design.md#39-수용-기준-문장-b가-표로-대조할-것)에 있다.
 조각명·범위·크기는 이 문서가 정본 4절의 이전 r3 추정 표를 대체한다.
 
@@ -31,7 +31,7 @@
 
 | 생산 파일 | 변경 | 예상 순 코드 |
 |---|---|---:|
-| 새 `src/services/herdr_launch/clear_epoch.rs` (proposed) | namespace/channel 상태, epoch·clearing, startup/effect 카운터, Notify, RAII·TLS | +180~210 |
+| 새 `src/services/herdr_launch/clear_epoch.rs` (B1 구현) | namespace/channel 상태, epoch·clearing, startup/effect 카운터, Notify, RAII·TLS | +180~210 |
 | `src/services/herdr_launch.rs` | scope capture, Pending 뒤 CheckEpoch, 기존 unsent retire 연결 | +10~15 |
 | `src/services/herdr_launch/prepared.rs` | worker에 Arc 전달, 실제 create 전 BeginEffect/끝까지 보유 | +12~18 |
 | `src/services/claude/herdr_turn.rs` | sync execute에서 Launching 등록 | +4~6 |
