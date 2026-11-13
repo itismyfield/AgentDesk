@@ -497,6 +497,10 @@ fn actual_busy_input_restart_and_native_stop_keep_only_the_birth_episode_pg() {
     use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
     use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _host = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_INSTANCE_ID",
+        std::ffi::OsStr::new("native-stop-busy-fixture"),
+    );
     let fixture = Fixture::after_shared_test_env_lock();
     let shim = fixture.root.path().join("tmux");
     let script = std::fs::read_to_string(&shim).unwrap().replacen("#!/bin/sh\n", &format!(
