@@ -139,10 +139,27 @@ impl PromotionRig {
             .unwrap()
             .environment_assignment()
             .unwrap();
+        let program = rig.root.path().join("synthetic-provider.py");
+        std::fs::write(&program, r#"import os, sys, tty
+tty.setraw(sys.stdin.fileno())
+sys.stdout.write("✻ Thinking… (12s · esc to interrupt)\r\n" + "─" * 40 + "\r\n❯ \r\n" + "─" * 40 + "\r\n")
+sys.stdout.flush()
+while os.read(0, 1) != b"\x1b":
+    pass
+"#).unwrap();
         assert!(
-            rig.raw(&["new-session", "-d", "-s", &rig.name, "-e", &marker, "cat"])
-                .status
-                .success()
+            rig.raw(&[
+                "new-session",
+                "-d",
+                "-s",
+                &rig.name,
+                "-e",
+                &marker,
+                "python3",
+                program.to_str().unwrap()
+            ])
+            .status
+            .success()
         );
         crate::services::tmux_common::write_tmux_owner_marker(&rig.name).unwrap();
         crate::services::tmux_common::host_marker::record_tmux_host_marker(&rig.name);
@@ -178,11 +195,35 @@ impl PromotionRig {
     pub(crate) async fn queue(&self) -> Vec<u8> {
         let token =
             test_turn::start(&self.shared, self.channel, self.channel.get() + 1, "new").await;
-        *token.tmux_binding.lock().unwrap() = Some(
-            crate::services::provider::cancel_token_cleanup::authority::TmuxBinding::NameOnly {
-                name: self.name.clone(),
+        token.bind_claude_tmux_session(&self.name);
+        let transcript = self.root.path().join("streaming.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"assistant\"}\n").unwrap();
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            &self.name,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                output_path: transcript.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: None,
+                last_offset: 0,
+                relay_last_offset: None,
             },
         );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !String::from_utf8_lossy(
+            &self
+                .raw(&["capture-pane", "-p", "-t", &format!("={}", self.name)])
+                .stdout,
+        )
+        .contains("Thinking")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "synthetic provider ready"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let pane = self.raw(&[
             "display-message",
             "-p",
@@ -226,6 +267,7 @@ impl PromotionRig {
         );
     }
     pub(crate) async fn finish(self) {
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&self.name);
         let _ = self.raw(&["kill-session", "-t", &format!("={}", self.name)]);
         self.pool.close().await;
         self.db.drop().await;
