@@ -751,7 +751,7 @@ B1에는 mailbox turn lease acquire/release, inflight create/delete, owner kick�
 
 | file:line (수리 후 정본) | 함수 |
 |---|---|
-| `src/services/turn_orchestrator/queued_head/v2/sources.rs:177` | `prepare_history` |
+| `src/services/turn_orchestrator/queued_head/v2/sources.rs:178` | `prepare_history` |
 | `src/services/tui_input/human_frame/history/v2/native.rs:226` | `prepare_native_intent` |
 | `src/services/tui_o/writer/input_facts.rs:569` | `observe_native` |
 | `src/services/tui_o/writer/input_facts.rs:581` | `native_evidence` |
