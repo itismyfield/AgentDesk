@@ -1,0 +1,27 @@
+---
+title: "Herdr /restart r2: seed at the queue head, exact close, the owner launches"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Owner
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 purple
+  s0: Old session and a queued input
+  s1: Exclusion released#59; seed waits for the owner
+  s2: Owner turn installed Pending and creates
+  s3: One new Ready session#59; inputs await the owner
+  s4: One new Ready session#59; inputs settled once
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s1 --> s2: Owner starts the seed: install Pending
+  s2 --> s3: Submit the first input and bind the source
+  s3 --> s4: Submit an input to the successor once
+  class s0 blue
+  class s1 purple
+  class s2 purple
+  class s3 teal
+  class s4 teal

@@ -1,0 +1,32 @@
+---
+title: "Herdr /restart r2: seed at the queue head, exact close, the owner launches"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+  }
+  class lg0 teal
+  class lg1 blue
+  s0: Old session and a queued input
+  s1: Seed committed at the queue head#59; gate holds it
+  s2: Restart holds the transition and fence
+  s3: Close refused or unconfirmed
+  s4: Failure answered#59; seed still to withdraw
+  s5: Visible failure#59; inputs still owned
+  s6: Visible failure#59; inputs settled
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s1 --> s2: Terminate takes transition and fence
+  s2 --> s3: Close refused, unconfirmed or row moved on
+  s3 --> s4: Answer the failure, release
+  s4 --> s5: Withdraw the seed
+  s5 --> s6: Submit an input to the still-current session
+  s4 --> s6: Withdraw the seed
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 teal
+  class s5 teal
+  class s6 teal

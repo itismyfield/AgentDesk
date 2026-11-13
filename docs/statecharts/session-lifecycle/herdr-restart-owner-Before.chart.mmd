@@ -1,0 +1,31 @@
+---
+title: "Herdr /restart r2: seed at the queue head, exact close, the owner launches"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Path to the RestartAvailable bug
+    lg3: Repeats forever, so RestartAvailable breaks
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 bugPath
+  class lg3 repeats
+  s0: Old session and a queued input
+  s1: A result awaits its visible answer
+  s2: Visible failure#59; inputs still owned
+  s3: Visible failure#59; inputs settled
+  [*] --> s0
+  s0 --> s1: Refuse before any effect
+  s1 --> s2: Show the result
+  s2 --> s3: Submit an input to the still-current session
+  s1 --> s3: Show the result
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 teal
+  class s2 bugPath
+  class s3 teal
+  class s3 repeats

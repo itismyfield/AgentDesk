@@ -1,0 +1,52 @@
+---
+title: "Herdr /restart r2: seed at the queue head, exact close, the owner launches"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Path to the ClearForgets bug
+    lg3: Repeats forever, so ClearForgets breaks
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 bugPath
+  class lg3 repeats
+  s0: Old session and a queued input
+  s1: Seed committed at the queue head#59; gate holds it
+  s2: Restart holds the transition and fence
+  s3: Close refused or unconfirmed
+  s4: Failure answered#59; seed still to withdraw
+  s5: Visible failure#59; inputs still owned
+  s6: Visible failure#59; inputs settled
+  s7: Clear dropped the seed#59; its teardown still to run
+  s8: Clear won: seed dropped, selector forgotten
+  s9: Clear gave up on the transition#59; selector still kept
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s1 --> s2: Terminate takes transition and fence
+  s2 --> s2: User clear reads the row or Clear discards the queue with receipts
+  s2 --> s3: Close refused, unconfirmed or row moved on
+  s3 --> s4: Answer the failure, release
+  s4 --> s5: Withdraw the seed
+  s5 --> s6: Submit an input to the still-current session or Clear discards the queue with receipts
+  s3 --> s3: Clear's terminate times out on the transition
+  s4 --> s7: Withdraw the seed
+  s4 --> s8: Withdraw the seed
+  s4 --> s6: Withdraw the seed
+  s7 --> s8: Clear ends the execution and forgets the selector
+  s4 --> s9: Withdraw the seed
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 teal
+  class s4 bugPath
+  class s5 teal
+  class s6 teal
+  class s7 teal
+  class s8 teal
+  class s9 teal
+  class s9 repeats
