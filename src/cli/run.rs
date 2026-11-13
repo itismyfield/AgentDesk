@@ -150,6 +150,9 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             super::dev_instance::execute(args).map_err(anyhow::Error::msg)
         }
         Commands::Dcserver(DcserverArgs { token }) => {
+            // SAFETY: Initial CLI dispatch precedes runtime threads, census and child creation.
+            let decision_key = unsafe { crate::services::decision_gate::capture_initial_key() };
+            super::dcserver::decision_boot::stage(decision_key);
             let token = token.or_else(|| std::env::var("AGENTDESK_TOKEN").ok());
             super::handle_dcserver(token);
             Ok(())

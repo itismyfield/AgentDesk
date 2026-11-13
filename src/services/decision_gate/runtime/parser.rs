@@ -19,6 +19,7 @@ pub(in crate::services::decision_gate) fn parse_response(
     };
     let confidence = probability(&answer["confidence"])?;
     let (choice, probabilities) = match question {
+        #[cfg(test)]
         Question::Noul { .. } if answer["type"] == "noul" => {
             let value = probability(&answer["noul"])?;
             (
@@ -44,6 +45,7 @@ pub(in crate::services::decision_gate) fn parse_response(
             }
             (DecisionValue::Choice(selected.into()), probabilities)
         }
+        #[cfg(test)]
         Question::Score { levels, .. } if answer["type"] == "score" => {
             let score = answer["score"]
                 .as_f64()

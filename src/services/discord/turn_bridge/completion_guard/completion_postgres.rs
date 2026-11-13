@@ -213,7 +213,7 @@ fn runtime_pg_complete_dispatch_with_result(
                 &result_value,
                 auto_queue_review_disabled,
             ) {
-                crate::db::auto_queue::finalize_completed_dispatch_terminal_entry_on_pg_tx(
+                crate::services::auto_queue::transactions::finalize_completed_dispatch_terminal_entry_on_pg_tx(
                     &mut tx,
                     &dispatch_id,
                     &transition_source,
@@ -307,7 +307,7 @@ async fn record_runtime_dispatch_failure_entries_on_pg_tx(
     let mut results = Vec::with_capacity(entry_ids.len());
     for entry_id in entry_ids {
         results.push(
-            crate::db::auto_queue::EntryDispatchFailureResult::record_on_pg_tx(
+            crate::services::auto_queue::transactions::EntryDispatchFailureResult::record_on_pg_tx(
                 tx,
                 &entry_id,
                 retry_limit,
@@ -428,7 +428,7 @@ async fn fail_runtime_dispatch_on_pg_tx(
         format!("record postgres dispatch failure event for {dispatch_id}: {error}")
     })?;
 
-    crate::db::auto_queue::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
+    crate::services::auto_queue::transactions::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
         tx,
         dispatch_id,
         "failed",
@@ -1414,6 +1414,10 @@ mod runtime_completion_policy_tests {
 #[cfg(test)]
 #[path = "replay_hold_tests.rs"]
 mod replay_hold_tests;
+
+#[cfg(test)]
+#[path = "completion_postgres_terminal_sync_tests.rs"]
+mod terminal_sync_tests;
 
 #[cfg(test)]
 #[path = "completion_postgres_snapshot_tests.rs"]

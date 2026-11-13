@@ -370,7 +370,9 @@ pub(super) async fn fail_or_retry(
                 context: Some(ctx.to_string()),
                 retry_count,
             };
-            match dispatched_sessions_db::create_retry_dispatch_pg(pool, &meta).await {
+            match crate::services::auto_queue::transactions::create_retry_dispatch_pg(pool, &meta)
+                .await
+            {
                 Ok(new_id) => {
                     crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
                         pool.clone(),

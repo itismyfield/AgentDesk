@@ -746,6 +746,7 @@ mod settle_over_http {
             let (sources, build_digest, at) = (Vec::new(), "b".to_owned(), Utc::now());
             let initial_anchor = 100;
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources,
                 initial_anchor,
@@ -753,7 +754,9 @@ mod settle_over_http {
                 at,
             })
         };
-        let era = store.begin_era(&[channel], Utc::now(), init).unwrap();
+        let era = store
+            .begin_fixture_era(&[channel], Utc::now(), init)
+            .unwrap();
         let mut recorded = store.open_channel(&era, channel).unwrap().unwrap();
         for (serial, &msg_id) in (0u64..).zip(posted) {
             let anchor_id = recorded.ledger().anchor();

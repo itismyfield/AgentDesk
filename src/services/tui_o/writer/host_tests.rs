@@ -346,6 +346,7 @@ fn hosted_as(
 fn empty_init(channel: u64) -> Initialized {
     let (initial_anchor, build_digest, at) = (100, "b".to_string(), Utc::now());
     Initialized {
+        policy_parent: None,
         channel,
         sources: Vec::new(),
         initial_anchor,
@@ -370,7 +371,10 @@ fn copy_dir(from: &Path, to: &Path) {
 #[tokio::test(start_paused = true)]
 async fn only_a_selected_channel_gets_an_actor_and_it_is_ready_only_while_owned() {
     let (harness, path, source) = switched_over(&row("m0", "before the switch"));
-    harness.store.init_channel(&empty_init(OTHER)).unwrap();
+    harness
+        .store
+        .init_fixture_channel(&empty_init(OTHER))
+        .unwrap();
     let startup = p5_event(CHANNEL, "claude", p5::BindingTarget::Source(source));
     p5_log(harness._runtime.path(), CHANNEL, &startup);
     let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);

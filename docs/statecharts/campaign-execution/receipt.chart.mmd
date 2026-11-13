@@ -1,0 +1,66 @@
+---
+title: "Campaign command: locked decision and atomic receipt"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: pending
+    lg1: committed
+  }
+  class lg0 orange
+  class lg1 teal
+  s0: no caller holds the lock#59; durable effect 0, receipt absent
+  s1: reading the saved receipt#59; durable effect 0, receipt absent
+  s2: reading locked facts#59; durable effect 0, receipt absent
+  s3: both calls finished#59; durable effect 0, receipt absent
+  s4: deciding from locked facts#59; durable effect 0, receipt absent
+  s5: writing state and evidence in the transaction#59; durable effect 0, receipt absent
+  s6: rendering the saved response#59; durable effect 0, receipt absent
+  s7: writing the receipt in the transaction#59; durable effect 0, receipt absent
+  s8: ready to commit#59; durable effect 0, receipt absent
+  s9: no caller holds the lock#59; durable effect 1, receipt saved
+  s10: both calls finished#59; durable effect 1, receipt saved
+  s11: reading the saved receipt#59; durable effect 1, receipt saved
+  s12: replaying the saved response#59; durable effect 1, receipt saved
+  [*] --> s0
+  s0 --> s1: one caller acquires the campaign and run locks
+  s1 --> s0: a failure rolls back and releases the locks
+  s1 --> s2: the caller checks the receipt before deciding
+  s0 --> s3: a failure rolls back and releases the locks
+  s2 --> s0: a failure rolls back and releases the locks
+  s2 --> s4: the caller reads state and stored seal inside the lock
+  s4 --> s0: a failure rolls back and releases the locks
+  s4 --> s5: the service decides without releasing the lock
+  s1 --> s3: a failure rolls back and releases the locks
+  s2 --> s3: a failure rolls back and releases the locks
+  s5 --> s0: a failure rolls back and releases the locks
+  s5 --> s6: the database stages state and evidence
+  s4 --> s3: a failure rolls back and releases the locks
+  s6 --> s0: a failure rolls back and releases the locks
+  s6 --> s7: the response is rendered inside the transaction
+  s5 --> s3: a failure rolls back and releases the locks
+  s7 --> s0: a failure rolls back and releases the locks
+  s7 --> s8: the database stages the receipt
+  s8 --> s0: a failure rolls back and releases the locks
+  s8 --> s9: the transaction commits and releases the locks
+  s6 --> s3: a failure rolls back and releases the locks
+  s7 --> s3: a failure rolls back and releases the locks
+  s9 --> s10: a failure rolls back and releases the locks
+  s9 --> s11: one caller acquires the campaign and run locks
+  s8 --> s3: a failure rolls back and releases the locks
+  s8 --> s10: the transaction commits and releases the locks
+  s11 --> s10: a failure rolls back and releases the locks
+  s11 --> s12: the caller checks the receipt before deciding
+  s12 --> s10: a failure rolls back and releases the locks or the transaction commits and releases the locks
+  class s0 orange
+  class s1 orange
+  class s2 orange
+  class s3 orange
+  class s4 orange
+  class s5 orange
+  class s6 orange
+  class s7 orange
+  class s8 orange
+  class s9 teal
+  class s10 teal
+  class s11 teal
+  class s12 teal

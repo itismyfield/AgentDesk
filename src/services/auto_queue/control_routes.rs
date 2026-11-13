@@ -635,7 +635,11 @@ pub async fn repair_phase_gates(
         dispatch_id: parsed_body.dispatch_id,
     };
     let (status, response_body) =
-        match crate::db::auto_queue::repair_phase_gates_for_run_on_pg(pool, &id, options).await {
+        match crate::services::auto_queue::transactions::repair_phase_gates_for_run_on_pg(
+            pool, &id, options,
+        )
+        .await
+        {
             Ok(summary) => {
                 audit_phase_gate_repair_summary(&caller, &summary);
                 let outcomes: Vec<serde_json::Value> = summary

@@ -17,6 +17,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "owner_input_common_operation_tests.rs"]
+mod common_operation_tests;
+
 pub(super) const PROMPT: &str = "owner busy question";
 pub(super) const AUTHOR: &str = "7";
 pub(super) const NAME: &str = "tester";

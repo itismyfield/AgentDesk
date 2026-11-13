@@ -8,7 +8,7 @@ pub async fn delete_card(
     let Some(pool) = state.pg_pool_ref() else {
         return Err(pg_pool_required_error());
     };
-    match kanban_db::soft_delete_card_pg(pool, &id).await {
+    match entry_transactions::soft_delete_card_pg(pool, &id).await {
         Ok(kanban_db::CardDeleteOutcome::NotFound) => Err(AppError::not_found("card not found")),
         Ok(kanban_db::CardDeleteOutcome::LiveDispatch(dispatch_id)) => Err(AppError::conflict(
             format!("card has live dispatch {dispatch_id}; cancel it before deleting the card"),

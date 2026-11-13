@@ -240,7 +240,7 @@ pub(super) async fn skip_entry_with_pg(
     id: &str,
     pool: &sqlx::PgPool,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    match crate::db::auto_queue::update_entry_status_on_pg(
+    match crate::services::auto_queue::transactions::update_entry_status_on_pg(
         pool,
         id,
         crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
