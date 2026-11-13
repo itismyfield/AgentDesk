@@ -401,6 +401,302 @@ pub(crate) fn health_witness() -> Result<Option<serde_json::Value>, String> {
     }
 }
 
+pub(crate) fn with_control_routes(app: axum::Router) -> Result<axum::Router, String> {
+    if !has_admitted_run() {
+        return Ok(app);
+    }
+    #[cfg(unix)]
+    control_epoch()?;
+    Ok(app.merge(
+        axum::Router::new()
+            .route(
+                "/_agentdesk/test-control",
+                axum::routing::post(control_request),
+            )
+            .layer(axum::extract::DefaultBodyLimit::max(8192)),
+    ))
+}
+
+async fn control_request(
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match dispatch_control(peer, &body) {
+        Ok(value) => axum::Json(value).into_response(),
+        Err(_) => axum::http::StatusCode::FORBIDDEN.into_response(),
+    }
+}
+
+#[cfg(unix)]
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ControlRequest {
+    schema: u8,
+    action: String,
+    root: String,
+    instance_id: String,
+    nonce: String,
+    challenge: String,
+    proof: String,
+}
+
+#[cfg(unix)]
+fn dispatch_control(peer: std::net::SocketAddr, body: &[u8]) -> Result<serde_json::Value, String> {
+    let request: ControlRequest = serde_json::from_slice(body).map_err(|_| rejected())?;
+    let instance = super::current()?.ok_or_else(rejected)?;
+    let run = RUN.lock().map_err(|_| rejected())?;
+    let snapshot = run.as_ref().ok_or_else(rejected)?;
+    if !peer.ip().is_loopback()
+        || body.len() > 8192
+        || request.schema != 1
+        || !matches!(request.action.as_str(), "probe" | "stop")
+        || request.root != instance.root.to_string_lossy()
+        || request.instance_id != instance.instance_id
+        || request.nonce != snapshot.nonce
+        || !uuid::Uuid::parse_str(&request.challenge)
+            .is_ok_and(|id| !id.is_nil() && id.hyphenated().to_string() == request.challenge)
+    {
+        return Err(rejected());
+    }
+    snapshot.verify(instance)?;
+    let key = snapshot.control_key(instance)?;
+    let mut encoded = serde_json::to_value(&request).map_err(|_| rejected())?;
+    encoded
+        .as_object_mut()
+        .ok_or_else(rejected)?
+        .remove("proof");
+    let expected = signed_control(&key, b"agentdesk-test-control-v1/request\0", &encoded)?;
+    if request.proof.len() != 64
+        || !request
+            .proof
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !crate::utils::auth::constant_time_token_eq(&expected, &request.proof)
+    {
+        return Err(rejected());
+    }
+    let bound = snapshot.bound.ok_or_else(rejected)?;
+    let witness = serde_json::json!({"schema":1,"instance_id":instance.instance_id,"head":snapshot.input.head,
+        "pid":std::process::id(),"binary_sha256":snapshot.input.binary.sha256,"nonce":snapshot.nonce,
+        "port":bound.port(),"identities":snapshot.input.identities,"live_ready":false});
+    let mut response = serde_json::json!({"schema":1,"action":request.action,"challenge":request.challenge,
+        "witness":witness,"control_ready":true,"epoch":control_epoch()?,"accepted":request.action=="stop"});
+    response["proof"] =
+        signed_control(&key, b"agentdesk-test-control-v1/response\0", &response)?.into();
+    if request.action == "stop" {
+        write_control_ack(instance, &response)?;
+        // The signed receipt precedes the signal; only the external owner can prove exit.
+        snapshot.verify(instance)?;
+        if unsafe { libc::raise(libc::SIGTERM) } != 0 {
+            return Err(rejected());
+        }
+    }
+    Ok(response)
+}
+
+#[cfg(not(unix))]
+fn dispatch_control(
+    _peer: std::net::SocketAddr,
+    _body: &[u8],
+) -> Result<serde_json::Value, String> {
+    Err(rejected())
+}
+
+#[cfg(unix)]
+impl RunSnapshot {
+    fn control_key(&self, instance: &super::TestInstance) -> Result<[u8; 32], String> {
+        use std::{io::Read, os::unix::fs::OpenOptionsExt};
+        let mut credentials = Vec::new();
+        for name in [
+            "announce_bot_token",
+            "claude_bot_token",
+            "codex_bot_token",
+            "notify_bot_token",
+        ] {
+            let identity = self
+                .input
+                .identities
+                .iter()
+                .find(|identity| identity.name == name)
+                .ok_or_else(rejected)?;
+            let path = instance.root.join("credential").join(name);
+            super::checked_path(&path)?;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&path)
+                .map_err(|_| rejected())?;
+            let matches = |metadata: &std::fs::Metadata| {
+                metadata.is_file()
+                    && metadata.mode() & 0o7777 == 0o600
+                    && metadata.uid() == unsafe { libc::geteuid() }
+                    && metadata.nlink() == 1
+                    && (metadata.dev(), metadata.ino(), metadata.len())
+                        == (identity.device, identity.inode, identity.size)
+                    && nanoseconds(metadata.mtime(), metadata.mtime_nsec())
+                        == Some(identity.mtime_ns)
+                    && nanoseconds(metadata.ctime(), metadata.ctime_nsec())
+                        == Some(identity.ctime_ns)
+            };
+            if !matches(&file.metadata().map_err(|_| rejected())?) {
+                return Err(rejected());
+            }
+            let mut bytes = Vec::new();
+            (&file)
+                .take(4097)
+                .read_to_end(&mut bytes)
+                .map_err(|_| rejected())?;
+            if bytes.is_empty()
+                || bytes.len() > 4096
+                || !matches(&file.metadata().map_err(|_| rejected())?)
+                || !matches(&std::fs::symlink_metadata(&path).map_err(|_| rejected())?)
+            {
+                return Err(rejected());
+            }
+            credentials.push((name, bytes));
+        }
+        Ok(derive_control_key(
+            credentials
+                .iter()
+                .map(|(name, bytes)| (*name, bytes.as_slice())),
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn derive_control_key<'a>(credentials: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> [u8; 32] {
+    use sha2::Digest;
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"agentdesk-test-control-key-v1\0");
+    for (name, bytes) in credentials {
+        digest.update((name.len() as u32).to_be_bytes());
+        digest.update(name.as_bytes());
+        digest.update((bytes.len() as u32).to_be_bytes());
+        digest.update(bytes);
+    }
+    digest.finalize().into()
+}
+
+#[cfg(unix)]
+fn control_hmac(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut inner = [0x36; 64];
+    let mut outer = [0x5c; 64];
+    for (index, byte) in key.iter().enumerate() {
+        inner[index] ^= byte;
+        outer[index] ^= byte;
+    }
+    let mut digest = sha2::Sha256::new();
+    digest.update(inner);
+    digest.update(bytes);
+    let inside = digest.finalize();
+    let mut digest = sha2::Sha256::new();
+    digest.update(outer);
+    digest.update(inside);
+    digest.finalize().into()
+}
+
+#[cfg(unix)]
+fn hex_digest(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(unix)]
+fn signed_control(
+    key: &[u8; 32],
+    domain: &[u8],
+    value: &serde_json::Value,
+) -> Result<String, String> {
+    let mut bytes = domain.to_vec();
+    bytes.extend(serde_json::to_vec(value).map_err(|_| rejected())?);
+    Ok(hex_digest(control_hmac(key, &bytes)))
+}
+
+#[cfg(target_os = "macos")]
+fn control_epoch() -> Result<u32, String> {
+    let (peer, _other) = std::os::unix::net::UnixStream::pair().map_err(|_| rejected())?;
+    let mut raw = [0u32; 8];
+    let mut length = std::mem::size_of_val(&raw) as libc::socklen_t;
+    // The audit token identifies this exec generation, rather than a reusable PID alone.
+    let result = unsafe {
+        libc::getsockopt(
+            peer.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERTOKEN,
+            raw.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if result != 0
+        || length as usize != std::mem::size_of_val(&raw)
+        || raw[5] != std::process::id()
+        || raw[7] == 0
+    {
+        return Err(rejected());
+    }
+    Ok(raw[7])
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn control_epoch() -> Result<u32, String> {
+    Err(rejected())
+}
+
+#[cfg(unix)]
+fn write_control_ack(
+    instance: &super::TestInstance,
+    response: &serde_json::Value,
+) -> Result<(), String> {
+    use std::{io::Write, os::fd::FromRawFd, os::unix::fs::OpenOptionsExt};
+    let path = instance.root.join("runtime");
+    super::checked_path(&path)?;
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| rejected())?;
+    let metadata = directory.metadata().map_err(|_| rejected())?;
+    if metadata.mode() & 0o7777 != 0o700 || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(rejected());
+    }
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c"instance-control-ack.json".as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(rejected());
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let original = file.metadata().map_err(|_| rejected())?;
+    if original.mode() & 0o7777 != 0o600
+        || original.uid() != unsafe { libc::geteuid() }
+        || original.nlink() != 1
+    {
+        return Err(rejected());
+    }
+    file.write_all(&serde_json::to_vec(response).map_err(|_| rejected())?)
+        .map_err(|_| rejected())?;
+    file.sync_all().map_err(|_| rejected())?;
+    directory.sync_all().map_err(|_| rejected())?;
+    let current =
+        std::fs::symlink_metadata(instance.root.join("runtime/instance-control-ack.json"))
+            .map_err(|_| rejected())?;
+    if !current.is_file()
+        || (current.dev(), current.ino()) != (original.dev(), original.ino())
+        || current.mode() & 0o7777 != 0o600
+        || current.uid() != unsafe { libc::geteuid() }
+        || current.nlink() != 1
+    {
+        return Err(rejected());
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn check_file(metadata: &std::fs::Metadata, witness: &Witness) -> Result<(), String> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};

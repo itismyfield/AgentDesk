@@ -16,6 +16,234 @@ const LIMIT: Duration = Duration::from_secs(10);
 #[path = "run_identity_tests.rs"]
 mod run_identity;
 
+#[test]
+fn control_hmac_matches_rfc4231_case_one() {
+    let mut key = [0; 32];
+    key[..20].fill(0x0b);
+    assert_eq!(
+        super::hex_digest(super::control_hmac(&key, b"Hi There")),
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    );
+}
+
+#[test]
+fn control_request_matches_the_cross_language_vector() {
+    let key = super::derive_control_key([
+        ("announce_bot_token", b"fixture-announce".as_slice()),
+        ("claude_bot_token", b"fixture-claude".as_slice()),
+        ("codex_bot_token", b"fixture-codex".as_slice()),
+        ("notify_bot_token", b"fixture-notify".as_slice()),
+    ]);
+    assert_eq!(
+        super::hex_digest(key),
+        "b5608c372adc5486f387dfa64c820fb55585348284b575a6d206e6de12293d8a"
+    );
+    let request = json!({"schema":1,"action":"probe","root":"/tmp/adk-control-vector",
+        "instance_id":"12345678-1234-4234-8234-123456789abc",
+        "nonce":"22345678-1234-4234-8234-123456789abc",
+        "challenge":"32345678-1234-4234-8234-123456789abc"});
+    assert_eq!(
+        super::signed_control(&key, b"agentdesk-test-control-v1/request\0", &request).unwrap(),
+        "9ff4fbb7ca425f5fa9874a29219b0555b0649c5fa03ba7b00ca33ed0bf9bc419"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
+    const CHILD: &str = "I3A_B2B_AUTH_CHILD";
+    let name = concat!(
+        module_path!(),
+        "::control_probe_rejects_bad_auth_scope_peer_and_changed_image"
+    );
+    let material = [
+        ("announce_bot_token", b"fixture-announce".as_slice()),
+        ("claude_bot_token", b"fixture-claude".as_slice()),
+        ("codex_bot_token", b"fixture-codex".as_slice()),
+        ("notify_bot_token", b"fixture-notify".as_slice()),
+    ];
+    if std::env::var_os(CHILD).is_some() {
+        let _environment = initialized_scope();
+        let lease: Value =
+            serde_json::from_str(&std::env::var("AGENTDESK_TEST_LEASE").unwrap()).unwrap();
+        let _held = admit_dcserver().unwrap().unwrap();
+        super::bound_listener("127.0.0.1:18791".parse().unwrap()).unwrap();
+        let instance = instance::current().unwrap().unwrap();
+        let key = super::derive_control_key(material);
+        let sign = |mut value: Value| {
+            value["proof"] =
+                super::signed_control(&key, b"agentdesk-test-control-v1/request\0", &value)
+                    .unwrap()
+                    .into();
+            serde_json::to_vec(&value).unwrap()
+        };
+        let value = json!({"schema":1,"action":"probe","root":instance.root,
+            "instance_id":instance.instance_id,"nonce":lease["nonce"],"challenge":uuid::Uuid::new_v4().to_string()});
+        let peer = "127.0.0.1:12345".parse().unwrap();
+        let response = super::dispatch_control(peer, &sign(value.clone())).unwrap();
+        assert_eq!(response["accepted"], false);
+        assert_eq!(response["control_ready"], true);
+        assert_eq!(response["witness"]["pid"], std::process::id());
+        assert!(response["epoch"].as_u64().unwrap() > 0);
+        let mut unsigned = response.clone();
+        unsigned.as_object_mut().unwrap().remove("proof");
+        assert_eq!(
+            response["proof"],
+            super::signed_control(&key, b"agentdesk-test-control-v1/response\0", &unsigned)
+                .unwrap()
+        );
+        for case in ["auth", "nonce", "root", "instance", "unknown", "action"] {
+            let mut request = value.clone();
+            match case {
+                "nonce" => request["nonce"] = json!(uuid::Uuid::new_v4().to_string()),
+                "root" => request["root"] = json!(instance.root.join("foreign")),
+                "instance" => request["instance_id"] = json!(uuid::Uuid::new_v4().to_string()),
+                "unknown" => request["extra"] = json!(true),
+                "action" => request["action"] = json!("delete"),
+                _ => {}
+            }
+            let mut request: Value = serde_json::from_slice(&sign(request)).unwrap();
+            if case == "auth" {
+                request["proof"] = json!("0".repeat(64));
+            }
+            assert!(
+                super::dispatch_control(peer, &serde_json::to_vec(&request).unwrap()).is_err(),
+                "invalid {case} request was accepted"
+            );
+        }
+        assert!(
+            super::dispatch_control("192.0.2.1:12345".parse().unwrap(), &sign(value.clone()))
+                .is_err()
+        );
+        let ack = instance.root.join("runtime/instance-control-ack.json");
+        std::fs::write(&ack, b"foreign-control-sentinel").unwrap();
+        std::fs::set_permissions(&ack, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut stop = value.clone();
+        stop["action"] = json!("stop");
+        assert!(
+            super::dispatch_control(peer, &sign(stop)).is_err(),
+            "existing acknowledgement was overwritten"
+        );
+        assert_eq!(std::fs::read(&ack).unwrap(), b"foreign-control-sentinel");
+        let executable = std::env::current_exe().unwrap();
+        std::fs::rename(&executable, executable.with_extension("old")).unwrap();
+        std::fs::write(executable, b"changed synthetic image").unwrap();
+        assert!(
+            super::dispatch_control(peer, &sign(value)).is_err(),
+            "changed executable reached the authenticated control callback"
+        );
+        return;
+    }
+    use sha2::{Digest, Sha256};
+    let fixture = LeaseFixture::new(true);
+    let executable = fixture.root.join("fixture-worktree/target/debug/agentdesk");
+    std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+    let binary = File::open(&executable).unwrap();
+    let metadata = binary.metadata().unwrap();
+    let digest = format!("{:x}", Sha256::digest(std::fs::read(&executable).unwrap()));
+    let directory = fixture.root.join("credential");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let identities: Vec<_> = material.iter().enumerate().map(|(index, (name, bytes))| {
+        let path = directory.join(name); std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let m = std::fs::metadata(path).unwrap();
+        json!({"name":name,"application_id":(index+100).to_string(),"device":m.dev(),"inode":m.ino(),"size":m.len(),
+            "mtime_ns":super::nanoseconds(m.mtime(),m.mtime_nsec()).unwrap(),"ctime_ns":super::nanoseconds(m.ctime(),m.ctime_nsec()).unwrap()})
+    }).collect();
+    let run = json!({"schema":1,"head":"a".repeat(40),"worktree":fixture.root.join("fixture-worktree"),
+        "binary":{"fd":binary.as_raw_fd(),"device":metadata.dev(),"inode":metadata.ino(),"sha256":digest},"identities":identities});
+    let environment = fixture::command(&fixture.root);
+    let mut command = Command::new(&executable);
+    command
+        .env_clear()
+        .envs(
+            environment
+                .get_envs()
+                .filter_map(|(key, value)| value.map(|value| (key, value))),
+        )
+        .args(["--exact", selector(name), "--nocapture"])
+        .env(CHILD, "1")
+        .env("AGENTDESK_TEST_RUN", run.to_string())
+        .env("AGENTDESK_TEST_LEASE", fixture.witness.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let descriptors = [
+        binary.as_raw_fd(),
+        fixture.donor.as_ref().unwrap().as_raw_fd(),
+    ];
+    unsafe {
+        command.pre_exec(move || {
+            for fd in descriptors {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let output = crate::services::process::wait_with_output_timeout(
+        command.spawn().unwrap(),
+        Duration::from_secs(90),
+        "authenticated control child",
+    )
+    .unwrap();
+    fixture::assert_single_test_passed(&output, selector(name));
+}
+
+#[test]
+fn control_route_is_absent_without_an_admitted_run() {
+    const CHILD: &str = "I3A_B2B_ABSENT_ROUTE";
+    let name = concat!(
+        module_path!(),
+        "::control_route_is_absent_without_an_admitted_run"
+    );
+    if let Ok(mode) = std::env::var(CHILD) {
+        let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        if mode == "legacy" {
+            instance::initialize().unwrap();
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use tower::ServiceExt;
+                let app = super::with_control_routes(axum::Router::new()).unwrap();
+                let mut request = axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/_agentdesk/test-control")
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+                request.extensions_mut().insert(axum::extract::ConnectInfo(
+                    "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                ));
+                assert_eq!(
+                    app.oneshot(request).await.unwrap().status(),
+                    axum::http::StatusCode::NOT_FOUND
+                );
+            });
+        return;
+    }
+    let (_temporary, root) = fixture::fixture();
+    for mode in ["normal", "legacy"] {
+        let mut command = if mode == "normal" {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.env_clear();
+            command
+        } else {
+            fixture::command(&root)
+        };
+        let output = command
+            .args(["--exact", selector(name), "--nocapture"])
+            .env(CHILD, mode)
+            .output()
+            .unwrap();
+        fixture::assert_single_test_passed(&output, selector(name));
+    }
+}
+
 struct LeaseFixture {
     _temporary: tempfile::TempDir,
     root: PathBuf,

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import queue
 import resource
+import signal
 import subprocess
 import sys
 import tempfile
@@ -213,6 +214,18 @@ class InstanceLeaseTests(unittest.TestCase):
 
 
 class InstanceSupervisorTests(unittest.TestCase):
+    def test_verified_sigterm_scope_is_temporary_and_legacy_is_untouched(self):
+        original = signal.getsignal(signal.SIGTERM)
+        with lifecycle._verified_sigterm(False) as stopped:
+            self.assertIs(signal.getsignal(signal.SIGTERM), original)
+            self.assertFalse(stopped.is_set())
+        with lifecycle._verified_sigterm(True) as stopped:
+            handler = signal.getsignal(signal.SIGTERM)
+            self.assertIsNot(handler, original)
+            handler(signal.SIGTERM, None)
+            self.assertTrue(stopped.is_set())
+        self.assertIs(signal.getsignal(signal.SIGTERM), original)
+
     def setUp(self):
         self.fixture = declarations.InstanceDeclarationTests(methodName="runTest")
         self.fixture.setUp()

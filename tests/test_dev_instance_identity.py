@@ -1,12 +1,16 @@
 """B2a identity and same-run health gates; no real credentials or network."""
 import copy
 import hashlib
+import hmac
 import importlib
 import io
 import json
 import os
 from pathlib import Path
 import time
+import subprocess
+import sys
+import uuid
 import unittest
 from unittest import mock
 
@@ -255,6 +259,225 @@ class IdentityTransportTests(unittest.TestCase):
             with self.assertRaises(files.InstanceError):
                 identity.request_json(f'http://127.0.0.1:{server.server_port}/redirect',time.monotonic()+2,b'SYNTHETIC_AUTH_ONLY')
         self.assertEqual(seen,['/identity','/redirect'])
+
+
+class ControlProtocolTests(unittest.TestCase):
+    def setUp(self):
+        from scripts.dev_instance import identity
+        self.identity = identity
+        self.base = IdentityAdmissionTests(methodName='runTest')
+        self.base.setUp()
+        self.addCleanup(self.base.doCleanups)
+        self.root, self.manifest = self.base.root, copy.deepcopy(self.base.manifest)
+        self.observed = self.base.probe()
+        self.nonce, self.digest = str(uuid.uuid4()), 'a'*64
+        self.mode, self.requests, self.paths, self.mutate = 'normal', [], [], lambda value: None
+        self.ack = self.root/'runtime/instance-control-ack.json'
+
+    def api(self, name):
+        value = getattr(self.identity, name, None)
+        self.assertTrue(callable(value), name+' must authenticate the existing lifecycle caller')
+        return value
+
+    @staticmethod
+    def canonical(value):
+        return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+
+    def key(self):
+        value = bytearray(b'agentdesk-test-control-key-v1\0')
+        for name in sorted(NAMES):
+            encoded, raw = name.encode(), (self.root/'credential'/name).read_bytes()
+            value.extend(len(encoded).to_bytes(4, 'big')+encoded+len(raw).to_bytes(4, 'big')+raw)
+        return hashlib.sha256(value).digest()
+
+    def sign(self, value, direction):
+        return hmac.new(self.key(), b'agentdesk-test-control-v1/'+direction+b'\0'+self.canonical(value),
+                        hashlib.sha256).hexdigest()
+
+    def start(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        self.child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+                                      stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        def cleanup():
+            if self.child.poll() is None: self.child.terminate()
+            self.child.wait(timeout=3)
+            if not self.child.stdin.closed: self.child.stdin.close()
+        self.addCleanup(cleanup)
+        owner = self
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                owner.paths.append(self.path); self.send_response(403); self.end_headers()
+            def do_POST(self):
+                owner.paths.append(self.path)
+                request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                owner.requests.append(request)
+                unsigned = {key: value for key, value in request.items() if key != 'proof'}
+                if self.path != '/_agentdesk/test-control' or request['proof'] != owner.sign(unsigned, b'request'):
+                    self.send_response(403); self.end_headers(); return
+                if owner.mode == 'redirect':
+                    self.send_response(302); self.send_header('Location', '/control-forbidden'); self.end_headers(); return
+                witness = {'schema':1, 'instance_id':owner.manifest['instance_id'], 'head':owner.manifest['head'],
+                           'pid':owner.child.pid, 'binary_sha256':owner.digest, 'nonce':owner.nonce,
+                           'port':owner.manifest['api']['port'], 'identities':owner.observed, 'live_ready':False}
+                reply = {'schema':1, 'action':request['action'], 'challenge':request['challenge'],
+                         'witness':witness, 'control_ready':True, 'epoch':7, 'accepted':request['action']=='stop'}
+                owner.mutate(reply)
+                if owner.mode == 'epoch-change' and request['action'] == 'stop': reply['epoch'] = 8
+                reply['proof'] = owner.sign(reply, b'response')
+                if owner.mode == 'forged': reply['proof'] = '0'*64
+                if request['action'] == 'stop':
+                    if owner.mode not in {'missing', 'eof-missing'}:
+                        ack = copy.deepcopy(reply)
+                        if owner.mode == 'old-ack':
+                            ack['challenge'] = str(uuid.uuid4()); ack.pop('proof')
+                            ack['proof'] = owner.sign(ack, b'response')
+                        owner.ack.write_bytes(owner.canonical(ack)); owner.ack.chmod(0o600)
+                        if owner.mode == 'public-ack': owner.ack.chmod(0o644)
+                        if owner.mode == 'linked-ack': os.link(owner.ack, owner.root/'hardlink-ack')
+                    if owner.mode != 'no-exit': owner.child.stdin.close()
+                    if owner.mode.startswith('eof'):
+                        self.close_connection = True; return
+                body = owner.canonical(reply)
+                self.send_response(200); self.send_header('Content-Length', str(len(body))); self.end_headers()
+                self.wfile.write(body)
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.manifest['api']['port'] = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+
+    def test_control_probe_and_stop_wait_for_the_original_child(self):
+        probe, stop = self.api('control_probe'), self.api('cooperative_stop')
+        self.start()
+        snapshot = probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+3)
+        self.assertEqual(snapshot['epoch'], 7)
+        with mock.patch.object(self.child, 'wait', wraps=self.child.wait) as wait:
+            result = stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+3)
+            wait.assert_called_once()
+        self.assertTrue(result['control_ack']); self.assertTrue(result['gateway_wait_ack'])
+        self.assertEqual(result['exit_code'], 0)
+        self.assertEqual([item['action'] for item in self.requests], ['probe', 'probe', 'stop'])
+        self.assertEqual(len({item['challenge'] for item in self.requests}), 3)
+
+    def test_public_nonce_does_not_authenticate_a_forged_control_reply(self):
+        probe = self.api('control_probe'); self.start(); self.mode = 'forged'
+        with self.assertRaises(self.identity.ControlRefused):
+            probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
+
+    def test_signed_reply_still_requires_exact_schema_challenge_epoch_and_witness(self):
+        probe = self.api('control_probe'); self.start()
+        variants = [('schema', True), ('action', 'stop'), ('challenge', str(uuid.uuid4())),
+                    ('epoch', 0), ('epoch', True), ('epoch', 2**32), ('control_ready', 1),
+                    ('accepted', True), ('extra', True)]
+        for field, value in variants:
+            self.mutate = lambda reply, field=field, value=value: reply.__setitem__(field, value)
+            with self.subTest(field=field, value=value), self.assertRaises(self.identity.ControlRefused):
+                probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
+        self.mutate = lambda reply: reply['witness'].__setitem__('nonce', 'old-run')
+        with self.assertRaises(self.identity.ControlRefused):
+            probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
+
+    def test_valid_http_reply_without_durable_ack_is_refused_before_wait(self):
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'missing'
+        with mock.patch.object(self.child, 'wait', wraps=self.child.wait) as wait:
+            with self.assertRaises(self.identity.ControlRefused):
+                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+            wait.assert_not_called()
+
+    def test_eof_is_accepted_only_with_the_signed_fresh_ack(self):
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'eof'
+        result = stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+        self.assertTrue(result['gateway_wait_ack']); self.assertEqual(result['exit_code'], 0)
+
+    def test_eof_without_ack_cannot_claim_gateway_exit(self):
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'eof-missing'
+        with self.assertRaises(self.identity.ControlRefused):
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+
+    def test_old_challenge_and_public_ack_files_are_refused(self):
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'old-ack'
+        with self.assertRaises(self.identity.ControlRefused):
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+
+    def test_wait_timeout_cannot_be_replaced_by_http_success(self):
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'no-exit'
+        with mock.patch.object(self.child, 'wait', side_effect=subprocess.TimeoutExpired('owned-child', .01)) as wait:
+            with self.assertRaises(self.identity.ControlRefused):
+                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+            wait.assert_called_once()
+
+    def test_ack_must_remain_private_even_with_a_valid_signature(self):
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'public-ack'
+        with self.assertRaises(self.identity.ControlRefused):
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+
+    def test_ack_hardlink_is_not_adopted_as_a_private_acknowledgement(self):
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'linked-ack'
+        with self.assertRaises(self.identity.ControlRefused):
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+
+    def test_epoch_change_between_fresh_probe_and_stop_is_refused(self):
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'epoch-change'
+        with self.assertRaises(self.identity.ControlRefused):
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+
+    def test_post_control_ignores_proxy_and_does_not_follow_redirects(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        probe = self.api('control_probe'); self.start(); received = []
+        class Proxy(BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_POST(self):
+                received.append(self.path); self.send_response(403); self.end_headers()
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Proxy)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+        with mock.patch.dict(os.environ, {'HTTP_PROXY':f'http://127.0.0.1:{server.server_port}',
+                                         'http_proxy':f'http://127.0.0.1:{server.server_port}',
+                                         'NO_PROXY':'', 'no_proxy':''}):
+            probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
+            self.mode = 'redirect'
+            with self.assertRaises(self.identity.ControlRefused):
+                probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
+        self.assertEqual(received, [])
+        self.assertEqual(self.paths, ['/_agentdesk/test-control']*2)
+
+    def test_changed_credential_metadata_refuses_before_any_control_request(self):
+        probe = self.api('control_probe'); self.start()
+        (self.root/'credential'/NAMES[0]).write_bytes(b'SYNTHETIC_REPLACED')
+        with self.assertRaises(self.identity.ControlRefused):
+            probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
+        self.assertEqual(self.requests, [])
+
+    def test_observed_inventory_cannot_carry_extra_private_fields(self):
+        probe = self.api('control_probe')
+        observed = copy.deepcopy(self.observed); observed[0]['private'] = 'SYNTHETIC_UNEXPECTED'
+        with mock.patch.object(self.identity, '_post_control') as request:
+            with self.assertRaises(self.identity.ControlRefused):
+                probe(self.manifest, self.nonce, 123456, self.digest, observed, time.monotonic()+2)
+            request.assert_not_called()
+
+    def test_cross_rust_public_synthetic_key_and_request_vector(self):
+        derive = self.api('_control_key'); mac = self.api('_control_mac')
+        for name, value in zip(sorted(NAMES), (b'fixture-announce', b'fixture-claude', b'fixture-codex', b'fixture-notify')):
+            (self.root/'credential'/name).write_bytes(value)
+        observed = [{**item, **self.identity._credential(self.root, item['name'])[0]} for item in self.observed]
+        key = derive(self.root, observed)
+        self.assertEqual(key.hex(), 'b5608c372adc5486f387dfa64c820fb55585348284b575a6d206e6de12293d8a')
+        request = {'schema':1, 'action':'probe', 'root':'/tmp/adk-control-vector',
+                   'instance_id':'12345678-1234-4234-8234-123456789abc',
+                   'nonce':'22345678-1234-4234-8234-123456789abc',
+                   'challenge':'32345678-1234-4234-8234-123456789abc'}
+        self.assertEqual(mac(key, b'request', request),
+                         '9ff4fbb7ca425f5fa9874a29219b0555b0649c5fa03ba7b00ca33ed0bf9bc419')
+
+    def test_key_derivation_uses_exact_raw_file_bytes_including_final_newline(self):
+        derive = self.api('_control_key')
+        path = self.root/'credential'/NAMES[0]
+        path.write_bytes(path.read_bytes()+b'\n')
+        observed = [{**item, **self.identity._credential(self.root, item['name'])[0]} for item in self.observed]
+        self.assertEqual(derive(self.root, observed), self.key())
 
 
 if __name__ == '__main__': unittest.main()

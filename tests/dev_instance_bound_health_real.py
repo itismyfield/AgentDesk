@@ -74,6 +74,14 @@ def wrapper():
             launch.write_text(json.dumps({'pid':child.pid,'argv':[argv[0],'--exact',SELECTOR,'--nocapture'],'env':kwargs['env']}))
             launch.chmod(0o600)
             return child
+    if mode == 'control-failure':
+        def refuse_control(*args, **kwargs):
+            raise identity.ControlRefused('synthetic control refusal')
+        identity.cooperative_stop = refuse_control
+    if mode == 'keeper-forward-failure':
+        def refuse_keeper(*args, **kwargs):
+            raise OSError('synthetic original keeper forwarding failure')
+        keeper.request = refuse_keeper
     def supervise(*args, **kwargs):
         return lifecycle.supervise(*args, **kwargs, spawn=native_spawn)
     if mode == 'publication-io-error':
@@ -223,12 +231,108 @@ class BoundHealthRealTests(RealKeeperTests):
         self.assertEqual(self.wrapper.returncode,0,out+err)
         result=json.loads(out)
         self.assertTrue(result['verified']);self.assertFalse(result['live_ready'])
+        self.assertTrue(result['cooperative_stop'])
+        self.assertTrue(result['gateway_wait_ack'])
+        self.assertFalse(result['forced_cleanup'])
+        self.assertEqual(result['child_exit'], -signal.SIGTERM)
         self.assert_closed()
         print('B2A_ACTUAL '+json.dumps({'pid':receipt['pid'],'port':receipt['port'],'nonce':receipt['nonce'],
              'binary_sha256':self.digest,'identities':len(receipt['identities']),'live_ready':False,'resources_remaining':0}),flush=True)
 
     def test_actual_native_same_run_four_identities_health_and_down(self): self.acceptance('positive')
     def test_actual_native_registry_arm_preserves_same_run_witness(self): self.acceptance('registry')
+
+    def test_public_nonce_alone_cannot_stop_the_native_child(self):
+        import urllib.error
+        import urllib.request
+        self.start()
+        receipt = self.wait_for(self.receipt, 'bound public witness', timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        request = {'schema':1, 'action':'probe', 'root':str(self.root),
+                   'instance_id':self.instance_id, 'nonce':receipt['nonce'],
+                   'challenge':str(uuid.uuid4()), 'proof':'0'*64}
+        url = f"http://127.0.0.1:{receipt['port']}/_agentdesk/test-control"
+        for action in ('probe', 'stop'):
+            request['action'] = action
+            with self.assertRaises(urllib.error.HTTPError) as refused:
+                urllib.request.urlopen(urllib.request.Request(url, json.dumps(request).encode(),
+                    {'Content-Type':'application/json'}, method='POST'), timeout=3)
+            self.assertEqual(refused.exception.code, 403)
+            refused.exception.close()
+        self.assertIsNone(self.wrapper.poll())
+        self.assertFalse((self.root/'runtime/instance-control-ack.json').exists())
+
+    def test_control_failure_is_forced_hold_after_original_handle_cleanup(self):
+        self.start('control-failure')
+        receipt = self.wait_for(self.receipt, 'bound public witness', timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        self.control.write(json.dumps({'root':str(self.root),'nonce':receipt['nonce'],'action':'down'})+'\n')
+        self.control.flush()
+        out, err = self.wrapper.communicate(timeout=15)
+        result = json.loads(out)
+        self.assertEqual(result['status'], 'HOLD', out+err)
+        self.assertEqual(self.wrapper.returncode, 6, out+err)
+        self.assertFalse(result['cooperative_stop'])
+        self.assertTrue(result['forced_cleanup'])
+        self.assertTrue(result['gateway_wait_ack'])
+        self.assertFalse(result['live_ready'])
+        self.assert_closed()
+
+    def test_sigterm_forward_failure_is_bounded_forced_hold(self):
+        self.start('keeper-forward-failure')
+        receipt = self.wait_for(self.receipt, 'bound public witness', timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        started = time.monotonic()
+        self.wrapper.terminate()
+        out, err = self.wrapper.communicate(timeout=15)
+        result = json.loads(out)
+        self.assertLess(time.monotonic()-started, 12)
+        self.assertEqual(result['status'], 'HOLD', out+err)
+        self.assertEqual(self.wrapper.returncode, 6, out+err)
+        self.assertFalse(result['cooperative_stop'])
+        self.assertTrue(result['forced_cleanup'])
+        self.assertTrue(result['gateway_wait_ack'])
+        self.assert_closed()
+
+    def test_wrapper_sigterm_requests_cooperation_before_keeper_close(self):
+        self.start()
+        receipt = self.wait_for(self.receipt, 'bound public witness', timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        self.wrapper.terminate()
+        out, err = self.wrapper.communicate(timeout=15)
+        result = json.loads(out)
+        self.assertEqual(result['status'], 'STOPPED', out+err)
+        self.assertTrue(result['cooperative_stop'])
+        self.assertTrue(result['gateway_wait_ack'])
+        self.assertFalse(result['forced_cleanup'])
+        self.assertFalse(result['live_ready'])
+        self.assert_closed()
+
+    def test_control_rechecks_the_current_execution_path_before_self_signal(self):
+        self.start()
+        receipt = self.wait_for(self.receipt, 'bound public witness', timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        backup = self.binary.with_name('b2b1-original-'+uuid.uuid4().hex)
+        self.binary.rename(backup)
+        try:
+            shutil.copyfile(backup, self.binary)
+            self.binary.chmod(0o700)
+            with self.assertRaises(identity.ControlRefused):
+                identity.control_probe(self.manifest, receipt['nonce'], receipt['pid'],
+                                       self.digest, receipt['identities'], time.monotonic()+3)
+            self.assertIsNone(self.wrapper.poll())
+            self.control.write(json.dumps({'root':str(self.root),'nonce':receipt['nonce'],'action':'down'})+'\n')
+            self.control.flush()
+            out, err = self.wrapper.communicate(timeout=15)
+            result = json.loads(out)
+            self.assertEqual(result['status'], 'HOLD', out+err)
+            self.assertEqual(self.wrapper.returncode, 6, out+err)
+            self.assertTrue(result['forced_cleanup'])
+            self.assertFalse(result['cooperative_stop'])
+            self.assert_closed()
+        finally:
+            # Restore this fixture's executable inode, never a foreign process or file.
+            backup.replace(self.binary)
 
     def refusal(self, mode, *, digest=None, started=True):
         self.start(mode,digest)

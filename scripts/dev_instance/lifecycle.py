@@ -1,6 +1,7 @@
 """Bound one declared child without claiming live readiness or orphan authority."""
 
 import hashlib
+from contextlib import ExitStack, contextmanager
 import json
 import math
 import threading
@@ -8,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import select
+import signal
 import subprocess
 import time
 
@@ -28,6 +30,25 @@ class CleanupPending(InstanceError):
 
 class _VerificationRefused(Exception):
     pass
+
+
+@contextmanager
+def _verified_sigterm(enabled):
+    stopped = threading.Event()
+    previous = None
+    if enabled:
+        if threading.current_thread() is not threading.main_thread():
+            raise InstanceError('verified supervisor requires its original main thread')
+        def requested(signum, frame):
+            if not stopped.is_set():
+                stopped.received_at = time.monotonic()
+                stopped.set()
+        previous = signal.signal(signal.SIGTERM, requested)
+    try:
+        yield stopped
+    finally:
+        if enabled:
+            signal.signal(signal.SIGTERM, previous)
 
 
 def _bounds(wall_timeout, stop_grace, max_gateway):
@@ -132,7 +153,8 @@ def supervise(base, instance_id, ambient, *, binary_sha256, head, wall_timeout,
             if resources is not None:
                 try:
                     return _supervise_resources(manifest, resources, binary, environment, owner,
-                                                started + wall_timeout, stop_grace, spawn, control_stream, verification)
+                                                started + wall_timeout, stop_grace, spawn, control_stream,
+                                                verification)
                 except _VerificationRefused:
                     raise InstanceError('runtime witness verification refused') from None
             child = spawn([str(binary), "dcserver"], cwd=str(root), env=environment,
@@ -157,7 +179,8 @@ def supervise(base, instance_id, ambient, *, binary_sha256, head, wall_timeout,
                     "max_gateway": 1, "restarts": 0}
 
 
-def _supervise_resources(manifest, specification, binary, environment, lease, deadline, grace, spawn, control_stream, verification=None):
+def _supervise_resources(manifest, specification, binary, environment, lease, deadline, grace, spawn, control_stream,
+                         verification=None):
     from . import keeper
     from .manifest import resource_spec
     specification = resource_spec(specification)
@@ -165,6 +188,31 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
         raise InstanceError("resource bounds exceed supervisor admission")
     process, control = keeper.launch(manifest, specification, lease.nonce)
     child, requested, timed_out, stop_end = None, False, False, None
+    cooperative, forced, signal_forwarded = False, False, False
+    signal_scope, stop_requested = ExitStack(), None
+    forward_failed = threading.Event()
+    signal_deadline = None
+
+    def stop_gateway(end):
+        nonlocal cooperative, forced
+        if verification is not None:
+            try:
+                ack = identity.cooperative_stop(manifest, lease.nonce, child,
+                                                verification[1], verification[2], end)
+                if not ack.get('gateway_wait_ack') or ack.get('exit_code') != child.returncode:
+                    raise identity.ControlRefused('original Gateway wait was not acknowledged')
+                cooperative = True
+                return
+            except identity.ControlRefused:
+                forced = True
+        # A failed private control keeps its attribution even after known-own cleanup.
+        _stop_child(child, grace, end)
+
+    def request_signal_stop():
+        try:
+            keeper.request(manifest['root'], lease.nonce, 'down', timeout=grace+1)
+        except (EOFError, OSError, ValueError):
+            forward_failed.set()
     try:
         ready = keeper.receive(control)
         if ready.get("state") != "RUNNING":
@@ -182,6 +230,8 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
                                                verification[2], deadline, alive=lambda: child.poll() is None)
                 if time.monotonic() >= deadline:
                     raise InstanceError('verification exhausted startup budget')
+                # Startup retains B1's wrapper-death behavior; only a verified run intercepts SIGTERM.
+                stop_requested = signal_scope.enter_context(_verified_sigterm(True))
                 publish_runtime(Path(manifest['root']), 'runtime/instance-run.json',
                                 {**witness, 'verified': True},
                                 live_sockets={path: tuple(value) for path, value in ready['sockets'].items()})
@@ -199,11 +249,20 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
                     return
             threading.Thread(target=controls, daemon=True).start()
         while child.poll() is None:
+            if stop_requested is not None and stop_requested.is_set() and not signal_forwarded:
+                signal_forwarded = True
+                signal_deadline = stop_requested.received_at + grace
+                threading.Thread(target=request_signal_stop, daemon=True).start()
+            if signal_forwarded and (forward_failed.is_set() or time.monotonic() >= signal_deadline):
+                requested, forced = True, True
+                stop_end = time.monotonic() + grace
+                _stop_child(child, grace, stop_end)
+                break
             remaining = deadline-time.monotonic()
             if remaining <= 0:
                 requested, timed_out = True, True
                 stop_end = time.monotonic() + grace
-                _stop_child(child, grace, stop_end)
+                stop_gateway(stop_end)
                 break
             ready, _, _ = select.select([control], [], [], min(remaining, .05))
             if ready:
@@ -214,7 +273,9 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
                         or not math.isfinite(stop_end) or stop_end > time.monotonic()+grace):
                     raise InstanceError("keeper control authority changed")
                 requested = True
-                _stop_child(child, grace, stop_end)
+                if signal_deadline is not None:
+                    stop_end = min(stop_end, signal_deadline)
+                stop_gateway(stop_end)
                 break
         stop_end = stop_end or time.monotonic()+grace
         keeper.send(control, {"nonce": lease.nonce, "exit": child.wait(timeout=max(0, stop_end-time.monotonic())),
@@ -225,11 +286,12 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
             raise CleanupPending(process)
         if process.wait(timeout=grace) != 0:
             raise CleanupPending(process)
-        return {**result, "status": "TIMEOUT" if timed_out else
+        return {**result, "status": "HOLD" if forced else "TIMEOUT" if timed_out else
                 "STOPPED" if requested or child.returncode == 0 else "FAILED",
                 "child_pid": child.pid, "child_exit": child.returncode,
                 "max_gateway": 1, "restarts": 0, "head": manifest["head"],
-                **({"verified": True} if verification else {})}
+                **({"verified": True, "cooperative_stop": cooperative, "forced_cleanup": forced,
+                    "gateway_wait_ack": child.returncode is not None} if verification else {})}
     except (EOFError, OSError, ValueError) as error:
         if child is not None:
             _stop_child(child, grace, stop_end or time.monotonic()+grace)
@@ -244,6 +306,7 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
                 pass
         raise
     finally:
+        signal_scope.close()
         control.close()
         try:
             process.wait(timeout=grace + 1)
