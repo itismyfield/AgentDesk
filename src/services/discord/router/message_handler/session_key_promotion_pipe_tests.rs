@@ -30,10 +30,6 @@ impl Drop for Hosting {
 
 async fn exercise(provider: ProviderKind, channel: u64, refuse: bool) {
     use std::os::unix::fs::PermissionsExt;
-    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let root = tempfile::tempdir().unwrap();
     let set = Env::set_path_after_shared_test_env_lock;
     let _root = set("AGENTDESK_ROOT_DIR", root.path());
@@ -379,19 +375,32 @@ else:
     db.drop().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn key_promotion_real_claude_pipe_dispatch_commits_and_kills_pg() {
-    exercise(ProviderKind::Claude, 81190501, false).await;
+fn run(provider: ProviderKind, channel: u64, refuse: bool) {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(exercise(provider, channel, refuse));
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn key_promotion_real_codex_pipe_dispatch_commits_and_kills_pg() {
-    exercise(ProviderKind::Codex, 81190502, false).await;
+
+#[test]
+fn key_promotion_real_claude_pipe_dispatch_commits_and_kills_pg() {
+    run(ProviderKind::Claude, 81190501, false);
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn key_promotion_real_claude_pipe_registration_refusal_holds_pg() {
-    exercise(ProviderKind::Claude, 81190503, true).await;
+#[test]
+fn key_promotion_real_codex_pipe_dispatch_commits_and_kills_pg() {
+    run(ProviderKind::Codex, 81190502, false);
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn key_promotion_real_codex_pipe_registration_refusal_holds_pg() {
-    exercise(ProviderKind::Codex, 81190504, true).await;
+#[test]
+fn key_promotion_real_claude_pipe_registration_refusal_holds_pg() {
+    run(ProviderKind::Claude, 81190503, true);
+}
+#[test]
+fn key_promotion_real_codex_pipe_registration_refusal_holds_pg() {
+    run(ProviderKind::Codex, 81190504, true);
 }
