@@ -64,6 +64,10 @@ B1은 기존 일반 launch·clear·claim 경로가 즉시 소비한다. restart 
 
 **예상 prod 16~22파일 / 순증 +790~970.** B1 head를 base로 재측정한다.
 
+B2 실행 중 공식 파서 실측에서 재추정이 +1052~1248로 올라 추가 생산 확장을 동결했다.
+[B2 추가 분할 제안](herdr-parity-restart-b2-split.plan.md)은 코디네이터 승인 전 PLAN_READY 산출물이며,
+아래의 기존 범위·수용 계약을 없애거나 B2 구현 완료로 표시하지 않는다.
+
 - queue 묶음 +340~420: 안정 operation/ticket, 기존 ticket 선조회, active seed alias join, 보호 단위 뒤 삽입,
   ticket 상태·철회·origin receipt, 일반 ingress의 reserved source 거절, gate Drop wake.
 - 명령/종료/permit 묶음 +450~550: `/restart`와 `!restart`의 공통 서비스, detached exact 종료와 postlude,
