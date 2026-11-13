@@ -18,6 +18,10 @@ fn data(node: &Node) -> crate::services::discord::Data {
 }
 
 async fn invoke(node: &Node, operation: u64) -> Vec<String> {
+    invoke_command(node, operation, "!restart").await
+}
+
+async fn invoke_command(node: &Node, operation: u64, command: &'static str) -> Vec<String> {
     let http = Arc::new(serenity::Http::new(""));
     tokio::time::timeout(
         WAIT,
@@ -25,7 +29,7 @@ async fn invoke(node: &Node, operation: u64) -> Vec<String> {
             &http,
             &data(node),
             channel(),
-            ("restart-fixture", "!restart", operation),
+            ("restart-fixture", command, operation),
         ),
     )
     .await
@@ -209,7 +213,7 @@ fn restart_common_retires_disconnects_keeps_selector_and_wakes_owner_pg() {
             })
         }));
         let wakes = Wakes::observe(&node.shared);
-        let response = invoke(&node, 900_812_801).await;
+        let response = invoke_command(&node, 900_812_801, "/restart").await;
         assert!(
             response
                 .last()

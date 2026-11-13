@@ -280,7 +280,7 @@ where
     say("♻ 세션 재시작 중...".into()).await?;
 
     #[cfg(unix)]
-    if crate::services::herdr_launch::herdr_configured_for_tui_launch(Some(channel_id.get())) {
+    if super::super::admin_host_guard::configured_refusal(channel_id.get()).is_some() {
         let response = herdr::run(
             data.shared.clone(),
             data.provider.clone(),

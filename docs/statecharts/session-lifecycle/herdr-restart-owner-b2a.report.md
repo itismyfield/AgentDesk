@@ -51,6 +51,8 @@ stateDiagram-v2
 
 ## 범위와 초기 진단
 
+Rust Gate 대기는 처음 관측한 `Arc` 세대에 고정해 A 해제 직후 B가 재진입해도 B/C의 생애로 늘어나지 않게 한다. `a_restart_waiter_finishes_when_its_observed_gate_is_replaced`가 다른 채널 알림·실패한 begin·세대 교체를 구별한다. 이 다중 operation 경합은 고정 operation 모델 밖이며 Rust 실행은 부모 보고서에서 별도 확인한다.
+
 메모리 결과는 첫 프로세스에서만 유지하며 crash 때 cache/gate를 잃는다. 같은 operation의 crash 뒤 영속 중복0이나 새 프로세스 안의 재호출 전체를 증명하지 않는다. 새 durable store·TTL/개수 제한 정책을 도입하지 않았고 기존 Discord dedup을 그 증거로 쓰지 않는다. 모델의 한 고정 operation/한 caller 취소/한 replay 범위를 넘는 경쟁은 실제 시험이 필요하다.
 
 초기 진단1241에서는 '이전 crash로 이미Ended인 idle row의 명시 재진입'과 '이번 요청 도중 daemon crash'를 겹쳐 두 번째 crash 뒤 자동 복구 주체가 없는 경로를 만들었다. SeedlessCrash와 GapSeedlessDispatchCrash에 AcceptedInputResolves가 추가로 깨졌다(checker-first6.log). 이를 PASS로 세거나 expected를 바꾸지 않았다. 최종8b3은 **이미Ended row 재진입(no current crash)**과 **현재 요청 중 단일 crash(original live/inflight)**를 별도 시나리오로 검사한다. 둘의 조합은 검증하지 않았다. 새 생산 예외가 아니라 이번 작은 모델의 명시 범위다.
