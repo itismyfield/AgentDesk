@@ -306,6 +306,13 @@ async fn due_census_tick_collects_both_hosts_and_posts_one_verdict_pg() {
             .unwrap();
         assert_eq!(outcomes.len(), 1, "{case}");
         assert_eq!(outcomes[0].status, "succeeded", "{case}: {:?}", outcomes[0]);
+        let runs = store.list_runs(&routine.id, 10).await.unwrap();
+        for key in ["started", "js_inputs", "js_action", "outcome"] {
+            assert!(
+                runs[0].discord_log_sections[key].is_string(),
+                "{case}: missing diagnostic {key}"
+            );
+        }
         let result = outcomes[0].result_json.as_ref().unwrap();
         assert_eq!(result["stage1"], expected, "{case}: {result}");
         let persisted: (String,Option<chrono::DateTime<chrono::Utc>>,Option<Value>) = sqlx::query_as("SELECT status,next_due_at,(SELECT result_json FROM routine_runs WHERE id=$2) FROM routines WHERE id=$1")

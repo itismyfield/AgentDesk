@@ -1941,13 +1941,7 @@ fn cleanup_stale_claude_tui_session(
 
 #[cfg(unix)]
 fn should_retry_claude_tui_fresh_prompt_ready(error: &str, attempt: usize) -> bool {
-    // #3889: a cold-boot stranded on the MCP-authentication-required welcome
-    // screen is a terminal, operator-actionable condition — retrying just reboots
-    // into the same blocked screen and burns another readiness window. It is
-    // already a distinct (non-timeout) error, but guard it explicitly so the
-    // retry loop can never re-enter it even if classification shifts.
-    !crate::services::claude_tui::input::is_mcp_auth_required_error(error)
-        && crate::services::claude_tui::input::is_prompt_ready_timeout_error(error)
+    crate::services::claude_tui::input::is_prompt_ready_timeout_error(error)
         && attempt < CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
 }
 

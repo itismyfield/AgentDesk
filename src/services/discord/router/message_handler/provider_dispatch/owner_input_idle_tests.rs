@@ -303,6 +303,7 @@ fn rehydrate(rig: &Rig, session: &str) {
         relay_last_offset: None,
     };
     register_tmux_runtime_binding(&rig.name, binding);
+    crate::services::claude_tui::readiness::tests::pre_source(&rig.name, &rig.transcript());
 }
 
 /// A's idle handoff settles before its AI turn ends; B uses that pane's binding while the
@@ -1465,6 +1466,7 @@ impl AttachedOwner {
         .unwrap();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(self.rig.transcript(), &path).unwrap();
+        crate::services::claude_tui::readiness::tests::pre_source(&self.rig.name, &path);
         let context = crate::config::runtime_root()
             .unwrap()
             .join("runtime/binding_contexts/claude")
@@ -2104,6 +2106,7 @@ fn a_verified_hook_adds_no_wake_for_an_already_readable_observer() {
     };
     // The source predates this hook and the drive's first wake.
     dedupe::register_tmux_runtime_binding(&owner.rig.name, existing.clone());
+    crate::services::claude_tui::readiness::tests::pre_source(&owner.rig.name, &path);
     let records = || binding_events::records_strict(channel).unwrap().unwrap();
     let before = records();
     assert!(

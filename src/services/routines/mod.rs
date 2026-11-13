@@ -15,6 +15,7 @@ pub mod fresh_session_reaper;
 mod legacy_body_census;
 pub mod loader;
 pub mod migrated;
+pub mod run_diagnostics;
 pub mod runtime;
 pub mod runtime_config;
 pub mod script_refs;

@@ -73,7 +73,7 @@ impl RoutineDiscordLogger {
             Err(error) => return RoutineDiscordLogStatus::failed(error),
         };
         let last_error = stored_error.as_deref().or(outcome.error.as_deref());
-        let message = consecutive_failures_message(&routine, threshold, last_error);
+        let message = consecutive_failures_message(&routine, threshold);
         // Keyed by the run that completed the streak, so re-logging that outcome cannot repeat it.
         let session_key = format!(
             "routine:{}:consecutive_failures:{}",
@@ -105,30 +105,9 @@ impl RoutineDiscordLogger {
     }
 }
 
-fn consecutive_failures_message(
-    routine: &RoutineRecord,
-    threshold: u32,
-    last_error: Option<&str>,
-) -> String {
-    let next_slot = routine
-        .next_due_at
-        .map(|value| value.to_rfc3339())
-        .unwrap_or_else(|| "없음".to_string());
-    routine_log_block_message(
-        "루틴 연속 실패",
-        vec![(
-            "기본",
-            vec![
-                field_line(
-                    "reason",
-                    format!("{threshold}회 연속 실패 - 점검이 필요합니다"),
-                ),
-                field_line("routine", compact(&routine.name, 80)),
-                field_line("id", &routine.id),
-                field_line("script", script_ref_for_message(&routine.script_ref, 120)),
-                field_line("last_error", compact(last_error.unwrap_or("없음"), 160)),
-                field_line("next_slot", next_slot),
-            ],
-        )],
+fn consecutive_failures_message(routine: &RoutineRecord, threshold: u32) -> String {
+    presentation::attention_message(
+        routine,
+        &format!("{threshold}회 연속 실패 · 점검이 필요합니다"),
     )
 }
