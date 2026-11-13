@@ -857,26 +857,174 @@ fn formats_ssh_direct_prompt_notification_clamps_blank_lines_and_urls() {
     }
 }
 
+fn assert_discord_literal_match_ranges(prompt: &str, output: &str) {
+    let matcher = regex::Regex::new(r"(?s)```(?:[a-zA-Z0-9_+-]+\n)?\n*([^\n].*?)\n*```").unwrap();
+    let ranges: Vec<_> = matcher
+        .captures_iter(output)
+        .map(|capture| {
+            let full = capture.get(0).unwrap();
+            let body = capture.get(1).unwrap();
+            (full.range(), body.range())
+        })
+        .collect();
+    let omitted = output
+        .rsplit_once("\n-# … (이하 ")
+        .map_or(0, |(_, suffix)| {
+            suffix
+                .strip_suffix("자)")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+        });
+    let shown = prompt.chars().count() - omitted;
+    let end = prompt
+        .char_indices()
+        .nth(shown)
+        .map_or(prompt.len(), |(index, _)| index);
+    let utf16: Vec<_> = ranges
+        .iter()
+        .map(|(full, body)| {
+            (
+                output[..full.start].encode_utf16().count()
+                    ..output[..full.end].encode_utf16().count(),
+                output[..body.start].encode_utf16().count()
+                    ..output[..body.end].encode_utf16().count(),
+            )
+        })
+        .collect();
+    let sample: String = prompt.chars().take(80).collect();
+    println!(
+        "MATCHER chars={} prefix={sample:?} shown={shown} omitted={omitted} bytes={ranges:?} utf16={utf16:?}",
+        prompt.chars().count()
+    );
+    let mut cursor = "-# ⌨️ tui direct input\n".len();
+    let mut check = |source: &str, escaped: bool| {
+        if source.is_empty() {
+            return;
+        }
+        let displayed = if escaped {
+            "\\`".repeat(source.len())
+        } else {
+            source.to_string()
+        };
+        let start = cursor
+            + output[cursor..]
+                .find(&displayed)
+                .expect("literal source prefix survives");
+        let stop = start + displayed.len();
+        if escaped || source.chars().all(|ch| ch == '\n') {
+            assert!(
+                ranges
+                    .iter()
+                    .all(|(full, _)| stop <= full.start || start >= full.end),
+                "plain literal run/newline was swallowed: {source:?} {ranges:?}"
+            );
+        } else {
+            assert!(
+                ranges
+                    .iter()
+                    .any(|(full, _)| full.start <= start && stop <= full.end),
+                "whole literal piece must be in one match"
+            );
+            for (offset, ch) in displayed.char_indices().filter(|(_, ch)| *ch != '\n') {
+                assert!(
+                    ranges.iter().any(|(_, body)| body.start <= start + offset
+                        && start + offset + ch.len_utf8() <= body.end),
+                    "source body escaped code block: {source:?} {ranges:?}"
+                );
+            }
+        }
+        cursor = stop;
+    };
+    let runs = regex::Regex::new(r"`{3,}").unwrap();
+    let mut source = 0;
+    for run in runs.find_iter(prompt) {
+        if source >= end {
+            break;
+        }
+        check(&prompt[source..run.start().min(end)], false);
+        if run.start() < end {
+            check(&prompt[run.start()..run.end().min(end)], true);
+        }
+        source = run.end().min(end);
+    }
+    if source < end {
+        check(&prompt[source..end], false);
+    }
+    let outside = regex::Regex::new(r"^(?:\\`|\n)*$").unwrap();
+    let marker = if omitted > 0 {
+        output.rfind("\n-# … (이하 ").unwrap()
+    } else {
+        output.len()
+    };
+    let mut position = "-# ⌨️ tui direct input\n".len();
+    for (full, _) in &ranges {
+        assert!(
+            outside.is_match(&output[position..full.start]),
+            "nonliteral text outside matcher ranges"
+        );
+        position = full.end;
+    }
+    assert!(
+        outside.is_match(&output[position..marker]),
+        "nonliteral tail outside matcher ranges"
+    );
+    for (start, _) in output.match_indices("```") {
+        assert!(
+            ranges
+                .iter()
+                .any(|(full, _)| full.start <= start && start + 3 <= full.end),
+            "unmatched synthetic fence at {start}: {output:?}"
+        );
+    }
+    if omitted > 0 {
+        let start = output.rfind("\n-# … (이하 ").unwrap();
+        assert!(
+            ranges.iter().all(|(full, _)| full.end <= start),
+            "omission marker is inside a code block"
+        );
+    }
+}
+
 #[test]
 fn formats_ssh_direct_prompt_notification_escapes_code_fence() {
-    for (prompt, body) in [
-        ("a ``` fence", "a \n```\n\\`\\`\\`\n```\n fence"),
+    for prompt in [
+        "```**bold**",
+        "end ```",
+        "```\n\n```",
+        "a ``` fence **bold**",
+        "a ```` fence",
+        "a ```   ",
+        "```unclosed\nbody",
+    ] {
+        let output = format_ssh_direct_prompt_notification("codex", "s", prompt);
+        assert_discord_literal_match_ranges(prompt, &output);
+    }
+
+    for (prompt, content) in [
+        ("a ``` fence", "```\na \n```\n\\`\\`\\`\n```\n fence\n```"),
         (
             "```\n@everyone\n```\n````",
-            "\n```\n\\`\\`\\`\n```\n\n@everyone\n\n```\n\\`\\`\\`\n```\n\n\n```\n\\`\\`\\`\\`\n```\n",
+            "\\`\\`\\`\n```\n\n@everyone\n\n```\n\\`\\`\\`\n\\`\\`\\`\\`",
         ),
         (
             "a ``` fence **bold**",
-            "a \n```\n\\`\\`\\`\n```\n fence **bold**",
+            "```\na \n```\n\\`\\`\\`\n```\n fence **bold**\n```",
         ),
-        ("a ```` fence", "a \n```\n\\`\\`\\`\\`\n```\n fence"),
-        ("a ```   ", "a \n```\n\\`\\`\\`\n```\n   "),
-        ("```unclosed\nbody", "\n```\n\\`\\`\\`\n```\nunclosed\nbody"),
-        ("end ```", "end \n```\n\\`\\`\\`\n```\n"),
-        ("`single` ``double``", "`single` ``double``"),
+        (
+            "a ```` fence",
+            "```\na \n```\n\\`\\`\\`\\`\n```\n fence\n```",
+        ),
+        ("a ```   ", "```\na \n```\n\\`\\`\\`\n```\n   \n```"),
+        ("```unclosed\nbody", "\\`\\`\\`\n```\nunclosed\nbody\n```"),
+        ("end ```", "```\nend \n```\n\\`\\`\\`"),
+        ("`single` ``double``", "```\n`single` ``double``\n```"),
+        ("```**bold**", "\\`\\`\\`\n```\n**bold**\n```"),
+        ("```\n\n```", "\\`\\`\\`\n\n\\`\\`\\`"),
     ] {
         let output = format_ssh_direct_prompt_notification("codex", "tmux`name", prompt);
-        assert_eq!(output, format!("-# ⌨️ tui direct input\n```\n{body}\n```"));
+        assert_discord_literal_match_ranges(prompt, &output);
+        assert_eq!(output, format!("-# ⌨️ tui direct input\n{content}"));
         assert_eq!(output.matches("```").count() % 2, 0);
         for line in output.lines().filter(|line| line.contains("```")) {
             assert_eq!(
@@ -887,10 +1035,10 @@ fn formats_ssh_direct_prompt_notification_escapes_code_fence() {
     }
     for prompt in ["`".repeat(5000), format!("a ```{}", "x".repeat(3000))] {
         let output = format_ssh_direct_prompt_notification("codex", "s", &prompt);
+        assert_discord_literal_match_ranges(&prompt, &output);
         let (blocks, suffix) = output.rsplit_once("\n-# … (이하 ").unwrap();
         let omitted: usize = suffix.strip_suffix("자)").unwrap().parse().unwrap();
         assert!(omitted > 0);
-        assert!(blocks.ends_with("\n```"));
         assert_eq!(blocks.matches("```").count() % 2, 0);
         for line in blocks.lines().filter(|line| line.contains("```")) {
             assert_eq!(line, "```");
@@ -899,6 +1047,8 @@ fn formats_ssh_direct_prompt_notification_escapes_code_fence() {
         if prompt.starts_with('`') {
             let shown = blocks.lines().find(|line| line.starts_with("\\`")).unwrap();
             assert_eq!(shown, "\\`".repeat(prompt.chars().count() - omitted));
+            assert_eq!(omitted, 4020);
+            assert!(!blocks.contains("```"));
         } else {
             assert_eq!(
                 blocks,
