@@ -400,8 +400,9 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
         .unwrap()
         .unwrap();
     store
-        .begin_era(&[channel], chrono::Utc::now(), |channel| {
+        .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![],
                 initial_anchor: 100,
@@ -474,8 +475,9 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
         .unwrap()
         .unwrap();
     oldstore
-        .begin_era(&[channel], chrono::Utc::now(), |channel| {
+        .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![],
                 initial_anchor: 100,

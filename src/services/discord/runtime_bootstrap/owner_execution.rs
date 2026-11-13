@@ -114,6 +114,8 @@ pub(super) async fn prepare(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
     }
 }
 
+#[cfg(all(test, unix))]
+mod child_view_tests;
 #[cfg(test)]
 mod tests;
 
@@ -147,6 +149,7 @@ pub(super) async fn refresh(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
     let Some(snapshot) = cutover::boot_snapshot() else {
         return;
     };
+    snapshot.refresh_child_records();
     let (shadow, kind) = match provider {
         ProviderKind::Claude => (ShadowProvider::Claude, RuntimeHandoffKind::ClaudeTui),
         ProviderKind::Codex => (ShadowProvider::Codex, RuntimeHandoffKind::CodexTui),

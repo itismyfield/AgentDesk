@@ -63,8 +63,9 @@ async fn local_retry_http_uses_the_ledger_payload_and_spends_only_one_additional
             .unwrap()
             .unwrap();
         let era = store
-            .begin_era(&[channel], Utc::now(), |channel| {
+            .begin_fixture_era(&[channel], Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![],
                     initial_anchor: 100,

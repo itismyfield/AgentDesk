@@ -201,8 +201,9 @@ async fn deliver(
     let source =
         crate::services::tui_o::shadow::binding_reader::source_id_for(ID, &cold.rollout).unwrap();
     store
-        .begin_era(&[cold.channel], Utc::now(), |channel| {
+        .begin_fixture_era(&[cold.channel], Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![InitSource {
                     source_id: source.clone(),
@@ -493,8 +494,9 @@ async fn resume_companion_live_era_advances_past_exact_terminals_and_restarts_wi
         .unwrap()
         .unwrap();
     store
-        .begin_era(&[channel], Utc::now(), |channel| {
+        .begin_fixture_era(&[channel], Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: Vec::new(),
                 initial_anchor: 100,
