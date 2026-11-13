@@ -135,6 +135,7 @@ impl WorkCache {
     }
 
     pub(crate) fn defer_delivery(&mut self, id: RecordId) {
+        self.retry(&id, false);
         self.delivery
             .insert(id, Instant::now() + Duration::from_secs(5));
     }

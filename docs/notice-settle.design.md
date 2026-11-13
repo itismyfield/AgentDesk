@@ -302,7 +302,7 @@ Blocked로 만든다. planned/raw-null 등록의 불확실성도 같은 hash의 
 
 최초 eligible 뒤 최종 admission이 거절돼도 source/range별 메모리 재시도 기한5초를 둔다.
 `deliver_owed`는 기한 전 notice를 회전시키고 뒤의 Body를 계속 처리한다. terminal은 바로 회수하고,
-기한 이후에는 최종 admission을 새로 실행해 Prepared/첫 POST 현재 상태 검증을 유지한다.
+최종 거절은 prepare 재평가도 같은5초 기한에 예약한다. 기한 이후에는 prepare와 최종 admission을 새로 실행해 Prepared/첫 POST 현재 상태 검증을 유지한다.
 이 기한은 종결·만료·게시 permit이 아니며 pending/debt를 지우지 않는다.
 
 pending 수백 건이라는 현재 관측에서 영구 Pending map의 절대 상한/soft-limit 경보는 추가하지 않는다.
