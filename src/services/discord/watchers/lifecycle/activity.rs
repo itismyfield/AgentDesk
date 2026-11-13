@@ -58,11 +58,18 @@ pub(in crate::services::discord) async fn refresh_session_heartbeat_from_tmux_ou
     tmux_session_name: &str,
     thread_channel_id: Option<u64>,
 ) -> HeartbeatRefreshOutcome {
-    let session_keys = super::super::super::adk_session::build_session_key_candidates(
+    let Ok(session_keys) = super::super::super::session_locator::candidates(
+        pg_pool,
         token_hash,
         provider,
         tmux_session_name,
-    );
+        thread_channel_id,
+    ) else {
+        return HeartbeatRefreshOutcome {
+            matched: HeartbeatRefreshMatch::NoMatch,
+            rows_affected: 0,
+        };
+    };
 
     if let Some(pg_pool) = pg_pool {
         let provider_name = provider.as_str().to_string();
@@ -139,11 +146,15 @@ pub(in crate::services::discord) async fn touch_session_activity(
     reason: &str,
     source: &str,
 ) -> bool {
-    let session_keys = super::super::super::adk_session::build_session_key_candidates(
+    let Ok(session_keys) = super::super::super::session_locator::candidates(
+        pg_pool,
         token_hash,
         provider,
         tmux_session_name,
-    );
+        thread_channel_id,
+    ) else {
+        return false;
+    };
     let outcome = refresh_session_heartbeat_from_tmux_output_detailed(
         pg_pool,
         token_hash,

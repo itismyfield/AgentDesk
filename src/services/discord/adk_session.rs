@@ -83,11 +83,11 @@ pub(super) async fn build_adk_session_key(
     let basis = resolve_session_key_basis(session_basis_override, channel_name.as_deref())?;
     let tmux_name = provider.build_tmux_session_name(&basis);
 
-    Some(build_namespaced_session_key(
-        &shared.token_hash,
-        provider,
-        &tmux_name,
-    ))
+    let preferred = build_namespaced_session_key(&shared.token_hash, provider, &tmux_name);
+    if session_basis_override.is_some() {
+        return Some(preferred);
+    }
+    super::session_locator::channel_key(shared, provider, channel_id.get(), preferred).await
 }
 
 /// [`build_adk_session_key`] for a turn; a channel with no name takes the key of its row returning
@@ -214,6 +214,7 @@ pub(super) fn derive_adk_session_info(
 /// the previous marker, so an ordinary interactive turn can never inherit a
 /// dispatched-origin marker from an older turn.
 pub(super) async fn record_turn_start_origin(
+    shared: &SharedData,
     session_key: Option<&str>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
@@ -225,6 +226,11 @@ pub(super) async fn record_turn_start_origin(
     else {
         return;
     };
+    if super::session_locator::origin_deferred(shared, provider, channel_id.get(), session_key)
+        .await
+    {
+        return;
+    }
     let body = crate::services::dispatched_sessions::HookSessionBody {
         session_key: session_key.to_string(),
         instance_id: None,

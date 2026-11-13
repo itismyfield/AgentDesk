@@ -219,11 +219,14 @@ pub(super) async fn upsert_rebind_session_id_override(
     let Some(pool) = shared.pg_pool.as_ref() else {
         return Ok(());
     };
-    let candidates = super::super::adk_session::build_session_key_candidates(
+    let candidates = super::super::session_locator::candidates(
+        Some(pool),
         &shared.token_hash,
         provider,
         tmux_session_name,
-    );
+        None,
+    )
+    .map_err(RebindError::Internal)?;
     let mut selected = candidates[0].as_str();
     for candidate in &candidates {
         match crate::db::dispatched_sessions::load_provider_session_ids_pg(

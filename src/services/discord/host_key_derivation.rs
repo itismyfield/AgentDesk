@@ -130,15 +130,9 @@ pub(super) async fn derive_channel_session_key(
     if channel_id == 0 {
         return Err(HostedLookup::Unknown("no channel id".to_string()));
     }
-    let channel = channel_id.to_string();
     let (mut rows, mut failed) = (Vec::new(), Vec::new());
     for hash in hashes {
-        let identity = CanonicalSessionIdentity {
-            kind: SessionIdentityKind::DiscordChannel,
-            discord_token_hash: hash,
-            channel_id: &channel,
-        };
-        match resolve_session_row_pg(pool, None, Some(provider.as_str()), Some(identity)).await {
+        match super::session_locator::current_row_typed(pool, hash, provider, channel_id).await {
             Ok(Some(row)) => rows.push(row),
             Ok(None) => {}
             Err(error) => failed.push(error.conflict_kind().map_or_else(

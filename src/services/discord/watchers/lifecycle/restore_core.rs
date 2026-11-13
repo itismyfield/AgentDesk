@@ -18,17 +18,22 @@ pub(super) async fn register_restored_core(
                 &shared.token_hash,
                 provider,
                 channel_name,
+                channel_id.get(),
             );
             let configured_path = crate::services::discord::settings::resolve_workspace(
                 *channel_id,
                 Some(channel_name.as_str()),
             );
             let tmux_name = provider.build_tmux_session_name(channel_name);
-            let session_keys = crate::services::discord::adk_session::build_session_key_candidates(
+            let Ok(session_keys) = crate::services::discord::session_locator::candidates(
+                shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 provider,
                 &tmux_name,
-            );
+                Some(channel_id.get()),
+            ) else {
+                continue;
+            };
             let db_cwd =
                 load_restored_session_cwd(shared.pg_pool.as_ref(), &session_keys, channel_id.get());
 

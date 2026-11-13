@@ -2033,7 +2033,7 @@ pub(super) async fn handle_text_message(
                 };
             }
         };
-        inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
+        inflight_create_log::record_turn_start_origin(shared, &provider, channel_id, &inflight_state).await;
         let create = |state: &mut InflightTurnState| save_intake_inflight(codex_seed.as_ref(), state);
         let admitted = super::foreign_row::admit(shared, &provider, &mut inflight_state, &cancel_token, create).await;
         if !matches!(admitted, Ok(true)) {
@@ -2139,6 +2139,7 @@ pub(super) async fn handle_text_message(
         // #1088: per-channel prompt-cache TTL (None|5|60). Only consumed by Claude.
         let cache_ttl_minutes =
             super::super::super::settings::resolve_cache_ttl_minutes(channel_id, None);
+        let registration_origin = Some(dispatch_id.is_some());
         let provider_execution_context = crate::services::provider_cli::ProviderExecutionContext {
             provider: provider.as_str().to_string(),
             agent_id: role_binding.as_ref().map(|binding| binding.role_id.clone()),
@@ -2181,6 +2182,7 @@ pub(super) async fn handle_text_message(
                         super::provider_dispatch::execute(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
+                                registration_origin,
                                 shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,

@@ -6,15 +6,33 @@ stateDiagram-v2
   s1: 새 이름 요청, 옛 실행 유지
   s2: 옛 host 종료, 부재 확인 대기
   s3: 옛 host 부재 확인
-  s4: 새 실행 준비, DB 등록 전
-  s5: 새 primary와 옛 alias 원자 등록
-  s6: 등록 nonce 충돌, 자기 successor만 정리
-  s7: 새 실행 종료, 재요청은 무효
+  s4: 새 실행 준비, 등록 전
+  s5: 비권한 snapshot 발견
+  s6: 증거/CAS 충돌, 부분 승격 없이 롤백
+  s7: old/new locator 정렬 잠금
+  s8: identity 잠금
+  s9: row/alias 잠금, CAS 재검증
+  s10: 트랜잭션 안 primary 갱신
+  s11: 옛 alias 보존, commit 대기
+  s12: 새 primary와 옛 alias 원자 등록
+  s13: 새 실행 종료, 재요청은 무효
   [*] --> s0
   s0 --> s1: 새 이름을 요청함
   s1 --> s2: 옛 host가 자연 종료됨
   s2 --> s3: 옛 host 부재를 확인함
   s3 --> s4: 부재와 nonce를 확인하고 successor를 준비함
-  s4 --> s5: 새 primary와 옛 alias를 원자 커밋함
-  s5 --> s7: 현재 primary가 가리키는 실행을 종료함
+  s4 --> s5: old row/primary/nonce를 관측함
+  s5 --> s7: 두 locator를 정렬해 잠금
   s4 --> s6: nonce 충돌로 자기 successor만 정리함
+  s7 --> s8: 그 뒤 identity를 잠금
+  s5 --> s6: nonce 충돌로 자기 successor만 정리함
+  s8 --> s9: row와 alias를 잠그고 snapshot 재검증
+  s7 --> s6: nonce 충돌로 자기 successor만 정리함
+  s8 --> s6: nonce 충돌로 자기 successor만 정리함
+  s9 --> s10: 허용 actor CAS 뒤 새 primary로 UPDATE
+  s9 --> s6: nonce 충돌로 자기 successor만 정리함
+  s10 --> s11: UPDATE 뒤 옛 key를 alias로 보존
+  s11 --> s12: 새 primary와 옛 alias를 원자 커밋함
+  s10 --> s6: nonce 충돌로 자기 successor만 정리함
+  s12 --> s13: 현재 primary가 가리키는 실행을 종료함
+  s11 --> s6: nonce 충돌로 자기 successor만 정리함

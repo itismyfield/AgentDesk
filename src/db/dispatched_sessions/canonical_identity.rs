@@ -1,5 +1,12 @@
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
+#[path = "key_promotion.rs"]
+pub(crate) mod key_promotion;
+use key_promotion::RegistrationWitness;
+#[cfg(all(test, unix))]
+#[path = "key_promotion_pg_tests.rs"]
+mod key_promotion_pg_tests;
+
 use crate::db::dispatched_sessions::HookSessionUpsert;
 
 const DISCORD_CHANNEL_KIND: &str = "discord_channel";
@@ -150,7 +157,7 @@ pub(crate) async fn upsert_hook_session_with_actor_pin_pg(
     }
     let active_turn_nonce = params.turn_start_nonce.map(str::to_owned);
     let status = Some(params.status.to_owned());
-    let (_, id) = upsert_hook_session_pg(pool, params, None, Some(pin), None).await?;
+    let (_, id) = upsert_hook_session_pg(pool, params, None, Some(pin), None, None).await?;
     Ok(HookSessionActorPin::Existing {
         id,
         active_turn_nonce,
@@ -176,7 +183,7 @@ pub(crate) async fn upsert_hook_session_with_identity_pg(
     if identity.is_none() {
         return upsert_legacy_hook_session_pg(pool, params).await;
     }
-    upsert_hook_session_pg(pool, params, identity, None, None)
+    upsert_hook_session_pg(pool, params, identity, None, None, None)
         .await
         .map(|(outcome, _)| outcome)
 }
@@ -198,9 +205,16 @@ pub(crate) async fn upsert_hook_session_terminal_pg(
             "terminal hook requires an existing actor nonce and a terminal status",
         ));
     }
-    upsert_hook_session_pg(pool, params, identity, None, Some(expected_turn_nonce))
-        .await
-        .map(|(outcome, _)| outcome)
+    upsert_hook_session_pg(
+        pool,
+        params,
+        identity,
+        None,
+        Some(expected_turn_nonce),
+        None,
+    )
+    .await
+    .map(|(outcome, _)| outcome)
 }
 
 async fn upsert_hook_session_pg(
@@ -209,10 +223,11 @@ async fn upsert_hook_session_pg(
     identity: Option<CanonicalSessionIdentity<'_>>,
     actor_pin: Option<&HookSessionActorPin>,
     expected_terminal_nonce: Option<&str>,
+    registration: Option<&RegistrationWitness<'_>>,
 ) -> Result<(HookSessionUpsertOutcome, i64), HookSessionUpsertError> {
     let mut tx = pool.begin().await.map_err(database_error)?;
 
-    acquire_locator_lock(&mut tx, params.session_key).await?;
+    key_promotion::lock_locators(&mut tx, params.session_key, registration).await?;
     if let Some(identity) = identity {
         acquire_identity_lock(&mut tx, params.provider, identity).await?;
     }
@@ -232,7 +247,12 @@ async fn upsert_hook_session_pg(
         _ => None,
     };
 
+    let is_alias = alias.is_some();
     let target = resolve_evidence(exact, alias, canonical, promotion)?;
+    if let Some(witness) = registration {
+        key_promotion::validate_registration(&mut tx, &params, identity, target.as_ref(), witness)
+            .await?;
+    }
     let expected_actor = match (actor_pin, target.as_ref()) {
         (None, _) | (Some(HookSessionActorPin::Missing), None) => None,
         (
@@ -253,20 +273,34 @@ async fn upsert_hook_session_pg(
     let outcome = match target {
         Some(target) => {
             validate_target_identity(&target, params.provider, params.channel_id, identity)?;
+            let alias_nonce = key_promotion::alias_nonce_fence(
+                &mut tx,
+                &target,
+                &params,
+                is_alias,
+                actor_pin.is_some(),
+                expected_terminal_nonce,
+            )
+            .await?;
             update_target(
                 &mut tx,
                 target.id,
                 &params,
                 identity,
                 expected_actor,
-                expected_terminal_nonce,
+                alias_nonce,
             )
             .await?;
-            preserve_alias(&mut tx, params.session_key, target.id).await?;
+            let session_key = if let Some(witness) = registration {
+                key_promotion::promote_primary(&mut tx, &target, witness).await?
+            } else {
+                preserve_alias(&mut tx, params.session_key, target.id).await?;
+                target.session_key
+            };
             (
                 HookSessionUpsertOutcome {
                     inserted: false,
-                    session_key: target.session_key,
+                    session_key,
                 },
                 target.id,
             )
@@ -308,7 +342,7 @@ pub(crate) async fn upsert_legacy_hook_session_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,
 ) -> Result<HookSessionUpsertOutcome, HookSessionUpsertError> {
-    upsert_hook_session_pg(pool, params, None, None, None)
+    upsert_hook_session_pg(pool, params, None, None, None, None)
         .await
         .map(|(outcome, _)| outcome)
 }

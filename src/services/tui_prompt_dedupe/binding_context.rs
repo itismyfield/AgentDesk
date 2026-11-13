@@ -462,6 +462,12 @@ impl PreparedIncarnation {
     }
 
     pub(crate) fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {
+        let result = result.and_then(|marker| {
+            #[cfg(unix)]
+            crate::services::discord::session_locator::created(&self.context)
+                .map_err(io::Error::other)?;
+            Ok(marker)
+        });
         result.map(|_| ()).map_err(|error| {
             crate::services::platform::tmux::kill_session(
                 &self.context.tmux_session,

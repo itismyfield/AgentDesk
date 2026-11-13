@@ -585,4 +585,7 @@ PrimaryNotAlias == Naming!PrimaryNotAlias
 NoDuplicateKill == Naming!NoDuplicateKill
 LateOldHookRejected == Naming!LateOldHookRejected
 
+NamingSpec == NamingInit /\ [][NamingNext]_vars /\ WF_vars(NamingNext)
+CanonicalPrimaryEventuallyCurrent == Naming!CanonicalPrimaryEventuallyCurrent
+RollbackHasNoPartialPromotion == Naming!RollbackHasNoPartialPromotion
 ====

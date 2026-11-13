@@ -51,6 +51,7 @@ impl OwnerTurn {
 #[derive(Clone)]
 pub(super) struct StreamingTurn<'a> {
     pub pool: Option<&'a sqlx::PgPool>,
+    pub registration_origin: Option<bool>,
     /// The bot whose channel lease a Herdr turn takes to resolve an unplaced launch.
     pub shared: Option<&'a Arc<crate::services::discord::SharedData>>,
     pub provider: &'a ProviderKind,
@@ -348,6 +349,18 @@ fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), S
         // `execute` brings a returning session back before any driver runs.
         TurnHost::Return(_) => return Err("herdr return: not returned before the turn".into()),
     }
+    #[cfg(unix)]
+    let _registration = crate::services::discord::session_locator::RegistrationScope::enter(
+        turn.pool,
+        turn.shared
+            .map(|shared| shared.token_hash.as_str())
+            .unwrap_or(""),
+        turn.provider,
+        turn.channel_id,
+        turn.tmux_session_name,
+        turn.cancel.turn_nonce(),
+        turn.registration_origin,
+    )?;
     #[cfg(test)]
     count_dispatch(turn.channel_id)?;
     #[cfg(test)]
@@ -926,6 +939,7 @@ pub(super) mod tests {
         let tools = vec!["Read".to_string()];
         let mut turn = StreamingTurn {
             pool: None,
+            registration_origin: None,
             shared: None,
             provider: &provider,
             prompt: "question",
@@ -1022,6 +1036,7 @@ pub(super) mod tests {
             let (sender, _receiver) = std::sync::mpsc::channel();
             let turn = StreamingTurn {
                 pool: Some(&pool),
+                registration_origin: None,
                 shared: None,
                 provider: &provider,
                 prompt: "question",

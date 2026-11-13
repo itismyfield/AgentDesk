@@ -160,7 +160,14 @@ pub(super) fn restore_session_cwd_from_db(
     channel_id: u64,
 ) -> Option<RestoredCwd> {
     let tmux_name = provider.build_tmux_session_name(channel_name);
-    let session_keys = build_session_key_candidates(token_hash, provider, &tmux_name);
+    let session_keys = crate::services::discord::session_locator::candidates(
+        pg_pool,
+        token_hash,
+        provider,
+        &tmux_name,
+        Some(channel_id),
+    )
+    .ok()?;
     let channel_id = channel_id.to_string();
     let pg_pool = pg_pool?;
     crate::utils::async_bridge::block_on_pg_result(
@@ -197,7 +204,15 @@ pub(super) fn correct_session_cwd_to_tmux(
         return;
     };
     let tmux_name = provider.build_tmux_session_name(channel_name);
-    let session_keys = build_session_key_candidates(token_hash, provider, &tmux_name);
+    let Ok(session_keys) = crate::services::discord::session_locator::candidates(
+        pg_pool,
+        token_hash,
+        provider,
+        &tmux_name,
+        Some(channel_id),
+    ) else {
+        return;
+    };
     let channel_id_str = channel_id.to_string();
     let tmux_cwd = tmux_cwd.to_string();
     let result = crate::utils::async_bridge::block_on_pg_result(
@@ -258,7 +273,14 @@ pub(super) fn restore_thread_worktree_path_from_db(
     channel_id: u64,
 ) -> Option<String> {
     let tmux_name = provider.build_tmux_session_name(channel_name);
-    let session_keys = build_session_key_candidates(token_hash, provider, &tmux_name);
+    let session_keys = crate::services::discord::session_locator::candidates(
+        pg_pool,
+        token_hash,
+        provider,
+        &tmux_name,
+        Some(channel_id),
+    )
+    .ok()?;
     let channel_id = channel_id.to_string();
     let pg_pool = pg_pool?;
     crate::utils::async_bridge::block_on_pg_result(

@@ -242,10 +242,24 @@ async fn resolve_channel_runtime_for_launch(
             current.3 = "runtime_session_rebound";
         }
     }
+    drop(data);
     let tmux_session_name = if provider.uses_managed_tmux_backend() {
         channel_name
             .as_ref()
             .map(|name| provider.build_tmux_session_name(name))
+    } else {
+        None
+    };
+    let tmux_session_name = if let Some(name) = tmux_session_name {
+        let preferred = super::super::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            provider,
+            &name,
+        );
+        super::super::session_locator::channel_key(shared, provider, channel_id.get(), preferred)
+            .await
+            .as_deref()
+            .and_then(super::super::session_identity::tmux_name_from_session_key)
     } else {
         None
     };

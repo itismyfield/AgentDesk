@@ -333,6 +333,7 @@ impl Rig {
         let host = TurnHost::Tmux;
         let turn = StreamingTurn {
             pool: self.pool.get(),
+            registration_origin: None,
             shared: None,
             provider,
             prompt: PROMPT,

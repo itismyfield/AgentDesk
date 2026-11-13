@@ -245,7 +245,13 @@ async fn build_channel_directory_from_pg_with_config(
                 provider,
                 tmux_segment,
             };
-            if let Err(error) = directory.insert(binding) {
+            let inserted = match session_tmux_segments
+                .get(&(binding.provider.clone(), binding.channel_id.clone()))
+            {
+                Some(actual) => directory.insert_name(actual.clone(), binding),
+                None => directory.insert(binding),
+            };
+            if let Err(error) = inserted {
                 tracing::warn!(
                     ?error,
                     agent_id = %agent_id,
@@ -299,9 +305,11 @@ async fn load_session_tmux_segments_pg(
             );
             continue;
         }
-        let Some((provider, tmux_segment)) =
-            live_tmux_segment_from_session_key(session_key, live_session_names)
-        else {
+        let Some((provider, tmux_segment)) = super::session_directory::live_name(
+            session_key,
+            provider_hint.as_deref(),
+            live_session_names,
+        ) else {
             continue;
         };
         if !provider_hint_matches_session_provider(provider_hint.as_deref(), &provider) {
@@ -384,6 +392,7 @@ fn normalize_nonempty(value: Option<&str>) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[cfg(test)]
 fn tmux_name_and_segment_from_session_key(
     session_key: &str,
 ) -> Option<(String, ProviderKind, String)> {
@@ -392,6 +401,7 @@ fn tmux_name_and_segment_from_session_key(
     Some((tmux_name, provider, tmux_segment))
 }
 
+#[cfg(test)]
 fn live_tmux_segment_from_session_key(
     session_key: &str,
     live_session_names: &HashSet<String>,

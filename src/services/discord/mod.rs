@@ -8,6 +8,7 @@ pub(crate) mod bot_role;
 pub(crate) mod busy_followup_retry_store;
 #[cfg(unix)]
 pub(crate) mod herdr_terminate;
+pub(crate) mod session_locator;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
 pub(crate) mod codex_absence;
@@ -343,8 +344,8 @@ use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use crate::services::turn_orchestrator::HasPendingSoftQueueResult;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
 use adk_session::{
-    build_adk_session_key, build_session_key_candidates, derive_adk_session_info,
-    lookup_pending_dispatch_for_thread, parse_dispatch_id,
+    build_adk_session_key, derive_adk_session_info, lookup_pending_dispatch_for_thread,
+    parse_dispatch_id,
 };
 pub(in crate::services) use compact_turn_authority::{
     ManagedCompactTurnIdentity, compact_eligible_turn_source, live_managed_turn_matches,

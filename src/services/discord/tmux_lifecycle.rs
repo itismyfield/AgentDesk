@@ -84,8 +84,14 @@ pub(super) fn resolve_dispatch_tmux_protection(
         .unwrap_or_default();
     let namespaced_session_key_prefix = format!("{}/{}/%", provider.as_str(), token_hash);
 
-    let session_keys =
-        super::adk_session::build_session_key_candidates(token_hash, provider, tmux_session_name);
+    let session_keys = super::session_locator::candidates(
+        pg_pool,
+        token_hash,
+        provider,
+        tmux_session_name,
+        thread_channel_id.parse().ok(),
+    )
+    .ok()?;
     if let Some(pg_pool) = pg_pool {
         let session_keys = session_keys.clone();
         let thread_channel_id = thread_channel_id.clone();

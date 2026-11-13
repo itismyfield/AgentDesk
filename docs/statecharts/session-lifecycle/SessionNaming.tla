@@ -13,7 +13,9 @@ Init(kind) ==
         target |-> Physical(kind, "old"), fresh |-> FALSE, aliases |-> {},
         rowNonce |-> nonce, oldHookSeen |-> FALSE, staleRejected |-> FALSE,
         kills |-> 0, retriedStop |-> FALSE, probeFailures |-> 0,
-        nonceContested |-> FALSE, registeredFromNonce |-> ""] : nonce \in {"old", ""}}
+        nonceContested |-> FALSE, registeredFromNonce |-> "",
+        tx |-> "idle", snapshotNonce |-> "", stagedPrimary |-> "old",
+        stagedNonce |-> "", stagedAliases |-> {}, hostWitness |-> "same", witnessChanged |-> FALSE] : nonce \in {"old", ""}}
 
 RequestNewName ==
     /\ n.stage = "old"
@@ -45,24 +47,62 @@ PrepareSuccessor(mode) ==
     /\ n' = [n EXCEPT !.fresh = TRUE, !.stage = "prepared"]
 
 ClaimNewNonce ==
-    /\ n.stage = "prepared" /\ n.rowNonce = ""
-    /\ n' = [n EXCEPT !.rowNonce = "new"]
+    /\ n.stage = "prepared" /\ n.tx = "rows" /\ n.stagedNonce = ""
+    /\ n' = [n EXCEPT !.stagedNonce = "new"]
 
 NonceChangesBeforeRegistration ==
     /\ n.stage = "prepared" /\ ~n.nonceContested
     /\ n' = [n EXCEPT !.rowNonce = "old", !.nonceContested = TRUE]
 
 RefuseConflictingRegistration ==
-    /\ n.stage = "prepared" /\ n.rowNonce = "old" /\ n.fresh
+    /\ n.stage = "prepared" /\ n.tx = "idle" /\ n.rowNonce = "old" /\ n.fresh
     /\ n' = [n EXCEPT !.fresh = FALSE, !.kills = @ + 1, !.stage = "refused"]
 
+TxDiscover ==
+    /\ n.stage = "prepared" /\ n.fresh /\ n.tx = "idle"
+    /\ n' = [n EXCEPT !.tx = "snapshot", !.snapshotNonce = n.rowNonce]
+
+TxLocatorLocks ==
+    /\ n.tx = "snapshot"
+    /\ n' = [n EXCEPT !.tx = "locators"]
+
+TxIdentityLock ==
+    /\ n.tx = "locators"
+    /\ n' = [n EXCEPT !.tx = "identity"]
+
+TxRows ==
+    /\ n.tx = "identity"
+    /\ n' = [n EXCEPT !.tx = "rows"]
+
+TxHostChanges ==
+    /\ n.stage = "prepared" /\ n.tx # "idle" /\ ~n.witnessChanged
+    /\ \E witness \in {"live", "failed", "unknown", "different-server", "pending"} :
+        n' = [n EXCEPT !.hostWitness = witness, !.witnessChanged = TRUE]
+
+TxValidHost(mode) == mode = "no-absence" \/ (~n.oldLive /\ n.absence = "absent" /\ n.hostWitness = "same")
+TxValidNonce(mode) == mode = "no-promotion-nonce" \/ (n.rowNonce \in {"", "new"} /\ n.rowNonce = n.snapshotNonce)
+
 PromotePrimary(mode) ==
-    /\ n.stage = "prepared" /\ n.fresh
-    /\ mode = "no-absence" \/ (~n.oldLive /\ n.absence = "absent")
-    /\ mode = "no-promotion-nonce" \/ n.rowNonce \in {"", "new"}
-    /\ n' = [n EXCEPT !.registeredFromNonce = n.rowNonce, !.primary = IF mode = "no-promotion" THEN @ ELSE "new",
-        !.aliases = {"old"}, !.current = "new", !.target = Physical(n.host, "new"),
-        !.fresh = FALSE, !.rowNonce = "new", !.stage = "registered"]
+    /\ n.stage = "prepared" /\ n.fresh /\ n.tx = "rows"
+    /\ TxValidHost(mode) /\ TxValidNonce(mode)
+    /\ n' = [n EXCEPT !.tx = "updated", !.stagedPrimary = IF mode = "no-promotion" THEN "old" ELSE "new", !.stagedNonce = "new"]
+
+TxPreserveAlias ==
+    /\ n.tx = "updated"
+    /\ n' = [n EXCEPT !.tx = "aliased", !.stagedAliases = {"old"}]
+
+TxCommit(mode) ==
+    /\ n.stage = "prepared" /\ n.tx = "aliased"
+    /\ TxValidHost(mode) /\ TxValidNonce(mode)
+    /\ n' = [n EXCEPT !.registeredFromNonce = n.rowNonce, !.primary = n.stagedPrimary,
+        !.aliases = n.stagedAliases, !.current = "new", !.target = Physical(n.host, "new"),
+        !.fresh = FALSE, !.rowNonce = n.stagedNonce, !.stage = "registered", !.tx = "committed"]
+
+TxRollback(mode) ==
+    /\ n.stage = "prepared" /\ n.tx # "idle"
+    /\ ~TxValidHost(mode) \/ ~TxValidNonce(mode)
+    /\ n' = [n EXCEPT !.tx = "rolled-back", !.stage = "refused", !.fresh = FALSE,
+         !.stagedPrimary = n.primary, !.stagedAliases = n.aliases, !.kills = @ + 1]
 
 LateOldNonceHook(mode) ==
     /\ n.stage \in {"registered", "stopped"} /\ ~n.oldHookSeen
@@ -83,6 +123,8 @@ Done == (n.stage = "refused" \/ (n.stage = "stopped" /\ n.retriedStop /\ n.oldHo
 
 Next(mode) == RequestNewName \/ OldHostEnds \/ ObserveOldHost \/ ProbeFails \/ ProbeAgain
     \/ OldNonceEnds \/ NonceChangesBeforeRegistration \/ RefuseConflictingRegistration \/ PrepareSuccessor(mode) \/ ClaimNewNonce \/ PromotePrimary(mode)
+    \/ TxDiscover \/ TxLocatorLocks \/ TxIdentityLock \/ TxRows \/ TxHostChanges
+    \/ TxPreserveAlias \/ TxCommit(mode) \/ TxRollback(mode)
     \/ LateOldNonceHook(mode) \/ StopCurrent \/ RetryStop(mode) \/ Done
 
 PrimaryTailIsCurrentPhysical == n.current # "none" => n.primary = n.target
@@ -94,4 +136,6 @@ PrimaryNotAlias == n.primary \notin n.aliases
 NoDuplicateKill == n.kills <= 1
 PromotionNonceWasCurrent == n.registeredFromNonce \in {"", "new"}
 LateOldHookRejected == n.oldHookSeen => n.staleRejected /\ n.rowNonce = "new"
+RollbackHasNoPartialPromotion == n.tx = "rolled-back" => n.primary = "old" /\ n.aliases = {}
+CanonicalPrimaryEventuallyCurrent == (n.stage = "prepared") ~> (n.stage = "refused" \/ (n.primary = "new" /\ n.rowNonce = "new" /\ "old" \in n.aliases))
 ====

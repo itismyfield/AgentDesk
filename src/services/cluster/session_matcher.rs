@@ -175,6 +175,14 @@ impl ChannelDirectory {
                 .as_deref()
                 .unwrap_or(&binding.channel_id),
         );
+        self.insert_name(key, binding)
+    }
+
+    pub(crate) fn insert_name(
+        &mut self,
+        key: String,
+        binding: ChannelBinding,
+    ) -> Result<(), DirectoryBuildError> {
         if let Some(existing) = self.by_session_name.get(&key) {
             if existing != &binding {
                 // Same expected session name but the binding differs in *any*
@@ -324,7 +332,6 @@ pub fn match_session_offline(
     channels: &ChannelDirectory,
 ) -> Option<MatchedChannelAudit> {
     // Same name/binding gating as the strict path, but skip the pane probe.
-    let _ = parse_provider_and_channel_from_tmux_name(session_name)?;
     let (binding, channel_id) = binding_for_session_or_thread(session_name, channels)?;
     Some(MatchedChannelAudit(MatchedChannel {
         channel_id,
@@ -359,9 +366,13 @@ pub fn match_session_detailed(
     pane_current_command: Option<&str>,
     channels: &ChannelDirectory,
 ) -> MatchOutcome {
-    let Some((provider, _channel_segment)) =
-        parse_provider_and_channel_from_tmux_name(session_name)
-    else {
+    let provider = channels
+        .binding_for_session_name(session_name)
+        .map(|binding| binding.provider.clone())
+        .or_else(|| {
+            parse_provider_and_channel_from_tmux_name(session_name).map(|(provider, _)| provider)
+        });
+    let Some(provider) = provider else {
         let prefix = format!("{}-", TMUX_SESSION_PREFIX);
         if let Some(stripped) = session_name.strip_prefix(&prefix) {
             let provider_segment = stripped.split('-').next().unwrap_or("").to_string();

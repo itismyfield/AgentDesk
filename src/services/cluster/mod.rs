@@ -35,6 +35,7 @@ pub(crate) mod pre_accept_sweep;
 pub(crate) mod readiness;
 pub mod registry_adapter_sink;
 pub mod relay_producer_registry;
+mod session_directory;
 pub mod session_discovery;
 pub mod session_matcher;
 pub mod session_registry;

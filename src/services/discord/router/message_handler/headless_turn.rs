@@ -388,7 +388,7 @@ async fn start_reserved_headless_turn_admitted(
         .await;
 
     let prompt_prep_started = std::time::Instant::now();
-    let (channel_name, tmux_session_name, category_name) = {
+    let (channel_name, mut tmux_session_name, category_name) = {
         let data = shared.core.lock().await;
         let channel_name = data
             .sessions
@@ -417,8 +417,14 @@ async fn start_reserved_headless_turn_admitted(
         metadata.as_ref(),
         tmux_session_label.as_deref(),
     );
+    let canonical_registration = session_key_basis_override.is_none();
     let adk_session_key =
         build_adk_session_key(shared, channel_id, &provider, session_key_basis_override).await;
+    if canonical_registration {
+        tmux_session_name = adk_session_key
+            .as_deref()
+            .and_then(super::super::super::session_identity::tmux_name_from_session_key);
+    }
     if !scheduled_snapshot_turn
         && valid_routine_metadata(metadata.as_ref()).is_some()
         && let (Some(pool), Some(binding), Some(session_key)) = (
@@ -1067,6 +1073,7 @@ async fn start_reserved_headless_turn_admitted(
                         super::provider_dispatch::execute(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
+                                registration_origin: canonical_registration.then_some(false),
                                 shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,
