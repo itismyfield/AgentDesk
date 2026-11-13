@@ -116,6 +116,8 @@ pub(crate) struct Candidate {
     late_boundary: Arc<OnceLock<LateBoundary>>,
     turn_mark: Arc<Mutex<Option<TurnMark>>>,
     baseline_order: Arc<AtomicU64>,
+    /// A thread child's verified relationship, set once and read by its first init.
+    child: Arc<OnceLock<crate::services::session_host::surface_policy::VerifiedSurface>>,
     /// Test builds: set when a claim released a pending adoption, cleared once a sink saw a body.
     #[cfg(test)]
     bodiless: Arc<std::sync::atomic::AtomicBool>,
@@ -171,9 +173,24 @@ impl Candidate {
             late_boundary: Arc::default(),
             turn_mark: Arc::default(),
             baseline_order: Arc::default(),
+            child: Arc::default(),
             #[cfg(test)]
             bodiless: Arc::default(),
         }
+    }
+
+    /// Records the child's verified relationship for every clone; the first one stays.
+    pub(crate) fn bind_child(
+        &self,
+        surface: crate::services::session_host::surface_policy::VerifiedSurface,
+    ) {
+        let _ = self.child.set(surface);
+    }
+
+    pub(crate) fn child_surface(
+        &self,
+    ) -> Option<crate::services::session_host::surface_policy::VerifiedSurface> {
+        self.child.get().copied()
     }
 
     pub(crate) fn reserved_late() -> Self {

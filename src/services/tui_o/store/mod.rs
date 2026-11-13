@@ -355,15 +355,18 @@ impl OStore {
 
     /// A first activation's `init`: a later channel of a sealed era, or else the channel the era is
     /// sealed over. Opening the store finishes a takeover's seal a crash cut off after its `init`.
+    /// A thread child's `init` also needs its verified relationship to its parent.
     pub(crate) fn begin_era_as(
         &self,
         init: &Initialized,
         origin: InitOrigin,
         scope: &InitScope,
+        child: Option<&crate::services::session_host::surface_policy::VerifiedSurface>,
     ) -> Result<(), StoreError> {
         let _sealing = SEALING.lock().unwrap_or_else(PoisonError::into_inner);
         let sealed = self.read_era()?.is_some();
-        self.init_channel_as(init, origin, scope)?;
+        let enabled = thread_children::COMPLETE_ACTIVATION;
+        self.init_channel_checked(init, origin, scope, child, enabled)?;
         if sealed {
             return Ok(());
         }

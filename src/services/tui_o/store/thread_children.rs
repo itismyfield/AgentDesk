@@ -11,6 +11,9 @@ use crate::services::session_host::surface_policy::VerifiedSurface;
 mod lifecycle;
 pub(crate) use lifecycle::ChildLifecycle;
 
+/// Whether this build writes thread child stores; the deploy guard reads it through build-info.
+pub(crate) const COMPLETE_ACTIVATION: bool = false;
+
 const FLOOR: &str = "thread_children.floor";
 const CONTENT: &[u8] = b"1\n";
 
@@ -98,7 +101,7 @@ impl OStore {
         init: &Initialized,
         origin: InitOrigin,
     ) -> Result<(), StoreError> {
-        self.begin_era_as(init, origin, &Self::fixture_scope(&[init.channel]))
+        self.begin_era_as(init, origin, &Self::fixture_scope(&[init.channel]), None)
     }
 
     pub(crate) fn begin_fixture_era(

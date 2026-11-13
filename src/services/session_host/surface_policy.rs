@@ -19,6 +19,11 @@ impl VerifiedSurface {
         self.destination == destination && self.parent == parent && kind == Some(self.kind)
     }
 
+    /// The parent channel whose policy the destination thread follows.
+    pub(crate) fn parent(&self) -> u64 {
+        self.parent
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn relationship(&self) -> (u64, u64, RuntimeHandoffKind) {
         (self.destination, self.parent, self.kind)

@@ -191,6 +191,7 @@ fn thread_children_unresolved_non_o_reader_waits_for_existing_refresh_then_resol
             conflict: false,
             record_unreadable: false,
             boot_discovered: true,
+            surface: None,
             life: Default::default(),
         },
     );
@@ -269,6 +270,7 @@ fn unresolved(boot: &BootChannels, channel: u64, boot_discovered: bool) {
             conflict: false,
             record_unreadable: false,
             boot_discovered,
+            surface: None,
             life: Default::default(),
         },
     );
@@ -503,4 +505,43 @@ fn thread_children_codex_turn_selection_follows_the_parents_policy() {
     assert!(cutover::codex_turn_awaited(43).is_none());
     assert_eq!(cutover::policy_channel(45), 44);
     assert_eq!(cutover::policy_channel(46), 46);
+}
+
+#[test]
+fn thread_child_first_init_waits_for_the_legacy_send_and_records_nothing_before_activation() {
+    use crate::services::tui_o::store::StoreConfig;
+    use crate::services::tui_o::writer::activation::{ActivationFacts, activate_with};
+    let boot = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Committed);
+    unresolved(&boot, 48, true);
+    boot.children
+        .resolve_legacy(&boot, |channel| Ok(thread(channel, 42)));
+    let root = tempfile::tempdir().unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())
+        .unwrap()
+        .unwrap();
+    let floor = root.path().join("o_store/thread_children.floor");
+    // Legacy and the writer host each read their own clone of the child's one adoption.
+    let legacy = boot.child(48).unwrap().unwrap().candidate;
+    let host = boot.output_candidate(48).unwrap();
+    let activate = || {
+        let facts = Ok(ActivationFacts::default());
+        activate_with(&store, 48, facts, || Ok(false), &host, || Ok(Vec::new()))
+    };
+    let sending = legacy.claim_body(48);
+    assert!(!sending.owned && sending.send.is_some());
+    assert_eq!(activate(), Err("Legacy body send in flight".into()));
+    assert_eq!(host.peek(), Adoption::Deferred);
+    assert!(!store.has_channel_dir(48) && !floor.exists());
+    drop(sending);
+    // Past the send the init carries the verified parent, and this build still refuses it.
+    let refused = activate().unwrap_err();
+    assert!(
+        refused.contains("child output requires verified surface and complete activation"),
+        "{refused}"
+    );
+    assert!(!store.has_channel_dir(48) && !floor.exists());
+    assert_eq!(host.peek(), Adoption::Released);
+    assert_eq!(legacy.peek(), Adoption::Released);
 }

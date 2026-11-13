@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::adoption::logged;
 use super::binding::BindingEvents;
+use crate::services::session_host::surface_policy::VerifiedSurface;
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
@@ -230,9 +231,10 @@ fn adopt(
     #[cfg(test)]
     test_hook::run(channel, test_hook::Step::BeforeWrite)?;
     let at = Instant::now();
-    let created = candidate
-        .init_scope(channel)
-        .and_then(|scope| create(store, channel, sources, origin, &scope));
+    let created = candidate.init_scope(channel).and_then(|scope| {
+        let child = candidate.child_surface();
+        create(store, (channel, child), sources, origin, &scope)
+    });
     #[cfg(test)]
     let created = created.and_then(|()| test_hook::run(channel, test_hook::Step::AfterWrite));
     spent.write = since(at);
@@ -278,9 +280,10 @@ pub(crate) fn settled(store: &OStore, channel: u64) -> Adoption {
     }
 }
 
+/// A thread child's init records its verified parent; the store refuses it until complete activation.
 fn create(
     store: &OStore,
-    channel: u64,
+    (channel, child): (u64, Option<VerifiedSurface>),
     sources: Vec<InitSource>,
     origin: InitOrigin,
     scope: &crate::services::session_host::surface_policy::InitScope,
@@ -289,14 +292,14 @@ fn create(
         return Err("the channel has store files but no init".into());
     }
     let init = Initialized {
-        policy_parent: None,
+        policy_parent: child.as_ref().map(VerifiedSurface::parent),
         channel,
         sources,
         initial_anchor: 0,
         build_digest: env!("CARGO_PKG_VERSION").into(),
         at: Utc::now(),
     };
-    let created = store.begin_era_as(&init, origin, scope);
+    let created = store.begin_era_as(&init, origin, scope, child.as_ref());
     created.map_err(|error| format!("init: {error:?}"))?;
     let count = init.sources.len();
     tracing::info!(

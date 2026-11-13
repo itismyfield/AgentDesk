@@ -17,6 +17,8 @@ pub(crate) use channel_gate::{
     peek_o_owns_tui_output_for_channel_tmux,
 };
 #[cfg(test)]
+mod child_funnel_tests;
+#[cfg(test)]
 pub(crate) use channel_gate::{
     claims_judged, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
 };
@@ -277,9 +279,68 @@ pub(crate) mod test_override {
         static CHANNELS: RefCell<Option<BootChannels>> = const { RefCell::new(None) };
     }
 
+    /// Set to a file path, every forced channel is a recorded thread child of its own selected
+    /// parent instead, and each forced child is appended to that file.
+    pub(crate) const AS_CHILD_ENV: &str = "ADK_TEST_O_TUI_AS_CHILD";
+
     /// Selected channels read as committed, as if each already had its store.
     fn snapshot(channels: &[(u64, RuntimeHandoffKind)]) -> BootChannels {
-        unadopted(channels).adopted(Adoption::Committed)
+        match std::env::var_os(AS_CHILD_ENV) {
+            Some(marks) => as_children(channels, std::path::Path::new(&marks)),
+            None => unadopted(channels).adopted(Adoption::Committed),
+        }
+    }
+
+    fn as_children(
+        channels: &[(u64, RuntimeHandoffKind)],
+        marks: &std::path::Path,
+    ) -> BootChannels {
+        use std::io::Write;
+        let parent = |channel: u64| channel ^ (1 << 52);
+        let parents: Vec<_> = channels
+            .iter()
+            .map(|&(id, kind)| (parent(id), kind))
+            .collect();
+        let boot = unadopted(&parents).adopted(Adoption::Committed);
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(marks)
+            .unwrap();
+        for &(channel, _) in channels {
+            boot.record_child_fixture(&crate::services::tui_o::store::Initialized {
+                channel,
+                sources: Vec::new(),
+                initial_anchor: 0,
+                build_digest: "fixture".into(),
+                at: chrono::Utc::now(),
+                policy_parent: Some(parent(channel)),
+            });
+            writeln!(file, "{channel} {}", parent(channel)).unwrap();
+        }
+        boot
+    }
+
+    /// Re-runs the funnel test at crate path `name` with its O channels as thread children.
+    pub(crate) fn funnel_as_child(name: &str) {
+        let marks = tempfile::NamedTempFile::new().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(AS_CHILD_ENV, marks.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("1 passed; 0 failed; 0 ignored;"),
+            "{stdout}"
+        );
+        let forced = std::fs::read_to_string(marks.path()).unwrap();
+        assert!(
+            !forced.trim().is_empty(),
+            "{name} forced no O channel as a child"
+        );
     }
 
     fn unadopted(channels: &[(u64, RuntimeHandoffKind)]) -> BootChannels {

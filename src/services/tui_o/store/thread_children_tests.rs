@@ -211,7 +211,7 @@ fn thread_children_production_capability_keeps_init_floor_writer_counts_zero() {
     );
     assert!(
         store
-            .begin_era_as(&init, InitOrigin::Fresh, &scope)
+            .begin_era_as(&init, InitOrigin::Fresh, &scope, None)
             .is_err()
     );
     assert_eq!(store.channels_with_init().unwrap().len(), 0);

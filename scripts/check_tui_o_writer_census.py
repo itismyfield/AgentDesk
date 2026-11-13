@@ -31,7 +31,7 @@ keeps that cut honest on every intermediate head:
 
 Census PASS is not flip readiness. `flip_ready` is reported on its own line and
 is true only when no census row is deferred and every FLIP_READY_TESTS funnel
-test exists in src/; `--require-flip-ready` turns a false verdict into rc 1.
+test and its CHILD_FLIP_READY_TESTS row exist in src/; `--require-flip-ready` turns a false verdict into rc 1.
 
 TO CHANGE A COUNT: edit the map in this file in the same commit that moves the
 call, and say in the commit message which site moved and why. A new file with a
@@ -554,6 +554,24 @@ FLIP_READY_TESTS: dict[str, tuple[str, ...]] = {
     "W35": ("o_delegated_anchor_repost_is_skipped",),
     "backstop": ("o_delegated_done_turn_needs_no_legacy_delivery_confirmation",),
 }
+# Site x child: per funnel, a test re-running it with the channel as a recorded thread child of a
+# selected parent. Every FLIP_READY_TESTS row needs one; the same existence rule applies.
+CHILD_FLIP_READY_TESTS: dict[str, tuple[str, ...]] = {
+    "W01": ("child_w01_watcher_turn_shows_no_body",),
+    "W02": ("child_w02_rollover_tick_writes_no_body",),
+    "W04": ("child_w04_single_message_footer_sends_no_body",),
+    "W10": ("child_w10_tui_body_is_cut_on_direct_gateways",),
+    "W11": ("child_w11_cancelled_partial_body_is_not_replaced",),
+    "W13": ("child_w13_foreign_custody_follows_destination_membership",),
+    "W20": ("child_w20_idle_range_is_consumed_without_transport",),
+    "W21": ("child_w21_task_response_leaves_no_legacy_claim",),
+    "W30": ("child_w30_recovery_body_posts_only_the_marker",),
+    "W31": ("child_w31_captured_recovery_range_is_consumed_without_send",),
+    "W33": ("child_w33_stale_leak_recovery_resends_nothing",),
+    "W34": ("child_w34_restart_handoff_keeps_only_the_marker",),
+    "W35": ("child_w35_anchor_repost_is_skipped",),
+    "backstop": ("child_backstop_done_turn_needs_no_legacy_confirmation",),
+}
 
 
 def _load_classifier():
@@ -1044,6 +1062,15 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
     empty = sorted(funnel for funnel, tests in FLIP_READY_TESTS.items() if not tests)
     if empty:
         reasons.append(f"funnel test lists empty: {', '.join(empty)}")
+    no_child = sorted(f for f in FLIP_READY_TESTS if not CHILD_FLIP_READY_TESTS.get(f))
+    if no_child:
+        reasons.append(f"funnels without a child test: {', '.join(no_child)}")
+    stray = sorted(set(CHILD_FLIP_READY_TESTS) - set(FLIP_READY_TESTS))
+    if stray:
+        reasons.append(f"child tests for unknown funnels: {', '.join(stray)}")
+    child_names = sorted({n for tests in CHILD_FLIP_READY_TESTS.values() for n in tests})
+    funnel_names = names
+    names = sorted(set(names) | set(child_names))
     defined: set[str] = set()
     src = root / "src"
     if names and src.is_dir():
@@ -1071,7 +1098,8 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
         reasons.append(f"funnel tests missing from src/: {', '.join(missing)}")
     if reasons:
         return False, "flip_ready=false: " + "; ".join(reasons)
-    return True, f"flip_ready=true: {len(names)} funnel tests over {len(FLIP_READY_TESTS)} rows"
+    return True, (f"flip_ready=true: {len(funnel_names)} funnel tests over {len(FLIP_READY_TESTS)} rows, "
+                  f"{len(child_names)} child tests")
 
 
 def _evidence_test_ids(data):

@@ -20,6 +20,8 @@ struct ChildEntry {
     conflict: bool,
     record_unreadable: bool,
     boot_discovered: bool,
+    /// The checked relationship a placement resolved; only a child holding it can first init.
+    surface: Option<crate::services::session_host::surface_policy::VerifiedSurface>,
     life: lifecycle::Lifecycle,
 }
 
@@ -54,6 +56,9 @@ impl ChildEntry {
             return Some(Err(ChildHeld));
         };
         let candidate = self.candidate.clone()?;
+        if let Some(surface) = self.surface {
+            candidate.bind_child(surface);
+        }
         Some(self.kind.map_or(Err(ChildHeld), |kind| {
             Ok(Child {
                 parent,
@@ -106,6 +111,7 @@ impl ChildEntries {
                     conflict: held,
                     record_unreadable: false,
                     boot_discovered: true,
+                    surface: None,
                     life: lifecycle::Lifecycle::default(),
                 });
             }
@@ -157,6 +163,7 @@ impl ChildEntries {
             entry.parent = Some(parent);
             entry.kind = Some(kind);
             entry.held = false;
+            entry.surface = Some(surface);
             entry.candidate = expected.map(|_| {
                 if boot_discovered {
                     Candidate::reserved_late()
@@ -258,7 +265,7 @@ impl BootChannels {
             .clone()
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn record_child_fixture(&self, init: &Initialized) {
         self.children.record(self, init, Adoption::Committed);
     }
