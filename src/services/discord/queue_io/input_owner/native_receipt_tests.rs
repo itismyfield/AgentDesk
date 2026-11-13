@@ -121,7 +121,13 @@ fn b2_idle_leaf_collects_for_turn_without_enabling_cancel_gate() {
         .store(true, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
         idle_claude(
-            crate::services::claude_tui::busy_inject::Pane::with_program(session, "tmux".into()),
+            crate::services::claude_tui::busy_inject::Pane::with_program(
+                session,
+                crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                    "tmux".into()
+                )
+            )
+            .expect("managed scripted pane"),
             session.into(),
             7_212_901,
             token.clone(),

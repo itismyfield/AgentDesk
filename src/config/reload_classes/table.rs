@@ -6,6 +6,14 @@ use super::{Detect, FieldReload, custom, detect, row};
 
 #[rustfmt::skip]
 pub const FIELDS: &[FieldReload] = &[
+    row("decision_gate.enabled", Live, "`src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot)"),
+    row("decision_gate.features.issue_duplicate.enabled", Live, "`src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot)"),
+    row("decision_gate.features.issue_duplicate.deadline_ms", Live, "`src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot)"),
+    row("decision_gate.features.host_assignment.enabled", Live, "`src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot)"),
+    row("decision_gate.features.host_assignment.deadline_ms", Live, "`src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot)"),
+    row("decision_gate.features.routine_precheck.enabled", Live, "`src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot)"),
+    row("decision_gate.features.routine_precheck.deadline_ms", Live, "`src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot)"),
+    row("decision_gate.repositories.*.enabled", Live, "`src/services/decision_gate/policy.rs` resolve (activation pending; injected validated snapshot)"),
     row("server.port", Restart, "`src/server/mod.rs` run (listener bind); also seeded as kv server_port by `src/services/settings/startup.rs` startup_reseed"),
     row("server.host", Restart, "`src/server/mod.rs` run (bind addr)"),
     custom("server.auth_token", Restart, Detect::Custom(detect::server_auth_token), "`src/server/routes/auth.rs` auth_middleware (AppState.config Arc built in server::run)"),

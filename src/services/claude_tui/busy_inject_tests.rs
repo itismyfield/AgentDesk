@@ -178,7 +178,13 @@ impl Fake {
 
     fn run_text(&self, text: &str, timing: &Timing) -> Outcome {
         let session = self.session();
-        let pane = Pane::with_program(&session, self.dir.path().join("tmux"));
+        let pane = Pane::with_program(
+            &session,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                self.dir.path().join("tmux"),
+            ),
+        )
+        .expect("managed scripted pane");
         let request = Request {
             session: &session,
             transcript: &self.transcript,
@@ -509,7 +515,13 @@ fn capture_failure_on_an_attached_pane_does_not_lock_later_inputs() {
     fake.fail("capture-pane");
     for (nonce, text) in [("1234abcd", "first input"), ("5678abcd", "later input")] {
         let session = fake.session();
-        let pane = Pane::with_program(&session, fake.dir.path().join("tmux"));
+        let pane = Pane::with_program(
+            &session,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                fake.dir.path().join("tmux"),
+            ),
+        )
+        .expect("managed scripted pane");
         let request = Request {
             session: &session,
             transcript: &fake.transcript,

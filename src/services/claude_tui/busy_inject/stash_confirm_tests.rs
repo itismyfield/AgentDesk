@@ -16,7 +16,13 @@ const LONG: &str = "첫 줄\n둘째 줄\n셋째 줄";
 /// Submits `text`, runs `between`, then confirms; `park` lets a visible draft be parked.
 fn submit(tui: &Tui, park: bool, between: impl FnOnce()) -> (Outcome, Option<Receipt>) {
     let session = tui.session();
-    let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+    let pane = Pane::with_program(
+        &session,
+        crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+            tui.dir.path().join("tmux"),
+        ),
+    )
+    .expect("managed scripted pane");
     let nonce = tui.next_nonce();
     let request = Request {
         session: &session,
