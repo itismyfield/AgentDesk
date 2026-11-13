@@ -2,7 +2,7 @@
   "configuration_errors":[],
   "count_unit_version":1,
   "edge_count_unit":"static reference occurrences",
-  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha d75a8843564ee6dc2691f6e5eac13aaf3616c0b7 --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
+  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha e42a79728cec9a6608f98ff6e2fc00fc5fef3867 --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
   "indeterminate_dependencies":[
     {"count":1,"id":"3d29ca6b7465863f206febb861a0f441644c728f409182ccd49d175c2c2806b8","kind":"import","source":"src/lib.rs::crate::cli::discord","target":"src/lib.rs::crate::services"},
     {"count":1,"id":"47c075858c533c75543be0e9196aaa2eecd8c00d2951247879e8d5baff37f816","kind":"import","source":"src/lib.rs::crate::server::routes::reviews","target":"src/lib.rs::crate::services"},
@@ -12,8 +12,8 @@
   ],
   "indeterminate_edges":5,
   "indeterminate_occurrences":5,
-  "input_sha":"d75a8843564ee6dc2691f6e5eac13aaf3616c0b7",
-  "mapping_sha256":"c8a647619ccd91fb988aea9c91f46fac8a3ec2b793538f6a6a060afdda315714",
+  "input_sha":"e42a79728cec9a6608f98ff6e2fc00fc5fef3867",
+  "mapping_sha256":"558b9226b61ddbdbb388f3c4bba3d31e4b29e6999a9ae9989e36428e9ae05fa1",
   "reverse_dependencies":[
     {"count":2,"id":"0035d7ca439517230bc6306b0881fc487fe95b44c2852a7e74379cb98436987d","kind":"path","source":"src/lib.rs::crate::config","target":"src/lib.rs::crate::config::session_hosts"},
     {"count":3,"id":"004548ea3340d4f2db928565ed126a4a242f7421b1c3421bba76cf7df27c3fc4","kind":"import","source":"src/lib.rs::crate::services::auto_queue","target":"src/lib.rs::crate::error"},
