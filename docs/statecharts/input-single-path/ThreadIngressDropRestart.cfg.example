@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=NoSilentLoss EXPECTED_LIVENESS=AcceptedCompletes,DeliveredGetsOutcome
+CONSTANTS
+    Target = "boundThread"
+    InitialSession = "absent"
+    ActualHost = "tmux"
+    DesiredHost = "herdr"
+    Mutation = "dropRestart"
+    CanCrash = TRUE
+SPECIFICATION Spec
+INVARIANT NoDuplicate NoSilentLoss RejectedNoEffects ForeignForbidden ParentFailClosed BoundThreadAdmitted SuccessBacked HttpAcceptanceBacked LiveActualHostPreserved
+PROPERTY AcceptedCompletes DeliveredGetsOutcome

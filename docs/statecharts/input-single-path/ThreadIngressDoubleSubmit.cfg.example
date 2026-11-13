@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=NoDuplicate,NoSilentLoss,SuccessBacked EXPECTED_LIVENESS=AcceptedCompletes
+CONSTANTS
+    Target = "boundThread"
+    InitialSession = "absent"
+    ActualHost = "herdr"
+    DesiredHost = "herdr"
+    Mutation = "doubleSubmit"
+    CanCrash = FALSE
+SPECIFICATION Spec
+INVARIANT NoDuplicate NoSilentLoss RejectedNoEffects ForeignForbidden ParentFailClosed BoundThreadAdmitted SuccessBacked HttpAcceptanceBacked LiveActualHostPreserved
+PROPERTY AcceptedCompletes DeliveredGetsOutcome

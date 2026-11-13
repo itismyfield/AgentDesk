@@ -1,5 +1,7 @@
 # InputOwnership — who answers an input pasted into a Claude pane (#7676 A2+D)
 
+API thread targeting and its cold/warm session join are checked separately in the [#8125 design projection](thread-ingress.report.md). That projection uses this model's accepted-source custody port; it does not change these historical configurations or claim their known gaps are fixed.
+
 Code versions modelled:
 
 | `Fix` | Commit | Config |

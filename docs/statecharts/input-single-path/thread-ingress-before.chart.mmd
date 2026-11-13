@@ -1,0 +1,18 @@
+---
+title: "API 입력을 같은 스레드 세션으로 전달"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks BoundThreadAdmitted
+    lg1: Path to the BoundThreadAdmitted bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 외부 입력 도착
+  s1: 403 거절
+  [*] --> s0
+  s0 --> s1: 부모와 에이전트 바인딩 확인
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 breaks
+  class s1 bugPath

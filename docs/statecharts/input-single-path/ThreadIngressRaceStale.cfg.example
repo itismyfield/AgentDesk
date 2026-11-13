@@ -1,0 +1,7 @@
+\* EXPECTED_SAFETY=NoStaleBootstrap EXPECTED_LIVENESS=-
+CONSTANTS
+    N = 3
+    Mutation = "staleRead"
+SPECIFICATION Spec
+INVARIANT NoDuplicate NoConcurrentStartup NoStaleBootstrap SuccessBacked
+PROPERTY EachAcceptedCompletes EachDeliveredGetsReply

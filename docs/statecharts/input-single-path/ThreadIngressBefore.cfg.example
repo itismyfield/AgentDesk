@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=BoundThreadAdmitted EXPECTED_LIVENESS=-
+CONSTANTS
+    Target = "boundThread"
+    InitialSession = "absent"
+    ActualHost = "tmux"
+    DesiredHost = "tmux"
+    Mutation = "before"
+    CanCrash = FALSE
+SPECIFICATION Spec
+INVARIANT NoDuplicate NoSilentLoss RejectedNoEffects ForeignForbidden ParentFailClosed BoundThreadAdmitted SuccessBacked HttpAcceptanceBacked LiveActualHostPreserved
+PROPERTY AcceptedCompletes DeliveredGetsOutcome

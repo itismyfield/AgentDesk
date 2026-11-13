@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=- EXPECTED_LIVENESS=-
+CONSTANTS
+    Target = "boundChannel"
+    InitialSession = "live"
+    ActualHost = "tmux"
+    DesiredHost = "tmux"
+    Mutation = "none"
+    CanCrash = TRUE
+SPECIFICATION Spec
+INVARIANT NoDuplicate NoSilentLoss RejectedNoEffects ForeignForbidden ParentFailClosed BoundThreadAdmitted SuccessBacked HttpAcceptanceBacked LiveActualHostPreserved
+PROPERTY AcceptedCompletes DeliveredGetsOutcome
