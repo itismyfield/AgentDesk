@@ -71,7 +71,7 @@ main에서 재사용할 보장:
 
 기존 frame registry의 `Registration`에 optional `native_settlement`(ticket, outcome, proof range, cleanup state, warned episode)을 두고 기존 저장/lock 경계 안에서 갱신한다. root에 알 수 없는 JSON 필드만 붙이는 안은 사용하지 않는다. **별도 DB·전역 tombstone·무제한 새 journal을 추가하지 않는다.** 완료 원본의 기존 보존/compaction 주기에서 이 표식도 함께 보존하고, 해당 원본이 소거된 뒤 과거 event가 살아 있는 프로세스는 source/actor CAS로 거절한다. bounded 최근-N 캐시를 exactly-once 근거로 삼지 않는다.
 
-**스키마·투영 보존:** `history/v2.rs:113`의 Registration, `:166`의 Snapshot, `:434`의 `Registry::project`와 `:135`의 `Passive::compact`가 같은 표식을 보존해야 한다(접두사 `src/services/tui_input/human_frame/`). passive 표식 변경 때 `encoded=None`으로 기존 encoding cache를 무효화한다. 결과 commit은 lock 아래 **기존 등록 key와 captured episode가 존재할 때만** 가능하며, 미등록/GC된 옛 증거에서 등록·완료를 새로 만들지 않는다. terminal_identities의 24시간 prune(`src/services/turn_orchestrator/queued_head/v2/retained.rs:78`)를 native exactly-once 기억으로 사용하지 않는다.
+**스키마·투영 보존:** `history/v2.rs:113`의 Registration, `:166`의 Snapshot, `:434`의 `Registry::project`와 `:135`의 `Passive::compact`가 같은 표식을 보존해야 한다(접두사 `src/services/tui_input/human_frame/`). passive 표식 변경 때 `encoded=None`으로 기존 encoding cache를 무효화한다. 결과 commit은 lock 아래 **기존 registration과 전체 ticket(owning_episode None 포함)이 정확히 일치할 때만** 가능하며, 미등록/GC된 옛 증거에서 등록·완료를 새로 만들지 않는다. terminal_identities의 24시간 prune(`src/services/turn_orchestrator/queued_head/v2/retained.rs:78`)를 native exactly-once 기억으로 사용하지 않는다.
 
 현재 writer는 알 수 없는 optional 필드를 typed round-trip에서 잃을 수 있다. 따라서 **frame registry envelope만 v3**로 쓴다(입력 queue SnapshotV2는 version2 유지). main의 `history/compat.rs:42`는 2 외 envelope를 쓰기 없이 거절하므로 구 writer가 v3 결과를 지울 수 없다. A에서 compat full/prefix reader·`v2/migration.rs::restore`와 typed encode가 v1/v2/v3를 읽고 표식을 보존하게 하되 새 표식이 없으면 v2를 계속 쓴다. B의 첫 native ticket 준비 저장(첫 key 전, outcome은 아직 None)부터 v3로 올리고 뒤의 모든 rewrite는 v3 유지다. ticket을 v2에 먼저 쓴 뒤 결과 때만 올리는 간격은 허용하지 않는다. 활성화 뒤 rollback 가능한 reader 하한은 **A**이며, 33d1f4b5로의 직접 rollback은 registry를 읽지 못하므로 지원하지 않는다. 운영자 변환 명령이나 수동 복구 절차를 새로 만들지 않는다. 실제 배포·rollback 결정은 이 설계 레그에서 수행하지 않는다.
 
@@ -158,3 +158,7 @@ WARN은 `(ticket, episode, source incarnation)`에 대해 native idle 관측이 
 | 잘못된 0/PASS | TLC 선택 cfg/실행 수와 expected 깨짐을 비교; e2e는 비영 분모·message ID·row/lease 증거, PG/실기 미실행을 PASS로 쓰지 않음 |
 
 운영자 새 수동 조작 기능과 대형 가드레일은 제안하지 않는다. 검증 불가능한 옛 입력의 자동 처분 정책이 필요해지면 위 한계와 비용을 사용자 결정 항목으로 올린다.
+
+## A 구현 계약 보강
+
+결과 CAS는 follower의 None을 허용한다. owning_episode Some만 lease·row·global_active 정리를 허가하며 None follower의 실행·철회 결과와 안내도 각각 한 번이다. A는 v3 reader와 비활성 API/fixture 기반이며 새 ticket·결과 producer 활성화는 B다. boot는 runtime_bootstrap→prepare_before_reap→기존 custody 보존→reaper→restore/owner drive 순서다. v3 ticket 보존 준비 실패는 해당 reaper pass를 보류하고 원본 행을 남긴다. 기존 v1/v2 경로의 정책은 바꾸지 않는다.

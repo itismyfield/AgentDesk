@@ -121,3 +121,7 @@ python3 scripts/ci/statecharts_tlc.py --base 33d1f4b5a9dce7023e2d0014e45a05ed6c5
 반례 그림은 `.codex/skills/statechart/scripts/statechart NativeInputAttribution.tla`에
 `--config NativeAttributionCurrentQueue.cfg --view native-attribution.view.mjs --out <새 디렉터리>`로 생성한다.
 wrapper rc=1은 예상 RED다. repository checker는 예상 RED까지 정확히 맞아야 전체 rc=0이다.
+
+## A reader 기반: follower / boot 계약
+
+A의 새 6 cfg는 follower Some 필수 오판과 boot preparation 순서의 비교다. FollowerBefore는 FollowerEventuallySettles RED, FollowerFixed는 None follower Executed/Withdrawn 모두 GREEN이다. BootBefore는 NoBootTicketLoss 및 BootEventuallyRestores RED, BootFixed는 미결과/이미 저장된 결과 양쪽에서 GREEN이다. BootFailureFixed는 준비 실패 때 row 보존 GREEN(영구 실패의 진행성은 주장하지 않음), BootIgnoreFailure는 NoBootTicketLoss·FailureKeepsRow RED다. 기존 14 cfg의 기대 위반은 바꾸지 않는다. review record는 부팅 준비·custody·reaper·restore/head 및 follower 결과/notice·parent lease/row/global_active를 표현한다.

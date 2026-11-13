@@ -687,3 +687,18 @@
 | `src/services/turn_orchestrator/lease_release.rs:43` | `detach_active_turn_anchor` | Inject / BootRestore / Settle(본문 actor 분기) |
 | `src/services/turn_orchestrator/lease_release.rs:50` | `detach_active_turn_anchor` | Inject / BootRestore / Settle(본문 actor 분기) |
 
+
+## boot 및 직접 제거 진입점 보강
+
+| 코드 좌표 | 행동/소유 |
+|---|---|
+| `src/services/discord/runtime_bootstrap.rs:308` | BootRestore: mint 전 public boot reaper |
+| `src/services/discord/inflight/removal/boot_reaper.rs:61` | PrepareBoot: 기존 prepare_before_reap 포트 |
+| `src/services/discord/inflight/removal/boot_reaper.rs:95` | PrepareBoot→custody→Reap 순서 |
+| `src/services/discord/inflight/removal/boot_reaper.rs:131` | Reap: provider row census |
+| `src/services/discord/inflight/removal/boot_reaper.rs:218` | ProjectionClear: lock-held 직접 unlink |
+| `src/services/discord/inflight/circuit_removal.rs` `delete` | AdjacentEnd/ProjectionClear: circuit 제거 |
+| `src/services/discord/inflight/rebind_reap.rs:311` | AdjacentEnd/ProjectionClear: abandoned rebind |
+| `src/services/discord/inflight/rebind_reap.rs:422` | AdjacentEnd/ProjectionClear: dead watcher rebind |
+
+모델의 review record는 registration 있음·owning_episode None follower와 boot 준비/보존/행 존재/restore-head를 이 진입점의 두 값으로 구분한다. 실패한 준비는 reaper를 허가하지 않는다.

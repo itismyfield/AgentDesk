@@ -471,3 +471,9 @@ turn-presence/TurnPresenceRetiredRestartBeforeLiveness.cfg	TurnPresence	-	NewInp
 turn-presence/TurnPresenceRetiredRestartFixed.cfg	TurnPresence	-	-
 turn-presence/TurnPresenceRetiredSweep.cfg	TurnPresence	RetiredOnlyQuietNotUnknown	NewInputEventuallyStarts
 turn-presence/TurnPresenceRetiredUnsafe.cfg	TurnPresence	NoForeignMarkerRemoval,NoLiveMarkerRemoval	-
+input-single-path/NativeAttributionFollowerBefore.cfg	NativeInputAttribution	-	FollowerEventuallySettles
+input-single-path/NativeAttributionFollowerFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootBefore.cfg	NativeInputAttribution	NoBootTicketLoss	BootEventuallyRestores
+input-single-path/NativeAttributionBootFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootFailureFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootIgnoreFailure.cfg	NativeInputAttribution	NoBootTicketLoss,FailureKeepsRow	-
