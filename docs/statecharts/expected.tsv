@@ -239,6 +239,10 @@ input-single-path/ManagedObserverRebindGraceBeforeAdoption.cfg	ManagedObserverRe
 input-single-path/ManagedObserverRebindGraceBeforeAdoptionNoHandoff.cfg	ManagedObserverRebind	-	SubmittedEventuallyCloses
 input-single-path/ManagedObserverRebindMetaIsInput.cfg	ManagedObserverRebind	FixedAOnlyOnEvidenceOrGrace	SubmittedEventuallyCloses
 input-single-path/ManagedObserverRebindSinglePoll.cfg	ManagedObserverRebind	FixedAOnlyOnEvidenceOrGrace	SubmittedEventuallyCloses
+input-single-path/NativeAttributionBootBefore.cfg	NativeInputAttribution	NoBootTicketLoss	BootEventuallyRestores
+input-single-path/NativeAttributionBootFailureFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootIgnoreFailure.cfg	NativeInputAttribution	NoBootTicketLoss,FailureKeepsRow	-
 input-single-path/NativeAttributionCurrentMidTurn.cfg	NativeInputAttribution	-	EveryInputEventuallySettled,HeadEventuallyInjected,IdleEventuallyReleased
 input-single-path/NativeAttributionCurrentQueue.cfg	NativeInputAttribution	NoForeignResponse	EveryInputEventuallySettled,HeadEventuallyInjected,IdleEventuallyReleased
 input-single-path/NativeAttributionCurrentWithdraw.cfg	NativeInputAttribution	-	EveryInputEventuallySettled,HeadEventuallyInjected,IdleEventuallyReleased
@@ -248,6 +252,8 @@ input-single-path/NativeAttributionFixedBootLegacy.cfg	NativeInputAttribution	-	
 input-single-path/NativeAttributionFixedMidTurn.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionFixedQueue.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionFixedWithdraw.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionFollowerBefore.cfg	NativeInputAttribution	-	FollowerEventuallySettles
+input-single-path/NativeAttributionFollowerFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionForeignEnd.cfg	NativeInputAttribution	NoForeignEnd	-
 input-single-path/NativeAttributionNoFence.cfg	NativeInputAttribution	NoForeignEnd,NoSuccessorRelease,NoSourceBorrow	-
 input-single-path/NativeAttributionNoWake.cfg	NativeInputAttribution	-	EveryInputEventuallySettled,HeadEventuallyInjected
@@ -471,9 +477,3 @@ turn-presence/TurnPresenceRetiredRestartBeforeLiveness.cfg	TurnPresence	-	NewInp
 turn-presence/TurnPresenceRetiredRestartFixed.cfg	TurnPresence	-	-
 turn-presence/TurnPresenceRetiredSweep.cfg	TurnPresence	RetiredOnlyQuietNotUnknown	NewInputEventuallyStarts
 turn-presence/TurnPresenceRetiredUnsafe.cfg	TurnPresence	NoForeignMarkerRemoval,NoLiveMarkerRemoval	-
-input-single-path/NativeAttributionFollowerBefore.cfg	NativeInputAttribution	-	FollowerEventuallySettles
-input-single-path/NativeAttributionFollowerFixed.cfg	NativeInputAttribution	-	-
-input-single-path/NativeAttributionBootBefore.cfg	NativeInputAttribution	NoBootTicketLoss	BootEventuallyRestores
-input-single-path/NativeAttributionBootFixed.cfg	NativeInputAttribution	-	-
-input-single-path/NativeAttributionBootFailureFixed.cfg	NativeInputAttribution	-	-
-input-single-path/NativeAttributionBootIgnoreFailure.cfg	NativeInputAttribution	NoBootTicketLoss,FailureKeepsRow	-
