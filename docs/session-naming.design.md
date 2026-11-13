@@ -486,6 +486,8 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 | K25 | `services/tmux_turn_liveness/cleanup_host.rs:22` | cleanup row locator key마다 host marker가 absent/tmux인지 확인 | current primary는 **자동(A)**. `locator_keys()`가 갖는 historical/source locator를 무조건 current로 치환하면 host proof를 지우므로 기존 all-locators 검사는 유지. alias 증거가 충돌하면 기존 보존. |
 | K26 | `db/dispatched_sessions/force_kill.rs:68,75` | `resolve_session_locator_pg`가 돌려준 current key로 `WHERE session_key=$1` exact-primary SELECT | **자동(A)**. DB loader는 이미 alias→primary resolve. **S3**의 service층 K15/K19/K24는 이 load 결과 current key를 실제 name 결정에도 사용하도록 전달 적응만 필요. |
 
+S2 거절 경계 델타: registration CAS 거절은 name-only cleanup과 분리해 Refused/Held로 반환한다. 미등록 fresh 슬롯은 다음 정리까지 남을 수 있으며, incarnation 기반 정리는 S3 계약이다. marker-publication 실패의 기존 cleanup 조건은 유지한다.
+
 ## primary 승격의 최소 트랜잭션 계약
 
 1. r1의 “primary=옛 이름 + current descriptor로 모든 곳에서 우회”를 삭제한다. 신규 등록에서만 **primary tail = 현재 물리 이름** 불변식을 유지한다. live old가 있으면 새 요청 이름과 상관없이 기존 primary/실행을 유지한다.

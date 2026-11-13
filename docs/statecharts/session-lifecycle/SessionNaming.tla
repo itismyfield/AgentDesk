@@ -15,7 +15,8 @@ Init(kind) ==
         kills |-> 0, retriedStop |-> FALSE, probeFailures |-> 0,
         nonceContested |-> FALSE, registeredFromNonce |-> "",
         tx |-> "idle", snapshotNonce |-> "", stagedPrimary |-> "old",
-        stagedNonce |-> "", stagedAliases |-> {}, hostWitness |-> "same", witnessChanged |-> FALSE] : nonce \in {"old", ""}}
+        stagedNonce |-> "", stagedAliases |-> {}, hostWitness |-> "same", witnessChanged |-> FALSE,
+        slotIncarnation |-> "none", replacementSeen |-> FALSE] : nonce \in {"old", ""}}
 
 RequestNewName ==
     /\ n.stage = "old"
@@ -44,7 +45,7 @@ OldNonceEnds ==
 PrepareSuccessor(mode) ==
     /\ n.stage = "requested" /\ n.rowNonce \in {"", "new"}
     /\ mode = "no-absence" \/ (~n.oldLive /\ n.absence = "absent")
-    /\ n' = [n EXCEPT !.fresh = TRUE, !.stage = "prepared"]
+    /\ n' = [n EXCEPT !.fresh = TRUE, !.stage = "prepared", !.slotIncarnation = "a"]
 
 ClaimNewNonce ==
     /\ n.stage = "prepared" /\ n.tx = "rows" /\ n.stagedNonce = ""
@@ -56,11 +57,17 @@ NonceChangesBeforeRegistration ==
 
 RefuseConflictingRegistration ==
     /\ n.stage = "prepared" /\ n.tx = "idle" /\ n.rowNonce = "old" /\ n.fresh
-    /\ n' = [n EXCEPT !.fresh = FALSE, !.kills = @ + 1, !.stage = "refused"]
+    /\ n' = [n EXCEPT !.fresh = FALSE, !.stage = "held"]
 
 TxDiscover ==
     /\ n.stage = "prepared" /\ n.fresh /\ n.tx = "idle"
     /\ n' = [n EXCEPT !.tx = "snapshot", !.snapshotNonce = n.rowNonce]
+
+SameNameIncarnationReplacesPrepared ==
+    /\ n.stage = "prepared" /\ n.tx = "snapshot" /\ ~n.replacementSeen
+    /\ n.slotIncarnation = "a"
+    /\ n' = [n EXCEPT !.slotIncarnation = "b", !.replacementSeen = TRUE,
+        !.rowNonce = "old", !.nonceContested = TRUE]
 
 TxLocatorLocks ==
     /\ n.tx = "snapshot"
@@ -101,8 +108,8 @@ TxCommit(mode) ==
 TxRollback(mode) ==
     /\ n.stage = "prepared" /\ n.tx # "idle"
     /\ ~TxValidHost(mode) \/ ~TxValidNonce(mode)
-    /\ n' = [n EXCEPT !.tx = "rolled-back", !.stage = "refused", !.fresh = FALSE,
-         !.stagedPrimary = n.primary, !.stagedAliases = n.aliases, !.kills = @ + 1]
+    /\ n' = [n EXCEPT !.tx = "rolled-back", !.stage = "held", !.fresh = FALSE,
+         !.stagedPrimary = n.primary, !.stagedAliases = n.aliases, !.stagedNonce = n.rowNonce]
 
 LateOldNonceHook(mode) ==
     /\ n.stage \in {"registered", "stopped"} /\ ~n.oldHookSeen
@@ -112,18 +119,18 @@ LateOldNonceHook(mode) ==
 
 StopCurrent ==
     /\ n.stage = "registered" /\ n.primary = "new" /\ n.rowNonce = "new"
-    /\ n' = [n EXCEPT !.kills = @ + 1, !.current = "none", !.target = "none", !.stage = "stopped"]
+    /\ n' = [n EXCEPT !.kills = @ + 1, !.current = "none", !.target = "none", !.stage = "stopped", !.slotIncarnation = "none"]
 
 RetryStop(mode) ==
     /\ n.stage = "stopped" /\ ~n.retriedStop
     /\ n' = [n EXCEPT !.retriedStop = TRUE,
         !.kills = IF mode = "double-kill" THEN @ + 1 ELSE @]
 
-Done == (n.stage = "refused" \/ (n.stage = "stopped" /\ n.retriedStop /\ n.oldHookSeen)) /\ UNCHANGED n
+Done == (n.stage = "held" \/ (n.stage = "stopped" /\ n.retriedStop /\ n.oldHookSeen)) /\ UNCHANGED n
 
 Next(mode) == RequestNewName \/ OldHostEnds \/ ObserveOldHost \/ ProbeFails \/ ProbeAgain
     \/ OldNonceEnds \/ NonceChangesBeforeRegistration \/ RefuseConflictingRegistration \/ PrepareSuccessor(mode) \/ ClaimNewNonce \/ PromotePrimary(mode)
-    \/ TxDiscover \/ TxLocatorLocks \/ TxIdentityLock \/ TxRows \/ TxHostChanges
+    \/ TxDiscover \/ SameNameIncarnationReplacesPrepared \/ TxLocatorLocks \/ TxIdentityLock \/ TxRows \/ TxHostChanges
     \/ TxPreserveAlias \/ TxCommit(mode) \/ TxRollback(mode)
     \/ LateOldNonceHook(mode) \/ StopCurrent \/ RetryStop(mode) \/ Done
 
@@ -137,5 +144,7 @@ NoDuplicateKill == n.kills <= 1
 PromotionNonceWasCurrent == n.registeredFromNonce \in {"", "new"}
 LateOldHookRejected == n.oldHookSeen => n.staleRejected /\ n.rowNonce = "new"
 RollbackHasNoPartialPromotion == n.tx = "rolled-back" => n.primary = "old" /\ n.aliases = {}
-CanonicalPrimaryEventuallyCurrent == (n.stage = "prepared") ~> (n.stage = "refused" \/ (n.primary = "new" /\ n.rowNonce = "new" /\ "old" \in n.aliases))
+RegistrationRefusalDoesNotKill == n.stage = "held" => n.kills = 0
+SameNameReplacementPreserved == n.replacementSeen => n.slotIncarnation = "b"
+CanonicalPrimaryEventuallyCurrent == (n.stage = "prepared") ~> (n.stage = "held" \/ (n.primary = "new" /\ n.rowNonce = "new" /\ "old" \in n.aliases))
 ====

@@ -465,18 +465,17 @@ impl PreparedIncarnation {
     }
 
     pub(crate) fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {
-        let result = result.and_then(|marker| {
-            #[cfg(unix)]
-            registration::complete(&self.context).map_err(io::Error::other)?;
-            Ok(marker)
-        });
-        result.map(|_| ()).map_err(|error| {
+        result.map_err(|error| {
             crate::services::platform::tmux::kill_session(
                 &self.context.tmux_session,
                 "binding context publication failed",
             );
             format!("publish binding context: {error}")
-        })
+        })?;
+        #[cfg(unix)]
+        registration::complete(&self.context)
+            .map_err(|error| format!("Held(registration_refused): {error}"))?;
+        Ok(())
     }
 
     pub(crate) fn validate(&self, tmux: &str) -> io::Result<()> {

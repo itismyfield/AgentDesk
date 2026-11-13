@@ -588,4 +588,6 @@ LateOldHookRejected == Naming!LateOldHookRejected
 NamingSpec == NamingInit /\ [][NamingNext]_vars /\ WF_vars(NamingNext)
 CanonicalPrimaryEventuallyCurrent == Naming!CanonicalPrimaryEventuallyCurrent
 RollbackHasNoPartialPromotion == Naming!RollbackHasNoPartialPromotion
+RegistrationRefusalDoesNotKill == Naming!RegistrationRefusalDoesNotKill
+SameNameReplacementPreserved == Naming!SameNameReplacementPreserved
 ====

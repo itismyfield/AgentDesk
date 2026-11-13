@@ -743,7 +743,11 @@ async fn key_promotion_registration_conflict_keeps_replaced_incarnation_pg() {
             .fetch_one(&rig.pool)
             .await
             .unwrap();
-    assert!(a.finish_spawn(stamped_a).is_err());
+    let refusal = a.finish_spawn(stamped_a).unwrap_err();
+    assert!(
+        refusal.starts_with("Held(registration_refused):"),
+        "{refusal}"
+    );
     let after: serde_json::Value =
         sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s WHERE id=$1")
             .bind(rig.id)
