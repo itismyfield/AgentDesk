@@ -555,6 +555,7 @@ fn dcserver_rejects_missing_lease_before_first_runtime_effect() {
             rlim_max: 0,
         };
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        eprintln!("LEASE_ENTRY_TEST {}", selector(name));
         crate::cli::dcserver::handle_dcserver(None);
         panic!("missing lease must refuse the real dcserver entry point");
     }
@@ -574,7 +575,8 @@ fn dcserver_rejects_missing_lease_before_first_runtime_effect() {
         String::from_utf8_lossy(&output.stderr).contains("test instance lease admission rejected")
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains(&format!("test {} ...", selector(name)))
+        String::from_utf8_lossy(&output.stderr)
+            .contains(&format!("LEASE_ENTRY_TEST {}", selector(name)))
     );
     fixture.assert_sentinel();
 }
