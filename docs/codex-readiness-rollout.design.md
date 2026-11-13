@@ -7,7 +7,7 @@
 ## 결정 요약
 
 - 준비·작업 중·종료·/stop의 권위 신호는 **현재 실행에 묶인 rollout의 최신 턴 상태**다. 이미 owner 입력 경로가 쓰는 `busy_inject::rollout::read_native_end`(`codex_tui/busy_inject/rollout.rs:98`)를 그대로 쓴다.
-- 종료 기록이 늦거나 없을 때는 같은 `turn_id`의 **Codex Stop 훅**이 종료를 증명한다. 그것도 없으면 기존 busy 입력 경로로 보내거나, 조용한 상태가 확인된 뒤 기존 재기동 경로로 넘긴다. 어느 경우에도 입력이 영구 보류되지 않는다.
+- 종료 기록이 늦거나 없을 때는 같은 `turn_id`의 **Codex Stop 훅**이 종료를 증명한다. 그것도 없으면 기존 busy 입력 경로로 보내거나, 조용한 상태가 확인된 뒤 기존 재기동 경로로 넘긴다. 모델이 다룬 범위에서는 입력이 영구 보류되지 않는다(0절). herdr에서 재기동 경로를 부를 수 있는지는 조각 B에서 확인한다(5절 멈춤 조건 1).
 - 입력을 쓰기 전에 **프로세스 생존**(tmux `pane_liveness`, herdr `process_info`)을 확인한다. rollout만 보면 종료된 pane의 셸에 입력이 들어갈 수 있다.
 - 화면 판독은 사람 초안(5번 보류)·모달 veto·Enter 직전 자기 글 확인·pane 크기에만 남는다. 이 판독이 실패해도 거절·보류가 영구화되지 않는다.
 - #8081 B1 계약은 바꾸지 않는다. 훅 ingress 호출부 한 곳(`claude_tui/hook_server.rs:491`~`:511`) 옆에 Codex 관측 호출을 더하는 것이 전부다. `DESIGN_DELTA` 없음.
@@ -154,7 +154,7 @@
 |---|---|---|---|
 | 종료 기록이 늦다 | 1 | 재판독이 기록을 본다. Stop 훅이 먼저 오면 2 | `CodexReadyAfterPerson` |
 | 종료 기록 유실·이름 없음, Stop 훅 있음 | 2 | 같은 `turn_id` Stop 훅으로 `Idle` | `CodexReadyAfterLostRecord`, `…UnnamedHook` |
-| 둘 다 없음, 프로세스 생존, 턴이 Open으로 읽힘 | 3 | 기존 busy 입력 경로로 보낸다(`effect/codex.rs:116`·`:143`). Codex는 열린 턴이면 큐에 넣고 유휴면 새 턴을 시작하며, nonce 영수증이 어느 쪽인지 알려 준다(`rollout.rs:419` `submitted`) | `CodexReadyAfterLostBothBusy` |
+| 둘 다 없음, 프로세스 생존, 턴이 Open으로 읽힘 | 3 | 기존 busy 입력 경로로 보낸다(`effect/codex.rs:116`·`:143`). Codex는 열린 턴이면 큐에 넣고 유휴면 새 턴을 시작하며, nonce 영수증이 어느 턴에 기록됐는지 알려 준다(`rollout.rs:419` `submitted`). 대상 턴과 다른 턴에 기록된 영수증의 처리(`busy_inject.rs:484`~`:508`)는 [U]라 조각 C에서 먼저 확인한다 | `CodexReadyAfterLostBothBusy` |
 | 둘 다 없음, busy 경로 불가(`NonSteerable`·`Unknown`) 또는 rollout 판독 불가(`.zst`·없음) | 4 | rollout stamp가 `STALE_USER_SUBMITTED_RECLAIM_SECS`(600초, `tui_turn_state.rs:76`) 동안 그대로이고 provider 프로세스에 자식이 없을 때만 기존 교체 경로로 새 실행을 띄운다 | `…LostBothReclaim`, `…Unnamed`, `…Compressed` |
 | 프로세스 종료 | — | `Gone` → 기존 재기동 | `CodexReadyAfterExit` |
 | dcserver 재시작 | — | 디스크의 rollout·binding으로 같은 판정. 훅 증거가 없으면 3·4 | `CodexReadyAfterRestart` |
@@ -194,7 +194,7 @@
 | `composer_status.rs` 함수 | 지금 호출자 | 옮긴 뒤 호출자 | 용도 |
 |---|---|---|---|
 | `:46` `model_first_status`·`:12` `line_is_codex_model_first_status` | `:219`(모달), `:279`(초안 판독기) | 같음 | 초안·모달 위치 찾기 |
-| `:145` `short_composer_footer` | `:204`, `:219`, `:282`, `:329` | `:219`, `:282`, `:329` | 초안·모달 |
+| `:145` `short_composer_footer` | `:204`, `:219`, `:282`, `:329` | 같음(`:204`는 남는 `recent_has_compact_composer` 안) | 초안·모달 |
 | `:183` `pane_has_dim_composer` | `input.rs:1439` → `:433`(초안), `:1299`(준비) | `input.rs:433` | 흐린 placeholder는 초안이 아님 |
 | `:197` `recent_has_compact_composer` | `input.rs:1473` → `:933`(초안), `herdr_cancel.rs:37`(veto), `:1466`(준비) | `:933`, `herdr_cancel.rs:37` | 초안·veto |
 | `:208` `pane_has_interactive_modal` | `input.rs:1036` → `submission.rs:209`, `herdr_cancel.rs:15`, `input.rs:1258`·`:1295`(준비) | `submission.rs:209`, `herdr_cancel.rs:15` | 모달 veto |
