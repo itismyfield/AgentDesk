@@ -1,6 +1,15 @@
 //! Forward launch preparation preserves the existing source/account and resume checks.
 use super::*;
 
+/// Preserve the wrapper's scheduling-refusal prefix while adding stages to launch errors.
+fn launch_error(stage: &str, error: String) -> String {
+    if error.starts_with("NotSent(") {
+        error
+    } else {
+        format!("herdr launch {stage}: {error}")
+    }
+}
+
 /// The session a launch resumes: the turn's own one while it last ran under the overlay's account,
 /// its transcript exists under the overlay's home and O reads that file; otherwise a new one.
 fn resumed_session(
@@ -49,35 +58,47 @@ pub(super) fn launched_source(
         .clone()
         .ok_or("herdr turn: no hook endpoint")?;
     let logical = &turn.owner.logical_key;
-    let overlay = ports.auth_overlay(logical)?;
+    let overlay = ports
+        .auth_overlay(logical)
+        .map_err(|e| launch_error("auth_overlay", e))?;
     let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay);
     let requested = if turn.force_fresh {
         None
     } else {
-        current_session(turn.channel_id, logical, turn.session_id)?
+        current_session(turn.channel_id, logical, turn.session_id)
+            .map_err(|e| launch_error("current_session", e))?
     };
-    let prior = resumed_session(turn, &overlay, requested.as_deref())?;
+    let prior = resumed_session(turn, &overlay, requested.as_deref())
+        .map_err(|e| launch_error("resume_source", e))?;
     if prior.is_some() {
         let mut earlier = ports.earlier_tmux(logical);
         if earlier.liveness() != session_handoff::Liveness::Ended {
-            runtime.block_on(session_handoff::pinned_tmux::end(
-                logical,
-                turn.channel_id,
-                None,
-                |_| async { Ok(!cancel_requested(turn.cancel.as_deref())) },
-            ))?;
+            runtime
+                .block_on(session_handoff::pinned_tmux::end(
+                    logical,
+                    turn.channel_id,
+                    None,
+                    |_| async { Ok(!cancel_requested(turn.cancel.as_deref())) },
+                ))
+                .map_err(|e| launch_error("close_legacy", e))?;
         }
     }
     let latest = if turn.force_fresh {
         None
     } else {
-        current_session(turn.channel_id, logical, turn.session_id)?
+        current_session(turn.channel_id, logical, turn.session_id)
+            .map_err(|e| launch_error("current_session", e))?
     };
-    let resumed = resumed_session(turn, &overlay, latest.as_deref())?;
+    let resumed = resumed_session(turn, &overlay, latest.as_deref())
+        .map_err(|e| launch_error("resume_source", e))?;
     let home = overlay.home.as_deref();
     let session_id = match &resumed {
         Some(session) => session.clone(),
-        None => super::super::fresh_claude_tui_session_resolution(working_dir, home)?.session_id,
+        None => {
+            super::super::fresh_claude_tui_session_resolution(working_dir, home)
+                .map_err(|e| launch_error("fresh_session", e))?
+                .session_id
+        }
     };
     let prepare = |prepared: &PreparedIncarnation| {
         let (system, model) = (turn.system_prompt, turn.model);
@@ -90,10 +111,12 @@ pub(super) fn launched_source(
             model,
             hooks,
             &auth,
-        )?;
+        )
+        .map_err(|e| launch_error("prepare_command", e))?;
         // The account this session runs under, which a later resume of it checks.
         let profile = &overlay.profile_id;
-        crate::services::tmux_common::write_claude_session_auth(logical, session, profile)?;
+        crate::services::tmux_common::write_claude_session_auth(logical, session, profile)
+            .map_err(|e| launch_error("write_auth", e))?;
         Ok(command)
     };
     // Subscribed before the create, so the launch's SessionStart cannot pass unseen.
@@ -101,11 +124,12 @@ pub(super) fn launched_source(
     let mut launch = launch(turn, Some(session_id.clone()), resumed.is_some());
     launch.provider_root = home.map(|home| home.join("projects"));
     let outcome = runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host));
-    let nonce = launched(outcome)?;
+    let nonce = launched(outcome).map_err(|e| launch_error("admit_create_evidence", e))?;
     let resume = resumed.is_some().then_some(nonce.as_str());
     let cancel = turn.cancel.as_deref();
-    session_started(runtime, &mut hooks, (&session_id, resume), cancel)?;
-    attach(turn, runtime, ports, &nonce, &session_id)
+    session_started(runtime, &mut hooks, (&session_id, resume), cancel)
+        .map_err(|e| launch_error("session_start", e))?;
+    attach(turn, runtime, ports, &nonce, &session_id).map_err(|e| launch_error("attach", e))
 }
 
 fn current_session(
@@ -188,6 +212,15 @@ fn current_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn launch_stage_preserves_scheduling_refusals() {
+        let held = "NotSent(\"writer_held\")".to_string();
+        assert_eq!(launch_error("auth_overlay", held.clone()), held);
+        assert_eq!(
+            launch_error("auth_overlay", "forced failure".into()),
+            "herdr launch auth_overlay: forced failure"
+        );
+    }
     use crate::services::tui_prompt_dedupe::binding_events as events;
     use std::os::unix::fs::MetadataExt;
     struct Log {
