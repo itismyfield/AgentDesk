@@ -5,7 +5,7 @@ use crate::services::discord::{
     health::HealthRegistry,
     herdr_terminate::{test_queue, test_turn},
 };
-use crate::services::platform::tmux::session_inventory::{self, tests::ChannelNamespace};
+use crate::services::platform::tmux::session_inventory::tests::ChannelNamespace;
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};
 use std::{
     process::{Command, Output},
@@ -251,6 +251,39 @@ async fn key_promotion_created_incarnation_and_candidate_seams_pg() {
             .await
             .unwrap();
     assert_eq!(alias, rig.id);
+    let legacy = adk_session::build_legacy_session_key(&rig.name);
+    sqlx::query("UPDATE sessions SET session_key=$1 WHERE id=$2")
+        .bind(&legacy)
+        .bind(rig.id)
+        .execute(&rig.pool)
+        .await
+        .unwrap();
+    let scope = RegistrationScope::enter(
+        Some(&rig.pool),
+        &rig.shared.token_hash,
+        &ProviderKind::Claude,
+        rig.channel.get(),
+        Some(&rig.name),
+        Some("new"),
+        Some(false),
+    )
+    .unwrap();
+    assert!(
+        rig.present(),
+        "alternate wire format must keep the live execution"
+    );
+    assert_eq!(
+        candidates(
+            Some(&rig.pool),
+            &rig.shared.token_hash,
+            &ProviderKind::Claude,
+            "another-preference",
+            Some(rig.channel.get())
+        )
+        .unwrap()[0],
+        legacy
+    );
+    drop(scope);
     rig.finish().await;
 }
 

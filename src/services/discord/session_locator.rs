@@ -271,7 +271,7 @@ mod unix {
                 },
                 |error| error,
             )?;
-            let Some(snapshot) = snapshot.filter(|row| row.primary != key) else {
+            let Some(snapshot) = snapshot.filter(|row| !crate::db::dispatched_session_canonical_identity::key_promotion::same_physical_locator(&row.primary, &key)) else {
                 return Ok(guard);
             };
             let expected = OLD_HOSTS
@@ -305,10 +305,9 @@ mod unix {
                 channel,
             )
             .map_err(|error| format!("inflight witness: {error}"))?
+                && state.turn_nonce.as_deref() != Some(&nonce)
             {
-                if state.turn_nonce.as_deref() != Some(&nonce) {
-                    return Err("old inflight actor still owns the channel".into());
-                }
+                return Err("old inflight actor still owns the channel".into());
             }
             REGISTRATION.with(|slot| {
                 if let Some(frame) = slot.borrow_mut().last_mut() {

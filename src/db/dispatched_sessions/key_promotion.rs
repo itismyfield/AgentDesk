@@ -138,6 +138,14 @@ pub(super) async fn validate_registration(
     Ok(())
 }
 
+pub(crate) fn same_physical_locator(left: &str, right: &str) -> bool {
+    use crate::domain::session_identity::SessionIdentity;
+    match (SessionIdentity::parse(left), SessionIdentity::parse(right)) {
+        (Some(left), Some(right)) => left.host == right.host && left.tmux_name == right.tmux_name,
+        _ => false,
+    }
+}
+
 pub(super) async fn alias_nonce_fence<'a>(
     tx: &mut Transaction<'_, Postgres>,
     target: &SessionEvidence,
@@ -160,7 +168,7 @@ pub(super) async fn alias_nonce_fence<'a>(
             return Err(refused("alias hook requires its expected actor nonce"));
         }
     }
-    if target.session_key != params.session_key
+    if !same_physical_locator(&target.session_key, params.session_key)
         && !actor_pinned
         && params.status.eq_ignore_ascii_case("turn_active")
     {
