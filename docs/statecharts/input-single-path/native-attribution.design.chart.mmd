@@ -1,0 +1,28 @@
+---
+title: "입력 귀속 설계 요약 (수동 작성; 검증은 TLA+ 모델)"
+---
+stateDiagram-v2
+  [*] --> Pending
+  Pending: 원본·attempt 등록
+  External: 예약·알림·TUI 직접 입력 실행
+  Queued: AgentDesk 입력은 내부 큐 대기
+  Running: 이 입력이 native run에 가입
+  EndSeen: 자기 membership 뒤 strict closer 확인
+  Withdrawn: 실행 전 철회 확인
+  Result: 결과 영속 기록 1회
+  Cleanup: 같은 episode lease와 row CAS
+  Wake: cleanup 완료 후 원래 head 깨움
+  Pending --> External: 외부 enqueue·시작
+  External --> Queued: AgentDesk 주입·enqueue
+  Queued --> Queued: 남의 end_turn·turn_duration
+  Queued --> Running: dequeue·user 또는 mid-turn command·흡수
+  Queued --> Withdrawn: remove·popAll
+  Running --> Running: assistant end_turn만 읽음
+  Running --> EndSeen: 같은 run의 strict closer
+  EndSeen --> Result: Executed
+  Withdrawn --> Result: WithdrawnNotExecuted
+  Result --> Cleanup: 저장 결과에서 멱등 재개
+  Cleanup --> Wake: 후속 nonce·actor 보존
+  Wake --> Pending: 다음 head
+  Result --> Result: 재시작·늦은 중복·옛 incarnation은 결과 보존
+  Queued --> Result: 기존 운영자 release·명시적 취소 결과
