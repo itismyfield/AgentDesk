@@ -785,6 +785,7 @@ mod operations_shape {
             .unwrap();
         let now = chrono::Utc::now();
         let initialized = Initialized {
+            policy_parent: None,
             channel: CHANNEL,
             sources: vec![init],
             initial_anchor: 0,
@@ -792,7 +793,7 @@ mod operations_shape {
             at: now,
         };
         let era = store
-            .begin_era(&[CHANNEL], now, |_| Ok(initialized.clone()))
+            .begin_fixture_era(&[CHANNEL], now, |_| Ok(initialized.clone()))
             .unwrap();
         let mut channel = store.open_channel(&era, CHANNEL).unwrap().unwrap();
         for source in &sources[1..] {
@@ -940,6 +941,7 @@ mod operations_shape {
             .unwrap();
         let now = chrono::Utc::now();
         let initialized = Initialized {
+            policy_parent: None,
             channel: CHANNEL,
             sources: Vec::new(),
             initial_anchor: 0,
@@ -947,7 +949,7 @@ mod operations_shape {
             at: now,
         };
         let era = store
-            .begin_era(&[CHANNEL], now, |_| Ok(initialized.clone()))
+            .begin_fixture_era(&[CHANNEL], now, |_| Ok(initialized.clone()))
             .unwrap();
         let mut channel = store.open_channel(&era, CHANNEL).unwrap().unwrap();
         for source in &sources {

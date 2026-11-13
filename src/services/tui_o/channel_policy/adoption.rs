@@ -106,6 +106,7 @@ pub(crate) struct LateBoundary {
 /// One selected channel's adoption and the lock every transition of it takes.
 #[derive(Clone, Debug)]
 pub(crate) struct Candidate {
+    init_scope: Option<Arc<crate::services::session_host::surface_policy::InitScope>>,
     state: Arc<Mutex<Adoption>>,
     sends: Arc<LegacySends>,
     /// Immutable boot origin, shared by every clone, distinct from ordinary Deferred retries.
@@ -121,8 +122,49 @@ pub(crate) struct Candidate {
 }
 
 impl Candidate {
+    #[cfg(test)]
+    pub(crate) fn bound_init_scope(&self) -> bool {
+        self.init_scope.is_some()
+    }
+
+    pub(crate) fn with_init_scope(
+        mut self,
+        scope: Arc<crate::services::session_host::surface_policy::InitScope>,
+    ) -> Self {
+        self.init_scope = Some(scope);
+        self
+    }
+
+    pub(crate) fn init_scope(
+        &self,
+        channel: u64,
+    ) -> Result<Arc<crate::services::session_host::surface_policy::InitScope>, String> {
+        if let Some(scope) = &self.init_scope {
+            return Ok(scope.clone());
+        }
+        #[cfg(test)]
+        {
+            let scope = crate::services::tui_o::cutover::boot_snapshot()
+                .map(|boot| boot.init_scope_view())
+                .unwrap_or_else(|| {
+                    Arc::new(
+                        crate::services::session_host::surface_policy::InitScope::fixture(&[
+                            channel,
+                        ]),
+                    )
+                });
+            Ok(scope)
+        }
+        #[cfg(not(test))]
+        {
+            let _ = channel;
+            Err("writer init has no boot policy view".into())
+        }
+    }
+
     pub(crate) fn new(state: Adoption) -> Self {
         Self {
+            init_scope: None,
             state: Arc::new(Mutex::new(state)),
             sends: Arc::default(),
             late_origin: false,

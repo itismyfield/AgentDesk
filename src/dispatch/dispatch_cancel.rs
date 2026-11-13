@@ -457,7 +457,7 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
             let entry_id: String = row.try_get("id").map_err(|error| {
                 format!("decode postgres queue entry id for {dispatch_id}: {error}")
             })?;
-            crate::db::auto_queue::update_entry_status_on_pg_tx(
+            crate::services::auto_queue::transactions::update_entry_status_on_pg_tx(
                 tx,
                 &entry_id,
                 target_status,

@@ -135,8 +135,9 @@ async fn scenario(
         .unwrap()
         .unwrap();
     store
-        .begin_era(&[channel], chrono::Utc::now(), |channel| {
+        .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![],
                 initial_anchor: 100,

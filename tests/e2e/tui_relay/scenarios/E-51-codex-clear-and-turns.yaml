@@ -5,6 +5,23 @@ coverage_class: live
 # Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
 cells: [codex-tui, codex-pipe, codex-herdr]
 isolation: required
+feature_coverage:
+  schema: 1
+  claims:
+    - feature_id: message-delivery
+      host: tmux
+      provider: codex
+      surface: channel
+      state: idle
+      qualifiers: {turn_origin: managed, output_path: unspecified, input_source: legacy_automation}
+      assertion_ids: [provider_text_present, no_duplicate_marker, no_duplicate_content]
+    - feature_id: message-delivery
+      host: herdr
+      provider: codex
+      surface: channel
+      state: idle
+      qualifiers: {turn_origin: managed, output_path: unspecified, input_source: legacy_automation}
+      assertion_ids: [provider_text_present, no_duplicate_marker, no_duplicate_content]
 acceptance_criteria:
   - T1·T2 are consecutive turns; T2 is a warm follow-up on the live pane and each marker arrives exactly once
   - "!clear goes through the normal Discord text-command path and is acknowledged"

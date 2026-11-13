@@ -3,10 +3,10 @@
 
 use super::runs::{
     RunCompletionBlockedReason, RunCompletionOutcome, acquire_run_advisory_xact_lock_on_pg_tx,
-    finalize_run_if_ready_on_pg_tx, finalize_run_if_ready_pg,
 };
 use super::test_support::TestPostgresDb;
 use super::{ENTRY_STATUS_SKIPPED, EntryStatusUpdateOptions, update_entry_status_on_pg};
+use super::{finalize_run_if_ready_on_pg_tx, finalize_run_if_ready_pg};
 use sqlx::PgPool;
 
 async fn setup_pool(pg_db: &TestPostgresDb) -> PgPool {

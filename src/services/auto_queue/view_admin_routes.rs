@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::auto_queue::transactions;
 
 /// GET /api/queue/status
 pub async fn status(
@@ -182,14 +183,10 @@ pub(super) async fn update_entry_with_pg(
     let mut effective_status = status.clone();
     if let Some(new_status) = requested_status {
         let update_result = if new_status == crate::db::auto_queue::ENTRY_STATUS_DONE {
-            crate::db::auto_queue::reconcile_failed_entry_done_on_pg(
-                pool,
-                id,
-                "manual_terminal_reconcile",
-            )
-            .await
+            transactions::reconcile_failed_entry_done_on_pg(pool, id, "manual_terminal_reconcile")
+                .await
         } else {
-            crate::db::auto_queue::update_entry_status_on_pg(
+            transactions::update_entry_status_on_pg(
                 pool,
                 id,
                 new_status,

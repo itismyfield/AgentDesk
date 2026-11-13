@@ -50,6 +50,7 @@ pub(super) fn legacy(items: Vec<PendingQueueItem>, meta: Option<Box<SnapshotMeta
         namespace: None,
         owed_drop_receipts: Vec::new(),
         unfinished_handoff: None,
+        effort_restart: None,
     }
 }
 

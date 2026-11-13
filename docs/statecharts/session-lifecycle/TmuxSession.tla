@@ -255,7 +255,8 @@ EffortInit(mode) ==
         watcher |-> "old", presence |-> (IF mode = "idle" THEN "Idle" ELSE "Busy"),
         binding |-> 0, daemonGeneration |-> 0, sameSession |-> TRUE, revision |-> 0,
         failed |-> FALSE, failureVisible |-> FALSE, noticeFailed |-> FALSE,
-        priorityBroken |-> FALSE, debt |-> 1, debtPosts |-> 0]
+        priorityBroken |-> FALSE, barrierBroken |-> FALSE, barrier |-> 0, queuedC |-> 0,
+        admittedC |-> [r \in EffortRoots |-> 0], debt |-> 1, debtPosts |-> 0]
 EffortOriginalNeverFinishes == effort.mode \in
     {"nonfinishing", "nonfinishing-failure", "no-interrupt", "no-close"}
 EffortRebooting == effort.phase \in {"requested", "interrupted", "stopped", "booting"}
@@ -285,6 +286,7 @@ EffortInterrupt ==
     /\ effort.mode # "no-interrupt"
     /\ effort' = [effort EXCEPT !.root = @ + 1, !.pending = effort.root + 1,
         !.active = "none", !.phase = "interrupted", !.presence = "Unknown",
+        !.barrier = effort.root + 1,
         !.noticeIntents[effort.root + 1] = IF effort.mode = "no-notice" THEN 0 ELSE 1]
 EffortNoticeFails ==
     /\ UNCHANGED vars
@@ -345,13 +347,18 @@ EffortResume ==
         !.revision = effort.changes, !.watcher = "new", !.presence = "Idle",
         !.resumed = IF effort.pending > 0 THEN @ \cup {effort.pending} ELSE @,
         !.wake = effort.mode # "no-wake"]
-\* A stable synthetic ticket is accepted exactly once; its text is the fixed continuation,
-\* never a copy of the interrupted original. This action must precede any waiting user.
+\* Admission owns one durable synthetic ticket; the submit/receipt alone releases its barrier.
 EffortContinue ==
     /\ UNCHANGED vars
     /\ effort.phase = "ready" /\ effort.active = "none" /\ effort.pending > 0 /\ effort.wake
-    /\ effort.continuations[effort.pending] = 0 /\ effort.mode # "no-continuation"
+    /\ effort.admittedC[effort.pending] = 0 /\ effort.mode # "no-continuation"
+    /\ effort' = [effort EXCEPT !.admittedC[effort.pending] = 1, !.queuedC = effort.pending]
+EffortSubmitContinuation ==
+    /\ UNCHANGED vars
+    /\ effort.phase = "ready" /\ effort.active = "none" /\ effort.pending > 0 /\ effort.wake
+    /\ effort.queuedC = effort.pending
     /\ effort' = [effort EXCEPT !.continuations[effort.pending] = 1, !.pending = 0,
+        !.barrier = 0, !.queuedC = 0,
         !.active = "continuation", !.row = TRUE, !.placeholder = TRUE, !.presence = "Busy"]
 EffortAdmitUser ==
     /\ UNCHANGED vars
@@ -360,7 +367,8 @@ EffortAdmitUser ==
     /\ LET i == Head(effort.users) IN
        effort' = [effort EXCEPT !.users = Tail(@), !.user = i, !.userCounts[i] = @ + 1,
            !.active = "user", !.row = TRUE, !.placeholder = TRUE, !.presence = "Busy",
-           !.priorityBroken = @ \/ effort.pending > 0]
+           !.priorityBroken = @ \/ effort.pending > 0,
+           !.barrierBroken = @ \/ effort.barrier > 0]
 EffortFinish ==
     /\ UNCHANGED vars
     /\ (effort.active # "original" \/ ~EffortOriginalNeverFinishes)
@@ -387,7 +395,7 @@ EffortRest ==
 EffortNext == EffortRequest \/ EffortSecondRequest \/ EffortInputArrives \/ EffortInterrupt
     \/ EffortNoticeFails \/ EffortTellInterrupted \/ EffortDuplicateNotice \/ EffortCloseInterrupted
     \/ EffortNoActiveTurn \/ EffortCurrentHerdrApply \/ EffortCurrentNextTurn \/ EffortStopTui \/ EffortLaunchFails
-    \/ EffortRetryFailed \/ EffortResume \/ EffortContinue \/ EffortAdmitUser \/ EffortFinish \/ EffortRepost \/ EffortDeliverOldDebt \/ EffortRest
+    \/ EffortRetryFailed \/ EffortResume \/ EffortContinue \/ EffortSubmitContinuation \/ EffortAdmitUser \/ EffortFinish \/ EffortRepost \/ EffortDeliverOldDebt \/ EffortRest
 EffortFair ==
     /\ WF_allVars(EffortRequest)
     /\ WF_allVars(EffortInterrupt)
@@ -400,6 +408,7 @@ EffortFair ==
     /\ WF_allVars(EffortLaunchFails)
     /\ WF_allVars(EffortResume)
     /\ WF_allVars(EffortContinue)
+    /\ WF_allVars(EffortSubmitContinuation)
     /\ WF_allVars(EffortAdmitUser)
     /\ WF_allVars(EffortFinish)
     /\ WF_allVars(EffortDeliverOldDebt)
@@ -448,5 +457,14 @@ EffortPendingEventuallyProcessed == \A i \in EffortPeople :
 EffortFailureVisible == (effort.phase = "booting" /\ effort.mode \in {"failure", "retry", "nonfinishing-failure"} /\ ~effort.failureVisible) ~> effort.failureVisible
 
 EffortRequestResolves == (effort.changes > 0) ~> (effort.phase \in {"ready", "failed"})
+
+EffortContinuationCustody == \A r \in effort.resumed :
+    effort.continuations[r] = 1
+    \/ (effort.pending = r /\ effort.barrier = r
+        /\ (effort.queuedC = r \/ effort.admittedC[r] = 0))
+EffortContinuationAdmittedOnce == \A r \in EffortRoots : effort.admittedC[r] <= 1
+EffortNoUserBeforeBarrier == ~effort.barrierBroken
+EffortSubmitReleasesBarrier == \A r \in EffortRoots :
+    (r \in effort.resumed) ~> (effort.continuations[r] = 1 /\ effort.barrier # r)
 
 ====
