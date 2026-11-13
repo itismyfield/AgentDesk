@@ -25,6 +25,7 @@ impl LeaseFixture {
     fn new(locked: bool) -> Self {
         let (temporary, root) = fixture::fixture();
         let parent = root.parent().unwrap();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(std::fs::metadata(parent).unwrap().mode() & 0o7777, 0o700);
         let control = parent.join(".gateway.lease");
         let donor = OpenOptions::new()
