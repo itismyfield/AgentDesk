@@ -20,10 +20,7 @@ pub(in crate::services::discord) fn local_tmux(
     row: Option<&InflightTurnState>,
 ) -> bool {
     let marker = read_host_kind_marker(name);
-    let marker_tmux = matches!(
-        marker,
-        HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
-    );
+    let marker_tmux = crate::services::session_host::operation_policy::marker_is_tmux(&marker);
     let row_tmux =
         row.is_none_or(|row| row.host_locator.is_none() && !row.runtime_kind_unknown_on_disk);
     if !(marker_tmux && row_tmux) {

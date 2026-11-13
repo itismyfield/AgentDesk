@@ -196,7 +196,7 @@ fn artifact_active(
 
     #[cfg(unix)]
     if let Some(tmux_session) = artifact.tmux_session.as_deref() {
-        let refusal = crate::services::discord::admin_host_guard::marker_refusal;
+        let refusal = crate::services::session_host::operation_policy::marker_refusal;
         if let Some(reason) = refusal(tmux_session) {
             evidence.insert("tmux_live_pane".to_string(), "host_unsupported".to_string());
             evidence.insert("tmux_host".to_string(), reason);

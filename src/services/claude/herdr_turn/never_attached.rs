@@ -41,7 +41,7 @@ pub(super) fn refusal(
         (None, Some(_)) => probe_again(turn, runtime, ports).map(drop),
         (None, None) => Err("no pane recorded".to_string()),
     };
-    let terminate = crate::services::discord::herdr_terminate::terminate_enabled();
+    let terminate = crate::services::session_host::operation_policy::terminate_enabled();
     let context = crate::services::platform::active_provider_context("claude");
     let session_key = context.and_then(|context| context.session_key);
     let key = session_key.as_deref().unwrap_or("<its session key>");

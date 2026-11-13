@@ -1,4 +1,7 @@
 schema_version = 1
 moves = [
   { section = "reverse_dependencies", old_id = "1debcca9c2f505965eb20292b83b6e751c36b6ff5065396e19d903eea0b1e459", new_id = "58678dbf17a69024cab722e4928af28890877396da2cef2736ecdc144885f4ce" },
+  { section = "reverse_dependencies", old_id = "8495d2cd9720767278c03ac57707186ea255a01a31110924c00d4abf8eb75f7f", new_id = "116e92098fb8af00078bc9e1d3e3d2f1950edbfdd043f17f2983364bf6a2f7d3" },
+  { section = "reverse_dependencies", old_id = "ee79591b4eb6db613153879e56c7477919a4ea6485d213a6cb90a745aaf5750e", new_id = "e1b1577f1012f16331d58e7e63b7b9746e33ade1289912a56837e0e535a00352" },
+  { section = "reverse_dependencies", old_id = "67a9bd486100ee7ecc0b9469ee59668a201f3761191790ea0a74f9f2f4a80598", new_id = "fbeb1c76e3ec758f38958f5cfbb4f4da587756d17141dbfb4237c44741876127" },
 ]
