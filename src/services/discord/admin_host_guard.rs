@@ -9,6 +9,7 @@ use sqlx::PgPool;
 
 use super::SharedData;
 use crate::services::provider::ProviderKind;
+pub(crate) use crate::services::session_host::operation_policy::configured_refusal;
 
 /// Why a channel's session may not be changed or observed by its tmux name. A found legacy
 /// row, or no row yet with no marker or inflight trace of another host, keeps main's path.
@@ -108,15 +109,6 @@ pub(super) async fn managed_reset_refusal(
     let channel_id = channel_id.get();
     tracing::warn!(channel_id, %reason, "managed session reset refused");
     Some(reason)
-}
-
-/// Why a Herdr-configured channel's tmux session is left as it is, whatever its stored rows say.
-pub(crate) fn configured_refusal(channel_id: u64) -> Option<String> {
-    let endpoint = crate::config::session_hosts::herdr_endpoint(channel_id)?;
-    let key = endpoint.key;
-    Some(format!(
-        "Herdr 설정 채널(endpoint `{key}`)이라 tmux 세션을 바꾸지 않아요"
-    ))
 }
 
 /// The in-memory `channel_name` first, then the registered fallback name; with neither, only
@@ -343,18 +335,9 @@ pub(crate) async fn session_key_refusal(
     refusal(pool, provider, channel, session_key, tmux_name).await
 }
 
-/// The `.host_kind` marker check alone, for a path holding only a tmux name.
+/// The marker-only check retained for cancel-token cleanup's separate teardown path.
 pub(crate) fn marker_refusal(tmux_name: &str) -> Option<String> {
-    let tmux = super::host_liveness::local_tmux(tmux_name, None);
-    (!tmux).then(|| format!("the host marker of {tmux_name} is not tmux"))
-}
-
-/// A provider-auth login target: only the auth namespace with no other host's marker.
-pub(crate) fn auth_login_refusal(tmux_name: &str) -> Option<String> {
-    if !tmux_name.starts_with("adk-login-") {
-        return Some(format!("{tmux_name} is not a provider-auth login session"));
-    }
-    marker_refusal(tmux_name)
+    crate::services::session_host::operation_policy::marker_refusal(tmux_name)
 }
 
 /// [`session_key_refusal`] on a stored row's provider and channel columns.

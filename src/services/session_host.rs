@@ -34,6 +34,7 @@ pub(crate) mod herdr_socket_rig_tests;
 pub(crate) mod herdr_terminate_real_tests;
 pub(crate) mod legacy_collapse;
 mod model;
+pub(crate) mod operation_policy;
 mod process_host;
 mod resolve;
 mod session_record;
