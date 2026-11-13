@@ -1,5 +1,7 @@
 # Herdr `/restart` — Codex resume A 모델
 
+> B PLAN 경계(588241083ccf4c2cda6d147e89e1d9fd10725387): A offset/cause/fresh 계약과23cfg 모델 바이트를 유지한다. 아래 s 영역은 r1 direct-launch의 역사적 투영이며 현재 B1/B2 정본은 [Owner 보고서](herdr-restart-owner.report.md)다. 2c887338의 “A 구현 필요”는 당시 Before 기록이고 A 코드는 이후 병합됐다. owner seed·idle repair·effect permission·부팅의 생산 완료를 이 A 보고서로 주장하지 않는다.
+
 A 코드 조사 기준: `2c8873381478c7179f0347d5bfc5b850d5cb90e2`. 기존 B 설계 기준은 `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba`다. **이 모델 작업은 생산 코드 수정·Rust 빌드·PG/herdr 운영 조작 0**이며, 부모 레인의 A 구현·Rust 시험 증거는 별도다.
 
 `HerdrRestart`의 기존 23 cfg에 A 변수를 추가했다. 새 cfg는 0개다. 기존 B (`s`)와 Codex provider helper A (`a`)는 독립 계약을 Cartesian product로 검사한다. 그림의 두 병렬 영역은 그 두 계약의 투영이며, B의 `/restart`와 A helper가 실제로 연결되어 같은 채널에서 동시에 실행된다는 증명이 아니다. 그 연결·권한 전달·owner seed 부팅 재개는 B 구현과 실제 시험이 필요하다. 기존 B 모델의 production 미구현 포트는 그대로 남는다.

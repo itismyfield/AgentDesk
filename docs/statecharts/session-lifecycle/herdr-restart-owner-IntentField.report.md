@@ -1,7 +1,7 @@
 # HerdrRestartOwner
 
-TLC reached 66 states and 162 steps. The chart draws 20 states and 30 arrows.
-The chart does not draw 103 steps that stay in one chart state.
+TLC reached 82 states and 206 steps. The chart draws 25 states and 40 arrows.
+The chart does not draw 130 steps that stay in one chart state.
 
 ## RequestResolves breaks
 TLC's counterexample is in tlc-RequestResolves.out. It has 4 steps:
@@ -13,4 +13,4 @@ TLC's counterexample is in tlc-RequestResolves.out. It has 4 steps:
 The run stops in "Restart record vanished without a result" forever.
 
 ## Rules that hold
-InputCustody, InputAtMostOnce, NoOldPaneInput, NoFalseReady, SeedAtMostOnce, NoBlindCreate, SingleSession, InflightSettledBeforeReady, ReadyEvidence, NoInheritedDispatch, NoDispatchRepost, NoSeedAfterClear, NoStaleCreate, NoSessionAfterClear, NoResumeAfterClear, NoSeedRevival, NoFalseSuperseded, NoDeadlock, CommandAnswers, RestartAvailable, AcceptedInputResolves, ClearForgets, ClearCompletes
+InputCustody, InputAtMostOnce, NoOldPaneInput, NoFalseReady, SeedAtMostOnce, NoBlindCreate, SingleSession, InflightSettledBeforeReady, ReadyEvidence, NoInheritedDispatch, NoDispatchRepost, NoSeedAfterClear, NoStaleCreate, NoSessionAfterClear, NoResumeAfterClear, NoSeedRevival, NoFalseSuperseded, NoOperationSeedless, NoOperationDuplicateSeed, EffectHasLivePermission, NoDeadlock, CommandAnswers, RestartAvailable, AcceptedInputResolves, ClearForgets, ClearCompletes, EndedSeedRecovers, ClearRequestCompletes

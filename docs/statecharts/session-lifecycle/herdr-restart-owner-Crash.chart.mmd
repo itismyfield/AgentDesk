@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -17,21 +17,27 @@ stateDiagram-v2
   s4: Visible failure#59; inputs still owned#59; old session lives
   s5: Exact close confirmed#59; retire and settle
   s6: Visible failure#59; inputs settled#59; old session lives
-  s7: After boot: seed waits
+  s7: Idle ended execution#59; the seed owner must repair the row
   s8: Old execution retired#59; exclusion still held
   s9: Exclusion released#59; reply pending
-  s10: Owner turn began a launch
-  s11: Seed waits for the owner
-  s12: Owner turn installed Pending
-  s13: Create answered#59; first input not submitted
-  s14: First input submitted#59; receipt not committed
-  s15: Receipt committed#59; source not bound
-  s16: Seed submit unproven: kept, never re-sent#59; an input waits
-  s17: One new Ready session#59; inputs await the owner
-  s18: Pending without a launching turn#59; an input waits
-  s19: One new Ready session#59; inputs settled once
-  s20: Seed submit unproven: kept, never re-sent#59; an input may still arrive
-  s21: Seed submit unproven: kept, never re-sent
+  s10: After boot: seed waits
+  s11: Owner turn began a launch
+  s12: Seed waits for the owner
+  s13: Owner turn installed Pending
+  s14: CheckEpoch observed#59; live BeginEffect still required
+  s15: BeginEffect holds create authority
+  s16: Create answered#59; first input not submitted
+  s17: CheckEpoch observed#59; live input authority still required
+  s18: BeginEffect holds input authority
+  s19: First input submitted#59; receipt not committed
+  s20: Receipt committed#59; source not bound
+  s21: Seed submit unproven: kept, never re-sent#59; an input waits
+  s22: One new Ready session#59; inputs await the owner
+  s23: Pending without a launching turn#59; an input waits
+  s24: One new Ready session#59; inputs settled once#59; an input may still arrive
+  s25: Seed submit unproven: kept, never re-sent#59; an input may still arrive
+  s26: One new Ready session#59; inputs settled once
+  s27: Seed submit unproven: kept, never re-sent
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
@@ -43,31 +49,41 @@ stateDiagram-v2
   s5 --> s7: Daemon dies and boots
   s5 --> s8: Retire CAS and settle the old turn
   s6 --> s4: Accept an input into the owner queue
+  s7 --> s10: The seed owner or inflight recovery repairs the exact ended row
   s8 --> s9: Disconnect keeping selector, release, wake
-  s8 --> s7: Daemon dies and boots
-  s9 --> s7: Daemon dies and boots
-  s9 --> s10: Owner starts the front: register the launch
-  s9 --> s11: Reply to the command
-  s7 --> s10: Owner starts the front: register the launch
-  s10 --> s7: Daemon dies and boots
-  s10 --> s12: Install Pending over the vacant row
-  s11 --> s7: Daemon dies and boots
-  s11 --> s10: Owner starts the front: register the launch
-  s12 --> s7: Daemon dies and boots
-  s12 --> s13: Create the pane once
-  s13 --> s14: Submit the first input
-  s13 --> s7: Daemon dies and boots
-  s14 --> s15: Commit the input's receipt
-  s14 --> s16: Daemon dies and boots
-  s15 --> s17: Bind the source
-  s15 --> s18: Daemon dies and boots
-  s7 --> s17: Seed joins the successor
-  s17 --> s19: Submit an input to the successor once
-  s18 --> s17: Probe adopts the Pending pane
-  s16 --> s20: Submit an input to the successor once
-  s19 --> s17: Accept an input into the owner queue
-  s20 --> s16: Accept an input into the owner queue
-  s16 --> s21: Submit an input to the successor once
+  s8 --> s10: Daemon dies and boots
+  s9 --> s10: Daemon dies and boots
+  s9 --> s11: Owner starts the front: register the launch
+  s9 --> s12: Reply to the command
+  s10 --> s11: Owner starts the front: register the launch
+  s11 --> s10: Daemon dies and boots
+  s11 --> s13: Install Pending over the vacant row
+  s12 --> s10: Daemon dies and boots
+  s12 --> s11: Owner starts the front: register the launch
+  s13 --> s10: Daemon dies and boots
+  s13 --> s14: Observe the create epoch
+  s14 --> s10: Daemon dies and boots
+  s14 --> s15: Compare live epoch and retain create permission
+  s15 --> s10: Daemon dies and boots
+  s15 --> s16: Create once under live effect permission
+  s16 --> s17: Observe the input epoch
+  s16 --> s10: Daemon dies and boots
+  s17 --> s10: Daemon dies and boots
+  s17 --> s18: Compare live epoch and retain input permission
+  s18 --> s10: Daemon dies and boots
+  s18 --> s19: Submit the first input under live permission
+  s10 --> s16: Claim the seed on its recovered exact successor
+  s19 --> s20: Commit the input's receipt
+  s19 --> s21: Daemon dies and boots
+  s20 --> s22: Bind the source
+  s20 --> s23: Daemon dies and boots
+  s22 --> s24: Submit an input to the successor once
+  s23 --> s22: Probe adopts the Pending pane
+  s21 --> s25: Submit an input to the successor once
+  s24 --> s22: Accept an input into the owner queue
+  s25 --> s21: Accept an input into the owner queue
+  s22 --> s26: Submit an input to the successor once
+  s21 --> s27: Submit an input to the successor once
   class s0 blue
   class s1 blue
   class s2 blue
@@ -78,10 +94,12 @@ stateDiagram-v2
   class s7 purple
   class s8 blue
   class s9 blue
-  class s11 purple
-  class s16 teal
-  class s17 teal
-  class s18 purple
-  class s19 teal
-  class s20 teal
+  class s10 purple
+  class s12 purple
   class s21 teal
+  class s22 teal
+  class s23 purple
+  class s24 teal
+  class s25 teal
+  class s26 teal
+  class s27 teal

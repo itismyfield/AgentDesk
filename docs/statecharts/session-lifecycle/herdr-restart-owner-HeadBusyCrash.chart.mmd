@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -11,89 +11,81 @@ stateDiagram-v2
   class lg1 blue
   class lg2 purple
   s0: Old session#59; an input is in flight to it
-  s1: Old session and a queued input
-  s2: Seed committed#59; gate holds it
-  s3: Restart holds the transition and fence
-  s4: After boot: seed waits#59; old session lives
+  s1: Seed committed#59; gate holds it
+  s2: Restart holds the transition and fence
+  s3: After boot: seed waits#59; old session lives
+  s4: Old session and a queued input
   s5: Visible failure#59; inputs settled#59; old session lives
   s6: Exact close confirmed#59; retire and settle
-  s7: Visible failure#59; inputs still owned#59; old session lives
-  s8: After boot: seed waits
-  s9: Old execution retired#59; exclusion still held
-  s10: Exclusion released#59; reply pending
+  s7: Idle ended execution#59; the seed owner must repair the row
+  s8: Old execution retired#59; exclusion still held
+  s9: Exclusion released#59; reply pending
+  s10: After boot: seed waits
   s11: Owner turn began a launch
   s12: Seed waits for the owner
   s13: Owner turn installed Pending
-  s14: Create answered#59; first input not submitted
-  s15: First input submitted#59; receipt not committed
-  s16: Receipt committed#59; source not bound
-  s17: Seed submit unproven: kept, never re-sent#59; an input may still arrive
-  s18: One new Ready session#59; inputs settled once
-  s19: Pending without a launching turn#59; an input may still arrive
-  s20: Seed submit unproven: kept, never re-sent#59; an input waits
-  s21: One new Ready session#59; inputs await the owner
-  s22: Pending without a launching turn#59; an input waits
-  s23: Seed submit unproven: kept, never re-sent
+  s14: CheckEpoch observed#59; live BeginEffect still required
+  s15: BeginEffect holds create authority
+  s16: Create answered#59; first input not submitted
+  s17: CheckEpoch observed#59; live input authority still required
+  s18: BeginEffect holds input authority
+  s19: First input submitted#59; receipt not committed
+  s20: Receipt committed#59; source not bound
+  s21: Seed submit unproven: kept, never re-sent
+  s22: One new Ready session#59; inputs settled once
+  s23: Pending without a launching turn
   [*] --> s0
-  s0 --> s1: The in-flight unit's own receipt settles it
-  s0 --> s2: Commit the seed original (acceptance)
-  s1 --> s2: Commit the seed original (acceptance)
-  s2 --> s3: Terminate takes transition and fence
-  s2 --> s4: Daemon dies and boots
-  s3 --> s4: Daemon dies and boots
-  s3 --> s6: Close only the captured pane
-  s4 --> s5: Permit refuses the seed with a notice
-  s5 --> s7: Accept an input into the owner queue
-  s4 --> s7: Permit refuses the seed with a notice
-  s6 --> s8: Daemon dies and boots
-  s6 --> s9: Retire CAS and settle the old turn
-  s7 --> s5: Submit an input to the still-current session
-  s9 --> s10: Disconnect keeping selector, release, wake
-  s9 --> s8: Daemon dies and boots
-  s10 --> s8: Daemon dies and boots
+  s0 --> s1: Commit the seed original (acceptance)
+  s0 --> s4: The in-flight unit's own receipt settles it
+  s1 --> s2: Terminate takes transition and fence
+  s1 --> s3: Daemon dies and boots
+  s2 --> s3: Daemon dies and boots
+  s2 --> s6: Close only the captured pane
+  s3 --> s5: Permit refuses the seed with a notice
+  s4 --> s1: Commit the seed original (acceptance)
+  s6 --> s7: Daemon dies and boots
+  s6 --> s8: Retire CAS and settle the old turn
+  s7 --> s10: The seed owner or inflight recovery repairs the exact ended row
+  s8 --> s9: Disconnect keeping selector, release, wake
+  s8 --> s10: Daemon dies and boots
+  s9 --> s10: Daemon dies and boots
+  s9 --> s11: Owner starts the front: register the launch
+  s9 --> s12: Reply to the command
   s10 --> s11: Owner starts the front: register the launch
-  s10 --> s12: Reply to the command
-  s8 --> s11: Owner starts the front: register the launch
-  s11 --> s8: Daemon dies and boots
+  s11 --> s10: Daemon dies and boots
   s11 --> s13: Install Pending over the vacant row
-  s12 --> s8: Daemon dies and boots
+  s12 --> s10: Daemon dies and boots
   s12 --> s11: Owner starts the front: register the launch
-  s13 --> s8: Daemon dies and boots
-  s13 --> s14: Create the pane once
-  s14 --> s15: Submit the first input
-  s14 --> s8: Daemon dies and boots
-  s15 --> s16: Commit the input's receipt
-  s15 --> s17: Daemon dies and boots
-  s15 --> s20: Daemon dies and boots
-  s16 --> s18: Bind the source
-  s16 --> s19: Daemon dies and boots
-  s8 --> s18: Seed joins the successor
-  s17 --> s20: Accept an input into the owner queue
-  s18 --> s21: Accept an input into the owner queue
-  s16 --> s21: Bind the source
-  s16 --> s22: Daemon dies and boots
-  s19 --> s18: Probe adopts the Pending pane
-  s19 --> s22: Accept an input into the owner queue
-  s8 --> s21: Seed joins the successor
-  s21 --> s18: Submit an input to the successor once
-  s22 --> s21: Probe adopts the Pending pane
-  s20 --> s23: Submit an input to the successor once
+  s13 --> s10: Daemon dies and boots
+  s13 --> s14: Observe the create epoch
+  s14 --> s10: Daemon dies and boots
+  s14 --> s15: Compare live epoch and retain create permission
+  s15 --> s10: Daemon dies and boots
+  s15 --> s16: Create once under live effect permission
+  s16 --> s17: Observe the input epoch
+  s16 --> s10: Daemon dies and boots
+  s17 --> s10: Daemon dies and boots
+  s17 --> s18: Compare live epoch and retain input permission
+  s18 --> s10: Daemon dies and boots
+  s18 --> s19: Submit the first input under live permission
+  s10 --> s16: Claim the seed on its recovered exact successor
+  s19 --> s20: Commit the input's receipt
+  s19 --> s21: Daemon dies and boots
+  s20 --> s22: Bind the source
+  s20 --> s23: Daemon dies and boots
+  s23 --> s22: Probe adopts the Pending pane
   class s0 blue
   class s1 blue
   class s2 blue
-  class s3 blue
-  class s4 purple
+  class s3 purple
+  class s4 blue
   class s5 teal
   class s6 blue
-  class s7 teal
-  class s8 purple
+  class s7 purple
+  class s8 blue
   class s9 blue
-  class s10 blue
+  class s10 purple
   class s12 purple
-  class s17 teal
-  class s18 teal
-  class s19 purple
-  class s20 teal
   class s21 teal
-  class s22 purple
-  class s23 teal
+  class s22 teal
+  class s23 purple

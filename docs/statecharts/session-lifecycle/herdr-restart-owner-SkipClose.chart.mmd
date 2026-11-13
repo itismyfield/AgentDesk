@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -21,7 +21,9 @@ stateDiagram-v2
   s6: Owner turn began a launch
   s7: Seed waits for the owner#59; old session lives
   s8: Owner turn installed Pending
-  s9: Two live sessions
+  s9: CheckEpoch observed#59; live BeginEffect still required
+  s10: BeginEffect holds create authority
+  s11: Two live sessions
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
@@ -32,7 +34,9 @@ stateDiagram-v2
   s5 --> s7: Reply to the command
   s6 --> s8: Install Pending over the vacant row
   s7 --> s6: Owner starts the front: register the launch
-  s8 --> s9: Create the pane once
+  s8 --> s9: Observe the create epoch
+  s9 --> s10: Compare live epoch and retain create permission
+  s10 --> s11: Create once under live effect permission
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath
@@ -49,5 +53,7 @@ stateDiagram-v2
   class s6 bugPath
   class s7 purple
   class s8 bugPath
-  class s9 breaks
   class s9 bugPath
+  class s10 bugPath
+  class s11 breaks
+  class s11 bugPath

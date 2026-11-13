@@ -1,7 +1,7 @@
 # HerdrRestartOwner
 
-TLC reached 27 states and 65 steps. The chart draws 8 states and 8 arrows.
-The chart does not draw 53 steps that stay in one chart state.
+TLC reached 35 states and 85 steps. The chart draws 8 states and 8 arrows.
+The chart does not draw 73 steps that stay in one chart state.
 
 ## ReadyEvidence breaks
 The shortest path has 6 steps:
@@ -14,4 +14,4 @@ The shortest path has 6 steps:
 6. Owner starts the front: register the launch: Ready was said on admission
 
 ## Rules that hold
-InputCustody, InputAtMostOnce, NoOldPaneInput, NoFalseReady, SeedAtMostOnce, NoBlindCreate, SingleSession, InflightSettledBeforeReady, NoInheritedDispatch, NoDispatchRepost, NoSeedAfterClear, NoStaleCreate, NoSessionAfterClear, NoResumeAfterClear, NoSeedRevival, NoFalseSuperseded, NoDeadlock, RequestResolves, CommandAnswers, RestartAvailable, AcceptedInputResolves, ClearForgets, ClearCompletes
+InputCustody, InputAtMostOnce, NoOldPaneInput, NoFalseReady, SeedAtMostOnce, NoBlindCreate, SingleSession, InflightSettledBeforeReady, NoInheritedDispatch, NoDispatchRepost, NoSeedAfterClear, NoStaleCreate, NoSessionAfterClear, NoResumeAfterClear, NoSeedRevival, NoFalseSuperseded, NoOperationSeedless, NoOperationDuplicateSeed, EffectHasLivePermission, NoDeadlock, RequestResolves, CommandAnswers, RestartAvailable, AcceptedInputResolves, ClearForgets, ClearCompletes, EndedSeedRecovers, ClearRequestCompletes

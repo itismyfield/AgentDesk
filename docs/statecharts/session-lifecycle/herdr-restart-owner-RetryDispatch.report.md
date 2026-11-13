@@ -1,7 +1,7 @@
 # HerdrRestartOwner
 
-TLC reached 25 states and 60 steps. The chart draws 6 states and 5 arrows.
-The chart does not draw 51 steps that stay in one chart state.
+TLC reached 33 states and 80 steps. The chart draws 6 states and 5 arrows.
+The chart does not draw 71 steps that stay in one chart state.
 
 ## NoDispatchRepost breaks
 The shortest path has 5 steps:
@@ -13,4 +13,4 @@ The shortest path has 5 steps:
 5. Disconnect and create a retry dispatch: The restart created a retry dispatch
 
 ## Rules that hold
-InputCustody, InputAtMostOnce, NoOldPaneInput, NoFalseReady, SeedAtMostOnce, NoBlindCreate, SingleSession, InflightSettledBeforeReady, ReadyEvidence, NoInheritedDispatch, NoSeedAfterClear, NoStaleCreate, NoSessionAfterClear, NoResumeAfterClear, NoSeedRevival, NoFalseSuperseded, NoDeadlock, RequestResolves, CommandAnswers, RestartAvailable, AcceptedInputResolves, ClearForgets, ClearCompletes
+InputCustody, InputAtMostOnce, NoOldPaneInput, NoFalseReady, SeedAtMostOnce, NoBlindCreate, SingleSession, InflightSettledBeforeReady, ReadyEvidence, NoInheritedDispatch, NoSeedAfterClear, NoStaleCreate, NoSessionAfterClear, NoResumeAfterClear, NoSeedRevival, NoFalseSuperseded, NoOperationSeedless, NoOperationDuplicateSeed, EffectHasLivePermission, NoDeadlock, RequestResolves, CommandAnswers, RestartAvailable, AcceptedInputResolves, ClearForgets, ClearCompletes, EndedSeedRecovers, ClearRequestCompletes

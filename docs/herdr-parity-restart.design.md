@@ -2,7 +2,7 @@
 
 기준: `origin/main` = `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba`, 2026-11-13 KST.
 대상 이슈: [#8128](https://github.com/itismyfield/AgentDesk/issues/8128).
-**설계·문서·모델만 작성했다. 생산 코드 변경, Rust 시험, 운영 실행은 0이다.**
+**이 문서의 변경은 설계·모델이다. A 구현은 별도 검증되었고, B는 구현 전 크기 계획 게이트에 있다.**
 
 이 문서의 목표는 인증된 `/restart`와 같은 구현을 쓰는 `!restart`에서 기존 실행을 끝내고,
 가능하면 같은 대화를 새 incarnation으로 이어 시작하는 것이다. 진행 중인 턴은 기존 tmux와 같이
@@ -199,7 +199,10 @@ seed 적재는 종료의 전제 조건이 아니다. 넣을 수 있으면 넣고
 2. canonical row를 읽어 3.2의 표로 분기한다. 거절 행은 여기서 보이는 실패로 끝나고 아무것도 바꾸지 않는다.
 3. 채널의 **clear epoch**(3.4)을 읽어 둔다. 종료가 필요한 행이면 **in-flight gate**(프로세스 메모리, RAII)를 건다.
    gate는 적재 결과와 무관하게 postlude가 끝날 때까지 유지한다. gate는 Drop에서 owner를 깨운다.
-4. **seed 적재 시도.** operation은 interaction ID 또는 `!restart` message ID에 token/provider/channel namespace를 결합한 값이다.
+4. **기존 operation ticket 선조회 후 seed 적재 시도.** operation은 interaction ID 또는 `!restart` message ID에 token/provider/channel namespace를 결합한 값이다.
+   현재 row로 새 context를 만들기 전에 기존 ticket을 읽는다. 진행 중이면 그 작업에 합류하고, 완료됐으면 기존 결과를 재응답한다. 이 경우 close·create·seed 수를 늘리지 않는다.
+   receipt만 남은 만료 operation도 새 요청으로 바꾸지 않는다. 상세 상태를 복원할 수 없으면 이미 처리됐음을 표시하고 종료 효과를 금지한다.
+   identity/context Conflict는 큐 포화·미채택 같은 admission 불가와 다른 결과다. Conflict를 seedless로 내려 종료해서는 안 된다.
    여기서 ticket과 합성 원본(기존 인사말 문구, `restart.rs:13`)을 유도하고, admission context에 `source = agentdesk_restart_seed`,
    operation, 종료 대상 nonce, row의 active dispatch, drop receipt용 origin(`src/services/turn_orchestrator/queued_head/v2/origin.rs:14`가 읽는 자리)을 담는다.
    - **위치.** owner가 이미 전송 중이거나 claim한 단위(head와 그 followers)가 있으면 seed는 **그 단위 바로 뒤**, 없으면 맨 앞이다.
@@ -209,7 +212,8 @@ seed 적재는 종료의 전제 조건이 아니다. 넣을 수 있으면 넣고
    - **적재됨:** 이 commit이 요청의 수락 시점이다. seed 뒤의 대기 입력은 seed를 앞지르지 못한다(`v2.rs:125`의 사람 선행 이동도 seed 앞으로는 막는다).
    - **적재 못 함**(큐 여유 없음, V2 미채택, `effort_restart` 미결, 그 밖의 admission 거절): seed 없이 계속한다(3.6). 수락 시점은 6단계의 fence다.
    - **commit 미확인:** 적재됐을 수도 있다고 보고 계속한다. gate가 걸려 있어 그 seed는 시작되지 않는다. 7단계에서 같은 ticket으로 다시 확인한다.
-   같은 operation의 재호출은 같은 ticket이라 중복 적재되지 않는다. 큐에 다른 restart seed가 이미 있으면 새 seed를 넣지 않고 그 seed를 이 요청의 seed로 쓴다.
+   같은 operation의 ticket은 같은 결과를 가리킨다. 큐의 다른 restart seed에 합류하면 alias operation의 receipt와 bind도 같은 commit에 기록한다.
+   합류한 요청은 공유 seed를 다시 닫거나 독자적으로 철회하지 않는다. alias를 재호출해도 종료 효과는 0이다.
 5. gate가 걸린 동안 owner는 seed를 시작하지 않고 기다린다(`owner_input.rs:859`~`:872`의 기존 대기 분기에 한 갈래).
    옛 턴이 도는 중이면 기존 synthetic 대기 규칙(`owner_input.rs:214`, `:245`)도 seed를 그 턴이 끝날 때까지 잡아 둔다.
 6. 기존 exact terminate를 **row의 owner와 active dispatch에 묶어** 부른다(3.3). tmux 분기의 `mailbox_cancel_active_turn` 선취소는 쓰지 않는다.
@@ -225,7 +229,9 @@ seed 적재는 종료의 전제 조건이 아니다. 넣을 수 있으면 넣고
 8. owner가 front인 seed를 시작한다. context가 보존된 시작이라 headless 진입(`owner_input.rs:912`)을 탄다. 여기에 **seed permit**을 둔다.
    origin이 owner의 내구 bind context에서 읽은 `RestartSeed`일 때만 `headless_turn.rs:159`의 판정을 intake와 같은 판정(`turn_host.rs:198`)으로 바꾸고, row를 context의 종료 대상 nonce와 대조한다.
    - 그 nonce의 실행이 **아직 돌고 있으면** 거절한다(재시작이 끝나지 않았다). 알림과 함께 종결하고, 그 뒤 대기 입력은 살아 있는 세션으로 간다.
-   - 그 nonce의 실행이 **끝났는데 row가 아직 Retired가 아니면**(`src/services/discord/herdr_terminate.rs:217`의 종료 읽기) 기다린다. 기존 복구가 row를 정리하고 owner를 깨우면 다시 본다.
+   - 그 nonce의 실행이 **끝났는데 row가 아직 Retired가 아니면** permit이 복구 주체가 된다. inflight 파일 없는 idle Bound·location 있는 Pending도 대상이다.
+     채널 transition과 그 nonce의 termination fence 아래 owner·nonce·dispatch와 종료 증거를 다시 고정하고, 기존 `execution_end`/`retire_confirmed` 및 disconnect CAS를 끝낸다.
+     이 복구는 새 close를 보내지 않는다. live·unconfirmed·row 이동이면 보이는 실패로 seed를 종결한다. 기존 inflight 복구만 공정하게 실행된다고 가정하지 않는다.
    - row가 그 nonce의 Retired이고 context의 dispatch가 아직 row에 남아 있으면, 같은 selector 보존 disconnect CAS를 먼저 끝낸다(postlude 전 crash의 마무리).
    - 그 밖의 headless 시작은 지금처럼 `executor_not_wired`다(#8125). 일반 ingress(`src/services/discord/queue_io/input_owner/start.rs:13`)는 이 source를 가진 시작을 만들지 못하게 거절한다.
    B-main 첫 커밋에서 seed가 이 경로로 `launch_herdr_session`에 닿고, permit 이전의 `start_waits` 구간과 `headless_turn.rs:159`~`:926` 사이에서
@@ -267,14 +273,15 @@ Claude는 `launched_source`(`handoff.rs:40`)가 account·transcript·cursor·ino
 **herdr r3.** 거절하지 않고 같은 결과를 낸다.
 - terminate를 row의 owner와 active dispatch에 묶는다(`src/services/discord/herdr_terminate/http_force.rs:23`의 `Expected`). 서비스가 captured 턴의 dispatch와 fence 아래 row의 dispatch를 대조한다(`herdr_terminate.rs:499`~`:505`, `:549`).
 - 결산은 HostTerminated다. captured hosted episode만 끝내고 dispatch 상태는 쓰지 않는다(`src/services/discord/turn_finalizer/finalize_context.rs:41`). 출력 소유는 기존 reader에 남는다.
-- postlude의 selector 보존 disconnect가 그 dispatch 조건으로 row에서 dispatch를 떼어낸다(`http_force.rs:44`, `:55`). successor는 옛 dispatch를 물려받지 않는다.
+- postlude의 selector 보존 disconnect가 그 dispatch 조건으로 row에서 dispatch를 떼어낸다(`http_force.rs:44`, `:55`). 새 seed 턴은 옛 dispatch를 물려받지 않는다.
+- 상속 금지는 새 seed 턴에 한정한다. 이후 backlog 입력의 thread/card dispatch 재발견은 `src/services/dispatches/thread_reuse.rs:247`, `src/services/discord/router/message_handler/intake_turn.rs:1518`의 tmux 기준선을 그대로 따른다.
 - HTTP 강제 종료의 `fail_or_retry`(`src/services/dispatched_sessions/force_kill.rs:325`)는 부르지 않는다. 재시도 dispatch 0, 중복 게시 0.
 
 | 경합·경계 | 처리 |
 |---|---|
 | 읽은 뒤 fence 전에 row의 dispatch가 바뀜 | 서비스가 `row changed under fence`로 거절한다. close 전이다. row를 다시 읽어 한 번만 다시 시도하고, 또 바뀌면 보이는 실패(9단계) |
 | row의 dispatch와 진행 중 턴의 dispatch가 다름(row에 낡은 값) | 묶지 않고 종료한다. disconnect가 `Ok(false)`여도 실패가 아니다. row는 그 값을 계속 가리킨다. tmux도 row를 고치지 않는다 |
-| retire 뒤·disconnect 전 crash | seed permit이 context의 nonce·dispatch로 같은 CAS를 끝낸 뒤 launch한다(3.1 8단계) |
+| retire 뒤·disconnect 전 crash | seed permit이 context의 owner·nonce·dispatch와 종료 증거를 transition·fence 아래 고정해 같은 CAS를 끝낸 뒤 launch한다(3.1 8단계) |
 | 위 crash + seed 없음(3.6) | row가 dispatch를 계속 가리킨 채 다음 입력이 launch한다. tmux와 같은 상태다. 모델에 기대 RED로 남겼다(`GapSeedlessDispatchCrash`) |
 
 **확인하지 못한 것.** tmux에서 restart 뒤 그 dispatch가 최종적으로 어떻게 끝나는지(감시·시간 초과 경로)는 추적하지 않았다.
@@ -287,12 +294,18 @@ clear는 seed가 큐에 있든, owner가 seed로 새 세션을 띄우는 중이�
 
 **기구: 채널 clear epoch**(프로세스 메모리, 새 작은 child). clear와 그것이 이겨야 하는 턴은 같은 프로세스에 있으므로 내구 기록이 필요 없다.
 
+`CheckEpoch`는 관찰이고 효과 허가가 아니다. epoch 갱신과 `BeginEffect`는 같은 채널 상태 mutex 아래 직렬화한다.
+`BeginEffect`는 epoch와 clearing 상태를 다시 검사한 뒤 효과 카운터를 올려 허가를 발급한다. 허가는 실제 create·submit이 끝날 때까지 살아 있어야 한다.
+clear보다 먼저 허가된 I/O는 clear 시작 뒤에도 끝날 수 있다. clear는 startup과 허가된 I/O를 기다린 뒤 그 실행을 exact 종료하고 selector를 지운 다음 완료한다.
+clear 뒤 새 허가는 0이다. 등록이 먼저 끝나도 startup과 겹친 사실은 clear guard에 sticky로 남겨 Retired 특수 보류 경로가 다시 선택되지 않게 한다.
+async task의 TLS를 await 너머 설치하지 않는다. sync execute의 등록 Arc를 create worker와 별도 blocking thread의 CreatedSubmit에 명시 전달한다.
+
 | 누가 | 하는 일 | 좌표(붙일 자리) |
 |---|---|---|
 | clear | 시작하자마자 epoch을 올린다. 그 뒤 큐 폐기·턴 취소를 한다 | `control.rs:518` 다음 |
 | herdr launch 턴 | 시작할 때 `Launching`을 등록하고 그때의 epoch을 기억한다(RAII, 끝나면 대기자를 깨움) | `src/services/claude/herdr_turn.rs:275`, `src/services/codex/herdr_turn.rs:200`의 launch 직전 |
-| launch | Pending CAS 뒤·create 전에 epoch을 다시 본다. 달라졌으면 자기 unsent Pending을 retire하고 끝낸다 | `herdr_launch.rs:482` 뒤, `:588`의 기존 retire |
-| launch 턴 | 첫 입력 제출 직전에 epoch을 다시 본다. 달라졌으면 제출하지 않는다 | 기존 취소 확인 옆(`src/services/claude/herdr_turn.rs:252`, `src/services/codex/herdr_turn.rs:358`) |
+| launch | Pending CAS 뒤 CheckEpoch, worker의 실제 create 직전 BeginEffect. 허가 실패면 자기 unsent Pending을 retire하고 끝낸다 | `herdr_launch.rs:482` 뒤, `:588`의 기존 retire |
+| launch 턴 | 첫 입력 CheckEpoch 후 실제 composer mutation 직전 BeginEffect. 허가 없으면 제출하지 않는다 | 기존 취소 확인 옆(`src/services/claude/herdr_turn.rs:252`, `src/services/codex/herdr_turn.rs:358`) |
 | clear | 폐기에서 launch 중 턴의 미제출 입력도 terminal로 결산한다(다시 시작 0) | `src/services/discord/mailbox_finish.rs:362` 경로. 기존 동작인지 B-clear 첫 시험이 확인 |
 | clear | 종료 단계에서 등록된 launch가 끝나기를 기다린 뒤(기존 launch I/O 상한) row를 읽어 처리한다 | `clear_teardown.rs:137` |
 | restart | 3단계에서 읽은 epoch을 postlude와 응답에서 대조한다 | 3.1 7·10단계 |
@@ -317,7 +330,8 @@ restart와 만나는 시점별 결과:
 | 적재 뒤, restart exclusion 전(clear가 transition 보유) | clear가 seed를 폐기하고 옛 실행을 끝낸다. restart의 종료는 nonce 불일치로 실패하고 응답은 epoch을 보고 superseded | seed 0, selector 삭제, 세션 0 |
 | restart exclusion 중(clear는 3초 뒤 지나감) | clear가 큐를 폐기한다. 자기 종료는 `transition busy`로 끝날 수 있다(`herdr_terminate.rs:483`). postlude가 epoch을 보고 selector를 지우고 남은 seed를 철회한다 | seed 0, selector 삭제, 세션 0 |
 | exclusion 해제 뒤, owner가 seed를 잡기 전 | 기존 clear가 Retired row를 처리(`herdr_recovery.rs:58`, `:83`, `:115`) | seed 폐기, selector 삭제 |
-| owner가 seed 턴을 띄우는 중(Pending 전·create 중·제출 전) | clear가 그 입력을 terminal로 결산하고, launch는 epoch을 보고 스스로 멈추고, clear가 launch 종료를 기다려 남은 row를 정리 | seed 실행 0, 세션 0, selector 삭제 |
+| owner가 seed 턴을 띄우는 중(Pending 전·create 중·제출 전) | clear가 미제출 입력을 terminal로 결산한다. CheckEpoch 뒤 BeginEffect는 새 허가를 거절하며, 이미 허가된 I/O는 완료까지 추적한다. clear는 startup·I/O 종료를 기다린 뒤 row를 정리한다 | 새 효과 허가 0, clear 완료 시 세션 0·selector 삭제 |
+| BeginEffect 뒤·물리 create/submit 전 | 허가가 물리 I/O 완료까지 살아 있고 clear가 기다린다. 허가 전 clear였으면 여기로 올 수 없다 | 먼저 허가된 I/O 완료 가능, clear 완료 시 해당 세션 0·selector 삭제 |
 | seed 제출 뒤(인사말 턴 진행 중) | Bound + 진행 중 턴의 기존 clear: 턴 취소, exact terminate | 인사말은 clear 전에 실행됨. 세션 0, selector 삭제 |
 | restart의 종료가 실패했고 clear의 종료도 timeout | 둘 다 경고로 끝나고 옛 세션이 남는다 | clear의 기존 timeout 계약 그대로(`GapClearCloseFailure`) |
 
@@ -335,7 +349,7 @@ seed가 적재된 요청에서는 seed 원본과 그 admission context가 **유�
 |---|---|---|
 | 적재 전 | 변화 없음 | 요청이 수락되지 않았다. 옛 세션 그대로 |
 | 적재 뒤, close 전 | seed가 큐에, row는 옛 nonce Bound, 실행은 살아 있음 | permit 거절 → seed는 알림과 함께 종결. 대기 입력은 살아 있는 옛 세션으로 간다. 세션 1개 |
-| close 뒤, retire CAS 전 | row는 Bound인데 실행은 끝남 | permit이 기다린다. 기존 복구가 row를 Retired로 만들면 seed가 launch → Ready |
+| close 뒤, retire CAS 전 | idle Bound/placed Pending 포함, row는 옛 nonce인데 실행은 끝남 | permit이 transition·fence 아래 종료 증거를 고정해 retire/disconnect를 마무리. 새 close 0, 확인 불가면 보이는 실패 |
 | retire 뒤(disconnect 전후), wake 전 | seed가 큐에, row Retired | permit이 남은 disconnect를 끝내고 owner가 seed로 launch → Ready |
 | launch 중·seed 제출 전후 | seed attempt + Pending | 3.1 끝의 세 단계 규칙. create 재전송 0, 불명 seed 재전송 0 |
 | 실패 응답 뒤, seed 철회 전 | seed가 남음 | permit 거절 알림이 한 번 더. 무응답 종료 없음 |
@@ -371,14 +385,14 @@ seed가 적재된 요청에서는 seed 원본과 그 admission context가 **유�
 
 ### 3.7 A 조각과의 접점 (P2-2·P2-5 of d1)
 
-A(Codex resume 경계)는 다른 레인이 구현 중이다. 채택안이 A에 요구하는 것은 다음뿐이다.
+A(Codex resume 경계)는 `0060c4dd50f68a7509217c29986dc58ff5e64d16`에 구현되어 독립 리뷰 중이다. B는 아래 기존 계약을 소비한다. A 리뷰가 계약을 바꾸면 코디의 통보를 받아 DESIGN_DELTA로 멈춘다.
 
 - **resume 요청의 출처**: `HerdrLaunch.resume`은 seed 턴에서만 true가 된다. 일반 Codex 재기동은 지금처럼 fresh다(`src/services/codex/herdr_turn.rs:188`~`:197`).
   origin은 `OwnerTurn`까지 보존된다. B-main은 그 `RestartSeed` origin을 Codex 턴의 typed resume 요청으로 넘기는 배선을 갖고, A는 그 요청을 받는 포트를 준다.
   selector가 있다는 것만으로 resume을 켜지 않는다. seed 없는 재시작(3.6) 뒤의 첫 입력은 일반 입력이므로 Codex는 fresh로 시작한다.
-- **시작점**: A가 Pending CAS와 같은 row 기록에 고정하는 resume 시작점을 그대로 쓴다. seed가 일반 첫 입력 경로(`first_input.rs:195`~`:225`)로
-  들어가므로 그 경로가 row의 시작점을 읽으면 충분하다. 통합 시험은 owner seed 경로에서 `:216`·`:225`의 시작점 소비와 일반 재기동의 `resume=false`를 함께 본다.
-- **부팅**: seed와 launch 사이 crash 뒤에도 시작점은 row에 있고 seed는 큐에 있다.
+- **시작점**: A가 Pending CAS 전에 immutable incarnation context에 내구 기록하고 Pending의 binding nonce로 연결하는 resume 시작점을 그대로 쓴다. seed가 일반 첫 입력 경로(`first_input.rs:195`~`:225`)로
+  들어가므로 그 경로가 같은 nonce의 incarnation context에서 시작점을 읽어야 한다. 통합 시험은 owner seed 경로에서 `:216`·`:225`의 시작점 소비와 일반 재기동의 `resume=false`를 함께 본다.
+- **부팅**: seed와 launch 사이 crash 뒤에도 시작점은 같은 incarnation context에 있고 seed는 큐에 있다. Pending/Bound successor 복원은 저장된 시작점을 쓰며 startup 뒤 EOF로 다시 측정하지 않는다.
 - Claude는 접점이 없다. 기존 `resumed_session`(`handoff.rs:6`)과 `o_reads`(`:29`)가 그대로 판정한다.
 
 ### 3.8 tmux와의 차이 전수와 남은 결정
@@ -406,12 +420,12 @@ A(Codex resume 경계)는 다른 레인이 구현 중이다. 채택안이 A에 �
    실패 확정은 실패 응답, 또는 부팅 뒤 permit의 거절이다. 접수 원본은 한 번만 전달되거나 명시 receipt로 종결된다.
 3. seed는 restart 명령만 만들 수 있고, 종료 대상이 돌고 있는 동안에는 전달되지 않는다. 일반 headless 시작은 계속 거절된다.
 4. 3.2의 각 행은 표의 결과를 내고, 거절 행은 close·seed·row 변화가 0이다.
-5. dispatch 실행 중에도 재시작한다. restart는 dispatch 상태를 쓰지 않고 재시도 dispatch를 만들지 않으며 successor는 그 dispatch를 물려받지 않는다.
-6. clear가 시작된 뒤 seed 제출 0, 그 clear보다 먼저 시작한 launch의 create 0, clear가 끝났을 때 그런 launch가 만든 세션 0, selector 삭제(3.4의 남는 것 세 가지 제외).
+5. dispatch 실행 중에도 재시작한다. restart는 dispatch 상태를 쓰지 않고 재시도 dispatch를 만들지 않으며 새 seed 턴은 그 dispatch를 물려받지 않는다. 이후 입력의 재발견·최종 상태·게시 수는 tmux 기준선과 같다.
+6. clear의 epoch 갱신 뒤 create·seed 제출의 새 효과 허가 0이다. 먼저 허가된 I/O는 끝날 수 있으나, clear가 끝날 때 그 launch가 만든 세션 0·selector 삭제다(3.4의 남는 것 세 가지 제외). CheckEpoch만으로 효과를 허가하지 않는다.
 7. seed를 넣을 수 없어도 종료 전에 거절하지 않는다. 대기 입력 유실 0, 응답은 tmux의 인사말 실패 문구다.
-8. 전송 중·claim된 단위가 있으면 seed는 그 뒤에 들어가고 그 단위의 결산은 실패하지 않는다.
+8. 전송 중·claim된 단위가 있으면 seed는 그 뒤에 들어가고 그 단위의 결산은 실패하지 않는다. claim 당시 followers는 이후 입력 도착으로 바뀌지 않는다.
 9. 3.5의 각 crash 시점은 표의 결과를 내고, seed가 적재된 요청은 Ready 또는 보이는 실패로 끝난다. 제출 뒤·receipt 전 crash의 seed는 다시 보내지 않는다.
-10. 응답은 seed의 ticket 상태로 정하고, superseded는 clear epoch 이동 또는 ticket의 clear 폐기 기록이 있을 때만 말한다.
+10. 응답은 seed의 ticket 상태로 정하고, superseded는 clear epoch 이동 또는 ticket의 clear 폐기 기록이 있을 때만 말한다. 같은 operation은 기존 ticket을 먼저 조회해 합류·기존 결과만 응답하며 close·create·seed를 반복하지 않는다. identity/context Conflict는 종료를 금지한다.
 11. 옛 바이너리로 돌아가도 seed는 보이는 거절로 종결되고 스냅샷은 읽힌다.
 12. create 응답 불명은 재전송 0, Pending 보존, 보이는 실패다.
 13. tmux 채널의 `/restart`와 herdr 채널의 인접 관리 가드는 변하지 않는다.
@@ -445,7 +459,7 @@ A는 그대로다(다른 레인). B는 **두 리뷰 단위**로 나눈다. 합�
 | 새 `src/services/discord/herdr_terminate/restart.rs` (+부모 `mod` 한 줄) | owner·dispatch에 묶고 요청과 분리해 도는 종료 진입점. `herdr_terminate.rs`(949줄) 본문은 건드리지 않는다 | +50~70 |
 | 새 `src/services/discord/queue_io/input_owner/restart_seed.rs` (+`mod.rs` 한 줄) | operation→ticket·원본·context, 적재 시도, ticket 상태, 철회, in-flight gate, permit(거절·대기·남은 disconnect) | +150~200 |
 | `src/services/discord/queue_io/input_owner/origin.rs`, `start.rs` | `RestartSeed` origin, 일반 ingress의 source 거절 | +15~20 |
-| 새 `src/services/turn_orchestrator/queued_head/v2/restart_seed.rs`, `v2.rs` | 단위 뒤 삽입과 bind index 이동, ticket 상태 조회, 사람 선행 이동 가드 | +50~70 |
+| 새 `src/services/turn_orchestrator/queued_head/v2/source_admission/restart_seed.rs`, `v2.rs` | 단위 뒤 삽입과 bind index 이동, ticket 상태 조회, 사람 선행 이동 가드 | +50~70 |
 | `src/services/turn_orchestrator/queued_head/v2/source_admission.rs` **(giant 1,028줄)** | 삽입 위치 판별 연결 2~4줄만 | +4 |
 | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs` **(giant 1,567줄)** | gate 대기 분기, 기존 대기 예외에 origin 한 갈래 | +8~12 |
 | `src/services/discord/router/message_handler/headless_turn.rs` **(giant 1,545줄)** | `:159`의 판정 선택 분기만. 검증은 child에 둔다 | +6~10 |
@@ -510,12 +524,12 @@ tmux와 herdr 각각 idle·busy·queue 2개·resume·실패·동시 clear를 같
 
 ## 6. 상태 차트 산출물
 
-r1 모델 `HerdrRestart`(restart가 직접 launch하는 방향)는 그대로 두었다. A 레인이 같은 파일들에 Codex resume 경계를 반영하는 중이라 제자리에서 고치지 않았다.
+`HerdrRestart`의 a 영역은 A의 Codex resume 경계다. s 영역은 r1 direct-launch 제안의 역사적 음성 대조이며 B의 정본으로 재사용하지 않는다.
 채택안은 같은 영역의 모듈 `HerdrRestartOwner`로 검사하며 r3에서 사용자 결정대로 갱신했다. 값 범위·수정 전/후 표·규칙·TLC 결과·Mermaid·재현 명령은
 [`session-lifecycle/herdr-restart-owner.report.md`](statecharts/session-lifecycle/herdr-restart-owner.report.md)에 있다.
 r1 보고서는 [`session-lifecycle/herdr-restart.report.md`](statecharts/session-lifecycle/herdr-restart.report.md)다.
 
-- 63 cfg: GREEN 28, 기대 RED 35(main의 거절 1, main의 clear 동작 1, 원인 변형 30, 남는 계약 3). 불변식 17개와 진행성 6개 모두 그것을 깨는 cfg가 있다.
+- 63 cfg: GREEN 28, 기대 RED 35(main의 거절 1, main의 clear 동작 1, 원인 변형 30, 남는 계약 3). 불변식 20개와 진행성 8개 모두 그것을 깨는 cfg가 있다.
 - dispatch 실행 중 재시작, clear 우선(직렬·overtake·launch 중·임의 시점), seed 없는 재시작, 전송 중 단위, seed 제출의 세 단계와 각 사이의 crash, 롤백, 시작 row 여섯 가지를 포함한다.
 - 모델은 새 코드가 아닌 설계 포트를 검사한다. seed의 headless 진입, provider별 I/O, 실제 부팅 복원, tmux의 dispatch 기준선은 5절의 시험으로 증명해야 한다.
 
@@ -550,3 +564,5 @@ r1 보고서는 [`session-lifecycle/herdr-restart.report.md`](statecharts/sessio
 - r1 (2026-11-13, `2c88733814`): 진입점 전수표, restart가 직접 launch하는 방향, `HerdrRestart` 모델 23 cfg.
 - r2 (2026-11-13, `f3c745ebc9`): 리뷰 d1의 방향 제안을 판정해 owner 큐 seed 방향을 채택(적재 → 종료 순서). P2-1·P2-3·P2-4·P2-6 반영, P2-2·P2-5는 A 접점만 기록, 사용자 결정 항목 U1~U4, B 크기 재추정, `HerdrRestartOwner` 모델 42 cfg.
 - r3 (2026-11-13): 사용자 결정 4건 반영(dispatch 중 재시작, clear 우선, 인사말 순서는 불가피 차이, seed 불가 시에도 재시작)과 리뷰 d2의 P2 5건(전송 중 단위 뒤 적재, ticket 상태와 clear epoch, seed 제출 세 단계, 옛 pane 전달 기준, tmux 차이 전수). B를 B-clear·B-main으로 분할, 모델 63 cfg.
+
+<!-- doc-path-refs: proposed herdr_turn/restart_resume.rs src/services/herdr_launch/clear_epoch.rs src/services/discord/commands/restart/herdr.rs src/services/discord/herdr_terminate/restart.rs src/services/discord/queue_io/input_owner/restart_seed.rs src/services/turn_orchestrator/queued_head/v2/source_admission/restart_seed.rs -->

@@ -1,86 +1,185 @@
 ---
-title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
 ---
 stateDiagram-v2
   state "Legend" as legend {
     lg0: Result
     lg1: Restart
-    lg2: Breaks NoSeedAfterClear or NoSessionAfterClear
-    lg3: Breaks NoSessionAfterClear in some cases
-    lg4: Path to the ClearForgets or NoSeedAfterClear or NoSessionAfterClear bug
-    lg5: Repeats forever, so ClearForgets breaks
+    lg2: Breaks EffectHasLivePermission or NoSeedAfterClear or NoSessionAfterClear
+    lg3: Path to the ClearForgets or EffectHasLivePermission or NoSeedAfterClear or NoSessionAfterClear bug
+    lg4: Repeats forever, so ClearForgets breaks
   }
   class lg0 teal
   class lg1 blue
   class lg2 breaks
-  class lg3 mayBreak
-  class lg4 bugPath
-  class lg5 repeats
+  class lg3 bugPath
+  class lg4 repeats
   s0: Old session and a queued input
   s1: Seed committed#59; gate holds it
   s2: Restart holds the transition and fence
-  s3: Clear began: epoch bumped#59; restart holds the transition
+  s3: Clear requested#59; epoch serializer pending
   s4: Exact close confirmed#59; retire and settle
-  s5: Clear discarded the queue#59; restart holds the transition
+  s5: Clear began: epoch bumped#59; restart holds the transition
   s6: Old execution retired#59; exclusion still held
-  s7: One new Ready session#59; inputs await the owner
-  s8: One new Ready session#59; inputs settled once
-  s9: The seed ran after a clear began
-  s10: Clear discarded the queue#59; a new session lives
-  s11: Old execution retired#59; a clear overtook the restart
-  s12: Exclusion released#59; superseded reply pending
-  s13: Clear ended#59; selector forgotten#59; a new session lives#59; an input may still arrive
-  s14: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; an input may still arrive
-  s15: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; an input may still arrive
-  s16: Clear ended#59; selector forgotten#59; a new session lives
-  s17: Clear ended#59; selector forgotten#59; a new session lives#59; an input waits
-  s18: Clear gave up on the transition#59; selector still kept#59; a new session lives
-  s19: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; an input waits
-  s20: Clear ended unconfirmed#59; selector still kept#59; a new session lives
-  s21: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; an input waits
+  s7: One new Ready session#59; inputs await the owner#59; physical effect used no live permission#59; original 1 waiting, original 2 not yet arrived
+  s8: Clear discarded the queue#59; restart holds the transition
+  s9: One new Ready session#59; inputs await the owner#59; physical effect used no live permission#59; original 1 waiting, original 2 waiting
+  s10: One new Ready session#59; inputs settled once#59; an input may still arrive#59; physical effect used no live permission#59; original 1 delivered, original 2 not yet arrived
+  s11: Clear requested#59; epoch serializer pending#59; physical effect used no live permission#59; original 1 waiting, original 2 not yet arrived
+  s12: One new Ready session#59; inputs await the owner#59; physical effect used no live permission#59; original 1 delivered, original 2 waiting
+  s13: Clear requested#59; epoch serializer pending#59; physical effect used no live permission#59; original 1 waiting, original 2 waiting
+  s14: Clear requested#59; epoch serializer pending#59; physical effect used no live permission#59; original 1 delivered, original 2 not yet arrived
+  s15: The seed ran after a clear began#59; physical effect used no live permission#59; original 1 waiting, original 2 not yet arrived
+  s16: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 waiting, original 2 not yet arrived
+  s17: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s18: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 delivered, original 2 delivered
+  s19: Clear requested#59; epoch serializer pending#59; physical effect used no live permission#59; original 1 delivered, original 2 waiting
+  s20: The seed ran after a clear began#59; physical effect used no live permission#59; original 1 waiting, original 2 waiting
+  s21: The seed ran after a clear began#59; physical effect used no live permission#59; original 1 delivered, original 2 not yet arrived
+  s22: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 waiting, original 2 waiting
+  s23: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 not yet arrived
+  s24: The seed ran after a clear began#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s25: Old execution retired#59; a clear overtook the restart
+  s26: Exclusion released#59; superseded reply pending#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s27: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s28: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s29: Clear requested#59; epoch serializer pending#59; physical effect used no live permission#59; original 1 delivered, original 2 delivered
+  s30: One new Ready session#59; inputs settled once#59; an input may still arrive#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s31: The seed ran after a clear began#59; physical effect used no live permission#59; original 1 delivered, original 2 waiting
+  s32: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 waiting
+  s33: The seed ran after a clear began#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s34: The seed ran after a clear began#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s35: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 not yet arrived
+  s36: Exclusion released#59; superseded reply pending#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s37: Exclusion released#59; superseded reply pending#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s38: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  s39: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s40: One new Ready session#59; inputs await the owner#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s41: The seed ran after a clear began#59; physical effect used no live permission#59; original 1 delivered, original 2 delivered
+  s42: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 delivered
+  s43: The seed ran after a clear began#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  s44: The seed ran after a clear began#59; physical effect used no live permission#59; original 1 delivered, original 2 explicitly dropped
+  s45: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 explicitly dropped
+  s46: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 waiting
+  s47: Clear ended#59; selector forgotten#59; a new session lives#59; an input may still arrive#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s48: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; an input may still arrive#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s49: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; an input may still arrive#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s50: Exclusion released#59; superseded reply pending#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  s51: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  s52: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 delivered, original 2 explicitly dropped
+  s53: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 delivered
+  s54: Clear ended#59; selector forgotten#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s55: Clear ended#59; selector forgotten#59; a new session lives#59; an input waits#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s56: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s57: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; an input waits#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s58: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s59: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; an input waits#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s60: Clear ended#59; selector forgotten#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  s61: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  s62: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
-  s2 --> s3: User clear begins: bump the clear epoch
+  s2 --> s3: User requests clear
   s2 --> s4: Close only the captured pane
-  s3 --> s5: Clear discards the queue and the launching input
-  s3 --> s3: Close only the captured pane or Retire CAS and settle the old turn
+  s3 --> s5: Acquire the serializer and bump the clear epoch
   s4 --> s6: Retire CAS and settle the old turn
-  s4 --> s4: Accept an input into the owner queue
-  s4 --> s3: User clear begins: bump the clear epoch
-  s5 --> s2: Clear's teardown acts on the row
+  s4 --> s3: User requests clear
+  s5 --> s8: Clear discards the queue and the launching input
   s5 --> s5: Close only the captured pane or Retire CAS and settle the old turn
   s6 --> s7: Launch the successor inside the exclusion
-  s6 --> s3: User clear begins: bump the clear epoch
-  s7 --> s8: Submit an input to the successor once
-  s3 --> s9: Launch the successor inside the exclusion
-  s5 --> s4: Clear's teardown acts on the row
-  s8 --> s7: Accept an input into the owner queue
-  s5 --> s10: Launch the successor inside the exclusion
-  s5 --> s11: Clear's teardown acts on the row
-  s4 --> s11: Retire CAS and settle the old turn
-  s10 --> s12: Clear's teardown acts on the row
-  s11 --> s12: Launch the successor inside the exclusion
-  s12 --> s13: Reply to the command
-  s12 --> s14: Reply to the command
-  s12 --> s15: Reply to the command
-  s10 --> s15: Clear's teardown acts on the row
-  s12 --> s16: Reply to the command
-  s12 --> s17: Reply to the command
-  s12 --> s18: Reply to the command
-  s12 --> s19: Reply to the command
-  s12 --> s20: Reply to the command
-  s12 --> s21: Reply to the command
-  s13 --> s17: Accept an input into the owner queue
+  s6 --> s3: User requests clear
+  s3 --> s3: Accept an input into the owner queue or Retire CAS and settle the old turn
+  s7 --> s9: Accept an input into the owner queue
+  s7 --> s10: Submit an input to the successor once
+  s8 --> s2: Clear's teardown acts on the row
+  s8 --> s8: Close only the captured pane or Retire CAS and settle the old turn
+  s6 --> s9: Launch the successor inside the exclusion
+  s3 --> s11: Launch the successor inside the exclusion
+  s9 --> s12: Submit an input to the successor once
+  s10 --> s12: Accept an input into the owner queue
+  s11 --> s13: Accept an input into the owner queue
+  s11 --> s14: Submit an input to the successor once
+  s11 --> s16: Acquire the serializer and bump the clear epoch
+  s3 --> s13: Launch the successor inside the exclusion
+  s5 --> s15: Launch the successor inside the exclusion
+  s8 --> s4: Clear's teardown acts on the row
+  s12 --> s18: Submit an input to the successor once
+  s13 --> s19: Submit an input to the successor once
+  s13 --> s22: Acquire the serializer and bump the clear epoch
+  s13 --> s13: Reply to the command
   s14 --> s19: Accept an input into the owner queue
-  s15 --> s21: Accept an input into the owner queue
-  s10 --> s20: Clear's teardown acts on the row
-  s10 --> s21: Clear's teardown acts on the row
-  s17 --> s16: Submit an input to the successor once
-  s19 --> s18: Submit an input to the successor once
-  s21 --> s20: Submit an input to the successor once
+  s14 --> s23: Acquire the serializer and bump the clear epoch
+  s15 --> s20: Accept an input into the owner queue
+  s15 --> s21: Submit an input to the successor once
+  s15 --> s24: Clear discards the queue and the launching input
+  s16 --> s22: Accept an input into the owner queue
+  s16 --> s17: Clear discards the queue and the launching input
+  s8 --> s17: Launch the successor inside the exclusion
+  s8 --> s25: Clear's teardown acts on the row
+  s5 --> s20: Launch the successor inside the exclusion
+  s4 --> s25: Retire CAS and settle the old turn
+  s17 --> s26: Clear's teardown acts on the row
+  s17 --> s28: Accept an input into the owner queue
+  s19 --> s29: Submit an input to the successor once
+  s19 --> s32: Acquire the serializer and bump the clear epoch
+  s20 --> s31: Submit an input to the successor once
+  s20 --> s33: Clear discards the queue and the launching input
+  s21 --> s31: Accept an input into the owner queue
+  s22 --> s27: Clear discards the queue and the launching input
+  s23 --> s32: Accept an input into the owner queue
+  s23 --> s35: Clear discards the queue and the launching input
+  s24 --> s34: Accept an input into the owner queue
+  s17 --> s30: Clear's teardown acts on the row
+  s25 --> s26: Launch the successor inside the exclusion
+  s8 --> s27: Launch the successor inside the exclusion
+  s8 --> s28: Launch the successor inside the exclusion
+  s26 --> s37: Accept an input into the owner queue
+  s26 --> s47: Reply to the command
+  s26 --> s48: Reply to the command
+  s26 --> s49: Reply to the command
+  s27 --> s36: Clear's teardown acts on the row
+  s28 --> s37: Clear's teardown acts on the row
+  s28 --> s38: Submit an input to the successor once
+  s29 --> s42: Acquire the serializer and bump the clear epoch
+  s30 --> s40: Accept an input into the owner queue
+  s31 --> s41: Submit an input to the successor once
+  s31 --> s44: Clear discards the queue and the launching input
+  s32 --> s45: Clear discards the queue and the launching input
+  s34 --> s43: Submit an input to the successor once
+  s27 --> s39: Clear's teardown acts on the row
+  s28 --> s40: Clear's teardown acts on the row
+  s35 --> s10: Clear's teardown acts on the row
+  s35 --> s46: Accept an input into the owner queue
+  s17 --> s49: Clear's teardown acts on the row
+  s25 --> s36: Launch the successor inside the exclusion
+  s25 --> s37: Launch the successor inside the exclusion
+  s36 --> s54: Reply to the command
+  s37 --> s50: Submit an input to the successor once
+  s37 --> s55: Reply to the command
+  s36 --> s56: Reply to the command
+  s37 --> s57: Reply to the command
+  s36 --> s58: Reply to the command
+  s37 --> s59: Reply to the command
+  s38 --> s50: Clear's teardown acts on the row
+  s40 --> s51: Submit an input to the successor once
+  s42 --> s53: Clear discards the queue and the launching input
+  s45 --> s52: Clear's teardown acts on the row
+  s46 --> s12: Clear's teardown acts on the row
+  s47 --> s55: Accept an input into the owner queue
+  s48 --> s57: Accept an input into the owner queue
+  s49 --> s59: Accept an input into the owner queue
+  s27 --> s58: Clear's teardown acts on the row
+  s28 --> s59: Clear's teardown acts on the row
+  s50 --> s60: Reply to the command
+  s50 --> s61: Reply to the command
+  s50 --> s62: Reply to the command
+  s53 --> s18: Clear's teardown acts on the row
+  s55 --> s60: Submit an input to the successor once
+  s57 --> s61: Submit an input to the successor once
+  s59 --> s62: Submit an input to the successor once
+  s38 --> s62: Clear's teardown acts on the row
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
-  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 blue
   class s0 bugPath
   class s1 blue
@@ -92,29 +191,121 @@ stateDiagram-v2
   class s5 blue
   class s5 bugPath
   class s6 blue
+  class s6 bugPath
   class s7 teal
-  class s8 teal
+  class s7 breaks
+  class s7 bugPath
+  class s8 blue
+  class s8 bugPath
   class s9 teal
   class s9 breaks
-  class s9 bugPath
+  class s10 teal
+  class s10 breaks
   class s11 teal
-  class s11 bugPath
+  class s11 breaks
   class s12 teal
-  class s12 mayBreak
-  class s12 bugPath
+  class s12 breaks
   class s13 teal
   class s13 breaks
+  class s13 bugPath
   class s14 teal
   class s14 breaks
   class s15 teal
+  class s15 breaks
+  class s15 bugPath
   class s16 teal
   class s16 breaks
-  class s17 teal
   class s17 breaks
   class s18 teal
   class s18 breaks
   class s18 repeats
   class s19 teal
   class s19 breaks
+  class s19 bugPath
   class s20 teal
+  class s20 breaks
   class s21 teal
+  class s21 breaks
+  class s22 teal
+  class s22 breaks
+  class s23 teal
+  class s23 breaks
+  class s24 teal
+  class s24 breaks
+  class s25 teal
+  class s25 bugPath
+  class s26 teal
+  class s26 breaks
+  class s26 bugPath
+  class s27 breaks
+  class s28 breaks
+  class s29 teal
+  class s29 breaks
+  class s29 bugPath
+  class s30 teal
+  class s30 breaks
+  class s31 teal
+  class s31 breaks
+  class s32 teal
+  class s32 breaks
+  class s33 teal
+  class s33 breaks
+  class s34 teal
+  class s34 breaks
+  class s35 teal
+  class s35 breaks
+  class s36 teal
+  class s36 breaks
+  class s37 teal
+  class s37 breaks
+  class s38 breaks
+  class s39 teal
+  class s39 breaks
+  class s40 teal
+  class s40 breaks
+  class s41 teal
+  class s41 breaks
+  class s42 teal
+  class s42 breaks
+  class s42 bugPath
+  class s43 teal
+  class s43 breaks
+  class s44 teal
+  class s44 breaks
+  class s45 teal
+  class s45 breaks
+  class s46 teal
+  class s46 breaks
+  class s47 teal
+  class s47 breaks
+  class s48 teal
+  class s48 breaks
+  class s49 teal
+  class s49 breaks
+  class s50 teal
+  class s50 breaks
+  class s51 teal
+  class s51 breaks
+  class s52 teal
+  class s52 breaks
+  class s53 teal
+  class s53 breaks
+  class s53 bugPath
+  class s54 teal
+  class s54 breaks
+  class s55 teal
+  class s55 breaks
+  class s56 teal
+  class s56 breaks
+  class s57 teal
+  class s57 breaks
+  class s58 teal
+  class s58 breaks
+  class s59 teal
+  class s59 breaks
+  class s60 teal
+  class s60 breaks
+  class s61 teal
+  class s61 breaks
+  class s62 teal
+  class s62 breaks

@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -22,7 +22,7 @@ stateDiagram-v2
   s1 --> s2: Terminate takes transition and fence
   s2 --> s3: Close only the captured pane
   s3 --> s4: Retire CAS and settle the old turn
-  s4 --> s4: Disconnect keeping selector, release, wake or Reply to the command or Owner starts the front: register the launch or Install Pending over the vacant row or Create the pane once or Submit the first input or Commit the input's receipt or Bind the source
+  s4 --> s4: Disconnect keeping selector, release, wake or Reply to the command or Owner starts the front: register the launch or Install Pending over the vacant row or Observe the create epoch or Compare live epoch and retain create permission or Create once under live effect permission or Observe the input epoch or Compare live epoch and retain input permission or Submit the first input under live permission or Commit the input's receipt or Bind the source
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath

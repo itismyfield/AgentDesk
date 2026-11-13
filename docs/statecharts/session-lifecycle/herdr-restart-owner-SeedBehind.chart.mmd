@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -24,11 +24,15 @@ stateDiagram-v2
   s7: Owner turn began a launch
   s8: Seed waits for the owner
   s9: Owner turn installed Pending
-  s10: Create answered#59; first input not submitted
-  s11: First input submitted#59; receipt not committed
-  s12: Receipt committed#59; source not bound
-  s13: One new Ready session#59; inputs await the owner
-  s14: One new Ready session#59; inputs settled once
+  s10: CheckEpoch observed#59; live BeginEffect still required
+  s11: BeginEffect holds create authority
+  s12: Create answered#59; first input not submitted
+  s13: CheckEpoch observed#59; live input authority still required
+  s14: BeginEffect holds input authority
+  s15: First input submitted#59; receipt not committed
+  s16: Receipt committed#59; source not bound
+  s17: One new Ready session#59; inputs await the owner
+  s18: One new Ready session#59; inputs settled once
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
@@ -40,15 +44,20 @@ stateDiagram-v2
   s6 --> s8: Reply to the command
   s7 --> s9: Install Pending over the vacant row
   s8 --> s7: Owner starts the front: register the launch
-  s9 --> s10: Create the pane once
-  s10 --> s11: Submit the first input
-  s11 --> s12: Commit the input's receipt
-  s12 --> s13: Bind the source
-  s12 --> s6: Bind the source
-  s13 --> s14: Submit an input to the successor once
-  s6 --> s14: Seed joins the successor
-  s12 --> s8: Bind the source
-  s8 --> s14: Seed joins the successor
+  s9 --> s10: Observe the create epoch
+  s10 --> s11: Compare live epoch and retain create permission
+  s11 --> s12: Create once under live effect permission
+  s12 --> s13: Observe the input epoch
+  s13 --> s14: Compare live epoch and retain input permission
+  s14 --> s15: Submit the first input under live permission
+  s15 --> s16: Commit the input's receipt
+  s16 --> s17: Bind the source
+  s16 --> s6: Bind the source
+  s17 --> s18: Submit an input to the successor once
+  s6 --> s12: Claim the seed on its recovered exact successor
+  s16 --> s8: Bind the source
+  s8 --> s12: Claim the seed on its recovered exact successor
+  s16 --> s18: Bind the source
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath
@@ -61,5 +70,5 @@ stateDiagram-v2
   class s5 blue
   class s6 blue
   class s8 purple
-  class s13 teal
-  class s14 teal
+  class s17 teal
+  class s18 teal

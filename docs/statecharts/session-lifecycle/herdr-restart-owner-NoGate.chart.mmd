@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -28,12 +28,16 @@ stateDiagram-v2
   s9: Seed waits for the owner
   s10: Owner turn installed Pending
   s11: Visible failure#59; inputs still owned
-  s12: Create answered#59; first input not submitted
-  s13: First input submitted#59; receipt not committed
-  s14: Receipt committed#59; source not bound
-  s15: One new Ready session#59; inputs await the owner
-  s16: One new Ready session#59; inputs settled once
-  s17: New session without a greeting#59; inputs settled
+  s12: CheckEpoch observed#59; live BeginEffect still required
+  s13: BeginEffect holds create authority
+  s14: Create answered#59; first input not submitted
+  s15: CheckEpoch observed#59; live input authority still required
+  s16: BeginEffect holds input authority
+  s17: First input submitted#59; receipt not committed
+  s18: Receipt committed#59; source not bound
+  s19: One new Ready session#59; inputs await the owner
+  s20: One new Ready session#59; inputs settled once
+  s21: New session without a greeting#59; inputs settled
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
@@ -42,44 +46,39 @@ stateDiagram-v2
   s3 --> s2: Terminate takes transition and fence
   s3 --> s5: Submit an input to the still-current session
   s4 --> s6: Retire CAS and settle the old turn
+  s5 --> s5: Terminate takes transition and fence or Close only the captured pane or Retire CAS and settle the old turn or Disconnect keeping selector, release, wake or Reply to the command
   s6 --> s7: Disconnect keeping selector, release, wake
   s7 --> s8: Owner starts the front: register the launch
   s7 --> s9: Reply to the command
   s8 --> s10: Install Pending over the vacant row
   s7 --> s11: Reply to the command
   s9 --> s8: Owner starts the front: register the launch
-  s10 --> s12: Create the pane once
+  s10 --> s12: Observe the create epoch
   s11 --> s8: Owner starts the front: register the launch
-  s12 --> s13: Submit the first input
-  s10 --> s10: Reply to the command
-  s13 --> s14: Commit the input's receipt
-  s14 --> s15: Bind the source
-  s15 --> s16: Submit an input to the successor once
-  s14 --> s7: Bind the source
-  s7 --> s17: Reply to the command
-  s14 --> s17: Bind the source
+  s12 --> s13: Compare live epoch and retain create permission
+  s13 --> s14: Create once under live effect permission
+  s14 --> s15: Observe the input epoch
+  s15 --> s16: Compare live epoch and retain input permission
+  s16 --> s17: Submit the first input under live permission
+  s17 --> s18: Commit the input's receipt
+  s18 --> s19: Bind the source
+  s19 --> s20: Submit an input to the successor once
+  s18 --> s7: Bind the source
+  s7 --> s21: Reply to the command
+  s18 --> s21: Bind the source
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath
   class s1 blue
   class s1 bugPath
-  class s2 bugPath
   class s3 teal
   class s3 bugPath
-  class s4 bugPath
   class s5 teal
   class s5 breaks
   class s5 bugPath
-  class s6 bugPath
-  class s7 bugPath
-  class s8 bugPath
+  class s5 repeats
   class s9 purple
-  class s10 bugPath
   class s11 teal
-  class s12 bugPath
-  class s13 bugPath
-  class s14 bugPath
-  class s15 teal
-  class s16 teal
-  class s17 teal
-  class s17 repeats
+  class s19 teal
+  class s20 teal
+  class s21 teal

@@ -1,8 +1,8 @@
-export const title = "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins";
+export const title = "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission";
 const qs = (s) => Object.values(s.q ?? {});
 const settled = (s) => qs(s).every(q => !["queued", "inflight"].includes(q));
 const tail = (s) => qs(s).includes("queued") ? "; an input waits" : qs(s).includes("incoming") ? "; an input may still arrive" : "";
-export const state = (v) => {
+const baseState = (v) => {
   const s = v.s;
   if (s.oldSeed) return "Greeting reached the execution the restart should end";
   if (s.oldInputs) return "Old pane received an input while the restart was open";
@@ -22,6 +22,12 @@ export const state = (v) => {
   if (s.ready && s.inflight) return "Ready while the old turn is unsettled";
   if (s.seed === "stripped") return "Restart record vanished without a result";
   if (s.clear === "held") return "Clear reported a hold and left the launch running";
+  if (s.clearRequested && s.clear === "none") return s.permission ? "Clear requested; wait for the accepted physical effect" : "Clear requested; epoch serializer pending";
+  if (s.crashed && ["Bound", "PendingPlaced"].includes(s.row) && !s.oldLive && s.seed === "queued") return "Idle ended execution; the seed owner must repair the row";
+  if (s.lphase === "pending" && s.effectBegan) return s.permission ? "BeginEffect holds create authority" : "Create authority was observed but not retained";
+  if (s.lphase === "pending" && s.checked) return "CheckEpoch observed; live BeginEffect still required";
+  if (s.lphase === "created" && s.effectBegan) return s.permission ? "BeginEffect holds input authority" : "Input authority was released before the effect";
+  if (s.lphase === "created" && s.checked) return "CheckEpoch observed; live input authority still required";
   if (s.clear === "begun" || s.clear === "discarded") {
     const what = s.clear === "begun" ? "Clear began: epoch bumped" : "Clear discarded the queue";
     const where = s.excl ? "; restart holds the transition" : (s.launcher && s.lphase === "none") ? "; a finished launch never released its registration" : s.launcher ? "; a turn is launching" : s.panes ? "; a new session lives" : s.oldLive ? "; the old session lives" : "; no session";
@@ -29,7 +35,7 @@ export const state = (v) => {
   }
   if (s.launcher && s.lphase === "none") return "A finished launch never released its registration";
   if (s.launcher) return ({ begun: "Owner turn began a launch", pending: "Owner turn installed Pending", created: "Create answered; first input not submitted", sent: "First input submitted; receipt not committed", settled: "Receipt committed; source not bound" })[s.lphase] + (s.epoch ? " (after a clear)" : "");
-  if (s.ready) return settled(s) ? "One new Ready session; inputs settled once" : "One new Ready session; inputs await the owner";
+  if (s.ready) return settled(s) ? "One new Ready session; inputs settled once" + tail(s) : "One new Ready session; inputs await the owner";
   if (s.cmd === "idle") return qs(s).includes("inflight") ? "Old session; an input is in flight to it" : "Old session and a queued input";
   if (s.cmd === "seeded") return s.seed === "queued" ? "Seed committed; gate holds it" : "No seed admitted; restart goes on";
   if (s.cmd === "closing") return "Restart holds the transition and fence";
@@ -47,6 +53,14 @@ export const state = (v) => {
   if (s.row === "NewBound") return (settled(s) ? "New session without a greeting; inputs settled" : "New session without a greeting") ;
   if (s.visible) return (settled(s) ? "Visible failure; inputs settled" : "Visible failure; inputs still owned") + (s.oldLive ? "; old session lives" : "");
   return (settled(s) ? "Restart answered; inputs settled" : "Restart answered; inputs wait") + (s.awake ? "" : "; owner not woken") + (s.oldLive ? "; old session lives" : "");
+};
+export const state = (v) => {
+  const s = v.s;
+  const failures = [s.opSeedless && "known ticket entered the seedless path", s.opDuplicate && "known operation inserted another seed", s.unsafeEffect && "physical effect used no live permission"].filter(Boolean);
+  if (!failures.length) return baseState(v);
+  const names = { incoming: "not yet arrived", queued: "waiting", inflight: "receipt pending", delivered: "delivered", retained: "retained", cancelled: "explicitly dropped", lost: "lost" };
+  const originals = qs(s).map((q, i) => `original ${i + 1} ${names[q] ?? q}`).join(", ");
+  return `${baseState(v)}; ${failures.join("; ")}; ${originals}`;
 };
 export const step = (action, from, to) => ({
   Request: to.s.cmd === "notice" ? "Refuse before any effect" : to.s.seed === "queued" ? "Commit the seed original (acceptance)" : "Seed not admitted: restart anyway",
@@ -68,16 +82,20 @@ export const step = (action, from, to) => ({
   NotifyFailure: "Show the result",
   SeedRefused: "Permit refuses the seed with a notice",
   SeedToOld: "Seed typed into the old execution",
-  SeedJoin: "Seed joins the successor",
+  SeedJoin: "Claim the seed on its recovered exact successor",
   LaunchBegin: "Owner starts the front: register the launch",
   InstallPending: "Install Pending over the vacant row",
   AbortUnsent: "Clear epoch moved: retire the unsent Pending",
-  Create: "Create the pane once",
+  CheckCreateEpoch: "Observe the create epoch",
+  BeginCreateEffect: "Compare live epoch and retain create permission",
+  Create: "Create once under live effect permission",
   LaunchNotSent: "Create not sent: fail the input visibly",
   LaunchUncertain: "Create unknown: keep Pending, fail visibly",
   ReplayCreate: "Create again after an unknown reply",
   AbortSubmit: "Clear epoch moved: do not submit",
-  SubmitEffect: "Submit the first input",
+  CheckSubmitEpoch: "Observe the input epoch",
+  BeginSubmitEffect: "Compare live epoch and retain input permission",
+  SubmitEffect: "Submit the first input under live permission",
   SettleReceipt: "Commit the input's receipt",
   BindSource: "Bind the source",
   Adopt: "Probe adopts the Pending pane",
@@ -86,10 +104,12 @@ export const step = (action, from, to) => ({
   RefuseUnknown: "Unreadable row refuses the input visibly",
   StaleOldDelivery: "Stale permission types into the old pane",
   ReplayInput: "Forget an input receipt",
-  RowEndRecovery: "Recovery retires the row of a gone pane",
+  RowEndRecovery: "The seed owner or inflight recovery repairs the exact ended row",
+  ReplayRequest: to.s.opSeedless ? "Treat known operation as seedless capacity failure" : to.s.opDuplicate ? "Insert a duplicate operation seed" : "Return or join the existing durable ticket",
   ResolveUnplaced: "Resolver settles the unplaced Pending",
   Crash: "Daemon dies and boots",
-  ClearBegin: "User clear begins: bump the clear epoch",
+  ClearRequest: "User requests clear",
+  ClearBegin: "Acquire the serializer and bump the clear epoch",
   ClearDiscard: "Clear discards the queue and the launching input",
   ClearEnd: "Clear's teardown acts on the row",
   Wait: "Wait",

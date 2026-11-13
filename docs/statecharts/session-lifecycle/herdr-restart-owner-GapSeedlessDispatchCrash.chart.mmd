@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -25,13 +25,17 @@ stateDiagram-v2
   s10: Owner turn began a launch
   s11: Successor inherited the old dispatch
   s12: Owner turn installed Pending
-  s13: Create answered#59; first input not submitted
-  s14: First input submitted#59; receipt not committed
-  s15: Pending without a launching turn#59; an input waits
-  s16: Receipt committed#59; source not bound
-  s17: New session without a greeting
-  s18: Pending without a launching turn
-  s19: New session without a greeting#59; inputs settled
+  s13: CheckEpoch observed#59; live BeginEffect still required
+  s14: BeginEffect holds create authority
+  s15: Create answered#59; first input not submitted
+  s16: CheckEpoch observed#59; live input authority still required
+  s17: Pending without a launching turn#59; an input waits
+  s18: BeginEffect holds input authority
+  s19: New session without a greeting
+  s20: First input submitted#59; receipt not committed
+  s21: New session without a greeting#59; inputs settled
+  s22: Receipt committed#59; source not bound
+  s23: Pending without a launching turn
   [*] --> s0
   s0 --> s1: Seed not admitted: restart anyway
   s1 --> s2: Terminate takes transition and fence
@@ -43,7 +47,7 @@ stateDiagram-v2
   s2 --> s4: Daemon dies and boots
   s5 --> s6: Daemon dies and boots
   s5 --> s7: Retire CAS and settle the old turn
-  s6 --> s6: Recovery retires the row of a gone pane
+  s6 --> s6: The seed owner or inflight recovery repairs the exact ended row
   s7 --> s8: Disconnect keeping selector, release, wake
   s7 --> s6: Daemon dies and boots
   s5 --> s9: Daemon dies and boots
@@ -56,18 +60,26 @@ stateDiagram-v2
   s10 --> s12: Install Pending over the vacant row
   s6 --> s10: Owner starts the front: register the launch
   s12 --> s6: Daemon dies and boots
-  s12 --> s13: Create the pane once
-  s13 --> s14: Submit the first input
-  s13 --> s15: Daemon dies and boots
-  s14 --> s16: Commit the input's receipt
-  s14 --> s18: Daemon dies and boots
-  s15 --> s17: Probe adopts the Pending pane
-  s16 --> s8: Bind the source
-  s16 --> s18: Daemon dies and boots
-  s17 --> s19: Submit an input to the successor once
-  s18 --> s19: Probe adopts the Pending pane
-  s8 --> s19: Daemon dies and boots or Reply to the command
-  s16 --> s19: Bind the source
+  s12 --> s13: Observe the create epoch
+  s13 --> s6: Daemon dies and boots
+  s13 --> s14: Compare live epoch and retain create permission
+  s14 --> s6: Daemon dies and boots
+  s14 --> s15: Create once under live effect permission
+  s15 --> s16: Observe the input epoch
+  s15 --> s17: Daemon dies and boots
+  s16 --> s17: Daemon dies and boots
+  s16 --> s18: Compare live epoch and retain input permission
+  s17 --> s19: Probe adopts the Pending pane
+  s18 --> s17: Daemon dies and boots
+  s18 --> s20: Submit the first input under live permission
+  s19 --> s21: Submit an input to the successor once
+  s20 --> s22: Commit the input's receipt
+  s20 --> s23: Daemon dies and boots
+  s22 --> s8: Bind the source
+  s22 --> s23: Daemon dies and boots
+  s23 --> s21: Probe adopts the Pending pane
+  s8 --> s21: Daemon dies and boots or Reply to the command
+  s22 --> s21: Bind the source
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath
@@ -87,7 +99,7 @@ stateDiagram-v2
   class s11 purple
   class s11 breaks
   class s11 bugPath
-  class s15 purple
   class s17 purple
-  class s18 purple
   class s19 purple
+  class s21 purple
+  class s23 purple

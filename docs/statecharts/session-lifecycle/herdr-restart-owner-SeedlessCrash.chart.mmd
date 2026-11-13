@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -20,14 +20,18 @@ stateDiagram-v2
   s9: Restart answered#59; inputs settled
   s10: Owner turn began a launch
   s11: Owner turn installed Pending
-  s12: Create answered#59; first input not submitted
-  s13: First input submitted#59; receipt not committed
-  s14: Pending without a launching turn#59; an input waits
-  s15: Receipt committed#59; source not bound
-  s16: New session without a greeting
-  s17: Pending without a launching turn#59; an input may still arrive
-  s18: New session without a greeting#59; inputs settled
-  s19: Pending without a launching turn
+  s12: CheckEpoch observed#59; live BeginEffect still required
+  s13: BeginEffect holds create authority
+  s14: Create answered#59; first input not submitted
+  s15: CheckEpoch observed#59; live input authority still required
+  s16: Pending without a launching turn#59; an input waits
+  s17: BeginEffect holds input authority
+  s18: New session without a greeting
+  s19: First input submitted#59; receipt not committed
+  s20: New session without a greeting#59; inputs settled
+  s21: Receipt committed#59; source not bound
+  s22: Pending without a launching turn#59; an input may still arrive
+  s23: Pending without a launching turn
   [*] --> s0
   s0 --> s1: Seed not admitted: restart anyway
   s1 --> s2: Terminate takes transition and fence
@@ -52,27 +56,35 @@ stateDiagram-v2
   s10 --> s6: Daemon dies and boots
   s10 --> s11: Install Pending over the vacant row
   s11 --> s6: Daemon dies and boots
-  s11 --> s12: Create the pane once
-  s12 --> s13: Submit the first input
-  s12 --> s14: Daemon dies and boots
-  s13 --> s15: Commit the input's receipt
-  s13 --> s17: Daemon dies and boots
-  s14 --> s16: Probe adopts the Pending pane
-  s13 --> s14: Daemon dies and boots
-  s15 --> s8: Bind the source
-  s15 --> s17: Daemon dies and boots
-  s16 --> s18: Submit an input to the successor once
-  s17 --> s18: Probe adopts the Pending pane
-  s17 --> s14: Accept an input into the owner queue
-  s15 --> s18: Bind the source
+  s11 --> s12: Observe the create epoch
+  s12 --> s6: Daemon dies and boots
+  s12 --> s13: Compare live epoch and retain create permission
+  s13 --> s6: Daemon dies and boots
+  s13 --> s14: Create once under live effect permission
+  s14 --> s15: Observe the input epoch
+  s14 --> s16: Daemon dies and boots
+  s15 --> s16: Daemon dies and boots
+  s15 --> s17: Compare live epoch and retain input permission
+  s16 --> s18: Probe adopts the Pending pane
+  s17 --> s16: Daemon dies and boots
+  s17 --> s19: Submit the first input under live permission
+  s18 --> s20: Submit an input to the successor once
+  s19 --> s21: Commit the input's receipt
+  s19 --> s22: Daemon dies and boots
+  s20 --> s18: Accept an input into the owner queue
+  s19 --> s16: Daemon dies and boots
+  s21 --> s8: Bind the source
+  s21 --> s22: Daemon dies and boots
+  s22 --> s20: Probe adopts the Pending pane
+  s22 --> s16: Accept an input into the owner queue
+  s21 --> s20: Bind the source
+  s8 --> s20: Daemon dies and boots or Reply to the command
+  s21 --> s16: Daemon dies and boots
+  s19 --> s23: Daemon dies and boots
+  s21 --> s18: Bind the source
   s8 --> s18: Daemon dies and boots or Reply to the command
-  s15 --> s14: Daemon dies and boots
-  s13 --> s19: Daemon dies and boots
-  s18 --> s16: Accept an input into the owner queue
-  s15 --> s16: Bind the source
-  s8 --> s16: Daemon dies and boots or Reply to the command
-  s15 --> s19: Daemon dies and boots
-  s19 --> s18: Probe adopts the Pending pane
+  s21 --> s23: Daemon dies and boots
+  s23 --> s20: Probe adopts the Pending pane
   class s0 blue
   class s1 blue
   class s2 blue
@@ -83,8 +95,8 @@ stateDiagram-v2
   class s7 blue
   class s8 blue
   class s9 purple
-  class s14 purple
   class s16 purple
-  class s17 purple
   class s18 purple
-  class s19 purple
+  class s20 purple
+  class s22 purple
+  class s23 purple

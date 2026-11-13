@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -17,131 +17,147 @@ stateDiagram-v2
   s0: Old session and a queued input
   s1: Seed committed#59; gate holds it
   s2: Restart holds the transition and fence
-  s3: Clear began: epoch bumped#59; the old session lives
-  s4: Clear began: epoch bumped#59; restart holds the transition
-  s5: Exact close confirmed#59; retire and settle
-  s6: Clear discarded the queue#59; the old session lives
-  s7: Clear discarded the queue#59; restart holds the transition
-  s8: Old execution retired#59; exclusion still held
-  s9: No seed admitted#59; restart goes on
-  s10: Exclusion released#59; reply pending
-  s11: Clear began: epoch bumped#59; no session
+  s3: Clear requested#59; epoch serializer pending
+  s4: Exact close confirmed#59; retire and settle
+  s5: Clear began: epoch bumped#59; the old session lives
+  s6: Clear began: epoch bumped#59; restart holds the transition
+  s7: Old execution retired#59; exclusion still held
+  s8: Clear discarded the queue#59; the old session lives
+  s9: Exclusion released#59; reply pending
+  s10: Clear discarded the queue#59; restart holds the transition
+  s11: No seed admitted#59; restart goes on
   s12: Owner turn began a launch
   s13: Seed waits for the owner
-  s14: Close refused, unconfirmed or row moved on
-  s15: Clear discarded the queue#59; no session
-  s16: Clear began: epoch bumped#59; a turn is launching
-  s17: Owner turn installed Pending
-  s18: Old execution retired#59; a clear overtook the restart
-  s19: Failure answered#59; seed still to withdraw
-  s20: Exclusion released#59; superseded reply pending
-  s21: Clear discarded the queue#59; a turn is launching
-  s22: Create answered#59; first input not submitted
-  s23: Clear ended#59; selector forgotten
-  s24: Clear gave up on the transition#59; selector forgotten
-  s25: Clear began: epoch bumped#59; a new session lives
-  s26: Pending without a launching turn#59; an input waits
-  s27: Clear discarded the queue#59; a new session lives
-  s28: New session without a greeting
-  s29: New session without a greeting#59; inputs settled
-  s30: Clear ended unconfirmed#59; selector forgotten#59; a new session lives
-  s31: Clear ended unconfirmed#59; selector still kept#59; a new session lives
+  s14: Clear began: epoch bumped#59; no session
+  s15: Owner turn installed Pending
+  s16: Close refused, unconfirmed or row moved on
+  s17: Clear discarded the queue#59; no session
+  s18: Clear began: epoch bumped#59; a turn is launching
+  s19: CheckEpoch observed#59; live BeginEffect still required
+  s20: Old execution retired#59; a clear overtook the restart
+  s21: Failure answered#59; seed still to withdraw
+  s22: Exclusion released#59; superseded reply pending
+  s23: Clear discarded the queue#59; a turn is launching
+  s24: BeginEffect holds create authority
+  s25: Clear ended#59; selector forgotten
+  s26: Clear requested#59; wait for the accepted physical effect
+  s27: Create answered#59; first input not submitted
+  s28: Clear gave up on the transition#59; selector forgotten
+  s29: Pending without a launching turn#59; an input waits
+  s30: Clear began: epoch bumped#59; a new session lives
+  s31: New session without a greeting
+  s32: Clear discarded the queue#59; a new session lives
+  s33: New session without a greeting#59; inputs settled
+  s34: Clear ended unconfirmed#59; selector forgotten#59; a new session lives
+  s35: Clear ended unconfirmed#59; selector still kept#59; a new session lives
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
-  s1 --> s3: User clear begins: bump the clear epoch
-  s2 --> s4: User clear begins: bump the clear epoch
-  s2 --> s5: Close only the captured pane
-  s3 --> s6: Clear discards the queue and the launching input
-  s4 --> s7: Clear discards the queue and the launching input
-  s5 --> s8: Retire CAS and settle the old turn
-  s5 --> s4: User clear begins: bump the clear epoch
-  s6 --> s9: Clear's teardown acts on the row
-  s7 --> s2: Clear's teardown acts on the row
-  s8 --> s10: Disconnect keeping selector, release, wake
-  s8 --> s4: User clear begins: bump the clear epoch
-  s9 --> s2: Terminate takes transition and fence
-  s10 --> s12: Owner starts the front: register the launch
-  s10 --> s11: User clear begins: bump the clear epoch
-  s10 --> s13: Reply to the command
-  s2 --> s14: Close refused, unconfirmed or row moved on
-  s4 --> s11: Clear epoch moved: forget selector, drop seed
-  s7 --> s5: Clear's teardown acts on the row
-  s11 --> s15: Clear discards the queue and the launching input
-  s11 --> s16: Owner starts the front: register the launch
-  s12 --> s17: Install Pending over the vacant row
-  s12 --> s16: User clear begins: bump the clear epoch
-  s12 --> s12: Reply to the command
+  s1 --> s3: User requests clear
+  s2 --> s3: User requests clear
+  s2 --> s4: Close only the captured pane
+  s3 --> s5: Acquire the serializer and bump the clear epoch
+  s3 --> s6: Acquire the serializer and bump the clear epoch
+  s3 --> s3: Close only the captured pane or Retire CAS and settle the old turn or Disconnect keeping selector, release, wake or Reply to the command or Owner starts the front: register the launch or Install Pending over the vacant row or Observe the create epoch or Create unknown: keep Pending, fail visibly
+  s4 --> s7: Retire CAS and settle the old turn
+  s4 --> s3: User requests clear
+  s5 --> s8: Clear discards the queue and the launching input
+  s6 --> s10: Clear discards the queue and the launching input
+  s7 --> s9: Disconnect keeping selector, release, wake
+  s7 --> s3: User requests clear
+  s8 --> s11: Clear's teardown acts on the row
+  s9 --> s12: Owner starts the front: register the launch
+  s9 --> s3: User requests clear
+  s9 --> s13: Reply to the command
+  s10 --> s2: Clear's teardown acts on the row
+  s11 --> s2: Terminate takes transition and fence
+  s12 --> s15: Install Pending over the vacant row
+  s12 --> s3: User requests clear
+  s3 --> s14: Acquire the serializer and bump the clear epoch
+  s2 --> s16: Close refused, unconfirmed or row moved on
   s13 --> s12: Owner starts the front: register the launch
-  s13 --> s11: User clear begins: bump the clear epoch
-  s14 --> s19: Answer the failure, release
-  s7 --> s15: Clear epoch moved: forget selector, drop seed
-  s7 --> s18: Clear's teardown acts on the row
-  s5 --> s18: Retire CAS and settle the old turn
-  s15 --> s20: Clear's teardown acts on the row
-  s16 --> s21: Clear discards the queue and the launching input
-  s17 --> s16: User clear begins: bump the clear epoch
-  s17 --> s22: Create the pane once
-  s18 --> s20: Clear epoch moved: forget selector, drop seed
-  s19 --> s23: Withdraw the seed
-  s20 --> s23: Reply to the command
-  s20 --> s24: Reply to the command
-  s16 --> s11: Clear epoch moved: retire the unsent Pending
-  s22 --> s16: User clear begins: bump the clear epoch
-  s22 --> s10: Create unknown: keep Pending, fail visibly
-  s15 --> s23: Clear's teardown acts on the row
-  s16 --> s25: Create unknown: keep Pending, fail visibly
-  s21 --> s15: Clear epoch moved: retire the unsent Pending
-  s10 --> s25: User clear begins: bump the clear epoch
-  s10 --> s26: Reply to the command
-  s22 --> s26: Create unknown: keep Pending, fail visibly
-  s25 --> s27: Clear discards the queue and the launching input
-  s21 --> s27: Create unknown: keep Pending, fail visibly
-  s10 --> s28: Reply to the command
-  s26 --> s28: Probe adopts the Pending pane
-  s26 --> s25: User clear begins: bump the clear epoch
-  s27 --> s20: Clear's teardown acts on the row
-  s10 --> s29: Reply to the command
-  s28 --> s29: Submit an input to the successor once
-  s28 --> s25: User clear begins: bump the clear epoch
-  s20 --> s30: Reply to the command
-  s20 --> s31: Reply to the command
-  s27 --> s30: Clear's teardown acts on the row
-  s27 --> s31: Clear's teardown acts on the row
-  s29 --> s25: User clear begins: bump the clear epoch
-  s27 --> s23: Clear's teardown acts on the row
-  s31 --> s31: Probe adopts the Pending pane
+  s13 --> s3: User requests clear
+  s6 --> s14: Clear epoch moved: forget selector, drop seed
+  s10 --> s4: Clear's teardown acts on the row
+  s14 --> s17: Clear discards the queue and the launching input
+  s14 --> s18: Owner starts the front: register the launch
+  s15 --> s3: User requests clear
+  s15 --> s19: Observe the create epoch
+  s3 --> s18: Acquire the serializer and bump the clear epoch
+  s16 --> s21: Answer the failure, release
+  s10 --> s17: Clear epoch moved: forget selector, drop seed
+  s10 --> s20: Clear's teardown acts on the row
+  s4 --> s20: Retire CAS and settle the old turn
+  s17 --> s22: Clear's teardown acts on the row
+  s18 --> s23: Clear discards the queue and the launching input
+  s19 --> s3: User requests clear
+  s19 --> s24: Compare live epoch and retain create permission
+  s20 --> s22: Clear epoch moved: forget selector, drop seed
+  s21 --> s25: Withdraw the seed
+  s18 --> s19: Observe the create epoch
+  s22 --> s25: Reply to the command
+  s22 --> s28: Reply to the command
+  s18 --> s14: Clear epoch moved: retire the unsent Pending
+  s3 --> s19: Acquire the serializer and bump the clear epoch
+  s3 --> s26: Compare live epoch and retain create permission
+  s24 --> s26: User requests clear
+  s24 --> s27: Create once under live effect permission
+  s17 --> s25: Clear's teardown acts on the row
+  s23 --> s19: Observe the create epoch
+  s23 --> s17: Clear epoch moved: retire the unsent Pending
+  s19 --> s14: Clear epoch moved: retire the unsent Pending
+  s26 --> s3: Create once under live effect permission
+  s27 --> s3: User requests clear
+  s27 --> s9: Create unknown: keep Pending, fail visibly
+  s24 --> s18: Create once under live effect permission
+  s19 --> s17: Clear epoch moved: retire the unsent Pending
+  s9 --> s29: Reply to the command
+  s27 --> s29: Create unknown: keep Pending, fail visibly
+  s24 --> s23: Create once under live effect permission
+  s18 --> s30: Create unknown: keep Pending, fail visibly
+  s9 --> s31: Reply to the command
+  s3 --> s30: Acquire the serializer and bump the clear epoch
+  s29 --> s31: Probe adopts the Pending pane
+  s29 --> s3: User requests clear
+  s30 --> s32: Clear discards the queue and the launching input
+  s23 --> s32: Create unknown: keep Pending, fail visibly
+  s9 --> s33: Reply to the command
+  s31 --> s33: Submit an input to the successor once
+  s31 --> s3: User requests clear
+  s32 --> s22: Clear's teardown acts on the row
+  s33 --> s3: User requests clear
+  s22 --> s34: Reply to the command
+  s22 --> s35: Reply to the command
+  s32 --> s34: Clear's teardown acts on the row
+  s32 --> s35: Clear's teardown acts on the row
+  s32 --> s25: Clear's teardown acts on the row
+  s35 --> s35: Probe adopts the Pending pane
   class s0 blue
   class s0 bugPath
   class s1 blue
   class s1 bugPath
   class s2 bugPath
-  class s3 blue
-  class s4 blue
-  class s5 bugPath
+  class s3 bugPath
+  class s5 blue
   class s6 blue
   class s7 blue
   class s8 blue
-  class s8 bugPath
-  class s9 teal
-  class s10 bugPath
-  class s12 bugPath
+  class s10 blue
+  class s11 teal
   class s13 purple
-  class s14 teal
-  class s16 bugPath
-  class s17 bugPath
-  class s18 teal
-  class s19 teal
+  class s16 teal
   class s20 teal
-  class s22 bugPath
-  class s23 teal
-  class s24 teal
-  class s25 bugPath
-  class s26 teal
-  class s27 bugPath
+  class s21 teal
+  class s22 teal
+  class s25 teal
+  class s26 bugPath
   class s28 teal
   class s29 teal
-  class s30 teal
+  class s30 bugPath
   class s31 teal
-  class s31 bugPath
-  class s31 repeats
+  class s32 bugPath
+  class s33 teal
+  class s34 teal
+  class s35 teal
+  class s35 bugPath
+  class s35 repeats

@@ -1,194 +1,167 @@
-# Herdr `/restart` r3 상태 모델: seed 적재 → 정확 종료 → owner 턴이 launch, clear가 이긴다
+# Herdr restart B1/B2 구현 전 포트 모델
 
-기준 코드: `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba` (main). 생산 코드 변경은 없다.
-설계는 [`../../herdr-parity-restart.design.md`](../../herdr-parity-restart.design.md) 3절(r3)이다.
-r1 모델 [`HerdrRestart`](herdr-restart.report.md)는 restart가 직접 launch하는 방향을 검사하며 그대로 두었다.
-A 레인이 그 파일들에 Codex resume 경계를 반영하는 중이라 제자리에서 고치지 않고, 채택안은 모듈 `HerdrRestartOwner`로 검사한다.
-r3에서 이 모듈을 사용자 결정 4건과 설계 리뷰 d2의 P2 5건에 맞춰 갱신했다(r2는 42 cfg였다).
+조사 기준 `588241083ccf4c2cda6d147e89e1d9fd10725387`(A+r3 병합). 정본은 [설계3.1~3.9](../../herdr-parity-restart.design.md)와 [B 분할 계획](../../herdr-parity-restart-b-split.plan.md)이다.
 
-아래에서 `src/` 없이 쓴 짧은 파일 이름(`owner_input.rs`, `restart.rs`, `control.rs`, `herdr_terminate.rs`, `headless_turn.rs` 등)은 설계 3절 머리의 대응표를 따른다.
+**PLAN_READY용 모델이며 B 생산 코드·Rust/cargo·PG/herdr 실실행·production PASS는 각각0이다.** After는 아래 새 포트를 실제 코드가 제공한다는 가정 아래의 GREEN이다. 현행 `/restart`의 거절은 Before에서 그대로 RED다. A offset 계약을 바꾸지 않았으며 r1 direct-launch 모델의 s 영역을 B 수용 근거로 재사용하지 않는다.
 
-**검증 종류:** TLC가 설계 포트를 가정했을 때의 불변식·진행성 검사다. Rust/DB/실제 herdr 시험, 실제 경합 재현, 운영 수용 PASS를 뜻하지 않는다.
+## 수정 전/후와 원인 대조
 
-## 진입점에서 가져온 값 범위
-
-| 모델 값 | 코드의 값·행동과 좌표 | 축약·제외 |
-|---|---|---|
-| `Policy={before,after}` | 현재 거절 `src/services/discord/commands/restart.rs:219`; after는 설계 3.1 | before는 아무것도 바꾸지 않고 거절 |
-| `StartKind` 일곱 값 | `src/db/dispatched_sessions/hosted_execution.rs:27`, `:171`, `:228`; 종료 서비스의 거절 조건 `src/services/discord/herdr_terminate.rs:450`~`:463`, `:512` | Conflict·다른 owner/node는 Unknown의 거절에 합쳤다. Legacy의 살아 있는 tmux(이주 분기)는 모델 밖 |
-| `Dispatch`, `rowDispatch`, `retries`, `inherit` | 묶인 종료 `src/services/discord/herdr_terminate/http_force.rs:23`, `:90`; disconnect 조건 `src/db/dispatched_sessions/hosted_execution/http_force.rs:44`, `:55`; tmux의 취소 턴은 dispatch를 쓰지 않음 `src/services/discord/turn_bridge/post_loop_finalize.rs:437`, `:439` | fence 전 dispatch 교체와 row·턴 dispatch 불일치는 모델 밖(설계 3.3 표) |
-| `SeedMode={ok,none}` | 적재 거절 사유: 큐 여유 `src/services/turn_orchestrator/queued_head/v2/effort_continue.rs:200`, V2 미채택·commit 미확인 `v2/source_admission.rs:918`~`:981` | none은 "넣지 못함" 한 갈래. commit 미확인의 재확인은 모델 밖 |
-| `HeadBusy`, `q`의 `inflight` | 전송 중 단위가 큐 맨 앞에 있어야 결산됨 `src/services/turn_orchestrator/queued_head/v2/retained.rs:405`, `v2.rs:259` | 단위는 입력 하나. 수락 전에 옛 실행으로 시작된 전달이다 |
-| `seed` 아홉 값 | 적재 `v2/source_admission.rs:918`; front 시작 `owner_input.rs:835`, `:912`; 결산 `v2/source_admission.rs:609` | `dropped`는 시작 실패의 retained + 알림, `uncertain`은 제출 뒤·receipt 전 crash, `stripped`는 변형 전용 |
-| `lphase={begun,pending,created,sent,settled}` | launch `src/services/herdr_launch.rs:378`, Pending CAS `:482`; 물리 제출 `src/services/discord/queue_io/input_owner/effect.rs:96`, receipt `:130`; source bind는 그 뒤 | Codex의 attach·시작점 기록은 A 범위라 bind 한 단계로 묶었다 |
-| `epoch`, `lEpoch`, `clearing` | 설계 3.4의 clear epoch(새 포트). clear 시작 `src/services/discord/commands/control.rs:518`, 기존 취소 확인 `src/services/claude/herdr_turn.rs:252`, `src/services/codex/herdr_turn.rs:358` | clear는 한 번. epoch은 프로세스 메모리라 crash에서 사라진다 |
-| `ClearOn={off,serial,overtake,launch,any}` | `control.rs:524`, `:540`, `:552`, `:599`; `control/herdr_recovery.rs:58`, `:115`, `:158`; `control/clear_teardown.rs:161`, `:183`, `:202` | clear의 종료 단계는 "row 읽기 + 처리" 한 단계. clear와 겹친 crash는 제외 |
-| `CrashOn`, `Rollback`, `binary` | 부팅 순서 `src/services/discord/runtime_bootstrap/queued_recovery.rs:48`, census `src/services/turn_orchestrator/queued_head/compat.rs:33`; 옛 판정 `headless_turn.rs:159` | crash는 수락 뒤 아무 단계에서나 한 번 |
-| `oldInputs`, `RestartOpen` | 설계 3.9-2. 옛 실행으로 가는 모든 전달을 관측한다 | 수락 전에 시작한 전달과 실패 확정 뒤의 전달은 허용 |
-
-## 수정 전/후 비교
-
-| 항목 | Before: main | After: r3 설계 |
-|---|---|---|
-| healthy herdr `/restart` | 취소 전에 거절 (`Before`: `RestartAvailable` RED) | seed 적재 → exact close → owner 턴이 launch, seed가 첫 입력 (GREEN) |
-| dispatch 실행 중 | 거절 | 재시작. dispatch 상태를 쓰지 않고 재시도 0, successor가 물려받지 않음 |
-| launch 중 `!clear` | 보류만 보고하고 launch가 계속된다 (`MainClear`: `NoStaleCreate`·`NoSeedAfterClear`·`NoSessionAfterClear`·`ClearForgets` RED) | clear가 이긴다 (`ClearDuringLaunch`, `ClearAny` GREEN) |
-| seed를 넣을 수 없음 | 해당 없음 | seed 없이 재시작, 대기 입력이 successor를 띄움 (`Seedless` GREEN) |
-| 전송 중 단위 | 해당 없음 | seed는 그 뒤. 단위의 결산이 막히지 않음 (`HeadBusy` GREEN) |
-| crash | 해당 없음 | seed가 적재된 요청은 Ready 또는 보이는 실패. 제출 뒤·receipt 전 crash의 seed는 재전송 0 |
-| 진행성 | `RestartAvailable` RED | 여섯 진행성 모두 GREEN (남는 계약 cfg 제외) |
-
-## 검사할 규칙
-
-불변식 17개:
-- `InputCustody`, `InputAtMostOnce`: 접수 원본은 큐·전달·receipt 있는 폐기·알림 있는 보류 중 하나이고 effect는 최대 1회다.
-- `NoOldPaneInput`: 재시작이 열려 있는 동안(수락부터 종료 또는 실패 확정까지) 옛 실행으로 시작하는 전달 0. 정상 전달 경로도 센다.
-- `NoFalseReady`: 인사말은 끝내려던 실행으로 가지 않는다(gate가 사라진 부팅 뒤에도).
-- `SeedAtMostOnce`, `NoBlindCreate`: seed와 create는 불명 뒤에도 반복하지 않는다.
-- `SingleSession`: 옛 pane과 새 pane의 합은 언제나 1 이하다.
-- `InflightSettledBeforeReady`, `ReadyEvidence`: Ready 전에 옛 턴이 결산됐고, Ready는 seed의 receipt로만 말한다.
-- `NoInheritedDispatch`, `NoDispatchRepost`: successor가 옛 dispatch를 물려받지 않고, restart가 재시도 dispatch를 만들지 않는다.
-- `NoSeedAfterClear`: clear가 시작된 뒤 seed 제출 0.
-- `NoStaleCreate`: clear보다 먼저 시작한 launch는 clear 뒤에 create하지 않는다.
-- `NoSessionAfterClear`: clear가 끝났을 때 그런 launch가 만든 세션이 남아 있지 않다.
-- `NoResumeAfterClear`: clear 뒤에 시작한 launch는 그 clear가 끝낸 대화를 resume하지 않는다.
-- `NoSeedRevival`, `NoFalseSuperseded`: clear가 버린 seed를 다시 적재하지 않고, clear가 없었는데 superseded를 말하지 않는다.
-
-진행성 6개:
-- `RequestResolves`: seed가 적재된 요청은 결국 Ready, 보이는 실패, clear의 폐기 중 하나로 끝난다.
-- `CommandAnswers`: 명령은 결국 답하거나 보이는 실패를 낸다(crash 제외).
-- `RestartAvailable`: healthy면 새 Ready여야 한다.
-- `AcceptedInputResolves`: 접수 원본마다 결국 전달·receipt 있는 폐기·알림 있는 보류로 끝난다.
-- `ClearForgets`: 큐를 폐기한 clear 뒤 selector는 결국 지워진다.
-- `ClearCompletes`: 시작한 clear는 결국 끝난다(launch 대기가 멈추지 않는다).
-
-## 결과
-
-저장소 checker `scripts/ci/statecharts_tlc.py`로 63 cfg를 돌렸다: **GREEN 28, 기대 RED 35, 예상 위반 집합 전부 일치**.
-cfg마다 깨진 규칙을 빼고 다시 돌려 전체 위반 집합을 얻는 방식이며 미검사 규칙은 없다.
-
-| cfg | 조건 | 실제 깨진 규칙 | 판정 |
+| 경계/조각 | r3의 생략/Before | After 포트 | 원인 mutant |
 |---|---|---|---|
-| [After](HerdrRestartOwnerAfter.cfg) | Bound, busy | — | GREEN |
-| [Concurrent](HerdrRestartOwnerConcurrent.cfg) | N=2 도착 경합 | — | GREEN |
-| [StartPendingPlaced](HerdrRestartOwnerStartPendingPlaced.cfg) | location 있는 Pending | — | GREEN |
-| [StartRetired](HerdrRestartOwnerStartRetired.cfg) | 종료 없이 seed + wake | — | GREEN |
-| [StartMissing](HerdrRestartOwnerStartMissing.cfg) | 종료 없이 seed + wake | — | GREEN |
-| [StartLegacy](HerdrRestartOwnerStartLegacy.cfg) | 종료 없이 seed + wake | — | GREEN |
-| [StartPendingUnplaced](HerdrRestartOwnerStartPendingUnplaced.cfg) | 보이는 거절 | — | GREEN |
-| [StartUnknown](HerdrRestartOwnerStartUnknown.cfg) | 보이는 거절 | — | GREEN |
-| [DispatchRestart](HerdrRestartOwnerDispatchRestart.cfg) | dispatch 실행 중 재시작, N=2 | — | GREEN |
-| [DispatchCrash](HerdrRestartOwnerDispatchCrash.cfg) | dispatch 실행 중 + 아무 단계 crash | — | GREEN |
-| [CloseIndeterminate](HerdrRestartOwnerCloseIndeterminate.cfg) | close 불명 | — | GREEN |
-| [CloseRefused](HerdrRestartOwnerCloseRefused.cfg) | close 거절 | — | GREEN |
-| [WithdrawFallback](HerdrRestartOwnerWithdrawFallback.cfg) | 철회가 빠져도 permit이 종결 | — | GREEN |
-| [LaunchNotSent](HerdrRestartOwnerLaunchNotSent.cfg) | create 미전송 | — | GREEN |
-| [LaunchUnknown](HerdrRestartOwnerLaunchUnknown.cfg) | create 응답 불명 | — | GREEN |
-| [ClearSerial](HerdrRestartOwnerClearSerial.cfg) | transition을 쥔 clear, N=2 | — | GREEN |
-| [ClearOvertake](HerdrRestartOwnerClearOvertake.cfg) | restart exclusion 중 지나간 clear, N=2 | — | GREEN |
-| [ClearDuringLaunch](HerdrRestartOwnerClearDuringLaunch.cfg) | owner가 launch하는 중의 clear, N=2 | — | GREEN |
-| [ClearAny](HerdrRestartOwnerClearAny.cfg) | 임의 시점의 clear, N=2 | — | GREEN |
-| [Seedless](HerdrRestartOwnerSeedless.cfg) | seed를 넣지 못한 재시작, N=2 | — | GREEN |
-| [SeedlessClear](HerdrRestartOwnerSeedlessClear.cfg) | seed 없음 + 임의 시점 clear | — | GREEN |
-| [SeedlessCrash](HerdrRestartOwnerSeedlessCrash.cfg) | seed 없음 + crash | — | GREEN |
-| [HeadBusy](HerdrRestartOwnerHeadBusy.cfg) | 전송 중 단위가 큐 맨 앞, N=2 | — | GREEN |
-| [HeadBusyCrash](HerdrRestartOwnerHeadBusyCrash.cfg) | 전송 중 단위 + crash | — | GREEN |
-| [Crash](HerdrRestartOwnerCrash.cfg) | 아무 단계 crash(제출 세 단계 사이 포함), N=2 | — | GREEN |
-| [CrashRollback](HerdrRestartOwnerCrashRollback.cfg) | crash 뒤 옛 바이너리 | — | GREEN |
-| [CrashCloseRefused](HerdrRestartOwnerCrashCloseRefused.cfg) | 실패 응답 전후 crash | — | GREEN |
-| [CrashLaunchUnknown](HerdrRestartOwnerCrashLaunchUnknown.cfg) | create 불명 전후 crash | — | GREEN |
-| [Before](HerdrRestartOwnerBefore.cfg) | main의 거절 | `RestartAvailable` | 기대 RED |
-| [MainClear](HerdrRestartOwnerMainClear.cfg) | **main의 clear**: launch 중 턴에 보류만 보고 | `ClearForgets`, `NoSeedAfterClear`, `NoSessionAfterClear`, `NoStaleCreate` | 기대 RED |
-| [DropQueue](HerdrRestartOwnerDropQueue.cfg) | retire가 큐를 purge | `AcceptedInputResolves`, `InputCustody` | 기대 RED |
-| [OldInput](HerdrRestartOwnerOldInput.cfg) | fence 중 옛 pane 입력 | `NoOldPaneInput` | 기대 RED |
-| [SeedBehind](HerdrRestartOwnerSeedBehind.cfg) | seed를 대기 입력 뒤에 둠(tmux 순서) | `NoOldPaneInput` | 기대 RED |
-| [PrependOverHead](HerdrRestartOwnerPrependOverHead.cfg) | 전송 중 단위 앞에 seed 삽입 | `AcceptedInputResolves`, `RequestResolves`, `RestartAvailable` | 기대 RED |
-| [NoGate](HerdrRestartOwnerNoGate.cfg) | gate 없이 적재 | `NoOldPaneInput`, `RestartAvailable` | 기대 RED |
-| [NoPermit](HerdrRestartOwnerNoPermit.cfg) | permit 없이 부팅 | `NoFalseReady`, `RequestResolves` | 기대 RED |
-| [SkipClose](HerdrRestartOwnerSkipClose.cfg) | 종료 관측 없이 retire | `SingleSession` | 기대 RED |
-| [NoSettle](HerdrRestartOwnerNoSettle.cfg) | 옛 턴 결산 생략 | `InflightSettledBeforeReady` | 기대 RED |
-| [ReplayInput](HerdrRestartOwnerReplayInput.cfg) | 입력 receipt 망각 | `InputAtMostOnce` | 기대 RED |
-| [RequeueUncertain](HerdrRestartOwnerRequeueUncertain.cfg) | 제출 뒤·receipt 전 crash의 seed를 다시 queued로 | `SeedAtMostOnce` | 기대 RED |
-| [ReadyOnAdmit](HerdrRestartOwnerReadyOnAdmit.cfg) | admission에서 Ready | `ReadyEvidence` | 기대 RED |
-| [ReplayUnknown](HerdrRestartOwnerReplayUnknown.cfg) | 불명 create 재전송 | `AcceptedInputResolves`, `NoBlindCreate`, `SingleSession` | 기대 RED |
-| [NoWake](HerdrRestartOwnerNoWake.cfg) | 해제 뒤 wake 없음 | `AcceptedInputResolves`, `RequestResolves`, `RestartAvailable` | 기대 RED |
-| [NoNotice](HerdrRestartOwnerNoNotice.cfg) | 시작 실패 알림 없음 | `RequestResolves` | 기대 RED |
-| [NoNoticeRefusal](HerdrRestartOwnerNoNoticeRefusal.cfg) | 거절 응답 없음 | `CommandAnswers`, `RestartAvailable` | 기대 RED |
-| [UnboundDispatch](HerdrRestartOwnerUnboundDispatch.cfg) | dispatch에 묶지 않은 종료(seed 없음) | `NoInheritedDispatch` | 기대 RED |
-| [RetryDispatch](HerdrRestartOwnerRetryDispatch.cfg) | postlude가 재시도 dispatch 생성 | `NoDispatchRepost` | 기대 RED |
-| [NoPermitDetach](HerdrRestartOwnerNoPermitDetach.cfg) | permit이 남은 disconnect를 안 함 + crash | `NoInheritedDispatch` | 기대 RED |
-| [NoSupersedeCheck](HerdrRestartOwnerNoSupersedeCheck.cfg) | postlude의 epoch 대조 없음 | `ClearForgets`, `NoResumeAfterClear`, `NoSeedAfterClear` | 기대 RED |
-| [SeedAbsentIsClear](HerdrRestartOwnerSeedAbsentIsClear.cfg) | 응답이 seed 부재를 clear로 판단 | `NoFalseSuperseded` | 기대 RED |
-| [ClearSkipsRetired](HerdrRestartOwnerClearSkipsRetired.cfg) | clear가 Retired row의 selector를 안 지움 | `ClearForgets`, `NoResumeAfterClear` | 기대 RED |
-| [ReloadSeed](HerdrRestartOwnerReloadSeed.cfg) | clear 뒤 seed 재적재 | `ClearForgets`, `NoResumeAfterClear`, `NoSeedAfterClear`, `NoSeedRevival` | 기대 RED |
-| [R1Launch](HerdrRestartOwnerR1Launch.cfg) | r1: exclusion 안에서 launch | `ClearForgets`, `NoSeedAfterClear`, `NoSessionAfterClear` | 기대 RED |
-| [NoLaunchCheck](HerdrRestartOwnerNoLaunchCheck.cfg) | launch가 create 전 epoch을 안 봄 | `NoStaleCreate` | 기대 RED |
-| [NoSubmitCheck](HerdrRestartOwnerNoSubmitCheck.cfg) | 제출 전 epoch을 안 봄 | `NoSeedAfterClear` | 기대 RED |
-| [ClearNoWait](HerdrRestartOwnerClearNoWait.cfg) | clear가 launch 종료를 안 기다림 | `ClearForgets`, `NoResumeAfterClear` | 기대 RED |
-| [ClearKeepsClaim](HerdrRestartOwnerClearKeepsClaim.cfg) | clear가 launch 중 입력을 결산하지 않음 | `NoSeedAfterClear` | 기대 RED |
-| [LeakLaunching](HerdrRestartOwnerLeakLaunching.cfg) | 끝난 launch가 등록을 안 풂 | `ClearCompletes`, `ClearForgets` | 기대 RED |
-| [IntentField](HerdrRestartOwnerIntentField.cfg) | 별도 V2 필드 + 롤백 | `RequestResolves` | 기대 RED |
-| [WithdrawFirst](HerdrRestartOwnerWithdrawFirst.cfg) | 응답 전에 철회 + crash | `RequestResolves` | 기대 RED |
-| [GapClearCloseFailure](HerdrRestartOwnerGapClearCloseFailure.cfg) | **남는 계약**: 종료 실패 + clear timeout | `ClearForgets` | 기대 RED |
-| [GapClearCreateUnknown](HerdrRestartOwnerGapClearCreateUnknown.cfg) | **남는 계약**: create 응답 불명 + clear | `ClearForgets` | 기대 RED |
-| [GapSeedlessDispatchCrash](HerdrRestartOwnerGapSeedlessDispatchCrash.cfg) | **남는 것**: seed 없음 + dispatch + crash (tmux와 같은 상태) | `NoInheritedDispatch` | 기대 RED |
+| P2-1 / B2 | 주체 없는 fair RowEndRecovery가 idle Bound/placed Pending도 저절로 정리 | 기존 inflight 복구가 있거나 durable seed owner/permit이 exact ended row를 CAS하고 wake | NoPermit·NoPermitDetach의 RecoveryPolicy=missing: EndedSeedRecovers 및 입력/seed 진행성 RED |
+| P2-2 / B2 | 재호출·다른 operation·완료 ticket 조회 없음 | same/conflict는 existing-first ticket 반환/공유, terminal ticket 재종료0 | known-ticket→seedless는 NoOperationSeedless RED; 재적재는 NoOperationDuplicateSeed RED |
+| P2-4 / B1 | epoch 확인과 physical effect가 한 step | CheckEpoch 관찰 → live BeginEffect 비교/허가 → 허가를 보유한 physical create/first-input | check-only create·조기반납 submit에서 EffectHasLivePermission 및 stale create/seed RED |
+| 복원 successor | SeedJoin이 원자적 제출 | exact successor의 seed도 claim→CheckSubmitEpoch→BeginSubmitEffect→effect→receipt→binding | 관련 crash cfg 재검사 |
+| 전송 중 단위 | head 하나 | HeadBusy N=2는 head+1 follower의 이미 진행 중인 단위. 모두 결산되기 전 seed는 앞지르지 않음 | 기존 PrependOverHead RED 유지 |
 
-규칙마다 그것을 깨는 cfg: `InputCustody`(DropQueue), `InputAtMostOnce`(ReplayInput), `NoOldPaneInput`(OldInput, SeedBehind, NoGate), `NoFalseReady`(NoPermit),
-`SeedAtMostOnce`(RequeueUncertain), `NoBlindCreate`(ReplayUnknown), `SingleSession`(SkipClose), `InflightSettledBeforeReady`(NoSettle), `ReadyEvidence`(ReadyOnAdmit),
-`NoInheritedDispatch`(UnboundDispatch, NoPermitDetach), `NoDispatchRepost`(RetryDispatch), `NoSeedAfterClear`(NoSubmitCheck, ClearKeepsClaim),
-`NoStaleCreate`(NoLaunchCheck), `NoSessionAfterClear`(R1Launch, MainClear), `NoResumeAfterClear`(NoSupersedeCheck, ClearNoWait, ClearSkipsRetired),
-`NoSeedRevival`(ReloadSeed), `NoFalseSuperseded`(SeedAbsentIsClear), `RequestResolves`(NoWake, NoNotice, IntentField, WithdrawFirst, PrependOverHead),
-`CommandAnswers`(NoNoticeRefusal), `RestartAvailable`(Before, NoGate), `AcceptedInputResolves`(DropQueue, NoWake, PrependOverHead),
-`ClearForgets`(NoSupersedeCheck 외), `ClearCompletes`(LeakLaunching).
+기존63cfg를 유지했다. 신규 cfg/expected 행0, 기존 위반 집합63개 삭제0, 예외 추가0이다. capacity/V2/effort admission 실패의 seedless 재시작은 사용자 결정대로 허용하고, **known replay/conflict를 capacity 실패로 바꾸는 것만 금지**한다.
 
-`ClearSerial`·`ClearAny`·`SeedlessClear`는 상태가 500개를 넘어 차트 파일이 없다(개별 보고서와 TLC 판정은 있다).
+## 실제 코드가 제공해야 할 precondition
 
-## 모델이 r3 설계를 바꾼 곳
+1. **idle repair 소유:** close 뒤·retire 전 crash에서 gate/명령 future가 사라져도 durable seed owner가 처리한다. `src/services/discord/herdr_terminate.rs:217` execution_end와 :224 retire_confirmed를 exact old nonce/owner/dispatch 재검사 아래 사용하고 seed-only disconnect→wake까지 맡는다. 새 idle 분기는 B2 포트이며 main의 background job이 이미 보장한다는 주장이 아니다.
+2. **existing-first:** canonical 종료 대상 선정/gate/close 전에 operation·ticket을 조회한다. same/conflict 및 완료/retained/clear-disposed ticket은 기존 결과를 반환/공유하고 새 seed나 seedless 종료를 만들지 않는다. 모델의 ReplayRequest는 이 early-return 포트이며 실제 durable bind/receipt 조회·정확한 existing outcome 분류가 필요하다.
+3. **live effect permission:** clear epoch 갱신과 BeginEffect가 같은 serializer를 사용한다. CheckEpoch bool만 넘기지 말고 권한을 blocking thread의 backend 호출 선형화까지 보유한다. scope는 create/seed first-input이며, 수락 전에 이미 시작된 native 입력의 receipt는 별개다. clear 요청은 기록되고 수락된 bounded I/O가 권한을 돌려준 뒤 epoch을 올린다. 사용자 도착과 clear epoch 선형화는 구별한다.
+4. **exact successor:** SeedJoin은 해당 ticket/attempt가 소유한 정확한 successor nonce에만 허용한다. 임의 새 Bound를 자기 successor로 보지 않는다. 복원된 Bound에서도 같은 submit permission을 소비한다.
+5. **dispatch:** disconnect는 restart postlude 또는 같은 seed permit만 한다. 일반 입력은 old dispatch를 지우지 않는다. GapSeedlessDispatchCrash 기대 RED는 유지한다. 실제 dispatch status/history 불변은 PG snapshot 시험이 필요하고 bool proxy만으로 증명하지 않는다.
+6. **실제 진입:** headless_turn.rs:147~165는 claim/reset 전이다. 새 seed token 설치 뒤 전체 terminate를 재호출해 seed 자신을 captured-turn settlement 대상으로 삼지 않는다. 물리 leaf는 queue_io/input_owner/effect.rs:96, receipt는 :130; Pending/create는 herdr_launch.rs:498/:531이다.
+7. **sticky startup/followers:** clear가 관측한 startup은 먼저 끝나도 sticky해야 한다. 순간 Launching=0만 보고 Retired 특수 보류로 돌아가지 않는다. 실제 PreparedPayload.followers(queued_head/v2_types.rs:147)의 snapshot/claim/clear receipt/upload/bind index는 B1 Rust 시험이 검증한다. 모델은 이미 진행 중인 head+follower의 일반화이며 임의 merge payload 직렬화까지 증명하지 않는다.
 
-- **superseded restart가 자기 seed를 철회한다.** clear가 epoch만 올리고 아직 큐를 폐기하기 전에 restart가 exclusion을 놓으면, seed가 새 epoch으로 시작해 clear 뒤에 제출된다
-  (첫 실행의 `ClearOvertake`·`ClearAny`에서 `NoSeedAfterClear` RED). postlude가 epoch 이동을 보면 selector 삭제와 함께 남은 seed를 철회하도록 설계 3.1 7단계에 넣었다.
-- **permit이 "끝났지만 아직 Retired가 아닌" 실행에서는 기다린다.** close 뒤·retire 전 crash에서 seed를 거절해 버리면 그 뒤 대기 입력이 dispatch가 남은 row 위에 launch한다
-  (`DispatchCrash`에서 `NoInheritedDispatch` RED). 거절은 실행이 아직 도는 경우로 좁히고, 끝난 경우는 기존 복구를 기다린 뒤 seed가 남은 disconnect를 끝내고 launch한다(3.1 8단계).
-- **launch 시작의 "clear 진행 중" 확인은 넣지 않았다.** 넣은 모델과 뺀 모델의 결과가 같았다. restart가 transition을 쥔 동안 지나간 clear는 postlude의 epoch 대조가 닫는다.
-  restart가 아닌 holder 아래의 같은 경합은 기존 계약으로 남긴다(설계 3.4의 남는 것 3).
-- **clear의 Retired selector 삭제는 launch 중 clear에서 필요하다.** r2에서는 overtake 경합용이었지만 그 경우는 이제 epoch이 닫는다.
-  launch가 스스로 멈춰 unsent Pending을 retire한 뒤의 row가 Retired이고, 그때 selector를 지울 주체가 clear뿐이다(`ClearSkipsRetired`).
+## 값 범위·가정
 
-## 반례와 실제 코드 대조
+기존 r3 row7종/seed9상태/launch5단계/clear epoch/dispatch/receipt는 canonical 진입점 표 그대로다. RecoveryPolicy=owned/missing은 seed owner의 idle repair 소유, ReplayMode=off/same/conflict는 알려진 ticket 조회, OpPolicy=strict/seedless/duplicate는 classifier guard와 cause mutant다. EffectPolicy=serialized/check_only_create/early_release_submit은 live epoch 허가와 그 제거 변형이다. checked/permission/effectKind/clearRequested는 새 B1 메모리 포트의 표시값이다.
 
-- [Before](herdr-restart-owner-Before.report.md): `restart.rs:219`의 거절이 취소보다 먼저다. 정적 추적으로 확인한 현재 동작이다.
-- [MainClear](herdr-restart-owner-MainClear.report.md): Retired row + 진행 중 턴에서 clear는 보류를 보고하고(`control/herdr_recovery.rs:158`) launch는 취소 확인 없이 create한다
-  (`src/services/herdr_launch.rs`에 취소 확인이 없다). 일반 메시지의 launch에서도 같은 현재 동작이다.
-- [SeedAbsentIsClear](herdr-restart-owner-SeedAbsentIsClear.report.md): wake 뒤 seed는 제출되어 큐에서 빠진다(`v2/source_admission.rs:609`). 부재를 clear로 읽으면 정상 재시작에 superseded를 말하고 selector를 지운다.
-- [PrependOverHead](herdr-restart-owner-PrependOverHead.report.md): 전송 중 단위 앞에 seed를 넣으면 그 단위의 결산이 `queue first item differs from selected head`로 실패한다(`v2/retained.rs:405`).
-- [RequeueUncertain](herdr-restart-owner-RequeueUncertain.report.md): 물리 제출(`queue_io/input_owner/effect.rs:96`)과 receipt(`:130`) 사이 crash의 seed를 다시 queued로 되돌리면 인사말이 두 번 나간다.
-- [R1Launch](herdr-restart-owner-R1Launch.report.md): exclusion 안에서 띄운 successor를 지나간 clear가 끝낼 수 없다(리뷰 d1의 P2-1).
-- [IntentField](herdr-restart-owner-IntentField.report.md): `SnapshotV2`에는 `deny_unknown_fields`가 없어(`v2_types.rs:19`) 옛 바이너리가 새 필드를 읽지 않고 다시 쓸 때 지운다.
+한 clear·한 crash·한 알려진 operation 재호출, N=1/2를 검사한다. 실제 I/O가 결과/timeout으로 돌아오고 scheduler가 owner/notice/clear를 계속 실행한다는 fairness를 쓴다. 영구 network 단절·반환하지 않는 backend·ticket eviction/unknown commit·데이터 손상·native source 검증은 이 모델의 증명이 아니다. clear와 겹친 crash는 기존 계약대로 제외한다.
 
-변형은 생산 코드를 바꾸거나 실행한 결과가 아니다. 구현 레그에서 같은 진입점과 fault 주입으로 RED→GREEN→원인 뮤턴트 RED를 확인해야 한다.
+## 새 규칙과 실제 결과
 
-## 포트 가정과 한계
+기존17 invariant/6 liveness에 NoOperationSeedless, NoOperationDuplicateSeed, EffectHasLivePermission, EndedSeedRecovers, ClearRequestCompletes를 추가해 **20 invariant/8 liveness**다(NoDeadlock 자동 검사 별도).
 
-1. seed의 단위 뒤 적재·gate·permit·철회, 묶인 종료, clear epoch과 launch의 두 확인, clear의 launch 대기와 Retired selector 삭제는 아직 없는 구현이다. 모델은 그것들이 설계대로 있다고 가정한다.
-2. seed가 owner front에서 headless 진입을 거쳐 launch에 닿는다는 것은 모델이 증명하지 않는다. herdr에서 그 진입은 지금 거절된다(`headless_turn.rs:159`).
-3. clear가 launch 중 턴의 미제출 입력을 terminal로 결산한다는 것은 가정이다(`ClearKeepsClaim`이 그 가정을 뺀 변형). 기존 clear가 이미 그렇게 하는지는 B-clear 첫 시험이 확인한다.
-4. 제출 직전의 epoch 확인과 제출을 한 단계로 묶었다. 실제로는 확인과 제출 사이에 clear가 시작할 수 있고, 그때는 "clear 전에 제출됨"으로 세며 clear가 그 세션을 끝낸다.
-5. tmux에서 restart 뒤 dispatch가 최종적으로 어떻게 끝나는지는 모델하지 않았다. 모델은 restart가 dispatch 상태를 쓰지 않는다는 것만 본다.
-6. clear와 겹친 crash, 두 번 이상의 crash·restart·clear, 다중 endpoint, restart가 아닌 holder 아래의 overtake는 제외했다.
-7. 각 I/O가 결국 답하고 기존 복구(끝난 pane의 row 정리와 그 뒤의 owner wake, unplaced resolver, Pending 재확인)가 결국 돈다는 약한 공정성을 가정한다.
-8. Codex resume 시작점과 출력 중복은 A의 범위다. 이 모델은 selector가 남았는지만 본다.
+**63 cfg /607 TLC 하위 실행, GREEN28·기대RED35, 미검사0, 기대집합 전부 일치(exit0)**. 최종 checker 총289.2초, cfg 최대14.0초로 300초/cfg 예산 이내다. 기존63개 위반 집합을 전부 보존한 것을 별도로 assert했다. 새 guard의 비활성 값이 만드는 추가 진행성은 초기 실행에서 확인했고 최종 기대집합을 강화했다.
 
-## 다시 실행
+모델 SHA256 `0f92c4defbb01df50696fb87b67e5119320f9663e556a13393c4699762f248f4`. 정식 로그는 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8128/logs/impl-b/model/checker-b-ports-final.log`, wrapper는 render-b-ports-final/, DOT는 coverage-final/coverage.json, 최종 입력은 inputs-final/이다. scratch·저장소·archive의 TLA/cfg/view는 바이트 동일하다. 초기 로그나 partial packaging을 최종 증거로 쓰지 않았다.
+
+최종 wrapper63개도 모두 검사했다. GREEN ClearAny, ClearDuringLaunch, ClearOvertake, ClearSerial, SeedlessClear는 500-state 그림 예산 때문에 Mermaid를 만들지 않았다. 해당 stale r3 그림5개를 제거하고 TLC 보고서/state 수를 유지했다. 이 cfg를 CI에서 빼거나 범위를 줄인 것이 아니다. 500-state 초과 negative cfg는 wrapper가 생성한 반례 경로 그림을 제공한다.
+
+환경 OpenJDK27.0.1.0.3/Node26.13.0/TLC2 2.19(tla2tools1.7.4), SHELL=/bin/zsh. Cargo/PG/운영 실행0, 검증 process는 모두 종료했다.
+
+| cfg | TLC states/steps | 실제 깨진 규칙 | 결과 |
+|---|---:|---|---|
+| [After](HerdrRestartOwnerAfter.cfg) | 65/190 | — | GREEN |
+| [Before](HerdrRestartOwnerBefore.cfg) | 5/10 | `RestartAvailable` | 기대 RED |
+| [ClearAny](HerdrRestartOwnerClearAny.cfg) | 1030/미제공(그림상한) | — | GREEN |
+| [ClearDuringLaunch](HerdrRestartOwnerClearDuringLaunch.cfg) | 617/미제공(그림상한) | — | GREEN |
+| [ClearKeepsClaim](HerdrRestartOwnerClearKeepsClaim.cfg) | 268/792 | `NoSeedAfterClear` | 기대 RED |
+| [ClearNoWait](HerdrRestartOwnerClearNoWait.cfg) | 761/미제공(그림상한) | `NoResumeAfterClear`, `ClearForgets` | 기대 RED |
+| [ClearOvertake](HerdrRestartOwnerClearOvertake.cfg) | 925/미제공(그림상한) | — | GREEN |
+| [ClearSerial](HerdrRestartOwnerClearSerial.cfg) | 1030/미제공(그림상한) | — | GREEN |
+| [ClearSkipsRetired](HerdrRestartOwnerClearSkipsRetired.cfg) | 644/미제공(그림상한) | `NoResumeAfterClear`, `ClearForgets` | 기대 RED |
+| [CloseIndeterminate](HerdrRestartOwnerCloseIndeterminate.cfg) | 14/31 | — | GREEN |
+| [CloseRefused](HerdrRestartOwnerCloseRefused.cfg) | 14/31 | — | GREEN |
+| [Concurrent](HerdrRestartOwnerConcurrent.cfg) | 133/454 | — | GREEN |
+| [Crash](HerdrRestartOwnerCrash.cfg) | 172/511 | — | GREEN |
+| [CrashCloseRefused](HerdrRestartOwnerCrashCloseRefused.cfg) | 20/54 | — | GREEN |
+| [CrashLaunchUnknown](HerdrRestartOwnerCrashLaunchUnknown.cfg) | 67/166 | — | GREEN |
+| [CrashRollback](HerdrRestartOwnerCrashRollback.cfg) | 172/512 | — | GREEN |
+| [DispatchCrash](HerdrRestartOwnerDispatchCrash.cfg) | 84/209 | — | GREEN |
+| [DispatchRestart](HerdrRestartOwnerDispatchRestart.cfg) | 67/195 | — | GREEN |
+| [DropQueue](HerdrRestartOwnerDropQueue.cfg) | 31/75 | `InputCustody`, `AcceptedInputResolves` | 기대 RED |
+| [GapClearCloseFailure](HerdrRestartOwnerGapClearCloseFailure.cfg) | 92/249 | `ClearForgets` | 기대 RED |
+| [GapClearCreateUnknown](HerdrRestartOwnerGapClearCreateUnknown.cfg) | 250/745 | `ClearForgets` | 기대 RED |
+| [GapSeedlessDispatchCrash](HerdrRestartOwnerGapSeedlessDispatchCrash.cfg) | 89/222 | `NoInheritedDispatch` | 기대 RED |
+| [HeadBusy](HerdrRestartOwnerHeadBusy.cfg) | 124/320 | — | GREEN |
+| [HeadBusyCrash](HerdrRestartOwnerHeadBusyCrash.cfg) | 304/780 | — | GREEN |
+| [IntentField](HerdrRestartOwnerIntentField.cfg) | 82/206 | `RequestResolves` | 기대 RED |
+| [LaunchNotSent](HerdrRestartOwnerLaunchNotSent.cfg) | 35/85 | — | GREEN |
+| [LaunchUnknown](HerdrRestartOwnerLaunchUnknown.cfg) | 27/65 | — | GREEN |
+| [LeakLaunching](HerdrRestartOwnerLeakLaunching.cfg) | 193/581 | `ClearForgets`, `ClearCompletes`, `ClearRequestCompletes` | 기대 RED |
+| [MainClear](HerdrRestartOwnerMainClear.cfg) | 364/1181 | `NoStaleCreate`, `NoSessionAfterClear`, `NoSeedAfterClear`, `ClearForgets` | 기대 RED |
+| [NoGate](HerdrRestartOwnerNoGate.cfg) | 70/169 | `NoOldPaneInput`, `RestartAvailable` | 기대 RED |
+| [NoLaunchCheck](HerdrRestartOwnerNoLaunchCheck.cfg) | 247/775 | `EffectHasLivePermission`, `NoStaleCreate` | 기대 RED |
+| [NoNotice](HerdrRestartOwnerNoNotice.cfg) | 83/207 | `RequestResolves` | 기대 RED |
+| [NoNoticeRefusal](HerdrRestartOwnerNoNoticeRefusal.cfg) | 3/5 | `CommandAnswers`, `RestartAvailable` | 기대 RED |
+| [NoPermit](HerdrRestartOwnerNoPermit.cfg) | 83/206 | `NoFalseReady`, `EffectHasLivePermission`, `RequestResolves`, `AcceptedInputResolves`, `EndedSeedRecovers` | 기대 RED |
+| [NoPermitDetach](HerdrRestartOwnerNoPermitDetach.cfg) | 189/550 | `NoOperationSeedless`, `NoInheritedDispatch`, `RequestResolves`, `AcceptedInputResolves`, `EndedSeedRecovers` | 기대 RED |
+| [NoSettle](HerdrRestartOwnerNoSettle.cfg) | 33/80 | `InflightSettledBeforeReady` | 기대 RED |
+| [NoSubmitCheck](HerdrRestartOwnerNoSubmitCheck.cfg) | 241/740 | `EffectHasLivePermission`, `NoSeedAfterClear` | 기대 RED |
+| [NoSupersedeCheck](HerdrRestartOwnerNoSupersedeCheck.cfg) | 923/미제공(그림상한) | `NoResumeAfterClear`, `NoSeedAfterClear`, `ClearForgets` | 기대 RED |
+| [NoWake](HerdrRestartOwnerNoWake.cfg) | 35/83 | `RequestResolves`, `RestartAvailable`, `AcceptedInputResolves` | 기대 RED |
+| [OldInput](HerdrRestartOwnerOldInput.cfg) | 61/150 | `NoOldPaneInput` | 기대 RED |
+| [PrependOverHead](HerdrRestartOwnerPrependOverHead.cfg) | 11/25 | `RequestResolves`, `RestartAvailable`, `AcceptedInputResolves` | 기대 RED |
+| [R1Launch](HerdrRestartOwnerR1Launch.cfg) | 273/814 | `EffectHasLivePermission`, `NoSeedAfterClear`, `NoSessionAfterClear`, `ClearForgets` | 기대 RED |
+| [ReadyOnAdmit](HerdrRestartOwnerReadyOnAdmit.cfg) | 35/85 | `ReadyEvidence` | 기대 RED |
+| [ReloadSeed](HerdrRestartOwnerReloadSeed.cfg) | 1107/미제공(그림상한) | `NoSeedRevival`, `NoResumeAfterClear`, `NoSeedAfterClear`, `ClearForgets` | 기대 RED |
+| [ReplayInput](HerdrRestartOwnerReplayInput.cfg) | 73/214 | `NoOperationDuplicateSeed`, `InputAtMostOnce` | 기대 RED |
+| [ReplayUnknown](HerdrRestartOwnerReplayUnknown.cfg) | 53/158 | `NoOperationSeedless`, `NoBlindCreate`, `SingleSession`, `EffectHasLivePermission`, `AcceptedInputResolves` | 기대 RED |
+| [RequeueUncertain](HerdrRestartOwnerRequeueUncertain.cfg) | 95/231 | `SeedAtMostOnce` | 기대 RED |
+| [RetryDispatch](HerdrRestartOwnerRetryDispatch.cfg) | 33/80 | `NoDispatchRepost` | 기대 RED |
+| [SeedAbsentIsClear](HerdrRestartOwnerSeedAbsentIsClear.cfg) | 36/85 | `NoFalseSuperseded` | 기대 RED |
+| [SeedBehind](HerdrRestartOwnerSeedBehind.cfg) | 93/231 | `NoOldPaneInput` | 기대 RED |
+| [Seedless](HerdrRestartOwnerSeedless.cfg) | 106/295 | — | GREEN |
+| [SeedlessClear](HerdrRestartOwnerSeedlessClear.cfg) | 1458/미제공(그림상한) | — | GREEN |
+| [SeedlessCrash](HerdrRestartOwnerSeedlessCrash.cfg) | 214/638 | — | GREEN |
+| [SkipClose](HerdrRestartOwnerSkipClose.cfg) | 33/80 | `SingleSession` | 기대 RED |
+| [StartLegacy](HerdrRestartOwnerStartLegacy.cfg) | 25/60 | — | GREEN |
+| [StartMissing](HerdrRestartOwnerStartMissing.cfg) | 25/60 | — | GREEN |
+| [StartPendingPlaced](HerdrRestartOwnerStartPendingPlaced.cfg) | 83/207 | — | GREEN |
+| [StartPendingUnplaced](HerdrRestartOwnerStartPendingUnplaced.cfg) | 26/63 | — | GREEN |
+| [StartRetired](HerdrRestartOwnerStartRetired.cfg) | 25/60 | — | GREEN |
+| [StartUnknown](HerdrRestartOwnerStartUnknown.cfg) | 5/10 | — | GREEN |
+| [UnboundDispatch](HerdrRestartOwnerUnboundDispatch.cfg) | 106/295 | `NoInheritedDispatch` | 기대 RED |
+| [WithdrawFallback](HerdrRestartOwnerWithdrawFallback.cfg) | 13/30 | — | GREEN |
+| [WithdrawFirst](HerdrRestartOwnerWithdrawFirst.cfg) | 18/46 | `RequestResolves` | 기대 RED |
+
+## 실제 경로 coverage·원인 control
+
+최종 DOT5개는 위607 checker 실행과 별도다. coverage-final/coverage.json의 B_PORT_PRECONDITIONS_COVERAGE_OK:
+
+- idle Bound172 states/repair edge2, idle PendingPlaced83 states/edge1. oldLive=false/inflight=false/crashed에서 Retired+wake로 감.
+- same replay32개 중 terminal ticket6, conflict66개 중 terminal14. seed/row/creates/panes/oldLive/gate/excl/dispatch 불변, seedless/duplicate0.
+- clear launch617 states: BeginEffect34·physical effect34. CheckEpoch 뒤 epoch 이동8개에서는 BeginEffect 금지. permission 보유 중 요청8개는 effect 뒤 epoch bump.
+
+causal-controls/는 NoPermit/NoPermitDetach의 다른 조건을 그대로 두고 RecoveryPolicy만 missing→owned로 바꾼 control2개다. EndedSeedRecovers가 GREEN으로 돌아왔고, 이 control에서 다른 기존 규칙도 전부 PASS라고 주장하지 않는다.
+
+반례 번호는 generated report를 따른다. 실제 생산 mutation/실재현이 아니며 B1/B2의 실제 진입·PG·원인 mutation 시험을 대체하지 않는다.
+
+- [LeakLaunching: `ClearRequestCompletes`](herdr-restart-owner-LeakLaunching.report.md): 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16. Clear discards the queue and the launching input: Clear discarded the queue; a finished launch never released its registration
+
+- [NoLaunchCheck: `EffectHasLivePermission`](herdr-restart-owner-NoLaunchCheck.report.md): 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10. Create once under live effect permission: Create answered; first input not submitted; physical effect used no live permission; original 1 waiting
+
+- [NoPermit: `EffectHasLivePermission`](herdr-restart-owner-NoPermit.report.md): 0 → 1 → 2 → 3. Seed typed into the old execution: Greeting reached the execution the restart should end; physical effect used no live permission; original 1 waiting
+
+- [NoPermit: `EndedSeedRecovers`](herdr-restart-owner-NoPermit.report.md): 0 → 1 → 2 → 3 → 4. Daemon dies and boots: Idle ended execution; the seed owner must repair the row
+
+- [NoPermitDetach: `NoOperationSeedless`](herdr-restart-owner-NoPermitDetach.report.md): 0 → 1 → 2. Treat known operation as seedless capacity failure: Seed committed; gate holds it; known ticket entered the seedless path; original 1 waiting
+
+- [NoPermitDetach: `EndedSeedRecovers`](herdr-restart-owner-NoPermitDetach.report.md): 0 → 1 → 2 → 3 → 4 → 5. Treat known operation as seedless capacity failure: Idle ended execution; the seed owner must repair the row; known ticket entered the seedless path; original 1 waiting
+
+- [NoSubmitCheck: `EffectHasLivePermission`](herdr-restart-owner-NoSubmitCheck.report.md): 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13. Submit the first input under live permission: First input submitted; receipt not committed; physical effect used no live permission; original 1 waiting
+
+- [R1Launch: `EffectHasLivePermission`](herdr-restart-owner-R1Launch.report.md): 0 → 1 → 2 → 3 → 4 → 5. Launch the successor inside the exclusion: One new Ready session; inputs await the owner; physical effect used no live permission; original 1 waiting, original 2 not yet arrived
+
+- [ReplayInput: `NoOperationDuplicateSeed`](herdr-restart-owner-ReplayInput.report.md): 0 → 1 → 2. Insert a duplicate operation seed: Seed committed; gate holds it; known operation inserted another seed; original 1 waiting
+
+- [ReplayUnknown: `NoOperationSeedless`](herdr-restart-owner-ReplayUnknown.report.md): 0 → 1 → 2. Treat known operation as seedless capacity failure: Seed committed; gate holds it; known ticket entered the seedless path; original 1 waiting
+
+- [ReplayUnknown: `EffectHasLivePermission`](herdr-restart-owner-ReplayUnknown.report.md): 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11. Create again after an unknown reply: Unknown create acknowledgement was replayed; physical effect used no live permission; original 1 waiting
+
+## 남긴 계약과 A 경계
+
+GapClearCloseFailure/GapClearCreateUnknown/GapSeedlessDispatchCrash의 기대 RED는 그대로다. owner Accepted/Launched는 Ready 증거가 아니며 receipt+source binding이 필요하다. named action/fairness 자체가 생산 guard는 아니다. reserved-source ingress 거절·actor 교체·실제 dispatch 경합·V1/V2/unknown schema 복원은 분할 계획의13개 실제 시험이 필요하다.
+
+A immutable offset·Resume cause·ordinary fresh의23cfg/바이트는 변경하지 않았다. HerdrRestart.s의 r1 direct-launch는 역사적 투영이며 현재 B 구현/수용 정본은 이 Owner 모델이다.
+
+## 재실행
 
 ```sh
 unset TMUX TMUX_PANE
-export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar
+export TLA2TOOLS=/Users/itismyfield/.local/share/tla2tools/tla2tools-1.7.4.jar
 export JAVA=/opt/homebrew/opt/openjdk/bin/java
-python3 scripts/ci/statecharts_tlc.py --base 33d1f4b5a9 --jobs 8 --java "$JAVA"
+python3 scripts/ci/statecharts_tlc.py --root /tmp/i8128-restart-owner-b --jobs 2
+/Users/itismyfield/.codex/skills/statechart/scripts/statechart \
+  /tmp/i8128-restart-owner-b/HerdrRestartOwner.tla \
+  --config /tmp/i8128-restart-owner-b/HerdrRestartOwnerAfter.cfg \
+  --view /tmp/i8128-restart-owner-b/herdr-restart-owner.view.mjs \
+  --out /tmp/i8128-restart-owner-b-render-new
 ```
 
-[정상 흐름](herdr-restart-owner-After.chart.mmd), [dispatch 실행 중](herdr-restart-owner-DispatchRestart.chart.mmd),
-[launch 중 clear](herdr-restart-owner-ClearDuringLaunch.chart.mmd), [clear overtake](herdr-restart-owner-ClearOvertake.chart.mmd),
-[seed 없는 재시작](herdr-restart-owner-Seedless.chart.mmd), [전송 중 단위](herdr-restart-owner-HeadBusy.chart.mmd),
-[crash](herdr-restart-owner-Crash.chart.mmd), [현재 거절](herdr-restart-owner-Before.chart.mmd).
-cfg마다 `herdr-restart-owner-<suffix>.report.md`가 같은 모델·[view](herdr-restart-owner.view.mjs)에서 생성됐다.
+[정상](herdr-restart-owner-After.chart.mmd), [idle Pending crash](herdr-restart-owner-StartPendingPlaced.chart.mmd), [BeginEffect 제거](herdr-restart-owner-NoLaunchCheck.chart.mmd), [허가 조기반납](herdr-restart-owner-NoSubmitCheck.chart.mmd), [idle recovery 제거](herdr-restart-owner-NoPermitDetach.chart.mmd). expected.tsv의 기존63행을 강화해 동기화했다(신규행0·기존위반삭제0·예외추가0).

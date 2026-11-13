@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+title: "Herdr restart B ports: owned idle recovery, existing operation ticket, effect permission"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -22,7 +22,6 @@ stateDiagram-v2
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
-  s1 --> s1: Accept an input into the owner queue
   s2 --> s3: Close only the captured pane
   s3 --> s4: Retire CAS and settle the old turn
   s4 --> s5: Disconnect keeping selector, release, wake

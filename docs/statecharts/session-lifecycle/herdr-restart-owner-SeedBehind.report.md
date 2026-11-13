@@ -1,7 +1,7 @@
 # HerdrRestartOwner
 
-TLC reached 59 states and 146 steps. The chart draws 15 states and 19 arrows.
-The chart does not draw 106 steps that stay in one chart state.
+TLC reached 93 states and 231 steps. The chart draws 19 states and 24 arrows.
+The chart does not draw 165 steps that stay in one chart state.
 
 ## NoOldPaneInput breaks
 The shortest path has 2 steps:
@@ -10,4 +10,4 @@ The shortest path has 2 steps:
 2. Submit an input to the still-current session: Old pane received an input while the restart was open
 
 ## Rules that hold
-InputCustody, InputAtMostOnce, NoFalseReady, SeedAtMostOnce, NoBlindCreate, SingleSession, InflightSettledBeforeReady, ReadyEvidence, NoInheritedDispatch, NoDispatchRepost, NoSeedAfterClear, NoStaleCreate, NoSessionAfterClear, NoResumeAfterClear, NoSeedRevival, NoFalseSuperseded, NoDeadlock, RequestResolves, CommandAnswers, RestartAvailable, AcceptedInputResolves, ClearForgets, ClearCompletes
+InputCustody, InputAtMostOnce, NoFalseReady, SeedAtMostOnce, NoBlindCreate, SingleSession, InflightSettledBeforeReady, ReadyEvidence, NoInheritedDispatch, NoDispatchRepost, NoSeedAfterClear, NoStaleCreate, NoSessionAfterClear, NoResumeAfterClear, NoSeedRevival, NoFalseSuperseded, NoOperationSeedless, NoOperationDuplicateSeed, EffectHasLivePermission, NoDeadlock, RequestResolves, CommandAnswers, RestartAvailable, AcceptedInputResolves, ClearForgets, ClearCompletes, EndedSeedRecovers, ClearRequestCompletes
