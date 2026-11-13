@@ -48,6 +48,7 @@ fn init_over(sources: &[(u64, PathBuf, u64)]) {
         }];
         let (initial_anchor, build_digest) = (0, "test".into());
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources,
             initial_anchor,
@@ -55,7 +56,7 @@ fn init_over(sources: &[(u64, PathBuf, u64)]) {
             at,
         })
     };
-    store.begin_era(&channels, at, init).unwrap();
+    store.begin_fixture_era(&channels, at, init).unwrap();
 }
 
 /// O owns both channels; only the one whose init starts at or before the turn settles its row.

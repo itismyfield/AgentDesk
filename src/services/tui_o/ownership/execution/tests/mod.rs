@@ -440,6 +440,7 @@ async fn an_execution_view_answers_owned_only_over_a_store_backed_candidate() {
     let init = |channel| {
         let (sources, initial_anchor, build_digest) = (Vec::new(), 0, "b".into());
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources,
             initial_anchor,
@@ -450,7 +451,7 @@ async fn an_execution_view_answers_owned_only_over_a_store_backed_candidate() {
     store
         .unwrap()
         .unwrap()
-        .begin_era(&[channel], at, init)
+        .begin_fixture_era(&[channel], at, init)
         .unwrap();
     snapshot.install_execution(channel, Some(Err("unverified again".into())));
     assert_eq!(

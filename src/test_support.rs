@@ -523,6 +523,7 @@ pub(crate) mod o_store {
         let init = |channel| {
             let (sources, initial_anchor, build_digest) = (Vec::new(), 0, "test".into());
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources,
                 initial_anchor,
@@ -530,7 +531,9 @@ pub(crate) mod o_store {
                 at,
             })
         };
-        store.begin_era(channels, at, init).expect("an O store era");
+        store
+            .begin_fixture_era(channels, at, init)
+            .expect("an O store era");
     }
 
     /// Commits the installed adoption of `channel` as O's writer would, for a rig admitted
