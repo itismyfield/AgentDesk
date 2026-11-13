@@ -977,6 +977,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
+│   │   │   │   ├── clear_held_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── boot_host_tests.rs
 │   │   │   ├── coldstop_input_tests.rs
@@ -1076,8 +1077,6 @@ src/
 │   │   │   ├── warm_followup.rs
 │   │   │   └── warm_followup_owner_tests.rs
 │   │   ├── input/
-│   │   │   ├── tests/
-│   │   │   │   └── prompt_ready_setup_tests.rs
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
@@ -1089,6 +1088,20 @@ src/
 │   │   │   ├── submission_tests.rs
 │   │   │   ├── timeout_draft_tests.rs
 │   │   │   └── user_receipt.rs
+│   │   ├── readiness/
+│   │   │   ├── compact/
+│   │   │   │   └── completion.rs
+│   │   │   ├── clear.rs
+│   │   │   ├── clear_tests.rs
+│   │   │   ├── compact.rs
+│   │   │   ├── compact_tests.rs
+│   │   │   ├── dialog.rs
+│   │   │   ├── evidence.rs
+│   │   │   ├── idle.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── readiness_tests.rs
+│   │   │   ├── source.rs
+│   │   │   └── wait.rs
 │   │   ├── session/
 │   │   │   ├── auto_compact_launch_tests.rs
 │   │   │   ├── effort.rs
@@ -2319,6 +2332,7 @@ src/
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_busy_gate_tests.rs
+│   │   │   │   │   ├── owner_input_busy_race_tests.rs
 │   │   │   │   │   ├── owner_input_carried_restart_tests.rs
 │   │   │   │   │   ├── owner_input_codex_native_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs

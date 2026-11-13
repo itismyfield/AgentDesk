@@ -79,35 +79,84 @@ fn observation(capture: Option<&str>, exit: bool) -> ControlFlow<bool> {
 }
 
 /// The capture precedes the gated paste; it never clears a draft or confirms a dialog.
-pub(crate) fn run(
+pub(crate) fn run_ready(
+    session: &str,
+    path: &std::path::Path,
     target: &HerdrTarget,
     plan: &[TuiInputAction],
     cancel: Option<&CancelToken>,
 ) -> InputRun {
-    when_ready(
+    when_idle(
+        session,
+        path,
         || target.capture_ansi(-80),
         cancel,
         || run_herdr(target, plan, cancel),
     )
 }
 
-/// [`run`] for an `/exit`, which also sends nothing while a draft is stashed.
+/// Readiness comes from the current source; the capture only protects a person's composer.
+pub(crate) fn when_idle(
+    session: &str,
+    path: &std::path::Path,
+    mut capture: impl FnMut() -> Option<String>,
+    cancel: Option<&CancelToken>,
+    send: impl FnOnce() -> InputRun,
+) -> InputRun {
+    use crate::services::claude_tui::readiness;
+    let proof = wait_for(cancel, COMPOSER_READY_WAIT, || {
+        let Some(proof) = readiness::observe(session, Some(path)) else {
+            return ControlFlow::Continue(());
+        };
+        let Some(pane) = capture() else {
+            return ControlFlow::Continue(());
+        };
+        if !readiness::empty_draft(&pane) {
+            match composer_owner(&pane) {
+                ComposerOwner::Person | ComposerOwner::AgentDesk => {
+                    return ControlFlow::Break(None);
+                }
+                ComposerOwner::Unread => return ControlFlow::Continue(()),
+                ComposerOwner::Empty => (),
+            }
+        }
+        if crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(&pane)
+        {
+            return ControlFlow::Break(None);
+        }
+        match readiness::reserve(proof) {
+            Some(reservation) => ControlFlow::Break(Some(reservation)),
+            None => ControlFlow::Continue(()),
+        }
+    });
+    match proof {
+        Ok(Some(reservation)) => {
+            if !reservation.current() {
+                reservation.not_sent();
+                return InputRun::Refused(InputRefusal::Unknown);
+            }
+            let result = send();
+            match &result {
+                InputRun::Applied => reservation.sent(),
+                InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 } => {
+                    reservation.not_sent()
+                }
+                _ => (),
+            }
+            result
+        }
+        Err(WaitStop::Cancelled) => InputRun::Cancelled { confirmed: 0 },
+        _ => InputRun::Refused(InputRefusal::Unknown),
+    }
+}
+
+/// Sends `/exit` only after its existing composer and stash checks.
 pub(crate) fn run_exit(target: &HerdrTarget, plan: &[TuiInputAction]) -> InputRun {
     let capture = || target.capture_ansi(-80);
     when_ready_to_exit(capture, None, || run_herdr(target, plan, None))
 }
 
-/// Runs `send` once an ANSI `capture` shows an empty ready Claude composer; a person's draft, a
-/// dialog or a busy screen sends nothing, on any host.
-pub(crate) fn when_ready(
-    capture: impl FnMut() -> Option<String>,
-    cancel: Option<&CancelToken>,
-    send: impl FnOnce() -> InputRun,
-) -> InputRun {
-    ready_then(capture, cancel, false, send)
-}
-
-/// [`when_ready`] for an `/exit`, which also sends nothing while a draft is stashed.
+/// The existing exit wait also refuses a stashed draft.
 pub(crate) fn when_ready_to_exit(
     capture: impl FnMut() -> Option<String>,
     cancel: Option<&CancelToken>,
