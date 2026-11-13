@@ -444,6 +444,15 @@ tui-o-writer/WriterThreadPrepRest.cfg	WriterThreadPrep	RecordedRestZero	-
 tui-o-writer/WriterThreadPrepReverse.cfg	WriterThreadPrep	FloorBeforeInit	-
 tui-o-writer/WriterThreadPrepRollback.cfg	WriterThreadPrep	OldTargetRefused	-
 tui-o-writer/WriterThreadPrepUnshared.cfg	WriterThreadPrep	SharedSnapshot	-
+tui-o-writer/WriterThreadRetireBefore.cfg	WriterThreadRetire	-	RetireResolves
+tui-o-writer/WriterThreadRetireFixed.cfg	WriterThreadRetire	-	-
+tui-o-writer/WriterThreadRetireNoCas.cfg	WriterThreadRetire	DebtKept,MarkHonored,NoLateMark	-
+tui-o-writer/WriterThreadRetireNoDebt.cfg	WriterThreadRetire	DebtKept	-
+tui-o-writer/WriterThreadRetireNoDelete.cfg	WriterThreadRetire	DebtKept,RequestAfterDelete	-
+tui-o-writer/WriterThreadRetireNoMark.cfg	WriterThreadRetire	RetiredNeedsMark	-
+tui-o-writer/WriterThreadRetireNoRehydrate.cfg	WriterThreadRetire	MarkHonored	-
+tui-o-writer/WriterThreadRetireNoStop.cfg	WriterThreadRetire	ExactlyOnce,NoStalePost	-
+tui-o-writer/WriterThreadRetireNoSupersede.cfg	WriterThreadRetire	-	InputAnswered
 tui-o-writer/WriterWakeActiveLoss.cfg	WriterWake	-	-
 tui-o-writer/WriterWakeI8055Current.cfg	WriterWake	BootCheckpointOnlyAccepted,BootNoSilentLoss	-
 tui-o-writer/WriterWakeI8055Design.cfg	WriterWake	-	-
