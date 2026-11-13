@@ -26,7 +26,11 @@ fn restart_common_refuses_future_legacy_unplaced_and_foreign_canonical_rows_pg()
         let cases = ["future-schema", "legacy-sql-null", "unplaced-pending", "foreign-owner"];
         for (index, case) in cases.into_iter().enumerate() {
             let node = Node::bind(&rig, HostedState::Bound, Some(DISPATCH)).await;
-            let mut record = rig.record(&node.shared.token_hash, &node.key);
+            let mut record = rig.record_as(
+                (&node.shared.token_hash, &node.key),
+                HostedState::Bound,
+                "claude",
+            );
             let raw = match index {
                 0 => {
                     let mut future = serde_json::to_value(&record).unwrap();
