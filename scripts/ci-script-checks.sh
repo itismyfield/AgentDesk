@@ -563,6 +563,7 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_post_deploy_relay_continuity \
   scripts.e2e.tui_relay.test_post_deploy_turn_smoke \
   scripts.e2e.tests.test_smoke_replay \
+  scripts.e2e.tests.test_continuous_catalog \
   tests.test_e2e_continuous_manifest \
   scripts.e2e.tui_relay.test_retained_queue_idle \
   scripts.e2e.tui_relay.test_restart_queued_inputs \

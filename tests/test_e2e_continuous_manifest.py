@@ -3,15 +3,20 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import shutil
+import tempfile
 import unittest
 
 import yaml
 
+from scripts.e2e.generate_continuous_catalog import build_catalog
+
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / 'docs/e2e-continuous/bundles.schema1.json'
+REGENERATE = 'python3 scripts/e2e/generate_continuous_catalog.py --write'
 
 
-def validate(plan):
+def validate(plan, root=ROOT):
     def require(condition, reason):
         if not condition:
             raise ValueError(reason)
@@ -30,16 +35,16 @@ def validate(plan):
                 'zero samples cannot imply zero cost or a measured run')
     catalog = plan['scenario_catalog']
     sources = {}
-    for path in (ROOT / 'tests/e2e/tui_relay/scenarios').glob('*.yaml'):
+    for path in (root / 'tests/e2e/tui_relay/scenarios').glob('*.yaml'):
         scenario = yaml.safe_load(path.read_text())
         sources[scenario['id']] = (path, scenario)
-    require(set(catalog) == set(sources), 'catalog differs from active YAML inventory')
+    require(set(catalog) == set(sources), f'catalog differs from active YAML inventory; run {REGENERATE}')
     for key, (path, scenario) in sources.items():
         entry = catalog[key]
-        require(entry['path'] == str(path.relative_to(ROOT)), 'wrong scenario path')
-        require(entry['sha256'] == hashlib.sha256(path.read_bytes()).hexdigest(), 'YAML drift')
-        require(entry['cells'] == scenario['cells'], 'unsupported cell declared')
-        require(entry['coverage_class'] == scenario['coverage_class'], 'coverage reclassified')
+        require(entry['path'] == str(path.relative_to(root)), f'wrong scenario path; run {REGENERATE}')
+        require(entry['sha256'] == hashlib.sha256(path.read_bytes()).hexdigest(), f'YAML drift; run {REGENERATE}')
+        require(entry['cells'] == scenario['cells'], f'unsupported cell declared; run {REGENERATE}')
+        require(entry['coverage_class'] == scenario['coverage_class'], f'coverage reclassified; run {REGENERATE}')
     full = plan['bundles']['F']
     ids = list(full['additional_scenarios'])
     for name in full['includes']:
@@ -93,12 +98,25 @@ def validate(plan):
             'original-cause branch lacks witnesses')
 
 
+def consistent_plan(manifest_path, root):
+    plan = json.loads(manifest_path.read_text())
+    plan['scenario_catalog'] = build_catalog(root)
+    return plan
+
+
 class ContinuousManifestTests(unittest.TestCase):
     def setUp(self):
-        self.plan = json.loads(MANIFEST.read_text())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        target = self.root / 'tests/e2e/tui_relay/scenarios'
+        target.mkdir(parents=True)
+        for path in (ROOT / 'tests/e2e/tui_relay/scenarios').glob('*.yaml'):
+            shutil.copyfile(path, target / path.name)
+        self.plan = consistent_plan(MANIFEST, self.root)
 
     def test_manifest_matches_live_yaml_inventory(self):
-        validate(self.plan)
+        validate(json.loads(MANIFEST.read_text()))
 
     def test_managed_control_has_separate_full_and_rotation_assignment(self):
         control = self.plan['control_occurrences']['R-inject-managed']
@@ -142,13 +160,31 @@ class ContinuousManifestTests(unittest.TestCase):
                 else:
                     plan['execution_contract']['occurrence_key_fields'].remove('busy_basis')
                 with self.assertRaises(ValueError):
-                    validate(plan)
+                    validate(plan, self.root)
 
     def test_mutant_rejects_missing_witness_pass_contract(self):
         plan = copy.deepcopy(self.plan)
         plan['execution_contract']['missing_precondition_witness'] = 'PASS'
         with self.assertRaisesRegex(ValueError, 'missing witness'):
-            validate(plan)
+            validate(plan, self.root)
+
+    def test_stale_catalog_has_regeneration_command(self):
+        plan = copy.deepcopy(self.plan)
+        next(iter(plan['scenario_catalog'].values()))['sha256'] = 'stale'
+        with self.assertRaises(ValueError) as error:
+            validate(plan, self.root)
+        self.assertIn(REGENERATE, str(error.exception))
+
+    def test_witness_mutant_ignores_unrelated_catalog_drift(self):
+        stale = copy.deepcopy(self.plan)
+        next(iter(stale['scenario_catalog'].values()))['sha256'] = 'stale'
+        stale['execution_contract']['missing_precondition_witness'] = 'PASS'
+        temporary_manifest = self.root / 'stale-manifest.json'
+        temporary_manifest.write_text(json.dumps(stale))
+        isolated = consistent_plan(temporary_manifest, self.root)
+        self.assertEqual(isolated['execution_contract']['missing_precondition_witness'], 'PASS')
+        with self.assertRaisesRegex(ValueError, 'missing witness'):
+            validate(isolated, self.root)
 
     def test_mutants_reject_omission_duplicate_and_fixture_in_live(self):
         for bad_ids in ([], ['E-50', 'E-51', 'E-11', 'E-13', 'E-36', 'E-1'],
@@ -156,18 +192,18 @@ class ContinuousManifestTests(unittest.TestCase):
             plan = copy.deepcopy(self.plan)
             plan['bundles']['F']['additional_scenarios'] = bad_ids
             with self.assertRaises(ValueError):
-                validate(plan)
+                validate(plan, self.root)
 
     def test_mutants_reject_deploy_hold_and_fixture_core(self):
         plan = copy.deepcopy(self.plan)
         plan['activation']['deployment_hold'] = True
         with self.assertRaises(ValueError):
-            validate(plan)
+            validate(plan, self.root)
         plan = copy.deepcopy(self.plan)
         plan['bundles']['P']['occurrences'][0].update(
             scenario='E-24', provider='claude', host='pipe', cell='claude-pipe')
         with self.assertRaises(ValueError):
-            validate(plan)
+            validate(plan, self.root)
 
     def test_mutants_reject_false_pass_zero_cost_and_human_coverage(self):
         for change in ('pass', 'zero_cost', 'human', 'missing_witness'):
@@ -182,7 +218,7 @@ class ContinuousManifestTests(unittest.TestCase):
                 plan['new_scenarios']['R-inject']['preconditions'].remove('pre_submit_busy_branch_witness')
                 next(entry for entry in plan['bundles']['P']['occurrences'] if entry['scenario'] == 'R-inject')['preconditions'].remove('pre_submit_busy_branch_witness')
             with self.assertRaises(ValueError):
-                validate(plan)
+                validate(plan, self.root)
 
 
 if __name__ == '__main__':

@@ -737,7 +737,7 @@
     },
     "E-50": {
       "path": "tests/e2e/tui_relay/scenarios/E-50-claude-clear-and-turns.yaml",
-      "sha256": "0ad716fe5044d2b306d396cf2ad955f24fbf5827219a3362e4d346ed04ceb1cf",
+      "sha256": "cd0ea8d84cdbe39913a8b93671884debbaa7958ecebba869c1d4df4103f8006b",
       "coverage_class": "live",
       "cells": [
         "claude-tui",
@@ -747,7 +747,7 @@
     },
     "E-51": {
       "path": "tests/e2e/tui_relay/scenarios/E-51-codex-clear-and-turns.yaml",
-      "sha256": "d3a0a721e5d44f506cc31e5508262f479857139e43d75425f8ba26a249d92fb4",
+      "sha256": "f66f150206fed9a46025b9071ea6671acd38b3bf12717b9865c51f5d534bf4fa",
       "coverage_class": "live",
       "cells": [
         "codex-tui",

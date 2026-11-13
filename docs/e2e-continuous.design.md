@@ -120,6 +120,11 @@ F의 control 목록은 추가 중복 실행 목록이 아니라 그 합집합의
 대조군 결과는 `coverage_scenario=R-inject-managed`와 managed busy key로만 집계하고
 native `R-inject` 회귀 coverage에 합산하지 않는다. P의 6 occurrence·13 prompt·계획 10턴은 그대로다.
 
+YAML 카탈로그는 `python3 scripts/e2e/generate_continuous_catalog.py --write`로 재생성한다.
+이 명령은 `scenario_catalog`만 갱신하며, landing 재생성 목록에도 등록한다. 나머지 witness/P/control 계약은
+JSON 보존 가드로 보호한다. 뮤턴트 시험은 현재 YAML의 임시 사본으로 일관된 카탈로그를 만들고 대상 계약만
+변형한다. 실제 저장 파일의 drift 검사는 별도 시험으로 유지하므로 자동 재생성이 witness 검증을 대체하지 않는다.
+
 ### 2.3 비용 측정 후에만 주기 선택
 
 초기 설정은 `enabled=false`, `rotation_interval_s=null`, `daily_full_at=null`,
