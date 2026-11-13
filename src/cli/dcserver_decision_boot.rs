@@ -6,13 +6,13 @@ static STAGED_KEY: std::sync::Mutex<Option<Option<SecretString>>> = std::sync::M
 pub(crate) fn stage(captured: Option<SecretString>) {
     *STAGED_KEY
         .lock()
-        .expect("decision startup staging poisoned") = Some(captured);
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(captured);
 }
 
 pub(crate) async fn initialize_staged() -> Result<(), &'static str> {
     let staged = STAGED_KEY
         .lock()
-        .expect("decision startup staging poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     // Shared bootstrap callers outside dcserver never stage a key or start a lookup.
     let Some(captured) = staged else {
