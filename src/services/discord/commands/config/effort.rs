@@ -81,7 +81,7 @@ fn local_tui(provider: &ProviderKind, channel: serenity::ChannelId) -> bool {
         ProviderSessionDriver, resolve_provider_session_selection_with_channel,
     };
     matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
-        && crate::config::session_hosts::herdr_endpoint(channel.get()).is_none()
+        && !crate::config::session_hosts::has_herdr_endpoint(channel.get())
         && resolve_provider_session_selection_with_channel(provider, true, Some(channel.get()))
             .driver
             == ProviderSessionDriver::TuiHosting
