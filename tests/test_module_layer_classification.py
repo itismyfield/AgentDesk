@@ -355,10 +355,13 @@ fn positive_control() {{
             "terminal_kind": 'fn sibling(mut value: TerminalEvidence) { value.kind = domain::replay_evidence::TerminalKind::Done; }',
             "quiet_receipt": 'fn sibling(mut value: NoEffectEvidence) { value.receipt_id = 8; }',
             "quiet_nonce": 'fn sibling(mut value: NoEffectEvidence) { value.nonce = "other".into(); }',
+            "wrong_terminal_key": 'fn sibling() { let _ = domain::replay_evidence::live::issuer::terminal((), 7, "n".into(), domain::replay_evidence::TerminalKind::Error); }',
+            "wrong_quiet_key": 'fn sibling() { let _ = domain::replay_evidence::live::issuer::no_effect(false, 7, "n".into()); }',
         }
         for name, body in cases.items():
             with self.subTest(name=name):
-                self.assert_refused(body, {"E0451", "E0423", "E0616"})
+                codes = {"E0308"} if name.startswith("wrong_") else {"E0451", "E0423", "E0616"}
+                self.assert_refused(body, codes)
 
     def test_replay_authority_has_no_default_clone_or_copy_escape(self):
         self.assert_compiles()
@@ -383,6 +386,10 @@ fn positive_control() {{
             public = Counter()
             for i, value in enumerate(values):
                 if value == "fn":
+                    if name == "issuer":
+                        self.assertEqual(values[i + 2], "(", "issuer must require the concrete observer key")
+                        first_end = values.index(",", i + 3)
+                        self.assertEqual(values[i + 4:first_end], [":", "ObservationKey"])
                     start = i - 1
                     while start >= 0 and values[start] not in {"{", "}", ";"}:
                         start -= 1
