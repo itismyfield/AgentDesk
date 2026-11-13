@@ -1,6 +1,8 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::campaign_execution::control::tests as domain;
+use crate::db::server_campaigns::command_transaction::StoreRequest;
+use crate::domain::campaign::definition;
+use crate::services::campaign_execution::{commands, control::tests as domain};
 
 pub(super) fn render(outcome: &CommandOutcome) -> StoreResult<ReceiptResponse> {
     Ok(ReceiptResponse {
@@ -31,7 +33,7 @@ pub(super) async fn create(
     key: &str,
     observed_at: DateTime<Utc>,
 ) -> StoreResult<CommandReply> {
-    super::create(pool, id, input, key, observed_at, render).await
+    commands::create(pool, id, input, key, observed_at, render).await
 }
 
 pub(super) async fn execute(
@@ -39,7 +41,7 @@ pub(super) async fn execute(
     id: &str,
     envelope: &CommandEnvelope,
 ) -> StoreResult<CommandReply> {
-    super::execute(pool, id, envelope, render).await
+    commands::execute(pool, id, envelope, render).await
 }
 
 pub(super) struct Harness {
@@ -167,7 +169,7 @@ async fn concurrent_create_same_key_and_lost_response_replay_before_stale_pg() {
     assert!(retry.replayed);
     assert_eq!(retry.outcome, a.outcome);
     assert_eq!(retry.response, a.response);
-    let retry_with_changed_renderer = super::create(
+    let retry_with_changed_renderer = commands::create(
         &h.pool,
         "campaign",
         &input,
@@ -351,7 +353,7 @@ async fn failed_create_and_missing_target_receipts_survive_new_pool_pg() {
         .unwrap();
     assert!(retry.replayed);
     assert_eq!(retry.outcome, failed.outcome);
-    let retry_with_changed_renderer = super::create(
+    let retry_with_changed_renderer = commands::create(
         &h.pool,
         "campaign",
         &invalid,
@@ -395,24 +397,22 @@ async fn rollback_and_receipt_insert_failure_leave_no_partial_action_or_event_pg
         binding: Box::new(binding),
         state: ActionState::StartPending,
     };
-    let mut tx = h.pool.begin().await.unwrap();
-    applied(
-        apply(
-            &mut tx,
-            "campaign",
-            "rolled-back",
-            domain::now(),
-            Request::Command(&command),
-            render,
-        )
-        .await
-        .unwrap()
-        .outcome,
-    );
+    let tx = h.pool.begin().await.unwrap();
+    let (tx, reply) = commands::apply_in(
+        tx,
+        "campaign",
+        "rolled-back",
+        domain::now(),
+        StoreRequest::Command(command.clone()),
+        render,
+    )
+    .await
+    .unwrap();
+    applied(reply.outcome);
     assert_eq!(get(&h.pool, "campaign").await.unwrap(), Some(state.clone()));
     tx.rollback().await.unwrap();
     assert!(matches!(
-        super::execute(
+        commands::execute(
             &h.pool,
             "campaign",
             &envelope("render-failure", command.clone()),
@@ -472,13 +472,13 @@ async fn run_lock_holds_command_until_commit_and_replays_response_loss_pg() {
     h.seed(domain::with_action(ActionState::Claimed, false))
         .await;
     let command = stop(StopMode::Immediate);
-    let mut tx = h.pool.begin().await.unwrap();
-    let first = apply(
-        &mut tx,
+    let tx = h.pool.begin().await.unwrap();
+    let (tx, first) = commands::apply_in(
+        tx,
         "campaign",
         "stop",
         domain::now(),
-        Request::Command(&command),
+        StoreRequest::Command(command.clone()),
         render,
     )
     .await

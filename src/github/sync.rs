@@ -1,5 +1,6 @@
 //! GitHub issue state sync: keep kanban cards consistent with GitHub issue state.
 
+use crate::services::auto_queue::transactions;
 use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
 use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
@@ -1180,7 +1181,7 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
             done_run_ids.insert(run_id);
         }
         if entry_status == crate::db::auto_queue::ENTRY_STATUS_FAILED {
-            crate::db::auto_queue::update_entry_status_on_pg_tx(
+            transactions::update_entry_status_on_pg_tx(
                 tx,
                 &entry_id,
                 crate::db::auto_queue::ENTRY_STATUS_DONE,
@@ -1233,7 +1234,7 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
         if let Ok(Some(run_id)) = row.try_get::<Option<String>, _>("run_id") {
             pending_run_ids.insert(run_id);
         }
-        crate::db::auto_queue::update_entry_status_on_pg_tx(
+        transactions::update_entry_status_on_pg_tx(
             tx,
             &entry_id,
             crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
@@ -1251,7 +1252,7 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     // update earlier in the tx races the inline check — making the CI
     // `_pg` lane deterministic.
     for run_id in pending_run_ids {
-        let _ = crate::db::auto_queue::maybe_finalize_run_if_ready_pg(tx, &run_id).await?;
+        let _ = transactions::maybe_finalize_run_if_ready_pg(tx, &run_id).await?;
     }
 
     // PG GitHub sync does not receive a PolicyEngine, so it cannot fire the
@@ -1260,7 +1261,7 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     // entry has been marked done.
     for run_id in done_run_ids {
         if auto_queue_run_review_disabled_on_pg(tx, &run_id).await? {
-            let _ = crate::db::auto_queue::maybe_finalize_run_if_ready_pg(tx, &run_id).await?;
+            let _ = transactions::maybe_finalize_run_if_ready_pg(tx, &run_id).await?;
         }
     }
 

@@ -409,8 +409,9 @@ async fn same_source_over_cap_reclaims_raw_and_keeps_debt_after_actor_recreation
     let o = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
         .unwrap()
         .unwrap();
-    o.begin_era(&[CHANNEL], chrono::Utc::now(), |channel| {
+    o.begin_fixture_era(&[CHANNEL], chrono::Utc::now(), |channel| {
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources: vec![InitSource {
                 source_id: source.clone(),
@@ -593,8 +594,9 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
     let o = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
         .unwrap()
         .unwrap();
-    o.begin_era(&[CHANNEL], chrono::Utc::now(), |channel| {
+    o.begin_fixture_era(&[CHANNEL], chrono::Utc::now(), |channel| {
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources: Vec::new(),
             initial_anchor: 10,
@@ -683,8 +685,9 @@ async fn queued_unresolved_notice_releases_its_raw_and_survives_recreation_besid
     let o = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
         .unwrap()
         .unwrap();
-    o.begin_era(&[CHANNEL], chrono::Utc::now(), |channel| {
+    o.begin_fixture_era(&[CHANNEL], chrono::Utc::now(), |channel| {
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources: vec![InitSource {
                 source_id: source.clone(),
@@ -795,8 +798,9 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
     let o = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
         .unwrap()
         .unwrap();
-    o.begin_era(&[CHANNEL], chrono::Utc::now(), |channel| {
+    o.begin_fixture_era(&[CHANNEL], chrono::Utc::now(), |channel| {
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources: Vec::new(),
             initial_anchor: 10,
@@ -870,8 +874,9 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
 }
 
 fn era(o: &OStore, source: &crate::services::tui_o::shadow::SourceId) {
-    o.begin_era(&[CHANNEL], chrono::Utc::now(), |channel| {
+    o.begin_fixture_era(&[CHANNEL], chrono::Utc::now(), |channel| {
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources: vec![InitSource {
                 source_id: source.clone(),

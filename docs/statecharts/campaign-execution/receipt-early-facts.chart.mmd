@@ -1,0 +1,144 @@
+---
+title: "Campaign command: locked decision and atomic receipt"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: pending
+    lg1: committed
+    lg2: down
+    lg3: Breaks ReceiptDecisionUsesLockedFacts
+    lg4: Breaks ReceiptDecisionUsesLockedFacts in some cases
+    lg5: Path to the ReceiptDecisionUsesLockedFacts bug
+  }
+  class lg0 orange
+  class lg1 teal
+  class lg2 pink
+  class lg3 breaks
+  class lg4 mayBreak
+  class lg5 bugPath
+  s0: no caller holds the lock#59; durable effect 0, receipt absent
+  s1: Server stopped, committed rows kept
+  s2: reading the saved receipt#59; durable effect 0, receipt absent
+  s3: reading locked facts#59; durable effect 0, receipt absent
+  s4: both calls finished#59; durable effect 0, receipt absent
+  s5: deciding from a snapshot read before the lock#59; durable effect 0, receipt absent
+  s6: writing state and evidence in the transaction#59; durable effect 0, receipt absent#59; decision used facts from outside the lock
+  s7: no caller holds the lock#59; durable effect 0, receipt absent#59; decision used facts from outside the lock
+  s8: rendering the saved response#59; durable effect 0, receipt absent#59; decision used facts from outside the lock
+  s9: writing the receipt in the transaction#59; durable effect 0, receipt absent#59; decision used facts from outside the lock
+  s10: both calls finished#59; durable effect 0, receipt absent#59; decision used facts from outside the lock
+  s11: ready to commit#59; durable effect 0, receipt absent#59; decision used facts from outside the lock
+  s12: reading the saved receipt#59; durable effect 0, receipt absent#59; decision used facts from outside the lock
+  s13: no caller holds the lock#59; durable effect 1, receipt saved#59; decision used facts from outside the lock
+  s14: reading locked facts#59; durable effect 0, receipt absent#59; decision used facts from outside the lock
+  s15: deciding from a snapshot read before the lock#59; durable effect 0, receipt absent#59; decision used facts from outside the lock
+  s16: both calls finished#59; durable effect 1, receipt saved#59; decision used facts from outside the lock
+  s17: reading the saved receipt#59; durable effect 1, receipt saved#59; decision used facts from outside the lock
+  s18: replaying the saved response#59; durable effect 1, receipt saved#59; decision used facts from outside the lock
+  [*] --> s0
+  s0 --> s0: a request reads facts before acquiring the lock
+  s0 --> s1: the server stops and uncommitted work rolls back
+  s0 --> s2: one caller acquires the campaign and run locks
+  s1 --> s0: the server reconnects and requests may retry
+  s2 --> s0: a failure rolls back and releases the locks
+  s2 --> s1: the server stops and uncommitted work rolls back
+  s2 --> s3: the caller checks the receipt before deciding
+  s0 --> s4: a failure rolls back and releases the locks
+  s3 --> s0: a failure rolls back and releases the locks
+  s3 --> s1: the server stops and uncommitted work rolls back
+  s3 --> s5: the service keeps the snapshot read before the lock
+  s4 --> s1: the server stops and uncommitted work rolls back
+  s5 --> s0: a failure rolls back and releases the locks
+  s5 --> s1: the server stops and uncommitted work rolls back
+  s5 --> s6: the service decides without releasing the lock
+  s2 --> s4: a failure rolls back and releases the locks
+  s3 --> s4: a failure rolls back and releases the locks
+  s6 --> s7: a failure rolls back and releases the locks
+  s6 --> s8: the database stages state and evidence
+  s6 --> s1: the server stops and uncommitted work rolls back
+  s1 --> s4: the server reconnects and requests may retry
+  s7 --> s1: the server stops and uncommitted work rolls back
+  s5 --> s4: a failure rolls back and releases the locks
+  s8 --> s7: a failure rolls back and releases the locks
+  s8 --> s1: the server stops and uncommitted work rolls back
+  s8 --> s9: the response is rendered inside the transaction
+  s1 --> s7: the server reconnects and requests may retry
+  s7 --> s10: a failure rolls back and releases the locks
+  s7 --> s12: one caller acquires the campaign and run locks
+  s6 --> s10: a failure rolls back and releases the locks
+  s9 --> s7: a failure rolls back and releases the locks
+  s9 --> s1: the server stops and uncommitted work rolls back
+  s9 --> s11: the database stages the receipt
+  s10 --> s1: the server stops and uncommitted work rolls back
+  s11 --> s7: a failure rolls back and releases the locks
+  s11 --> s1: the server stops and uncommitted work rolls back
+  s11 --> s13: the transaction commits and releases the locks
+  s12 --> s1: the server stops and uncommitted work rolls back
+  s12 --> s10: a failure rolls back and releases the locks
+  s12 --> s14: the caller checks the receipt before deciding
+  s8 --> s10: a failure rolls back and releases the locks
+  s13 --> s1: the server stops and uncommitted work rolls back
+  s14 --> s1: the server stops and uncommitted work rolls back
+  s14 --> s10: a failure rolls back and releases the locks
+  s14 --> s15: the service keeps the snapshot read before the lock
+  s9 --> s10: a failure rolls back and releases the locks
+  s1 --> s10: the server reconnects and requests may retry
+  s12 --> s7: a failure rolls back and releases the locks
+  s13 --> s16: a failure rolls back and releases the locks
+  s13 --> s17: one caller acquires the campaign and run locks
+  s11 --> s10: a failure rolls back and releases the locks
+  s11 --> s16: the transaction commits and releases the locks
+  s15 --> s6: the service decides without releasing the lock
+  s15 --> s1: the server stops and uncommitted work rolls back
+  s15 --> s10: a failure rolls back and releases the locks
+  s1 --> s13: the server reconnects and requests may retry
+  s14 --> s7: a failure rolls back and releases the locks
+  s16 --> s1: the server stops and uncommitted work rolls back
+  s17 --> s1: the server stops and uncommitted work rolls back
+  s17 --> s16: a failure rolls back and releases the locks
+  s17 --> s18: the caller checks the receipt before deciding
+  s15 --> s7: a failure rolls back and releases the locks
+  s18 --> s1: the server stops and uncommitted work rolls back
+  s18 --> s16: a failure rolls back and releases the locks or the transaction commits and releases the locks
+  s17 --> s13: a failure rolls back and releases the locks
+  s18 --> s13: a failure rolls back and releases the locks or the transaction commits and releases the locks
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 orange
+  class s0 bugPath
+  class s1 pink
+  class s1 mayBreak
+  class s2 orange
+  class s2 bugPath
+  class s3 orange
+  class s3 bugPath
+  class s4 orange
+  class s5 orange
+  class s5 bugPath
+  class s6 orange
+  class s6 breaks
+  class s6 bugPath
+  class s7 orange
+  class s7 breaks
+  class s8 orange
+  class s8 breaks
+  class s9 orange
+  class s9 breaks
+  class s10 orange
+  class s10 breaks
+  class s11 orange
+  class s11 breaks
+  class s12 orange
+  class s12 breaks
+  class s13 teal
+  class s13 breaks
+  class s14 orange
+  class s14 breaks
+  class s15 orange
+  class s15 breaks
+  class s16 teal
+  class s16 breaks
+  class s17 teal
+  class s17 breaks
+  class s18 teal
+  class s18 breaks

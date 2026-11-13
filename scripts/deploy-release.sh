@@ -985,7 +985,7 @@ try:
     data = json.loads(run.stdout)
 except Exception:
     data = None
-value = data.get(field) if isinstance(data, dict) and data.get("schema") == 1 else None
+value = data.get(field) if isinstance(data, dict) and type(data.get("schema")) is int and data["schema"] == 1 else None
 print("true" if value is True else "false" if value is False else "unknown")
 PY
 )" || value=unknown
@@ -1250,6 +1250,12 @@ _rollback_release_binary() {
 
     if _rollback_would_revert_o_ledger; then
         echo "🛑 ROLLBACK REFUSED — O ledger floor requires a compatible reader"
+        echo "   The new binary stays live; $rel_backup is preserved. Fix forward with a compatible build."
+        return 0
+    fi
+
+    if _rollback_would_revert_o_child_store; then
+        echo "🛑 ROLLBACK REFUSED — O child store floor requires a complete child-output reader"
         echo "   The new binary stays live; $rel_backup is preserved. Fix forward with a compatible build."
         return 0
     fi
@@ -2767,9 +2773,28 @@ if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; th
     # reuse an existing artifact, so align the mtime after build.
     [ -e "$SOURCE_BINARY" ] && touch "$SOURCE_BINARY"
 fi
+# Define the pre-stage guards before checking artifacts and before rollback can be armed.
+_binary_would_revert_o_child_store() {
+    # A floor of any kind requires the actual target's complete child-output capability.
+    local rel_root="${ADK_REL:-${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}}"
+    local floor="$rel_root/o_store/thread_children.floor"
+    [ -e "$floor" ] || [ -L "$floor" ] || return 1
+    [ "$(_binary_build_flag "$1" o_store_thread_children)" = "true" ] || return 0
+    return 1
+}
+
+_rollback_would_revert_o_child_store() {
+    _binary_would_revert_o_child_store "${REL_BINARY_BACKUP:-}"
+}
+
 # The binary itself reports its O ledger reader; refuse before anything is staged.
 if _binary_would_revert_o_ledger "$SOURCE_BINARY"; then
     echo "✗ O ledger floor refuses this build's incompatible reader" >&2
+    exit 1
+fi
+
+if _binary_would_revert_o_child_store "$SOURCE_BINARY"; then
+    echo "✗ O child store floor refuses this build's incomplete child-output capability" >&2
     exit 1
 fi
 

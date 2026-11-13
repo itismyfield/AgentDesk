@@ -86,8 +86,9 @@ async fn boot_wait(ending: Ending) {
         .unwrap()
         .unwrap();
     let era = store
-        .begin_era(&[CANARY_CHANNEL], chrono::Utc::now(), |channel| {
+        .begin_fixture_era(&[CANARY_CHANNEL], chrono::Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![InitSource {
                     source_id: fixture.old_source.clone(),

@@ -614,7 +614,8 @@ assembly = 1
             shutil.copytree(ROOT / "scripts/audit_maintainability", scripts / "audit_maintainability",
                             ignore=shutil.ignore_patterns("__pycache__", "baselines"))
             (scripts / "ci").mkdir()
-            shutil.copy2(ROOT / "scripts/ci/rust_test_sources.py", scripts / "ci/rust_test_sources.py")
+            for filename in ("rust_test_sources.py", "merge_candidate.py"):
+                shutil.copy2(ROOT / "scripts/ci" / filename, scripts / "ci" / filename)
             def git(*arguments):
                 return subprocess.run(["git", "-C", str(repo), *arguments], capture_output=True,
                                       text=True, check=True).stdout.strip()

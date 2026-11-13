@@ -19,8 +19,9 @@ pub struct Excluded {
 
 /// Seals the era over the channels whose binding log already names a switch-time source; a
 /// sealed era is returned unchanged with nothing excluded.
-pub fn begin_era_checked<B: BindingEvents>(
+pub(crate) fn begin_era_checked<B: BindingEvents>(
     store: &OStore,
+    scope: &crate::services::session_host::surface_policy::InitScope,
     channels: &[u64],
     switch_at: DateTime<Utc>,
     bindings: &B,
@@ -47,7 +48,7 @@ pub fn begin_era_checked<B: BindingEvents>(
         .copied()
         .filter(|channel| inits.contains_key(channel))
         .collect();
-    let era = store.begin_era(&included, switch_at, |channel| {
+    let era = store.begin_era(&included, switch_at, scope, |channel| {
         let init = inits.remove(&channel);
         init.ok_or_else(|| StoreError::Rejected("channel was not checked".into()))
     })?;

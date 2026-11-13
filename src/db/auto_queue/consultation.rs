@@ -2,7 +2,7 @@ use sqlx::PgPool;
 use thiserror::Error;
 
 use super::entries::{
-    ENTRY_STATUS_DISPATCHED, EntryStatusUpdateOptions, update_entry_status_on_pg_tx,
+    ENTRY_STATUS_DISPATCHED, EntryStatusUpdateOptions, write_entry_status_on_pg_tx,
 };
 use super::runs::acquire_run_advisory_xact_lock_on_pg_tx;
 
@@ -106,7 +106,8 @@ pub async fn record_consultation_dispatch_on_pg(
         .to_string());
     }
 
-    let entry_result = update_entry_status_on_pg_tx(
+    // A `dispatched` target never owes a run-completion attempt.
+    let entry_result = write_entry_status_on_pg_tx(
         &mut tx,
         entry_id,
         ENTRY_STATUS_DISPATCHED,
@@ -116,7 +117,8 @@ pub async fn record_consultation_dispatch_on_pg(
             slot_index: None,
         },
     )
-    .await?;
+    .await?
+    .without_finalize();
 
     tx.commit()
         .await
