@@ -2,6 +2,7 @@
 use super::*;
 
 use super::ClaudeHandoffJournal as Journal;
+#[cfg(unix)]
 pub(crate) const MAX_START_FAILURES: u32 = 5;
 impl Owner {
     pub(crate) fn handoff(&self) -> Option<Journal> {
@@ -115,6 +116,7 @@ impl Owner {
         Ok(())
     }
     /// Persist the retry budget before releasing a failed wrapper; exhaustion uses start_failed.
+    #[cfg(unix)]
     pub(crate) fn handoff_start_failed(
         &mut self,
         front: &Front,
@@ -235,6 +237,7 @@ mod tests {
         );
         drop(root_guard);
     }
+    #[cfg(unix)]
     #[test]
     fn ended_handoff_launch_failure_is_bounded_and_retained_once() {
         let (_root, dir, mut owner, front) = queued();
@@ -303,6 +306,7 @@ mod tests {
         assert_eq!(owner.front().unwrap().1.message_id, following.message_id);
         assert_eq!(owner.snapshot.items.len(), 1);
     }
+    #[cfg(unix)]
     #[test]
     fn exhausted_handoff_retention_publish_failure_preserves_original_until_one_commit() {
         let (_root, dir, mut owner, front) = queued();
