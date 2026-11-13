@@ -720,3 +720,16 @@
 | `src/services/tui_input/human_frame/history/v2/native.rs:200` `ack_native_withdrawal_notice` | NoticeAck: cfg(test) 영속 outbox enqueue 뒤 철회 안내 ack | 운영 호출 연결은 B |
 
 A의 boot fixture는 실제 prepare→custody→reaper 뒤 시험 소비자가 등록 결과·기존 exact mailbox finish·owner drive를 연결한다. 자동 restore/결과 producer가 운영에 연결되었다는 주장은 하지 않는다.
+
+## B1 읽기·준비 포트 (비활성)
+
+| file:line / 함수 | 행동·모델 값의 근거 |
+|---|---|
+| `src/services/tui_o/writer/input_facts.rs:571` `observe_native`; `:580` `native_evidence`; `:537` 같은 capture의 record 연결 | 첫 record 전 opt-in, authenticated prefix만. `NativeInputPreparation.source`의 PreSource/Bound는 아래 bind_source에서 오며 capture 재시작의 물리 SourceId는 기존 SourceBinding을 사용한다. |
+| `src/services/tui_o/writer/input_facts/native.rs:41` `Stage`; `:70` `fold`; `:29` `Evidence` | Waiting/Taken/Attached/Running/Removed, 실제 source 순서·FIFO·membership/strict closer·철회. namespace/전체 ticket과 native range를 소비자에게 반환할 뿐 row·lease를 변경하지 않는다. |
+| `src/services/tui_input/human_frame/history/v2/native.rs:20` `Intent`; `:31` `episode` | Primary/Follower, Some/None. primary 원본 id 일치·nonce 비어 있지 않음·generation>0. 모델 pin은 이 명시적 intent에서만 온다. |
+| `src/services/discord/queue_io/input_owner/pump.rs:102` `submit_native_front` → 공통 reserve/effect | 모델 Intent→Prepared는 attribution을 담은 기존 durable reserve, AnyKey는 그 뒤 기존 effect leaf, NotSent는 leaf 전 typed 거절이다. 생산 caller는 아직 없다. |
+| `src/services/turn_orchestrator/queued_head/v2/sources.rs:14` `native_intent`; `prepare_history/bind_source/restore` | 원본 primary를 기준으로 decode. RuntimeReady와 Unknown/Reserved 복원은 기존 source·phase 형식을 보존한다. NotSent 원본은 기존 unarmed 복원으로 queued에 남고 결과를 만들지 않는다. |
+| `src/services/tui_input/human_frame/history/v2/native.rs:183` `native_evidence_registrations` | 기존 abandoned no-key 등록과 결과/cleanup 완료를 새 membership 후보에서 제외. 저장된 결과·boot custody 소비는 B2다. |
+
+B1에는 mailbox turn lease acquire/release, inflight create/delete, owner kick의 새 진입점이 없다. 기존 전수표는 유지한다. `NativeInputPreparation.phase`의 Intent/Prepared/Unknown/NotSent는 위 준비 경계의 추상 이름이며 별도 운영 상태 파일·전역 guard가 아니다. 이 모델의 result=None은 B1이 native finalization을 켜지 않는 범위이며 B2 결과/CAS/row/wake 진행성을 대신하지 않는다.

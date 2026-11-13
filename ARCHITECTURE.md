@@ -2004,6 +2004,8 @@ src/
 │   │   │   │   │   ├── herdr.rs
 │   │   │   │   │   ├── herdr_safety_tests.rs
 │   │   │   │   │   └── herdr_tests.rs
+│   │   │   │   ├── native_intent/
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── claude_handoff.rs
@@ -2019,6 +2021,7 @@ src/
 │   │   │   │   ├── ingress.rs
 │   │   │   │   ├── ingress_tests.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── native_intent.rs
 │   │   │   │   ├── native_receipt_tests.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── notice_tests.rs
@@ -4185,6 +4188,9 @@ src/
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
+│   │   │   │   ├── native/
+│   │   │   │   │   └── tests.rs
+│   │   │   │   ├── native.rs
 │   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── queued.rs
 │   │   │   │   ├── reactions.rs

@@ -47,35 +47,68 @@ pub(crate) async fn submit_front(
     clock: Clock,
     leaf: Leaf,
 ) -> Result<Completion, String> {
+    let attribution = serde_json::json!({"sources": prepared.sources});
+    submit_with_attribution(mailbox, claim, prepared, attribution, clock, leaf).await
+}
+
+async fn submit_with_attribution(
+    mailbox: &ChannelMailboxHandle,
+    claim: Option<FrontClaim>,
+    prepared: PreparedPayload,
+    attribution: serde_json::Value,
+    clock: Clock,
+    leaf: Leaf,
+) -> Result<Completion, String> {
     let lane = lane(TargetKey::of(&prepared.attempt)?);
     let _writer = lane.lock().await;
     let PreparedPayload {
         frame,
-        sources,
+        sources: _,
         attempt,
     } = prepared;
     let followers = claim.as_ref().map_or(&[][..], FrontClaim::followers);
     let payload = serde_json::json!({
         "digest": format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(frame.as_bytes())),
         "frame": frame,
-        "attribution": {"sources": sources},
+        "attribution": attribution,
         "followers": followers,
     });
     mailbox
         .v2_request(move |slot| {
             let owner = slot.as_mut().ok_or("V2 not adopted")?;
             let (attempt, payload) = (parse(attempt)?, parse(payload)?);
-            match claim {
+            let reserved = match claim {
                 Some(claim) => {
                     owner.reserve_claimed((claim.front(), claim.number()), attempt, payload)
                 }
                 None => owner.reserve(attempt, payload),
+            };
+            reserved?;
+            #[cfg(test)]
+            if owner.json()?["head_injection"]["payload"]["attribution"]
+                .get("native_intent")
+                .is_some()
+            {
+                owner.native_intent()?;
             }
-            .map(drop)
+            Ok(())
         })
         .await
         .map_err(effect::unsent)?;
     effect::run(mailbox, clock, leaf).await
+}
+
+#[cfg(test)]
+pub(crate) async fn submit_native_front(
+    mailbox: &ChannelMailboxHandle,
+    claim: Option<FrontClaim>,
+    prepared: PreparedPayload,
+    intent: super::native_intent::Intent,
+    clock: Clock,
+    leaf: Leaf,
+) -> Result<Completion, String> {
+    let attribution = intent.attribution(&prepared.sources);
+    submit_with_attribution(mailbox, claim, prepared, attribution, clock, leaf).await
 }
 
 #[cfg(test)]

@@ -10,6 +10,26 @@ pub(super) fn identity(item: &PendingQueueItem) -> QueueIdentity {
 }
 
 impl Owner {
+    #[cfg(test)]
+    pub(crate) fn native_intent(
+        &self,
+    ) -> Result<Option<crate::services::tui_input::human_frame::history::v2::native::Episode>, String>
+    {
+        let input = self
+            .snapshot
+            .head_injection
+            .as_ref()
+            .ok_or("no reserved native input")?;
+        let value = &input
+            .payload
+            .as_ref()
+            .ok_or("no native payload")?
+            .attribution["native_intent"];
+        let intent: crate::services::tui_input::human_frame::history::v2::native::Intent =
+            serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+        intent.episode(input.identity.primary)
+    }
+
     pub(super) fn fenced(&self, item: &PendingQueueItem) -> bool {
         let wanted = identity(item);
         let mut known = self

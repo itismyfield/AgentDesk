@@ -259,6 +259,10 @@ input-single-path/NativeAttributionNoFence.cfg	NativeInputAttribution	NoForeignE
 input-single-path/NativeAttributionNoWake.cfg	NativeInputAttribution	-	EveryInputEventuallySettled,HeadEventuallyInjected
 input-single-path/NativeAttributionNoWithdraw.cfg	NativeInputAttribution	-	EveryInputEventuallySettled,HeadEventuallyInjected,IdleEventuallyReleased
 input-single-path/NativeAttributionUnavailable.cfg	NativeInputAttribution	-	EveryInputEventuallySettled,HeadEventuallyInjected,IdleEventuallyReleased
+input-single-path/NativePreparationBorrowBusy.cfg	NativeInputPreparation	FollowerNoAuthority	-
+input-single-path/NativePreparationDropNotSent.cfg	NativeInputPreparation	NoSilentLoss	-
+input-single-path/NativePreparationFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationKeyBeforePrepare.cfg	NativeInputPreparation	NoKeyBeforePrepare	-
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
 input-single-path/ReservedIdEnqueueBefore.cfg	ReservedIdEnqueue	NoReservationQueueOverlap	-

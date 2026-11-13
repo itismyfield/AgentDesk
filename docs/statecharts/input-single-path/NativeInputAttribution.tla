@@ -1,5 +1,6 @@
 -------------------- MODULE NativeInputAttribution --------------------
 EXTENDS Naturals, FiniteSets, Sequences
+\* Pre-key intent/AnyKey/NotSent are refined in NativeInputPreparation; finalization stays B2.
 CONSTANTS Mode, Scenario, Legacy
 Ids == {1, 2}
 VARIABLES pc, native, members, nativeQueue, stage, lease, rows, pending,

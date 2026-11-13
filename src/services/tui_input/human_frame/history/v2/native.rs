@@ -1,6 +1,11 @@
 //! Native input evidence stays attached to its original registration through projection.
 use super::*;
 
+#[cfg(test)]
+pub(crate) fn frame_hashes(text: &str) -> Vec<String> {
+    super::super::class_hashes(text)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Episode {
     pub(crate) user_message_id: u64,
@@ -8,6 +13,35 @@ pub(crate) struct Episode {
     pub(crate) generation: u64,
     #[serde(flatten)]
     pub(crate) extra: serde_json::Map<String, Value>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Intent {
+    Primary(Episode),
+    Follower,
+}
+
+#[cfg(test)]
+impl Intent {
+    pub(crate) fn attribution(&self, sources: &[String]) -> serde_json::Value {
+        serde_json::json!({"sources": sources, "native_intent": self})
+    }
+
+    pub(crate) fn episode(&self, primary: u64) -> Result<Option<Episode>, String> {
+        match self {
+            Self::Primary(episode)
+                if episode.user_message_id != primary
+                    || primary == 0
+                    || episode.turn_nonce.is_empty()
+                    || episode.generation == 0 =>
+            {
+                Err("native primary intent mismatch".into())
+            }
+            Self::Primary(episode) => Ok(Some(episode.clone())),
+            Self::Follower => Ok(None),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +179,52 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
 }
 
 impl Registry {
+    #[cfg(test)]
+    pub(crate) fn native_evidence_registrations(
+        &self,
+    ) -> Result<Vec<crate::services::tui_o::writer::input_facts::native::Registration>, String>
+    {
+        self.inspect(|state| {
+            let registrations = state
+                .live
+                .iter()
+                .map(|b| (&b.registration, Some(&b.entry)))
+                .chain(state.planned.iter().map(|r| (r, None)))
+                .chain(
+                    state
+                        .passive
+                        .iter()
+                        .filter(|p| p.state != collision::ABANDONED)
+                        .filter_map(|p| p.registration.as_ref().map(|r| (r, p.entry.as_ref()))),
+                );
+            registrations
+                .filter_map(|(registration, entry)| {
+                    registration
+                        .native_settlement
+                        .as_ref()
+                        .filter(|s| s.outcome.is_none() && !s.cleanup_complete)
+                        .map(|s| (registration, entry, s))
+                })
+                .map(|(registration, entry, settlement)| {
+                    settlement.validate(registration)?;
+                    Ok(
+                        crate::services::tui_o::writer::input_facts::native::Registration {
+                            namespace: registration.namespace.clone(),
+                            ticket: settlement.ticket.clone(),
+                            frame_hash: registration.frame.class_hash.clone(),
+                            receipts: entry
+                                .into_iter()
+                                .flat_map(|e| e.events.iter())
+                                .filter(|e| matches!(e.kind.as_str(), "user" | "command"))
+                                .filter_map(|e| e.row.clone())
+                                .collect(),
+                        },
+                    )
+                })
+                .collect()
+        })
+    }
+
     // Writers stay test-only until native input activation installs their production caller.
     #[cfg(test)]
     pub(crate) fn prepare_native(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
