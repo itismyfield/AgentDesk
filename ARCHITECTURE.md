@@ -983,6 +983,9 @@ src/
 │   │   ├── verification_runner_tests.rs
 │   │   ├── view.rs
 │   │   └── view_tests.rs
+│   ├── channel_roles/
+│   │   ├── config_projection.rs
+│   │   └── memory_policy.rs
 │   ├── claude/
 │   │   ├── first_input/
 │   │   │   └── tests.rs
@@ -3687,6 +3690,9 @@ src/
 │   ├── opencode/
 │   │   ├── server_launch.rs
 │   │   └── streaming_entry.rs
+│   ├── org_catalog/
+│   │   ├── auth_projection.rs
+│   │   └── document.rs
 │   ├── pipeline_routes/
 │   │   ├── stage_validation.rs
 │   │   └── stage_validation_tests.rs
@@ -4674,6 +4680,7 @@ src/
 │   ├── automation_candidate_contract.rs
 │   ├── automation_candidate_materializer.rs
 │   ├── calendar_sync.rs
+│   ├── channel_roles.rs
 │   ├── claude.rs
 │   ├── claude_command.rs
 │   ├── claude_compact_context.rs
@@ -4718,6 +4725,7 @@ src/
 │   ├── monitoring_store.rs
 │   ├── opencode.rs
 │   ├── operator_connectors.rs
+│   ├── org_catalog.rs
 │   ├── pane_readiness.rs
 │   ├── pipeline_override.rs
 │   ├── pipeline_routes.rs
