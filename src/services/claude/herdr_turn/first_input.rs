@@ -96,7 +96,7 @@ fn write(
     };
     let HerdrInputRun::Ran(run) = observed_input(cancel, start, || {
         crate::services::claude_tui::composer_lock::with_composer_mutation_lock(logical, || {
-            composer::run(&attached.target, &plan, cancel)
+            composer::run_ready(logical, path, &attached.target, &plan, cancel)
         })
     })?
     else {
@@ -116,17 +116,17 @@ fn write(
         InputRun::Applied => (),
         stopped @ (InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }) => {
             let pane = attached.target.clone();
+            let watched_session = logical.to_owned();
+            let watched_path = attached.transcript.clone();
             crate::services::claude_tui::owner_input::record_preparation_watch(Box::new(
                 move || {
                     use crate::services::claude_tui::busy_inject::Screen;
-                    match composer::when_ready(
-                        || pane.capture_ansi(-80),
-                        None,
-                        || InputRun::Applied,
-                    ) {
-                        InputRun::Applied => Screen::Ready,
-                        _ => Screen::Unknown,
-                    }
+                    if crate::services::claude_tui::readiness::observe(&watched_session,Some(&watched_path)).is_some()
+                        && pane.capture_ansi(-80).as_deref().is_some_and(|capture|
+                            crate::services::claude_tui::readiness::empty_draft(capture)
+                            && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture)) {
+                        Screen::Ready
+                    } else { Screen::Unknown }
                 },
             ));
             return Err(before_payload(
@@ -262,6 +262,8 @@ pub(super) fn observe(
 }
 
 #[cfg(test)]
+mod clear_held_tests;
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]
@@ -388,6 +390,7 @@ mod regression_tests {
                 baseline_event_seq: None,
             },
         };
+        crate::services::claude_tui::readiness::tests::pre_source(logical, transcript);
         (
             owner,
             Attached {

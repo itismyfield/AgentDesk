@@ -346,8 +346,9 @@ use adk_session::{
     build_adk_session_key, build_session_key_candidates, derive_adk_session_info,
     lookup_pending_dispatch_for_thread, parse_dispatch_id,
 };
+use compact_turn_authority::compact_eligible_turn_source;
 pub(in crate::services) use compact_turn_authority::{
-    ManagedCompactTurnIdentity, compact_eligible_turn_source, live_managed_turn_matches,
+    ManagedCompactTurnIdentity, pending_managed_turn_matches,
 };
 use formatting::{format_for_discord, format_tool_input, send_long_message_raw, truncate_str};
 use inflight::InflightTurnState;
