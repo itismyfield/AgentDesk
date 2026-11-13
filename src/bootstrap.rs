@@ -105,7 +105,10 @@ pub(crate) async fn prepare_and_install_boot_snapshots(
         let candidate = crate::config::session_hosts::BootSessionHosts::from_config(config)?;
         let selection = prepare_session_hosts_boot(candidate, pool).await;
         crate::services::session_host::policy::boot_grants::prepare(selection.hosts()).await;
-        install_boot_snapshots(config, selection)
+        install_boot_snapshots(config, selection)?;
+        crate::cli::dcserver::decision_boot::initialize_staged()
+            .await
+            .map_err(anyhow::Error::msg)
     }
     .await;
     crate::services::legacy_body_census::record_selection(config, result.is_ok()).await;

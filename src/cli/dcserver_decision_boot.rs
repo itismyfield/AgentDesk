@@ -1,6 +1,30 @@
 use crate::services::decision_gate::{self, SecretString};
 use tokio_util::sync::CancellationToken;
 
+static STAGED_KEY: std::sync::Mutex<Option<Option<SecretString>>> = std::sync::Mutex::new(None);
+
+pub(crate) fn stage(captured: Option<SecretString>) {
+    *STAGED_KEY
+        .lock()
+        .expect("decision startup staging poisoned") = Some(captured);
+}
+
+pub(crate) async fn initialize_staged() -> Result<(), &'static str> {
+    let staged = STAGED_KEY
+        .lock()
+        .expect("decision startup staging poisoned")
+        .take();
+    // Shared bootstrap callers outside dcserver never stage a key or start a lookup.
+    let Some(captured) = staged else {
+        return Ok(());
+    };
+    if initialize(captured).await {
+        Ok(())
+    } else {
+        Err("dcserver startup cancelled")
+    }
+}
+
 pub(super) async fn initialize(captured: Option<SecretString>) -> bool {
     let Ok(termination) = StartupTermination::listen() else {
         tracing::info!(outcome = "Off(cancelled)", "Decision gate availability");
@@ -85,3 +109,7 @@ impl StartupTermination {
 #[cfg(all(test, unix))]
 #[path = "dcserver_decision_boot_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "dcserver_decision_stage_tests.rs"]
+mod stage_tests;
