@@ -355,5 +355,5 @@ pub(crate) fn current_report_matches(path: &Path, expected: &RestartCompletionRe
     current.attempt == expected.attempt && current.state == expected.state
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

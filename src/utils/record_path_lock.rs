@@ -38,5 +38,5 @@ pub(crate) fn lock_record_path(record_path: &Path) -> Result<RecordPathLock, Str
     Ok(RecordPathLock { _file: file })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

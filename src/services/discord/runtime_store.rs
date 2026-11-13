@@ -39,7 +39,7 @@ pub(super) fn discord_inflight_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_inflight"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn discord_restart_reports_root() -> Option<PathBuf> {
     crate::services::runtime_paths::restart_reports_root()
 }
