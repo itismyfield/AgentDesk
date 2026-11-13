@@ -1,8 +1,11 @@
 # Discord 테스트 채널 E2E 상시 실행 설계
 
 기준 main: `79bebdd4eaa29b289bf88412825baa7d70a6ac77` (2026-11-13).
-정본 입력은 #8120 본문·댓글의 레인 사본 `issue-and-comments.md`와 11-13 13:5x 브리프다.
-이 문서는 구현 계약이다. 이번 조사에서 빌드·provider 실행·Discord 접속·운영 조회를 하지 않았다.
+정본 입력은 #8120 본문·댓글의 레인 사본 `issue-and-comments.md`, 11-13 13:5x 브리프와
+14:3x 코디네이터 결정(controlled ingress·수용 자동화·실측 전 off·알림만)이다.
+이 문서는 구현 계약이다. 최초 설계 조사에서는 빌드·provider 실행·Discord 접속·운영 조회를 하지 않았다.
+S0는 두 맥의 보존 deploy 로그를 읽기 전용 복사본으로 집계하고 L0는 오프라인 모델을 검증한다.
+운영 프로세스·Discord·설정은 변경하지 않으며 cargo/provider 실행도 하지 않는다.
 
 **단일 시험 호스트의 외부 runner가 #8124 인스턴스에서 실행하고, 결과 파일을 감시자가 읽는다.**
 배포 후 핵심·순환 조각·일일 전체의 명세는 만들되, 실제 사용량이 없는 묶음의 주기는 켜지 않는다.
@@ -68,10 +71,13 @@ Notify는 turn sender로 허용하지 않고, Announce의 일반 입력은 기�
 | `tests/e2e/tui_relay/fixtures/turn_smoke/saved/e50-herdr-pass-20261101T175451Z.json:43` | 보존된 실제 보고서 부분본의 start/end 차이 **61초**, n=1. ACK된 Discord post 4개 중 clear 1, 작업 prompt 3 | 현재 시험 인스턴스/observer 비용이 아님. 실제 provider start/API 호출·token 미기록. 파일명 stamp와 내부 local 시각의 timezone을 섞지 않음 |
 | `i8011/smoke-fail-0043.log:36`–:43 (레인에 보존된 11-09 스모크 원문) | E-51 PASS, T1/T2/AFTER_CLEAR 각 1. 단계 합 **64.4초**, n=1; 작업 prompt 3, clear 1 | 단계 합은 전체 wall time이 아님. 같은 실행의 E-50은 첫 응답 timeout, 단계 합 64.1초(:33) |
 | 같은 E-51 단계 :41 | T1 send+wait=20.1초, T2=14.7초, AFTER_CLEAR=20.5초; idle 2·clear 3.6·final 3.5초 | provider inference만의 시간도, 지연 상한의 근거도 아님 |
-| #8120 본문 | 11-06 이후 E-50 PASS24/FAIL3, E-51 PASS30/FAIL7; E-51 분모 37 | 제공 집계. 해당 실패 7건 원문·37건 usage 시계열은 이 레인에 없음. §5.2의 미분류를 유지 |
+| #8120 본문과 S0 replay | E-50 PASS24/FAIL3, E-51 PASS30/FAIL7이 같은 40배포 시작 창에서 재현됨 | 원 run 목록이 없어 `match_not_identity`. E-51 실패 7건의 원문 확보·원인 불명 7. 현재 KST 전수 분모와 분리(§5.2) |
+| S0의 KST 11-06 이후 mac-book report | E-50 wall n=34, min/median/max **58/67/98초**; E-51 wall n=44, **60/66.5/88초** | 각 report의 start/end 차이이며 묶음 wall·provider inference·native turn/token은 아님. 시나리오별 ACK post는 기록됐으나 clear 포함으로 턴 환산 금지 |
 
 재계산 산출물은 레인 `logs/historical-measurements.json`, `logs/scenario-census.json`에 둔다.
-원문 로그 사본의 SHA256은 전자에 기록했다. n=1 부분본 둘의 61+64.4=125.4초는
+최초 설계 원문 로그 사본의 SHA256은 전자에 기록했다. S0 전수 원문·inventory·report SHA는
+[replay JSON](e2e-continuous/s0-replay.json), 시각·head·실패 단계 전체 표는
+[replay 표](e2e-continuous/s0-replay.md)에 추가한다. n=1 부분본 둘의 61+64.4=125.4초는
 **서로 다른 실행에서 가져온 proxy 합**일 뿐, 핵심 묶음 wall time·p95·평균이 아니다.
 새로운 busy/thread 묶음과 순환/전체는 기존 실행 표본 **n=0, 실제 턴·시간·token=unknown**이다.
 YAML의 timeout 합이나 약 3.3시간이라는 과거 명세 합
@@ -80,11 +86,12 @@ YAML의 timeout 합이나 약 3.3시간이라는 과거 명세 합
 ### 2.2 묶음 명세와 활성화 조건
 
 새 시나리오는 번호 충돌을 피하려고 여기서는 이름으로 표기한다. 실제 E 번호는 구현 때 배정한다.
-`R-marker`/`R-inject`는 §3.1의 **human 원증상** 전제가 필요하다.
+`R-marker`/`R-inject`는 §3.1의 **human 원증상** 전제가 필요하다. 무인 회귀는 별도
+`controlled_ingress` provenance로 실행하고, #8114의 native-busy 원증상과 managed 대조군을 구별한다(§3.3).
 
 | 묶음 | 고정 목록·조합 | 입력/턴/시간 근거와 주기 |
 | --- | --- | --- |
-| P: 배포 SHA 핵심 | E-50(Claude/Herdr/channel), E-51(Codex/tmux/channel), R-marker(Claude/tmux/channel/busy), R-inject(Claude/Herdr/channel/busy), R-fresh(Claude/tmux/thread/primary-no-slots), R-host(Claude/Herdr/thread/primary-no-slots, busy 후속·취소 포함) | 기존 둘은 작업 prompt 6개; 신규는 A+B, A+B, 첫 입력, A+B로 **계획상 7개**, 합 13개. busy 합류가 성공하면 계획상 native 턴 10개지만 **실제 턴 미실측**. 기존 둘의 시간 proxy만 있고 전체는 unknown. 배포 완료 이벤트당 중복 제거한 요청 1개, 자동 실행은 실측 활성화 뒤 |
+| P: 배포 SHA 핵심 | E-50(Claude/Herdr/channel), E-51(Codex/tmux/channel), R-marker(Claude/tmux/channel/busy), R-inject(Claude/Herdr/channel/native-busy/no-managed-or-external-holder), R-fresh(Claude/tmux/thread/primary-no-slots), R-host(Claude/Herdr/thread/primary-no-slots, busy 후속·취소 포함) | 기존 둘은 작업 prompt 6개; 신규는 A+B, A+B, 첫 입력, A+B로 **계획상 7개**, 합 13개. busy 합류가 성공하면 계획상 native 턴 10개지만 **실제 턴 미실측**. 기존 둘의 시간 proxy만 있고 전체는 unknown. 배포 완료 이벤트당 중복 제거한 요청 1개, 자동 실행은 실측 활성화 뒤 |
 | R1: 기본 relay | E-1, E-2, E-3, E-5, E-15; 지원하는 두 TUI provider, host를 회차별 tmux/Herdr 교대 | n=0, 실제 턴/시간/token unknown |
 | R2: 입력·본문·로컬 제어 | E-16, E-20, E-22, E-23, E-52, E-64; YAML cells와 실제 capability의 교집합 | n=0. E-20은 같은 세션에 입력 동시 도착이며 provider 활성 턴 2개를 요구하는 E-11과 다름 |
 | R3: 직접 TUI·압축·모델 | E-4, E-6, E-7, E-10, E-21, E-37; tmux TUI 및 YAML의 provider만 | n=0; Herdr에 tmux-only 키 검사를 N/A로 바꿔 전체 PASS하지 않음 |
@@ -101,6 +108,11 @@ E-11은 실제 두 provider 턴 동시성이라 #8124의 활성 턴 1 계약에�
 E-13은 claude-pipe 전용이라 초기 TUI 프로필에서 gap이다. E-35/36의 Herdr N/A도 coverage 0이다
 (`scripts/e2e/tui_relay/herdr.py:286`). 이 칸들이 남으면 F는 `PARTIAL`, full-live PASS가 아니다.
 fixture E-24/25는 offline 별도 결과, unsupported E-26/27/28과 retired E-32/33/34는 live 성공 수에 넣지 않는다.
+
+기계 판독 정본은 [묶음 manifest](e2e-continuous/bundles.schema1.json)다. 이것은 `NOT_RUN` 계획이며
+YAML hash·38 live 목록·P의 실제 host·controlled ingress provenance·공백·off/null 비용을 함께 고정한다.
+`python3 -m unittest -v tests.test_e2e_continuous_manifest`는 누락/중복/fixture 혼입·거짓 PASS·
+미실측 비용 0·human 승격·배포 hold 뮤턴트를 거부한다. manifest 자체는 실행/coverage 증거가 아니다.
 
 ### 2.3 비용 측정 후에만 주기 선택
 
@@ -155,22 +167,31 @@ runtime witness가 있어야 한다. witness가 없으면 `UNEVALUABLE(precondit
 `preserve_on_cancel`을 요구한다. `DISPATCH:`로 바꿔도 같은 경로가 되지 않는다.
 봇을 사람으로 위장하거나 `/turn/deliver` 성공을 Discord reaction 검증으로 치환하지 않는다.
 
-권고는 **원증상 human 입력 1회 RED/GREEN 수용 + 무인 bot 대응군의 별도 coverage**다.
-R-marker/R-inject의 human 칸은 시험 채널에서 관측자가 준비된 뒤 사람이 run nonce가 있는 B를 보내는
-준자동 시나리오로 먼저 구현한다. nightly에서 입력이 없으면 `NOT_RUN_HUMAN`, 원증상 coverage 0이다.
-operator가 수용 창을 예약하지 않은 무인 회차는 human 시나리오의 A부터 시작하지 않아 불필요한 턴을 쓰지 않는다.
-수정 레인의 기존 실제 intake/owner fixture RED도 원인 증거로 연결하되 live human E2E로 승격하지 않는다.
-무인 human 원경로까지 필수라면 별도 test-only ingress replay 설계/승인이 필요하다. 그것도
-`controlled_ingress` 칸이며 실제 human Gateway 입력과 같은 live 칸이라고 보고할 수 없다(§8).
+확정한 수용 방식은 **원증상 human 입력 1회 RED/GREEN + 무인 controlled-ingress 회귀 + bot 대조군**이다.
+R-marker/R-inject의 실제 human Gateway 수용은 Notify observer 준비 뒤 코디네이터가 agent-desktop으로
+Discord 앱을 조작해 run nonce가 있는 B를 보내 수행한다. 사용자에게 입력을 요청하지 않으며 정기 수동 작업은 0이다.
+무인 회차는 human 시나리오의 A를 시작하지 않고 해당 칸을 `NOT_RUN_HUMAN`, coverage 0으로 남긴다.
+수정 레인의 실제 intake/owner fixture RED도 원인 증거로 연결하되 live human E2E로 승격하지 않는다.
+
+E1b 앞의 E1-ingress는 기존 `intake_gate/live_entry_tests.rs:337`–:346의
+`FullEvent::Message → router::handle_event` 진입점을 시험 전용 adapter로 재사용한다.
+#8124 receipt의 instance/boot·실제 parent·run nonce를 검증하고, 동일 nonce의 원래 bot 이벤트와 중복 실행을 막는다.
+controlled input에서 실제 host submit·REST reaction·Notify 관측까지 연결하되 ingress provenance는
+`controlled_ingress`로 보존한다. 이는 human 분기 회귀를 무인 검증하는 별도 칸이며 실제 human Gateway의
+전달 계층을 검증하지 않는다. bot 입력·controlled ingress·human Gateway의 실행 수와 coverage를 합산하지 않는다.
 
 ### 3.2 메시지별 반응 변경 이력 — R-marker, #8113
 
 Discord REST의 Get Reactions는 현재 반응한 사용자 목록이지 변경 이력이 아니다.
 `after`는 사용자 pagination이며 반응 시각 cursor가 아니다. polling으로 📬 add/remove가 사이에 지나가면
 놓친다. 이력에는 입력 전 연결된 별도 Notify observer가 받는 Gateway reaction add/remove,
-remove-all/remove-emoji를 사용한다. 이벤트에는 actor/message/channel이 있고 반응 자체 timestamp는 없으므로
-Gateway session/shard/sequence 순서와 **수신 monotonic 시각**을 보존한다.
-근거: [Get Reactions](https://docs.discord.com/developers/resources/message#get-reactions),
+remove-all/remove-emoji를 사용한다. 단건 add/remove는 `user_id` actor로 귀속한다.
+bulk remove-all/remove-emoji에는 actor가 없으므로 actor 필터로 버리지 않고, 해당 메시지 전체 또는 해당
+이모지의 관측 집합 전체에 제거를 적용한다. 이벤트의 message/channel과 Gateway session/shard/sequence 순서,
+**수신 monotonic 시각**을 보존하며 반응 자체 timestamp는 가정하지 않는다.
+actor 없는 두 bulk 이벤트 replay와 이를 버리는 뮤턴트는 제거 이력 누락이나 불완전 이력의 PASS를 RED로 검출해야 한다.
+근거: [bulk reaction 제거 payload](https://docs.discord.com/developers/events/gateway-events#message-reaction-remove-all),
+[Get Reactions](https://docs.discord.com/developers/resources/message#get-reactions),
 [reaction events / payload sequence](https://docs.discord.com/developers/events/gateway-events#message-reaction-add)
 (2026-11-13 문서 확인, 앱 접속 없음).
 
@@ -215,14 +236,26 @@ reaction endpoint의 초당 고정 quota를 가정하지 않는다. 현재 문�
 4분 보류를 잡기 위한 **초기 기능 계약 제안**이다. 측정 뒤 유지/조정하되 턴 종료 전 조건은 완화하지 않는다.
 Discord 생성→수신 지연은 별도 수치이며 server/observer의 서로 다른 clock 원점을 빼지 않는다.
 
-A는 실제 provider가 foreground hold tool에 들어간 witness를 남긴다. busy를 확인한 뒤 B를 보내고,
-서버 수신·queue 수락·host write/submit receipt·provider가 B를 읽은 native source offset·A end를 잇는다.
-fixture hold는 최대 45초 후 자연 종료하므로 broken 경로도 끝나지만, B를 A 종료 후 보내는 순차 시험은 불가능하다.
-구체적으로 다음을 저장한다.
+**원증상 native-busy 시험과 managed 대조군은 별도 occurrence다.** 원증상의 A는 AgentDesk가 시작하지 않은
+동일 native session의 실제 busy source이며, foreground hold tool 진입과 A terminal record를 남긴다.
+B 수신 직전 managed active claim/inflight와 durable external holder가 모두 없음을 동일 session/nonce에
+연결해 확인해야 한다. `native` 라벨만 붙이거나 managed 턴 A를 시작한 것만으로 이 조건을 충족하지 않는다.
+`intake_gate.rs:989`–:1015·:1073의 managed active 큐잉/return과
+`router/message_handler/provider_dispatch/owner_input.rs:200`–:241의 external-holder/`hand_busy`는
+`router/message_handler/intake_turn.rs:1753`–:1768과 다른 경로다.
+따라서 B가 실제 pre-submit busy 분기에 도달한 witness를 필수로 저장한다. 선행 상태나 분기 witness가
+없으면 `UNEVALUABLE(precondition)`이며 원증상 RED/GREEN으로 세지 않는다.
+
+managed 대조군은 managed active claim/inflight가 있는 A에 B를 보내 queue/`hand_busy` 경로의 정상 동작을
+검증한다. 그 GREEN은 #8114 원증상 분기 coverage가 아니며 원증상과 결과를 합치지 않는다.
+각 시험은 busy를 확인한 뒤 B를 보내고, 서버 수신·queue 수락·host write/submit receipt·provider가 B를 읽은
+native source offset·A end를 잇는다. fixture hold는 최대 45초 후 자연 종료하므로 broken 경로도 끝나지만,
+B를 A 종료 후 보내는 순차 시험은 불가능하다. 구체적으로 다음을 저장한다.
 
 | 단계 | 증거와 판정 |
 | --- | --- |
-| 수신/수락 | B의 Discord message ID·generation, A turn nonce, gate의 실제 적용값. server의 한 clock ID로 수신 시각 기록 |
+| 원증상 선행/분기 | native busy source identity·offset, B 수신 직전 managed claim/inflight 및 durable external holder 부재, 실제 pre-submit busy 분기 도달 receipt. 하나라도 없으면 UNEVALUABLE |
+| 수신/수락 | B의 Discord message ID 또는 controlled ingress ID·generation, provenance, A turn nonce, gate의 실제 적용값. server의 한 clock ID로 수신 시각 기록 |
 | host submit | 해당 host의 실제 입력 제출 완료 receipt. adapter가 받은 시각을 같은 서버 clock으로 기록해 상한을 보수적으로 측정. 함수 진입/queue 성공/붙여넣기 호출 의도는 아님 |
 | provider 관측 | 같은 native session의 B user/input source record와 offset, A의 terminal record보다 앞선 순서. fixture가 요청한 고유 marker를 provider 출력으로도 확인 |
 | 종료/유일성 | submit은 A end보다 **엄격히 이전**; B 처리 1회. 새 턴의 응답이 B marker를 포함한 것만으로 통과 불가 |
@@ -230,9 +263,11 @@ fixture hold는 최대 45초 후 자연 종료하므로 broken 경로도 끝나�
 trace는 인스턴스의 bounded observation NDJSON에 metadata만 기록하고, body/token/운영 session은 싣지 않는다.
 receipt 없는 host나 provider format은 `BLOCKED_CAPABILITY`다. 10초 경계·같은 시각·A end 직전/직후·
 늦게 도착한 source record를 deterministic replay로 검증한다. native source 순서와 수집 도착 순서를 구분한다.
-수정 전 `intake_turn.rs:1753`의 Herdr 제외→:1768 `defer_before_submit`은 A 종료 뒤 B를 처리해
-`submit < A_end` 또는 10초 단언에 RED다. 이미 Herdr를 포함하는 `queued_head_covers`만 보고
-GREEN이라고 하지 않는다. 뮤턴트는 Herdr 제외를 복구; 결과 순서만 유지돼도 시간 단언이 RED여야 한다.
+수리 전 고정 SHA에서 **위와 같은 선행/분기 witness** 및 :1768의 `hosted_tui_busy_pre_submit`을 함께 관측한다.
+이 조건의 `intake_turn.rs:1753` Herdr 제외→:1768 `defer_before_submit`은 A 종료 뒤 B를 처리해
+`submit < A_end` 또는 10초 단언에 RED여야 한다. 수리 후 GREEN과 Herdr 제외를 복구한 뮤턴트 RED도
+동일 witness 조건으로 제출한다. 이미 Herdr를 포함하는 `queued_head_covers`나 managed 대조군의 GREEN만으로
+원증상을 통과시키지 않는다. 결과 순서만 유지돼도 시간 단언이 RED여야 한다.
 
 ### 3.4 새 thread 첫 입력 — R-fresh, #8115
 
@@ -287,7 +322,8 @@ parent 상속이 없어 새 thread가 tmux/legacy로 가면 **응답 본문이 �
 | 기능 claim | scenario / 필수 operation | 원증상 qualifier | 현재 live 증거 |
 | --- | --- | --- | --- |
 | busy 입력 결과 표시 | R-marker / reaction_history, host_identity | #8113, human/managed/Claude/tmux/channel/busy | gap; 기존 fixture RED는 별도 |
-| busy 입력 즉시 합류 | R-inject / inject_before_turn_end, injection_latency, exactly_once | #8114, human/managed/Claude/Herdr/channel/busy | gap |
+| busy 입력 즉시 합류 | R-inject / inject_before_turn_end, injection_latency, exactly_once, pre_submit_busy_witness | #8114, human 또는 controlled_ingress(별도)/native-busy/Claude/Herdr/channel; B 직전 managed claim/inflight·durable external holder 없음 | gap; witness 없으면 UNEVALUABLE |
+| managed busy 대조군 | R-inject-managed / inject_before_turn_end, injection_latency, exactly_once | managed active claim/inflight/Claude/Herdr/channel/busy; 원증상 분기와 별도 | gap; #8114 원증상 coverage에 합산 안 함 |
 | 새 대화 첫 입력 | R-fresh / fresh_session_started, execution_node | #8115, thread/primary-no-slots/idle-unowned | 제품 fix·PG 시험 존재, live gap |
 | thread host·출력 상속 | R-host / session_host, output_sink, busy_followup, cancel | #8118, Herdr/thread/idle→busy | gap |
 
@@ -341,10 +377,10 @@ summary와 별도로 단일 supervisor의 `status.json`에 heartbeat·enabled·r
 }
 ```
 
-occurrence key는 scenario×provider×host×surface×idle/busy에 human/automation·managed/native·
+occurrence key는 scenario×provider×host×surface×idle/busy에 ingress provenance(human_gateway/controlled_ingress/bot)·managed/native·
 preferred-node 조건·O/Legacy qualifier와 assertion operation/occurrence를 더한다.
 #8123 기능 지도에는 같은 key로 join한다. 선언 coverage와 실제 실행 최근성은 별도 열이다.
-같은 cell의 다른 host나 bot 실행을 human/Herdr 칸에 합산하지 않는다.
+같은 cell의 다른 host나 bot/controlled_ingress 실행을 human Gateway/Herdr 칸에 합산하지 않는다.
 
 PASS는 expected=executed live occurrence set, 실행 수>0, 필수 assertion 전부 complete/pass,
 실제 provider contact, instance/head/binary/profile 일치, timeout/dirty residue 없음일 때뿐이다.
@@ -402,32 +438,45 @@ launchd unload나 test job pause가 운영 dcserver 중단·배포 중단을 뜻
 오염된 세션을 자동 kill/reset해서 통과시키지 않고 #8124 소유 정리만 사용한다.
 입력 ACK 불명은 Discord nonce/message 조회로 중복 여부를 확인하기 전 재송신하지 않는다.
 
-### 5.2 요청된 E-51 FAIL 7/37의 실제 분류 상태
+### 5.2 E-51 FAIL 7/37과 S0 전수 replay
 
-**과부하 7건이라고 결론낼 근거가 없다.** 정본 본문에 30 PASS/7 FAIL 집계만 있고,
-WSL의 제공 로그에는 해당 7건의 run ID·report·host 지표가 없다. 운영 호스트/토큰으로 더 수집하지 않았다.
+S0는 mac-book deploy 로그 **398개/34,757,622 bytes**, mac-mini **352개/27,428,192 bytes**를
+읽기 전용으로 복사했다. 복사 snapshot의 inventory·파일별 SHA256·report SHA를 남긴다.
+브리프의 약 400개는 snapshot에서 398개였으며, 보존본 밖 로그의 존재나 결과를 추정하지 않는다.
+전수 표의 시각은 smoke **묶음 시작 stamp**이며 시나리오별 start/end와 구별한다.
+정식 경계는 **2026-11-06 00:00 KST**다. 현재 snapshot까지 94개 묶음·188개 시나리오 판정이 있다.
 
-| 11-06 이후 해당 7건 | 원시 로그 확인 수 | 원인 확정 수 |
-| --- | ---: | ---: |
-| 제품 회귀 / host 과부하 / provider·Discord / observer·harness | 0 | 각 0 (원인 미확정) |
-| **미분류** | **7건 원문 미확보** | **7** |
+| 정식 KST 경계 이후 | PASS | FAIL | SKIPPED | 실제 scenario 실행 |
+| --- | ---: | ---: | ---: | ---: |
+| mac-book E-50 | 26 | 8 | 14 | 34 |
+| mac-book E-51 | 37 | 8 | 3 | 44 (reset 실패 1건은 입력 전) |
+| mac-mini E-50 | 0 | 0 | 46 | 0 |
+| mac-mini E-51 | 0 | 0 | 46 | 0 |
 
-참고 가능한 별개 사례는 다음뿐이며, 이들을 위 7건의 분자에 끼워 넣지 않는다.
+mini의 no-relay-channel skip은 실행 0이며 PASS가 아니다. 로그의 `path=herdr`는 보고/config 경로이고
+actual runtime host 증거는 아니므로 실제 host는 unknown으로 남긴다. 배포/시나리오 결과도 분리한다.
+원문 수치 E-50 **24 PASS/3 FAIL**, E-51 **30 PASS/7 FAIL**은
+**11-06 09:00 KST~11-12 12:58:35 KST 묶음 시작 창**의 같은 40배포에서 동시에 재현됐다.
+원 run-list가 없으므로 이 창은 `match_not_identity`이며 원래 37건 identity를 확정한 것은 아니다.
+정식 KST 경계와 현재 snapshot에는 이 추정 창 앞뒤의 실행이 추가된다. 기간 밖 실패로 분자를 채우지 않는다.
 
-- `scripts/e2e/tui_relay/tests/fixtures/e51_codex_tui_20261024_wait_timeout.json:30`은 watcher_unbound,
-  :37은 queue_blocked/queue1을 보인다. raw marker는 **자기 prompt**(:19)라 relay 성공 증거가 아니다.
-  옛 `relay_surface_filter_miss...` 분류만 보고 false FAIL/과부하라고 결론내릴 수 없다. 10-24라 집계 기간 밖이다.
-- 11-09 보존 로그의 E-51은 PASS다(§2.1). 같은 run의 E-50은 no_direct_input_or_relay_evidence timeout으로,
-  host 부하 지표가 없어 원인 미확정이다.
-- 정본 11-12 댓글은 E-50의 6/6 relay PASS·각 전달1과 stdout 교체/fingerprint 불일치로 인한 judge FAIL을
-  보고한다. 이는 **관측 경로 실패** 사례이지 E-51 7건의 원인이 아니다. 현재 :4643–:4648의 excerpt 거부와
-  `post_deploy_turn_smoke.py:182`가 그 경로를 설명하며, config host 표시와 actual cell 차이도 §1.2에서 다룬다.
+| 추정 E-51 7 FAIL의 원문 witness | 건수 | 분류와 한계 |
+| --- | ---: | --- |
+| composer readiness 로그 카운터를 deploy judge가 거부 | 5 | **불명**. scenario report PASS와 deploy FAIL이 함께 남음. 과부하나 제품 회귀를 확정할 host 지표 없음 |
+| 첫 Discord 응답 대기 timeout | 1 | **불명**. 시간 위반만으로 과부하라고 하지 않음 |
+| cell-reset HTTP 409 / provider runtime unavailable | 1 | **불명**. scenario 입력 전 중단; native 턴 실행으로 세지 않음 |
+| 원문 확보 / 원인 확정 | **7 / 0** | 과부하 0·외부 503 0·Herdr 전환 0·진짜 회귀 0·불명 7 |
 
-S0에서 coordinator가 토큰 없이 제공하는 37건의 보존 report/log·7건 run 목록을 run ID로 dedup하여
-`run/head/cell/actual-host/first-failing-step/marker-count/observer/log-rotation/host-metrics/provider-error/classification/confidence`
-CSV로 만든다. 누락 항목은 unknown이다. log 교체는 해당 run/boot의 회전 전후 bytes를 검증하거나
-실제 Herdr detail/CLI로 판정하고, tmux에 필요한 로그를 Herdr 문자열로 면제하지 않는다.
-최초 원인 분류를 확정하기 전 자동 차단/재시도율/성능 주기를 통계로 정하지 않는다.
+정식 전수의 FAIL 16개 중 외부 HTTP 503을 직접 기록한 실행은 **1개**, 나머지는 **불명 15개**다.
+이 외부 503 실행을 위 E-51 7건에 넣지 않는다. 시간 상한·readiness·로그 발췌 누락을 원인과 혼동하지 않는다.
+운영 세션/설정/토큰으로 보강하거나 새 provider 턴을 실행하지 않았다.
+
+시각·호스트·head·결과·첫 실패 단계·분류·원문 파일/행/SHA·marker·report·duration·ACK post는
+[기계 판독 replay](e2e-continuous/s0-replay.json)와 [전체 표](e2e-continuous/s0-replay.md)에 있다.
+`python3 scripts/e2e/smoke_replay.py`는 보존 snapshot만 읽어 재생성하며 run/host/scenario 중복이나
+report identity 불일치는 오류로 중단한다. native turn·usage·scenario 중 host 부하와 actual runtime host는
+자료가 없어 null이다. 이번 역사적 운영 스모크 표본을 신규 P/R/F 시험 인스턴스 비용 n으로 합산하지 않는다.
+새 묶음 비용은 여전히 n=0이므로 주기·예산 활성화와 자동 차단율은 결정하지 않는다.
 
 ## 6. 채널 lease와 작은 모델
 
@@ -473,7 +522,10 @@ mutation-pending 작성 전후 crash와 ACK 불명→늦은 서버 수락도 모
 미완결 전송이 있으면 Pending 대신 PausedUncertain으로 가며, 다음 writer가 시작하지 않아야 한다.
 불변식은 resource당 live 입력 writer≤1, 살아 있는 holder 탈취0, foreign cleanup0,
 Released 후 이전 writer의 신규 입력0이다. 생존성은 모든 holder 종료 및 실제 idle 확인 뒤 다음 요청 진행이다.
-TLC는 구현 L0에서 수행한다. 기존 TTL 모델·복잡한 분산 복구 상태는 만들지 않는다.
+L0의 실제 TLC 결과·짧은 반례·실제 Python flock 재생은
+[lease 수명 모델 보고서](statecharts/e2e-run-lease/lease.report.md)에 있다. 정상 GREEN은 제안한 수명 계약의
+유계 검증이며 현재 제품 lease를 고쳤다는 뜻이 아니다. 기존 read/O_TRUNC·TTL·unlink 반례는 별도로 재생한다.
+분산 lease·복잡한 자동 복구·새 운영 정리 권한은 모델과 구현 범위에 넣지 않는다.
 
 ## 7. 구현 조각과 수용 순서
 
@@ -483,10 +535,11 @@ SDK vendoring이나 외부 소비자 코드를 숨기지 않는다. giant driver
 
 | 조각 | 범위·예상 prod 파일/순 코드 | 선행·수용 |
 | --- | --- | --- |
-| S0 | 기존 37건/usage 자료 수집·replay 표·묶음 manifest, 0–2 / +0–180 | 지금 문서의 unknown을 그대로 입력으로 시작. 근거 없는 0/PASS와 기간 밖 표본 혼합 RED. missing 7 로그는 준비물 |
+| S0 | 보존 로그/usage 자료 수집·replay 표·묶음 manifest, 0–2 / +0–180 | 94 묶음/188 판정과 원문 수치 일치 창을 분리해 확보. 원인·usage unknown 유지. 근거 없는 0/PASS와 기간 밖 표본 혼합 RED |
 | L0 | run lease와 #8124 FD 수명 작은 모델, 0–1 / +0–100 | #8124 조각0와 통합 검토. TTL 탈취/동시 writer/부모 crash/FD 누락 뮤턴트 RED |
-| E1a | serenity sequence seam spike·Notify observer/example·NDJSON, 3–6 / +400–800 | #8124 I1/I2/I3a의 경계, I3b의 실제 앱 identity. seam 미입증은 다음 조각 진행해도 strict-history claim off. gap/역순/overflow/actor 혼동 RED |
-| E1b | busy trace·reaction/주입 adapter·R-marker/R-inject·human 수용, 4–8 / +600–1100 | I3b + E1a. 수리 전 #8113/#8114 RED, 수리 후 GREEN 및 원인 뮤턴트. human과 bot coverage 분리 |
+| E1a | serenity sequence seam spike·Notify observer/example·NDJSON, 3–6 / +400–800 | #8124 I1/I2/I3a의 경계, I3b의 실제 앱 identity. seam 미입증은 다음 조각 진행해도 strict-history claim off. gap/역순/overflow/actor 혼동·actor 없는 bulk 제거 유실 RED |
+| E1-ingress | test-only FullEvent→router adapter·receipt/boot/parent/nonce 검증·원래 bot 이벤트 중복 방지·provenance, 2–4 / +180–350(미실측) | E1b 앞, #8124 I2/I3a 경계 및 I3b 실제 host·E1a 관측 재사용. 경계/옛 boot/nonce 재사용·이중 실행·controlled_ingress를 human Gateway로 합산하는 뮤턴트 RED |
+| E1b | busy trace·reaction/주입 adapter·R-marker/R-inject·human 수용, 4–8 / +600–1100 | I3b + E1a + E1-ingress. 수리 전 #8113/#8114 RED, 수리 후 GREEN 및 원인 뮤턴트. #8114 native-busy 선행/분기 witness 필수·managed 대조군 분리. human Gateway 1회는 코디네이터 agent-desktop; 정기 수동 0 |
 | E1c | fresh/thread host/output adapter·R-fresh/R-host, 3–7 / +450–900 | I3b, #8115 fix 재사용, #8118/#8119 parent descriptor 계약. 수리 전/후 및 host/output 개별 상속 제거 뮤턴트 |
 | S1 | 단일 runner·channel flock·budget·manifest/cursor·배포 inbox, 4–8 / +600–1050 | L0 + #8124 I3a/I3b, capability별 E1. 동시 acquire·crash·old owner·due 경계·off·예산 reservation RED |
 | S2 | summary/status/outbox·공유 순수 소비자, 3–6 / +350–700 | S1. 0건/skip/옛 head/schema/누락 단언/timeout/usage unknown/알림 실패 RED. scheduled 실제1회 + 실패 알림1회 증거 |
@@ -509,20 +562,20 @@ SDK vendoring이나 외부 소비자 코드를 숨기지 않는다. giant driver
 
 설계 문서 커밋을 막는 결정은 없다. 운영 권한·앱 수·채널·공유 계정·사전 실행 비차단은 다시 묻지 않는다.
 
-| 구현/활성화 시점에 필요한 것 | 선택지와 권고 |
+| 구현/활성화 항목 | 확정 결정과 준비물 |
 | --- | --- |
-| **원증상 human 경로의 무인화 범위** | **권고:** human 준자동 RED/GREEN 수용 + 무인 bot 대응군을 분리하고 human E2E 빈 칸 공개. 대안은 test-only controlled ingress replay 조각 추가이며, 실제 human Gateway E2E와 동등하다고 표기하지 않음. 무인 human 원경로가 DoD 필수라면 현재 네 bot만으로 해결됐다고 완료 처리할 수 없음 |
-| 주기·일일 예산 | **권고:** S0/단발 실측 뒤 배포 이벤트·6/12시간 회전·일일 전체 중 선택. 현재는 off. 기존 24턴/60분을 승인값으로 간주하지 않음 |
+| **원증상 human 경로의 무인화 범위** | **확정:** E1b 앞 E1-ingress를 추가해 무인 회귀는 controlled_ingress로 실행. human Gateway와 동등 표시 금지. human 입력 1회 RED/GREEN은 코디네이터가 agent-desktop으로 Discord 앱을 조작해 수용하며 사용자 입력 요청·정기 수동 작업은 0 |
+| 주기·일일 예산 | **확정:** S0/단발 실측 전 off. 이후 배포 이벤트·6/12시간 회전·일일 전체 중 선택. 기존 24턴/60분은 승인값이 아님 |
 | strict reaction seam | **권고:** E1a에서 기존 serenity로 검증, 불가능하면 비용/크기를 제시하고 별도 결정. raw seq 없는 callback을 완전 이력으로 승인하지 않음 |
-| host·자료·알림 준비 | #8124 지정 시험 호스트/receipt·앱 ID·operator recipient, 37건 스모크 보존본과 7 FAIL 목록/host 지표/usage. 운영 token·설정값을 레인으로 전달하는 방식은 사용하지 않음 |
-| 향후 다음 배포 hold | 초기 off/알림만 권고. 필요 시 confirmed 데이터 손실·세션/host 회귀에 한정해 별도 결정. 이번 설계의 선행 조건 아님 |
+| host·자료·알림 준비 | #8124 지정 시험 호스트/receipt·앱 ID·operator recipient, S0로 스모크 보존본과 추정 7 FAIL 원문은 확보. scenario 중 host 지표/native turn/usage는 여전히 없음. 운영 token·설정값을 레인으로 전달하는 방식은 사용하지 않음 |
+| 향후 다음 배포 hold | **확정:** 알림만. 향후 hold가 필요하면 confirmed 데이터 손실·세션/host 회귀에 한정해 별도 결정. 이번 설계의 선행 조건 아님 |
 
 리뷰 집중 항목: **경계 시각**은 submit/A-end 엄격 순서·clock ID·native offset과 deadline 경계 replay;
 **동시성**은 실제 parent 쌍 flock·FD 수명·늦은 send 모델;
 **옛 형식 복원**은 schema2 원본 유지·schema1 명시·unknown schema/누락을 PASS 금지;
 **문서뿐인 guard**는 allowlist/receipt/실제 precondition witness 음성 시험;
 **잘못된 0/PASS**는 expected occurrence 집합·필수 단언·실제 contact·null usage·human/gap 칸을 독립 확인한다.
-남은 반례는 human 무인 입력 부재, strict sequence seam 미입증, E-51 7건 원문 부재, 새 묶음 비용 n=0이며
+남은 반례는 controlled ingress가 검증하지 않는 실제 human Gateway 전달 계층, strict sequence seam 미입증, E-51 7건의 원인 불명, 새 묶음 비용 n=0이며
 각각 §3.1/§3.2/§5.2/§2의 준비·평가 불가 상태로 남긴다.
 
 <!-- doc-path-refs: external i8011/ i8113/ src/client/ src/gateway/ briefing_checks.py pr_cap_prod.py -->
