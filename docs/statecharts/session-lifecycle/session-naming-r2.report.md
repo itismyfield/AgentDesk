@@ -122,3 +122,23 @@ file:line 전수 결과는 `/Users/itismyfield/.adk/lane-runs/i8119/logs/s2-regi
 - 이 projection은 한 fresh successor와 한 등록 시도다. rollback 뒤 호출자의 새 탐색/재시도, 다중 채널 및 외부 host 변경 전체를 무한 탐색했다고 주장하지 않는다.
 
 등록 완료 연결은 `binding_context/registration.rs`의 thread scope callback을 통해 상위 locator에 전달한다. 낮은 층이 Discord 구현을 직접 참조하지 않는다. 같은 row의 incoming new-key alias 소비와 foreign alias 거부는 PG namespace 시험이 담당하며, 이 단일-successor projection은 사전 alias 집합 전체를 탐색하지 않는다.
+
+
+## S2 승인 델타: registration 거절은 Held
+
+registration callback의 거절은 marker-publication 실패 cleanup에 합치지 않는다. fresh 슬롯이 다음 정리까지 남는 비용을 받아들이며 incarnation 기반 정리는 S3 계약이다. 기존 marker-publication 실패 cleanup 조건은 main 범위를 유지한다.
+
+모델의 RefuseConflictingRegistration과 TxRollback은 `held`로 전이하며 kill을 늘리지 않는다. 실제 `slotIncarnation`은 유지한다. 이미 snapshot을 잡은 A의 동일 이름 슬롯을 다른 nonce B가 대체하면 row nonce가 달라져 rollback하며 B를 보존한다. 값 `a/b/none`은 binding context의 execution_nonce 두 생성과 슬롯 부재를 유한 추상화한 것이다. `replacementSeen`과 nonce 경합 1회는 `session_locator_pg_tests.rs`의 registration-conflict 반례 진입점을 따른다. 기본 tmux 소켓/운영 서버/무한 nonce 공간을 이 값 범위로 추정하지 않는다.
+
+| cfg | 변경 전 | 변경 후 |
+|---|---|---|
+| TmuxSessionNamingFixed | registration 거절 시 kill 1, 후속 incarnation 변수 없음 | Held/kill 0, RegistrationRefusalDoesNotKill 및 SameNameReplacementPreserved GREEN, 기존 safety와 liveness PROPERTY GREEN |
+| HerdrSessionNamingFixed | registration 거절 시 kill 1, 후속 incarnation 변수 없음 | 같은 불변식과 liveness PROPERTY GREEN |
+| naming mutant 10개 | 각 expected 위반 집합 | 동일한 위반 집합 유지, expected 행 변경 0 |
+| scratch의 name-only cleanup 복원 2개 | 새 불변식으로 대조 | 두 호스트 모두 RegistrationRefusalDoesNotKill와 SameNameReplacementPreserved RED |
+
+원문: `s2-l4-tlc-fixed.log`(cfg 12개 전체 통과), `s2-l4-tlc-old-cleanup.log`(의도한 두 규칙 위반). 처음 scratch에 복사한 비대상 cfg의 미등록 오류와 old-cleanup expected의 2열 오류는 실행 도구 구성 오류로 기록했으며 수용 PASS/RED에 포함하지 않았다. 저장소 expected.tsv의 기존 404행과 승인된 naming 12행은 모두 그대로다.
+
+공식 statechart worker로 Fixed 두 호스트의 도식을 갱신했다. 각각 444 states/1128 steps, 도식 16 states/21 arrows이며 같은 도식 상태 안의 596 steps를 숨긴다. chart에는 Held의 fresh 슬롯 보류와 후속 incarnation 보존을 따로 표시한다. wrapper의 금지된 janitor 명령을 실행하지 않고 같은 skill의 worker.ts를 직접 사용했다.
+
+진입점 전수표는 `s2-registration-entrypoints.log`다. Rust의 거절 경계는 PreparedIncarnation::finish_spawn → scoped completion → session_locator::created의 반환이며, marker-publication 실패의 기존 kill과 분리된다. 같은 이름 슬롯 교체의 실제 PG 반례는 A의 DB CAS 거절과 B의 물리 생존을 동시에 검사한다. 여러 채널, 무제한 재시도, S3의 Held 슬롯 정리, marker-publication 실패의 기존 name-only cleanup 경합은 이 projection 범위 밖이다.
