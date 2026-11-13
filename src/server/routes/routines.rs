@@ -175,6 +175,9 @@ impl PatchRoutineBody {
 
 #[path = "routines/audit.rs"]
 mod audit;
+#[cfg(test)]
+#[path = "routines/execution_mode_http_tests.rs"]
+mod execution_mode_http_tests;
 #[path = "routines/handlers.rs"]
 mod handlers;
 #[path = "routines/helpers.rs"]
@@ -210,22 +213,26 @@ mod tests {
             parse(json!({})).execution_definition_patch(&current),
             Ok((None, None))
         );
-        let (definition, limit) =
-            parse(json!({"execution_mode": "thread", "headless_failure_notice_limit": 5}))
-                .execution_definition_patch(&current)
-                .unwrap();
         assert_eq!(
-            (definition.map(|definition| definition.mode.as_str()), limit),
-            (Some("thread"), Some(5))
+            parse(json!({"headless_failure_notice_limit": 5})).execution_definition_patch(&current),
+            Ok((None, Some(5)))
         );
-        for body in [
-            json!({"execution_mode": null}),
-            json!({"runner": null}),
-            json!({"headless_failure_notice_limit": null}),
-            json!({"headless_failure_notice_limit": 101}),
+        for (body, expected) in [
+            (json!({"execution_mode": null}), "cannot be cleared"),
+            (json!({"runner": null}), "cannot be cleared"),
+            (json!({"execution_mode": "thread"}), "not available"),
+            (
+                json!({"headless_failure_notice_limit": null}),
+                "cannot be null",
+            ),
+            (
+                json!({"headless_failure_notice_limit": 101}),
+                "between 1 and 100",
+            ),
         ] {
             let result = parse(body.clone()).execution_definition_patch(&current);
-            assert!(result.is_err(), "{body}: {result:?}");
+            let message = result.expect_err("refused");
+            assert!(message.contains(expected), "{body}: {message}");
         }
     }
 

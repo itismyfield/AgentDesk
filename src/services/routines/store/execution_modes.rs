@@ -46,6 +46,30 @@ impl RoutineStore {
         Ok(rows.into_iter().map(|row| (row.id.clone(), row)).collect())
     }
 
+    /// The routine as `run_id` was claimed (pinned strategy, thread, agents) so a mid-run PATCH
+    /// cannot retarget its session cleanup; runs with a NULL `run_spec` keep the live row.
+    pub async fn routine_as_claimed(
+        &self,
+        routine_id: &str,
+        run_id: &str,
+    ) -> Result<Option<RoutineRecord>> {
+        let Some(mut routine) = self.get_routine(routine_id).await? else {
+            return Ok(None);
+        };
+        let spec: Option<Option<Value>> = sqlx::query_scalar(
+            "SELECT run_spec FROM routine_runs WHERE id = $1 AND routine_id = $2",
+        )
+        .bind(run_id)
+        .bind(routine_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("read routine run {run_id} run_spec: {e}"))?;
+        if let Some(spec) = spec.flatten() {
+            apply_run_spec(&mut routine, &spec);
+        }
+        Ok(Some(routine))
+    }
+
     /// Explicit-mode runs refuse the legacy dynamic DM override; null-mode runs keep it.
     pub async fn run_forbids_dm_override(&self, run_id: &str) -> Result<bool> {
         let explicit: Option<bool> = sqlx::query_scalar(
@@ -56,5 +80,24 @@ impl RoutineStore {
         .await
         .map_err(|e| anyhow!("read routine run {run_id} execution mode: {e}"))?;
         Ok(explicit.unwrap_or(false))
+    }
+}
+
+fn apply_run_spec(routine: &mut RoutineRecord, spec: &Value) {
+    let text = |key: &str| spec.get(key).and_then(Value::as_str).map(str::to_string);
+    let int = |key: &str| {
+        spec.get(key)
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+    };
+    if let Some(strategy) = text("execution_strategy") {
+        routine.execution_strategy = strategy;
+    }
+    routine.agent_id = text("agent_id");
+    routine.fallback_agent_id = text("fallback_agent_id");
+    routine.discord_thread_id = text("discord_thread_id");
+    routine.timeout_secs = int("timeout_secs");
+    if let Some(max_retries) = int("max_retries") {
+        routine.max_retries = max_retries;
     }
 }

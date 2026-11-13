@@ -376,6 +376,7 @@ impl RoutineAgentExecutor {
                     self.teardown_fresh_agent_session(
                         store,
                         &run.routine_id,
+                        &run.run_id,
                         result_json.as_ref(),
                         "routine provider error response",
                     )
@@ -426,6 +427,7 @@ impl RoutineAgentExecutor {
                 self.teardown_fresh_agent_session(
                     store,
                     &run.routine_id,
+                    &run.run_id,
                     result_json.as_ref(),
                     "routine fresh agent run completed",
                 )
@@ -451,6 +453,7 @@ impl RoutineAgentExecutor {
                 self.teardown_fresh_agent_session(
                     store,
                     &run.routine_id,
+                    &run.run_id,
                     result_json.as_ref(),
                     "routine fresh agent turn ended before completion",
                 )
@@ -488,6 +491,7 @@ impl RoutineAgentExecutor {
                 self.teardown_fresh_agent_session(
                     store,
                     &run.routine_id,
+                    &run.run_id,
                     result_json.as_ref(),
                     "routine fresh agent run timed out",
                 )
@@ -819,6 +823,7 @@ impl RoutineAgentExecutor {
         &self,
         store: &RoutineStore,
         routine_id: &str,
+        run_id: &str,
         result_json: Option<&Value>,
         reason: &str,
     ) {
@@ -839,7 +844,7 @@ impl RoutineAgentExecutor {
             self.stop_process_attempt(result_json, reason).await;
             return;
         }
-        let routine = match store.get_routine(routine_id).await {
+        let routine = match store.routine_as_claimed(routine_id, run_id).await {
             Ok(Some(routine)) => routine,
             Ok(None) => {
                 tracing::warn!(
@@ -937,7 +942,10 @@ impl RoutineAgentExecutor {
                 return;
             }
         }
-        let routine = match store.get_routine(&recovered.routine_id).await {
+        let routine = match store
+            .routine_as_claimed(&recovered.routine_id, &recovered.run_id)
+            .await
+        {
             Ok(Some(routine)) => routine,
             Ok(None) => {
                 tracing::warn!(

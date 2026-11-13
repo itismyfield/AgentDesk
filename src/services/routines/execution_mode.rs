@@ -43,9 +43,10 @@ impl RoutineExecutionMode {
         }
     }
 
-    /// Only modes whose runtime path exists may be registered; the rest are refused, not stored.
+    /// Only modes with a runtime path may be stored; thread waits until its backend comes from
+    /// provider capability rather than the legacy `headless_fresh_agents` flag.
     fn is_available(self) -> bool {
-        matches!(self, Self::Thread)
+        false
     }
 }
 
@@ -308,72 +309,95 @@ mod tests {
         }
     }
 
+    fn reason<T: std::fmt::Debug>(result: Result<T, String>) -> String {
+        result.expect_err("request must be refused")
+    }
+
     #[test]
-    fn patch_keeps_omitted_and_rejects_conflicting_definitions() {
+    fn patch_keeps_omitted_and_refuses_each_definition_change_for_its_own_reason() {
         let legacy = stored(None, "persistent");
         let explicit = stored(Some("thread"), "fresh");
-        let runner = json!({"kind": "quickjs", "script_ref": "daily.js"});
-        let thread = Some(ExecutionDefinition {
-            mode: RoutineExecutionMode::Thread,
-            runner: quickjs_runner("daily.js"),
-        });
+        let runner = quickjs_runner("daily.js");
 
         assert_eq!(definition_for_patch(None, None, None, &legacy), Ok(None));
         assert_eq!(
             definition_for_patch(None, None, Some("persistent"), &legacy),
             Ok(None)
         );
-        assert_eq!(
-            definition_for_patch(Some(Some("thread")), None, None, &legacy),
-            Ok(thread.clone())
-        );
-        assert_eq!(
-            definition_for_patch(None, Some(Some(&runner)), None, &explicit),
-            Ok(thread)
-        );
-        let rejected = [
-            definition_for_patch(None, None, Some("persistent"), &explicit),
-            definition_for_patch(Some(Some("thread")), None, Some("persistent"), &legacy),
-            definition_for_patch(None, Some(Some(&runner)), None, &legacy),
-            definition_for_patch(Some(Some("fresh")), None, None, &legacy),
+        let cases = [
+            (
+                definition_for_patch(Some(Some("thread")), None, None, &legacy),
+                "not available",
+            ),
+            (
+                definition_for_patch(Some(Some("fresh")), None, None, &legacy),
+                "unsupported",
+            ),
+            (
+                definition_for_patch(None, Some(Some(&runner)), None, &legacy),
+                "requires execution_mode",
+            ),
+            (
+                definition_for_patch(None, None, Some("persistent"), &explicit),
+                "conflicts",
+            ),
+            (
+                definition_for_patch(Some(Some("thread")), None, Some("persistent"), &legacy),
+                "conflicts",
+            ),
         ];
-        for result in rejected {
-            assert!(result.is_err(), "{result:?}");
+        for (result, expected) in cases {
+            let message = reason(result);
+            assert!(message.contains(expected), "{expected}: {message}");
         }
     }
 
     #[test]
-    fn create_accepts_only_available_modes_and_matching_quickjs_runner() {
+    fn create_refuses_every_explicit_mode_until_its_runtime_exists() {
         assert_eq!(
             definition_for_create(None, None, None, "daily.js"),
             Ok(None)
         );
-        assert!(
-            definition_for_create(Some("thread"), None, Some("fresh"), "daily.js")
-                .unwrap()
-                .is_some()
-        );
-        let rejected = [
-            definition_for_create(None, Some(&quickjs_runner("daily.js")), None, "daily.js"),
-            definition_for_create(Some("headless"), None, None, "daily.js"),
-            definition_for_create(Some("channel"), None, None, "daily.js"),
-            definition_for_create(Some("script"), None, None, "daily.js"),
-            definition_for_create(
-                Some("script"),
-                Some(&json!({"kind": "command", "program": "/bin/true"})),
+        for mode in ["headless", "thread", "channel", "script"] {
+            let message = reason(definition_for_create(
+                Some(mode),
                 None,
+                Some("fresh"),
                 "daily.js",
+            ));
+            assert!(message.contains("not available"), "{mode}: {message}");
+        }
+        let cases = [
+            (
+                definition_for_create(None, Some(&quickjs_runner("daily.js")), None, "daily.js"),
+                "requires execution_mode",
             ),
-            definition_for_create(
-                Some("thread"),
-                Some(&quickjs_runner("other.js")),
-                None,
-                "daily.js",
+            (
+                definition_for_create(Some("thread"), None, Some("persistent"), "daily.js"),
+                "conflicts",
             ),
-            definition_for_create(Some("thread"), None, Some("persistent"), "daily.js"),
         ];
-        for result in rejected {
-            assert!(result.is_err(), "{result:?}");
+        for (result, expected) in cases {
+            let message = reason(result);
+            assert!(message.contains(expected), "{expected}: {message}");
+        }
+    }
+
+    #[test]
+    fn runner_must_be_a_quickjs_alias_of_the_routine_script() {
+        assert_eq!(
+            validate_runner(
+                &json!({"kind": "quickjs", "script_ref": " daily.js "}),
+                "daily.js"
+            ),
+            Ok(quickjs_runner("daily.js"))
+        );
+        for runner in [
+            json!({"kind": "quickjs", "script_ref": "other.js"}),
+            json!({"kind": "command", "program": "/bin/true"}),
+            json!({}),
+        ] {
+            assert!(validate_runner(&runner, "daily.js").is_err(), "{runner}");
         }
     }
 

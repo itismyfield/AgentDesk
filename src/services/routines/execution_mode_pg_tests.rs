@@ -309,6 +309,154 @@ async fn definition_constraints_reject_writes_that_race_past_the_api_pg() {
         (None, Some("thread"), "legacy_fresh", 3)
     );
 
+    // The runner CHECK must refuse rows whose kind or mode is missing, not let them pass as UNKNOWN.
+    let cases = [
+        ("{}", None, false),
+        (r#"{"kind": null}"#, None, false),
+        (r#"{"kind": "command"}"#, None, false),
+        (r#"{"kind": "command"}"#, Some("thread"), false),
+        (r#"{"kind": "quickjs"}"#, Some("thread"), true),
+        (r#"{"kind": "command"}"#, Some("script"), true),
+    ];
+    for (index, (runner, mode, accepted)) in cases.into_iter().enumerate() {
+        let inserted = sqlx::query(
+            "INSERT INTO routines (id, script_ref, name, execution_strategy, execution_mode, runner)
+             VALUES ($1, 'm.js', 'm', 'fresh', $2, $3::jsonb)",
+        )
+        .bind(format!("runner-{index}"))
+        .bind(mode)
+        .bind(runner)
+        .execute(&pool)
+        .await;
+        match inserted {
+            Ok(_) => assert!(accepted, "{runner} / {mode:?} must be refused"),
+            Err(error) => {
+                assert!(!accepted, "{runner} / {mode:?}: {error}");
+                assert!(
+                    error.to_string().contains("routines_runner_shape_check"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_cleanup_reads_the_routine_as_its_run_was_claimed_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let store = store(&pool);
+    let claim = || {
+        let store = store.clone();
+        async move {
+            store
+                .claim_due_runs(1)
+                .await
+                .unwrap()
+                .pop()
+                .expect("due run")
+        }
+    };
+
+    // persistent -> fresh during the run: cleanup still sees the persistent run and skips it.
+    let persistent = store
+        .attach_routine(routine("persistent.js", "persistent", Some("1001")))
+        .await
+        .unwrap();
+    let persistent_run = claim().await;
+    let fresh_patch = RoutinePatch {
+        execution_strategy: Some("fresh".into()),
+        ..RoutinePatch::default()
+    };
+    store
+        .patch_routine(&persistent.id, fresh_patch)
+        .await
+        .unwrap();
+
+    // fresh thread A -> B during the run: cleanup still targets A.
+    let fresh = store
+        .attach_routine(routine("fresh.js", "fresh", Some("2001")))
+        .await
+        .unwrap();
+    let fresh_run = claim().await;
+    let retarget = |thread: &str| RoutinePatch {
+        discord_thread_id: Some(Some(thread.into())),
+        ..RoutinePatch::default()
+    };
+    store
+        .patch_routine(&fresh.id, retarget("2002"))
+        .await
+        .unwrap();
+
+    // A run claimed before snapshots existed keeps following the live row.
+    let legacy = store
+        .attach_routine(routine("legacy.js", "fresh", Some("3001")))
+        .await
+        .unwrap();
+    let legacy_run = claim().await;
+    sqlx::query("UPDATE routine_runs SET run_spec = NULL WHERE id = $1")
+        .bind(&legacy_run.run_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    store
+        .patch_routine(&legacy.id, retarget("3002"))
+        .await
+        .unwrap();
+
+    let as_claimed = |routine_id: String, run_id: String| {
+        let store = store.clone();
+        async move {
+            let routine = store
+                .routine_as_claimed(&routine_id, &run_id)
+                .await
+                .unwrap()
+                .expect("routine");
+            (routine.execution_strategy, routine.discord_thread_id)
+        }
+    };
+    let expected = [
+        (&persistent.id, &persistent_run.run_id, "persistent", "1001"),
+        (&fresh.id, &fresh_run.run_id, "fresh", "2001"),
+        (&legacy.id, &legacy_run.run_id, "fresh", "3002"),
+    ];
+    for (routine_id, run_id, strategy, thread) in expected {
+        assert_eq!(
+            as_claimed(routine_id.clone(), run_id.clone()).await,
+            (strategy.to_string(), Some(thread.to_string())),
+            "{routine_id}"
+        );
+    }
+
+    // Boot recovery reads the same claim-time definition after closing the expired runs.
+    sqlx::query("UPDATE routine_runs SET lease_expires_at = NOW() - INTERVAL '1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let recovered = store.recover_stale_running_runs().await.unwrap();
+    assert_eq!(recovered.len(), 3, "{recovered:?}");
+    for (routine_id, run_id, strategy, thread) in expected {
+        let row = recovered
+            .iter()
+            .find(|row| &row.run_id == run_id)
+            .expect("recovered run");
+        assert_eq!(
+            (
+                row.execution_strategy.as_str(),
+                row.discord_thread_id.as_deref()
+            ),
+            (strategy, Some(thread)),
+            "{routine_id}"
+        );
+        assert_eq!(
+            as_claimed(routine_id.clone(), run_id.clone()).await,
+            (strategy.to_string(), Some(thread.to_string()))
+        );
+    }
+
     pool.close().await;
     db.drop().await;
 }

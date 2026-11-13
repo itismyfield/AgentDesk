@@ -2,6 +2,7 @@
 --
 -- routines.execution_mode   NULL keeps the pre-mode (legacy) contract; existing rows are not backfilled.
 -- routines.runner           discriminated runner JSON; only the script mode may hold a command runner.
+--                           IS TRUE makes a missing kind or NULL mode fail the CHECK instead of passing as UNKNOWN.
 -- routines.headless_failure_notice_limit  headless failure notices before escalation (1..100, default 3).
 -- routine_runs.run_spec     definition pinned at claim; poll/recovery read it instead of the live row.
 
@@ -20,7 +21,7 @@ ALTER TABLE IF EXISTS routines
                 jsonb_typeof(runner) = 'object'
                 AND runner ->> 'kind' IN ('quickjs', 'command')
                 AND (runner ->> 'kind' <> 'command' OR execution_mode = 'script')
-            )
+            ) IS TRUE
         ),
     ADD CONSTRAINT routines_explicit_mode_fresh_check
         CHECK (execution_mode IS NULL OR execution_strategy = 'fresh'),
