@@ -139,6 +139,9 @@ pub(super) async fn validate_registration(
 }
 
 pub(crate) fn same_physical_locator(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
     use crate::domain::session_identity::SessionIdentity;
     match (SessionIdentity::parse(left), SessionIdentity::parse(right)) {
         (Some(left), Some(right)) => left.host == right.host && left.tmux_name == right.tmux_name,

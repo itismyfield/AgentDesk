@@ -183,7 +183,9 @@ async fn canonical_identity_actor_pin_nullable_and_prior_nonce_alias_update_pg()
         upsert_hook_session_with_identity_pg(&pool, seed, Some(identity("102")))
             .await
             .unwrap();
-        upsert_hook_session_with_identity_pg(&pool, params(alias, "102"), Some(identity("102")))
+        let mut alias_seed = params(alias, "102");
+        alias_seed.turn_start_nonce = previous;
+        upsert_hook_session_with_identity_pg(&pool, alias_seed, Some(identity("102")))
             .await
             .unwrap();
         if previous.is_none() {
