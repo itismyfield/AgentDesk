@@ -69,11 +69,17 @@ main에서 재사용할 보장:
 
 ### 영속화·경합의 실제 경계
 
-V2 registry의 새 optional `native_settlement`(ticket, outcome, proof range, cleanup state, warned episode)을 기존 저장/lock 경계 안에서 갱신하는 안이다. **별도 DB·전역 tombstone·무제한 새 journal을 추가하지 않는다.** 완료 원본의 기존 보존/compaction 주기에서 이 표식도 함께 보존하고, 해당 원본이 소거된 뒤 과거 event가 살아 있는 프로세스는 source/actor CAS로 거절한다. bounded 최근-N 캐시를 exactly-once 근거로 삼지 않는다.
+기존 frame registry의 `Registration`에 optional `native_settlement`(ticket, outcome, proof range, cleanup state, warned episode)을 두고 기존 저장/lock 경계 안에서 갱신한다. root에 알 수 없는 JSON 필드만 붙이는 안은 사용하지 않는다. **별도 DB·전역 tombstone·무제한 새 journal을 추가하지 않는다.** 완료 원본의 기존 보존/compaction 주기에서 이 표식도 함께 보존하고, 해당 원본이 소거된 뒤 과거 event가 살아 있는 프로세스는 source/actor CAS로 거절한다. bounded 최근-N 캐시를 exactly-once 근거로 삼지 않는다.
+
+**스키마·투영 보존:** `history/v2.rs:113`의 Registration, `:166`의 Snapshot, `:434`의 `Registry::project`와 `:135`의 `Passive::compact`가 같은 표식을 보존해야 한다(접두사 `src/services/tui_input/human_frame/`). passive 표식 변경 때 `encoded=None`으로 기존 encoding cache를 무효화한다. 결과 commit은 lock 아래 **기존 등록 key와 captured episode가 존재할 때만** 가능하며, 미등록/GC된 옛 증거에서 등록·완료를 새로 만들지 않는다. terminal_identities의 24시간 prune(`src/services/turn_orchestrator/queued_head/v2/retained.rs:78`)를 native exactly-once 기억으로 사용하지 않는다.
+
+현재 writer는 알 수 없는 optional 필드를 typed round-trip에서 잃을 수 있다. 따라서 **frame registry envelope만 v3**로 쓴다(입력 queue SnapshotV2는 version2 유지). main의 `history/compat.rs:42`는 2 외 envelope를 쓰기 없이 거절하므로 구 writer가 v3 결과를 지울 수 없다. A에서 compat full/prefix reader·`v2/migration.rs::restore`와 typed encode가 v1/v2/v3를 읽고 표식을 보존하게 하되 새 표식이 없으면 v2를 계속 쓴다. B의 첫 native ticket 결과 저장부터 v3로 올리고 뒤의 모든 rewrite는 v3 유지다. 활성화 뒤 rollback 가능한 reader 하한은 **A**이며, 33d1f4b5로의 직접 rollback은 registry를 읽지 못하므로 지원하지 않는다. 운영자 변환 명령이나 수동 복구 절차를 새로 만들지 않는다. 실제 배포·rollback 결정은 이 설계 레그에서 수행하지 않는다.
+
+필수 fixture는 v1/v2→v3 최초 결과, passive/project/compact 뒤 결과 유지, 표식 없는 구 snapshot의 늦은 project, cache 재사용, old main reader의 unsupported-envelope·파일 바이트 불변, 등록 제거 뒤 과거 proof 재제출이다. 새 reader를 먼저 착지시키는 A/B 순서가 추가되는 이유는 기존 writer의 필드 소거를 막기 위해서다. 저장 포트의 atomic 결과 보존을 구체화한 것이며 별도 tombstone 저장소를 추가하지 않는다.
 
 현재 finalizer ledger는 재시작·GC를 넘는 영속 결과가 아니다. 따라서 result 저장을 단순 in-memory ledger에만 추가하면 안 된다. `prepare/bind/project` snapshot 쓰기와 같은 원본 key에 저장하고 receipt/settlement-before-delete crash fixture를 필수로 둔다. 기존 `claim_normal_episode`는 lease→receipt→row 순서이므로 새 helper를 호출했다는 사실만으로 atomic 완료라 주장하지 않는다. 모든 side effect 재개 지점은 저장된 결과에서 다시 출발한다. 결과가 저장된 후 새 입력이 claim한 경우에는 새 actor/nonce를 건드리지 않고 옛 row만 exact CAS로 정리한다.
 
-WARN은 `(ticket, episode, source incarnation)`에 대해 native idle 관측이 계속되는데 결과/정리 debt가 남아 있는 경우 N분 뒤 한 번이다. N은 구현 시 기존 관측 주기와 함께 정할 로그 정책 값이며 운영 설정값은 **[U] 열람하지 않음**이다. 단조 clock·테스트 clock을 쓰며 새 user/open·source 변경은 idle 구간을 끝낸다. persisted warned 표식으로 재시작 spam을 막는다. 시간은 경보에만 쓰며 결과·lease 해제 증거를 만들지 않는다.
+WARN은 `(ticket, episode, source incarnation)`에 대해 native idle 관측이 계속되는데 결과/정리 debt가 남아 있는 경우 N분 뒤 한 번이다. 이 설계의 N은 **120초**(로그 관측 상수)로 고정한다. 운영 설정값은 **[U] 열람하지 않음**이며 새 운영 설정 키를 요구하지 않는다. 단조 clock·테스트 clock을 쓰며 새 user/open·source 변경은 idle 구간을 끝낸다. persisted warned 표식으로 재시작 spam을 막는다. 시간은 경보에만 쓰며 결과·lease 해제 증거를 만들지 않는다.
 
 ## 재시작·부팅·incarnation
 
@@ -132,12 +138,12 @@ WARN은 `(ticket, episode, source incarnation)`에 대해 native idle 관측이 
 
 ## 구현 크기와 리뷰 경계
 
-예상 prod **14~18파일, 순증 +850~1,150**(불확실성 ±30%). 시험/fixture는 별도다. 이미 있는 O facts·V2 registry·finalizer를 재사용하는 추정이며 full lifecycle 이사가 아니다.
+예상 prod **16~20파일, 순증 +900~1,180**(불확실성 ±30%). 시험/fixture는 별도다. 이미 있는 O facts·V2 registry·finalizer를 재사용하는 추정이며 full lifecycle 이사가 아니다.
 
 | 조각 | 표면·예상 순증 | 수용 경계 |
 |---|---|---|
-| A 귀속 fold/영속 결과 | O leaf 2~3개, V2 native settlement leaf 2개, 부모 연결 2개: +450~600 | 큐·membership·withdraw·source/twin·replay. 아직 활성화하지 않는다면 cfg(test)로 경고0 유지 |
-| B 연결·정리·boot·WARN | discord native input lifecycle leaf 2~3개, finalizer leaf 2개, intake/restore/bridge 접점: +400~550 | 결과→CAS→row→wake, 중립 종료, crash·adjacent race·e2e |
+| A 귀속 fold/영속 결과 | O leaf 2~3개, native settlement leaf 2개, compat/migration reader·부모 연결: +500~650 | 큐·membership·withdraw·source/twin·replay, v3 reader 먼저. actor는 아직 활성화하지 않고 cfg(test)로 경고0 유지 |
+| B 연결·정리·boot·WARN | discord native input lifecycle leaf 2~3개, finalizer leaf 2개, intake/restore/bridge 접점: +400~530 | 결과→CAS→row→wake, 중립 종료, crash·adjacent race·e2e |
 
 전체가 +1,200을 넘으면 **A(순수 계약/fixture)와 B(활성화/복구)**를 서로 다른 리뷰 조각으로 나눈다. A에 휴면 production actor를 먼저 띄우지 않는다. giant `intake_turn.rs`(2,321줄), `turn_finalizer.rs`(4,887줄), `restore_inflight.rs`에는 import/mod·호출·typed 거절 분기만 둔다. `stream_loop.rs`는 973줄이므로 새 FSM을 넣어 1,000줄을 넘기지 않는다. registry는 큰 본문을 늘리지 않고 child leaf로 분리한다. census/baseline/allowlist 인상은 계획에 없다.
 
@@ -147,7 +153,7 @@ WARN은 `(ticket, episode, source incarnation)`에 대해 native idle 관측이 
 |---|---|
 | 경계 시각 | wall-clock timestamp 순서 대신 동일 source의 완전한 줄 offset, run opener/closer; end_turn/summary/duration 분리 fixture |
 | 동시성 경합 | durable 결과 key+episode/actor CAS+lock-held row CAS, 단계별 crash latches, late old proof와 successor 주입 경쟁 |
-| 옛 형식 복원 | optional None은 Unknown, V1/V2 실제 fixture·unique source 복구; 불가복구는 retained/WARN이며 성공0 |
+| 옛 형식 복원 | optional None은 Unknown, V1/V2→v3·old reader 거절·project/compact 보존 fixture·unique source 복구; 불가복구는 retained/WARN이며 성공0 |
 | 문서로만 선언한 가드 | 실제 intake/restore/Cancel 경로→finalizer와 store leaf를 통과하는 시험, gate/source/wake 제거 mutant RED |
 | 잘못된 0/PASS | TLC 선택 cfg/실행 수와 expected 깨짐을 비교; e2e는 비영 분모·message ID·row/lease 증거, PG/실기 미실행을 PASS로 쓰지 않음 |
 

@@ -99,6 +99,8 @@ Unavailable은 restart 뒤 같은 source를 영원히 읽을 수 없는 비교 �
   같은 본문 twin, 외부 queued notification·FIFO popAll/removal 선후 모든 조합은 Rust fixture가 증명한다.
 - 이 모델은 영속 결과를 한 atomic transition으로 둔다. 실제 V2 저장·fsync·lease와 파일 사이 crash는 atomic하지 않다.
   결과-before-release, result 보존, CAS 실패 debt 재발견을 실제 store/latch 시험으로 검증해야 한다.
+  구 writer가 typed rewrite로 표식을 지우지 못하도록 frame registry v3/reader-first 순서도 그 저장 포트의 구현 조건이다.
+  v1/v2 복원과 project/compact/cache round-trip, old reader의 쓰기 없는 거절, 등록 제거 뒤 늦은 proof를 실제 fixture로 확인한다.
 - OperatorRelease/AdjacentEnd는 이미 권한·exact execution 조건을 만족한 기존 조작의 **결과**다.
   Cancel 요청만으로 native를 idle로 만드는 가정을 제품에 옮기지 않는다. Stop/Terminate의 권한·프로세스 증거는 #8128 접점 시험이다.
 - incarnation 1/2와 ticket 1/2는 전체 identity tuple의 추상화다. 같은 numeric pane·같은 message-id에 다른 nonce,
