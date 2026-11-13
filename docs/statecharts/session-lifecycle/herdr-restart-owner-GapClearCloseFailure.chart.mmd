@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r2: seed at the queue head, exact close, the owner launches"
+title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -13,40 +13,55 @@ stateDiagram-v2
   class lg2 bugPath
   class lg3 repeats
   s0: Old session and a queued input
-  s1: Seed committed at the queue head#59; gate holds it
+  s1: Seed committed#59; gate holds it
   s2: Restart holds the transition and fence
-  s3: Close refused or unconfirmed
-  s4: Failure answered#59; seed still to withdraw
-  s5: Visible failure#59; inputs still owned
-  s6: Visible failure#59; inputs settled
-  s7: Clear dropped the seed#59; its teardown still to run
-  s8: Clear won: seed dropped, selector forgotten
-  s9: Clear gave up on the transition#59; selector still kept
+  s3: Clear began: epoch bumped#59; restart holds the transition
+  s4: Close refused, unconfirmed or row moved on
+  s5: Clear discarded the queue#59; restart holds the transition
+  s6: Failure answered#59; seed still to withdraw
+  s7: Visible failure#59; inputs still owned#59; old session lives
+  s8: Clear began: epoch bumped#59; the old session lives
+  s9: Visible failure#59; inputs settled#59; old session lives
+  s10: Clear discarded the queue#59; the old session lives
+  s11: Clear gave up on the transition#59; selector still kept#59; the old session lives
+  s12: Clear ended#59; selector forgotten
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
-  s2 --> s2: User clear reads the row or Clear discards the queue with receipts
-  s2 --> s3: Close refused, unconfirmed or row moved on
-  s3 --> s4: Answer the failure, release
-  s4 --> s5: Withdraw the seed
-  s5 --> s6: Submit an input to the still-current session or Clear discards the queue with receipts
-  s3 --> s3: Clear's terminate times out on the transition
-  s4 --> s7: Withdraw the seed
-  s4 --> s8: Withdraw the seed
-  s4 --> s6: Withdraw the seed
-  s7 --> s8: Clear ends the execution and forgets the selector
-  s4 --> s9: Withdraw the seed
+  s2 --> s3: User clear begins: bump the clear epoch
+  s2 --> s4: Close refused, unconfirmed or row moved on
+  s3 --> s5: Clear discards the queue and the launching input
+  s3 --> s3: Close refused, unconfirmed or row moved on
+  s4 --> s3: User clear begins: bump the clear epoch
+  s4 --> s6: Answer the failure, release
+  s5 --> s2: Clear's teardown acts on the row
+  s3 --> s8: Answer the failure, release
+  s6 --> s7: Withdraw the seed
+  s7 --> s9: Submit an input to the still-current session
+  s5 --> s4: Clear's teardown acts on the row
+  s5 --> s10: Answer the failure, release
+  s8 --> s10: Clear discards the queue and the launching input
+  s10 --> s6: Clear's teardown acts on the row
+  s6 --> s9: Withdraw the seed
+  s10 --> s12: Clear's teardown acts on the row
+  s6 --> s11: Withdraw the seed
+  s6 --> s12: Withdraw the seed
   class s0 blue
   class s0 bugPath
   class s1 blue
   class s1 bugPath
   class s2 bugPath
+  class s3 blue
   class s3 bugPath
-  class s4 teal
   class s4 bugPath
-  class s5 teal
+  class s5 blue
+  class s5 bugPath
   class s6 teal
+  class s6 bugPath
   class s7 teal
   class s8 teal
   class s9 teal
-  class s9 repeats
+  class s10 teal
+  class s11 teal
+  class s11 repeats
+  class s12 teal

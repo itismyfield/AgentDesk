@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r2: seed at the queue head, exact close, the owner launches"
+title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -13,7 +13,7 @@ stateDiagram-v2
   class lg2 bugPath
   class lg3 repeats
   s0: Old session and a queued input
-  s1: Seed committed at the queue head#59; gate holds it
+  s1: Seed committed#59; gate holds it
   s2: Restart holds the transition and fence
   s3: Exact close confirmed#59; retire and settle
   s4: Accepted input lost its owner
@@ -22,7 +22,7 @@ stateDiagram-v2
   s1 --> s2: Terminate takes transition and fence
   s2 --> s3: Close only the captured pane
   s3 --> s4: Retire CAS and settle the old turn
-  s4 --> s4: Disconnect keeping selector, release, wake or Owner starts the seed: install Pending or Create the pane once or Submit the first input and bind the source
+  s4 --> s4: Disconnect keeping selector, release, wake or Reply to the command or Owner starts the front: register the launch or Install Pending over the vacant row or Create the pane once or Submit the first input or Commit the input's receipt or Bind the source
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath

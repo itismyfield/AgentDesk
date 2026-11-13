@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r2: seed at the queue head, exact close, the owner launches"
+title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -14,11 +14,12 @@ stateDiagram-v2
   class lg3 repeats
   s0: Old session and a queued input
   s1: A result awaits its visible answer
-  s2: Visible failure#59; inputs still owned
-  s3: Visible failure#59; inputs settled
+  s2: Visible failure#59; inputs still owned#59; old session lives
+  s3: Visible failure#59; inputs settled#59; old session lives
   [*] --> s0
   s0 --> s1: Refuse before any effect
   s1 --> s2: Show the result
+  s1 --> s1: Submit an input to the still-current session
   s2 --> s3: Submit an input to the still-current session
   s1 --> s3: Show the result
   class s0 blue
@@ -26,6 +27,5 @@ stateDiagram-v2
   class s1 blue
   class s1 bugPath
   class s2 teal
-  class s2 bugPath
   class s3 teal
   class s3 repeats

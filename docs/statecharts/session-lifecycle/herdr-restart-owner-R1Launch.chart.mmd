@@ -1,50 +1,120 @@
 ---
-title: "Herdr /restart r2: seed at the queue head, exact close, the owner launches"
+title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
 ---
 stateDiagram-v2
   state "Legend" as legend {
     lg0: Result
     lg1: Restart
-    lg2: Breaks NoResumeAfterClear
-    lg3: Path to the ClearForgets or NoResumeAfterClear bug
-    lg4: Repeats forever, so ClearForgets breaks
+    lg2: Breaks NoSeedAfterClear or NoSessionAfterClear
+    lg3: Breaks NoSessionAfterClear in some cases
+    lg4: Path to the ClearForgets or NoSeedAfterClear or NoSessionAfterClear bug
+    lg5: Repeats forever, so ClearForgets breaks
   }
   class lg0 teal
   class lg1 blue
   class lg2 breaks
-  class lg3 bugPath
-  class lg4 repeats
+  class lg3 mayBreak
+  class lg4 bugPath
+  class lg5 repeats
   s0: Old session and a queued input
-  s1: Seed committed at the queue head#59; gate holds it
+  s1: Seed committed#59; gate holds it
   s2: Restart holds the transition and fence
-  s3: Exact close confirmed#59; retire and settle
-  s4: Old execution retired#59; exclusion still held
-  s5: One new Ready session#59; inputs await the owner
-  s6: One new Ready session#59; inputs settled once
-  s7: A launch resumed the conversation a clear ended
+  s3: Clear began: epoch bumped#59; restart holds the transition
+  s4: Exact close confirmed#59; retire and settle
+  s5: Clear discarded the queue#59; restart holds the transition
+  s6: Old execution retired#59; exclusion still held
+  s7: One new Ready session#59; inputs await the owner
+  s8: One new Ready session#59; inputs settled once
+  s9: The seed ran after a clear began
+  s10: Clear discarded the queue#59; a new session lives
+  s11: Old execution retired#59; a clear overtook the restart
+  s12: Exclusion released#59; superseded reply pending
+  s13: Clear ended#59; selector forgotten#59; a new session lives#59; an input may still arrive
+  s14: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; an input may still arrive
+  s15: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; an input may still arrive
+  s16: Clear ended#59; selector forgotten#59; a new session lives
+  s17: Clear ended#59; selector forgotten#59; a new session lives#59; an input waits
+  s18: Clear gave up on the transition#59; selector still kept#59; a new session lives
+  s19: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; an input waits
+  s20: Clear ended unconfirmed#59; selector still kept#59; a new session lives
+  s21: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; an input waits
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
-  s2 --> s3: Close only the captured pane
-  s3 --> s4: Retire CAS and settle the old turn
-  s3 --> s3: User clear reads the row
-  s4 --> s5: Launch the successor inside the exclusion
-  s4 --> s4: User clear reads the row or Clear discards the queue with receipts or Clear's terminate times out on the transition or Accept an input into the owner queue
-  s5 --> s6: Submit an input to the successor once or Clear discards the queue with receipts or Submit the first input and bind the source
-  s6 --> s5: Accept an input into the owner queue
-  s4 --> s7: Launch the successor inside the exclusion
-  s7 --> s7: Show the result or Submit an input to the successor once
+  s2 --> s3: User clear begins: bump the clear epoch
+  s2 --> s4: Close only the captured pane
+  s3 --> s5: Clear discards the queue and the launching input
+  s3 --> s3: Close only the captured pane or Retire CAS and settle the old turn
+  s4 --> s6: Retire CAS and settle the old turn
+  s4 --> s4: Accept an input into the owner queue
+  s4 --> s3: User clear begins: bump the clear epoch
+  s5 --> s2: Clear's teardown acts on the row
+  s5 --> s5: Close only the captured pane or Retire CAS and settle the old turn
+  s6 --> s7: Launch the successor inside the exclusion
+  s6 --> s3: User clear begins: bump the clear epoch
+  s7 --> s8: Submit an input to the successor once
+  s3 --> s9: Launch the successor inside the exclusion
+  s5 --> s4: Clear's teardown acts on the row
+  s8 --> s7: Accept an input into the owner queue
+  s5 --> s10: Launch the successor inside the exclusion
+  s5 --> s11: Clear's teardown acts on the row
+  s4 --> s11: Retire CAS and settle the old turn
+  s10 --> s12: Clear's teardown acts on the row
+  s11 --> s12: Launch the successor inside the exclusion
+  s12 --> s13: Reply to the command
+  s12 --> s14: Reply to the command
+  s12 --> s15: Reply to the command
+  s10 --> s15: Clear's teardown acts on the row
+  s12 --> s16: Reply to the command
+  s12 --> s17: Reply to the command
+  s12 --> s18: Reply to the command
+  s12 --> s19: Reply to the command
+  s12 --> s20: Reply to the command
+  s12 --> s21: Reply to the command
+  s13 --> s17: Accept an input into the owner queue
+  s14 --> s19: Accept an input into the owner queue
+  s15 --> s21: Accept an input into the owner queue
+  s10 --> s20: Clear's teardown acts on the row
+  s10 --> s21: Clear's teardown acts on the row
+  s17 --> s16: Submit an input to the successor once
+  s19 --> s18: Submit an input to the successor once
+  s21 --> s20: Submit an input to the successor once
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 blue
   class s0 bugPath
   class s1 blue
   class s1 bugPath
   class s2 bugPath
+  class s3 blue
   class s3 bugPath
   class s4 bugPath
-  class s5 teal
-  class s6 teal
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
   class s7 teal
-  class s7 breaks
-  class s7 bugPath
-  class s7 repeats
+  class s8 teal
+  class s9 teal
+  class s9 breaks
+  class s9 bugPath
+  class s11 teal
+  class s11 bugPath
+  class s12 teal
+  class s12 mayBreak
+  class s12 bugPath
+  class s13 teal
+  class s13 breaks
+  class s14 teal
+  class s14 breaks
+  class s15 teal
+  class s16 teal
+  class s16 breaks
+  class s17 teal
+  class s17 breaks
+  class s18 teal
+  class s18 breaks
+  class s18 repeats
+  class s19 teal
+  class s19 breaks
+  class s20 teal
+  class s21 teal

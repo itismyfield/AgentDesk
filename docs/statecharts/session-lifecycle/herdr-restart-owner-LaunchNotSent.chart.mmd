@@ -1,5 +1,5 @@
 ---
-title: "Herdr /restart r2: seed at the queue head, exact close, the owner launches"
+title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -11,29 +11,39 @@ stateDiagram-v2
   class lg1 blue
   class lg2 purple
   s0: Old session and a queued input
-  s1: Seed committed at the queue head#59; gate holds it
+  s1: Seed committed#59; gate holds it
   s2: Restart holds the transition and fence
   s3: Exact close confirmed#59; retire and settle
   s4: Old execution retired#59; exclusion still held
-  s5: Exclusion released#59; seed waits for the owner
-  s6: Owner turn installed Pending and creates
-  s7: Visible failure#59; inputs still owned
-  s8: Visible failure#59; inputs settled
+  s5: Exclusion released#59; reply pending
+  s6: Owner turn began a launch
+  s7: Seed waits for the owner
+  s8: Owner turn installed Pending
+  s9: Create answered#59; first input not submitted
+  s10: Visible failure#59; inputs still owned
+  s11: Visible failure#59; inputs settled
   [*] --> s0
   s0 --> s1: Commit the seed original (acceptance)
   s1 --> s2: Terminate takes transition and fence
   s2 --> s3: Close only the captured pane
   s3 --> s4: Retire CAS and settle the old turn
   s4 --> s5: Disconnect keeping selector, release, wake
-  s5 --> s6: Owner starts the seed: install Pending
-  s6 --> s7: Create not sent: fail the input visibly
-  s7 --> s6: Owner starts an input: install Pending
-  s6 --> s8: Create not sent: fail the input visibly
+  s5 --> s6: Owner starts the front: register the launch
+  s5 --> s7: Reply to the command
+  s6 --> s8: Install Pending over the vacant row
+  s7 --> s6: Owner starts the front: register the launch
+  s8 --> s9: Create the pane once
+  s9 --> s5: Create not sent: fail the input visibly
+  s5 --> s10: Reply to the command
+  s9 --> s10: Create not sent: fail the input visibly
+  s10 --> s6: Owner starts the front: register the launch
+  s5 --> s11: Reply to the command
+  s9 --> s11: Create not sent: fail the input visibly
   class s0 blue
   class s1 blue
   class s2 blue
   class s3 blue
   class s4 blue
-  class s5 purple
-  class s7 teal
-  class s8 teal
+  class s7 purple
+  class s10 teal
+  class s11 teal

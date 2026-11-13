@@ -1,0 +1,96 @@
+---
+title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Owner
+    lg3: Breaks NoInheritedDispatch
+    lg4: Path to the NoInheritedDispatch bug
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 purple
+  class lg3 breaks
+  class lg4 bugPath
+  s0: Old session and a queued input
+  s1: Seed committed#59; gate holds it
+  s2: Restart holds the transition and fence
+  s3: After boot: seed waits#59; old session lives
+  s4: Visible failure#59; inputs still owned#59; old session lives
+  s5: Exact close confirmed#59; retire and settle
+  s6: Visible failure#59; inputs settled#59; old session lives
+  s7: After boot: seed waits
+  s8: Old execution retired#59; exclusion still held
+  s9: Exclusion released#59; reply pending
+  s10: Owner turn began a launch
+  s11: Successor inherited the old dispatch
+  s12: Seed waits for the owner
+  s13: Owner turn installed Pending
+  s14: Create answered#59; first input not submitted
+  s15: First input submitted#59; receipt not committed
+  s16: Receipt committed#59; source not bound
+  s17: Seed submit unproven: kept, never re-sent#59; an input waits
+  s18: One new Ready session#59; inputs await the owner
+  s19: Pending without a launching turn#59; an input waits
+  s20: One new Ready session#59; inputs settled once
+  s21: Seed submit unproven: kept, never re-sent
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s1 --> s2: Terminate takes transition and fence
+  s1 --> s3: Daemon dies and boots
+  s2 --> s3: Daemon dies and boots
+  s2 --> s5: Close only the captured pane
+  s3 --> s4: Permit refuses the seed with a notice
+  s4 --> s6: Submit an input to the still-current session
+  s5 --> s7: Daemon dies and boots
+  s5 --> s8: Retire CAS and settle the old turn
+  s7 --> s7: Recovery retires the row of a gone pane
+  s8 --> s9: Disconnect keeping selector, release, wake
+  s8 --> s7: Daemon dies and boots
+  s9 --> s10: Owner starts the front: register the launch
+  s9 --> s7: Daemon dies and boots
+  s9 --> s12: Reply to the command
+  s7 --> s11: Owner starts the front: register the launch
+  s10 --> s7: Daemon dies and boots
+  s10 --> s13: Install Pending over the vacant row
+  s7 --> s10: Owner starts the front: register the launch
+  s12 --> s7: Daemon dies and boots
+  s12 --> s10: Owner starts the front: register the launch
+  s13 --> s7: Daemon dies and boots
+  s13 --> s14: Create the pane once
+  s14 --> s15: Submit the first input
+  s14 --> s7: Daemon dies and boots
+  s15 --> s16: Commit the input's receipt
+  s15 --> s17: Daemon dies and boots
+  s16 --> s18: Bind the source
+  s16 --> s19: Daemon dies and boots
+  s7 --> s18: Seed joins the successor
+  s18 --> s20: Submit an input to the successor once
+  s19 --> s18: Probe adopts the Pending pane
+  s17 --> s21: Submit an input to the successor once
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 purple
+  class s4 teal
+  class s5 blue
+  class s5 bugPath
+  class s6 teal
+  class s7 purple
+  class s7 bugPath
+  class s8 blue
+  class s9 blue
+  class s11 breaks
+  class s11 bugPath
+  class s12 purple
+  class s17 teal
+  class s18 teal
+  class s19 purple
+  class s20 teal
+  class s21 teal
