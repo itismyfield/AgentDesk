@@ -29,6 +29,7 @@ struct Kept {
 pub(crate) struct WorkCache {
     records: HashMap<RecordId, Kept>,
     binding: Option<PathBuf>,
+    delivery: HashMap<RecordId, Instant>,
 }
 
 impl WorkCache {
@@ -42,6 +43,12 @@ impl WorkCache {
         let binding = self.binding.as_deref().and_then(fingerprint);
         let state = store.ledger().input_notices();
         self.records.retain(|id, _| {
+            state
+                .evidence
+                .get(id)
+                .is_some_and(|e| !state.terminal(store.ledger(), id, e))
+        });
+        self.delivery.retain(|id, _| {
             state
                 .evidence
                 .get(id)
@@ -121,6 +128,15 @@ impl WorkCache {
                 kept.revision = state.revision(id);
             }
         }
+    }
+
+    pub(crate) fn delivery_ready(&self, id: &RecordId) -> bool {
+        self.delivery.get(id).is_none_or(|at| Instant::now() >= *at)
+    }
+
+    pub(crate) fn defer_delivery(&mut self, id: RecordId) {
+        self.delivery
+            .insert(id, Instant::now() + Duration::from_secs(5));
     }
 
     pub(crate) fn retry(&mut self, id: &RecordId, transient: bool) {

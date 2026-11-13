@@ -32,6 +32,8 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::Owe
 
 #[path = "input_notices/migration.rs"]
 mod notice_migration;
+#[path = "input_notices/retry.rs"]
+mod notice_retry;
 
 /// A POST still unanswered by then is treated as uncertain and settled from history.
 pub const POST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -716,6 +718,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 return self.stop(WriterAlarm::LedgerViolation { detail });
             }
             Some(Err(Refusal::Withheld(reason))) => {
+                self.defer_notice_delivery(piece);
+                #[cfg(test)]
+                super::input_notices::admission::count_notice_refusal(piece);
                 tracing::info!(channel, reason, unit_key = ?piece.unit_key,
                     "[tui_o] verified piece withheld before Prepared");
                 return Step::Withheld;

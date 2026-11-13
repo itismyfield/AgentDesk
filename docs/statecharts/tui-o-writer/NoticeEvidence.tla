@@ -8,7 +8,7 @@ all == <<bootAll, n>>
 NoticeInit == n = [phase |-> "absent", proof |-> "unknown", closed |-> FALSE,
     reason |-> "authority_busy", logged |-> FALSE, logs |-> 0, bootLogs |-> 0,
     posts |-> 0, prepared |-> FALSE, effect |-> FALSE, crashed |-> FALSE,
-    savedTerminal |-> FALSE]
+    savedTerminal |-> FALSE, otherContext |-> TRUE]
 Terminal == n.phase \in {"posted", "excluded", "expired"}
 Exempt == n.proof \in {"owned", "policy"}
 ParentHold == RouteOwnerHold /\ UNCHANGED n
@@ -28,6 +28,10 @@ RecoverProof == /\ n.phase = "pending" /\ n.proof = "unknown" /\ EvidenceReturns
 CloseSession == /\ SessionBoundary /\ n.phase # "absent" /\ ~n.closed
                 /\ n' = [n EXCEPT !.closed = TRUE]
                 /\ UNCHANGED bootAll
+\* Another frame's retained execution context can be swept while A still owes a notice.
+LoseOtherContext == /\ n.phase # "absent" /\ n.otherContext
+                    /\ n' = [n EXCEPT !.otherContext = FALSE]
+                    /\ UNCHANGED bootAll
 Defer == /\ n.phase = "pending"
          /\ \E reason \in {"authority_busy", "native_census_unavailable",
                             "registration_source_mismatch", "history_snapshot_changed"} :
@@ -50,6 +54,7 @@ ExpireUnproven == /\ NoticeMode = "expire-unproven" /\ n.phase = "pending"
                   /\ n' = [n EXCEPT !.phase = "expired"]
                   /\ UNCHANGED bootAll
 Prepare == /\ n.phase = "pending" /\ n.proof = "direct" /\ ~n.prepared
+           /\ (NoticeMode # "scope-context" \/ n.otherContext)
            /\ bootReady /\ routeGateway
            /\ n' = [n EXCEPT !.prepared = TRUE]
            /\ UNCHANGED bootAll
@@ -68,7 +73,7 @@ Crash == /\ n.phase # "absent" /\ ~n.crashed
 
 NoticeNext == ParentHold \/ ParentRecheck \/ ParentOpens \/ ParentWake \/ ParentExecute
               \/ Materialize \/ RecoverProof \/ CloseSession \/ Defer \/ Settle
-              \/ ExpireUnproven \/ Prepare \/ Post \/ Confirm \/ Crash
+              \/ ExpireUnproven \/ Prepare \/ Post \/ Confirm \/ Crash \/ LoseOtherContext
 NoticeSpec == RouteInit /\ NoticeInit /\ [][NoticeNext]_all
     /\ WF_all(ParentHold) /\ WF_all(ParentRecheck) /\ WF_all(ParentOpens)
     /\ WF_all(ParentWake) /\ WF_all(ParentExecute)
@@ -77,7 +82,7 @@ NoticeSpec == RouteInit /\ NoticeInit /\ [][NoticeNext]_all
 
 NoticeType == n.phase \in {"absent", "pending", "excluded", "expired", "posted"}
               /\ n.proof \in {"unknown", "owned", "policy", "direct"}
-              /\ n.posts \in 0..1 /\ n.logs \in 0..2
+              /\ n.posts \in 0..1 /\ n.logs \in 0..2 /\ n.otherContext \in BOOLEAN
 NoticeOnce == n.posts <= 1 /\ (n.phase = "posted" => n.posts = 1)
 NoQuietLoss == n.phase \in {"excluded", "expired"} => Exempt
 NoExpireOwedDirect == InputClass = "direct" => n.phase \notin {"excluded", "expired"}
@@ -89,4 +94,6 @@ EveryPendingTerminates == (n.phase = "pending") ~> Terminal
 DirectEventuallyPosted == (n.phase = "pending" /\ InputClass = "direct") ~> (n.phase = "posted")
 BoundaryHappens == <>n.closed
 BoundarySpec == NoticeSpec /\ WF_all(CloseSession)
+OtherContextLost == <>~n.otherContext
+ContextSpec == NoticeSpec /\ WF_all(LoseOtherContext)
 =============================================================================

@@ -2,7 +2,7 @@
 
 Baseline: `79bebdd4eaa29b289bf88412825baa7d70a6ac77`.
 Independent design review: CLEAN; the four P2 decisions are reflected in the implementation and model.
-Model SHA256: `83382a2948dbcafa0e62216be0bcff1205a6cd57249737a45927f6407b7f7602`.
+Model SHA256: `b058b67402884898041dd8a66fb5d6d7617fcd3c1caeb09bfdae3fe19141122c`.
 [설계와 진입점 전수표](../../notice-settle.design.md).
 
 NoticeEvidence EXTENDS the existing WriterWake Route model. Notice transitions leave bootAll
@@ -28,7 +28,8 @@ The Mermaid chart is a hand-authored overview. Raw traces and counts below come 
 | NoticeEvidenceUnavailable.cfg | EveryPendingTerminates | EveryPendingTerminates | 일치 |
 | NoticeEvidenceWaitBoundary.cfg | 신규 | EveryPendingTerminates | 일치 |
 
-총17 config, TLC 59회 + fairness precheck17회, 예상과 다른 실패0.
+초기 구현 검증은17 config, TLC59회+fairness precheck17회에서 예상과 다른 실패0이었다.
+수리 후 변경 모델의15 cfg 결과는 아래 보완 절에 기록한다.
 RED가 예상대로 나온 것은 checker 성공이며 production의 liveness PASS라는 뜻이 아니다.
 각 temporal property는 singleton run으로 검증했고 SYMMETRY를 사용하지 않았다.
 
@@ -74,3 +75,22 @@ Java21.0.13, jar1.7.4(TLC banner2.19), worker1/config, 동시 config2.
     TLA2TOOLS=/home/adk/.cache/tla2tools/tla2tools.jar python3 scripts/ci/statecharts_tlc.py --base origin/main --jobs 2
 
 최종 Rust 바이너리·선택 모듈·PG·뮤턴트·clippy/static/source-scan 증거는 외부 report-impl-b1.md에 기록한다.
+
+
+## Frame별 context 판정 수리
+
+retired execution context는 정상7일 sweep 뒤 없어질 수 있다. source A의 등록/직접 twin과 다른
+frame B의 context 부재를 같은 scope의 실패로 보지 않는다. `otherContext`는 B 경로의
+present/missing 관측이며 NoticeEvidence에 `LoseOtherContext`를 추가했다. Rust의 `ContextObservation`
+경로 fingerprint는 유지하고 frame hash별 Related/Unrelated/Uncertain을 `Blocked`로 투영한다.
+
+| cfg | 수리 전 계약 | 수리 후 실제 |
+|---|---|---|
+| NoticeEvidenceContextBefore.cfg | scope-context 전역 가드, B 소실 뒤 A 영구 Pending | EveryPendingTerminates / DirectEventuallyPosted RED |
+| NoticeEvidenceContextAfter.cfg | B 소실이 A를 막지 않음 | GREEN, OtherContextLost도 GREEN |
+
+ContextSpec만 WF(LoseOtherContext)를 사용해 실제 B 소실을 검사한다. 정상 NoticeSpec의 source 경계
+fairness는 추가하지 않았다. 기존13 NoticeEvidence cfg의 기대 결과는 위 표 그대로 유지되며,
+이번에는 변경 모델을 사용하는15 cfg 전체를 재실행해 예상과 다른 실패0을 확인했다.
+원문: `/home/adk/adk/lane-runs/i8112/logs/impl-b1r1/model-results.json`, `model-matrix.log`, 각 TLC trace.
+기존4 boot/input-single-path cfg는 전이가 변하지 않아 앞선 결과를 재사용한다(전체 모델 집합은 이제19 cfg).

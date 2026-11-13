@@ -759,6 +759,18 @@ async fn notice_owner_history_change_after_preflight_defers_until_next_batch() {
             CHANNEL,
         ))
         .await;
+    assert_eq!(
+        c.notices(),
+        0,
+        "the final-refusal retry deadline still holds"
+    );
+    assert_eq!(actor.notice_debt_extra(), 1);
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    actor
+        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+            CHANNEL,
+        ))
+        .await;
     assert_eq!(c.notices(), 1);
     assert_eq!(actor.notice_debt_extra(), 0);
 }

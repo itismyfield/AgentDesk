@@ -290,3 +290,20 @@ prod 약 10파일 / +770, 불확실성 여유 +300까지도 PLAN 선 +1200 이�
 notice/input 접수 기존 시험을 재사용하고 자기 파일 clippy 경고 0을 확인한다. 새 lib 시험 ID는
 required PR job이 선택하도록 공식 inventory/lane check로 확인한다. source_scan_readers failed 0 및
 prepush --static-only의 PREPUSH_STATIC_OK 후에만 REVIEW_READY를 낸다. 구현 검증 결과와 실행 수는 레인 report-impl-b1.md에 기록하며 미실행을 0 tests/PASS로 표기하지 않는다.
+
+
+## Frame별 context와 최종 admission 재시도 보완
+
+동일 source scope의 다른 frame context는 정상 retired sweep으로 사라질 수 있다
+(`src/services/tui_prompt_dedupe/binding_context.rs:563`). history의 `relevant`는
+Related/Unrelated/Uncertain으로 나누고, context 읽기 실패/경합은 해당 등록의 frame hash만
+Blocked로 만든다. planned/raw-null 등록의 불확실성도 같은 hash의 직접 게시를 막는다.
+경로 fingerprint 관측은 유지해 context 복구 시 재평가하며, 무관 hash A의 직접 twin은 POST1을 보장한다.
+
+최초 eligible 뒤 최종 admission이 거절돼도 source/range별 메모리 재시도 기한5초를 둔다.
+`deliver_owed`는 기한 전 notice를 회전시키고 뒤의 Body를 계속 처리한다. terminal은 바로 회수하고,
+기한 이후에는 최종 admission을 새로 실행해 Prepared/첫 POST 현재 상태 검증을 유지한다.
+이 기한은 종결·만료·게시 permit이 아니며 pending/debt를 지우지 않는다.
+
+pending 수백 건이라는 현재 관측에서 영구 Pending map의 절대 상한/soft-limit 경보는 추가하지 않는다.
+관측만 추가하는 제안은 이번 수용 범위에서 기각했으며 기존 terminal 회수 규칙을 유지한다.

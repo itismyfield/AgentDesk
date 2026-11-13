@@ -727,6 +727,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             let Some(item) = self.owed.front() else {
                 return;
             };
+            if !self.writer.notice_delivery_ready(item) {
+                self.owed.rotate_left(1);
+                continue;
+            }
             let input = matches!(item, Derived::Piece(piece) if piece.unit_key.kind == crate::services::tui_o::shadow::UnitKind::InputNotice);
             let step = self.writer.deliver(item).await;
             if step != Step::Done && !(input && step == Step::Withheld) {

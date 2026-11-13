@@ -503,3 +503,131 @@ async fn retained_fresh_execution_of_same_native_source_uses_its_immutable_proof
             .is_none()
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn unrelated_missing_context_blocks_only_its_frame_and_recovery_rechecks() {
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        BindingContext, PreparedIncarnation,
+    };
+    for planned in [false, true] {
+        let c = Case::new(if planned {
+            "context-planned"
+        } else {
+            "context-bound"
+        });
+        let a = c.frame();
+        let b = format!("[User: imessage (ID: 1)]\nother frame {}", c.logical);
+        c.v2(&a, 8920, false);
+        let prepared = PreparedIncarnation::create(BindingContext {
+            schema: 1,
+            provider: "claude".into(),
+            created_at: chrono::Utc::now(),
+            execution_nonce: "73320000000000000000000000000813".into(),
+            tmux_session: c.logical.clone(),
+            channel_id: Some(CHANNEL),
+            owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
+            host: None,
+            expected_native_session_id: Some("native".into()),
+            launch_mode: "resume".into(),
+            provider_root: None,
+            first_prompt_digest: None,
+            source_policy: None,
+        })
+        .unwrap();
+        let mut key = registration(
+            &c.path,
+            &c.logical,
+            &prepared.context.execution_nonce,
+            8921,
+            planned,
+        );
+        key["attempt"]["target"]["root"] = prepared.context.owner_runtime_root.clone().into();
+        let registry = history::v2::Registry::runtime().unwrap();
+        registry
+            .prepare(NAMESPACE, &registered_input(&key, &b))
+            .unwrap();
+        let bytes = std::fs::read(&prepared.path).unwrap();
+        std::fs::remove_file(&prepared.path).unwrap();
+        c.input("context-a-owned", &a);
+        c.input("context-a-direct", &a);
+        c.input("context-b-uncertain", &b);
+        let mut actor = c.open();
+        c.run(&mut actor).await;
+        assert_eq!(
+            c.notices(),
+            1,
+            "unrelated missing context must not suppress A's direct twin"
+        );
+        assert!(
+            actor
+                .writer
+                .store()
+                .ledger()
+                .latest_piece(&input_key("context-a-direct"), 0)
+                .is_some()
+        );
+        assert!(
+            actor
+                .writer
+                .store()
+                .ledger()
+                .latest_piece(&input_key("context-b-uncertain"), 0)
+                .is_none()
+        );
+        assert!(
+            actor
+                .writer
+                .store()
+                .ledger()
+                .excluded(&input_key("context-b-uncertain"))
+                .is_none()
+        );
+        assert_eq!(
+            actor.notice_debt_extra(),
+            1,
+            "same-hash B remains pending, including planned registrations"
+        );
+        EVALUATIONS.with(|c| c.set((0, 0)));
+        actor.prepare_notices(&[]).await;
+        assert_eq!(EVALUATIONS.with(|c| c.get().0), 0);
+        std::fs::write(&prepared.path, bytes).unwrap();
+        actor.prepare_notices(&[]).await;
+        assert!(
+            EVALUATIONS.with(|c| c.get().0) > 0,
+            "restoring the watched context must re-evaluate B"
+        );
+        if planned {
+            assert_eq!(
+                actor.notice_debt_extra(),
+                1,
+                "a recovered planned registration still needs its source"
+            );
+            registry
+                .bind(
+                    NAMESPACE,
+                    &key,
+                    &history::v2::Source {
+                        target: key["attempt"]["target"].clone(),
+                        provider: "claude".into(),
+                        session_id: "native".into(),
+                        transcript: c.path.clone(),
+                        file: [c.source.dev, c.source.ino],
+                        offset: 0,
+                        binding_watermark: None,
+                    },
+                )
+                .unwrap();
+            actor.prepare_notices(&[]).await;
+        }
+        assert_eq!(
+            actor
+                .writer
+                .store()
+                .ledger()
+                .excluded(&input_key("context-b-uncertain")),
+            Some("input_notice_source")
+        );
+        assert_eq!(actor.notice_debt_extra(), 0);
+        assert_eq!(c.notices(), 1);
+    }
+}

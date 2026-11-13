@@ -2,6 +2,8 @@ stateDiagram-v2
     [*] --> Absent
     Absent --> Pending: complete native record materialized durably
     Pending --> Pending: reason rotates / first log per process only
+    Pending --> Pending: other frame context removed / only that hash blocked
+    Pending --> Pending: final admission refused / keep queue and retry after 5 seconds
     Pending --> Excluded: exact Owned or existing no-notice policy proof
     Pending --> Expired: same exemption proof + proven closed session
     Pending --> Prepared: direct Unowned + final admission + migration ready

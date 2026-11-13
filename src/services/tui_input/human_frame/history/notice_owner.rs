@@ -21,6 +21,14 @@ type Stamp = Fingerprint;
 struct ContextObservation {
     stamp: Option<Stamp>,
     unavailable: bool,
+    frames: HashSet<String>,
+}
+
+#[derive(Clone, Copy)]
+enum Relevance {
+    Related,
+    Unrelated,
+    Uncertain,
 }
 type Contexts = HashMap<PathBuf, ContextObservation>;
 type Answers = HashMap<String, (u64, Vec<String>, Decision)>;
@@ -246,17 +254,13 @@ impl Batch {
         let Some(scope) = self.scopes.iter().find(|s| same_scope(&s.origin, origin)) else {
             return Decision::Pending("original_binding_missing");
         };
-        if scope
-            .executions
-            .iter()
-            .any(|(path, stamp)| file_stamp(path).as_ref() != stamp.stamp.as_ref())
-        {
+        let hashes = class_hashes(prompt);
+        if scope.executions.iter().any(|(path, observed)| {
+            observed.frames.iter().any(|h| hashes.contains(h))
+                && file_stamp(path).as_ref() != observed.stamp.as_ref()
+        }) {
             return Decision::Pending("execution_context_changed");
         }
-        if scope.executions.values().any(|e| e.unavailable) {
-            return Decision::Pending("execution_context_unavailable");
-        }
-        let hashes = class_hashes(prompt);
         if let Some((offset, frames, answer)) = scope.exact.get(row)
             && *offset <= origin.record.start
             && frames.iter().any(|h| hashes.contains(h))
@@ -326,8 +330,14 @@ fn candidates(
         );
     for (raw, registration) in bound {
         if raw.is_null() {
-            if relevant(registration, origin, channel, executions) {
-                blocked.push((frame_hash(registration)?, "unbound_pre_source"));
+            match relevant(registration, origin, channel, executions) {
+                Relevance::Related => {
+                    blocked.push((frame_hash(registration)?, "unbound_pre_source"))
+                }
+                Relevance::Uncertain => {
+                    blocked.push((frame_hash(registration)?, "execution_context_unavailable"))
+                }
+                Relevance::Unrelated => {}
             }
             continue;
         }
@@ -335,11 +345,22 @@ fn candidates(
         if entry.provider != "claude" || entry.session != origin.logical_session {
             continue;
         }
-        if !same(&entry)
-            || (!registration.is_null() && !relevant(registration, origin, channel, executions))
-        {
+        if !same(&entry) {
             blocked.push((entry.class_hash.clone(), "registration_source_mismatch"));
             continue;
+        }
+        if !registration.is_null() {
+            match relevant(registration, origin, channel, executions) {
+                Relevance::Related => {}
+                Relevance::Unrelated => {
+                    blocked.push((entry.class_hash.clone(), "registration_source_mismatch"));
+                    continue;
+                }
+                Relevance::Uncertain => {
+                    blocked.push((entry.class_hash.clone(), "execution_context_unavailable"));
+                    continue;
+                }
+            }
         }
         // Migrated V1 evidence has no execution nonce or native-session field to invent.
         if registration.is_null() || historical_match(registration, &entry, origin)? {
@@ -360,8 +381,12 @@ fn candidates(
         _ => return Err("history planned invalid".into()),
     };
     for registration in planned {
-        if relevant(registration, origin, channel, executions) {
-            blocked.push((frame_hash(registration)?, "unbound_pre_source"));
+        match relevant(registration, origin, channel, executions) {
+            Relevance::Related => blocked.push((frame_hash(registration)?, "unbound_pre_source")),
+            Relevance::Uncertain => {
+                blocked.push((frame_hash(registration)?, "execution_context_unavailable"))
+            }
+            Relevance::Unrelated => {}
         }
     }
     Ok((entries, blocked))
@@ -379,12 +404,21 @@ fn relevant(
     origin: &NoticeOrigin,
     channel: u64,
     executions: &mut Contexts,
-) -> bool {
+) -> Relevance {
     let attempt = &registration["key"]["attempt"];
-    attempt["provider"] == "claude"
-        && attempt["target"]["owner"] == origin.logical_session
-        && (attempt["target"]["execution_nonce"] == origin.execution_nonce
-            || resumed_execution(&attempt["target"], origin, channel, executions))
+    if attempt["provider"] != "claude" || attempt["target"]["owner"] != origin.logical_session {
+        return Relevance::Unrelated;
+    }
+    if attempt["target"]["execution_nonce"] == origin.execution_nonce {
+        return Relevance::Related;
+    }
+    resumed_execution(
+        &attempt["target"],
+        origin,
+        channel,
+        executions,
+        registration["frame"]["class_hash"].as_str(),
+    )
 }
 
 fn resumed_execution(
@@ -392,36 +426,48 @@ fn resumed_execution(
     origin: &NoticeOrigin,
     channel: u64,
     executions: &mut Contexts,
-) -> bool {
+    frame: Option<&str>,
+) -> Relevance {
     use crate::services::tui_prompt_dedupe::binding_context;
     let Some(nonce) = target["execution_nonce"].as_str() else {
-        return false;
+        return Relevance::Uncertain;
     };
     let Ok(path) = binding_context::context_path("claude", nonce) else {
-        return false;
+        return Relevance::Uncertain;
     };
     let before = file_stamp(&path);
     let context = binding_context::execution_context("claude", nonce);
-    executions.insert(
-        path.clone(),
-        ContextObservation {
-            stamp: before.clone(),
-            unavailable: context.is_err(),
-        },
-    );
+    let unstable = context.is_err() || before.is_none() || file_stamp(&path) != before;
+    let observed = executions
+        .entry(path)
+        .or_insert_with(|| ContextObservation {
+            stamp: before,
+            unavailable: unstable,
+            frames: HashSet::new(),
+        });
+    observed.unavailable |= unstable;
+    if let Some(frame) = frame {
+        observed.frames.insert(frame.into());
+    }
+    if unstable {
+        return Relevance::Uncertain;
+    }
     let Ok(context) = context else {
-        return false;
+        return Relevance::Uncertain;
     };
     // The attachment's nonce stays historical; the immutable launch must name this source.
-    before.is_some()
-        && target["host"] == "tmux"
+    if target["host"] == "tmux"
         && context.tmux_session == origin.logical_session
         && context.channel_id == Some(channel)
         && target["root"] == context.owner_runtime_root
         && matches!(context.launch_mode.as_str(), "resume" | "fresh")
         && context.expected_native_session_id.as_deref()
             == Some(origin.record.source.session_id.as_str())
-        && file_stamp(&path) == before
+    {
+        Relevance::Related
+    } else {
+        Relevance::Unrelated
+    }
 }
 
 fn historical_match(

@@ -242,6 +242,8 @@ tui-o-writer/NoticeEvidenceAfterOwned.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceAfterPolicy.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceBefore.cfg	NoticeEvidence	-	EveryPendingTerminates
 tui-o-writer/NoticeEvidenceBoundary.cfg	NoticeEvidence	-	-
+tui-o-writer/NoticeEvidenceContextAfter.cfg	NoticeEvidence	-	-
+tui-o-writer/NoticeEvidenceContextBefore.cfg	NoticeEvidence	-	DirectEventuallyPosted,EveryPendingTerminates
 tui-o-writer/NoticeEvidenceDropLog.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceDropReplay.cfg	NoticeEvidence	ReplayKeepsTerminal	-
 tui-o-writer/NoticeEvidenceExpireUnproven.cfg	NoticeEvidence	NoQuietLoss,NoExpireOwedDirect	DirectEventuallyPosted
