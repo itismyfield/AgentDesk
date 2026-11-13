@@ -21,7 +21,10 @@ fn control_ack_sync_uses_the_retained_directory_inode() {
     let directory = File::open(temporary.path()).unwrap();
     let alias = PathBuf::from(format!("/dev/fd/{}/ack", directory.as_raw_fd()));
     let expected = directory.metadata().unwrap();
-    let actual = std::fs::metadata(alias.parent().unwrap()).unwrap();
+    let actual = File::open(alias.parent().unwrap())
+        .unwrap()
+        .metadata()
+        .unwrap();
     assert_eq!(
         (actual.dev(), actual.ino()),
         (expected.dev(), expected.ino())
