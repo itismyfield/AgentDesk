@@ -748,7 +748,3 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 <!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/state.rs -->
 <!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/tmux.rs -->
 <!-- doc-path-refs: proposed src/services/discord/herdr_terminate/effort_restart.rs -->
-<!-- doc-path-refs: proposed src/services/discord/queue_io/input_owner/effort_continue.rs -->
-<!-- doc-path-refs: proposed src/services/turn_orchestrator/queued_head/v2/effort_continue.rs -->
-<!-- doc-path-refs: proposed src/services/turn_orchestrator/queued_head/v2_types/effort_restart.rs -->
-<!-- doc-path-refs: proposed v2_types/effort_restart.rs -->

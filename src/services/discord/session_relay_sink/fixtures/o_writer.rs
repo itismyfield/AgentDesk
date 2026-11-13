@@ -128,8 +128,9 @@ impl WriterFixture {
             prefix_hash: hex::encode(Sha256::digest(b"")),
         };
         store
-            .begin_era(&[channel], Utc::now(), |channel| {
+            .begin_fixture_era(&[channel], Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![source.clone()],
                     initial_anchor: 100,

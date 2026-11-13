@@ -40,18 +40,6 @@ impl IntakeSubmission {
     }
 }
 
-impl IntakeAdmission {
-    pub(in crate::services::discord) fn forwarded_for_tests(&self) -> Option<(&str, i64)> {
-        match self {
-            Self::Forwarded {
-                target_instance_id,
-                outbox_id,
-            } => Some((target_instance_id, *outbox_id)),
-            _ => None,
-        }
-    }
-}
-
 fn input() -> IntakeSubmission {
     let message = serenity::MessageId::new(CANARY_CHANNEL + 7163);
     IntakeSubmission {
@@ -347,8 +335,9 @@ async fn admission_case(case: Case) {
         .unwrap()
         .unwrap();
     let era = store
-        .begin_era(&[CANARY_CHANNEL], Utc::now(), |channel| {
+        .begin_fixture_era(&[CANARY_CHANNEL], Utc::now(), |channel| {
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources: Vec::new(),
                 initial_anchor: 0,

@@ -5,7 +5,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-pub(in crate::services::decision_gate) struct SecretString(String);
+pub(crate) struct SecretString(String);
 
 impl SecretString {
     pub(super) fn new(value: String) -> Option<Self> {
@@ -29,7 +29,7 @@ impl fmt::Debug for SecretString {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::decision_gate) enum KeyLookupOutcome {
+pub(crate) enum KeyLookupOutcome {
     On,
     NoKey,
     LookupTimeout,
@@ -48,7 +48,7 @@ impl KeyLookupOutcome {
     }
 }
 
-pub(super) async fn load(
+pub(in crate::services::decision_gate) async fn load(
     captured: Option<SecretString>,
     command: &mut Command,
     cancel: &CancellationToken,
@@ -62,6 +62,7 @@ pub(super) async fn load(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     let Ok(mut child) = command.spawn() else {
         return (None, KeyLookupOutcome::NoKey);
     };
@@ -70,7 +71,7 @@ pub(super) async fn load(
     let result = tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(KeyLookupOutcome::Cancelled),
-        result = tokio::time::timeout(Duration::from_secs(8), async {
+        result = tokio::time::timeout_at(deadline, async {
             stdout.take(4097).read_to_end(&mut bytes).await?;
             child.wait().await
         }) => match result {
@@ -81,7 +82,8 @@ pub(super) async fn load(
         }
     };
     if let Err(outcome) = result {
-        let _ = child.kill().await;
+        let _ = child.start_kill();
+        let _ = child.wait().await;
         return (None, outcome);
     }
     if bytes.len() > 4096 {
@@ -92,3 +94,16 @@ pub(super) async fn load(
         None => (None, KeyLookupOutcome::NoKey),
     }
 }
+
+/// # Safety
+/// Call only on the initial single-threaded binary path, before starting children.
+pub(crate) unsafe fn capture_initial_key() -> Option<SecretString> {
+    unsafe { initial_env::take() }.and_then(SecretString::new)
+}
+
+#[cfg(all(test, unix))]
+#[path = "key_tests.rs"]
+mod tests;
+
+#[path = "key_initial_env.rs"]
+mod initial_env;

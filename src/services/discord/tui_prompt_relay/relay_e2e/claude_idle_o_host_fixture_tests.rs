@@ -291,8 +291,9 @@ impl Fixture {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(&self.pane.path).unwrap();
         self.store
-            .begin_era(&[self.pane.channel.get()], chrono::Utc::now(), |channel| {
+            .begin_fixture_era(&[self.pane.channel.get()], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![InitSource {
                         source_id: self.a(),

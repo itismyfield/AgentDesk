@@ -2,6 +2,13 @@
 //! pane mutation, and typed outcomes. A confirmed tmux session takes keys; a recorded
 //! Herdr pane takes them only through its own gate.
 
+#[cfg(unix)]
+pub(crate) mod busy;
+#[cfg(unix)]
+pub(crate) use busy::{BusyOperation, BusyOutcome};
+mod transport;
+pub(crate) use transport::InputTransport;
+
 use super::input::{
     POST_LITERAL_SETTLE, POST_PASTE_BUFFER_SETTLE, PROMPT_READY_CANCELLED_ERROR,
     PromptReadinessKind, TuiInputAction, ensure_tmux_success, literal_action_needs_post_settle,
@@ -148,25 +155,6 @@ impl MutationGate for LegacyTmuxGate {
     fn admit(&self, _session: &str) -> Result<(), InputRefusal> {
         Ok(())
     }
-}
-
-/// Pane operations input needs; tmux is the only production transport.
-pub(crate) trait InputTransport {
-    fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String>;
-    fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String>;
-    fn paste_buffer(&mut self, session: &str, buffer: &str, delete: bool)
-    -> Result<Output, String>;
-    fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String>;
-    fn capture(&mut self, session: &str, scroll_back: i32) -> Option<String>;
-    /// The pane for the draft-protection reader; a transport that cannot keep its attributes
-    /// returns nothing, which keeps a protected pane held.
-    fn capture_draft(&mut self, _session: &str) -> Option<String> {
-        None
-    }
-    fn pane_alive(&mut self, session: &str) -> bool;
-    fn present(&mut self, session: &str) -> bool;
-    /// Records the termination and exit reason, then kills the session.
-    fn retire(&mut self, session: &str, reason_code: &str, reason: &str);
 }
 
 struct TmuxInput;
@@ -813,6 +801,8 @@ mod spy {
         pub cancel_on: Option<(&'static str, usize, std::sync::Arc<CancelToken>)>,
         /// Sees each send (load, literal, paste or keys) just before the pane would receive it.
         pub on_send: Option<SendHook>,
+        /// The fixture may publish its provider startup before the first input liveness read.
+        pub on_alive: Option<SendHook>,
     }
 
     pub(crate) type SendHook = Box<dyn FnMut(&str)>;
@@ -830,6 +820,7 @@ mod spy {
                 sends: 0,
                 cancel_on: None,
                 on_send: None,
+                on_alive: None,
             }
         }
     }
@@ -939,9 +930,12 @@ mod spy {
             state.capture()
         }
 
-        fn pane_alive(&mut self, _session: &str) -> bool {
+        fn pane_alive(&mut self, session: &str) -> bool {
             let mut state = self.0.borrow_mut();
             state.record("alive".to_string());
+            if let Some(hook) = state.on_alive.as_mut() {
+                hook(session);
+            }
             !state.dead
         }
 
@@ -1046,21 +1040,13 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
-    use super::spy::{Spy, SpyGuard, SpyState, exit};
+    use super::spy::{Spy, SpyState, exit};
     use super::*;
-    use crate::services::claude_tui::input::{CompactSubmitOutcome, send_compact_while_busy};
     use crate::services::session_host::{SessionTargetInput, TargetSource, UnknownHost};
 
     const EMPTY_COMPOSER: &str = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
     const BUSY: &str = "\u{2733} Architecting\u{2026}";
     const DRAFT: &str = "\u{276f} 남은 초안 한글";
-
-    fn state(captures: &[Option<&str>]) -> SpyState {
-        SpyState {
-            captures: captures.iter().map(|c| c.map(str::to_string)).collect(),
-            ..SpyState::default()
-        }
-    }
 
     fn run(spy: &mut Spy, gate: &dyn MutationGate, actions: &[TuiInputAction]) -> InputRun {
         let target = InputTarget::legacy_tmux("p6a1-spy-session");
@@ -1096,18 +1082,6 @@ mod tests {
             source: TargetSource::SessionRecord,
             name: "AgentDesk-claude-p6a1".to_string(),
         }
-    }
-
-    #[test]
-    fn compact_literal_failure_never_sends_enter() {
-        let mut failing = state(&[Some(EMPTY_COMPOSER)]);
-        failing.fail_send = Some((0, Err("broken pipe".to_string())));
-        let guard = SpyGuard::install(failing);
-        assert_eq!(
-            send_compact_while_busy("p6a1-spy-compact"),
-            CompactSubmitOutcome::AmbiguousAfterMutation
-        );
-        assert_eq!(guard.calls(), ["capture", "alive", "literal:/compact"]);
     }
 
     #[test]

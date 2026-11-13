@@ -29,7 +29,8 @@ impl Fixture {
         std::fs::write(&path, b"L1\n").unwrap();
         let source = source_id_for("s1", &path).unwrap();
         let store = enabled(runtime.path());
-        let era = (store.begin_era(&[7], Utc::now(), |c| Ok(initialized(c, Vec::new())))).unwrap();
+        let era = (store.begin_fixture_era(&[7], Utc::now(), |c| Ok(initialized(c, Vec::new()))))
+            .unwrap();
         Self {
             runtime,
             store,

@@ -246,6 +246,15 @@ pub(crate) fn fresh_receipt(session: &str, prompt: &str, path: &str, sid: &str) 
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn fresh_source_for_tests() -> Option<String> {
+    OWNER.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|scope| scope.fresh_path.clone())
+    })
+}
+
 #[cfg(unix)]
 pub(crate) fn set_fresh_receipt_source(path: &str, sid: &str) {
     set_receipt_session_id(sid);

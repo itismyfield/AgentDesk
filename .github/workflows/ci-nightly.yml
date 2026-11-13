@@ -606,6 +606,24 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Self-tests include the credential CLI bundle owned by PR CI's cargo shard.
+      - name: Install Rust toolchain for script tests
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+          components: clippy
+
+      - name: Setup sccache for script tests
+        uses: ./.github/actions/sccache-or-nothing
+
+      - name: Cache Cargo dependencies for script tests
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Setup Python for script checks
         uses: actions/setup-python@v5
         with:
@@ -628,6 +646,8 @@ jobs:
           GFP_CANDIDATE_SHA: ${{ github.sha }}
           TEST_LANE_BASELINE_REF: HEAD
           SCRIPT_CHECK_SELF_TESTS_ONLY: "1"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
 
       - name: shellcheck scripts
         shell: bash

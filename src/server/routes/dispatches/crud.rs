@@ -10,6 +10,7 @@ use sqlx::Row;
 use crate::dispatch::{VALID_DISPATCH_STATUSES, is_valid_dispatch_status};
 use crate::server::dto::dispatches::{DispatchListItem, DispatchRouteResponse};
 use crate::server::routes::AppState;
+use crate::services::auto_queue::transactions;
 // #3037: `UpdateDispatchBody` relocated to the services layer so service-side
 // loopback callers no longer reach back into `crate::server`. The route module
 // references it via the `routes::dispatches` re-export (`super::`) rather than a
@@ -767,7 +768,7 @@ async fn update_dispatch_result_pg(
         current_status.as_deref(),
         Some("completed" | "failed" | "cancelled")
     ) {
-        let _ = crate::db::auto_queue::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
+        let _ = transactions::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
             &mut tx,
             dispatch_id,
             current_status.as_deref().unwrap_or("completed"),

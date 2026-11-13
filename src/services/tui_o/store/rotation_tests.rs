@@ -16,7 +16,7 @@ fn a_decided_boundary_is_never_rewritten_and_an_unowed_source_keeps_its_spool() 
     let source = source_id_for("s2", &path).unwrap();
     let store = enabled(runtime.path());
     let init = |channel| Ok(initialized(channel, Vec::new()));
-    let era = store.begin_era(&[7], Utc::now(), init).unwrap();
+    let era = store.begin_fixture_era(&[7], Utc::now(), init).unwrap();
     let mut channel = store.open_channel(&era, 7).unwrap().unwrap();
     channel.set_limits_for_test(1, u64::MAX);
     channel.attach_source(&source).unwrap();

@@ -158,3 +158,14 @@ fn hosted_execution_decode_keeps_unreadable_payloads_unknown() {
         assert!(!decoded.deletable(), "{label} must keep its row");
     }
 }
+
+impl HostedObservation {
+    pub(crate) fn known_fixture(record: HostedExecution) -> Self {
+        let raw = Some(serde_json::to_value(&record).expect("fixture serializes"));
+        Self {
+            session_id: 0,
+            raw,
+            record: HostedRecord::Known(record),
+        }
+    }
+}

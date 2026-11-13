@@ -1,6 +1,1 @@
-resolver | src/services/decision_gate/policy.rs
-resolver | src/services/decision_gate/runtime.rs
-resolver | src/services/decision_gate/runtime/gemini.rs
-resolver | src/services/decision_gate/runtime/key.rs
-resolver | src/services/decision_gate/runtime/parser.rs
-resolver | src/services/decision_gate/runtime/request.rs
+# All six resolver subtrees are production-reachable after activation.

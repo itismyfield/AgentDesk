@@ -85,6 +85,33 @@ class ScriptCheckInputSelection(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertNotIn(title, self.cli(SCRIPT_CHECK_CHANGED_FILES=json.dumps([path])))
 
+    def test_user_feature_map_inputs_select_both_checks(self) -> None:
+        titles = {"User feature map static check", "User feature map generation contract"}
+        self.assertTrue(titles <= selector.SELF_TEST_INPUTS.keys())
+        paths = (
+            "docs/user-feature-map.rows.yaml", "docs/user-feature-map.md",
+            "docs/generated/user-feature-coverage.json", "docs/source-of-truth.md",
+            "docs/test-infra.design.md", "docs/e2e/multi-provider-e2e.md",
+            "tests/e2e/tui_relay/scenarios/README.md",
+            "tests/e2e/tui_relay/scenarios/E-50-claude-clear-and-turns.yaml",
+            "tests/e2e/tui_relay/scenarios/retired/E-retired.yaml",
+            "scripts/e2e/tui_relay/assertion_registry.py", "scripts/e2e/run_tui_relay.py",
+            "scripts/generate_user_feature_map.py", "tests/test_generate_user_feature_map.py",
+            "tests/test_user_feature_map_static.py",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                skipped = self.cli(SCRIPT_CHECK_CHANGED_FILES=json.dumps([path]))
+                self.assertTrue(titles.isdisjoint(skipped), skipped)
+
+    def test_user_feature_map_unknown_selection_executes_both_checks(self) -> None:
+        titles = {"User feature map static check", "User feature map generation contract"}
+        self.assertTrue(titles <= selector.SELF_TEST_INPUTS.keys())
+        for changes in ("", "[]", "malformed"):
+            with self.subTest(changes=changes):
+                done = self.fixture_runner(SCRIPT_CHECK_CHANGED_FILES=changes)
+                self.assertTrue(titles <= self.executed(done))
+
     def test_added_deleted_and_renamed_paths_need_no_file_to_exist(self) -> None:
         fixture = {"alpha": ("tools/alpha/**",), "beta": ("tools/beta/**",)}
         with patch.object(selector, "SELF_TEST_INPUTS", fixture):
@@ -168,6 +195,46 @@ class ScriptCheckInputSelection(unittest.TestCase):
             if name == "ci-nightly.yml":
                 self.assertEqual(len(runners), 1)
                 self.assertEqual(runners[0][1]["env"]["SCRIPT_CHECK_SELF_TESTS_ONLY"], "1")
+
+    def test_nightly_credential_bundle_has_the_pr_cargo_shards_rust_setup(self) -> None:
+        pr = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())
+        nightly = yaml.safe_load((ROOT / ".github/workflows/ci-nightly.yml").read_text())
+        title = "Isolated instance credential binary tests"
+        listed = subprocess.run(
+            ["/bin/bash", str(ROOT / "scripts/ci-script-checks.sh")], cwd=ROOT,
+            env=self.env(PYTHON=sys.executable, SCRIPT_CHECK_LIST="1"),
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+        owners = [shard for shard, name in (line.split("\t", 1)
+                  for line in listed.stdout.splitlines()) if name == title]
+        self.assertEqual(owners, ["cargo"])
+        self.assertIn(title, selector.SELF_TEST_INPUTS)
+        self.assertEqual(selector.skipped_checks(self.env(GITHUB_EVENT_NAME="schedule")), {})
+
+        pr_job = pr["jobs"]["scripts"]
+        pr_run = next(step for step in pr_job["steps"]
+                      if step.get("run") == "./scripts/ci-script-checks.sh")
+        self.assertEqual(pr_run["env"]["SCRIPT_CHECK_SHARD"], owners[0])
+        job = nightly["jobs"]["scripts"]
+        run = next(step for step in job["steps"]
+                   if step.get("run") == "./scripts/ci-script-checks.sh")
+        self.assertNotIn("if", job)
+        self.assertNotIn("if", run)
+        self.assertNotIn("continue-on-error", run)
+        self.assertNotIn("SCRIPT_CHECK_SHARD", run["env"])
+        self.assertEqual(run["env"]["SCRIPT_CHECK_SELF_TESTS_ONLY"], "1")
+        self.assertEqual(nightly["env"]["RUSTC_WRAPPER"], "sccache")
+        for action in ("dtolnay/rust-toolchain@master", "./.github/actions/sccache-or-nothing"):
+            with self.subTest(action=action):
+                setup = [step for step in job["steps"] if step.get("uses") == action]
+                self.assertEqual(len(setup), 1, f"nightly credential bundle needs {action}")
+                self.assertNotIn("if", setup[0])
+                self.assertNotIn("continue-on-error", setup[0])
+                self.assertLess(job["steps"].index(setup[0]), job["steps"].index(run))
+                reference = next(step for step in pr_job["steps"] if step.get("uses") == action)
+                self.assertEqual(setup[0].get("with"), reference.get("with"))
+        for profile in ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"):
+            self.assertEqual(run["env"].get(profile), "0")
 
     def fixture_runner(self, *, remove_helper: bool = False, child_probe: bool = False,
                        **extra: str) -> subprocess.CompletedProcess[str]:

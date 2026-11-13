@@ -300,6 +300,12 @@ mod tests {
 
     #[test]
     fn operational_alert_delivery_adds_non_turn_provenance() {
+        let routine = delivery_content(
+            "루틴 실패 · 실행 이력 /routines",
+            "routine-runtime",
+            Some("routine_run_attention"),
+        );
+        assert!(crate::services::discord::dispatch_policy::has_non_turn_provenance(&routine));
         let marked = delivery_content(
             "watchdog alert",
             "dispatch_watchdog",

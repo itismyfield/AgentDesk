@@ -23,7 +23,7 @@ pub const SEGMENT_MAX_BYTES: u64 = 64 << 20;
 /// Per-channel spool ceiling; reaching it pauses the source instead of dropping records.
 pub const SPOOL_CAP_BYTES: u64 = 1 << 30;
 /// Replay keeps each segment's body-selection version; new appends roll forward to current rules.
-pub(crate) const READABLE_IDENTITY_VERSIONS: [u32; 6] = [2, 3, 4, 5, 6, 7];
+pub(crate) const READABLE_IDENTITY_VERSIONS: [u32; 7] = [2, 3, 4, 5, 6, 7, 8];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
@@ -684,7 +684,7 @@ mod tests {
             };
             let sources: Vec<InitSource> = delivery_start.map(init_source).into_iter().collect();
             let init = |channel| Ok(initialized(channel, sources.clone()));
-            let era = store.begin_era(&[7], Utc::now(), init).unwrap();
+            let era = store.begin_fixture_era(&[7], Utc::now(), init).unwrap();
             Self {
                 runtime,
                 path,
