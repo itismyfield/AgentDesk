@@ -189,7 +189,7 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 - 문서로만 선언한 guard: S1 공용 platform 관문과 외부16파일 보호식·외부skill 시험은 S8c 선행. 이 문서는 Rust/skill 구현 완료를 주장하지 않음.
 - 잘못된 0/PASS: 정적 시험 후보 수와 실행 수 구별, 격리 tmux/HTTP fixture와 운영 조건 구별, 모델은 미구현 A 계약의 bounded 검증이며 cargo/PG 통과가 아님.
 
-<!-- doc-path-refs: proposed discord/session_locator.rs domain/provider/session_name.rs services/tmux_common/artifact_paths.rs services/session_name_reservations.rs db/dispatched_sessions/key_promotion.rs -->
+<!-- doc-path-refs: proposed domain/provider/session_name.rs services/tmux_common/artifact_paths.rs services/session_name_reservations.rs -->
 
 
 # 부록 A. 이름 판독 전수표
