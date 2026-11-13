@@ -128,7 +128,16 @@ def _bindings(ts, matched, metadata):
                         and values[j + 1:j + 2] != ["::"]):
                     result.append((values[j], j, arm_end, ""))
         if token.value == "fn":
-            opening = next((j for j in range(i + 2, len(ts)) if values[j] in {"(", "{", ";"}), None)
+            head = i + 2
+            if values[head:head + 1] == ["<"]:
+                depth, head = 1, head + 1
+                while head < len(ts) and depth:
+                    if head in matched:
+                        head = matched[head] + 1
+                    else:
+                        depth += (values[head] == "<") - (values[head] == ">")
+                        head += 1
+            opening = next((j for j in range(head, len(ts)) if values[j] in {"(", "{", ";"}), None)
             if opening is None or values[opening] != "(":
                 continue
             closing = matched[opening]
@@ -238,11 +247,24 @@ def _normalize(ts, lo, hi, bindings, calls, mode):
     return visit(lo, hi), sorted(notes)
 
 
+def _known_predicates(ts, matched, calls):
+    for start, (_, closing, _) in calls.items():
+        predicate = closing + 1
+        suffix = ts[predicate:predicate + 4]
+        if (len(suffix) == 4 and [t.value for t in suffix] in (
+                [".", "is_none", "(", ")"], [".", "is_some", "(", ")"])
+                and all(t.kind == "code" for t in suffix)
+                and matched.get(predicate + 2) == predicate + 3):
+            yield start, predicate + 4
+
+
 def _sites(view, exports, mode):
     path, text, ts, matched, metadata, production, aliases, module = view
     bindings = _bindings(ts, matched, metadata)
     calls = _accessor_calls(ts, matched, metadata, aliases, module, exports)
-    for lo, hi in _segments(ts, matched):
+    candidates = [(lo, hi, False) for lo, hi in _segments(ts, matched)]
+    candidates.extend((lo, hi, True) for lo, hi in _known_predicates(ts, matched, calls))
+    for lo, hi, known in candidates:
         identifiers = [t for t in ts[lo:hi] if t.kind == "code" and t.value.isidentifier()]
         if not identifiers or any(t.start not in production for t in identifiers):
             continue
@@ -257,14 +279,14 @@ def _sites(view, exports, mode):
         raw_predicate = any(lo <= i < end < hi and any(
             t.value in {"is_none", "is_some", "is_some_and", "is_ok", "is_err"} for t in ts[end + 1:hi])
             for i, (_, end, _) in calls.items())
-        if not logic and not raw_predicate:
+        if not logic and not raw_predicate and not known:
             continue
         normalized, notes = _normalize(ts, lo, hi, bindings, calls, mode)
         digest = sha256(json.dumps(normalized, separators=(",", ":")).encode()).hexdigest()
         first, last = ts[lo], ts[hi - 1]
         yield digest, normalized, {"path": path, "line": first.line, "column": first.start - text.rfind("\n", 0, first.start),
                                    "enclosing_fn": metadata[lo][1], "normalization_notes": notes,
-                                   "kind": "compound" if logic else "known_accessor",
+                                   "kind": "compound" if logic and not known else "known_accessor",
                                    "expression": text[first.start:last.start + len(last.value)]}
 
 
@@ -292,7 +314,7 @@ def scan(repo, mode="normalized"):
 
 def _run(_allowlist):
     try:
-        for row in scan(common.REPO_ROOT):
+        for row in scan(common.REPO_ROOT, mode="exact"):
             site = row["sites"][0]
             yield Finding("duplicate_conditions", "warn", site["path"], site["line"],
                           f"copied condition at {row['count']} sites; review for a shared policy", row)
@@ -301,14 +323,14 @@ def _run(_allowlist):
 
 
 CHECK = CheckSpec(key="duplicate_conditions", title="Repeated conditions (advisory)", hard_gate=False,
-                  description="Three or more normalized copies of boolean policy logic; review only.", runner=_run)
+                  description="Three or more exact copies of boolean policy logic; review only.", runner=_run)
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=common.REPO_ROOT)
-    parser.add_argument("--mode", choices=("exact", "normalized", "both"), default="normalized")
+    parser.add_argument("--mode", choices=("exact", "normalized", "both"), default="exact")
     args = parser.parse_args()
     views, exports = _views(args.repo.resolve())
     result = ({m: _clusters(views, exports, m) for m in ("exact", "normalized")}

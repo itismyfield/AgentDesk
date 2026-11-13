@@ -42,6 +42,56 @@ class DuplicateConditionsTests(unittest.TestCase):
         self.assertEqual(len(rows[0]["sites"]), 3)
         self.assertEqual(len(rows[0]["normalized_hash"]), 64)
 
+    def test_default_warning_is_exact_and_normalized_is_opt_in(self):
+        self.scan("""
+            fn first(x: bool, y: bool) { if x && y {} }
+            fn second(a: bool, b: bool) { if a && b {} }
+            fn third(c: bool, d: bool) { if c && d {} }
+        """)
+        with mock.patch.object(self.check.common, "REPO_ROOT", self.repo):
+            self.assertEqual(list(self.check._run(set())), [])
+        self.assertEqual([r["count"] for r in self.check.scan(self.repo, mode="normalized")], [3])
+
+    def test_generic_bound_parameters_are_alpha_locals(self):
+        functions = [
+            "fn first<F: Fn(bool) -> bool>(x: bool, y: bool, f: F) { if x && y {} }",
+            "fn second<F: FnMut(bool) -> bool>(a: bool, b: bool, f: F) { if a && b {} }",
+            "fn third<F: FnOnce(bool) -> bool>(c: bool, d: bool, f: F) { if c && d {} }",
+        ]
+        self.assertEqual(self.scan("\n".join(functions[:2])), [])
+        self.assertEqual([r["count"] for r in self.scan("\n".join(functions))], [3])
+        self.assertEqual(self.check.scan(self.repo, mode="exact"), [])
+
+    def test_registered_predicate_is_extracted_across_different_guards(self):
+        functions = [
+            'fn a(channel: u64, ready: bool) { if ready && herdr_endpoint(select(channel, "(,)" )).is_none() {} }',
+            'fn b(channel: u64, active: bool) { if active || herdr_endpoint(select(channel, "(,)" )).is_none() {} }',
+            'fn c(channel: u64) { if provider == Provider::Claude && herdr_endpoint(select(channel, "(,)" )).is_none() {} }',
+        ]
+        self.assertEqual(self.scan("\n".join(functions[:2])), [])
+        self.scan("\n".join(functions))
+        for mode in ("exact", "normalized"):
+            with self.subTest(mode=mode):
+                rows = self.check.scan(self.repo, mode=mode)
+                known = [r for r in rows if all(s["kind"] == "known_accessor" for s in r["sites"])]
+                self.assertEqual([r["count"] for r in known], [3])
+                self.assertTrue(all(s["expression"].startswith("herdr_endpoint(")
+                                    and s["expression"].endswith(".is_none()") for s in known[0]["sites"]))
+
+    def test_registered_predicate_keeps_polarity_arguments_and_fields(self):
+        def guarded(expressions):
+            guards = ("ready &&", "active ||", "provider == Provider::Claude &&")
+            return "\n".join(f"fn f{i}(channel: Channel, ready: bool, active: bool) {{ if {guard} {expr} {{}} }}"
+                             for i, (guard, expr) in enumerate(zip(guards, expressions)))
+        base = "herdr_endpoint(channel.left).is_none()"
+        for other in ("herdr_endpoint(channel.left).is_some()", "herdr_endpoint(channel.right).is_none()",
+                      "herdr_endpoint(other(channel.left)).is_none()"):
+            with self.subTest(other=other):
+                self.assertEqual(self.scan(guarded([base, base, other])), [])
+        self.assertEqual(self.scan(guarded(["other_endpoint(channel).is_none()"] * 3)), [])
+        rows = self.scan(guarded([base] * 3) + guarded([base.replace("is_none", "is_some")] * 3))
+        self.assertEqual(sorted(r["count"] for r in rows), [3, 3])
+
     def test_alpha_locals_and_accessor_argument_receiver_get(self):
         rows = self.scan("""
             use crate::config::session_hosts::herdr_endpoint as endpoint;
@@ -56,8 +106,9 @@ class DuplicateConditionsTests(unittest.TestCase):
                 if enabled && herdr_endpoint(local.get()).is_none() {}
             }
         """)
-        self.assertEqual([r["count"] for r in rows], [3])
-        self.assertFalse(rows[0]["ambiguous"])
+        self.assertEqual([r["count"] for r in rows], [3, 3])
+        self.assertEqual({s["kind"] for r in rows for s in r["sites"]}, {"compound", "known_accessor"})
+        self.assertTrue(all(not r["ambiguous"] for r in rows))
         self.assertEqual(self.check.scan(self.repo, mode="exact"), [])
 
     def test_registered_method_receiver_is_normalized(self):
