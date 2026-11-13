@@ -78,7 +78,7 @@ class ActionableOpsAlertRoutingContract(unittest.TestCase):
         self.assertIn("tracing::info!", recovery)
 
         helper_start = text.index("async fn log_actionable_to_routine_target_with_ttl")
-        helper_end = text.index("async fn log_run_section", helper_start)
+        helper_end = text.index("async fn resolve_routine_log_target(", helper_start)
         self.assertIn(ANNOUNCE, text[helper_start:helper_end])
 
     def test_worker_fallback_is_exactly_announce_to_notify(self) -> None:

@@ -884,6 +884,12 @@ async fn start_reserved_headless_turn_admitted(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
+    inflight_state.routine_presentation =
+        crate::services::discord::routine_presentation::RoutinePresentation::at_start(
+            &provider,
+            source,
+            routine_metadata::routine_process_turn(metadata.as_ref()),
+        );
     inflight_state.scheduled =
         crate::services::discord::scheduled_turn::ScheduledTurnMark::at_headless_start(
             metadata.as_ref(),

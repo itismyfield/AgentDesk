@@ -137,10 +137,16 @@ Refuse(i) ==
     /\ retained' = (retained \/ Mutant = "UntypedHeld")
     /\ UNCHANGED <<up, awake, actor, phase, journal, oldLive, newLive, peer, capPeer, pane, capPane, raced, foreignClosed, failures, notice, retrySeen, probe, effects, nativeLog, seen, oldKeys, draft, executedDraft, crashes>>
 
+\* This opaque boundary is refined by InputPath.ReadinessSpec (ClaudeReadiness.tla):
+\* Blocked includes missing current SessionStart/Idle evidence and a draft veto.
+\* Stop/mtime only wake; an old Stop cannot grant a first-input ready capability.
+\* Exact close, typed Held custody and post-key Unknown settlement are unchanged.
+ComposerAdmitted(i) == ~Blocked /\ ~draft[i]
+
 WakeFirst(i) ==
     /\ up /\ awake /\ i \in Front
     /\ q[i] = "held" /\ attempt[i] = "no-key"
-    /\ ~Blocked /\ ~draft[i]
+    /\ ComposerAdmitted(i)
     /\ Mutant # "NoFirstWake"
     /\ q' = ([q EXCEPT ![i] = "queued"])
     /\ attempt' = ([attempt EXCEPT ![i] = "ready"])
@@ -149,8 +155,7 @@ WakeFirst(i) ==
 Reserve(i) ==
     /\ up /\ awake /\ phase = "bound"
     /\ i \in Front
-    /\ ~Blocked \/ Mutant = "DraftBypass"
-    /\ ~draft[i] \/ Mutant = "DraftBypass"
+    /\ ComposerAdmitted(i) \/ Mutant = "DraftBypass"
     /\ attempt[i] \in {"none", "ready"}
     /\ ~FirstRefusals \/ attempt[i] = "ready" \/ Mutant = "DraftBypass"
     /\ q' = ([q EXCEPT ![i] = "reserved"])
