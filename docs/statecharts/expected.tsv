@@ -302,6 +302,11 @@ intake-readiness/IntakeReadinessCurrent.cfg	IntakeReadiness	-	-
 intake-readiness/IntakeReadinessEarlyTxEnd.cfg	IntakeReadiness	ApplyUsesLockedTransaction	-
 intake-readiness/IntakeReadinessProposed.cfg	IntakeReadiness	-	-
 intake-readiness/IntakeReadinessStaleSnapshot.cfg	IntakeReadiness	NoStaleSnapshot	-
+org-auth/OrgAuthReadAfter.cfg	OrgAuthRead	-	-
+org-auth/OrgAuthReadAuthInstalls.cfg	OrgAuthRead	AuthNoEffects	-
+org-auth/OrgAuthReadBefore.cfg	OrgAuthRead	-	-
+org-auth/OrgAuthReadDropClear.cfg	OrgAuthRead	RuntimeClear	-
+org-auth/OrgAuthReadDropInstall.cfg	OrgAuthRead	RuntimeInstall	-
 outbound-port/OutboundCallerFlowIssueAfter.cfg	OutboundCallerFlow	-	-
 outbound-port/OutboundCallerFlowIssueBefore.cfg	OutboundCallerFlow	-	-
 outbound-port/OutboundCallerFlowOutboxAfter.cfg	OutboundCallerFlow	-	-

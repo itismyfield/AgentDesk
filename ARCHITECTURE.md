@@ -3671,6 +3671,9 @@ src/
 │   ├── opencode/
 │   │   ├── server_launch.rs
 │   │   └── streaming_entry.rs
+│   ├── org_catalog/
+│   │   ├── auth_projection.rs
+│   │   └── document.rs
 │   ├── pipeline_routes/
 │   │   ├── stage_validation.rs
 │   │   └── stage_validation_tests.rs
@@ -4694,6 +4697,7 @@ src/
 │   ├── monitoring_store.rs
 │   ├── opencode.rs
 │   ├── operator_connectors.rs
+│   ├── org_catalog.rs
 │   ├── pane_readiness.rs
 │   ├── pipeline_override.rs
 │   ├── pipeline_routes.rs

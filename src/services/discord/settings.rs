@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
 use serenity::ChannelId;
 
 use poise::serenity_prelude as serenity;
@@ -25,7 +24,9 @@ use super::org_schema;
 use super::runtime_store;
 use super::runtime_store::{bot_settings_path, discord_uploads_root};
 
-pub(crate) use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings};
+pub(crate) use crate::domain::memory::{
+    MemoryBackendKind, MemoryConfigOverride, ResolvedMemorySettings,
+};
 pub(crate) use crate::utils::discord::discord_token_hash;
 pub(super) use content::{
     channel_upload_dir, cleanup_channel_uploads, cleanup_old_uploads, is_known_agent,
@@ -126,14 +127,6 @@ const MIN_MEMORY_RECALL_TIMEOUT_MS: u64 = 100;
 const MAX_MEMORY_RECALL_TIMEOUT_MS: u64 = 2_000;
 const MIN_MEMORY_CAPTURE_TIMEOUT_MS: u64 = 500;
 const MAX_MEMORY_CAPTURE_TIMEOUT_MS: u64 = 30_000;
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub(crate) struct MemoryConfigOverride {
-    pub backend: Option<String>,
-    pub recall_timeout_ms: Option<u64>,
-    pub capture_timeout_ms: Option<u64>,
-}
 
 fn clamp_timeout(name: &str, value: u64, min: u64, max: u64, default: u64) -> u64 {
     let clamped = value.clamp(min, max);
