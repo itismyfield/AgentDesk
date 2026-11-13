@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use poise::serenity_prelude::ChannelId;
 
 use super::runtime_store::org_schema_path;
-use super::settings::{RegisteredChannelBinding, RoleBinding, resolve_memory_settings};
+use super::settings::{RegisteredChannelBinding, RoleBinding};
 use crate::domain::provider_auth_profile::FallbackPolicy;
 use crate::services::agent_identity::{self, identity_from_parts, identity_label};
 use crate::services::provider::ProviderKind;
@@ -13,8 +13,8 @@ use crate::services::provider_auth_profile::fallback::FallbackPolicyRuntime;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
 // ─── Compatibility document access ─────────────────────────────────────────
+use crate::services::org_catalog::OrgSchema;
 use crate::services::org_catalog::configured_auth_profile;
-use crate::services::org_catalog::{AgentDef, ChannelBinding, OrgSchema};
 
 pub(in crate::services) use crate::services::org_catalog::parse_org_schema;
 
@@ -436,111 +436,12 @@ pub(super) fn is_known_agent(role_id: &str) -> Option<bool> {
 
 // ─── Resolution functions (mirror role_map.rs API) ──────────────────────────
 
-/// Resolve a channel binding from org schema, returning the ChannelBinding
-/// and the agent definition it refers to.
-fn resolve_channel_binding<'a>(
-    schema: &'a OrgSchema,
-    channel_id: ChannelId,
-    channel_name: Option<&str>,
-) -> Option<(&'a ChannelBinding, &'a AgentDef)> {
-    let channels = schema.channels.as_ref()?;
-
-    // 1. Try by_id
-    if let Some(by_id) = &channels.by_id {
-        let key = channel_id.get().to_string();
-        if let Some(binding) = by_id.get(&key) {
-            if let Some(agent_def) = schema.agents.get(&binding.agent) {
-                return Some((binding, agent_def));
-            }
-        }
-    }
-
-    // 2. Try by_name (if enabled)
-    if let Some(by_name) = &channels.by_name {
-        let enabled = by_name.enabled.unwrap_or(false);
-        if enabled {
-            if let (Some(mappings), Some(cname)) = (&by_name.mappings, channel_name) {
-                if let Some(binding) = mappings.get(cname) {
-                    if let Some(agent_def) = schema.agents.get(&binding.agent) {
-                        return Some((binding, agent_def));
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
 pub(super) fn resolve_role_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
 ) -> Option<RoleBinding> {
-    let schema = load_org_schema()?;
-    let (ch_binding, agent_def) = resolve_channel_binding(&schema, channel_id, channel_name)?;
-
-    // Channel-level overrides take priority over agent-level defaults
-    let provider = ch_binding
-        .provider
-        .as_deref()
-        .or(agent_def.provider.as_deref())
-        .and_then(ProviderKind::from_str);
-
-    let model = ch_binding.model.clone().or_else(|| agent_def.model.clone());
-    let peer_agents_enabled = ch_binding
-        .peer_agents
-        .or(agent_def.peer_agents)
-        .unwrap_or(true);
-    let memory = resolve_memory_settings(agent_def.memory.as_ref(), ch_binding.memory.as_ref());
-
-    // Explicit prompt_file > auto-derived from prompts_root > empty
-    let prompt_file = agent_def
-        .prompt_file
-        .as_deref()
-        .map(expand_tilde)
-        .or_else(|| {
-            schema.prompts_root.as_deref().map(|root| {
-                let base = expand_tilde(root);
-                format!("{}/agents/{}/IDENTITY.md", base, ch_binding.agent)
-            })
-        })
-        .unwrap_or_default();
-
-    let auth_profile = configured_auth_profile(
-        ch_binding.auth_profile.as_deref(),
-        agent_def.auth_profile.as_deref(),
-    )
-    .map(str::to_string)
-    .unwrap_or_else(|| {
-        provider_primary_profile(&schema, provider.as_ref().map(ProviderKind::as_str))
-    });
-
-    Some(RoleBinding {
-        role_id: ch_binding.agent.clone(),
-        prompt_file,
-        provider,
-        model,
-        reasoning_effort: None,
-        peer_agents_enabled,
-        auth_profile,
-        memory,
-    })
-}
-
-pub(super) fn resolve_workspace(
-    channel_id: ChannelId,
-    channel_name: Option<&str>,
-) -> Option<String> {
-    let schema = load_org_schema()?;
-    let (ch_binding, agent_def) = resolve_channel_binding(&schema, channel_id, channel_name)?;
-
-    // Channel-level workspace overrides agent-level default
-    let ws = ch_binding
-        .workspace
-        .as_deref()
-        .or(agent_def.workspace.as_deref())?;
-
-    Some(expand_tilde(ws))
+    crate::services::channel_roles::config_projection::org_role_binding(channel_id, channel_name)
+        .map(Into::into)
 }
 
 pub(super) fn load_shared_prompt_path() -> Option<String> {

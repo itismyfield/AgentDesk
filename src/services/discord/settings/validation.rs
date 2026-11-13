@@ -175,15 +175,7 @@ pub(crate) fn resolve_role_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
 ) -> Option<RoleBinding> {
-    if let Some(binding) = agentdesk_config::resolve_role_binding(channel_id, channel_name) {
-        return Some(binding);
-    }
-    if org_schema::org_schema_exists() {
-        if let Some(binding) = org_schema::resolve_role_binding(channel_id, channel_name) {
-            return Some(binding);
-        }
-    }
-    None
+    crate::services::channel_roles::resolve_role_binding(channel_id, channel_name).map(Into::into)
 }
 
 /// Resolve the prompt-cache TTL bucket (#1088) for a Discord channel.
@@ -219,20 +211,7 @@ pub(crate) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding
     merged.into_values().collect()
 }
 
-pub(crate) fn resolve_workspace(
-    channel_id: ChannelId,
-    channel_name: Option<&str>,
-) -> Option<String> {
-    if let Some(ws) = agentdesk_config::resolve_workspace(channel_id, channel_name) {
-        return Some(ws);
-    }
-    if org_schema::org_schema_exists() {
-        if let Some(ws) = org_schema::resolve_workspace(channel_id, channel_name) {
-            return Some(ws);
-        }
-    }
-    None
-}
+pub(crate) use crate::services::channel_roles::resolve_workspace;
 
 pub(crate) fn has_configured_channel_binding(
     channel_id: ChannelId,

@@ -9,6 +9,10 @@ use super::settings::{
 };
 use crate::config::{AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, Config};
 use crate::services::agent_identity::{identity_from_parts, identity_label};
+pub(crate) use crate::services::channel_roles::config_projection::default_prompt_path;
+use crate::services::channel_roles::config_projection::{
+    binding_provider, default_workspace, find_channel_binding, role_projection_from_channel,
+};
 use crate::services::provider::ProviderKind;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
@@ -147,25 +151,6 @@ fn resolve_bot_token(bot_name: &str, bot: &crate::config::BotConfig) -> Option<S
         .or_else(|| crate::credential::read_bot_token(bot_name))
 }
 
-pub(crate) fn default_prompt_path(role_id: &str) -> Option<String> {
-    let root = crate::config::runtime_root()?;
-    let agents_root = crate::runtime_layout::managed_agents_root(&root);
-    let canonical = agents_root.join(role_id).join("IDENTITY.md");
-    if canonical.exists() {
-        return Some(canonical.display().to_string());
-    }
-    let legacy_flat = agents_root.join(format!("{role_id}.prompt.md"));
-    if legacy_flat.exists() {
-        return Some(legacy_flat.display().to_string());
-    }
-    Some(canonical.display().to_string())
-}
-
-fn default_workspace(role_id: &str) -> Option<String> {
-    let root = crate::config::runtime_root()?;
-    Some(root.join("workspaces").join(role_id).display().to_string())
-}
-
 fn shared_prompt_fallback_path() -> Option<String> {
     let root = crate::config::runtime_root()?;
     let canonical = crate::runtime_layout::shared_prompt_path(&root);
@@ -186,57 +171,6 @@ fn agent_display_name(agent: &crate::config::AgentDef) -> String {
         .unwrap_or_else(|| agent.name.clone())
 }
 
-fn match_channel(
-    channel: &AgentChannel,
-    channel_id: ChannelId,
-    channel_name: Option<&str>,
-) -> Option<u8> {
-    let channel_id_str = channel_id.get().to_string();
-    if let Some(explicit_channel_id) = channel.channel_id() {
-        return (explicit_channel_id == channel_id_str).then_some(2);
-    }
-
-    let channel_name = channel_name?.trim();
-    if channel_name.is_empty() {
-        return None;
-    }
-    channel
-        .aliases()
-        .iter()
-        .any(|alias| alias == channel_name)
-        .then_some(1)
-}
-
-fn find_channel_binding<'a>(
-    config: &'a Config,
-    channel_id: ChannelId,
-    channel_name: Option<&str>,
-) -> Option<(&'a crate::config::AgentDef, &'static str, &'a AgentChannel)> {
-    let mut best: Option<(&crate::config::AgentDef, &'static str, &AgentChannel, u8)> = None;
-
-    for agent in &config.agents {
-        for (provider_key, channel) in agent.channels.iter() {
-            let Some(provider_key) = crate::services::provider::intern_provider_id(provider_key)
-            else {
-                continue;
-            };
-            let Some(score) = match_channel(channel, channel_id, channel_name) else {
-                continue;
-            };
-
-            if best
-                .as_ref()
-                .map(|(_, _, _, best_score)| score > *best_score)
-                .unwrap_or(true)
-            {
-                best = Some((agent, provider_key, channel, score));
-            }
-        }
-    }
-
-    best.map(|(agent, provider_key, channel, _)| (agent, provider_key, channel))
-}
-
 pub(super) fn thread_inheritance_enabled(
     channel_id: ChannelId,
     channel_name: Option<&str>,
@@ -250,18 +184,6 @@ pub(super) fn thread_inheritance_enabled(
             AgentChannel::Legacy(_) => true,
         })
         .unwrap_or(true)
-}
-
-fn binding_provider(
-    agent: &crate::config::AgentDef,
-    provider_key: &str,
-    channel: &AgentChannel,
-) -> Option<ProviderKind> {
-    channel
-        .provider()
-        .or_else(|| Some(agent.provider.clone()))
-        .or_else(|| Some(provider_key.to_string()))
-        .and_then(|raw| ProviderKind::from_str(&raw))
 }
 
 fn effective_channel_provider(provider_key: &str, channel: &AgentChannel) -> Option<ProviderKind> {
@@ -288,20 +210,7 @@ fn role_binding_from_channel(
     provider_key: &str,
     channel: &AgentChannel,
 ) -> RoleBinding {
-    RoleBinding {
-        role_id: agent.id.clone(),
-        prompt_file: channel
-            .prompt_file()
-            .map(|value| expand_tilde(&value))
-            .or_else(|| default_prompt_path(&agent.id))
-            .unwrap_or_default(),
-        provider: binding_provider(agent, provider_key, channel),
-        model: channel.model(),
-        reasoning_effort: channel.reasoning_effort(),
-        peer_agents_enabled: channel.peer_agents().unwrap_or(true),
-        auth_profile: "default".to_string(),
-        memory: resolve_agent_memory_settings(Some(agent)),
-    }
+    role_projection_from_channel(agent, provider_key, channel).into()
 }
 
 fn role_binding_from_agent(agent: &crate::config::AgentDef, provider: ProviderKind) -> RoleBinding {
@@ -405,15 +314,6 @@ pub(super) fn dm_default_agent_allows_outbound_source(
             .unwrap_or(false)
 }
 
-pub(super) fn resolve_role_binding(
-    channel_id: ChannelId,
-    channel_name: Option<&str>,
-) -> Option<RoleBinding> {
-    let config = load_agentdesk_config()?;
-    let (agent, provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
-    Some(role_binding_from_channel(agent, provider_key, channel))
-}
-
 pub(super) fn resolve_worktree_isolation_policy(
     channel_id: ChannelId,
     channel_name: Option<&str>,
@@ -471,18 +371,6 @@ pub(crate) fn resolve_dispatch_profile(
         Some("full") => Some(DispatchProfile::Full),
         _ => None,
     }
-}
-
-pub(super) fn resolve_workspace(
-    channel_id: ChannelId,
-    channel_name: Option<&str>,
-) -> Option<String> {
-    let config = load_agentdesk_config()?;
-    let (agent, _provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
-    channel
-        .workspace()
-        .map(|value| expand_tilde(&value))
-        .or_else(|| default_workspace(&agent.id))
 }
 
 pub(super) fn load_shared_prompt_path() -> Option<String> {
