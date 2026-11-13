@@ -1,11 +1,9 @@
 //! Provider auth persistence. Selection and recovery side effects belong to callers.
-use std::fs;
 use std::path::Path;
 
 use super::{ProviderAuthProfileDef, validate_profile_def};
-use crate::services::discord::org_schema::{OrgSchema, parse_org_schema};
 
-pub(crate) mod document;
+pub(in crate::services) mod document;
 use document::{ORG_PROFILE_WRITE_LOCK, load_org_document, org_yaml_path, persist_org_document};
 
 fn normalized_auth_profile(value: Option<&str>) -> Option<String> {
@@ -257,15 +255,10 @@ pub(crate) fn remove_provider_auth_profile_at(
     persist_org_document(org_path, &document)
 }
 
-pub(crate) fn read_org_schema(path: &Path) -> Result<Option<OrgSchema>, String> {
-    match fs::read_to_string(path) {
-        Ok(content) => parse_org_schema(&content)
-            .map(Some)
-            .map_err(|error| format!("org schema rejected: {error}")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("read org schema '{}': {error}", path.display())),
-    }
-}
+#[cfg(test)]
+use crate::services::org_catalog::read_auth_catalog_at as read_org_schema;
+#[cfg(test)]
+use std::fs;
 
 #[cfg(test)]
 mod tests;

@@ -9,6 +9,7 @@ pub mod auto_queue;
 pub mod automation_candidate_contract;
 pub mod automation_candidate_materializer;
 pub mod campaign_execution;
+pub(crate) mod channel_roles;
 pub mod claude;
 pub(crate) mod claude_command;
 pub mod claude_compact_context;
@@ -72,6 +73,7 @@ pub mod monitoring_store;
 pub mod observability;
 pub mod onboarding;
 pub mod opencode;
+pub(crate) mod org_catalog;
 pub(crate) mod pane_readiness;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during operator_connectors dead-code cleanup.
