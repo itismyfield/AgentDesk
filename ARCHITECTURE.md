@@ -448,6 +448,7 @@ src/
 │   ├── file_sync.rs
 │   ├── host_observation.rs
 │   ├── human_input.rs
+│   ├── input_retry.rs
 │   ├── intake_consent.rs
 │   ├── intake_identity.rs
 │   ├── lifecycle.rs
