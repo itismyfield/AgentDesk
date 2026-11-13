@@ -444,14 +444,21 @@ async fn i8117_recovery_quiet_after_commit_with_hold_pg() {
 }
 #[tokio::test]
 async fn i8117_recovery_full_controls_pg() {
-    for held in [false, true] {
-        for evidence in ["legacy", "full", "missing", "ambiguous"] {
-            for captured in [false, true] {
-                // Each full-body fixture stays off the test runtime's stack frame.
-                Box::pin(restored(false, held, evidence, false, captured)).await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for held in [false, true] {
+                for evidence in ["legacy", "full", "missing", "ambiguous"] {
+                    for captured in [false, true] {
+                        // Join each local task so fixture construction and transport polls do not nest.
+                        let task = tokio::task::spawn_local(Box::pin(restored(
+                            false, held, evidence, false, captured,
+                        )));
+                        await_within(task, WAIT_CAP).await.unwrap();
+                    }
+                }
             }
-        }
-    }
+        })
+        .await;
 }
 
 #[tokio::test]
