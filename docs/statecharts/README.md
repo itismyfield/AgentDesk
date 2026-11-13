@@ -142,3 +142,5 @@ The Claude readiness refinement also checks terminal-free self-compact completio
 AwaitingClear's authenticated, one-use source retirement is refined in
 [input readiness](input-single-path/transcript-readiness.design.md#awaitingclear-adoption),
 including restart, forged proof, cursor loss and split-publication counterexamples.
+
+The #8080/#8114 readiness merge keeps clear retirement/consumption and pre-source Pending/modal-watch as separate Mode projections. The bounded integration check preserves both parent result sets (42 and 40 cfg) in 49 merged ReadinessSpec cfg: 27 GREEN and 22 expected RED, with no expected-rule changes. This check does not replace the wider changed-model CI selection; the separate 83 Herdr busy/source/reobserve/cold-Idle cfg and their expected rows remain byte-identical.
