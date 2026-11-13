@@ -194,6 +194,7 @@ fn pane_probe_failing_tmux() -> (tempfile::TempDir, Vec<crate::config::TestEnvVa
                 *) exit 1 ;; esac\n";
     std::fs::write(&binary, body).unwrap();
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::services::platform::tmux::session_identity_tests::mark_fixture_program(binary);
     let mut paths = vec![dir.path().to_path_buf()];
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),

@@ -217,10 +217,16 @@ pub(super) fn execute_streaming_local_tmux(
         tmux_session_name,
         prompt,
     );
-    let tmux_result = crate::services::platform::tmux::create_session(
+    let tmux_result = crate::services::platform::tmux::create_session_with_identity(
         tmux_session_name,
         Some(working_dir),
         &format!("bash {}", shell_escape(&script_path)),
+        &crate::services::session_identity_metadata::provider_identity(
+            tmux_session_name,
+            "qwen",
+            report_channel_id,
+            "wrapper",
+        )?,
     )?;
 
     if !tmux_result.status.success() {

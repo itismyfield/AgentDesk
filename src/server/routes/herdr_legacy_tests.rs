@@ -51,6 +51,7 @@ fn recording_tmux(dir: &FsPath) -> crate::config::TestEnvVarGuard {
     let script = "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/calls\"\nexit 0\n";
     std::fs::write(&tmux, script).unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::services::platform::tmux::session_identity_tests::mark_fixture_program(tmux);
     crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(dir)
 }
 

@@ -334,11 +334,16 @@ pub(crate) struct Pane {
 }
 
 impl Pane {
-    pub(crate) fn with_program(session: &str, program: PathBuf) -> Self {
-        Self {
+    pub(crate) fn with_program(session: &str, program: PathBuf) -> Result<Self, String> {
+        crate::services::platform::tmux::session_identity::require_managed_with_program(
+            session,
+            &program,
+            Duration::from_secs(3),
+        )?;
+        Ok(Self {
             program,
             target: format!("={session}:"),
-        }
+        })
     }
 
     /// The `={session}:` target every command names.
@@ -347,6 +352,23 @@ impl Pane {
     }
 
     fn run(&self, args: &[&str]) -> Result<Output, BoundedTmuxError> {
+        if matches!(
+            args.first(),
+            Some(&"send-keys" | &"paste-buffer" | &"if-shell")
+        ) {
+            let session = self.target.trim_start_matches('=').trim_end_matches(':');
+            crate::services::platform::tmux::session_identity::require_managed_with_program(
+                session,
+                &self.program,
+                Duration::from_secs(3),
+            )
+            .map_err(|error| {
+                BoundedTmuxError::Spawn(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    error,
+                ))
+            })?;
+        }
         let mut command = Command::new(&self.program);
         crate::services::platform::tmux::input_command(&mut command, args)
             .map_err(BoundedTmuxError::Spawn)?;

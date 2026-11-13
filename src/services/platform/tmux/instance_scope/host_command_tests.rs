@@ -25,6 +25,7 @@ while [ "$1" = '-S' ] || [ "$1" = '-u' ]; do
   if [ "$1" = '-S' ]; then shift 2; else shift; fi
 done
 case "$1 $*" in
+  *show-environment*AGENTDESK_IDENTITY*) printf '%s\n' "$ADK_I2_TMUX_IDENTITY";;
   *pane_width*) printf '80 30\n';;
   *pane_id*) printf '%%7\n';;
   *pane_dead*|list-panes*) printf '0\n';;
@@ -106,6 +107,14 @@ fn exercise_instance_entries() {
     crate::config::test_instance::initialize().unwrap();
     let instance = crate::config::test_instance::current().unwrap().unwrap();
     let name = std::env::var("ADK_I2_TMUX_SESSION").unwrap();
+    let assignment = crate::services::session_identity_metadata::runtime_identity(&name)
+        .unwrap()
+        .environment_assignment()
+        .unwrap();
+    let _identity = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_I2_TMUX_IDENTITY",
+        std::ffi::OsStr::new(&assignment),
+    );
     let fake = instance.root.join("fixture-worktree/target/debug/tmux");
     assert!(
         tmux::create_session(&name, None, "true")

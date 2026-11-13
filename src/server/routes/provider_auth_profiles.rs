@@ -215,7 +215,7 @@ pub async fn login_start(
         ))
     })?;
     let script = write_login_script(&home, &overlay, argv).map_err(profile_error)?;
-    spawn_login_tmux(&session, &home, &script).map_err(|error| {
+    spawn_login_tmux(&session, &home, &script, kind.as_str()).map_err(|error| {
         AppError::new(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Internal, error)
     })?;
 
@@ -483,6 +483,7 @@ fn spawn_login_tmux(
     session: &str,
     home: &std::path::Path,
     script: &std::path::Path,
+    provider: &str,
 ) -> Result<(), String> {
     if crate::services::platform::tmux::has_session(session) {
         let _ =
@@ -492,10 +493,16 @@ fn spawn_login_tmux(
         "bash {}",
         crate::services::process::shell_escape(&script.display().to_string())
     );
-    let output = crate::services::platform::tmux::create_session(
+    let output = crate::services::platform::tmux::create_session_with_identity(
         session,
         Some(&home.display().to_string()),
         &command,
+        &crate::services::session_identity_metadata::provider_identity(
+            session,
+            provider,
+            None,
+            "provider_auth",
+        )?,
     )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -643,3 +650,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "provider_auth_profiles_identity_tests.rs"]
+mod identity_tests;

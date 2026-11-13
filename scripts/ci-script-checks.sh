@@ -840,6 +840,12 @@ if run_check cargo "Maintainability audit tests"; then
 "$PYTHON" -m unittest tests.test_audit_maintainability tests.test_module_layer_baseline_records tests.test_module_layer_measurement tests.test_module_layer_ratchet tests.test_module_layer_classification
 fi
 
+if run_check guards "Low-level accessor ratchet tests"; then
+"$PYTHON" -m unittest tests.test_low_level_accessors
+"$PYTHON" -m unittest tests.test_low_level_accessor_baseline
+"$PYTHON" -m unittest tests.test_low_level_accessor_wiring
+fi
+
 if run_check cargo "Maintainability audit"; then
 mkdir -p target
 # The default stdout format is the YAML artifact; --check findings go to stderr.

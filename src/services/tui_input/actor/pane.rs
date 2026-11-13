@@ -65,12 +65,19 @@ pub struct TmuxPane {
 }
 
 impl TmuxPane {
-    pub fn new(session: &str) -> Self {
+    pub fn new(session: &str) -> Result<Self, String> {
         Self::with_program(session, PathBuf::from("tmux"), Duration::from_secs(5))
     }
 
-    pub(crate) fn with_program(session: &str, program: PathBuf, budget: Duration) -> Self {
-        Self {
+    pub(crate) fn with_program(
+        session: &str,
+        program: PathBuf,
+        budget: Duration,
+    ) -> Result<Self, String> {
+        crate::services::platform::tmux::session_identity::require_managed_with_program(
+            session, &program, budget,
+        )?;
+        Ok(Self {
             session: session.to_string(),
             program,
             budget,
@@ -79,7 +86,7 @@ impl TmuxPane {
             busy: false,
             #[cfg(test)]
             test_nonce: None,
-        }
+        })
     }
 
     #[cfg(test)]
@@ -99,6 +106,19 @@ impl TmuxPane {
     }
 
     fn run(&self, args: &[&str]) -> Result<std::process::Output, BoundedTmuxError> {
+        if matches!(args.first(), Some(&"send-keys" | &"paste-buffer")) {
+            crate::services::platform::tmux::session_identity::require_managed_with_program(
+                &self.session,
+                &self.program,
+                self.budget,
+            )
+            .map_err(|error| {
+                BoundedTmuxError::Spawn(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    error,
+                ))
+            })?;
+        }
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
@@ -118,10 +138,10 @@ impl TmuxPane {
         })
     }
 
-    pub fn for_provider(session: &str, provider: ShadowProvider) -> Self {
-        let mut pane = Self::new(session);
+    pub fn for_provider(session: &str, provider: ShadowProvider) -> Result<Self, String> {
+        let mut pane = Self::new(session)?;
         pane.provider = provider;
-        pane
+        Ok(pane)
     }
 
     fn submit_inner(

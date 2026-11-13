@@ -351,6 +351,11 @@ pub(crate) fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
     with_boot(|boot| boot.and_then(|boot| boot.herdr_endpoint(channel)).cloned())
 }
 
+/// Whether boot config routes this channel to a Herdr endpoint; callers outside the host-policy owners ask this instead of reading the endpoint.
+pub(crate) fn has_herdr_endpoint(channel: u64) -> bool {
+    with_boot(|boot| boot.is_some_and(|boot| boot.herdr_endpoint(channel).is_some()))
+}
+
 /// Every Herdr-configured channel id as text, for SQL that must leave their rows alone.
 pub(crate) fn configured_channel_ids() -> Vec<String> {
     let ids = |boot: &BootSessionHosts| boot.channels().keys().map(u64::to_string).collect();
