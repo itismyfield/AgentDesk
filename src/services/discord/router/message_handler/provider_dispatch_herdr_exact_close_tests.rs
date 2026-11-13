@@ -365,6 +365,20 @@ impl EarlierExecution for OldTmuxView {
 
 impl Drop for OldTmux {
     fn drop(&mut self) {
+        if let Ok(log) = std::fs::read_to_string(self.root.path().join("control.log"))
+            && (std::thread::panicking()
+                || log.contains("PROVIDER_EXIT failed ")
+                || log
+                    .lines()
+                    .filter(|line| line.starts_with("CTL kill-pane -t %"))
+                    .count()
+                    > log
+                        .lines()
+                        .filter(|line| line.starts_with("PROVIDER_EXIT observed pid="))
+                        .count())
+        {
+            eprintln!("PRIVATE_OLD_FINAL_CONTROL\n{log}");
+        }
         if self.panes.get_mut().unwrap().is_some() {
             let _ = self.command().args(["-N", "kill-server"]).status();
         }
