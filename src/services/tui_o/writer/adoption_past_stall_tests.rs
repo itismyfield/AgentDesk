@@ -30,27 +30,6 @@ fn a_deferred_activation_waits_for_an_actual_legacy_body_send() {
 }
 
 #[test]
-fn a_pending_body_claim_preserves_the_already_released_refusal() {
-    let channel = Channel::new(67371002);
-    let store = channel.store();
-    let snapshot = channel.pin().unwrap();
-    assert_eq!(channel.candidate.peek(), Adoption::Pending);
-    let claimed = channel.candidate.claim_body(channel.channel);
-    assert!(!claimed.owned);
-    let send = claimed.send.expect("the body claim releases Pending");
-    assert_eq!(channel.candidate.peek(), Adoption::Released);
-    assert_eq!(channel.candidate.sends(), (1, 0));
-
-    let detail = channel.activate(&store, &snapshot).unwrap_err();
-    assert_eq!(detail, "adoption is already Released");
-    assert_eq!(channel.candidate.peek(), Adoption::Released);
-    assert!(!store.has_channel_dir(channel.channel));
-    assert_eq!(store.read_init(channel.channel).unwrap(), None);
-    drop(send);
-    assert_eq!(channel.candidate.sends(), (1, 1));
-}
-
-#[test]
 fn a_past_stall_recheck_relaxes_only_the_running_tail() {
     let (channel, _) = rotated(67371003, 2);
     let snapshot = channel.pin().unwrap();

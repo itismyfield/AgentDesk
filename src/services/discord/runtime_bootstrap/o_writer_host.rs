@@ -4,6 +4,7 @@
 use super::*;
 use crate::services::tui_o::ownership::execution::OwnerPermit;
 use std::collections::BTreeMap;
+mod adoption_wake;
 mod owner_port;
 pub(super) use owner_port::prepare as prepare_owner_rest;
 type ExecutionPermits = BTreeMap<u64, Result<Arc<OwnerPermit>, String>>;
@@ -241,7 +242,7 @@ impl HostIo for GatewayHost {
         async move {
             if let Some(execution) = execution {
                 let permit = execution?;
-                let FencedFacts { hold, facts, .. } = owner_port::facts(&permit).await?;
+                let FencedFacts { hold, facts, .. } = owner_port::facts(&permit, None).await?;
                 hold.release().await.map_err(|e| e.to_string())?;
                 return Ok(facts);
             }
@@ -260,6 +261,7 @@ impl HostIo for GatewayHost {
                     .await?;
             Ok(ActivationFacts {
                 open_intake: rows.open_intake,
+                own_turn_intake: 0,
                 runner_sessions: rows.foreign_sessions,
                 node_override: node_override.or(agent_node),
             })
@@ -272,9 +274,14 @@ impl HostIo for GatewayHost {
         channel: u64,
         _provider: ShadowProvider,
     ) -> Result<FencedFacts, String> {
+        // Read before the fence: a row naming this turn's message is one Legacy already took in.
+        let mailbox = super::super::mailbox_snapshot(&self.shared, ChannelId::new(channel)).await;
+        let own_turn = mailbox
+            .active_user_message_id
+            .map(|id| id.get().to_string());
         if let Some(execution) = self.execution_permit(channel) {
             let permit = execution?;
-            return owner_port::facts(&permit).await;
+            return owner_port::facts(&permit, own_turn.as_deref()).await;
         }
         let pool = self.shared.pg_pool.as_ref().ok_or("no PG pool")?;
         let id = channel.to_string();
@@ -286,14 +293,19 @@ impl HostIo for GatewayHost {
         let node_override =
             super::super::commands::channel_node_override(&self.shared, ChannelId::new(channel))
                 .await?;
-        let (hold, rows, queued_bodies) =
-            crate::db::o_channel_activation::fenced_activation_rows(pool, &id, &local)
-                .await
-                .map_err(|error| format!("activation fence: {error}"))?;
+        let (hold, rows, queued_bodies) = crate::db::o_channel_activation::fenced_activation_rows(
+            pool,
+            &id,
+            &local,
+            own_turn.as_deref(),
+        )
+        .await
+        .map_err(|error| format!("activation fence: {error}"))?;
         Ok(FencedFacts {
             hold,
             facts: ActivationFacts {
                 open_intake: rows.open_intake,
+                own_turn_intake: rows.own_turn_intake,
                 runner_sessions: rows.foreign_sessions,
                 node_override: node_override.or(agent_node),
             },
@@ -399,6 +411,12 @@ impl HostIo for GatewayHost {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
         };
+        // Each time the adopted writer turns ready, the row kept for its adoption is judged again.
+        #[cfg(test)]
+        let rest = self.rest.clone();
+        #[cfg(not(test))]
+        let rest = None;
+        adoption_wake::spawn(&self.shared, rest, provider.clone(), channel);
         super::super::queue_io::schedule_writer_ready_queue_kick(
             self.shared.clone(),
             provider,
@@ -517,14 +535,15 @@ pub(super) mod test_host {
         }
     }
 
-    /// The Claude gateway host's parts as the boot builds them, posting through `rest` as the
+    /// The `provider` gateway host's parts as the boot builds them, posting through `rest` as the
     /// node clustering configured as `configured_id`.
-    pub(in crate::services::discord::runtime_bootstrap) fn claude_parts(
+    pub(in crate::services::discord::runtime_bootstrap) fn rest_parts(
         shared: &Arc<SharedData>,
+        provider: &ProviderKind,
         rest: Arc<serenity::Http>,
         configured_id: &str,
     ) -> host::HostParts<impl HostIo> {
-        let mut parts = parts_with_rest(shared, &ProviderKind::Claude, None, Some(rest));
+        let mut parts = parts_with_rest(shared, provider, None, Some(rest));
         Arc::get_mut(&mut parts.io).unwrap().configured_id = Some(configured_id.to_owned());
         parts
     }

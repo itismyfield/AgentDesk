@@ -1,11 +1,11 @@
-//! The legacy long replace's claimed send stays counted through the fallback post at Discord.
+//! A pending channel's long replace is held before its edit and fallback post reach Discord.
 
 use super::*;
 
-/// A legacy long replace whose edit fails keeps its claimed send counted through the fallback
-/// post, and lets it go once that post is done.
+/// A pending adoption holds the long replace: neither its edit nor the fallback post a refused
+/// edit would take reaches Discord, nothing is reported sent, and no Legacy send is counted.
 #[tokio::test(flavor = "current_thread")]
-async fn a_failed_edit_keeps_the_claimed_send_counted_through_its_fallback_post() {
+async fn a_held_long_replace_sends_neither_its_edit_nor_its_fallback_post() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
     use crate::services::tui_o::cutover::test_override;
     use axum::{Json, Router, http::Method, http::StatusCode, response::IntoResponse};
@@ -19,17 +19,17 @@ async fn a_failed_edit_keeps_the_claimed_send_counted_through_its_fallback_post(
     let _candidates = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
     let candidate = test_override::with_channels(|boot| boot?.candidate(CHANNEL).cloned());
     let candidate = candidate.unwrap();
-    // The channel's Legacy sends as each post reached Discord; every edit is refused.
-    let posts: Arc<std::sync::Mutex<Vec<(u64, u64)>>> = Arc::default();
-    let (seen, adoption) = (posts.clone(), candidate.clone());
+    // Every request that reached Discord; every edit is refused.
+    let requests: Arc<std::sync::Mutex<Vec<Method>>> = Arc::default();
+    let seen = requests.clone();
     let app = Router::new().fallback(axum::routing::any(move |method: Method| {
-        let (seen, adoption) = (seen.clone(), adoption.clone());
+        let seen = seen.clone();
         async move {
+            seen.lock().unwrap().push(method.clone());
             if method == Method::PATCH {
                 let refused = r#"{"message":"Missing Permissions","code":50013}"#;
                 return (StatusCode::FORBIDDEN, refused).into_response();
             }
-            seen.lock().unwrap().push(adoption.sends());
             Json(serde_json::json!({
                 "id": "6737153", "channel_id": CHANNEL.to_string(), "content": "",
                 "author": {"id": "1", "username": "t", "discriminator": "0001", "avatar": null},
@@ -66,16 +66,7 @@ async fn a_failed_edit_keeps_the_claimed_send_counted_through_its_fallback_post(
     )
     .await;
     server.abort();
-    assert!(matches!(
-        sent,
-        Some(Ok(WatcherDeferredReplaceOutcome::Replace(
-            ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }
-        )))
-    ));
-    assert_eq!(
-        *posts.lock().unwrap(),
-        [(1, 0)],
-        "counted at the fallback post"
-    );
-    assert_eq!(candidate.sends(), (1, 1), "done once the post is");
+    assert!(sent.is_none(), "nothing was sent");
+    assert_eq!(*requests.lock().unwrap(), Vec::<Method>::new());
+    assert_eq!(candidate.sends(), (0, 0), "no Legacy send is counted");
 }

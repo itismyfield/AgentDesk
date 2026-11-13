@@ -1,5 +1,5 @@
-//! A candidate channel against its real Legacy sink and the real writer host: whichever of the
-//! first Legacy body and the first `init` comes first owns the channel, and each unit posts once.
+//! A candidate channel against its real Legacy sink and the real writer host: Legacy holds every
+//! body of the channel, the first `init` makes the channel O's, and each unit posts once at most.
 
 use super::*;
 use crate::services::discord::SharedData;
@@ -110,19 +110,22 @@ async fn settle() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 }
 
-/// Asserts the rejected outcome: Legacy posted A's unit once, O nothing, and no init was written.
-fn assert_released(pair: &Pair) {
-    assert_eq!(adoption(A), Adoption::Released);
-    assert_eq!(
-        pair.posts(&pair.io, 0, None),
-        (0, 1),
-        "A goes through Legacy only"
-    );
-    assert!(!pair.init_exists(), "a rejected adoption writes no init");
+/// A sink outcome that held the TUI body for O's adoption or its refusal; nothing was sent.
+fn assert_held(outcome: Result<RelaySinkOutcome, RelaySinkError>) {
+    let held = format!("{outcome:?}");
+    assert!(held.contains("O adoption"), "{held}");
+}
+
+/// Asserts the refused outcome: A's unit is held by Legacy and posted by neither, and no init was
+/// written, while B stays Legacy's.
+fn assert_refused(pair: &Pair) {
+    assert_eq!(adoption(A), Adoption::Refused);
+    assert_eq!(pair.posts(&pair.io, 0, None), (0, 0), "A's unit is held");
+    assert!(!pair.init_exists(), "a refused adoption writes no init");
     assert_eq!(pair.posts(&pair.io, 1, None), (0, 1), "B stays Legacy");
 }
 
-async fn open_intake_releases() {
+async fn open_intake_refuses() {
     let pair = Pair::new().await;
     let _candidates =
         cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
@@ -131,50 +134,53 @@ async fn open_intake_releases() {
     settle().await;
     assert_eq!(
         adoption(A),
-        Adoption::Released,
-        "rejected before any store write"
+        Adoption::Refused,
+        "refused before any store write"
     );
-    for leg in &pair.legs {
-        finish(&leg).await;
-    }
+    assert_held(pair.legs[0].finish_turn().await);
+    finish(&pair.legs[1]).await;
     settle().await;
-    assert_released(&pair);
+    assert_refused(&pair);
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_candidate_with_open_intake_is_released_and_its_unit_posts_once_through_legacy() {
-    if isolated(
-        "adoption::a_candidate_with_open_intake_is_released_and_its_unit_posts_once_through_legacy",
-    ) {
-        open_intake_releases().await;
+async fn a_candidate_with_open_intake_is_refused_and_its_unit_is_held_not_posted() {
+    if isolated("adoption::a_candidate_with_open_intake_is_refused_and_its_unit_is_held_not_posted")
+    {
+        open_intake_refuses().await;
     }
 }
 
-async fn legacy_body_first() {
+async fn held_body_first() {
     let pair = Pair::new().await;
     let _candidates =
         cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
     let check = crate::services::tui_o::channel_policy::BodyCheck::watch(A, &pair.legs[0].body);
     pair.legs[0].gateway.check.set(check.clone()).unwrap();
-    finish(&pair.legs[0]).await;
+    assert_held(pair.legs[0].finish_turn().await);
     check.assert_settled();
-    assert_eq!(
-        adoption(A),
-        Adoption::Released,
-        "the sink's body judgement took the channel"
-    );
+    // The held turn sits past Legacy's frontier, so the host takes it as O's to post.
+    pair.read_legacy();
+    rehydrated(&pair.legs[0]);
     let hosts = pair.host(&pair.io);
     finish(&pair.legs[1]).await;
     settle().await;
-    assert_released(&pair);
+    assert_eq!(adoption(A), Adoption::Committed, "{:?}", pair.alarms());
+    let body = pair.legs[0].body.clone();
+    assert_eq!(
+        pair.posts(&pair.io, 0, Some(&body)),
+        (1, 0),
+        "O posts the held unit once"
+    );
+    assert_eq!(pair.posts(&pair.io, 1, None), (0, 1), "B stays Legacy");
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_legacy_body_before_activation_keeps_the_candidate_on_legacy() {
-    if isolated("adoption::a_legacy_body_before_activation_keeps_the_candidate_on_legacy") {
-        legacy_body_first().await;
+async fn a_body_held_before_activation_is_posted_once_by_o_and_never_by_legacy() {
+    if isolated("adoption::a_body_held_before_activation_is_posted_once_by_o_and_never_by_legacy") {
+        held_body_first().await;
     }
 }
 
@@ -187,22 +193,20 @@ async fn unit_between_facts_and_lock() {
     settle().await;
     assert_eq!(
         adoption(A),
-        Adoption::Released,
+        Adoption::Refused,
         "the recheck under the lock saw the unit"
     );
-    for leg in &pair.legs {
-        finish(&leg).await;
-    }
+    assert_held(pair.legs[0].finish_turn().await);
+    finish(&pair.legs[1]).await;
     settle().await;
-    assert_released(&pair);
+    assert_refused(&pair);
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_unit_written_after_the_facts_but_before_the_lock_keeps_the_channel_on_legacy() {
-    if isolated(
-        "adoption::a_unit_written_after_the_facts_but_before_the_lock_keeps_the_channel_on_legacy",
-    ) {
+async fn a_unit_written_after_the_facts_but_before_the_lock_refuses_the_channel() {
+    if isolated("adoption::a_unit_written_after_the_facts_but_before_the_lock_refuses_the_channel")
+    {
         unit_between_facts_and_lock().await;
     }
 }
@@ -419,6 +423,18 @@ fn write_second(path: &str, body: &str) -> (u64, String) {
 
 /// Hands the second turn to A's Legacy sink over its own open turn, as its tail would.
 async fn deliver_second(leg: &Leg, start: u64, rows: &str) {
+    let outcome = send_second(leg, start, rows).await;
+    assert!(
+        matches!(outcome, Ok(RelaySinkOutcome::TerminalDelivered)),
+        "{outcome:?}"
+    );
+}
+
+async fn send_second(
+    leg: &Leg,
+    start: u64,
+    rows: &str,
+) -> Result<RelaySinkOutcome, RelaySinkError> {
     let session = &leg.binding.expected_session_name;
     let mut row =
         inflight_with_identity_offset(leg.channel, session, 711, SECOND_STARTED, Some(start));
@@ -429,11 +445,7 @@ async fn deliver_second(leg: &Leg, start: u64, rows: &str) {
     let mut frame =
         terminal_frame_offset(&leg.binding, rows, 1, end, 711, SECOND_STARTED, Some(start));
     frame.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(session));
-    let outcome = leg.sink.deliver(&frame).await;
-    assert!(
-        matches!(outcome, Ok(RelaySinkOutcome::TerminalDelivered)),
-        "{outcome:?}"
-    );
+    leg.sink.deliver(&frame).await
 }
 
 /// Legacy's cursor where a rehydrate pass of this process leaves it: the transcript's length.
@@ -538,7 +550,7 @@ async fn unit_after_the_pin() {
     });
     let hosts = pair.host(&pair.io);
     settle().await;
-    assert_eq!(adoption(A), Adoption::Released);
+    assert_eq!(adoption(A), Adoption::Refused);
     assert!(!pair.init_exists(), "a moved transcript writes no init");
     pair.released_for("length moved");
     let (start, rows) = written
@@ -547,21 +559,19 @@ async fn unit_after_the_pin() {
         .take()
         .expect("the unit was written");
     assert_eq!(start, cursor, "the unit starts at Legacy's cursor");
-    deliver_second(&pair.legs[0], start, &rows).await;
+    assert_held(send_second(&pair.legs[0], start, &rows).await);
     settle().await;
     assert_eq!(
         pair.posts(&pair.io, 0, None),
-        (0, 2),
-        "Legacy posts the unit from its cursor"
+        (0, 1),
+        "the unit is held, only history posted"
     );
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_unit_written_after_the_pin_keeps_the_channel_on_legacy_from_its_cursor() {
-    if isolated(
-        "adoption::a_unit_written_after_the_pin_keeps_the_channel_on_legacy_from_its_cursor",
-    ) {
+async fn a_unit_written_after_the_pin_refuses_the_channel_and_is_held() {
+    if isolated("adoption::a_unit_written_after_the_pin_refuses_the_channel_and_is_held") {
         unit_after_the_pin().await;
     }
 }
@@ -573,31 +583,33 @@ async fn undelivered_closed_turn() {
     let leg = &pair.legs[0];
     std::fs::write(&leg.binding.expected_rollout_path, first_turn(&leg.body)).unwrap();
     pair.read_legacy();
-    let cursor = rehydrated(leg);
+    rehydrated(leg);
     row_custody(&pair);
     let _candidates =
         cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
     let hosts = pair.host(&pair.io);
-    tokio::time::sleep(Duration::from_secs(39 * 60)).await;
-    assert_eq!(adoption(A), Adoption::Deferred);
-    // The late delivery of that turn goes through Legacy, as a tail started below the cursor would.
-    finish(leg).await;
-    tokio::time::sleep(Duration::from_secs(2 * 60)).await;
-    assert_eq!(
-        pair.posts(&pair.io, 0, None),
-        (0, 1),
-        "Legacy posts the turn once"
-    );
+    // Legacy sends no TUI body, so the turn it owes is O's from its frontier; a row only waits.
+    tokio::time::sleep(Duration::from_secs(60)).await;
     assert_eq!(adoption(A), Adoption::Committed, "{:?}", pair.alarms());
-    assert_eq!(pair.o_start(), cursor);
-    assert_eq!(pair.alarms(), [], "what Legacy delivered is not reported");
+    assert_eq!(pair.alarms(), [], "nothing is abandoned");
+    let body = leg.body.clone();
+    assert_eq!(
+        pair.posts(&pair.io, 0, Some(&body)),
+        (1, 0),
+        "O posts the turn once"
+    );
+    // A late Legacy delivery of that turn sends nothing more.
+    finish(leg).await;
+    settle().await;
+    assert_eq!(pair.posts(&pair.io, 0, Some(&body)), (1, 0));
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_closed_turn_legacy_delivers_late_goes_through_legacy_before_o_adopts() {
-    if isolated("adoption::a_closed_turn_legacy_delivers_late_goes_through_legacy_before_o_adopts")
-    {
+async fn a_closed_turn_legacy_has_not_delivered_is_posted_once_by_o_from_its_frontier() {
+    if isolated(
+        "adoption::a_closed_turn_legacy_has_not_delivered_is_posted_once_by_o_from_its_frontier",
+    ) {
         undelivered_closed_turn().await;
     }
 }
@@ -886,34 +898,28 @@ async fn row_over_a_dead_tail() {
     let leg = &pair.legs[0];
     std::fs::write(&leg.binding.expected_rollout_path, first_turn(&leg.body)).unwrap();
     pair.read_legacy();
-    let cursor = rehydrated(leg);
+    rehydrated(leg);
     let row = stale_row(leg);
     row_custody(&pair);
     let candidates =
         cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
     let hosts = pair.host(&pair.io);
-    tokio::time::sleep(Duration::from_secs(39 * 60)).await;
-    assert_eq!(adoption(A), Adoption::Deferred, "Legacy may still deliver");
-    assert_eq!(pair.alarms(), []);
-    tokio::time::sleep(Duration::from_secs(3 * 60)).await;
+    // The tail Legacy never delivers is O's from its frontier: posted once, abandoned never.
+    tokio::time::sleep(Duration::from_secs(60)).await;
     assert_eq!(adoption(A), Adoption::Committed, "{:?}", pair.alarms());
-    assert_eq!(pair.o_start(), cursor);
-    let abandoned = crate::services::tui_o::writer::WriterAlarm::Abandoned {
-        source: leg.source(),
-        from: 0,
-        to: cursor,
-    };
+    assert_eq!(pair.alarms(), []);
+    let body = leg.body.clone();
     assert_eq!(
-        pair.alarms(),
-        [(A, abandoned.clone())],
-        "one report of the whole tail"
+        pair.posts(&pair.io, 0, Some(&body)),
+        (1, 0),
+        "O posts the tail once"
     );
 
     retry_first_turn(leg).await;
     assert_eq!(
-        pair.posts(&pair.io, 0, None),
-        (0, 0),
-        "the retried tail is posted by neither"
+        pair.posts(&pair.io, 0, Some(&body)),
+        (1, 0),
+        "the retried tail posts nothing more"
     );
     let judged = cutover::claims_judged(A);
     // Legacy's standby relay over the row reaches the body gate and stops there.
@@ -944,27 +950,19 @@ async fn row_over_a_dead_tail() {
     deliver_second(leg, start, &rows).await;
     settle().await;
     let posts = pair.io.posts.to(A);
-    assert_eq!(
-        posts,
-        [format!("{} second", leg.body), TURN_DONE.to_owned()]
-    );
-    assert_eq!(leg.legacy_posts(), 0, "the abandoned turn was never posted");
+    let second = format!("{} second", leg.body);
+    assert_eq!(posts, [body, TURN_DONE.into(), second, TURN_DONE.into()]);
+    assert_eq!(leg.legacy_posts(), 0, "Legacy posted neither turn");
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
     drop(candidates);
     let io = pair.restarted().await;
     assert_eq!(pair.posts(&io, 0, None), (0, 0), "restart is silent");
-    assert_eq!(
-        *io.alarms.0.lock().unwrap(),
-        [],
-        "nor reports the tail again"
-    );
+    assert_eq!(*io.alarms.0.lock().unwrap(), [], "nor reports anything");
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_tail_legacy_never_delivers_is_abandoned_once_after_the_stall_and_never_posted() {
-    if isolated(
-        "adoption::a_tail_legacy_never_delivers_is_abandoned_once_after_the_stall_and_never_posted",
-    ) {
+async fn a_tail_legacy_never_delivers_is_posted_once_by_o_and_never_abandoned() {
+    if isolated("adoption::a_tail_legacy_never_delivers_is_posted_once_by_o_and_never_abandoned") {
         row_over_a_dead_tail().await;
     }
 }
@@ -975,43 +973,34 @@ async fn tail_left_by_a_restart_drain() {
     let leg = &pair.legs[0];
     // A restart drained Legacy's row and kept its frontier; the turn written before it is owed.
     let (start, rows) = write_second(&leg.binding.expected_rollout_path, &leg.body);
-    let cursor = rehydrated(leg);
+    rehydrated(leg);
     let candidates =
         cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
     let hosts = pair.host(&pair.io);
     settle().await;
-    assert_eq!(adoption(A), Adoption::Deferred, "{:?}", pair.alarms());
-    assert!(!pair.init_exists());
-    assert_eq!(pair.alarms(), []);
-    deliver_second(leg, start, &rows).await;
-    tokio::time::sleep(Duration::from_secs(60)).await;
     assert_eq!(adoption(A), Adoption::Committed, "{:?}", pair.alarms());
-    assert_eq!(pair.o_start(), cursor);
-    assert_eq!(pair.alarms(), [], "what Legacy delivered is not reported");
+    assert_eq!(pair.alarms(), [], "nothing is abandoned");
+    let second = format!("{} second", leg.body);
+    let owed = pair.posts(&pair.io, 0, Some(&second));
     assert_eq!(
-        pair.posts(&pair.io, 0, None),
-        (0, 2),
-        "Legacy posts the owed turn once"
+        owed,
+        (1, 1),
+        "O posts the owed turn once; Legacy posted only the history"
     );
-    let (start, rows) = write_second(&leg.binding.expected_rollout_path, &leg.body);
+    // Legacy's own delivery of that turn sends nothing more.
     deliver_second(leg, start, &rows).await;
     settle().await;
-    assert_eq!(
-        pair.posts(&pair.io, 0, Some(&format!("{} second", leg.body))),
-        (1, 2),
-        "O posts the next turn once"
-    );
+    assert_eq!(pair.posts(&pair.io, 0, Some(&second)), (1, 1));
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
     drop(candidates);
     let io = pair.restarted().await;
-    assert_eq!(pair.posts(&io, 0, None), (0, 2), "restart is silent");
+    assert_eq!(pair.posts(&io, 0, None), (0, 1), "restart is silent");
     assert_eq!(*io.alarms.0.lock().unwrap(), []);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_turn_legacy_owes_after_a_restart_goes_through_legacy_before_o_adopts() {
-    if isolated("adoption::a_turn_legacy_owes_after_a_restart_goes_through_legacy_before_o_adopts")
-    {
+async fn a_turn_legacy_owes_after_a_restart_is_posted_once_by_o() {
+    if isolated("adoption::a_turn_legacy_owes_after_a_restart_is_posted_once_by_o") {
         tail_left_by_a_restart_drain().await;
     }
 }

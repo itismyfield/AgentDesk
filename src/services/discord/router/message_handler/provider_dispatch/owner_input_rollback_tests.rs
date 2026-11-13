@@ -820,6 +820,8 @@ async fn not_sent_intake_records_only_the_later_success_pg() {
         .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
         .unwrap();
     assert_eq!(result, Ok(()), "{}", rig.trace.text());
+    // O adopts the channel while the admitted turn runs, so the turn ends through its delivery.
+    crate::test_support::o_store::adopt_installed(rig.channel.get());
     wait("the submitted native user row", || {
         fs::read_to_string(&rig.transcript)
             .unwrap()
@@ -873,10 +875,11 @@ async fn not_sent_intake_records_only_the_later_success_pg() {
         1
     );
     assert!(
-        rig.mock
+        !rig.mock
             .written_texts()
             .iter()
-            .any(|s| s.contains("delivered exactly once"))
+            .any(|s| s.contains("delivered exactly once")),
+        "O delivers the adopted turn's answer, not Legacy"
     );
     drop(rig);
     pool.close().await;
@@ -986,6 +989,8 @@ async fn a_turn_start_waits_out_a_native_busy_turn_then_runs_as_its_own_pg() {
     use crate::services::agents::input_result::{InputResult, OriginChannel, lookup};
     const ORIGIN: &str = "G-native-busy";
     let _root = crate::config::TestRuntimeRootGuard::new();
+    // Its turn ends only through O's delegated delivery, which needs the channel adopted.
+    crate::test_support::o_store::commit_o_store(_root.path(), &[7_340_801]);
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let rig = IntakeRig::turn_start_stored(7_340_801, pool.clone(), ORIGIN).await;
@@ -1280,6 +1285,8 @@ async fn a_start_waiting_across_a_restart_runs_once_after_the_carried_row_closes
     use crate::services::discord::inflight;
     const ORIGIN: &str = "G-restart-carried";
     let _root = crate::config::TestRuntimeRootGuard::new();
+    // Its turn ends only through O's delegated delivery, which needs the channel adopted.
+    crate::test_support::o_store::commit_o_store(_root.path(), &[7_340_803]);
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let rig = IntakeRig::turn_start_stored(7_340_803, pool.clone(), ORIGIN).await;

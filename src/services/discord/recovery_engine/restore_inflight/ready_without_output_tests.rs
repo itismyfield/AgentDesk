@@ -680,6 +680,58 @@ async fn captured_live_partial_eof_preserves_failures_then_commits_and_clears_cu
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn captured_partial_eof_held_for_adoption_keeps_row_and_budget_then_settles_on_delivery() {
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let mut fixture = Fixture::new(5_071_812);
+    fixture.state.recovery_relay_attempts = 2;
+    fixture.claim().await;
+    let channel = ChannelId::new(fixture.state.channel_id);
+    let actor = mailbox_snapshot(&fixture.shared, channel)
+        .await
+        .cancel_token
+        .expect("captured actor");
+    for held in [
+        RecoveryRelayOutcome::AwaitingAdoption,
+        RecoveryRelayOutcome::AdoptionRefused,
+    ] {
+        let state = fixture.load().expect("held obligation");
+        let settle = settle_ready_without_output_for_actor(
+            &fixture.shared,
+            &ProviderKind::Claude,
+            &state,
+            Some(&actor),
+            |_| std::future::ready(held),
+        );
+        assert!(settle.await, "{held:?}: the captured actor settles");
+        let retained = fixture.load().expect("a held body keeps its row");
+        assert!(!retained.terminal_delivery_completed(), "{held:?}");
+        assert_eq!(retained.full_response, state.full_response, "{held:?}");
+        assert_eq!(
+            retained.response_sent_offset, state.response_sent_offset,
+            "{held:?}: nothing was sent, so the offset stays"
+        );
+        assert_eq!(
+            retained.recovery_relay_attempts, 2,
+            "{held:?}: an unsent body spends no retry budget"
+        );
+        let owner = mailbox_snapshot(&fixture.shared, channel).await;
+        assert!(owner.cancel_token.is_some(), "{held:?}: the actor stays");
+    }
+    let state = fixture.load().expect("held obligation");
+    let settle = settle_ready_without_output_for_actor(
+        &fixture.shared,
+        &ProviderKind::Claude,
+        &state,
+        Some(&actor),
+        |_| std::future::ready(RecoveryRelayOutcome::Delivered),
+    );
+    assert!(settle.await);
+    assert!(fixture.load().is_none(), "a later delivery settles the row");
+    let owner = mailbox_snapshot(&fixture.shared, channel).await;
+    assert!(owner.cancel_token.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn captured_partial_eof_never_commits_new_same_turn_progress_or_replacement_actor() {
     let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
     for replace_actor in [false, true] {

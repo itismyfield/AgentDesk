@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// A terminal whose body O's adoption holds: the watcher retries the range until the adopted
+/// channel ends the turn through O, and finalizes nothing meanwhile.
+pub(super) fn held_for_adoption(
+    ownership: &Result<bool, crate::services::tui_o::cutover::IdentityError>,
+) -> bool {
+    use crate::services::tui_o::cutover::IdentityError;
+    matches!(
+        ownership,
+        Err(IdentityError::AwaitingAdoption | IdentityError::AdoptionRefused)
+    )
+}
+
+/// The rewind attempts after one more retry; a retry held for adoption spends none.
+pub(super) fn counted_rewind(
+    attempts: u8,
+    ownership: &Result<bool, crate::services::tui_o::cutover::IdentityError>,
+) -> u8 {
+    attempts.saturating_add(u8::from(!held_for_adoption(ownership)))
+}
+
 pub(super) fn watcher_tui_gate_blocks_lifecycle(
     gate_outcome: TuiCompletionGateOutcome,
     terminal_delivery_committed: bool,

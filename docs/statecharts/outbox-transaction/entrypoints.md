@@ -284,8 +284,8 @@ S14d부터 DB 함수는 완료 직전 지점에서 멈추고(`PreparedCompletion
 |`src/services/provider/channel_rules.rs:237`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/provider/runtime.rs:22`|관측 leaf/경로: 위 표 참조|
 |`src/services/provider/runtime.rs:46`|관측 leaf/경로: 위 표 참조|
-|`src/services/tui_o/cutover/channel_gate.rs:297`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
-|`src/services/tui_o/cutover/channel_gate/tests.rs:253`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
+|`src/services/tui_o/cutover/channel_gate.rs:303`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
+|`src/services/tui_o/cutover/channel_gate/tests.rs:241`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 
 ## 시험 fixture 좌표 (production 집계 제외)
 

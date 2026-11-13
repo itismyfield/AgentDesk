@@ -143,7 +143,7 @@ async fn cleanup_abort_before_first_poll_releases_reserved_candidate() {
     assert!(task.await.unwrap_err().is_cancelled());
     assert_eq!(
         adoption(CHANNEL),
-        Adoption::Released,
+        Adoption::Refused,
         "cleanup must be owned before spawn"
     );
     f.assert_no_publication();
@@ -159,7 +159,7 @@ async fn cleanup_root_and_home_failures_leave_no_reserved_host() {
     }
     let f = Fixture::new();
     assert!(f.start_with(None).is_empty());
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Refused);
     assert!(!f.ready.is_hosted(CHANNEL));
     assert!(
         f.io.alarms
@@ -203,7 +203,7 @@ async fn cleanup_stop_after_first_poll_finishes_before_host_claim_is_released() 
     let handle = f.start();
     f.first_facts().await;
     handle.stop_and_join().await.unwrap();
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Refused);
     assert!(!f.ready.is_hosted(CHANNEL));
     f.assert_no_publication();
 }
@@ -221,7 +221,7 @@ async fn cleanup_facts_panic_releases_unpublished_candidate() {
     let task = f.start().into_detached();
     assert!(task.await.unwrap_err().is_panic());
     assert!(f.io.calls().contains(&("facts", CHANNEL)));
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Refused);
     f.assert_no_publication();
 }
 

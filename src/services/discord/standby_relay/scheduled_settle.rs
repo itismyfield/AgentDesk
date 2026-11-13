@@ -38,6 +38,23 @@ pub(super) async fn settle(
         .await;
 }
 
+/// What a relay send leaves to settle: its own delivery, or the row of a turn O owes.
+pub(super) fn delivered<E>(
+    sent: Result<BodySend<bool>, E>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<bool> {
+    match sent {
+        Ok(BodySend::Sent(delivered)) => Some(delivered),
+        Ok(BodySend::OwnedByO) => {
+            super::super::inflight::load_inflight_state(provider, channel_id.get())
+                .filter(super::super::recovery_paths::o_duty::owes_row)
+                .map(|_| true)
+        }
+        Err(_) => None,
+    }
+}
+
 /// Whether the turn's first `result` event at or after `start` is a typed error;
 /// `None` when the turn has no result event yet.
 pub(super) fn terminal_result_is_error(output_path: &str, start: u64) -> Option<bool> {
@@ -57,3 +74,7 @@ pub(super) fn terminal_result_is_error(output_path: &str, start: u64) -> Option<
 #[cfg(test)]
 #[path = "scheduled_settle_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "o_owed_settle_tests.rs"]
+mod o_owed_settle_tests;

@@ -28,6 +28,10 @@ pub(in crate::services::discord) enum RecoveryRelayOutcome {
     /// Anything else: no HTTP status, 5xx, 429 rate-limit, transport error.
     /// Must stay retryable — never escalate these to a destructive verdict.
     TransientFailure,
+    /// The TUI body is held until O adopts the channel: no send was tried, so no budget is spent.
+    AwaitingAdoption,
+    /// O refused the channel's adoption: the body stays held for an operator or a restart.
+    AdoptionRefused,
 }
 
 impl RecoveryRelayOutcome {
@@ -35,6 +39,18 @@ impl RecoveryRelayOutcome {
     /// `true` only when the response actually reached Discord.
     pub(in crate::services::discord) fn delivered(self) -> bool {
         matches!(self, RecoveryRelayOutcome::Delivered)
+    }
+
+    /// The outcome of a body the TUI gate held: an adoption wait or refusal is no relay failure.
+    pub(in crate::services::discord) fn held(
+        error: &crate::services::tui_o::cutover::IdentityError,
+    ) -> Self {
+        use crate::services::tui_o::cutover::IdentityError;
+        match error {
+            IdentityError::AwaitingAdoption => Self::AwaitingAdoption,
+            IdentityError::AdoptionRefused => Self::AdoptionRefused,
+            _ => Self::TransientFailure,
+        }
     }
 }
 
@@ -144,6 +160,8 @@ pub(in crate::services::discord) enum RowDisposition {
     ClearBudgetExhausted,
     /// Preserve the row for the next boot and persist `attempts + 1`.
     PreserveAndCount,
+    /// Preserve the row uncounted: its body waits on O's adoption, which no restart budget ends.
+    Preserve,
 }
 
 /// Decision matrix for the post-relay row disposition.
@@ -162,6 +180,9 @@ pub(in crate::services::discord) fn unrecoverable_relay_disposition(
     match outcome {
         RecoveryRelayOutcome::Delivered => RowDisposition::FinishAndClear,
         RecoveryRelayOutcome::PermanentFailure => RowDisposition::ClearPermanent,
+        RecoveryRelayOutcome::AwaitingAdoption | RecoveryRelayOutcome::AdoptionRefused => {
+            RowDisposition::Preserve
+        }
         RecoveryRelayOutcome::TransientFailure => {
             if !tmux_alive && attempts.saturating_add(1) >= budget {
                 RowDisposition::ClearBudgetExhausted
@@ -181,7 +202,9 @@ pub(in crate::services::discord) fn disposition_reason_code(
     match disposition {
         RowDisposition::ClearPermanent => Some("recovery_permanent_relay_failure"),
         RowDisposition::ClearBudgetExhausted => Some("recovery_retry_budget_exhausted"),
-        RowDisposition::FinishAndClear | RowDisposition::PreserveAndCount => None,
+        RowDisposition::FinishAndClear
+        | RowDisposition::PreserveAndCount
+        | RowDisposition::Preserve => None,
     }
 }
 

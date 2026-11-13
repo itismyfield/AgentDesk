@@ -556,10 +556,9 @@ async fn unretired_supervisor_consumer_preserves_legacy_decode_and_backfill() {
     let outcome = LegacySessionRelayConsumer(sink.clone())
         .deliver(&frame)
         .await;
-    assert!(
-        matches!(outcome, Ok(RelaySinkOutcome::TerminalDelivered)),
-        "{outcome:?}"
-    );
+    // The TUI body awaits O's adoption; decode and backfill still run before that hold.
+    let held = format!("{outcome:?}");
+    assert!(held.contains("awaits O adoption"), "{held}");
     let raw = observations.raw_process_snapshot();
     assert!(
         raw.writable_inflight_load_calls > 0,
@@ -578,6 +577,7 @@ async fn unretired_supervisor_consumer_preserves_legacy_decode_and_backfill() {
     assert_eq!(
         leg.gateway.send_calls.load(Ordering::Acquire)
             + leg.gateway.replace_calls.load(Ordering::Acquire),
-        1
+        0,
+        "Legacy sends no held TUI body"
     );
 }

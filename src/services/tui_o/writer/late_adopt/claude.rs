@@ -5,8 +5,9 @@ use super::codex::prefix::Verdict;
 use super::codex::{Baseline, Taken, Takeover, bound_after};
 use crate::services::tui_o::channel_policy::Candidate;
 use crate::services::tui_o::ownership::OwnershipGate;
+use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
-use crate::services::tui_o::store::{InitOrigin, OStore};
+use crate::services::tui_o::store::{InitOrigin, InitSource, OStore};
 use crate::services::tui_o::writer::binding::BindingEvent;
 use crate::services::tui_o::writer::host::HostIo;
 use crate::services::tui_o::writer::rotation::bound_source;
@@ -98,6 +99,8 @@ pub(in crate::services::tui_o::writer) struct Sample {
     pub(in crate::services::tui_o::writer) nonce: String,
     pub(in crate::services::tui_o::writer) len: u64,
     pub(in crate::services::tui_o::writer) sends: (u64, u64),
+    /// The hash of the transcript's bytes before `len`.
+    pub(in crate::services::tui_o::writer) hash: String,
 }
 
 /// A source a rebase left without proof that Legacy delivered it, with the sample taken before.
@@ -115,6 +118,43 @@ impl Owed {
         candidate: &Candidate,
     ) -> Result<Floor, String> {
         old_source_done(self.sample.as_ref(), &self.old, events, candidate)
+    }
+
+    /// The old transcript from where Legacy last delivered it, once no Legacy body started since
+    /// that sample: O takes what is past it. `sends` is read by the caller, under its own lock.
+    pub(in crate::services::tui_o::writer) fn range(
+        &self,
+        events: &[BindingEvent],
+        sends: (u64, u64),
+    ) -> Result<InitSource, String> {
+        let sample = self
+            .sample
+            .as_ref()
+            .ok_or("no delivered sample of the old transcript")?;
+        if sample.source != self.old.0
+            || nonce_of(events, &self.old.0).as_ref() != Some(&sample.nonce)
+        {
+            return Err("the delivered sample is of another transcript or execution".into());
+        }
+        if sends.0 != sample.sends.0 {
+            return Err("a Legacy body send started since the delivered sample".into());
+        }
+        let path = self.old.0.path.display();
+        let meta =
+            std::fs::metadata(&self.old.0.path).map_err(|error| format!("source {path}: {error}"));
+        let meta = meta?;
+        if file_match(&self.old.0, file_identity(&meta)) == FileMatch::Other
+            || meta.len() < sample.len
+        {
+            return Err(format!(
+                "source {path} no longer holds its delivered prefix"
+            ));
+        }
+        Ok(InitSource {
+            source_id: self.old.0.clone(),
+            delivery_start: sample.len,
+            prefix_hash: sample.hash.clone(),
+        })
     }
 }
 

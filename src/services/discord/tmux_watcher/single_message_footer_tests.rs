@@ -176,10 +176,10 @@ async fn o_delegated_single_message_footer_completion_sends_no_body() {
     }
 }
 
-/// A footer with no assistant body to show (no target, empty or chrome-only text, or a clean mirror
-/// body needing no edit) leaves a pending adoption; the one that shows the body ends it first.
+/// A pending adoption holds every footer body: no target, empty or chrome-only text, a clean mirror
+/// body, and a rewrite that would show the body all leave it pending and show no body.
 #[test]
-fn only_a_footer_that_rewrites_a_body_ends_a_pending_adoption() {
+fn a_pending_adoption_holds_every_footer_body() {
     // Keep concurrent fixture resets from erasing the binding while the async body runs.
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
@@ -270,11 +270,7 @@ async fn pending_adoption_footer_case() {
     assert_eq!(check.adoption(), Adoption::Pending);
 
     let shown = complete(Some(BODY), placeholder, "", false).await;
-    assert_eq!(
-        shown.iter().filter(|c| c.contains(BODY)).count(),
-        1,
-        "{shown:?}"
-    );
+    assert!(!shown.iter().any(|c| c.contains(BODY)), "{shown:?}");
     check.assert_settled();
-    assert_eq!(check.adoption(), Adoption::Released);
+    assert_eq!(check.adoption(), Adoption::Pending);
 }

@@ -1257,11 +1257,11 @@ async fn o_capture_probe_is_quiet_but_body_identity_errors_still_alarm() {
     let _pending = cutover::test_override::force_candidates(&[(channel, CodexTui)]);
     assert_eq!(
         cutover::peek_o_owns_tui_output_for_channel_quiet(channel, Some(CodexTui)),
-        Ok(false)
+        Err(IdentityError::AwaitingAdoption)
     );
     assert_eq!(
         cutover::peek_o_owns_tui_output_for_channel(channel, Some(CodexTui)),
-        Ok(false)
+        Err(IdentityError::AwaitingAdoption)
     );
     assert!(buffer.lock().unwrap().is_empty());
 }
@@ -1365,10 +1365,10 @@ async fn o_delegated_foreign_custody_follows_destination_membership() {
     }
 }
 
-/// Custody whose chunk was acknowledged before the resume settles without posting and leaves a
-/// pending adoption; custody that still posts its body ends the adoption first and posts once.
+/// A pending adoption holds foreign custody on resume, acknowledged before it or not: the record
+/// is kept for O, nothing posts, and the adoption stays.
 #[tokio::test]
-async fn only_a_foreign_custody_that_posts_ends_a_pending_adoption() {
+async fn a_pending_adoption_holds_foreign_custody_whether_or_not_it_was_acknowledged() {
     use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
     use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
     for acknowledged in [true, false] {
@@ -1416,15 +1416,10 @@ async fn only_a_foreign_custody_that_posts_ends_a_pending_adoption() {
         )
         .await
         .unwrap();
-        assert_eq!(settled, 1, "acknowledged={acknowledged}");
+        assert_eq!(settled, 0, "acknowledged={acknowledged}");
         check.assert_settled();
-        let expected = if acknowledged {
-            (0, Adoption::Pending)
-        } else {
-            (1, Adoption::Released)
-        };
         let seen = (driver.completed_publications(), check.adoption());
-        assert_eq!(seen, expected, "acknowledged={acknowledged}");
+        assert_eq!(seen, (0, Adoption::Pending), "acknowledged={acknowledged}");
     }
 }
 

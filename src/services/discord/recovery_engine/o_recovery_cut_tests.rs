@@ -127,10 +127,10 @@ async fn o_delegated_recovery_body_posts_only_the_marker_without_evidence() {
     .await;
 }
 
-/// A recovery notice with no answer (the restart notice or the no-text notice) leaves a pending
-/// adoption; the notice carrying the recovered body ends it first and shows that body once.
+/// A pending adoption holds every recovery notice, the bodiless ones and the one carrying the
+/// recovered body alike: nothing is shown, the adoption stays, and the relay reports the wait.
 #[tokio::test(flavor = "current_thread")]
-async fn only_a_recovered_body_ends_a_pending_adoption() {
+async fn a_pending_adoption_holds_every_recovery_notice_until_o_adopts() {
     use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
     with_isolated_runtime_root(|| async move {
         const CHANNEL: u64 = 9_425_021;
@@ -144,17 +144,12 @@ async fn only_a_recovered_body_ends_a_pending_adoption() {
         empty.full_response = " \n".to_string();
         let notice = interrupted_recovery_message(&empty, &empty.full_response);
         let recorder = start_watching(CHANNEL, check.clone(), false).await;
-        relay_recovery_body_notice(
-            &recorder.http,
-            &shared,
-            &ProviderKind::Claude,
-            &empty,
-            &notice,
-        )
-        .await;
+        let provider = ProviderKind::Claude;
+        let held = relay_recovery_body_notice(&recorder.http, &shared, &provider, &empty, &notice);
+        assert_eq!(held.await, RecoveryRelayOutcome::AwaitingAdoption);
         let channel = ChannelId::new(CHANNEL);
         let no_text = RECOVERED_WITHOUT_TEXT;
-        relay_recovery_body_to_placeholder(
+        let held = relay_recovery_body_to_placeholder(
             &recorder.http,
             &shared,
             &empty,
@@ -162,30 +157,93 @@ async fn only_a_recovered_body_ends_a_pending_adoption() {
             None,
             no_text,
             None,
-        )
-        .await;
-        assert_eq!(recorder.contents(), vec![notice, no_text.to_string()]);
-        check.assert_settled();
-        assert_eq!(check.adoption(), Adoption::Pending);
+        );
+        assert_eq!(held.await, RecoveryRelayOutcome::AwaitingAdoption);
 
         let state = recovery_state(CHANNEL, 0, RuntimeHandoffKind::ClaudeTui);
         let text = interrupted_recovery_message(&state, &state.full_response);
-        relay_recovery_body_notice(
-            &recorder.http,
-            &shared,
-            &ProviderKind::Claude,
-            &state,
-            &text,
-        )
-        .await;
-        let shown = recorder.contents();
-        assert_eq!(
-            shown.iter().filter(|c| c.contains(BODY)).count(),
-            1,
-            "{shown:?}"
-        );
+        let held = relay_recovery_body_notice(&recorder.http, &shared, &provider, &state, &text);
+        assert_eq!(held.await, RecoveryRelayOutcome::AwaitingAdoption);
+        assert!(recorder.contents().is_empty(), "{:?}", recorder.contents());
         check.assert_settled();
-        assert_eq!(check.adoption(), Adoption::Released);
+        assert_eq!(check.adoption(), Adoption::Pending);
+    })
+    .await;
+}
+
+/// A held body's captured recovery, tmux gone and one attempt left, keeps its row uncounted and
+/// posts nothing for a pending, refused or unverified channel; an identity fault still clears it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_held_recovery_body_spends_no_restart_budget_and_keeps_its_row() {
+    use crate::services::tui_o::cutover::test_override;
+    with_isolated_runtime_root(|| async move {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let budget = inflight::RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET;
+        let cases = [
+            (
+                "pending",
+                9_425_051u64,
+                RecoveryRelayOutcome::AwaitingAdoption,
+            ),
+            ("refused", 9_425_052, RecoveryRelayOutcome::AdoptionRefused),
+            (
+                "unverified",
+                9_425_053,
+                RecoveryRelayOutcome::AdoptionRefused,
+            ),
+            (
+                "unknown kind",
+                9_425_054,
+                RecoveryRelayOutcome::TransientFailure,
+            ),
+        ];
+        for (case, channel, expected) in cases {
+            let kind = RuntimeHandoffKind::ClaudeTui;
+            let _boot = if case == "unknown kind" {
+                force_channels(&[(channel, kind)])
+            } else {
+                test_override::force_candidates(&[(channel, kind)])
+            };
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            match case {
+                "refused" => snapshot.candidate(channel).unwrap().release(channel),
+                "unverified" => snapshot.install_execution(channel, Some(Err("unverified".into()))),
+                _ => {}
+            }
+            let mut state = recovery_state(channel, 0, kind);
+            state.runtime_kind = (case != "unknown kind").then_some(kind);
+            state.recovery_relay_attempts = budget - 1;
+            inflight::save_inflight_state(&state).unwrap();
+            let state = inflight::load_inflight_state(&provider, channel).unwrap();
+            let recorder = start(channel).await;
+            let text = interrupted_recovery_message(&state, &state.full_response);
+            let relay = relay_captured_recovery_terminal_notice(
+                &recorder.http,
+                &shared,
+                &provider,
+                &state,
+                &text,
+            );
+            let outcome = relay.await.outcome;
+            assert_eq!(outcome, expected, "{case}");
+            dispose_recovery_relay_outcome(
+                &shared, &provider, &state, outcome, false, "test", "captured", &text, false,
+            )
+            .await;
+            let row = inflight::load_inflight_state(&provider, channel);
+            let kept = row.map(|row| (row.recovery_relay_attempts, row.response_sent_offset));
+            let held = (case != "unknown kind").then_some((budget - 1, state.response_sent_offset));
+            assert_eq!(
+                kept, held,
+                "{case}: a held row stays uncounted, a fault spends the budget"
+            );
+            assert!(
+                recorder.calls().is_empty(),
+                "{case}: {:?}",
+                recorder.contents()
+            );
+        }
     })
     .await;
 }

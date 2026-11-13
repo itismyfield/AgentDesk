@@ -238,7 +238,7 @@ fn a_selected_channel_starts_committed_only_over_a_readable_init() {
     );
     assert_eq!(
         adoption::stored(None, &channels),
-        all(Adoption::Held),
+        all(Adoption::Refused),
         "no runtime root"
     );
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path());
@@ -275,27 +275,27 @@ fn a_selected_channel_starts_committed_only_over_a_readable_init() {
 }
 
 #[test]
-fn a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it() {
+fn a_pending_channels_body_is_held_by_a_peek_and_a_claim_alike_until_o_adopts_it() {
     use crate::services::tui_o::cutover::{self, IdentityError, test_override};
     use RuntimeHandoffKind::{ClaudeTui, CodexTui};
     let _candidates = test_override::force_candidates(&[(41, ClaudeTui)]);
     let state = || test_override::with_channels(|boot| boot.unwrap().candidate(41).unwrap().peek());
+    let awaiting = Err(IdentityError::AwaitingAdoption);
     assert_eq!(
         cutover::peek_o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
-        Ok(false)
+        awaiting
     );
     assert_eq!(cutover::o_owns_tui_output_for_channel(42, None), Ok(false));
     let mismatch = cutover::o_owns_tui_output_for_channel(41, Some(CodexTui));
     assert!(matches!(mismatch, Err(IdentityError::KindMismatch { .. })));
-    assert_eq!(state(), Adoption::Pending, "no body was judged for 41");
     assert_eq!(
         cutover::o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
-        Ok(false)
+        awaiting
     );
-    assert_eq!(state(), Adoption::Released);
     assert_eq!(
-        cutover::peek_o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
-        Ok(false)
+        state(),
+        Adoption::Pending,
+        "a held body changes no adoption"
     );
 
     let _committed = test_override::force_channels(&[(41, ClaudeTui)]);
@@ -310,57 +310,50 @@ fn a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it(
     let _foreign = test_override::force_foreign(&[(41, ClaudeTui)], "a");
     assert_eq!(
         cutover::o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
-        Ok(false)
+        awaiting,
+        "a node off the home holds the body too"
     );
 }
 
-/// The check the site tests rely on: a bodiless claim, a body before its claim, and the body on
-/// another channel each fail it; the body on the watched channel after its claim settles it.
+/// The check the site tests rely on: the held body leaving on any channel fails it, a notice
+/// without the body does not, and a body path that changes the adoption fails it too.
 #[test]
-fn the_body_check_fails_a_bodiless_claim_and_a_body_before_its_claim() {
+fn the_body_check_fails_a_held_body_that_leaves_or_a_changed_adoption() {
     use crate::services::tui_o::channel_policy::SinkOp::{Patch, Post};
-    use crate::services::tui_o::cutover::{self, test_override};
+    use crate::services::tui_o::cutover::test_override;
     use RuntimeHandoffKind::ClaudeTui;
     let settled = |check: &BodyCheck| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check.assert_settled())).is_ok()
     };
-    let claim = |channel| cutover::o_owns_tui_output_for_channel(channel, Some(ClaudeTui));
     let channels = [(41, ClaudeTui), (43, ClaudeTui), (45, ClaudeTui)];
     let _candidates = test_override::force_candidates(&channels);
-    let (claimed, early, elsewhere) = (
+    let (quiet, leaked, changed) = (
         BodyCheck::watch(41, "answer"),
         BodyCheck::watch(43, "answer"),
         BodyCheck::watch(45, "answer"),
     );
-    assert_eq!(claim(41), Ok(false));
-    claimed.sink(41, Post, "a notice without it");
-    assert!(!settled(&claimed), "released with no body shown");
-    claimed.sink(41, Patch, "the answer, banner and all");
-    assert!(settled(&claimed));
+    quiet.sink(41, Post, "a notice without it");
+    quiet.sink_request("GET", "/api/v10/channels/41/messages/7", "the answer");
+    assert!(settled(&quiet));
 
-    early.sink(43, Post, "the answer");
-    assert_eq!(claim(43), Ok(false));
+    leaked.sink_request(
+        "PATCH",
+        "/api/v10/channels/46/messages/7",
+        "the answer, banner and all",
+    );
     assert!(
-        !settled(&early),
-        "the body left while the adoption was pending"
+        !settled(&leaked),
+        "the held body went out on another channel"
     );
 
-    assert_eq!(claim(45), Ok(false));
-    elsewhere.sink(46, Post, "the answer");
-    assert!(
-        elsewhere.bodiless_release(),
-        "another channel's body settles nothing"
-    );
-    elsewhere.sink_request("PATCH", "/api/v10/channels/45/messages/7", "the answer");
-    assert!(!elsewhere.bodiless_release());
-    assert!(
-        !settled(&elsewhere),
-        "the body went to another channel first"
-    );
+    let candidate = test_override::with_channels(|boot| boot?.candidate(45).cloned()).unwrap();
+    candidate.release(45);
+    changed.sink(45, Patch, "a notice without it");
+    assert!(!settled(&changed), "the adoption moved under the body path");
 }
 
 #[test]
-fn a_placement_is_held_off_the_home_and_ends_a_pending_adoption_on_it() {
+fn a_placement_is_held_off_the_home_and_leaves_a_pending_adoption_on_it() {
     use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
     use crate::services::tui_o::cutover::test_override;
     use RuntimeHandoffKind::ClaudeTui;
@@ -393,13 +386,12 @@ fn a_placement_is_held_off_the_home_and_ends_a_pending_adoption_on_it() {
         intake_route::route_for_placement("claude", 41),
         IntakeRoute::Unselected
     );
-    assert_eq!(check.adoption(), Adoption::Released);
-    // The one release with no body by design: the placed Legacy turn takes the channel.
-    assert!(check.bodiless_release());
+    check.assert_settled();
+    assert_eq!(check.adoption(), Adoption::Pending);
 }
 
 #[test]
-fn a_deferred_adoption_survives_legacy_bodies_and_placements_until_its_host_releases_it() {
+fn a_deferred_adoption_survives_held_bodies_and_placements_until_its_host_refuses_it() {
     use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
     use crate::services::tui_o::cutover::{self, test_override};
     use RuntimeHandoffKind::ClaudeTui;
@@ -410,8 +402,8 @@ fn a_deferred_adoption_survives_legacy_bodies_and_placements_until_its_host_rele
     assert!(candidate.defer(41), "a deferred adoption stays deferred");
     assert_eq!(
         cutover::o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
-        Ok(false),
-        "Legacy sends its body"
+        Err(cutover::IdentityError::AwaitingAdoption),
+        "the body is held"
     );
     assert_eq!(
         intake_route::route_for_placement("claude", 41),
@@ -424,17 +416,17 @@ fn a_deferred_adoption_survives_legacy_bodies_and_placements_until_its_host_rele
     let candidate = candidate.unwrap();
     assert!(candidate.defer(41));
     candidate.release(41);
-    assert_eq!(candidate.peek(), Adoption::Released);
+    assert_eq!(candidate.peek(), Adoption::Refused);
     assert!(
         !candidate.defer(41),
-        "a released adoption is never deferred again"
+        "a refused adoption is never deferred again"
     );
 }
 
-/// A placement carries no body: it ends a pending adoption or leaves a deferred one without
+/// A placement carries no body: it leaves a pending or deferred adoption as it was without
 /// counting a Legacy send, so it never reads as delivery progress.
 #[test]
-fn a_placement_ends_or_leaves_an_adoption_without_counting_a_legacy_send() {
+fn a_placement_leaves_an_adoption_without_counting_a_legacy_send() {
     use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
     use crate::services::tui_o::cutover::test_override;
     use RuntimeHandoffKind::ClaudeTui;
@@ -451,7 +443,7 @@ fn a_placement_ends_or_leaves_an_adoption_without_counting_a_legacy_send() {
     }
     assert_eq!(
         (pending.peek(), pending.sends()),
-        (Adoption::Released, (0, 0))
+        (Adoption::Pending, (0, 0))
     );
     assert_eq!(
         (deferred.peek(), deferred.sends()),

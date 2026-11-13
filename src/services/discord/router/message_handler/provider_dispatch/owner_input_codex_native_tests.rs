@@ -117,6 +117,8 @@ async fn codex_start(id: u64, by: By, case: Rollout) {
     use crate::services::agents::input_result::{InputResult, OriginChannel, lookup};
     const ORIGIN: &str = "G-codex-native";
     let _root = crate::config::TestRuntimeRootGuard::new();
+    // Its turn ends only through O's delegated delivery, which needs the channel adopted.
+    crate::test_support::o_store::commit_o_store(_root.path(), &[id]);
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let codex = ProviderKind::Codex;

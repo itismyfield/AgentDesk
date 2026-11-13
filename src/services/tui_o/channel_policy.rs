@@ -21,7 +21,7 @@ pub(crate) use adoption::{
 };
 #[cfg(test)]
 pub(crate) use adoption::{
-    body_check::{BodyCheck, SinkOp},
+    body_check::{BodyCheck, SinkOp, racing_legacy_body},
     stored,
 };
 
@@ -432,6 +432,17 @@ impl BootChannels {
             .map(|candidate| candidate.with_init_scope(self.init_scope_view()))
     }
 
+    /// An unverified permit's candidate follows the channel's store: with no store it is refused.
+    fn unverified_candidate(&self, channel: u64) -> Candidate {
+        let selected = BTreeSet::from([channel]);
+        let stored =
+            adoption::stored(crate::config::runtime_root().as_deref(), &selected)[&channel];
+        Candidate::new(match stored {
+            Adoption::Committed | Adoption::Held => stored,
+            _ => Adoption::Refused,
+        })
+    }
+
     pub(crate) fn install_execution(
         &self,
         channel: u64,
@@ -483,7 +494,7 @@ impl BootChannels {
                     .remove(&channel);
                 return;
             }
-            Some(Err(reason)) => View::held(reason),
+            Some(Err(reason)) => View::held(reason, self.unverified_candidate(channel)),
             Some(Ok(permit)) => {
                 let selected = BTreeSet::from([channel]);
                 let state =
@@ -516,9 +527,9 @@ impl BootChannels {
                 prior.gate().close();
             }
         }
-        let candidate = old
-            .map(|view| view.candidate)
-            .unwrap_or_else(|| View::held(reason.clone()).candidate);
+        let candidate = old.map(|view| view.candidate).unwrap_or_else(|| {
+            View::held(reason.clone(), self.unverified_candidate(channel)).candidate
+        });
         self.execution
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

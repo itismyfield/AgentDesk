@@ -2,7 +2,8 @@
 
 use super::late_host::{Legacy, closed, seed};
 use super::*;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+use crate::services::tui_o::channel_policy::racing_legacy_body;
+use crate::services::tui_o::cutover::BodySend;
 use crate::services::tui_o::writer::activation::test_hook::{self, Step};
 use crate::services::tui_o::writer::binding::{
     BindingCause, BindingEvent, BindingEvents, BindingEvidence, BindingRecord, BindingTarget,
@@ -224,7 +225,7 @@ impl Fixture {
         handles.pop().unwrap()
     }
     async fn deliver_old(&self) -> (SourceId, u64) {
-        let result = claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
+        let result = racing_legacy_body(CHANNEL, || async {
             self.old
                 .lock()
                 .unwrap()
@@ -486,7 +487,7 @@ async fn late_adopt_binding_first_bound_or_resolved_rejects_coalesced_rotation_b
             spin().await;
         }
         // A@3 and B@5 both came after the first read: the wait rebases onto B, never A.
-        assert_ne!(adoption(CHANNEL), Adoption::Released);
+        assert_ne!(adoption(CHANNEL), Adoption::Refused);
         assert!(
             f.harness.port.posts().is_empty(),
             "nothing of A or B is reposted"
@@ -594,12 +595,9 @@ async fn late_adopt_binding_unsafe_channel_does_not_block_other_channels_new_bod
     let unsafe_old = Arc::new(AtomicUsize::new(0));
     let sent = unsafe_old.clone();
     assert_eq!(
-        claim_then_send(
-            Some(BodyClaim::new(OTHER, Some(ClaudeTui))),
-            || async move {
-                sent.fetch_add(1, Ordering::SeqCst);
-            }
-        )
+        racing_legacy_body(OTHER, || async move {
+            sent.fetch_add(1, Ordering::SeqCst);
+        })
         .await
         .unwrap(),
         BodySend::Sent(())
@@ -721,7 +719,7 @@ async fn late_adopt_binding_two_simultaneous_sources_each_commit_and_post_new_on
     let other_old = Arc::new(AtomicUsize::new(0));
     let sent = other_old.clone();
     assert_eq!(
-        claim_then_send(Some(BodyClaim::new(OTHER, Some(ClaudeTui))), || async {
+        racing_legacy_body(OTHER, || async {
             sent.fetch_add(1, Ordering::SeqCst);
             append(
                 &other_path,
@@ -848,8 +846,7 @@ async fn late_adopt_binding_legacy_send_while_the_boundary_reads_custody_keeps_t
     f.io.log.replace(events);
     // A Legacy body completes between the boundary's first look at its sends and its custody read.
     *f.io.on_custody.lock().unwrap() = Some(Box::new(|| {
-        let claim = Some(BodyClaim::new(CHANNEL, Some(ClaudeTui)));
-        let sent = futures::executor::block_on(claim_then_send(claim, || async {}));
+        let sent = futures::executor::block_on(racing_legacy_body(CHANNEL, || async {}));
         assert_eq!(sent.unwrap(), BodySend::Sent(()));
     }));
     let handle = f.start();
@@ -860,7 +857,7 @@ async fn late_adopt_binding_legacy_send_while_the_boundary_reads_custody_keeps_t
     test_override::with_channels(|boot| {
         assert_eq!(boot.unwrap().candidate(CHANNEL).unwrap().sends(), (1, 1))
     });
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Refused);
     let (rotated, first) = (sources[1].path.display(), sources[0].path.display());
     let expected = format!(
         "source {rotated} was bound while the adoption waited (seq 2; baseline {first}@1; boundary 0;"

@@ -659,24 +659,23 @@ fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
     alarms.raise(channel, WriterAlarm::Halted { detail });
 }
 
-/// A channel not adopted before its first `init` stays Legacy's for this process.
+/// A channel not adopted before its first `init` is refused for this process; its body stays held.
 pub(super) fn release(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
     candidate.release(channel);
-    let detail = format!("adoption held: {detail}");
+    let detail = format!("adoption refused: {detail}");
     stop(candidate, alarms, channel, &detail);
 }
 
-/// Names a stop by the adoption it left: a released or deferred channel's output is Legacy's, so
-/// only an owned or undecided channel is held.
+/// Names a stop by the adoption it left: a refused or deferred channel raises the refusal alarm
+/// (its body stays held), an owned or undecided one is held.
 pub(super) fn stop(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
-    if !matches!(candidate.peek(), Adoption::Released | Adoption::Deferred) {
+    if !matches!(
+        candidate.peek(),
+        Adoption::Refused | Adoption::Released | Adoption::Deferred
+    ) {
         return hold(alarms, channel, detail);
     }
-    tracing::warn!(
-        channel,
-        detail,
-        "[tui_o] writer host left the channel to Legacy"
-    );
+    tracing::warn!(channel, detail, "[tui_o] writer host refused the adoption");
     let detail = format!("writer host: {detail}");
     alarms.raise(channel, WriterAlarm::Released { detail });
 }
