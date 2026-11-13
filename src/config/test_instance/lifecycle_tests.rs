@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 const MODE: &str = "I3A_LEASE_TEST_MODE";
 const LIMIT: Duration = Duration::from_secs(10);
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 #[test]
 fn control_ack_sync_uses_the_retained_directory_inode() {
     let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
