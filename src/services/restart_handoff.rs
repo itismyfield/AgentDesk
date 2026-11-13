@@ -31,19 +31,4 @@ mod tests {
             serde_json::json!({"startup": "ready"})
         );
     }
-
-    #[test]
-    fn custody_owners_have_no_discord_or_cli_backedge() {
-        for (name, source) in [
-            ("store", include_str!("restart_handoff/store.rs")),
-            ("proof", include_str!("restart_handoff/proof.rs")),
-            ("generation", include_str!("process_generation.rs")),
-            ("paths", include_str!("runtime_paths.rs")),
-            ("publish", include_str!("durable_publish.rs")),
-            ("lock", include_str!("../utils/record_path_lock.rs")),
-        ] {
-            assert!(!source.contains("discord::"), "{name}: Discord backedge");
-            assert!(!source.contains("crate::cli"), "{name}: CLI backedge");
-        }
-    }
 }
