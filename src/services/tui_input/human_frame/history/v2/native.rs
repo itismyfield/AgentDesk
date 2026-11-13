@@ -102,19 +102,11 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(error) => return Err(error.to_string()),
     };
-    let value = match compat::parse(raw.as_bytes()) {
-        Ok(value) => value,
-        Err(error) if raw.starts_with("{\"version\":3,") => return Err(error),
-        Err(_) => return Ok(vec![]),
+    let snapshot = match migration::decode(&raw)? {
+        migration::Decoded::Legacy(_) => return Ok(vec![]),
+        migration::Decoded::V2(snapshot) => snapshot,
     };
-    if value.get("version").is_none() || value["version"] == 2 {
-        return Ok(vec![]);
-    }
-    if value["version"] != 3 {
-        return Err("unsupported native frame history envelope".into());
-    }
-    let snapshot = migration::restore(&raw)?;
-    let registrations = snapshot
+    let mut registrations = snapshot
         .live
         .iter()
         .map(|bound| &bound.registration)
@@ -125,6 +117,12 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
                 .iter()
                 .filter_map(|passive| passive.registration.as_ref()),
         );
+    if snapshot.version == 2 {
+        return match registrations.any(|r| r.native_settlement.is_some()) {
+            true => Err("native frame history requires a v3 envelope".into()),
+            false => Ok(vec![]),
+        };
+    }
     registrations
         .filter(|r| r.key["attempt"]["provider"] == provider)
         .filter_map(|registration| {

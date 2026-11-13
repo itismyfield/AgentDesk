@@ -195,3 +195,30 @@ fn test_dir(runtime: &crate::config::TestRuntimeRootGuard) -> tempfile::TempDir 
     std::fs::create_dir_all(&root).unwrap();
     tempfile::tempdir_in(root).unwrap()
 }
+
+#[test]
+fn native_8148_boot_reader_exempts_only_decoded_historical_envelopes() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let dir = test_dir(&runtime);
+    let path = dir.path().join("frames.json");
+    for raw in [
+        r#"{"entries":[]}"#,
+        r#"{"version":2,"live":[],"passive":[]}"#,
+    ] {
+        std::fs::write(&path, raw).unwrap();
+        assert!(native::boot_records(&path, "claude").unwrap().is_empty());
+    }
+    for raw in [r#"{"version":2,"live":7,"passive":[]}"#, "{broken"] {
+        std::fs::write(&path, raw).unwrap();
+        assert!(native::boot_records(&path, "claude").is_err());
+    }
+    std::fs::remove_file(&path).unwrap();
+    let fixture = Fixture::at(path.clone(), 8148500, true);
+    let mut value = fixture.history.json().unwrap();
+    value["version"] = json!(2);
+    std::fs::write(&path, value.to_string()).unwrap();
+    assert!(
+        native::boot_records(&path, "claude").is_err(),
+        "a native ticket cannot use the historical exception"
+    );
+}

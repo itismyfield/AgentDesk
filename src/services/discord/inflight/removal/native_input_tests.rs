@@ -171,7 +171,10 @@ async fn native_8148_boot_preparation_reaper_and_owner_drive_recover_both_crashe
         let root = env.dir().parent().unwrap().to_path_buf();
         let channel = 8148200 + u64::from(already_recorded);
         let f = Fixture::at(root.join("injected_frames.json"), channel, true);
-        let outcome = Fixture::outcome(native::Disposition::Executed);
+        let mut outcome = Fixture::outcome(native::Disposition::Executed);
+        outcome
+            .extra
+            .insert("native_proof".into(), json!({"opener":17,"closer":41}));
         if already_recorded {
             assert!(
                 f.history
@@ -179,6 +182,21 @@ async fn native_8148_boot_preparation_reaper_and_owner_drive_recover_both_crashe
                     .unwrap()
             );
         }
+        let mut snapshot = f.history.json().unwrap();
+        let registration = snapshot["live"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|bound| {
+                bound["registration"]["native_settlement"]["ticket"]["channel_id"] == channel
+            })
+            .map(|bound| &mut bound["registration"])
+            .unwrap();
+        registration["native_settlement"]["proof"] = json!({"source_incarnation":"incarnation-1"});
+        registration["native_settlement"]["warned"] = json!(true);
+        let expected = json!({"namespace":registration["namespace"],
+            "settlement":registration["native_settlement"],"registration":registration});
+        fs::write(root.join("injected_frames.json"), snapshot.to_string()).unwrap();
         let mut old = row(channel, None);
         old.born_generation = 1;
         old.turn_nonce = Some(f.ticket.owning_episode.as_ref().unwrap().turn_nonce.clone());
@@ -219,8 +237,8 @@ async fn native_8148_boot_preparation_reaper_and_owner_drive_recover_both_crashe
         let recovered: serde_json::Value =
             serde_json::from_slice(&fs::read(native_copies[0].path()).unwrap()).unwrap();
         assert_eq!(
-            recovered["settlement"]["ticket"],
-            serde_json::to_value(&f.ticket).unwrap()
+            recovered, expected,
+            "custody preserves the complete BootRecord"
         );
         let reopened = Registry::at(root.join("injected_frames.json"));
         let first = reopened
@@ -285,4 +303,39 @@ async fn native_8148_failed_ticket_custody_preserves_row_and_retry_uses_same_boo
     );
     assert_eq!(retried.reaped_stale, 1);
     assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn native_8148_malformed_v3_preserves_row_and_retries_same_boot_gate() {
+    for (index, malformed) in [
+        concat!(" \n", r#"{ "version" : 3, "live": ["#),
+        r#"{
+  "version": 3,
+ "passive": ["#,
+        r#"{"live": [], "planned": [], "version": 3, "passive": ["#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let env = Env::new();
+        let root = env.dir().parent().unwrap().to_path_buf();
+        let channel = 8148400 + index as u64;
+        let history = root.join("injected_frames.json");
+        let _fixture = Fixture::at(history.clone(), channel, true);
+        let good = fs::read(&history).unwrap();
+        let path = env.seed(&row(channel, None), STALE);
+        fs::write(&history, malformed).unwrap();
+        let guard = BootReapOnce::default();
+        let failed = reap_inflight_rows_at_boot_with_guard(&guard, &CLAUDE, None).await;
+        assert!(path.exists(), "uncertain v3 must retain the old row");
+        assert_eq!(failed.incomplete, 1);
+        fs::write(history, good).unwrap();
+        let retried = reap_inflight_rows_at_boot_with_guard(&guard, &CLAUDE, None).await;
+        assert!(
+            !retried.already_ran,
+            "failed read cannot consume the boot gate"
+        );
+        assert_eq!(retried.reaped_stale, 1);
+        assert!(!path.exists());
+    }
 }
