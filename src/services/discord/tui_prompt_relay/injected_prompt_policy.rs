@@ -9,7 +9,6 @@
 
 use super::super::response_sanitizer::subagent_notification_card;
 use super::super::tui_task_card::strip_terminal_controls;
-use super::super::{DISCORD_MSG_LIMIT, formatting::discord_message_units};
 
 const LOCAL_COMMAND_STDOUT_OPEN: &str = "<local-command-stdout>";
 const LOCAL_COMMAND_STDOUT_CLOSE: &str = "</local-command-stdout>";
@@ -296,39 +295,7 @@ pub(super) fn format_ssh_direct_prompt_notification(
     let prompt = strip_terminal_controls(prompt)
         .replace("\r\n", "\n")
         .replace(['\r', '\u{2028}', '\u{2029}'], "\n");
-    const HEADER: &str = "-# ⌨️ tui direct input\n";
-    let header_units = discord_message_units(HEADER);
-    let total_chars = prompt.chars().count();
-    let mut checkpoints = Vec::new();
-    let mut body_units = 0;
-    let mut backtick_run = 0;
-    let mut fence_len = 3;
-    // Each checkpoint reserves complete fences longer than every backtick run in its body.
-    for (index, ch) in prompt.char_indices() {
-        backtick_run = if ch == '`' { backtick_run + 1 } else { 0 };
-        fence_len = fence_len.max(backtick_run + 1);
-        body_units += ch.len_utf16();
-        if header_units + body_units + 2 * fence_len + 2 > DISCORD_MSG_LIMIT {
-            break;
-        }
-        checkpoints.push((index + ch.len_utf8(), body_units, fence_len));
-    }
-    loop {
-        let (end, body_units, fence_len) = checkpoints.last().copied().unwrap_or((0, 0, 3));
-        let omitted = total_chars - checkpoints.len();
-        let suffix = if omitted == 0 {
-            String::new()
-        } else {
-            format!("\n-# … (이하 {omitted}자)")
-        };
-        if header_units + body_units + 2 * fence_len + 2 + discord_message_units(&suffix)
-            <= DISCORD_MSG_LIMIT
-        {
-            let fence = "`".repeat(fence_len);
-            return format!("{HEADER}{fence}\n{}\n{fence}{suffix}", &prompt[..end]);
-        }
-        checkpoints.pop();
-    }
+    crate::domain::message_split::bounded_raw_code_block_notice("-# ⌨️ tui direct input", &prompt)
 }
 
 #[cfg(test)]

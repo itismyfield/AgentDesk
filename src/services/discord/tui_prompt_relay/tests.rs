@@ -796,9 +796,9 @@ fn formats_ssh_direct_prompt_notification_preserves_safe_multiline_text() {
     assert_eq!(
         output,
         concat!(
-            "-# ⌨️ tui direct input\n````\n",
+            "-# ⌨️ tui direct input\n```\n",
             "  **bold** @everyone <@123456789012345678>\n\n# heading\n> quote\n",
-            "[link](https://x.y)\n``` @here\n- item\n1. item\n\\_~||\n\n````"
+            "[link](https://x.y)\n\n```\n\\`\\`\\`\n```\n @here\n- item\n1. item\n\\_~||\n\n```"
         )
     );
     assert!(!super::super::session_notice::is_inline(&output));
@@ -859,31 +859,57 @@ fn formats_ssh_direct_prompt_notification_clamps_blank_lines_and_urls() {
 
 #[test]
 fn formats_ssh_direct_prompt_notification_escapes_code_fence() {
-    for (prompt, fence) in [
-        ("a ``` fence", "````"),
-        ("```\n@everyone\n```\n````", "`````"),
-        ("`single` ``double``", "```"),
+    for (prompt, body) in [
+        ("a ``` fence", "a \n```\n\\`\\`\\`\n```\n fence"),
+        (
+            "```\n@everyone\n```\n````",
+            "\n```\n\\`\\`\\`\n```\n\n@everyone\n\n```\n\\`\\`\\`\n```\n\n\n```\n\\`\\`\\`\\`\n```\n",
+        ),
+        (
+            "a ``` fence **bold**",
+            "a \n```\n\\`\\`\\`\n```\n fence **bold**",
+        ),
+        ("a ```` fence", "a \n```\n\\`\\`\\`\\`\n```\n fence"),
+        ("a ```   ", "a \n```\n\\`\\`\\`\n```\n   "),
+        ("```unclosed\nbody", "\n```\n\\`\\`\\`\n```\nunclosed\nbody"),
+        ("end ```", "end \n```\n\\`\\`\\`\n```\n"),
+        ("`single` ``double``", "`single` ``double``"),
     ] {
         let output = format_ssh_direct_prompt_notification("codex", "tmux`name", prompt);
-        assert_eq!(
-            output,
-            format!("-# ⌨️ tui direct input\n{fence}\n{prompt}\n{fence}")
-        );
+        assert_eq!(output, format!("-# ⌨️ tui direct input\n```\n{body}\n```"));
+        assert_eq!(output.matches("```").count() % 2, 0);
+        for line in output.lines().filter(|line| line.contains("```")) {
+            assert_eq!(
+                line, "```",
+                "only standalone triple fences may reach Discord"
+            );
+        }
     }
-    // Even an oversized backtick run must leave a complete fence and a correct omission count.
-    let prompt = "`".repeat(5000);
-    let output = format_ssh_direct_prompt_notification("codex", "s", &prompt);
-    let mut lines = output.lines();
-    assert_eq!(lines.next(), Some("-# ⌨️ tui direct input"));
-    let fence = lines.next().unwrap();
-    let shown = lines.next().unwrap();
-    assert_eq!(lines.next(), Some(fence));
-    assert!(fence.len() > shown.len());
-    assert_eq!(
-        lines.next().unwrap(),
-        format!("-# … (이하 {}자)", 5000 - shown.len())
-    );
-    assert!(output.encode_utf16().count() <= 2000);
+    for prompt in ["`".repeat(5000), format!("a ```{}", "x".repeat(3000))] {
+        let output = format_ssh_direct_prompt_notification("codex", "s", &prompt);
+        let (blocks, suffix) = output.rsplit_once("\n-# … (이하 ").unwrap();
+        let omitted: usize = suffix.strip_suffix("자)").unwrap().parse().unwrap();
+        assert!(omitted > 0);
+        assert!(blocks.ends_with("\n```"));
+        assert_eq!(blocks.matches("```").count() % 2, 0);
+        for line in blocks.lines().filter(|line| line.contains("```")) {
+            assert_eq!(line, "```");
+        }
+        assert!(output.encode_utf16().count() <= 2000);
+        if prompt.starts_with('`') {
+            let shown = blocks.lines().find(|line| line.starts_with("\\`")).unwrap();
+            assert_eq!(shown, "\\`".repeat(prompt.chars().count() - omitted));
+        } else {
+            assert_eq!(
+                blocks,
+                format!(
+                    "-# ⌨️ tui direct input\n```\na \n```\n\\`\\`\\`\n```\n{}\n```",
+                    "x".repeat(1935)
+                )
+            );
+            assert_eq!(omitted, 1065);
+        }
+    }
 }
 
 #[test]

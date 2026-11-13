@@ -1,4 +1,6 @@
+mod literal_code_block;
 pub(crate) mod semantic_boundaries;
+pub(crate) use literal_code_block::bounded_raw_code_block_notice;
 
 pub(crate) const DISCORD_MSG_LIMIT: usize = 2000;
 
