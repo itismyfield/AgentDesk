@@ -76,6 +76,12 @@ def wrapper():
             return child
     def supervise(*args, **kwargs):
         return lifecycle.supervise(*args, **kwargs, spawn=native_spawn)
+    if mode == 'publication-io-error':
+        original_publish=lifecycle.publish_runtime
+        def publication(root,relative,*args,**kwargs):
+            if str(relative)=='runtime/instance-run.json': raise OSError('synthetic owned publication failure')
+            return original_publish(root,relative,*args,**kwargs)
+        lifecycle.publish_runtime=publication
     entry.supervise = supervise
     return entry.main(sys.argv[4:])
 
@@ -233,6 +239,7 @@ class BoundHealthRealTests(RealKeeperTests):
         if started: self.assert_closed()
         else: self.assertFalse((self.root/keeper.OWNER_FILE).exists())
 
+    def test_publication_io_error_reuses_original_handle_rollback(self): self.refusal('publication-io-error')
     def test_wrong_identity_refuses_before_any_runtime_resource(self): self.refusal('wrong-id',started=False)
     def test_foreign_run_nonce_rolls_back_actual_resources(self): self.refusal('wrong-nonce')
     def test_foreign_head_rolls_back_actual_resources(self): self.refusal('wrong-head')

@@ -26,6 +26,10 @@ class CleanupPending(InstanceError):
         self.child = child
 
 
+class _VerificationRefused(Exception):
+    pass
+
+
 def _bounds(wall_timeout, stop_grace, max_gateway):
     valid = lambda value: type(value) in (int, float) and math.isfinite(value) and value > 0
     if (type(max_gateway) is not int or max_gateway != 1 or not valid(wall_timeout)
@@ -126,8 +130,11 @@ def supervise(base, instance_id, ambient, *, binary_sha256, head, wall_timeout,
                 environment[identity.RUN_ENV] = json.dumps(run, separators=(",", ":"))
                 verification = (source.fileno(), binary_sha256, observed)
             if resources is not None:
-                return _supervise_resources(manifest, resources, binary, environment, owner,
-                                            started + wall_timeout, stop_grace, spawn, control_stream, verification)
+                try:
+                    return _supervise_resources(manifest, resources, binary, environment, owner,
+                                                started + wall_timeout, stop_grace, spawn, control_stream, verification)
+                except _VerificationRefused:
+                    raise InstanceError('runtime witness verification refused') from None
             child = spawn([str(binary), "dcserver"], cwd=str(root), env=environment,
                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                           stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(owner.fd,))
@@ -170,13 +177,17 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(lease.fd,) + ((verification[0],) if verification else ()))
         if verification is not None:
-            witness = identity.wait_health(manifest, lease.nonce, child.pid, verification[1],
-                                           verification[2], deadline, alive=lambda: child.poll() is None)
-            if time.monotonic() >= deadline:
-                raise InstanceError('verification exhausted startup budget')
-            publish_runtime(Path(manifest['root']), 'runtime/instance-run.json',
-                            {**witness, 'verified': True},
-                            live_sockets={path: tuple(value) for path, value in ready['sockets'].items()})
+            try:
+                witness = identity.wait_health(manifest, lease.nonce, child.pid, verification[1],
+                                               verification[2], deadline, alive=lambda: child.poll() is None)
+                if time.monotonic() >= deadline:
+                    raise InstanceError('verification exhausted startup budget')
+                publish_runtime(Path(manifest['root']), 'runtime/instance-run.json',
+                                {**witness, 'verified': True},
+                                live_sockets={path: tuple(value) for path, value in ready['sockets'].items()})
+            except (InstanceError, OSError):
+                # Keep a witness refusal separate from legacy control-channel uncertainty.
+                raise _VerificationRefused from None
         if control_stream is not None:
             def controls():
                 try:

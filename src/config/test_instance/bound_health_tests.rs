@@ -109,6 +109,7 @@ fn b2a_native_bound_health_child() {
         .owner_authority_channel_ids
         .clear();
     config.discord.bots.clear();
+    config.tui_o = None;
     config.agents.clear();
     config.routines.enabled = false;
     config.github.sync_interval_minutes = 0;
