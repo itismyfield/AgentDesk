@@ -128,6 +128,7 @@ fn p2_actual_warm_session_died_then_recreate_fresh_reuses_token() {
         relay_last_offset: None,
     };
     tui_prompt_dedupe::register_tmux_runtime_binding(session, binding(&old));
+    crate::services::claude_tui::readiness::tests::pre_source(session, &old);
     let tmux = ScriptedTmux::new(&view("", false));
     tmux.set_dead(false);
     tmux.die_on_enter();
@@ -172,12 +173,23 @@ fn p2_actual_warm_session_died_then_recreate_fresh_reuses_token() {
         }
     }
     std::fs::write(&new, "").unwrap();
-    std::fs::write(
-        crate::services::tmux_common::session_temp_path(session, "spawn_nonce"),
-        "recreated-pane",
-    )
-    .unwrap();
+    let recreated =
+        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::prepare(
+            "claude",
+            session,
+            None,
+            Some(sid),
+            false,
+        )
+        .unwrap();
+    recreated
+        .finish_spawn(crate::services::discord::stamp_spawn_markers(
+            session,
+            Some(&recreated),
+        ))
+        .unwrap();
     tui_prompt_dedupe::register_tmux_runtime_binding(session, binding(&new));
+    crate::services::claude_tui::readiness::tests::pre_source(session, &new);
     tmux.set_dead(false);
     tmux.on_enter(&new, &format!("{}\n{{\"type\":\"system\",\"subtype\":\"stop_hook_summary\"}}",
         serde_json::json!({"type":"user","uuid":"recreated-a","sessionId":sid,"message":{"role":"user","content":frame}})));

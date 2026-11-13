@@ -235,7 +235,7 @@ pub(super) fn resolve_claude_followup_transcript_path(
 ///   - `None` — the launch time could NOT be reliably obtained. The cwd-mtime
 ///     fallback is then DISABLED entirely (we never adopt an unverified
 ///     candidate). Stronger identities (runtime binding, exact UUID) still
-///     resolve; otherwise we return `None` (prompt-marker-only) and accept the
+///     resolve; otherwise we return `None` (source unresolved) and accept the
 ///     minor false-busy over the false-ready of adopting an unverifiable
 ///     transcript.
 ///
@@ -280,7 +280,7 @@ pub(super) fn resolve_claude_followup_transcript_path_with_identity(
     // 3. cwd-mtime fallback, but guarded.
     //
     // P1-1: with no reliable launch cutoff we MUST NOT adopt any unverified
-    // candidate — disable the fallback and return None (prompt-marker-only).
+    // candidate — disable the fallback and return None (source unresolved).
     let Some(launch_mtime_cutoff) = launch_mtime_cutoff else {
         return None;
     };
@@ -377,78 +377,6 @@ pub(super) fn claude_followup_transcript(
         claude_session_launch_mtime_cutoff(tmux_session_name),
         &std::collections::HashSet::new(),
     )
-}
-
-#[cfg(unix)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum HostedTuiBusyPreflightReadinessWait {
-    Codex,
-    ClaudePromptMarkerOnly,
-    ClaudePromptMarkerOrIdleTranscript(std::path::PathBuf),
-}
-
-#[cfg(unix)]
-pub(super) fn hosted_tui_busy_preflight_readiness_wait(
-    provider: &ProviderKind,
-    current_path: Option<&str>,
-    session_id: Option<&str>,
-    tmux_session_name: Option<&str>,
-) -> HostedTuiBusyPreflightReadinessWait {
-    let pane_cwd = tmux_session_name
-        .and_then(crate::services::tmux_diagnostics::tmux_session_pane_cwd)
-        .map(std::path::PathBuf::from);
-    let runtime_binding = tmux_session_name
-        .and_then(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session);
-    let launch_mtime_cutoff = claude_session_launch_mtime_cutoff(tmux_session_name);
-    hosted_tui_busy_preflight_readiness_wait_with_claude_home(
-        provider,
-        current_path,
-        session_id,
-        pane_cwd.as_deref(),
-        None,
-        runtime_binding.as_ref(),
-        launch_mtime_cutoff,
-    )
-}
-
-#[cfg(unix)]
-pub(super) fn hosted_tui_busy_preflight_readiness_wait_with_claude_home(
-    provider: &ProviderKind,
-    current_path: Option<&str>,
-    session_id: Option<&str>,
-    pane_cwd: Option<&std::path::Path>,
-    claude_home: Option<&std::path::Path>,
-    runtime_binding: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
-    launch_mtime_cutoff: Option<std::time::SystemTime>,
-) -> HostedTuiBusyPreflightReadinessWait {
-    if matches!(provider, ProviderKind::Codex) {
-        return HostedTuiBusyPreflightReadinessWait::Codex;
-    }
-    // #3208: resolve the *running* session's transcript (worktree-aware), not
-    // just `claude_transcript_path(current_path, session_id)`, so the idle
-    // JSONL fallback engages for sessions running in a rotating worktree.
-    // #3212: prefer the runtime binding's per-session output transcript over the
-    // ambiguous newest-in-cwd guess so we never wait on the wrong session; the
-    // launch-mtime cutoff (P1-1) floors the cwd fallback to this session's launch.
-    let Some(transcript_path) = resolve_claude_followup_transcript_path_with_identity(
-        current_path,
-        session_id,
-        pane_cwd,
-        claude_home,
-        runtime_binding,
-        launch_mtime_cutoff,
-        &std::collections::HashSet::new(),
-    ) else {
-        return HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly;
-    };
-    // Missing Claude JSONL files currently observe as Idle. Only pass a
-    // transcript path to the fallback once the file exists, so cold sessions
-    // still require the visible prompt marker before we inject a follow-up.
-    if transcript_path.exists() {
-        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(transcript_path)
-    } else {
-        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
-    }
 }
 
 #[cfg(unix)]
