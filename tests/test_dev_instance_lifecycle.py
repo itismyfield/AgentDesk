@@ -567,7 +567,7 @@ from tests.test_dev_instance import profile
 
 class ResourceFixture(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="b1r-", dir="/private/tmp")
+        self.temporary = tempfile.TemporaryDirectory(prefix="b1r-", dir="/tmp")
         self.addCleanup(self.temporary.cleanup)
         self.scratch = Path(self.temporary.name).resolve()
         self.scratch.chmod(0o700)
