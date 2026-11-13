@@ -10,7 +10,7 @@ NoticeInit == n = [phase |-> "absent", proof |-> "unknown", closed |-> FALSE,
     posts |-> 0, prepared |-> FALSE, effect |-> FALSE, crashed |-> FALSE,
     savedTerminal |-> FALSE, otherContext |-> TRUE]
 Terminal == n.phase \in {"posted", "excluded", "expired"}
-Exempt == n.proof \in {"owned", "policy"}
+Exempt == n.proof \in {"owned", "policy", "legacy"}
 ParentHold == RouteOwnerHold /\ UNCHANGED n
 ParentRecheck == RouteSelfWakeRecheck /\ UNCHANGED n
 ParentOpens == RouteGatewayOpens /\ UNCHANGED n
@@ -18,7 +18,9 @@ ParentWake == RouteExistingOwnerWake /\ UNCHANGED n
 ParentExecute == RouteExecute /\ UNCHANGED n
 
 Materialize == /\ n.phase = "absent" /\ bootReady
-               /\ n' = [n EXCEPT !.phase = "pending"]
+               /\ n' = [n EXCEPT !.phase = "pending",
+                   !.proof = IF InputClass = "legacy_retry" THEN "legacy" ELSE @,
+                   !.prepared = @ \/ (InputClass = "legacy_retry")]
                /\ UNCHANGED bootAll
 \* Current's mismatched registration cannot supply the new source/UUID-bound proof.
 RecoverProof == /\ n.phase = "pending" /\ n.proof = "unknown" /\ EvidenceReturns
@@ -58,8 +60,16 @@ Prepare == /\ n.phase = "pending" /\ n.proof = "direct" /\ ~n.prepared
            /\ bootReady /\ routeGateway
            /\ n' = [n EXCEPT !.prepared = TRUE]
            /\ UNCHANGED bootAll
+\* A restored budget root with NotFound has no uncertain effect; source exclusion still runs.
+ExcludeLegacyRetry == /\ InputClass = "legacy_retry" /\ n.phase = "pending"
+                      /\ n.prepared /\ ~n.effect /\ bootReady /\ routeGateway
+                      /\ NoticeMode # "legacy-retry-before"
+                      /\ n' = [n EXCEPT !.phase = "excluded"]
+                      /\ UNCHANGED bootAll
 \* Existing Prepared/history confirmation is abstracted; an uncertain effect is never retried blind.
 Post == /\ n.prepared /\ ~n.effect /\ n.phase = "pending"
+        /\ (InputClass # "legacy_retry" \/ (bootReady /\ routeGateway))
+        /\ (InputClass # "legacy_retry" \/ NoticeMode = "legacy-retry-before")
         /\ n' = [n EXCEPT !.effect = TRUE, !.posts = @ + 1]
         /\ UNCHANGED bootAll
 Confirm == /\ n.prepared /\ n.effect /\ n.phase = "pending"
@@ -73,21 +83,25 @@ Crash == /\ n.phase # "absent" /\ ~n.crashed
 
 NoticeNext == ParentHold \/ ParentRecheck \/ ParentOpens \/ ParentWake \/ ParentExecute
               \/ Materialize \/ RecoverProof \/ CloseSession \/ Defer \/ Settle
-              \/ ExpireUnproven \/ Prepare \/ Post \/ Confirm \/ Crash \/ LoseOtherContext
+              \/ ExpireUnproven \/ Prepare \/ Post \/ Confirm \/ Crash \/ LoseOtherContext \/ ExcludeLegacyRetry
 NoticeSpec == RouteInit /\ NoticeInit /\ [][NoticeNext]_all
     /\ WF_all(ParentHold) /\ WF_all(ParentRecheck) /\ WF_all(ParentOpens)
     /\ WF_all(ParentWake) /\ WF_all(ParentExecute)
     /\ WF_all(Materialize) /\ WF_all(RecoverProof)
     /\ WF_all(Settle) /\ WF_all(Prepare) /\ WF_all(Post) /\ WF_all(Confirm)
+    /\ WF_all(ExcludeLegacyRetry)
 
 NoticeType == n.phase \in {"absent", "pending", "excluded", "expired", "posted"}
-              /\ n.proof \in {"unknown", "owned", "policy", "direct"}
+              /\ n.proof \in {"unknown", "owned", "policy", "direct", "legacy"}
               /\ n.posts \in 0..1 /\ n.logs \in 0..2 /\ n.otherContext \in BOOLEAN
 NoticeOnce == n.posts <= 1 /\ (n.phase = "posted" => n.posts = 1)
 NoQuietLoss == n.phase \in {"excluded", "expired"} => Exempt
 NoExpireOwedDirect == InputClass = "direct" => n.phase \notin {"excluded", "expired"}
 NoPostExempt == InputClass # "direct" => n.posts = 0
-PreparedKept == n.prepared => n.phase \in {"pending", "posted"}
+PreparedKept == n.prepared => (n.phase \in {"pending", "posted"} \/
+                 (InputClass = "legacy_retry" /\ n.phase = "excluded" /\ ~n.effect))
+LegacyRetryNoPost == InputClass = "legacy_retry" => n.posts = 0
+LegacyRetryExcluded == (InputClass = "legacy_retry" /\ n.phase = "pending") ~> (n.phase = "excluded")
 ReplayKeepsTerminal == n.savedTerminal => Terminal
 PendingLoggedOnce == n.bootLogs <= 1 /\ n.logs <= 2
 EveryPendingTerminates == (n.phase = "pending") ~> Terminal

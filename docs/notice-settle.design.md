@@ -307,3 +307,9 @@ Blocked로 만든다. planned/raw-null 등록의 불확실성도 같은 hash의 
 
 pending 수백 건이라는 현재 관측에서 영구 Pending map의 절대 상한/soft-limit 경보는 추가하지 않는다.
 관측만 추가하는 제안은 이번 수용 범위에서 기각했으며 기존 terminal 회수 규칙을 유지한다.
+
+## Saved legacy retry source admission
+
+A Prepared budget root whose outcome is NotFound still owes final source admission. The native projector and final admission share the pre-v1 legacy frame predicate, including the single pasted-content wrapper. Final admission appends input_notice_source exclusion before creating a POST. This restores a subset of main's existing source policy; it adds no cleanup or expiry authority.
+
+The retained v1 header boolean remains insufficient for durable Policy or historical Discord ownership. Its direct full-frame twin still requires source+UUID evidence and remains owed during history failure. The ledger settlement rules for Prepared/uncertain effects are unchanged. The debt model distinguishes a saved NotFound root from an uncertain Prepared effect and checks zero POST for the legacy source.

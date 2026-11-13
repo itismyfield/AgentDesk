@@ -452,6 +452,8 @@ tui-o-writer/NoticeEvidenceContextBefore.cfg	NoticeEvidence	-	DirectEventuallyPo
 tui-o-writer/NoticeEvidenceDropLog.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceDropReplay.cfg	NoticeEvidence	ReplayKeepsTerminal	-
 tui-o-writer/NoticeEvidenceExpireUnproven.cfg	NoticeEvidence	NoQuietLoss,NoExpireOwedDirect	DirectEventuallyPosted
+tui-o-writer/NoticeEvidenceLegacyRetryAfter.cfg	NoticeEvidence	-	-
+tui-o-writer/NoticeEvidenceLegacyRetryBefore.cfg	NoticeEvidence	LegacyRetryNoPost,NoPostExempt	LegacyRetryExcluded
 tui-o-writer/NoticeEvidenceNoSettle.cfg	NoticeEvidence	-	EveryPendingTerminates
 tui-o-writer/NoticeEvidenceReasonLog.cfg	NoticeEvidence	PendingLoggedOnce	-
 tui-o-writer/NoticeEvidenceSameSource.cfg	NoticeEvidence	-	-

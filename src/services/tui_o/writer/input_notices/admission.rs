@@ -102,7 +102,8 @@ pub(crate) fn admit_notice<R>(
         if cleared(&events, origin, store)? {
             return exclude(piece, store, "input_notice_clear");
         }
-        if discord::input_notice_content(&prompt).is_none() {
+        if super::legacy_discord_input(&prompt) || discord::input_notice_content(&prompt).is_none()
+        {
             return exclude(piece, store, "input_notice_source");
         }
         match history::observed_attempt_checked(

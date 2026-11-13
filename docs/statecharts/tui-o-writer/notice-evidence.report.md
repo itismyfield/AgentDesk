@@ -94,3 +94,9 @@ fairness는 추가하지 않았다. 기존13 NoticeEvidence cfg의 기대 결과
 이번에는 변경 모델을 사용하는15 cfg 전체를 재실행해 예상과 다른 실패0을 확인했다.
 원문: `/home/adk/adk/lane-runs/i8112/logs/impl-b1r1/model-results.json`, `model-matrix.log`, 각 TLC trace.
 기존4 boot/input-single-path cfg는 전이가 변하지 않아 앞선 결과를 재사용한다(전체 모델 집합은 이제19 cfg).
+
+## Retained legacy source retry debt
+
+Code input: merged f7047a7cd4e42917ac278db888806e5abbe11670. A saved budget root is retried only after NotFound (writer/local_retry/notice_selection.rs:13); its Prepared audit row is distinct from an uncertain effect. The legacy source policy must run again before the first POST poll, through writer/input_notices/admission.rs. Native projection already rejects the same pre-v1 source frame.
+
+NoticeEvidenceLegacyRetryBefore.cfg expects LegacyRetryNoPost and NoPostExempt safety RED, and LegacyRetryExcluded liveness RED. NoticeEvidenceLegacyRetryAfter.cfg is GREEN. The new source exclusion permits only a known-effect-free legacy retry to leave Prepared as Excluded; uncertain/direct Prepared keeps its prior rule. All previous fifteen configs retain their expected results. The checked seventeen-config prototype is copied byte-for-byte; the source and data row evidence is in the lane report.
