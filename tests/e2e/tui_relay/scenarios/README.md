@@ -41,6 +41,46 @@ Only `fixture` rows are runnable there: `is_runnable` (`:106`) selects inputs fo
 [`scripts/ci-script-checks.sh:451`](../../../../scripts/ci-script-checks.sh#L451);
 mocked/local checks do not execute the live specifications.
 
+## User-feature claims
+
+The [handwritten feature rows](../../../../docs/user-feature-map.rows.yaml) and
+scenario YAMLs are inputs to the [generated feature map](../../../../docs/user-feature-map.md)
+and [coverage JSON](../../../../docs/generated/user-feature-coverage.json).
+Edit the inputs, then regenerate both outputs from the repository root:
+
+```bash
+python3 scripts/generate_user_feature_map.py --write --base-ref origin/main
+python3 scripts/generate_user_feature_map.py --check --base-ref origin/main
+```
+
+`feature_coverage.schema: 1` contains `claims` keyed by `feature_id`, explicit
+`host`, `provider`, `surface`, `state`, and `qualifiers`; `assertion_ids` names
+existing assertion operations. The [schema guide](../../../../docs/e2e/multi-provider-e2e.md#user-feature-coverage-metadata)
+defines the exact claim contract. A claim needs every required assertion from
+its matching handwritten row, an explicit compatible TUI cell, and operations
+present in both this YAML's `assertions` and the shared runner registry.
+Pipe cells and empty orchestration cells do not imply a supported TUI claim.
+Thread/busy claims also require actual supported surface/state witness operations;
+metadata alone cannot implement those operations.
+
+Initial claims in `E-50`/`E-51` cover common message delivery only. Their
+`send_discord_prompt` step calls `DiscordClient.send` with `channel_id` and
+`content`; the send API defaults to source `system` and the announce bot
+(`scripts/e2e/tui_relay/discord.py`, `src/services/discord/outbound/send_api.rs`).
+That transport is `input_source: legacy_automation`, not human input.
+`output_path: unspecified` records that these assertions do not observe a
+specific Legacy or `tui_o` receipt/profile. These claims cannot fill a more
+specific output-path or input-source row. The clear acknowledgement wait is
+not an assertion claim for the full reset/clear feature.
+
+Coverage here means a supported **live specification**, not a passed run.
+Fixture, known-gap and retired specifications never fill live feature cells.
+Missing operations remain `pending_assertions` with an issue, reason and source
+applicability in the handwritten rows. The initial reaction, busy-injection,
+fresh-thread and thread host/output contracts remain gaps; no new runtime
+assertions are introduced by this metadata. Actual execution, freshness and
+head/instance evidence are reported separately by the E2E runner.
+
 ## Why live specifications do not run in CI
 
 The issue's audit identified seven prerequisites that the census job does not

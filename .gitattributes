@@ -8,6 +8,10 @@ scripts/** text eol=lf
 # keep checkouts identical across platforms.
 migrations/postgres/** text eol=lf
 
+# Required CI checks the three source trees before accepting these list merges.
+docs/statecharts/expected.tsv merge=union
+scripts/ci/test-removal-justifications.txt merge=union
+
 # Custom merge driver for tracked generated inventory docs (#4724 slice B).
 # These two files are generated wholesale; line-count churn makes concurrent PRs
 # collide on them. The

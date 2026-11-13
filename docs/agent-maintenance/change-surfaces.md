@@ -2455,7 +2455,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/cli/provider_cli/mod.rs`
 - `src/config.rs`
 - `src/db/auto_queue/entries.rs`
-- `src/db/auto_queue/phase_gates.rs`
 - `src/db/dispatched_sessions.rs`
 - `src/db/dispatched_sessions/canonical_identity.rs`
 - `src/db/dispatches/mod.rs`

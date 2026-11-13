@@ -1,0 +1,14 @@
+---
+title: "Busy Claude input uses the same owner on either host"
+---
+stateDiagram-v2
+  s0: Original owned front
+  s1: 공통 대상으로 진행 중 턴 확인
+  s2: May have sent, never replay
+  s3: 본문#183;Enter 기록, 영수증 대기
+  s4: Transcript receipt settled
+  [*] --> s0
+  s0 --> s1: 공통 대상부터 관측
+  s1 --> s2: try existing busy writer
+  s2 --> s3: 본문과 Enter 전송
+  s3 --> s4: settle original once

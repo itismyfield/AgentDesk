@@ -1,0 +1,28 @@
+---
+title: "Busy Claude input uses the same owner on either host"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks VerifiedClearNeverBusy
+    lg1: Path to the VerifiedClearEventuallyDelegates or VerifiedClearNeverBusy bug
+    lg2: Repeats forever, so VerifiedClearEventuallyDelegates breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: Original owned front
+  s1: May have sent, never replay
+  s2: 본문#183;Enter 기록, 영수증 대기
+  s3: Transcript receipt settled
+  [*] --> s0
+  s0 --> s1: try existing busy writer
+  s1 --> s2: 본문과 Enter 전송
+  s2 --> s2: observe user or queued row
+  s2 --> s3: settle original once
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath
+  class s3 breaks
+  class s3 repeats

@@ -20,7 +20,7 @@ impl Fixture {
         let source = fixture::native_file(root.path());
         let owner = enabled(root.path());
         let era = owner
-            .begin_era(&[7], chrono::Utc::now(), |c| Ok(initialized(c, Vec::new())))
+            .begin_fixture_era(&[7], chrono::Utc::now(), |c| Ok(initialized(c, Vec::new())))
             .unwrap();
         let mut store = owner.open_channel(&era, 7).unwrap().unwrap();
         store.attach_source(&source).unwrap();

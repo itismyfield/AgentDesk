@@ -15,6 +15,7 @@ fn init(channel: u64, sources: &[&SourceId]) -> Initialized {
         prefix_hash: hex::encode(Sha256::digest(b"")),
     };
     Initialized {
+        policy_parent: None,
         channel,
         sources: sources.iter().map(init_source).collect(),
         initial_anchor: 100,
@@ -47,8 +48,15 @@ fn the_era_leaves_out_and_reports_channels_without_a_binding_baseline() {
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
         .unwrap()
         .unwrap();
-    let (era, excluded) =
-        begin_era_checked(&store, &[7, 8, 9], Utc::now(), &bindings, inits).unwrap();
+    let (era, excluded) = begin_era_checked(
+        &store,
+        &crate::services::session_host::surface_policy::InitScope::fixture(&[7, 8, 9, CHANNEL]),
+        &[7, 8, 9],
+        Utc::now(),
+        &bindings,
+        inits,
+    )
+    .unwrap();
     assert_eq!(era.initial_channels, [7]);
     let out = |channel, reason: &str| Excluded {
         channel,
@@ -61,7 +69,15 @@ fn the_era_leaves_out_and_reports_channels_without_a_binding_baseline() {
     assert_eq!(excluded, expected);
     assert!(store.read_init(7).unwrap().is_some());
     assert!(store.read_init(8).unwrap().is_none() && store.read_init(9).unwrap().is_none());
-    let again = begin_era_checked(&store, &[7, 8, 9], Utc::now(), &bindings, inits).unwrap();
+    let again = begin_era_checked(
+        &store,
+        &crate::services::session_host::surface_policy::InitScope::fixture(&[7, 8, 9, CHANNEL]),
+        &[7, 8, 9],
+        Utc::now(),
+        &bindings,
+        inits,
+    )
+    .unwrap();
     assert_eq!(
         again,
         (era, Vec::new()),
@@ -72,7 +88,15 @@ fn the_era_leaves_out_and_reports_channels_without_a_binding_baseline() {
         .unwrap()
         .unwrap();
     bindings.fail(Some("no log"));
-    let (era, excluded) = begin_era_checked(&store, &[7], Utc::now(), &bindings, inits).unwrap();
+    let (era, excluded) = begin_era_checked(
+        &store,
+        &crate::services::session_host::surface_policy::InitScope::fixture(&[7, 8, 9, CHANNEL]),
+        &[7],
+        Utc::now(),
+        &bindings,
+        inits,
+    )
+    .unwrap();
     assert!(era.initial_channels.is_empty());
     assert_eq!(excluded, [out(7, "binding log unreadable: no log")]);
 }

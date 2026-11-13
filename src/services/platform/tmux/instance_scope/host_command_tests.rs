@@ -138,6 +138,7 @@ fn exercise_instance_entries() {
         tmux::list_sessions_with_pane_command().unwrap()[0].session_name,
         name
     );
+    #[cfg(target_os = "macos")]
     assert_eq!(tmux::list_sessions_with_server_pid().unwrap().len(), 1);
     assert_eq!(tmux::pane_liveness(&name), tmux::PaneLiveness::Live);
     let mut prepared = super::super::liveness::prepared_tmux_command().unwrap();

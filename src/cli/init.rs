@@ -1266,6 +1266,23 @@ mod tests {
 mod launchd_plist_tests {
     use super::*;
 
+    fn assert_launchd_program_arguments(plist: &str, bin: &Path) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("arguments.plist");
+        fs::write(&path, plist).unwrap();
+        let output = std::process::Command::new("plutil")
+            .args(["-extract", "ProgramArguments", "json", "-o", "-"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let arguments: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            arguments,
+            [bin.to_string_lossy().into_owned(), "dcserver".into()]
+        );
+    }
+
     fn assert_plist_xml_valid(plist: &str) {
         let temp_dir = tempfile::tempdir().unwrap();
         let plist_path = temp_dir.path().join("agentdesk.plist");
@@ -1312,6 +1329,7 @@ mod launchd_plist_tests {
             assert!(!plist.contains("<key>SoftResourceLimits</key>"));
             assert_eq!(plist.matches("<key>NumberOfFiles</key>").count(), 0);
         }
+        assert_launchd_program_arguments(&plist, &root_dir.join("bin").join("agentdesk"));
         assert_plist_xml_valid(&plist);
     }
 
@@ -1335,6 +1353,7 @@ mod launchd_plist_tests {
         assert!(plist.contains("<key>AGENTDESK_ROOT_DIR</key>"));
         assert!(plist.contains("<key>ProcessType</key><string>Interactive</string>"));
         assert!(!plist.contains("/Users/itismyfield") && !plist.contains("/Users/kunkun"));
+        assert_launchd_program_arguments(&plist, &agentdesk_bin);
         assert_plist_xml_valid(&plist);
     }
 }
