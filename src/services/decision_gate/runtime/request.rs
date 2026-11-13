@@ -7,6 +7,7 @@ pub(super) fn body(request: &DecisionRequest) -> Result<Value, NoAnswerReason> {
         return Err(NoAnswerReason::InvalidRequest);
     }
     let question = match &request.question {
+        #[cfg(test)]
         Question::Noul {
             instructions,
             true_description,
@@ -44,6 +45,7 @@ pub(super) fn body(request: &DecisionRequest) -> Result<Value, NoAnswerReason> {
                 .collect();
             json!({"type": "choice", "instructions": instructions, "criteria": criteria})
         }
+        #[cfg(test)]
         Question::Score {
             instructions,
             levels,

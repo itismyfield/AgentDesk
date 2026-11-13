@@ -83,6 +83,9 @@ src/
 │   ├── channel_provider.rs
 │   ├── client.rs
 │   ├── dcserver.rs
+│   ├── dcserver_decision_boot.rs
+│   ├── dcserver_decision_boot_tests.rs
+│   ├── dcserver_decision_stage_tests.rs
 │   ├── dcserver_pg_bootstrap.rs
 │   ├── dcserver_restart_marker.rs
 │   ├── dcserver_restart_wait.rs
@@ -630,6 +633,9 @@ src/
 │   │   │   ├── ops.rs
 │   │   │   ├── reviews.rs
 │   │   │   └── runtime.rs
+│   │   ├── github/
+│   │   │   ├── issue_duplicate.rs
+│   │   │   └── issue_duplicate_tests.rs
 │   │   ├── health_api/
 │   │   │   ├── db_deadline_tests/
 │   │   │   │   ├── amplification_records_tests/
@@ -1057,6 +1063,12 @@ src/
 │   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   ├── relay_receipts.rs
 │   │   │   └── resume_renumber_tests.rs
+│   │   ├── host_input/
+│   │   │   ├── busy/
+│   │   │   │   ├── herdr.rs
+│   │   │   │   └── tmux.rs
+│   │   │   ├── busy.rs
+│   │   │   └── transport.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── fresh_hold_tests.rs
@@ -1333,6 +1345,8 @@ src/
 │   │   ├── runtime/
 │   │   │   ├── gemini.rs
 │   │   │   ├── key.rs
+│   │   │   ├── key_initial_env.rs
+│   │   │   ├── key_tests.rs
 │   │   │   ├── parser.rs
 │   │   │   ├── request.rs
 │   │   │   └── tests.rs
@@ -1986,9 +2000,11 @@ src/
 │   │   │   │   │   └── tests/
 │   │   │   │   │       └── actual_close_tests.rs
 │   │   │   │   ├── effect/
+│   │   │   │   │   ├── claude.rs
 │   │   │   │   │   ├── codex.rs
 │   │   │   │   │   ├── codex_herdr_tests.rs
 │   │   │   │   │   ├── herdr.rs
+│   │   │   │   │   ├── herdr_safety_tests.rs
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
@@ -1999,6 +2015,8 @@ src/
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
 │   │   │   │   ├── effect_tests.rs
+│   │   │   │   ├── effort_continue.rs
+│   │   │   │   ├── effort_continue_tests.rs
 │   │   │   │   ├── held_watch.rs
 │   │   │   │   ├── ingress.rs
 │   │   │   │   ├── ingress_tests.rs
@@ -2302,6 +2320,8 @@ src/
 │   │   │   │   │   ├── owner_input_carried_restart_tests.rs
 │   │   │   │   │   ├── owner_input_codex_native_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs
+│   │   │   │   │   ├── owner_input_common_operation_tests.rs
+│   │   │   │   │   ├── owner_input_herdr_busy_operation_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_pending_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
@@ -2438,8 +2458,9 @@ src/
 │   │   │   │   │   └── owner_execution.rs
 │   │   │   │   └── owner_port.rs
 │   │   │   ├── owner_execution/
-│   │   │   │   └── tests/
-│   │   │   │       └── mod.rs
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── mod.rs
+│   │   │   │   └── child_view_tests.rs
 │   │   │   ├── queued_placeholders/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── n3bc_tests.rs
@@ -3914,6 +3935,7 @@ src/
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
 │   │   ├── session_record.rs
+│   │   ├── surface_policy.rs
 │   │   ├── test_support.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
@@ -4018,7 +4040,10 @@ src/
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
 │   │   │   │   └── body_check.rs
+│   │   │   ├── children/
+│   │   │   │   └── tests.rs
 │   │   │   ├── adoption.rs
+│   │   │   ├── children.rs
 │   │   │   ├── late_reservation_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── cutover/
@@ -4090,6 +4115,8 @@ src/
 │   │   │   ├── spool/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
+│   │   │   ├── thread_children/
+│   │   │   │   └── retirement_tests.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
 │   │   │   ├── clear_end_tests.rs
@@ -4112,6 +4139,8 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── spool.rs
 │   │   │   ├── spool_transition_tests.rs
+│   │   │   ├── thread_children.rs
+│   │   │   ├── thread_children_tests.rs
 │   │   │   ├── tool_card_switch.rs
 │   │   │   ├── tool_card_switch_recovery_tests.rs
 │   │   │   └── tool_card_switch_tests.rs
@@ -4509,6 +4538,7 @@ src/
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── control_tests.rs
+│   │   │   │   ├── effort_continue.rs
 │   │   │   │   ├── migration.rs
 │   │   │   │   ├── migration_tests.rs
 │   │   │   │   ├── origin.rs
@@ -4523,6 +4553,8 @@ src/
 │   │   │   │   ├── start_failure.rs
 │   │   │   │   ├── start_failure_tests.rs
 │   │   │   │   └── unit_tests.rs
+│   │   │   ├── v2_types/
+│   │   │   │   └── effort_restart.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs
 │   │   │   ├── mend.rs

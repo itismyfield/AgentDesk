@@ -1,0 +1,28 @@
+---
+title: "Busy Claude input uses the same owner on either host"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoUnrelatedEarlyDiagnostic
+    lg1: Path to the HealthyBusyEventuallyInjected or NoUnrelatedEarlyDiagnostic bug
+    lg2: Repeats forever, so HealthyBusyEventuallyInjected breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: Original owned front
+  s1: 대상 관측 전에 tmux 진단 실행
+  s2: Held before any key
+  s3: Held visibly, before any key
+  [*] --> s0
+  s0 --> s1: 기존 tmux 진단 실행
+  s1 --> s2: try existing busy writer
+  s2 --> s3: show existing held status
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 breaks
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath
+  class s3 breaks
+  class s3 repeats

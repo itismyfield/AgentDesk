@@ -142,6 +142,7 @@ mod tests {
             .unwrap();
         let now = chrono::Utc::now();
         let init = Initialized {
+            policy_parent: None,
             channel: 7,
             at: now,
             initial_anchor: 0,
@@ -152,7 +153,9 @@ mod tests {
             }],
             build_digest: "test".into(),
         };
-        let era = store.begin_era(&[7], now, |_| Ok(init.clone())).unwrap();
+        let era = store
+            .begin_fixture_era(&[7], now, |_| Ok(init.clone()))
+            .unwrap();
         let channel = store.open_channel(&era, 7).unwrap().unwrap();
         let witness = CleanupWitness {
             source: source.clone(),

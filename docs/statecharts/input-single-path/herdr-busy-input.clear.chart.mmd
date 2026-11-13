@@ -1,0 +1,12 @@
+---
+title: "Busy Claude input uses the same owner on either host"
+---
+stateDiagram-v2
+  s0: Original owned front
+  s1: 검증된 clear를 기존 Idle에 위임
+  s2: 본문#183;Enter 기록, 영수증 대기
+  s3: Transcript receipt settled
+  [*] --> s0
+  s0 --> s1: try existing busy writer
+  s1 --> s2: 기존 Idle가 clear 세션에 입력
+  s2 --> s3: settle original once

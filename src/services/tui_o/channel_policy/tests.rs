@@ -246,6 +246,7 @@ fn a_selected_channel_starts_committed_only_over_a_readable_init() {
     let init = |channel| {
         let (sources, initial_anchor, build_digest) = (Vec::new(), 0, "b".into());
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources,
             initial_anchor,
@@ -256,7 +257,7 @@ fn a_selected_channel_starts_committed_only_over_a_readable_init() {
     store
         .unwrap()
         .unwrap()
-        .begin_era(&[1, 2], at, init)
+        .begin_fixture_era(&[1, 2], at, init)
         .unwrap();
     let dir = root.path().join("o_store");
     std::fs::remove_file(dir.join("2/init")).unwrap();
@@ -549,15 +550,16 @@ fn commit_on_disk(era: &[u64], later: &[u64]) -> std::path::PathBuf {
     let store = store.unwrap().unwrap();
     let at = chrono::Utc::now();
     let init = |channel| Initialized {
+        policy_parent: None,
         channel,
         sources: Vec::new(),
         initial_anchor: 0,
         build_digest: "b".into(),
         at,
     };
-    store.begin_era(era, at, |c| Ok(init(c))).unwrap();
+    store.begin_fixture_era(era, at, |c| Ok(init(c))).unwrap();
     for &channel in later {
-        store.init_channel(&init(channel)).unwrap();
+        store.init_fixture_channel(&init(channel)).unwrap();
     }
     root.join(crate::services::tui_o::store::STORE_DIR_NAME)
 }

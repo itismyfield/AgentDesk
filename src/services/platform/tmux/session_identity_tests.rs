@@ -255,6 +255,16 @@ fn identity_checked_panes_refuse_unmarked_submission_target() {
     let before = rig.snapshot(&name);
     let program = rig.dir.path().join("tmux");
     let busy = crate::services::claude_tui::busy_inject::Pane::with_program(&name, program.clone());
+    let operation = std::panic::catch_unwind(|| {
+        crate::services::claude_tui::host_input::BusyOperation::for_session(
+            &name,
+            None,
+            program.clone(),
+            &crate::services::claude_tui::busy_inject::TIMING,
+            false,
+            std::sync::Arc::new(crate::services::provider::CancelToken::new()),
+        )
+    });
     let actor = crate::services::tui_input::actor::pane::TmuxPane::with_program(
         &name,
         program,
@@ -271,6 +281,12 @@ fn identity_checked_panes_refuse_unmarked_submission_target() {
     );
     let after = rig.snapshot(&name);
     let _ = rig.raw(&["kill-session", "-t", &exact_target(&name)]);
+    assert!(
+        operation
+            .expect("an unmarked target must be refused without panicking")
+            .is_err(),
+        "the common operation must propagate the Pane ownership refusal"
+    );
     use crate::services::claude_tui::guarded_outcome::SubmissionError;
     use crate::services::claude_tui::host_input::{InputRefusal, InputRun};
     assert_eq!(

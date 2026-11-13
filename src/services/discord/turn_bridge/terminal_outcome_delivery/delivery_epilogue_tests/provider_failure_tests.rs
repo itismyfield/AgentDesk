@@ -53,6 +53,7 @@ fn seed_o_store() {
     let at = chrono::Utc::now();
     let init = |channel| {
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources: Vec::new(),
             initial_anchor: 7,
@@ -60,7 +61,9 @@ fn seed_o_store() {
             at,
         })
     };
-    store.begin_era(&[DRIVER_CHANNEL_ID], at, init).unwrap();
+    store
+        .begin_fixture_era(&[DRIVER_CHANNEL_ID], at, init)
+        .unwrap();
 }
 
 struct Case {

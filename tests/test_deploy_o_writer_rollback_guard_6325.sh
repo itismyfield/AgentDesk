@@ -44,6 +44,7 @@ extract_function() {
 for fn in _rollback_release_binary _cleanup_on_exit _signal_release_lock_pid _wait_release_stopped \
     _binary_build_flag _manifest_o_tui_writer \
     _rollback_would_revert_o_ledger _binary_would_revert_o_ledger \
+    _binary_would_revert_o_child_store _rollback_would_revert_o_child_store \
     _rollback_would_revert_o_writer _rollback_would_revert_o_spool _write_release_source_manifest \
     _external_artifact_would_skip_o_writer; do
     body="$(extract_function "$fn")"
