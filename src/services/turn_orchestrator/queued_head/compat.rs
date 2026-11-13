@@ -18,8 +18,8 @@ impl SnapshotRead {
 }
 
 impl SnapshotV2 {
-    /// Whether this queue holds queued, attempted or owed retained input, an owed drop receipt, or
-    /// an opaque/unclosed bind. Settled binds and terminal identities are delivered history.
+    /// Whether the queue holds input, including a continuation awaiting ready/admission.
+    /// Settled binds and terminal identities are delivered history.
     pub(crate) fn holds_input(&self) -> bool {
         use super::v2_types::BindAt;
         let closed = |identity: &QueueIdentity, attempt: &super::v2_types::AttemptIdentity| {
@@ -31,6 +31,10 @@ impl SnapshotV2 {
             BindAt::Opaque => true,
         };
         !self.items.is_empty()
+            || self
+                .effort_restart
+                .as_ref()
+                .is_some_and(|intent| intent.pending().is_some())
             || !self.owed_drop_receipts.is_empty()
             || self.head_injection.is_some()
             || (self.retained_inputs.iter()).any(|entry| entry.owed_to_owner())
