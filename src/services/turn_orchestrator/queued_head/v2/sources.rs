@@ -10,6 +10,7 @@ pub(super) fn identity(item: &PendingQueueItem) -> QueueIdentity {
 }
 
 impl Owner {
+    #[cfg(test)]
     pub(crate) fn native_intent(
         &self,
     ) -> Result<Option<crate::services::tui_input::human_frame::history::v2::native::Episode>, String>
@@ -200,7 +201,6 @@ impl Owner {
             use crate::services::tui_input::human_frame::history::v2::native::Intent;
             let intent: Intent =
                 serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
-            self.native_intent()?;
             let key = serde_json::json!({"identity":input.identity,"attempt":input.attempt});
             if key["attempt"]["provider"] != "claude" {
                 return Err("native intent requires Claude".into());
