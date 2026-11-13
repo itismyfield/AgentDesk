@@ -1147,7 +1147,7 @@ C=실제 채널/합성 thread/DM hint를 담을 수 있는 저장 문자열; R=r
 
 - 한 채널의 옛 실행 하나와 새 successor 하나, old/empty 실행 nonce 2개 initial state, probe failure 최대 1회, 등록 전 nonce 교체 1회, 늦은 old hook 1회와 중지 재요청 1회를 탐색한다.
 - 새 이름 요청 자체는 old live 이름/primary/물리 대상을 바꾸지 않는다. old host의 실제 종료와 부재 관측 뒤에만 successor를 준비한다. 등록은 old-host absence와 row nonce empty/new를 확인해 **primary 새 key + old alias**를 한 행동으로 커밋한다.
-- 등록 직전 nonce가 old로 바뀌면 등록을 거부하고 자기 fresh successor만 정리한다. 자기 생성·서버 witness가 유효하다는 조건과 DB identity/두 locator lock의 원자성은 이 projection의 가정이다. 소유 증거 교체·기본 tmux 서버·실제 SQL 격리는 구현 시험 책임이다.
+- 등록 직전 nonce가 old로 바뀌면 등록을 거부하고 fresh 슬롯은 kill 없이 Held로 남긴다. 정리는 S3의 incarnation 계약으로 넘긴다. 자기 생성·서버 witness가 유효하다는 조건과 DB identity/두 locator lock의 원자성은 이 projection의 가정이다. 소유 증거 교체·기본 tmux 서버·실제 SQL 격리는 구현 시험 책임이다.
 - tmux는 `PrimaryTailIsCurrentPhysical`을 검사한다. Herdr primary는 logical artifact 이름이므로 pane ID와 literal 동등성은 검사하지 않고 `PrimaryNamesCurrentLogical`과 `HostTargetMatchesCurrent`(old/new logical ↔ old/new pane)를 검사한다. pane의 실제 생성/복구 프로토콜은 기존 Herdr 모델에 그대로 남아 있다.
 - `NoDuplicateKill`은 같은 owned successor에 대한 **종료 효과가 1회를 넘지 않음**이다. 호출 횟수나 모든 외부 프로세스에 대한 kill 권한을 증명하지 않는다. retry stop은 효과 0이다.
 

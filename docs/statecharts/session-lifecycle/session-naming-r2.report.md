@@ -1,6 +1,6 @@
 # 이름 이전 등록 트랜잭션 모델 — r2
 
-이 모델은 **아직 구현하지 않은 A 승격 계약의 별도 유한 projection**이다. 기존 수명 모델 전체와 naming을 합성 탐색한 결과가 아니다. TmuxSession은 `msg`, HerdrSession은 `handoff`에 Naming record를 넣고 나머지 기존 lifecycle 변수는 고정한다. 기존 `Init`/`Next` 본문과 기존 cfg는 바이트 동일하게 보존했다. 따라서 기존 model의 알려진 수명 위반을 고쳤거나 재검증했다고 주장하지 않는다.
+r2 설계 시점의 이 모델은 **당시 아직 구현하지 않은 A 승격 계약의 별도 유한 projection**이다. 현재 구현과 실행 증거는 아래 S2 절에 기록한다. 기존 수명 모델 전체와 naming을 합성 탐색한 결과가 아니다. TmuxSession은 `msg`, HerdrSession은 `handoff`에 Naming record를 넣고 나머지 기존 lifecycle 변수는 고정한다. 기존 `Init`/`Next` 본문과 기존 cfg는 바이트 동일하게 보존했다. 따라서 기존 model의 알려진 수명 위반을 고쳤거나 재검증했다고 주장하지 않는다.
 
 ## 범위와 계약
 
@@ -99,9 +99,9 @@ TLA2TOOLS=/tmp/i8119-r2-models/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk@25/b
 | `src/db/dispatched_sessions/canonical_identity.rs:144` 및 `src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff.rs:650` | snapshotNonce/nonceContested; 명시 witness가 없으면 primary 승격 없음 |
 | `src/db/dispatched_sessions/key_promotion.rs:26,79,100` (discovery/locator/validation) | TxDiscover → TxLocatorLocks → TxIdentityLock → TxRows; 비권한 snapshot과 under-lock CAS |
 | `src/db/dispatched_sessions/key_promotion.rs:183` (promote_primary) | PromotePrimary → TxPreserveAlias → TxCommit; 충돌은 TxRollback |
-| `src/services/discord/session_locator.rs:130,217` (channel_key/observe_old) | RequestNewName / ObserveOldHost; live old의 관측 namespace만 재사용, 미관측 namespace는 Unknown |
+| `src/services/discord/session_locator.rs:130,219` (channel_key/observe_old) | RequestNewName / ObserveOldHost; live old의 관측 namespace만 재사용, 미관측 namespace는 Unknown |
 | `src/services/discord/router/message_handler/provider_dispatch.rs:353` (registration_origin) | 명시 canonical 등록만; synthetic/process/routine/scheduled의 override는 범위 밖 |
-| `src/services/tui_prompt_dedupe/binding_context.rs:467` → scoped completion → `src/services/discord/session_locator.rs:360` | 실제 새 incarnation과 spawn marker 게시 뒤 fresh registration witness 생산 |
+| `src/services/tui_prompt_dedupe/binding_context.rs:467` → scoped completion → `src/services/discord/session_locator.rs:362` | 실제 새 incarnation과 spawn marker 게시 뒤 fresh registration witness 생산 |
 
 file:line 전수 결과는 `/Users/itismyfield/.adk/lane-runs/i8119/logs/s2-registration-entrypoints.log`다. 이름의 suffix로 입력 kind/provider/channel을 새로 추론하는 진입점을 모델에 추가하지 않았다.
 
