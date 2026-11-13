@@ -366,7 +366,10 @@ fn wait_for_prompt_ready_inner(
     transcript_path: Option<&std::path::Path>,
 ) -> Result<(), String> {
     check_prompt_cancel(cancel_token)?;
-    if !host_input::legacy_pane_alive(session_name) {
+    // A warm owner already checked liveness; the writer still validates its pane before keys.
+    if readiness != PromptReadinessKind::ProvenWarmFollowup
+        && !host_input::legacy_pane_alive(session_name)
+    {
         return Err("claude tui session died before prompt input was ready".into());
     }
     match super::readiness::prepare(
