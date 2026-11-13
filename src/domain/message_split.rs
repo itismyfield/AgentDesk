@@ -1,6 +1,10 @@
+mod literal_code_block;
 pub(crate) mod semantic_boundaries;
+pub(crate) use literal_code_block::bounded_raw_code_block_notice;
 
 pub(crate) const DISCORD_MSG_LIMIT: usize = 2000;
+/// Plain-text budget after the shared splitter reserves its repair margin.
+pub(crate) const PLAIN_MESSAGE_SPLIT_LIMIT: usize = DISCORD_MSG_LIMIT - 10;
 
 /// Conservative unit policy for Discord's documented 2000-character limit.
 ///
@@ -63,9 +67,7 @@ pub(crate) fn split_message(text: &str) -> Vec<String> {
         } else {
             0
         };
-        let effective_limit = DISCORD_MSG_LIMIT
-            .saturating_sub(tag_overhead)
-            .saturating_sub(10);
+        let effective_limit = PLAIN_MESSAGE_SPLIT_LIMIT.saturating_sub(tag_overhead);
         // `code_block_lang` is capped when the opener is observed, so the
         // synthetic reopen/close tags can never consume the body budget. Every
         // Unicode scalar needs at most two UTF-16 units, hence a non-empty

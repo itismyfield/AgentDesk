@@ -9,7 +9,6 @@
 
 use super::super::response_sanitizer::subagent_notification_card;
 use super::super::tui_task_card::strip_terminal_controls;
-use super::super::{DISCORD_MSG_LIMIT, formatting::discord_message_units};
 
 const LOCAL_COMMAND_STDOUT_OPEN: &str = "<local-command-stdout>";
 const LOCAL_COMMAND_STDOUT_CLOSE: &str = "</local-command-stdout>";
@@ -296,68 +295,7 @@ pub(super) fn format_ssh_direct_prompt_notification(
     let prompt = strip_terminal_controls(prompt)
         .replace("\r\n", "\n")
         .replace(['\r', '\u{2028}', '\u{2029}'], "\n");
-    let mut output = String::from("-# ⌨️ ");
-    let mut units = discord_message_units(&output);
-    // Each source scalar owns one checkpoint, including hidden blank-line whitespace.
-    // Line prefixes and escape/mention guards stay attached to the same scalar.
-    let mut checkpoints = Vec::new();
-    'lines: for (line_index, line) in prompt.split_inclusive('\n').enumerate() {
-        let has_text = !line.trim().is_empty();
-        let mut at_token_start = true;
-        let mut in_url = false;
-        for (index, ch) in line.char_indices() {
-            if ch.is_whitespace() {
-                at_token_start = true;
-                in_url = false;
-            } else if at_token_start {
-                in_url =
-                    line[index..].starts_with("http://") || line[index..].starts_with("https://");
-                at_token_start = false;
-            }
-            let escaped = match ch {
-                '\n' => "\n".to_string(),
-                _ if !has_text => String::new(),
-                '@' => "@\u{200b}".to_string(),
-                '<' => "‹".to_string(),
-                '>' => "›".to_string(),
-                _ if in_url => ch.to_string(),
-                '\\' | '`' | '*' | '_' | '~' | '|' | '[' | ']' | '#' | '-' | '+' | '.' | '('
-                | ')' | '!' => format!("\\{ch}"),
-                _ => ch.to_string(),
-            };
-            let prefix = if line_index > 0 && index == 0 && has_text {
-                "-# "
-            } else {
-                ""
-            };
-            let escaped = format!("{prefix}{escaped}");
-            let next_units = units + discord_message_units(&escaped);
-            if next_units > DISCORD_MSG_LIMIT {
-                break 'lines;
-            }
-            checkpoints.push((output.len(), units));
-            output.push_str(&escaped);
-            units = next_units;
-        }
-    }
-    let mut omitted = prompt.chars().count() - checkpoints.len();
-    if omitted == 0 {
-        return output;
-    }
-    loop {
-        let prefix = if output.ends_with('\n') { "-# " } else { "" };
-        let suffix = format!("{prefix}… (이하 {omitted}자)");
-        if units + discord_message_units(&suffix) <= DISCORD_MSG_LIMIT {
-            output.push_str(&suffix);
-            return output;
-        }
-        let (end, previous_units) = checkpoints
-            .pop()
-            .expect("the notice header leaves room for the omission marker");
-        output.truncate(end);
-        units = previous_units;
-        omitted += 1;
-    }
+    crate::domain::message_split::bounded_raw_code_block_notice("-# ⌨️ tui direct input", &prompt)
 }
 
 #[cfg(test)]

@@ -1,0 +1,60 @@
+---
+title: "연속 실패 알림과 한 번의 복구 요청"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: accepted
+    lg1: normal
+    lg2: Breaks OrdinaryNotifyDoesNotStart
+    lg3: Path to the OrdinaryNotifyDoesNotStart bug
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  s0: 예약 실행 이력 대기
+  s1: 실패 누적
+  s2: 일반 알림이 턴 시작
+  s3: N+1 복구 요청 저장됨
+  s4: 기존 outbox 전송 대기
+  s5: 명령봇 메시지 도착
+  s6: 허용 봇 입력 수용
+  s7: 복구 요청 결과 기록
+  s8: 추가 실패#183;알림만
+  s9: 성공#183;비실패로 카운터 초기화
+  [*] --> s0
+  s0 --> s1: 실패 알림만#183;턴 0
+  s1 --> s2: 일반 알림을 잘못 입력으로 수용
+  s1 --> s3: N+1회#183;명령봇 복구 요청
+  s3 --> s4: 기존 outbox가 전송 시작
+  s4 --> s5: 명령봇으로 게시
+  s3 --> s2: 일반 알림을 잘못 입력으로 수용
+  s5 --> s6: 기존 Discord intake 통과
+  s4 --> s2: 일반 알림을 잘못 입력으로 수용
+  s6 --> s7: 기존 owner가 별도 복구 턴 시작
+  s5 --> s2: 일반 알림을 잘못 입력으로 수용
+  s7 --> s1: 전송 결과 종결
+  s6 --> s2: 일반 알림을 잘못 입력으로 수용
+  s1 --> s8: 실패 알림만#183;턴 0
+  s7 --> s8: 전송 결과 종결
+  s7 --> s2: 일반 알림을 잘못 입력으로 수용
+  s8 --> s2: 일반 알림을 잘못 입력으로 수용
+  s8 --> s9: 비실패 terminal#183;카운터 0
+  s7 --> s9: 전송 결과 종결
+  s9 --> s1: 실패 알림만#183;턴 0
+  s7 --> s3: 전송 결과 종결
+  s1 --> s9: 비실패 terminal#183;카운터 0
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 teal
+  class s7 blue
+  class s8 blue
+  class s9 blue

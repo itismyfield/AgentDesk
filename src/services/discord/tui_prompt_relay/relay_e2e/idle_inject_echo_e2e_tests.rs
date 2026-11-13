@@ -170,11 +170,8 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
     assert_eq!(matching.len(), 1, "one external frame notice: {notices:?}");
     let notice = matching[0];
     assert_eq!(notice, &expected);
-    assert!(notice.starts_with("-# ⌨️ "), "{notice}");
-    assert_eq!(notice.lines().count(), 2, "{notice}");
-    assert!(
-        notice.lines().all(|line| line.starts_with("-# ")),
-        "{notice}"
+    assert_eq!(
+        notice,
+        &format!("-# ⌨️ tui direct input\n```\n{frame}\n```")
     );
-    assert!(notice.ends_with(request.text), "{notice}");
 }

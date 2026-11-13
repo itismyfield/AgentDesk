@@ -1,0 +1,27 @@
+---
+title: "정확한 시도의 비공개 증거와 분류"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ProofNamesAttempt
+    lg1: Path to the ProofNamesAttempt bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 아직 증거 없음
+  s1: 한 번만 결정에 넘긴 관측
+  s2: 관측에 묶인 증거 보유
+  s3: 다른 시도가 분류됨
+  [*] --> s0
+  s0 --> s0: ClaimReader or RecordEof or WaitChild or DrainStderr or CloseReader
+  s0 --> s1: 결정자가 시도를 가져옴
+  s1 --> s1: PrivateLiveKey
+  s1 --> s2: 완결된 관측으로 증거 발급
+  s2 --> s2: SupersedeAttempt
+  s2 --> s3: 현재 행과 일치하면 분류
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath

@@ -245,7 +245,8 @@ async fn imessage_start_echoes_one_input_notice_line_pg() {
             .await
             .unwrap()
         );
-        f.one("-# ⌨️ 시험: 요청 본문").await;
+        f.one("-# ⌨️ tui direct input\n```\n시험: 요청 본문\n```")
+            .await;
         drop(pane);
         f.close().await;
     }
@@ -264,7 +265,8 @@ async fn imessage_decision_reply_start_echoes_label_and_body_pg() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    f.one("-# ⌨️ 시험: 결정 답장").await;
+    f.one("-# ⌨️ tui direct input\n```\n시험: 결정 답장\n```")
+        .await;
     f.close().await;
 }
 
@@ -303,7 +305,8 @@ async fn replay_echo(obligations: bool, channel: u64) {
         1,
         "replay must not call echo even when outbox dedupes it"
     );
-    f.one("-# ⌨️ 시험: 요청 본문").await;
+    f.one("-# ⌨️ tui direct input\n```\n시험: 요청 본문\n```")
+        .await;
     f.close().await;
 }
 
@@ -355,7 +358,8 @@ async fn imessage_deliver_unconfirmed_still_echoes_pg() {
     assert_eq!(body["delivery"], "unconfirmed", "{body}");
     assert_eq!(f.backend.load(Ordering::SeqCst), 1);
     assert_eq!(f.enqueue.load(Ordering::SeqCst), 1);
-    f.one("-# ⌨️ 시험: 요청 본문").await;
+    f.one("-# ⌨️ tui direct input\n```\n시험: 요청 본문\n```")
+        .await;
     drop(pane);
     f.close().await;
 }
@@ -372,7 +376,8 @@ async fn unparsed_imessage_envelope_still_delivers_and_echoes_flat_text_pg() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    f.one("-# ⌨️ iMessage: 해석 실패 두 줄").await;
+    f.one("-# ⌨️ tui direct input\n```\niMessage: 해석 실패 두 줄\n```")
+        .await;
     f.close().await;
 }
 
@@ -390,7 +395,8 @@ async fn imessage_handoff_echoes_one_input_notice_line_pg() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["channel_id"], f.channel.to_string());
     assert_eq!(body["status"], "accepted");
-    f.one("-# ⌨️ 시험: 요청 본문").await;
+    f.one("-# ⌨️ tui direct input\n```\n시험: 요청 본문\n```")
+        .await;
     f.close().await;
 }
 
@@ -407,7 +413,8 @@ async fn unparsed_imessage_deliver_envelope_with_origin_still_echoes_pg() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["delivery"], "queued", "{body}");
-    f.one("-# ⌨️ iMessage: 해석 실패 본문").await;
+    f.one("-# ⌨️ tui direct input\n```\niMessage: 해석 실패 본문\n```")
+        .await;
     f.close().await;
 }
 
@@ -431,7 +438,8 @@ async fn non_imessage_source_echoes_nothing_pg() {
         assert_eq!(status, StatusCode::OK, "{source}: {body}");
         assert_eq!(f.notices().await.len(), expected, "{source}");
     }
-    f.one("-# ⌨️ 시험: 요청 본문").await;
+    f.one("-# ⌨️ tui direct input\n```\n시험: 요청 본문\n```")
+        .await;
     f.close().await;
 }
 
@@ -602,7 +610,8 @@ async fn imessage_owner_external_hold_accepts_without_imessage_reply_pg() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["delivery"], "queued", "{body}");
     assert_eq!(body["reason"], "accepted", "{body}");
-    f.one("-# ⌨️ 시험: 요청 본문").await;
+    f.one("-# ⌨️ tui direct input\n```\n시험: 요청 본문\n```")
+        .await;
     let replies: i64 = sqlx::query_scalar("SELECT count(*) FROM imsg_reply_actions")
         .fetch_one(&f.pool)
         .await
@@ -624,7 +633,8 @@ async fn imessage_owner_origin_conflict_echoes_nothing_pg() {
         f.call("turn/deliver", &request, false).await.0,
         StatusCode::OK
     );
-    f.one("-# ⌨️ 시험: 요청 본문").await;
+    f.one("-# ⌨️ tui direct input\n```\n시험: 요청 본문\n```")
+        .await;
     let before = f.notices().await;
     let changed = input(
         &ENVELOPE.replace("요청 본문", "다른 본문"),
@@ -660,7 +670,8 @@ async fn imessage_owner_busy_start_echoes_one_input_notice_line_pg() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "accepted");
-    f.one("-# ⌨️ 시험: 요청 본문").await;
+    f.one("-# ⌨️ tui direct input\n```\n시험: 요청 본문\n```")
+        .await;
     drop(pane);
     f.close().await;
 }
@@ -704,7 +715,8 @@ async fn imessage_legacy_race_replay_after_preparation_refusal_enqueues_nothing_
     );
     assert_eq!(f.backend.load(Ordering::SeqCst), 1);
     assert_eq!(f.enqueue.load(Ordering::SeqCst), 1);
-    f.one("-# ⌨️ 시험: 요청 본문").await;
+    f.one("-# ⌨️ tui direct input\n```\n시험: 요청 본문\n```")
+        .await;
     f.close().await;
 }
 
@@ -740,7 +752,8 @@ async fn imessage_deliver_concurrent_origin_has_one_backend_and_enqueue_pg() {
         assert_eq!(f.call("turn/deliver", &request, obligations).await, winner);
         assert_eq!(f.backend.load(Ordering::SeqCst), 1);
         assert_eq!(f.enqueue.load(Ordering::SeqCst), 1);
-        f.one("-# ⌨️ 시험: 요청 본문").await;
+        f.one("-# ⌨️ tui direct input\n```\n시험: 요청 본문\n```")
+            .await;
         f.close().await;
     }
 }

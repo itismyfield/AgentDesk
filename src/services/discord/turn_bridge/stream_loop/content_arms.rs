@@ -269,6 +269,9 @@ pub(super) async fn handle_stream_content_message(
                         } => {
                             if let Some(ref sid) = sid { crate::services::provider::session_prompt::observe(ctx.cancel_token, sid); }
                             let session_died_retry = result == "__session_died_retry__";
+                            if !session_died_retry && !ctx.herdr_aborted {
+                                inflight_state.routine_presentation.observe_terminal(&result);
+                            }
                             if !session_died_retry { ctx.cancel_token.native_stop.completed(); }
                             if session_died_retry {
                                 // Recovery reader requests the generic Discord-history

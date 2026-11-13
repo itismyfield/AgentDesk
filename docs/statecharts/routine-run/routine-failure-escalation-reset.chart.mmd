@@ -1,0 +1,75 @@
+---
+title: "연속 실패 알림과 한 번의 복구 요청"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: accepted
+    lg1: normal
+    lg2: Breaks AllEligibleStreaksOffered or CounterMatchesHistory
+    lg3: Path to the AllEligibleStreaksOffered or CounterMatchesHistory bug
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  s0: 예약 실행 이력 대기
+  s1: 실패 누적
+  s2: N+1 복구 요청 저장됨
+  s3: 기존 outbox 전송 대기
+  s4: 명령봇 메시지 도착
+  s5: 허용 봇 입력 수용
+  s6: 실패 집계 불일치
+  s7: 복구 요청 결과 기록
+  s8: 추가 실패#183;알림만
+  s9: 새 묶음 요청 수 오류
+  s10: 성공#183;비실패로 카운터 초기화
+  [*] --> s0
+  s0 --> s1: 실패 알림만#183;턴 0
+  s1 --> s1: 실패 알림만#183;턴 0
+  s1 --> s2: N+1회#183;명령봇 복구 요청
+  s2 --> s3: 기존 outbox가 전송 시작
+  s2 --> s2: 실패 알림만#183;턴 0 or interrupted#183;카운터 유지
+  s3 --> s4: 명령봇으로 게시
+  s4 --> s5: 기존 Discord intake 통과
+  s2 --> s6: 성공 뒤 카운터를 잘못 유지
+  s5 --> s7: 기존 owner가 별도 복구 턴 시작
+  s3 --> s6: 성공 뒤 카운터를 잘못 유지
+  s6 --> s6: 실패 알림만#183;턴 0
+  s7 --> s1: 전송 결과 종결
+  s4 --> s6: 성공 뒤 카운터를 잘못 유지
+  s1 --> s8: 실패 알림만#183;턴 0
+  s7 --> s8: 전송 결과 종결
+  s5 --> s6: 성공 뒤 카운터를 잘못 유지
+  s7 --> s6: 성공 뒤 카운터를 잘못 유지
+  s6 --> s2: 비실패 terminal#183;카운터 0
+  s8 --> s6: 성공 뒤 카운터를 잘못 유지
+  s6 --> s3: 비실패 terminal#183;카운터 0
+  s6 --> s4: 비실패 terminal#183;카운터 0
+  s2 --> s9: 비실패 terminal#183;카운터 0
+  s6 --> s5: 비실패 terminal#183;카운터 0
+  s3 --> s9: 비실패 terminal#183;카운터 0
+  s6 --> s7: 비실패 terminal#183;카운터 0
+  s4 --> s9: 비실패 terminal#183;카운터 0
+  s6 --> s10: 비실패 terminal#183;카운터 0
+  s7 --> s10: 전송 결과 종결
+  s5 --> s9: 비실패 terminal#183;카운터 0
+  s10 --> s1: 실패 알림만#183;턴 0
+  s7 --> s9: 비실패 terminal#183;카운터 0
+  s1 --> s9: 비실패 terminal#183;카운터 0
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s4 blue
+  class s5 teal
+  class s6 breaks
+  class s6 bugPath
+  class s7 blue
+  class s8 blue
+  class s9 breaks
+  class s9 bugPath
+  class s10 blue

@@ -1,0 +1,8 @@
+---
+title: "정확한 시도의 비공개 증거와 분류"
+---
+stateDiagram-v2
+  s0: 기존 보류 row
+  s1: 기존 보류 notice 복원 완료
+  [*] --> s0
+  s0 --> s1: proof 없이 기존 notice 복원
