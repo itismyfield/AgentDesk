@@ -179,6 +179,29 @@ run_rollback
 if [[ "$OUT" == *"stub bootout error=5"* ]]; then pass "bootout diagnostics remain visible"; else fail "bootout diagnostics were swallowed: $OUT"; fi
 assert_event "failed bootout still waits for observed stop" '^launchctl bootstrap .* at=2$'
 
+echo "a child floor created after the first guard check refuses the swap after the stop"
+# First call is the guard before the stop, the second the one before the swap.
+_rollback_would_revert_o_child_store() {
+    printf x >>"$TMP_ROOT/child_checks"
+    [ "$(wc -c <"$TMP_ROOT/child_checks")" -ge 2 ]
+}
+setup_case
+: >"$TMP_ROOT/child_checks"
+JOB_EXIT_AT=3 PID_EXIT_AT=5
+run_rollback
+assert_eq "the floor is judged before the stop and again before the swap" 2 "$(wc -c <"$TMP_ROOT/child_checks" | tr -d ' ')"
+assert_eq "the new binary stays in place" new "$(cat "$REL_BINARY")"
+assert_eq "the rollback backup is preserved" old "$(cat "$REL_BINARY_BACKUP")"
+assert_event "the stop still completed before the recheck" '^launchctl bootout gui/501/com.agentdesk.test at=0$'
+assert_event "the new binary is restarted" '^launchctl bootstrap .* at=5$'
+assert_event "the restart is health-checked" '^health at='
+if [[ "$OUT" == *"ROLLBACK REFUSED"*"child store floor"* && "$OUT" != *"Rollback succeeded"* ]]; then
+    pass "the refusal is visible and no rollback success is claimed"
+else
+    fail "refusal output: $OUT"
+fi
+_rollback_would_revert_o_child_store() { return 1; }
+
 echo "the main stop branch narrows every lock-derived signal"
 for command in "/usr/bin/python3 unrelated.py" "/bin/bash -c $REL_BINARY dcserver" \
     "$REL_BINARY codex-tmux-wrapper dcserver" "$REL_BINARY dcserver-extra" \
