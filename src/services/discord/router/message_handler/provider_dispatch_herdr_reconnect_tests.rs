@@ -435,91 +435,162 @@ fn awaiting_clear_after_real_readiness_restart_sends_once_and_preserves_old_curs
     );
 }
 
-#[test]
-fn awaiting_clear_revalidates_nonce_pending_and_authenticated_proof_before_any_retirement_pg() {
+fn assert_invalid_clear_adoption(invalid: &str, public_ready: bool) {
     use crate::services::claude_tui::readiness;
     use crate::services::tui_prompt_dedupe::binding_context::observe_spawn_nonce_marker;
-    for invalid in [
-        "fake-proof",
-        "nonce",
-        "pending",
-        "missing-proof",
-        "consumed",
-        "newer-start",
-    ] {
-        let fx = Fixture::new(&format!("clear-refused-{invalid}"), None);
-        let launcher = Arc::new(Launcher::default());
-        let (nonce, _) = launch(&fx, &launcher);
-        let cleared = uuid();
-        let path = clear_pending(&fx, &cleared);
-        let previous =
-            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
-        let certified = PathBuf::from(crate::services::tmux_common::session_temp_path(
-            fx.logical(),
-            "claude_clear_ready",
-        ));
-        assert!(
-            certified.is_file(),
-            "actual hook persisted clear certification"
-        );
-        match invalid {
-            "nonce" => std::fs::write(
-                crate::services::tmux_common::session_temp_path(fx.logical(), "spawn_nonce"),
-                uuid::Uuid::new_v4().simple().to_string(),
-            )
-            .unwrap(),
-            "pending" => forge(0, |event| event["cause"] = json!("unknown")),
-            "missing-proof" => std::fs::remove_file(&certified).unwrap(),
-            "newer-start" => {
-                let proof: Value =
-                    serde_json::from_slice(&std::fs::read(&certified).unwrap()).unwrap();
-                let published: chrono::DateTime<chrono::Utc> =
-                    serde_json::from_value(proof["published"].clone()).unwrap();
-                readiness::tests::restore_bound_start(
-                    fx.logical(),
-                    published + chrono::Duration::nanoseconds(1),
-                );
-            }
-            "fake-proof" | "consumed" => {
-                let mut value: Value =
-                    serde_json::from_slice(&std::fs::read(&certified).unwrap()).unwrap();
-                if invalid == "fake-proof" {
-                    value["pending"]["seq"] = json!(u64::MAX);
-                } else {
-                    value["consumed"] = json!(true);
-                    readiness::tests::forget_session(fx.logical());
-                }
-                std::fs::write(&certified, serde_json::to_vec(&value).unwrap()).unwrap();
-            }
-            _ => panic!("unexpected invalid fixture"),
-        }
-        assert!(
-            !readiness::adopt_awaiting_clear(fx.logical(), &nonce, &path),
-            "{invalid}"
-        );
-        assert_eq!(
-            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical()),
-            previous,
-            "{invalid}: retirement count is zero"
-        );
-        assert!(
-            readiness::observe(fx.logical(), Some(&path)).is_none(),
-            "{invalid}: Held"
-        );
-        if invalid == "nonce" {
-            assert_ne!(
-                observe_spawn_nonce_marker(fx.logical()),
-                crate::services::tui_prompt_dedupe::binding_context::SpawnNonceMarker::Known(nonce)
-            );
-        } else {
-            assert!(cleared_turn(&fx, &launcher, &cleared, &path).is_err());
-            assert_eq!(
-                fx.rig.sends().len(),
-                2,
-                "{invalid}: no new payload callback"
+    use crate::services::tui_prompt_dedupe::binding_events::{self, BindingTarget};
+
+    let fx = Fixture::new(&format!("clear-refused-{invalid}"), None);
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, _) = launch(&fx, &launcher);
+    let cleared = uuid();
+    let path = clear_pending(&fx, &cleared);
+    let previous =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
+    let replacements = || {
+        binding_events::records_strict(CHANNEL)
+            .expect("durable binding history is readable")
+            .expect("durable binding history is complete")
+            .into_iter()
+            .filter(|event| {
+                event.tmux_session == fx.logical()
+                    && matches!(
+                        &event.new,
+                        BindingTarget::Source(_) | BindingTarget::Resolved { .. }
+                    )
+            })
+            .collect::<Vec<_>>()
+    };
+    let previous_replacements = replacements();
+    let previous_sends = fx.rig.sends();
+    assert_eq!(previous_sends.len(), 2, "the launched turn submitted once");
+    assert!(
+        readiness::observe(fx.logical(), Some(&path)).is_some(),
+        "the authentic clear has current public readiness before {invalid}"
+    );
+    let certified = PathBuf::from(crate::services::tmux_common::session_temp_path(
+        fx.logical(),
+        "claude_clear_ready",
+    ));
+    assert!(
+        certified.is_file(),
+        "actual hook persisted clear certification"
+    );
+    match invalid {
+        "nonce" => std::fs::write(
+            crate::services::tmux_common::session_temp_path(fx.logical(), "spawn_nonce"),
+            uuid::Uuid::new_v4().simple().to_string(),
+        )
+        .unwrap(),
+        "pending" => forge(0, |event| event["cause"] = json!("unknown")),
+        "missing-proof" => std::fs::remove_file(&certified).unwrap(),
+        "newer-start" => {
+            let proof: Value = serde_json::from_slice(&std::fs::read(&certified).unwrap()).unwrap();
+            let published: chrono::DateTime<chrono::Utc> =
+                serde_json::from_value(proof["published"].clone()).unwrap();
+            readiness::tests::restore_bound_start(
+                fx.logical(),
+                published + chrono::Duration::nanoseconds(1),
             );
         }
+        "fake-proof" | "consumed" => {
+            let mut value: Value =
+                serde_json::from_slice(&std::fs::read(&certified).unwrap()).unwrap();
+            if invalid == "fake-proof" {
+                value["pending"]["seq"] = json!(u64::MAX);
+            } else {
+                value["consumed"] = json!(true);
+                readiness::tests::forget_session(fx.logical());
+            }
+            std::fs::write(&certified, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        _ => panic!("unexpected invalid fixture"),
     }
+    assert!(
+        !readiness::adopt_awaiting_clear(fx.logical(), &nonce, &path),
+        "{invalid}"
+    );
+    assert_eq!(
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical()),
+        previous,
+        "{invalid}: adoption preserves the old binding"
+    );
+    assert_eq!(
+        replacements(),
+        previous_replacements,
+        "{invalid}: adoption appends no durable source replacement"
+    );
+    assert_eq!(
+        readiness::observe(fx.logical(), Some(&path)).is_some(),
+        public_ready,
+        "{invalid}: public readiness and retirement certification are distinct"
+    );
+    if invalid == "nonce" {
+        assert_ne!(
+            observe_spawn_nonce_marker(fx.logical()),
+            crate::services::tui_prompt_dedupe::binding_context::SpawnNonceMarker::Known(nonce)
+        );
+    }
+    let result = cleared_turn(&fx, &launcher, &cleared, &path);
+    assert!(
+        result.is_err(),
+        "{invalid}: the actual driver refuses: {result:?}"
+    );
+    assert_eq!(
+        fx.rig.sends(),
+        previous_sends,
+        "{invalid}: the actual driver adds no paste or Enter"
+    );
+    assert_eq!(
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical()),
+        previous,
+        "{invalid}: the actual driver preserves the old binding"
+    );
+    assert_eq!(
+        replacements(),
+        previous_replacements,
+        "{invalid}: the actual driver appends no durable source replacement"
+    );
+    assert_eq!(
+        fx.row(),
+        Some(HostedState::Bound),
+        "{invalid}: no retirement"
+    );
+    assert_eq!(
+        launcher.creates.load(Ordering::SeqCst),
+        1,
+        "{invalid}: no replacement execution was launched"
+    );
+}
+
+#[test]
+fn awaiting_clear_rejects_a_forged_certificate_with_current_public_readiness_pg() {
+    assert_invalid_clear_adoption("fake-proof", true);
+}
+
+#[test]
+fn awaiting_clear_rejects_a_changed_nonce_before_any_retirement_pg() {
+    assert_invalid_clear_adoption("nonce", false);
+}
+
+#[test]
+fn awaiting_clear_rejects_a_changed_pending_before_any_retirement_pg() {
+    assert_invalid_clear_adoption("pending", false);
+}
+
+#[test]
+fn awaiting_clear_rejects_a_missing_certificate_with_current_public_readiness_pg() {
+    assert_invalid_clear_adoption("missing-proof", true);
+}
+
+#[test]
+fn awaiting_clear_rejects_a_consumed_certificate_without_volatile_start_pg() {
+    assert_invalid_clear_adoption("consumed", false);
+}
+
+#[test]
+fn awaiting_clear_rejects_an_older_clear_after_a_newer_bound_start_pg() {
+    assert_invalid_clear_adoption("newer-start", false);
 }
 
 #[test]
