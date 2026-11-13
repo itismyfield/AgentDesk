@@ -3,6 +3,8 @@
    the owner queue, then one drive task prepares it (Empty -> direct, readable draft -> C-s,
    modal or unreadable -> Held), keys it (C-s, paste, Enter) and settles it.
    Landed code: origin/main 0a9b3f99cf. Unlanded 4f design: design-4f-r1 (+ carry P1).
+   Readiness refinement: ReadinessSpec expands the formerly opaque pre-key ready check
+   into transcript Idle, scoped Stop wakes and SessionStart; legacy specs stay frozen.
    Input ids are 1..N. 0 stands for the human's own draft in the composer.            *)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -347,15 +349,20 @@ BaseNext ==
 VARIABLES biReceived, biHeld, biAccepted, biVisible, biPermanent, biCheckpoint,
           biExecutions, biWriter, biWake, biRestarts, biHalts, biOrigin, biOwner,
           biProviderMatch, biPayload
-bootIngressVars == <<biReceived,biHeld,biAccepted,biVisible,biPermanent,biCheckpoint,
+legacyBootIngressVars == <<biReceived,biHeld,biAccepted,biVisible,biPermanent,biCheckpoint,
                     biExecutions,biWriter,biWake,biRestarts,biHalts,biOrigin,biOwner,
                     biProviderMatch,biPayload>>
+\* A concrete readiness boundary shared by ordinary and first Herdr input design.
+VARIABLE inputReadiness
+Readiness == INSTANCE ClaudeReadiness WITH N <- N, Mode <- Mut, r <- inputReadiness
+bootIngressVars == <<legacyBootIngressVars, inputReadiness>>
 biMode == Mut \in {"boot-current", "boot-design", "boot-no-ready-wake", "boot-checkpoint-early"}
 biFixed == Mut # "boot-current"
 biLocal == biOwner = "local" /\ biProviderMatch
 biReady == biWriter = "ready" /\ biLocal
 biDone == {i \in Ids : biExecutions[i] > 0}
 BootIngressInit ==
+    /\ Readiness!Init
     /\ biOrigin \in (IF biMode THEN {"live", "queued", "claimed"} ELSE {"live"})
     /\ biOwner \in (IF biMode THEN {"local", "remote", "lost"} ELSE {"local"})
     /\ biProviderMatch \in (IF biMode THEN BOOLEAN ELSE {TRUE})
@@ -478,20 +485,42 @@ BootExecute(i) ==
                    biWriter,biWake,biRestarts,biHalts,biOrigin,biOwner,
                    biProviderMatch,biPayload,vars>>
 BootRest == UNCHANGED <<bootIngressVars,vars>>
-BootNext == BootGatewayTransient \/ BootGatewayReady \/ BootPermanentReject \/
+LegacyBootNext == BootGatewayTransient \/ BootGatewayReady \/ BootPermanentReject \/
             BootCatchUp \/ BootGatewayRedelivery \/ BootBeginResume \/ BootReady \/
             BootHalt \/ BootRefreshHost \/ BootProcessRestart \/
             (\E i \in Ids : BootExecute(i)) \/ BootRest
+BootNext == LegacyBootNext /\ UNCHANGED inputReadiness
 BootSpec == Init /\ [][BootNext]_<<vars,bootIngressVars>>
-            /\ WF_<<vars,bootIngressVars>>(BootBeginResume)
-            /\ WF_<<vars,bootIngressVars>>(BootReady)
-            /\ WF_<<vars,bootIngressVars>>(BootRefreshHost)
-            /\ (\A i \in Ids : WF_<<vars,bootIngressVars>>(BootExecute(i)))
+            /\ WF_<<vars,legacyBootIngressVars>>(BootBeginResume)
+            /\ WF_<<vars,legacyBootIngressVars>>(BootReady)
+            /\ WF_<<vars,legacyBootIngressVars>>(BootRefreshHost)
+            /\ (\A i \in Ids : WF_<<vars,legacyBootIngressVars>>(BootExecute(i)))
 BootNoSilentLoss == biReceived \subseteq biHeld \cup biDone \cup biVisible
 BootNoDuplicate == \A i \in Ids : biExecutions[i] <= 1
 BootCheckpointBacked == biCheckpoint \subseteq biAccepted \cup biDone
 BootPermanentNeverExecutes == \A i \in biPermanent : biExecutions[i] = 0
 BootPayloadIntact == \A i \in biAccepted : biPayload[i] = "original"
 BootHeldEventuallyExecutes == \A i \in Ids : (i \in biHeld /\ biReady) ~> (i \in biDone)
+
+\* Readiness-only refinement holds the older custody/lifecycle state fixed.
+ReadinessNext == Readiness!Next /\ UNCHANGED <<vars, legacyBootIngressVars>>
+ReadinessSpec == Init /\ [][ReadinessNext]_<<vars, bootIngressVars>> /\ Readiness!Fairness
+ReadyNoModalOpenWake == Readiness!NoModalOpenWake
+ReadyModalCloseEventuallySends == Readiness!ModalCloseEventuallySends
+ReadyTypeOK == Readiness!TypeOK
+ReadyNoDuplicate == Readiness!NoDuplicate
+ReadyNoSilentLoss == Readiness!NoSilentLoss
+ReadyNoIdleRunningInjection == Readiness!NoIdleRunningInjection
+ReadyNoHumanDraftExecution == Readiness!NoHumanDraftExecution
+ReadyNoEarlyInput == Readiness!NoEarlyInput
+ReadyNoClearAuthorityViolation == Readiness!NoClearAuthorityViolation
+ReadyClearHeldEventuallySends == Readiness!ClearHeldEventuallySends
+ReadyCompactAfterStopIdle == Readiness!CompactAfterStopIdle
+ReadyPendingEventuallyExecutes == Readiness!PendingEventuallyExecutes
+ReadyCompactEventuallyExecutes == Readiness!CompactEventuallyExecutes
+ReadySelfCompactEventuallyReleases == Readiness!SelfCompactEventuallyReleases
+ReadyNoContinuationEarlyInput == Readiness!NoContinuationEarlyInput
+ReadyBusyKeyPlanPreserved == Readiness!BusyKeyPlanPreserved
+ReadyBusyEventuallyQueues == Readiness!BusyEventuallyQueues
 
 =============================================================================
