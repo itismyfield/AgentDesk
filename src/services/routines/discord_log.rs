@@ -183,6 +183,13 @@ impl RoutineDiscordLogger {
     ) -> RoutineDiscordLogStatus {
         let message = stale_paused_message(routine, paused_for_secs);
         let session_key = stale_paused_session_key(&routine.id);
+        // A headless routine never owns a thread; its stall goes to the agent's primary channel.
+        if let Some(status) = self
+            .log_headless_stale_to_primary(store, routine, &session_key, &message, dedupe_ttl_secs)
+            .await
+        {
+            return status;
+        }
 
         if routine
             .discord_thread_id

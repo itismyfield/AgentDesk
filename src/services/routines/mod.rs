@@ -51,6 +51,8 @@ pub(crate) fn fresh_context_guaranteed(
 #[cfg(test)]
 mod execution_mode_pg_tests;
 #[cfg(test)]
+mod failure_escalation_pg_tests;
+#[cfg(test)]
 mod reliability_pg_tests;
 
 #[cfg(test)]

@@ -3810,12 +3810,14 @@ src/
 │   │   │   └── formatting.rs
 │   │   ├── store/
 │   │   │   ├── agent_start.rs
-│   │   │   └── execution_modes.rs
+│   │   │   ├── execution_modes.rs
+│   │   │   └── failure_escalation.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
 │   │   ├── execution_mode.rs
 │   │   ├── execution_mode_pg_tests.rs
+│   │   ├── failure_escalation_pg_tests.rs
 │   │   ├── fresh_session_reaper.rs
 │   │   ├── legacy_body_census.rs
 │   │   ├── legacy_body_census_tests.rs

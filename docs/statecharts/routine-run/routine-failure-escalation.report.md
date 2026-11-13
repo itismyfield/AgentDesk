@@ -97,3 +97,20 @@ export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew
 [기본 N3](routine-failure-escalation.chart.mmd)·[Unknown](routine-failure-escalation-unknown.chart.mmd)·[일반 알림 오동작](routine-failure-escalation-notify.chart.mmd)·[경계 오류](routine-failure-escalation-boundary.chart.mmd)·[중복 요청](routine-failure-escalation-duplicate.chart.mmd)·[reset 누락](routine-failure-escalation-reset.chart.mmd)·[Unknown 재게시](routine-failure-escalation-blind-unknown.chart.mmd)·[사건 키 제거](routine-failure-escalation-event-key.chart.mmd)·[intake 우회](routine-failure-escalation-intake-gate.chart.mmd).
 
 최종 escalation 모델 SHA256 `90af6e1d8903701c869f1aad2dcf71069405b6583fd33c317425eaee96cc7f22`.
+
+## H1 구현 좌표 (PR2b 1조각)
+
+모델 source(SHA256 `90af6e1d…`)와 12cfg는 바꾸지 않았다. PR2 A head `850ca459`에서 다시 실행한 결과도 5 GREEN·7 기대 RED로 같다. 아래는 모델 action과 구현 좌표의 대응이다. 전송 계층(Unknown 보존·nonce/ACK·held activation 제외)은 H2 몫이다.
+
+| 모델 action / 불변식 | 구현 좌표 | 상태 |
+|---|---|---|
+| RecordRun: terminal failed → count·firstFailed | `src/services/routines/store.rs` close_run 의 `reserve_headless_failure_event` 호출(실패 run 저장과 같은 트랜잭션), streak SQL `store/failure_escalation.rs` `reserve_headless_failure_event` | H1 |
+| reset: nonfailed terminal, interrupted 중립 | 같은 SQL의 `NOT EXISTS` 경계(`status NOT IN ('running','interrupted','failed')`) | H1 |
+| TriggerOnlyAtNPlusOne / notify 1..N / N+1 초과 notify | `headless_failure_event` | H1 |
+| N pin | streak 첫 failed run 의 `run_spec.headless_failure_notice_limit` | H1 |
+| UnseenIncident(first) 사건 키 | `routine:{id}:failure_incident:{first_failed}` persistent dedupe, N+1 초과는 `after_incident:{first_failed}` 24h TTL | H1 |
+| RelogRun | close_run 은 running run 만 닫는다(두 번째 close 는 false). 로거 재진입(`log_run_outcome`·`alert_consecutive_failures`)은 headless 에서 아무것도 넣지 않는다 | H1 |
+| OrdinaryNotifyDoesNotStart | `routine_headless_failure` 를 actionable/non-turn 목록에 등록(`domain/outbound/outbox/identity.rs`), `routine_failure_incident` 는 두 목록 모두 제외 | H1 |
+| LoadOutbox / PostOutbox / ExistingBotIntake | 기존 outbox worker → Announce → intake, 대상 `agent:<id>`(primary) | 기존 경로 |
+| NoBlindUnknownRepost / NoDuplicateDiscordMessage / completion_unconfirmed | 미구현 — 현재 generic outbox 는 Unknown 을 retry 할 수 있다 | **H2** |
+| headless 모드 노출 | `execution_mode.rs` `is_available` 이 아직 false 라 headless run 을 API로 만들 수 없다 | 휴면 |

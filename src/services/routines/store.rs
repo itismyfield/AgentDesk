@@ -1,7 +1,9 @@
 use anyhow::{Result, anyhow};
 mod agent_start;
 mod execution_modes;
+mod failure_escalation;
 use chrono::{DateTime, Utc};
+pub(crate) use failure_escalation::{FAILURE_INCIDENT_REASON_CODE, HEADLESS_FAILURE_REASON_CODE};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -3438,6 +3440,10 @@ impl RoutineStore {
 
         if run_updated.rows_affected() != 1 {
             return Err(anyhow!("close run {run_id}: running run guard lost row"));
+        }
+        if run_status == "failed" {
+            Self::reserve_headless_failure_event(&mut tx, &routine_id, run_id, close.pause_routine)
+                .await?;
         }
 
         tx.commit().await?;
