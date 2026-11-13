@@ -28,44 +28,43 @@ relevant 99, sha256 약 300, pane_liveness 314+207, legacy-body-census-writer 73
 
 ## 0단계: 코드 진입점 전수표
 
-아래 좌표는 모두 기준 SHA이다. `src/services/tui_o/`를 `O/`,
-`src/services/tui_input/human_frame/`를 `H/`로 줄였다. `writer/actor/notice_owner*`에는
-시험만 있으며 production 소유권 구현은 `H/history/notice_owner.rs`이다.
+아래 좌표는 모두 기준 SHA이다. `writer/actor/notice_owner*`에는
+시험만 있으며 production 소유권 구현은 `src/services/tui_input/human_frame/history/notice_owner.rs`이다.
 검색 원문은 외부 보고서의 `notice-entrypoints.txt`, `lifecycle-entrypoints.txt`에 있다.
 
 | 역할/진입점 | file:line | 읽거나 만드는 값·범위 / 경계 |
 |---|---|---|
-| Discord idle/turn 입력 프레임 | `src/services/discord/router/response_format.rs:161`; `H/../human_frame.rs:97`, `:109` | 일반 `[User: name (ID: digits)]`; idle과 plain inject가 같은 가시 bytes 사용 |
+| Discord idle/turn 입력 프레임 | `src/services/discord/router/response_format.rs:161`; `src/services/tui_input/human_frame.rs:97`, `:109` | 일반 `[User: name (ID: digits)]`; idle과 plain inject가 같은 가시 bytes 사용 |
 | created execution의 첫 prompt 제출 | `src/services/claude_tui/hosting/fresh_lifecycle.rs:175`; `src/services/discord/health/turn_deliver/inject/first_input.rs:35`, `:49`, `:164` | prepare_history → owner permit consume → with_attempt 안에서 physical submit; native JSONL user row는 provider가 기록 |
 | owner 등록/재시작 동기화 | `src/services/turn_orchestrator/queued_head/v2/sources.rs:158`, `:214` | active/retained input을 Registry::prepare/project로 연결; restored registration도 같은 native attribution에 도달 |
-| busy 주입 등록·영수증 collector | `src/services/claude_tui/busy_inject.rs:596`, `:644`; `H/history/v2.rs:566` | enqueue 영수증과 native user/command UUID 영수증은 구별됨 |
-| durable 등록 생성/PreSource 해소/수동 이관 | `H/history/v2.rs:354`, `:395`, `:434` | namespace+전체 key, source target/provider/session/path/dev/ino/offset; live/planned/passive, abandoned 제외 |
+| busy 주입 등록·영수증 collector | `src/services/claude_tui/busy_inject.rs:596`, `:644`; `src/services/tui_input/human_frame/history/v2.rs:566` | enqueue 영수증과 native user/command UUID 영수증은 구별됨 |
+| durable 등록 생성/PreSource 해소/수동 이관 | `src/services/tui_input/human_frame/history/v2.rs:354`, `:395`, `:434` | namespace+전체 key, source target/provider/session/path/dev/ino/offset; live/planned/passive, abandoned 제외 |
 | 예약 입력 | `src/services/scheduled_messages/owner_input.rs:196`, `:206`, `:211`, `:297` | owner original과 `origin=scheduled`, source metadata; metadata만으로 native row 소유권을 추정하지 않음 |
 | slash/기계 입력 정책 | `src/services/discord/tui_prompt_relay.rs:50`; `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs:89`, `:141` | human-active/local-only 판정; bare slash 문자열과 machine envelope를 구분 |
-| capture/replay의 projection 연결 | `O/writer/rotation/owe.rs:103`, `:116`; `O/writer/pieces.rs:109`, `:115` | complete CapturedRecord start/end/line → project_record; notice feature는 Claude+transcript turn 채널만 |
-| origin 생성 | `O/writer/rotation/owe.rs:125`, `:145` | source의 최초 정확한 attachment 또는 rotation link; logical_session/binding_seq/nonce. 현재 실행 nonce와 같다는 보장 없음 |
-| 새 record 분류·identity seal | `O/writer/input_notices.rs:61`, `:73`, `:112`, `:145`, `:165` | Discord/비인간은 None; Known은 None, Pending/원본 부족은 Err; UnitKey=(channel,Claude,UUID,InputNotice) |
-| evidence 생성/회수 | `O/writer/input_notices/evidence.rs:8`, `:17`, `:44`, `:57` | project가 Ok(None)이 아니면 raw+선택 prompt/digest/key/payload/origin 보존; origin/key 없는 record도 가능 |
-| migration floor | `O/writer/input_notices/evidence.rs:64` | frozen source lower/시간/기존 binding checkpoint; 새 TTL이 아님 |
-| 최초 boot freeze | `O/writer/actor/notice_work.rs:61`, `:129`; `O/writer/actor.rs:361` | resume capture 전 finite source/history cohort, binding checkpoint와 freeze 시각 |
-| materialize append | `O/writer/actor/notice_work.rs:169`, `:200`, `:204` | 기존 payload canonical 유지, covers면 재append 없음 |
-| evidence validate/merge | `O/store/ledger/input_notices.rs:106`, `:166`, `:189`, `:217` | source/start/end/raw 일치, optional 단조 보강; complete는 prompt/digest/key/payload/origin 모두 Some |
-| ledger append/replay | `O/store/mod.rs:483`; `O/store/ledger.rs:447`, `:794`, `:839` | append 후 apply; complete unknown JSON variant는 damage 오류, truncate 대상 아님 |
-| notice format floor/handover | `O/store/input_notice_floor.rs:13`, `:43`; `O/writer/input_notices.rs:39` | `input_notice.floor=1`, migration_started durable 확인 뒤 relay→writer handover |
-| startup/incarnation deriver | `O/writer/actor/fresh_resume.rs:24`, `:135` | rescope는 Codex만; Claude notice 만료 신호로 사용 불가. rebuild가 ledger를 지우지 않음 |
-| boot/주기 재진입 | `O/writer/actor.rs:393`, `:400`, `:449`, `:876`, `:903` | 한 actor loop에 prepare 두 번; follow/capture/tend 뒤 새 evidence persist |
-| pending 열거·origin 재시도 | `O/writer/actor/notice_work.rs:238`, `:256`, `:268` | Posted/Excluded 외 전부 clone; 미완성은 binding log 재조회 |
-| Batch owner snapshot | `H/history/notice_owner.rs:67`, `:80`, `:100`, `:132` | history 읽기, source별 census, origin별 후보; stable history/context/native fingerprint 재확인 |
-| candidate/blocked 생성 | `H/history/notice_owner.rs:176`, `:225`, `:264`, `:309` | source/owner/nonce/context 불일치 → hash별 registration_source_mismatch; unbound → unbound_pre_source |
-| native attribution | `H/history/notice_owner.rs:362`, `:407` | 정확 UUID receipt 우선; native 순서로 unused 등록 하나 소비; 같은 hash의 blocked 후보는 Unowned를 허용하지 않음 |
-| 최종 owner 판정 | `H/history/notice_owner.rs:132` | Owned / Unowned / Pending(reason). reason은 증거 상태가 아닌 진단 사유 |
-| admission/exclude | `O/writer/input_notices/admission.rs:25`, `:45`, `:72`, `:79`, `:242` | 현재 source 불필요 판정도 complete origin과 tmux authority 뒤에 있음; Excluded는 UnitKey 필요 |
-| actor 재준비/사유 로그 | `O/writer/actor/notice_work.rs:295`, `:328`, `:411` | migration_unresolved/incomplete/authority_busy/ownership reason; reason 교대 시 다시 info |
-| legacy migration 소비 | `O/writer/input_notices/migration.rs:98`, `:116`, `:126`, `:194`, `:207` | 모든 evidence를 읽음; 불확실 기존 메시지는 MigrationUnresolved 및 후보 ID 예약으로 보존 |
-| durable state의 이관 소비 | `O/store/ledger/input_notices.rs:246`, `:284`; `O/store/ledger.rs:449` | Imported→Excluded, unresolved는 감사 부채; 새로운 proof 없는 무조건 청소 불가 |
-| 실제 게시/재시도/확인 | `O/writer/deliver.rs:589`, `:621`, `:850`; `O/writer/local_retry/notice_selection.rs:12` | Prepared/Posted/NotFound/Ambiguous; unresolved POST와 local retry는 만료로 대체 불가 |
-| debt/retention/queued 소비 | `O/writer/actor/notice_work.rs:390`, `:434`, `:457`; `O/writer/actor.rs:729`, `:835` | debt count와 raw-independent/notice-only 판정 모두 새 terminal을 보아야 함 |
-| memory reset/로그 수명 | `O/writer/deliver.rs:204`, `:265`; `O/writer/actor/notice_work.rs:267`, `:330`, `:353` | 기준 main의 HashMap<RecordId,String>은 restart와 eligible 전환에 지워짐; 새 구현은 nonterminal 동안 유지 |
+| capture/replay의 projection 연결 | `src/services/tui_o/writer/rotation/owe.rs:103`, `:116`; `src/services/tui_o/writer/pieces.rs:109`, `:115` | complete CapturedRecord start/end/line → project_record; notice feature는 Claude+transcript turn 채널만 |
+| origin 생성 | `src/services/tui_o/writer/rotation/owe.rs:125`, `:145` | source의 최초 정확한 attachment 또는 rotation link; logical_session/binding_seq/nonce. 현재 실행 nonce와 같다는 보장 없음 |
+| 새 record 분류·identity seal | `src/services/tui_o/writer/input_notices.rs:61`, `:73`, `:112`, `:145`, `:165` | Discord/비인간은 None; Known은 None, Pending/원본 부족은 Err; UnitKey=(channel,Claude,UUID,InputNotice) |
+| evidence 생성/회수 | `src/services/tui_o/writer/input_notices/evidence.rs:8`, `:17`, `:44`, `:57` | project가 Ok(None)이 아니면 raw+선택 prompt/digest/key/payload/origin 보존; origin/key 없는 record도 가능 |
+| migration floor | `src/services/tui_o/writer/input_notices/evidence.rs:64` | frozen source lower/시간/기존 binding checkpoint; 새 TTL이 아님 |
+| 최초 boot freeze | `src/services/tui_o/writer/actor/notice_work.rs:61`, `:129`; `src/services/tui_o/writer/actor.rs:361` | resume capture 전 finite source/history cohort, binding checkpoint와 freeze 시각 |
+| materialize append | `src/services/tui_o/writer/actor/notice_work.rs:169`, `:200`, `:204` | 기존 payload canonical 유지, covers면 재append 없음 |
+| evidence validate/merge | `src/services/tui_o/store/ledger/input_notices.rs:106`, `:166`, `:189`, `:217` | source/start/end/raw 일치, optional 단조 보강; complete는 prompt/digest/key/payload/origin 모두 Some |
+| ledger append/replay | `src/services/tui_o/store/mod.rs:483`; `src/services/tui_o/store/ledger.rs:447`, `:794`, `:839` | append 후 apply; complete unknown JSON variant는 damage 오류, truncate 대상 아님 |
+| notice format floor/handover | `src/services/tui_o/store/input_notice_floor.rs:13`, `:43`; `src/services/tui_o/writer/input_notices.rs:39` | `input_notice.floor=1`, migration_started durable 확인 뒤 relay→writer handover |
+| startup/incarnation deriver | `src/services/tui_o/writer/actor/fresh_resume.rs:24`, `:135` | rescope는 Codex만; Claude notice 만료 신호로 사용 불가. rebuild가 ledger를 지우지 않음 |
+| boot/주기 재진입 | `src/services/tui_o/writer/actor.rs:393`, `:400`, `:449`, `:876`, `:903` | 한 actor loop에 prepare 두 번; follow/capture/tend 뒤 새 evidence persist |
+| pending 열거·origin 재시도 | `src/services/tui_o/writer/actor/notice_work.rs:238`, `:256`, `:268` | Posted/Excluded 외 전부 clone; 미완성은 binding log 재조회 |
+| Batch owner snapshot | `src/services/tui_input/human_frame/history/notice_owner.rs:67`, `:80`, `:100`, `:132` | history 읽기, source별 census, origin별 후보; stable history/context/native fingerprint 재확인 |
+| candidate/blocked 생성 | `src/services/tui_input/human_frame/history/notice_owner.rs:176`, `:225`, `:264`, `:309` | source/owner/nonce/context 불일치 → hash별 registration_source_mismatch; unbound → unbound_pre_source |
+| native attribution | `src/services/tui_input/human_frame/history/notice_owner.rs:362`, `:407` | 정확 UUID receipt 우선; native 순서로 unused 등록 하나 소비; 같은 hash의 blocked 후보는 Unowned를 허용하지 않음 |
+| 최종 owner 판정 | `src/services/tui_input/human_frame/history/notice_owner.rs:132` | Owned / Unowned / Pending(reason). reason은 증거 상태가 아닌 진단 사유 |
+| admission/exclude | `src/services/tui_o/writer/input_notices/admission.rs:25`, `:45`, `:72`, `:79`, `:242` | 현재 source 불필요 판정도 complete origin과 tmux authority 뒤에 있음; Excluded는 UnitKey 필요 |
+| actor 재준비/사유 로그 | `src/services/tui_o/writer/actor/notice_work.rs:295`, `:328`, `:411` | migration_unresolved/incomplete/authority_busy/ownership reason; reason 교대 시 다시 info |
+| legacy migration 소비 | `src/services/tui_o/writer/input_notices/migration.rs:98`, `:116`, `:126`, `:194`, `:207` | 모든 evidence를 읽음; 불확실 기존 메시지는 MigrationUnresolved 및 후보 ID 예약으로 보존 |
+| durable state의 이관 소비 | `src/services/tui_o/store/ledger/input_notices.rs:246`, `:284`; `src/services/tui_o/store/ledger.rs:449` | Imported→Excluded, unresolved는 감사 부채; 새로운 proof 없는 무조건 청소 불가 |
+| 실제 게시/재시도/확인 | `src/services/tui_o/writer/deliver.rs:589`, `:621`, `:850`; `src/services/tui_o/writer/local_retry/notice_selection.rs:12` | Prepared/Posted/NotFound/Ambiguous; unresolved POST와 local retry는 만료로 대체 불가 |
+| debt/retention/queued 소비 | `src/services/tui_o/writer/actor/notice_work.rs:390`, `:434`, `:457`; `src/services/tui_o/writer/actor.rs:729`, `:835` | debt count와 raw-independent/notice-only 판정 모두 새 terminal을 보아야 함 |
+| memory reset/로그 수명 | `src/services/tui_o/writer/deliver.rs:204`, `:265`; `src/services/tui_o/writer/actor/notice_work.rs:267`, `:330`, `:353` | 기준 main의 HashMap<RecordId,String>은 restart와 eligible 전환에 지워짐; 새 구현은 nonterminal 동안 유지 |
 
 모델 값은 이 표에서만 추상화했다. RecordId는 `(SourceId,start,end)`, InputClass는
 native 귀속 증거의 owned/direct 또는 기존 renderer가 거부하는 policy, proof unknown은
@@ -138,7 +137,7 @@ settlement는 typed proof와 optional `expired_after`를 갖는다. None은 not_
 있으면 expired이며 Posted/기존 Excluded/LegacyImported는 그대로 terminal이다.
 proof는 unknown field를 거절하는 typed enum으로 원본 digest와 정책 종류 또는 정확한 native ownership 증거,
 그리고 expired인 경우 경계 seq/이전 source와 execution을 가진다. 단순 reason 문자열은 허용하지 않는다.
-`NoticeState`에 RecordId별 terminal map과 열린 record index를 재생한다. raw evidence는 삭제하지 않는다.
+`NoticeState`에 RecordId별 terminal map을 재생하고 열린 record는 같은 terminal 판정으로 계산한다. raw evidence는 삭제하지 않는다.
 키 있는 종결은 기존 Excluded 소비자에도 반영하되 하나의 ledger entry apply로 함께 바뀐다.
 키 없는 non-notice도 record terminal로 감사 가능하다. 같은 proof 재생은 멱등, 충돌은 violation이다.
 terminal 뒤 native key 보강은 같은 ledger apply에서 Excluded 인덱스에도 반영해 종결을 다시 열지 않는다.
@@ -262,7 +261,7 @@ legacy-body-census-writer의 독립 CPU는 이번 notice 정착만으로 해소�
 | 조각 | 파일 계획 | prod 순 코드 추정 |
 |---|---|---|
 | S1 durable terminal proof와 replay | ledger/input_notices.rs, 새 input_notices/settlement.rs, ledger.rs 연결 | +250 |
-| S2 원본/귀속 proof와 세션 경계 정착 | 새 history/notice_owner/settlement.rs, notice_owner.rs 연결, 새 actor/notice_settlement.rs, notice_work.rs 연결 | +400 |
+| S2 원본/귀속 proof와 세션 경계 정착 | 새 history/notice_owner/generation.rs, notice_owner.rs 연결, 새 actor/notice_settlement.rs, notice_work.rs 연결 | +400 |
 | S3 terminal 소비/로그/계측 | migration.rs, admission.rs, notice_work.rs, deliver.rs의 선언/연결 | +120 |
 | 시험 | 기존 input_notices/tests.rs와 notice_owner_tests.rs, 새 notice_settlement_tests.rs, notice_work_tests.rs | 테스트 +450~650 (prod cap 제외) |
 | 문서/공식 생성 목록 | 본 설계·상태 차트, 필요시 공식 sync | prod 제외 |
