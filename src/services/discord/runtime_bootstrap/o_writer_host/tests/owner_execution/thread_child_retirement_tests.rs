@@ -224,3 +224,83 @@ async fn thread_child_retired_before_a_restart_boots_with_no_writer_candidate_un
     assert_eq!(read, json!({"schema":1,"generation":4,"retired":false}));
     assert_eq!(candidate(child), Some(true));
 }
+
+#[tokio::test]
+async fn thread_child_writer_owing_output_refuses_retirement_and_keeps_writer_and_store_pg() {
+    if !cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::thread_child_writer_owing_output_refuses_retirement_and_keeps_writer_and_store_pg"
+    )) {
+        return;
+    }
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    use crate::services::tui_o::writer::actor::{Demand, Undelivered};
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (parent, child) = (73_369_651, 733_696_520_000_001_u64);
+    booted(root.path(), parent, child);
+    let (_registry, shared) = runtime(&pool, ProviderKind::Claude, parent, "gateway").await;
+    let state = discord_mock::DiscordMockState::new();
+    state.allow_channel(parent);
+    state.allow_channel(child);
+    let (proxy, gateway, _server) = discord_mock::start(state).await;
+    let context = discord_mock::serenity_context(proxy, gateway).await;
+    assert!(shared.http.cached_serenity_ctx.set(context).is_ok());
+    crate::services::tui_o::ownership::gate("claude").acquired();
+    super::super::super::super::owner_execution::prepare(&ProviderKind::Claude, Some(&pool)).await;
+    assert!(hosted(&shared, child).await);
+    let ready = host::process_readiness();
+    let writer = ready.hosted_by(child).unwrap();
+    let child_dir = root.path().join("o_store").join(child.to_string());
+    let mark = || std::fs::read(child_dir.join("child_lifecycle")).ok();
+    let children = host::ChildStores;
+
+    // The child's fresh owed read answers one unposted item for every ask after it.
+    let real = ready
+        .undelivered(child)
+        .expect("the child writer publishes what it owes");
+    let (owes, published) = tokio::sync::watch::channel(None::<Undelivered>);
+    let demand = Demand::default();
+    let asks = demand.clone();
+    let answering = tokio::spawn(async move {
+        loop {
+            if asks.wanted() {
+                let owed = Undelivered {
+                    owed: 1,
+                    asked: asks.asked(),
+                    ..Undelivered::default()
+                };
+                owes.send_replace(Some(owed));
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    ready.track_owed_for_test(child, host::OwedView { published, demand });
+    let pinned = children.pin(child).expect("an active hosted child pins");
+    let refused = children.retire(pinned, Box::pin(async { Ok(false) })).await;
+    answering.abort();
+    let reason = refused.expect_err("an unposted item refuses the retirement");
+    assert!(reason.contains("still owes output"), "{reason}");
+    assert_eq!((ready.hosted_by(child), mark()), (Some(writer), None));
+    let candidate = cutover::boot_ownership()
+        .into_iter()
+        .find(|(id, _, _)| *id == child)
+        .and_then(|(_, _, candidate)| candidate);
+    assert!(
+        candidate.is_some(),
+        "the refused store stays a writer candidate"
+    );
+
+    // With nothing owed the same request retires that writer generation.
+    ready.track_owed_for_test(child, real);
+    let pinned = children
+        .pin(child)
+        .expect("the refusal kept the child active");
+    let retired = children.retire(pinned, Box::pin(async { Ok(false) })).await;
+    assert!(retired.is_ok(), "{retired:?}");
+    assert_eq!(ready.hosted_by(child), None);
+    let read: Value = serde_json::from_slice(&mark().unwrap()).unwrap();
+    assert_eq!(read, json!({"schema":1,"generation":1,"retired":true}));
+    pool.close().await;
+}
