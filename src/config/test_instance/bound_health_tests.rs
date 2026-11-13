@@ -136,6 +136,14 @@ fn b2a_native_bound_health_child() {
         .build()
         .unwrap()
         .block_on(async move {
+            if let Some(registry) = registry.as_ref() {
+                registry
+                    .register_worker(
+                        "claude".into(),
+                        crate::services::discord::make_shared_data_for_tests(),
+                    )
+                    .await;
+            }
             let pool = crate::db::postgres::connect_and_migrate(&config)
                 .await
                 .expect("B1 keeper's private PostgreSQL")
