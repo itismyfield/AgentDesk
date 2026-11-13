@@ -584,7 +584,7 @@
     },
     "E-21": {
       "path": "tests/e2e/tui_relay/scenarios/E-21-direct-input-control-strip.yaml",
-      "sha256": "0c01a249a1b85026db6888e0ebc3533d0499b15dff179f1fc51955bb262dc1e9",
+      "sha256": "0a7f219cc07cdf814343412382c83baf38cad8a1273456e078feb6891c59dfc9",
       "coverage_class": "live",
       "cells": [
         "claude-tui",
@@ -715,7 +715,7 @@
     },
     "E-4": {
       "path": "tests/e2e/tui_relay/scenarios/E-4-direct-input-relay.yaml",
-      "sha256": "d8dec9ab6082cdc68672d6fd0aeffc6b334249df8dd1f9dcd8f1bf6380a9a39e",
+      "sha256": "f1202b837f85ccdeba575cae288abc5259635de4e15d217844a424620df8d661",
       "coverage_class": "live",
       "cells": [
         "claude-tui",
