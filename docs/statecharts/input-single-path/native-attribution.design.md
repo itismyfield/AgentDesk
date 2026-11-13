@@ -162,3 +162,7 @@ WARN은 `(ticket, episode, source incarnation)`에 대해 native idle 관측이 
 ## A 구현 계약 보강
 
 결과 CAS는 follower의 None을 허용한다. owning_episode Some만 lease·row·global_active 정리를 허가하며 None follower의 실행·철회 결과와 안내도 각각 한 번이다. A는 v3 reader와 비활성 API/fixture 기반이며 새 ticket·결과 producer 활성화는 B다. boot는 runtime_bootstrap→prepare_before_reap→기존 custody 보존→reaper→restore/owner drive 순서다. v3 ticket 보존 준비 실패는 해당 reaper pass를 보류하고 원본 행을 남긴다. 기존 v1/v2 경로의 정책은 바꾸지 않는다.
+
+A reader의 v3 wire 계약은 registration의 optional `native_settlement`다. 내부에는 전체 `ticket`(기존 attempt key, channel_id, source, owning_episode), optional `outcome`(disposition, native byte range), `withdrawal_notice`, `cleanup_complete`, `warned`를 보존한다. owning_episode는 `user_message_id/turn_nonce/generation` 또는 None이다. ticket·episode·outcome·settlement의 추가 proof 필드는 flatten map으로 보존하므로 A로 rollback해 project/compact해도 B의 추가 증거를 지우지 않는다. ordinary 등록에는 필드를 쓰지 않고 envelope2를 유지한다. 최초 ticket 준비와 envelope3 전환은 같은 registry transaction이다.
+
+A의 prepare/result/withdrawal ack API는 cfg(test)이며 운영 producer가 없다. 철회 안내는 기존 `retained_input_notice` source의 persistent-dedupe outbox 영속 enqueue 뒤 ack한다. 새 source 허용 항목은 추가하지 않는다. B가 API를 활성화할 때 durable outbox 전에 ack하거나 None follower에게 parent 정리 권한을 부여해서는 안 된다. boot read는 live/planned/passive의 미정리 자료와 전체 원본 registration을 기존 custody에 보존한다. 이 A 보존 연결은 native 결과를 새로 만들거나 시간으로 lease를 해제하지 않는다. 기존 finalizer·actor CAS·inflight CAS·owner drive 자체를 재구현하지 않는다.

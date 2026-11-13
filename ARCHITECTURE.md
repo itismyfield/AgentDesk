@@ -1770,6 +1770,7 @@ src/
 │   │   │   │   ├── custody_notice.rs
 │   │   │   │   ├── custody_notice_tests.rs
 │   │   │   │   ├── input_fence_reaper_tests.rs
+│   │   │   │   ├── native_input_tests.rs
 │   │   │   │   ├── restart_marker_lifetime_tests.rs
 │   │   │   │   ├── restore_failure.rs
 │   │   │   │   └── scoped_restore.rs
@@ -3993,6 +3994,8 @@ src/
 │   │   │   │   │   ├── carried_tests.rs
 │   │   │   │   │   ├── collision.rs
 │   │   │   │   │   ├── migration.rs
+│   │   │   │   │   ├── native.rs
+│   │   │   │   │   ├── native_tests.rs
 │   │   │   │   │   └── s4_tests.rs
 │   │   │   │   ├── append.rs
 │   │   │   │   ├── append_tests.rs

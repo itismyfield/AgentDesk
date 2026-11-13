@@ -19,6 +19,7 @@ pub(super) enum HistoryRead {
 /// What the V2 writer always opens with (`v2::Snapshot::encode`); a V1 store opens with
 /// `entries`, and any other version or spacing takes the full read.
 const V2_PREFIX: &[u8] = b"{\"version\":2,";
+const V3_PREFIX: &[u8] = b"{\"version\":3,";
 
 #[cfg(test)]
 thread_local! {
@@ -43,8 +44,10 @@ pub(super) fn envelope(value: &serde_json::Value) -> Result<bool, String> {
     if value.get("version").is_none() {
         return Ok(false);
     }
-    if value.get("version").and_then(serde_json::Value::as_u64) != Some(2)
-        || value.get("entries").is_some()
+    if !matches!(
+        value.get("version").and_then(serde_json::Value::as_u64),
+        Some(2 | 3)
+    ) || value.get("entries").is_some()
     {
         return Err("unsupported frame history envelope".into());
     }
@@ -87,7 +90,7 @@ pub(super) fn v2_prefix(path: &Path) -> std::io::Result<bool> {
         let (parses, bytes, inspects) = cost.get();
         cost.set((parses, bytes + filled, inspects));
     });
-    Ok(head[..filled].starts_with(V2_PREFIX))
+    Ok(head[..filled].starts_with(V2_PREFIX) || head[..filled].starts_with(V3_PREFIX))
 }
 
 pub(super) fn read_legacy(path: &Path) -> Result<Store, String> {
@@ -115,8 +118,10 @@ pub(super) fn read_legacy(path: &Path) -> Result<Store, String> {
 fn v2_value(path: &Path) -> Option<Arc<serde_json::Value>> {
     let read = reuse(path, std::fs::read(path).ok()?, |raw| {
         let value = parse(raw)?;
-        let v2 = value.get("version").and_then(serde_json::Value::as_u64) == Some(2)
-            && value.get("entries").is_none();
+        let v2 = matches!(
+            value.get("version").and_then(serde_json::Value::as_u64),
+            Some(2 | 3)
+        ) && value.get("entries").is_none();
         Ok(v2.then(|| Arc::new(value)))
     });
     read.ok()?.as_ref().clone()

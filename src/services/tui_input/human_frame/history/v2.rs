@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex};
 pub(crate) mod carried;
 mod collision;
 mod migration;
+pub(crate) mod native;
+#[cfg(all(test, unix))]
+pub(crate) mod native_tests;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Source {
@@ -116,6 +119,8 @@ struct Registration {
     frame: Frame,
     #[serde(default)]
     source: Option<Source>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_settlement: Option<native::Settlement>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Bound {
@@ -372,6 +377,7 @@ impl Registry {
                 key: key.clone(),
                 frame: Frame::new(&author, frame),
                 source: source.clone(),
+                native_settlement: None,
             };
             if let Some(source) = &registration.source {
                 state.live.push(Bound {
@@ -409,6 +415,9 @@ impl Registry {
             {
                 let mut registration = state.planned.remove(at);
                 registration.source = Some(source.clone());
+                if let Some(native) = &mut registration.native_settlement {
+                    native.ticket.source = Some(source.clone());
+                }
                 state.live.push(Bound {
                     entry: registration.frame.bind(key, source),
                     registration,
@@ -426,6 +435,9 @@ impl Registry {
                 .ok_or("attempt registration missing")?;
             let registration = passive.registration.as_mut().ok_or("legacy registration")?;
             registration.source = Some(source.clone());
+            if let Some(native) = &mut registration.native_settlement {
+                native.ticket.source = Some(source.clone());
+            }
             passive.entry = Some(registration.frame.bind(key, source));
             passive.encoded = None;
             Ok(())

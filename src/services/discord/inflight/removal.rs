@@ -1691,3 +1691,6 @@ mod host_liveness_stale_tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+mod native_input_tests;

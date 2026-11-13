@@ -58,18 +58,29 @@ impl BootReapOnce {
     }
 }
 
-/// What boot input preparation reports before the reaper may run. Only `Unconfigured`
-/// exists until a preparer installs the provider's protections here.
+/// What boot input preparation reports before the reaper may reserve its pass.
 pub(super) enum BootPreparation {
     Unconfigured,
+    NativePrepared,
+    Failed,
 }
 
-async fn prepare_before_reap(_provider: &ProviderKind) -> BootPreparation {
+async fn prepare_before_reap(provider: &ProviderKind) -> BootPreparation {
     #[cfg(test)]
     if let Some(latch) = super::super::store::boot_observation::preparing() {
         let _ = latch.await;
     }
-    BootPreparation::Unconfigured
+    let Some(root) = crate::services::discord::runtime_store::runtime_root() else {
+        return BootPreparation::Unconfigured;
+    };
+    match super::boot_custody::preserve_native_before_boot_reap(&root, provider) {
+        Ok(true) => BootPreparation::NativePrepared,
+        Ok(false) => BootPreparation::Unconfigured,
+        Err(error) => {
+            tracing::warn!(provider = provider.as_str(), %error, "native boot preparation failed; rows preserved");
+            BootPreparation::Failed
+        }
+    }
 }
 
 pub(crate) async fn reap_inflight_rows_at_boot_blocking(
@@ -98,7 +109,12 @@ pub(super) async fn reap_inflight_rows_after_preparation(
     pg_pool: Option<sqlx::PgPool>,
     prepare: impl std::future::Future<Output = BootPreparation>,
 ) -> BootReapReport {
-    let BootPreparation::Unconfigured = prepare.await;
+    if matches!(prepare.await, BootPreparation::Failed) {
+        return BootReapReport {
+            incomplete: 1,
+            ..Default::default()
+        };
+    }
     let owned = provider.clone();
     let reap = move || {
         inflight_runtime_root()

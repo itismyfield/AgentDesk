@@ -697,8 +697,27 @@
 | `src/services/discord/inflight/removal/boot_reaper.rs:95` | PrepareBoot→custody→Reap 순서 |
 | `src/services/discord/inflight/removal/boot_reaper.rs:131` | Reap: provider row census |
 | `src/services/discord/inflight/removal/boot_reaper.rs:218` | ProjectionClear: lock-held 직접 unlink |
-| `src/services/discord/inflight/circuit_removal.rs` `delete` | AdjacentEnd/ProjectionClear: circuit 제거 |
+| `src/services/discord/inflight/circuit_removal.rs:55` `delete` | AdjacentEnd/ProjectionClear: circuit 제거 |
 | `src/services/discord/inflight/rebind_reap.rs:311` | AdjacentEnd/ProjectionClear: abandoned rebind |
 | `src/services/discord/inflight/rebind_reap.rs:422` | AdjacentEnd/ProjectionClear: dead watcher rebind |
 
 모델의 review record는 registration 있음·owning_episode None follower와 boot 준비/보존/행 존재/restore-head를 이 진입점의 두 값으로 구분한다. 실패한 준비는 reaper를 허가하지 않는다.
+
+
+## A reader 구현 좌표
+
+위 전수표는 d1 기준 main 좌표이며 A는 다음 기존 포트에만 연결한다. runtime root는 `runtime_store::runtime_root()`다(그 아래 `discord_inflight` row root와 구별한다).
+
+| 함수 | A 행동 | B에 남는 소비 |
+|---|---|---|
+| `src/services/tui_input/human_frame/history/v2/native.rs:99` `boot_records` | v3 live/planned/passive의 미정리 ticket·결과·원본 registration 읽기 | native proof fold 및 저장 결과에 따른 cleanup 재개 |
+| `src/services/discord/inflight/removal/boot_reaper.rs:68` `prepare_before_reap` | 기존 boot port에서 먼저 native custody 준비; 실패 시 pass 예약·행 삭제 보류 | 보존 자료 restore census |
+| `src/services/discord/inflight/removal/boot_custody.rs:434` `preserve_native_before_boot_reap` | 기존 retention lock·durable custody publication 재사용 | source incarnation 인증 후 최종 결과 확정 |
+| `src/services/tui_input/human_frame/history/v2/native.rs:174` `record_native_outcome` | cfg(test) 계약 API: 등록+전체 ticket 일치, None follower 포함 | 운영 producer 연결 |
+| `src/services/turn_orchestrator/episode_identity.rs:162`, `src/services/discord/turn_finalizer/episode.rs:47`, `src/services/discord/inflight/clear_store/identity.rs:252` | 기존 exact episode/actor/row CAS를 유지 | Some episode만 이 경로 호출; None follower는 정리 권한 없음 |
+| `src/services/discord/queue_io/input_owner/drive.rs:88` `wake` | 기존 owner wake·claim 계약을 통합 fixture에서 실제 호출 | 결과/cleanup 소비 후 운영 wake 연결 |
+
+| `src/services/tui_input/human_frame/history/v2/native.rs:152` `prepare_native` | Inject 준비: cfg(test) 최초 ticket과 envelope3를 같은 transaction으로 저장 | 운영 호출 연결은 B |
+| `src/services/tui_input/human_frame/history/v2/native.rs:200` `ack_native_withdrawal_notice` | NoticeAck: cfg(test) 영속 outbox enqueue 뒤 철회 안내 ack | 운영 호출 연결은 B |
+
+A의 boot fixture는 실제 prepare→custody→reaper 뒤 시험 소비자가 등록 결과·기존 exact mailbox finish·owner drive를 연결한다. 자동 restore/결과 producer가 운영에 연결되었다는 주장은 하지 않는다.

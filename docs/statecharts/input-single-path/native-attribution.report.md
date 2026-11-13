@@ -125,3 +125,5 @@ wrapper rc=1은 예상 RED다. repository checker는 예상 RED까지 정확히 
 ## A reader 기반: follower / boot 계약
 
 A의 새 6 cfg는 follower Some 필수 오판과 boot preparation 순서의 비교다. FollowerBefore는 FollowerEventuallySettles RED, FollowerFixed는 None follower Executed/Withdrawn 모두 GREEN이다. BootBefore는 NoBootTicketLoss 및 BootEventuallyRestores RED, BootFixed는 미결과/이미 저장된 결과 양쪽에서 GREEN이다. BootFailureFixed는 준비 실패 때 row 보존 GREEN(영구 실패의 진행성은 주장하지 않음), BootIgnoreFailure는 NoBootTicketLoss·FailureKeepsRow RED다. 기존 14 cfg의 기대 위반은 바꾸지 않는다. review record는 부팅 준비·custody·reaper·restore/head 및 follower 결과/notice·parent lease/row/global_active를 표현한다.
+
+A 전체 checker: 변경 모델 20 cfg·94 TLC run 전체 선택, 예상 집합 불일치0, rc0, 121.8초. 원시 로그 `/Users/itismyfield/.adk/lane-runs/i8148/logs/a1-tlc-full.txt`. [boot-before 생성 그림](native-attribution-a-boot.chart.mmd)과 [wrapper 보고서](native-attribution-a-boot.report.md)는 반례 표시용이다. wrapper의 100,000-state 한계를 full-checker 통과와 혼동하지 않는다.
