@@ -98,7 +98,7 @@ TLA2TOOLS=/tmp/i8119-r2-models/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk@25/b
 | `src/services/dispatched_sessions/hook.rs:101,107` → `src/db/dispatched_sessions/canonical_identity.rs:178,191,220` | LateOldNonceHook; nonce CAS 없는 old alias의 UPDATE 거절 |
 | `src/db/dispatched_sessions/canonical_identity.rs:144` 및 `src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff.rs:650` | snapshotNonce/nonceContested; 명시 witness가 없으면 primary 승격 없음 |
 | `src/db/dispatched_sessions/key_promotion.rs:26,79,100` (discovery/locator/validation) | TxDiscover → TxLocatorLocks → TxIdentityLock → TxRows; 비권한 snapshot과 under-lock CAS |
-| `src/db/dispatched_sessions/key_promotion.rs:180` (promote_primary) | PromotePrimary → TxPreserveAlias → TxCommit; 충돌은 TxRollback |
+| `src/db/dispatched_sessions/key_promotion.rs:183` (promote_primary) | PromotePrimary → TxPreserveAlias → TxCommit; 충돌은 TxRollback |
 | `src/services/discord/session_locator.rs:130,217` (channel_key/observe_old) | RequestNewName / ObserveOldHost; live old의 관측 namespace만 재사용, 미관측 namespace는 Unknown |
 | `src/services/discord/router/message_handler/provider_dispatch.rs:353` (registration_origin) | 명시 canonical 등록만; synthetic/process/routine/scheduled의 override는 범위 밖 |
 | `src/services/tui_prompt_dedupe/binding_context.rs:467` → scoped completion → `src/services/discord/session_locator.rs:360` | 실제 새 incarnation과 spawn marker 게시 뒤 fresh registration witness 생산 |
