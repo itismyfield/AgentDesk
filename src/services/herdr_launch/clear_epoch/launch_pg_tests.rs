@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "projection_tests.rs"]
+mod projection_tests;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn clear_before_actual_launch_sends_no_create_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();

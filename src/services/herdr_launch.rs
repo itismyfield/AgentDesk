@@ -575,6 +575,8 @@ pub(crate) async fn launch_herdr_session(
         None => return Ok(indeterminate("create call did not return".into())),
     };
     let location = pane_location(&endpoint, pane_id);
+    #[cfg(test)]
+    clear_epoch::tests::before_projection(&owner);
     // The row is read again after the socket call: only this nonce's Pending takes the pane.
     let recorded = match load_row(pool, &owner).await {
         Ok(current) => {

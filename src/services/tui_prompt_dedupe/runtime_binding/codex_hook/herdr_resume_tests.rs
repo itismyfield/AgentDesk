@@ -6,6 +6,9 @@ use serde_json::json;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
+#[path = "herdr_resume_cause_tests.rs"]
+mod resume_cause_tests;
+
 struct Fixture {
     _env: [crate::config::TestEnvVarGuard; 2],
     root: tempfile::TempDir,
@@ -91,6 +94,15 @@ impl Fixture {
     }
 
     fn hook_reason(&self, source: &binding_events::SourceId, reason: &str) -> IngressOutcome {
+        self.hook_event(source, "session_start", Some(reason))
+    }
+
+    fn hook_event(
+        &self,
+        source: &binding_events::SourceId,
+        event: &str,
+        reason: Option<&str>,
+    ) -> IngressOutcome {
         // The seed's later process reads the immutable incarnation rather than the launch caller.
         let context =
             binding_context::execution_context("codex", &self.context.execution_nonce).unwrap();
@@ -99,8 +111,8 @@ impl Fixture {
             observed: ObservedHookProcess::default(),
         };
         let hook = HookSignal {
-            event: "session_start".into(),
-            source: Some(reason.into()),
+            event: event.into(),
+            source: reason.map(str::to_owned),
             transcript_path: Some(source.path.display().to_string()),
             received_at: chrono::Utc::now(),
             published_at: None,

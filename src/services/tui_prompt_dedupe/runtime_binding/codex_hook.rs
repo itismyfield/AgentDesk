@@ -462,6 +462,9 @@ fn observe_codex_hook_under_source_authority(
         #[cfg(unix)]
         let offset = (|| {
             use crate::services::cluster::stream_relay::SourceFileIdentity;
+            if first_source.is_none() && hook.cause() != binding_events::BindingCause::Resume {
+                return Err("Codex Herdr resume needs its Resume SessionStart".to_string());
+            }
             let Some(verified) = verified.as_ref() else {
                 return first_source
                     .is_some()

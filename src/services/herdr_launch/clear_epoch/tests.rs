@@ -4,6 +4,7 @@ use super::*;
 pub(crate) enum Point {
     Checked,
     Authorized,
+    Projecting,
 }
 type Hook = Arc<dyn Fn() + Send + Sync>;
 static HOOKS: LazyLock<Mutex<HashMap<(Key, Point), Hook>>> = LazyLock::new(Default::default);
@@ -31,6 +32,15 @@ pub(super) fn point(key: &Key, at: Point) {
     if let Some(hook) = hook {
         hook();
     }
+}
+
+pub(crate) fn before_projection(owner: &HostedOwner) {
+    let key = (
+        owner.provider.clone(),
+        owner.discord_token_hash.clone(),
+        owner.channel_id.parse().unwrap(),
+    );
+    point(&key, Point::Projecting);
 }
 
 impl Drop for Watch {
