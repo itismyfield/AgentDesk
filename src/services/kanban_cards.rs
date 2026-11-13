@@ -1,3 +1,5 @@
+pub(crate) mod entry_transactions;
+
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;

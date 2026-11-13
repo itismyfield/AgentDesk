@@ -39,7 +39,7 @@ pub(super) fn record_entry_dispatch_failure(
     let result = crate::utils::async_bridge::block_on_pg_result(
         pool,
         move |bridge_pool| async move {
-            crate::db::auto_queue::record_entry_dispatch_failure_on_pg(
+            crate::services::auto_queue::transactions::record_entry_dispatch_failure_on_pg(
                 &bridge_pool,
                 &entry_id_text,
                 retry_limit,
