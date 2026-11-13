@@ -251,7 +251,7 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
     } else {
         None
     };
-    // Heap-pin every boot await so the shared fixture also fits smaller test stacks.
+    // The boot entry runs receipt settlement and the actual restore_inflight_states scan.
     if evidence == "idle" {
         let gateway = crate::services::discord::gateway::DiscordGateway::new(
             discord.http.clone(),
@@ -259,11 +259,11 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
             provider.clone(),
             None,
         );
-        assert!(Box::pin(super::super::super::idle_captured_response::recover_idle_partial_response_from_ready_source(
+        assert!(super::super::super::idle_captured_response::recover_idle_partial_response_from_ready_source(
             &discord.http, &shared, &serialized, output.path(), &gateway,
-        )).await);
+        ).await);
     } else {
-        Box::pin(restore_inflight_turns(&discord.http, &shared, &provider)).await;
+        restore_inflight_turns(&discord.http, &shared, &provider).await;
     }
     if matches!(evidence, "drain_missing_receipt" | "drain_closed_pool") {
         assert_eq!(
@@ -322,7 +322,7 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
         assert_eq!(kept.full_response, original.full_response);
         assert!(discord.contents().is_empty());
         drop(lease);
-        Box::pin(restore_inflight_turns(&discord.http, &shared, &provider)).await;
+        restore_inflight_turns(&discord.http, &shared, &provider).await;
     }
     let writes: Vec<_> = discord
         .calls()
@@ -370,7 +370,7 @@ async fn restored(committed: bool, held: bool, evidence: &str, quiet: bool, capt
                 "no-visible success is not an interrupted run"
             );
         }
-        Box::pin(restore_inflight_turns(&discord.http, &shared, &provider)).await;
+        restore_inflight_turns(&discord.http, &shared, &provider).await;
         assert_eq!(
             discord
                 .calls()
@@ -444,21 +444,13 @@ async fn i8117_recovery_quiet_after_commit_with_hold_pg() {
 }
 #[tokio::test]
 async fn i8117_recovery_full_controls_pg() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            for held in [false, true] {
-                for evidence in ["legacy", "full", "missing", "ambiguous"] {
-                    for captured in [false, true] {
-                        // Join each local task so fixture construction and transport polls do not nest.
-                        let task = tokio::task::spawn_local(Box::pin(restored(
-                            false, held, evidence, false, captured,
-                        )));
-                        await_within(task, WAIT_CAP).await.unwrap();
-                    }
-                }
+    for held in [false, true] {
+        for evidence in ["legacy", "full", "missing", "ambiguous"] {
+            for captured in [false, true] {
+                restored(false, held, evidence, false, captured).await;
             }
-        })
-        .await;
+        }
+    }
 }
 
 #[tokio::test]

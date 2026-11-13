@@ -15,17 +15,21 @@ use crate::services::tui_o::cutover::{
 pub(super) const RECOVERY_NEUTRAL_NOTICE: &str = "ℹ️ 이전 실행은 종료됐거나 입력 가능한 상태지만, 이전 요청의 완료 여부는 확인하지 못했습니다. 요청을 자동으로 다시 실행하지는 않았습니다.";
 
 // Only the exact registered notice masks a body; a saved partial before it still counts.
-async fn registered_notice<T>(
+fn registered_notice<T>(
     source: BodySource,
     site: BodySite,
     text: &str,
     next: impl std::future::Future<Output = T>,
-) -> T {
+) -> impl std::future::Future<Output = T> {
+    // Box before constructing the async state so callers never embed the large input future.
     let next = Box::pin(next);
-    if text == RECOVERY_NEUTRAL_NOTICE {
-        source.observe(site, BodyOffer::NonBody, next).await
-    } else {
-        next.await
+    let neutral = text == RECOVERY_NEUTRAL_NOTICE;
+    async move {
+        if neutral {
+            source.observe(site, BodyOffer::NonBody, next).await
+        } else {
+            next.await
+        }
     }
 }
 
