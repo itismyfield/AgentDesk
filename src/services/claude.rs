@@ -17,6 +17,7 @@ use std::sync::mpsc::Sender;
 #[cfg(unix)]
 use std::time::Duration;
 
+use crate::domain::restart_report::{RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV};
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
 use crate::services::claude_command::ClaudeCommandBuilder;
 use crate::services::claude_compact_context::{
@@ -29,9 +30,6 @@ use crate::services::claude_tui::hosting::{
     try_claude_tui_warm_followup,
 };
 use crate::services::discord::replay_policy::live::{RawTap, Seen};
-use crate::services::discord::restart_report::{
-    RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
-};
 use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::session_prompt;
 use crate::services::provider::{
@@ -1602,7 +1600,9 @@ pub(crate) fn resolve_live_claude_tui_session(
     // The pane answers in the session its hooks last reported; a cached id it moved off (/clear)
     // still has a transcript on disk, so resuming it would tail a file the turn never reaches.
     let adopted =
-        crate::services::tui_prompt_dedupe::hook_adopted_claude_session_id(tmux_session_name);
+        crate::services::tui_prompt_dedupe::session_rotation::hook_adopted_claude_session_id(
+            tmux_session_name,
+        );
     let superseded = adopted
         .as_deref()
         .is_some_and(|id| id != resolution.session_id);

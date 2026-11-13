@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> Acquire
+    Acquire --> Sample: same record flock
+    Sample --> Publish: generation memo and doctor JSON
+    Publish --> Release: rename completed
+    Release --> Claim: exact attempt and generation
+    Claim --> Proof: persisted then cancelled then persisted
+    Proof --> Settle: matching attempt remains Awaiting
+    Settle --> Observe: release lock before HTTP
+    Observe --> Consume: acceptance plus same attempt
+    Consume --> [*]

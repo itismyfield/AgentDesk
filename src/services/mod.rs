@@ -38,6 +38,7 @@ pub mod dispatch_watchdog;
 pub mod dispatched_sessions;
 pub mod dispatches;
 pub mod dispatches_followup;
+pub(crate) mod durable_publish;
 pub(crate) mod escalation_cooldown;
 pub mod explicit_auth_route;
 pub mod gemini;
@@ -87,6 +88,7 @@ pub(crate) mod legacy_body_census;
 pub mod pr_summary;
 pub mod process;
 pub(crate) mod process_boot;
+pub mod process_generation;
 // #3034: residual dead code here is a dormant recovery-priming constructor;
 // scoped allow retained pending provider recovery cleanup. The old #2662/#2668
 // envelope/dev-role dedup stubs were retired by #3744.
@@ -113,9 +115,11 @@ pub(crate) mod recovery_defer;
 pub(crate) mod release_source;
 pub mod remote_stub;
 pub(crate) mod resident_loops;
+pub(crate) mod restart_handoff;
 pub mod retrospectives;
 pub mod review_decision;
 pub mod routines;
+pub(crate) mod runtime_paths;
 pub mod scheduled_messages;
 pub(crate) mod scheduling;
 pub mod service_error;

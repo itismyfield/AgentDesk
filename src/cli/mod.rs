@@ -20,6 +20,7 @@ pub(crate) mod monitoring;
 pub(crate) mod o;
 pub(crate) mod provider_cli;
 pub(crate) mod query;
+pub(crate) mod restart_handoff;
 pub(crate) mod restart_terminal_proof;
 pub(crate) mod run;
 pub(crate) mod turn_lease;

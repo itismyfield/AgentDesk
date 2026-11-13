@@ -783,13 +783,8 @@ fn build_restart_report_context(
     report_channel_id: Option<u64>,
     report_provider: Option<ReportProvider>,
     report_message_id: Option<u64>,
-) -> std::result::Result<
-    Option<crate::services::discord::restart_report::RestartReportContext>,
-    String,
-> {
-    use crate::services::discord::restart_report::{
-        RestartReportContext, restart_report_context_from_env,
-    };
+) -> std::result::Result<Option<crate::domain::restart_report::RestartReportContext>, String> {
+    use crate::domain::restart_report::{RestartReportContext, restart_report_context_from_env};
     use crate::services::provider::ProviderKind;
 
     match (report_provider, report_channel_id, report_message_id) {

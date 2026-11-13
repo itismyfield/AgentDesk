@@ -19,5 +19,6 @@ pub(crate) mod process_incarnation;
 pub(crate) mod provider;
 pub(crate) mod provider_auth_profile;
 pub(crate) mod replay_evidence;
+pub(crate) mod restart_report;
 pub(crate) mod session_identity;
 pub(crate) mod tool_text;

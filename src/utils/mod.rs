@@ -20,3 +20,5 @@ pub mod redact;
 pub mod secret_file;
 // #1099/#3792 WIP detector used by the Discord turn-end warning facade.
 pub mod wip_detect;
+
+pub(crate) mod record_path_lock;

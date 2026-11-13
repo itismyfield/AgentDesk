@@ -50,15 +50,13 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::domain::restart_report::{RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV};
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
 use crate::services::claude;
 use crate::services::claude_tui::hook_bundle::{
     HookBundleConfig, codex_hook_config_overrides, run_codex_hook_launch_self_check_with_exec_path,
 };
 use crate::services::claude_tui::hook_server::current_hook_endpoint;
-use crate::services::discord::restart_report::{
-    RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
-};
 use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,

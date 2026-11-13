@@ -345,7 +345,7 @@ mod injected_steer;
 mod observation;
 mod prompt_identity;
 mod runtime_binding;
-mod session_rotation;
+pub(crate) mod session_rotation;
 mod shadow_peek;
 mod state;
 

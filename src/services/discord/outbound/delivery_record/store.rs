@@ -206,58 +206,9 @@ pub(super) fn delivery_owner_context_path(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Per-record flock (mirrors inflight.rs's `lock_inflight_state_path`) so a
-// read-modify-write (acquire lease / write frontier / clear lease) is atomic
-// against a concurrent writer in the same process (invariant I4 — no new
-// non-atomic load→mutate→save race). The `.lock` file lives in the sidecar
-// dir, still outside the inflight scan path.
-// ---------------------------------------------------------------------------
-
-// #5071 T4-B2 widened this pair from `outbound` to the discord module so the
-// reachability obligation ledger reuses this flock instead of introducing a
-// second lock mechanism (4987 §5.2 storage rule). Widening a visibility is not
-// a new caller contract: the lock's semantics, its `.json.lock` sidecar path
-// and its Drop-unlock are untouched, and the two existing writers are
-// unchanged.
-pub(in crate::services::discord) struct DeliveryRecordLock {
-    _file: fs::File,
-}
-
-impl Drop for DeliveryRecordLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            // Best effort unlock; closing the fd would release it anyway.
-            let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
-        }
-    }
-}
-
-pub(in crate::services::discord) fn lock_record_path(
-    record_path: &Path,
-) -> Result<DeliveryRecordLock, String> {
-    let lock_path = record_path.with_extension("json.lock");
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(&lock_path)
-        .map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-    }
-    Ok(DeliveryRecordLock { _file: file })
-}
+pub(in crate::services::discord) use crate::utils::record_path_lock::{
+    RecordPathLock as DeliveryRecordLock, lock_record_path,
+};
 
 // ---------------------------------------------------------------------------
 // Store core (path-based; the public provider/channel API delegates here)

@@ -1,3 +1,7 @@
+use crate::domain::restart_report::{
+    RestartAttempt, RestartFailure, RestartReportContext, RestartReportState,
+    restart_report_context_from_env,
+};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -475,10 +479,7 @@ pub fn kill_existing_dcserver_processes() {
 pub fn parse_restart_dcserver_report_context(
     args: &[String],
     start_index: usize,
-) -> Result<Option<services::discord::restart_report::RestartReportContext>, String> {
-    use services::discord::restart_report::{
-        RestartReportContext, restart_report_context_from_env,
-    };
+) -> Result<Option<RestartReportContext>, String> {
     use services::provider::ProviderKind;
 
     let mut report_channel_id: Option<u64> = None;
@@ -554,14 +555,13 @@ pub(crate) fn run_quick_restart_with_production_effects_for_test(root: &Path, ve
     super::dcserver_restart_wait::run_quick_restart_with_production_effects(Some(root), version, attempt, |marker| after_marker_acquired(marker.nonce()))
 }
 pub fn handle_restart_dcserver(
-    report_context_override: Option<services::discord::restart_report::RestartReportContext>,
+    report_context_override: Option<RestartReportContext>,
 ) -> Result<(), String> {
     use super::dcserver_restart_wait::WaitTermination;
+    use super::restart_handoff::prepare_restart_handoff;
     use services::discord::load_discord_bot_launch_configs;
-    use services::discord::restart_report::{
-        RestartAttempt, RestartFailure, RestartReportState, clear_restart_handoff,
-        prepare_restart_handoff, restart_claim_for_context, restart_report_context_from_env,
-        settle_restart_handoff,
+    use services::restart_handoff::store::{
+        clear_restart_handoff, restart_claim_for_context, settle_restart_handoff,
     };
     const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -587,7 +587,7 @@ pub fn handle_restart_dcserver(
     // Preview the epoch the replacement process will allocate at boot. The old
     // process keeps its immutable epoch throughout the quiesce window so turns
     // born after this request remain distinguishable from the replacement.
-    let new_generation = services::discord::runtime_store::next_process_generation();
+    let new_generation = services::process_generation::next_process_generation();
 
     // Show version transition if available
     if let Some(root) = crate::config::runtime_root() {

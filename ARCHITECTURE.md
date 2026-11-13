@@ -112,6 +112,7 @@ src/
 │   ├── o.rs
 │   ├── query.rs
 │   ├── removed_channel_home_tests.rs
+│   ├── restart_handoff.rs
 │   ├── restart_terminal_proof.rs
 │   ├── run.rs
 │   ├── turn_lease.rs
@@ -470,6 +471,7 @@ src/
 │   ├── provider.rs
 │   ├── provider_auth_profile.rs
 │   ├── replay_evidence.rs
+│   ├── restart_report.rs
 │   ├── session_identity.rs
 │   └── tool_text.rs
 ├── engine/
@@ -3726,6 +3728,8 @@ src/
 │   │   │   ├── stream_queue.rs
 │   │   │   └── test_fixture.rs
 │   │   └── stream_child.rs
+│   ├── process_generation/
+│   │   └── generation_allocation_tests.rs
 │   ├── provider/
 │   │   ├── cancel_token_cleanup/
 │   │   │   ├── authority.rs
@@ -3790,6 +3794,11 @@ src/
 │   ├── replay_evidence/
 │   │   ├── live_issuer.rs
 │   │   └── recovery_issuer.rs
+│   ├── restart_handoff/
+│   │   ├── store/
+│   │   │   └── tests.rs
+│   │   ├── proof.rs
+│   │   └── store.rs
 │   ├── review_decision/
 │   │   ├── accept.rs
 │   │   ├── adapters.rs
@@ -4682,6 +4691,7 @@ src/
 │   ├── dispatch_watchdog.rs
 │   ├── dispatched_sessions.rs
 │   ├── dispatches_followup.rs
+│   ├── durable_publish.rs
 │   ├── escalation_cooldown.rs
 │   ├── explicit_auth_route.rs
 │   ├── gemini.rs
@@ -4718,6 +4728,7 @@ src/
 │   ├── pr_summary.rs
 │   ├── process.rs
 │   ├── process_boot.rs
+│   ├── process_generation.rs
 │   ├── provider.rs
 │   ├── provider_auth.rs
 │   ├── provider_auth_profile.rs
@@ -4737,8 +4748,10 @@ src/
 │   ├── release_source.rs
 │   ├── remote_stub.rs
 │   ├── resident_loops.rs
+│   ├── restart_handoff.rs
 │   ├── retrospectives.rs
 │   ├── review_decision.rs
+│   ├── runtime_paths.rs
 │   ├── scheduled_messages.rs
 │   ├── scheduling.rs
 │   ├── service_error.rs
@@ -4785,6 +4798,8 @@ src/
 │   ├── ai_screen.rs
 │   └── mod.rs
 ├── utils/
+│   ├── record_path_lock/
+│   │   └── tests.rs
 │   ├── secret_file/
 │   │   ├── fresh_tests.rs
 │   │   └── private_directory.rs
@@ -4800,6 +4815,7 @@ src/
 │   ├── loopback_url.rs
 │   ├── mod.rs
 │   ├── parsed_bytes.rs
+│   ├── record_path_lock.rs
 │   ├── redact.rs
 │   ├── secret_file.rs
 │   └── wip_detect.rs
