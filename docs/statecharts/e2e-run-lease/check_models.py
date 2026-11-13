@@ -2,11 +2,12 @@
 """Run the bounded TLC matrix and keep machine-readable, fail-closed results."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
-import re
-import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
 
 
@@ -54,62 +55,63 @@ def self_test_selection():
     return 0 if all(row['passed'] for row in results) else 1
 
 
+BASE = Path(__file__).resolve().parent
+CHECKER = BASE.parents[2] / 'scripts/ci/statecharts_tlc.py'
+SPEC = importlib.util.spec_from_file_location('lease_common_tlc', CHECKER)
+common = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = common
+SPEC.loader.exec_module(common)
+
+
+def load_expectations(root):
+    rows = common.read_expected(root / 'expected.tsv')
+    scoped = {cfg: value for cfg, value in rows.items() if cfg.startswith('e2e-run-lease/')}
+    wanted = {f'e2e-run-lease/{name}' for name in EXPECTED_CONFIGS}
+    if set(scoped) != wanted:
+        raise ValueError(f'incomplete canonical lease expectations: missing={sorted(wanted - set(scoped))} '
+                         f'unexpected={sorted(set(scoped) - wanted)}')
+    return scoped
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--java', default=os.environ.get('JAVA', 'java'))
     parser.add_argument('--jar', default=os.environ.get('TLA2TOOLS'))
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--timeout', type=float, default=300)
+    parser.add_argument('--jobs', type=int, default=2)
     parser.add_argument('--self-test-selection', action='store_true')
     args = parser.parse_args()
     if args.self_test_selection:
         return self_test_selection()
-    if args.out is None:
-        parser.error('--out is required')
-    if not args.jar:
-
-        parser.error('--jar or TLA2TOOLS is required')
-    base = Path(__file__).resolve().parent
+    if args.out is None or not args.jar or not Path(args.jar).is_file():
+        parser.error('--out and an existing --jar or TLA2TOOLS are required')
+    if args.jobs < 1 or args.timeout <= 0:
+        parser.error('--jobs and --timeout must be positive')
     try:
-        configs = select_configs(base)
-    except ValueError as error:
+        configs = select_configs(BASE)
+        expected = load_expectations(BASE.parent)
+    except (ValueError, OSError, common.CheckError) as error:
         parser.error(str(error))
     args.out.mkdir(parents=True, exist_ok=False)
-    spec = base / 'LeaseLifetime.tla'
-    expected = {
-        'none': None, 'ttl_takeover': 'NoHolderTheft', 'non_atomic': 'NoHolderTheft',
-        'parent_unlock': 'NoHolderTheft', 'missing_fd': 'WriterHasInheritedFd',
-        'duplicate_child': 'NoDualWriter', 'no_pending': 'UncertainSendJournaled',
-        'clear_on_idle': 'UncertainSendJournaled', 'send_after_release': 'NoSendAfterRelease',
-        'leak_fd': 'NextRequestProgress', 'foreign_cleanup': 'NoForeignCleanup',
-    }
-    results = []
-    for cfg in configs:
-        mutant = cfg.stem.split('-', 2)[-1] if '-live-' in cfg.stem else cfg.stem.split('-', 1)[1]
-        command = [args.java, '-Xmx512m', '-XX:+UseParallelGC', '-cp', args.jar, 'tlc2.TLC',
-                   '-workers', '1', '-metadir', str(args.out / (cfg.stem + '-states')),
-                   '-config', str(cfg), str(spec)]
-        result = subprocess.run(command, text=True, capture_output=True, timeout=60)
-        output = result.stdout + result.stderr
-        (args.out / (cfg.stem + '.log')).write_text(output)
-        violation = re.search(r'Invariant (\w+) is violated|Temporal properties were violated', output)
-        rule = violation.group(1) if violation and violation.group(1) else None
-        if violation and rule is None:
-            properties = re.findall(r'^PROPERTY (\w+)$', cfg.read_text(), re.MULTILINE)
-            rule = properties[0] if len(properties) == 1 else 'temporal'
-        states = re.search(r'(\d+) states generated, (\d+) distinct states found', output)
-        good = ('Model checking completed. No error has been found.' in output and result.returncode == 0)
-        bad = 'NextRequestStarts' if '-live-leak_fd' in cfg.stem else expected[mutant]
-        matches = good if bad is None else (result.returncode != 0 and bool(violation)
-                                             and (rule == bad or (bad == 'NextRequestProgress' and rule == 'temporal')))
-        row = {'config': cfg.name, 'expected_rule': bad, 'actual_rule': rule,
-               'exit': result.returncode, 'status': 'GREEN' if good else 'RED' if violation else 'ERROR',
-               'matches_expectation': matches,
-               'states_generated': int(states[1]) if states else None,
-               'distinct_states': int(states[2]) if states else None,
-               'spec_sha256': hashlib.sha256(spec.read_bytes()).hexdigest(),
-               'config_sha256': hashlib.sha256(cfg.read_bytes()).hexdigest(),
-               'log': str(args.out / (cfg.stem + '.log'))}
-        results.append(row)
+    spec_hash = hashlib.sha256((BASE / 'LeaseLifetime.tla').read_bytes()).hexdigest()
+
+    def check(cfg):
+        relative = f'e2e-run-lease/{cfg.name}'
+        module, rules = expected[relative]
+        result = common.check_cfg(BASE.parent, relative, module, rules, args.java,
+                                  Path(args.jar).resolve(), args.timeout)
+        problems = result.problems()
+        row = dict(config=cfg.name, expected_rules=sorted(rules), broken_rules=sorted(result.broken),
+                   error=result.error, problems=problems, matches_expectation=not problems,
+                   runs=result.runs, seconds=result.seconds, spec_sha256=spec_hash,
+                   config_sha256=hashlib.sha256(cfg.read_bytes()).hexdigest())
+        (args.out / (cfg.stem + '.log')).write_text(json.dumps(row, indent=2) + '\n')
+        return row
+
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        results = list(pool.map(check, configs))
+    for row in results:
         print(json.dumps(row), flush=True)
     (args.out / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
     return 0 if all(row['matches_expectation'] for row in results) else 1
