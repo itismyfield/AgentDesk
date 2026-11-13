@@ -378,7 +378,8 @@ impl UnitDeriver {
             }
             return out;
         }
-        if matches!(planned, UnitPlan::Pieces(_))
+        if unit_key.kind != UnitKind::Recap
+            && matches!(planned, UnitPlan::Pieces(_))
             && let Some(cards) = &mut self.cards
         {
             out.extend(cards.close());

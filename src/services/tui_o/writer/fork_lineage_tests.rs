@@ -175,3 +175,26 @@ fn warm_scanner_rechecks_identity_length_absence_and_scan_cap_without_more_bytes
         );
     }
 }
+
+#[test]
+fn recap_lineage_compares_top_level_content_but_ignores_session_metadata() {
+    let mut value: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/claude_away_summary.jsonl"
+    )))
+    .unwrap();
+    let (_root, _source, lineage) = scan(&json(value.clone()));
+    value["sessionId"] = serde_json::json!("fork-session");
+    value["cwd"] = serde_json::json!("/another/synthetic/project");
+    value["isMeta"] = serde_json::json!(true);
+    value["futureField"] = serde_json::json!("ignored");
+    assert_eq!(
+        lineage.native_class(ShadowProvider::Claude, &json(value.clone()), 0),
+        Class::Inherited
+    );
+    value["content"] = serde_json::json!("A changed recap must not inherit the original body.");
+    assert_eq!(
+        lineage.native_class(ShadowProvider::Claude, &json(value), 0),
+        Class::Unidentified
+    );
+}
