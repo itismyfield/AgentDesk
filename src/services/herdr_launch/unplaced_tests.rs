@@ -260,8 +260,18 @@ async fn a_launch_stays_in_flight_until_its_create_worker_returns_even_when_its_
                 command: "true".into(),
             };
             let owner = owner();
-            let created =
-                prepared::create(&pool, &owner, &endpoint, command, &host, None, &in_flight);
+            let launching =
+                crate::services::herdr_launch::clear_epoch::Launching::for_launch(&owner).unwrap();
+            let checked = launching.scope().check_epoch().unwrap();
+            let created = prepared::create(
+                &pool,
+                &owner,
+                &endpoint,
+                command,
+                &host,
+                None,
+                (&in_flight, checked),
+            );
             let _ = created.await;
         })
     };
