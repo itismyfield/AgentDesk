@@ -1613,6 +1613,7 @@ async fn a_stopped_turn_on_another_host_keeps_its_inflight_row() {
 
 /// A pending adoption holds every terminal and /stop body, answer or not: nothing is shown or
 /// committed, the row survives the finalize with its offset, and the adoption stays pending.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_pending_adoption_holds_every_terminal_and_stop_body() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
