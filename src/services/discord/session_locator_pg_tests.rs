@@ -758,5 +758,6 @@ async fn key_promotion_registration_conflict_keeps_replaced_incarnation_pg() {
         "a refused stale registration must not kill its replacement incarnation"
     );
     drop(scope);
+    drop(_cleanup);
     rig.finish().await;
 }
