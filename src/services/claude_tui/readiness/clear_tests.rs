@@ -383,3 +383,24 @@ fn clear_crash_after_reservation_cannot_reuse_the_authenticated_start() {
         Some(old)
     );
 }
+
+#[test]
+fn old_clear_release_cannot_release_a_new_pending_on_the_same_native_source() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = ClearRig::new();
+    let native = uuid::Uuid::new_v4().to_string();
+    r.pending(&native, r.channel, &r.path(&native));
+    r.start(&native, "clear");
+    let first = reserve(observe(&r.rig.session, Some(&r.path(&native))).unwrap()).unwrap();
+    let old = first.clear.clone().unwrap();
+    first.not_sent();
+    r.pending(&native, r.channel, &r.path(&native));
+    r.start(&native, "clear");
+    let latest = reserve(observe(&r.rig.session, Some(&r.path(&native))).unwrap()).unwrap();
+    assert!(latest.current());
+    super::super::clear::release(&latest.source, Some(&old));
+    drop(latest);
+    forget_session(&r.rig.session);
+    r.start(&native, "clear");
+    r.closed(&native);
+}

@@ -266,12 +266,18 @@ pub(in crate::services::claude_tui::readiness) fn claim(
     })
 }
 
-pub(in crate::services::claude_tui::readiness) fn release(source: &Source) {
+pub(in crate::services::claude_tui::readiness) fn release(
+    source: &Source,
+    expected: &super::super::clear::Evidence,
+) {
     tmux_common::with_tmux_source_authority(&source.session, |authority| {
         let Some((mut proof, current)) = verified_under(authority) else {
             return;
         };
-        if current == *source && proof.consumed {
+        if current == *source
+            && proof.consumed
+            && expected.same_pending(proof.pending.channel_id, proof.pending.seq)
+        {
             proof.consumed = false;
             if save(&source.session, &proof).is_none() {
                 tracing::warn!(

@@ -173,11 +173,16 @@ pub(super) fn claim(source: &Source, expected: Option<&Evidence>) -> bool {
     }
 }
 pub(super) fn release(source: &Source, expected: Option<&Evidence>) {
-    if expected.is_none() {
+    let Some(expected) = expected else {
         return;
-    }
+    };
     #[cfg(unix)]
-    source::release_clear(source);
+    source::release_clear(source, expected);
     #[cfg(not(unix))]
-    let _ = source;
+    let _ = (source, expected);
+}
+impl Evidence {
+    pub(super) fn same_pending(&self, channel: u64, seq: u64) -> bool {
+        self.channel == channel && self.seq == seq
+    }
 }
