@@ -106,7 +106,13 @@ fn run_cell(turn_mode: bool, row: Row, route: Route, at: u64) -> Cell {
     };
     let frame = busy_inject::frame("discord", "200", "ann", &nonce, &text);
     let offset = std::fs::metadata(&transcript).unwrap().len();
-    let pane = Pane::with_program(&session, path("tmux"));
+    let pane = Pane::with_program(
+        &session,
+        crate::services::platform::tmux::session_identity_tests::managed_fixture_program(path(
+            "tmux",
+        )),
+    )
+    .expect("managed scripted pane");
     let report = match route {
         Route::Busy => busy_inject::inject_owned(&pane, &request, &TIMING, false),
         Route::Declared => busy_inject::inject_report_any_turn(&pane, &request, None, &TIMING),
@@ -275,7 +281,13 @@ fn owned_entry_sends_no_key_on_a_screen_it_cannot_prove_submits() {
             nonce: &nonce,
             text: "held until the screen submits",
         };
-        let pane = Pane::with_program(&session, dir.path().join("tmux"));
+        let pane = Pane::with_program(
+            &session,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                dir.path().join("tmux"),
+            ),
+        )
+        .expect("managed scripted pane");
         let report = busy_inject::inject_owned(&pane, &request, &TIMING, false);
         assert_eq!(report.outcome, expected, "{screen}");
         let keys = std::fs::read_to_string(dir.path().join("applied")).unwrap_or_default();
@@ -401,7 +413,13 @@ fn identical_inputs_each_answer_for_their_own_row() {
         let transcript = path("transcript.jsonl");
         let session = format!("row-repeat-{at}");
         register_tmux_channel(&session, 7_676_300 + at as u64);
-        let pane = Pane::with_program(&session, path("tmux"));
+        let pane = Pane::with_program(
+            &session,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(path(
+                "tmux",
+            )),
+        )
+        .expect("managed scripted pane");
         let append = |record: serde_json::Value| {
             use std::io::Write;
             let mut file = std::fs::OpenOptions::new()

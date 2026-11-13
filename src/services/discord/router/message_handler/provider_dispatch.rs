@@ -456,6 +456,7 @@ fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), S
                 report_channel_id: Some(turn.channel_id),
                 report_provider: Some(turn.provider.clone()),
                 model: turn.model,
+                effort: turn.effort,
                 fast_mode_enabled: turn.native_fast_mode,
                 goals_enabled: turn.codex_goals,
                 compact_token_limit: turn.compact_token_limit,

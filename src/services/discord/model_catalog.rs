@@ -12,6 +12,7 @@ use crate::services::provider::ProviderKind;
 
 mod bounded_cache_file;
 mod claude;
+pub(in crate::services::discord) mod effort;
 
 pub(crate) const DISCORD_SELECT_OPTION_VALUE_LIMIT: usize = 100;
 

@@ -38,6 +38,7 @@ pub(super) struct LocalTuiTurn<'a> {
     pub session_id: Option<&'a str>,
     pub model: Option<&'a str>,
     pub fast_mode_enabled: Option<bool>,
+    pub effort: Option<&'a str>,
     pub goals_enabled: Option<bool>,
     pub working_dir: &'a str,
     pub sender: Sender<StreamMessage>,
@@ -61,6 +62,7 @@ pub(super) fn execute_observed(
         session_id,
         model,
         fast_mode_enabled,
+        effort,
         goals_enabled,
         working_dir,
         sender,
@@ -129,7 +131,7 @@ pub(super) fn execute_observed(
                     .with_resume_session_id(Some(session_id))
                     .with_developer_instructions(developer_instructions)
                     .with_model(model)
-                    .with_reasoning_effort(codex_reasoning_effort_from_env().as_deref())
+                    .with_reasoning_effort(effort::resolve(effort, None).as_deref())
                     .with_compact_token_limit(compact_token_limit)
                     .with_readonly_mode(readonly_mode)
                     .with_fast_mode_enabled(fast_mode_enabled)
@@ -175,7 +177,7 @@ pub(super) fn execute_observed(
         None,
         force_fresh_provider_session,
     );
-    let reasoning_effort = codex_reasoning_effort_from_env();
+    let reasoning_effort = effort::resolve(effort, None);
     let launch_options = CodexLaunchOptions::new(prompt)
         .with_resume_session_id(session_selection.resume_session_id())
         .with_developer_instructions(developer_instructions)
@@ -207,6 +209,7 @@ pub(super) fn execute_observed(
             prompt,
             model,
             fast_mode_enabled,
+            effort,
             goals_enabled,
             session_id,
             working_dir,

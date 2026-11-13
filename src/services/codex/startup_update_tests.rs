@@ -252,7 +252,7 @@ printf '%s\0' "$@" > "$root/cold.argv"
 cat "$root/cold.records" >> "$ADK_CODEX_COLD_CHAIN_ROLLOUT"
 "#,
     );
-    write_program(
+    let tmux_program = write_program(
         "tmux",
         r#"#!/bin/bash
 set -eu
@@ -295,6 +295,7 @@ set-option|set-hook|set-environment|show-options|show-environment) exit 0 ;;
 esac
 "#,
     );
+    crate::services::platform::tmux::session_identity_tests::mark_fixture_program(tmux_program);
     let _path = Guard::prepend_path_after_shared_test_env_lock(root.path());
     let _binary = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &codex);
     let cancel = Arc::new(CancelToken::new());
@@ -328,6 +329,7 @@ esac
         let result = execute_streaming_local_tui_tmux(
             &prompt,
             Some(&session_id),
+            None,
             None,
             None,
             None,

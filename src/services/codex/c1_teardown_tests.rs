@@ -79,6 +79,7 @@ fn an_existing_session_is_recreated_only_under_its_clearance() {
             None,
             None,
             None,
+            None,
             "/tmp",
             tx,
             None,
@@ -135,6 +136,7 @@ fn a_cleared_existing_session_is_relaunched_exactly_once() {
         None,
         None,
         None,
+        None,
         "/tmp",
         tx,
         Some(cancel),
@@ -161,7 +163,8 @@ fn a_cleared_existing_session_is_relaunched_exactly_once() {
         .find(|call| call.starts_with("new-session"))
         .unwrap();
     assert!(
-        created.starts_with(&format!("new-session -d -s {NAME} -c /tmp bash "))
+        created.starts_with(&format!("new-session -d -s {NAME} -e AGENTDESK_IDENTITY="))
+            && created.contains(" -c /tmp bash ")
             && created.contains(&script),
         "{created}"
     );

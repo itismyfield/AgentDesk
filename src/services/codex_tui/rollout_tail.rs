@@ -2829,51 +2829,74 @@ mod tests {
 
     #[test]
     fn always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done() {
-        let (_dir, rollout) = pending_tool_rollout();
-        let (tx, rx) = mpsc::channel();
-        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let probe_count = probes.clone();
-        let started_at = Instant::now();
-        let (result, _outcome) = tail_rollout_file_until_assistant_response_with_pane_busy_probe(
-            &rollout,
-            0,
-            None,
-            &tx,
-            None,
-            || true,
-            RolloutTailOptions {
-                terminal_drain: Duration::from_secs(60),
-                assistant_response_deadline: Some(Duration::from_secs(60)),
-                pending_tool_call_deadline: Some(Duration::from_millis(100)),
-                legacy_terminal_drain: None,
-                pane_busy_probe: Some(Box::new(move || {
-                    probe_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    super::super::input::CodexPaneBusySignal::Fresh
-                })),
-                pane_busy_veto_cap: Duration::from_millis(250),
-                ..RolloutTailOptions::default()
-            },
-        )
-        .unwrap();
-        drop(tx);
+        use std::cell::Cell;
+        struct VetoClock {
+            started: Instant,
+            at: Cell<Instant>,
+            scheduling_delay: Duration,
+        }
+        impl following_source::TailClock for VetoClock {
+            fn now(&self) -> Instant {
+                self.at.get()
+            }
+            fn sleep(&self, duration: Duration) {
+                let next = self.at.get() + duration + self.scheduling_delay;
+                assert!(
+                    next.duration_since(self.started) < Duration::from_secs(2),
+                    "an always-fresh probe must not hang the tailer"
+                );
+                self.at.set(next);
+            }
+        }
+        // A delayed scheduler may cross the wall-clock cap in a single EOF wait.
+        for (delay_ms, expected_probes, elapsed_ms) in [(0, 4, 400), (250, 2, 700)] {
+            let (_dir, rollout) = pending_tool_rollout();
+            let (tx, rx) = mpsc::channel();
+            let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let probe_count = probes.clone();
+            let started = Instant::now();
+            let clock = VetoClock {
+                started,
+                at: Cell::new(started),
+                scheduling_delay: Duration::from_millis(delay_ms),
+            };
+            let (result, _outcome) = following_source::tail_with_clock(
+                (&rollout, 0, None),
+                &tx,
+                || true,
+                RolloutTailOptions {
+                    terminal_drain: Duration::from_secs(60),
+                    assistant_response_deadline: Some(Duration::from_secs(60)),
+                    pending_tool_call_deadline: Some(Duration::from_millis(100)),
+                    legacy_terminal_drain: None,
+                    pane_busy_probe: Some(Box::new(move || {
+                        probe_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        super::super::input::CodexPaneBusySignal::Fresh
+                    })),
+                    pane_busy_veto_cap: Duration::from_millis(250),
+                    ..RolloutTailOptions::default()
+                },
+                &clock,
+            )
+            .unwrap();
+            drop(tx);
 
-        assert!(matches!(result, ReadOutputResult::Completed { .. }));
-        assert!(
-            probes.load(std::sync::atomic::Ordering::SeqCst) >= 3,
-            "the hard cap must allow multiple fresh veto probes"
-        );
-        assert!(
-            started_at.elapsed() >= Duration::from_millis(250),
-            "the hard cap must retain the short normal-busy grace window"
-        );
-        assert!(
-            started_at.elapsed() < Duration::from_secs(2),
-            "an always-fresh probe must not hang the tailer"
-        );
-        assert!(
-            rx.iter()
-                .any(|message| matches!(message, StreamMessage::Done { .. }))
-        );
+            assert!(matches!(result, ReadOutputResult::Completed { .. }));
+            assert_eq!(
+                probes.load(std::sync::atomic::Ordering::SeqCst),
+                expected_probes,
+                "fresh veto probes must follow elapsed time with {delay_ms}ms scheduling delay"
+            );
+            assert_eq!(
+                clock.at.get().duration_since(started),
+                Duration::from_millis(elapsed_ms),
+                "the hard cap must retain its grace window and finish on the next EOF poll"
+            );
+            assert!(
+                rx.iter()
+                    .any(|message| matches!(message, StreamMessage::Done { .. }))
+            );
+        }
     }
 
     #[test]
