@@ -12,6 +12,20 @@ use std::{
     sync::Arc,
 };
 
+struct SessionCleanup {
+    program: std::path::PathBuf,
+    names: [String; 2],
+}
+impl Drop for SessionCleanup {
+    fn drop(&mut self) {
+        for name in &self.names {
+            let _ = Command::new(&self.program)
+                .args(["kill-session", "-t", &format!("={name}")])
+                .output();
+        }
+    }
+}
+
 pub(crate) struct PromotionRig {
     pub(crate) pool: PgPool,
     pub(crate) shared: Arc<SharedData>,
@@ -21,6 +35,7 @@ pub(crate) struct PromotionRig {
     pub(crate) old: String,
     pub(crate) channel: ChannelId,
     pub(crate) id: i64,
+    _sessions: SessionCleanup,
     pub(crate) root: tempfile::TempDir,
     db: TestPostgresDb,
     program: std::path::PathBuf,
@@ -83,10 +98,14 @@ impl PromotionRig {
             shared,
             registry,
             key,
-            name,
+            name: name.clone(),
             old,
             channel: ChannelId::new(channel),
             id,
+            _sessions: SessionCleanup {
+                program: program.clone(),
+                names: [old_name.clone(), name.clone()],
+            },
             root,
             db,
             program,
