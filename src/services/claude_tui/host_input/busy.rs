@@ -1,6 +1,7 @@
 //! Busy input's host boundary; the owner keeps framing, notices and settlement.
 mod herdr;
 mod tmux;
+pub(crate) use herdr::observe as observe_herdr;
 pub(crate) use tmux::{cause, loads};
 
 use std::path::{Path, PathBuf};
@@ -10,7 +11,6 @@ use super::{InputRefusal, InputTarget};
 use crate::services::claude_tui::busy_inject::{self, Request, Screen, Veto};
 use crate::services::provider::CancelToken;
 use crate::services::session_host::HerdrTarget;
-use crate::services::turn_host::TurnHost;
 
 pub(crate) type BusyProbe = Box<dyn FnMut() -> Screen + Send>;
 
@@ -65,21 +65,6 @@ pub(crate) struct BusyOperation {
 }
 
 impl BusyOperation {
-    /// Observes a supplied host once; it never resolves another execution for that logical key.
-    pub(crate) fn observe_hosted(
-        channel: u64,
-        logical: &str,
-        host: &TurnHost,
-        token_hash: &str,
-    ) -> BusyObservation {
-        match host {
-            TurnHost::Tmux => BusyObservation::only(BusyState::Legacy),
-            TurnHost::Herdr(plan) => herdr::observe(channel, logical, plan, token_hash),
-            // Lifecycle refusals and returns keep the existing driver's recovery policy.
-            TurnHost::Return(_) | TurnHost::Refused(_) => BusyObservation::only(BusyState::Idle),
-        }
-    }
-
     pub(crate) fn for_session(
         session: &str,
         herdr: Option<(HerdrTarget, String)>,
@@ -169,7 +154,7 @@ pub(crate) struct BusyObservation {
 }
 
 impl BusyObservation {
-    fn only(state: BusyState) -> Self {
+    pub(crate) fn only(state: BusyState) -> Self {
         Self {
             context: None,
             state,

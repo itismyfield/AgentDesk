@@ -1,7 +1,7 @@
 //! Owned busy admission shared by the early and late entries.
 use super::*;
 use crate::services::claude_tui::host_input::busy::{BusyObservation, BusyState};
-use crate::services::discord::queue_io::input_owner::held_watch;
+use crate::services::discord::queue_io::input_owner::{claude_handoff, held_watch};
 
 const SOURCE_HELD: &str = "busy_source_unavailable";
 
@@ -34,7 +34,7 @@ impl OwnerTurn {
         )
         .await;
         let observation =
-            BusyOperation::observe_hosted(channel.get(), session, &host, &shared.token_hash);
+            claude_handoff::observe_busy(channel.get(), session, &host, &shared.token_hash);
         match observation.state() {
             BusyState::Legacy => return Ok((owner, true)),
             BusyState::Idle => return Ok((owner, false)),
@@ -116,7 +116,7 @@ impl OwnerTurn {
             .as_deref()
             .filter(|session| {
                 *provider == ProviderKind::Claude
-                    && BusyOperation::observe_hosted(
+                    && claude_handoff::observe_busy(
                         channel.get(),
                         session,
                         &host,
@@ -162,7 +162,7 @@ pub(super) fn late(
     let Some(session) = turn.tmux_session_name.filter(|session| !session.is_empty()) else {
         return legacy();
     };
-    let observation = BusyOperation::observe_hosted(
+    let observation = claude_handoff::observe_busy(
         turn.channel_id,
         session,
         turn.host,

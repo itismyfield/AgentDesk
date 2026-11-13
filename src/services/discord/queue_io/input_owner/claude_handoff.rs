@@ -5,6 +5,7 @@ use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState
 use crate::services::claude::session_handoff::{
     EarlierExecution, LegacyTmux, Liveness, pinned_tmux,
 };
+use crate::services::claude_tui::host_input::busy::{self, BusyObservation, BusyState};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_host::{HerdrTurnPlan, TurnHost};
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
@@ -383,6 +384,58 @@ pub(crate) fn bound_herdr(
     let pane = crate::services::session_host::herdr_endpoints().target(record)?;
     let target = serde_json::json!({"host":"herdr","owner":record.owner.logical_key,"root":at.socket_addr,"execution_nonce":record.execution_nonce});
     Some((pane, format!("{}#{}", at.socket_addr, at.pane_id), target))
+}
+
+/// Observes the supplied host without resolving a replacement execution.
+pub(crate) fn observe_busy(
+    channel: u64,
+    logical: &str,
+    host: &TurnHost,
+    token_hash: &str,
+) -> BusyObservation {
+    let plan = match host {
+        TurnHost::Tmux => return BusyObservation::only(BusyState::Legacy),
+        TurnHost::Herdr(plan) => plan,
+        // Lifecycle refusals and returns keep the existing driver's recovery policy.
+        TurnHost::Return(_) | TurnHost::Refused(_) => {
+            return BusyObservation::only(BusyState::Idle);
+        }
+    };
+    let Some(row) = plan.row.as_ref() else {
+        return BusyObservation::only(BusyState::Idle);
+    };
+    let record = match &row.record {
+        HostedRecord::Unknown(_) => return BusyObservation::only(BusyState::Held),
+        HostedRecord::Known(record) if record.state == HostedState::Bound => record,
+        _ => return BusyObservation::only(BusyState::Idle),
+    };
+    let runtime_root = crate::config::runtime_root();
+    if token_hash.is_empty()
+        || record.owner.discord_token_hash != token_hash
+        || record.owner.owner_node != plan.endpoint.execution_node
+        || runtime_root.as_deref() != Some(std::path::Path::new(&record.owner.runtime_root))
+        || record.owner.provider != "claude"
+        || record.owner.logical_key != logical
+        || record.owner.channel_id != channel.to_string()
+    {
+        return BusyObservation::only(BusyState::Held);
+    }
+    let Some(target) = bound_herdr(plan) else {
+        return BusyObservation::only(BusyState::Held);
+    };
+    busy::observe_herdr(
+        (channel, logical, &record.execution_nonce),
+        target,
+        busy_output_ready,
+    )
+}
+
+fn busy_output_ready(channel: u64) -> bool {
+    crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+        channel,
+        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+    ) == Ok(true)
+        && crate::services::tui_o::writer::host::channel_accepts(channel)
 }
 
 #[cfg(test)]

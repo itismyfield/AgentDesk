@@ -1,9 +1,10 @@
 //! Direct source, ownership and captured-target contracts on the existing typed Herdr rig.
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedExecution, HostedLocation, HostedObservation, HostedOwner, SourceRef,
+    HostedExecution, HostedLocation, HostedObservation, HostedOwner, HostedRecord, HostedState,
+    SourceRef,
 };
-use crate::services::claude_tui::host_input::busy::BusyOperation;
+use crate::services::discord::queue_io::input_owner::claude_handoff;
 use crate::services::herdr_admission::{Admission, force_for_test};
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
@@ -11,6 +12,7 @@ use crate::services::tui_o::cutover::{self, test_override};
 use crate::services::tui_prompt_dedupe::hosted_source::tests::{
     CHANNEL, Fixture as BindingFixture, LOGICAL, N1, N2,
 };
+use crate::services::turn_host::HerdrTurnPlan;
 use binding_events::{BindingCause, CauseSource, HookSignal, Proposal};
 use serde_json::json;
 use std::io::Write;
@@ -118,13 +120,14 @@ fn current_source_requires_the_bound_nonce_and_current_runtime_binding() {
     let _registry = rig.registry_on_this_thread();
     pane(&rig);
     let observation =
-        BusyOperation::observe_hosted(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+        claude_handoff::observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     let context = observation.context.as_ref().unwrap();
     assert_eq!(current(context).unwrap().id, source);
     let wrong_nonce = Context {
         channel: CHANNEL,
         logical: LOGICAL.into(),
         nonce: N2.into(),
+        output_ready: context.output_ready,
         target: context.target.clone(),
         writer: context.writer.clone(),
         attempt_target: context.attempt_target.clone(),
@@ -150,7 +153,7 @@ fn current_source_rejects_a_replaced_transcript_inode() {
     let _registry = rig.registry_on_this_thread();
     pane(&rig);
     let observation =
-        BusyOperation::observe_hosted(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+        claude_handoff::observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     let context = observation.context.as_ref().unwrap();
     assert_eq!(current(context).unwrap().id, source);
     let replacement = source.path.with_extension("replacement");
@@ -179,7 +182,7 @@ fn an_owned_live_source_waits_while_its_actual_output_writer_is_absent() {
         CHANNEL
     ));
     let observation =
-        BusyOperation::observe_hosted(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+        claude_handoff::observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     let context = observation.context.as_ref().unwrap();
     assert!(context.target.execution_alive());
     assert_eq!(current(context).unwrap().id, source);
@@ -201,7 +204,7 @@ fn a_captured_target_rejects_the_other_execution_running_in_its_pane() {
     let _admission = force_for_test(Admission::new(true, Some(stop)));
     pane(&rig);
     let observation =
-        BusyOperation::observe_hosted(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+        claude_handoff::observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     let context = observation.context.as_ref().unwrap();
     assert!(context.target.execution_alive());
     context.target.pin(HerdrMutation::Input).unwrap();
@@ -225,7 +228,7 @@ fn a_held_source_probe_wakes_verified_clear_before_its_new_transcript_exists() {
     pane(&rig);
     std::fs::remove_file(&source.path).unwrap();
     let observation =
-        BusyOperation::observe_hosted(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+        claude_handoff::observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     assert_eq!(observation.state(), BusyState::Held);
     let mut probe = observation.probe();
     assert!(matches!(probe(), Screen::Unknown));
@@ -260,7 +263,7 @@ fn a_held_source_probe_wakes_verified_clear_before_its_new_transcript_exists() {
         "verified clear delegates without granting Busy"
     );
     assert_eq!(
-        BusyOperation::observe_hosted(CHANNEL, LOGICAL, &host(&rig), "observation-fixture").state(),
+        claude_handoff::observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture").state(),
         BusyState::Idle
     );
     assert!(rig.sends().is_empty());
@@ -297,7 +300,7 @@ fn a_bound_observation_requires_this_accounts_node_and_runtime_owner() {
         } else {
             "observation-fixture"
         };
-        let observation = BusyOperation::observe_hosted(CHANNEL, LOGICAL, &stale, token);
+        let observation = claude_handoff::observe_busy(CHANNEL, LOGICAL, &stale, token);
         assert_eq!(observation.state(), BusyState::Held, "{case}");
         assert!(
             observation.herdr().is_none(),
@@ -366,7 +369,7 @@ fn an_idle_relay_does_not_delegate_a_busy_input_source() {
         crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&source.path).is_busy()
     );
     let observation =
-        BusyOperation::observe_hosted(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+        claude_handoff::observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     assert_eq!(
         observation.state(),
         BusyState::Held,

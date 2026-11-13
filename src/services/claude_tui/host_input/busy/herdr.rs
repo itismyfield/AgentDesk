@@ -1,6 +1,5 @@
 //! The existing bound Herdr transaction, with no fallback to another host.
 use super::{BusyObservation, BusyOutcome, BusyReport, BusyState};
-use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject::{self, Request, Screen, Veto};
 use crate::services::claude_tui::composer_lock::DraftSighting;
@@ -14,7 +13,6 @@ use crate::services::session_host::{HerdrMutation, HerdrTarget, HostKey, HostMut
 use crate::services::tui_input::human_frame::history;
 use crate::services::tui_prompt_dedupe::binding_events::SourceId;
 use crate::services::tui_prompt_dedupe::{self, binding_events};
-use crate::services::turn_host::HerdrTurnPlan;
 use std::sync::Arc;
 
 pub(super) struct Adapter {
@@ -157,6 +155,7 @@ pub(super) struct Context {
     channel: u64,
     pub(super) logical: String,
     nonce: String,
+    output_ready: fn(u64) -> bool,
     pub(super) target: HerdrTarget,
     pub(super) writer: String,
     pub(super) attempt_target: serde_json::Value,
@@ -186,45 +185,19 @@ impl Reading {
     }
 }
 
-pub(super) fn observe(
-    channel: u64,
-    logical: &str,
-    plan: &HerdrTurnPlan,
-    token_hash: &str,
+pub(crate) fn observe(
+    (channel, logical, nonce): (u64, &str, &str),
+    (target, writer, attempt_target): (HerdrTarget, String, serde_json::Value),
+    output_ready: fn(u64) -> bool,
 ) -> BusyObservation {
-    let Some(row) = plan.row.as_ref() else {
-        return BusyObservation::only(BusyState::Idle);
-    };
-    let record = match &row.record {
-        HostedRecord::Unknown(_) => return BusyObservation::only(BusyState::Held),
-        HostedRecord::Known(record) if record.state == HostedState::Bound => record,
-        _ => return BusyObservation::only(BusyState::Idle),
-    };
-    let runtime_root = crate::config::runtime_root();
-    if token_hash.is_empty()
-        || record.owner.discord_token_hash != token_hash
-        || record.owner.owner_node != plan.endpoint.execution_node
-        || runtime_root.as_deref() != Some(std::path::Path::new(&record.owner.runtime_root))
-        || record.owner.provider != "claude"
-        || record.owner.logical_key != logical
-        || record.owner.channel_id != channel.to_string()
-    {
-        return BusyObservation::only(BusyState::Held);
-    }
-    let Some(location) = record.location.as_ref() else {
-        return BusyObservation::only(BusyState::Held);
-    };
-    let Some(target) = crate::services::session_host::herdr_endpoints().target(record) else {
-        return BusyObservation::only(BusyState::Held);
-    };
     let context = Arc::new(Context {
         channel,
         logical: logical.into(),
-        nonce: record.execution_nonce.clone(),
+        nonce: nonce.into(),
+        output_ready,
         target,
-        writer: format!("{}#{}", location.socket_addr, location.pane_id),
-        attempt_target: serde_json::json!({"host":"herdr", "owner":logical,
-            "root":location.socket_addr, "execution_nonce":record.execution_nonce}),
+        writer,
+        attempt_target,
     });
     let read = context.read();
     BusyObservation {
@@ -242,11 +215,7 @@ impl Context {
         if self.cleared() || self.idle_ready() {
             return Reading::idle();
         }
-        if crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
-            self.channel,
-            Some(RuntimeHandoffKind::ClaudeTui),
-        ) != Ok(true)
-            || !crate::services::tui_o::writer::host::channel_accepts(self.channel)
+        if !(self.output_ready)(self.channel)
             || !matches!(self.target.capture_ansi(-80), Some(capture) if !busy_inject::modal(&capture))
         {
             return Reading::held();

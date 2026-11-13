@@ -3,6 +3,7 @@ use super::*;
 use crate::services::discord::queue_io::input_owner::admission::{
     Admission as OwnerAdmission, AdmissionTicket, admit,
 };
+use crate::services::discord::queue_io::input_owner::claude_handoff;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::{self as discord, SharedData, inflight};
 use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
@@ -90,7 +91,7 @@ fn assert_idle_source(
     host: &crate::services::turn_host::TurnHost,
 ) {
     use crate::services::agent_protocol::RuntimeHandoffKind;
-    use crate::services::claude_tui::host_input::busy::{BusyOperation, BusyState};
+    use crate::services::claude_tui::host_input::busy::BusyState;
     use crate::services::claude_tui::source_verify::{self, Observation, PinJudgment};
     use crate::services::tui_prompt_dedupe::{self, binding_events};
     use std::os::unix::fs::MetadataExt;
@@ -187,7 +188,7 @@ fn assert_idle_source(
         "the launch completed before a later fixture changes the source"
     );
     assert_eq!(
-        BusyOperation::observe_hosted(CHANNEL, fx.logical(), host, &shared.token_hash).state(),
+        claude_handoff::observe_busy(CHANNEL, fx.logical(), host, &shared.token_hash).state(),
         BusyState::Idle,
         "the complete initial source reaches the same actual busy observer"
     );
@@ -236,9 +237,9 @@ impl Intake {
         )
         .unwrap();
         std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let no_tmux = ScopedTmuxPath(Some(
-            Guard::prepend_path_after_shared_test_env_lock(fx.cwd.path()),
-        ));
+        let no_tmux = ScopedTmuxPath(Some(Guard::prepend_path_after_shared_test_env_lock(
+            fx.cwd.path(),
+        )));
         crate::services::platform::tmux::invalidate_availability_cache();
         let session_hosts_guard = crate::config::session_hosts::force_config_for_test(&config);
         crate::config_live_reload::install(config.clone());
@@ -974,7 +975,7 @@ async fn idle_turn_unwound(intake: &Intake) {
 
 #[test]
 fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
-    use crate::services::claude_tui::host_input::busy::{BusyOperation, BusyState};
+    use crate::services::claude_tui::host_input::busy::BusyState;
     use crate::services::discord::queue_io::input_owner::held_watch::{self, Verdict};
     use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
     use crate::services::tui_prompt_dedupe::binding_events;
@@ -1044,13 +1045,8 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
         )
         .await;
         assert_eq!(
-            BusyOperation::observe_hosted(
-                CHANNEL,
-                fx.logical(),
-                &hosted,
-                &intake.shared.token_hash
-            )
-            .state(),
+            claude_handoff::observe_busy(CHANNEL, fx.logical(), &hosted, &intake.shared.token_hash)
+                .state(),
             BusyState::Held,
             "the same strict observer holds the unverified Busy source"
         );
@@ -1168,7 +1164,7 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
         )
         .await;
         assert_eq!(
-            BusyOperation::observe_hosted(
+            claude_handoff::observe_busy(
                 CHANNEL,
                 fx.logical(),
                 &hosted,
