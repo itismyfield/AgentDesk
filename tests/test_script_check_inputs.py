@@ -169,6 +169,46 @@ class ScriptCheckInputSelection(unittest.TestCase):
                 self.assertEqual(len(runners), 1)
                 self.assertEqual(runners[0][1]["env"]["SCRIPT_CHECK_SELF_TESTS_ONLY"], "1")
 
+    def test_nightly_credential_bundle_has_the_pr_cargo_shards_rust_setup(self) -> None:
+        pr = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())
+        nightly = yaml.safe_load((ROOT / ".github/workflows/ci-nightly.yml").read_text())
+        title = "Isolated instance credential binary tests"
+        listed = subprocess.run(
+            ["/bin/bash", str(ROOT / "scripts/ci-script-checks.sh")], cwd=ROOT,
+            env=self.env(PYTHON=sys.executable, SCRIPT_CHECK_LIST="1"),
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+        owners = [shard for shard, name in (line.split("\t", 1)
+                  for line in listed.stdout.splitlines()) if name == title]
+        self.assertEqual(owners, ["cargo"])
+        self.assertIn(title, selector.SELF_TEST_INPUTS)
+        self.assertEqual(selector.skipped_checks(self.env(GITHUB_EVENT_NAME="schedule")), {})
+
+        pr_job = pr["jobs"]["scripts"]
+        pr_run = next(step for step in pr_job["steps"]
+                      if step.get("run") == "./scripts/ci-script-checks.sh")
+        self.assertEqual(pr_run["env"]["SCRIPT_CHECK_SHARD"], owners[0])
+        job = nightly["jobs"]["scripts"]
+        run = next(step for step in job["steps"]
+                   if step.get("run") == "./scripts/ci-script-checks.sh")
+        self.assertNotIn("if", job)
+        self.assertNotIn("if", run)
+        self.assertNotIn("continue-on-error", run)
+        self.assertNotIn("SCRIPT_CHECK_SHARD", run["env"])
+        self.assertEqual(run["env"]["SCRIPT_CHECK_SELF_TESTS_ONLY"], "1")
+        self.assertEqual(nightly["env"]["RUSTC_WRAPPER"], "sccache")
+        for action in ("dtolnay/rust-toolchain@master", "./.github/actions/sccache-or-nothing"):
+            with self.subTest(action=action):
+                setup = [step for step in job["steps"] if step.get("uses") == action]
+                self.assertEqual(len(setup), 1, f"nightly credential bundle needs {action}")
+                self.assertNotIn("if", setup[0])
+                self.assertNotIn("continue-on-error", setup[0])
+                self.assertLess(job["steps"].index(setup[0]), job["steps"].index(run))
+                reference = next(step for step in pr_job["steps"] if step.get("uses") == action)
+                self.assertEqual(setup[0].get("with"), reference.get("with"))
+        for profile in ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"):
+            self.assertEqual(run["env"].get(profile), "0")
+
     def fixture_runner(self, *, remove_helper: bool = False, child_probe: bool = False,
                        **extra: str) -> subprocess.CompletedProcess[str]:
         aggregate = (ROOT / "scripts/ci-script-checks.sh").read_text()
