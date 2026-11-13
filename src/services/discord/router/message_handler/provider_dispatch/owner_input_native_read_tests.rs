@@ -163,7 +163,7 @@ async fn start_meets(id: u64, case: Read) {
         Read::Armed => BUSY.to_string(),
         Read::Unlooked => IDLE.to_string(),
         _ if early => format!("{IDLE}{PERMISSION_MODE}"),
-        Read::ReadyTail => format!("{IDLE}{PERMISSION_MODE}"),
+        Read::ReadyTail => format!("{PERMISSION_MODE}{IDLE}"),
         _ => IDLE.to_string(),
     };
     fs::write(&native, initial).unwrap();
@@ -312,7 +312,10 @@ async fn start_meets(id: u64, case: Read) {
     match case {
         Read::LateBusy => append(IDLE),
         Read::Unlooked => rig.mock.heal_channel(id),
-        _ => shim.composer_ready(),
+        _ => {
+            append(IDLE);
+            shim.composer_ready();
+        }
     }
     runs_once(&rig, &pool, ORIGIN, &mut settled, bridge, append).await;
     drop(rig);

@@ -140,6 +140,7 @@ fn a_fresh_refusal_or_uncertain_payload_keeps_its_session_and_owner_marker() {
         crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(front.path());
     let dir = tempfile::tempdir().unwrap();
     let (owner, transcript) = (dir.path().join("owner"), dir.path().join("t.jsonl"));
+    crate::services::claude_tui::readiness::tests::pre_source(NAME, &transcript);
     let rule = "─".repeat(80);
     let ready = format!("Claude Code v2.1.289\n\n{rule}\n\u{276f} \n{rule}\n  MCP: 2");
     for (label, fence, held) in [

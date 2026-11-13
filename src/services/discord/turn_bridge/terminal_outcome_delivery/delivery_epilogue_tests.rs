@@ -1899,3 +1899,5 @@ async fn the_delivery_commit_stores_the_scheduled_outcome_of_its_transcript() {
         assert_eq!(stored, expected, "{case}");
     }
 }
+
+mod routine_presentation_tests;

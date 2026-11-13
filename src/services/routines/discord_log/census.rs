@@ -50,7 +50,7 @@ impl RoutineDiscordLogger {
     ) -> RoutineDiscordLogStatus {
         let content = render(outcome);
         let state = match store
-            .record_run_discord_log_section(&outcome.run_id, "outcome", &content)
+            .record_run_discord_log_section(&outcome.run_id, "public_result", &content)
             .await
         {
             Ok(state) => state,

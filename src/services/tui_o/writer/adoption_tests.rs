@@ -503,3 +503,28 @@ fn a_renumbered_pin_reads_unchanged_until_its_file_moves() {
 
 #[path = "adoption_past_stall_tests.rs"]
 mod past_stall;
+
+#[test]
+fn recap_is_undelivered_output_without_reopening_adoption_turn() {
+    let channel = Channel::new(814_301);
+    let before = channel.end();
+    let recap = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/claude_away_summary.jsonl"
+    ));
+    append(&channel.source.path, recap);
+    *channel.legacy.cursor.lock().unwrap() = Some(channel.end());
+    let snapshot = channel
+        .pin()
+        .expect("recap cannot reopen the completed turn");
+    assert!(
+        snapshot.owed().is_some(),
+        "recap must stay output, not quiet bookkeeping"
+    );
+    assert!(
+        matches!(snapshot.abandoned(), Some(WriterAlarm::Abandoned { from, to, .. })
+        if from == before && to == channel.end())
+    );
+    *channel.legacy.frontier.lock().unwrap() = Some(channel.end());
+    assert!(channel.pin().unwrap().owed().is_none());
+}
