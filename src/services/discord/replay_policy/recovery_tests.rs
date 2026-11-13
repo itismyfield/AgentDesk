@@ -541,8 +541,6 @@ async fn existing_withheld_current_owner_restores_without_a_local_root_proof_pg(
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE intake_outbox SET replay_preserved=replay_preserved #- '{stale_replay_notice,hold_nonce}' WHERE id=$1")
-        .bind(attempt.receipt_id()).execute(&pool).await.unwrap();
     let restored = write::recover_hold_notice(
         &pool,
         attempt.receipt_id(),
@@ -554,10 +552,39 @@ async fn existing_withheld_current_owner_restores_without_a_local_root_proof_pg(
     )
     .await
     .unwrap();
-    assert_eq!(restored.outbox_id, first.outbox_id);
-    assert_eq!(restored.dedupe_key, first.dedupe_key);
+    assert_eq!(restored, first);
+    let mut legacy = state(82);
+    let old = begin(&pool, &mut legacy, &target, current).await;
+    // Seed the old persisted format before withholding; the held-row fence stays enabled.
+    let old_notice = serde_json::json!({
+        "legacy":{"raw":" untouched "},
+        "stale_replay_notice":{
+            "dedupe_key":format!("stale_replay_withheld:{}", old.receipt_id()),
+            "outbox_id":987654321
+        }
+    });
+    write::withhold(
+        &pool,
+        &old,
+        "legacy notice whose delivery was collected",
+        &old_notice,
+    )
+    .await
+    .unwrap();
+    let restored_old = write::recover_hold_notice(
+        &pool,
+        old.receipt_id(),
+        &legacy.provider,
+        &legacy.channel_id.to_string(),
+        None,
+        None,
+        ROUTING,
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored_old.outbox_id, 987654321);
     assert_eq!(
-        restored.hold_nonce, None,
+        restored_old.hold_nonce, None,
         "missing legacy notice nonce remains distinct from empty"
     );
     let held: (String, String, String, serde_json::Value, i64) = sqlx::query_as(

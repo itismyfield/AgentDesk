@@ -1,4 +1,5 @@
 //! Only the singleton owner can assemble a root from its existing lock handle.
+#![cfg(unix)]
 use super::OwnedRuntimeRoot;
 use crate::cli::dcserver::replay_recovery::issuer_key::SingletonRootKey;
 use std::{fs::File, path::PathBuf, sync::Arc};

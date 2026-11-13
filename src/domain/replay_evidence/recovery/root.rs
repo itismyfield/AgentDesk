@@ -5,7 +5,6 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(unix)]
 #[path = "../../../cli/dcserver/replay_root_issuer.rs"]
 pub(crate) mod issuer;
 
