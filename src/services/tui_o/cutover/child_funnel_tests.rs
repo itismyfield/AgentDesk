@@ -1,5 +1,6 @@
 //! Site × child: each census funnel's O test again with its channel as a recorded thread child of
-//! a selected parent, so a funnel that reads only boot membership posts the child's body.
+//! a selected parent, so a funnel that reads only boot membership posts the child's body. W10 builds
+//! its own boot and keeps its child case beside it.
 
 use super::test_override::funnel_as_child;
 
@@ -32,14 +33,6 @@ fn child_w04_single_message_footer_sends_no_body() {
     run(
         WATCHER,
         "single_message_footer_tests::o_delegated_single_message_footer_completion_sends_no_body",
-    );
-}
-
-#[test]
-fn child_w10_tui_body_is_cut_on_direct_gateways() {
-    run(
-        EPILOGUE,
-        "turn_mode_anchor_tests::o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless",
     );
 }
 

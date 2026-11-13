@@ -16,7 +16,7 @@ pub(crate) use channel_gate::{
     o_owns_tui_output_for_channel_reserving, peek_o_owns_tui_output_for_channel,
     peek_o_owns_tui_output_for_channel_tmux,
 };
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod child_funnel_tests;
 #[cfg(test)]
 pub(crate) use channel_gate::{
@@ -322,6 +322,7 @@ pub(crate) mod test_override {
     }
 
     /// Re-runs the funnel test at crate path `name` with its O channels as thread children.
+    #[cfg(unix)]
     pub(crate) fn funnel_as_child(name: &str) {
         let marks = tempfile::NamedTempFile::new().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
