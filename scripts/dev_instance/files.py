@@ -11,6 +11,8 @@ from pathlib import Path
 
 
 CREDENTIAL_NAMES = frozenset({"claude_bot_token", "codex_bot_token", "driver_bot_token"})
+LIVE_CREDENTIAL_NAMES = frozenset({"claude_bot_token", "codex_bot_token", "announce_bot_token", "notify_bot_token"})
+STORED_CREDENTIAL_NAMES = CREDENTIAL_NAMES | LIVE_CREDENTIAL_NAMES
 LAYOUT_DIRS = (
     "config", "runtime", "data", "logs", "outputs", "policies", "workspaces",
     "credential", "postgres", "postgres/data", "postgres/socket",
@@ -177,7 +179,7 @@ def _validate_directory(descriptor: int, relative: tuple[str, ...], sockets) -> 
                     or (metadata.st_dev, metadata.st_ino) != sockets[child]):
                 raise InstanceError("live socket was replaced")
         elif relative == ("credential",):
-            if name not in CREDENTIAL_NAMES or not stat.S_ISREG(metadata.st_mode):
+            if name not in STORED_CREDENTIAL_NAMES or not stat.S_ISREG(metadata.st_mode):
                 raise InstanceError("unknown credential entry is not allowed")
             if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1 or metadata.st_size == 0:
                 raise InstanceError("credential must be a nonempty private regular file")
@@ -253,7 +255,7 @@ def write_private_text(root: str | Path, relative: str | Path, text: str) -> Non
 
 def publish_runtime(root, relative, data, expected_identity=None, live_sockets=None):
     """Update only the pinned owned inode; a partial JSON read must remain HOLD."""
-    if _child_parts(relative) != ("runtime", "resources-owner.json"):
+    if _child_parts(relative) not in {("runtime", "resources-owner.json"), ("runtime", "instance-run.json")}:
         raise InstanceError("runtime publication target is not declared")
     try:
         encoded = (json.dumps(data, sort_keys=True, allow_nan=False) + "\n").encode()
@@ -332,7 +334,7 @@ def _token_bytes(value) -> bytes:
 
 def write_credential(root: str | Path, name: str, stream) -> None:
     root = safe_absolute(root)
-    if name not in CREDENTIAL_NAMES:
+    if name not in STORED_CREDENTIAL_NAMES:
         raise InstanceError("unknown credential name")
     validate_tree(root)
     first_path = os.environ.get("PATH", "").split(os.pathsep)[0]

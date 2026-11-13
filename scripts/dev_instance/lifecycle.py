@@ -8,12 +8,11 @@ import os
 from pathlib import Path
 import re
 import select
-import math
-import threading
 import subprocess
 import time
 
-from .files import InstanceError, safe_absolute
+from .files import InstanceError, safe_absolute, publish_runtime
+from . import identity
 from .lease import LEASE_ENV, acquire
 from .manifest import child_environment, validate, worktree_identity
 
@@ -51,10 +50,53 @@ def _stop_child(child, grace, deadline=None):
             raise CleanupPending(child) from None
 
 
+class _PrefixedControl:
+    def __init__(self, prefix, stream):
+        self.prefix, self.stream = prefix, stream
+
+    def readline(self, limit=-1):
+        prefix, self.prefix = self.prefix, ''
+        return prefix if prefix.endswith('\n') else prefix+self.stream.readline(
+            limit if limit < 0 else max(0, limit-len(prefix)))
+
+
+def initial_frame(stream):
+    """Only a complete pre-filled typed frame opts in; legacy stdin never waits."""
+    try:
+        descriptor = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None, stream
+    data = bytearray()
+    while len(data) <= 4096 and select.select([descriptor], [], [], 0)[0]:
+        byte = os.read(descriptor, 1)
+        if not byte:
+            break
+        data.extend(byte)
+        if byte == b'\n':
+            break
+    if len(data) > 4096:
+        raise InstanceError('initial control frame exceeds its bound')
+    text = data.decode('utf-8')
+    if text.endswith('\n'):
+        try:
+            frame = json.loads(text)
+        except ValueError:
+            frame = None
+        if type(frame) is dict and frame.get('kind') == 'admission':
+            identity.parse_admission(frame)
+            return frame, stream
+        if type(frame) is dict and frame.get('kind') == 'orphan-control':
+            raise InstanceError('cooperative orphan control is not available')
+    return None, _PrefixedControl(text, stream) if text else stream
+
+
 def supervise(base, instance_id, ambient, *, binary_sha256, head, wall_timeout,
               stop_grace, max_gateway=1, spawn=subprocess.Popen, resources=None, control_stream=None):
     _bounds(wall_timeout, stop_grace, max_gateway)
     started = time.monotonic()
+    admission, control_stream = initial_frame(control_stream)
+    if admission is not None and resources is None:
+        raise InstanceError('verified admission requires owned runtime resources')
     manifest = validate(base, instance_id, ambient)
     if (not isinstance(head, str) or manifest["head"] != head
             or not isinstance(binary_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", binary_sha256)):
@@ -62,45 +104,53 @@ def supervise(base, instance_id, ambient, *, binary_sha256, head, wall_timeout,
     binary = safe_absolute(Path(manifest["worktree"]) / "target/debug/agentdesk")
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise InstanceError("declared lane binary is unavailable")
-    with binary.open("rb") as source:
+    descriptor = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as source:
         if hashlib.file_digest(source, "sha256").hexdigest() != binary_sha256:
             raise InstanceError("declared lane binary SHA mismatch")
-    environment = child_environment(manifest, ambient)
-    root = Path(manifest["root"])
-    with acquire(root, instance_id) as owner:
-        owner.verify()
-        if worktree_identity(manifest["worktree"]) != head:
-            raise InstanceError("lifecycle source HEAD changed")
-        remaining = wall_timeout - (time.monotonic() - started)
-        if remaining <= 0:
-            raise InstanceError("lifecycle startup budget exhausted")
-        environment[LEASE_ENV] = json.dumps(owner.witness(), sort_keys=True, separators=(",", ":"))
-        if resources is not None:
-            return _supervise_resources(manifest, resources, binary, environment, owner,
-                                        started + wall_timeout, stop_grace, spawn, control_stream)
-        child = spawn([str(binary), "dcserver"], cwd=str(root), env=environment,
-                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                      stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(owner.fd,))
-        status = "STOPPED"
-        try:
+        environment = child_environment(manifest, ambient)
+        root = Path(manifest["root"])
+        observed = identity.probe(root, admission, started+wall_timeout,
+                                  declared_roles=manifest["profile"]["bots"]) if admission is not None else None
+        with acquire(root, instance_id) as owner:
             owner.verify()
-            remaining = max(0, wall_timeout - (time.monotonic() - started))
-            child.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            status = "TIMEOUT"
-            _stop_child(child, stop_grace)
-        except BaseException:
-            _stop_child(child, stop_grace)
-            raise
-        if status == "STOPPED" and child.returncode != 0:
-            status = "FAILED"
-        return {"status": status, "live_ready": False, "instance_id": instance_id,
-                "head": head, "binary_sha256": binary_sha256, "child_pid": child.pid,
-                "child_exit": child.returncode, "nonce": owner.nonce,
-                "max_gateway": 1, "restarts": 0}
+            if worktree_identity(manifest["worktree"]) != head:
+                raise InstanceError("lifecycle source HEAD changed")
+            remaining = wall_timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                raise InstanceError("lifecycle startup budget exhausted")
+            environment[LEASE_ENV] = json.dumps(owner.witness(), sort_keys=True, separators=(",", ":"))
+            verification = None
+            if observed is not None:
+                run = identity.run_payload(manifest, source, binary_sha256, observed)
+                environment[identity.RUN_ENV] = json.dumps(run, separators=(",", ":"))
+                verification = (source.fileno(), binary_sha256, observed)
+            if resources is not None:
+                return _supervise_resources(manifest, resources, binary, environment, owner,
+                                            started + wall_timeout, stop_grace, spawn, control_stream, verification)
+            child = spawn([str(binary), "dcserver"], cwd=str(root), env=environment,
+                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(owner.fd,))
+            status = "STOPPED"
+            try:
+                owner.verify()
+                remaining = max(0, wall_timeout - (time.monotonic() - started))
+                child.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                status = "TIMEOUT"
+                _stop_child(child, stop_grace)
+            except BaseException:
+                _stop_child(child, stop_grace)
+                raise
+            if status == "STOPPED" and child.returncode != 0:
+                status = "FAILED"
+            return {"status": status, "live_ready": False, "instance_id": instance_id,
+                    "head": head, "binary_sha256": binary_sha256, "child_pid": child.pid,
+                    "child_exit": child.returncode, "nonce": owner.nonce,
+                    "max_gateway": 1, "restarts": 0}
 
 
-def _supervise_resources(manifest, specification, binary, environment, lease, deadline, grace, spawn, control_stream):
+def _supervise_resources(manifest, specification, binary, environment, lease, deadline, grace, spawn, control_stream, verification=None):
     from . import keeper
     from .manifest import resource_spec
     specification = resource_spec(specification)
@@ -118,7 +168,15 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
             raise InstanceError("resource startup exhausted wall budget")
         child = spawn([str(binary), "dcserver"], cwd=manifest["root"], env=environment,
                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                      stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(lease.fd,))
+                      stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(lease.fd,) + ((verification[0],) if verification else ()))
+        if verification is not None:
+            witness = identity.wait_health(manifest, lease.nonce, child.pid, verification[1],
+                                           verification[2], deadline, alive=lambda: child.poll() is None)
+            if time.monotonic() >= deadline:
+                raise InstanceError('verification exhausted startup budget')
+            publish_runtime(Path(manifest['root']), 'runtime/instance-run.json',
+                            {**witness, 'verified': True},
+                            live_sockets={path: tuple(value) for path, value in ready['sockets'].items()})
         if control_stream is not None:
             def controls():
                 try:
@@ -159,7 +217,8 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
         return {**result, "status": "TIMEOUT" if timed_out else
                 "STOPPED" if requested or child.returncode == 0 else "FAILED",
                 "child_pid": child.pid, "child_exit": child.returncode,
-                "max_gateway": 1, "restarts": 0, "head": manifest["head"]}
+                "max_gateway": 1, "restarts": 0, "head": manifest["head"],
+                **({"verified": True} if verification else {})}
     except (EOFError, OSError, ValueError) as error:
         if child is not None:
             _stop_child(child, grace, stop_end or time.monotonic()+grace)

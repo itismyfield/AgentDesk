@@ -382,6 +382,8 @@ pub(crate) async fn run(
     bind_security_diagnostics::log_decision(&config, &bind_host, &bind_decision);
     let addr = format!("{}:{}", bind_host, config.server.port);
     let listener = crate::services::platform::network::bind_tcp_listener(&addr).await?;
+    crate::config::test_instance::lifecycle::bound_listener(listener.local_addr()?)
+        .map_err(anyhow::Error::msg)?;
     tracing::info!("HTTP server listening on {addr}");
     routes::audit_explicit_auth_routes_on_boot(&config);
     axum::serve(

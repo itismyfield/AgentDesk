@@ -13,6 +13,9 @@ use std::time::{Duration, Instant};
 const MODE: &str = "I3A_LEASE_TEST_MODE";
 const LIMIT: Duration = Duration::from_secs(10);
 
+#[path = "run_identity_tests.rs"]
+mod run_identity;
+
 struct LeaseFixture {
     _temporary: tempfile::TempDir,
     root: PathBuf,

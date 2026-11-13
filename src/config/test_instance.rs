@@ -17,6 +17,10 @@ pub(crate) struct TestInstance {
     pub(crate) root: PathBuf,
     config_path: PathBuf,
     pub(crate) instance_id: String,
+    #[cfg(unix)]
+    pub(crate) head: String,
+    #[cfg(unix)]
+    pub(crate) worktree: PathBuf,
     pub(crate) tmux: TmuxHost,
     pub(crate) herdr: HerdrHost,
     environment: environment::Environment,
@@ -176,6 +180,17 @@ fn load_instance_declaration(
         return Err(rejected());
     }
     let id = manifest["instance_id"].as_str().ok_or_else(rejected)?;
+    let head = manifest["head"].as_str().ok_or_else(rejected)?;
+    let worktree = Path::new(manifest["worktree"].as_str().ok_or_else(rejected)?);
+    checked_path(worktree)?;
+    if head.len() != 40
+        || !head
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || std::fs::canonicalize(worktree).map_err(|_| rejected())? != worktree
+    {
+        return Err(rejected());
+    }
     if !uuid::Uuid::parse_str(id).is_ok_and(|id_value| id_value.hyphenated().to_string() == id)
         || root.file_name() != Some(std::ffi::OsStr::new(id))
         || manifest["root"] != root.to_string_lossy().as_ref()
@@ -239,10 +254,35 @@ fn load_instance_declaration(
         root: root.into(),
         config_path: config_path.into(),
         instance_id: id.into(),
+        #[cfg(unix)]
+        head: head.into(),
+        #[cfg(unix)]
+        worktree: worktree.into(),
         tmux,
         herdr,
         environment: environment::Environment::load(root, &manifest, &config)?,
     })
+}
+
+#[cfg(unix)]
+impl TestInstance {
+    fn verify_run_declaration(&self) -> Result<(), String> {
+        self.environment.verify()?;
+        for path in [
+            self.root.join("manifest.json"),
+            self.root.join("receipt.json"),
+        ] {
+            let declaration = read_json(&path)?;
+            if declaration["head"] != self.head
+                || declaration["worktree"] != self.worktree.to_string_lossy().as_ref()
+                || declaration["instance_id"] != self.instance_id
+                || declaration["root"] != self.root.to_string_lossy().as_ref()
+            {
+                return Err(rejected());
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn configure_tmux_command(command: &mut Command) -> io::Result<()> {
@@ -507,5 +547,7 @@ pub(crate) mod tests;
 
 #[cfg(all(test, unix))]
 mod api_boundary_tests;
+#[cfg(all(test, unix))]
+mod bound_health_tests;
 #[cfg(all(test, unix))]
 mod environment_tests;

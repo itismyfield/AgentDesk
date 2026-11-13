@@ -145,11 +145,13 @@ src/
 │   │   └── teardown_probe.rs
 │   ├── test_instance/
 │   │   ├── api_boundary_tests.rs
+│   │   ├── bound_health_tests.rs
 │   │   ├── environment.rs
 │   │   ├── environment_tests.rs
 │   │   ├── host_scope_tests.rs
 │   │   ├── lifecycle.rs
-│   │   └── lifecycle_tests.rs
+│   │   ├── lifecycle_tests.rs
+│   │   └── run_identity_tests.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
 │   ├── cluster_role.rs
@@ -670,6 +672,8 @@ src/
 │   │   │   ├── response.rs
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
+│   │   │   ├── test_instance_projection_tests.rs
+│   │   │   ├── test_instance_response_tests.rs
 │   │   │   ├── tui_output_readiness_tests.rs
 │   │   │   ├── unread_tail_attribution_tests.rs
 │   │   │   └── writer_readiness.rs
@@ -3890,6 +3894,7 @@ src/
 │   │   │   │   ├── loaded_image_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── peer.rs
+│   │   │   │   ├── peer_current_image_tests.rs
 │   │   │   │   ├── peer_tests.rs
 │   │   │   │   ├── permit.rs
 │   │   │   │   ├── proof_tests.rs
