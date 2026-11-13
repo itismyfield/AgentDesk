@@ -1,45 +1,53 @@
 ---
-title: "Codex ready, busy, end and /stop judged from the rollout, the Stop hook and the process"
+title: "Codex ready, busy, end and /stop judged from the rollout, the hooks and the process"
 ---
 stateDiagram-v2
-  s0: Booting: wait for this launch's Codex process (launch 1, 0 turn(s) started)
-  s1: Idle: the rollout proves the end (launch 1, 0 turn(s) started)
-  s2: Ready proven: read again before the first key (launch 1, 0 turn(s) started)
-  s3: Turn running: the busy entry stays available (launch 1, 1 turn(s) started)
-  s4: Idle, end record not written yet (launch 1, 1 turn(s) started)
-  s5: Ready proven: read again before the first key (launch 1, 1 turn(s) started)
-  s6: Idle: the rollout proves the end (launch 1, 1 turn(s) started)
-  s7: Turn running: the busy entry stays available (launch 1, 2 turn(s) started)
-  s8: Idle, end record not written yet (launch 1, 2 turn(s) started)
-  s9: Idle: the rollout proves the end (launch 1, 2 turn(s) started)
-  s10: Ready proven: read again before the first key (launch 1, 2 turn(s) started)
-  s11: Turn running: the busy entry stays available (launch 1, 3 turn(s) started)
-  s12: Idle, end record not written yet (launch 1, 3 turn(s) started)
-  s13: Idle: the rollout proves the end (launch 1, 3 turn(s) started)
+  s0: Booting: wait for this launch's Codex process (tmux launch 1, 0 turn(s) started)
+  s1: Idle: the rollout proves the end (tmux launch 1, 0 turn(s) started)
+  s2: Ready proven: read again before the first key (tmux launch 1, 0 turn(s) started)
+  s3: Enter pressed, task_started not written: the UserPromptSubmit hook says busy (tmux launch 1, 1 turn(s) started)
+  s4: Ready proven: read again before the first key (tmux launch 1, 1 turn(s) started)
+  s5: Turn running: the rollout reads open (tmux launch 1, 1 turn(s) started)
+  s6: Idle, end record not written yet (tmux launch 1, 1 turn(s) started)
+  s7: Idle: the rollout proves the end (tmux launch 1, 1 turn(s) started)
+  s8: Enter pressed, task_started not written: the UserPromptSubmit hook says busy (tmux launch 1, 2 turn(s) started)
+  s9: Turn running: the rollout reads open (tmux launch 1, 2 turn(s) started)
+  s10: Idle, end record not written yet (tmux launch 1, 2 turn(s) started)
+  s11: Ready proven: read again before the first key (tmux launch 1, 2 turn(s) started)
+  s12: Idle: the rollout proves the end (tmux launch 1, 2 turn(s) started)
+  s13: Enter pressed, task_started not written: the UserPromptSubmit hook says busy (tmux launch 1, 3 turn(s) started)
+  s14: Turn running: the rollout reads open (tmux launch 1, 3 turn(s) started)
+  s15: Idle, end record not written yet (tmux launch 1, 3 turn(s) started)
+  s16: Idle: the rollout proves the end (tmux launch 1, 3 turn(s) started)
   [*] --> s0
   s0 --> s1: Codex becomes the pane's running process
   s1 --> s2: the next input proves ready
-  s1 --> s3: a person starts a turn in the TUI
-  s2 --> s5: a person starts a turn in the TUI
-  s2 --> s3: the input is written, or its proof no longer holds
-  s3 --> s4: the turn ends in the TUI
-  s4 --> s6: the end record reaches the rollout
-  s4 --> s5: the next input proves ready
-  s5 --> s3: the input is written, or its proof no longer holds
-  s6 --> s5: the next input proves ready
-  s5 --> s4: the input is written, or its proof no longer holds
-  s5 --> s7: the input is written, or its proof no longer holds
-  s5 --> s6: the input is written, or its proof no longer holds
-  s6 --> s7: a person starts a turn in the TUI
-  s7 --> s8: the turn ends in the TUI
-  s5 --> s10: a person starts a turn in the TUI
-  s8 --> s9: the end record reaches the rollout
-  s8 --> s10: the next input proves ready
-  s9 --> s10: the next input proves ready
-  s10 --> s11: the input is written, or its proof no longer holds
-  s10 --> s7: the input is written, or its proof no longer holds
-  s9 --> s11: a person starts a turn in the TUI
-  s10 --> s8: the input is written, or its proof no longer holds
-  s11 --> s12: the turn ends in the TUI
-  s10 --> s9: the input is written, or its proof no longer holds
-  s12 --> s13: the end record reaches the rollout
+  s1 --> s3: a person presses Enter in the TUI
+  s2 --> s4: a person presses Enter in the TUI
+  s2 --> s5: the input is written, or its proof no longer holds
+  s3 --> s5: task_started reaches the rollout
+  s4 --> s3: the input is written, or its proof no longer holds
+  s5 --> s6: the turn ends in the TUI
+  s6 --> s7: the end record reaches the rollout
+  s6 --> s4: the next input proves ready
+  s4 --> s5: the input is written, or its proof no longer holds
+  s7 --> s4: the next input proves ready
+  s7 --> s8: a person presses Enter in the TUI
+  s4 --> s6: the input is written, or its proof no longer holds
+  s4 --> s9: the input is written, or its proof no longer holds
+  s4 --> s7: the input is written, or its proof no longer holds
+  s4 --> s11: a person presses Enter in the TUI
+  s8 --> s9: task_started reaches the rollout
+  s9 --> s10: the turn ends in the TUI
+  s10 --> s12: the end record reaches the rollout
+  s10 --> s11: the next input proves ready
+  s11 --> s8: the input is written, or its proof no longer holds
+  s12 --> s11: the next input proves ready
+  s12 --> s13: a person presses Enter in the TUI
+  s11 --> s14: the input is written, or its proof no longer holds
+  s11 --> s9: the input is written, or its proof no longer holds
+  s11 --> s10: the input is written, or its proof no longer holds
+  s13 --> s14: task_started reaches the rollout
+  s14 --> s15: the turn ends in the TUI
+  s11 --> s12: the input is written, or its proof no longer holds
+  s15 --> s16: the end record reaches the rollout

@@ -1,5 +1,5 @@
 ---
-title: "Codex ready, busy, end and /stop judged from the rollout, the Stop hook and the process"
+title: "Codex ready, busy, end and /stop judged from the rollout, the hooks and the process"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -8,8 +8,8 @@ stateDiagram-v2
   }
   class lg0 bugPath
   class lg1 repeats
-  s0: Booting: wait for this launch's Codex process (launch 1, 0 turn(s) started)
-  s1: Idle, pane unread: no ready verdict (launch 1, 0 turn(s) started)
+  s0: Booting: wait for this launch's Codex process (herdr launch 1, 0 turn(s) started)
+  s1: Idle, pane unread: no ready verdict (herdr launch 1, 0 turn(s) started)
   [*] --> s0
   s0 --> s1: Codex becomes the pane's running process
   class s0 bugPath
