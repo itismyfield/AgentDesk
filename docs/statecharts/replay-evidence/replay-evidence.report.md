@@ -36,7 +36,7 @@ RestoreWithheld만 포함해 항진이었으나, 이제 전체 Next를 사용하
 localProof/ack를 새로 만드는 결함이며 Init → RestoreWithheld 두 상태에서 두 불변식을 깬다.
 RecoverHold의 withheld guard만 제거하면 root/proof/current-owner guard가 남아 rootless
 초기 상태에서 도달할 수 없으므로, 그 변이만으로 유효성을 주장하지 않는다.
- 다음은 각 cfg의 첫 run이다.
+ 다음 표의 Rootless 행은 보완 후 첫 run이며, 나머지는 S15a와 동일한 모델의 첫 run이다.
 
 | cfg | generated / distinct | 기대한 결과 |
 |---|---:|---|
@@ -47,9 +47,10 @@ RecoverHold의 withheld guard만 제거하면 root/proof/current-owner guard가 
 | ProposedLive | 166768 / 43118 | GREEN |
 | ProposedRecovery | 56616 / 20776 | GREEN |
 | Reuse | 121050 / 34862 | ProofNamesAttempt |
-| RootlessCurrent | 48 / 32 | GREEN |
-| RootlessNeedsProof | 32 / 16 | RestoreEventually |
-| RootlessProposed | 48 / 32 | GREEN |
+| RootlessAuthority | 18 / 18 | RestorationNoStart, RootlessNoNewAuthority (각각 검사) |
+| RootlessCurrent | 112 / 64 | GREEN |
+| RootlessNeedsProof | 64 / 32 | RestoreEventually |
+| RootlessProposed | 112 / 64 | GREEN |
 | TakeTwice | 21 / 21 | OneDecision |
 | WrongRoot | 86633 / 45147 | RecoveryBoundRoot |
 
