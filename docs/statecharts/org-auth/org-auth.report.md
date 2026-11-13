@@ -46,10 +46,10 @@ not a claim of a preexisting bug. Runtime traces are also tested at the actual e
 | `src/services/discord/org_schema.rs:587` | `crate::services::agent_recovery::install_catalog(catalog);` |
 | `src/services/discord/org_schema.rs:597` | `let schema = load_org_schema()?;` |
 | `src/services/discord/org_schema.rs:643` | `let schema = load_org_schema()?;` |
-| `src/services/discord/org_schema.rs:698` | `let schema = load_org_schema()?;` |
-| `src/services/discord/org_schema.rs:711` | `let schema = load_org_schema()?;` |
-| `src/services/discord/org_schema.rs:730` | `let Some(schema) = load_org_schema() else {` |
-| `src/services/discord/org_schema.rs:771` | `let schema = load_org_schema()?;` |
+| [org_schema.rs at main L698](https://github.com/itismyfield/AgentDesk/blob/8896695e659467a2243fe7b09123e26ba8f033b8/src/services/discord/org_schema.rs#L698) | `let schema = load_org_schema()?;` |
+| [org_schema.rs at main L711](https://github.com/itismyfield/AgentDesk/blob/8896695e659467a2243fe7b09123e26ba8f033b8/src/services/discord/org_schema.rs#L711) | `let schema = load_org_schema()?;` |
+| [org_schema.rs at main L730](https://github.com/itismyfield/AgentDesk/blob/8896695e659467a2243fe7b09123e26ba8f033b8/src/services/discord/org_schema.rs#L730) | `let Some(schema) = load_org_schema() else {` |
+| [org_schema.rs at main L771](https://github.com/itismyfield/AgentDesk/blob/8896695e659467a2243fe7b09123e26ba8f033b8/src/services/discord/org_schema.rs#L771) | `let schema = load_org_schema()?;` |
 | `src/services/provider_auth_profile/queries.rs:12` | `load_org_schema()` |
 | `src/services/provider_auth_profile/queries.rs:18` | `load_org_schema()` |
 | `src/services/provider_auth_profile/queries.rs:24` | `load_org_schema()` |
