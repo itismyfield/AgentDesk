@@ -1047,18 +1047,6 @@ _binary_would_revert_o_ledger() {
     return 1
 }
 
-_binary_would_revert_o_child_store() {
-    # A floor of any kind requires the actual target's complete child-output capability.
-    local floor="$ADK_REL/o_store/thread_children.floor"
-    [ -e "$floor" ] || [ -L "$floor" ] || return 1
-    [ "$(_binary_build_flag "$1" o_store_thread_children)" = "true" ] || return 0
-    return 1
-}
-
-_rollback_would_revert_o_child_store() {
-    _binary_would_revert_o_child_store "${REL_BINARY_BACKUP:-}"
-}
-
 _rollback_would_revert_o_writer() {
     # 0 (refuse, no override) when the new binary may run the O writer and the rollback target
     # is not recorded as an O writer build: rolling back would return output to the Legacy relay.
@@ -2785,6 +2773,20 @@ if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; th
     # reuse an existing artifact, so align the mtime after build.
     [ -e "$SOURCE_BINARY" ] && touch "$SOURCE_BINARY"
 fi
+# Define the pre-stage guards before checking artifacts and before rollback can be armed.
+_binary_would_revert_o_child_store() {
+    # A floor of any kind requires the actual target's complete child-output capability.
+    local rel_root="${ADK_REL:-${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}}"
+    local floor="$rel_root/o_store/thread_children.floor"
+    [ -e "$floor" ] || [ -L "$floor" ] || return 1
+    [ "$(_binary_build_flag "$1" o_store_thread_children)" = "true" ] || return 0
+    return 1
+}
+
+_rollback_would_revert_o_child_store() {
+    _binary_would_revert_o_child_store "${REL_BINARY_BACKUP:-}"
+}
+
 # The binary itself reports its O ledger reader; refuse before anything is staged.
 if _binary_would_revert_o_ledger "$SOURCE_BINARY"; then
     echo "✗ O ledger floor refuses this build's incompatible reader" >&2
