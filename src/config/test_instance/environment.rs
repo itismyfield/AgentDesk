@@ -169,6 +169,10 @@ fn scope() -> Result<Option<&'static Environment>, String> {
     Ok(Some(&instance.environment))
 }
 
+pub(crate) fn runtime_path() -> Result<Option<&'static str>, String> {
+    Ok(scope()?.map(|snapshot| snapshot.required["PATH"].as_str()))
+}
+
 fn home_at(root: &Path, provider: &str) -> Result<PathBuf, String> {
     match provider {
         "claude" | "codex" => Ok(root

@@ -1,27 +1,7 @@
 use super::*;
 
 pub(crate) fn instance_child(test_name: &str) -> bool {
-    if std::env::var_os("I2B_PROVIDER_CHILD").is_none() {
-        let (_temporary, root) = crate::config::test_instance::tests::fixture();
-        let output = crate::config::test_instance::tests::command(&root)
-            .args([
-                "--exact",
-                test_name.split_once("::").unwrap().1,
-                "--nocapture",
-            ])
-            .env("I2B_PROVIDER_CHILD", "1")
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            output.status.success(),
-            "{stdout}\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
-        return false;
-    }
-    true
+    crate::config::test_instance::tests::instance_child(test_name, "I2B_PROVIDER_CHILD")
 }
 
 pub(crate) fn with_instance(test_name: &str, check: impl FnOnce()) {
@@ -36,6 +16,152 @@ pub(crate) fn with_instance(test_name: &str, check: impl FnOnce()) {
 fn overlay(provider: ProviderKind) -> ProviderAuthOverlay {
     let id = format!("test-{}", provider.as_str());
     resolve(provider, Some(&id), None, &queries::provider_auth_catalog()).unwrap()
+}
+
+pub(crate) fn synthetic_login_shell(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let shell = root.join("fake-login-shell");
+    std::fs::write(&shell, format!(
+        "#!/bin/sh\nprintf called > '{}'\nprintf '__AGENTDESK_SHELL_ENV__PATH=/synthetic/login-path\\n__AGENTDESK_SHELL_ENV__'\n",
+        root.join("login-shell.called").display(),
+    )).unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+    shell
+}
+
+fn direct_launch(provider: ProviderKind) {
+    use crate::config::TestEnvVarGuard as Guard;
+    use crate::services::agent_protocol::StreamMessage;
+    use crate::services::provider_cli::ProviderExecutionContext;
+    use std::os::unix::fs::PermissionsExt;
+
+    let instance = crate::config::test_instance::current().unwrap().unwrap();
+    let root = &instance.root;
+    let expected_path = std::env::var("PATH").unwrap();
+    let binaries = root.join("direct-binaries");
+    std::fs::create_dir(&binaries).unwrap();
+    let binary = binaries.join(provider.as_str());
+    let capture = root.join("direct.env");
+    let arguments = root.join("direct.argv");
+    let path_capture = root.join("direct.path");
+    let shell = synthetic_login_shell(root);
+    let _shell = Guard::set_path_after_shared_test_env_lock("SHELL", &shell);
+    let (version, response) = match provider {
+        ProviderKind::Claude => (
+            "2.1.0 (Claude Code)",
+            r#"{"type":"result","subtype":"success","result":"ok","session_id":"fixture-session"}"#,
+        ),
+        ProviderKind::Codex => (
+            "codex-cli 0.160.0",
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}"#,
+        ),
+        _ => unreachable!(),
+    };
+    std::fs::write(&binary, format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '{version}'; exit 0; fi\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s' \"$PATH\" > '{}'\nset -- direct-capture\n{CAPTURE} > '{}'\ncat >/dev/null\nprintf '%s\\n' '{response}'\n",
+        arguments.display(), path_capture.display(), capture.display(),
+    )).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let key = if provider == ProviderKind::Claude {
+        "AGENTDESK_CLAUDE_PATH"
+    } else {
+        "AGENTDESK_CODEX_PATH"
+    };
+    let _binary = Guard::set_path_after_shared_test_env_lock(key, &binary);
+    let context = ProviderExecutionContext {
+        provider: provider.as_str().into(),
+        agent_id: Some(provider.as_str().into()),
+        execution_mode: Some("discord_turn".into()),
+        ..Default::default()
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<StreamMessage>();
+    let result =
+        crate::services::platform::with_provider_execution_context(context, || match provider {
+            ProviderKind::Claude => crate::services::claude::execute_command_streaming(
+                "instance direct prompt",
+                None,
+                root.to_str().unwrap(),
+                tx,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                0,
+                None,
+                None,
+            ),
+            ProviderKind::Codex => crate::services::codex::execute_command_streaming(
+                "instance direct prompt",
+                None,
+                root.to_str().unwrap(),
+                tx,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+            ),
+            _ => unreachable!(),
+        });
+    assert!(result.is_ok(), "{provider:?}: {result:?}");
+    assert!(
+        rx.try_iter()
+            .any(|message| matches!(message, StreamMessage::Done { .. }))
+    );
+    assert_environment_capture(&std::fs::read(&capture).unwrap(), root, "direct-capture");
+    assert_eq!(
+        std::fs::read_to_string(path_capture).unwrap(),
+        expected_path
+    );
+    assert!(!root.join("login-shell.called").exists());
+    let argv = std::fs::read_to_string(arguments).unwrap();
+    if provider == ProviderKind::Claude {
+        assert!(argv.lines().any(|argument| argument == "--output-format"));
+        assert!(argv.lines().any(|argument| argument == "stream-json"));
+    } else {
+        assert_eq!(argv.lines().next(), Some("exec"));
+        assert!(
+            argv.lines()
+                .any(|argument| argument == "instance direct prompt")
+        );
+    }
+}
+
+#[test]
+fn test_instance_claude_direct_launch_preserves_startup_path() {
+    with_instance(
+        concat!(
+            module_path!(),
+            "::test_instance_claude_direct_launch_preserves_startup_path"
+        ),
+        || direct_launch(ProviderKind::Claude),
+    );
+}
+
+#[test]
+fn test_instance_codex_direct_launch_preserves_startup_path() {
+    with_instance(
+        concat!(
+            module_path!(),
+            "::test_instance_codex_direct_launch_preserves_startup_path"
+        ),
+        || direct_launch(ProviderKind::Codex),
+    );
 }
 
 pub(crate) const CAPTURE: &str = r#"printf '%s\n' "$HOME" "$TMPDIR" "$XDG_CONFIG_HOME" "$CLAUDE_CONFIG_DIR" "$CODEX_HOME" "$AGENTDESK_API_URL" "$ADK_API_URL" "$AGENTDESK_DCSERVER_LABEL" "$AGENTDESK_RELEASE_TMUX_SESSION" "$AGENTDESK_TEST_MANIFEST" "$AGENTDESK_ROOT_DIR" "$AGENTDESK_CONFIG" "${MEMENTO_ACCESS_KEY+present}" "${ANTHROPIC_API_KEY+present}" "${OPENAI_API_KEY+present}" "${OP_SERVICE_ACCOUNT_TOKEN+present}" "$1""#;
@@ -190,12 +316,31 @@ fn test_instance_provider_snapshot_survives_marker_removal_and_refuses_home_drif
         || {
             use crate::config::TestEnvVarGuard as Guard;
             let overlay = overlay(ProviderKind::Claude);
+            assert_eq!(
+                crate::services::platform::binary_resolver::prepared_runtime_path(),
+                Some(std::ffi::OsStr::new(&std::env::var("PATH").unwrap()))
+            );
             let _home = Guard::set_value_after_shared_test_env_lock(
                 "HOME",
                 std::ffi::OsStr::new("/synthetic/foreign/home"),
             );
             let _marker = Guard::remove_after_shared_test_env_lock("AGENTDESK_TEST_MANIFEST");
             assert!(crate::config::test_instance::requested());
+            assert!(crate::services::platform::binary_resolver::prepared_runtime_path().is_none());
+            assert!(crate::services::platform::merged_runtime_path().is_none());
+            assert!(
+                crate::services::platform::binary_resolver::runtime_command("/bin/false").is_err()
+            );
+            let mut command = Command::new("/bin/false");
+            crate::services::platform::binary_resolver::apply_runtime_path(&mut command);
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(key, _)| *key == "PATH")
+                    .unwrap()
+                    .1,
+                Some(std::ffi::OsStr::new(""))
+            );
             assert!(resolve(ProviderKind::Claude, None, None, &HashMap::new()).is_err());
             assert!(apply_overlay_to_command(&mut Command::new("/bin/false"), &overlay).is_err());
             assert!(overlay_shell_env_lines(&overlay).is_err());

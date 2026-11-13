@@ -94,6 +94,50 @@ pub(crate) fn command(root: &Path) -> Command {
     command
 }
 
+pub(crate) fn assert_single_test_passed(output: &std::process::Output, selector: &str) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let executed = format!("test {selector} ... ok");
+    let summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;";
+    assert!(
+        output.status.success()
+            && stdout.lines().any(|line| line == executed)
+            && stdout
+                .lines()
+                .filter(|line| line.starts_with(summary))
+                .count()
+                == 1,
+        "expected exactly one successful test {selector}\n{stdout}\n{stderr}"
+    );
+}
+
+pub(crate) fn instance_child(test_name: &str, marker: &str) -> bool {
+    if std::env::var_os(marker).is_some() {
+        return true;
+    }
+    let selector = test_name.strip_prefix("agentdesk::").unwrap_or(test_name);
+    let (_temporary, root) = fixture();
+    let output = command(&root)
+        .args(["--exact", selector, "--nocapture"])
+        .env(marker, "1")
+        .output()
+        .unwrap();
+    assert_single_test_passed(&output, selector);
+    false
+}
+
+#[test]
+fn instance_child_refuses_missing_selector() {
+    let (_temporary, root) = fixture();
+    let selector = "config::test_instance::tests::__i3a_missing_selector";
+    let output = command(&root)
+        .args(["--exact", selector, "--nocapture"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(std::panic::catch_unwind(|| assert_single_test_passed(&output, selector)).is_err());
+}
+
 fn write(path: &Path, value: &Value) {
     std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
 }

@@ -70,7 +70,13 @@ fn instance_startup_rejects_home_api_label_memento_and_old_declarations() {
 
 #[test]
 fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
-    if std::env::var_os("I2B_BACKEND_CHILD").is_some() {
+    if tests::instance_child(
+        concat!(
+            module_path!(),
+            "::instance_backend_refuses_foreign_files_before_create_or_spawn"
+        ),
+        "I2B_BACKEND_CHILD",
+    ) {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         initialize().unwrap();
         crate::TEST_PARSE_OUTCOME.with(|slot| {
@@ -99,16 +105,28 @@ fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
         std::fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\n{} > '{}'\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s' \"$PATH\" > '{}'\n{} > '{}'\n",
+                root.join("backend-argv").display(),
+                root.join("backend-path").display(),
                 crate::services::provider_auth_profile::instance_env_tests::CAPTURE,
                 capture.display()
             ),
         )
         .unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let shell =
+            crate::services::provider_auth_profile::instance_env_tests::synthetic_login_shell(root);
+        let _shell =
+            crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("SHELL", &shell);
+        let _binary = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CODEX_PATH",
+            &wrapper,
+        );
+        let resolution = crate::services::platform::resolve_provider_binary("codex");
         let config = SessionConfig {
             agentdesk_exe: wrapper.to_string_lossy().into_owned(),
             output_path: root.join("backend-output").to_string_lossy().into_owned(),
+            env_vars: vec![("PATH".into(), resolution.exec_path.unwrap())],
             ..config
         };
         let handle = ProcessBackend::new().create_session(&config).unwrap();
@@ -131,6 +149,22 @@ fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
             root,
             "tmux-wrapper",
         );
+        assert_eq!(
+            std::fs::read_to_string(root.join("backend-path")).unwrap(),
+            std::env::var("PATH").unwrap()
+        );
+        let argv = std::fs::read_to_string(root.join("backend-argv")).unwrap();
+        assert_eq!(argv.lines().next(), Some("tmux-wrapper"));
+        for expected in [
+            "--output-file",
+            "--input-fifo",
+            "--prompt-file",
+            "--cwd",
+            "--input-mode",
+            "pipe",
+        ] {
+            assert!(argv.lines().any(|argument| argument == expected));
+        }
         std::fs::remove_file(&capture).unwrap();
         for (key, value) in [
             ("HOME", "/synthetic/foreign-home"),
@@ -153,13 +187,5 @@ fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
             std::ffi::OsStr::new("/synthetic/foreign-home"),
         );
         assert!(configure_tmux_command(&mut Command::new("/bin/false")).is_err());
-        return;
     }
-    let (_temp, root) = tests::fixture();
-    let output = tests::command(&root).args(["--exact", "config::test_instance::environment_tests::instance_backend_refuses_foreign_files_before_create_or_spawn", "--nocapture"]).env("I2B_BACKEND_CHILD", "1").output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
