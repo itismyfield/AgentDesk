@@ -294,6 +294,7 @@ replay-evidence/OwnProcess.cfg	ReplayEvidence	RecoveryStaleOnly	-
 replay-evidence/ProposedLive.cfg	ReplayEvidence	-	-
 replay-evidence/ProposedRecovery.cfg	ReplayEvidence	-	-
 replay-evidence/Reuse.cfg	ReplayEvidence	ProofNamesAttempt	-
+replay-evidence/RootlessAuthority.cfg	ReplayEvidence	RestorationNoStart,RootlessNoNewAuthority	-
 replay-evidence/RootlessCurrent.cfg	ReplayEvidence	-	-
 replay-evidence/RootlessNeedsProof.cfg	ReplayEvidence	-	RestoreEventually
 replay-evidence/RootlessProposed.cfg	ReplayEvidence	-	-

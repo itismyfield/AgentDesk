@@ -346,6 +346,22 @@ fn positive_control() {{
         self.assertTrue(errors, result.stderr)
         self.assertTrue(all(d["code"]["code"] in codes for d in errors), result.stderr)
 
+    def assert_sealed_layout(self, values, *, fields=False, key=None, modules=()):
+        self.assertEqual([values[i + 1] for i, value in enumerate(values) if value == "mod"], list(modules))
+        if key:
+            self.assertEqual(values, ["pub", "(", "crate", ")", "struct", key, "(",
+                                      "pub", "(", "super", ")", "(", ")", ")", ";"])
+        if fields:
+            for i, value in enumerate(values):
+                if value != "struct":
+                    continue
+                start = values.index("{", i)
+                end, depth = start + 1, 1
+                while depth:
+                    depth += (values[end] == "{") - (values[end] == "}")
+                    end += 1
+                self.assertNotIn("pub", values[start + 1:end - 1], "evidence fields stay private to their issuing subtree")
+
     def test_real_issuer_compiles_only_in_the_original_observer_scope(self):
         self.assert_compiles()
         self.assert_compiles(test=True)
@@ -389,6 +405,9 @@ fn positive_control() {{
             # Keep cfg(test) items: test-only constructors can otherwise bypass the same gate.
             tokens = rust_tokens(path.read_text(), extended=True)
             values = [token.value for token in tokens if token.kind != "string"]
+            self.assert_sealed_layout(values, fields=name == "proof",
+                                      key="ObservationKey" if name == "key" else None,
+                                      modules={"module": ("live", "recovery"), "proof": ("issuer",)}.get(name, ()))
             public = Counter()
             for i, value in enumerate(values):
                 if value == "fn":
@@ -534,6 +553,10 @@ fn singleton_positive_control(path: std::path::PathBuf, lock: std::sync::Arc<std
         for name, path in self.paths.items():
             tokens = rust_tokens(path.read_text(), extended=True)
             values = [token.value for token in tokens if token.kind != "string"]
+            self.assert_sealed_layout(values, fields=name in {"snapshot", "root"},
+                                      key={"key": "LoadedSnapshotKey", "root_key": "SingletonRootKey"}.get(name),
+                                      modules={"module": ("live", "recovery"), "recovery": ("root", "snapshot"),
+                                               "snapshot": ("issuer",), "root": ("issuer",)}.get(name, ()))
             public = Counter()
             for i, value in enumerate(values):
                 if value == "fn":

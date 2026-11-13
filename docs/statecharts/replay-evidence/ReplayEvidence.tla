@@ -3,7 +3,7 @@ EXTENDS Naturals, FiniteSets
 CONSTANTS Mode, Boundary, Fault
 ASSUME Mode \in {"live", "recovery"}
 ASSUME Boundary \in {"current", "proposed"}
-ASSUME Fault \in {"none", "forge", "reuse", "take-twice", "root", "own-process", "restore-proof"}
+ASSUME Fault \in {"none", "forge", "reuse", "take-twice", "root", "own-process", "restore-proof", "restore-authority"}
 
 A == [receipt |-> 1, nonce |-> 1, owner |-> 1]
 B == [receipt |-> 1, nonce |-> 2, owner |-> 2]
@@ -112,7 +112,9 @@ RecoverHold == /\ Mode = "recovery" /\ ~s.withheld /\ s.localProof /\ ~s.recover
 RestoreWithheld == /\ Mode = "recovery" /\ s.withheld /\ ~s.restored
     /\ s.noticeReadable /\ s.heldNonce \in {"valid", "missing"}
     /\ (Fault # "restore-proof" \/ s.localProof)
-    /\ s' = [s EXCEPT !.restored = TRUE]
+    /\ s' = [s EXCEPT !.restored = TRUE,
+             !.localProof = @ \/ (Fault = "restore-authority"),
+             !.ack = @ \/ (Fault = "restore-authority")]
 LiveEnd == /\ Mode = "live"
     /\ (s.ack \/ s.takes > 1
         \/ (s.takes = 1 /\ ~CanIssue(s.frozen, "terminal")
@@ -151,7 +153,7 @@ RecoveryExactIdentity == s.recoveryAccepted =>
 RestorationNoStart == s.restored => (s.retrySpends = 0 /\ ~s.ack)
 RootlessWithheldInit == /\ Init /\ s.withheld /\ ~s.rootHeld /\ ~s.sameRoot
     /\ s.storedOwner = "current" /\ s.noticeReadable /\ s.heldNonce = "missing"
-RootlessSpec == RootlessWithheldInit /\ [][RestoreWithheld \/ Idle]_vars /\ WF_vars(RestoreWithheld)
-RootlessNoNewAuthority == ~s.localProof /\ ~s.recoveryAccepted /\ s.retrySpends = 0
+RootlessSpec == RootlessWithheldInit /\ [][Next]_vars /\ WF_vars(RestoreWithheld)
+RootlessNoNewAuthority == ~s.localProof /\ ~s.recoveryAccepted /\ ~s.ack /\ s.retrySpends = 0
 RestoreEventually == <>s.restored
 =============================================================================

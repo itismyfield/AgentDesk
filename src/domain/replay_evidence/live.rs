@@ -4,6 +4,7 @@ use super::TerminalKind;
 #[path = "../../services/replay_evidence/live_issuer.rs"]
 pub(crate) mod issuer;
 
+/// A provider terminal from its complete reader.
 #[derive(Debug)]
 pub(crate) struct TerminalEvidence {
     receipt_id: i64,
@@ -21,6 +22,7 @@ impl TerminalEvidence {
     }
 }
 
+/// Proof that one exact attempt produced no output, tool, input or provider turn.
 #[derive(Debug)]
 pub(crate) struct NoEffectEvidence {
     receipt_id: i64,

@@ -2,7 +2,8 @@
 
 모델의 기준 코드는 `68cd533396df10378f8402320ed94eea6ddca7a2`다. S15a는 live proof를,
 S15b는 `0e0d2586b06f9548d79fe796a29236099e24aca7` 위에서 recovery/root 값을 이동한다.
-TLA와 cfg는 바꾸지 않았으며 아래의 current/proposed 전이를 각 실제 소유자에 대응시킨다.
+아래의 current/proposed 전이를 각 실제 소유자에 대응시킨다. S15b 리뷰 보완은 rootless
+spec에서도 전체 Next를 탐색하며, 복원이 local proof/ack를 새로 만드는 변이를 추가한다.
 
 ## 상태와 권한
 
@@ -25,9 +26,17 @@ Rootless cfg는 root 없음/current owner/missing legacy hold nonce/proof 없음
 | 모델 | cfg | TLC safety/liveness runs | 결과 |
 |---|---:|---:|---|
 | 설계 v2 | 9 | 15 | GREEN4·기대 RED5. 기존 withheld의 root 없는 진입점은 없었음 |
-| S15a | 12 | 21 | GREEN6·기대 RED6. Rootless Current/Proposed GREEN, proof 요구 회귀는 RestoreEventually RED |
+| S15a / S15b 보완 전 | 12 | 21 | GREEN6·기대 RED6. 복원만 허용하는 좁은 RootlessSpec |
+| S15b 보완 후 | 13 | 25 | GREEN6·기대 RED7. 전체 Next 탐색, RootlessAuthority가 RestorationNoStart·RootlessNoNewAuthority RED |
 
-세 Rootless cfg의 fairness 해석도 저장소 checker가 실제 확인한다. 다음은 각 cfg의 첫 run이다.
+네 Rootless cfg의 fairness 해석도 저장소 checker가 실제 확인한다.
+RootlessNoNewAuthority는 localProof와 ack가 없음을 직접 검사한다. 이전에는 Next가
+RestoreWithheld만 포함해 항진이었으나, 이제 전체 Next를 사용하므로 RecoverHold를
+비롯한 다른 전이도 guard가 허용하면 탐색한다. restore-authority 변이는 RestoreWithheld가
+localProof/ack를 새로 만드는 결함이며 Init → RestoreWithheld 두 상태에서 두 불변식을 깬다.
+RecoverHold의 withheld guard만 제거하면 root/proof/current-owner guard가 남아 rootless
+초기 상태에서 도달할 수 없으므로, 그 변이만으로 유효성을 주장하지 않는다.
+ 다음은 각 cfg의 첫 run이다.
 
 | cfg | generated / distinct | 기대한 결과 |
 |---|---:|---|
@@ -89,7 +98,7 @@ JAVA_TOOL_OPTIONS=-Xmx768m python3 scripts/ci/statecharts_tlc.py --jobs 2 \
   --jar /Users/itismyfield/.local/share/tla2tools/tla2tools-1.7.4.jar
 ```
 
-README와 expected.tsv가 12 cfg를 discovery한다. PR 모드는 checker에 `--base`/`--head`를 준다.
+README와 expected.tsv가 13 cfg를 discovery한다. PR 모드는 checker에 `--base`/`--head`를 준다.
 bounded safety와 Rootless restoration의 좁은 liveness를 검사한다. 실제 SQL serialization,
 filesystem replacement, serde 전체·provider matrix·일반 relay 진행성의 증명은 아니다.
 Rust privacy compile probes와 PG/observer 시험은 별도로 필요하다.
