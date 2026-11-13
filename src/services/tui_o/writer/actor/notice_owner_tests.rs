@@ -764,7 +764,7 @@ async fn notice_owner_history_change_after_preflight_defers_until_next_batch() {
         0,
         "the final-refusal retry deadline still holds"
     );
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.progress().debt, 1);
     tokio::time::advance(std::time::Duration::from_secs(5)).await;
     actor.prepare_notices(&[]).await;
     actor
