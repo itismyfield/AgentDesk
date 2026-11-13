@@ -19,6 +19,7 @@ fn binding(provider: &str, channel: u64, owner: &str) -> (PreparedIncarnation, V
         provider_root: None,
         first_prompt_digest: None,
         source_policy: None,
+        resume_start: None,
     })
     .unwrap();
     let marker = crate::services::tmux_common::session_temp_path(owner, "spawn_nonce");

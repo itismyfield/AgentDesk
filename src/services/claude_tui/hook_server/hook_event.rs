@@ -45,7 +45,7 @@ impl Default for HookEvent {
 pub(super) fn original_context(headers: &axum::http::HeaderMap) -> Option<BindingContext> {
     let envelope = decode_binding_header(headers.get(BINDING_HEADER)?.to_str().ok()?).ok()?;
     match envelope.context {
-        CapturedContext::Captured(context) => Some(context),
+        CapturedContext::Captured(context) => Some(*context),
         CapturedContext::Absent(_) => None,
     }
 }

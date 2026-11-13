@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::Value;
 
 use super::*;
+#[cfg(unix)]
+#[path = "herdr_launch/restart_resume_pg_tests.rs"]
+mod restart_resume_tests;
 use crate::db::dispatched_sessions::hosted_execution::tests::{
     expected, location, owner, pending, record,
 };
@@ -31,6 +34,7 @@ fn launch(endpoint: Option<HerdrLaunchEndpoint>) -> HerdrLaunch {
         expected_native_session_id: None,
         resume: false,
         provider_root: None,
+        resume_start: None,
     }
 }
 

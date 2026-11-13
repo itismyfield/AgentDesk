@@ -68,7 +68,7 @@ fn late_pending_hook(fixture: &CanaryFixture) {
     )
     .unwrap();
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(fixture.context.clone()),
+        context: CapturedContext::Captured(fixture.context.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

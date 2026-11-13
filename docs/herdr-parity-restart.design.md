@@ -2,7 +2,7 @@
 
 기준: `origin/main` = `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba`, 2026-11-13 KST.
 대상 이슈: [#8128](https://github.com/itismyfield/AgentDesk/issues/8128).
-**설계·문서·모델만 작성했다. 생산 코드 변경, Rust 시험, 운영 실행은 0이다.**
+**초기 설계(1~6절)는 설계·문서·모델만 다뤘다. A 구현 범위와 갱신한 계약은 7절에 기록한다.**
 
 이 문서의 목표는 인증된 `/restart`와 같은 구현을 쓰는 `!restart`에서 기존 실행을 끝내고,
 가능하면 같은 대화를 새 incarnation으로 이어 시작하는 것이다. 진행 중인 턴은 기존 tmux와 같이
@@ -23,88 +23,88 @@ S3의 continuation custody/barrier는 main의 `51508b1f8ec75f0cb6254ce49a3d46442
 O-a는 child 활성화 전체가 아니고 S3는 command launch/취소 hook 자체가 아니다.
 따라서 이 선행 착지만으로 herdr `/restart`가 충족됐다고 표시하지 않는다.
 
-아래 좌표는 모두 위 기준 SHA의 코드다. `D`는 `src/services/discord/`, `S`는 `src/services/`,
-`DB`는 `src/db/`를 뜻한다. 경로를 생략한 두 번째 좌표도 같은 행의 파일이다.
+아래 좌표는 모두 위 기준 SHA의 코드이며 경로는 저장소 루트 기준이다.
+경로를 생략한 두 번째 좌표도 같은 행의 파일이다.
 설계 모델의 운영 값 범위는 이 표에서만 가져온다. 모델의 단계명은 이 호출 순서의 투영이며 새 생산 enum이 아니다.
 
 | 경로/소비자 | file:line | 현재 동작·값·이번 범위 |
 |---|---|---|
-| 슬래시 등록·인증 | `D/commands/restart.rs:352`, `:312`, `:315`, `:318` | `cmd_restart` → auth → slash policy → 공통 `restart_channel` |
-| 텍스트 명령 | `D/commands/text_commands.rs:129`, `D/commands/restart.rs:336` | 인증된 intake의 `!restart`, 원 명령 메시지에 reply(`:343`) |
-| 공통 restart | `D/commands/restart.rs:259`, `:272`, `:293` | 진행 알림 → reset → seed → 결과. host별 orchestration을 나눌 위치 |
-| 메모리 snapshot | `D/commands/restart.rs:17`, `:45` | `NoActiveSession / ActiveSessionWithoutSessionId / ActiveSessionResumable`; 표시용 snapshot이지 실행 권한이 아님 |
-| reset 전 herdr 거절 | `D/commands/restart.rs:218` | `managed_reset_refusal(...true,true,None)`가 cancel보다 먼저 실행됨 |
-| 공통 관리 가드 | `D/admin_host_guard.rs:93`, `:124`, `:143` | `configured_refusal(:114)`로 herdr 설정 채널 거절. **이 가드를 전역 완화하지 않음** |
-| row·marker 가드 | `D/admin_host_guard.rs:15`, `:151`, `:164`, `:334` | legacy tmux 확인, unknown/conflict/hosted 세션의 이름 기반 조작 차단 |
-| 현재 active 취소 | `D/commands/restart.rs:223`, `:225`, `:227` | 경고 → mailbox cancel → `stop_active_turn(PreserveSession)`. herdr branch에서 이 선취소를 쓰면 exact terminate의 captured token 증거를 잃을 수 있음 |
-| tmux reset 인자 | `D/commands/restart.rs:239` | `reset_provider_state=!supports_resume(:245)`, history 보존(`:246`), recreate 요청(`:247`) |
-| 기존 인사말 | `D/commands/restart.rs:13`, `:133`, `:151` | `안녕하세요. 세션 재시작 완료.`를 `start_headless_turn`으로 제출 |
-| seed 재시도·결과 | `D/commands/restart.rs:55`, `:166` | `Started/Busy/Failed/RetryFailed`; pre-spawn Conflict만 1초 뒤 한 번 재시도. accepted 요청 재전송 없음 |
-| 일반 headless 거절 | `D/router/message_handler/headless_turn.rs:147`, `:159`, `S/turn_host.rs:177` | 현재 herdr `executor_not_wired`; 기존 seed를 그대로 부르면 종료 뒤 시작 실패 |
-| provider reset | `D/commands/control/provider_reset.rs:3`, `:16`, `:24`, `:38`, `:49`, `:58` | guard 뒤 memory/DB selector·history·process·tmux reset. 다른 명령까지 열리므로 전체 재사용 금지 |
-| tmux recreate | `D/commands/tmux_recreate.rs:9`, `:38`, `:57` | inflight admission 뒤 kill, 성공 때만 temp cleanup |
-| 세션 보존 relaunch | `D/commands/tmux_recreate.rs:80`, `:91`, `:102` | 관리 guard, account marker 보존, kill/cleanup/복원. herdr 후속 범위 |
-| pending 설정 소비 | `D/commands/control.rs:225`, `:246`, `:334` | herdr로 바뀐 relaunch는 해제/다음 기동 안내; guarded provider reset 호출. 후속 범위 |
-| `/stop` | `D/commands/stop.rs:84`, `:91`, `:75` | Herdr stop 결과에 답한 뒤 별도 cancel/cleanup 안 함 |
-| Herdr stop | `D/turn_bridge/tmux_runtime/judged_stop.rs:345`, `:370` | interrupt intent + Escape. close 권한과 다름 |
-| 비강제 Cancel | `S/queue/herdr_stop.rs:13`, `:24`, `:42` | holder stop, provider End 대기; 완료나 inflight 삭제로 위조하지 않음 |
-| 강제 Cancel | `S/queue/http_force.rs:33`, `:86` | exact owner/dispatch/nonce terminate + **queue purge**, restart에 purge 재사용 금지 |
-| session force-kill | `S/dispatched_sessions/herdr_kill.rs:21`, `:60`, `:96` | 같은 terminate 서비스, queue 보존. retry dispatch 등 HTTP 후처리 전체는 가져오지 않음 |
+| 슬래시 등록·인증 | `src/services/discord/commands/restart.rs:352`, `:312`, `:315`, `:318` | `cmd_restart` → auth → slash policy → 공통 `restart_channel` |
+| 텍스트 명령 | `src/services/discord/commands/text_commands.rs:129`, `src/services/discord/commands/restart.rs:336` | 인증된 intake의 `!restart`, 원 명령 메시지에 reply(`:343`) |
+| 공통 restart | `src/services/discord/commands/restart.rs:259`, `:272`, `:293` | 진행 알림 → reset → seed → 결과. host별 orchestration을 나눌 위치 |
+| 메모리 snapshot | `src/services/discord/commands/restart.rs:17`, `:45` | `NoActiveSession / ActiveSessionWithoutSessionId / ActiveSessionResumable`; 표시용 snapshot이지 실행 권한이 아님 |
+| reset 전 herdr 거절 | `src/services/discord/commands/restart.rs:218` | `managed_reset_refusal(...true,true,None)`가 cancel보다 먼저 실행됨 |
+| 공통 관리 가드 | `src/services/discord/admin_host_guard.rs:93`, `:124`, `:143` | `configured_refusal(:114)`로 herdr 설정 채널 거절. **이 가드를 전역 완화하지 않음** |
+| row·marker 가드 | `src/services/discord/admin_host_guard.rs:15`, `:151`, `:164`, `:334` | legacy tmux 확인, unknown/conflict/hosted 세션의 이름 기반 조작 차단 |
+| 현재 active 취소 | `src/services/discord/commands/restart.rs:223`, `:225`, `:227` | 경고 → mailbox cancel → `stop_active_turn(PreserveSession)`. herdr branch에서 이 선취소를 쓰면 exact terminate의 captured token 증거를 잃을 수 있음 |
+| tmux reset 인자 | `src/services/discord/commands/restart.rs:239` | `reset_provider_state=!supports_resume(:245)`, history 보존(`:246`), recreate 요청(`:247`) |
+| 기존 인사말 | `src/services/discord/commands/restart.rs:13`, `:133`, `:151` | `안녕하세요. 세션 재시작 완료.`를 `start_headless_turn`으로 제출 |
+| seed 재시도·결과 | `src/services/discord/commands/restart.rs:55`, `:166` | `Started/Busy/Failed/RetryFailed`; pre-spawn Conflict만 1초 뒤 한 번 재시도. accepted 요청 재전송 없음 |
+| 일반 headless 거절 | `src/services/discord/router/message_handler/headless_turn.rs:147`, `:159`, `src/services/turn_host.rs:177` | 현재 herdr `executor_not_wired`; 기존 seed를 그대로 부르면 종료 뒤 시작 실패 |
+| provider reset | `src/services/discord/commands/control/provider_reset.rs:3`, `:16`, `:24`, `:38`, `:49`, `:58` | guard 뒤 memory/DB selector·history·process·tmux reset. 다른 명령까지 열리므로 전체 재사용 금지 |
+| tmux recreate | `src/services/discord/commands/tmux_recreate.rs:9`, `:38`, `:57` | inflight admission 뒤 kill, 성공 때만 temp cleanup |
+| 세션 보존 relaunch | `src/services/discord/commands/tmux_recreate.rs:80`, `:91`, `:102` | 관리 guard, account marker 보존, kill/cleanup/복원. herdr 후속 범위 |
+| pending 설정 소비 | `src/services/discord/commands/control.rs:225`, `:246`, `:334` | herdr로 바뀐 relaunch는 해제/다음 기동 안내; guarded provider reset 호출. 후속 범위 |
+| `/stop` | `src/services/discord/commands/stop.rs:84`, `:91`, `:75` | Herdr stop 결과에 답한 뒤 별도 cancel/cleanup 안 함 |
+| Herdr stop | `src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs:345`, `:370` | interrupt intent + Escape. close 권한과 다름 |
+| 비강제 Cancel | `src/services/queue/herdr_stop.rs:13`, `:24`, `:42` | holder stop, provider End 대기; 완료나 inflight 삭제로 위조하지 않음 |
+| 강제 Cancel | `src/services/queue/http_force.rs:33`, `:86` | exact owner/dispatch/nonce terminate + **queue purge**, restart에 purge 재사용 금지 |
+| session force-kill | `src/services/dispatched_sessions/herdr_kill.rs:21`, `:60`, `:96` | 같은 terminate 서비스, queue 보존. retry dispatch 등 HTTP 후처리 전체는 가져오지 않음 |
 | 명시 Terminate API | `src/server/routes/herdr_terminate.rs:40`, `:88`, `:93`, `:110` | 인증/switch, session_key+nonce, 선택한 pane proof, Retired만 HTTP 성공 |
-| exact 종료 서비스 | `D/herdr_terminate.rs:401`, `:437` | owner/local node/location/nonce(`:453`), captured turn(`:477`), transition(`:482`), same actor/token(`:486`), fence(`:519`), row 재검사(`:548`), exact close(`:590`), end read(`:594`), retire CAS(`:596`), settlement(`:603`) |
-| 종료의 결과·postlude | `D/herdr_terminate.rs:38`, `:61`, `:412`, `:224` | 기존 `after_retire`에서만 보유 exclusion 사용. retire CAS stale은 Indeterminate이며 성공 아님 |
-| exact close 권한 | `S/termination_audit/host_terminate.rs:116`, `:126`, `:132` | live switch + terminate warrant, 일반 cancel warrant를 close로 승격하지 않음 |
-| pane·server 정체성 | `S/session_host/herdr_gate.rs:141`, `:455`, `:473`, `:496`, `:658` | endpoint/session/pane/nonce fence, 같은 witness 서버에만 close 전달. 숫자 pane 재조회/다른 연결 fallback 금지 |
-| exclusion 보유 범위 | `D/herdr_terminate/retired_exclusion.rs:16`, `:99` | transition + old execution fence + actor/token; `disconnect_session_keeping_provider` 사용 가능 |
-| 보존형 disconnect CAS | `DB/dispatched_sessions/hosted_execution/http_force.rs:34`, `:45`, `:47` | retired/owner/nonce/dispatch 조건 아래 provider selector 유지. **successor Pending 설치 전에만 적용** |
-| `/clear`, `!clear` | `D/commands/control.rs:510`, `:523`, `:552`, `:562`, `:573`, `:599` | transition 3초 timeout에도 계속 수행; queue/history/selector 폐기. restart와 의미가 다름 |
-| Herdr clear teardown | `D/commands/control/clear_teardown.rs:70`, `:137`, `:179`, `:192` | 동일 `terminate_explicit_herdr` 서비스가 재사용 대상 |
-| clear 전용 부작용 | `D/commands/control/clear_teardown.rs:175`, `:183`, `:186` | retired selector 삭제 postlude. `end_herdr` 전체를 그대로 호출하면 resume 보존 위반 |
-| clear의 기존 fallback·기록 | `D/commands/control/clear_teardown.rs:150`, `:167`, `:80`, `:94`, `:97` | unknown/pool 없음은 end_unconfirmed 후 managed fallback 가능. tmux 전용 end record 차이는 후속으로 남기고 확대하지 않음 |
-| 소유 입력 종료 cleanup | `D/commands/control/clear_teardown/execution_cleanup.rs:9`, `:42`, `:63`, `:112` | nonce/receipt/cleanup owner 전용 계약. restart에서 terminal 입력을 되살리는 용도로 쓰지 않음 |
-| hosted 상태·읽기 | `DB/dispatched_sessions/hosted_execution.rs:27`, `:171`, `:228` | `Pending/Bound/Retired`; `Legacy/Known/Unknown`, lookup `Missing/Found/Unknown/Conflict` |
-| herdr 새 launch | `S/herdr_launch.rs:378`, `:395`, `:433`, `:466`, `:492`, `:515` | RuntimeHintFence → row → Retired hold 검사 → 새 nonce → Pending CAS/marker → create |
-| create/launch 결과 | `S/herdr_launch.rs:111`, `:210`, `:226` | `Created/NotSent/Indeterminate/CreatedUnconfirmed`; `Launched{evidence Ok/Err}/Indeterminate`; 불명 ACK는 Pending 유지, 재생성 금지 |
-| incarnation 준비 | `S/herdr_launch.rs:732`, `:758` | 새 UUID, provider/channel/logical/runtime/native session/launch mode를 묶음 |
-| Claude resume 준비 | `S/claude/herdr_turn/handoff.rs:6`, `:17`, `:29`, `:118` | account·transcript·O cursor·최신 binding·inode 검증, core session_id만으로 resume 안 함 |
-| Claude 시작 순서 | `S/claude/herdr_turn/handoff.rs:99`, `:103`, `:107`, `:108` | hook 사전 구독 → launch → 자기 SessionStart → attach → prompt |
-| Claude migration 종료 | `S/claude/herdr_turn/handoff.rs:60`, `:63` | `earlier_tmux`를 종료하는 migration 분기. Herdr→Herdr restart에서는 실행하지 않을 부분 |
-| Codex 현재 시작 | `S/codex/herdr_turn.rs:188`, `:200`, `:277`, `:434` | fresh native selector=None/resume=false, 자기 Startup source, first input 뒤 Source attach |
-| Codex argv 가드 | `S/codex/tui_session_launch/launch_policy.rs:170`, `:178`, `:210`, `:256` | 준비 전과 최종 argv 모두 fresh-only 검증. resume 모드 지원을 따로 추가해야 함 |
-| Codex 출력 경계 | `S/codex/herdr_turn/first_input.rs:195`, `:208`, `:211`, `:225` | 첫 입력 뒤 hook/source/attach, 새 rollout 가정 offset=0. resume에 그대로 쓰면 과거 출력 중복 위험 |
-| transition 중 intake | `D/router/message_handler/intake_turn/runtime_transition.rs:37`, `:43`, `:78` | 새 입력 durable tail, 기존 owner front는 원본 유지 + release wake |
-| busy owner 입력 | `D/router/message_handler/provider_dispatch/owner_input.rs:216`, `:239` | transition 실패는 `NotSent(session_transition_busy)` |
-| 기존 owner synthetic 시작 | `D/router/message_handler/provider_dispatch/owner_input.rs:621`, `D/queue_io/input_owner/start.rs:13`, `:59` | retry original/ticket 보존·admission. idle context는 `owner_input.rs:909` → headless 거절로 돌아가므로 전용 연결 필요 |
-| 기존 transition lease/wake | `D/session_transition.rs:38`, `:120`, `:145` | 실제 shared/channel mutex에만 borrow 허용, Drop 이후 installed-owner wake |
-| owner 내구 상태 | `S/turn_orchestrator/queued_head/v2_types.rs:20`, `:38`, `:81`, `:93` | V2 optional handoff/effort intent, 원본/attempt/target epoch. 새 restart intent 제안의 저장 위치 |
-| 입력 없는 boot debt | `S/turn_orchestrator/queued_head/compat.rs:23` | `holds_input`는 items/head/retained/effort만 셈. restart intent만 남는 파일도 발견하도록 연결해야 함 |
-| boot census 필터 | `S/turn_orchestrator/pending_queue_persistence/queued_recovery.rs:88`, `:92` | `v2_channels`가 holds_input/unfinished Claude handoff만 선택. restart intent-only·알림 debt도 owner 복구에 올려야 함 |
-| 부팅 큐/actor | `D/runtime_bootstrap/queued_recovery.rs:48`, `:65`, `:129`, `:155`, `:189`, `:210` | 큐 먼저 복원, actor dedup·persist 실패는 원본 Held, 그 뒤 inflight |
-| 부팅 intake gate | `D/runtime_bootstrap.rs:34`, `:41` | 복원이 끝난 뒤 intake 오픈, installed-owner wake |
-| inflight 재수화 | `D/recovery_engine/restore_inflight.rs:136`, `:198`, `:219` | receipt/Herdr settlement, runtime_kind absent legacy 허용, unknown/newer는 추정 복원 금지 |
-| TUI pending 재수화 | `D/tui_prompt_relay/synthetic_start.rs:2044`, `:2073` | pending index/worker 복원, prompt 자체 재전송 아님 |
-| auto-queue·진단 | `S/auto_queue/runtime.rs:485`, `D/commands/diagnostics/reports.rs:46` | herdr reset 건너뜀/화면 unsupported. 후속 조각에서 처리 |
-| 루틴 reset·runtime clear | `S/routines/session_control.rs:105`, `D/health/recovery.rs:267` | 같은 managed guard를 소비. 큐를 clear하는 후처리도 있으므로 restart에서 통째 호출하지 않음 |
-| 에이전트 상태·출력 API | `S/agents/turn.rs:309`, `src/server/routes/agents.rs:186`, `S/dispatched_sessions/output.rs:171` | row/session-key guard로 tmux capture/probe를 거절하거나 unsupported로 표시. 이후 진단 조각 |
+| exact 종료 서비스 | `src/services/discord/herdr_terminate.rs:401`, `:437` | owner/local node/location/nonce(`:453`), captured turn(`:477`), transition(`:482`), same actor/token(`:486`), fence(`:519`), row 재검사(`:548`), exact close(`:590`), end read(`:594`), retire CAS(`:596`), settlement(`:603`) |
+| 종료의 결과·postlude | `src/services/discord/herdr_terminate.rs:38`, `:61`, `:412`, `:224` | 기존 `after_retire`에서만 보유 exclusion 사용. retire CAS stale은 Indeterminate이며 성공 아님 |
+| exact close 권한 | `src/services/termination_audit/host_terminate.rs:116`, `:126`, `:132` | live switch + terminate warrant, 일반 cancel warrant를 close로 승격하지 않음 |
+| pane·server 정체성 | `src/services/session_host/herdr_gate.rs:141`, `:455`, `:473`, `:496`, `:658` | endpoint/session/pane/nonce fence, 같은 witness 서버에만 close 전달. 숫자 pane 재조회/다른 연결 fallback 금지 |
+| exclusion 보유 범위 | `src/services/discord/herdr_terminate/retired_exclusion.rs:16`, `:99` | transition + old execution fence + actor/token; `disconnect_session_keeping_provider` 사용 가능 |
+| 보존형 disconnect CAS | `src/db/dispatched_sessions/hosted_execution/http_force.rs:34`, `:45`, `:47` | retired/owner/nonce/dispatch 조건 아래 provider selector 유지. **successor Pending 설치 전에만 적용** |
+| `/clear`, `!clear` | `src/services/discord/commands/control.rs:510`, `:523`, `:552`, `:562`, `:573`, `:599` | transition 3초 timeout에도 계속 수행; queue/history/selector 폐기. restart와 의미가 다름 |
+| Herdr clear teardown | `src/services/discord/commands/control/clear_teardown.rs:70`, `:137`, `:179`, `:192` | 동일 `terminate_explicit_herdr` 서비스가 재사용 대상 |
+| clear 전용 부작용 | `src/services/discord/commands/control/clear_teardown.rs:175`, `:183`, `:186` | retired selector 삭제 postlude. `end_herdr` 전체를 그대로 호출하면 resume 보존 위반 |
+| clear의 기존 fallback·기록 | `src/services/discord/commands/control/clear_teardown.rs:150`, `:167`, `:80`, `:94`, `:97` | unknown/pool 없음은 end_unconfirmed 후 managed fallback 가능. tmux 전용 end record 차이는 후속으로 남기고 확대하지 않음 |
+| 소유 입력 종료 cleanup | `src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:9`, `:42`, `:63`, `:112` | nonce/receipt/cleanup owner 전용 계약. restart에서 terminal 입력을 되살리는 용도로 쓰지 않음 |
+| hosted 상태·읽기 | `src/db/dispatched_sessions/hosted_execution.rs:27`, `:171`, `:228` | `Pending/Bound/Retired`; `Legacy/Known/Unknown`, lookup `Missing/Found/Unknown/Conflict` |
+| herdr 새 launch | `src/services/herdr_launch.rs:378`, `:395`, `:433`, `:466`, `:492`, `:515` | RuntimeHintFence → row → Retired hold 검사 → 새 nonce → Pending CAS/marker → create |
+| create/launch 결과 | `src/services/herdr_launch.rs:111`, `:210`, `:226` | `Created/NotSent/Indeterminate/CreatedUnconfirmed`; `Launched{evidence Ok/Err}/Indeterminate`; 불명 ACK는 Pending 유지, 재생성 금지 |
+| incarnation 준비 | `src/services/herdr_launch.rs:732`, `:758` | 새 UUID, provider/channel/logical/runtime/native session/launch mode를 묶음 |
+| Claude resume 준비 | `src/services/claude/herdr_turn/handoff.rs:6`, `:17`, `:29`, `:118` | account·transcript·O cursor·최신 binding·inode 검증, core session_id만으로 resume 안 함 |
+| Claude 시작 순서 | `src/services/claude/herdr_turn/handoff.rs:99`, `:103`, `:107`, `:108` | hook 사전 구독 → launch → 자기 SessionStart → attach → prompt |
+| Claude migration 종료 | `src/services/claude/herdr_turn/handoff.rs:60`, `:63` | `earlier_tmux`를 종료하는 migration 분기. Herdr→Herdr restart에서는 실행하지 않을 부분 |
+| Codex 현재 시작 | `src/services/codex/herdr_turn.rs:188`, `:200`, `:277`, `:434` | fresh native selector=None/resume=false, 자기 Startup source, first input 뒤 Source attach |
+| Codex argv 가드 | `src/services/codex/tui_session_launch/launch_policy.rs:170`, `:178`, `:210`, `:256` | 준비 전과 최종 argv 모두 fresh-only 검증. resume 모드 지원을 따로 추가해야 함 |
+| Codex 출력 경계 | `src/services/codex/herdr_turn/first_input.rs:195`, `:208`, `:211`, `:225` | 첫 입력 뒤 hook/source/attach, 새 rollout 가정 offset=0. resume에 그대로 쓰면 과거 출력 중복 위험 |
+| transition 중 intake | `src/services/discord/router/message_handler/intake_turn/runtime_transition.rs:37`, `:43`, `:78` | 새 입력 durable tail, 기존 owner front는 원본 유지 + release wake |
+| busy owner 입력 | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:216`, `:239` | transition 실패는 `NotSent(session_transition_busy)` |
+| 기존 owner synthetic 시작 | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:621`, `src/services/discord/queue_io/input_owner/start.rs:13`, `:59` | retry original/ticket 보존·admission. idle context는 `owner_input.rs:909` → headless 거절로 돌아가므로 전용 연결 필요 |
+| 기존 transition lease/wake | `src/services/discord/session_transition.rs:38`, `:120`, `:145` | 실제 shared/channel mutex에만 borrow 허용, Drop 이후 installed-owner wake |
+| owner 내구 상태 | `src/services/turn_orchestrator/queued_head/v2_types.rs:20`, `:38`, `:81`, `:93` | V2 optional handoff/effort intent, 원본/attempt/target epoch. 새 restart intent 제안의 저장 위치 |
+| 입력 없는 boot debt | `src/services/turn_orchestrator/queued_head/compat.rs:23` | `holds_input`는 items/head/retained/effort만 셈. restart intent만 남는 파일도 발견하도록 연결해야 함 |
+| boot census 필터 | `src/services/turn_orchestrator/pending_queue_persistence/queued_recovery.rs:88`, `:92` | `v2_channels`가 holds_input/unfinished Claude handoff만 선택. restart intent-only·알림 debt도 owner 복구에 올려야 함 |
+| 부팅 큐/actor | `src/services/discord/runtime_bootstrap/queued_recovery.rs:48`, `:65`, `:129`, `:155`, `:189`, `:210` | 큐 먼저 복원, actor dedup·persist 실패는 원본 Held, 그 뒤 inflight |
+| 부팅 intake gate | `src/services/discord/runtime_bootstrap.rs:34`, `:41` | 복원이 끝난 뒤 intake 오픈, installed-owner wake |
+| inflight 재수화 | `src/services/discord/recovery_engine/restore_inflight.rs:136`, `:198`, `:219` | receipt/Herdr settlement, runtime_kind absent legacy 허용, unknown/newer는 추정 복원 금지 |
+| TUI pending 재수화 | `src/services/discord/tui_prompt_relay/synthetic_start.rs:2044`, `:2073` | pending index/worker 복원, prompt 자체 재전송 아님 |
+| auto-queue·진단 | `src/services/auto_queue/runtime.rs:485`, `src/services/discord/commands/diagnostics/reports.rs:46` | herdr reset 건너뜀/화면 unsupported. 후속 조각에서 처리 |
+| 루틴 reset·runtime clear | `src/services/routines/session_control.rs:105`, `src/services/discord/health/recovery.rs:267` | 같은 managed guard를 소비. 큐를 clear하는 후처리도 있으므로 restart에서 통째 호출하지 않음 |
+| 에이전트 상태·출력 API | `src/services/agents/turn.rs:309`, `src/server/routes/agents.rs:186`, `src/services/dispatched_sessions/output.rs:171` | row/session-key guard로 tmux capture/probe를 거절하거나 unsupported로 표시. 이후 진단 조각 |
 | 에이전트 CRUD·auth | `src/server/routes/agents_crud.rs:1037`, `src/server/routes/provider_auth_profiles.rs:518` | legacy-tmux/auth-login target 가드. restart의 별도 경로가 이를 전역 개방하지 않음 |
-| 명시 resume rebind | `S/session_resume.rs:404` | herdr 설정이면 transcript 복사·binding·teardown 전에 HostUnsupported. restart 준비의 검증 포트와 구별 |
-| stale/relay 복구 | `D/router/intake_gate/stale_turn.rs:191`, `D/relay_recovery/apply.rs:100` | turn release 거절 시 token/state 보존. 새 incarnation 때문에 old token을 무조건 삭제하지 않음 |
-| watcher·idle·inflight 복구 | `D/tmux_watcher/host_gate.rs:153`, `D/session_idle_cleanup.rs:75`, `D/inflight/host_recovery_guard.rs:103` | herdr 설정 채널의 이름 기반 teardown/clear 건너뜀. restart activation으로 이 보호를 약화하지 않음 |
-| CLI·provider cleanup·활성 판정 | `src/cli/utils.rs:176`, `S/provider_cli/session_guard.rs:199`, `S/provider/cancel_token_cleanup/executor.rs:162`, `S/session_activity.rs:49` | marker가 다른 host면 이름 기반 kill/probe를 거절/건너뜀. old nonce settlement와 별도 보호 |
-| TUI passthrough | `D/commands/tui_passthrough.rs:176` | channel guard로 tmux passthrough 거절. `/model`·`/compact` 후속과 guard를 공유하므로 전역 우회 금지 |
-| I/O 관측의 대기 한계 | `S/session_host/herdr/transport.rs:30`, `:84`, `:159`, `S/claude/herdr_turn.rs:63`, `S/codex/herdr_turn.rs:56` | 기존 socket read/write timeout·read deadline, Claude SessionStart/Codex composer/source wait를 재사용. DB·알림/작업 scheduler의 진행은 별도 liveness 전제 |
+| 명시 resume rebind | `src/services/session_resume.rs:404` | herdr 설정이면 transcript 복사·binding·teardown 전에 HostUnsupported. restart 준비의 검증 포트와 구별 |
+| stale/relay 복구 | `src/services/discord/router/intake_gate/stale_turn.rs:191`, `src/services/discord/relay_recovery/apply.rs:100` | turn release 거절 시 token/state 보존. 새 incarnation 때문에 old token을 무조건 삭제하지 않음 |
+| watcher·idle·inflight 복구 | `src/services/discord/tmux_watcher/host_gate.rs:153`, `src/services/discord/session_idle_cleanup.rs:75`, `src/services/discord/inflight/host_recovery_guard.rs:103` | herdr 설정 채널의 이름 기반 teardown/clear 건너뜀. restart activation으로 이 보호를 약화하지 않음 |
+| CLI·provider cleanup·활성 판정 | `src/cli/utils.rs:176`, `src/services/provider_cli/session_guard.rs:199`, `src/services/provider/cancel_token_cleanup/executor.rs:162`, `src/services/session_activity.rs:49` | marker가 다른 host면 이름 기반 kill/probe를 거절/건너뜀. old nonce settlement와 별도 보호 |
+| TUI passthrough | `src/services/discord/commands/tui_passthrough.rs:176` | channel guard로 tmux passthrough 거절. `/model`·`/compact` 후속과 guard를 공유하므로 전역 우회 금지 |
+| I/O 관측의 대기 한계 | `src/services/session_host/herdr/transport.rs:30`, `:84`, `:159`, `src/services/claude/herdr_turn.rs:63`, `src/services/codex/herdr_turn.rs:56` | 기존 socket read/write timeout·read deadline, Claude SessionStart/Codex composer/source wait를 재사용. DB·알림/작업 scheduler의 진행은 별도 liveness 전제 |
 
 ### 입력 출처와 불변식의 수락 경계
 
 | 출처 | file:line | 수락·재시작 중 처리 |
 |---|---|---|
-| Discord 사람의 일반 메시지 | `D/router/intake_queue_transaction.rs:35`, `:121`, `D/router/intake_gate.rs:366` | Human, 원본 message/source IDs·queued generation 유지. 등록 slash는 일반 메시지 큐에 중복 투입하지 않음 |
-| Discord 허용 봇 | `D/router/intake_gate.rs:347`, `D/router/intake_queue_transaction.rs:43` | AllowedBot/announce만 기존 정책대로 접수. 재시작 중 입력 custody는 사람과 동일, 명령 권한은 기존 auth 그대로 |
-| 기타 봇 | `D/router/intake_queue_transaction.rs:39`, `D/router/intake_gate.rs:347` | OtherBot의 기존 비접수 정책 유지. 수락하지 않은 입력을 loss=0 계수에 넣어 가짜 성공으로 만들지 않음 |
-| TUI에서 시작된 실제 턴 | `D/tui_prompt_relay/synthetic_start.rs:2044`, `D/herdr_terminate.rs:477` | O/합성 start로 관측한 old inflight를 captured token 기준 결산. 이미 시작된 턴은 중단 경고 대상 |
-| TUI의 아직 제출하지 않은 수동 draft/직접 키 | `S/session_host/herdr_gate.rs:555`, `D/commands/restart.rs:276` | AgentDesk가 수락한 queued original과 구별. 종료할 pane의 draft·진행 중 턴은 기존 tmux restart처럼 중단될 수 있음. 직접 키 입력 자체를 무손실 접수했다고 주장하지 않음 |
-| HTTP·루틴·iMessage 시작 | `D/router/message_handler/headless_turn.rs:159`, `S/turn_host.rs:177` | 현재 herdr 거절 유지(#8125). 이 설계의 typed seed permit을 일반 API 사용자가 만들 수 없어야 함 |
-| restart 인사말 | `D/commands/restart.rs:13`, `D/queue_io/input_owner/start.rs:13` | 인증된 명령의 stable operation ID에서 유도한 한 ticket/original. 일반 source 문자열과 다른 내부 권한으로만 successor에 제출 |
+| Discord 사람의 일반 메시지 | `src/services/discord/router/intake_queue_transaction.rs:35`, `:121`, `src/services/discord/router/intake_gate.rs:366` | Human, 원본 message/source IDs·queued generation 유지. 등록 slash는 일반 메시지 큐에 중복 투입하지 않음 |
+| Discord 허용 봇 | `src/services/discord/router/intake_gate.rs:347`, `src/services/discord/router/intake_queue_transaction.rs:43` | AllowedBot/announce만 기존 정책대로 접수. 재시작 중 입력 custody는 사람과 동일, 명령 권한은 기존 auth 그대로 |
+| 기타 봇 | `src/services/discord/router/intake_queue_transaction.rs:39`, `src/services/discord/router/intake_gate.rs:347` | OtherBot의 기존 비접수 정책 유지. 수락하지 않은 입력을 loss=0 계수에 넣어 가짜 성공으로 만들지 않음 |
+| TUI에서 시작된 실제 턴 | `src/services/discord/tui_prompt_relay/synthetic_start.rs:2044`, `src/services/discord/herdr_terminate.rs:477` | O/합성 start로 관측한 old inflight를 captured token 기준 결산. 이미 시작된 턴은 중단 경고 대상 |
+| TUI의 아직 제출하지 않은 수동 draft/직접 키 | `src/services/session_host/herdr_gate.rs:555`, `src/services/discord/commands/restart.rs:276` | AgentDesk가 수락한 queued original과 구별. 종료할 pane의 draft·진행 중 턴은 기존 tmux restart처럼 중단될 수 있음. 직접 키 입력 자체를 무손실 접수했다고 주장하지 않음 |
+| HTTP·루틴·iMessage 시작 | `src/services/discord/router/message_handler/headless_turn.rs:159`, `src/services/turn_host.rs:177` | 현재 herdr 거절 유지(#8125). 이 설계의 typed seed permit을 일반 API 사용자가 만들 수 없어야 함 |
+| restart 인사말 | `src/services/discord/commands/restart.rs:13`, `src/services/discord/queue_io/input_owner/start.rs:13` | 인증된 명령의 stable operation ID에서 유도한 한 ticket/original. 일반 source 문자열과 다른 내부 권한으로만 successor에 제출 |
 
 수락한 입력은 owner의 durable original/attempt로 보유한 입력이다. 재시작 수락 선형화는
 **old channel transition + old nonce termination fence 획득 및 현재 row 재검사가 끝난 시점**이다.
@@ -210,8 +210,8 @@ Ready timeout과 실패 표시는 session cleanup·seed replay 권한과 분리�
 
 | 조각 | 예정 생산 파일/연결 | 순증 추정 | 수용 경계 |
 |---|---|---|---|
-| A: Codex resume launch/source 경계 | `S/codex/herdr_turn.rs`, 새 `herdr_turn/restart_resume.rs`, `first_input.rs`, `tui_session_launch/launch_policy.rs`, 필요 시 기존 launch options/source child (4~6파일) | +350~500 | 기존 fresh 검사 유지, resume native/argv/source EOF/nonce 검증. 기존 생산 prepare/first-input 경로의 소비되는 기능으로 연결하고 미사용 dormant API/allow를 만들지 않음 |
-| B: restart 수명·owner seed·boot | `D/commands/restart.rs`, 새 `commands/restart/herdr.rs`, 새 작은 seed/intent child, `D/herdr_terminate/retired_exclusion.rs`, 기존 provider 준비 포트, `D/queue_io/input_owner/start.rs`, `owner_input.rs`/`headless_turn.rs` 연결, V2 types/compat/actor child, `runtime_bootstrap/queued_recovery.rs` 연결 (10~13파일, 공통 파일 중복 가능) | +750~950 | 공개 실제 명령을 RED→GREEN, queue/seed/Ready/실패·복원까지. 일반 API 거절 및 인접 관리 guard 유지 |
+| A: Codex resume launch/source 경계 | `src/services/codex/herdr_turn.rs`, 새 `herdr_turn/restart_resume.rs`, `first_input.rs`, `tui_session_launch/launch_policy.rs`, 필요 시 기존 launch options/source child (4~6파일) | +350~500 | 기존 fresh 검사 유지, resume native/argv/source EOF/nonce 검증. 기존 생산 prepare/first-input 경로의 소비되는 기능으로 연결하고 미사용 dormant API/allow를 만들지 않음 |
+| B: restart 수명·owner seed·boot | `src/services/discord/commands/restart.rs`, 새 `commands/restart/herdr.rs`, 새 작은 seed/intent child, `src/services/discord/herdr_terminate/retired_exclusion.rs`, 기존 provider 준비 포트, `src/services/discord/queue_io/input_owner/start.rs`, `owner_input.rs`/`headless_turn.rs` 연결, V2 types/compat/actor child, `runtime_bootstrap/queued_recovery.rs` 연결 (10~13파일, 공통 파일 중복 가능) | +750~950 | 공개 실제 명령을 RED→GREEN, queue/seed/Ready/실패·복원까지. 일반 API 거절 및 인접 관리 guard 유지 |
 
 `headless_turn.rs` 1545줄, `provider_dispatch/owner_input.rs` 1567줄은 giant다(기준선 실측).
 여기에는 선언·typed 연결·거절 분기만 추가한다. `herdr_gate.rs` 같은 giant에 restart orchestration을 넣지 않는다.
@@ -251,15 +251,15 @@ tmux와 herdr 각각 idle·busy·queue 2개·resume·실패·동시 clear를 같
 
 | 전제/집중 항목 | 코드 증거와 막을 방법 또는 남은 반례 |
 |---|---|
-| herdr server·정책 | `S/herdr_launch.rs:385` LegacyDedicated restore-off fresh witness, UserDefault grant `:456`; `S/session_host/herdr_gate.rs:496` 같은 서버. 버전 문자열이 아닌 기존 프로토콜/권한 판정을 사용하며 런타임 설정값은 이 레그에서 확인하지 않음 |
-| pane identity | `D/herdr_terminate.rs:453`, `:548`, `S/session_host/herdr_gate.rs:455` old nonce/owner/location + witnessed exact close. 같은 숫자 pane 재사용은 새 권한 아님 |
+| herdr server·정책 | `src/services/herdr_launch.rs:385` LegacyDedicated restore-off fresh witness, UserDefault grant `:456`; `src/services/session_host/herdr_gate.rs:496` 같은 서버. 버전 문자열이 아닌 기존 프로토콜/권한 판정을 사용하며 런타임 설정값은 이 레그에서 확인하지 않음 |
+| pane identity | `src/services/discord/herdr_terminate.rs:453`, `:548`, `src/services/session_host/herdr_gate.rs:455` old nonce/owner/location + witnessed exact close. 같은 숫자 pane 재사용은 새 권한 아님 |
 | launch 인자 | Claude `handoff.rs:17/29/85`, Codex `launch_policy.rs:178/210/256`, `herdr_launch.rs:732`. 기존 설정·계정·source 검증을 통과시켜야 하며 resume-only 가드 완화 금지 |
 | 경계 시각 | request 도착·수락 fence·close effect·Pending commit·seed submit·source attach·Ready 게시를 분리. 이전 uncertain 입력은 replay하지 않음. 직접 native draft는 접수 원본 보장 밖임을 명시 |
 | 동시성 경합 | old fence→retire→old disconnect→새 Pending→seed custody까지 exclusion 유지. clear는 timeout 후 진행하므로 generation 검사 필요. 두 번째 요청/Cancel/Terminate/actor 교체는 expected row/token 불일치로 보이는 실패 |
 | 옛 형식 복원 | optional intent 없는 V2·legacy inflight는 기존 호환 유지. intent-only debt census 연결, unknown/newer 오인 복원 금지. 이 연결은 현재 main에 구현돼 있지 않음 |
 | 문서로만 선언한 가드 | typed seed permit, restart intent/census, generation 재검사, provider별 Ready proof는 **새 구현·시험이 필요한 포트**. 기존 transition/fence가 이것까지 제공한다고 주장하지 않음 |
 | 잘못된 0/PASS | 모델/current refusal의 안전 GREEN≠parity; owner Accepted/launch Launched≠Ready; PG skip/시험0≠PASS. 실제 물리 효과·선택 수·원본 receipt와 결과 메시지로 판정 |
-| 기존 결함 넓히지 않음 | `D/commands/control/provider_reset.rs:58`의 tmux recreate bool을 소비하지 않고 `:70` Applied로 끝나는 기존 가능성, clear teardown unknown fallback은 그대로 두고 herdr 성공 판단에 복제하지 않음. 후속에 넘길 사실이며 새 이슈/PR은 이 레그에서 쓰지 않음 |
+| 기존 결함 넓히지 않음 | `src/services/discord/commands/control/provider_reset.rs:58`의 tmux recreate bool을 소비하지 않고 `:70` Applied로 끝나는 기존 가능성, clear teardown unknown fallback은 그대로 두고 herdr 성공 판단에 복제하지 않음. 후속에 넘길 사실이며 새 이슈/PR은 이 레그에서 쓰지 않음 |
 
 ## 6. 상태 차트 산출물
 
@@ -269,6 +269,30 @@ tmux와 herdr 각각 idle·busy·queue 2개·resume·실패·동시 clear를 같
 [`session-lifecycle/herdr-restart.report.md`](statecharts/session-lifecycle/herdr-restart.report.md)에 둔다.
 모델은 새 코드가 아닌 설계 포트를 검사하며, 부팅 intent 내구성과 provider별 I/O는 위 실제 시험으로 증명해야 한다.
 
-`SC_CI=NEEDS_FILES`: 새 cfg의 `docs/statecharts/expected.tsv` 등록은 공통 규칙의 baseline 항목 변경 승인 대상이므로
-이 레그에서 편집하지 않았다. 제안 행은 모델 보고서에 모두 제시하며, scratch root의 제안 manifest로만 정식 checker를 실행했다.
-등록 전 기본 statechart CI는 새 cfg를 unlisted로 거절한다. 이 사실을 TLC GREEN 또는 CI 통과로 숨기지 않는다.
+새 cfg 23행의 `docs/statecharts/expected.tsv` 등록은 A 브리프에서 승인되었다.
+기존 baseline 행은 바꾸지 않고 신규 모델을 등록하며, A의 새 위반 집합도 같은 23개 설정에서 검사한다.
+
+## 7. A 조각의 재개 경계 계약
+
+설계 리뷰 P2-2/P2-5는 A에서 다룬다. P2-1/3/4/6과 owner가 successor를 시작하는 대안은 B 전 r2 게이트에서 판정한다.
+이 조각은 `/restart` 명령이나 V2 restart intent를 활성화하지 않는다.
+
+- `ResumeStart{operation,path,dev,ino,offset}`를 immutable `BindingContext.resume_start`에 보관한다.
+  incarnation 파일은 fsync/부모 flush 뒤 Pending CAS에 쓰는 nonce로 고정되므로, seed나 부팅의 다른 프로세스도 같은 시작점을 읽는다.
+  메모리 registry나 seed metadata를 원본으로 삼지 않으며, optional 필드가 없는 옛 fresh context는 그대로 읽는다.
+- Codex resume는 명시 `HerdrLaunch.resume_start`와 `resume=true`, 정확한 native selector,
+  같은 owner의 확인된 Retired predecessor가 함께 있을 때만 준비한다. 일반 `launch_of`는 selector가 남아 있어도 fresh다.
+  argv의 resume 모드는 이 기록과 selector/파일 정체성을 확인한 분기에서만 열고 기존 fresh 검사도 유지한다.
+- 시작점은 옛 실행 종료가 확인된 뒤의 complete-line EOF다. 같은 source의 유일한 비-retired O cursor가
+  EOF와 정확히 같고 prefix hash가 맞을 때만 capture한다. cursor<EOF, cursor>EOF, 파일 교체/손상은 명시 거절한다.
+  min/max로 합치거나 O cursor를 움직이지 않는다. fresh로 바꿀지/다시 기다릴지는 B의 정책이며 A는 자동 전환하지 않는다.
+- 새 resume 프로세스의 metadata가 seed 전에 EOF를 늘려도 부팅에서 시작점을 재측정하지 않는다.
+  immutable offset을 유지하고 path/native/dev/ino 및 `len>=offset`을 확인한다. `len==offset` 재검사는 새 metadata를 잘못 거절하므로 하지 않는다.
+- resume의 자기 binding은 정확한 durable context와 파일을 가진 `Resume` 원인만 허용한다. fresh의 `Startup` 제한은 유지한다.
+  첫 key 전에 context를 확인하고, 첫 입력 reader·중단 토큰의 시작점·hook rollout marker·runtime binding 복원 offset이 같은 기록을 사용한다.
+  값이 없거나 다른 source이면 0으로 대체하지 않는다. 이 경로를 verified policy로 승격시키지도 않는다.
+- 실제 시험은 기존 rollout+O cursor, 저장된 새 incarnation/Pending, 메모리 registry 소실과 O 재부팅,
+  실제 seed/Resume hook/attach/native reply/O delivery를 통과한다. 과거 assistant 출력은 다시 게시하지 않아야 하며,
+  정상 resume를 `Startup`만 기다리다 SOURCE_WAIT 실패로 만들지 않아야 한다.
+
+<!-- doc-path-refs: proposed herdr_turn/restart_resume.rs commands/restart/herdr.rs -->

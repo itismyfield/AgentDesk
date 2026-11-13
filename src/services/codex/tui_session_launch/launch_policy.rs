@@ -164,6 +164,75 @@ pub(in crate::services::codex) fn codex_tui_option_args(
     args
 }
 
+#[cfg(unix)]
+fn validate_herdr_launch_args(
+    prepared: &PreparedIncarnation,
+    options: &CodexLaunchOptions,
+    args: &[String],
+) -> Result<(), String> {
+    let context = &prepared.context;
+    let Some(start) = context.resume_start.as_ref() else {
+        return crate::services::codex::validate_herdr_fresh_argv(
+            &context.launch_mode,
+            options.resume_session_id.as_deref(),
+            args,
+        );
+    };
+    let session = options
+        .resume_session_id
+        .as_deref()
+        .filter(|id| exact_codex_resume_id(id))
+        .ok_or("codex herdr resume: no exact session selector")?;
+    if context.provider != "codex"
+        || context.launch_mode != "resume"
+        || context.expected_native_session_id.as_deref() != Some(session)
+        || start.operation.trim().is_empty()
+    {
+        return Err("codex herdr resume: restart identity differs".into());
+    }
+    start.validate(
+        &crate::services::tui_prompt_dedupe::binding_events::SourceId {
+            session_id: session.to_owned(),
+            path: start.path.clone(),
+            dev: start.dev,
+            ino: start.ino,
+        },
+    )?;
+    if !args.is_empty() {
+        validate_herdr_resume_argv(args, session)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_herdr_resume_argv(args: &[String], session: &str) -> Result<(), String> {
+    let mut arguments = args.iter();
+    let mut command = false;
+    let mut selector = None;
+    while let Some(arg) = arguments.next() {
+        match arg.as_str() {
+            "-c" | "--config" | "-m" | "--model" | "--sandbox" | "-C" | "--cd" | "--add-dir"
+            | "--profile" | "--enable" | "--disable" => {
+                if arguments.next().is_none() {
+                    return Err("codex herdr resume: option value is missing".into());
+                }
+            }
+            "--no-daemon"
+            | "--dangerously-bypass-hook-trust"
+            | "--dangerously-bypass-approvals-and-sandbox" => {}
+            "resume" if !command => command = true,
+            value if !value.starts_with('-') && command && selector.is_none() => {
+                selector = Some(value);
+            }
+            _ => return Err("codex herdr resume: unexpected command or argument".into()),
+        }
+    }
+    if !command || selector != Some(session) {
+        return Err("codex herdr resume: rendered session selector differs".into());
+    }
+    Ok(())
+}
+
 /// The Herdr pane command of one prepared incarnation: no prompt in the argv, `--no-daemon`,
 /// hooks and an exported home, with the Herdr pane variables unset right before the exec.
 #[cfg(unix)]
@@ -175,11 +244,7 @@ pub(in crate::services::codex) fn prepare_codex_herdr_launch(
     home: &std::path::Path,
 ) -> Result<crate::services::herdr_launch::HerdrLaunchCommand, String> {
     use crate::services::herdr_launch::{HerdrLaunchCommand, unset_herdr_env_before_exec};
-    crate::services::codex::validate_herdr_fresh_argv(
-        &prepared.context.launch_mode,
-        launch_options.resume_session_id.as_deref(),
-        &[],
-    )?;
+    validate_herdr_launch_args(prepared, launch_options, &[])?;
     let logical = prepared.context.tmux_session.as_str();
     let (codex_bin, exec_path) = (
         &launchable.codex_bin,
@@ -207,11 +272,7 @@ pub(in crate::services::codex) fn prepare_codex_herdr_launch(
     }
     append_codex_config_overrides(&mut args, overrides);
     insert_codex_resume_option_before_other_options(&mut args, "--dangerously-bypass-hook-trust");
-    crate::services::codex::validate_herdr_fresh_argv(
-        &prepared.context.launch_mode,
-        launch_options.resume_session_id.as_deref(),
-        &args,
-    )?;
+    validate_herdr_launch_args(prepared, launch_options, &args)?;
     let script = render_codex_tui_tmux_script(&env_lines, codex_bin, &args);
     let script = unset_herdr_env_before_exec(&script)?;
     let path = crate::services::tmux_common::session_temp_path(logical, "sh");
@@ -264,5 +325,7 @@ pub(crate) fn validate_herdr_fresh_argv(
 
 #[cfg(all(test, unix))]
 mod fresh_tests;
+#[cfg(all(test, unix))]
+mod resume_tests;
 #[cfg(all(test, unix))]
 mod symlink_home_tests;

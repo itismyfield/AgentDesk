@@ -1,45 +1,85 @@
 ---
-title: "Herdr /restart: exact close, new incarnation, original input custody"
+title: "Separate contracts: restart lifecycle B and Codex resume helper A"
 ---
 stateDiagram-v2
+  direction LR
   state "Legend" as legend {
-    lg0: Result
-    lg1: Restart
-    lg2: Breaks NoOldPaneInput
-    lg3: Path to the NoOldPaneInput bug
+    lg0: Contract
+    lg1: Breaks ANoHistoricalReplay or AOffsetPreserved or NoOldPaneInput
+    lg2: Path to the ANoHistoricalReplay or AOffsetPreserved or NoOldPaneInput bug
   }
-  class lg0 teal
-  class lg1 blue
-  class lg2 breaks
-  class lg3 bugPath
-  s0: Old session and original queued input
-  s1: Restart excludes old input and captures exact pane
-  s2: Old pane received a restart input
-  s3: Exact close confirmed#59; settle old inflight
-  s4: Old incarnation retired#59; originals still held
-  s5: Fresh incarnation Pending before create
-  s6: New pane created#59; wait for evidence and binding
-  s7: One new Ready session#59; originals await the owner
-  s8: One new Ready session#59; originals settled once
-  [*] --> s0
-  s0 --> s1: User /restart is accepted under transition and fence
-  s1 --> s2: Stale input permission types into old pane
-  s1 --> s3: Close only the captured pane
-  s3 --> s4: Retire and settle only the old token
-  s4 --> s5: Commit new incarnation before create
-  s5 --> s6: Create reply is observed once
-  s6 --> s7: Evidence and binding admit the successor
-  s7 --> s8: Submit an original to the successor once
+  class lg0 blue
+  class lg1 breaks
+  class lg2 bugPath
+  state "At the same time" as all {
+    state "Restart lifecycle B" as r0 {
+      s0: Old session and original queued input
+      s1: Restart excludes old input and captures exact pane
+      s2: Old pane received a restart input
+      s3: Exact close confirmed#59; settle old inflight
+      s4: Old incarnation retired#59; originals still held
+      s5: Fresh incarnation Pending before create
+      s6: New pane created#59; wait for evidence and binding
+      s7: One new Ready session#59; originals await the owner
+      s8: One new Ready session#59; originals settled once
+      [*] --> s0
+      s0 --> s1: User /restart is accepted under transition and fence
+      s1 --> s2: Stale input permission types into old pane
+      s1 --> s3: Close only the captured pane
+      s3 --> s4: Retire and settle only the old token
+      s4 --> s5: Commit new incarnation before create
+      s5 --> s6: Create reply is observed once
+      s6 --> s7: Evidence and binding admit the successor
+      s7 --> s8: Submit an original to the successor once
+    }
+    --
+    state "Codex resume helper A" as r1 {
+      s9: Verified resume intent or ordinary fresh launch
+      s10: Old End confirmed before EOF capture
+      s11: EOF and O cursor agree#59; prepare immutable incarnation
+      s12: Offset durably recorded before provider launch
+      s13: Own startup metadata appended#59; seed not submitted
+      s14: Process crashed#59; volatile reader state lost
+      s15: Boot restored the original reader offset
+      s16: Resumed reader replays old history
+      [*] --> s9
+      s9 --> s10: Confirm old provider End before EOF capture
+      s10 --> s11: Compare post-End EOF with O cursor
+      s11 --> s12: Persist reader offset and mode in the incarnation
+      s12 --> s13: Launch once and observe own Startup or Resume
+      s13 --> s14: Crash after startup metadata and before seed
+      s14 --> s15: Recover the recorded incarnation and reader offset
+      s15 --> s16: Bind the scoped cause and tail from the recorded offset
+    }
+  }
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath
   class s1 blue
   class s1 bugPath
+  class s2 blue
   class s2 breaks
   class s2 bugPath
   class s3 blue
   class s4 blue
   class s5 blue
   class s6 blue
-  class s7 teal
-  class s8 teal
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s9 bugPath
+  class s10 blue
+  class s10 bugPath
+  class s11 blue
+  class s11 bugPath
+  class s12 blue
+  class s12 bugPath
+  class s13 blue
+  class s13 bugPath
+  class s14 blue
+  class s14 bugPath
+  class s15 blue
+  class s15 bugPath
+  class s16 blue
+  class s16 breaks
+  class s16 bugPath

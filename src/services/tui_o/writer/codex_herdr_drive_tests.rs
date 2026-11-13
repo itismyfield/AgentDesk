@@ -17,6 +17,10 @@ pub(crate) struct ODrive {
 }
 
 impl ODrive {
+    pub(crate) fn store(&self) -> &OStore {
+        &self.harness.store
+    }
+
     /// A writer on a ready channel's store, which holds a binding checkpoint, here before any
     /// logged record; call it on a thread that sees the test log.
     pub(crate) fn new() -> Self {

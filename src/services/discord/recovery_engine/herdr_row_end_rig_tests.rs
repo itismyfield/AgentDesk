@@ -366,6 +366,7 @@ impl Run {
                     provider_root: None,
                     first_prompt_digest: None,
                     source_policy: None,
+                    resume_start: None,
                 };
                 let prepared =
                     crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(context)

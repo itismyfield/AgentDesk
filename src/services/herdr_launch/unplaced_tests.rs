@@ -88,6 +88,7 @@ fn context_of(path: &Path) -> Result<Option<BindingContext>, String> {
         provider_root: None,
         first_prompt_digest: None,
         source_policy: None,
+        resume_start: None,
     };
     match name {
         "broken" => Err("context corrupt".into()),

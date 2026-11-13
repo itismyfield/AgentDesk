@@ -2,6 +2,9 @@
 //! start over an in-process Herdr socket, a PG row, the hook receiver and the production attach.
 #![cfg(unix)]
 
+#[path = "provider_dispatch_codex_herdr_tests/restart_resume_tests.rs"]
+mod restart_resume_tests;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -732,6 +735,7 @@ fn without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg() 
             provider_root: Some(fx.home.join("sessions")),
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         },
     )
     .unwrap();

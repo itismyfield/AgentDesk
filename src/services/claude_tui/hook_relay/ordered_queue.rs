@@ -1436,7 +1436,7 @@ mod tests {
             let captured: OrderedHookRelayRequest = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(
                 captured.binding.as_ref().unwrap().context,
-                CapturedContext::Captured(p.context)
+                CapturedContext::Captured(p.context.into())
             );
             let expected = if mode == "legacy" {
                 let mut old: Value = serde_json::from_slice(&bytes).unwrap();

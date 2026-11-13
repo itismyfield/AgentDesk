@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[cfg(all(test, unix))]
+#[path = "codex_hook/herdr_resume_tests.rs"]
+mod herdr_resume_tests;
+
 /// Launch paths let the execution's context name the cause of a new source.
 pub(crate) fn register_launched_tmux_runtime_binding(
     tmux_session_name: &str,
@@ -429,6 +433,69 @@ fn observe_codex_hook_under_source_authority(
             return reject(NotApplicableReason::CodexSourceRejected, payload_session);
         }
     };
+    let start_offset = if context.launch_mode == "resume"
+        && herdr_execution_is(&context.tmux_session, &context.execution_nonce)
+    {
+        #[cfg(unix)]
+        let history =
+            match binding_events::binding_events_since(context.channel_id.unwrap_or_default(), 0) {
+                Ok(history) => history,
+                Err(error) => {
+                    tracing::error!(%error, payload_session, "Codex resume history unavailable");
+                    return IngressOutcome::NotDurable(NotDurableReason::Append);
+                }
+            };
+        #[cfg(unix)]
+        let first_source = history.iter().find_map(|event| {
+            if event.provider != "codex"
+                || event.tmux_session != context.tmux_session
+                || event.execution_nonce.as_deref() != Some(context.execution_nonce.as_str())
+            {
+                return None;
+            }
+            match &event.new {
+                binding_events::BindingTarget::Source(source)
+                | binding_events::BindingTarget::Resolved { source, .. } => Some(source),
+                _ => None,
+            }
+        });
+        #[cfg(unix)]
+        let offset = (|| {
+            use crate::services::cluster::stream_relay::SourceFileIdentity;
+            let Some(verified) = verified.as_ref() else {
+                return first_source
+                    .is_some()
+                    .then_some(0)
+                    .ok_or_else(|| "Codex resumed source is not verified".to_string());
+            };
+            let SourceFileIdentity::Unix { dev, ino } = verified.identity else {
+                return Err("Codex resumed source has no file identity".to_string());
+            };
+            let source = binding_events::SourceId {
+                session_id: verified.session_id.clone(),
+                path: verified.rollout_path.clone(),
+                dev,
+                ino,
+            };
+            // Later native transitions keep their existing source policy; a repeated first hook
+            // still needs its durable boundary after an append-before-marker crash.
+            if first_source.is_some_and(|first| first != &source) {
+                return Ok(0);
+            }
+            binding_context::herdr_resume::start_offset(context, &source)
+        })();
+        #[cfg(not(unix))]
+        let offset: Result<u64, String> = Err("Codex Herdr resume needs file identity".into());
+        match offset {
+            Ok(offset) => offset,
+            Err(error) => {
+                tracing::warn!(%error, payload_session, "Codex Herdr resume source rejected");
+                return reject(NotApplicableReason::CodexSourceRejected, payload_session);
+            }
+        }
+    } else {
+        0
+    };
     let changed =
         match binding_events::codex::record(context, payload_session, hook, verified.as_ref()) {
             Ok(changed) => changed,
@@ -456,7 +523,7 @@ fn observe_codex_hook_under_source_authority(
         authority,
         &verified.rollout_path,
         Some(&verified.session_id),
-        Some(0),
+        Some(start_offset),
     ) {
         tracing::error!(
             error,
@@ -491,8 +558,8 @@ fn observe_codex_hook_under_source_authority(
                     output_path: path,
                     relay_output_path: None,
                     session_id: Some(verified.session_id),
-                    last_offset: 0,
-                    relay_last_offset: Some(0),
+                    last_offset: start_offset,
+                    relay_last_offset: Some(start_offset),
                     ..old
                 },
                 recorded_at: Instant::now(),

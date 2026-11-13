@@ -124,7 +124,7 @@ pub(crate) fn scan_context_from_path(
     else {
         return None;
     };
-    context_current(provider, logical, channel, &context).then_some(context)
+    context_current(provider, logical, channel, &context).then_some(*context)
 }
 
 fn context_current(provider: &str, logical: &str, channel: u64, context: &BindingContext) -> bool {

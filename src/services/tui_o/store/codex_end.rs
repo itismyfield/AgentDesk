@@ -62,6 +62,7 @@ impl From<&BindingContext> for ContextSnapshot {
             provider_root,
             first_prompt_digest,
             source_policy,
+            resume_start: _,
         } = context;
         Self {
             schema: *schema,

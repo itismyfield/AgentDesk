@@ -79,7 +79,7 @@ pub(crate) fn proven(root: &Path) -> (BindingContext, SourceId) {
         dedupe::CodexDeliveryPermissionForTests::Allowed,
     );
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(context.clone()),
+        context: CapturedContext::Captured(context.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

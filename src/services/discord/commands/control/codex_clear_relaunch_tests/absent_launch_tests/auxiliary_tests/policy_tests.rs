@@ -251,7 +251,7 @@ async fn ambient_shadow_absence_pins_verified_but_explicit_clear_restores_shadow
         .unwrap()
         .join(format!("rollout-{THIRD_NATIVE_ID}.jsonl"));
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(n3.clone()),
+        context: CapturedContext::Captured(n3.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();
@@ -429,7 +429,7 @@ async fn synthetic_ordinary_verified_pin_does_not_receive_canary_launch_authorit
     fs::write(&path, format!("{}\n", json!({"type":"session_meta","timestamp":at,"payload":{
         "id":THIRD_NATIVE_ID,"timestamp":at,"cwd":fixture.root.path(),"source":"cli","originator":"codex_cli_rs"}}))).unwrap();
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(context.clone()),
+        context: CapturedContext::Captured(context.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

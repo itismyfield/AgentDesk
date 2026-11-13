@@ -129,6 +129,7 @@ impl HostObservation {
                 .into(),
             ),
             source_policy: (!self.herdr).then(|| "shadow".into()),
+            resume_start: None,
         };
         Ok(Inputs {
             target: Target {

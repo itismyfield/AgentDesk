@@ -353,6 +353,7 @@ impl Rig {
             expected_native_session_id: None,
             resume: false,
             provider_root: None,
+            resume_start: None,
         };
         let prepare = |prepared: &PreparedIncarnation| {
             Ok(HerdrLaunchCommand {
@@ -430,6 +431,7 @@ fn other_execution(rig: &Rig) -> (String, PathBuf) {
         provider_root: None,
         first_prompt_digest: None,
         source_policy: None,
+        resume_start: None,
     };
     (nonce, PreparedIncarnation::create(context).unwrap().path)
 }
@@ -511,6 +513,7 @@ async fn a_pre_marker_launch_whose_provider_started_is_adopted_after_a_restart_p
                 expected_native_session_id: None,
                 resume: false,
                 provider_root: None,
+                resume_start: None,
             };
             let prepare = |prepared: &PreparedIncarnation| {
                 Ok(HerdrLaunchCommand {

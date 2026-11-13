@@ -5,6 +5,8 @@
 #[cfg(unix)]
 pub(crate) mod busy;
 mod first_input;
+#[cfg(test)]
+mod restart_resume_tests;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -193,6 +195,7 @@ fn launch_of(turn: &CodexHerdrTurn<'_>, provider_root: Option<&Path>) -> HerdrLa
         expected_native_session_id: None,
         resume: false,
         provider_root: provider_root.map(|home| home.join("sessions")),
+        resume_start: None,
     }
 }
 
@@ -274,7 +277,7 @@ fn hook_logged(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<bool, String> {
     }))
 }
 
-/// The source execution `nonce`'s own SessionStart(startup) hook recorded, while it is the pane's
+/// The source execution `nonce`'s own startup/resume hook recorded, while it is the pane's
 /// latest record; refusal audits do not move the pane.
 fn logged_source(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Option<SourceId> {
     let logical = turn.owner.logical_key.as_str();
@@ -287,7 +290,10 @@ fn logged_source(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Option<SourceId> {
         .find(|event| moved(&event.new))?;
     let own = latest.provider == "codex"
         && latest.execution_nonce.as_deref() == Some(nonce)
-        && latest.cause == BindingCause::Startup;
+        && latest.cause == match crate::services::tui_prompt_dedupe::binding_context::herdr_resume::pending_start(nonce).ok()? {
+            Some(_) => BindingCause::Resume,
+            None => BindingCause::Startup,
+        };
     match latest.new {
         BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } if own => {
             Some(source)

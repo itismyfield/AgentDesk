@@ -487,6 +487,7 @@ fn settled_resume_for_first_init(channel: u64, history: bool) -> (Harness, Settl
         provider_root: Some(sessions.canonicalize().unwrap()),
         first_prompt_digest: None,
         source_policy: Some("verified".into()),
+        resume_start: None,
     };
     PreparedIncarnation::create(context.clone()).unwrap();
     let marker = tc::session_temp_path(&context.tmux_session, "spawn_nonce");
@@ -527,7 +528,7 @@ fn settled_resume_for_first_init(channel: u64, history: bool) -> (Harness, Settl
     }
     std::fs::write(&path, &bytes).unwrap();
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(context.clone()),
+        context: CapturedContext::Captured(context.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

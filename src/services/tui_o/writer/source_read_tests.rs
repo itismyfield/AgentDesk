@@ -80,6 +80,7 @@ impl Fixture {
             provider_root: Some(sessions.canonicalize().unwrap()),
             first_prompt_digest: Some(format!("sha256:{:x}", Sha256::digest(PROMPT.as_bytes()))),
             source_policy: Some(if verified { "verified" } else { "legacy" }.into()),
+            resume_start: None,
         };
         PreparedIncarnation::create(context.clone()).unwrap();
         let marker = tc::session_temp_path(&context.tmux_session, "spawn_nonce");
@@ -127,7 +128,9 @@ impl Fixture {
         context: Option<BindingContext>,
     ) {
         let envelope = HookBindingEnvelope {
-            context: CapturedContext::Captured(context.unwrap_or_else(|| self.context.clone())),
+            context: CapturedContext::Captured(
+                context.unwrap_or_else(|| self.context.clone()).into(),
+            ),
             observed: ObservedHookProcess::default(),
         };
         let mut headers = axum::http::HeaderMap::new();
@@ -538,7 +541,7 @@ async fn source_read_unknown_hook_posts_and_follows_descriptor_compact_resume() 
         assert!(format!("{first:?}").contains("old preview"), "{first:?}");
         binding_events::set_test_root(Some(&root));
         let envelope = HookBindingEnvelope {
-            context: CapturedContext::Captured(context.clone()),
+            context: CapturedContext::Captured(context.clone().into()),
             observed: ObservedHookProcess::default(),
         };
         let mut headers = axum::http::HeaderMap::new();

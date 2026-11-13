@@ -564,6 +564,7 @@ fn revoke_retained_source(root: &std::path::Path) {
         provider_root: Some(root.canonicalize().unwrap()),
         first_prompt_digest: None,
         source_policy: Some("verified".into()),
+        resume_start: None,
     };
     PreparedIncarnation::create(context.clone()).unwrap();
     let marker = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");
@@ -586,7 +587,7 @@ fn revoke_retained_source(root: &std::path::Path) {
         dedupe::CodexDeliveryPermissionForTests::Allowed,
     );
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(context),
+        context: CapturedContext::Captured(context.into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

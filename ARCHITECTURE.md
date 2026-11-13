@@ -1249,12 +1249,14 @@ src/
 │   │   │   ├── busy.rs
 │   │   │   ├── busy_tests.rs
 │   │   │   ├── composer_tests.rs
-│   │   │   └── first_input.rs
+│   │   │   ├── first_input.rs
+│   │   │   └── restart_resume_tests.rs
 │   │   ├── tui_session_launch/
 │   │   │   ├── first_input/
 │   │   │   │   └── tests.rs
 │   │   │   ├── launch_policy/
 │   │   │   │   ├── fresh_tests.rs
+│   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── symlink_home_tests.rs
 │   │   │   ├── first_input.rs
 │   │   │   └── launch_policy.rs
@@ -2341,6 +2343,8 @@ src/
 │   │   │   │   │   ├── replay_scope.rs
 │   │   │   │   │   ├── start_failure.rs
 │   │   │   │   │   └── start_failure_state_tests.rs
+│   │   │   │   ├── provider_dispatch_codex_herdr_tests/
+│   │   │   │   │   └── restart_resume_tests.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
@@ -3538,9 +3542,11 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── runtime_marker/
 │   │   │   └── tests.rs
+│   │   ├── codex_resume.rs
 │   │   ├── policy.rs
 │   │   ├── policy_tests.rs
 │   │   ├── prepared.rs
+│   │   ├── restart_resume_pg_tests.rs
 │   │   ├── retired_hold.rs
 │   │   ├── runtime_marker.rs
 │   │   ├── unplaced.rs
@@ -4404,6 +4410,7 @@ src/
 │   │   └── turn_mode.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_context/
+│   │   │   ├── herdr_resume.rs
 │   │   │   ├── inventory.rs
 │   │   │   └── inventory_tests.rs
 │   │   ├── binding_events/
@@ -4428,6 +4435,8 @@ src/
 │   │   │   ├── observation.rs
 │   │   │   └── source_tests.rs
 │   │   ├── runtime_binding/
+│   │   │   ├── codex_hook/
+│   │   │   │   └── herdr_resume_tests.rs
 │   │   │   ├── codex_policy/
 │   │   │   │   ├── absent_open.rs
 │   │   │   │   ├── absent_open_tests.rs

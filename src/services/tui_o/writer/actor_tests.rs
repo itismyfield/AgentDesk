@@ -998,6 +998,7 @@ async fn held_actor_preserves_cursor_and_owed_output(allowed_new_source: bool) {
                 provider_root: Some(_context_root.path().canonicalize().unwrap()),
                 first_prompt_digest: None,
                 source_policy: Some("verified".into()),
+                resume_start: None,
             };
             PreparedIncarnation::create(context.clone()).unwrap();
             let marker = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");
@@ -1014,7 +1015,7 @@ async fn held_actor_preserves_cursor_and_owed_output(allowed_new_source: bool) {
                     "cwd":_context_root.path(),"originator":"codex_cli_rs"}});
                 std::fs::write(&proof_path, format!("{header}\n")).unwrap();
                 dedupe::set_codex_delivery_permission_for_tests(&context, dedupe::CodexDeliveryPermissionForTests::Allowed);
-                let envelope = HookBindingEnvelope { context: CapturedContext::Captured(context.clone()), observed: ObservedHookProcess::default() };
+                let envelope = HookBindingEnvelope { context: CapturedContext::Captured(context.clone().into()), observed: ObservedHookProcess::default() };
                 let mut headers = axum::http::HeaderMap::new();
                 headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
                 let ingress = crate::services::claude_tui::hook_server::observation_ingress::observe_binding_hook(

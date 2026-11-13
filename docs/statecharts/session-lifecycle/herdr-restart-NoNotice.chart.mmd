@@ -1,24 +1,65 @@
 ---
-title: "Herdr /restart: exact close, new incarnation, original input custody"
+title: "Separate contracts: restart lifecycle B and Codex resume helper A"
 ---
 stateDiagram-v2
+  direction LR
   state "Legend" as legend {
-    lg0: Restart
+    lg0: Contract
     lg1: Path to the AcceptedInputResolves or RequestResolves or RestartAvailable bug
     lg2: Repeats forever, so AcceptedInputResolves or RequestResolves or RestartAvailable breaks
   }
   class lg0 blue
   class lg1 bugPath
   class lg2 repeats
-  s0: Old session and original queued input
-  s1: Restart excludes old input and captures exact pane
-  s2: Failure awaiting a visible result
-  [*] --> s0
-  s0 --> s1: User /restart is accepted under transition and fence
-  s1 --> s2: Exact close is unconfirmed
+  state "At the same time" as all {
+    state "Restart lifecycle B" as r0 {
+      s0: Old session and original queued input
+      s1: Restart excludes old input and captures exact pane
+      s2: Failure awaiting a visible result
+      [*] --> s0
+      s0 --> s1: User /restart is accepted under transition and fence
+      s1 --> s2: Exact close is unconfirmed
+    }
+    --
+    state "Codex resume helper A" as r1 {
+      s3: Verified resume intent or ordinary fresh launch
+      s4: Old End confirmed before EOF capture
+      s5: EOF and O cursor agree#59; prepare immutable incarnation
+      s6: Offset durably recorded before provider launch
+      s7: Own startup metadata appended#59; seed not submitted
+      s8: Process crashed#59; volatile reader state lost
+      s9: Boot restored the original reader offset
+      s10: Resume cause accepted#59; old history excluded
+      [*] --> s3
+      s3 --> s4: Confirm old provider End before EOF capture
+      s4 --> s5: Compare post-End EOF with O cursor
+      s5 --> s6: Persist reader offset and mode in the incarnation
+      s6 --> s7: Launch once and observe own Startup or Resume
+      s7 --> s8: Crash after startup metadata and before seed
+      s8 --> s9: Recover the recorded incarnation and reader offset
+      s9 --> s10: Bind the scoped cause and tail from the recorded offset
+    }
+  }
   class s0 blue
   class s0 bugPath
   class s1 blue
   class s1 bugPath
   class s2 blue
+  class s2 bugPath
   class s2 repeats
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 blue
+  class s7 bugPath
+  class s8 blue
+  class s8 bugPath
+  class s9 blue
+  class s9 bugPath
+  class s10 blue
+  class s10 repeats

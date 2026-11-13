@@ -1,27 +1,43 @@
 ---
-title: "Herdr /restart: exact close, new incarnation, original input custody"
+title: "Separate contracts: restart lifecycle B and Codex resume helper A"
 ---
 stateDiagram-v2
+  direction LR
   state "Legend" as legend {
-    lg0: Restart
-    lg1: Breaks FreshIncarnation
-    lg2: Path to the FreshIncarnation bug
+    lg0: Contract
+    lg1: Breaks AOrdinaryFresh or FreshIncarnation
+    lg2: Path to the AOrdinaryFresh or FreshIncarnation bug
   }
   class lg0 blue
   class lg1 breaks
   class lg2 bugPath
-  s0: Old session and original queued input
-  s1: Restart excludes old input and captures exact pane
-  s2: Exact close confirmed#59; settle old inflight
-  s3: Old incarnation retired#59; originals still held
-  s4: Fresh incarnation Pending before create
-  s5: New pane reused the old incarnation
-  [*] --> s0
-  s0 --> s1: User /restart is accepted under transition and fence
-  s1 --> s2: Close only the captured pane
-  s2 --> s3: Retire and settle only the old token
-  s3 --> s4: Commit new incarnation before create
-  s4 --> s5: Create reply is observed once
+  state "At the same time" as all {
+    state "Restart lifecycle B" as r0 {
+      s0: Old session and original queued input
+      s1: Restart excludes old input and captures exact pane
+      s2: Exact close confirmed#59; settle old inflight
+      s3: Old incarnation retired#59; originals still held
+      s4: Fresh incarnation Pending before create
+      s5: New pane reused the old incarnation
+      [*] --> s0
+      s0 --> s1: User /restart is accepted under transition and fence
+      s1 --> s2: Close only the captured pane
+      s2 --> s3: Retire and settle only the old token
+      s3 --> s4: Commit new incarnation before create
+      s4 --> s5: Create reply is observed once
+    }
+    --
+    state "Codex resume helper A" as r1 {
+      s6: Verified resume intent or ordinary fresh launch
+      s7: Ordinary launch has no old reader boundary
+      s8: Prepare an ordinary fresh incarnation with offset zero
+      s9: Ordinary launch acquired resume mode
+      [*] --> s6
+      s6 --> s7: Ordinary launch keeps fresh mode
+      s7 --> s8: Ordinary fresh launch keeps reader offset zero
+      s8 --> s9: Persist reader offset and mode in the incarnation
+    }
+  }
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath
@@ -33,5 +49,15 @@ stateDiagram-v2
   class s3 bugPath
   class s4 blue
   class s4 bugPath
+  class s5 blue
   class s5 breaks
   class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 blue
+  class s7 bugPath
+  class s8 blue
+  class s8 bugPath
+  class s9 blue
+  class s9 breaks
+  class s9 bugPath

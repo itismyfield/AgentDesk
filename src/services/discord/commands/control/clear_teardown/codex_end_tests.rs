@@ -184,6 +184,7 @@ impl Pane {
             provider_root: Some(provider_root),
             first_prompt_digest: None,
             source_policy: Some("shadow".into()),
+            resume_start: None,
         };
         let context_path = PreparedIncarnation::create(context.clone()).unwrap().path;
         std::fs::write(

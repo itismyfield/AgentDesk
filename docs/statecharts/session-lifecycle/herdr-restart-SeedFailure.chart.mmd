@@ -1,29 +1,41 @@
 ---
-title: "Herdr /restart: exact close, new incarnation, original input custody"
+title: "Separate contracts: restart lifecycle B and Codex resume helper A"
 ---
 stateDiagram-v2
+  direction LR
   state "Legend" as legend {
-    lg0: Result
-    lg1: Restart
+    lg0: Contract
   }
-  class lg0 teal
-  class lg1 blue
-  s0: Old session and original queued input
-  s1: Restart excludes old input and captures exact pane
-  s2: Exact close confirmed#59; settle old inflight
-  s3: Old incarnation retired#59; originals still held
-  s4: Fresh incarnation Pending before create
-  s5: New pane created#59; wait for evidence and binding
-  s6: Failure awaiting a visible result
-  s7: Visible failure#59; originals remain owned
-  [*] --> s0
-  s0 --> s1: User /restart is accepted under transition and fence
-  s1 --> s2: Close only the captured pane
-  s2 --> s3: Retire and settle only the old token
-  s3 --> s4: Commit new incarnation before create
-  s4 --> s5: Create reply is observed once
-  s5 --> s6: Evidence and binding admit the successor
-  s6 --> s7: Show the failure and retain input custody
+  class lg0 blue
+  state "At the same time" as all {
+    state "Restart lifecycle B" as r0 {
+      s0: Old session and original queued input
+      s1: Restart excludes old input and captures exact pane
+      s2: Exact close confirmed#59; settle old inflight
+      s3: Old incarnation retired#59; originals still held
+      s4: Fresh incarnation Pending before create
+      s5: New pane created#59; wait for evidence and binding
+      s6: Failure awaiting a visible result
+      s7: Visible failure#59; originals remain owned
+      [*] --> s0
+      s0 --> s1: User /restart is accepted under transition and fence
+      s1 --> s2: Close only the captured pane
+      s2 --> s3: Retire and settle only the old token
+      s3 --> s4: Commit new incarnation before create
+      s4 --> s5: Create reply is observed once
+      s5 --> s6: Evidence and binding admit the successor
+      s6 --> s7: Show the failure and retain input custody
+    }
+    --
+    state "Codex resume helper A" as r1 {
+      s8: Verified resume intent or ordinary fresh launch
+      s9: Old End confirmed before EOF capture
+      s10: Visible preparation or binding failure#59; no tail
+      [*] --> s8
+      s8 --> s9: Confirm old provider End before EOF capture
+      s9 --> s10: Compare post-End EOF with O cursor
+    }
+  }
   class s0 blue
   class s1 blue
   class s2 blue
@@ -31,4 +43,7 @@ stateDiagram-v2
   class s4 blue
   class s5 blue
   class s6 blue
-  class s7 teal
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s10 blue

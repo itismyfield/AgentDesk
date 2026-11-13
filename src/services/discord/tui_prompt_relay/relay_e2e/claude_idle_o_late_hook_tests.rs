@@ -13,7 +13,7 @@ fn hook_request(f: &Fixture, cause: &str) -> impl FnOnce() + Send + 'static {
     ))
     .unwrap();
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(execution_context("claude", &nonce).unwrap()),
+        context: CapturedContext::Captured(execution_context("claude", &nonce).unwrap().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

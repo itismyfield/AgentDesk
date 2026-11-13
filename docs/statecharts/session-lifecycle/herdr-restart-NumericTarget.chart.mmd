@@ -1,33 +1,65 @@
 ---
-title: "Herdr /restart: exact close, new incarnation, original input custody"
+title: "Separate contracts: restart lifecycle B and Codex resume helper A"
 ---
 stateDiagram-v2
+  direction LR
   state "Legend" as legend {
-    lg0: Result
-    lg1: Restart
-    lg2: Breaks NoForeignClose
-    lg3: Path to the NoForeignClose bug
+    lg0: Contract
+    lg1: Breaks NoForeignClose
+    lg2: Path to the NoForeignClose bug
   }
-  class lg0 teal
-  class lg1 blue
-  class lg2 breaks
-  class lg3 bugPath
-  s0: Old session and original queued input
-  s1: Restart excludes old input and captures exact pane
-  s2: Reused numeric target was closed
-  s3: Failure awaiting a visible result
-  s4: Visible failure#59; originals remain owned
-  [*] --> s0
-  s0 --> s1: User /restart is accepted under transition and fence
-  s1 --> s2: Reuse a numeric target after replacement
-  s1 --> s3: Unknown or changed identity refuses close
-  s3 --> s4: Show the failure and retain input custody
+  class lg0 blue
+  class lg1 breaks
+  class lg2 bugPath
+  state "At the same time" as all {
+    state "Restart lifecycle B" as r0 {
+      s0: Old session and original queued input
+      s1: Restart excludes old input and captures exact pane
+      s2: Reused numeric target was closed
+      s3: Failure awaiting a visible result
+      s4: Visible failure#59; originals remain owned
+      [*] --> s0
+      s0 --> s1: User /restart is accepted under transition and fence
+      s1 --> s2: Reuse a numeric target after replacement
+      s1 --> s3: Unknown or changed identity refuses close
+      s3 --> s4: Show the failure and retain input custody
+    }
+    --
+    state "Codex resume helper A" as r1 {
+      s5: Verified resume intent or ordinary fresh launch
+      s6: Old End confirmed before EOF capture
+      s7: EOF and O cursor agree#59; prepare immutable incarnation
+      s8: Offset durably recorded before provider launch
+      s9: Own startup metadata appended#59; seed not submitted
+      s10: Process crashed#59; volatile reader state lost
+      s11: Boot restored the original reader offset
+      s12: Resume cause accepted#59; old history excluded
+      [*] --> s5
+      s5 --> s6: Confirm old provider End before EOF capture
+      s6 --> s7: Compare post-End EOF with O cursor
+      s7 --> s8: Persist reader offset and mode in the incarnation
+      s8 --> s9: Launch once and observe own Startup or Resume
+      s9 --> s10: Crash after startup metadata and before seed
+      s10 --> s11: Recover the recorded incarnation and reader offset
+      s11 --> s12: Bind the scoped cause and tail from the recorded offset
+    }
+  }
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath
   class s1 blue
   class s1 bugPath
+  class s2 blue
   class s2 breaks
   class s2 bugPath
   class s3 blue
-  class s4 teal
+  class s4 blue
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s11 blue
+  class s12 blue

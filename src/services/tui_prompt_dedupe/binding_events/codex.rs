@@ -173,9 +173,15 @@ impl Writer {
             pending.execution_nonce.as_deref() == Some(&context.execution_nonce)
                 && matches!(&pending.new, BindingTarget::Pending { payload_session_id, .. } if payload_session_id == session)
         });
-        if source
+        let restart_incarnation = context.launch_mode == "resume"
+            && context.resume_start.is_some()
+            && pane.is_some_and(|pane| {
+                pane.nonce.as_deref() != Some(context.execution_nonce.as_str())
+            });
+        if (source
             .as_ref()
             .is_some_and(|source| Some(source) == old.as_ref())
+            && !restart_incarnation)
             || (source.is_none() && pending.is_some())
         {
             return None;

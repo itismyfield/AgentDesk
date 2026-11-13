@@ -86,7 +86,7 @@ fn launched_pane(fx: &Fixture, s0: &str, nonce: &str) -> HookBindingEnvelope {
     let binding = claude(&path, s0);
     crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(logical, binding);
     HookBindingEnvelope {
-        context: CapturedContext::Captured(execution_context("claude", nonce).unwrap()),
+        context: CapturedContext::Captured(execution_context("claude", nonce).unwrap().into()),
         observed: Default::default(),
     }
 }
@@ -424,7 +424,7 @@ fn dispatched_return(owned: bool) {
     // The new execution's resumed start is taken; the ended Herdr execution's is not.
     let start = json!({"session_id": s_b, "source": "resume", "transcript_path": herdr.path});
     let own = HookBindingEnvelope {
-        context: CapturedContext::Captured(context),
+        context: CapturedContext::Captured(context.into()),
         observed: Default::default(),
     };
     let uri = format!("/hooks/claude/SessionStart?session_id={s_b}");

@@ -29,7 +29,7 @@ fn hook_with_source(
     path: Option<&Path>,
 ) -> IngressOutcome {
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(h.context.clone()),
+        context: CapturedContext::Captured(h.context.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

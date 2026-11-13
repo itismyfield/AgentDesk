@@ -1,28 +1,51 @@
 ---
-title: "Herdr /restart: exact close, new incarnation, original input custody"
+title: "Separate contracts: restart lifecycle B and Codex resume helper A"
 ---
 stateDiagram-v2
+  direction LR
   state "Legend" as legend {
-    lg0: Restart
-    lg1: Breaks NoBlindCreate
-    lg2: Path to the NoBlindCreate bug
+    lg0: Contract
+    lg1: Breaks ABootOffsetStable or ANoNewPrefixSkip or AOffsetPreserved or NoBlindCreate
+    lg2: Path to the ABootOffsetStable or ANoNewPrefixSkip or AOffsetPreserved or NoBlindCreate bug
   }
   class lg0 blue
   class lg1 breaks
   class lg2 bugPath
-  s0: Old session and original queued input
-  s1: Restart excludes old input and captures exact pane
-  s2: Exact close confirmed#59; settle old inflight
-  s3: Old incarnation retired#59; originals still held
-  s4: Fresh incarnation Pending before create
-  s5: Unknown create acknowledgement was replayed
-  [*] --> s0
-  s0 --> s1: User /restart is accepted under transition and fence
-  s1 --> s2: Close only the captured pane
-  s2 --> s3: Retire and settle only the old token
-  s3 --> s4: Commit new incarnation before create
-  s4 --> s4: Create reply is observed once
-  s4 --> s5: Create reply is observed once
+  state "At the same time" as all {
+    state "Restart lifecycle B" as r0 {
+      s0: Old session and original queued input
+      s1: Restart excludes old input and captures exact pane
+      s2: Exact close confirmed#59; settle old inflight
+      s3: Old incarnation retired#59; originals still held
+      s4: Fresh incarnation Pending before create
+      s5: Unknown create acknowledgement was replayed
+      [*] --> s0
+      s0 --> s1: User /restart is accepted under transition and fence
+      s1 --> s2: Close only the captured pane
+      s2 --> s3: Retire and settle only the old token
+      s3 --> s4: Commit new incarnation before create
+      s4 --> s5: Create reply is observed once
+    }
+    --
+    state "Codex resume helper A" as r1 {
+      s6: Verified resume intent or ordinary fresh launch
+      s7: Old End confirmed before EOF capture
+      s8: EOF and O cursor agree#59; prepare immutable incarnation
+      s9: Offset durably recorded before provider launch
+      s10: Own startup metadata appended#59; seed not submitted
+      s11: Process crashed#59; volatile reader state lost
+      s12: Boot replaced the recorded offset
+      s13: Recovered reader skips new prefix
+      [*] --> s6
+      s6 --> s7: Confirm old provider End before EOF capture
+      s7 --> s8: Compare post-End EOF with O cursor
+      s8 --> s9: Persist reader offset and mode in the incarnation
+      s9 --> s10: Launch once and observe own Startup or Resume
+      s10 --> s11: Crash after startup metadata and before seed
+      s11 --> s12: Recover the recorded incarnation and reader offset
+      s12 --> s13: Bind the scoped cause and tail from the recorded offset
+    }
+  }
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath
@@ -34,5 +57,24 @@ stateDiagram-v2
   class s3 bugPath
   class s4 blue
   class s4 bugPath
+  class s5 blue
   class s5 breaks
   class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 blue
+  class s7 bugPath
+  class s8 blue
+  class s8 bugPath
+  class s9 blue
+  class s9 bugPath
+  class s10 blue
+  class s10 bugPath
+  class s11 blue
+  class s11 bugPath
+  class s12 blue
+  class s12 breaks
+  class s12 bugPath
+  class s13 blue
+  class s13 breaks
+  class s13 bugPath

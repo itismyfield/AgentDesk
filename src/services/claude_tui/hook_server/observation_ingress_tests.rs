@@ -602,7 +602,7 @@ fn a_launched_pane_stays_refused_past_the_grace_until_a_pass_lists_tmux() {
     fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     fs::write(marker, &prepared.context.execution_nonce).unwrap();
     let encode = |context: BindingContext| {
-        let context = CapturedContext::Captured(context);
+        let context = CapturedContext::Captured(context.into());
         let observed = Default::default();
         HookBindingEnvelope { context, observed }.encode().unwrap()
     };

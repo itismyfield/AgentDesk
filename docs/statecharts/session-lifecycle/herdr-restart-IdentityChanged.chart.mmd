@@ -1,22 +1,52 @@
 ---
-title: "Herdr /restart: exact close, new incarnation, original input custody"
+title: "Separate contracts: restart lifecycle B and Codex resume helper A"
 ---
 stateDiagram-v2
+  direction LR
   state "Legend" as legend {
-    lg0: Result
-    lg1: Restart
+    lg0: Contract
   }
-  class lg0 teal
-  class lg1 blue
-  s0: Old session and original queued input
-  s1: Restart excludes old input and captures exact pane
-  s2: Failure awaiting a visible result
-  s3: Visible failure#59; originals remain owned
-  [*] --> s0
-  s0 --> s1: User /restart is accepted under transition and fence
-  s1 --> s2: Unknown or changed identity refuses close
-  s2 --> s3: Show the failure and retain input custody
+  class lg0 blue
+  state "At the same time" as all {
+    state "Restart lifecycle B" as r0 {
+      s0: Old session and original queued input
+      s1: Restart excludes old input and captures exact pane
+      s2: Failure awaiting a visible result
+      s3: Visible failure#59; originals remain owned
+      [*] --> s0
+      s0 --> s1: User /restart is accepted under transition and fence
+      s1 --> s2: Unknown or changed identity refuses close
+      s2 --> s3: Show the failure and retain input custody
+    }
+    --
+    state "Codex resume helper A" as r1 {
+      s4: Verified resume intent or ordinary fresh launch
+      s5: Ordinary launch has no old reader boundary
+      s6: Prepare an ordinary fresh incarnation with offset zero
+      s7: Offset durably recorded before provider launch
+      s8: Own startup metadata appended#59; seed not submitted
+      s9: Process crashed#59; volatile reader state lost
+      s10: Boot restored the original reader offset
+      s11: Ordinary fresh launch uses Startup and offset zero
+      [*] --> s4
+      s4 --> s5: Ordinary launch keeps fresh mode
+      s5 --> s6: Ordinary fresh launch keeps reader offset zero
+      s6 --> s7: Persist reader offset and mode in the incarnation
+      s7 --> s8: Launch once and observe own Startup or Resume
+      s8 --> s9: Crash after startup metadata and before seed
+      s9 --> s10: Recover the recorded incarnation and reader offset
+      s10 --> s11: Bind the scoped cause and tail from the recorded offset
+    }
+  }
   class s0 blue
   class s1 blue
   class s2 blue
-  class s3 teal
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s11 blue

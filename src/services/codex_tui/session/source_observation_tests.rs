@@ -1098,7 +1098,7 @@ fn shadow_ingress_is_readonly_before_equality_and_without_a_source_map() {
     .unwrap();
     let mut headers = axum::http::HeaderMap::new();
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(prepared.context.clone()),
+        context: CapturedContext::Captured(prepared.context.clone().into()),
         observed: Default::default(),
     };
     headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
@@ -1451,7 +1451,7 @@ fn shadow_ingress_is_readonly_before_equality_and_without_a_source_map() {
     headers.insert(
         BINDING_HEADER,
         HookBindingEnvelope {
-            context: CapturedContext::Captured(legacy),
+            context: CapturedContext::Captured(legacy.into()),
             observed: Default::default(),
         }
         .encode()
@@ -1528,7 +1528,7 @@ fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
     assert_eq!(history[0].cause, events::BindingCause::Startup);
     assert_eq!(history[0].evidence.hook_event, None);
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(prepared.context.clone()),
+        context: CapturedContext::Captured(prepared.context.clone().into()),
         observed: Default::default(),
     };
     let payload = json!({"transcript_path":path,"prompt":"첫 argv\n한글","source":"startup"});
@@ -1918,7 +1918,7 @@ fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
             envelope.clone()
         } else {
             HookBindingEnvelope {
-                context: CapturedContext::Captured(invalid),
+                context: CapturedContext::Captured(invalid.into()),
                 observed: Default::default(),
             }
         };
@@ -1938,7 +1938,7 @@ fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
         invalid.source_policy = policy.map(str::to_owned);
         std::fs::write(&prepared.path, serde_json::to_vec(&invalid).unwrap()).unwrap();
         let env = HookBindingEnvelope {
-            context: CapturedContext::Captured(invalid),
+            context: CapturedContext::Captured(invalid.into()),
             observed: Default::default(),
         };
         run(&payload, &env, "session_start", false);

@@ -244,6 +244,7 @@ impl Terminating {
             provider_root: Some(sessions.clone()),
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         };
         let prepared = PreparedIncarnation::create(context).unwrap();
         let key = (token_hash.as_str(), session_key.as_str());
@@ -275,6 +276,7 @@ impl Terminating {
             expected_native_session_id: native,
             resume: false,
             provider_root,
+            resume_start: None,
         }
     }
 

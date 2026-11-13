@@ -117,6 +117,7 @@ fn launched(root: &Path, nonce: &str, change: impl FnOnce(&mut BindingContext)) 
         provider_root: Some(root.to_path_buf()),
         first_prompt_digest: Some(digest(PROMPT)),
         source_policy: Some("shadow".into()),
+        resume_start: None,
     };
     change(&mut context);
     PreparedIncarnation::create(context).unwrap().path

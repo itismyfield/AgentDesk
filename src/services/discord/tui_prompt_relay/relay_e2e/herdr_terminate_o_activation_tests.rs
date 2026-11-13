@@ -176,6 +176,7 @@ async fn launch(
         expected_native_session_id: Some(session.to_owned()),
         resume: false,
         provider_root: None,
+        resume_start: None,
     };
     let host = Arc::new(Successor("claude"));
     let outcome = launch_herdr_session(pool, launch, prepare, host).await;

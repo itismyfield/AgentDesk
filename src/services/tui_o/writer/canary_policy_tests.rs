@@ -32,6 +32,7 @@ fn context(root: &Path, tmux: &str, policy: &str) -> BindingContext {
         provider_root: Some(root.canonicalize().unwrap()),
         first_prompt_digest: None,
         source_policy: Some(policy.into()),
+        resume_start: None,
     }
 }
 
@@ -61,7 +62,7 @@ fn durable_canary_without_launch_files(root: &Path) -> (BindingContext, PathBuf,
         dedupe::CodexDeliveryPermissionForTests::Allowed,
     );
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(context.clone()),
+        context: CapturedContext::Captured(context.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

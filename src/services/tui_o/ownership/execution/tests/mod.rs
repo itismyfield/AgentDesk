@@ -196,6 +196,7 @@ async fn owner_execution_bound_native_requires_original_local_incarnation_pg() {
         provider_root: None,
         first_prompt_digest: None,
         source_policy: None,
+        resume_start: None,
     };
     let _prepared = PreparedIncarnation::create(context).unwrap();
     let marker = crate::services::tmux_common::session_temp_path(owner, "spawn_nonce");

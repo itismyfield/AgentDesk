@@ -595,6 +595,7 @@ fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>, resume: bool) -> Her
         expected_native_session_id: session_id,
         resume,
         provider_root: None,
+        resume_start: None,
     }
 }
 

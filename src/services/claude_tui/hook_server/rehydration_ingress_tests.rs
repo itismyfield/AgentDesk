@@ -110,6 +110,7 @@ fn outer_failure(alias: bool, header: bool) {
         provider_root: Some(home.clone()),
         first_prompt_digest: None,
         source_policy: None,
+        resume_start: None,
     };
     let prepared = PreparedIncarnation::create(context).unwrap();
     use crate::services::tmux_common as tc;
@@ -179,7 +180,7 @@ fn outer_failure(alias: bool, header: bool) {
     );
     let request = uuid();
     let encoded = HookBindingEnvelope {
-        context: CapturedContext::Captured(prepared.context.clone()),
+        context: CapturedContext::Captured(prepared.context.clone().into()),
         observed: ObservedHookProcess::default(),
     }
     .encode()
@@ -192,7 +193,7 @@ fn outer_failure(alias: bool, header: bool) {
         .0;
     assert_eq!(status, 425, "F4-alias status == 425");
     let mut captured = HookBindingEnvelope {
-        context: CapturedContext::Captured(prepared.context.clone()),
+        context: CapturedContext::Captured(prepared.context.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     assert!(
@@ -338,6 +339,7 @@ impl RegistrationRace {
             provider_root: Some(home.clone()),
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         };
         let prepared = PreparedIncarnation::create(context.clone()).unwrap();
         use crate::services::tmux_common as tc;
@@ -378,7 +380,7 @@ impl RegistrationRace {
     }
     fn envelope(&self) -> HookBindingEnvelope {
         HookBindingEnvelope {
-            context: CapturedContext::Captured(self.context.clone()),
+            context: CapturedContext::Captured(self.context.clone().into()),
             observed: ObservedHookProcess::default(),
         }
     }
@@ -500,7 +502,7 @@ fn registration_nonce_replacement(independent_failure: bool) {
     next.expected_native_session_id = Some(uuid());
     let next_context = next.clone();
     let n2 = HookBindingEnvelope {
-        context: CapturedContext::Captured(next.clone()),
+        context: CapturedContext::Captured(next.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let (tmux, a) = (race.tmux.clone(), race.a.clone());
@@ -541,7 +543,7 @@ fn registration_nonce_replacement(independent_failure: bool) {
         let ctx = next_context;
         let command = ctx.expected_native_session_id.clone().unwrap();
         let encoded = HookBindingEnvelope {
-            context: CapturedContext::Captured(ctx),
+            context: CapturedContext::Captured(ctx.into()),
             observed: ObservedHookProcess::default(),
         }
         .encode()
@@ -1043,6 +1045,7 @@ fn a_rehydrated_replacement_execution_uses_its_matching_launch_context_once() {
                 provider_root: Some(home.clone()),
                 first_prompt_digest: None,
                 source_policy: None,
+                resume_start: None,
             })
             .unwrap();
             let marker = tc::session_temp_path(&tmux, "spawn_nonce");

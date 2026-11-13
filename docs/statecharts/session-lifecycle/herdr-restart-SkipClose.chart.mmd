@@ -1,31 +1,55 @@
 ---
-title: "Herdr /restart: exact close, new incarnation, original input custody"
+title: "Separate contracts: restart lifecycle B and Codex resume helper A"
 ---
 stateDiagram-v2
+  direction LR
   state "Legend" as legend {
-    lg0: Result
-    lg1: Restart
-    lg2: Breaks SingleReadySession
-    lg3: Path to the SingleReadySession bug
+    lg0: Contract
+    lg1: Breaks AAfterConfirmedEnd or SingleReadySession
+    lg2: Path to the AAfterConfirmedEnd or SingleReadySession bug
   }
-  class lg0 teal
-  class lg1 blue
-  class lg2 breaks
-  class lg3 bugPath
-  s0: Old session and original queued input
-  s1: Restart excludes old input and captures exact pane
-  s2: Exact close confirmed#59; settle old inflight
-  s3: Old incarnation retired#59; originals still held
-  s4: Fresh incarnation Pending before create
-  s5: New pane created#59; wait for evidence and binding
-  s6: Two live sessions after restart
-  [*] --> s0
-  s0 --> s1: User /restart is accepted under transition and fence
-  s1 --> s2: Close only the captured pane
-  s2 --> s3: Retire and settle only the old token
-  s3 --> s4: Commit new incarnation before create
-  s4 --> s5: Create reply is observed once
-  s5 --> s6: Evidence and binding admit the successor
+  class lg0 blue
+  class lg1 breaks
+  class lg2 bugPath
+  state "At the same time" as all {
+    state "Restart lifecycle B" as r0 {
+      s0: Old session and original queued input
+      s1: Restart excludes old input and captures exact pane
+      s2: Exact close confirmed#59; settle old inflight
+      s3: Old incarnation retired#59; originals still held
+      s4: Fresh incarnation Pending before create
+      s5: New pane created#59; wait for evidence and binding
+      s6: Two live sessions after restart
+      [*] --> s0
+      s0 --> s1: User /restart is accepted under transition and fence
+      s1 --> s2: Close only the captured pane
+      s2 --> s3: Retire and settle only the old token
+      s3 --> s4: Commit new incarnation before create
+      s4 --> s5: Create reply is observed once
+      s5 --> s6: Evidence and binding admit the successor
+    }
+    --
+    state "Codex resume helper A" as r1 {
+      s7: Verified resume intent or ordinary fresh launch
+      s8: Old End confirmed before EOF capture
+      s9: EOF was captured before confirmed old End
+      s10: EOF and O cursor agree#59; prepare immutable incarnation
+      s11: Offset durably recorded before provider launch
+      s12: Own startup metadata appended#59; seed not submitted
+      s13: Process crashed#59; volatile reader state lost
+      s14: Boot restored the original reader offset
+      s15: Resume cause accepted#59; old history excluded
+      [*] --> s7
+      s7 --> s8: Confirm old provider End before EOF capture
+      s7 --> s9: Compare post-End EOF with O cursor
+      s8 --> s10: Compare post-End EOF with O cursor
+      s10 --> s11: Persist reader offset and mode in the incarnation
+      s11 --> s12: Launch once and observe own Startup or Resume
+      s12 --> s13: Crash after startup metadata and before seed
+      s13 --> s14: Recover the recorded incarnation and reader offset
+      s14 --> s15: Bind the scoped cause and tail from the recorded offset
+    }
+  }
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 blue
   class s0 bugPath
@@ -39,6 +63,18 @@ stateDiagram-v2
   class s4 bugPath
   class s5 blue
   class s5 bugPath
-  class s6 teal
+  class s6 blue
   class s6 breaks
   class s6 bugPath
+  class s7 blue
+  class s7 bugPath
+  class s8 blue
+  class s9 blue
+  class s9 breaks
+  class s9 bugPath
+  class s10 blue
+  class s11 blue
+  class s12 blue
+  class s13 blue
+  class s14 blue
+  class s15 blue

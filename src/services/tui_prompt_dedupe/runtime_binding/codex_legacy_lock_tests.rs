@@ -140,7 +140,7 @@ fn run_legacy_ingress(race_channel_registration: bool) {
             .is_err()
     );
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(context),
+        context: CapturedContext::Captured(context.into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

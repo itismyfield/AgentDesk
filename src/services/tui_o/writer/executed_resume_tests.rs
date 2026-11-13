@@ -169,7 +169,7 @@ impl Drop for Cold {
 
 fn resume_hook(rollout: &Path, context: &BindingContext) -> IngressOutcome {
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(context.clone()),
+        context: CapturedContext::Captured(context.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();
@@ -555,7 +555,7 @@ async fn resume_companion_live_era_advances_past_exact_terminals_and_restarts_wi
         IngressOutcome::Durable(DurableKind::Pending)
     );
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(f.context.clone()),
+        context: CapturedContext::Captured(f.context.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

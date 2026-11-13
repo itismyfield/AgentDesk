@@ -1,11 +1,12 @@
 ---- MODULE HerdrRestart ----
-\* Design port model over main 33d1f4b5a9dce7023e2d0014e45a05ed6c530bba.
+\* Restart ports plus Codex resume A over 2c8873381478c7179f0347d5bfc5b850d5cb90e2.
 \* A bounded projection of one explicit restart, its old inflight turn, and the
 \* existing owner's queued inputs. This is not a model of a new Core or host trait.
 EXTENDS Naturals, FiniteSets
 CONSTANTS Policy, Mutant, N, StartKind, CloseReply, CreateReply, SeedReply, Identity, Busy, Supersede
-VARIABLE s
-vars == <<s>>
+CONSTANTS APolicy, AMutant, AResumeIntent, ACursorMatches, ACrash
+VARIABLES s, a
+vars == <<s, a>>
 Ids == 1..N
 Restarting == s.phase \notin {"idle", "ready", "failed"}
 Healthy == StartKind \in {"Bound", "Legacy"} /\ CloseReply = "confirmed"
@@ -106,8 +107,9 @@ Next == Progress \/ (\E i \in Ids : Admit(i) \/ Deliver(i) \/ StaleOldDelivery(i
         \/ UnsafeForeignClose \/ Wait
 \* Every operation phase eventually returns; the failure notice transport also
 \* eventually answers. These are explicit scheduler/I/O assumptions, not timeouts.
-Spec == Init /\ [][Next]_vars /\ WF_vars(Progress)
-        /\ (\A i \in Ids : WF_vars(Admit(i)) /\ WF_vars(Deliver(i)))
+RestartNext == Next /\ UNCHANGED a
+RestartFair == WF_vars(Progress /\ UNCHANGED a)
+        /\ (\A i \in Ids : WF_vars(Admit(i) /\ UNCHANGED a) /\ WF_vars(Deliver(i) /\ UNCHANGED a))
 InputCustody == \A i \in s.accepted : s.q[i] \in {"queued", "held", "delivered"}
                  \/ (s.q[i] = "cancelled" /\ i \in s.clearReceipts)
 InputAtMostOnce == \A i \in Ids : s.effects[i] <= 1
@@ -123,4 +125,108 @@ NoSupersededReady == s.clearSeen => s.phase # "ready"
 RestartAvailable == <> (s.phase = "ready" \/ ((~Healthy \/ Supersede) /\ s.phase = "failed" /\ s.visible))
 AcceptedInputResolves == \A i \in Ids : (i \in s.accepted) ~>
                         (s.q[i] = "delivered" \/ (s.q[i] = "cancelled" /\ i \in s.clearReceipts) \/ (s.phase = "failed" /\ s.visible))
+
+\* A is the provider helper boundary, independently of the still-unwired command.
+\* Offsets 0/1/2 represent fresh, confirmed old EOF, and new startup bytes.
+AInit == a = [resumeIntent |-> AResumeIntent, cursorMatches |-> ACursorMatches, phase |-> "end", endConfirmed |-> FALSE, captured |-> FALSE,
+              capturedOffset |-> 0, currentEof |-> 0, mode |-> "fresh",
+              prepared |-> FALSE, persisted |-> FALSE, durableOffset |-> 0,
+              durableNonce |-> 0, loadedOffset |-> 0, loadedNonce |-> 0,
+              launched |-> FALSE, cause |-> "Startup", crashed |-> FALSE,
+              recovered |-> FALSE, tailStarted |-> FALSE, readOffset |-> 0,
+              replayedHistory |-> FALSE, skippedNewPrefix |-> FALSE, visible |-> FALSE]
+AConfirmEnd == /\ a.phase = "end" /\ APolicy = "after"
+               /\ a' = [a EXCEPT !.endConfirmed = AResumeIntent, !.phase = "capture"]
+ABeforeRefusal == /\ a.phase = "end" /\ APolicy = "before"
+                  /\ a' = [a EXCEPT !.phase = "failed", !.visible = TRUE]
+\* The EOF is read after exact end. Cursor disagreement refuses resume in A.
+ACapture == /\ (a.phase = "capture" \/ (a.phase = "end" /\ AMutant = "BeforeEndCapture"))
+            /\ a' = [a EXCEPT !.captured = TRUE,
+                             !.capturedOffset = IF AResumeIntent THEN 1 ELSE 0,
+                             !.currentEof = IF AResumeIntent THEN 1 ELSE 0,
+                             !.prepared = ~AResumeIntent \/ ACursorMatches \/ AMutant = "IgnoreCursorMismatch",
+                             !.phase = IF AResumeIntent /\ ~ACursorMatches /\ AMutant # "IgnoreCursorMismatch"
+                                       THEN "failed" ELSE "record",
+                             !.visible = AResumeIntent /\ ~ACursorMatches /\ AMutant # "IgnoreCursorMismatch"]
+\* The incarnation persists the offset before launch. Ordinary launch stays fresh.
+APersist == /\ a.phase = "record"
+            /\ a' = [a EXCEPT !.mode = IF AResumeIntent \/ AMutant = "OrdinaryResume" THEN "resume" ELSE "fresh",
+                             !.persisted = AMutant # "VolatileOffset",
+                             !.durableOffset = IF AMutant = "VolatileOffset" THEN 0 ELSE a.capturedOffset,
+                             !.durableNonce = IF AMutant = "VolatileOffset" THEN 0 ELSE 1,
+                             !.loadedOffset = a.capturedOffset, !.loadedNonce = 1, !.phase = "launch"]
+ALaunch == /\ a.phase = "launch"
+           /\ a' = [a EXCEPT !.launched = TRUE,
+                            !.cause = IF a.mode = "resume" THEN "Resume" ELSE "Startup",
+                            !.currentEof = a.capturedOffset + 1, !.phase = "before_seed"]
+\* A process can crash after launch/startup metadata but before its first seed.
+ACrashBeforeSeed == /\ a.phase = "before_seed" /\ ACrash /\ ~a.crashed
+                    /\ a' = [a EXCEPT !.crashed = TRUE, !.loadedOffset = 0,
+                                     !.loadedNonce = 0, !.phase = "boot"]
+ABoot == /\ a.phase = "boot"
+         /\ a' = [a EXCEPT !.recovered = TRUE,
+                          !.loadedOffset = IF AMutant = "BootRecapture" THEN a.currentEof ELSE a.durableOffset,
+                          !.loadedNonce = a.durableNonce,
+                          !.phase = IF a.persisted THEN "observe" ELSE "failed",
+                          !.visible = ~a.persisted]
+ANoCrash == /\ a.phase = "before_seed" /\ ~ACrash
+            /\ a' = [a EXCEPT !.phase = "observe"]
+ACauseAccepted == IF AMutant = "StartupOnly" THEN a.cause = "Startup"
+                  ELSE (a.mode = "fresh" /\ a.cause = "Startup")
+                    \/ (a.mode = "resume" /\ a.cause = "Resume")
+\* The recorded incarnation, not a boot-time EOF read or zero, starts the tail.
+AObserve == /\ a.phase = "observe"
+            /\ LET at == IF AMutant = "OffsetZero" THEN 0 ELSE a.loadedOffset
+               IN a' = [a EXCEPT !.tailStarted = ACauseAccepted,
+                                !.readOffset = at,
+                                !.replayedHistory = ACauseAccepted /\ at < a.capturedOffset,
+                                !.skippedNewPrefix = ACauseAccepted /\ at > a.capturedOffset,
+                                !.phase = IF ACauseAccepted THEN "done" ELSE "failed",
+                                !.visible = ~ACauseAccepted]
+AWait == /\ a.phase \in {"done", "failed"} /\ UNCHANGED a
+AProgress == AConfirmEnd \/ ABeforeRefusal \/ ACapture \/ APersist \/ ALaunch
+             \/ ACrashBeforeSeed \/ ABoot \/ ANoCrash \/ AObserve
+RRequest == Request /\ UNCHANGED a
+RRefuseIdentity == RefuseIdentity /\ UNCHANGED a
+RCloseFails == CloseFails /\ UNCHANGED a
+RCloseExact == CloseExact /\ UNCHANGED a
+RRetireAndSettle == RetireAndSettle /\ UNCHANGED a
+RInstallPending == InstallPending /\ UNCHANGED a
+RCreate == Create /\ UNCHANGED a
+RBindReady == BindReady /\ UNCHANGED a
+RNotifyFailure == NotifyFailure /\ UNCHANGED a
+RAbortSuperseded == AbortSuperseded /\ UNCHANGED a
+RClearSupersedes == ClearSupersedes /\ UNCHANGED a
+RUnsafeForeignClose == UnsafeForeignClose /\ UNCHANGED a
+RWait == Wait /\ UNCHANGED a
+RAdmit(i) == Admit(i) /\ UNCHANGED a
+RDeliver(i) == Deliver(i) /\ UNCHANGED a
+RStaleOldDelivery(i) == StaleOldDelivery(i) /\ UNCHANGED a
+RReplayInput(i) == ReplayInput(i) /\ UNCHANGED a
+PConfirmEnd == AConfirmEnd /\ UNCHANGED s
+PBeforeRefusal == ABeforeRefusal /\ UNCHANGED s
+PCapture == ACapture /\ UNCHANGED s
+PPersist == APersist /\ UNCHANGED s
+PLaunch == ALaunch /\ UNCHANGED s
+PCrashBeforeSeed == ACrashBeforeSeed /\ UNCHANGED s
+PBoot == ABoot /\ UNCHANGED s
+PNoCrash == ANoCrash /\ UNCHANGED s
+PObserve == AObserve /\ UNCHANGED s
+PWait == AWait /\ UNCHANGED s
+CombinedNext == RRequest \/ RRefuseIdentity \/ RCloseFails \/ RCloseExact \/ RRetireAndSettle \/ RInstallPending \/ RCreate \/ RBindReady \/ RNotifyFailure \/ RAbortSuperseded \/ RClearSupersedes \/ RUnsafeForeignClose \/ RWait
+  \/ (\E i \in Ids : RAdmit(i) \/ RDeliver(i) \/ RStaleOldDelivery(i) \/ RReplayInput(i))
+  \/ PConfirmEnd \/ PBeforeRefusal \/ PCapture \/ PPersist \/ PLaunch \/ PCrashBeforeSeed \/ PBoot \/ PNoCrash \/ PObserve \/ PWait
+Spec == Init /\ AInit /\ [][CombinedNext]_vars /\ RestartFair
+        /\ WF_vars(AProgress /\ UNCHANGED s)
+AAfterConfirmedEnd == a.captured /\ AResumeIntent => a.endConfirmed
+ACursorAgreement == a.prepared /\ AResumeIntent => ACursorMatches
+AOrdinaryFresh == ~AResumeIntent => a.mode = "fresh"
+ADurableBeforeLaunch == a.launched => a.persisted /\ a.durableOffset = a.capturedOffset /\ a.durableNonce = 1
+ABootOffsetStable == a.recovered /\ a.persisted => a.loadedOffset = a.durableOffset /\ a.loadedNonce = a.durableNonce
+AOffsetPreserved == a.tailStarted => a.readOffset = a.capturedOffset
+ANoHistoricalReplay == ~a.replayedHistory
+ANoNewPrefixSkip == ~a.skippedNewPrefix
+AScopedCause == a.tailStarted => ((a.mode = "resume" /\ a.cause = "Resume") \/ (a.mode = "fresh" /\ a.cause = "Startup"))
+ARequestResolves == <> (a.phase = "done" \/ (a.phase = "failed" /\ a.visible))
+AResumeAvailable == <> (a.phase = "done" \/ (~ACursorMatches /\ a.phase = "failed" /\ a.visible))
 ====
