@@ -140,7 +140,7 @@ fn b2a_native_bound_health_child() {
                 .await
                 .expect("B1 keeper's private PostgreSQL")
                 .expect("private PostgreSQL is mandatory");
-            let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dispatched_sessions")
+            let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
                 .fetch_one(&pool)
                 .await
                 .expect("fresh private session census");
