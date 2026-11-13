@@ -2,10 +2,6 @@
 pub struct PendingQueueSnapshot {
     pub queue_depth: usize,
     pub disk_present: Option<bool>,
-    // #3034: populated for diagnostics/observability; not read by the queue
-    // preservation check (which only compares depth + presence).
-    #[allow(dead_code)]
-    pub disk_path: Option<std::path::PathBuf>,
     /// #5176: the primary Discord message id of every queued intervention, in
     /// queue order. Depth alone told operators that a cancel lost "one item"
     /// and nothing else — not which user instruction vanished, and not whether
@@ -18,13 +14,10 @@ pub struct PendingQueueSnapshot {
 mod tests {
     use super::*;
 
-    fn values(
-        snapshot: &PendingQueueSnapshot,
-    ) -> (usize, Option<bool>, Option<&std::path::Path>, &[u64]) {
+    fn values(snapshot: &PendingQueueSnapshot) -> (usize, Option<bool>, &[u64]) {
         (
             snapshot.queue_depth,
             snapshot.disk_present,
-            snapshot.disk_path.as_deref(),
             &snapshot.message_ids,
         )
     }
@@ -34,7 +27,6 @@ mod tests {
         let snapshot = PendingQueueSnapshot {
             queue_depth: 2,
             disk_present: Some(true),
-            disk_path: Some(std::path::PathBuf::from("queue/turn.json")),
             message_ids: vec![42, 17],
         };
         let cloned = snapshot.clone();
@@ -55,7 +47,6 @@ mod tests {
         let snapshot = PendingQueueSnapshot {
             queue_depth: 2,
             disk_present: None,
-            disk_path: Some(std::path::PathBuf::from("queue/unreadable.json")),
             message_ids: vec![42, 17],
         };
         assert_eq!(values(&snapshot.clone()), values(&snapshot));
@@ -68,6 +59,6 @@ mod tests {
             assert_ne!(values(&snapshot), values(&measured));
         }
         let default = PendingQueueSnapshot::default();
-        assert_eq!(values(&default), (0, None, None, &[][..]));
+        assert_eq!(values(&default), (0, None, &[][..]));
     }
 }

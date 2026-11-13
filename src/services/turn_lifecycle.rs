@@ -795,13 +795,11 @@ pub(crate) mod policy_observability_tests {
         let pre = PendingQueueSnapshot {
             queue_depth: 1,
             disk_present: Some(true),
-            disk_path: None,
             message_ids: vec![9_001],
         };
         let post_loss = PendingQueueSnapshot {
             queue_depth: 0,
             disk_present: Some(false),
-            disk_path: None,
             message_ids: Vec::new(),
         };
         let lost_memory = PendingQueueSnapshot {
@@ -852,7 +850,6 @@ pub(crate) mod policy_observability_tests {
             PendingQueueSnapshot {
                 queue_depth: message_ids.len(),
                 disk_present: Some(!message_ids.is_empty()),
-                disk_path: None,
                 message_ids,
             }
         }

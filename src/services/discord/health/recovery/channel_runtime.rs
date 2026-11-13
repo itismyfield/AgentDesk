@@ -167,16 +167,16 @@ async fn snapshot_pending_queue_state_for_shared(
     let message_ids = (snapshot.intervention_queue.iter())
         .map(|intervention| intervention.message_id.get())
         .collect();
-    let disk_path = discord::runtime_store::discord_pending_queue_root().map(|root| {
+    let disk_present = discord::runtime_store::discord_pending_queue_root().and_then(|root| {
         root.join(provider.as_str())
             .join(&shared.token_hash)
             .join(format!("{}.json", channel_id.get()))
+            .try_exists()
+            .ok()
     });
-    let disk_present = disk_path.as_ref().and_then(|path| path.try_exists().ok());
     Some(PendingQueueSnapshot {
         queue_depth,
         disk_present,
-        disk_path,
         message_ids,
     })
 }
