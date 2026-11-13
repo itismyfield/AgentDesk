@@ -5,18 +5,22 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::session_host::herdr_endpoints;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
 
-const NONCE: &str = "00112233445566778899aabbccddee01";
+pub(super) const NONCE: &str = "00112233445566778899aabbccddee01";
 fn pane(above: &str, input: &str) -> String {
     format!(
         "{above}\n\n────────────────────────────────────────────────────\n❯ {input}\n────────────────────────────────────────────────────\n  🤖 Opus(H) │ 7% │ MCP: 2\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
     )
 }
 
-fn bound_target(rig: &HerdrRig, logical: &str) -> (HostedOwner, HerdrTarget) {
+pub(super) fn bound_target(
+    rig: &HerdrRig,
+    logical: &str,
+    channel: u64,
+) -> (HostedOwner, HerdrTarget) {
     let owner = HostedOwner {
         provider: "claude".into(),
         discord_token_hash: "hash".into(),
-        channel_id: "1".into(),
+        channel_id: channel.to_string(),
         logical_key: logical.into(),
         owner_node: NODE.into(),
         runtime_root: "test".into(),
@@ -37,7 +41,7 @@ fn bound_target(rig: &HerdrRig, logical: &str) -> (HostedOwner, HerdrTarget) {
         expected: Some(rig.expected(NONCE)),
         source_ref: SourceRef {
             runtime_root: "test".into(),
-            channel: "1".into(),
+            channel: channel.to_string(),
             provider: "claude".into(),
             logical_key: logical.into(),
             execution_nonce: NONCE.into(),
@@ -86,7 +90,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
         "herdr",
     )
     .unwrap();
-    let (owner, target) = bound_target(&rig, logical);
+    let (owner, target) = bound_target(&rig, logical, 1);
     rig.answer("pane.read", serde_json::json!({"type":"pane_read","read":{"pane_id":PANE,
         "source":"recent_unwrapped","text":pane("✻ Baked for 2s", ""),"revision":1,"truncated":false}}));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -100,6 +104,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
         .connect_lazy("postgres://localhost/unused_cold_submit_test")
         .unwrap();
     let transcript = root.path().join("not-created.jsonl");
+    crate::services::claude_tui::readiness::tests::pre_source(logical, &transcript);
     let prompt = "reply _ literal\nattachment + voice";
     let attached = Attached {
         nonce: NONCE.into(),

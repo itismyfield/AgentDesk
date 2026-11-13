@@ -202,6 +202,7 @@ fn mm_retire_wakes_held_writer_and_normal_input_delivers_without_deadlock_pg() {
     let record = case.record();
     assert_eq!(record.state, HostedState::Retired);
     assert_eq!(CAS_ATTEMPTS.with(std::cell::Cell::get), 1);
+    case.rt.block_on(accepts(CHANNEL));
     let absence = case.rt.block_on(activity::reading_now(
         &case.shared,
         &ProviderKind::Claude,
@@ -218,7 +219,6 @@ fn mm_retire_wakes_held_writer_and_normal_input_delivers_without_deadlock_pg() {
     );
 
     eprintln!("MM_WRITER retired cas=1 presence=Idle/no_session");
-    case.rt.block_on(accepts(CHANNEL));
     assert_eq!(
         host::process_readiness().hosted_by(CHANNEL),
         Some(generation)
