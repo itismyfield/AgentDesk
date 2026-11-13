@@ -4,7 +4,10 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import io
+import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -29,7 +32,7 @@ class DuplicateConditionsTests(unittest.TestCase):
 
     def scan(self, source):
         self.write("src/consumer.rs", source)
-        return self.check.scan(self.repo)
+        return self.check.scan(self.repo, mode="normalized")
 
     def repeated(self, expression, count=3):
         return "\n".join(f"fn f{i}(x: bool, y: bool) {{ if {expression} {{}} }}" for i in range(count))
@@ -50,7 +53,25 @@ class DuplicateConditionsTests(unittest.TestCase):
         """)
         with mock.patch.object(self.check.common, "REPO_ROOT", self.repo):
             self.assertEqual(list(self.check._run(set())), [])
+        self.assertEqual(self.check.scan(self.repo), [])
         self.assertEqual([r["count"] for r in self.check.scan(self.repo, mode="normalized")], [3])
+
+    def test_cli_default_is_exact_and_normalized_is_opt_in(self):
+        self.scan("""
+            fn first(x: bool, y: bool) { if x && y {} }
+            fn second(a: bool, b: bool) { if a && b {} }
+            fn third(c: bool, d: bool) { if c && d {} }
+        """)
+        def run(*args):
+            result = subprocess.run(
+                [sys.executable, "-m", "audit_maintainability.checks.duplicate_conditions",
+                 "--repo", str(self.repo), *args], cwd=ROOT, capture_output=True, text=True,
+                env={**os.environ, "PYTHONPATH": str(ROOT / "scripts"),
+                     "PYTHONPYCACHEPREFIX": str(self.repo / "cli-cache"),
+                     "PYTHONDONTWRITEBYTECODE": "1"}, check=True)
+            return json.loads(result.stdout)
+        self.assertEqual(run(), [])
+        self.assertEqual([r["count"] for r in run("--mode", "normalized")], [3])
 
     def test_generic_bound_parameters_are_alpha_locals(self):
         functions = [

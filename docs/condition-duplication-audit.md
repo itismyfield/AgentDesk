@@ -2,7 +2,7 @@
 
 조사 corpus는 main `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba`의 운영 Rust 모듈 그래프다. 첫 구현은 `b64dcdd9bd3a4cfa33f66619fe56b09d3e919cef`이며 아래 수리 후 수치도 같은 Rust corpus에서 재측정했다. A lexer·literal·scope·alias·cfg/test 제외 계약을 재사용한다. Rust 변경·cargo·운영 관측은 없다.
 
-기본 CI/prepush 경고와 CLI 기본 모드는 **exact**다. normalized는 `--mode normalized` 또는 `--mode both` 조사 옵션으로 둔다. 서로 다른 `path:line:column` 세 곳 이상인 복합 논리식과 등록 raw accessor predicate를 경고한다. 단일 고수준 helper 호출은 재사용으로 제외한다. warning은 실패 gate가 아니다.
+기본 CI/prepush 경고·scan API·CLI 모드는 **exact**다. normalized는 `--mode normalized` 또는 `--mode both` 조사 옵션으로 둔다. 서로 다른 `path:line:column` 세 곳 이상인 복합 논리식과 등록 raw accessor predicate를 경고한다. 단일 고수준 helper 호출은 재사용으로 제외한다. warning은 실패 gate가 아니다.
 
 `if`/`else if`/`while`, match guard, bool let·tail·closure를 lexical container에서 찾는다. 등록 accessor 바로 뒤의 균형 잡힌 빈 `.is_none()`·`.is_some()` span은 guard와 별개인 `kind=known_accessor` 후보로 추출한다. 임의 공통 부분식은 탐색하지 않는다. 같은 standalone span을 여러 번 방문해도 source location으로 한 번만 센다.
 
@@ -29,6 +29,8 @@ TP는 같은 판정 복사 후보, FP는 의미가 다른 지역 값을 같은 �
 
 새로 추출된 군집:
 
+기존 is_some 군집도 직접 span 추출로 증가했다: exact `c288fb9d4257` 4→7곳, `557d724bd8a9` 3→5곳, normalized `fd898f27e425` 9→15곳이다. 신규 군집과 이 증가분을 합쳐 exact sites 252→266, normalized 948→965가 된다.
+
 | 모드 / hash 앞12자 | 판정 | sites / functions | 전수 file:line |
 |---|---|---:|---|
 | exact / fae23cbcf7ab | TP | 6 / 4 | `src/services/discord/commands/config/provider_settings.rs:190`; `src/services/discord/commands/control/clear_teardown.rs:81`; `src/services/discord/commands/control/clear_teardown.rs:115`; `src/services/discord/queue_dispatch.rs:253`; `src/services/discord/router/message_handler/intake_turn.rs:1110`; `src/services/discord/router/message_handler/intake_turn.rs:1754` |
@@ -41,12 +43,12 @@ normalized 새 부정 predicate 군집은 unverified receiver 3지점을 포함�
 
 ## 고정 seed와 첫 묶음 순서
 
-positive 4군집(H 두 종류·이름·반응) 및 지점 분모를 유지했다. 고정 지점 3개 이상이 한 군집에 함께 나타나면 검출로 센다. 앞 턴 H-negative의 첫 locator 1111은 다음 guard 줄이므로 실제 accessor 좌표 1110으로 교정했다. 군집/지점 분모와 앞 턴 검출 결과는 바뀌지 않는다.
+coverage는 시점별 모든 검출 군집의 seed 지점 합집합이며, recall은 한 군집에 고정 지점 3개 이상이 함께 나타나는 기준이다. positive 4군집(H 두 종류·이름·반응) 및 지점 분모를 유지했다. 고정 지점 3개 이상이 한 군집에 함께 나타나면 검출로 센다. 앞 턴 H-negative의 첫 locator 1111은 다음 guard 줄이므로 실제 accessor 좌표 1110으로 교정했다. 군집/지점 분모와 앞 턴 검출 결과는 바뀌지 않는다.
 
 | positive seed | exact coverage 전→후 | normalized coverage 전→후 | 고정 지점 전수표 |
 |---|---:|---:|---|
 | H-presence | 7/9 → 7/9 | 9/9 → 9/9 | `src/config/session_hosts.rs:355`; `src/services/discord/commands/control.rs:466`; `src/services/discord/commands/control/clear_teardown/clear_end_record.rs:45`; `src/services/discord/commands/tui_passthrough.rs:128`; `src/services/discord/router/message_handler/tui_followup/nameless_gate.rs:79`; `src/services/discord/session_runtime.rs:513`; `src/services/discord/tui_prompt_relay.rs:757`; `src/services/herdr_launch.rs:62`; `src/services/tui_o/writer/actor.rs:461` |
-| H-negative | 0/4 → 3/4 | 0/4 → 4/4 | `src/services/discord/router/message_handler/intake_turn.rs:1110`; `src/services/discord/router/message_handler/intake_turn.rs:1754`; `src/services/discord/queue_dispatch.rs:253`; `src/services/discord/health/turn_deliver/inject.rs:312` |
+| H-negative | 0/4 → 4/4 (한 군집 최대 3) | 0/4 → 4/4 | `src/services/discord/router/message_handler/intake_turn.rs:1110`; `src/services/discord/router/message_handler/intake_turn.rs:1754`; `src/services/discord/queue_dispatch.rs:253`; `src/services/discord/health/turn_deliver/inject.rs:312` |
 | N-namespace | 0/7 → 0/7 | 0/7 → 0/7 | `src/services/discord/relay_recovery/decision.rs:252`; `src/services/discord/health/watcher_respawn.rs:167`; `src/services/discord/health/o_transition/codex_census.rs:47`; `src/services/discord/recovery_engine/state_extractors.rs:139`; `src/services/discord/tmux_reaper/host_guard.rs:155`; `src/services/discord/turn_presence/activity/unbound.rs:463`; `src/services/discord/turn_presence/activity/unbound/hold_leaf.rs:70` |
 | R-display | 0/4 → 0/4 | 0/4 → 0/4 | `src/services/discord/router/message_handler/pre_admission_control.rs:223`; `src/services/discord/router/message_handler/pre_admission_control.rs:235`; `src/services/discord/router/message_handler/intake_turn.rs:541`; `src/services/discord/router/message_handler/intake_turn/race_loss.rs:426` |
 

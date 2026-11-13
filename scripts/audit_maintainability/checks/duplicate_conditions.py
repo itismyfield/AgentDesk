@@ -305,7 +305,7 @@ def _clusters(views, exports, mode):
             if len(sites) >= THRESHOLD]
 
 
-def scan(repo, mode="normalized"):
+def scan(repo, mode="exact"):
     """Report distinct source locations, not repeated visits through cfg/crate roots."""
     if mode not in {"exact", "normalized"}:
         raise ValueError(f"unknown condition mode: {mode}")
