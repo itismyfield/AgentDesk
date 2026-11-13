@@ -5,34 +5,37 @@ pub(in crate::services::memory) fn with_configured_memento(
     test: &str,
     check: impl FnOnce(&TcpListener, &Path),
 ) {
-    crate::services::provider_auth_profile::instance_env_tests::with_instance(test, || {
-        let instance = crate::config::test_instance::current().unwrap().unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
-        let key_name = "I2B_SYNTHETIC_MEMENTO_KEY";
-        let _key = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
-            key_name,
-            std::ffi::OsStr::new("fixture-only"),
-        );
-        let memory = json!({"version":2,"backend":"memento",
-            "mcp":{"endpoint":endpoint,"access_key_env":key_name}});
-        let path = instance.root.join("config/agentdesk.yaml");
-        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        config["memory"] = memory.clone();
-        std::fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
-        std::fs::write(
-            runtime_layout::memory_backend_path(&instance.root),
-            serde_json::to_vec(&memory).unwrap(),
-        )
-        .unwrap();
-        // Both the canonical declaration and its supported JSON fallback name the private sink.
-        let loaded = runtime_layout::load_memory_backend(&instance.root);
-        assert_eq!(loaded.backend, "memento");
-        assert_eq!(loaded.mcp.endpoint, endpoint);
-        assert_eq!(loaded.mcp.access_key_env, key_name);
-        check(&listener, &instance.root);
-    });
+    if !crate::services::provider_auth_profile::instance_env_tests::instance_child(test) {
+        return;
+    }
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    crate::config::test_instance::initialize().unwrap();
+    let instance = crate::config::test_instance::current().unwrap().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let key_name = "I2B_SYNTHETIC_MEMENTO_KEY";
+    let _key = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        key_name,
+        std::ffi::OsStr::new("fixture-only"),
+    );
+    let memory = json!({"version":2,"backend":"memento",
+        "mcp":{"endpoint":endpoint,"access_key_env":key_name}});
+    let path = instance.root.join("config/agentdesk.yaml");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["memory"] = memory.clone();
+    std::fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+    std::fs::write(
+        runtime_layout::memory_backend_path(&instance.root),
+        serde_json::to_vec(&memory).unwrap(),
+    )
+    .unwrap();
+    // Both the canonical declaration and its supported JSON fallback name the private sink.
+    let loaded = runtime_layout::load_memory_backend(&instance.root);
+    assert_eq!(loaded.backend, "memento");
+    assert_eq!(loaded.mcp.endpoint, endpoint);
+    assert_eq!(loaded.mcp.access_key_env, key_name);
+    check(&listener, &instance.root);
 }
 
 #[test]

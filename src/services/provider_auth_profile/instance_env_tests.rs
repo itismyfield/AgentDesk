@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn with_instance(test_name: &str, check: impl FnOnce()) {
+pub(crate) fn instance_child(test_name: &str) -> bool {
     if std::env::var_os("I2B_PROVIDER_CHILD").is_none() {
         let (_temporary, root) = crate::config::test_instance::tests::fixture();
         let output = crate::config::test_instance::tests::command(&root)
@@ -19,6 +19,13 @@ pub(crate) fn with_instance(test_name: &str, check: impl FnOnce()) {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+        return false;
+    }
+    true
+}
+
+pub(crate) fn with_instance(test_name: &str, check: impl FnOnce()) {
+    if !instance_child(test_name) {
         return;
     }
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();

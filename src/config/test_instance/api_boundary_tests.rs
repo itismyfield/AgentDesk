@@ -181,7 +181,8 @@ fn instance_api_and_monitoring_stay_on_receipt_endpoint() {
     assert!(crate::cli::client::get_json_at(&endpoint, "/api/redirect").is_err());
     // The monitoring API uses its own transport and must reject redirects too.
     assert!(crate::cli::monitoring::start(900004, "redirect", "redirect").is_err());
-    let requests = worker.join().unwrap();
+    let requests =
+        crate::test_support::wait::join_within(worker, crate::test_support::wait::WAIT_CAP);
     assert_eq!(requests.len(), 5);
     assert!(requests[0].starts_with("GET /api/positive HTTP/1.1"));
     assert!(requests[1].starts_with("POST /api/channels/900004/monitoring HTTP/1.1"));
@@ -207,7 +208,7 @@ fn instance_api_and_monitoring_stay_on_receipt_endpoint() {
     );
     assert!(crate::cli::monitoring::start(900004, "foreign", "foreign").is_err());
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
-    foreign_worker.join().unwrap();
+    crate::test_support::wait::join_within(foreign_worker, crate::test_support::wait::WAIT_CAP);
     assert_eq!(escaped.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 

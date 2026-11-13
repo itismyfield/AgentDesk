@@ -5,8 +5,6 @@ pub(crate) struct BootstrapState {
 }
 
 pub(crate) fn initialize() -> Result<BootstrapState> {
-    crate::config::test_instance::environment::refuse_service_management()
-        .map_err(anyhow::Error::msg)?;
     crate::logging::init_tracing()?;
 
     let runtime_root = crate::config::runtime_root();

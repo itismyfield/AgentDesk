@@ -73,7 +73,10 @@ fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
     if std::env::var_os("I2B_BACKEND_CHILD").is_some() {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         initialize().unwrap();
-        assert!(crate::bootstrap::initialize().is_err());
+        crate::TEST_PARSE_OUTCOME.with(|slot| {
+            *slot.borrow_mut() = Some(crate::cli::args::ParseOutcome::RunServer);
+        });
+        assert!(crate::run_from_args().is_err());
         use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
         let root = &current().unwrap().unwrap().root;
         let foreign = root.parent().unwrap().join("foreign-output");

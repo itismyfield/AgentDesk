@@ -254,6 +254,13 @@ mod high_risk_recovery;
 
 use anyhow::{Context, Result};
 
+#[cfg(test)]
+thread_local! {
+    static TEST_PARSE_OUTCOME: std::cell::RefCell<Option<cli::args::ParseOutcome>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 pub fn run_from_args() -> Result<()> {
     config::test_instance::initialize().map_err(anyhow::Error::msg)?;
     services::process_boot::initialize();
@@ -265,9 +272,17 @@ pub fn run_from_args() -> Result<()> {
     {
         return worker_result.map_err(anyhow::Error::msg);
     }
-    match cli::args::parse() {
+    #[cfg(not(test))]
+    let outcome = cli::args::parse();
+    #[cfg(test)]
+    let outcome = TEST_PARSE_OUTCOME
+        .with(|slot| slot.borrow_mut().take())
+        .unwrap_or_else(cli::args::parse);
+    match outcome {
         cli::args::ParseOutcome::Command { command, json } => cli::execute(command, json),
         cli::args::ParseOutcome::RunServer => {
+            config::test_instance::environment::refuse_service_management()
+                .map_err(anyhow::Error::msg)?;
             let state = bootstrap::initialize().context("Bootstrap failed")?;
             launch::run(state).context("Launch failed")
         }
