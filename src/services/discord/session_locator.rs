@@ -143,7 +143,9 @@ pub(super) async fn channel_key(
         return Some(preferred);
     };
     #[cfg(unix)]
-    if unix::observe_old(id, &primary, channel) {
+    if matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
+        && unix::observe_old(id, &primary, channel)
+    {
         return Some(preferred);
     }
     #[cfg(not(unix))]
@@ -187,7 +189,7 @@ mod unix {
 
     static OLD_HOSTS: LazyLock<Mutex<HashMap<(i64, String), Observation>>> =
         LazyLock::new(Default::default);
-    thread_local! { static REGISTRATION: RefCell<Vec<Pending>> = const { RefCell::new(Vec::new()) }; }
+    thread_local! { static REGISTRATION: RefCell<Vec<Option<Pending>>> = const { RefCell::new(Vec::new()) }; }
     #[derive(Clone)]
     struct Pending {
         pool: PgPool,
@@ -240,12 +242,15 @@ mod unix {
             nonce: Option<&str>,
             origin: Option<bool>,
         ) -> Result<Self, String> {
+            REGISTRATION.with(|slot| slot.borrow_mut().push(None));
+            let guard = Self(true);
             let Some(dispatched_origin) = origin else {
-                return Ok(Self(false));
+                return Ok(guard);
             };
-            let (Some(pool), Some(name), Some(nonce)) = (pool, name, nonce) else {
-                return Ok(Self(false));
+            let (Some(pool), Some(name)) = (pool, name) else {
+                return Ok(guard);
             };
+            let nonce = nonce.unwrap_or_default();
             let key = adk_session::build_namespaced_session_key(hash, provider, name);
             let (hash, provider, nonce) = (
                 hash.to_owned(),
@@ -267,7 +272,7 @@ mod unix {
                 |error| error,
             )?;
             let Some(snapshot) = snapshot.filter(|row| row.primary != key) else {
-                return Ok(Self(false));
+                return Ok(guard);
             };
             let expected = OLD_HOSTS
                 .lock()
@@ -277,6 +282,15 @@ mod unix {
                 .ok_or("old host namespace is unknown")?;
             if snapshot.hosted.is_some() || nonce.trim().is_empty() {
                 return Err("registration is not a fresh local tmux execution".into());
+            }
+            let pin =
+                crate::db::dispatched_session_canonical_identity::HookSessionActorPin::Existing {
+                    id: snapshot.id,
+                    active_turn_nonce: snapshot.nonce.clone(),
+                    status: snapshot.status.clone(),
+                };
+            if pin.active_for_other_actor(Some(&nonce)) {
+                return Err("old actor still owns the registration".into());
             }
             let old_name = local_name(&snapshot.primary).ok_or("old host is not local")?;
             let observed = session_inventory::observe_inventory(channel);
@@ -297,19 +311,21 @@ mod unix {
                 }
             }
             REGISTRATION.with(|slot| {
-                slot.borrow_mut().push(Pending {
-                    pool: pool.clone(),
-                    snapshot,
-                    hash,
-                    provider,
-                    channel,
-                    key,
-                    nonce,
-                    dispatched_origin,
-                    expected,
-                })
+                if let Some(frame) = slot.borrow_mut().last_mut() {
+                    *frame = Some(Pending {
+                        pool: pool.clone(),
+                        snapshot,
+                        hash,
+                        provider,
+                        channel,
+                        key,
+                        nonce,
+                        dispatched_origin,
+                        expected,
+                    });
+                }
             });
-            Ok(Self(true))
+            Ok(guard)
         }
     }
     impl Drop for RegistrationScope {
@@ -334,7 +350,8 @@ mod unix {
 
     /// The creator calls this only after publishing this incarnation's spawn marker.
     pub(crate) fn created(context: &BindingContext) -> Result<(), String> {
-        let Some(pending) = REGISTRATION.with(|slot| slot.borrow().last().cloned()) else {
+        let Some(pending) = REGISTRATION.with(|slot| slot.borrow().last().cloned().flatten())
+        else {
             return Ok(());
         };
         let name = super::super::session_identity::tmux_name_from_session_key(&pending.key)
@@ -362,33 +379,51 @@ mod unix {
                         && missing(&observed, &old_name)
                 };
                 let channel = pending.channel.to_string();
-                let witness = RegistrationWitness {
-                    snapshot: &pending.snapshot,
-                    new_key: &pending.key,
-                    new_nonce: &pending.nonce,
-                    old_host_absent: &absent,
-                };
-                let params = crate::db::dispatched_sessions::HookSessionUpsert {
-                    session_key: &pending.key,
-                    instance_id: None,
-                    agent_id: None,
-                    provider: &pending.provider,
-                    status: "turn_active",
-                    session_info: None,
-                    model: None,
-                    tokens: None,
-                    cwd: None,
-                    active_dispatch_id: None,
-                    thread_channel_id: None,
-                    channel_id: Some(&channel),
-                    claude_session_id: None,
-                    raw_provider_session_id: None,
-                    turn_start_nonce: Some(&pending.nonce),
-                    dispatched_origin: pending.dispatched_origin,
-                };
-                register_hook_session_pg(&pool, params, identity(&pending.hash, &channel), &witness)
-                    .await
-                    .map_err(|error| format!("register created session: {error:?}"))
+                let mut snapshot = pending.snapshot.clone();
+                for attempt in 0..2 {
+                    let witness = RegistrationWitness {
+                        snapshot: &snapshot,
+                        new_key: &pending.key,
+                        new_nonce: &pending.nonce,
+                        old_host_absent: &absent,
+                    };
+                    let params = crate::db::dispatched_sessions::HookSessionUpsert {
+                        session_key: &pending.key,
+                        instance_id: None,
+                        agent_id: None,
+                        provider: &pending.provider,
+                        status: "turn_active",
+                        session_info: None,
+                        model: None,
+                        tokens: None,
+                        cwd: None,
+                        active_dispatch_id: None,
+                        thread_channel_id: None,
+                        channel_id: Some(&channel),
+                        claude_session_id: None,
+                        raw_provider_session_id: None,
+                        turn_start_nonce: Some(&pending.nonce),
+                        dispatched_origin: pending.dispatched_origin,
+                    };
+                    let result = register_hook_session_pg(
+                        &pool,
+                        params,
+                        identity(&pending.hash, &channel),
+                        &witness,
+                    )
+                    .await;
+                    match result {
+                        Ok(outcome) => return Ok(outcome),
+                        Err(error) if attempt == 0 && crate::db::dispatched_session_canonical_identity::key_promotion::snapshot_changed(&error) => {
+                            let next = discover_registration_pg(&pool, &pending.provider, identity(&pending.hash, &channel)).await
+                                .map_err(|error| format!("registration rediscovery: {error:?}"))?.ok_or("registration row disappeared")?;
+                            if next.id != snapshot.id || next.primary != snapshot.primary { return Err("registration ownership changed".into()); }
+                            snapshot = next;
+                        }
+                        Err(error) => return Err(format!("register created session: {error:?}")),
+                    }
+                }
+                Err("registration did not settle".into())
             },
             |error| error,
         )?;

@@ -153,6 +153,11 @@ pub(super) async fn derive_channel_session_key(
             SessionIdentityConflictKind::EvidenceDivergence,
         ));
     }
+    if rows.iter().any(|(_, other)| other != key) {
+        return Err(HostedLookup::Unknown(
+            "primary changed between candidate reads".into(),
+        ));
+    }
     Ok(key.clone())
 }
 

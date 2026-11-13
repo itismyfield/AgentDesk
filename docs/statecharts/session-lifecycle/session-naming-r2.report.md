@@ -86,3 +86,37 @@ TLA2TOOLS=/tmp/i8119-r2-models/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk@25/b
 명령: `JAVA=/opt/homebrew/opt/openjdk/bin/java TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar python3 scripts/ci/statecharts_tlc.py --root <naming 모델/12 cfg/12 expected 행만 복사한 scratch> --timeout 60`. 원시 로그는 `/Users/itismyfield/.adk/lane-runs/i8119/logs/s2-tlc-import.log`다.
 
 이번 커밋은 승인된 설계 산출물 이식이다. 실제 SQL의 witness/CAS/rollback interleaving과 liveness PROPERTY 추가는 S2 본체 단계이며, 위 safety 검사로 증명했다고 주장하지 않는다.
+
+## S2 승격 transaction projection
+
+기준 구현 조각 `ae48c900771e10c67c7d76646761683777daf695` 위에서 등록을 discovery → 정렬 locator → identity → row/alias/CAS → tx 내부 primary UPDATE → old alias → commit으로 분리했다. 외부에서 볼 수 있는 primary/alias/current/nonce는 commit에서 한 번에 게시한다. old host 증거가 Live/ProbeFailed/Unknown/다른 server/hosted pending으로 바뀌거나 snapshot nonce가 바뀌면 staged 변경을 버리고 rollback한다. 실제 SQL lock 대기는 PG 경합 시험이 담당한다.
+
+진입점과 모델 행동:
+
+| 코드 진입점 | 모델 행동/값 |
+|---|---|
+| `src/services/dispatched_sessions/hook.rs:101,107` → `src/db/dispatched_sessions/canonical_identity.rs:178,191,220` | LateOldNonceHook; nonce CAS 없는 old alias의 UPDATE 거절 |
+| `src/db/dispatched_sessions/canonical_identity.rs:144` 및 `src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff.rs:650` | snapshotNonce/nonceContested; 명시 witness가 없으면 primary 승격 없음 |
+| `src/db/dispatched_sessions/key_promotion.rs:26,79,100` (discovery/locator/validation) | TxDiscover → TxLocatorLocks → TxIdentityLock → TxRows; 비권한 snapshot과 under-lock CAS |
+| `src/db/dispatched_sessions/key_promotion.rs:172` (promote_primary) | PromotePrimary → TxPreserveAlias → TxCommit; 충돌은 TxRollback |
+| `src/services/discord/session_locator.rs:130,217` (channel_key/observe_old) | RequestNewName / ObserveOldHost; live old의 관측 namespace만 재사용, 미관측 namespace는 Unknown |
+| `src/services/discord/router/message_handler/provider_dispatch.rs:353` (registration_origin) | 명시 canonical 등록만; synthetic/process/routine/scheduled의 override는 범위 밖 |
+| `src/services/tui_prompt_dedupe/binding_context.rs:464` → `src/services/discord/session_locator.rs:352` | 실제 새 incarnation과 spawn marker 게시 뒤 fresh registration witness 생산 |
+
+file:line 전수 결과는 `/Users/itismyfield/.adk/lane-runs/i8119/logs/s2-registration-entrypoints.log`다. 이름의 suffix로 입력 kind/provider/channel을 새로 추론하는 진입점을 모델에 추가하지 않았다.
+
+| cfg | 변경 전(r2 safety) | 승격 제거 liveness 대조 | 변경 후 transaction/liveness |
+|---|---|---|---|
+| TmuxSessionNamingFixed | safety GREEN, PROPERTY 없음 | CanonicalPrimaryEventuallyCurrent RED | safety/rollback invariant 및 PROPERTY GREEN |
+| HerdrSessionNamingFixed | safety GREEN, PROPERTY 없음 | CanonicalPrimaryEventuallyCurrent RED | safety/rollback invariant 및 PROPERTY GREEN |
+| naming mutant 10개 | 기대 위반 집합 | 해당 없음 | 동일한 기대 위반 집합 유지 |
+
+원시 로그: `s2-tlc-before-tx.log`(PROPERTY만 둔 승격 제거 대조), `s2-tlc-tx.log`(12 cfg). Fixed 두 cfg는 `SPECIFICATION NamingSpec`에서 WF로 등록 시도를 진행하며 `PROPERTY CanonicalPrimaryEventuallyCurrent`를 검사한다. rollback은 새 primary/old alias의 부분 게시가 없음을 별도 invariant로 검사한다. 기존 main 404 cfg/expected 행의 기대값은 바꾸지 않았다.
+
+범위 밖과 관계:
+
+- 여러 채널/DB row/서로 다른 SQL backend의 실제 blocking은 모델의 lock phase로 추상화했다. PG 경합 시험이 정렬 locator/identity 순서와 old-alias hook 겹침을 검증한다.
+- fresh tmux의 atomic create와 incarnation marker 게시 프로토콜은 S1/기존 binding-context 계약이다. 모델은 그 creator의 fresh witness만 입력으로 받는다.
+- ordinary process/routine/scheduled 및 historical ownership token은 canonical registration의 증거가 아니며 primary 승격 경로에 합치지 않는다.
+- 명시 old-alias force_kill/host_repair의 파괴적 소비자 효과는 S3로 이관됐다. current-primary의 queue/force-kill/policy/GC 효과는 S2 실제 PG/격리 tmux 시험이 맡는다.
+- 이 projection은 한 fresh successor와 한 등록 시도다. rollback 뒤 호출자의 새 탐색/재시도, 다중 채널 및 외부 host 변경 전체를 무한 탐색했다고 주장하지 않는다.

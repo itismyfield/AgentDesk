@@ -176,7 +176,26 @@ impl PromotionRig {
             .success()
     }
     pub(crate) async fn queue(&self) -> Vec<u8> {
-        test_turn::start(&self.shared, self.channel, self.channel.get() + 1, "new").await;
+        let token =
+            test_turn::start(&self.shared, self.channel, self.channel.get() + 1, "new").await;
+        *token.tmux_binding.lock().unwrap() = Some(
+            crate::services::provider::cancel_token_cleanup::authority::TmuxBinding::NameOnly {
+                name: self.name.clone(),
+            },
+        );
+        let pane = self.raw(&[
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={}", self.name),
+            "#{pane_pid}",
+        ]);
+        let pid = std::str::from_utf8(&pane.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        token.store_child_pid(pid);
         let mut row = crate::services::discord::inflight::load_inflight_state(
             &ProviderKind::Claude,
             self.channel.get(),
@@ -232,21 +251,6 @@ async fn key_promotion_created_incarnation_and_candidate_seams_pg() {
             .await
             .unwrap();
     assert_eq!(alias, rig.id);
-    sqlx::query("UPDATE sessions SET cwd=$1 WHERE id=$2")
-        .bind(rig.root.path().to_string_lossy().as_ref())
-        .bind(rig.id)
-        .execute(&rig.pool)
-        .await
-        .unwrap();
-    let cwd = crate::services::discord::session_runtime::restore_session_cwd_from_db(
-        Some(&rig.pool),
-        &rig.shared.token_hash,
-        &ProviderKind::Claude,
-        "unrelated-preferred-name",
-        rig.channel.get(),
-    )
-    .unwrap();
-    assert_eq!(cwd.path, rig.root.path().to_string_lossy());
     rig.finish().await;
 }
 
@@ -292,7 +296,7 @@ async fn key_promotion_current_primary_queue_cancel_preserves_input_pg() {
         .execute(&rig.pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE sessions SET active_dispatch_id='s2-dispatch' WHERE id=$1")
+    sqlx::query("UPDATE sessions SET active_dispatch_id='s2-dispatch', status='turn_active', thread_channel_id=channel_id WHERE id=$1")
         .bind(rig.id)
         .execute(&rig.pool)
         .await
@@ -342,5 +346,141 @@ async fn key_promotion_current_primary_thread_gc_keeps_live_thread_pg() {
     .await
     .unwrap();
     assert_eq!(count, 1, "protected thread row survives");
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn key_promotion_live_and_foreign_namespace_keep_primary_and_execution_pg() {
+    let mut rig = PromotionRig::new(81190306).await;
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s WHERE id=$1")
+            .bind(rig.id)
+            .fetch_one(&rig.pool)
+            .await
+            .unwrap();
+    let pid = rig
+        .raw(&[
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={}", rig.name),
+            "#{pane_pid}",
+        ])
+        .stdout;
+    assert!(!super::unix::observe_old(
+        rig.id,
+        &rig.key,
+        rig.channel.get()
+    ));
+    let preferred = adk_session::build_namespaced_session_key(
+        &rig.shared.token_hash,
+        &ProviderKind::Claude,
+        "other-preferred",
+    );
+    assert_eq!(
+        channel_key(
+            &rig.shared,
+            &ProviderKind::Claude,
+            rig.channel.get(),
+            preferred.clone()
+        )
+        .await,
+        Some(rig.key.clone())
+    );
+    assert!(
+        RegistrationScope::enter(
+            Some(&rig.pool),
+            &rig.shared.token_hash,
+            &ProviderKind::Claude,
+            rig.channel.get(),
+            Some("other-preferred"),
+            Some("other"),
+            Some(false)
+        )
+        .is_err()
+    );
+    let other_socket = rig.root.path().join("another.sock");
+    let displaced = std::mem::replace(
+        &mut rig._namespace,
+        ChannelNamespace::new(81190399, other_socket.clone()),
+    );
+    drop(displaced);
+    let other = ChannelNamespace::new(rig.channel.get(), other_socket);
+    assert_eq!(
+        channel_key(
+            &rig.shared,
+            &ProviderKind::Claude,
+            rig.channel.get(),
+            preferred
+        )
+        .await,
+        Some(rig.key.clone())
+    );
+    drop(other);
+    assert_eq!(
+        pid,
+        rig.raw(&[
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={}", rig.name),
+            "#{pane_pid}"
+        ])
+        .stdout
+    );
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s WHERE id=$1")
+            .bind(rig.id)
+            .fetch_one(&rig.pool)
+            .await
+            .unwrap();
+    assert_eq!(after, before);
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn key_promotion_synthetic_scope_does_not_publish_canonical_registration_pg() {
+    let rig = PromotionRig::new(81190307).await;
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s WHERE id=$1")
+            .bind(rig.id)
+            .fetch_one(&rig.pool)
+            .await
+            .unwrap();
+    let scope = RegistrationScope::enter(
+        Some(&rig.pool),
+        &rig.shared.token_hash,
+        &ProviderKind::Claude,
+        rig.channel.get(),
+        Some("synthetic-isolated"),
+        Some("synthetic"),
+        None,
+    )
+    .unwrap();
+    let context = BindingContext {
+        schema: 1,
+        provider: "claude".into(),
+        created_at: chrono::Utc::now(),
+        execution_nonce: uuid::Uuid::new_v4().simple().to_string(),
+        tmux_session: "synthetic-isolated".into(),
+        channel_id: Some(rig.channel.get()),
+        owner_runtime_root: rig.root.path().display().to_string(),
+        host: None,
+        expected_native_session_id: None,
+        launch_mode: "scheduled".into(),
+        provider_root: None,
+        first_prompt_digest: None,
+        source_policy: None,
+    };
+    created(&context).unwrap();
+    drop(scope);
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s WHERE id=$1")
+            .bind(rig.id)
+            .fetch_one(&rig.pool)
+            .await
+            .unwrap();
+    assert_eq!(after, before);
+    assert!(rig.present());
     rig.finish().await;
 }

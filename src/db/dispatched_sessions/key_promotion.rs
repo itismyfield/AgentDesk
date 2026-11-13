@@ -1,5 +1,11 @@
 use super::*;
 
+const SNAPSHOT_CHANGED: &str = "registration snapshot changed; rediscover before retry";
+
+pub(crate) fn snapshot_changed(error: &HookSessionUpsertError) -> bool {
+    matches!(error, HookSessionUpsertError::Conflict(conflict) if conflict.message == SNAPSHOT_CHANGED)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RegistrationSnapshot {
     pub(crate) id: i64,
@@ -121,9 +127,7 @@ pub(super) async fn validate_registration(
         .is_none_or(|target| target.id != snapshot.id || target.session_key != snapshot.primary)
         || load_snapshot(&mut **tx, snapshot.id).await?.as_ref() != Some(snapshot)
     {
-        return Err(refused(
-            "registration snapshot changed; rediscover before retry",
-        ));
+        return Err(refused(SNAPSHOT_CHANGED));
     }
     if load_alias_for_update(tx, &snapshot.primary)
         .await?

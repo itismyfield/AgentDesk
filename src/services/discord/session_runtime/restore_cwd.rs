@@ -304,3 +304,25 @@ pub(super) fn restore_thread_worktree_path_from_db(
     .ok()
     .flatten()
 }
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn key_promotion_cwd_restore_uses_canonical_actual_locator_pg() {
+    let rig = crate::services::discord::session_locator::tests::PromotionRig::new(81190308).await;
+    sqlx::query("UPDATE sessions SET cwd=$1 WHERE id=$2")
+        .bind(rig.root.path().to_string_lossy().as_ref())
+        .bind(rig.id)
+        .execute(&rig.pool)
+        .await
+        .unwrap();
+    let cwd = restore_session_cwd_from_db(
+        Some(&rig.pool),
+        &rig.shared.token_hash,
+        &crate::services::provider::ProviderKind::Claude,
+        "unrelated-preferred-name",
+        rig.channel.get(),
+    )
+    .unwrap();
+    assert_eq!(cwd.path, rig.root.path().to_string_lossy());
+    rig.finish().await;
+}
