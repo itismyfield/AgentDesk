@@ -38,8 +38,6 @@ Seed == IF ~parentO THEN "legacy"
         ELSE IF Mut = "alias" THEN "parent"
         ELSE IF init THEN "committed"
         ELSE IF Mut = "pending" THEN "pending" ELSE "late"
-\* A late reservation made while an input is open leaves that one turn to Legacy.
-LateOf(c) == c = "late" /\ input = "waiting"
 Fixed == <<parentO, dormant>>
 
 \* Discord intake, dispatch, routine TUI and terminal input all reach one placement boundary.
@@ -51,37 +49,39 @@ Arrive ==
     /\ UNCHANGED <<proc, relation, cand, floor, init, tomb, tombGen, writer, gen,
                    retire, deploy, booted, crashes, Fixed, wmode, lSending>>
 
-\* The checked parent read either verifies the child or leaves a held, unresolved entry.
+\* The placement's checked parent read either records the child or holds the input itself at
+\* placement, before it reaches the session, so no body exists yet to hold or lose.
 Admit ==
-    /\ Fix = "after" /\ proc = "new" /\ knock /\ knock' = FALSE
+    /\ Fix = "after" /\ proc = "new" /\ knock
     /\ \/ /\ relation = "none"
           /\ \E ok \in BOOLEAN :
                 /\ relation' = IF ok THEN "verified" ELSE "unresolved"
                 /\ cand' = IF ok THEN Seed ELSE "held"
-       \/ /\ relation # "none" /\ UNCHANGED <<relation, cand>>
-    /\ lateTurn' = (lateTurn \/ (relation = "none" /\ LateOf(cand')))
+                /\ knock' = ~ok
+                /\ input' = IF ~ok /\ Mut = "dropHeld" THEN "lost" ELSE input
+       \/ /\ relation = "verified" /\ knock' = FALSE /\ UNCHANGED <<relation, cand, input>>
     /\ tomb' = FALSE
     /\ gen' = IF tomb \/ retire # 0 THEN gen + 1 ELSE gen
-    /\ UNCHANGED <<proc, floor, init, tombGen, writer, input, arrived, oSent, lSent, via,
-                   row, retire, deploy, booted, crashes, Fixed, wmode, lSending, oTurn>>
+    /\ UNCHANGED <<proc, floor, init, tombGen, writer, arrived, oSent, lSent, via,
+                   row, retire, deploy, booted, crashes, Fixed, wmode, lSending, lateTurn,
+                   oTurn>>
 
-\* The existing 2 s owner refresh resolves a held entry before any provider branch. A child
-\* of a Legacy parent becomes Legacy's; the body the gate held is then sent once.
-Resolve ==
-    /\ Mut # "noresolve" /\ proc = "new" /\ relation = "unresolved"
-    /\ relation' = "verified" /\ cand' = Seed
-    /\ lateTurn' = (lateTurn \/ LateOf(Seed))
+\* The next input's placement can record a boot-reserved child while Legacy still sends its
+\* open turn; that turn stays Legacy's until it ends.
+EarlyPlace ==
+    /\ Fix = "after" /\ proc = "new" /\ relation = "none" /\ lateTurn /\ input = "waiting"
+    /\ ~knock /\ relation' = "verified" /\ cand' = Seed
     /\ UNCHANGED <<proc, floor, init, tomb, tombGen, writer, gen, input, knock, arrived,
                    oSent, lSent, via, row, retire, deploy, booted, crashes, Fixed, wmode,
-                   lSending, oTurn>>
-\* Mutant: the gate answers an unresolved child as a failed send; a caller that does not
-\* retry drops the body.
-HoldFail ==
-    /\ Mut = "holdFails" /\ proc = "new" /\ relation = "unresolved" /\ input = "waiting"
-    /\ ~knock /\ input' = "lost"
-    /\ UNCHANGED <<proc, relation, cand, floor, init, tomb, tombGen, writer, gen, knock,
-                   arrived, oSent, lSent, via, row, retire, deploy, booted, crashes, Fixed,
-                   wmode, lSending, lateTurn, oTurn>>
+                   lSending, lateTurn, oTurn>>
+\* The held placement is tried again until its checked read succeeds. A child of a Legacy
+\* parent becomes Legacy's; the input then goes on as any other.
+Resolve ==
+    /\ Mut # "noresolve" /\ proc = "new" /\ relation = "unresolved"
+    /\ relation' = "verified" /\ cand' = Seed /\ knock' = FALSE
+    /\ UNCHANGED <<proc, floor, init, tomb, tombGen, writer, gen, input, arrived,
+                   oSent, lSent, via, row, retire, deploy, booted, crashes, Fixed, wmode,
+                   lSending, lateTurn, oTurn>>
 
 \* Legacy posts a body where the gate reads the thread as a non-member, a Legacy parent's
 \* child, or the late reservation's own turn before the handoff.
@@ -172,17 +172,17 @@ Crash ==
     /\ proc' = "down" /\ crashes' = crashes + 1 /\ Down
     /\ UNCHANGED <<floor, init, tomb, tombGen, gen, input, knock, arrived, oSent, lSent,
                    via, row, deploy, booted, Fixed, wmode, lateTurn, oTurn>>
-\* Boot reads recorded children without REST and holds known unrecorded ones.
+\* Boot reads recorded children without REST. A known unrecorded child is reserved late: its
+\* open turn stays Legacy's, and the next placement records it.
 Boot ==
     /\ proc = "down" /\ deploy \in {"idle", "refused"} /\ proc' = "new"
-    /\ relation' = IF init THEN "verified"
-                   ELSE IF input = "waiting" /\ Mut # "noBootScan" /\ Fix = "after"
-                        THEN "unresolved" ELSE "none"
-    /\ cand' = IF relation' = "verified" THEN "committed"
-               ELSE IF relation' = "unresolved" THEN "held" ELSE "none"
+    /\ relation' = IF init THEN "verified" ELSE "none"
+    /\ cand' = IF init THEN "committed" ELSE "none"
+    /\ lateTurn' = (lateTurn \/ (Fix = "after" /\ Mut # "noBootScan" /\ ~init
+                                   /\ input = "waiting" /\ ~knock))
     /\ UNCHANGED <<floor, init, tomb, tombGen, writer, gen, input, knock, arrived, oSent,
                    lSent, via, row, retire, deploy, booted, crashes, Fixed, wmode, lSending,
-                   lateTurn, oTurn>>
+                   oTurn>>
 
 \* A rollback to a binary without the child capability, judged before the service stops.
 DeployCheck ==
@@ -231,7 +231,7 @@ Retire ==
                    oSent, lSent, via, row, deploy, booted, crashes, Fixed, wmode, lSending,
                    lateTurn, oTurn>>
 
-Next == Arrive \/ Admit \/ Resolve \/ HoldFail \/ LegacyClaim \/ LegacyDone \/ StartWriter
+Next == Arrive \/ Admit \/ EarlyPlace \/ Resolve \/ LegacyClaim \/ LegacyDone \/ StartWriter
         \/ PublishFloor
         \/ PublishInit \/ InitFail \/ HeldVisible \/ Ready \/ Post \/ Crash \/ Boot
         \/ DeployCheck \/ DeployStop \/ DeploySwap \/ GcDelete \/ StopWriter \/ Retire
@@ -250,11 +250,11 @@ FloorBeforeInit == init => floor
 ReadyNeedsInit == writer = "ready" => (init /\ cand = "committed")
 OldReaderBoots == booted = "ok"
 TombExact == tomb => tombGen = gen
-\* A body the gate held for an unresolved child is never dropped.
+\* An input held at placement for an unresolved child is never dropped.
 NoSilentLoss == input # "lost"
 InheritDormant == writer \in {"starting", "ready"} => ((wmode = "dormant") = dormant)
 \* An admitted child input is posted by its own ready writer or fails visibly.
 ChildInputAnswered == [](input = "waiting" => <>(input # "waiting" \/ proc = "old"))
-\* A held unresolved child is resolved while its process runs.
+\* An input held at placement is resolved while its process runs.
 HeldResolves == [](relation = "unresolved" => <>(relation # "unresolved" \/ proc # "new"))
 =============================================================================
