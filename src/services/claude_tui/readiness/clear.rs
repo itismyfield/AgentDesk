@@ -18,10 +18,8 @@ pub(super) fn evidence(source: &Source) -> Option<Evidence> {
     if !source::clear_usable(source) {
         return None;
     }
-    evidence_with(
-        source,
-        &tui_prompt_dedupe::runtime_binding_for_tmux_session(&source.session)?,
-    )
+    let binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(&source.session);
+    evidence_with(source, binding.as_ref())
 }
 #[cfg(unix)]
 pub(super) fn evidence_under(
@@ -31,15 +29,14 @@ pub(super) fn evidence_under(
     if !source::clear_usable_under(source, authority) {
         return None;
     }
-    evidence_with(
-        source,
-        &tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)?,
-    )
+    let binding =
+        tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority);
+    evidence_with(source, binding.as_ref())
 }
 #[cfg(unix)]
 fn evidence_with(
     source: &Source,
-    binding: &tui_prompt_dedupe::TuiRuntimeBinding,
+    binding: Option<&tui_prompt_dedupe::TuiRuntimeBinding>,
 ) -> Option<Evidence> {
     use binding_events::{BindingCause, BindingTarget};
     let nonce = source.nonce.as_deref()?;
@@ -115,10 +112,11 @@ fn evidence_with(
         return None;
     }
     let old = before.old.as_ref()?;
-    if binding.session_id.as_deref() != Some(old.session_id.as_str())
-        || Path::new(binding.relay_output_path()) != old.path
-        || binding_events::published_claude_history(channel, &source.session, nonce).as_ref()
-            != Some(&snapshot)
+    if binding.is_some_and(|binding| {
+        binding.session_id.as_deref() != Some(old.session_id.as_str())
+            || Path::new(binding.relay_output_path()) != old.path
+    }) || binding_events::published_claude_history(channel, &source.session, nonce).as_ref()
+        != Some(&snapshot)
     {
         return None;
     }
@@ -135,9 +133,25 @@ pub(super) fn current(source: &Source) -> Option<Option<Evidence>> {
         .get(source)
         .is_some_and(|entry| entry.clear_start);
     let Some(binding) = tui_prompt_dedupe::runtime_binding_for_tmux_session(&source.session) else {
-        return (!clear_start).then_some(None);
+        return if clear_start {
+            evidence(source).map(Some)
+        } else {
+            Some(None)
+        };
     };
-    if clear_start && !source.path.exists() {
+    #[cfg(unix)]
+    let pending = source
+        .nonce
+        .as_deref()
+        .and_then(|nonce| binding_context::execution_context("claude", nonce).ok())
+        .and_then(|ctx| Some((ctx.channel_id?, ctx.execution_nonce)))
+        .and_then(|(channel, nonce)| {
+            binding_events::published_claude_history(channel, &source.session, &nonce)
+        })
+        .is_some_and(|(_, history)| history.awaiting.is_some());
+    #[cfg(not(unix))]
+    let pending = false;
+    if clear_start && pending && !source.path.exists() {
         return evidence(source).map(Some);
     }
     if binding

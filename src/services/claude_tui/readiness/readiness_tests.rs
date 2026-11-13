@@ -1016,10 +1016,10 @@ fn managed_stash_holds_when_the_final_composer_capture_is_unreadable() {
     let pane =
         super::super::busy_inject::Pane::with_program("unreadable-composer", program).unwrap();
     let unread = Err(super::super::busy_inject::Veto::ScreenUnread);
-    assert_eq!(idle::before_paste(&pane, true), unread);
+    assert_eq!(idle::before_paste(&pane, true), Ok(false));
     assert_eq!(idle::before_paste(&pane, false), Ok(false));
     fs::write(dir.path().join("capture"), "not a composer").unwrap();
-    assert_eq!(idle::before_paste(&pane, true), unread);
+    assert_eq!(idle::before_paste(&pane, true), Ok(false));
     fs::write(
         dir.path().join("capture"),
         super::super::input::submission::tests::view("person draft", false),

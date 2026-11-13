@@ -41,24 +41,60 @@ fn save(session: &str, proof: &Certified) -> Option<()> {
     crate::domain::file_sync::fsync_parent_dir(&path).ok()
 }
 fn pending(ctx: &BindingContext, native: &str, path: &Path) -> Option<BindingEvent> {
+    use binding_events::{BindingCause, BindingTarget};
     let channel = ctx.channel_id?;
-    let awaited = crate::services::claude::herdr_turn::awaited_clear(
-        channel,
-        &ctx.tmux_session,
-        &ctx.execution_nonce,
-    )?;
-    if awaited.session_id != native || awaited.transcript.as_deref().map(Path::new) != Some(path) {
+    let snapshot =
+        binding_events::published_claude_history(channel, &ctx.tmux_session, &ctx.execution_nonce)?;
+    if !snapshot.1.complete || snapshot.1.awaiting.as_ref()?.session != native {
         return None;
     }
-    binding_events::binding_events_since(channel, 0)
-        .ok()?
-        .into_iter()
-        .rev()
-        .find(|event| {
+    let records = binding_events::records_strict(channel).ok()?.ok()?;
+    if records.last()?.seq != snapshot.0 {
+        return None;
+    }
+    let pane: Vec<_> = records
+        .iter()
+        .filter(|event| {
             event.tmux_session == ctx.tmux_session
                 && !matches!(event.new, BindingTarget::Rejected { .. })
         })
+        .collect();
+    let waiting = pane
+        .iter()
+        .rev()
+        .take_while(|event| {
+            event.execution_nonce.as_deref() == Some(ctx.execution_nonce.as_str())
+                && event.cause == BindingCause::Clear
+                && event.evidence.hook_event.as_deref() == Some("session_start")
+                && matches!(event.new, BindingTarget::Pending { .. })
+        })
+        .count();
+    let (earlier, chain) = pane.split_at(pane.len() - waiting);
+    let previous = earlier
+        .last()
+        .filter(|event| event.execution_nonce.as_deref() == Some(ctx.execution_nonce.as_str()))?;
+    let from = match &previous.new {
+        BindingTarget::Source(from) | BindingTarget::Resolved { source: from, .. } => from,
+        _ => return None,
+    };
+    let latest = *chain.last()?;
+    if chain.iter().any(|event| event.old.as_ref() != Some(from))
+        || !matches!(&latest.new, BindingTarget::Pending {
+            payload_session_id, payload_transcript_path
+        } if payload_session_id == native && payload_transcript_path.as_deref().map(Path::new) == Some(path))
+        || binding_events::published_claude_history(
+            channel,
+            &ctx.tmux_session,
+            &ctx.execution_nonce,
+        )
+        .as_ref()
+            != Some(&snapshot)
+    {
+        return None;
+    }
+    Some(latest.clone())
 }
+
 impl Certified {
     fn source(&self) -> Option<Source> {
         let BindingTarget::Pending {
@@ -151,12 +187,13 @@ fn verified_with(
     if !proof.current(session, epoch, &source.path) {
         return None;
     }
-    let binding = binding()?;
+    let binding = binding();
     let old = proof.pending.old.as_ref()?;
-    if binding.runtime_kind != crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
-        || binding.session_id.as_deref() != Some(old.session_id.as_str())
-        || Path::new(binding.relay_output_path()) != old.path
-    {
+    if binding.as_ref().is_some_and(|binding| {
+        binding.runtime_kind != crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+            || binding.session_id.as_deref() != Some(old.session_id.as_str())
+            || Path::new(binding.relay_output_path()) != old.path
+    }) {
         return None;
     }
     Some((proof, source))

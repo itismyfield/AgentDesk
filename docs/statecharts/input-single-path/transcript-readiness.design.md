@@ -452,7 +452,9 @@ permission-mode는 현재 terminal을 무효화하되 뒤의 정상 완료까지
 An authenticated SessionStart(clear) certifies the canonical context, latest Pending
 record and publication time under source authority. The atomically persisted
 certificate survives daemon restart. Missing or stale context, nonce, sequence,
-source, binding or certificate stays Held.
+source or certificate stays Held. A conflicting live binding stays Held; an absent
+volatile binding after restart is admitted only by that exact authenticated,
+unconsumed Pending certificate and does not publish any runtime binding.
 
 Restoration publishes only local readiness for the Pending's exact native source.
 The old runtime binding and O cursor remain unchanged until the native source is
@@ -473,7 +475,7 @@ This replaces runtime-binding retirement with a Pending evidence transition.
 |---|---|
 | readiness::note_hook(SessionStart clear) -> source::clear::note | canonical context + latest Pending; durable certificate; duplicate preserves consumption |
 | source::Source::current -> source::clear::restore | exact Pending source restoration; no runtime publication; newer volatile identity cannot admit old output |
-| readiness::clear::evidence/current | old binding and authenticated Pending chain rechecked; absent binding/proof refuses clear bootstrap |
+| readiness::clear::evidence/current | live old binding, when present, and authenticated Pending chain rechecked; absent volatile cache needs the exact unconsumed certificate; absent/consumed proof refuses bootstrap |
 | readiness::reserve -> clear::claim | source authority -> durable one-use fence -> local pending revision; no key ownership change |
 | Reservation::current | exact source, Pending Evidence, stamp and local revision immediately before existing writer gate |
 | Reservation::not_sent -> clear::release | only matching known non-delivery releases; no implicit crash replay |
@@ -487,3 +489,7 @@ old-output refusal and consumed-proof restart. Negative controls keep early bind
 replacement, removed certificate validation, cursor loss, old-output completion and
 proof reuse RED. Draft/modal, readiness-before-liveness, Cancel, Stop, exact-close and
 native writer ownership remain independent existing guards.
+
+### Idle capture admission
+
+Current Idle source evidence admits a submission without stashing when capture is unavailable or the composer cannot be read. The final draft veto applies only to observed Composer::Text in the existing stash-enabled route; unlisted channels keep their canonical plain-send behavior; a recognized modal still vetoes. Initial composer preparation follows the landing readiness/wait.rs contract, including the existing managed-stash admission. ClearRetire restores the authenticated Pending certificate while retaining the old runtime binding and cursor until native source publication. Observer restoration reads only the published fold and strict journal; it never loads or repairs the writer journal.

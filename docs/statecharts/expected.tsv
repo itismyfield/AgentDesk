@@ -249,6 +249,7 @@ input-single-path/InputPathReadyClearReplay.cfg	InputPath	-	-
 input-single-path/InputPathReadyClearReplayBefore.cfg	InputPath	ReadyNoDuplicate,ReadyNoSilentLoss	-
 input-single-path/InputPathReadyClearRestart.cfg	InputPath	-	-
 input-single-path/InputPathReadyClearSplit.cfg	InputPath	ReadyClearAtomic	-
+input-single-path/InputPathReadyClearUnread.cfg	InputPath	-	-
 input-single-path/InputPathReadyClearVolatile.cfg	InputPath	-	-
 input-single-path/InputPathReadyClearVolatileBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyCompact.cfg	InputPath	-	-
@@ -267,7 +268,7 @@ input-single-path/InputPathReadyNoLatch.cfg	InputPath	ReadyNoContinuationEarlyIn
 input-single-path/InputPathReadyNoLatchCompact.cfg	InputPath	ReadyCompactAfterStopIdle,ReadyNoContinuationEarlyInput,ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyNoRevalidate.cfg	InputPath	ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyNoWake.cfg	InputPath	-	ReadyPendingEventuallyExecutes
-input-single-path/InputPathReadyPermanentUnread.cfg	InputPath	-	ReadyPendingEventuallyExecutes
+input-single-path/InputPathReadyPermanentUnread.cfg	InputPath	-	-
 input-single-path/InputPathReadyPermissionLater.cfg	InputPath	-	-
 input-single-path/InputPathReadyPermissionPoison.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyPreflightOnly.cfg	InputPath	-	ReadyPendingEventuallyExecutes

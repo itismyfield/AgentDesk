@@ -16,12 +16,6 @@ const IDLE: &str = include_str!("../../../../../tests/fixtures/tui_input/claude-
 fn user(text: &str, id: &str) -> String {
     json!({"type":"user","uuid":id,"sessionId":"receipt-sid","message":{"role":"user","content":text}}).to_string()
 }
-fn completed_user(text: &str, id: &str) -> String {
-    format!(
-        "{}\n{{\"type\":\"system\",\"subtype\":\"turn_duration\"}}\n",
-        user(text, id)
-    )
-}
 fn binding(session: &str, path: &std::path::Path) {
     tui_prompt_dedupe::register_tmux_runtime_binding(
         session,
@@ -607,17 +601,6 @@ fn p2_new_pane_rearms_a_rejected_token_but_same_pane_cannot() {
     let tmux = ScriptedTmux::new(&view("", false));
     let _spy = ready();
     let token = Arc::new(CancelToken::new());
-    let terminal = || {
-        use std::io::Write;
-        writeln!(
-            std::fs::OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .unwrap(),
-            "{{\"type\":\"system\",\"subtype\":\"turn_duration\"}}"
-        )
-        .unwrap();
-    };
     tmux.on_enter(&path, &user("foreign", "first-foreign"));
     fresh(session, &path, "own", &token).unwrap();
     assert_eq!(observed(&token, &path), Some(Err(())));

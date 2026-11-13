@@ -9,14 +9,14 @@ Before == Mode = "ready-before-narrow"
 Clear == Mode \in {"ready-clear", "ready-clear-before", "ready-clear-restart", "ready-clear-forged",
                     "ready-clear-no-revalidate", "ready-clear-drop-cursor", "ready-clear-split", "ready-clear-consumed",
                     "ready-clear-volatile", "ready-clear-volatile-before",
-                    "ready-clear-replay", "ready-clear-replay-before", "ready-clear-old-output", "ready-clear-old-output-before"}
+                    "ready-clear-replay", "ready-clear-replay-before", "ready-clear-old-output", "ready-clear-old-output-before", "ready-clear-unread"}
 ClearHeld == Mode \in {"ready-clear-held-before", "ready-clear-held-after"}
 ClearPreSource == Clear \/ ClearHeld \/ Mode \in {"ready-clear-pending-before", "ready-clear-pending-after", "ready-clear-pending-recheck"}
 Fresh == ClearPreSource \/ Mode \in {"ready-fresh", "ready-clear", "ready-resume", "ready-late-dialog", "ready-preflight-only"}
 Dialog == Mode \in {"ready-late-dialog", "ready-preflight-only"}
 Permission == Mode \in {"ready-permission-later", "ready-permission-poison"}
 Race == Mode \in {"ready-race", "ready-no-revalidate"}
-Blind == Mode \in {"ready-unread", "ready-permanent-unread", "ready-draft-bypass"}
+Blind == Mode \in {"ready-unread", "ready-permanent-unread", "ready-draft-bypass", "ready-clear-unread"}
 ManagedStash == Mode \in {"ready-stash-before", "ready-stash-after"}
 CanPark == Mode = "ready-stash-after"
 Person == ManagedStash \/ Mode \in {"ready-draft", "ready-draft-bypass"}
@@ -84,7 +84,7 @@ SessionStart ==
     /\ ~Dialog \/ r.dialog = "Dismissed"
     /\ r' = [r EXCEPT !.phase = IF Clear THEN @ ELSE "Idle", !.started = TRUE,
                      !.durableClear = @ \/ (Clear /\ r.clearProof), !.awake = TRUE]
-\* Restoring the authenticated Pending never replaces the old runtime binding.
+\* Restoring authenticated Pending retains the durable old source even if its volatile binding cache was lost.
 ClearRetire ==
     /\ Clear /\ ~r.clearDone /\ ~r.clearConsumed
     /\ Mode \notin {"ready-clear-before", "ready-clear-volatile-before"}
@@ -149,7 +149,7 @@ HumanClears ==
     /\ r.human /\ r.draft = "Person" /\ (~ClearHeld \/ r.heldOnce)
     /\ r' = [r EXCEPT !.human = FALSE, !.draft = "Empty",
                      !.awake = IF ClearHeld THEN @ ELSE TRUE]
-ComposerPrepared == r.draft = "Empty" \/ (CanPark /\ r.draft = "Person")
+ComposerPrepared == r.draft = "Empty" \/ (~Fresh /\ r.draft = "Unread") \/ (CanPark /\ r.draft = "Person")
 Hold(i) ==
     /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake
     /\ ~ClearHeld \/ Ready
@@ -202,7 +202,7 @@ Submit ==
                      !.phase = "Running", !.turn = @ + 1, !.tail = "assistant",
                      !.compactReady = FALSE, !.awake = FALSE,
                      !.badIdleRunning = @ \/ r.phase = "Running",
-                     !.badDraft = @ \/ (r.human /\ ~CanPark),
+                     !.badDraft = @ \/ (r.human /\ r.draft = "Person" /\ ~CanPark),
                      !.stashRoundTrips = @ + IF CanPark /\ r.human THEN 1 ELSE 0,
                      !.badEarly = @ \/ (r.needsStart /\ ~r.started),
                      !.badClear = @ \/ (r.oldBinding /\ (~r.started \/ ~r.durableClear \/ r.proofPending # r.pendingSeq)),
