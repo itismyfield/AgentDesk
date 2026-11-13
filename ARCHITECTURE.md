@@ -2012,6 +2012,8 @@ src/
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
 │   │   │   │   ├── effect_tests.rs
+│   │   │   │   ├── effort_continue.rs
+│   │   │   │   ├── effort_continue_tests.rs
 │   │   │   │   ├── held_watch.rs
 │   │   │   │   ├── ingress.rs
 │   │   │   │   ├── ingress_tests.rs
@@ -4530,6 +4532,7 @@ src/
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── control_tests.rs
+│   │   │   │   ├── effort_continue.rs
 │   │   │   │   ├── migration.rs
 │   │   │   │   ├── migration_tests.rs
 │   │   │   │   ├── origin.rs
@@ -4544,6 +4547,8 @@ src/
 │   │   │   │   ├── start_failure.rs
 │   │   │   │   ├── start_failure_tests.rs
 │   │   │   │   └── unit_tests.rs
+│   │   │   ├── v2_types/
+│   │   │   │   └── effort_restart.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs
 │   │   │   ├── mend.rs

@@ -15,6 +15,9 @@ pub(crate) async fn original(
     (turn, channel, text): (&str, u64, &str),
     context: &mut serde_json::Value,
 ) -> Result<(PendingQueueItem, AdmissionTicket), String> {
+    if super::effort_continue::is_continuation(Some(context)) {
+        return super::effort_continue::original(mailbox, channel, context).await;
+    }
     let identity = InputOrigin::imessage_identity(
         channel,
         context["source"].as_str(),
