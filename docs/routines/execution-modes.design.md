@@ -520,7 +520,7 @@ PR1은 P2-C/H의 새 mode/incident 기능을 선행 구현하지 않는다. 현�
 - 임의 셸 내부 side effect/group을 이탈한 하위 daemon의 exactly-once, 전역 relay replacement-safe 내구성은 이 모델의 보장 밖이다. 사용자의 데이터/세션 삭제·kill 권한을 성공률 명목으로 추가하지 않는다.
 
 <!-- doc-path-refs: proposed src/services/discord/router/message_handler/headless_turn/isolated_context.rs src/services/routines/agent_executor/channel.rs src/services/routines/agent_executor/settlement.rs scripts/report.sh -->
-<!-- doc-path-refs: proposed src/services/routines/execution_mode.rs src/services/routines/store/execution_modes.rs src/services/routines/store/diagnostics.rs -->
+<!-- doc-path-refs: proposed src/services/routines/store/diagnostics.rs -->
 <!-- doc-path-refs: proposed src/services/routines/agent_executor/surface.rs src/services/routines/agent_executor/run_policy.rs src/services/routines/store/recovery.rs src/services/routines/agent_executor/channel_settlement.rs src/services/routines/command_runner.rs src/services/routines/command_runner/output.rs src/services/routines/runner_spec.rs -->
 
 <!-- doc-path-refs: proposed src/services/routines/prejudge.rs -->

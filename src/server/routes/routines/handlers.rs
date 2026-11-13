@@ -15,13 +15,19 @@ use super::helpers::{
     validate_execution_strategy_request, validate_max_retries_request, validate_run_status_filter,
     validate_schedule_request, validate_timeout_request,
 };
-use super::responses::{delete_routine_response, session_control_error, store_error};
+use super::responses::{
+    definition_store_error, delete_routine_response, routine_view, session_control_error,
+    store_error, unprocessable,
+};
 use super::{
     AttachRoutineBody, ListRoutinesQuery, ListRunsQuery, PatchRoutineBody, ResumeRoutineBody,
     RoutineMetricsQuery, SearchRoutineRunResultsQuery,
 };
 use crate::api_caller_observability::RequestPrincipal;
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::services::routines::execution_mode::{
+    ExecutionProjection, definition_for_create, notice_limit_for_create,
+};
 use crate::services::routines::store::{RoutineRecord, RoutineRunRecord};
 use crate::services::routines::{
     NewRoutine, RoutineLifecycleEvent, RoutineScriptLoader, RoutineSessionCommand,
@@ -47,10 +53,15 @@ pub async fn list_routines(
         .into_iter()
         .map(|run| (run.routine_id.clone(), run))
         .collect();
+    let mut executions = store
+        .load_execution_definitions(&ids)
+        .await
+        .map_err(store_error)?;
     let routines: Vec<RoutineListItem> = routines
         .into_iter()
         .map(|routine| RoutineListItem {
             last_run: last_runs.remove(&routine.id),
+            execution: executions.remove(&routine.id).map(|row| row.projection()),
             routine,
         })
         .collect();
@@ -65,6 +76,8 @@ pub async fn list_routines(
 struct RoutineListItem {
     #[serde(flatten)]
     routine: RoutineRecord,
+    #[serde(flatten)]
+    execution: Option<ExecutionProjection>,
     last_run: Option<RoutineRunRecord>,
 }
 
@@ -100,6 +113,7 @@ mod list_item_tests {
         expected["last_run"] = Value::Null;
         let listed = RoutineListItem {
             routine,
+            execution: None,
             last_run: None,
         };
         assert_eq!(json!(listed), expected);
@@ -169,6 +183,7 @@ pub async fn get_routine(
             "routine {routine_id} not found"
         )));
     };
+    let routine = routine_view(&store, routine).await?;
     Ok(Json(json!({
         "routine": routine,
         "default_timeout_secs": state.config.routines.agent_timeout_secs,
@@ -221,27 +236,41 @@ pub async fn attach_routine(
     )
     .await?;
     validate_distinct_fallback_agent(agent_id.as_deref(), fallback_agent_id.as_deref())?;
+    let execution = definition_for_create(
+        body.execution_mode.as_deref(),
+        body.runner.as_ref(),
+        Some(&execution_strategy),
+        &script_ref,
+    )
+    .map_err(unprocessable)?;
+    let notice_limit =
+        notice_limit_for_create(body.headless_failure_notice_limit).map_err(unprocessable)?;
     let initial_status = initial_attach_status(&script_ref).to_string();
     let routine = store
-        .attach_routine(NewRoutine {
-            agent_id,
-            fallback_agent_id,
-            max_retries: body.max_retries,
-            script_ref,
-            name,
-            status: Some(initial_status),
-            execution_strategy,
-            schedule: body.schedule,
-            next_due_at: body.next_due_at,
-            checkpoint: body.checkpoint,
-            discord_thread_id: body.discord_thread_id,
-            timeout_secs: body.timeout_secs,
-        })
+        .attach_routine_with_execution(
+            NewRoutine {
+                agent_id,
+                fallback_agent_id,
+                max_retries: body.max_retries,
+                script_ref,
+                name,
+                status: Some(initial_status),
+                execution_strategy,
+                schedule: body.schedule,
+                next_due_at: body.next_due_at,
+                checkpoint: body.checkpoint,
+                discord_thread_id: body.discord_thread_id,
+                timeout_secs: body.timeout_secs,
+            },
+            execution.as_ref(),
+            notice_limit,
+        )
         .await
-        .map_err(store_error)?;
+        .map_err(definition_store_error)?;
     let discord_log = routine_discord_logger(&state)?
         .log_routine_event_with_store(&store, &routine, RoutineLifecycleEvent::Attached)
         .await;
+    let routine = routine_view(&store, routine).await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({ "routine": routine, "discord_log": discord_log })),
@@ -278,16 +307,26 @@ pub async fn patch_routine(
             fallback_agent_id.as_deref(),
         )?;
     }
-    let patch = body.into_patch();
+    let current = store
+        .load_execution_definitions(std::slice::from_ref(&routine_id))
+        .await
+        .map_err(store_error)?
+        .remove(&routine_id)
+        .ok_or_else(|| AppError::not_found(format!("routine {routine_id} not found")))?;
+    let (execution, notice_limit) = body
+        .execution_definition_patch(&current)
+        .map_err(unprocessable)?;
+    let patch = body.into_patch(execution, notice_limit);
     let Some(routine) = store
         .patch_routine(&routine_id, patch)
         .await
-        .map_err(store_error)?
+        .map_err(definition_store_error)?
     else {
         return Err(AppError::not_found(format!(
             "routine {routine_id} not found"
         )));
     };
+    let routine = routine_view(&store, routine).await?;
     Ok(Json(json!({ "routine": routine })))
 }
 

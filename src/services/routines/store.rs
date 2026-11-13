@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 mod agent_start;
+mod execution_modes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -16,6 +17,8 @@ use crate::services::automation_candidate_contract::{
 };
 use crate::services::scheduling::{next_due_after, next_due_after_anchor, validate_schedule};
 use crate::utils::api::clamp_api_limit;
+
+use super::execution_mode::{DEFAULT_HEADLESS_FAILURE_NOTICE_LIMIT, ExecutionDefinition};
 
 pub const ROUTINE_RUN_LEASE_SECS: u64 = 30 * 60;
 const RUN_LEASE_SECS: i64 = ROUTINE_RUN_LEASE_SECS as i64;
@@ -399,6 +402,8 @@ pub struct RoutineRunRecord {
     pub discord_log_error: Option<String>,
     pub discord_message_id: Option<String>,
     pub discord_log_sections: Value,
+    /// Definition pinned at claim; `None` for runs claimed before execution modes existed.
+    pub run_spec: Option<Value>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -645,6 +650,10 @@ pub struct RoutinePatch {
     pub checkpoint: Option<Option<Value>>,
     pub discord_thread_id: Option<Option<String>>,
     pub timeout_secs: Option<Option<i32>>,
+    /// An explicit definition also forces `execution_strategy = 'fresh'`.
+    #[serde(skip)]
+    pub execution_definition: Option<ExecutionDefinition>,
+    pub headless_failure_notice_limit: Option<i32>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -979,7 +988,7 @@ impl RoutineStore {
             SELECT id, routine_id, status, action, turn_id, lease_expires_at,
                    retry_count, next_retry_at, attempts,
                    result_json, error, discord_log_status, discord_log_error,
-                   discord_message_id, discord_log_sections, started_at,
+                   discord_message_id, discord_log_sections, run_spec, started_at,
                    finished_at, created_at, updated_at
             FROM routine_runs
             WHERE routine_id = $1
@@ -1002,7 +1011,7 @@ impl RoutineStore {
                    id, routine_id, status, action, turn_id, lease_expires_at,
                    retry_count, next_retry_at, attempts,
                    result_json, error, discord_log_status, discord_log_error,
-                   discord_message_id, discord_log_sections, started_at,
+                   discord_message_id, discord_log_sections, run_spec, started_at,
                    finished_at, created_at, updated_at
             FROM routine_runs
             WHERE routine_id = ANY($1)
@@ -1080,20 +1089,26 @@ impl RoutineStore {
             r#"
             SELECT rr.id AS run_id,
                    rr.routine_id,
-                   r.agent_id,
-                   r.fallback_agent_id,
-                   r.max_retries,
+                   CASE WHEN rr.run_spec IS NULL THEN r.agent_id
+                        ELSE rr.run_spec ->> 'agent_id' END AS agent_id,
+                   CASE WHEN rr.run_spec IS NULL THEN r.fallback_agent_id
+                        ELSE rr.run_spec ->> 'fallback_agent_id' END AS fallback_agent_id,
+                   CASE WHEN rr.run_spec IS NULL THEN r.max_retries
+                        ELSE (rr.run_spec ->> 'max_retries')::int END AS max_retries,
                    rr.retry_count,
                    r.script_ref,
                    r.name,
-                   r.execution_strategy,
-                   r.discord_thread_id,
+                   CASE WHEN rr.run_spec IS NULL THEN r.execution_strategy
+                        ELSE rr.run_spec ->> 'execution_strategy' END AS execution_strategy,
+                   CASE WHEN rr.run_spec IS NULL THEN r.discord_thread_id
+                        ELSE rr.run_spec ->> 'discord_thread_id' END AS discord_thread_id,
                    rr.turn_id,
                    rr.next_retry_at,
                    rr.attempts,
                    rr.result_json,
                    rr.started_at,
-                   r.timeout_secs
+                   CASE WHEN rr.run_spec IS NULL THEN r.timeout_secs
+                        ELSE (rr.run_spec ->> 'timeout_secs')::int END AS timeout_secs
             FROM routine_runs rr
             JOIN routines r ON r.id = rr.routine_id
             WHERE rr.status = 'running'
@@ -2058,6 +2073,20 @@ impl RoutineStore {
     }
 
     pub async fn attach_routine(&self, new_routine: NewRoutine) -> Result<RoutineRecord> {
+        self.attach_routine_with_execution(new_routine, None, DEFAULT_HEADLESS_FAILURE_NOTICE_LIMIT)
+            .await
+    }
+
+    /// `None` keeps the legacy null-mode contract; an explicit definition stores a fresh routine.
+    pub async fn attach_routine_with_execution(
+        &self,
+        mut new_routine: NewRoutine,
+        execution: Option<&ExecutionDefinition>,
+        headless_failure_notice_limit: i32,
+    ) -> Result<RoutineRecord> {
+        if execution.is_some() {
+            new_routine.execution_strategy = "fresh".to_string();
+        }
         validate_execution_strategy(&new_routine.execution_strategy)?;
         let status = normalize_new_routine_status(new_routine.status.as_deref())?;
         let schedule = normalize_schedule(new_routine.schedule)?;
@@ -2079,9 +2108,10 @@ impl RoutineStore {
             INSERT INTO routines (
                 id, agent_id, script_ref, name, status, execution_strategy,
                 schedule, next_due_at, checkpoint, discord_thread_id, timeout_secs,
-                fallback_agent_id, max_retries
+                fallback_agent_id, max_retries, execution_mode, runner,
+                headless_failure_notice_limit
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             RETURNING id, agent_id, script_ref, name, status, execution_strategy,
                       schedule, next_due_at, last_run_at, last_result, checkpoint,
                       discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
@@ -2102,6 +2132,9 @@ impl RoutineStore {
         .bind(new_routine.timeout_secs)
         .bind(fallback_agent_id)
         .bind(max_retries)
+        .bind(execution.map(|definition| definition.mode.as_str()))
+        .bind(execution.map(|definition| definition.runner.clone()))
+        .bind(headless_failure_notice_limit)
         .fetch_one(&*self.pool)
         .await
         .map_err(|e| anyhow!("attach routine: {e}"))
@@ -2133,6 +2166,7 @@ impl RoutineStore {
             .fallback_agent_id
             .map(|value| normalize_optional_text(value));
         let max_retries_was_set = patch.max_retries.is_some();
+        let execution = patch.execution_definition;
         let next_due_was_set = patch.next_due_at.is_some();
         let mut next_due_at = patch.next_due_at.flatten();
         let mut update_next_due_at = next_due_was_set;
@@ -2154,7 +2188,8 @@ impl RoutineStore {
             r#"
             UPDATE routines
             SET name = COALESCE($2, name),
-                execution_strategy = COALESCE($3, execution_strategy),
+                execution_strategy = CASE WHEN $18::text IS NOT NULL THEN 'fresh'
+                                          ELSE COALESCE($3, execution_strategy) END,
                 schedule = CASE WHEN $4 THEN $5 ELSE schedule END,
                 next_due_at = CASE WHEN $6 THEN $7 ELSE next_due_at END,
                 checkpoint = CASE WHEN $8 THEN $9 ELSE checkpoint END,
@@ -2162,6 +2197,9 @@ impl RoutineStore {
                 timeout_secs = CASE WHEN $12 THEN $13 ELSE timeout_secs END,
                 fallback_agent_id = CASE WHEN $14 THEN $15 ELSE fallback_agent_id END,
                 max_retries = CASE WHEN $16 THEN $17 ELSE max_retries END,
+                execution_mode = COALESCE($18, execution_mode),
+                runner = COALESCE($19, runner),
+                headless_failure_notice_limit = COALESCE($20, headless_failure_notice_limit),
                 updated_at = NOW()
             WHERE id = $1
               AND status <> 'detached'
@@ -2189,6 +2227,13 @@ impl RoutineStore {
         .bind(fallback_agent_id.flatten())
         .bind(max_retries_was_set)
         .bind(patch.max_retries.unwrap_or(0))
+        .bind(
+            execution
+                .as_ref()
+                .map(|definition| definition.mode.as_str()),
+        )
+        .bind(execution.map(|definition| definition.runner))
+        .bind(patch.headless_failure_notice_limit)
         .fetch_optional(&*self.pool)
         .await
         .map_err(|e| anyhow!("patch routine {routine_id}: {e}"))
@@ -2946,22 +2991,35 @@ impl RoutineStore {
     ) -> Result<bool> {
         let normalized = normalize_optional_text(Some(discord_thread_id.to_string()))
             .ok_or_else(|| anyhow!("discord_thread_id must not be empty"))?;
-        let result = sqlx::query(
+        // The in-flight run that created the thread keeps targeting it on retries.
+        let result: Option<i32> = sqlx::query_scalar(
             r#"
-            UPDATE routines
-            SET discord_thread_id = $2,
-                updated_at = NOW()
-            WHERE id = $1
-              AND status <> 'detached'
+            WITH routine AS (
+                UPDATE routines
+                SET discord_thread_id = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND status <> 'detached'
+                RETURNING in_flight_run_id
+            ),
+            pinned AS (
+                UPDATE routine_runs rr
+                SET run_spec = jsonb_set(rr.run_spec, '{discord_thread_id}', to_jsonb($2::text))
+                FROM routine
+                WHERE rr.id = routine.in_flight_run_id
+                  AND rr.status = 'running'
+                  AND rr.run_spec IS NOT NULL
+            )
+            SELECT 1 FROM routine
             "#,
         )
         .bind(routine_id)
         .bind(normalized)
-        .execute(&*self.pool)
+        .fetch_optional(&*self.pool)
         .await
         .map_err(|e| anyhow!("update routine {routine_id} discord_thread_id: {e}"))?;
 
-        Ok(result.rows_affected() == 1)
+        Ok(result.is_some())
     }
 
     /// Interrupt the current in-flight run for a routine after an explicit
@@ -3083,15 +3141,18 @@ impl RoutineStore {
                   AND rr.status = 'running'
                   AND rr.lease_expires_at IS NOT NULL
                   AND rr.lease_expires_at < NOW()
-                RETURNING rr.id, rr.routine_id, rr.owned_tmux_session
+                RETURNING rr.id, rr.routine_id, rr.owned_tmux_session, rr.run_spec
             )
             SELECT closed.id AS run_id,
                    r.id AS routine_id,
-                   r.agent_id,
+                   CASE WHEN closed.run_spec IS NULL THEN r.agent_id
+                        ELSE closed.run_spec ->> 'agent_id' END AS agent_id,
                    r.script_ref,
                    r.name,
-                   r.discord_thread_id,
-                   r.execution_strategy,
+                   CASE WHEN closed.run_spec IS NULL THEN r.discord_thread_id
+                        ELSE closed.run_spec ->> 'discord_thread_id' END AS discord_thread_id,
+                   CASE WHEN closed.run_spec IS NULL THEN r.execution_strategy
+                        ELSE closed.run_spec ->> 'execution_strategy' END AS execution_strategy,
                    closed.owned_tmux_session
             FROM closed
             JOIN routines r ON r.id = closed.routine_id
@@ -3209,6 +3270,7 @@ impl RoutineStore {
                 candidate.id
             ));
         }
+        Self::pin_run_spec(tx, &run_id, &candidate.id).await?;
 
         Ok(ClaimedRoutineRun {
             run_id,

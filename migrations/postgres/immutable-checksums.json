@@ -930,6 +930,11 @@
       "path": "migrations/postgres/0190_agent_recovery_checkpoint_events_at_index.sql",
       "sha256": "3eee965fa397a016036ab12ac2512896908d0210b2d7b76ccbbfde9daba9b5f1",
       "version": 190
+    },
+    {
+      "path": "migrations/postgres/0191_routine_execution_modes.sql",
+      "sha256": "de6628936f47becb705dacc36d01e21025923e7cd5030c94f2169f551e62501f",
+      "version": 191
     }
   ],
   "version": 1
