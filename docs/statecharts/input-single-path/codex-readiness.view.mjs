@@ -8,7 +8,7 @@ export const state = (v) => {
   if (r.badStopIdle) return "RED: /stop answered idle while its turn runs";
   if (r.badStopKey) return "RED: stop key written with no open turn";
   // The launch and turn counts tell apart states that one-off events can no longer leave.
-  const at = `${r.host} launch ${r.inc}, ${r.turn} turn(s) started`;
+  const at = `${r.host} launch ${r.inc}, ${r.turn} turn(s) started${r.mismatch ? ", launch options changed" : ""}`;
   const label = (text) => `${text} (${at})`;
   if (r.stop === "asked") return label("/stop asked: judge the own turn");
   if (r.head) return label("Ready proven: read again before the first key");
@@ -25,16 +25,18 @@ export const state = (v) => {
         ? "Enter pressed, task_started not written: the UserPromptSubmit hook says busy"
         : "Enter pressed, task_started not written: no signal says busy");
     }
+    if (r.file === "zst") return label(r.ups ? "Turn running on an archived rollout: the UserPromptSubmit hook says busy" : "Turn running on an archived rollout: no signal says busy");
     return label("Turn running: the rollout reads open");
   }
   if (r.mode === "before") {
-    if (r.rec === "started") {
+    if (r.rec === "started" || (r.host === "tmux" && r.rec === "unknown")) {
       return label(r.host === "tmux"
         ? "Idle, but the rollout still reads busy: follow-ups stay queued"
         : "Idle, pane unread, the rollout still reads an open turn");
     }
     return label(r.screen === "ok" ? "Idle: the pane shows an empty composer" : "Idle, pane unread: no ready verdict");
   }
+  if (r.ups) return label("Idle, a UserPromptSubmit hook with no readable turn start: Busy until it expires");
   if (r.file === "zst") return label("Idle, rollout archived: no signal can prove the end");
   if (r.late) return label("Idle, end record not written yet");
   if (r.rec === "unknown") return label(r.hook ? "Idle, end record unreadable: Stop hook proves the end" : "Idle, end record unreadable, no hook");
@@ -45,6 +47,10 @@ const steps = {
   Boot: "Codex becomes the pane's running process",
   PersonEnter: "a person presses Enter in the TUI",
   RecordStart: "task_started reaches the rollout",
+  PersonBlocked: "a UserPromptSubmit hook arrives and no turn follows",
+  ConfigChange: "the launch options or the binding change",
+  ConfigReplace: "warm reuse is refused: the pane is replaced and the prompt goes in the argv",
+  UpsExpire: "the UserPromptSubmit evidence expires: quiet rollout, no child",
   Finish: "the turn ends in the TUI",
   WriteLate: "the end record reaches the rollout",
   CompressRollout: "Codex archives the idle rollout to .zst",

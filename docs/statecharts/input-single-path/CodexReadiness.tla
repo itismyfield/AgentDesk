@@ -1,5 +1,5 @@
 -------------------------- MODULE CodexReadiness --------------------------
-\* Codex ready / busy / end / stop judgment (#8082 design d2).
+\* Codex ready / busy / end / stop judgment (#8082 design d3).
 \* Production code baseline 082c77aa4e06b81c76b614f55b8fed73ce01923f.
 \* "before" is the code as it is: tmux waits on the pane and replaces it after a timeout,
 \* Herdr waits on the pane and refuses. "after" reads the bound rollout, the hooks and the process.
@@ -18,13 +18,16 @@ CONSTANTS
     BusyRoute,    \* the existing busy entry may deliver into an open turn
     Silent,       \* a running turn that writes nothing to the rollout: "none" | "tool" | "model"
     Stops,        \* /stop requests on an owned running turn
-    HerdrReplace  \* Herdr can end and relaunch a pane and observe its children (#8128 B2a/B2b)
+    HerdrReplace, \* Herdr can end and relaunch a pane and observe its children (#8128 B2a/B2b)
+    Config,       \* tmux warm reuse becomes ineligible: launch options, binding or runtime kind changed
+    Blocked       \* UserPromptSubmit hooks that are followed by no turn
 VARIABLE r
 
 Ids == 1..N
 Modes == {"before", "after", "after-latch", "after-no-proc", "after-no-revalidate",
           "after-no-fallback", "after-no-floor", "after-no-child", "after-stop-screen",
-          "after-timeout-replace", "after-reclaim-open", "after-no-ups"}
+          "after-timeout-replace", "after-reclaim-open", "after-no-ups",
+          "after-guard-all", "after-ups-until-end"}
 After == Mode # "before"
 MaxInc == 5
 
@@ -35,6 +38,7 @@ Initial ==
      latch |-> FALSE, hook |-> FALSE, ups |-> FALSE, owner |-> 0,
      q |-> [i \in Ids |-> "queued"], effects |-> [i \in Ids |-> 0],
      head |-> 0, wait |-> 0, proofInc |-> 0, proofSeen |-> 0,
+     mismatch |-> FALSE, config |-> Config, blocked |-> Blocked,
      lossLeft |-> IF Loss = "none" THEN 0 ELSE 1,
      person |-> Person, exits |-> Exits, restarts |-> Restarts,
      compress |-> IF Compress THEN 1 ELSE 0,
@@ -52,7 +56,8 @@ Level ==
            [] r.rec = "ended" -> "Ended"
            [] OTHER -> "Unknown"
 \* The lenient reader of the Discord intake pre-check (tui_turn_state.rs observe_codex_jsonl_turn_state).
-LenientBusy == r.file = "plain" /\ r.rec = "started"
+\* It reads turn_aborted and every event it does not know as Streaming (tui_turn_state.rs:731~:735).
+LenientBusy == r.file = "plain" /\ r.rec \in {"started", "unknown"}
 \* herdr process_info / tmux pane liveness names this incarnation's provider process;
 \* "started" is that reading, not a SessionStart hook.
 Alive == r.phase \in {"Idle", "Running"}
@@ -65,6 +70,8 @@ ReadyAfter ==
     /\ ProcOK /\ ~r.ups
     /\ \/ Level \in {"Ended", "NoStart"}
        \/ Level \in {"Open", "Unknown"} /\ HookTier
+\* The Busy judgment: UserPromptSubmit evidence, or an open turn without a Stop hook.
+BusyVerdict == ProcOK /\ (r.ups \/ (Level = "Open" /\ ~HookTier))
 Ready ==
     CASE Mode = "before" -> ScreenIdle
       [] Mode = "after-latch" -> r.latch \/ ReadyAfter
@@ -79,7 +86,7 @@ NewTurn(i) ==
 \* tmux relaunches with the prompt in the argv: the new incarnation runs input i as its first turn.
 ArgvLaunch(i) ==
     [NewTurn(i) EXCEPT !.inc = @ + 1, !.started = TRUE, !.file = "plain", !.head = 0, !.wait = 0,
-                       !.effects[i] = @ + 1,
+                       !.effects[i] = @ + 1, !.mismatch = FALSE,
                        !.q = [j \in Ids |-> IF j = i THEN "sent"
                                             ELSE IF j = r.owner /\ r.q[j] = "sent" THEN "done"
                                             ELSE r.q[j]],
@@ -97,9 +104,20 @@ PersonEnter ==
     /\ r.person > 0 /\ r.phase = "Idle" /\ ~r.late
     /\ r' = [r EXCEPT !.person = @ - 1, !.phase = "Running", !.turn = @ + 1, !.pending = TRUE,
                      !.hook = FALSE, !.owner = 0, !.ups = (After /\ Mode # "after-no-ups")]
+\* The task_started record releases the UserPromptSubmit evidence when it can be read:
+\* from there the open turn itself is the Busy evidence.
 RecordStart ==
     /\ r.pending
-    /\ r' = [r EXCEPT !.pending = FALSE, !.rec = "started", !.seen = r.turn, !.late = FALSE]
+    /\ r' = [r EXCEPT !.pending = FALSE, !.rec = "started", !.seen = r.turn, !.late = FALSE,
+                     !.ups = IF Mode # "after-ups-until-end" /\ r.file = "plain" THEN FALSE ELSE @]
+\* A UserPromptSubmit hook arrives and no turn follows (a prompt that a user-level hook blocks).
+PersonBlocked ==
+    /\ r.blocked > 0 /\ r.phase = "Idle" /\ ~r.late
+    /\ r' = [r EXCEPT !.blocked = @ - 1, !.ups = (After /\ Mode # "after-no-ups")]
+\* The operator changes the launch options, or the binding no longer matches: warm reuse is refused.
+ConfigChange ==
+    /\ r.config > 0 /\ Host = "tmux" /\ r.head = 0 /\ r.wait = 0
+    /\ r' = [r EXCEPT !.config = @ - 1, !.mismatch = TRUE]
 \* The turn ends in the TUI. Its terminal record is late, lost, or unnamed; its Stop hook may be lost.
 Finish ==
     /\ r.phase = "Running" /\ ~r.pending
@@ -135,6 +153,7 @@ Restart ==
 \* rollout reads busy (intake_turn.rs:1549, warm_followup.rs:542).
 Admit ==
     /\ Mode = "before" /\ Host = "tmux" /\ r.wait = 0 /\ r.head = 0 /\ Alive /\ ~LenientBusy
+    /\ ~r.mismatch
     /\ \E i \in First : r' = [r EXCEPT !.wait = i]
 \* tmux, as it is: the wait timed out on a pane that never read ready, so the pane is replaced and
 \* the prompt goes in the new argv (absence_launch.rs:273). Nothing asks whether a turn runs.
@@ -144,8 +163,19 @@ TimeoutReplace ==
     /\ \/ Mode = "before" /\ r.wait # 0 /\ ~ScreenIdle /\ r' = ArgvLaunch(r.wait)
        \/ Mode = "after-timeout-replace" /\ r.head = 0 /\ ~Ready
           /\ \E i \in First : r' = ArgvLaunch(i)
+\* tmux, a warm fallback that is not about readiness (warm_followup.rs:92~:98). The Discord intake
+\* pre-check queues the input while it reads busy; otherwise the pane is replaced, before and after.
+\* The pre-check and the replacement are one step here; the gap between them is not modelled.
+\* "after-guard-all" asks for Gone or stage 4 on every reason (the d2 wording), so an idle pane
+\* with changed options is never replaced.
+ConfigReplace ==
+    /\ Host = "tmux" /\ r.mismatch /\ r.head = 0 /\ r.wait = 0 /\ Alive /\ Natives = {}
+    /\ r.inc < MaxInc /\ r.stop # "asked"
+    /\ \/ Mode = "before" /\ ~LenientBusy
+       \/ After /\ Mode # "after-guard-all" /\ ~BusyVerdict
+    /\ \E i \in First : r' = ArgvLaunch(i)
 Prepare ==
-    /\ r.head = 0
+    /\ r.head = 0 /\ ~r.mismatch
     /\ \E i \in First :
         /\ Ready
         /\ ~(Mode = "before" /\ Host = "tmux") \/ r.wait = i
@@ -175,6 +205,12 @@ BusyDeliver ==
 \* the rollout has not grown for the quiet window, and the provider process has no child.
 QuietObserved == r.phase = "Idle" \/ (r.phase = "Running" /\ ~r.pending /\ Silent # "none")
 NoChildObserved == r.phase = "Idle" \/ (r.phase = "Running" /\ Silent = "model")
+\* UserPromptSubmit evidence with no readable task_started expires under the stage 4 guard, and the
+\* judgment is then made from the rollout alone. "after-ups-until-end" keeps it until an end signal.
+UpsExpire ==
+    /\ r.ups /\ Mode # "after-ups-until-end" /\ Alive /\ r.head = 0
+    /\ QuietObserved /\ (Mode = "after-no-child" \/ NoChildObserved)
+    /\ r' = [r EXCEPT !.ups = FALSE]
 \* Stage 4 opens on an unreadable source only; "after-reclaim-open" also opens it on an open turn.
 Stuck ==
     /\ After /\ Mode # "after-no-fallback" /\ Alive /\ r.started /\ ~r.hook
@@ -191,7 +227,7 @@ Relaunch ==
              ELSE [r EXCEPT !.inc = @ + 1, !.phase = "Booting", !.started = FALSE,
                             !.rec = IF Mode = "after-no-floor" THEN @ ELSE "none",
                             !.pending = FALSE, !.late = FALSE, !.file = "plain",
-                            !.hook = FALSE, !.ups = FALSE, !.owner = 0, !.wait = 0,
+                            !.hook = FALSE, !.ups = FALSE, !.owner = 0, !.wait = 0, !.mismatch = FALSE,
                             !.badKill = @ \/ r.phase = "Running",
                             !.q = [j \in Ids |-> IF j = r.owner /\ r.q[j] = "sent"
                                                  THEN "done" ELSE r.q[j]]]
@@ -217,19 +253,21 @@ StopJudge ==
 
 \* Nothing happens; a stuck input is caught by the delivery property, not by a deadlock.
 Wait == UNCHANGED r
-Next == Boot \/ PersonEnter \/ RecordStart \/ Finish \/ WriteLate \/ CompressRollout \/ Exit
-        \/ Restart \/ Admit \/ TimeoutReplace \/ Prepare \/ Submit \/ BusyDeliver \/ Relaunch
-        \/ StopAsk \/ StopJudge \/ Wait
+Next == Boot \/ PersonEnter \/ RecordStart \/ PersonBlocked \/ Finish \/ WriteLate \/ CompressRollout
+        \/ Exit \/ Restart \/ ConfigChange \/ Admit \/ TimeoutReplace \/ ConfigReplace \/ Prepare
+        \/ Submit \/ BusyDeliver \/ UpsExpire \/ Relaunch \/ StopAsk \/ StopJudge \/ Wait
 Spec == Init /\ [][Next]_r
         /\ WF_r(Boot) /\ WF_r(RecordStart) /\ WF_r(Finish) /\ WF_r(WriteLate)
         /\ WF_r(Admit) /\ WF_r(TimeoutReplace) /\ WF_r(Prepare) /\ WF_r(Submit)
         /\ WF_r(BusyDeliver) /\ WF_r(Relaunch) /\ WF_r(StopJudge)
+        /\ WF_r(ConfigReplace) /\ WF_r(UpsExpire)
 
 \* ---- rules ----
 CodexTypeOK ==
     /\ Mode \in Modes /\ Host \in {"tmux", "herdr"} /\ Screen \in {"ok", "unread"}
     /\ Loss \in {"none", "record", "hook", "both", "unnamed", "unnamed-both"}
     /\ Silent \in {"none", "tool", "model"}
+    /\ Host = "herdr" => Config = 0
     /\ r.phase \in {"Booting", "Idle", "Running", "Exited"}
     /\ r.rec \in {"none", "started", "ended", "unknown"}
     /\ r.inc \in 1..MaxInc /\ r.head \in 0..N /\ r.wait \in 0..N

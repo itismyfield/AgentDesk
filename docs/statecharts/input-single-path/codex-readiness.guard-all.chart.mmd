@@ -1,0 +1,55 @@
+---
+title: "Codex ready, busy, end and /stop judged from the rollout, the hooks and the process"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the CodexPendingEventuallyDelivered bug
+    lg1: Repeats forever, so CodexPendingEventuallyDelivered breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: Booting: wait for this launch's Codex process (tmux launch 1, 0 turn(s) started)
+  s1: Booting: wait for this launch's Codex process (tmux launch 1, 0 turn(s) started, launch options changed)
+  s2: Idle: the rollout proves the end (tmux launch 1, 0 turn(s) started)
+  s3: Idle: the rollout proves the end (tmux launch 1, 0 turn(s) started, launch options changed)
+  s4: Ready proven: read again before the first key (tmux launch 1, 0 turn(s) started)
+  s5: Turn running: the rollout reads open (tmux launch 1, 1 turn(s) started)
+  s6: Idle, end record not written yet (tmux launch 1, 1 turn(s) started)
+  s7: Turn running: the rollout reads open (tmux launch 1, 1 turn(s) started, launch options changed)
+  s8: Idle: the rollout proves the end (tmux launch 1, 1 turn(s) started)
+  s9: Idle, end record not written yet (tmux launch 1, 1 turn(s) started, launch options changed)
+  s10: Ready proven: read again before the first key (tmux launch 1, 1 turn(s) started)
+  s11: Idle: the rollout proves the end (tmux launch 1, 1 turn(s) started, launch options changed)
+  s12: Turn running: the rollout reads open (tmux launch 1, 2 turn(s) started)
+  s13: Idle, end record not written yet (tmux launch 1, 2 turn(s) started)
+  s14: Turn running: the rollout reads open (tmux launch 1, 2 turn(s) started, launch options changed)
+  s15: Idle: the rollout proves the end (tmux launch 1, 2 turn(s) started)
+  s16: Idle, end record not written yet (tmux launch 1, 2 turn(s) started, launch options changed)
+  s17: Idle: the rollout proves the end (tmux launch 1, 2 turn(s) started, launch options changed)
+  [*] --> s0
+  s0 --> s1: the launch options or the binding change
+  s0 --> s2: Codex becomes the pane's running process
+  s1 --> s3: Codex becomes the pane's running process
+  s2 --> s3: the launch options or the binding change
+  s2 --> s4: the next input proves ready
+  s4 --> s5: the input is written, or its proof no longer holds
+  s5 --> s6: the turn ends in the TUI
+  s5 --> s7: the launch options or the binding change
+  s6 --> s8: the end record reaches the rollout
+  s6 --> s9: the launch options or the binding change
+  s6 --> s10: the next input proves ready
+  s7 --> s9: the turn ends in the TUI
+  s8 --> s11: the launch options or the binding change
+  s8 --> s10: the next input proves ready
+  s9 --> s11: the end record reaches the rollout
+  s10 --> s12: the input is written, or its proof no longer holds
+  s12 --> s13: the turn ends in the TUI
+  s12 --> s14: the launch options or the binding change
+  s13 --> s15: the end record reaches the rollout
+  s13 --> s16: the launch options or the binding change
+  s14 --> s16: the turn ends in the TUI
+  s15 --> s17: the launch options or the binding change
+  s16 --> s17: the end record reaches the rollout
+  class s0 bugPath
+  class s2 bugPath
+  class s3 repeats
