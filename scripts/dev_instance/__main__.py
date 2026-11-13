@@ -42,6 +42,7 @@ def main(argv=None):
     up.add_argument("--wall-timeout", type=float, required=True)
     up.add_argument("--stop-grace", type=float, required=True)
     up.add_argument("--max-gateway", type=int, default=1)
+    up.add_argument("--resources", help="Explicit non-secret resource specification JSON")
     try:
         args = parser.parse_args(argv)
         base = safe_absolute(Path.home() / ".adk/dev/instances")
@@ -53,7 +54,9 @@ def main(argv=None):
         elif args.command == "up":
             result = supervise(base, args.instance, os.environ, binary_sha256=args.binary_sha256,
                                head=args.head, wall_timeout=args.wall_timeout,
-                               stop_grace=args.stop_grace, max_gateway=args.max_gateway)
+                               stop_grace=args.stop_grace, max_gateway=args.max_gateway,
+                               resources=read_json(safe_absolute(args.resources)) if args.resources else None,
+                               control_stream=sys.stdin if args.resources else None)
         else:
             result = validate(base, args.instance, os.environ,
                               require_credentials=getattr(args, "require_credentials", False))
@@ -67,7 +70,7 @@ def main(argv=None):
                 child_environment(result, os.environ)
                 result = {"status": "DECLARATION_VALID", "live_ready": False, "instance_id": args.instance}
         print(json.dumps(result, sort_keys=True))
-        return 7 if result.get("status") in {"FAILED", "TIMEOUT"} else 0
+        return 6 if result.get("status") == "HOLD" else 7 if result.get("status") in {"FAILED", "TIMEOUT"} else 0
     except BlockedBinary:
         print(json.dumps({"status": "BLOCKED_BINARY"}))
         return 4

@@ -1,8 +1,11 @@
 """Prepare and revalidate declarations without starting a daemon or PostgreSQL."""
 
 import json
+import math
+import os
 import re
 import socket
+import stat
 import subprocess
 from pathlib import Path
 
@@ -166,10 +169,35 @@ def prepare(base, instance_id, worktree, profile, ambient, api_port=None, pg_por
     return manifest
 
 
-def validate(base, instance_id, ambient, require_credentials=False, check_ports=True):
+def resource_spec(value):
+    keys = {"postgres_bin", "initdb_bin", "psql_bin", "herdr_bin", "startup_timeout",
+            "stop_grace", "max_aux", "pg_pool", "pg_reserve"}
+    if type(value) is not dict or set(value) != keys:
+        raise InstanceError("invalid resource specification fields")
+    for key, maximum in (("startup_timeout", 600), ("stop_grace", 30)):
+        item = value[key]
+        if type(item) not in (int, float) or not 0 < item <= maximum or not math.isfinite(item):
+            raise InstanceError("resource deadline is outside its bound")
+    for key, expected in (("max_aux", 2), ("pg_pool", 4), ("pg_reserve", 1)):
+        if type(value[key]) is not int or value[key] != expected:
+            raise InstanceError("resource capacity differs from its declared bound")
+    for key in ("postgres_bin", "initdb_bin", "psql_bin", "herdr_bin"):
+        if not isinstance(value[key], str):
+            raise InstanceError("resource executable must be an explicit absolute path")
+        try:
+            path = safe_absolute(value[key])
+            metadata = path.stat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o022 or not os.access(path, os.X_OK):
+                raise OSError()
+        except (OSError, ValueError):
+            raise InstanceError("resource executable is not a safe executable file") from None
+    return dict(value)
+
+
+def validate(base, instance_id, ambient, require_credentials=False, check_ports=True, live_sockets=None):
     reject_database_env(ambient)
     root = instance_root(base, instance_id)
-    validate_tree(root, require_credentials=require_credentials)
+    validate_tree(root, require_credentials=require_credentials, live_sockets=live_sockets)
     if any(not (root / relative).is_dir() for relative in (*LAYOUT_DIRS, *HOST_DIRS)):
         raise InstanceError("declared instance directory is missing")
     manifest = read_json(root / MANIFEST_NAME)

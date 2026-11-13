@@ -414,5 +414,293 @@ sys.exit({exit_code})
         self.assertEqual(json.loads(result.stdout), {"status": "DEFERRED_BUSY", "live_ready": False})
 
 
+
+
+"""Keeper authority is an original handle or a current nonce, never a disk PID."""
+
+import importlib
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import tempfile
+import unittest
+import uuid
+
+
+class KeeperAdmissionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="keeper-")
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name).resolve()
+        self.base.chmod(0o700)
+        self.root = self.base / str(uuid.uuid4())
+        self.root.mkdir(mode=0o700)
+        try:
+            self.keeper = importlib.import_module("scripts.dev_instance.keeper")
+        except ModuleNotFoundError:
+            self.keeper = None
+
+    def api(self):
+        self.assertIsNotNone(self.keeper, "normal keeper admission is not implemented")
+        return self.keeper
+
+    def test_fixed_resource_lock_is_held_until_confirmed_exit(self):
+        keeper = self.api()
+        owner = keeper.ResourceLock(self.root, str(uuid.uuid4()))
+        original = (self.base / keeper.LOCK_NAME).stat()
+        try:
+            self.assertFalse(os.get_inheritable(owner.fd))
+            # An independent open, not the O_EXCL marker, proves the flock contract.
+            import fcntl
+            fd = os.open(self.base / keeper.LOCK_NAME, os.O_RDWR)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+            with self.assertRaises((ValueError, OSError)):
+                keeper.ResourceLock(self.root, str(uuid.uuid4()))
+            owner.finish()
+        finally:
+            owner.close()
+        again = keeper.ResourceLock(self.root, str(uuid.uuid4()))
+        try:
+            self.assertEqual((self.base / keeper.LOCK_NAME).stat().st_ino, original.st_ino)
+            again.finish()
+        finally:
+            again.close()
+
+    def test_lost_keeper_marker_refuses_without_pid_adoption(self):
+        keeper = self.api()
+        owner = keeper.ResourceLock(self.root, str(uuid.uuid4()))
+        marker = (self.base / keeper.MARKER_NAME).read_bytes()
+        owner.close()  # Simulates kernel FD loss with unconfirmed resources.
+        from unittest import mock
+        with mock.patch.object(os, "kill", side_effect=AssertionError("foreign PID signal")):
+            with self.assertRaises(ValueError):
+                keeper.ResourceLock(self.root, str(uuid.uuid4()))
+        self.assertEqual((self.base / keeper.MARKER_NAME).read_bytes(), marker)
+
+    def test_replaced_owner_or_lock_is_not_unlinked(self):
+        keeper = self.api()
+        owner = keeper.ResourceLock(self.root, str(uuid.uuid4()))
+        marker = self.base / keeper.MARKER_NAME
+        try:
+            marker.rename(self.base / "owned-old")
+            marker.write_text("foreign replacement")
+            marker.chmod(0o600)
+            with self.assertRaises(ValueError):
+                owner.finish()
+            self.assertEqual(marker.read_text(), "foreign replacement")
+        finally:
+            owner.close()
+
+    def test_private_pool_and_fixed_lock_reject_foreign_paths(self):
+        keeper = self.api()
+        foreign = self.base / "foreign"
+        foreign.write_text("unchanged")
+        (self.base / keeper.LOCK_NAME).symlink_to(foreign)
+        with self.assertRaises((ValueError, OSError)):
+            keeper.ResourceLock(self.root, str(uuid.uuid4()))
+        self.assertEqual(foreign.read_text(), "unchanged")
+
+    def test_protocol_binds_exact_root_nonce_and_action(self):
+        keeper = self.api()
+        nonce = str(uuid.uuid4())
+        valid = {"root": str(self.root), "nonce": nonce, "action": "down"}
+        self.assertTrue(keeper.valid_request(valid, self.root, nonce))
+        for field, wrong in [("root", str(self.base / str(uuid.uuid4()))),
+                             ("nonce", str(uuid.uuid4())), ("action", "kill-pid")]:
+            value = valid | {field: wrong}
+            self.assertFalse(keeper.valid_request(value, self.root, nonce))
+        self.assertFalse(keeper.valid_request(valid | {"pid": os.getpid()}, self.root, nonce))
+        for value in (None, [], {}, True):
+            self.assertFalse(keeper.valid_request(valid | {"action": value}, self.root, nonce))
+
+    def test_slow_partial_frame_has_one_total_deadline(self):
+        keeper = self.api()
+        parent, peer = socket.socketpair()
+        parent.settimeout(.05)
+        def drip():
+            try:
+                for byte in b'{"long":"partial packet"}\n':
+                    peer.sendall(bytes([byte]))
+                    time.sleep(.02)
+            except OSError:
+                pass
+        worker = threading.Thread(target=drip)
+        started = time.monotonic()
+        worker.start()
+        try:
+            with self.assertRaises(TimeoutError):
+                keeper.receive(parent)
+            self.assertLess(time.monotonic()-started, .2)
+        finally:
+            parent.close()
+            peer.close()
+            worker.join(timeout=1)
+        self.assertFalse(worker.is_alive())
+
+
+
+
+"""Resource authority and failure contracts without installed services."""
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+import unittest
+import uuid
+from unittest import mock
+
+from scripts.dev_instance import resources
+from scripts.dev_instance.files import InstanceError
+from scripts.dev_instance.manifest import prepare
+from tests.test_dev_instance import profile
+
+
+class ResourceFixture(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="b1r-", dir="/private/tmp")
+        self.addCleanup(self.temporary.cleanup)
+        self.scratch = Path(self.temporary.name).resolve()
+        self.scratch.chmod(0o700)
+        self.base, self.worktree = self.scratch / "i", self.scratch / "w"
+        self.base.mkdir(mode=0o700)
+        self.worktree.mkdir()
+        environment = {"PATH": "/usr/bin:/bin", "HOME": str(self.scratch), "LC_ALL": "C"}
+        def git(*arguments):
+            subprocess.run(["git", "-C", str(self.worktree), *arguments], env=environment,
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        git("init", "-q")
+        git("config", "user.name", "Resource Fixture")
+        git("config", "user.email", "resource@example.invalid")
+        git("config", "commit.gpgsign", "false")
+        (self.worktree / "fixture").write_text("synthetic resource declaration\n")
+        git("add", "fixture")
+        git("commit", "-qm", "resource fixture")
+        self.instance_id = str(uuid.uuid4())
+        self.manifest = prepare(self.base, self.instance_id, self.worktree, profile(), {})
+        self.root = Path(self.manifest["root"])
+        config = self.root / "herdr-home/config.toml"
+        os.utime(config, (time.time() - 3, time.time() - 3))
+        fake = self.scratch / "fake-resource"
+        fake.write_text("#!/bin/sh\nexit 71\n")
+        fake.chmod(0o700)
+        self.spec = dict(postgres_bin=str(fake), initdb_bin=str(fake), psql_bin=str(fake),
+                         herdr_bin=str(fake), startup_timeout=20, stop_grace=5,
+                         max_aux=2, pg_pool=4, pg_reserve=1)
+
+    def owner(self, **kwargs):
+        return resources.ResourceOwner(self.manifest, self.spec, time.monotonic() + 40, **kwargs)
+
+    def real_spec(self):
+        result = dict(self.spec)
+        for field in ["postgres_bin", "initdb_bin", "psql_bin", "herdr_bin"]:
+            value = os.environ.get("ADK_TEST_" + field.upper())
+            self.assertIsNotNone(value, "explicit installed binary required: " + field)
+            path = Path(value)
+            self.assertTrue(path.is_absolute() and path.is_file() and os.access(path, os.X_OK))
+            result[field] = str(path)
+        return result
+
+
+class ResourceAuthorityTests(ResourceFixture):
+    def test_ambient_database_or_foreign_binary_rejects_before_spawn(self):
+        with mock.patch.object(subprocess, "Popen") as spawn:
+            with self.assertRaises(InstanceError):
+                self.owner(ambient={"DATABASE_URL": "postgresql://synthetic.invalid/foreign"}).start()
+            self.spec["postgres_bin"] = "/synthetic/nonexistent/postgres"
+            with self.assertRaises(InstanceError):
+                self.owner().start()
+        spawn.assert_not_called()
+
+    def test_disk_pid_is_never_adopted_or_signalled(self):
+        marker = self.root / "postgres/data/postmaster.pid"
+        marker.write_text("424242\nforeign sentinel remains\n")
+        original = marker.read_bytes()
+        owner = self.owner()
+        with mock.patch.object(subprocess, "Popen") as spawn, mock.patch.object(os, "kill") as signal:
+            with self.assertRaises(InstanceError):
+                owner.start()
+            with self.assertRaises(resources.CleanupPending):
+                owner.close(time.monotonic() + 1)
+        spawn.assert_not_called()
+        signal.assert_not_called()
+        self.assertEqual(marker.read_bytes(), original)
+        self.assertFalse(owner.witness()["known_resources_closed"])
+
+    def test_expired_startup_budget_performs_no_spawn(self):
+        owner = resources.ResourceOwner(self.manifest, self.spec, time.monotonic() - 1)
+        with mock.patch.object(subprocess, "Popen") as spawn:
+            with self.assertRaises(InstanceError):
+                owner.start()
+        spawn.assert_not_called()
+
+    def test_unreaped_handle_is_retained_as_pending(self):
+        owner = self.owner()
+        child = mock.Mock()
+        child.pid = 313131
+        child.returncode = None
+        child.poll.return_value = None
+        child.wait.side_effect = subprocess.TimeoutExpired("owned fake", 0)
+        owner.items.append(child)
+        owner._kinds.append("postgres")
+        with self.assertRaises(resources.CleanupPending) as raised:
+            owner.close(time.monotonic() + 0.01)
+        self.assertIs(raised.exception.owner, owner)
+        self.assertIs(owner.items[0], child)
+        child.kill.assert_not_called()
+        self.assertFalse(owner.witness()["known_resources_closed"])
+
+
+
+
+    def test_authority_peer_probe_error_holds_before_any_signal(self):
+        import socket
+        owner = self.owner()
+        path = self.root / "postgres/socket/.s.PGSQL.25432"
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(path))
+            listener.listen(1)
+            child = mock.Mock()
+            child.pid, child.poll.return_value = 313131, None
+            owner.items.append(child)
+            owner._kinds.append("postgres")
+            owner._startup = time.monotonic()+1
+            with mock.patch.object(resources, "_peer_pid", side_effect=PermissionError("synthetic authority failure")):
+                with self.assertRaises(PermissionError):
+                    owner._listener(path, child)
+            with self.assertRaises(resources.CleanupPending):
+                owner.close(time.monotonic()+1)
+            child.send_signal.assert_not_called()
+            child.kill.assert_not_called()
+            self.assertFalse(owner.witness()["known_resources_closed"])
+
+    def test_keeper_lifeline_eof_is_visible_hold_not_uncaught_eof(self):
+        import socket
+        from scripts.dev_instance import keeper
+        fixture = InstanceSupervisorTests(methodName="runTest")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        digest = fixture.binary_fixture()
+        fake = str(fixture.binary)
+        spec = dict(postgres_bin=fake, initdb_bin=fake, psql_bin=fake, herdr_bin=fake,
+                    startup_timeout=.1, stop_grace=.1, max_aux=2, pg_pool=4, pg_reserve=1)
+        parent, peer = socket.socketpair()
+        peer.close()
+        process = mock.Mock()
+        process.wait.return_value = 1
+        with mock.patch.object(keeper, "launch", return_value=(process, parent)):
+            with self.assertRaises(lifecycle.CleanupPending):
+                fixture.supervise(digest, resources=spec, wall_timeout=1, stop_grace=.1)
+
+
 if __name__ == "__main__":
     unittest.main()

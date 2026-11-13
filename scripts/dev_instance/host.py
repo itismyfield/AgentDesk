@@ -93,14 +93,17 @@ class HerdrCleanupPending(InstanceError):
         self.child = child
 
 
-def _stop_owned(child):
+def _stop_owned(child, deadline=None):
+    remaining = lambda: 5 if deadline is None else max(0, deadline - time.monotonic())
+    if child.poll() is not None:
+        return
     child.terminate()
     try:
-        child.wait(timeout=5)
+        child.wait(timeout=remaining())
     except subprocess.TimeoutExpired:
         child.kill()
         try:
-            child.wait(timeout=5)
+            child.wait(timeout=remaining())
         except subprocess.TimeoutExpired:
             raise HerdrCleanupPending(child) from None
 
@@ -135,7 +138,7 @@ class HerdrOwner:
         self.identity = identity
         self.record = record
 
-    def close(self):
+    def close(self, deadline=None):
         root = Path(self.manifest["root"])
         with _owner_lock(root):
             if not _same_owner(read_json(root / OWNER_FILE), self.record):
@@ -144,12 +147,12 @@ class HerdrOwner:
                 return
             if self.identity(self.child.pid) != self.record["daemon"]["start_identity"]:
                 raise InstanceError("daemon identity changed; cleanup refused")
-            _stop_owned(self.child)
+            _stop_owned(self.child, deadline)
 
 
 def start_herdr(base, instance_id, binary, ambient, *, spawn=subprocess.Popen,
-                identity=process_start):
-    manifest = validate(base, instance_id, ambient, check_ports=False)
+                identity=process_start, deadline=None, live_sockets=None, relative_socket=False):
+    manifest = validate(base, instance_id, ambient, check_ports=False, live_sockets=live_sockets)
     root = Path(manifest["root"])
     declared = manifest["hosts"]["herdr"]
     binary = safe_absolute(binary)
@@ -159,8 +162,12 @@ def start_herdr(base, instance_id, binary, ambient, *, spawn=subprocess.Popen,
     config = home / "config.toml"
     if read_regular_text(config) != HERDR_CONFIG:
         raise InstanceError("Herdr config is not canonical")
-    if config.stat().st_mtime_ns + 1_000_000_000 >= time.time_ns():
-        raise Unevaluable("Herdr config preparation margin is not met")
+    while config.stat().st_mtime_ns + 1_000_000_000 >= time.time_ns():
+        if deadline is None:
+            raise Unevaluable("Herdr config preparation margin is not met")
+        if time.monotonic() >= deadline:
+            raise InstanceError("Herdr startup deadline expired")
+        time.sleep(min(0.05, deadline - time.monotonic()))
     environment = child_environment(manifest, ambient)
     environment.update({
         "HOME": str(home), "XDG_CONFIG_HOME": str(home / "xdg"),
@@ -170,12 +177,19 @@ def start_herdr(base, instance_id, binary, ambient, *, spawn=subprocess.Popen,
         "HERDR_SOCKET_PATH": declared["socket"], "HERDR_SESSION": declared["session"],
         "SHELL": "/bin/sh", "TERM": "xterm-256color",
     })
+    server_cwd = home
+    if relative_socket:
+        # Resolve both Herdr socket names in the declared private directory.
+        server_cwd = Path(declared["socket"]).parent
+        environment["HERDR_SOCKET_PATH"] = Path(declared["socket"]).name
     binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
     with _owner_lock(root):
-        for path in (root / OWNER_FILE, Path(declared["socket"])):
+        for path in (root / OWNER_FILE, Path(declared["socket"]), Path(declared["socket"] + "-client.sock")):
             if path.exists() or path.is_symlink():
                 raise InstanceError("existing Herdr resource cannot be adopted")
-        child = spawn([str(binary), "server"], env=environment, cwd=str(home),
+        if deadline is not None and time.monotonic() >= deadline:
+            raise InstanceError("Herdr startup deadline expired")
+        child = spawn([str(binary), "server"], env=environment, cwd=str(server_cwd),
                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
         try:
@@ -188,9 +202,9 @@ def start_herdr(base, instance_id, binary, ambient, *, spawn=subprocess.Popen,
             if child.poll() is not None:
                 raise InstanceError("owned Herdr exited before receipt publication")
             _publish_owner(root, record)
-        except Exception:
+        except BaseException:
             # Only this spawn handle is available; a disk PID never authorizes cleanup.
             if child.poll() is None:
-                _stop_owned(child)
+                _stop_owned(child, deadline)
             raise
     return HerdrOwner(manifest, child, identity, record)
