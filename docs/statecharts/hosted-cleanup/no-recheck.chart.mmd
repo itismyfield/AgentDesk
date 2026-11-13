@@ -1,0 +1,47 @@
+---
+title: "Hosted cleanup: 관측과 조건부 삭제"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ExplicitAliasRechecked
+    lg1: Breaks BulkDisconnectedRechecked or ChangedRowRechecked in some cases
+    lg2: Path to the BulkDisconnectedRechecked or ChangedRowRechecked or ExplicitAliasRechecked bug
+  }
+  class lg0 breaks
+  class lg1 mayBreak
+  class lg2 bugPath
+  s0: 다음 정리 대기
+  s1: DB 후보 읽음
+  s2: lock 종료 후 재관측
+  s3: 삭제 판정 완료
+  s4: 삭제 판정 완료 #183; row 변경
+  s5: transaction 조건부 적용 #183; row 변경
+  s6: 삭제 판정 완료 #183; alias 추가
+  s7: transaction 조건부 적용 #183; alias 추가
+  s8: 삭제됨 (bulk, 관측 absent, 현재 absent)
+  s9: 삭제됨 (explicit, 관측 absent, 현재 unknown)
+  [*] --> s0
+  s0 --> s1: DB 후보 snapshot
+  s1 --> s3: host marker 관측
+  s1 --> s2: host marker 관측
+  s2 --> s3: row와 marker 재관측
+  s3 --> s4: 새 turn 또는 재spawn
+  s4 --> s5: 조건부 재검증 및 삭제
+  s3 --> s6: 다른 host marker가 있는 alias 추가
+  s5 --> s8: transaction commit
+  s6 --> s7: 조건부 재검증 및 삭제
+  s7 --> s9: transaction commit
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 bugPath
+  class s8 mayBreak
+  class s8 bugPath
+  class s9 breaks
+  class s9 bugPath

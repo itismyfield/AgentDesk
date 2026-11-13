@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, types::Json};
 
-use crate::services::stale_turn_reconciler::STALE_TURN_GRACE;
+use crate::domain::lifecycle::STALE_TURN_GRACE;
 use crate::utils::github_links::{normalize_github_issue_url, normalize_github_repo_id};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

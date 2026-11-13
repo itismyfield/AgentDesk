@@ -203,7 +203,9 @@ pub(super) fn successor_unproved_under(
 }
 
 pub(crate) fn commit(captured: &Captured, origin: &str) -> Result<(), String> {
+    let fence = tc::runtime_hint_fence::RuntimeHintFence::acquire(&captured.context.tmux_session)?;
     tc::with_tmux_source_authority(&captured.context.tmux_session, |authority| {
+        fence.validate(authority.session())?;
         if capture_under(authority)?.as_ref() != Some(captured) {
             return Err("ownership changed after clear capture".into());
         }
@@ -217,7 +219,12 @@ pub(crate) fn commit(captured: &Captured, origin: &str) -> Result<(), String> {
                     && context.owner_runtime_root == captured.context.owner_runtime_root
             })
         {
-            tc::cleanup_session_temp_files_under_source_authority(authority, authority.session());
+            tc::cleanup_session_temp_files_under_source_authority(
+                authority,
+                authority.session(),
+                #[cfg(unix)]
+                &fence,
+            )?;
         }
         if !vacant_under(authority) {
             return Err("clear target is not confirmed vacant".into());
@@ -239,6 +246,9 @@ pub(crate) fn commit(captured: &Captured, origin: &str) -> Result<(), String> {
         if bytes.len() > 1024 {
             return Err("retirement exceeds limit".into());
         }
-        crate::services::discord::runtime_store::atomic_write(&path()?, &bytes)
+        crate::domain::atomic_write::prepare(&path()?, &bytes)
+            .and_then(|prepared| prepared.publish())
+            .map(|crate::domain::atomic_write::Published| ())
+            .map_err(crate::services::disk_monitor::atomic_write_error)
     })
 }

@@ -1,13 +1,16 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Row, Transaction, types::Json};
+use sqlx::{PgPool, Postgres, Transaction, types::Json};
 
-use crate::services::campaign_execution::{
-    control,
-    definition::{self, DefinitionInput},
-    model::*,
+use crate::domain::campaign::model::{
+    CampaignControl, CampaignState, CommandResult, Decision, Event, EventKind, EvidenceWrite,
+    NodeRuntime, Rejection, Run,
 };
 
+#[cfg(test)]
+use crate::domain::campaign::{definition::DefinitionInput, model::*};
+
+pub(crate) mod command_transaction;
 pub mod evidence_store;
 mod read;
 mod write;
@@ -51,8 +54,6 @@ pub struct ReceiptResponse {
     pub body: serde_json::Value,
 }
 
-pub type RenderReceipt = fn(&CommandOutcome) -> StoreResult<ReceiptResponse>;
-
 fn evidence_error(error: evidence_store::EvidenceStoreError) -> StoreError {
     match error {
         evidence_store::EvidenceStoreError::Sql(e) => StoreError::Sql(e),
@@ -87,177 +88,6 @@ async fn write_evidence(
         }
     }
     Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum Request<'a> {
-    Create(&'a DefinitionInput),
-    Command(&'a Command),
-}
-
-/// The caller supplies a stable ID and pure response renderer; replay uses the saved response.
-pub async fn create(
-    pool: &PgPool,
-    id: &str,
-    input: &DefinitionInput,
-    key: &str,
-    observed_at: DateTime<Utc>,
-    render: RenderReceipt,
-) -> StoreResult<CommandReply> {
-    transact(pool, id, key, observed_at, Request::Create(input), render).await
-}
-
-/// Internal domain commands are not an HTTP request DTO or an execution toggle.
-pub async fn execute(
-    pool: &PgPool,
-    id: &str,
-    envelope: &CommandEnvelope,
-    render: RenderReceipt,
-) -> StoreResult<CommandReply> {
-    transact(
-        pool,
-        id,
-        &envelope.idempotency_key,
-        envelope.observed_at,
-        Request::Command(&envelope.command),
-        render,
-    )
-    .await
-}
-
-async fn transact(
-    pool: &PgPool,
-    id: &str,
-    key: &str,
-    observed_at: DateTime<Utc>,
-    request: Request<'_>,
-    render: RenderReceipt,
-) -> StoreResult<CommandReply> {
-    let mut tx = pool.begin().await?;
-    let reply = apply(&mut tx, id, key, observed_at, request, render).await?;
-    tx.commit().await?;
-    Ok(reply)
-}
-
-async fn apply(
-    tx: &mut Transaction<'_, Postgres>,
-    id: &str,
-    key: &str,
-    observed_at: DateTime<Utc>,
-    request: Request<'_>,
-    render: RenderReceipt,
-) -> StoreResult<CommandReply> {
-    if !definition::valid_id(id) || key.trim().is_empty() {
-        return Err(StoreError::InvalidIdentity);
-    }
-    let fingerprint = match request {
-        Request::Create(input) => format!(
-            "create:{}",
-            blake3::hash(&serde_json::to_vec(&(id, input))?).to_hex()
-        ),
-        Request::Command(command) => format!("command:{}", control::command_fingerprint(command)?),
-    };
-    sqlx::query(
-        "INSERT INTO server_campaign_keys (campaign_id) VALUES ($1) ON CONFLICT DO NOTHING",
-    )
-    .bind(id)
-    .execute(&mut **tx)
-    .await?;
-    sqlx::query("SELECT campaign_id FROM server_campaign_keys WHERE campaign_id = $1 FOR UPDATE")
-        .bind(id)
-        .fetch_one(&mut **tx)
-        .await?;
-    // Both creates and run commands hold the campaign lock; an existing run is locked too.
-    sqlx::query(
-        "SELECT r.run_id FROM server_campaign_runs r JOIN server_campaign_definitions d \
-         ON d.campaign_id = r.campaign_id AND d.run_id = r.run_id WHERE d.campaign_id = $1 FOR UPDATE OF r",
-    ).bind(id).fetch_optional(&mut **tx).await?;
-    let saved = sqlx::query(
-        "SELECT fingerprint, outcome, response_status, response_body FROM server_campaign_receipts \
-         WHERE campaign_id = $1 AND idempotency_key = $2",
-    )
-    .bind(id)
-    .bind(key)
-    .fetch_optional(&mut **tx)
-    .await?;
-    if let Some(saved) = saved {
-        if saved.try_get::<String, _>("fingerprint")? != fingerprint {
-            return Err(StoreError::IdempotencyConflict);
-        }
-        return Ok(CommandReply {
-            #[cfg(test)]
-            outcome: saved.try_get::<Json<CommandOutcome>, _>("outcome")?.0,
-            response: ReceiptResponse {
-                status: u16::try_from(saved.try_get::<i32, _>("response_status")?)
-                    .map_err(|_| StoreError::InconsistentState)?,
-                body: saved
-                    .try_get::<Json<serde_json::Value>, _>("response_body")?
-                    .0,
-            },
-            #[cfg(test)]
-            replayed: true,
-        });
-    }
-    let previous = read::get_in(tx, id).await?;
-    // A BeginReview may cite only the seal the server stored for that Work attempt.
-    let mut unsealed = false;
-    if let (Request::Command(Command::BeginReview { seal, .. }), Some(run)) =
-        (&request, previous.as_ref().and_then(|s| s.run.as_ref()))
-    {
-        let stored = evidence_store::sealed(tx, id, &run.id, &seal.seal_id)
-            .await
-            .map_err(evidence_error)?;
-        unsealed = stored.is_none_or(|stored| seal.confirm_retry(&stored).is_err());
-    }
-    let decision = match (&request, &previous) {
-        _ if unsealed => Some(Err(Rejection::new(RejectionCode::StaleBinding))),
-        (Request::Create(input), None) => Some(control::create_definition(
-            id.to_owned(),
-            (*input).clone(),
-            key,
-            observed_at,
-        )),
-        (Request::Create(_), Some(_)) => Some(Err(Rejection::new(RejectionCode::AlreadyExists))),
-        (Request::Command(command), Some(state)) => Some(control::decide_with_receipt(
-            state,
-            &CommandEnvelope {
-                idempotency_key: key.to_owned(),
-                observed_at,
-                command: (*command).clone(),
-            },
-            None,
-        )),
-        (Request::Command(_), None) => None,
-    };
-    let outcome = match decision {
-        Some(Ok(decision)) => {
-            write::persist(tx, previous.as_ref(), &decision).await?;
-            // Evidence rows commit or roll back together with the state they belong to.
-            if let Some(run) = &decision.state.run {
-                for record in &decision.records {
-                    write_evidence(tx, id, &run.id, record).await?;
-                }
-            }
-            CommandOutcome::Decided(Ok(decision.result))
-        }
-        Some(Err(rejection)) => CommandOutcome::Decided(Err(rejection)),
-        None => CommandOutcome::NotFound,
-    };
-    let response = render(&outcome)?;
-    sqlx::query(
-        "INSERT INTO server_campaign_receipts \
-         (campaign_id, idempotency_key, fingerprint, outcome, observed_at, response_status, response_body) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
-    ).bind(id).bind(key).bind(fingerprint).bind(Json(&outcome)).bind(observed_at)
-        .bind(i32::from(response.status)).bind(Json(&response.body))
-        .execute(&mut **tx).await?;
-    Ok(CommandReply {
-        #[cfg(test)]
-        outcome,
-        response,
-        #[cfg(test)]
-        replayed: false,
-    })
 }
 
 #[cfg(test)]

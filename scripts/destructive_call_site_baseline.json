@@ -135,7 +135,7 @@
         "src/services/discord/tui_direct_pending_start/foreign_recovery.rs": 2,
         "src/services/discord/tui_prompt_relay/synthetic_start.rs": 1,
         "src/services/discord/turn_bridge/completion_postlude.rs": 1,
-        "src/services/discord/turn_finalizer/cleanup.rs": 1,
+        "src/services/discord/turn_finalizer/cleanup/already_finalized.rs": 1,
         "src/services/discord/watchers/dispatched_origin_ghost.rs": 1,
         "src/services/turn_lifecycle.rs": 1
       }
@@ -202,7 +202,6 @@
         "src/services/discord/settings/write.rs": 3,
         "src/services/discord/status_panel_orphan_store.rs": 1,
         "src/services/discord/terminal_delivery_custody.rs": 1,
-        "src/services/discord/terminal_ui_obligation.rs": 1,
         "src/services/discord/tmux_session_files.rs": 4,
         "src/services/discord/tui_direct_abort_marker/store.rs": 4,
         "src/services/discord/tui_direct_pending_start/state.rs": 1,
@@ -293,6 +292,7 @@
     "discord_message_edit": {
       "comment": "Production identifiers ending in edit_message, edit_channel_message, edit_outbound_message or edit_outbound_message_classified followed by '('; same scope and limits as discord_message_delete.",
       "files": {
+        "src/domain/outbound/port.rs": 1,
         "src/services/discord/abandon_request_store.rs": 1,
         "src/services/discord/footer_view_reconciler/mod.rs": 7,
         "src/services/discord/formatting/replace_long_message.rs": 1,
@@ -303,7 +303,7 @@
         "src/services/discord/http.rs": 2,
         "src/services/discord/monitoring_status.rs": 2,
         "src/services/discord/outbound/delivery.rs": 1,
-        "src/services/discord/outbound/transport.rs": 2,
+        "src/services/discord/outbound/transport.rs": 1,
         "src/services/discord/outbound/turn_output_controller/transport.rs": 1,
         "src/services/discord/placeholder_controller.rs": 1,
         "src/services/discord/placeholder_controller/queued_card_gate.rs": 1,
@@ -311,7 +311,6 @@
         "src/services/discord/router/message_handler/tui_followup.rs": 1,
         "src/services/discord/startup_reclaim.rs": 1,
         "src/services/discord/task_notification_delivery/gateway.rs": 1,
-        "src/services/discord/terminal_ui_obligation.rs": 1,
         "src/services/discord/tmux_placeholder_suppression/ops.rs": 1,
         "src/services/discord/tmux_watcher.rs": 1,
         "src/services/discord/tmux_watcher/no_result_exits.rs": 2,

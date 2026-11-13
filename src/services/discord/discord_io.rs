@@ -144,10 +144,13 @@ async fn notify_source_agent(
         resolve_channel_to_u64(ch)?
     } else {
         let pg_pool = pg_pool.ok_or("postgres pool unavailable during agent lookup")?;
-        let raw = crate::db::agents::resolve_agent_primary_channel_pg(pg_pool, source_agent)
-            .await
-            .map_err(|e| format!("agent lookup failed for {source_agent}: {e}"))?
-            .ok_or("agent has no primary channel")?;
+        let raw = crate::services::agent_channels::resolve_agent_primary_channel_pg(
+            pg_pool,
+            source_agent,
+        )
+        .await
+        .map_err(|e| format!("agent lookup failed for {source_agent}: {e}"))?
+        .ok_or("agent has no primary channel")?;
         resolve_channel_to_u64(&raw)?
     };
 

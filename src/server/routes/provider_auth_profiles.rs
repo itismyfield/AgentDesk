@@ -13,16 +13,19 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::AppState;
+use crate::domain::provider_auth_profile::{
+    DEFAULT_PROFILE_ID, ProfileBinding, ProviderAuthProfileDef,
+};
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::services::discord::org_writer;
 use crate::services::provider::ProviderKind;
 use crate::services::provider_auth::{ProviderAuthSpec, detect_provider_credentials_with_overlay};
 use crate::services::provider_auth_profile::{
     self, AuthProfileError, EXTRA_ACCOUNT_PROVIDER_IDS, ManagedHomeValidationMode,
-    ProviderAuthProfileDef, compact_home_for_yaml, create_empty_profile_home, extra_account_home,
+    compact_home_for_yaml, create_empty_profile_home, extra_account_home,
     extra_account_login_supported, intern_provider, login_tmux_session_name, overlay_for_home,
     validate_managed_profile_home, validate_profile_id, vendor_login_argv, write_login_script,
 };
+use crate::services::provider_auth_profile::{queries, repository};
 
 #[derive(Debug, Deserialize, Default)]
 pub struct LoginStartBody {
@@ -59,9 +62,9 @@ pub(super) fn deserialize_auth_profile_patch<'de, D: serde::Deserializer<'de>>(
 pub async fn list_provider_auth_profiles(
     State(state): State<AppState>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
-    let catalog = crate::services::discord::org_schema::provider_auth_catalog();
-    let primary_profiles = crate::services::discord::org_schema::provider_auth_primary_profiles();
-    let bindings = crate::services::discord::org_schema::list_profile_bindings();
+    let catalog = queries::provider_auth_catalog();
+    let primary_profiles = queries::provider_auth_primary_profiles();
+    let bindings = queries::list_profile_bindings();
     let usage_by_key = if let Some(pool) = state.pg_pool_ref() {
         let now = chrono::Utc::now().timestamp();
         crate::services::analytics::build_rate_limit_provider_payloads_pg(pool, now)
@@ -150,11 +153,11 @@ pub async fn set_primary_profile(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(provider_auth_profile::DEFAULT_PROFILE_ID);
-    if profile_id != provider_auth_profile::DEFAULT_PROFILE_ID {
+        .unwrap_or(DEFAULT_PROFILE_ID);
+    if profile_id != DEFAULT_PROFILE_ID {
         validate_profile_id(profile_id).map_err(profile_error)?;
     }
-    org_writer::set_provider_primary_profile(kind.as_str(), profile_id)
+    repository::set_provider_primary_profile(kind.as_str(), profile_id)
         .map_err(|error| AppError::new(StatusCode::BAD_REQUEST, ErrorCode::Config, error))?;
     Ok((
         StatusCode::OK,
@@ -178,7 +181,7 @@ pub async fn login_start(
             kind.as_str().to_string(),
         )));
     }
-    let catalog = crate::services::discord::org_schema::provider_auth_catalog();
+    let catalog = queries::provider_auth_catalog();
     let profile_id = match body
         .profile_id
         .as_deref()
@@ -212,7 +215,7 @@ pub async fn login_start(
         ))
     })?;
     let script = write_login_script(&home, &overlay, argv).map_err(profile_error)?;
-    spawn_login_tmux(&session, &home, &script).map_err(|error| {
+    spawn_login_tmux(&session, &home, &script, kind.as_str()).map_err(|error| {
         AppError::new(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Internal, error)
     })?;
 
@@ -283,7 +286,7 @@ pub async fn login_complete(
         }));
     }
 
-    org_writer::append_provider_auth_profile(
+    repository::append_provider_auth_profile(
         profile_id,
         ProviderAuthProfileDef {
             provider: kind.as_str().to_string(),
@@ -323,7 +326,7 @@ pub async fn remove_profile(
     validate_profile_id(profile_id).map_err(profile_error)?;
     let session = login_tmux_session_name(&kind, profile_id);
     refuse_non_auth_target(&session)?;
-    org_writer::remove_provider_auth_profile(profile_id, kind.as_str()).map_err(|error| {
+    repository::remove_provider_auth_profile(profile_id, kind.as_str()).map_err(|error| {
         let status = if error.contains("not found") {
             StatusCode::NOT_FOUND
         } else if error.contains("still bound") {
@@ -353,7 +356,7 @@ pub fn apply_agent_auth_profile_patch(
     agent_id: &str,
     auth_profile: &Value,
 ) -> Result<(), AppError> {
-    org_writer::set_agent_auth_profile(agent_id, parse_auth_profile_patch(auth_profile)?).map_err(
+    repository::set_agent_auth_profile(agent_id, parse_auth_profile_patch(auth_profile)?).map_err(
         |error| {
             let status = if error.contains("not found") {
                 StatusCode::NOT_FOUND
@@ -373,7 +376,7 @@ pub async fn patch_channel_auth_profile(
     let Some(value) = body.auth_profile.as_ref() else {
         return Err(AppError::bad_request("auth_profile is required"));
     };
-    org_writer::set_channel_auth_profile(&channel_id, parse_auth_profile_patch(value)?).map_err(
+    repository::set_channel_auth_profile(&channel_id, parse_auth_profile_patch(value)?).map_err(
         |error| {
             let status = if error.contains("not found") {
                 StatusCode::NOT_FOUND
@@ -401,7 +404,7 @@ fn parse_auth_profile_patch(value: &Value) -> Result<Option<&str>, AppError> {
             if trimmed.is_empty() {
                 Ok(None)
             } else {
-                if trimmed != provider_auth_profile::DEFAULT_PROFILE_ID {
+                if trimmed != DEFAULT_PROFILE_ID {
                     validate_profile_id(trimmed).map_err(profile_error)?;
                 }
                 Ok(Some(trimmed))
@@ -417,7 +420,7 @@ fn account_payload(
     profile_id: &str,
     home: &str,
     provider: &ProviderKind,
-    bindings: &[crate::services::discord::org_schema::ProfileBinding],
+    bindings: &[ProfileBinding],
     usage_by_key: &HashMap<(String, String), Value>,
 ) -> Value {
     let mut bound_agents: Vec<String> = bindings
@@ -480,6 +483,7 @@ fn spawn_login_tmux(
     session: &str,
     home: &std::path::Path,
     script: &std::path::Path,
+    provider: &str,
 ) -> Result<(), String> {
     if crate::services::platform::tmux::has_session(session) {
         let _ =
@@ -489,10 +493,16 @@ fn spawn_login_tmux(
         "bash {}",
         crate::services::process::shell_escape(&script.display().to_string())
     );
-    let output = crate::services::platform::tmux::create_session(
+    let output = crate::services::platform::tmux::create_session_with_identity(
         session,
         Some(&home.display().to_string()),
         &command,
+        &crate::services::session_identity_metadata::provider_identity(
+            session,
+            provider,
+            None,
+            "provider_auth",
+        )?,
     )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -568,7 +578,7 @@ mod tests {
 
     #[test]
     fn test_013_account_payload_includes_usage_without_secrets() {
-        let bindings = vec![crate::services::discord::org_schema::ProfileBinding {
+        let bindings = vec![ProfileBinding {
             agent_id: "coder".into(),
             provider: "codex".into(),
             profile_id: "work".into(),
@@ -640,3 +650,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "provider_auth_profiles_identity_tests.rs"]
+mod identity_tests;

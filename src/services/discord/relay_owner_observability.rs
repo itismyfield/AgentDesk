@@ -30,8 +30,8 @@ pub(in crate::services::discord) mod event_kind {
 }
 
 /// Counter name for the #3646 inflight-clear invariant breach (the #3607
-/// state: terminal delivery committed, but cleared with neither a visible UI
-/// completion nor a persisted terminal-UI obligation). Used by the
+/// state: terminal delivery committed, but cleared without a visible UI
+/// completion). Used by the
 /// error-level invariant signal — NOT a control-flow gate.
 pub(in crate::services::discord) const INFLIGHT_CLEAR_COMMITTED_NO_UI_FINISH_INVARIANT: &str =
     "inflight_clear_committed_no_ui_finish";
@@ -127,18 +127,16 @@ pub(in crate::services::discord) fn terminal_ui_transition_extra(
     outcome: TerminalUiOutcome,
     gate_outcome: &str,
     pane_quiescent: Option<bool>,
-    obligation_id: Option<u64>,
 ) -> Value {
     json!({
         "outcome": outcome.as_str(),
         "gate_outcome": gate_outcome,
         "pane_quiescent": pane_quiescent,
-        "obligation_id": obligation_id,
     })
 }
 
 /// The #3646 inflight-clear invariant: a committed terminal delivery cleared
-/// WITHOUT either a visible UI completion or a persisted terminal-UI obligation
+/// WITHOUT a visible UI completion
 /// is the #3607 state. Returns `true` when the invariant is VIOLATED.
 ///
 /// PURE: callers pass values they already hold. This does NOT gate the clear —
@@ -146,22 +144,19 @@ pub(in crate::services::discord) fn terminal_ui_transition_extra(
 pub(in crate::services::discord) fn inflight_clear_invariant_violated(
     terminal_delivery_committed: bool,
     terminal_ui_committed: bool,
-    terminal_ui_obligation_persisted: bool,
 ) -> bool {
-    terminal_delivery_committed && !(terminal_ui_committed || terminal_ui_obligation_persisted)
+    terminal_delivery_committed && !terminal_ui_committed
 }
 
 /// Build the `inflight_clear` event payload (#3646 event 3/3).
 pub(in crate::services::discord) fn inflight_clear_extra(
     terminal_delivery_committed: bool,
     terminal_ui_committed: bool,
-    terminal_ui_obligation_persisted: bool,
     invariant_violated: bool,
 ) -> Value {
     json!({
         "terminal_delivery_committed": terminal_delivery_committed,
         "terminal_ui_committed": terminal_ui_committed,
-        "terminal_ui_obligation_persisted": terminal_ui_obligation_persisted,
         "invariant_violated": invariant_violated,
     })
 }
@@ -228,8 +223,7 @@ pub(in crate::services::discord) fn emit_terminal_body_commit(
     );
 }
 
-/// Emit #3646 event 2/3 (`terminal_ui_transition`). `obligation_id` is always
-/// `None` from the watcher path (the watcher does not persist obligations).
+/// Emit `terminal_ui_transition`.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn emit_terminal_ui_transition(
     provider: &str,
@@ -249,7 +243,7 @@ pub(in crate::services::discord) fn emit_terminal_ui_transition(
         session_key,
         turn_id.as_deref(),
         event_kind::TERMINAL_UI_TRANSITION,
-        terminal_ui_transition_extra(outcome, gate_outcome, pane_quiescent, None),
+        terminal_ui_transition_extra(outcome, gate_outcome, pane_quiescent),
     );
 }
 
@@ -258,7 +252,6 @@ pub(in crate::services::discord) fn emit_terminal_ui_transition(
 /// The clear itself has ALREADY run at the call site — this records the signals
 /// and fires the invariant; it NEVER gates cleanup. `record_invariant_check_*`
 /// only tracing-logs + emits + bumps `guard_fires`; its bool is discarded.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn emit_inflight_clear_with_invariant(
     provider: &str,
     channel_id: u64,
@@ -267,13 +260,9 @@ pub(in crate::services::discord) fn emit_inflight_clear_with_invariant(
     turn_id: Option<&str>,
     terminal_delivery_committed: bool,
     terminal_ui_committed: bool,
-    terminal_ui_obligation_persisted: bool,
 ) {
-    let invariant_violated = inflight_clear_invariant_violated(
-        terminal_delivery_committed,
-        terminal_ui_committed,
-        terminal_ui_obligation_persisted,
-    );
+    let invariant_violated =
+        inflight_clear_invariant_violated(terminal_delivery_committed, terminal_ui_committed);
     crate::services::observability::emit_inflight_lifecycle_event(
         provider,
         channel_id,
@@ -284,7 +273,6 @@ pub(in crate::services::discord) fn emit_inflight_clear_with_invariant(
         inflight_clear_extra(
             terminal_delivery_committed,
             terminal_ui_committed,
-            terminal_ui_obligation_persisted,
             invariant_violated,
         ),
     );
@@ -300,11 +288,10 @@ pub(in crate::services::discord) fn emit_inflight_clear_with_invariant(
             turn_id,
             invariant: INFLIGHT_CLEAR_COMMITTED_NO_UI_FINISH_INVARIANT,
             code_location: "tmux_watcher.rs:inflight_clear",
-            message: "committed terminal delivery cleared without visible UI completion or persisted terminal-UI obligation (#3607)",
+            message: "committed terminal delivery cleared without visible UI completion (#3607)",
             details: inflight_clear_extra(
                 terminal_delivery_committed,
                 terminal_ui_committed,
-                terminal_ui_obligation_persisted,
                 invariant_violated,
             ),
         },
@@ -315,7 +302,7 @@ pub(in crate::services::discord) fn emit_inflight_clear_with_invariant(
     // a turn or crash the relay path in production.
     debug_assert!(
         !invariant_violated,
-        "#3646/#3607: committed terminal cleared without UI completion or persisted obligation"
+        "#3646/#3607: committed terminal cleared without UI completion"
     );
 }
 
@@ -383,16 +370,12 @@ mod tests {
 
     #[test]
     fn invariant_violated_only_on_committed_without_ui_or_obligation() {
-        // #3607 state: committed, but neither UI completion nor obligation.
-        assert!(inflight_clear_invariant_violated(true, false, false));
+        // Committed, but no UI completion.
+        assert!(inflight_clear_invariant_violated(true, false));
         // A visible UI completion satisfies the invariant.
-        assert!(!inflight_clear_invariant_violated(true, true, false));
-        // A persisted obligation satisfies the invariant (the bridge gate-timeout path).
-        assert!(!inflight_clear_invariant_violated(true, false, true));
-        // Both → satisfied.
-        assert!(!inflight_clear_invariant_violated(true, true, true));
+        assert!(!inflight_clear_invariant_violated(true, true));
         // No committed delivery → nothing to violate (empty-turn / suppressed cleanup).
-        assert!(!inflight_clear_invariant_violated(false, false, false));
+        assert!(!inflight_clear_invariant_violated(false, false));
     }
 
     #[test]
@@ -422,30 +405,22 @@ mod tests {
             TerminalUiOutcome::GateSuppressed,
             "TimedOut",
             Some(false),
-            None,
         );
         assert_eq!(extra["outcome"], "gate_suppressed");
         assert_eq!(extra["gate_outcome"], "TimedOut");
         assert_eq!(extra["pane_quiescent"], false);
-        assert!(extra["obligation_id"].is_null());
 
-        let extra2 = terminal_ui_transition_extra(
-            TerminalUiOutcome::Committed,
-            "ConfirmedIdle",
-            Some(true),
-            Some(99),
-        );
+        let extra2 =
+            terminal_ui_transition_extra(TerminalUiOutcome::Committed, "ConfirmedIdle", Some(true));
         assert_eq!(extra2["outcome"], "committed");
         assert_eq!(extra2["pane_quiescent"], true);
-        assert_eq!(extra2["obligation_id"], 99);
     }
 
     #[test]
     fn inflight_clear_extra_carries_three_signals_and_flag() {
-        let extra = inflight_clear_extra(true, false, false, true);
+        let extra = inflight_clear_extra(true, false, true);
         assert_eq!(extra["terminal_delivery_committed"], true);
         assert_eq!(extra["terminal_ui_committed"], false);
-        assert_eq!(extra["terminal_ui_obligation_persisted"], false);
         assert_eq!(extra["invariant_violated"], true);
     }
 

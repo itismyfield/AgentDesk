@@ -7,7 +7,7 @@ use crate::db::session_status::{
     AWAITING_BG, AWAITING_USER, DISCONNECTED, IDLE, is_active_status, is_bg_wait_status,
     is_terminal_status, is_user_wait_status, normalize_session_status,
 };
-use crate::services::discord::session_identity::SessionIdentity;
+use crate::domain::session_identity::SessionIdentity;
 
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::tmux_session_has_live_pane;

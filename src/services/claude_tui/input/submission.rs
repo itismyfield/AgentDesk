@@ -32,14 +32,6 @@ pub(super) fn send(
     })
 }
 
-/// Steering has judged the pane from its own snapshot, so it skips the readiness wait.
-pub(super) fn send_now(session: &str, prompt: &str) -> Result<(), SubmissionError> {
-    guarded_outcome::capture_preparation(|| {
-        let text = payload_text(prompt)?;
-        submit(session, prompt, &text, PromptReadinessKind::Followup, None)
-    })
-}
-
 fn payload_text(prompt: &str) -> Result<String, String> {
     let actions = plan_prompt_submit(prompt)?;
     let Some((TuiInputAction::Enter, payload)) = actions.split_last() else {
@@ -150,7 +142,9 @@ fn run(
         if cancel_requested(request.cancel) {
             return InputRun::Cancelled { confirmed: 0 };
         }
-        let pane = busy_inject::Pane::with_program(session, "tmux".into());
+        let Ok(pane) = busy_inject::Pane::with_program(session, "tmux".into()) else {
+            return InputRun::Refused(InputRefusal::IdentityMismatch);
+        };
         let park = match busy_inject::before_paste(&pane, stash_allowed) {
             Ok(park) => park,
             Err(veto) => {

@@ -1,0 +1,19 @@
+stateDiagram-v2
+    [*] --> Admission
+    Admission --> HintSnapshot: confirmed Missing and no process
+    Admission --> ObserveLegacy: live legacy direct TUI
+    HintSnapshot --> WakeOnce: exact hint cleanup
+    ObserveLegacy --> Refused: unsupported or unknown owner or shell remains
+    ObserveLegacy --> HandoffWaiting: busy or draft or modal
+    ObserveLegacy --> LiteralIntent: verified empty idle and pinned identity
+    LiteralIntent --> EnterIntent: literal on same target
+    EnterIntent --> HandoffWaiting: exact draft and same target
+    LiteralIntent --> Refused: replaced or cancelled
+    EnterIntent --> Refused: changed draft or identity
+    HandoffWaiting --> ObserveLegacy: ready and no write intent
+    HandoffWaiting --> HintSnapshot: exact Ended confirmed
+    HandoffWaiting --> HandoffWaiting: restart observes only
+    WakeOnce --> Pending: fresh vacancy and owner rechecked
+    Pending --> StartupBound: existing successful launch contract
+    StartupBound --> DeliveredOnce
+    Refused --> OriginalRetainedAndNotified

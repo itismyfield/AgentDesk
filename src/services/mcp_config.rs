@@ -212,7 +212,10 @@ pub(crate) fn sync_opencode_mcp_servers(config: &Config) -> Result<(), String> {
 
     let serialized = serde_json::to_string_pretty(&root)
         .map_err(|error| format!("Failed to serialize OpenCode config: {error}"))?;
-    atomic_write(&config_path, &serialized)?;
+    crate::domain::atomic_write::prepare(&config_path, &serialized)
+        .and_then(|prepared| prepared.publish())
+        .map(|crate::domain::atomic_write::Published| ())
+        .map_err(crate::services::disk_monitor::atomic_write_error)?;
 
     let next_state = OpenCodeMcpSyncState {
         managed_servers: desired_names.into_iter().collect(),
@@ -924,3 +927,7 @@ fn run_codex_command_vec(codex_bin: &str, args: &[String]) -> Result<(), String>
 #[cfg(test)]
 #[path = "mcp_config_snapshot_tests.rs"]
 mod snapshot_tests;
+
+#[cfg(test)]
+#[path = "mcp_config_atomic_write_tests.rs"]
+mod atomic_write_tests;

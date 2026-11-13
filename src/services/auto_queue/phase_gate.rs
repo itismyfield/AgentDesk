@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::auto_queue::transactions;
 
 #[derive(Debug, Clone)]
 pub(super) struct ActivateDispatchEntryAttachment {
@@ -152,7 +153,7 @@ async fn create_activate_dispatch_pg_inner(
     }
 
     if !sandbox_preflight_dispatch {
-        let channel_value = crate::db::agents::resolve_agent_dispatch_channel_pg(
+        let channel_value = crate::services::agent_channels::resolve_agent_dispatch_channel_pg(
             pool,
             to_agent_id,
             Some(dispatch_type),
@@ -476,7 +477,7 @@ async fn create_activate_dispatch_pg_inner(
         })?
     {
         if let Some(attachment) = entry_attachment.as_ref() {
-            crate::db::auto_queue::update_entry_status_on_pg_tx(
+            transactions::update_entry_status_on_pg_tx(
                 &mut tx,
                 &attachment.entry_id,
                 crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
@@ -591,7 +592,7 @@ async fn create_activate_dispatch_pg_inner(
     }
 
     if let Some(attachment) = entry_attachment.as_ref() {
-        let entry_result = crate::db::auto_queue::update_entry_status_on_pg_tx(
+        let entry_result = transactions::update_entry_status_on_pg_tx(
             &mut tx,
             &attachment.entry_id,
             crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,

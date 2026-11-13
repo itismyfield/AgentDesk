@@ -15,6 +15,7 @@
 use sqlx::PgPool;
 
 use crate::db::dispatches::outbox::CompletedDispatchInfo;
+pub(crate) use crate::domain::dispatch_route::use_counter_model_channel;
 use crate::services::dispatches::discord_delivery::{
     DispatchTransport, HttpDispatchTransport, discord_api_url,
     send_review_result_to_primary_with_transport,
@@ -467,13 +468,11 @@ async fn post_dispatch_completion_summary(
     message: &str,
     config: &DispatchFollowupConfig,
 ) -> Result<(), String> {
+    use crate::domain::outbound::{
+        DeliveryResult, DiscordOutboundPolicy, OutboundChannelId, OutboundDelivery, OutboundIntent,
+        OutboundTargetKey,
+    };
     use crate::services::discord::outbound::HttpOutboundClient;
-    use crate::services::discord::outbound::delivery::deliver_outbound;
-    use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
-    use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
-    use crate::services::discord::outbound::result::DeliveryResult;
-    use crate::services::discord::outbound::shared_outbound_deduper;
-    use poise::serenity_prelude::ChannelId;
 
     let Some(token) = config.notify_bot_token.as_deref() else {
         return Err("no notify bot token".to_string());
@@ -484,26 +483,21 @@ async fn post_dispatch_completion_summary(
 
     let target_channel_id = thread_id
         .parse::<u64>()
-        .map(ChannelId::new)
+        .map(OutboundChannelId::new)
         .map_err(|error| format!("invalid dispatch summary thread id {thread_id}: {error}"))?;
     let outbound_client =
         HttpOutboundClient::new(client, token.to_string(), config.discord_api_base.clone());
-    let outbound_msg = DiscordOutboundMessage::new(
+    let outbound_msg = OutboundIntent::new(
         format!("dispatch:{dispatch_id}"),
         format!("dispatch:{dispatch_id}:completion-summary"),
         message,
-        OutboundTarget::Channel(target_channel_id),
+        OutboundTargetKey::Channel {
+            channel: target_channel_id,
+        },
         DiscordOutboundPolicy::review_notification(),
     );
 
-    match deliver_outbound(
-        &outbound_client,
-        shared_outbound_deduper(),
-        outbound_msg,
-        None,
-    )
-    .await
-    {
+    match outbound_client.deliver(outbound_msg).await {
         DeliveryResult::Sent { .. }
         | DeliveryResult::Fallback { .. }
         | DeliveryResult::Duplicate { .. }
@@ -720,26 +714,6 @@ pub(crate) fn parse_channel_id(channel: &str) -> Option<u64> {
 /// Public wrapper around the shared resolve_channel_alias.
 pub fn resolve_channel_alias_pub(alias: &str) -> Option<u64> {
     resolve_channel_alias(alias)
-}
-
-pub(crate) fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
-    // "review", "e2e-test" (#197), and "consultation" (#256) go to the counter-model channel.
-    // "review-decision" is routed back to the original implementation provider
-    // so it reuses the implementation-side thread rather than the reviewer channel.
-    //
-    // #3605 (T2): "scope-assessment" is intentionally NOT listed here. Unlike
-    // consultation, the assigned agent itself evaluates the scope, so the
-    // dispatch must stay on the assigned agent's PRIMARY channel (the default
-    // when this returns false).
-    //
-    // #3594 (T3): "plan-review" goes to the counter-model channel — like a
-    // review, the plan is checked by the counterpart model. "plan" itself is
-    // NOT listed (the assigned agent designs on its PRIMARY channel, mirroring
-    // implementation), so it is intentionally absent here.
-    matches!(
-        dispatch_type,
-        Some("review") | Some("e2e-test") | Some("consultation") | Some("plan-review")
-    )
 }
 
 // ── Message formatting ──────────────────────────────────────────

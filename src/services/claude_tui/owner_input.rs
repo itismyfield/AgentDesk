@@ -12,6 +12,8 @@ use std::{
 pub(crate) type Commit = Arc<dyn Fn(Option<PaneEpoch>) -> Result<(), String> + Send + Sync>;
 pub(crate) type Pin = Arc<dyn Fn(Option<PaneEpoch>, String) -> Result<(), String> + Send + Sync>;
 pub(crate) type Hold = Arc<dyn Fn(serde_json::Value) -> Result<(), String> + Send + Sync>;
+#[cfg(unix)]
+pub(crate) type PreparationWatch = Box<dyn FnMut() -> super::busy_inject::Screen + Send>;
 struct Scope {
     provider: String,
     target: serde_json::Value,
@@ -31,10 +33,21 @@ struct Scope {
     #[cfg(unix)]
     epoch: Mutex<Option<crate::services::tui_input::target_epoch::LiveEpoch>>,
     refused: Mutex<Option<submission_fence::PreSubmitPersistenceRefused>>,
+    #[cfg(unix)]
+    preparation_watch: Mutex<Option<PreparationWatch>>,
 }
 thread_local! { static CURRENT:RefCell<Option<Arc<Scope>>>=const { RefCell::new(None) }; }
 fn current() -> Option<Arc<Scope>> {
     CURRENT.with(|v| v.borrow().clone())
+}
+#[cfg(unix)]
+pub(crate) fn record_preparation_watch(probe: PreparationWatch) {
+    if let Some(scope) = current() {
+        *scope
+            .preparation_watch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(probe);
+    }
 }
 pub(crate) fn active() -> bool {
     current().is_some()
@@ -462,6 +475,7 @@ pub(crate) fn capture_scope<R>(
         writer: Mutex::new(None),
         epoch: Mutex::new(None),
         refused: Mutex::new(None),
+        preparation_watch: Mutex::new(None),
     });
     let _restore = Restore(CURRENT.with(|v| v.replace(Some(scope.clone()))));
     if scope.target["host"] == "tmux"
@@ -489,6 +503,12 @@ pub(crate) fn capture_scope<R>(
         .then(|| scope.target.get("_attempt").cloned())
         .flatten()
         .map(|attempt| NotSentProof {
+            preparation_watch: scope
+                .preparation_watch
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .map(|probe| (scope.channel, probe)),
             attempt,
             reason: scope
                 .refused
@@ -610,10 +630,16 @@ fn pin_key(record: &PaneEpoch) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 pub(crate) struct NotSentProof {
+    #[cfg(unix)]
+    preparation_watch: Option<(u64, PreparationWatch)>,
     attempt: serde_json::Value,
     reason: String,
 }
 impl NotSentProof {
+    #[cfg(unix)]
+    pub(crate) fn take_preparation_watch(&mut self) -> Option<(u64, PreparationWatch)> {
+        self.preparation_watch.take()
+    }
     pub(crate) fn into_reason(self, key: &serde_json::Value) -> Result<String, String> {
         if self.attempt != *key {
             return Err("NotSent proof belongs to another attempt".into());

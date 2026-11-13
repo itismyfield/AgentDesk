@@ -17,10 +17,48 @@ COMMON_INPUTS = (
     ".github/workflows/**",
 )
 SCRIPT_TEST_INPUTS = ("scripts/**", "tests/**")
+USER_FEATURE_MAP_INPUTS = (
+    "docs/user-feature-map.rows.yaml",
+    "docs/user-feature-map.md",
+    "docs/generated/user-feature-coverage.json",
+    "docs/source-of-truth.md",
+    "docs/test-infra.design.md",
+    "docs/e2e/multi-provider-e2e.md",
+    "tests/e2e/tui_relay/scenarios/**",
+    "scripts/e2e/tui_relay/assertion_registry.py",
+    "scripts/e2e/run_tui_relay.py",
+    "scripts/generate_user_feature_map.py",
+    "tests/test_generate_user_feature_map.py",
+    "tests/test_user_feature_map_static.py",
+)
 
 # Broad script/test roots cover imported helpers and fixture-copy dependencies.
 # Source assertions retain their explicit source inputs instead of hiding them.
 SELF_TEST_INPUTS: dict[str, tuple[str, ...]] = {
+    "User feature map static check": USER_FEATURE_MAP_INPUTS,
+    "User feature map generation contract": USER_FEATURE_MAP_INPUTS,
+    "Isolated instance declaration tests": (
+        "scripts/dev-instance.sh",
+        "scripts/dev_instance/**",
+        "tests/test_dev_instance.py",
+        "tests/test_dev_instance_files.py",
+        "docs/dev-instance.md",
+    ),
+    "Isolated instance credential binary tests": (
+        "Cargo.toml",
+        "Cargo.lock",
+        "scripts/dev-instance.sh",
+        "scripts/dev_instance/**",
+        "src/cli/args.rs",
+        "src/cli/dev_instance.rs",
+        "src/cli/dev_instance/**",
+        "src/cli/mod.rs",
+        "src/cli/run.rs",
+        "src/utils/secret_file.rs",
+        "src/utils/secret_file/**",
+        "tests/test_dev_instance*.py",
+        "docs/dev-instance.md",
+    ),
     "Script checks input selection contract": (
         "scripts/ci/script_check_inputs.py",
         "tests/test_script_check_inputs.py",

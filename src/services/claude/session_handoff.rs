@@ -1,5 +1,7 @@
-//! A Claude session moving between tmux and Herdr keeps its id: the earlier execution ends by its
-//! own `/exit` before the other host resumes; nothing here kills, and anything unobserved stops.
+//! A Claude session keeps its id across hosts. Forward handoff closes one verified legacy pane;
+//! the reverse path retains its existing guarded `/exit` policy.
+
+pub(crate) mod pinned_tmux;
 
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;

@@ -7,9 +7,9 @@ mod metadata;
 pub(crate) mod outbox;
 
 pub(crate) use metadata::{
-    CardIssueInfo, DispatchDeliveryMetadata, dispatch_context_value, load_card_issue_info_pg,
-    load_dispatch_delivery_metadata_pg, resolve_dispatch_delivery_channel_pg,
-    resolve_review_followup_channel_pg,
+    CardIssueInfo, DispatchDeliveryMetadata, dispatch_context_value,
+    latest_completed_review_provider_pg, load_card_issue_info_pg,
+    load_dispatch_delivery_metadata_pg,
 };
 use sqlx::{AssertSqlSafe, PgPool, Row as SqlxRow};
 

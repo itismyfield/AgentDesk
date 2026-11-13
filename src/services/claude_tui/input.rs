@@ -17,6 +17,8 @@ mod preparation_hold;
 pub(crate) mod submission;
 mod user_receipt;
 use literal_chunks::split_literal_chunks;
+#[cfg(unix)]
+pub(crate) use preparation_hold::EffectPhase;
 pub(crate) use preparation_hold::PreparationHold;
 pub(crate) use preparation_hold::readiness_failure;
 #[cfg(all(test, unix))]
@@ -477,27 +479,6 @@ fn compact_pre_enter_modal_guard(snapshot: &PromptReadinessSnapshot) -> Result<(
         return Err("interactive modal");
     }
     Ok(())
-}
-
-pub(crate) fn steering_snapshot_decision(
-    snapshot: &PromptReadinessSnapshot,
-) -> Result<(), &'static str> {
-    if snapshot.prompt_draft_detected {
-        return Err("composer draft");
-    }
-    compact_pre_enter_modal_guard(snapshot)?;
-    if !crate::services::tmux_common::tmux_capture_indicates_claude_tui_exact_empty_composer(
-        &snapshot.pane_tail,
-    ) {
-        return Err("composer not present");
-    }
-    Ok(())
-}
-
-pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
-    let snapshot = prompt_readiness_snapshot(session_name);
-    steering_snapshot_decision(&snapshot).map_err(str::to_string)?;
-    submission::send_now(session_name, prompt).map_err(SubmissionError::into_legacy)
 }
 
 fn compact_queued_message_hint(pane_tail: &str) -> bool {

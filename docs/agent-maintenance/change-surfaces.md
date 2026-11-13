@@ -1559,12 +1559,6 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Existing cohesive responsibilities may grow).
-  - `src/services/discord/terminal_ui_obligation.rs` (545 prod LoC; #3607
-    worker-local durable terminal-UI obligation sidecar store plus isolated
-    status-card reconciliation sweeper. The file owns
-    `discord_terminal_ui_obligations/<provider>/<channel_id>.json`, pure
-    record/reconcile predicates, and boot-resumed status-card edit convergence.
-    It is below the giant-file threshold).
   - `src/services/discord/turn_bridge/cancel_finalize_policy.rs` (131 prod
     lines; pure cancel/finalize-policy decisions extracted from `mod.rs` by
     #3479: `classify_turn_finished_dispatch_kind`,
@@ -2461,7 +2455,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/cli/provider_cli/mod.rs`
 - `src/config.rs`
 - `src/db/auto_queue/entries.rs`
-- `src/db/auto_queue/phase_gates.rs`
 - `src/db/dispatched_sessions.rs`
 - `src/db/dispatched_sessions/canonical_identity.rs`
 - `src/db/dispatches/mod.rs`
@@ -2469,6 +2462,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/dispatch/dispatch_context.rs`
 - `src/dispatch/dispatch_create.rs`
 - `src/dispatch/dispatch_status.rs`
+- `src/domain/campaign/verification_run.rs`
 - `src/engine/loader.rs`
 - `src/engine/mod.rs`
 - `src/engine/ops/db_ops.rs`
@@ -2485,7 +2479,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/auto_queue.rs`
 - `src/services/auto_queue/activate_command.rs`
 - `src/services/auto_queue/cleanup_tasks.rs`
-- `src/services/campaign_execution/verification_run.rs`
 - `src/services/claude.rs`
 - `src/services/claude_tui/hook_relay/ordered_queue.rs`
 - `src/services/claude_tui/input.rs`
@@ -2493,9 +2486,11 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/codex_tmux_wrapper.rs`
 - `src/services/codex_tui/input.rs`
 - `src/services/discord/health/snapshot.rs`
+- `src/services/discord/health/turn_deliver/inject.rs`
 - `src/services/discord/mod.rs`
 - `src/services/discord/outbound/turn_output_controller.rs`
 - `src/services/discord/recovery_engine/restore_inflight.rs`
+- `src/services/discord/router/intake_dispatch.rs`
 - `src/services/discord/router/intake_gate.rs`
 - `src/services/discord/router/message_handler/headless_turn.rs`
 - `src/services/discord/router/message_handler/intake_turn.rs`
@@ -2516,7 +2511,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/onboarding/mod.rs`
 - `src/services/opencode.rs`
 - `src/services/platform/binary_resolver.rs`
-- `src/services/provider.rs`
+- `src/services/platform/tmux.rs`
 - `src/services/qwen.rs`
 - `src/services/routines/agent_executor.rs`
 - `src/services/routines/discord_log.rs`

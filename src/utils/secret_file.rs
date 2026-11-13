@@ -39,8 +39,47 @@ fn ensure_secret_parent(path: &Path) -> io::Result<()> {
 /// process umask. On Unix, parent directories are owner-only and files are
 /// created or rewritten as 0600.
 pub(crate) fn write_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    write_secret_file_with_policy(path, contents, SecretFilePolicy::Replace)
+}
+
+pub(crate) enum SecretFilePolicy {
+    Replace,
+    #[cfg(unix)]
+    FreshPrivate,
+}
+
+pub(crate) fn write_secret_file_with_policy(
+    path: &Path,
+    contents: impl AsRef<[u8]>,
+    policy: SecretFilePolicy,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    if matches!(policy, SecretFilePolicy::FreshPrivate) {
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("invalid secret path"))?;
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| io::Error::other("invalid secret filename"))?;
+        let directory = private_directory::PrivateDirectory::open(parent)
+            .map_err(|_| io::Error::other("private secret directory rejected"))?;
+        let file = directory
+            .create_new(filename)
+            .map_err(|_| io::Error::other("fresh secret file rejected"))?;
+        return write_secret_contents(file, contents.as_ref());
+    }
+    #[cfg(not(unix))]
+    let _ = policy;
     ensure_secret_parent(path)?;
     write_secret_file_after_parent(path, contents)
+}
+
+#[cfg(unix)]
+fn write_secret_contents(mut file: fs::File, contents: &[u8]) -> io::Result<()> {
+    file.set_permissions(fs::Permissions::from_mode(SECRET_FILE_MODE))?;
+    file.write_all(contents)?;
+    file.sync_all()
 }
 
 /// The file a rename-replace of `path` writes: the symlink target, or `path` itself when
@@ -99,14 +138,13 @@ fn write_secret_file_after_parent(path: &Path, contents: impl AsRef<[u8]>) -> io
         if path.exists() {
             set_mode(path, SECRET_FILE_MODE)?;
         }
-        let mut file = fs::OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(SECRET_FILE_MODE)
             .open(path)?;
-        file.write_all(contents.as_ref())?;
-        file.sync_all()?;
+        write_secret_contents(file, contents.as_ref())?;
         set_mode(path, SECRET_FILE_MODE)?;
         Ok(())
     }
@@ -116,6 +154,10 @@ fn write_secret_file_after_parent(path: &Path, contents: impl AsRef<[u8]>) -> io
         fs::write(path, contents)
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "secret_file/fresh_tests.rs"]
+mod fresh_tests;
 
 /// Correct unsafe existing secret-file modes on Unix. Symlinks and non-files
 /// are refused so a read-side audit cannot chmod an arbitrary target. The

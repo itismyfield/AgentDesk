@@ -57,6 +57,7 @@ pub(in crate::services::discord) use relay_auto_heal::relay_recovery_retry_delay
 mod relay_dead_reattach;
 mod relay_progress;
 mod routine_process;
+pub(crate) use super::queue_io::input_owner::closed::repair_cleared_row;
 pub(crate) use routine_process::cancel_routine_process_turn;
 mod channel_home_seed;
 mod runtime_resolve;
@@ -621,7 +622,7 @@ impl HealthRegistry {
     /// the same selection logic `resolve_direct_channel_shared` uses. For
     /// a single registered runtime it returns that runtime regardless of
     /// channel, so single-bot deployments behave exactly as before.
-    pub(in crate::services::discord) async fn shared_for_provider_on_channel(
+    pub(crate) async fn shared_for_provider_on_channel(
         &self,
         provider: &ProviderKind,
         channel_id: ChannelId,

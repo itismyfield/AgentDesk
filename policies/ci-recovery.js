@@ -591,6 +591,8 @@ function processWaitingCard(cardId, blockedReason) {
       }
     }
   }
+  // Only a run for the verified PR head may drive recovery or card transitions.
+  if (!currentSha || run.headSha !== currentSha) return;
   var runId = run.databaseId;
 
   // ── Dedup: skip if we already processed this run ──

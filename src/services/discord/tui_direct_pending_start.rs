@@ -78,7 +78,7 @@ use state::{
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum DestructiveCancelHookPoint {
+pub(in crate::services::discord) enum DestructiveCancelHookPoint {
     /// The death/identity gate has allowed, before any pin is captured.
     PostGate,
     /// #5071 T3-A1: the flock-held row commit has returned and the registry CAS
@@ -88,7 +88,7 @@ enum DestructiveCancelHookPoint {
     PreRegistryCas,
 }
 #[cfg(test)]
-type DestructiveCancelPostGateHook =
+pub(in crate::services::discord) type DestructiveCancelPostGateHook =
     Arc<dyn Fn(DestructiveCancelHookPoint) + Send + Sync + 'static>;
 #[cfg(test)]
 static DESTRUCTIVE_CANCEL_POST_GATE_HOOK: LazyLock<Mutex<Option<DestructiveCancelPostGateHook>>> =
@@ -106,7 +106,7 @@ fn run_destructive_cancel_post_gate_hook_for_tests(point: DestructiveCancelHookP
 }
 
 #[cfg(test)]
-struct DestructiveCancelPostGateHookGuard;
+pub(in crate::services::discord) struct DestructiveCancelPostGateHookGuard;
 
 #[cfg(test)]
 impl Drop for DestructiveCancelPostGateHookGuard {
@@ -118,7 +118,7 @@ impl Drop for DestructiveCancelPostGateHookGuard {
 }
 
 #[cfg(test)]
-fn set_destructive_cancel_post_gate_hook_for_tests(
+pub(in crate::services::discord) fn set_destructive_cancel_post_gate_hook_for_tests(
     hook: DestructiveCancelPostGateHook,
 ) -> DestructiveCancelPostGateHookGuard {
     *DESTRUCTIVE_CANCEL_POST_GATE_HOOK

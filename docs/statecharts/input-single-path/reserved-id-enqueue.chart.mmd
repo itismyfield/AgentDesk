@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> Queued
+    Queued --> Reserved: Take / queue removed, marker written
+    Reserved --> Queued: authorized owner return / atomic restore, keep marker
+    Reserved --> Refused: Replay / proposed actor guard
+    Reserved --> Overlap: Replay / current actor
+    Refused --> Executed: successful claim
+    Refused --> Lost: race-loss return / abandon reservation and marker
+    Overlap --> Queued: race-loss return / durable queued copy survives
+    Executed --> [*]
+    Lost --> Queued: fresh external receipt after release (not guaranteed)

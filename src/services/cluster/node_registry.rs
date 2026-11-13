@@ -272,7 +272,7 @@ pub(crate) async fn run_leader_intake_retry_maintenance_once(
     let Some((max_attempts, retry_authorization_secs)) = retry() else {
         return Ok(None);
     };
-    crate::db::intake_outbox::sweep_failed_pre_accept_once(
+    super::pre_accept_sweep::sweep_failed_pre_accept_once(
         pool,
         instance_id,
         max_attempts,

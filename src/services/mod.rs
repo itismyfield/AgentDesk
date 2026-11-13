@@ -1,3 +1,4 @@
+pub(crate) mod agent_channels;
 pub mod agent_identity;
 pub mod agent_protocol;
 pub mod agent_recovery;
@@ -19,6 +20,7 @@ pub mod codex_tmux_wrapper;
 pub mod codex_tui;
 // Storage primitives remain dormant until the input actor is wired.
 pub mod cswap;
+pub mod decision_gate;
 pub mod discord;
 pub mod discord_config_audit;
 #[allow(dead_code)]
@@ -167,10 +169,6 @@ pub(crate) mod tui_o {
 pub(crate) mod tui_prompt_control;
 #[allow(dead_code)]
 pub(crate) mod tui_prompt_dedupe;
-// #4754 Slice 1 removes the automatic intake call site; retain this helper
-// module for the subsequent manual-steering slice without dead-code noise.
-#[allow(dead_code)]
-pub(crate) mod tui_steering;
 pub(crate) mod tui_turn_state;
 pub mod turn_cancel_finalizer;
 pub mod turn_cancel_queue_guard;
@@ -184,3 +182,5 @@ pub use remote_stub as remote;
 
 #[cfg(test)]
 mod provider_output_guard_tests;
+
+pub(crate) mod session_identity_metadata;

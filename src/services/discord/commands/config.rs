@@ -305,12 +305,12 @@ fn runtime_model_for_turn(
     }
 }
 
+mod effort;
 mod provider_settings;
-#[cfg(test)]
-pub(in crate::services::discord) use provider_settings::EFFORT_LEVELS;
+pub(in crate::services::discord) use effort::{channel_effort_level, update_channel_effort};
 pub(in crate::services::discord) use provider_settings::{
-    channel_effort_level, claude_local_tui_relaunch_applies, update_channel_codex_goals,
-    update_channel_effort, update_channel_fast_mode, update_channel_model_override,
+    claude_local_tui_relaunch_applies, update_channel_codex_goals, update_channel_fast_mode,
+    update_channel_model_override,
 };
 
 pub(in crate::services::discord) fn would_channel_model_override_change(
@@ -1026,3 +1026,6 @@ mod session_override_cluster_characterization_tests {
         assert!(!shared.overrides.session_reset_pending.contains(&channel));
     }
 }
+
+#[cfg(test)]
+mod effort_settings_tests;

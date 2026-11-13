@@ -1,18 +1,5 @@
-//! New outbound message domain type (#1006 v3, slice 1.0 — types only).
-//!
-//! This is the outbound message envelope used by v3 delivery. It pairs
-//! message content with an explicit
-//! [`OutboundTarget`] (so channel-vs-thread routing is encoded in the type
-//! system rather than in two parallel `Option<String>` fields) and embeds
-//! the per-message [`super::policy::DiscordOutboundPolicy`] so the deliver
-//! function can be a free, callsite-agnostic helper.
-//!
-//! No callsite consumes this type in slice 1.0; the migration happens in
-//! slices 1.1 (service impl) and 1.2 (outbox callsite rewire).
-//!
-//! `serenity::model::id::ChannelId` is a transparent newtype around a `u64`
-//! and already implements `Serialize` / `Deserialize`, so this struct can
-//! round-trip through serde without manual glue.
+//! Serenity-addressed outbound request envelope and its conversion into the
+//! `domain::outbound` key values; Serenity ids stop at this adapter.
 
 use std::path::PathBuf;
 
@@ -20,57 +7,10 @@ use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use serde::{Deserialize, Serialize};
 
 use super::policy::DiscordOutboundPolicy;
-
-/// Caller-provided semantic identity for outbound idempotency.
-///
-/// `correlation_id` groups related outbound attempts (for example, all
-/// notifications for one dispatch), while `semantic_event_id` identifies the
-/// exact event within that group. Future durable dedup stores should key on
-/// both values plus target/operation metadata.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct OutboundDeliveryId {
-    pub(crate) correlation_id: String,
-    pub(crate) semantic_event_id: String,
-}
-
-impl OutboundDeliveryId {
-    pub(crate) fn new(
-        correlation_id: impl Into<String>,
-        semantic_event_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            correlation_id: correlation_id.into(),
-            semantic_event_id: semantic_event_id.into(),
-        }
-    }
-
-    /// Structured dedup key derived from semantic identity plus delivery
-    /// target/operation metadata.
-    pub(crate) fn key_for(
-        &self,
-        target: OutboundTarget,
-        operation: OutboundOperation,
-    ) -> OutboundDedupKey {
-        OutboundDedupKey {
-            correlation_id: self.correlation_id.clone(),
-            semantic_event_id: self.semantic_event_id.clone(),
-            target: OutboundTargetKey::from(target),
-            operation: OutboundOperationKey::from(operation),
-        }
-    }
-}
-
-/// Structured idempotency key for outbound delivery replay detection.
-///
-/// This deliberately stays as typed components instead of a delimiter-joined
-/// string so values like `("a::b", "c")` and `("a", "b::c")` cannot collide.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct OutboundDedupKey {
-    pub(crate) correlation_id: String,
-    pub(crate) semantic_event_id: String,
-    pub(crate) target: OutboundTargetKey,
-    pub(crate) operation: OutboundOperationKey,
-}
+use crate::domain::outbound::ids::{OutboundChannelId, OutboundMessageId, OutboundUserId};
+use crate::domain::outbound::intent::OutboundIntent;
+pub(crate) use crate::domain::outbound::key::{OutboundDedupKey, OutboundDeliveryId};
+use crate::domain::outbound::key::{OutboundOperationKey, OutboundTargetKey};
 
 /// Where an outbound delivery should land.
 ///
@@ -94,27 +34,17 @@ pub(crate) enum OutboundTarget {
     DmUser(UserId),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum OutboundTargetKey {
-    Channel {
-        channel: ChannelId,
-    },
-    Thread {
-        parent: ChannelId,
-        thread: ChannelId,
-    },
-    DmUser {
-        user: UserId,
-    },
-}
-
 impl From<OutboundTarget> for OutboundTargetKey {
     fn from(target: OutboundTarget) -> Self {
         match target {
-            OutboundTarget::Channel(channel) => Self::Channel { channel },
-            OutboundTarget::Thread { parent, thread } => Self::Thread { parent, thread },
-            OutboundTarget::DmUser(user) => Self::DmUser { user },
+            OutboundTarget::Channel(channel) => Self::Channel {
+                channel: channel.into(),
+            },
+            OutboundTarget::Thread { parent, thread } => Self::Thread {
+                parent: parent.into(),
+                thread: thread.into(),
+            },
+            OutboundTarget::DmUser(user) => Self::DmUser { user: user.into() },
         }
     }
 }
@@ -127,19 +57,62 @@ pub(crate) enum OutboundOperation {
     Edit { message_id: MessageId },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum OutboundOperationKey {
-    Send,
-    Edit { message_id: MessageId },
-}
-
 impl From<OutboundOperation> for OutboundOperationKey {
     fn from(operation: OutboundOperation) -> Self {
         match operation {
             OutboundOperation::Send => Self::Send,
-            OutboundOperation::Edit { message_id } => Self::Edit { message_id },
+            OutboundOperation::Edit { message_id } => Self::Edit {
+                message_id: message_id.into(),
+            },
         }
+    }
+}
+
+impl From<ChannelId> for OutboundChannelId {
+    fn from(id: ChannelId) -> Self {
+        Self::new(id.get())
+    }
+}
+
+impl From<MessageId> for OutboundMessageId {
+    fn from(id: MessageId) -> Self {
+        Self::new(id.get())
+    }
+}
+
+impl From<UserId> for OutboundUserId {
+    fn from(id: UserId) -> Self {
+        Self::new(id.get())
+    }
+}
+
+impl From<OutboundIntent> for DiscordOutboundMessage {
+    fn from(intent: OutboundIntent) -> Self {
+        let target = match intent.target {
+            OutboundTargetKey::Channel { channel } => {
+                OutboundTarget::Channel(ChannelId::new(channel.get()))
+            }
+            OutboundTargetKey::Thread { parent, thread } => OutboundTarget::Thread {
+                parent: ChannelId::new(parent.get()),
+                thread: ChannelId::new(thread.get()),
+            },
+            OutboundTargetKey::DmUser { user } => OutboundTarget::DmUser(UserId::new(user.get())),
+        };
+        let operation = match intent.operation {
+            OutboundOperationKey::Send => OutboundOperation::Send,
+            OutboundOperationKey::Edit { message_id } => OutboundOperation::Edit {
+                message_id: MessageId::new(message_id.get()),
+            },
+        };
+        let mut message = Self::new(
+            intent.idempotency.correlation_id,
+            intent.idempotency.semantic_event_id,
+            intent.content,
+            target,
+            intent.policy,
+        );
+        message.operation = operation;
+        message
     }
 }
 
@@ -374,7 +347,8 @@ impl DiscordOutboundMessage {
 
     /// Structured dedup key derived from idempotency + target + operation.
     pub(crate) fn dedup_key(&self) -> OutboundDedupKey {
-        self.idempotency.key_for(self.target, self.operation)
+        self.idempotency
+            .key_for(self.target.into(), self.operation.into())
     }
 }
 

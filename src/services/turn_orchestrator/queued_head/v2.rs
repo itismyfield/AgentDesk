@@ -7,8 +7,10 @@ use std::path::PathBuf;
 
 pub(crate) mod actor;
 mod attempt;
+pub(crate) mod claude_handoff;
 mod commit;
 pub(crate) mod control;
+mod effort_continue;
 mod migration;
 pub(crate) mod origin;
 pub(crate) mod projection;
@@ -120,7 +122,10 @@ impl Owner {
 
     /// Moves the earliest person ahead of waiting machine starts, with every queued bind in one commit.
     pub(crate) fn prefer_person(&mut self, held: &Front) -> Result<bool, String> {
-        if !self.front().is_some_and(|front| is_front(&front, held)) || self.person_at(0) {
+        if self.effort_blocks(None)
+            || !self.front().is_some_and(|front| is_front(&front, held))
+            || self.person_at(0)
+        {
             return Ok(false);
         }
         let Some(index) = (1..self.snapshot.items.len()).find(|index| self.person_at(*index))
@@ -163,6 +168,8 @@ impl Owner {
                 terminal_identities: vec![],
                 namespace: Some(namespace),
                 owed_drop_receipts: Vec::new(),
+                unfinished_handoff: None,
+                effort_restart: None,
             },
         };
         let mut owner = Self {
@@ -182,6 +189,7 @@ impl Owner {
         };
         // A restored bootstrap is possibly sent; missing deadline never proves NotSent.
         let mut restored = owner.snapshot.clone();
+        owner.restore_effort_receipt(&mut restored)?;
         if owner.bytes.is_some()
             && let Some(head) = restored.head_injection.as_mut()
             && head.phase != HeadPhase::Reserved
@@ -225,6 +233,9 @@ impl Owner {
         if self.snapshot.head_injection.is_some() {
             return Err("active head".into());
         }
+        if self.effort_blocks(self.snapshot.items.first()) {
+            return Err("NotSent(\"effort_continuation_barrier\")".into());
+        }
         self.place(self.snapshot.clone(), attempt, payload)
     }
 
@@ -236,6 +247,15 @@ impl Owner {
         attempt: AttemptIdentity,
         payload: PreparedPayload,
     ) -> Result<AttemptRef, String> {
+        if let Some(journal) = &next.unfinished_handoff {
+            if attempt.target.host != "herdr"
+                || attempt.target.owner != journal.logical
+                || !journal.ended
+            {
+                return Err("NotSent(\"handoff_not_ready\")".into());
+            }
+            next.unfinished_handoff = None;
+        }
         let original = next.items.first().ok_or("empty queue")?.clone();
         let identity = sources::identity(&original);
         let key = AttemptRef {
@@ -349,6 +369,9 @@ impl Owner {
             return None;
         }
         let original = self.snapshot.items.first()?.clone();
+        if self.effort_blocks(Some(&original)) {
+            return None;
+        }
         let item = self.snapshot.queued_digest(0)?;
         let ticket = self
             .snapshot
@@ -510,7 +533,8 @@ impl Owner {
         order: crate::services::turn_orchestrator::TurnAdmissionOrder,
     ) -> bool {
         use crate::services::turn_orchestrator::TurnAdmissionOrder;
-        self.holds(message)
+        self.effort_blocks(None)
+            || self.holds(message)
             || self.snapshot.head_injection.is_some()
             || (order != TurnAdmissionOrder::Immediate && !self.snapshot.items.is_empty())
     }

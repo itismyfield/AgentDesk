@@ -10,8 +10,10 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use sqlx::PgPool;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
+#[cfg(test)]
+use super::checkpoint::load_checkpoint_events;
 use super::checkpoint::{
-    commit_recovery_transition, load_channel_state, load_channel_states, load_checkpoint_events,
+    commit_recovery_transition, load_channel_state, load_channel_states, load_restore_events,
 };
 use super::*;
 
@@ -25,6 +27,8 @@ pub(crate) use provider_errors::observe_provider_error;
 
 #[cfg(test)]
 mod postgres_tests;
+#[cfg(test)]
+mod restore_window_tests;
 
 /// A test-only durable store for one task, so a test never attaches the process one.
 #[cfg(test)]
@@ -107,8 +111,7 @@ impl Coordinator {
             }
         };
         if let Some(state) = load_channel_state(pool, channel_id).await? {
-            let events =
-                load_checkpoint_events(pool, channel_id, DEFAULT_READ_EVENT_LIMIT as i64).await?;
+            let events = load_restore_events(pool, channel_id).await?;
             if state.lock_held()
                 && let Some(turn_id) = state.primary_turn_id.as_ref()
             {

@@ -6,13 +6,12 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::domain::bot_role::UtilityBotRole;
-use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
-use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
-use crate::services::discord::outbound::message::{OutboundOperation, OutboundTarget};
-use crate::services::discord::outbound::{
-    DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, HttpOutboundClient,
-    shared_outbound_deduper,
+use crate::domain::outbound::{
+    DeliveryResult, DiscordOutboundPolicy, OutboundDelivery, OutboundIntent, OutboundMessageId,
+    OutboundOperationKey, OutboundTargetKey, first_raw_message_id,
 };
+use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
+use crate::services::discord::outbound::HttpOutboundClient;
 
 use super::runtime::RoutineRunOutcome;
 use super::store::{ClaimedRoutineRun, RecoveredRoutineRun, RoutineRecord, RoutineStore};
@@ -572,20 +571,20 @@ impl RoutineDiscordLogger {
         let policy = DiscordOutboundPolicy::default().without_idempotency();
 
         if let Some(message_id) = message_id.filter(|value| parse_message_id(value).is_some()) {
-            let message_id = poise::serenity_prelude::MessageId::new(
+            let message_id = OutboundMessageId::new(
                 message_id
                     .parse::<u64>()
                     .map_err(|error| format!("invalid routine summary message id: {error}"))?,
             );
-            let message = DiscordOutboundMessage::new(
+            let message = OutboundIntent::new(
                 format!("routine-log:no-idempotency:{channel}"),
                 "routine-log:no-idempotency:edit",
                 content.to_string(),
-                OutboundTarget::Channel(poise::serenity_prelude::ChannelId::new(channel)),
+                OutboundTargetKey::channel(channel),
                 policy,
             )
-            .with_operation(OutboundOperation::Edit { message_id });
-            match deliver_outbound(&client, shared_outbound_deduper(), message, None).await {
+            .with_operation(OutboundOperationKey::Edit { message_id });
+            match client.deliver(message).await {
                 DeliveryResult::Sent { messages, .. }
                 | DeliveryResult::Fallback { messages, .. } => {
                     if let Some(message_id) = first_raw_message_id(&messages) {
@@ -615,7 +614,7 @@ impl RoutineDiscordLogger {
                 | DeliveryResult::ConfirmedMissing { reason } => {
                     tracing::warn!(
                         target = %target.target,
-                        message_id = %message_id,
+                        message_id = %message_id.get(),
                         error = %reason,
                         "routine run Discord summary edit failed; sending replacement message"
                     );
@@ -623,14 +622,14 @@ impl RoutineDiscordLogger {
             }
         }
 
-        let message = DiscordOutboundMessage::new(
+        let message = OutboundIntent::new(
             format!("routine-log:no-idempotency:{channel}"),
             "routine-log:no-idempotency:send",
             content.to_string(),
-            OutboundTarget::Channel(poise::serenity_prelude::ChannelId::new(channel)),
+            OutboundTargetKey::channel(channel),
             policy,
         );
-        match deliver_outbound(&client, shared_outbound_deduper(), message, None).await {
+        match client.deliver(message).await {
             DeliveryResult::Sent { messages, .. } | DeliveryResult::Fallback { messages, .. } => {
                 first_raw_message_id(&messages).ok_or_else(|| {
                     "routine run Discord summary send returned no message id".to_string()

@@ -18,13 +18,7 @@ use crate::services::provider::CancelToken;
 use live::{LiveAttempt, RawObservation, Verdict};
 use sqlx::PgPool;
 
-/// Admission and restart recovery compare the same process owner incarnation.
-static INCARNATION: std::sync::LazyLock<String> =
-    std::sync::LazyLock::new(|| uuid::Uuid::new_v4().to_string());
-
-pub(crate) fn incarnation() -> &'static str {
-    &INCARNATION
-}
+pub(crate) use crate::domain::process_incarnation::incarnation;
 
 #[derive(Debug)]
 pub(crate) enum ReplayDecision {

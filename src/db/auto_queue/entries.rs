@@ -1,17 +1,15 @@
 use sqlx::{PgPool, Row as SqlxRow};
-use std::collections::BTreeSet;
 use thiserror::Error;
 
 use super::run_admission::admit_entry_transition_on_pg_tx;
 use super::run_status::is_live_run_status;
 use super::runs::{
     acquire_run_advisory_xact_lock_on_pg_tx, acquire_run_advisory_xact_locks_on_pg_tx,
-    auto_queue_run_review_disabled_on_pg_tx, maybe_finalize_run_after_terminal_entry_pg,
-    maybe_finalize_run_if_ready_pg,
 };
 
 mod dispatch_failure;
-pub use dispatch_failure::record_entry_dispatch_failure_on_pg;
+pub(crate) mod status_write;
+use status_write::{EntryStatusStage, EntryStatusWrite, StagedEntryStatus, run_finalize_due};
 
 pub const ENTRY_STATUS_PENDING: &str = "pending";
 pub const ENTRY_STATUS_DISPATCHED: &str = "dispatched";
@@ -84,13 +82,16 @@ pub async fn reactivate_done_entry_on_pg(
 ) -> Result<EntryStatusUpdateResult, String> {
     let current = load_entry_status_row_pg(pool, entry_id).await?;
     if current.status != ENTRY_STATUS_DONE {
-        return update_entry_status_on_pg(
+        // A `dispatched` target never owes a run-completion attempt.
+        return stage_entry_status_on_pg(
             pool,
             entry_id,
             ENTRY_STATUS_DISPATCHED,
             trigger_source,
             options,
         )
+        .await?
+        .commit_without_finalize()
         .await;
     }
 
@@ -151,14 +152,15 @@ pub async fn reactivate_done_entry_on_pg(
 
     ensure_done_entry_run_live_on_pg_tx(&mut tx, &reloaded_run_id, entry_id).await?;
 
-    let result = update_entry_status_on_pg_tx(
+    let result = write_entry_status_on_pg_tx(
         &mut tx,
         entry_id,
         ENTRY_STATUS_DISPATCHED,
         trigger_source,
         options,
     )
-    .await?;
+    .await?
+    .without_finalize();
     if !result.changed {
         tx.rollback().await.map_err(|error| {
             format!("rollback stale postgres auto-queue reactivation {entry_id}: {error}")
@@ -398,23 +400,28 @@ pub async fn reconcile_failed_entry_done_on_pg(
         ));
     }
 
-    update_entry_status_on_pg(
+    // A `done` target never owes a run-completion attempt.
+    stage_entry_status_on_pg(
         pool,
         entry_id,
         ENTRY_STATUS_DONE,
         trigger_source,
         &EntryStatusUpdateOptions::default(),
     )
+    .await?
+    .commit_without_finalize()
     .await
 }
 
-pub async fn update_entry_status_on_pg(
+/// Pool-scoped entry status writer. A changed row comes back staged on its still-open tx so
+/// the service can attempt run completion there before committing.
+pub(crate) async fn stage_entry_status_on_pg(
     pool: &PgPool,
     entry_id: &str,
     new_status: &str,
     trigger_source: &str,
     options: &EntryStatusUpdateOptions,
-) -> Result<EntryStatusUpdateResult, String> {
+) -> Result<EntryStatusStage, String> {
     let normalized = normalize_entry_status(new_status).map_err(|error| error.to_string())?;
     let mut current = load_entry_status_row_pg(pool, entry_id).await?;
     // #5356 S2: the write target is fixed once, before the retry loop, so a
@@ -444,7 +451,7 @@ pub async fn update_entry_status_on_pg(
                 "auto-queue entry {entry_id} status update livelock: exceeded {MAX_STALE_RETRIES} stale retries (target={normalized})"
             ));
         }
-        let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+        let log_ctx = crate::domain::auto_queue_log::AutoQueueLogContext::new()
             .run(&current.run_id)
             .entry(entry_id)
             .card(&current.card_id)
@@ -491,12 +498,12 @@ pub async fn update_entry_status_on_pg(
         let changed = current.status != normalized || metadata_change;
 
         if !changed {
-            return Ok(EntryStatusUpdateResult {
+            return Ok(EntryStatusStage::Unchanged(EntryStatusUpdateResult {
                 run_id: current.run_id,
                 from_status: current.status,
                 to_status: normalized.to_string(),
                 changed: false,
-            });
+            }));
         }
 
         let mut tx = pool
@@ -642,12 +649,12 @@ pub async fn update_entry_status_on_pg(
                 pinned_dispatch_id.as_deref(),
                 pinned_slot_index,
             ) {
-                return Ok(EntryStatusUpdateResult {
+                return Ok(EntryStatusStage::Unchanged(EntryStatusUpdateResult {
                     run_id: latest.run_id,
                     from_status: latest.status,
                     to_status: normalized.to_string(),
                     changed: false,
-                });
+                }));
             }
             // #5356 S2: the relatch defense is this branch and the CAS above
             // together, not either alone — and neither of them is the hoisted
@@ -690,7 +697,7 @@ pub async fn update_entry_status_on_pg(
             }
 
             if !is_allowed_entry_transition(&latest.status, normalized, trigger_source) {
-                let stale_log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+                let stale_log_ctx = crate::domain::auto_queue_log::AutoQueueLogContext::new()
                     .run(&latest.run_id)
                     .entry(entry_id)
                     .card(&latest.card_id)
@@ -748,35 +755,22 @@ pub async fn update_entry_status_on_pg(
         )
         .await?;
 
-        // #815 P1: `user_cancelled` is a NON-run-finalizing terminal status.
-        // The run must stay in its prior state (`active` / `paused`) so the
-        // operator can flip the entry back to `pending` (e.g. via the API) and
-        // a later tick can re-pick it up. Auto-completing the run would
-        // strand the entry — `restore` only accepts cancelled/restoring,
-        // `resume` only reopens paused, and `activate()` only promotes
-        // generated/pending, so no path could re-open the entry.
-        if matches!(
-            normalized,
-            ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED
-        ) {
-            maybe_finalize_run_after_terminal_entry_pg(&mut tx, &current.run_id, normalized)
-                .await?;
-        }
-
-        tx.commit()
-            .await
-            .map_err(|error| format!("commit postgres entry transition for {entry_id}: {error}"))?;
-
-        return Ok(EntryStatusUpdateResult {
+        let result = EntryStatusUpdateResult {
             run_id: current.run_id,
             from_status: current.status,
             to_status: normalized.to_string(),
             changed: true,
-        });
+        };
+        return Ok(EntryStatusStage::Staged(StagedEntryStatus::new(
+            tx,
+            entry_id,
+            result,
+            run_finalize_due(normalized),
+        )));
     }
 }
 
-/// Transaction-scoped variant of [`update_entry_status_on_pg`].
+/// Transaction-scoped variant of [`stage_entry_status_on_pg`].
 ///
 /// Mirrors the pool-scoped helper's semantics — transition validation,
 /// dispatch-history bookkeeping, transition recording, and conditional run
@@ -788,17 +782,17 @@ pub async fn update_entry_status_on_pg(
 /// that identity drifts it returns an error instead of looping. The caller
 /// composes this into a wider atomic operation, so observed state is already a
 /// stable snapshot inside the transaction.
-pub async fn update_entry_status_on_pg_tx(
+pub(crate) async fn write_entry_status_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: &str,
     new_status: &str,
     trigger_source: &str,
     options: &EntryStatusUpdateOptions,
-) -> Result<EntryStatusUpdateResult, String> {
+) -> Result<EntryStatusWrite, String> {
     let normalized = normalize_entry_status(new_status).map_err(|error| error.to_string())?;
     let current = load_entry_status_row_pg_tx(tx, entry_id).await?;
 
-    let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+    let log_ctx = crate::domain::auto_queue_log::AutoQueueLogContext::new()
         .run(&current.run_id)
         .entry(entry_id)
         .card(&current.card_id)
@@ -850,12 +844,12 @@ pub async fn update_entry_status_on_pg_tx(
     let changed = current.status != normalized || metadata_change;
 
     if !changed {
-        return Ok(EntryStatusUpdateResult {
+        return Ok(EntryStatusWrite::unchanged(EntryStatusUpdateResult {
             run_id: current.run_id,
             from_status: current.status,
             to_status: normalized.to_string(),
             changed: false,
-        });
+        }));
     }
 
     admit_entry_transition_on_pg_tx(tx, &current.run_id, entry_id, &current.status, normalized)
@@ -983,12 +977,12 @@ pub async fn update_entry_status_on_pg_tx(
         // Stale snapshot — the row mutated between our load and update inside
         // the same tx. Surface as a no-op; the caller already owns the tx
         // boundary and decides whether to roll back.
-        return Ok(EntryStatusUpdateResult {
+        return Ok(EntryStatusWrite::unchanged(EntryStatusUpdateResult {
             run_id: current.run_id,
             from_status: current.status.clone(),
             to_status: current.status,
             changed: false,
-        });
+        }));
     }
 
     if normalized == ENTRY_STATUS_DISPATCHED {
@@ -1008,21 +1002,14 @@ pub async fn update_entry_status_on_pg_tx(
     record_entry_transition_on_pg(tx, entry_id, &current.status, normalized, trigger_source)
         .await?;
 
-    // #815 P1: `user_cancelled` is intentionally NOT in this list — the run
-    // must stay in its prior state so the operator can flip the entry back to
-    // `pending` and a later tick can re-pick it up.
-    if matches!(
-        normalized,
-        ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED
-    ) {
-        maybe_finalize_run_after_terminal_entry_pg(tx, &current.run_id, normalized).await?;
-    }
-
-    Ok(EntryStatusUpdateResult {
-        run_id: current.run_id,
-        from_status: current.status,
-        to_status: normalized.to_string(),
-        changed: true,
+    Ok(EntryStatusWrite {
+        result: EntryStatusUpdateResult {
+            run_id: current.run_id,
+            from_status: current.status,
+            to_status: normalized.to_string(),
+            changed: true,
+        },
+        run_finalize_due: run_finalize_due(normalized),
     })
 }
 
@@ -1082,208 +1069,8 @@ async fn validate_new_dispatch_attachment_on_pg_tx(
     Ok(())
 }
 
-/// Route dispatch-linked terminal transitions through the canonical entry
-/// helper so PG transition bookkeeping and run finalization stay consistent.
-pub async fn sync_dispatch_terminal_entries_on_pg_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    dispatch_id: &str,
-    new_status: &str,
-    trigger_source: &str,
-    preserve_dispatch_link: bool,
-) -> Result<usize, String> {
-    Ok(sync_dispatch_terminal_entries_on_pg_tx_result(
-        tx,
-        dispatch_id,
-        new_status,
-        trigger_source,
-        preserve_dispatch_link,
-    )
-    .await?
-    .changed_entries)
-}
-
-async fn sync_dispatch_terminal_entries_on_pg_tx_result(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    dispatch_id: &str,
-    new_status: &str,
-    trigger_source: &str,
-    preserve_dispatch_link: bool,
-) -> Result<DispatchTerminalEntrySyncResult, String> {
-    // #1562 RC8: also match entries via kanban_card_id when the agent has
-    // performed a self-recovery (replaced a cancelled dispatch with a fresh
-    // one on the same card). The entry's `dispatch_id` pointer still
-    // references the cancelled original, so direct dispatch_id match would
-    // miss the completion. Card-id fallback only fires when the entry's
-    // tracked dispatch is NOT itself the dispatch being completed (avoids
-    // cross-row updates when both pointers happen to align) AND when the
-    // entry's previously-tracked dispatch is in a terminal non-completed
-    // state — i.e. genuine self-recovery, not normal lifecycle.
-    //
-    // #1970: retryable transport failures can briefly push the entry to
-    // `failed` before a later retry dispatch succeeds for the same card. Treat
-    // the completed retry as authoritative and reconcile that stale failed
-    // entry to `done` by card id.
-    let rows = sqlx::query(
-        "WITH target_dispatch AS (
-             SELECT kanban_card_id
-             FROM task_dispatches
-             WHERE id = $1
-         )
-         SELECT e.id, e.run_id, e.dispatch_id, e.slot_index, e.status
-         FROM auto_queue_entries e
-         JOIN target_dispatch d ON d.kanban_card_id = e.kanban_card_id
-         WHERE (
-                e.status = 'dispatched'
-            AND (
-                  e.dispatch_id = $1
-               OR COALESCE(
-                    (
-                        SELECT status
-                        FROM task_dispatches
-                        WHERE id = e.dispatch_id
-                        FOR SHARE
-                    ),
-                    ''
-                  ) IN ('cancelled', 'failed', 'superseded')
-            )
-         )
-         OR (
-                $2 = 'done'
-            AND e.status = 'failed'
-            AND (
-                  e.dispatch_id = $1
-               OR COALESCE(
-                    (
-                        SELECT status
-                        FROM task_dispatches
-                        WHERE id = e.dispatch_id
-                        FOR SHARE
-                    ),
-                    ''
-                  ) IN ('cancelled', 'failed', 'superseded')
-               OR EXISTS (
-                    SELECT 1
-                    FROM auto_queue_entry_dispatch_history h
-                    WHERE h.entry_id = e.id
-                      AND h.dispatch_id = $1
-               )
-            )
-         )
-         FOR UPDATE OF e",
-    )
-    .bind(dispatch_id)
-    .bind(new_status)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| {
-        format!("load postgres auto-queue entries for dispatch {dispatch_id}: {error}")
-    })?;
-
-    let mut changed = 0usize;
-    let mut affected_run_ids = BTreeSet::new();
-    for row in rows {
-        let entry_id: String = row.try_get("id").map_err(|error| {
-            format!("decode postgres auto-queue entry id for {dispatch_id}: {error}")
-        })?;
-        let run_id: String = row.try_get("run_id").map_err(|error| {
-            format!("decode postgres auto-queue entry run_id for {dispatch_id}: {error}")
-        })?;
-        let linked_dispatch_id: Option<String> = row.try_get("dispatch_id").map_err(|error| {
-            format!("decode postgres auto-queue entry dispatch_id for {dispatch_id}: {error}")
-        })?;
-        let slot_index: Option<i64> = row.try_get("slot_index").map_err(|error| {
-            format!("decode postgres auto-queue entry slot_index for {dispatch_id}: {error}")
-        })?;
-        let entry_status: String = row.try_get("status").map_err(|error| {
-            format!("decode postgres auto-queue entry status for {dispatch_id}: {error}")
-        })?;
-        let update_trigger_source =
-            if entry_status == ENTRY_STATUS_FAILED && new_status == ENTRY_STATUS_DONE {
-                "dispatch_terminal_reconcile"
-            } else {
-                trigger_source
-            };
-        let result = update_entry_status_on_pg_tx(
-            tx,
-            &entry_id,
-            new_status,
-            update_trigger_source,
-            &EntryStatusUpdateOptions::default(),
-        )
-        .await?;
-        if result.changed {
-            if entry_status == ENTRY_STATUS_FAILED && new_status == ENTRY_STATUS_DONE {
-                record_entry_dispatch_history_on_pg(tx, &entry_id, dispatch_id, trigger_source)
-                    .await?;
-            }
-            if preserve_dispatch_link {
-                if let Some(linked_dispatch_id) = linked_dispatch_id {
-                    sqlx::query(
-                        "UPDATE auto_queue_entries
-                         SET dispatch_id = $1,
-                             slot_index = $2
-                         WHERE id = $3
-                           AND dispatch_id IS NULL
-                           AND status = $4",
-                    )
-                    .bind(&linked_dispatch_id)
-                    .bind(slot_index)
-                    .bind(&entry_id)
-                    .bind(new_status)
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(|error| {
-                        format!("restore postgres auto-queue entry lineage for {entry_id}: {error}")
-                    })?;
-                }
-            }
-            affected_run_ids.insert(run_id);
-            changed += 1;
-        }
-    }
-
-    Ok(DispatchTerminalEntrySyncResult {
-        changed_entries: changed,
-        affected_run_ids: affected_run_ids.into_iter().collect(),
-        finalized_run_ids: Vec::new(),
-    })
-}
-
-/// Canonical completed-dispatch entry finalizer.
-///
-/// Normal dispatch completion reaches `task_dispatches.status = completed`
-/// first, then derives the linked auto-queue entry terminal state here. Runs
-/// with review disabled have no review/card-terminal hook left to close them,
-/// so this helper is also responsible for invoking the only run completion
-/// writer, `maybe_finalize_run_if_ready_pg`, after the entry reaches `done`.
-pub async fn finalize_completed_dispatch_terminal_entry_on_pg_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    dispatch_id: &str,
-    trigger_source: &str,
-    preserve_dispatch_link: bool,
-) -> Result<DispatchTerminalEntrySyncResult, String> {
-    let mut result = sync_dispatch_terminal_entries_on_pg_tx_result(
-        tx,
-        dispatch_id,
-        ENTRY_STATUS_DONE,
-        trigger_source,
-        preserve_dispatch_link,
-    )
-    .await?;
-
-    for run_id in &result.affected_run_ids {
-        if auto_queue_run_review_disabled_on_pg_tx(tx, &run_id).await?
-            && maybe_finalize_run_if_ready_pg(tx, &run_id).await?
-        {
-            result.finalized_run_ids.push(run_id.clone());
-        }
-    }
-
-    Ok(result)
-}
-
 /// Transaction-scoped equivalent of [`load_entry_status_row_pg`] used by
-/// [`update_entry_status_on_pg_tx`].
+/// [`write_entry_status_on_pg_tx`].
 ///
 /// Note: `agent_id` is nullable in the PG schema (see
 /// `migrations/postgres/0001_initial_schema.sql`) — older fixtures and
@@ -1349,6 +1136,34 @@ async fn load_entry_status_row_pg_tx(
             .try_get("completed_at")
             .map_err(|error| format!("decode auto-queue entry {entry_id} completed_at: {error}"))?,
     })
+}
+
+/// Puts back the dispatch link a terminal entry write cleared, when the caller keeps lineage.
+async fn restore_entry_dispatch_link_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: &str,
+    linked_dispatch_id: &str,
+    slot_index: Option<i64>,
+    status: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE auto_queue_entries
+         SET dispatch_id = $1,
+             slot_index = $2
+         WHERE id = $3
+           AND dispatch_id IS NULL
+           AND status = $4",
+    )
+    .bind(linked_dispatch_id)
+    .bind(slot_index)
+    .bind(entry_id)
+    .bind(status)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("restore postgres auto-queue entry lineage for {entry_id}: {error}")
+    })?;
+    Ok(())
 }
 
 async fn record_entry_dispatch_history_on_pg(
@@ -1657,6 +1472,9 @@ async fn record_entry_transition_on_pg(
 mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::auto_queue::transactions::{
+        update_entry_status_on_pg, update_entry_status_on_pg_tx,
+    };
     use sqlx::{Connection, PgConnection, PgPool};
 
     async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {

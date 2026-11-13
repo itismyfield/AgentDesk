@@ -38,6 +38,7 @@ pub(super) struct LocalTuiTurn<'a> {
     pub session_id: Option<&'a str>,
     pub model: Option<&'a str>,
     pub fast_mode_enabled: Option<bool>,
+    pub effort: Option<&'a str>,
     pub goals_enabled: Option<bool>,
     pub working_dir: &'a str,
     pub sender: Sender<StreamMessage>,
@@ -61,6 +62,7 @@ pub(super) fn execute_observed(
         session_id,
         model,
         fast_mode_enabled,
+        effort,
         goals_enabled,
         working_dir,
         sender,
@@ -89,6 +91,10 @@ pub(super) fn execute_observed(
             observer(observation, cancel_token.as_ref());
         }
     });
+    let publisher_observation =
+        crate::services::tmux_common::runtime_hint_fence::TmuxPublisherObservation::capture(
+            tmux_session_name,
+        )?;
     let captured = (!clear_relaunch::relaunch_open(tmux_session_name))
         .then(|| {
             observation
@@ -125,7 +131,7 @@ pub(super) fn execute_observed(
                     .with_resume_session_id(Some(session_id))
                     .with_developer_instructions(developer_instructions)
                     .with_model(model)
-                    .with_reasoning_effort(codex_reasoning_effort_from_env().as_deref())
+                    .with_reasoning_effort(effort::resolve(effort, None).as_deref())
                     .with_compact_token_limit(compact_token_limit)
                     .with_readonly_mode(readonly_mode)
                     .with_fast_mode_enabled(fast_mode_enabled)
@@ -171,7 +177,7 @@ pub(super) fn execute_observed(
         None,
         force_fresh_provider_session,
     );
-    let reasoning_effort = codex_reasoning_effort_from_env();
+    let reasoning_effort = effort::resolve(effort, None);
     let launch_options = CodexLaunchOptions::new(prompt)
         .with_resume_session_id(session_selection.resume_session_id())
         .with_developer_instructions(developer_instructions)
@@ -203,6 +209,7 @@ pub(super) fn execute_observed(
             prompt,
             model,
             fast_mode_enabled,
+            effort,
             goals_enabled,
             session_id,
             working_dir,
@@ -279,6 +286,17 @@ pub(super) fn execute_observed(
         );
     }
 
+    let fence = match publisher_observation.acquire() {
+        Ok(fence) => fence,
+        Err(_) if captured.is_some() => {
+            return verified_hold::wait_for_cancel(tmux_session_name, cancel_token.as_ref());
+        }
+        Err(error) => return Err(error),
+    };
+    fence.validate_tmux_publisher(tmux_session_name)?;
+    if crate::services::herdr_launch::herdr_configured_for_tui_launch(report_channel_id) {
+        return Err(crate::services::herdr_launch::HERDR_NOT_ADMITTED.to_string());
+    }
     let cleaned =
         crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
             if captured.is_some_and(|captured| {
@@ -286,23 +304,25 @@ pub(super) fn execute_observed(
                     clear_relaunch::absent_matches_under(authority, observed, captured)
                 })
             }) {
-                return false;
+                return Ok(false);
             }
             #[cfg(test)]
             actual_submit_tests::note_dead_temp_cleanup(tmux_session_name, "session_temp");
             crate::services::tmux_common::cleanup_session_temp_files_under_source_authority(
                 authority,
                 tmux_session_name,
-            );
+                &fence,
+            )?;
             #[cfg(test)]
             actual_submit_tests::note_dead_temp_cleanup(tmux_session_name, "codex_session_files");
             crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(
                 tmux_session_name,
             )
             .cleanup_best_effort();
-            true
-        });
+            Ok::<_, String>(true)
+        })?;
     if !cleaned {
+        drop(fence);
         return verified_hold::wait_for_cancel(tmux_session_name, cancel_token.as_ref());
     }
 
@@ -326,7 +346,7 @@ pub(super) fn execute_observed(
         &launch_options,
         (report_channel_id, report_provider),
         warm_followup_enabled,
-        (&auth_overlay, prepared),
+        (&auth_overlay, prepared, fence),
     )?;
     if let Some(channel_id) = report_channel_id {
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
@@ -339,6 +359,7 @@ pub(super) fn execute_observed(
             clear_relaunch::absent_matches(tmux_session_name, observed, captured)
         })
     }) {
+        drop(launch);
         return verified_hold::wait_for_cancel(tmux_session_name, cancel_token.as_ref());
     }
     tui_session_launch::tui_preflight_with_policy(

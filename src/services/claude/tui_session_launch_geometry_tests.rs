@@ -85,6 +85,7 @@ impl Lab {
             None,
             channel,
             false,
+            None,
         )
         .map(|_| ())
     }
@@ -183,6 +184,17 @@ fn claude_launch_guarded_and_other_channels_use_regular_sessions() {
         ("AgentDesk-cga-none", None),
     ] {
         lab.launch(name, channel).unwrap();
+        let marker = lab.real(&[
+            "show-environment",
+            "-t",
+            &format!("={name}"),
+            "AGENTDESK_IDENTITY",
+        ]);
+        let identity =
+            crate::domain::session_identity::managed::ManagedIdentity::decode_environment(
+                std::str::from_utf8(&marker.stdout).unwrap(),
+            )
+            .unwrap();
         let launched = lab.take_calls();
         let geometry = lab.geometry(name);
         for evidence in [
@@ -206,7 +218,13 @@ fn claude_launch_guarded_and_other_channels_use_regular_sessions() {
         let script = tc::session_temp_path(name, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT);
         let command = format!("bash {}", super::shell_escape(&script));
         let dir = lab.root.path().to_str().unwrap();
-        crate::services::platform::tmux::create_session(name, Some(dir), &command).unwrap();
+        crate::services::platform::tmux::create_session_with_identity(
+            name,
+            Some(dir),
+            &command,
+            &identity,
+        )
+        .unwrap();
         let direct = lab.take_calls();
         assert_eq!(
             launched.first(),

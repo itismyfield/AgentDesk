@@ -1,9 +1,9 @@
 use super::super::*;
 use super::super::{queue_marker, queue_reactions};
 use super::intake_queue_transaction::{
-    IntakeQueueAuthorClass, IntakeQueueCommitOptions, IntakeQueueCommitSource,
-    IntakeQueuePendingReactionPolicy, SoftInterventionCommitRequest, SoftInterventionSpec,
-    commit_soft_intervention_transaction,
+    IntakeQueueAuthorClass, IntakeQueueCommitOptions, IntakeQueueCommitOutcome,
+    IntakeQueueCommitSource, IntakeQueuePendingReactionPolicy, SoftInterventionCommitRequest,
+    SoftInterventionSpec, commit_soft_intervention_transaction,
 };
 pub(crate) use crate::services::cluster::intake_router_hook::owner_record::input_start;
 
@@ -33,6 +33,29 @@ use reply_context::build_reply_context;
 use stale_turn::{
     mailbox_has_live_active_turn_or_cleanup_stale_proof, thread_guard_release_stale_thread,
 };
+
+async fn report_queue_save_failure(
+    ctx: &serenity::Context,
+    data: &Data,
+    commit: &IntakeQueueCommitOutcome,
+) -> Result<(), Error> {
+    if !commit.failed() {
+        return Ok(());
+    }
+    rate_limit_wait(&data.shared, commit.channel_id).await;
+    let _ = commit
+        .channel_id
+        .say(
+            &ctx.http,
+            "⚠️ 메시지 큐 저장 중 오류가 감지되어 접수 표시를 생략했어.",
+        )
+        .await;
+    Err(format!(
+        "message queue save failed in channel {} for message {}",
+        commit.channel_id, commit.message_id
+    )
+    .into())
+}
 
 async fn append_pending_uploads(
     shared: &std::sync::Arc<SharedData>,
@@ -851,14 +874,8 @@ pub(in crate::services::discord) async fn handle_event(
                         if released {
                             // Fall through to normal processing below.
                         } else {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] 🔀 THREAD-GUARD: bot message to parent {} queued (dispatch thread {} active)",
-                                channel_id,
-                                thread_id
-                            );
                             let mut queue_effects = IntakeGateQueueEffects { ctx, data };
-                            let _commit = commit_soft_intervention_transaction(
+                            let commit = commit_soft_intervention_transaction(
                                 &mut queue_effects,
                                 SoftInterventionCommitRequest {
                                     source: IntakeQueueCommitSource::ThreadGuard,
@@ -883,6 +900,15 @@ pub(in crate::services::discord) async fn handle_event(
                                 },
                             )
                             .await;
+                            report_queue_save_failure(ctx, data, &commit).await?;
+                            if commit.accepted() {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::info!(
+                                    "  [{ts}] 🔀 THREAD-GUARD: bot message to parent {} queued (dispatch thread {} active)",
+                                    channel_id,
+                                    thread_id
+                                );
+                            }
                             return Ok(());
                         }
                     } else {
@@ -931,6 +957,7 @@ pub(in crate::services::discord) async fn handle_event(
                         },
                     )
                     .await;
+                    report_queue_save_failure(ctx, data, &commit).await?;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     if commit.accepted() {
                         tracing::info!(
@@ -988,19 +1015,12 @@ pub(in crate::services::discord) async fn handle_event(
                     )
                     .await
                 };
+                if report_queue_save_failure(ctx, data, &commit).await.is_err() {
+                    return Ok(());
+                }
                 let enqueued = commit.accepted();
 
                 if !commit.accepted() {
-                    if commit.failed() {
-                        rate_limit_wait(&data.shared, channel_id).await;
-                        let _ = channel_id
-                            .say(
-                                &ctx.http,
-                                "⚠️ 메시지 큐 저장 중 오류가 감지되어 접수 표시를 생략했어.",
-                            )
-                            .await;
-                        return Ok(());
-                    }
                     if busy_duplicate_notice::silence_if_already_queued(
                         commit.refusal_reason(),
                         new_message.id,
@@ -1061,7 +1081,7 @@ pub(in crate::services::discord) async fn handle_event(
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
                 let mut queue_effects = IntakeGateQueueEffects { ctx, data };
-                let _commit = commit_soft_intervention_transaction(
+                let commit = commit_soft_intervention_transaction(
                     &mut queue_effects,
                     SoftInterventionCommitRequest {
                         source: IntakeQueueCommitSource::ReconcileGate,
@@ -1090,6 +1110,7 @@ pub(in crate::services::discord) async fn handle_event(
                     },
                 )
                 .await;
+                report_queue_save_failure(ctx, data, &commit).await?;
                 return Ok(());
             }
 

@@ -84,9 +84,33 @@ type Attempted = (
     Arc<std::sync::Mutex<Option<Value>>>,
 );
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FaultCase {
+    None,
+    StartAfterStash,
+    PinAfterPaste,
+    EnterReplyLost,
+}
+
+struct SafetyAttempt {
+    first: Attempted,
+    restarted: Option<Value>,
+    retry_leaves: usize,
+}
+
 /// One owner attempt on a Herdr pane showing `screen` whose logical session is not its pane id;
 /// `logged` makes Claude record the pasted frame on Enter, and `writer` is the pane the owner binds.
 fn attempt(channel: u64, logged: bool, writer: Option<&str>, screen: Value) -> Attempted {
+    attempt_case(channel, logged, writer, screen, FaultCase::None).first
+}
+
+fn attempt_case(
+    channel: u64,
+    logged: bool,
+    writer: Option<&str>,
+    screen: Value,
+    fault: FaultCase,
+) -> SafetyAttempt {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(channel, NODE)]);
     let rig = HerdrRig::start();
@@ -108,15 +132,43 @@ fn attempt(channel: u64, logged: bool, writer: Option<&str>, screen: Value) -> A
         .unwrap()
         .join("claude/input-owner-herdr");
     let stashed = Arc::new(std::sync::Mutex::new(None));
+    let sender_scope = Arc::new(std::sync::Mutex::new(
+        None::<(
+            tokio::runtime::Handle,
+            crate::services::turn_orchestrator::ChannelMailboxHandle,
+        )>,
+    ));
+    type RestoreFault = Box<dyn FnOnce() + Send>;
+    let restore_fault = Arc::new(std::sync::Mutex::new(None::<RestoreFault>));
     {
         let path = transcript.clone();
         let mut pasted = String::new();
         let (file, stash) = (queue.join(format!("{channel}.json")), stashed.clone());
+        let (scope, restore) = (sender_scope.clone(), restore_fault.clone());
         rig.on_send(move |params| {
             if params["keys"] == json!(["ctrl+s"]) {
                 let raw = std::fs::read_to_string(&file).unwrap_or_default();
                 let owner: Value = serde_json::from_str(&raw).unwrap_or_default();
                 *stash.lock().unwrap() = Some(owner["head_injection"].clone());
+                if fault == FaultCase::StartAfterStash {
+                    let (runtime, mailbox) = scope.lock().unwrap().as_ref().unwrap().clone();
+                    let previous = runtime
+                        .block_on(mailbox.v2_request(|slot| {
+                            let owner = slot.as_mut().ok_or("no owner")?;
+                            let previous = owner.fault;
+                            owner.cancel_fault_for_tests(true);
+                            Ok(previous)
+                        }))
+                        .unwrap();
+                    *restore.lock().unwrap() = Some(Box::new(move || {
+                        runtime
+                            .block_on(mailbox.v2_request(move |slot| {
+                                slot.as_mut().ok_or("no owner")?.fault = previous;
+                                Ok(())
+                            }))
+                            .unwrap();
+                    }));
+                }
             }
             if !logged {
                 return;
@@ -153,6 +205,20 @@ fn attempt(channel: u64, logged: bool, writer: Option<&str>, screen: Value) -> A
     let _entered = runtime.enter();
     let registry = ChannelMailboxRegistry::default();
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+    *sender_scope.lock().unwrap() = Some((runtime.handle().clone(), mailbox.clone()));
+    if fault == FaultCase::PinAfterPaste {
+        use crate::services::session_host::herdr_socket_rig_tests::NEW_SHELL;
+        rig.answer_after_send(
+            "pane.process_info",
+            json!({"type":"pane_process_info",
+            "process_info":{"pane_id":PANE,"shell_pid":NEW_SHELL,
+                "foreground_process_group_id":NEW_SHELL,
+                "foreground_processes":[{"pid":NEW_SHELL}]}}),
+        );
+    }
+    if fault == FaultCase::EnterReplyLost {
+        rig.answer_sends_then_leave_unanswered(1);
+    }
     let id = 8_000_000_000_000_007_000 + channel % 1000;
     let original: PendingQueueItem = serde_json::from_value(json!({"author_id":7,
         "message_id":id,"channel_id":channel,"source_message_ids":[id],
@@ -172,6 +238,12 @@ fn attempt(channel: u64, logged: bool, writer: Option<&str>, screen: Value) -> A
                 "transcript":transcript.display().to_string(),
                 "file":[meta.dev(), meta.ino()],"offset":meta.len()}}),
     };
+    let retry_payload = || PreparedPayload {
+        frame: prepared.frame.clone(),
+        sources: prepared.sources.clone(),
+        attempt: prepared.attempt.clone(),
+    };
+    let (first_retry, second_retry) = (retry_payload(), retry_payload());
     let physical = format!("{}#{PANE}", rig.socket().display());
     let leaf = BusyClaudeHerdr {
         target,
@@ -186,6 +258,13 @@ fn attempt(channel: u64, logged: bool, writer: Option<&str>, screen: Value) -> A
         text: PROMPT.into(),
     }
     .leaf();
+    let leaf: Leaf = Box::new(move |frame| {
+        let result = leaf(frame);
+        if let Some(restore) = restore_fault.lock().unwrap().take() {
+            restore();
+        }
+        result
+    });
     let completion = runtime.block_on(async {
         std::fs::create_dir_all(&queue).unwrap();
         mailbox
@@ -206,7 +285,50 @@ fn attempt(channel: u64, logged: bool, writer: Option<&str>, screen: Value) -> A
     let snapshot = runtime
         .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
         .unwrap();
-    (rig, completion.unwrap(), snapshot, nonce, stashed)
+    *sender_scope.lock().unwrap() = None;
+    drop(mailbox);
+    drop(registry);
+    let retry_leaves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let restarted = (fault != FaultCase::None).then(|| {
+        runtime.block_on(async {
+            let registry = ChannelMailboxRegistry::default();
+            let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+            mailbox
+                .v2_adopt(queue.join(format!("{channel}.json")), "input-owner".into())
+                .await
+                .unwrap();
+            for prepared in [first_retry, second_retry] {
+                let runs = retry_leaves.clone();
+                let leaf: Leaf = Box::new(move |_| {
+                    runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(Completion::Submitted)
+                });
+                assert!(
+                    pump::submit(&mailbox, prepared, Arc::new(|| 200_000), leaf)
+                        .await
+                        .is_err(),
+                    "a possibly keyed original must never acquire another effect"
+                );
+                mailbox
+                    .v2_request(|slot| {
+                        let owner = slot.as_mut().ok_or("no owner")?;
+                        owner.tick(200_000)?;
+                        owner.requeue_known_not_sent().map(drop)
+                    })
+                    .await
+                    .unwrap();
+            }
+            mailbox
+                .v2_request(|s| s.as_ref().unwrap().json())
+                .await
+                .unwrap()
+        })
+    });
+    SafetyAttempt {
+        first: (rig, completion.unwrap(), snapshot, nonce, stashed),
+        restarted,
+        retry_leaves: retry_leaves.load(std::sync::atomic::Ordering::SeqCst),
+    }
 }
 
 fn alerts(nonce: &str) -> usize {
@@ -372,7 +494,13 @@ fn the_tmux_owner_parks_only_what_the_herdr_owner_parks() {
         tmux.clear();
         tmux.show(&screen);
         let (session, nonce) = (format!("owner-park-{at}"), format!("0a1b2c3{at}"));
-        let pane = busy_inject::Pane::with_program(&session, "tmux".into());
+        let pane = busy_inject::Pane::with_program(
+            &session,
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                "tmux".into(),
+            ),
+        )
+        .expect("managed scripted pane");
         let request = busy_inject::Request {
             session: &session,
             transcript: &transcript,
@@ -410,3 +538,6 @@ fn the_tmux_owner_parks_only_what_the_herdr_owner_parks() {
         );
     }
 }
+
+#[path = "herdr_safety_tests.rs"]
+mod safety_tests;

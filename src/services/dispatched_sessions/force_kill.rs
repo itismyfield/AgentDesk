@@ -370,8 +370,16 @@ pub(super) async fn fail_or_retry(
                 context: Some(ctx.to_string()),
                 retry_count,
             };
-            match dispatched_sessions_db::create_retry_dispatch_pg(pool, &meta).await {
+            match crate::services::auto_queue::transactions::create_retry_dispatch_pg(pool, &meta)
+                .await
+            {
                 Ok(new_id) => {
+                    crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
+                        pool.clone(),
+                        "constraint_release",
+                        meta.origin_dispatch_id.clone(),
+                        "dispatch_terminal_status",
+                    );
                     retry_dispatch_id = Some(new_id);
                 }
                 Err(e) => {
@@ -405,3 +413,7 @@ pub(super) fn activates_auto_queue(
 ) -> bool {
     retry_dispatch_id.is_none() && retry_skipped_reason.is_none()
 }
+
+#[cfg(test)]
+#[path = "force_kill/retry_wake_tests.rs"]
+mod retry_wake_tests;

@@ -1072,10 +1072,11 @@ impl PipelineConfig {
         }
 
         // Clock fields must reference valid states
-        for state in self.clocks.keys() {
+        for (state, clock) in &self.clocks {
             if !state_ids.contains(&state.as_str()) {
                 anyhow::bail!("clock for unknown state: {}", state);
             }
+            crate::db::kanban_cards::clock_columns::validate_set(state, &clock.set)?;
         }
 
         // Hook bindings must reference valid states
@@ -1491,7 +1492,7 @@ mod schema_strictness_tests {
             },
             "hooks": { "review": { "on_enter": ["OnReviewEnter"], "on_exit": [] } },
             "events": { "on_error": [] },
-            "clocks": { "review": { "set": "on_enter", "mode": "reset" } },
+            "clocks": { "review": { "set": "review_entered_at", "mode": "reset" } },
             "timeouts": {
                 "review": {
                     "duration": "2h",

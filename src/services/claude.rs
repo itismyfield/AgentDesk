@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use crate::services::claude_tui::guarded_outcome::{self, OwnedWarmOutcome, SubmissionError};
+pub(crate) mod capability_probe;
 mod process_session_launch;
 pub(crate) use process_session_launch::execute_streaming_local_process;
 
@@ -1707,6 +1708,10 @@ fn execute_streaming_local_tui_tmux(
     hook_endpoint: String,
 ) -> Result<(), String> {
     host_gate::tmux_turn_admitted(tmux_session_name)?;
+    let publisher_observation =
+        crate::services::tmux_common::runtime_hint_fence::TmuxPublisherObservation::capture(
+            tmux_session_name,
+        )?;
     debug_log(&format!(
         "=== execute_streaming_local_tui_tmux START: {} ===",
         tmux_session_name
@@ -1795,7 +1800,7 @@ fn execute_streaming_local_tui_tmux(
     let returned = matches!(teardown, Some(TeardownClearance::Returned));
     let mut starts =
         (returned && resume).then(crate::services::claude_tui::hook_server::subscribe_hook_events);
-    let (owner_path, prepared) = prepare_and_create_claude_tui_session(
+    let (owner_path, prepared, fence) = prepare_and_create_claude_tui_session(
         tmux_session_name,
         working_dir,
         working_dir_path,
@@ -1808,6 +1813,7 @@ fn execute_streaming_local_tui_tmux(
         claude_home,
         report_channel_id,
         returned && session_exists,
+        Some(publisher_observation),
     )?;
     crate::services::tmux_common::write_tmux_session_auth_profile(
         tmux_session_name,
@@ -1823,10 +1829,12 @@ fn execute_streaming_local_tui_tmux(
     }
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
+    fence.validate_tmux_publisher(tmux_session_name)?;
     prepared.finish_spawn(crate::services::discord::stamp_spawn_markers(
         tmux_session_name,
         Some(&prepared),
     ))?;
+    drop(fence);
     if let Some(starts) = starts.as_mut() {
         let nonce = &prepared.context.execution_nonce;
         let cancel = cancel_token.as_deref();
@@ -2396,6 +2404,10 @@ fn execute_streaming_local_tmux(
     compact_lower_bound_tokens: u64,
 ) -> Result<(), String> {
     host_gate::tmux_turn_admitted(tmux_session_name)?;
+    let publisher_observation =
+        crate::services::tmux_common::runtime_hint_fence::TmuxPublisherObservation::capture(
+            tmux_session_name,
+        )?;
     debug_log(&format!(
         "=== execute_streaming_local_tmux START: {} ===",
         tmux_session_name
@@ -2591,7 +2603,15 @@ fn execute_streaming_local_tmux(
     }
 
     // Clean up any leftover files in both persistent and legacy locations.
-    crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
+    let fence = publisher_observation.acquire()?;
+    fence.validate_tmux_publisher(tmux_session_name)?;
+    if crate::services::herdr_launch::herdr_configured_for_tui_launch(report_channel_id) {
+        return Err(crate::services::herdr_launch::HERDR_NOT_ADMITTED.to_string());
+    }
+    crate::services::tmux_common::cleanup_session_temp_files_under_fence(
+        &fence,
+        tmux_session_name,
+    )?;
 
     // Create output file (empty)
     std::fs::write(&output_path, "").map_err(|e| format!("Failed to create output file: {}", e))?;
@@ -2613,7 +2633,8 @@ fn execute_streaming_local_tmux(
     std::fs::write(&prompt_path, prompt)
         .map_err(|e| format!("Failed to write prompt file: {}", e))?;
     write_tmux_owner_marker(tmux_session_name)?;
-    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+    crate::services::tmux_common::write_tmux_runtime_kind_marker_under_fence(
+        &fence,
         tmux_session_name,
         crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper,
     )?;
@@ -2674,10 +2695,17 @@ fn execute_streaming_local_tmux(
     ));
 
     // Launch tmux session with script file (avoids command length limits)
-    let tmux_result = crate::services::platform::tmux::create_session(
+    fence.validate_tmux_publisher(tmux_session_name)?;
+    let tmux_result = crate::services::platform::tmux::create_session_with_identity(
         tmux_session_name,
         Some(working_dir),
         &format!("bash {}", shell_escape(&script_path)),
+        &crate::services::session_identity_metadata::provider_identity(
+            tmux_session_name,
+            "claude",
+            report_channel_id,
+            "wrapper",
+        )?,
     )?;
 
     if !tmux_result.status.success() {
@@ -2704,12 +2732,14 @@ fn execute_streaming_local_tmux(
     // distinct spawns into one instance key. Write errors are logged (not
     // silently swallowed) since a missing nonce degrades the panel-reset
     // boundary to best-effort.
+    fence.validate_tmux_publisher(tmux_session_name)?;
     if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name, None) {
         debug_log(&format!(
             "failed to write spawn nonce for {tmux_session_name}: {e}"
         ));
     }
 
+    drop(fence);
     session_prompt::claude_args(args);
     emit_fresh_session_watcher_handoff(&sender, output_path, input_fifo_path, tmux_session_name);
     log_producer_exit(

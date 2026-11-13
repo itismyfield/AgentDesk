@@ -15,6 +15,8 @@ pub(in crate::services::discord) use refusal::Refusal;
 
 #[path = "admission_refusal.rs"]
 mod refusal;
+#[path = "worker_handoff.rs"]
+mod worker_handoff;
 
 #[derive(Debug, Clone)]
 pub(in crate::services::discord) struct Hold {
@@ -478,7 +480,7 @@ pub(in crate::services::discord::router) async fn worker(
             .record(vec![intent.clone()])
             .await
             .map_err(Code::Record.of())?;
-        crate::db::intake_outbox::consent_handoff::hold_before_effects(
+        worker_handoff::hold(
             pool,
             proof
                 .take()

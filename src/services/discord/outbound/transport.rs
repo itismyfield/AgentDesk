@@ -1,8 +1,7 @@
 //! Shared Discord outbound transport and in-process dedup primitives.
 //!
-//! The v3 envelope/policy/result modules own outbound delivery semantics.
-//! This module keeps the transport trait, HTTP/Serenity implementations, and
-//! temporary in-memory deduper used by production callers and tests.
+//! The transport port lives in `domain::outbound::port`; this adapter keeps the
+//! HTTP/Serenity implementations and the in-memory dedup authority.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -13,10 +12,12 @@ use serenity::{ChannelId, MessageId};
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
-use crate::services::discord::SharedData;
-use crate::services::dispatches::discord_delivery::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind,
+use crate::domain::outbound::intent::OutboundIntent;
+use crate::domain::outbound::port::{
+    DiscordOutboundClient, DispatchMessagePostError, DispatchMessagePostErrorKind, OutboundDelivery,
 };
+use crate::domain::outbound::result::DeliveryResult;
+use crate::services::discord::SharedData;
 
 pub(crate) async fn post_serenity_message_with_nonce(
     http: &Arc<serenity::Http>,
@@ -58,88 +59,6 @@ pub(crate) fn outbound_fingerprint(parts: &[&str]) -> String {
     }
     let digest = hasher.finalize();
     format!("{digest:x}").chars().take(16).collect()
-}
-
-/// Transport abstraction over the Discord HTTP API. Production code uses an
-/// implementation that wraps `reqwest`; tests inject a deterministic mock.
-#[allow(async_fn_in_trait)]
-pub(crate) trait DiscordOutboundClient: Send + Sync {
-    /// Post `content` to `target_channel` (a channel id or thread id).
-    /// Returns the created message id on success.
-    async fn post_message(
-        &self,
-        target_channel: &str,
-        content: &str,
-    ) -> Result<String, DispatchMessagePostError>;
-
-    /// Post `content` as a reply/reference to another message. Clients that
-    /// cannot express references may fall back to a plain post.
-    async fn post_message_with_reference(
-        &self,
-        target_channel: &str,
-        content: &str,
-        _reference_channel: &str,
-        _reference_message: &str,
-    ) -> Result<String, DispatchMessagePostError> {
-        self.post_message(target_channel, content).await
-    }
-
-    /// Post with Discord's create-message nonce contract. Clients that do not
-    /// support nonces preserve legacy behavior; production Serenity clients
-    /// override this method.
-    async fn post_message_with_nonce(
-        &self,
-        target_channel: &str,
-        content: &str,
-        _nonce: &str,
-        _enforce_nonce: bool,
-    ) -> Result<String, DispatchMessagePostError> {
-        self.post_message(target_channel, content).await
-    }
-
-    /// Reference-bearing nonce variant used when a durable send is also a
-    /// reply. The default retains the reference even when the client cannot
-    /// express a nonce.
-    async fn post_message_with_reference_and_nonce(
-        &self,
-        target_channel: &str,
-        content: &str,
-        reference_channel: &str,
-        reference_message: &str,
-        _nonce: &str,
-        _enforce_nonce: bool,
-    ) -> Result<String, DispatchMessagePostError> {
-        self.post_message_with_reference(
-            target_channel,
-            content,
-            reference_channel,
-            reference_message,
-        )
-        .await
-    }
-
-    /// Edit an existing message. Returns the edited message id on success.
-    async fn edit_message(
-        &self,
-        target_channel: &str,
-        message_id: &str,
-        _content: &str,
-    ) -> Result<String, DispatchMessagePostError> {
-        Err(DispatchMessagePostError::new(
-            DispatchMessagePostErrorKind::Other,
-            format!(
-                "outbound client does not support edit for channel {target_channel} message {message_id}"
-            ),
-        ))
-    }
-
-    /// Resolve or create the DM channel for a Discord user id.
-    async fn resolve_dm_channel(&self, user_id: &str) -> Result<String, DispatchMessagePostError> {
-        Err(DispatchMessagePostError::new(
-            DispatchMessagePostErrorKind::Other,
-            format!("outbound client does not support DM channel resolution for user {user_id}"),
-        ))
-    }
 }
 
 /// In-memory dedup table keyed on the serialized v3 outbound dedup key.
@@ -346,6 +265,21 @@ impl HttpOutboundClient {
             token: token.into(),
             discord_api_base: discord_api_base.into(),
         }
+    }
+}
+
+/// Binds the process-wide deduper so callers cannot pick their own dedup store.
+impl OutboundDelivery for HttpOutboundClient {
+    fn deliver(
+        &self,
+        intent: OutboundIntent,
+    ) -> impl std::future::Future<Output = DeliveryResult> + Send {
+        super::delivery::deliver_outbound(
+            self,
+            super::shared_outbound_deduper(),
+            intent.into(),
+            None,
+        )
     }
 }
 

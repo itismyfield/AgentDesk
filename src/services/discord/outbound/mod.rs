@@ -12,7 +12,6 @@ pub(crate) mod confirmation;
 pub(crate) mod decision;
 pub(crate) mod delivery;
 pub(in crate::services::discord) mod delivery_frontier_probe;
-pub(in crate::services::discord) mod delivery_obligation;
 pub(in crate::services::discord) mod delivery_record; // #3089 B0
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
@@ -22,6 +21,8 @@ pub(in crate::services::discord) mod o_delivery_evidence;
 mod o_delivery_manifest;
 pub(crate) mod o_writer_io;
 pub(in crate::services::discord) mod o_writer_legacy;
+#[cfg(test)]
+mod outbound_delivery_port_tests;
 pub(crate) mod policy;
 pub(in crate::services::discord) mod reaction_control;
 // Read-only projection over `delivery_record`'s evidence, without verdict authority.
@@ -40,6 +41,7 @@ pub(crate) mod source_registry;
 mod transport;
 pub(in crate::services::discord) mod turn_output_controller; // #3089 A1
 
+pub(crate) use crate::domain::outbound::port::DiscordOutboundClient;
 pub(crate) use decision::{
     DISCORD_MESSAGE_HARD_LIMIT_CHARS as DISCORD_HARD_LIMIT_CHARS,
     DISCORD_MESSAGE_SAFE_CHARS as DISCORD_SAFE_LIMIT_CHARS,
@@ -48,8 +50,8 @@ pub(crate) use message::DiscordOutboundMessage;
 pub(crate) use policy::DiscordOutboundPolicy;
 pub(crate) use result::{DeliveryResult, DiscordTransportReceipt};
 pub(crate) use transport::{
-    DiscordOutboundClient, HttpOutboundClient, OutboundDedupClaim, OutboundDedupReservation,
-    OutboundDedupWait, OutboundDeduper, outbound_fingerprint, post_serenity_message_with_nonce,
+    HttpOutboundClient, OutboundDedupClaim, OutboundDedupReservation, OutboundDedupWait,
+    OutboundDeduper, outbound_fingerprint, post_serenity_message_with_nonce,
 };
 
 /// Process-wide in-memory outbound deduper shared by every Discord producer.

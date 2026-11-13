@@ -233,7 +233,9 @@ fn adopt(
     #[cfg(test)]
     test_hook::run(channel, test_hook::Step::BeforeWrite)?;
     let at = Instant::now();
-    let created = create(store, channel, sources, origin);
+    let created = candidate
+        .init_scope(channel)
+        .and_then(|scope| create(store, channel, sources, origin, &scope));
     #[cfg(test)]
     let created = created.and_then(|()| test_hook::run(channel, test_hook::Step::AfterWrite));
     spent.write = since(at);
@@ -284,18 +286,20 @@ fn create(
     channel: u64,
     sources: Vec<InitSource>,
     origin: InitOrigin,
+    scope: &crate::services::session_host::surface_policy::InitScope,
 ) -> Result<(), String> {
     if store.has_channel_dir(channel) {
         return Err("the channel has store files but no init".into());
     }
     let init = Initialized {
+        policy_parent: None,
         channel,
         sources,
         initial_anchor: 0,
         build_digest: env!("CARGO_PKG_VERSION").into(),
         at: Utc::now(),
     };
-    let created = store.begin_era_as(&init, origin);
+    let created = store.begin_era_as(&init, origin, scope);
     created.map_err(|error| format!("init: {error:?}"))?;
     let count = init.sources.len();
     tracing::info!(

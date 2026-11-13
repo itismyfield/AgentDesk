@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use crate::services::campaign_execution::definition::ValidatedDefinition;
+use crate::domain::campaign::definition::ValidatedDefinition;
 
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

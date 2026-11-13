@@ -642,7 +642,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
     }
 
     // Look up agent's discord channel
-    let channel_id = crate::db::dispatches::resolve_dispatch_delivery_channel_pg(
+    let channel_id = crate::services::agent_channels::resolve_dispatch_delivery_channel_pg(
         pool,
         agent_id,
         card_id,
@@ -1335,11 +1335,12 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
         };
     }
 
-    let channel_id = crate::db::dispatches::resolve_review_followup_channel_pg(pool, &agent_id)
-        .await?
-        .ok_or_else(|| {
-            format!("agent {agent_id} missing primary discord channel for review followup")
-        })?;
+    let channel_id =
+        crate::services::agent_channels::resolve_review_followup_channel_pg(pool, &agent_id)
+            .await?
+            .ok_or_else(|| {
+                format!("agent {agent_id} missing primary discord channel for review followup")
+            })?;
 
     let channel_id_num: u64 = match channel_id.parse() {
         Ok(n) => n,

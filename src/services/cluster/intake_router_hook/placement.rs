@@ -94,7 +94,7 @@ pub(super) async fn route_by_preference(
                 })
                 .collect();
             if capacity_aware {
-                execution_capacity::rank(&mut eligible_nodes);
+                execution_capacity::rank(&mut eligible_nodes, preferred_node);
             }
             candidates_from_worker_nodes_json(&eligible_nodes)
         }

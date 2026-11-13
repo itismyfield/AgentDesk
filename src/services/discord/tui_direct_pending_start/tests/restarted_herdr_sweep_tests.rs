@@ -55,7 +55,11 @@ fn the_sweep_leaves_a_restarted_herdr_row_to_its_owner() {
             "the sweep's own age and frontier cutoff admit the row"
         );
 
-        assert!(!demote_leaked_foreign_inflight_if_current(&shared, &rec).await);
+        assert!(
+            !demote_leaked_foreign_inflight_if_current(&shared, &rec)
+                .await
+                .cleared
+        );
         let kept = crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
             .expect("the row stays for its owner");
         assert_eq!(kept.turn_nonce, state.turn_nonce);

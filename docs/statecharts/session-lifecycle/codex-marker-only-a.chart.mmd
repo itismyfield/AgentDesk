@@ -1,0 +1,39 @@
+stateDiagram-v2
+    [*] --> Observe
+    Observe --> Intent: eligible Missing or exact Legacy
+    Observe --> Notice: ineligible
+    Intent --> Recheck: durable intent
+    Recheck --> UnlinkCanonical: fresh fence and authority
+    UnlinkCanonical --> UnlinkLegacy
+    UnlinkLegacy --> ReceiptCommit
+    ReceiptCommit --> OutboxCommit
+    OutboxCommit --> Wake
+    Wake --> Admission
+    Admission --> Wait: before plus Legacy
+    Wait --> Wait
+    Admission --> Grant: typed fresh Legacy proof
+    Admission --> Ack: already settled outbox
+    Grant --> Create
+    Create --> Prompt
+    Prompt --> Ack
+    Intent --> Continuation: transient I/O error
+    UnlinkLegacy --> Continuation: partial unlink
+    ReceiptCommit --> Continuation: commit I/O error
+    Boot --> Recover: discovered intent, controller acquired
+    Recover --> Continuation: boot reobserve error
+    Continuation --> Observe: live controller, no intent yet
+    Continuation --> Recover: live controller, failures below 3
+    Continuation --> Stuck: controller dropped mutant
+    Stuck --> Stuck
+    Recover --> UnlinkCanonical: fresh recheck, same paths
+    Continuation --> Notice: budget exhausted
+    Notice --> Ack: preserve custody, explicit notice
+    Ack --> [*]
+    note right of Continuation
+      The same awaited callback continues.
+      No new timer, wake or input is assumed.
+    end note
+    note right of Prompt
+      Post-effect crash and replay are outside
+      this retry liveness proof.
+    end note

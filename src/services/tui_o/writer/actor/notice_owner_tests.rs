@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 const OWNER_NONCE: &str = "73320000000000000000000000000092";
 const NAMESPACE: &str = "notice-owner-tests";
 
+#[path = "notice_cache_tests.rs"]
+mod cache_tests;
 #[path = "notice_resume_tests.rs"]
 mod resume_tests;
 
@@ -168,6 +170,14 @@ impl Case {
     }
 
     async fn run(&self, actor: &mut Host) {
+        crate::services::tui_o::writer::restart_end::refresh(
+            &mut actor.writer,
+            &mut actor.deriver,
+            actor.bindings.as_ref(),
+            ShadowProvider::Claude,
+        )
+        .await
+        .unwrap();
         let fresh = actor.read_sources();
         actor.prepare_notices(&fresh).await;
         actor

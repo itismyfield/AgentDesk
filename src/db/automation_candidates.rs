@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
-use crate::services::automation_candidate_contract::PIPELINE_STAGE_ID;
+use crate::domain::automation_contract::PIPELINE_STAGE_ID;
 
 pub(crate) use crate::db::automation_candidate_card_program::load_card_program_for_update_in_tx;
 pub use crate::db::automation_candidate_card_program::{

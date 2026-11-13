@@ -129,7 +129,13 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
         nonce: "f00d7108",
         text: "typed externally after refusal",
     };
-    let pane = busy_inject::Pane::with_program(&session, busy.pane.path("tmux"));
+    let pane = busy_inject::Pane::with_program(
+        &session,
+        crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+            busy.pane.path("tmux"),
+        ),
+    )
+    .expect("managed scripted pane");
     let report = busy_inject::inject_report_any_turn(&pane, &request, None, &busy_inject::TIMING);
     assert!(matches!(
         report.outcome,

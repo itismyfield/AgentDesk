@@ -1387,3 +1387,53 @@ async fn legacy_array_bot_busy_preserves_restored_original() {
 }
 
 mod retry_tests;
+
+#[tokio::test]
+async fn race_lost_owner_returns_original_and_marker_before_exactly_one_execution() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let f = Fixture::new(8_091_401).await;
+    let original = item(8_091_402);
+    f.enqueue(original.clone()).await;
+    let taken = f.take().await;
+    let admitted = f.admit(&taken).await;
+    let handle = f.shared.mailbox(f.channel);
+    assert!(
+        handle
+            .try_start_turn(
+                Arc::new(crate::services::provider::CancelToken::new()),
+                UserId::new(99),
+                MessageId::new(8_091_499),
+            )
+            .await
+    );
+    let outcome = finish_admitted_queued_intake(&f.deps(), admitted)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, IntakeExecution::Deferred));
+    assert_eq!(f.ids().await, [original.message_id.get()]);
+    assert!(
+        crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+            &f.provider,
+            &f.shared.token_hash,
+            f.channel,
+        )
+        .is_some(),
+        "owner return keeps durable marker"
+    );
+    let ctx = queue_dispatch::persistence_context(&f.shared, &f.provider, f.channel);
+    handle.finish_turn(ctx.clone()).await;
+    let next = f.take().await;
+    assert_eq!(next.intervention.unwrap().message_id, original.message_id);
+    assert!(
+        handle
+            .try_start_turn(
+                Arc::new(crate::services::provider::CancelToken::new()),
+                original.author_id,
+                original.message_id,
+            )
+            .await
+    );
+    handle.finish_turn(ctx).await;
+    assert!(f.take().await.intervention.is_none());
+    f.shared.mailboxes.remove_fixture_for_test(f.channel);
+}

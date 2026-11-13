@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::auto_queue::transactions;
 
 /// Early-return HTTP payload shared by `activate_with_deps_pg` and the phase
 /// helpers extracted from it (Part of #3038). Helpers signal an early exit by
@@ -238,7 +239,7 @@ pub(crate) async fn activate_with_deps_pg(
         }
 
         if effective.is_terminal(&initial_state.status) || initial_state.status == "done" {
-            if let Err(error) = crate::db::auto_queue::update_entry_status_on_pg(
+            if let Err(error) = transactions::update_entry_status_on_pg(
                 pool,
                 &entry_id,
                 crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
@@ -281,7 +282,7 @@ pub(crate) async fn activate_with_deps_pg(
                 card_id,
                 dispatch_id
             );
-            if let Err(error) = crate::db::auto_queue::update_entry_status_on_pg(
+            if let Err(error) = transactions::update_entry_status_on_pg(
                 pool,
                 &entry_id,
                 crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
@@ -600,7 +601,7 @@ pub(crate) async fn activate_with_deps_pg(
                     .filter(|state| state.has_active_dispatch())
                     .and_then(|state| state.latest_dispatch_id.clone())
                 {
-                    if let Err(update_error) = crate::db::auto_queue::update_entry_status_on_pg(
+                    if let Err(update_error) = transactions::update_entry_status_on_pg(
                         pool,
                         &entry_id,
                         crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
@@ -677,7 +678,7 @@ pub(crate) async fn activate_with_deps_pg(
             }
         };
 
-        if let Err(error) = crate::db::auto_queue::update_entry_status_on_pg(
+        if let Err(error) = transactions::update_entry_status_on_pg(
             pool,
             &entry_id,
             crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
@@ -899,8 +900,7 @@ pub(super) async fn complete_run_if_empty(
         if entry_count > 0 {
             return Ok(None);
         }
-        let outcome =
-            crate::db::auto_queue::finalize_run_if_ready_on_pg_tx(&mut tx, run_id).await?;
+        let outcome = transactions::finalize_run_if_ready_on_pg_tx(&mut tx, run_id).await?;
         tx.commit().await.map_err(|error| error.to_string())?;
         Ok::<Option<crate::db::auto_queue::RunCompletionOutcome>, String>(Some(outcome))
     }
@@ -1331,7 +1331,7 @@ pub(super) async fn finalize_activate_run_and_build_response(
         }
     };
     if remaining == 0 {
-        match crate::db::auto_queue::finalize_run_if_ready_pg(pool, run_id).await {
+        match transactions::finalize_run_if_ready_pg(pool, run_id).await {
             Ok(outcome) if outcome.is_completed() => {}
             Ok(outcome) => crate::auto_queue_log!(
                 info,

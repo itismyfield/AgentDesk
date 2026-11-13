@@ -5,22 +5,23 @@ use std::sync::Mutex;
 
 use super::StreamingTurn;
 use crate::services::claude_tui::busy_inject::Screen;
+use crate::services::claude_tui::host_input::BusyOperation;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
+use crate::services::discord::queue_io::input_owner::claude_handoff::{self, bound_herdr};
 use crate::services::discord::queue_io::input_owner::drive::{
     Drive, Front, FrontClaim, Handoff, Settled as Owed, claim_turn,
 };
 use crate::services::discord::queue_io::input_owner::effect::{
-    self, BusyClaude, BusyClaudeHerdr, BusyCodex, BusyCodexHerdr, Clock, CodexInput, Completion,
-    PreparedPayload,
+    self, BusyClaude, BusyCodex, BusyCodexHerdr, Clock, CodexInput, Completion, PreparedPayload,
 };
 use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOrigin};
 use crate::services::discord::queue_io::input_owner::{pump, target};
 use crate::services::discord::router::intake_dispatch::WRITER_HELD;
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::session_host::{HerdrTarget, herdr_endpoints};
+use crate::services::session_host::HerdrTarget;
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
-use crate::services::turn_host::{HerdrTurnPlan, TurnHost};
+use crate::services::turn_host::TurnHost;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 use serde_json::{Value, json};
 
@@ -145,19 +146,6 @@ fn other_account(provider: &str, session: &str) -> bool {
     overlay.is_ok_and(|overlay| !matches(session, &overlay.profile_id))
 }
 
-/// A Bound Herdr row's gated pane, its physical writer `socket#pane` and its attempt target.
-fn bound_herdr(plan: &HerdrTurnPlan) -> Option<(HerdrTarget, String, Value)> {
-    use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
-    let HostedRecord::Known(record) = &plan.row.as_ref()?.record else {
-        return None;
-    };
-    let at = (record.location.as_ref()).filter(|_| record.state == HostedState::Bound)?;
-    let pane = herdr_endpoints().target(record)?;
-    let target = json!({"host":"herdr","owner":record.owner.logical_key,"root":at.socket_addr,
-        "execution_nonce":record.execution_nonce});
-    Some((pane, format!("{}#{}", at.socket_addr, at.pane_id), target))
-}
-
 /// The channel's owner drive: a front goes into the turn that runs, else to `idle`, the start of
 /// a turn that claims it.
 pub(in crate::services::discord) fn owner_drive(
@@ -202,7 +190,14 @@ pub(in crate::services::discord) fn owner_drive(
                 }
                 return Err(WRITER_HELD.into());
             }
-            let synthetic = !front_origin(&mailbox, &front).await?.is_person();
+            let origin = front_origin(&mailbox, &front).await?;
+            let synthetic = !origin.is_person();
+            if !synthetic
+                && claude_handoff::prepare(runtime.as_ref(), &mailbox, &provider, channel, &front)
+                    .await?
+            {
+                return idle(front).await;
+            }
             let active = match mailbox.has_active_turn().await {
                 // Without a registry this read considers only a durable external holder.
                 Ok(false) if !synthetic => Ok(
@@ -247,7 +242,10 @@ pub(in crate::services::discord) fn owner_drive(
                 Ok(false) => idle(front).await,
                 Err(unreachable) => Err(format!("{unreachable:?}")),
             };
-            if synthetic && result.as_ref().err().map(String::as_str) == Some(START_WAITS) {
+            if synthetic
+                && origin != InputOrigin::EffortContinue
+                && result.as_ref().err().map(String::as_str) == Some(START_WAITS)
+            {
                 let held = original.clone();
                 mailbox
                     .v2_request(move |slot| {
@@ -677,7 +675,10 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
         (Err(error), _) | (_, Err(error)) => Err(error),
     };
     match recovered {
-        Ok(_) => wake(shared, channel),
+        Ok(_) => {
+            claude_handoff::recover(shared.clone(), channel);
+            wake(shared, channel);
+        }
         Err(error) => tracing::warn!(channel_id = channel.get(), %error, "owner recovery held"),
     }
 }
@@ -1320,16 +1321,13 @@ fn take_owned(
         _ => None,
     };
     let declared = until_done.is_some();
-    // Only the Claude tmux writers consult the first-key gate, so only there does a stop prove no key.
+    // Only adapters that consume the first-key gate can supply its stopped-before-key proof.
     let gate = matches!(route, target::Route::ClaudeIdle | target::Route::ClaudeBusy)
         .then(|| turn.cancel.native_stop.receipt_sink());
     let native_pin_submitted = registration.native_pin_submitted.clone();
     let busy = matches!(
         route,
-        target::Route::ClaudeBusy
-            | target::Route::ClaudeHerdrBusy
-            | target::Route::CodexBusy
-            | target::Route::CodexHerdrBusy
+        target::Route::ClaudeBusy | target::Route::CodexBusy | target::Route::CodexHerdrBusy
     );
     let originals: Vec<_> = front
         .as_ref()
@@ -1449,7 +1447,14 @@ fn run(
         target::Route::ClaudeBusy => (
             busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
             BusyClaude {
-                pane: busy_inject::Pane::with_program(session()?, r.program),
+                operation: BusyOperation::for_session(
+                    session()?,
+                    r.herdr,
+                    r.program,
+                    r.timing,
+                    declared,
+                    turn.cancel.clone(),
+                )?,
                 session: session()?.into(),
                 transcript: r.transcript,
                 channel: turn.channel_id,
@@ -1458,17 +1463,14 @@ fn run(
                 name: r.name,
                 nonce,
                 text: turn.prompt.into(),
-                timing: r.timing,
-                declared,
                 draft_notice: draft_notice(turn, &r.sources),
-                cancel: turn.cancel.clone(),
             }
             .leaf(),
         ),
         target::Route::ClaudeIdle => (
             turn.prompt.into(),
             effect::idle_claude(
-                busy_inject::Pane::with_program(session()?, r.program),
+                busy_inject::Pane::with_program(session()?, r.program)?,
                 session()?.into(),
                 turn.channel_id,
                 turn.cancel.clone(),
@@ -1478,32 +1480,11 @@ fn run(
             codex_herdr_frame(turn.prompt)
                 .map_err(|error| format!("NotSent(\"invalid_prompt: {error}\")"))?,
             effect::idle_codex(
-                busy_inject::Pane::with_program(session()?, r.program),
+                busy_inject::Pane::with_program(session()?, r.program)?,
                 session()?.into(),
                 turn.channel_id,
             ),
         ),
-        target::Route::ClaudeHerdrBusy => {
-            let (target, writer) = r
-                .herdr
-                .ok_or("NotSent(\"owner Herdr input without a pane\")")?;
-            (
-                busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
-                BusyClaudeHerdr {
-                    target,
-                    writer,
-                    session: session()?.into(),
-                    transcript: r.transcript,
-                    channel: turn.channel_id,
-                    source: "discord".into(),
-                    author: r.author,
-                    name: r.name,
-                    nonce,
-                    text: turn.prompt.into(),
-                }
-                .leaf(),
-            )
-        }
         target::Route::CodexBusy | target::Route::CodexHerdrBusy => {
             // A readable rollout supplies a diagnostic turn, not permission to deliver.
             use crate::services::codex_tui::busy_inject::{TIMING, TurnVerdict, read_turn};
@@ -1527,7 +1508,7 @@ fn run(
             };
             let leaf = match (route, r.herdr) {
                 (target::Route::CodexBusy, _) => BusyCodex {
-                    pane: busy_inject::Pane::with_program(session()?, r.program),
+                    pane: busy_inject::Pane::with_program(session()?, r.program)?,
                     timing: &TIMING,
                     input,
                 }

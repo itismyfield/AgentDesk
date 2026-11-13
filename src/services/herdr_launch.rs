@@ -289,6 +289,7 @@ pub(crate) fn o_store_for_test(
         .unwrap();
     let init = |channel| {
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources: Vec::new(),
             initial_anchor: 1,
@@ -296,7 +297,9 @@ pub(crate) fn o_store_for_test(
             at: chrono::Utc::now(),
         })
     };
-    let era = store.begin_era(channels, chrono::Utc::now(), init).unwrap();
+    let era = store
+        .begin_fixture_era(channels, chrono::Utc::now(), init)
+        .unwrap();
     (store, era)
 }
 
@@ -390,6 +393,11 @@ pub(crate) async fn launch_herdr_session(
         None
     };
     let owner = launch.owner;
+    let fence = crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence::acquire_async(
+        &owner.logical_key,
+    )
+    .await
+    .map_err(HerdrLaunchError::Prepare)?;
     let observed = load_row(pool, &owner).await?;
     if let HostedRecord::Known(record) = &observed.record
         && let Some(location) = awaiting_evidence(record, &endpoint)
@@ -419,6 +427,7 @@ pub(crate) async fn launch_herdr_session(
                 granted
             }
         };
+        drop(fence);
         return probe_again(pool, &owner, record, location, witness, &host).await;
     }
     match &observed.record {
@@ -489,11 +498,12 @@ pub(crate) async fn launch_herdr_session(
             .map_err(|error| HerdrLaunchError::Marker(error.to_string()))
     });
     let markers = match markers {
-        Ok(_) => runtime_marker::clear_fresh(&owner, &nonce)
-            .await
-            .map_err(HerdrLaunchError::Marker),
+        Ok(_) => {
+            runtime_marker::clear_fresh(&owner, &nonce, &fence).map_err(HerdrLaunchError::Marker)
+        }
         Err(error) => Err(error),
     };
+    drop(fence);
     if let Err(error) = markers {
         return Err(retire_unsent(pool, &owner, &nonce, error).await);
     }

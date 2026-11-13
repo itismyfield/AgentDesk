@@ -8,6 +8,11 @@ use tracing::field;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriter;
 
+pub(crate) mod auto_queue;
+
+#[cfg(test)]
+mod auto_queue_tests;
+
 const DEFAULT_DCSERVER_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_DCSERVER_LOG_MAX_FILES: usize = 10;
 

@@ -22,7 +22,17 @@ pub(super) fn prepare_and_create_claude_tui_session(
     claude_home: Option<&std::path::Path>,
     channel_id: Option<u64>,
     respawn: bool,
-) -> Result<(String, PreparedIncarnation), String> {
+    publisher_observation: Option<
+        crate::services::tmux_common::runtime_hint_fence::TmuxPublisherObservation,
+    >,
+) -> Result<
+    (
+        String,
+        PreparedIncarnation,
+        crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence,
+    ),
+    String,
+> {
     use crate::services::herdr_launch::{HERDR_NOT_ADMITTED, herdr_configured_for_tui_launch};
     // The host is chosen before any launch I/O; a Herdr channel never gets a tmux session.
     if herdr_configured_for_tui_launch(channel_id) {
@@ -30,11 +40,28 @@ pub(super) fn prepare_and_create_claude_tui_session(
     }
     // A launch that fails after its cleanup puts back the account markers, so the next launch still
     // resumes the session under the account it ran on.
+    let publisher_observation = match publisher_observation {
+        Some(observation) => observation,
+        None => {
+            crate::services::tmux_common::runtime_hint_fence::TmuxPublisherObservation::capture(
+                tmux_session_name,
+            )?
+        }
+    };
+    let fence = publisher_observation.acquire()?;
+    fence.validate_tmux_publisher(tmux_session_name)?;
+    if herdr_configured_for_tui_launch(channel_id) {
+        return Err(HERDR_NOT_ADMITTED.to_string());
+    }
     let auth = crate::services::tmux_common::AuthMarkers::read(tmux_session_name);
-    crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
+    crate::services::tmux_common::cleanup_session_temp_files_under_fence(
+        &fence,
+        tmux_session_name,
+    )?;
     let mut restore = RestoreAuthOnFailure(Some((tmux_session_name, auth)));
     write_tmux_owner_marker(tmux_session_name)?;
-    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+    crate::services::tmux_common::write_tmux_runtime_kind_marker_under_fence(
+        &fence,
         tmux_session_name,
         crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
     )?;
@@ -62,11 +89,21 @@ pub(super) fn prepare_and_create_claude_tui_session(
             },
         )?;
         // A returned session's dead pane is started again in place, never replaced.
-        let start = match respawn {
-            true => crate::services::platform::tmux::respawn_dead_pane,
-            false => crate::services::platform::tmux::create_session,
+        fence.validate_tmux_publisher(tmux_session_name)?;
+        let result = if respawn {
+            crate::services::platform::tmux::respawn_dead_pane(
+                tmux_session_name,
+                Some(working_dir),
+                &command,
+            )?
+        } else {
+            crate::services::platform::tmux::create_session_with_identity(
+                tmux_session_name,
+                Some(working_dir),
+                &command,
+                &prepared.tmux_identity()?,
+            )?
         };
-        let result = start(tmux_session_name, Some(working_dir), &command)?;
         Ok((result, prepared))
     })();
     let (tmux_result, incarnation) = match launch_result {
@@ -88,7 +125,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
         return Err(format!("tmux error: {}", stderr));
     }
     restore.0 = None;
-    Ok((owner_path, incarnation))
+    Ok((owner_path, incarnation, fence))
 }
 
 /// Restores the account markers read before a launch's cleanup unless the launch disarms it.
@@ -245,6 +282,7 @@ mod tests {
                     None,
                     None,
                     false,
+                    None,
                 )
                 .map(|_| ())
             },
@@ -305,6 +343,7 @@ mod host_marker_tests {
             None,
             Some(42),
             false,
+            None,
         )
         .unwrap();
         assert!(std::fs::read_to_string(&calls).unwrap().contains(tmux));
@@ -330,9 +369,15 @@ mod host_marker_tests {
             None,
             Some(43),
             false,
+            None,
         )
-        .expect("a marker write failure must not block the launch");
-        assert!(std::fs::read_to_string(&calls).unwrap().contains(blocked));
+        .err()
+        .expect("unreadable host evidence cannot authorize a publisher");
+        assert!(!std::fs::read_to_string(&calls).unwrap().contains(blocked));
+        assert!(std::path::Path::new(&marker).is_dir());
+        assert!(
+            !std::path::Path::new(&crate::services::tmux_common::tmux_owner_path(blocked)).exists()
+        );
         assert!(matches!(
             read_host_kind_marker(blocked),
             HostKindMarker::ReadFailed(_)
@@ -389,6 +434,7 @@ mod herdr_off_tests {
             None,
             Some(44),
             false,
+            None,
         );
 
         launched.expect("the tmux launch runs as before");
@@ -462,6 +508,7 @@ mod herdr_off_tests {
                 None,
                 Some(channel),
                 false,
+                None,
             )
         };
         let created = |tmux: &str| {
@@ -630,6 +677,7 @@ mod herdr_env_tests {
             None,
             None,
             false,
+            None,
         )
         .unwrap();
         let script = crate::services::tmux_common::session_temp_path(

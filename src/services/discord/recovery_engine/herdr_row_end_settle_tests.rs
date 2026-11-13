@@ -430,7 +430,7 @@ fn the_sweep_wakes_a_stalled_end_pass_pg() {
                 };
             let sweep = crate::services::discord::tui_direct_pending_start::demote_leaked_foreign_inflight_if_current;
             assert!(
-                !sweep(&run.shared, &record).await,
+                !sweep(&run.shared, &record).await.cleared,
                 "the sweep never ends the row itself"
             );
             let ended = wait(Duration::from_secs(30), || run.durable().is_none()).await;

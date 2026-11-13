@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
+use crate::domain::session_identity::SessionIdentity;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::session_identity::SessionIdentity;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_cancel_queue_guard::PurgeCounts;
 use crate::services::turn_lifecycle::TurnLifecycleTarget;
@@ -128,8 +128,15 @@ pub(crate) async fn force_purge_channel_mailbox(
     // `active_user_message_id`. The handler only clears an anchor whose token
     // is already `cancelled` (the force-kill above flipped it), so a fresh
     // turn that raced in after the kill keeps its anchor (#2706).
-    let (purge, refused_reason) =
-        purge_on(&handle, provider, channel_id, session_key, true).await?;
+    let (purge, refused_reason) = purge_on(
+        &handle,
+        provider,
+        channel_id,
+        session_key,
+        health_registry.map(Arc::as_ref),
+        true,
+    )
+    .await?;
     let finish = crate::services::discord::health::finish_cancelled_provider_channel_mailbox(
         health_registry.map(Arc::as_ref),
         Some(provider.as_str()),
@@ -177,12 +184,22 @@ async fn purge_on(
     provider: &ProviderKind,
     channel_id: ChannelId,
     session_key: Option<&str>,
+    health_registry: Option<&HealthRegistry>,
     clear_cancelled_active_anchor: bool,
 ) -> Option<(PurgeQueueResult, Option<String>)> {
-    let token_hash = session_key
+    let mut token_hash = session_key
         .and_then(SessionIdentity::parse)
         .and_then(|identity| identity.token_hash)
         .unwrap_or_default();
+    // Resolve only a sessionless request; the actor still checks the actual owner's file and CAS.
+    if session_key.is_none()
+        && let Some(registry) = health_registry
+        && let Some(shared) = registry
+            .shared_for_provider_on_channel(provider, channel_id)
+            .await
+    {
+        token_hash = shared.token_hash.clone();
+    }
     let persistence = QueuePersistenceContext::new(provider, &token_hash, None);
     #[cfg(test)]
     run_pre_purge_hook_for_test(provider, channel_id, handle).await;

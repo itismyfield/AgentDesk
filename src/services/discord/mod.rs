@@ -138,7 +138,6 @@ mod synthetic_headless_message_id;
 mod task_notification_delivery;
 pub(in crate::services::discord) mod task_supervisor;
 mod terminal_coordinate;
-mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
 #[cfg(all(test, unix))]
@@ -258,6 +257,11 @@ pub(crate) use queue_io::input_ingress::{
 };
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_owner::origin::Execution as OwnerExecutionForTest;
+#[cfg(all(test, unix))]
+pub(crate) use queue_io::input_owner::{
+    drive as owner_drive_for_test, effect as owner_effect_for_test,
+    held_watch as owner_held_watch_for_test,
+};
 #[cfg(all(test, unix))]
 pub(crate) fn input_mailbox_for_test(
     shared: &SharedData,
@@ -597,8 +601,8 @@ pub(super) fn status_update_interval() -> Duration {
     *CACHED.get_or_init(|| env_duration_secs("AGENTDESK_STATUS_INTERVAL_SECS", 5))
 }
 
-pub(crate) fn clear_inflight_state_for_channel(provider: &ProviderKind, channel_id: u64) {
-    inflight::clear_inflight_state(provider, channel_id);
+pub(crate) fn clear_inflight_state_for_channel(provider: &ProviderKind, channel_id: u64) -> bool {
+    inflight::clear_inflight_state(provider, channel_id)
 }
 
 pub(crate) fn inflight_state_allows_idle_tmux_repair_for_channel(

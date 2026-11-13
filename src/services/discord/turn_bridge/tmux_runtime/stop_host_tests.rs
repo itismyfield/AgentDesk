@@ -80,9 +80,19 @@ impl Fixture {
         let dir = tempfile::TempDir::new().expect("tmux dir");
         let binary = dir.path().join("tmux");
         let mut file = std::fs::File::create(&binary).expect("tmux");
+        let identity = crate::services::session_identity_metadata::runtime_identity("stop-fixture")
+            .unwrap()
+            .environment_assignment()
+            .unwrap();
+        let identity = crate::services::process::shell_escape(&identity);
         writeln!(
             file,
             "#!/bin/sh\n[ \"$1\" = -u ] && shift\nd=\"$(dirname \"$0\")\"\n\
+             case \"$*\" in *show-environment*AGENTDESK_IDENTITY*)\n\
+             case \"$(cat \"$d/mode\")\" in\n\
+             live) printf '%s\\n' {identity}; exit 0 ;;\n\
+             missing) exit 127 ;;\n\
+             *) echo \"no server running on $d/socket\" >&2; exit 1 ;;\nesac ;;\nesac\n\
              echo \"$*\" >> \"$d/calls\"\ncase \"$(cat \"$d/mode\")\" in\n\
              missing) exit 127 ;;\n\
              nosocket) echo \"no server running on $d/socket\" >&2; exit 1 ;;\nesac\n\

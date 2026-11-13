@@ -60,6 +60,7 @@ pub struct UnitDeriver {
     output_origin:
         Option<crate::services::cluster::intake_router_hook::owner_record::output::Origin>,
     notices: super::input_notices::Projection,
+    restart: super::restart_end::Projection,
 }
 
 impl UnitDeriver {
@@ -73,6 +74,7 @@ impl UnitDeriver {
             summary: None,
             output_origin: None,
             notices: super::input_notices::Projection::default(),
+            restart: super::restart_end::Projection::default(),
         }
     }
 
@@ -142,6 +144,45 @@ impl UnitDeriver {
         if let Some(summary) = &mut self.summary {
             summary.enter(&source.path);
         }
+    }
+
+    pub(super) fn restart_projection(&mut self) -> &mut super::restart_end::Projection {
+        &mut self.restart
+    }
+
+    pub(super) fn restart_before(
+        &mut self,
+        source: &crate::services::tui_o::shadow::SourceId,
+        record: &CapturedRecord,
+    ) -> Vec<Derived> {
+        let binding = crate::services::tui_o::shadow::SourceBinding {
+            channel_id: self.channel,
+            provider: self.provider,
+            source: source.clone(),
+        };
+        self.restart
+            .before(&binding, record)
+            .map_or_else(Vec::new, |ended| self.end_projection(&ended))
+    }
+
+    pub(super) fn end_projection(&mut self, ended: &super::restart_end::Ended) -> Vec<Derived> {
+        self.seals.end_announced(&ended.release);
+        let mut out = self
+            .cards
+            .as_mut()
+            .map(|cards| cards.end_keys(&ended.release))
+            .unwrap_or_default();
+        if let Some(summary) = &mut self.summary {
+            summary.physical_end(&ended.source.path);
+        }
+        if let Some(origin) = &self.output_origin {
+            for item in &mut out {
+                if let Derived::Piece(piece) = item {
+                    piece.output_origin = Some(origin.seal(&piece.payload));
+                }
+            }
+        }
+        out
     }
 
     /// Units in record order; a repeated key with the same plan (a fork copy) yields nothing.

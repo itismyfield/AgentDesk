@@ -1,0 +1,55 @@
+---
+title: "같은 source의 exact End witness와 준비된 답"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: boot
+    lg1: work
+    lg2: Path to the RestartExactEndEventuallyCloses bug
+    lg3: Repeats forever, so RestartExactEndEventuallyCloses breaks
+  }
+  class lg0 yellow
+  class lg1 blue
+  class lg2 bugPath
+  class lg3 repeats
+  s0: 옛 Open, native closer 없음
+  s1: 물리 종료 확인, witness 읽기 전
+  s2: witness 없이 옛 opener 읽기
+  s3: writer 재시작, durable 기록 유지
+  s4: old cutoff 앞, 새 prompt 읽기 전
+  s5: 옛 Open이 아직 닫히지 않음
+  s6: old prefix seal 전
+  s7: 옛 Open이 Unknown에 남음 [재시작 가능]
+  s8: 옛 Open이 Unknown에 남음 [재시작 기회 소진]
+  [*] --> s0
+  s0 --> s1: old incarnation의 실제 종료 기록
+  s1 --> s2: witness 설치 없이 source 재생
+  s1 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s2 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s2 --> s4: old opener 재생
+  s3 --> s1: 같은 source와 ledger를 다시 읽음
+  s4 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s4 --> s5: closer 없이 old Open 유지
+  s5 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s5 --> s6: cutoff 뒤 새 prompt 처리
+  s6 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s6 --> s7: old prefix seal, 기존 ledger debt 보존
+  s7 --> s3: writer process가 중단됨 [이전 재시작 없음]
+  s6 --> s8: old prefix seal, 기존 ledger debt 보존
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 yellow
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 blue
+  class s8 blue
+  class s8 repeats

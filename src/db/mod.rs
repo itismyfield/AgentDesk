@@ -6,6 +6,7 @@ pub mod automation_candidates;
 pub mod calendar_sync;
 pub mod campaigns;
 pub mod cancel_tombstones;
+pub(crate) mod channel_custody_lock;
 pub(crate) mod channel_home_preferences;
 #[cfg(test)]
 mod discarded_tx_result_scan_tests;
@@ -29,6 +30,7 @@ pub(crate) mod intake_outbox_open_status;
 pub(crate) mod intake_outbox_status;
 pub mod kanban;
 pub mod kanban_cards;
+pub(crate) mod message_outbox;
 pub(crate) mod o_channel_activation;
 pub mod postgres;
 pub mod prompt_manifests;

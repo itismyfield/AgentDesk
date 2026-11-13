@@ -456,6 +456,7 @@ fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), S
                 report_channel_id: Some(turn.channel_id),
                 report_provider: Some(turn.provider.clone()),
                 model: turn.model,
+                effort: turn.effort,
                 fast_mode_enabled: turn.native_fast_mode,
                 goals_enabled: turn.codex_goals,
                 compact_token_limit: turn.compact_token_limit,
@@ -855,7 +856,7 @@ fn stream_json_request(turn: &StreamingTurn<'_>) -> Result<ProviderTurnRequest, 
 
 #[cfg(test)]
 #[path = "provider_dispatch_herdr_tests.rs"]
-mod herdr_tests;
+pub(crate) mod herdr_tests;
 
 #[cfg(test)]
 #[path = "provider_dispatch_codex_herdr_tests.rs"]

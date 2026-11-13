@@ -1,10 +1,10 @@
 use anyhow::{Result, anyhow};
 use sqlx::PgPool;
-use std::time::Duration;
 
+use crate::domain::lifecycle::STALE_TURN_GRACE;
+use crate::domain::session_identity::SessionIdentity;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::relay_recovery::AxisBSite;
-use crate::services::discord::session_identity::SessionIdentity;
 use crate::services::provider::ProviderKind;
 
 #[cfg(test)]
@@ -18,11 +18,6 @@ use test_barriers::await_stale_sweep_apply_barrier;
 pub(crate) use test_barriers::{
     StaleSweepApplyBarrier, StaleSweepApplyBarrierPoint, install_stale_sweep_apply_barrier,
 };
-
-/// A live turn refreshes its heartbeat roughly once per minute. Five minutes
-/// leaves enough margin for transient database or scheduler delays while still
-/// bounding how long a stale busy state can block mailbox injection.
-pub(crate) const STALE_TURN_GRACE: Duration = Duration::from_secs(5 * 60);
 
 /// Which guard qualified a session for reconciliation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -803,6 +798,7 @@ async fn reconcile_candidate_pg(pool: &PgPool, candidate: &StaleTurnCandidate) -
 mod tests {
     use super::*;
     use sqlx::Row;
+    use std::time::Duration;
 
     /// Upper bound for any single wait in this module. Generous enough that a
     /// loaded PostgreSQL fixture never trips it, short enough that a wedged

@@ -2,56 +2,13 @@
 
 //! A consent release may rearm only the original row carrying a before-effects custody marker.
 use super::IntakeOutboxRow;
-use crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use super::consent_projection::project;
+use crate::domain::intake_consent::{
+    HoldInput, Marker, PREFIX, REARM_PREFIX, RearmMarker, marker, permits_custody,
+};
+use crate::domain::intake_identity::OwnerIdentity;
+use crate::intake_consent_authority::BeforeEffects;
 use sqlx::PgPool;
-
-const PREFIX: &str = "herdr-consent-custody:v1:";
-const REARM_PREFIX: &str = "herdr-consent-rearm:v1:";
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RearmMarker {
-    row: i64,
-    payload: String,
-    owner: Option<String>,
-    generation: Option<i64>,
-    count: u8,
-    rearmed_at: i64,
-}
-
-fn permits_custody(error: Option<&str>, row: &IntakeOutboxRow) -> Result<bool, String> {
-    let Some(error) = error else {
-        return Ok(true);
-    };
-    let Some(encoded) = error.strip_prefix(REARM_PREFIX) else {
-        return Ok(false);
-    };
-    let Ok(marker) = serde_json::from_str::<RearmMarker>(encoded) else {
-        return Ok(false);
-    };
-    Ok(marker.row == row.id
-        && marker.payload == payload(row)?
-        && marker.owner == row.owner_instance_id
-        && marker.generation == row.owner_generation
-        && marker.count == 1
-        && marker.rearmed_at > 0)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Marker {
-    // A generation nonce is a release receipt, never authority for the held row.
-    nonce: String,
-    consent: String,
-    row: i64,
-    payload: String,
-    claim: Option<String>,
-    owner: Option<String>,
-    generation: Option<i64>,
-    released: bool,
-}
 
 #[derive(sqlx::FromRow)]
 struct Snapshot {
@@ -61,46 +18,7 @@ struct Snapshot {
 }
 
 fn payload(row: &IntakeOutboxRow) -> Result<String, String> {
-    let fields = serde_json::json!([
-        row.id,
-        row.target_instance_id,
-        row.forwarded_by_instance_id,
-        row.required_labels,
-        row.execution_requirements,
-        row.attachment_refs,
-        row.channel_id,
-        row.user_msg_id,
-        row.replay_source_message_ids,
-        row.request_owner_id,
-        row.request_owner_name,
-        row.user_text,
-        row.reply_context,
-        row.has_reply_boundary,
-        row.dm_hint,
-        row.turn_kind,
-        row.merge_consecutive,
-        row.reply_to_user_message,
-        row.defer_watcher_resume,
-        row.wait_for_completion,
-        row.preserve_on_cancel,
-        row.agent_id,
-        row.provider,
-        row.attempt_no,
-        row.parent_outbox_id,
-        row.admission_kind,
-        // Preserve the null slot in existing consent custody digests.
-        serde_json::Value::Null
-    ]);
-    Ok(hex::encode(Sha256::digest(
-        serde_json::to_vec(&fields).map_err(|e| e.to_string())?,
-    )))
-}
-
-fn marker(error: Option<&str>) -> Result<Marker, String> {
-    let encoded = error.and_then(|error| error.strip_prefix(PREFIX)).ok_or(
-        "outbox has no durable before-effects consent custody marker; preserve its original row",
-    )?;
-    serde_json::from_str(encoded).map_err(|e| format!("invalid consent custody marker: {e}"))
+    project(row).payload.digest()
 }
 
 /// Never creates a row, attempt or payload. A released marker stays with the original row forever.
@@ -183,7 +101,7 @@ pub(crate) async fn release(
 /// Rearms the exact pre-effects row once; its marker survives later claims without a TTL reset.
 pub(crate) async fn return_before_record(
     pool: &PgPool,
-    proof: crate::services::cluster::intake_worker::BeforeEffects,
+    proof: BeforeEffects,
 ) -> Result<bool, String> {
     let expected = proof.row();
     if expected.status != super::IntakeOutboxStatus::Spawned || expected.claim_owner.is_none() {
@@ -245,27 +163,11 @@ pub(crate) async fn return_before_record(
 
 pub(crate) async fn hold_before_effects(
     pool: &PgPool,
-    proof: crate::services::cluster::intake_worker::BeforeEffects,
-    store: &crate::services::session_host::policy::consent::ConsentStore,
-    expected: &crate::services::session_host::policy::consent::Consent,
-    intent: &crate::services::session_host::policy::consent::IntentRef,
+    proof: BeforeEffects,
+    input: HoldInput,
 ) -> Result<(), String> {
-    use crate::services::session_host::policy::durable;
     let row = proof.row();
-    let current = store
-        .load(&expected.key)?
-        .ok_or("consent custody missing")?;
-    if current != *expected
-        || !current.unresolved_intents().contains(intent)
-        || intent.store != "intake_outbox"
-        || intent.id != row.id.to_string()
-        || intent.provider != row.provider
-        || intent.channel.to_string() != row.channel_id
-        || intent.source_message.to_string() != row.user_msg_id
-        || intent.fifo != row.attempt_no as u64
-        || row.status != crate::db::intake_outbox_status::IntakeOutboxStatus::Spawned
-        || row.claim_owner.is_none()
-    {
+    if !input.matches(&project(row))? {
         return Err(
             "before-effects consent custody does not identify this exact worker payload".into(),
         );
@@ -288,12 +190,12 @@ pub(crate) async fn hold_before_effects(
     if payload(&current_row)? != payload(row)? {
         return Err("worker payload changed before custody handoff".into());
     }
-    if !permits_custody(last_error.as_deref(), &current_row)? {
+    if !permits_custody(last_error.as_deref(), &project(&current_row))? {
         return Err("worker error marker changed before consent custody handoff".into());
     }
     let marker = Marker {
         nonce: String::new(),
-        consent: durable::key(&current.key)?,
+        consent: input.consent().to_owned(),
         row: row.id,
         payload: payload(row)?,
         claim: row.claim_owner.clone(),

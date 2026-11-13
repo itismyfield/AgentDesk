@@ -269,6 +269,22 @@ else
 fi
 fi
 
+if run_check guards "User feature map static check"; then
+"$PYTHON" -m unittest tests.test_user_feature_map_static
+fi
+
+if run_check guards "Isolated instance declaration tests"; then
+"$PYTHON" -m unittest tests.test_dev_instance
+"$PYTHON" -m unittest tests.test_dev_instance_files
+fi
+
+if run_check cargo "Isolated instance credential binary tests"; then
+cargo build --bin agentdesk
+instance_test_bin="$(cd "${CARGO_TARGET_DIR:-$PWD/target}/debug" && pwd -P)"
+export PATH="$instance_test_bin:$PATH"
+"$PYTHON" -m unittest tests.test_dev_instance_credential
+fi
+
 if run_check guards "PG audit guard"; then
 ./scripts/pg-audit.sh
 fi
@@ -558,12 +574,30 @@ if run_check guards "Relay-authority named-target floor contract (#5071)"; then
 "$PYTHON" -m unittest tests.test_check_relay_authority_contract
 fi
 
+if run_check contracts "User feature map generation contract"; then
+feature_map_base="${TEST_LANE_BASELINE_REF:-${GFP_BASE_SHA:-}}"
+if [ -z "$feature_map_base" ]; then
+  if [ -n "${CI:-}${GITHUB_ACTIONS:-}${GFP_EVENT_NAME:-}${GITHUB_EVENT_NAME:-}" ]; then
+    echo "ERROR: CI feature map check requires TEST_LANE_BASELINE_REF or GFP_BASE_SHA" >&2
+    exit 1
+  fi
+  feature_map_base=origin/main
+fi
+"$PYTHON" scripts/generate_user_feature_map.py --check --base-ref "$feature_map_base"
+"$PYTHON" -m unittest tests.test_generate_user_feature_map
+fi
+
 if run_check contracts "Fast compile check PR/main/nightly split contract (#4747)"; then
 "$PYTHON" -m unittest tests.test_fast_check_ci_wiring
 fi
 
 if run_check contracts "Script checks shard ownership + result mirror contract"; then
 "$PYTHON" -m unittest tests.test_ci_script_check_shards
+fi
+
+if run_check contracts "Union list merge guard and required CI contract"; then
+"$PYTHON" scripts/ci/list_merge_guard.py --ci
+"$PYTHON" -m unittest tests.test_list_merge_guard
 fi
 
 if run_check contracts "Script checks input selection contract"; then
@@ -827,9 +861,19 @@ if run_check cargo "Maintainability audit tests"; then
 "$PYTHON" -m unittest tests.test_audit_maintainability tests.test_module_layer_baseline_records tests.test_module_layer_measurement tests.test_module_layer_ratchet tests.test_module_layer_classification
 fi
 
+if run_check guards "Low-level accessor ratchet tests"; then
+"$PYTHON" -m unittest tests.test_low_level_accessors
+"$PYTHON" -m unittest tests.test_low_level_accessor_baseline
+"$PYTHON" -m unittest tests.test_low_level_accessor_wiring
+fi
+
 if run_check cargo "Maintainability audit"; then
 mkdir -p target
 # The default stdout format is the YAML artifact; --check findings go to stderr.
 "$PYTHON" scripts/audit_maintainability.py --check > target/maintainability-audit.yaml
 echo "Wrote target/maintainability-audit.yaml"
+fi
+
+if run_check contracts "Landing regeneration contracts"; then
+"$PYTHON" -m unittest -v tests.test_landing_regeneration
 fi

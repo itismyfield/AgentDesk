@@ -7,6 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod effort;
+use effort::LaunchEffort;
+
 use crate::services::claude_command::ClaudeBinary;
 #[cfg(test)]
 use crate::services::claude_tui::hook_bundle::write_claude_hook_settings;
@@ -328,6 +331,17 @@ pub(crate) fn prepare_claude_tui_launch_with_settings(
     fast_mode: Option<bool>,
     effort: Option<&str>,
 ) -> Result<ClaudeTuiSessionFiles, String> {
+    prepare_claude_tui_launch_with_continuation_owner(config, fast_mode, effort, false)
+}
+
+/// Only a verified restart whose C owns the first submission may disable native continuation.
+pub(crate) fn prepare_claude_tui_launch_with_continuation_owner(
+    config: &ClaudeTuiLaunchConfig,
+    fast_mode: Option<bool>,
+    effort: Option<&str>,
+    owner_first_submit: bool,
+) -> Result<ClaudeTuiSessionFiles, String> {
+    let effort = LaunchEffort::parse(effort)?;
     let files = config.session_files();
     let result = (|| {
         // A freshly prepared hosted pane must never inherit a disarmed or
@@ -349,12 +363,14 @@ pub(crate) fn prepare_claude_tui_launch_with_settings(
                 agentdesk_exe: config.agentdesk_exe.display().to_string(),
             },
             fast_mode,
+            effort.ultracode(),
         )?;
         write_launch_script(
             &files.launch_script_path,
             config,
             &files.hook_settings_path,
             effort,
+            owner_first_submit,
         )
     })();
     if let Err(error) = result {
@@ -400,7 +416,8 @@ fn write_launch_script(
     path: &Path,
     config: &ClaudeTuiLaunchConfig,
     hook_settings_path: &Path,
-    effort: Option<&str>,
+    effort: LaunchEffort<'_>,
+    owner_first_submit: bool,
 ) -> Result<(), String> {
     // This is the final pre-exec launch artifact. Registering here marks the
     // pane as AgentDesk-launched before it can receive its first prompt, and
@@ -412,9 +429,7 @@ fn write_launch_script(
         })?;
     }
     let mut args = build_claude_tui_args(config, hook_settings_path);
-    if let Some(effort) = effort {
-        args.extend(["--effort".to_string(), effort.to_string()]);
-    }
+    effort.append_args(&mut args);
     // `resumed=` is read off the argv this script runs, since a launch may start fresh in place of
     // the session its turn asked for.
     let resumed = args
@@ -462,8 +477,11 @@ fn write_launch_script(
     // comment + the unit tests.
     let mut env_exports = String::new();
     // The effort variable outranks `--effort`, so an inherited one would hide the channel's level.
-    if effort.is_some() {
+    if effort.explicit() {
         env_exports.push_str("unset CLAUDE_CODE_EFFORT_LEVEL\n");
+    }
+    if owner_first_submit && resumed {
+        env_exports.push_str("export CLAUDE_CODE_RESUME_INTERRUPTED_TURN=0\n");
     }
     // #5172 R1: snapshot the YAML provider setting for each new launch. Its
     // absolute value is independent of the launch model and later model changes.
@@ -501,6 +519,9 @@ fn write_launch_script(
 #[cfg(test)]
 #[path = "session/auto_compact_launch_tests.rs"]
 mod auto_compact_launch_tests;
+#[cfg(test)]
+#[path = "session/effort_launch_tests.rs"]
+mod effort_launch_tests;
 #[cfg(test)]
 #[path = "session/fast_launch_tests.rs"]
 mod fast_launch_tests;
@@ -619,7 +640,14 @@ mod tests {
             },
         )
         .unwrap();
-        write_launch_script(&launch_script_path, &config, &hook_settings_path, None).unwrap();
+        write_launch_script(
+            &launch_script_path,
+            &config,
+            &hook_settings_path,
+            LaunchEffort::default(),
+            false,
+        )
+        .unwrap();
 
         let settings = std::fs::read_to_string(&hook_settings_path).unwrap();
         let script = std::fs::read_to_string(&launch_script_path).unwrap();
@@ -675,7 +703,8 @@ mod tests {
             &launch_script_path,
             &config,
             Path::new("/tmp/settings.json"),
-            None,
+            LaunchEffort::default(),
+            false,
         )
         .unwrap();
 
@@ -701,7 +730,8 @@ mod tests {
             &launch_script_path,
             &config,
             Path::new("/tmp/settings.json"),
-            None,
+            LaunchEffort::default(),
+            false,
         )
         .unwrap();
         let sonnet_script = std::fs::read_to_string(&launch_script_path).unwrap();
@@ -714,7 +744,8 @@ mod tests {
             &launch_script_path,
             &config,
             Path::new("/tmp/settings.json"),
-            None,
+            LaunchEffort::default(),
+            false,
         )
         .unwrap();
         let opus_script = std::fs::read_to_string(&launch_script_path).unwrap();
@@ -783,7 +814,8 @@ mod tests {
             &files.launch_script_path,
             &config,
             &files.hook_settings_path,
-            None,
+            LaunchEffort::default(),
+            false,
         )
         .unwrap();
 

@@ -99,7 +99,7 @@ struct Fake {
     root: tempfile::TempDir,
     reader: Mutex<Option<Reader>>,
     start: Instant,
-    channels: Vec<u64>,
+    channels: Mutex<Vec<u64>>,
     readings: Mutex<HashMap<u64, Observed>>,
     overtaken: AtomicBool,
     token: AtomicBool,
@@ -127,7 +127,7 @@ impl Fake {
             root: tempfile::tempdir().unwrap(),
             reader: Mutex::new(None),
             start: Instant::now(),
-            channels: channels.to_vec(),
+            channels: Mutex::new(channels.to_vec()),
             readings: Mutex::new(channels.iter().map(|&c| (c, observed)).collect()),
             overtaken: AtomicBool::new(false),
             token: AtomicBool::new(false),
@@ -195,7 +195,7 @@ impl Effects for Fake {
     }
 
     fn channels(&self) -> Vec<u64> {
-        self.channels.clone()
+        lock(&self.channels).clone()
     }
 
     async fn read(&self, channel: u64) -> Reading {
@@ -325,6 +325,9 @@ pub(crate) fn seed_long_unknown_for_tests(channel: u64, reason: &'static str, ag
     presence.activity_since = Utc::now() - chrono::Duration::seconds(age_secs as i64);
     lock(&PRESENCE).insert(channel, Arc::new(Mutex::new(presence)));
 }
+
+#[path = "supervisor_worker_tests.rs"]
+mod worker_tests;
 
 #[path = "supervisor_notice_tests.rs"]
 mod notice_tests;
