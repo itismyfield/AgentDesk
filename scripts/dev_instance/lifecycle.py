@@ -230,7 +230,7 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
                                                verification[2], deadline, alive=lambda: child.poll() is None)
                 if time.monotonic() >= deadline:
                     raise InstanceError('verification exhausted startup budget')
-                # Startup retains B1's wrapper-death behavior; only a verified run intercepts SIGTERM.
+                # Startup keeps its default signal behavior; intercept only after verification.
                 stop_requested = signal_scope.enter_context(_verified_sigterm(True))
                 publish_runtime(Path(manifest['root']), 'runtime/instance-run.json',
                                 {**witness, 'verified': True},

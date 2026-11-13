@@ -682,7 +682,12 @@ fn write_control_ack(
     file.write_all(&serde_json::to_vec(response).map_err(|_| rejected())?)
         .map_err(|_| rejected())?;
     file.sync_all().map_err(|_| rejected())?;
-    directory.sync_all().map_err(|_| rejected())?;
+    // The FD alias keeps the shared directory-sync helper bound to this retained inode.
+    let pinned = std::path::PathBuf::from(format!(
+        "/dev/fd/{}/instance-control-ack.json",
+        directory.as_raw_fd()
+    ));
+    crate::domain::file_sync::fsync_parent_dir(&pinned).map_err(|_| rejected())?;
     let current =
         std::fs::symlink_metadata(instance.root.join("runtime/instance-control-ack.json"))
             .map_err(|_| rejected())?;

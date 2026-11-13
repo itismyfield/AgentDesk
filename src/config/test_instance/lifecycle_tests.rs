@@ -13,6 +13,28 @@ use std::time::{Duration, Instant};
 const MODE: &str = "I3A_LEASE_TEST_MODE";
 const LIMIT: Duration = Duration::from_secs(10);
 
+#[cfg(target_os = "macos")]
+#[test]
+fn control_ack_sync_uses_the_retained_directory_inode() {
+    let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = File::open(temporary.path()).unwrap();
+    let alias = PathBuf::from(format!("/dev/fd/{}/ack", directory.as_raw_fd()));
+    let expected = directory.metadata().unwrap();
+    let actual = std::fs::metadata(alias.parent().unwrap()).unwrap();
+    assert_eq!(
+        (actual.dev(), actual.ino()),
+        (expected.dev(), expected.ino())
+    );
+    crate::domain::file_sync::parent_sync_probe::SYNCED.with(|synced| {
+        *synced.borrow_mut() = Some(Vec::new());
+    });
+    crate::domain::file_sync::fsync_parent_dir(&alias).unwrap();
+    let synced = crate::domain::file_sync::parent_sync_probe::SYNCED
+        .with(|value| value.borrow_mut().take().unwrap());
+    assert_eq!(synced, vec![alias.parent().unwrap().to_path_buf()]);
+}
+
 #[path = "run_identity_tests.rs"]
 mod run_identity;
 
