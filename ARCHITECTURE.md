@@ -169,10 +169,14 @@ src/
 ├── db/
 │   ├── auto_queue/
 │   │   ├── entries/
-│   │   │   └── dispatch_failure.rs
+│   │   │   ├── dispatch_failure.rs
+│   │   │   └── status_write.rs
+│   │   ├── phase_gates/
+│   │   │   └── reconcile_write.rs
 │   │   ├── run_owner_guard/
 │   │   │   └── writes.rs
 │   │   ├── claim.rs
+│   │   ├── completion_write.rs
 │   │   ├── consultation.rs
 │   │   ├── entries.rs
 │   │   ├── mod.rs
@@ -248,6 +252,9 @@ src/
 │   │   ├── mod.rs
 │   │   ├── soft_delete.rs
 │   │   └── transitions.rs
+│   ├── message_outbox/
+│   │   ├── census.rs
+│   │   └── notice.rs
 │   ├── o_channel_activation/
 │   │   └── owner.rs
 │   ├── o_piece_delivery/
@@ -304,6 +311,7 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
 │   ├── server_campaigns/
+│   │   ├── command_transaction.rs
 │   │   ├── evidence_store.rs
 │   │   ├── evidence_store_tests.rs
 │   │   ├── mod.rs
@@ -342,6 +350,7 @@ src/
 │   ├── intake_outbox_open_status.rs
 │   ├── intake_outbox_status.rs
 │   ├── kanban.rs
+│   ├── message_outbox.rs
 │   ├── mod.rs
 │   ├── o_channel_activation.rs
 │   ├── o_channel_activation_fence_tests.rs
@@ -856,6 +865,14 @@ src/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
 │   │   │   ├── slot_reset_host_pg_tests.rs
 │   │   │   └── verified_reset_pg_tests.rs
+│   │   ├── transactions/
+│   │   │   ├── completion.rs
+│   │   │   ├── completion_tests.rs
+│   │   │   ├── consultation.rs
+│   │   │   ├── dispatch_failure.rs
+│   │   │   ├── entries.rs
+│   │   │   ├── phase_gates.rs
+│   │   │   └── retry.rs
 │   │   ├── activate_command.rs
 │   │   ├── activate_preflight.rs
 │   │   ├── activate_route.rs
@@ -888,6 +905,7 @@ src/
 │   │   ├── run_completion_activate_pg_tests.rs
 │   │   ├── runtime.rs
 │   │   ├── slot_routes.rs
+│   │   ├── transactions.rs
 │   │   ├── view.rs
 │   │   └── view_admin_routes.rs
 │   ├── automation_candidate_materializer/
@@ -901,6 +919,8 @@ src/
 │   │   ├── adk_observe/
 │   │   │   ├── ci.rs
 │   │   │   └── ci_tests.rs
+│   │   ├── commands/
+│   │   │   └── transaction_tests.rs
 │   │   ├── adk_observe.rs
 │   │   ├── adk_observe_tests.rs
 │   │   ├── adk_profile.rs
@@ -911,6 +931,7 @@ src/
 │   │   ├── adk_workspace_tests.rs
 │   │   ├── candidate_seal.rs
 │   │   ├── candidate_seal_tests.rs
+│   │   ├── commands.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
 │   │   ├── definition.rs
@@ -2894,6 +2915,7 @@ src/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   ├── completion_postgres.rs
 │   │   │   │   ├── completion_postgres_snapshot_tests.rs
+│   │   │   │   ├── completion_postgres_terminal_sync_tests.rs
 │   │   │   │   ├── replay_hold_tests.rs
 │   │   │   │   └── span_tests.rs
 │   │   │   ├── completion_postlude/
@@ -3516,6 +3538,8 @@ src/
 │   │   ├── test_support.rs
 │   │   ├── token_store.rs
 │   │   └── transport_tests.rs
+│   ├── kanban_cards/
+│   │   └── entry_transactions.rs
 │   ├── legacy_body_census/
 │   │   ├── cache.rs
 │   │   ├── collector.rs
@@ -3569,6 +3593,8 @@ src/
 │   │   ├── diagnostics.rs
 │   │   ├── identity.rs
 │   │   ├── identity_tests.rs
+│   │   ├── plain.rs
+│   │   ├── plain_tests.rs
 │   │   └── session_notice.rs
 │   ├── observability/
 │   │   ├── events/

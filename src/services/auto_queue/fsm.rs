@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::auto_queue::transactions;
 
 pub(super) fn attempt_restore_dispatch(
     deps: &AutoQueueActivateDeps,
@@ -318,7 +319,7 @@ pub(super) async fn apply_restore_state_changes_pg(
     for entry in entries {
         match decide_restore_transition_pg(pool, &entry).await {
             Ok(RestoreEntryDecision::Pending) => {
-                match crate::db::auto_queue::update_entry_status_on_pg_tx(
+                match transactions::update_entry_status_on_pg_tx(
                     &mut tx,
                     &entry.entry_id,
                     crate::db::auto_queue::ENTRY_STATUS_PENDING,
@@ -338,7 +339,7 @@ pub(super) async fn apply_restore_state_changes_pg(
                 }
             }
             Ok(RestoreEntryDecision::Done) => {
-                match crate::db::auto_queue::update_entry_status_on_pg_tx(
+                match transactions::update_entry_status_on_pg_tx(
                     &mut tx,
                     &entry.entry_id,
                     crate::db::auto_queue::ENTRY_STATUS_DONE,
@@ -359,7 +360,7 @@ pub(super) async fn apply_restore_state_changes_pg(
             }
             Ok(RestoreEntryDecision::ExistingDispatch { title, .. })
             | Ok(RestoreEntryDecision::NewDispatch { title }) => {
-                match crate::db::auto_queue::update_entry_status_on_pg_tx(
+                match transactions::update_entry_status_on_pg_tx(
                     &mut tx,
                     &entry.entry_id,
                     crate::db::auto_queue::ENTRY_STATUS_PENDING,
@@ -515,7 +516,7 @@ pub(super) fn update_entry_status_prefer_pg(
     crate::utils::async_bridge::block_on_pg_result(
         pool,
         move |bridge_pool| async move {
-            crate::db::auto_queue::update_entry_status_on_pg(
+            transactions::update_entry_status_on_pg(
                 &bridge_pool,
                 &entry_id_owned,
                 &new_status,
