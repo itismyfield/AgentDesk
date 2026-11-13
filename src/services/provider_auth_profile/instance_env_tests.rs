@@ -134,10 +134,23 @@ fn direct_launch(provider: ProviderKind) {
         assert!(argv.lines().any(|argument| argument == "--output-format"));
         assert!(argv.lines().any(|argument| argument == "stream-json"));
     } else {
-        assert_eq!(argv.lines().next(), Some("exec"));
+        let arguments: Vec<_> = argv.lines().collect();
+        let exec = arguments
+            .iter()
+            .position(|argument| *argument == "exec")
+            .unwrap();
+        assert_eq!(
+            &arguments[exec..exec + 3],
+            &["exec", "--skip-git-repo-check", "--json"]
+        );
         assert!(
-            argv.lines()
-                .any(|argument| argument == "instance direct prompt")
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["-C", root.to_str().unwrap()])
+        );
+        assert_eq!(
+            &arguments[arguments.len() - 2..],
+            &["--", "instance direct prompt"]
         );
     }
 }
