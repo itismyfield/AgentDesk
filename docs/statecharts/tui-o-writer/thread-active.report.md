@@ -16,6 +16,7 @@ Values come only from the entry table in `docs/session-host-parity.design.md` §
 | `OldReaderBoots` | a binary without the child capability never boots over a child `init` |
 | `TombExact` | a retirement mark names the child's current generation |
 | `NoSilentLoss` | an input held at placement for an unresolved child is never dropped |
+| `LateTurnLegacyOnce` | the late reservation's own turn ends sent by Legacy exactly once and never by O |
 | `InheritDormant` | a running child writer reads in its parent's dormant or active mode |
 | `ChildInputAnswered` (liveness) | a waiting child input is posted by its ready writer or fails visibly |
 | `HeldResolves` (liveness) | an input held at placement is resolved while its process runs |
@@ -24,7 +25,7 @@ Fairness is weak fairness on `Admit`, `Resolve`, `LegacyClaim`, `LegacyDone`, `S
 
 ## Results
 
-Plain TLC 1.7.4 through `scripts/ci/statecharts_tlc.py`, 16 configs, 32.4 s, on 2026-11-14, after the boot hold was replaced by the late reservation (decision E). State counts are the first-violation runs.
+Plain TLC 1.7.4 through `scripts/ci/statecharts_tlc.py`, 17 configs, 24.9 s (rerun with `LateTurnLegacyOnce`; `NoWait`, `ReadyEarly` and `ParentReady` also break it, After stays GREEN at 2957 states), on 2026-11-14, after the boot hold was replaced by the late reservation (decision E). State counts are the first-violation runs.
 
 | cfg | distinct states | result |
 |---|---:|---|
@@ -42,6 +43,7 @@ Plain TLC 1.7.4 through `scripts/ci/statecharts_tlc.py`, 16 configs, 32.4 s, on 
 | WriterThreadActiveNoRecheck | 318 | `OldReaderBoots`: guard judged only before the service stops |
 | WriterThreadActiveLateTomb | 445 | `TombExact`, `ChildInputAnswered`: a late retirement after a new input |
 | WriterThreadActiveNoWait | 1278 | `ExactlyOnce`: the placement records the child during Legacy's open turn and `init` commits before that send ends, so O posts it again |
+| WriterThreadActiveInitNoWait | 477 | `LateTurnLegacyOnce`: a failed first `init` during Legacy's open late turn marks that turn failed with no send at all |
 | WriterThreadActiveDropHeld | 13 | `NoSilentLoss`: a failed placement read drops the input instead of holding it |
 | WriterThreadActiveNoInherit | 48 | `InheritDormant`: a dormant parent's child starts an active writer |
 

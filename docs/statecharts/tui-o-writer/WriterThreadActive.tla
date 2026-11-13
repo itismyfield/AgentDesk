@@ -135,6 +135,7 @@ PublishInit ==
 \* A failed init keeps the floor and is a visible halt, never a silent Legacy fallback.
 InitFail ==
     /\ proc = "new" /\ writer = "starting" /\ floor /\ ~init /\ cand = "late"
+    /\ (Settled \/ Mut = "initNoWait")
     /\ cand' = "held" /\ writer' = "none"
     /\ input' = IF input = "waiting" /\ ~lateTurn THEN "failed" ELSE input
     /\ UNCHANGED <<proc, relation, floor, init, tomb, tombGen, gen, knock, arrived,
@@ -252,6 +253,8 @@ OldReaderBoots == booted = "ok"
 TombExact == tomb => tombGen = gen
 \* An input held at placement for an unresolved child is never dropped.
 NoSilentLoss == input # "lost"
+\* The late reservation's own turn ends sent by Legacy exactly once, and never by O.
+LateTurnLegacyOnce == (lateTurn /\ input \in {"posted", "failed"}) => (lSent /\ ~oSent)
 InheritDormant == writer \in {"starting", "ready"} => ((wmode = "dormant") = dormant)
 \* An admitted child input is posted by its own ready writer or fails visibly.
 ChildInputAnswered == [](input = "waiting" => <>(input # "waiting" \/ proc = "old"))
