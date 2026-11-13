@@ -3422,3 +3422,5 @@ pub(crate) use tmux::tmux_output_stream::{
 pub(crate) async fn revoke_notice_author_for_test(shared: &SharedData) {
     shared.settings.write().await.allowed_user_ids.clear();
 }
+
+pub(super) mod routine_presentation;

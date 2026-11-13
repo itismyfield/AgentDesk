@@ -43,6 +43,7 @@ pub(crate) struct CapturedReadyDeliveryCommit {
     pub(super) shared: Arc<SharedData>,
     pub(super) state: inflight::InflightTurnState,
     pub(super) actor: Option<Arc<CancelToken>>,
+    pub(super) quiet_restart_generation: Option<u64>,
     pub(super) delivery: CapturedRecoveryDelivery,
 }
 
@@ -56,6 +57,14 @@ impl CapturedReadyDeliveryCommit {
             _ => false,
         } {
             return None;
+        }
+        if let Some(generation) = self.quiet_restart_generation {
+            self.state = super::restore_inflight::adopt_quiet_drain_restart(
+                &self.state,
+                generation,
+                current,
+            )?;
+            return Some(self);
         }
         if let Some(pending) = self.delivery.pending_anchor.take()
             && !matches!(
