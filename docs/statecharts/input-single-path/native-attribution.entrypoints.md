@@ -21,7 +21,7 @@
 
 아래 표의 `Projection*`는 모델에서 row 집합 변경으로, `Settle`은 durable 결과→lease CAS→row CAS→wake 네 단계로 확장한다. `AdjacentEnd`는 기존 Cancel/Terminate/clear/stop의 명시적 결과이며 남의 native 종료와 구분한다.
 
-## lease: 139행 (시험·주석 제외 726행)
+## lease: 142행 (시험·주석 제외 723행)
 
 | 코드 좌표 | 포함 함수/진입점 | 모델 행동 |
 |---|---|---|
@@ -83,6 +83,8 @@
 | `src/services/discord/queue_io/turn_admission.rs:148` | `mailbox_try_start_turn_ordered` | Inject(배타 lease claim) |
 | `src/services/discord/queue_io/turn_admission.rs:153` | `mailbox_try_start_turn_ordered` | Inject(배타 lease claim) |
 | `src/services/discord/queue_io/turn_admission.rs:165` | `mailbox_try_start_turn_ordered` | BootRestore / Reconstruct |
+| `src/services/discord/recovery_engine/runtime.rs:325` | `reregister_active_turn_from_inflight_inner` | BootRestore / Reconstruct |
+| `src/services/discord/relay_recovery/apply.rs:126` | `apply_relay_recovery_decision_admitted` | BootRestore / Reconstruct |
 | `src/services/discord/relay_recovery/apply.rs:265` | `apply_relay_recovery_decision_admitted` | BootRestore / Reconstruct |
 | `src/services/discord/router/intake_dispatch/queued.rs:51` | `restore` | BootRestore / Reconstruct |
 | `src/services/discord/router/intake_dispatch/queued.rs:175` | `admit_queued_intake` | BootRestore / Reconstruct |
@@ -100,6 +102,7 @@
 | `src/services/discord/router/turn_start.rs:742` | `release_mailbox_after_hosted_tui_busy_pre_submit` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/tmux.rs:651` | `start_monitor_auto_turn_when_available` | Inject(배타 lease claim) |
 | `src/services/discord/tmux_restart_handoff.rs:463` | `release_relinquished_turn_mailbox` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/discord/tmux_watcher/turn_stream_collector.rs:239` | `collect_turn_stream_body` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/tui_prompt_relay/bridge_gateway.rs:191` | `dispatch_queued_turn` | BootRestore / Reconstruct |
 | `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs:787` | `headless_turn_setup_failure_releases_only_its_slot_and_active_count` | Inject(배타 lease claim) |
 | `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs:872` | `headless_turn_provider_mismatch_refuses_before_mailbox_or_session_mutation` | Inject(배타 lease claim) |
@@ -165,7 +168,7 @@
 | `src/services/turn_orchestrator/queued_head/v2/control.rs:111` | `route` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/turn_orchestrator/witnessed_release.rs:93` | `answer` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 
-## inflight: 248행 (시험·주석 제외 1468행)
+## inflight: 254행 (시험·주석 제외 1462행)
 
 | 코드 좌표 | 포함 함수/진입점 | 모델 행동 |
 |---|---|---|
@@ -173,6 +176,7 @@
 | `src/services/discord/commands/control/clear_teardown.rs:229` | `stop_released_turn` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:471` | `archive_completed_identity` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/health/recovery.rs:845` | `maybe_recover_completed_stale_leak` | BootRestore / ProjectionSave / ProjectionClear |
+| `src/services/discord/health/recovery/carried_turn_close.rs:279` | `try_close` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/health/recovery/inflight_repair.rs:73` | `clear_idle_tmux_stale_turn_inflight_if_pinned` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/health/recovery/inflight_repair.rs:81` | `clear_idle_tmux_stale_turn_inflight_if_pinned` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/health/recovery/inflight_repair.rs:154` | `clear_idle_tmux_stale_turn` | BootRestore / ProjectionSave / ProjectionClear |
@@ -274,6 +278,8 @@
 | `src/services/discord/inflight/save_store.rs:1310` | `save_inflight_state_if_absent_in_root` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/inflight/save_store.rs:1314` | `save_inflight_state_if_absent_in_root` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/inflight/save_store.rs:1322` | `save_inflight_state_if_absent_in_root_with_io` | ProjectionSave(Inject / native observation, 기존 identity fence) |
+| `src/services/discord/inflight/save_store/delivery_rewind.rs:16` | `save_inflight_delivery_rewind_if_matches_identity` | ProjectionSave(Inject / native observation, 기존 identity fence) |
+| `src/services/discord/inflight/save_store/delivery_rewind.rs:28` | `save_inflight_delivery_rewind_if_matches_identity` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/inflight/save_store/delivery_rewind.rs:31` | `save_inflight_delivery_rewind_if_matches_identity_in_root` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/inflight/save_store/identity_gate.rs:53` | `save_inflight_state_if_identity_unchanged` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/inflight/save_store/identity_gate.rs:64` | `save_inflight_state_if_identity_unchanged_in_root` | ProjectionSave(Inject / native observation, 기존 identity fence) |
@@ -344,8 +350,10 @@
 | `src/services/discord/relay_recovery/apply.rs:474` | `apply_relay_recovery_decision_admitted` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/relay_recovery/idle_tmux.rs:49` | `clear_idle_tmux_reattach_inflight_if_pinned` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/relay_recovery/idle_tmux.rs:57` | `clear_idle_tmux_reattach_inflight_if_pinned` | BootRestore / ProjectionSave / ProjectionClear |
+| `src/services/discord/router/intake_gate/thread_guard_release.rs:137` | `thread_guard_force_clean_stale_thread` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/router/message_handler/foreign_row.rs:21` | `held_by_another_turn` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/router/message_handler/foreign_row.rs:47` | `admit_headless` | ProjectionSave(Inject / native observation, 기존 identity fence) |
+| `src/services/discord/router/message_handler/headless_turn.rs:942` | `start_reserved_headless_turn_admitted` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/router/message_handler/intake_turn.rs:2037` | `handle_text_message` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/router/message_handler/intake_turn/inflight_create_log.rs:21` | `log_create_new_inflight_outcome` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/router/message_handler/provider_isolation.rs:253` | `save_intake_inflight` | ProjectionSave(Inject / native observation, 기존 identity fence) |
@@ -371,6 +379,7 @@
 | `src/services/discord/tmux_watcher/turn_identity.rs:24` | `emit_explicit_inflight_cleanup_signal` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/tmux_watcher/turn_identity.rs:146` | `emit_explicit_inflight_cleanup_signal_pane_dead` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/tui_direct_pending_start/foreign_recovery.rs:198` | `submit_stale_foreign_inflight_cancel` | BootRestore / ProjectionSave / ProjectionClear |
+| `src/services/discord/tui_direct_pending_start/foreign_recovery.rs:289` | `submit_committed_foreign_inflight_complete` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/tui_direct_pending_start/state.rs:403` | `save_row_unless_retired` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/tui_prompt_relay/codex_idle_rollout.rs:223` | `replay_and_relay_codex_sources` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs:144` | `seed` | ProjectionSave(Inject / native observation, 기존 identity fence) |
@@ -418,7 +427,7 @@
 | `src/services/turn_lifecycle.rs:978` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/turn_lifecycle.rs:979` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 
-## inflight_alias: 61행 (시험·주석 제외 23행)
+## inflight_alias: 64행 (시험·주석 제외 20행)
 
 | 코드 좌표 | 포함 함수/진입점 | 모델 행동 |
 |---|---|---|
@@ -459,6 +468,7 @@
 | `src/services/discord/inflight/save_store/identity_gate.rs:688` | `persist_recovery_output_path_if_matches_identity_locked_in_root` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
 | `src/services/discord/inflight/save_store/identity_gate/bridge_entry.rs:90` | `patch_bridge_entry_state_if_identity_unchanged_in_root_impl` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
 | `src/services/discord/inflight/save_store/identity_gate/bridge_entry.rs:193` | `patch_bridge_entry_state_if_identity_unchanged_in_root_impl` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
+| `src/services/discord/inflight/save_store/identity_gate/captured_nonce.rs:64` | `save_admitted_nonce_transition` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
 | `src/services/discord/inflight/save_store/identity_gate/captured_nonce.rs:76` | `read_owned_row_for_guarded_write` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
 | `src/services/discord/inflight/save_store/identity_gate/completion_preserve.rs:129` | `save_inflight_state_if_matches_identity_in_root` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
 | `src/services/discord/inflight/save_store/identity_gate/heartbeat.rs:61` | `touch_inflight_state_if_matches_identity_in_root` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
@@ -483,8 +493,10 @@
 | `src/services/discord/inflight/watcher_state.rs:323` | `commit_watcher_terminal_delivery_locked_in_root` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
 | `src/services/discord/inflight/watcher_state.rs:426` | `persist_watcher_relay_watermark_locked_in_root` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
 | `src/services/discord/recovery_engine/herdr_admitted_restart.rs:178` | `settle_checked` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
+| `src/services/discord/tui_direct_pending_start/turn_retirement.rs:115` | `retire_channel` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
+| `src/services/discord/turn_finalizer/episode/row_retirement.rs:105` | `retire_drifted_row` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
 
-## kick: 167행 (시험·주석 제외 299행)
+## kick: 173행 (시험·주석 제외 293행)
 
 | 코드 좌표 | 포함 함수/진입점 | 모델 행동 |
 |---|---|---|
@@ -545,6 +557,7 @@
 | `src/services/discord/queue_io/backstop.rs:428` | `wake_coalesced` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/backstop.rs:669` | `reconcile_all_ready_idle_queues` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/backstop.rs:786` | `schedule_deferred_idle_queue_kickoff_inner` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_io/backstop.rs:834` | `schedule_deferred_idle_queue_kickoff_inner` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/input_owner/claude_handoff.rs:303` | `schedule` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/input_owner/closed.rs:28` | `closed` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/input_owner/ingress.rs:458` | `admit_raw` | Kick(wake/event/queue admission, 같은 head 재검증) |
@@ -582,7 +595,10 @@
 | `src/services/discord/runtime_bootstrap/recovery_flush.rs:136` | `run_bot_spawn_recovery_and_flush_restart_reports` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/session_transition.rs:153` | `wake_installed_owner` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/tmux_restart_handoff.rs:481` | `release_relinquished_turn_mailbox` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/tmux_restart_handoff.rs:541` | `resume_aborted_restart_turn` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/tmux_restart_handoff.rs:545` | `resume_aborted_restart_turn` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/tmux_watcher/terminal_commit_epilogue.rs:539` | `run_terminal_commit_epilogue` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/tui_direct_pending_start.rs:592` | `promote_queued_follow_up_after_abort` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/tui_direct_pending_start/state.rs:258` | `pending_synthetic_start_blocks_idle_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/tui_prompt_relay.rs:330` | `relay_observed_prompt` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/tui_prompt_relay/bridge_gateway.rs:209` | `dispatch_queued_turn` | Kick(wake/event/queue admission, 같은 head 재검증) |
@@ -650,6 +666,8 @@
 | `src/services/turn_orchestrator/registry_purge.rs:290` | `recovery_kickoff_with_closed_retry` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator/registry_purge.rs:300` | `recovery_kickoff_with_closed_retry` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator/remint_fence.rs:58` | `note_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/turn_orchestrator/remint_fence.rs:119` | `note_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/turn_orchestrator/remint_fence.rs:125` | `note_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator/turn_finished_signal.rs:13` | `module` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator/turn_finished_signal.rs:18` | `module` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator/turn_finished_signal.rs:49` | `wait` | Kick(wake/event/queue admission, 같은 head 재검증) |

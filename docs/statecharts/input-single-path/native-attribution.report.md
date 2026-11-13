@@ -11,7 +11,7 @@ Code SHA: `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba`.
 기존 `input-single-path` 영역에 별도 작은 `NativeInputAttribution.tla`를 추가했다.
 `InputOwnership.tla`의 native busy/idle은 원본의 내부 enqueue/dequeue·membership·strict closer를 구분하지 않는다.
 기존 모델을 더 큰 다목적 FSM으로 확장하지 않고 같은 색인·영역에서 원본 두 개, 외부 native run 하나,
-최대 프로세스 재시작 1회와 execution incarnation 교체 1회를 정밀화한다. 기존 모델/규칙은 변경하지 않는다.
+최대 프로세스 재시작 1회와 execution incarnation 교체 1회를 정밀화한다. 두 원본은 각각 새 lease를 잡는 primary이며 대기 중 head2를 사용자가 명시 취소하지 않는 진행성 범위다. 기존 모델/규칙은 변경하지 않는다.
 
 값 범위와 호출/선언 전수의 정본은 [진입점 표](native-attribution.entrypoints.md)다.
 
@@ -105,6 +105,7 @@ Unavailable은 restart 뒤 같은 source를 영원히 읽을 수 없는 비교 �
   Cancel 요청만으로 native를 idle로 만드는 가정을 제품에 옮기지 않는다. Stop/Terminate의 권한·프로세스 증거는 #8128 접점 시험이다.
 - incarnation 1/2와 ticket 1/2는 전체 identity tuple의 추상화다. 같은 numeric pane·같은 message-id에 다른 nonce,
   old schema None, generation wrap/GC 후 late event를 실제 identity API로 따로 시험한다.
+- 이미 있는 lease에 붙는 busy follower는 owning_episode=None이며 자기 결과만 정리한다. 이 모델은 새 primary lease 경로를 정밀화한다. 기존 `HerdrBusyInput.tla`의 busy 주입/보관 모델과 이 모델의 자동 합성 증명은 없다. follower 철회 때 parent lease/row 불변, 여러 입력이 같은 run에서 끝날 때 primary release1, queued clear 뒤 재주입0을 실제 owner_input→fold→mailbox fixture로 검증한다.
 - WARN 분 단위 경계/로그 sink·배송 POST/receipt·Discord body/card/footer는 모델 밖이며 main 설계의 DoD 표가 맡는다.
   O-delivery가 입력 release를 결정한다는 가정은 넣지 않았다. proof stamp는 native 출처이지 배송 receipt가 아니다.
 
