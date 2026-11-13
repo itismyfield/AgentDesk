@@ -449,6 +449,7 @@ src/
 │   ├── session_identity/
 │   │   ├── managed.rs
 │   │   └── naming.rs
+│   ├── agent_handoff.rs
 │   ├── atomic_write.rs
 │   ├── auto_queue_log.rs
 │   ├── automation_contract.rs

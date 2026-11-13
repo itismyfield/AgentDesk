@@ -1041,11 +1041,11 @@ pub async fn agent_message(
         );
     };
 
-    let channel_kind = match crate::services::discord::agent_handoff::AgentHandoffChannelKind::parse(
+    let channel_kind = match crate::domain::agent_handoff::AgentHandoffChannelKind::parse(
         body.channel_kind.as_deref(),
     ) {
         Ok(channel_kind) => channel_kind,
-        Err(error) => return (error.status(), Json(error.body())),
+        Err(error) => return bad_request(error),
     };
 
     match crate::services::discord::agent_handoff::send_agent_handoff(
@@ -1102,7 +1102,7 @@ pub async fn agent_handoff(
         );
     };
 
-    let channel_kind = match crate::services::discord::agent_handoff::AgentHandoffChannelKind::parse(
+    let channel_kind = match crate::domain::agent_handoff::AgentHandoffChannelKind::parse(
         body.channel_kind.as_deref(),
     ) {
         Ok(channel_kind) => channel_kind,
@@ -1113,7 +1113,7 @@ pub async fn agent_handoff(
                 "handoff",
                 "invalid_channel_kind",
             );
-            return (error.status(), Json(error.body()));
+            return bad_request(error);
         }
     };
 
@@ -1149,6 +1149,58 @@ pub async fn agent_handoff(
                 "backend_error",
             );
             (error.status(), Json(error.body()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod handoff_channel_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn invalid_channel_kind_preserves_both_api_responses() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let config = crate::config::Config::default();
+        let engine = crate::engine::PolicyEngine::new(&config).expect("policy engine");
+        let broadcast_tx = crate::eventbus::new_broadcast();
+        let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
+        let state = AppState {
+            pg_pool: Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .connect_lazy("postgres://postgres@127.0.0.1:1/unused")
+                    .expect("lazy pool"),
+            ),
+            engine,
+            config: Arc::new(config),
+            broadcast_tx,
+            batch_buffer,
+            health_registry: Some(Arc::new(
+                crate::services::discord::health::HealthRegistry::new(),
+            )),
+            cluster_instance_id: None,
+        };
+        for input in ["notify", "CC", "Cdx", "CDX", " ccx ", "cc cdx"] {
+            let message = serde_json::from_value(json!({
+                "from_agent_id": "sender", "message": "hello", "channel_kind": input,
+            }))
+            .unwrap();
+            let handoff = serde_json::from_value(json!({
+                "from_agent_id": "sender", "prompt": "hello", "channel_kind": input,
+            }))
+            .unwrap();
+            let responses = [
+                agent_message(State(state.clone()), Path("receiver".into()), Json(message)).await,
+                agent_handoff(State(state.clone()), Path("receiver".into()), Json(handoff)).await,
+            ];
+            for (status, Json(body)) in responses {
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{input:?}");
+                assert_eq!(
+                    body,
+                    json!({"error": "channel_kind must be cc or cdx"}),
+                    "{input:?}"
+                );
+            }
         }
     }
 }
