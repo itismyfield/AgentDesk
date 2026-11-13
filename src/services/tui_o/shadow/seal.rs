@@ -53,6 +53,10 @@ impl SealRegistry {
     pub fn unsealed(&self) -> Vec<UnitKey> {
         self.announced.iter().cloned().collect()
     }
+
+    pub(crate) fn end_announced(&mut self, keys: &BTreeSet<UnitKey>) {
+        self.announced.retain(|key| !keys.contains(key));
+    }
 }
 
 /// What one record did to the turn state of its source.

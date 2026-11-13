@@ -684,7 +684,7 @@ mod tests {
             };
             let sources: Vec<InitSource> = delivery_start.map(init_source).into_iter().collect();
             let init = |channel| Ok(initialized(channel, sources.clone()));
-            let era = store.begin_era(&[7], Utc::now(), init).unwrap();
+            let era = store.begin_fixture_era(&[7], Utc::now(), init).unwrap();
             Self {
                 runtime,
                 path,

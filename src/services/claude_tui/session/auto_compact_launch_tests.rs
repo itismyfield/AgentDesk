@@ -39,7 +39,8 @@ fn generated_script(root: &Path, name: &str, model: Option<&str>) -> String {
         &script_path,
         &launch_config(root, model),
         &root.join("hook-settings.json"),
-        None,
+        LaunchEffort::default(),
+        false,
     )
     .expect("the production script writer must finish before checking its output");
     fs::read_to_string(script_path).unwrap()

@@ -1,10 +1,9 @@
 //! The owner's effect for one reserved attempt: its provider leaf runs inside the owner scope and
 //! the attempt settles from what the leaf proved, never from a resend.
 #![cfg(unix)]
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::services::claude_tui::busy_inject::{self, Outcome, WriteFailure};
+use crate::services::claude_tui::busy_inject;
 use crate::services::claude_tui::owner_input;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
@@ -40,22 +39,6 @@ pub(crate) fn refused(reason: String, waits: bool) -> Completion {
     match waits {
         true => Completion::Held(reason),
         false => Completion::NotSent(reason),
-    }
-}
-
-/// Whether a later look may clear a Claude veto; an input the entry refuses never submits.
-pub(crate) fn claude_waits(veto: busy_inject::Veto) -> bool {
-    use busy_inject::Veto::*;
-    match veto {
-        InvalidInput => false,
-        LockContended
-        | PaneUnavailable
-        | Modal
-        | NotBusy
-        | TranscriptUnavailable
-        | LoadFailed
-        | ScreenUnread
-        | CopyMode => true,
     }
 }
 
@@ -160,133 +143,8 @@ pub(super) fn parse<T: serde::de::DeserializeOwned>(value: serde_json::Value) ->
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
-/// A busy Claude tmux pane: main's busy transaction, any visible draft parked, ending at Enter.
-pub(crate) struct BusyClaude {
-    pub(crate) pane: busy_inject::Pane,
-    pub(crate) session: String,
-    pub(crate) transcript: PathBuf,
-    pub(crate) channel: u64,
-    pub(crate) source: String,
-    pub(crate) author: String,
-    pub(crate) name: String,
-    /// The attempt's nonce, which names the input in the transcript.
-    pub(crate) nonce: String,
-    /// The original body; the prepared frame must be exactly main's framing of it.
-    pub(crate) text: String,
-    pub(crate) timing: &'static busy_inject::Timing,
-    /// A reader set up before the paste answers it, so the relay leaves its turn alone.
-    pub(crate) declared: bool,
-    /// Tells the original once that a draft beside the pasted input may not be kept.
-    pub(crate) draft_notice: Option<DraftNotice>,
-    /// The turn's token, whose first-key gate the paste consumes.
-    pub(crate) cancel: Arc<crate::services::provider::CancelToken>,
-}
-
-/// Raises the one notice an original owes when its paste met a draft C-s could not park.
+/// Raises the original's notice if its draft could not be parked.
 pub(crate) type DraftNotice = Box<dyn FnOnce() + Send>;
-
-impl BusyClaude {
-    pub(crate) fn leaf(mut self) -> Leaf {
-        let notice = self.draft_notice.take();
-        Box::new(move |frame| {
-            let (source, author, name) = (&self.source, &self.author, &self.name);
-            if busy_inject::frame(source, author, name, &self.nonce, &self.text) != frame {
-                owner_input::vetoed("frame_mismatch");
-                return Ok(Completion::NotSent("frame_mismatch".into()));
-            }
-            let request = busy_inject::Request {
-                session: &self.session,
-                transcript: &self.transcript,
-                source: &self.source,
-                author: &self.author,
-                name: &self.name,
-                nonce: &self.nonce,
-                text: &self.text,
-            };
-            // Enter ends the transaction: the receipt is only recorded off this thread.
-            let inject = || {
-                let declared = self.declared;
-                let sink = crate::services::claude_tui::guarded_outcome::with_receipt_sink;
-                sink(Some(&self.cancel), || {
-                    let report =
-                        busy_inject::inject_owned(&self.pane, &request, self.timing, declared);
-                    busy_inject::collect_receipt(&request, &report, self.timing);
-                    (report.outcome, report.draft_unproven)
-                })
-            };
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
-            // A stop that took the gate before the first key left nothing sent and nothing to resend.
-            if matches!(outcome, Ok((Outcome::NotSent(_), _)))
-                && self.cancel.native_stop.receipt_sink().stopped_before_key()
-            {
-                owner_input::stop_took_gate();
-                return Ok(Completion::WriteUncertain("stopped_before_key".into()));
-            }
-            let outcome = outcome.map(|(outcome, unproven)| {
-                if unproven && let Some(notice) = notice {
-                    tracing::info!(channel_id = self.channel, nonce = %self.nonce, "owned paste met an unparked draft");
-                    notice();
-                }
-                outcome
-            });
-            let alert = |detail: &str| {
-                self.unconfirmed(detail);
-                detail.to_string()
-            };
-            Ok(match outcome {
-                Ok(Outcome::NotSent(veto)) => {
-                    use busy_inject::Veto::{
-                        CopyMode, LoadFailed, Modal, ScreenUnread, TranscriptUnavailable,
-                    };
-                    match veto {
-                        Modal | ScreenUnread | CopyMode => {
-                            arm_screen(self.channel, self.pane.clone())
-                        }
-                        // A buffer that failed to load is a cause a read sees; a frame ledger refusal
-                        // is not, so that front waits for the busy turn's end wake.
-                        LoadFailed if owner_input::buffer_failed() => {
-                            arm_cause(self.channel, self.pane.clone(), loads(self.pane.clone()))
-                        }
-                        TranscriptUnavailable => {
-                            let transcript = self.transcript.clone();
-                            arm_cause(self.channel, self.pane.clone(), move || transcript.exists());
-                        }
-                        _ => {}
-                    }
-                    refused(format!("{veto:?}"), claude_waits(veto))
-                }
-                Ok(Outcome::Injected) => Completion::Submitted,
-                Ok(Outcome::Failed(WriteFailure::Stash)) => {
-                    Completion::Failed(alert("stash_failed"))
-                }
-                Ok(Outcome::Failed(WriteFailure::Paste)) => {
-                    Completion::WriteUncertain(alert("paste_failed"))
-                }
-                Ok(Outcome::Failed(WriteFailure::Enter)) => {
-                    Completion::WriteUncertain(alert("enter_failed"))
-                }
-                Err(_) => Completion::WriteUncertain(alert("executor_failed")),
-            })
-        })
-    }
-
-    fn unconfirmed(&self, detail: &str) {
-        let payload = serde_json::json!({
-            "detail": detail,
-            "nonce": self.nonce,
-            "source": self.source,
-            "tmux_session": self.session,
-            "owner": true,
-        });
-        tracing::warn!(channel_id = self.channel, %payload, "owner busy input unconfirmed");
-        crate::services::observability::events::record_simple(
-            "busy_inject_unconfirmed",
-            Some(self.channel),
-            Some("claude"),
-            payload,
-        );
-    }
-}
 
 /// Leaves a read of the Claude pane that refused under a screen Enter may not submit on, so its
 /// recovery wakes the drive.
@@ -302,29 +160,15 @@ fn arm_screen(channel: u64, pane: busy_inject::Pane) {
 pub(super) fn arm_cause(
     channel: u64,
     pane: busy_inject::Pane,
-    mut clear: impl FnMut() -> bool + Send + 'static,
+    clear: impl FnMut() -> bool + Send + 'static,
 ) {
-    let read = move || match clear() {
-        true => busy_inject::Screen::Ready,
-        false => pane.lost(),
-    };
-    super::held_watch::arm(channel, Box::new(read));
+    let probe = crate::services::claude_tui::host_input::busy::cause(pane, clear);
+    super::held_watch::arm(channel, probe);
 }
 
 /// Whether tmux loads a buffer for `pane` again; the probe's buffer is deleted and nothing pasted.
 pub(super) fn loads(pane: busy_inject::Pane) -> impl FnMut() -> bool + Send + 'static {
-    move || {
-        let Ok(file) = tempfile::NamedTempFile::new() else {
-            return false;
-        };
-        let (path, buffer) = (file.path().to_string_lossy(), "agentdesk-owner-load-probe");
-        let loaded = std::fs::write(file.path(), "probe").is_ok()
-            && pane.ok(&["load-buffer", "-b", buffer, &path]).is_some();
-        if loaded {
-            let _ = pane.ok(&["delete-buffer", "-b", buffer]);
-        }
-        loaded
-    }
+    crate::services::claude_tui::host_input::busy::loads(pane)
 }
 
 /// An idle Claude tmux pane: main's warm submission, whose stash the owner scope admits.
@@ -395,10 +239,12 @@ pub(crate) fn cold_claude(
     )
 }
 
+mod claude;
 mod codex;
+#[cfg(test)]
 mod herdr;
+pub(crate) use claude::BusyClaude;
 pub(crate) use codex::{BusyCodex, BusyCodexHerdr, CodexInput, idle_codex};
-pub(crate) use herdr::BusyClaudeHerdr;
 
 #[cfg(test)]
 #[path = "effect_tests.rs"]

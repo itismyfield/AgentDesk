@@ -77,6 +77,9 @@ fn wait_for_tmux_output(
 
 mod availability;
 pub(crate) mod health_probe;
+pub(crate) mod session_identity;
+#[cfg(all(test, unix))]
+pub(crate) mod session_identity_tests;
 #[cfg(unix)]
 pub(crate) mod session_inventory;
 
@@ -157,8 +160,19 @@ pub fn create_session(
     working_dir: Option<&str>,
     shell_command: &str,
 ) -> Result<Output, String> {
+    let identity = crate::services::session_identity_metadata::runtime_identity(session_name)?;
+    create_session_with_identity(session_name, working_dir, shell_command, &identity)
+}
+
+pub(crate) fn create_session_with_identity(
+    session_name: &str,
+    working_dir: Option<&str>,
+    shell_command: &str,
+    identity: &crate::domain::session_identity::managed::ManagedIdentity,
+) -> Result<Output, String> {
     let mut cmd = tmux_command().map_err(|e| format!("Failed to create tmux session: {e}"))?;
     cmd.args(["new-session", "-d", "-s", session_name]);
+    cmd.args(["-e", &identity.environment_assignment()?]);
     if let Some(dir) = working_dir {
         cmd.args(["-c", dir]);
     }
@@ -373,6 +387,9 @@ fn kill_session_output_internal(session_name: &str, reason: &str) -> std::io::Re
         tracing::warn!("  [{ts}] ⚠ refusing tmux kill for blank session name reason={reason}");
         return Ok(failed_output("refusing tmux kill for blank session name\n"));
     }
+    if let Err(error) = session_identity::require_managed(session_name) {
+        return Ok(failed_output(&error));
+    }
     log_kill_request(session_name, reason);
     let output = tmux_output(["kill-session", "-t", &exact_target(session_name)]);
     match &output {
@@ -397,6 +414,11 @@ fn kill_session_output_internal_with_timeout(
         tracing::warn!("  [{ts}] ⚠ refusing tmux kill for blank session name reason={reason}");
         return Err("refusing tmux kill for blank session name".to_string());
     }
+    session_identity::require_managed_with_program(
+        session_name,
+        std::path::Path::new("tmux"),
+        timeout,
+    )?;
     log_kill_request(session_name, reason);
     let output = tmux_command()
         .map_err(|e| format!("tmux kill-session spawn failed: {e}"))
@@ -460,6 +482,7 @@ pub fn kill_session_checked(session_name: &str, reason: &str) -> Result<(), Stri
 ///
 /// `keys` are passed as separate arguments — typically `["some-text", "Enter"]`.
 pub fn send_keys(session_name: &str, keys: &[&str]) -> Result<Output, String> {
+    session_identity::require_managed(session_name)?;
     let target = exact_target(session_name);
     let mut args = vec!["send-keys", "-t", &target];
     args.extend(keys);
@@ -472,6 +495,11 @@ pub fn send_keys_timeout(
     keys: &[&str],
     timeout: Duration,
 ) -> Result<Output, String> {
+    session_identity::require_managed_with_program(
+        session_name,
+        std::path::Path::new("tmux"),
+        timeout,
+    )?;
     let target = exact_target(session_name);
     let mut args = vec!["send-keys", "-t", &target];
     args.extend(keys);
@@ -482,6 +510,7 @@ pub fn send_keys_timeout(
 
 /// Send literal text to a tmux session without interpreting tmux key names.
 pub fn send_literal(session_name: &str, text: &str) -> Result<Output, String> {
+    session_identity::require_managed(session_name)?;
     let target = exact_target(session_name);
     tmux_output(["send-keys", "-t", &target, "-l", "--", text])
         .map_err(|e| format!("tmux send-keys -l failed: {e}"))
@@ -509,6 +538,7 @@ pub fn load_buffer(buffer_name: &str, text: &str) -> Result<Output, String> {
 
 /// Paste a named tmux buffer to the active pane.
 pub fn paste_buffer(session_name: &str, buffer_name: &str, delete: bool) -> Result<Output, String> {
+    session_identity::require_managed(session_name)?;
     let target = exact_target(session_name);
     let args = paste_buffer_args(buffer_name, &target, delete);
     tmux_output(&args).map_err(|e| format!("tmux paste-buffer failed: {e}"))
@@ -687,6 +717,7 @@ pub struct EnumeratedSession {
 }
 
 /// A tmux session and the PID of the tmux server that owns it.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionServer {
     pub session_name: String,
@@ -743,6 +774,7 @@ pub fn list_sessions_with_pane_command() -> Result<Vec<EnumeratedSession>, Strin
 }
 
 /// List every tmux session along with its owning tmux server PID.
+#[cfg(target_os = "macos")]
 pub fn list_sessions_with_server_pid() -> Result<Vec<SessionServer>, String> {
     let mut command = tmux_command().map_err(|e| format!("tmux list-sessions failed: {e}"))?;
     command.env_remove("TMUX");
@@ -758,6 +790,7 @@ pub fn list_sessions_with_server_pid() -> Result<Vec<SessionServer>, String> {
     )))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_sessions_with_server_pid(text: &str) -> Vec<SessionServer> {
     let mut sessions = Vec::new();
     for line in text.lines() {
@@ -1334,14 +1367,20 @@ mod timeout_tests {
         let _path = PathOverride::prepend(temp.path());
 
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "missing") };
-        assert_eq!(session_presence("agentdesk-test"), SessionPresence::Missing);
+        assert_eq!(
+            session_presence("AgentDesk-timeout-fixture"),
+            SessionPresence::Missing
+        );
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "failed") };
         assert_eq!(
-            session_presence("agentdesk-test"),
+            session_presence("AgentDesk-timeout-fixture"),
             SessionPresence::ProbeFailed
         );
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "present") };
-        assert_eq!(session_presence("agentdesk-test"), SessionPresence::Present);
+        assert_eq!(
+            session_presence("AgentDesk-timeout-fixture"),
+            SessionPresence::Present
+        );
         unsafe { std::env::remove_var("FAKE_TMUX_MODE") };
     }
 
@@ -1436,7 +1475,7 @@ mod timeout_tests {
         // `Missing`, so the two arms stay observably distinct.
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "missing") };
         assert_eq!(
-            readiness("agentdesk-test"),
+            readiness("AgentDesk-timeout-fixture"),
             IndependentTmuxReadiness::Missing,
             "a confirmed missing session must still read as Missing"
         );
@@ -1444,7 +1483,7 @@ mod timeout_tests {
         // An unexpected tmux failure classifies as `ProbeFailed`; it must not
         // reach destructive callers as absence.
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "failed") };
-        let probe_failed = readiness("agentdesk-test");
+        let probe_failed = readiness("AgentDesk-timeout-fixture");
         unsafe { std::env::remove_var("FAKE_TMUX_MODE") };
         assert_eq!(
             probe_failed,
@@ -1502,14 +1541,20 @@ mod timeout_tests {
 
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "failed") };
         assert_eq!(
-            pane_liveness("agentdesk-test"),
+            pane_liveness("AgentDesk-timeout-fixture"),
             PaneLiveness::ProbeError,
             "an unexpected has-session failure is unknown, not confirmed death"
         );
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "missing") };
-        assert_eq!(pane_liveness("agentdesk-test"), PaneLiveness::DeadOrAbsent);
+        assert_eq!(
+            pane_liveness("AgentDesk-timeout-fixture"),
+            PaneLiveness::DeadOrAbsent
+        );
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "present") };
-        assert_eq!(pane_liveness("agentdesk-test"), PaneLiveness::Live);
+        assert_eq!(
+            pane_liveness("AgentDesk-timeout-fixture"),
+            PaneLiveness::Live
+        );
         unsafe { std::env::remove_var("FAKE_TMUX_MODE") };
     }
 
@@ -1520,7 +1565,7 @@ mod timeout_tests {
         let _path = PathOverride::prepend(temp.path());
 
         let error = send_keys_timeout(
-            "agentdesk-test",
+            "AgentDesk-timeout-fixture",
             &["/compact", "Enter"],
             Duration::from_millis(20),
         )
@@ -1536,7 +1581,7 @@ mod timeout_tests {
         let _path = PathOverride::prepend(temp.path());
 
         let output = send_keys_timeout(
-            "agentdesk-test",
+            "AgentDesk-timeout-fixture",
             &["/compact", "Enter"],
             Duration::from_secs(1),
         )
@@ -1557,7 +1602,7 @@ mod timeout_tests {
         let _path = PathOverride::prepend(temp.path());
 
         let error = kill_session_output_timeout(
-            "agentdesk-test",
+            "AgentDesk-timeout-fixture",
             "test timeout",
             Duration::from_millis(20),
         )

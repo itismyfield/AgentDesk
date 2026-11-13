@@ -28,7 +28,7 @@ impl Fixture {
         let source = source_id_for("native-session", &path).unwrap();
         let store = enabled(runtime.path());
         let era = store
-            .begin_era(&[7], chrono::Utc::now(), |channel| {
+            .begin_fixture_era(&[7], chrono::Utc::now(), |channel| {
                 Ok(initialized(channel, Vec::new()))
             })
             .unwrap();

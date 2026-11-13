@@ -7,15 +7,13 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 
 use super::phase_gates::{PhaseGateStateWrite, save_phase_gate_state_on_pg};
-use super::runs::{
-    RunCompletionBlockedReason, RunCompletionOutcome, finalize_run_if_ready_on_pg_tx,
-    finalize_run_if_ready_pg,
-};
+use super::runs::{RunCompletionBlockedReason, RunCompletionOutcome};
 use super::test_support::TestPostgresDb;
 use super::{
     ENTRY_STATUS_PENDING, EntryStatusUpdateOptions, update_entry_status_on_pg,
     update_entry_status_on_pg_tx,
 };
+use super::{finalize_run_if_ready_on_pg_tx, finalize_run_if_ready_pg};
 
 const DEADLINE: Duration = Duration::from_secs(5);
 

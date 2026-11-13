@@ -484,7 +484,7 @@ pub(crate) async fn reopen_done_auto_queue_entries_on_pg_tx(
             ));
         }
         crate::db::auto_queue::ensure_done_entry_run_live_on_pg_tx(tx, &run_id, &entry_id).await?;
-        let result = crate::db::auto_queue::update_entry_status_on_pg_tx(
+        let result = crate::services::auto_queue::transactions::update_entry_status_on_pg_tx(
             tx,
             &entry_id,
             crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,

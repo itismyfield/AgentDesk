@@ -2455,7 +2455,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/cli/provider_cli/mod.rs`
 - `src/config.rs`
 - `src/db/auto_queue/entries.rs`
-- `src/db/auto_queue/phase_gates.rs`
 - `src/db/dispatched_sessions.rs`
 - `src/db/dispatched_sessions/canonical_identity.rs`
 - `src/db/dispatches/mod.rs`
@@ -2463,6 +2462,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/dispatch/dispatch_context.rs`
 - `src/dispatch/dispatch_create.rs`
 - `src/dispatch/dispatch_status.rs`
+- `src/domain/campaign/verification_run.rs`
 - `src/engine/loader.rs`
 - `src/engine/mod.rs`
 - `src/engine/ops/db_ops.rs`
@@ -2479,7 +2479,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/auto_queue.rs`
 - `src/services/auto_queue/activate_command.rs`
 - `src/services/auto_queue/cleanup_tasks.rs`
-- `src/services/campaign_execution/verification_run.rs`
 - `src/services/claude.rs`
 - `src/services/claude_tui/hook_relay/ordered_queue.rs`
 - `src/services/claude_tui/input.rs`
@@ -2487,6 +2486,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/codex_tmux_wrapper.rs`
 - `src/services/codex_tui/input.rs`
 - `src/services/discord/health/snapshot.rs`
+- `src/services/discord/health/turn_deliver/inject.rs`
 - `src/services/discord/mod.rs`
 - `src/services/discord/outbound/turn_output_controller.rs`
 - `src/services/discord/recovery_engine/restore_inflight.rs`
@@ -2511,6 +2511,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/onboarding/mod.rs`
 - `src/services/opencode.rs`
 - `src/services/platform/binary_resolver.rs`
+- `src/services/platform/tmux.rs`
 - `src/services/qwen.rs`
 - `src/services/routines/agent_executor.rs`
 - `src/services/routines/discord_log.rs`

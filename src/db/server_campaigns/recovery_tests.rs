@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use super::tests::{Harness, applied, edit, envelope, execute, rejected, send, stop};
 use super::*;
-use crate::services::campaign_execution::{control::tests as domain, view};
+use crate::services::campaign_execution::{
+    control::{self, tests as domain},
+    view,
+};
 
 fn observe(binding: &AttemptBinding, observation: ActionObservation) -> Command {
     Command::ObserveAction {

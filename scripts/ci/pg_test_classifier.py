@@ -741,8 +741,6 @@ def discover_pg_inventory(
         for match in _ATTR_FN.finditer(clean):
             if not _TEST_ATTR.search(match.group("attrs")):
                 continue
-            if not _inside_test_region(match.start(), ranges, external):
-                continue
             opening = _function_body_opening(clean, match.end())
             if opening is None:
                 continue

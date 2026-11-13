@@ -1,4 +1,7 @@
 mod command_streaming;
+mod effort;
+#[cfg(unix)]
+use effort::from_env as codex_reasoning_effort_from_env;
 mod direct_reader;
 pub(crate) use command_streaming::{CommandStreamingRequest, execute_command_streaming_observed};
 #[cfg(unix)]
@@ -229,12 +232,6 @@ fn clean_nonempty(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-fn codex_reasoning_effort_from_env() -> Option<String> {
-    std::env::var("AGENTDESK_CODEX_REASONING_EFFORT")
-        .ok()
-        .and_then(|value| clean_nonempty(Some(&value)))
-}
-
 /// Public so onboarding/health-check can use the exact same resolution contract.
 #[allow(dead_code)]
 pub fn resolve_codex_path() -> Option<String> {
@@ -342,9 +339,10 @@ fn render_codex_wrapper_tmux_script(
     developer_instructions: Option<&str>,
     compact_token_limit: Option<u64>,
     fast_mode_enabled: Option<bool>,
+    effort: Option<&str>,
     goals_enabled: Option<bool>,
 ) -> String {
-    let reasoning_effort = codex_reasoning_effort_from_env();
+    let reasoning_effort = effort::resolve(effort, None);
     let wrapper_args = build_codex_wrapper_cli_args(
         &CodexLaunchOptions::new("")
             .with_resume_session_id(session_id)
@@ -1106,6 +1104,7 @@ pub fn execute_command_streaming(
             report_provider,
             model,
             fast_mode_enabled,
+            effort: None,
             goals_enabled,
             compact_token_limit,
             force_fresh_provider_session,
@@ -1134,6 +1133,7 @@ fn execute_streaming_direct(
     session_id: Option<&str>,
     model: Option<&str>,
     fast_mode_enabled: Option<bool>,
+    effort: Option<&str>,
     goals_enabled: Option<bool>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
@@ -1156,7 +1156,7 @@ fn execute_streaming_direct(
             .with_resume_session_id(session_id)
             .with_developer_instructions(developer_instructions)
             .with_model(model)
-            .with_reasoning_effort(Some("high"))
+            .with_reasoning_effort(effort::resolve(effort, Some("high")).as_deref())
             .with_compact_token_limit(compact_token_limit)
             .with_readonly_mode(readonly_mode)
             .with_fast_mode_enabled(fast_mode_enabled)
@@ -1276,6 +1276,7 @@ fn execute_streaming_local_tui_tmux(
     session_id: Option<&str>,
     model: Option<&str>,
     fast_mode_enabled: Option<bool>,
+    effort: Option<&str>,
     goals_enabled: Option<bool>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
@@ -1295,6 +1296,7 @@ fn execute_streaming_local_tui_tmux(
             session_id,
             model,
             fast_mode_enabled,
+            effort,
             goals_enabled,
             working_dir,
             sender,
@@ -1409,6 +1411,7 @@ fn execute_streaming_local_tmux(
     prompt: &str,
     model: Option<&str>,
     fast_mode_enabled: Option<bool>,
+    effort: Option<&str>,
     goals_enabled: Option<bool>,
     session_id: Option<&str>,
     working_dir: &str,
@@ -1593,6 +1596,7 @@ fn execute_streaming_local_tmux(
         developer_instructions,
         compact_token_limit,
         fast_mode_enabled,
+        effort,
         goals_enabled,
     );
 
@@ -1600,10 +1604,16 @@ fn execute_streaming_local_tmux(
         .map_err(|e| format!("Failed to write launch script: {}", e))?;
 
     fence.validate_tmux_publisher(tmux_session_name)?;
-    let tmux_result = crate::services::platform::tmux::create_session(
+    let tmux_result = crate::services::platform::tmux::create_session_with_identity(
         tmux_session_name,
         Some(working_dir),
         &format!("bash {}", shell_escape(&script_path)),
+        &crate::services::session_identity_metadata::provider_identity(
+            tmux_session_name,
+            "codex",
+            report_channel_id,
+            "wrapper",
+        )?,
     )?;
 
     if !tmux_result.status.success() {
@@ -2294,6 +2304,7 @@ mod tui_hosting_tests {
             Some("developer rules"),
             Some(120_000),
             Some(false),
+            None,
             Some(true),
         );
 
@@ -2783,6 +2794,7 @@ mod verified_admission_tests {
                 None,
                 None,
                 None,
+                None,
                 root.path().to_str().unwrap(),
                 tx,
                 None,
@@ -2876,6 +2888,7 @@ mod verified_admission_tests {
             assert!(
                 execute_streaming_local_tui_tmux(
                     "not submitted",
+                    None,
                     None,
                     None,
                     None,

@@ -194,6 +194,14 @@ async fn notice_owner_resume_context_change_invalidates_prepared_census() {
     let frame = c.frame();
     register_current(&c, &frame);
     c.input("context-change", &frame);
+    crate::services::tui_o::writer::restart_end::refresh(
+        &mut actor.writer,
+        &mut actor.deriver,
+        actor.bindings.as_ref(),
+        ShadowProvider::Claude,
+    )
+    .await
+    .unwrap();
     actor.read_sources();
     let origin = actor
         .writer

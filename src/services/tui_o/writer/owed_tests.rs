@@ -295,6 +295,7 @@ fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId) {
     let initialized = |channel| {
         let (sources, build_digest, at) = (vec![init.clone()], "b".to_string(), Utc::now());
         Ok(Initialized {
+            policy_parent: None,
             channel,
             sources,
             initial_anchor: 100,
@@ -303,7 +304,7 @@ fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId) {
         })
     };
     store
-        .begin_era(&[channel], Utc::now(), initialized)
+        .begin_fixture_era(&[channel], Utc::now(), initialized)
         .unwrap();
     (runtime, store, source)
 }

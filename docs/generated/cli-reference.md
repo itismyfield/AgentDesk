@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 55
-- Commands including nested subcommands: 101
+- Top-level commands: 56
+- Commands including nested subcommands: 103
 
 ## Global options
 
@@ -27,6 +27,8 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | Command | Summary | Notes |
 |---|---|---|
 | [`agentdesk dcserver`](#agentdesk-dcserver) | Start Discord bot server(s) |  |
+| [`agentdesk dev-instance`](#agentdesk-dev-instance) | Write an isolated instance credential from stdin |  |
+| [`agentdesk dev-instance credential-write`](#agentdesk-dev-instance-credential-write) |  |  |
 | [`agentdesk init`](#agentdesk-init) | Run the initial setup wizard |  |
 | [`agentdesk reconfigure`](#agentdesk-reconfigure) | Re-run the configuration wizard |  |
 | [`agentdesk emit-launchd-plist`](#agentdesk-emit-launchd-plist) | Emit a launchd plist using the canonical Rust renderer |  |
@@ -139,6 +141,25 @@ Usage: `agentdesk dcserver [TOKEN]`
 | Argument | Value | Default | Description |
 |---|---|---|---|
 | `[TOKEN]` | `String` |  | Bot token (defaults to configured Discord bots or AGENTDESK_TOKEN env) |
+
+## `agentdesk dev-instance`
+
+Write an isolated instance credential from stdin
+
+Usage: `agentdesk dev-instance <COMMAND>`
+
+Subcommands:
+
+- `credential-write`
+
+### `agentdesk dev-instance credential-write`
+
+Usage: `agentdesk dev-instance credential-write [OPTIONS]`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `--root <ROOT>` (required) | `PathBuf` |  |  |
+| `--name <NAME>` (required) | `String` |  |  |
 
 ## `agentdesk init`
 

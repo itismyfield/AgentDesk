@@ -5,14 +5,14 @@ use std::sync::Mutex;
 
 use super::StreamingTurn;
 use crate::services::claude_tui::busy_inject::Screen;
+use crate::services::claude_tui::host_input::BusyOperation;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
 use crate::services::discord::queue_io::input_owner::claude_handoff::{self, bound_herdr};
 use crate::services::discord::queue_io::input_owner::drive::{
     Drive, Front, FrontClaim, Handoff, Settled as Owed, claim_turn,
 };
 use crate::services::discord::queue_io::input_owner::effect::{
-    self, BusyClaude, BusyClaudeHerdr, BusyCodex, BusyCodexHerdr, Clock, CodexInput, Completion,
-    PreparedPayload,
+    self, BusyClaude, BusyCodex, BusyCodexHerdr, Clock, CodexInput, Completion, PreparedPayload,
 };
 use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOrigin};
 use crate::services::discord::queue_io::input_owner::{pump, target};
@@ -190,7 +190,8 @@ pub(in crate::services::discord) fn owner_drive(
                 }
                 return Err(WRITER_HELD.into());
             }
-            let synthetic = !front_origin(&mailbox, &front).await?.is_person();
+            let origin = front_origin(&mailbox, &front).await?;
+            let synthetic = !origin.is_person();
             if !synthetic
                 && claude_handoff::prepare(runtime.as_ref(), &mailbox, &provider, channel, &front)
                     .await?
@@ -241,7 +242,10 @@ pub(in crate::services::discord) fn owner_drive(
                 Ok(false) => idle(front).await,
                 Err(unreachable) => Err(format!("{unreachable:?}")),
             };
-            if synthetic && result.as_ref().err().map(String::as_str) == Some(START_WAITS) {
+            if synthetic
+                && origin != InputOrigin::EffortContinue
+                && result.as_ref().err().map(String::as_str) == Some(START_WAITS)
+            {
                 let held = original.clone();
                 mailbox
                     .v2_request(move |slot| {
@@ -1337,16 +1341,13 @@ fn take_owned(
         _ => None,
     };
     let declared = until_done.is_some();
-    // Only the Claude tmux writers consult the first-key gate, so only there does a stop prove no key.
+    // Only adapters that consume the first-key gate can supply its stopped-before-key proof.
     let gate = matches!(route, target::Route::ClaudeIdle | target::Route::ClaudeBusy)
         .then(|| turn.cancel.native_stop.receipt_sink());
     let native_pin_submitted = registration.native_pin_submitted.clone();
     let busy = matches!(
         route,
-        target::Route::ClaudeBusy
-            | target::Route::ClaudeHerdrBusy
-            | target::Route::CodexBusy
-            | target::Route::CodexHerdrBusy
+        target::Route::ClaudeBusy | target::Route::CodexBusy | target::Route::CodexHerdrBusy
     );
     let originals: Vec<_> = front
         .as_ref()
@@ -1466,7 +1467,14 @@ fn run(
         target::Route::ClaudeBusy => (
             busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
             BusyClaude {
-                pane: busy_inject::Pane::with_program(session()?, r.program),
+                operation: BusyOperation::for_session(
+                    session()?,
+                    r.herdr,
+                    r.program,
+                    r.timing,
+                    declared,
+                    turn.cancel.clone(),
+                )?,
                 session: session()?.into(),
                 transcript: r.transcript,
                 channel: turn.channel_id,
@@ -1475,17 +1483,14 @@ fn run(
                 name: r.name,
                 nonce,
                 text: turn.prompt.into(),
-                timing: r.timing,
-                declared,
                 draft_notice: draft_notice(turn, &r.sources),
-                cancel: turn.cancel.clone(),
             }
             .leaf(),
         ),
         target::Route::ClaudeIdle => (
             turn.prompt.into(),
             effect::idle_claude(
-                busy_inject::Pane::with_program(session()?, r.program),
+                busy_inject::Pane::with_program(session()?, r.program)?,
                 session()?.into(),
                 turn.channel_id,
                 turn.cancel.clone(),
@@ -1495,32 +1500,11 @@ fn run(
             codex_herdr_frame(turn.prompt)
                 .map_err(|error| format!("NotSent(\"invalid_prompt: {error}\")"))?,
             effect::idle_codex(
-                busy_inject::Pane::with_program(session()?, r.program),
+                busy_inject::Pane::with_program(session()?, r.program)?,
                 session()?.into(),
                 turn.channel_id,
             ),
         ),
-        target::Route::ClaudeHerdrBusy => {
-            let (target, writer) = r
-                .herdr
-                .ok_or("NotSent(\"owner Herdr input without a pane\")")?;
-            (
-                busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
-                BusyClaudeHerdr {
-                    target,
-                    writer,
-                    session: session()?.into(),
-                    transcript: r.transcript,
-                    channel: turn.channel_id,
-                    source: "discord".into(),
-                    author: r.author,
-                    name: r.name,
-                    nonce,
-                    text: turn.prompt.into(),
-                }
-                .leaf(),
-            )
-        }
         target::Route::CodexBusy | target::Route::CodexHerdrBusy => {
             // A readable rollout supplies a diagnostic turn, not permission to deliver.
             use crate::services::codex_tui::busy_inject::{TIMING, TurnVerdict, read_turn};
@@ -1544,7 +1528,7 @@ fn run(
             };
             let leaf = match (route, r.herdr) {
                 (target::Route::CodexBusy, _) => BusyCodex {
-                    pane: busy_inject::Pane::with_program(session()?, r.program),
+                    pane: busy_inject::Pane::with_program(session()?, r.program)?,
                     timing: &TIMING,
                     input,
                 }

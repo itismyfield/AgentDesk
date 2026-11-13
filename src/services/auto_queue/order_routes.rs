@@ -145,9 +145,11 @@ async fn store_submitted_order_on_pg(
             })?;
         // A pending run without entries is trivially ready; the canonical
         // writer owns the status flip so it stays subject to the same gates.
-        let outcome = crate::db::auto_queue::finalize_run_if_ready_on_pg_tx(&mut tx, run_id)
-            .await
-            .map_err(|error| store(format!("complete auto-queue run '{run_id}': {error}")))?;
+        let outcome = crate::services::auto_queue::transactions::finalize_run_if_ready_on_pg_tx(
+            &mut tx, run_id,
+        )
+        .await
+        .map_err(|error| store(format!("complete auto-queue run '{run_id}': {error}")))?;
         Some(outcome)
     } else {
         sqlx::query(
