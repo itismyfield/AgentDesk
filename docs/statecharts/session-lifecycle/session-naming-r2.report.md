@@ -101,7 +101,7 @@ TLA2TOOLS=/tmp/i8119-r2-models/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk@25/b
 | `src/db/dispatched_sessions/key_promotion.rs:180` (promote_primary) | PromotePrimary → TxPreserveAlias → TxCommit; 충돌은 TxRollback |
 | `src/services/discord/session_locator.rs:130,217` (channel_key/observe_old) | RequestNewName / ObserveOldHost; live old의 관측 namespace만 재사용, 미관측 namespace는 Unknown |
 | `src/services/discord/router/message_handler/provider_dispatch.rs:353` (registration_origin) | 명시 canonical 등록만; synthetic/process/routine/scheduled의 override는 범위 밖 |
-| `src/services/tui_prompt_dedupe/binding_context.rs:464` → `src/services/discord/session_locator.rs:351` | 실제 새 incarnation과 spawn marker 게시 뒤 fresh registration witness 생산 |
+| `src/services/tui_prompt_dedupe/binding_context.rs:467` → scoped completion → `src/services/discord/session_locator.rs:360` | 실제 새 incarnation과 spawn marker 게시 뒤 fresh registration witness 생산 |
 
 file:line 전수 결과는 `/Users/itismyfield/.adk/lane-runs/i8119/logs/s2-registration-entrypoints.log`다. 이름의 suffix로 입력 kind/provider/channel을 새로 추론하는 진입점을 모델에 추가하지 않았다.
 
@@ -120,3 +120,5 @@ file:line 전수 결과는 `/Users/itismyfield/.adk/lane-runs/i8119/logs/s2-regi
 - ordinary process/routine/scheduled 및 historical ownership token은 canonical registration의 증거가 아니며 primary 승격 경로에 합치지 않는다.
 - 명시 old-alias force_kill/host_repair의 파괴적 소비자 효과는 S3로 이관됐다. current-primary의 queue/force-kill/policy/GC 효과는 S2 실제 PG/격리 tmux 시험이 맡는다.
 - 이 projection은 한 fresh successor와 한 등록 시도다. rollback 뒤 호출자의 새 탐색/재시도, 다중 채널 및 외부 host 변경 전체를 무한 탐색했다고 주장하지 않는다.
+
+등록 완료 연결은 `binding_context/registration.rs`의 thread scope callback을 통해 상위 locator에 전달한다. 낮은 층이 Discord 구현을 직접 참조하지 않는다. 같은 row의 incoming new-key alias 소비와 foreign alias 거부는 PG namespace 시험이 담당하며, 이 단일-successor projection은 사전 alias 집합 전체를 탐색하지 않는다.

@@ -495,6 +495,26 @@ async fn key_promotion_live_and_foreign_namespace_keep_primary_and_execution_pg(
         )
         .is_err()
     );
+    use std::os::unix::fs::PermissionsExt;
+    let failed_probe = rig.root.path().join("failed-inventory");
+    std::fs::write(&failed_probe, "#!/bin/sh\nexit 2\n").unwrap();
+    std::fs::set_permissions(&failed_probe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let failed = crate::services::platform::tmux::session_inventory::tests::ChannelCommand::new(
+        rig.channel.get(),
+        failed_probe,
+    );
+    assert_eq!(
+        channel_key(
+            &rig.shared,
+            &ProviderKind::Claude,
+            rig.channel.get(),
+            preferred.clone()
+        )
+        .await,
+        Some(rig.key.clone())
+    );
+    assert_eq!(pid, rig.pane_pid());
+    drop(failed);
     let other_socket = rig.root.path().join("another.sock");
     let displaced = std::mem::replace(
         &mut rig._namespace,

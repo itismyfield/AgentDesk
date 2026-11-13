@@ -185,6 +185,13 @@ pub(super) async fn promote_primary(
     if !(witness.old_host_absent)() {
         return Err(refused("old host absence witness changed"));
     }
+    // Consume only this row's incoming alias so the key can enter the primary namespace.
+    sqlx::query("DELETE FROM session_key_aliases WHERE session_key = $1 AND session_id = $2")
+        .bind(witness.new_key)
+        .bind(target.id)
+        .execute(&mut **tx)
+        .await
+        .map_err(classify_write_error)?;
     let updated = sqlx::query("UPDATE sessions SET session_key = $1 WHERE id = $2 AND (active_turn_nonce IS NULL OR active_turn_nonce = $3)")
         .bind(witness.new_key).bind(target.id).bind(witness.new_nonce)
         .execute(&mut **tx).await.map_err(classify_write_error)?;

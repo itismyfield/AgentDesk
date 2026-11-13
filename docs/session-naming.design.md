@@ -504,6 +504,7 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 - host 차이: old live·probe error·다른 server witness·Herdr Pending이면 old primary 유지 및 기존 live 대상 무조작. absence 검사를 제거한 뮤턴트 RED.
 - 동시성: old-alias hook와 new registration을 의도적으로 겹쳐 deadlock 없음/한 canonical primary/old hook CAS 거절. 정렬 locator lock을 identity 뒤로 이동한 뮤턴트는 timeout/deadlock 또는 계약 실패 RED.
 - 효과 회귀: queue cancel(K20), force_kill(K15), policy host_repair(K02), hosted thread GC(K16)를 현재 primary와 명시 old alias 양쪽에서 호출. 취소/중지 후 **새 이름 세션이 없음**, 보호해야 할 새 live thread는 GC가 삭제하지 않음, queue 유지. 단순 JSON key 동일 전달을 성공 단언으로 쓰지 않음.
+- S2 실행 범위 델타: 효과 회귀는 current primary 입력으로 검증한다. explicit old-alias force_kill/host_repair 효과 회귀는 S3가 검증하며 raw alias 정규화도 S3에 둔다.
 - 위 항목은 **구현 레그의 수용 시험**이다. 이번 읽기 전용 설계 조사에서는 PG/cargo/운영 tmux를 실행하지 않았다.
 
 

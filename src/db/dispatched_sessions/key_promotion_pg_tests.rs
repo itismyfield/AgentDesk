@@ -249,6 +249,26 @@ async fn key_promotion_live_failed_unknown_foreign_server_and_pending_hold_pg() 
         );
         assert_eq!(state(&pool).await, before, "{label}");
     }
+    let before = state(&pool).await;
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let absence_changed = || calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+    let witness = RegistrationWitness {
+        snapshot: &snapshot,
+        new_key: &new,
+        new_nonce: "new",
+        old_host_absent: &absence_changed,
+    };
+    assert!(
+        register_hook_session_pg(&pool, params(&new, "new"), identity(), &witness)
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        state(&pool).await,
+        before,
+        "host change after actor UPDATE must roll back"
+    );
     let pending = crate::db::dispatched_sessions::hosted_execution::tests::pending(
         &crate::db::dispatched_sessions::hosted_execution::tests::owner(CHANNEL),
         "pending",

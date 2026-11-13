@@ -212,6 +212,8 @@ src/
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
+│   │   ├── key_promotion.rs
+│   │   ├── key_promotion_pg_tests.rs
 │   │   ├── listing.rs
 │   │   ├── rebind_override.rs
 │   │   ├── tests.rs
@@ -1200,6 +1202,7 @@ src/
 │   │   ├── readiness.rs
 │   │   ├── registry_adapter_sink.rs
 │   │   ├── relay_producer_registry.rs
+│   │   ├── session_directory.rs
 │   │   ├── session_discovery.rs
 │   │   ├── session_matcher.rs
 │   │   ├── session_registry.rs
@@ -3369,6 +3372,8 @@ src/
 │   │   ├── session_identity.rs
 │   │   ├── session_idle_cleanup.rs
 │   │   ├── session_idle_cleanup_tests.rs
+│   │   ├── session_locator.rs
+│   │   ├── session_locator_pg_tests.rs
 │   │   ├── session_notice.rs
 │   │   ├── session_notice_delivery.rs
 │   │   ├── session_relay_sink.rs
@@ -4350,7 +4355,8 @@ src/
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_context/
 │   │   │   ├── inventory.rs
-│   │   │   └── inventory_tests.rs
+│   │   │   ├── inventory_tests.rs
+│   │   │   └── registration.rs
 │   │   ├── binding_events/
 │   │   │   ├── codex/
 │   │   │   │   ├── commit/
