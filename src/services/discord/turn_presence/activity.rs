@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
