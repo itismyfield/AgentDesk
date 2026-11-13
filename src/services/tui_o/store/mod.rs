@@ -365,8 +365,8 @@ impl OStore {
     ) -> Result<(), StoreError> {
         let _sealing = SEALING.lock().unwrap_or_else(PoisonError::into_inner);
         let sealed = self.read_era()?.is_some();
-        let enabled = thread_children::COMPLETE_ACTIVATION;
-        self.init_channel_checked(init, origin, scope, child, enabled)?;
+        // Child stores stay off until complete activation; build-info reports the same switch.
+        self.init_channel_checked(init, origin, scope, child, false)?;
         if sealed {
             return Ok(());
         }
