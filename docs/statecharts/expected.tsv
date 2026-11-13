@@ -308,6 +308,8 @@ input-single-path/InputPathReadyDraftBypass.cfg	InputPath	ReadyNoHumanDraftExecu
 input-single-path/InputPathReadyFresh.cfg	InputPath	-	-
 input-single-path/InputPathReadyLateDialog.cfg	InputPath	-	-
 input-single-path/InputPathReadyLostStop.cfg	InputPath	-	-
+input-single-path/InputPathReadyManagedStashAfter.cfg	InputPath	-	-
+input-single-path/InputPathReadyManagedStashBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyModalWatchAfter.cfg	InputPath	-	-
 input-single-path/InputPathReadyModalWatchBefore.cfg	InputPath	ReadyNoModalOpenWake	-
 input-single-path/InputPathReadyNoLatch.cfg	InputPath	ReadyNoContinuationEarlyInput,ReadyNoIdleRunningInjection	-

@@ -16,7 +16,9 @@ Dialog == Mode \in {"ready-late-dialog", "ready-preflight-only"}
 Permission == Mode \in {"ready-permission-later", "ready-permission-poison"}
 Race == Mode \in {"ready-race", "ready-no-revalidate"}
 Blind == Mode \in {"ready-unread", "ready-permanent-unread", "ready-draft-bypass"}
-Person == Mode \in {"ready-draft", "ready-draft-bypass"}
+ManagedStash == Mode \in {"ready-stash-before", "ready-stash-after"}
+CanPark == Mode = "ready-stash-after"
+Person == ManagedStash \/ Mode \in {"ready-draft", "ready-draft-bypass"}
 NoWake == Mode = "ready-no-wake"
 ModalWatch == Mode \in {"ready-modal-watch-before", "ready-modal-watch-after"}
 Busy == Mode \in {"ready-busy-active", "ready-busy-native", "ready-block-busy", "ready-busy-finish-before",
@@ -54,6 +56,7 @@ Initial ==
      restarts |-> IF Mode \in {"ready-restart", "ready-clear-restart"} THEN 1 ELSE 0,
      compactPending |-> Compact, compacts |-> 0,
      compactFence |-> FALSE, compactEvidence |-> FALSE, compactReady |-> FALSE,
+     stashRoundTrips |-> 0,
      badIdleRunning |-> FALSE, badDraft |-> FALSE, badEarly |-> FALSE,
      dialog |-> IF Dialog THEN "Boot" ELSE "None", dialogKeys |-> 0,
      permissionStage |-> 0, poisoned |-> FALSE,
@@ -142,13 +145,15 @@ RecoverDraft ==
     /\ r.draft = "Unread" /\ Mode # "ready-permanent-unread"
     /\ r' = [r EXCEPT !.draft = IF r.human THEN "Person" ELSE "Empty", !.awake = TRUE]
 HumanClears ==
+    /\ ~ManagedStash
     /\ r.human /\ r.draft = "Person" /\ (~ClearHeld \/ r.heldOnce)
     /\ r' = [r EXCEPT !.human = FALSE, !.draft = "Empty",
                      !.awake = IF ClearHeld THEN @ ELSE TRUE]
+ComposerPrepared == r.draft = "Empty" \/ (CanPark /\ r.draft = "Person")
 Hold(i) ==
     /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake
     /\ ~ClearHeld \/ Ready
-    /\ ~Ready \/ r.draft # "Empty" \/ (ModalWatch /\ r.modalOpen)
+    /\ ~Ready \/ ~ComposerPrepared \/ (ModalWatch /\ r.modalOpen)
     /\ r' = [r EXCEPT !.q[i] = "held", !.awake = FALSE,
                      !.heldOnce = @ \/ ClearHeld,
                      !.modalHeld = @ \/ (ModalWatch /\ r.modalOpen)]
@@ -168,7 +173,7 @@ Prepare(i) ==
     /\ ~ModalWatch \/ ~r.modalOpen
     /\ ~CompactCompletion \/ ~r.compactPending
     /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake /\ Ready
-    /\ r.draft = "Empty" \/ Mode = "ready-draft-bypass"
+    /\ ComposerPrepared \/ Mode = "ready-draft-bypass"
     /\ r' = [r EXCEPT !.q[i] = "prepared", !.head = i,
                      !.proofEpoch = r.epoch, !.proofTurn = r.turn, !.proofPending = r.pendingSeq]
 NativeStart ==
@@ -184,19 +189,20 @@ PublishClearFile ==
     /\ ClearPreSource /\ r.filePublished /\ r.oldBinding
     /\ r' = [r EXCEPT !.oldBinding = FALSE]
 Revoke ==
-    /\ r.head # 0 /\ (~ProofCurrent \/ r.draft # "Empty")
+    /\ r.head # 0 /\ (~ProofCurrent \/ ~ComposerPrepared)
     /\ r' = [r EXCEPT !.q[r.head] = "held", !.head = 0, !.awake = FALSE]
 Submit ==
     /\ (~ClearPreSource \/ r.pendingChanges = 0)
     /\ r.head # 0 /\ (~Race \/ r.nativeStarts = 0)
     /\ ProofCurrent \/ Mode = "ready-no-revalidate"
-    /\ r.draft = "Empty" \/ Mode = "ready-draft-bypass"
+    /\ ComposerPrepared \/ Mode = "ready-draft-bypass"
     /\ r' = [r EXCEPT !.q[r.head] = "sent", !.effects[r.head] = @ + 1,
                      !.writes[r.head] = @ + 1, !.head = 0,
                      !.phase = "Running", !.turn = @ + 1, !.tail = "assistant",
                      !.compactReady = FALSE, !.awake = FALSE,
                      !.badIdleRunning = @ \/ r.phase = "Running",
-                     !.badDraft = @ \/ r.human,
+                     !.badDraft = @ \/ (r.human /\ ~CanPark),
+                     !.stashRoundTrips = @ + IF CanPark /\ r.human THEN 1 ELSE 0,
                      !.badEarly = @ \/ (r.needsStart /\ ~r.started),
                      !.badClear = @ \/ (r.oldBinding /\ (~r.started \/ ~r.durableClear \/ r.proofPending # r.pendingSeq)),
                      !.filePublished = IF ClearPreSource THEN TRUE ELSE @,
@@ -280,6 +286,9 @@ NoDuplicate == \A i \in Ids : r.effects[i] <= 1 /\ r.writes[i] <= 1
 NoSilentLoss == \A i \in Ids : r.q[i] = "done" => r.effects[i] = 1
 NoIdleRunningInjection == ~r.badIdleRunning
 NoHumanDraftExecution == ~r.badDraft
+ManagedDraftPreserved == ManagedStash =>
+    (r.human /\ r.draft = "Person" /\
+     r.stashRoundTrips = Cardinality({i \in Ids : r.effects[i] > 0}))
 NoEarlyInput == ~r.badEarly
 NoClearAuthorityViolation == ~r.badClear
 CompactAfterStopIdle == ~r.badCompact

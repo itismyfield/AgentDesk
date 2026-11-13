@@ -484,6 +484,13 @@ fn fresh_payload_waits_for_session_start_and_running_idle_path_sends_no_key() {
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
 }
 
+#[cfg(unix)]
+pub(crate) fn fresh_fixture(session: &str) {
+    if let Some(path) = super::super::guarded_outcome::fresh_source_for_tests() {
+        pre_source(session, Path::new(&path));
+    }
+}
+
 pub(crate) fn pre_source(session: &str, path: &Path) {
     let source = Source::current(session, Some(path)).unwrap_or_else(|| Source {
         session: session.into(),

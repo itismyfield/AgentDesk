@@ -263,6 +263,7 @@ mod tests {
                 relay_last_offset: None,
             },
         );
+        crate::services::claude_tui::readiness::tests::pre_source(session, path);
     }
 
     fn inflight(channel_id: ChannelId, message_id: MessageId) -> InflightTurnState {

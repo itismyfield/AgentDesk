@@ -512,6 +512,7 @@ ReadyNoDuplicate == Readiness!NoDuplicate
 ReadyNoSilentLoss == Readiness!NoSilentLoss
 ReadyNoIdleRunningInjection == Readiness!NoIdleRunningInjection
 ReadyNoHumanDraftExecution == Readiness!NoHumanDraftExecution
+ReadyManagedDraftPreserved == Readiness!ManagedDraftPreserved
 ReadyNoEarlyInput == Readiness!NoEarlyInput
 ReadyNoClearAuthorityViolation == Readiness!NoClearAuthorityViolation
 ReadyClearHeldEventuallySends == Readiness!ClearHeldEventuallySends

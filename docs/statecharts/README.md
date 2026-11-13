@@ -144,3 +144,5 @@ AwaitingClear's authenticated, one-use source retirement is refined in
 including restart, forged proof, cursor loss and split-publication counterexamples.
 
 The #8080/#8114 readiness merge keeps clear retirement/consumption and pre-source Pending/modal-watch as separate Mode projections. The bounded integration check preserves both parent result sets (42 and 40 cfg) in 49 merged ReadinessSpec cfg: 27 GREEN and 22 expected RED, with no expected-rule changes. This check does not replace the wider changed-model CI selection; the separate 83 Herdr busy/source/reobserve/cold-Idle cfg and their expected rows remain byte-identical.
+
+The managed idle-stash readiness refinement keeps a person draft intact through the existing C-s round trip: [before](input-single-path/InputPathReadyManagedStashBefore.cfg) breaks queued-input liveness; [after](input-single-path/InputPathReadyManagedStashAfter.cfg) preserves the draft and sends once after current source readiness. [Evidence](input-single-path/readiness-managed-stash.report.md).
