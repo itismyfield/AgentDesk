@@ -150,7 +150,7 @@ Fixed의 NamingNext만 `NextWithRestart`로 확장했다. commit 전 snapshot/lo
 
 | 코드 진입점 | 유한 모델 값/관계 |
 |---|---|
-| `canonical_identity.rs:229` begin, :321 commit 및 Transaction drop rollback | commit 전 6단계와 committed 단계 각각의 crash 절단점 |
+| `canonical_identity.rs:229` begin, :317 commit 및 Transaction drop rollback | commit 전 6단계와 committed 단계 각각의 crash 절단점 |
 | `session_locator.rs:19` current_row → canonical row 재조회 | RestartReadsDurableRow는 durable primary/nonce/alias를 재사용 |
 | `session_locator.rs:195,244` process-local host cache와 registration scope | 재시작이 pending witness를 보존한다고 가정하지 않음; 미등록 실행은 Held |
 | `key_promotion.rs:198,204` 같은 transaction의 primary/alias 변경 | crash 직전 durable tuple은 old 또는 완전한 new |
