@@ -274,12 +274,11 @@ pub(in crate::services::discord) fn owner_drive(
                     &original,
                 )
                 .await;
-                super::super::busy_retry::note_busy_result(
+                super::super::busy_retry::note_unsent_front(
                     shared,
                     &provider,
                     ChannelId::new(channel),
                     &originals,
-                    &[],
                     &result,
                 )
                 .await;

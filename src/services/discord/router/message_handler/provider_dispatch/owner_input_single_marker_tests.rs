@@ -380,6 +380,18 @@ async fn busy_active_closed_gate_keeps_mailbox_op() {
     let rig = IntakeRig::new(8_113_104, true).await;
     let message = busy_active_arrival(&rig, false).await;
     assert_eq!(active_message_ops(&rig, message), [('📬', true)]);
+    let _transition = rig
+        .shared
+        .session_transition_lock(rig.channel)
+        .lock_owned()
+        .await;
+    let (drive, mut settled) = rig.drive();
+    discord::queue_io::input_owner::drive::wake(drive);
+    assert_eq!(
+        await_within(settled.recv(), WAIT_CAP).await.unwrap(),
+        Err("NotSent(\"session_transition_busy\")".into())
+    );
+    assert_eq!(active_message_ops(&rig, message), [('📬', true)]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -941,4 +953,38 @@ async fn gated_idle_start_restores_pending_and_delivers_native_answer() {
             .iter()
             .all(|(emoji, _)| ['⏳', '✅'].contains(emoji))
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parent_gate_pre_injection_handback_without_route_keeps_mailbox_op() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::single_marker::",
+        "parent_gate_pre_injection_handback_without_route_keeps_mailbox_op"
+    )) {
+        return;
+    }
+    let _root = active_root();
+    let rig = IntakeRig::new(8_113_121, true).await;
+    let parent = rig.channel.get() + 100;
+    rig.mock.unname_channel(rig.channel.get());
+    rig.mock.name_channel(parent, "parent-gate");
+    rig.mock.add_thread(rig.channel.get(), parent);
+    let _gate = discord::router::busy_inject_support::open_gate(parent);
+    rig.shared
+        .restart
+        .reconcile_done
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let _transition = rig
+        .shared
+        .session_transition_lock(rig.channel)
+        .lock_owned()
+        .await;
+    let (drive, mut settled) = rig.drive();
+    discord::queue_io::input_owner::drive::wake(drive);
+    assert_eq!(
+        await_within(settled.recv(), WAIT_CAP).await.unwrap(),
+        Err("NotSent(\"queued intake transition busy\")".into())
+    );
+    assert_eq!(rig.state().await["items"].as_array().unwrap().len(), 1);
+    assert_eq!(reaction_ops(&rig), [('📬', true)]);
 }
