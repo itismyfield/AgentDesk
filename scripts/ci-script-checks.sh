@@ -595,6 +595,11 @@ if run_check contracts "Script checks shard ownership + result mirror contract";
 "$PYTHON" -m unittest tests.test_ci_script_check_shards
 fi
 
+if run_check contracts "Union list merge guard and required CI contract"; then
+"$PYTHON" scripts/ci/list_merge_guard.py --ci
+"$PYTHON" -m unittest tests.test_list_merge_guard
+fi
+
 if run_check contracts "Script checks input selection contract"; then
 "$PYTHON" -m unittest tests.test_script_check_inputs
 fi
@@ -867,4 +872,8 @@ mkdir -p target
 # The default stdout format is the YAML artifact; --check findings go to stderr.
 "$PYTHON" scripts/audit_maintainability.py --check > target/maintainability-audit.yaml
 echo "Wrote target/maintainability-audit.yaml"
+fi
+
+if run_check contracts "Landing regeneration contracts"; then
+"$PYTHON" -m unittest -v tests.test_landing_regeneration
 fi
