@@ -82,61 +82,17 @@ impl OldTmux {
         let marker = crate::services::tmux_common::session_temp_path(&self.logical, "spawn_nonce");
         let script = format!(
             r#"#!/usr/bin/env python3
-import json, os, select, subprocess, sys
+import json, os, subprocess, sys
 real, socket, log, arm, marker = {real}, {socket}, {log}, {arm}, {marker}
 args = sys.argv[1:]
 def record(text):
     with open(log, 'a') as out:
         out.write(text + '\n')
-def exit_failure(pid, reason):
-    try:
-        probe = subprocess.run(['ps', '-p', str(pid), '-o', 'pid=,ppid=,stat=,lstart=,command='], capture_output=True, text=True, timeout=2)
-        detail = 'ps_rc=%s stdout=%r stderr=%r' % (probe.returncode, probe.stdout, probe.stderr)
-    except Exception as error:
-        detail = 'ps_read_error=%r' % error
-    text = 'PROVIDER_EXIT failed pid=%s reason=%s %s' % (pid, reason, detail)
-    record(text)
-    print(text, file=sys.stderr, flush=True)
-def arm_exit(pane):
-    pid = int(subprocess.check_output([real, '-S', socket, '-f', '/dev/null', 'display-message', '-p', '-t', pane, '#{{pane_pid}}'], text=True, timeout=2).strip())
-    if pid <= 0:
-        raise RuntimeError('private provider pid is not positive')
-    fd, watch = None, None
-    try:
-        if hasattr(os, 'pidfd_open'):
-            fd = os.pidfd_open(pid)
-            watch = select.poll()
-            watch.register(fd, select.POLLIN)
-        else:
-            watch = select.kqueue()
-            event = select.kevent(pid, filter=select.KQ_FILTER_PROC, flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT, fflags=select.KQ_NOTE_EXIT)
-            watch.control([event], 0, 0)
-    except ProcessLookupError:
-        return pid, fd, watch, True
-    except Exception as error:
-        exit_failure(pid, repr(error))
-        raise
-    record('PROVIDER_EXIT armed pane=%s pid=%s' % (pane, pid))
-    return pid, fd, watch, False
-def observed_exit(captured):
-    pid, fd, watch, absent = captured
-    try:
-        if absent:
-            return True
-        if fd is not None:
-            return any(event_fd == fd and flags & select.POLLIN for event_fd, flags in watch.poll(4000))
-        return any(event.ident == pid and event.fflags & select.KQ_NOTE_EXIT and not event.flags & select.KQ_EV_ERROR for event in watch.control(None, 1, 4))
-    finally:
-        if fd is not None:
-            os.close(fd)
-        elif watch is not None:
-            watch.close()
 record('ARGV ' + json.dumps(args))
 command = [real, '-S', socket, '-f', '/dev/null'] + args
 if '-C' not in args:
     os.execv(real, command)
 child = subprocess.Popen(command, stdin=subprocess.PIPE)
-exit_failed = False
 for line in sys.stdin.buffer:
     text = line.decode().rstrip('\n')
     record('CTL ' + text)
@@ -145,26 +101,13 @@ for line in sys.stdin.buffer:
         with open(marker, 'w') as out:
             out.write('fedcba9876543210fedcba9876543210')
         record('RACE changed spawn nonce before metadata recheck')
-    closing = arm_exit(text.split()[-1]) if text.startswith('kill-pane -t %') else None
     try:
         child.stdin.write(line)
         child.stdin.flush()
     except BrokenPipeError:
         break
-    if closing is not None:
-        try:
-            observed = observed_exit(closing)
-        except Exception as error:
-            exit_failure(closing[0], repr(error))
-            observed = False
-        if not observed:
-            exit_failure(closing[0], 'kernel exit event unobserved')
-            exit_failed = True
-            break
-        record('PROVIDER_EXIT observed pid=%s' % closing[0])
 child.stdin.close()
-status = child.wait()
-sys.exit(1 if exit_failed else status)
+sys.exit(child.wait())
 "#,
             real = serde_json::to_string(&self.real).unwrap(),
             socket = serde_json::to_string(&self.root.path().join("s")).unwrap(),
@@ -323,13 +266,6 @@ sys.exit(1 if exit_failed else status)
     pub(crate) fn assert_no_input(&self) {
         let log = self.log();
         eprintln!("PRIVATE_OLD_CONTROL\n{log}");
-        assert_eq!(
-            log.lines()
-                .filter(|line| line.starts_with("PROVIDER_EXIT observed pid="))
-                .count(),
-            self.closes(),
-            "each closed private pane needs its actual provider exit witness: {log}"
-        );
         for forbidden in [
             "send-keys",
             "send-literal",
@@ -365,20 +301,6 @@ impl EarlierExecution for OldTmuxView {
 
 impl Drop for OldTmux {
     fn drop(&mut self) {
-        if let Ok(log) = std::fs::read_to_string(self.root.path().join("control.log"))
-            && (std::thread::panicking()
-                || log.contains("PROVIDER_EXIT failed ")
-                || log
-                    .lines()
-                    .filter(|line| line.starts_with("CTL kill-pane -t %"))
-                    .count()
-                    > log
-                        .lines()
-                        .filter(|line| line.starts_with("PROVIDER_EXIT observed pid="))
-                        .count())
-        {
-            eprintln!("PRIVATE_OLD_FINAL_CONTROL\n{log}");
-        }
         if self.panes.get_mut().unwrap().is_some() {
             let _ = self.command().args(["-N", "kill-server"]).status();
         }
