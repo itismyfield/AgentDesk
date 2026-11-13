@@ -32,6 +32,7 @@ fn with_launch(check: impl FnOnce(&mut ClaudeTuiLaunchConfig)) {
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn effort_resume_suppresses_native_continuation_before_owner_c() {
     use std::io::{BufRead, Write};
@@ -183,6 +184,7 @@ fn unset_channel_effort_preserves_the_cli_effort_setting() {
     });
 }
 
+#[cfg(unix)]
 fn assert_interrupted_flag(resume: bool, owner_first_submit: bool, effort: Option<&str>) {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
@@ -219,32 +221,38 @@ fn assert_interrupted_flag(resume: bool, owner_first_submit: bool, effort: Optio
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn ordinary_resume_high_preserves_inherited_interrupted_flag() {
     assert_interrupted_flag(true, false, Some("high"));
 }
 
+#[cfg(unix)]
 #[test]
 fn ordinary_resume_unset_preserves_inherited_interrupted_flag() {
     assert_interrupted_flag(true, false, None);
 }
 
+#[cfg(unix)]
 #[test]
 fn effort_resume_high_suppresses_inherited_interrupted_flag() {
     assert_interrupted_flag(true, true, Some("high"));
 }
 
+#[cfg(unix)]
 #[test]
 fn effort_resume_unset_suppresses_inherited_interrupted_flag() {
     assert_interrupted_flag(true, true, None);
 }
 
+#[cfg(unix)]
 #[test]
 fn cold_start_high_preserves_inherited_interrupted_flag() {
     assert_interrupted_flag(false, false, Some("high"));
     assert_interrupted_flag(false, true, Some("high"));
 }
 
+#[cfg(unix)]
 #[test]
 fn cold_start_unset_preserves_inherited_interrupted_flag() {
     assert_interrupted_flag(false, false, None);
