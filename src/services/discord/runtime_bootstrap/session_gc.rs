@@ -7,7 +7,7 @@ pub(super) async fn gc_stale_thread_sessions(shared: &Arc<SharedData>) {
         tracing::warn!("  [{ts}] ⚠ Thread session GC skipped: postgres pool unavailable");
         return;
     };
-    let deleted_keys = crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_pg(pool).await;
+    let deleted_keys = crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_pg(pool, &crate::services::tui_o::writer::host::ChildStores).await;
     if deleted_keys.is_empty() {
         return;
     }

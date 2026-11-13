@@ -31,7 +31,10 @@ pub(crate) async fn for_claimed_input(
     phase: &'static str,
 ) -> IntakeRoute {
     if !selected_codex_input(provider, channel) {
-        return super::route(provider, channel);
+        return super::route_claimed(provider, channel);
+    }
+    if let Err(detail) = super::super::claimed_child_input(channel) {
+        return IntakeRoute::Hold(detail);
     }
     let provider = provider.to_owned();
     blocking_route(move || {

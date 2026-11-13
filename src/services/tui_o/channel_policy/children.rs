@@ -8,6 +8,9 @@ use super::{Adoption, BootChannels, Candidate};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::store::{Initialized, OStore};
 
+mod lifecycle;
+pub(crate) use lifecycle::RetirementTicket;
+
 #[derive(Clone, Debug)]
 struct ChildEntry {
     parent: Option<u64>,
@@ -17,6 +20,7 @@ struct ChildEntry {
     conflict: bool,
     record_unreadable: bool,
     boot_discovered: bool,
+    life: lifecycle::Lifecycle,
 }
 
 /// A resolved child of an O parent, as every snapshot clone reads it.
@@ -102,6 +106,7 @@ impl ChildEntries {
                     conflict: held,
                     record_unreadable: false,
                     boot_discovered: true,
+                    life: lifecycle::Lifecycle::default(),
                 });
             }
         }
@@ -224,6 +229,7 @@ pub(super) fn seeded_from_store(
                     && init.policy_parent.is_some()
                 {
                     boot.children.record(&boot, &init, state);
+                    boot.children.rehydrate(channel, &store);
                     children.push(channel);
                 }
             }

@@ -2451,6 +2451,7 @@ src/
 │   │   │   │   │   │   ├── park_missing_tests.rs
 │   │   │   │   │   │   ├── park_reply_tests.rs
 │   │   │   │   │   │   ├── refresh_tests.rs
+│   │   │   │   │   │   ├── thread_child_retirement_tests.rs
 │   │   │   │   │   │   └── thread_child_tests.rs
 │   │   │   │   │   └── owner_execution.rs
 │   │   │   │   └── owner_port.rs
@@ -4036,6 +4037,7 @@ src/
 │   │   │   ├── adoption/
 │   │   │   │   └── body_check.rs
 │   │   │   ├── children/
+│   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── adoption.rs
 │   │   │   ├── children.rs
@@ -4111,6 +4113,7 @@ src/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── thread_children/
+│   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── retirement_tests.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
@@ -4176,6 +4179,7 @@ src/
 │   │   │   │   └── scan.rs
 │   │   │   ├── host/
 │   │   │   │   ├── activation_io.rs
+│   │   │   │   ├── child_retirement.rs
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs
 │   │   │   │   ├── fresh_input_tests.rs

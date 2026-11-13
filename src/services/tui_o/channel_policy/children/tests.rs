@@ -191,6 +191,7 @@ fn thread_children_unresolved_non_o_reader_waits_for_existing_refresh_then_resol
             conflict: false,
             record_unreadable: false,
             boot_discovered: true,
+            life: Default::default(),
         },
     );
     // Isolated O-b reader contract: O-a does not apply Held to the production gate.
@@ -268,6 +269,7 @@ fn unresolved(boot: &BootChannels, channel: u64, boot_discovered: bool) {
             conflict: false,
             record_unreadable: false,
             boot_discovered,
+            life: Default::default(),
         },
     );
 }
@@ -401,4 +403,77 @@ fn thread_children_resolution_reads_outside_the_entry_lock_and_rechecks_the_entr
     assert_eq!(reads, 1);
     assert!(matches!(boot.child(46), Some(Err(ChildHeld))));
     assert!(boot.children.entries.lock().unwrap()[&46].parent.is_none());
+}
+
+#[test]
+fn thread_children_retirement_yields_to_any_input_and_survives_only_as_a_readable_mark() {
+    let config = config();
+    let root = crate::config::TestRuntimeRootGuard::new();
+    store(root.path(), &init(43, Some(42)));
+    let boot = || {
+        let validated = BootChannels::validate(&config).unwrap();
+        seeded_from_store(validated, &config, Some(root.path())).unwrap()
+    };
+    let mark = root.path().join("o_store/43/child_lifecycle");
+    let live = boot();
+    // An input in the middle of the transition is held, and the retirement gives way to it.
+    let ticket = live.child_retirement_ticket(43).unwrap();
+    assert!(live.begin_child_retirement(&ticket));
+    assert!(live.child_dormant(43) && live.child_retirement_ticket(43).is_none());
+    {
+        use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+        let _forced = test_override::force_boot(live.clone());
+        let _ready = intake_route::test_probe::answer_with(|_| true);
+        let observed = intake_route::route("claude", 43);
+        assert!(matches!(observed, IntakeRoute::Hold(_)), "{observed:?}");
+        let placed = intake_route::route_for_placement("claude", 43);
+        assert!(matches!(placed, IntakeRoute::Hold(_)), "{placed:?}");
+    }
+    assert_eq!(live.commit_child_retirement(&ticket), Ok(false));
+    assert!(!live.child_dormant(43) && !mark.exists());
+    // The ticket of an older input epoch takes nothing.
+    assert!(!live.begin_child_retirement(&ticket));
+    let ticket = live.child_retirement_ticket(43).unwrap();
+    assert!(live.begin_child_retirement(&ticket));
+    assert_eq!(live.commit_child_retirement(&ticket), Ok(true));
+    assert!(live.child_dormant(43));
+    assert!(!live.proactive_channels().contains(&43) && live.output_channels().contains(&43));
+    assert!(
+        matches!(live.child(43), Some(Ok(_))),
+        "retired stays O's child"
+    );
+    // A restart keeps the retirement; the next input supersedes it under a new generation.
+    let restarted = boot();
+    assert!(restarted.child_dormant(43) && restarted.child_retirement_ticket(43).is_none());
+    assert_eq!(restarted.child_input_arrived(43), Ok(()));
+    assert!(!restarted.child_dormant(43));
+    let read: serde_json::Value = serde_json::from_slice(&std::fs::read(&mark).unwrap()).unwrap();
+    assert_eq!(
+        read,
+        serde_json::json!({"schema":1,"generation":2,"retired":false})
+    );
+    assert!(
+        !restarted.begin_child_retirement(&ticket),
+        "the old generation is refused"
+    );
+    // A mark that cannot be read whole, or of a later schema, never retires the child.
+    for unreadable in [
+        &b"{\"schema\":1,\"generation\":2,\"reti"[..],
+        br#"{"schema":2,"generation":2,"retired":true}"#,
+    ] {
+        std::fs::write(&mark, unreadable).unwrap();
+        assert!(!boot().child_dormant(43));
+    }
+    // A child without a readable init takes no mark at all.
+    std::fs::remove_file(root.path().join("o_store/43/init")).unwrap();
+    std::fs::remove_file(&mark).unwrap();
+    let ticket = live.child_retirement_ticket(43);
+    assert!(
+        ticket.is_none(),
+        "the live view still holds the retired entry"
+    );
+    let fresh = restarted.child_retirement_ticket(43).unwrap();
+    assert!(restarted.begin_child_retirement(&fresh));
+    assert!(restarted.commit_child_retirement(&fresh).is_err());
+    assert!(!restarted.child_dormant(43) && !mark.exists());
 }

@@ -38,9 +38,10 @@ pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<C
             let blocked = snapshot
                 .execution(channel)
                 .is_some_and(|view| view.permit.is_err());
+            // A retired or mid-transition child keeps its adoption and gets no writer.
             let candidate = snapshot
                 .output_candidate(channel)
-                .filter(|_| hosted && !blocked);
+                .filter(|_| hosted && !blocked && !snapshot.child_dormant(channel));
             (channel, kind, candidate)
         };
         snapshot.output_channels().into_iter().map(judged).collect()
@@ -84,6 +85,29 @@ fn owned_in(snapshot: &BootChannels, channel: u64) -> Option<RuntimeHandoffKind>
 fn child_held(channel: u64) -> bool {
     test_override::with_channels(|snapshot| {
         snapshot.is_some_and(|snapshot| matches!(snapshot.child(channel), Some(Err(_))))
+    })
+}
+
+/// Whether `channel` is a child whose store is retired or mid-transition: held until an input at
+/// its placement or claim boundary supersedes the retirement.
+fn child_dormant(channel: u64) -> bool {
+    test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.child_dormant(channel)))
+}
+
+/// Whether the shared view knows `channel` as a thread child, resolved or not.
+pub(crate) fn thread_child(channel: u64) -> bool {
+    test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.child(channel).is_some()))
+}
+
+/// What thread_gc pins for `channel` before its row delete; none unless it is an active child.
+pub(crate) fn child_retirement_ticket(channel: u64) -> Option<channel_policy::RetirementTicket> {
+    test_override::with_channels(|snapshot| snapshot?.child_retirement_ticket(channel))
+}
+
+/// A claimed input row reached its child again; see `BootChannels::child_input_arrived`.
+fn claimed_child_input(channel: u64) -> Result<(), String> {
+    test_override::with_channels(|snapshot| {
+        snapshot.map_or(Ok(()), |snapshot| snapshot.child_input_arrived(channel))
     })
 }
 
@@ -162,6 +186,10 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
         if channel.is_some_and(|channel| !snapshot.channels().contains(&channel)) && child.is_none()
         {
             return Ok(());
+        }
+        // The input stales any older retirement ticket and supersedes a retired store.
+        if let Some(channel) = channel.filter(|_| child.is_some()) {
+            snapshot.child_input_arrived(channel)?;
         }
         if let Some(channel) = channel
             && let Some(view) = snapshot.execution(channel)

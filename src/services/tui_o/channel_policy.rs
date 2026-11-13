@@ -24,6 +24,7 @@ pub(crate) use adoption::{
     body_check::{BodyCheck, SinkOp},
     stored,
 };
+pub(crate) use children::RetirementTicket;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BootChannels {

@@ -26,12 +26,14 @@ use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::Unsent;
 
 mod activation_io;
+mod child_retirement;
 mod first_init;
 mod fresh_input;
 mod missing;
 mod recover;
 mod transition;
 pub use activation_io::{Custody, FencedFacts};
+pub(crate) use child_retirement::{ChildStores, keep_stoppable};
 pub(crate) use fresh_input::initial_fresh_refusal;
 use recover::{Recovered, recover, recover_boot};
 /// What the gateway runtime supplies; asked only for channels O owns.
@@ -420,25 +422,15 @@ pub fn start<I: HostIo>(
     prepare: impl FnOnce() -> HostParts<I>,
 ) -> Vec<JoinHandle<()>> {
     let owned = cutover::boot_ownership();
-    detached(start_managed(provider, pg_gateway, owned, prepare))
-}
-
-fn detached(handles: Vec<ManagedWriterHandle>) -> Vec<JoinHandle<()>> {
-    handles
-        .into_iter()
-        .map(ManagedWriterHandle::into_detached)
-        .collect()
+    keep_stoppable(start_managed(provider, pg_gateway, owned, prepare))
 }
 
 pub type OwnedChannels = Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>;
 
 /// One hosted channel's writer: its host task, the stop it obeys and the claim that hosts it.
 pub struct ManagedWriterHandle {
-    #[cfg(test)]
     channel: u64,
-    #[cfg(test)]
     generation: u64,
-    #[cfg(test)]
     settled: Arc<AtomicBool>,
     stop: StopOnDrop,
     host: JoinHandle<()>,
@@ -497,7 +489,6 @@ impl ManagedWriterHandle {
     }
 
     /// Requests stop before returning the wait future; its cancellation never cancels cleanup.
-    #[cfg(test)]
     pub fn stop_and_join(
         self,
     ) -> impl Future<Output = Result<WriterStopped, String>> + Send + 'static {
@@ -507,7 +498,7 @@ impl ManagedWriterHandle {
             settled,
             stop,
             host,
-            keep: _,
+            ..
         } = self;
         stop.signal.send_replace(true);
         let settle = tokio::spawn(async move {
@@ -582,9 +573,7 @@ pub fn start_managed<I: HostIo>(
             Some(Ok(permit)) => permit.gate(),
             _ => Arc::clone(&gate),
         };
-        #[cfg(test)]
         let generation = claim.generation;
-        #[cfg(test)]
         let settled = Arc::clone(&claim.settled);
         let (stop, stopping) = watch::channel(false);
         let retired_stop = stop.clone();
@@ -616,11 +605,8 @@ pub fn start_managed<I: HostIo>(
             }
         });
         tasks.push(ManagedWriterHandle {
-            #[cfg(test)]
             channel,
-            #[cfg(test)]
             generation,
-            #[cfg(test)]
             settled,
             stop: StopOnDrop {
                 signal: stop,

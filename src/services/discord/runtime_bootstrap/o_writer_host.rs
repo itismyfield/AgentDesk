@@ -808,9 +808,8 @@ pub(super) fn spawn_execution(
                 .is_some_and(|snapshot| snapshot.execution(*ch).is_some())
         })
         .collect();
-    for handle in host::start_managed(shadow, false, owned, || parts(shared, provider, config)) {
-        drop(handle.into_detached());
-    }
+    let started = host::start_managed(shadow, false, owned, || parts(shared, provider, config));
+    drop(host::keep_stoppable(started));
 }
 
 /// Retries missing unmanaged hosts only for this runtime's current gateway authority.
@@ -875,7 +874,6 @@ pub(super) async fn resume_gateway(
     if !serving() || gate.current() != observed {
         return;
     }
-    for handle in host::start_managed(shadow, true, owned, || parts(shared, provider, config)) {
-        drop(handle.into_detached());
-    }
+    let started = host::start_managed(shadow, true, owned, || parts(shared, provider, config));
+    drop(host::keep_stoppable(started));
 }

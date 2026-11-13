@@ -21,7 +21,9 @@ pub(crate) use force_kill::{disconnect_session_and_prepare_retry_pg, load_force_
 mod thread_gc;
 #[cfg(test)]
 pub(crate) use crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_with_probe_pg;
-pub(crate) use thread_gc::{delete_stale_thread_cleanup_row_pg, load_stale_thread_cleanup_rows_pg};
+pub(crate) use thread_gc::{
+    delete_stale_thread_cleanup_row_pg, load_stale_thread_cleanup_rows_pg, thread_session_exists_pg,
+};
 
 #[cfg(test)]
 #[path = "dispatched_sessions/tests.rs"]

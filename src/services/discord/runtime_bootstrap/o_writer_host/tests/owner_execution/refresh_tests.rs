@@ -5,6 +5,9 @@ use crate::services::tui_o::cutover::intake_route::{IntakeRoute, for_input_place
 #[path = "park_missing_tests.rs"]
 mod park_missing_tests;
 #[cfg(unix)]
+#[path = "thread_child_retirement_tests.rs"]
+mod thread_child_retirement_tests;
+#[cfg(unix)]
 #[path = "thread_child_tests.rs"]
 mod thread_child_tests;
 

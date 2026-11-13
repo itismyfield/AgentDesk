@@ -5,7 +5,12 @@ use crate::services::tui_o::channel_policy::Adoption;
 use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
 
 /// Boots a home whose store holds PARENT's init and CHILD's init recorded under PARENT.
-fn booted(root: &std::path::Path, parent: u64, child: u64) {
+pub(super) fn booted(root: &std::path::Path, parent: u64, child: u64) {
+    stored(root, parent, child);
+    install(parent);
+}
+
+pub(super) fn stored(root: &std::path::Path, parent: u64, child: u64) {
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root)
         .unwrap()
         .unwrap();
@@ -25,6 +30,10 @@ fn booted(root: &std::path::Path, parent: u64, child: u64) {
     let mut init: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     init["policy_parent"] = parent.into();
     std::fs::write(&path, serde_json::to_vec(&init).unwrap()).unwrap();
+}
+
+/// This process's one boot over whatever the store holds now.
+pub(super) fn install(parent: u64) {
     let config = serde_json::from_value(json!({"server":{},
         "cluster":{"enabled":true,"instance_id":"mac-a","gateway_preferred_instance_id":"mac-a"},
         "agents":[{"id":"custody-agent","name":"fixture","channels":{"claude":{"id":parent.to_string(),"runtime":"tui"}}}],
