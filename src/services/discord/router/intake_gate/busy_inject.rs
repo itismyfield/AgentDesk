@@ -104,7 +104,7 @@ pub(in crate::services::discord::router) fn defer_owned_busy_view(
 ) -> bool {
     owned
         && *provider == ProviderKind::Claude
-        && crate::config::session_hosts::herdr_endpoint(channel.get()).is_none()
+        && !crate::config::session_hosts::has_herdr_endpoint(channel.get())
         && queued_head_covers(channel, parent)
 }
 
