@@ -47,25 +47,23 @@ async fn exercise(provider: ProviderKind, channel: u64, refuse: bool) {
     let real_tmux = crate::services::platform::binary_resolver::runtime_command("tmux").unwrap();
     let socket = root.path().join("private.sock");
     let tmux = root.path().join("tmux");
-    let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/agentdesk");
-    assert!(
-        cli.is_file(),
-        "build the isolated wrapper CLI before this test"
-    );
-    // The dispatch is real; only its harness executable is replaced by the CLI that runs wrappers.
+    let test_name = std::thread::current().name().unwrap().to_owned();
+    // Reentry runs the native wrapper subcommand from the same test artifact.
     std::fs::write(
         &tmux,
         format!(
             r#"#!/usr/bin/env python3
-import os, pathlib, shlex, subprocess, sys, time
+import json, os, pathlib, shlex, subprocess, sys, time
 args = sys.argv[1:]
 with pathlib.Path({calls:?}).open("a") as out: out.write(repr(args) + "\n")
 if 'new-session' in args and args[-1].startswith('bash '):
     script = pathlib.Path(shlex.split(args[-1])[1])
     text = script.read_text()
     assert 'tmux-wrapper' in text
-    text = text.replace({harness:?}, {cli:?})
-    script.write_text(text)
+    start = text.index('exec ')
+    command = shlex.split(text[start+5:].replace("\\\n", " "))
+    assert command[0] == {harness:?}
+    script.write_text(text[:start] + 'export AGENTDESK_PIPE_TEST_CHILD=' + shlex.quote(json.dumps(command[1:])) + '\nexec ' + shlex.quote(command[0]) + ' --exact ' + shlex.quote({test_name:?}) + ' --test-threads=1 --nocapture\n')
 result = subprocess.run([{real:?}, '-S', {socket:?}, '-f', '/dev/null'] + args)
 if 'new-session' in args and args[-1].startswith('bash ') and {refuse}:
     pathlib.Path({created:?}).write_text('created')
@@ -76,7 +74,7 @@ if 'new-session' in args and args[-1].startswith('bash ') and {refuse}:
 sys.exit(result.returncode)
 "#,
             harness = std::env::current_exe().unwrap().to_str().unwrap(),
-            cli = cli.to_str().unwrap(),
+            test_name = test_name,
             real = real_tmux.get_program().to_str().unwrap(),
             socket = socket.to_str().unwrap(),
             calls = root.path().join("tmux.calls").to_str().unwrap(),
@@ -376,6 +374,17 @@ else:
 }
 
 fn run(provider: ProviderKind, channel: u64, refuse: bool) {
+    if let Ok(args) = std::env::var("AGENTDESK_PIPE_TEST_CHILD") {
+        use clap::{FromArgMatches, Subcommand};
+        let args: Vec<String> = serde_json::from_str(&args).unwrap();
+        let mut matches =
+            crate::cli::args::Commands::augment_subcommands(clap::Command::new("agentdesk"))
+                .try_get_matches_from(std::iter::once("agentdesk".to_owned()).chain(args))
+                .unwrap();
+        let command = crate::cli::args::Commands::from_arg_matches_mut(&mut matches).unwrap();
+        crate::cli::execute(command, false).unwrap();
+        return;
+    }
     let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
         .lock()
