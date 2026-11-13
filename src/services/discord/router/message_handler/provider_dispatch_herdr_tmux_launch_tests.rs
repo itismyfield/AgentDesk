@@ -131,7 +131,7 @@ fn moves_to_herdr_resuming(fx: &Fixture, session: &str, path: &Path) {
     let answered = json!({"type": "assistant", "sessionId": session,
         "timestamp": "2026-10-01T00:00:01Z", "message": {"role": "assistant",
         "stop_reason": "end_turn", "content": [{"type": "text", "text": "beta"}]}});
-    let done = json!({"type":"system", "subtype":"turn_duration", "sessionId":session});
+    let done = json!({"type":"system","subtype":"turn_duration","sessionId":session});
     append(path, &[said, answered, done]);
     read_through(path, session);
     *fx.session.lock().unwrap() = Some(session.to_owned());

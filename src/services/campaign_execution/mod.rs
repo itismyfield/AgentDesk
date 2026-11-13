@@ -3,6 +3,7 @@ pub mod adk_profile;
 pub mod adk_resources;
 pub mod adk_workspace;
 pub mod candidate_seal;
+pub(crate) mod commands;
 pub mod control;
 pub mod definition;
 pub mod effect_envelope;

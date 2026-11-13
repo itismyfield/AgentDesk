@@ -505,12 +505,16 @@ BootHeldEventuallyExecutes == \A i \in Ids : (i \in biHeld /\ biReady) ~> (i \in
 \* Readiness-only refinement holds the older custody/lifecycle state fixed.
 ReadinessNext == Readiness!Next /\ UNCHANGED <<vars, legacyBootIngressVars>>
 ReadinessSpec == Init /\ [][ReadinessNext]_<<vars, bootIngressVars>> /\ Readiness!Fairness
+ReadyNoModalOpenWake == Readiness!NoModalOpenWake
+ReadyModalCloseEventuallySends == Readiness!ModalCloseEventuallySends
 ReadyTypeOK == Readiness!TypeOK
 ReadyNoDuplicate == Readiness!NoDuplicate
 ReadyNoSilentLoss == Readiness!NoSilentLoss
 ReadyNoIdleRunningInjection == Readiness!NoIdleRunningInjection
 ReadyNoHumanDraftExecution == Readiness!NoHumanDraftExecution
 ReadyNoEarlyInput == Readiness!NoEarlyInput
+ReadyNoClearAuthorityViolation == Readiness!NoClearAuthorityViolation
+ReadyClearHeldEventuallySends == Readiness!ClearHeldEventuallySends
 ReadyCompactAfterStopIdle == Readiness!CompactAfterStopIdle
 ReadyPendingEventuallyExecutes == Readiness!PendingEventuallyExecutes
 ReadyCompactEventuallyExecutes == Readiness!CompactEventuallyExecutes

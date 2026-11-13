@@ -23,6 +23,15 @@ pub(super) fn send(
     guarded_outcome::capture_preparation(|| {
         // An invalid prompt fails here, before any readiness wait or key.
         let text = payload_text(prompt)?;
+        #[cfg(unix)]
+        if readiness == PromptReadinessKind::ProvenWarmFollowup
+            && !cancel_requested(cancel)
+            && busy_inject::Pane::with_program(session, "tmux".into()).is_err()
+        {
+            let run = InputRun::Refused(InputRefusal::IdentityMismatch);
+            guarded_outcome::finish(&run);
+            return SubmissionError::from_run(run);
+        }
         wait_for_prompt_ready(session, readiness, cancel)
             .map_err(|error| preparation_hold::readiness_failure(session, error))?;
         submit(session, prompt, &text, readiness, cancel)
@@ -145,17 +154,21 @@ fn run(
         let park = match super::super::readiness::idle::before_paste(&pane, stash_allowed) {
             Ok(park) => park,
             Err(veto) => {
-                super::super::readiness::watch_current(session);
+                if veto == busy_inject::Veto::Modal {
+                    super::super::readiness::watch_modal(session, None);
+                } else {
+                    super::super::readiness::watch_current(session, None);
+                }
                 modal.set(veto == busy_inject::Veto::Modal);
                 return refused(Refusal::NotReady);
             }
         };
         let Some(proof) = super::super::readiness::observe(session, None) else {
-            super::super::readiness::watch_current(session);
+            super::super::readiness::watch_current(session, None);
             return refused(Refusal::NotReady);
         };
         let Some(reservation) = super::super::readiness::reserve(proof) else {
-            super::super::readiness::watch_current(session);
+            super::super::readiness::watch_current(session, None);
             return refused(Refusal::NotReady);
         };
         if authority.claim(session).is_err() {
@@ -164,7 +177,7 @@ fn run(
         }
         // A stop that took the writer token's gate first leaves the pane without a key.
         if !reservation.current() {
-            super::super::readiness::watch_current(session);
+            super::super::readiness::watch_current(session, None);
             reservation.not_sent();
             return refused(Refusal::NotReady);
         }

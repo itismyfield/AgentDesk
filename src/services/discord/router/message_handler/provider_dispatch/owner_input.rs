@@ -196,7 +196,8 @@ pub(in crate::services::discord) fn owner_drive(
                 }
                 return Err(WRITER_HELD.into());
             }
-            let synthetic = !front_origin(&mailbox, &front).await?.is_person();
+            let origin = front_origin(&mailbox, &front).await?;
+            let synthetic = !origin.is_person();
             if !synthetic
                 && claude_handoff::prepare(runtime.as_ref(), &mailbox, &provider, channel, &front)
                     .await?
@@ -249,7 +250,10 @@ pub(in crate::services::discord) fn owner_drive(
             };
             #[cfg(test)]
             owned_busy::note_drive_result(channel, &result);
-            if synthetic && result.as_ref().err().map(String::as_str) == Some(START_WAITS) {
+            if synthetic
+                && origin != InputOrigin::EffortContinue
+                && result.as_ref().err().map(String::as_str) == Some(START_WAITS)
+            {
                 let held = original.clone();
                 mailbox
                     .v2_request(move |slot| {
@@ -1466,9 +1470,12 @@ fn run(
             busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
             BusyClaude {
                 operation: match r.observation {
-                    Some(observation) => {
-                        observation.prepare_busy(r.program, r.timing, declared, turn.cancel.clone())
-                    }
+                    Some(observation) => Ok(observation.prepare_busy(
+                        r.program,
+                        r.timing,
+                        declared,
+                        turn.cancel.clone(),
+                    )),
                     None => BusyOperation::for_session(
                         session()?,
                         r.herdr,
@@ -1477,7 +1484,7 @@ fn run(
                         declared,
                         turn.cancel.clone(),
                     ),
-                },
+                }?,
                 session: session()?.into(),
                 transcript: r.transcript,
                 channel: turn.channel_id,

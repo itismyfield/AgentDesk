@@ -336,7 +336,8 @@ impl Fixture {
             .unwrap()
             .unwrap();
         store
-            .init_channel(&Initialized {
+            .init_fixture_channel(&Initialized {
+                policy_parent: None,
                 channel,
                 sources: vec![InitSource {
                     source_id: source.clone(),
@@ -349,8 +350,9 @@ impl Fixture {
             })
             .unwrap();
         store
-            .begin_era(&[channel], chrono::Utc::now(), |channel| {
+            .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
                 Ok(Initialized {
+                    policy_parent: None,
                     channel,
                     sources: vec![InitSource {
                         source_id: source.clone(),

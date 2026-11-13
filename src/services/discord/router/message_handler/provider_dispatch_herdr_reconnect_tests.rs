@@ -148,6 +148,7 @@ pub(super) fn clear_pending(fx: &Fixture, cleared: &str) -> std::path::PathBuf {
     crate::services::tmux_common::with_tmux_source_authority(fx.logical(), |_| {
         binding_events::record_pending(&proposal).unwrap();
     });
+    // The receiver supplies clear readiness from the canonical hook context.
     use crate::services::tui_prompt_dedupe::binding_context::{
         SpawnNonceMarker, observe_spawn_nonce_marker,
     };

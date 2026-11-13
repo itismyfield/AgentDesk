@@ -249,3 +249,37 @@ Continuation latches and recovery floors remain intact. A recovery floor already
 | InputPathReadySuppressedCompact.cfg | GREEN | - |
 
 Completion retirement reads the owned historical prefix; current Idle evidence separately rejects later native activity. A new native turn winning the timer cannot hide the completed control or authorize Running injection; its later hard terminal can advance the next original without UserPromptSubmit. Caller compact_completed_prefix_cannot_hide_a_new_native_turn_or_require_its_submit_hook covers this interleaving. TLA/cfg bytes are unchanged; retirement and CurrentEvidence remain separate obligations.
+
+
+## Clear Pending before file publication
+
+Merge source baseline: ca4ba220aa35c4d4c31d417bcbd9659eb7e1da89. The refinement preserves the old runtime binding until the first new transcript is registered. A current clear Start and the same execution's published canonical Pending permit only an explicit new path. Proofs retain the Pending seq and Start revision; reserve/current recheck both. Readiness observes an already published fold and never reloads or repairs the writer log.
+
+`InputPathReadyClearPendingBefore.cfg` separates `oldBinding` from `filePublished` and breaks `ReadyPendingEventuallyExecutes`: no payload means no file and therefore no new binding. `InputPathReadyClearPendingAfter.cfg` passes safety and that liveness property. `InputPathReadyClearPendingRecheck.cfg` changes the Pending seq after Prepare; the stale proof is revoked, and a fresh proof progresses. The diagrams are hand-authored projections; the lane report records actual TLC runs and fingerprints.
+
+Clear repair implementation source SHA: d0d8d711b8be5668aacf90a7cd7c362e15ef7ec0. Final normal Rust source includes the unchanged-path native-ID fallback. Targeted callers and negative evidence tests are described in the lane report.
+
+Direct TLC:62 configs/226 calls, GREEN34, expected RED28, unexpected0. The required base/head invocation selected79 configs and completed270 calls. The concrete nonce/channel/path checks are exercised by caller tests; the model separates old binding, Pending seq and new file publication.
+
+## Clear first-input Held watch refinement
+
+Code base SHA: b63a97c5115bf469c85996242d61732557122427 (the before/None watcher).
+Candidate first_input.rs SHA256: b27be5fb6760f3875ff9703c8abe4b7ed7ee5be861d80086ba9e3b7b8137bbe3.
+Repository checker run: `TLA2TOOLS=/home/adk/.cache/tla2tools/tla2tools.jar python3 scripts/ci/statecharts_tlc.py --base 193a57168f --head HEAD --jobs 2`.
+81 configs / 274 TLC invocations / 40 GREEN / 41 expected RED / unexpected0.
+The working model inputs were checked; committed-head selection is verified separately before reporting completion.
+
+| cfg | expected / actual | liveness violation |
+|---|---|---|
+| InputPathReadyClearHeldBefore.cfg | RED / RED | ReadyClearHeldEventuallySends |
+| InputPathReadyClearHeldAfter.cfg | GREEN / GREEN | none |
+
+ClearHeld forces a first-input draft veto only after current clear readiness was observed.
+Recovering the composer does not itself wake, and the ordinary Observe action cannot wake this Held input.
+Old Stop and external IdleWake are disabled in this scenario. Only the level watch may wake it.
+The before watch asks for the implicit source and stays blocked behind the old runtime binding.
+The after watch preserves the attached path and reuses current clear/Pending authority.
+Submit creates the first new file; PublishClearFile changes the old binding later.
+Stable current nonce/path/Start/Pending and fair watch execution are liveness premises.
+Runtime owned-caller tests check changed nonce/path, transient capture failure, exact original custody and one paste/Enter.
+The model does not grant replacement-source authority or change Unknown replay, Busy injection or draft/focus policy.

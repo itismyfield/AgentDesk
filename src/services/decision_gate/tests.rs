@@ -140,10 +140,6 @@ fn policy_projects_switches_aliases_and_independent_deadlines() {
 
 #[tokio::test]
 async fn dormant_and_missing_key_calls_remain_off_without_logs() {
-    assert_eq!(
-        super::availability(),
-        DecisionResult::Off(OffReason::NotInstalled)
-    );
     let gate = DecisionGate::new(Arc::new(|| Some(DecisionGateConfig::default())), None);
     for _ in 0..10 {
         let attempt = gate.decide(&request()).await;
@@ -181,6 +177,11 @@ mod parser_tests;
 fn production_entry_ignores_seeded_environment_and_agent_op() {
     use crate::test_support::wait::{WAIT_CAP, join_within};
     use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "ADK_DECISION_UNINSTALLED_PROBE";
+    if std::env::var_os(CHILD).is_some() {
+        assert!(super::installed().is_none());
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("unexpected-agent-op-call");
     let fake = dir.path().join("agent-op");
@@ -190,46 +191,27 @@ fn production_entry_ignores_seeded_environment_and_agent_op() {
     )
     .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let module =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services/decision_gate/mod.rs");
-    let source = dir.path().join("probe.rs");
-    std::fs::write(&source, format!("#[path = {module:?}] mod gate;\nfn main() {{ println!(\"{{:?}}\", gate::availability()); }}\n")).unwrap();
-    let executable = dir.path().join("dormant-probe");
-    let output_path = executable.clone();
-    let build = join_within(
-        std::thread::spawn(move || {
-            std::process::Command::new("rustc")
-                .arg("--edition=2024")
-                .arg(source)
-                .arg("-o")
-                .arg(output_path)
-                .output()
-                .unwrap()
-        }),
-        WAIT_CAP,
-    );
-    assert!(
-        build.status.success(),
-        "production-only facade did not compile"
-    );
     let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
     ))
     .unwrap();
     let result = join_within(
         std::thread::spawn(move || {
-            std::process::Command::new(executable)
-                .env("PATH", path)
-                .env("GEMINI_API_KEY", "fixture-seeded-environment-credential")
-                .output()
-                .unwrap()
+            std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["services::decision_gate::tests::production_entry_ignores_seeded_environment_and_agent_op", "--exact", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("PATH", path)
+            .env("GEMINI_API_KEY", "fixture-seeded-environment-credential")
+            .output().unwrap()
         }),
         WAIT_CAP,
     );
-    assert!(result.status.success());
-    assert_eq!(
-        String::from_utf8(result.stdout).unwrap().trim(),
-        "Off(NotInstalled)"
+    assert!(result.status.success(), "uninstalled getter probe failed");
+    assert!(
+        !String::from_utf8_lossy(&result.stdout).contains("fixture-seeded-environment-credential")
+    );
+    assert!(
+        !String::from_utf8_lossy(&result.stderr).contains("fixture-seeded-environment-credential")
     );
     assert!(!marker.exists());
 }

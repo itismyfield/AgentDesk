@@ -72,7 +72,7 @@ impl BusyOperation {
         timing: &'static busy_inject::Timing,
         declared: bool,
         cancel: Arc<CancelToken>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let (target, writer) = herdr.map_or_else(
             || (InputTarget::Tmux(session.into()), None),
             |(target, writer)| (InputTarget::Herdr(target), Some(writer)),
@@ -87,20 +87,11 @@ impl BusyOperation {
         declared: bool,
         cancel: Arc<CancelToken>,
         writer: Option<String>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let (submit, host_tag): (BusySubmit, Option<&'static str>) = match target {
             InputTarget::Tmux(session) => {
-                let pane = match busy_inject::Pane::with_program(&session, program) {
-                    Ok(pane) => pane,
-                    Err(reason) => {
-                        return Self {
-                            submit: Box::new(move |_| BusyReport::refused(reason.clone())),
-                            host_tag: None,
-                        };
-                    }
-                };
                 let adapter = tmux::Adapter {
-                    pane,
+                    pane: busy_inject::Pane::with_program(&session, program)?,
                     timing,
                     declared,
                     cancel,
@@ -123,7 +114,7 @@ impl BusyOperation {
                 (Box::new(move |request| adapter.submit(request)), None)
             }
         };
-        Self { submit, host_tag }
+        Ok(Self { submit, host_tag })
     }
 
     pub(crate) fn submit(&self, request: &Request<'_>) -> BusyReport {
@@ -223,7 +214,8 @@ impl BusyObservation {
                 declared,
                 cancel,
                 None,
-            );
+            )
+            .expect("a refused operation performs no target lookup");
         };
         let adapter = herdr::Adapter {
             target: context.target.clone(),

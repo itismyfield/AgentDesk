@@ -166,7 +166,8 @@ fn an_owned_paste_beside_an_unparkable_draft_notices_its_original_once() {
                 false,
                 Arc::new(crate::services::provider::CancelToken::new()),
                 None,
-            ),
+            )
+            .expect("managed scripted operation"),
             session: session.clone(),
             transcript: dir.path().join("transcript.jsonl"),
             channel: 7_676_400 + at,

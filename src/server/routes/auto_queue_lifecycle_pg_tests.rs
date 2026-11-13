@@ -826,4 +826,345 @@ mod tests {
         pool.close().await;
         pg_db.drop().await;
     }
+
+    async fn seed_slot(pool: &sqlx::PgPool, run_id: &str) {
+        sqlx::query(
+            "INSERT INTO auto_queue_slots
+                (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
+             VALUES ('agent-1', 0, $1, 0, CAST('{}' AS jsonb))",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("seed slot");
+    }
+
+    async fn entry_status(pool: &sqlx::PgPool, entry_id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = $1")
+            .bind(entry_id)
+            .fetch_one(pool)
+            .await
+            .expect("load entry status")
+    }
+
+    async fn notice_targets(pool: &sqlx::PgPool) -> Vec<String> {
+        sqlx::query_scalar("SELECT target FROM message_outbox WHERE bot = 'notify' ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .expect("load notices")
+    }
+
+    /// Makes every outbox INSERT fail until [`allow_outbox`].
+    async fn reject_outbox(pool: &sqlx::PgPool) {
+        sqlx::raw_sql(
+            "CREATE OR REPLACE FUNCTION reject_outbox_insert() RETURNS trigger AS $$
+             BEGIN RAISE EXCEPTION 'outbox rejected by test'; END $$ LANGUAGE plpgsql;
+             CREATE TRIGGER reject_outbox BEFORE INSERT ON message_outbox
+             FOR EACH ROW EXECUTE FUNCTION reject_outbox_insert();",
+        )
+        .execute(pool)
+        .await
+        .expect("install outbox rejection");
+    }
+
+    async fn allow_outbox(pool: &sqlx::PgPool) {
+        sqlx::query("DROP TRIGGER reject_outbox ON message_outbox")
+            .execute(pool)
+            .await
+            .expect("drop outbox rejection");
+    }
+
+    /// One active run holding the slot: a finished entry plus `entry-last` in `last_status`.
+    async fn seed_run_with_last_entry(pool: &sqlx::PgPool, last_status: &str) {
+        seed_agent(pool).await;
+        seed_run(pool, "run-1", "active").await;
+        seed_slot(pool, "run-1").await;
+        seed_entry(pool, "run-1", "entry-done", "done", None).await;
+        seed_entry(pool, "run-1", "entry-last", last_status, None).await;
+    }
+
+    /// The skip route's entry write completes the run in the same tx: a failed notice keeps
+    /// the entry pending and the slot held, and the successful skip queues one notice.
+    #[tokio::test]
+    async fn skip_route_completes_run_with_entry_write_in_one_tx_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_run_with_last_entry(&pool, "pending").await;
+        let app = test_router(pool.clone());
+
+        reject_outbox(&pool).await;
+        let (status, body) =
+            request_json_response(&app, Method::PATCH, "/queue/entries/entry-last/skip", None)
+                .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(entry_status(&pool, "entry-last").await, "pending");
+        assert_eq!(run_status(&pool, "run-1").await, "active");
+        assert_eq!(slot_run(&pool).await.as_deref(), Some("run-1"));
+        assert!(notice_targets(&pool).await.is_empty());
+
+        allow_outbox(&pool).await;
+        let (status, body) =
+            request_json_response(&app, Method::PATCH, "/queue/entries/entry-last/skip", None)
+                .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(entry_status(&pool, "entry-last").await, "skipped");
+        assert_eq!(run_status(&pool, "run-1").await, "completed");
+        assert_eq!(slot_run(&pool).await, None);
+        assert_eq!(notice_targets(&pool).await, vec!["channel:123".to_string()]);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// A plain status change through the entry PATCH route completes the run with the write.
+    #[tokio::test]
+    async fn entry_patch_status_change_completes_run_with_entry_write_in_one_tx_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_run_with_last_entry(&pool, "pending").await;
+        let app = test_router(pool.clone());
+        let skip = json!({"status": "skipped"});
+
+        reject_outbox(&pool).await;
+        let (status, body) = request_json_response(
+            &app,
+            Method::PATCH,
+            "/queue/entries/entry-last",
+            Some(skip.clone()),
+        )
+        .await;
+        assert_ne!(status, StatusCode::OK, "{body}");
+        assert_eq!(entry_status(&pool, "entry-last").await, "pending");
+        assert_eq!(run_status(&pool, "run-1").await, "active");
+        assert!(notice_targets(&pool).await.is_empty());
+
+        allow_outbox(&pool).await;
+        let (status, body) =
+            request_json_response(&app, Method::PATCH, "/queue/entries/entry-last", Some(skip))
+                .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(entry_status(&pool, "entry-last").await, "skipped");
+        assert_eq!(run_status(&pool, "run-1").await, "completed");
+        assert_eq!(slot_run(&pool).await, None);
+        assert_eq!(notice_targets(&pool).await, vec!["channel:123".to_string()]);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// The entry PATCH route's manual `done` reconciles a failed entry whose card finished,
+    /// with its transition recorded; a `done` write never completes the run by itself.
+    #[tokio::test]
+    async fn entry_patch_done_reconciles_failed_entry_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_run_with_last_entry(&pool, "failed").await;
+        sqlx::raw_sql(
+            "UPDATE kanban_cards SET status = 'done' WHERE id = 'card-entry-last';
+             INSERT INTO task_dispatches
+                 (id, kanban_card_id, to_agent_id, dispatch_type, status, result)
+             VALUES ('d-last', 'card-entry-last', 'agent-1', 'implementation', 'completed',
+                     CAST('{\"completed_commit\":\"abc123\"}' AS jsonb));
+             UPDATE auto_queue_entries SET dispatch_id = 'd-last' WHERE id = 'entry-last';",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed finished card evidence");
+        let app = test_router(pool.clone());
+
+        let (status, body) = request_json_response(
+            &app,
+            Method::PATCH,
+            "/queue/entries/entry-last",
+            Some(json!({"status": "done"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(entry_status(&pool, "entry-last").await, "done");
+        assert_eq!(
+            scalar_i64(
+                &pool,
+                "SELECT COUNT(*)::BIGINT FROM auto_queue_entry_transitions
+                  WHERE entry_id = 'entry-last' AND from_status = 'failed'
+                    AND to_status = 'done' AND trigger_source = 'manual_terminal_reconcile'",
+            )
+            .await,
+            1
+        );
+        assert_eq!(run_status(&pool, "run-1").await, "active");
+        assert!(notice_targets(&pool).await.is_empty());
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// The repair route clears a passed final gate, completes the drained run and queues its
+    /// notice in the repair tx; a failed notice leaves the gate and run as they were.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repair_route_clears_gate_and_completes_run_in_one_tx_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-1", "active").await;
+        seed_slot(&pool, "run-1").await;
+        seed_entry(&pool, "run-1", "entry-done", "done", None).await;
+        let mut declaration = crate::phase_gate::resolve_declaration_value("pr-confirm")
+            .expect("pr-confirm declaration");
+        let gate = declaration.as_object_mut().expect("declaration object");
+        gate.insert("run_id".to_string(), json!("run-1"));
+        gate.insert("batch_phase".to_string(), json!(0));
+        gate.insert("final_phase".to_string(), json!(true));
+        let context = json!({"phase_gate": declaration});
+        let result = json!({"verdict": "phase_gate_passed", "checks": {
+            "merge_verified": "pass", "issue_closed": "pass", "build_passed": "pass"}});
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, to_agent_id, dispatch_type, status, title, context, result)
+             VALUES ('d-gate', 'agent-1', 'phase-gate', 'completed', 'gate',
+                     CAST($1 AS jsonb), CAST($2 AS jsonb))",
+        )
+        .bind(context.to_string())
+        .bind(result.to_string())
+        .execute(&pool)
+        .await
+        .expect("seed gate dispatch");
+        crate::db::auto_queue::save_phase_gate_state_on_pg(
+            &pool,
+            "run-1",
+            0,
+            &crate::db::auto_queue::PhaseGateStateWrite {
+                status: "failed".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["d-gate".into()],
+                next_phase: None,
+                final_phase: true,
+                failure_reason: Some("stale failed verdict".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed failed gate");
+        let gates = "SELECT COUNT(*)::BIGINT FROM auto_queue_phase_gates WHERE run_id = 'run-1'";
+        let app = test_router(pool.clone());
+        let path = "/queue/runs/run-1/phase-gates/repair";
+
+        reject_outbox(&pool).await;
+        let (status, body) = request_json_response(&app, Method::POST, path, Some(json!({}))).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(scalar_i64(&pool, gates).await, 1);
+        assert_eq!(run_status(&pool, "run-1").await, "active");
+        assert_eq!(slot_run(&pool).await.as_deref(), Some("run-1"));
+
+        allow_outbox(&pool).await;
+        let (status, body) = request_json_response(&app, Method::POST, path, Some(json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["cleared_gates"], 1, "{body}");
+        assert_eq!(body["outcomes"][0]["run_finalized"], true, "{body}");
+        assert_eq!(scalar_i64(&pool, gates).await, 0);
+        assert_eq!(run_status(&pool, "run-1").await, "completed");
+        assert_eq!(slot_run(&pool).await, None);
+        assert_eq!(notice_targets(&pool).await, vec!["channel:123".to_string()]);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    async fn transition_count(pool: &sqlx::PgPool, entry: &str, to: &str, source: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM auto_queue_entry_transitions
+              WHERE entry_id = $1 AND to_status = $2 AND trigger_source = $3",
+        )
+        .bind(entry)
+        .bind(to)
+        .bind(source)
+        .fetch_one(pool)
+        .await
+        .expect("count entry transitions")
+    }
+
+    /// Restore writes `done`, `pending` and a live-dispatch re-attach per entry in one tx; a
+    /// failed write leaves the run cancelled and every entry skipped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restore_route_writes_done_existing_and_new_dispatch_entries_atomically_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-1", "cancelled").await;
+        seed_entry(&pool, "run-1", "entry-a", "skipped", None).await;
+        seed_entry(&pool, "run-1", "entry-b", "skipped", None).await;
+        seed_entry(&pool, "run-1", "entry-c", "skipped", None).await;
+        sqlx::raw_sql(
+            "UPDATE kanban_cards SET status = 'done' WHERE id = 'card-entry-a';
+             INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status)
+             VALUES ('d-a', 'card-entry-a', 'agent-1', 'implementation', 'completed'),
+                    ('d-live', 'card-entry-b', 'agent-1', 'implementation', 'dispatched'),
+                    ('d-c-old', 'card-entry-c', 'agent-1', 'implementation', 'cancelled');
+             UPDATE kanban_cards SET latest_dispatch_id = 'd-live' WHERE id = 'card-entry-b';
+             INSERT INTO auto_queue_entry_dispatch_history (entry_id, dispatch_id)
+             VALUES ('entry-a', 'd-a'), ('entry-b', 'd-live'), ('entry-c', 'd-c-old');
+             CREATE FUNCTION reject_entry_c() RETURNS trigger AS $$
+             BEGIN
+                 IF OLD.id = 'entry-c' THEN RAISE EXCEPTION 'entry-c rejected by test'; END IF;
+                 RETURN NEW;
+             END $$ LANGUAGE plpgsql;
+             CREATE TRIGGER reject_entry_c BEFORE UPDATE ON auto_queue_entries
+             FOR EACH ROW EXECUTE FUNCTION reject_entry_c();",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed restore fixture");
+        let app = test_router(pool.clone());
+        let path = "/queue/runs/run-1/restore";
+
+        let (_, body) = request_json_response(&app, Method::POST, path, Some(json!({}))).await;
+        assert_eq!(body["ok"], false, "{body}");
+        assert_eq!(run_status(&pool, "run-1").await, "cancelled");
+        for entry in ["entry-a", "entry-b", "entry-c"] {
+            assert_eq!(entry_status(&pool, entry).await, "skipped", "{entry}");
+        }
+
+        sqlx::query("DROP TRIGGER reject_entry_c ON auto_queue_entries")
+            .execute(&pool)
+            .await
+            .expect("drop entry rejection");
+        let (status, body) = request_json_response(&app, Method::POST, path, Some(json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            transition_count(&pool, "entry-a", "done", "restore_run_done").await,
+            1
+        );
+        assert_eq!(entry_status(&pool, "entry-a").await, "done");
+        assert_eq!(
+            transition_count(
+                &pool,
+                "entry-c",
+                "pending",
+                "restore_run_pending_new_dispatch"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            transition_count(
+                &pool,
+                "entry-b",
+                "dispatched",
+                "restore_run_attach_existing_dispatch"
+            )
+            .await,
+            1,
+            "{body}"
+        );
+        let attached: (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT status, dispatch_id, slot_index::BIGINT FROM auto_queue_entries
+              WHERE id = 'entry-b'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load re-attached entry");
+        assert_eq!(attached.0, "dispatched");
+        assert_eq!(attached.1.as_deref(), Some("d-live"));
+        assert!(
+            attached.2.is_some(),
+            "the re-attached entry holds a slot: {body}"
+        );
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }

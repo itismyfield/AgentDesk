@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 import generate_inventory_docs as inventory
 from ratchet_admission import parse_cap_table
+from ci.merge_candidate import pr_comparison_base as resolve_pr_base
 ROOT = Path(__file__).resolve().parent.parent
 EVIDENCE = ROOT / "target/giant-file-progress/evidence.json"
 REGISTRY = "scripts/giant_file_registry.toml"
@@ -26,29 +27,10 @@ def git(*args: str, binary: bool = False) -> str | bytes:
     return result.stdout
 def oid(ref: str, suffix: str = "commit") -> str:
     return str(git("rev-parse", "--verify", f"{ref}^{{{suffix}}}" if suffix else ref)).strip()
-# Bind evaluation to the immutable candidate and its ordered base/head parents.
-def provenance_matches(candidate: str, base: str, head: str, parents: list[str]) -> bool: return parents == [candidate, base, head]
-
 def pr_comparison_base(candidate: str, event_base: str, head: str,
                        parents: list[str]) -> str:
-    """Resolve only a forward base advance on the event-provided candidate.
-
-    GITHUB_SHA pins the candidate and the second parent must still be the
-    event's exact head. A rewind, unrelated base, unavailable object, or Git
-    error fails closed. No fetch or mutable branch lookup is involved.
-    """
-    mismatch = "event/base/head/merge object provenance mismatch"
-    if len(parents) != 3 or not provenance_matches(candidate, parents[1], head, parents):
-        raise RuntimeError(mismatch)
-    comparison_base = parents[1]
-    if comparison_base != event_base:
-        try:
-            git("merge-base", "--is-ancestor", event_base, comparison_base)
-        except subprocess.CalledProcessError as error:
-            if error.returncode == 1:
-                raise RuntimeError(mismatch) from error
-            raise  # Operational errors are not evidence of ancestry.
-    return comparison_base
+    """Use the shared immutable candidate provenance contract."""
+    return resolve_pr_base(candidate, event_base, head, parents, git)
 
 def archive(ref: str, destination: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(git("archive", "--format=tar", ref, binary=True))) as bundle:

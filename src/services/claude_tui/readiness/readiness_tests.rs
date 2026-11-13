@@ -16,6 +16,9 @@ struct Rig {
 }
 impl Rig {
     fn new() -> Self {
+        Self::for_channel(None)
+    }
+    fn for_channel(channel: Option<u64>) -> Self {
         initialize();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("projects");
@@ -27,7 +30,7 @@ impl Rig {
         let path = project.join(format!("{native}.jsonl"));
         let ctx: BindingContext = serde_json::from_value(json!({
             "schema":1,"provider":"claude","created_at":Utc::now(),"execution_nonce":nonce,
-            "tmux_session":session,"channel_id":null,"owner_runtime_root":"fixture",
+            "tmux_session":session,"channel_id":channel,"owner_runtime_root":"fixture",
             "host":"readiness-test","expected_native_session_id":native,"launch_mode":"fresh",
             "provider_root":root
         }))
@@ -100,6 +103,10 @@ impl Rig {
         super::super::input::send_warm_followup_owned(&self.session, "one original", None)
     }
 }
+
+#[cfg(unix)]
+#[path = "clear_tests.rs"]
+pub(crate) mod clear_tests;
 impl Drop for Rig {
     fn drop(&mut self) {
         tui_prompt_dedupe::clear_tmux_runtime_binding(&self.session);

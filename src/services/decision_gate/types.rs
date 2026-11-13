@@ -1,27 +1,19 @@
-#[cfg(test)]
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OffReason {
     NotInstalled,
-    #[cfg(test)]
     MissingKey,
-    #[cfg(test)]
     GlobalDisabled,
-    #[cfg(test)]
     FeatureDisabled,
-    #[cfg(test)]
     RepositoryDisabled,
-    #[cfg(test)]
     PolicyUnavailable,
 }
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum DecisionResult {
     Off(OffReason),
-    #[cfg(test)]
     NoAnswer(NoAnswerReason),
-    #[cfg(test)]
     Answer {
         choice: DecisionValue,
         confidence: f64,
@@ -29,7 +21,6 @@ pub(crate) enum DecisionResult {
     },
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NoAnswerReason {
     InvalidRequest,
@@ -44,32 +35,36 @@ pub(crate) enum NoAnswerReason {
     ClientUnavailable,
 }
 
-#[cfg(test)]
 #[derive(Debug, PartialEq)]
 pub(crate) enum DecisionValue {
-    Noul { answer: bool, p_yes: f64 },
+    #[cfg(test)]
+    Noul {
+        answer: bool,
+        p_yes: f64,
+    },
     Choice(String),
+    #[cfg(test)]
     Score(f64),
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Feature {
     IssueDuplicate,
+    #[cfg(test)]
     HostAssignment,
+    #[cfg(test)]
     RoutinePrecheck,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct Scope {
     pub(crate) feature: Feature,
     pub(crate) repository: Option<String>,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) enum Question {
+    #[cfg(test)]
     Noul {
         instructions: String,
         true_description: Option<String>,
@@ -79,13 +74,13 @@ pub(crate) enum Question {
         instructions: String,
         options: Vec<(String, String)>,
     },
+    #[cfg(test)]
     Score {
         instructions: String,
         levels: Vec<String>,
     },
 }
 
-#[cfg(test)]
 pub(crate) struct DecisionRequest {
     pub(crate) scope: Scope,
     pub(crate) template_version: String,
@@ -93,7 +88,6 @@ pub(crate) struct DecisionRequest {
     pub(crate) question: Question,
 }
 
-#[cfg(test)]
 #[derive(Debug, PartialEq)]
 pub(crate) struct DecisionObservation {
     pub(crate) template_version: String,
@@ -101,7 +95,6 @@ pub(crate) struct DecisionObservation {
     pub(crate) input_tokens: Option<u64>,
 }
 
-#[cfg(test)]
 #[derive(Debug, PartialEq)]
 pub(crate) struct DecisionAttempt {
     pub(crate) result: DecisionResult,
