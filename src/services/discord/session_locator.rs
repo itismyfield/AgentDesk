@@ -231,7 +231,10 @@ mod unix {
         })
     }
 
-    pub(crate) struct RegistrationScope(bool);
+    pub(crate) struct RegistrationScope {
+        active: bool,
+        _completion: crate::services::tui_prompt_dedupe::binding_context::registration::Scope,
+    }
     impl RegistrationScope {
         pub(crate) fn enter(
             pool: Option<&PgPool>,
@@ -243,7 +246,13 @@ mod unix {
             origin: Option<bool>,
         ) -> Result<Self, String> {
             REGISTRATION.with(|slot| slot.borrow_mut().push(None));
-            let guard = Self(true);
+            let guard = Self {
+                active: true,
+                _completion:
+                    crate::services::tui_prompt_dedupe::binding_context::registration::enter(
+                        created,
+                    ),
+            };
             let Some(dispatched_origin) = origin else {
                 return Ok(guard);
             };
@@ -329,7 +338,7 @@ mod unix {
     }
     impl Drop for RegistrationScope {
         fn drop(&mut self) {
-            if self.0 {
+            if self.active {
                 REGISTRATION.with(|slot| {
                     slot.borrow_mut().pop();
                 });

@@ -345,3 +345,56 @@ async fn key_promotion_overlapping_old_hook_is_fenced_after_commit_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test]
+async fn key_promotion_consumes_only_its_new_key_alias_pg() {
+    for foreign in [false, true] {
+        let (db, pool, old, new, snapshot) = setup().await;
+        let owner = if foreign {
+            sqlx::query_scalar("INSERT INTO sessions(session_key, provider, status) VALUES ('other:alias-owner', 'claude', 'idle') RETURNING id")
+                .fetch_one(&pool).await.unwrap()
+        } else {
+            snapshot.id
+        };
+        sqlx::query("INSERT INTO session_key_aliases(session_key, session_id) VALUES ($1, $2)")
+            .bind(&new)
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = state(&pool).await;
+        let outcome = promote(&pool, &snapshot, &new).await;
+        if foreign {
+            assert!(outcome.is_err());
+            assert_eq!(state(&pool).await, before);
+        } else {
+            let outcome = outcome.unwrap();
+            let primary: (String, Option<String>) =
+                sqlx::query_as("SELECT session_key, active_turn_nonce FROM sessions WHERE id=$1")
+                    .bind(snapshot.id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let old_alias: i64 = sqlx::query_scalar(
+                "SELECT session_id FROM session_key_aliases WHERE session_key=$1",
+            )
+            .bind(&old)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let new_alias: Option<i64> = sqlx::query_scalar(
+                "SELECT session_id FROM session_key_aliases WHERE session_key=$1",
+            )
+            .bind(&new)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                (primary, old_alias, new_alias, outcome.session_key),
+                ((new.clone(), Some("new".into())), snapshot.id, None, new)
+            );
+        }
+        pool.close().await;
+        db.drop().await;
+    }
+}

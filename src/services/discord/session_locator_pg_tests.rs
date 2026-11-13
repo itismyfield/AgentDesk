@@ -159,12 +159,18 @@ impl PromotionRig {
             .environment_assignment()
             .unwrap();
         let program = rig.root.path().join("synthetic-provider.py");
-        std::fs::write(&program, r#"import os, sys, tty
-tty.setraw(sys.stdin.fileno())
-sys.stdout.write("✻ Thinking… (12s · esc to interrupt)\r\n" + "─" * 40 + "\r\n❯ \r\n" + "─" * 40 + "\r\n")
-sys.stdout.flush()
-while os.read(0, 1) != b"\x1b":
-    pass
+        std::fs::write(&program, r#"import json, os, pathlib
+root = pathlib.Path(__file__).parent
+fifo = root / "input.fifo"
+os.mkfifo(fifo)
+fd = os.open(fifo, os.O_RDWR)
+(root / "provider.ready").write_text("ready")
+with os.fdopen(fd) as stream:
+    for line in stream:
+        value = json.loads(line)
+        if value.get("type") == "control_request" and value.get("request", {}).get("subtype") == "interrupt":
+            (root / "interrupt.received").write_text("received")
+            break
 "#).unwrap();
         assert!(
             rig.raw(&[
@@ -175,7 +181,8 @@ while os.read(0, 1) != b"\x1b":
                 "-e",
                 &marker,
                 "python3",
-                program.to_str().unwrap()
+                program.to_str().unwrap(),
+                "tmux-wrapper"
             ])
             .status
             .success()
@@ -235,26 +242,21 @@ while os.read(0, 1) != b"\x1b":
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
             &self.name,
             crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                runtime_kind:
+                    crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper,
                 output_path: transcript.display().to_string(),
                 relay_output_path: None,
-                input_fifo_path: None,
+                input_fifo_path: Some(self.root.path().join("input.fifo").display().to_string()),
                 session_id: None,
                 last_offset: 0,
                 relay_last_offset: None,
             },
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while !String::from_utf8_lossy(
-            &self
-                .raw(&["capture-pane", "-p", "-t", &format!("={}:", self.name)])
-                .stdout,
-        )
-        .contains("Thinking")
-        {
+        while !self.root.path().join("provider.ready").exists() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "synthetic provider ready"
+                "synthetic wrapper ready"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -266,7 +268,8 @@ while os.read(0, 1) != b"\x1b":
         .unwrap();
         row.tmux_session_name = Some(self.name.clone());
         row.session_key = Some(self.key.clone());
-        row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        row.runtime_kind =
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper);
         crate::services::discord::inflight::save_inflight_state(&row).unwrap();
         test_queue::queue_original(&self.shared, self.channel).await;
         self.queue_bytes()
@@ -402,6 +405,10 @@ async fn key_promotion_current_primary_queue_cancel_preserves_input_pg() {
         .cancel_dispatch(Some(&rig.registry), "s2-dispatch")
         .await
         .unwrap();
+    assert!(
+        rig.root.path().join("interrupt.received").exists(),
+        "the wrapper must receive the real interrupt"
+    );
     assert!(
         !rig.present(),
         "queue cancel must end the new physical session"

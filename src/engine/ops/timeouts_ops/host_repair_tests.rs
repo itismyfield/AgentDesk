@@ -900,36 +900,6 @@ async fn policy_tick_calls_owner_without_js_candidate_or_repair_decisions_pg() {
     db.drop().await;
 }
 
-#[derive(Clone)]
-struct CurrentPrimaryTmux;
-impl crate::engine::ops::exec_ops::SessionTmux for CurrentPrimaryTmux {
-    fn send_keys(
-        &self,
-        name: &str,
-        keys: &[&str],
-        timeout: Option<std::time::Duration>,
-    ) -> Result<std::process::Output, String> {
-        crate::services::platform::tmux::send_keys_timeout(
-            name,
-            keys,
-            timeout.unwrap_or(std::time::Duration::from_secs(2)),
-        )
-    }
-    fn audit_kill(&self, _: &str) {}
-    fn kill(
-        &self,
-        name: &str,
-        reason: &str,
-        timeout: Option<std::time::Duration>,
-    ) -> Result<std::process::Output, String> {
-        crate::services::platform::tmux::kill_session_output_timeout(
-            name,
-            reason,
-            timeout.unwrap_or(std::time::Duration::from_secs(2)),
-        )
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn key_promotion_current_primary_policy_kill_and_repair_have_effect_pg() {
     let rig = crate::services::discord::session_locator::tests::PromotionRig::new(81190305).await;
@@ -944,7 +914,7 @@ async fn key_promotion_current_primary_policy_kill_and_repair_have_effect_pg() {
         crate::engine::ops::exec_ops::register_session_command_ops_for_test(
             &ctx,
             Some(rig.pool.clone()),
-            CurrentPrimaryTmux,
+            crate::engine::ops::exec_ops::SystemTmux,
         )
         .unwrap();
         let call = format!(

@@ -42,6 +42,9 @@
 //! [`request_discovery_tick`] for that purpose so future PRs can nudge the
 //! loop without changing this module.
 
+#[path = "session_directory.rs"]
+mod session_directory;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -303,11 +306,9 @@ async fn load_session_tmux_segments_pg(
             );
             continue;
         }
-        let Some((provider, tmux_segment)) = super::session_directory::live_name(
-            session_key,
-            provider_hint.as_deref(),
-            live_session_names,
-        ) else {
+        let Some((provider, tmux_segment)) =
+            session_directory::live_name(session_key, provider_hint.as_deref(), live_session_names)
+        else {
             continue;
         };
         if !provider_hint_matches_session_provider(provider_hint.as_deref(), &provider) {
