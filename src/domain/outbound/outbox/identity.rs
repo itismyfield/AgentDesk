@@ -33,6 +33,7 @@ pub(crate) fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -
 /// later configured as an allowed sender.
 pub(crate) fn is_non_turn_operational_alert(source: &str, reason_code: Option<&str>) -> bool {
     is_actionable_ops_alert(source, reason_code)
+        || (source == "routine-runtime" && reason_code == Some("routine_run_attention"))
         || (source == "lifecycle_notifier" && reason_code == Some("stale_replay_withheld"))
         || matches!(
             source,

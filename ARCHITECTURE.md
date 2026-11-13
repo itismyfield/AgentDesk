@@ -2087,6 +2087,8 @@ src/
 │   │   │   │   ├── codex_spawn.rs
 │   │   │   │   └── normalized_writer.rs
 │   │   │   ├── restore_inflight/
+│   │   │   │   ├── replay_hold_tests/
+│   │   │   │   │   └── routine_presentation_tests.rs
 │   │   │   │   ├── host_probe_tests.rs
 │   │   │   │   ├── kickoff_identity.rs
 │   │   │   │   ├── kickoff_identity_tests.rs
@@ -2095,6 +2097,7 @@ src/
 │   │   │   │   ├── replay_decision.rs
 │   │   │   │   ├── replay_hold.rs
 │   │   │   │   ├── replay_hold_tests.rs
+│   │   │   │   ├── routine_presentation.rs
 │   │   │   │   └── scheduled_body_restore_tests.rs
 │   │   │   ├── terminal_text_idempotency/
 │   │   │   │   └── anchor_identity.rs
@@ -2257,7 +2260,10 @@ src/
 │   │   │   │   ├── headless_turn/
 │   │   │   │   │   ├── process_mailbox/
 │   │   │   │   │   │   ├── bridge_tests.rs
+│   │   │   │   │   │   ├── routine_presentation_tests.rs
 │   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   ├── replay_start_tests/
+│   │   │   │   │   │   └── routine_policy_tests.rs
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
 │   │   │   │   │   ├── process_mailbox.rs
@@ -2416,6 +2422,8 @@ src/
 │   │   │   ├── response_format.rs
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
+│   │   ├── routine_presentation/
+│   │   │   └── tests.rs
 │   │   ├── runtime_bootstrap/
 │   │   │   ├── gateway_runtime/
 │   │   │   │   ├── slash_command_tests/
@@ -3014,6 +3022,7 @@ src/
 │   │   │   │   ├── output.rs
 │   │   │   │   ├── reclaim.rs
 │   │   │   │   ├── rollover_guard.rs
+│   │   │   │   ├── routine_stream_tests.rs
 │   │   │   │   └── runtime.rs
 │   │   │   ├── terminal_controller_cutover/
 │   │   │   │   └── o_body.rs
@@ -3033,6 +3042,7 @@ src/
 │   │   │   │   │   ├── provider_failure_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
+│   │   │   │   │   ├── routine_presentation_tests.rs
 │   │   │   │   │   ├── rowless_receipt_tests.rs
 │   │   │   │   │   ├── settled_delivery_tests.rs
 │   │   │   │   │   └── turn_mode_anchor_tests.rs
@@ -3400,6 +3410,7 @@ src/
 │   │   ├── response_sanitizer.rs
 │   │   ├── restart_mode.rs
 │   │   ├── restart_report.rs
+│   │   ├── routine_presentation.rs
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
 │   │   ├── runtime_store_atomic_write_tests.rs
@@ -3774,9 +3785,14 @@ src/
 │   │   │   └── start_deferral.rs
 │   │   ├── discord_log/
 │   │   │   ├── census.rs
-│   │   │   └── failure_alert.rs
+│   │   │   ├── failure_alert.rs
+│   │   │   └── presentation.rs
 │   │   ├── loader/
 │   │   │   └── discovery.rs
+│   │   ├── reliability_pg_tests/
+│   │   │   └── run_diagnostics_tests.rs
+│   │   ├── run_diagnostics/
+│   │   │   └── formatting.rs
 │   │   ├── store/
 │   │   │   └── agent_start.rs
 │   │   ├── action.rs
@@ -3789,6 +3805,7 @@ src/
 │   │   ├── migrated.rs
 │   │   ├── mod.rs
 │   │   ├── reliability_pg_tests.rs
+│   │   ├── run_diagnostics.rs
 │   │   ├── runtime.rs
 │   │   ├── runtime_config.rs
 │   │   ├── script_refs.rs
