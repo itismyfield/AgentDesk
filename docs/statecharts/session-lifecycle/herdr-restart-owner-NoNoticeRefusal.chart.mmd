@@ -1,0 +1,22 @@
+---
+title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Restart
+    lg1: Path to the CommandAnswers or RestartAvailable bug
+    lg2: Repeats forever, so CommandAnswers or RestartAvailable breaks
+  }
+  class lg0 blue
+  class lg1 bugPath
+  class lg2 repeats
+  s0: Old session and a queued input
+  s1: A result awaits its visible answer
+  [*] --> s0
+  s0 --> s1: Refuse before any effect
+  s1 --> s1: Unreadable row refuses the input visibly
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s1 repeats

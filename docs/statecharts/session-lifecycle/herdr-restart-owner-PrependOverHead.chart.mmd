@@ -1,0 +1,43 @@
+---
+title: "Herdr /restart r3: seed behind the in-flight unit, exact close, the owner launches, clear wins"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Restart
+    lg1: Owner
+    lg2: Path to the AcceptedInputResolves or RequestResolves or RestartAvailable bug
+    lg3: Repeats forever, so AcceptedInputResolves or RequestResolves or RestartAvailable breaks
+  }
+  class lg0 blue
+  class lg1 purple
+  class lg2 bugPath
+  class lg3 repeats
+  s0: Old session#59; an input is in flight to it
+  s1: Seed committed#59; gate holds it
+  s2: Restart holds the transition and fence
+  s3: Exact close confirmed#59; retire and settle
+  s4: Old execution retired#59; exclusion still held
+  s5: Exclusion released#59; reply pending
+  s6: Seed waits for the owner
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s1 --> s2: Terminate takes transition and fence
+  s1 --> s1: Accept an input into the owner queue
+  s2 --> s3: Close only the captured pane
+  s3 --> s4: Retire CAS and settle the old turn
+  s4 --> s5: Disconnect keeping selector, release, wake
+  s5 --> s6: Reply to the command
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 purple
+  class s6 repeats
