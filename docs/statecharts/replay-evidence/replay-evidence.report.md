@@ -1,7 +1,8 @@
 # Replay evidence authority
 
-기준 코드: `68cd533396df10378f8402320ed94eea6ddca7a2`와 이 변경의 S15a live proof 이동이다.
-`LocalSnapshot`/runtime root production 구현 이동은 다음 조각이며 이 변경에 포함하지 않는다.
+모델의 기준 코드는 `68cd533396df10378f8402320ed94eea6ddca7a2`다. S15a는 live proof를,
+S15b는 `0e0d2586b06f9548d79fe796a29236099e24aca7` 위에서 recovery/root 값을 이동한다.
+TLA와 cfg는 바꾸지 않았으며 아래의 current/proposed 전이를 각 실제 소유자에 대응시킨다.
 
 ## 상태와 권한
 
@@ -50,11 +51,29 @@ Rootless cfg는 root 없음/current owner/missing legacy hold nonce/proof 없음
 - Reuse: `src/db/replay_disposition/write.rs`의 evidence.names와 `write/settle.rs`의 owner CAS가
   다른 attempt를 거절한다. 같은 receipt의 새 nonce에 old terminal/no-effect를 쓰는 PG도 있다.
 - TakeTwice: `LiveAttempt`의 Mutex<Option<ExactAttempt>>::take가 두 번째 결정을 거절한다.
-- WrongRoot/OwnProcess: 기존 `recovery.rs`의 root covers와 DB `write/hold_notice.rs`의
-  process incarnation 판정이 신규 settlement를 거절한다. 이 production 코드는 그대로다.
+- WrongRoot/OwnProcess: service의 `LocalSnapshot::load`가 adapter root의 `covers`를
+  호출한 뒤에만 snapshot key를 만든다. DB `write/hold_notice.rs`는 신규 settlement 안에서
+  snapshot의 S24 incarnation을 읽어 현재 owner를 거절한다. 기존 withheld 복원에는 적용하지 않는다.
 - RootlessNeedsProof: `recovery_engine/restore_inflight/replay_decision.rs`의 PG-only 호출은
   proof=None이고 DB `write/hold_notice.rs`는 기존 withheld를 복원한다. 잘못 추가한
   proof 요구는 해당 경로의 진행성을 깨므로 현재 버그로 보고하지 않는다.
+
+## S15b 코드 대응
+
+| 모델 변수·전이 | 실제 소유와 가드 |
+|---|---|
+| rootHeld / ObserveLocal | CLI `replay_recovery::Singleton::acquire`의 기존 open/flock/PID/canonicalize. adapter `recovery::root::OwnedRuntimeRoot::covers`와 service loader의 guard |
+| PrivateRecoveryKey / IssueLocalProof | 원래 recovery loader가 `LoadedSnapshotKey`를 만들고 `recovery::snapshot::issuer::loaded`를 호출. 파일 관측은 계속 service에 있음 |
+| rootRetained / DropBootHandle | adapter root의 실제 `Arc<File>`과 `LocalSnapshot::_root`. boot/loader handle을 내려도 sealed snapshot이 같은 lock을 보유 |
+| understood / sameIdentity | snapshot의 원문 owned identity와 version/unknown/native metadata. DB의 기존 row-lock 안 identity/projection/turn nonce 비교 |
+| storedOwner / RecoverHold | snapshot이 보관한 같은 S24 UUID와 `disposition != "withheld"` 안의 current-owner 거절 |
+| RestoreWithheld | 동일 tx에서 기존 withheld notice read/backfill. proof=None·current owner·missing legacy hold nonce를 허용하고 실행 권한은 만들지 않음 |
+
+새 root lifetime PG는 loader handle drop과 global root 변경 뒤에도 원래 lock과 원문 capture가
+유지되는지 검사한다. 별도의 rootless/current-owner PG는 기존 notice의 missing hold nonce를
+복원하면서 event를 재발급하지 않는지 확인한다. rollback PG는 enqueue 실패와 receipt-reference
+실패를 모두 주입한다. root key의 private scope는 실제-source compiler probe로 검사하며,
+모델의 rootHeld는 기존 singleton acquire가 성립시킨 custody라는 경계 가정이다.
 
 ## 차트
 

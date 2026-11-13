@@ -458,3 +458,116 @@ fn p5_live_no_effect_handoff_survives_local_and_foreign_recovery_pg() {
         db.drop().await;
     });
 }
+#[tokio::test]
+async fn sealed_snapshot_retains_the_original_root_lock_after_loader_handle_drop_pg() {
+    let _env = crate::config::TestRuntimeRootGuard::new();
+    let root = runtime_store::agentdesk_root().unwrap();
+    std::fs::create_dir_all(root.join("runtime")).unwrap();
+    let loader = crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).unwrap();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let target = crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+    let mut saved = state(80);
+    saved.user_text = "  raw recovery input\n ".into();
+    let attempt = begin(&pool, &mut saved, &target, "previous-process").await;
+    inflight::save_inflight_state_create_new(&saved).unwrap();
+    let snapshot = LocalSnapshot::load(Some(&loader), &saved).unwrap();
+    assert_eq!(snapshot.state().user_text, saved.user_text);
+    assert_eq!(
+        snapshot.incarnation(),
+        crate::domain::process_incarnation::incarnation()
+    );
+    drop(loader);
+    assert!(
+        crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).is_err(),
+        "the sealed snapshot retains the original singleton lock"
+    );
+    let other = tempfile::tempdir().unwrap();
+    let _other = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        other.path(),
+    );
+    let capture = serde_json::json!({"raw":" original root capture ","unknown":{"kept":true}});
+    write::recover_hold_notice(
+        &pool,
+        attempt.receipt_id(),
+        &saved.provider,
+        &saved.channel_id.to_string(),
+        Some(&snapshot),
+        Some(&capture),
+        ROUTING,
+    )
+    .await
+    .unwrap();
+    let held: (String, String, String, serde_json::Value) = sqlx::query_as(
+        "SELECT replay_disposition,replay_episode_nonce,replay_owner_incarnation,replay_preserved FROM intake_outbox WHERE id=$1"
+    ).bind(attempt.receipt_id()).fetch_one(&pool).await.unwrap();
+    assert_eq!(held.0, "withheld");
+    assert_eq!(held.1, attempt.nonce());
+    assert_eq!(held.2, "previous-process");
+    assert_eq!(held.3["recovery_snapshot"], capture);
+    assert!(crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).is_err());
+    drop(snapshot);
+    assert!(
+        crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).is_ok(),
+        "dropping the last sealed snapshot releases its original root"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn existing_withheld_current_owner_restores_without_a_local_root_proof_pg() {
+    let _env = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let target = crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+    let mut saved = state(81);
+    let current = crate::domain::process_incarnation::incarnation();
+    let attempt = begin(&pool, &mut saved, &target, current).await;
+    let preserved = serde_json::json!({"legacy":{"raw":" untouched "}});
+    write::withhold(&pool, &attempt, "existing held request", &preserved)
+        .await
+        .unwrap();
+    assert!(LocalSnapshot::load(None, &saved).is_none());
+    let first = write::recover_hold_notice(
+        &pool,
+        attempt.receipt_id(),
+        &saved.provider,
+        &saved.channel_id.to_string(),
+        None,
+        None,
+        ROUTING,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE intake_outbox SET replay_preserved=replay_preserved #- '{stale_replay_notice,hold_nonce}' WHERE id=$1")
+        .bind(attempt.receipt_id()).execute(&pool).await.unwrap();
+    let restored = write::recover_hold_notice(
+        &pool,
+        attempt.receipt_id(),
+        &saved.provider,
+        &saved.channel_id.to_string(),
+        None,
+        None,
+        ROUTING,
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored.outbox_id, first.outbox_id);
+    assert_eq!(restored.dedupe_key, first.dedupe_key);
+    assert_eq!(
+        restored.hold_nonce, None,
+        "missing legacy notice nonce remains distinct from empty"
+    );
+    let held: (String, String, String, serde_json::Value, i64) = sqlx::query_as(
+        "SELECT replay_disposition,replay_episode_nonce,replay_owner_incarnation,replay_preserved,(SELECT count(*) FROM message_outbox) FROM intake_outbox WHERE id=$1"
+    ).bind(attempt.receipt_id()).fetch_one(&pool).await.unwrap();
+    assert_eq!(held.0, "withheld");
+    assert_eq!(held.1, attempt.nonce());
+    assert_eq!(held.2, current);
+    assert_eq!(held.3["legacy"], preserved["legacy"]);
+    assert_eq!(held.4, 1);
+    pool.close().await;
+    db.drop().await;
+}
