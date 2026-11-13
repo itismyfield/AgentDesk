@@ -365,6 +365,13 @@ replay-evidence/RootlessNeedsProof.cfg	ReplayEvidence	-	RestoreEventually
 replay-evidence/RootlessProposed.cfg	ReplayEvidence	-	-
 replay-evidence/TakeTwice.cfg	ReplayEvidence	OneDecision	-
 replay-evidence/WrongRoot.cfg	ReplayEvidence	RecoveryBoundRoot	-
+restart-handoff/After.cfg	RestartCustody	-	-
+restart-handoff/Before.cfg	RestartCustody	-	-
+restart-handoff/DiskRead.cfg	RestartCustody	BootMemo	-
+restart-handoff/EarlySample.cfg	RestartCustody	MetadataInLock,NoLostUpdate	-
+restart-handoff/NoCas.cfg	RestartCustody	SuccessorPreserved	-
+restart-handoff/NoFinal.cfg	RestartCustody	PersistedWins	-
+restart-handoff/NoLock.cfg	RestartCustody	MetadataInLock,NoLostUpdate	-
 routine-run/RoutineFailureEscalationBlindUnknown.cfg	RoutineFailureEscalation	NoBlindUnknownRepost,NoDuplicateDiscordMessage	-
 routine-run/RoutineFailureEscalationBypassIntake.cfg	RoutineFailureEscalation	OnlyExistingAcceptedBotIntake	-
 routine-run/RoutineFailureEscalationDropEventKey.cfg	RoutineFailureEscalation	AllEligibleStreaksOffered,AtMostOneRemediationPerIncident,AtMostOneTriggerPerStreak	-
@@ -565,10 +572,3 @@ turn-presence/TurnPresenceRetiredRestartBeforeLiveness.cfg	TurnPresence	-	NewInp
 turn-presence/TurnPresenceRetiredRestartFixed.cfg	TurnPresence	-	-
 turn-presence/TurnPresenceRetiredSweep.cfg	TurnPresence	RetiredOnlyQuietNotUnknown	NewInputEventuallyStarts
 turn-presence/TurnPresenceRetiredUnsafe.cfg	TurnPresence	NoForeignMarkerRemoval,NoLiveMarkerRemoval	-
-restart-handoff/Before.cfg	RestartCustody	-	-
-restart-handoff/After.cfg	RestartCustody	-	-
-restart-handoff/NoLock.cfg	RestartCustody	MetadataInLock,NoLostUpdate	-
-restart-handoff/EarlySample.cfg	RestartCustody	MetadataInLock,NoLostUpdate	-
-restart-handoff/DiskRead.cfg	RestartCustody	BootMemo	-
-restart-handoff/NoCas.cfg	RestartCustody	SuccessorPreserved	-
-restart-handoff/NoFinal.cfg	RestartCustody	PersistedWins	-
