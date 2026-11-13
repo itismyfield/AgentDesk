@@ -12,6 +12,7 @@ use crate::services::discord::queue_io::input_owner::admission::{
     Admission, AdmissionTicket, TurnBind, admit, exact_turn,
 };
 use crate::services::turn_orchestrator::{PendingQueueItem, v2_queue};
+use poise::serenity_prelude as serenity;
 
 #[test]
 fn restart_common_refuses_future_legacy_unplaced_and_foreign_canonical_rows_pg() {

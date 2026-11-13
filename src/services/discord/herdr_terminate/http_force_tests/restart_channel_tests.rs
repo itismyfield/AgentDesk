@@ -5,6 +5,7 @@ use crate::services::discord::commands::{
 use crate::services::discord::queue_io::cancel_backstop_test_support as wake_probe;
 use crate::services::discord::queue_io::input_owner::restart_gate;
 use crate::services::herdr_launch::clear_epoch;
+use poise::serenity_prelude as serenity;
 
 const SELECTOR: &str = "019ee441-173c-735c-9a24-812800000001";
 const WAIT: Duration = Duration::from_secs(10);
