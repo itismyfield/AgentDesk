@@ -873,6 +873,11 @@ fn write_dcserver_lock_pid(mut file: &fs::File) -> std::io::Result<()> {
 }
 
 pub fn handle_dcserver(token: Option<String>) {
+    let _test_lease =
+        crate::config::test_instance::lifecycle::admit_dcserver().unwrap_or_else(|error| {
+            eprintln!("  ✗ {error}");
+            std::process::exit(1)
+        });
     #[cfg(windows)]
     if let Err(error) = crate::services::platform::windows_job::own_runtime_children() {
         eprintln!("Failed to establish Windows runtime process ownership: {error}");
@@ -911,7 +916,9 @@ pub fn handle_dcserver(token: Option<String>) {
     let replay_restart = None;
 
     // Also kill any stale processes (e.g. orphaned without lock)
-    kill_existing_dcserver_processes();
+    crate::config::test_instance::lifecycle::legacy_cleanup_if_unscoped(
+        kill_existing_dcserver_processes,
+    );
 
     let runtime_root = crate::config::runtime_root();
     if let Some(root) = runtime_root.as_ref() {

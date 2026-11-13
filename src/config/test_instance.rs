@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 pub(crate) mod environment;
+pub(crate) mod lifecycle;
 
 const MARKER: &str = "AGENTDESK_TEST_MANIFEST";
 static INSTANCE: OnceLock<Result<TestInstance, String>> = OnceLock::new();

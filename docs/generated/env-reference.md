@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 95
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 96
 - Platform and third-party variables: 40
 
 ## AgentDesk variables
@@ -106,6 +106,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_STALE_REPLAY_CHANNELS` | `src/services/discord/replay_policy/activation.rs` |  |
 | `AGENTDESK_STALE_REPLAY_V1` | `src/services/discord/replay_policy/activation.rs` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
+| `AGENTDESK_TEST_LEASE` | `src/config/test_instance/lifecycle.rs` |  |
 | `AGENTDESK_TEST_MANIFEST` | `src/config/test_instance.rs` |  |
 | `AGENTDESK_TEST_PG_RECLAIM_DENY_SERVERS` | `src/db/postgres/test_db_reclaim.rs` |  |
 | `AGENTDESK_TEST_PG_RECLAIM_LOG` | `src/db/postgres/test_db_reclaim.rs` |  |

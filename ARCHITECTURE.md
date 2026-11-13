@@ -144,7 +144,9 @@ src/
 │   │   ├── api_boundary_tests.rs
 │   │   ├── environment.rs
 │   │   ├── environment_tests.rs
-│   │   └── host_scope_tests.rs
+│   │   ├── host_scope_tests.rs
+│   │   ├── lifecycle.rs
+│   │   └── lifecycle_tests.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
 │   ├── cluster_role.rs
