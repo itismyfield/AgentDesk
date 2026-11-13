@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 96
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 97
 - Platform and third-party variables: 41
 
 ## AgentDesk variables
@@ -112,6 +112,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_TEST_PG_RECLAIM_LOG` | `src/db/postgres/test_db_reclaim.rs` |  |
 | `AGENTDESK_TEST_PG_RECLAIM_PAUSE_AT` | `src/db/postgres/test_db_reclaim.rs` | Test seam: a child process stops at this create stage until stdin yields a line. |
 | `AGENTDESK_TEST_PG_RECLAIM_SERVER` | `src/db/postgres/test_db_reclaim.rs` |  |
+| `AGENTDESK_TEST_RUN` | `src/config/test_instance/lifecycle.rs` |  |
 | `AGENTDESK_TEST_RUNTIME` | `src/config/runtime_root_guard.rs` |  |
 | `AGENTDESK_TOKEN` | `src/cli/run.rs` |  |
 | `AGENTDESK_WORKSPACE_ROOT` | `src/services/routines/migrated.rs` |  |
