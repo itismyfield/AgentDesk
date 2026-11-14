@@ -10,6 +10,7 @@ use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 use super::super::{bind_cancel_token_tmux_runtime, process_table, stop_active_turn_on};
 use super::*;
+use crate::domain::runtime_stop::InflightDisposition;
 use crate::services::claude_tui::host_input::InputRefusal;
 use crate::services::discord::InflightRestartMode;
 use crate::services::provider::cancel_token_cleanup::executor::{
@@ -569,7 +570,7 @@ fn runtime_cancel_reads_no_pane_of_another_host() {
             let stop = crate::services::discord::health::stop_provider_channel_runtime_with_policy;
             let policy = TmuxCleanupPolicy::PreserveSession;
             let result = stop(&registry, "claude", channel, "p6ao", policy).await;
-            let kept = crate::services::discord::health::InflightDisposition::PreservedByHostGuard;
+            let kept = InflightDisposition::PreservedByHostGuard;
             let legacy = matches!(host, Mark::Absent);
             assert_eq!(result.unwrap().inflight == kept, !legacy, "{host:?}");
             assert_eq!(token.cancelled.load(Ordering::SeqCst), legacy, "{host:?}");

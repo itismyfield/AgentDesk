@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 use futures::FutureExt;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+use crate::domain::runtime_stop::TOKEN_SUPERSEDED_PATH;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::{self as discord, SharedData, inflight};
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -331,7 +332,7 @@ fn a_superseded_stop_reports_the_owner_queue_waiting_depth() {
             next
         };
         let (result, _next) = tokio::join!(stop, race);
-        let superseded = crate::services::discord::health::TOKEN_SUPERSEDED_PATH;
+        let superseded = TOKEN_SUPERSEDED_PATH;
         assert_eq!(result.lifecycle_path, superseded);
         assert_eq!(
             result.queue_depth,

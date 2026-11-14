@@ -10,8 +10,6 @@ use serenity::ChannelId;
 
 use super::SharedData;
 use super::bot_role::UtilityBotRole;
-#[cfg(test)]
-pub(crate) use crate::domain::runtime_stop::{InflightDisposition, TOKEN_SUPERSEDED_PATH};
 use crate::services::provider::ProviderKind;
 
 // #3038 Phase A: `health.rs` is the module root — the `HealthRegistry` core
