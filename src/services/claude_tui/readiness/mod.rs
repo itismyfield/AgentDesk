@@ -240,6 +240,75 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
         && clear::current(&proof.source) == Some(proof.clear.clone()))
     .then_some(proof)
 }
+/// A wait's first look at its source, kept to tell at the budget's end whether anything moved.
+pub(crate) struct Watched {
+    session: String,
+    path: Option<PathBuf>,
+    seen: Option<(Source, Option<Stamp>)>,
+}
+pub(crate) fn watched(session: &str, path: Option<&Path>) -> Watched {
+    let seen = Source::current(session, path).map(|source| {
+        let stamp = Stamp::read(&source.path);
+        (source, stamp)
+    });
+    Watched {
+        session: session.into(),
+        path: path.map(Path::to_path_buf),
+        seen,
+    }
+}
+impl Watched {
+    /// The budget ended on the same idle bytes with no turn, control or fence open and still no
+    /// proof: only new activity in the pane can make this source ready, so no later look helps.
+    pub(crate) fn unproven(&self) -> bool {
+        let Some((source, stamp)) = &self.seen else {
+            return false;
+        };
+        let path = self.path.as_deref();
+        if observe(&self.session, path).is_some()
+            || Source::current(&self.session, path).as_ref() != Some(source)
+            || clear::current(source).is_none()
+        {
+            return false;
+        }
+        let tail = evidence::read(&source.path);
+        if tail.as_ref().map(|tail| &tail.stamp) != stamp.as_ref()
+            || Stamp::read(&source.path) != *stamp
+        {
+            return false;
+        }
+        let running = tail.as_ref().is_some_and(|tail| {
+            tail.native
+                .as_deref()
+                .is_some_and(|native| native != source.native)
+                || crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
+                    &source.path,
+                ) != crate::services::tui_turn_state::TuiTurnState::Idle
+        });
+        if running {
+            return false;
+        }
+        let state = ledger();
+        let fenced = [source.nonce.clone(), None].into_iter().any(|nonce| {
+            state
+                .unread_continuations
+                .contains(&(source.path.clone(), nonce.clone()))
+                || stamp.as_ref().is_some_and(|stamp| {
+                    state.continuations.contains_key(&(
+                        source.path.clone(),
+                        stamp.file,
+                        nonce.clone(),
+                    ))
+                })
+        });
+        !fenced
+            && state.entries.get(source).is_some_and(|entry| {
+                entry.pending.is_none()
+                    && entry.compact_ticket.is_none()
+                    && entry.compact_done.is_none()
+            })
+    }
+}
 pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
     let current = observe(&proof.source.session, Some(&proof.source.path))?;
     if current.source != proof.source

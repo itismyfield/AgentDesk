@@ -531,6 +531,42 @@ fn fresh_payload_waits_for_session_start_and_running_idle_path_sends_no_key() {
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
 }
 
+// The warm follow-up's timed-out hold says whether a later look can clear it: an idle restored
+// source that proves nothing cannot, a turn still running can.
+#[cfg(unix)]
+#[test]
+fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
+    use super::super::guarded_outcome::SubmissionError;
+    use super::super::input::submission::tests::{ScriptedTmux, view};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    r.assistant("old answer");
+    r.terminal();
+    daemon_restart(&r.session);
+    let tmux = ScriptedTmux::new(&view("", false));
+    tmux.set_dead(false);
+    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(Some(Duration::ZERO)));
+    let unproven = || match r.send() {
+        Err(SubmissionError::Held(hold)) => hold.unproven,
+        other => panic!("the wait must hold: {other:?}"),
+    };
+    assert!(unproven(), "nothing in flight can supply the evidence");
+    let seen = watched(&r.session, None);
+    r.append(json!({"type":"ai-title"}));
+    assert!(!seen.unproven(), "a source that moved waits");
+    r.assistant("still Running");
+    assert!(!unproven(), "a running turn ends by itself");
+    assert!(tmux.sends().is_empty());
+    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
+}
+
+/// A daemon restart: the ledger forgets `session`, while its files, markers and launch remain.
+pub(crate) fn daemon_restart(session: &str) {
+    let mut state = ledger();
+    state.entries.retain(|source, _| source.session != session);
+    state.starts.retain(|(started, _), _| started != session);
+}
+
 #[cfg(unix)]
 pub(crate) fn fresh_fixture(session: &str) {
     if let Some(path) = super::super::guarded_outcome::fresh_source_for_tests() {

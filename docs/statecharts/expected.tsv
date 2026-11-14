@@ -291,6 +291,12 @@ input-single-path/InputPathReadyResumeMetaAfter.cfg	InputPath	-	-
 input-single-path/InputPathReadyResumeMetaBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyResumedIdleEventuallyReceives
 input-single-path/InputPathReadyResumeNoQuiet.cfg	InputPath	ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyResumePersonAfter.cfg	InputPath	-	-
+input-single-path/InputPathReadyResumeRestartAfter.cfg	InputPath	-	-
+input-single-path/InputPathReadyResumeRestartAnyTimeout.cfg	InputPath	ReadyExpiryOnlyUnproven	-
+input-single-path/InputPathReadyResumeRestartBefore.cfg	InputPath	-	ReadyPendingEventuallySettles
+input-single-path/InputPathReadyResumeRestartCut.cfg	InputPath	-	ReadyPendingEventuallySettles
+input-single-path/InputPathReadyResumeRestartGap.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyResumedIdleEventuallyReceives
+input-single-path/InputPathReadyResumeRestartPerson.cfg	InputPath	-	-
 input-single-path/InputPathReadySuppressedCompact.cfg	InputPath	-	-
 input-single-path/InputPathReadySuppressedStop.cfg	InputPath	-	-
 input-single-path/InputPathReadyUnread.cfg	InputPath	-	-
