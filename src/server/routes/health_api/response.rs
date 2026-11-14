@@ -275,7 +275,11 @@ async fn assemble(
         json["intake_routing"]["input_fallback"] =
             crate::services::cluster::input_fallback_config::status_json();
 
-        let http_status = if status.is_http_ready() {
+        let instance_verified = attach_test_instance(
+            &mut json,
+            crate::config::test_instance::lifecycle::health_witness(),
+        );
+        let http_status = if status.is_http_ready() && instance_verified {
             StatusCode::OK
         } else {
             StatusCode::SERVICE_UNAVAILABLE
@@ -375,12 +379,46 @@ async fn assemble(
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
         json["intake_routing"]["input_fallback"] =
             crate::services::cluster::input_fallback_config::status_json();
+        let instance_verified = attach_test_instance(
+            &mut json,
+            crate::config::test_instance::lifecycle::health_witness(),
+        );
+        let status = if instance_verified {
+            status
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
         let json = if detailed {
             with_latest_startup_doctor(json, true)
         } else {
             with_latest_startup_doctor(public_health_json(json), false)
         };
         (status, Json(json)).into_response()
+    }
+}
+
+fn attach_test_instance(
+    json: &mut serde_json::Value,
+    witness: Result<Option<serde_json::Value>, String>,
+) -> bool {
+    if let Some(object) = json.as_object_mut() {
+        object.remove("test_instance");
+    }
+    match witness {
+        Ok(Some(witness)) => {
+            json["test_instance"] = witness;
+            true
+        }
+        Ok(None) => true,
+        Err(_) => {
+            json["status"] = serde_json::json!("unhealthy");
+            json["ok"] = serde_json::json!(false);
+            json["fully_recovered"] = serde_json::json!(false);
+            if let Some(reasons) = json["degraded_reasons"].as_array_mut() {
+                reasons.push(serde_json::json!("test_instance_unverified"));
+            }
+            false
+        }
     }
 }
 
@@ -397,3 +435,7 @@ mod kv_gate_tests;
 #[cfg(test)]
 #[path = "boot_incarnation_tests.rs"]
 mod boot_incarnation_tests;
+
+#[cfg(test)]
+#[path = "test_instance_response_tests.rs"]
+mod test_instance_response_tests;

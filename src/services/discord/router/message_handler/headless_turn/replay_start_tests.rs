@@ -1380,3 +1380,5 @@ fn fresh_headless_start_keeps_the_session_when_its_boundary_does_not_land_pg() {
 
 #[path = "replay_start_origin_tests.rs"]
 mod origin_tests;
+
+mod routine_policy_tests;

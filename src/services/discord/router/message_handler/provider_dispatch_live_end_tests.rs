@@ -368,7 +368,10 @@ fn claude_live_turn<R>(
     );
     super::append(
         &path,
-        &[json!({"type": "system", "subtype": "init", "sessionId": session})],
+        &[
+            json!({"type": "system", "subtype": "init", "sessionId": session}),
+            json!({"type": "system", "subtype": "turn_duration", "sessionId": session}),
+        ],
     );
     let url = fx.db.as_ref().unwrap().database_url.clone();
     let mut seen = None;

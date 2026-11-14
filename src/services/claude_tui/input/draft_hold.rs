@@ -109,13 +109,14 @@ pub(super) fn clear_prompt_draft(session_name: &str) {
 
 /// One Enter under the composer lock, only while the same dialog shows and the pane takes
 /// automatic writes; a pane protecting a person's draft gets no key.
-pub(super) fn dismiss_startup_dialog(
+pub(in crate::services::claude_tui) fn dismiss_startup_dialog(
     session_name: &str,
     readiness: PromptReadinessKind,
     dialog: &ClaudeStartupDialog,
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     with_composer_mutation_lock(session_name, || {
+        super::check_prompt_cancel(cancel_token)?;
         if admit_automatic_write(session_name, readiness).is_err() {
             return Ok(());
         }

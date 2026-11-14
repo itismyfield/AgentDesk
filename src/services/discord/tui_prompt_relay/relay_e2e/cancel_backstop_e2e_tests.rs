@@ -1184,6 +1184,7 @@ async fn cancelled_anchor_recovery_types_q_once_behind_a_person_draft_pg() {
             relay_last_offset: None,
         },
     );
+    crate::services::claude_tui::readiness::tests::pre_source(&tmux, &transcript);
     {
         let mut core = h.shared.core.lock().await;
         core.sessions.get_mut(&h.channel_id).unwrap().channel_name = Some(name.to_string());

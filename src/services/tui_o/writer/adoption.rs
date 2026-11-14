@@ -13,7 +13,7 @@ use super::WriterAlarm;
 use super::binding::{BindingEvent, BindingEvents, BindingRecord, BindingTarget};
 use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
 use crate::services::tui_o::shadow::identity::{RecordFact, classify};
-use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
+use crate::services::tui_o::shadow::{ShadowProvider, SourceId, UnitKind};
 use crate::services::tui_o::store::InitSource;
 
 /// As long as unmapped hooks are refused after the receiver starts, so a live Legacy pass is seen.
@@ -360,7 +360,11 @@ impl Turns {
         let facts = facts.unwrap_or_default();
         if facts.iter().any(|fact| matches!(fact, RecordFact::Idle(_))) {
             (self.closed_at, self.open) = (end, false);
-        } else if !facts.is_empty() || record.is_none() {
+        } else if facts
+            .iter()
+            .any(|fact| !matches!(fact, RecordFact::Unit(_, UnitKind::Recap, _)))
+            || record.is_none()
+        {
             // An unreadable record after the last turn end may hold output.
             self.open = true;
         }

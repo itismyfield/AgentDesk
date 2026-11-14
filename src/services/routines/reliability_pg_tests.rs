@@ -351,7 +351,9 @@ async fn consecutive_failure_alert_fires_once_per_streak_pg() {
     .await
     .unwrap();
     assert!(
-        content.contains(&routine.id) && content.contains("provider down"),
+        content.contains(&routine.name)
+            && content.contains("/routines")
+            && !content.contains("provider down"),
         "{content}"
     );
 
@@ -594,3 +596,5 @@ async fn latest_runs_return_each_routines_newest_run_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+mod run_diagnostics_tests;

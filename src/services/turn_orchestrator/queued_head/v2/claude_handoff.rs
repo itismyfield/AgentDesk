@@ -2,6 +2,8 @@
 use super::*;
 
 use super::ClaudeHandoffJournal as Journal;
+#[cfg(unix)]
+pub(crate) const MAX_START_FAILURES: u32 = 5;
 impl Owner {
     pub(crate) fn handoff(&self) -> Option<Journal> {
         self.snapshot.unfinished_handoff.clone()
@@ -38,6 +40,7 @@ impl Owner {
             ended: false,
             failures: 0,
             notice_acked: false,
+            retry_after_ms: 0,
         };
         let mut next = self.snapshot.clone();
         next.unfinished_handoff = Some(journal.clone());
@@ -112,7 +115,8 @@ impl Owner {
         }
         Ok(())
     }
-    /// A failed wrapper before reserve keeps its original queued; only its old row is retired.
+    /// Persist the retry budget before releasing a failed wrapper; exhaustion uses start_failed.
+    #[cfg(unix)]
     pub(crate) fn handoff_start_failed(
         &mut self,
         front: &Front,
@@ -126,6 +130,19 @@ impl Owner {
         {
             return Ok(false);
         }
+        let failures = self
+            .handoff()
+            .expect("checked journal")
+            .failures
+            .saturating_add(1);
+        if failures >= MAX_START_FAILURES {
+            return Ok(false);
+        }
+        let mut next = self.snapshot.clone();
+        let journal = next.unfinished_handoff.as_mut().expect("checked journal");
+        journal.failures = failures;
+        journal.retry_after_ms = origin::now_ms().saturating_add(1_000u64 << failures.min(5));
+        self.commit(next)?;
         self.revoke_front();
         self.held = Some(front.1.message_id);
         self.starts.closing = pin;
@@ -219,6 +236,123 @@ mod tests {
             first.id
         );
         drop(root_guard);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn ended_handoff_launch_failure_is_bounded_and_retained_once() {
+        let (_root, dir, mut owner, front) = queued();
+        let journal = owner
+            .begin_handoff(&front, "owned".into(), "key".into())
+            .unwrap();
+        owner.handoff_ended(&journal.id).unwrap();
+        let mut following = front.1.clone();
+        following.message_id += 1;
+        following.source_message_ids = vec![following.message_id];
+        following.author_id += 1;
+        owner.enqueue_fixture(&following).unwrap();
+        let mut tries = 0;
+        for _ in 0..6 {
+            let front = owner.front().unwrap();
+            owner.grant_front(&front).unwrap();
+            owner.claim_turn(front.1.message_id, &front).unwrap();
+            let number = owner.claim_number();
+            tries += 1;
+            let retained = if owner.handoff_start_failed(&front, number, None).unwrap() {
+                false
+            } else {
+                owner
+                    .start_failed(
+                        &front,
+                        number,
+                        std::slice::from_ref(&front.1),
+                        None,
+                        StartFailureKind::Opaque,
+                        "launch auth_overlay: forced failure",
+                    )
+                    .unwrap()
+                    == Some(true)
+            };
+            if retained {
+                assert_eq!(
+                    owner
+                        .start_failed(
+                            &front,
+                            number,
+                            std::slice::from_ref(&front.1),
+                            None,
+                            StartFailureKind::Opaque,
+                            "late duplicate"
+                        )
+                        .unwrap(),
+                    None
+                );
+                break;
+            }
+            drop(owner);
+            owner = Owner::adopt(dir.path().join("queue.json"), "handoff".into()).unwrap();
+        }
+        eprintln!(
+            "launch attempts={tries} journal_failures={:?} retained={}",
+            owner.handoff().map(|j| j.failures),
+            owner.snapshot.retained_inputs.len()
+        );
+        assert!(tries <= 5, "ended journal must not retry indefinitely");
+        assert!(owner.handoff().is_none());
+        assert_eq!(owner.snapshot.retained_inputs.len(), 1);
+        assert_eq!(
+            owner.snapshot.retained_inputs[0].input.original.message_id,
+            front.1.message_id
+        );
+        assert_eq!(owner.front().unwrap().1.message_id, following.message_id);
+        assert_eq!(owner.snapshot.items.len(), 1);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn exhausted_handoff_retention_publish_failure_preserves_original_until_one_commit() {
+        let (_root, dir, mut owner, front) = queued();
+        let journal = owner
+            .begin_handoff(&front, "owned".into(), "key".into())
+            .unwrap();
+        owner.handoff_ended(&journal.id).unwrap();
+        for _ in 0..4 {
+            owner.handoff_failed(&journal.id).unwrap();
+        }
+        owner.claim_turn(front.1.message_id, &front).unwrap();
+        let number = owner.claim_number();
+        assert!(!owner.handoff_start_failed(&front, number, None).unwrap());
+        let before = owner.json().unwrap();
+        owner.fault = Fault::Before;
+        assert!(
+            owner
+                .start_failed(
+                    &front,
+                    number,
+                    std::slice::from_ref(&front.1),
+                    None,
+                    StartFailureKind::Opaque,
+                    "failed launch"
+                )
+                .is_err()
+        );
+        assert_eq!(owner.json().unwrap(), before);
+        owner.fault = Fault::None;
+        assert_eq!(
+            owner
+                .start_failed(
+                    &front,
+                    number,
+                    std::slice::from_ref(&front.1),
+                    None,
+                    StartFailureKind::Opaque,
+                    "failed launch"
+                )
+                .unwrap(),
+            Some(true)
+        );
+        let restored = Owner::adopt(dir.path().join("queue.json"), "handoff".into()).unwrap();
+        assert_eq!(restored.snapshot.retained_inputs.len(), 1);
+        assert!(restored.snapshot.items.is_empty());
+        assert!(restored.handoff().is_none());
     }
     #[test]
     fn bootstrap_crash_retains_the_original_once_without_an_unfinished_journal() {

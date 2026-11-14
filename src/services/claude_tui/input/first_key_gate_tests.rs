@@ -81,6 +81,7 @@ fn a_fresh_writer_sends_no_key_once_a_stop_took_its_gate() {
                 relay_last_offset: None,
             },
         );
+        crate::services::claude_tui::readiness::tests::pre_source(&name, &root.join("transcript"));
         let token = Arc::new(CancelToken::new());
         let sink = token.native_stop.receipt_sink();
         sink.arm_first_key();

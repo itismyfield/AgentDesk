@@ -51,6 +51,7 @@ CHECK_MODULES = (
     "audit_maintainability.checks.source_of_truth_alias",
     "audit_maintainability.checks.module_layers",
     "audit_maintainability.checks.low_level_accessors",
+    "audit_maintainability.checks.duplicate_conditions",
 )
 
 DEFAULT_ALLOWLIST_FILE = REPO_ROOT / "scripts" / "audit_allowlist.toml"

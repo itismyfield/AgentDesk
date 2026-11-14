@@ -148,6 +148,22 @@ pub(super) fn clear_pending(fx: &Fixture, cleared: &str) -> std::path::PathBuf {
     crate::services::tmux_common::with_tmux_source_authority(fx.logical(), |_| {
         binding_events::record_pending(&proposal).unwrap();
     });
+    // The synthetic pending record also supplies the readiness effect of its current clear hook.
+    use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker};
+    let SpawnNonceMarker::Known(nonce) = binding_context::observe_spawn_nonce_marker(fx.logical())
+    else {
+        panic!("the launched execution has a current nonce");
+    };
+    let context = binding_context::execution_context("claude", &nonce).unwrap();
+    crate::services::claude_tui::readiness::note_hook(
+        "claude",
+        &crate::services::claude_tui::hook_server::HookEventKind::SessionStart,
+        fx.logical(),
+        &payload,
+        Some(&context),
+        Some(chrono::Utc::now()),
+        false,
+    );
     path
 }
 

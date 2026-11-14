@@ -77,6 +77,11 @@ fn claude(record: &Value, identity_version: u32) -> Vec<RecordFact> {
             .chain(claude_blocks(record, identity_version))
             .collect(),
         Some("user") => claude_user(record, identity_version),
+        Some("system")
+            if identity_version >= 8 && str_at(record, "subtype") == Some("away_summary") =>
+        {
+            super::recap::classify(record).into_iter().collect()
+        }
         _ => Vec::new(),
     }
 }

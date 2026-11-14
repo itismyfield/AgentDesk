@@ -269,6 +269,9 @@ impl IntakeRig {
                 relay_last_offset: None,
             },
         );
+        if !codex {
+            crate::services::claude_tui::readiness::tests::pre_source(&name, &transcript);
+        }
         discord::host_defer_gate::tests::map_channel(&shared, channel, &label).await;
         {
             let mut core = shared.core.lock().await;

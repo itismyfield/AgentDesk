@@ -748,41 +748,40 @@ fn hard_probe_failure_preserves_dead_looking_session() {
 
 #[test]
 fn formats_ssh_direct_prompt_notification() {
-    let output = format_ssh_direct_prompt_notification("claude", "AgentDesk-claude-a", "hi");
-
-    assert_eq!(output, "-# ⌨️ hi");
+    for prompt in [
+        "hi",
+        "first\nsecond",
+        "_underscore_ (parentheses) **bold**",
+        "<pasted_content id=\"42\">\nraw *text*\n</pasted_content>",
+        "@everyone @here <@123> <@&456>",
+        "",
+    ] {
+        let output = format_ssh_direct_prompt_notification("claude", "AgentDesk-claude-a", prompt);
+        assert_eq!(
+            output,
+            format!("-# ⌨️ tui direct input\n```\n{prompt}\n```")
+        );
+    }
 }
 
 #[test]
 fn formats_ssh_direct_prompt_notification_with_truncation() {
-    for (raw, escaped, fits) in [
-        ("x", "x", 1994),
-        ("한", "한", 1994),
-        ("😀", "😀", 997),
-        ("*", r"\*", 997),
-        ("@", "@\u{200b}", 997),
-        ("\\", r"\\", 997),
-        ("\n", "\n", 1994),
-    ] {
+    let header = "-# ⌨️ tui direct input\n```\n";
+    for raw in ["x", "한", "😀", "*", "@", "\\", "\n"] {
+        let fits = (2000 - header.encode_utf16().count() - 4) / raw.encode_utf16().count();
         let exact = format_ssh_direct_prompt_notification("codex", "s", &raw.repeat(fits));
-        assert_eq!(exact, format!("-# ⌨️ {}", escaped.repeat(fits)));
+        assert_eq!(exact, format!("{header}{}\n```", raw.repeat(fits)));
         assert!(exact.encode_utf16().count() <= 2000);
 
         let output = format_ssh_direct_prompt_notification("codex", "s", &raw.repeat(fits + 1));
-        let (shown, suffix) = output.rsplit_once("… (이하 ").expect("overflow marker");
-        let omission_prefix = if raw == "\n" { "-# " } else { "" };
-        let shown = shown.strip_suffix(omission_prefix).unwrap();
+        let (shown, suffix) = output
+            .rsplit_once("\n```\n-# … (이하 ")
+            .expect("overflow marker outside fence");
         let omitted: usize = suffix.strip_suffix("자)").unwrap().parse().unwrap();
         assert!(omitted > 0 && omitted <= fits + 1);
-        assert_eq!(
-            shown,
-            format!("-# ⌨️ {}", escaped.repeat(fits + 1 - omitted))
-        );
+        assert_eq!(shown, format!("{header}{}", raw.repeat(fits + 1 - omitted)));
         assert!(output.encode_utf16().count() <= 2000, "{raw:?}");
-        let one_more = format!(
-            "{shown}{escaped}{omission_prefix}… (이하 {}자)",
-            omitted - 1
-        );
+        let one_more = format!("{shown}{raw}\n```\n-# … (이하 {}자)", omitted - 1);
         assert!(
             one_more.encode_utf16().count() > 2000,
             "maximal prefix: {raw:?}"
@@ -797,9 +796,9 @@ fn formats_ssh_direct_prompt_notification_preserves_safe_multiline_text() {
     assert_eq!(
         output,
         concat!(
-            "-# ⌨️   \\*\\*bold\\*\\* @\u{200b}everyone ‹@\u{200b}123456789012345678›\n",
-            "\n-# \\# heading\n-# › quote\n-# \\[link\\]\\(https://x\\.y\\)\n",
-            "-# \\`\\`\\` @\u{200b}here\n-# \\- item\n-# 1\\. item\n-# \\\\\\_\\~\\|\\|\n"
+            "-# ⌨️ tui direct input\n```\n",
+            "  **bold** @everyone <@123456789012345678>\n\n# heading\n> quote\n",
+            "[link](https://x.y)\n\n```\n\\`\\`\\`\n```\n @here\n- item\n1. item\n\\_~||\n\n```"
         )
     );
     assert!(!super::super::session_notice::is_inline(&output));
@@ -813,8 +812,10 @@ fn formats_ssh_direct_prompt_notification_preserves_blank_lines() {
     for separator in ["", " \t ", "\u{3000}"] {
         let prompt = format!("first paragraph\n{separator}\nsecond paragraph\n{separator}");
         let output = format_ssh_direct_prompt_notification("claude", "s", &prompt);
-        assert_eq!(output, "-# ⌨️ first paragraph\n\n-# second paragraph\n");
-        assert!(output.lines().all(|line| line.trim() != "-#"));
+        assert_eq!(
+            output,
+            format!("-# ⌨️ tui direct input\n```\n{prompt}\n```")
+        );
     }
 }
 
@@ -827,67 +828,238 @@ fn formats_ssh_direct_prompt_notification_preserves_url_tokens() {
     let output = format_ssh_direct_prompt_notification("claude", "s", &prompt);
     assert_eq!(
         output,
-        format!(
-            "-# ⌨️ {url}\n-# 1\\. \\*\\*bold\\*\\*\thttp://x.y/a_(b)?q=1+2#anchor! @\u{200b}here\n-# https://u@\u{200b}x.y/‹tag› https://x.y/a*b\\c https://x.y/end.\n-# \\*\\*after\\*\\* foohttps://x\\.y"
-        )
+        format!("-# ⌨️ tui direct input\n```\n{prompt}\n```")
     );
 }
 
 #[test]
 fn formats_ssh_direct_prompt_notification_clamps_blank_lines_and_urls() {
     let url = "https://github.com/itismyfield/AgentDesk/pull/7550";
-    for (padding, tail, shown_tail, omitted) in [
+    for (tail, shown_tail, omitted) in [
         (
-            1973,
-            format!("\n \t\n{}", "끝".repeat(30)),
-            "\n\n-# 끝끝끝끝끝끝",
-            24,
+            format!("\n \t\n{}", "끝".repeat(50)),
+            format!("\n \t\n{}", "끝".repeat(11)),
+            39,
         ),
-        (1980, format!("\n \t\n{}", "끝".repeat(30)), "\n-# ", 31),
-        (1960, format!(" {url}"), " https://github.com/itis", 27),
-        (
-            1948,
-            format!("\n\n{url}"),
-            "\n\n-# https://github.com/itismyfield/",
-            19,
-        ),
+        (format!(" {url}"), " https://github".to_string(), 36),
+        (format!("\n\n{url}"), "\n\nhttps://githu".to_string(), 37),
     ] {
-        let prompt = format!("{}{tail}", "한".repeat(padding));
+        let prompt = format!("{}{tail}", "한".repeat(1940));
         let output = format_ssh_direct_prompt_notification("codex", "s", &prompt);
         assert_eq!(
             output,
             format!(
-                "-# ⌨️ {}{shown_tail}… (이하 {omitted}자)",
-                "한".repeat(padding)
+                "-# ⌨️ tui direct input\n```\n{}{shown_tail}\n```\n-# … (이하 {omitted}자)",
+                "한".repeat(1940)
             )
         );
-        assert!(output.encode_utf16().count() <= 2000);
+        assert_eq!(output.encode_utf16().count(), 2000);
+    }
+}
+
+fn assert_discord_literal_match_ranges(prompt: &str, output: &str) {
+    let matcher = regex::Regex::new(r"(?s)```(?:[a-zA-Z0-9_+-]+\n)?\n*([^\n].*?)\n*```").unwrap();
+    let ranges: Vec<_> = matcher
+        .captures_iter(output)
+        .map(|capture| {
+            let full = capture.get(0).unwrap();
+            let body = capture.get(1).unwrap();
+            (full.range(), body.range())
+        })
+        .collect();
+    let omitted = output
+        .rsplit_once("\n-# … (이하 ")
+        .map_or(0, |(_, suffix)| {
+            suffix
+                .strip_suffix("자)")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+        });
+    let shown = prompt.chars().count() - omitted;
+    let end = prompt
+        .char_indices()
+        .nth(shown)
+        .map_or(prompt.len(), |(index, _)| index);
+    let utf16: Vec<_> = ranges
+        .iter()
+        .map(|(full, body)| {
+            (
+                output[..full.start].encode_utf16().count()
+                    ..output[..full.end].encode_utf16().count(),
+                output[..body.start].encode_utf16().count()
+                    ..output[..body.end].encode_utf16().count(),
+            )
+        })
+        .collect();
+    let sample: String = prompt.chars().take(80).collect();
+    println!(
+        "MATCHER chars={} prefix={sample:?} shown={shown} omitted={omitted} bytes={ranges:?} utf16={utf16:?}",
+        prompt.chars().count()
+    );
+    let mut cursor = "-# ⌨️ tui direct input\n".len();
+    let mut check = |source: &str, escaped: bool| {
+        if source.is_empty() {
+            return;
+        }
+        let displayed = if escaped {
+            "\\`".repeat(source.len())
+        } else {
+            source.to_string()
+        };
+        let start = cursor
+            + output[cursor..]
+                .find(&displayed)
+                .expect("literal source prefix survives");
+        let stop = start + displayed.len();
+        if escaped || source.chars().all(|ch| ch == '\n') {
+            assert!(
+                ranges
+                    .iter()
+                    .all(|(full, _)| stop <= full.start || start >= full.end),
+                "plain literal run/newline was swallowed: {source:?} {ranges:?}"
+            );
+        } else {
+            assert!(
+                ranges
+                    .iter()
+                    .any(|(full, _)| full.start <= start && stop <= full.end),
+                "whole literal piece must be in one match"
+            );
+            for (offset, ch) in displayed.char_indices().filter(|(_, ch)| *ch != '\n') {
+                assert!(
+                    ranges.iter().any(|(_, body)| body.start <= start + offset
+                        && start + offset + ch.len_utf8() <= body.end),
+                    "source body escaped code block: {source:?} {ranges:?}"
+                );
+            }
+        }
+        cursor = stop;
+    };
+    let runs = regex::Regex::new(r"`{3,}").unwrap();
+    let mut source = 0;
+    for run in runs.find_iter(prompt) {
+        if source >= end {
+            break;
+        }
+        check(&prompt[source..run.start().min(end)], false);
+        if run.start() < end {
+            check(&prompt[run.start()..run.end().min(end)], true);
+        }
+        source = run.end().min(end);
+    }
+    if source < end {
+        check(&prompt[source..end], false);
+    }
+    let outside = regex::Regex::new(r"^(?:\\`|\n)*$").unwrap();
+    let marker = if omitted > 0 {
+        output.rfind("\n-# … (이하 ").unwrap()
+    } else {
+        output.len()
+    };
+    let mut position = "-# ⌨️ tui direct input\n".len();
+    for (full, _) in &ranges {
         assert!(
-            output
-                .lines()
-                .filter(|line| !line.is_empty())
-                .all(|line| line.starts_with("-# "))
+            outside.is_match(&output[position..full.start]),
+            "nonliteral text outside matcher ranges"
+        );
+        position = full.end;
+    }
+    assert!(
+        outside.is_match(&output[position..marker]),
+        "nonliteral tail outside matcher ranges"
+    );
+    for (start, _) in output.match_indices("```") {
+        assert!(
+            ranges
+                .iter()
+                .any(|(full, _)| full.start <= start && start + 3 <= full.end),
+            "unmatched synthetic fence at {start}: {output:?}"
         );
     }
-    for (padding, tail, rendered) in [
-        (1939, format!("\n\n{url}"), format!("\n\n-# {url}")),
-        (1988, "\n \t\n한".to_string(), "\n\n-# 한".to_string()),
-    ] {
-        let output = format_ssh_direct_prompt_notification(
-            "codex",
-            "s",
-            &format!("{}{tail}", "한".repeat(padding)),
+    if omitted > 0 {
+        let start = output.rfind("\n-# … (이하 ").unwrap();
+        assert!(
+            ranges.iter().all(|(full, _)| full.end <= start),
+            "omission marker is inside a code block"
         );
-        assert_eq!(output, format!("-# ⌨️ {}{rendered}", "한".repeat(padding)));
-        assert_eq!(output.encode_utf16().count(), 2000);
     }
 }
 
 #[test]
 fn formats_ssh_direct_prompt_notification_escapes_code_fence() {
-    let output = format_ssh_direct_prompt_notification("codex", "tmux`name", "a ``` fence");
+    for prompt in [
+        "```**bold**",
+        "end ```",
+        "```\n\n```",
+        "a ``` fence **bold**",
+        "a ```` fence",
+        "a ```   ",
+        "```unclosed\nbody",
+    ] {
+        let output = format_ssh_direct_prompt_notification("codex", "s", prompt);
+        assert_discord_literal_match_ranges(prompt, &output);
+    }
 
-    assert_eq!(output, r"-# ⌨️ a \`\`\` fence");
+    for (prompt, content) in [
+        ("a ``` fence", "```\na \n```\n\\`\\`\\`\n```\n fence\n```"),
+        (
+            "```\n@everyone\n```\n````",
+            "\\`\\`\\`\n```\n\n@everyone\n\n```\n\\`\\`\\`\n\\`\\`\\`\\`",
+        ),
+        (
+            "a ``` fence **bold**",
+            "```\na \n```\n\\`\\`\\`\n```\n fence **bold**\n```",
+        ),
+        (
+            "a ```` fence",
+            "```\na \n```\n\\`\\`\\`\\`\n```\n fence\n```",
+        ),
+        ("a ```   ", "```\na \n```\n\\`\\`\\`\n```\n   \n```"),
+        ("```unclosed\nbody", "\\`\\`\\`\n```\nunclosed\nbody\n```"),
+        ("end ```", "```\nend \n```\n\\`\\`\\`"),
+        ("`single` ``double``", "```\n`single` ``double``\n```"),
+        ("```**bold**", "\\`\\`\\`\n```\n**bold**\n```"),
+        ("```\n\n```", "\\`\\`\\`\n\n\\`\\`\\`"),
+    ] {
+        let output = format_ssh_direct_prompt_notification("codex", "tmux`name", prompt);
+        assert_discord_literal_match_ranges(prompt, &output);
+        assert_eq!(output, format!("-# ⌨️ tui direct input\n{content}"));
+        assert_eq!(output.matches("```").count() % 2, 0);
+        for line in output.lines().filter(|line| line.contains("```")) {
+            assert_eq!(
+                line, "```",
+                "only standalone triple fences may reach Discord"
+            );
+        }
+    }
+    for prompt in ["`".repeat(5000), format!("a ```{}", "x".repeat(3000))] {
+        let output = format_ssh_direct_prompt_notification("codex", "s", &prompt);
+        assert_discord_literal_match_ranges(&prompt, &output);
+        let (blocks, suffix) = output.rsplit_once("\n-# … (이하 ").unwrap();
+        let omitted: usize = suffix.strip_suffix("자)").unwrap().parse().unwrap();
+        assert!(omitted > 0);
+        assert_eq!(blocks.matches("```").count() % 2, 0);
+        for line in blocks.lines().filter(|line| line.contains("```")) {
+            assert_eq!(line, "```");
+        }
+        assert!(output.encode_utf16().count() <= 2000);
+        if prompt.starts_with('`') {
+            let shown = blocks.lines().find(|line| line.starts_with("\\`")).unwrap();
+            assert_eq!(shown, "\\`".repeat(prompt.chars().count() - omitted));
+            assert_eq!(omitted, 4020);
+            assert!(!blocks.contains("```"));
+        } else {
+            assert_eq!(
+                blocks,
+                format!(
+                    "-# ⌨️ tui direct input\n```\na \n```\n\\`\\`\\`\n```\n{}\n```",
+                    "x".repeat(1935)
+                )
+            );
+            assert_eq!(omitted, 1065);
+        }
+    }
 }
 
 #[test]
@@ -898,7 +1070,7 @@ fn formats_ssh_direct_prompt_notification_strips_terminal_controls() {
         "\u{15}\u{1b}[31mhello\u{1b}[0m\n\tworld",
     );
 
-    assert_eq!(output, "-# ⌨️ hello\n-# \tworld");
+    assert_eq!(output, "-# ⌨️ tui direct input\n```\nhello\n\tworld\n```");
     assert!(!output.contains('\u{15}'));
     assert!(!output.contains('\u{1b}'));
 }
@@ -921,7 +1093,10 @@ fn notification_strip_drops_bare_control_bytes_but_keeps_whitespace() {
             output
         );
     }
-    assert_eq!(output, "-# ⌨️ ringpagedelc1\n-# \tkeep");
+    assert_eq!(
+        output,
+        "-# ⌨️ tui direct input\n```\nringpagedelc1\n\tkeep\n```"
+    );
 }
 
 // #3100: a human typing directly into the TUI is a real active turn.
@@ -1843,7 +2018,7 @@ fn local_command_stdout_negative_cases_stay_human_direct() {
     let rendered = format_ssh_direct_prompt_notification("claude", "sess-mid-body", mid_body_tag);
     assert!(
         rendered
-            == "-# ⌨️ please explain this transcript:\n-# ‹local\\-command\\-stdout›x‹/local\\-command\\-stdout›",
+            == "-# ⌨️ tui direct input\n```\nplease explain this transcript:\n<local-command-stdout>x</local-command-stdout>\n```",
         "a later quoted stdout line stays visible as literal human input",
     );
 }
@@ -6963,8 +7138,8 @@ async fn synthetic_prompt_note_on_wire(route: u8) -> serde_json::Value {
             body["content"]
                 .as_str()
                 .unwrap()
-                .contains("@\u{200b}everyone"),
-            "steer echo keeps its existing mention escape"
+                .contains("```\n@everyone @here <@&5678> <@1234> steering input\n```"),
+            "steer echo preserves mentions inside the code block"
         );
     } else {
         assert!(

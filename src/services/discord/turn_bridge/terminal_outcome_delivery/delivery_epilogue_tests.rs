@@ -22,6 +22,7 @@ use tracing_subscriber::fmt::MakeWriter;
 
 #[cfg(unix)]
 mod codex_empty_tests;
+mod o_done_reaction_tests;
 mod provider_failure_tests;
 #[cfg(all(test, unix))]
 mod recovery_retry_guard_tests;
@@ -1898,3 +1899,5 @@ async fn the_delivery_commit_stores_the_scheduled_outcome_of_its_transcript() {
         assert_eq!(stored, expected, "{case}");
     }
 }
+
+mod routine_presentation_tests;

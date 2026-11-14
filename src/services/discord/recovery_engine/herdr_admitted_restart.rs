@@ -143,6 +143,7 @@ impl AdmittedRestartTerminal {
                 shared: shared.clone(),
                 state: row,
                 actor: None,
+                quiet_restart_generation: None,
                 delivery,
             };
             let mailbox = shared.mailbox(channel_id);

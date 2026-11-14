@@ -392,3 +392,6 @@ async fn a_scheduled_bridge_completion_settles_on_the_next_poll_pg() {
     })
     .await;
 }
+
+#[path = "routine_presentation_tests.rs"]
+mod routine_presentation_tests;

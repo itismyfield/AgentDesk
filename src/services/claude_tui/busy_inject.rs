@@ -370,7 +370,8 @@ impl Pane {
             })?;
         }
         let mut command = Command::new(&self.program);
-        command.arg("-u").args(args);
+        crate::services::platform::tmux::input_command(&mut command, args)
+            .map_err(BoundedTmuxError::Spawn)?;
         crate::services::platform::binary_resolver::apply_runtime_path(&mut command);
         // A fresh thread owns its runtime, so this blocks safely from any caller.
         std::thread::scope(|scope| {
@@ -429,16 +430,6 @@ impl Pane {
 
 pub(crate) fn modal(capture: &str) -> bool {
     screen::modal(capture)
-}
-
-/// Read once before any key: whether a visible draft is parked with C-s. An unread composer
-/// deliberately proceeds without C-s.
-#[cfg(unix)]
-pub(in crate::services::claude_tui) fn before_paste(
-    pane: &Pane,
-    stash_allowed: bool,
-) -> Result<bool, Veto> {
-    before_paste_by(pane, listed(stash_allowed), false).map(|seen| seen.park)
 }
 
 /// One read of a held pane by the owned entry's own screen check.

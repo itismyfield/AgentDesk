@@ -7,6 +7,12 @@ coverage_class: live
 cells: [claude-pipe, claude-tui, codex-pipe, codex-tui, claude-herdr, codex-herdr]
 herdr_text_stop: true  # Separate mid-turn !stop subcase; never an HTTP substitute.
 isolation: required
+feature_coverage:
+  schema: 1
+  references:
+    - feature_id: cancel-stop
+      scope: Claude/Codex의 cancel 뒤 late marker 부재와 hold/health 명세를 참조한다. 입력은 legacy_automation이며 인간 입력 취소보존과 구체 tui_o output receipt를 증명하지 않는다. Herdr의 durable hold·legacy idle 검사는 N/A이고 자동 busy witness operation도 없다.
+      needs_live: true
 destructive: true
 acceptance_criteria:
   - Use the deterministic provider hold prompt fixture after [E2E:E18:OK].

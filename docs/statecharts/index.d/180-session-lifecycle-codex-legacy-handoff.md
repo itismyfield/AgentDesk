@@ -1,0 +1,2 @@
+key: 180-session-lifecycle-codex-legacy-handoff
+| `session-lifecycle` (Codex legacy handoff, #8057 H design r2) | `289f41b1d0` | r1: changed target receives exit, stale hint waits forever, generic failure loses automatic resume | proposed r2: fixed target, typed waiting, exact hint cleanup/wake; 10-case GREEN under explicit port and Ended assumptions; [report](session-lifecycle/herdr-handoff.report.md) |

@@ -57,7 +57,12 @@ impl Namespace {
             // SAFETY: these calls only read this process's credentials.
             uid: unsafe { libc::getuid() },
             euid: unsafe { libc::geteuid() },
-            explicit,
+            explicit: explicit.or_else(|| {
+                crate::config::test_instance::current()
+                    .ok()
+                    .flatten()
+                    .map(|instance| instance.tmux.socket.clone())
+            }),
             cwd: std::env::current_dir().ok(),
             runtime_path: crate::services::platform::binary_resolver::prepared_runtime_path()
                 .map(OsString::from),
@@ -318,7 +323,10 @@ fn classify_output(
         }
         let names: Vec<_> = text.split_terminator('\n').collect();
         if names.iter().any(|n| {
-            n.trim().is_empty() || n.chars().any(char::is_control) || n.contains([':', '.'])
+            n.trim().is_empty()
+                || n.chars().any(char::is_control)
+                || n.contains([':', '.'])
+                || super::validate_target(n).is_err()
         }) {
             return fail();
         }

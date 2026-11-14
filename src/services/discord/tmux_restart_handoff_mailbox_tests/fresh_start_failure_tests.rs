@@ -91,6 +91,9 @@ fn fail_fresh_turn(
         .unwrap_or_else(|p| p.into_inner());
     let _spy = SpyGuard::install(SpyState {
         captures: std::iter::repeat_n(Some(ready), 64).collect(),
+        on_alive: Some(Box::new(
+            crate::services::claude_tui::readiness::tests::fresh_fixture,
+        )),
         ..SpyState::default()
     });
     let clearance = cleared(NAME);

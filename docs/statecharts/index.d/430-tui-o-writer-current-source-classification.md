@@ -1,0 +1,2 @@
+key: 430-tui-o-writer-current-source-classification
+| `tui-o-writer` current-source classification (#7845 delta) | `7a0c819e12` + reviewed Current contract | birth ordering hides current A loss after A→B→A; Unknown can park without absence, ready precedes a valid new bind, parked rebind keeps running | full-log last valid Bound identifies historical sources; ready follows applicable bind application; post-view parked rebind/refinement halts. Includes rotation-before-checkpoint interruption. See [report](tui-o-writer/rebound.report.md). |

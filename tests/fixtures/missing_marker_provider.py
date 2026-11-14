@@ -29,8 +29,12 @@ url = os.environ['ADK_MM_HOOK_URL'] + '/hooks/claude/SessionStart?session_id=' +
 assert urllib.parse.urlparse(url).hostname == '127.0.0.1'
 payload = {'hook_event_name': 'SessionStart', 'source': 'startup', 'session_id': session,
            'transcript_path': str(source), 'cwd': os.getcwd()}
+published = datetime.datetime.now(datetime.timezone.utc)
 request = urllib.request.Request(url, json.dumps(payload).encode(),
-    {'content-type': 'application/json', 'x-agentdesk-binding-context': envelope}, method='POST')
+    {'content-type': 'application/json', 'x-agentdesk-binding-context': envelope,
+     'x-agentdesk-relay-request-id': str(uuid.uuid4()),
+     'x-agentdesk-relay-published-at': published.isoformat(),
+     'x-agentdesk-relay-deadline': (published + datetime.timedelta(seconds=60)).isoformat()}, method='POST')
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 for attempt in range(100):
     try:

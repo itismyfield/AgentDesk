@@ -32,6 +32,8 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::Owe
 
 #[path = "input_notices/migration.rs"]
 mod notice_migration;
+#[path = "input_notices/retry.rs"]
+mod notice_retry;
 
 /// A POST still unanswered by then is treated as uncertain and settled from history.
 pub const POST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -202,6 +204,8 @@ impl<H> Drop for LeaseReturn<H> {
 
 pub struct ChannelWriter<P, L, A> {
     pub(super) notice_owners: crate::services::tui_input::human_frame::history::notice_owner::Batch,
+    pub(super) notice_cache:
+        crate::services::tui_input::human_frame::history::notice_owner::generation::WorkCache,
     pub(super) notice_pending: HashMap<(SourceId, u64, u64), String>,
     pub(super) boot: super::boot::Trace,
     pub(super) suspension: super::suspension::Suspension,
@@ -263,6 +267,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         let posts = Some(with_in_flight(shared));
         let mut writer = Self {
             notice_owners: Default::default(),
+            notice_cache: Default::default(),
             notice_pending: HashMap::new(),
             boot: super::boot::Trace::new(channel, None, 0, 0),
             suspension: super::suspension::Suspension::default(),
@@ -713,6 +718,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 return self.stop(WriterAlarm::LedgerViolation { detail });
             }
             Some(Err(Refusal::Withheld(reason))) => {
+                self.defer_notice_delivery(piece);
+                #[cfg(test)]
+                super::input_notices::admission::count_notice_refusal(piece);
                 tracing::info!(channel, reason, unit_key = ?piece.unit_key,
                     "[tui_o] verified piece withheld before Prepared");
                 return Step::Withheld;

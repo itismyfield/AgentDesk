@@ -3,6 +3,7 @@
 import importlib.util
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -706,6 +707,85 @@ class ProblemsTest(unittest.TestCase):
         self.assertTrue(new.startswith("a/M.cfg: New:") and "newly broken" in new)
         self.assertTrue(fixed.startswith("a/M.cfg: Old:") and "now holds" in fixed)
 
+
+
+class LeaseWrapperTest(unittest.TestCase):
+    def setUp(self) -> None:
+        source = SCRIPT_PATH.parents[2] / 'docs/statecharts/e2e-run-lease/check_models.py'
+        spec = importlib.util.spec_from_file_location('lease_wrapper', source)
+        self.wrapper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.wrapper)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.area = self.root / 'e2e-run-lease'
+        self.area.mkdir()
+        for name in self.wrapper.EXPECTED_CONFIGS:
+            (self.area / name).write_text('SPECIFICATION Spec\n')
+        (self.area / 'LeaseLifetime.tla').write_text('fixture spec')
+        self.jar = self.root / 'tools.jar'
+        self.jar.touch()
+        self.rows = {f'e2e-run-lease/{name}': set() for name in self.wrapper.EXPECTED_CONFIGS}
+        self.rows['e2e-run-lease/run-ttl_takeover.cfg'] = {'NoDualGateway', 'NoHolderTheft', 'NextRequestProgress'}
+        self.write_expected()
+
+    def write_expected(self) -> None:
+        (self.root / 'expected.tsv').write_text(''.join(
+            f'{name}\tLeaseLifetime\t{",".join(sorted(rules)) or "-"}\n'
+            for name, rules in sorted(self.rows.items())))
+
+    def test_shared_expected_values_preserve_full_rule_sets(self) -> None:
+        loaded = self.wrapper.load_expectations(self.root)
+        self.assertEqual(loaded['e2e-run-lease/run-ttl_takeover.cfg'][1],
+                         {'NoDualGateway', 'NoHolderTheft', 'NextRequestProgress'})
+
+    def test_missing_and_extra_registration_are_refused(self) -> None:
+        self.rows.pop('e2e-run-lease/run-none.cfg')
+        self.write_expected()
+        with self.assertRaisesRegex(ValueError, 'incomplete canonical'):
+            self.wrapper.load_expectations(self.root)
+        self.rows['e2e-run-lease/unknown.cfg'] = set()
+        self.write_expected()
+        with self.assertRaisesRegex(ValueError, 'unexpected='):
+            self.wrapper.load_expectations(self.root)
+
+    def test_missing_config_is_refused(self) -> None:
+        (self.area / 'run-none.cfg').unlink()
+        with self.assertRaisesRegex(ValueError, 'incomplete TLC matrix'):
+            self.wrapper.select_configs(self.area)
+
+    def run_wrapper(self, mismatch=False):
+        def checked(root, cfg, module, expected, java, jar, timeout):
+            self.assertEqual(root, self.root)
+            self.assertEqual(module, 'LeaseLifetime')
+            self.assertEqual(expected, self.rows[cfg])
+            broken = set(expected)
+            if mismatch and cfg.endswith('/run-none.cfg'):
+                broken.add('NoDualWriter')
+            return self.wrapper.common.Result(cfg, set(expected), broken=broken,
+                                              rules=sorted(set(expected) | broken), runs=2)
+        out = self.root / 'results'
+        args = ['checker', '--jar', str(self.jar), '--out', str(out)]
+        with mock.patch.object(self.wrapper, 'BASE', self.area), \
+             mock.patch.object(sys, 'argv', args), \
+             mock.patch.object(self.wrapper.common, 'check_cfg', side_effect=checked) as check, \
+             contextlib.redirect_stdout(io.StringIO()):
+            status = self.wrapper.main()
+        self.assertEqual(check.call_count, 23)
+        return status, json.loads((out / 'results.json').read_text())
+
+    def test_wrapper_delegates_every_config_to_common_checker(self) -> None:
+        status, rows = self.run_wrapper()
+        self.assertEqual(status, 0)
+        self.assertEqual(len(rows), 23)
+        self.assertTrue(all(row['matches_expectation'] for row in rows))
+        row = next(row for row in rows if row['config'] == 'run-ttl_takeover.cfg')
+        self.assertEqual(set(row['expected_rules']), self.rows['e2e-run-lease/run-ttl_takeover.cfg'])
+
+    def test_common_mismatch_cannot_pass(self) -> None:
+        status, rows = self.run_wrapper(mismatch=True)
+        self.assertEqual(status, 1)
+        self.assertFalse(next(row for row in rows if row['config'] == 'run-none.cfg')['matches_expectation'])
 
 if __name__ == "__main__":
     unittest.main()

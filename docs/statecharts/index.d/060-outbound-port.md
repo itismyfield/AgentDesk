@@ -1,0 +1,2 @@
+key: 060-outbound-port
+| `outbound-port` (#7353 S21) | `92ef5b00b205679965c24c5c017f7237e8b5d57f` | NoNonceAmbiguous/NoNonceRestart: 응답 없는 생성 뒤 재시도나 재시작으로 nonce 없는 같은 intent가 두 번 게시됨; LossyKey·RecordBeforePost·NoReserve·NoReserveNonce 변형은 기대 RED; caller 흐름(OutboundCallerFlow)은 fallback-on-transient·관측 뒤 반환·caller 새 deduper 변형이 RED | 값 계약 이동 전(Before)·후(After) 같은 전이로 GREEN, nonce 강제 경로만 재시작·재시도에도 1회 게시; see [report](outbound-port/outbound-port.report.md) |

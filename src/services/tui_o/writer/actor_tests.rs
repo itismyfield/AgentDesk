@@ -2,6 +2,8 @@
 mod input_notice_composition;
 #[path = "park_unsealed_actor_tests.rs"]
 mod park_unsealed;
+#[path = "recap_tests.rs"]
+mod recap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[path = "tool_card_actor_tests.rs"]

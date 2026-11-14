@@ -20,6 +20,8 @@ fn ready_pane() -> String {
 }
 
 pub(super) fn managed_row(channel: u64) -> (InflightTurnState, ManagedSubmission) {
+    let session = format!("AgentDesk-claude-zp1-{channel}");
+    crate::services::claude_tui::readiness::tests::idle_fixture(&session);
     let mut state = InflightTurnState::new(
         ProviderKind::Claude,
         channel,
@@ -29,7 +31,7 @@ pub(super) fn managed_row(channel: u64) -> (InflightTurnState, ManagedSubmission
         channel + 11,
         "managed prompt".into(),
         None,
-        Some(format!("AgentDesk-claude-zp1-{channel}")),
+        Some(session),
         None,
         None,
         0,

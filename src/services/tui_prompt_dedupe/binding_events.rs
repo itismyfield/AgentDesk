@@ -27,6 +27,7 @@ pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
 mod claude_fold;
 use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
+pub(crate) use claude_fold::published_claude_history;
 pub(crate) mod codex;
 mod log_record;
 mod read_cache;
@@ -237,7 +238,7 @@ fn fault(_step: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
+pub(crate) fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|dir| dir.join(format!("{channel_id}.log"))))
 }
 

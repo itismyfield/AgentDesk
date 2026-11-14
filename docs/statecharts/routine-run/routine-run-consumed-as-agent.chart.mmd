@@ -1,0 +1,93 @@
+---
+title: "루틴 한 실행의 판정ﬂ°°183¶ß입력ﬂ°°183¶ß종결"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: running
+    lg1: done
+    lg2: closed
+    lg3: Breaks SuccessfulAgentExactlyOne
+    lg4: Path to the SuccessfulAgentExactlyOne bug
+  }
+  class lg0 blue
+  class lg1 teal
+  class lg2 orange
+  class lg3 breaks
+  class lg4 bugPath
+  s0: 루틴 실행 시작
+  s1: 실패 기록과 알림
+  s2: 일시정지와 알림
+  s3: 같은 입력을 보관
+  s4: 복구 확인 대기
+  s5: 종결 기한 종료
+  s6: 실행 건너뜀
+  s7: 턴 0을 에이전트 성공으로 오인
+  s8: 제출 준비
+  s9: 취소 확인#183;중단 저장 대기
+  s10: 보류 기한 종료
+  s11: 중단 기록과 알림
+  s12: 제출 여부 정산
+  s13: 제출 안 됨 확인
+  s14: 복구 중 제출 증거 정산
+  s15: 기한 뒤 제출 증거 정산
+  s16: 한 번 수용됨
+  s17: 실행 완료
+  [*] --> s0
+  s0 --> s1: 제출 전 실패를 기록
+  s0 --> s2: JS가 건너뜀 또는 일시정지
+  s0 --> s3: 입력을 한 번 등록
+  s0 --> s4: 만료된 실행 복구 시작
+  s0 --> s5: 실행 기한 도달
+  s0 --> s6: JS가 건너뜀 또는 일시정지
+  s0 --> s7: 명령만 소비하고 종결
+  s3 --> s8: 기존 소유자가 수용
+  s3 --> s4: 만료된 실행 복구 시작
+  s3 --> s10: 실행 기한 도달
+  s4 --> s9: 정확한 대기 입력 취소 확인
+  s5 --> s1: 정확한 대기 입력 취소 후 종결 or 제출 전 실패를 기록 or 재전송 없이 정산 종료 or 에이전트 실패 처리
+  s5 --> s2: JS가 건너뜀 또는 일시정지
+  s5 --> s4: 만료된 실행 복구 시작
+  s5 --> s6: JS가 건너뜀 또는 일시정지
+  s8 --> s12: 기존 소유자가 프롬프트 제출
+  s8 --> s13: 첫 키 전 거절
+  s8 --> s4: 만료된 실행 복구 시작
+  s8 --> s5: 실행 기한 도달
+  s9 --> s11: 중단 결과 저장
+  s10 --> s1: 정확한 대기 입력 취소 후 종결
+  s10 --> s4: 만료된 실행 복구 시작
+  s12 --> s13: 미제출 증거 확인
+  s12 --> s15: 실행 기한 도달
+  s12 --> s16: 실제 수용 확인
+  s13 --> s8: 같은 입력 재시도
+  s13 --> s5: 실행 기한 도달
+  s4 --> s14: 기존 소유자가 프롬프트 제출
+  s5 --> s15: 기존 소유자가 프롬프트 제출
+  s14 --> s11: 보낸 입력을 재전송 없이 중단
+  s15 --> s5: 미제출 증거 확인 or 실제 수용 확인
+  s15 --> s1: 재전송 없이 정산 종료
+  s16 --> s1: 에이전트 실패 처리
+  s16 --> s5: 실행 기한 도달
+  s16 --> s17: 결과 저장
+  s5 --> s17: 결과 저장
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 orange
+  class s2 orange
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 orange
+  class s7 teal
+  class s7 breaks
+  class s7 bugPath
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s11 orange
+  class s12 blue
+  class s13 blue
+  class s14 blue
+  class s15 blue
+  class s16 blue
+  class s17 teal

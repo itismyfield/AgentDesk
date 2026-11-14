@@ -1106,11 +1106,10 @@ pub(super) async fn handle_text_message(
             .await.map(|_| IntakeExecution::deferred(channel_id));
         }
 
-        let defer_busy_view = owner.is_some() && provider == ProviderKind::Claude
-            && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
-            && super::super::intake_gate::busy_inject::queued_head_covers(
-                channel_id, final_thread_parent.as_ref().map(|(parent, _)| *parent),
-            );
+        let defer_busy_view = super::super::intake_gate::busy_inject::defer_owned_busy_view(
+            owner.is_some(), &provider, channel_id,
+            final_thread_parent.as_ref().map(|(parent, _)| *parent),
+        );
         // Owned input remains durable while its pane decides between a start and a busy paste.
         let _turn_start_attempt = if add_turn_pending && !defer_busy_view {
             tv_start_current_with_attempt(shared, http, original_channel_id, user_msg_id, "intake_start")
@@ -1571,72 +1570,22 @@ pub(super) async fn handle_text_message(
                     let wait_session_name = initial_diagnostic.tmux_session_name.clone();
                     let wait_cancel_token = cancel_token.clone();
                     let wait_provider = provider.clone();
-                    let wait_readiness = hosted_tui_busy_preflight_readiness_wait(
-                        &wait_provider,
-                        Some(&current_path),
-                        session_id.as_deref(),
-                        tmux_session_name.as_deref(),
-                    );
-                    match &wait_readiness {
-                        HostedTuiBusyPreflightReadinessWait::Codex => {
-                            tracing::debug!(
-                                channel_id = channel_id.get(),
-                                user_msg_id = user_msg_id.get(),
-                                tmux_session_name = %wait_session_name,
-                                "hosted tui busy preflight will wait for codex composer readiness"
-                            );
+                    let wait_result = tokio::task::spawn_blocking(move || {
+                        match wait_provider {
+                            ProviderKind::Codex => crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
+                                &wait_session_name,
+                                crate::services::codex_tui::input::PromptReadinessKind::Followup,
+                                Some(&wait_cancel_token),
+                            ),
+                            _ => crate::services::claude_tui::input::wait_for_prompt_ready(
+                                &wait_session_name,
+                                crate::services::claude_tui::input::PromptReadinessKind::Followup,
+                                Some(wait_cancel_token.as_ref()),
+                            ),
                         }
-                        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
-                            transcript_path,
-                        ) => {
-                            tracing::debug!(
-                                channel_id = channel_id.get(),
-                                user_msg_id = user_msg_id.get(),
-                                tmux_session_name = %wait_session_name,
-                                transcript_path = %transcript_path.display(),
-                                "hosted tui busy preflight will allow claude idle transcript readiness"
-                            );
-                        }
-                        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly => {
-                            tracing::debug!(
-                                channel_id = channel_id.get(),
-                                user_msg_id = user_msg_id.get(),
-                                tmux_session_name = %wait_session_name,
-                                "hosted tui busy preflight will require claude prompt marker readiness"
-                            );
-                        }
-                    }
-                    let wait_result =
-                        tokio::task::spawn_blocking(move || {
-                            match wait_readiness {
-                    HostedTuiBusyPreflightReadinessWait::Codex => {
-                        crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
-                            &wait_session_name,
-                            crate::services::codex_tui::input::PromptReadinessKind::Followup,
-                            Some(&wait_cancel_token),
-                        )
-                    }
-                    HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
-                        transcript_path,
-                    ) => crate::services::claude_tui::input::wait_for_prompt_ready_or_idle_transcript(
-                        &wait_session_name,
-                        crate::services::claude_tui::input::PromptReadinessKind::Followup,
-                        Some(wait_cancel_token.as_ref()),
-                        &transcript_path,
-                    ),
-                    HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly => {
-                        crate::services::claude_tui::input::wait_for_prompt_ready(
-                            &wait_session_name,
-                            crate::services::claude_tui::input::PromptReadinessKind::Followup,
-                            Some(wait_cancel_token.as_ref()),
-                        )
-                    }
-                }
-                        })
-                        .await
-                        .unwrap_or_else(|join_err| {
-                            Err(format!("wait_for_prompt_ready join error: {join_err}"))
-                        });
+                    }).await.unwrap_or_else(|join_err| {
+                        Err(format!("wait_for_prompt_ready join error: {join_err}"))
+                    });
                     let post_wait_diagnostic = tui_busy_followup_diagnostic(
                         shared,
                         &provider,

@@ -10,7 +10,7 @@ fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
     let name = "cold-submit-source-delayed";
     let prompt = "reply + attachments\nvoice _ literal";
     frame_renderer(&f, name, prompt, &screen(""), &screen(prompt), &screen(""));
-    let transcript = f.root.path().join("not-created.jsonl");
+    let transcript = f.root.path().join("project/not-created.jsonl");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -18,7 +18,7 @@ fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
         .unwrap();
     let nonce = "00112233445566778899aabbccddee02";
     let owner_root = crate::services::tmux_common::current_tmux_owner_marker();
-    let context:crate::services::tui_prompt_dedupe::binding_context::BindingContext=serde_json::from_value(serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),"execution_nonce":nonce,"tmux_session":name,"channel_id":727395,"owner_runtime_root":owner_root,"host":"scope-test","expected_native_session_id":null,"launch_mode":"fresh","provider_root":null})).unwrap();
+    let context:crate::services::tui_prompt_dedupe::binding_context::BindingContext=serde_json::from_value(serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),"execution_nonce":nonce,"tmux_session":name,"channel_id":727395,"owner_runtime_root":owner_root,"host":"scope-test","expected_native_session_id":null,"launch_mode":"fresh","provider_root":f.root.path()})).unwrap();
     let _prepared =
         crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(context)
             .unwrap();
@@ -29,6 +29,7 @@ fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727395));
     runtime.block_on(mailbox.v2_cold_fixture(f.root.path().join("cold-owner.json"),serde_json::json!({"nonce":"claude-cold-scope","provider":"claude","target":{"host":"tmux","owner":name,"root":owner_root,"execution_nonce":nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),727395)).unwrap();
+    session_started(name, nonce, &transcript, "not-created");
     let transcript_for_submit = transcript.display().to_string();
     let (_, outcome) = runtime
         .block_on(
@@ -78,6 +79,25 @@ fn fresh_submit_held_never_retries_or_writes_payload() {
     let f = Fixture::after_shared_test_env_lock();
     let name = "fresh-branch-hold";
     frame_renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    let nonce = "00112233445566778899aabbccddee14";
+    let owner_root = crate::services::tmux_common::current_tmux_owner_marker();
+    let ctx = serde_json::from_value(serde_json::json!({"schema":1,"provider":"claude",
+        "created_at":chrono::Utc::now(),"execution_nonce":nonce,"tmux_session":name,
+        "channel_id":null,"owner_runtime_root":owner_root,"host":"fresh-hold-test",
+        "expected_native_session_id":null,"launch_mode":"fresh","provider_root":f.root.path()}))
+    .unwrap();
+    let _prepared =
+        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(ctx)
+            .unwrap();
+    let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
+    std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(marker, nonce).unwrap();
+    session_started(
+        name,
+        nonce,
+        &f.root.path().join("project/held.jsonl"),
+        "held",
+    );
     guard_draft(name, DraftGuard::RecoveryRequired);
     let spy = SpyGuard::install(SpyState {
         captures: [
@@ -175,7 +195,7 @@ fn owned_first_prompt_keeps_its_ticket_for_the_observer() {
         serde_json::from_value(serde_json::json!({"schema":1,"provider":"claude",
             "created_at":chrono::Utc::now(),"execution_nonce":nonce,"tmux_session":name,
             "channel_id":727396,"owner_runtime_root":owner_root,"host":"owned-test",
-            "expected_native_session_id":null,"launch_mode":"fresh","provider_root":null}))
+            "expected_native_session_id":null,"launch_mode":"fresh","provider_root":f.root.path()}))
         .unwrap();
     let _prepared =
         crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(context)
@@ -183,7 +203,8 @@ fn owned_first_prompt_keeps_its_ticket_for_the_observer() {
     let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
     std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     std::fs::write(marker, nonce).unwrap();
-    let transcript = f.root.path().join("owned.jsonl");
+    let transcript = f.root.path().join("project/owned-sid.jsonl");
+    session_started(name, nonce, &transcript, "owned-sid");
     let hook: crate::services::claude_tui::owner_input::LaunchHook =
         Box::new(move |_lineage, target, source, _writer, submit| {
             assert_eq!(target["execution_nonce"], nonce);
@@ -225,7 +246,7 @@ fn b1_owned_launch_passes_writer_source_across_the_owner_callback() {
     let root = crate::services::tmux_common::current_tmux_owner_marker();
     let context = serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),
         "execution_nonce":nonce,"tmux_session":name,"channel_id":7212801,"owner_runtime_root":root,
-        "host":"owned-source-test","expected_native_session_id":null,"launch_mode":"fresh","provider_root":null});
+        "host":"owned-source-test","expected_native_session_id":null,"launch_mode":"fresh","provider_root":fixture.root.path()});
     let _incarnation = tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
         serde_json::from_value(context).unwrap(),
     )
@@ -233,7 +254,7 @@ fn b1_owned_launch_passes_writer_source_across_the_owner_callback() {
     let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
     std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     std::fs::write(marker, nonce).unwrap();
-    let path = fixture.root.path().join("owned-source.jsonl");
+    let path = fixture.root.path().join("project/owned-sid.jsonl");
     tui_prompt_dedupe::register_tmux_runtime_binding(
         name,
         TuiRuntimeBinding {
@@ -246,6 +267,7 @@ fn b1_owned_launch_passes_writer_source_across_the_owner_callback() {
             relay_last_offset: None,
         },
     );
+    session_started(name, nonce, &path, "owned-sid");
     let hook: crate::services::claude_tui::owner_input::LaunchHook =
         Box::new(move |_, _, source, _, submit| {
             assert_eq!(source["expected_session_id"], "owned-sid");
@@ -295,4 +317,31 @@ fn b1_owned_launch_passes_writer_source_across_the_owner_callback() {
         1
     );
     tui_prompt_dedupe::clear_tmux_runtime_binding(name);
+}
+
+// The renderer supplies draft evidence; first-input readiness comes from its current startup.
+fn session_started(name: &str, nonce: &str, path: &std::path::Path, native: &str) {
+    use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
+    readiness::initialize();
+    let ctx =
+        crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", nonce)
+            .unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    assert!(
+        readiness::observe(name, Some(path)).is_none(),
+        "no readiness before SessionStart"
+    );
+    readiness::note_hook(
+        "claude",
+        &HookEventKind::SessionStart,
+        name,
+        &serde_json::json!({"session_id":native,"transcript_path":path,"source":"startup"}),
+        Some(&ctx),
+        Some(chrono::Utc::now()),
+        false,
+    );
+    assert!(
+        readiness::observe(name, Some(path)).is_some(),
+        "current startup admits a missing transcript"
+    );
 }

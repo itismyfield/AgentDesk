@@ -1,5 +1,8 @@
 //! Actual restart scan: a durable hold preserves the episode while delivering its saved debt.
 
+#[path = "replay_hold_tests/routine_presentation_tests.rs"]
+mod routine_presentation_tests;
+
 use super::*;
 use crate::services::discord::host_teardown_gate::test_support::{
     Stored, channel_key, nameless_turn, seed, shared_on,

@@ -69,7 +69,7 @@ impl ProviderTurn {
         assert_ne!(ran, std::thread::current().id());
         assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_none());
     }
-    async fn finish(mut self, pool: &sqlx::PgPool) {
+    async fn finish(mut self, pool: &sqlx::PgPool, no_visible_result: bool) {
         self.release.take().unwrap().send(()).unwrap();
         let delivered = AtomicUsize::new(0);
         // Stand in for the outbox worker while the real bridge/postlude completes.
@@ -87,7 +87,15 @@ impl ProviderTurn {
             },
             _ = worker => unreachable!(),
         }
-        assert!(delivered.load(Ordering::SeqCst) > 0);
+        if no_visible_result {
+            assert_eq!(
+                delivered.load(Ordering::SeqCst),
+                0,
+                "a C1 NO_REPLY completion must not enqueue a headless body"
+            );
+        } else {
+            assert!(delivered.load(Ordering::SeqCst) > 0);
+        }
         assert_eq!(self.extra.load(Ordering::SeqCst), 0);
     }
 }
@@ -114,7 +122,7 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
     const TEST: &str = "services::discord::turn_presence::activity::unbound::live::owner_tests::receipt_tests::routine_receipt_survives_reset_and_starts_one_provider_turn_pg";
     if std::env::var_os(CHILD).is_none() {
         let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
             .env(CHILD, "1")
             .env(
                 crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
@@ -291,6 +299,7 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
         );
         turn.entered().await;
         let row = inflight::load_inflight_state(&ProviderKind::Claude, thread).unwrap();
+        assert!(!row.routine_presentation.holds_body());
         let name = row
             .tmux_session_name
             .as_deref()
@@ -333,7 +342,7 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
                 Some(receipt.as_str())
             );
         }
-        turn.finish(&pool).await;
+        turn.finish(&pool, false).await;
         assert!(
             inflight::load_inflight_state(&ProviderKind::Claude, thread).is_none(),
             "completed producer must not leave inflight behind"
@@ -377,14 +386,11 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
         .unwrap();
     assert_eq!(process.status, "running", "{process:?}");
     process_turn.entered().await;
-    assert!(
-        inflight::load_inflight_state(&ProviderKind::Claude, thread)
-            .unwrap()
-            .tmux_session_name
-            .is_none()
-    );
+    let process_row = inflight::load_inflight_state(&ProviderKind::Claude, thread).unwrap();
+    assert!(process_row.tmux_session_name.is_none());
+    assert!(process_row.routine_presentation.holds_body());
     assert_eq!(owned(&pool, &process_run).await, None);
-    process_turn.finish(&pool).await;
+    process_turn.finish(&pool, true).await;
     assert!(
         store
             .complete_agent_run(
@@ -484,13 +490,14 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
     assert_eq!(body["status"], "started");
     turn.entered().await;
     let row = inflight::load_inflight_state(&ProviderKind::Claude, parent).unwrap();
+    assert!(!row.routine_presentation.holds_body());
     assert_eq!(
         body["turn_id"],
         format!("discord:{parent}:{}", row.user_msg_id)
     );
     let (again, refused) = post_start(&app, agent).await;
     assert_eq!(again, axum::http::StatusCode::CONFLICT, "{refused}");
-    turn.finish(&pool).await;
+    turn.finish(&pool, false).await;
     let mut codex =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     Arc::get_mut(&mut codex).unwrap().provider = ProviderKind::Codex;

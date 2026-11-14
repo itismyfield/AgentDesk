@@ -70,14 +70,29 @@ fn follow_up(name: &str, scenario: Scenario) -> (Ended, Vec<String>, usize) {
     let dir = tempfile::tempdir().unwrap();
     let transcript = dir.path().join(format!("{SESSION_ID}.jsonl"));
     let last = match scenario.idle_transcript {
-        true => "result",
-        false => "permission-mode",
+        true => "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+        false => "{\"type\":\"permission-mode\"}\n",
     };
-    std::fs::write(&transcript, format!("{{\"type\":\"{last}\"}}\n")).unwrap();
+    std::fs::write(&transcript, last).unwrap();
     let name = name.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let token = Arc::new(CancelToken::new());
+        if scenario.idle_transcript {
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                &name,
+                crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                    runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                    output_path: transcript.display().to_string(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: Some(SESSION_ID.into()),
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+            );
+            crate::services::claude_tui::readiness::tests::pre_source(&name, &transcript);
+        }
         let guard = SpyGuard::install(SpyState {
             captures: scenario
                 .captures

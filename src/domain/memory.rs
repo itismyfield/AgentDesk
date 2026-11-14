@@ -1,3 +1,13 @@
+use serde::Deserialize;
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct MemoryConfigOverride {
+    pub backend: Option<String>,
+    pub recall_timeout_ms: Option<u64>,
+    pub capture_timeout_ms: Option<u64>,
+}
+
 pub(crate) const DEFAULT_MEMORY_RECALL_TIMEOUT_MS: u64 = 500;
 pub(crate) const DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS: u64 = 5_000;
 

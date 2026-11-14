@@ -1,41 +1,5 @@
-//! Model-aware Claude `/compact` triggering and busy-turn steering.
-//!
-//! This trigger keeps main's proven *stateless observable-usage* shape: a single
-//! per-pane `armed` bool, consumed once per fill cycle at a turn-completion
-//! boundary and re-armed only after observable occupancy drops back below a
-//! hysteresis floor (which is exactly what a real compaction does). It never owns
-//! an identity/epoch/ticket lifecycle authority; the model-aware context window is
-//! resolved fresh each turn by the caller (`claude_compact_context`) and only the
-//! numeric threshold changes when the model/window changes.
-//!
-//! What #4591 keeps on top of main's shape:
-//!   * a *token* threshold (`compact_threshold`) instead of a percentage, so the
-//!     model-aware CTW resolution drives an exact absolute trigger, and
-//!   * the steering primitive (`send_compact_while_busy` under the narrow
-//!     per-pane composer lock) so an auto `/compact` steers a busy pane without
-//!     waiting behind a normal turn's readiness phase.
-//!
-//! Lock discipline (the freeze-bug fix): the per-pane armed state lock is a
-//! LEAF. It is taken only for a brief flip/read in [`observe_and_decide_with_source`],
-//! [`pane_still_disarmed_for_send`], [`rearm_for_retry`], and [`clear_for_tmux`],
-//! and is NEVER held across tmux I/O. Only the per-pane composer lock is held
-//! across the send. This removes the old global-latch-held-across-submit
-//! linearization that froze every pane's observation for the duration of a send.
-//!
-//! What #4591 rework adds on top of the stateless shape:
-//!   * F2 — a per-pane fill-cycle GENERATION (a single process-global monotonic
-//!     `u64`, owned in exactly one place under the leaf lock). Every crossing
-//!     that consumes the armed flag stamps the pane with a fresh generation; a
-//!     queued worker carries the generation it was spawned for and proceeds only
-//!     on an exact match. Because the counter is globally monotonic and never
-//!     reused, a same-name pane recreated after [`clear_for_tmux`] gets a
-//!     strictly greater generation, so a stale worker can never match a NEW
-//!     pane's `Some(false)` (closes the armed-bool ABA), and a late
-//!     [`rearm_for_retry`] cannot clobber a newer crossing's consumed flag.
-//!   * F3 — the pre-send recheck re-reads the freshest observed OCCUPANCY (also
-//!     leaf-lock state) under the composer lock and bails when it has fallen
-//!     below the trigger threshold, atomizing "is it still valid to send" with
-//!     the send inside one composer critical section.
+//! Model-aware usage crossings create one source-bound compact request per fill cycle.
+//! The pending worker waits for terminal Idle evidence and keeps uncertainty disarmed.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -43,8 +7,8 @@ use std::sync::{LazyLock, Mutex};
 use crate::services::claude_compact_context::{
     CLAUDE_AUTO_COMPACT_MAX_TOKENS, CompactThreshold, compact_threshold,
 };
-use crate::services::claude_tui::input::CompactSubmitOutcome;
-use crate::services::discord::{ManagedCompactTurnIdentity, live_managed_turn_matches};
+use crate::services::claude_tui::readiness::compact::{self, Outcome};
+use crate::services::discord::{ManagedCompactTurnIdentity, pending_managed_turn_matches};
 use crate::services::provider::ProviderKind;
 
 /// Per-pane key for the once-per-fill-cycle armed flag. Keyed by both the Discord
@@ -129,9 +93,8 @@ static COMPACT_TRIGGER_STATE: LazyLock<Mutex<CompactTriggerState>> = LazyLock::n
 /// jitter around the threshold does not. The inject check consumes the flag
 /// optimistically the moment we decide to fire and stamps the pane with a fresh
 /// generation, so two near-simultaneous completion observations cannot both
-/// inject and a queued worker is bound to exactly its crossing. A non-confirmed
-/// send restores the flag via [`rearm_for_retry`] so a later turn retries while
-/// usage stays high.
+/// request and its worker is bound to exactly its crossing. A request that cannot
+/// capture its source can re-arm; a mutated request stays disarmed.
 ///
 /// `occupied` is the observable USAGE occupancy (`context_occupancy_input_tokens`
 /// = input + cache_create + cache_read). Idempotency is keyed on this reliable
@@ -180,10 +143,8 @@ fn observe_and_decide_with_source(
     }
     if armed && occupied >= threshold.effective_tokens {
         // Optimistically consume the flag and stamp a fresh generation so
-        // concurrent completion observations do not double-inject and the queued
-        // worker is bound to THIS crossing. Restored by `rearm_for_retry` on a
-        // non-confirmed send; re-armed naturally by the drop branch after a real
-        // compact.
+        // One request owns this crossing; only an unstarted request can retry.
+        // A real compact re-arms through the occupancy drop branch.
         let generation = state.next_generation.wrapping_add(1);
         state.next_generation = generation;
         if let Some(entry) = state.panes.get_mut(pane) {
@@ -221,12 +182,8 @@ fn pane_still_disarmed_for_send(
     })
 }
 
-/// Restore the armed flag after a non-confirmed send so a later turn-completion
-/// retries `/compact` while usage stays high — observable retry. Generation-gated
-/// (F2): the restore only lands while the pane is still on the worker's crossing
-/// `generation`, so a stale worker cannot clobber a NEWER crossing's consumed
-/// flag. Idempotent and resurrection-safe: a pane the teardown path already
-/// removed stays removed, so a late worker cannot revive a stale entry.
+/// A request that could not capture a source may retry at the next usage observation.
+/// The generation fence prevents a stale request from reviving a newer or cleared cycle.
 fn rearm_for_retry(pane: &CompactPaneKey, generation: u64) {
     let mut guard = COMPACT_TRIGGER_STATE
         .lock()
@@ -274,20 +231,44 @@ fn submit_under_composer_lock(
     generation: u64,
     threshold: CompactThreshold,
     expected_turn: &ManagedCompactTurnIdentity,
-    live_turn_matches: impl FnOnce(&ManagedCompactTurnIdentity) -> bool,
-    submit: impl FnOnce() -> CompactSubmitOutcome,
-) -> Option<CompactSubmitOutcome> {
-    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+    completing: bool,
+    live_turn_matches: impl FnOnce(&ManagedCompactTurnIdentity) -> Result<bool, String>,
+    submit: impl for<'a> FnOnce(
+        crate::services::claude_tui::composer_lock::ComposerPermit<'a>,
+    ) -> Outcome,
+) -> Option<Outcome> {
+    crate::services::claude_tui::composer_lock::with_composer_permit(
         &pane.tmux_session_name,
-        || {
-            if !pane_still_disarmed_for_send(pane, generation, threshold) {
+        |permit| {
+            let eligible = if completing {
+                COMPACT_TRIGGER_STATE
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .panes
+                    .get(pane)
+                    .is_some_and(|entry| {
+                        entry.generation == generation
+                            && entry.last_window_tokens == threshold.actual_window_tokens
+                    })
+            } else {
+                pane_still_disarmed_for_send(pane, generation, threshold)
+            };
+            if !eligible {
                 return None;
             }
-            if !live_turn_matches(expected_turn) {
-                invalidate_after_authority_rejection(pane, generation, threshold);
-                return None;
+            match if completing {
+                Ok(true)
+            } else {
+                live_turn_matches(expected_turn)
+            } {
+                Ok(true) => {}
+                Ok(false) => {
+                    invalidate_after_authority_rejection(pane, generation, threshold);
+                    return None;
+                }
+                Err(_) => return Some(Outcome::Pending),
             }
-            Some(submit())
+            Some(submit(permit))
         },
     )
 }
@@ -304,9 +285,7 @@ pub(in crate::services) fn observe_active_usage(
     turn_identity: ManagedCompactTurnIdentity,
     provider: &ProviderKind,
     model: Option<&str>,
-    input_tokens: Option<u64>,
-    cache_create_tokens: Option<u64>,
-    cache_read_tokens: Option<u64>,
+    usage: (Option<u64>, Option<u64>, Option<u64>),
     compact_percent: u64,
     lower_bound_tokens: u64,
 ) -> bool {
@@ -317,9 +296,7 @@ pub(in crate::services) fn observe_active_usage(
     let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
         return false;
     };
-    let (Some(input_tokens), Some(cache_create_tokens), Some(cache_read_tokens)) =
-        (input_tokens, cache_create_tokens, cache_read_tokens)
-    else {
+    let (Some(input_tokens), Some(cache_create_tokens), Some(cache_read_tokens)) = usage else {
         return false;
     };
     let occupied = input_tokens
@@ -433,55 +410,49 @@ pub(in crate::services) fn maybe_inject_compact_with_source(
         return;
     };
 
-    // The flag was just consumed, so at most one blocking worker exists per
-    // crossing. This worker holds ONLY the per-pane composer lock across the tmux
-    // mutation (never the leaf state lock) and performs no turn-readiness wait. It
-    // carries `generation` so the pre-send recheck binds it to THIS crossing.
-    tokio::task::spawn_blocking(move || {
+    let worker_pane = pane.clone();
+    if !compact::spawn(&pane.tmux_session_name, move |pending| {
         let outcome = submit_under_composer_lock(
-            &pane,
+            &worker_pane,
             generation,
             threshold,
             &turn_identity,
-            live_managed_turn_matches,
-            || crate::services::claude_tui::input::send_compact_while_busy(&pane.tmux_session_name),
+            pending.completing(),
+            pending_managed_turn_matches,
+            |permit| {
+                pending.poll(permit, |publish| {
+                    // No file or source-authority reads while holding the generation leaf lock.
+                    let state = COMPACT_TRIGGER_STATE
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    state.panes.get(&worker_pane).is_some_and(|entry| {
+                        entry.generation == generation
+                            && entry.last_window_tokens == threshold.actual_window_tokens
+                    }) && publish()
+                })
+            },
         );
         match outcome {
-            None => tracing::debug!(
-                tmux_session_name = %pane.tmux_session_name,
-                "skipping stale Claude auto compact before tmux mutation (occupancy drop re-armed, pane torn down, or fell below threshold)"
-            ),
-            Some(CompactSubmitOutcome::AcceptedOrQueued) => tracing::info!(
-                tmux_session_name = %pane.tmux_session_name,
+            Some(Outcome::Submitted) => tracing::info!(
+                tmux_session_name = %worker_pane.tmux_session_name,
                 usage_tokens,
                 threshold_tokens = threshold.effective_tokens,
                 window_source = window_source.as_str(),
-                "Claude auto compact accepted or queued"
+                "Claude auto compact control submitted after terminal Idle evidence"
             ),
-            Some(CompactSubmitOutcome::PreMutationRefused) => {
-                // No mutation happened (pane was not in an empty-composer state).
-                // Re-arm so a later idle turn retries while usage stays high.
-                rearm_for_retry(&pane, generation);
-                tracing::debug!(
-                    tmux_session_name = %pane.tmux_session_name,
-                    "Claude auto compact refused before mutation; armed flag restored for retry"
-                );
+            Some(Outcome::Ambiguous) => tracing::warn!(
+                tmux_session_name = %worker_pane.tmux_session_name,
+                "Claude auto compact mutation is uncertain; keeping this cycle disarmed"
+            ),
+            Some(Outcome::Obsolete) => {
+                invalidate_after_authority_rejection(&worker_pane, generation, threshold);
             }
-            Some(CompactSubmitOutcome::AmbiguousAfterMutation) => {
-                // Observable retry (replaces the old never-re-arm rule that could
-                // permanently disable auto-compact and let context grow without
-                // bound): re-arm, then `observe_and_decide` next turn only
-                // re-injects when usage is still high AND no compaction was
-                // observed. If the ambiguous send actually landed, occupancy
-                // drops and the re-arm branch keeps it armed without re-injecting.
-                rearm_for_retry(&pane, generation);
-                tracing::warn!(
-                    tmux_session_name = %pane.tmux_session_name,
-                    "Claude auto compact outcome ambiguous after tmux mutation; armed flag restored for observable retry next turn"
-                );
-            }
+            _ => {}
         }
-    });
+        outcome
+    }) {
+        rearm_for_retry(&pane, generation);
+    }
 }
 
 /// Forget every compact armed flag tied to a physical tmux pane. This runs when a
@@ -710,9 +681,7 @@ mod tests {
             ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
             &ProviderKind::Claude,
             None,
-            Some(560_000),
-            Some(0),
-            Some(0),
+            (Some(560_000), Some(0), Some(0)),
             50,
             300_000,
         ));
@@ -721,9 +690,7 @@ mod tests {
             ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
             &ProviderKind::Claude,
             Some("routed-sonnet[1m]"),
-            Some(560_000),
-            Some(0),
-            Some(0),
+            (Some(560_000), Some(0), Some(0)),
             50,
             300_000,
         ));
@@ -737,9 +704,7 @@ mod tests {
             ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
             &ProviderKind::Claude,
             Some("routed-sonnet[1m]"),
-            Some(560_000),
-            None,
-            Some(0),
+            (Some(560_000), None, Some(0)),
             50,
             300_000,
         ));
@@ -753,9 +718,7 @@ mod tests {
             ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
             &ProviderKind::Codex,
             Some("routed-sonnet[1m]"),
-            Some(560_000),
-            Some(0),
-            Some(0),
+            (Some(560_000), Some(0), Some(0)),
             50,
             300_000,
         ));
@@ -958,10 +921,11 @@ mod tests {
                             generation,
                             threshold,
                             &expected_turn,
-                            |_| worker_authority.load(Ordering::SeqCst),
-                            || {
+                            false,
+                            |_| Ok(worker_authority.load(Ordering::SeqCst)),
+                            |_permit| {
                                 worker_sends.fetch_add(1, Ordering::SeqCst);
-                                CompactSubmitOutcome::AcceptedOrQueued
+                                Outcome::Submitted
                             },
                         );
                         outcome_tx.send(outcome).expect("return compact outcome");
@@ -1031,21 +995,15 @@ mod tests {
         ));
     }
 
-    /// Observable retry: a non-confirmed send (`PreMutationRefused` or
-    /// `AmbiguousAfterMutation`) restores the flag so the next turn re-injects
-    /// only while usage stays high, and a real compaction (occupancy drop) is
-    /// still observed instead of re-firing. Mutation guard: `rearm_for_retry`.
-    /// Reverting it (leave disarmed on ambiguous) permanently disables
-    /// auto-compact for a stuck-high pane — the `observe_and_decide(&pane,
-    /// 700_000, ...)` re-inject assert fails.
+    /// An unstarted request can retry while usage remains high; mutated requests cannot.
     #[test]
-    fn ambiguous_after_mutation_rearms_for_observable_retry() {
+    fn known_pre_mutation_refusal_rearms_for_observable_retry() {
         let _guard = state_test_guard();
         let pane = pane();
         let threshold = threshold_for(1_000_000);
         let generation = observe_and_decide(&pane, 700_000, threshold).expect("crossing injects");
         assert_eq!(armed_state(&pane), Some(false));
-        // Simulate the worker's ambiguous-after-mutation outcome.
+        // Simulate a request that never captured its source or sent a key.
         rearm_for_retry(&pane, generation);
         assert_eq!(armed_state(&pane), Some(true));
         // Usage still high and no compaction observed → retry next turn.

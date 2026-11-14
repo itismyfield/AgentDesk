@@ -153,6 +153,7 @@ pub(super) async fn deliver_held_debt_checked(
             shared: shared.clone(),
             state: state.clone(),
             actor: owner.cancel_token,
+            quiet_restart_generation: None,
             delivery,
         })
         .await;

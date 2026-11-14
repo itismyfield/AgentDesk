@@ -611,6 +611,7 @@ pub struct RunDiscordLogState {
     pub sections: Value,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct RunDiscordLogFailure {
     pub status: Option<String>,
@@ -2843,6 +2844,7 @@ impl RoutineStore {
         Ok(result.rows_affected() == 1)
     }
 
+    #[cfg(test)]
     pub async fn get_run_discord_log_failure(
         &self,
         run_id: &str,

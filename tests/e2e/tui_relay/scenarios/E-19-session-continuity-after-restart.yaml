@@ -6,6 +6,12 @@ coverage_class: live
 # Herdr: tmux identity checks are not_applicable; verify same status nonce and published reconnect row.
 cells: [claude-tui, codex-tui, claude-herdr, codex-herdr]
 isolation: required
+feature_coverage:
+  schema: 1
+  references:
+    - feature_id: herdr-handoff
+      scope: Claude/Codex의 재시작 전후 문맥·응답 연속성을 참조한다. 입력은 legacy_automation, output_path는 unspecified다. Herdr에서 tmux identity capture/preservation step은 N/A이며 실제 Herdr host·동일 세션 취소까지 증명하지 않는다.
+      needs_live: true
 destructive: true
 acceptance_criteria:
   - Give the live TUI session a secret token before restart without relaying it.
