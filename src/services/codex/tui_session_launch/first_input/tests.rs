@@ -137,3 +137,6 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
         }
     }
 }
+
+#[path = "native_tests.rs"]
+mod native_tests;

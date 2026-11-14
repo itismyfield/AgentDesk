@@ -37,6 +37,7 @@ pub(super) async fn update_streaming_status_tick(
             .is_some_and(|identity| identity.matches_state(row))
             && row.tmux_session_name.as_deref() == Some(ctx.tmux_session_name.as_str())
             && row.output_path.as_deref() == Some(ctx.output_path.as_str())
+            && row.turn_nonce.as_deref() == ctx.turn_nonce
     })
     .and_then(|row| row.turn_nonce);
     crate::services::tui_o::cutover::wait_codex_first(ctx.channel_id.get(), first_nonce.as_deref())

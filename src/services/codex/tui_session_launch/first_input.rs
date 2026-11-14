@@ -165,12 +165,15 @@ pub(in crate::services::codex) fn observe(input: Observe<'_>) -> Result<(), Stri
         prompt,
     } = input;
     let Submitted {
-        prepared: _prepared,
+        prepared,
         validated_tail,
         rollout_modified_since,
         handoff: _handoff,
     } = submitted;
     let cancel_token_for_post_tail = cancel_token.clone();
+    if validated_tail.context() != &prepared.context {
+        return Err("Codex tail ticket does not name its prepared launch".into());
+    }
     let tail_result = crate::services::codex_tui::tail_launch::dispatch(
         validated_tail,
         working_dir,

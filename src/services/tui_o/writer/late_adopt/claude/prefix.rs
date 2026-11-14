@@ -4,7 +4,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::super::codex::prefix::{Prefix, Verdict, read};
+use super::super::codex::prefix::{Prefix, PrefixClass, Verdict, read};
 use crate::services::tui_o::shadow::identity::{RecordFact, classify};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 
@@ -44,6 +44,7 @@ pub(in crate::services::tui_o::writer::late_adopt) fn judge(source: &SourceId) -
         return Verdict::Wait("the transcript ends inside a record".into());
     }
     Verdict::Eligible(Prefix {
+        class: PrefixClass::OutputFree,
         prompt_digest: None,
         len: bytes.len() as u64,
         sha256: hex::encode(Sha256::digest(&bytes)),

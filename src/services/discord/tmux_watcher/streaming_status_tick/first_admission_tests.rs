@@ -8,7 +8,7 @@ fn a_streaming_tick_waits_only_for_its_captured_turn_and_source() {
     let root = crate::config::TestRuntimeRootGuard::new();
     crate::services::tui_prompt_dedupe::run_serial_test(async {
         let dir = tempfile::tempdir().unwrap();
-        for mismatch in ["turn", "source", "own"] {
+        for mismatch in ["turn", "source", "nonce", "missing-nonce", "own"] {
             let mut fx = seed_row(dir.path(), 8165, false, false);
             let mut captured = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
             fx.provider = ProviderKind::Codex;
@@ -37,6 +37,11 @@ fn a_streaming_tick_waits_only_for_its_captured_turn_and_source() {
                 .unwrap();
             let mut row = load_inflight_state(&fx.provider, channel).unwrap();
             row.turn_nonce = token.turn_nonce().map(str::to_owned);
+            fx.nonce = match mismatch {
+                "nonce" => Some("earlier-captured-turn".into()),
+                "missing-nonce" => None,
+                _ => row.turn_nonce.clone(),
+            };
             if mismatch == "turn" {
                 row.started_at.push('B');
             }

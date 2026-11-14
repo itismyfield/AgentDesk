@@ -499,6 +499,7 @@ async fn run_tick_with_tools(
     let full = body.to_string();
     let ctx = StreamingStatusTickContext {
         turn_identity: None,
+        turn_nonce: None,
         http: &rec.http,
         shared,
         channel_id: fx.channel,

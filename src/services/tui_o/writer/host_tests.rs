@@ -107,6 +107,7 @@ struct TestIo {
     producer: Mutex<Option<ProducerObservation>>,
     custody: Mutex<Result<Custody, String>>,
     queued_bodies: std::sync::atomic::AtomicI64,
+    intake_pool: Mutex<Option<sqlx::PgPool>>,
     fence_error: Mutex<Option<String>>,
     /// Runs once while the next facts are read.
     on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -157,6 +158,7 @@ impl TestIo {
             producer: Mutex::default(),
             custody: Mutex::new(Ok(Custody::Free)),
             queued_bodies: Default::default(),
+            intake_pool: Mutex::default(),
             fence_error: Mutex::default(),
             on_facts: Mutex::default(),
             port_down: Default::default(),
@@ -269,13 +271,27 @@ impl HostIo for TestIo {
         self.calls.lock().unwrap().push(("fence", channel));
         let error = self.fence_error.lock().unwrap().clone();
         let queued_bodies = self.queued_bodies.load(Ordering::SeqCst);
+        let pool = self.intake_pool.lock().unwrap().clone();
         async move {
             if let Some(error) = error {
                 return Err(error);
             }
             let facts = self.activation_facts(channel, provider).await?;
+            let hold = match pool {
+                Some(pool) => {
+                    crate::db::o_channel_activation::fenced_activation_rows(
+                        &pool,
+                        &channel.to_string(),
+                        "first-fixture",
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .0
+                }
+                None => crate::db::o_channel_activation::IntakeFence::empty_for_test(),
+            };
             Ok(crate::services::tui_o::writer::host::FencedFacts {
-                hold: crate::db::o_channel_activation::IntakeFence::empty_for_test(),
+                hold,
                 facts,
                 queued_bodies,
             })

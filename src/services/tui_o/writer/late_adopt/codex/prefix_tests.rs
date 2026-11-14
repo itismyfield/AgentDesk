@@ -257,3 +257,6 @@ fn a_captured_rollout_refuses_what_only_resembles_its_environment_or_mirror() {
         );
     }
 }
+
+#[path = "buffered_tests.rs"]
+mod buffered_tests;

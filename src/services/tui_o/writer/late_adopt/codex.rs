@@ -245,7 +245,12 @@ impl<I: HostIo> Takeover<'_, I> {
         let Some(bound) = bound_after(&events, at.seq) else {
             return Err(Taken::Retry("no rollout bound since the baseline".into()));
         };
-        match prefix::judge(&bound.0) {
+        let verdict = if self.candidate.first_mark().is_some() {
+            prefix::buffered(&bound.0)
+        } else {
+            prefix::judge(&bound.0)
+        };
+        match verdict {
             // Turn mode is confirmed after the taken turn, so a rollout with no prompt is not taken yet.
             Verdict::Eligible(prefix) if prefix.prompt_end.is_none() => Err(Taken::Retry(
                 "the takeover rollout has no first user prompt yet".into(),
@@ -303,6 +308,11 @@ impl<I: HostIo> Takeover<'_, I> {
                 ));
             }
             proof.with_current(|| Ok(())).map_err(Taken::Skip)?;
+        }
+        if matches!(prefix.class, prefix::PrefixClass::Buffered { .. }) && admission.is_none() {
+            return Err(Taken::Skip(
+                "buffered output has no admitted execution proof".into(),
+            ));
         }
         let checked = Checked {
             prefix: prefix.clone(),
@@ -433,7 +443,21 @@ impl<I: HostIo> Takeover<'_, I> {
                 "the binding moved while O fenced the takeover".into(),
             ));
         }
-        match (self.judge)(source) {
+        if checked.admission.is_some() {
+            prefix
+                .preserved_in(source)
+                .map_err(|verdict| match verdict {
+                    Verdict::Wait(detail) => Taken::Retry(detail),
+                    Verdict::Refuse(detail) => Taken::Skip(detail),
+                    Verdict::Eligible(_) => unreachable!(),
+                })?;
+        }
+        let verdict = if checked.admission.is_some() {
+            prefix::buffered(source)
+        } else {
+            (self.judge)(source)
+        };
+        match verdict {
             Verdict::Eligible(now) if now == *prefix => {}
             Verdict::Eligible(_) => {
                 return Err(Taken::Again(

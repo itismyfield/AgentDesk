@@ -101,6 +101,7 @@ struct Fixture {
     tmux: String,
     output_path: String,
     identity: InflightTurnIdentity,
+    nonce: Option<String>,
 }
 
 impl Fixture {
@@ -139,7 +140,7 @@ fn seed_row(root: &std::path::Path, case: u64, terminal: bool, silent: bool) -> 
     row.silent_turn = silent;
     save_inflight_state(&row).expect("seed row");
     let identity = InflightTurnIdentity::from_state(&row);
-    Fixture { provider, channel, tmux, output_path, identity }
+    Fixture { provider, channel, tmux, output_path, identity, nonce: row.turn_nonce }
 }
 
 /// The real `tmux.rs` wrapper with a post-send-shaped patch: anchor id, nonzero
@@ -331,6 +332,7 @@ async fn run_tick_body(
             generation_mtime_ns: 1, reset_incarnation: 0, source_stamp: None,
         },
         turn_identity: Some(&fx.identity),
+        turn_nonce: fx.nonce.as_deref(),
         turn_delivered: &delivered_flag, host: &HostSnapshot::new(WatchHost::Legacy),
     };
     let turn = StreamingStatusTickTurn {

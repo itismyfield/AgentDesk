@@ -444,6 +444,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             terminal_rewind_attempt_key: &mut terminal_rewind_attempt_key,
             terminal_rewind_attempts: &mut terminal_rewind_attempts,
             watcher_turn_identity: &watcher_turn_identity,
+            watcher_turn_nonce: &watcher_turn_nonce,
             last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
             active_stream_inflight_reacquire_logged: &mut active_stream_inflight_reacquire_logged,
         };
