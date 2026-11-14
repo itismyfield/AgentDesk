@@ -999,7 +999,7 @@ async fn an_unreachable_routine_thread_defers_the_run_and_never_runs_on_the_prim
 #[tokio::test]
 async fn people_who_write_while_a_headless_run_holds_the_primary_are_served_once_after_it_pg() {
     use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
-    use poise::serenity_prelude as serenity;
+    use poise::serenity_prelude::{self as serenity, UserId};
     if !api_child(&format!(
         "{TEST}people_who_write_while_a_headless_run_holds_the_primary_are_served_once_after_it_pg"
     )) {
@@ -1035,7 +1035,7 @@ async fn people_who_write_while_a_headless_run_holds_the_primary_are_served_once
     ];
     for (id, text) in inputs {
         let mut message = discord_mock::user_message(id, text);
-        message.channel_id = PRIMARY;
+        (message.channel_id, message.author.id) = (PRIMARY, UserId::new(id));
         let event = serenity::FullEvent::Message {
             new_message: message,
         };
@@ -1055,17 +1055,19 @@ async fn people_who_write_while_a_headless_run_holds_the_primary_are_served_once
             "{text}"
         );
     }
+    // Each input waits exactly once, in order, behind the run that still holds the mailbox.
     let waiting = crate::services::discord::mailbox_snapshot(&fixture.shared, PRIMARY).await;
-    let queued: Vec<_> = waiting
+    let units: Vec<u64> = waiting
         .intervention_queue
         .iter()
-        .map(|input| input.message_id.get())
+        .map(|unit| unit.message_id.get())
         .collect();
-    assert_eq!(
-        queued,
-        [inputs[0].0, inputs[1].0],
-        "each input waits once, in order"
-    );
+    let sources: Vec<u64> = waiting
+        .intervention_queue
+        .iter()
+        .flat_map(|unit| unit.source_message_ids.iter().map(|id| id.get()))
+        .collect();
+    assert_eq!(sources, [inputs[0].0, inputs[1].0], "{units:?}");
     assert!(
         waiting
             .cancel_token
@@ -1074,7 +1076,7 @@ async fn people_who_write_while_a_headless_run_holds_the_primary_are_served_once
     let spawned = || std::fs::read_to_string(fixture.stubs.join("spawned")).unwrap_or_default();
     assert_eq!(spawned().lines().count(), 1, "only the run's own provider");
 
-    // The run ends: the same actor takes each waiting input once, in order.
+    // The run ends: the same actor hands each waiting unit to a turn once, in order.
     std::fs::write(fixture.stubs.join("answer"), "headless-answer-8117").unwrap();
     std::fs::write(fixture.stubs.join("release"), "").unwrap();
     let served = async {
@@ -1082,21 +1084,18 @@ async fn people_who_write_while_a_headless_run_holds_the_primary_are_served_once
         loop {
             let now = crate::services::discord::mailbox_snapshot(&fixture.shared, PRIMARY).await;
             let active = now.active_user_message_id.map(|id| id.get());
-            if let Some(id) = active.filter(|id| inputs.iter().any(|input| input.0 == *id)) {
+            if let Some(id) = active.filter(|id| units.contains(id)) {
                 if served.last() != Some(&id) {
                     served.push(id);
                 }
             }
-            if served.len() == inputs.len() && now.intervention_queue.is_empty() {
+            if served.len() == units.len() && now.intervention_queue.is_empty() {
                 break served;
             }
             tokio::task::yield_now().await;
         }
     };
-    assert_eq!(
-        await_within(served, WAIT_CAP).await,
-        [inputs[0].0, inputs[1].0]
-    );
+    assert_eq!(await_within(served, WAIT_CAP).await, units);
     let current = fixture.shared.mailbox_peek(PRIMARY);
     assert!(current.is_some_and(|current| current.same_actor(&actor)));
     fixture.db.drop().await;
