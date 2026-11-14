@@ -50,7 +50,7 @@ d3에서 더한 것(델타 리뷰 P1-N1·P2-A·P2-B·P2-C):
 
 A1에서 더한 것(0.169.0 fixture):
 
-- **Enter 뒤 순서**(`EnterGap`): d3는 UserPromptSubmit 훅이 `task_started` 기록보다 먼저 온다고 뒀다(`"hook"`, 0.157.1 기준). 0.169.0은 Enter 뒤 약 13ms에 `task_started`를 먼저 쓰고, 훅은 그 0.05~0.7초 뒤에 온다([F] `codex-0.169.0.json`). `"record"`는 Enter와 함께 기록이 쓰인 것으로 보고, `"silent"`는 기록 전의 짧은 순간(아무 신호도 없다)을 남긴다. d3의 68 cfg는 `"hook"`으로 그대로 두었고 결과도 같다.
+- **Enter 뒤 순서**(`EnterGap`): d3는 UserPromptSubmit 훅이 `task_started` 기록보다 먼저 온다고 뒀다(`"hook"`, 0.157.1 기준). 0.169.0은 Enter 뒤 약 13ms에 `task_started`를 먼저 쓰고, 훅은 그 0.1~1.0초 뒤에 온다([F] `codex-0.169.0.json`). `"record"`는 Enter와 함께 기록이 쓰인 것으로 보고, `"silent"`는 기록 전의 짧은 순간(아무 신호도 없다)을 남긴다. d3의 68 cfg는 `"hook"`으로 그대로 두었고 결과도 같다.
 
 74 cfg: GREEN 40, 의도한 RED 34, 예상 밖 0. 호스트별 전/후 표와 반례의 코드 대조는 보고서에 있다. 설계에 반영한 반례는 다음과 같다.
 
