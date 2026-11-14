@@ -178,6 +178,7 @@ SWITCH_ON='{"schema":1,"o_tui_writer":true,"o_ledger_operator_resume":false,"o_s
 CAPABLE='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":true}'
 NOTICE_CAPABLE='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":false,"o_ledger_input_notice":true}'
 BOTH_CAPABLE='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":true,"o_ledger_input_notice":true}'
+SCHEDULED_CAPABLE='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":false,"o_ledger_input_notice":true,"o_ledger_scheduled_input_notice":true}'
 OLD_MANIFEST='{"repo_head":"abc","latest_postgres_migration":"0001_init.sql"}'
 LEGACY_MANIFEST='{"repo_head":"abc","o_tui_writer":"false"}'
 O_MANIFEST='{"repo_head":"abc","o_tui_writer":"true"}'
@@ -253,6 +254,7 @@ mkdir -p "$ADK_REL/o_store"
 printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
 printf '1\n' >"$ADK_REL/o_store/input_notice.floor"
 expect "both floors, compatible target" rolled_back
+
 echo "== failed initial readiness respects the target spool reader =="
 SPOOL_V6='{"schema":1,"o_tui_writer":true,"o_spool_write_version":6,"o_spool_readable_versions":[2,3,4,5,6]}'
 seed_v7_store() {
@@ -325,6 +327,46 @@ for notice in true false; do
         fi
         AGENTDESK_DEPLOY_FORCE_ROLLBACK=1 expect "notice=$notice, spool=$spool" "$expected" readiness "$reason"
     done
+done
+
+echo "== the scheduled-fire evidence floor needs a reader that replays it =="
+# The manifest a build that reads notices but drops scheduled-fire evidence records.
+NOTICE_ONLY_MANIFEST='{"o_tui_writer":"false","o_ledger_input_notice":true}'
+SCHEDULED_MANIFEST='{"o_tui_writer":"false","o_ledger_input_notice":true,"o_ledger_scheduled_input_notice":true}'
+seed_notice_floors() {
+    mkdir -p "$ADK_REL/o_store"
+    printf '1\n' >"$ADK_REL/o_store/input_notice.floor"
+    [ "${1:-}" = none ] || printf '1\n' >"$ADK_REL/o_store/scheduled_input_notice.floor"
+}
+setup_case "$SWITCH_OFF" "$NOTICE_ONLY_MANIFEST"
+seed_notice_floors none
+expect "no scheduled evidence, notice-only reader" rolled_back
+for target in "$NOTICE_ONLY_MANIFEST" "not json" "" \
+    '{"o_tui_writer":"false","o_ledger_input_notice":true,"o_ledger_scheduled_input_notice":false}' \
+    '{"o_tui_writer":"false","o_ledger_input_notice":true,"o_ledger_scheduled_input_notice":"true"}'; do
+    setup_case "$SWITCH_OFF" "$target"
+    seed_notice_floors
+    AGENTDESK_DEPLOY_FORCE_ROLLBACK=1 expect "scheduled floor, incompatible target: $target" refused direct \
+        "O ledger floor requires a compatible reader"
+done
+setup_case "$SWITCH_OFF" "$SCHEDULED_MANIFEST"
+seed_notice_floors
+expect "scheduled floor, compatible target" rolled_back
+setup_case "$SWITCH_OFF" "$NOTICE_ONLY_MANIFEST"
+seed_notice_floors none
+ln -s "$TMP_ROOT/missing-floor" "$ADK_REL/o_store/scheduled_input_notice.floor"
+expect "scheduled floor broken symlink, notice-only target" refused
+for scheduled in false true; do
+    setup_case "$SWITCH_ON" \
+        "{\"o_tui_writer\":\"true\",\"o_ledger_input_notice\":true,\"o_ledger_scheduled_input_notice\":$scheduled}"
+    seed_v7_store
+    seed_notice_floors
+    if [ "$scheduled" = true ]; then
+        expect "failed readiness, scheduled reader target" rolled_back readiness
+    else
+        AGENTDESK_DEPLOY_FORCE_ROLLBACK=1 expect "failed readiness, notice-only target" refused readiness \
+            "O ledger floor requires a compatible reader"
+    fi
 done
 
 echo "== an unreadable switch counts as on =="
@@ -407,10 +449,13 @@ expect_build_floor() {
     if [ "$3" = yes ] || [ "$3" = both ]; then
         printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
     fi
-    if [ "$3" = notice ] || [ "$3" = both ]; then
+    if [ "$3" = notice ] || [ "$3" = both ] || [ "$3" = scheduled ]; then
         printf '1\n' >"$ADK_REL/o_store/input_notice.floor"
     elif [ "$3" = notice-symlink ]; then
         ln -s "$TMP_ROOT/missing-floor" "$ADK_REL/o_store/input_notice.floor"
+    fi
+    if [ "$3" = scheduled ]; then
+        printf '1\n' >"$ADK_REL/o_store/scheduled_input_notice.floor"
     fi
     actual="$(run_floor_check "$ARTIFACT" 2>"$TMP_ROOT/floor-error")" || status=$?
     if [ "$4" = refused ]; then
@@ -465,6 +510,19 @@ import sys
 assert json.load(open(sys.argv[1]))["o_ledger_input_notice"] is False
 PY
 then pass "manifest keeps a missing InputNotice capability false"; else fail "manifest invents notice capability"; fi
+for build in "$SCHEDULED_CAPABLE" "$NOTICE_CAPABLE"; do
+    setup_case "$build" ""
+    _write_release_source_manifest >/dev/null 2>&1 || true
+    expected=False
+    [ "$build" = "$NOTICE_CAPABLE" ] || expected=True
+    if python3 - "$MANIFEST" "$expected" <<'PY'
+import json
+import sys
+assert json.load(open(sys.argv[1]))["o_ledger_scheduled_input_notice"] is (sys.argv[2] == "True")
+PY
+    then pass "manifest records scheduled evidence capability $expected"
+    else fail "manifest scheduled evidence capability is not $expected"; fi
+done
 setup_case "" ""
 _write_release_source_manifest >/dev/null 2>&1 || true
 recorded="$(_manifest_o_tui_writer || true)"
@@ -491,8 +549,18 @@ expect_build_floor "both floors, only operator build" "$CAPABLE" both refused
 expect_build_floor "both floors, only notice build" "$NOTICE_CAPABLE" both refused
 expect_build_floor "both floors, capable build" "$BOTH_CAPABLE" both staged
 
+echo "== the scheduled-fire evidence floor guards the selected build before staging =="
+expect_build_floor "scheduled floor, scheduled reader build" "$SCHEDULED_CAPABLE" scheduled staged
+expect_build_floor "no scheduled floor, notice-only build" "$NOTICE_CAPABLE" notice staged
+expect_build_floor "scheduled floor, notice-only build" "$NOTICE_CAPABLE" scheduled refused
+expect_build_floor "scheduled floor, false capability" \
+    '{"schema":1,"o_ledger_input_notice":true,"o_ledger_scheduled_input_notice":false}' scheduled refused
+expect_build_floor "scheduled floor, string capability" \
+    '{"schema":1,"o_ledger_input_notice":true,"o_ledger_scheduled_input_notice":"true"}' scheduled refused
+expect_build_floor "scheduled floor, missing build-info" "" scheduled refused
+
 echo "== the binary reports every switch this script reads =="
-for field in o_tui_writer o_ledger_operator_resume o_ledger_input_notice o_spool_write_version o_spool_readable_versions; do
+for field in o_tui_writer o_ledger_operator_resume o_ledger_input_notice o_ledger_scheduled_input_notice o_spool_write_version o_spool_readable_versions; do
     if grep -q "\"$field\":" "$REPO_ROOT/src/cli/build_info.rs"; then
         pass "build-info reports $field"
     else

@@ -235,8 +235,8 @@ fn a_scheduled_fire_row_is_announced_once_under_the_scheduled_header() {
 fn only_a_fire_s_own_human_class_row_reads_as_scheduled() {
     let edits: [(&str, &str, &str); 4] = [
         (
-            "meta row of no scheduled task",
-            r#""scheduledTaskId":"abbf09df","#,
+            "meta row with only its turn's scheduled origin",
+            r#""wakeupSource":"schedule_wakeup","scheduledTaskId":"abbf09df","#,
             "",
         ),
         (
@@ -265,6 +265,28 @@ fn only_a_fire_s_own_human_class_row_reads_as_scheduled() {
                 .unwrap()
                 .is_none(),
             "{case}"
+        );
+    }
+}
+
+#[test]
+fn either_fire_mark_alone_reads_as_scheduled_as_on_the_hook_path() {
+    // Claude 2.1.295 wrote no `wakeupSource`; the hook path takes either mark.
+    for mark in [
+        r#""wakeupSource":"schedule_wakeup","#,
+        r#""scheduledTaskId":"abbf09df","#,
+    ] {
+        let row = SCHEDULED_USER_ROW.replace(mark, "");
+        assert_ne!(row, SCHEDULED_USER_ROW, "{mark}");
+        let row = captured(&row);
+        assert!(needs_origin(&row), "{mark}");
+        let piece = project(&mut Projection::for_tests(), &row)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{mark}"));
+        assert_eq!(
+            piece.payload,
+            format!("-# ⏰ scheduled prompt\n```\n{SCHEDULED_TEXT}\n```"),
+            "{mark}"
         );
     }
 }

@@ -647,6 +647,7 @@ _write_release_source_manifest() {
     AGENTDESK_MANIFEST_O_TUI_WRITER="$(_binary_build_flag "${REL_BINARY:-}" o_tui_writer)" \
     AGENTDESK_MANIFEST_O_LEDGER_OPERATOR_RESUME="$(_binary_build_flag "${REL_BINARY:-}" o_ledger_operator_resume)" \
     AGENTDESK_MANIFEST_O_LEDGER_INPUT_NOTICE="$(_binary_build_flag "${REL_BINARY:-}" o_ledger_input_notice)" \
+    AGENTDESK_MANIFEST_O_LEDGER_SCHEDULED_INPUT_NOTICE="$(_binary_build_flag "${REL_BINARY:-}" o_ledger_scheduled_input_notice)" \
     python3 - "$manifest_tmp" <<PY
 import json
 import os
@@ -674,6 +675,7 @@ payload = {
     "o_tui_writer": os.environ.get("AGENTDESK_MANIFEST_O_TUI_WRITER", "unknown"),
     "o_ledger_operator_resume": os.environ.get("AGENTDESK_MANIFEST_O_LEDGER_OPERATOR_RESUME") == "true",
     "o_ledger_input_notice": os.environ.get("AGENTDESK_MANIFEST_O_LEDGER_INPUT_NOTICE") == "true",
+    "o_ledger_scheduled_input_notice": os.environ.get("AGENTDESK_MANIFEST_O_LEDGER_SCHEDULED_INPUT_NOTICE") == "true",
 }
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
@@ -1016,7 +1018,7 @@ PY
 _rollback_would_revert_o_ledger() {
     # Only first use raises the floor; an unused new build can still roll back after a failed deploy.
     local floor field
-    for field in o_ledger_operator_resume o_ledger_input_notice; do
+    for field in o_ledger_operator_resume o_ledger_input_notice o_ledger_scheduled_input_notice; do
         floor="$ADK_REL/o_store/${field#o_ledger_}.floor"
         [ -e "$floor" ] || [ -L "$floor" ] || continue
         if ! python3 - "$ADK_REL/runtime/release-source.json" "$field" <<'PY' 2>/dev/null
@@ -1039,7 +1041,7 @@ PY
 _binary_would_revert_o_ledger() {
     # Any used ledger format requires a reader this binary explicitly supports.
     local floor field
-    for field in o_ledger_operator_resume o_ledger_input_notice; do
+    for field in o_ledger_operator_resume o_ledger_input_notice o_ledger_scheduled_input_notice; do
         floor="$ADK_REL/o_store/${field#o_ledger_}.floor"
         [ -e "$floor" ] || [ -L "$floor" ] || continue
         [ "$(_binary_build_flag "$1" "$field")" = "true" ] || return 0

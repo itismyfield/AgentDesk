@@ -831,6 +831,8 @@ fn slash_command_control_turn_is_first_sighting(tmux_session_name: &str, kind: &
 }
 
 fn prepare_local_only_slash_control_note(prompt: &ObservedTuiPrompt, kind: &str) -> Option<String> {
+    let paired =
+        slash_command_output::take_output_command(&prompt.tmux_session_name, kind, &prompt.prompt);
     if !slash_command_control_turn_is_first_sighting(&prompt.tmux_session_name, kind) {
         crate::services::tui_prompt_dedupe::seal_deduped_local_only_entry_id(prompt);
         return None;
@@ -839,6 +841,7 @@ fn prepare_local_only_slash_control_note(prompt: &ObservedTuiPrompt, kind: &str)
         &prompt.tmux_session_name,
         kind,
         &prompt.prompt,
+        paired,
     ))
 }
 

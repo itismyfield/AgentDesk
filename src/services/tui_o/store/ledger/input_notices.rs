@@ -69,6 +69,21 @@ pub enum NoticeEntry {
     },
 }
 
+impl NoticeEntry {
+    /// Evidence of a scheduled fire's own row, which a reader that drops `isMeta` rows refuses.
+    pub fn records_scheduled_fire(&self) -> bool {
+        let Self::Materialized { evidence } = self else {
+            return false;
+        };
+        serde_json::from_slice(&evidence.raw_record)
+            .ok()
+            .and_then(|raw: serde_json::Value| {
+                crate::services::tui_prompt_dedupe::extract_claude_writer_input_with_entry_id(&raw)
+            })
+            .is_some_and(|(_, _, scheduled)| scheduled)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MigrationDebt {
     pub reason: String,

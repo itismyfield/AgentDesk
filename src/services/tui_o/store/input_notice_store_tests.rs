@@ -166,3 +166,89 @@ fn input_notice_origin_survives_read_only_observer_for_legacy_and_current_prepar
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }
+
+/// Evidence of `row`, whose origin the writer has not bound yet.
+fn unbound_evidence(row: serde_json::Value, start: u64) -> LedgerEntry {
+    use crate::services::tui_o::shadow::{
+        ShadowProvider, SourceId, SourceRange, UnitKey, UnitKind,
+    };
+    use sha2::{Digest, Sha256};
+    let prompt = row["message"]["content"].as_str().unwrap().to_string();
+    let raw_record = serde_json::to_vec(&row).unwrap();
+    LedgerEntry::InputNotice {
+        entry: Box::new(NoticeEntry::Materialized {
+            evidence: Box::new(super::ledger::input_notices::NoticeEvidence {
+                record: SourceRange {
+                    source: SourceId {
+                        session_id: "native".into(),
+                        path: "/tmp/transcript.jsonl".into(),
+                        dev: 1,
+                        ino: 2,
+                    },
+                    start,
+                    end: start + raw_record.len() as u64 + 1,
+                },
+                raw_record,
+                prompt_sha256: Some(hex::encode(Sha256::digest(prompt.as_bytes()))),
+                prompt: Some(prompt),
+                unit_key: Some(UnitKey {
+                    channel_id: 7,
+                    provider: ShadowProvider::Claude,
+                    native_key: row["uuid"].as_str().unwrap().into(),
+                    kind: UnitKind::InputNotice,
+                }),
+                payload: None,
+                origin: None,
+            }),
+        }),
+    }
+}
+
+#[test]
+fn scheduled_fire_evidence_floor_precedes_its_first_append() {
+    let runtime = tempfile::tempdir().unwrap();
+    let store = tests::enabled(runtime.path());
+    let era = tests::sealed(&store, &[7]);
+    let root = runtime.path().join("o_store");
+    let floor = root.join("scheduled_input_notice.floor");
+    let ledger = root.join("7/ledger.jsonl");
+    let mut channel = store.open_channel(&era, 7).unwrap().unwrap();
+    let typed = serde_json::json!({"type": "user", "uuid": "typed-row",
+        "message": {"role": "user", "content": "typed by a person"}});
+    channel.append_ledger(unbound_evidence(typed, 0)).unwrap();
+    assert!(root.join("input_notice.floor").exists());
+    assert!(
+        !floor.exists(),
+        "a typed input's evidence any notice reader replays"
+    );
+
+    let fire = serde_json::json!({"type": "user", "isMeta": true, "uuid": "fire-row",
+        "scheduledTaskId": "abbf09df", "message": {"role": "user", "content": "scheduled run"}});
+    let written = std::fs::read(&ledger).unwrap();
+    let failure = durable::fault::plant(
+        &root,
+        durable::fault::Step::Write,
+        io::ErrorKind::StorageFull,
+        None,
+    );
+    assert!(
+        channel
+            .append_ledger(unbound_evidence(fire.clone(), 500))
+            .is_err()
+    );
+    assert!(!floor.exists());
+    assert_eq!(
+        std::fs::read(&ledger).unwrap(),
+        written,
+        "no evidence without its floor"
+    );
+    drop((failure, channel));
+
+    let mut reopened = store.open_channel(&era, 7).unwrap().unwrap();
+    reopened.append_ledger(unbound_evidence(fire, 500)).unwrap();
+    assert_eq!(std::fs::read(&floor).unwrap(), b"1\n");
+    drop(reopened);
+    let replayed = store.open_channel(&era, 7).unwrap().unwrap();
+    assert_eq!(replayed.ledger().violation(), None);
+    assert_eq!(replayed.ledger().input_notices().evidence.len(), 2);
+}

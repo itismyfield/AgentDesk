@@ -104,7 +104,7 @@ pub(super) fn origin_in_rows(rows: &str, prompt_id: &str, prompt: &str) -> Origi
                 if row["promptId"] == prompt_id
                     && row_text(&row).as_deref().map(str::trim) == Some(wanted) =>
             {
-                if carries_scheduled_marks(&row) {
+                if crate::services::tui_prompt_dedupe::carries_scheduled_fire_marks(&row) {
                     return Origin::Scheduled;
                 }
                 typed = true;
@@ -132,17 +132,6 @@ fn row_text(row: &Value) -> Option<String> {
         }
         _ => None,
     }
-}
-
-/// `turnOrigin` belongs to the whole turn, so an input typed into a scheduled turn and that
-/// turn's compact summary carry it too; only the fire's own marks count.
-fn carries_scheduled_marks(row: &Value) -> bool {
-    row["isCompactSummary"] != true
-        && (row["scheduledTaskId"].is_string()
-            || matches!(
-                row["wakeupSource"].as_str(),
-                Some("schedule_wakeup" | "loop_wakeup")
-            ))
 }
 
 fn read_tail(path: &Path) -> Option<String> {

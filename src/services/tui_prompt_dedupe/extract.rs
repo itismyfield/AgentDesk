@@ -101,6 +101,17 @@ pub(crate) fn is_claude_compact_summary(json: &Value) -> bool {
     json.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
 }
 
+/// A scheduled-task fire's own row marks, which the hook and the writer both read. `turnOrigin`
+/// belongs to the whole turn, so a typed input and a compact summary of that turn carry it too.
+pub(crate) fn carries_scheduled_fire_marks(json: &Value) -> bool {
+    !is_claude_compact_summary(json)
+        && (json.get("scheduledTaskId").is_some_and(Value::is_string)
+            || matches!(
+                json.get("wakeupSource").and_then(Value::as_str),
+                Some("schedule_wakeup" | "loop_wakeup")
+            ))
+}
+
 /// #3540: same extraction as [`extract_claude_transcript_user_prompt`], but also
 /// returns the JSONL entry's STABLE identity (`uuid`) when present.
 ///
@@ -157,12 +168,10 @@ pub(crate) fn extract_claude_writer_input_with_entry_id(
     if let Some((prompt, entry_id)) = extract_claude_transcript_user_prompt_with_entry_id(json) {
         return Some((prompt, entry_id, false));
     }
+    // The shared extraction drops every `isMeta` row; the writer takes back only a fire's own.
     let scheduled_fire = json.get("isMeta").and_then(Value::as_bool) == Some(true)
-        && json.get("scheduledTaskId").is_some_and(Value::is_string);
-    if json.get("type").and_then(Value::as_str) != Some("user")
-        || !scheduled_fire
-        || is_claude_compact_summary(json)
-    {
+        && carries_scheduled_fire_marks(json);
+    if json.get("type").and_then(Value::as_str) != Some("user") || !scheduled_fire {
         return None;
     }
     let message = json.get("message")?;

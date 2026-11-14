@@ -1,4 +1,5 @@
-//! The notice ledger format becomes mandatory before its first new entry is appended.
+//! The notice ledger format becomes mandatory before its first new entry is appended, and the
+//! scheduled-fire evidence format before its first such entry.
 
 use std::fs::{self, File};
 use std::io;
@@ -8,14 +9,25 @@ use super::durable;
 use crate::domain::file_sync::fsync_parent_dir;
 
 const FILE_NAME: &str = "input_notice.floor";
+/// A build whose ledger reader drops `isMeta` rows refuses a scheduled fire's evidence, so the
+/// deploy guard needs this floor's reader capability before it rolls back.
+const SCHEDULED_FILE_NAME: &str = "scheduled_input_notice.floor";
 const CONTENT: &[u8] = b"1\n";
 
 pub(super) fn before_append(store_root: &Path, enabled: bool) -> io::Result<()> {
     if !enabled {
         return Ok(());
     }
+    raise(store_root, FILE_NAME)
+}
+
+pub(super) fn before_scheduled_append(store_root: &Path) -> io::Result<()> {
+    raise(store_root, SCHEDULED_FILE_NAME)
+}
+
+fn raise(store_root: &Path, file_name: &str) -> io::Result<()> {
     durable::ensure_dir(store_root)?;
-    let path = store_root.join(FILE_NAME);
+    let path = store_root.join(file_name);
     match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             if let Err(error) = durable::create_once(&path, CONTENT)
@@ -30,11 +42,11 @@ pub(super) fn before_append(store_root: &Path, enabled: bool) -> io::Result<()> 
     if !fs::symlink_metadata(&path)?.is_file() || fs::read(&path)? != CONTENT {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "input notice floor is not a regular schema-1 marker",
+            format!("{file_name} is not a regular schema-1 marker"),
         ));
     }
     // A published floor left by a failed append stays mandatory on the next attempt.
-    File::open(store_root.join(FILE_NAME))?.sync_all()?;
+    File::open(store_root.join(file_name))?.sync_all()?;
     fsync_parent_dir(&path)
 }
 

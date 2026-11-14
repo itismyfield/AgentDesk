@@ -24,9 +24,15 @@ fn observed_control(row: &str) -> (String, String) {
     (control.kind, prompt)
 }
 
+/// One row through the relay's bookkeeping and note, without its display dedupe.
+fn note(tmux: &str, kind: &str, raw: &str) -> String {
+    let paired = take_output_command(tmux, kind, raw);
+    local_slash_control_note(tmux, kind, raw, paired)
+}
+
 fn note_for_row(tmux: &str, row: &str) -> String {
     let (kind, prompt) = observed_control(row);
-    local_slash_control_note(tmux, &kind, &prompt)
+    note(tmux, &kind, &prompt)
 }
 
 /// The note every local-only row had before this issue.
@@ -87,9 +93,9 @@ fn output_row_without_a_command_row_keeps_the_kind_only_note() {
 #[test]
 fn multi_line_output_keeps_its_lines_and_cannot_close_the_block() {
     let tmux = "AgentDesk-claude-i8142-slash-lines";
-    local_slash_control_note(tmux, "/status", "<command-name>/status</command-name>");
+    note(tmux, "/status", "<command-name>/status</command-name>");
     assert_eq!(
-        local_slash_control_note(
+        note(
             tmux,
             "local-command-stdout",
             "<local-command-stdout>\nmodel: sonnet\n  effort: low\n@everyone ```\n</local-command-stdout>",
@@ -106,17 +112,17 @@ fn command_name_that_is_not_a_plain_token_or_an_empty_output_keeps_the_kind_only
     let tmux = "AgentDesk-claude-i8142-slash-odd";
     let done = "<local-command-stdout>done</local-command-stdout>";
     for odd in ["/my_plugin_cmd", "/a`b", "/"] {
-        local_slash_control_note(tmux, odd, "<command-name>x</command-name>");
+        note(tmux, odd, "<command-name>x</command-name>");
         assert_eq!(
-            local_slash_control_note(tmux, "local-command-stdout", done),
+            note(tmux, "local-command-stdout", done),
             kind_only_note(tmux, "local-command-stdout", done),
             "{odd}"
         );
     }
     let empty = "<local-command-stdout>  </local-command-stdout>";
-    local_slash_control_note(tmux, "/model", "<command-name>/model</command-name>");
+    note(tmux, "/model", "<command-name>/model</command-name>");
     assert_eq!(
-        local_slash_control_note(tmux, "local-command-stdout", empty),
+        note(tmux, "local-command-stdout", empty),
         kind_only_note(tmux, "local-command-stdout", empty)
     );
 }
@@ -129,10 +135,15 @@ fn an_output_row_with_a_command_kind_of_its_own_names_no_later_output() {
         "<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>";
     let kind = slash_command_control_kind(compacted);
     assert_eq!(kind, "/compact");
-    local_slash_control_note(tmux, &kind, compacted);
+    // The real command row comes first; its output row ends the slot it opened.
+    note(tmux, "/compact", "<command-name>/compact</command-name>");
+    assert_eq!(
+        note(tmux, &kind, compacted),
+        kind_only_note(tmux, &kind, compacted)
+    );
     let cost = "<local-command-stdout>Total cost: $1.00</local-command-stdout>";
     assert_eq!(
-        local_slash_control_note(tmux, "local-command-stdout", cost),
+        note(tmux, "local-command-stdout", cost),
         kind_only_note(tmux, "local-command-stdout", cost)
     );
 }
