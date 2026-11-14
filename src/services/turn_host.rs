@@ -210,6 +210,28 @@ where
     }
 }
 
+/// A headless start's first judgement: only the greeting an authorized restart queued passes as
+/// the intake does; every other headless start on a configured channel stays refused.
+pub(crate) async fn start_refusal_before_turn<F>(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: impl FnOnce() -> F,
+    restart_seed: bool,
+) -> Option<HerdrRefusal>
+where
+    F: std::future::Future<Output = Option<String>>,
+{
+    match refusal_before_turn(pool, provider, channel_id, session_key).await {
+        Some(HerdrRefusal::ExecutorNotWired)
+            if restart_seed && herdr_turn_switched_on_for(provider) =>
+        {
+            None
+        }
+        judged => judged,
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static FORCED_SWITCH: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };

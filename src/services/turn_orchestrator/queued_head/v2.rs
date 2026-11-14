@@ -127,6 +127,7 @@ impl Owner {
         if self.effort_blocks(None)
             || !self.front().is_some_and(|front| is_front(&front, held))
             || self.person_at(0)
+            || self.seed_front()
         {
             return Ok(false);
         }

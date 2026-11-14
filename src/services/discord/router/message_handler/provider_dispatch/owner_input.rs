@@ -523,6 +523,11 @@ impl OwnerTurn {
         self.claim.front()
     }
 
+    /// Whether this turn starts the greeting an authorized restart queued.
+    pub(in crate::services::discord) fn restart_seed(&self) -> bool {
+        self.origin == InputOrigin::RestartSeed
+    }
+
     /// No effect began: leave the original at the owner's front until another real wake.
     pub(in crate::services::discord) fn defer_before_submit(self, reason: &str) {
         let _ = self.settled.send(Err(effect::unsent(reason.into())));
@@ -869,6 +874,10 @@ async fn start_idle(
     .await?;
     // A start waits unclaimed behind a turn it did not start; that turn's idle wakes the owner.
     let wait = match &kept {
+        // The greeting's permit, not a tmux pane read, decides when it may start.
+        Some(context) if InputOrigin::from_context(Some(context)) == InputOrigin::RestartSeed => {
+            Wait::Go
+        }
         Some(context) if !InputOrigin::from_context(Some(context)).is_person() => {
             start_waits(&shared, channel, context).await
         }
@@ -889,6 +898,8 @@ async fn start_idle(
     let (settled, answer) = tokio::sync::oneshot::channel();
     let origin = InputOrigin::from_context(kept.as_ref());
     let failed = super::start_failure::Failure::claimed(&mailbox, &claim);
+    let permit = super::start_failure::greeting_permit;
+    let failed = permit(&shared, channel, kept.as_ref(), failed).await?;
     let refusal = std::sync::Arc::new(Mutex::new(None));
     let owner = OwnerTurn {
         mailbox,

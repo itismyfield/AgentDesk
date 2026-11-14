@@ -25,6 +25,20 @@ impl Operation {
     pub(crate) fn channel(&self) -> u64 {
         self.channel
     }
+
+    /// The greeting's source message and admission ticket, fixed by the operation alone.
+    pub(crate) fn seed_identity(&self) -> (u64, String) {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        for part in ["agentdesk-restart-seed-v1", &self.namespace, &self.id] {
+            hash.update((part.len() as u64).to_be_bytes());
+            hash.update(part.as_bytes());
+        }
+        hash.update(self.channel.to_be_bytes());
+        let digest = hash.finalize();
+        let message = u64::from_be_bytes(digest[..8].try_into().expect("eight bytes")) | (1 << 63);
+        (message, format!("restart-{}", hex::encode(&digest[..28])))
+    }
 }
 
 #[cfg(test)]

@@ -15,16 +15,17 @@ use crate::services::turn_orchestrator::{PendingQueueItem, v2_queue};
 use poise::serenity_prelude as serenity;
 
 #[test]
-fn restart_common_refuses_future_legacy_unplaced_and_foreign_canonical_rows_pg() {
+fn restart_common_refuses_future_unplaced_and_foreign_canonical_rows_pg() {
     let Some((rig, runtime)) = rig_child(
-        "restart_refusal_tests::restart_common_refuses_future_legacy_unplaced_and_foreign_canonical_rows_pg",
+        "restart_refusal_tests::restart_common_refuses_future_unplaced_and_foreign_canonical_rows_pg",
     ) else {
         return;
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
     runtime.block_on(async {
-        let cases = ["future-schema", "legacy-sql-null", "unplaced-pending", "foreign-owner"];
-        for (index, case) in cases.into_iter().enumerate() {
+        // A legacy row is no refusal: the greeting's own turn takes it (restart_channel_tests).
+        let cases = [(0, "future-schema"), (2, "unplaced-pending"), (3, "foreign-owner")];
+        for (index, case) in cases {
             let node = Node::bind(&rig, HostedState::Bound, Some(DISPATCH)).await;
             let mut record = rig.record_as(
                 (&node.shared.token_hash, &node.key),
@@ -37,7 +38,6 @@ fn restart_common_refuses_future_legacy_unplaced_and_foreign_canonical_rows_pg()
                     future["schema"] = json!(9917);
                     Some(future)
                 }
-                1 => None,
                 2 => {
                     record.state = HostedState::Pending;
                     record.location = None;
@@ -71,7 +71,6 @@ fn restart_common_refuses_future_legacy_unplaced_and_foreign_canonical_rows_pg()
             };
             match (index, &found.record) {
                 (0, HostedRecord::Unknown(value)) => assert_eq!(value["schema"], json!(9917)),
-                (1, HostedRecord::Legacy) => assert!(raw.is_none(), "SQL NULL, not JSON null"),
                 (2, HostedRecord::Known(known)) => {
                     assert_eq!(known.state, HostedState::Pending);
                     assert!(known.location.is_none() && known.expected.is_none());

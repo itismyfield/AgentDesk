@@ -156,8 +156,9 @@ async fn start_reserved_headless_turn_admitted(
         async move { build_adk_session_key(shared, channel_id, provider, basis.as_deref()).await }
     };
     let pool = shared.pg_pool.as_ref();
-    let host = crate::services::turn_host::refusal_before_turn;
-    if let Some(refusal) = host(pool, &provider, channel_id.get(), session_key).await {
+    let host = crate::services::turn_host::start_refusal_before_turn;
+    let seed = owner.as_ref().is_some_and(|owner| owner.restart_seed());
+    if let Some(refusal) = host(pool, &provider, channel_id.get(), session_key, seed).await {
         #[cfg(unix)]
         if let Some(owner) = owner.as_ref() {
             owner.refused(refusal.clone());

@@ -88,6 +88,20 @@ pub(crate) async fn admit_with_context(
     ticket: AdmissionTicket,
     context: serde_json::Value,
 ) -> Admission {
+    // Only the restart command admits its greeting; no other ingress may borrow that source.
+    if ChannelMailboxHandle::restart_seed_input(Some(&context)) {
+        return Admission::Rejected("restart_seed_source_reserved".into());
+    }
+    admit_reserved(handle, original, ticket, context).await
+}
+
+/// The admission itself, for the one caller allowed a reserved source.
+pub(super) async fn admit_reserved(
+    handle: &ChannelMailboxHandle,
+    original: &PendingQueueItem,
+    ticket: AdmissionTicket,
+    context: serde_json::Value,
+) -> Admission {
     match handle
         .v2_admit_ticket_with_context(original.clone(), ticket.0.clone(), context)
         .await

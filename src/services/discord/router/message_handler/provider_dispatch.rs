@@ -29,7 +29,8 @@ pub(in crate::services::discord) use owner_input::{
 };
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use owner_input::{
-    owner_drive as owner_drive_for_test, start_idle_for_test,
+    install_root_recovery_launch, owner_drive as owner_drive_for_test, start_idle_for_test,
+    wake_drive_for_test,
 };
 pub(super) mod replay_scope;
 
@@ -45,6 +46,9 @@ impl OwnerTurn {
     }
     pub(in crate::services::discord) async fn complete_locally(self) {
         match self {}
+    }
+    pub(in crate::services::discord) fn restart_seed(&self) -> bool {
+        match *self {}
     }
 }
 
@@ -1100,6 +1104,22 @@ pub(super) mod tests {
         }
         assert_eq!(judge(true, Some(true)).await, None, "intake on");
         assert_eq!(judge(false, Some(true)).await, not_wired, "headless on");
+        // Only the greeting a restart command queued passes the headless entry, and only while
+        // the switch is on; every other headless start stays refused.
+        let start = |seed: bool, on: Option<bool>| {
+            let (pool, provider) = (&pool, &provider);
+            async move {
+                let _switch = crate::services::turn_host::force_switch_for_test(on);
+                let key = || async { Some(session_key.to_owned()) };
+                let entry = crate::services::turn_host::start_refusal_before_turn;
+                entry(Some(pool), provider, CHANNEL, key, seed).await
+            }
+        };
+        assert_eq!(start(true, Some(true)).await, None, "greeting on");
+        assert_eq!(start(false, Some(true)).await, not_wired, "other start on");
+        for off in [None, Some(false)] {
+            assert_eq!(start(true, off).await, not_wired, "greeting {off:?}");
+        }
         for driver in ["tmux.calls", "claude.calls"] {
             assert!(!root.path().join(driver).exists(), "{driver} ran");
         }

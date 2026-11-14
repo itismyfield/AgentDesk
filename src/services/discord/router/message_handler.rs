@@ -55,7 +55,7 @@ mod provider_dispatch;
 pub(in crate::services::discord) use self::provider_dispatch::hand_busy;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use self::provider_dispatch::{
-    owner_drive_for_test, start_idle_for_test,
+    install_root_recovery_launch, owner_drive_for_test, start_idle_for_test, wake_drive_for_test,
 };
 #[cfg(all(test, unix))]
 pub(crate) use provider_dispatch::herdr_tests::exact_close_tests::OldTmux as PrivateOldTmuxForTest;

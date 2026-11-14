@@ -30,7 +30,7 @@ Init == \E endedBeforeRequest \in {FALSE, TRUE} : s = [cmd |-> "idle", seed |-> 
              settled |-> ~(Busy /\ NeedsClose /\ (Seeded \/ CrashOn \/ ~endedBeforeRequest)),
              warned |-> FALSE, awake |-> FALSE, panes |-> 0, created |-> "no",
              creates |-> 0, launcher |-> 0, lphase |-> "none", lEpoch |-> 0,
-             seedEffects |-> 0, oldSeed |-> FALSE, oldInputs |-> 0,
+             seedEffects |-> 0, owner |-> 0, foreignGreeting |-> FALSE, oldSeed |-> FALSE, oldInputs |-> 0,
              opSeen |-> FALSE, opSeedless |-> FALSE, opDuplicate |-> FALSE,
              aStarted |-> FALSE, aPhase |-> "none", aGate |-> FALSE, aCache |-> "none", aOutcome |-> "none",
              aCallerGone |-> FALSE, aReplayed |-> FALSE, aCloseCalls |-> 0, aRepairCalls |-> 0,
@@ -55,7 +55,9 @@ Init == \E endedBeforeRequest \in {FALSE, TRUE} : s = [cmd |-> "idle", seed |-> 
 SeedPending == s.seed \in {"queued", "claimed"}
 \* An input whose delivery to the old execution began before the restart was accepted.
 UnitPending == \E i \in Ids : s.q[i] \in {"claimed", "inflight"}
-FrontInput(i) == /\ (~SeedPending \/ Mutant = "SeedBehind") /\ s.launcher = 0
+\* B2b: the tmux order (greeting behind waiting input) and its two join variants share one order.
+Behind == Mutant \in {"SeedBehind", "JoinForeign", "JoinHeld"}
+FrontInput(i) == /\ (~SeedPending \/ Behind) /\ s.launcher = 0
                  /\ s.q[i] = "queued"
                  /\ \A j \in 1..(i-1) : s.q[j] \notin {"queued", "claimed", "inflight"}
 OwnerFree == s.awake /\ ~s.excl /\ ~s.clearExcl /\ ~s.clearing /\ ~s.aGate
@@ -196,11 +198,19 @@ SeedRefused ==
                        !.visible = @ \/ (~silent /\ Mutant # "NoNotice")]
 SeedToOld == /\ Mutant = "NoPermit" /\ SeedStartable /\ s.binary = "new" /\ OldTarget /\ s.oldLive
              /\ s' = [s EXCEPT !.seed = "delivered", !.oldSeed = TRUE, !.seedEffects = @ + 1, !.unsafeEffect = TRUE]
+\* B2b: the seed joins a successor only when its own attempt launched it. A successor that
+\* another input launched is not this restart's session: the seed ends with a visible refusal.
+OwnSuccessor == s.owner = SeedId
 SeedJoin == /\ SeedStartable /\ s.binary = "new" /\ s.row = "NewBound"
+            /\ OwnSuccessor \/ Mutant = "JoinForeign"
             /\ s' = [s EXCEPT !.seed = "claimed", !.launcher = SeedId,
+                             !.foreignGreeting = @ \/ ~OwnSuccessor,
                              !.lphase = "created", !.lEpoch = s.epoch,
                              !.checked = FALSE, !.effectBegan = FALSE,
                              !.permission = FALSE, !.effectKind = "none"]
+SeedForeign == /\ SeedStartable /\ s.binary = "new" /\ s.row = "NewBound" /\ ~OwnSuccessor
+               /\ Mutant \notin {"JoinForeign", "JoinHeld"}
+               /\ s' = [s EXCEPT !.seed = "dropped", !.visible = @ \/ Mutant # "NoNotice"]
 \* A launching turn registers with the clear epoch it saw. The seed's permit first finishes
 \* the restart's own disconnect, so a crash before the postlude leaves no dispatch behind.
 Detaches(l) == l = SeedId /\ Mutant # "NoPermitDetach"
@@ -216,7 +226,7 @@ LaunchBegin(l) ==
                     !.resumedPreClear = @ \/ (Superseded /\ s.selector = "kept")]
 \* Pending is installed over a vacant row before create; B1 report maps the actual leaf ports.
 InstallPending == /\ s.lphase = "begun" /\ Vacant
-                  /\ s' = [s EXCEPT !.row = "NewPending", !.lphase = "pending",
+                  /\ s' = [s EXCEPT !.row = "NewPending", !.lphase = "pending", !.owner = s.launcher,
                                    !.created = "no", !.creates = 0]
 Stale == s.epoch # s.lEpoch
 ChecksLaunch == Mutant \notin {"NoLaunchCheck", "MainClear"}
@@ -416,7 +426,7 @@ Next == \/ B2aRepairEnded \/ B2aCancelCaller \/ B2aObserveResult \/ B2aCacheResu
         \/ B2aReleaseGate \/ B2aReplayCompleted \/ ClaimRead \/ ClaimBadPayload \/ ClaimReserve \/ ClaimReject \/ ClaimDone
         \/ Request \/ OwnerParks \/ TakeExclusion \/ CloseExact \/ CloseFails \/ Retire
         \/ Postlude \/ Answer \/ Fail \/ Withdraw \/ NotifyFailure \/ SeedRefused \/ SeedToOld
-        \/ SeedJoin \/ InstallPending \/ AbortUnsent \/ CheckCreateEpoch \/ BeginCreateEffect \/ Create \/ LaunchNotSent
+        \/ SeedJoin \/ SeedForeign \/ InstallPending \/ AbortUnsent \/ CheckCreateEpoch \/ BeginCreateEffect \/ Create \/ LaunchNotSent
         \/ LaunchUncertain \/ ReplayCreate \/ AbortSubmit \/ CheckSubmitEpoch \/ BeginSubmitEffect \/ SubmitEffect \/ SettleReceipt
         \/ BindSource \/ Adopt \/ RowEndRecovery \/ ResolveUnplaced \/ Crash
         \/ ClearRequest \/ ClearBegin \/ ClearDiscard \/ ClearEnd \/ ReplayRequest \/ Wait
@@ -432,7 +442,7 @@ Spec == /\ Init /\ [][Next]_vars
         /\ WF_vars(Request) /\ WF_vars(TakeExclusion) /\ WF_vars(CloseExact)
         /\ WF_vars(CloseFails) /\ WF_vars(Retire) /\ WF_vars(Postlude) /\ WF_vars(Answer)
         /\ WF_vars(Fail) /\ WF_vars(Withdraw) /\ WF_vars(NotifyFailure)
-        /\ WF_vars(SeedRefused) /\ WF_vars(SeedToOld) /\ WF_vars(SeedJoin)
+        /\ WF_vars(SeedRefused) /\ WF_vars(SeedToOld) /\ WF_vars(SeedJoin) /\ WF_vars(SeedForeign)
         /\ WF_vars(InstallPending) /\ WF_vars(AbortUnsent) /\ WF_vars(CheckCreateEpoch) /\ WF_vars(BeginCreateEffect) /\ WF_vars(Create)
         /\ WF_vars(LaunchNotSent) /\ WF_vars(LaunchUncertain) /\ WF_vars(AbortSubmit)
         /\ WF_vars(CheckSubmitEpoch) /\ WF_vars(BeginSubmitEffect) /\ WF_vars(SubmitEffect) /\ WF_vars(SettleReceipt) /\ WF_vars(BindSource)
@@ -451,6 +461,9 @@ NoOldPaneInput == s.oldInputs = 0
 \* The greeting never reaches the execution the restart was meant to end.
 NoFalseReady == ~s.oldSeed
 SeedAtMostOnce == s.seedEffects <= 1
+\* B2b: Ready is said for exactly one physical greeting, in the session its own attempt launched.
+GreetingExactlyOnce == s.ready => s.seedEffects = 1
+GreetingOwnSession == ~s.foreignGreeting
 NoBlindCreate == s.creates <= 1
 SingleSession == (IF s.oldLive THEN 1 ELSE 0) + s.panes <= 1
 InflightSettledBeforeReady == s.ready => s.settled /\ ~s.inflight /\ (~(Busy /\ NeedsClose) \/ s.warned)

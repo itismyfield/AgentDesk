@@ -470,6 +470,8 @@ session-lifecycle/HerdrRestartOwnerGapClearCreateUnknown.cfg	HerdrRestartOwner	-
 session-lifecycle/HerdrRestartOwnerGapSeedlessDispatchCrash.cfg	HerdrRestartOwner	NoInheritedDispatch	-
 session-lifecycle/HerdrRestartOwnerHeadBusy.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerHeadBusyCrash.cfg	HerdrRestartOwner	-	-
+session-lifecycle/HerdrRestartOwnerJoinForeign.cfg	HerdrRestartOwner	GreetingOwnSession,NoOldPaneInput	-
+session-lifecycle/HerdrRestartOwnerJoinHeld.cfg	HerdrRestartOwner	NoOldPaneInput	RequestResolves,RestartAvailable
 session-lifecycle/HerdrRestartOwnerIntentField.cfg	HerdrRestartOwner	-	RequestResolves
 session-lifecycle/HerdrRestartOwnerLaunchNotSent.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerLaunchUnknown.cfg	HerdrRestartOwner	-	-
@@ -495,7 +497,7 @@ session-lifecycle/HerdrRestartOwnerReplayUnknown.cfg	HerdrRestartOwner	EffectHas
 session-lifecycle/HerdrRestartOwnerRequeueUncertain.cfg	HerdrRestartOwner	SeedAtMostOnce	-
 session-lifecycle/HerdrRestartOwnerRetryDispatch.cfg	HerdrRestartOwner	NoDispatchRepost	-
 session-lifecycle/HerdrRestartOwnerSeedAbsentIsClear.cfg	HerdrRestartOwner	NoFalseSuperseded	-
-session-lifecycle/HerdrRestartOwnerSeedBehind.cfg	HerdrRestartOwner	NoOldPaneInput	-
+session-lifecycle/HerdrRestartOwnerSeedBehind.cfg	HerdrRestartOwner	NoOldPaneInput	RestartAvailable
 session-lifecycle/HerdrRestartOwnerSeedless.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerSeedlessClear.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerSeedlessCrash.cfg	HerdrRestartOwner	-	-

@@ -13,6 +13,12 @@ use super::super::{
 #[cfg(unix)]
 mod herdr;
 
+#[cfg(unix)]
+pub(in crate::services::discord) use herdr::seed_permit as herdr_seed_permit;
+
+#[cfg(unix)]
+use crate::services::discord::queue_io::input_owner::restart_seed::PROMPT as RESTART_SEED_PROMPT;
+#[cfg(not(unix))]
 const RESTART_SEED_PROMPT: &str = "안녕하세요. 세션 재시작 완료.";
 
 /// Outcome of resolving the reload action against the current session state.
@@ -281,21 +287,20 @@ where
 
     #[cfg(unix)]
     if super::super::admin_host_guard::configured_refusal(channel_id.get()).is_some() {
-        let response = herdr::run(
+        return herdr::run(
             data.shared.clone(),
             data.provider.clone(),
             channel_id,
-            &operation_id.to_string(),
+            (&operation_id.to_string(), command_name, user_name),
             || async {
                 if mailbox_has_active_turn(&data.shared, channel_id).await {
                     say("⚠ 진행 중 턴 1회 손실 가능 — 안전하게 중단합니다.".into()).await?;
                 }
                 Ok(())
             },
+            &say,
         )
-        .await?;
-        say(response).await?;
-        return Ok(());
+        .await;
     }
     let action = resolve_restart_action(&data.shared, channel_id).await;
     let (shared, provider) = (&data.shared, &data.provider);
@@ -503,14 +508,35 @@ pub(in crate::services::discord) async fn restart_channel_for_tests(
     channel: serenity::ChannelId,
     identity: (&str, &'static str, u64),
 ) -> Result<Vec<String>, Error> {
+    let quiet: SayProbe = Arc::new(|_| Box::pin(async {}));
+    restart_channel_probed_for_tests(http, data, channel, identity, quiet).await
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) type SayProbe =
+    Arc<dyn Fn(String) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
+/// Runs the common restart and lets `probe` observe the channel as each reply is said.
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) async fn restart_channel_probed_for_tests(
+    http: &Arc<serenity::Http>,
+    data: &Data,
+    channel: serenity::ChannelId,
+    identity: (&str, &'static str, u64),
+    probe: SayProbe,
+) -> Result<Vec<String>, Error> {
     async fn forbidden_seed() -> RestartSeedStatus {
         panic!("a Herdr restart must not invoke the legacy greeting seed");
     }
     let replies = Arc::new(std::sync::Mutex::new(Vec::new()));
     let written = replies.clone();
     let say = move |text: String| {
-        written.lock().unwrap().push(text);
-        std::future::ready(Ok::<(), Error>(()))
+        let (written, probe) = (written.clone(), probe.clone());
+        async move {
+            probe(text.clone()).await;
+            written.lock().unwrap().push(text);
+            Ok::<(), Error>(())
+        }
     };
     restart_channel(http, data, channel, identity, say, forbidden_seed).await?;
     let replies = replies.lock().unwrap().clone();

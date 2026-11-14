@@ -17,69 +17,111 @@ use crate::services::discord::herdr_terminate::{
     self, OperatorTerminate, RetiredExclusion, TerminationResult,
 };
 use crate::services::discord::queue_io::input_owner::restart_gate::{self, Gate};
+use crate::services::discord::queue_io::input_owner::restart_seed::{
+    self as seed, Admitted, Seed, SeedStatus,
+};
 use crate::services::herdr_launch::clear_epoch::{self, Epoch};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::restart_operation::Operation;
 
 const FAILED: &str = "기존 세션의 종료를 확인하지 못했습니다.\n인사말 turn은 시작하지 못했습니다.";
 const REFUSED: &str = "세션을 재시작하지 않았습니다. 현재 세션을 안전하게 확인할 수 없습니다.";
-const ENDED: &str = "기존 세션 종료를 확인했습니다.\n인사말 turn은 시작하지 못했습니다.";
 
-pub(super) async fn run<Warn, WarnFut>(
+pub(super) async fn run<Warn, WarnFut, Say, SayFut>(
     shared: Arc<SharedData>,
     provider: ProviderKind,
     channel: ChannelId,
-    id: &str,
+    (id, command, requester): (&str, &'static str, &str),
     warn: Warn,
-) -> Result<String, super::Error>
+    say: Say,
+) -> Result<(), super::Error>
 where
     Warn: FnOnce() -> WarnFut,
     WarnFut: std::future::Future<Output = Result<(), super::Error>>,
+    Say: FnOnce(String) -> SayFut,
+    SayFut: std::future::Future<Output = Result<(), super::Error>>,
 {
     let operation = match Operation::new(provider.as_str(), &shared.token_hash, channel.get(), id) {
         Ok(operation) => operation,
-        Err(_) => return Ok(REFUSED.into()),
+        Err(_) => return say(REFUSED.into()).await,
     };
     if let Some(response) = restart_gate::completed(&operation) {
-        return Ok(response);
+        return say(response).await;
     }
     let gate = match Gate::begin(&shared, channel) {
         Ok(gate) => gate,
         Err(_) => {
-            return Ok(restart_gate::wait_completed(&operation)
-                .await
-                .unwrap_or_else(|| "다른 재시작 요청을 처리하고 있습니다.".into()));
+            let waited = restart_gate::wait_completed(&operation).await;
+            return say(waited.unwrap_or_else(|| "다른 재시작 요청을 처리하고 있습니다.".into()))
+                .await;
         }
     };
     if let Some(response) = restart_gate::completed(&operation) {
-        return Ok(response);
+        return say(response).await;
     }
     let epoch = clear_epoch::snapshot(provider.as_str(), &shared.token_hash, channel.get());
     warn().await?;
-    let task = tokio::spawn(async move {
-        let result = std::panic::AssertUnwindSafe(terminate(shared, provider, channel, epoch))
+    let requester = requester.to_string();
+    let (answer, answered) = tokio::sync::oneshot::channel::<()>();
+    let (result, finished) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mailbox = shared.mailbox(channel);
+        let request = Request {
+            shared,
+            provider,
+            channel,
+            epoch,
+            operation: operation.clone(),
+            by: (command, requester),
+        };
+        let (response, failed) = std::panic::AssertUnwindSafe(restart(request))
             .catch_unwind()
             .await
-            .unwrap_or_else(|_| FAILED.into());
+            .unwrap_or_else(|_| (FAILED.into(), None));
         // The detached worker remembers the result before delivery can resume.
-        restart_gate::remember(&operation, result.clone());
+        restart_gate::remember(&operation, response.clone());
+        let _ = result.send(response);
+        // A failed restart answers first and withdraws its greeting after: a crash in between
+        // leaves the greeting to its permit's refusal, never to a silent end.
+        if let Some(seed) = failed {
+            let _ = answered.await;
+            seed.withdraw(&mailbox).await;
+        }
         drop(gate);
-        result
     });
-    Ok(task.await.unwrap_or_else(|_| FAILED.into()))
+    let said = say(finished.await.unwrap_or_else(|_| FAILED.into())).await;
+    drop(answer);
+    said
 }
 
-async fn terminate(
+struct Request {
     shared: Arc<SharedData>,
     provider: ProviderKind,
     channel: ChannelId,
     epoch: Epoch,
-) -> String {
+    operation: Operation,
+    by: (&'static str, String),
+}
+
+/// The canonical row a restart acts on.
+enum Selected {
+    /// No execution to end: the greeting's own turn launches the session.
+    Vacant,
+    Refused(String),
+    Target(Box<Target>),
+}
+
+struct Target {
+    pool: PgPool,
+    row: hosted_execution::HostedObservation,
+    record: hosted_execution::HostedExecution,
+    key: String,
+    dispatch: Option<String>,
+}
+
+async fn select(shared: &Arc<SharedData>, provider: &ProviderKind, channel: ChannelId) -> Selected {
     let Some(pool) = shared.pg_pool.as_ref().cloned() else {
-        return REFUSED.into();
-    };
-    let Some(registry) = shared.health_registry() else {
-        return REFUSED.into();
+        return Selected::Refused(REFUSED.into());
     };
     let channel_key = channel.get().to_string();
     let row = match hosted_execution::load_hosted_execution_pg(
@@ -96,21 +138,21 @@ async fn terminate(
     .await
     {
         HostedLookup::Found(row) => row,
-        HostedLookup::Missing => {
-            return "종료할 활성 세션을 찾지 못했습니다.\n인사말 turn은 시작하지 못했습니다."
-                .into();
-        }
-        _ => return REFUSED.into(),
+        HostedLookup::Missing => return Selected::Vacant,
+        _ => return Selected::Refused(REFUSED.into()),
     };
-    let HostedRecord::Known(record) = &row.record else {
-        return REFUSED.into();
+    let record = match &row.record {
+        HostedRecord::Known(record) => record,
+        // A row no Herdr execution ever held: the greeting's own turn launches or migrates it.
+        HostedRecord::Legacy => return Selected::Vacant,
+        _ => return Selected::Refused(REFUSED.into()),
     };
     if record.location.is_none()
         || record.owner.provider != provider.as_str()
         || record.owner.discord_token_hash != shared.token_hash
         || record.owner.channel_id != channel_key
     {
-        return REFUSED.into();
+        return Selected::Refused(REFUSED.into());
     }
     let key =
         match sqlx::query_scalar::<_, String>("SELECT session_key FROM sessions WHERE id = $1")
@@ -119,39 +161,155 @@ async fn terminate(
             .await
         {
             Ok(key) => key,
-            Err(_) => return REFUSED.into(),
+            Err(_) => return Selected::Refused(REFUSED.into()),
         };
     let dispatch =
         match hosted_execution::http_force::active_dispatch_pg(&pool, row.session_id()).await {
             Ok(dispatch) => dispatch,
-            Err(_) => return REFUSED.into(),
+            Err(_) => return Selected::Refused(REFUSED.into()),
         };
+    let record = record.clone();
+    Selected::Target(Box::new(Target {
+        pool,
+        row,
+        record,
+        key,
+        dispatch,
+    }))
+}
+
+/// The response, and the greeting this request must withdraw once that response was said.
+async fn restart(request: Request) -> (String, Option<Seed>) {
+    let Request {
+        shared,
+        provider,
+        channel,
+        epoch,
+        operation,
+        by,
+    } = request;
+    let mailbox = shared.mailbox(channel);
+    // The operation's own ticket is read before the current row gives it any new context.
+    match Seed::prior(&mailbox, &operation).await {
+        Ok(SeedStatus::Absent) | Err(_) => {}
+        Ok(status) => {
+            return (
+                format!("이미 처리한 재시작 요청입니다.\n{}", greeting(status)),
+                None,
+            );
+        }
+    }
+    let target = match select(&shared, &provider, channel).await {
+        Selected::Refused(response) => return (response, None),
+        Selected::Vacant => None,
+        Selected::Target(target) => Some(target),
+    };
+    let mut seed = Seed::of(&mailbox, &operation).await;
+    let against = seed::Target {
+        nonce: target.as_ref().map(|t| t.record.execution_nonce.as_str()),
+        dispatch: target.as_ref().and_then(|t| t.dispatch.as_deref()),
+    };
+    let admitted = match seed.as_mut() {
+        Ok(seed) => seed.admit(&mailbox, (by.0, &by.1), against).await,
+        Err(reason) => Admitted::Refused(reason.clone()),
+    };
+    let (mut seed, own, mut absent) = match (admitted, seed) {
+        (Admitted::Conflict, _) => return (REFUSED.into(), None),
+        (Admitted::Created, Ok(seed)) => (Some(seed), true, None),
+        (Admitted::Joined, Ok(seed)) => (Some(seed), false, None),
+        (Admitted::Unconfirmed, Ok(seed)) => (Some(seed), true, Some(true)),
+        (Admitted::Refused(reason), _) | (_, Err(reason)) => {
+            tracing::info!(%reason, "restart goes on without a greeting");
+            (None, false, Some(false))
+        }
+    };
+    let ended = match target {
+        None => Ok(Applied::Vacant),
+        Some(target) => terminate(&shared, *target, epoch).await,
+    };
+    // An unconfirmed commit is settled under the same ticket once the old execution is decided.
+    if absent == Some(true)
+        && let Some(seed) = seed.as_mut()
+    {
+        let again = seed::Target {
+            nonce: None,
+            dispatch: None,
+        };
+        match seed.admit(&mailbox, (by.0, &by.1), again).await {
+            Admitted::Created | Admitted::Joined => absent = None,
+            _ => {}
+        }
+    }
+    let status = match &seed {
+        Some(seed) if absent.is_none() => seed.status(&mailbox).await.ok(),
+        _ => None,
+    };
+    match ended {
+        Ok(Applied::Cleared) => {
+            if let Some(seed) = seed.take().filter(|_| own) {
+                seed.withdraw(&mailbox).await;
+            }
+            (Applied::Cleared.response().into(), None)
+        }
+        Ok(applied) => {
+            let greeting = match (status, absent) {
+                (Some(status), _) => greeting(status),
+                (None, Some(true)) => "인사말 등록을 확인하지 못했습니다.",
+                (None, _) => "인사말 turn은 시작하지 못했습니다.",
+            };
+            (format!("{}\n{greeting}", applied.response()), None)
+        }
+        Err(response) => (response, seed.filter(|_| own)),
+    }
+}
+
+fn greeting(status: SeedStatus) -> &'static str {
+    match status {
+        SeedStatus::Queued | SeedStatus::Attempt => "인사말을 대기열에 등록했습니다.",
+        SeedStatus::Settled => "인사말 turn이 시작됐습니다.",
+        SeedStatus::Retained => "인사말 turn을 시작하지 못했습니다. 실패 알림을 확인해 주세요.",
+        SeedStatus::Gone | SeedStatus::Absent => "인사말 turn은 시작하지 못했습니다.",
+    }
+}
+
+/// Ends the exact old execution, or finishes one that already ended, and runs the postlude.
+async fn terminate(
+    shared: &Arc<SharedData>,
+    target: Target,
+    epoch: Epoch,
+) -> Result<Applied, String> {
+    let Target {
+        pool,
+        row,
+        record,
+        key,
+        dispatch,
+    } = target;
+    let Some(registry) = shared.health_registry() else {
+        return Err(REFUSED.into());
+    };
     let expected =
-        match herdr_terminate::restart_recovery::expected_for_restart(&shared, record, dispatch)
+        herdr_terminate::restart_recovery::expected_for_restart(shared, &record, dispatch)
             .await
-        {
-            Ok(expected) => expected,
-            Err(result) => return failure(result),
-        };
+            .map_err(failure)?;
     let request = || OperatorTerminate {
         session_key: key.clone(),
         execution_nonce: record.execution_nonce.clone(),
     };
     let id = row.session_id();
-    match herdr_terminate::restart_recovery::recover_ended(
+    let recovered = herdr_terminate::restart_recovery::recover_ended(
         request(),
         expected.clone(),
         shared.clone(),
         &pool,
-    )
-    .await
-    {
-        Ok(Some(held)) => {
+    );
+    let applied = match recovered.await.map_err(failure)? {
+        Some(held) => {
             let result = apply(&held, &pool, id, &epoch).await;
             drop(held);
-            result.released().await.response()
+            result.released().await
         }
-        Ok(None) => {
+        None => {
             let pool_for_postlude = pool.clone();
             let (result, applied) = http_force::terminate_for_http(
                 &registry,
@@ -163,27 +321,87 @@ async fn terminate(
                 },
             )
             .await;
-            applied
-                .map(Applied::response)
-                .unwrap_or_else(|| failure(result))
+            applied.ok_or_else(|| failure(result))?
         }
-        Err(result) => failure(result),
+    };
+    match applied {
+        Applied::Failed => Err(Applied::Failed.response().into()),
+        applied => Ok(applied),
+    }
+}
+
+/// The greeting's permit at its start: it runs only once the execution it was queued against is
+/// retired and detached, and finishes that itself when the daemon died in between. No close is
+/// ever sent from here.
+pub(in crate::services::discord) async fn seed_permit(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    context: &serde_json::Value,
+) -> Result<(), String> {
+    let against = seed::target(context);
+    let target = match select(shared, &shared.provider, channel).await {
+        Selected::Vacant => return Ok(()),
+        Selected::Refused(_) => return Err("현재 세션을 확인할 수 없습니다".into()),
+        Selected::Target(target) => target,
+    };
+    let retired = target.record.state == HostedState::Retired;
+    if Some(target.record.execution_nonce.as_str()) != against.nonce {
+        // Another execution's retired row is vacant; a live one is not this restart's successor.
+        return match retired {
+            true => Ok(()),
+            false => Err("재시작 대상이 아닌 세션이 실행 중입니다".into()),
+        };
+    }
+    if retired && (target.dispatch.is_none() || target.dispatch.as_deref() != against.dispatch) {
+        return Ok(());
+    }
+    let epoch = clear_epoch::snapshot(shared.provider.as_str(), &shared.token_hash, channel.get());
+    let Target {
+        pool,
+        row,
+        record,
+        key,
+        dispatch,
+    } = *target;
+    let expected =
+        herdr_terminate::restart_recovery::expected_for_restart(shared, &record, dispatch)
+            .await
+            .map_err(|result| result.outcome().1)?;
+    let request = OperatorTerminate {
+        session_key: key,
+        execution_nonce: record.execution_nonce.clone(),
+    };
+    let recover = herdr_terminate::restart_recovery::recover_ended;
+    match recover(request, expected, shared.clone(), &pool).await {
+        Ok(Some(held)) => match apply(&held, &pool, row.session_id(), &epoch).await {
+            Applied::Failed => Err("기존 세션 정리를 마치지 못했습니다".into()),
+            _ => Ok(()),
+        },
+        Ok(None) => Err("재시작이 끝나지 않아 기존 세션이 계속 실행 중입니다".into()),
+        Err(result) => Err(format!(
+            "기존 세션의 종료를 확인하지 못했습니다: {}",
+            result.outcome().1
+        )),
     }
 }
 
 enum Applied {
+    Vacant,
     Ended,
     Cleared,
     Failed,
 }
 impl Applied {
-    fn response(self) -> String {
+    fn response(&self) -> &'static str {
         match self {
-            Self::Ended => ENDED.into(),
+            Self::Vacant => "종료할 활성 세션이 없어 새 세션으로 시작합니다.",
+            Self::Ended => "기존 세션 종료를 확인했습니다.",
             Self::Cleared => {
-                "기존 세션 종료를 확인했습니다.\n겹친 비우기 요청으로 재시작을 중단했습니다.".into()
+                "기존 세션 종료를 확인했습니다.\n겹친 비우기 요청으로 재시작을 중단했습니다."
             }
-            Self::Failed => "기존 세션 종료를 확인했습니다.\n세션 정리를 마치지 못했습니다. 인사말 turn은 시작하지 못했습니다.".into(),
+            Self::Failed => {
+                "기존 세션 종료를 확인했습니다.\n세션 정리를 마치지 못했습니다. 인사말 turn은 시작하지 못했습니다."
+            }
         }
     }
 }

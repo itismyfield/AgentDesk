@@ -27,6 +27,15 @@ pub(crate) fn remember(operation: &Operation, response: String) {
         .or_insert(response);
 }
 
+/// A new process remembers nothing: only the owner's durable ticket still names the operation.
+#[cfg(test)]
+pub(crate) fn forget_for_tests(operation: &Operation) {
+    COMPLETED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(operation);
+}
+
 pub(crate) async fn wait_completed(operation: &Operation) -> Option<String> {
     let key = (operation.namespace().into(), operation.channel());
     // Later restarts must not extend a waiter past the gate it first observed.

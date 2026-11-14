@@ -7,6 +7,8 @@ pub(crate) enum InputOrigin {
     Imessage,
     HttpStart,
     EffortContinue,
+    /// The greeting an authorized restart command queued; only its durable bind names it.
+    RestartSeed,
     Routine,
     #[cfg(test)]
     DirectHeadless,
@@ -31,6 +33,9 @@ impl InputOrigin {
     pub(crate) fn from_context(context: Option<&serde_json::Value>) -> Self {
         if super::effort_continue::is_continuation(context) {
             return Self::EffortContinue;
+        }
+        if crate::services::turn_orchestrator::ChannelMailboxHandle::restart_seed_input(context) {
+            return Self::RestartSeed;
         }
         if crate::services::turn_orchestrator::ChannelMailboxHandle::person_input(context) {
             return if context.is_some() {
@@ -73,11 +78,12 @@ impl InputOrigin {
     }
 
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Discord,
         Self::Imessage,
         Self::HttpStart,
         Self::EffortContinue,
+        Self::RestartSeed,
         Self::Routine,
         Self::DirectHeadless,
     ];
