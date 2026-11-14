@@ -71,6 +71,8 @@ Plain TLC 1.7.4 through `scripts/ci/statecharts_tlc.py`, 17 configs, 24.9 s (rer
 
 ## Scope
 
-The model covers one child and one parent. Sibling isolation is checked in the Rust tests, not here. Rows 1–3 of "Before and after" for a recorded child are implemented by the first O-b review unit and retirement by the second; the dormant inheritance and the second rollback guard are implemented by b3a; the first `init`, the producers, the placement hold, the late handoff wait and the capability flag are model predictions until b3b lands. Counterexamples for the recorded-child rules are replayed by `thread_children_*` and `thread_child_*` tests.
+The model covers one child and one parent. Sibling isolation is checked in the Rust tests, not here. Rows 1–3 of "Before and after" for a recorded child are implemented by the first O-b review unit and retirement by the second; the dormant inheritance and the second rollback guard are implemented by b3a; the first `init`, the late handoff wait and the census site × child rows by b3b-1; the producers, the boot reservation, the placement read and the capability flag by b3b-2.
+
+The model treats "the late turn has closed" as a fact apart from the Legacy send counter. So a resolution that makes a new adoption (and loses the counted send) is invisible here: `lateTurn` still blocks the `init`. In the code, the late takeover reads that same counter, so the Rust test `thread_child_boot_reservation_counts_legacy_and_keeps_that_send_through_resolution` covers the regenerated-adoption mutant instead. Counterexamples for the recorded-child rules are replayed by `thread_children_*` and `thread_child_*` tests.
 
 Logs: `~/.adk/release/lane-runs/hl-20260925/i8118/logs/ob-tlc`, revision `logs/ob3/tlc`.
