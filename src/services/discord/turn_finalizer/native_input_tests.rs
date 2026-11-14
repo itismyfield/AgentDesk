@@ -2693,13 +2693,6 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
         key.channel_id,
     );
     assert!(
-        !f.history
-            .native_settlement("native-fixture", &f.ticket)
-            .unwrap()
-            .cleanup_complete
-    );
-    assert!(events.try_recv().is_err());
-    assert!(
         shared
             .mailbox(key.channel_id)
             .enqueue(review_soft_input(81489857), context)
@@ -2727,6 +2720,13 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
     )
     .await;
     assert_eq!(queue_save_faults(key.channel_id, true), 0);
+    assert!(
+        !f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .cleanup_complete
+    );
+    assert!(events.try_recv().is_err());
     assert!(
         shared
             .mailbox(key.channel_id)
