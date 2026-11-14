@@ -168,37 +168,41 @@ fn read_at(mut file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
 }
 
 /// Streams `0..len` into a hasher and returns it with the trailing guard bytes.
+pub(crate) trait PrefixConsumer {
+    fn prefix_bytes(&mut self, bytes: &[u8]);
+}
+impl PrefixConsumer for () {
+    fn prefix_bytes(&mut self, _bytes: &[u8]) {}
+}
+
 fn hash_prefix(file: &File, len: u64) -> io::Result<(Sha256, Vec<u8>)> {
-    hash_prefix_into(file, len, &mut io::sink())
+    hash_prefix_into(file, len, &mut ())
 }
 
 fn hash_prefix_into(
     mut file: &File,
     len: u64,
-    consumer: &mut dyn io::Write,
+    consumer: &mut dyn PrefixConsumer,
 ) -> io::Result<(Sha256, Vec<u8>)> {
-    struct HashPass<'a> {
-        hash: &'a mut Sha256,
-        consumer: &'a mut dyn io::Write,
+    struct HashPass<'f, 'c> {
+        reader: io::Take<&'f File>,
+        consumer: &'c mut dyn PrefixConsumer,
     }
-    impl io::Write for HashPass<'_> {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.hash.update(bytes);
-            self.consumer.write_all(bytes)?;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            self.consumer.flush()
+    impl Read for HashPass<'_, '_> {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            let count = self.reader.read(bytes)?;
+            self.consumer.prefix_bytes(&bytes[..count]);
+            Ok(count)
         }
     }
     file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
     let copied = io::copy(
-        &mut file.take(len),
         &mut HashPass {
-            hash: &mut hasher,
+            reader: file.take(len),
             consumer,
         },
+        &mut hasher,
     )?;
     #[cfg(all(test, unix))]
     self::io_trace::record_source(file, "source_prefix", copied);
@@ -233,12 +237,11 @@ impl SourceCapture {
     /// Reopens a stored source at its cursor. A renumbered dev is accepted like an exact one, as
     /// the bytes before `through` must hash to `prefix_hash` either way (`InvalidData` if not).
     pub fn reopen(source: SourceId, through: u64, prefix_hash: &str) -> io::Result<Self> {
-        Self::reopen_with_prefix(source, through, prefix_hash, io::sink())
-            .map(|(capture, _)| capture)
+        Self::reopen_with_prefix(source, through, prefix_hash, ()).map(|(capture, _)| capture)
     }
 
     /// The consumer stays private until this same FD's stored prefix hash is verified.
-    pub(crate) fn reopen_with_prefix<T: io::Write>(
+    pub(crate) fn reopen_with_prefix<T: PrefixConsumer>(
         source: SourceId,
         through: u64,
         prefix_hash: &str,
@@ -272,7 +275,7 @@ impl SourceCapture {
     }
 
     fn opened(source: SourceId, file: File, meta: &Metadata, start: u64) -> io::Result<Self> {
-        Self::opened_with_prefix(source, file, meta, start, &mut io::sink())
+        Self::opened_with_prefix(source, file, meta, start, &mut ())
     }
 
     fn opened_with_prefix(
@@ -280,7 +283,7 @@ impl SourceCapture {
         file: File,
         meta: &Metadata,
         start: u64,
-        consumer: &mut dyn io::Write,
+        consumer: &mut dyn PrefixConsumer,
     ) -> io::Result<Self> {
         let (prefix, guard) = hash_prefix_into(&file, start, consumer)?;
         Ok(Self {

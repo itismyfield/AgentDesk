@@ -164,10 +164,14 @@ pub(crate) use projection::Projection;
 #[cfg(unix)]
 mod projection {
     use super::*;
-    use crate::services::tui_o::shadow::capture::{MAX_PARTIAL_BYTES, SourceCapture};
+    use crate::services::tui_o::shadow::capture::{
+        MAX_PARTIAL_BYTES, PrefixConsumer, SourceCapture,
+    };
     use crate::services::tui_o::shadow::identity::{RecordFact, classify, row_key};
     use crate::services::tui_o::shadow::seal::{TurnEvent, TurnTracker};
-    use std::io::{self, Write};
+    use std::io;
+    #[cfg(test)]
+    use std::io::Write;
 
     #[derive(Clone)]
     enum Event {
@@ -354,10 +358,10 @@ mod projection {
             Ok(())
         }
     }
-    impl Write for Decoder {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+    impl PrefixConsumer for Decoder {
+        fn prefix_bytes(&mut self, bytes: &[u8]) {
             if self.error.is_some() {
-                return Ok(bytes.len());
+                return;
             }
             for part in bytes.split_inclusive(|b| *b == b'\n') {
                 if self.partial.len() + part.len() > MAX_PARTIAL_BYTES {
@@ -376,10 +380,6 @@ mod projection {
                     self.partial.clear();
                 }
             }
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
         }
     }
     #[derive(Clone, Copy, PartialEq, Eq)]
