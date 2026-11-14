@@ -518,7 +518,7 @@ bash scripts/main-ci-triage.sh --self-test
 fi
 
 if run_check guards "Lib test build and clippy swap + memory probe contract"; then
-"$PYTHON" -m unittest tests.test_ensure_swap_ci_wiring
+"$PYTHON" -m unittest tests.test_ensure_swap_ci_wiring tests.test_ci_runner_memory tests.test_runner_memory_wiring
 fi
 
 if run_check guards "CI timeout wrapper tests (#4413)"; then
