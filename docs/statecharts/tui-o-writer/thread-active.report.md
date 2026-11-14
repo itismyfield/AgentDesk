@@ -46,8 +46,8 @@ Plain TLC 1.7.4 through `scripts/ci/statecharts_tlc.py`, 17 configs, 24.9 s (rer
 | WriterThreadActiveInitNoWait | 477 | `LateTurnLegacyOnce`: a failed first `init` during Legacy's open late turn marks that turn failed with no send at all |
 | WriterThreadActiveDropHeld | 13 | `NoSilentLoss`: a failed placement read drops the input instead of holding it |
 | WriterThreadActiveNoInherit | 48 | `InheritDormant`: a dormant parent's child starts an active writer |
-| WriterThreadActiveExecFirst | 311 | `LateTurnLegacyOnce`, `ChildInputAnswered`: the gate lets a Bound execution view own a late child before its `init`, so Legacy's terminal settles the open turn with no body and the `init` waits for a send that never comes |
-| WriterThreadActiveReregister | 93 | `NoLegacyBody`, `ExactlyOnce`: a thread that is itself a configured binding is recorded again as a child, and the gate reads that late adoption while the member writer keeps posting |
+| WriterThreadActiveExecFirst | 280 | `LateTurnLegacyOnce`, `ChildInputAnswered`: the gate lets a Bound execution view own a late child before its `init`, so Legacy's terminal settles the open turn with no body and the `init` waits for a send that never comes |
+| WriterThreadActiveReregister | 95 | `NoLegacyBody`, `ExactlyOnce`: a thread that is itself a configured binding is recorded again as a child, and the gate reads that late adoption while the member writer keeps posting |
 
 `ExecFirst` and `Reregister` were added with the `exec`, `bound` and `stray` variables after the table above was measured; the rows above it are the earlier counts. With them, After is GREEN at 5011 distinct states.
 
