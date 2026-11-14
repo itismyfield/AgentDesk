@@ -269,9 +269,10 @@ class InstanceLiveFilesTests(unittest.TestCase):
     def test_runtime_publication_refuses_foreign_replacements_links_and_names(self):
         identity = self.publish({"owned": True})
         path = self.root / "runtime/resources-owner.json"
-        path.unlink()
-        path.write_text('{"foreign": true}\n')
-        os.chmod(path, 0o600)
+        foreign = path.with_name("resources-owner.foreign")
+        foreign.write_text('{"foreign": true}\n')
+        os.chmod(foreign, 0o600)
+        os.replace(foreign, path)
         with self.assertRaises(files.InstanceError):
             self.publish({"owned": True}, expected_identity=identity)
         self.assertEqual(json.loads(path.read_text()), {"foreign": True})
