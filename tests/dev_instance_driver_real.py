@@ -15,11 +15,11 @@ class SentinelDriverRealTests(unittest.TestCase):
         from tests.test_dev_instance import profile
         declared=profile();declared['bots']['driver']='900006'
         fixture=native.BoundHealthRealTests(methodName='runTest')
+        self.addCleanup(lambda: self.assertTrue(fixture.doCleanups(), 'inner native fixture cleanup failed'))
         writer=Path(os.environ['ADK_I3B_CREDENTIAL_WRITER'])
         self.assertTrue(writer.is_absolute() and writer.is_file())
         self.assertEqual(writer.name,'agentdesk')
         with mock.patch.object(native,'profile',return_value=declared):fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
         phases=['prepare']
         # Replace this fixture's own synthetic files using the real stdin-only Rust writer.
         for name in native.NAMES:(fixture.root/'credential'/name).unlink()
