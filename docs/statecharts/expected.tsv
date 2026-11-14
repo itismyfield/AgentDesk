@@ -34,6 +34,17 @@ campaign-execution/CampaignVerificationTwoValues.cfg	CampaignVerification	-	-
 catch-up-frontier/CatchUpFrontier.cfg	CatchUpFrontier	-	-
 catch-up-frontier/CatchUpFrontierMain.cfg	CatchUpFrontier	-	DeliveredInputsAdvanceCursor
 catch-up-frontier/CatchUpFrontierPendingPass.cfg	CatchUpFrontier	NoDeadlock,NoUndeliveredBehindCursor	-
+e2e-run-lease/admission/admission-duplicate_child.cfg	InstanceAdmission	NoDualGateway	-
+e2e-run-lease/admission/admission-foreign_cleanup.cfg	InstanceAdmission	NoForeignCleanup	-
+e2e-run-lease/admission/admission-late_spawn.cfg	InstanceAdmission	NoSpawnAfterDeadline	-
+e2e-run-lease/admission/admission-leak_fd.cfg	InstanceAdmission	-	OrphanReacquire
+e2e-run-lease/admission/admission-non_atomic.cfg	InstanceAdmission	AdmissionBeforeEffects,NoDualGateway,NoHolderTheft	-
+e2e-run-lease/admission/admission-none.cfg	InstanceAdmission	-	-
+e2e-run-lease/admission/admission-parent_unlock.cfg	InstanceAdmission	AdmissionBeforeEffects,NoDualGateway,NoHolderTheft	-
+e2e-run-lease/admission/admission-skip_admission.cfg	InstanceAdmission	AdmissionBeforeEffects,NoDualGateway	-
+e2e-run-lease/admission/admission-skip_cloexec.cfg	InstanceAdmission	AdmissionBeforeEffects	-
+e2e-run-lease/admission/admission-skip_same_fd.cfg	InstanceAdmission	AdmissionBeforeEffects,NoDualGateway	-
+e2e-run-lease/admission/chart-none.cfg	InstanceAdmission	-	-
 e2e-run-lease/instance-duplicate_child.cfg	LeaseLifetime	NoDualGateway,NoDualWriter	-
 e2e-run-lease/instance-foreign_cleanup.cfg	LeaseLifetime	NoForeignCleanup	-
 e2e-run-lease/instance-leak_fd.cfg	LeaseLifetime	-	NextRequestProgress
