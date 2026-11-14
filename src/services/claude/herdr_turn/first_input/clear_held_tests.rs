@@ -123,7 +123,7 @@ impl Source {
             transcript: self.path.clone(),
             target,
             bound: true,
-            awaiting_clear: false,
+            awaiting_clear: true,
             physical: None,
         }
     }

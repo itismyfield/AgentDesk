@@ -338,7 +338,6 @@ impl Fixture {
         std::fs::write(marker, "herdr").unwrap();
         let session = uuid();
         let transcript = self.ingress.transcript(&session);
-        // A settled transcript supplies readiness independently of the composer.
         append(
             &transcript,
             &[

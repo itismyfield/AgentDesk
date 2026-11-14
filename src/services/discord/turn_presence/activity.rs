@@ -1134,8 +1134,8 @@ mod tail;
 mod unbound;
 
 #[cfg(all(test, unix))]
-mod claude_activity_tests;
-
-#[cfg(all(test, unix))]
 #[path = "activity/effort_restart_baseline_tests.rs"]
 mod effort_restart_baseline_tests;
+
+#[cfg(all(test, unix))]
+mod claude_activity_tests;

@@ -148,7 +148,6 @@ pub(super) fn clear_pending(fx: &Fixture, cleared: &str) -> std::path::PathBuf {
     crate::services::tmux_common::with_tmux_source_authority(fx.logical(), |_| {
         binding_events::record_pending(&proposal).unwrap();
     });
-    // The receiver supplies clear readiness from the canonical hook context.
     use crate::services::tui_prompt_dedupe::binding_context::{
         SpawnNonceMarker, observe_spawn_nonce_marker,
     };
@@ -435,7 +434,7 @@ fn awaiting_clear_after_real_readiness_restart_sends_once_and_preserves_old_curs
     );
 }
 
-fn assert_invalid_clear_adoption(invalid: &str, public_ready: bool) {
+fn assert_invalid_clear_adoption(invalid: &str) {
     use crate::services::claude_tui::readiness;
     use crate::services::tui_prompt_dedupe::binding_context::observe_spawn_nonce_marker;
     use crate::services::tui_prompt_dedupe::binding_events::{self, BindingTarget};
@@ -520,10 +519,9 @@ fn assert_invalid_clear_adoption(invalid: &str, public_ready: bool) {
         previous_replacements,
         "{invalid}: adoption appends no durable source replacement"
     );
-    assert_eq!(
-        readiness::observe(fx.logical(), Some(&path)).is_some(),
-        public_ready,
-        "{invalid}: public readiness and retirement certification are distinct"
+    assert!(
+        readiness::observe(fx.logical(), Some(&path)).is_none(),
+        "{invalid}: invalid certification cannot grant public clear readiness"
     );
     if invalid == "nonce" {
         assert_ne!(
@@ -564,33 +562,33 @@ fn assert_invalid_clear_adoption(invalid: &str, public_ready: bool) {
 }
 
 #[test]
-fn awaiting_clear_rejects_a_forged_certificate_with_current_public_readiness_pg() {
-    assert_invalid_clear_adoption("fake-proof", true);
+fn awaiting_clear_rejects_a_forged_certificate_with_authentic_pending_pg() {
+    assert_invalid_clear_adoption("fake-proof");
 }
 
 #[test]
 fn awaiting_clear_rejects_a_changed_nonce_before_any_retirement_pg() {
-    assert_invalid_clear_adoption("nonce", false);
+    assert_invalid_clear_adoption("nonce");
 }
 
 #[test]
 fn awaiting_clear_rejects_a_changed_pending_before_any_retirement_pg() {
-    assert_invalid_clear_adoption("pending", false);
+    assert_invalid_clear_adoption("pending");
 }
 
 #[test]
-fn awaiting_clear_rejects_a_missing_certificate_with_current_public_readiness_pg() {
-    assert_invalid_clear_adoption("missing-proof", true);
+fn awaiting_clear_rejects_a_missing_certificate_with_authentic_pending_pg() {
+    assert_invalid_clear_adoption("missing-proof");
 }
 
 #[test]
 fn awaiting_clear_rejects_a_consumed_certificate_without_volatile_start_pg() {
-    assert_invalid_clear_adoption("consumed", false);
+    assert_invalid_clear_adoption("consumed");
 }
 
 #[test]
 fn awaiting_clear_rejects_an_older_clear_after_a_newer_bound_start_pg() {
-    assert_invalid_clear_adoption("newer-start", false);
+    assert_invalid_clear_adoption("newer-start");
 }
 
 #[test]
@@ -610,6 +608,8 @@ fn awaiting_clear_adoption_blocks_stale_same_session_close_until_pre_source_is_v
     let (release, wait) = std::sync::mpsc::channel();
     let (contended, blocked) = std::sync::mpsc::channel();
     let closed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let closer_nonce = nonce.clone();
+    let closer_log_root = log_root.clone();
     let publisher = std::thread::spawn(move || {
         dedupe::binding_events::set_test_root(log_root.as_deref());
         readiness::CLEAR_AFTER_PUBLICATION.with_borrow_mut(|slot| {
@@ -625,6 +625,7 @@ fn awaiting_clear_adoption_blocks_stale_same_session_close_until_pre_source_is_v
         .expect("pre-source cache published while authority is held");
     let (logical, closed_in_thread) = (fx.logical().to_owned(), Arc::clone(&closed));
     let closer = std::thread::spawn(move || {
+        dedupe::binding_events::set_test_root(closer_log_root.as_deref());
         tc::SOURCE_AUTHORITY_CONTENDED.with_borrow_mut(|slot| {
             *slot = Some(Box::new(move || {
                 contended.send(()).unwrap();
@@ -633,10 +634,21 @@ fn awaiting_clear_adoption_blocks_stale_same_session_close_until_pre_source_is_v
         tc::with_tmux_source_authority(&logical, |authority| {
             let now =
                 dedupe::runtime_binding_for_tmux_session_under_source_authority(authority).unwrap();
-            if now == old {
+            let pending = crate::services::claude::herdr_turn::awaited_clear(
+                CHANNEL,
+                &logical,
+                &closer_nonce,
+            )
+            .unwrap();
+            let old_ready = now.session_id.as_deref() == Some(pending.session_id.as_str());
+            let new_ready = pending.transcript.as_deref().is_some_and(|path| {
+                Path::new(path).file_stem().and_then(|s| s.to_str())
+                    == Some(pending.session_id.as_str())
+            });
+            if old_ready {
                 closed_in_thread.fetch_add(1, Ordering::SeqCst);
             }
-            now.session_id
+            (now == old, old_ready, new_ready)
         })
     });
     blocked
@@ -647,7 +659,7 @@ fn awaiting_clear_adoption_blocks_stale_same_session_close_until_pre_source_is_v
     assert!(crate::test_support::wait::join_within(publisher, LIMIT));
     assert_eq!(
         crate::test_support::wait::join_within(closer, LIMIT),
-        Some(cleared)
+        (true, false, true)
     );
     assert_eq!(
         closed.load(Ordering::SeqCst),

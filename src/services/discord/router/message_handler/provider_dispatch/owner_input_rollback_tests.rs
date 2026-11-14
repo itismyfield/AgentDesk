@@ -391,6 +391,7 @@ impl IntakeRig {
                 relay_last_offset: None,
             },
         );
+        crate::services::claude_tui::readiness::tests::pre_source(&name, &self.transcript);
     }
 
     async fn state(&self) -> Value {

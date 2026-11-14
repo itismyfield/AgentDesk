@@ -296,6 +296,14 @@ impl Rig {
         transcript: &Path,
         execution: Execution,
     ) -> Registration {
+        if *provider == ProviderKind::Claude && phase == target::Phase::Idle {
+            let binding =
+                crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&self.name);
+            let path = binding
+                .as_ref()
+                .map_or(transcript, |binding| Path::new(binding.relay_output_path()));
+            crate::services::claude_tui::readiness::tests::pre_source(&self.name, path);
+        }
         let root = crate::services::tmux_common::current_tmux_owner_marker();
         // A live pane's attempt names the transcript it was observed on.
         let source = if phase == target::Phase::Busy {
@@ -1104,6 +1112,12 @@ fn startup_enter_is_the_attempts_first_key() {
     let rig = rig("oc-dialog", 7_272_515, "startup", dialog.into(), IDLE);
     let _driver = rig.trace_driver();
     fs::write(rig.renderer.join("body"), "").unwrap();
+    // A menu confirmation is not a native user turn; keep its renderer record off the transcript.
+    fs::write(
+        rig.renderer.join("record-path"),
+        rig.renderer.join("startup-ui.jsonl").display().to_string(),
+    )
+    .unwrap();
     fs::write(rig.renderer.join("after"), view("", false)).unwrap();
     let pane = rig.f.tmux(&[
         "display-message",
@@ -1129,6 +1143,7 @@ fn startup_enter_is_the_attempts_first_key() {
     let result = created_first_prompt(&rig);
     assert!(result.is_err(), "{result:?}");
     rig.assert_hooks_completed();
+    assert_eq!(fs::read_to_string(rig.transcript()).unwrap(), IDLE);
     assert_eq!(rig.events(), ["Enter"], "startup key only; the load failed");
     let trace =
         fs::read_to_string(rig.f.root.path().join(format!("{}-owner/trace", rig.name))).unwrap();
@@ -1899,7 +1914,11 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
     let path = rig.transcript();
     let past = json!({"type":"user","uuid":"past","sessionId":"receipt-sid","message":{"role":"user","content":PROMPT}});
     use std::io::Write;
-    fs::write(&path, format!("{past}\n{IDLE}")).unwrap();
+    write!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{past}\n{IDLE}"
+    )
+    .unwrap();
     let before = fs::metadata(&path).unwrap().len();
     fs::write(rig.renderer.join("native-sid"), "receipt-sid").unwrap();
     fs::write(rig.renderer.join("native-uuid"), "dispatch-idle-a").unwrap();
@@ -1922,6 +1941,10 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
         target::Phase::Idle,
         &path,
         Execution::LocalTui,
+    );
+    assert!(
+        crate::services::claude_tui::readiness::observe(&rig.name, Some(&path)).is_some(),
+        "Idle source before dispatch"
     );
     let (settled, _) = tokio::sync::oneshot::channel();
     let mut written_token = None;

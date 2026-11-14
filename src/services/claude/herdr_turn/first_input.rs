@@ -142,6 +142,7 @@ fn write(
             let watched_session = logical.to_owned();
             let clearing = attached.awaiting_clear;
             let epoch = attached.nonce.clone();
+            let clear_path = path.to_path_buf();
             let watched_path = attached.transcript.clone();
             crate::services::claude_tui::owner_input::record_preparation_watch(Box::new(
                 move || {
@@ -150,7 +151,7 @@ fn write(
                         crate::services::claude_tui::readiness::clear_wakeable(
                             &watched_session,
                             &epoch,
-                            &watched_path,
+                            &clear_path,
                         )
                     } else {
                         crate::services::claude_tui::readiness::observe(

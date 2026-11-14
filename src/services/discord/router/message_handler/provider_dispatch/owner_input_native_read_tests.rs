@@ -9,8 +9,8 @@ const PERMISSION_MODE: &str =
     "{\"type\":\"permission-mode\",\"permissionMode\":\"bypassPermissions\"}\n";
 const START_WAITS: &str = "NotSent(\"synthetic_waits_idle\")";
 
-/// The rig's tmux behind a script: a capture shows `screen` if it exists, liveness reads are
-/// counted, read `park-at` waits for `release`, and one read fails after `fail-after` cwd reads.
+/// The shim counts native source and liveness reads separately; only a third source lookup fails.
+/// A selected liveness read can wait for an explicit release.
 struct Shim {
     dir: std::path::PathBuf,
 }
@@ -27,16 +27,16 @@ impl Shim {
              case \"$*\" in *capture-pane*) [ -f \"$d/screen\" ] && {{ cat \"$d/screen\"; exit 0; }} ;; esac\n\
              case \"$*\" in *pane_current_path*)\n\
                c=$(cat \"$d/cwds\" 2>/dev/null || echo 0); echo $((c+1)) > \"$d/cwds\"\n\
+               if [ -f \"$d/source-limit\" ] && [ ! -f \"$d/failed\" ] && \
+                  [ \"$c\" -ge \"$(cat \"$d/source-limit\")\" ]; then\n\
+                 : > \"$d/failed\"; echo 'native source requery refused' >&2; exit 1\n\
+               fi\n\
                if [ -f \"$d/busy-armed\" ] && [ -f \"$(cat \"$d/row-path\")\" ]; then\n\
                  rm -f \"$d/busy-armed\"; cat \"$d/busy-rows\" >> \"$(cat \"$d/transcript\")\"\n\
                fi ;;\n\
              esac\n\
              case \"$*\" in *list-panes*pane_dead*)\n\
                n=$(cat \"$d/reads\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$d/reads\"\n\
-               if [ -f \"$d/fail-after\" ] && [ ! -f \"$d/failed\" ] && \
-                  [ \"$(cat \"$d/cwds\" 2>/dev/null || echo 0)\" -ge \"$(cat \"$d/fail-after\")\" ]; then\n\
-                 : > \"$d/failed\"; echo 'probe failed' >&2; exit 1\n\
-               fi\n\
                if [ \"$(cat \"$d/park-at\" 2>/dev/null)\" = \"$n\" ]; then\n\
                  : > \"$d/parked\"; while [ ! -f \"$d/release\" ]; do sleep 0.02; done\n\
                fi ;;\n\
@@ -64,10 +64,9 @@ impl Shim {
         fs::write(self.dir.join("park-at"), "2").unwrap();
     }
 
-    /// The first liveness read after the late read resolved its transcript fails once, as a tmux
-    /// probe error; the early and the late read each resolve it through the pane's cwd.
-    fn fail_after_late_read(&self) {
-        fs::write(self.dir.join("fail-after"), "2").unwrap();
+    /// A third source resolution fails; independent physical-liveness checks stay available.
+    fn guard_cached_source(&self) {
+        fs::write(self.dir.join("source-limit"), "2").unwrap();
     }
 
     /// The next read made while the channel's inflight row `row` exists, so after a claim, finds a
@@ -110,7 +109,7 @@ enum Read {
     /// Session markers over an idle composer read idle.
     ReadyTail,
     /// Idle at both reads; a later read of the pane's liveness fails once.
-    ReadAgain,
+    CachedSource,
     /// A native turn opens after each claim, three times; the pane then reads idle.
     LateAgain,
     /// As `Early`, for a start naming no pane: its session has no name, and Discord names it.
@@ -179,7 +178,7 @@ async fn start_meets(id: u64, case: Read) {
         Read::Unlooked => {}
         _ if early => shim.composer_busy(),
         Read::Late | Read::LateBusy => shim.park_second_read(),
-        Read::ReadAgain => shim.fail_after_late_read(),
+        Read::CachedSource => shim.guard_cached_source(),
         _ => {}
     }
     let channels = [OriginChannel {
@@ -194,15 +193,23 @@ async fn start_meets(id: u64, case: Read) {
     let name = ProviderKind::Claude.build_tmux_session_name(&format!("a1-rollback-{id}"));
     let headless = format!("[session-strategy] channel={id}");
     let (drive, mut settled) = rig.drive();
-    if matches!(case, Read::ReadyTail | Read::ReadAgain) {
+    if matches!(case, Read::ReadyTail | Read::CachedSource) {
         let (completed, bridge) = tokio::sync::oneshot::channel();
         *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
             .lock()
             .unwrap() = Some((rig.channel, completed));
         crate::services::discord::queue_io::input_owner::drive::wake(drive);
         runs_once(&rig, &pool, ORIGIN, &mut settled, bridge, append).await;
-        if case == Read::ReadAgain {
-            assert!(shim.dir.join("failed").exists(), "no liveness read failed");
+        if case == Read::CachedSource {
+            assert_eq!(
+                fs::read_to_string(shim.dir.join("cwds")).unwrap().trim(),
+                "2",
+                "native source must use the cached late read"
+            );
+            assert!(
+                !shim.dir.join("failed").exists(),
+                "native source must not be resolved a third time"
+            );
         }
         drop(rig);
         pool.close().await;
@@ -443,7 +450,7 @@ async fn an_idle_late_read_is_registered_without_reading_the_pane_again_pg() {
     native_read_pg(
         "an_idle_late_read_is_registered_without_reading_the_pane_again_pg",
         7_772_107,
-        Read::ReadAgain,
+        Read::CachedSource,
     )
     .await;
 }

@@ -63,5 +63,16 @@ pub(crate) fn before_paste(
     if focus_modal(&capture) {
         return Err(Veto::Modal);
     }
-    Ok(stash_allowed && screen::parkable(&capture))
+    let park = stash_allowed && screen::parkable(&capture);
+    if !park && matches!(screen::input_box(&capture), screen::Composer::Text(_)) {
+        let target = pane.target().trim_start_matches('=').trim_end_matches(':');
+        let lost_authority =
+            super::super::submission_fence::idle_stash_scope().is_some_and(|(fence, context)| {
+                !context.available || context.target != target || !fence.idle_stash_admits(target)
+            });
+        if stash_allowed || lost_authority {
+            return Err(Veto::ScreenUnread);
+        }
+    }
+    Ok(park)
 }

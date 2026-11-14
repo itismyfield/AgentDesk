@@ -1478,6 +1478,7 @@ impl AttachedOwner {
             "export AGENTDESK_BINDING_CONTEXT='{}'\ncd '{}'\nexec 'claude' '--session-id' '{session}'\n",
             context.display(), project.display(),
         )).unwrap();
+        crate::services::claude_tui::readiness::tests::pre_source(&self.rig.name, &path);
         (session, path)
     }
 

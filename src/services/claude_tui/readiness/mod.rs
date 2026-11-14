@@ -238,9 +238,18 @@ pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
     {
         return None;
     }
+    if !clear::claim(&proof.source, proof.clear.as_ref()) {
+        return None;
+    }
     let mut state = ledger();
-    let entry = state.entries.get_mut(&proof.source)?;
+    let Some(entry) = state.entries.get_mut(&proof.source) else {
+        drop(state);
+        clear::release(&proof.source, proof.clear.as_ref());
+        return None;
+    };
     if entry.revision != proof.revision || entry.pending.is_some() {
+        drop(state);
+        clear::release(&proof.source, proof.clear.as_ref());
         return None;
     }
     entry.revision += 1;
@@ -281,6 +290,7 @@ impl Reservation {
 
     /// Only a known pre-key refusal releases a local reservation; uncertainty stays fenced.
     pub(crate) fn not_sent(self) {
+        let mut released = false;
         let mut state = ledger();
         if let Some(entry) = state.entries.get_mut(&self.source)
             && entry
@@ -289,7 +299,12 @@ impl Reservation {
         {
             entry.pending = None;
             entry.revision += 1;
+            released = true;
             changed(&mut state);
+        }
+        drop(state);
+        if released {
+            clear::release(&self.source, self.clear.as_ref());
         }
     }
     pub(crate) fn sent(self) {
@@ -553,12 +568,20 @@ fn watch(session: &str, path: Option<&Path>, draft_required: bool) {
         let session = session.to_owned();
         let path = path.map(Path::to_path_buf);
         super::owner_input::record_preparation_watch(Box::new(move || {
-            if observe(&session,path.as_deref()).is_some()
-                && (!draft_required || super::host_input::observe_draft(&session).as_deref()
-                    .is_some_and(|capture| empty_draft(capture)
-                        && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture))) {
+            if observe(&session, path.as_deref()).is_some()
+                && super::host_input::observe_draft(&session)
+                    .as_deref()
+                    .is_some_and(|capture| {
+                        !idle::focus_modal(capture)
+                            && (empty_draft(capture)
+                                || (!draft_required
+                                    && super::busy_inject::screen::parkable(capture)))
+                    })
+            {
                 super::busy_inject::Screen::Ready
-            } else { super::busy_inject::Screen::Unknown }
+            } else {
+                super::busy_inject::Screen::Unknown
+            }
         }));
     }
     #[cfg(not(unix))]

@@ -17,6 +17,9 @@ pub(crate) fn prepare(
         if cancel_requested(cancel) {
             return Err(super::super::input::PROMPT_READY_CANCELLED_ERROR.into());
         }
+        if let Some(refused) = crate::services::claude_tui::submission_fence::refusal() {
+            return Err(refused.to_string());
+        }
         let revision = ledger().revision;
         let dialog_pending = dialogs.poll(session, cancel)?;
         if !dialog_pending

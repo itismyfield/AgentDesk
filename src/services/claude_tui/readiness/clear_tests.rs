@@ -332,3 +332,99 @@ fn pending_seq_change_invalidates_both_observed_and_reserved_proofs() {
     );
     assert_eq!(sent.get(), 0);
 }
+
+#[test]
+fn clear_known_non_delivery_releases_the_certificate_and_old_output_stays_fenced() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = ClearRig::new();
+    let native = uuid::Uuid::new_v4().to_string();
+    r.pending(&native, r.channel, &r.path(&native));
+    r.start(&native, "clear");
+    let old = tui_prompt_dedupe::runtime_binding_for_tmux_session(&r.rig.session).unwrap();
+    let reservation = reserve(observe(&r.rig.session, Some(&r.path(&native))).unwrap()).unwrap();
+    assert!(reservation.current());
+    reservation.not_sent();
+    r.rig.assistant("late old output");
+    r.rig.terminal();
+    assert!(observe(&r.rig.session, Some(&r.rig.path)).is_none());
+    let sent = Cell::new(0);
+    assert!(matches!(r.run(&native, &sent), InputRun::Applied));
+    assert_eq!(sent.get(), 1);
+    assert_eq!(
+        tui_prompt_dedupe::runtime_binding_for_tmux_session(&r.rig.session),
+        Some(old)
+    );
+    super::forget_session(&r.rig.session);
+    r.start(&native, "clear");
+    r.closed(&native);
+    assert_eq!(
+        sent.get(),
+        1,
+        "a sent clear certificate cannot bootstrap after restart"
+    );
+}
+
+#[test]
+fn clear_crash_after_reservation_cannot_reuse_the_authenticated_start() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = ClearRig::new();
+    let native = uuid::Uuid::new_v4().to_string();
+    r.pending(&native, r.channel, &r.path(&native));
+    r.start(&native, "clear");
+    let old = tui_prompt_dedupe::runtime_binding_for_tmux_session(&r.rig.session).unwrap();
+    let reservation = reserve(observe(&r.rig.session, Some(&r.path(&native))).unwrap()).unwrap();
+    assert!(reservation.current());
+    drop(reservation);
+    super::forget_session(&r.rig.session);
+    r.start(&native, "clear");
+    r.closed(&native);
+    assert_eq!(
+        tui_prompt_dedupe::runtime_binding_for_tmux_session(&r.rig.session),
+        Some(old)
+    );
+}
+
+#[test]
+fn old_clear_release_cannot_release_a_new_pending_on_the_same_native_source() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = ClearRig::new();
+    let native = uuid::Uuid::new_v4().to_string();
+    r.pending(&native, r.channel, &r.path(&native));
+    r.start(&native, "clear");
+    let first = reserve(observe(&r.rig.session, Some(&r.path(&native))).unwrap()).unwrap();
+    let old = first.clear.clone().unwrap();
+    first.not_sent();
+    let intermediate = uuid::Uuid::new_v4().to_string();
+    r.pending(&intermediate, r.channel, &r.path(&intermediate));
+    r.pending(&native, r.channel, &r.path(&native));
+    r.start(&native, "clear");
+    let latest = reserve(observe(&r.rig.session, Some(&r.path(&native))).unwrap()).unwrap();
+    assert!(latest.current());
+    assert_ne!(
+        old,
+        latest.clear.as_ref().unwrap().clone(),
+        "the later Pending has distinct evidence"
+    );
+    super::super::clear::release(&latest.source, Some(&old));
+    drop(latest);
+    super::forget_session(&r.rig.session);
+    r.start(&native, "clear");
+    r.closed(&native);
+}
+
+#[test]
+fn authenticated_pending_after_restart_needs_no_volatile_binding_and_sends_once() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = ClearRig::new();
+    let native = uuid::Uuid::new_v4().to_string();
+    r.pending(&native, r.channel, &r.path(&native));
+    r.start(&native, "clear");
+    tui_prompt_dedupe::clear_tmux_runtime_binding(&r.rig.session);
+    super::forget_session(&r.rig.session);
+    let sent = Cell::new(0);
+    assert!(matches!(r.run(&native, &sent), InputRun::Applied));
+    assert_eq!(sent.get(), 1);
+    assert!(tui_prompt_dedupe::runtime_binding_for_tmux_session(&r.rig.session).is_none());
+    super::forget_session(&r.rig.session);
+    r.closed(&native);
+}
