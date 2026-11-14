@@ -50,10 +50,14 @@ pub fn claude_transcript_path_candidates(
         return Err("invalid Claude session_id UUID".to_string());
     }
     let filename = format!("{session_id}.jsonl");
-    Ok(claude_project_dir_candidates_for_cwd(cwd, claude_home)?
+    claude_project_dir_candidates_for_cwd(cwd, claude_home)?
         .into_iter()
-        .map(|project_dir| project_dir.join(&filename))
-        .collect())
+        .map(|project_dir| {
+            let path = project_dir.join(&filename);
+            crate::config::test_instance::environment::validate_path(&path)?;
+            Ok(path)
+        })
+        .collect()
 }
 
 // #3034: test-only single-candidate helper; production resolves transcripts via
@@ -76,8 +80,9 @@ pub fn claude_project_dir_candidates_for_cwd(
     let home = claude_home
         .map(Path::to_path_buf)
         .or_else(default_claude_home)
-        .ok_or_else(|| "Claude home directory is unavailable".to_string())?
-        .join("projects");
+        .ok_or_else(|| "Claude home directory is unavailable".to_string())?;
+    crate::config::test_instance::environment::validate_provider_home("claude", &home)?;
+    let home = home.join("projects");
     let mut path_candidates = Vec::new();
     if let Ok(canonical) = std::fs::canonicalize(cwd) {
         path_candidates.push(canonical);
@@ -89,6 +94,7 @@ pub fn claude_project_dir_candidates_for_cwd(
     let mut project_dirs = Vec::new();
     for path in path_candidates {
         let project_dir = home.join(encode_project_path(&path));
+        crate::config::test_instance::environment::validate_path(&project_dir)?;
         if !project_dirs.contains(&project_dir) {
             project_dirs.push(project_dir);
         }
@@ -166,6 +172,9 @@ fn claude_transcript_files_for_cwd_since(
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            if crate::config::test_instance::environment::validate_path(&path).is_err() {
+                continue;
+            }
             // #2843 multi-session fix: skip transcripts already claimed by a
             // *different* live session's binding. Without this, concurrent
             // Claude TUI sessions sharing one cwd all collapse onto the single
@@ -413,6 +422,11 @@ pub(crate) fn encode_project_path(path: &Path) -> String {
 /// transcript through the same resolver the readers here use, instead of
 /// matching a hardcoded `~/.claude` the override would walk away from.
 pub(crate) fn default_claude_home() -> Option<PathBuf> {
+    if crate::config::test_instance::requested() {
+        return crate::config::test_instance::environment::provider_home("claude")
+            .ok()
+            .flatten();
+    }
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
