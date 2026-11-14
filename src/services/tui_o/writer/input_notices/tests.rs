@@ -187,3 +187,84 @@ fn disabled_projection_never_creates_a_notice() {
     assert!(!Projection::default().enabled());
     assert!(project(&mut Projection::default(), &row).unwrap().is_none());
 }
+
+/// The row Claude Code 2.1.325 wrote for a real one-shot `CronCreate` fire (session 708eaac7).
+const SCHEDULED_USER_ROW: &str = r#"{"parentUuid":"8156566a-f661-406c-adff-025cfdde0230","isSidechain":false,"promptId":"3fc992ba-8e68-43c2-a178-6ed88df586d3","type":"user","message":{"role":"user","content":"i8142 probe line one\nsecond line with `backticks`"},"isMeta":true,"uuid":"e240fedf-dea7-4efe-a5ba-120d919918f7","timestamp":"2026-11-13T23:24:00.344Z","permissionMode":"auto","promptSource":"system","queueSkipSlashCommands":true,"wakeupSource":"schedule_wakeup","scheduledTaskId":"abbf09df","scheduledFireId":"8156566a-f661-406c-adff-025cfdde0230","turnOrigin":"scheduled","turnPosition":{"promptIndex":1,"turnIndex":2},"queuePriority":"later","queueSkipAttachments":true,"userType":"external","entrypoint":"sdk-cli","cwd":"/tmp/i8142-probe2/proj","sessionId":"708eaac7-d46f-4c29-837a-84e79c2d811f","version":"2.1.325","gitBranch":"HEAD"}"#;
+const SCHEDULED_TEXT: &str = "i8142 probe line one\nsecond line with `backticks`";
+
+fn captured(row: &str) -> CapturedRecord {
+    CapturedRecord {
+        start: 10,
+        end: 11 + row.len() as u64,
+        line: row.as_bytes().to_vec(),
+    }
+}
+
+#[test]
+fn a_scheduled_fire_row_is_announced_once_under_the_scheduled_header() {
+    let fire = captured(SCHEDULED_USER_ROW);
+    assert!(needs_origin(&fire), "the row must get its binding origin");
+    let mut projection = Projection::for_tests();
+    let piece = project(&mut projection, &fire)
+        .unwrap()
+        .expect("a scheduled fire's row must project");
+    assert_eq!(
+        piece.payload,
+        format!("-# ⏰ scheduled prompt\n```\n{SCHEDULED_TEXT}\n```")
+    );
+    assert_eq!(
+        piece.unit_key.native_key,
+        "e240fedf-dea7-4efe-a5ba-120d919918f7"
+    );
+    assert_eq!(piece.unit_key.kind, UnitKind::InputNotice);
+    assert!(
+        project(&mut projection, &fire).unwrap().is_none(),
+        "a re-read row is the same notice, not a second one"
+    );
+    // The same text typed by a person keeps the typed header.
+    let typed = project(&mut projection, &record("typed-uuid", SCHEDULED_TEXT))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        typed.payload,
+        format!("-# ⌨️ tui direct input\n```\n{SCHEDULED_TEXT}\n```")
+    );
+}
+
+#[test]
+fn only_a_fire_s_own_human_class_row_reads_as_scheduled() {
+    let edits: [(&str, &str, &str); 4] = [
+        (
+            "meta row of no scheduled task",
+            r#""scheduledTaskId":"abbf09df","#,
+            "",
+        ),
+        (
+            "compact summary of a scheduled turn",
+            r#""isMeta":true"#,
+            r#""isMeta":true,"isCompactSummary":true"#,
+        ),
+        (
+            "scheduled slash command, which keeps its live note",
+            r#"i8142 probe line one\nsecond line with `backticks`"#,
+            "<command-name>/clear</command-name>",
+        ),
+        (
+            "row of another role",
+            r#""type":"user","message":{"role":"user""#,
+            r#""type":"user","message":{"role":"assistant""#,
+        ),
+    ];
+    for (case, from, to) in edits {
+        let row = SCHEDULED_USER_ROW.replace(from, to);
+        assert_ne!(row, SCHEDULED_USER_ROW, "{case}");
+        let row = captured(&row);
+        assert!(!needs_origin(&row), "{case}");
+        assert!(
+            project(&mut Projection::for_tests(), &row)
+                .unwrap()
+                .is_none(),
+            "{case}"
+        );
+    }
+}

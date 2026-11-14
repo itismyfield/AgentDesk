@@ -120,3 +120,19 @@ fn command_name_that_is_not_a_plain_token_or_an_empty_output_keeps_the_kind_only
         kind_only_note(tmux, "local-command-stdout", empty)
     );
 }
+
+#[test]
+fn an_output_row_with_a_command_kind_of_its_own_names_no_later_output() {
+    use super::super::injected_prompt_policy::slash_command_control_kind;
+    let tmux = "AgentDesk-claude-i8142-slash-compacted";
+    let compacted =
+        "<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>";
+    let kind = slash_command_control_kind(compacted);
+    assert_eq!(kind, "/compact");
+    local_slash_control_note(tmux, &kind, compacted);
+    let cost = "<local-command-stdout>Total cost: $1.00</local-command-stdout>";
+    assert_eq!(
+        local_slash_control_note(tmux, "local-command-stdout", cost),
+        kind_only_note(tmux, "local-command-stdout", cost)
+    );
+}

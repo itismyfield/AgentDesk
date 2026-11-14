@@ -175,3 +175,58 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
         &format!("-# ⌨️ tui direct input\n```\n{frame}\n```")
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_fire_hook_is_announced_under_the_scheduled_header_pg() {
+    let busy = idle().await;
+    let rt = &busy.rt;
+    let _confirmed = TestConfirmation::new(CHANNEL_ID);
+    let tx = observer(rt);
+    let session = busy.pane.session();
+    let transcript = busy.pane.path(InjectPane::TRANSCRIPT);
+    let prompt_id = format!("i8142-fire-{}", fresh_id());
+    let text = "i8142 scheduled canary\nsecond line";
+    // The fire's own row, with the marks Claude Code 2.1.325 writes on it.
+    let row = serde_json::json!({"type":"user", "isMeta":true, "promptId":prompt_id,
+        "uuid":format!("{prompt_id}-row"), "promptSource":"system",
+        "wakeupSource":"schedule_wakeup", "scheduledTaskId":"abbf09df",
+        "turnOrigin":"scheduled", "message":{"role":"user","content":text}});
+    busy.pane.set(
+        InjectPane::TRANSCRIPT,
+        &format!("{{\"type\":\"system\",\"subtype\":\"turn_duration\"}}\n{row}\n"),
+    );
+    tx.send(HookEvent {
+        original_context: None,
+        provider: "claude".into(),
+        session_id: session,
+        kind: HookEventKind::UserPromptSubmit,
+        received_at: chrono::Utc::now(),
+        payload: serde_json::json!({"prompt":text, "prompt_id":prompt_id,
+            "transcript_path":transcript}),
+        fanout: None,
+    })
+    .unwrap();
+    assert!(
+        wait_until(WAIT, || {
+            let found = rt
+                .notices()
+                .iter()
+                .any(|notice| notice.contains("i8142 scheduled canary"));
+            Box::pin(async move { found })
+        })
+        .await,
+        "the scheduled fire must be announced: {:?}",
+        rt.notices()
+    );
+    let notices = rt.notices();
+    rt.finish().await;
+    let matching: Vec<_> = notices
+        .iter()
+        .filter(|notice| notice.contains("i8142 scheduled canary"))
+        .collect();
+    assert_eq!(
+        matching,
+        [&format!("-# ⏰ scheduled prompt\n```\n{text}\n```")],
+        "one notice under the scheduled header: {notices:?}"
+    );
+}

@@ -285,6 +285,36 @@ fn origin_is_read_only_from_the_prompts_own_row() {
 }
 
 #[test]
+fn a_turn_wide_scheduled_origin_alone_is_not_a_scheduled_fire() {
+    let id = REAL_PROMPT_ID;
+    let text = "i8142 probe line one\nsecond line with `backticks`";
+    // An input typed into a scheduled turn carries that turn's origin and no fire mark.
+    let typed_in_scheduled_turn =
+        TYPED_USER_ROW.replace(r#""turnOrigin":"human""#, r#""turnOrigin":"scheduled""#);
+    assert_ne!(typed_in_scheduled_turn, TYPED_USER_ROW);
+    assert_eq!(
+        origin_in_rows(&typed_in_scheduled_turn, id, text),
+        Origin::Typed
+    );
+    // A scheduled turn's compact summary keeps every mark of the fire.
+    let summary = SCHEDULED_USER_ROW.replace(
+        r#""isMeta":true"#,
+        r#""isMeta":true,"isCompactSummary":true"#,
+    );
+    assert_ne!(summary, SCHEDULED_USER_ROW);
+    assert_eq!(origin_in_rows(&summary, id, text), Origin::Typed);
+    // Either fire mark is enough: Claude 2.1.295 wrote no `wakeupSource`.
+    for mark in [
+        r#""wakeupSource":"schedule_wakeup","#,
+        r#""scheduledTaskId":"abbf09df","#,
+    ] {
+        let row = SCHEDULED_USER_ROW.replace(mark, "");
+        assert_ne!(row, SCHEDULED_USER_ROW);
+        assert_eq!(origin_in_rows(&row, id, text), Origin::Scheduled, "{mark}");
+    }
+}
+
+#[test]
 fn scheduled_class_differs_from_a_typed_input_only_in_its_notice() {
     use super::super::injected_prompt_policy::{
         InjectedPromptClass, classify_injected_prompt,

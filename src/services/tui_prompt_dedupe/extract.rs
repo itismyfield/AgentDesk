@@ -149,6 +149,35 @@ pub fn extract_claude_transcript_user_prompt_with_entry_id(
     Some((prompt, entry_id))
 }
 
+/// What the tui_o writer announces off a native row: a typed input, or with the flag set a
+/// scheduled fire's own row. The idle scanner keeps to the shared extraction, which drops it.
+pub(crate) fn extract_claude_writer_input_with_entry_id(
+    json: &Value,
+) -> Option<(String, Option<String>, bool)> {
+    if let Some((prompt, entry_id)) = extract_claude_transcript_user_prompt_with_entry_id(json) {
+        return Some((prompt, entry_id, false));
+    }
+    let scheduled_fire = json.get("isMeta").and_then(Value::as_bool) == Some(true)
+        && json.get("scheduledTaskId").is_some_and(Value::is_string);
+    if json.get("type").and_then(Value::as_str) != Some("user")
+        || !scheduled_fire
+        || is_claude_compact_summary(json)
+    {
+        return None;
+    }
+    let message = json.get("message")?;
+    if message
+        .get("role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role != "user")
+    {
+        return None;
+    }
+    let prompt = reject_synthetic_claude_user_prompt(extract_message_content_text(message)?)?;
+    let entry_id = extract_claude_transcript_entry_id(json, message);
+    Some((prompt, entry_id, true))
+}
+
 /// #3540: pull the stable entry identity for a Claude transcript `user` entry.
 /// Prefers the top-level `uuid` (where Claude Code writes it), falls back to a
 /// `message.uuid` if a future format ever moves it. Returns a normalized,

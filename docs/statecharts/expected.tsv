@@ -532,6 +532,13 @@ tui-o-writer/WriterRestartEndPrefix.cfg	WriterWake	-	-
 tui-o-writer/WriterRestartEndRepost.cfg	WriterWake	RestartReplyOnce	-
 tui-o-writer/WriterRestartEndUnscoped.cfg	WriterWake	RestartExactEndOnly	-
 tui-o-writer/WriterRestartEndWitnessLost.cfg	WriterWake	RestartWitnessSurvivesBoot,RestartWitnessBeforeSeal	-
+tui-o-writer/WriterScheduledNoticeBefore.cfg	WriterScheduledNotice	-	EventuallyPostedOnce
+tui-o-writer/WriterScheduledNoticeFixed.cfg	WriterScheduledNotice	-	-
+tui-o-writer/WriterScheduledNoticeNoFloor.cfg	WriterScheduledNotice	NoRetroactivePost,PostedAtMostOnce	-
+tui-o-writer/WriterScheduledNoticeNoHookSuppress.cfg	WriterScheduledNotice	PostedAtMostOnce	-
+tui-o-writer/WriterScheduledNoticeNoSeal.cfg	WriterScheduledNotice	PostedAtMostOnce	-
+tui-o-writer/WriterScheduledNoticePayloadOnly.cfg	WriterScheduledNotice	PostedAtMostOnce	-
+tui-o-writer/WriterScheduledNoticeQueuedHandoff.cfg	WriterScheduledNotice	PostedAtMostOnce	-
 tui-o-writer/WriterThreadPrepAlias.cfg	WriterThreadPrep	OwnCandidate	-
 tui-o-writer/WriterThreadPrepBefore.cfg	WriterThreadPrep	SharedSnapshot	-
 tui-o-writer/WriterThreadPrepFixed.cfg	WriterThreadPrep	-	-

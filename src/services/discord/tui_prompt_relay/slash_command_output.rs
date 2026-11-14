@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::injected_prompt_policy::{
     format_slash_command_control_note, format_slash_command_output_notice,
+    is_local_command_output_row,
 };
 
 const LOCAL_COMMAND_STDOUT_KIND: &str = "local-command-stdout";
@@ -26,7 +27,9 @@ pub(super) fn local_slash_control_note(tmux_session_name: &str, kind: &str, raw:
         if kind == LOCAL_COMMAND_STDOUT_KIND {
             last.remove(tmux_session_name).map(|(command, _)| command)
         } else {
-            if kind.starts_with('/') {
+            // An output row can carry a command kind of its own (`/compact`'s "Compacted …");
+            // only the command row names the command the next output belongs to.
+            if kind.starts_with('/') && !is_local_command_output_row(raw) {
                 last.insert(
                     tmux_session_name.to_string(),
                     (kind.to_string(), Instant::now()),

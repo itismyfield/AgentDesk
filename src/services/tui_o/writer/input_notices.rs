@@ -64,6 +64,45 @@ pub(crate) fn discord_input(prompt: &str) -> bool {
         || crate::services::tui_input::human_frame::opens_legacy_inject(framed)
 }
 
+/// A native row the writer may announce.
+pub(crate) struct NativeInput {
+    pub prompt: String,
+    pub uuid: Option<String>,
+    /// A scheduled-task fire, which the shared extraction drops as `isMeta`.
+    pub scheduled: bool,
+}
+
+/// The writer's own reading of a native row: a typed input, or a scheduled fire's row.
+pub(crate) fn native_input(row: &serde_json::Value) -> Option<NativeInput> {
+    let (prompt, uuid, scheduled) =
+        tui_prompt_dedupe::extract_claude_writer_input_with_entry_id(row)?;
+    Some(NativeInput {
+        prompt,
+        uuid,
+        scheduled,
+    })
+}
+
+impl NativeInput {
+    /// The notice of an input of the class the writer owns, headed by where it came from.
+    pub(crate) fn notice(&self) -> Option<String> {
+        if self.scheduled {
+            discord::scheduled_input_notice_content(&self.prompt)
+        } else {
+            discord::input_notice_content(&self.prompt)
+        }
+    }
+
+    /// The typed-header notice the hook path posted for a scheduled fire whose row it could
+    /// not read in time, while it was the live owner.
+    pub(crate) fn legacy_typed_notice(&self) -> Option<String> {
+        (self
+            .scheduled
+            .then(|| discord::input_notice_content(&self.prompt)))
+        .flatten()
+    }
+}
+
 /// A native user row always carries the JSON string `"user"`, so other rows skip the parse.
 fn may_be_user(line: &[u8]) -> bool {
     line.windows(6).any(|window| window == b"\"user\"")
@@ -74,12 +113,8 @@ pub(crate) fn needs_origin(record: &CapturedRecord) -> bool {
     may_be_user(&record.line)
         && serde_json::from_slice(&record.line)
             .ok()
-            .and_then(|value| {
-                tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(&value)
-            })
-            .is_some_and(|(prompt, _)| {
-                !discord_input(&prompt) && discord::input_notice_content(&prompt).is_some()
-            })
+            .and_then(|value| native_input(&value))
+            .is_some_and(|input| !discord_input(&input.prompt) && input.notice().is_some())
 }
 
 #[derive(Default)]
@@ -121,17 +156,16 @@ impl Projection {
         }
         let value = serde_json::from_slice(&record.line)
             .map_err(|error| format!("input notice record at {}: {error}", record.start))?;
-        let Some((prompt, uuid)) =
-            tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(&value)
-        else {
+        let Some(input) = native_input(&value) else {
             return Ok(None);
         };
-        if discord_input(&prompt) {
+        if discord_input(&input.prompt) {
             return Ok(None);
         }
-        let Some(payload) = discord::input_notice_content(&prompt) else {
+        let Some(payload) = input.notice() else {
             return Ok(None);
         };
+        let NativeInput { prompt, uuid, .. } = input;
         let native_key = uuid.ok_or("input notice has no native user UUID")?;
         let origin = origin?;
         if origin.record.start != record.start

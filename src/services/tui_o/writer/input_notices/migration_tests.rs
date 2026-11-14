@@ -777,3 +777,132 @@ async fn notice_settlement_rejects_undiscovered_frozen_legacy_receipts_but_accep
     }
     assert_eq!(fixture.port.posts.load(Ordering::SeqCst), 0);
 }
+
+fn scheduled_notice(prompt: &str) -> String {
+    format!("-# ⏰ scheduled prompt\n```\n{prompt}\n```")
+}
+
+/// A scheduled fire's own row, as the writer keeps it.
+fn scheduled(uuid: &str, prompt: &str, start: u64) -> NoticeEvidence {
+    let mut input = evidence(uuid, prompt, start);
+    input.raw_record = serde_json::to_vec(&serde_json::json!({
+        "type":"user", "isMeta":true, "scheduledTaskId":"abbf09df", "uuid":uuid,
+        "message":{"role":"user","content":prompt}
+    }))
+    .unwrap();
+    input.record.end = start + input.raw_record.len() as u64 + 1;
+    input.origin.as_mut().unwrap().record = input.record.clone();
+    input.payload = Some(scheduled_notice(prompt));
+    input
+}
+
+#[tokio::test]
+async fn a_frozen_scheduled_fire_the_hook_announced_under_either_header_is_not_posted_again() {
+    let prompt = "hourly briefing";
+    let headers = [
+        scheduled_notice(prompt),
+        crate::services::discord::input_notice_content(prompt).unwrap(),
+    ];
+    assert_ne!(headers[0], headers[1]);
+    assert_eq!(
+        crate::services::tui_o::writer::input_notices::Projection::for_tests()
+            .project_record(
+                7,
+                ShadowProvider::Claude,
+                &scheduled("fire", prompt, 0).record.source,
+                &crate::services::tui_o::shadow::CapturedRecord {
+                    start: 0,
+                    end: scheduled("fire", prompt, 0).record.end,
+                    line: scheduled("fire", prompt, 0).raw_record,
+                },
+                Ok(*scheduled("fire", prompt, 0).origin.unwrap()),
+            )
+            .unwrap()
+            .map(|piece| piece.payload),
+        Some(headers[0].clone()),
+        "the fixture's payload is the one the writer derives"
+    );
+    for legacy in headers {
+        let fixture = Fixture::new();
+        let input = scheduled("fire", prompt, 0);
+        let key = input.unit_key.clone().unwrap();
+        fixture.message(40, &legacy);
+        let mut writer = fixture.writer();
+        seed(&mut writer, &[input], fixed());
+        let ready = writer
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
+            .await
+            .unwrap();
+        assert!(ready.is_empty(), "{legacy}");
+        let unresolved: Vec<_> = (writer.store().ledger().input_notices().unresolved)
+            .values()
+            .collect();
+        assert_eq!(unresolved.len(), 1, "{legacy}");
+        assert_eq!(unresolved[0].candidates, [40], "{legacy}");
+        // A restart reads the scheduled evidence back and reaches the same verdict.
+        drop(writer);
+        let mut writer = fixture.writer();
+        assert_eq!(writer.store().ledger().violation(), None);
+        assert_eq!(writer.store().ledger().input_notices().evidence.len(), 1);
+        let ready = writer
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
+            .await
+            .unwrap();
+        assert!(ready.is_empty(), "{legacy}");
+        assert_eq!(fixture.port.posts.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn scheduled_fires_are_ready_only_from_the_frozen_lower_on() {
+    let fixture = Fixture::new();
+    let inputs = [
+        scheduled("a-floor", "before the handoff", 0),
+        scheduled("b-cohort", "frozen and never announced", 2_000),
+        scheduled("c-live", "after the handoff", 20_000),
+    ];
+    let keys: Vec<_> = inputs
+        .iter()
+        .map(|input| input.unit_key.clone().unwrap())
+        .collect();
+    // Another notice in the frozen range proves the history was readable.
+    fixture.message(40, &scheduled_notice("some other fire"));
+    let mut writer = fixture.writer();
+    writer
+        .record(LedgerEntry::InputNotice {
+            entry: Box::new(NoticeEntry::MigrationStarted {
+                snapshot: MigrationSnapshot {
+                    sources: vec![MigrationSource {
+                        source: inputs[0].record.source.clone(),
+                        lower: 1_000,
+                        upper: 10_000,
+                        prefix_hash: "0".repeat(64),
+                    }],
+                    binding_checkpoint: 3,
+                    history: fixed(),
+                },
+            }),
+        })
+        .unwrap();
+    for input in inputs {
+        writer
+            .record(LedgerEntry::InputNotice {
+                entry: Box::new(NoticeEntry::Materialized {
+                    evidence: Box::new(input),
+                }),
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        writer
+            .reconcile_notice_migration(true, &[], &keys, &[])
+            .await
+            .unwrap(),
+        keys[1..]
+    );
+    assert!(
+        (writer.store().ledger().input_notices().unresolved).is_empty(),
+        "the floor row is neither debt nor ready"
+    );
+    assert_eq!(fixture.port.posts.load(Ordering::SeqCst), 0);
+}

@@ -447,6 +447,11 @@ pub(super) fn format_slash_command_output_notice(
     (plain && !body.is_empty()).then(|| raw_prompt_notice(&format!("-# ⚙️ {command}"), body))
 }
 
+/// Whether the row is a local command's output rather than the command itself.
+pub(super) fn is_local_command_output_row(prompt: &str) -> bool {
+    local_command_stdout_inner(prompt).is_some()
+}
+
 fn local_command_stdout_inner(prompt: &str) -> Option<String> {
     let (normalized, _peeled_caveat) = normalize_slash_command_control_prompt(prompt);
     let rest = normalized.strip_prefix(LOCAL_COMMAND_STDOUT_OPEN)?;

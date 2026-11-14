@@ -134,13 +134,15 @@ fn row_text(row: &Value) -> Option<String> {
     }
 }
 
+/// `turnOrigin` belongs to the whole turn, so an input typed into a scheduled turn and that
+/// turn's compact summary carry it too; only the fire's own marks count.
 fn carries_scheduled_marks(row: &Value) -> bool {
-    row["turnOrigin"] == "scheduled"
-        || row["scheduledTaskId"].is_string()
-        || matches!(
-            row["wakeupSource"].as_str(),
-            Some("schedule_wakeup" | "loop_wakeup")
-        )
+    row["isCompactSummary"] != true
+        && (row["scheduledTaskId"].is_string()
+            || matches!(
+                row["wakeupSource"].as_str(),
+                Some("schedule_wakeup" | "loop_wakeup")
+            ))
 }
 
 fn read_tail(path: &Path) -> Option<String> {
