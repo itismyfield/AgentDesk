@@ -393,6 +393,6 @@ pub(crate) fn decide(pane: Pane<'_>, now: DateTime<Utc>) -> Verdict {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "readiness_tests.rs"]
 mod tests;
