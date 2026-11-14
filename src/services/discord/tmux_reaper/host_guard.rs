@@ -152,7 +152,10 @@ pub(super) async fn unified_thread_target(
     // including env isolation to avoid killing sessions from other environments.
     let env_suffix = crate::services::provider::tmux_env_suffix();
     let full_suffix = format!("-t{thread_channel_id}{env_suffix}");
-    let prefix = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);
+    let prefix = format!(
+        "{}-",
+        crate::domain::provider::naming::tmux_session_prefix()
+    );
     let name = names
         .iter()
         .find(|name| name.starts_with(&prefix) && name.ends_with(&full_suffix))?;

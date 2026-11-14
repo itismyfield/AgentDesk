@@ -85,7 +85,10 @@ pub(super) fn session_exists(tmux_session_name: &str) -> Result<bool, String> {
         HostPresence::Present => Ok(true),
         HostPresence::Missing => Ok(false),
         // Only a socket confirmed absent means no server; an unreadable one stays unobserved.
-        HostPresence::ProbeFailed if matches!(tmux_server_socket().try_exists(), Ok(false)) => {
+        HostPresence::ProbeFailed
+            if !crate::config::test_instance::requested()
+                && matches!(tmux_server_socket().try_exists(), Ok(false)) =>
+        {
             Ok(false)
         }
         HostPresence::ProbeFailed => {

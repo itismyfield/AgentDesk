@@ -104,10 +104,14 @@ fn serve(reply: Reply) -> Server {
     } else {
         path
     };
+    serve_at(path, 7, reply)
+}
+
+fn serve_at(path: PathBuf, serving_pid: u32, reply: Reply) -> Server {
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).unwrap();
     listener.set_nonblocking(true).unwrap();
-    let serving = Arc::new(AtomicU32::new(7));
+    let serving = Arc::new(AtomicU32::new(serving_pid));
     let conns = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let pong = Arc::new(Mutex::new(
@@ -648,3 +652,375 @@ impl SocketHerdrLaunchHost {
 
 #[path = "unplaced_rig_tests.rs"]
 mod unplaced_rig;
+
+struct InstanceBootstrapped;
+
+impl ServerProvenance for InstanceBootstrapped {
+    fn process_start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+        Bootstrapped.process_start(pid)
+    }
+
+    fn process_env(&self, _pid: u32, key: &str) -> Result<Vec<String>, RestoreUnverified> {
+        let instance = crate::config::test_instance::current().unwrap().unwrap();
+        let path = instance.herdr.home.join(match key {
+            "HERDR_CONFIG_PATH" => "config.toml",
+            "XDG_CONFIG_HOME" => "xdg",
+            _ => return Err(RestoreUnverified::NotBootstrapped),
+        });
+        Ok(vec![path.display().to_string()])
+    }
+
+    fn read_config(&self, path: &Path) -> Result<ConfigRead, RestoreUnverified> {
+        Bootstrapped.read_config(path)
+    }
+}
+
+fn instance_launch(server: &Server) -> HerdrLaunchEndpoint {
+    let instance = crate::config::test_instance::current().unwrap().unwrap();
+    HerdrLaunchEndpoint {
+        execution_node: instance.instance_id.clone(),
+        config_key: instance.herdr.endpoint_key.clone(),
+        socket_addr: server.path.display().to_string(),
+        herdr_session: instance.herdr.session.clone(),
+    }
+}
+
+fn instance_host(server: &Server, process_reads: Arc<AtomicU32>) -> SocketHerdrLaunchHost {
+    let instance = crate::config::test_instance::current().unwrap().unwrap();
+    let endpoint = HerdrEndpoint::new(
+        &instance.instance_id,
+        &instance.herdr.endpoint_key,
+        &server.path,
+        &instance.herdr.session,
+    )
+    .unwrap()
+    .with_herdr_home(&instance.herdr.home)
+    .unwrap();
+    let mut host = SocketHerdrLaunchHost::new(
+        vec![endpoint],
+        HerdrSocketConfig {
+            io_timeout: Duration::from_millis(500),
+            ..HerdrSocketConfig::default()
+        },
+    );
+    host.read_restore =
+        |transport, endpoint| read_restore_resume_with(transport, endpoint, &InstanceBootstrapped);
+    host.sources.clear();
+    let (endpoint, transport) = host.endpoints.pop().unwrap();
+    let serving = server.serving.clone();
+    let transport = Arc::try_unwrap(transport)
+        .unwrap_or_else(|_| panic!("unshared test transport"))
+        .with_peer_reader(Box::new(move |_| {
+            process_reads.fetch_add(1, Ordering::SeqCst);
+            let pid = serving.load(Ordering::SeqCst);
+            Ok((pid, start_of(pid)))
+        }));
+    host.endpoints.push((endpoint, Arc::new(transport)));
+    host
+}
+
+fn instance_owner() -> Value {
+    let instance = crate::config::test_instance::current().unwrap().unwrap();
+    let pid = std::process::id();
+    json!({
+        "schema_version": 1, "instance_id": instance.instance_id,
+        "endpoint": {
+            "socket": instance.herdr.socket,
+            "home": instance.herdr.home,
+            "session": instance.herdr.session,
+            "endpoint_key": instance.herdr.endpoint_key,
+        },
+        "binary_sha256": "0".repeat(64),
+        "daemon": {"pid": pid, "start_identity": {
+            "platform": "darwin", "seconds": 1_000 + u64::from(pid), "micros": 0
+        }},
+        "workspaces": []
+    })
+}
+
+fn write_instance_owner(value: &Value) {
+    use std::os::unix::fs::PermissionsExt;
+    let instance = crate::config::test_instance::current().unwrap().unwrap();
+    let path = instance.root.join("runtime/herdr-owner.json");
+    std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+struct WirePaneTarget(Option<&'static str>);
+
+impl super::super::wire::HerdrFraming for WirePaneTarget {
+    fn encode(&self, call: &HerdrCall) -> Result<Vec<u8>, String> {
+        let mut value = serde_json::to_value(call).map_err(|error| error.to_string())?;
+        let params = value["params"].as_object_mut().ok_or("missing params")?;
+        match self.0 {
+            Some(pane) => {
+                params.insert("pane_id".into(), json!(pane));
+            }
+            None => {
+                params.remove("pane_id");
+            }
+        }
+        let mut bytes = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    fn read_frame(
+        &self,
+        reader: &mut dyn BufRead,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, super::super::wire::FrameError> {
+        super::super::wire::HerdrFraming::read_frame(&LineJsonFraming, reader, max_bytes)
+    }
+}
+
+#[test]
+fn test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreign_receipts() {
+    use crate::config::test_instance;
+    if !test_instance::requested() {
+        let (_temp, root) = test_instance::tests::fixture();
+        let output = crate::config::test_instance::tests::command(&root)
+            .args(["--exact", concat!(module_path!(),
+                "::test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreign_receipts")
+                .strip_prefix("agentdesk::").unwrap(), "--nocapture"])
+            .env("AGENTDESK_TEST_MANIFEST", root.join("manifest.json"))
+            .env("AGENTDESK_ROOT_DIR", &root)
+            .env("AGENTDESK_CONFIG", root.join("config/agentdesk.yaml"))
+            .output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+        return;
+    }
+    test_instance::initialize().unwrap();
+    let instance = test_instance::current().unwrap().unwrap();
+    let cwd = instance.root.join("workspace");
+    std::fs::create_dir(&cwd).unwrap();
+    let label = format!("{}-claude-owned", instance.tmux.prefix);
+    let owner_path = instance.root.join("runtime/herdr-owner.json");
+    let baseline = instance_owner();
+    write_instance_owner(&baseline);
+    let pair_before_input = Arc::new(AtomicBool::new(false));
+    {
+        let observed = pair_before_input.clone();
+        let owner_path = owner_path.clone();
+        let server_cwd = cwd.clone();
+        let server = serve_at(
+            instance.herdr.socket.clone(),
+            std::process::id(),
+            Box::new(move |request, _| match request["method"].as_str() {
+                Some("workspace.create") => json!({"type":"workspace_created", "root_pane":{
+                    "pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","revision":0,"cwd":server_cwd
+                }}),
+                Some("pane.send_input") => {
+                    let owner: Value =
+                        serde_json::from_slice(&std::fs::read(&owner_path).unwrap()).unwrap();
+                    observed.store(
+                        owner["workspaces"] == json!([{"workspace_id":"w1","pane_id":"w1:p1"}]),
+                        Ordering::SeqCst,
+                    );
+                    json!({"type":"ok"})
+                }
+                _ => json!({"type":"ok"}),
+            }),
+        );
+        let process_reads = Arc::new(AtomicU32::new(0));
+        let host = instance_host(&server, process_reads.clone());
+        let endpoint = instance_launch(&server);
+        let witness = host
+            .restore_resume(&endpoint)
+            .admitted_witness()
+            .expect("owned E7 off");
+        let before = server.methods();
+        let call = host.call(HerdrRequest::PaneSendInput {
+            pane_id: "unowned:pane".into(),
+            text: "sentinel".into(),
+            keys: vec!["enter".into()],
+        });
+        let transport = &host.endpoint(&endpoint).unwrap().1;
+        assert_eq!(
+            transport.call_with_witness(&call, &witness),
+            Err(contract::HerdrTransportError::NotSent(
+                "test Herdr request names an unowned workspace".into()
+            ))
+        );
+        assert_eq!(server.methods(), before, "unjournaled pane issued RPC");
+        let request = HerdrCreateRequest {
+            endpoint: endpoint.clone(),
+            label: label.clone(),
+            cwd: cwd.clone(),
+            command: "bash /run/launch.sh".into(),
+            restore_off_witness: witness.clone(),
+        };
+        let guard = test_instance::begin_herdr_create(&endpoint, &witness, &label, &cwd)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            host.create(&request),
+            HerdrCreateOutcome::NotSent("test instance host declaration rejected".into())
+        );
+        assert_eq!(server.methods(), before, "contended create issued RPC");
+        drop(guard);
+        assert_eq!(
+            host.create(&request),
+            HerdrCreateOutcome::Created {
+                pane_id: "w1:p1".into()
+            }
+        );
+        assert!(pair_before_input.load(Ordering::SeqCst));
+        assert!(process_reads.load(Ordering::SeqCst) > 0);
+        for target in [Some("unowned:pane"), None] {
+            let configured = HerdrEndpoint::new(
+                &instance.instance_id,
+                &instance.herdr.endpoint_key,
+                &server.path,
+                &instance.herdr.session,
+            )
+            .unwrap();
+            let transport = HerdrSocketTransport::new(
+                &configured,
+                HerdrSocketConfig::default(),
+                WirePaneTarget(target),
+            )
+            .with_peer_reader(Box::new(|_| {
+                let pid = std::process::id();
+                Ok((pid, start_of(pid)))
+            }));
+            let call = host.call(HerdrRequest::PaneSendInput {
+                pane_id: "w1:p1".into(),
+                text: "sentinel".into(),
+                keys: vec!["enter".into()],
+            });
+            let before = server.methods();
+            assert!(matches!(
+                transport.call_with_witness(&call, &witness),
+                Err(contract::HerdrTransportError::NotSent(_))
+            ));
+            assert_eq!(
+                server.methods(),
+                before,
+                "unowned or missing wire target issued RPC"
+            );
+        }
+        let methods = server.methods();
+        let created = methods
+            .iter()
+            .position(|method| method == "workspace.create")
+            .unwrap();
+        let input = methods
+            .iter()
+            .position(|method| method == "pane.send_input")
+            .unwrap();
+        assert!(created < input, "{methods:?}");
+        let before = methods;
+        assert!(host.channel_panes(&endpoint, &label, &witness).is_err());
+        assert_eq!(
+            server.methods(),
+            before,
+            "existing workspace adoption issued RPC"
+        );
+    }
+    for wrong_pid in [true, false] {
+        let mut changed = baseline.clone();
+        if wrong_pid {
+            changed["daemon"]["pid"] = json!(std::process::id() + 1);
+        } else {
+            changed["daemon"]["start_identity"]["micros"] = json!(1);
+        }
+        write_instance_owner(&changed);
+        let server = serve_at(
+            instance.herdr.socket.clone(),
+            std::process::id(),
+            created(cwd.display().to_string()),
+        );
+        let reads = Arc::new(AtomicU32::new(0));
+        let host = instance_host(&server, reads.clone());
+        assert!(
+            host.restore_resume(&instance_launch(&server))
+                .admitted_witness()
+                .is_none()
+        );
+        assert!(server.methods().is_empty(), "mismatched identity sent RPC");
+        if wrong_pid {
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                0,
+                "foreign PID read process identity"
+            );
+        } else {
+            assert!(reads.load(Ordering::SeqCst) > 0);
+        }
+    }
+    write_instance_owner(&baseline);
+    {
+        let foreign = instance.root.join("foreign.sock");
+        let listener = UnixListener::bind(&foreign).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = Server {
+            path: foreign,
+            serving: Arc::new(AtomicU32::new(std::process::id())),
+            conns: Arc::new(Mutex::new(Vec::new())),
+            pong: Arc::new(Mutex::new(json!({}))),
+            stop: Arc::new(AtomicBool::new(false)),
+            thread: None,
+        };
+        let reads = Arc::new(AtomicU32::new(0));
+        let host = instance_host(&server, reads.clone());
+        assert!(
+            host.restore_resume(&instance_launch(&server))
+                .admitted_witness()
+                .is_none()
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "foreign socket connected"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+    write_instance_owner(&baseline);
+    {
+        let foreign_owner = {
+            let mut value = baseline.clone();
+            value["instance_id"] = json!(uuid::Uuid::new_v4().to_string());
+            value
+        };
+        let owner_path = owner_path.clone();
+        let server_cwd = cwd.clone();
+        let server = serve_at(
+            instance.herdr.socket.clone(),
+            std::process::id(),
+            Box::new(move |request, _| {
+                if request["method"] == "workspace.create" {
+                    std::fs::write(&owner_path, serde_json::to_vec(&foreign_owner).unwrap())
+                        .unwrap();
+                    json!({"type":"workspace_created", "root_pane":{
+                        "pane_id":"w2:p2","workspace_id":"w2","tab_id":"w2:t2","revision":0,"cwd":server_cwd
+                    }})
+                } else {
+                    json!({"type":"ok"})
+                }
+            }),
+        );
+        let host = instance_host(&server, Arc::new(AtomicU32::new(0)));
+        let endpoint = instance_launch(&server);
+        let witness = host.restore_resume(&endpoint).admitted_witness().unwrap();
+        let request = HerdrCreateRequest {
+            endpoint,
+            label,
+            cwd,
+            command: "bash /run/launch.sh".into(),
+            restore_off_witness: witness,
+        };
+        assert_eq!(unconfirmed_pane(&host.create(&request)), Some("w2:p2"));
+        assert_eq!(
+            server.request("pane.send_input"),
+            None,
+            "foreign receipt accepted after create"
+        );
+    }
+}

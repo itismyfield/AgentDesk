@@ -70,6 +70,14 @@ class ScriptCheckInputSelection(unittest.TestCase):
 
     def test_live_source_fixture_changes_select_their_bundles(self) -> None:
         cases = {
+            "tests/test_dev_instance_runtime.py":
+                "Isolated instance credential binary tests",
+            "src/config/test_instance.rs":
+                "Isolated instance credential binary tests",
+            "src/config/test_instance/child.rs":
+                "Isolated instance credential binary tests",
+            "src/services/claude_tui/hook_relay/ordered_queue.rs":
+                "Isolated instance credential binary tests",
             "src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs":
                 "Comment-only change checker self-tests",
             "src/services/discord/tui_prompt_relay/injected_prompt_policy.rs":

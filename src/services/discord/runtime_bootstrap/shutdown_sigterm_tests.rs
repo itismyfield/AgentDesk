@@ -1,4 +1,106 @@
 use super::*;
+
+#[cfg(unix)]
+#[test]
+fn b2b_real_sigterm_provider_persists_then_exits_its_original_process() {
+    const MARKER: &str = "I3A_B2B_REAL_PROVIDER_SIGTERM";
+    const CHANNEL: u64 = 6_325_811;
+    if std::env::var_os(MARKER).is_some() {
+        let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let mut original: libc::sigaction = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut original) },
+            0
+        );
+        assert_eq!(original.sa_sigaction, libc::SIG_DFL);
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                shared
+                    .restart
+                    .shutdown_remaining
+                    .store(1, std::sync::atomic::Ordering::SeqCst);
+                shared
+                    .last_message_ids
+                    .insert(ChannelId::new(CHANNEL), CHANNEL + 1);
+                let checkpoint = runtime_store::last_message_root()
+                    .unwrap()
+                    .join("claude")
+                    .join(format!("{CHANNEL}.txt"));
+                std::fs::write(
+                    std::env::var_os("I3A_B2B_CHECKPOINT_PATH").unwrap(),
+                    checkpoint.to_string_lossy().as_bytes(),
+                )
+                .unwrap();
+                let _handler = run_bot_spawn_sigterm_handler(&shared, ProviderKind::Claude);
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+                    assert_eq!(
+                        unsafe { libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut current) },
+                        0
+                    );
+                    if current.sa_sigaction != libc::SIG_DFL {
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "production SIGTERM listener was never installed"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                eprintln!("B2B_REAL_PROVIDER_SIGTERM {MARKER}");
+                assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+                std::future::pending::<()>().await;
+            });
+        unreachable!();
+    }
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("home")).unwrap();
+    let path = root.join("checkpoint-path");
+    let selector = concat!(
+        module_path!(),
+        "::b2b_real_sigterm_provider_persists_then_exits_its_original_process"
+    );
+    let selector = selector.strip_prefix("agentdesk::").unwrap_or(selector);
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root.join("home"))
+        .env("TMPDIR", &root)
+        .env("AGENTDESK_ROOT_DIR", &root)
+        .env(MARKER, "1")
+        .env("I3A_B2B_CHECKPOINT_PATH", &path)
+        .args(["--exact", selector, "--nocapture", "--test-threads=1"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = crate::services::process::wait_with_output_timeout(
+        child,
+        std::time::Duration::from_secs(15),
+        "real provider SIGTERM child",
+    )
+    .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("B2B_REAL_PROVIDER_SIGTERM"));
+    let checkpoint = std::path::PathBuf::from(std::fs::read_to_string(path).unwrap());
+    assert!(checkpoint.starts_with(&root));
+    assert_eq!(
+        std::fs::read_to_string(checkpoint).unwrap().trim(),
+        (CHANNEL + 1).to_string()
+    );
+}
 use crate::services::turn_orchestrator::{Intervention, InterventionMode, QueuePersistenceContext};
 
 /// The actual handler marks every row it can from async code (an open row included),

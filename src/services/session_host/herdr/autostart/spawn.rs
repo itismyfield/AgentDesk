@@ -52,6 +52,9 @@ impl Context {
 /// Ensures `launch`'s server is up when it is the local default user server and absent; every
 /// other case returns without IO beyond reading the socket.
 pub(crate) async fn ensure(launch: &HerdrLaunchEndpoint) -> Ensured {
+    if crate::config::test_instance::requested() {
+        return Ensured::Refused("test_instance_manual_daemon_required");
+    }
     #[cfg(test)]
     ENSURED.with(|count| count.set(count.get() + 1));
     let socket = PathBuf::from(&launch.socket_addr);
@@ -65,6 +68,9 @@ pub(crate) async fn ensure(launch: &HerdrLaunchEndpoint) -> Ensured {
 /// `ensure` in its own task, for a caller that must not wait; skipped while a start for the
 /// socket is already being judged.
 pub(crate) fn demand(launch: &HerdrLaunchEndpoint) {
+    if crate::config::test_instance::requested() {
+        return;
+    }
     if socket_gate(Path::new(&launch.socket_addr))
         .try_lock()
         .is_err()

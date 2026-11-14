@@ -25,7 +25,13 @@ struct Control {
     output: Lines<BufReader<ChildStdout>>,
 }
 impl Control {
-    async fn attach_with(command: std::process::Command, logical: &str) -> Result<Self, String> {
+    async fn attach_with(
+        mut command: std::process::Command,
+        logical: &str,
+    ) -> Result<Self, String> {
+        crate::services::platform::tmux::validate_target(logical).map_err(|e| e.to_string())?;
+        crate::config::test_instance::configure_tmux_command(&mut command)
+            .map_err(|e| e.to_string())?;
         let mut command = tokio::process::Command::from(command);
         let mut child = command
             .args([
@@ -108,6 +114,16 @@ impl Control {
             tracing::debug!("tmux control client did not detach before deadline");
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn scoped_control_attach_for_test(
+    program: &std::path::Path,
+    logical: &str,
+) -> Result<(), String> {
+    let control = Control::attach_with(std::process::Command::new(program), logical).await?;
+    control.finish().await;
+    Ok(())
 }
 
 fn id(value: &str, prefix: char) -> bool {
@@ -271,6 +287,7 @@ where
     let mut control = Control::attach_with(command, logical).await?;
     let query = format!("display-message -p -t ={logical}: '{FORMAT}'");
     let (server, session, window, pane, pid) = fields(&control.command(&query).await?)?;
+    crate::services::platform::tmux::validate_target(&pane).map_err(|e| e.to_string())?;
     let pin = Pin {
         nonce,
         server,

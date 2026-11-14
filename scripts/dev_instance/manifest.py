@@ -1,12 +1,15 @@
 """Prepare and revalidate declarations without starting a daemon or PostgreSQL."""
 
 import json
+import math
+import os
 import re
 import socket
+import stat
 import subprocess
 from pathlib import Path
 
-from .config import build_config
+from .config import HERDR_CONFIG, build_config, build_org, declared_hosts, provider_home
 from .files import (InstanceError, LAYOUT_DIRS, create_layout, instance_root, read_regular_text,
                     safe_absolute, validate_tree, write_private_json, write_private_text)
 from .profile import same_json, validate_profile
@@ -15,6 +18,7 @@ API_PORTS = range(18791, 18807)
 PG_PORTS = range(25432, 25448)
 MANIFEST_NAME = "manifest.json"
 RECEIPT_NAME = "receipt.json"
+HOST_DIRS = ("runtime/tmux", "runtime/herdr", "herdr-home")
 
 
 def reject_database_env(ambient):
@@ -98,7 +102,8 @@ def declared_manifest(base, instance_id, worktree, head, profile, api_port, pg_p
                      "socket_dir": str(root / "postgres/socket"),
                      "database": db_identity, "role": db_identity, "cluster_started": False},
         "config_path": str(root / "config/agentdesk.yaml"),
-        "execution_node_id": "test-" + instance_id,
+        "execution_node_id": instance_id,
+        "hosts": declared_hosts(root, instance_id),
         "preferred_node_seed_required": True,
     }
 
@@ -106,7 +111,14 @@ def declared_manifest(base, instance_id, worktree, head, profile, api_port, pg_p
 def child_environment(manifest, ambient):
     reject_database_env(ambient)
     # Build from constants and validated declarations; ambient secrets never enter.
-    environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+    root = safe_absolute(manifest["root"])
+    expected = declared_manifest(root.parent, manifest["instance_id"], manifest["worktree"],
+                                 manifest["head"], manifest["profile"],
+                                 manifest["api"]["port"], manifest["postgres"]["port"])
+    if not same_json(manifest, expected):
+        raise InstanceError("child environment differs from its declaration")
+    environment = {"PATH": str(safe_absolute(manifest["worktree"]) / "target/debug") + ":/usr/bin:/bin",
+                   "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
     flags = validate_profile(manifest["profile"])
     if not same_json(flags, manifest["applied_env"]):
         raise InstanceError("applied environment differs from profile")
@@ -115,6 +127,14 @@ def child_environment(manifest, ambient):
         "AGENTDESK_ROOT_DIR": manifest["root"], "AGENTDESK_CONFIG": manifest["config_path"],
         "AGENTDESK_API_URL": manifest["api"]["self_url"],
         "ADK_API_URL": manifest["api"]["self_url"],
+        "AGENTDESK_TEST_MANIFEST": str(Path(manifest["root"]) / MANIFEST_NAME),
+        "TMUX_TMPDIR": manifest["hosts"]["tmux"]["tmpdir"],
+        "HOME": str(root / "home"), "TMPDIR": str(root / "tmp"),
+        "XDG_CONFIG_HOME": str(root / "xdg"),
+        "CLAUDE_CONFIG_DIR": str(provider_home(root, "claude")),
+        "CODEX_HOME": str(provider_home(root, "codex")),
+        "AGENTDESK_DCSERVER_LABEL": "com.agentdesk.test." + manifest["instance_id"],
+        "AGENTDESK_RELEASE_TMUX_SESSION": "AdkTest-" + manifest["instance_id"] + "-dcserver",
     })
     return environment
 
@@ -122,7 +142,7 @@ def child_environment(manifest, ambient):
 def receipt_for(manifest):
     return {key: manifest[key] for key in (
         "schema_version", "status", "live_ready", "instance_id", "root", "worktree",
-        "head", "api", "postgres", "applied_env", "execution_node_id", "preferred_node_seed_required"
+        "head", "api", "postgres", "applied_env", "execution_node_id", "preferred_node_seed_required", "hosts"
     )} | {"features": manifest["profile"]["features"],
          "bots": manifest["profile"]["bots"], "channels": manifest["profile"]["channels"]}
 
@@ -136,20 +156,49 @@ def prepare(base, instance_id, worktree, profile, ambient, api_port=None, pg_por
                                  allocate_port(api_port, API_PORTS), allocate_port(pg_port, PG_PORTS))
     safe_absolute(base).mkdir(mode=0o700, parents=True, exist_ok=True)
     create_layout(root)
+    for relative in HOST_DIRS:
+        (root / relative).mkdir(mode=0o700)
+    write_private_text(root, "herdr-home/config.toml", HERDR_CONFIG)
     for provider in ("claude", "codex"):
         write_private_text(root, f"config/agents/{provider}.md", "Isolated test agent.\n")
     config = build_config(root, profile, manifest["api"]["port"], manifest["postgres"]["port"], instance_id)
     write_private_json(root, "config/agentdesk.yaml", config)
+    write_private_json(root, "config/org.yaml", build_org(root, profile))
     write_private_json(root, MANIFEST_NAME, manifest)
     write_private_json(root, RECEIPT_NAME, receipt_for(manifest))
     return manifest
 
 
-def validate(base, instance_id, ambient, require_credentials=False, check_ports=True):
+def resource_spec(value):
+    keys = {"postgres_bin", "initdb_bin", "psql_bin", "herdr_bin", "startup_timeout",
+            "stop_grace", "max_aux", "pg_pool", "pg_reserve"}
+    if type(value) is not dict or set(value) != keys:
+        raise InstanceError("invalid resource specification fields")
+    for key, maximum in (("startup_timeout", 600), ("stop_grace", 30)):
+        item = value[key]
+        if type(item) not in (int, float) or not 0 < item <= maximum or not math.isfinite(item):
+            raise InstanceError("resource deadline is outside its bound")
+    for key, expected in (("max_aux", 2), ("pg_pool", 4), ("pg_reserve", 1)):
+        if type(value[key]) is not int or value[key] != expected:
+            raise InstanceError("resource capacity differs from its declared bound")
+    for key in ("postgres_bin", "initdb_bin", "psql_bin", "herdr_bin"):
+        if not isinstance(value[key], str):
+            raise InstanceError("resource executable must be an explicit absolute path")
+        try:
+            path = safe_absolute(value[key])
+            metadata = path.stat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o022 or not os.access(path, os.X_OK):
+                raise OSError()
+        except (OSError, ValueError):
+            raise InstanceError("resource executable is not a safe executable file") from None
+    return dict(value)
+
+
+def validate(base, instance_id, ambient, require_credentials=False, check_ports=True, live_sockets=None):
     reject_database_env(ambient)
     root = instance_root(base, instance_id)
-    validate_tree(root, require_credentials=require_credentials)
-    if any(not (root / relative).is_dir() for relative in LAYOUT_DIRS):
+    validate_tree(root, require_credentials=require_credentials, live_sockets=live_sockets)
+    if any(not (root / relative).is_dir() for relative in (*LAYOUT_DIRS, *HOST_DIRS)):
         raise InstanceError("declared instance directory is missing")
     manifest = read_json(root / MANIFEST_NAME)
     try:
@@ -163,6 +212,8 @@ def validate(base, instance_id, ambient, require_credentials=False, check_ports=
         if not same_json(config, build_config(root, manifest["profile"], manifest["api"]["port"],
                                              manifest["postgres"]["port"], instance_id)):
             raise InstanceError("explicit config differs from its declaration")
+        if not same_json(read_json(root / "config/org.yaml"), build_org(root, manifest["profile"])):
+            raise InstanceError("org catalog differs from its declaration")
     except (KeyError, TypeError, AttributeError):
         raise InstanceError("invalid startup manifest") from None
     if check_ports:

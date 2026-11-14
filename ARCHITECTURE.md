@@ -146,6 +146,15 @@ src/
 │   │   └── user_default_validator_tests.rs
 │   ├── test_env/
 │   │   └── teardown_probe.rs
+│   ├── test_instance/
+│   │   ├── api_boundary_tests.rs
+│   │   ├── bound_health_tests.rs
+│   │   ├── environment.rs
+│   │   ├── environment_tests.rs
+│   │   ├── host_scope_tests.rs
+│   │   ├── lifecycle.rs
+│   │   ├── lifecycle_tests.rs
+│   │   └── run_identity_tests.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
 │   ├── cluster_role.rs
@@ -170,6 +179,7 @@ src/
 │   ├── session_hosts_tests.rs
 │   ├── snapshot_reader_tests.rs
 │   ├── test_env.rs
+│   ├── test_instance.rs
 │   ├── tool_activity_display.rs
 │   └── writer_channels_tests.rs
 ├── db/
@@ -673,6 +683,8 @@ src/
 │   │   │   ├── response.rs
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
+│   │   │   ├── test_instance_projection_tests.rs
+│   │   │   ├── test_instance_response_tests.rs
 │   │   │   ├── tui_output_readiness_tests.rs
 │   │   │   ├── unread_tail_attribution_tests.rs
 │   │   │   └── writer_readiness.rs
@@ -3645,6 +3657,7 @@ src/
 │   │   ├── memento.rs
 │   │   ├── memento_anchor.rs
 │   │   ├── memento_endpoint.rs
+│   │   ├── memento_instance_tests.rs
 │   │   ├── memento_scope.rs
 │   │   ├── memento_scope_tests.rs
 │   │   ├── memento_throttle.rs
@@ -3708,6 +3721,8 @@ src/
 │   │   │   ├── production_probe_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── tmux/
+│   │   │   ├── instance_scope/
+│   │   │   │   └── host_command_tests.rs
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
 │   │   │   ├── session_inventory/
@@ -3715,6 +3730,7 @@ src/
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
+│   │   │   ├── instance_scope.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── session_identity.rs
 │   │   │   ├── session_identity_tests.rs
@@ -3767,6 +3783,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── direct_spawn_tests.rs
 │   │   ├── fallback.rs
+│   │   ├── instance_env_tests.rs
 │   │   ├── queries.rs
 │   │   └── repository.rs
 │   ├── provider_cli/
@@ -3935,6 +3952,7 @@ src/
 │   │   │   │   ├── loaded_image_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── peer.rs
+│   │   │   │   ├── peer_current_image_tests.rs
 │   │   │   │   ├── peer_tests.rs
 │   │   │   │   ├── permit.rs
 │   │   │   │   ├── proof_tests.rs
