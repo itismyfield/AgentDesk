@@ -1,0 +1,2 @@
+key: 470-e2e-run-lease
+| `e2e-run-lease` (#8120 L0 · #8124 FD) | `79bebdd4eaa29b289bf88412825baa7d70a6ac77` | TTL/non-atomic acquire, parent unlock, missing/duplicate/leaked FD and uncertain-send mutants retain their complete safety/liveness violation sets | 23 cfg registered in common TLC CI; 4 GREEN + 19 expected RED. Bounded model and temporary OS replay only; production lease unchanged. [report](e2e-run-lease/lease.report.md) |

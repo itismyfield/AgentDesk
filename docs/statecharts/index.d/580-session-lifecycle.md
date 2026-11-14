@@ -1,0 +1,2 @@
+key: 580-session-lifecycle
+| `session-lifecycle` (Herdr launch after RootReplaced, #8146) | `33d1f4b5a9` | Before/NoCount: unbounded retries and permanent head; ImmediateWake: backoff; RetiredJournal: wrong journal classification | Seven TLC configs: restored ended journal bounded to five launch failures, durable backoff, one visible retention and next-head progress; Retired new input uses ordinary launch. [Report](session-lifecycle/herdr-handoff-launch.report.md). |
