@@ -569,6 +569,7 @@ src/
 │   ├── legacy_migration.rs
 │   ├── mod.rs
 │   ├── paths.rs
+│   ├── skill_provider_sync_tests.rs
 │   ├── skill_refresh.rs
 │   ├── skill_sync.rs
 │   ├── snapshot_reader_tests.rs
@@ -3657,6 +3658,9 @@ src/
 │   │   ├── admission_intent.rs
 │   │   ├── operation.rs
 │   │   └── record.rs
+│   ├── mcp_config/
+│   │   ├── antigravity.rs
+│   │   └── antigravity_tests.rs
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── memento.rs
@@ -4744,6 +4748,7 @@ src/
 │   ├── manual_steer.rs
 │   ├── mcp_config.rs
 │   ├── mcp_config_atomic_write_tests.rs
+│   ├── mcp_config_retirement_tests.rs
 │   ├── mcp_config_snapshot_tests.rs
 │   ├── message_outbox.rs
 │   ├── message_outbox_circuit_authority.rs
