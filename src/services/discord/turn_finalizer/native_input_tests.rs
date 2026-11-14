@@ -1258,7 +1258,7 @@ async fn native_8148_s2_persistence_error_keeps_row_and_wake_debt() {
         source_text_segments: vec![],
         text: "next".into(),
         mode: InterventionMode::Soft,
-        created_at: Instant::now(),
+        created_at: std::time::Instant::now(),
         reply_context: None,
         has_reply_boundary: false,
         merge_consecutive: false,
@@ -1300,7 +1300,7 @@ async fn native_8148_s2_persistence_error_keeps_row_and_wake_debt() {
             .cancel_token
             .is_none()
     );
-    assert!(actor.completion_cleanup_applied());
+    assert!(actor.is_completion_cleanup());
     assert_eq!(
         shared
             .restart
@@ -1409,7 +1409,7 @@ async fn native_8148_s2_transfer_closes_debt_without_successor_row_or_wake() {
                 .load(std::sync::atomic::Ordering::SeqCst),
             active
         );
-        assert!(!actor.completion_cleanup_applied());
+        assert!(!actor.is_completion_cleanup());
         let snapshot = shared.mailbox(key.channel_id).snapshot().await;
         if successor_lease {
             assert!(Arc::ptr_eq(
