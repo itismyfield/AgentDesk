@@ -624,3 +624,6 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
+deploy-restart/PeerDeployRestart.cfg	PeerDeployRestart	-	-
+deploy-restart/PeerDeployRestartAnyProof.cfg	PeerDeployRestart	AckRequiresOwnProof	-
+deploy-restart/PeerDeployRestartMain.cfg	PeerDeployRestart	-	DeployConfirmed
