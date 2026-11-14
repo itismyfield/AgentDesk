@@ -1210,6 +1210,10 @@ async fn native_8148_s2_bound_ticket_rejects_episode_extra_and_source_without_wr
             "extra" => ticket["future"] = true.into(),
             _ => ticket["source"]["binding_watermark"] = "changed-valid-binding".into(),
         }
+        let coherent_source = ticket["source"].clone();
+        if field == "source" {
+            value["live"][0]["registration"]["source"] = coherent_source;
+        }
         let bytes = serde_json::to_vec(&value).unwrap();
         std::fs::write(&path, &bytes).unwrap();
         if field == "source" {
