@@ -658,11 +658,15 @@ async fn waiting(node: &Node) {
 /// The durable record a restart leaves once its greeting is committed: nothing else survives
 /// the daemon.
 async fn crashed_after_commit(node: &Node, id: u64) {
+    crashed_after_commit_owning(node, id, None).await;
+}
+
+async fn crashed_after_commit_owning(node: &Node, id: u64, dispatch: Option<&str>) {
     let mailbox = node.shared.mailbox(channel());
     let mut seed = Seed::of(&mailbox, &operation(node, id)).await.unwrap();
     let against = Target {
         nonce: Some(herdr::EXECUTION),
-        dispatch: None,
+        dispatch,
     };
     let admitted = seed.admit(&mailbox, ("!restart", "restart-fixture"), against);
     assert!(matches!(admitted.await, Admitted::Created));
@@ -971,6 +975,261 @@ fn restart_seed_left_after_the_close_finishes_the_retirement_at_boot_then_launch
             "the conversation stays resumable"
         );
         assert!(retained(&node).await.is_empty());
+        node.finish().await;
+    });
+}
+
+// A turn that owns the row's dispatch is restarted like any other: the dispatch is detached from
+// the session and neither its status nor its retry count is written.
+#[test]
+fn restart_common_detaches_the_dispatch_its_captured_turn_owns_and_writes_no_dispatch_pg() {
+    let Some((rig, runtime)) = rig_child(
+        "restart_channel_tests::restart_common_detaches_the_dispatch_its_captured_turn_owns_and_writes_no_dispatch_pg",
+    ) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::bind(&rig, herdr::HostedState::Bound, Some(DISPATCH)).await;
+        seed_selector(&node).await;
+        install_owner(&node).await;
+        node.start(51, "restart-dispatched-turn", Some(DISPATCH))
+            .await;
+        let before = dispatch_state(&node).await;
+        let wakes = Wakes::observe(&node.shared);
+        let response = invoke(&node, 900_812_817).await;
+        assert!(
+            response.iter().any(|text| text.contains("손실")),
+            "a running turn is warned about before it is ended: {response:?}"
+        );
+        let last = response.last().unwrap();
+        assert!(
+            last.contains("기존 세션 종료를 확인") && last.contains("인사말을 대기열에 등록"),
+            "{response:?}"
+        );
+        let effects = node.effects(&rig).await;
+        assert_eq!((effects.closes(), effects.row.clone()), (1, retired()));
+        assert_eq!(
+            effects.session,
+            disconnected(),
+            "the greeting's turn inherits no dispatch"
+        );
+        assert_eq!(
+            dispatch_state(&node).await,
+            before,
+            "no dispatch status or retry count changes"
+        );
+        assert_eq!(items(&node).await, [GREETING]);
+        assert!(test_turn::active(&node.shared, channel()).await.is_none());
+        wakes.after_reopen().await;
+        drop(wakes);
+        node.finish().await;
+    });
+}
+
+// A row that is already retired is not ended again: the command only queues the greeting and
+// leaves a dispatch nobody proved it owns where it is.
+#[test]
+fn restart_common_on_a_retired_row_queues_the_greeting_without_a_close_pg() {
+    let Some((rig, runtime)) = rig_child(
+        "restart_channel_tests::restart_common_on_a_retired_row_queues_the_greeting_without_a_close_pg",
+    ) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::bind(&rig, herdr::HostedState::Retired, Some(DISPATCH)).await;
+        seed_selector(&node).await;
+        install_owner(&node).await;
+        let wakes = Wakes::observe(&node.shared);
+        let before = node.effects(&rig).await;
+        let response = invoke(&node, 900_812_818).await;
+        let last = response.last().unwrap();
+        assert!(
+            last.contains("이미 종료되어 있습니다") && last.contains("인사말을 대기열에 등록"),
+            "{response:?}"
+        );
+        assert!(
+            response.iter().all(|text| !text.contains("손실")),
+            "{response:?}"
+        );
+        let after = node.effects(&rig).await;
+        assert!(after.writes.is_empty(), "a retired row is not closed again");
+        assert_eq!((after.row, after.session), (before.row, before.session));
+        assert_eq!(items(&node).await, [GREETING]);
+        wakes.after_reopen().await;
+        drop(wakes);
+        node.finish().await;
+    });
+}
+
+// A daemon death after the retirement and before the disconnect: the greeting's context names
+// the dispatch its restart captured, and the permit detaches exactly that before the launch.
+#[test]
+fn restart_seed_left_after_the_retirement_detaches_its_captured_dispatch_at_boot_pg() {
+    let Some((rig, runtime)) = rig_child(
+        "restart_channel_tests::restart_seed_left_after_the_retirement_detaches_its_captured_dispatch_at_boot_pg",
+    ) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::bind(&rig, herdr::HostedState::Retired, Some(DISPATCH)).await;
+        seed_selector(&node).await;
+        rig.restore_shell();
+        install_owner(&node).await;
+        crashed_after_commit_owning(&node, 900_812_821, Some(DISPATCH)).await;
+        let before = dispatch_state(&node).await;
+        let _gateway = gateway(&node).await;
+        let launched = ran();
+        let reached = launched.clone();
+        let _launch = install_root_recovery_launch(
+            channel(),
+            Box::new(move |owner, _| {
+                reached.store(true, Ordering::SeqCst);
+                owner.defer_before_submit("fixture_stop");
+                Err("NotSent(\"fixture_stop\")".into())
+            }),
+        );
+        wake_drive_for_test(&node.shared, channel());
+        until("the drive settles the greeting", async || {
+            prior_of(&node, 900_812_821).await != Ok(SeedStatus::Queued)
+                || launched.load(Ordering::SeqCst)
+        })
+        .await;
+        assert!(
+            launched.load(Ordering::SeqCst),
+            "the permit lets the greeting through: {:?}",
+            retained(&node).await
+        );
+        let effects = node.effects(&rig).await;
+        assert_eq!(
+            effects.session,
+            disconnected(),
+            "detached before the launch"
+        );
+        assert_eq!(effects.row, retired());
+        assert_eq!(effects.closes(), 0);
+        assert_eq!(dispatch_state(&node).await, before);
+        assert_eq!(
+            selectors(&node).await,
+            (Some(SELECTOR.into()), Some(SELECTOR.into()))
+        );
+        node.finish().await;
+    });
+}
+
+// A live execution the greeting was not queued against is no successor of this restart: the
+// greeting is retained with a notice and that session receives nothing.
+#[test]
+fn restart_seed_never_joins_a_live_execution_it_was_not_queued_against_pg() {
+    let Some((rig, runtime)) = rig_child_with(
+        "restart_channel_tests::restart_seed_never_joins_a_live_execution_it_was_not_queued_against_pg",
+        true,
+    ) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::bind(&rig, herdr::HostedState::Bound, None).await;
+        node.sql("UPDATE sessions SET status='idle', active_dispatch_id=NULL, last_heartbeat=NULL WHERE session_key=$1 AND $2::TEXT IS NULL", None).await;
+        install_owner(&node).await;
+        let mailbox = node.shared.mailbox(channel());
+        let mut seed = Seed::of(&mailbox, &operation(&node, 900_812_819)).await.unwrap();
+        let against = Target {
+            nonce: Some("an-execution-that-is-gone"),
+            dispatch: None,
+        };
+        let admitted = seed.admit(&mailbox, ("!restart", "restart-fixture"), against);
+        assert!(matches!(admitted.await, Admitted::Created));
+        let _gateway = gateway(&node).await;
+        let launched = ran();
+        let reached = launched.clone();
+        let _launch = install_root_recovery_launch(
+            channel(),
+            Box::new(move |owner, _| {
+                reached.store(true, Ordering::SeqCst);
+                owner.defer_before_submit("fixture_stop");
+                Err("NotSent(\"fixture_stop\")".into())
+            }),
+        );
+        wake_drive_for_test(&node.shared, channel());
+        until("the drive settles the greeting", async || {
+            prior_of(&node, 900_812_819).await != Ok(SeedStatus::Queued)
+                || launched.load(Ordering::SeqCst)
+        })
+        .await;
+        assert!(!launched.load(Ordering::SeqCst));
+        assert_eq!(prior_of(&node, 900_812_819).await, Ok(SeedStatus::Retained));
+        assert!(rig.writes().is_empty());
+        assert_eq!(
+            herdr::row(&node.pool, &node.key).await,
+            Some((herdr::HostedState::Bound, herdr::EXECUTION.into()))
+        );
+        node.finish().await;
+    });
+}
+
+// The greeting is the one headless start a Herdr channel runs: from the owner's drive it passes
+// its permit and the headless entry and installs its successor's Pending row on Herdr.
+#[test]
+fn restart_seed_reaches_the_herdr_launch_through_the_headless_start_pg() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::herdr_admission::{Admission, force_for_test as force_admission};
+    use crate::services::herdr_launch::{force_writer_accepts, o_store_for_test};
+    let Some((rig, runtime)) = rig_child(
+        "restart_channel_tests::restart_seed_reaches_the_herdr_launch_through_the_headless_start_pg",
+    ) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::bind(&rig, herdr::HostedState::Bound, None).await;
+        seed_selector(&node).await;
+        node.sql("UPDATE sessions SET status='idle', active_dispatch_id=NULL, last_heartbeat=NULL WHERE session_key=$1 AND $2::TEXT IS NULL", None).await;
+        rig.restore_shell();
+        install_owner(&node).await;
+        crashed_after_commit(&node, 900_812_822).await;
+        let workdir = tempfile::tempdir().unwrap();
+        crate::services::discord::host_defer_gate::tests::map_channel(&node.shared, channel(), "e07")
+            .await;
+        {
+            let mut core = node.shared.core.lock().await;
+            let session = core.sessions.get_mut(&channel()).unwrap();
+            session.current_path = Some(workdir.path().display().to_string());
+        }
+        let root = crate::config::runtime_root().unwrap();
+        let _switch = crate::services::turn_host::force_switch_for_test(Some(true));
+        let _open = force_admission(Admission::new(true, Some(root.join("no-stop-file"))));
+        let (store, era) = o_store_for_test(&root, &[CHANNEL]);
+        let mut seeded = store.open_channel(&era, CHANNEL).unwrap().unwrap();
+        seeded.set_binding_checkpoint(3).unwrap();
+        let _owned = crate::services::tui_o::cutover::test_override::force_channels(&[(
+            CHANNEL, ClaudeTui,
+        )]);
+        let _writer = force_writer_accepts(Some(true));
+        let _gateway = gateway(&node).await;
+        let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+            "http://127.0.0.1:9".into(),
+        );
+        wake_drive_for_test(&node.shared, channel());
+        let successor = async || {
+            let row = herdr::row(&node.pool, &node.key).await;
+            row.filter(|(_, nonce)| nonce != herdr::EXECUTION)
+        };
+        until("the greeting's turn installs its successor or ends visibly", async || {
+            successor().await.is_some() || prior_of(&node, 900_812_822).await == Ok(SeedStatus::Retained)
+        })
+        .await;
+        let launched = successor().await;
+        assert!(
+            matches!(&launched, Some((herdr::HostedState::Pending | herdr::HostedState::Bound, _))),
+            "the greeting reached the Herdr launch: row {launched:?}, retained {:?}",
+            retained(&node).await
+        );
         node.finish().await;
     });
 }

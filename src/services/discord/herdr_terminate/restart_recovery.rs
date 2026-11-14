@@ -101,10 +101,12 @@ pub(in crate::services::discord) async fn recover_ended(
         }
         (Some(_), None) => false,
     };
+    // With no turn left to compare, the row's dispatch is rechecked under the fence below.
     if !same_turn
         || expected.captured_dispatch
-            && turn.as_ref().and_then(|turn| turn.dispatch_id.as_ref())
-                != expected.dispatch.as_ref()
+            && turn
+                .as_ref()
+                .is_some_and(|turn| turn.dispatch_id != expected.dispatch)
     {
         return Err(Refused("restart turn changed under transition".into()));
     }

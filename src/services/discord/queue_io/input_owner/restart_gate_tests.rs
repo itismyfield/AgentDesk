@@ -38,6 +38,10 @@ async fn restart_gate_holds_owner_until_remembered_result_and_drop() {
         channel.get()
     ));
     assert!(Gate::begin(&shared, channel).is_err());
+    assert!(
+        held(&shared, channel).is_some(),
+        "a refused second request can say how long the first has run"
+    );
     let waiting = wait_completed(&operation);
     tokio::pin!(waiting);
     assert!(

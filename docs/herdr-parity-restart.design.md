@@ -2,7 +2,7 @@
 
 기준: `origin/main` = `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba`, 2026-11-13 KST.
 대상 이슈: [#8128](https://github.com/itismyfield/AgentDesk/issues/8128).
-**r3 목표 계약과 선행 A/B1 증거를 구별한다. B2a 종료·postlude·Gate source는 P2 커밋 `5b8811fd4e` 뒤 checkout에 적용됐으나 현재 Rust/PG PASS는0이다. seed·admission·일반 boot 복구·새 Ready는 B2b 미완이다.**
+**r3 목표 계약과 선행 A/B1 증거를 구별한다. B2a 종료·postlude·Gate와 B2b seed 적재·permit·Codex resume 배선은 구현됐고, 실행 증거는 각 조각의 구현 보고서가 head별로 적는다. 아래 1.1절의 "B2b 미완" 표기는 B2a 시점의 기록이다.**
 
 이 문서의 목표는 인증된 `/restart`와 같은 구현을 쓰는 `!restart`에서 기존 실행을 끝내고,
 가능하면 같은 대화를 새 incarnation으로 이어 시작하는 것이다. 진행 중인 턴은 기존 tmux와 같이
@@ -264,7 +264,7 @@ seed 적재는 종료의 전제 조건이 아니다. 넣을 수 있으면 넣고
     `Admission::Accepted`나 launch 반환을 Ready로 말하지 않는다. Ready는 seed ticket의 Settled receipt, successor nonce의 Bound, source binding으로 판정한다.
 
 **seed 제출의 세 단계와 crash.** owner의 첫 입력은 물리 제출(`src/services/discord/queue_io/input_owner/effect.rs:96`), receipt 결산(`:130`), source bind가 따로 일어난다.
-- 제출 전 crash: seed는 unsent로 큐에 돌아가고 부팅 뒤 다시 시작한다. create를 보낸 적 없는 Pending은 retire되고, 응답을 받은 pane은 기존 Pending 확인이 이어받는다.
+- 제출 전 crash: seed는 unsent로 큐에 돌아간다. 부팅 뒤 row가 여전히 종료 대상 nonce의 Retired면 다시 시작한다. launch가 이미 다른 nonce의 Pending·Bound를 남겼으면 **합류하지 않고 보이는 거절로 끝낸다**(B2b 판정 2026-11-14: reserve 전에는 그 successor가 이 seed의 것이라는 내구 증거가 없다. 사용자는 `/restart`를 다시 하면 된다). 남은 Pending은 다음 입력의 기존 Pending 확인이 푼다.
 - 제출 뒤·receipt 전 crash: seed는 **불명**이다. 다시 보내지 않고 retained + 알림으로 끝낸다. Ready를 말하지 않는다.
 - receipt 뒤·bind 전 crash: seed는 전달로 확정이고, 부팅 뒤 기존 Pending 확인이 Bound를 만든 때 Ready다.
 Codex의 attach와 시작점 기록(`first_input.rs:208`, `:219`)은 A의 범위다.
@@ -371,7 +371,7 @@ seed가 적재된 요청에서는 seed 원본과 그 admission context가 **유�
 | 적재 뒤, close 전 | seed가 큐에, row는 옛 nonce Bound, 실행은 살아 있음 | permit 거절 → seed는 알림과 함께 종결. 대기 입력은 살아 있는 옛 세션으로 간다. 세션 1개 |
 | close 뒤, retire CAS 전 | idle Bound/placed Pending 포함, row는 옛 nonce인데 실행은 끝남 | permit이 transition·fence 아래 종료 증거를 고정해 retire/disconnect를 마무리. 새 close 0, 확인 불가면 보이는 실패 |
 | retire 뒤(disconnect 전후), wake 전 | seed가 큐에, row Retired | permit이 남은 disconnect를 끝내고 owner가 seed로 launch → Ready |
-| launch 중·seed 제출 전후 | seed attempt + Pending | 3.1 끝의 세 단계 규칙. create 재전송 0, 불명 seed 재전송 0 |
+| launch 중·seed 제출 전후 | seed attempt + Pending | 3.1 끝의 세 단계 규칙. create 재전송 0, 불명 seed 재전송 0. 제출 전 crash로 다른 nonce의 Pending·Bound가 남았으면 seed는 합류 없이 보이는 거절 |
 | 실패 응답 뒤, seed 철회 전 | seed가 남음 | permit 거절 알림이 한 번 더. 무응답 종료 없음 |
 | seed 없는 재시작(3.6)의 어느 시점 | 내구 기록 없음 | tmux와 같다. 옛 실행이 끝났으면 다음 입력이 새 세션을 띄우고, 재시작 결과 메시지는 없을 수 있다 |
 
@@ -589,6 +589,7 @@ r1 보고서는 [`session-lifecycle/herdr-restart.report.md`](statecharts/sessio
 
 - r1 (2026-11-13, `2c88733814`): 진입점 전수표, restart가 직접 launch하는 방향, `HerdrRestart` 모델 23 cfg.
 - r2 (2026-11-13, `f3c745ebc9`): 리뷰 d1의 방향 제안을 판정해 owner 큐 seed 방향을 채택(적재 → 종료 순서). P2-1·P2-3·P2-4·P2-6 반영, P2-2·P2-5는 A 접점만 기록, 사용자 결정 항목 U1~U4, B 크기 재추정, `HerdrRestartOwner` 모델 42 cfg.
+- B2b 판정 (2026-11-14): 소유 증거 없는 successor 합류 금지(3.1·3.5), unplaced Pending 거절 안내 문구, Retired row는 종료 없이 seed만 적재.
 - r3 (2026-11-13): 사용자 결정 4건 반영(dispatch 중 재시작, clear 우선, 인사말 순서는 불가피 차이, seed 불가 시에도 재시작)과 리뷰 d2의 P2 5건(전송 중 단위 뒤 적재, ticket 상태와 clear epoch, seed 제출 세 단계, 옛 pane 전달 기준, tmux 차이 전수). B를 B-clear·B-main으로 분할, 모델 63 cfg.
 
 <!-- doc-path-refs: proposed herdr_turn/restart_resume.rs src/services/discord/herdr_terminate/restart.rs -->

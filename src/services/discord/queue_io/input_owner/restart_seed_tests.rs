@@ -89,6 +89,17 @@ async fn restart_seed_is_created_once_joined_by_a_second_request_and_read_by_tic
     assert_eq!(Seed::prior(&mailbox, &second).await, Ok(SeedStatus::Queued));
     seed.withdraw(&mailbox).await;
     assert!(queued(&mailbox).await.is_empty());
+    // The withdrawn greeting owes its cancelled receipt under the operation's own origin.
+    let owed = mailbox
+        .v2_request(|slot| Ok(slot.as_ref().ok_or("no owner".to_string())?.owed_drops()))
+        .await
+        .unwrap();
+    assert!(
+        matches!(owed.as_slice(), [drop] if drop.message_id == seed.original.message_id
+            && drop.origins.iter().any(|origin| origin == seed.ticket.as_str())
+            && drop.outcome == crate::db::turns::TerminalOutcome::Cancelled),
+        "{owed:?}"
+    );
     for operation in [&first, &second] {
         assert_eq!(
             Seed::prior(&mailbox, operation).await,

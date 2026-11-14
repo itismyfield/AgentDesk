@@ -7,7 +7,10 @@ use crate::services::discord::{ChannelId, SharedData};
 use crate::services::turn_orchestrator::restart_operation::Operation;
 
 type Key = (String, u64);
-static ACTIVE: LazyLock<Mutex<HashMap<Key, Arc<()>>>> = LazyLock::new(Default::default);
+static ACTIVE: LazyLock<Mutex<HashMap<Key, Arc<std::time::Instant>>>> =
+    LazyLock::new(Default::default);
+/// A restart holding the channel longer than this is logged; it is never released by force.
+const SLOW: std::time::Duration = std::time::Duration::from_secs(120);
 static COMPLETED: LazyLock<Mutex<HashMap<Operation, String>>> = LazyLock::new(Default::default);
 static CHANGED: LazyLock<tokio::sync::Notify> = LazyLock::new(Default::default);
 
@@ -78,7 +81,7 @@ impl Gate {
             let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
             match active.entry(key.clone()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(Arc::new(()));
+                    entry.insert(Arc::new(std::time::Instant::now()));
                 }
                 std::collections::hash_map::Entry::Occupied(_) => return Err("restart_busy".into()),
             }
@@ -91,12 +94,41 @@ impl Gate {
     }
 }
 
+/// How long the channel's running restart has held its gate, logged once it is slow.
+pub(crate) fn held(shared: &SharedData, channel: ChannelId) -> Option<std::time::Duration> {
+    let key = (
+        format!("{}/{}", shared.provider.as_str(), shared.token_hash),
+        channel.get(),
+    );
+    let active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let held = active.get(&key)?.elapsed();
+    if held > SLOW {
+        tracing::warn!(
+            channel_id = channel.get(),
+            held_secs = held.as_secs(),
+            "restart gate held long"
+        );
+    }
+    Some(held)
+}
+
 impl Drop for Gate {
     fn drop(&mut self) {
-        ACTIVE
+        let began = ACTIVE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.key);
+        if let Some(held) = began
+            .map(|began| began.elapsed())
+            .filter(|held| *held > SLOW)
+        {
+            let (channel_id, held_secs) = (self.channel.get(), held.as_secs());
+            tracing::warn!(
+                channel_id,
+                held_secs,
+                "restart gate released after a long hold"
+            );
+        }
         CHANGED.notify_waiters();
         crate::services::discord::router::message_handler::owner_wake(&self.shared, self.channel);
     }

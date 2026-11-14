@@ -57,6 +57,17 @@ Seeded 요청에 B2a detached worker·결과 cache 메타데이터(`a*`)를 켜�
 
 새 cfg가 필요한 미모델 행동은 없었다.
 
+## 레그 2 대응(모델 무변경)
+
+레그 2는 모델을 바꾸지 않았다. TLA·cfg·expected.tsv 변경 0.
+
+| 구현 | 모델의 대응 | 차이 |
+|---|---|---|
+| 다른 nonce의 살아 있는 Pending·Bound를 만난 seed는 항상 보이는 거절 | `SeedForeign` | 모델은 자기 attempt가 띄운 successor에는 `SeedJoin`을 허용한다. 구현은 그 갈래를 쓰지 않는다(더 엄격). `RequestResolves`는 보이는 거절로 성립하고, crash가 없는 정상 경로는 그 상태에 닿지 않는다 |
+| Retired row에서의 `/restart`는 종료 없이 seed만 적재 | `StartKind = Retired`(`HerdrRestartOwnerStartRetired`) | 같다 |
+| permit이 context의 dispatch를 근거로 남은 disconnect를 끝냄 | `LaunchBegin`의 `Detaches(SeedId)` | 같다 |
+| Codex seed 턴만 resume | 모델은 selector 보존(`selector = kept`)까지만 본다 | provider별 resume 여부는 모델 밖이다 |
+
 ## 진입점 전수표
 
 모델의 값 범위는 아래 실제 진입점에서만 가져왔다. 줄 번호는 이 보고서를 실은 커밋의 것이다.

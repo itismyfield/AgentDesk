@@ -126,9 +126,13 @@ fn restart_common_refuses_future_unplaced_and_foreign_canonical_rows_pg() {
             let replies = tokio::time::timeout(Duration::from_secs(10), call)
                 .await.expect("the actual restart common entry completes").unwrap();
             let final_reply = replies.last().expect("a refusal is visible to the user");
-            assert_eq!(final_reply,
-                "세션을 재시작하지 않았습니다. 현재 세션을 안전하게 확인할 수 없습니다.",
-                "{case}: {replies:?}");
+            let expected = match index {
+                2 => "세션을 재시작하지 않았습니다. 새 세션의 생성 응답을 아직 확인하지 못했습니다.\n메시지를 보내면 기존 경로가 이 상태를 해결합니다.",
+                _ => "세션을 재시작하지 않았습니다. 현재 세션을 안전하게 확인할 수 없습니다.",
+            };
+            assert_eq!(final_reply, expected, "{case}: {replies:?}");
+            assert!(replies.iter().all(|reply| !reply.contains("손실")),
+                "{case}: a request that ends nothing warns of no lost turn: {replies:?}");
             assert!(replies.iter().all(|reply|
                 !reply.contains("종료를 확인했습니다") && !reply.contains("Ready") &&
                 !reply.contains("인사말 turn을 시작했습니다")), "{case}: {replies:?}");

@@ -94,7 +94,7 @@ impl Seed {
             );
             self.context = serde_json::json!({"origin":"headless","turn_id":turn,
                 "request_owner":1,"request_owner_name":requester,"source":RESTART_SEED_SOURCE,
-                "metadata":{"command":command,"restart_seed":{"operation":self.ticket.as_str(),
+                "metadata":{"command":command,"human_input":{"origin_id":self.ticket.as_str()},"restart_seed":{"operation":self.ticket.as_str(),
                     "target_nonce":target.nonce,"dispatch":target.dispatch}},
                 "channel_name_hint":null,"synthetic_label":null,"is_dm":null});
         }
