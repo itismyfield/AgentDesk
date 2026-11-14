@@ -1208,10 +1208,22 @@ async fn native_8148_s2_bound_ticket_rejects_episode_extra_and_source_without_wr
         match field {
             "episode" => ticket["owning_episode"]["turn_nonce"] = "other-episode".into(),
             "extra" => ticket["future"] = true.into(),
-            _ => ticket["source"]["offset"] = 1.into(),
+            _ => ticket["source"]["binding_watermark"] = "changed-valid-binding".into(),
         }
         let bytes = serde_json::to_vec(&value).unwrap();
         std::fs::write(&path, &bytes).unwrap();
+        if field == "source" {
+            let updated = f
+                .history
+                .native_ticket("native-fixture", &f.ticket.key)
+                .unwrap();
+            updated
+                .source
+                .as_ref()
+                .unwrap()
+                .validate(&updated.key)
+                .unwrap();
+        }
         assert!(prepared.any_key(&f.history).is_err(), "{field}");
         assert!(
             prepared
