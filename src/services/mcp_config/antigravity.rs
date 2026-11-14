@@ -12,7 +12,7 @@ const EXCLUDED_MEMENTO_TOOLS: &[&str] = &[
 const STATE_FILE: &str = "antigravity-mcp-sync-state.json";
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 struct SyncState {
     managed_servers: BTreeSet<String>,
@@ -62,6 +62,7 @@ pub(crate) fn sync(config: &Config) -> Result<(), String> {
         .as_array_mut()
         .ok_or("Antigravity permissions.allow must be an array")?;
     let catalogs = discover_catalogs(&desired)?;
+    let mut pending_state = state.clone();
     let mut failed = false;
     let names: BTreeSet<_> = desired
         .keys()
@@ -102,6 +103,21 @@ pub(crate) fn sync(config: &Config) -> Result<(), String> {
         }
     }
     state.managed_servers = desired.keys().cloned().collect();
+    // Preserve old and new ownership until both target files have been published.
+    pending_state
+        .managed_servers
+        .extend(state.managed_servers.iter().cloned());
+    for (name, rules) in &state.managed_allow {
+        pending_state
+            .managed_allow
+            .entry(name.clone())
+            .or_default()
+            .extend(rules.iter().cloned());
+    }
+    publish(
+        &state_path,
+        &serde_json::to_value(pending_state).map_err(|_| "Cannot serialize MCP sync state")?,
+    )?;
     publish(&config_path, &target)?;
     if settings != previous_settings {
         publish(&settings_path, &settings)?;

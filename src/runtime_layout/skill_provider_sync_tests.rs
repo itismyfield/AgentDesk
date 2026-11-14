@@ -83,8 +83,16 @@ fn retired_gemini_cleans_only_skill_symlinks_even_without_managed_skills() {
         let links = workspace.join(".gemini/skills");
         fs::create_dir_all(&links).unwrap();
         create_symlink_entry(&skill, &links.join("demo"), true).unwrap();
+        fs::write(skill.join("source.txt"), "preserve").unwrap();
+        ensure_runtime_layout(root).unwrap();
         sync_managed_skills(root).unwrap();
         assert!(!links.exists());
+        assert_eq!(fs::read_to_string(skill.join("SKILL.md")).unwrap(), "demo");
+        assert_eq!(
+            fs::read_to_string(skill.join("source.txt")).unwrap(),
+            "preserve"
+        );
+        sync_managed_skills(root).unwrap();
         let empty = root.join("workspaces/empty/.gemini/skills");
         fs::create_dir_all(&empty).unwrap();
         fs::remove_file(skill.join("SKILL.md")).unwrap();
@@ -140,11 +148,73 @@ fn retired_gemini_preserves_mixed_files_unknown_links_and_directory_aliases() {
         create_symlink_entry(&workspace.join("unknown"), &links.join("unknown"), false).unwrap();
         sync_managed_skills(root).unwrap();
         assert!(links.join("unknown").exists());
-        let alias = root.join("workspaces/alias");
-        fs::create_dir_all(&alias).unwrap();
-        create_symlink_entry(&workspace.join(".gemini"), &alias.join(".gemini"), true).unwrap();
-        sync_managed_skills(root).unwrap();
-        assert!(links.join("demo").exists());
+        for level in ["workspaces", "workspace", ".gemini", "skills"] {
+            let case = root.join(level);
+            let outside = tempfile::tempdir().unwrap();
+            let (skill, _) = fixture(&case, serde_json::json!(["codex"]));
+            let (alias, target, skills) = match level {
+                "workspaces" => (
+                    case.join("workspaces"),
+                    outside.path().join("workspaces"),
+                    "project/.gemini/skills",
+                ),
+                "workspace" => (
+                    case.join("workspaces/project"),
+                    outside.path().join("project"),
+                    ".gemini/skills",
+                ),
+                ".gemini" => (
+                    case.join("workspaces/project/.gemini"),
+                    outside.path().join(".gemini"),
+                    "skills",
+                ),
+                _ => (
+                    case.join("workspaces/project/.gemini/skills"),
+                    outside.path().join("skills"),
+                    "",
+                ),
+            };
+            let links = target.join(skills);
+            fs::create_dir_all(&links).unwrap();
+            create_symlink_entry(&skill, &links.join("demo"), true).unwrap();
+            if alias.exists() {
+                if level == "workspaces" {
+                    fs::remove_dir(alias.join("project")).unwrap();
+                }
+                fs::remove_dir(&alias).unwrap();
+            }
+            fs::create_dir_all(alias.parent().unwrap()).unwrap();
+            create_symlink_entry(&target, &alias, true).unwrap();
+            captured.lock().unwrap().clear();
+            let output = captured.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(move || Capture(output.clone()))
+                .finish();
+            tracing::subscriber::with_default(subscriber, || sync_managed_skills(&case).unwrap());
+            assert!(
+                fs::symlink_metadata(&alias)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{level}"
+            );
+            assert!(
+                fs::symlink_metadata(links.join("demo"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{level}"
+            );
+            assert_eq!(fs::read_to_string(skill.join("SKILL.md")).unwrap(), "demo");
+            assert!(
+                String::from_utf8(captured.lock().unwrap().clone())
+                    .unwrap()
+                    .contains("Preserving"),
+                "{level}"
+            );
+        }
     });
 }
 
@@ -185,7 +255,7 @@ fn antigravity_skills_support_default_explicit_alias_and_pruning_without_touchin
         fs::remove_dir(&shared).unwrap();
         create_symlink_entry(&workspace.join(".codex/skills"), &shared, true).unwrap();
         let (skill, _) = fixture(root, serde_json::json!(["antigravity", "codex"]));
-        fs::remove_file(workspace.join(".codex/skills/demo")).unwrap();
+        remove_link_or_path(&workspace.join(".codex/skills/demo")).unwrap();
         assert_eq!(sync_managed_skills(root).unwrap().created_links, 1);
         fixture(root, serde_json::json!(["antigravity"]));
         assert_eq!(sync_managed_skills(root).unwrap().created_links, 0);

@@ -478,8 +478,7 @@ fn cleanup_retired_gemini_skills(root: &Path) -> Result<(), String> {
             continue;
         }
         for entry in entries {
-            fs::remove_file(entry.path())
-                .map_err(|error| format!("Failed to remove retired skill link: {error}"))?;
+            remove_link_or_path(&entry.path())?;
         }
         fs::remove_dir(&skills)
             .map_err(|error| format!("Failed to remove '{}': {error}", skills.display()))?;

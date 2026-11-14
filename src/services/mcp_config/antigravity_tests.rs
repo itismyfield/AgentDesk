@@ -42,6 +42,7 @@ impl Server {
                     }
                     Err(error) => panic!("mock accept: {error}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                     .unwrap();
@@ -174,6 +175,13 @@ fn antigravity_syncs_http_servers_and_specific_permissions_from_user_scope() {
                 auth: None,
             },
         );
+        let state_path = state_path();
+        let fault = crate::domain::atomic_write::rename_fault::Armed::new(&state_path);
+        assert!(sync(&runtime).is_err());
+        let (attempts, errors) = fault.evidence();
+        assert_eq!(attempts, 1);
+        assert_eq!(errors.len(), 1);
+        drop(fault);
         sync(&runtime).unwrap();
         let target = read(&config_path(home));
         assert_eq!(
@@ -197,7 +205,7 @@ fn antigravity_syncs_http_servers_and_specific_permissions_from_user_scope() {
         );
         assert_eq!(settings["permissions"]["deny"], json!(["manual"]));
         assert_eq!(settings["theme"], "user");
-        let state = std::fs::read_to_string(state_path()).unwrap();
+        let state = std::fs::read_to_string(&state_path).unwrap();
         assert!(!state.contains("fake-bearer-secret"));
         assert!(!state.contains("fake-private-value"));
         assert!(!state.contains(&server.url));
@@ -205,6 +213,42 @@ fn antigravity_syncs_http_servers_and_specific_permissions_from_user_scope() {
         let bytes = std::fs::read(settings_path(home)).unwrap();
         sync(&runtime).unwrap();
         assert_eq!(std::fs::read(settings_path(home)).unwrap(), bytes);
+        *server.tools.lock().unwrap() = vec!["remember".into(), "new_tool".into()];
+        let fault = crate::domain::atomic_write::rename_fault::Armed::new(&settings_path(home));
+        assert!(sync(&runtime).is_err());
+        let (attempts, errors) = fault.evidence();
+        assert_eq!(attempts, 1);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(std::fs::read(settings_path(home)).unwrap(), bytes);
+        drop(fault);
+        sync(&runtime).unwrap();
+        assert_eq!(
+            read(&settings_path(home))["permissions"]["allow"],
+            json!([
+                "shell(ls)",
+                "mcp(manual/tool)",
+                "mcp(memento/remember)",
+                "shell(pwd)",
+                "mcp(memento/new_tool)"
+            ])
+        );
+        runtime.mcp_servers.clear();
+        write(&home.join(".claude.json"), r#"{"mcpServers":{}}"#);
+        sync(&runtime).unwrap();
+        assert_eq!(
+            read(&settings_path(home))["permissions"]["allow"],
+            json!([
+                "shell(ls)",
+                "mcp(manual/tool)",
+                "mcp(memento/remember)",
+                "shell(pwd)"
+            ])
+        );
+        assert!(
+            read(&config_path(home))["mcpServers"]
+                .get("memento")
+                .is_none()
+        );
     });
 }
 
