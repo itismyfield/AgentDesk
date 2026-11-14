@@ -8,6 +8,9 @@ use std::io::{BufRead, BufReader};
 use std::process::Child;
 use std::sync::mpsc::{self, Sender};
 
+#[cfg(all(test, target_os = "linux"))]
+mod reaping_tests;
+
 pub(super) fn read(
     mut child: ReapingChild,
     sender: Sender<StreamMessage>,
