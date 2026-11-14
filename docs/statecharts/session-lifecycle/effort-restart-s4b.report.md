@@ -43,7 +43,7 @@ stateDiagram-v2
 | 경로 | 코드 | S4b에서의 관계 |
 |---|---|---|
 | 사용자 stop | `turn_bridge/tmux_runtime/judged_stop.rs:345` `begin_user_stop` | 같은 mailbox token을 본다. 재기동이 token을 정산한 뒤에는 `NoActiveTurn`이며, 대기 중 C는 취소하지 않는다(S6 몫) |
-| `/clear` | `commands/control.rs:510` | 전환 guard를 같이 쓴다. 큐·세션을 버리는 clear의 범위는 그대로이고, snapshot의 intent는 큐와 함께 사라진다 |
+| `/clear` | `commands/control.rs:510` | 전환 guard를 같이 쓴다. 큐·세션을 버리는 clear의 범위는 그대로다. 이 head에서는 owner가 C 항목만 지우고 intent는 남아 barrier가 풀리지 않는다(첫 리뷰 P1, 수리는 [s4b2](effort-restart-s4b2.report.md)) |
 | 다음 턴 재기동 소비 | `commands/control.rs` `reset_provider_session_if_pending` | 즉시 재기동이 끝나면 `channel_relaunch_pending`을 풀어 두 번 재기동하지 않는다. `Kept`이면 기존 경로가 그대로 처리 |
 | Herdr terminate | `herdr_terminate.rs` `terminate_scoped` | 같은 `capture_turn`·`settle_captured`를 쓴다. 로컬 tmux 채널만 S4b 대상 |
 | watcher의 종료 감지 | `watchers/lifecycle/liveness.rs` | tombstone이 있으면 restart handoff를 하지 않는다 |
@@ -76,7 +76,7 @@ stateDiagram-v2
 ## 모델과 코드가 다른 곳
 
 1. 모델의 `EffortResume`은 "같은 세션의 새 실행이 ready"다. 코드에는 프롬프트 없이 TUI를 띄우는 경로가 없어, 새 실행은 C(또는 대기 입력)의 턴 시작이 띄운다. 그래서 코드의 ready는 "옛 프로세스 종료 확인 + C 접수 가능"이고, 끊긴 턴이 없으면 다음 입력이 올 때까지 TUI는 없다.
-2. 모델은 의도를 종료 전에 기록한다. 코드는 종료·정산·종료 기록 뒤에 한 번만 owner snapshot에 기록한다. 종료와 기록 사이에 서버가 죽으면 C는 없다(기존 "프로세스가 죽은 턴" 복구 경로가 처리). 종료 전 기록과 그 취소는 다음 조각 몫이다.
+2. 모델은 의도를 종료 전에 기록한다. 코드는 종료·정산·종료 기록 뒤에 한 번만 owner snapshot에 기록한다. 종료와 기록 사이에 서버가 죽으면 C는 영구히 0이다. 기존 부팅 복구는 정산된 행을 지울 뿐 이어하기를 만들지 않는다(첫 리뷰 P1). 종료 전 기록과 그 취소는 [s4b2](effort-restart-s4b2.report.md)에서 설계했다.
 3. 중단 안내(`EffortTellInterrupted`)의 durable 게시는 이번 조각에 없다. 명령 응답이 중단 사실을 알릴 뿐이다.
 4. 자연 완료와 중단의 경합은 포착 시점으로 가른다. 포착된 뒤 종료 전에 턴이 자연 완료해도 C는 접수된다.
 

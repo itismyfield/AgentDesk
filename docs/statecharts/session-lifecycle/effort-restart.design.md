@@ -6,7 +6,7 @@
 
 ## 확정된 동작
 
-Discord /effort는 Claude와 Codex TUI 채널에서 현재 작업의 종료를 기다리지 않고, 같은 native session/thread를 resume하는 새 TUI incarnation을 즉시 시작한다. ultra도 하나의 채널 effort로 저장하고 다른 effort 선택 전까지 모든 후속 launch에 다시 적용한다. 지원하지 않는 모델에서는 설정과 모델을 바꾸지 않고 거절한다. /fast와 /model 단독 명령의 기존 적용 시점은 유지한다.
+Discord /effort는 Claude와 Codex TUI 채널에서 현재 작업의 종료를 기다리지 않고 기존 TUI를 즉시 종료한다. 같은 native session/thread를 resume하는 새 incarnation은 끊긴 턴이 있으면 자동 이어하기 입력의 턴 시작이 곧바로 띄우고, 없으면 다음 입력이 띄운다. 프롬프트 없이 TUI만 띄우는 launch 경로는 만들지 않는다. ultra도 하나의 채널 effort로 저장하고 다른 effort 선택 전까지 모든 후속 launch에 다시 적용한다. 지원하지 않는 모델에서는 설정과 모델을 바꾸지 않고 거절한다. /fast와 /model 단독 명령의 기존 적용 시점은 유지한다.
 
 실제로 끊긴 턴이 있으면 성공한 재기동 뒤 AgentDesk 자동 입력 하나로 작업을 이어간다. 원문을 다시 보내지 않는다. 자동 입력 문안은 다음과 같다.
 
@@ -86,7 +86,7 @@ capability port는 Supported(active/available 관측 포함), Unavailable, Unkno
 6. 같은 witness를 InputFacts·writer·presence가 먼저 소비해 old Open을 닫는다. writer가 old episode의 미게시 prefix를 seal하고 기존 unit identity/ledger의 durable delivery debt로 보존한다. 이미 Prepared인 POST의 소유권은 그대로 둔다. Discord POST 완료를 물리 resume의 선행조건으로 기다리지 않는다. 이미 게시한 offset·spool·checkpoint는 초기화하지 않는다. old inflight는 output snapshot/receipt debt가 durable한 exact old identity로만 settle한다. output drain/notice 실패는 보존된 debt로 회복하며 post success 전에 checkpoint를 진행하지 않는다.
 7. 중단 안내는 한 durable episode identity를 사용한다. 기존 outbox/nonce 게시·영수증 경로로 같은 사건만 retry하고 unkeyed say를 별도로 보내지 않는다. 이미 끊긴 턴의 partial reply나 [Stopped]와 중단 문구가 두 군데 게시되지 않도록 effort cause의 lifecycle notice 소유자는 한 군데다. ordinary command ACK는 중단 안내로 세지 않고 같은 문구를 반복하지 않는다.
 8. turn presence는 old witness와 정확히 일치하는 Open만 닫는다. 새 binding/nonce의 관측을 다시 얻으며, daemon current_generation 자체를 증가시키지 않는다. 새 incarnation nonce가 바뀌어도 native session은 동일하다. witness 없이 new ready 화면만 보고 old Open을 Idle로 덮어쓰지 않는다.
-9. 다음 사용자 턴을 기다리지 않고 provider의 resume launch를 즉시 실행한다. Claude effort 재기동 launch는 상속된 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`의 native 자동실행을 명시적으로 억제해 owner C만 제출을 소유한다(S3/S4); 현재 CLI의 비활성 값은 미완료 transcript·flag=1 격리 fixture에서 C 전 모델 요청 0/C 제출 1 및 억제 제거 mutant RED로 확인한다. 같은 계정·working directory·native session, 새 execution nonce와 requested effort를 전달하고 Startup/Bound/ready 및 validated launch args 반영을 확인한다. 출력 writer host의 재획득은 기존 lease/custody 규칙을 통과한다. 실제 Codex turn_context는 첫 입력 뒤 생성될 수 있으므로 이것을 launch/continuation의 선행조건으로 기다리지 않는다.
+9. 끊긴 턴이 있으면 guard 해제 뒤 owner wake로 자동 이어하기 입력의 턴이 곧바로 provider의 resume launch를 실행한다. 끊긴 턴이 없으면 TUI 종료만 하고 다음 입력이 같은 세션으로 launch한다. Claude effort 재기동 launch는 상속된 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`의 native 자동실행을 명시적으로 억제해 owner C만 제출을 소유한다(S3/S4); 현재 CLI의 비활성 값은 미완료 transcript·flag=1 격리 fixture에서 C 전 모델 요청 0/C 제출 1 및 억제 제거 mutant RED로 확인한다. 같은 계정·working directory·native session, 새 execution nonce와 requested effort를 전달하고 Startup/Bound/ready 및 validated launch args 반영을 확인한다. 출력 writer host의 재획득은 기존 lease/custody 규칙을 통과한다. 실제 Codex turn_context는 첫 입력 뒤 생성될 수 있으므로 이것을 launch/continuation의 선행조건으로 기다리지 않는다.
 10. capability preflight 및 같은 세션의 verified launch/ready 확인 후 미전달 continuation 하나를 기존 owner에 앞자리로 원자적으로 admit한다. admission만으로 barrier를 풀지 않는다. 같은 C ticket이 정확한 first reserve와 실제 Submitted/receipt를 얻을 때까지 사용자 grant와 prefer_person 회전을 막는다. C가 일시 Held 또는 Unknown이면 barrier/custody를 유지해 같은 original만 reconcile한다. 그 뒤 사용자는 원래 FIFO다. transition guard를 해제한 다음 SessionTransitionCompletion/owner wake로 drive를 시작한다. barrier는 first submit 후 owner commit에서 해제하므로 이 drive와 자기 잠금을 교착시키지 않는다. 단순 ready 기록이나 Held watcher Gone는 wake를 대신하지 못한다.
 
 durable intent의 정본은 기존 owner SnapshotV2다(queued_head/v2_types.rs:18-38). 기존 unfinished_handoff 패턴처럼 optional effort_restart 필드(serde default, 구 snapshot은 None)를 추가한다. 새 타입 본체는 v2_types/effort_restart.rs child에 두고 commands/effort_restart/state.rs는 mailbox actor의 기존 Owner::commit(v2/commit.rs:39-71)을 호출하는 adapter다. 독립 restart journal 파일이나 두 번째 큐 저장소를 만들지 않는다. phase·desired revision·cancel revision·C original/ticket·notice debt를 같은 snapshot에서 갱신한다. witness 파일은 physical end라는 불변 사실의 출력 투영이고 intent와 별도 제어 정본이 아니다.
@@ -94,6 +94,14 @@ durable intent의 정본은 기존 owner SnapshotV2다(queued_head/v2_types.rs:1
 intent를 준비한 뒤 기존 settings 저장에 성공하고 그 revision의 SettingsSaved를 owner commit에서 확인한 때만 kill한다. 설정 저장 실패면 intent를 명시 취소하고 기존 큐를 보존한다. 두 저장 사이 crash는 Prepared intent/기존 settings 결과를 재관측하여 같은 revision을 복구하며 성공으로 추측하지 않는다. 새 명령/명시 stop이 진행한 revision을 옛 복구가 덮지 못한다.
 
 intent/witness는 이 명령의 미완료 작업과 기존 output 경계만 다루는 작은 durable 기록이다. intent에서 kill 전/kill 확인 뒤/새 bind 뒤/continuation admit 확인 뒤를 구분한다. enqueue의 Pending을 완료로 지우지 않는다. 자동 continuation ticket·original과 post한 notice receipt를 기록에서 분리해서 새로 생성하지 않는다. 완료된 작업은 기존 저장의 정상 정리 규약으로만 닫으며 새 bulk 삭제/오래된 세션 kill을 만들지 않는다.
+
+### S4b 개정: kill 전 Prepared intent, 명시 취소, 반영한 pending 소비
+
+S4b 첫 리뷰의 P1 3건을 반영한 계약이다. 근거와 cutpoint별 표는 [effort-restart-s4b2.report.md](effort-restart-s4b2.report.md)에 있다.
+
+- intent는 kill 전에 owner snapshot에 `Prepared`(ready 아님, C ticket과 잘린 bind 포함)로 저장한다. kill 거절·실패는 같은 owner의 취소 commit으로 닫는다. kill 확인·정산·종료 witness 뒤에만 `Ready`가 되고, 그 뒤 C를 접수한다. 라이브, owner wake, 서버 재시작 복구는 같은 resolver로 이 단계를 이어 간다. 재시작 때 옛 TUI가 살아 있으면 취소, 없으면 같은 ticket으로 이어 간다.
+- `/clear`, 대기열 전체 취소, C 단일 취소, checked purge는 C를 지우는 owner commit 안에서 intent를 `Cancelled`로 닫는다. 시도 중이거나 전달 여부가 모호한 C는 기존 custody를 유지한다. 취소 표시는 늦게 도착한 ready가 같은 operation을 되살리지 못하게 남긴다.
+- kill이 확인되면 전환 guard 아래 설정 write lock 한 번으로 그때까지 쌓인 relaunch·fast·model pending을 소비한다. 다음 launch가 그 값을 읽기 때문이다. 자동 이어하기 입력의 턴 시작은 세션을 초기화하지 않는다. 그 뒤에 저장된 변경은 다음 사용자 턴이 기존 규칙대로 적용한다.
 
 ## 명시적 중지의 선형화 지점
 
