@@ -1,6 +1,9 @@
 //! Claude native input record classification and inactive source-bound membership evidence.
+#[cfg(all(test, unix))]
 use self::classify as classify_queued_record;
+#[cfg(all(test, unix))]
 use super::{Ordered, SourceBinding};
+#[cfg(all(test, unix))]
 use crate::services::tui_input::human_frame::history::v2::native::{
     Disposition, Ticket, frame_hashes,
 };
@@ -73,7 +76,8 @@ fn body(value: &Value) -> Option<String> {
     }
 }
 
-#[derive(Clone)]
+#[cfg(all(test, unix))]
+#[derive(Clone, serde::Serialize)]
 pub(crate) struct Registration {
     pub(crate) namespace: String,
     pub(crate) ticket: Ticket,
@@ -81,6 +85,14 @@ pub(crate) struct Registration {
     pub(crate) receipts: Vec<String>,
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn registrations_fingerprint(registrations: &[Registration]) -> Result<String, String> {
+    serde_json::to_vec(registrations)
+        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(all(test, unix))]
 impl Registration {
     pub(crate) fn matches(&self, binding: &SourceBinding) -> bool {
         binding.provider == super::ShadowProvider::Claude
@@ -99,6 +111,7 @@ impl Registration {
 }
 
 /// A candidate batch is read-only; its stamp is rechecked before any future actor mutation.
+#[cfg(all(test, unix))]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Observation {
     pub(crate) binding: SourceBinding,
@@ -106,21 +119,25 @@ pub(crate) struct Observation {
     pub(crate) binding_seq: u64,
     pub(crate) revision: u64,
     pub(crate) through: u64,
+    pub(crate) registrations_fingerprint: String,
     pub(crate) evidence: Vec<Evidence>,
 }
 
+#[cfg(all(test, unix))]
 pub(super) struct Record {
     pub(super) range: (u64, u64),
     pub(super) value: Value,
     pub(super) boundaries: Vec<Ordered>,
 }
 
+#[cfg(all(test, unix))]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Run {
     pub(crate) start: u64,
     pub(crate) native_id: Option<String>,
 }
 
+#[cfg(all(test, unix))]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Evidence {
     pub(crate) namespace: String,
@@ -133,6 +150,7 @@ pub(crate) struct Evidence {
     pub(crate) disposition: Disposition,
 }
 
+#[cfg(all(test, unix))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Waiting,
@@ -141,6 +159,7 @@ enum Stage {
     Running,
     Removed,
 }
+#[cfg(all(test, unix))]
 struct Input {
     body: String,
     owner: Option<usize>,
@@ -152,12 +171,14 @@ struct Input {
     pending: Option<PendingMembership>,
 }
 
+#[cfg(all(test, unix))]
 #[derive(Clone)]
 struct PendingMembership {
     range: (u64, u64),
     row: Option<String>,
 }
 
+#[cfg(all(test, unix))]
 #[derive(Clone)]
 struct Member {
     run: Run,
@@ -165,11 +186,13 @@ struct Member {
     row: Option<String>,
 }
 
+#[cfg(all(test, unix))]
 fn same_body(a: &str, b: &str) -> bool {
     let hashes = frame_hashes(a);
     frame_hashes(b).iter().any(|hash| hashes.contains(hash))
 }
 
+#[cfg(all(test, unix))]
 pub(super) fn fold(
     binding: &SourceBinding,
     records: &[Record],
@@ -469,6 +492,7 @@ pub(super) fn fold(
         .collect())
 }
 
+#[cfg(all(test, unix))]
 fn accepts_row(registration: &Registration, value: &Value) -> bool {
     registration.receipts.is_empty()
         || value["uuid"]
@@ -476,6 +500,7 @@ fn accepts_row(registration: &Registration, value: &Value) -> bool {
             .is_some_and(|uuid| registration.receipts.iter().any(|known| known == uuid))
 }
 
+#[cfg(all(test, unix))]
 fn settle_removed(
     input: &mut Input,
     end: u64,

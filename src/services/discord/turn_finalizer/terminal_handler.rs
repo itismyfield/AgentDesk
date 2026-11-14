@@ -314,6 +314,7 @@ pub(super) async fn handle_policy_close(
 #[derive(Clone)]
 struct NativeAdmission {
     evidence: crate::services::tui_o::writer::input_facts::native::Evidence,
+    registrations_fingerprint: String,
     cleanup: Option<(TurnKey, Arc<CancelToken>)>,
 }
 
@@ -334,6 +335,7 @@ impl NativeAdmission {
             || observed.binding_seq != current.binding_seq
             || observed.revision != current.revision
             || observed.through != current.through
+            || observed.registrations_fingerprint != current.registrations_fingerprint
         {
             return Err("native observation superseded".into());
         }
@@ -410,6 +412,7 @@ impl NativeAdmission {
         };
         Ok(Self {
             evidence: evidence.clone(),
+            registrations_fingerprint: observed.registrations_fingerprint.clone(),
             cleanup,
         })
     }
@@ -506,6 +509,18 @@ impl NativePrepared {
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
         shared: &Arc<SharedData>,
     ) -> Result<NativeCleanup, String> {
+        let registrations: Vec<_> = history
+            .native_evidence_registrations()?
+            .into_iter()
+            .filter(|r| r.matches(&observed.binding))
+            .collect();
+        let fingerprint =
+            crate::services::tui_o::writer::input_facts::native::registrations_fingerprint(
+                &registrations,
+            )?;
+        if fingerprint != observed.registrations_fingerprint {
+            return Err("native registrations superseded".into());
+        }
         let ticket = self.bound_ticket(history)?;
         let settlement = history.native_settlement(&self.namespace, &ticket)?;
         if settlement.extra.get("any_key") != Some(&serde_json::Value::Bool(true)) {
@@ -643,7 +658,12 @@ impl NativeCleanup {
                 serde_json::to_value(evidence).map_err(|e| e.to_string())?,
             )]),
         };
-        history.record_native_outcome(&evidence.namespace, &evidence.ticket, &outcome)?;
+        history.record_native_outcome_at_stamp(
+            &evidence.namespace,
+            &evidence.ticket,
+            &outcome,
+            &self.admission.registrations_fingerprint,
+        )?;
         let settlement = history.native_settlement(&evidence.namespace, &evidence.ticket)?;
         if settlement.cleanup_complete {
             return Ok(true);

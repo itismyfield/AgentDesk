@@ -1,6 +1,6 @@
 # Native input B2 — 활성화 전 경계
 
-기준 B1 `ccd3752cbae7b1a5c451809dddf5c509d88bc72c`. B1 리뷰 P2 세 건의 fixture는 같은 O capture를 재생한다.
+기준 B1 `ccd3752cbae7b1a5c451809dddf5c509d88bc72c`. 아래 첫 절의 native21·30cfg/121.7초·staged272/+1162는 P2 커밋 시점 수치다. 최종 B2a는 native23·32cfg/116.0초·prod7/+280, 잔여중간값890과의 합+1170이며 레인 최종 보고서가 정본이다. B1 리뷰 P2 세 건의 fixture는 같은 O capture를 재생한다.
 
 | 경로 | 수정 전 Rust | 수정 뒤 Rust | 모델 RED → GREEN |
 |---|---|---|---|

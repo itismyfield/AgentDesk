@@ -21,7 +21,7 @@ use crate::services::tui_o::writer::input_facts::{InputFacts, Resume, TurnState}
 pub(in crate::services::discord) mod notice_identity;
 use notice_identity::{NoticeObservation, progress};
 mod effort_restart;
-mod native_input;
+pub(in crate::services::discord) mod native_input;
 
 /// New bytes one effect-point poll may read before it answers `catching_up`.
 const CHUNK_BUDGET: u64 = 4 * 1024 * 1024;
@@ -699,7 +699,6 @@ fn judge_with_policy(
     if !caught_up {
         return progress(at(&guard, observed(Activity::Unknown, "catching_up")));
     }
-    native_input::observe(&guard);
     if effort_restart::needs_refresh(&guard) {
         let outcome = std::mem::replace(&mut guard.outcome, Outcome::Rebuilding);
         return rebuild(
@@ -889,7 +888,6 @@ fn install(watch: &Mutex<Watch>, key: &Key, generation: u64, outcome: Outcome, g
         if let Some((through, grew_at)) = grown {
             (guard.through, guard.grew_at) = (through, grew_at);
         }
-        native_input::observe(&guard);
     }
 }
 
@@ -950,7 +948,6 @@ fn read_tail(mut reader: tail::TailReader, key: &Key, ports: &dyn Ports) -> (Out
     if effort_restart::install(&mut reader.facts, ports, key).is_err() {
         return (effort_restart::unreadable(), None);
     }
-    native_input::prepare(&mut reader.facts);
     let result = reader.bootstrap();
     let (start, end, remaining, bytes) = reader.diagnostics();
     tracing::debug!(source = %reader.facts.binding().source.path.display(), seq = key.seq, mode = "tail", start, end, remaining, forward_bytes = bytes, result = ?result, "activity rebuild");
@@ -977,7 +974,6 @@ fn read_from(
         Ok(facts) => facts,
         Err(outcome) => return (outcome, None),
     };
-    native_input::prepare(&mut facts);
     let mut through = 0;
     loop {
         match facts.poll(WORKER_BUDGET) {

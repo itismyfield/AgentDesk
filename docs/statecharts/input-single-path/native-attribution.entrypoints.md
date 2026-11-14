@@ -4,7 +4,7 @@
 
 `git grep -n -E <pattern> -- src`의 전 저장소 결과에서 시험 파일·`cfg(test)` 구간·주석을 제외한 호출 및 선언 전수다. 선언/공통 wrapper도 생략하지 않았다. 같은 함수의 여러 호출은 각각 남겼다. 각 표의 모델 행동은 원래 경로의 의미이며 이번 설계가 모든 경로를 변경한다는 뜻이 아니다. 본문의 핵심 actor 분기 표와 함께 읽는다. 메모리/DB getter는 상태를 바꾸지 않아 제외한다. `GuardedClearOutcome::for_snapshot*` 등 별칭의 실제 제거 구현도 inflight 표의 leaf에서 덮는다.
 
-재현 스크립트·원시 `git grep` 결과: `/Users/itismyfield/.adk/lane-runs/i8148/logs/d1-build-inventory.py`, `d1-census-{lease,inflight,kick,anchor}.txt`. 이 문서의 표는 이 스크립트가 생성했다. `hard_stop` 등 이름이 같은 타 subsystem도 과잉 포함하며 모델의 AdjacentEnd는 해당 mailbox 경로만 뜻한다. 실제 상태 값은 아래 핵심 행에서만 정한다.
+재현 스크립트·원시 `git grep` 결과: `/Users/itismyfield/.adk/lane-runs/i8148/logs/d1-build-inventory.py`, `d1-census-{lease,inflight,kick,anchor}.txt`. 기준 mutation 표는 이 스크립트가 생성했고, 뒤의 A/B 포트 표는 각 변경 시점의 소스 좌표로 덧붙였다. `hard_stop` 등 이름이 같은 타 subsystem도 과잉 포함하며 모델의 AdjacentEnd는 해당 mailbox 경로만 뜻한다. 실제 상태 값은 아래 핵심 행에서만 정한다.
 
 ## 모델 값의 근거
 
@@ -737,6 +737,8 @@ B1에는 mailbox turn lease acquire/release, inflight create/delete, owner kick�
 
 ## B2a 추가 포트 (B1 head 이후)
 
+아래 두 표는 B2a head8698df14b의 역사적 접점이다. Watch 연결은 2a에서 제거했으며 현재 접점은 마지막 절을 따른다.
+
 | 코드 접점 | 모델 행동·권한 | 이번 변경 |
 |---|---|---|
 | `src/services/turn_orchestrator/queued_head/v2/sources.rs::Owner::prepare_history` → `history/v2/native.rs::Registry::prepare_native_intent` | Prepare. 기존 cold effect의 prepare-before-arm 경계 | 명시 intent가 있을 때만 v3 ticket 보존. 운영 intent producer는 아직 없음. lease/inflight/kick 변경0 |
@@ -780,3 +782,15 @@ B1에는 mailbox turn lease acquire/release, inflight create/delete, owner kick�
 결과·cleanup metadata를 저장하는 leaf는 기존 frame registry lock/transaction을 쓴다. 독립 DB·전역 guard·새 실행 소유자는 없다. boot/custody-only 소비 및 Cancel/Terminate/clear/stop/release의 production 연결은 본 전수표의 기존 경로 그대로 B2b-2 잔여다.
 
 Start의 기존 production wake 호출은 `turn_finalizer.rs::actor_loop`에서 `actor_state.rs::handle_start`로 같은 동작을 옮겼다. `publish_claimed_queue_eligible` 두 호출은 기존 admission의 Kick이며 새 큐 정책이 아니다. Native cleanup 포트는 row runtime 선확인→actor CAS→row 재확인→lock-held snapshot CAS 순서이고, generic pin이 담지 않는 execution nonce의 ABA는 B2b-2 잔여다.
+
+
+## B2b-2a P2 대체 포트 (기준 25d22a24a)
+
+| 현재 file:line / 함수 | 모델 행동·값 출처 / 기존 접점 대체 |
+|---|---|
+| `src/services/discord/turn_presence/activity/native_input.rs:13,31` `Reader::new/poll` | Reconstruct/ObserveProof. Watch를 받지 않는 ticket 전용 full-prefix reader. byte budget은 IO 진행만 제한하며 native 결과를 시간으로 만들지 않는다. `activity.rs`의 prepare/observe/snapshot 호출은 제거했다. |
+| `src/services/tui_o/writer/input_facts/native.rs:89,122` `registrations_fingerprint` / `Observation` | namespace·전체 ticket·frame_hash·receipts에서 fingerprint를 만든다. Preparation의 version/readVersion {0,1}은 변경 전/후 fingerprint의 유한 추상화이며 운영 카운터 신설이 아니다. |
+| `src/services/discord/turn_finalizer/terminal_handler.rs:338,521` `NativeAdmission::capture/NativePrepared::admit` | 관측/현재 및 registry의 fingerprint가 다르면 typed 거절. source transcript의 revision이 같아도 늦은 receipt가 기존 후보를 취소한다. |
+| `src/services/tui_input/human_frame/history/v2/native.rs:291,502` `record_native_outcome_at_stamp/native_transaction_checked` | Settle 결과 publish 전에 동일 history transaction 안에서 fingerprint를 비교하고 Executed membership row의 receipt를 확인한다. 기존 같은 ticket/outcome의 cleanup 재시도는 멱등이다. |
+
+추가 reader·증거·actor-result 포트는 `cfg(all(test,unix))`다. 기존 schema reader/prepare/bind/project는 production에 남고 새 production native producer/actor/lease/row/kick 진입점은 없다. AnyKey 실제 source의 읽기 포트(`claude_tui/owner_input.rs`)가 설계 목록 밖이므로 FILES 경계에서 producer/custody/witness/bridge 연결을 시작하지 않았다.

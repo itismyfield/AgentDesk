@@ -1,6 +1,7 @@
 //! Native input evidence stays attached to its original registration through projection.
 use super::*;
 
+#[cfg(all(test, unix))]
 pub(crate) fn frame_hashes(text: &str) -> Vec<String> {
     super::super::class_hashes(text)
 }
@@ -176,50 +177,56 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
         .collect()
 }
 
+#[cfg(all(test, unix))]
+fn evidence_registrations(
+    state: &Snapshot,
+) -> Result<Vec<crate::services::tui_o::writer::input_facts::native::Registration>, String> {
+    let registrations = state
+        .live
+        .iter()
+        .map(|b| (&b.registration, Some(&b.entry)))
+        .chain(state.planned.iter().map(|r| (r, None)))
+        .chain(
+            state
+                .passive
+                .iter()
+                .filter(|p| p.state != collision::ABANDONED)
+                .filter_map(|p| p.registration.as_ref().map(|r| (r, p.entry.as_ref()))),
+        );
+    registrations
+        .filter_map(|(registration, entry)| {
+            registration
+                .native_settlement
+                .as_ref()
+                .filter(|s| s.outcome.is_none() && !s.cleanup_complete)
+                .map(|s| (registration, entry, s))
+        })
+        .map(|(registration, entry, settlement)| {
+            settlement.validate(registration)?;
+            Ok(
+                crate::services::tui_o::writer::input_facts::native::Registration {
+                    namespace: registration.namespace.clone(),
+                    ticket: settlement.ticket.clone(),
+                    frame_hash: registration.frame.class_hash.clone(),
+                    receipts: entry
+                        .into_iter()
+                        .flat_map(|e| e.events.iter())
+                        .filter(|e| matches!(e.kind.as_str(), "user" | "command"))
+                        .filter_map(|e| e.row.clone())
+                        .collect(),
+                },
+            )
+        })
+        .collect()
+}
+
 impl Registry {
+    #[cfg(all(test, unix))]
     pub(crate) fn native_evidence_registrations(
         &self,
     ) -> Result<Vec<crate::services::tui_o::writer::input_facts::native::Registration>, String>
     {
-        self.inspect(|state| {
-            let registrations = state
-                .live
-                .iter()
-                .map(|b| (&b.registration, Some(&b.entry)))
-                .chain(state.planned.iter().map(|r| (r, None)))
-                .chain(
-                    state
-                        .passive
-                        .iter()
-                        .filter(|p| p.state != collision::ABANDONED)
-                        .filter_map(|p| p.registration.as_ref().map(|r| (r, p.entry.as_ref()))),
-                );
-            registrations
-                .filter_map(|(registration, entry)| {
-                    registration
-                        .native_settlement
-                        .as_ref()
-                        .filter(|s| s.outcome.is_none() && !s.cleanup_complete)
-                        .map(|s| (registration, entry, s))
-                })
-                .map(|(registration, entry, settlement)| {
-                    settlement.validate(registration)?;
-                    Ok(
-                        crate::services::tui_o::writer::input_facts::native::Registration {
-                            namespace: registration.namespace.clone(),
-                            ticket: settlement.ticket.clone(),
-                            frame_hash: registration.frame.class_hash.clone(),
-                            receipts: entry
-                                .into_iter()
-                                .flat_map(|e| e.events.iter())
-                                .filter(|e| matches!(e.kind.as_str(), "user" | "command"))
-                                .filter_map(|e| e.row.clone())
-                                .collect(),
-                        },
-                    )
-                })
-                .collect()
-        })
+        self.inspect(evidence_registrations)
     }
 
     /// The cold effect calls this before arming only when its payload carries explicit intent.
@@ -278,6 +285,84 @@ impl Registry {
                 }
             }
         })
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn record_native_outcome_at_stamp(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+        outcome: &Outcome,
+        expected: &str,
+    ) -> Result<bool, String> {
+        self.native_transaction_checked(
+            namespace,
+            &ticket.key,
+            |snapshot| {
+                let current = snapshot
+                    .locate(namespace, &ticket.key)
+                    .and_then(|(r, _)| r.native_settlement.as_ref())
+                    .ok_or("native ticket missing")?;
+                if current.ticket != *ticket {
+                    return Err("native result ticket mismatch".into());
+                }
+                if current.outcome.as_ref() == Some(outcome) {
+                    return Ok(());
+                }
+                let source = ticket.source.as_ref().ok_or("native source missing")?;
+                let registrations: Vec<_> = evidence_registrations(snapshot)?
+                    .into_iter()
+                    .filter(|r| {
+                        r.ticket.channel_id == ticket.channel_id
+                            && r.ticket.source.as_ref().is_some_and(|s| {
+                                s.provider == source.provider
+                                    && s.session_id == source.session_id
+                                    && s.transcript == source.transcript
+                                    && s.file == source.file
+                            })
+                    })
+                    .collect();
+                let fingerprint =
+                    crate::services::tui_o::writer::input_facts::native::registrations_fingerprint(
+                        &registrations,
+                    )?;
+                if fingerprint != expected {
+                    return Err("native registrations superseded".into());
+                }
+                if outcome.disposition == Disposition::Executed {
+                    let row = outcome
+                        .extra
+                        .get("native_proof")
+                        .and_then(|p| p["membership_row"].as_str())
+                        .ok_or("native executed receipt missing")?;
+                    if !registrations.iter().any(|r| {
+                        r.namespace == namespace
+                            && r.ticket == *ticket
+                            && r.receipts.iter().any(|known| known == row)
+                    }) {
+                        return Err("native executed receipt unconfirmed".into());
+                    }
+                }
+                Ok(())
+            },
+            |registration| {
+                let current = registration
+                    .native_settlement
+                    .as_mut()
+                    .ok_or("native ticket missing")?;
+                if current.ticket != *ticket || !outcome.valid() {
+                    return Err("native result ticket mismatch".into());
+                }
+                match &current.outcome {
+                    Some(existing) if existing == outcome => Ok(false),
+                    Some(_) => Err("native result already settled".into()),
+                    None => {
+                        current.outcome = Some(outcome.clone());
+                        Ok(true)
+                    }
+                }
+            },
+        )
     }
 
     #[cfg(test)]
@@ -411,7 +496,18 @@ impl Registry {
         key: &Value,
         apply: impl FnOnce(&mut Registration) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.native_transaction_checked(namespace, key, |_| Ok(()), apply)
+    }
+
+    fn native_transaction_checked<T>(
+        &self,
+        namespace: &str,
+        key: &Value,
+        check: impl FnOnce(&Snapshot) -> Result<(), String>,
+        apply: impl FnOnce(&mut Registration) -> Result<T, String>,
+    ) -> Result<T, String> {
         self.transaction(|snapshot| {
+            check(snapshot)?;
             let mut active = snapshot
                 .live
                 .iter_mut()

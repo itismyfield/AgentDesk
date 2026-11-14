@@ -7,7 +7,7 @@ vars == <<BaseVars, review>>
 Init == /\ phase = "Intent" /\ role \in {"Primary", "Follower"}
         /\ pin = "None" /\ prepared = FALSE /\ anyKey = FALSE /\ original = TRUE
         /\ result = "None" /\ source = "PreSource" /\ restored = FALSE /\ admitted = FALSE
-        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}]
+        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}]
 Prepare == /\ phase = "Intent"
            /\ phase' = "Prepared" /\ prepared' = TRUE
            /\ pin' = IF role = "Primary" \/ Mode = "BorrowBusy" THEN "Primary" ELSE "None"
@@ -25,28 +25,31 @@ Restart == /\ phase \in {"Prepared", "Unknown", "NotSent"} /\ ~restored
            /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, result, source, admitted, review>>
 Done == /\ phase \in {"Unknown", "NotSent"} /\ source = "Bound" /\ restored
         /\ UNCHANGED vars
+AcceptRow(row) == Mode = "ReceiptBefore" \/ row \in review.receipts
+JoinPending == Mode # "OpenBefore" /\ review.pending /\ review.kind \in {"Taken","Attached"}
 ReceiptOne == /\ Mode \in {"ReceiptBefore","ReceiptFixed"} /\ review.pc = 0
-              /\ review' = [review EXCEPT !.pc = 1, !.member = IF Mode = "ReceiptBefore" THEN "one" ELSE "None"]
+              /\ review' = [review EXCEPT !.pc = 1, !.member = IF AcceptRow("one") THEN "one" ELSE review.member]
               /\ UNCHANGED BaseVars
 ReceiptCloseOne == /\ Mode \in {"ReceiptBefore","ReceiptFixed"} /\ review.pc = 1
                    /\ review' = [review EXCEPT !.pc = 2, !.firstProof = IF review.member = "one" THEN 1 ELSE 0,
                         !.proofs = IF review.member = "one" THEN {"one"} ELSE {}]
                    /\ UNCHANGED BaseVars
 ReceiptTwo == /\ Mode \in {"ReceiptBefore","ReceiptFixed"} /\ review.pc = 2
-              /\ review' = [review EXCEPT !.pc = 3, !.member = "two",
-                   !.proofs = IF Mode = "ReceiptFixed" THEN {"two"} ELSE {}]
+              /\ review' = [review EXCEPT !.pc = 3,
+                   !.member = IF review.member = "None" /\ AcceptRow("two") THEN "two" ELSE review.member,
+                   !.proofs = IF review.member = "None" /\ AcceptRow("two") THEN {"two"} ELSE {}]
               /\ UNCHANGED BaseVars
 PopAll == /\ Mode \in {"PopAllBefore","PopAllFixed"} /\ review.pc = 0
-          /\ review' = [review EXCEPT !.pc = 1, !.fifo = (Mode = "PopAllBefore")]
+          /\ review' = [review EXCEPT !.pc = 1, !.fifo = IF Mode # "PopAllBefore" THEN FALSE ELSE review.fifo]
           /\ UNCHANGED BaseVars
 SecondDequeue == /\ Mode \in {"PopAllBefore","PopAllFixed"} /\ review.pc = 1
-                 /\ review' = [review EXCEPT !.pc = 2, !.taken = ~review.fifo]
+                 /\ review' = [review EXCEPT !.pc = 2, !.taken = (IF review.fifo THEN "one" ELSE "two") = "two"]
                  /\ UNCHANGED BaseVars
 SecondClose == /\ Mode \in {"PopAllBefore","PopAllFixed"} /\ review.pc = 2
                /\ review' = [review EXCEPT !.pc = 3, !.proofs = IF review.taken THEN {"two"} ELSE {}]
                /\ UNCHANGED BaseVars
 PendingOpen == /\ Mode \in {"OpenBefore","OpenFixed"} /\ review.pc = 0
-               /\ review' = [review EXCEPT !.pc = 1, !.member = IF Mode = "OpenFixed" THEN "two" ELSE "None"]
+               /\ review' = [review EXCEPT !.pc = 1, !.member = IF JoinPending /\ AcceptRow("two") THEN "two" ELSE review.member]
                /\ UNCHANGED BaseVars
 PendingClose == /\ Mode \in {"OpenBefore","OpenFixed"} /\ review.pc = 1
                 /\ review' = [review EXCEPT !.pc = 2, !.proofs = IF review.member = "two" THEN {"two"} ELSE {}]
@@ -55,9 +58,27 @@ NativeTypedAdmission == /\ ~admitted
                         /\ (Mode = "UntypedAdmission" \/ (prepared /\ anyKey /\ source = "Bound"))
                         /\ admitted' = TRUE
                         /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, result, source, restored, review>>
-Next == NativeTypedAdmission \/ Prepare \/ AnyKey \/ NotSent \/ RuntimeReady \/ Restart \/ Done
+StampRead == /\ Mode \in {"StampBefore","StampFixed"} /\ review.pc = 0
+             /\ review' = [review EXCEPT !.pc = 1, !.readVersion = review.version, !.member = "one"]
+             /\ UNCHANGED BaseVars
+StampReceipt == /\ Mode \in {"StampBefore","StampFixed"} /\ review.pc = 1
+                /\ review' = [review EXCEPT !.pc = 2, !.version = 1, !.receipts = {"two"}]
+                /\ UNCHANGED BaseVars
+StampCommit == /\ Mode \in {"StampBefore","StampFixed"} /\ review.pc = 2
+               /\ review' = [review EXCEPT !.pc = 3,
+                    !.stored = IF Mode = "StampBefore" \/ review.readVersion = review.version THEN review.member ELSE review.stored]
+               /\ UNCHANGED BaseVars
+StampRetry == /\ Mode \in {"StampBefore","StampFixed"} /\ review.pc = 3 /\ review.stored = "None"
+              /\ review' = [review EXCEPT !.pc = 4, !.readVersion = review.version, !.member = "two"]
+              /\ UNCHANGED BaseVars
+StampOwn == /\ Mode \in {"StampBefore","StampFixed"} /\ review.pc = 4
+            /\ review.member \in review.receipts /\ review.readVersion = review.version
+            /\ review' = [review EXCEPT !.pc = 5, !.stored = review.member]
+            /\ UNCHANGED BaseVars
+Next == StampRead \/ StampReceipt \/ StampCommit \/ StampRetry \/ StampOwn \/ NativeTypedAdmission \/ Prepare \/ AnyKey \/ NotSent \/ RuntimeReady \/ Restart \/ Done
         \/ ReceiptOne \/ ReceiptCloseOne \/ ReceiptTwo \/ PopAll \/ SecondDequeue \/ SecondClose \/ PendingOpen \/ PendingClose
 Spec == Init /\ [][Next]_vars /\ WF_vars(Prepare) /\ WF_vars(AnyKey)
+        /\ WF_vars(StampRead) /\ WF_vars(StampReceipt) /\ WF_vars(StampCommit) /\ WF_vars(StampRetry) /\ WF_vars(StampOwn)
         /\ WF_vars(NotSent) /\ WF_vars(RuntimeReady) /\ WF_vars(Restart)
         /\ WF_vars(ReceiptOne) /\ WF_vars(ReceiptCloseOne) /\ WF_vars(ReceiptTwo)
         /\ WF_vars(PopAll) /\ WF_vars(SecondDequeue) /\ WF_vars(SecondClose)
@@ -75,4 +96,6 @@ EvidenceEventuallyOwn == (Mode \in {"ReceiptBefore","ReceiptFixed","PopAllBefore
 
 NoUntypedAdmission == admitted => (prepared /\ anyKey /\ source = "Bound" /\ (role = "Primary" => pin = "Primary"))
 TypedAdmissionEventuallyAvailable == (phase = "Unknown" /\ source = "Bound") ~> admitted
+FreshRegistrationResult == review.stored = "None" \/ review.readVersion = review.version
+ReceiptEventuallyCommits == <>(review.stored = "two")
 =====================================================================

@@ -492,3 +492,5 @@ turn-presence/TurnPresenceRetiredUnsafe.cfg	TurnPresence	NoForeignMarkerRemoval,
 input-single-path/NativeAttributionDebtBefore.cfg	NativeInputAttribution	NativeRowBarrier	NativeDebtEventuallyDrained
 input-single-path/NativeAttributionDebtFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionDebtNoRetry.cfg	NativeInputAttribution	-	NativeDebtEventuallyDrained
+input-single-path/NativePreparationStampBefore.cfg	NativeInputPreparation	FreshRegistrationResult	ReceiptEventuallyCommits
+input-single-path/NativePreparationStampFixed.cfg	NativeInputPreparation	-	-

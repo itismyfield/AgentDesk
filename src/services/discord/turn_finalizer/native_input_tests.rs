@@ -51,6 +51,11 @@ fn native_8148_b2_typed_admission_refuses_stale_stamp_source_and_actor() {
         binding_seq: 4,
         revision: 5,
         through: facts.observation_progress().0,
+        registrations_fingerprint:
+            crate::services::tui_o::writer::input_facts::native::registrations_fingerprint(
+                &f.history.native_evidence_registrations().unwrap(),
+            )
+            .unwrap(),
         evidence: facts
             .native_evidence(&f.history.native_evidence_registrations().unwrap())
             .unwrap(),
@@ -69,6 +74,9 @@ fn native_8148_b2_typed_admission_refuses_stale_stamp_source_and_actor() {
     assert_eq!(admitted.evidence, batch.evidence[0]);
     assert!(Arc::ptr_eq(&admitted.cleanup.unwrap().1, &actor));
     let mut stale = Vec::new();
+    let mut changed = batch.clone();
+    changed.registrations_fingerprint.push_str("stale");
+    stale.push(changed);
     let mut changed = batch.clone();
     changed.generation += 1;
     stale.push(changed);
@@ -223,6 +231,20 @@ fn b2b_batch(f: &Fixture) -> Observation {
         rows.iter().map(|r| format!("{r}\n")).collect::<String>(),
     )
     .unwrap();
+    assert_eq!(
+        f.history.receipt(
+            "native-fixture",
+            &f.ticket.key,
+            (
+                &source.transcript,
+                0,
+                "user",
+                Some("own"),
+                "한국어 원본 입력"
+            )
+        ),
+        Some(true)
+    );
     let binding = SourceBinding {
         channel_id: f.ticket.channel_id,
         provider: ShadowProvider::Claude,
@@ -243,6 +265,11 @@ fn b2b_batch(f: &Fixture) -> Observation {
         binding_seq: 4,
         revision: 5,
         through: facts.observation_progress().0,
+        registrations_fingerprint:
+            crate::services::tui_o::writer::input_facts::native::registrations_fingerprint(
+                &f.history.native_evidence_registrations().unwrap(),
+            )
+            .unwrap(),
         evidence: facts
             .native_evidence(&f.history.native_evidence_registrations().unwrap())
             .unwrap(),
@@ -759,5 +786,139 @@ async fn native_8148_b2b_cleanup_ack_requires_exact_result_ticket_and_notice() {
         !f.history
             .ack_native_cleanup("native-fixture", &f.ticket, &outcome)
             .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn native_8148_2a_receipt_version_rejects_old_candidate_and_transaction() {
+    use crate::services::discord::turn_presence::activity::native_input::Reader;
+    use crate::services::tui_input::human_frame::history::v2::native::Outcome;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    std::fs::create_dir_all(runtime.path().join("runtime")).unwrap();
+    let dir = tempfile::tempdir_in(runtime.path().join("runtime")).unwrap();
+    let f = Fixture::at(dir.path().join("frames.json"), 8148950, false);
+    let source = f.ticket.source.as_ref().unwrap();
+    let shared = b2b_shared(None);
+    let key = TurnKey::new(
+        ChannelId::new(f.ticket.channel_id),
+        f.ticket.channel_id + 1,
+        1,
+    );
+    let prepared = NativePrepared::capture(
+        &f.history,
+        "native-fixture",
+        f.ticket.clone(),
+        key,
+        None,
+        &shared,
+    )
+    .await
+    .unwrap();
+    prepared.any_key(&f.history).unwrap();
+    let rows = [
+        serde_json::json!({"type":"queue-operation","operation":"enqueue","content":"한국어 원본 입력"}),
+        serde_json::json!({"type":"queue-operation","operation":"dequeue"}),
+        serde_json::json!({"type":"user","uuid":"one","sessionId":"native","message":{"content":"한국어 원본 입력"}}),
+        serde_json::json!({"type":"system","subtype":"turn_duration"}),
+    ];
+    std::fs::write(
+        &source.transcript,
+        rows.iter().map(|r| format!("{r}\n")).collect::<String>(),
+    )
+    .unwrap();
+    let binding = SourceBinding {
+        channel_id: f.ticket.channel_id,
+        provider: ShadowProvider::Claude,
+        source: SourceId {
+            session_id: source.session_id.clone(),
+            path: source.transcript.clone(),
+            dev: source.file[0],
+            ino: source.file[1],
+        },
+    };
+    let mut reader = Reader::new(binding, f.history.clone());
+    let old = reader.poll(u64::MAX).unwrap().unwrap();
+    assert_eq!(old.evidence.len(), 1);
+    assert_eq!(old.evidence[0].membership_row.as_deref(), Some("one"));
+    let unconfirmed = prepared
+        .admit(&old, &old, 0, &source.target, &f.history, &shared)
+        .await
+        .unwrap();
+    assert!(
+        b2b_submit(&shared, unconfirmed, &f.history).await.is_err(),
+        "Executed waits for a confirmed receipt"
+    );
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    assert_eq!(
+        f.history.receipt(
+            "native-fixture",
+            &f.ticket.key,
+            (
+                &source.transcript,
+                0,
+                "user",
+                Some("two"),
+                "한국어 원본 입력"
+            )
+        ),
+        Some(true)
+    );
+    assert!(
+        prepared
+            .admit(&old, &old, 0, &source.target, &f.history, &shared)
+            .await
+            .is_err(),
+        "unchanged transcript stamp must not borrow the old receipt set"
+    );
+    let withdrawn = Outcome {
+        disposition: Disposition::WithdrawnNotExecuted,
+        range: Some([old.evidence[0].range.0, old.evidence[0].range.1]),
+        extra: Default::default(),
+    };
+    assert!(
+        f.history
+            .record_native_outcome_at_stamp(
+                "native-fixture",
+                &f.ticket,
+                &withdrawn,
+                &old.registrations_fingerprint
+            )
+            .is_err(),
+        "writer rechecks under the publication lock"
+    );
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&source.transcript)
+        .unwrap();
+    writeln!(file,"{}",serde_json::json!({"type":"user","uuid":"two","sessionId":"native","message":{"content":"한국어 원본 입력"}})).unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({"type":"system","subtype":"turn_duration"})
+    )
+    .unwrap();
+    let current = reader.poll(u64::MAX).unwrap().unwrap();
+    assert_eq!(current.evidence.len(), 1);
+    assert_eq!(current.evidence[0].membership_row.as_deref(), Some("two"));
+    let work = prepared
+        .admit(&current, &current, 0, &source.target, &f.history, &shared)
+        .await
+        .unwrap();
+    assert!(b2b_submit(&shared, work, &f.history).await.unwrap());
+    assert_eq!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .unwrap()
+            .extra["native_proof"]["membership_row"],
+        "two"
     );
 }
