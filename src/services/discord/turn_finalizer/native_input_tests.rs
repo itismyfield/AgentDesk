@@ -2770,7 +2770,7 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
     drop(handle);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adoption() {
     use super::super::native_prepare::Handle;
     use crate::test_support::wait::{WAIT_CAP, await_within};
