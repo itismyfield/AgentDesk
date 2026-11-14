@@ -204,6 +204,14 @@ pub(super) async fn run_stream_loop(
         guarded_tool_frame_retry_retained,
         std::time::Instant::now(),
     ) {
+        if super::native_input::enabled()
+            && super::native_input::state(&shared_owned, &provider, &inflight_state, &cancel_token)
+                .await
+                == super::native_input::State::Settled
+        {
+            loop_outcome = StreamLoopOutcome::NativeSettled;
+            break 'outer;
+        }
         // #2172: Done wins over a later cancel during residual-control drain;
         // only `!done` may run cancel finalization.
         if !done && cancel_requested(Some(cancel_token.as_ref())) {

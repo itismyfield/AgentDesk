@@ -84,7 +84,6 @@ async fn submit_with_attribution(
                 None => owner.reserve(attempt, payload),
             };
             reserved?;
-            #[cfg(test)]
             if owner.json()?["head_injection"]["payload"]["attribution"]
                 .get("native_intent")
                 .is_some()
@@ -98,7 +97,6 @@ async fn submit_with_attribution(
     effect::run(mailbox, clock, leaf).await
 }
 
-#[cfg(test)]
 pub(crate) async fn submit_native_front(
     mailbox: &ChannelMailboxHandle,
     claim: Option<FrontClaim>,

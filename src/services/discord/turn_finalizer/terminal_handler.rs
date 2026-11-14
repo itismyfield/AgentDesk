@@ -64,6 +64,16 @@ pub(super) async fn handle_terminal(
     // (recovery/orphan). An unregistered turn (post-restart inflight, no live
     // `Start`) still finalizes below — idempotent, exactly-once.
     let ledger_key = resolve_ledger_key(ledger, key);
+    #[cfg(unix)]
+    if matches!(
+        event,
+        TerminalEvent::Complete | TerminalEvent::GateTimeout { .. }
+    ) && ledger
+        .get(&ledger_key)
+        .is_some_and(|entry| entry.completion_admission.native_input.is_some())
+    {
+        return FinalizeOutcome::Deferred;
+    }
 
     // Codex P1 — ambiguous channel-only terminal: an id-0 submission that fell
     // back to the literal orphan key (a recently-`Finalized` entry exists) is
@@ -419,8 +429,9 @@ impl NativeAdmission {
 }
 
 /// Explicit intent captures its own actor before keys; an empty lease never grants ownership.
-#[cfg(all(test, unix))]
-struct NativePrepared {
+#[cfg(unix)]
+#[derive(Clone)]
+pub(super) struct NativePrepared {
     namespace: String,
     ticket: crate::services::tui_input::human_frame::history::v2::native::Ticket,
     key: TurnKey,
@@ -428,9 +439,9 @@ struct NativePrepared {
     started_before: std::time::Instant,
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 impl NativePrepared {
-    async fn capture(
+    pub(super) async fn capture(
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
         namespace: &str,
         ticket: crate::services::tui_input::human_frame::history::v2::native::Ticket,
@@ -478,6 +489,14 @@ impl NativePrepared {
         })
     }
 
+    pub(super) fn owns_bridge(&self, key: TurnKey, actor: usize) -> bool {
+        self.key.exact_key() == key.exact_key()
+            && self
+                .actor
+                .as_ref()
+                .is_some_and(|a| Arc::as_ptr(a) as usize == actor)
+    }
+
     fn bound_ticket(
         &self,
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
@@ -493,13 +512,20 @@ impl NativePrepared {
         Ok(current)
     }
 
-    fn any_key(
+    pub(super) fn any_key(
         &self,
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
     ) -> Result<(), String> {
-        history.note_native_any_key(&self.namespace, &self.bound_ticket(history)?)
+        history.note_native_any_key(&self.namespace, &self.bound_ticket(history)?)?;
+        tracing::debug!(
+            channel = self.key.channel_id.get(),
+            elapsed_ms = self.started_before.elapsed().as_millis(),
+            "native key witness acknowledged"
+        );
+        Ok(())
     }
 
+    #[cfg(all(test, unix))]
     async fn admit(
         &self,
         observed: &crate::services::tui_o::writer::input_facts::native::Observation,
@@ -563,6 +589,10 @@ pub(super) struct NativeCleanup {
 
 #[cfg(all(test, unix))]
 impl NativeCleanup {
+    pub(super) fn primary_key(&self) -> Option<TurnKey> {
+        self.admission.cleanup.as_ref().map(|(key, _)| *key)
+    }
+
     fn capture(
         admission: NativeAdmission,
         row: Option<super::super::inflight::InflightTurnState>,
@@ -727,7 +757,7 @@ impl NativeCleanup {
                 return Ok(false);
             };
             let (cleared, detail) =
-                GuardedClearOutcome::for_snapshot_with_detail(&ProviderKind::Claude, &row);
+                GuardedClearOutcome::for_native_snapshot_with_detail(&ProviderKind::Claude, &row);
             if !matches!(
                 (cleared, detail.reason),
                 (GuardedClearOutcome::Cleared, _) | (GuardedClearOutcome::Missing, "not_found")

@@ -35,6 +35,8 @@ fn finished_turn() -> LedgerEntry {
     let mut completion_admission = CompletionAdmission::new(CompletionAdmissionPlan::Immediate);
     completion_admission.note_mailbox_released();
     LedgerEntry {
+        #[cfg(unix)]
+        native_inputs: HashMap::new(),
         recovery_lease: None,
         phase: Phase::Finalized,
         relay_owner: RelayOwnerKind::Watcher,

@@ -494,3 +494,8 @@ input-single-path/NativeAttributionDebtFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionDebtNoRetry.cfg	NativeInputAttribution	-	NativeDebtEventuallyDrained
 input-single-path/NativePreparationStampBefore.cfg	NativeInputPreparation	FreshRegistrationResult	ReceiptEventuallyCommits
 input-single-path/NativePreparationStampFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativeAttributionPortPreflightBefore.cfg	NativeInputAttribution	FailedPreflightKeepsLease	NativePortEventuallyDone
+input-single-path/NativeAttributionPortPreflightFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionPortTransferBefore.cfg	NativeInputAttribution	-	NativePortEventuallyDone
+input-single-path/NativeAttributionPortTransferDeletes.cfg	NativeInputAttribution	NativeTransferKeepsSuccessor	-
+input-single-path/NativeAttributionPortTransferFixed.cfg	NativeInputAttribution	-	-

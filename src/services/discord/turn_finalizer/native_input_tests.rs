@@ -922,3 +922,144 @@ async fn native_8148_2a_receipt_version_rejects_old_candidate_and_transaction() 
         "two"
     );
 }
+
+#[test]
+fn native_8148_b2b2_runtime_witness_rejects_nonce_aba_under_row_lock() {
+    use super::super::super::inflight;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::at(runtime.path().join("runtime/frames.json"), 8148964, true);
+    let captured = b2b_row(&f);
+    let path = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Claude,
+        captured.channel_id,
+    );
+    let mut replacement = captured.clone();
+    replacement.hosted_execution_nonce = Some("successor-execution".into());
+    let bytes = serde_json::to_vec(&replacement).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let (outcome, detail) = inflight::GuardedClearOutcome::for_native_snapshot_with_detail(
+        &ProviderKind::Claude,
+        &captured,
+    );
+    assert_eq!(outcome, inflight::GuardedClearOutcome::UserMsgMismatch);
+    assert_eq!(detail.reason, "native_runtime_changed");
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_8148_b2b2_registered_scope_rejects_legacy_completion_and_body() {
+    use super::super::super::{inflight, turn_bridge::native_input};
+    use super::super::native_prepare::Handle;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::at(runtime.path().join("runtime/frames.json"), 8148965, true);
+    let shared = b2b_shared(None);
+    let (key, actor) = b2b_active(&f, &shared).await;
+    let row = b2b_row(&f);
+    let bytes = std::fs::read(inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Claude,
+        key.channel_id.get(),
+    ))
+    .unwrap();
+    shared.turn_finalizer.register_start(
+        key,
+        ProviderKind::Claude,
+        super::super::RelayOwnerKind::Watcher,
+        &shared,
+    );
+    let prepared = Handle::prepare(
+        &shared,
+        key,
+        Some(actor.clone()),
+        f.history.clone(),
+        "native-fixture".into(),
+        f.ticket.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        native_input::state(&shared, &ProviderKind::Claude, &row, &actor).await,
+        native_input::State::Pending
+    );
+    assert!(native_input::neutral_exit(&shared, &ProviderKind::Claude, &row, &actor).await);
+    let mut body = "foreign turn before our membership".to_string();
+    assert!(
+        native_input::reject_legacy_body(&shared, &ProviderKind::Claude, &row, &actor, &mut body)
+            .await
+    );
+    assert!(body.is_empty());
+    for event in [
+        TerminalEvent::Complete,
+        TerminalEvent::GateTimeout {
+            pane_quiescent: Some(true),
+        },
+    ] {
+        let outcome = shared
+            .turn_finalizer
+            .submit_terminal(
+                key,
+                ProviderKind::Claude,
+                event,
+                FinalizeContext::watcher(),
+                shared.clone(),
+            )
+            .await;
+        assert!(matches!(outcome, FinalizeOutcome::Deferred));
+    }
+    let other = CancelToken::from_persisted_turn_nonce(actor.turn_nonce().map(str::to_string));
+    assert_eq!(
+        native_input::state(&shared, &ProviderKind::Claude, &row, &other).await,
+        native_input::State::Legacy
+    );
+    assert!(!native_input::neutral_exit(&shared, &ProviderKind::Claude, &row, &other).await);
+    assert!(Arc::ptr_eq(
+        shared
+            .mailbox(key.channel_id)
+            .snapshot()
+            .await
+            .cancel_token
+            .as_ref()
+            .unwrap(),
+        &actor
+    ));
+    assert_eq!(
+        std::fs::read(inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &ProviderKind::Claude,
+            key.channel_id.get()
+        ))
+        .unwrap(),
+        bytes
+    );
+    actor.mark_completion_cleanup();
+    assert_eq!(
+        native_input::state(&shared, &ProviderKind::Claude, &row, &actor).await,
+        native_input::State::Settled
+    );
+    drop(prepared);
+}
+
+#[test]
+fn native_8148_b2b2_native_admission_waits_for_input_not_delivery() {
+    let mut admission = super::super::completion_admission::CompletionAdmission::new(
+        CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+    );
+    admission.native_input = Some(false);
+    admission.note_mailbox_released();
+    admission.note_terminal_projection_settled(true);
+    admission.note_terminal_disposition_settled(true);
+    admission.operator_released = true;
+    assert!(
+        !admission.claim_queue_eligible(),
+        "delivery or operator permission cannot skip native row cleanup"
+    );
+    admission.native_input = Some(true);
+    admission.terminal_projection_allows_queue = false;
+    admission.terminal_disposition_allows_queue = false;
+    assert!(
+        admission.claim_queue_eligible(),
+        "native lifecycle admission does not claim provider delivery"
+    );
+    assert!(!admission.claim_queue_eligible());
+}

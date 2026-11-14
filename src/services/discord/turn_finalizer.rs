@@ -36,6 +36,9 @@ use super::SharedData;
 use super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome};
 
 mod actor_state;
+#[cfg(unix)]
+pub(in crate::services::discord) mod native_prepare;
+use actor_state::panic_payload_summary;
 pub(in crate::services::discord) mod cleanup;
 mod completion_admission;
 mod completion_admission_actor;
@@ -595,19 +598,6 @@ impl TurnFinalizer {
     }
 }
 
-/// #3866: render a caught panic payload for the actor's error log without
-/// re-panicking. `catch_unwind` yields `Box<dyn Any + Send>`; the common
-/// payloads are `&'static str` and `String`.
-fn panic_payload_summary(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        return (*message).to_string();
-    }
-    if let Some(message) = payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-    "non-string panic payload".to_string()
-}
-
 /// The single owning task. Owns the ledger and a NON-owning cached handle to
 /// `SharedData`, and drives the reconcile timer in the same task via `select!`
 /// so the deadline-armed gate-timeout finalize fires deterministically (no
@@ -632,9 +622,13 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                     msg @ FinalizeMsg::Start { .. } => {
                         actor_state::handle_start(msg, &mut ledger, &mut pending_admission, &mut cached_shared);
                     }
+                    #[cfg(unix)]
+                    msg @ (FinalizeMsg::NativeRegister { .. } | FinalizeMsg::NativeKeyed { .. } | FinalizeMsg::NativeScope { .. }) => {
+                        native_prepare::handle(msg, &mut ledger).await;
+                    }
                     #[cfg(all(test, unix))]
                     FinalizeMsg::Native { work, history, shared, ack } => {
-                        actor_state::handle_native(*work, history, shared, ack).await;
+                        actor_state::handle_native(*work, history, shared, ack, &mut ledger).await;
                     }
                     msg @ (FinalizeMsg::MailboxReleased { .. }
                     | FinalizeMsg::TerminalProjectionSettled { .. }

@@ -37,6 +37,7 @@ pub(in crate::services::discord) fn is_stale_resume_error(message: &str, stderr:
     stale_resume::stream_error_has_stale_resume_error(message, stderr)
 }
 
+pub(in crate::services::discord) mod native_input;
 mod status_panel;
 mod stream_loop;
 #[cfg(test)]
@@ -673,8 +674,8 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         .await;
         let busy_attempt_cost = turn_start.elapsed();
         match stream_loop_output.outcome {
-            stream_loop::StreamLoopOutcome::Completed => {}
-            stream_loop::StreamLoopOutcome::AuthorityLost => {
+            stream_loop::StreamLoopOutcome::Completed if !native_input::enabled() || !native_input::neutral_exit(&shared_owned, &provider, &inflight_state, &cancel_token).await => {}
+            _ => {
                 completion_guard.relinquish_bridge_authority();
                 inflight_guard.defuse();
                 return;

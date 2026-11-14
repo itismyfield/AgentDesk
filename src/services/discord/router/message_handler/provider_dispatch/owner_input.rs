@@ -24,9 +24,12 @@ use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use crate::services::turn_host::TurnHost;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 use serde_json::{Value, json};
+mod native_input;
+use native_input::submit;
 
 /// What the owner verified about a channel's target before its turn reached dispatch.
 pub(super) struct Registration {
+    native: Option<native_input::Producer>,
     mailbox: ChannelMailboxHandle,
     execution: Execution,
     origin: InputOrigin,
@@ -115,6 +118,7 @@ impl Registration {
             ids => ids.iter().map(u64::to_string).collect(),
         };
         Ok(Self {
+            native: None,
             mailbox,
             execution: Execution::LocalTui,
             origin,
@@ -1091,7 +1095,10 @@ pub(super) fn execute_owned(
         }
     };
     match registered {
-        Ok(owner) => execute_front(turn, sender, claim, owner, settled),
+        Ok(mut owner) => {
+            owner.native = native_input::for_front(&turn, &claim, true);
+            execute_front(turn, sender, claim, owner, settled)
+        }
         Err(error) => {
             let _ = settled.send(Err(error.clone()));
             Err(error)
@@ -1250,6 +1257,10 @@ pub(super) fn execute_front(
     owner: Registration,
     settled: Settled,
 ) -> Result<(), String> {
+    let mut owner = owner;
+    if owner.native.is_none() {
+        owner.native = native_input::for_front(&turn, &claim, false);
+    }
     let reply = reply_once(Some(settled));
     let failure = super::start_failure::Failure::claimed(&owner.mailbox, &claim);
     let watch =
@@ -1372,20 +1383,6 @@ fn take_owned(
     Some(Taken::Done(result))
 }
 
-/// Submits on the owner's pump from the driver's blocking thread, for the granted front if any.
-fn submit(
-    (mailbox, clock): (&ChannelMailboxHandle, Clock),
-    front: Option<FrontClaim>,
-    prepared: PreparedPayload,
-    leaf: effect::Leaf,
-) -> Result<(), String> {
-    let submitted = pump::submit_front(mailbox, front, prepared, clock, leaf);
-    match tokio::runtime::Handle::current().block_on(submitted)? {
-        Completion::Submitted => Ok(()),
-        other => Err(format!("{other:?}")),
-    }
-}
-
 /// Reserves the first prompt on the target of the execution its driver observed, runs the driver's
 /// submit as the effect, and refuses any lineage but `wanted` before reserving.
 fn created(
@@ -1413,7 +1410,7 @@ fn created(
             attempt,
         };
         let leaf = effect::created(submit_created, writer);
-        let result = submit((&r.mailbox, r.clock), front, prepared, leaf);
+        let result = submit((&r.mailbox, r.clock), front, prepared, leaf, r.native);
         reply(&result);
         result
     })
@@ -1533,7 +1530,7 @@ fn run(
         sources: r.sources,
         attempt: r.attempt,
     };
-    submit((&r.mailbox, r.clock), front, prepared, leaf)
+    submit((&r.mailbox, r.clock), front, prepared, leaf, r.native)
 }
 
 /// Posts the original's one notice that a draft beside its paste may not be kept; the outbox key

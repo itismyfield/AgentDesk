@@ -22,7 +22,6 @@ pub(crate) enum Intent {
 }
 
 impl Intent {
-    #[cfg(test)]
     pub(crate) fn attribution(&self, sources: &[String]) -> serde_json::Value {
         serde_json::json!({"sources": sources, "native_intent": self})
     }
@@ -389,7 +388,7 @@ impl Registry {
         })
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(crate) fn native_ticket(&self, namespace: &str, key: &Value) -> Result<Ticket, String> {
         self.inspect(|snapshot| {
             let registration = snapshot
@@ -414,7 +413,7 @@ impl Registry {
         })
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(crate) fn note_native_any_key(
         &self,
         namespace: &str,
@@ -433,7 +432,7 @@ impl Registry {
         })
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(crate) fn native_settlement(
         &self,
         namespace: &str,
@@ -559,4 +558,16 @@ fn prepare_ticket(registration: &mut Registration, ticket: &Ticket) -> Result<()
     }
     registration.native_settlement = Some(candidate);
     Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn scoped_ticket() -> Result<(Registry, String, Ticket), String> {
+    let context = super::context().ok_or("native attempt scope missing")?;
+    if context.receipt_only {
+        return Err("native receipt scope cannot prepare input".into());
+    }
+    let ticket = context
+        .registry
+        .native_ticket(&context.namespace, &context.key)?;
+    Ok((context.registry, context.namespace, ticket))
 }

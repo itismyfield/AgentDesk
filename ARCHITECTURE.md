@@ -2314,6 +2314,10 @@ src/
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   ├── owner_input/
+│   │   │   │   │   │   ├── native_input/
+│   │   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   │   └── native_input.rs
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_busy_gate_tests.rs
 │   │   │   │   │   ├── owner_input_carried_restart_tests.rs
@@ -3119,6 +3123,7 @@ src/
 │   │   │   ├── headless_delivery.rs
 │   │   │   ├── memory_lifecycle.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── native_input.rs
 │   │   │   ├── output_lifecycle.rs
 │   │   │   ├── panel_lifecycle.rs
 │   │   │   ├── post_loop_finalize.rs
@@ -3173,6 +3178,7 @@ src/
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── guarded_finish_residue.rs
 │   │   │   ├── native_input_tests.rs
+│   │   │   ├── native_prepare.rs
 │   │   │   ├── policy_commit.rs
 │   │   │   ├── reconcile.rs
 │   │   │   ├── terminal_handler.rs

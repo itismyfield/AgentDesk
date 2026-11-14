@@ -2900,6 +2900,7 @@ pub(crate) fn claimed_root_recovery_launch(
         ids => ids.iter().map(u64::to_string).collect(),
     };
     let registration = Registration {
+        native: None,
         mailbox,
         execution: Execution::LocalTui,
         origin,

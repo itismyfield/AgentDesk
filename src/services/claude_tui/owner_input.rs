@@ -49,6 +49,10 @@ pub(crate) fn record_preparation_watch(probe: PreparationWatch) {
             .unwrap_or_else(|e| e.into_inner()) = Some(probe);
     }
 }
+pub(crate) fn key_attempted() -> Option<bool> {
+    Some(current()?.keyed.load(Ordering::SeqCst))
+}
+
 pub(crate) fn active() -> bool {
     current().is_some()
 }

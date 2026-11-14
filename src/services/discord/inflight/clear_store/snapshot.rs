@@ -10,6 +10,34 @@ pub(in crate::services::discord) struct SnapshotClearDetail {
 }
 
 impl GuardedClearOutcome {
+    #[cfg(all(test, unix))]
+    pub(in crate::services::discord) fn for_native_snapshot_with_detail(
+        provider: &ProviderKind,
+        snapshot: &InflightTurnState,
+    ) -> (Self, SnapshotClearDetail) {
+        let Some(root) = inflight_runtime_root() else {
+            return (Self::Missing, detail("no_runtime_root", None));
+        };
+        clear_snapshot_checked(
+            &root,
+            provider,
+            snapshot.channel_id,
+            &InflightTurnIdentity::from_state(snapshot),
+            (&snapshot.updated_at, snapshot.save_generation),
+            (
+                snapshot.effective_finalizer_turn_id(),
+                Some(&super::super::InflightEpisodePin::from_state(snapshot)),
+            ),
+            |current| {
+                snapshot
+                    .hosted_execution_nonce
+                    .as_ref()
+                    .is_some_and(|nonce| !nonce.is_empty())
+                    && current.hosted_execution_nonce == snapshot.hosted_execution_nonce
+            },
+        )
+    }
+
     /// `clear_inflight_state_for_snapshot` with the lock-held reason behind its outcome.
     pub(in crate::services::discord) fn for_snapshot_with_detail(
         provider: &ProviderKind,
@@ -89,7 +117,28 @@ pub(super) fn clear_if_matches_generation_and_episode_in_root(
     expected_generation: (&str, u64),
     expected_episode: Option<&super::super::InflightEpisodePin>,
 ) -> (GuardedClearOutcome, SnapshotClearDetail) {
+    clear_snapshot_checked(
+        root,
+        provider,
+        channel_id,
+        expected,
+        expected_generation,
+        (expected_finalizer_turn_id, expected_episode),
+        |_| true,
+    )
+}
+
+fn clear_snapshot_checked(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_generation: (&str, u64),
+    expected_pin: (u64, Option<&super::super::InflightEpisodePin>),
+    runtime_matches: impl FnOnce(&InflightTurnState) -> bool,
+) -> (GuardedClearOutcome, SnapshotClearDetail) {
     let (expected_updated_at, expected_save_generation) = expected_generation;
+    let (expected_finalizer_turn_id, expected_episode) = expected_pin;
     let path = inflight_state_path(root, provider, channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return (GuardedClearOutcome::IoError, detail("lock_failed", None));
@@ -118,7 +167,9 @@ pub(super) fn clear_if_matches_generation_and_episode_in_root(
             detail("rebind_origin", observed),
         );
     }
-    let mismatch = if expected_episode.is_some_and(|episode| !episode.matches_state(&state)) {
+    let mismatch = if !runtime_matches(&state) {
+        Some("native_runtime_changed")
+    } else if expected_episode.is_some_and(|episode| !episode.matches_state(&state)) {
         Some("episode_pin_changed")
     } else if expected_finalizer_turn_id == 0
         || !state.matches_finalizer_turn_id(expected_finalizer_turn_id)

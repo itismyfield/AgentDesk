@@ -10,7 +10,6 @@ pub(super) fn identity(item: &PendingQueueItem) -> QueueIdentity {
 }
 
 impl Owner {
-    #[cfg(test)]
     pub(crate) fn native_intent(
         &self,
     ) -> Result<Option<crate::services::tui_input::human_frame::history::v2::native::Episode>, String>

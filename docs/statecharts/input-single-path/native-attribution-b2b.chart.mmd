@@ -3,8 +3,10 @@ stateDiagram-v2
     Prepared --> Prepared: no key, original retained
     Prepared --> Candidate: durable AnyKey, same O capture
     Candidate --> Result: exact ticket and current actor admission
+    Result --> Pending: row unreadable/changed before release, lease kept
     Result --> Released: exact actor / nonce / cutoff CAS
-    Result --> Pending: successor actor, no cleanup
+    Result --> Transferred: durable result, no own lease, successor row proven
+    Transferred --> [*]: close debt, no row delete or wake
     Released --> Pending: row unreadable / changed / CAS miss
     Pending --> Released: repair and resubmit same durable result
     Released --> RowGone: exact snapshot CAS or proven absence

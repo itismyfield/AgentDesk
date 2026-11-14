@@ -303,6 +303,7 @@ impl Rig {
                 "expected_transcript":null,"binding_watermark":null})
         };
         Registration {
+            native: None,
             mailbox: self.mailbox.clone(),
             execution,
             origin: InputOrigin::Discord,
@@ -1013,6 +1014,7 @@ fn owner_refusals_before_a_pane_need_no_session() {
 /// the launch will create.
 fn prepared_before_launch(rig: &Rig) -> Registration {
     Registration {
+        native: None,
         mailbox: rig.mailbox.clone(),
         execution: Execution::LocalTui,
         origin: InputOrigin::Discord,

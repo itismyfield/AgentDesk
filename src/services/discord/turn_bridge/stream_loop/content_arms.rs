@@ -35,6 +35,10 @@ pub(super) async fn handle_stream_content_message(
     ctx: StreamContentArmContext<'_>,
     state: StreamContentArmState<'_>,
 ) -> StreamContentArmOutcome {
+    if matches!(message, StreamContentArmMessage::Text { .. } | StreamContentArmMessage::Done { .. })
+        && super::super::native_input::enabled() && super::super::native_input::reject_legacy_body(ctx.shared_owned, ctx.provider, state.inflight_state, ctx.cancel_token, state.full_response).await {
+        return StreamContentArmOutcome::ContinueDraining;
+    }
     let shared_owned = Arc::clone(ctx.shared_owned);
     let gateway = Arc::clone(ctx.gateway);
     let channel_id = ctx.channel_id;

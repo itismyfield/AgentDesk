@@ -53,6 +53,8 @@ pub(super) enum Phase {
 }
 
 pub(super) struct LedgerEntry {
+    #[cfg(unix)]
+    pub(super) native_inputs: HashMap<String, super::terminal_handler::NativePrepared>,
     pub(super) recovery_lease: Option<crate::services::agent_recovery::RecoveryLease>,
     pub(super) phase: Phase,
     pub(super) relay_owner: RelayOwnerKind,
@@ -83,6 +85,8 @@ impl LedgerEntry {
         watcher_backstop_deadline: Option<Instant>,
     ) -> Self {
         Self {
+            #[cfg(unix)]
+            native_inputs: HashMap::new(),
             recovery_lease,
             phase: Phase::Pending,
             relay_owner,
@@ -108,6 +112,30 @@ pub(super) struct PendingCompletionAdmission {
 }
 
 pub(super) enum FinalizeMsg {
+    #[cfg(unix)]
+    NativeRegister {
+        key: TurnKey,
+        actor: Option<Arc<CancelToken>>,
+        history: crate::services::tui_input::human_frame::history::v2::Registry,
+        namespace: String,
+        ticket: Box<crate::services::tui_input::human_frame::history::v2::native::Ticket>,
+        shared: Arc<SharedData>,
+        ack: oneshot::Sender<Result<String, String>>,
+    },
+    #[cfg(unix)]
+    NativeKeyed {
+        key: TurnKey,
+        input: String,
+        keyed: bool,
+        history: crate::services::tui_input::human_frame::history::v2::Registry,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    #[cfg(unix)]
+    NativeScope {
+        key: TurnKey,
+        actor: usize,
+        ack: oneshot::Sender<bool>,
+    },
     Start {
         key: TurnKey,
         recovery_lease: Option<crate::services::agent_recovery::RecoveryLease>,
@@ -287,10 +315,31 @@ pub(super) async fn handle_native(
     history: crate::services::tui_input::human_frame::history::v2::Registry,
     shared: Arc<SharedData>,
     ack: oneshot::Sender<Result<bool, String>>,
+    ledger: &mut HashMap<LedgerKey, LedgerEntry>,
 ) {
+    let key = work.primary_key();
     let result = std::panic::AssertUnwindSafe(work.drive(&history, &shared))
         .catch_unwind()
         .await
         .unwrap_or_else(|_| Err("native finalizer panicked; durable debt retained".into()));
+    if result.as_ref() == Ok(&true)
+        && let Some(entry) = key.and_then(|key| ledger.get_mut(&key.exact_key()))
+    {
+        entry.phase = Phase::Finalized;
+        entry.finalized_at = Some(Instant::now());
+        entry.completion_admission.native_input = Some(true);
+        entry.completion_admission.note_mailbox_released();
+        entry.completion_admission.queue_eligible_published = true;
+    }
     let _ = ack.send(result);
+}
+
+pub(super) fn panic_payload_summary(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "non-string panic payload".to_string()
 }

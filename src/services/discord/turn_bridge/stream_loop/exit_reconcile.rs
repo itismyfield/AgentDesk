@@ -7,6 +7,7 @@ use super::*;
 pub(in crate::services::discord::turn_bridge) enum StreamLoopOutcome {
     Completed,
     AuthorityLost,
+    NativeSettled,
 }
 
 /// Guarded input stays held through cancellation; Legacy fence refusals still yield to user stops.
