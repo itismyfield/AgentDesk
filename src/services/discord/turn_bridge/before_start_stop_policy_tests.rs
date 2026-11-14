@@ -1281,3 +1281,123 @@ async fn p10_fin_ack_refuses_a_message_moved_during_the_notice() {
 
 #[path = "before_start_stop_protected_tests.rs"]
 mod protected;
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_8148_review_receipt_callback_preserves_native_authority() {
+    use crate::services::discord::turn_finalizer::native_prepare::Handle;
+    use crate::services::tui_input::human_frame::history::v2::native_tests::Fixture;
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    HERDR_SETTLEMENT_OVERRIDE.set(true);
+    let mut f = Fixture::at(
+        runtime.path().join("runtime/receipt-native.json"),
+        81489880,
+        true,
+    );
+    let source = f.ticket.source.as_ref().unwrap().clone();
+    let mut close = Close::open_in(1, f.ticket.channel_id, |row| {
+        row.born_generation = 1;
+        row.session_id = Some(source.session_id.clone());
+        row.output_path = Some(source.transcript.to_string_lossy().into_owned());
+        row.hosted_execution_nonce = source.target["execution_nonce"].as_str().map(str::to_owned);
+    })
+    .await;
+    f.ticket.owning_episode.as_mut().unwrap().turn_nonce = close.actor.turn_nonce().unwrap().into();
+    let mut stored = f.history.json().unwrap();
+    stored["live"][0]["registration"]["native_settlement"]["ticket"] =
+        serde_json::to_value(&f.ticket).unwrap();
+    std::fs::write(
+        runtime.path().join("runtime/receipt-native.json"),
+        stored.to_string(),
+    )
+    .unwrap();
+    close.fin = close.shared.turn_finalizer.clone();
+    let key = TurnKey::new(close.channel(), close.row.user_msg_id, 1)
+        .with_episode_nonce(close.actor.turn_nonce());
+    close.fin.register_start(
+        key,
+        ProviderKind::Claude,
+        RelayOwnerKind::None,
+        &close.shared,
+    );
+    let handle = await_within(
+        Handle::prepare(
+            &close.shared,
+            key,
+            Some(close.actor.clone()),
+            f.history.clone(),
+            "native-fixture".into(),
+            f.ticket.clone(),
+        ),
+        WAIT_CAP,
+    )
+    .await
+    .unwrap();
+    f.history
+        .note_native_any_key("native-fixture", &f.ticket)
+        .unwrap();
+    let acked = close.acked().await;
+    let bytes = close.bytes().unwrap();
+    let lock = discord::inflight::lock_inflight_state_path(&close.path()).unwrap();
+    let refused = await_within(close.submit(close.intent(acked.clone())), WAIT_CAP).await;
+    assert!(matches!(
+        refused,
+        PolicyCloseOutcome::Retained(PolicyRetain::Clear(PolicyClear::LockBusy))
+    ));
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    assert!(close.actor_holds().await);
+    assert_eq!(close.active(), 1);
+    drop(lock);
+    let mut replaced = acked.clone();
+    replaced.user_msg_id += 100;
+    std::fs::write(close.path(), serde_json::to_vec(&replaced).unwrap()).unwrap();
+    let refused = await_within(close.submit(close.intent(acked.clone())), WAIT_CAP).await;
+    assert!(matches!(refused, PolicyCloseOutcome::Retained(_)));
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    assert_eq!(close.active(), 1);
+    std::fs::write(close.path(), bytes).unwrap();
+    let settled = await_within(close.submit(close.intent(acked)), WAIT_CAP).await;
+    assert!(
+        matches!(settled, PolicyCloseOutcome::Settled),
+        "{settled:?}"
+    );
+    await_within(
+        async {
+            while !f
+                .history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .cleanup_complete
+            {
+                tokio::task::yield_now().await;
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
+    assert!(!close.path().exists());
+    assert!(!close.actor_holds().await);
+    assert_eq!(close.active(), 0);
+    assert_eq!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .unwrap()
+            .disposition,
+        crate::services::tui_input::human_frame::history::v2::native::Disposition::Cancelled
+    );
+    drop(handle);
+}

@@ -106,7 +106,7 @@ pub(super) async fn claim_episode(
             persistence_error: None,
         }
     };
-    if finish.persistence_error.is_some() {
+    if finish.removed_token.is_none() && finish.persistence_error.is_some() {
         return Err(());
     }
     let drifted = loaded

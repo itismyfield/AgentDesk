@@ -1003,3 +1003,141 @@ fn native_8148_control_direct_delete_preserves_full_custody_and_refuses_busy_or_
             .any(|r| serde_json::to_value(r).unwrap() == serde_json::to_value(&expected).unwrap())
     );
 }
+
+#[test]
+fn native_8148_review_rebind_unlinks_preserve_pending_native_custody() {
+    use super::super::rebind_reap::{
+        RebindReapOutcome, reap_abandoned_rebind_origin_locked_in_root,
+        reap_dead_watcher_rebind_origin_locked_in_root,
+    };
+    for watcher in [false, true] {
+        let env = Env::new();
+        let dir = env.dir();
+        let root = dir.parent().unwrap();
+        let channel = 81489860 + u64::from(watcher);
+        let f = Fixture::at(root.join("injected_frames.json"), channel, true);
+        let mut state = row(channel, None);
+        state.user_msg_id = 0;
+        state.current_msg_id = 0;
+        state.rebind_origin = true;
+        state.turn_source = TurnSource::ExternalAdopted;
+        state.relay_owner_kind = if watcher {
+            RelayOwnerKind::Watcher
+        } else {
+            RelayOwnerKind::None
+        };
+        state.rebind_origin_birth_generation = Some(1);
+        let path = env.seed(&state, STALE);
+        let bytes = fs::read(&path).unwrap();
+        let reap = || {
+            if watcher {
+                reap_dead_watcher_rebind_origin_locked_in_root(&dir, &CLAUDE, &state, 2)
+            } else {
+                reap_abandoned_rebind_origin_locked_in_root(&dir, &CLAUDE, &state, 2)
+            }
+        };
+        let lock =
+            super::custody_notice::retention::lock(&root.join("discord_custody/claude"), false)
+                .unwrap();
+        assert_eq!(reap(), RebindReapOutcome::Skipped);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        drop(lock);
+        assert_eq!(reap(), RebindReapOutcome::Reaped);
+        assert!(!path.exists());
+        let expected = f
+            .history
+            .native_boot_record("native-fixture", &f.ticket)
+            .unwrap();
+        fs::remove_file(root.join("injected_frames.json")).unwrap();
+        let restored = native_boot_records(root, &CLAUDE).unwrap();
+        assert!(
+            restored
+                .iter()
+                .any(|r| serde_json::to_value(r).unwrap()
+                    == serde_json::to_value(&expected).unwrap())
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_8148_review_saved_control_proof_boot_and_custody_only() {
+    use crate::services::discord::turn_finalizer::native_prepare::BootInputs;
+    for (n, (kind, custody_only)) in [
+        (native::Disposition::Cancelled, false),
+        (native::Disposition::Cancelled, true),
+        (native::Disposition::OperatorReleased, false),
+        (native::Disposition::OperatorReleased, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let env = Env::new();
+        let dir = env.dir();
+        let root = dir.parent().unwrap();
+        let channel = 81489870 + n as u64;
+        let f = Fixture::at(root.join("injected_frames.json"), channel, true);
+        let source = f.ticket.source.as_ref().unwrap();
+        let mut state = row(channel, None);
+        state.born_generation = 1;
+        state.turn_nonce = Some(f.ticket.owning_episode.as_ref().unwrap().turn_nonce.clone());
+        state.session_id = Some(source.session_id.clone());
+        state.output_path = Some(source.transcript.to_string_lossy().into_owned());
+        state.hosted_execution_nonce = source.target["execution_nonce"].as_str().map(str::to_owned);
+        let path = env.seed(&state, STALE);
+        f.history
+            .note_native_any_key("native-fixture", &f.ticket)
+            .unwrap();
+        f.history
+            .try_native_control(
+                "native-fixture",
+                &f.ticket,
+                kind.clone(),
+                Some(serde_json::to_value(&state).unwrap()),
+            )
+            .unwrap();
+        let outcome = f
+            .history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .unwrap();
+        let registry_bytes = fs::read(root.join("injected_frames.json")).unwrap();
+        let mut corrupt: serde_json::Value = serde_json::from_slice(&registry_bytes).unwrap();
+        corrupt["live"][0]["registration"]["native_settlement"]["outcome"]["control_proof"]["ticket"]
+            ["foreign"] = true.into();
+        fs::write(root.join("injected_frames.json"), corrupt.to_string()).unwrap();
+        assert!(BootInputs::prepare(root, 2).is_err());
+        assert!(path.exists());
+        fs::write(root.join("injected_frames.json"), registry_bytes).unwrap();
+        super::boot_custody::preserve_native_before_boot_reap(root, &CLAUDE).unwrap();
+        if custody_only {
+            fs::remove_file(root.join("injected_frames.json")).unwrap();
+        }
+        let shared = boot_shared(None);
+        let mut events =
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                &shared,
+            );
+        BootInputs::prepare(root, 2)
+            .unwrap()
+            .restore(&shared)
+            .await
+            .unwrap();
+        assert!(!path.exists());
+        let history = Registry::at(root.join("injected_frames.json"));
+        let after = history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap();
+        assert_eq!(after.outcome, Some(outcome));
+        assert!(after.cleanup_complete);
+        assert!(events.try_recv().unwrap().queue_is_eligible());
+        assert!(events.try_recv().is_err());
+        BootInputs::prepare(root, 2)
+            .unwrap()
+            .restore(&shared)
+            .await
+            .unwrap();
+        assert!(events.try_recv().is_err());
+        next_head(shared.mailbox(ChannelId::new(channel)), channel, root).await;
+    }
+}

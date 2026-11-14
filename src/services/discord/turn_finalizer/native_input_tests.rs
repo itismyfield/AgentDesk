@@ -1854,6 +1854,30 @@ async fn control_case(kind: &str) {
         super::super::RelayOwnerKind::None,
         &shared,
     );
+    if kind == "clear" {
+        shared
+            .mailbox(key.channel_id)
+            .v2_adopt(
+                runtime.path().join(format!("runtime/next-{channel}.json")),
+                format!("next-{channel}"),
+            )
+            .await
+            .unwrap();
+        let input = serde_json::from_value(serde_json::json!({"author_id":7,"message_id":channel+9,"channel_id":channel,"source_message_ids":[channel+9],"queued_generation":1,"text":"V2 clear pending"})).unwrap();
+        shared
+            .mailbox(key.channel_id)
+            .v2_admit_ticket(input, "clear-pending".into())
+            .await
+            .unwrap();
+        assert!(
+            shared
+                .mailbox(key.channel_id)
+                .snapshot()
+                .await
+                .v2_queue
+                .is_some()
+        );
+    }
     let custody = await_within(
         Handle::prepare(
             &shared,
@@ -1867,6 +1891,43 @@ async fn control_case(kind: &str) {
     )
     .await
     .unwrap();
+    if kind == "clear" {
+        let row_path = super::super::super::inflight::inflight_state_path(
+            &super::super::super::inflight::inflight_runtime_root().unwrap(),
+            &ProviderKind::Claude,
+            channel,
+        );
+        let row_before = std::fs::read(&row_path).unwrap();
+        let before =
+            std::fs::read(runtime.path().join(format!("runtime/next-{channel}.json"))).unwrap();
+        let rejected = super::super::super::mailbox_clear_channel(
+            &shared,
+            &ProviderKind::Claude,
+            key.channel_id,
+        )
+        .await;
+        assert!(rejected.removed_token.is_none());
+        assert_eq!(std::fs::read(row_path).unwrap(), row_before);
+        assert!(rejected.persistence.failed.contains(&"native_input"));
+        assert_eq!(
+            std::fs::read(runtime.path().join(format!("runtime/next-{channel}.json"))).unwrap(),
+            before
+        );
+        assert!(
+            f.history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .outcome
+                .is_none()
+        );
+        assert_eq!(
+            shared
+                .restart
+                .global_active
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
     f.history
         .note_native_any_key("native-fixture", &f.ticket)
         .unwrap();
@@ -2306,4 +2367,280 @@ async fn native_8148_control_native_result_and_control_outcome_have_one_winner()
         .await;
         drop(custody);
     }
+}
+
+fn review_soft_input(id: u64) -> crate::services::turn_orchestrator::Intervention {
+    crate::services::turn_orchestrator::pending_queue_item_to_intervention(
+        serde_json::from_value(serde_json::json!({"author_id":7,"message_id":id,
+            "source_message_ids":[id],"queued_generation":1,"text":"retained V1 input"}))
+        .unwrap(),
+        std::time::SystemTime::now(),
+        std::time::Instant::now(),
+    )
+}
+
+#[tokio::test]
+async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
+    use super::super::super::{inflight, turn_completion_events};
+    use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use std::sync::atomic::Ordering;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for capture_only in [false, true] {
+        let channel = ChannelId::new(81489850 + u64::from(capture_only));
+        let shared = b2b_shared(None);
+        let provider = ProviderKind::Gemini;
+        let actor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+            "v1-exact".into(),
+        )));
+        shared
+            .mailbox(channel)
+            .restore_active_turn(
+                actor.clone(),
+                serenity::model::id::UserId::new(7),
+                serenity::model::id::MessageId::new(channel.get() + 1),
+            )
+            .await;
+        shared.restart.global_active.store(1, Ordering::SeqCst);
+        let key = TurnKey::new(channel, channel.get() + 1, 1).with_episode_nonce(Some("v1-exact"));
+        let mut row = inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            7,
+            key.user_msg_id,
+            key.user_msg_id,
+            "pipe input".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        row.turn_nonce = Some("v1-exact".into());
+        row.born_generation = 1;
+        inflight::save_inflight_state(&row).unwrap();
+        let context = super::super::super::queue_persistence_context(&shared, &provider, channel);
+        assert!(
+            shared
+                .mailbox(channel)
+                .enqueue(review_soft_input(channel.get() + 2), context)
+                .await
+                .enqueued
+        );
+        assert!(shared.mailbox(channel).snapshot().await.v2_queue.is_none());
+        let mut events = turn_completion_events::subscribe_turn_completion_events(&shared);
+        fail_queue_saves(channel, 1);
+        if capture_only {
+            let captured = await_within(
+                super::super::episode::claim_normal_episode(
+                    &shared,
+                    &provider,
+                    key,
+                    true,
+                    Some(actor.clone()),
+                ),
+                WAIT_CAP,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                captured
+                    .finish
+                    .removed_token
+                    .as_ref()
+                    .is_some_and(|t| Arc::ptr_eq(t, &actor))
+            );
+            assert!(captured.finish.persistence_error.is_some());
+            let snapshot = captured.snapshot;
+            let finish = captured.finish;
+            let result = super::super::finalize::do_finalize_with_release(
+                key,
+                provider,
+                &super::super::TerminalEvent::Complete,
+                super::super::FinalizeContext::bridge(),
+                snapshot.as_ref(),
+                &shared,
+                Some(finish),
+                false,
+            )
+            .await;
+            assert!(matches!(
+                result,
+                super::super::FinalizeOutcome::Finalized {
+                    removed_token: Some(_),
+                    ..
+                }
+            ));
+        } else {
+            let mut ledger = HashMap::from([(
+                key.exact_key(),
+                LedgerEntry::registered(
+                    key,
+                    provider.clone(),
+                    super::super::RelayOwnerKind::None,
+                    None,
+                    super::super::completion_admission::CompletionAdmissionPlan::Immediate,
+                    None,
+                ),
+            )]);
+            let mut pending = HashMap::new();
+            let evidence = || super::super::episode::TerminalEvidence {
+                episode_captured: true,
+                turn_nonce: Some("v1-exact".into()),
+                claim_snapshot: None,
+                probed_tmux_session: None,
+            };
+            let result = await_within(
+                super::handle_terminal(
+                    &mut ledger,
+                    &mut pending,
+                    key,
+                    provider.clone(),
+                    super::super::TerminalEvent::Complete,
+                    super::super::FinalizeContext::bridge(),
+                    evidence(),
+                    &shared,
+                ),
+                WAIT_CAP,
+            )
+            .await;
+            assert!(matches!(
+                result,
+                super::super::FinalizeOutcome::Finalized {
+                    removed_token: Some(_),
+                    ..
+                }
+            ));
+            assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+            let mut released = 0;
+            let mut eligible = 0;
+            while let Ok(event) = events.try_recv() {
+                released += usize::from(
+                    event.phase == turn_completion_events::TurnCompletionPhase::MailboxReleased,
+                );
+                eligible += usize::from(event.queue_is_eligible());
+            }
+            assert_eq!((released, eligible), (1, 1));
+            let duplicate = super::handle_terminal(
+                &mut ledger,
+                &mut pending,
+                key,
+                provider,
+                super::super::TerminalEvent::Complete,
+                super::super::FinalizeContext::bridge(),
+                evidence(),
+                &shared,
+            )
+            .await;
+            assert!(matches!(
+                duplicate,
+                super::super::FinalizeOutcome::AlreadyFinalized
+            ));
+            super::super::reconcile::reconcile(&mut ledger, &mut pending, &shared).await;
+            assert!(events.try_recv().is_err());
+        }
+        assert_eq!(queue_save_faults(channel, true), 0);
+        assert!(actor.cancelled.load(Ordering::SeqCst));
+        assert!(actor.is_completion_cleanup());
+        assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+        let snapshot = shared.mailbox(channel).snapshot().await;
+        assert!(snapshot.cancel_token.is_none());
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert!(
+            inflight::load_inflight_state_read_only(&row.provider_kind().unwrap(), channel.get())
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_8148_review_control_partial_release_debits_before_retry() {
+    use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
+    use std::sync::atomic::Ordering;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::at(
+        runtime.path().join("runtime/control-partial.json"),
+        81489852,
+        true,
+    );
+    let shared = b2b_shared(None);
+    let (key, actor) = b2b_active(&f, &shared).await;
+    let row = b2b_row(&f);
+    let prepared = NativePrepared::capture(
+        &f.history,
+        "native-fixture",
+        f.ticket.clone(),
+        key,
+        Some(actor.clone()),
+        &shared,
+    )
+    .await
+    .unwrap();
+    prepared.install_control(&f.history, &shared).await.unwrap();
+    prepared.any_key(&f.history).unwrap();
+    let context = super::super::super::queue_persistence_context(
+        &shared,
+        &ProviderKind::Claude,
+        key.channel_id,
+    );
+    assert!(
+        shared
+            .mailbox(key.channel_id)
+            .enqueue(review_soft_input(81489854), context)
+            .await
+            .enqueued
+    );
+    f.history
+        .try_native_control(
+            "native-fixture",
+            &f.ticket,
+            Disposition::Cancelled,
+            Some(serde_json::to_value(row).unwrap()),
+        )
+        .unwrap();
+    let mut entry = LedgerEntry::registered(
+        key,
+        ProviderKind::Claude,
+        super::super::RelayOwnerKind::None,
+        None,
+        super::super::completion_admission::CompletionAdmissionPlan::Immediate,
+        None,
+    );
+    entry.completion_admission.native_input = Some(false);
+    entry.native_inputs.insert("partial".into(), prepared);
+    let mut events =
+        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+    fail_queue_saves(key.channel_id, 1);
+    super::native_policy::reconcile(&mut entry, &shared).await;
+    assert_eq!(queue_save_faults(key.channel_id, true), 0);
+    assert!(
+        shared
+            .mailbox(key.channel_id)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none()
+    );
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+    assert!(
+        !f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .cleanup_complete
+    );
+    assert!(events.try_recv().is_err());
+    super::native_policy::reconcile(&mut entry, &shared).await;
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .cleanup_complete
+    );
+    assert!(events.try_recv().unwrap().queue_is_eligible());
+    super::native_policy::reconcile(&mut entry, &shared).await;
+    assert!(events.try_recv().is_err());
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+    assert!(!actor.is_completion_cleanup());
 }

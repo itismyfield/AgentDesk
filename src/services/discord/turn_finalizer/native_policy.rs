@@ -170,10 +170,13 @@ impl NativePrepared {
                 shared, &ProviderKind::Claude, self.key.channel_id, serenity::model::id::MessageId::new(self.key.user_msg_id),
                 ticket.owning_episode.as_ref().map(|e| e.turn_nonce.clone()), self.started_before, Some(actor.clone())
             ).await;
-            if finish.removed_token.is_none() || finish.persistence_error.is_some() {
+            if finish.removed_token.is_none() {
                 return Ok(None);
             }
             super::super::super::saturating_decrement_global_active(shared);
+            if finish.persistence_error.is_some() {
+                return Ok(None);
+            }
         }
         let slot = shared.mailbox(self.key.channel_id).snapshot().await;
         let row = crate::services::discord::inflight::load_inflight_state_read_only_result(
