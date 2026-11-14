@@ -1,6 +1,7 @@
 """Kernel lease and bounded, non-ready instance supervisor effects."""
 
 import concurrent.futures
+import contextlib
 import errno
 import fcntl
 import hashlib
@@ -713,6 +714,85 @@ class ResourceAuthorityTests(ResourceFixture):
         with mock.patch.object(keeper, "launch", return_value=(process, parent)):
             with self.assertRaises(lifecycle.CleanupPending):
                 fixture.supervise(digest, resources=spec, wall_timeout=1, stop_grace=.1)
+
+
+class VerifiedSupervisorWiringTests(unittest.TestCase):
+    def run_verified_stop(self, refused):
+        from scripts.dev_instance import identity, keeper
+        manifest = {'root':'/synthetic/verified-instance', 'head':'a'*40}
+        nonce, digest, observed = str(uuid.uuid4()), 'b'*64, []
+        events = []
+        child = mock.Mock()
+        child.pid, child.returncode = 313131, None
+        child.poll.side_effect = lambda: child.returncode
+        def wait(**_kwargs):
+            events.append('gateway-wait')
+            if child.returncode is None: child.returncode = 0
+            return child.returncode
+        def terminate():
+            events.append('owned-force-stop')
+            child.returncode = -signal.SIGTERM
+        child.wait.side_effect, child.terminate.side_effect = wait, terminate
+        process, control, owner = mock.Mock(), mock.Mock(), mock.Mock()
+        process.wait.return_value = 0
+        owner.nonce, owner.fd = nonce, 31
+        spawn = mock.Mock(return_value=child)
+        def cooperative(*args):
+            events.append('cooperative-stop')
+            self.assertIs(args[2], child)
+            if refused: raise identity.ControlRefused('synthetic control refusal')
+            child.returncode = 0
+            return {'gateway_wait_ack':True, 'exit_code':0}
+        def acknowledge(*args):
+            events.append('keeper-exit-ack')
+            self.assertEqual(args[1]['exit'], child.returncode)
+        ready = {'state':'RUNNING', 'sockets':{}}
+        stop = {'action':'stop', 'nonce':nonce, 'deadline':time.monotonic()+.5}
+        closed = {'state':'STOPPED', 'known_resources_closed':True, 'live_ready':False}
+        with mock.patch('scripts.dev_instance.manifest.resource_spec',
+                        return_value={'startup_timeout':1, 'stop_grace':1}), \
+                mock.patch.object(keeper, 'launch', return_value=(process, control)), \
+                mock.patch.object(keeper, 'receive', side_effect=[ready, stop, closed]), \
+                mock.patch.object(keeper, 'send', side_effect=acknowledge) as send, \
+                mock.patch.object(identity, 'wait_health', return_value={'live_ready':False}) as health, \
+                mock.patch.object(identity, 'cooperative_stop', side_effect=cooperative) as cooperate, \
+                mock.patch.object(lifecycle, 'publish_runtime') as publication, \
+                mock.patch.object(lifecycle, '_verified_sigterm',
+                                  return_value=contextlib.nullcontext(threading.Event())), \
+                mock.patch.object(lifecycle.select, 'select', return_value=([control], [], [])):
+            result = lifecycle._supervise_resources(manifest, {}, Path('/synthetic/agentdesk'), {}, owner,
+                                                    time.monotonic()+10, 1, spawn, None,
+                                                    verification=(32, digest, observed))
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args.kwargs['pass_fds'], (31, 32))
+        health.assert_called_once()
+        publication.assert_called_once()
+        cooperate.assert_called_once_with(manifest, nonce, child, digest, observed, stop['deadline'])
+        send.assert_called_once()
+        self.assertLess(events.index('cooperative-stop'), events.index('gateway-wait'))
+        self.assertLess(events.index('gateway-wait'), events.index('keeper-exit-ack'))
+        self.assertTrue(process.wait.called)
+        control.close.assert_called_once()
+        self.assertTrue(result['verified'])
+        self.assertTrue(result['gateway_wait_ack'])
+        self.assertFalse(result['live_ready'])
+        return result, child
+
+    def test_refused_cooperative_stop_is_hold_after_owned_force_cleanup(self):
+        result, child = self.run_verified_stop(refused=True)
+        self.assertEqual(result['status'], 'HOLD')
+        self.assertTrue(result['forced_cleanup'])
+        self.assertFalse(result['cooperative_stop'])
+        child.terminate.assert_called_once()
+        child.kill.assert_not_called()
+
+    def test_acknowledged_cooperative_stop_is_stopped_without_force_cleanup(self):
+        result, child = self.run_verified_stop(refused=False)
+        self.assertEqual(result['status'], 'STOPPED')
+        self.assertTrue(result['cooperative_stop'])
+        self.assertFalse(result['forced_cleanup'])
+        child.terminate.assert_not_called()
+        child.kill.assert_not_called()
 
 
 if __name__ == "__main__":
