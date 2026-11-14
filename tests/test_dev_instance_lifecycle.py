@@ -754,9 +754,9 @@ class VerifiedSupervisorWiringTests(unittest.TestCase):
                 mock.patch.object(keeper, 'launch', return_value=(process, control)), \
                 mock.patch.object(keeper, 'receive', side_effect=[ready, stop, closed]), \
                 mock.patch.object(keeper, 'send', side_effect=acknowledge) as send, \
-                mock.patch.object(identity, 'wait_health', return_value={'live_ready':False}) as health, \
+                mock.patch.object(identity, 'wait_health', return_value={'live_ready':True}) as health, \
                 mock.patch.object(identity, 'cooperative_stop', side_effect=cooperative) as cooperate, \
-                mock.patch.object(lifecycle, 'publish_runtime') as publication, \
+                mock.patch.object(lifecycle, 'publish_runtime', return_value=(171, 181)) as publication, \
                 mock.patch.object(lifecycle, '_verified_sigterm',
                                   return_value=contextlib.nullcontext(threading.Event())), \
                 mock.patch.object(lifecycle.select, 'select', return_value=([control], [], [])):
@@ -766,7 +766,14 @@ class VerifiedSupervisorWiringTests(unittest.TestCase):
         spawn.assert_called_once()
         self.assertEqual(spawn.call_args.kwargs['pass_fds'], (31, 32))
         health.assert_called_once()
-        publication.assert_called_once()
+        self.assertEqual(publication.call_count, 2)
+        ready, ended = publication.call_args_list
+        self.assertEqual(ready.args[:2], (Path(manifest['root']), 'runtime/instance-run.json'))
+        self.assertEqual(ended.args[:2], ready.args[:2])
+        self.assertTrue(ready.args[2]['live_ready'])
+        self.assertFalse(ended.args[2]['live_ready'])
+        self.assertEqual(ended.args[2], {**ready.args[2], 'live_ready':False})
+        self.assertEqual(ended.kwargs['expected_identity'], (171, 181))
         cooperate.assert_called_once_with(manifest, nonce, child, digest, observed, stop['deadline'])
         send.assert_called_once()
         self.assertLess(events.index('cooperative-stop'), events.index('gateway-wait'))

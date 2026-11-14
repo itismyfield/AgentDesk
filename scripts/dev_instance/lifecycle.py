@@ -11,12 +11,13 @@ import re
 import select
 import signal
 import subprocess
+import sys
 import time
 
-from .files import InstanceError, safe_absolute, publish_runtime
+from .files import InstanceError, safe_absolute, publish_runtime, instance_root, read_regular_text
 from . import identity
-from .lease import LEASE_ENV, acquire
-from .manifest import child_environment, validate, worktree_identity
+from .lease import LEASE_ENV, LeaseBusy, acquire, open_candidate
+from .manifest import API_PORTS, PG_PORTS, check_port, child_environment, validate, worktree_identity
 
 MAX_WALL_SECONDS = 600
 MAX_STOP_GRACE_SECONDS = 30
@@ -75,6 +76,88 @@ def _stop_child(child, grace, deadline=None):
             raise CleanupPending(child) from None
 
 
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        raise CleanupPending(None) from None
+
+
+def _process_root(pid):
+    try:
+        if sys.platform.startswith('linux'):
+            return os.readlink(f'/proc/{pid}/cwd')
+        if sys.platform == 'darwin':
+            result = subprocess.run(['/usr/sbin/lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'],
+                                    capture_output=True, text=True, timeout=3)
+            paths = [line[1:] for line in result.stdout.splitlines() if line.startswith('n')]
+            if result.returncode == 0 and len(paths) == 1:
+                return paths[0]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    raise CleanupPending(None)
+
+
+def cleanup_orphan(manifest, record, grace):
+    """Only a recorded instance PID whose cwd is its private root can be signalled."""
+    if (type(record) is not dict or record.get('instance_id') != manifest['instance_id']
+            or any(type(record.get(field)) is not int or record[field] <= 1 for field in ('pid', 'supervisor_pid'))
+            or not isinstance(record.get('nonce'), str) or not record['nonce']
+            or type(grace) not in (int, float) or not math.isfinite(grace) or not 0 < grace <= MAX_STOP_GRACE_SECONDS):
+        raise InstanceError('recorded orphan identity is invalid')
+    if _pid_alive(record['supervisor_pid']):
+        raise InstanceError('a live supervisor cannot be treated as an orphan')
+    pid = record['pid']
+    if not _pid_alive(pid):
+        return
+    if _process_root(pid) != manifest['root']:
+        raise InstanceError('recorded PID belongs to a different instance')
+    for requested in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(pid, requested)
+        except ProcessLookupError:
+            return
+        except OSError:
+            raise CleanupPending(None) from None
+        end = time.monotonic() + grace
+        while _pid_alive(pid):
+            if time.monotonic() >= end:
+                break
+            time.sleep(min(.02, max(0, end-time.monotonic())))
+        else:
+            return
+    raise CleanupPending(None)
+
+
+def _acquire_instance(manifest, grace):
+    root = Path(manifest['root'])
+    try:
+        return acquire(root, manifest['instance_id'])
+    except LeaseBusy as busy:
+        try:
+            candidate = open_candidate(root, manifest['instance_id'])
+            try:
+                previous = json.loads(os.pread(candidate.fd, 4097, 0))
+            finally:
+                candidate.close()
+            old_root = instance_root(root.parent, previous['instance_id'])
+            old_manifest = json.loads(read_regular_text(old_root/'manifest.json'))
+            record = json.loads(read_regular_text(old_root/'runtime/instance-run.json'))
+            if (previous['root'] != str(old_root) or old_manifest['root'] != str(old_root)
+                    or old_manifest['instance_id'] != previous['instance_id']
+                    or old_manifest['worktree'] != manifest['worktree'] or record['nonce'] != previous['nonce']):
+                raise busy
+            cleanup_orphan(old_manifest, record, grace)
+        except CleanupPending:
+            raise
+        except (InstanceError, KeyError, TypeError, ValueError, OSError):
+            raise busy from None
+        return acquire(root, manifest['instance_id'])
+
+
 class _PrefixedControl:
     def __init__(self, prefix, stream):
         self.prefix, self.stream = prefix, stream
@@ -122,7 +205,7 @@ def supervise(base, instance_id, ambient, *, binary_sha256, head, wall_timeout,
     admission, control_stream = initial_frame(control_stream)
     if admission is not None and resources is None:
         raise InstanceError('verified admission requires owned runtime resources')
-    manifest = validate(base, instance_id, ambient)
+    manifest = validate(base, instance_id, ambient, check_ports=False)
     if (not isinstance(head, str) or manifest["head"] != head
             or not isinstance(binary_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", binary_sha256)):
         raise InstanceError("explicit lifecycle source identity mismatch")
@@ -137,7 +220,9 @@ def supervise(base, instance_id, ambient, *, binary_sha256, head, wall_timeout,
         root = Path(manifest["root"])
         observed = identity.probe(root, admission, started+wall_timeout,
                                   declared_roles=manifest["profile"]["bots"]) if admission is not None else None
-        with acquire(root, instance_id) as owner:
+        with _acquire_instance(manifest, stop_grace) as owner:
+            check_port(manifest["api"]["port"], API_PORTS)
+            check_port(manifest["postgres"]["port"], PG_PORTS)
             owner.verify()
             if worktree_identity(manifest["worktree"]) != head:
                 raise InstanceError("lifecycle source HEAD changed")
@@ -192,15 +277,14 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
     signal_scope, stop_requested = ExitStack(), None
     forward_failed = threading.Event()
     signal_deadline = None
+    publication, run_record, runtime_sockets = None, None, None
 
     def stop_gateway(end):
         nonlocal cooperative, forced
         if verification is not None:
             try:
-                ack = identity.cooperative_stop(manifest, lease.nonce, child,
+                identity.cooperative_stop(manifest, lease.nonce, child,
                                                 verification[1], verification[2], end)
-                if not ack.get('gateway_wait_ack') or ack.get('exit_code') != child.returncode:
-                    raise identity.ControlRefused('original Gateway wait was not acknowledged')
                 cooperative = True
                 return
             except identity.ControlRefused:
@@ -232,9 +316,10 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
                     raise InstanceError('verification exhausted startup budget')
                 # Startup keeps its default signal behavior; intercept only after verification.
                 stop_requested = signal_scope.enter_context(_verified_sigterm(True))
-                publish_runtime(Path(manifest['root']), 'runtime/instance-run.json',
-                                {**witness, 'verified': True},
-                                live_sockets={path: tuple(value) for path, value in ready['sockets'].items()})
+                run_record = {**witness, 'verified': True, 'supervisor_pid': os.getpid()}
+                runtime_sockets = {path: tuple(value) for path, value in ready['sockets'].items()}
+                publication = publish_runtime(Path(manifest['root']), 'runtime/instance-run.json',
+                                              run_record, live_sockets=runtime_sockets)
             except (InstanceError, OSError):
                 # Keep a witness refusal separate from legacy control-channel uncertainty.
                 raise _VerificationRefused from None
@@ -313,3 +398,11 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
         except subprocess.TimeoutExpired:
             # The keeper retains pending original handles; killing it would orphan them.
             raise CleanupPending(process) from None
+        finally:
+            if publication is not None:
+                try:
+                    publish_runtime(Path(manifest['root']), 'runtime/instance-run.json',
+                                    {**run_record, 'live_ready':False}, expected_identity=publication,
+                                    live_sockets=runtime_sockets)
+                except (InstanceError, OSError):
+                    raise CleanupPending(process) from None

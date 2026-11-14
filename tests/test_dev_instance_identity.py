@@ -140,7 +140,7 @@ class IdentityAdmissionTests(unittest.TestCase):
         self.assertIsNone(lifecycle.initial_frame(stream)[0])
         self.assertLess(time.monotonic()-before, .1)
 
-    def test_same_run_health_rejects_each_stale_or_missing_witness(self):
+    def test_raw_control_health_rejects_each_stale_or_missing_witness(self):
         identity = self.identity(); observed = self.probe()
         expected = {'schema': 1, 'instance_id': self.manifest['instance_id'], 'head': self.manifest['head'],
                     'pid': 123456, 'binary_sha256': 'a'*64, 'nonce': 'current-nonce',
@@ -156,6 +156,29 @@ class IdentityAdmissionTests(unittest.TestCase):
                                        123456, 'a'*64, observed)
         with self.assertRaises(files.InstanceError):
             identity.verify_health({}, self.manifest, 'current-nonce', 123456, 'a'*64, observed)
+
+    def test_ready_uses_only_current_scope_id_nonce_and_pid(self):
+        identity = self.identity(); observed = self.probe()
+        expected = {'schema':1, 'instance_id':self.manifest['instance_id'], 'head':self.manifest['head'],
+                    'pid':123456, 'binary_sha256':'a'*64, 'nonce':'current-nonce',
+                    'port':self.manifest['api']['port'], 'identities':observed, 'live_ready':True}
+        body = {'test_instance':{'instance_id':self.manifest['instance_id'], 'nonce':'current-nonce',
+                                 'pid':123456, 'head':'ignored-health-head', 'binary_sha256':'0'*64,
+                                 'identities':[]}}
+        with mock.patch.object(identity, 'request_json', return_value=body):
+            result = identity.wait_health(self.manifest, 'current-nonce', 123456, 'a'*64,
+                                          observed, time.monotonic()+2)
+        self.assertEqual(result, expected)
+
+    def test_ready_refuses_foreign_scope_id_nonce_or_pid(self):
+        identity = self.identity(); observed = self.probe()
+        current = {'instance_id':self.manifest['instance_id'], 'nonce':'current-nonce', 'pid':123456}
+        for field, value in [('instance_id','foreign-instance'), ('nonce','foreign-run'), ('pid',654321)]:
+            body = {'test_instance':{**current, field:value}}
+            with self.subTest(field=field), mock.patch.object(identity, 'request_json', return_value=body):
+                with self.assertRaises(files.InstanceError):
+                    identity.wait_health(self.manifest, 'current-nonce', 123456, 'a'*64,
+                                         observed, time.monotonic()+2)
 
     def test_health_observed_credential_replacement_is_not_accepted(self):
         identity = self.identity(); observed = self.probe()
@@ -178,8 +201,8 @@ class IdentityAdmissionTests(unittest.TestCase):
         with self.assertRaises(files.InstanceError): self.probe(request=request)
         request.assert_not_called()
 
-    def test_b2_runtime_receipt_is_private_bounded_nonsecret_and_never_ready(self):
-        payload = {'schema':1,'verified':True,'live_ready':False,'identities':self.probe()}
+    def test_runtime_ready_receipt_is_private_bounded_and_nonsecret(self):
+        payload = {'schema':1,'verified':True,'live_ready':True,'identities':self.probe()}
         identity = files.publish_runtime(self.root,'runtime/instance-run.json',payload)
         self.assertEqual((self.root/'runtime/instance-run.json').stat().st_mode & 0o777,0o600)
         self.assertNotIn('SYNTHETIC_PRIVATE_IDENTITY_', (self.root/'runtime/instance-run.json').read_text())
@@ -314,7 +337,8 @@ class ControlProtocolTests(unittest.TestCase):
                 request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 owner.requests.append(request)
                 unsigned = {key: value for key, value in request.items() if key != 'proof'}
-                if self.path != '/_agentdesk/test-control' or request['proof'] != owner.sign(unsigned, b'request'):
+                if (self.path != '/_agentdesk/test-control' or request['action'] != 'stop'
+                        or request['proof'] != owner.sign(unsigned, b'request')):
                     self.send_response(403); self.end_headers(); return
                 if owner.mode == 'redirect':
                     self.send_response(302); self.send_header('Location', '/control-forbidden'); self.end_headers(); return
@@ -322,9 +346,8 @@ class ControlProtocolTests(unittest.TestCase):
                            'pid':owner.child.pid, 'binary_sha256':owner.digest, 'nonce':owner.nonce,
                            'port':owner.manifest['api']['port'], 'identities':owner.observed, 'live_ready':False}
                 reply = {'schema':1, 'action':request['action'], 'challenge':request['challenge'],
-                         'witness':witness, 'control_ready':True, 'epoch':7, 'accepted':request['action']=='stop'}
+                         'witness':witness, 'accepted':True}
                 owner.mutate(reply)
-                if owner.mode == 'epoch-change' and request['action'] == 'stop': reply['epoch'] = 8
                 reply['proof'] = owner.sign(reply, b'response')
                 if owner.mode == 'forged': reply['proof'] = '0'*64
                 if request['action'] == 'stop':
@@ -347,36 +370,34 @@ class ControlProtocolTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
 
-    def test_control_probe_and_stop_wait_for_the_original_child(self):
-        probe, stop = self.api('control_probe'), self.api('cooperative_stop')
+    def test_single_stop_waits_for_the_original_child(self):
+        stop = self.api('cooperative_stop')
         self.start()
-        snapshot = probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+3)
-        self.assertEqual(snapshot['epoch'], 7)
         with mock.patch.object(self.child, 'wait', wraps=self.child.wait) as wait:
             result = stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+3)
             wait.assert_called_once()
-        self.assertTrue(result['control_ack']); self.assertTrue(result['gateway_wait_ack'])
-        self.assertEqual(result['exit_code'], 0)
-        self.assertEqual([item['action'] for item in self.requests], ['probe', 'probe', 'stop'])
-        self.assertEqual(len({item['challenge'] for item in self.requests}), 3)
+        self.assertIsNone(result)
+        self.assertEqual(self.child.returncode, 0)
+        self.assertEqual([item['action'] for item in self.requests], ['stop'])
+        self.assertEqual(str(uuid.UUID(self.requests[0]['challenge'])), self.requests[0]['challenge'])
 
     def test_public_nonce_does_not_authenticate_a_forged_control_reply(self):
-        probe = self.api('control_probe'); self.start(); self.mode = 'forged'
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'forged'
         with self.assertRaises(self.identity.ControlRefused):
-            probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
 
-    def test_signed_reply_still_requires_exact_schema_challenge_epoch_and_witness(self):
-        probe = self.api('control_probe'); self.start()
-        variants = [('schema', True), ('action', 'stop'), ('challenge', str(uuid.uuid4())),
-                    ('epoch', 0), ('epoch', True), ('epoch', 2**32), ('control_ready', 1),
-                    ('accepted', True), ('extra', True)]
+    def test_signed_reply_still_requires_exact_schema_challenge_and_witness(self):
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'no-exit'
+        variants = [('schema', True), ('action', 'probe'), ('challenge', str(uuid.uuid4())),
+                    ('accepted', False), ('extra', True)]
         for field, value in variants:
             self.mutate = lambda reply, field=field, value=value: reply.__setitem__(field, value)
             with self.subTest(field=field, value=value), self.assertRaises(self.identity.ControlRefused):
-                probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
+                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
         self.mutate = lambda reply: reply['witness'].__setitem__('nonce', 'old-run')
         with self.assertRaises(self.identity.ControlRefused):
-            probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+        self.assertEqual(len(self.requests), len(variants)+1)
 
     def test_valid_http_reply_without_durable_ack_is_refused_before_wait(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'missing'
@@ -388,7 +409,7 @@ class ControlProtocolTests(unittest.TestCase):
     def test_eof_is_accepted_only_with_the_signed_fresh_ack(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'eof'
         result = stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
-        self.assertTrue(result['gateway_wait_ack']); self.assertEqual(result['exit_code'], 0)
+        self.assertIsNone(result); self.assertEqual(self.child.returncode, 0)
 
     def test_eof_without_ack_cannot_claim_gateway_exit(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'eof-missing'
@@ -417,15 +438,18 @@ class ControlProtocolTests(unittest.TestCase):
         with self.assertRaises(self.identity.ControlRefused):
             stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
 
-    def test_epoch_change_between_fresh_probe_and_stop_is_refused(self):
-        stop = self.api('cooperative_stop'); self.start(); self.mode = 'epoch-change'
-        with self.assertRaises(self.identity.ControlRefused):
-            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+    def test_removed_epoch_and_control_ready_fields_are_rejected(self):
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'no-exit'
+        for field in ('epoch', 'control_ready'):
+            self.mutate = lambda reply, field=field: reply.__setitem__(field, 7)
+            with self.subTest(field=field), self.assertRaises(self.identity.ControlRefused):
+                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+        self.assertEqual(len(self.requests), 2)
 
     def test_post_control_ignores_proxy_and_does_not_follow_redirects(self):
         import threading
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-        probe = self.api('control_probe'); self.start(); received = []
+        stop = self.api('cooperative_stop'); self.start(); self.mode = 'redirect'; received = []
         class Proxy(BaseHTTPRequestHandler):
             def log_message(self, *args): pass
             def do_POST(self):
@@ -436,26 +460,24 @@ class ControlProtocolTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'HTTP_PROXY':f'http://127.0.0.1:{server.server_port}',
                                          'http_proxy':f'http://127.0.0.1:{server.server_port}',
                                          'NO_PROXY':'', 'no_proxy':''}):
-            probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
-            self.mode = 'redirect'
             with self.assertRaises(self.identity.ControlRefused):
-                probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
+                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
         self.assertEqual(received, [])
-        self.assertEqual(self.paths, ['/_agentdesk/test-control']*2)
+        self.assertEqual(self.paths, ['/_agentdesk/test-control'])
 
     def test_changed_credential_metadata_refuses_before_any_control_request(self):
-        probe = self.api('control_probe'); self.start()
+        stop = self.api('cooperative_stop'); self.start()
         (self.root/'credential'/NAMES[0]).write_bytes(b'SYNTHETIC_REPLACED')
         with self.assertRaises(self.identity.ControlRefused):
-            probe(self.manifest, self.nonce, self.child.pid, self.digest, self.observed, time.monotonic()+2)
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
         self.assertEqual(self.requests, [])
 
     def test_observed_inventory_cannot_carry_extra_private_fields(self):
-        probe = self.api('control_probe')
+        stop = self.api('cooperative_stop'); self.start()
         observed = copy.deepcopy(self.observed); observed[0]['private'] = 'SYNTHETIC_UNEXPECTED'
         with mock.patch.object(self.identity, '_post_control') as request:
             with self.assertRaises(self.identity.ControlRefused):
-                probe(self.manifest, self.nonce, 123456, self.digest, observed, time.monotonic()+2)
+                stop(self.manifest, self.nonce, self.child, self.digest, observed, time.monotonic()+2)
             request.assert_not_called()
 
     def test_cross_rust_public_synthetic_key_and_request_vector(self):
@@ -465,12 +487,12 @@ class ControlProtocolTests(unittest.TestCase):
         observed = [{**item, **self.identity._credential(self.root, item['name'])[0]} for item in self.observed]
         key = derive(self.root, observed)
         self.assertEqual(key.hex(), 'b5608c372adc5486f387dfa64c820fb55585348284b575a6d206e6de12293d8a')
-        request = {'schema':1, 'action':'probe', 'root':'/tmp/adk-control-vector',
+        request = {'schema':1, 'action':'stop', 'root':'/tmp/adk-control-vector',
                    'instance_id':'12345678-1234-4234-8234-123456789abc',
                    'nonce':'22345678-1234-4234-8234-123456789abc',
                    'challenge':'32345678-1234-4234-8234-123456789abc'}
         self.assertEqual(mac(key, b'request', request),
-                         '9ff4fbb7ca425f5fa9874a29219b0555b0649c5fa03ba7b00ca33ed0bf9bc419')
+                         'ab2729a91124a68241bd4ddd2ee230cc3c6291238b957c382512951fba238249')
 
     def test_key_derivation_uses_exact_raw_file_bytes_including_final_newline(self):
         derive = self.api('_control_key')

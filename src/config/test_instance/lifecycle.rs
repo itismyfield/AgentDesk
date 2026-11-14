@@ -405,8 +405,6 @@ pub(crate) fn with_control_routes(app: axum::Router) -> Result<axum::Router, Str
     if !has_admitted_run() {
         return Ok(app);
     }
-    #[cfg(unix)]
-    control_epoch()?;
     Ok(app.merge(
         axum::Router::new()
             .route(
@@ -443,6 +441,24 @@ struct ControlRequest {
 
 #[cfg(unix)]
 fn dispatch_control(peer: std::net::SocketAddr, body: &[u8]) -> Result<serde_json::Value, String> {
+    let response = prepare_control(peer, body)?;
+    let instance = super::current()?.ok_or_else(rejected)?;
+    let run = RUN.lock().map_err(|_| rejected())?;
+    let snapshot = run.as_ref().ok_or_else(rejected)?;
+    if response["witness"]["nonce"].as_str() != Some(snapshot.nonce.as_str()) {
+        return Err(rejected());
+    }
+    write_control_ack(instance, &response)?;
+    // The acknowledgement precedes the signal; only the original owner can prove exit.
+    snapshot.verify(instance)?;
+    if unsafe { libc::raise(libc::SIGTERM) } != 0 {
+        return Err(rejected());
+    }
+    Ok(response)
+}
+
+#[cfg(unix)]
+fn prepare_control(peer: std::net::SocketAddr, body: &[u8]) -> Result<serde_json::Value, String> {
     let request: ControlRequest = serde_json::from_slice(body).map_err(|_| rejected())?;
     let instance = super::current()?.ok_or_else(rejected)?;
     let run = RUN.lock().map_err(|_| rejected())?;
@@ -450,7 +466,7 @@ fn dispatch_control(peer: std::net::SocketAddr, body: &[u8]) -> Result<serde_jso
     if !peer.ip().is_loopback()
         || body.len() > 8192
         || request.schema != 1
-        || !matches!(request.action.as_str(), "probe" | "stop")
+        || request.action != "stop"
         || request.root != instance.root.to_string_lossy()
         || request.instance_id != instance.instance_id
         || request.nonce != snapshot.nonce
@@ -481,17 +497,9 @@ fn dispatch_control(peer: std::net::SocketAddr, body: &[u8]) -> Result<serde_jso
         "pid":std::process::id(),"binary_sha256":snapshot.input.binary.sha256,"nonce":snapshot.nonce,
         "port":bound.port(),"identities":snapshot.input.identities,"live_ready":false});
     let mut response = serde_json::json!({"schema":1,"action":request.action,"challenge":request.challenge,
-        "witness":witness,"control_ready":true,"epoch":control_epoch()?,"accepted":request.action=="stop"});
+        "witness":witness,"accepted":true});
     response["proof"] =
         signed_control(&key, b"agentdesk-test-control-v1/response\0", &response)?.into();
-    if request.action == "stop" {
-        write_control_ack(instance, &response)?;
-        // The signed receipt precedes the signal; only the external owner can prove exit.
-        snapshot.verify(instance)?;
-        if unsafe { libc::raise(libc::SIGTERM) } != 0 {
-            return Err(rejected());
-        }
-    }
     Ok(response)
 }
 
@@ -613,36 +621,6 @@ fn signed_control(
     Ok(hex_digest(control_hmac(key, &bytes)))
 }
 
-#[cfg(target_os = "macos")]
-fn control_epoch() -> Result<u32, String> {
-    let (peer, _other) = std::os::unix::net::UnixStream::pair().map_err(|_| rejected())?;
-    let mut raw = [0u32; 8];
-    let mut length = std::mem::size_of_val(&raw) as libc::socklen_t;
-    // The audit token identifies this exec generation, rather than a reusable PID alone.
-    let result = unsafe {
-        libc::getsockopt(
-            peer.as_raw_fd(),
-            libc::SOL_LOCAL,
-            libc::LOCAL_PEERTOKEN,
-            raw.as_mut_ptr().cast(),
-            &mut length,
-        )
-    };
-    if result != 0
-        || length as usize != std::mem::size_of_val(&raw)
-        || raw[5] != std::process::id()
-        || raw[7] == 0
-    {
-        return Err(rejected());
-    }
-    Ok(raw[7])
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn control_epoch() -> Result<u32, String> {
-    Err(rejected())
-}
-
 #[cfg(unix)]
 fn write_control_ack(
     instance: &super::TestInstance,
@@ -681,13 +659,6 @@ fn write_control_ack(
     }
     file.write_all(&serde_json::to_vec(response).map_err(|_| rejected())?)
         .map_err(|_| rejected())?;
-    file.sync_all().map_err(|_| rejected())?;
-    // The FD alias keeps the shared directory-sync helper bound to this retained inode.
-    let pinned = std::path::PathBuf::from(format!(
-        "/dev/fd/{}/instance-control-ack.json",
-        directory.as_raw_fd()
-    ));
-    crate::domain::file_sync::fsync_parent_dir(&pinned).map_err(|_| rejected())?;
     let current =
         std::fs::symlink_metadata(instance.root.join("runtime/instance-control-ack.json"))
             .map_err(|_| rejected())?;

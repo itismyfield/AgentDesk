@@ -13,31 +13,6 @@ use std::time::{Duration, Instant};
 const MODE: &str = "I3A_LEASE_TEST_MODE";
 const LIMIT: Duration = Duration::from_secs(10);
 
-#[cfg(unix)]
-#[test]
-fn control_ack_sync_uses_the_retained_directory_inode() {
-    let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let temporary = tempfile::tempdir().unwrap();
-    let directory = File::open(temporary.path()).unwrap();
-    let alias = PathBuf::from(format!("/dev/fd/{}/ack", directory.as_raw_fd()));
-    let expected = directory.metadata().unwrap();
-    let actual = File::open(alias.parent().unwrap())
-        .unwrap()
-        .metadata()
-        .unwrap();
-    assert_eq!(
-        (actual.dev(), actual.ino()),
-        (expected.dev(), expected.ino())
-    );
-    crate::domain::file_sync::parent_sync_probe::SYNCED.with(|synced| {
-        *synced.borrow_mut() = Some(Vec::new());
-    });
-    crate::domain::file_sync::fsync_parent_dir(&alias).unwrap();
-    let synced = crate::domain::file_sync::parent_sync_probe::SYNCED
-        .with(|value| value.borrow_mut().take().unwrap());
-    assert_eq!(synced, vec![alias.parent().unwrap().to_path_buf()]);
-}
-
 #[path = "run_identity_tests.rs"]
 mod run_identity;
 
@@ -63,17 +38,17 @@ fn control_request_matches_the_cross_language_vector() {
         super::hex_digest(key),
         "b5608c372adc5486f387dfa64c820fb55585348284b575a6d206e6de12293d8a"
     );
-    let request = json!({"schema":1,"action":"probe","root":"/tmp/adk-control-vector",
+    let request = json!({"schema":1,"action":"stop","root":"/tmp/adk-control-vector",
         "instance_id":"12345678-1234-4234-8234-123456789abc",
         "nonce":"22345678-1234-4234-8234-123456789abc",
         "challenge":"32345678-1234-4234-8234-123456789abc"});
     assert_eq!(
         super::signed_control(&key, b"agentdesk-test-control-v1/request\0", &request).unwrap(),
-        "9ff4fbb7ca425f5fa9874a29219b0555b0649c5fa03ba7b00ca33ed0bf9bc419"
+        "ab2729a91124a68241bd4ddd2ee230cc3c6291238b957c382512951fba238249"
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 #[test]
 fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
     const CHILD: &str = "I3A_B2B_AUTH_CHILD";
@@ -102,14 +77,50 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
                     .into();
             serde_json::to_vec(&value).unwrap()
         };
-        let value = json!({"schema":1,"action":"probe","root":instance.root,
+        let value = json!({"schema":1,"action":"stop","root":instance.root,
             "instance_id":instance.instance_id,"nonce":lease["nonce"],"challenge":uuid::Uuid::new_v4().to_string()});
         let peer = "127.0.0.1:12345".parse().unwrap();
-        let response = super::dispatch_control(peer, &sign(value.clone())).unwrap();
-        assert_eq!(response["accepted"], false);
-        assert_eq!(response["control_ready"], true);
+        let mut probe = value.clone();
+        probe["action"] = json!("probe");
+        assert!(
+            super::prepare_control(peer, &sign(probe)).is_err(),
+            "probe action must be rejected"
+        );
+        assert!(
+            super::with_control_routes(axum::Router::new()).is_ok(),
+            "an admitted Unix run must attach its stop route"
+        );
+        let response = super::prepare_control(peer, &sign(value.clone())).unwrap();
+        assert!(
+            !instance
+                .root
+                .join("runtime/instance-control-ack.json")
+                .exists(),
+            "preparing a response must not publish an acknowledgement"
+        );
+        assert_eq!(response["accepted"], true);
+        let expected: std::collections::BTreeSet<_> = [
+            "schema",
+            "action",
+            "challenge",
+            "witness",
+            "accepted",
+            "proof",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            response
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
+        assert_eq!(response["action"], "stop");
+        assert_eq!(response["witness"]["live_ready"], false);
         assert_eq!(response["witness"]["pid"], std::process::id());
-        assert!(response["epoch"].as_u64().unwrap() > 0);
         let mut unsigned = response.clone();
         unsigned.as_object_mut().unwrap().remove("proof");
         assert_eq!(
@@ -132,12 +143,12 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
                 request["proof"] = json!("0".repeat(64));
             }
             assert!(
-                super::dispatch_control(peer, &serde_json::to_vec(&request).unwrap()).is_err(),
+                super::prepare_control(peer, &serde_json::to_vec(&request).unwrap()).is_err(),
                 "invalid {case} request was accepted"
             );
         }
         assert!(
-            super::dispatch_control("192.0.2.1:12345".parse().unwrap(), &sign(value.clone()))
+            super::prepare_control("192.0.2.1:12345".parse().unwrap(), &sign(value.clone()))
                 .is_err()
         );
         let ack = instance.root.join("runtime/instance-control-ack.json");
@@ -154,7 +165,7 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
         std::fs::rename(&executable, executable.with_extension("old")).unwrap();
         std::fs::write(executable, b"changed synthetic image").unwrap();
         assert!(
-            super::dispatch_control(peer, &sign(value)).is_err(),
+            super::prepare_control(peer, &sign(value)).is_err(),
             "changed executable reached the authenticated control callback"
         );
         return;

@@ -228,17 +228,20 @@ def verify_health(body, manifest, nonce, pid, digest, observed):
 def wait_health(manifest, nonce, pid, digest, observed, deadline, alive=lambda: True):
     while time.monotonic() < deadline:
         if not alive():
-            raise InstanceError('runtime exited before bound health verification')
-        recheck_credentials(Path(manifest['root']), observed)
+            raise InstanceError('runtime exited before health verification')
         try:
             body = request_json(f"http://127.0.0.1:{manifest['api']['port']}/api/health", deadline)
         except ConnectionError:
             time.sleep(min(.02, max(0, deadline-time.monotonic())))
             continue
-        result = verify_health(body, manifest, nonce, pid, digest, observed)
-        recheck_credentials(Path(manifest['root']), observed)
-        return result
-    raise InstanceError('bound health did not become verifiable before deadline')
+        current = body.get('test_instance')
+        if (type(current) is not dict or current.get('instance_id') != manifest['instance_id']
+                or current.get('nonce') != nonce or type(current.get('pid')) is not int or current['pid'] != pid):
+            raise InstanceError('current instance health identity mismatch')
+        return {'schema':1, 'instance_id':manifest['instance_id'], 'nonce':nonce, 'pid':pid,
+                'head':manifest['head'], 'binary_sha256':digest, 'port':manifest['api']['port'],
+                'identities':observed, 'live_ready':True}
+    raise InstanceError('health did not become available before deadline')
 
 
 class ControlRefused(Exception):
@@ -330,12 +333,10 @@ def _post_control(manifest, request, deadline):
         raise ControlRefused('control response is unverified') from None
 
 
-def _verify_control(reply, key, action, challenge, manifest, nonce, pid, digest, observed, epoch=None):
-    if (type(reply) is not dict or set(reply) != {'schema','action','challenge','witness','control_ready','epoch','accepted','proof'}
+def _verify_control(reply, key, action, challenge, manifest, nonce, pid, digest, observed):
+    if (type(reply) is not dict or set(reply) != {'schema','action','challenge','witness','accepted','proof'}
             or type(reply['schema']) is not int or reply['schema'] != 1 or reply['action'] != action
-            or reply['challenge'] != challenge or reply['control_ready'] is not True
-            or reply['accepted'] is not (action == 'stop') or type(reply['epoch']) is not int
-            or not 1 <= reply['epoch'] <= 2**32-1 or (epoch is not None and reply['epoch'] != epoch)
+            or reply['challenge'] != challenge or action != 'stop' or reply['accepted'] is not True
             or type(reply['proof']) is not str or not re.fullmatch(r'[0-9a-f]{64}', reply['proof'])):
         raise ControlRefused('control reply fields are unverified')
     unsigned = {field:value for field,value in reply.items() if field != 'proof'}
@@ -356,16 +357,6 @@ def _control_request(manifest, nonce, action, key):
     return request
 
 
-def control_probe(manifest, nonce, pid, digest, observed, deadline):
-    try:
-        key = _control_key(Path(manifest['root']), observed)
-        request = _control_request(manifest, nonce, 'probe', key)
-        reply = _post_control(manifest, request, deadline)
-        return _verify_control(reply, key, 'probe', request['challenge'], manifest, nonce, pid, digest, observed)
-    except (InstanceError, OSError, ValueError, TypeError, KeyError):
-        raise ControlRefused('control probe is unverified') from None
-
-
 def _control_ack(root):
     parent, name = _open_parent(root, 'runtime/instance-control-ack.json', private=True)
     try:
@@ -383,8 +374,7 @@ def _control_ack(root):
                     or fingerprint(leaf) != fingerprint(metadata) or not stat.S_ISREG(leaf.st_mode)
                     or leaf.st_uid != os.geteuid() or stat.S_IMODE(leaf.st_mode) != 0o600 or leaf.st_nlink != 1):
                 raise ControlRefused('control acknowledgement changed')
-            return json.loads(data, object_pairs_hook=_control_object), {
-                'device':metadata.st_dev, 'inode':metadata.st_ino, 'sha256':hashlib.sha256(data).hexdigest()}
+            return json.loads(data, object_pairs_hook=_control_object)
     finally:
         os.close(parent)
 
@@ -393,7 +383,6 @@ def cooperative_stop(manifest, nonce, child, digest, observed, deadline):
     try:
         if child.poll() is not None:
             raise ControlRefused('control target exited before authentication')
-        snapshot = control_probe(manifest, nonce, child.pid, digest, observed, deadline)
         key = _control_key(Path(manifest['root']), observed)
         request = _control_request(manifest, nonce, 'stop', key)
         try:
@@ -402,14 +391,13 @@ def cooperative_stop(manifest, nonce, child, digest, observed, deadline):
             pass
         else:
             _verify_control(reply, key, 'stop', request['challenge'], manifest, nonce, child.pid,
-                            digest, observed, epoch=snapshot['epoch'])
-        acknowledgement, receipt = _control_ack(Path(manifest['root']))
+                            digest, observed)
+        acknowledgement = _control_ack(Path(manifest['root']))
         _verify_control(acknowledgement, key, 'stop', request['challenge'], manifest, nonce, child.pid,
-                        digest, observed, epoch=snapshot['epoch'])
+                        digest, observed)
         exit_code = child.wait(timeout=_control_remaining(deadline))
         if type(exit_code) is not int:
             raise ControlRefused('original child exit is unverified')
-        return {'control_ack':True, 'gateway_wait_ack':True, 'exit_code':exit_code, 'pid':child.pid,
-                'epoch':snapshot['epoch'], 'nonce':nonce, 'challenge':request['challenge'], 'ack':receipt}
+        return None
     except (InstanceError, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
         raise ControlRefused('cooperative stop is unverified') from None
