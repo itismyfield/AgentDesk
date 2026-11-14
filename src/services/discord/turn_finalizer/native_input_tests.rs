@@ -2390,6 +2390,10 @@ async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
         let channel = ChannelId::new(81489850 + u64::from(capture_only));
         let shared = b2b_shared(None);
         let provider = ProviderKind::Gemini;
+        let finish_context = super::super::FinalizeContext {
+            clear_inflight: true,
+            ..super::super::FinalizeContext::bridge()
+        };
         let actor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
             "v1-exact".into(),
         )));
@@ -2459,7 +2463,7 @@ async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
                 key,
                 provider,
                 &super::super::TerminalEvent::Complete,
-                super::super::FinalizeContext::bridge(),
+                finish_context,
                 snapshot.as_ref(),
                 &shared,
                 Some(finish),
@@ -2499,7 +2503,7 @@ async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
                     key,
                     provider.clone(),
                     super::super::TerminalEvent::Complete,
-                    super::super::FinalizeContext::bridge(),
+                    finish_context,
                     evidence(),
                     &shared,
                 ),
@@ -2529,7 +2533,7 @@ async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
                 key,
                 provider,
                 super::super::TerminalEvent::Complete,
-                super::super::FinalizeContext::bridge(),
+                finish_context,
                 evidence(),
                 &shared,
             )
