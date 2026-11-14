@@ -311,6 +311,10 @@ input-single-path/InputPathReadyResumeRestartAnyTimeout.cfg	InputPath	ReadyExpir
 input-single-path/InputPathReadyResumeRestartBefore.cfg	InputPath	-	ReadyPendingEventuallySettles
 input-single-path/InputPathReadyResumeRestartCut.cfg	InputPath	-	ReadyPendingEventuallySettles
 input-single-path/InputPathReadyResumeRestartDurable.cfg	InputPath	-	-
+input-single-path/InputPathReadyResumeRestartDurableCut.cfg	InputPath	-	-
+input-single-path/InputPathReadyResumeRestartDurableLate.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyPendingEventuallySettles,ReadyRestartedIdleEventuallyReceives,ReadyResumedIdleEventuallyReceives
+input-single-path/InputPathReadyResumeRestartDurableNoQuiet.cfg	InputPath	ReadyNoIdleRunningInjection	-
+input-single-path/InputPathReadyResumeRestartDurablePerson.cfg	InputPath	-	-
 input-single-path/InputPathReadyResumeRestartGap.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyResumedIdleEventuallyReceives
 input-single-path/InputPathReadyResumeRestartPerson.cfg	InputPath	-	-
 input-single-path/InputPathReadySuppressedCompact.cfg	InputPath	-	-

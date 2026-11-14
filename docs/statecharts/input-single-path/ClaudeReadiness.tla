@@ -15,11 +15,16 @@ ClearPreSource == ClearHeld \/ Mode \in {"ready-clear-pending-before", "ready-cl
 \* The restored modes rebuild readiness from what the earlier incarnation recorded durably: a
 \* closed, non-continuing turn of this execution, or this execution's resume start with no turn yet.
 \* The terminal-only mutant trusts the transcript's last terminal alone.
+\* A resume start is restored at observation. The late placement restores it only past the shared
+\* observer's early return, which an old cut or permission-marked history never passes.
 IdleRestartFloor == Mode = "ready-idle-restart-before"
 IdleRestartRestored == Mode \in {"ready-idle-restart-after", "ready-idle-restart-continuing",
                                  "ready-idle-restart-terminal-only"}
 IdleRestart == IdleRestartFloor \/ IdleRestartRestored
-ResumeRestartRestored == Mode = "ready-resume-restart-durable"
+ResumeRestartRestored == Mode \in {"ready-resume-restart-durable", "ready-resume-restart-durable-cut",
+                                   "ready-resume-restart-durable-late", "ready-resume-restart-durable-person",
+                                   "ready-resume-restart-durable-no-quiet"}
+LateRestore == Mode = "ready-resume-restart-durable-late"
 Restored == IdleRestartRestored \/ ResumeRestartRestored
 RetainsUnproven == IdleRestart \/ ResumeRestartRestored \/
                    Mode \in {"ready-resume-restart-after", "ready-resume-restart-person",
@@ -29,11 +34,13 @@ ResumeRestart == Mode \in {"ready-resume-restart-after", "ready-resume-restart-p
                            "ready-resume-restart-before"}
 ResumeAfter == ResumeRestart \/ ResumeRestartRestored \/
                Mode \in {"ready-resume-meta-after", "ready-resume-cut-after", "ready-resume-person-after"}
-ResumeNoQuiet == Mode = "ready-resume-no-quiet"
-ResumeCut == Mode \in {"ready-resume-cut-before", "ready-resume-cut-after", "ready-resume-restart-cut"}
+ResumeNoQuiet == Mode \in {"ready-resume-no-quiet", "ready-resume-restart-durable-no-quiet"}
+ResumeCut == Mode \in {"ready-resume-cut-before", "ready-resume-cut-after", "ready-resume-restart-cut",
+                       "ready-resume-restart-durable-cut", "ready-resume-restart-durable-late"}
 ResumeHistory == ResumeAfter \/ ResumeNoQuiet \/ ResumeCut \/ Mode = "ready-resume-meta-before"
 ResumePerson == Mode \in {"ready-resume-person-after", "ready-resume-no-quiet",
-                          "ready-resume-restart-person", "ready-resume-restart-any-timeout"}
+                          "ready-resume-restart-person", "ready-resume-restart-any-timeout",
+                          "ready-resume-restart-durable-person", "ready-resume-restart-durable-no-quiet"}
 Fresh == ClearPreSource \/ ResumeHistory \/ Mode \in {"ready-fresh", "ready-clear", "ready-resume", "ready-late-dialog", "ready-preflight-only"}
 Dialog == Mode \in {"ready-late-dialog", "ready-preflight-only"}
 Permission == Mode \in {"ready-permission-later", "ready-permission-poison"}
@@ -75,7 +82,7 @@ Initial ==
      nativeStarts |-> IF Race THEN 1 ELSE 0,
      restarts |-> IF Mode = "ready-restart" \/ ResumeRestart \/ IdleRestart \/ ResumeRestartRestored
                   THEN 1 ELSE 0,
-     durable |-> 0,
+     durable |-> 0, restore |-> "none",
      restored |-> "no", notices |-> [i \in Ids |-> 0], badExpire |-> FALSE,
      compactPending |-> Compact, compacts |-> 0,
      compactFence |-> FALSE, compactEvidence |-> FALSE, compactReady |-> FALSE,
@@ -141,10 +148,18 @@ SoftSummary ==
     /\ Suppressed /\ r.softStage = 1
     /\ r' = [r EXCEPT !.softStage = 2, !.tail = "summary", !.terminal = r.turn]
 \* Shared observer may report Idle for a summary while the provider is still Running.
+ObservedNow == IF r.tail = "summary" THEN "Idle"
+               ELSE IF r.phase = "Booting" THEN "Unknown"
+               ELSE IF r.turn = 0 /\ r.history = "cut" THEN "Running" ELSE r.phase
+\* The same observation restores this execution's logged resume start while no turn of this run
+\* exists (the no-quiet mutant drops that check); the late placement only past an Idle observer.
+RestoresStart == r.restore = "pending" /\ (r.turn = 0 \/ ResumeNoQuiet)
+                 /\ (~LateRestore \/ ObservedNow = "Idle")
 Observe ==
-    /\ r' = [r EXCEPT !.observed = IF r.tail = "summary" THEN "Idle"
-                                  ELSE IF r.phase = "Booting" THEN "Unknown"
-                                  ELSE IF r.turn = 0 /\ r.history = "cut" THEN "Running" ELSE r.phase,
+    /\ r' = [r EXCEPT !.observed = ObservedNow,
+                     !.restore = IF RestoresStart THEN "done" ELSE @,
+                     !.started = @ \/ RestoresStart,
+                     !.restored = IF RestoresStart THEN "no" ELSE @,
                      !.seenEpoch = r.epoch, !.seenTurn = r.turn,
                      !.softStage = IF Suppressed /\ r.softStage = 2 THEN 3 ELSE @,
                      !.awake = IF NoWake \/ (ClearHeld /\ r.heldOnce) \/ (ModalWatch /\ r.modalHeld) THEN @ ELSE TRUE]
@@ -271,8 +286,7 @@ Receipt(i) ==
 \* as this execution's final Stop, or this execution's resume start while no turn followed it.
 RestoreProof ==
     IF Mode = "ready-idle-restart-terminal-only" THEN r.terminal = r.turn /\ r.turn > 0
-    ELSE (r.durable = r.turn /\ r.terminal = r.turn /\ r.turn > 0) \/
-         (ResumeRestartRestored /\ r.started /\ r.turn = 0)
+    ELSE r.durable = r.turn /\ r.terminal = r.turn /\ r.turn > 0
 \* Only pre-key daemon restart is refined here; post-key Unknown is never replayed.
 \* The in-memory continuation latch does not survive the restart in the idle-restart modes.
 Restart ==
@@ -281,7 +295,8 @@ Restart ==
                      !.restored = IF ResumeRestart \/ IdleRestartFloor THEN "floor"
                                   ELSE IF Restored THEN (IF RestoreProof THEN "passed" ELSE "floor")
                                   ELSE @,
-                     !.started = ResumeRestartRestored /\ RestoreProof /\ r.turn = 0,
+                     !.started = FALSE,
+                     !.restore = IF ResumeRestartRestored /\ r.started THEN "pending" ELSE "none",
                      !.continuing = IF IdleRestart THEN FALSE ELSE @,
                      !.awake = FALSE, !.restarts = 0]
 Replay(i) ==
