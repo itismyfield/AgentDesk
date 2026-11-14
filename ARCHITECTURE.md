@@ -1421,6 +1421,7 @@ src/
 │   │   │   ├── scan_progress.rs
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
+│   │   │   ├── slash_message_tests.rs
 │   │   │   └── too_old_drop_pg_tests.rs
 │   │   ├── codex_absence/
 │   │   │   ├── observation_tests.rs
