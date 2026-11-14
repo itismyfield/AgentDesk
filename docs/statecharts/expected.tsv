@@ -501,3 +501,5 @@ input-single-path/NativeAttributionPortTransferDeletes.cfg	NativeInputAttributio
 input-single-path/NativeAttributionPortTransferFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionPortTransferAbsentBefore.cfg	NativeInputAttribution	-	NativePortEventuallyDone
 input-single-path/NativeAttributionPortTransferAbsentFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionPortTransferUnreadable.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionPortTransferAbsentUnreadable.cfg	NativeInputAttribution	-	-
