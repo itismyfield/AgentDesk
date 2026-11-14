@@ -26,7 +26,7 @@ async fn scenario(
         tokio::time::resume();
         *io.intake_pool.lock().unwrap() = Some(pool.clone());
         let mut tx = pool.begin().await.unwrap();
-        sqlx::query("LOCK TABLE intake_outbox IN ACCESS EXCLUSIVE MODE")
+        sqlx::query("LOCK TABLE intake_outbox IN ROW EXCLUSIVE MODE")
             .execute(&mut *tx)
             .await
             .unwrap();
