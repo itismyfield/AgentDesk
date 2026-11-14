@@ -7,8 +7,16 @@ vars == <<s>>
 Terminal == {"succeeded", "failed", "interrupted", "skipped", "paused"}
 Unsent == {"none", "input_pending", "accepted", "NotSent", "retry_scheduled"}
 
-Init == \E c1, noReply, held, verified \in BOOLEAN:
- s = [mode |-> Mode, status |-> "running", action |-> IF Mode = "script" THEN "complete" ELSE "agent",
+Owned == {"owned_thread", "owned_dm"}
+\* The surface a routine turn runs on: its own thread or DM, or its agent's shared primary channel.
+Init == \E c1, noReply, held, verified \in BOOLEAN, owned \in Owned,
+           busy \in (IF Mode = "headless" THEN BOOLEAN ELSE {FALSE}),
+           fault \in (IF Mode = "thread" THEN {"none", "transient", "permanent"} ELSE {"none"}):
+ s = [mode |-> Mode,
+             scope |-> IF Mode \in {"headless", "channel"} THEN "shared_primary"
+                       ELSE IF Mode = "thread" THEN owned ELSE "none",
+             actor |-> "original", hArrived |-> 0, hQueued |-> 0, hDone |-> 0,
+             humanBusy |-> busy, deferTries |-> 0, threadFault |-> fault, primaryFallback |-> FALSE, status |-> "running", action |-> IF Mode = "script" THEN "complete" ELSE "agent",
              input |-> "none", queued |-> FALSE, acceptedTurns |-> 0,
              lateAcceptedTurns |-> 0, expired |-> FALSE, recorded |-> FALSE,
              notified |-> FALSE, retryCount |-> 0, sharedDestroyed |-> FALSE, recovering |-> FALSE,
@@ -32,11 +40,46 @@ SkipOrPause ==
                         !.action = IF result = "paused" THEN "pause" ELSE "skip",
                         !.recorded = TRUE, !.notified = result = "paused", !.outcomeKind = "script"]
 
+\* A busy primary mailbox or an unavailable thread admits nothing; neither falls back to primary.
 Admit ==
     /\ ~s.recovering
     /\ s.status = "running" /\ s.input = "none" /\ ~s.expired /\ s.prejudgeDone
     /\ (s.action = "agent" \/ (Mode = "script" /\ Policy = "script_agent"))
-    /\ s' = [s EXCEPT !.input = "input_pending", !.queued = TRUE, !.action = "agent"]
+    /\ ~s.humanBusy
+    /\ (s.threadFault = "none" \/ Policy = "primary_fallback")
+    /\ s' = [s EXCEPT !.input = "input_pending", !.queued = TRUE, !.action = "agent",
+                      !.primaryFallback = s.threadFault # "none",
+                      !.scope = IF s.threadFault # "none" THEN "shared_primary" ELSE @]
+
+\* The routine turn holds its channel mailbox from submission until the run closes.
+RoutineHolds == s.input \in {"MayHaveSent", "started"}
+                /\ (s.status = "running" \/ Policy = "no_release")
+
+HumanArrive ==
+    /\ Mode = "headless" /\ s.hArrived < 2
+    /\ s' = [s EXCEPT !.hArrived = @ + 1, !.hQueued = @ + 1]
+
+HumanProcess ==
+    /\ s.hQueued > 0 /\ ~RoutineHolds
+    /\ s' = [s EXCEPT !.hQueued = @ - 1, !.hDone = @ + 1,
+                      !.actor = IF @ = "retired" THEN "replaced" ELSE @]
+
+HumanFinish == s.humanBusy /\ s' = [s EXCEPT !.humanBusy = FALSE]
+
+\* One start-deferral retry of the same run against the same surface.
+DeferStart ==
+    /\ ~s.recovering /\ s.status = "running" /\ s.input = "none" /\ s.deferTries < 2
+    /\ (s.humanBusy \/ s.threadFault = "transient")
+    /\ s' = [s EXCEPT !.deferTries = @ + 1]
+
+ThreadRecover == s.threadFault = "transient" /\ s' = [s EXCEPT !.threadFault = "none"]
+
+\* Only a routine-owned thread or DM actor retires; the shared primary actor stays even when idle.
+RetireActor ==
+    /\ s.status \in Terminal /\ s.actor = "original" /\ s.acceptedTurns > 0
+    /\ s.hQueued = 0 /\ ~s.humanBusy /\ ~RoutineHolds
+    /\ (s.scope \in Owned \/ (Policy = "retire_shared" /\ s.scope = "shared_primary"))
+    /\ s' = [s EXCEPT !.actor = "retired"]
 
 OwnerAccept ==
     /\ ~s.recovering
@@ -142,11 +185,14 @@ Prejudge ==
                             !.reason = "prejudge_no_work", !.outcomeKind = "script", !.recorded = TRUE]
          ELSE s' = [s EXCEPT !.prejudgeDone = TRUE, !.prejudgeCalls = 1, !.prejudgeResult = result]
 
-FailureKinds == {"thread_setup_permanent", "js_error", "migration_invalid", "command_nonzero", "deferral_exhausted"}
+FailureKinds == {"thread_setup_permanent", "js_error", "migration_invalid", "command_nonzero",
+                 "deferral_exhausted", "primary_busy", "thread_unavailable"}
 FailBeforeSubmit(kind) ==
     /\ ~s.recovering /\ s.status = "running" /\ s.input = "none"
     /\ kind \in FailureKinds
     /\ (kind # "command_nonzero" \/ Mode = "script")
+    /\ (kind # "primary_busy" \/ (s.humanBusy /\ s.deferTries = 2))
+    /\ (kind # "thread_unavailable" \/ (s.threadFault = "transient" /\ s.deferTries = 2))
     /\ s' = [s EXCEPT !.status = "failed", !.reason = kind,
                       !.recorded = TRUE, !.notified = TRUE, !.outcomeKind = "failed"]
 
@@ -226,8 +272,10 @@ Next == Prejudge \/ Admit \/ OwnerAccept \/ RefuseBeforeKey \/ RearmKnownUnsent 
         \/ NativeAccept \/ ObserveAccepted \/ ObserveNotSent \/ RetryStarted \/ ResendUnknown
         \/ Expire \/ Finish \/ BeginRecovery \/ RecoveryFinish \/ AwaitRecoveryCommit
         \/ LateDispatch \/ TeardownChannel \/ AwaitHeld \/ Restart \/ RestartCompleted \/ RestoreCompleted \/ ConsumeUnverifiedMarker \/ Done
+        \/ HumanArrive \/ HumanProcess \/ HumanFinish \/ DeferStart \/ ThreadRecover \/ RetireActor
 Spec == Init /\ [][Next]_vars /\ WF_vars(Expire) /\ WF_vars(Finish)
         /\ WF_vars(RecoveryFinish) /\ WF_vars(RestoreCompleted)
+        /\ WF_vars(HumanProcess) /\ WF_vars(RetireActor)
 
 NoDuplicateTurn == s.acceptedTurns <= 1
 SuccessfulAgentExactlyOne == (s.status = "succeeded" /\ s.outcomeKind = "agent") => s.acceptedTurns = 1
@@ -245,7 +293,13 @@ SharedSessionPreserved == ~s.sharedDestroyed
 NoReplyRecoveryBodyZero == (s.c1 /\ s.noReply) => s.bodyPosts = 0
 RecoveryPreservesRaw == s.rawHash = 17
 HeldEpisodeSurvives == s.replayHeld => s.episodePresent
+PrimaryActorPreserved == s.scope = "shared_primary" => s.actor = "original"
+NoPrimaryFallback == ~s.primaryFallback
+HumanInputsConserved == s.hDone + s.hQueued = s.hArrived
 EveryRunTerminates == <>(s.status \in Terminal)
+HumanInputsEventuallyProcessed == <>[](s.hQueued = 0)
+OwnedSurfaceRetires == (s.scope \in Owned /\ s.status \in Terminal /\ s.acceptedTurns > 0)
+                         ~> (s.actor = "retired")
 QuietRestartEventuallySettles == (s.c1 /\ s.noReply /\ s.restarted /\ s.receiptVerified) ~> s.recoverySettled
 UnverifiedReceiptKeepsMarker == (s.c1 /\ s.noReply /\ s.drainRequired /\ ~s.receiptVerified) => s.drainMarker
 =============================================================================
