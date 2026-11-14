@@ -447,6 +447,29 @@ fn decide_with_snapshot(
     if channel_id == 0 {
         return Err(IdentityError::UnknownChannel);
     }
+    // The body and its host share both state and sends.
+    let judged = |candidate: &channel_policy::Candidate| match usage {
+        Use::Body => match origin {
+            Some(origin) => candidate.claim_body_from(channel_id, origin),
+            None => candidate.claim_body(channel_id),
+        },
+        Use::Peek => {
+            let state = candidate.peek();
+            BodyClaimed {
+                owned: state.owned(),
+                send: None,
+                reason: if state == channel_policy::Adoption::Pending {
+                    ClaimReason::NoCandidate
+                } else {
+                    state.claim_reason()
+                },
+            }
+        }
+    };
+    // A boot reservation with no parent read yet stays Legacy's; its sends gate the later handoff.
+    if let Some(reserved) = snapshot.unresolved_child(channel_id) {
+        return Ok(judged(&reserved));
+    }
     // A known thread child is judged under its parent's kind, never as a plain non-member.
     let child = match snapshot.child(channel_id) {
         Some(child) => Some(child.map_err(|_| IdentityError::ChildHeld)?),
@@ -478,25 +501,6 @@ fn decide_with_snapshot(
             },
         });
     }
-    // The body and its host share both state and sends.
-    let judged = |candidate: &channel_policy::Candidate| match usage {
-        Use::Body => match origin {
-            Some(origin) => candidate.claim_body_from(channel_id, origin),
-            None => candidate.claim_body(channel_id),
-        },
-        Use::Peek => {
-            let state = candidate.peek();
-            BodyClaimed {
-                owned: state.owned(),
-                send: None,
-                reason: if state == channel_policy::Adoption::Pending {
-                    ClaimReason::NoCandidate
-                } else {
-                    state.claim_reason()
-                },
-            }
-        }
-    };
     // A child has its own adoption; an undecided one is held, as a claim would release it.
     if let Some(child) = child {
         child.body_owner().ok_or(IdentityError::ChildHeld)?;

@@ -242,6 +242,8 @@ pub(super) async fn redirect_dispatch(
                         .await
                     {
                         Ok(thread) => {
+                            // A thread this process just made has run no Legacy turn.
+                            crate::services::tui_o::cutover::record_thread_child(&thread, true);
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
                                 "  [{ts}] 🧵 Created dispatch thread {} for dispatch {}",

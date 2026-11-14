@@ -306,6 +306,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // Only the utility branch leaves earlier: it builds no runtime or mint surface. Its
     // doctor handles only health-registered runtimes, which register after their reaper.
     super::inflight::reap_inflight_rows_at_boot_blocking(&provider, shared.pg_pool.clone()).await;
+    // Before any watcher or relay opens, so an open thread turn's Legacy sends are counted.
+    o_writer_host::reserve_boot_threads(&provider);
     // Turn mode is fixed before the relay restores pending starts for the channels it confirms.
     let tui_o =
         crate::services::tui_o::shadow::tap::TuiOConfig::or_default(boot_config.tui_o.as_ref());

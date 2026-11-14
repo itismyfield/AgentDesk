@@ -13,6 +13,11 @@ pub(crate) async fn text_for_input_placement(provider: &str, channel: &str) -> I
 }
 
 async fn placement(provider: &str, channel: Option<u64>) -> IntakeRoute {
+    if let Some(channel) = channel
+        && let Err(detail) = super::super::resolve_reserved_child(channel).await
+    {
+        return IntakeRoute::Hold(detail);
+    }
     if !channel.is_some_and(|channel| selected_codex_input(provider, channel)) {
         return match channel {
             Some(channel) => super::route_for_placement(provider, channel),

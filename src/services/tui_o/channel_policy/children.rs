@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use super::{Adoption, BootChannels, Candidate};
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::session_host::surface_policy::VerifiedSurface;
 use crate::services::tui_o::store::{Initialized, OStore};
 
 mod lifecycle;
@@ -21,7 +22,7 @@ struct ChildEntry {
     record_unreadable: bool,
     boot_discovered: bool,
     /// The checked relationship a placement resolved; only a child holding it can first init.
-    surface: Option<crate::services::session_host::surface_policy::VerifiedSurface>,
+    surface: Option<VerifiedSurface>,
     life: lifecycle::Lifecycle,
 }
 
@@ -45,6 +46,16 @@ impl Child {
     }
 }
 
+impl ChildEntry {
+    /// A boot reservation whose parent is still unknown: Legacy's, with its sends counted.
+    fn unresolved_late(&self) -> Option<&Candidate> {
+        let open = self.parent.is_none() && !self.held && !self.conflict;
+        self.candidate
+            .as_ref()
+            .filter(|c| open && c.late_adopt_origin())
+    }
+}
+
 /// A known child whose relationship is unresolved, conflicting or unreadable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ChildHeld;
@@ -52,6 +63,9 @@ pub(crate) struct ChildHeld;
 impl ChildEntry {
     /// `None` once the child resolved under a parent O does not select.
     fn read(&self) -> Option<Result<Child, ChildHeld>> {
+        if self.unresolved_late().is_some() {
+            return None;
+        }
         let (Some(parent), false, false) = (self.parent, self.held, self.conflict) else {
             return Some(Err(ChildHeld));
         };
@@ -121,16 +135,91 @@ impl ChildEntries {
         }
     }
 
+    /// Applies one checked relationship to `channel`. A known adoption is kept, so the Legacy sends
+    /// it counted before the parent was known still hold off the first init; returns whether the
+    /// channel is now a child O hosts.
+    fn resolve(
+        &self,
+        boot: &BootChannels,
+        channel: u64,
+        surface: VerifiedSurface,
+        fresh: bool,
+    ) -> bool {
+        let (destination, parent, kind) = surface.relationship();
+        let expected = boot
+            .configured_binding(parent)
+            .then(|| boot.kinds.get(&parent).copied())
+            .flatten();
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if expected.is_none() && !entries.contains_key(&channel) {
+            return false;
+        }
+        let entry = entries.entry(channel).or_insert_with(|| ChildEntry {
+            parent: None,
+            kind: None,
+            candidate: None,
+            held: false,
+            conflict: false,
+            record_unreadable: false,
+            boot_discovered: false,
+            surface: None,
+            life: lifecycle::Lifecycle::default(),
+        });
+        if entry.conflict {
+            return false;
+        }
+        if destination != channel || expected.is_some_and(|expected| expected != kind) {
+            entry.conflict = true;
+            entry.held = true;
+            return false;
+        }
+        if let Some(known) = entry.parent {
+            // A resolved child is never moved to another parent.
+            if known != parent {
+                entry.conflict = true;
+                entry.held = true;
+            }
+            return !entry.conflict && entry.candidate.is_some();
+        }
+        entry.parent = Some(parent);
+        entry.kind = Some(kind);
+        entry.held = false;
+        entry.surface = Some(surface);
+        let late = entry.boot_discovered || !fresh;
+        entry.candidate = expected.map(|_| {
+            entry.candidate.take().unwrap_or_else(|| {
+                if late {
+                    Candidate::reserved_late()
+                } else {
+                    Candidate::new(Adoption::Pending)
+                }
+            })
+        });
+        entry.candidate.is_some()
+    }
+
+    /// A known thread left over from before boot: Legacy keeps its body, counted on its own late
+    /// adoption, until a placement reads its parent.
+    fn reserve(&self, channel: u64) {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        entries.entry(channel).or_insert_with(|| ChildEntry {
+            parent: None,
+            kind: None,
+            candidate: Some(Candidate::reserved_late()),
+            held: false,
+            conflict: false,
+            record_unreadable: false,
+            boot_discovered: true,
+            surface: None,
+            life: lifecycle::Lifecycle::default(),
+        });
+    }
+
     #[cfg(all(test, unix))]
     fn resolve_legacy(
         &self,
         boot: &BootChannels,
-        mut checked: impl FnMut(
-            u64,
-        ) -> Result<
-            crate::services::session_host::surface_policy::VerifiedSurface,
-            (),
-        >,
+        mut checked: impl FnMut(u64) -> Result<VerifiedSurface, ()>,
     ) {
         let Ok(_refresh) = self.refresh.try_lock() else {
             return;
@@ -149,31 +238,16 @@ impl ChildEntries {
             let Ok(surface) = checked(channel) else {
                 continue;
             };
-            let (destination, parent, kind) = surface.relationship();
-            let expected = boot.kinds.get(&parent).copied();
-            let mut entries = self.entries.lock().unwrap();
             // The entry may have been resolved or replaced while the read was in flight.
-            let Some(entry) = entries
-                .get_mut(&channel)
-                .filter(|entry| unresolved(entry) && entry.boot_discovered == boot_discovered)
-            else {
-                continue;
-            };
-            if destination != channel || expected.is_some_and(|expected| expected != kind) {
-                entry.conflict = true;
-                continue;
+            let still = self
+                .entries
+                .lock()
+                .unwrap()
+                .get(&channel)
+                .is_some_and(|entry| unresolved(entry) && entry.boot_discovered == boot_discovered);
+            if still {
+                self.resolve(boot, channel, surface, !boot_discovered);
             }
-            entry.parent = Some(parent);
-            entry.kind = Some(kind);
-            entry.held = false;
-            entry.surface = Some(surface);
-            entry.candidate = expected.map(|_| {
-                if boot_discovered {
-                    Candidate::reserved_late()
-                } else {
-                    Candidate::new(Adoption::Pending)
-                }
-            });
         }
     }
 
@@ -186,7 +260,8 @@ impl ChildEntries {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .filter(|(_, entry)| entry.boot_discovered)
+            // Only children boot read from the store; a checked one has no store record to lose yet.
+            .filter(|(_, entry)| entry.boot_discovered && entry.surface.is_none() && entry.parent.is_some())
             .map(|(&id, _)| id)
             .collect();
         if channels.is_empty() {
@@ -311,6 +386,51 @@ impl BootChannels {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         entries.get(&channel)?.read()
+    }
+
+    /// A boot reservation whose parent no placement has read yet; Legacy's, its sends counted.
+    pub(crate) fn unresolved_child(&self, channel: u64) -> Option<Candidate> {
+        let entries = self
+            .children
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        entries.get(&channel)?.unresolved_late().cloned()
+    }
+
+    /// Records a relationship Discord itself returned; `fresh` when no Legacy turn ever ran there.
+    pub(crate) fn resolve_child(
+        &self,
+        channel: u64,
+        surface: VerifiedSurface,
+        fresh: bool,
+    ) -> bool {
+        self.children.resolve(self, channel, surface, fresh)
+    }
+
+    /// Reserves each unconfigured thread a boot read left open whose hinted parent O selects. The
+    /// hint only picks the reservation; the parent is bound by a later checked read.
+    pub(crate) fn reserve_boot_children(&self, threads: &[(u64, u64)]) {
+        for &(channel, hinted) in threads {
+            if !self.configured_binding(channel) && self.channels.contains(&hinted) {
+                self.children.reserve(channel);
+            }
+        }
+    }
+
+    /// A reservation whose channel turned out to be no O thread: plain Legacy from now on.
+    pub(crate) fn release_reservation(&self, channel: u64) {
+        let mut entries = self
+            .children
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if entries
+            .get(&channel)
+            .is_some_and(|entry| entry.unresolved_late().is_some())
+        {
+            entries.remove(&channel);
+        }
     }
 
     /// Boot membership plus every known child, held ones included so no reader drops them.

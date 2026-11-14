@@ -507,11 +507,22 @@ fn thread_children_codex_turn_selection_follows_the_parents_policy() {
     assert_eq!(cutover::policy_channel(46), 46);
 }
 
-#[tokio::test]
-async fn thread_child_first_init_waits_for_the_legacy_send_and_records_nothing_before_activation() {
+fn store_at(root: &Path) -> OStore {
     use crate::services::tui_o::store::StoreConfig;
-    const CHILD: u64 = 4_801;
+    OStore::open_if_enabled(&StoreConfig { enabled: true }, root)
+        .unwrap()
+        .unwrap()
+}
+
+fn first_init(store: &OStore, channel: u64, host: &Candidate) -> Result<(), String> {
     use crate::services::tui_o::writer::activation::{ActivationFacts, activate_with};
+    let facts = Ok(ActivationFacts::default());
+    activate_with(store, channel, facts, || Ok(false), host, || Ok(Vec::new()))
+}
+
+#[tokio::test]
+async fn thread_child_first_init_waits_for_the_legacy_send_then_records_its_verified_parent() {
+    const CHILD: u64 = 4_801;
     let boot = BootChannels::validate(&config())
         .unwrap()
         .adopted(Adoption::Committed);
@@ -519,33 +530,74 @@ async fn thread_child_first_init_waits_for_the_legacy_send_and_records_nothing_b
     boot.children
         .resolve_legacy(&boot, |channel| Ok(thread(channel, 42)));
     let root = tempfile::tempdir().unwrap();
-    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())
-        .unwrap()
-        .unwrap();
+    let store = store_at(root.path());
     let floor = root.path().join("o_store/thread_children.floor");
     // Legacy and the writer host each read their own clone of the child's one adoption.
     let legacy = boot.child(CHILD).unwrap().unwrap().candidate;
     let host = boot.output_candidate(CHILD).unwrap();
-    let activate = || {
-        let facts = Ok(ActivationFacts::default());
-        activate_with(&store, CHILD, facts, || Ok(false), &host, || Ok(Vec::new()))
-    };
     let sending = legacy.claim_body(CHILD);
     assert!(!sending.owned && sending.send.is_some());
-    assert_eq!(activate(), Err("Legacy body send in flight".into()));
+    assert_eq!(
+        first_init(&store, CHILD, &host),
+        Err("Legacy body send in flight".into())
+    );
     assert_eq!(host.peek(), Adoption::Deferred);
     assert!(!store.has_channel_dir(CHILD) && !floor.exists());
     drop(sending);
-    // Past the send the init carries the verified parent, and this build still refuses it.
-    let refused = activate().unwrap_err();
+    // Past the send the child's init records the parent Discord returned, behind the floor.
+    assert_eq!(first_init(&store, CHILD, &host), Ok(()));
+    assert!(floor.exists());
+    let init = store.read_init(CHILD).unwrap().unwrap();
+    assert_eq!(init.policy_parent, Some(42));
+    assert_eq!(legacy.peek(), Adoption::Committed);
+    let _forced = test_override::force_boot(boot.clone());
+    assert_eq!(
+        legacy_sent(CHILD, RuntimeHandoffKind::ClaudeTui).await,
+        Ok(false)
+    );
+}
+
+#[tokio::test]
+async fn thread_child_refused_first_init_is_held_visibly_and_never_handed_to_legacy() {
+    const CHILD: u64 = 4_803;
+    let boot = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Committed);
+    // A relationship whose kind is not the parent's: the store refuses the child's init.
+    let wrong = serde_json::from_value(serde_json::json!({
+        "id": CHILD.to_string(), "parent_id": "42", "type": 11, "name": "fixture"
+    }))
+    .unwrap();
+    let wrong = crate::services::session_host::surface_policy::VerifiedSurface::from_discord(
+        &wrong,
+        RuntimeHandoffKind::CodexTui,
+    )
+    .unwrap();
+    boot.children.entries.lock().unwrap().insert(
+        CHILD,
+        ChildEntry {
+            parent: Some(42),
+            kind: Some(RuntimeHandoffKind::ClaudeTui),
+            candidate: Some(Candidate::reserved_late()),
+            held: false,
+            conflict: false,
+            record_unreadable: false,
+            boot_discovered: true,
+            surface: Some(wrong),
+            life: Default::default(),
+        },
+    );
+    let root = tempfile::tempdir().unwrap();
+    let store = store_at(root.path());
+    let host = boot.output_candidate(CHILD).unwrap();
+    let refused = first_init(&store, CHILD, &host).unwrap_err();
     assert!(
         refused.contains("child output requires verified surface and complete activation"),
         "{refused}"
     );
-    assert!(!store.has_channel_dir(CHILD) && !floor.exists());
+    assert!(!store.has_channel_dir(CHILD));
+    assert!(!root.path().join("o_store/thread_children.floor").exists());
     assert_eq!(host.peek(), Adoption::Released);
-    assert_eq!(legacy.peek(), Adoption::Released);
-    // A refused child is held visibly at the gate, never handed back to Legacy.
     let _forced = test_override::force_boot(boot.clone());
     assert_eq!(
         legacy_sent(CHILD, RuntimeHandoffKind::ClaudeTui).await,
@@ -553,6 +605,43 @@ async fn thread_child_first_init_waits_for_the_legacy_send_and_records_nothing_b
     );
     let halted = format!("tui_o:halted:{CHILD}");
     assert!(crate::services::tui_o::alarm::health_reasons().contains(&halted));
+}
+
+#[tokio::test]
+async fn thread_child_boot_reservation_counts_legacy_and_keeps_that_send_through_resolution() {
+    const CHILD: u64 = 4_804;
+    let boot = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Committed);
+    // Only a hint naming a selected parent picks the reservation; an unselected one does not.
+    boot.reserve_boot_children(&[(CHILD, 42), (4_805, 99)]);
+    assert!(boot.unresolved_child(4_805).is_none());
+    let _forced = test_override::force_boot(boot.clone());
+    // Before the parent is read, Legacy keeps the body and the send counts on the reservation.
+    assert_eq!(
+        legacy_sent(CHILD, RuntimeHandoffKind::ClaudeTui).await,
+        Ok(true)
+    );
+    let reserved = boot.unresolved_child(CHILD).unwrap();
+    assert_eq!(reserved.sends(), (1, 1));
+    assert!(boot.child(CHILD).is_none());
+    let sending = reserved.claim_body(CHILD);
+    assert!(boot.resolve_child(CHILD, thread(CHILD, 42), false));
+    // The resolved child keeps that adoption, so the send still in flight holds off its init.
+    let host = boot.output_candidate(CHILD).unwrap();
+    assert!(host.late_adopt_origin());
+    let root = tempfile::tempdir().unwrap();
+    let store = store_at(root.path());
+    assert_eq!(
+        first_init(&store, CHILD, &host),
+        Err("Legacy body send in flight".into())
+    );
+    drop(sending);
+    assert_eq!(first_init(&store, CHILD, &host), Ok(()));
+    assert_eq!(
+        store.read_init(CHILD).unwrap().unwrap().policy_parent,
+        Some(42)
+    );
 }
 
 #[test]

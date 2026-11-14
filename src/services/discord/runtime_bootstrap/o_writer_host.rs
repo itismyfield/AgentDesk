@@ -478,6 +478,44 @@ fn parts_with_rest(
     prepared
 }
 
+/// O reads a reserved thread's parent the way automatic checks do: a failed read stays an error.
+fn install_thread_lookup(shared: &Arc<SharedData>) {
+    let shared = Arc::clone(shared);
+    crate::services::tui_o::cutover::install_channel_lookup(Arc::new(move |channel| {
+        let shared = Arc::clone(&shared);
+        Box::pin(async move {
+            let http = shared.serenity_http_or_token_fallback();
+            let http = http.ok_or_else(|| "Discord REST is not ready".to_string())?;
+            match serenity::ChannelId::new(channel).to_channel(&http).await {
+                Ok(serenity::Channel::Guild(channel)) => Ok(Some(channel)),
+                Ok(_) => Ok(None),
+                Err(error) => Err(error.to_string()),
+            }
+        })
+    }));
+}
+
+/// Turns left open in unconfigured TUI threads stay Legacy's, counted on their own late adoption,
+/// until a placement reads the parent. The recorded parent is only a hint for picking them.
+pub(super) fn reserve_boot_threads(provider: &ProviderKind) {
+    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    let Some(boot) = crate::services::tui_o::cutover::boot_snapshot() else {
+        return;
+    };
+    let open = crate::services::discord::inflight::load_inflight_states(provider);
+    let threads: Vec<(u64, u64)> = open
+        .iter()
+        .filter(|state| matches!(state.runtime_kind, Some(ClaudeTui | CodexTui)))
+        .filter_map(|state| {
+            let hinted = state
+                .logical_channel_id
+                .filter(|p| *p != state.channel_id)?;
+            Some((state.channel_id, hinted))
+        })
+        .collect();
+    boot.reserve_boot_children(&threads);
+}
+
 /// Starts the ordinary gateway writer under its PG gateway lease.
 pub(super) fn spawn(
     shared: &Arc<SharedData>,
@@ -485,6 +523,7 @@ pub(super) fn spawn(
     config: Option<&TuiOConfig>,
     pg_gateway: bool,
 ) {
+    install_thread_lookup(shared);
     let Some(shadow) = shadow_of(provider) else {
         return;
     };
@@ -796,6 +835,7 @@ pub(super) fn spawn_execution(
     provider: &ProviderKind,
     config: Option<&TuiOConfig>,
 ) {
+    install_thread_lookup(shared);
     let Some(shadow) = shadow_of(provider) else {
         return;
     };

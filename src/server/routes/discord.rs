@@ -121,6 +121,18 @@ async fn ensure_channel_is_role_mapped(channel_id: ChannelId) -> AppResult<()> {
     }
 
     if let Some(parent_id) = channel_info.as_ref().and_then(thread_parent_id) {
+        // The JSON parent only picks the checked read that records an O thread target.
+        let recorded = crate::services::tui_o::cutover::record_thread_child_by_id(
+            channel_id.get(),
+            parent_id.get(),
+        );
+        if let Err(detail) = recorded.await {
+            tracing::warn!(
+                channel = channel_id.get(),
+                detail,
+                "[tui_o] API thread parent not recorded"
+            );
+        }
         let parent_info = fetch_discord_channel_info(&client, &token, parent_id).await;
         let parent_name = parent_info.as_ref().and_then(discord_channel_name);
         if resolve_role_binding(parent_id, parent_name.as_deref()).is_some() {

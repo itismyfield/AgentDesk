@@ -1155,6 +1155,8 @@ async fn create_routine_thread(
                 parent_channel_id.get()
             )
         })?;
+    // The routine's TUI thread is new, so no Legacy turn has run in it.
+    crate::services::tui_o::cutover::record_thread_child(&thread, true);
     Ok((thread.id, resolved.bot))
 }
 

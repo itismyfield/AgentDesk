@@ -18,6 +18,8 @@ pub(crate) use channel_gate::{
 };
 #[cfg(all(test, unix))]
 mod child_funnel_tests;
+#[cfg(all(test, unix))]
+mod thread_child_record_tests;
 #[cfg(test)]
 pub(crate) use channel_gate::{
     claims_judged, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
@@ -99,6 +101,91 @@ fn child_dormant(channel: u64) -> bool {
 /// Whether the shared view knows `channel` as a thread child, resolved or not.
 pub(crate) fn thread_child(channel: u64) -> bool {
     test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.child(channel).is_some()))
+}
+
+/// A checked Discord read of one channel: `Ok(None)` for a channel that is no guild channel, an
+/// error when the read itself failed. The Discord runtime installs it once per process.
+pub(crate) type ChannelLookup = std::sync::Arc<
+    dyn Fn(
+            u64,
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<Option<poise::serenity_prelude::GuildChannel>, String>,
+        > + Send
+        + Sync,
+>;
+
+static CHANNEL_LOOKUP: std::sync::OnceLock<ChannelLookup> = std::sync::OnceLock::new();
+
+pub(crate) fn install_channel_lookup(lookup: ChannelLookup) {
+    let _ = CHANNEL_LOOKUP.set(lookup);
+}
+
+/// Before an input is placed on a boot reservation, its parent is read once: a failed read holds
+/// the input, and a channel that is no thread of an O parent stays Legacy's for good.
+pub(crate) async fn resolve_reserved_child(channel: u64) -> Result<(), String> {
+    resolve_reserved_with(channel, CHANNEL_LOOKUP.get().cloned()).await
+}
+
+async fn resolve_reserved_with(channel: u64, lookup: Option<ChannelLookup>) -> Result<(), String> {
+    let Some(snapshot) = boot_snapshot() else {
+        return Ok(());
+    };
+    if snapshot.unresolved_child(channel).is_none() {
+        return Ok(());
+    }
+    let lookup = lookup.ok_or_else(|| format!("O thread {channel} has no checked parent read"))?;
+    let read = lookup(channel).await;
+    match read.map_err(|error| format!("O thread {channel} parent read failed: {error}"))? {
+        Some(read) if record_in(&snapshot, &read, false) => {}
+        _ => snapshot.release_reservation(channel),
+    }
+    Ok(())
+}
+
+/// Records a thread Discord returned under an O parent; `fresh` only for a thread this process
+/// just created, where no Legacy turn has run. Returns whether O now hosts it.
+pub(crate) fn record_thread_child(
+    channel: &poise::serenity_prelude::GuildChannel,
+    fresh: bool,
+) -> bool {
+    test_override::with_channels(|snapshot| snapshot.is_some_and(|s| record_in(s, channel, fresh)))
+}
+
+/// As `record_thread_child` for a channel known by id, read through the checked lookup; only
+/// when `hinted_parent`, which is no evidence, names a channel O selects.
+pub(crate) async fn record_thread_child_by_id(
+    channel: u64,
+    hinted_parent: u64,
+) -> Result<bool, String> {
+    let selected = test_override::with_channels(|snapshot| {
+        snapshot
+            .is_some_and(|s| s.channels().contains(&hinted_parent) && s.child(channel).is_none())
+    });
+    if !selected {
+        return Ok(false);
+    }
+    let lookup = CHANNEL_LOOKUP.get().cloned();
+    let lookup = lookup.ok_or_else(|| "no checked channel read installed".to_string())?;
+    Ok(lookup(channel)
+        .await?
+        .is_some_and(|read| record_thread_child(&read, false)))
+}
+
+fn record_in(
+    snapshot: &BootChannels,
+    channel: &poise::serenity_prelude::GuildChannel,
+    fresh: bool,
+) -> bool {
+    use crate::services::session_host::surface_policy::VerifiedSurface;
+    let parent = channel.parent_id.map(|parent| parent.get());
+    let Some(kind) = parent.and_then(|parent| snapshot.kind(parent)) else {
+        return false;
+    };
+    let Some(surface) = VerifiedSurface::from_discord(channel, kind) else {
+        return false;
+    };
+    snapshot.resolve_child(channel.id.get(), surface, fresh)
 }
 
 /// What thread_gc pins for `channel` before its row delete; none unless it is an active child.

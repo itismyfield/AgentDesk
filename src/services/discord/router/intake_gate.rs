@@ -225,6 +225,17 @@ pub(in crate::services::discord) async fn handle_event(
                 // Check if this arrival is from a thread context
                 let thread_parent = resolve_thread_parent(&ctx.http, new_message.channel_id).await;
                 let is_thread_context = thread_parent.is_some();
+                // The best-effort parent only picks the checked read that records an O thread.
+                if let Some((parent, _)) = &thread_parent {
+                    let channel = new_message.channel_id.get();
+                    let recorded = crate::services::tui_o::cutover::record_thread_child_by_id(
+                        channel,
+                        parent.get(),
+                    );
+                    if let Err(detail) = recorded.await {
+                        tracing::warn!(channel, detail, "[tui_o] thread parent not recorded");
+                    }
+                }
 
                 // #2044 F6: when promoting a parent → thread arrival, verify
                 // that the first (parent) arrival did NOT already make it

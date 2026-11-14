@@ -24,13 +24,11 @@ impl VerifiedSurface {
         self.parent
     }
 
-    #[cfg(all(test, unix))]
     pub(crate) fn relationship(&self) -> (u64, u64, RuntimeHandoffKind) {
         (self.destination, self.parent, self.kind)
     }
 
-    // The producer is dormant until child admission is enabled.
-    #[cfg(all(test, unix))]
+    /// Only a channel Discord itself returned, of an actual thread kind, under a nonzero parent.
     pub(crate) fn from_discord(
         channel: &poise::serenity_prelude::GuildChannel,
         kind: RuntimeHandoffKind,
