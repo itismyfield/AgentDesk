@@ -729,13 +729,10 @@ fn handoff_hook_relay_failure(
         "--exact",
         "services::claude_tui::hook_relay::tests::failure_marker_worker_subprocess_entry",
     ]);
+    crate::config::test_instance::configure_reentry_command(&mut command)?;
     let child = command
         .env(FAILURE_MARKER_WORKER_ENV, encoded)
         .env_remove(NON_WAIT_RELAY_WORKER_ENV)
-        // The request owns the resolved marker directory. Keeping the worker
-        // independent of later process-global env changes prevents test/runtime
-        // root drift after the handoff has succeeded.
-        .env_remove("AGENTDESK_ROOT_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

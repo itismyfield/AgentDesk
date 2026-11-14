@@ -4,7 +4,7 @@
 
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
@@ -16,6 +16,7 @@ use super::model::{HERDR_PROTOCOL, HerdrCall, HerdrEndpoint, HerdrRequest};
 use super::observe::{self, RestoreUnverified};
 use super::provenance::{self, ProcessStart};
 use super::wire::{self, HerdrFraming, LineJsonFraming, MAX_FRAME_BYTES};
+use crate::config::test_instance;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HerdrSocketConfig {
@@ -78,8 +79,17 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
     }
 
     fn dial(&self) -> Result<Dialled, HerdrTransportError> {
+        let owner =
+            test_instance::owned_herdr(&self.socket_path).map_err(HerdrTransportError::NotSent)?;
         let not_sent = |error: std::io::Error| HerdrTransportError::NotSent(error.to_string());
         let stream = UnixStream::connect(&self.socket_path).map_err(not_sent)?;
+        if let Some(owner) = &owner
+            && provenance::socket_peer_pid(&stream) != Some(owner.pid())
+        {
+            return Err(HerdrTransportError::NotSent(
+                "test Herdr peer is not its owned daemon".into(),
+            ));
+        }
         stream
             .set_read_timeout(Some(self.config.io_timeout))
             .map_err(not_sent)?;
@@ -87,7 +97,17 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
             .set_write_timeout(Some(self.config.io_timeout))
             .map_err(not_sent)?;
         let connected_at = SystemTime::now();
-        let server = (self.read_peer)(&stream).map(|(pid, start)| {
+        let peer = (self.read_peer)(&stream);
+        if let Some(owner) = &owner
+            && !peer
+                .as_ref()
+                .is_ok_and(|(pid, start)| owner.matches_peer(*pid, &start.identity))
+        {
+            return Err(HerdrTransportError::NotSent(
+                "test Herdr daemon start identity changed".into(),
+            ));
+        }
+        let server = peer.map(|(pid, start)| {
             let witness = ServerWitness {
                 socket: self.socket_path.clone(),
                 pid,
@@ -103,11 +123,46 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
     }
 
     /// Writes one request on `stream` and reads one reply; the stream is not reused.
-    fn exchange(&self, stream: UnixStream, call: &HerdrCall) -> HerdrOutcome {
+    fn exchange(
+        &self,
+        stream: UnixStream,
+        call: &HerdrCall,
+        witness: Option<&ServerWitness>,
+    ) -> HerdrOutcome {
         let frame = self
             .framing
             .encode(call)
             .map_err(HerdrTransportError::NotSent)?;
+        if let Some(owner) =
+            test_instance::owned_herdr(&self.socket_path).map_err(HerdrTransportError::NotSent)?
+        {
+            if witness.is_none_or(|witness| !owner.matches_witness(witness)) {
+                return Err(HerdrTransportError::NotSent(
+                    "test Herdr owner changed before its request".into(),
+                ));
+            }
+            let admitted = match &call.request {
+                HerdrRequest::Ping {} => true,
+                HerdrRequest::WorkspaceCreate { cwd, label, .. } => {
+                    test_instance::validate_herdr_create_target(Path::new(cwd), label)
+                        .map_err(HerdrTransportError::NotSent)?;
+                    true
+                }
+                HerdrRequest::SessionSnapshot {} => false,
+                _ => {
+                    let wire: serde_json::Value = serde_json::from_slice(&frame)
+                        .map_err(|error| HerdrTransportError::NotSent(error.to_string()))?;
+                    wire.pointer("/params/pane_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|pane_id| owner.contains_pane(pane_id))
+                }
+            };
+            if !admitted {
+                return Err(HerdrTransportError::NotSent(
+                    "test Herdr request names an unowned workspace".into(),
+                ));
+            }
+        }
         let mut writer = &stream;
         if let Err(failure) = wire::write_frame(&mut writer, &frame) {
             let detail = format!(
@@ -140,7 +195,10 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
         match self.dial() {
             Ok(dialled) => {
                 let witness = dialled.server.map(|(witness, _)| witness);
-                (self.exchange(dialled.stream, call), witness)
+                (
+                    self.exchange(dialled.stream, call, witness.as_ref().ok()),
+                    witness,
+                )
             }
             Err(error) => (Err(error), Err(RestoreUnverified::NoPeer)),
         }
@@ -174,7 +232,9 @@ impl<F: HerdrFraming> HerdrTransport for HerdrSocketTransport<F> {
             .unwrap_or_else(PoisonError::into_inner);
         let dialled = self.dial()?;
         match &dialled.server {
-            Ok((witness, _)) if witness == expected => self.exchange(dialled.stream, call),
+            Ok((witness, _)) if witness == expected => {
+                self.exchange(dialled.stream, call, Some(witness))
+            }
             Ok((witness, _)) => Err(HerdrTransportError::NotSent(format!(
                 "server changed: {witness:?} is not the verified {expected:?}"
             ))),
@@ -198,7 +258,7 @@ impl<F: HerdrFraming> HerdrTransport for HerdrSocketTransport<F> {
             ),
             request: HerdrRequest::Ping {},
         };
-        let outcome = self.exchange(dialled.stream, &ping);
+        let outcome = self.exchange(dialled.stream, &ping, Some(&witness));
         let hello = observe::hello_result(&ping, outcome).map_err(|error| {
             tracing::debug!(?error, "herdr hello refused");
             RestoreUnverified::NoPeer

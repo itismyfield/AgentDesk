@@ -835,6 +835,8 @@ pub fn merged_runtime_path() -> Option<String> {
 pub fn apply_runtime_path(command: &mut Command) {
     if let Some(path) = merged_runtime_path() {
         command.env("PATH", path);
+    } else if crate::config::test_instance::requested() {
+        command.env("PATH", "");
     }
 }
 
@@ -847,6 +849,10 @@ pub fn augment_exec_path(command: &mut Command, binary_path: impl AsRef<Path>) {
 }
 
 pub fn apply_binary_resolution(command: &mut Command, resolution: &BinaryResolution) {
+    if crate::config::test_instance::requested() {
+        apply_runtime_path(command);
+        return;
+    }
     if let Some(path) = &resolution.exec_path {
         command.env("PATH", path);
     } else if let Some(path) = &resolution.resolved_path {
@@ -1016,6 +1022,9 @@ fn exec_path_for_binary(binary_path: &Path) -> Option<String> {
 }
 
 fn exec_path_entries(resolved_path: &Path, canonical_path: Option<&Path>) -> Vec<PathBuf> {
+    if crate::config::test_instance::requested() {
+        return runtime_path_entries();
+    }
     let mut entries = Vec::new();
     let mut seen = BTreeSet::new();
 

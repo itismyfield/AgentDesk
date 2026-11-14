@@ -136,3 +136,92 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
         }
     }
 }
+
+#[test]
+fn test_instance_codex_native_and_herdr_scripts_execute_with_declared_environment() {
+    use crate::services::provider_auth_profile::{self as profiles, instance_env_tests as scope};
+    scope::with_instance(
+        concat!(
+            module_path!(),
+            "::test_instance_codex_native_and_herdr_scripts_execute_with_declared_environment"
+        ),
+        || {
+            let _state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let instance = crate::config::test_instance::current().unwrap().unwrap();
+            let binary = scope::fake_provider(&instance.root, "codex");
+            let _binary =
+                Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &binary);
+            let _hooks = Guard::set_value_after_shared_test_env_lock(
+                "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+                "0".as_ref(),
+            );
+            let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+            SOURCE_MODE_TEST.with(|slot| slot.set(Some(CodexSourceMode::Legacy)));
+            let overlay = profiles::resolve(
+                ProviderKind::Codex,
+                Some("test-codex"),
+                None,
+                &profiles::queries::provider_auth_catalog(),
+            )
+            .unwrap();
+            let name = format!("{}-codex-native-env", instance.tmux.prefix);
+            let prompt = "instance native argv 한글";
+            let options = CodexLaunchOptions::new(prompt).with_cwd(instance.root.to_str());
+            let launch = super::super::prepare_codex_tui_launch_script(
+                &name,
+                None,
+                prompt,
+                &options,
+                (None, None),
+                false,
+                &overlay,
+            )
+            .unwrap();
+            let run = |script: &str| {
+                let output = std::process::Command::new("/bin/bash")
+                    .arg(script)
+                    .env_clear()
+                    .env("MEMENTO_ACCESS_KEY", "synthetic-parent")
+                    .output()
+                    .unwrap();
+                scope::assert_child_environment(output, &instance.root, "native-capture");
+            };
+            run(&launch.script_path);
+            let argv = std::fs::read_to_string(instance.root.join("codex.argv")).unwrap();
+            assert_eq!(argv.lines().last(), Some(prompt));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _entered = runtime.enter();
+            let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+                "http://127.0.0.1:9".into(),
+            );
+            let launchable = super::super::CodexHerdrLaunchable {
+                codex_bin: binary.to_string_lossy().into_owned(),
+                resolution: resolve_codex_binary(),
+                policy: "legacy",
+            };
+            let herdr = super::super::prepare_codex_herdr_launch(
+                &launch.prepared,
+                &launchable,
+                &options,
+                &overlay,
+                overlay.home.as_deref().unwrap(),
+            )
+            .unwrap();
+            let output = std::process::Command::new("/bin/bash")
+                .args(["-c", &herdr.command])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HERDR_WORKSPACE_ID", "synthetic-foreign")
+                .output()
+                .unwrap();
+            scope::assert_child_environment(output, &instance.root, "native-capture");
+            let argv = std::fs::read_to_string(instance.root.join("codex.argv")).unwrap();
+            assert!(argv.lines().any(|argument| argument == "--no-daemon"));
+            assert!(!argv.lines().any(|argument| argument == prompt));
+            SOURCE_MODE_TEST.with(|slot| slot.set(None));
+        },
+    );
+}

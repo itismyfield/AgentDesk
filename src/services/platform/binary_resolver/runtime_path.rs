@@ -4,10 +4,23 @@ static PREPARED_RUNTIME_PATH: OnceLock<OsString> = OnceLock::new();
 
 /// Read a completed PATH snapshot without starting or waiting for shell discovery.
 pub(crate) fn prepared_runtime_path() -> Option<&'static OsStr> {
+    if crate::config::test_instance::requested() {
+        return crate::config::test_instance::environment::runtime_path()
+            .ok()
+            .flatten()
+            .map(OsStr::new);
+    }
     PREPARED_RUNTIME_PATH.get().map(OsString::as_os_str)
 }
 
 pub(super) fn runtime_path_entries() -> Vec<PathBuf> {
+    if crate::config::test_instance::requested() {
+        return crate::config::test_instance::environment::runtime_path()
+            .ok()
+            .flatten()
+            .map(|path| std::env::split_paths(path).collect())
+            .unwrap_or_default();
+    }
     let mut entries = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -26,6 +39,12 @@ pub(super) fn runtime_path_entries() -> Vec<PathBuf> {
 /// Build a `Command` for `program` that runs with the merged runtime PATH.
 pub(crate) fn runtime_command(program: impl AsRef<OsStr>) -> std::io::Result<Command> {
     let path = merged_runtime_path().map(OsString::from);
+    if crate::config::test_instance::requested() && path.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "test instance runtime PATH rejected",
+        ));
+    }
     command_with_path(program.as_ref(), path.as_deref())
 }
 

@@ -1,0 +1,2 @@
+key: 080-tui-o-writer-boot-custody
+| `tui-o-writer` boot custody (#8055) | `e285a5cff1e8f8eadfc87e297ad7a202531f3ed3` | frozen Current: swallowed notice failure and visible refusal followed by checkpoint; no-ready-wake mutant stalls | existing custody plus ready wake; gateway/host authority checks are abstract inputs without a gate-equality assumption; see [report](tui-o-writer/i8055-writer-design.report.md) |

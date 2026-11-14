@@ -1,0 +1,2 @@
+key: 020-input-single-path-reserved-id-enqueue
+| `input-single-path` reserved id enqueue (#8091) | `0b9af5833990e6ee41d3428fa2d37ba5289c22e9` | Before: reservation/queue overlap; proposed guard alone: race-loss caller drops the returned input | Fixed model and live/released controls pass; actor guard plus lease-authorized owner return; see [report](input-single-path/reserved-id-enqueue.report.md). |

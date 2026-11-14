@@ -45,9 +45,9 @@
 
 use std::collections::BTreeMap;
 
+use crate::domain::provider::naming::tmux_session_prefix;
 use crate::services::provider::{
-    ProviderKind, TMUX_SESSION_PREFIX, parse_provider_and_channel_from_tmux_name,
-    provider_registry, tmux_env_suffix,
+    ProviderKind, parse_provider_and_channel_from_tmux_name, provider_registry, tmux_env_suffix,
 };
 
 /// A single channel → (agent_id, provider) binding entry. The matcher only
@@ -362,7 +362,7 @@ pub fn match_session_detailed(
     let Some((provider, _channel_segment)) =
         parse_provider_and_channel_from_tmux_name(session_name)
     else {
-        let prefix = format!("{}-", TMUX_SESSION_PREFIX);
+        let prefix = format!("{}-", tmux_session_prefix());
         if let Some(stripped) = session_name.strip_prefix(&prefix) {
             let provider_segment = stripped.split('-').next().unwrap_or("").to_string();
             return MatchOutcome::Rejected(MatchRejection::UnknownProvider(provider_segment));
@@ -516,7 +516,7 @@ pub fn is_agentdesk_managed_wrapper_command(pane_cmd: &str) -> bool {
 /// regardless of whether the directory has a binding for it.
 #[allow(dead_code)] // future discovery-loop hook; exercised only by #[cfg(test)] tests
 pub fn looks_like_agentdesk_session(session_name: &str) -> bool {
-    let prefix = format!("{}-", TMUX_SESSION_PREFIX);
+    let prefix = format!("{}-", tmux_session_prefix());
     let suffix = tmux_env_suffix();
     if !session_name.starts_with(&prefix) {
         return false;

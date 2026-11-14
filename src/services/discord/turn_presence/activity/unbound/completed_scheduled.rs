@@ -113,7 +113,7 @@ pub(super) async fn collect(
             parse_provider_and_channel_from_tmux_name(&receipt.name).is_some_and(|(provider, _)| {
                 receipt.name.starts_with(&format!(
                     "{}-{}-scheduled-smsg_",
-                    crate::services::provider::TMUX_SESSION_PREFIX,
+                    crate::domain::provider::naming::tmux_session_prefix(),
                     provider.as_str()
                 ))
             })
