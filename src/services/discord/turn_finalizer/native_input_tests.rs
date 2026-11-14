@@ -1599,11 +1599,10 @@ async fn native_8148_s2_blocked_pg_does_not_hold_finalizer_actor() {
         !submit.is_finished(),
         "Start must be answered before PG timeout"
     );
-    let error =
-        crate::test_support::wait::await_within(submit, crate::test_support::wait::WAIT_CAP)
-            .await
-            .unwrap()
-            .unwrap_err();
+    let error = crate::test_support::wait::await_within(submit, std::time::Duration::from_secs(5))
+        .await
+        .unwrap()
+        .unwrap_err();
     assert!(error.contains("timed out"), "{error}");
     let pending = f
         .history
