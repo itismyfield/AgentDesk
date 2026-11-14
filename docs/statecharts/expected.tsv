@@ -606,3 +606,10 @@ turn-presence/TurnPresenceRetiredRestartBeforeLiveness.cfg	TurnPresence	-	NewInp
 turn-presence/TurnPresenceRetiredRestartFixed.cfg	TurnPresence	-	-
 turn-presence/TurnPresenceRetiredSweep.cfg	TurnPresence	RetiredOnlyQuietNotUnknown	NewInputEventuallyStarts
 turn-presence/TurnPresenceRetiredUnsafe.cfg	TurnPresence	NoForeignMarkerRemoval,NoLiveMarkerRemoval	-
+turn-view/BusyActiveBefore.cfg	TurnView	OneBusyResult	-
+turn-view/BusyActiveFixed.cfg	TurnView	-	-
+turn-view/BusyActiveNoFallback.cfg	TurnView	OneBusyResult,NoInvisibleSettled	AcceptedEventuallyVisible
+turn-view/EmptyMailbox.cfg	TurnView	-	-
+turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
+turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
+turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible

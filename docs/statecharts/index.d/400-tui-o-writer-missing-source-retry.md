@@ -1,0 +1,2 @@
+key: 400-tui-o-writer-missing-source-retry
+| `tui-o-writer` missing-source retry (#7878 F1) | `b6d8a728d8` + held-claim implementation | same Missing/Unknown releases the claim and owner cleanup boots again; provider alive in another pane cannot repair the row-bound source | retains the claim after actor join and resumes once per source/presence/nonce/binding change; [model and limits](tui-o-writer/missing-halt.report.md) |

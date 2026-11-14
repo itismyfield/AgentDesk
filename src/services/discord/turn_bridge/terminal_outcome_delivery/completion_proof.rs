@@ -82,3 +82,18 @@ fn external_native_input_confirmed(state: &InflightTurnState) -> bool {
         false
     }
 }
+
+/// The turn ran to its own end: no stop, failure, retry, requeue or unsent input keeps it open.
+#[cfg(unix)]
+pub(super) fn ran_to_end(
+    ctx: &TerminalOutcomeDeliveryContext,
+    state: &InflightTurnState,
+    held: bool,
+) -> bool {
+    !(ctx.cancelled || ctx.transport_error || ctx.is_prompt_too_long || ctx.recovery_retry)
+        && !ctx.transcript_terminal_error
+        && !ctx.claude_tui_followup_pre_submit_requeue_candidate
+        && !ctx.tui_error_classification.input_not_submitted()
+        && !held
+        && waiting(state).is_none()
+}

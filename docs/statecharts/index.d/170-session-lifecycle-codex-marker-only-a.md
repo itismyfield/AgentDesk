@@ -1,0 +1,2 @@
+key: 170-session-lifecycle-codex-marker-only-a
+| `session-lifecycle` (Codex marker-only A, #8057 H design r4) | `289f41b1d0` | LegacyBefore waits after cleanup; NoFrontCheck grants a stale front; NoOutboxDiscovery misses boot debt | bounded retained-controller RetryFixed GREEN; dropped controller and unbounded retry RED; replay proof limited; [design](session-lifecycle/codex-marker-only-a.design.md), [report](session-lifecycle/codex-marker-only-a.report.md). B/C deferred |

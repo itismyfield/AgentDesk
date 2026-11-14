@@ -1424,6 +1424,7 @@ src/
 │   │   │   ├── scan_progress.rs
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
+│   │   │   ├── slash_message_tests.rs
 │   │   │   └── too_old_drop_pg_tests.rs
 │   │   ├── codex_absence/
 │   │   │   ├── observation_tests.rs
@@ -2023,6 +2024,7 @@ src/
 │   │   │   │   ├── claude_handoff/
 │   │   │   │   │   └── tests/
 │   │   │   │   │       ├── actual_close_tests.rs
+│   │   │   │   │       ├── custody_tests.rs
 │   │   │   │   │       └── left_herdr_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── claude.rs
@@ -3072,6 +3074,7 @@ src/
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
 │   │   │   │   │   ├── codex_empty_tests.rs
+│   │   │   │   │   ├── o_done_reaction_tests.rs
 │   │   │   │   │   ├── preparation_hold_tests.rs
 │   │   │   │   │   ├── provider_failure_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
