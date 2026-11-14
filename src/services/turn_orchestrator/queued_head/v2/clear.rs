@@ -63,7 +63,7 @@ pub(crate) fn clear_channel(
             .v2
             .as_mut()
             .ok_or("no V2 owner")?
-            .clear_all(keep)
+            .clear_all(keep, active)
     });
     let cleared: Result<Vec<MessageId>, String> = cleared.or_else(|error| {
         tracing::warn!(%error, "V2 clear will readopt the queue and retry once");
@@ -82,7 +82,7 @@ pub(crate) fn clear_channel(
             .v2
             .as_mut()
             .ok_or("no V2 owner")?
-            .clear_all(keep)?;
+            .clear_all(keep, active)?;
         result.persistence.retried.push("queue_publish");
         Ok(discarded)
     });
@@ -151,7 +151,11 @@ pub(crate) fn clear_channel(
 }
 
 impl Owner {
-    fn clear_all(&mut self, protected: &[MessageId]) -> Result<Vec<MessageId>, String> {
+    fn clear_all(
+        &mut self,
+        protected: &[MessageId],
+        active: ActivePolicy,
+    ) -> Result<Vec<MessageId>, String> {
         self.recover()?;
         let mut next = self.snapshot.clone();
         let at = origin::now_ms();
@@ -213,6 +217,7 @@ impl Owner {
         next.effort_restart = None;
         next.admission_binds.retain(|bind| match &bind.at {
             BindAt::Settled { .. } => true,
+            BindAt::Queued { .. } => active == ActivePolicy::Release,
             BindAt::Attempt { identity, attempt } => {
                 next.head_injection.as_ref().is_some_and(|head| {
                     head.members()

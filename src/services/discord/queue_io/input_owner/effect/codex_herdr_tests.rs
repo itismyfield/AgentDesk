@@ -551,7 +551,7 @@ fn a_pre_write_herdr_gate_refusal_has_no_unknown_attempt() {
 
 /// A paste with no acknowledgement remains Unknown through clear and checked purge.
 #[test]
-fn a_possible_herdr_paste_stays_owned_through_clear_and_purge() {
+fn a_possible_herdr_paste_stays_owned_through_purge_until_explicit_clear() {
     use crate::services::turn_orchestrator::QueuePersistenceContext;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -593,12 +593,9 @@ fn a_possible_herdr_paste_stays_owned_through_clear_and_purge() {
                 "owner-herdr",
                 None,
             );
-            let cleared = mailbox.clear(context.clone()).await;
-            assert!(cleared.discarded_message_ids.is_empty());
-            assert!(cleared.persistence.failed.is_empty());
             let captured = mailbox.try_capture_v2().await.unwrap().unwrap();
             let purged = mailbox
-                .try_purge_queue_if_unchanged(context, captured)
+                .try_purge_queue_if_unchanged(context.clone(), captured)
                 .await
                 .unwrap();
             assert!(purged.failed.is_none(), "{:?}", purged.failed);
@@ -612,11 +609,30 @@ fn a_possible_herdr_paste_stays_owned_through_clear_and_purge() {
                 .unwrap();
             assert_eq!(
                 after["head_injection"], before["head_injection"],
-                "clear and purge retain the exact attempt"
+                "purge retains the exact attempt"
             );
             assert_eq!(after["items"], before["items"]);
             assert_eq!(after["admission_receipts"], before["admission_receipts"]);
             assert_eq!(after["retained_inputs"], json!([]));
+            let cleared = mailbox.clear(context).await;
+            assert!(cleared.persistence.failed.is_empty());
+            assert!(!cleared.persistence.count_unknown);
+            assert_eq!(
+                cleared.discarded_message_ids,
+                [poise::serenity_prelude::MessageId::new(
+                    before["head_injection"]["identity"]["primary"]
+                        .as_u64()
+                        .unwrap()
+                )]
+            );
+            let after = mailbox
+                .v2_request(|s| s.as_ref().unwrap().json())
+                .await
+                .unwrap();
+            assert!(after["head_injection"].is_null());
+            assert_eq!(after["items"], json!([]));
+            assert_eq!(after["retained_inputs"], json!([]));
+            assert_eq!(after["admission_receipts"], before["admission_receipts"]);
         });
     });
 }
