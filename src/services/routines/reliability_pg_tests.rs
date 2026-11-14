@@ -574,7 +574,7 @@ async fn fresh_terminal_turn_error_ends_run_as_failure_before_timeout_pg() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_headless_run_whose_turn_was_submitted_never_starts_a_second_turn_pg() {
+async fn a_run_whose_turn_was_submitted_never_starts_a_second_turn_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let store = store(&pool);
@@ -598,19 +598,25 @@ async fn a_headless_run_whose_turn_was_submitted_never_starts_a_second_turn_pg()
     for (name, retries, definition, turn) in [
         ("headless-retry", 2, Some(&headless), "discord:7101:1"),
         ("headless-fallback", 0, Some(&headless), "discord:7102:1"),
-        ("legacy-retry", 2, None, "discord:7103:1"),
+        ("thread-retry", 2, None, "discord:7103:1"),
+        ("thread-fallback", 0, None, "discord:7104:1"),
+        ("claimed-before-the-pin", 2, None, "discord:7105:1"),
     ] {
         let run = started_run_of(&pool, &store, routine(name, retries), definition, turn).await;
         quality_event(&pool, turn, "turn_error", "cancelled", 60).await;
         runs.push(run);
     }
+    // A run claimed before the policy existed carries no pin and drains with its retries.
+    sqlx::query("UPDATE routine_runs SET run_spec = run_spec - 'retry_after_start' WHERE id = $1")
+        .bind(&runs[4])
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let outcomes = executor.poll_agent_runs(&store, 10, false).await.unwrap();
     let outcome = |run: &str| {
-        let outcome = outcomes
-            .iter()
-            .find(|outcome| outcome.run_id == run)
-            .unwrap();
+        let outcome = outcomes.iter().find(|outcome| outcome.run_id == run);
+        let outcome = outcome.unwrap();
         (outcome.status.clone(), outcome.error.clone().unwrap())
     };
     let pending_turn = |run: String| {
@@ -625,7 +631,7 @@ async fn a_headless_run_whose_turn_was_submitted_never_starts_a_second_turn_pg()
             turn
         }
     };
-    for run in &runs[..2] {
+    for run in &runs[..4] {
         let (status, error) = outcome(run);
         assert_eq!(status, "failed", "{error}");
         assert!(!error.contains("fallback agent"), "{error}");
@@ -634,11 +640,10 @@ async fn a_headless_run_whose_turn_was_submitted_never_starts_a_second_turn_pg()
         let (turn, next_retry_at) = pending_turn(run.clone()).await;
         assert!(turn.is_some() && next_retry_at.is_none());
     }
-    // A null-mode run still schedules its retry: its claim pinned no such policy.
-    assert_eq!(outcome(&runs[2]).0, "running");
-    let (status, retries, _) = run_row(&pool, &runs[2]).await;
+    assert_eq!(outcome(&runs[4]).0, "running");
+    let (status, retries, _) = run_row(&pool, &runs[4]).await;
     assert_eq!((status.as_str(), retries), ("running", 1));
-    let (turn, next_retry_at) = pending_turn(runs[2].clone()).await;
+    let (turn, next_retry_at) = pending_turn(runs[4].clone()).await;
     assert!(turn.is_none() && next_retry_at.is_some());
 
     pool.close().await;

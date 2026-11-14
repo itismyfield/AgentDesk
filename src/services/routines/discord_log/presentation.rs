@@ -25,16 +25,14 @@ impl RoutineDiscordLogger {
         .bind(&routine.id)
         .fetch_one(&*self.pool)
         .await;
-        // The census verdict goes to the routine's thread, which a headless run does not have.
-        if super::super::legacy_body_census::applies(&routine.script_ref)
-            && !matches!(snapshot, Ok((_, true)))
-        {
-            return self.log_census_outcome(store, routine, outcome).await;
-        }
         let (status, headless) = match snapshot {
             Ok(status) => status,
             Err(error) => return RoutineDiscordLogStatus::failed(error),
         };
+        // The census verdict goes to the routine's thread, which a headless run does not have.
+        if !headless && super::super::legacy_body_census::applies(&routine.script_ref) {
+            return self.log_census_outcome(store, routine, outcome).await;
+        }
         // Headless failures are reported at close; a headless pause goes to the primary channel.
         if headless {
             return self.log_headless_pause(routine, outcome, &status).await;

@@ -7,6 +7,7 @@ mod owner_input;
 use owner_input::AgentStartDisposition;
 mod owned_session;
 pub(crate) mod reliability;
+mod run_policy;
 pub(crate) mod start_deferral;
 mod surface;
 use reliability::{current_attempt_started_at, provider_error_from_completion};
@@ -189,6 +190,7 @@ impl RoutineAgentExecutor {
                     "primary",
                     &message,
                     action,
+                    run_policy::Submission::of_start_error(&error),
                     pause_on_terminal_failure,
                 )
                 .await
@@ -210,10 +212,15 @@ impl RoutineAgentExecutor {
         attempt_kind: &str,
         message: &str,
         action: String,
+        submission: run_policy::Submission,
         pause_on_terminal_failure: bool,
     ) -> Result<RoutineRunOutcome> {
         let fresh_context_guaranteed = fresh_context_guaranteed(&claimed.execution_strategy, false);
-        match claimed_failure_recovery_plan(&claimed, failed_agent_id, attempt_kind) {
+        let plan = match submission.forbids_new_turn(store, &claimed.run_id).await? {
+            true => AgentFailureRecoveryPlan::Fail,
+            false => claimed_failure_recovery_plan(&claimed, failed_agent_id, attempt_kind),
+        };
+        match plan {
             AgentFailureRecoveryPlan::Retry {
                 retry_count_after_increment,
                 next_retry_at: retry_at,
@@ -396,6 +403,7 @@ impl RoutineAgentExecutor {
                             result_json,
                             failed_agent_id.as_deref(),
                             &attempt_kind,
+                            run_policy::Submission::Submitted,
                             pause_on_terminal_failure,
                         )
                         .await?
@@ -473,6 +481,7 @@ impl RoutineAgentExecutor {
                         result_json,
                         failed_agent_id.as_deref(),
                         &attempt_kind,
+                        run_policy::Submission::Submitted,
                         pause_on_terminal_failure,
                     )
                     .await?
@@ -511,6 +520,7 @@ impl RoutineAgentExecutor {
                         result_json,
                         failed_agent_id.as_deref(),
                         &attempt_kind,
+                        run_policy::Submission::Submitted,
                         pause_on_terminal_failure,
                     )
                     .await?
@@ -635,9 +645,11 @@ impl RoutineAgentExecutor {
                     return Ok(Some(deferred));
                 }
                 let message = error.to_string();
+                // A closed deferral window names what the run waited for.
+                let shared_primary = surface::headless(store, &run.run_id).await?;
                 let result_json = Some(pending_result_without_fresh_context_guarantee(
                     &run,
-                    "failed_to_start",
+                    start_deferral::exhausted_status(&error, shared_primary),
                     Some(&message),
                 ));
                 self.handle_running_agent_failure(
@@ -647,6 +659,7 @@ impl RoutineAgentExecutor {
                     result_json,
                     Some(&agent_id),
                     &attempt_kind,
+                    run_policy::Submission::of_start_error(&error),
                     pause_on_terminal_failure,
                 )
                 .await
@@ -663,11 +676,11 @@ impl RoutineAgentExecutor {
         result_json: Option<Value>,
         failed_agent_id: Option<&str>,
         attempt_kind: &str,
+        submission: run_policy::Submission,
         pause_on_terminal_failure: bool,
     ) -> Result<Option<RoutineRunOutcome>> {
         let fresh_context_guaranteed = fresh_context_guaranteed_from_result(result_json.as_ref());
-        // Every caller reports a turn that was already submitted.
-        let plan = match store.run_forbids_retry_after_start(&run.run_id).await? {
+        let plan = match submission.forbids_new_turn(store, &run.run_id).await? {
             true => AgentFailureRecoveryPlan::Fail,
             false => running_failure_recovery_plan(&run, failed_agent_id, attempt_kind),
         };
@@ -1043,6 +1056,13 @@ impl RoutineAgentExecutor {
                         delivery_bot,
                     });
                 }
+                // A thread that is only unreachable right now is retried, never replaced.
+                Err(error)
+                    if start_deferral::is_transient(&error)
+                        && store.run_forbids_primary_fallback(&claimed.run_id).await? =>
+                {
+                    return Err(error);
+                }
                 Err(error) => {
                     let warning = format!(
                         "routine saved discord thread reuse failed; creating replacement: {error}"
@@ -1068,8 +1088,7 @@ impl RoutineAgentExecutor {
         let title = routine_thread_title(&claimed.name, agent_id);
         let (thread_id, delivery_bot) =
             create_routine_thread(registry, provider_name, agent_id, parent_channel_id, &title)
-                .await
-                .map_err(|error| anyhow!("create routine discord thread: {error}"))?;
+                .await?;
         let thread_id_string = thread_id.get().to_string();
         if let Err(error) = store
             .update_discord_thread_id(&claimed.routine_id, &thread_id_string)
@@ -1125,11 +1144,16 @@ async fn validate_routine_thread(
     agent_id: &str,
     thread_id: poise::serenity_prelude::ChannelId,
 ) -> Result<String> {
-    let resolved = resolve_routine_thread_http(registry, provider_name, agent_id).await?;
+    let resolved = resolve_routine_thread_http(registry, provider_name, agent_id)
+        .await
+        .map_err(start_deferral::thread_runtime_error)?;
     let channel = thread_id
         .to_channel(&*resolved.http)
         .await
-        .map_err(|error| anyhow!("fetch saved routine thread {}: {error}", thread_id.get()))?;
+        .map_err(|error| {
+            let message = format!("fetch saved routine thread {}: {error}", thread_id.get());
+            start_deferral::thread_error(message, &error, true)
+        })?;
     match channel {
         poise::serenity_prelude::Channel::Guild(channel)
             if matches!(
@@ -1154,7 +1178,9 @@ async fn create_routine_thread(
     parent_channel_id: poise::serenity_prelude::ChannelId,
     title: &str,
 ) -> Result<(poise::serenity_prelude::ChannelId, String)> {
-    let resolved = resolve_routine_thread_http(registry, provider_name, agent_id).await?;
+    let resolved = resolve_routine_thread_http(registry, provider_name, agent_id)
+        .await
+        .map_err(start_deferral::thread_runtime_error)?;
     let thread = parent_channel_id
         .create_thread(
             &*resolved.http,
@@ -1164,10 +1190,9 @@ async fn create_routine_thread(
         )
         .await
         .map_err(|error| {
-            anyhow!(
-                "discord create thread in {}: {error}",
-                parent_channel_id.get()
-            )
+            let parent = parent_channel_id.get();
+            let message = format!("create routine discord thread in {parent}: {error}");
+            start_deferral::thread_error(message, &error, false)
         })?;
     Ok((thread.id, resolved.bot))
 }

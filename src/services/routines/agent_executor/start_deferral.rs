@@ -12,6 +12,7 @@ pub(super) const START_DEFER_WINDOW_SECS: i64 = 600;
 pub(crate) enum TransientStartKind {
     ProviderNotReady,
     MailboxBusy,
+    ThreadUnavailable,
 }
 
 impl TransientStartKind {
@@ -19,6 +20,7 @@ impl TransientStartKind {
         match self {
             Self::ProviderNotReady => "provider_not_ready",
             Self::MailboxBusy => "mailbox_busy",
+            Self::ThreadUnavailable => "thread_unavailable",
         }
     }
 }
@@ -93,6 +95,59 @@ fn classified_start_error(message: String, error: &HeadlessTurnStartError) -> an
     match classify_headless_start_error(error) {
         Some(kind) => TransientStartError { kind, message }.into(),
         None => anyhow!(message),
+    }
+}
+
+pub(super) fn is_transient(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<TransientStartError>().is_some()
+}
+
+/// A routine thread call that failed. As for any outbound Discord call, 5xx, 429 and 408 are
+/// transient; so is a read that got no response, while an unanswered create may have made one.
+pub(super) fn thread_error(
+    message: String,
+    error: &poise::serenity_prelude::Error,
+    read_only: bool,
+) -> anyhow::Error {
+    use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
+    use poise::serenity_prelude::{Error, http::HttpError};
+    let status = match error {
+        Error::Http(http) => http.status_code(),
+        _ => None,
+    };
+    let kind = DispatchMessagePostErrorKind::Other;
+    let transient = match (status, error) {
+        (Some(status), _) => {
+            DispatchMessagePostError::http(kind, status, None, String::new()).is_transient()
+        }
+        (None, Error::Http(HttpError::Request(request))) => read_only || request.is_connect(),
+        (None, _) => false,
+    };
+    match transient {
+        true => thread_unavailable(message),
+        false => anyhow!(message),
+    }
+}
+
+/// No bot can reach Discord for the thread yet, as right after a restart.
+pub(super) fn thread_runtime_error(error: anyhow::Error) -> anyhow::Error {
+    thread_unavailable(error.to_string())
+}
+
+fn thread_unavailable(message: String) -> anyhow::Error {
+    let kind = TransientStartKind::ThreadUnavailable;
+    TransientStartError { kind, message }.into()
+}
+
+/// The failure class of a start whose deferral window closed; `failed_to_start` otherwise.
+pub(super) fn exhausted_status(error: &anyhow::Error, shared_primary: bool) -> &'static str {
+    match error
+        .downcast_ref::<TransientStartError>()
+        .map(|error| error.kind)
+    {
+        Some(TransientStartKind::MailboxBusy) if shared_primary => "primary_busy",
+        Some(TransientStartKind::ThreadUnavailable) => "thread_unavailable",
+        _ => "failed_to_start",
     }
 }
 

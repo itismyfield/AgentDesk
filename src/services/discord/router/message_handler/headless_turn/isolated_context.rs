@@ -25,6 +25,26 @@ fn marked_headless(metadata: Option<&serde_json::Value>) -> Result<bool, Headles
     }
 }
 
+/// Whether the run the launch names was claimed as headless. The claim, not the launch, decides
+/// that a turn must be isolated; a claim that cannot be read refuses the start.
+async fn claimed_headless(
+    shared: &SharedData,
+    metadata: Option<&serde_json::Value>,
+) -> Result<bool, HeadlessTurnStartError> {
+    let run_id = metadata
+        .and_then(|metadata| metadata.get("routine_run_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty());
+    let (Some(run_id), Some(pool)) = (run_id, shared.pg_pool.as_ref()) else {
+        return Ok(false);
+    };
+    crate::db::session_transcripts::routine_run_claimed_headless_pg(pool, run_id)
+        .await
+        .map(|claimed| claimed.unwrap_or(false))
+        .map_err(|_| refused("its claim could not be read"))
+}
+
 impl IsolatedRoutineProcess {
     /// `None` for every start that is not a headless routine run. A marked run that cannot be
     /// isolated is refused before anything is claimed: it never falls back to the shared session.
@@ -36,7 +56,14 @@ impl IsolatedRoutineProcess {
         is_dm_hint: Option<bool>,
         workspace: impl FnOnce() -> Option<String>,
     ) -> Result<Option<Self>, HeadlessTurnStartError> {
-        if !marked_headless(metadata)? {
+        let marked = marked_headless(metadata);
+        if claimed_headless(shared, metadata).await? {
+            let silent = metadata.and_then(|metadata| metadata.get("silent"));
+            if !matches!(marked, Ok(true)) || silent != Some(&serde_json::Value::Bool(true)) {
+                return Err(refused("its launch lost the headless contract"));
+            }
+        }
+        if !marked? {
             return Ok(None);
         }
         if !routine_metadata::routine_process_turn(metadata) {

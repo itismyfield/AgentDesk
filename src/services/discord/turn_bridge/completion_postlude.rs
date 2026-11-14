@@ -251,6 +251,16 @@ pub(super) async fn run_completion_postlude(
             "turn bridge withheld final idle status because status-panel completion edit did not commit"
         );
     }
+    let run_key = adk_session_key.as_deref();
+    let close = channel_writeback::close_isolated_run_session;
+    close(
+        &shared_owned,
+        &provider,
+        channel_id,
+        run_key,
+        &inflight_state,
+    )
+    .await;
 
     if completion_r1.permits_channel_effects()
         && !bridge_relay_delegated_to_watcher

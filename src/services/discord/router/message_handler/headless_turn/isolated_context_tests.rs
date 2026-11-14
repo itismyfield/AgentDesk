@@ -32,6 +32,7 @@ struct Fixture {
     stubs: std::path::PathBuf,
     /// Records every runtime API call, the session status hook among them.
     api: Recorder,
+    discord: crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock::DiscordMockState,
     db: crate::db::auto_queue::test_support::TestPostgresDb,
     pool: PgPool,
     shared: Arc<SharedData>,
@@ -103,8 +104,11 @@ async fn fixture() -> Fixture {
     for channel in [PRIMARY, THREAD] {
         discord.name_channel(channel.get(), "discord-named");
     }
-    let (proxy, gateway, _server) = discord_mock::start(discord).await;
+    let (proxy, gateway, _server) = discord_mock::start(discord.clone()).await;
     let ctx = discord_mock::serenity_context(proxy, gateway).await;
+    registry
+        .register_http("claude".to_string(), ctx.http.clone())
+        .await;
     shared.http.cached_serenity_ctx.set(ctx).unwrap();
     let token = "test-token".to_string();
     shared.http.cached_bot_token.set(token).unwrap();
@@ -136,6 +140,7 @@ async fn fixture() -> Fixture {
     Fixture {
         stubs,
         api,
+        discord,
         db,
         pool,
         shared,
@@ -244,8 +249,8 @@ async fn channel_state(fixture: &Fixture, channel: ChannelId) -> String {
     .fetch_one(&fixture.pool)
     .await
     .unwrap();
-    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT session_key, agent_id, claude_session_id, identity_kind FROM sessions
+    let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT session_key, agent_id, claude_session_id FROM sessions
          WHERE channel_id = $1 AND identity_kind = 'discord_channel' ORDER BY id",
     )
     .bind(&id)
@@ -272,22 +277,28 @@ async fn turn_ended(fixture: &Fixture, channel: ChannelId) {
     std::fs::remove_file(fixture.stubs.join("release")).unwrap();
 }
 
-/// The session keys every session status was sent for, and the identity kinds they named.
-fn status_posts(fixture: &Fixture) -> (Vec<String>, Vec<String>) {
-    let (mut keys, mut kinds) = (Vec::new(), Vec::new());
+/// What the runtime API was sent about sessions: the keys of every status, the identity kinds
+/// they named, the keys reported ended, and how many session rows were deleted.
+fn status_posts(fixture: &Fixture) -> (Vec<String>, Vec<String>, Vec<String>, usize) {
+    let (mut keys, mut kinds, mut ended, mut deleted) = (Vec::new(), Vec::new(), Vec::new(), 0);
     for call in fixture.api.take() {
+        deleted += usize::from(call.starts_with("DELETE /api/dispatched-sessions/webhook"));
         let Some(body) = call.strip_prefix("POST /api/dispatched-sessions/webhook ") else {
             continue;
         };
         let body: Value = serde_json::from_str(body).unwrap();
-        keys.push(body["session_key"].as_str().unwrap().to_string());
+        let key = body["session_key"].as_str().unwrap().to_string();
+        if body["status"] == "disconnected" {
+            ended.push(key.clone());
+        }
+        keys.push(key);
         kinds.extend(body["identity_kind"].as_str().map(str::to_owned));
     }
     keys.sort();
     keys.dedup();
     kinds.sort();
     kinds.dedup();
-    (keys, kinds)
+    (keys, kinds, ended, deleted)
 }
 
 #[tokio::test]
@@ -356,17 +367,19 @@ async fn a_headless_run_leaves_its_primary_channel_session_untouched_pg() {
     assert_eq!(channel_state(&fixture, PRIMARY).await, before, "at start");
     turn_ended(&fixture, PRIMARY).await;
     assert_eq!(channel_state(&fixture, PRIMARY).await, before, "at end");
-    // Session status went only to the per-run key, and never as the channel's own identity.
+    // Session status went only to the per-run key, never as the channel's own identity, and
+    // the finished run's own row was reported ended and removed.
+    let snapshot = vec!["scheduled_snapshot".to_string()];
     assert_eq!(
         status_posts(&fixture),
-        (vec![per_run], vec!["scheduled_snapshot".to_string()])
+        (vec![per_run.clone()], snapshot, vec![per_run], 1)
     );
 
     // Positive control: the same routine as a shared-session fresh run does clear its channel.
     let shared_before = channel_state(&fixture, THREAD).await;
-    let label = Some("routine-process 9200 nightly agent8117");
+    let label = "routine-process 9200 nightly agent8117";
     assert_eq!(
-        start(&fixture, THREAD, "thread-agent", routine(None), label).await,
+        start(&fixture, THREAD, "thread-agent", routine(None), Some(label)).await,
         Ok(())
     );
     let shared_after = channel_state(&fixture, THREAD).await;
@@ -379,12 +392,14 @@ async fn a_headless_run_leaves_its_primary_channel_session_untouched_pg() {
     );
     let shared_key = channel_key(
         &fixture.shared,
-        &ProviderKind::Claude.build_tmux_session_name(label.unwrap()),
+        &ProviderKind::Claude.build_tmux_session_name(label),
     );
     turn_ended(&fixture, THREAD).await;
+    // A turn that shares its channel's session never ends or removes that session's row.
+    let channel = vec!["discord_channel".to_string()];
     assert_eq!(
         status_posts(&fixture),
-        (vec![shared_key], vec!["discord_channel".to_string()])
+        (vec![shared_key], channel, Vec::new(), 0)
     );
     fixture.db.drop().await;
 }
@@ -431,20 +446,30 @@ async fn a_headless_mark_that_cannot_be_isolated_is_refused_without_a_shared_fal
     fixture.db.drop().await;
 }
 
-/// A headless routine of the fixture's agent, claimed for the real launcher:
-/// `(store, executor, claimed run, routine id)`.
-async fn headless_claim(
-    fixture: &Fixture,
-) -> (
+type Claim = (
     RoutineStore,
     RoutineAgentExecutor,
     ClaimedRoutineRun,
     String,
-) {
+);
+
+/// A headless routine of the fixture's agent, claimed for the real launcher:
+/// `(store, executor, claimed run, routine id)`.
+async fn headless_claim(fixture: &Fixture) -> Claim {
+    routine_claim(fixture, true, None, 0).await
+}
+
+/// A fresh routine claimed for the real launcher: headless, or null-mode with its saved thread.
+async fn routine_claim(
+    fixture: &Fixture,
+    headless: bool,
+    thread: Option<ChannelId>,
+    retries: i32,
+) -> Claim {
     let pool = &fixture.pool;
     sqlx::query(
         "INSERT INTO agents (id, name, provider, discord_channel_cc)
-         VALUES ('agent8117', 'A', 'claude', $1)",
+         VALUES ('agent8117', 'A', 'claude', $1) ON CONFLICT (id) DO NOTHING",
     )
     .bind(PRIMARY.get().to_string())
     .execute(pool)
@@ -458,7 +483,7 @@ async fn headless_claim(
     let routine_row = NewRoutine {
         agent_id: Some("agent8117".into()),
         fallback_agent_id: None,
-        max_retries: Some(0),
+        max_retries: Some(retries),
         script_ref: "nightly.js".into(),
         name: "nightly".into(),
         status: None,
@@ -466,19 +491,64 @@ async fn headless_claim(
         schedule: None,
         next_due_at: Some(chrono::Utc::now() - chrono::Duration::minutes(1)),
         checkpoint: None,
-        discord_thread_id: None,
+        discord_thread_id: thread.map(|thread| thread.get().to_string()),
         timeout_secs: None,
     };
-    let headless = ExecutionDefinition {
+    let definition = ExecutionDefinition {
         mode: RoutineExecutionMode::Headless,
         runner: json!({"kind": "quickjs", "script_ref": "nightly.js"}),
     };
-    let attached = store.attach_routine_with_execution(routine_row, Some(&headless), 3);
+    let definition = headless.then_some(&definition);
+    let attached = store.attach_routine_with_execution(routine_row, definition, 3);
     let routine_id = attached.await.unwrap().id;
     let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
     let registry = Some(fixture.registry.clone());
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60);
+    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60)
+        .with_headless_fresh_agents(true);
     (store, executor, claimed, routine_id)
+}
+
+/// Makes a deferred or retrying run due now, its deferral window opened `opened_mins` ago.
+async fn due_now(fixture: &Fixture, run: &str, opened_mins: i64) {
+    let opened = (chrono::Utc::now() - chrono::Duration::minutes(opened_mins)).to_rfc3339();
+    sqlx::query(
+        "UPDATE routine_runs
+         SET result_json = jsonb_set(result_json, '{deferred_since}', to_jsonb($2::text)),
+             next_retry_at = NOW() - INTERVAL '1 second'
+         WHERE id = $1",
+    )
+    .bind(run)
+    .bind(opened)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+}
+
+/// `(status, retry_count, result status)` of a run.
+async fn run_state(fixture: &Fixture, run: &str) -> (String, i32, Option<String>) {
+    sqlx::query_as(
+        "SELECT status, retry_count, result_json ->> 'status' FROM routine_runs WHERE id = $1",
+    )
+    .bind(run)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap()
+}
+
+/// The channel's session rows, whole.
+async fn session_rows(fixture: &Fixture, channel: ChannelId) -> Vec<String> {
+    sqlx::query_scalar("SELECT to_jsonb(s)::text FROM sessions s WHERE channel_id = $1 ORDER BY id")
+        .bind(channel.get().to_string())
+        .fetch_all(&fixture.pool)
+        .await
+        .unwrap()
+}
+
+fn nothing_ran(fixture: &Fixture, channels: &[ChannelId]) -> bool {
+    let idle = |channel: &ChannelId| {
+        load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).is_none()
+    };
+    !fixture.stubs.join("spawned").exists() && channels.iter().all(idle)
 }
 
 #[tokio::test]
@@ -498,6 +568,7 @@ async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context
     let (store, executor, claimed, routine_id) = headless_claim(&fixture).await;
     let (run, since) = (claimed.run_id.clone(), chrono::Utc::now());
     let before = channel_state(&fixture, PRIMARY).await;
+    let primary_rows = session_rows(&fixture, PRIMARY).await;
 
     // The real launcher starts the run it claimed as headless on the agent's primary channel.
     let prompt = "nightly report".to_string();
@@ -518,6 +589,26 @@ async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context
     let per_run = row.session_key.clone().unwrap();
     assert!(per_run.contains("routine-process"), "{per_run}");
     assert_eq!(channel_state(&fixture, PRIMARY).await, before, "at start");
+    // While it runs, the run has a session row of its own, apart from the primary's.
+    let own: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT session_key, identity_kind FROM sessions WHERE channel_id = $1 ORDER BY id",
+    )
+    .bind(&primary)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let primary_key = channel_key(
+        &fixture.shared,
+        &ProviderKind::Claude.build_tmux_session_name("primary-agent"),
+    );
+    let kind = |kind: &str| Some(kind.to_string());
+    assert_eq!(
+        own,
+        [
+            (primary_key, kind("discord_channel")),
+            (per_run.clone(), kind("scheduled_snapshot"))
+        ]
+    );
     std::fs::write(fixture.stubs.join("answer"), ANSWER).unwrap();
     turn_ended(&fixture, PRIMARY).await;
 
@@ -606,58 +697,14 @@ async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context
     );
     drop(tx);
 
-    // The run's session row is its own; the primary's row keeps its provider session.
-    let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT session_key, identity_kind, claude_session_id FROM sessions
-         WHERE channel_id = $1 ORDER BY id",
-    )
-    .bind(&primary)
-    .fetch_all(pool)
-    .await
-    .unwrap();
-    let primary_key = channel_key(
-        &fixture.shared,
-        &ProviderKind::Claude.build_tmux_session_name("primary-agent"),
-    );
-    let kind = |kind: &str| Some(kind.to_string());
-    assert_eq!(rows.len(), 2, "{rows:?}");
-    assert_eq!(
-        rows[0],
-        (primary_key, kind("discord_channel"), kind("primary-sid"))
-    );
-    assert_eq!(
-        (&rows[1].0, &rows[1].1),
-        (&per_run, &kind("scheduled_snapshot"))
-    );
-    // Once the run's row has gone stale, the existing session maintenance disconnects and then
-    // removes it; the primary's own row is not its to touch.
+    // The finished run's own session row is gone; the primary's row is byte-for-byte as before.
     let over = async {
         while load_inflight_state_read_only(&ProviderKind::Claude, PRIMARY.get()).is_some() {
             tokio::task::yield_now().await;
         }
     };
     await_within(over, WAIT_CAP).await;
-    sqlx::query(
-        "UPDATE sessions SET last_heartbeat = NOW() - INTERVAL '7 hours' WHERE session_key = $1",
-    )
-    .bind(&per_run)
-    .execute(pool)
-    .await
-    .unwrap();
-    use crate::db::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg;
-    use crate::services::dispatched_sessions::hosted_cleanup::cleanup_disconnected_sessions_pg;
-    let reclaimed = (
-        gc_stale_fixed_working_sessions_db_pg(pool).await,
-        cleanup_disconnected_sessions_pg(pool).await,
-    );
-    assert_eq!(reclaimed, (1, Ok(1)));
-    let left: Vec<(String, String)> =
-        sqlx::query_as("SELECT session_key, status FROM sessions WHERE channel_id = $1")
-            .bind(&primary)
-            .fetch_all(pool)
-            .await
-            .unwrap();
-    assert_eq!(left, [(rows[0].0.clone(), "idle".to_string())]);
+    assert_eq!(session_rows(&fixture, PRIMARY).await, primary_rows);
     api.abort();
     fixture.db.drop().await;
 }
@@ -691,17 +738,7 @@ async fn a_headless_run_waits_behind_a_busy_primary_and_starts_no_provider_pg() 
     );
 
     // The deferral window closes with the person still at work: the run fails unstarted.
-    sqlx::query(
-        "UPDATE routine_runs
-         SET result_json = jsonb_set(result_json, '{deferred_since}', to_jsonb($2::text)),
-             next_retry_at = NOW() - INTERVAL '1 second'
-         WHERE id = $1",
-    )
-    .bind(&run)
-    .bind((chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339())
-    .execute(&fixture.pool)
-    .await
-    .unwrap();
+    due_now(&fixture, &run, 11).await;
     let polled = executor.poll_agent_runs(&store, 10, false).await.unwrap();
     let closed: Vec<_> = polled.iter().map(|run| run.status.as_str()).collect();
     assert_eq!(closed, ["failed"], "{polled:?}");
@@ -713,6 +750,236 @@ async fn a_headless_run_waits_behind_a_busy_primary_and_starts_no_provider_pg() 
     let active = active.cancel_token.expect("the person's turn");
     assert!(Arc::ptr_eq(&active, &human));
     assert!(!human.cancelled.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(channel_state(&fixture, PRIMARY).await, before);
+    // The run names what it waited for.
+    let waited = ("failed".to_string(), 0, Some("primary_busy".to_string()));
+    assert_eq!(run_state(&fixture, &run).await, waited);
+    fixture.db.drop().await;
+}
+
+#[tokio::test]
+async fn a_headless_claim_whose_launch_lost_its_contract_is_refused_before_admission_pg() {
+    if !api_child(&format!(
+        "{TEST}a_headless_claim_whose_launch_lost_its_contract_is_refused_before_admission_pg"
+    )) {
+        return;
+    }
+    let fixture = fixture().await;
+    let (_store, _executor, claimed, _) = headless_claim(&fixture).await;
+    let before = channel_state(&fixture, PRIMARY).await;
+    // The launch names its claimed run, as the launcher's metadata does.
+    let launch = |edit: &dyn Fn(&mut Value)| {
+        let mut metadata = routine(Some(json!("headless")));
+        metadata["routine_run_id"] = json!(claimed.run_id);
+        metadata["silent"] = json!(true);
+        edit(&mut metadata);
+        metadata
+    };
+    let cases: [(&str, &dyn Fn(&mut Value)); 6] = [
+        ("no mark", &|launch| {
+            drop(launch.as_object_mut().unwrap().remove("routine_run_mode"))
+        }),
+        ("null mark", &|launch| {
+            launch["routine_run_mode"] = Value::Null
+        }),
+        ("another mode", &|launch| {
+            launch["routine_run_mode"] = json!("thread")
+        }),
+        ("unreadable mark", &|launch| {
+            launch["routine_run_mode"] = json!(true)
+        }),
+        ("not silent", &|launch| launch["silent"] = json!(false)),
+        ("silent missing", &|launch| {
+            drop(launch.as_object_mut().unwrap().remove("silent"))
+        }),
+    ];
+    for (case, edit) in cases {
+        let refused = start(
+            &fixture,
+            PRIMARY,
+            "primary-agent",
+            launch(edit),
+            Some(LABEL),
+        )
+        .await;
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.contains("lost the headless contract")),
+            "{case}: {refused:?}"
+        );
+        assert!(nothing_ran(&fixture, &[PRIMARY]), "{case}");
+        assert!(!turn_active(&fixture, PRIMARY).await, "{case}");
+        assert_eq!(channel_state(&fixture, PRIMARY).await, before, "{case}");
+    }
+    // The whole contract starts the isolated run.
+    let whole = launch(&|_| {});
+    assert_eq!(
+        start(&fixture, PRIMARY, "primary-agent", whole, Some(LABEL)).await,
+        Ok(())
+    );
+    let row = load_inflight_state_read_only(&ProviderKind::Claude, PRIMARY.get()).unwrap();
+    assert!(row.routine_presentation.isolated_run());
+    turn_ended(&fixture, PRIMARY).await;
+    fixture.db.drop().await;
+}
+
+#[tokio::test]
+async fn a_headless_run_keeps_its_retries_for_starts_that_submitted_nothing_pg() {
+    if !api_child(&format!(
+        "{TEST}a_headless_run_keeps_its_retries_for_starts_that_submitted_nothing_pg"
+    )) {
+        return;
+    }
+    const ANSWER: &str = "retried-run-answer-8117";
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let fixture = fixture().await;
+    let api = real_api(&fixture).await;
+    let (store, executor, claimed, _) = routine_claim(&fixture, true, None, 2).await;
+    let run = claimed.run_id.clone();
+    let channel = |value: Option<String>| async {
+        sqlx::query("UPDATE agents SET discord_channel_cc = $1 WHERE id = 'agent8117'")
+            .bind(value)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+    };
+    let polled = || async {
+        due_now(&fixture, &run, 0).await;
+        let polled = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+        polled
+            .iter()
+            .map(|run| run.status.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // The agent has no primary channel: both starts fail before anything is submitted, and
+    // each only spends one retry.
+    channel(None).await;
+    let prompt = "nightly report".to_string();
+    let start = executor.start_agent_run(&store, claimed, prompt, None, None, None, None, false);
+    assert_eq!(start.await.unwrap().status, "running");
+    assert_eq!(run_state(&fixture, &run).await.1, 1);
+    assert_eq!(polled().await, ["running"]);
+    assert_eq!(run_state(&fixture, &run).await.1, 2);
+    assert!(nothing_ran(&fixture, &[PRIMARY]));
+
+    // The channel is back: the same run starts once and succeeds.
+    channel(Some(PRIMARY.get().to_string())).await;
+    assert_eq!(polled().await, ["running"]);
+    assert!(turn_active(&fixture, PRIMARY).await);
+    std::fs::write(fixture.stubs.join("answer"), ANSWER).unwrap();
+    turn_ended(&fixture, PRIMARY).await;
+    let closed = async {
+        loop {
+            let polled = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+            if let Some(run) = polled.first() {
+                break run.status.clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    assert_eq!(await_within(closed, WAIT_CAP).await, "succeeded");
+    let spawned = std::fs::read_to_string(fixture.stubs.join("spawned")).unwrap();
+    assert_eq!(spawned.lines().count(), 1);
+    api.abort();
+    fixture.db.drop().await;
+}
+
+#[tokio::test]
+async fn an_unreachable_routine_thread_defers_the_run_and_never_runs_on_the_primary_pg() {
+    if !api_child(&format!(
+        "{TEST}an_unreachable_routine_thread_defers_the_run_and_never_runs_on_the_primary_pg"
+    )) {
+        return;
+    }
+    let fixture = fixture().await;
+    fixture.discord.add_thread(THREAD.get(), PRIMARY.get());
+    let before = channel_state(&fixture, PRIMARY).await;
+    let prompt = || "nightly report".to_string();
+    let thread_of = |routine: String| async move {
+        let saved: Option<String> =
+            sqlx::query_scalar("SELECT discord_thread_id FROM routines WHERE id = $1")
+                .bind(routine)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        saved
+    };
+
+    // Discord answers 500 for the saved thread: the run waits for that same thread.
+    let (store, executor, claimed, routine_id) =
+        routine_claim(&fixture, false, Some(THREAD), 0).await;
+    let run = claimed.run_id.clone();
+    fixture.discord.fail_channel(THREAD.get());
+    let start = executor.start_agent_run(&store, claimed, prompt(), None, None, None, None, false);
+    let deferred = start.await.unwrap();
+    assert_eq!(deferred.status, "deferred", "{deferred:?}");
+    assert_eq!(
+        deferred.result_json.unwrap()["deferred_reason"],
+        "thread_unavailable"
+    );
+    assert!(nothing_ran(&fixture, &[PRIMARY, THREAD]));
+    assert_eq!(channel_state(&fixture, PRIMARY).await, before);
+    let saved = Some(THREAD.get().to_string());
+    assert_eq!(thread_of(routine_id.clone()).await, saved);
+
+    // The thread answers again inside the window: the same run starts on the same thread.
+    fixture.discord.heal_channel(THREAD.get());
+    due_now(&fixture, &run, 1).await;
+    let polled = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    assert_eq!(polled.len(), 1, "{polled:?}");
+    let started = polled[0].result_json.clone().unwrap();
+    assert_eq!(
+        (polled[0].status.as_str(), &started["channel_id"]),
+        ("running", &json!(THREAD.get().to_string())),
+        "{started}"
+    );
+    assert!(turn_active(&fixture, THREAD).await && !turn_active(&fixture, PRIMARY).await);
+    assert_eq!(thread_of(routine_id).await, saved);
+    turn_ended(&fixture, THREAD).await;
+    assert_eq!(channel_state(&fixture, PRIMARY).await, before);
+    sqlx::query("UPDATE routine_runs SET status = 'failed' WHERE id = $1")
+        .bind(&run)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    std::fs::remove_file(fixture.stubs.join("spawned")).unwrap();
+    assert!(crate::services::discord::inflight::clear_inflight_state(
+        &ProviderKind::Claude,
+        THREAD.get()
+    ));
+
+    // The thread stays unreachable past the window: the run fails for that reason, unstarted.
+    let (store, executor, claimed, _) = routine_claim(&fixture, false, Some(THREAD), 0).await;
+    let run = claimed.run_id.clone();
+    fixture.discord.fail_channel(THREAD.get());
+    let start = executor.start_agent_run(&store, claimed, prompt(), None, None, None, None, false);
+    assert_eq!(start.await.unwrap().status, "deferred");
+    due_now(&fixture, &run, 11).await;
+    let polled = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    let closed: Vec<_> = polled.iter().map(|run| run.status.as_str()).collect();
+    assert_eq!(closed, ["failed"], "{polled:?}");
+    let unavailable = Some("thread_unavailable".to_string());
+    assert_eq!(
+        run_state(&fixture, &run).await,
+        ("failed".into(), 0, unavailable)
+    );
+    assert!(nothing_ran(&fixture, &[PRIMARY, THREAD]));
+    fixture.discord.heal_channel(THREAD.get());
+
+    // Discord refuses for good (the saved thread and the replacement both 404): the run fails
+    // at once and still does not run on the primary.
+    let gone = ChannelId::new(1_479_671_302_387_081_173);
+    let (store, executor, claimed, _) = routine_claim(&fixture, false, Some(gone), 0).await;
+    let run = claimed.run_id.clone();
+    let start = executor.start_agent_run(&store, claimed, prompt(), None, None, None, None, false);
+    let failed = start.await.unwrap();
+    assert_eq!(failed.status, "failed", "{failed:?}");
+    let error = failed.error.unwrap();
+    assert!(error.contains("create routine discord thread"), "{error}");
+    assert_eq!(run_state(&fixture, &run).await.0, "failed");
+    assert!(nothing_ran(&fixture, &[PRIMARY, THREAD]));
     assert_eq!(channel_state(&fixture, PRIMARY).await, before);
     fixture.db.drop().await;
 }

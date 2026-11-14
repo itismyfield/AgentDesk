@@ -10,10 +10,11 @@ pub(crate) const HEADLESS_FAILURE_REASON_CODE: &str = "routine_headless_failure"
 pub(crate) const FAILURE_INCIDENT_REASON_CODE: &str = "routine_failure_incident";
 const NOTICE_TTL_SECS: i64 = 24 * 60 * 60;
 /// Failure classes a notice may name; anything else is reported generically.
-const SAFE_FAILURE_CLASSES: [(&str, &str); 4] = [
+const SAFE_FAILURE_CLASSES: [(&str, &str); 5] = [
     ("timeout", "시간 초과"),
     ("provider_error", "provider 오류"),
     ("primary_busy", "본 채널 사용 중"),
+    ("thread_unavailable", "루틴 스레드 준비 실패"),
     ("deferred", "시작 대기 소진"),
 ];
 

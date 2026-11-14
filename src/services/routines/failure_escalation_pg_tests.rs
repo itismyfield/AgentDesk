@@ -319,6 +319,41 @@ async fn a_headless_routine_logs_no_lifecycle_event_and_no_census_verdict_pg() {
     );
     assert!(seen[2].2, "a null-mode census run records its verdict");
 
+    // A census run whose mode cannot be read is not assumed to have a thread: nothing is
+    // recorded or resolved for it.
+    let mut row = routine("unread");
+    (row.script_ref, row.agent_id) = (census.to_string(), None);
+    let attached = store
+        .attach_routine_with_execution(row, None, 3)
+        .await
+        .unwrap();
+    let run_id = claim(&store).await;
+    let outcome = RoutineRunOutcome {
+        run_id: run_id.clone(),
+        routine_id: attached.id.clone(),
+        script_ref: census.to_string(),
+        action: "complete".into(),
+        status: "succeeded".into(),
+        result_json: None,
+        error: None,
+        fresh_context_guaranteed: false,
+    };
+    sqlx::query("ALTER TABLE routine_runs RENAME COLUMN run_spec TO run_spec_unread")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let unread = logger.log_run_outcome(&store, &outcome).await;
+    let sections: String =
+        sqlx::query_scalar("SELECT discord_log_sections::text FROM routine_runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (unread.status.as_str(), sections.contains("public_result")),
+        ("failed", false)
+    );
+
     pool.close().await;
     db.drop().await;
 }

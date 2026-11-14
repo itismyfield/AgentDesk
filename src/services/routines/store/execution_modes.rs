@@ -96,6 +96,19 @@ impl RoutineStore {
         Ok(forbidden.unwrap_or(false))
     }
 
+    /// Whether the claim pinned "no primary fallback" for a thread that cannot be prepared.
+    pub async fn run_forbids_primary_fallback(&self, run_id: &str) -> Result<bool> {
+        let forbidden: Option<bool> = sqlx::query_scalar(
+            "SELECT COALESCE(run_spec ->> 'primary_fallback' = 'false', FALSE)
+             FROM routine_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("read routine run {run_id} fallback policy: {e}"))?;
+        Ok(forbidden.unwrap_or(false))
+    }
+
     /// Explicit-mode runs refuse the legacy dynamic DM override; null-mode runs keep it.
     pub async fn run_forbids_dm_override(&self, run_id: &str) -> Result<bool> {
         let explicit: Option<bool> = sqlx::query_scalar(

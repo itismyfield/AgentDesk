@@ -99,6 +99,10 @@ impl RoutineAgentExecutor {
                     let _ = store
                         .record_discord_log_result(&claimed.run_id, "failed", Some(&warning))
                         .await;
+                    // The claim decides: a run pinned so never runs on the primary instead.
+                    if store.run_forbids_primary_fallback(&claimed.run_id).await? {
+                        return Err(error);
+                    }
                     tracing::warn!(
                         routine_id = claimed.routine_id,
                         run_id = claimed.run_id,
@@ -225,11 +229,11 @@ impl RoutineAgentExecutor {
         .map_err(|error| start_deferral::headless_start_error(agent_id, error))?;
 
         if outcome.turn_id != turn_id {
-            return Err(anyhow!(
+            return Err(run_policy::SubmittedStartError(format!(
                 "reserved routine agent turn id mismatch: expected {} but started {}",
-                turn_id,
-                outcome.turn_id
-            ));
+                turn_id, outcome.turn_id
+            ))
+            .into());
         }
         let disposition = owner_input::disposition(outcome.status);
         let started = disposition == AgentStartDisposition::Started;

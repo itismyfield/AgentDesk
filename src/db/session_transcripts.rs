@@ -378,6 +378,20 @@ pub(crate) async fn routine_attempt_owns_turn_pg(
         .is_ok_and(|rows| rows.len() == 1)
 }
 
+/// Whether routine run `run_id` was claimed as headless; `None` when no such run exists.
+pub(crate) async fn routine_run_claimed_headless_pg(
+    pool: &PgPool,
+    run_id: &str,
+) -> sqlx::Result<Option<bool>> {
+    sqlx::query_scalar(
+        "SELECT COALESCE(run_spec ->> 'execution_mode' = 'headless', FALSE)
+         FROM routine_runs WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn persist_turn_db(
     pg_pool: Option<&PgPool>,
     entry: PersistSessionTranscript<'_>,
