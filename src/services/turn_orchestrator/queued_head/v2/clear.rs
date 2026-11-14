@@ -65,7 +65,7 @@ pub(crate) fn clear_channel(
             .ok_or("no V2 owner")?
             .clear_all(keep)
     });
-    let cleared = cleared.or_else(|error| {
+    let cleared: Result<Vec<MessageId>, String> = cleared.or_else(|error| {
         tracing::warn!(%error, "V2 clear will readopt the queue and retry once");
         // An explicit clear may replace a stale owner, but still publishes through the same CAS.
         let (path, namespace) = state
