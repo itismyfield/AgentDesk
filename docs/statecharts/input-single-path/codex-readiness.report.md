@@ -1,8 +1,8 @@
-# Codex readiness, busy, end and /stop judgment (#8082 design d3)
+# Codex readiness, busy, end and /stop judgment (#8082 design d3, slice A)
 
 Model: [`CodexReadiness.tla`](CodexReadiness.tla), view [`codex-readiness.view.mjs`](codex-readiness.view.mjs).
 Written against production code `082c77aa4e06b81c76b614f55b8fed73ce01923f`. Design: [`docs/codex-readiness-rollout.design.md`](../../codex-readiness-rollout.design.md).
-Design model only: no production code changed.
+The d3 model was written before any production change. Slice A added the `EnterGap` constant after the Codex 0.169.0 capture (`tests/fixtures/hook_payload/codex-0.169.0.json`); the 68 d3 configs keep `EnterGap = "hook"` and their results.
 
 ## What the model covers
 
@@ -38,7 +38,7 @@ Value ranges come from the entry-point table of the design (section 1): `NativeE
 
 ## Results
 
-`scripts/ci/statecharts_tlc.py` on the 68 configs: GREEN 36, expected RED 32, unexpected 0. The `statechart` command gave the same rule sets; every run ended with exit 0 (36) or 1 (32).
+`scripts/ci/statecharts_tlc.py` on the 74 configs: GREEN 40, expected RED 34, unexpected 0. For the 68 d3 configs the `statechart` command gave the same rule sets; every run ended with exit 0 (36) or 1 (32).
 
 ### Before and after, per scenario and host (pane unread unless noted)
 
@@ -71,6 +71,21 @@ On tmux the unread pane alone is not a liveness defect before: the pane is repla
 | `CodexReadyAfterArchivedSilentTurn` | `CodexNoRunningKill` | a person's turn on an archived rollout stays silent and childless past the quiet window: the evidence expires and stage 4 replaces the pane. Depends on whether Codex archives a live rollout (unconfirmed) |
 
 `CodexReadyAfterSilentModel` (a quiet running turn that reads open) is GREEN: an open turn is never relaunched. `CodexReadyAfterSilentTool` (a person's turn on an archived rollout running a quiet tool) is GREEN: the child check holds both the expiry and stage 4.
+
+### The Enter gap as Codex 0.169.0 writes it (slice A)
+
+The d3 model took the UserPromptSubmit hook as delivered before `task_started` is written (`EnterGap = "hook"`, the 0.157.1 reading). The 0.169.0 capture shows the other order: `task_started` is written about 13 ms after the Enter, and the SessionStart and UserPromptSubmit hooks arrive 0.05 s to 0.7 s after that record. So on 0.169.0 the hook never covers the gap; the start record closes it. `EnterGap = "record"` takes the record as written with the Enter, `EnterGap = "silent"` keeps the moment before it, in which no signal says busy.
+
+| cfg | `EnterGap` | Result | Meaning |
+|---|---|---|---|
+| `CodexReadyAfterPerson`, `…Herdr` (d3) | hook | GREEN, unchanged | the hook covers the gap (0.157.1) |
+| `CodexReadyAfterPersonRecordFirst`, `…Herdr` | record | GREEN | the open turn is the Busy evidence from the Enter on |
+| `CodexReadyAfterEnterGapSilent` | silent | RED `CodexNoEarlyInput` | the moment between the Enter and the start record has no signal; residual R3 restated for 0.169.0 |
+| `CodexReadyAfterUnnamedPersonRecordFirst` | record | GREEN | a person's turn that ends unnamed with no Stop hook is still replaced and delivered |
+| `CodexReadyAfterSilentToolRecordFirst` | record | GREEN | on an archived rollout the hook that follows the unreadable start record holds Busy while a child runs |
+| `CodexReadyAfterArchivedSilentTurnRecordFirst` | record | RED `CodexNoRunningKill` | residual R4, same as with the hook first |
+
+No liveness result changed: every config that was GREEN or RED on `CodexPendingEventuallyDelivered` in d3 is the same, and no new config breaks it.
 
 In d2 the UserPromptSubmit evidence was released by an end signal only. That held an input for good after a person's turn ended unnamed with no Stop hook, and after a hook that no turn followed (`CodexReadyUpsUntilEnd`, `CodexReadyUpsUntilEndBlocked`). Releasing it removes that hold and lets the archived-rollout residual open without a restart.
 

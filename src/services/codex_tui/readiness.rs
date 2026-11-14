@@ -240,9 +240,9 @@ pub(crate) fn judge_in(tmux: &str, cwd: Option<&str>) -> Verdict {
             Some(_) => None,
             None => crate::services::tmux_diagnostics::tmux_session_pane_cwd(tmux),
         };
-        let owned = cwd.or(pane.as_deref()).is_none_or(|cwd| {
-            super::rollout_tail::rollout_file_matches_cwd(&path, Path::new(cwd))
-        });
+        let owned = cwd
+            .or(pane.as_deref())
+            .is_none_or(|cwd| super::rollout_tail::rollout_file_matches_cwd(&path, Path::new(cwd)));
         if !owned {
             return Verdict::Unknown(Why::NoSource);
         }
@@ -309,7 +309,10 @@ fn quiet(path: &Path, seen: DateTime<Utc>, now: DateTime<Utc>) -> bool {
         Some(modified) => SystemTime::now()
             .duration_since(modified)
             .is_ok_and(|age| age >= QUIET),
-        None => now.signed_duration_since(seen).to_std().is_ok_and(|age| age >= QUIET),
+        None => now
+            .signed_duration_since(seen)
+            .to_std()
+            .is_ok_and(|age| age >= QUIET),
     }
 }
 
@@ -344,7 +347,10 @@ pub(crate) fn decide(pane: Pane<'_>, now: DateTime<Utc>) -> Verdict {
     if let Some((submitted, seen)) = &known.prompt {
         let shown = turn.as_deref() == Some(submitted.as_str())
             || started.is_some_and(|started| started > *seen)
-            || known.stop.as_ref().is_some_and(|(stopped, _)| stopped == submitted);
+            || known
+                .stop
+                .as_ref()
+                .is_some_and(|(stopped, _)| stopped == submitted);
         if shown || (quiet(&key.path, *seen, now) && (pane.children)() == Descendants::NoneObserved)
         {
             if let Some(entry) = evidence().get_mut(&key)

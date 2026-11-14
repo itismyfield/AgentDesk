@@ -404,18 +404,29 @@ fn codex_0_169_hooks_and_rollout_records_name_the_same_turns() {
     for run in runs(&fixture) {
         let records = run["rollout_turn_records"].as_array().expect("records");
         let of = |kind: &str| -> Vec<&Value> {
-            let named = records.iter().filter(|record| record["payload"]["type"] == kind);
+            let named = records
+                .iter()
+                .filter(|record| record["payload"]["type"] == kind);
             named.collect()
         };
         let turns = |kind: &str| -> Vec<&str> {
             let named = of(kind).into_iter();
-            named.map(|record| text(&record["payload"], "turn_id")).collect()
+            named
+                .map(|record| text(&record["payload"], "turn_id"))
+                .collect()
         };
         let run_events = run["events"].as_array().expect("events");
         // The session header parses, and each hook names the rollout of its own session.
         let mut sessions = Vec::new();
-        for (index, record) in run["rollout_session_meta"].as_array().expect("meta").iter().enumerate() {
-            let path = dir.path().join(format!("{}-{index}.jsonl", text(run, "name")));
+        for (index, record) in run["rollout_session_meta"]
+            .as_array()
+            .expect("meta")
+            .iter()
+            .enumerate()
+        {
+            let path = dir
+                .path()
+                .join(format!("{}-{index}.jsonl", text(run, "name")));
             std::fs::write(&path, format!("{record}\n")).expect("write rollout header");
             let meta = read_rollout_session_meta(&path).expect("session_meta parses");
             sessions.push(meta.id.expect("session_meta.id"));
@@ -435,7 +446,7 @@ fn codex_0_169_hooks_and_rollout_records_name_the_same_turns() {
                 }
                 // A UserPromptSubmit names a started turn; its start record was written first.
                 "UserPromptSubmit" => {
-                    let started = of("task_started").into_iter();
+                    let mut started = of("task_started").into_iter();
                     let started = started
                         .find(|record| record["payload"]["turn_id"].as_str() == turn)
                         .expect("the submitted turn's start record");
@@ -454,7 +465,11 @@ fn codex_0_169_hooks_and_rollout_records_name_the_same_turns() {
         let ends = [turns("task_complete"), turns("turn_aborted")].concat();
         assert!(turns("task_started").iter().all(|turn| ends.contains(turn)));
         // An interrupted turn fires no Stop.
-        assert!(turns("turn_aborted").iter().all(|turn| !stops.contains(turn)));
+        assert!(
+            turns("turn_aborted")
+                .iter()
+                .all(|turn| !stops.contains(turn))
+        );
     }
     assert_eq!(stops.len(), 2, "captured Stop hooks");
     // The turn the model failed ends with its own record and no Stop.
@@ -463,9 +478,16 @@ fn codex_0_169_hooks_and_rollout_records_name_the_same_turns() {
 
     // /clear fires no hook; the next prompt opens a new session and its SessionStart says so.
     let cleared = events(&fixture, "tui_bypass_startup_clear_abort");
-    let starts = cleared.iter().filter(|event| event["event"] == "SessionStart");
+    let starts = cleared
+        .iter()
+        .filter(|event| event["event"] == "SessionStart");
     let sources: Vec<_> = starts
-        .map(|event| (text(&event["payload"], "source"), text(&event["payload"], "session_id")))
+        .map(|event| {
+            (
+                text(&event["payload"], "source"),
+                text(&event["payload"], "session_id"),
+            )
+        })
         .collect();
     assert_eq!(sources.len(), 2);
     assert_eq!((sources[0].0, sources[1].0), ("startup", "clear"));

@@ -155,7 +155,9 @@ fn the_captured_0_169_timeline_is_judged_step_by_step() {
         }
         for record in run["rollout_turn_records"].as_array().unwrap() {
             let turn = &record["payload"]["turn_id"];
-            let hook = events.iter().find(|hook| hook["payload"]["turn_id"] == *turn);
+            let hook = events
+                .iter()
+                .find(|hook| hook["payload"]["turn_id"] == *turn);
             let path = rollout(&hook.expect("a hook names the record's turn")["payload"]);
             steps.push((time(&record["timestamp"]) + shift, path, None, record));
         }
@@ -231,16 +233,96 @@ fn a_hook_is_evidence_only_from_inside_its_own_execution() {
     let own = Some(&world.ctx);
     let inside = Some(at(2));
     let refused: [(&str, bool, &str, &HookEventKind, Value, _, _); 10] = [
-        ("an unaccepted binding observation", false, "codex", &stop, payload.clone(), own, inside),
-        ("another provider", true, "claude", &stop, payload.clone(), own, inside),
-        ("another hook kind", true, "codex", &start, payload.clone(), own, inside),
-        ("no binding context", true, "codex", &stop, payload.clone(), None, inside),
-        ("a context that is not the stored one", true, "codex", &stop, payload.clone(), Some(&renamed), inside),
-        ("no publish time", true, "codex", &stop, payload.clone(), own, None),
-        ("published before the launch", true, "codex", &stop, payload.clone(), own, Some(at(-1))),
-        ("published in the future", true, "codex", &stop, payload.clone(), own, Some(at(7200))),
-        ("no turn id", true, "codex", &stop, json!({"transcript_path": path}), own, inside),
-        ("no transcript path", true, "codex", &stop, json!({"turn_id": "t1"}), own, inside),
+        (
+            "an unaccepted binding observation",
+            false,
+            "codex",
+            &stop,
+            payload.clone(),
+            own,
+            inside,
+        ),
+        (
+            "another provider",
+            true,
+            "claude",
+            &stop,
+            payload.clone(),
+            own,
+            inside,
+        ),
+        (
+            "another hook kind",
+            true,
+            "codex",
+            &start,
+            payload.clone(),
+            own,
+            inside,
+        ),
+        (
+            "no binding context",
+            true,
+            "codex",
+            &stop,
+            payload.clone(),
+            None,
+            inside,
+        ),
+        (
+            "a context that is not the stored one",
+            true,
+            "codex",
+            &stop,
+            payload.clone(),
+            Some(&renamed),
+            inside,
+        ),
+        (
+            "no publish time",
+            true,
+            "codex",
+            &stop,
+            payload.clone(),
+            own,
+            None,
+        ),
+        (
+            "published before the launch",
+            true,
+            "codex",
+            &stop,
+            payload.clone(),
+            own,
+            Some(at(-1)),
+        ),
+        (
+            "published in the future",
+            true,
+            "codex",
+            &stop,
+            payload.clone(),
+            own,
+            Some(at(7200)),
+        ),
+        (
+            "no turn id",
+            true,
+            "codex",
+            &stop,
+            json!({"transcript_path": path}),
+            own,
+            inside,
+        ),
+        (
+            "no transcript path",
+            true,
+            "codex",
+            &stop,
+            json!({"turn_id": "t1"}),
+            own,
+            inside,
+        ),
     ];
     for (name, accepted, provider, kind, payload, context, published) in refused {
         note_hook(accepted, provider, kind, &payload, context, published);

@@ -1,8 +1,9 @@
 # Codex 준비·작업 중·/stop 판정을 rollout·훅·프로세스 신호로 옮기기 — #8082 설계 d3
 
 기준 코드: `082c77aa4e06b81c76b614f55b8fed73ce01923f` (#8081 B1 리뷰 CLEAN head, main 미착지).
-이 문서는 설계·모델만 다룬다. 생산 코드는 바꾸지 않았고 빌드·시험도 돌리지 않았다.
+d3까지는 설계·모델만 다뤘다. 구현은 5절의 조각 순서로 들어가고, 조각 A가 확인한 사실은 **A1** 표시로 적었다.
 `src/services/` 접두어는 생략한다. 표기: [C] 이 base의 코드에서 확인, [F] 저장소 fixture에서 확인, [U] 확인하지 못한 운영 전제.
+A1(구현 조각 A)은 Codex 0.169.0 fixture 결과를 반영했다. 바뀐 곳: 0절(모델 74 cfg, `EnterGap`), 2절의 Busy (b)·floor·턴 없는 새 실행·`.zst`, 5절의 fixture 결과와 조각 A·C 메모, 8절 R3·R4.
 d3는 d2 델타 리뷰(P1 1건, P2 3건)를 반영했다. 바뀐 곳: 0절(모델 68 cfg), 새 절 1.7(기존 pane을 끝내는 모든 길), 2절의 Busy (b) 해제 조건과 시간 초과 문단, 3절 marker 소비자 표의 재전송 행, 5절 조각 C·이관 표, 시험 계획, 8절 R3~R5.
 d2는 d1 리뷰(P1 2건, P2 8건)를 반영했다. 바뀐 곳: 0절 전체, 1.1의 Enter 뒤 확인 행, 1.6(새 절), 2절의 Busy 조건·floor·시간 초과 표·단계 4, 3절의 marker 소비자 표, 4절의 [U] 행, 5절 조각 계획과 이관 표 틀, 8절 잔여.
 
@@ -45,7 +46,11 @@ d3에서 더한 것(델타 리뷰 P1-N1·P2-A·P2-B·P2-C):
 - **느슨한 판독 보정**: 수정 전 tmux의 사전 확인은 `turn_aborted`와 모르는 종료 이벤트를 busy로 읽는다(`tui_turn_state.rs:731`~`:735`). `LenientBusy`에 반영했다.
 - **UserPromptSubmit 증거의 해제**: `task_started`가 rollout에서 읽히면 푼다(`RecordStart`). 읽히지 않으면 단계 4와 같은 가드(조용함 + 자식 없음) 아래에서 만료한다(`UpsExpire`). 턴이 뒤따르지 않는 UserPromptSubmit(`PersonBlocked`)도 넣었다. 뮤턴트 `after-ups-until-end`는 d2처럼 종료 신호로만 푼다.
 
-68 cfg: GREEN 36, 의도한 RED 32, 예상 밖 0. 호스트별 전/후 표와 반례의 코드 대조는 보고서에 있다. 설계에 반영한 반례는 다음과 같다.
+A1에서 더한 것(0.169.0 fixture):
+
+- **Enter 뒤 순서**(`EnterGap`): d3는 UserPromptSubmit 훅이 `task_started` 기록보다 먼저 온다고 뒀다(`"hook"`, 0.157.1 기준). 0.169.0은 Enter 뒤 약 13ms에 `task_started`를 먼저 쓰고, 훅은 그 0.05~0.7초 뒤에 온다([F] `codex-0.169.0.json`). `"record"`는 Enter와 함께 기록이 쓰인 것으로 보고, `"silent"`는 기록 전의 짧은 순간(아무 신호도 없다)을 남긴다. d3의 68 cfg는 `"hook"`으로 그대로 두었고 결과도 같다.
+
+74 cfg: GREEN 40, 의도한 RED 34, 예상 밖 0. 호스트별 전/후 표와 반례의 코드 대조는 보고서에 있다. 설계에 반영한 반례는 다음과 같다.
 
 | 반례 | 모델 cfg | 코드 대조 | 설계 반영 |
 |---|---|---|---|
@@ -63,14 +68,14 @@ d3에서 더한 것(델타 리뷰 P1-N1·P2-A·P2-B·P2-C):
 | 재개된 rollout의 끊긴 턴이 새 실행에서 계속 Open으로 읽힌다 | `CodexReadyNoFloor` | [C] `read_native_end`는 파일의 최신 `task_started`까지만 거슬러 읽고 실행 경계를 모른다(`rollout.rs:98`~`:105`) | 2절 floor |
 | 종료 기록이 늦고 Stop 훅도 없으면 유휴 composer에 Esc가 간다 | `CodexStopAfterLateNoHook` | 설계 잔여. 화면 판독도 같은 창을 가진다 | 2절 /stop, 8절 |
 
-수정 후에도 RED로 남는 cfg는 다섯이고 잔여로는 넷이다(R2에 cfg가 둘). 숨기지 않고 8절 잔여로 적었다.
+수정 후에도 RED로 남는 cfg는 일곱이고 잔여로는 넷이다(R2·R3·R4에 cfg가 둘씩). 숨기지 않고 8절 잔여로 적었다.
 
 | cfg | 깨지는 규칙 | 뜻 | 8절 |
 |---|---|---|---|
 | `CodexReadyAfterLostBothHeld` | `CodexPendingEventuallyDelivered` | 열린 것으로 읽히는 턴 + 종료 신호 둘 다 유실 + busy 경로 불가 → 보류가 풀리지 않는다 | R1 |
 | `CodexReadyAfterCompressedHerdr`, `CodexReadyAfterUnnamedHerdr` | `CodexPendingEventuallyDelivered` | herdr + rollout 판독 불가(`.zst`, 이름 없는 종료에 Stop 훅도 없음) + #8128 전 → 전달되지 않는다(거절). `…Herdr8128` 둘은 GREEN | R2 |
-| `CodexReadyAfterEnterRestart` | `CodexNoEarlyInput` | 사람의 Enter 구간 안에서 dcserver가 재시작해 UserPromptSubmit 증거가 사라진다 | R3 |
-| `CodexReadyAfterArchivedSilentTurn` | `CodexNoRunningKill` | 살아 있는 턴의 rollout이 `.zst`이고, 그 턴이 자식 없이 조용하다 | R4 |
+| `CodexReadyAfterEnterRestart`, `CodexReadyAfterEnterGapSilent`(A1) | `CodexNoEarlyInput` | 사람의 Enter 구간 안에서 dcserver가 재시작해 UserPromptSubmit 증거가 사라진다. 0.169.0에서는 Enter와 `task_started` 기록 사이(약 13ms)에 신호가 없다 | R3 |
+| `CodexReadyAfterArchivedSilentTurn`, `…RecordFirst`(A1) | `CodexNoRunningKill` | 살아 있는 턴의 rollout이 `.zst`이고, 그 턴이 자식 없이 조용하다 | R4 |
 
 d2의 P2-B 경로(사람 턴 + 이름 없는 종료 + Stop 훅 없음)는 `CodexReadyAfterUnnamedPerson`·`…PersonHerdr8128`로 GREEN을 확인했다. 턴이 뒤따르지 않는 UserPromptSubmit은 `CodexReadyAfterBlockedPrompt`·`…Herdr`로 GREEN이다. 같은 상수에서 조용한 도구 실행은 `CodexReadyAfterSilentTool`로 GREEN이고, 자식 확인을 뺀 `CodexReadyNoChildCheck`만 `CodexNoRunningKill`로 깨진다(R3와 분리했다).
 
@@ -217,9 +222,11 @@ Enter 뒤 확인을 rollout 영수증(`busy_inject/rollout.rs:419` `submitted`)�
 
 **Busy (b)**: 사람이 TUI에서 Enter를 누른 뒤 `task_started`가 rollout에 쓰이기 전에는 rollout이 앞 턴의 `Ended`를 보여 준다. UserPromptSubmit 훅은 턴이 진행되기 전에 오므로, 그 훅을 받은 시점부터 `Busy`로 둔다. 이 조건을 빼면 그 구간에 Idle 경로 키가 실행 중 턴에 들어간다(`CodexReadyNoUps` RED). 훅이 없는 실행과 재시작으로 증거가 사라진 경우는 8절 R3이다.
 
+**A1**: 위 순서는 0.157.1의 것이다. 0.169.0은 `task_started`를 먼저 쓰고 UserPromptSubmit 훅을 그 뒤에 낸다([F] `codex-0.169.0.json`의 `rollout_identity.record_order`). 그래서 0.169.0에서 Enter 구간을 닫는 것은 훅이 아니라 시작 기록이고, 훅이 도착했을 때는 그 턴이 이미 열린 턴으로 읽혀 Busy (b)가 곧바로 풀린다(Busy (a)가 맡는다). Busy (b)는 시작 기록을 읽을 수 없을 때(`.zst`)와 훅이 먼저 오는 버전에서만 일한다. 기록 전의 약 13ms는 R3이다.
+
 Busy (b)가 막을 것은 Enter와 `task_started` 사이뿐이다. 그래서 다음 셋 중 하나로 푼다.
 
-1. 그 훅 뒤의 `task_started`(같은 `turn_id`, fixture에서 다르면 훅 뒤 첫 턴)가 rollout에서 읽혔다. 그 뒤로는 열린 턴 자체가 Busy (a)의 증거다.
+1. 같은 `turn_id`의 `task_started`가 rollout에서 읽혔다(훅보다 먼저 쓰였어도 같다. A1: 0.169.0에서 `turn_id`가 같음을 확인했다), 또는 훅 뒤에 시작한 다른 턴이 읽혔다. 그 뒤로는 열린 턴 자체가 Busy (a)의 증거다.
 2. 같은 `turn_id`의 종료 기록이나 유효한 Stop 훅을 봤다.
 3. 만료: `task_started`가 읽히지 않은 채 rollout stamp가 600초(`STALE_USER_SUBMITTED_RECLAIM_SECS`) 동안 그대로이고 provider 프로세스에 자식이 없다. 단계 4와 같은 가드다. 만료하면 증거를 버리고 rollout만으로 다시 판정한다. 읽을 수 있고 `Ended`이면 `Idle`이라 교체 없이 전달하고, 읽을 수 없으면 `Unknown`이라 단계 4로 간다.
 
@@ -234,11 +241,11 @@ d2는 2번으로만 풀었다. 그러면 사람 턴이 이름 없는 종료로 �
 3. 첫 키 직전, composer lock 안에서 `proof.current()`를 다시 확인한다. 실행 nonce·파일 `(dev, ino)`·최신 턴 id·종료 상태가 그대로일 때만 쓴다(`CodexReadyNoRevalidate` RED). 위치는 tmux `admit_codex_prompt_under_lock`(`input.rs:1066`), herdr `followup_write` 직전(`herdr_turn.rs:614`)이다.
 4. **floor**: `NativeEnd`는 이 실행이 뜬 뒤의 기록만 읽는다. 근거는 운영 코드가 실제로 남기는 것만 쓴다.
    - 1순위: 이 실행의 launch context가 만들어진 시각. `BindingContext.created_at`(`tui_prompt_dedupe/binding_context.rs:24`)은 spawn 전에 정해져 디스크에 남고(`:345`, 읽기 `:207` `execution_context`), 재시작 뒤에도 읽힌다. rollout 레코드의 최상위 `timestamp`가 이 시각보다 이른 `task_started`는 앞 실행의 턴이므로 열린 턴으로 세지 않는다. 같은 호스트의 같은 시계다(`BindingContext.host`).
-   - 2순위: 이 실행의 첫 훅을 받았을 때의 파일 길이(메모리). 레코드에 `timestamp`가 없는 옛 형식에서 쓴다.
-   - 둘 다 없으면 0으로 읽는다. 그때 끊긴 턴이 Open으로 보이면 단계 3으로 간다.
+   - 2순위: 이 실행의 첫 훅을 받았을 때의 파일 길이(메모리). 레코드에 `timestamp`가 없는 옛 형식에서 쓴다. **A1**: 구현하지 않았다. 0.157.1·0.169.0 모두 모든 레코드에 `timestamp`가 있어 쓸 곳이 없다. 시작 기록에 `timestamp`가 없으면 floor를 적용하지 않고 읽는다.
+   - 둘 다 없으면 0으로 읽는다. 그때 끊긴 턴이 Open으로 보이면 단계 3으로 간다. **A1**: "없다"는 pane에 실행 nonce marker가 없는 경우만이다. marker가 있는데 그 launch context를 읽지 못하면 0으로 읽지 않고 `Unknown(ProbeError)`로 둔다(앞 실행의 종료를 이 실행의 준비로 읽지 않기 위해서다).
    - d1이 1순위로 적은 rollout marker의 `rollout_start_offset`은 뺀다. `write_codex_tui_rollout_marker`(`codex_tui/session.rs:151`)는 `#[cfg(test)]`이고 `_with_start_offset`(`:164`)의 호출자도 모두 시험이라 운영에서는 쓰이지 않는다. 리뷰가 권한 "binding 관측의 파일 길이"도 쓸 수 없다. binding이 내구화하는 source 식별자는 `SourceId{session_id, path, dev, ino}`(`tui_o/shadow/mod.rs:47`)뿐이고 길이가 없다.
-   - [U] 훅을 주입하지 않은 실행에도 launch context가 남는지, 0.169.0 rollout의 모든 레코드에 `timestamp`가 있는지는 조각 A의 fixture 작업에서 확인한다.
-5. **턴 없는 새 실행**: Codex 0.157.1은 rollout 헤더를 launch 때 쓰지만, SessionStart 훅은 첫 프롬프트와 함께 낸다([F] `tests/fixtures/hook_payload/codex-0.157.1.json` `tui_bypass_startup_clear`의 note: "thread created at launch …; SessionStart fired only with the first prompt …, after the rollout header was written"). 파일은 있어도 그 파일을 이 실행에 묶는 훅이 아직 없으므로, 부팅 직후에는 묶인 source가 없다. 0.169.0에서도 같은지는 조각 A의 fixture로 확정한다. 이 구간의 입력은 첫 입력 경로뿐이고, 증거는 "프로세스가 pane의 전경 실행이다"(herdr `PaneProvider::Execution`) + "화면이 비어 있지 않고 모달이 읽히지 않는다"다. owner 경로가 이미 쓰는 규칙이다(`herdr_turn.rs:354`~`:366`). 상태줄·폭을 해석하지 않는다. owner 시작(`owner_input.rs:829`)의 `NoStart → Unknown`은 그대로 둔다.
+   - **A1** 확인: launch context는 훅 주입 여부를 정하기 전에 만들어진다([C] `codex/tui_session_launch/first_input.rs:225`의 launch context 준비가 `:261` `hooks_enabled` 분기보다 앞). 0.169.0 rollout은 캡처한 두 파일의 모든 레코드(18·30건)에 최상위 `timestamp`가 있다([F]).
+5. **턴 없는 새 실행**: Codex 0.157.1은 rollout 헤더를 launch 때 쓰지만, SessionStart 훅은 첫 프롬프트와 함께 낸다([F] `tests/fixtures/hook_payload/codex-0.157.1.json` `tui_bypass_startup_clear`의 note: "thread created at launch …; SessionStart fired only with the first prompt …, after the rollout header was written"). 파일은 있어도 그 파일을 이 실행에 묶는 훅이 아직 없으므로, 부팅 직후에는 묶인 source가 없다. **A1**: 0.169.0은 rollout 파일 자체를 첫 프롬프트 때 만든다([F] `file_birth`가 `launched_at`보다 12초 늦고 첫 `task_started`와 같은 시각. `session_meta.payload.timestamp`만 thread 생성 시각이다). 부팅 때 나는 훅은 여전히 없다. 그래서 부팅 직후에는 파일도 없고, 결론(묶인 source 없음 → 첫 입력 경로)은 같다. 이 구간의 입력은 첫 입력 경로뿐이고, 증거는 "프로세스가 pane의 전경 실행이다"(herdr `PaneProvider::Execution`) + "화면이 비어 있지 않고 모달이 읽히지 않는다"다. owner 경로가 이미 쓰는 규칙이다(`herdr_turn.rs:354`~`:366`). 상태줄·폭을 해석하지 않는다. owner 시작(`owner_input.rs:829`)의 `NoStart → Unknown`은 그대로 둔다.
 6. 훅이 주입되지 않은 실행(`first_input.rs:298`~`:302`의 "using rollout transcript tail")은 Stop 훅 단계가 없다. rollout 판정과 대체 단계 3·4로만 간다.
 
 ### 작업 중
@@ -289,7 +296,7 @@ d2는 2번으로만 풀었다. 그러면 사람 턴이 이름 없는 종료로 �
 - #8128 착지 뒤: B2a의 "기존 detached pane exact 종료"와 B2b의 "새 incarnation launch → successor Ready"를 단계 4의 교체로 부른다(`CodexReadyAfterCompressedHerdr8128`·`CodexReadyAfterUnnamedHerdr8128` GREEN). 설계 정본은 #8128의 `docs/herdr-parity-restart.design.md`이고 이 base에는 없다. 조각 B는 거절까지만 넣고, 교체 연결은 #8128 착지 뒤의 작은 후속 조각으로 둔다.
 - 자식 관측: B1의 `claude_tui/activity/processes.rs:19` `observe`는 `tmux::pane_pid`로 루트를 잡아(`:31`) herdr pane에서는 항상 `Unknown`이다. herdr는 `read_execution`(`session_host/herdr_gate.rs:758`)이 주는 실행 `ProcessStamp{pid, start}`(`db/dispatched_sessions/hosted_execution.rs:58`)의 pid를 루트로 삼아 같은 `ancestry(root, text)`(`processes.rs:53`)를 부르는 어댑터를 `codex_tui/readiness.rs` 쪽에 둔다. B1 파일에서 바뀌는 것은 `ancestry`의 가시성 한 줄이다.
 
-`.zst`: 운영 Codex CLI(0.169.0)는 오래된 rollout을 `.jsonl.zst`로 바꾸고 원본을 지운다(#8051). 원본이 없고 같은 경로의 `.zst`가 있으면 `Unknown(SourceArchived)`로 구분해 로그에 남기고 단계 4로 간다. `.zst`를 풀어 읽지는 않는다. 살아 있는 TUI의 rollout이 압축되는지, 그 뒤 기록이 어디에 쓰이는지는 [U]이고 조각 A의 fixture 작업에서 확인한다. 압축되지 않는다면 8절 R4는 일어나지 않는다.
+`.zst`: 운영 Codex CLI(0.169.0)는 오래된 rollout을 `.jsonl.zst`로 바꾸고 원본을 지운다(#8051). 원본이 없고 같은 경로의 `.zst`가 있으면 `Unknown(SourceArchived)`로 구분해 로그에 남기고 단계 4로 간다. `.zst`를 풀어 읽지는 않는다. 살아 있는 TUI의 rollout이 압축되는지, 그 뒤 기록이 어디에 쓰이는지는 [U]다. **A1** 관찰(읽기 전용): 캡처 호스트의 plain 1,942개·`.zst` 5,882개에서 가장 새 `.zst`가 11-02, 가장 오래된 plain이 11-03이라 약 10~12일 지난 파일이 압축된다. 같은 세션의 plain과 `.zst`가 함께 있는 경우는 0이고, 가장 오래 산 TUI(4일 22시간)의 rollout은 plain이었다. 압축 나이보다 오래 산 세션이 없어 "살아 있는 rollout은 압축되지 않는다"를 확정하지 못했다. 바이너리에 `skipped_busy`·`skipped_not_cold` 계수가 있어 건너뛰는 조건이 있다는 것까지만 안다. R4는 문장 그대로 둔다.
 
 ### 남는 화면 판독과 실패 처리
 
@@ -396,6 +403,12 @@ marker 정의를 바꿀 때 영향을 받는 소비자(1.6의 전수에서 "판�
 | 오류로 끝난 턴의 rollout 꼬리와 Stop 훅 | 이름 있는 종료 또는 Stop 훅이 있다 | 단계 3·4로 가는 빈도 추정에 반영 |
 | 살아 있는 TUI의 rollout이 `.zst`로 압축되는가(읽기 전용 관찰) | 압축되지 않는다 | R4를 설계 대상으로 올린다 |
 
+**A1 결과**([F] `codex-0.169.0.json`, 로드 시험 `codex_0_169_hooks_and_rollout_records_name_the_same_turns`): 1행 같다(Stop 2건). 2행 같다. 다만 `task_started`가 훅보다 먼저 쓰인다(위 Busy (b) A1). 3행 어긋남: 파일이 launch가 아니라 첫 프롬프트 때 생긴다(2절 5 A1). 4행 0.157.1과 같다. 5행 모든 레코드에 있다. 6행 중단된 턴은 `turn_aborted`, 모델 오류 턴은 `task_complete`로 이름 있는 종료가 있고 두 경우 모두 Stop 훅은 없다. 7행 미확정(2절 `.zst` A1). 멈춤 조건 3·4는 해당 없다.
+
+**조각 A의 과도기 규칙**: 판정이 `Idle`·`Busy`·`Gone`이면 판정이 정하고, `Unknown`이면 지금의 화면 판독(준비 대기)·느슨한 판독(진단)·session id 판독(owner)이 정한다. 단계 3·4와 교체 전 확인이 조각 C라서, 그 전에 `Unknown`을 "준비 아님"으로 두면 화면이 읽히는 pane의 `.zst`·unbound 입력이 45초 대기와 교체로 퇴행한다. 조각 C가 단계 4를 넣으면서 이 대체를 지운다. 같은 이유로 조각 A만으로는 lock 안 제출 확인(`admit_codex_prompt_under_lock`)이 아직 화면을 요구한다.
+
+**조각 C 메모**(d3 델타 리뷰 P2-1·P2-2): Enter 전 거절의 분류와 `Deferred` 재시도의 시간 상한은 조각 C의 첫 작업에서 정한다.
+
 멈춤 조건: (1) #8128이 착지하기 전에는 herdr 단계 4를 거절까지만 넣는다. 교체 연결(B')은 #8128의 B2a·B2b가 main에 있을 때만 착수한다. (2) 조각 D가 5번(사람 초안) 시험의 기대값을 바꿔야 하면 멈춘다. (3) 0.169.0 fixture에서 Stop 훅에 `turn_id`가 없거나 rollout과 다르면 단계 2를 빼고 3·4만으로 진행할지 코디네이터에 묻는다. (4) 훅 주입 없는 실행에 launch context가 없으면 floor를 2순위로만 쓸지 묻는다.
 
 ### legacy 준비 대기 호출자 → owner 경로 이관 가능 여부 (틀)
@@ -482,8 +495,8 @@ marker 정의를 바꿀 때 영향을 받는 소비자(1.6의 전수에서 "판�
 
 - **R1 열린 턴의 보류**(`CodexReadyAfterLostBothHeld`): readonly 실행처럼 busy 경로를 쓸 수 없는 pane에서 종료 기록과 Stop 훅이 모두 유실되면, 그 턴은 계속 열린 것으로 읽히고 입력은 사유 있는 보류로 남는다. 신호만으로는 "끝났는데 기록이 없다"와 "조용히 실행 중이다"를 가를 수 없다. 자동으로 풀면 실행 중인 턴을 죽인다(`CodexReadyReclaimOpen`). 풀리는 길은 프로세스 종료(`Gone`), 사람의 /stop·재시작, 그 pane에서 사람이 새 턴을 여는 것이다. 이슈 DoD의 "영구 보류 0"과 어긋나는 한 점이라 **코디네이터 결정 항목**으로 올린다. 대안은 (가) 이 설계대로 보류 + 알림, (나) 상한(예: 60분) 뒤 자식 없음 조건으로 교체다. 권고는 (가)다. 죽인 턴은 되돌릴 수 없고 보류는 사람이 풀 수 있다.
 - **R2 herdr의 `Unknown`**(`CodexReadyAfterCompressedHerdr`, `CodexReadyAfterUnnamedHerdr`): #8128 착지 전까지 600초 뒤 거절로 끝난다. 착지 뒤 B'로 닫는다.
-- **R3 Enter 구간의 증거 유실**(`CodexReadyAfterEnterRestart`, 훅 없는 실행 포함): 사람의 Enter와 `task_started` 기록 사이에 dcserver가 재시작하거나 훅이 주입되지 않은 실행이면, 그 구간에 Idle 경로 키가 실행 중 턴에 들어갈 수 있다. Codex가 큐에 넣으므로 유실은 아니고 턴 귀속이 틀어진다. 구간은 `task_started`가 쓰일 때까지다. Enter 직전 `proof.current()`가 한 번 더 줄인다.
-- **R4 살아 있는 턴의 rollout 압축**(`CodexReadyAfterArchivedSilentTurn`): rollout이 `.zst`인 채로 사람이 턴을 열고, 그 턴이 자식 없이 600초 넘게 조용하면 UserPromptSubmit 증거가 만료되고 단계 4가 실행 중인 턴을 죽인다. d2에서는 증거가 종료 신호 전까지 남아 재시작이 겹쳐야만 일어났다. d3는 그 증거가 만드는 영구 보류를 없애는 대신 이 잔여가 재시작 없이도 열린다. 살아 있는 TUI의 rollout이 압축되는지가 [U]다(조각 A fixture 작업). 압축되지 않는다면 일어나지 않는다. 압축된다면 `.zst`의 mtime·크기 변화를 "조용함" 판독에 넣는다.
+- **R3 Enter 구간의 증거 유실**(`CodexReadyAfterEnterRestart`, 훅 없는 실행 포함): 사람의 Enter와 `task_started` 기록 사이에 dcserver가 재시작하거나 훅이 주입되지 않은 실행이면, 그 구간에 Idle 경로 키가 실행 중 턴에 들어갈 수 있다. Codex가 큐에 넣으므로 유실은 아니고 턴 귀속이 틀어진다. 구간은 `task_started`가 쓰일 때까지다. Enter 직전 `proof.current()`가 한 번 더 줄인다. **A1**: 0.169.0에서는 훅이 시작 기록보다 늦어 이 구간을 덮지 못한다(`CodexReadyAfterEnterGapSilent`). 구간은 약 13ms이고 시작 기록이 닫는다. 훅이 주입된 실행에서도 같다.
+- **R4 살아 있는 턴의 rollout 압축**(`CodexReadyAfterArchivedSilentTurn`): rollout이 `.zst`인 채로 사람이 턴을 열고, 그 턴이 자식 없이 600초 넘게 조용하면 UserPromptSubmit 증거가 만료되고 단계 4가 실행 중인 턴을 죽인다. d2에서는 증거가 종료 신호 전까지 남아 재시작이 겹쳐야만 일어났다. d3는 그 증거가 만드는 영구 보류를 없애는 대신 이 잔여가 재시작 없이도 열린다. 살아 있는 TUI의 rollout이 압축되는지가 [U]다. A1 관찰에서도 확정하지 못했다(2절 `.zst`). 압축되지 않는다면 일어나지 않는다. 압축된다면 `.zst`의 mtime·크기 변화를 "조용함" 판독에 넣는다.
 - **R5 준비 판독과 무관한 교체**(`CodexReadyBeforeTmuxConfigPerson`은 수정 전 RED): launch 옵션 변경·binding 불일치·Enter 전 전달 실패·`LegacyPath` 정리는 지금처럼 실행 중 턴을 확인하지 않고 pane을 끝낸다(1.7). Discord 입력은 사전 확인이 `Busy`를 걸러 주므로, 남는 경우는 사전 확인과 교체 사이에 턴이 시작된 때와 사전 확인을 거치지 않는 호출자다. 이 설계가 만든 것이 아니라 그대로 둔 것이다. 닫으려면 이 사유들에도 "`Busy`면 `Deferred`"를 걸면 되고(리뷰가 권한 형태), 그때는 "옵션이 바뀐 pane에서 열린 턴의 종료 신호가 유실되면 보류"가 R1에 더해진다. 코디네이터 결정 항목이다.
 - `/stop` 늦은 기록 창(2절, `CodexStopAfterLateNoHook`). 유휴 composer에 Esc 한 번. 화면 판독과 같은 수준이며 훅이 있으면 닫힌다.
 - 단계 4는 600초를 기다린다. 그동안 입력은 사유가 붙은 보류로 남는다.
