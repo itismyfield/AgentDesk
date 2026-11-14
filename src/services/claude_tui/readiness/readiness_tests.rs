@@ -455,6 +455,53 @@ fn restored_history_needs_new_activity_and_summary_needs_a_matching_stop() {
     );
 }
 
+// A resume start admits over the exit metadata its history ends with, and closes for good on the
+// first turn record or permission marker after it; that turn then needs its own terminal.
+#[test]
+fn resumed_start_closes_on_the_first_turn_record_or_permission_marker_after_it() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let old = Utc::now() - chrono::Duration::hours(1);
+    let resumed = || {
+        let r = Rig::new();
+        r.append(json!({"type":"assistant","timestamp":old,
+            "message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}}));
+        r.terminal();
+        r.append(json!({"type":"last-prompt"}));
+        r.append(json!({"type":"cost-state"}));
+        r.hook("resume");
+        r.append(json!({"type":"tools-used"}));
+        r
+    };
+    let r = resumed();
+    assert!(r.ready(), "exit and resume metadata is no turn of this run");
+    r.append(json!({"type":"user","timestamp":Utc::now(),
+        "message":{"role":"user","content":"typed in the pane"}}));
+    assert!(!r.ready(), "a prompt typed after the resume is Running");
+    r.assistant("its answer");
+    r.append(json!({"type":"system","subtype":"stop_hook_summary"}));
+    assert!(
+        !r.ready(),
+        "the resume start cannot stand in for that turn's terminal"
+    );
+    r.terminal();
+    assert!(r.ready());
+    let r = resumed();
+    r.append(json!({"type":"permission-mode","permissionMode":"default"}));
+    assert!(
+        !r.ready(),
+        "a permission marker after the start is a turn starting"
+    );
+    let r = Rig::new();
+    r.terminal();
+    r.append(json!({"type":"user","timestamp":Utc::now(),
+        "message":{"role":"user","content":"typed while the start hook ran"}}));
+    r.hook("resume");
+    assert!(
+        !r.ready(),
+        "a prompt this run already took is not its history"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn fresh_payload_waits_for_session_start_and_running_idle_path_sends_no_key() {

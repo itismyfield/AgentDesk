@@ -523,5 +523,6 @@ ReadySelfCompactEventuallyReleases == Readiness!SelfCompactEventuallyReleases
 ReadyNoContinuationEarlyInput == Readiness!NoContinuationEarlyInput
 ReadyBusyKeyPlanPreserved == Readiness!BusyKeyPlanPreserved
 ReadyBusyEventuallyQueues == Readiness!BusyEventuallyQueues
+ReadyResumedIdleEventuallyReceives == Readiness!ResumedIdleEventuallyReceives
 
 =============================================================================

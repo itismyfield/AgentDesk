@@ -32,6 +32,21 @@ struct Entry {
     recovery: Option<(u64, DateTime<Utc>)>,
     file: Option<(u64, u64)>,
     high_water: u64,
+    /// A resume start's transcript length and launch time; its history is no turn of this run.
+    resumed: Option<(u64, DateTime<Utc>)>,
+}
+impl Entry {
+    /// The accepted start no input of ours has consumed yet.
+    fn start_open(&self) -> bool {
+        self.start && !self.submitted && self.pending.is_none()
+    }
+    /// The resumed start still admits its first input: only metadata followed it.
+    fn resumed_quiet(&self, tail: &evidence::Tail) -> bool {
+        self.start_open()
+            && self
+                .resumed
+                .is_some_and(|(floor, launched)| tail.quiet_from(floor, launched))
+    }
 }
 type FileKey = (PathBuf, (u64, u64), Option<String>);
 #[derive(Default)]
@@ -63,6 +78,8 @@ pub(crate) struct Proof {
     stamp: Option<Stamp>,
     revision: u64,
     clear: Option<clear::Evidence>,
+    /// Rests on a resume start alone: the transcript's terminal belongs to an earlier run.
+    resumed: bool,
 }
 pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
     let source = Source::current(session, path)?;
@@ -80,12 +97,12 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
             &source.path,
         ) == crate::services::tui_turn_state::TuiTurnState::Idle;
     let mut state = ledger();
-    // Keep ordinary Running observation side-effect-free; only our completed control can differ.
+    // Keep ordinary Running observation side-effect-free; only our completed control or an
+    // unconsumed resume start, whose history says nothing of this run, can differ.
     if !native_idle
-        && state
-            .entries
-            .get(&source)
-            .is_none_or(|entry| entry.compact_done.is_none())
+        && state.entries.get(&source).is_none_or(|entry| {
+            entry.compact_done.is_none() && !(entry.start_open() && entry.resumed.is_some())
+        })
     {
         return None;
     }
@@ -170,7 +187,7 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
                 && compact::completion::read(&source.path, &done.floor, &source.native, true)
                     .is_some()
         });
-    let ready = compact_ready
+    let settled = compact_ready
         || (native_idle
             && entry.compact_ticket.is_none()
             && match &tail {
@@ -196,21 +213,16 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
                         || (tail.end == End::Summary
                             && final_stop.is_some_and(|floor| tail.activity <= floor));
                     (terminal && recovered && after_pending && after_continuation)
-                        || (entry.start
-                            && !entry.submitted
-                            && entry.pending.is_none()
-                            && tail.empty
-                            && blocked.is_none())
+                        || (entry.start_open() && tail.empty && blocked.is_none())
                 }
-                None => {
-                    entry.start
-                        && !entry.submitted
-                        && entry.pending.is_none()
-                        && entry.file.is_none()
-                        && !source.path.exists()
-                }
+                None => entry.start_open() && entry.file.is_none() && !source.path.exists(),
             });
-    if !ready {
+    // A resumed session idles at its composer whatever its old history ends with.
+    let resumed = !settled
+        && entry.compact_ticket.is_none()
+        && blocked.is_none()
+        && tail.as_ref().is_some_and(|tail| entry.resumed_quiet(tail));
+    if !settled && !resumed {
         return None;
     }
     if entry.pending.take().is_some() {
@@ -221,6 +233,7 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
         stamp: tail.map(|t| t.stamp),
         revision: entry.revision,
         clear,
+        resumed,
     };
     drop(state);
     (Source::current(session, path).as_ref() == Some(&proof.source)
@@ -387,8 +400,13 @@ pub(crate) fn note_hook(
             state.entries.retain(|old, _| {
                 old.session != source.session || old.nonce != source.nonce || old == &source
             });
+            let resumed = (payload["source"] == "resume").then(|| {
+                let floor = Stamp::read(&source.path).map_or(0, |stamp| stamp.len);
+                (floor, ctx.created_at)
+            });
             let entry = state.entries.entry(source).or_default();
             entry.start = true;
+            entry.resumed = resumed;
             entry.clear_start = payload["source"] == "clear";
             entry.compact_done = None;
             entry.recovery = None;

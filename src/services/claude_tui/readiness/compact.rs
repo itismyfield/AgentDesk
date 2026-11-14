@@ -99,10 +99,12 @@ impl Pending {
             self.submitted = None;
             return Outcome::Completed;
         }
+        // A resume start's proof stands on no terminal of this run, so the compact waits.
         let proof = super::observe(session, Some(&self.source.path)).filter(|proof| {
-            evidence::read(&self.source.path).is_some_and(|tail| {
-                Some(tail.stamp) == proof.stamp && tail.terminal > 0 && !tail.empty
-            })
+            !proof.resumed
+                && evidence::read(&self.source.path).is_some_and(|tail| {
+                    Some(tail.stamp) == proof.stamp && tail.terminal > 0 && !tail.empty
+                })
         });
         let capture = host_input::observe_draft(session);
         let empty = capture.as_deref().is_some_and(|capture| {
