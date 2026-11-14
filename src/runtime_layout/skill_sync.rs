@@ -84,6 +84,7 @@ pub(super) fn sync_managed_skills(root: &Path) -> Result<SkillSyncReport, String
     }
 
     let manifest = load_skill_manifest(root)?;
+    cleanup_retired_gemini_skills(root)?;
     let skill_dirs = discover_skill_dirs(root)?;
     if skill_dirs.is_empty() {
         return Ok(SkillSyncReport::default());
@@ -330,11 +331,11 @@ fn parse_legacy_skill_target(raw: &str) -> Option<LegacySkillTarget> {
         return None;
     }
     if let Some((provider_raw, root_raw)) = trimmed.split_once('@') {
-        let provider = normalize_provider_name(provider_raw)?;
+        let provider = normalize_skill_provider_name(provider_raw)?;
         let root = expand_user_path(root_raw)?;
         return Some(LegacySkillTarget::Workspace { provider, root });
     }
-    normalize_provider_name(trimmed).map(|provider| LegacySkillTarget::Global { provider })
+    normalize_skill_provider_name(trimmed).map(|provider| LegacySkillTarget::Global { provider })
 }
 
 fn load_skill_manifest(root: &Path) -> Result<SkillManifest, String> {
@@ -398,7 +399,7 @@ pub(super) fn discover_workspaces(root: &Path) -> Result<Vec<String>, String> {
 fn normalize_provider_list(values: &[String]) -> Vec<String> {
     let mut providers = values
         .iter()
-        .filter_map(|value| normalize_provider_name(value))
+        .filter_map(|value| normalize_skill_provider_name(value))
         .collect::<Vec<_>>();
     providers.sort();
     providers.dedup();
@@ -417,16 +418,54 @@ fn normalize_workspace_names(values: &[String]) -> Vec<String> {
     workspaces
 }
 
+fn normalize_skill_provider_name(value: &str) -> Option<String> {
+    normalize_provider_name(value).filter(|name| name != "gemini")
+}
+
+fn cleanup_retired_gemini_skills(root: &Path) -> Result<(), String> {
+    for workspace in discover_workspaces(root)? {
+        let gemini = root.join("workspaces").join(workspace).join(".gemini");
+        let skills = gemini.join("skills");
+        // Do not follow a directory alias into another workspace or a user's home.
+        if fs::symlink_metadata(&gemini).is_ok_and(|meta| meta.file_type().is_symlink())
+            || fs::symlink_metadata(&skills).is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            tracing::warn!(path = %skills.display(), "Preserving aliased Gemini skills directory");
+            continue;
+        }
+        let entries = match fs::read_dir(&skills) {
+            Ok(entries) => entries.collect::<Result<Vec<_>, _>>(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("Failed to read '{}': {error}", skills.display())),
+        }
+        .map_err(|error| format!("Failed to read '{}': {error}", skills.display()))?;
+        if entries.iter().any(|entry| {
+            !entry.file_type().is_ok_and(|kind| kind.is_symlink())
+                || resolve_linked_skill_source("gemini", &entry.path()).is_none()
+        }) {
+            tracing::warn!(path = %skills.display(), "Preserving Gemini skills directory containing user files or unknown links");
+            continue;
+        }
+        for entry in entries {
+            fs::remove_file(entry.path())
+                .map_err(|error| format!("Failed to remove retired skill link: {error}"))?;
+        }
+        fs::remove_dir(&skills)
+            .map_err(|error| format!("Failed to remove '{}': {error}", skills.display()))?;
+    }
+    Ok(())
+}
+
 fn all_skill_providers() -> Vec<String> {
     vec![
         "claude".to_string(),
         "codex".to_string(),
-        "gemini".to_string(),
         "qwen".to_string(),
     ]
 }
 
 pub(super) fn migrate_legacy_skill_links(root: &Path) -> Result<(), String> {
+    cleanup_retired_gemini_skills(root)?;
     let manifest = load_skill_manifest(root)?;
     let mut candidates = collect_legacy_skill_target_dirs(root, &manifest)?;
     candidates.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
@@ -668,7 +707,6 @@ fn provider_target_dir(provider: &str, base: &Path) -> PathBuf {
     match provider {
         "claude" => base.join(".claude").join("commands"),
         "codex" => base.join(".codex").join("skills"),
-        "gemini" => base.join(".gemini").join("skills"),
         "qwen" => base.join(".qwen").join("skills"),
         _ => base.join(".codex").join("skills"),
     }
@@ -1174,3 +1212,7 @@ mod shipped_tree_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "skill_provider_sync_tests.rs"]
+mod provider_sync_tests;
