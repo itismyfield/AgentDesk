@@ -734,13 +734,14 @@ _health_json_deploy_nonblocking_ere() {
   # once the body proves the node or the individual provider is standby. A TUI gateway reason is
   # accepted only for a provider whose role the body verifies. A TUI O channel
   # released to Legacy before any store write keeps its output there, so it never
-  # blocks. Everything else, including an unrecognised reason, blocks. No comma:
+  # blocks. A missing binding keeps ownership without a writer until reconfigured.
+  # Everything else, including an unrecognised reason, blocks. No comma:
   # the fallback splits on one.
   # $5 joins smoke E2E and pre-existing reader alarm channel ids; only their
   # reader-count reason is accepted, and only for a deploy verdict.
   # $6 is the smoke E2E channel ids alone: a held source start there is the
   # smoke's own known failure, so it does not block a deploy verdict either.
-  local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+|turn_presence_unknown:(claude|codex):(~|([A-Za-z0-9_.-]|%[0-9A-F]{2})+):[a-z][a-z0-9_]*:[a-z][a-z0-9_]*:[1-9][0-9]*:[0-9]+' ids_re='^[0-9]+([|][0-9]+)*$'
+  local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+|tui_o:binding_missing:[0-9]+|turn_presence_unknown:(claude|codex):(~|([A-Za-z0-9_.-]|%[0-9A-F]{2})+):[a-z][a-z0-9_]*:[a-z][a-z0-9_]*:[1-9][0-9]*:[0-9]+' ids_re='^[0-9]+([|][0-9]+)*$'
   [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:deferred_hooks_backlog:[1-9][0-9]*"
