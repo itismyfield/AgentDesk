@@ -470,6 +470,11 @@ async fn routine_claim(
     retries: i32,
 ) -> Claim {
     let pool = &fixture.pool;
+    // Only the routine attached here is due, so the claim below is its run.
+    sqlx::query("UPDATE routines SET status = 'paused'")
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO agents (id, name, provider, discord_channel_cc)
          VALUES ('agent8117', 'A', 'claude', $1) ON CONFLICT (id) DO NOTHING",
@@ -505,6 +510,7 @@ async fn routine_claim(
     let attached = store.attach_routine_with_execution(routine_row, definition, 3);
     let routine_id = attached.await.unwrap().id;
     let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
+    assert_eq!(claimed.routine_id, routine_id);
     let registry = Some(fixture.registry.clone());
     let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60)
         .with_headless_fresh_agents(true);
@@ -987,5 +993,111 @@ async fn an_unreachable_routine_thread_defers_the_run_and_never_runs_on_the_prim
     assert_eq!(run_state(&fixture, &run).await.0, "failed");
     assert!(nothing_ran(&fixture, &[PRIMARY, THREAD]));
     assert_eq!(channel_state(&fixture, PRIMARY).await, before);
+    fixture.db.drop().await;
+}
+
+#[tokio::test]
+async fn people_who_write_while_a_headless_run_holds_the_primary_are_served_once_after_it_pg() {
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    use poise::serenity_prelude as serenity;
+    if !api_child(&format!(
+        "{TEST}people_who_write_while_a_headless_run_holds_the_primary_are_served_once_after_it_pg"
+    )) {
+        return;
+    }
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let fixture = fixture().await;
+    fixture.discord.allow_channel(PRIMARY.get());
+    {
+        let mut settings = fixture.shared.settings.write().await;
+        settings.owner_user_id = Some(discord_mock::USER_ID);
+        settings.allow_all_users = true;
+    }
+    let (store, executor, claimed, _) = headless_claim(&fixture).await;
+    let actor = fixture.shared.mailbox(PRIMARY);
+    let prompt = "nightly report".to_string();
+    let start = executor.start_agent_run(&store, claimed, prompt, None, None, None, None, false);
+    assert_eq!(start.await.unwrap().status, "running");
+    let run_turn = crate::services::discord::mailbox_snapshot(&fixture.shared, PRIMARY).await;
+    let run_turn = run_turn.cancel_token.expect("the headless turn");
+
+    // Two messages reach the production intake while the run holds the primary mailbox.
+    let ctx = fixture
+        .shared
+        .http
+        .cached_serenity_ctx
+        .get()
+        .unwrap()
+        .clone();
+    let inputs = [
+        (1_479_671_302_387_090_001_u64, "first question"),
+        (1_479_671_302_387_090_002_u64, "second question"),
+    ];
+    for (id, text) in inputs {
+        let mut message = discord_mock::user_message(id, text);
+        message.channel_id = PRIMARY;
+        let event = serenity::FullEvent::Message {
+            new_message: message,
+        };
+        let data = crate::services::discord::Data {
+            shared: fixture.shared.clone(),
+            token: "test-token".to_string(),
+            provider: ProviderKind::Claude,
+        };
+        let ctx = ctx.clone();
+        let intake = tokio::spawn(async move {
+            let handled = crate::services::discord::router::handle_event(&ctx, &event, &data);
+            Box::pin(handled).await.map_err(|error| error.to_string())
+        });
+        assert_eq!(
+            await_within(intake, WAIT_CAP).await.unwrap(),
+            Ok(()),
+            "{text}"
+        );
+    }
+    let waiting = crate::services::discord::mailbox_snapshot(&fixture.shared, PRIMARY).await;
+    let queued: Vec<_> = waiting
+        .intervention_queue
+        .iter()
+        .map(|input| input.message_id.get())
+        .collect();
+    assert_eq!(
+        queued,
+        [inputs[0].0, inputs[1].0],
+        "each input waits once, in order"
+    );
+    assert!(
+        waiting
+            .cancel_token
+            .is_some_and(|token| Arc::ptr_eq(&token, &run_turn))
+    );
+    let spawned = || std::fs::read_to_string(fixture.stubs.join("spawned")).unwrap_or_default();
+    assert_eq!(spawned().lines().count(), 1, "only the run's own provider");
+
+    // The run ends: the same actor takes each waiting input once, in order.
+    std::fs::write(fixture.stubs.join("answer"), "headless-answer-8117").unwrap();
+    std::fs::write(fixture.stubs.join("release"), "").unwrap();
+    let served = async {
+        let mut served: Vec<u64> = Vec::new();
+        loop {
+            let now = crate::services::discord::mailbox_snapshot(&fixture.shared, PRIMARY).await;
+            let active = now.active_user_message_id.map(|id| id.get());
+            if let Some(id) = active.filter(|id| inputs.iter().any(|input| input.0 == *id)) {
+                if served.last() != Some(&id) {
+                    served.push(id);
+                }
+            }
+            if served.len() == inputs.len() && now.intervention_queue.is_empty() {
+                break served;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    assert_eq!(
+        await_within(served, WAIT_CAP).await,
+        [inputs[0].0, inputs[1].0]
+    );
+    let current = fixture.shared.mailbox_peek(PRIMARY);
+    assert!(current.is_some_and(|current| current.same_actor(&actor)));
     fixture.db.drop().await;
 }
