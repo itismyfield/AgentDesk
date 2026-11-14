@@ -377,7 +377,7 @@ async fn terminate(
     let applied = match recovered.await.map_err(failure)? {
         Some(held) => {
             tracing::info!(
-                session_id = id,
+                sessions_row = id,
                 "restart finished an execution that had already ended"
             );
             let result = apply(&held, &pool, id, &epoch).await;
