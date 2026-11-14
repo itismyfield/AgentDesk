@@ -135,9 +135,8 @@ impl ChildEntries {
         }
     }
 
-    /// Applies one checked relationship to `channel`. A known adoption is kept, so the Legacy sends
-    /// it counted before the parent was known still hold off the first init; returns whether the
-    /// channel is now a child O hosts.
+    /// Applies one checked relationship, keeping any known adoption so the Legacy sends it counted
+    /// still hold off the first init; returns whether O now hosts the child.
     fn resolve(
         &self,
         boot: &BootChannels,
@@ -261,7 +260,9 @@ impl ChildEntries {
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             // Only children boot read from the store; a checked one has no store record to lose yet.
-            .filter(|(_, entry)| entry.boot_discovered && entry.surface.is_none() && entry.parent.is_some())
+            .filter(|(_, entry)| {
+                entry.boot_discovered && entry.surface.is_none() && entry.parent.is_some()
+            })
             .map(|(&id, _)| id)
             .collect();
         if channels.is_empty() {
