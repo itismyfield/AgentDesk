@@ -74,7 +74,7 @@ On tmux the unread pane alone is not a liveness defect before: the pane is repla
 
 ### The Enter gap as Codex 0.169.0 writes it (slice A)
 
-The d3 model took the UserPromptSubmit hook as delivered before `task_started` is written (`EnterGap = "hook"`, the 0.157.1 reading). The 0.169.0 capture shows the other order: `task_started` is written about 13 ms after the Enter, and the SessionStart and UserPromptSubmit hooks arrive 0.1 s to 1.0 s after that record. So on 0.169.0 the hook never covers the gap; the start record closes it. `EnterGap = "record"` takes the record as written with the Enter, `EnterGap = "silent"` keeps the moment before it, in which no signal says busy.
+The d3 model took the UserPromptSubmit hook as delivered before `task_started` is written (`EnterGap = "hook"`, the 0.157.1 reading). The 0.169.0 capture shows the other order: `task_started` is written about 13 ms after the Enter (seen in the capture driver's log; the fixture keeps no Enter time), and the SessionStart and UserPromptSubmit hooks arrive 0.1 s to 1.0 s after that record. So on 0.169.0 the hook never covers the gap; the start record closes it. `EnterGap = "record"` takes the record as written with the Enter, `EnterGap = "silent"` keeps the moment before it, in which no signal says busy.
 
 | cfg | `EnterGap` | Result | Meaning |
 |---|---|---|---|
