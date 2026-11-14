@@ -518,7 +518,7 @@ impl NativePrepared {
     ) -> Result<(), String> {
         history.note_native_any_key(&self.namespace, &self.bound_ticket(history)?)?;
         tracing::debug!(
-            channel = self.key.channel_id.get(),
+            channel_id = self.key.channel_id.get(),
             elapsed_ms = self.started_before.elapsed().as_millis(),
             "native key witness acknowledged"
         );
