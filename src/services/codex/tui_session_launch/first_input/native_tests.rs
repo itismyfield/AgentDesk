@@ -39,6 +39,10 @@ esac
     let wrong_home = root.path().join("other");
     std::fs::create_dir_all(wrong_home.join("sessions")).unwrap();
     let home = Guard::set_path_after_shared_test_env_lock("CODEX_HOME", &wrong_home);
+    let hooks = Guard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+        "0".as_ref(),
+    );
     let name = "codex-early-discovery-fixture";
     let channel = 8_165_501;
     let id = "00000000-0000-4000-8000-000000008165";
@@ -321,6 +325,7 @@ esac
         events
     );
     dedupe::reset_state_for_tests();
+    drop(hooks);
     drop(home);
     drop(tmux);
     drop(guards);
