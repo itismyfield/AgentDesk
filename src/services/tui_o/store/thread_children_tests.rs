@@ -45,7 +45,7 @@ fn thread_children_outside_config_without_parent_writes_nothing() {
 }
 
 #[test]
-fn thread_children_old_reader_seeded_error_is_a_boot_compatibility_hazard() {
+fn thread_children_old_reader_keeps_unbound_init_without_writes() {
     use crate::services::tui_o::channel_policy::{self, BootChannels};
     let root = tempfile::tempdir().unwrap();
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())
@@ -55,20 +55,34 @@ fn thread_children_old_reader_seeded_error_is_a_boot_compatibility_hazard() {
     std::fs::create_dir(&channel).unwrap();
     let mut record = serde_json::to_value(fixture(43)).unwrap();
     record["policy_parent"] = serde_json::json!(42);
-    std::fs::write(channel.join("init"), serde_json::to_vec(&record).unwrap()).unwrap();
+    let original = serde_json::to_vec(&record).unwrap();
+    std::fs::write(channel.join("init"), &original).unwrap();
     let config = serde_json::from_value(serde_json::json!({
         "server":{}, "agents":[{"id":"a","name":"A","channels":{"claude":{"id":"42","runtime":"tui"}}}],
         "tui_o":{"writer":{"all_tui":false,"channels":[42]}}
     })).unwrap();
-    let error = BootChannels::validate(&config)
+    let boot = BootChannels::validate(&config)
         .unwrap()
         .seeded(&config, |selected, _| {
             let committed = store.channels_with_init()?;
             let channels = selected.union(&committed).copied().collect();
             Ok(channel_policy::stored(Some(root.path()), &channels))
         })
-        .unwrap_err();
-    assert!(format!("{error:#}").contains("channel 43 is not registered"));
+        .unwrap();
+    assert!(boot.channels().contains(&43));
+    assert_eq!(boot.kind(43), None);
+    assert_eq!(
+        boot.candidate(43).unwrap().peek(),
+        channel_policy::Adoption::Committed
+    );
+    assert_eq!(boot.kind(42), Some(RuntimeHandoffKind::ClaudeTui));
+    let forced = test_override::force_boot(boot);
+    let ownership = crate::services::tui_o::cutover::boot_ownership();
+    let unbound = ownership.iter().find(|entry| entry.0 == 43).unwrap();
+    assert_eq!(unbound.1, None);
+    assert!(unbound.2.is_none());
+    assert_eq!(std::fs::read(channel.join("init")).unwrap(), original);
+    drop(forced);
 }
 fn boot() -> crate::services::tui_o::channel_policy::BootChannels {
     let config = serde_json::from_value(serde_json::json!({

@@ -1,3 +1,4 @@
+use crate::services::process::reaping::CommandReapExt;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -116,7 +117,7 @@ impl GitCommand {
         command.stderr(Stdio::piped());
 
         let mut child = command
-            .spawn()
+            .spawn_reaping()
             .map_err(|source| GitCommandError::spawn(context.clone(), source))?;
 
         let stdout_handle = child.stdout.take().map(read_pipe);

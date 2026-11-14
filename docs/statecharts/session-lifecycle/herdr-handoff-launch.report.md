@@ -34,7 +34,7 @@ updated coordinates and raw census. No production queue or server was changed.
 | Cancel one input | `queued_head/v2/control.rs:207-274` | clears journal only if removed original matches; old callbacks lose claim |
 | Queue clear / clear waiting | same `:285-297,:412-422` | clears journal when unattempted waiting items taken; attempted custody preserved |
 | Legacy migration / adoption | `queued_head/v2/migration.rs:52`; `queued_head/v2.rs:171`; `v2_types.rs:39` | no journal on V1 migration/new snapshot; optional journal on V2 restore |
-| Legacy write and /clear guards | `queued_head/compat.rs:55-80` | V2 remains read-only to legacy save/clear; no new bypass |
+| Legacy write and /clear guards | `queued_head/compat.rs:57-79` | V2 remains read-only to legacy save/clear (V2 clear goes through its owner); no new bypass |
 
 `Cap=5` follows the implementation launch budget; backoff uses the existing
 `1 << min(failures,5)` seconds (first four sleeps 2,4,8,16 when starting at zero). Existing close failures share

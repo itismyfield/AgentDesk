@@ -7,6 +7,9 @@ pub(crate) mod cancel_token_cleanup;
 mod cancel_token_codex_owed;
 mod cancel_watchdog;
 pub(crate) mod channel_rules;
+#[cfg(all(test, target_os = "linux"))]
+#[path = "provider/reaping_tests.rs"]
+mod child_reaping_tests;
 pub(crate) mod herdr_before_start;
 pub(crate) mod native_stop;
 mod output_reader;
@@ -242,6 +245,7 @@ pub struct CancelToken {
     pub cancelled: AtomicBool,
     pub(crate) prompt_capture: std::sync::OnceLock<std::sync::Arc<session_prompt::Capture>>,
     child_pid: Mutex<Option<CapturedProcess>>,
+    child_pid_generation: AtomicU64,
     cancel_source: Mutex<Option<String>>,
     cancel_source_kind: Mutex<Option<CancelSource>>,
     /// Serializes cancellation attribution and completion publication.
@@ -303,6 +307,7 @@ impl CancelToken {
             cancelled: AtomicBool::new(false),
             prompt_capture: std::sync::OnceLock::new(),
             child_pid: Mutex::new(None),
+            child_pid_generation: AtomicU64::new(0),
             cancel_source: Mutex::new(None),
             cancel_source_kind: Mutex::new(None),
             cancellation_publication: Mutex::new(()),
@@ -351,8 +356,10 @@ impl CancelToken {
     }
 
     pub(crate) fn store_child_pid(&self, pid: u32) {
-        *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(CapturedProcess::capture(pid));
+        let captured = CapturedProcess::capture(pid);
+        let mut child = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
+        self.child_pid_generation.fetch_add(1, Ordering::Relaxed);
+        *child = Some(captured);
     }
 
     pub(crate) fn child_pid_value(&self) -> Option<u32> {
@@ -366,14 +373,44 @@ impl CancelToken {
         self.child_pid.lock().ok().and_then(|guard| guard.clone())
     }
 
+    pub(crate) fn try_reap_child(
+        &self,
+        child: &mut std::process::Child,
+        generation: u64,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let mut published = match self.child_pid.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+        };
+        // PID dispatch shares this lock. Preserve a newer registration even when its PID
+        // number matches a delayed owner's already-reaped child.
+        let status = child.try_wait()?;
+        if status.is_some()
+            && self.child_pid_generation.load(Ordering::Relaxed) == generation
+            && published
+                .as_ref()
+                .is_some_and(|target| target.pid == child.id())
+        {
+            *published = None;
+        }
+        Ok(status)
+    }
+
+    pub(crate) fn child_reap_generation(&self) -> u64 {
+        self.child_pid_generation.load(Ordering::Relaxed)
+    }
+
     #[cfg(test)]
     pub(crate) fn store_child_process_for_test(&self, process: CapturedProcess) {
-        *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(process);
+        let mut child = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
+        self.child_pid_generation.fetch_add(1, Ordering::Relaxed);
+        *child = Some(process);
     }
 
     #[cfg(test)]
     pub(crate) fn store_child_pid_without_identity_for_test(&self, pid: u32) {
-        *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(CapturedProcess {
+        self.store_child_process_for_test(CapturedProcess {
             pid,
             identity: None,
         });
@@ -397,6 +434,7 @@ impl CancelToken {
         let captured = CapturedProcess::capture(pid);
         let mut child_pid = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
         if child_pid.is_none() {
+            self.child_pid_generation.fetch_add(1, Ordering::Relaxed);
             *child_pid = Some(captured);
         }
     }

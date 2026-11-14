@@ -1,3 +1,4 @@
+use crate::services::process::reaping::CommandReapExt;
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::path::Path;
@@ -712,7 +713,7 @@ pub fn probe_codex_cli_version_with_path(
             command.env("PATH", trimmed);
         }
     }
-    let mut child = command.spawn().ok()?;
+    let mut child = command.spawn_reaping().ok()?;
 
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {

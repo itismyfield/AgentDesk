@@ -3,12 +3,16 @@
 use super::handle_codex_json_line;
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::replay_policy::live::{RawTap, Seen};
+use crate::services::process::reaping::ReapingChild;
 use std::io::{BufRead, BufReader};
 use std::process::Child;
 use std::sync::mpsc::{self, Sender};
 
+#[cfg(all(test, target_os = "linux"))]
+mod reaping_tests;
+
 pub(super) fn read(
-    mut child: Child,
+    mut child: ReapingChild,
     sender: Sender<StreamMessage>,
     session_id: Option<&str>,
     tap: RawTap,
