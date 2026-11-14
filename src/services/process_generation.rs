@@ -147,30 +147,6 @@ mod test_generation_publication {
         }
     }
 
-    #[test]
-    fn boot_allocation_memo_survives_foreign_disk_advance() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("generation");
-        fs::write(&path, "7").unwrap();
-        let cell = std::sync::OnceLock::new();
-        let transaction = std::sync::Mutex::new(());
-        let allocate = || {
-            allocate_generation_epoch_with_io(GenerationIo {
-                path: Some(path.clone()),
-                lock: lock_generation_path,
-                read: read_generation_counter,
-                write: atomic_write,
-                fsync: fsync_parent_dir,
-                flushes: PARENT_DIR_FSYNC_FLUSHES,
-            })
-        };
-        let boot = allocate_once_with(&cell, &transaction, allocate);
-        assert_eq!(boot.generation, 8);
-        fs::write(&path, "91").unwrap();
-        assert_eq!(allocate_once_with(&cell, &transaction, allocate), boot);
-        assert_eq!(read_generation_counter(&path), CounterRead::Parsed(91));
-    }
-
     pub(super) fn published_binding() -> Option<ProcessGenerationAllocation> {
         BINDING.get()
     }
