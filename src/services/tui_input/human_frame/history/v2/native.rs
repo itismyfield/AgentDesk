@@ -4,7 +4,7 @@ use super::*;
 #[path = "native_control.rs"]
 pub(crate) mod control;
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) fn frame_hashes(text: &str) -> Vec<String> {
     super::super::class_hashes(text)
 }

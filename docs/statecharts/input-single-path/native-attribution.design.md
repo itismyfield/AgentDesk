@@ -171,7 +171,7 @@ B 착수 시 실제 reader/worker/actor 포트를 대조한 [재산정·분할�
 
 ## 조각 3a: reopen prefix projection (비활성)
 
-기존 SourceCapture reopen의 단일 FD/hash pass에 두 번째 Write 소비자를 붙인다.
+기존 SourceCapture reopen의 단일 FD/hash pass에 읽기 observer를 붙인다.
 소비자는 같은 순서의 bytes만 받으며 identity·stored prefix_hash 검증이 끝난 뒤에만
 Projection을 반환한다. 일반 open·verify_prefix·verify_eof에는 projection 설치 효과가 없다.
 입력 body의 정규화 hash, UUID, queue kind, run 경계/range만 source 메모리에 남기며

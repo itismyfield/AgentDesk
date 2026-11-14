@@ -167,7 +167,7 @@ fn read_at(mut file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Streams `0..len` into a hasher and returns it with the trailing guard bytes.
+/// Observes the existing prefix read without acquiring a file or writer.
 pub(crate) trait PrefixConsumer {
     fn prefix_bytes(&mut self, bytes: &[u8]);
 }
@@ -175,6 +175,7 @@ impl PrefixConsumer for () {
     fn prefix_bytes(&mut self, _bytes: &[u8]) {}
 }
 
+/// Streams `0..len` into a hasher and returns it with the trailing guard bytes.
 fn hash_prefix(file: &File, len: u64) -> io::Result<(Sha256, Vec<u8>)> {
     hash_prefix_into(file, len, &mut ())
 }

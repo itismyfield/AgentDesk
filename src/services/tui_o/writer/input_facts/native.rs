@@ -159,7 +159,7 @@ pub(super) use tests::fold;
 mod tests;
 
 #[cfg(unix)]
-pub(crate) use projection::Projection;
+pub(crate) type Projection = projection::Projection;
 
 #[cfg(unix)]
 mod projection {
