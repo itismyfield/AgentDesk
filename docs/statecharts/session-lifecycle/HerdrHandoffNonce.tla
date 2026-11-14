@@ -56,7 +56,8 @@ Launch == /\ msg \in {"queued", "rejected"} /\ Ready
 \* A rejected input is resent by the user and judged again from the same markers.
 Resend == /\ msg = "rejected" /\ msg' = "queued"
           /\ UNCHANGED <<tmux, herdrPane, marker, hostKind, recorded, journal, captured, rebooted>>
-\* Restart keeps markers, the binding log and the journal; only memory is rebuilt.
+\* Restart without file cleanup: markers, the binding log and the journal stay; only memory is rebuilt.
+\* Boot orphan sweep and partial marker writes are not modeled.
 Boot == /\ ~rebooted /\ rebooted' = TRUE
         /\ UNCHANGED <<tmux, herdrPane, marker, hostKind, recorded, journal, msg, captured>>
 

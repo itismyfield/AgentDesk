@@ -28,17 +28,23 @@ names another host (`host_gate.rs:20-36`), so a failed Herdr create never reads 
 | Stat registration of the same source | `tui_prompt_dedupe/runtime_binding.rs:240-251` → `binding_events.rs:874-882` | `ResumeLogged = FALSE` (no record, `recorded = t0`) |
 | Herdr create: row Pending, host marker, nonce | `herdr_launch.rs:480-497` | `Launch` success: `marker = h2`, `hostKind = herdr` |
 | Herdr create failing after its markers | `herdr_launch.rs:529-546` (indeterminate / NotSent) | `Start = "failedcreate"` (`h1`, pane may run) |
-| Herdr failure before markers | `herdr_launch.rs:503-508` `retire_unsent` | no marker change |
+| Herdr marker write failing during create | `herdr_launch.rs:493-508` (host marker at :493, nonce stamp at :497, then `retire_unsent`) | NOT_MODELED: host may be `herdr` while the nonce is missing or removed |
+| Nonce write failure removes the nonce | `tmux_session_files.rs:346-354` | NOT_MODELED: marker absent, so the judgment refuses as before |
 | kill-tmux API | `dispatched_sessions/tmux_cleanup.rs:338` | `KillTmux` (markers stay) |
 | Session temp cleanup (removes `.spawn_nonce`) | `tmux_common.rs:1186-1260`; callers `tmux_reaper.rs:344,687`, `turn_lifecycle.rs:502`, `tmux_recreate.rs:59`, `clear_teardown/execution_cleanup.rs:311`, `managed_reset.rs:145`, `claude.rs:2605`, `claude/tui_session_launch.rs:57` | marker absent: never refused (unchanged, not modeled) |
 | Input-owner handoff close | `queue_io/input_owner/claude_handoff.rs:138-197,241-258` → `pinned_tmux.rs:224-338` | `Begin`, `Close` (`CloseWorks`) |
 | Launch-time close of a live tmux | `herdr_turn/handoff.rs:74-86` | covered by `Direct` only as a judgment before close |
 | Binding judgment | `herdr_turn/handoff.rs:183-195,218-225` (`ended_tmux_execution`) | `Refused` |
-| dcserver restart / boot census | markers, log and journal are files; the writer fold is rebuilt from the log | `Boot` (nothing changes) |
+| dcserver restart / boot census | markers, log and journal are files; the writer fold is rebuilt from the log | `Boot` (restart without cleanup) |
+| Boot orphan sweep (removes stale session files when dead sessions were cleaned) | `watchers/lifecycle/restore.rs:690-719` → `tmux_session_files.rs:850` | NOT_MODELED |
 | Retired row (#8146) | `herdr_launch.rs:440-447` `retired_hold::before_fresh` | not changed; Herdr-side proof |
 
 Cancel, queue clear, Herdr Terminate, `/clear` and stop do not write `.host_kind` = tmux or
 a tmux nonce, so none of them creates the accepted state. Input classification is untouched.
+
+Scope: `Boot` is a restart that performs no file cleanup. Marker removal (boot orphan sweep, nonce
+write failure) and partial marker writes are NOT_MODELED; the 9 cfg results do not cover them and
+must not be read as a pass for the whole boot path.
 
 ## TLC result
 
