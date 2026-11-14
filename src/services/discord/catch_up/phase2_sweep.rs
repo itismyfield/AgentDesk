@@ -310,6 +310,16 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
             progress.stats.skipped += 1;
             continue;
         }
+        if router::should_skip_human_slash_message(
+            msg.author.bot,
+            &msg.content,
+            shared.known_slash_commands.get(),
+        ) {
+            progress.frontier.recovered(mid);
+            progress.phase2_checkpoint = advance_phase2_checkpoint(progress.phase2_checkpoint, mid);
+            progress.stats.skipped += 1;
+            continue;
+        }
         let age_secs = match phase2_pre_gate(
             msg,
             current_bot_user_id,
