@@ -758,7 +758,7 @@ fn init_path(harness: &Harness, channel: u64) -> PathBuf {
     let dir = harness
         ._runtime
         .path()
-        .join("o_store")
+        .join(crate::services::tui_o::store::STORE_DIR_NAME)
         .join(channel.to_string());
     dir.join("init")
 }

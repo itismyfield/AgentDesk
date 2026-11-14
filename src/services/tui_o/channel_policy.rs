@@ -301,13 +301,16 @@ impl BootChannels {
                 let kinds = registered_kinds(config, "o_store", &kept)
                     .context("a channel committed to O here left the writer selection")?;
                 for &channel in &kept {
-                    if kinds.contains_key(&channel) {
+                    let alarm = if kinds.contains_key(&channel) {
                         tracing::warn!(
                             channel,
                             "[tui_o] committed channel missing from writer selection"
                         );
-                    }
-                    alarms.raise_at(channel, &WriterAlarm::SelectionMissing, Instant::now());
+                        WriterAlarm::SelectionMissing
+                    } else {
+                        WriterAlarm::BindingMissing
+                    };
+                    alarms.raise_at(channel, &alarm, Instant::now());
                 }
                 self.kinds.extend(kinds);
                 self.channels.extend(kept);

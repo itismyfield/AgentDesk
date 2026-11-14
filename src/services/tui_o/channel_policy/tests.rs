@@ -587,7 +587,9 @@ fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
         return;
     };
     let store = if role == "rebound" {
-        crate::config::runtime_root().unwrap().join("o_store")
+        crate::config::runtime_root()
+            .unwrap()
+            .join(crate::services::tui_o::store::STORE_DIR_NAME)
     } else {
         let store = commit_on_disk(&[41, 42], &[43]);
         std::fs::create_dir(store.join("44")).unwrap();
@@ -633,7 +635,8 @@ fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
     let held = boot().unwrap().candidate(44).map(Candidate::peek);
     assert_eq!((owned, held), (vec![41, 42, 43, 44], Some(Adoption::Held)));
     let missing = match role.as_str() {
-        "dropped" | "unregistered" | "rebound" => vec![42, 43, 44],
+        "dropped" | "rebound" => vec![42, 43, 44],
+        "unregistered" => vec![42],
         _ => vec![],
     };
     let missing: Vec<_> = missing
@@ -648,13 +651,32 @@ fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
         let text = std::fs::read_to_string(log.path()).unwrap();
         for channel in [43, 44] {
             assert_eq!(boot().unwrap().kind(channel), None);
+            assert!(
+                crate::services::tui_o::alarm::health_reasons()
+                    .contains(&format!("tui_o:binding_missing:{channel}"))
+            );
             let warnings: Vec<_> = text
                 .lines()
                 .filter(|line| line.contains(&format!("channel={channel}")))
                 .collect();
             assert_eq!(warnings.len(), 1, "{text}");
-            assert!(warnings[0].contains("SelectionMissing"), "{text}");
+            assert!(warnings[0].contains("BindingMissing"), "{text}");
+            assert!(
+                warnings[0].contains("no binding; writer not started"),
+                "{text}"
+            );
         }
+        let warnings: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("channel=42"))
+            .collect();
+        assert_eq!(warnings.len(), 2, "{text}");
+        assert!(
+            warnings
+                .iter()
+                .any(|line| line.contains("committed channel missing from writer selection")),
+            "{text}"
+        );
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -680,6 +702,93 @@ fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
             boot().unwrap().candidate(43).unwrap().peek(),
             Adoption::Committed
         );
+        let (_, kind, candidate) = super::super::cutover::boot_ownership()
+            .into_iter()
+            .find(|(id, _, _)| *id == 43)
+            .unwrap();
+        assert_eq!(kind, Some(RuntimeHandoffKind::ClaudeTui));
+        assert_eq!(candidate.unwrap().peek(), Adoption::Committed);
+    }
+}
+
+#[test]
+fn an_unbound_member_holds_claimed_placed_and_discovered_intake() {
+    use crate::services::tui_o::cutover::{intake_route, test_override};
+    use intake_route::IntakeRoute;
+    let config = boot_config(&[41], &[41, 42], serde_json::json!({}));
+    let snapshot = BootChannels::validate(&config)
+        .unwrap()
+        .seeded(&config, |_, _| {
+            Ok(BTreeMap::from([
+                (41, Adoption::Committed),
+                (43, Adoption::Committed),
+            ]))
+        })
+        .unwrap();
+    let _boot = test_override::force_boot(snapshot);
+    let _ready = intake_route::test_probe::answer_with(|_| true);
+    for provider in ["claude", "codex", "other"] {
+        let expected = IntakeRoute::Hold("O channel 43 has no binding".into());
+        assert_eq!(intake_route::route(provider, 43), expected);
+        assert_eq!(intake_route::route_for_placement(provider, 43), expected);
+        assert_eq!(intake_route::route_text(provider, "43"), expected);
+        assert_eq!(
+            intake_route::route_text_for_placement(provider, "43"),
+            expected
+        );
+        assert!(intake_route::held_channels(provider).contains(&"43".into()));
+        assert_eq!(intake_route::route(provider, 99), IntakeRoute::Unselected);
+    }
+    assert_eq!(intake_route::route("claude", 41), IntakeRoute::Gateway);
+    assert_eq!(intake_route::held_channels("claude"), ["43"]);
+}
+
+#[test]
+fn only_unbound_unselected_home_members_may_lack_a_kind() {
+    for selected in [&[][..], &[41][..]] {
+        for local in ["home", "foreign"] {
+            let config = boot_config(
+                selected,
+                &[41, 42],
+                serde_json::json!({
+                    "enabled": true, "instance_id": local, "gateway_preferred_instance_id": "home"
+                }),
+            );
+            let snapshot = BootChannels::validate(&config)
+                .unwrap()
+                .seeded(&config, |_, _| {
+                    Ok(BTreeMap::from([
+                        (41, Adoption::Committed),
+                        (42, Adoption::Committed),
+                        (43, Adoption::Committed),
+                        (44, Adoption::Held),
+                    ]))
+                })
+                .unwrap();
+            let untyped: BTreeSet<_> = snapshot
+                .channels()
+                .iter()
+                .filter(|&&id| snapshot.kind(id).is_none())
+                .copied()
+                .collect();
+            for id in &untyped {
+                assert_eq!(snapshot.site(), &Site::Home);
+                assert!(
+                    !snapshot.selected().contains(id),
+                    "selected member {id} lost its kind"
+                );
+                assert!(
+                    !agent_bindings(&config).any(|(bound, _, _)| bound == *id),
+                    "bound member {id} lost its kind"
+                );
+            }
+            let expected = if local == "home" && !selected.is_empty() {
+                BTreeSet::from([43, 44])
+            } else {
+                BTreeSet::new()
+            };
+            assert_eq!(untyped, expected);
+        }
     }
 }
 
