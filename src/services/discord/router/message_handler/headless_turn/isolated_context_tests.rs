@@ -1073,29 +1073,56 @@ async fn people_who_write_while_a_headless_run_holds_the_primary_are_served_once
             .cancel_token
             .is_some_and(|token| Arc::ptr_eq(&token, &run_turn))
     );
-    let spawned = || std::fs::read_to_string(fixture.stubs.join("spawned")).unwrap_or_default();
-    assert_eq!(spawned().lines().count(), 1, "only the run's own provider");
-
-    // The run ends: the same actor hands each waiting unit to a turn once, in order.
+    // The run ends and lets go of the mailbox: nothing waiting is lost or repeated.
     std::fs::write(fixture.stubs.join("answer"), "headless-answer-8117").unwrap();
     std::fs::write(fixture.stubs.join("release"), "").unwrap();
-    let served = async {
-        let mut served: Vec<u64> = Vec::new();
+    let held = |now: &crate::services::turn_orchestrator::ChannelMailboxSnapshot| {
+        let token = now.cancel_token.as_ref();
+        token.is_some_and(|token| Arc::ptr_eq(token, &run_turn))
+    };
+    // What the mailbox holds for the waiting inputs: `(being served, still waiting)`.
+    let holds = |now: &crate::services::turn_orchestrator::ChannelMailboxSnapshot| {
+        let taken = [now.pending_user_dispatch, now.active_user_message_id];
+        let mut serving: Vec<u64> = taken.iter().flatten().map(|id| id.get()).collect();
+        serving.retain(|id| units.contains(id));
+        serving.dedup();
+        let waiting: Vec<u64> = now
+            .intervention_queue
+            .iter()
+            .map(|unit| unit.message_id.get())
+            .collect();
+        (serving, waiting)
+    };
+    let released = async {
         loop {
             let now = crate::services::discord::mailbox_snapshot(&fixture.shared, PRIMARY).await;
-            let active = now.active_user_message_id.map(|id| id.get());
-            if let Some(id) = active.filter(|id| units.contains(id)) {
-                if served.last() != Some(&id) {
-                    served.push(id);
-                }
-            }
-            if served.len() == units.len() && now.intervention_queue.is_empty() {
-                break served;
+            if !held(&now) {
+                break holds(&now);
             }
             tokio::task::yield_now().await;
         }
     };
-    assert_eq!(await_within(served, WAIT_CAP).await, units);
+    let (serving, waiting) = await_within(released, WAIT_CAP).await;
+    assert_eq!([serving, waiting].concat(), units, "after the run");
+    let spawned = std::fs::read_to_string(fixture.stubs.join("spawned")).unwrap();
+    assert_eq!(
+        spawned.lines().count(),
+        1,
+        "only the run's own provider ran"
+    );
+
+    // The same actor then hands the first waiting input to a turn; the other still waits once.
+    let handed = async {
+        loop {
+            let now = crate::services::discord::mailbox_snapshot(&fixture.shared, PRIMARY).await;
+            let (serving, waiting) = holds(&now);
+            if serving == units[..1] {
+                break waiting;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    assert_eq!(await_within(handed, WAIT_CAP).await, units[1..]);
     let current = fixture.shared.mailbox_peek(PRIMARY);
     assert!(current.is_some_and(|current| current.same_actor(&actor)));
     fixture.db.drop().await;
