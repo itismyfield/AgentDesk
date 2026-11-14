@@ -168,3 +168,23 @@ A reader의 v3 wire 계약은 registration의 optional `native_settlement`다. �
 A의 prepare/result/withdrawal ack API는 cfg(test)이며 운영 producer가 없다. 철회 안내는 기존 `retained_input_notice` source의 persistent-dedupe outbox 영속 enqueue 뒤 ack한다. 새 source 허용 항목은 추가하지 않는다. B가 API를 활성화할 때 durable outbox 전에 ack하거나 None follower에게 parent 정리 권한을 부여해서는 안 된다. boot read는 live/planned/passive의 미정리 자료와 전체 원본 registration을 기존 custody에 보존한다. 이 A 보존 연결은 native 결과를 새로 만들거나 시간으로 lease를 해제하지 않는다. 기존 finalizer·actor CAS·inflight CAS·owner drive 자체를 재구현하지 않는다.
 
 B 착수 시 실제 reader/worker/actor 포트를 대조한 [재산정·분할안](native-attribution-b.plan.md)이 있다. P2 두 건만 첫 B 커밋에서 처리했고 새 운영 전이는 아직 켜지 않았다. 원래 크기 표는 설계 당시 추정이며 잔여 구현량은 해당 재산정과 실측으로 판단한다.
+
+## 조각 3a: reopen prefix projection (비활성)
+
+기존 SourceCapture reopen의 단일 FD/hash pass에 두 번째 Write 소비자를 붙인다.
+소비자는 같은 순서의 bytes만 받으며 identity·stored prefix_hash 검증이 끝난 뒤에만
+Projection을 반환한다. 일반 open·verify_prefix·verify_eof에는 projection 설치 효과가 없다.
+입력 body의 정규화 hash, UUID, queue kind, run 경계/range만 source 메모리에 남기며
+raw JSON/output payload나 별도의 checkpoint/journal을 저장하지 않는다.
+
+Registration/receipt가 달라질 때 다시 평가할 수 있는 source facts를 보존한다.
+이는 입력 hash와 run 관계의 순수 평가이며 파일 열기/읽기/cursor reset을 수행하지 않는다.
+기존 B1 batch fold는 시험 코드에 그대로 남겨 prefix별 독립 오라클로 비교한다.
+불완전한 record, 잘린 FIFO, foreign source, 손상 자료는 Unavailable이며 빈 성공 후보가 아니다.
+Hash/identity 거절은 기존 output reopen 오류를 유지한다. Native parser 거절은 output capture와
+분리된 Result로 반환하여 output 경로를 native 오류에 묶지 않는다.
+
+Prefix cfg의 lease 진행성은 pre-key scope를 열었던 caller가 Ready/Unavailable 반환 뒤
+기존 unstarted unwind를 완료한다는 합성 계약이다. Projection 자체는 lease를 잡거나 풀지 않는다.
+실제 공급/NotSent 연결·같은 facts 재평가 scheduling·admit/ack·host wiring은 조각3b이고,
+3a의 모델 GREEN을 운영 활성화나 native 결과 완료의 실행 증거로 세지 않는다.

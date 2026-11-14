@@ -33,7 +33,7 @@ Init == /\ pc = 0 /\ native = "Idle" /\ members = {} /\ nativeQueue = <<>>
              row : {Mode \notin {"BootQueueBefore", "BootQueueFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable", "NeutralTransferBefore", "NeutralTransferFixed"}}, preserved : {FALSE}, prepared : {FALSE}, head : {FALSE},
              failed : {Mode \in {"BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
                 "PreflightBefore", "PreflightFixed", "TransferUnreadable", "TransferAbsentUnreadable", "BootCorruptBefore", "BootCorruptFixed", "ControlUnreadableFixed"}}, notice : {0},
-             parentLease : {IF Mode \in ConsumerModes \/ Mode \in {"TransferAbsentBefore", "TransferAbsentFixed", "TransferAbsentUnreadable"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferUnreadable", "NeutralTransferBefore", "NeutralTransferFixed", "ControlStaleBefore", "ControlStaleFixed"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {Mode \in {"BootQueueBefore", "BootQueueFixed"}}, neutral : {FALSE}]
+             parentLease : {IF Mode \in ConsumerModes \/ Mode \in {"TransferAbsentBefore", "TransferAbsentFixed", "TransferAbsentUnreadable"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferUnreadable", "NeutralTransferBefore", "NeutralTransferFixed", "ControlStaleBefore", "ControlStaleFixed"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {Mode \in {"BootQueueBefore", "BootQueueFixed"}}, neutral : {FALSE}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}]
         /\ review.commits = IF review.result = "Executed" THEN 1 ELSE 0
         /\ (~ReviewBoot /\ Mode \notin ConsumerModes) => review.result = "None"
         /\ Mode \in ConsumerModes => review.result = IF Mode \in {"BootPendingFixed", "BootGcBefore", "BootGcFixed"} THEN "None" ELSE "Executed"
@@ -426,5 +426,29 @@ ControlCustodyBeforeDelete == ~review.parentRow => review.preserved
 ControlKeepsSuccessor == Mode \notin {"ControlStaleBefore", "ControlStaleFixed"} \/ (review.parentLease = 2 /\ review.parentRow /\ review.parentActive = 1)
 ControlNoKeyPreserved == Mode # "ControlNoKeyFixed" \/ (review.parentLease = 1 /\ review.result = "None" /\ review.parentRow)
 ControlEventuallyDone == <>(review.phase = "Done" /\ review.nativeAck /\ review.head)
+
+
+\* The reopen pass owns the seed; a pre-key caller closes its unstarted scope on return.
+PrefixHashPass == /\ review.prefixStep = 0
+                  /\ review' = [review EXCEPT !.prefixStep = 1, !.prefixReads = 1,
+                       !.seed = IF Mode = "PrefixGapBefore" THEN "Absent"
+                          ELSE IF (review.prefixHash /\ review.prefixFifo) \/ Mode \in {"PrefixHashBefore", "PrefixFifoBefore"}
+                               THEN "Ready" ELSE "Unavailable"]
+                  /\ UNCHANGED <<ConsumerStable, known>>
+PrefixTicketChange == /\ review.prefixStep = 1
+                      /\ review' = [review EXCEPT !.prefixStep = 2,
+                           !.prefixReads = IF Mode = "PrefixReadBefore" THEN 2 ELSE review.prefixReads]
+                      /\ UNCHANGED <<ConsumerStable, known>>
+PrefixScopeClose == /\ review.prefixStep = 2 /\ review.seed # "Absent"
+                    /\ review' = [review EXCEPT !.prefixStep = 3, !.prefixLease = 0]
+                    /\ UNCHANGED <<ConsumerStable, known>>
+PrefixNext == PrefixHashPass \/ PrefixTicketChange \/ PrefixScopeClose
+PrefixSpec == Init /\ [][PrefixNext]_vars /\ WF_vars(PrefixHashPass)
+              /\ WF_vars(PrefixTicketChange) /\ WF_vars(PrefixScopeClose)
+PrefixAuthenticated == review.seed = "Ready" => review.prefixHash /\ review.prefixFifo
+PrefixNoReread == review.prefixReads <= 1
+PrefixNoFabrication == review.result = "None" /\ ~review.nativeAck
+PrefixSeedEventuallyAvailable == <>(review.seed # "Absent")
+PrefixLeaseEventuallyFree == <>(review.prefixLease = 0)
 
 =============================================================================

@@ -7,7 +7,7 @@ vars == <<BaseVars, review>>
 Init == /\ phase = "Intent" /\ role \in {"Primary", "Follower"}
         /\ pin = "None" /\ prepared = FALSE /\ anyKey = FALSE /\ original = TRUE
         /\ result = "None" /\ source = "PreSource" /\ restored = FALSE /\ admitted = FALSE
-        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}]
+        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}]
 Prepare == /\ phase = "Intent"
            /\ phase' = "Prepared" /\ prepared' = TRUE
            /\ pin' = IF role = "Primary" \/ Mode = "BorrowBusy" THEN "Primary" ELSE "None"
@@ -98,4 +98,28 @@ NoUntypedAdmission == admitted => (prepared /\ anyKey /\ source = "Bound" /\ (ro
 TypedAdmissionEventuallyAvailable == (phase = "Unknown" /\ source = "Bound") ~> admitted
 FreshRegistrationResult == review.stored = "None" \/ review.readVersion = review.version
 ReceiptEventuallyCommits == <>(review.stored = "two")
+
+\* The reopen pass owns the seed; a pre-key caller closes its unstarted scope on return.
+PrefixHashPass == /\ review.prefixStep = 0
+                  /\ review' = [review EXCEPT !.prefixStep = 1, !.prefixReads = 1,
+                       !.seed = IF Mode = "PrefixGapBefore" THEN "Absent"
+                          ELSE IF (review.prefixHash /\ review.prefixFifo) \/ Mode \in {"PrefixHashBefore", "PrefixFifoBefore"}
+                               THEN "Ready" ELSE "Unavailable"]
+                  /\ UNCHANGED BaseVars
+PrefixTicketChange == /\ review.prefixStep = 1
+                      /\ review' = [review EXCEPT !.prefixStep = 2,
+                           !.prefixReads = IF Mode = "PrefixReadBefore" THEN 2 ELSE review.prefixReads]
+                      /\ UNCHANGED BaseVars
+PrefixScopeClose == /\ review.prefixStep = 2 /\ review.seed # "Absent"
+                    /\ review' = [review EXCEPT !.prefixStep = 3, !.prefixLease = 0]
+                    /\ UNCHANGED BaseVars
+PrefixNext == PrefixHashPass \/ PrefixTicketChange \/ PrefixScopeClose
+PrefixSpec == Init /\ [][PrefixNext]_vars /\ WF_vars(PrefixHashPass)
+              /\ WF_vars(PrefixTicketChange) /\ WF_vars(PrefixScopeClose)
+PrefixAuthenticated == review.seed = "Ready" => review.prefixHash /\ review.prefixFifo
+PrefixNoReread == review.prefixReads <= 1
+PrefixNoFabrication == result = "None" /\ original
+PrefixSeedEventuallyAvailable == <>(review.seed # "Absent")
+PrefixLeaseEventuallyFree == <>(review.prefixLease = 0)
+
 =====================================================================

@@ -494,6 +494,14 @@ input-single-path/NativeAttributionDebtFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionDebtNoRetry.cfg	NativeInputAttribution	-	NativeDebtEventuallyDrained
 input-single-path/NativePreparationStampBefore.cfg	NativeInputPreparation	FreshRegistrationResult	ReceiptEventuallyCommits
 input-single-path/NativePreparationStampFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationPrefixFifoBefore.cfg	NativeInputPreparation	PrefixAuthenticated	-
+input-single-path/NativePreparationPrefixFifoFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationPrefixGapBefore.cfg	NativeInputPreparation	-	PrefixLeaseEventuallyFree,PrefixSeedEventuallyAvailable
+input-single-path/NativePreparationPrefixGapFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationPrefixHashBefore.cfg	NativeInputPreparation	PrefixAuthenticated	-
+input-single-path/NativePreparationPrefixHashFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationPrefixReadBefore.cfg	NativeInputPreparation	PrefixNoReread	-
+input-single-path/NativePreparationPrefixReadFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativeAttributionPortPreflightBefore.cfg	NativeInputAttribution	FailedPreflightKeepsLease	NativePortEventuallyDone
 input-single-path/NativeAttributionPortPreflightFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionPortTransferBefore.cfg	NativeInputAttribution	-	NativePortEventuallyDone
@@ -530,3 +538,11 @@ input-single-path/NativeAttributionControlStaleBefore.cfg	NativeInputAttribution
 input-single-path/NativeAttributionControlStaleFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionControlUnreadableFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionControlNoKeyFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionPrefixFifoBefore.cfg	NativeInputAttribution	PrefixAuthenticated	-
+input-single-path/NativeAttributionPrefixFifoFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionPrefixGapBefore.cfg	NativeInputAttribution	-	PrefixLeaseEventuallyFree,PrefixSeedEventuallyAvailable
+input-single-path/NativeAttributionPrefixGapFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionPrefixHashBefore.cfg	NativeInputAttribution	PrefixAuthenticated	-
+input-single-path/NativeAttributionPrefixHashFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionPrefixReadBefore.cfg	NativeInputAttribution	PrefixNoReread	-
+input-single-path/NativeAttributionPrefixReadFixed.cfg	NativeInputAttribution	-	-

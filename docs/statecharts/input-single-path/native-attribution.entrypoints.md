@@ -883,3 +883,16 @@ PortTransferred는 durable 결과+내 lease 없음+foreign row의 조합에서 d
 | `circuit_removal.rs::handoff_before_discard_locked`, `rebind_reap.rs` 두 unlink | 기존 sidecar lock 아래 `preserve_native_before_discard`를 먼저 완료. custody try-lock/보존 실패면 삭제 거절. 새 삭제 권한0 |
 
 Control marker의 값은 위 코드에서만 가져온다: `any_key/not_sent` 미기록 또는 true, 기존 outcome None/native 결과/명시 control 결과, cleanup false/true, control_intent의 namespace/full ticket/선택 row snapshot. 새 관측 loop·source replay·timer result는 없다. NativeInputAttribution의 prepared는 AnyKey+설치 ack를 추상화하며 scope/receipt/직렬화 정밀 비교는 실제 Rust 입구가 검증한다.
+
+## 조각 3a — 기존 reopen hash pass의 비활성 projection
+
+| 코드 접점 | 모델 행동/값의 근거 |
+|---|---|
+| `shadow/capture.rs::hash_prefix_into`, `SourceCapture::reopen_with_prefix` | PrefixHashPass. 기존 FD/read 범위0..through 및 trailing guard, SourceId/저장 hash 검증. 추가 reader/open/read loop 없음 |
+| `writer/input_facts/native.rs::Projection::reopen`, `Decoder::write` | Absent→Ready/Unavailable. bytes는 단일 hash pass에서만 받고 incomplete coverage/record를 거절. 새 seed의 생성자는 이 reopen뿐 |
+| 같은 파일 `Projection::evidence`, `reduce` | PrefixTicketChange. namespace/full ticket/source/receipt를 같은 source facts에 적용. source I/O·result/lease mutation0 |
+| `NativeInputPreparation`/`NativeInputAttribution`의 PrefixScopeClose | 조각3b caller 합성 전제: 첫 key 이전 반환 뒤 기존 unstarted scope unwind. 3a 함수 자체의 lease 해제로 주장하지 않음 |
+
+추가 모델 값: `seed∈{Absent,Ready,Unavailable}`는 위 Result/부재, prefixHash/prefixFifo의
+Bool은 hash/coverage/FIFO 검증 결과, prefixReads∈0..2는 기존 byte pass 횟수(2는 반례),
+prefixLease∈{0,1}은 caller의 기존 scoped actor 소유 유무다. 영속 flag나 timer를 신설하지 않는다.

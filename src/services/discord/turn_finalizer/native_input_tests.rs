@@ -2693,6 +2693,13 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
         key.channel_id,
     );
     assert!(
+        !f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .cleanup_complete
+    );
+    assert!(events.try_recv().is_err());
+    assert!(
         shared
             .mailbox(key.channel_id)
             .enqueue(review_soft_input(81489857), context)
@@ -2707,7 +2714,7 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
             "native-fixture",
             &f.ticket,
             Disposition::Cancelled,
-            Some(serde_json::to_value(row).unwrap()),
+            Some(serde_json::to_value(&row).unwrap()),
         )
         .unwrap();
     await_within(
@@ -2728,13 +2735,6 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
             .cancel_token
             .is_none()
     );
-    assert!(
-        !f.history
-            .native_settlement("native-fixture", &f.ticket)
-            .unwrap()
-            .cleanup_complete
-    );
-    assert!(events.try_recv().is_err());
     let event = await_within(events.recv(), WAIT_CAP).await.unwrap();
     assert!(event.queue_is_eligible());
     let settled = f
@@ -2756,7 +2756,7 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
             "native-fixture",
             &f.ticket,
             Disposition::Cancelled,
-            Some(serde_json::to_value(b2b_row(&f)).unwrap()),
+            Some(serde_json::to_value(&row).unwrap()),
         )
         .unwrap();
     assert!(
