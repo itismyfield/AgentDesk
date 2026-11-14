@@ -215,7 +215,7 @@ esac
         assert_eq!(published.session_id.as_deref(), Some(id));
     } else {
         assert!(published.is_none());
-        assert!(before.is_none());
+        assert!(before.as_ref().unwrap().is_empty());
     }
     assert!(matches!(init, StreamMessage::Init { .. }));
     let messages: Vec<_> = receiver.into_iter().collect();
