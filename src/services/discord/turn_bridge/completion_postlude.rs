@@ -551,7 +551,7 @@ pub(super) async fn run_completion_postlude(
             || !should_suppress_headless_delivery_for_cancel(Some(&cancel_token)))
     {
         let channel_id_text = channel_id.get().to_string();
-        if let Err(e) = crate::db::session_transcripts::persist_turn_db_with_clear_fence(
+        if let Err(e) = crate::db::session_transcripts::persist_turn_db_in_context(
             shared_owned.pg_pool.as_ref(),
             crate::db::session_transcripts::PersistSessionTranscript {
                 turn_id: turn_id.as_str(),
@@ -570,6 +570,8 @@ pub(super) async fn run_completion_postlude(
                     crate::db::session_transcripts::discord_message_started_at_millis(user_msg_id),
             },
             routine_attempt_owns_turn.then_some(ctx.clear_fence),
+            // An isolated routine run keeps its evidence out of the channel's conversation.
+            !inflight_state.routine_presentation.isolated_run(),
         )
         .await
         {

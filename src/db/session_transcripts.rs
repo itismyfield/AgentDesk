@@ -16,6 +16,7 @@ const FETCH_RECENT_CHANNEL_PAIRS_SQL: &str = "SELECT transcript.user_message,
      LEFT JOIN channel_session_clear_boundaries AS clear_boundary
        ON clear_boundary.channel_id = transcript.channel_id
      WHERE transcript.channel_id = $1
+       AND transcript.channel_context
        AND BTRIM(transcript.user_message) <> ''
        AND BTRIM(transcript.assistant_message) <> ''
        AND (clear_boundary.cleared_through_id IS NULL
@@ -207,6 +208,7 @@ const FETCH_CHANNEL_PAIRS_UP_TO_FRONTIER_SQL: &str = "SELECT transcript.user_mes
      LEFT JOIN channel_session_clear_boundaries AS clear_boundary
        ON clear_boundary.channel_id = transcript.channel_id
      WHERE transcript.channel_id = $1
+       AND transcript.channel_context
        AND transcript.id <= $2
        AND BTRIM(transcript.user_message) <> ''
        AND BTRIM(transcript.assistant_message) <> ''
@@ -223,7 +225,8 @@ pub(crate) async fn fetch_channel_frontier_tx(
     channel_id: &str,
 ) -> Result<i64> {
     sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(MAX(id), 0) FROM session_transcripts WHERE channel_id = $1",
+        "SELECT COALESCE(MAX(id), 0) FROM session_transcripts
+          WHERE channel_id = $1 AND channel_context",
     )
     .bind(channel_id)
     .fetch_one(&mut **tx)
@@ -301,6 +304,8 @@ struct PreparedSessionTranscript {
     assistant_message: String,
     events_json: String,
     duration_ms: Option<i64>,
+    /// False for a turn kept as evidence only, outside its channel's conversation context.
+    channel_context: bool,
 }
 
 /// Fixed first observation bound to its exact channel; -1 permanently means failure.
@@ -385,14 +390,26 @@ pub(crate) async fn persist_turn_db_with_clear_fence(
     entry: PersistSessionTranscript<'_>,
     fence: Option<ChannelClearFence>,
 ) -> Result<bool> {
+    persist_turn_db_in_context(pg_pool, entry, fence, true).await
+}
+
+/// `channel_context` false stores the turn as completion evidence that its channel's
+/// recent-context and snapshot reads never return; a stored exclusion is never lifted.
+pub(crate) async fn persist_turn_db_in_context(
+    pg_pool: Option<&PgPool>,
+    entry: PersistSessionTranscript<'_>,
+    fence: Option<ChannelClearFence>,
+    channel_context: bool,
+) -> Result<bool> {
     let Some(pool) = pg_pool else {
         return Err(anyhow!("postgres pool is required to persist transcript"));
     };
 
     let prepared = prepare_persist_entry_pg(pool, &entry).await?;
-    let Some(prepared) = prepared else {
+    let Some(mut prepared) = prepared else {
         return Ok(false);
     };
+    prepared.channel_context = channel_context;
 
     // Required proof never falls back to the legacy timestamp/fail-open path.
     if let Some(captured) = fence {
@@ -532,8 +549,9 @@ where
             user_message,
             assistant_message,
             events_json,
-            duration_ms
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CAST($9 AS jsonb), $10)
+            duration_ms,
+            channel_context
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CAST($9 AS jsonb), $10, $11)
          ON CONFLICT (turn_id) DO UPDATE SET
             session_key = EXCLUDED.session_key,
             channel_id = EXCLUDED.channel_id,
@@ -543,7 +561,8 @@ where
             user_message = EXCLUDED.user_message,
             assistant_message = EXCLUDED.assistant_message,
             events_json = EXCLUDED.events_json,
-            duration_ms = EXCLUDED.duration_ms",
+            duration_ms = EXCLUDED.duration_ms,
+            channel_context = session_transcripts.channel_context AND EXCLUDED.channel_context",
     )
     .bind(&entry.turn_id)
     .bind(&entry.session_key)
@@ -555,6 +574,7 @@ where
     .bind(&entry.assistant_message)
     .bind(&entry.events_json)
     .bind(entry.duration_ms)
+    .bind(entry.channel_context)
     .execute(executor)
     .await
     .map_err(|e| anyhow!("persist postgres transcript failed: {e}"))?;
@@ -704,6 +724,7 @@ fn prepare_persist_entry_base(
         assistant_message: assistant_message.to_string(),
         events_json,
         duration_ms: entry.duration_ms,
+        channel_context: true,
     }))
 }
 

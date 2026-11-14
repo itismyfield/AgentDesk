@@ -42,7 +42,7 @@ struct Fixture {
 }
 
 /// The provider CLI is pinned to a stub that holds its turn open until `release`, or until its
-/// directory goes away with a failed test, and then fails.
+/// directory goes away with a failed test; it then answers with the `answer` file or fails.
 async fn fixture() -> Fixture {
     let root = crate::config::TestRuntimeRootGuard::new();
     // A config override in the environment would hide the agent written under this root.
@@ -68,7 +68,10 @@ async fn fixture() -> Fixture {
     let hold = concat!(
         "#!/bin/sh\nd=\"$(dirname \"$0\")\"\n",
         "case \"$*\" in *--version*) echo 0.0.0-stub; exit 0 ;; esac\n",
-        "while [ -d \"$d\" ] && [ ! -e \"$d/release\" ]; do sleep 0.05; done\nexit 1\n"
+        "while [ -d \"$d\" ] && [ ! -e \"$d/release\" ]; do sleep 0.05; done\n",
+        "[ -e \"$d/answer\" ] || exit 1\n",
+        "printf '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"%s\",",
+        "\"session_id\":\"81170000-0000-4000-8000-000000000001\"}\\n' \"$(cat \"$d/answer\")\"\n"
     );
     for cli in ["claude", "codex"] {
         std::fs::write(stubs.join(cli), hold).unwrap();
@@ -152,6 +155,18 @@ async fn start(
     metadata: Value,
     label: Option<&str>,
 ) -> Result<(), String> {
+    let started = start_turn(fixture, channel, hint, metadata, label).await;
+    started.map(drop)
+}
+
+/// The started turn's id.
+async fn start_turn(
+    fixture: &Fixture,
+    channel: ChannelId,
+    hint: &str,
+    metadata: Value,
+    label: Option<&str>,
+) -> Result<String, String> {
     start_reserved_headless_agent_turn_with_owner_channel(
         &fixture.registry,
         channel,
@@ -165,8 +180,30 @@ async fn start(
         reserve_headless_agent_turn(channel),
     )
     .await
-    .map(|_| ())
+    .map(|started| started.turn_id)
     .map_err(|error| format!("{error:?}"))
+}
+
+/// Serves the real runtime API on the fixture's database, so session hooks write real rows.
+async fn real_api(fixture: &Fixture) -> tokio::task::AbortHandle {
+    let config = crate::config::Config::default();
+    let engine = crate::engine::PolicyEngine::new(&config).unwrap();
+    let broadcast = crate::eventbus::new_broadcast();
+    let buffer = crate::eventbus::spawn_batch_flusher(broadcast.clone());
+    let app = crate::server::routes::api_router_with_pg(
+        engine,
+        config,
+        broadcast,
+        buffer,
+        Some(fixture.registry.clone()),
+        Some(fixture.pool.clone()),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    crate::services::discord::internal_api::init(port, Some(fixture.pool.clone()));
+    let serving = axum::Router::new().nest("/api", app);
+    let serving = serving.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, serving).await.unwrap() }).abort_handle()
 }
 
 /// Everything of the channel a later turn of its own would read back.
@@ -381,5 +418,169 @@ async fn a_headless_mark_that_cannot_be_isolated_is_refused_without_a_shared_fal
         assert!(!turn_active(&fixture, PRIMARY).await, "{case}");
         assert_eq!(channel_state(&fixture, PRIMARY).await, before, "{case}");
     }
+    fixture.db.drop().await;
+}
+
+#[tokio::test]
+async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context_pg() {
+    use crate::db::session_transcripts as transcripts;
+    use crate::services::routines::store::{NewRoutine, RoutineStore};
+    if !api_child(&format!(
+        "{TEST}a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context_pg"
+    )) {
+        return;
+    }
+    const ANSWER: &str = "isolated-run-answer-8117";
+    let fixture = fixture().await;
+    let api = real_api(&fixture).await;
+    let (pool, primary) = (&fixture.pool, PRIMARY.get().to_string());
+    sqlx::query("INSERT INTO agents (id, name, provider) VALUES ('agent8117', 'A', 'claude')")
+        .execute(pool)
+        .await
+        .unwrap();
+    let store = RoutineStore::new_with_timezone_and_checkpoint_limit(
+        Arc::new(pool.clone()),
+        "Asia/Seoul",
+        256 * 1024,
+    );
+    let routine_row = NewRoutine {
+        agent_id: Some("agent8117".into()),
+        fallback_agent_id: None,
+        max_retries: Some(0),
+        script_ref: "nightly.js".into(),
+        name: "nightly".into(),
+        status: None,
+        execution_strategy: "fresh".into(),
+        schedule: None,
+        next_due_at: Some(chrono::Utc::now() - chrono::Duration::minutes(1)),
+        checkpoint: None,
+        discord_thread_id: None,
+        timeout_secs: None,
+    };
+    store
+        .attach_routine_with_execution(routine_row, None, 3)
+        .await
+        .unwrap();
+    let run = store.claim_due_runs(1).await.unwrap().pop().unwrap().run_id;
+    let since = chrono::Utc::now() - chrono::Duration::minutes(1);
+
+    let headless = routine(Some(json!("headless")));
+    let turn = start_turn(&fixture, PRIMARY, "primary-agent", headless, Some(LABEL)).await;
+    let turn = turn.unwrap();
+    // The routine attempt owns the turn on the primary channel, as the launcher records it.
+    let result = json!({"channel_id": primary});
+    let marked = store.mark_agent_turn_started(&run, &turn, Some(result), "agent8117", "primary");
+    assert!(marked.await.unwrap());
+    std::fs::write(fixture.stubs.join("answer"), ANSWER).unwrap();
+    turn_ended(&fixture, PRIMARY).await;
+
+    // The run's completion evidence is stored under its own key and the primary channel id.
+    let evidence = || async {
+        let stored: Option<(String, bool, Option<String>, i64)> = sqlx::query_as(
+            "SELECT assistant_message, channel_context, session_key, id
+             FROM session_transcripts WHERE turn_id = $1 AND channel_id = $2",
+        )
+        .bind(&turn)
+        .bind(&primary)
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        stored
+    };
+    let stored = async {
+        loop {
+            match evidence().await {
+                Some(stored) => break stored,
+                None => tokio::task::yield_now().await,
+            }
+        }
+    };
+    let (answer, in_context, key, run_row) = await_within(stored, WAIT_CAP).await;
+    let per_run = channel_key(
+        &fixture.shared,
+        &ProviderKind::Claude.build_tmux_session_name(LABEL),
+    );
+    assert_eq!((answer.as_str(), in_context), (ANSWER, false));
+    assert_eq!(key.as_deref(), Some(per_run.as_str()));
+    use crate::services::routines::agent_executor::reliability::find_headless_turn_completion;
+    let completion = find_headless_turn_completion(pool, &turn, since).await;
+    let completion = completion.unwrap().expect("the run's completion evidence");
+    assert_eq!(completion.assistant_message.as_deref(), Some(ANSWER));
+
+    // The primary conversation reads its own turns only, live and through a snapshot.
+    let own = transcripts::PersistSessionTranscript {
+        turn_id: "primary-own-turn",
+        session_key: None,
+        channel_id: Some(&primary),
+        agent_id: None,
+        provider: Some("claude"),
+        dispatch_id: None,
+        user_message: "primary question",
+        assistant_message: "primary answer",
+        events: &[],
+        duration_ms: None,
+        turn_started_at_millis: None,
+    };
+    assert!(transcripts::persist_turn_db(Some(pool), own).await.unwrap());
+    let own_pair = vec![transcripts::ChannelTranscriptPair {
+        user_message: "primary question".into(),
+        assistant_message: "primary answer".into(),
+    }];
+    let recent = transcripts::fetch_recent_channel_pairs(pool, &primary, 10).await;
+    assert_eq!(recent.unwrap(), own_pair);
+    let mut tx = pool.begin().await.unwrap();
+    let frontier = transcripts::fetch_channel_frontier_tx(&mut tx, &primary).await;
+    let frontier = frontier.unwrap();
+    let snapshot =
+        transcripts::fetch_channel_pairs_up_to_frontier_tx(&mut tx, &primary, i64::MAX, 10).await;
+    assert_eq!(snapshot.unwrap(), own_pair);
+    drop(tx);
+    assert!(frontier > run_row, "the frontier is the primary's own turn");
+    sqlx::query("DELETE FROM session_transcripts WHERE turn_id = 'primary-own-turn'")
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let frontier = transcripts::fetch_channel_frontier_tx(&mut tx, &primary).await;
+    assert_eq!(
+        frontier.unwrap(),
+        0,
+        "the run's row is no frontier of the channel"
+    );
+    drop(tx);
+
+    // The run's session row is its own; the primary's row keeps its provider session.
+    let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT session_key, identity_kind, claude_session_id FROM sessions
+         WHERE channel_id = $1 ORDER BY id",
+    )
+    .bind(&primary)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let primary_key = channel_key(
+        &fixture.shared,
+        &ProviderKind::Claude.build_tmux_session_name("primary-agent"),
+    );
+    let kind = |kind: &str| Some(kind.to_string());
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(
+        rows[0],
+        (primary_key, kind("discord_channel"), kind("primary-sid"))
+    );
+    assert_eq!(
+        (&rows[1].0, &rows[1].1),
+        (&per_run, &kind("scheduled_snapshot"))
+    );
+    let observed: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT status, claude_session_id, thread_channel_id, agent_id FROM sessions
+         WHERE session_key = $1",
+    )
+    .bind(&per_run)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    eprintln!("PER_RUN_ROW status/claude_session_id/thread_channel_id/agent_id = {observed:?}");
+    api.abort();
     fixture.db.drop().await;
 }
