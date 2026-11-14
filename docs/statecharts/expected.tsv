@@ -366,7 +366,6 @@ input-single-path/InputPathReadyNoLatchCompact.cfg	InputPath	ReadyCompactAfterSt
 input-single-path/InputPathReadyNoRevalidate.cfg	InputPath	ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyNoWake.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyPermanentUnread.cfg	InputPath	-	-
-input-single-path/InputPathReadyPermanentUnread.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyPermissionLater.cfg	InputPath	-	-
 input-single-path/InputPathReadyPermissionPoison.cfg	InputPath	-	ReadyPendingEventuallyExecutes
 input-single-path/InputPathReadyPreflightOnly.cfg	InputPath	-	ReadyPendingEventuallyExecutes
