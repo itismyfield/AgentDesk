@@ -215,6 +215,7 @@ async fn turn_ended(fixture: &Fixture, channel: ChannelId) {
         }
     };
     await_within(ended, WAIT_CAP).await;
+    std::fs::remove_file(fixture.stubs.join("release")).unwrap();
 }
 
 /// The session keys every session status was sent for, and the identity kinds they named.
@@ -243,10 +244,43 @@ async fn a_headless_run_leaves_its_primary_channel_session_untouched_pg() {
         return;
     }
     let fixture = fixture().await;
-    let before = channel_state(&fixture, PRIMARY).await;
-    let headless = routine(Some(json!("headless")));
+    let headless = || routine(Some(json!("headless")));
+    // A primary channel without a live session gets none from the run, at start or at its end.
+    let live = fixture.shared.core.lock().await.sessions.remove(&PRIMARY);
+    let earlier = Some("routine-process 9000 nightly agent8117");
     assert_eq!(
-        start(&fixture, PRIMARY, "primary-agent", headless, Some(LABEL)).await,
+        start(&fixture, PRIMARY, "primary-agent", headless(), earlier).await,
+        Ok(())
+    );
+    let sessionless = || async {
+        !fixture
+            .shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .contains_key(&PRIMARY)
+    };
+    assert!(sessionless().await, "at start");
+    turn_ended(&fixture, PRIMARY).await;
+    assert!(sessionless().await, "at end");
+    // The failed turn keeps its row for a delivery retry; the next run starts from none.
+    assert!(crate::services::discord::inflight::clear_inflight_state(
+        &ProviderKind::Claude,
+        PRIMARY.get()
+    ));
+    fixture
+        .shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .insert(PRIMARY, live.unwrap());
+    fixture.api.take();
+
+    let before = channel_state(&fixture, PRIMARY).await;
+    assert_eq!(
+        start(&fixture, PRIMARY, "primary-agent", headless(), Some(LABEL)).await,
         Ok(())
     );
     // The run is pinned isolated under its own key and started cold.
