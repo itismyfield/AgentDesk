@@ -16,7 +16,9 @@ fn unprovable_early_discovery_releases_its_admission_and_preserves_the_legacy_ta
 fn native_scenario(provable: bool) {
     let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let state_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    dedupe::reset_state_for_tests();
     let (root, guards) = fixture::fixture_after_shared_test_env_lock();
+    dedupe::binding_events::set_test_root(Some(root.path()));
     let tmux = fixture::fake_tmux(root.path());
     std::fs::write(root.path().join("tmux"), r#"#!/bin/bash
 if [ "${1-}" = -u ]; then shift; fi
@@ -100,8 +102,10 @@ esac
     let cwd = root.path().display().to_string();
     let started = std::time::Instant::now();
     let worker_context = context.clone();
+    let event_root = root.path().to_path_buf();
     let worker = std::thread::spawn(move || {
         use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
+        dedupe::binding_events::set_test_root(Some(&event_root));
         let config = serde_json::from_value(serde_json::json!({"server":{},
             "agents":[{"id":"early", "name":"early", "channels":{"codex":{"id":channel.to_string(),"runtime":"tui"}}}],
             "tui_o":{"writer":{"channels":[channel],"late_adopt":true}}})).unwrap();
@@ -141,6 +145,7 @@ esac
         drop(admission);
         let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
         drop(boot_guard);
+        dedupe::binding_events::set_test_root(None);
         (result, candidate, nonce, snapshot)
     });
     let init = recv_within(&receiver, WAIT_CAP);
@@ -235,6 +240,7 @@ esac
             crate::services::tui_o::shadow::binding_reader::source_id_for(id, &path).unwrap();
         assert!(candidate.first_proof(&source).is_err());
         dedupe::reset_state_for_tests();
+        dedupe::binding_events::set_test_root(None);
         return;
     }
     assert_eq!(
@@ -314,17 +320,20 @@ esac
     let log = dedupe::binding_events::log_path(channel).unwrap().unwrap();
     std::fs::rename(&log, log.with_extension("saved")).unwrap();
     std::fs::create_dir(&log).unwrap();
+    dedupe::binding_events::forget_channel_for_tests(channel);
     assert!(
         crate::services::codex_tui::session::publish_discovered_launch(&context, &path).is_err(),
         "early publication must not inherit the legacy install's success on an append failure"
     );
     std::fs::remove_dir(&log).unwrap();
     std::fs::rename(log.with_extension("saved"), &log).unwrap();
+    dedupe::binding_events::forget_channel_for_tests(channel);
     assert_eq!(
         dedupe::binding_events::records_strict(channel).unwrap(),
         events
     );
     dedupe::reset_state_for_tests();
+    dedupe::binding_events::set_test_root(None);
     drop(hooks);
     drop(home);
     drop(tmux);
