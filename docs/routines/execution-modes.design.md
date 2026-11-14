@@ -204,6 +204,8 @@ QuickJS agent action → 기존 provider 준비 확인 → thread/DM resolver를
 
 D0 구현 계약(PR3a): launcher는 turn metadata에 `routine_run_mode=headless`를 넣고, 기존 `execution_mode=process`·fresh·agent_id·per-run synthetic label을 함께 준다. 표식이 있는데 process/fresh가 아니거나 label·workspace가 없거나 per-run key가 채널 key와 같으면 claim 전에 거절하며 shared 경로로 내려가지 않는다. 격리 여부는 시작 때 inflight `routine_presentation`에 pin하고 완료·provider 재시도·복구가 그 pin만 읽는다. per-run key의 세션 상태 기록은 채널 소유가 아닌 기존 격리 identity(`scheduled_snapshot` 종류)로 보내 primary의 canonical 세션 행으로 해석되지 않게 한다. 전용 identity 종류를 따로 둘지는 PR3b 전 결정 항목이다. 격리 run은 worktree 분리·pending reset·retry context를 쓰지 않고 `/goal` 명령 prompt를 거절한다.
 
+D 첫 조각 구현 계약(PR3b-1): launcher(`agent_executor/surface.rs`)는 claim 때 pin된 `run_spec.execution_mode=headless`만 보고 thread/DM resolver를 건너뛰어 primary channel을 예약하며, backend를 process로 고정하고 `routine_run_mode=headless`·`silent=true`를 metadata에 넣는다. run_spec 판독 실패는 시작 실패다. `ProcessMailboxScope`는 DM 예약·Discord가 해석한 thread parent·격리 run 여부에서만 만들고 SharedPrimary는 capture 자체를 하지 않는다. 명시 모드 run은 claim 때 `run_spec.retry_after_start=false`가 pin되어 제출 뒤 실패(provider 오류·조기 실패·timeout)에서 retry·fallback agent 없이 failed로 닫히고, 격리 run의 history 재실행도 막힌다. null-mode(현재 7개) claim의 같은 금지, thread 일시 실패의 60/600 보류와 primary fallback 제거, `primary_busy` 사유 표기는 다음 조각(PR3b-2)이다. 격리 run의 transcript는 `session_transcripts.channel_context=false`로 저장되어 완료 증거로만 남는다.
+
 백엔드 미지원은 명시 실패이며 tmux/채널로 조용히 fallback하지 않는다. 새 headless는 Claude/Codex process 지원 범위부터 제공한다. 기존 thread는 현 지원 provider를 유지한다. 외부 업무 전송은 routine의 명시 도구 호출 범위이며 이 게시 억제가 업무 iMessage 발송까지 막지 않는다. 실패1..N은 primary에 알림만 보내고 정확히N+1에서 기존 명령봇을 통해 별도 대응 턴을 요청한다. paused·stale-paused·classification 알림 자체는 턴을 만들지 않는다. 아래 사건표와 전송 계약을 따른다. 어느 경우에도 routine thread 생성 경로는 호출하지 않는다.
 
 
@@ -523,7 +525,7 @@ PR1은 P2-C/H의 새 mode/incident 기능을 선행 구현하지 않는다. 현�
 
 <!-- doc-path-refs: proposed src/services/routines/agent_executor/channel.rs src/services/routines/agent_executor/settlement.rs scripts/report.sh -->
 <!-- doc-path-refs: proposed src/services/routines/store/diagnostics.rs -->
-<!-- doc-path-refs: proposed src/services/routines/agent_executor/surface.rs src/services/routines/agent_executor/run_policy.rs src/services/routines/store/recovery.rs src/services/routines/agent_executor/channel_settlement.rs src/services/routines/command_runner.rs src/services/routines/command_runner/output.rs src/services/routines/runner_spec.rs -->
+<!-- doc-path-refs: proposed src/services/routines/agent_executor/run_policy.rs src/services/routines/store/recovery.rs src/services/routines/agent_executor/channel_settlement.rs src/services/routines/command_runner.rs src/services/routines/command_runner/output.rs src/services/routines/runner_spec.rs -->
 
 <!-- doc-path-refs: proposed src/services/routines/prejudge.rs -->
 

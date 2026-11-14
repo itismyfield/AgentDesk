@@ -7,7 +7,7 @@ use crate::services::discord::health::{
     start_reserved_headless_agent_turn_with_owner_channel,
 };
 use crate::services::discord::host_defer_gate::tests::{map_channel, postgres};
-use crate::services::discord::host_teardown_gate::test_support::{channel_key, runtime};
+use crate::services::discord::host_teardown_gate::test_support::{channel_key, shared_on};
 use crate::services::discord::inflight::load_inflight_state_read_only;
 use crate::services::discord::router::message_handler::headless_turn::STARTS_RESOLVED;
 use crate::services::provider::ProviderKind;
@@ -91,7 +91,13 @@ async fn fixture() -> Fixture {
     let api = Recorder::start().await;
     crate::services::discord::internal_api::init(api.port, None);
     let (db, pool) = postgres().await;
-    let (shared, registry) = runtime(&pool).await;
+    // A real token hash shape, so the runtime API accepts the identity a session hook names.
+    let mut shared = shared_on(&pool).await;
+    Arc::get_mut(&mut shared).unwrap().token_hash = "discord_8117811781178117".to_string();
+    let registry = Arc::new(HealthRegistry::new());
+    registry
+        .register("claude".to_string(), shared.clone())
+        .await;
     use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
     let discord = discord_mock::DiscordMockState::new();
     for channel in [PRIMARY, THREAD] {
@@ -623,15 +629,35 @@ async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context
         (&rows[1].0, &rows[1].1),
         (&per_run, &kind("scheduled_snapshot"))
     );
-    let observed: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT status, claude_session_id, thread_channel_id, agent_id FROM sessions
-         WHERE session_key = $1",
+    // Once the run's row has gone stale, the existing session maintenance disconnects and then
+    // removes it; the primary's own row is not its to touch.
+    let over = async {
+        while load_inflight_state_read_only(&ProviderKind::Claude, PRIMARY.get()).is_some() {
+            tokio::task::yield_now().await;
+        }
+    };
+    await_within(over, WAIT_CAP).await;
+    sqlx::query(
+        "UPDATE sessions SET last_heartbeat = NOW() - INTERVAL '7 hours' WHERE session_key = $1",
     )
     .bind(&per_run)
-    .fetch_all(pool)
+    .execute(pool)
     .await
     .unwrap();
-    eprintln!("PER_RUN_ROW status/claude_session_id/thread_channel_id/agent_id = {observed:?}");
+    use crate::db::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg;
+    use crate::services::dispatched_sessions::hosted_cleanup::cleanup_disconnected_sessions_pg;
+    let reclaimed = (
+        gc_stale_fixed_working_sessions_db_pg(pool).await,
+        cleanup_disconnected_sessions_pg(pool).await,
+    );
+    assert_eq!(reclaimed, (1, Ok(1)));
+    let left: Vec<(String, String)> =
+        sqlx::query_as("SELECT session_key, status FROM sessions WHERE channel_id = $1")
+            .bind(&primary)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    assert_eq!(left, [(rows[0].0.clone(), "idle".to_string())]);
     api.abort();
     fixture.db.drop().await;
 }

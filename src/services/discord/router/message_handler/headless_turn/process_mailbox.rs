@@ -1,4 +1,4 @@
-//! Retire only the idle actor captured by a fresh routine process attempt.
+//! Retire only the idle actor a fresh routine process attempt captured on its own thread or DM.
 
 use std::{
     sync::{Arc, atomic::Ordering},

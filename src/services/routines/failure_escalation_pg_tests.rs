@@ -254,3 +254,71 @@ async fn thread_mode_runs_reserve_no_headless_events_and_headless_stalls_go_prim
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_headless_routine_logs_no_lifecycle_event_and_no_census_verdict_pg() {
+    use super::RoutineLifecycleEvent;
+    let (db, pool, store) = setup().await;
+    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let census = super::legacy_body_census::SCRIPT_REF;
+    let definition = ExecutionDefinition {
+        mode: RoutineExecutionMode::Headless,
+        runner: json!({"kind": "quickjs", "script_ref": census}),
+    };
+    let mut seen = Vec::new();
+    // The same census routine: headless, then null-mode with and without an agent as controls.
+    // The agentless control resolves no target, so its verdict is recorded but never sent.
+    for (name, definition, agent) in [
+        ("quiet", Some(&definition), true),
+        ("threaded", None, true),
+        ("agentless", None, false),
+    ] {
+        let mut row = routine(name);
+        row.script_ref = census.to_string();
+        row.agent_id = agent.then(|| "boot-agent".to_string());
+        let attached = store.attach_routine_with_execution(row, definition, 3);
+        let attached = attached.await.unwrap();
+        let lifecycle = logger
+            .log_routine_event_with_store(&store, &attached, RoutineLifecycleEvent::Attached)
+            .await;
+        let run_id = claim(&store).await;
+        store.pause_routine(&attached.id).await.unwrap();
+        if name != "threaded" {
+            let outcome = RoutineRunOutcome {
+                run_id: run_id.clone(),
+                routine_id: attached.id.clone(),
+                script_ref: census.to_string(),
+                action: "complete".into(),
+                status: "succeeded".into(),
+                result_json: None,
+                error: None,
+                fresh_context_guaranteed: false,
+            };
+            logger.log_run_outcome(&store, &outcome).await;
+        }
+        let posts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_outbox WHERE session_key LIKE 'routine:' || $1 || ':%'",
+        )
+        .bind(&attached.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let sections: String =
+            sqlx::query_scalar("SELECT discord_log_sections::text FROM routine_runs WHERE id = $1")
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        seen.push((lifecycle.status, posts, sections.contains("public_result")));
+    }
+    assert_eq!(seen[0], ("skipped".to_string(), 0, false), "headless");
+    assert_eq!(
+        (seen[1].0.as_str(), seen[1].1),
+        ("ok", 1),
+        "null-mode lifecycle"
+    );
+    assert!(seen[2].2, "a null-mode census run records its verdict");
+
+    pool.close().await;
+    db.drop().await;
+}

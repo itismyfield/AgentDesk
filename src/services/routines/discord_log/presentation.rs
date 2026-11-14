@@ -17,18 +17,21 @@ impl RoutineDiscordLogger {
         routine: &RoutineRecord,
         outcome: &RoutineRunOutcome,
     ) -> RoutineDiscordLogStatus {
-        if super::super::legacy_body_census::applies(&routine.script_ref) {
-            return self.log_census_outcome(store, routine, outcome).await;
-        }
-        let (status, headless): (String, bool) = match sqlx::query_as(
+        let snapshot: Result<(String, bool), _> = sqlx::query_as(
             "SELECT status, COALESCE(run_spec ->> 'execution_mode' = 'headless', FALSE)
              FROM routine_runs WHERE id = $1 AND routine_id = $2",
         )
         .bind(&outcome.run_id)
         .bind(&routine.id)
         .fetch_one(&*self.pool)
-        .await
+        .await;
+        // The census verdict goes to the routine's thread, which a headless run does not have.
+        if super::super::legacy_body_census::applies(&routine.script_ref)
+            && !matches!(snapshot, Ok((_, true)))
         {
+            return self.log_census_outcome(store, routine, outcome).await;
+        }
+        let (status, headless) = match snapshot {
             Ok(status) => status,
             Err(error) => return RoutineDiscordLogStatus::failed(error),
         };
@@ -71,6 +74,20 @@ impl RoutineDiscordLogger {
 }
 
 impl RoutineDiscordLogger {
+    /// Whether the routine's stored definition is headless; a failed read is an error, not "no".
+    pub(super) async fn headless_routine(
+        &self,
+        store: &RoutineStore,
+        routine: &RoutineRecord,
+    ) -> Result<bool, String> {
+        let definitions = store
+            .load_execution_definitions(std::slice::from_ref(&routine.id))
+            .await
+            .map_err(|error| error.to_string())?;
+        let mode = definitions.get(&routine.id);
+        Ok(mode.and_then(|row| row.execution_mode.as_deref()) == Some("headless"))
+    }
+
     /// `agent:<id>` for a routine whose stored definition is headless.
     pub(super) async fn headless_primary_target(
         &self,

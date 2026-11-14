@@ -76,6 +76,12 @@ impl RoutineDiscordLogger {
         routine: &RoutineRecord,
         event: RoutineLifecycleEvent,
     ) -> RoutineDiscordLogStatus {
+        // A headless routine has no thread of its own and announces no lifecycle event.
+        match self.headless_routine(store, routine).await {
+            Ok(false) => {}
+            Ok(true) => return RoutineDiscordLogStatus::skipped(),
+            Err(error) => return RoutineDiscordLogStatus::failed(error),
+        }
         self.log_to_routine_target(
             Some(store),
             Some(&routine.id),
