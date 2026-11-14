@@ -2648,3 +2648,124 @@ async fn native_8148_review_control_partial_release_debits_before_retry() {
     assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
     assert!(!actor.is_completion_cleanup());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
+    use super::super::native_prepare::Handle;
+    use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use std::sync::atomic::Ordering;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::at(
+        runtime.path().join("runtime/actor-partial.json"),
+        81489855,
+        true,
+    );
+    let shared = b2b_shared(None);
+    let (key, actor) = b2b_active(&f, &shared).await;
+    let row = b2b_row(&f);
+    let finalizer = shared.turn_finalizer.clone();
+    finalizer.register_start(
+        key,
+        ProviderKind::Claude,
+        super::super::RelayOwnerKind::None,
+        &shared,
+    );
+    let handle = await_within(
+        Handle::prepare(
+            &shared,
+            key,
+            Some(actor.clone()),
+            f.history.clone(),
+            "native-fixture".into(),
+            f.ticket.clone(),
+        ),
+        WAIT_CAP,
+    )
+    .await
+    .unwrap();
+    f.history
+        .note_native_any_key("native-fixture", &f.ticket)
+        .unwrap();
+    let context = super::super::super::queue_persistence_context(
+        &shared,
+        &ProviderKind::Claude,
+        key.channel_id,
+    );
+    assert!(
+        shared
+            .mailbox(key.channel_id)
+            .enqueue(review_soft_input(81489857), context)
+            .await
+            .enqueued
+    );
+    let mut events =
+        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+    fail_queue_saves(key.channel_id, 1);
+    f.history
+        .try_native_control(
+            "native-fixture",
+            &f.ticket,
+            Disposition::Cancelled,
+            Some(serde_json::to_value(row).unwrap()),
+        )
+        .unwrap();
+    await_within(
+        async {
+            while shared.restart.global_active.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
+    assert_eq!(queue_save_faults(key.channel_id, true), 0);
+    assert!(
+        shared
+            .mailbox(key.channel_id)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none()
+    );
+    assert!(
+        !f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .cleanup_complete
+    );
+    assert!(events.try_recv().is_err());
+    let event = await_within(events.recv(), WAIT_CAP).await.unwrap();
+    assert!(event.queue_is_eligible());
+    let settled = f
+        .history
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    assert!(settled.cleanup_complete);
+    assert_eq!(
+        settled.outcome.as_ref().unwrap().disposition,
+        Disposition::Cancelled
+    );
+    assert!(
+        await_within(finalizer.native_settled(key, &actor), WAIT_CAP)
+            .await
+            .unwrap()
+    );
+    f.history
+        .try_native_control(
+            "native-fixture",
+            &f.ticket,
+            Disposition::Cancelled,
+            Some(serde_json::to_value(b2b_row(&f)).unwrap()),
+        )
+        .unwrap();
+    assert!(
+        await_within(finalizer.native_settled(key, &actor), WAIT_CAP)
+            .await
+            .unwrap()
+    );
+    assert!(events.try_recv().is_err());
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+    assert!(!actor.is_completion_cleanup());
+    drop(handle);
+}
