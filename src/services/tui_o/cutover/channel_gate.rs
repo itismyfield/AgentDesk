@@ -490,7 +490,13 @@ fn decide_with_snapshot(
         });
     }
     // A member's boot kind is always a TUI kind, so from here the channel is selected.
-    if let Some(execution) = snapshot.execution(channel_id) {
+    // A late child keeps Legacy's open turn, counted, until its own adoption commits.
+    let late_child = child
+        .as_ref()
+        .is_some_and(|child| child.body_owner() == Some(false));
+    if let Some(execution) = snapshot.execution(channel_id)
+        && (execution.permit.is_err() || !late_child)
+    {
         return Ok(BodyClaimed {
             owned: true,
             send: None,

@@ -144,6 +144,10 @@ impl ChildEntries {
         surface: VerifiedSurface,
         fresh: bool,
     ) -> bool {
+        // A configured binding keeps its own member adoption; a second one would split its writer.
+        if boot.configured_binding(channel) {
+            return false;
+        }
         let (destination, parent, kind) = surface.relationship();
         let expected = boot
             .configured_binding(parent)

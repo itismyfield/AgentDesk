@@ -101,3 +101,81 @@ async fn a_placement_on_a_reserved_thread_never_routes_before_its_parent_is_read
     ));
     assert!(boot.unresolved_child(child).is_some());
 }
+
+/// A thread that is itself a configured binding keeps its member adoption; no producer records a
+/// second, child adoption the gate would read instead.
+#[tokio::test]
+async fn a_configured_thread_is_never_recorded_as_a_child_of_its_parent() {
+    let thread = PARENT + 8;
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "server": {},
+        "agents": [
+            {"id": "a", "name": "A", "channels": {"claude": {"id": PARENT.to_string(), "runtime": "tui"}}},
+            {"id": "b", "name": "B", "channels": {"claude": {"id": thread.to_string(), "runtime": "tui"}}}
+        ],
+        "tui_o": {"writer": {"all_tui": false, "channels": [PARENT, thread]}}
+    }))
+    .unwrap();
+    let boot = BootChannels::validate(&config)
+        .unwrap()
+        .adopted(Adoption::Committed);
+    let _forced = test_override::force_boot(boot.clone());
+    assert!(!record_thread_child(&discord(thread, PARENT, 11), false));
+    assert!(boot.child(thread).is_none());
+    assert_eq!(boot.candidate(thread).unwrap().peek(), Adoption::Committed);
+    let claim = Some(BodyClaim::new(thread, Some(ClaudeTui)));
+    let sent = claim_then_send_at(BodySite::BridgeTerminal, claim, || async {}).await;
+    assert!(matches!(sent, Ok(BodySend::OwnedByO)), "{sent:?}");
+}
+
+/// A late child under a Bound execution view stays Legacy's, counted, until its own init commits:
+/// Legacy finishes the open turn and only then does O take the child.
+#[tokio::test]
+async fn a_late_child_under_a_bound_execution_view_keeps_legacy_until_its_init_commits_pg() {
+    use crate::services::tui_o::ownership::execution;
+    use crate::services::tui_o::store::{OStore, StoreConfig};
+    use crate::services::tui_o::writer::activation::{ActivationFacts, activate_with};
+    let child = PARENT + 9;
+    let boot = boot();
+    let _forced = test_override::force_boot(boot.clone());
+    assert!(record_thread_child(&discord(child, PARENT, 11), false));
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    execution::tests::admission(&pool, "claude", child, "mac-a").await;
+    let fresh = execution::read(&pool, "claude", child, "mac-a", || Ok(false))
+        .await
+        .unwrap()
+        .unwrap();
+    boot.install_execution(child, Some(Ok(execution::tests::bound_like(&fresh))));
+    let host = boot.output_candidate(child).unwrap();
+    assert!(host.late_adopt_origin());
+    assert_eq!(owned_kind(child), None);
+    let root = tempfile::tempdir().unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())
+        .unwrap()
+        .unwrap();
+    let init = || {
+        let facts = Ok(ActivationFacts::default());
+        activate_with(&store, child, facts, || Ok(false), &host, || Ok(Vec::new()))
+    };
+    // Legacy sends the open turn's body; the init waits until that send has ended.
+    let claim = Some(BodyClaim::new(child, Some(ClaudeTui)));
+    let during = std::cell::Cell::new(None);
+    let sent = claim_then_send_at(BodySite::BridgeTerminal, claim, || {
+        during.set(Some(init()));
+        async {}
+    })
+    .await;
+    assert!(matches!(sent, Ok(BodySend::Sent(()))), "{sent:?}");
+    assert_eq!(
+        during.take(),
+        Some(Err("Legacy body send in flight".into()))
+    );
+    assert_eq!(host.sends(), (1, 1));
+    assert_eq!(init(), Ok(()));
+    // Past the commit the execution view makes the child O's; Legacy sends nothing more.
+    assert_eq!(owned_kind(child), Some(ClaudeTui));
+    let claim = Some(BodyClaim::new(child, Some(ClaudeTui)));
+    let sent = claim_then_send_at(BodySite::BridgeTerminal, claim, || async {}).await;
+    assert!(matches!(sent, Ok(BodySend::OwnedByO)), "{sent:?}");
+}

@@ -72,11 +72,15 @@ fn owned_kind(channel: u64) -> Option<RuntimeHandoffKind> {
 
 fn owned_in(snapshot: &BootChannels, channel: u64) -> Option<RuntimeHandoffKind> {
     let kind = snapshot.kind(channel);
-    if snapshot.execution(channel).is_some() {
+    let child = snapshot.child(channel);
+    let late_child = matches!(&child, Some(Ok(c)) if c.body_owner() == Some(false));
+    if let Some(view) = snapshot.execution(channel)
+        && (view.permit.is_err() || !late_child)
+    {
         return kind;
     }
     // A child is O's unless its late reservation still waits for Legacy's open turn.
-    let kept = match snapshot.child(channel) {
+    let kept = match child {
         Some(Ok(child)) => child.body_owner() != Some(false),
         _ => snapshot
             .output_candidate(channel)
