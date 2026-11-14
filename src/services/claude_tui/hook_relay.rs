@@ -1,3 +1,4 @@
+use crate::services::process::reaping::CommandReapExt;
 use crate::services::tui_prompt_dedupe::binding_context::{BINDING_HEADER, HookBindingEnvelope};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -16,6 +17,8 @@ use crate::services::claude_tui::hook_server::relay_receipts::{
 use crate::services::claude_tui::memento_feedback;
 
 mod ordered_queue;
+#[cfg(all(test, target_os = "linux"))]
+mod reaping_tests;
 mod response_window;
 mod too_early;
 mod transport_retry;
@@ -736,10 +739,10 @@ fn handoff_hook_relay_failure(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .spawn_reaping()
         .map_err(|err| format!("start hook relay failure marker worker: {err}"))?;
-    // Dropping a process handle does not terminate the child. Unlike a detached
-    // in-process thread, this worker survives the one-shot hook CLI's exit.
+    // The reaper owns the worker until natural exit; the worker also survives
+    // the one-shot hook CLI exiting before it.
     drop(child);
     Ok(())
 }
@@ -1793,6 +1796,8 @@ mod tests {
         if std::env::var_os(FAILURE_MARKER_WORKER_ENV).is_none() {
             return;
         }
+        #[cfg(target_os = "linux")]
+        super::reaping_tests::record_worker_pid();
         if let Some(release_path) = std::env::var_os(FAILURE_MARKER_TEST_RELEASE_PATH_ENV) {
             wait_for_test_release(Path::new(&release_path));
         }
@@ -1805,6 +1810,8 @@ mod tests {
         if std::env::var_os(NON_WAIT_RELAY_WORKER_ENV).is_none() {
             return;
         }
+        #[cfg(target_os = "linux")]
+        super::reaping_tests::record_worker_pid();
         crate::run_from_args().expect("non-wait relay worker delivers event or durable marker");
     }
 

@@ -4,6 +4,7 @@
 //! Callers in async contexts should use `tokio::task::spawn_blocking`.
 
 use super::binary_resolver;
+use crate::services::process::reaping::CommandReapExt;
 use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -524,7 +525,7 @@ pub fn load_buffer(buffer_name: &str, text: &str) -> Result<Output, String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_reaping()
         .map_err(|e| format!("tmux load-buffer failed: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin

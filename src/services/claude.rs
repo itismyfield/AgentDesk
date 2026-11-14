@@ -1,5 +1,6 @@
-#[cfg(unix)]
 use crate::services::claude_tui::guarded_outcome::{self, OwnedWarmOutcome, SubmissionError};
+#[cfg(unix)]
+use crate::services::process::reaping::CommandReapExt;
 pub(crate) mod capability_probe;
 mod process_session_launch;
 pub(crate) use process_session_launch::execute_streaming_local_process;
@@ -882,7 +883,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     )?;
     crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay);
 
-    let mut child = command.spawn().map_err(|e| {
+    let mut child = command.spawn_reaping().map_err(|e| {
         debug_log(&format!(
             "ERROR: Failed to spawn after {:?}: {}",
             spawn_start.elapsed(),
@@ -898,6 +899,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     session_prompt::claude_args(&args);
     register_child_pid(cancel_token.as_deref(), child.id());
+    child.track_cancel_token(cancel_token.as_ref());
     let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "claude-direct-stream");
 
     if let Some(mut stdin) = child.stdin.take() {

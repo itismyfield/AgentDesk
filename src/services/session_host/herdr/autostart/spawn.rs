@@ -1,6 +1,7 @@
 //! Starts the user's absent default herdr for an input: judge, lock the socket dir, judge again,
 //! then `herdr server` in its own session; it never stops or unlinks anything, nor grants authority.
 
+use crate::services::process::reaping::CommandReapExt;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -256,7 +257,7 @@ fn spawn_server(binary: &Path, home: &Path, records: &Path) -> std::io::Result<C
             Ok(())
         });
     }
-    let mut child = command.spawn()?;
+    let mut child = command.spawn_reaping()?;
     let pid = child.id();
     let exited = Arc::new(Mutex::new(None));
     let reaped = exited.clone();
