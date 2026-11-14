@@ -533,6 +533,16 @@ tui-o-writer/WriterArchivedSourceBootNoUnsealedGuard.cfg	WriterArchivedSource	No
 tui-o-writer/WriterArchivedSourceNoDrain.cfg	WriterArchivedSource	NoUnsentTailLost
 tui-o-writer/WriterArchivedSourceRebindAfter.cfg	WriterArchivedSource	-	-
 tui-o-writer/WriterArchivedSourceRebindBefore.cfg	WriterArchivedSource	-	NewBindingProgress
+tui-o-writer/WriterCodexLateBefore.cfg	WriterAdoption	LateBindingPrecedesOutput	LateModalExplained
+tui-o-writer/WriterCodexLateBufferedDesign.cfg	WriterAdoption	-	-
+tui-o-writer/WriterCodexLateBufferedIdentityMut.cfg	WriterAdoption	LateNoUnsafeCommit	-
+tui-o-writer/WriterCodexLateBufferedIncarnationMut.cfg	WriterAdoption	LateNoUnsafeCommit	-
+tui-o-writer/WriterCodexLateBufferedRecheckMut.cfg	WriterAdoption	LateNoUnsafeCommit	-
+tui-o-writer/WriterCodexLateBufferedRestoreMut.cfg	WriterAdoption	LateCommitAtMostOnce	-
+tui-o-writer/WriterCodexLateEarlyBinding.cfg	WriterAdoption	LateBoundBeforeNeverSkipped	LateBoundBeforeCommits
+tui-o-writer/WriterCodexLateFencedDesign.cfg	WriterAdoption	-	-
+tui-o-writer/WriterCodexLateTimeoutMut.cfg	WriterAdoption	-	LateModalExplained
+tui-o-writer/WriterCodexLateUnfencedMut.cfg	WriterAdoption	LateNoUnsafeCommit	-
 tui-o-writer/WriterMissingHaltBefore.cfg	WriterMissingHalt	NoUnchangedReboot	-
 tui-o-writer/WriterMissingHaltBinding.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltEarly.cfg	WriterMissingHalt	-	-
