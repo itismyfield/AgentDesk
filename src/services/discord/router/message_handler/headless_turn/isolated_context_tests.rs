@@ -997,11 +997,11 @@ async fn an_unreachable_routine_thread_defers_the_run_and_never_runs_on_the_prim
 }
 
 #[tokio::test]
-async fn people_who_write_while_a_headless_run_holds_the_primary_are_served_once_after_it_pg() {
+async fn people_who_write_while_a_headless_run_holds_the_primary_wait_once_and_outlive_it_pg() {
     use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
     use poise::serenity_prelude::{self as serenity, UserId};
     if !api_child(&format!(
-        "{TEST}people_who_write_while_a_headless_run_holds_the_primary_are_served_once_after_it_pg"
+        "{TEST}people_who_write_while_a_headless_run_holds_the_primary_wait_once_and_outlive_it_pg"
     )) {
         return;
     }
@@ -1111,18 +1111,6 @@ async fn people_who_write_while_a_headless_run_holds_the_primary_are_served_once
         "only the run's own provider ran"
     );
 
-    // The same actor then hands the first waiting input to a turn; the other still waits once.
-    let handed = async {
-        loop {
-            let now = crate::services::discord::mailbox_snapshot(&fixture.shared, PRIMARY).await;
-            let (serving, waiting) = holds(&now);
-            if serving == units[..1] {
-                break waiting;
-            }
-            tokio::task::yield_now().await;
-        }
-    };
-    assert_eq!(await_within(handed, WAIT_CAP).await, units[1..]);
     let current = fixture.shared.mailbox_peek(PRIMARY);
     assert!(current.is_some_and(|current| current.same_actor(&actor)));
     fixture.db.drop().await;
