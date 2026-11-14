@@ -1,7 +1,7 @@
 mod command_streaming;
 mod effort;
-#[cfg(unix)]
 use crate::services::process::reaping::CommandReapExt;
+#[cfg(unix)]
 use effort::from_env as codex_reasoning_effort_from_env;
 mod direct_reader;
 pub(crate) use command_streaming::{CommandStreamingRequest, execute_command_streaming_observed};

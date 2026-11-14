@@ -1,5 +1,5 @@
-use crate::services::claude_tui::guarded_outcome::{self, OwnedWarmOutcome, SubmissionError};
 #[cfg(unix)]
+use crate::services::claude_tui::guarded_outcome::{self, OwnedWarmOutcome, SubmissionError};
 use crate::services::process::reaping::CommandReapExt;
 pub(crate) mod capability_probe;
 mod process_session_launch;
