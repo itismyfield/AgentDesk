@@ -1249,9 +1249,9 @@ async fn native_8148_s2_persistence_error_keeps_row_and_wake_debt() {
         key.channel_id,
     );
     let item = Intervention {
-        author_id: serenity::UserId::new(7),
+        author_id: serenity::model::id::UserId::new(7),
         author_is_bot: false,
-        message_id: serenity::MessageId::new(8149999),
+        message_id: serenity::model::id::MessageId::new(8149999),
         queued_generation: 1,
         source_message_ids: vec![],
         source_message_queued_generations: vec![],
@@ -1350,8 +1350,8 @@ async fn native_8148_s2_transfer_closes_debt_without_successor_row_or_wake() {
                 .mailbox(key.channel_id)
                 .restore_active_turn(
                     successor.clone(),
-                    serenity::UserId::new(7),
-                    serenity::MessageId::new(key.user_msg_id + 1),
+                    serenity::model::id::UserId::new(7),
+                    serenity::model::id::MessageId::new(key.user_msg_id + 1),
                 )
                 .await;
         }
