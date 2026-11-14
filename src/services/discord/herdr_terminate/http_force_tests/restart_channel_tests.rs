@@ -1209,9 +1209,7 @@ fn restart_seed_reaches_the_herdr_launch_through_the_headless_start_pg() {
         )]);
         let _writer = force_writer_accepts(Some(true));
         let _gateway = gateway(&node).await;
-        let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        // This test owns its child process, so no other test publishes an endpoint beside it.
         let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
             "http://127.0.0.1:9".into(),
         );
