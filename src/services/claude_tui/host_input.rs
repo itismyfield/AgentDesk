@@ -39,6 +39,8 @@ pub(crate) enum InputTarget {
 pub(crate) enum InputRefusal {
     Unsupported(HostKind),
     Unknown,
+    /// The readiness budget ended on an idle source that proves no boundary; no look clears it.
+    Unproven,
     Conflict,
     IdentityMismatch,
     Composer(crate::services::tui_input::submission::Refusal),

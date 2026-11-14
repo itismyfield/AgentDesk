@@ -1,0 +1,23 @@
+---
+title: "Resumed Claude execution: first input over old history"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the ReadyPendingEventuallyExecutes or ReadyResumedIdleEventuallyReceives bug
+    lg1: Repeats forever, so ReadyPendingEventuallyExecutes or ReadyResumedIdleEventuallyReceives breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: Resuming: wait for this launch's SessionStart
+  s1: Idle over meta history: queued input waits
+  s2: Idle over meta history: queued input held
+  [*] --> s0
+  s0 --> s1: ReadinessNext
+  s0 --> s2: ReadinessNext
+  s1 --> s2: ReadinessNext
+  s1 --> s1: ReadinessNext
+  s2 --> s2: ReadinessNext
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s2 repeats
