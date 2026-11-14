@@ -1,3 +1,4 @@
+pub(crate) mod reaping;
 pub(crate) mod stream_child;
 
 use std::process::{Command, Output};

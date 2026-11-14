@@ -65,13 +65,26 @@ pub fn spawn_cancel_watchdog(
     let token = token?;
     let done = Arc::new(AtomicBool::new(false));
     let done_for_thread = Arc::clone(&done);
-    let handle = std::thread::spawn(move || {
+    let work = move || {
         while !done_for_thread.load(Ordering::Relaxed) {
             if poll_cancel_watchdog(&token, label) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+    };
+    #[cfg(test)]
+    let real_pid_kill = super::cancel_token_cleanup::executor::real_pid_kill_enabled_for_test();
+    #[cfg(not(test))]
+    let handle = std::thread::spawn(work);
+    #[cfg(test)]
+    let handle = std::thread::spawn(move || {
+        #[cfg(test)]
+        if real_pid_kill {
+            super::cancel_token_cleanup::executor::with_real_pid_kill(work);
+            return;
+        }
+        work();
     });
     Some(CancelWatchdog::new(done, handle))
 }

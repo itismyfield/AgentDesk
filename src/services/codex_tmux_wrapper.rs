@@ -1,3 +1,4 @@
+use crate::services::process::reaping::CommandReapExt;
 use crate::services::process::stream_child::stream_queue;
 use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
 use std::io::{BufRead, BufReader};
@@ -250,7 +251,7 @@ fn run_turn(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_reaping()
         .map_err(|e| format!("Failed to start Codex: {}", e))?;
 
     let mut lifecycle = StreamChild::new(&child, None, None);

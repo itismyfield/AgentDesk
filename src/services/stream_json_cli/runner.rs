@@ -1,5 +1,6 @@
 //! Provider-neutral process lifecycle for StreamJson CLIs.
 
+use crate::services::process::reaping::CommandReapExt;
 use crate::services::process::stream_child::stream_queue;
 
 use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
@@ -72,10 +73,11 @@ fn run_prepared_with_clock(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_reaping()
         .map_err(|error| format!("Failed to start StreamJson CLI: {error}"))?;
 
     register_child_pid(cancel.as_deref(), child.id());
+    child.track_cancel_token(cancel.as_ref());
     let watchdog = spawn_cancel_watchdog(cancel.clone(), "stream-json-cli");
     let mut lifecycle = StreamChild::new(&child, cancel.clone(), watchdog);
     if cancel_requested(cancel.as_deref()) {

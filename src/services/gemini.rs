@@ -1,3 +1,4 @@
+use crate::services::process::reaping::CommandReapExt;
 use crate::services::process::stream_child::stream_queue;
 use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
 use serde_json::Value;
@@ -306,10 +307,11 @@ fn execute_gemini_streaming_attempt(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_reaping()
         .map_err(|e| format!("Failed to start Gemini: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
+    child.track_cancel_token(cancel_token.as_ref());
     let watchdog = spawn_cancel_watchdog(cancel_token.clone(), "gemini-direct-stream");
     let mut lifecycle = StreamChild::new(&child, cancel_token.clone(), watchdog);
     if cancel_requested(cancel_token.as_deref()) {

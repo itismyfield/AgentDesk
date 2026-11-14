@@ -86,6 +86,7 @@ pub(super) fn spawn_with_budget(
 ) -> Result<Pending, BoundedTmuxError> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
+        use crate::services::process::reaping::CommandReapExt;
         use std::os::unix::process::CommandExt;
         use std::process::Stdio;
         command
@@ -93,7 +94,7 @@ pub(super) fn spawn_with_budget(
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let child = command.spawn().map_err(BoundedTmuxError::Spawn)?;
+        let child = command.spawn_reaping().map_err(BoundedTmuxError::Spawn)?;
         let cleanup = platform::run(child, budget.min(Duration::from_secs(5)));
         Ok(Pending {
             cleanup: handle.spawn(cleanup),
@@ -109,17 +110,18 @@ pub(super) fn spawn_with_budget(
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod platform {
     use super::*;
+    use crate::services::process::reaping::ReapingChild;
     use std::io::Read;
     use std::os::fd::AsRawFd;
     use std::os::unix::process::ExitStatusExt;
-    use std::process::{Child, ExitStatus};
+    use std::process::ExitStatus;
     use std::time::Instant;
 
     const POLL: Duration = Duration::from_millis(5);
     const OUTPUT_LIMIT: usize = 1024 * 1024;
 
     struct OwnedChild {
-        child: Child,
+        child: ReapingChild,
         owned: bool,
         cleanup_until: Option<Instant>,
     }
@@ -145,6 +147,7 @@ mod platform {
             let error = io::Error::last_os_error();
             if error.raw_os_error() == Some(libc::ECHILD) {
                 self.owned = false;
+                self.child.mark_reaped();
             }
             if error.kind() == io::ErrorKind::Interrupted {
                 return Ok(false);
@@ -160,6 +163,7 @@ mod platform {
             let rc = unsafe { libc::waitpid(self.pid(), &mut status, libc::WNOHANG) };
             if rc == self.pid() {
                 self.owned = false;
+                self.child.mark_reaped();
                 return Ok(Some(ExitStatus::from_raw(status)));
             }
             if rc == 0 {
@@ -168,6 +172,7 @@ mod platform {
             let error = io::Error::last_os_error();
             if error.raw_os_error() == Some(libc::ECHILD) {
                 self.owned = false;
+                self.child.mark_reaped();
             }
             if error.kind() == io::ErrorKind::Interrupted {
                 return Ok(None);
@@ -246,7 +251,7 @@ mod platform {
     }
 
     pub(super) fn run(
-        child: Child,
+        child: ReapingChild,
         budget: Duration,
     ) -> impl std::future::Future<Output = Result<Output, BoundedTmuxError>> {
         let mut owner = OwnedChild {

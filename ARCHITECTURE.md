@@ -1071,6 +1071,7 @@ src/
 │   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
+│   │   │   ├── reaping_tests.rs
 │   │   │   ├── response_window.rs
 │   │   │   ├── too_early.rs
 │   │   │   └── transport_retry.rs
@@ -1283,6 +1284,8 @@ src/
 │   ├── codex/
 │   │   ├── actual_submit_tests/
 │   │   │   └── source_io_tests.rs
+│   │   ├── direct_reader/
+│   │   │   └── reaping_tests.rs
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
 │   │   │   │   └── pg_tests.rs
@@ -3746,12 +3749,15 @@ src/
 │   │   ├── tmux.rs
 │   │   └── windows_job.rs
 │   ├── process/
+│   │   ├── reaping/
+│   │   │   └── tests.rs
 │   │   ├── stream_child/
 │   │   │   ├── stream_queue/
 │   │   │   │   ├── test_delay.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── stream_queue.rs
 │   │   │   └── test_fixture.rs
+│   │   ├── reaping.rs
 │   │   └── stream_child.rs
 │   ├── provider/
 │   │   ├── cancel_token_cleanup/
@@ -3773,6 +3779,7 @@ src/
 │   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
+│   │   ├── reaping_tests.rs
 │   │   ├── registry.rs
 │   │   ├── runtime.rs
 │   │   ├── session_probe.rs
