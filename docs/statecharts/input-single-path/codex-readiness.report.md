@@ -89,6 +89,70 @@ No liveness result changed: every config that was GREEN or RED on `CodexPendingE
 
 In d2 the UserPromptSubmit evidence was released by an end signal only. That held an input for good after a person's turn ended unnamed with no Stop hook, and after a hook that no turn followed (`CodexReadyUpsUntilEnd`, `CodexReadyUpsUntilEndBlocked`). Releasing it removes that hold and lets the archived-rollout residual open without a restart.
 
+### A held owner input on an older start record
+
+The owner-input regression test starts a live turn with `task_started.turn_id` and no `root_turn_id`. The strict reader cannot identify that turn, so its readiness verdict is `Unknown`; the older rollout reader still positively reads it as busy. Slice A discarded that positive busy reading and used the pane instead. Codex shows its composer marker during a running turn too, so that fallback sent the held input before the turn ended.
+
+`after-held-unknown` reproduces this intake decision. `after-held-keep-busy` preserves the older reader's positive busy evidence on an unknown strict verdict; an older Idle reading does not upgrade Unknown to proven Idle. These modes start just after the previous inflight row disappears, with one held owner front, one running legacy turn, and the composer marker visible. The strict reader keeps both `legacy-started` and `legacy-ended` unknown; only the older busy reading distinguishes the period before the end. The existing `CodexNoEarlyInput` invariant is unchanged.
+
+| cfg | Mode | `CodexNoEarlyInput` | Delivery / duplicate rules | States / steps |
+|---|---|---|---|---|
+| `CodexHeldOwnerBefore.cfg` | `after-held-unknown` | RED, shortest path 2 steps | hold | 14 / 30 |
+| `CodexHeldOwnerAfter.cfg` | `after-held-keep-busy` | GREEN | hold | 7 / 13 |
+
+Both configs also check `CodexTypeOK`, `CodexNoShellInput`, `CodexNoSilentLoss`, `CodexNoRunningKill`, both stop invariants, deadlock, and `CodexPendingEventuallyDelivered`. The RED replay is the unchanged assertion in `a_held_codex_input_runs_once_after_its_live_busy_pane_turns_idle_pg`: after the old inflight row is cleared, its temporary event trace observes a paste while the pane is still busy (paste 1, Enter 0 at the failed assertion). The GREEN replay keeps the input held, writes the end record and turns the pane idle, then observes exactly one paste followed by Enter.
+
+All 74 existing `CodexReadiness` configs were also rerun through `scripts/ci/statecharts_tlc.py`'s `check_cfg`: selected 74, executed 74, unexpected results 0. Their expected rule sets are unchanged; `expected.tsv` was not edited.
+
+The owner's earlier reservation, row removal, late hold and wake are covered by `InputOwnership.tla` (`DriveStartWaits`, `DriveStartLateHolds`, `AttemptRowClears`, `StartOwnTurn` and `NativeHeldResumes`). This extension supplies the busy diagnostic assumption those transitions consume; it does not change the ownership, cancellation or settlement model. The real regression test drives the complete gateway and turn-mode path. Human drafts, modals, restarts and unrelated replacement paths are outside this focused case and remain in their existing configs.
+
+The shortest RED path and the GREEN path through delivery are:
+
+```mermaid
+stateDiagram-v2
+  [*] --> HeldBusy
+  HeldBusy: Held input, live legacy turn still busy
+  Prepared: Unknown falls back to the visible composer
+  Early: RED — paste and Enter reach the busy pane
+  HeldBusy --> Prepared: strict reader loses older busy evidence
+  Prepared --> Early: submit
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> HeldBusy
+  HeldBusy: Held input, older reader still proves busy
+  IdleLate: Pane idle, end record still pending
+  Idle: End record written, older busy evidence clears
+  Sent: Exactly one paste and Enter
+  HeldBusy --> IdleLate: turn ends
+  IdleLate --> Idle: end record arrives
+  Idle --> Sent: prepare and submit
+```
+
+These projections hide the recheck after prepare and the delivered input's later completion. Reproduce with the existing cfg as a template, without changing `expected.tsv`:
+
+```sh
+case_dir=$(mktemp -d /tmp/codex-held-owner.XXXXXX)
+cp docs/statecharts/input-single-path/CodexReadiness.tla "$case_dir/"
+cp docs/statecharts/input-single-path/codex-readiness.view.mjs "$case_dir/"
+python3 - "$case_dir" <<'PY'
+from pathlib import Path
+import sys
+out = Path(sys.argv[1])
+template = Path('docs/statecharts/input-single-path/CodexReadyAfterPersonRecordFirst.cfg').read_text()
+template = template.replace('N = 2', 'N = 1').replace('Person = 1', 'Person = 0')
+template = template.replace('Screen = "unread"', 'Screen = "ok"').replace('BusyRoute = TRUE', 'BusyRoute = FALSE')
+for name, mode in [('Before', 'after-held-unknown'), ('After', 'after-held-keep-busy')]:
+    (out / f'CodexHeldOwner{name}.cfg').write_text(template.replace('Mode = "after"', f'Mode = "{mode}"'))
+PY
+for version in Before After; do
+  ~/.claude/skills/statechart/scripts/statechart "$case_dir/CodexReadiness.tla" \
+    --config "$case_dir/CodexHeldOwner$version.cfg" --view "$case_dir/codex-readiness.view.mjs" \
+    --out "$case_dir/$version"
+done
+```
+
 ### Guards of the design, one removed at a time
 
 | cfg | Removed guard | Breaks |

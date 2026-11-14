@@ -1,5 +1,3 @@
-use super::*;
-
 #[cfg(unix)]
 pub(in crate::services::discord::router::message_handler) fn observe_codex_tui_rollout_state_for_cwd(
     current_path: Option<&str>,

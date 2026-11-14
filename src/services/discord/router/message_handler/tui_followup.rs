@@ -454,16 +454,19 @@ pub(super) fn tui_busy_followup_diagnostic(
             session_id,
             Some(tmux_session_name),
         ),
-        // A bound pane is judged from its rollout, hooks and process; an unbound one keeps the
-        // cwd read.
-        ProviderKind::Codex => match codex_verdict(tmux_session_name, current_path) {
-            Some(verdict) => codex_turn_state(&verdict),
-            None => observe_codex_tui_rollout_state_for_cwd(
-                current_path,
-                Some(tmux_session_name),
-                session_id,
-            ),
-        },
+        ProviderKind::Codex => {
+            let legacy = || {
+                observe_codex_tui_rollout_state_for_cwd(
+                    current_path,
+                    Some(tmux_session_name),
+                    session_id,
+                )
+            };
+            match codex_verdict(tmux_session_name, current_path) {
+                Some(verdict) => codex_turn_state(&verdict, legacy),
+                None => legacy(),
+            }
+        }
         _ => crate::services::tui_turn_state::TuiTurnState::Unknown,
     };
     if transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Idle {
@@ -554,18 +557,23 @@ pub(super) fn tui_busy_followup_diagnostic(
     )
 }
 
-/// A Codex readiness judgment as the busy follow-up diagnostic reads a turn: only a proven end is
-/// idle, and what proves nothing leaves the pane read to answer.
+/// An unknown strict read keeps the older reader's positive busy evidence, so a legacy start
+/// cannot fall through to the composer while its turn runs. Only the readiness proof gives Idle.
 #[cfg(unix)]
 fn codex_turn_state(
     verdict: &crate::services::codex_tui::readiness::Verdict,
+    legacy: impl FnOnce() -> crate::services::tui_turn_state::TuiTurnState,
 ) -> crate::services::tui_turn_state::TuiTurnState {
     use crate::services::codex_tui::readiness::Verdict;
     use crate::services::tui_turn_state::TuiTurnState;
     match verdict {
         Verdict::Idle(_) => TuiTurnState::Idle,
         Verdict::Busy(_) => TuiTurnState::Streaming,
-        Verdict::Unknown(_) | Verdict::Gone => TuiTurnState::Unknown,
+        Verdict::Unknown(_) => match legacy() {
+            state if state.is_busy() => state,
+            _ => TuiTurnState::Unknown,
+        },
+        Verdict::Gone => TuiTurnState::Unknown,
     }
 }
 

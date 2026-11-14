@@ -20,6 +20,7 @@ export const state = (v) => {
   if (r.phase === "Booting") return label("Booting: wait for this launch's Codex process");
   if (r.phase === "Exited") return label("Process gone: new incarnation");
   if (r.phase === "Running") {
+    if (r.rec === "legacy-started") return label("Held owner input, legacy turn running: strict read unknown, older reader says busy");
     if (r.pending) {
       return label(r.ups
         ? "Enter pressed, task_started not written: the UserPromptSubmit hook says busy"
@@ -37,6 +38,8 @@ export const state = (v) => {
     return label(r.screen === "ok" ? "Idle: the pane shows an empty composer" : "Idle, pane unread: no ready verdict");
   }
   if (r.ups) return label("Idle, a UserPromptSubmit hook with no readable turn start: Busy until it expires");
+  if (r.rec === "legacy-started") return label("Idle, legacy end record not written: the held input still waits");
+  if (r.rec === "legacy-ended") return label("Idle, legacy turn ended: the held input can be delivered");
   if (r.file === "zst") return label("Idle, rollout archived: no signal can prove the end");
   if (r.late) return label("Idle, end record not written yet");
   if (r.rec === "unknown") return label(r.hook ? "Idle, end record unreadable: Stop hook proves the end" : "Idle, end record unreadable, no hook");

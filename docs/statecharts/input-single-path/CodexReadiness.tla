@@ -28,11 +28,12 @@ Ids == 1..N
 Modes == {"before", "after", "after-latch", "after-no-proc", "after-no-revalidate",
           "after-no-fallback", "after-no-floor", "after-no-child", "after-stop-screen",
           "after-timeout-replace", "after-reclaim-open", "after-no-ups",
-          "after-guard-all", "after-ups-until-end"}
+          "after-guard-all", "after-ups-until-end", "after-held-unknown", "after-held-keep-busy"}
 After == Mode # "before"
+HeldOwner == Mode \in {"after-held-unknown", "after-held-keep-busy"}
 MaxInc == 5
 
-Initial ==
+BaseInitial ==
     [mode |-> Mode, host |-> Host, screen |-> Screen,  \* constants, kept for the chart labels
      inc |-> 1, phase |-> "Booting", started |-> FALSE,
      turn |-> 0, seen |-> 0, rec |-> "none", pending |-> FALSE, late |-> FALSE, file |-> "plain",
@@ -46,6 +47,12 @@ Initial ==
      stops |-> Stops, stop |-> "none", stopTurn |-> 0,
      badEarly |-> FALSE, badShell |-> FALSE, badKill |-> FALSE,
      badStopIdle |-> FALSE, badStopKey |-> FALSE]
+\* The previous inflight row has gone, but a live legacy turn still holds the owner front.
+\* Its start has a turn id and no root_turn_id: the strict reader cannot identify its turn.
+Initial == IF HeldOwner THEN
+               [BaseInitial EXCEPT !.phase = "Running", !.started = TRUE,
+                                   !.turn = 1, !.seen = 1, !.rec = "legacy-started"]
+           ELSE BaseInitial
 Init == r = Initial
 
 \* ---- what each judgment reads ----
@@ -58,7 +65,7 @@ Level ==
            [] OTHER -> "Unknown"
 \* The lenient reader of the Discord intake pre-check (tui_turn_state.rs observe_codex_jsonl_turn_state).
 \* It reads turn_aborted and every event it does not know as Streaming (tui_turn_state.rs:731~:735).
-LenientBusy == r.file = "plain" /\ r.rec \in {"started", "unknown"}
+LenientBusy == r.file = "plain" /\ r.rec \in {"started", "legacy-started", "unknown"}
 \* herdr process_info / tmux pane liveness names this incarnation's provider process;
 \* "started" is that reading, not a SessionStart hook.
 Alive == r.phase \in {"Idle", "Running"}
@@ -76,6 +83,10 @@ BusyVerdict == ProcOK /\ (r.ups \/ (Level = "Open" /\ ~HookTier))
 Ready ==
     CASE Mode = "before" -> ScreenIdle
       [] Mode = "after-latch" -> r.latch \/ ReadyAfter
+      \* An unknown strict read falls back to the pane, whose composer marker is also visible
+      \* while Codex runs. Keep the older reader's positive busy evidence before that fallback.
+      [] HeldOwner -> ProcOK /\ Screen = "ok"
+                     /\ (Mode = "after-held-unknown" \/ ~LenientBusy)
       [] OTHER -> ReadyAfter
 First == {i \in Ids : r.q[i] = "queued" /\ \A j \in 1..(i-1) : r.q[j] # "queued"}
 Natives == {i \in Ids : r.q[i] = "native"}
@@ -146,7 +157,9 @@ Finish ==
 \* The late terminal record reaches the file; a following tail latches composer_ready.
 WriteLate ==
     /\ r.late
-    /\ r' = [r EXCEPT !.late = FALSE, !.rec = "ended", !.latch = TRUE, !.ups = FALSE]
+    /\ r' = [r EXCEPT !.late = FALSE,
+                     !.rec = IF r.rec = "legacy-started" THEN "legacy-ended" ELSE "ended",
+                     !.latch = TRUE, !.ups = FALSE]
 \* Codex CLI archives an old idle rollout; by then the hook evidence has expired.
 CompressRollout ==
     /\ r.compress > 0 /\ r.phase = "Idle" /\ ~r.late /\ r.file = "plain" /\ r.head = 0 /\ r.wait = 0
@@ -281,7 +294,7 @@ CodexTypeOK ==
     /\ Silent \in {"none", "tool", "model"} /\ EnterGap \in {"hook", "silent", "record"}
     /\ Host = "herdr" => Config = 0
     /\ r.phase \in {"Booting", "Idle", "Running", "Exited"}
-    /\ r.rec \in {"none", "started", "ended", "unknown"}
+    /\ r.rec \in {"none", "started", "ended", "unknown", "legacy-started", "legacy-ended"}
     /\ r.inc \in 1..MaxInc /\ r.head \in 0..N /\ r.wait \in 0..N
     /\ \A i \in Ids : r.q[i] \in {"queued", "sent", "native", "done"}
 \* No Idle-route key reaches a running turn.
