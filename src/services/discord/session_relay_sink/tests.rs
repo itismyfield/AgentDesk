@@ -4673,3 +4673,5 @@ pub(in crate::services::discord) mod idle_relay_harness {
         }
     }
 }
+
+mod first_admission_tests;

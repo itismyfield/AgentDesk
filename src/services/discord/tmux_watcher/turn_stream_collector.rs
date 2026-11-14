@@ -736,6 +736,7 @@ async fn collect_turn_stream_body(
                     tmux_session_name: &tmux_session_name,
                     output_path: &output_path,
                     source_authority,
+                    turn_identity: watcher_turn_identity.as_ref(),
                     turn_delivered: &turn_delivered,
                     host: &ctx.host,
                 },

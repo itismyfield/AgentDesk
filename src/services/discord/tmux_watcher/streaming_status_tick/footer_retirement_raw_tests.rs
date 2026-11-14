@@ -498,6 +498,7 @@ async fn run_tick_with_tools(
     let delivered_flag = Arc::new(AtomicBool::new(false));
     let full = body.to_string();
     let ctx = StreamingStatusTickContext {
+        turn_identity: None,
         http: &rec.http,
         shared,
         channel_id: fx.channel,

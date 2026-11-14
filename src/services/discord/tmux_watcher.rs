@@ -2599,3 +2599,6 @@ fn watcher_body_source(
             authority.reset_incarnation,
         )
 }
+
+#[cfg(test)]
+pub(crate) use terminal_relay_plan::first_terminal_plan;

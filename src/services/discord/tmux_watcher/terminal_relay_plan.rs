@@ -852,3 +852,6 @@ mod soft_terminal_direct_send_authority_tests;
 #[cfg(test)]
 #[path = "lost_body_record_pg_tests.rs"]
 mod lost_body_record_pg_tests;
+
+#[cfg(test)]
+pub(crate) use soft_terminal_direct_send_authority_tests::first_terminal_plan;

@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::provider::CancelToken;
 use crate::services::tui_o::channel_policy::first_prompt_digest;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+use crate::services::tui_o::cutover::BodySend;
 use crate::services::tui_prompt_dedupe::{
     self as dedupe, TuiRuntimeBinding, binding_context::PreparedIncarnation,
 };
@@ -10,6 +10,7 @@ use std::io::Write;
 
 async fn scenario(boundary: Option<Step>, invalidator: &str) {
     dedupe::reset_state_for_tests();
+    tokio::time::pause();
     let Takeover {
         harness,
         io,
@@ -50,6 +51,7 @@ async fn scenario(boundary: Option<Step>, invalidator: &str) {
     ));
     std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
     std::fs::write(&marker, &prepared.context.execution_nonce).unwrap();
+    crate::services::tmux_common::write_tmux_runtime_kind_marker("tmux-codex", CodexTui).unwrap();
     let mut bytes = prompted("s-codex");
     if invalidator == "wrong-prompt" {
         bytes = String::from_utf8(bytes)
@@ -89,15 +91,24 @@ async fn scenario(boundary: Option<Step>, invalidator: &str) {
             .write_all(&answer("first-output", "short answer"))
             .unwrap();
     }
-    let mut body = Box::pin(claim_then_send(
-        Some(BodyClaim::new(channel, Some(CodexTui)).for_turn(token.turn_nonce())),
-        || async { 1 },
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    *io.relay_shared.lock().unwrap() = Some(shared.clone());
+    let transports = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut body = Box::pin(crate::services::discord::first_terminal_plan(
+        shared.clone(),
+        channel,
+        "tmux-codex",
+        token.turn_nonce(),
+        &path,
+        transports.clone(),
     ));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
         std::future::Future::poll(body.as_mut(), &mut context).is_pending(),
         "the body is retained before any Legacy claim"
     );
+    assert_eq!(transports.load(Ordering::SeqCst), 0);
+    assert!(!shared.relay_emission_in_flight(poise::serenity_prelude::ChannelId::new(channel)));
     if let Some(boundary) = boundary {
         test_hook::set(channel, boundary, mutate);
     }
@@ -125,7 +136,7 @@ async fn scenario(boundary: Option<Step>, invalidator: &str) {
     if invalidator == "evict" && boundary.is_none() {
         dedupe::evict_dead_tmux_mirror("tmux-codex");
     }
-    let sent = await_within(body, WAIT_CAP).await.unwrap();
+    let sent = await_within(body, WAIT_CAP).await;
     if invalidator == "valid" {
         assert_eq!(
             adoption(channel),
@@ -133,8 +144,21 @@ async fn scenario(boundary: Option<Step>, invalidator: &str) {
             "{:?}",
             io.alarms.halted()
         );
-        assert_eq!(init_sources(&harness, channel), [(source, 0)]);
+        assert_eq!(init_sources(&harness, channel), [(source.clone(), 0)]);
         assert!(matches!(sent, BodySend::OwnedByO));
+        assert_eq!(transports.load(Ordering::SeqCst), 0);
+        tokio::time::resume();
+        append(&path, &answer("first-output", "short answer"));
+        await_within(
+            async {
+                while harness.port.posts().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            },
+            WAIT_CAP,
+        )
+        .await;
+        assert_eq!(harness.port.posts(), ["short answer"]);
     } else {
         assert_ne!(adoption(channel), Adoption::Committed, "{invalidator}");
         assert!(
@@ -147,7 +171,13 @@ async fn scenario(boundary: Option<Step>, invalidator: &str) {
         );
     }
     drop(admission);
-    drop(tasks);
+    if invalidator == "valid" {
+        tokio::time::pause();
+        restart_posts_nothing(&harness, tasks, &source).await;
+    } else {
+        assert_eq!(transports.load(Ordering::SeqCst), 1);
+        drop(tasks);
+    }
     drop(reserved);
     dedupe::reset_state_for_tests();
 }
@@ -191,7 +221,6 @@ fn a_binding_must_name_the_admitted_execution_not_a_legacy_or_old_one() {
 fn serial_scenario(boundary: Option<Step>, invalidator: &str) {
     let root_guard = crate::config::TestRuntimeRootGuard::new();
     dedupe::run_serial_test(async {
-        tokio::time::pause();
         scenario(boundary, invalidator).await;
     });
     drop(root_guard);

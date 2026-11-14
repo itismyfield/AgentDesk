@@ -288,11 +288,14 @@ impl SessionBoundDiscordRelaySink {
         }
         let provider = delivery.provider.clone();
         let inflight = super::inflight::load_inflight_state(&provider, channel_id);
-        crate::services::tui_o::cutover::wait_codex_first(
+        let first_nonce = delivery_frontier::current_inflight_matches(
+            &provider,
             channel_id,
-            inflight.as_ref().and_then(|row| row.turn_nonce.as_deref()),
+            &delivery.session_name,
+            &delivery,
         )
-        .await;
+        .and_then(|row| row.turn_nonce);
+        crate::services::tui_o::cutover::wait_codex_first(channel_id, first_nonce.as_deref()).await;
         let census_source = inflight
             .as_ref()
             .map(BodySource::from_state)
@@ -551,7 +554,7 @@ impl SessionBoundDiscordRelaySink {
             channel_id,
             Some(&delivery.session_name),
         )
-        .for_turn(inflight.as_ref().and_then(|row| row.turn_nonce.as_deref()));
+        .for_turn(first_nonce.as_deref());
 
         if let SessionBoundTerminalDeliveryRoute::PlaceholderEdit(msg_id) = route {
             if let Some((start, end)) = cutover_range.filter(|_| cutover_short_replace) {

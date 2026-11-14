@@ -330,6 +330,7 @@ async fn run_tick_body(
             source_file: crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&std::fs::File::open(&fx.output_path).unwrap()),
             generation_mtime_ns: 1, reset_incarnation: 0, source_stamp: None,
         },
+        turn_identity: Some(&fx.identity),
         turn_delivered: &delivered_flag, host: &HostSnapshot::new(WatchHost::Legacy),
     };
     let turn = StreamingStatusTickTurn {
@@ -1064,3 +1065,6 @@ fn committed_progress_tick_preserves_cleanup_and_panel_parity() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
 }
+
+#[path = "first_admission_tests.rs"]
+mod first_admission_tests;

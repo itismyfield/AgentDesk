@@ -115,6 +115,7 @@ struct TestIo {
     legacy: Mutex<Option<Arc<dyn LegacyView>>>,
     busy: std::sync::atomic::AtomicBool,
     relaying: std::sync::atomic::AtomicBool,
+    relay_shared: Mutex<Option<Arc<crate::services::discord::SharedData>>>,
     late_enabled: std::sync::atomic::AtomicBool,
     /// Each lease handed to a new writer: when, how many writers still held one, and how many
     /// piece leases were back by then.
@@ -162,6 +163,7 @@ impl TestIo {
             legacy: Mutex::default(),
             busy: Default::default(),
             relaying: Default::default(),
+            relay_shared: Mutex::default(),
             late_enabled: Default::default(),
             leases: Mutex::default(),
             repost_turns: Arc::default(),
@@ -294,8 +296,17 @@ impl HostIo for TestIo {
         std::future::ready(self.busy.load(Ordering::SeqCst))
     }
 
-    fn relaying(&self, _: u64) -> bool {
+    fn relaying(&self, channel: u64) -> bool {
         self.relaying.load(Ordering::SeqCst)
+            || self
+                .relay_shared
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|shared| {
+                    shared
+                        .relay_emission_in_flight(poise::serenity_prelude::ChannelId::new(channel))
+                })
     }
 
     fn adopted(&self, channel: u64, _: ShadowProvider) {
