@@ -78,32 +78,45 @@ async fn thread_children_recorded_store_only_boot_and_refresh_need_no_rest() {
 }
 
 #[test]
-fn thread_children_unrecorded_committed_id_keeps_old_config_error() {
+fn thread_children_unrecorded_committed_id_stays_an_unbound_o_member() {
     let config = config();
     let root = tempfile::tempdir().unwrap();
     store(root.path(), &init(43, None));
-    let error = seeded_from_store(
+    let boot = seeded_from_store(
         BootChannels::validate(&config).unwrap(),
         &config,
         Some(root.path()),
     )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("channel 43 is not registered"));
+    .unwrap();
+    assert!(boot.channels().contains(&43));
+    assert_eq!(boot.kind(43), None);
+    assert_eq!(boot.candidate(43).unwrap().peek(), Adoption::Committed);
+    assert!(!boot.children.entries.lock().unwrap().contains_key(&43));
 }
 
 #[test]
-fn thread_children_old_reader_rejects_recorded_thread_init() {
+fn thread_children_old_reader_keeps_recorded_init_as_unbound_o_member() {
     let config = config();
     let root = tempfile::tempdir().unwrap();
     store(root.path(), &init(43, Some(42)));
     // Preserve the old channels_with_init -> stored_with_committed -> seeded path exactly.
-    let error = BootChannels::validate(&config)
+    let boot = BootChannels::validate(&config)
         .unwrap()
         .seeded(&config, |channels, _| {
             super::super::adoption::stored_with_committed(Some(root.path()), channels)
         })
-        .unwrap_err();
-    assert!(format!("{error:#}").contains("channel 43 is not registered"));
+        .unwrap();
+    assert!(boot.channels().contains(&43));
+    assert_eq!(boot.kind(43), None);
+    assert_eq!(boot.candidate(43).unwrap().peek(), Adoption::Committed);
+    assert!(!boot.children.entries.lock().unwrap().contains_key(&43));
+    let _forced = test_override::force_boot(boot);
+    let (_, kind, candidate) = crate::services::tui_o::cutover::boot_ownership()
+        .into_iter()
+        .find(|(id, _, _)| *id == 43)
+        .unwrap();
+    assert_eq!(kind, None);
+    assert!(candidate.is_none());
 }
 
 #[test]
