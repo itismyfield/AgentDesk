@@ -29,7 +29,7 @@ class ScriptCheckInputSelection(unittest.TestCase):
                if not key.startswith("SCRIPT_CHECK_")
                and key not in {"GITHUB_EVENT_NAME", "GFP_EVENT_NAME"}}
         env.update(GITHUB_EVENT_NAME="pull_request", SCRIPT_CHECK_CHANGES_RESULT="success",
-                   SCRIPT_CHECK_CHANGED_FILES=json.dumps(["src/unrelated.rs"]))
+                   SCRIPT_CHECK_CHANGED_FILES=json.dumps(["src/unrelated.txt"]))
         env.update(extra)
         return env
 
@@ -103,6 +103,18 @@ class ScriptCheckInputSelection(unittest.TestCase):
             with self.subTest(path=path):
                 skipped = self.cli(SCRIPT_CHECK_CHANGED_FILES=json.dumps([path]))
                 self.assertTrue(titles.isdisjoint(skipped), skipped)
+
+    def test_named_test_source_changes_select_both_feature_map_checks(self) -> None:
+        titles = {"User feature map static check", "User feature map generation contract"}
+        paths = (
+            "src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs",
+            "scripts/e2e/tui_relay/test_driver_health.py",
+            "tests/test_dev_instance.py",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                skipped = self.cli(SCRIPT_CHECK_CHANGED_FILES=json.dumps([path]))
+                self.assertTrue(titles.isdisjoint(skipped), f"feature map checks skipped for {path}")
 
     def test_user_feature_map_unknown_selection_executes_both_checks(self) -> None:
         titles = {"User feature map static check", "User feature map generation contract"}
@@ -308,8 +320,9 @@ class ScriptCheckInputSelection(unittest.TestCase):
         ]))
         self.assertEqual(self.executed(done), {
             "fixture current source", "TUI relay e2e harness unit tests (#5065/#5997)",
+            "User feature map static check", "User feature map generation contract",
         })
-        self.assertEqual(done.stdout.count("skipped: 입력 변경 없음 ("), len(selector.SELF_TEST_INPUTS) - 1)
+        self.assertEqual(done.stdout.count("skipped: 입력 변경 없음 ("), len(selector.SELF_TEST_INPUTS) - 3)
 
     def test_runner_continuous_manifest_input_executes_tui_relay_harness(self) -> None:
         path = "docs/e2e-continuous/bundles.schema1.json"

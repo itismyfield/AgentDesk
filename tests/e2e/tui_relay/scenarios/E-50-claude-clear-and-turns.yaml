@@ -22,6 +22,10 @@ feature_coverage:
       state: idle
       qualifiers: {turn_origin: managed, output_path: unspecified, input_source: legacy_automation}
       assertion_ids: [provider_text_present, no_duplicate_marker, no_duplicate_content]
+  references:
+    - feature_id: reset-clear
+      scope: Claude의 clear 뒤 첫 provider 응답·중복 부재 명세를 참조한다. ack는 wait step이며 clear_ack/fresh-session assertion은 없다. legacy_automation/unspecified이므로 현재 human/tui_o 수기 계약과 source/output이 다르고 세션 identity를 증명하지 않는다.
+      needs_live: true
 acceptance_criteria:
   - T1·T2 are consecutive turns on one live session; each marker arrives exactly once
   - "!clear goes through the normal Discord text-command path and is acknowledged"

@@ -5,6 +5,8 @@
 수기 정본: [user-feature-map.rows.yaml](user-feature-map.rows.yaml). 이 지도는 live **명세** 연결이며 실행 PASS·최근성 증거가 아니다.
 fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않는다. `unspecified` output은 실제 출력 경로를 증명하지 않는다.
 
+기존 시험 이름은 소스 정의 참조이며 실행/PASS가 아니다. 부분 시나리오 references와 needs_live는 covered 수를 늘리지 않는다.
+
 적용 23 · covered 4 · 빈 칸 19 · 미지원 단언 칸 19
 시나리오 분류: {"active": 43, "fixture": 2, "live": 38, "retired": 3, "unsupported-known-gap": 3}
 
@@ -24,6 +26,9 @@ fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않�
 
 ## busy-input
 
+needs_live: `true`
+
+
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |
 | {"host":"herdr","provider":"claude","qualifiers":{"input_source":"human","output_path":"tui_o","turn_origin":"managed"},"state":"busy","surface":"channel"} | busy_injected_before_turn_end, injection_latency_within, reaction_history_matches, state_busy_observed | — | unsupported |
@@ -38,46 +43,85 @@ fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않�
 
 ## campaigns
 
+needs_live: `true`
+
+- 기존 시험 정의: `src/db/campaigns/tests.rs::postgres_live_status_reads_the_issue_card_without_touching_the_ledger_pg`
+- 기존 시험 정의: `src/server/routes/server_campaigns/http_tests.rs::public_execution_is_unavailable_without_legacy_queue_or_card_effects_pg`
+- 기존 시험 정의: `src/services/campaign_execution/view_tests.rs::planned_or_claimed_work_is_not_displayed_as_actual_execution`
+
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |
 | {"host":"tmux","provider":"claude","qualifiers":{"input_source":"human","output_path":"tui_o","turn_origin":"managed"},"state":"idle","surface":"channel"} | campaign_progress_observed | — | unsupported |
 
-- `campaign_progress_observed` (#8120; human): 캠페인 실행 증거와 사용자 표시를 연결하는 단언 미구현이다.
+- `campaign_progress_observed` (#8120; human): legacy live-status와 상태 projection 시험은 main에 있다. server execution은 Unavailable이며 API/view 시험은 tmux/Claude/human/tui_o 실행을 증명하지 않으므로 실제 campaign 진행 관측은 pending이다.
 
 ## cancel-stop
+
+needs_live: `true`
+
+- 기존 시험 정의: `src/services/discord/router/intake_queue_transaction.rs::only_human_intake_sets_cancel_preservation_marker`
+- 기존 시험 정의: `src/services/discord/turn_bridge/tmux_runtime/herdr_http_cancel_tests.rs::herdr_http_cancel_stops_a_live_turn_and_completes_nothing_pg`
+- 기존 시험 정의: `src/services/discord/turn_bridge/tmux_runtime/native_stop_contract_tests.rs::preserve_stop_failed_command_notice_once_and_reader_continues`
+- 부분 시나리오 `E-18` (needs_live): Claude/Codex의 cancel 뒤 late marker 부재와 hold/health 명세를 참조한다. 입력은 legacy_automation이며 인간 입력 취소보존과 구체 tui_o output receipt를 증명하지 않는다. Herdr의 durable hold·legacy idle 검사는 N/A이고 자동 busy witness operation도 없다.
+- 부분 시나리오 `E-54` (needs_live): Claude tmux의 late marker 부재와 idle !stop 답글 정확히 1회 UX만 참조한다. legacy_automation/unspecified 입력·출력이므로 human/tui_o 수기 계약과 다르며 인간 입력 보존·자동 busy witness는 증명하지 않는다.
 
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |
 | {"host":"tmux","provider":"claude","qualifiers":{"input_source":"human","output_path":"tui_o","turn_origin":"managed"},"state":"idle","surface":"channel"} | cancel_effect_observed, cancel_preservation_observed | — | unsupported |
 
-- `cancel_effect_observed` (#8120; human): 중지 효과와 인간 입력 보존의 실행 관측 단언이 없다.
-- `cancel_preservation_observed` (#8120; human): 중지 효과와 인간 입력 보존의 실행 관측 단언이 없다.
+- `cancel_effect_observed` (#8120; human): 중지·인간 보존 정책과 기존 단위시험은 main에 있다. E-18/E-54의 부분 명세는 인간 Gateway 입력 보존·실제 host/output witness까지 증명하지 않으므로 해당 실행 단언은 pending이다.
+- `cancel_preservation_observed` (#8120; human): 중지·인간 보존 정책과 기존 단위시험은 main에 있다. E-18/E-54의 부분 명세는 인간 Gateway 입력 보존·실제 host/output witness까지 증명하지 않으므로 해당 실행 단언은 pending이다.
 
 ## dm
+
+needs_live: `true`
+
+- 기존 시험 정의: `src/services/discord/outbound/send_gate.rs::dm_default_agent_allows_headless_private_channel_when_provider_bound`
+- 기존 시험 정의: `src/services/discord/queue_io/transport/tests.rs::rest_queue_routing_preserves_thread_parent_and_dm_policy`
+- 기존 시험 정의: `src/services/message_outbox/identity_tests.rs::dm_session_routes_outbox_delivery_through_provider_bot`
 
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |
 | {"host":"tmux","provider":"claude","qualifiers":{"input_source":"human","output_path":"tui_o","turn_origin":"managed"},"state":"idle","surface":"dm"} | dm_surface_observed | — | unsupported |
 
-- `dm_surface_observed` (#8120; human): 초기 phase-1은 channel/thread만 지원하므로 DM 실제 실행과 단언이 미지원이다.
+- `dm_surface_observed` (#8120; human): 인간 DM routing·provider bot 분리 단위시험은 main에 있다. 기존 TUI runner에는 DM 전용 시나리오가 없고 인간 Gateway→실제 tmux/tui_o 응답 관측은 pending이다.
 
 ## effort-model
+
+needs_live: `true`
+
+- 기존 시험 정의: `scripts/e2e/tui_relay/test_driver_health.py::E37CodexModelLocalControl.test_passes_when_model_stays_local_and_prompt_with_empty_sources_is_admitted`
+- 기존 시험 정의: `src/services/claude_tui/session/effort_launch_tests.rs::ultra_persists_and_normal_effort_turns_ultracode_off`
+- 기존 시험 정의: `src/services/discord/commands/config/effort_settings_tests.rs::codex_effort_persists_and_restores_on_its_channel`
+- 부분 시나리오 `E-37` (needs_live): Codex /model의 local-control 안내 뒤 일반 입력 admission·응답 정확히 1회 명세만 참조한다. legacy_automation 입력이며 현재 Claude/human 수기 칸과 provider/source가 다르다. 구체 output profile과 실제 model/effort 선택·적용 효과는 관측하지 않는다.
 
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |
 | {"host":"tmux","provider":"claude","qualifiers":{"input_source":"human","output_path":"tui_o","turn_origin":"managed"},"state":"idle","surface":"channel"} | effort_model_effect_observed | — | unsupported |
 
-- `effort_model_effect_observed` (#8120; human): UI 표시와 실제 다음 턴 설정을 잇는 단언 미구현이다.
+- `effort_model_effect_observed` (#8120; human): effort/model 저장·다음 턴 전달 시험은 main에 있다. E-37은 Codex local-control 이후 입력 처리만 확인하므로 현재 Claude/human/tui_o 칸의 실제 설정 적용 witness는 pending이다.
 
 ## herdr-handoff
+
+needs_live: `true`
+
+- 기존 시험 정의: `scripts/e2e/tui_relay/test_herdr_observe.py::HerdrObserve.test_cold_and_post_turn_row_contract`
+- 기존 시험 정의: `src/services/herdr_launch_tests.rs::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg`
+- 기존 시험 정의: `src/services/herdr_launch_tests.rs::herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store`
+- 부분 시나리오 `E-19` (needs_live): Claude/Codex의 재시작 전후 문맥·응답 연속성을 참조한다. 입력은 legacy_automation, output_path는 unspecified다. Herdr에서 tmux identity capture/preservation step은 N/A이며 실제 Herdr host·동일 세션 취소까지 증명하지 않는다.
+- 부분 시나리오 `E-30` (needs_live): Codex의 연속 후속 응답·중복 부재 명세만 참조한다. 입력은 legacy_automation, output_path는 unspecified다. 현재 수기 칸은 Claude이므로 provider가 다르고, Herdr에서는 tmux identity step이 N/A여서 실제 host·동일 세션·취소를 증명하지 않는다.
 
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |
 | {"host":"herdr","provider":"claude","qualifiers":{"input_source":"human","output_path":"tui_o","turn_origin":"managed"},"state":"idle","surface":"channel"} | host_handoff_observed | — | unsupported |
 
-- `host_handoff_observed` (#8120; human): label이나 cell 선언만으로 실제 endpoint·session의 넘김을 관측하지 않는다.
+- `host_handoff_observed` (#8120; human): Herdr launch 및 row/nonce readiness 단위시험은 main에 있다. E-19/E-30 identity 단계는 Herdr N/A이므로 실제 endpoint·session 넘김 witness는 pending이다.
 
 ## message-delivery
+
+needs_live: `true`
+
+- 기존 시험 정의: `scripts/e2e/tui_relay/test_assertions.py::ProviderAuthorScenarios.test_every_turn_wait_and_e36_request_is_provider_scoped`
 
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |
@@ -87,6 +131,9 @@ fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않�
 | {"host":"tmux","provider":"codex","qualifiers":{"input_source":"legacy_automation","output_path":"unspecified","turn_origin":"managed"},"state":"idle","surface":"channel"} | no_duplicate_content, no_duplicate_marker, provider_text_present | E-51 | covered |
 
 ## reaction-display
+
+needs_live: `true`
+
 
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |
@@ -100,22 +147,39 @@ fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않�
 
 ## reset-clear
 
+needs_live: `true`
+
+- 기존 시험 정의: `scripts/e2e/tui_relay/test_herdr_observe.py::HerdrTextClear.test_clear_completion_shares_the_refusal_boundary`
+- 기존 시험 정의: `src/services/discord/commands/control/clear_end_tests.rs::a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg`
+- 기존 시험 정의: `src/services/discord/commands/control/herdr_recovery_tests.rs::live_clear_forgets_the_retired_selector_pg`
+- 부분 시나리오 `E-50` (needs_live): Claude의 clear 뒤 첫 provider 응답·중복 부재 명세를 참조한다. ack는 wait step이며 clear_ack/fresh-session assertion은 없다. legacy_automation/unspecified이므로 현재 human/tui_o 수기 계약과 source/output이 다르고 세션 identity를 증명하지 않는다.
+- 부분 시나리오 `E-51` (needs_live): Codex의 clear 뒤 첫 provider 응답·중복 부재 명세를 참조한다. ack는 wait step이며 clear_ack/fresh-session assertion은 없다. 현재 Claude/human/tui_o 수기 칸과 provider/source/output이 다르며 실제 새 세션 identity를 증명하지 않는다.
+
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |
 | {"host":"tmux","provider":"claude","qualifiers":{"input_source":"human","output_path":"tui_o","turn_origin":"managed"},"state":"idle","surface":"channel"} | clear_ack_observed, fresh_session_observed | — | unsupported |
 
-- `clear_ack_observed` (#8120; human): E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 witness도 미구현이다.
-- `fresh_session_observed` (#8120; human): E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 witness도 미구현이다.
+- `clear_ack_observed` (#8120; human): clear 처리와 selector 정리 시험은 main에 있다. E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 identity witness도 없으므로 두 실행 단언은 pending이다.
+- `fresh_session_observed` (#8120; human): clear 처리와 selector 정리 시험은 main에 있다. E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 identity witness도 없으므로 두 실행 단언은 pending이다.
 
 ## routines
+
+needs_live: `true`
+
+- 기존 시험 정의: `src/services/routines/discord_log.rs::render_run_log_sections_keeps_stable_order_and_sanitizes_code_fences`
+- 기존 시험 정의: `src/services/routines/reliability_pg_tests.rs::logged_unicode_object_completion_and_next_due_run_persist_pg`
+- 기존 시험 정의: `src/services/routines/reliability_pg_tests.rs::slot_missed_during_startup_grace_runs_exactly_once_after_it_pg`
 
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |
 | {"host":"tmux","provider":"claude","qualifiers":{"input_source":"human","output_path":"tui_o","turn_origin":"managed"},"state":"idle","surface":"channel"} | routine_fired_observed | — | unsupported |
 
-- `routine_fired_observed` (#8120; human): 시각·실행 identity·전달 결과를 연결하는 명세 단언 미구현이다.
+- `routine_fired_observed` (#8120; human): AgentDesk due claim·중복 방지·결과 로그 시험은 main에 있다. 실행 provenance는 routine이며 인간 입력 source와 다르다. E-13 ScheduleWakeup은 별개라 실제 routine/run/host/output 관측은 pending이다.
 
 ## threads
+
+needs_live: `true`
+
 
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |
@@ -130,4 +194,4 @@ fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않�
 - `state_busy_observed` (#8115 / #8118 / #8120; human): fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
 - `surface_thread_observed` (#8115 / #8118 / #8120; human): fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
 
-source_hash: `18edd40f135f23b65d5b62167b2762bd5dcc2686a547526fc4cd05e4923f2dfc`
+source_hash: `19c9013e4dbf8abd04b95d714c4a82c0b9da35a799768a49f5cded2e1ffa3e55`
