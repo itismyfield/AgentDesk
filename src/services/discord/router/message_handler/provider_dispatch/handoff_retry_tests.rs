@@ -38,6 +38,8 @@ async fn expired_launch_deadline_keeps_backoff_on_a_prepare_refusal() {
     let mut shared = crate::services::discord::make_shared_data_for_tests();
     Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Claude;
     let channel = ChannelId::new(8_146_002);
+    // The journal keeps its custody only while boot config still routes the channel to Herdr.
+    let _hosts = crate::config::session_hosts::force_for_test(Some("n"), &[(channel.get(), "n")]);
     let mailbox = shared.mailbox(channel);
     let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None);
     let (path, namespace) =

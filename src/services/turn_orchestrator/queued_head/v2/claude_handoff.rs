@@ -115,6 +115,58 @@ impl Owner {
         }
         Ok(())
     }
+    /// A channel that left Herdr keeps no journal whose old pane ended or whose original is gone.
+    #[cfg(unix)]
+    pub(crate) fn abandon_handoff(&mut self, id: &str) -> Result<bool, String> {
+        let mut next = self.snapshot.clone();
+        let queued =
+            |j: &Journal| (next.items.iter()).any(|item| sources::identity(item) == j.original);
+        if !(next.unfinished_handoff.as_ref())
+            .is_some_and(|j| j.id == id && (j.ended || !queued(j)))
+        {
+            return Ok(false);
+        }
+        next.unfinished_handoff = None;
+        self.commit(next)?;
+        Ok(true)
+    }
+    /// A hold the journal's own target caused spends the launch budget and its backoff; the last
+    /// one retains the granted front as a start failure, `None`, instead of holding it again.
+    #[cfg(unix)]
+    pub(crate) fn handoff_held(
+        &mut self,
+        front: &Front,
+        id: &str,
+    ) -> Result<Option<Journal>, String> {
+        let Some(journal) = self.handoff().filter(|j| j.id == id) else {
+            return Err("handoff journal changed".into());
+        };
+        let failures = journal.failures.saturating_add(1);
+        if failures >= MAX_START_FAILURES {
+            if self.claim_turn(front.1.message_id, front).is_none() {
+                return Err("handoff front no longer granted".into());
+            }
+            let (number, member) = (self.claim_number, std::slice::from_ref(&front.1));
+            let kind = StartFailureKind::Opaque;
+            let retained =
+                self.start_failed(front, number, member, None, kind, "claude_handoff_held");
+            if !matches!(retained, Ok(Some(true))) {
+                self.revoke_front();
+                return Err(retained
+                    .err()
+                    .unwrap_or("handoff front not retained".into()));
+            }
+            return Ok(None);
+        }
+        self.hold_front(front)?;
+        let mut next = self.snapshot.clone();
+        let journal = next.unfinished_handoff.as_mut().expect("checked journal");
+        journal.failures = failures;
+        journal.retry_after_ms = origin::now_ms().saturating_add(1_000u64 << failures.min(5));
+        let journal = journal.clone();
+        self.commit(next)?;
+        Ok(Some(journal))
+    }
     /// Persist the retry budget before releasing a failed wrapper; exhaustion uses start_failed.
     #[cfg(unix)]
     pub(crate) fn handoff_start_failed(

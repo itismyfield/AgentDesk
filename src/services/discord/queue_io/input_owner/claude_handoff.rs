@@ -38,6 +38,16 @@ pub(crate) async fn prepare(
         .v2_request(|slot| Ok(slot.as_ref().and_then(|owner| owner.handoff())))
         .await?;
     let channel = Channel::new(channel);
+    let left = journal.as_ref().filter(|_| left_herdr(channel.get()));
+    if let Some(id) = left.map(|j| j.id.clone())
+        && abandon(mailbox, id).await?
+    {
+        tracing::info!(
+            channel_id = channel.get(),
+            "handoff journal dropped: channel left Herdr"
+        );
+        return Ok(false);
+    }
     if let Some(journal) = &journal
         && journal.retry_after_ms > now_ms()
     {
@@ -50,6 +60,9 @@ pub(crate) async fn prepare(
             journal.failures,
         )
         .await;
+    }
+    if let Some(journal) = left {
+        return spend(shared, mailbox, channel, front, &journal.id).await;
     }
     let judged = judge(shared, provider, channel, journal.is_some()).await;
     let (key, host) = match judged {
@@ -70,18 +83,19 @@ pub(crate) async fn prepare(
         }
     };
     let TurnHost::Herdr(plan) = host else {
-        if let Some(journal) = journal {
-            return hold(
-                shared,
-                mailbox,
-                channel,
-                front,
-                &journal.id,
-                journal.failures,
-            )
-            .await;
+        let Some(journal) = journal else {
+            return Ok(false);
+        };
+        if journal.ended {
+            return spend(shared, mailbox, channel, front, &journal.id).await;
         }
-        return Ok(false);
+        // The old pane still stands: a refusing host waits in custody like a failed close.
+        let id = journal.id.clone();
+        let failed = mailbox
+            .v2_request(move |slot| slot.as_mut().ok_or("owner missing")?.handoff_failed(&id))
+            .await?;
+        let failures = failed.map_or(journal.failures, |failed| failed.failures);
+        return hold(shared, mailbox, channel, front, &journal.id, failures).await;
     };
     if let Some(record) = plan.row.as_ref().and_then(|row| match &row.record {
         HostedRecord::Known(record) if record.state == HostedState::Bound => Some(record),
@@ -238,6 +252,19 @@ async fn judge(
     .await;
     Ok(Some((key, host)))
 }
+/// Whether boot config no longer routes the channel to Herdr, so a journal has no handoff target.
+fn left_herdr(channel: u64) -> bool {
+    #[cfg(test)]
+    if tests::judged(channel).is_some() {
+        return false;
+    }
+    !crate::config::session_hosts::has_herdr_endpoint(channel)
+}
+async fn abandon(mailbox: &ChannelMailboxHandle, id: String) -> Result<bool, String> {
+    mailbox
+        .v2_request(move |slot| slot.as_mut().ok_or("owner missing")?.abandon_handoff(&id))
+        .await
+}
 async fn close_legacy<F, Fut>(
     channel: u64,
     logical: &str,
@@ -296,6 +323,34 @@ async fn hold(
         .v2_request(move |slot| slot.as_mut().ok_or("owner missing")?.hold_front(&original))
         .await?;
     schedule(shared.clone(), channel, id.to_string(), failures);
+    Err(HELD.into())
+}
+/// A hold no later look of this journal clears by itself: counted, backed off, and retained as a
+/// visible start failure once the journal's launch budget is spent.
+async fn spend(
+    shared: &Shared,
+    mailbox: &ChannelMailboxHandle,
+    channel: Channel,
+    front: &Front,
+    id: &str,
+) -> Result<bool, String> {
+    let (original, journal) = (front.clone(), id.to_string());
+    let held = mailbox
+        .v2_request(move |slot| {
+            slot.as_mut()
+                .ok_or("owner missing")?
+                .handoff_held(&original, &journal)
+        })
+        .await?;
+    let Some(held) = held else {
+        tracing::warn!(
+            channel_id = channel.get(),
+            front_id = front.1.message_id,
+            "handoff hold budget spent; front retained"
+        );
+        return Err("NotSent(\"owner_start_failed\")".into());
+    };
+    schedule(shared.clone(), channel, held.id, held.failures);
     Err(HELD.into())
 }
 fn schedule(shared: Shared, channel: Channel, id: String, failures: u32) {
@@ -405,6 +460,9 @@ pub(crate) fn recover(shared: Shared, channel: Channel) {
         let Ok(Some(journal)) = journal else {
             return;
         };
+        if left_herdr(channel.get()) && abandon(&mailbox, journal.id.clone()).await == Ok(true) {
+            return;
+        }
         let host = judge(&shared, &ProviderKind::Claude, channel, true).await;
         if let Ok(Some((_, TurnHost::Herdr(plan)))) = host
             && journal.ended
@@ -440,6 +498,7 @@ pub(crate) fn bound_herdr(
 #[cfg(test)]
 pub(crate) mod tests {
     mod actual_close_tests;
+    mod left_herdr_tests;
     use super::*;
     use crate::db::dispatched_sessions::hosted_execution::{
         HostedLookup, HostedLookupKey, HostedObservation, load_hosted_execution_pg,
@@ -476,7 +535,23 @@ pub(crate) mod tests {
         );
         Guard(channel)
     }
+    static REFUSED: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(Default::default);
+    struct Refusing(u64);
+    impl Drop for Refusing {
+        fn drop(&mut self) {
+            REFUSED.lock().unwrap().remove(&self.0);
+        }
+    }
+    /// The channel stays mapped while its judged host refuses every turn.
+    fn refuse_host(channel: u64) -> impl Drop {
+        REFUSED.lock().unwrap().insert(channel);
+        Refusing(channel)
+    }
     pub(super) fn judged(channel: u64) -> Option<(String, TurnHost)> {
+        if REFUSED.lock().unwrap().contains(&channel) {
+            let refusal = crate::services::turn_host::HerdrRefusal::ExecutorNotWired;
+            return Some(("claude/t/h:left".into(), TurnHost::Refused(refusal)));
+        }
         let forced = FORCED.lock().unwrap();
         let f = forced.get(&channel)?;
         Some((

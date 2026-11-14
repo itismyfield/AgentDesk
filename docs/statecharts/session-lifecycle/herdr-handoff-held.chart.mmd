@@ -1,0 +1,14 @@
+stateDiagram-v2
+    [*] --> Journal: restored unfinished_handoff, front queued
+    Journal --> Dropped: channel left Herdr AND old pane ended / drop journal, keep front
+    Dropped --> Submitted: ordinary path reserves the front once
+    Journal --> Backoff: channel left Herdr unended, or mapped host refuses an ended journal / persist failures + deadline
+    Backoff --> Journal: 2,4,8,16 seconds / timer wake
+    Journal --> Retained: fifth counted hold / original + notice intent, journal released
+    Retained --> NextHead: next front takes the ordinary path
+    Journal --> Custody: mapped host refuses, old pane standing / count as a close failure
+    Custody --> Journal: backoff up to 32 seconds
+    Journal --> Closing: mapped channel, Herdr host / close old pane first
+    Closing --> Submitted: ended journal consumed by one Herdr reserve
+    Submitted --> [*]
+    NextHead --> [*]: deduplicated visible failure notice
