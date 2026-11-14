@@ -103,6 +103,7 @@ impl Failure {
         channel: poise::serenity_prelude::ChannelId,
         token: Option<Arc<CancelToken>>,
     ) -> Result<Option<bool>, String> {
+        let opaque = matches!(kind, Kind::Opaque);
         let (watch, unreadable) = match watch {
             Ok(watch) => (watch, None),
             Err(error) => (None, Some(error)),
@@ -126,6 +127,8 @@ impl Failure {
                 {
                     return Ok(None);
                 }
+                tracing::warn!(channel_id=channel.get(), front_id=self.front.1.message_id,
+                    stage="provider_start", error=%detail, "owner launch failed before reserve");
                 if let Some(error) = unreadable {
                     return Err(format!("failure row cannot be captured: {error}"));
                 }
@@ -146,7 +149,7 @@ impl Failure {
                         return Err("failure row does not name the producer episode".into());
                     }
                 }
-                if owner.handoff_start_failed(&self.front, self.number, pin.clone())? {
+                if opaque && owner.handoff_start_failed(&self.front, self.number, pin.clone())? {
                     return Ok(Some(false));
                 }
                 owner.start_failed(&self.front, self.number, &self.members, pin, kind, &detail)
@@ -229,6 +232,14 @@ impl Failure {
                         true
                     };
                     if wake {
+                        match crate::services::discord::queue_io::input_owner::claude_handoff::retry_start(&shared, channel).await {
+                            Ok(true) => return,
+                            Ok(false) => (),
+                            Err(error) => {
+                                tracing::warn!(channel_id=channel.get(), %error, "handoff retry remains held");
+                                return;
+                            }
+                        }
                         super::owner_input::wake(&shared, channel);
                     }
                 });

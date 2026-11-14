@@ -28,8 +28,11 @@ src/
 │   │   ├── snapshot_reader_tests.rs
 │   │   └── transport.rs
 │   ├── dcserver/
+│   │   ├── replay_recovery/
+│   │   │   └── issuer_key.rs
 │   │   ├── replay_recovery.rs
 │   │   ├── replay_recovery_tests.rs
+│   │   ├── replay_root_issuer.rs
 │   │   ├── startup.rs
 │   │   └── startup_audit_tests.rs
 │   ├── dev_instance/
@@ -143,6 +146,15 @@ src/
 │   │   └── user_default_validator_tests.rs
 │   ├── test_env/
 │   │   └── teardown_probe.rs
+│   ├── test_instance/
+│   │   ├── api_boundary_tests.rs
+│   │   ├── bound_health_tests.rs
+│   │   ├── environment.rs
+│   │   ├── environment_tests.rs
+│   │   ├── host_scope_tests.rs
+│   │   ├── lifecycle.rs
+│   │   ├── lifecycle_tests.rs
+│   │   └── run_identity_tests.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
 │   ├── cluster_role.rs
@@ -167,6 +179,7 @@ src/
 │   ├── session_hosts_tests.rs
 │   ├── snapshot_reader_tests.rs
 │   ├── test_env.rs
+│   ├── test_instance.rs
 │   ├── tool_activity_display.rs
 │   └── writer_channels_tests.rs
 ├── db/
@@ -412,6 +425,7 @@ src/
 │   ├── intake_consent/
 │   │   └── decision.rs
 │   ├── message_split/
+│   │   ├── literal_code_block.rs
 │   │   └── semantic_boundaries.rs
 │   ├── outbound/
 │   │   ├── outbox/
@@ -436,6 +450,12 @@ src/
 │   │   └── value_methods.rs
 │   ├── provider_auth_profile/
 │   │   └── inputs.rs
+│   ├── replay_evidence/
+│   │   ├── recovery/
+│   │   │   ├── root.rs
+│   │   │   └── snapshot.rs
+│   │   ├── live.rs
+│   │   └── recovery.rs
 │   ├── session_identity/
 │   │   ├── managed.rs
 │   │   └── naming.rs
@@ -458,6 +478,7 @@ src/
 │   ├── process_incarnation.rs
 │   ├── provider.rs
 │   ├── provider_auth_profile.rs
+│   ├── replay_evidence.rs
 │   ├── session_identity.rs
 │   └── tool_text.rs
 ├── engine/
@@ -662,6 +683,8 @@ src/
 │   │   │   ├── response.rs
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
+│   │   │   ├── test_instance_projection_tests.rs
+│   │   │   ├── test_instance_response_tests.rs
 │   │   │   ├── tui_output_readiness_tests.rs
 │   │   │   ├── unread_tail_attribution_tests.rs
 │   │   │   └── writer_readiness.rs
@@ -972,13 +995,17 @@ src/
 │   │   ├── verification_runner_tests.rs
 │   │   ├── view.rs
 │   │   └── view_tests.rs
+│   ├── channel_roles/
+│   │   ├── config_projection.rs
+│   │   └── memory_policy.rs
 │   ├── claude/
 │   │   ├── first_input/
 │   │   │   └── tests.rs
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
 │   │   │   │   ├── clear_held_tests.rs
-│   │   │   │   └── tests.rs
+│   │   │   │   ├── tests.rs
+│   │   │   │   └── unproven_tests.rs
 │   │   │   ├── boot_host_tests.rs
 │   │   │   ├── coldstop_input_tests.rs
 │   │   │   ├── composer.rs
@@ -1413,6 +1440,7 @@ src/
 │   │   │   ├── scan_progress.rs
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
+│   │   │   ├── slash_message_tests.rs
 │   │   │   └── too_old_drop_pg_tests.rs
 │   │   ├── codex_absence/
 │   │   │   ├── observation_tests.rs
@@ -2205,10 +2233,13 @@ src/
 │   │   │   └── resume_tests.rs
 │   │   ├── replay_policy/
 │   │   │   ├── live/
+│   │   │   │   ├── issuer_key.rs
 │   │   │   │   ├── observer_tests.rs
 │   │   │   │   ├── seal.rs
 │   │   │   │   ├── stderr.rs
 │   │   │   │   └── tap.rs
+│   │   │   ├── recovery/
+│   │   │   │   └── issuer_key.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── live.rs
@@ -2347,6 +2378,7 @@ src/
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   └── restart_gate_tests.rs
+│   │   │   │   │   ├── handoff_retry_tests.rs
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_busy_gate_tests.rs
 │   │   │   │   │   ├── owner_input_busy_race_tests.rs
@@ -2388,6 +2420,7 @@ src/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
 │   │   │   │   │   ├── clear_tests.rs
+│   │   │   │   │   ├── handoff_launch_tests.rs
 │   │   │   │   │   ├── legacy_clear_tests.rs
 │   │   │   │   │   ├── policy_tests.rs
 │   │   │   │   │   ├── preclaim_tests.rs
@@ -3077,6 +3110,7 @@ src/
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
 │   │   │   │   │   ├── codex_empty_tests.rs
+│   │   │   │   │   ├── o_done_reaction_tests.rs
 │   │   │   │   │   ├── preparation_hold_tests.rs
 │   │   │   │   │   ├── provider_failure_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
@@ -3656,6 +3690,7 @@ src/
 │   │   ├── memento.rs
 │   │   ├── memento_anchor.rs
 │   │   ├── memento_endpoint.rs
+│   │   ├── memento_instance_tests.rs
 │   │   ├── memento_scope.rs
 │   │   ├── memento_scope_tests.rs
 │   │   ├── memento_throttle.rs
@@ -3703,6 +3738,9 @@ src/
 │   ├── opencode/
 │   │   ├── server_launch.rs
 │   │   └── streaming_entry.rs
+│   ├── org_catalog/
+│   │   ├── auth_projection.rs
+│   │   └── document.rs
 │   ├── pipeline_routes/
 │   │   ├── stage_validation.rs
 │   │   └── stage_validation_tests.rs
@@ -3716,6 +3754,8 @@ src/
 │   │   │   ├── production_probe_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── tmux/
+│   │   │   ├── instance_scope/
+│   │   │   │   └── host_command_tests.rs
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
 │   │   │   ├── session_inventory/
@@ -3723,6 +3763,7 @@ src/
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
+│   │   │   ├── instance_scope.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── session_identity.rs
 │   │   │   ├── session_identity_tests.rs
@@ -3775,6 +3816,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── direct_spawn_tests.rs
 │   │   ├── fallback.rs
+│   │   ├── instance_env_tests.rs
 │   │   ├── queries.rs
 │   │   └── repository.rs
 │   ├── provider_cli/
@@ -3804,6 +3846,9 @@ src/
 │   ├── recovery_defer/
 │   │   ├── cursor.rs
 │   │   └── tests.rs
+│   ├── replay_evidence/
+│   │   ├── live_issuer.rs
+│   │   └── recovery_issuer.rs
 │   ├── review_decision/
 │   │   ├── accept.rs
 │   │   ├── adapters.rs
@@ -3940,6 +3985,7 @@ src/
 │   │   │   │   ├── loaded_image_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── peer.rs
+│   │   │   │   ├── peer_current_image_tests.rs
 │   │   │   │   ├── peer_tests.rs
 │   │   │   │   ├── permit.rs
 │   │   │   │   ├── proof_tests.rs
@@ -4050,7 +4096,8 @@ src/
 │   │   │   │   ├── notice_owner/
 │   │   │   │   │   ├── census/
 │   │   │   │   │   │   └── census_tests.rs
-│   │   │   │   │   └── census.rs
+│   │   │   │   │   ├── census.rs
+│   │   │   │   │   └── generation.rs
 │   │   │   │   ├── v2/
 │   │   │   │   │   ├── carried.rs
 │   │   │   │   │   ├── carried_tests.rs
@@ -4168,6 +4215,7 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── ledger/
 │   │   │   │   ├── input_notices/
+│   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   └── input_notices.rs
 │   │   │   ├── spool/
@@ -4219,6 +4267,8 @@ src/
 │   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
+│   │   │   │   ├── notice_settlement.rs
+│   │   │   │   ├── notice_settlement_tests.rs
 │   │   │   │   ├── notice_work.rs
 │   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs
@@ -4260,6 +4310,7 @@ src/
 │   │   │   │   ├── history_tests.rs
 │   │   │   │   ├── migration.rs
 │   │   │   │   ├── migration_tests.rs
+│   │   │   │   ├── retry.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── late_adopt/
 │   │   │   │   ├── claude/
@@ -4690,6 +4741,7 @@ src/
 │   ├── automation_candidate_contract.rs
 │   ├── automation_candidate_materializer.rs
 │   ├── calendar_sync.rs
+│   ├── channel_roles.rs
 │   ├── claude.rs
 │   ├── claude_command.rs
 │   ├── claude_compact_context.rs
@@ -4734,6 +4786,7 @@ src/
 │   ├── monitoring_store.rs
 │   ├── opencode.rs
 │   ├── operator_connectors.rs
+│   ├── org_catalog.rs
 │   ├── pane_readiness.rs
 │   ├── pipeline_override.rs
 │   ├── pipeline_routes.rs

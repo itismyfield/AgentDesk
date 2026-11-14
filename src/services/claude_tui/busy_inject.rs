@@ -370,7 +370,8 @@ impl Pane {
             })?;
         }
         let mut command = Command::new(&self.program);
-        command.arg("-u").args(args);
+        crate::services::platform::tmux::input_command(&mut command, args)
+            .map_err(BoundedTmuxError::Spawn)?;
         crate::services::platform::binary_resolver::apply_runtime_path(&mut command);
         // A fresh thread owns its runtime, so this blocks safely from any caller.
         std::thread::scope(|scope| {

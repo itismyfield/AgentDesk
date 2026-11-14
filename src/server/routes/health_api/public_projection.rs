@@ -238,9 +238,46 @@ pub(super) fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     if !tui_output_gateway_channels.is_empty() {
         public["tui_output_gateway_channels"] = tui_output_gateway_channels.into();
     }
+    if let Some(witness) = project_test_instance(
+        &json,
+        crate::config::test_instance::lifecycle::has_admitted_run(),
+    ) {
+        public["test_instance"] = witness;
+    }
     public
+}
+
+fn project_test_instance(json: &serde_json::Value, admitted: bool) -> Option<serde_json::Value> {
+    if !admitted {
+        return None;
+    }
+    let witness = json.get("test_instance")?;
+    if witness["schema"] != 1 || witness["live_ready"] != false {
+        return None;
+    }
+    let identities = witness["identities"].as_array()?;
+    if identities.len() != 4 {
+        return None;
+    }
+    let identities: Option<Vec<_>> = identities.iter().map(|identity| Some(serde_json::json!({
+        "name":identity.get("name")?.as_str()?,
+        "application_id":identity.get("application_id")?.as_str()?,
+        "device":identity.get("device")?.as_u64()?,"inode":identity.get("inode")?.as_u64()?,
+        "size":identity.get("size")?.as_u64()?,"mtime_ns":identity.get("mtime_ns")?.as_u64()?,
+        "ctime_ns":identity.get("ctime_ns")?.as_u64()?
+    }))).collect();
+    Some(serde_json::json!({"schema":1,
+        "instance_id":witness.get("instance_id")?.as_str()?,"head":witness.get("head")?.as_str()?,
+        "pid":witness.get("pid")?.as_u64()?,"binary_sha256":witness.get("binary_sha256")?.as_str()?,
+        "nonce":witness.get("nonce")?.as_str()?,"port":witness.get("port")?.as_u64()?,
+        "identities":identities?,"live_ready":false
+    }))
 }
 
 #[cfg(all(test, unix))]
 #[path = "tui_output_readiness_tests.rs"]
 mod tui_output_readiness_tests;
+
+#[cfg(test)]
+#[path = "test_instance_projection_tests.rs"]
+mod test_instance_projection_tests;

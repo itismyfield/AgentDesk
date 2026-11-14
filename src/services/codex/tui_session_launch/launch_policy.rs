@@ -70,6 +70,8 @@ pub(in crate::services::codex) fn prepare_codex_tui_incarnation_with_policy(
     if crate::services::herdr_launch::herdr_configured_for_tui_launch(channel) {
         return Err(CodexTuiLaunchRefused::HerdrNotAdmitted);
     }
+    let (home, _) =
+        codex_tui_home(overlay).map_err(CodexTuiLaunchRefused::PreparationUnavailable)?;
     let policy =
         tui_preflight_with_policy(tmux, channel, options, resume_root, inherited_verified)?;
     use sha2::{Digest, Sha256};
@@ -81,9 +83,7 @@ pub(in crate::services::codex) fn prepare_codex_tui_incarnation_with_policy(
         options.resume_session_id.as_deref(),
         options.resume_session_id.is_some(),
         // Ownership compares canonical rollout paths to this root, so record it unaliased.
-        codex_tui_home(overlay)
-            .0
-            .map(|home| home.canonicalize().unwrap_or(home).join("sessions")),
+        home.map(|home| home.canonicalize().unwrap_or(home).join("sessions")),
         (Some(digest), Some(policy.to_owned())),
     )
     .map_err(CodexTuiLaunchRefused::PreparationUnavailable)
@@ -107,8 +107,10 @@ pub(in crate::services::codex) fn preflight_codex_tui_turn_with_policy(
         && selection
             .resume_session_id()
             .is_some_and(exact_codex_resume_id);
+    let (home, _) =
+        codex_tui_home(overlay).map_err(CodexTuiLaunchRefused::PreparationUnavailable)?;
     let resume_root = exact
-        .then(|| codex_tui_home(overlay).0.map(|home| home.join("sessions")))
+        .then(|| home.map(|home| home.join("sessions")))
         .flatten();
     let policy = tui_preflight_with_policy(
         tmux,
@@ -244,6 +246,7 @@ pub(in crate::services::codex) fn prepare_codex_herdr_launch(
     home: &std::path::Path,
 ) -> Result<crate::services::herdr_launch::HerdrLaunchCommand, String> {
     use crate::services::herdr_launch::{HerdrLaunchCommand, unset_herdr_env_before_exec};
+    crate::config::test_instance::environment::validate_provider_home("codex", home)?;
     validate_herdr_launch_args(prepared, launch_options, &[])?;
     let logical = prepared.context.tmux_session.as_str();
     let (codex_bin, exec_path) = (
@@ -257,7 +260,7 @@ pub(in crate::services::codex) fn prepare_codex_herdr_launch(
     let channel = prepared.context.channel_id;
     let mut env_lines = build_tmux_launch_env_lines(exec_path, channel, Some(ProviderKind::Codex));
     env_lines
-        .push_str(&crate::services::provider_auth_profile::overlay_shell_env_lines(auth_overlay));
+        .push_str(&crate::services::provider_auth_profile::overlay_shell_env_lines(auth_overlay)?);
     env_lines.push_str(&prepared.env_lines());
     env_lines.push_str(&format!(
         "export AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE={}\nexport CODEX_HOME={}\n",

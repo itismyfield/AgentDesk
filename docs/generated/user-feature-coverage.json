@@ -5,6 +5,7 @@
       "applicable": 4,
       "covered": 0,
       "missing": 4,
+      "needs_live": true,
       "pending_assertions": [
         {
           "assertion_id": "busy_injected_before_turn_end",
@@ -39,6 +40,8 @@
           "reason": "실제 busy·host submit·provider 관측·반응 이력 단언이 미구현이다. 내부 API 성공은 대체 증거가 아니다."
         }
       ],
+      "scenario_references": [],
+      "test_names": [],
       "tuples": [
         {
           "host": "herdr",
@@ -131,6 +134,7 @@
       "applicable": 1,
       "covered": 0,
       "missing": 1,
+      "needs_live": true,
       "pending_assertions": [
         {
           "assertion_id": "campaign_progress_observed",
@@ -138,8 +142,14 @@
             "human"
           ],
           "issue": "#8120",
-          "reason": "캠페인 실행 증거와 사용자 표시를 연결하는 단언 미구현이다."
+          "reason": "legacy live-status와 상태 projection 시험은 main에 있다. server execution은 Unavailable이며 API/view 시험은 tmux/Claude/human/tui_o 실행을 증명하지 않으므로 실제 campaign 진행 관측은 pending이다."
         }
+      ],
+      "scenario_references": [],
+      "test_names": [
+        "src/db/campaigns/tests.rs::postgres_live_status_reads_the_issue_card_without_touching_the_ledger_pg",
+        "src/server/routes/server_campaigns/http_tests.rs::public_execution_is_unavailable_without_legacy_queue_or_card_effects_pg",
+        "src/services/campaign_execution/view_tests.rs::planned_or_claimed_work_is_not_displayed_as_actual_execution"
       ],
       "tuples": [
         {
@@ -167,6 +177,7 @@
       "applicable": 1,
       "covered": 0,
       "missing": 1,
+      "needs_live": true,
       "pending_assertions": [
         {
           "assertion_id": "cancel_effect_observed",
@@ -174,7 +185,7 @@
             "human"
           ],
           "issue": "#8120",
-          "reason": "중지 효과와 인간 입력 보존의 실행 관측 단언이 없다."
+          "reason": "중지·인간 보존 정책과 기존 단위시험은 main에 있다. E-18/E-54의 부분 명세는 인간 Gateway 입력 보존·실제 host/output witness까지 증명하지 않으므로 해당 실행 단언은 pending이다."
         },
         {
           "assertion_id": "cancel_preservation_observed",
@@ -182,8 +193,25 @@
             "human"
           ],
           "issue": "#8120",
-          "reason": "중지 효과와 인간 입력 보존의 실행 관측 단언이 없다."
+          "reason": "중지·인간 보존 정책과 기존 단위시험은 main에 있다. E-18/E-54의 부분 명세는 인간 Gateway 입력 보존·실제 host/output witness까지 증명하지 않으므로 해당 실행 단언은 pending이다."
         }
+      ],
+      "scenario_references": [
+        {
+          "needs_live": true,
+          "scenario_id": "E-18",
+          "scope": "Claude/Codex의 cancel 뒤 late marker 부재와 hold/health 명세를 참조한다. 입력은 legacy_automation이며 인간 입력 취소보존과 구체 tui_o output receipt를 증명하지 않는다. Herdr의 durable hold·legacy idle 검사는 N/A이고 자동 busy witness operation도 없다."
+        },
+        {
+          "needs_live": true,
+          "scenario_id": "E-54",
+          "scope": "Claude tmux의 late marker 부재와 idle !stop 답글 정확히 1회 UX만 참조한다. legacy_automation/unspecified 입력·출력이므로 human/tui_o 수기 계약과 다르며 인간 입력 보존·자동 busy witness는 증명하지 않는다."
+        }
+      ],
+      "test_names": [
+        "src/services/discord/router/intake_queue_transaction.rs::only_human_intake_sets_cancel_preservation_marker",
+        "src/services/discord/turn_bridge/tmux_runtime/herdr_http_cancel_tests.rs::herdr_http_cancel_stops_a_live_turn_and_completes_nothing_pg",
+        "src/services/discord/turn_bridge/tmux_runtime/native_stop_contract_tests.rs::preserve_stop_failed_command_notice_once_and_reader_continues"
       ],
       "tuples": [
         {
@@ -212,6 +240,7 @@
       "applicable": 1,
       "covered": 0,
       "missing": 1,
+      "needs_live": true,
       "pending_assertions": [
         {
           "assertion_id": "dm_surface_observed",
@@ -219,8 +248,14 @@
             "human"
           ],
           "issue": "#8120",
-          "reason": "초기 phase-1은 channel/thread만 지원하므로 DM 실제 실행과 단언이 미지원이다."
+          "reason": "인간 DM routing·provider bot 분리 단위시험은 main에 있다. 기존 TUI runner에는 DM 전용 시나리오가 없고 인간 Gateway→실제 tmux/tui_o 응답 관측은 pending이다."
         }
+      ],
+      "scenario_references": [],
+      "test_names": [
+        "src/services/discord/outbound/send_gate.rs::dm_default_agent_allows_headless_private_channel_when_provider_bound",
+        "src/services/discord/queue_io/transport/tests.rs::rest_queue_routing_preserves_thread_parent_and_dm_policy",
+        "src/services/message_outbox/identity_tests.rs::dm_session_routes_outbox_delivery_through_provider_bot"
       ],
       "tuples": [
         {
@@ -248,6 +283,7 @@
       "applicable": 1,
       "covered": 0,
       "missing": 1,
+      "needs_live": true,
       "pending_assertions": [
         {
           "assertion_id": "effort_model_effect_observed",
@@ -255,8 +291,20 @@
             "human"
           ],
           "issue": "#8120",
-          "reason": "UI 표시와 실제 다음 턴 설정을 잇는 단언 미구현이다."
+          "reason": "effort/model 저장·다음 턴 전달 시험은 main에 있다. E-37은 Codex local-control 이후 입력 처리만 확인하므로 현재 Claude/human/tui_o 칸의 실제 설정 적용 witness는 pending이다."
         }
+      ],
+      "scenario_references": [
+        {
+          "needs_live": true,
+          "scenario_id": "E-37",
+          "scope": "Codex /model의 local-control 안내 뒤 일반 입력 admission·응답 정확히 1회 명세만 참조한다. legacy_automation 입력이며 현재 Claude/human 수기 칸과 provider/source가 다르다. 구체 output profile과 실제 model/effort 선택·적용 효과는 관측하지 않는다."
+        }
+      ],
+      "test_names": [
+        "scripts/e2e/tui_relay/test_driver_health.py::E37CodexModelLocalControl.test_passes_when_model_stays_local_and_prompt_with_empty_sources_is_admitted",
+        "src/services/claude_tui/session/effort_launch_tests.rs::ultra_persists_and_normal_effort_turns_ultracode_off",
+        "src/services/discord/commands/config/effort_settings_tests.rs::codex_effort_persists_and_restores_on_its_channel"
       ],
       "tuples": [
         {
@@ -284,6 +332,7 @@
       "applicable": 1,
       "covered": 0,
       "missing": 1,
+      "needs_live": true,
       "pending_assertions": [
         {
           "assertion_id": "host_handoff_observed",
@@ -291,8 +340,25 @@
             "human"
           ],
           "issue": "#8120",
-          "reason": "label이나 cell 선언만으로 실제 endpoint·session의 넘김을 관측하지 않는다."
+          "reason": "Herdr launch 및 row/nonce readiness 단위시험은 main에 있다. E-19/E-30 identity 단계는 Herdr N/A이므로 실제 endpoint·session 넘김 witness는 pending이다."
         }
+      ],
+      "scenario_references": [
+        {
+          "needs_live": true,
+          "scenario_id": "E-19",
+          "scope": "Claude/Codex의 재시작 전후 문맥·응답 연속성을 참조한다. 입력은 legacy_automation, output_path는 unspecified다. Herdr에서 tmux identity capture/preservation step은 N/A이며 실제 Herdr host·동일 세션 취소까지 증명하지 않는다."
+        },
+        {
+          "needs_live": true,
+          "scenario_id": "E-30",
+          "scope": "Codex의 연속 후속 응답·중복 부재 명세만 참조한다. 입력은 legacy_automation, output_path는 unspecified다. 현재 수기 칸은 Claude이므로 provider가 다르고, Herdr에서는 tmux identity step이 N/A여서 실제 host·동일 세션·취소를 증명하지 않는다."
+        }
+      ],
+      "test_names": [
+        "scripts/e2e/tui_relay/test_herdr_observe.py::HerdrObserve.test_cold_and_post_turn_row_contract",
+        "src/services/herdr_launch_tests.rs::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg",
+        "src/services/herdr_launch_tests.rs::herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store"
       ],
       "tuples": [
         {
@@ -320,7 +386,12 @@
       "applicable": 4,
       "covered": 4,
       "missing": 0,
+      "needs_live": true,
       "pending_assertions": [],
+      "scenario_references": [],
+      "test_names": [
+        "scripts/e2e/tui_relay/test_assertions.py::ProviderAuthorScenarios.test_every_turn_wait_and_e36_request_is_provider_scoped"
+      ],
       "tuples": [
         {
           "host": "herdr",
@@ -417,6 +488,7 @@
       "applicable": 4,
       "covered": 0,
       "missing": 4,
+      "needs_live": true,
       "pending_assertions": [
         {
           "assertion_id": "reaction_history_matches",
@@ -435,6 +507,8 @@
           "reason": "message/actor별 전체 반응 이벤트와 실제 busy witness를 아직 관측하지 않는다."
         }
       ],
+      "scenario_references": [],
+      "test_names": [],
       "tuples": [
         {
           "host": "herdr",
@@ -519,6 +593,7 @@
       "applicable": 1,
       "covered": 0,
       "missing": 1,
+      "needs_live": true,
       "pending_assertions": [
         {
           "assertion_id": "clear_ack_observed",
@@ -526,7 +601,7 @@
             "human"
           ],
           "issue": "#8120",
-          "reason": "E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 witness도 미구현이다."
+          "reason": "clear 처리와 selector 정리 시험은 main에 있다. E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 identity witness도 없으므로 두 실행 단언은 pending이다."
         },
         {
           "assertion_id": "fresh_session_observed",
@@ -534,8 +609,25 @@
             "human"
           ],
           "issue": "#8120",
-          "reason": "E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 witness도 미구현이다."
+          "reason": "clear 처리와 selector 정리 시험은 main에 있다. E-50/E-51의 ack wait는 assertions 교집합이 아니며 새 세션 identity witness도 없으므로 두 실행 단언은 pending이다."
         }
+      ],
+      "scenario_references": [
+        {
+          "needs_live": true,
+          "scenario_id": "E-50",
+          "scope": "Claude의 clear 뒤 첫 provider 응답·중복 부재 명세를 참조한다. ack는 wait step이며 clear_ack/fresh-session assertion은 없다. legacy_automation/unspecified이므로 현재 human/tui_o 수기 계약과 source/output이 다르고 세션 identity를 증명하지 않는다."
+        },
+        {
+          "needs_live": true,
+          "scenario_id": "E-51",
+          "scope": "Codex의 clear 뒤 첫 provider 응답·중복 부재 명세를 참조한다. ack는 wait step이며 clear_ack/fresh-session assertion은 없다. 현재 Claude/human/tui_o 수기 칸과 provider/source/output이 다르며 실제 새 세션 identity를 증명하지 않는다."
+        }
+      ],
+      "test_names": [
+        "scripts/e2e/tui_relay/test_herdr_observe.py::HerdrTextClear.test_clear_completion_shares_the_refusal_boundary",
+        "src/services/discord/commands/control/clear_end_tests.rs::a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg",
+        "src/services/discord/commands/control/herdr_recovery_tests.rs::live_clear_forgets_the_retired_selector_pg"
       ],
       "tuples": [
         {
@@ -564,6 +656,7 @@
       "applicable": 1,
       "covered": 0,
       "missing": 1,
+      "needs_live": true,
       "pending_assertions": [
         {
           "assertion_id": "routine_fired_observed",
@@ -571,8 +664,14 @@
             "human"
           ],
           "issue": "#8120",
-          "reason": "시각·실행 identity·전달 결과를 연결하는 명세 단언 미구현이다."
+          "reason": "AgentDesk due claim·중복 방지·결과 로그 시험은 main에 있다. 실행 provenance는 routine이며 인간 입력 source와 다르다. E-13 ScheduleWakeup은 별개라 실제 routine/run/host/output 관측은 pending이다."
         }
+      ],
+      "scenario_references": [],
+      "test_names": [
+        "src/services/routines/discord_log.rs::render_run_log_sections_keeps_stable_order_and_sanitizes_code_fences",
+        "src/services/routines/reliability_pg_tests.rs::logged_unicode_object_completion_and_next_due_run_persist_pg",
+        "src/services/routines/reliability_pg_tests.rs::slot_missed_during_startup_grace_runs_exactly_once_after_it_pg"
       ],
       "tuples": [
         {
@@ -600,6 +699,7 @@
       "applicable": 4,
       "covered": 0,
       "missing": 4,
+      "needs_live": true,
       "pending_assertions": [
         {
           "assertion_id": "actual_host_observed",
@@ -642,6 +742,8 @@
           "reason": "fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가."
         }
       ],
+      "scenario_references": [],
+      "test_names": [],
       "tuples": [
         {
           "host": "herdr",
@@ -751,6 +853,6 @@
     "unsupported-known-gap": 3
   },
   "schema_version": 1,
-  "source_hash": "31568e40346cc8dcb42ed0601ef151d7e3a1276cf6275d02bf03d7e8acf7f956",
+  "source_hash": "76544ca1fcb2c520f2e94e3dcc975154f635c6dcccde0d00a8cae14f2df0d7eb",
   "unsupported": 19
 }

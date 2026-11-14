@@ -57,6 +57,21 @@ class UserFeatureMapStatic(unittest.TestCase):
         self.assertGreater(report["applicable"], 0)
         self.assertEqual(report["covered"] + report["missing"], report["applicable"])
         self.assertTrue(report["by_feature"])
+        rows = yaml.safe_load((ROOT / "docs/user-feature-map.rows.yaml").read_text())
+        expected = {feature["feature_id"]: feature for feature in rows["features"]}
+        self.assertEqual(set(report["by_feature"]), set(expected))
+        for feature_id, summary in report["by_feature"].items():
+            with self.subTest(feature=feature_id):
+                self.assertIs(type(summary["needs_live"]), bool)
+                self.assertEqual(summary["needs_live"], expected[feature_id].get("needs_live", True))
+                names = summary["test_names"]
+                self.assertIsInstance(names, list)
+                self.assertTrue(all(isinstance(name, str) and name.strip() for name in names))
+                self.assertEqual(len(names), len(set(names)))
+                self.assertCountEqual(names, expected[feature_id].get("test_names", []))
+                self.assertIsInstance(summary["scenario_references"], list)
+                if all(entry["status"] == "unsupported" for entry in summary["tuples"]):
+                    self.assertEqual(summary["covered"], 0)
         scenarios = ROOT / "tests/e2e/tui_relay/scenarios"
         active = [yaml.safe_load(path.read_text()) for path in sorted(scenarios.glob("*.yaml"))]
         counts = Counter(item["coverage_class"] for item in active)

@@ -68,6 +68,10 @@ MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 WARM_WORKFLOW = REPO_ROOT / ".github/workflows/ci-windows-cache-warm.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
 SCCACHE_ACTION = Path(".github/actions/sccache-or-nothing/action.yml")
+RUNNER_MEMORY_OBSERVER_NAMES = {
+    "Start runner memory sampler", "Begin runner memory step",
+    "End runner memory step", "Summarize runner memory", "Upload runner memory",
+}
 
 
 def job_block(workflow: str, job_name: str) -> str:
@@ -367,7 +371,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(job["if"], _LINT_FILTER)
         # Clippy over every target and feature is the compile `cargo check` used to repeat.
         self.assertEqual(
-            [line.strip() for step in job["steps"] for line in str(step.get("run", "")).splitlines() if line.strip()],
+            [line.strip() for step in job["steps"] if step.get("name") not in RUNNER_MEMORY_OBSERVER_NAMES
+             for line in str(step.get("run", "")).splitlines() if line.strip()],
             [
                 "just fmt-check",
                 "npm run test:policies",
@@ -378,7 +383,12 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "sccache --show-stats || true",
             ],
         )
-        self.assertNotIn("continue-on-error", job_block(workflow, "lint"))
+        self.assertNotIn("continue-on-error", job)
+        for step in job["steps"]:
+            if step.get("name") in RUNNER_MEMORY_OBSERVER_NAMES:
+                self.assertIs(step.get("continue-on-error"), True)
+            else:
+                self.assertNotIn("continue-on-error", step)
 
     def test_nextest_jobs_reject_fail_open_and_artifact_mutants_after_repin(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -829,6 +839,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             [
                 line.strip()
                 for step in main_jobs["lint"]["steps"]
+                if step.get("name") not in RUNNER_MEMORY_OBSERVER_NAMES
                 for line in str(step.get("run", "")).splitlines()
                 if line.strip()
             ],
@@ -913,7 +924,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", job)
         steps = job["steps"]
         self.assertEqual(steps[0], {"uses": "actions/checkout@v4", "with": {"fetch-depth": 2}})
-        path_filter = steps[1]
+        path_filter_index = 1
+        path_filter = steps[path_filter_index]
         self.assertEqual(path_filter.get("id"), "mutation_paths")
         self.assertEqual(path_filter.get("uses"), "dorny/paths-filter@v3")
         self.assertNotIn("if", path_filter)
@@ -930,7 +942,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for name in preparation:
             self.assertIn(name, names, f"missing mutation preparation step: {name}")
             index = names.index(name)
-            self.assertGreater(index, 1, f"{name} must follow the path filter")
+            self.assertGreater(index, path_filter_index, f"{name} must follow the path filter")
             self.assertLess(index, mutation_index, f"{name} must precede mutations")
             self.assertEqual(steps[index].get("if"), condition, name)
             self.assertNotIn("continue-on-error", steps[index], name)
@@ -1234,7 +1246,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(mutated)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(
-                    "protected step inventory changed; expected indices [9, 10]",
+                    "protected step inventory changed; expected indices [11, 12]",
                     result.stderr,
                 )
 

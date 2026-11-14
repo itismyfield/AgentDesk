@@ -1,0 +1,2 @@
+key: 420-tui-o-writer-archived-source-boot
+| `tui-o-writer` archived source boot (#8063) | `ac9e137b79` + boot archive proof | BootBefore, NoReopen and NoQuestionFilter: a valid archive-only source stays halted; guard mutants cover unread bytes, real unsealed bodies, corrupt archives, file races and duplicate replay | BootAfter validates decoder EOF, full length/hash and stable snapshots after retained replay; existing ownership and posted-body guards remain; [boot model and limits](tui-o-writer/archive-boot.report.md) |

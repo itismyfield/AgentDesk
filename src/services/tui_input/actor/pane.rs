@@ -97,7 +97,7 @@ impl TmuxPane {
     fn command(&self, args: &[&str]) -> std::io::Result<Command> {
         let mut command =
             crate::services::platform::binary_resolver::runtime_command(&self.program)?;
-        command.arg("-u").args(args);
+        crate::services::platform::tmux::input_command(&mut command, args)?;
         Ok(command)
     }
 
