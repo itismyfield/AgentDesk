@@ -1342,7 +1342,14 @@ async fn native_8148_s2_transfer_closes_debt_without_successor_row_or_wake() {
             cleanup.drive(&f.history, &shared).await.is_err(),
             "result must already be durable"
         );
-        let released = shared.mailbox(key.channel_id).finish_cancelled_turn().await;
+        let released = shared
+            .mailbox(key.channel_id)
+            .finish_turn(super::super::super::queue_persistence_context(
+                &shared,
+                &ProviderKind::Claude,
+                key.channel_id,
+            ))
+            .await;
         assert!(released.removed_token.is_some());
         let successor = Arc::new(CancelToken::new());
         if successor_lease {
@@ -1496,7 +1503,7 @@ async fn native_8148_s2_withdrawal_preseed_same_and_different_ticket_pg() {
             &pool,
             OutboxMessage {
                 target: &target,
-                content: "preseed",
+                content: "입력이 실행 전에 철회되었습니다.",
                 bot: "claude",
                 source: "retained_input_notice",
                 reason_code: None,
