@@ -8,17 +8,24 @@ use serde::{Deserialize, Serialize};
 pub(super) struct RoutinePresentation {
     policy: Policy,
     terminal: TerminalEvidence,
+    #[serde(skip_serializing_if = "Isolation::is_shared")]
     isolation: Isolation,
 }
 
-/// A per-run turn owns no channel state: every completer and recovery reads this pin, so a row
-/// written before the pin existed stays `Shared`.
+/// A per-run turn owns no channel state: every completer and recovery reads this pin. `Shared`
+/// is not stored, so a shared row keeps its bytes and a row from before the pin reads `Shared`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Isolation {
     #[default]
     Shared,
     PerRun,
+}
+
+impl Isolation {
+    fn is_shared(&self) -> bool {
+        *self == Self::Shared
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
