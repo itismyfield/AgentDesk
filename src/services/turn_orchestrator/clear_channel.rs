@@ -113,9 +113,7 @@ pub(super) fn clear_channel_state(
     persistence: QueuePersistenceContext,
     active: ActivePolicy,
 ) -> ClearChannelResult {
-    if let Some(result) =
-        queued_head::v2::clear::clear_channel(state, channel_id, &persistence, active)
-    {
+    if let Some(result) = queued_head::clear_v2_channel(state, channel_id, &persistence, active) {
         return result;
     }
     state.last_persistence = Some(persistence.clone());
