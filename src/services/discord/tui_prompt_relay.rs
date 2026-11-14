@@ -41,6 +41,8 @@ use self::hook_observer::{
 };
 
 mod observed_prompt_decision;
+mod scheduled_prompt;
+mod slash_command_output;
 pub(in crate::services::discord) use self::observed_prompt_decision::observed_prompt_starts_external_turn_lifecycle;
 use self::observed_prompt_decision::{
     RelayObservedPromptInjectionDecision, relay_observed_prompt_injected_prompt_decision,
@@ -536,11 +538,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         } else if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
             String::new()
         } else {
-            format_ssh_direct_prompt_notification(
-                &prompt.provider,
-                &prompt.tmux_session_name,
-                &prompt.prompt,
-            )
+            scheduled_prompt::direct_prompt_notice(&prompt).await
         };
         let notification_anchor_message_id = if let Some(message_id) = task_card_anchor {
             synthetic_start_wiring::record_prompt_id_after_post(&prompt, None);
@@ -825,7 +823,7 @@ fn prepare_local_only_slash_control_note(prompt: &ObservedTuiPrompt, kind: &str)
         crate::services::tui_prompt_dedupe::seal_deduped_local_only_entry_id(prompt);
         return None;
     }
-    Some(format_slash_command_control_note(
+    Some(slash_command_output::local_slash_control_note(
         &prompt.tmux_session_name,
         kind,
         &prompt.prompt,

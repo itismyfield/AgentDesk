@@ -150,11 +150,7 @@ pub(super) async fn post_passive_prompt_notice(
         Some(kind) => {
             format_slash_command_control_note(&prompt.tmux_session_name, kind, &prompt.prompt)
         }
-        None => format_ssh_direct_prompt_notification(
-            &prompt.provider,
-            &prompt.tmux_session_name,
-            &prompt.prompt,
-        ),
+        None => super::scheduled_prompt::direct_prompt_notice(prompt).await,
     };
     let posted = super::super::http::dispatch_channel_message(
         &gate.notify_http,

@@ -21,6 +21,8 @@ const COMPACTED_LOCAL_COMMAND_STDOUT_PREFIX: &str = "<local-command-stdout>Compa
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum InjectedPromptClass {
     HumanTuiDirect,
+    /// A Claude scheduled-task fire: a typed input's lifecycle under its own notice header.
+    ScheduledPrompt,
     TaskNotificationEvent,
     SubagentNotificationEvent,
     SystemContinuation,
@@ -31,7 +33,10 @@ impl InjectedPromptClass {
     /// Whether this class represents a human-driven active turn that should
     /// receive a `⏳` reaction and claim queue/inflight ownership.
     pub(super) fn is_human_active_turn(self) -> bool {
-        matches!(self, InjectedPromptClass::HumanTuiDirect)
+        matches!(
+            self,
+            InjectedPromptClass::HumanTuiDirect | InjectedPromptClass::ScheduledPrompt
+        )
     }
 
     /// Neutral machine events suppress the active-turn lifecycle. Slash control
@@ -132,6 +137,20 @@ pub(super) fn classify_injected_prompt(prompt: &str) -> InjectedPromptClass {
         InjectedPromptClass::SlashCommandControl
     } else {
         InjectedPromptClass::HumanTuiDirect
+    }
+}
+
+/// The same classification, told whether the transcript marks the prompt's row as a scheduled
+/// fire. Only a prompt that would otherwise be a typed input becomes scheduled.
+pub(super) fn classify_injected_prompt_with_origin(
+    prompt: &str,
+    scheduled_fire: bool,
+) -> InjectedPromptClass {
+    match classify_injected_prompt(prompt) {
+        InjectedPromptClass::HumanTuiDirect if scheduled_fire => {
+            InjectedPromptClass::ScheduledPrompt
+        }
+        class => class,
     }
 }
 
@@ -292,10 +311,27 @@ pub(super) fn format_ssh_direct_prompt_notification(
     _tmux_session_name: &str,
     prompt: &str,
 ) -> String {
+    raw_prompt_notice("-# ⌨️ tui direct input", prompt)
+}
+
+fn raw_prompt_notice(header: &str, prompt: &str) -> String {
     let prompt = strip_terminal_controls(prompt)
         .replace("\r\n", "\n")
         .replace(['\r', '\u{2028}', '\u{2029}'], "\n");
-    crate::domain::message_split::bounded_raw_code_block_notice("-# ⌨️ tui direct input", &prompt)
+    crate::domain::message_split::bounded_raw_code_block_notice(header, &prompt)
+}
+
+/// A direct prompt's notice by class; a scheduled fire is told apart by its header.
+pub(super) fn format_direct_prompt_notification(
+    class: InjectedPromptClass,
+    provider: &str,
+    tmux_session_name: &str,
+    prompt: &str,
+) -> String {
+    match class {
+        InjectedPromptClass::ScheduledPrompt => raw_prompt_notice("-# ⏰ scheduled prompt", prompt),
+        _ => format_ssh_direct_prompt_notification(provider, tmux_session_name, prompt),
+    }
 }
 
 #[cfg(test)]
@@ -394,14 +430,35 @@ pub(super) fn extract_loop_body(prompt: &str) -> Option<String> {
     None
 }
 
-fn extract_local_command_stdout_body(prompt: &str) -> Option<String> {
+/// A local command's output as written, under a `-# ⚙️ /<command>` header. `None` for a name
+/// that is not a plain slash token or an empty output; the caller keeps the kind-only note.
+pub(super) fn format_slash_command_output_notice(
+    command: &str,
+    raw_prompt: &str,
+) -> Option<String> {
+    let name = command.strip_prefix('/')?;
+    let plain = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | ':' | '.'));
+    let body = local_command_stdout_inner(raw_prompt)?;
+    let body = body.trim();
+    (plain && !body.is_empty()).then(|| raw_prompt_notice(&format!("-# ⚙️ {command}"), body))
+}
+
+fn local_command_stdout_inner(prompt: &str) -> Option<String> {
     let (normalized, _peeled_caveat) = normalize_slash_command_control_prompt(prompt);
     let rest = normalized.strip_prefix(LOCAL_COMMAND_STDOUT_OPEN)?;
     let rest = rest.trim_end();
     if !rest.ends_with(LOCAL_COMMAND_STDOUT_CLOSE) {
         return None;
     }
-    let body = &rest[..rest.len() - LOCAL_COMMAND_STDOUT_CLOSE.len()];
+    Some(rest[..rest.len() - LOCAL_COMMAND_STDOUT_CLOSE.len()].to_string())
+}
+
+fn extract_local_command_stdout_body(prompt: &str) -> Option<String> {
+    let body = local_command_stdout_inner(prompt)?;
     let body = body
         .lines()
         .map(str::trim)
