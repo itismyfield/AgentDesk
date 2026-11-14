@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "8558c96cf7ffb17ea98db05d075e165a301b2c5b",
+  "measured_at_sha": "1071a6cf4dc5daeddd82b75f3fa68b4263da43d7",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -154,6 +154,7 @@
         "src/runtime_layout/legacy_migration.rs": 4,
         "src/runtime_layout/mod.rs": 5,
         "src/runtime_layout/skill_refresh.rs": 7,
+        "src/runtime_layout/skill_sync.rs": 2,
         "src/server/dashboard_provision.rs": 1,
         "src/server/routes/agents_setup.rs": 2,
         "src/server/worker_recovery.rs": 1,
@@ -212,6 +213,7 @@
         "src/services/herdr_launch/runtime_marker.rs": 1,
         "src/services/maintenance/jobs/hang_dump_cleanup.rs": 1,
         "src/services/maintenance/jobs/worktree_orphan_sweep.rs": 2,
+        "src/services/mcp_config.rs": 1,
         "src/services/memory/memento_writer_guard.rs": 1,
         "src/services/onboarding/mod.rs": 2,
         "src/services/provider/herdr_before_start.rs": 1,
