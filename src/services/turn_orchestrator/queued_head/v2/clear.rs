@@ -41,14 +41,16 @@ pub(crate) fn clear_channel(
         .chain(state.active_absorbed_source_ids.iter().copied())
         .collect();
     result.persistence.not_waiting = protected.clone();
-    result
-        .persistence
-        .not_waiting
-        .extend(state.pending_user_dispatch);
-    result
-        .persistence
-        .not_waiting
-        .extend(state.pending_user_dispatch_source_ids.iter().copied());
+    if active == ActivePolicy::Release {
+        result
+            .persistence
+            .not_waiting
+            .extend(state.pending_user_dispatch);
+        result
+            .persistence
+            .not_waiting
+            .extend(state.pending_user_dispatch_source_ids.iter().copied());
+    }
     let cleared = adoption.and_then(|()| {
         state
             .queued_head
