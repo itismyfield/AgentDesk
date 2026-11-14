@@ -446,7 +446,7 @@ mod merge_tests {
                 &path,
                 serde_json::to_vec(&serde_json::json!({
                 "version":2,"namespace":namespace,"items":[],"head_injection":null,
-                "retained_inputs":[],"terminal_identities":[]}))
+                "retained_inputs":[],"terminal_identities":[],"admission_binds":[]}))
                 .unwrap(),
             )
             .unwrap();

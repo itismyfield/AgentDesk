@@ -395,6 +395,12 @@ input-single-path/NativeAttributionPrefixReadBefore.cfg	NativeInputAttribution	P
 input-single-path/NativeAttributionPrefixReadFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionUnavailable.cfg	NativeInputAttribution	-	EveryInputEventuallySettled,HeadEventuallyInjected,IdleEventuallyReleased
 input-single-path/NativePreparationBorrowBusy.cfg	NativeInputPreparation	FollowerNoAuthority	-
+input-single-path/NativePreparationClearOwnerBefore.cfg	NativeInputPreparation	ClearRefusalKeepsOwnership	-
+input-single-path/NativePreparationClearOwnerFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationClearReadOnlyBefore.cfg	NativeInputPreparation	ClearReadOnlyKeepsIntent,ClearRefusalKeepsOwnership	-
+input-single-path/NativePreparationClearReadOnlyFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationClearRouteBefore.cfg	NativeInputPreparation	ClearReadOnlyKeepsIntent	-
+input-single-path/NativePreparationClearRouteFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationDropNotSent.cfg	NativeInputPreparation	NoSilentLoss	-
 input-single-path/NativePreparationFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationKeyBeforePrepare.cfg	NativeInputPreparation	NoKeyBeforePrepare	-
@@ -713,7 +719,3 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
-input-single-path/NativePreparationClearOwnerBefore.cfg	NativeInputPreparation	ClearRefusalKeepsOwnership	-
-input-single-path/NativePreparationClearOwnerFixed.cfg	NativeInputPreparation	-	-
-input-single-path/NativePreparationClearReadOnlyBefore.cfg	NativeInputPreparation	ClearReadOnlyKeepsIntent,ClearRefusalKeepsOwnership	-
-input-single-path/NativePreparationClearReadOnlyFixed.cfg	NativeInputPreparation	-	-
