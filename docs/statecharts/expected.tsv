@@ -515,7 +515,6 @@ tui-o-writer/CodexLateDeliveryR6PrebindFilter.cfg	CodexLateDelivery	NoAdoptionLo
 tui-o-writer/CodexLateDeliveryR6Residual.cfg	CodexLateDelivery	NoLossStrict,NoDupDelivered	-
 tui-o-writer/CodexLateDeliveryR6Rotate.cfg	CodexLateDelivery	-	-
 tui-o-writer/CodexLateDeliveryR6RowPending.cfg	CodexLateDelivery	-	-
-tui-o-writer/WriterAdoptionAdvanceOnEnd.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
 tui-o-writer/NoticeEvidenceAfterDirect.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceAfterOwned.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceAfterPolicy.cfg	NoticeEvidence	-	-
@@ -533,6 +532,7 @@ tui-o-writer/NoticeEvidenceReasonLog.cfg	NoticeEvidence	PendingLoggedOnce	-
 tui-o-writer/NoticeEvidenceSameSource.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceUnavailable.cfg	NoticeEvidence	-	EveryPendingTerminates
 tui-o-writer/NoticeEvidenceWaitBoundary.cfg	NoticeEvidence	-	EveryPendingTerminates
+tui-o-writer/WriterAdoptionAdvanceOnEnd.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
 tui-o-writer/WriterAdoptionBudgetMut.cfg	WriterAdoption	RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionExemptAll.cfg	WriterAdoption	OtherCustodyBlocks	-
 tui-o-writer/WriterAdoptionGateOnly.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered,AdoptionSettles
