@@ -246,9 +246,10 @@ Retire ==
                    oSent, lSent, via, row, deploy, booted, crashes, Fixed, Aux, wmode, lSending,
                    lateTurn, oTurn>>
 
-\* The owner refresh installs a Bound execution view for a recorded child, over its own adoption.
+\* The owner refresh installs a Bound execution view for a recorded child, over its own late or
+\* committed adoption.
 InstallExec ==
-    /\ proc = "new" /\ relation = "verified" /\ parentO /\ ~bound /\ ~exec
+    /\ proc = "new" /\ relation = "verified" /\ cand \in {"late", "committed"} /\ ~bound /\ ~exec
     /\ exec' = TRUE
     /\ UNCHANGED <<proc, relation, cand, floor, init, tomb, tombGen, writer, gen, input, knock,
                    arrived, oSent, lSent, via, row, retire, deploy, booted, crashes, Fixed,
