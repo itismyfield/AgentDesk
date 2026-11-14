@@ -5,6 +5,8 @@
 #[cfg(unix)]
 pub(crate) mod busy;
 mod first_input;
+#[cfg(unix)]
+pub(crate) mod restart_intent;
 #[cfg(test)]
 mod restart_resume_tests;
 
@@ -190,14 +192,20 @@ fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
 }
 
 fn launch_of(turn: &CodexHerdrTurn<'_>, provider_root: Option<&Path>) -> HerdrLaunch {
+    // Only a new execution of a restart's greeting resumes; a selector alone never does.
+    #[cfg(unix)]
+    let resume = provider_root.and_then(|_| restart_intent::resume_of(turn));
+    #[cfg(not(unix))]
+    let resume: Option<(String, _)> = None;
+    let (native, resume_start) = resume.unzip();
     HerdrLaunch {
         endpoint: Some(turn.endpoint.clone()),
         owner: turn.owner.clone(),
         channel_id: Some(turn.channel_id),
-        expected_native_session_id: None,
-        resume: false,
+        expected_native_session_id: native,
+        resume: resume_start.is_some(),
         provider_root: provider_root.map(|home| home.join("sessions")),
-        resume_start: None,
+        resume_start,
     }
 }
 

@@ -1112,8 +1112,15 @@ pub(super) fn execute_owned(
             Registration::read_as(mailbox, kind, at, front, (observer, read))
         }
     };
+    // Only the greeting of an explicit restart carries its operation to a Codex launch.
+    let restart = (origin == InputOrigin::RestartSeed)
+        .then(|| claim.front().0.clone())
+        .flatten();
+    let as_restart = crate::services::codex::herdr_turn::restart_intent::scope;
     match registered {
-        Ok(owner) => execute_front(turn, sender, claim, owner, settled),
+        Ok(owner) => as_restart(restart, || {
+            execute_front(turn, sender, claim, owner, settled)
+        }),
         Err(error) => {
             let _ = settled.send(Err(error.clone()));
             Err(error)
