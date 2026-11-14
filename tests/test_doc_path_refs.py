@@ -106,6 +106,18 @@ class LinkTest(RepoCase):
         found = self.findings("[gone](../docs/docs/guide.md)\n")
         self.assertIn("link target missing", found[0])
 
+    def test_statechart_fragment_links_resolve_from_rendered_readme(self) -> None:
+        self.write("docs/statecharts/area/report.md", "# Report\n")
+        body = "key: entry\n| Area | sha | rules | [report](area/report.md) |\n"
+        self.assertEqual(self.findings(body, "docs/statecharts/index.d/entry.md"), [])
+
+    def test_fragment_directory_shadow_does_not_hide_missing_readme_link(self) -> None:
+        self.write("docs/statecharts/index.d/area/report.md", "# Wrong base\n")
+        body = "key: entry\n| Area | sha | rules | [report](area/report.md) |\n"
+        found = self.findings(body, "docs/statecharts/index.d/entry.md")
+        self.assertEqual(len(found), 1)
+        self.assertIn("index.d/entry.md:2: area/report.md -> link target missing", found[0])
+
 
 class MarkerTest(RepoCase):
     def test_inline_markers_accept_absent_paths(self) -> None:

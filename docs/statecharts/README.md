@@ -55,6 +55,7 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 
 ## Index
 
+<!-- STATECHART INDEX:BEGIN -->
 | Area | Code SHA | Rules that break | Disposition |
 |---|---|---|---|
 | `e2e-run-lease` (#8120 L0 · #8124 FD) | `79bebdd4eaa29b289bf88412825baa7d70a6ac77` | TTL/non-atomic acquire, parent unlock, missing/duplicate/leaked FD and uncertain-send mutants retain their complete safety/liveness violation sets | 23 cfg registered in common TLC CI; 4 GREEN + 19 expected RED. Bounded model and temporary OS replay only; production lease unchanged. [report](e2e-run-lease/lease.report.md) |
@@ -117,6 +118,7 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 | `campaign-execution` verification run (#7438 E3-1 design) | `975200a8e7` | calling the landed methods as they are: a V with cancelled phases never closes, a refused start cancels a phase its holder may still run, a gate-made start cannot be recorded after the fence acknowledgement, a finish-stage stop waits on a dead check or an interrupted task, a start lost in a crash has no end, a launch receipt that arrives after a finish-stage stop leaves its attempt without finish authority | design model only, execution is dormant; the base config holds every rule with the proposed command rules, four mutant configs guard them, and the session assumption of a finish-stage stop is a separate spec; see [report](campaign-execution/verification.report.md) |
 | `campaign-execution` command receipt (#7353 S4-17 design) | `0051e898e4e43012c232c244a521c5a280765fb8` | EarlyFacts: facts observed before lock; SplitWrite: state escapes receipt commit, rollback leaks and retry duplicates | Current/prepare-apply boundary GREEN for two same-input callers, rollback and restart; changed effects and durable rejected/no-op/notfound receipts are distinct. Kernel rules remain in the existing configs. See [report](campaign-execution/receipt.report.md) and [entrypoints](campaign-execution/receipt-entrypoints.md). |
 | `tui-o-writer` writer adoption (#7651 stage 1) | `13f9acdd9a` + plan r2.1 | main: Legacy posts a Deferred TUI turn; with no runtime root or an execution view without a store the gate answers owned and the row and dispatch settle with nothing posted; gate-only: a warm channel never commits, or commits at end of file past the held turn | Stage1 passes; six configs each drop one stage-1 guard; see [report](tui-o-writer/writer-adoption.report.md) |
+<!-- STATECHART INDEX:END -->
 
 The #8055 implementation code snapshot is `7f7e47d0b397d97527e5fefd92e48ac03fdfb9a4`; the index Code SHA records the frozen Current baseline. The #8055 `InputPathBootDesign` and `InputPathBootDesignTwo` GREEN configurations exceed the tool's 500-state chart budget, so they have complete reports but no generated chart. Their absence is not a skipped check; the [Writer design chart](tui-o-writer/i8055-writer-design.chart.mmd) shows the shared custody/ready flow. The scoped models leave normal V1 local execution unchanged and outside their proof.
 
