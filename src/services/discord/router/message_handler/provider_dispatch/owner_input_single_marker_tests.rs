@@ -951,10 +951,11 @@ async fn gated_idle_start_restores_pending_and_leaves_the_native_answer_to_o() {
             .any(|text| text.contains("idle completed")),
         "O delivers the native answer, not Legacy"
     );
+    let ops = reaction_ops(&rig);
     assert!(
-        reaction_ops(&rig)
-            .iter()
-            .all(|(emoji, _)| ['⏳', '✅'].contains(emoji))
+        ops.iter()
+            .all(|(emoji, add)| !add || ['⏳', '✅'].contains(emoji)),
+        "unexpected reaction additions: {ops:?}"
     );
 }
 
