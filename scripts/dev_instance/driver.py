@@ -85,7 +85,7 @@ def run(base, instance_id, provider, timeout, *, identity_request=None, rest_fac
                                           and marker in (row.get('content') or '')])
                         return summary
                 except assertions.AssertionError:pass
-                time.sleep(min(.1,max(0,deadline-time.monotonic())))
+                time.sleep(min(1.0,max(0,deadline-time.monotonic())))
     except (InstanceError,OSError,ValueError,TypeError,KeyError):
         summary.update(status='UNEVALUABLE(observation)',transmissions=None)
     # No DELETE/archive: public threads auto-archive without broader bot permissions.
