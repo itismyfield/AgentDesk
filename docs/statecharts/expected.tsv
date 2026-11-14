@@ -514,3 +514,7 @@ input-single-path/NativeAttributionBootOldGenerationFixed.cfg	NativeInputAttribu
 input-single-path/NativeAttributionBootQueueBefore.cfg	NativeInputAttribution	-	NativeBootEventuallyDone
 input-single-path/NativeAttributionBootQueueFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionBootPendingFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionCustodyReceiptBefore.cfg	NativeInputAttribution	-	NativeBootEventuallyDone
+input-single-path/NativeAttributionCustodyReceiptFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionCustodySourceBefore.cfg	NativeInputAttribution	-	NativeBootEventuallyDone
+input-single-path/NativeAttributionCustodySourceFixed.cfg	NativeInputAttribution	-	-

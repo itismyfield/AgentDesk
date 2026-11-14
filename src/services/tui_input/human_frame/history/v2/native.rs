@@ -125,6 +125,7 @@ struct BootRecord<'a> {
     namespace: &'a str,
     settlement: &'a Settlement,
     registration: &'a Registration,
+    entry: Option<&'a Entry>,
 }
 
 #[cfg(unix)]
@@ -133,6 +134,8 @@ pub(crate) struct RestoredRecord {
     pub(crate) namespace: String,
     pub(crate) settlement: Settlement,
     registration: Registration,
+    #[serde(default)]
+    entry: Option<Entry>,
 }
 
 #[cfg(unix)]
@@ -146,6 +149,19 @@ impl RestoredRecord {
             || (record.settlement.cleanup_complete && record.settlement.outcome.is_none())
         {
             return Err("native custody registration mismatch".into());
+        }
+        if let Some(entry) = &record.entry {
+            let source = record
+                .registration
+                .source
+                .as_ref()
+                .ok_or("native receipt source absent")?;
+            let expected = record
+                .registration
+                .frame
+                .bind(&record.registration.key, source);
+            same_entry(&expected, entry)?;
+            merge_entry(None, Some(entry))?;
         }
         Ok(record)
     }
@@ -165,35 +181,36 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
     let mut registrations = snapshot
         .live
         .iter()
-        .map(|bound| &bound.registration)
-        .chain(snapshot.planned.iter())
+        .map(|bound| (&bound.registration, Some(&bound.entry)))
+        .chain(snapshot.planned.iter().map(|r| (r, None)))
         .chain(
             snapshot
                 .passive
                 .iter()
-                .filter_map(|passive| passive.registration.as_ref()),
+                .filter_map(|p| p.registration.as_ref().map(|r| (r, p.entry.as_ref()))),
         );
     if snapshot.version == 2 {
-        return match registrations.any(|r| r.native_settlement.is_some()) {
+        return match registrations.any(|(r, _)| r.native_settlement.is_some()) {
             true => Err("native frame history requires a v3 envelope".into()),
             false => Ok(vec![]),
         };
     }
     registrations
-        .filter(|r| r.key["attempt"]["provider"] == provider)
-        .filter_map(|registration| {
+        .filter(|(r, _)| r.key["attempt"]["provider"] == provider)
+        .filter_map(|(registration, entry)| {
             registration
                 .native_settlement
                 .as_ref()
                 .filter(|s| !s.cleanup_complete)
-                .map(|s| (registration, s))
+                .map(|s| (registration, s, entry))
         })
-        .map(|(registration, settlement)| {
+        .map(|(registration, settlement, entry)| {
             settlement.validate(registration)?;
             serde_json::to_value(BootRecord {
                 namespace: &registration.namespace,
                 settlement,
                 registration,
+                entry,
             })
             .map_err(|error| error.to_string())
         })
@@ -251,7 +268,7 @@ impl Registry {
         ticket: &Ticket,
     ) -> Result<RestoredRecord, String> {
         self.inspect(|snapshot| {
-            let (registration, _) = snapshot
+            let (registration, entry) = snapshot
                 .locate(namespace, &ticket.key)
                 .ok_or("native registration missing")?;
             let settlement = registration
@@ -266,6 +283,7 @@ impl Registry {
                 namespace: namespace.into(),
                 settlement,
                 registration: registration.clone(),
+                entry: entry.cloned(),
             })
         })
     }
@@ -279,8 +297,24 @@ impl Registry {
             let mut adopted = Vec::new();
             for record in records {
                 let mut incoming = record.registration.clone();
-                if let Some((current, _)) = snapshot.locate(&record.namespace, &incoming.key) {
-                    let mut a = serde_json::to_value(current).map_err(|e| e.to_string())?;
+                let mut receipts = record.entry.clone();
+                let original = snapshot.locate(&record.namespace, &incoming.key);
+                incoming.source = merge_source(
+                    &incoming.key,
+                    original.and_then(|(r, _)| r.source.as_ref()),
+                    incoming.source.as_ref(),
+                )?;
+                incoming
+                    .native_settlement
+                    .as_mut()
+                    .ok_or("native ticket missing")?
+                    .ticket
+                    .source = incoming.source.clone();
+                if let Some((current, entry)) = original {
+                    receipts = merge_entry(entry, receipts.as_ref())?;
+                    let mut normalized = current.clone();
+                    normalized.source = incoming.source.clone();
+                    let mut a = serde_json::to_value(&normalized).map_err(|e| e.to_string())?;
                     let mut b = serde_json::to_value(&incoming).map_err(|e| e.to_string())?;
                     // Accept only the display compaction already performed by Passive::compact.
                     let display = ["author", "body_hash", "header", "screen_prefix"];
@@ -310,7 +344,13 @@ impl Registry {
                         .native_settlement
                         .clone()
                         .ok_or("native ticket missing")?;
-                    if settled.ticket != record.settlement.ticket
+                    settled.ticket.source = incoming.source.clone();
+                    if settled.ticket
+                        != incoming
+                            .native_settlement
+                            .as_ref()
+                            .ok_or("native ticket missing")?
+                            .ticket
                         || settled
                             .outcome
                             .as_ref()
@@ -335,34 +375,74 @@ impl Registry {
                         }
                         settled.extra.insert(key.clone(), value.clone());
                     }
-                    incoming = current.clone();
-                    incoming.native_settlement = Some(settled);
+                    normalized.native_settlement = Some(settled);
+                    incoming = normalized;
                 }
                 let key = &incoming.key;
+                if let Some(entry) = &receipts {
+                    same_entry(
+                        &incoming.frame.bind(
+                            key,
+                            incoming
+                                .source
+                                .as_ref()
+                                .ok_or("native receipt source absent")?,
+                        ),
+                        entry,
+                    )?;
+                    for (owner, other) in snapshot.entries() {
+                        if owner.is_some_and(|r| r.namespace == record.namespace && r.key == *key) {
+                            continue;
+                        }
+                        if other.path == entry.path
+                            && other.file == entry.file
+                            && entry
+                                .events
+                                .iter()
+                                .any(|event| other.events.iter().any(|old| old.key == event.key))
+                        {
+                            return Err("native receipt belongs to another registration".into());
+                        }
+                    }
+                }
                 let recovered_entry = || {
-                    incoming
-                        .source
-                        .as_ref()
-                        .map(|source| incoming.frame.bind(key, source))
+                    receipts.clone().or_else(|| {
+                        incoming
+                            .source
+                            .as_ref()
+                            .map(|source| incoming.frame.bind(key, source))
+                    })
                 };
                 if let Some(bound) = snapshot.live.iter_mut().find(|b| {
                     b.registration.namespace == record.namespace && b.registration.key == *key
                 }) {
                     bound.registration = incoming.clone();
+                    if let Some(entry) = recovered_entry() {
+                        bound.entry = entry;
+                    }
                 } else if let Some(planned) = snapshot
                     .planned
                     .iter_mut()
                     .find(|r| r.namespace == record.namespace && r.key == *key)
                 {
                     *planned = incoming.clone();
+                    if incoming.source.is_some() {
+                        snapshot
+                            .planned
+                            .retain(|r| !(r.namespace == record.namespace && r.key == *key));
+                        snapshot.passive.push(Passive {
+                            registration: Some(incoming.clone()),
+                            entry: recovered_entry(),
+                            state: "retained".into(),
+                            encoded: None,
+                        });
+                    }
                 } else if let Some(passive) = snapshot.passive.iter_mut().find(|p| {
                     p.registration
                         .as_ref()
                         .is_some_and(|r| r.namespace == record.namespace && r.key == *key)
                 }) {
-                    if passive.entry.is_none() {
-                        passive.entry = recovered_entry();
-                    }
+                    passive.entry = recovered_entry();
                     passive.registration = Some(incoming.clone());
                     passive.encoded = None;
                 } else {
@@ -388,6 +468,9 @@ impl Registry {
                         .native_settlement
                         .clone()
                         .ok_or("native ticket missing")?,
+                    entry: snapshot
+                        .locate(&record.namespace, key)
+                        .and_then(|(_, entry)| entry.cloned()),
                     registration: incoming,
                 });
             }
@@ -748,4 +831,112 @@ pub(crate) fn scoped_ticket() -> Result<(Registry, String, Ticket), String> {
         .registry
         .native_ticket(&context.namespace, &context.key)?;
     Ok((context.registry, context.namespace, ticket))
+}
+
+#[cfg(unix)]
+fn merge_source(
+    key: &Value,
+    a: Option<&Source>,
+    b: Option<&Source>,
+) -> Result<Option<Source>, String> {
+    if a.zip(b).is_some_and(|(a, b)| a != b) {
+        return Err("native bound source conflicts".into());
+    }
+    let Some(source) = a.or(b) else {
+        return Ok(None);
+    };
+    let expected = &key["attempt"]["source"];
+    let valid = match expected["kind"].as_str() {
+        Some("existing") => {
+            expected["session_id"] == source.session_id
+                && expected["transcript"] == json!(source.transcript)
+                && expected["file"] == json!(source.file)
+                && expected["offset"] == source.offset
+        }
+        Some("pre_source") => [
+            (&expected["expected_session_id"], json!(source.session_id)),
+            (&expected["expected_transcript"], json!(source.transcript)),
+            (
+                &expected["binding_watermark"],
+                json!(source.binding_watermark),
+            ),
+        ]
+        .iter()
+        .all(|(wanted, actual)| wanted.is_null() || *wanted == actual),
+        _ => false,
+    };
+    if !valid
+        || source.target != key["attempt"]["target"]
+        || source.provider != key["attempt"]["provider"]
+        || source.session_id.is_empty()
+        || source.file == [0, 0]
+        || source.target["execution_nonce"]
+            .as_str()
+            .is_none_or(str::is_empty)
+    {
+        return Err("native source expectation mismatch".into());
+    }
+    Ok(Some(source.clone()))
+}
+
+#[cfg(unix)]
+fn same_entry(a: &Entry, b: &Entry) -> Result<(), String> {
+    let mut a = serde_json::to_value(a).map_err(|e| e.to_string())?;
+    let mut b = serde_json::to_value(b).map_err(|e| e.to_string())?;
+    let display = ["author", "body_hash", "header", "screen_prefix"];
+    let compact = [&a, &b]
+        .iter()
+        .any(|v| display.iter().all(|k| v[*k].as_str() == Some("")));
+    for v in [&mut a, &mut b] {
+        let object = v.as_object_mut().ok_or("native receipt object missing")?;
+        object.remove("events");
+        object.remove("append");
+        if compact {
+            for key in display {
+                object.remove(key);
+            }
+        }
+    }
+    if a != b {
+        return Err("native receipt identity mismatch".into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn merge_entry(a: Option<&Entry>, b: Option<&Entry>) -> Result<Option<Entry>, String> {
+    let Some(mut entry) = a.or(b).cloned() else {
+        return Ok(None);
+    };
+    if let Some(other) = b {
+        same_entry(&entry, other)?;
+        for event in &other.events {
+            if event.kind.is_empty()
+                || !event.key.starts_with(&format!("{}:", event.kind))
+                || event.row.as_ref().is_some_and(|row| {
+                    row.is_empty() || event.key != format!("{}:{row}", event.kind)
+                })
+            {
+                return Err("native receipt event malformed".into());
+            }
+            if let Some(old) = entry.events.iter().find(|old| old.key == event.key) {
+                if serde_json::to_value(old).map_err(|e| e.to_string())?
+                    != serde_json::to_value(event).map_err(|e| e.to_string())?
+                {
+                    return Err("native receipt event conflicts".into());
+                }
+            } else {
+                entry.events.push(event.clone());
+            }
+        }
+        if entry.append.is_none() {
+            entry.append = other.append.clone();
+        } else if other.append.is_some()
+            && serde_json::to_value(&entry.append).map_err(|e| e.to_string())?
+                != serde_json::to_value(&other.append).map_err(|e| e.to_string())?
+        {
+            return Err("native receipt append conflicts".into());
+        }
+    }
+    Ok(Some(entry))
 }

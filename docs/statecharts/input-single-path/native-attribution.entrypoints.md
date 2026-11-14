@@ -843,3 +843,16 @@ PortTransferred는 durable 결과+내 lease 없음+foreign row의 조합에서 d
 | `src/services/discord/router/message_handler/provider_dispatch/owner_input/native_input.rs:121,139`, `owner_input.rs:664,677` | 기존 owner recover/drive 연결; boot admission 뒤 wake. own lease 추가 claim/전역 gate 없음 | ConsumerOwnerDrive |
 
 기존 inflight age/root helper·active reconcile·owner recover·ledger key resolver의 의미 동일 leaf 이동은 소유 이전이 아니다. 결과 1회·옛 row만 삭제·후속 head 1회 fixture는 기존 reaper와 V2 owner Drive의 실제 진입점을 쓴다. unreadable은 실제 자료가 복구되어야 진행하며 시간으로 자료를 고치거나 결과를 합성하지 않는다. native idle WARN·ticket replay·lost-wake 감시는 사용자 범위 축소로 추가하지 않는다.
+
+
+## 조각1 리뷰 P2 — receipt/source 채택 보강
+
+| 코드/모델 값의 근거 | 행동 |
+|---|---|
+| `history/v2/native.rs::BootRecord,RestoredRecord,boot_records,native_boot_record` | namespace/full registration/full ticket에 붙은 optional entry/event facts 보존; 구형 없음은 None |
+| 같은 파일 `RestoredRecord::decode,same_entry,merge_entry` | entry의 attempt nonce/frame/source identity 검증, 실제 key/UUID/kind event 집합 단조 병합·다른 owner 충돌 거절 |
+| 같은 파일 `merge_source,adopt_native_records` | source None/Some, 다른 Some/Some; target/incarnation/pre_source 기대값. 오래된 None으로 bound 사실을 지우지 않음 |
+| `NativeAttributionCustodyReceipt{Before,Fixed}.cfg` | preserved false/true에 따른 다음 동일 frame의 receipt 확인/진행; concrete events는 Rust에서 검증 |
+| `NativeAttributionCustodySource{Before,Fixed}.cfg` | 건강한 None/Some copy 재채택 충돌/단조 채택; 기존 bool/전이만 재사용 |
+
+이 보강은 lease/row/global_active 변경점을 추가하지 않는다. control의 실제 mutation cut point에 넣을 nonblocking storage commit 포트는 파일 승인 전이며, 기존 `Registry::transaction`의 blocking mutex/flock을 actor에 연결하지 않았다.

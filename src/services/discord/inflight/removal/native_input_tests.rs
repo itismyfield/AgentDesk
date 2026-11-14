@@ -194,8 +194,19 @@ async fn native_8148_boot_preparation_reaper_and_owner_drive_recover_both_crashe
             .unwrap();
         registration["native_settlement"]["proof"] = json!({"source_incarnation":"incarnation-1"});
         registration["native_settlement"]["warned"] = json!(true);
-        let expected = json!({"namespace":registration["namespace"],
+        let mut expected = json!({"namespace":registration["namespace"],
             "settlement":registration["native_settlement"],"registration":registration});
+        let mut entry = snapshot["live"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|bound| {
+                bound["registration"]["native_settlement"]["ticket"]["channel_id"] == channel
+            })
+            .unwrap()
+            .clone();
+        entry.as_object_mut().unwrap().remove("registration");
+        expected["entry"] = entry;
         fs::write(root.join("injected_frames.json"), snapshot.to_string()).unwrap();
         let mut old = row(channel, None);
         old.born_generation = 1;
@@ -863,4 +874,96 @@ async fn native_8148_boot_terminal_custody_failure_keeps_admission_pending_until
             .await
     );
     next_head(shared.mailbox(ChannelId::new(81489967)), 81489967, &root).await;
+}
+
+#[tokio::test]
+async fn native_8148_p2_custody_restores_receipts_before_the_next_identical_input() {
+    use crate::services::discord::turn_finalizer::native_prepare::BootInputs;
+    let env = Env::new();
+    let root = env.dir().parent().unwrap().to_path_buf();
+    let (f, outcome, _, _) = boot_saved(&env, 81489971, false);
+    assert!(
+        f.history
+            .ack_native_cleanup("native-fixture", &f.ticket, &outcome)
+            .unwrap()
+    );
+    let record = f
+        .history
+        .native_boot_record("native-fixture", &f.ticket)
+        .unwrap();
+    super::super::persist_native_boot_record(&root, &record).unwrap();
+    fs::remove_file(root.join("injected_frames.json")).unwrap();
+    let plan = BootInputs::prepare(&root, 2).unwrap();
+    reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
+    plan.restore(&boot_shared(None)).await.unwrap();
+    let source = f.ticket.source.as_ref().unwrap();
+    let next_offset = fs::metadata(&source.transcript).unwrap().len();
+    let mut next = f.input.clone();
+    next["identity"]["primary"] = json!(81489973u64);
+    next["identity"]["sources"][0]["message_id"] = json!(81489973u64);
+    next["attempt"]["nonce"] = json!("same-frame-next");
+    next["attempt"]["source"]["offset"] = json!(next_offset);
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&source.transcript)
+        .unwrap();
+    std::io::Write::write_all(&mut file, b"{\"type\":\"user\",\"uuid\":\"next-user\"}\n").unwrap();
+    f.history.prepare("native-fixture", &next).unwrap();
+    let key = json!({"identity":next["identity"],"attempt":next["attempt"]});
+    assert_eq!(
+        f.history.receipt(
+            "native-fixture",
+            &key,
+            (
+                &source.transcript,
+                next_offset,
+                "user",
+                Some("next-user"),
+                "한국어 원본 입력"
+            )
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        f.history.receipt(
+            "native-fixture",
+            &f.ticket.key,
+            (
+                &source.transcript,
+                0,
+                "user",
+                Some("own-81489971"),
+                "한국어 원본 입력"
+            )
+        ),
+        Some(true)
+    );
+    let twin_offset = fs::metadata(&source.transcript).unwrap().len();
+    std::io::Write::write_all(&mut file, b"{}\n").unwrap();
+    let mut twins = Vec::new();
+    for n in 0..2u64 {
+        let mut input = next.clone();
+        input["identity"]["primary"] = json!(81489980 + n);
+        input["identity"]["sources"][0]["message_id"] = json!(81489980 + n);
+        input["attempt"]["nonce"] = json!(format!("unresolved-twin-{n}"));
+        input["attempt"]["source"]["offset"] = json!(twin_offset);
+        f.history.prepare("native-fixture", &input).unwrap();
+        twins.push(json!({"identity":input["identity"],"attempt":input["attempt"]}));
+    }
+    for key in twins {
+        assert_eq!(
+            f.history.receipt(
+                "native-fixture",
+                &key,
+                (
+                    &source.transcript,
+                    twin_offset,
+                    "user",
+                    Some("unknown-twin"),
+                    "한국어 원본 입력"
+                )
+            ),
+            None
+        );
+    }
 }

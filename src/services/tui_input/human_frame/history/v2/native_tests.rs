@@ -366,3 +366,227 @@ fn native_8148_boot_stale_custody_cannot_roll_back_a_durable_result_or_ack() {
     assert!(f.history.adopt_native_records(&[conflict]).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
+
+#[test]
+fn native_8148_p2_cold_source_adoption_is_monotonic_in_both_orders() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::at(
+        runtime.path().join("runtime/source-template.json"),
+        81489991,
+        true,
+    );
+    let source = f.ticket.source.clone().unwrap();
+    let mut input = f.input.clone();
+    input["attempt"]["source"] = json!({"kind":"pre_source", "expected_session_id":"native",
+        "expected_transcript":source.transcript,"binding_watermark":null});
+    let key = json!({"identity":input["identity"],"attempt":input["attempt"]});
+    let path = runtime.path().join("runtime/cold.json");
+    let history = Registry::at(path.clone());
+    history.prepare("native-fixture", &input).unwrap();
+    let mut ticket = f.ticket.clone();
+    ticket.key = key.clone();
+    ticket.source = None;
+    history.prepare_native("native-fixture", &ticket).unwrap();
+    let old = super::native::RestoredRecord::decode(
+        super::native::boot_records(&path, "claude")
+            .unwrap()
+            .remove(0),
+    )
+    .unwrap();
+    history.bind("native-fixture", &key, &source).unwrap();
+    ticket.source = Some(source.clone());
+    history
+        .note_native_any_key("native-fixture", &ticket)
+        .unwrap();
+    let outcome = Fixture::outcome(Disposition::TransferredUnverified);
+    history
+        .record_native_outcome("native-fixture", &ticket, &outcome)
+        .unwrap();
+    history
+        .ack_native_cleanup("native-fixture", &ticket, &outcome)
+        .unwrap();
+    let bound = history
+        .native_boot_record("native-fixture", &ticket)
+        .unwrap();
+    let seeded = std::fs::read(&path).unwrap();
+    for canonical in [false, true] {
+        for reverse in [false, true] {
+            if canonical {
+                std::fs::write(&path, &seeded).unwrap();
+            } else if path.exists() {
+                std::fs::remove_file(&path).unwrap();
+            }
+            let records = if reverse {
+                [bound.clone(), old.clone()]
+            } else {
+                [old.clone(), bound.clone()]
+            };
+            history.adopt_native_records(&records).unwrap();
+            let actual = history
+                .native_settlement("native-fixture", &ticket)
+                .unwrap();
+            assert_eq!(actual.ticket.source, Some(source.clone()));
+            assert_eq!(actual.outcome, Some(outcome.clone()));
+            assert!(actual.cleanup_complete);
+        }
+    }
+    let foreign_path = runtime.path().join("runtime/foreign-cold.json");
+    let mut foreign = serde_json::to_value(&bound).unwrap();
+    foreign["registration"]["source"]["session_id"] = json!("foreign");
+    foreign["settlement"]["ticket"]["source"]["session_id"] = json!("foreign");
+    foreign["registration"]["native_settlement"] = foreign["settlement"].clone();
+    let foreign = super::native::RestoredRecord::decode(foreign).unwrap();
+    assert!(
+        Registry::at(foreign_path.clone())
+            .adopt_native_records(&[foreign])
+            .is_err()
+    );
+    assert!(!foreign_path.exists());
+    for mutation in ["source", "watermark", "target", "frame", "episode"] {
+        let before = std::fs::read(&path).unwrap();
+        let mut bad = serde_json::to_value(&bound).unwrap();
+        match mutation {
+            "source" => {
+                for prefix in ["registration", "settlement"] {
+                    let at = if prefix == "registration" {
+                        &mut bad[prefix]["source"]
+                    } else {
+                        &mut bad[prefix]["ticket"]["source"]
+                    };
+                    at["session_id"] = json!("foreign");
+                }
+            }
+            "watermark" => {
+                bad["registration"]["source"]["binding_watermark"] = json!("foreign");
+                bad["settlement"]["ticket"]["source"]["binding_watermark"] = json!("foreign");
+            }
+            "target" => {
+                bad["registration"]["source"]["target"]["execution_nonce"] = json!("other");
+                bad["settlement"]["ticket"]["source"]["target"]["execution_nonce"] = json!("other");
+            }
+            "frame" => bad["registration"]["frame"]["class_hash"] = json!("foreign"),
+            _ => {
+                bad["settlement"]["ticket"]["owning_episode"]["turn_nonce"] = json!("foreign");
+            }
+        }
+        bad["registration"]["native_settlement"] = bad["settlement"].clone();
+        let result = super::native::RestoredRecord::decode(bad)
+            .and_then(|record| history.adopt_native_records(&[record]).map(drop));
+        assert!(result.is_err(), "{mutation}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn native_8148_p2_receipt_adoption_keeps_facts_and_rejects_foreign_owners() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let path = runtime.path().join("runtime/receipt-custody.json");
+    let f = Fixture::at(path.clone(), 81489995, true);
+    let source = f.ticket.source.as_ref().unwrap();
+    for row in ["receipt-a", "receipt-b"] {
+        assert_eq!(
+            f.history.receipt(
+                "native-fixture",
+                &f.ticket.key,
+                (&source.transcript, 0, "user", Some(row), "한국어 원본 입력")
+            ),
+            Some(true)
+        );
+        if row == "receipt-a" {
+            let raw = super::native::boot_records(&path, "claude")
+                .unwrap()
+                .remove(0);
+            assert_eq!(raw["entry"]["events"][0]["row"], "receipt-a");
+            std::fs::write(path.with_extension("old"), raw.to_string()).unwrap();
+        }
+    }
+    let old: Value =
+        serde_json::from_slice(&std::fs::read(path.with_extension("old")).unwrap()).unwrap();
+    let latest = serde_json::to_value(
+        f.history
+            .native_boot_record("native-fixture", &f.ticket)
+            .unwrap(),
+    )
+    .unwrap();
+    for reverse in [false, true] {
+        std::fs::remove_file(&path).unwrap();
+        let records = if reverse {
+            [&latest, &old]
+        } else {
+            [&old, &latest]
+        };
+        let records = records
+            .into_iter()
+            .map(|v| super::native::RestoredRecord::decode(v.clone()).unwrap())
+            .collect::<Vec<_>>();
+        f.history.adopt_native_records(&records).unwrap();
+        let registration = f.history.native_evidence_registrations().unwrap().remove(0);
+        assert_eq!(
+            registration
+                .receipts
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["receipt-a".to_owned(), "receipt-b".to_owned()]
+                .into_iter()
+                .collect()
+        );
+    }
+    let mut legacy = latest.clone();
+    legacy.as_object_mut().unwrap().remove("entry");
+    f.history
+        .adopt_native_records(&[super::native::RestoredRecord::decode(legacy.clone()).unwrap()])
+        .unwrap();
+    assert_eq!(
+        f.history.native_evidence_registrations().unwrap()[0]
+            .receipts
+            .len(),
+        2
+    );
+    let missing = Registry::at(runtime.path().join("runtime/old-custody.json"));
+    missing
+        .adopt_native_records(&[super::native::RestoredRecord::decode(legacy).unwrap()])
+        .unwrap();
+    assert!(
+        missing.native_evidence_registrations().unwrap()[0]
+            .receipts
+            .is_empty()
+    );
+    for field in ["id", "path", "file", "hash", "event"] {
+        let before = std::fs::read(&path).unwrap();
+        let mut bad = latest.clone();
+        match field {
+            "file" => bad["entry"][field] = json!([1, 2]),
+            "event" => bad["entry"]["events"][0]["key"] = json!("user:forged"),
+            _ => bad["entry"][field] = json!("foreign"),
+        }
+        let result = super::native::RestoredRecord::decode(bad)
+            .and_then(|r| f.history.adopt_native_records(&[r]).map(drop));
+        assert!(result.is_err(), "{field}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+    let mut input = f.input.clone();
+    input["identity"]["primary"] = json!(81489999u64);
+    input["identity"]["sources"][0]["message_id"] = json!(81489999u64);
+    input["attempt"]["nonce"] = json!("different-receipt-owner");
+    f.history.prepare("native-fixture", &input).unwrap();
+    let key = json!({"identity":input["identity"],"attempt":input["attempt"]});
+    let mut ticket = f.ticket.clone();
+    ticket.key = key;
+    ticket.owning_episode.as_mut().unwrap().user_message_id = 81489999;
+    ticket.owning_episode.as_mut().unwrap().turn_nonce = "different-receipt-episode".into();
+    f.history.prepare_native("native-fixture", &ticket).unwrap();
+    let mut other = serde_json::to_value(
+        f.history
+            .native_boot_record("native-fixture", &ticket)
+            .unwrap(),
+    )
+    .unwrap();
+    other["entry"]["events"] = latest["entry"]["events"].clone();
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        f.history
+            .adopt_native_records(&[super::native::RestoredRecord::decode(other).unwrap()])
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

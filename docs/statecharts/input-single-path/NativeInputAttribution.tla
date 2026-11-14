@@ -11,7 +11,7 @@ vars == <<pc, native, members, nativeQueue, stage, lease, rows, pending,
           result, count, proof, closed, ran, injected, wake, booted,
           generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
 
-ConsumerModes == {"BootSavedBefore", "BootSavedFixed", "BootCustodyBefore", "BootCustodyFixed", "BootCorruptBefore", "BootCorruptFixed", "BootOldGenerationBefore", "BootOldGenerationFixed", "BootQueueBefore", "BootQueueFixed", "BootPendingFixed"}
+ConsumerModes == {"CustodyReceiptBefore", "CustodyReceiptFixed", "CustodySourceBefore", "CustodySourceFixed", "BootSavedBefore", "BootSavedFixed", "BootCustodyBefore", "BootCustodyFixed", "BootCorruptBefore", "BootCorruptFixed", "BootOldGenerationBefore", "BootOldGenerationFixed", "BootQueueBefore", "BootQueueFixed", "BootPendingFixed"}
 ReviewModes == ConsumerModes \cup {"FollowerBefore", "FollowerFixed", "BootBefore", "BootFixed",
                 "BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
                 "PreflightBefore", "PreflightFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable"}
@@ -348,14 +348,15 @@ NativePortEventuallyDone == <>(review.phase = "Done" /\ review.neutral)
 ConsumerStable == <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
 ConsumerAdopt == /\ review.phase = "Prepare"
                  /\ review' = [review EXCEPT !.phase = "Prepared", !.prepared = TRUE,
-                      !.preserved = ~review.failed]
+                      !.preserved = (~review.failed /\ Mode \notin {"CustodyReceiptBefore", "CustodySourceBefore"}),
+                      !.failed = (review.failed \/ Mode = "CustodySourceBefore")]
                  /\ known' = (IF Mode = "BootCustodyBefore" THEN known ELSE TRUE)
                  /\ UNCHANGED ConsumerStable
 ConsumerRepair == /\ review.phase = "Prepared" /\ review.failed
                   /\ review' = [review EXCEPT !.phase = "Prepare", !.prepared = FALSE, !.failed = FALSE]
                   /\ UNCHANGED <<ConsumerStable, known>>
 ConsumerReap == /\ review.phase = "Prepared"
-                /\ (review.preserved \/ Mode = "BootCorruptBefore")
+                /\ (review.preserved \/ Mode \in {"BootCorruptBefore", "CustodyReceiptBefore"})
                 /\ review' = [review EXCEPT !.phase = "Reaped", !.row = FALSE]
                 /\ UNCHANGED <<ConsumerStable, known>>
 ConsumerSettle == /\ review.phase = "Reaped" /\ known /\ ~review.failed
@@ -364,6 +365,7 @@ ConsumerSettle == /\ review.phase = "Reaped" /\ known /\ ~review.failed
                   /\ review' = [review EXCEPT !.phase = "Consumed", !.nativeAck = TRUE]
                   /\ UNCHANGED <<ConsumerStable, known>>
 ConsumerOwnerDrive == /\ review.phase \in {"Reaped", "Consumed"} /\ review.nativeAck /\ ~review.row
+                     /\ (Mode \notin {"CustodyReceiptBefore", "CustodyReceiptFixed"} \/ review.preserved)
                      /\ Mode # "BootQueueBefore"
                      /\ review' = [review EXCEPT !.phase = "Done", !.head = TRUE]
                      /\ UNCHANGED <<ConsumerStable, known>>
