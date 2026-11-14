@@ -794,3 +794,21 @@ Start의 기존 production wake 호출은 `turn_finalizer.rs::actor_loop`에서 
 | `src/services/tui_input/human_frame/history/v2/native.rs:291,502` `record_native_outcome_at_stamp/native_transaction_checked` | Settle 결과 publish 전에 동일 history transaction 안에서 fingerprint를 비교하고 Executed membership row의 receipt를 확인한다. 기존 같은 ticket/outcome의 cleanup 재시도는 멱등이다. |
 
 추가 reader·증거·actor-result 포트는 `cfg(all(test,unix))`다. 기존 schema reader/prepare/bind/project는 production에 남고 새 production native producer/actor/lease/row/kick 진입점은 없다. AnyKey 실제 source의 읽기 포트(`claude_tui/owner_input.rs`)가 설계 목록 밖이므로 FILES 경계에서 producer/custody/witness/bridge 연결을 시작하지 않았다.
+
+
+## B2b-2 ① 연결 포트 (기준 458610721)
+
+기본 운영 선택은 `native_prepare::enabled=false`다. 아래 production 선언/연결을 추가했으나 ticket 발행과 bridge 전이는 켜지 않는다. native 결과 producer/boot/인접 종료는 후속 경계다. 위 B2b-1 표의 runtime nonce ABA 잔여는 잠금 안 검증 leaf로 보강했고, 정리 actor 자체의 production 활성화는 여전히 없다.
+
+| file:line / 진입점 | 모델 행동 / 유한 값 근거 |
+|---|---|
+| `src/services/claude_tui/owner_input.rs:52` `key_attempted` | AnyKey/NotSent. 기존 scoped `keyed` AtomicBool의 None/false/true를 읽는다. setter와 저장 위치는 기존 것뿐이다. |
+| `src/services/discord/router/message_handler/provider_dispatch/owner_input/native_input.rs:40,64,88` `wrap/for_front/submit` | Prepare/Inject. 명시 primary Episode 또는 follower None을 기존 pump에 운반하고 등록 ack 전 leaf를 금지한다. |
+| `src/services/discord/turn_finalizer/native_prepare.rs:19,108` `Handle::prepare/handle` | PortRegister. actor-local prepared HashMap의 없음/있음, 기존 ledger Pending/Finalized, oneshot 등록 ack의 실패/성공이 review.prepared의 값 근거다. |
+| `native_prepare.rs:53,155` `Handle::witness/NativeKeyed` | AnyKey/NotSent. 키 true만 history receipt를 기록, false는 actor-local 준비만 제거한다. 원본 결과 None을 바꾸지 않는다. |
+| `src/services/discord/turn_finalizer/completion_admission.rs:13,74` `native_input/claimable` | NativePortBarrier. None/Some(false)/Some(true)는 기존 배송 관문과 분리된 입력 준비/정리 상태다. PortRow의 nativeAck bool은 cleanup_complete와 admission의 완료 확정 추상화이며 새 durable flag가 아니다. |
+| `src/services/discord/inflight/clear_store/snapshot.rs:14,131` `for_native_snapshot_with_detail/clear_snapshot_checked` | DebtRow/ProjectionClear. 기존 파일 잠금 아래 nonempty hosted execution nonce의 일치/불일치를 검사한다. row None/own/foreign 값은 기존 inflight snapshot에서만 가져온다. native wrapper는 test-only다. |
+| `src/services/discord/turn_bridge/native_input.rs:19,50,64` `state/reject_legacy_body/neutral_exit` | PortNeutral. exact episode와 보관된 같은 actor Arc에 한해 Legacy/Pending/Settled를 반환한다. review.neutral bool은 중립 stream exit의 실행 여부다. actor 주소는 Arc가 살아 있는 동안의 query 비교에만 사용하며 정리 권한으로 저장하지 않는다. |
+| `src/services/discord/turn_finalizer/terminal_handler.rs:68` `handle_terminal` | NativePortBarrier. 등록된 primary의 legacy Complete/GateTimeout은 Deferred이며 result/cancel로 위조하지 않는다. |
+
+PortTransferred는 durable 결과+내 lease 없음+foreign row의 조합에서 debt만 닫는 ② 목표다. 모델은 안전성/진행성 목표를 비교하지만 이 조각의 production drive는 해당 종결을 구현하지 않는다. WARN/새 observer/새 ticket replay/lost wake는 사용자 11-14 범위 축소이며 과거 cfg를 운영 수용 증거로 세지 않는다.
