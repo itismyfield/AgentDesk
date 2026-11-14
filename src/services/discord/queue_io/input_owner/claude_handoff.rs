@@ -498,6 +498,7 @@ pub(crate) fn bound_herdr(
 #[cfg(test)]
 pub(crate) mod tests {
     mod actual_close_tests;
+    mod custody_tests;
     mod left_herdr_tests;
     use super::*;
     use crate::db::dispatched_sessions::hosted_execution::{
@@ -547,27 +548,50 @@ pub(crate) mod tests {
         REFUSED.lock().unwrap().insert(channel);
         Refusing(channel)
     }
+    /// A mapped channel's rowless Herdr host: the session key it names and whether its close fails.
+    static ROWLESS: LazyLock<Mutex<std::collections::HashMap<u64, (String, bool)>>> =
+        LazyLock::new(Default::default);
+    struct Rowless(u64);
+    impl Drop for Rowless {
+        fn drop(&mut self) {
+            ROWLESS.lock().unwrap().remove(&self.0);
+        }
+    }
+    /// The channel's host takes Herdr turns under `key` with no row; its old pane's close succeeds
+    /// unless `close_fails`.
+    fn herdr_host(channel: u64, key: &str, close_fails: bool) -> impl Drop {
+        let host = (key.to_string(), close_fails);
+        ROWLESS.lock().unwrap().insert(channel, host);
+        Rowless(channel)
+    }
+    fn plan(row: Option<HostedObservation>) -> TurnHost {
+        TurnHost::Herdr(Box::new(HerdrTurnPlan {
+            endpoint: HerdrLaunchEndpoint {
+                execution_node: "test-node".into(),
+                config_key: "test".into(),
+                socket_addr: "/not-used".into(),
+                herdr_session: "not-used".into(),
+            },
+            row,
+        }))
+    }
     pub(super) fn judged(channel: u64) -> Option<(String, TurnHost)> {
         if REFUSED.lock().unwrap().contains(&channel) {
             let refusal = crate::services::turn_host::HerdrRefusal::ExecutorNotWired;
             return Some(("claude/t/h:left".into(), TurnHost::Refused(refusal)));
         }
+        if let Some((key, _)) = ROWLESS.lock().unwrap().get(&channel) {
+            return Some((key.clone(), plan(None)));
+        }
         let forced = FORCED.lock().unwrap();
         let f = forced.get(&channel)?;
-        Some((
-            f.key.clone(),
-            TurnHost::Herdr(Box::new(HerdrTurnPlan {
-                endpoint: HerdrLaunchEndpoint {
-                    execution_node: "test-node".into(),
-                    config_key: "test".into(),
-                    socket_addr: "/not-used".into(),
-                    herdr_session: "not-used".into(),
-                },
-                row: Some(f.row.clone()),
-            })),
-        ))
+        Some((f.key.clone(), plan(Some(f.row.clone()))))
     }
     pub(super) fn close_result(channel: u64) -> Option<Result<(), String>> {
+        if let Some((_, fails)) = ROWLESS.lock().unwrap().get(&channel) {
+            let failure = "fixed close failure; no legacy input transport exists";
+            return Some(if *fails { Err(failure.into()) } else { Ok(()) });
+        }
         let mut all = FORCED.lock().unwrap();
         let f = all.get_mut(&channel)?;
         if f.real_close {

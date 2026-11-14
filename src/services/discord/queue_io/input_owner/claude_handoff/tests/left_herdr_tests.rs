@@ -4,12 +4,13 @@ use crate::services::discord::queue_io::cancel_backstop_test_support::set_owner_
 use crate::services::discord::queue_io::input_owner::drive::{Drive, Handoff};
 use serde_json::Value;
 
-struct Rig {
-    shared: Shared,
-    mailbox: ChannelMailboxHandle,
-    channel: Channel,
-    started: Arc<Mutex<Vec<u64>>>,
-    drive: Arc<Drive>,
+pub(super) struct Rig {
+    pub(super) shared: Shared,
+    pub(super) mailbox: ChannelMailboxHandle,
+    pub(super) channel: Channel,
+    pub(super) started: Arc<Mutex<Vec<u64>>>,
+    pub(super) drive: Arc<Drive>,
+    queue: (std::path::PathBuf, String),
     _root: crate::config::TestRuntimeRootGuard,
 }
 impl Drop for Rig {
@@ -18,8 +19,8 @@ impl Drop for Rig {
     }
 }
 
-/// An unmapped Claude channel whose queue holds `messages`, the first under a handoff journal.
-async fn rig(channel: u64, messages: &[u64], ended: bool) -> Rig {
+/// A Claude channel's adopted owner with an empty queue and a drive whose start only records.
+pub(super) async fn queued(channel: u64) -> Rig {
     let root = crate::config::TestRuntimeRootGuard::new();
     let mut shared = crate::services::discord::make_shared_data_for_tests();
     Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Claude;
@@ -28,26 +29,9 @@ async fn rig(channel: u64, messages: &[u64], ended: bool) -> Rig {
     let channel = Channel::new(channel);
     let mailbox = shared.mailbox(channel);
     let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None);
-    let (path, namespace) =
-        crate::services::turn_orchestrator::v2_queue(&persistence, channel).unwrap();
-    mailbox.v2_adopt(path, namespace).await.unwrap();
-    let queued: Vec<_> = (messages.iter())
-        .map(|id| original(channel.get(), *id))
-        .collect();
+    let queue = crate::services::turn_orchestrator::v2_queue(&persistence, channel).unwrap();
     mailbox
-        .v2_request(move |slot| {
-            let owner = slot.as_mut().unwrap();
-            for item in &queued {
-                owner.enqueue_fixture(item).map_err(|e| format!("{e:?}"))?;
-            }
-            let front = owner.front().unwrap();
-            owner.grant_front(&front)?;
-            let journal = owner.begin_handoff(&front, "left".into(), "claude/t/h:left".into())?;
-            if ended {
-                owner.handoff_ended(&journal.id)?;
-            }
-            Ok(())
-        })
+        .v2_adopt(queue.0.clone(), queue.1.clone())
         .await
         .unwrap();
     let started = Arc::new(Mutex::new(Vec::new()));
@@ -69,13 +53,53 @@ async fn rig(channel: u64, messages: &[u64], ended: bool) -> Rig {
         channel,
         started,
         drive,
+        queue,
         _root: root,
     }
 }
 
+/// An unmapped Claude channel whose queue holds `messages`, the first under a handoff journal.
+pub(super) async fn rig(channel: u64, messages: &[u64], ended: bool) -> Rig {
+    let rig = queued(channel).await;
+    for id in messages {
+        rig.enqueue(*id).await;
+    }
+    rig.begin(ended).await;
+    rig
+}
+
 impl Rig {
+    pub(super) async fn enqueue(&self, id: u64) {
+        let item = original(self.channel.get(), id);
+        let queued = self.mailbox.v2_request(move |slot| {
+            let queued = slot.as_mut().unwrap().enqueue_fixture(&item);
+            queued.map(drop).map_err(|e| format!("{e:?}"))
+        });
+        queued.await.unwrap();
+    }
+    /// Admits a routine, scheduled or HTTP start with the context its seam keeps.
+    pub(super) async fn admit_kept(&self, id: u64, context: Value) {
+        let (item, ticket) = (original(self.channel.get(), id), format!("kept-{id}"));
+        let admitted = self.mailbox.v2_admit_ticket_with_context(item, ticket, context);
+        assert!(admitted.await.is_ok(), "the kept start is admitted");
+    }
+    /// Opens the queue front's handoff journal, ended when its old pane is known closed.
+    pub(super) async fn begin(&self, ended: bool) -> Value {
+        let begun = self.mailbox.v2_request(move |slot| {
+            let owner = slot.as_mut().unwrap();
+            let front = owner.front().unwrap();
+            owner.grant_front(&front)?;
+            let journal = owner.begin_handoff(&front, "left".into(), "claude/t/h:left".into())?;
+            if ended {
+                owner.handoff_ended(&journal.id)?;
+            }
+            Ok(())
+        });
+        begun.await.unwrap();
+        self.state().await["unfinished_handoff"].clone()
+    }
     /// One pass of the drive's entry over the owner's current front.
-    async fn hand(&self) -> Result<(), String> {
+    pub(super) async fn hand(&self) -> Result<(), String> {
         let front = self
             .mailbox
             .v2_request(|slot| {
@@ -88,11 +112,25 @@ impl Rig {
             .unwrap();
         (self.drive.handoff)(front).await
     }
-    async fn state(&self) -> Value {
+    pub(super) async fn state(&self) -> Value {
         self.mailbox
             .v2_request(|slot| slot.as_ref().unwrap().json())
             .await
             .unwrap()
+    }
+    /// Lets the journal's persisted backoff deadline pass.
+    pub(super) async fn expire(&self) {
+        let expired = self.mailbox.v2_request(|slot| {
+            let journal = slot.as_mut().unwrap().snapshot.unfinished_handoff.as_mut();
+            journal.ok_or("no journal")?.retry_after_ms = 1;
+            Ok(())
+        });
+        expired.await.unwrap();
+    }
+    /// A process restart: the owner is adopted again from its published queue.
+    pub(super) async fn reboot(&self) {
+        let (path, namespace) = self.queue.clone();
+        self.mailbox.v2_adopt(path, namespace).await.unwrap();
     }
 }
 
