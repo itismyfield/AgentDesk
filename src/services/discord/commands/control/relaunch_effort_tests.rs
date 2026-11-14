@@ -1,7 +1,7 @@
 //! An effort level saved by `/effort` on a local Claude TUI, kept across a restart and launched
 //! with on the same session, over an inherited effort variable.
 
-use super::model_tests::{TOKEN, model_confirm, relaunched_as, transcript};
+use super::model_tests::{TOKEN, model_confirm, transcript};
 use super::*;
 use crate::services::discord::commands::tui_passthrough::effort_save_notice;
 
@@ -13,9 +13,10 @@ impl Fixture {
         keys.clear();
         let (shared, channel, provider) = (&self.shared, self.channel, &ProviderKind::Claude);
         let owner = self.own(None).await;
+        // The running bot holds its token, so a setting released by the command is saved too.
+        let _ = self.shared.http.cached_bot_token.set(TOKEN.to_string());
         let said = effort_save_notice(shared, TOKEN, channel, provider, level).await;
         self.own(Some(owner)).await;
-        let _ = self.shared.http.cached_bot_token.set(TOKEN.to_string());
         said
     }
 
@@ -45,8 +46,8 @@ impl Fixture {
     }
 }
 
-// A saved level survives a restart, restarts the TUI once on its own session, and the next launch
-// takes it as `--effort` with an inherited effort variable cleared so it cannot outrank the level.
+// A saved level ends the idle TUI at once and survives a server restart; the next launch resumes
+// its session with `--effort` over an inherited effort variable, and no relaunch is left over.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_saved_effort_relaunches_its_tui_on_the_same_session_pg() {
     let test = "services::discord::commands::control::relaunch_tests::effort_tests::a_saved_effort_relaunches_its_tui_on_the_same_session_pg";
@@ -59,30 +60,32 @@ async fn a_saved_effort_relaunches_its_tui_on_the_same_session_pg() {
 
     let said = fx.save_effort("high").await;
     assert!(said.contains("effort를 `high`로 저장했습니다"), "{said}");
-    let typed = called(&fx.tmux.take_calls(), "send-keys");
-    assert!(!typed, "nothing is typed into the TUI");
+    assert!(said.contains("다음 입력부터 같은 세션"), "{said}");
+    let calls = fx.tmux.take_calls();
+    assert!(
+        !called(&calls, "send-keys"),
+        "nothing is typed into the TUI"
+    );
+    assert!(called(&calls, "kill-session"), "the TUI ends with the save");
     let reset_asked = &fx.shared.overrides.session_reset_pending;
     assert!(!reset_asked.contains(&fx.channel), "no reset is asked");
+    let session = fx.session_id().await;
+    assert_eq!(session.as_deref(), Some(SESSION), "session kept");
+    let kept = (Some("work".to_string()), Some(format!("{SESSION}\nwork")));
+    assert_eq!(fx.markers(), kept, "account markers kept");
+    assert!(!fx.stored_relaunch_pending(), "no relaunch is left on disk");
     fx.restart().await;
     assert_eq!(
         fx.effort().await.as_deref(),
         Some("high"),
         "the level outlives a restart"
     );
-    assert!(fx.relaunch_pending().await, "and so does its relaunch");
-
-    let reset = fx.consume().await;
-    assert!(relaunched_as(&reset, &fx.name), "{reset:?}");
-    assert!(called(&fx.tmux.take_calls(), "kill-session"));
-    let session = fx.session_id().await;
-    assert_eq!(session.as_deref(), Some(SESSION), "session kept");
-    let kept = (Some("work".to_string()), Some(format!("{SESSION}\nwork")));
-    assert_eq!(fx.markers(), kept, "account markers kept");
+    assert!(!fx.relaunch_pending().await, "and brings no relaunch back");
     assert!(
-        !fx.stored_relaunch_pending(),
-        "the relaunch is dropped on disk"
+        fx.consume().await.is_none(),
+        "the next turn restarts nothing"
     );
-    super::super::relaunch::forget(fx.channel);
+    assert!(!called(&fx.tmux.take_calls(), "kill-session"));
 
     let set = TestEnvVarGuard::set_value_after_shared_test_env_lock;
     let _inherited = set("CLAUDE_CODE_EFFORT_LEVEL", std::ffi::OsStr::new("max"));
@@ -96,14 +99,12 @@ async fn a_saved_effort_relaunches_its_tui_on_the_same_session_pg() {
     assert_eq!(env, "-", "the inherited effort variable is cleared");
     fx.tmux.mark_present();
     fx.tmux.take_calls();
-    assert!(fx.consume().await.is_none(), "the change applies once");
-    assert!(!called(&fx.tmux.take_calls(), "kill-session"));
 
     let said = fx.save_effort("high").await;
     assert!(said.contains("이미 `high`"), "{said}");
     assert!(
-        !fx.relaunch_pending().await,
-        "an unchanged level asks for nothing"
+        !called(&fx.tmux.take_calls(), "kill-session"),
+        "an unchanged level ends nothing"
     );
     tc::cleanup_session_temp_files(&fx.name);
 }
@@ -119,8 +120,12 @@ async fn clear_keeps_the_saved_effort_and_drops_its_relaunch_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let fx = Fixture::new(21, RuntimeHandoffKind::ClaudeTui).await;
     let _idle = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(false);
-    fx.save_effort("low").await;
+    // The TUI does not end, so the level waits for the next turn's relaunch.
+    fx.tmux.fail_kills();
+    let said = fx.save_effort("low").await;
+    assert!(said.contains("지금은 재기동하지 않았습니다"), "{said}");
     assert!(fx.stored_relaunch_pending());
+    fx.tmux.take_calls();
 
     super::super::native::clear_process_reset_pending(&fx.shared, fx.channel).await;
     let low = Some("low".to_string());

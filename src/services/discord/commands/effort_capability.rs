@@ -37,6 +37,14 @@ impl Capability {
         }))
     }
 
+    /// Whether the model is known to lack `level`: its levels are listed and `level` is not one,
+    /// and no answer about ultra is still to be asked. Unknown support is not a refusal.
+    pub(in crate::services::discord) fn lacks(&self, level: &str) -> bool {
+        !self.levels.is_empty()
+            && !self.levels.iter().any(|supported| supported == level)
+            && !(level == "ultra" && self.ultra.is_some())
+    }
+
     /// The supported levels that start with `prefix`, the only ones `/effort` suggests.
     pub(in crate::services::discord) fn choices(&self, prefix: &str) -> Vec<String> {
         let mut levels: Vec<String> = self

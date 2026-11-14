@@ -256,7 +256,8 @@ EffortInit(mode) ==
         binding |-> 0, daemonGeneration |-> 0, sameSession |-> TRUE, revision |-> 0,
         failed |-> FALSE, failureVisible |-> FALSE, noticeFailed |-> FALSE,
         priorityBroken |-> FALSE, barrierBroken |-> FALSE, barrier |-> 0, queuedC |-> 0,
-        admittedC |-> [r \in EffortRoots |-> 0], debt |-> 1, debtPosts |-> 0]
+        admittedC |-> [r \in EffortRoots |-> 0], debt |-> 1, debtPosts |-> 0,
+        late |-> 0, crashes |-> 0]
 EffortOriginalNeverFinishes == effort.mode \in
     {"nonfinishing", "nonfinishing-failure", "no-interrupt", "no-close"}
 EffortRebooting == effort.phase \in {"requested", "interrupted", "stopped", "booting"}
@@ -357,7 +358,7 @@ EffortSubmitContinuation ==
     /\ UNCHANGED vars
     /\ effort.phase = "ready" /\ effort.active = "none" /\ effort.pending > 0 /\ effort.wake
     /\ effort.queuedC = effort.pending
-    /\ effort' = [effort EXCEPT !.continuations[effort.pending] = 1, !.pending = 0,
+    /\ effort' = [effort EXCEPT !.continuations[effort.pending] = @ + 1, !.pending = 0,
         !.barrier = 0, !.queuedC = 0,
         !.active = "continuation", !.row = TRUE, !.placeholder = TRUE, !.presence = "Busy"]
 EffortAdmitUser ==
@@ -387,6 +388,27 @@ EffortDeliverOldDebt ==
     /\ UNCHANGED vars
     /\ effort.debt = 1
     /\ effort' = [effort EXCEPT !.debt = 0, !.debtPosts = @ + 1]
+\* The interrupted turn's own completion arrives after the restart closed it. It names the old
+\* turn, so it changes nothing; the mutant lets it settle whatever row the channel holds now.
+EffortLateOldCompletion ==
+    /\ UNCHANGED vars
+    /\ effort.mode \in {"late", "late-clobber"} /\ effort.late = 0
+    /\ effort.root > 0 /\ effort.phase \in {"stopped", "booting", "ready", "failed"}
+    /\ effort' = IF effort.mode = "late-clobber"
+                 THEN [effort EXCEPT !.late = 1, !.row = FALSE, !.placeholder = FALSE,
+                                     !.presence = "Idle"]
+                 ELSE [effort EXCEPT !.late = 1]
+\* The server restarts while a restart is unfinished. The stored intent keeps its phase and its one
+\* ticket and the owner is woken; the mutant starts the restart over with a new ticket.
+EffortDaemonRestart ==
+    /\ UNCHANGED vars
+    /\ effort.mode \in {"recover", "recover-twice"} /\ effort.crashes = 0
+    /\ effort.root > 0 /\ effort.phase \in {"stopped", "booting", "ready"}
+    /\ effort' = IF effort.mode = "recover-twice"
+                 THEN [effort EXCEPT !.crashes = 1, !.phase = "stopped", !.pending = effort.root,
+                                     !.barrier = effort.root, !.queuedC = 0,
+                                     !.admittedC[effort.root] = 0]
+                 ELSE [effort EXCEPT !.crashes = 1, !.wake = (effort.phase = "ready") \/ @]
 \* Only a physically idle provider or an explicit failed restart is a normal rest state.
 EffortRest ==
     /\ effort.phase = "failed"
@@ -396,6 +418,7 @@ EffortNext == EffortRequest \/ EffortSecondRequest \/ EffortInputArrives \/ Effo
     \/ EffortNoticeFails \/ EffortTellInterrupted \/ EffortDuplicateNotice \/ EffortCloseInterrupted
     \/ EffortNoActiveTurn \/ EffortCurrentHerdrApply \/ EffortCurrentNextTurn \/ EffortStopTui \/ EffortLaunchFails
     \/ EffortRetryFailed \/ EffortResume \/ EffortContinue \/ EffortSubmitContinuation \/ EffortAdmitUser \/ EffortFinish \/ EffortRepost \/ EffortDeliverOldDebt \/ EffortRest
+    \/ EffortLateOldCompletion \/ EffortDaemonRestart
 EffortFair ==
     /\ WF_allVars(EffortRequest)
     /\ WF_allVars(EffortInterrupt)
@@ -431,6 +454,15 @@ EffortNonFinishingSpec == EffortInit("nonfinishing") /\ [][EffortNext]_allVars /
 EffortNonFinishingFailureSpec == EffortInit("nonfinishing-failure") /\ [][EffortNext]_allVars /\ EffortFair
 EffortNoInterruptSpec == EffortInit("no-interrupt") /\ [][EffortNext]_allVars /\ EffortFair
 EffortNoCloseSpec == EffortInit("no-close") /\ [][EffortNext]_allVars /\ EffortFair
+EffortLateSpec == EffortInit("late") /\ [][EffortNext]_allVars /\ EffortFair
+EffortLateClobberSpec == EffortInit("late-clobber") /\ [][EffortNext]_allVars /\ EffortFair
+EffortRecoverSpec == EffortInit("recover") /\ [][EffortNext]_allVars /\ EffortFair
+EffortRecoverTwiceSpec == EffortInit("recover-twice") /\ [][EffortNext]_allVars /\ EffortFair
+\* One request restarts the TUI at most once; a request that resolved ready restarted it once.
+EffortOneRestartPerRequest == effort.binding <= effort.changes
+\* A running successor keeps its row, placeholder and presence whatever arrives for the old turn.
+EffortLateKeepsSuccessor == effort.active \in {"continuation", "user"}
+    => effort.row /\ effort.placeholder /\ effort.presence = "Busy"
 EffortReplyOnce == (\A t \in EffortTasks : effort.replies[t] <= 1) /\ effort.debtPosts <= 1
 EffortOldDebtNotLost == effort.debt = 1 \/ effort.debtPosts = 1
 EffortOldDebtEventuallyPosted == (effort.debt = 1) ~> (effort.debtPosts = 1)

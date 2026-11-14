@@ -66,14 +66,57 @@ pub(in crate::services::discord) async fn channel_effort_level(
     if !matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
         return None;
     }
-    shared
-        .settings
-        .read()
-        .await
-        .channel_effort_levels
-        .get(&channel.to_string())
+    let saved = shared.settings.read().await;
+    let level = saved.channel_effort_levels.get(&channel.to_string());
+    let level = level
         .filter(|level| EFFORT_LEVELS.contains(&level.as_str()))
-        .cloned()
+        .cloned()?;
+    drop(saved);
+    // A role can change the channel's model under a saved level without passing the save check,
+    // so a launch drops a level its model is known to lack.
+    let (model, cwd) = launch_model(shared, provider, channel).await;
+    let (provider, asked) = (provider.clone(), level.clone());
+    let lacks = tokio::task::spawn_blocking(move || {
+        let for_model = super::super::effort_capability::for_model;
+        for_model(&provider, model.as_deref(), channel, cwd.as_deref()).lacks(&asked)
+    });
+    if lacks.await.unwrap_or(false) {
+        tracing::warn!(
+            channel_id = channel.get(),
+            %level,
+            "saved effort dropped at launch: the channel's model does not support it"
+        );
+        return None;
+    }
+    Some(level)
+}
+
+/// The model and folder the channel's next launch uses.
+async fn launch_model(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: serenity::ChannelId,
+) -> (Option<String>, Option<std::path::PathBuf>) {
+    let (name, cwd) = session_facts(shared, channel).await;
+    let dispatch_role = shared
+        .dispatch
+        .role_overrides
+        .get(&channel)
+        .map(|role| *role);
+    let explicit = shared
+        .overrides
+        .model_overrides
+        .get(&channel)
+        .map(|value| value.clone());
+    let role = dispatch_role;
+    let model = model_for_write(
+        provider,
+        channel,
+        name.as_deref(),
+        role,
+        explicit.as_deref(),
+    );
+    (model, cwd)
 }
 
 fn local_tui(provider: &ProviderKind, channel: serenity::ChannelId) -> bool {
@@ -109,24 +152,7 @@ async fn read_entry_capability<T: Send + 'static>(
     if let Err(error) = shared.check_settings_owner(provider, channel).await {
         return Ok(read(&refused(error.to_string())));
     }
-    let (name, cwd) = session_facts(shared, channel).await;
-    let dispatch_role = shared
-        .dispatch
-        .role_overrides
-        .get(&channel)
-        .map(|role| *role);
-    let explicit = shared
-        .overrides
-        .model_overrides
-        .get(&channel)
-        .map(|value| value.clone());
-    let model = model_for_write(
-        provider,
-        channel,
-        name.as_deref(),
-        dispatch_role,
-        explicit.as_deref(),
-    );
+    let (model, cwd) = launch_model(shared, provider, channel).await;
     let provider = provider.clone();
     tokio::task::spawn_blocking(move || {
         let known = matches!(provider, ProviderKind::Claude | ProviderKind::Codex);

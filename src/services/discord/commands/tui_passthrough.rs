@@ -98,15 +98,69 @@ pub(super) async fn effort_save_notice(
         };
     }
     match super::config::update_channel_effort(shared, token, channel_id, provider, level).await {
-        Ok(true) if matches!(provider, ProviderKind::Codex) => {
-            format!("effort를 `{level}`로 저장했습니다. 다음 Codex TUI 기동부터 적용합니다.")
-        }
-        Ok(true) => format!(
-            "effort를 `{level}`로 저장했습니다. 다음 새 턴 시작 때 같은 세션으로 TUI를 재기동해 적용합니다(맥락 유지)."
-        ),
+        Ok(true) => saved_effort_notice(shared, provider, channel_id, level).await,
         Ok(false) => format!("effort는 이미 `{level}`로 저장돼 있습니다. 바꾼 설정이 없습니다."),
         Err(error) => format!("effort 설정을 저장하지 못했습니다: {error}"),
     }
+}
+
+/// What the saved level does next where no immediate restart runs.
+fn next_launch_notice(provider: &ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Codex => "다음 Codex TUI 기동부터 적용합니다.",
+        _ => "다음 새 턴 시작 때 같은 세션으로 TUI를 재기동해 적용합니다(맥락 유지).",
+    }
+}
+
+/// Restarts the channel's TUI on its own session for the level just saved, and says what that
+/// did to the turn it was running.
+#[cfg(unix)]
+async fn saved_effort_notice(
+    shared: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: poise::serenity_prelude::ChannelId,
+    level: &str,
+) -> String {
+    use super::effort_restart::{Restart, restart};
+    let saved = format!("effort를 `{level}`로 저장했습니다.");
+    match restart(shared, provider, channel_id).await {
+        Restart::Restarted {
+            continues: true,
+            told: true,
+        } => format!("{saved} 같은 세션으로 TUI를 지금 다시 시작합니다(맥락 유지)."),
+        Restart::Restarted {
+            continues: true,
+            told: false,
+        } => format!(
+            "{saved} 같은 세션으로 TUI를 지금 다시 시작합니다(맥락 유지). 진행 중이던 작업은 중단했고, 재기동 뒤 자동으로 이어갑니다."
+        ),
+        Restart::Restarted {
+            continues: false, ..
+        } => format!(
+            "{saved} 실행 중이던 TUI를 종료했고, 다음 입력부터 같은 세션에서 이 값으로 이어집니다(맥락 유지)."
+        ),
+        Restart::NotRunning => format!("{saved} 실행 중인 TUI가 없어 다음 기동부터 적용합니다."),
+        Restart::Kept(reason) => format!(
+            "{saved} 지금은 재기동하지 않았습니다: {reason}. {}",
+            next_launch_notice(provider)
+        ),
+        Restart::Unfinished(reason) => format!(
+            "{saved} TUI는 종료했지만 중단한 작업의 자동 이어하기를 접수하지 못했습니다: {reason}. 대기 중인 입력은 보존되며, 다음 입력부터 같은 세션에서 이어집니다."
+        ),
+    }
+}
+
+#[cfg(not(unix))]
+async fn saved_effort_notice(
+    _: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    _: poise::serenity_prelude::ChannelId,
+    level: &str,
+) -> String {
+    format!(
+        "effort를 `{level}`로 저장했습니다. {}",
+        next_launch_notice(provider)
+    )
 }
 
 /// Why a passthrough may not reach the channel's session: a host the check keeps off its

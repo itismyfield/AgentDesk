@@ -742,9 +742,5 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 <!-- doc-path-refs: proposed src/services/codex/tui_session_launch/launch_policy/resume.rs -->
 <!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/cancel.rs -->
 <!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/herdr.rs -->
-<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/mod.rs -->
-<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/notice.rs -->
-<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/recovery.rs -->
 <!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/state.rs -->
-<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/tmux.rs -->
 <!-- doc-path-refs: proposed src/services/discord/herdr_terminate/effort_restart.rs -->

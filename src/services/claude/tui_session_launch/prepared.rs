@@ -63,8 +63,11 @@ pub(super) fn prepare(
         model: launch.model.map(str::to_string),
         resume,
     };
-    let prepare = crate::services::claude_tui::session::prepare_claude_tui_launch_with_settings;
-    let session_files = prepare(&launch_config, launch.fast_mode, launch.effort)?;
+    use crate::services::claude_tui::session;
+    // A resume under an effort restart leaves the first submit to that restart's continuation.
+    let owner_first = resume && session::owner_first_submit(resolved_session_id);
+    let prepare = session::prepare_claude_tui_launch_with_continuation_owner;
+    let session_files = prepare(&launch_config, launch.fast_mode, launch.effort, owner_first)?;
     session_prompt::record(launch_config.system_prompt.as_deref(), resume);
     let launch_script_path = session_files.launch_script_path.clone();
     *prepared_session_files = Some(session_files);

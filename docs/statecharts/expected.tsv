@@ -403,6 +403,8 @@ session-lifecycle/EffortRestartDropQueue.cfg	TmuxSession	EffortInputNotLost,Effo
 session-lifecycle/EffortRestartDuplicateNotice.cfg	TmuxSession	EffortInterruptedNoticeExactlyOnce	-
 session-lifecycle/EffortRestartFailure.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartIdle.cfg	TmuxSession	-	-
+session-lifecycle/EffortRestartLate.cfg	TmuxSession	-	-
+session-lifecycle/EffortRestartLateClobber.cfg	TmuxSession	EffortLateKeepsSuccessor	-
 session-lifecycle/EffortRestartNoClose.cfg	TmuxSession	NoDeadlock	EffortRequestResolves
 session-lifecycle/EffortRestartNoContinuation.cfg	TmuxSession	-	EffortContinuationEventuallyInjected,EffortPendingEventuallyProcessed
 session-lifecycle/EffortRestartNoInterrupt.cfg	TmuxSession	NoDeadlock	EffortRequestResolves
@@ -410,6 +412,8 @@ session-lifecycle/EffortRestartNoNotice.cfg	TmuxSession	EffortInterruptedNoticeE
 session-lifecycle/EffortRestartNoWake.cfg	TmuxSession	-	EffortContinuationEventuallyInjected,EffortPendingEventuallyProcessed
 session-lifecycle/EffortRestartNonFinishing.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartNonFinishingFailure.cfg	TmuxSession	-	-
+session-lifecycle/EffortRestartRecover.cfg	TmuxSession	-	-
+session-lifecycle/EffortRestartRecoverTwice.cfg	TmuxSession	EffortContinuationAtMostOnce,EffortContinuationCustody,EffortLateKeepsSuccessor,EffortOneRestartPerRequest,EffortReplyOnce	EffortContinuationEventuallyInjected,EffortSubmitReleasesBarrier
 session-lifecycle/EffortRestartRepost.cfg	TmuxSession	EffortReplyOnce	-
 session-lifecycle/EffortRestartRetry.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartSecond.cfg	TmuxSession	-	-

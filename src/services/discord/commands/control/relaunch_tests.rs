@@ -684,3 +684,6 @@ mod model_tests;
 
 #[path = "relaunch_effort_tests.rs"]
 mod effort_tests;
+
+#[path = "relaunch_effort_restart_tests.rs"]
+mod restart_tests;

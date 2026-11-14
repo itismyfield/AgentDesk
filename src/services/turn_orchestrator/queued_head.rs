@@ -95,6 +95,7 @@ pub(crate) use v2::source_admission::TurnBind;
 pub(crate) use v2_types::OwedDrop;
 mod v2_types;
 pub(super) use snapshot::{parse_snapshot, snapshot_json};
+pub(crate) use v2_types::effort_restart as effort_intent;
 
 /// The head and submitted sources a queue file holds; `None` for a missing file or a legacy array,
 /// an error for a file that cannot be read or parsed, legacy or not.

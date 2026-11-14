@@ -922,7 +922,7 @@ fn codex_effort_command_saves_supported_ultra_and_refuses_it_on_luna() {
         effort_model(&data, "gpt-6-astra");
         let said = rig.effort(&data, "ultra").await;
         assert!(said.contains("effort를 `ultra`로 저장했습니다"), "{said}");
-        assert!(said.contains("Codex TUI"), "{said}");
+        assert!(said.contains("다음 기동부터 적용"), "{said}");
         let ultra = Some("ultra".to_string());
         assert_eq!(effort_state(&data).await, (ultra.clone(), true, ultra));
         let read = crate::services::discord::commands::channel_effort_level;

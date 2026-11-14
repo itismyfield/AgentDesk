@@ -677,6 +677,7 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
     match recovered {
         Ok(_) => {
             claude_handoff::recover(shared.clone(), channel);
+            crate::services::discord::commands::effort_restart::resume_owed(shared, channel).await;
             wake(shared, channel);
         }
         Err(error) => tracing::warn!(channel_id = channel.get(), %error, "owner recovery held"),

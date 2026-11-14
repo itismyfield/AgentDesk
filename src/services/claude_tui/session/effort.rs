@@ -1,4 +1,27 @@
 //! One channel effort choice produces both the CLI level and the session ultracode flag.
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+/// How long a restart's mark covers the resume launches of its session.
+const OWNER_FIRST_FOR: Duration = Duration::from_secs(600);
+static OWNER_FIRST: LazyLock<Mutex<HashMap<String, Instant>>> = LazyLock::new(Mutex::default);
+
+/// An effort restart cut `session`'s turn and owns the first submit of its next resume.
+pub(crate) fn expect_owner_first_submit(session: &str) {
+    let mut marks = OWNER_FIRST.lock().unwrap_or_else(|e| e.into_inner());
+    marks.retain(|_, at| at.elapsed() < OWNER_FIRST_FOR);
+    marks.insert(session.to_string(), Instant::now());
+}
+
+/// Whether a resume of `session` launches under a restart whose continuation submits first.
+pub(crate) fn owner_first_submit(session: &str) -> bool {
+    let marks = OWNER_FIRST.lock().unwrap_or_else(|e| e.into_inner());
+    marks
+        .get(session)
+        .is_some_and(|at| at.elapsed() < OWNER_FIRST_FOR)
+}
+
 #[derive(Clone, Copy, Default)]
 pub(super) enum LaunchEffort<'a> {
     #[default]
