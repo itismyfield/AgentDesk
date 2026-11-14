@@ -339,3 +339,528 @@ async fn native_8148_malformed_v3_preserves_row_and_retries_same_boot_gate() {
         assert!(!path.exists());
     }
 }
+
+fn boot_shared(pool: Option<sqlx::PgPool>) -> Arc<crate::services::discord::SharedData> {
+    let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .restart
+        .current_generation = 2;
+    shared
+}
+
+fn boot_saved(
+    env: &Env,
+    channel: u64,
+    withdraw: bool,
+) -> (Fixture, native::Outcome, InflightTurnState, PathBuf) {
+    use crate::services::tui_o::{
+        shadow::{ShadowProvider, SourceBinding, SourceId},
+        writer::input_facts::InputFacts,
+    };
+    let root = env.dir().parent().unwrap().to_path_buf();
+    let f = Fixture::at(root.join("injected_frames.json"), channel, true);
+    let source = f.ticket.source.as_ref().unwrap();
+    let uuid = format!("own-{channel}");
+    let rows = if withdraw {
+        vec![
+            json!({"type":"queue-operation","operation":"enqueue","content":"한국어 원본 입력"}),
+            json!({"type":"queue-operation","operation":"remove","content":"한국어 원본 입력"}),
+        ]
+    } else {
+        vec![
+            json!({"type":"user","sessionId":"native","uuid":uuid,"message":{"content":"한국어 원본 입력"}}),
+            json!({"type":"system","subtype":"turn_duration"}),
+        ]
+    };
+    fs::write(
+        &source.transcript,
+        rows.iter().map(|r| format!("{r}\n")).collect::<String>(),
+    )
+    .unwrap();
+    if !withdraw {
+        assert_eq!(
+            f.history.receipt(
+                "native-fixture",
+                &f.ticket.key,
+                (
+                    &source.transcript,
+                    0,
+                    "user",
+                    Some(&uuid),
+                    "한국어 원본 입력"
+                )
+            ),
+            Some(true)
+        );
+    }
+    f.history
+        .note_native_any_key("native-fixture", &f.ticket)
+        .unwrap();
+    let binding = SourceBinding {
+        channel_id: channel,
+        provider: ShadowProvider::Claude,
+        source: SourceId {
+            session_id: source.session_id.clone(),
+            path: source.transcript.clone(),
+            dev: source.file[0],
+            ino: source.file[1],
+        },
+    };
+    let mut facts = InputFacts::open(binding.clone()).unwrap();
+    facts.observe_native().unwrap();
+    facts.poll(u64::MAX).unwrap();
+    let registrations: Vec<_> = f
+        .history
+        .native_evidence_registrations()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.matches(&binding))
+        .collect();
+    let proof = facts.native_evidence(&registrations).unwrap().remove(0);
+    let outcome = native::Outcome {
+        disposition: proof.disposition.clone(),
+        range: Some([proof.range.0, proof.range.1]),
+        extra: serde_json::Map::from_iter([(
+            "native_proof".into(),
+            serde_json::to_value(proof).unwrap(),
+        )]),
+    };
+    let stamp = crate::services::tui_o::writer::input_facts::native::registrations_fingerprint(
+        &registrations,
+    )
+    .unwrap();
+    assert!(
+        f.history
+            .record_native_outcome_at_stamp("native-fixture", &f.ticket, &outcome, &stamp)
+            .unwrap()
+    );
+    let mut state = row(channel, None);
+    state.born_generation = 1;
+    state.turn_nonce = Some(f.ticket.owning_episode.as_ref().unwrap().turn_nonce.clone());
+    state.session_id = Some(source.session_id.clone());
+    state.output_path = Some(source.transcript.to_string_lossy().into_owned());
+    state.hosted_execution_nonce = Some("incarnation-1".into());
+    let path = env.seed(&state, STALE);
+    (f, outcome, state, path)
+}
+
+#[tokio::test]
+async fn native_8148_boot_saved_result_and_custody_only_recovery_drive_next_head_pg() {
+    use crate::services::discord::turn_finalizer::native_prepare::BootInputs;
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for custody_only in [false, true] {
+        let env = Env::new();
+        let root = env.dir().parent().unwrap().to_path_buf();
+        let channel = 81489960 + u64::from(custody_only);
+        let (f, outcome, state, path) = boot_saved(&env, channel, false);
+        super::boot_custody::preserve_native_before_boot_reap(&root, &CLAUDE).unwrap();
+        if custody_only {
+            fs::remove_file(root.join("injected_frames.json")).unwrap();
+        }
+        let shared = boot_shared(Some(pool.clone()));
+        let plan = BootInputs::prepare(&root, shared.restart.current_generation).unwrap();
+        let reap =
+            reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
+        assert!(reap.native_preparation_complete());
+        assert!(!path.exists());
+        let mut events =
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                &shared,
+            );
+        plan.restore(&shared).await.unwrap();
+        assert!(
+            shared
+                .turn_finalizer
+                .native_boot_ready(ChannelId::new(channel))
+                .await
+        );
+        let history = Registry::at(root.join("injected_frames.json"));
+        let after = history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap();
+        assert_eq!(after.outcome, Some(outcome));
+        assert!(after.cleanup_complete);
+        assert!(
+            !history
+                .record_native_outcome("native-fixture", &f.ticket, after.outcome.as_ref().unwrap())
+                .unwrap()
+        );
+        assert!(
+            shared
+                .mailbox(ChannelId::new(channel))
+                .snapshot()
+                .await
+                .cancel_token
+                .is_none()
+        );
+        assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+        let wake = events.try_recv().unwrap();
+        assert_eq!(wake.channel_id, ChannelId::new(channel));
+        assert!(events.try_recv().is_err());
+        next_head(shared.mailbox(ChannelId::new(channel)), channel, &root).await;
+        // A lost registry after cleanup must recover the terminal copy, not an older pending debt.
+        fs::remove_file(root.join("injected_frames.json")).unwrap();
+        BootInputs::prepare(&root, 2)
+            .unwrap()
+            .restore(&shared)
+            .await
+            .unwrap();
+        assert!(events.try_recv().is_err());
+        assert!(
+            shared
+                .turn_finalizer
+                .native_boot_ready(ChannelId::new(channel))
+                .await
+        );
+        assert!(!path.exists());
+        assert_eq!(state.born_generation, 1);
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn native_8148_boot_pending_registration_is_adopted_without_a_result_or_lease() {
+    use crate::services::discord::turn_finalizer::native_prepare::BootInputs;
+    let env = Env::new();
+    let root = env.dir().parent().unwrap().to_path_buf();
+    let f = Fixture::at(root.join("injected_frames.json"), 81489962, true);
+    super::boot_custody::preserve_native_before_boot_reap(&root, &CLAUDE).unwrap();
+    fs::remove_file(root.join("injected_frames.json")).unwrap();
+    let shared = boot_shared(None);
+    let plan = BootInputs::prepare(&root, 2).unwrap();
+    reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
+    plan.restore(&shared).await.unwrap();
+    assert!(
+        !shared
+            .turn_finalizer
+            .native_boot_ready(ChannelId::new(81489962))
+            .await
+    );
+    let restored = Registry::at(root.join("injected_frames.json"))
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    assert!(restored.outcome.is_none() && !restored.cleanup_complete);
+    assert!(
+        shared
+            .mailbox(ChannelId::new(81489962))
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none()
+    );
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+    assert!(!crate::services::discord::turn_finalizer::native_prepare::enabled());
+}
+
+#[tokio::test]
+async fn native_8148_boot_rejects_corrupt_proof_current_epoch_and_unreadable_row_before_reap() {
+    use crate::services::discord::turn_finalizer::native_prepare::BootInputs;
+    for mutation in [
+        "namespace",
+        "ticket",
+        "membership",
+        "any_key",
+        "generation",
+        "row_io",
+    ] {
+        let env = Env::new();
+        let root = env.dir().parent().unwrap().to_path_buf();
+        let (f, _, _, path) = boot_saved(&env, 81489963, false);
+        let registry = root.join("injected_frames.json");
+        let mut data = f.history.json().unwrap();
+        let settled = &mut data["live"][0]["registration"]["native_settlement"];
+        match mutation {
+            "namespace" => settled["outcome"]["native_proof"]["namespace"] = json!("foreign"),
+            "ticket" => settled["outcome"]["native_proof"]["ticket"]["opaque"] = json!(true),
+            "membership" => {
+                settled["outcome"]["native_proof"]["membership_row"] = serde_json::Value::Null
+            }
+            "any_key" => settled["any_key"] = json!(false),
+            "generation" => {}
+            _ => {
+                fs::remove_file(&path).unwrap();
+                fs::create_dir(&path).unwrap();
+            }
+        }
+        fs::write(&registry, data.to_string()).unwrap();
+        let before = fs::read(&registry).unwrap();
+        assert!(
+            BootInputs::prepare(&root, if mutation == "generation" { 1 } else { 2 }).is_err(),
+            "{mutation}"
+        );
+        assert_eq!(fs::read(&registry).unwrap(), before, "{mutation}");
+        assert!(path.exists(), "{mutation}");
+    }
+}
+
+#[tokio::test]
+async fn native_8148_boot_transfer_preserves_successor_and_cannot_borrow_live_actor() {
+    use crate::services::discord::turn_finalizer::native_prepare::BootInputs;
+    for successor in [false, true] {
+        let env = Env::new();
+        let root = env.dir().parent().unwrap().to_path_buf();
+        let (f, _, mut next, path) = boot_saved(&env, 81489964, false);
+        let shared = boot_shared(None);
+        let plan = BootInputs::prepare(&root, 2).unwrap();
+        reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
+        if successor {
+            next.born_generation = 2;
+            next.user_msg_id += 10;
+            next.turn_nonce = Some("successor".into());
+            next.hosted_execution_nonce = Some("new-execution".into());
+        }
+        let token = Arc::new(CancelToken::from_persisted_turn_nonce(
+            next.turn_nonce.clone(),
+        ));
+        let mailbox = shared.mailbox(ChannelId::new(next.channel_id));
+        mailbox
+            .restore_active_turn(
+                token.clone(),
+                UserId::new(7),
+                MessageId::new(next.user_msg_id),
+            )
+            .await;
+        shared.restart.global_active.store(1, Ordering::SeqCst);
+        let bytes = serde_json::to_vec(&next).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let mut events =
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                &shared,
+            );
+        let result = plan.restore(&shared).await;
+        assert_eq!(result.is_ok(), successor);
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        assert!(Arc::ptr_eq(
+            mailbox.snapshot().await.cancel_token.as_ref().unwrap(),
+            &token
+        ));
+        assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 1);
+        assert!(events.try_recv().is_err());
+        let status = f
+            .history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap();
+        assert_eq!(status.cleanup_complete, successor);
+        assert_eq!(
+            shared
+                .turn_finalizer
+                .native_boot_ready(ChannelId::new(next.channel_id))
+                .await,
+            successor
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_8148_boot_withdrawal_pg_wait_is_outside_actor_and_keeps_admission_held() {
+    use crate::services::discord::turn_finalizer::native_prepare::BootInputs;
+    let env = Env::new();
+    let root = env.dir().parent().unwrap().to_path_buf();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(1).await;
+    let (f, _, _, path) = boot_saved(&env, 81489965, true);
+    let shared = boot_shared(Some(pool.clone()));
+    let plan = BootInputs::prepare(&root, 2).unwrap();
+    reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
+    let held = pool.acquire().await.unwrap();
+    let task = tokio::spawn({
+        let shared = shared.clone();
+        async move { plan.restore(&shared).await }
+    });
+    await_within(
+        async {
+            while shared
+                .turn_finalizer
+                .native_boot_ready(ChannelId::new(81489965))
+                .await
+            {
+                tokio::task::yield_now().await;
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
+    assert!(!task.is_finished());
+    assert!(
+        !await_within(
+            shared
+                .turn_finalizer
+                .native_boot_ready(ChannelId::new(81489965)),
+            WAIT_CAP
+        )
+        .await
+    );
+    assert!(
+        await_within(task, WAIT_CAP)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("timed out")
+    );
+    assert!(!path.exists());
+    assert!(
+        !f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .cleanup_complete
+    );
+    drop(held);
+    BootInputs::prepare(&root, 2)
+        .unwrap()
+        .restore(&shared)
+        .await
+        .unwrap();
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .withdrawal_notice
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM message_outbox WHERE source='retained_input_notice'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    BootInputs::prepare(&root, 2)
+        .unwrap()
+        .restore(&shared)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM message_outbox WHERE source='retained_input_notice'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn native_8148_boot_custody_digest_manifest_and_incomplete_repair_keep_rows() {
+    use crate::services::discord::turn_finalizer::native_prepare::BootInputs;
+    let env = Env::new();
+    let root = env.dir().parent().unwrap().to_path_buf();
+    let (_, _, _, row) = boot_saved(&env, 81489966, false);
+    super::boot_custody::preserve_native_before_boot_reap(&root, &CLAUDE).unwrap();
+    let mut native_copy = None;
+    for episode in fs::read_dir(root.join("discord_custody/claude"))
+        .unwrap()
+        .flatten()
+    {
+        for rev in fs::read_dir(episode.path())
+            .unwrap()
+            .flatten()
+            .filter(|r| r.file_name().to_string_lossy().starts_with("rev-"))
+        {
+            for copy in fs::read_dir(rev.path()).unwrap().flatten() {
+                if copy
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with("-native_input.json")
+                {
+                    native_copy = Some(copy.path());
+                }
+            }
+        }
+    }
+    let copy = native_copy.unwrap();
+    let bytes = fs::read(&copy).unwrap();
+    let manifest = copy.parent().unwrap().join("manifest.json");
+    let original_manifest = fs::read(&manifest).unwrap();
+    fs::remove_file(root.join("injected_frames.json")).unwrap();
+    fs::write(&copy, b"{}").unwrap();
+    assert!(BootInputs::prepare(&root, 2).is_err());
+    assert!(row.exists());
+    assert!(!root.join("injected_frames.json").exists());
+    let mut tampered: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    tampered["settlement"]["warned"] = json!(true);
+    tampered["registration"]["native_settlement"]["warned"] = json!(true);
+    fs::write(&copy, tampered.to_string()).unwrap();
+    assert!(BootInputs::prepare(&root, 2).is_err());
+    assert!(row.exists());
+    fs::write(&copy, &bytes).unwrap();
+    let saved = manifest.with_extension("saved");
+    fs::rename(&manifest, &saved).unwrap();
+    assert!(BootInputs::prepare(&root, 2).is_err());
+    assert!(row.exists());
+    fs::rename(&saved, &manifest).unwrap();
+    let mut broken: serde_json::Value = serde_json::from_slice(&original_manifest).unwrap();
+    broken["complete"] = json!(false);
+    fs::write(&manifest, broken.to_string()).unwrap();
+    assert!(BootInputs::prepare(&root, 2).is_err());
+    assert!(row.exists());
+    fs::write(&manifest, &original_manifest).unwrap();
+    let shared = boot_shared(None);
+    let plan = BootInputs::prepare(&root, 2).unwrap();
+    reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
+    plan.restore(&shared).await.unwrap();
+    assert!(!row.exists());
+    assert!(
+        shared
+            .turn_finalizer
+            .native_boot_ready(ChannelId::new(81489966))
+            .await
+    );
+}
+
+#[tokio::test]
+async fn native_8148_boot_terminal_custody_failure_keeps_admission_pending_until_repair() {
+    use crate::services::discord::turn_finalizer::native_prepare::BootInputs;
+    let env = Env::new();
+    let root = env.dir().parent().unwrap().to_path_buf();
+    let (f, _, _, row) = boot_saved(&env, 81489967, false);
+    let shared = boot_shared(None);
+    let plan = BootInputs::prepare(&root, 2).unwrap();
+    reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
+    let custody = root.join("discord_custody/claude");
+    let kept = root.join("discord_custody/claude-kept");
+    fs::rename(&custody, &kept).unwrap();
+    fs::write(&custody, b"not a directory").unwrap();
+    assert!(plan.restore(&shared).await.is_err());
+    assert!(!row.exists());
+    assert!(
+        !shared
+            .turn_finalizer
+            .native_boot_ready(ChannelId::new(81489967))
+            .await
+    );
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .cleanup_complete
+    );
+    fs::remove_file(&custody).unwrap();
+    fs::rename(&kept, &custody).unwrap();
+    let retry = BootInputs::prepare(&root, 2).unwrap();
+    fs::rename(&custody, &kept).unwrap();
+    fs::write(&custody, b"not a directory").unwrap();
+    assert!(retry.restore(&shared).await.is_err());
+    assert!(
+        !shared
+            .turn_finalizer
+            .native_boot_ready(ChannelId::new(81489967))
+            .await
+    );
+    fs::remove_file(&custody).unwrap();
+    fs::rename(&kept, &custody).unwrap();
+    BootInputs::prepare(&root, 2)
+        .unwrap()
+        .restore(&shared)
+        .await
+        .unwrap();
+    assert!(
+        shared
+            .turn_finalizer
+            .native_boot_ready(ChannelId::new(81489967))
+            .await
+    );
+    next_head(shared.mailbox(ChannelId::new(81489967)), 81489967, &root).await;
+}

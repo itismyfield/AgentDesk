@@ -10,7 +10,7 @@ pub(in crate::services::discord) struct SnapshotClearDetail {
 }
 
 impl GuardedClearOutcome {
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(in crate::services::discord) fn for_native_snapshot_with_detail(
         provider: &ProviderKind,
         snapshot: &InflightTurnState,

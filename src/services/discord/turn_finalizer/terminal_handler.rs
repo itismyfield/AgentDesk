@@ -698,7 +698,6 @@ impl NativeCleanup {
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
         shared: &Arc<SharedData>,
     ) -> Result<(), String> {
-        use crate::services::tui_input::human_frame::history::v2::native::Disposition;
         let evidence = &self.admission.evidence;
         let outcome = self.outcome()?;
         history.record_native_outcome_at_stamp(
@@ -707,36 +706,7 @@ impl NativeCleanup {
             &outcome,
             &self.admission.registrations_fingerprint,
         )?;
-        let settlement = history.native_settlement(&evidence.namespace, &evidence.ticket)?;
-        if settlement.cleanup_complete {
-            return Ok(());
-        }
-        if outcome.disposition == Disposition::WithdrawnNotExecuted && !settlement.withdrawal_notice
-        {
-            let pool = shared
-                .pg_pool
-                .as_ref()
-                .ok_or("native withdrawal outbox unavailable")?;
-            let stable = serde_json::to_vec(&(&evidence.namespace, &evidence.ticket))
-                .map_err(|e| e.to_string())?;
-            let dedupe = format!("native-withdrawal:{}", blake3::hash(&stable));
-            tokio::time::timeout(std::time::Duration::from_secs(2), crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_persistent_dedupe(
-                pool,
-                crate::services::message_outbox::OutboxMessage {
-                    target: &format!("channel:{}", evidence.ticket.channel_id),
-                    content: "입력이 실행 전에 철회되었습니다.",
-                    bot: "claude",
-                    source: "retained_input_notice",
-                    reason_code: None,
-                    session_key: Some(&dedupe),
-                },
-            ))
-            .await
-            .map_err(|_| "native withdrawal outbox timed out")?
-            .map_err(|e| e.to_string())?;
-            history.ack_native_withdrawal_notice(&evidence.namespace, &evidence.ticket)?;
-        }
-        Ok(())
+        prepare_saved_notice(history, &evidence.namespace, &evidence.ticket, shared).await
     }
 
     pub(super) async fn drive(
@@ -833,3 +803,49 @@ impl NativeCleanup {
 #[cfg(all(test, unix))]
 #[path = "native_input_tests.rs"]
 mod native_input_tests;
+
+#[cfg(unix)]
+pub(super) async fn prepare_saved_notice(
+    history: &crate::services::tui_input::human_frame::history::v2::Registry,
+    namespace: &str,
+    ticket: &crate::services::tui_input::human_frame::history::v2::native::Ticket,
+    shared: &Arc<SharedData>,
+) -> Result<(), String> {
+    use crate::services::tui_input::human_frame::history::v2::native::Disposition;
+    let settlement = history.native_settlement(namespace, ticket)?;
+    if settlement.cleanup_complete {
+        return Ok(());
+    }
+    if settlement
+        .outcome
+        .as_ref()
+        .is_some_and(|o| o.disposition == Disposition::WithdrawnNotExecuted)
+        && !settlement.withdrawal_notice
+    {
+        let pool = shared
+            .pg_pool
+            .as_ref()
+            .ok_or("native withdrawal outbox unavailable")?;
+        let stable = serde_json::to_vec(&(namespace, ticket)).map_err(|e| e.to_string())?;
+        let dedupe = format!("native-withdrawal:{}", blake3::hash(&stable));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+                pool,
+                crate::services::message_outbox::OutboxMessage {
+                    target: &format!("channel:{}", ticket.channel_id),
+                    content: "입력이 실행 전에 철회되었습니다.",
+                    bot: "claude",
+                    source: "retained_input_notice",
+                    reason_code: None,
+                    session_key: Some(&dedupe),
+                },
+            ),
+        )
+        .await
+        .map_err(|_| "native withdrawal outbox timed out")?
+        .map_err(|e| e.to_string())?;
+        history.ack_native_withdrawal_notice(namespace, ticket)?;
+    }
+    Ok(())
+}

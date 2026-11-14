@@ -55,6 +55,8 @@ pub(super) enum Phase {
 pub(super) struct LedgerEntry {
     #[cfg(unix)]
     pub(super) native_inputs: HashMap<String, super::terminal_handler::NativePrepared>,
+    #[cfg(unix)]
+    pub(super) native_boot_inputs: HashMap<String, super::native_prepare::RestoredInput>,
     pub(super) recovery_lease: Option<crate::services::agent_recovery::RecoveryLease>,
     pub(super) phase: Phase,
     pub(super) relay_owner: RelayOwnerKind,
@@ -87,6 +89,8 @@ impl LedgerEntry {
         Self {
             #[cfg(unix)]
             native_inputs: HashMap::new(),
+            #[cfg(unix)]
+            native_boot_inputs: HashMap::new(),
             recovery_lease,
             phase: Phase::Pending,
             relay_owner,
@@ -112,6 +116,18 @@ pub(super) struct PendingCompletionAdmission {
 }
 
 pub(super) enum FinalizeMsg {
+    #[cfg(unix)]
+    NativeBoot {
+        inputs: Vec<super::native_prepare::RestoredInput>,
+        step: super::native_prepare::RestoreStep,
+        shared: Arc<SharedData>,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    #[cfg(unix)]
+    NativeBootReady {
+        channel: ChannelId,
+        ack: oneshot::Sender<bool>,
+    },
     #[cfg(unix)]
     NativeRegister {
         key: TurnKey,
@@ -352,4 +368,21 @@ pub(super) async fn contain_panic<T>(
         tracing::error!(panic = %message, "TurnFinalizer handler panicked; durable work retained");
         message
     })
+}
+
+/// Resolve a submission to the ledger entry it acts on. A real `user_msg_id`
+/// uses its exact key (a stale terminal of a finalized turn matches the
+/// retained `Finalized` entry → `AlreadyFinalized`); a channel-only id-0
+/// terminal collapses per `resolve_channel_only` (never prematurely finalizing
+/// a queued follow-up).
+pub(super) fn resolve_ledger_key(
+    ledger: &HashMap<LedgerKey, LedgerEntry>,
+    key: TurnKey,
+) -> LedgerKey {
+    resolve_channel_only(
+        key,
+        ledger
+            .iter()
+            .map(|(lk, entry)| (lk, entry.phase == Phase::Finalized)),
+    )
 }

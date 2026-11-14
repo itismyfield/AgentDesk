@@ -19,6 +19,13 @@ pub(crate) struct BootReapReport {
     pub(super) max_reaped_age_secs: Option<u64>,
 }
 
+#[cfg(unix)]
+impl BootReapReport {
+    pub(in crate::services::discord) fn native_preparation_complete(&self) -> bool {
+        self.incomplete == 0
+    }
+}
+
 /// Per-provider completion gate: the first caller starts the reaper and every
 /// later caller waits for that run, so none reaches a mint surface before it.
 /// The pass is spawned outside any caller, so a cancelled caller cannot restart it.

@@ -115,3 +115,31 @@ pub(super) fn submit(
 
 #[cfg(test)]
 mod tests;
+
+/// A restarted owner re-adopts the channel's V2 queue, settles a head whose window passed,
+/// projects history and posts owed notices, then wakes its drive.
+pub(super) async fn recover(shared: &Shared, channel: ChannelId) {
+    use crate::services::discord::queue_io::input_owner::recovery;
+    use crate::services::tui_input::human_frame::history::v2::Registry;
+    let persistence = crate::services::discord::queue_dispatch::persistence_context;
+    let queue = crate::services::turn_orchestrator::v2_queue;
+    let queue = queue(&persistence(shared, &shared.provider, channel), channel);
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let recovered = match (queue, Registry::runtime()) {
+        (Ok(queue), Ok(history)) => {
+            let at = (shared.provider.as_str(), channel.get(), now);
+            let pool = shared.pg_pool.as_ref();
+            recovery::recover(&shared.mailbox(channel), queue, history, pool, at).await
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    };
+    match recovered {
+        Ok(_) => {
+            claude_handoff::recover(shared.clone(), channel);
+            if native_prepare::boot_ready(shared, channel).await {
+                wake(shared, channel);
+            }
+        }
+        Err(error) => tracing::warn!(channel_id = channel.get(), %error, "owner recovery held"),
+    }
+}

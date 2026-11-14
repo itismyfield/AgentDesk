@@ -824,3 +824,22 @@ PortTransferred는 durable 결과+내 lease 없음+foreign row의 조합에서 d
 | `NativeCleanup::row_snapshot` | readable foreign row는 None, unreadable은 Err. successor lease가 있고 row가 없으면 foreign으로 취급한다. successor가 없는 단순 row 부재는 기존 captured fallback과 normal clear/wake를 유지한다. 모델 parentLease0/2와 row false는 앞의 no-own-lease/foreign proof를 추상화하며 독립 저장 값을 신설하지 않는다. |
 
 기본 `native_prepare::enabled=false`는 유지한다. boot/custody-only/old generation/인접 종료/e2e 및 운영 증거 공급 포트는 이 ②에 포함하지 않는다. 기존 ①의 barrier와 drive 소유 계약을 바꾸지 않았다.
+
+
+## B2b 조각 1 — saved outcome / custody / boot (비활성)
+
+기준 부모 `f8c80664eae4955f477e51ffbf86d554eb3980d5`. 기존 mutation 전수표를 대체하지 않는다. `native_prepare::enabled()` false이며 control/supply/activation은 이 조각 밖이다. `NativeInputAttribution`의 Consumer 전이와 기존 PortTransfer unreadable 보강은 아래 값·진입점에서만 가져온다.
+
+| 코드 좌표 | 소비/변경과 값 | 모델 행동 |
+|---|---|---|
+| `src/services/tui_input/human_frame/history/v2/native.rs:248,274` | namespace/full registration/ticket, outcome None/Some, cleanup/notice false/true. 같은 원본 결과의 단조 병합; custody-only는 passive retained/settled, live slot 생성 0 | ConsumerAdopt |
+| `src/services/discord/inflight/removal/native_input_custody.rs:5,37` | canonical + 기존 custody complete manifest/copy digest; unreadable/partial/contradictory는 Err, terminal record 보존 | ConsumerAdopt / ConsumerRepair |
+| `src/services/discord/turn_finalizer/native_restore.rs:29,62` | 원본 generation>0 및 current 미만, saved proof/source/UUID/AnyKey true. 현재 fixture는 old=1,current=2, parentLease=0; 결과 미존재를 유지 | ConsumerAdopt / NativeBootNoFabrication / NativeBootNoLeaseRemint |
+| `src/services/discord/runtime_bootstrap/native_input.rs:4`, `runtime_bootstrap.rs:299` | enabled 조건 아래 준비→기존 reaper→restore; 오류면 intake 전 복귀 | ConsumerAdopt→ConsumerReap→ConsumerSettle |
+| `src/services/discord/inflight/removal/boot_reaper.rs:24,75,108` | 기존 prepare_before_reap 보존 오류/incomplete면 restore admission 보류. 기존 reaper의 exact loader row 삭제 소유 유지 | ConsumerReap / NativeBootFailureKeepsRow |
+| `src/services/discord/turn_finalizer/native_restore.rs:131,154` | read-only current row/lease 재확인, original exact started/offset snapshot CAS만; successor row이면 cleanup debt만 닫음, row 삭제/wake/global_active 변경 0 | ConsumerSettle / PortTransferred |
+| `src/services/discord/turn_finalizer/native_restore.rs:146,258,299` | Register barrier→actor 밖 PG 안내→Settle→cleanup ack→terminal custody 성공 확인. PG/보존 실패는 admission Pending | ConsumerSettle / NativeBootAdmission |
+| `src/services/discord/turn_finalizer/native_prepare.rs:123`, `native_restore.rs:346,357` | channel의 모든 restored input settled 여부를 actor-local 조회. fixed switch false면 기존 경로 유지 | ConsumerOwnerDrive admission |
+| `src/services/discord/router/message_handler/provider_dispatch/owner_input/native_input.rs:121,139`, `owner_input.rs:664,677` | 기존 owner recover/drive 연결; boot admission 뒤 wake. own lease 추가 claim/전역 gate 없음 | ConsumerOwnerDrive |
+
+기존 inflight age/root helper·active reconcile·owner recover·ledger key resolver의 의미 동일 leaf 이동은 소유 이전이 아니다. 결과 1회·옛 row만 삭제·후속 head 1회 fixture는 기존 reaper와 V2 owner Drive의 실제 진입점을 쓴다. unreadable은 실제 자료가 복구되어야 진행하며 시간으로 자료를 고치거나 결과를 합성하지 않는다. native idle WARN·ticket replay·lost-wake 감시는 사용자 범위 축소로 추가하지 않는다.

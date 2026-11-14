@@ -222,3 +222,117 @@ fn native_8148_boot_reader_exempts_only_decoded_historical_envelopes() {
         "a native ticket cannot use the historical exception"
     );
 }
+
+#[test]
+fn native_8148_boot_adopts_full_registration_without_reopening_a_live_slot() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let path = runtime.path().join("runtime/boot-adopt.json");
+    let _fixture = Fixture::at(path.clone(), 81489951, true);
+    let mut record = super::native::boot_records(&path, "claude")
+        .unwrap()
+        .remove(0);
+    for location in ["settlement", "registration"] {
+        let settlement = if location == "settlement" {
+            &mut record[location]
+        } else {
+            &mut record[location]["native_settlement"]
+        };
+        settlement["ticket"]["opaque_ticket"] = json!({"preserve": [1,2,3]});
+        settlement["opaque_settlement"] = json!({"preserve": "proof"});
+        settlement["warned"] = json!(true);
+    }
+    let record = super::native::RestoredRecord::decode(record).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let restored = Registry::at(path.clone());
+    assert_eq!(
+        restored
+            .adopt_native_records(std::slice::from_ref(&record))
+            .unwrap()
+            .len(),
+        1
+    );
+    let expected = serde_json::to_value(&record).unwrap();
+    let state = restored.json().unwrap();
+    assert_eq!(
+        state["passive"][0]["registration"],
+        expected["registration"]
+    );
+    assert_eq!(state["passive"][0]["state"], "retained");
+    assert!(state["planned"].as_array().unwrap().is_empty());
+    assert_eq!(state["version"], 3);
+    assert!(state["live"].as_array().unwrap().is_empty());
+    let bytes = std::fs::read(&path).unwrap();
+    restored
+        .adopt_native_records(std::slice::from_ref(&record))
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    for mutation in ["namespace", "frame", "frame_author", "outcome", "extra"] {
+        let mut bad = serde_json::to_value(&record).unwrap();
+        match mutation {
+            "namespace" => bad["namespace"] = json!("another-namespace"),
+            "frame" => bad["registration"]["frame"]["class_hash"] = json!("another-frame"),
+            "frame_author" => bad["registration"]["frame"]["author"] = json!("forged-author"),
+            "outcome" => {
+                bad["settlement"]["cleanup_complete"] = json!(true);
+                bad["registration"]["native_settlement"]["cleanup_complete"] = json!(true);
+            }
+            _ => {
+                bad["settlement"]["opaque_settlement"] = json!(false);
+                bad["registration"]["native_settlement"]["opaque_settlement"] = json!(false);
+            }
+        }
+        let rejected = super::native::RestoredRecord::decode(bad)
+            .and_then(|bad| restored.adopt_native_records(&[bad]).map(drop));
+        assert!(rejected.is_err(), "{mutation}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "{mutation}");
+    }
+}
+
+#[test]
+fn native_8148_boot_stale_custody_cannot_roll_back_a_durable_result_or_ack() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let path = runtime.path().join("runtime/boot-monotonic.json");
+    let f = Fixture::at(path.clone(), 81489952, false);
+    let old = super::native::RestoredRecord::decode(
+        super::native::boot_records(&path, "claude")
+            .unwrap()
+            .remove(0),
+    )
+    .unwrap();
+    let outcome = Fixture::outcome(Disposition::Executed);
+    f.history
+        .record_native_outcome("native-fixture", &f.ticket, &outcome)
+        .unwrap();
+    f.history
+        .ack_native_cleanup("native-fixture", &f.ticket, &outcome)
+        .unwrap();
+    f.history.project(&json!({"namespace":"native-fixture","head_injection":null,"retained_inputs":[],"terminal_identities":[{"identity":f.ticket.key["identity"]}]})).unwrap();
+    let before = f
+        .history
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    let merged = f
+        .history
+        .adopt_native_records(std::slice::from_ref(&old))
+        .unwrap();
+    assert_eq!(merged[0].settlement, before);
+    assert_eq!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap(),
+        before
+    );
+    let mut conflicting = serde_json::to_value(&merged[0]).unwrap();
+    for place in ["settlement", "registration"] {
+        let settlement = if place == "settlement" {
+            &mut conflicting[place]
+        } else {
+            &mut conflicting[place]["native_settlement"]
+        };
+        settlement["outcome"]["disposition"] = json!("withdrawn_not_executed");
+    }
+    let conflict = super::native::RestoredRecord::decode(conflicting).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(f.history.adopt_native_records(&[conflict]).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}

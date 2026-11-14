@@ -127,6 +127,30 @@ struct BootRecord<'a> {
     registration: &'a Registration,
 }
 
+#[cfg(unix)]
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct RestoredRecord {
+    pub(crate) namespace: String,
+    pub(crate) settlement: Settlement,
+    registration: Registration,
+}
+
+#[cfg(unix)]
+impl RestoredRecord {
+    pub(crate) fn decode(value: Value) -> Result<Self, String> {
+        let record: Self = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        record.settlement.validate(&record.registration)?;
+        if record.namespace.is_empty()
+            || record.namespace != record.registration.namespace
+            || record.registration.native_settlement.as_ref() != Some(&record.settlement)
+            || (record.settlement.cleanup_complete && record.settlement.outcome.is_none())
+        {
+            return Err("native custody registration mismatch".into());
+        }
+        Ok(record)
+    }
+}
+
 /// Returns no work for historical envelopes; a v3 read must succeed before any boot deletion.
 pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, String> {
     let raw = match std::fs::read_to_string(path) {
@@ -220,6 +244,151 @@ fn evidence_registrations(
 }
 
 impl Registry {
+    #[cfg(unix)]
+    pub(crate) fn native_boot_record(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+    ) -> Result<RestoredRecord, String> {
+        self.inspect(|snapshot| {
+            let (registration, _) = snapshot
+                .locate(namespace, &ticket.key)
+                .ok_or("native registration missing")?;
+            let settlement = registration
+                .native_settlement
+                .clone()
+                .ok_or("native ticket missing")?;
+            settlement.validate(registration)?;
+            if settlement.ticket != *ticket {
+                return Err("native boot record ticket changed".into());
+            }
+            Ok(RestoredRecord {
+                namespace: namespace.into(),
+                settlement,
+                registration: registration.clone(),
+            })
+        })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn adopt_native_records(
+        &self,
+        records: &[RestoredRecord],
+    ) -> Result<Vec<RestoredRecord>, String> {
+        self.transaction(|snapshot| {
+            let mut adopted = Vec::new();
+            for record in records {
+                let mut incoming = record.registration.clone();
+                if let Some((current, _)) = snapshot.locate(&record.namespace, &incoming.key) {
+                    let mut a = serde_json::to_value(current).map_err(|e| e.to_string())?;
+                    let mut b = serde_json::to_value(&incoming).map_err(|e| e.to_string())?;
+                    // Accept only the display compaction already performed by Passive::compact.
+                    let display = ["author", "body_hash", "header", "screen_prefix"];
+                    let compacted = [&a, &b].iter().any(|value| {
+                        display
+                            .iter()
+                            .all(|key| value["frame"][*key].as_str() == Some(""))
+                    });
+                    for value in [&mut a, &mut b] {
+                        value
+                            .as_object_mut()
+                            .ok_or("native registration object missing")?
+                            .remove("native_settlement");
+                        if compacted {
+                            for key in display {
+                                value["frame"]
+                                    .as_object_mut()
+                                    .ok_or("native frame missing")?
+                                    .remove(key);
+                            }
+                        }
+                    }
+                    if a != b {
+                        return Err("native custody conflicts with current registration".into());
+                    }
+                    let mut settled = current
+                        .native_settlement
+                        .clone()
+                        .ok_or("native ticket missing")?;
+                    if settled.ticket != record.settlement.ticket
+                        || settled
+                            .outcome
+                            .as_ref()
+                            .zip(record.settlement.outcome.as_ref())
+                            .is_some_and(|(a, b)| a != b)
+                    {
+                        return Err("native custody conflicts with current result".into());
+                    }
+                    if settled.outcome.is_none() {
+                        settled.outcome = record.settlement.outcome.clone();
+                    }
+                    settled.cleanup_complete |= record.settlement.cleanup_complete;
+                    settled.withdrawal_notice |= record.settlement.withdrawal_notice;
+                    settled.warned |= record.settlement.warned;
+                    for (key, value) in &record.settlement.extra {
+                        if settled
+                            .extra
+                            .get(key)
+                            .is_some_and(|current| current != value)
+                        {
+                            return Err("native custody extension changed".into());
+                        }
+                        settled.extra.insert(key.clone(), value.clone());
+                    }
+                    incoming = current.clone();
+                    incoming.native_settlement = Some(settled);
+                }
+                let key = &incoming.key;
+                if let Some(bound) = snapshot.live.iter_mut().find(|b| {
+                    b.registration.namespace == record.namespace && b.registration.key == *key
+                }) {
+                    bound.registration = incoming.clone();
+                } else if let Some(planned) = snapshot
+                    .planned
+                    .iter_mut()
+                    .find(|r| r.namespace == record.namespace && r.key == *key)
+                {
+                    *planned = incoming.clone();
+                } else if let Some(passive) = snapshot.passive.iter_mut().find(|p| {
+                    p.registration
+                        .as_ref()
+                        .is_some_and(|r| r.namespace == record.namespace && r.key == *key)
+                }) {
+                    passive.registration = Some(incoming.clone());
+                    passive.encoded = None;
+                } else {
+                    snapshot.passive.push(Passive {
+                        registration: Some(incoming.clone()),
+                        entry: None,
+                        state: if incoming
+                            .native_settlement
+                            .as_ref()
+                            .is_some_and(|s| s.cleanup_complete)
+                        {
+                            "settled"
+                        } else {
+                            "retained"
+                        }
+                        .into(),
+                        encoded: None,
+                    });
+                }
+                adopted.push(RestoredRecord {
+                    namespace: record.namespace.clone(),
+                    settlement: incoming
+                        .native_settlement
+                        .clone()
+                        .ok_or("native ticket missing")?,
+                    registration: incoming,
+                });
+            }
+            if !records.is_empty() {
+                snapshot.version = 3;
+            }
+            Ok(adopted)
+        })
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn native_evidence_registrations(
         &self,
@@ -364,7 +533,7 @@ impl Registry {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(unix)]
     pub(crate) fn ack_native_withdrawal_notice(
         &self,
         namespace: &str,
@@ -464,7 +633,7 @@ impl Registry {
         })
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(crate) fn ack_native_cleanup(
         &self,
         namespace: &str,

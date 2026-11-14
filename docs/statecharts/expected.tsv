@@ -503,3 +503,14 @@ input-single-path/NativeAttributionPortTransferAbsentBefore.cfg	NativeInputAttri
 input-single-path/NativeAttributionPortTransferAbsentFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionPortTransferUnreadable.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionPortTransferAbsentUnreadable.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootSavedBefore.cfg	NativeInputAttribution	-	NativeBootEventuallyDone
+input-single-path/NativeAttributionBootSavedFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootCustodyBefore.cfg	NativeInputAttribution	-	NativeBootEventuallyDone
+input-single-path/NativeAttributionBootCustodyFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootCorruptBefore.cfg	NativeInputAttribution	NativeBootFailureKeepsRow	NativeBootEventuallyDone
+input-single-path/NativeAttributionBootCorruptFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootOldGenerationBefore.cfg	NativeInputAttribution	-	NativeBootEventuallyDone
+input-single-path/NativeAttributionBootOldGenerationFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootQueueBefore.cfg	NativeInputAttribution	-	NativeBootEventuallyDone
+input-single-path/NativeAttributionBootQueueFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootPendingFixed.cfg	NativeInputAttribution	-	-

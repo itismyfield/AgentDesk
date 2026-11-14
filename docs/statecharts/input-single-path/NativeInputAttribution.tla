@@ -11,7 +11,8 @@ vars == <<pc, native, members, nativeQueue, stage, lease, rows, pending,
           result, count, proof, closed, ran, injected, wake, booted,
           generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
 
-ReviewModes == {"FollowerBefore", "FollowerFixed", "BootBefore", "BootFixed",
+ConsumerModes == {"BootSavedBefore", "BootSavedFixed", "BootCustodyBefore", "BootCustodyFixed", "BootCorruptBefore", "BootCorruptFixed", "BootOldGenerationBefore", "BootOldGenerationFixed", "BootQueueBefore", "BootQueueFixed", "BootPendingFixed"}
+ReviewModes == ConsumerModes \cup {"FollowerBefore", "FollowerFixed", "BootBefore", "BootFixed",
                 "BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
                 "PreflightBefore", "PreflightFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable"}
 ReviewBoot == Mode \in {"BootBefore", "BootFixed", "BootFailureFixed", "BootIgnoreFailure"}
@@ -21,18 +22,20 @@ Init == /\ pc = 0 /\ native = "Idle" /\ members = {} /\ nativeQueue = <<>>
         /\ pending = Ids /\ result = [i \in Ids |-> "None"]
         /\ count = [i \in Ids |-> 0] /\ proof = [i \in Ids |-> "None"]
         /\ closed = {} /\ ran = {} /\ injected = {} /\ wake = FALSE
-        /\ booted = TRUE /\ generation = 1 /\ known = TRUE
+        /\ booted = TRUE /\ generation = IF Mode \in ConsumerModes THEN 2 ELSE 1
+        /\ known = (Mode \notin {"BootCustodyBefore", "BootCustodyFixed"})
         /\ restarted = FALSE /\ foreignBody = FALSE /\ staleReleased = FALSE
         /\ warned = {} /\ incarnation = 1 /\ inputInc = [i \in Ids |-> 0]
         /\ proofInc = [i \in Ids |-> 0] /\ replaced = FALSE /\ staleSeen = FALSE /\ outsideQueued = FALSE
-        /\ review \in [phase : {IF ReviewBoot THEN "Prepare" ELSE IF Mode \in ReviewModes THEN "Registered" ELSE "Dormant"},
+        /\ review \in [phase : {IF ReviewBoot \/ Mode \in ConsumerModes THEN "Prepare" ELSE IF Mode \in ReviewModes THEN "Registered" ELSE "Dormant"},
              outcome : {"Executed", "Withdrawn"}, commits : {0, 1}, result : {"None", "Executed"},
-             row : {Mode \notin {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable"}}, preserved : {FALSE}, prepared : {FALSE}, head : {FALSE},
+             row : {Mode \notin {"BootQueueBefore", "BootQueueFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable"}}, preserved : {FALSE}, prepared : {FALSE}, head : {FALSE},
              failed : {Mode \in {"BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
-                "PreflightBefore", "PreflightFixed", "TransferUnreadable", "TransferAbsentUnreadable"}}, notice : {0},
-             parentLease : {IF Mode \in {"TransferAbsentBefore", "TransferAbsentFixed", "TransferAbsentUnreadable"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferUnreadable"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {FALSE}, neutral : {FALSE}]
+                "PreflightBefore", "PreflightFixed", "TransferUnreadable", "TransferAbsentUnreadable", "BootCorruptBefore", "BootCorruptFixed"}}, notice : {0},
+             parentLease : {IF Mode \in ConsumerModes \/ Mode \in {"TransferAbsentBefore", "TransferAbsentFixed", "TransferAbsentUnreadable"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferUnreadable"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {Mode \in {"BootQueueBefore", "BootQueueFixed"}}, neutral : {FALSE}]
         /\ review.commits = IF review.result = "Executed" THEN 1 ELSE 0
-        /\ ~ReviewBoot => review.result = "None"
+        /\ (~ReviewBoot /\ Mode \notin ConsumerModes) => review.result = "None"
+        /\ Mode \in ConsumerModes => review.result = IF Mode = "BootPendingFixed" THEN "None" ELSE "Executed"
         /\ Mode \notin ReviewModes => review.outcome = "Executed"
 
 ExternalEnqueue == /\ booted /\ pc = 0 /\ ~outsideQueued
@@ -340,4 +343,37 @@ NativePortRegistered == review.result # "None" => review.prepared
 NativeTransferKeepsSuccessor == Mode \notin {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable"}
                                 \/ (review.parentLease \in {0, 2} /\ review.parentRow /\ ~review.head)
 NativePortEventuallyDone == <>(review.phase = "Done" /\ review.neutral)
+
+\* The boot consumer adopts full custody without minting a live actor for the old generation.
+ConsumerStable == <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+ConsumerAdopt == /\ review.phase = "Prepare"
+                 /\ review' = [review EXCEPT !.phase = "Prepared", !.prepared = TRUE,
+                      !.preserved = ~review.failed]
+                 /\ known' = (IF Mode = "BootCustodyBefore" THEN known ELSE TRUE)
+                 /\ UNCHANGED ConsumerStable
+ConsumerRepair == /\ review.phase = "Prepared" /\ review.failed
+                  /\ review' = [review EXCEPT !.phase = "Prepare", !.prepared = FALSE, !.failed = FALSE]
+                  /\ UNCHANGED <<ConsumerStable, known>>
+ConsumerReap == /\ review.phase = "Prepared"
+                /\ (review.preserved \/ Mode = "BootCorruptBefore")
+                /\ review' = [review EXCEPT !.phase = "Reaped", !.row = FALSE]
+                /\ UNCHANGED <<ConsumerStable, known>>
+ConsumerSettle == /\ review.phase = "Reaped" /\ known /\ ~review.failed
+                  /\ review.result = "Executed"
+                  /\ Mode \notin {"BootSavedBefore", "BootOldGenerationBefore"}
+                  /\ review' = [review EXCEPT !.phase = "Consumed", !.nativeAck = TRUE]
+                  /\ UNCHANGED <<ConsumerStable, known>>
+ConsumerOwnerDrive == /\ review.phase \in {"Reaped", "Consumed"} /\ review.nativeAck /\ ~review.row
+                     /\ Mode # "BootQueueBefore"
+                     /\ review' = [review EXCEPT !.phase = "Done", !.head = TRUE]
+                     /\ UNCHANGED <<ConsumerStable, known>>
+ConsumerNext == ConsumerAdopt \/ ConsumerRepair \/ ConsumerReap \/ ConsumerSettle \/ ConsumerOwnerDrive
+ConsumerSpec == Init /\ [][ConsumerNext]_vars
+                /\ WF_vars(ConsumerAdopt) /\ WF_vars(ConsumerRepair) /\ WF_vars(ConsumerReap)
+                /\ WF_vars(ConsumerSettle) /\ WF_vars(ConsumerOwnerDrive)
+NativeBootFailureKeepsRow == review.failed => (review.row /\ ~review.nativeAck)
+NativeBootNoFabrication == review.result = "None" => (~review.nativeAck /\ ~review.head)
+NativeBootAdmission == review.nativeAck => (review.result = "Executed" /\ known /\ ~review.failed)
+NativeBootNoLeaseRemint == review.parentLease = 0 /\ generation = 2
+NativeBootEventuallyDone == <>(review.phase = "Done" /\ review.head /\ ~review.row)
 =============================================================================

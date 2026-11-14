@@ -16,3 +16,17 @@ stateDiagram-v2
     Admitted --> Wake: primary first cleanup only
     Admitted --> [*]: follower, parent unchanged
     Wake --> [*]
+
+    state "Boot custody consumer (OFF)" as BootConsumer {
+        [*] --> BootPrepare
+        BootPrepare --> BootHeld: unreadable / conflicting full record
+        BootHeld --> BootPrepare: actual artifact repaired
+        BootPrepare --> BootAdopted: full registration + saved proof validated
+        BootAdopted --> BootReaped: existing custody prepare then reaper
+        BootReaped --> BootPending: outcome absent (no fabrication)
+        BootReaped --> BootRegistered: saved outcome / actor-local barrier
+        BootRegistered --> BootSettle: notice enqueue outside actor
+        BootSettle --> BootHeld: exact authority or terminal custody failed
+        BootSettle --> BootConsumed: old-row CAS or debt-only transfer
+        BootConsumed --> BootOwnerDrive: existing recover / admission ready
+    }

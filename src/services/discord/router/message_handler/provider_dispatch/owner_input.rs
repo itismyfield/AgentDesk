@@ -661,30 +661,8 @@ pub(in crate::services::discord) async fn admit_start(
     .await
 }
 
-/// A restarted owner re-adopts the channel's V2 queue, settles a head whose window passed,
-/// projects history and posts owed notices, then wakes its drive.
 pub(in crate::services::discord) async fn recover(shared: &Shared, channel: ChannelId) {
-    use crate::services::discord::queue_io::input_owner::recovery;
-    use crate::services::tui_input::human_frame::history::v2::Registry;
-    let persistence = crate::services::discord::queue_dispatch::persistence_context;
-    let queue = crate::services::turn_orchestrator::v2_queue;
-    let queue = queue(&persistence(shared, &shared.provider, channel), channel);
-    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    let recovered = match (queue, Registry::runtime()) {
-        (Ok(queue), Ok(history)) => {
-            let at = (shared.provider.as_str(), channel.get(), now);
-            let pool = shared.pg_pool.as_ref();
-            recovery::recover(&shared.mailbox(channel), queue, history, pool, at).await
-        }
-        (Err(error), _) | (_, Err(error)) => Err(error),
-    };
-    match recovered {
-        Ok(_) => {
-            claude_handoff::recover(shared.clone(), channel);
-            wake(shared, channel);
-        }
-        Err(error) => tracing::warn!(channel_id = channel.get(), %error, "owner recovery held"),
-    }
+    native_input::recover(shared, channel).await;
 }
 
 /// Why a start waits unclaimed: a later event wakes it, or a read of its pane's native turn does.
@@ -697,6 +675,10 @@ enum Wait {
 /// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
 /// or the pane the start would take runs a native turn, cannot be read or cannot be named yet.
 async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
+    if !crate::services::discord::turn_finalizer::native_prepare::boot_ready(shared, channel).await
+    {
+        return Wait::Event;
+    }
     use crate::services::discord::inflight::{TurnSource, load_inflight_state_read_only};
     use crate::services::discord::turn_presence::activity::{Activity, activity_now};
     let (provider, id) = (&shared.provider, channel.get());

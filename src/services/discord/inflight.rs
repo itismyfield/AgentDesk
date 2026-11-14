@@ -140,6 +140,8 @@ mod removal;
 pub(in crate::services::discord) use removal::{
     invalidate_stale_generation_scoped, load_inflight_probe_scoped,
 };
+#[cfg(unix)]
+pub(in crate::services::discord) use removal::{native_boot_records, persist_native_boot_record};
 mod restart_mark;
 #[cfg(test)]
 pub(in crate::services::discord) use self::removal::custody_notice_text;
@@ -352,9 +354,7 @@ pub(super) fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-pub(super) fn inflight_runtime_root() -> Option<PathBuf> {
-    discord_inflight_root()
-}
+pub(super) use removal::inflight_runtime_root;
 
 /// #2235: expose the local `INFLIGHT_STATE_VERSION` so the recovery engine
 /// can decide whether an on-disk row was authored by a newer binary (i.e.

@@ -1,6 +1,10 @@
 //! Pre-key custody belongs to the finalizer actor; a leaf carries only its acknowledged handle.
 use super::*;
+#[path = "native_restore.rs"]
+mod native_restore;
 use crate::services::tui_input::human_frame::history::v2::{Registry, native::Ticket};
+pub(in crate::services::discord) use native_restore::{BootInputs, boot_ready};
+pub(super) use native_restore::{RestoreStep, RestoredInput};
 
 // Completion evidence production is outside this rollout, so default inputs keep their old path.
 pub(in crate::services::discord) fn enabled() -> bool {
@@ -107,6 +111,22 @@ impl TurnFinalizer {
 
 pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, LedgerEntry>) {
     match msg {
+        FinalizeMsg::NativeBoot {
+            inputs,
+            step,
+            shared,
+            ack,
+        } => {
+            let result = native_restore::restore(inputs, step, &shared, ledger).await;
+            let _ = ack.send(result);
+        }
+        FinalizeMsg::NativeBootReady { channel, ack } => {
+            let ready = ledger
+                .values()
+                .filter(|e| e.turn_key.channel_id == channel)
+                .all(|entry| entry.native_boot_inputs.values().all(|input| input.settled));
+            let _ = ack.send(ready);
+        }
         FinalizeMsg::NativeRegister {
             key,
             actor,

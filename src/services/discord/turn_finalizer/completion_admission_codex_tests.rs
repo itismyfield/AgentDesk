@@ -37,6 +37,8 @@ fn finished_turn() -> LedgerEntry {
     LedgerEntry {
         #[cfg(unix)]
         native_inputs: HashMap::new(),
+        #[cfg(unix)]
+        native_boot_inputs: HashMap::new(),
         recovery_lease: None,
         phase: Phase::Finalized,
         relay_owner: RelayOwnerKind::Watcher,

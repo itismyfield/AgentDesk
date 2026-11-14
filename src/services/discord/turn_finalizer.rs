@@ -38,7 +38,7 @@ use super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome};
 mod actor_state;
 #[cfg(unix)]
 pub(in crate::services::discord) mod native_prepare;
-use actor_state::panic_payload_summary;
+use actor_state::{panic_payload_summary, resolve_ledger_key};
 pub(in crate::services::discord) mod cleanup;
 mod completion_admission;
 mod completion_admission_actor;
@@ -186,20 +186,6 @@ pub(in crate::services::discord) struct LedgerKey {
     pub(in crate::services::discord) channel_id: ChannelId,
     pub(in crate::services::discord) generation: u64,
     pub(in crate::services::discord) user_msg_id: u64,
-}
-
-/// Resolve a submission to the ledger entry it acts on. A real `user_msg_id`
-/// uses its exact key (a stale terminal of a finalized turn matches the
-/// retained `Finalized` entry → `AlreadyFinalized`); a channel-only id-0
-/// terminal collapses per `resolve_channel_only` (never prematurely finalizing
-/// a queued follow-up).
-fn resolve_ledger_key(ledger: &HashMap<LedgerKey, LedgerEntry>, key: TurnKey) -> LedgerKey {
-    resolve_channel_only(
-        key,
-        ledger
-            .iter()
-            .map(|(lk, entry)| (lk, entry.phase == Phase::Finalized)),
-    )
 }
 
 /// #3016 S1 (read-only): does the channel's `generation` have a live
@@ -623,7 +609,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         actor_state::handle_start(msg, &mut ledger, &mut pending_admission, &mut cached_shared);
                     }
                     #[cfg(unix)]
-                    msg @ (FinalizeMsg::NativeRegister { .. } | FinalizeMsg::NativeKeyed { .. } | FinalizeMsg::NativeScope { .. }) => {
+                    msg @ (FinalizeMsg::NativeRegister { .. } | FinalizeMsg::NativeKeyed { .. } | FinalizeMsg::NativeScope { .. } | FinalizeMsg::NativeBoot { .. } | FinalizeMsg::NativeBootReady { .. }) => {
                         native_prepare::handle(msg, &mut ledger).await;
                     }
                     #[cfg(all(test, unix))]

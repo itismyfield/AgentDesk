@@ -4,9 +4,9 @@ use self::classify as classify_queued_record;
 #[cfg(all(test, unix))]
 use super::{Ordered, SourceBinding};
 #[cfg(all(test, unix))]
-use crate::services::tui_input::human_frame::history::v2::native::{
-    Disposition, Ticket, frame_hashes,
-};
+use crate::services::tui_input::human_frame::history::v2::native::frame_hashes;
+#[cfg(unix)]
+use crate::services::tui_input::human_frame::history::v2::native::{Disposition, Ticket};
 use serde_json::Value;
 
 /// What one record says about the queue.
@@ -130,15 +130,15 @@ pub(super) struct Record {
     pub(super) boundaries: Vec<Ordered>,
 }
 
-#[cfg(all(test, unix))]
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Run {
     pub(crate) start: u64,
     pub(crate) native_id: Option<String>,
 }
 
-#[cfg(all(test, unix))]
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Evidence {
     pub(crate) namespace: String,
     pub(crate) ticket: Ticket,
