@@ -766,6 +766,9 @@ async fn a_headless_run_waits_behind_a_busy_primary_and_starts_no_provider_pg() 
     fixture.db.drop().await;
 }
 
+/// One way a launch can lose its contract.
+type LaunchEdit<'a> = &'a dyn Fn(&mut Value);
+
 #[tokio::test]
 async fn a_headless_claim_whose_launch_lost_its_contract_is_refused_before_admission_pg() {
     if !api_child(&format!(
@@ -777,14 +780,14 @@ async fn a_headless_claim_whose_launch_lost_its_contract_is_refused_before_admis
     let (_store, _executor, claimed, _) = headless_claim(&fixture).await;
     let before = channel_state(&fixture, PRIMARY).await;
     // The launch names its claimed run, as the launcher's metadata does.
-    let launch = |edit: &dyn Fn(&mut Value)| {
+    let launch = |edit: LaunchEdit| {
         let mut metadata = routine(Some(json!("headless")));
         metadata["routine_run_id"] = json!(claimed.run_id);
         metadata["silent"] = json!(true);
         edit(&mut metadata);
         metadata
     };
-    let cases: [(&str, &dyn Fn(&mut Value)); 6] = [
+    let cases: [(&str, LaunchEdit); 6] = [
         ("no mark", &|launch| {
             drop(launch.as_object_mut().unwrap().remove("routine_run_mode"))
         }),
