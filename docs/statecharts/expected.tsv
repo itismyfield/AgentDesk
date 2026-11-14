@@ -690,3 +690,7 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
+input-single-path/ClaudeReadinessCurrentClearIgnoreCertificate.cfg	ClaudeReadiness	CurrentReadyRequiresCertificate	-
+input-single-path/ClaudeReadinessCurrentClearInvalid.cfg	ClaudeReadiness	-	-
+input-single-path/ClaudeReadinessCurrentClearToctou.cfg	ClaudeReadiness	-	-
+input-single-path/ClaudeReadinessCurrentClearValid.cfg	ClaudeReadiness	-	-
