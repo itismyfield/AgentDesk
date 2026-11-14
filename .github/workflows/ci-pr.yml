@@ -397,6 +397,7 @@ jobs:
               - 'src/services/discord/turn_lease_tests.rs'
               - 'src/services/discord/turn_presence/activity.rs'
               - 'src/services/discord/turn_presence/activity/effort_restart.rs'
+              - 'src/services/discord/turn_presence/activity/native_input.rs'
               - 'src/services/discord/turn_presence/activity/tail.rs'
               - 'src/services/discord/turn_presence/supervisor.rs'
               - 'src/services/discord/turn_presence/supervisor_tests.rs'
