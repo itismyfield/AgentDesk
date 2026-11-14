@@ -1755,7 +1755,7 @@ async fn control_next_head(
 
     mailbox
         .v2_adopt(
-            root.join(format!("next-{channel}.json")),
+            root.join("runtime").join(format!("next-{channel}.json")),
             format!("next-{channel}"),
         )
         .await
@@ -1814,6 +1814,27 @@ async fn control_case(kind: &str) {
     use super::super::native_prepare::Handle;
     use crate::test_support::wait::{WAIT_CAP, await_within};
     let runtime = crate::config::TestRuntimeRootGuard::new();
+    if kind == "cancel" {
+        let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+        let outside = registry.handle(ChannelId::new(81489790));
+        let error = await_within(
+            outside.v2_adopt(runtime.path().join("outside-runtime.json"), "probe".into()),
+            WAIT_CAP,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("directory sync unconfirmed"), "{error}");
+        let inside = registry.handle(ChannelId::new(81489791));
+        await_within(
+            inside.v2_adopt(
+                runtime.path().join("runtime/inside-runtime.json"),
+                "probe".into(),
+            ),
+            WAIT_CAP,
+        )
+        .await
+        .unwrap();
+    }
     let channel = 81489701
         + ["cancel", "terminate", "clear", "stop"]
             .iter()

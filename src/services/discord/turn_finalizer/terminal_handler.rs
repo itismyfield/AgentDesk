@@ -143,6 +143,10 @@ pub(super) async fn handle_terminal(
     // Gate-timeout with a still-busy pane AND a live relay owner is the only
     // event that defers instead of finalizing now.
     let mut effective_ctx = ctx;
+    #[cfg(unix)]
+    if entry.completion_admission.native_input.is_some() {
+        effective_ctx.allow_completion_cleanup = false;
+    }
     if let TerminalEvent::GateTimeout {
         pane_quiescent: Some(false),
     } = event
