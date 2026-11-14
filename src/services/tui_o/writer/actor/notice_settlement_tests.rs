@@ -468,6 +468,7 @@ async fn retained_fresh_execution_of_same_native_source_uses_its_immutable_proof
         provider_root: None,
         first_prompt_digest: None,
         source_policy: None,
+        resume_start: None,
     })
     .unwrap();
     let frame = c.frame();
@@ -532,6 +533,7 @@ async fn unrelated_missing_context_blocks_only_its_frame_and_recovery_rechecks()
             provider_root: None,
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         })
         .unwrap();
         let mut key = registration(
