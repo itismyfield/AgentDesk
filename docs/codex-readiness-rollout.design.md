@@ -1,5 +1,7 @@
 # Codex 준비·작업 중·/stop 판정을 rollout·훅·프로세스 신호로 옮기기 — #8082 설계 d3
 
+<!-- doc-path-refs: proposed docs/herdr-parity-restart.design.md -->
+
 기준 코드: `082c77aa4e06b81c76b614f55b8fed73ce01923f` (#8081 B1 리뷰 CLEAN head, main 미착지).
 d3까지는 설계·모델만 다뤘다. 구현은 5절의 조각 순서로 들어가고, 조각 A가 확인한 사실은 **A1** 표시로 적었다.
 `src/services/` 접두어는 생략한다. 표기: [C] 이 base의 코드에서 확인, [F] 저장소 fixture에서 확인, [U] 확인하지 못한 운영 전제.
@@ -353,7 +355,7 @@ marker 정의를 바꿀 때 영향을 받는 소비자(1.6의 전수에서 "판�
 | `:46` `model_first_status`·`:12` `line_is_codex_model_first_status` | `:219`(모달), `:279`(초안 판독기) | 같음 | 초안·모달 위치 찾기 |
 | `:145` `short_composer_footer` | `:204`, `:219`, `:282`, `:329` | 같음(`:204`는 남는 `recent_has_compact_composer` 안) | 초안·모달 |
 | `:183` `pane_has_dim_composer` | `input.rs:1439` → `:433`(초안), `:1299`(준비) | `input.rs:433` | 흐린 placeholder는 초안이 아님 |
-| `:197` `recent_has_compact_composer` | `input.rs:1473` → `:933`(초안), `herdr_cancel.rs:37`(veto), `:1466`(준비) | `:933`, `herdr_cancel.rs:37` | 초안·veto |
+| `:197` `recent_has_compact_composer` | `input.rs:1473` → `input.rs:933`(초안), `herdr_cancel.rs:37`(veto), `input.rs:1466`(준비) | `input.rs:933`, `herdr_cancel.rs:37` | 초안·veto |
 | `:208` `pane_has_interactive_modal` | `input.rs:1036` → `submission.rs:209`, `herdr_cancel.rs:15`, `input.rs:1258`·`:1295`(준비) | `submission.rs:209`, `herdr_cancel.rs:15` | 모달 veto |
 | `:247` `composer_draft_with_start_in_pane` | `submission.rs:165`, `:184` | 같음 | 초안 판독(5번) |
 

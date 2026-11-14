@@ -1,6 +1,5 @@
-//! One judgment of whether a Codex pane takes an input: the bound rollout's latest turn read from
-//! this execution's floor, the Stop and UserPromptSubmit hooks of that turn, and the provider
-//! process. The pane's screen is no input here.
+//! Whether a Codex pane takes an input, judged from the bound rollout's latest turn since this
+//! execution's floor, that turn's Stop and UserPromptSubmit hooks, and the provider process.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -141,9 +140,8 @@ fn evidence() -> std::sync::MutexGuard<'static, HashMap<Key, Evidence>> {
     EVIDENCE.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-/// Records a Codex Stop or UserPromptSubmit hook as evidence of the turn it names. Only a hook
-/// whose binding observation was accepted, whose context is the execution's own canonical one and
-/// whose publish time lies inside that execution is kept.
+/// Keeps a Codex Stop or UserPromptSubmit hook as evidence of the turn it names: only one with an
+/// accepted binding, the execution's own stored context and a publish time inside that execution.
 pub(crate) fn note_hook(
     accepted: bool,
     provider: &str,
