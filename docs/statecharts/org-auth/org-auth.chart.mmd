@@ -1,0 +1,13 @@
+stateDiagram-v2
+  [*] --> Read
+  Read --> Missing
+  Read --> Invalid: malformed / read error
+  Read --> Decoded
+  Decoded --> RecoveryInstalled: runtime / valid recovery / install once
+  Decoded --> Cleared: runtime / invalid recovery / clear once
+  Missing --> Cleared: runtime / clear once
+  Invalid --> Cleared: runtime / clear once
+  Decoded --> Projected: auth / zero effects (also recovery-invalid)
+  RecoveryInstalled --> Projected
+  Cleared --> [*]: no snapshot
+  Projected --> [*]

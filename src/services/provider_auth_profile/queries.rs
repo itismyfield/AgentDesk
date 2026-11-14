@@ -1,98 +1,76 @@
-//! Existing org auth projections, including the org loader's recovery registration.
-use std::collections::HashMap;
-
+//! Runtime auth projections retain the org loader's recovery registration.
 use super::fallback::FallbackPolicy;
 use crate::domain::provider::ProviderKind;
 use crate::domain::provider_auth_profile::{ProfileBinding, ProviderAuthProfileDef};
-use crate::services::discord::org_schema::{
-    OrgSchema, configured_auth_profile, load_org_schema, provider_primary_profile,
+use crate::services::org_catalog::{
+    AuthCatalogSnapshot, PrimaryProfileMap, ProfileBindingInput, configured_auth_profile,
+    load_runtime_auth_catalog, provider_primary_profile,
 };
+use std::collections::HashMap;
 
 pub(crate) fn provider_auth_catalog() -> HashMap<String, ProviderAuthProfileDef> {
-    load_org_schema()
-        .and_then(|schema| schema.provider_auth_profiles)
+    load_runtime_auth_catalog()
+        .map(|snapshot| snapshot.profiles)
         .unwrap_or_default()
 }
 
-pub(crate) fn provider_auth_primary_profiles() -> HashMap<String, String> {
-    load_org_schema()
-        .and_then(|schema| schema.provider_auth_primary_profiles)
+pub(crate) fn provider_auth_primary_profiles() -> PrimaryProfileMap {
+    load_runtime_auth_catalog()
+        .map(|snapshot| snapshot.primary_profiles)
         .unwrap_or_default()
 }
 
 pub(crate) fn provider_auth_fallback_policies() -> HashMap<String, FallbackPolicy> {
-    load_org_schema()
-        .map(|schema| schema.provider_auth_fallbacks)
+    load_runtime_auth_catalog()
+        .map(|snapshot| snapshot.fallback_policies)
         .unwrap_or_default()
 }
 
 pub(crate) fn list_profile_bindings() -> Vec<ProfileBinding> {
-    let Some(schema) = load_org_schema() else {
-        return Vec::new();
-    };
-    list_profile_bindings_from_schema(&schema)
+    load_runtime_auth_catalog()
+        .map(list_profile_bindings_from_snapshot)
+        .unwrap_or_default()
 }
 
-pub(crate) fn list_profile_bindings_from_schema(schema: &OrgSchema) -> Vec<ProfileBinding> {
-    let mut bindings = Vec::new();
-    for (agent_id, def) in &schema.agents {
-        let provider = def
-            .provider
-            .as_deref()
-            .and_then(ProviderKind::from_str)
-            .map(|kind| kind.as_str().to_string())
-            .unwrap_or_else(|| {
-                def.provider
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string())
-            });
-        let explicit_profile = configured_auth_profile(None, def.auth_profile.as_deref());
-        let profile_id = explicit_profile
-            .map(str::to_string)
-            .unwrap_or_else(|| provider_primary_profile(&schema, def.provider.as_deref()));
-        bindings.push(ProfileBinding {
-            agent_id: agent_id.clone(),
-            provider,
-            profile_id,
-            channel_id: None,
-            is_explicit: explicit_profile.is_some(),
-        });
-    }
-    if let Some(channels) = schema
-        .channels
-        .as_ref()
-        .and_then(|channels| channels.by_id.as_ref())
-    {
-        for (channel_id, binding) in channels {
-            let agent_def = schema.agents.get(&binding.agent);
-            let provider = binding
+pub(crate) fn list_profile_bindings_from_snapshot(
+    snapshot: AuthCatalogSnapshot,
+) -> Vec<ProfileBinding> {
+    snapshot
+        .bindings
+        .into_iter()
+        .map(|input: ProfileBindingInput| {
+            let provider = input
                 .provider
                 .as_deref()
-                .or(agent_def.and_then(|def| def.provider.as_deref()))
                 .and_then(ProviderKind::from_str)
                 .map(|kind| kind.as_str().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let explicit_profile = configured_auth_profile(
-                binding.auth_profile.as_deref(),
-                agent_def.and_then(|def| def.auth_profile.as_deref()),
+                .unwrap_or_else(|| {
+                    if input.channel_id.is_some() {
+                        "unknown".to_string()
+                    } else {
+                        input
+                            .provider
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string())
+                    }
+                });
+            let explicit = configured_auth_profile(
+                input.channel_profile.as_deref(),
+                input.agent_profile.as_deref(),
             );
-            let profile_id = explicit_profile.map(str::to_string).unwrap_or_else(|| {
+            let profile_id = explicit.map(str::to_string).unwrap_or_else(|| {
                 provider_primary_profile(
-                    &schema,
-                    binding
-                        .provider
-                        .as_deref()
-                        .or(agent_def.and_then(|def| def.provider.as_deref())),
+                    Some(&snapshot.primary_profiles),
+                    input.provider.as_deref(),
                 )
             });
-            bindings.push(ProfileBinding {
-                agent_id: binding.agent.clone(),
+            ProfileBinding {
+                agent_id: input.agent_id,
                 provider,
                 profile_id,
-                channel_id: Some(channel_id.clone()),
-                is_explicit: explicit_profile.is_some(),
-            });
-        }
-    }
-    bindings
+                channel_id: input.channel_id,
+                is_explicit: explicit.is_some(),
+            }
+        })
+        .collect()
 }

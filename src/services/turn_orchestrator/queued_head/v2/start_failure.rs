@@ -46,6 +46,12 @@ impl Owner {
         }
     }
     pub(super) fn retry_member(&self, front: &PendingQueueItem, member: &PendingQueueItem) -> bool {
+        if self
+            .handoff()
+            .is_some_and(|journal| journal.retry_after_ms > 0)
+        {
+            return false;
+        }
         !self.starts.failures.contains_key(&self.start_key(front))
             || self.starts.failures.contains_key(&self.start_key(member))
     }
@@ -88,7 +94,10 @@ impl Owner {
                     .get(&key)
                     .copied()
                     .unwrap_or(0)
-                    .saturating_add(1);
+                    .saturating_add(1)
+                    .max(self.handoff().map_or(0, |journal| {
+                        journal.failures.saturating_add(1).min(u8::MAX as u32) as u8
+                    }));
                 (key, n)
             })
             .collect();
@@ -139,6 +148,15 @@ impl Owner {
                 }
             }
             next.items.drain(..members.len());
+            if next.unfinished_handoff.as_ref().is_some_and(|journal| {
+                journal.ended
+                    || !next
+                        .items
+                        .iter()
+                        .any(|item| sources::identity(item) == journal.original)
+            }) {
+                next.unfinished_handoff = None;
+            }
         }
         self.commit(next)?;
         for (key, n) in counts {

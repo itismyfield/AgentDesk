@@ -983,6 +983,9 @@ src/
 │   │   ├── verification_runner_tests.rs
 │   │   ├── view.rs
 │   │   └── view_tests.rs
+│   ├── channel_roles/
+│   │   ├── config_projection.rs
+│   │   └── memory_policy.rs
 │   ├── claude/
 │   │   ├── first_input/
 │   │   │   └── tests.rs
@@ -2344,6 +2347,7 @@ src/
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   ├── handoff_retry_tests.rs
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_busy_gate_tests.rs
 │   │   │   │   │   ├── owner_input_busy_race_tests.rs
@@ -2379,6 +2383,7 @@ src/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
 │   │   │   │   │   ├── clear_tests.rs
+│   │   │   │   │   ├── handoff_launch_tests.rs
 │   │   │   │   │   ├── legacy_clear_tests.rs
 │   │   │   │   │   ├── policy_tests.rs
 │   │   │   │   │   ├── preclaim_tests.rs
@@ -3685,6 +3690,9 @@ src/
 │   ├── opencode/
 │   │   ├── server_launch.rs
 │   │   └── streaming_entry.rs
+│   ├── org_catalog/
+│   │   ├── auth_projection.rs
+│   │   └── document.rs
 │   ├── pipeline_routes/
 │   │   ├── stage_validation.rs
 │   │   └── stage_validation_tests.rs
@@ -4035,7 +4043,8 @@ src/
 │   │   │   │   ├── notice_owner/
 │   │   │   │   │   ├── census/
 │   │   │   │   │   │   └── census_tests.rs
-│   │   │   │   │   └── census.rs
+│   │   │   │   │   ├── census.rs
+│   │   │   │   │   └── generation.rs
 │   │   │   │   ├── v2/
 │   │   │   │   │   ├── carried.rs
 │   │   │   │   │   ├── carried_tests.rs
@@ -4153,6 +4162,7 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── ledger/
 │   │   │   │   ├── input_notices/
+│   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   └── input_notices.rs
 │   │   │   ├── spool/
@@ -4204,6 +4214,8 @@ src/
 │   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
+│   │   │   │   ├── notice_settlement.rs
+│   │   │   │   ├── notice_settlement_tests.rs
 │   │   │   │   ├── notice_work.rs
 │   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs
@@ -4245,6 +4257,7 @@ src/
 │   │   │   │   ├── history_tests.rs
 │   │   │   │   ├── migration.rs
 │   │   │   │   ├── migration_tests.rs
+│   │   │   │   ├── retry.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── late_adopt/
 │   │   │   │   ├── claude/
@@ -4667,6 +4680,7 @@ src/
 │   ├── automation_candidate_contract.rs
 │   ├── automation_candidate_materializer.rs
 │   ├── calendar_sync.rs
+│   ├── channel_roles.rs
 │   ├── claude.rs
 │   ├── claude_command.rs
 │   ├── claude_compact_context.rs
@@ -4711,6 +4725,7 @@ src/
 │   ├── monitoring_store.rs
 │   ├── opencode.rs
 │   ├── operator_connectors.rs
+│   ├── org_catalog.rs
 │   ├── pane_readiness.rs
 │   ├── pipeline_override.rs
 │   ├── pipeline_routes.rs

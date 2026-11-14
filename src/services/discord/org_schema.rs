@@ -1,206 +1,55 @@
 use std::collections::HashMap;
 
 use poise::serenity_prelude::ChannelId;
-use serde::Deserialize;
 
 use super::runtime_store::org_schema_path;
-use super::settings::{
-    MemoryConfigOverride, RegisteredChannelBinding, RoleBinding, resolve_memory_settings,
-};
+use super::settings::{RegisteredChannelBinding, RoleBinding};
+use crate::domain::provider_auth_profile::FallbackPolicy;
 use crate::services::agent_identity::{self, identity_from_parts, identity_label};
 use crate::services::provider::ProviderKind;
-use crate::services::provider_auth_profile::fallback::{
-    self, FallbackPolicy, FallbackPolicyRuntime,
-};
-use crate::services::provider_auth_profile::{ProviderAuthProfileDef, validate_catalog};
+use crate::services::provider_auth_profile::ProviderAuthProfileDef;
+#[cfg(test)]
+use crate::services::provider_auth_profile::fallback::FallbackPolicyRuntime;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
-// ─── YAML Schema Types ──────────────────────────────────────────────────────
+// ─── Compatibility document access ─────────────────────────────────────────
+use crate::services::org_catalog::OrgSchema;
+use crate::services::org_catalog::configured_auth_profile;
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct OrgSchema {
-    #[serde(default)]
-    pub provider_auth_fallbacks: HashMap<String, FallbackPolicy>,
-    // #3034: serde wire fields deserialized from the org schema for forward
-    // compatibility; no in-code reader today.
-    #[allow(dead_code)]
-    pub version: u32,
-    // #3034: serde wire field deserialized from the org schema for forward
-    // compatibility; no in-code reader today.
-    #[allow(dead_code)]
-    pub name: Option<String>,
-    // serde-deserialized; consumed by `load_shared_prompt_path` (the shared-prompt
-    // fallback chain whose root caller is currently dormant — see that fn).
-    #[allow(dead_code)]
-    pub shared_prompt: Option<String>,
-    /// Root directory for prompt files (e.g. "$AGENTDESK_ROOT_DIR/prompts").
-    /// When set, agent prompt_file is auto-derived as
-    /// `{prompts_root}/agents/{role_id}/IDENTITY.md` if not explicitly specified.
-    pub prompts_root: Option<String>,
-    /// Root directory for skill files (e.g. "$AGENTDESK_ROOT_DIR/skills").
-    // #3034: serde wire field; the loader was removed as dead, the config
-    // surface is retained for forward compatibility.
-    #[allow(dead_code)]
-    pub skills_root: Option<String>,
-    pub agents: HashMap<String, AgentDef>,
-    pub channels: Option<ChannelsConfig>,
-    pub suffix_map: Option<HashMap<String, String>>,
-    #[serde(default)]
-    pub provider_auth_profiles: Option<HashMap<String, ProviderAuthProfileDef>>,
-    #[serde(default)]
-    pub provider_auth_primary_profiles: Option<HashMap<String, String>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct AgentDef {
-    pub display_name: String,
-    pub prompt_file: Option<String>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub workspace: Option<String>,
-    pub peer_agents: Option<bool>,
-    #[serde(default)]
-    pub auth_profile: Option<String>,
-    #[serde(default)]
-    pub memory: Option<MemoryConfigOverride>,
-    #[serde(default)]
-    pub recovery: Option<crate::services::agent_recovery::RecoveryConfigWire>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChannelsConfig {
-    pub by_id: Option<HashMap<String, ChannelBinding>>,
-    pub by_name: Option<ChannelsByName>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChannelBinding {
-    pub agent: String,
-    pub workspace: Option<String>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub peer_agents: Option<bool>,
-    #[serde(default)]
-    pub auth_profile: Option<String>,
-    #[serde(default)]
-    pub memory: Option<MemoryConfigOverride>,
-    #[serde(default)]
-    pub recovery: Option<crate::services::agent_recovery::RecoveryConfigWire>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChannelsByName {
-    pub enabled: Option<bool>,
-    pub mappings: Option<HashMap<String, ChannelBinding>>,
-}
-
-// ─── Loading ────────────────────────────────────────────────────────────────
+pub(in crate::services) use crate::services::org_catalog::parse_org_schema;
 
 pub(crate) fn load_org_schema() -> Option<OrgSchema> {
-    match load_org_schema_for_auth() {
-        Ok(Some(schema)) => match install_org_recovery(&schema) {
-            Ok(()) => Some(schema),
-            Err(error) => {
-                tracing::error!(error = %error, "org.yaml recovery policy rejected");
-                crate::services::agent_recovery::clear_catalog();
-                None
-            }
-        },
-        Ok(None) => {
-            crate::services::agent_recovery::clear_catalog();
-            None
-        }
-        Err(error) => {
-            crate::services::agent_recovery::clear_catalog();
-            tracing::error!("{error}");
-            None
-        }
-    }
+    crate::services::org_catalog::load_runtime_document_at(org_schema_path().as_deref())
 }
 
-fn load_org_schema_for_auth() -> Result<Option<OrgSchema>, String> {
+fn load_org_schema_for_auth()
+-> Result<Option<crate::services::org_catalog::AuthCatalogSnapshot>, String> {
     let Some(path) = org_schema_path() else {
         return Ok(None);
     };
-    crate::services::provider_auth_profile::repository::read_org_schema(&path)
+    crate::services::org_catalog::read_auth_catalog_at(&path)
+}
+
+pub(crate) fn provider_primary_profile(schema: &OrgSchema, provider: Option<&str>) -> String {
+    crate::services::org_catalog::provider_primary_profile(
+        schema.provider_auth_primary_profiles.as_ref(),
+        provider,
+    )
 }
 
 #[cfg(test)]
 #[path = "org_schema/auth_selection_tests.rs"]
 mod auth_selection_tests;
 #[cfg(test)]
-use crate::services::provider_auth_profile::queries::list_profile_bindings_from_schema;
+fn list_profile_bindings_from_schema(
+    schema: OrgSchema,
+) -> Vec<crate::domain::provider_auth_profile::ProfileBinding> {
+    crate::services::provider_auth_profile::queries::list_profile_bindings_from_snapshot(
+        schema.into(),
+    )
+}
 #[cfg(test)]
 pub(crate) use crate::services::provider_auth_profile::queries::provider_auth_catalog;
-
-pub(crate) fn parse_org_schema(content: &str) -> Result<OrgSchema, String> {
-    let schema: OrgSchema =
-        serde_yaml::from_str(content).map_err(|error| format!("org schema yaml: {error}"))?;
-    if let Some(catalog) = schema.provider_auth_profiles.as_ref() {
-        validate_catalog(catalog).map_err(|error| error.to_string())?;
-    }
-    for (name, policy) in &schema.provider_auth_fallbacks {
-        let provider = crate::services::provider_auth_profile::intern_provider(name)
-            .map_err(|error| error.to_string())?;
-        if name != provider.as_str() {
-            return Err(format!(
-                "profile fallback provider must use canonical name '{}'",
-                provider.as_str()
-            ));
-        }
-        policy.validate(
-            &provider,
-            &schema.provider_auth_profiles.clone().unwrap_or_default(),
-        )?;
-    }
-    if let Some(primary) = schema.provider_auth_primary_profiles.as_ref() {
-        let catalog = schema
-            .provider_auth_profiles
-            .as_ref()
-            .cloned()
-            .unwrap_or_default();
-        for (provider, profile_id) in primary {
-            let kind = ProviderKind::from_str(provider)
-                .ok_or_else(|| format!("unknown primary profile provider '{provider}'"))?;
-            if profile_id == "default" {
-                continue;
-            }
-            let profile = catalog.get(profile_id).ok_or_else(|| {
-                format!(
-                    "provider primary '{provider}' references unknown auth_profile '{profile_id}'"
-                )
-            })?;
-            if !profile.provider.eq_ignore_ascii_case(kind.as_str()) {
-                return Err(format!(
-                    "provider primary '{provider}' auth_profile '{profile_id}' belongs to '{}'",
-                    profile.provider
-                ));
-            }
-        }
-    }
-    Ok(schema)
-}
-
-pub(crate) fn configured_auth_profile<'a>(
-    channel: Option<&'a str>,
-    agent: Option<&'a str>,
-) -> Option<&'a str> {
-    let input = crate::domain::provider_auth_profile::ProfileOverrides::new(channel, agent);
-    input.channel.or(input.agent)
-}
-
-pub(crate) fn provider_primary_profile(schema: &OrgSchema, provider: Option<&str>) -> String {
-    provider
-        .and_then(|provider| {
-            let provider = provider.to_ascii_lowercase();
-            schema
-                .provider_auth_primary_profiles
-                .as_ref()
-                .and_then(|profiles| profiles.get(&provider))
-        })
-        .cloned()
-        .unwrap_or_else(|| "default".to_string())
-}
 
 fn fallback_profile_available(
     provider: &ProviderKind,
@@ -228,13 +77,13 @@ pub(crate) fn advance_auth_profile(
         return Ok(None);
     };
     let policy = schema
-        .provider_auth_fallbacks
+        .fallback_policies
         .get(provider.as_str())
         .cloned()
         .unwrap_or_default();
-    let catalog = schema.provider_auth_profiles.unwrap_or_default();
+    let catalog = schema.profiles;
     let binding = resolve_role_binding(ChannelId::new(channel), None);
-    Ok(fallback::fail(
+    Ok(crate::services::provider_auth_profile::fallback::fail(
         provider,
         channel,
         request,
@@ -276,25 +125,33 @@ pub(crate) fn spawn_auth_overlay(
 /// The account a launch for the channel and agent is configured to use: a recovery pin first,
 /// then the channel or agent setting, then the provider primary; `true` when a pin chose it.
 fn configured_launch_profile(
-    schema: Option<&OrgSchema>,
+    schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
     provider: &ProviderKind,
     channel_id: Option<u64>,
     agent_id: Option<&str>,
 ) -> Result<(Option<String>, bool), String> {
     let channel_profile = channel_id.and_then(|id| {
-        schema.and_then(|schema| {
-            resolve_channel_binding(schema, ChannelId::new(id), None)
-                .filter(|(binding, _)| agent_id.is_none_or(|agent| agent == binding.agent))
-                .and_then(|(binding, _)| binding.auth_profile.clone())
-        })
+        let snapshot = schema?;
+        let channel = id.to_string();
+        snapshot
+            .bindings
+            .iter()
+            .find(|input| {
+                input.channel_id.as_deref() == Some(channel.as_str())
+                    && agent_id.is_none_or(|agent| agent == input.agent_id)
+                    && snapshot
+                        .bindings
+                        .iter()
+                        .any(|agent| agent.channel_id.is_none() && agent.agent_id == input.agent_id)
+            })
+            .and_then(|input| input.channel_profile.clone())
     });
-    let agent_profile = agent_id.and_then(|agent_id| {
-        schema.and_then(|schema| {
-            schema
-                .agents
-                .get(agent_id)
-                .and_then(|agent| agent.auth_profile.clone())
-        })
+    let agent_profile = agent_id.and_then(|id| {
+        schema?
+            .bindings
+            .iter()
+            .find(|input| input.channel_id.is_none() && input.agent_id == id)
+            .and_then(|input| input.agent_profile.clone())
     });
     let pinned_profile = channel_id
         .map(|id| {
@@ -311,7 +168,12 @@ fn configured_launch_profile(
         configured_auth_profile(channel_profile.as_deref(), agent_profile.as_deref())
             .map(str::to_string)
             .or_else(|| {
-                schema.map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
+                schema.map(|schema| {
+                    crate::services::org_catalog::provider_primary_profile(
+                        Some(&schema.primary_profiles),
+                        Some(provider.as_str()),
+                    )
+                })
             })
     });
     Ok((profile, recovery_pinned))
@@ -328,13 +190,13 @@ pub(crate) fn configured_launch_overlay(
     let schema = load_org_schema_for_auth()?;
     let catalog = schema
         .as_ref()
-        .and_then(|schema| schema.provider_auth_profiles.clone())
+        .map(|schema| schema.profiles.clone())
         .unwrap_or_default();
     let (profile, pinned) =
         configured_launch_profile(schema.as_ref(), &provider, Some(channel_id), agent_id)?;
     let fallback = schema
         .as_ref()
-        .and_then(|schema| schema.provider_auth_fallbacks.get(provider.as_str()))
+        .and_then(|schema| schema.fallback_policies.get(provider.as_str()))
         .is_some_and(|policy| policy.enabled);
     if fallback
         && !pinned
@@ -354,7 +216,7 @@ type LaunchParts = (
 );
 
 fn launch_overlay_parts(
-    schema: Option<&OrgSchema>,
+    schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
     provider: &ProviderKind,
     channel_id: Option<u64>,
     agent_id: Option<&str>,
@@ -371,7 +233,7 @@ fn launch_overlay_parts(
     .map_err(|error| error.to_string())?;
     let route = channel_id.filter(|_| !recovery_pinned).map(|channel| {
         let policy = schema
-            .and_then(|schema| schema.provider_auth_fallbacks.get(provider.as_str()))
+            .and_then(|schema| schema.fallback_policies.get(provider.as_str()))
             .cloned()
             .unwrap_or_default();
         (channel, policy)
@@ -394,16 +256,24 @@ fn spawn_auth_overlay_for_context(
     let schema = load_org_schema_for_auth()?;
     let catalog = schema
         .as_ref()
-        .and_then(|schema| schema.provider_auth_profiles.clone())
+        .map(|schema| schema.profiles.clone())
         .unwrap_or_default();
     let (primary_overlay, fallback_route) =
         launch_overlay_parts(schema.as_ref(), &provider, channel_id, agent_id, &catalog)?;
     let overlay = if let Some((channel, policy)) = fallback_route {
-        let candidates = policy.candidates(&provider, &primary_overlay.profile_id, &catalog);
+        let candidates = crate::services::org_catalog::fallback_candidates(
+            &policy,
+            &provider,
+            &primary_overlay.profile_id,
+            &catalog,
+        );
         let selected = if fallback_selects(&provider, &policy) {
-            fallback::select_for_launch(&provider, channel, &candidates, |id| {
-                fallback_profile_available(&provider, id, agent_id, &catalog)
-            })
+            crate::services::provider_auth_profile::fallback::select_for_launch(
+                &provider,
+                channel,
+                &candidates,
+                |id| fallback_profile_available(&provider, id, agent_id, &catalog),
+            )
             .ok_or_else(|| format!("no configured {} auth profile", provider.as_str()))?
         } else {
             primary_overlay.profile_id.clone()
@@ -470,14 +340,18 @@ pub(crate) fn predicted_launch_home(
     let (loaded, name) = (load_org_schema_for_auth()?, provider.as_str());
     let schema = loaded.as_ref();
     let catalog = schema
-        .and_then(|schema| schema.provider_auth_profiles.clone())
+        .map(|schema| schema.profiles.clone())
         .unwrap_or_default();
     // No agent, an agent outside the schema, and each schema agent cover every launch context.
-    let agents = [None, Some("\0unbound")].into_iter().chain(
-        schema
-            .into_iter()
-            .flat_map(|schema| schema.agents.keys().map(|id| Some(id.as_str()))),
-    );
+    let agents = [None, Some("\0unbound")]
+        .into_iter()
+        .chain(schema.into_iter().flat_map(|schema| {
+            schema
+                .bindings
+                .iter()
+                .filter(|input| input.channel_id.is_none())
+                .map(|input| Some(input.agent_id.as_str()))
+        }));
     let mut homes = Vec::new();
     for agent in agents {
         // An agent whose account cannot resolve for this provider never launches it, so it adds no home.
@@ -490,9 +364,13 @@ pub(crate) fn predicted_launch_home(
         // Launch-time routing can only move off the primary when it has another candidate.
         let routed = route.is_some_and(|(_, policy)| {
             fallback_selects(&provider, &policy)
-                && policy
-                    .candidates(&provider, &primary.profile_id, &catalog)
-                    .len()
+                && crate::services::org_catalog::fallback_candidates(
+                    &policy,
+                    &provider,
+                    &primary.profile_id,
+                    &catalog,
+                )
+                .len()
                     > 1
         });
         if routed {
@@ -546,48 +424,6 @@ pub(crate) fn api_agent_identity(
     agent_identity::identity_json(&identity)
 }
 
-fn install_org_recovery(
-    schema: &OrgSchema,
-) -> Result<(), crate::services::agent_recovery::PolicyError> {
-    let agents: Vec<crate::services::agent_recovery::OrgAgentInput> = schema
-        .agents
-        .iter()
-        .map(|(id, def)| crate::services::agent_recovery::OrgAgentInput {
-            id: id.clone(),
-            provider: def.provider.clone(),
-            model: def.model.clone(),
-            workspace: def.workspace.clone(),
-            auth_profile: configured_auth_profile(None, def.auth_profile.as_deref())
-                .map(str::to_string)
-                .unwrap_or_else(|| provider_primary_profile(schema, def.provider.as_deref())),
-            recovery: def.recovery.clone(),
-        })
-        .collect();
-    let channels: Vec<crate::services::agent_recovery::OrgChannelInput> = schema
-        .channels
-        .as_ref()
-        .and_then(|channels| channels.by_id.as_ref())
-        .map(|by_id| {
-            by_id
-                .iter()
-                .map(
-                    |(channel_id, binding)| crate::services::agent_recovery::OrgChannelInput {
-                        channel_id: channel_id.clone(),
-                        agent: binding.agent.clone(),
-                        provider: binding.provider.clone(),
-                        workspace: binding.workspace.clone(),
-                        auth_profile: binding.auth_profile.clone(),
-                        recovery: binding.recovery.clone(),
-                    },
-                )
-                .collect()
-        })
-        .unwrap_or_default();
-    let catalog = crate::services::agent_recovery::build_recovery_catalog(&agents, &channels)?;
-    crate::services::agent_recovery::install_catalog(catalog);
-    Ok(())
-}
-
 pub(super) fn org_schema_exists() -> bool {
     org_schema_path().map(|p| p.exists()).unwrap_or(false)
 }
@@ -600,118 +436,19 @@ pub(super) fn is_known_agent(role_id: &str) -> Option<bool> {
 
 // ─── Resolution functions (mirror role_map.rs API) ──────────────────────────
 
-/// Resolve a channel binding from org schema, returning the ChannelBinding
-/// and the agent definition it refers to.
-fn resolve_channel_binding<'a>(
-    schema: &'a OrgSchema,
-    channel_id: ChannelId,
-    channel_name: Option<&str>,
-) -> Option<(&'a ChannelBinding, &'a AgentDef)> {
-    let channels = schema.channels.as_ref()?;
-
-    // 1. Try by_id
-    if let Some(by_id) = &channels.by_id {
-        let key = channel_id.get().to_string();
-        if let Some(binding) = by_id.get(&key) {
-            if let Some(agent_def) = schema.agents.get(&binding.agent) {
-                return Some((binding, agent_def));
-            }
-        }
-    }
-
-    // 2. Try by_name (if enabled)
-    if let Some(by_name) = &channels.by_name {
-        let enabled = by_name.enabled.unwrap_or(false);
-        if enabled {
-            if let (Some(mappings), Some(cname)) = (&by_name.mappings, channel_name) {
-                if let Some(binding) = mappings.get(cname) {
-                    if let Some(agent_def) = schema.agents.get(&binding.agent) {
-                        return Some((binding, agent_def));
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
 pub(super) fn resolve_role_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
 ) -> Option<RoleBinding> {
-    let schema = load_org_schema()?;
-    let (ch_binding, agent_def) = resolve_channel_binding(&schema, channel_id, channel_name)?;
-
-    // Channel-level overrides take priority over agent-level defaults
-    let provider = ch_binding
-        .provider
-        .as_deref()
-        .or(agent_def.provider.as_deref())
-        .and_then(ProviderKind::from_str);
-
-    let model = ch_binding.model.clone().or_else(|| agent_def.model.clone());
-    let peer_agents_enabled = ch_binding
-        .peer_agents
-        .or(agent_def.peer_agents)
-        .unwrap_or(true);
-    let memory = resolve_memory_settings(agent_def.memory.as_ref(), ch_binding.memory.as_ref());
-
-    // Explicit prompt_file > auto-derived from prompts_root > empty
-    let prompt_file = agent_def
-        .prompt_file
-        .as_deref()
-        .map(expand_tilde)
-        .or_else(|| {
-            schema.prompts_root.as_deref().map(|root| {
-                let base = expand_tilde(root);
-                format!("{}/agents/{}/IDENTITY.md", base, ch_binding.agent)
-            })
-        })
-        .unwrap_or_default();
-
-    let auth_profile = configured_auth_profile(
-        ch_binding.auth_profile.as_deref(),
-        agent_def.auth_profile.as_deref(),
-    )
-    .map(str::to_string)
-    .unwrap_or_else(|| {
-        provider_primary_profile(&schema, provider.as_ref().map(ProviderKind::as_str))
-    });
-
-    Some(RoleBinding {
-        role_id: ch_binding.agent.clone(),
-        prompt_file,
-        provider,
-        model,
-        reasoning_effort: None,
-        peer_agents_enabled,
-        auth_profile,
-        memory,
-    })
-}
-
-pub(super) fn resolve_workspace(
-    channel_id: ChannelId,
-    channel_name: Option<&str>,
-) -> Option<String> {
-    let schema = load_org_schema()?;
-    let (ch_binding, agent_def) = resolve_channel_binding(&schema, channel_id, channel_name)?;
-
-    // Channel-level workspace overrides agent-level default
-    let ws = ch_binding
-        .workspace
-        .as_deref()
-        .or(agent_def.workspace.as_deref())?;
-
-    Some(expand_tilde(ws))
+    crate::services::channel_roles::config_projection::org_role_binding(channel_id, channel_name)
+        .map(|projection| projection.into())
 }
 
 pub(super) fn load_shared_prompt_path() -> Option<String> {
     let schema = load_org_schema()?;
     // Explicit shared_prompt > auto-derived from prompts_root/agents/_shared.prompt.md
     schema
-        .shared_prompt
+        ._shared_prompt
         .as_deref()
         .map(expand_tilde)
         .or_else(|| {
@@ -902,7 +639,7 @@ channels:
       auth_profile: codex-personal
 "#;
         let schema = parse_org_schema(yaml).expect("schema");
-        let bindings = list_profile_bindings_from_schema(&schema);
+        let bindings = list_profile_bindings_from_schema(schema);
         let agent = bindings
             .iter()
             .find(|binding| binding.channel_id.is_none())
