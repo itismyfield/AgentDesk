@@ -23,6 +23,29 @@ use std::time::{Instant, SystemTime};
 const HELD: &str = "the V2 owner holds this queue; the legacy queue path is refused";
 
 pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg: M) -> Option<M> {
+    if state.queued_head.v2.is_some()
+        && matches!(
+            &msg,
+            M::Clear {
+                active: ActivePolicy::Release,
+                ..
+            }
+        )
+        && crate::services::turn_orchestrator::policy_close::admit_control(state, channel_id, false)
+            .is_err()
+    {
+        if let M::Clear { reply, .. } = msg {
+            let _ = reply.send(ClearChannelResult {
+                persistence: crate::services::turn_orchestrator::clear_channel::ClearPersistence {
+                    failed: vec!["native_input"],
+                    count_unknown: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }
+        return None;
+    }
     let Some(owner) = state.queued_head.v2.as_mut() else {
         return Some(msg);
     };
@@ -50,6 +73,7 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         | M::ReleaseWitnessedEpisode(_)
         | M::PolicyClose { .. }
         | M::ClaimPolicyTail(_)
+        | M::ControlCustody(_)
         | M::FinishCancelledTurn { .. }
         | M::CloseIfIdle { .. }
         | M::Injection(_)
