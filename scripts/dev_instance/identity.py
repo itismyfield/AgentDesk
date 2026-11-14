@@ -1,4 +1,4 @@
-"""Authenticate explicit app identities and bind non-ready runtime witnesses."""
+"""Authenticate admitted identities, current-run readiness, and a single stop request."""
 from contextlib import contextmanager
 import hashlib
 import hmac

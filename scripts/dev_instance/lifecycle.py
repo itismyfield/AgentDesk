@@ -1,4 +1,4 @@
-"""Bound one declared child without claiming live readiness or orphan authority."""
+"""Supervise bounded test instances and reclaim their recorded, scoped orphan."""
 
 import hashlib
 from contextlib import ExitStack, contextmanager
@@ -401,8 +401,16 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
         finally:
             if publication is not None:
                 try:
+                    # Resource shutdown can remove sockets before readiness is withdrawn.
+                    remaining = {}
+                    for path, token in runtime_sockets.items():
+                        try:
+                            os.stat(path, follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        remaining[path] = token
                     publish_runtime(Path(manifest['root']), 'runtime/instance-run.json',
                                     {**run_record, 'live_ready':False}, expected_identity=publication,
-                                    live_sockets=runtime_sockets)
+                                    live_sockets=remaining)
                 except (InstanceError, OSError):
                     raise CleanupPending(process) from None

@@ -717,7 +717,7 @@ class ResourceAuthorityTests(ResourceFixture):
 
 
 class VerifiedSupervisorWiringTests(unittest.TestCase):
-    def run_verified_stop(self, refused):
+    def run_verified_stop(self, refused, sockets=None):
         from scripts.dev_instance import identity, keeper
         manifest = {'root':'/synthetic/verified-instance', 'head':'a'*40}
         nonce, digest, observed = str(uuid.uuid4()), 'b'*64, []
@@ -746,7 +746,7 @@ class VerifiedSupervisorWiringTests(unittest.TestCase):
         def acknowledge(*args):
             events.append('keeper-exit-ack')
             self.assertEqual(args[1]['exit'], child.returncode)
-        ready = {'state':'RUNNING', 'sockets':{}}
+        ready = {'state':'RUNNING', 'sockets':sockets or {}}
         stop = {'action':'stop', 'nonce':nonce, 'deadline':time.monotonic()+.5}
         closed = {'state':'STOPPED', 'known_resources_closed':True, 'live_ready':False}
         with mock.patch('scripts.dev_instance.manifest.resource_spec',
@@ -774,6 +774,7 @@ class VerifiedSupervisorWiringTests(unittest.TestCase):
         self.assertFalse(ended.args[2]['live_ready'])
         self.assertEqual(ended.args[2], {**ready.args[2], 'live_ready':False})
         self.assertEqual(ended.kwargs['expected_identity'], (171, 181))
+        self.assertEqual(ended.kwargs['live_sockets'], {})
         cooperate.assert_called_once_with(manifest, nonce, child, digest, observed, stop['deadline'])
         send.assert_called_once()
         self.assertLess(events.index('cooperative-stop'), events.index('gateway-wait'))
@@ -800,6 +801,16 @@ class VerifiedSupervisorWiringTests(unittest.TestCase):
         self.assertFalse(result['forced_cleanup'])
         child.terminate.assert_not_called()
         child.kill.assert_not_called()
+
+    def test_ready_withdrawal_drops_removed_owned_socket_witness(self):
+        with mock.patch.object(lifecycle.os, 'stat', side_effect=FileNotFoundError()):
+            result, _ = self.run_verified_stop(False, {'/synthetic/closed-owned.sock':(17, 18)})
+        self.assertEqual(result['status'], 'STOPPED')
+
+    def test_ready_withdrawal_probe_error_is_hold(self):
+        with mock.patch.object(lifecycle.os, 'stat', side_effect=PermissionError('synthetic socket probe error')):
+            with self.assertRaises(lifecycle.CleanupPending):
+                self.run_verified_stop(False, {'/synthetic/unknown-owned.sock':(17, 18)})
 
 
 if __name__ == "__main__":
