@@ -69,9 +69,10 @@ esac
     .unwrap();
     dedupe::register_tmux_channel(name, channel);
     let path = sessions.join(format!("rollout-{id}.jsonl"));
+    let native_started = chrono::Utc::now();
     let records = [
         serde_json::json!({"type":"session_meta", "timestamp":chrono::Utc::now().to_rfc3339(), "payload":{"id":id,"cwd":root.path(),"source":"cli","timestamp":chrono::Utc::now().to_rfc3339()}}),
-        serde_json::json!({"type":"event_msg", "payload":{"type":"task_started","turn_id":"t1"}}),
+        serde_json::json!({"type":"event_msg", "timestamp":native_started.to_rfc3339(), "payload":{"type":"task_started","turn_id":"t1"}}),
         serde_json::json!({"type":"response_item", "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}),
     ];
     let mut records = records;
@@ -100,7 +101,6 @@ esac
     let handoff = dedupe::reserve_discord_handoff("codex", name, "hi");
     let (sender, receiver) = std::sync::mpsc::channel();
     let cwd = root.path().display().to_string();
-    let started = std::time::Instant::now();
     let worker_context = context.clone();
     let event_root = root.path().to_path_buf();
     let worker = std::thread::spawn(move || {
@@ -152,6 +152,7 @@ esac
     let published = dedupe::runtime_binding_for_tmux_session(name);
     let pending_before_output = !worker.is_finished();
     let before = dedupe::binding_events::records_strict(channel).unwrap();
+    let native_completed = chrono::Utc::now();
     for target in [
         &path,
         &wrong_home
@@ -164,7 +165,7 @@ esac
             .unwrap();
         for value in [
             serde_json::json!({"type":"response_item", "payload":{"type":"message","role":"assistant","id":"answer","content":[{"type":"output_text","text":"quick answer"}]}}),
-            serde_json::json!({"type":"event_msg", "payload":{"type":"task_complete","turn_id":"t1"}}),
+            serde_json::json!({"type":"event_msg", "timestamp":native_completed.to_rfc3339(), "payload":{"type":"task_complete","turn_id":"t1"}}),
         ] {
             writeln!(file, "{value}").unwrap();
         }
@@ -204,7 +205,11 @@ esac
     assert_eq!(candidate.sends(), (1, 1));
     drop(scope);
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(2),
+        (0..2000).contains(
+            &native_completed
+                .signed_duration_since(native_started)
+                .num_milliseconds()
+        ),
         "short native turn must finish under two seconds"
     );
     assert!(

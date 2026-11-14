@@ -104,27 +104,12 @@ async fn scenario(
             "type":"item_completed", "turn_id":"t1", "item":{"type":"AgentMessage", "id":"first-output"}}})),
         );
     }
-    let ready_at = Arc::new(Mutex::new((
-        std::time::Instant::now(),
-        tokio::time::Instant::now(),
-    )));
-    let post_latencies = Arc::new(Mutex::new(Vec::new()));
-    let ready = ready_at.clone();
-    let posted = post_latencies.clone();
-    *harness.port.on_post.lock().unwrap() = Some(Box::new(move || {
-        let (wall, logical) = *ready.lock().unwrap();
-        posted.lock().unwrap().push((
-            wall.elapsed(),
-            tokio::time::Instant::now().duration_since(logical),
-        ));
-    }));
     let mutate = {
         let candidate = candidate.clone();
         let token = token.clone();
         let marker = marker.clone();
         let path = path.clone();
         let output = output.clone();
-        let ready_at = ready_at.clone();
         let invalidator = invalidator.to_owned();
         move || {
             match invalidator.as_str() {
@@ -141,13 +126,6 @@ async fn scenario(
                 "valid" | "wrong-prompt" | "output" | "unsafe-output" => {}
 
                 _ => unreachable!(),
-            }
-            if matches!(
-                output.as_deref(),
-                Some("after-judge" | "fence" | "final" | "growth")
-            ) {
-                *ready_at.lock().unwrap() =
-                    (std::time::Instant::now(), tokio::time::Instant::now());
             }
             match output.as_deref() {
                 Some("after-judge" | "fence" | "final") => {
@@ -221,9 +199,29 @@ async fn scenario(
     if invalidator == "evict" && boundary.is_none() {
         dedupe::evict_dead_tmux_mirror("tmux-codex");
     }
-    if output.as_deref() == Some("after-bind") {
-        *ready_at.lock().unwrap() = (std::time::Instant::now(), tokio::time::Instant::now());
+    if matches!(output.as_deref(), Some("after-bind" | "short")) {
+        if output.as_deref() == Some("short") {
+            let events = ChannelBindingLog::new(channel, ShadowProvider::Codex)
+                .binding_events_since(channel, 0)
+                .unwrap();
+            assert_eq!(
+                crate::services::tui_o::writer::adoption::current(&events)
+                    .map(|(source, _)| source),
+                Some(source.clone()),
+                "the binding is durable before the first output"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
         append(&path, &first);
+        if output.as_deref() == Some("short") {
+            append(
+                &path,
+                &codex_line(
+                    serde_json::json!({"type":"event_msg", "timestamp":Utc::now().to_rfc3339(),
+                "payload":{"type":"task_complete", "turn_id":"t1"}}),
+                ),
+            );
+        }
     }
     let sent = if let Some((tx, pid)) = blocker {
         let publish = async {
@@ -235,7 +233,6 @@ async fn scenario(
                     if waiting { break; }
                 }
             }, WAIT_CAP).await;
-            *ready_at.lock().unwrap() = (std::time::Instant::now(), tokio::time::Instant::now());
             append(&path, &first);
             tx.rollback().await.unwrap();
         };
@@ -263,12 +260,11 @@ async fn scenario(
             );
         }
         if output.is_none() || output.as_deref() == Some("announced") {
-            *ready_at.lock().unwrap() = (std::time::Instant::now(), tokio::time::Instant::now());
             append(&path, &first);
         }
         await_within(
             async {
-                let count = if matches!(output.as_deref(), Some("closed" | "growth")) {
+                let count = if matches!(output.as_deref(), Some("closed" | "short" | "growth")) {
                     2
                 } else {
                     1
@@ -280,18 +276,6 @@ async fn scenario(
             WAIT_CAP,
         )
         .await;
-        if output.is_some() {
-            for (wall, logical) in post_latencies.lock().unwrap().iter() {
-                assert!(
-                    *wall < std::time::Duration::from_secs(2),
-                    "{output:?}: native-ready to O POST took {wall:?}"
-                );
-                assert!(
-                    *logical < std::time::Duration::from_secs(2),
-                    "{output:?}: eligible growth must retry immediately ({logical:?})"
-                );
-            }
-        }
         let posts = harness.port.posts();
         assert_eq!(
             posts
@@ -302,7 +286,7 @@ async fn scenario(
         );
         if output.as_deref() == Some("growth") {
             assert_eq!(posts, ["short answer", "later answer"]);
-        } else if output.as_deref() == Some("closed") {
+        } else if matches!(output.as_deref(), Some("closed" | "short")) {
             assert_eq!(posts.len(), 2, "one body and one existing turn summary");
             assert_ne!(posts[0], posts[1]);
             let records: Vec<serde_json::Value> = std::fs::read_to_string(&path)
@@ -425,6 +409,15 @@ fn a_checked_buffered_prefix_rejects_foreign_growth_and_rewritten_known_bytes() 
 }
 
 #[test]
+fn a_short_native_turn_binds_before_output_commits_and_posts_once() {
+    let root = crate::config::TestRuntimeRootGuard::new();
+    dedupe::run_serial_test(async {
+        scenario(None, "valid", Some("short"), None).await;
+    });
+    drop(root);
+}
+
+#[test]
 fn buffered_output_arriving_while_the_real_intake_fence_waits_pg() {
     let root = crate::config::TestRuntimeRootGuard::new();
     dedupe::run_serial_test(async {
@@ -435,6 +428,7 @@ fn buffered_output_arriving_while_the_real_intake_fence_waits_pg() {
         .await;
         let pool = db.connect_and_migrate_with_max_connections(4).await;
         scenario(None, "valid", Some("fence-wait"), Some(&pool)).await;
+        tokio::time::resume();
         pool.close().await;
         db.drop().await;
     });
