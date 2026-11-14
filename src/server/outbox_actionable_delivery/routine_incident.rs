@@ -13,9 +13,12 @@ enum Outcome {
     MayHaveSent,
 }
 
-/// Statuses the send path returns before it reaches Discord.
-const PRE_POST_REFUSALS: [&str; 4] = [
+/// Statuses the send path returns before it reaches Discord; 403 and 404 are its target and
+/// source refusals, and Discord's own 403 or 404 creates no message either.
+const PRE_POST_REFUSALS: [&str; 6] = [
     "400 Bad Request",
+    "403 Forbidden",
+    "404 Not Found",
     "409 Conflict",
     "retired_source",
     "invalid_attachment",
@@ -69,14 +72,18 @@ pub(in crate::server) async fn deliver<F, Fut>(
         }
     }
     let (status, body) = send().await;
-    let settled = match outcome(&status, &body) {
+    let (settled, closed) = match outcome(&status, &body) {
         Outcome::Ack(message_id) => match routine_incident::ack(pool, lease, &message_id).await {
-            Ok(true) => Ok(true),
-            _ => routine_incident::mark_unknown(pool, lease, "ack not stored after post").await,
+            Ok(true) => (Ok(true), None),
+            _ => (
+                routine_incident::mark_unknown(pool, lease, "ack not stored after post").await,
+                Some("unknown"),
+            ),
         },
-        Outcome::MayHaveSent => {
-            routine_incident::mark_unknown(pool, lease, &format!("{status}: {body}")).await
-        }
+        Outcome::MayHaveSent => (
+            routine_incident::mark_unknown(pool, lease, &format!("{status}: {body}")).await,
+            Some("unknown"),
+        ),
         Outcome::NotSent => {
             let retry = match super::failure_action(row, &status) {
                 MessageOutboxFailureAction::Retry {
@@ -85,13 +92,23 @@ pub(in crate::server) async fn deliver<F, Fut>(
                 } => Some((retry_count, backoff_secs)),
                 MessageOutboxFailureAction::Fail { .. } => None,
             };
-            routine_incident::release_not_sent(pool, lease, &format!("{status}: {body}"), retry)
-                .await
+            let error = format!("{status}: {body}");
+            (
+                routine_incident::release_not_sent(pool, lease, &error, retry).await,
+                retry.is_none().then_some("failed"),
+            )
         }
     };
-    if !matches!(settled, Ok(true)) {
+    match (&settled, closed) {
+        (Ok(true), None) => {}
+        // Neither close is retried, so the log is the only signal besides the run projection.
+        (Ok(true), Some(closed)) => {
+            tracing::warn!(outbox_id = row.id, %status, closed, "[outbox] incident closed without a confirmed post");
+        }
         // The row stays `posting`; the abandoned-posting sweep closes it as unknown.
-        tracing::warn!(outbox_id = row.id, %status, ?settled, "[outbox] incident outcome not stored");
+        _ => {
+            tracing::warn!(outbox_id = row.id, %status, ?settled, "[outbox] incident outcome not stored");
+        }
     }
 }
 
@@ -119,8 +136,14 @@ mod tests {
         ] {
             assert_eq!(ok(body), Outcome::MayHaveSent, "{body}");
         }
-        assert_eq!(outcome("409 Conflict", ""), Outcome::NotSent);
-        assert_eq!(outcome("400 Bad Request", ""), Outcome::NotSent);
+        for status in [
+            "400 Bad Request",
+            "403 Forbidden",
+            "404 Not Found",
+            "409 Conflict",
+        ] {
+            assert_eq!(outcome(status, ""), Outcome::NotSent, "{status}");
+        }
         for status in [
             "500 Internal Server Error",
             "503 Service Unavailable",

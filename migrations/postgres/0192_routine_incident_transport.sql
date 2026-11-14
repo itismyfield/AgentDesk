@@ -4,7 +4,7 @@
 --                                      acked (Discord message id stored) or unknown (may have been sent).
 -- message_outbox.transport_message_id  the Discord message id an ack recorded.
 -- A row that may have been posted keeps its dedupe fence: no worker, activation, GC or cancel path
--- may change its status, dedupe key or expiry, or delete it, outside the transitions below.
+-- may change its status or dedupe key, give its fence an expiry, or delete it, outside the transitions below.
 
 ALTER TABLE IF EXISTS message_outbox
     ADD COLUMN IF NOT EXISTS transport_state TEXT,
@@ -37,8 +37,11 @@ BEGIN
     IF TG_OP = 'DELETE' THEN
         RETURN NULL;
     END IF;
+    -- Making the fence permanent (expiry to NULL) only strengthens it: a redriven row carries a
+    -- finite expiry, and re-reserving its key must still return the row.
     IF NEW.dedupe_key IS DISTINCT FROM OLD.dedupe_key
-       OR NEW.dedupe_expires_at IS DISTINCT FROM OLD.dedupe_expires_at THEN
+       OR (NEW.dedupe_expires_at IS DISTINCT FROM OLD.dedupe_expires_at
+           AND NEW.dedupe_expires_at IS NOT NULL) THEN
         RETURN NULL;
     END IF;
     IF NEW.transport_state IS NOT DISTINCT FROM OLD.transport_state THEN

@@ -96,7 +96,7 @@ export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew
 
 [기본 N3](routine-failure-escalation.chart.mmd)·[일반 알림 오동작](routine-failure-escalation-notify.chart.mmd)·[경계 오류](routine-failure-escalation-boundary.chart.mmd)·[중복 요청](routine-failure-escalation-duplicate.chart.mmd)·[reset 누락](routine-failure-escalation-reset.chart.mmd)·[Unknown 재게시](routine-failure-escalation-blind-unknown.chart.mmd)·[사건 키 제거](routine-failure-escalation-event-key.chart.mmd)·[intake 우회](routine-failure-escalation-intake-gate.chart.mmd).
 
-최종 escalation 모델 SHA256 `90af6e1d8903701c869f1aad2dcf71069405b6583fd33c317425eaee96cc7f22`.
+H1 시점 escalation 모델 SHA256 `90af6e1d8903701c869f1aad2dcf71069405b6583fd33c317425eaee96cc7f22`.
 
 ## H1 구현 좌표 (PR2b 1조각)
 

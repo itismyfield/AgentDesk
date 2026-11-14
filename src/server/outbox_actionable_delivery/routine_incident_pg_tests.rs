@@ -325,3 +325,164 @@ async fn a_refusal_before_the_post_retries_the_same_incident_row_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+async fn claim(pool: &PgPool, id: i64) -> (String, chrono::DateTime<Utc>) {
+    sqlx::query_as("SELECT claim_owner, claimed_at FROM message_outbox WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_lost_lease_never_posts_and_only_an_aged_posting_row_is_swept_pg() {
+    let (db, pool, store) = setup().await;
+    let (_, _, row) = incident(&pool, &store, "lease").await;
+    // Another worker reclaimed the row; the first worker still holds its old lease.
+    sqlx::query(
+        "UPDATE message_outbox SET status = 'processing', claim_owner = 'other', claimed_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(row)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (_, claimed_at) = claim(&pool, row).await;
+    let stale = super::super::PendingMessageOutboxRow {
+        id: row,
+        target: "agent:boot-agent".into(),
+        content: "incident".into(),
+        bot: "announce".into(),
+        source: "routine-runtime".into(),
+        reason_code: Some(INCIDENT.into()),
+        session_key: None,
+        retry_count: 0,
+        attachment: Ok(None),
+        claim_owner: "stale".into(),
+        claimed_at: claimed_at - Duration::hours(1),
+    };
+    let sends = Arc::new(Mutex::new(0));
+    let sent = sends.clone();
+    super::routine_incident::deliver(&pool, &stale, || async move {
+        *sent.lock().unwrap() += 1;
+        ("200 OK".to_string(), r#"{"message_id":"1900"}"#.to_string())
+    })
+    .await;
+    assert_eq!(*sends.lock().unwrap(), 0);
+    assert_eq!(state(&pool, row).await, ("processing".into(), None, None));
+
+    // The live lease posts; the sweep leaves a post that is still within its window.
+    let lease = routine_incident::Lease {
+        id: row,
+        claim_owner: "other",
+        claimed_at,
+    };
+    assert!(routine_incident::begin_posting(&pool, lease).await.unwrap());
+    let swept = || async {
+        routine_incident::close_abandoned_posting(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(swept().await, 0);
+    assert_eq!(state(&pool, row).await, held("posting"));
+    sqlx::query(
+        "UPDATE message_outbox SET claimed_at = claimed_at - INTERVAL '11 minutes' WHERE id = $1",
+    )
+    .bind(row)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(swept().await, 1);
+    assert_eq!(state(&pool, row).await, held("unknown"));
+
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_redriven_incident_keeps_its_fence_and_its_key_reserves_the_same_row_pg() {
+    let (db, pool, store) = setup().await;
+    let (routine, first, row) = incident(&pool, &store, "redriven").await;
+    // An unresolvable target is refused before any post: the same row retries, then fails.
+    assert_eq!(
+        drain(&pool, "404 Not Found", "unknown target", false).await,
+        posting()
+    );
+    let retries: i64 = sqlx::query_scalar("SELECT retry_count FROM message_outbox WHERE id = $1")
+        .bind(row)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        (state(&pool, row).await, retries),
+        (("pending".into(), None, None), 1)
+    );
+    sqlx::query(
+        "UPDATE message_outbox SET retry_count = 1000, next_attempt_at = NULL WHERE id = $1",
+    )
+    .bind(row)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        drain(&pool, "403 Forbidden", "not in role map", false).await,
+        posting()
+    );
+    assert_eq!(state(&pool, row).await, ("failed".into(), None, None));
+    assert_eq!(
+        projection(&store, &routine, &first).await.as_deref(),
+        Some("delivery_failed")
+    );
+
+    // An operator redrive gives the row a finite fence; its next post may have been sent.
+    let ids = [row];
+    crate::services::message_outbox_recovery::redrive_failed_rows(&pool, &ids, "k1", "test", false)
+        .await
+        .unwrap();
+    let finite: bool = sqlx::query_scalar(
+        "SELECT dedupe_expires_at IS NOT NULL FROM message_outbox WHERE id = $1",
+    )
+    .bind(row)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(finite);
+    assert_eq!(
+        drain(&pool, "500 Internal Server Error", "timeout", false).await,
+        posting()
+    );
+    assert_eq!(state(&pool, row).await, held("unknown"));
+
+    let (target, session) = (
+        "agent:boot-agent".to_string(),
+        format!("routine:{routine}:failure_incident:{first}"),
+    );
+    let again = message_outbox::enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+        &pool,
+        OutboxMessage {
+            target: &target,
+            content: "again",
+            bot: "announce",
+            source: "routine-runtime",
+            reason_code: Some(INCIDENT),
+            session_key: Some(&session),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(again, row);
+    // The re-reservation made the fence permanent and reopened nothing.
+    message_outbox::gc_stale_outbox_rows(&pool).await.unwrap();
+    assert_eq!(state(&pool, row).await, held("unknown"));
+    assert_eq!(drain(&pool, "200 OK", "{}", false).await, []);
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE session_key = $1")
+            .bind(&session)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 1);
+
+    pool.close().await;
+    db.drop().await;
+}
