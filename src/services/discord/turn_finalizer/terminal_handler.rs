@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(unix)]
+#[path = "native_policy.rs"]
+pub(super) mod native_policy;
 #[path = "policy_commit.rs"]
 mod policy_commit;
 pub(super) use policy_commit::PolicyCommit;
@@ -432,6 +435,7 @@ impl NativeAdmission {
 #[cfg(unix)]
 #[derive(Clone)]
 pub(super) struct NativePrepared {
+    history: crate::services::tui_input::human_frame::history::v2::Registry,
     namespace: String,
     ticket: crate::services::tui_input::human_frame::history::v2::native::Ticket,
     key: TurnKey,
@@ -449,7 +453,14 @@ impl NativePrepared {
         actor: Option<Arc<CancelToken>>,
         shared: &Arc<SharedData>,
     ) -> Result<Self, String> {
-        history.native_settlement(namespace, &ticket)?;
+        if history
+            .native_settlement(namespace, &ticket)?
+            .extra
+            .get("not_sent")
+            == Some(&serde_json::Value::Bool(true))
+        {
+            return Err("native preparation follows confirmed NotSent".into());
+        }
         let started_before = std::time::Instant::now();
         if key.channel_id.get() != ticket.channel_id
             || ticket.key["identity"]["primary"] != key.user_msg_id
@@ -481,6 +492,7 @@ impl NativePrepared {
             }
         }
         Ok(Self {
+            history: history.clone(),
             namespace: namespace.into(),
             ticket,
             key,
@@ -516,7 +528,16 @@ impl NativePrepared {
         &self,
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
     ) -> Result<(), String> {
-        history.note_native_any_key(&self.namespace, &self.bound_ticket(history)?)?;
+        let ticket = self.bound_ticket(history)?;
+        if history
+            .native_settlement(&self.namespace, &ticket)?
+            .extra
+            .get("not_sent")
+            == Some(&serde_json::Value::Bool(true))
+        {
+            return Err("native key follows confirmed NotSent".into());
+        }
+        history.note_native_any_key(&self.namespace, &ticket)?;
         tracing::debug!(
             channel_id = self.key.channel_id.get(),
             elapsed_ms = self.started_before.elapsed().as_millis(),

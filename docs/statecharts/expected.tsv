@@ -522,3 +522,11 @@ input-single-path/NativeAttributionNeutralTransferBefore.cfg	NativeInputAttribut
 input-single-path/NativeAttributionBootGcBefore.cfg	NativeInputAttribution	NativeBootNoFabrication,NativeBootPendingPreserved	-
 input-single-path/NativeAttributionNeutralTransferFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionBootGcFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionControlBefore.cfg	NativeInputAttribution	ControlDurableBeforeRelease	-
+input-single-path/NativeAttributionControlFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionControlCustodyBefore.cfg	NativeInputAttribution	ControlCustodyBeforeDelete	-
+input-single-path/NativeAttributionControlCustodyFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionControlStaleBefore.cfg	NativeInputAttribution	ControlDurableBeforeRelease,ControlKeepsSuccessor	-
+input-single-path/NativeAttributionControlStaleFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionControlUnreadableFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionControlNoKeyFixed.cfg	NativeInputAttribution	-	-

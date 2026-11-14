@@ -14,6 +14,8 @@ pub(super) fn handoff_before_discard_locked(
     guard: &impl CircuitDiscardGuard,
 ) -> Result<(), String> {
     let path = guard.state_path();
+    #[cfg(unix)]
+    super::preserve_native_before_discard(path)?;
     let data = match fs::read_to_string(path) {
         Ok(data) => data,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),

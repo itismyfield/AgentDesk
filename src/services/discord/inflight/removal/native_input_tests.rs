@@ -967,3 +967,39 @@ async fn native_8148_p2_custody_restores_receipts_before_the_next_identical_inpu
         );
     }
 }
+
+#[test]
+fn native_8148_control_direct_delete_preserves_full_custody_and_refuses_busy_or_corrupt() {
+    let env = Env::new();
+    let dir = env.dir();
+    let root = dir.parent().unwrap();
+    let channel = 81489760;
+    let f = Fixture::at(root.join("injected_frames.json"), channel, true);
+    let r = row(channel, None);
+    save_inflight_state(&r).unwrap();
+    let path = inflight_state_path(&env.dir(), &CLAUDE, channel);
+    let bytes = fs::read(&path).unwrap();
+    let custody = root.join("discord_custody/claude");
+    let lock = super::custody_notice::retention::lock(&custody, false).unwrap();
+    assert!(!delete_inflight_state_file(&CLAUDE, channel));
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    drop(lock);
+    let registry = fs::read(root.join("injected_frames.json")).unwrap();
+    fs::write(root.join("injected_frames.json"), b"{\"version\":3}").unwrap();
+    assert!(!delete_inflight_state_file(&CLAUDE, channel));
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    fs::write(root.join("injected_frames.json"), registry).unwrap();
+    let expected = f
+        .history
+        .native_boot_record("native-fixture", &f.ticket)
+        .unwrap();
+    assert!(delete_inflight_state_file(&CLAUDE, channel));
+    assert!(!path.exists());
+    fs::remove_file(root.join("injected_frames.json")).unwrap();
+    let restored = native_boot_records(root, &CLAUDE).unwrap();
+    assert!(
+        restored
+            .iter()
+            .any(|r| serde_json::to_value(r).unwrap() == serde_json::to_value(&expected).unwrap())
+    );
+}

@@ -16,6 +16,7 @@ pub(in crate::services::discord) struct Handle {
     key: TurnKey,
     input: String,
     history: Registry,
+    shared: Arc<SharedData>,
     finished: bool,
 }
 
@@ -50,6 +51,7 @@ impl Handle {
             key,
             input,
             history,
+            shared: shared.clone(),
             finished: false,
         })
     }
@@ -65,6 +67,7 @@ impl Handle {
                 input: self.input.clone(),
                 keyed,
                 history: self.history.clone(),
+                shared: self.shared.clone(),
                 ack,
             })
             .map_err(|_| "native key actor unavailable")?;
@@ -177,6 +180,14 @@ pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, Led
                 if entry.phase == Phase::Finalized {
                     return Err("native episode already finalized".into());
                 }
+                if entry
+                    .native_inputs
+                    .get(&id)
+                    .is_some_and(|existing| !existing.same_control_scope(&prepared))
+                {
+                    return Err("native control scope replaced".into());
+                }
+                prepared.install_control(&history, &shared).await?;
                 entry.native_inputs.entry(id.clone()).or_insert(prepared);
                 if primary {
                     entry.completion_admission.native_input = Some(false);
@@ -191,9 +202,10 @@ pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, Led
             input,
             keyed,
             history,
+            shared,
             ack,
         } => {
-            let result = (|| {
+            let result = async {
                 let entry = ledger
                     .get_mut(&key.exact_key())
                     .ok_or("native entry missing")?;
@@ -204,12 +216,14 @@ pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, Led
                 if keyed {
                     return prepared.any_key(&history);
                 }
+                prepared.remove_control(&history, &shared).await?;
                 entry.native_inputs.remove(&input);
                 if entry.native_inputs.is_empty() {
                     entry.completion_admission.native_input = None;
                 }
                 Ok(())
-            })();
+            }
+            .await;
             let _ = ack.send(result);
         }
         FinalizeMsg::NativeSettled { key, actor, ack } => {

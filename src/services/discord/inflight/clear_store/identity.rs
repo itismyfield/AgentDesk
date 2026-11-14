@@ -416,6 +416,10 @@ impl PolicyReceipt for AckedPolicyReceipt {
 
     /// Never waits on the row lock: the mailbox step calling it must keep serving its queue.
     fn try_clear(&self) -> PolicyClear {
+        self.try_clear_admitted(&|| Ok(()))
+    }
+
+    fn try_clear_admitted(&self, admission: &dyn Fn() -> Result<(), String>) -> PolicyClear {
         let acked = &self.acked;
         let (Some(root), Some(provider)) = (inflight_runtime_root(), acked.provider_kind()) else {
             return PolicyClear::Io;
@@ -427,10 +431,17 @@ impl PolicyReceipt for AckedPolicyReceipt {
             Err(TryLockRefusal::Contended) => return PolicyClear::LockBusy,
             Err(TryLockRefusal::Failed(_)) => return PolicyClear::Io,
         };
+        let admitted = std::cell::Cell::new(true);
         let outcome = acked.clear_before_start_receipt_locked(&path, &provider, |fresh| {
-            crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-                && acked.before_start_policy_receipt_clearable(fresh, self.generation)
+            if !crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+                || !acked.before_start_policy_receipt_clearable(fresh, self.generation) { return false; }
+            let ready = admission().is_ok();
+            admitted.set(ready);
+            ready
         });
+        if !admitted.get() {
+            return PolicyClear::Io;
+        }
         match outcome {
             GuardedClearOutcome::Cleared => PolicyClear::Cleared,
             GuardedClearOutcome::Missing => PolicyClear::Missing,

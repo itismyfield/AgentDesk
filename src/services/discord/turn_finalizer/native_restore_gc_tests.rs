@@ -68,3 +68,97 @@ async fn native_8148_p2_gc_keeps_boot_debt_after_an_unconfirmed_terminal_phase()
     assert!(actual.outcome.is_none());
     assert!(!actual.cleanup_complete);
 }
+
+#[tokio::test]
+async fn native_8148_control_not_sent_restores_original_without_native_boot_debt() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let root = runtime.path().join("runtime");
+    let f = Fixture::at(root.join("injected_frames.json"), 81489750, true);
+    let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .restart
+        .current_generation = 1;
+    let e = f.ticket.owning_episode.as_ref().unwrap();
+    let key = TurnKey::new(
+        ChannelId::new(f.ticket.channel_id),
+        e.user_message_id,
+        e.generation,
+    )
+    .with_episode_nonce(Some(&e.turn_nonce));
+    let actor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+        e.turn_nonce.clone(),
+    )));
+    await_within(
+        shared.mailbox(key.channel_id).restore_active_turn(
+            actor.clone(),
+            serenity::model::id::UserId::new(7),
+            serenity::model::id::MessageId::new(e.user_message_id),
+        ),
+        WAIT_CAP,
+    )
+    .await;
+    shared
+        .turn_finalizer
+        .register_start(key, ProviderKind::Claude, RelayOwnerKind::None, &shared);
+    let custody = await_within(
+        super::super::Handle::prepare(
+            &shared,
+            key,
+            Some(actor.clone()),
+            f.history.clone(),
+            "native-fixture".into(),
+            f.ticket.clone(),
+        ),
+        WAIT_CAP,
+    )
+    .await
+    .unwrap();
+    let (ack, rx) = oneshot::channel();
+    shared
+        .turn_finalizer
+        .tx
+        .send(FinalizeMsg::NativeKeyed {
+            key,
+            input: serde_json::to_string(&("native-fixture", &f.ticket.key)).unwrap(),
+            keyed: false,
+            history: f.history.clone(),
+            shared: shared.clone(),
+            ack,
+        })
+        .unwrap();
+    await_within(rx, WAIT_CAP).await.unwrap().unwrap();
+    let stored = f
+        .history
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    assert!(stored.outcome.is_none());
+    assert!(!stored.cleanup_complete);
+    assert_eq!(stored.extra["not_sent"], true);
+    let plan = BootInputs::prepare(&root, e.generation + 1).unwrap();
+    assert!(plan.inputs.is_empty());
+    let finish = await_within(
+        shared.mailbox(key.channel_id).finish_turn_if_token(
+            Some(actor),
+            crate::services::discord::queue_persistence_context(
+                &shared,
+                &ProviderKind::Claude,
+                key.channel_id,
+            ),
+        ),
+        WAIT_CAP,
+    )
+    .await;
+    assert!(matches!(
+        finish,
+        crate::services::turn_orchestrator::TokenFinish::Finished(_)
+    ));
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    drop(custody);
+}

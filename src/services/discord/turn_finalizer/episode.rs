@@ -2,6 +2,7 @@
 use super::*;
 
 mod row_retirement;
+use row_retirement::episode_row_miss;
 #[cfg(test)]
 mod row_retirement_tests;
 pub(in crate::services::discord) use row_retirement::RuntimeWitness;
@@ -105,6 +106,9 @@ pub(super) async fn claim_episode(
             persistence_error: None,
         }
     };
+    if finish.persistence_error.is_some() {
+        return Err(());
+    }
     let drifted = loaded
         .as_ref()
         .filter(|_| clear_inflight && row_miss == Some("finalizer_id_mismatch"));
@@ -183,21 +187,6 @@ pub(super) async fn claim_episode(
 }
 
 /// Why the loaded row is not this episode's cleanup target; `None` when it is.
-fn episode_row_miss(
-    row: Option<&super::super::inflight::InflightTurnState>,
-    key: TurnKey,
-) -> Option<&'static str> {
-    match row {
-        None => Some("row_missing"),
-        Some(row) if row.effective_finalizer_turn_id() != key.user_msg_id => {
-            Some("finalizer_id_mismatch")
-        }
-        Some(row) if !key.matches_episode_nonce(row.turn_nonce.as_deref()) => {
-            Some("episode_nonce_mismatch")
-        }
-        Some(_) => None,
-    }
-}
 
 /// A requested row cleanup that left the durable row in place (or found none);
 /// the mailbox release may still have succeeded, so this is the only trace.

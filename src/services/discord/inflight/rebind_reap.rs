@@ -301,6 +301,10 @@ pub(super) fn reap_abandoned_rebind_origin_locked_in_root(
     if !should_reap_abandoned_rebind_origin(&locked, age_secs, current_generation) {
         return RebindReapOutcome::Skipped;
     }
+    #[cfg(unix)]
+    if super::preserve_native_before_discard(_lock.state_path()).is_err() {
+        return RebindReapOutcome::Skipped;
+    }
     log_inflight_remove(
         provider,
         locked.channel_id,
@@ -411,6 +415,10 @@ pub(super) fn reap_dead_watcher_rebind_origin_locked_in_root(
         if !session.is_empty() && watcher_runtime_activity_recent(session) {
             return RebindReapOutcome::Skipped;
         }
+    }
+    #[cfg(unix)]
+    if super::preserve_native_before_discard(_lock.state_path()).is_err() {
+        return RebindReapOutcome::Skipped;
     }
     log_inflight_remove(
         provider,

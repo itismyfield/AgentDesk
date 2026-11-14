@@ -590,3 +590,207 @@ fn native_8148_p2_receipt_adoption_keeps_facts_and_rejects_foreign_owners() {
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+#[test]
+fn native_8148_control_store_trylocks_cas_and_encoding_are_fail_closed() {
+    use crate::test_support::wait::{WAIT_CAP, join_within};
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let path = runtime.path().join("runtime/try-control.json");
+    let f = Fixture::at(path.clone(), 81489740, true);
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        f.history
+            .try_native_control(
+                "native-fixture",
+                &f.ticket,
+                super::native::Disposition::Cancelled,
+                None
+            )
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    f.history
+        .note_native_any_key("native-fixture", &f.ticket)
+        .unwrap();
+    for kind in ["cache", "pending", "flock"] {
+        let cache = (kind == "cache").then(|| f.history.cached.lock().unwrap());
+        let pending = (kind == "pending").then(|| f.history.pending.lock().unwrap());
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.with_extension("lock"))
+            .unwrap();
+        if kind == "flock" {
+            lock.lock().unwrap();
+        }
+        let history = f.history.clone();
+        let ticket = f.ticket.clone();
+        let result = join_within(
+            std::thread::spawn(move || {
+                history.try_native_control(
+                    "native-fixture",
+                    &ticket,
+                    super::native::Disposition::Cancelled,
+                    None,
+                )
+            }),
+            WAIT_CAP,
+        );
+        assert!(result.is_err(), "{kind}");
+        drop(cache);
+        drop(pending);
+        drop(lock);
+        assert!(
+            f.history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .outcome
+                .is_none()
+        );
+    }
+    f.history
+        .encode_fault
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        f.history
+            .try_native_control(
+                "native-fixture",
+                &f.ticket,
+                super::native::Disposition::Cancelled,
+                None
+            )
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    f.history
+        .encode_fault
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    f.history
+        .try_native_control(
+            "native-fixture",
+            &f.ticket,
+            super::native::Disposition::Cancelled,
+            None,
+        )
+        .unwrap();
+    let first = f
+        .history
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    f.history
+        .try_native_control(
+            "native-fixture",
+            &f.ticket,
+            super::native::Disposition::OperatorReleased,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap(),
+        first
+    );
+    let mut changed = f.ticket.clone();
+    changed.extra.insert("foreign".into(), true.into());
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        f.history
+            .try_native_control(
+                "native-fixture",
+                &changed,
+                super::native::Disposition::Cancelled,
+                None
+            )
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn native_8148_control_unflushed_candidate_repairs_or_preserves_a_third_state() {
+    use crate::services::discord::runtime_store::durable_publish::flush_probe::{
+        Plan, Step, Watch,
+    };
+    for third in [false, true] {
+        let runtime = crate::config::TestRuntimeRootGuard::new();
+        let path = runtime.path().join("runtime/control-flush.json");
+        let f = Fixture::at(path.clone(), 81489741, true);
+        f.history
+            .note_native_any_key("native-fixture", &f.ticket)
+            .unwrap();
+        let second = Fixture::at(path.clone(), 81489742, true);
+        f.history
+            .note_native_any_key("native-fixture", &second.ticket)
+            .unwrap();
+        {
+            let _fault = Watch::new(
+                path.parent().unwrap(),
+                Plan {
+                    fail: vec![Step::ParentSync],
+                    block: None,
+                },
+            );
+            assert!(
+                f.history
+                    .try_native_control(
+                        "native-fixture",
+                        &f.ticket,
+                        super::native::Disposition::Cancelled,
+                        None
+                    )
+                    .is_err()
+            );
+            let candidate = std::fs::read(&path).unwrap();
+            assert!(
+                f.history
+                    .try_native_control(
+                        "native-fixture",
+                        &second.ticket,
+                        super::native::Disposition::Cancelled,
+                        None
+                    )
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), candidate);
+        }
+        if third {
+            let mut other: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            other["live"][0]["registration"]["native_settlement"]["third"] = true.into();
+            let other = other.to_string().into_bytes();
+            std::fs::write(&path, &other).unwrap();
+            assert!(
+                f.history
+                    .try_native_control(
+                        "native-fixture",
+                        &f.ticket,
+                        super::native::Disposition::Cancelled,
+                        None
+                    )
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), other);
+        } else {
+            f.history
+                .try_native_control(
+                    "native-fixture",
+                    &f.ticket,
+                    super::native::Disposition::Cancelled,
+                    None,
+                )
+                .unwrap();
+            assert!(f.history.pending.lock().unwrap().is_none());
+            assert_eq!(
+                f.history
+                    .native_settlement("native-fixture", &f.ticket)
+                    .unwrap()
+                    .outcome
+                    .unwrap()
+                    .disposition,
+                super::native::Disposition::Cancelled
+            );
+        }
+    }
+}

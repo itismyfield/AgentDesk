@@ -224,3 +224,19 @@ fn before_cas(channel: u64) {
         hook();
     }
 }
+
+pub(super) fn episode_row_miss(
+    row: Option<&InflightTurnState>,
+    key: TurnKey,
+) -> Option<&'static str> {
+    match row {
+        None => Some("row_missing"),
+        Some(row) if row.effective_finalizer_turn_id() != key.user_msg_id => {
+            Some("finalizer_id_mismatch")
+        }
+        Some(row) if !key.matches_episode_nonce(row.turn_nonce.as_deref()) => {
+            Some("episode_nonce_mismatch")
+        }
+        Some(_) => None,
+    }
+}

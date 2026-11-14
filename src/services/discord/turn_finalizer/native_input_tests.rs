@@ -1741,3 +1741,548 @@ async fn native_8148_p2_transfer_ledger_settlement_is_a_neutral_bridge_exit() {
     assert!(events.try_recv().is_err());
     drop(handle);
 }
+
+async fn control_next_head(
+    mailbox: crate::services::turn_orchestrator::ChannelMailboxHandle,
+    channel: u64,
+    root: &std::path::Path,
+) {
+    use crate::services::discord::queue_io::input_owner::drive::{self, Drive, Front};
+    use crate::services::turn_orchestrator::PendingQueueItem;
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    mailbox
+        .v2_adopt(
+            root.join(format!("next-{channel}.json")),
+            format!("next-{channel}"),
+        )
+        .await
+        .unwrap();
+    let original: PendingQueueItem = serde_json::from_value(json!({"author_id":7,"message_id":channel+2,
+        "channel_id":channel,"source_message_ids":[channel+2],"queued_generation":1,"text":"다음 원본"})).unwrap();
+    mailbox
+        .v2_admit_ticket(original, format!("admission-{channel}"))
+        .await
+        .unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let hand_count = count.clone();
+    let hand_mailbox = mailbox.clone();
+    let (done, completion) = tokio::sync::oneshot::channel();
+    let done = Arc::new(std::sync::Mutex::new(Some(done)));
+    let drive = Arc::new(Drive {
+        mailbox,
+        channel,
+        handoff: Arc::new(move |front: Front| {
+            let mailbox = hand_mailbox.clone();
+            let count = hand_count.clone();
+            Box::pin(async move {
+                let _claim = drive::claim_turn(&mailbox, front.1.message_id, &front)
+                    .await?
+                    .ok_or("claim missing")?;
+                mailbox.v2_request(move |slot| {
+                let owner = slot.as_mut().ok_or("owner missing")?;
+                let attempt = serde_json::from_value(json!({"nonce":format!("next-{channel}"),"provider":"claude",
+                    "target":{"host":"herdr","owner":"next-pane","root":"/test","execution_nonce":"next-epoch"},
+                    "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}))
+                    .map_err(|error| error.to_string())?;
+                let key = owner.reserve_unit(attempt, |item| Some(("user".into(), item.text.clone())))?;
+                drop(owner.arm(&key, 1)?);
+                owner.settle(&key, true, 2)
+            }).await?;
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }),
+        settled: Some(Arc::new(move || {
+            let done = done.clone();
+            Box::pin(async move {
+                if let Some(done) = done.lock().unwrap().take() {
+                    let _ = done.send(());
+                }
+            })
+        })),
+    });
+    drive::wake(drive.clone());
+    drive::wake(drive);
+    await_within(completion, WAIT_CAP).await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+async fn control_case(kind: &str) {
+    use super::super::native_prepare::Handle;
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let channel = 81489701
+        + ["cancel", "terminate", "clear", "stop"]
+            .iter()
+            .position(|v| *v == kind)
+            .unwrap() as u64;
+    let f = Fixture::at(
+        runtime.path().join(format!("runtime/{kind}.json")),
+        channel,
+        true,
+    );
+    let shared = b2b_shared(None);
+    let (key, actor) = b2b_active(&f, &shared).await;
+    b2b_row(&f);
+    shared.turn_finalizer.register_start(
+        key,
+        ProviderKind::Claude,
+        super::super::RelayOwnerKind::None,
+        &shared,
+    );
+    let custody = await_within(
+        Handle::prepare(
+            &shared,
+            key,
+            Some(actor.clone()),
+            f.history.clone(),
+            "native-fixture".into(),
+            f.ticket.clone(),
+        ),
+        WAIT_CAP,
+    )
+    .await
+    .unwrap();
+    f.history
+        .note_native_any_key("native-fixture", &f.ticket)
+        .unwrap();
+    let mut events =
+        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+    match kind {
+        "cancel" | "terminate" => {
+            let event = if kind == "cancel" {
+                super::super::TerminalEvent::Cancel
+            } else {
+                super::super::TerminalEvent::HostTerminated
+            };
+            let result = await_within(
+                shared.turn_finalizer.submit_terminal(
+                    key,
+                    ProviderKind::Claude,
+                    event,
+                    super::super::FinalizeContext::host_terminated(),
+                    shared.clone(),
+                ),
+                WAIT_CAP,
+            )
+            .await;
+            assert!(matches!(
+                result,
+                super::super::FinalizeOutcome::Finalized { .. }
+            ));
+        }
+        "clear" => {
+            let result = await_within(
+                super::super::super::mailbox_clear_channel(
+                    &shared,
+                    &ProviderKind::Claude,
+                    key.channel_id,
+                ),
+                WAIT_CAP,
+            )
+            .await;
+            assert!(result.removed_token.is_some());
+            assert!(result.persistence.failed.is_empty());
+        }
+        "stop" => {
+            let result = await_within(
+                super::super::super::mailbox_finish::mailbox_finish_stopped_turn(
+                    &shared,
+                    &ProviderKind::Claude,
+                    key.channel_id,
+                    Some(&actor),
+                    super::super::super::mailbox_finish::MailboxLookup::Peek,
+                ),
+                WAIT_CAP,
+            )
+            .await;
+            assert!(matches!(
+                result,
+                crate::services::turn_orchestrator::TokenFinish::Finished(_)
+            ));
+        }
+        _ => unreachable!(),
+    }
+    let settlement = f
+        .history
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    assert_eq!(
+        settlement.outcome.as_ref().map(|o| &o.disposition),
+        Some(&Disposition::Cancelled),
+        "{kind}: control outcome must precede release"
+    );
+    await_within(
+        async {
+            while !f
+                .history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .cleanup_complete
+            {
+                tokio::task::yield_now().await;
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
+    assert!(
+        shared
+            .mailbox(key.channel_id)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none()
+    );
+    assert!(
+        super::super::super::inflight::load_inflight_state_read_only(
+            &ProviderKind::Claude,
+            channel
+        )
+        .is_none()
+    );
+    assert_eq!(
+        shared
+            .restart
+            .global_active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        if matches!(kind, "clear" | "stop") {
+            1
+        } else {
+            0
+        }
+    );
+    let before = f
+        .history
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    let stale = await_within(
+        shared.mailbox(key.channel_id).finish_turn_if_token(
+            Some(actor),
+            crate::services::discord::queue_persistence_context(
+                &shared,
+                &ProviderKind::Claude,
+                key.channel_id,
+            ),
+        ),
+        WAIT_CAP,
+    )
+    .await;
+    assert!(!matches!(
+        stale,
+        crate::services::turn_orchestrator::TokenFinish::Finished(_)
+    ));
+    assert_eq!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap(),
+        before
+    );
+    await_within(async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.phase == super::super::super::turn_completion_events::TurnCompletionPhase::QueueEligible { break; }
+        }
+    }, WAIT_CAP).await;
+    control_next_head(shared.mailbox(key.channel_id), channel, runtime.path()).await;
+    drop(custody);
+}
+
+#[tokio::test]
+async fn native_8148_control_cancel_lease_row_and_head_progress() {
+    control_case("cancel").await;
+}
+#[tokio::test]
+async fn native_8148_control_terminate_lease_row_and_head_progress() {
+    control_case("terminate").await;
+}
+#[tokio::test]
+async fn native_8148_control_clear_lease_row_and_head_progress() {
+    control_case("clear").await;
+}
+#[tokio::test]
+async fn native_8148_control_stop_lease_row_and_head_progress() {
+    control_case("stop").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_8148_control_failed_admission_and_successor_preserve_all_axes() {
+    use super::super::native_prepare::Handle;
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::at(runtime.path().join("runtime/refusal.json"), 81489720, true);
+    let shared = b2b_shared(None);
+    let (key, actor) = b2b_active(&f, &shared).await;
+    let row = b2b_row(&f);
+    shared.turn_finalizer.register_start(
+        key,
+        ProviderKind::Claude,
+        super::super::RelayOwnerKind::None,
+        &shared,
+    );
+    let custody = await_within(
+        Handle::prepare(
+            &shared,
+            key,
+            Some(actor.clone()),
+            f.history.clone(),
+            "native-fixture".into(),
+            f.ticket.clone(),
+        ),
+        WAIT_CAP,
+    )
+    .await
+    .unwrap();
+    let bytes = std::fs::read(runtime.path().join("runtime/refusal.json")).unwrap();
+    for keyed in [false, true] {
+        if keyed {
+            f.history
+                .note_native_any_key("native-fixture", &f.ticket)
+                .unwrap();
+        }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(
+                runtime
+                    .path()
+                    .join("runtime/refusal.json")
+                    .with_extension("lock"),
+            )
+            .unwrap();
+        if keyed {
+            lock.lock().unwrap();
+        }
+        let result = await_within(
+            shared.mailbox(key.channel_id).finish_turn_if_token(
+                Some(actor.clone()),
+                crate::services::discord::queue_persistence_context(
+                    &shared,
+                    &ProviderKind::Claude,
+                    key.channel_id,
+                ),
+            ),
+            WAIT_CAP,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            crate::services::turn_orchestrator::TokenFinish::Unavailable
+        ));
+        drop(lock);
+        assert!(
+            f.history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .outcome
+                .is_none()
+        );
+        assert!(Arc::ptr_eq(
+            shared
+                .mailbox(key.channel_id)
+                .snapshot()
+                .await
+                .cancel_token
+                .as_ref()
+                .unwrap(),
+            &actor
+        ));
+        assert_eq!(
+            shared
+                .restart
+                .global_active
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+    let successor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+        "successor".into(),
+    )));
+    await_within(
+        shared.mailbox(key.channel_id).restore_active_turn(
+            successor.clone(),
+            serenity::model::id::UserId::new(8),
+            serenity::model::id::MessageId::new(key.user_msg_id + 10),
+        ),
+        WAIT_CAP,
+    )
+    .await;
+    let result = await_within(
+        super::super::super::mailbox_clear_channel(&shared, &ProviderKind::Claude, key.channel_id),
+        WAIT_CAP,
+    )
+    .await;
+    assert!(result.removed_token.is_none());
+    assert!(result.persistence.failed.contains(&"native_input"));
+    assert!(Arc::ptr_eq(
+        shared
+            .mailbox(key.channel_id)
+            .snapshot()
+            .await
+            .cancel_token
+            .as_ref()
+            .unwrap(),
+        &successor
+    ));
+    let after = super::super::super::inflight::load_inflight_state_read_only(
+        &ProviderKind::Claude,
+        row.channel_id,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(after).unwrap(),
+        serde_json::to_value(row).unwrap()
+    );
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    assert!(!bytes.is_empty());
+    drop(custody);
+}
+
+#[tokio::test]
+async fn native_8148_control_native_result_and_control_outcome_have_one_winner() {
+    use super::super::native_prepare::Handle;
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    for native_first in [true, false] {
+        let f = Fixture::at(
+            runtime
+                .path()
+                .join(format!("runtime/race-{native_first}.json")),
+            81489730 + u64::from(native_first),
+            true,
+        );
+        let shared = b2b_shared(None);
+        let (key, actor) = b2b_active(&f, &shared).await;
+        b2b_row(&f);
+        shared.turn_finalizer.register_start(
+            key,
+            ProviderKind::Claude,
+            super::super::RelayOwnerKind::None,
+            &shared,
+        );
+        let custody = await_within(
+            Handle::prepare(
+                &shared,
+                key,
+                Some(actor.clone()),
+                f.history.clone(),
+                "native-fixture".into(),
+                f.ticket.clone(),
+            ),
+            WAIT_CAP,
+        )
+        .await
+        .unwrap();
+        let prepared = NativePrepared::capture(
+            &f.history,
+            "native-fixture",
+            f.ticket.clone(),
+            key,
+            Some(actor),
+            &shared,
+        )
+        .await
+        .unwrap();
+        prepared.any_key(&f.history).unwrap();
+        let batch = b2b_batch(&f);
+        let work = prepared
+            .admit(
+                &batch,
+                &batch,
+                0,
+                &f.ticket.source.as_ref().unwrap().target,
+                &f.history,
+                &shared,
+            )
+            .await
+            .unwrap();
+        if native_first {
+            assert!(b2b_submit(&shared, work, &f.history).await.unwrap());
+        } else {
+            await_within(
+                shared.turn_finalizer.submit_terminal(
+                    key,
+                    ProviderKind::Claude,
+                    super::super::TerminalEvent::Cancel,
+                    super::super::FinalizeContext::host_terminated(),
+                    shared.clone(),
+                ),
+                WAIT_CAP,
+            )
+            .await;
+            assert!(b2b_submit(&shared, work, &f.history).await.is_err());
+        }
+        if native_first {
+            await_within(
+                shared.turn_finalizer.submit_terminal(
+                    key,
+                    ProviderKind::Claude,
+                    super::super::TerminalEvent::Cancel,
+                    super::super::FinalizeContext::host_terminated(),
+                    shared.clone(),
+                ),
+                WAIT_CAP,
+            )
+            .await;
+        }
+        await_within(
+            async {
+                while !f
+                    .history
+                    .native_settlement("native-fixture", &f.ticket)
+                    .unwrap()
+                    .cleanup_complete
+                {
+                    tokio::task::yield_now().await;
+                }
+            },
+            WAIT_CAP,
+        )
+        .await;
+        let result = f
+            .history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap();
+        assert_eq!(
+            result.outcome.unwrap().disposition,
+            if native_first {
+                Disposition::Executed
+            } else {
+                Disposition::Cancelled
+            }
+        );
+        assert_eq!(
+            shared
+                .restart
+                .global_active
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(
+            shared
+                .mailbox(key.channel_id)
+                .snapshot()
+                .await
+                .cancel_token
+                .is_none()
+        );
+        control_next_head(
+            shared.mailbox(key.channel_id),
+            f.ticket.channel_id,
+            runtime.path(),
+        )
+        .await;
+        drop(custody);
+    }
+}

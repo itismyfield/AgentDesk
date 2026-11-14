@@ -1,5 +1,8 @@
 //! Native input evidence stays attached to its original registration through projection.
 use super::*;
+#[cfg(unix)]
+#[path = "native_control.rs"]
+pub(crate) mod control;
 
 #[cfg(all(test, unix))]
 pub(crate) fn frame_hashes(text: &str) -> Vec<String> {

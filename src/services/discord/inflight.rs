@@ -141,7 +141,9 @@ pub(in crate::services::discord) use removal::{
     invalidate_stale_generation_scoped, load_inflight_probe_scoped,
 };
 #[cfg(unix)]
-pub(in crate::services::discord) use removal::{native_boot_records, persist_native_boot_record};
+pub(in crate::services::discord) use removal::{
+    native_boot_records, persist_native_boot_record, preserve_native_before_discard,
+};
 mod restart_mark;
 #[cfg(test)]
 pub(in crate::services::discord) use self::removal::custody_notice_text;

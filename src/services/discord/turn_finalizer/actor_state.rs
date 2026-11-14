@@ -152,6 +152,7 @@ pub(super) enum FinalizeMsg {
         input: String,
         keyed: bool,
         history: crate::services::tui_input::human_frame::history::v2::Registry,
+        shared: Arc<SharedData>,
         ack: oneshot::Sender<Result<(), String>>,
     },
     #[cfg(unix)]

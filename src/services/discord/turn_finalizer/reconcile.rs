@@ -214,6 +214,10 @@ pub(super) async fn reconcile(
     shared: &Arc<SharedData>,
 ) {
     let now = Instant::now();
+    #[cfg(unix)]
+    for entry in ledger.values_mut() {
+        super::terminal_handler::native_policy::reconcile(entry, shared).await;
+    }
 
     // #5068: the finalizer actor owns guarded-miss recovery. Run before other
     // deadline work so releasing a terminal residue promptly publishes the

@@ -6,6 +6,10 @@ pub(in crate::services::discord) fn persist_native_boot_record(
     root: &Path,
     record: &RestoredRecord,
 ) -> Result<(), String> {
+    persist_record(root, record, true)
+}
+
+fn persist_record(root: &Path, record: &RestoredRecord, blocking: bool) -> Result<(), String> {
     let provider = ProviderKind::Claude;
     let ticket = &record.settlement.ticket;
     let message = ticket
@@ -15,8 +19,8 @@ pub(in crate::services::discord) fn persist_native_boot_record(
         .or_else(|| ticket.key["identity"]["primary"].as_u64())
         .ok_or("native custody identity missing")?;
     let custody = root.join("discord_custody/claude");
-    let _lock =
-        super::super::custody_notice::retention::lock(&custody, true).map_err(|e| e.to_string())?;
+    let _lock = super::super::custody_notice::retention::lock(&custody, blocking)
+        .map_err(|e| e.to_string())?;
     let key = episode_key(&provider, [ticket.channel_id, message], None);
     let dir = custody.join(sha(key.to_string().as_bytes()));
     preserve_episode(
@@ -32,6 +36,36 @@ pub(in crate::services::discord) fn persist_native_boot_record(
         )],
         runtime_store::process_generation_binding().generation,
     )
+}
+
+pub(in crate::services::discord) fn preserve_native_before_discard(
+    path: &Path,
+) -> Result<(), String> {
+    if path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+        != Some("claude")
+    {
+        return Ok(());
+    }
+    let root = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or("native discard root missing")?;
+    let channel = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or("native discard channel missing")?;
+    for value in native::boot_records(&root.join("injected_frames.json"), "claude")? {
+        let record = RestoredRecord::decode(value)?;
+        if record.settlement.ticket.channel_id == channel {
+            persist_record(root, &record, false)?;
+        }
+    }
+    Ok(())
 }
 
 pub(in crate::services::discord) fn native_boot_records(

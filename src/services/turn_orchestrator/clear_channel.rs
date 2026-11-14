@@ -40,7 +40,10 @@ fn clear_and_signal(
     active: ActivePolicy,
 ) -> ClearChannelResult {
     let result = clear_channel_state(state, channel_id, persistence, active);
-    if active == ActivePolicy::Release && !result.persistence.failed.contains(&"queue_read_only") {
+    if active == ActivePolicy::Release
+        && !result.persistence.failed.contains(&"queue_read_only")
+        && !result.persistence.failed.contains(&"native_input")
+    {
         super::mark_turn_finished_signal_done(channel_id);
     }
     result
@@ -121,6 +124,18 @@ pub(super) fn clear_channel_state(
         return ClearChannelResult {
             persistence: ClearPersistence {
                 failed: vec!["queue_read_only"],
+                count_unknown: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+    }
+    if active == ActivePolicy::Release
+        && super::policy_close::admit_control(state, channel_id, false).is_err()
+    {
+        return ClearChannelResult {
+            persistence: ClearPersistence {
+                failed: vec!["native_input"],
                 count_unknown: true,
                 ..Default::default()
             },

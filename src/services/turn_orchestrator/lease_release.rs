@@ -40,6 +40,8 @@ pub(super) fn release_active_turn_anchor(
 pub(super) fn detach_active_turn_anchor(
     state: &mut ChannelMailboxState,
 ) -> (Option<Arc<CancelToken>>, Option<Instant>) {
+    state.control_custody = None;
+    state.control_custody = None;
     let removed_token = state.cancel_token.take();
     let held = state
         .turn_started_instant

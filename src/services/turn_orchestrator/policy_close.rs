@@ -23,9 +23,78 @@ macro_rules! at {
 }
 
 /// The close's one durable effect: the non-blocking exact clear of its acked receipt row.
+pub(crate) trait ControlCustody: Send + Sync {
+    fn input(&self) -> &str;
+    fn owns(
+        &self,
+        channel: ChannelId,
+        actor: Option<&Arc<crate::services::provider::CancelToken>>,
+        message: Option<MessageId>,
+        nonce: Option<&str>,
+    ) -> bool;
+    fn admit(&self, operator: bool) -> Result<(), String>;
+}
+
+pub(super) struct InstallCustody {
+    pub(crate) custody: Option<Arc<dyn ControlCustody>>,
+    pub(crate) remove: Option<String>,
+    pub(crate) reply: tokio::sync::oneshot::Sender<bool>,
+}
+
+impl super::ChannelMailboxHandle {
+    pub(crate) async fn install_control_custody(&self, custody: Arc<dyn ControlCustody>) -> bool {
+        self.request(|reply| {
+            super::ChannelMailboxMsg::ControlCustody(Box::new(InstallCustody {
+                custody: Some(custody),
+                remove: None,
+                reply,
+            }))
+        })
+        .await
+        .unwrap_or(false)
+    }
+}
+
+impl super::ChannelMailboxHandle {
+    pub(crate) async fn remove_control_custody(&self, input: String) -> bool {
+        self.request(|reply| {
+            super::ChannelMailboxMsg::ControlCustody(Box::new(InstallCustody {
+                custody: None,
+                remove: Some(input),
+                reply,
+            }))
+        })
+        .await
+        .unwrap_or(false)
+    }
+}
+
+pub(super) fn admit_control(
+    state: &ChannelMailboxState,
+    channel: ChannelId,
+    operator: bool,
+) -> Result<(), String> {
+    if let Some(custody) = &state.control_custody {
+        if !custody.owns(
+            channel,
+            state.cancel_token.as_ref(),
+            state.active_user_message_id,
+            state.active_turn_nonce.as_deref(),
+        ) {
+            return Err("native control custody superseded".into());
+        }
+        custody.admit(operator)?;
+    }
+    Ok(())
+}
+
 pub(crate) trait PolicyReceipt: Send {
     fn channel(&self) -> u64;
     fn try_clear(&self) -> PolicyClear;
+    fn try_clear_admitted(&self, admission: &dyn Fn() -> Result<(), String>) -> PolicyClear {
+        let _ = admission;
+        PolicyClear::Skipped
+    }
 }
 
 /// How the receipt clear ended; only `Cleared` lets the step release anything.
@@ -175,6 +244,31 @@ pub(super) fn answer(
 ) {
     let (request, reply) = match msg {
         super::ChannelMailboxMsg::PolicyClose { request, reply } => (*request, reply),
+        super::ChannelMailboxMsg::ControlCustody(request) => {
+            let accepted = if let Some(custody) = request.custody {
+                let owns = custody.owns(
+                    channel_id,
+                    state.cancel_token.as_ref(),
+                    state.active_user_message_id,
+                    state.active_turn_nonce.as_deref(),
+                );
+                if owns {
+                    state.control_custody = Some(custody);
+                }
+                owns
+            } else if state
+                .control_custody
+                .as_ref()
+                .is_some_and(|c| Some(c.input()) == request.remove.as_deref())
+            {
+                state.control_custody = None;
+                true
+            } else {
+                true
+            };
+            let _ = request.reply.send(accepted);
+            return;
+        }
         super::ChannelMailboxMsg::ClaimPolicyTail(claim) => {
             return tail::answer(state, claim, recovery_done);
         }
@@ -266,7 +360,14 @@ fn close(
         actor: request.actor.clone(),
     };
     at!(request, BeforeClear);
-    let refused = match request.receipt.try_clear() {
+    let cleared = if state.control_custody.is_some() {
+        request
+            .receipt
+            .try_clear_admitted(&|| admit_control(state, channel_id, false))
+    } else {
+        request.receipt.try_clear()
+    };
+    let refused = match cleared {
         PolicyClear::Cleared => None,
         cleared => Some(PolicyRetain::Clear(cleared)),
     };

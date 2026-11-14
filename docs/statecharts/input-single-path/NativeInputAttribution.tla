@@ -12,7 +12,8 @@ vars == <<pc, native, members, nativeQueue, stage, lease, rows, pending,
           generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
 
 ConsumerModes == {"BootGcBefore", "BootGcFixed", "CustodyReceiptBefore", "CustodyReceiptFixed", "CustodySourceBefore", "CustodySourceFixed", "BootSavedBefore", "BootSavedFixed", "BootCustodyBefore", "BootCustodyFixed", "BootCorruptBefore", "BootCorruptFixed", "BootOldGenerationBefore", "BootOldGenerationFixed", "BootQueueBefore", "BootQueueFixed", "BootPendingFixed"}
-ReviewModes == ConsumerModes \cup {"NeutralTransferBefore", "NeutralTransferFixed", "FollowerBefore", "FollowerFixed", "BootBefore", "BootFixed",
+ControlModes == {"ControlBefore", "ControlFixed", "ControlCustodyBefore", "ControlCustodyFixed", "ControlStaleBefore", "ControlStaleFixed", "ControlUnreadableFixed", "ControlNoKeyFixed"}
+ReviewModes == ControlModes \cup ConsumerModes \cup {"NeutralTransferBefore", "NeutralTransferFixed", "FollowerBefore", "FollowerFixed", "BootBefore", "BootFixed",
                 "BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
                 "PreflightBefore", "PreflightFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable"}
 ReviewBoot == Mode \in {"BootBefore", "BootFixed", "BootFailureFixed", "BootIgnoreFailure"}
@@ -31,8 +32,8 @@ Init == /\ pc = 0 /\ native = "Idle" /\ members = {} /\ nativeQueue = <<>>
              outcome : {"Executed", "Withdrawn"}, commits : {0, 1}, result : {"None", "Executed"},
              row : {Mode \notin {"BootQueueBefore", "BootQueueFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable", "NeutralTransferBefore", "NeutralTransferFixed"}}, preserved : {FALSE}, prepared : {FALSE}, head : {FALSE},
              failed : {Mode \in {"BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
-                "PreflightBefore", "PreflightFixed", "TransferUnreadable", "TransferAbsentUnreadable", "BootCorruptBefore", "BootCorruptFixed"}}, notice : {0},
-             parentLease : {IF Mode \in ConsumerModes \/ Mode \in {"TransferAbsentBefore", "TransferAbsentFixed", "TransferAbsentUnreadable"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferUnreadable", "NeutralTransferBefore", "NeutralTransferFixed"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {Mode \in {"BootQueueBefore", "BootQueueFixed"}}, neutral : {FALSE}]
+                "PreflightBefore", "PreflightFixed", "TransferUnreadable", "TransferAbsentUnreadable", "BootCorruptBefore", "BootCorruptFixed", "ControlUnreadableFixed"}}, notice : {0},
+             parentLease : {IF Mode \in ConsumerModes \/ Mode \in {"TransferAbsentBefore", "TransferAbsentFixed", "TransferAbsentUnreadable"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferUnreadable", "NeutralTransferBefore", "NeutralTransferFixed", "ControlStaleBefore", "ControlStaleFixed"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {Mode \in {"BootQueueBefore", "BootQueueFixed"}}, neutral : {FALSE}]
         /\ review.commits = IF review.result = "Executed" THEN 1 ELSE 0
         /\ (~ReviewBoot /\ Mode \notin ConsumerModes) => review.result = "None"
         /\ Mode \in ConsumerModes => review.result = IF Mode \in {"BootPendingFixed", "BootGcBefore", "BootGcFixed"} THEN "None" ELSE "Executed"
@@ -390,4 +391,40 @@ NativeBootNoFabrication == review.result = "None" => (~review.nativeAck /\ ~revi
 NativeBootAdmission == review.nativeAck => (review.result = "Executed" /\ known /\ ~review.failed)
 NativeBootNoLeaseRemint == review.parentLease = 0 /\ generation = 2
 NativeBootEventuallyDone == <>(review.phase = "Done" /\ review.head /\ ~review.row)
+ControlGrant == /\ review.phase = "Registered"
+                /\ review' = [review EXCEPT !.phase = "Granted", !.prepared = Mode # "ControlNoKeyFixed"]
+                /\ UNCHANGED <<ConsumerStable, known>>
+ControlRepair == /\ review.failed
+                 /\ review' = [review EXCEPT !.failed = FALSE]
+                 /\ UNCHANGED <<ConsumerStable, known>>
+ControlResult == /\ review.phase = "Granted" /\ review.parentLease = 1
+                 /\ review.prepared /\ ~review.failed /\ review.result = "None"
+                 /\ review' = [review EXCEPT !.phase = "Result", !.result = "Cancelled", !.commits = @ + 1]
+                 /\ UNCHANGED <<ConsumerStable, known>>
+ControlNativeResult == /\ review.phase = "Granted" /\ review.parentLease = 1
+                       /\ review.prepared /\ ~review.failed /\ review.result = "None"
+                       /\ review' = [review EXCEPT !.phase = "Result", !.result = "Executed", !.commits = @ + 1]
+                       /\ UNCHANGED <<ConsumerStable, known>>
+ControlRelease == /\ review.phase = "Result" \/ (Mode \in {"ControlBefore", "ControlStaleBefore"} /\ review.phase = "Granted")
+                  /\ review' = [review EXCEPT !.phase = "Released", !.parentLease = 0, !.parentActive = 0]
+                  /\ UNCHANGED <<ConsumerStable, known>>
+ControlCustody == /\ review.phase = "Released"
+                  /\ review' = [review EXCEPT !.phase = "Custody", !.preserved = TRUE]
+                  /\ UNCHANGED <<ConsumerStable, known>>
+ControlDelete == /\ review.phase = "Custody" \/ (Mode = "ControlCustodyBefore" /\ review.phase = "Released")
+                 /\ review' = [review EXCEPT !.phase = "RowGone", !.parentRow = FALSE]
+                 /\ UNCHANGED <<ConsumerStable, known>>
+ControlAck == /\ review.phase = "RowGone"
+              /\ review' = [review EXCEPT !.phase = "Done", !.nativeAck = TRUE, !.head = TRUE]
+              /\ UNCHANGED <<ConsumerStable, known>>
+ControlNext == ControlGrant \/ ControlRepair \/ ControlResult \/ ControlNativeResult \/ ControlRelease \/ ControlCustody \/ ControlDelete \/ ControlAck
+ControlSpec == Init /\ [][ControlNext]_vars /\ WF_vars(ControlGrant) /\ WF_vars(ControlRepair)
+               /\ WF_vars(ControlResult) /\ WF_vars(ControlNativeResult) /\ WF_vars(ControlRelease)
+               /\ WF_vars(ControlCustody) /\ WF_vars(ControlDelete) /\ WF_vars(ControlAck)
+ControlDurableBeforeRelease == review.parentLease = 0 => review.result # "None"
+ControlCustodyBeforeDelete == ~review.parentRow => review.preserved
+ControlKeepsSuccessor == Mode \notin {"ControlStaleBefore", "ControlStaleFixed"} \/ (review.parentLease = 2 /\ review.parentRow /\ review.parentActive = 1)
+ControlNoKeyPreserved == Mode # "ControlNoKeyFixed" \/ (review.parentLease = 1 /\ review.result = "None" /\ review.parentRow)
+ControlEventuallyDone == <>(review.phase = "Done" /\ review.nativeAck /\ review.head)
+
 =============================================================================

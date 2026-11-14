@@ -866,3 +866,20 @@ PortTransferred는 durable 결과+내 lease 없음+foreign row의 조합에서 d
 | `turn_finalizer/reconcile.rs::reconcile` → `actor_state.rs::native_debt_pending` | ConsumerGc | 일반 phase/TTL만으로 미확정 boot debt 삭제 금지. 미결 barrier 또는 unsettled boot registration이 있으면 보존 |
 
 이 두 입구는 Cancel/Terminate/clear/stop/operator release 권한 commit과 직접 row 삭제 custody를 대체하지 않는다. 해당 control 입구는 기존 전수표대로 남으며 아직 native policy 연결을 하지 않았다. 운영 활성화는 false다.
+
+
+### 조각2 control의 scoped custody 포트
+
+| 실제 입구 | 행동/값 범위 |
+|---|---|
+| `native_prepare.rs::handle(NativeRegister/NativeKeyed)` → `native_policy.rs::NativePrepared::{install_control,remove_control}` | 첫 key 전 actor 설치 ack. 확인된 NotSent는 result 없이 nonterminal 사실 저장/handle 해제. 전체 ticket·namespace·Registry path·captured actor 일치 |
+| `turn_orchestrator.rs::ControlCustody` → `policy_close.rs::answer/admit_control` | actor-local `None/own/stale` handle, captured Arc/id/nonce. 닫힌 actor의 설치 거절 |
+| `episode_identity.rs::finish_turn_if_matches/finish_turn_if_token/finish_cancelled`, root `FinishTurn` | 기존 identity/취소 조건 뒤·token/route/queue 변경 전 control CAS. 실패는 기존 typed refusal/error |
+| `clear_channel.rs::clear_channel_state`, `checked_purge.rs::purge_queue` | active anchor를 실제로 release하는 기존 분기만 admission. persistence 실패·native refusal은 row/queue/lease 보존 |
+| `policy_close.rs::close` → `clear_store/identity.rs::AckedPolicyReceipt::try_clear_admitted` | actor claims 뒤 기존 row lock/receipt predicate까지 통과한 지점에서 intent/result CAS. 원래 receipt 불일치/lock busy면 결과 기록0 |
+| `lease_release.rs::detach_active_turn_anchor` | scoped handle의 lifetime도 기존 lease detach와 함께 끝남. 새 actor에 오래된 권한 승계0 |
+| `history/v2/native_control.rs::try_native_control/try_native_not_sent` | full registration/ticket·AnyKey·nonterminal NotSent·Cancelled/OperatorReleased; try mutex/flock·durable CAS·candidate retry/third-state 보존 |
+| `native_policy.rs::reconcile` / `native_restore.rs::RestoredInput::proof/drive` | saved control proof, exact actor release→runtime row CAS→cleanup ack→terminal custody→기존 ledger admission/wake. successor/runtime 불일치는 삭제/wake 없는 debt-only 종결 |
+| `circuit_removal.rs::handoff_before_discard_locked`, `rebind_reap.rs` 두 unlink | 기존 sidecar lock 아래 `preserve_native_before_discard`를 먼저 완료. custody try-lock/보존 실패면 삭제 거절. 새 삭제 권한0 |
+
+Control marker의 값은 위 코드에서만 가져온다: `any_key/not_sent` 미기록 또는 true, 기존 outcome None/native 결과/명시 control 결과, cleanup false/true, control_intent의 namespace/full ticket/선택 row snapshot. 새 관측 loop·source replay·timer result는 없다. NativeInputAttribution의 prepared는 AnyKey+설치 ack를 추상화하며 scope/receipt/직렬화 정밀 비교는 실제 Rust 입구가 검증한다.

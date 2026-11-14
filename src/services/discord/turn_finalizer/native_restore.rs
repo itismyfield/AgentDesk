@@ -63,6 +63,20 @@ impl RestoredInput {
         let Some(outcome) = &self.record.settlement.outcome else {
             return Ok(());
         };
+        if let Some(value) = outcome.extra.get("control_proof") {
+            let intent: crate::services::tui_input::human_frame::history::v2::native::control::Intent = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            if !intent.validates(
+                &self.record.namespace,
+                &self.record.settlement.ticket,
+                outcome,
+            ) || self.record.settlement.extra.get("any_key")
+                != Some(&serde_json::Value::Bool(true))
+                || intent.row.as_ref().is_some_and(|row| !intent.owns_row(row))
+            {
+                return Err("native boot control proof mismatch".into());
+            }
+            return Ok(());
+        }
         let evidence: Evidence = serde_json::from_value(
             outcome
                 .extra
@@ -185,6 +199,14 @@ impl RestoredInput {
             )?;
             match current {
                 Some(row) if self.owns_row(&row) => {
+                    if let Some(value) = outcome.extra.get("control_proof") {
+                        let intent: crate::services::tui_input::human_frame::history::v2::native::control::Intent = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+                        if !intent.runtime_matches(
+                            &serde_json::to_value(&row).map_err(|e| e.to_string())?,
+                        ) {
+                            return Err("native boot control runtime changed".into());
+                        }
+                    }
                     let captured = self
                         .row
                         .as_ref()
@@ -246,6 +268,15 @@ impl BootInputs {
         let adopted = history.adopt_native_records(&records)?;
         let mut inputs = std::collections::BTreeMap::new();
         for record in adopted {
+            if record.settlement.extra.get("not_sent") == Some(&serde_json::Value::Bool(true)) {
+                if record.settlement.outcome.is_some()
+                    || record.settlement.extra.get("any_key")
+                        == Some(&serde_json::Value::Bool(true))
+                {
+                    return Err("native boot no-key proof conflicts".into());
+                }
+                continue;
+            }
             let id = serde_json::to_string(&(&record.namespace, &record.settlement.ticket.key))
                 .map_err(|e| e.to_string())?;
             inputs.insert(id, RestoredInput::capture(record, generation)?);

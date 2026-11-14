@@ -1109,3 +1109,128 @@ async fn operator_release_settles_after_caller_abort_without_home_fence() {
     })
     .await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_8148_control_operator_release_uses_exact_native_custody() {
+    use crate::services::discord::turn_finalizer::native_prepare::Handle;
+    use crate::services::tui_input::human_frame::history::v2::{
+        native::Disposition, native_tests::Fixture,
+    };
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::at(runtime.path().join("runtime/operator.json"), 81489710, true);
+    let episode = f.ticket.owning_episode.as_ref().unwrap();
+    let source = f.ticket.source.as_ref().unwrap();
+    let mut shared = super::super::make_shared_data_for_tests_with_storage(None);
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .restart
+        .current_generation = 1;
+    let channel = ChannelId::new(f.ticket.channel_id);
+    let actor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+        episode.turn_nonce.clone(),
+    )));
+    await_within(
+        shared.mailbox(channel).restore_active_turn(
+            actor.clone(),
+            UserId::new(7),
+            MessageId::new(episode.user_message_id),
+        ),
+        WAIT_CAP,
+    )
+    .await;
+    shared.restart.global_active.store(1, Ordering::SeqCst);
+    let mut row = inflight::InflightTurnState::new(
+        ProviderKind::Claude,
+        channel.get(),
+        None,
+        7,
+        episode.user_message_id,
+        episode.user_message_id,
+        "native".into(),
+        Some(source.session_id.clone()),
+        None,
+        source.transcript.to_str().map(str::to_owned),
+        None,
+        0,
+    );
+    row.turn_nonce = Some(episode.turn_nonce.clone());
+    row.born_generation = 1;
+    row.hosted_execution_nonce = source.target["execution_nonce"].as_str().map(str::to_owned);
+    inflight::save_inflight_state(&row).unwrap();
+    let key = TurnKey::new(channel, episode.user_message_id, 1)
+        .with_episode_nonce(Some(&episode.turn_nonce));
+    shared.turn_finalizer.register_start(
+        key,
+        ProviderKind::Claude,
+        crate::services::discord::inflight::RelayOwnerKind::None,
+        &shared,
+    );
+    let custody = await_within(
+        Handle::prepare(
+            &shared,
+            key,
+            Some(actor.clone()),
+            f.history.clone(),
+            "native-fixture".into(),
+            f.ticket.clone(),
+        ),
+        WAIT_CAP,
+    )
+    .await
+    .unwrap();
+    f.history
+        .note_native_any_key("native-fixture", &f.ticket)
+        .unwrap();
+    let expected = identity(&shared, &ProviderKind::Claude, channel)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = ReleaseRequest {
+        expected,
+        reason: "isolated fixture control".into(),
+    };
+    let result = await_within(
+        release_on(&shared, &ProviderKind::Claude, channel, request.clone()),
+        WAIT_CAP,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["released"], true);
+    assert_eq!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .as_ref()
+            .map(|o| &o.disposition),
+        Some(&Disposition::OperatorReleased)
+    );
+    await_within(
+        async {
+            while !f
+                .history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .cleanup_complete
+            {
+                tokio::task::yield_now().await;
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+    assert!(
+        inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).is_none()
+    );
+    assert_eq!(
+        release_on(&shared, &ProviderKind::Claude, channel, request)
+            .await
+            .unwrap()["released"],
+        false
+    );
+    assert!(!actor.is_completion_cleanup());
+    drop(custody);
+}

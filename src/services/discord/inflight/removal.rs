@@ -863,7 +863,7 @@ use boot_custody::inflight_age_secs_for_path;
 pub(in crate::services::discord) use boot_custody::inflight_runtime_root;
 #[cfg(unix)]
 pub(in crate::services::discord) use boot_custody::{
-    native_boot_records, persist_native_boot_record,
+    native_boot_records, persist_native_boot_record, preserve_native_before_discard,
 };
 mod boot_reaper;
 mod custody_notice;
