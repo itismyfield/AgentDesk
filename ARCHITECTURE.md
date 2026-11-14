@@ -2285,6 +2285,7 @@ src/
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
 │   │   │   │   │   ├── isolated_context.rs
 │   │   │   │   │   ├── isolated_context_tests.rs
+│   │   │   │   │   ├── isolated_context_thread_tests.rs
 │   │   │   │   │   ├── process_mailbox.rs
 │   │   │   │   │   ├── recovery_context_take_order_tests.rs
 │   │   │   │   │   ├── replay_start.rs
