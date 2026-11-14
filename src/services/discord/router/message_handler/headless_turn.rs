@@ -249,8 +249,18 @@ async fn start_reserved_headless_turn_admitted(
         front,
     )
     .await?;
-    let process_mailbox =
-        process_mailbox::capture((shared, channel_id), &cancel_token, metadata.as_ref()).await;
+    let mailbox_scope = process_mailbox::ProcessMailboxScope::of(
+        isolated_run.is_some(),
+        is_dm_hint == Some(true),
+        early_thread_parent.is_some(),
+    );
+    let process_mailbox = process_mailbox::capture(
+        (shared, channel_id),
+        &cancel_token,
+        metadata.as_ref(),
+        mailbox_scope,
+    )
+    .await;
     crate::services::discord::increment_global_active(shared, "headless_turn_start");
     // Compute the routine continuity policy once at the turn-start boundary.
     // The shared `/goal fresh` machinery below clears every provider restore path

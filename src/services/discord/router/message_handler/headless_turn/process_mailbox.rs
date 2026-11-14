@@ -32,13 +32,41 @@ pub(super) struct ProcessMailbox {
     user_message_id: u64,
 }
 
+/// The surface a process routine turn runs on. Only the routine's own thread or DM actor may
+/// retire with its turn; the agent's shared primary actor stays, even idle with an empty queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProcessMailboxScope {
+    RoutineOwnedThread,
+    RoutineOwnedDm,
+    SharedPrimary,
+}
+
+impl ProcessMailboxScope {
+    /// Read from the start's own evidence, never from launch metadata: the DM reservation, the
+    /// thread parent Discord resolved for the channel, and the isolated run's primary surface.
+    pub(super) fn of(isolated_run: bool, dm_reservation: bool, thread_resolved: bool) -> Self {
+        match (isolated_run, dm_reservation, thread_resolved) {
+            (true, ..) => Self::SharedPrimary,
+            (false, true, _) => Self::RoutineOwnedDm,
+            (false, false, true) => Self::RoutineOwnedThread,
+            (false, false, false) => Self::SharedPrimary,
+        }
+    }
+
+    fn retires(self) -> bool {
+        self != Self::SharedPrimary
+    }
+}
+
 /// Called with the admission transition guard held, before a provider can finish.
 pub(super) async fn capture(
     (shared, channel): (&Arc<SharedData>, ChannelId),
     token: &Arc<CancelToken>,
     metadata: Option<&serde_json::Value>,
+    scope: ProcessMailboxScope,
 ) -> Option<ProcessMailbox> {
-    if !super::routine_metadata::routine_process_turn(metadata)
+    if !scope.retires()
+        || !super::routine_metadata::routine_process_turn(metadata)
         || !matches!(shared.provider, ProviderKind::Claude | ProviderKind::Codex)
     {
         return None;

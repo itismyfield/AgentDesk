@@ -424,6 +424,8 @@ async fn a_headless_mark_that_cannot_be_isolated_is_refused_without_a_shared_fal
 #[tokio::test]
 async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context_pg() {
     use crate::db::session_transcripts as transcripts;
+    use crate::services::routines::agent_executor::RoutineAgentExecutor;
+    use crate::services::routines::execution_mode::{ExecutionDefinition, RoutineExecutionMode};
     use crate::services::routines::store::{NewRoutine, RoutineStore};
     if !api_child(&format!(
         "{TEST}a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context_pg"
@@ -434,10 +436,14 @@ async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context
     let fixture = fixture().await;
     let api = real_api(&fixture).await;
     let (pool, primary) = (&fixture.pool, PRIMARY.get().to_string());
-    sqlx::query("INSERT INTO agents (id, name, provider) VALUES ('agent8117', 'A', 'claude')")
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_cc)
+         VALUES ('agent8117', 'A', 'claude', $1)",
+    )
+    .bind(&primary)
+    .execute(pool)
+    .await
+    .unwrap();
     let store = RoutineStore::new_with_timezone_and_checkpoint_limit(
         Arc::new(pool.clone()),
         "Asia/Seoul",
@@ -457,20 +463,37 @@ async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context
         discord_thread_id: None,
         timeout_secs: None,
     };
-    store
-        .attach_routine_with_execution(routine_row, None, 3)
-        .await
-        .unwrap();
-    let run = store.claim_due_runs(1).await.unwrap().pop().unwrap().run_id;
-    let since = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let headless = ExecutionDefinition {
+        mode: RoutineExecutionMode::Headless,
+        runner: json!({"kind": "quickjs", "script_ref": "nightly.js"}),
+    };
+    let attached = store.attach_routine_with_execution(routine_row, Some(&headless), 3);
+    let routine_id = attached.await.unwrap().id;
+    let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
+    let (run, since) = (claimed.run_id.clone(), chrono::Utc::now());
+    let before = channel_state(&fixture, PRIMARY).await;
 
-    let headless = routine(Some(json!("headless")));
-    let turn = start_turn(&fixture, PRIMARY, "primary-agent", headless, Some(LABEL)).await;
-    let turn = turn.unwrap();
-    // The routine attempt owns the turn on the primary channel, as the launcher records it.
-    let result = json!({"channel_id": primary});
-    let marked = store.mark_agent_turn_started(&run, &turn, Some(result), "agent8117", "primary");
-    assert!(marked.await.unwrap());
+    // The real launcher starts the run it claimed as headless on the agent's primary channel.
+    let registry = Some(fixture.registry.clone());
+    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60);
+    let prompt = "nightly report".to_string();
+    let started = executor.start_agent_run(&store, claimed, prompt, None, None, None, None, false);
+    let started = started.await.unwrap();
+    assert_eq!(started.status, "running", "{started:?}");
+    let launched = started.result_json.unwrap();
+    assert_eq!(
+        (&launched["channel_id"], &launched["discord_thread_id"]),
+        (&json!(primary), &Value::Null),
+        "no routine thread: {launched}"
+    );
+    assert_eq!(launched["execution_mode"], "process", "{launched}");
+    let turn = launched["turn_id"].as_str().unwrap().to_string();
+    // Its launch mark isolated the turn and keeps its body off Discord.
+    let row = load_inflight_state_read_only(&ProviderKind::Claude, PRIMARY.get()).unwrap();
+    assert!(row.routine_presentation.isolated_run() && row.silent_turn);
+    let per_run = row.session_key.clone().unwrap();
+    assert!(per_run.contains("routine-process"), "{per_run}");
+    assert_eq!(channel_state(&fixture, PRIMARY).await, before, "at start");
     std::fs::write(fixture.stubs.join("answer"), ANSWER).unwrap();
     turn_ended(&fixture, PRIMARY).await;
 
@@ -496,16 +519,26 @@ async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context
         }
     };
     let (answer, in_context, key, run_row) = await_within(stored, WAIT_CAP).await;
-    let per_run = channel_key(
-        &fixture.shared,
-        &ProviderKind::Claude.build_tmux_session_name(LABEL),
-    );
     assert_eq!((answer.as_str(), in_context), (ANSWER, false));
     assert_eq!(key.as_deref(), Some(per_run.as_str()));
     use crate::services::routines::agent_executor::reliability::find_headless_turn_completion;
     let completion = find_headless_turn_completion(pool, &turn, since).await;
     let completion = completion.unwrap().expect("the run's completion evidence");
     assert_eq!(completion.assistant_message.as_deref(), Some(ANSWER));
+    // The routine's own poll closes the run on that evidence; no thread was made for it.
+    let polled = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    let closed: Vec<_> = polled.iter().map(|run| run.status.as_str()).collect();
+    assert_eq!(closed, ["succeeded"], "{polled:?}");
+    let (status, thread): (String, Option<String>) = sqlx::query_as(
+        "SELECT rr.status, r.discord_thread_id FROM routine_runs rr
+         JOIN routines r ON r.id = rr.routine_id WHERE rr.id = $1 AND r.id = $2",
+    )
+    .bind(&run)
+    .bind(&routine_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), thread), ("succeeded", None));
 
     // The primary conversation reads its own turns only, live and through a snapshot.
     let own = transcripts::PersistSessionTranscript {

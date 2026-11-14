@@ -8,6 +8,7 @@ use owner_input::AgentStartDisposition;
 mod owned_session;
 pub(crate) mod reliability;
 pub(crate) mod start_deferral;
+mod surface;
 use reliability::{current_attempt_started_at, provider_error_from_completion};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;

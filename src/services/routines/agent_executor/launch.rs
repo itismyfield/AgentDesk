@@ -34,6 +34,11 @@ impl RoutineAgentExecutor {
         let provider = bindings
             .resolved_primary_provider_kind()
             .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
+        let headless = surface::headless(store, &claimed.run_id).await?;
+        let execution_mode = match headless {
+            true => surface::headless_backend(&provider, dm_user_id)?,
+            false => execution_mode,
+        };
         execution_mode.ensure_provider(&provider)?;
         start_deferral::ensure_provider_registered(registry, &provider).await?;
         let primary_channel = bindings
@@ -55,57 +60,61 @@ impl RoutineAgentExecutor {
             None => None,
         };
 
-        let (turn_channel_id, discord_thread_id, delivery_bot, reservation) =
-            if let Some(dm_user_id_num) = dm_user_id_num {
-                let (dm_channel_id, reservation) = reserve_headless_agent_turn_in_dm(
+        let (turn_channel_id, discord_thread_id, delivery_bot, reservation) = if headless {
+            // No routine thread is resolved or created; the turn posts nothing of its own.
+            let bot = UtilityBotRole::Notify.alias().to_string();
+            (
+                channel_id,
+                None,
+                bot,
+                reserve_headless_agent_turn(channel_id),
+            )
+        } else if let Some(dm_user_id_num) = dm_user_id_num {
+            let (dm_channel_id, reservation) =
+                reserve_headless_agent_turn_in_dm(registry, channel_id, dm_user_id_num, &provider)
+                    .await
+                    .map_err(|error| {
+                        start_deferral::dm_reservation_error(agent_id, dm_user_id_num, error)
+                    })?;
+            (dm_channel_id, None, "dm".to_string(), reservation)
+        } else {
+            let routine_channel = self
+                .resolve_or_create_routine_thread(
+                    store,
                     registry,
+                    claimed,
+                    agent_id,
+                    provider.as_str(),
                     channel_id,
-                    dm_user_id_num,
-                    &provider,
                 )
-                .await
-                .map_err(|error| {
-                    start_deferral::dm_reservation_error(agent_id, dm_user_id_num, error)
-                })?;
-                (dm_channel_id, None, "dm".to_string(), reservation)
-            } else {
-                let routine_channel = self
-                    .resolve_or_create_routine_thread(
-                        store,
-                        registry,
-                        claimed,
-                        agent_id,
-                        provider.as_str(),
-                        channel_id,
-                    )
-                    .await;
-                let (turn_channel_id, discord_thread_id, delivery_bot) = match routine_channel {
-                    Ok(target) => (
-                        target.channel_id,
-                        target.discord_thread_id,
-                        target.delivery_bot,
-                    ),
-                    Err(error) => {
-                        let warning = error.to_string();
-                        let _ = store
-                            .record_discord_log_result(&claimed.run_id, "failed", Some(&warning))
-                            .await;
-                        tracing::warn!(
-                            routine_id = claimed.routine_id,
-                            run_id = claimed.run_id,
-                            error = %warning,
-                            "routine thread setup failed; falling back to agent primary channel"
-                        );
-                        (channel_id, None, UtilityBotRole::Notify.alias().to_string())
-                    }
-                };
-                (
-                    turn_channel_id,
-                    discord_thread_id,
-                    delivery_bot,
-                    reserve_headless_agent_turn(turn_channel_id),
-                )
+                .await;
+            let (turn_channel_id, discord_thread_id, delivery_bot) = match routine_channel {
+                Ok(target) => (
+                    target.channel_id,
+                    target.discord_thread_id,
+                    target.delivery_bot,
+                ),
+                Err(error) => {
+                    let warning = error.to_string();
+                    let _ = store
+                        .record_discord_log_result(&claimed.run_id, "failed", Some(&warning))
+                        .await;
+                    tracing::warn!(
+                        routine_id = claimed.routine_id,
+                        run_id = claimed.run_id,
+                        error = %warning,
+                        "routine thread setup failed; falling back to agent primary channel"
+                    );
+                    (channel_id, None, UtilityBotRole::Notify.alias().to_string())
+                }
             };
+            (
+                turn_channel_id,
+                discord_thread_id,
+                delivery_bot,
+                reserve_headless_agent_turn(turn_channel_id),
+            )
+        };
         let turn_id = reservation.turn_id().to_string();
 
         let mut result_json = json!({
@@ -130,7 +139,7 @@ impl RoutineAgentExecutor {
             "checkpoint": checkpoint,
             "next_due_at": next_due_at.map(|value| value.to_rfc3339()),
         });
-        let metadata = Some(json!({
+        let mut metadata = json!({
             "agent_id": agent_id,
             "delivery_bot": delivery_bot,
             "routine_id": claimed.routine_id,
@@ -145,7 +154,11 @@ impl RoutineAgentExecutor {
             "discord_thread_id": discord_thread_id,
             "dm_user_id": dm_user_id,
             "is_dm": dm_user_id.is_some(),
-        }));
+        });
+        if headless {
+            surface::mark_headless(&mut metadata);
+        }
+        let metadata = Some(metadata);
         let process = execution_mode == execution::AgentExecutionMode::Process;
         let channel_name_hint = dm_user_id_num.is_none().then(|| primary_channel.clone());
         let tmux_session_label = (dm_user_id_num.is_none() || process)

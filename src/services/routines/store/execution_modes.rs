@@ -70,6 +70,18 @@ impl RoutineStore {
         Ok(Some(routine))
     }
 
+    /// The explicit execution mode pinned on `run_id` at claim; `None` for a null-mode run.
+    pub async fn run_execution_mode(&self, run_id: &str) -> Result<Option<String>> {
+        let mode: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT run_spec ->> 'execution_mode' FROM routine_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("read routine run {run_id} execution mode: {e}"))?;
+        mode.ok_or_else(|| anyhow!("routine run {run_id} not found while reading its mode"))
+    }
+
     /// Explicit-mode runs refuse the legacy dynamic DM override; null-mode runs keep it.
     pub async fn run_forbids_dm_override(&self, run_id: &str) -> Result<bool> {
         let explicit: Option<bool> = sqlx::query_scalar(

@@ -12,6 +12,7 @@ use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, QueuePersistenceContext, TokenFinish,
 };
 
+const OWNED: ProcessMailboxScope = ProcessMailboxScope::RoutineOwnedThread;
 static NEXT_CHANNEL: AtomicU64 = AtomicU64::new(61_018_401);
 
 fn process_metadata() -> Value {
@@ -60,7 +61,7 @@ impl Fixture {
                 .await,
             "the fixture must claim a real mailbox episode"
         );
-        let lease = capture((&shared, channel), &token, Some(&process_metadata()))
+        let lease = capture((&shared, channel), &token, Some(&process_metadata()), OWNED)
             .await
             .expect("fresh process routine captures its active actor");
         (
@@ -701,6 +702,99 @@ async fn settlement_retry_budget_expires_with_the_original_actor_retained() {
     .await;
 }
 
+fn human_input(shared: &SharedData, id: u64) -> Intervention {
+    Intervention {
+        author_id: UserId::new(7),
+        author_is_bot: false,
+        message_id: MessageId::new(id),
+        queued_generation: shared.restart.current_generation,
+        source_message_ids: vec![MessageId::new(id)],
+        source_message_queued_generations: vec![],
+        source_text_segments: vec![],
+        text: format!("human {id}"),
+        mode: InterventionMode::Soft,
+        created_at: Instant::now(),
+        reply_context: None,
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: vec![],
+    }
+}
+
+/// One process routine turn on `scope` that runs to its end and settles, as the turn start and
+/// its completion watcher do; `behind` human inputs arrive while it runs.
+async fn routine_turn(
+    (shared, mailbox): (&Arc<SharedData>, &ChannelMailboxHandle),
+    channel: ChannelId,
+    scope: ProcessMailboxScope,
+    behind: &[u64],
+) {
+    let token = Arc::new(CancelToken::new());
+    let (author, message) = (UserId::new(1), MessageId::new(900));
+    assert!(mailbox.try_start_turn(token.clone(), author, message).await);
+    let lease = capture((shared, channel), &token, Some(&process_metadata()), scope).await;
+    let persistence = QueuePersistenceContext::new(&shared.provider, &shared.token_hash, None);
+    for id in behind {
+        let queued = mailbox.enqueue(human_input(shared, *id), persistence.clone());
+        assert!(queued.await.enqueued);
+    }
+    token.mark_completion_cleanup();
+    token.cancelled.store(true, Ordering::Release);
+    let finished = mailbox.finish_turn_if_token(Some(token), persistence).await;
+    assert!(matches!(finished, TokenFinish::Finished(_)));
+    if let Some(lease) = lease {
+        finalize(lease).await;
+    }
+}
+
+#[tokio::test]
+async fn a_shared_primary_actor_serves_inputs_queued_behind_a_routine_turn_and_never_retires() {
+    with_isolated_runtime_root(|| async {
+        let mut shared = make_shared_data_for_tests_with_storage(None);
+        Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Claude;
+        let channel = ChannelId::new(NEXT_CHANNEL.fetch_add(1, Ordering::Relaxed));
+        let mailbox = shared.mailbox(channel);
+        let primary = ProcessMailboxScope::of(true, false, false);
+        assert_eq!(primary, ProcessMailboxScope::SharedPrimary);
+        let same_actor = || {
+            let current = shared.mailbox_peek(channel);
+            current.is_some_and(|current| current.same_actor(&mailbox))
+        };
+
+        // Two human inputs arrive behind the running turn; each is served once, in order.
+        routine_turn((&shared, &mailbox), channel, primary, &[124, 125]).await;
+        assert!(same_actor());
+        let persistence = QueuePersistenceContext::new(&shared.provider, &shared.token_hash, None);
+        let mut served = Vec::new();
+        while let Some(next) = mailbox
+            .take_next_soft(persistence.clone())
+            .await
+            .intervention
+        {
+            served.push(next.text);
+        }
+        assert_eq!(served, ["human 124", "human 125"]);
+
+        // Idle with an empty queue, the primary actor still outlives the next routine turn.
+        routine_turn((&shared, &mailbox), channel, primary, &[]).await;
+        assert!(same_actor(), "the shared primary actor was retired");
+        assert!(mailbox.snapshot().await.intervention_queue.is_empty());
+
+        // Positive control: the same idle turn on the routine's own thread or DM retires it.
+        for (dm, thread) in [(false, true), (true, false), (true, true)] {
+            let owned = ProcessMailboxScope::of(false, dm, thread);
+            let channel = ChannelId::new(NEXT_CHANNEL.fetch_add(1, Ordering::Relaxed));
+            let mailbox = shared.mailbox(channel);
+            routine_turn((&shared, &mailbox), channel, owned, &[]).await;
+            assert!(shared.mailbox_peek(channel).is_none(), "{owned:?}");
+        }
+        // Neither a thread nor a DM was resolved: the surface is the primary channel.
+        let unresolved = ProcessMailboxScope::of(false, false, false);
+        assert_eq!(unresolved, ProcessMailboxScope::SharedPrimary);
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn capture_requires_fresh_process_routine_metadata_and_the_exact_active_token() {
     with_isolated_runtime_root(|| async {
@@ -712,15 +806,15 @@ async fn capture_requires_fresh_process_routine_metadata_and_the_exact_active_to
             Some(json!({"routine_id": "x", "execution_strategy": "fresh", "execution_mode": "tmux"})),
             Some(json!({"routine_id": "x", "execution_strategy": "fresh"})),
         ] {
-            assert!(capture((&fixture.shared, fixture.channel), &fixture.token, metadata.as_ref()).await.is_none(),
+            assert!(capture((&fixture.shared, fixture.channel), &fixture.token, metadata.as_ref(), OWNED).await.is_none(),
                 "ineligible metadata cannot capture an actor: {metadata:?}");
         }
         let unrelated = Arc::new(CancelToken::new());
-        assert!(capture((&fixture.shared, fixture.channel), &unrelated, Some(&process_metadata())).await.is_none());
+        assert!(capture((&fixture.shared, fixture.channel), &unrelated, Some(&process_metadata()), OWNED).await.is_none());
         assert!(capture((&fixture.shared, ChannelId::new(NEXT_CHANNEL.fetch_add(1, Ordering::Relaxed))),
-            &fixture.token, Some(&process_metadata())).await.is_none());
+            &fixture.token, Some(&process_metadata()), OWNED).await.is_none());
         fixture.settle(false).await;
-        assert!(capture((&fixture.shared, fixture.channel), &fixture.token, Some(&process_metadata())).await.is_none());
+        assert!(capture((&fixture.shared, fixture.channel), &fixture.token, Some(&process_metadata()), OWNED).await.is_none());
     }).await;
 }
 
