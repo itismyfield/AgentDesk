@@ -265,11 +265,14 @@ async fn turn_active(fixture: &Fixture, channel: ChannelId) -> bool {
     mailbox.cancel_token.is_some()
 }
 
-/// Releases the stub CLI and waits for the failed turn's completion to release the mailbox.
+/// Releases the stub CLI and waits for the turn to release the mailbox and finish finalizing.
 async fn turn_ended(fixture: &Fixture, channel: ChannelId) {
     std::fs::write(fixture.stubs.join("release"), "").unwrap();
+    let finalizing = &fixture.shared.restart.finalizing_turns;
     let ended = async {
-        while turn_active(fixture, channel).await {
+        while turn_active(fixture, channel).await
+            || finalizing.load(std::sync::atomic::Ordering::Relaxed) > 0
+        {
             tokio::task::yield_now().await;
         }
     };
@@ -894,6 +897,8 @@ async fn an_unreachable_routine_thread_defers_the_run_and_never_runs_on_the_prim
         return;
     }
     let fixture = fixture().await;
+    // Discord answers the saved thread as a thread under the primary channel.
+    fixture.discord.unname_channel(THREAD.get());
     fixture.discord.add_thread(THREAD.get(), PRIMARY.get());
     let before = channel_state(&fixture, PRIMARY).await;
     let prompt = || "nightly report".to_string();
