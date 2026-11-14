@@ -116,8 +116,26 @@ pub(super) fn clear_channel_state(
     persistence: QueuePersistenceContext,
     active: ActivePolicy,
 ) -> ClearChannelResult {
-    if let Some(result) = queued_head::clear_v2_channel(state, channel_id, &persistence, active) {
-        return result;
+    // Unknown snapshot versions stay untouched; supported V2 clears through its owner.
+    if let Ok(path) =
+        pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel_id)
+        && let Ok(raw) = std::fs::read_to_string(path)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw)
+        && value.is_object()
+        && value.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+        && !matches!(
+            queued_head::compat::inspect(&raw),
+            Ok(queued_head::compat::SnapshotRead::ReadOnlyV2(_))
+        )
+    {
+        return ClearChannelResult {
+            persistence: ClearPersistence {
+                failed: vec!["queue_read_only"],
+                count_unknown: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
     }
     if active == ActivePolicy::Release
         && super::policy_close::admit_control(state, channel_id, false).is_err()
@@ -130,6 +148,9 @@ pub(super) fn clear_channel_state(
             },
             ..Default::default()
         };
+    }
+    if let Some(result) = queued_head::clear_v2_channel(state, channel_id, &persistence, active) {
+        return result;
     }
     state.last_persistence = Some(persistence.clone());
     let namespace = super::remint_fence::namespace(&persistence);
@@ -370,5 +391,147 @@ impl super::ChannelMailboxRegistry {
         let op = if marker { Op::Marker } else { Op::Queue };
         let mut armed = FAULTS.lock().unwrap_or_else(|e| e.into_inner());
         armed.extend(std::iter::repeat_n((channel, op, after_removal), times));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod merge_tests {
+    use super::*;
+    use crate::services::provider::{CancelToken, ProviderKind};
+    use crate::services::turn_orchestrator::policy_close::ControlCustody;
+    use futures::FutureExt;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    struct Admission {
+        allowed: AtomicBool,
+        calls: AtomicUsize,
+    }
+    impl ControlCustody for Admission {
+        fn input(&self) -> &str {
+            "clear-admission"
+        }
+        fn owns(
+            &self,
+            _: ChannelId,
+            _: Option<&Arc<CancelToken>>,
+            _: Option<MessageId>,
+            _: Option<&str>,
+        ) -> bool {
+            true
+        }
+        fn admit(&self, _: bool) -> Result<(), String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.allowed
+                .load(Ordering::SeqCst)
+                .then_some(())
+                .ok_or("native admission unavailable".into())
+        }
+    }
+
+    fn context() -> QueuePersistenceContext {
+        QueuePersistenceContext::new(&ProviderKind::Claude, "merge-clear", None)
+    }
+
+    #[test]
+    fn native_8148_merge_clear_admission_precedes_cold_and_adopted_owner() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        for adopted_first in [false, true] {
+            let channel = ChannelId::new(8_148_987 + u64::from(adopted_first));
+            let (path, namespace) = queued_head::v2_queue(&context(), channel).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                "version":2,"namespace":namespace,"items":[],"head_injection":null,
+                "retained_inputs":[],"terminal_identities":[]}))
+                .unwrap(),
+            )
+            .unwrap();
+            let item: super::super::PendingQueueItem = serde_json::from_value(serde_json::json!({
+                "author_id":7,"message_id":101,"channel_id":channel.get(),
+                "source_message_ids":[101],"queued_generation":1,"text":"waiting"}))
+            .unwrap();
+            let mut snapshot: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            snapshot["items"] = serde_json::json!([item]);
+            std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            let actor = Arc::new(CancelToken::new());
+            let mut state = ChannelMailboxState::default();
+            state.cancel_token = Some(actor.clone());
+            state.active_user_message_id = Some(MessageId::new(100));
+            if adopted_first {
+                let adopted = queued_head::clear_v2_channel(
+                    &mut state,
+                    channel,
+                    &context(),
+                    ActivePolicy::Preserve,
+                )
+                .unwrap();
+                assert!(adopted.persistence.failed.is_empty());
+                std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            }
+            let before = std::fs::read(&path).unwrap();
+            let admission = Arc::new(Admission {
+                allowed: AtomicBool::new(false),
+                calls: AtomicUsize::new(0),
+            });
+            state.control_custody = Some(admission.clone());
+            let signal = super::super::turn_finished_signal(channel);
+            signal.reset();
+
+            let refused = clear_and_signal(&mut state, channel, context(), ActivePolicy::Release);
+            assert_eq!(refused.persistence.failed, ["native_input"]);
+            assert!(refused.removed_token.is_none());
+            assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert!(Arc::ptr_eq(state.cancel_token.as_ref().unwrap(), &actor));
+            assert!(signal.wait().now_or_never().is_none());
+
+            admission.allowed.store(true, Ordering::SeqCst);
+            let cleared = clear_and_signal(&mut state, channel, context(), ActivePolicy::Release);
+            assert!(cleared.persistence.failed.is_empty());
+            assert!(cleared.removed_token.is_some());
+            assert_eq!(admission.calls.load(Ordering::SeqCst), 2);
+            assert!(state.cancel_token.is_none());
+            assert!(signal.wait().now_or_never().is_some());
+            let after: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(after["version"], 2);
+            assert_eq!(after["items"], serde_json::json!([]));
+            assert_eq!(
+                after["admission_binds"],
+                serde_json::from_slice::<serde_json::Value>(&before).unwrap()["admission_binds"]
+            );
+        }
+    }
+
+    #[test]
+    fn native_8148_merge_clear_read_only_refusal_preserves_signal_and_native_intent() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let channel = ChannelId::new(8_148_989);
+        let path =
+            pending_queue_file_path(&context().provider, &context().token_hash, channel).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let before = br#"{"version":3,"items":[]}"#;
+        std::fs::write(&path, before).unwrap();
+        let admission = Arc::new(Admission {
+            allowed: AtomicBool::new(true),
+            calls: AtomicUsize::new(0),
+        });
+        let mut state = ChannelMailboxState::default();
+        state.cancel_token = Some(Arc::new(CancelToken::new()));
+        state.control_custody = Some(admission.clone());
+        let signal = super::super::turn_finished_signal(channel);
+        signal.reset();
+        let refused = clear_and_signal(&mut state, channel, context(), ActivePolicy::Release);
+        assert_eq!(refused.persistence.failed, ["queue_read_only"]);
+        assert!(refused.removed_token.is_none());
+        assert!(state.cancel_token.is_some());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
+        assert!(signal.wait().now_or_never().is_none());
     }
 }

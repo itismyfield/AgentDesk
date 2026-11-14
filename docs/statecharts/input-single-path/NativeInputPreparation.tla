@@ -7,7 +7,7 @@ vars == <<BaseVars, review>>
 Init == /\ phase = "Intent" /\ role \in {"Primary", "Follower"}
         /\ pin = "None" /\ prepared = FALSE /\ anyKey = FALSE /\ original = TRUE
         /\ result = "None" /\ source = "PreSource" /\ restored = FALSE /\ admitted = FALSE
-        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}]
+        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {FALSE}), clearDenied : {TRUE}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}]
 Prepare == /\ phase = "Intent"
            /\ phase' = "Prepared" /\ prepared' = TRUE
            /\ pin' = IF role = "Primary" \/ Mode = "BorrowBusy" THEN "Primary" ELSE "None"
@@ -122,4 +122,30 @@ PrefixNoFabrication == result = "None" /\ original
 PrefixSeedEventuallyAvailable == <>(review.seed # "Absent")
 PrefixLeaseEventuallyFree == <>(review.prefixLease = 0)
 
+
+\* Clear first refuses unsupported snapshots, then native admission, then delegates to V2.
+ClearAttempt == /\ review.clearStep = 0
+                /\ LET bypass == Mode = "ClearOwnerBefore" /\ review.clearOwner
+                       readonlyBypass == Mode = "ClearReadOnlyBefore"
+                       clears == bypass \/ readonlyBypass
+                   IN review' = [review EXCEPT !.clearStep = 1,
+                        !.clearLease = IF clears THEN 0 ELSE @,
+                        !.clearRows = IF clears THEN 0 ELSE @,
+                        !.clearSignal = clears,
+                        !.clearIntents = IF readonlyBypass THEN 1 ELSE @]
+                /\ UNCHANGED BaseVars
+ClearRepair == /\ review.clearStep = 1
+               /\ review' = [review EXCEPT !.clearStep = 2,
+                    !.clearDenied = FALSE, !.clearReadOnly = FALSE]
+               /\ UNCHANGED BaseVars
+ClearDelegate == /\ review.clearStep = 2 /\ ~review.clearDenied /\ ~review.clearReadOnly
+                 /\ review' = [review EXCEPT !.clearStep = 3, !.clearOwner = TRUE,
+                      !.clearLease = 0, !.clearRows = 0, !.clearSignal = TRUE, !.clearHead = TRUE]
+                 /\ UNCHANGED BaseVars
+ClearSpec == Init /\ [][ClearAttempt \/ ClearRepair \/ ClearDelegate]_vars
+             /\ WF_vars(ClearAttempt) /\ WF_vars(ClearRepair) /\ WF_vars(ClearDelegate)
+ClearRefusalKeepsOwnership == review.clearStep = 1 =>
+    review.clearLease = 1 /\ review.clearRows = 1 /\ ~review.clearSignal
+ClearReadOnlyKeepsIntent == (review.clearStep = 1 /\ review.clearReadOnly) => review.clearIntents = 0
+ClearEventuallyProgresses == <>(review.clearLease = 0 /\ review.clearRows = 0 /\ review.clearHead)
 =====================================================================

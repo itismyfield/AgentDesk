@@ -2769,3 +2769,118 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
     assert!(!actor.is_completion_cleanup());
     drop(handle);
 }
+
+#[tokio::test]
+async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adoption() {
+    use super::super::native_prepare::Handle;
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use futures::FutureExt;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    for adopted_first in [false, true] {
+        let channel = 8_148_991 + u64::from(adopted_first);
+        let history_path = runtime.path().join(format!("runtime/merge-{channel}.json"));
+        let f = Fixture::at(history_path.clone(), channel, true);
+        let shared = b2b_shared(None);
+        let (key, actor) = b2b_active(&f, &shared).await;
+        let row = b2b_row(&f);
+        shared.turn_finalizer.register_start(
+            key,
+            ProviderKind::Claude,
+            super::super::RelayOwnerKind::None,
+            &shared,
+        );
+        let custody = await_within(
+            Handle::prepare(
+                &shared,
+                key,
+                Some(actor.clone()),
+                f.history.clone(),
+                "native-fixture".into(),
+                f.ticket.clone(),
+            ),
+            WAIT_CAP,
+        )
+        .await
+        .unwrap();
+        f.history
+            .note_native_any_key("native-fixture", &f.ticket)
+            .unwrap();
+        let persistence = crate::services::discord::queue_persistence_context(
+            &shared,
+            &ProviderKind::Claude,
+            key.channel_id,
+        );
+        let (path, namespace) =
+            crate::services::turn_orchestrator::queued_head::v2_queue(&persistence, key.channel_id)
+                .unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let snapshot = serde_json::json!({"version":2,"namespace":namespace,
+            "items":[{"author_id":7,"message_id":channel+10,"channel_id":channel,
+                "source_message_ids":[channel+10],"queued_generation":1,"text":"next"}],
+            "head_injection":null,"retained_inputs":[],"terminal_identities":[]});
+        std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        if adopted_first {
+            shared
+                .mailbox(key.channel_id)
+                .v2_adopt(path.clone(), namespace)
+                .await
+                .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let history_before = std::fs::read(&history_path).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(history_path.with_extension("lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let signal = crate::services::turn_orchestrator::ChannelMailboxRegistry::default()
+            .turn_finished(key.channel_id);
+        let refused = await_within(
+            crate::services::discord::mailbox_clear_channel(
+                &shared,
+                &ProviderKind::Claude,
+                key.channel_id,
+            ),
+            WAIT_CAP,
+        )
+        .await;
+        assert_eq!(refused.persistence.failed, ["native_input"]);
+        assert!(refused.removed_token.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::read(&history_path).unwrap(), history_before);
+        assert!(signal.wait().now_or_never().is_none());
+        assert!(Arc::ptr_eq(
+            shared
+                .mailbox(key.channel_id)
+                .snapshot()
+                .await
+                .cancel_token
+                .as_ref()
+                .unwrap(),
+            &actor
+        ));
+        assert_eq!(
+            shared
+                .restart
+                .global_active
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            serde_json::to_value(
+                crate::services::discord::inflight::load_inflight_state_read_only(
+                    &ProviderKind::Claude,
+                    channel,
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(row).unwrap()
+        );
+        drop(lock);
+        drop(custody);
+    }
+}

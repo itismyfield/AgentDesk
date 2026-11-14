@@ -713,3 +713,7 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
+input-single-path/NativePreparationClearOwnerBefore.cfg	NativeInputPreparation	ClearRefusalKeepsOwnership	-
+input-single-path/NativePreparationClearOwnerFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationClearReadOnlyBefore.cfg	NativeInputPreparation	ClearReadOnlyKeepsIntent,ClearRefusalKeepsOwnership	-
+input-single-path/NativePreparationClearReadOnlyFixed.cfg	NativeInputPreparation	-	-
