@@ -425,6 +425,80 @@ async fn text_clear_commits_and_warns_once_whatever_fails_pg() {
     run_matrix(Entry::Text).await;
 }
 
+fn v2_snapshot(channel: ChannelId) -> Value {
+    let item = |offset: u64| {
+        let id = channel.get() + offset;
+        serde_json::json!({"author_id":7,"message_id":id,"channel_id":channel.get(),
+            "queued_generation":5,"source_message_ids":[id],"text":format!("input {id}")})
+    };
+    let identity = |offset: u64| {
+        let id = channel.get() + offset;
+        serde_json::json!({"primary":id,"queued_generation":5,
+            "sources":[{"message_id":id,"queued_generation":5}]})
+    };
+    let attempt = |offset| {
+        serde_json::json!({"identity":identity(offset),"original":item(offset),
+            "phase":"unknown","attempt":null,"payload":null,"confirmation_deadline_ms":null})
+    };
+    serde_json::json!({"version":2,"items":[item(11),item(12)],
+        "head_injection":attempt(11),"retained_inputs":[{"input":attempt(13),
+            "reason":{"kind":"unconfirmed"},"notice":{"kind":"unconfirmed","enqueued":false}}],
+        "terminal_identities":[{"identity":identity(14),"settled_at_ms":1}],
+        "admission_sequence":41,"admission_receipts":["historic-receipt"]})
+}
+
+async fn run_v2_clear(entry: Entry) {
+    let rig = Rig::start().await;
+    for (n, adopted) in [false, true].into_iter().enumerate() {
+        let (channel, _) = rig.channel(30 + n as u64, Fault::Clean).await;
+        let mailbox = rig.shared().mailbox(channel);
+        let prepared = mailbox.clear(rig.persistence()).await;
+        assert!(prepared.persistence.failed.is_empty());
+        let path = rig.file(channel, "json");
+        let before = v2_snapshot(channel);
+        std::fs::write(&path, serde_json::to_vec_pretty(&before).unwrap()).unwrap();
+        if adopted {
+            let (_, namespace) =
+                crate::services::turn_orchestrator::v2_queue(&rig.persistence(), channel).unwrap();
+            mailbox.v2_adopt(path.clone(), namespace).await.unwrap();
+        }
+
+        let replies = rig.clear(entry, channel).await;
+
+        let expected = format!("{SESSION_CLEARED_RESPONSE}\n대기 메시지 3건을 비웠어요.");
+        assert_eq!(replies, [expected], "{entry:?}, live owner={adopted}");
+        let after: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(after["version"], 2);
+        assert_eq!(after["items"], serde_json::json!([]));
+        assert_eq!(after["retained_inputs"], serde_json::json!([]));
+        assert!(after["head_injection"].is_null());
+        for field in ["admission_sequence", "admission_receipts"] {
+            assert_eq!(
+                after[field], before[field],
+                "{field}: delivered history stays"
+            );
+        }
+        assert!(
+            after["terminal_identities"]
+                .as_array()
+                .unwrap()
+                .contains(&before["terminal_identities"][0]),
+            "delivered history stays"
+        );
+    }
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn slash_clear_discards_v2_queue_and_retained_with_an_exact_count_pg() {
+    run_v2_clear(Entry::Slash).await;
+}
+
+#[tokio::test]
+async fn text_clear_discards_v2_queue_and_retained_with_an_exact_count_pg() {
+    run_v2_clear(Entry::Text).await;
+}
+
 /// Without a pool the clear still commits through both entries; the skipped boundary is warned.
 #[tokio::test]
 async fn a_clear_without_a_pool_commits_and_warns_through_both_entries_pg() {
