@@ -42,9 +42,11 @@ fn render(outcome: &RoutineRunOutcome) -> String {
 }
 
 impl RoutineDiscordLogger {
+    /// `thread_store` is the store when a missing routine thread may be created for the verdict.
     pub(super) async fn log_census_outcome(
         &self,
         store: &RoutineStore,
+        thread_store: Option<&RoutineStore>,
         routine: &RoutineRecord,
         outcome: &RoutineRunOutcome,
     ) -> RoutineDiscordLogStatus {
@@ -58,7 +60,7 @@ impl RoutineDiscordLogger {
         };
         let target = match self
             .resolve_routine_log_target(
-                Some(store),
+                thread_store,
                 Some(&routine.id),
                 Some(&routine.name),
                 routine.agent_id.as_deref(),

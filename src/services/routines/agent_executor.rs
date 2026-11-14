@@ -178,6 +178,19 @@ impl RoutineAgentExecutor {
                     return Ok(deferred);
                 }
                 let message = error.to_string();
+                let failure = start_deferral::StartFailure::of(&error, false);
+                if failure.ends_run() {
+                    return fail_claimed_agent_run(
+                        store,
+                        claimed,
+                        action,
+                        message,
+                        (Some(agent_id.as_str()), "primary"),
+                        failure,
+                        pause_on_terminal_failure,
+                    )
+                    .await;
+                }
                 self.handle_claimed_agent_failure(
                     store,
                     claimed,
@@ -318,8 +331,8 @@ impl RoutineAgentExecutor {
                             claimed,
                             action,
                             combined,
-                            Some(&fallback_agent_id),
-                            "fallback",
+                            (Some(fallback_agent_id.as_str()), "fallback"),
+                            start_deferral::StartFailure::of(&fallback_error, false),
                             pause_on_terminal_failure,
                         )
                         .await;
@@ -334,8 +347,8 @@ impl RoutineAgentExecutor {
             claimed,
             action,
             message.to_string(),
-            Some(failed_agent_id),
-            attempt_kind,
+            (Some(failed_agent_id), attempt_kind),
+            start_deferral::StartFailure::Regular,
             pause_on_terminal_failure,
         )
         .await
@@ -645,13 +658,22 @@ impl RoutineAgentExecutor {
                     return Ok(Some(deferred));
                 }
                 let message = error.to_string();
-                // A closed deferral window names what the run waited for.
+                // A closed deferral window names what the run waited for, and ends it.
                 let shared_primary = surface::headless(store, &run.run_id).await?;
-                let result_json = Some(pending_result_without_fresh_context_guarantee(
-                    &run,
-                    start_deferral::exhausted_status(&error, shared_primary),
-                    Some(&message),
+                let failure = start_deferral::StartFailure::of(&error, shared_primary);
+                let result_json = Some(failure.stamp(
+                    pending_result_without_fresh_context_guarantee(
+                        &run,
+                        failure.status(),
+                        Some(&message),
+                    ),
                 ));
+                if failure.ends_run() {
+                    let fresh = fresh_context_guaranteed_from_result(result_json.as_ref());
+                    let closing = (message.as_str(), result_json, fresh);
+                    return fail_running_agent_run(store, run, closing, pause_on_terminal_failure)
+                        .await;
+                }
                 self.handle_running_agent_failure(
                     store,
                     run,
@@ -781,11 +803,13 @@ impl RoutineAgentExecutor {
                         let combined = format!(
                             "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
                         );
-                        let result_json = Some(pending_result_without_fresh_context_guarantee(
-                            &run,
-                            "failed",
-                            Some(&combined),
-                        ));
+                        let failure = start_deferral::StartFailure::of(&fallback_error, false);
+                        let result_json =
+                            Some(failure.stamp(pending_result_without_fresh_context_guarantee(
+                                &run,
+                                "failed",
+                                Some(&combined),
+                            )));
                         let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
                             store
                                 .fail_run_and_pause_routine(
@@ -815,27 +839,8 @@ impl RoutineAgentExecutor {
             AgentFailureRecoveryPlan::Fail => {}
         }
 
-        let result_json =
-            result_json.or_else(|| Some(merge_pending_result(&run, "failed", Some(message), None)));
-        let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
-            store
-                .fail_run_and_pause_routine(&run.run_id, message, result_json.clone())
-                .await?
-        } else {
-            store
-                .fail_agent_run(&run.run_id, message, result_json.clone(), None)
-                .await?
-        };
-        Ok(closed.then(|| RoutineRunOutcome {
-            run_id: run.run_id,
-            routine_id: run.routine_id,
-            script_ref: run.script_ref,
-            action: "agent".to_string(),
-            status: "failed".to_string(),
-            result_json,
-            error: Some(message.to_string()),
-            fresh_context_guaranteed,
-        }))
+        let closing = (message, result_json, fresh_context_guaranteed);
+        fail_running_agent_run(store, run, closing, pause_on_terminal_failure).await
     }
 
     pub(crate) async fn teardown_fresh_agent_session(
@@ -1271,16 +1276,46 @@ fn timeout_secs_for_run(run: &RunningAgentRoutineRun, default_completion_timeout
         .unwrap_or(default_completion_timeout_secs)
 }
 
+/// Closes a running run as failed; `closing` is its message, result and fresh-context flag.
+async fn fail_running_agent_run(
+    store: &RoutineStore,
+    run: RunningAgentRoutineRun,
+    (message, result_json, fresh_context_guaranteed): (&str, Option<Value>, bool),
+    pause_on_terminal_failure: bool,
+) -> Result<Option<RoutineRunOutcome>> {
+    let result_json =
+        result_json.or_else(|| Some(merge_pending_result(&run, "failed", Some(message), None)));
+    let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
+        store
+            .fail_run_and_pause_routine(&run.run_id, message, result_json.clone())
+            .await?
+    } else {
+        store
+            .fail_agent_run(&run.run_id, message, result_json.clone(), None)
+            .await?
+    };
+    Ok(closed.then(|| RoutineRunOutcome {
+        run_id: run.run_id,
+        routine_id: run.routine_id,
+        script_ref: run.script_ref,
+        action: "agent".to_string(),
+        status: "failed".to_string(),
+        result_json,
+        error: Some(message.to_string()),
+        fresh_context_guaranteed,
+    }))
+}
+
 async fn fail_claimed_agent_run(
     store: &RoutineStore,
     claimed: ClaimedRoutineRun,
     action: String,
     message: String,
-    failed_agent_id: Option<&str>,
-    attempt_kind: &str,
+    (failed_agent_id, attempt_kind): (Option<&str>, &str),
+    failure: start_deferral::StartFailure,
     pause_on_terminal_failure: bool,
 ) -> Result<RoutineRunOutcome> {
-    let result_json = Some(json!({
+    let result_json = Some(failure.stamp(json!({
         "status": "failed_to_start",
         "error": message,
         "failed_agent_id": failed_agent_id,
@@ -1289,7 +1324,7 @@ async fn fail_claimed_agent_run(
         "run_id": claimed.run_id,
         "script_ref": claimed.script_ref,
         "fresh_context_guaranteed": fresh_context_guaranteed(&claimed.execution_strategy, false),
-    }));
+    })));
     let fresh_context_guaranteed = fresh_context_guaranteed(&claimed.execution_strategy, false);
     let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
         store

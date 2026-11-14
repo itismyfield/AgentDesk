@@ -17,21 +17,26 @@ impl RoutineDiscordLogger {
         routine: &RoutineRecord,
         outcome: &RoutineRunOutcome,
     ) -> RoutineDiscordLogStatus {
-        let snapshot: Result<(String, bool), _> = sqlx::query_as(
-            "SELECT status, COALESCE(run_spec ->> 'execution_mode' = 'headless', FALSE)
+        let snapshot: Result<(String, bool, bool), _> = sqlx::query_as(
+            "SELECT status, COALESCE(run_spec ->> 'execution_mode' = 'headless', FALSE),
+                    COALESCE(result_json ->> 'thread_failure' = 'create_unconfirmed', FALSE)
              FROM routine_runs WHERE id = $1 AND routine_id = $2",
         )
         .bind(&outcome.run_id)
         .bind(&routine.id)
         .fetch_one(&*self.pool)
         .await;
-        let (status, headless) = match snapshot {
+        let (status, headless, create_unconfirmed) = match snapshot {
             Ok(status) => status,
             Err(error) => return RoutineDiscordLogStatus::failed(error),
         };
+        // A run whose thread create went unanswered gets no second thread from its own log.
+        let thread_store = (!create_unconfirmed).then_some(store);
         // The census verdict goes to the routine's thread, which a headless run does not have.
         if !headless && super::super::legacy_body_census::applies(&routine.script_ref) {
-            return self.log_census_outcome(store, routine, outcome).await;
+            return self
+                .log_census_outcome(store, thread_store, routine, outcome)
+                .await;
         }
         // Headless failures are reported at close; a headless pause goes to the primary channel.
         if headless {
@@ -45,7 +50,7 @@ impl RoutineDiscordLogger {
         };
         let target = match self
             .resolve_routine_log_target(
-                Some(store),
+                thread_store,
                 Some(&routine.id),
                 Some(&routine.name),
                 routine.agent_id.as_deref(),
