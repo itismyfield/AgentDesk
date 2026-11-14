@@ -306,13 +306,9 @@ async fn running(
     assert!(idle.try_start_turn(token, owner, MessageId::new(900)).await);
     let (handle, path) = seeded(registry, channel, &[200]).await;
     if fault {
-        handle
-            .v2_request(|slot| {
-                slot.as_mut().ok_or("no owner")?.fault = super::super::Fault::Before;
-                Ok(())
-            })
-            .await
-            .unwrap();
+        // A directory at the file path makes both the original commit and readoption fail.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
     }
     let signal = crate::services::turn_orchestrator::turn_finished_signal(ChannelId::new(channel));
     (handle, path, signal)
@@ -622,4 +618,110 @@ fn synthetic_inputs_sharing_an_id_are_separate_admissions() {
         assert!(after.enqueued, "{:?}", after.refusal_reason);
         assert_eq!(texts(&v2(&handle).await), ["B", "C"]);
     });
+}
+
+#[test]
+fn a_clear_readopts_a_valid_snapshot_changed_outside_the_owner_once() {
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let (handle, path) = seeded(&registry, 7_272_408, &[200]).await;
+        let mut external = v2(&handle).await;
+        external["admission_sequence"] = json!(77);
+        external["admission_receipts"] = json!(["outside-receipt"]);
+        external["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::to_value(item(300)).unwrap());
+        std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();
+        let cleared = handle.clear(ctx()).await;
+        assert!(cleared.persistence.failed.is_empty());
+        assert!(!cleared.persistence.count_unknown);
+        assert_eq!(cleared.persistence.retried, ["queue_publish"]);
+        assert_eq!(
+            cleared.discarded_message_ids,
+            [100, 200, 300].map(MessageId::new)
+        );
+        let after = single_writer(&handle, &path, "readopt and clear").await;
+        assert!(ids(&after).is_empty());
+        assert!(after["head_injection"].is_null());
+        for field in [
+            "admission_sequence",
+            "admission_receipts",
+            "terminal_identities",
+        ] {
+            assert_eq!(after[field], external[field]);
+        }
+        assert!(handle.enqueue(intervention(400), ctx()).await.enqueued);
+        assert_eq!(
+            ids(&single_writer(&handle, &path, "next admission").await),
+            [400]
+        );
+    });
+}
+
+#[test]
+fn a_preserving_clear_keeps_every_protected_member_of_an_armed_head() {
+    let _root = TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(7_272_409);
+    let (path, namespace) = actor::v2_queue(&ctx(), channel).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut owner = Owner::adopt(path, namespace).unwrap();
+    for id in [100, 200, 300] {
+        Custody::with_ticket(&item(id), Ticket::new(&format!("group-{id}")).unwrap())
+            .advance(&mut owner)
+            .unwrap();
+    }
+    let key = owner
+        .reserve(
+            attempt(100),
+            PreparedPayload {
+                frame: "group".into(),
+                digest: "digest".into(),
+                attribution: json!({}),
+                followers: vec![item(200)],
+            },
+        )
+        .unwrap();
+    drop(owner.arm(&key, 0).unwrap());
+    let mut state = ChannelMailboxState::default();
+    state.active_user_message_id = Some(MessageId::new(100));
+    state.active_absorbed_source_ids = vec![MessageId::new(200)];
+    state.queued_head.v2 = Some(owner);
+    let cleared = crate::services::turn_orchestrator::clear_channel::clear_channel_state(
+        &mut state,
+        channel,
+        ctx(),
+        crate::services::turn_orchestrator::clear_channel::ActivePolicy::Preserve,
+    );
+    assert!(cleared.persistence.failed.is_empty());
+    assert_eq!(cleared.discarded_message_ids, [MessageId::new(300)]);
+    let owner = state.queued_head.v2.as_mut().unwrap();
+    assert_eq!(
+        owner
+            .snapshot
+            .items
+            .iter()
+            .map(|item| item.message_id)
+            .collect::<Vec<_>>(),
+        [100, 200]
+    );
+    assert_eq!(owner.snapshot.admission_binds.len(), 2);
+    owner.settle(&key, true, 1).unwrap();
+    assert_eq!(
+        owner
+            .snapshot
+            .terminal_identities
+            .iter()
+            .map(|t| t.identity.primary)
+            .collect::<Vec<_>>(),
+        [100, 200]
+    );
+    assert!(
+        owner
+            .snapshot
+            .admission_binds
+            .iter()
+            .all(|bind| matches!(bind.at, BindAt::Settled { .. }))
+    );
 }

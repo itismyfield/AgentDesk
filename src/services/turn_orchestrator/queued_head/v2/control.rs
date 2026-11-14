@@ -173,7 +173,7 @@ fn enqueue(
 }
 
 /// Items behind an attempted head are untried; every original the head carries stays in custody.
-fn untried(owner: &Owner) -> usize {
+pub(super) fn untried(owner: &Owner) -> usize {
     (owner.snapshot.head_injection.as_ref()).map_or(0, |head| head.members().count())
 }
 
@@ -383,11 +383,7 @@ impl Owner {
             if matches!(entry.reason, RetainedReason::Unconfirmed) {
                 uncertain += entry.input.members().count();
             }
-            if matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent))
-                && entry.input.attempt.is_some()
-                && !entry.notice.enqueued
-                && !super::retained::permanently_refused(entry)
-            {
+            if owes_cancelled(entry) {
                 owed.push(entry.input.clone());
             }
             entry.notice.enqueued = true;
@@ -405,4 +401,13 @@ impl Owner {
             kept: first,
         })
     }
+}
+
+/// Only a proven-unsent attempt without an earlier terminal notice can acquire cancellation debt.
+pub(super) fn owes_cancelled(entry: &RetainedInput) -> bool {
+    entry.notice.kind != super::retained::CLEARED_NOTICE
+        && matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent))
+        && entry.input.attempt.is_some()
+        && !entry.notice.enqueued
+        && !super::retained::permanently_refused(entry)
 }

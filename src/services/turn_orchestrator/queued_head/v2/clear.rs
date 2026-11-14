@@ -29,7 +29,8 @@ pub(crate) fn clear_channel(
         ) {
             return None;
         }
-        Owner::adopt(path, namespace).map(|owner| state.queued_head.v2 = Some(owner))
+        Owner::adopt(path.clone(), namespace.clone())
+            .map(|owner| state.queued_head.v2 = Some(owner))
     } else {
         Ok(())
     };
@@ -51,17 +52,39 @@ pub(crate) fn clear_channel(
             .not_waiting
             .extend(state.pending_user_dispatch_source_ids.iter().copied());
     }
+    let keep = if active == ActivePolicy::Preserve {
+        protected.as_slice()
+    } else {
+        &[]
+    };
     let cleared = adoption.and_then(|()| {
         state
             .queued_head
             .v2
             .as_mut()
             .ok_or("no V2 owner")?
-            .clear_all(if active == ActivePolicy::Preserve {
-                &protected
-            } else {
-                &[]
-            })
+            .clear_all(keep)
+    });
+    let cleared = cleared.or_else(|error| {
+        tracing::warn!(%error, "V2 clear will readopt the queue and retry once");
+        // An explicit clear may replace a stale owner, but still publishes through the same CAS.
+        let (path, namespace) = state
+            .queued_head
+            .v2
+            .take()
+            .map_or((path, namespace), |owner| {
+                (owner.path, owner.snapshot.namespace.unwrap_or_default())
+            });
+        let owner = Owner::adopt(path, namespace)?;
+        state.queued_head.v2 = Some(owner);
+        let discarded = state
+            .queued_head
+            .v2
+            .as_mut()
+            .ok_or("no V2 owner")?
+            .clear_all(keep)?;
+        result.persistence.retried.push("queue_publish");
+        Ok(discarded)
     });
     match cleared {
         Ok(mut discarded) => {
@@ -85,7 +108,21 @@ pub(crate) fn clear_channel(
             discarded.sort_unstable();
             discarded.dedup();
             if active == ActivePolicy::Preserve {
-                discarded.retain(|id| !protected.contains(id));
+                let running: Vec<_> = state
+                    .queued_head
+                    .v2
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|owner| owner.snapshot.head_injection.iter())
+                    .flat_map(|head| head.members())
+                    .flat_map(|item| sources::identity(item).sources)
+                    .map(|source| MessageId::new(source.message_id))
+                    .collect();
+                discarded.retain(|id| !running.contains(id));
+                result
+                    .persistence
+                    .not_waiting
+                    .retain(|id| !discarded.contains(id));
                 state.remint_fence.note_discarded(&discarded);
             }
             result.discarded_message_ids = discarded;
@@ -118,19 +155,49 @@ impl Owner {
         self.recover()?;
         let mut next = self.snapshot.clone();
         let at = origin::now_ms();
-        next.owe_queued(0..next.items.len(), TerminalOutcome::Cancelled, at);
-        next.owe_opaque(TerminalOutcome::Cancelled, at);
-        let inputs: Vec<_> = next
+        let head = next.head_injection.take().filter(|head| {
+            head.phase != HeadPhase::Reserved
+                && head.members().all(|item| {
+                    sources::identity(item)
+                        .sources
+                        .iter()
+                        .all(|source| protected.contains(&MessageId::new(source.message_id)))
+                })
+        });
+        let kept = head.as_ref().map_or(0, |head| head.members().count());
+        if let Some(input) = self
+            .snapshot
             .head_injection
+            .as_ref()
+            .filter(|head| head.phase == HeadPhase::Reserved)
+        {
+            next.owe_attempt(input, TerminalOutcome::Cancelled, at);
+        }
+        next.owe_queued(
+            control::untried(self)..next.items.len(),
+            TerminalOutcome::Cancelled,
+            at,
+        );
+        let inputs: Vec<_> = next
+            .retained_inputs
             .iter()
-            .chain(next.retained_inputs.iter().map(|entry| &entry.input))
-            .cloned()
+            .filter(|entry| control::owes_cancelled(entry))
+            .map(|entry| entry.input.clone())
             .collect();
-        let mut discarded: Vec<_> = next.items.iter().map(sources::identity).collect();
         for input in inputs {
             next.owe_attempt(&input, TerminalOutcome::Cancelled, at);
-            discarded.extend(input.members().map(sources::identity));
         }
+        let mut discarded: Vec<_> = next
+            .items
+            .iter()
+            .skip(kept)
+            .chain(
+                next.retained_inputs
+                    .iter()
+                    .flat_map(|entry| entry.input.members()),
+            )
+            .map(sources::identity)
+            .collect();
         if let Some(pending) = next
             .effort_restart
             .as_ref()
@@ -138,27 +205,23 @@ impl Owner {
         {
             discarded.push(sources::identity(&pending.original));
         }
-        let running: Vec<_> = discarded
-            .iter()
-            .filter(|identity| {
-                identity
-                    .sources
-                    .iter()
-                    .any(|source| protected.contains(&MessageId::new(source.message_id)))
-            })
-            .map(|identity| identity.primary)
-            .collect();
-        // A preserved turn still owns its result; only waiting origins become cancelled.
-        next.owed_drop_receipts.retain(|owed| {
-            !running.contains(&owed.message_id) || self.snapshot.owed_drop_receipts.contains(owed)
-        });
-        next.items.clear();
-        next.head_injection = None;
+        // An armed, protected input keeps all members and their exact attempt for late settlement.
+        next.items.truncate(kept);
+        next.head_injection = head;
         next.retained_inputs.clear();
         next.unfinished_handoff = None;
         next.effort_restart = None;
-        next.admission_binds
-            .retain(|bind| matches!(bind.at, BindAt::Settled { .. }));
+        next.admission_binds.retain(|bind| match &bind.at {
+            BindAt::Settled { .. } => true,
+            BindAt::Attempt { identity, attempt } => {
+                next.head_injection.as_ref().is_some_and(|head| {
+                    head.members()
+                        .any(|item| sources::identity(item) == *identity)
+                        && head.attempt.as_ref() == Some(attempt)
+                })
+            }
+            _ => false,
+        });
         self.commit(next)?;
         self.revoke_front();
         self.held = None;
