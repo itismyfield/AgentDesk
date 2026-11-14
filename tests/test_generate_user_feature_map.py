@@ -23,6 +23,8 @@ FEATURES = (
 ROWS = "docs/user-feature-map.rows.yaml"
 SCENARIOS = "tests/e2e/tui_relay/scenarios"
 OUTPUTS = ("docs/user-feature-map.md", "docs/generated/user-feature-coverage.json")
+PYTHON_TEST_REFERENCE = "tests/ref_cases.py::ReferenceCase.test_existing"
+RUST_TEST_REFERENCE = "src/ref_tests.rs::existing_test"
 
 
 def applicable():
@@ -109,6 +111,25 @@ class FeatureMapTests(unittest.TestCase):
     def rejected(self, pattern):
         with self.assertRaisesRegex(gen.MapError, pattern):
             self.generate()
+
+    def reference_sources(self):
+        python = self.root / "tests/ref_cases.py"
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text(
+            "import unittest\n\n"
+            "class ReferenceCase(unittest.TestCase):\n"
+            "    def test_existing(self):\n"
+            "        self.assertTrue(True)\n"
+            "    def helper(self):\n"
+            "        return True\n"
+        )
+        rust = self.root / "src/ref_tests.rs"
+        rust.parent.mkdir(parents=True, exist_ok=True)
+        rust.write_text("#[test]\nfn existing_test() {}\nfn helper() {}\n")
+
+    def reference(self, **changes):
+        return {"feature_id": "dm", "scope": "provider routing의 부분 명세", "needs_live": True,
+                **changes}
 
     def test_valid_bootstrap_counts_declarations_without_execution_claim(self):
         markdown, report = self.generate()
@@ -381,6 +402,116 @@ class FeatureMapTests(unittest.TestCase):
         self.assertEqual((original["applicable"], original["covered"]),
                          (changed["applicable"], changed["covered"]))
         self.assertEqual((changed_markdown, changed), gen.generate(self.root, "HEAD"))
+
+    def test_feature_needs_live_rejects_non_boolean_values(self):
+        for value in (1, 0, "true", None, []):
+            with self.subTest(value=value):
+                self.rows["features"][0]["needs_live"] = value
+                self.rejected("needs_live|test")
+
+    def test_test_names_require_a_list_of_real_test_coordinates(self):
+        for value in ("tests/ref_cases.py::ReferenceCase.test_existing", None, 1, [False], [""]):
+            with self.subTest(value=value):
+                self.rows["features"][0]["test_names"] = value
+                self.rejected("test")
+
+    def test_test_names_reject_invalid_paths_and_missing_definitions(self):
+        self.reference_sources()
+        invalid = (
+            "missing-coordinate", "../tests/ref_cases.py::ReferenceCase.test_existing",
+            "tests/../tests/ref_cases.py::ReferenceCase.test_existing",
+            "/tmp/ref_cases.py::ReferenceCase.test_existing", "tests/missing.py::ReferenceCase.test_existing",
+            "tests/ref_cases.py::ReferenceCase.test_missing", "tests/ref_cases.py::OtherCase.test_existing",
+            "tests/ref_cases.py::ReferenceCase.helper", "src/ref_tests.rs::missing_test",
+            "src/ref_tests.rs::helper",
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                self.rows["features"][0]["test_names"] = [value]
+                self.rejected("test")
+
+    def test_reference_metadata_rejects_unknown_feature_or_empty_scope(self):
+        for entry in (self.reference(feature_id="not-in-inventory"),
+                      self.reference(scope=""), self.reference(scope="  "),
+                      self.reference(scope=False)):
+            with self.subTest(entry=entry):
+                self.scenario["feature_coverage"]["references"] = [entry]
+                self.rejected("reference")
+
+    def test_references_require_mappings_and_explicit_true_needs_live(self):
+        for entries in (False, {}, [None], [self.reference(needs_live=False)],
+                        [self.reference(needs_live=1)], [self.reference(needs_live="true")]):
+            with self.subTest(entries=entries):
+                self.scenario["feature_coverage"]["references"] = entries
+                self.rejected("reference|needs_live")
+
+    def test_references_only_scenario_preserves_all_live_gaps(self):
+        metadata = self.scenario["feature_coverage"]
+        metadata.pop("claims")
+        entry = self.reference()
+        metadata["references"] = [entry]
+        for explicit_empty_claims in (False, True):
+            with self.subTest(explicit_empty_claims=explicit_empty_claims):
+                if explicit_empty_claims:
+                    metadata["claims"] = []
+                markdown, report = self.generate()
+                self.assertEqual((report["applicable"], report["covered"], report["missing"]), (11, 0, 11))
+                self.assertEqual(report["by_feature"]["dm"]["scenario_references"],
+                                 [{"scenario_id": "E-900", "scope": entry["scope"], "needs_live": True}])
+                self.assertIn(entry["scope"], markdown)
+
+    def test_empty_claims_and_references_are_not_a_feature_mapping(self):
+        self.scenario["feature_coverage"].update(claims=[], references=[])
+        self.rejected("claim|reference")
+
+    def test_references_and_existing_tests_are_reported_without_implying_execution(self):
+        self.reference_sources()
+        feature = next(row for row in self.rows["features"] if row["feature_id"] == "dm")
+        feature["needs_live"] = True
+        feature["test_names"] = [PYTHON_TEST_REFERENCE, RUST_TEST_REFERENCE]
+        self.scenario["feature_coverage"]["references"] = [self.reference()]
+        markdown, report = self.generate()
+        summary = report["by_feature"]["dm"]
+        self.assertTrue(summary["needs_live"])
+        self.assertCountEqual(summary["test_names"], [PYTHON_TEST_REFERENCE, RUST_TEST_REFERENCE])
+        self.assertEqual((summary["covered"], summary["missing"]), (0, 1))
+        self.assertEqual(report["covered"], 1)
+        self.assertIn(PYTHON_TEST_REFERENCE, markdown)
+        self.assertIn(RUST_TEST_REFERENCE, markdown)
+
+    def test_false_needs_live_does_not_fill_a_missing_live_contract(self):
+        self.reference_sources()
+        feature = next(row for row in self.rows["features"] if row["feature_id"] == "dm")
+        feature["needs_live"] = False
+        feature["test_names"] = [PYTHON_TEST_REFERENCE]
+        _, report = self.generate()
+        summary = report["by_feature"]["dm"]
+        self.assertIs(summary["needs_live"], False)
+        self.assertEqual((summary["covered"], summary["missing"]), (0, 1))
+        self.assertEqual((report["covered"], report["missing"]), (1, 10))
+
+    def test_existing_rows_default_to_needs_live_and_empty_test_references(self):
+        _, report = self.generate()
+        for feature in report["by_feature"].values():
+            self.assertIs(feature["needs_live"], True)
+            self.assertEqual(feature["test_names"], [])
+            self.assertEqual(feature["scenario_references"], [])
+
+    def test_referenced_test_source_bytes_participate_in_source_hash(self):
+        self.reference_sources()
+        self.rows["features"][0]["test_names"] = [PYTHON_TEST_REFERENCE, RUST_TEST_REFERENCE]
+        _, original = self.generate()
+        for relative in ("tests/ref_cases.py", "src/ref_tests.rs"):
+            with self.subTest(source=relative):
+                path = self.root / relative
+                before = path.read_text()
+                comment = "\n# source metadata only\n" if relative.endswith(".py") else "\n// source metadata only\n"
+                path.write_text(before + comment)
+                _, changed = gen.generate(self.root, "HEAD")
+                self.assertNotEqual(original["source_hash"], changed["source_hash"])
+                self.assertEqual((changed["applicable"], changed["covered"], changed["missing"]), (11, 1, 10))
+                self.assertEqual(changed, gen.generate(self.root, "HEAD")[1])
+                path.write_text(before)
 
     def test_generated_bytes_are_repeatable_and_drift_is_rejected(self):
         self.save()

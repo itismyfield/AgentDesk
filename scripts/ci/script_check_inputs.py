@@ -30,6 +30,8 @@ USER_FEATURE_MAP_INPUTS = (
     "scripts/generate_user_feature_map.py",
     "tests/test_generate_user_feature_map.py",
     "tests/test_user_feature_map_static.py",
+    "*.py",
+    "*.rs",
 )
 
 # Broad script/test roots cover imported helpers and fixture-copy dependencies.

@@ -5,6 +5,12 @@ coverage_class: live
 # Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
 cells: [codex-pipe, codex-tui]
 isolation: required
+feature_coverage:
+  schema: 1
+  references:
+    - feature_id: effort-model
+      scope: Codex /model의 local-control 안내 뒤 일반 입력 admission·응답 정확히 1회 명세만 참조한다. legacy_automation 입력이며 현재 Claude/human 수기 칸과 provider/source가 다르다. 구체 output profile과 실제 model/effort 선택·적용 효과는 관측하지 않는다.
+      needs_live: true
 acceptance_criteria:
   - Warm the Codex channel and wait until the target mailbox is idle.
   - Send a content-only `/model` through Discord; the local-control notice arrives and no inflight row is read until the quiet period ends with queue 0.

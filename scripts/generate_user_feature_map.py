@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -103,6 +105,8 @@ def validate_rows(rows):
         require(nonempty(fid) and fid not in index, "schema: duplicate/invalid feature ID")
         for field in ("title", "visible_contract", "verification", "owner", "chart"):
             require(nonempty(feature.get(field)), f"schema: {fid}.{field} required")
+        require(type(feature.get("needs_live", True)) is bool, "needs_live: boolean required")
+        string_list(feature.get("test_names", []), "test_names", empty=True)
         apps = feature.get("applicable")
         require(isinstance(apps, list) and bool(apps), f"schema: nonempty applicable inventory for {fid}")
         pending = feature.get("pending_assertions", [])
@@ -136,6 +140,41 @@ def validate_rows(rows):
 
 def load_yaml(path):
     return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def test_sources(root, index):
+    sources, definitions = set(), {}
+    for feature in index.values():
+        for coordinate in feature.get("test_names", []):
+            relative, separator, name = coordinate.partition("::")
+            path = Path(relative)
+            require(separator and not path.is_absolute() and ".." not in path.parts,
+                    "test: repo-relative file::test_name required")
+            source = (root / path).resolve()
+            require(source.is_relative_to(root) and source.is_file() and path.suffix in {".py", ".rs"},
+                    f"test: missing or invalid source {relative}")
+            if source not in definitions:
+                text = source.read_text(encoding="utf-8")
+                if path.suffix == ".py":
+                    names = set()
+                    def collect(node, prefix=""):
+                        for child in node.body:
+                            if isinstance(child, ast.ClassDef):
+                                collect(child, prefix + child.name + ".")
+                            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name.startswith("test_"):
+                                names.add(prefix + child.name)
+                    try:
+                        collect(ast.parse(text))
+                    except SyntaxError as exc:
+                        raise MapError(f"test: invalid Python source {relative}") from exc
+                else:
+                    names = set(re.findall(
+                        r"(?m)^\s*#\[(?:\w+::)*test(?:\([^\]]*\))?\]\s*"
+                        r"(?:#\[[^\]]*\]\s*|//[^\n]*\n\s*)*(?:async\s+)?fn\s+(\w+)\s*\(", text))
+                definitions[source] = names
+            require(name in definitions[source], f"test: definition not found: {coordinate}")
+            sources.add(source)
+    return sorted(sources)
 
 
 def git(root, *args):
@@ -218,6 +257,7 @@ def validate_claim(claim, scenario, index):
 
 def scenario_claims(root, index):
     claims = {}
+    references = {}
     ids = set()
     counts = {"active": 0, "live": 0, "fixture": 0, "unsupported-known-gap": 0, "retired": 0}
     paths = sorted((root / SCENARIOS).glob("*.yaml")) + sorted((root / SCENARIOS / "retired").glob("*.yaml"))
@@ -240,8 +280,21 @@ def scenario_claims(root, index):
             continue
         require(isinstance(metadata, dict) and type(metadata.get("schema")) is int and metadata["schema"] == 1,
                 "schema: feature_coverage.schema must be 1")
-        entries = metadata.get("claims")
-        require(isinstance(entries, list) and bool(entries), "schema: nonempty claims required")
+        entries = metadata.get("claims", [])
+        refs = metadata.get("references", [])
+        require(isinstance(entries, list), "schema: claims list required")
+        require(isinstance(refs, list), "reference: list required")
+        require(bool(entries or refs), "schema: nonempty claims or references required")
+        referenced = set()
+        for reference in refs:
+            require(isinstance(reference, dict), "reference: mapping required")
+            fid = reference.get("feature_id")
+            require(isinstance(fid, str) and fid in index and fid not in referenced,
+                    "reference: unknown or duplicate feature")
+            require(nonempty(reference.get("scope")), "reference: explicit partial scope required")
+            require(reference.get("needs_live") is True, "reference: needs_live must be true")
+            referenced.add(fid)
+            references.setdefault(fid, []).append({"scenario_id": sid, "scope": reference["scope"], "needs_live": True})
         seen = set()
         for claim in entries:
             fid, key = validate_claim(claim, scenario, index)
@@ -266,14 +319,15 @@ def scenario_claims(root, index):
                 require(not any(op.startswith("fixture_") or op == "no_duplicate_marker_with_known_gap"
                                 for op in claim["assertion_ids"]), "class: fixture/known-gap assertion cannot cover live")
             claims.setdefault((fid, key), []).append((sid, live))
-    return claims, counts, paths
+    return claims, counts, paths, references
 
 
-def source_hash(root, paths):
+def source_hash(root, paths, tests=()):
     digest = hashlib.sha256()
     sources = [(str(ROWS), root / ROWS)] + [(str(p.relative_to(root)), p) for p in paths]
     sources += [("generator", Path(__file__)),
                 ("assertion_registry", Path(__file__).parent / "e2e/tui_relay/assertion_registry.py")]
+    sources += [(str(path.relative_to(root)), path) for path in tests]
     for label, path in sources:
         data = path.read_bytes()
         digest.update(label.encode() + b"\0" + str(len(data)).encode() + b"\0" + data)
@@ -286,10 +340,11 @@ def generate(root: Path, base_ref: str):
     rows = load_yaml(root / ROWS)
     index = validate_rows(rows)
     check_ratchet(rows, index, baseline)
-    claims, counts, paths = scenario_claims(root, index)
+    tests = test_sources(root, index)
+    claims, counts, paths, references = scenario_claims(root, index)
     report = {"schema_version": 1, "applicable": 0, "covered": 0, "missing": 0,
               "unsupported": 0, "by_feature": {}, "scenario_counts": counts,
-              "source_hash": source_hash(root, paths)}
+              "source_hash": source_hash(root, paths, tests)}
     for fid, feature in sorted(index.items()):
         entries = []
         for app in sorted(feature["applicable"], key=tuple_key):
@@ -304,7 +359,9 @@ def generate(root: Path, base_ref: str):
         covered = sum(bool(entry["scenario_ids"]) for entry in entries)
         summary = {"applicable": len(entries), "covered": covered, "missing": len(entries) - covered,
                    "unsupported": sum(entry["status"] == "unsupported" for entry in entries),
-                   "tuples": entries, "pending_assertions": feature.get("pending_assertions", [])}
+                   "tuples": entries, "pending_assertions": feature.get("pending_assertions", []),
+                   "needs_live": feature.get("needs_live", True), "test_names": sorted(feature.get("test_names", [])),
+                   "scenario_references": sorted(references.get(fid, []), key=lambda ref: ref["scenario_id"])}
         report["by_feature"][fid] = summary
         for field in ("applicable", "covered", "missing", "unsupported"):
             report[field] += summary[field]
@@ -319,6 +376,7 @@ def render(index, report):
     lines = ["# 사용자 기능 지도", "", "생성: `python3 scripts/generate_user_feature_map.py --write --base-ref origin/main`", "",
              "수기 정본: [user-feature-map.rows.yaml](user-feature-map.rows.yaml). 이 지도는 live **명세** 연결이며 실행 PASS·최근성 증거가 아니다.",
              "fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않는다. `unspecified` output은 실제 출력 경로를 증명하지 않는다.", "",
+             "기존 시험 이름은 소스 정의 참조이며 실행/PASS가 아니다. 부분 시나리오 references와 needs_live는 covered 수를 늘리지 않는다.", "",
              f"적용 {report['applicable']} · covered {report['covered']} · 빈 칸 {report['missing']} · 미지원 단언 칸 {report['unsupported']}",
              f"시나리오 분류: {json.dumps(report['scenario_counts'], ensure_ascii=False, sort_keys=True)}", "",
              "| ID / 기능 | 사용자에게 보이는 계약 | 확인 명령 | 적용 / covered / 빈 칸 | 담당 / 차트 |",
@@ -329,7 +387,12 @@ def render(index, report):
             f"{fid} / {feature['title']}", feature["visible_contract"], feature["verification"],
             f"{summary['applicable']} / {summary['covered']} / {summary['missing']}", f"{feature['owner']} / {feature['chart']}")) + " |")
     for fid, summary in report["by_feature"].items():
-        lines += ["", f"## {fid}", "", "| 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |", "| --- | --- | --- | --- |"]
+        lines += ["", f"## {fid}", "", f"needs_live: `{str(summary['needs_live']).lower()}`", ""]
+        for name in summary["test_names"]:
+            lines.append(f"- 기존 시험 정의: `{name}`")
+        for reference in summary["scenario_references"]:
+            lines.append(f"- 부분 시나리오 `{reference['scenario_id']}` (needs_live): {reference['scope']}")
+        lines += ["", "| 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |", "| --- | --- | --- | --- |"]
         for entry in summary["tuples"]:
             lines.append("| " + " | ".join(cell(v) for v in (tuple_key(entry), ", ".join(entry["required_assertion_ids"]),
                           ", ".join(entry["scenario_ids"]) or "—", entry["status"])) + " |")
