@@ -56,7 +56,7 @@ pub(crate) fn clear_channel(
             .queued_head
             .v2
             .as_mut()
-            .ok_or_else(|| "no V2 owner".into())?
+            .ok_or("no V2 owner")?
             .clear_all(if active == ActivePolicy::Preserve {
                 &protected
             } else {
