@@ -258,6 +258,7 @@ fn native_8148_boot_adopts_full_registration_without_reopening_a_live_slot() {
         expected["registration"]
     );
     assert_eq!(state["passive"][0]["state"], "retained");
+    assert!(state["passive"][0]["entry"].is_object());
     assert!(state["planned"].as_array().unwrap().is_empty());
     assert_eq!(state["version"], 3);
     assert!(state["live"].as_array().unwrap().is_empty());
@@ -266,6 +267,35 @@ fn native_8148_boot_adopts_full_registration_without_reopening_a_live_slot() {
         .adopt_native_records(std::slice::from_ref(&record))
         .unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let mut missing_entry = restored.json().unwrap();
+    missing_entry["passive"][0]["entry"] = Value::Null;
+    std::fs::write(&path, missing_entry.to_string()).unwrap();
+    restored
+        .adopt_native_records(std::slice::from_ref(&record))
+        .unwrap();
+    let source = record.settlement.ticket.source.as_ref().unwrap();
+    assert_eq!(
+        restored.receipt(
+            "native-fixture",
+            &record.settlement.ticket.key,
+            (
+                &source.transcript,
+                source.offset,
+                "user",
+                Some("boot-restored-user"),
+                "한국어 원본 입력"
+            )
+        ),
+        Some(true)
+    );
+    restored
+        .adopt_native_records(std::slice::from_ref(&record))
+        .unwrap();
+    assert_eq!(
+        restored.json().unwrap()["passive"][0]["entry"]["events"][0]["row"],
+        "boot-restored-user"
+    );
+    let bytes = std::fs::read(&path).unwrap();
     for mutation in ["namespace", "frame", "frame_author", "outcome", "extra"] {
         let mut bad = serde_json::to_value(&record).unwrap();
         match mutation {

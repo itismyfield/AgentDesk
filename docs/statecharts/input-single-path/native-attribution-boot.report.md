@@ -31,3 +31,5 @@ NativeInputAttribution·NativeInputPreparation 합계 57 cfg에서 기대 위반
 운영 bootstrap는 enabled일 때만 prepare→기존 reaper→restore를 실행하며 준비·보존 오류면 intake를 열기 전에 돌아간다. owner recover와 start_waits도 같은 actor-local boot admission을 조회한다. enabled=false에서는 기존 reaper와 recover 경로를 그대로 실행한다. readonly admission query는 actor를 기다릴 뿐 PG를 기다리지 않는다.
 
 이 조각의 fixture는 실제 registry/custody/reaper/finalizer와 기존 V2 owner Drive를 통과한다. 실제 Discord 송신·herdr·운영 transcript 조회는 없다. 새 source 증거 공급과 Cancel/Terminate/clear/stop/operator-release의 native 결과 채택은 아직 구현하지 않았으므로 활성화 근거로 삼지 않는다.
+
+부팅 채택은 source가 있는 registration에서 기존 Frame::bind로 passive 인식 entry만 복원한다. live slot/lease/UUID receipt는 만들지 않는다. 기존 entry가 있으면 receipts를 보존하며, 없는 entry는 기존 receipt 진입점이 실제 row를 확인할 수 있게 한다. entry=None인 채 same-source bind가 조기 반환하는 반례는 실제 Registry::receipt RED→GREEN 및 entry 생성/보수 제거 mutant로 검증한다. source 없는 cold 입력은 기존 bind가 나중에 entry를 만들도록 유지한다. 모델에서는 기존 NativePreparationReceiptBefore/Fixed의 receipt/version 행동이며 새 source 읽기·전이/observer를 추가하지 않는다.

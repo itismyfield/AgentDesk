@@ -339,6 +339,12 @@ impl Registry {
                     incoming.native_settlement = Some(settled);
                 }
                 let key = &incoming.key;
+                let recovered_entry = || {
+                    incoming
+                        .source
+                        .as_ref()
+                        .map(|source| incoming.frame.bind(key, source))
+                };
                 if let Some(bound) = snapshot.live.iter_mut().find(|b| {
                     b.registration.namespace == record.namespace && b.registration.key == *key
                 }) {
@@ -354,12 +360,15 @@ impl Registry {
                         .as_ref()
                         .is_some_and(|r| r.namespace == record.namespace && r.key == *key)
                 }) {
+                    if passive.entry.is_none() {
+                        passive.entry = recovered_entry();
+                    }
                     passive.registration = Some(incoming.clone());
                     passive.encoded = None;
                 } else {
                     snapshot.passive.push(Passive {
                         registration: Some(incoming.clone()),
-                        entry: None,
+                        entry: recovered_entry(),
                         state: if incoming
                             .native_settlement
                             .as_ref()
