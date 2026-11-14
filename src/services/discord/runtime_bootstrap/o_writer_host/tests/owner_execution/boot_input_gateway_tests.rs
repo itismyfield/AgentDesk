@@ -4,6 +4,9 @@ use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::{Data, router};
 use axum::response::IntoResponse;
 
+#[path = "unbound_gateway_tests.rs"]
+mod unbound_gateway_tests;
+
 async fn prepare_gateway(f: &Fixture) {
     let channel = serenity::ChannelId::new(f.channel);
     {
