@@ -448,10 +448,10 @@ fn boot_saved(
 #[tokio::test]
 async fn native_8148_boot_saved_result_and_custody_only_recovery_drive_next_head_pg() {
     use crate::services::discord::turn_finalizer::native_prepare::BootInputs;
-    let db = TestPostgresDb::create().await;
-    let pool = db.connect_and_migrate().await;
     for custody_only in [false, true] {
         let env = Env::new();
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
         let root = env.dir().parent().unwrap().to_path_buf();
         let channel = 81489960 + u64::from(custody_only);
         let (f, outcome, state, path) = boot_saved(&env, channel, false);
@@ -516,9 +516,9 @@ async fn native_8148_boot_saved_result_and_custody_only_recovery_drive_next_head
         );
         assert!(!path.exists());
         assert_eq!(state.born_generation, 1);
+        pool.close().await;
+        db.drop().await;
     }
-    pool.close().await;
-    db.drop().await;
 }
 
 #[tokio::test]
