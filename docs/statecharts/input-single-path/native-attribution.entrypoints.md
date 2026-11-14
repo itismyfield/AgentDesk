@@ -812,3 +812,15 @@ Start의 기존 production wake 호출은 `turn_finalizer.rs::actor_loop`에서 
 | `src/services/discord/turn_finalizer/terminal_handler.rs:68` `handle_terminal` | NativePortBarrier. 등록된 primary의 legacy Complete/GateTimeout은 Deferred이며 result/cancel로 위조하지 않는다. |
 
 PortTransferred는 durable 결과+내 lease 없음+foreign row의 조합에서 debt만 닫는 ② 목표다. 모델은 안전성/진행성 목표를 비교하지만 이 조각의 production drive는 해당 종결을 구현하지 않는다. WARN/새 observer/새 ticket replay/lost wake는 사용자 11-14 범위 축소이며 과거 cfg를 운영 수용 증거로 세지 않는다.
+
+
+## B2b-2 ② P2 수리 (기준 2baf0806f)
+
+| 진입점 | 행동·값 근거 |
+|---|---|
+| `actor_state.rs::submit_native` → `NativeCleanup::prepare_notice` | Result durable → outbox enqueue → withdrawal ack를 actor 메시지 제출 전에 수행한다. 2초 제한은 PG 대기만 Err로 돌리고 lease/result 완료를 만들지 않는다. |
+| `actor_state.rs::contain_panic` | Terminal과 Native가 같은 helper로 panic payload를 &str/String으로 보존한다. 실패는 ack의 Err/기존 Terminal outcome으로 돌아가며 actor 수명과 분리한다. |
+| `terminal_handler.rs::NativeCleanup::drive` | durable exact outcome이 없으면 거절. captured actor가 lease를 보유하지 않고 row가 captured episode/runtime/start/offset과 다르면 cleanup debt만 ack한다. row 삭제·wake·global_active 변경0이다. |
+| `NativeCleanup::row_snapshot` | readable foreign row는 None, unreadable은 Err. successor lease가 있고 row가 없으면 foreign으로 취급한다. successor가 없는 단순 row 부재는 기존 captured fallback과 normal clear/wake를 유지한다. 모델 parentLease0/2와 row false는 앞의 no-own-lease/foreign proof를 추상화하며 독립 저장 값을 신설하지 않는다. |
+
+기본 `native_prepare::enabled=false`는 유지한다. boot/custody-only/old generation/인접 종료/e2e 및 운영 증거 공급 포트는 이 ②에 포함하지 않는다. 기존 ①의 barrier와 drive 소유 계약을 바꾸지 않았다.

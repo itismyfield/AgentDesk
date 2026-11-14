@@ -639,6 +639,7 @@ impl NativeCleanup {
     fn row_snapshot(
         &self,
         key: &TurnKey,
+        missing_is_captured: bool,
     ) -> Result<Option<super::super::inflight::InflightTurnState>, String> {
         let evidence = &self.admission.evidence;
         let captured = self.row.as_ref().ok_or("native row capture missing")?;
@@ -666,28 +667,40 @@ impl NativeCleanup {
                 }
                 current
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => captured.clone(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !missing_is_captured {
+                    return Ok(None);
+                }
+                captured.clone()
+            }
             Err(error) => return Err(error.to_string()),
         };
         Ok(Some(row))
     }
 
-    pub(super) async fn drive(
+    fn outcome(
         &self,
-        history: &crate::services::tui_input::human_frame::history::v2::Registry,
-        shared: &Arc<SharedData>,
-    ) -> Result<bool, String> {
-        use super::super::inflight::GuardedClearOutcome;
-        use crate::services::tui_input::human_frame::history::v2::native::{Disposition, Outcome};
+    ) -> Result<crate::services::tui_input::human_frame::history::v2::native::Outcome, String> {
+        use crate::services::tui_input::human_frame::history::v2::native::Outcome;
         let evidence = &self.admission.evidence;
-        let outcome = Outcome {
+        Ok(Outcome {
             disposition: evidence.disposition.clone(),
             range: Some([evidence.range.0, evidence.range.1]),
             extra: serde_json::Map::from_iter([(
                 "native_proof".into(),
                 serde_json::to_value(evidence).map_err(|e| e.to_string())?,
             )]),
-        };
+        })
+    }
+
+    pub(super) async fn prepare_notice(
+        &self,
+        history: &crate::services::tui_input::human_frame::history::v2::Registry,
+        shared: &Arc<SharedData>,
+    ) -> Result<(), String> {
+        use crate::services::tui_input::human_frame::history::v2::native::Disposition;
+        let evidence = &self.admission.evidence;
+        let outcome = self.outcome()?;
         history.record_native_outcome_at_stamp(
             &evidence.namespace,
             &evidence.ticket,
@@ -696,7 +709,7 @@ impl NativeCleanup {
         )?;
         let settlement = history.native_settlement(&evidence.namespace, &evidence.ticket)?;
         if settlement.cleanup_complete {
-            return Ok(true);
+            return Ok(());
         }
         if outcome.disposition == Disposition::WithdrawnNotExecuted && !settlement.withdrawal_notice
         {
@@ -707,7 +720,7 @@ impl NativeCleanup {
             let stable = serde_json::to_vec(&(&evidence.namespace, &evidence.ticket))
                 .map_err(|e| e.to_string())?;
             let dedupe = format!("native-withdrawal:{}", blake3::hash(&stable));
-            crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+            tokio::time::timeout(std::time::Duration::from_secs(2), crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_persistent_dedupe(
                 pool,
                 crate::services::message_outbox::OutboxMessage {
                     target: &format!("channel:{}", evidence.ticket.channel_id),
@@ -717,12 +730,48 @@ impl NativeCleanup {
                     reason_code: None,
                     session_key: Some(&dedupe),
                 },
-            )
+            ))
             .await
+            .map_err(|_| "native withdrawal outbox timed out")?
             .map_err(|e| e.to_string())?;
             history.ack_native_withdrawal_notice(&evidence.namespace, &evidence.ticket)?;
         }
+        Ok(())
+    }
+
+    pub(super) async fn drive(
+        &self,
+        history: &crate::services::tui_input::human_frame::history::v2::Registry,
+        shared: &Arc<SharedData>,
+    ) -> Result<bool, String> {
+        use super::super::inflight::GuardedClearOutcome;
+        use crate::services::tui_input::human_frame::history::v2::native::Disposition;
+        let evidence = &self.admission.evidence;
+        let outcome = self.outcome()?;
+        let settlement = history.native_settlement(&evidence.namespace, &evidence.ticket)?;
+        if settlement.outcome.as_ref() != Some(&outcome) {
+            return Err("native durable result missing".into());
+        }
+        if settlement.cleanup_complete {
+            return Ok(true);
+        }
+        if outcome.disposition == Disposition::WithdrawnNotExecuted && !settlement.withdrawal_notice
+        {
+            return Err("native withdrawal notice pending".into());
+        }
         if let Some((key, actor)) = &self.admission.cleanup {
+            let current = match shared.mailbox_peek(key.channel_id) {
+                Some(mailbox) => mailbox.snapshot().await.cancel_token,
+                None => None,
+            };
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, actor))
+                && self.row_snapshot(key, current.is_none())?.is_none()
+            {
+                history.ack_native_cleanup(&evidence.namespace, &evidence.ticket, &outcome)?;
+                return Ok(true);
+            }
             if let Some(mailbox) = shared.mailbox_peek(key.channel_id) {
                 let current = mailbox.snapshot().await;
                 if current
@@ -733,7 +782,7 @@ impl NativeCleanup {
                     return Ok(false);
                 }
                 if current.cancel_token.is_some() {
-                    if self.row_snapshot(key)?.is_none() {
+                    if self.row_snapshot(key, true)?.is_none() {
                         return Ok(false);
                     }
                     let finish = super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
@@ -753,7 +802,7 @@ impl NativeCleanup {
                     }
                 }
             }
-            let Some(row) = self.row_snapshot(key)? else {
+            let Some(row) = self.row_snapshot(key, true)? else {
                 return Ok(false);
             };
             let (cleared, detail) =

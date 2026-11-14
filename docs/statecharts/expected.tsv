@@ -499,3 +499,5 @@ input-single-path/NativeAttributionPortPreflightFixed.cfg	NativeInputAttribution
 input-single-path/NativeAttributionPortTransferBefore.cfg	NativeInputAttribution	-	NativePortEventuallyDone
 input-single-path/NativeAttributionPortTransferDeletes.cfg	NativeInputAttribution	NativeTransferKeepsSuccessor	-
 input-single-path/NativeAttributionPortTransferFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionPortTransferAbsentBefore.cfg	NativeInputAttribution	-	NativePortEventuallyDone
+input-single-path/NativeAttributionPortTransferAbsentFixed.cfg	NativeInputAttribution	-	-

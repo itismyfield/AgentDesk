@@ -1063,3 +1063,524 @@ fn native_8148_b2b2_native_admission_waits_for_input_not_delivery() {
     );
     assert!(!admission.claim_queue_eligible());
 }
+
+async fn s2_primary(
+    f: &Fixture,
+    shared: &Arc<SharedData>,
+) -> (TurnKey, Arc<CancelToken>, NativeCleanup) {
+    let (key, actor) = b2b_active(f, shared).await;
+    b2b_row(f);
+    let prepared = NativePrepared::capture(
+        &f.history,
+        "native-fixture",
+        f.ticket.clone(),
+        key,
+        Some(actor.clone()),
+        shared,
+    )
+    .await
+    .unwrap();
+    prepared.any_key(&f.history).unwrap();
+    let batch = b2b_batch(f);
+    let cleanup = prepared
+        .admit(
+            &batch,
+            &batch,
+            0,
+            &f.ticket.source.as_ref().unwrap().target,
+            &f.history,
+            shared,
+        )
+        .await
+        .unwrap();
+    (key, actor, cleanup)
+}
+
+async fn s2_withdraw(f: &Fixture, shared: &Arc<SharedData>) -> NativeCleanup {
+    let prepared = NativePrepared::capture(
+        &f.history,
+        "native-fixture",
+        f.ticket.clone(),
+        TurnKey::new(
+            ChannelId::new(f.ticket.channel_id),
+            f.ticket.channel_id + 1,
+            1,
+        ),
+        None,
+        shared,
+    )
+    .await
+    .unwrap();
+    prepared.any_key(&f.history).unwrap();
+    let mut batch = b2b_batch(f);
+    let evidence = &mut batch.evidence[0];
+    evidence.disposition = Disposition::WithdrawnNotExecuted;
+    evidence.run = None;
+    evidence.membership_range = None;
+    evidence.membership_row = None;
+    evidence.closer_range = None;
+    prepared
+        .admit(
+            &batch,
+            &batch,
+            0,
+            &f.ticket.source.as_ref().unwrap().target,
+            &f.history,
+            shared,
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn native_8148_s2_row_start_and_offset_guard_keep_owned_lease() {
+    use super::super::super::inflight;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    for (n, field) in ["started_at", "turn_start_offset"].into_iter().enumerate() {
+        let f = Fixture::at(
+            runtime.path().join(format!("runtime/row-{n}.json")),
+            8148970 + n as u64,
+            true,
+        );
+        let shared = b2b_shared(None);
+        let (key, actor, cleanup) = s2_primary(&f, &shared).await;
+        let path = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &ProviderKind::Claude,
+            f.ticket.channel_id,
+        );
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if field == "started_at" {
+            value[field] = "2000-01-01T00:00:00Z".into();
+        } else {
+            value[field] = 900.into();
+        }
+        let bytes = serde_json::to_vec(&value).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(
+            !b2b_submit(&shared, cleanup, &f.history).await.unwrap(),
+            "{field}"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert!(Arc::ptr_eq(
+            shared
+                .mailbox(key.channel_id)
+                .snapshot()
+                .await
+                .cancel_token
+                .as_ref()
+                .unwrap(),
+            &actor
+        ));
+        assert_eq!(
+            shared
+                .restart
+                .global_active
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_8148_s2_bound_ticket_rejects_episode_extra_and_source_without_writes() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    for (n, field) in ["episode", "extra", "source"].into_iter().enumerate() {
+        let path = runtime.path().join(format!("runtime/ticket-{n}.json"));
+        let f = Fixture::at(path.clone(), 8148973 + n as u64, true);
+        let shared = b2b_shared(None);
+        let (key, actor) = b2b_active(&f, &shared).await;
+        b2b_row(&f);
+        let prepared = NativePrepared::capture(
+            &f.history,
+            "native-fixture",
+            f.ticket.clone(),
+            key,
+            Some(actor),
+            &shared,
+        )
+        .await
+        .unwrap();
+        let batch = b2b_batch(&f);
+        let mut value = f.history.json().unwrap();
+        let ticket = &mut value["live"][0]["registration"]["native_settlement"]["ticket"];
+        match field {
+            "episode" => ticket["owning_episode"]["turn_nonce"] = "other-episode".into(),
+            "extra" => ticket["future"] = true.into(),
+            _ => ticket["source"]["offset"] = 1.into(),
+        }
+        let bytes = serde_json::to_vec(&value).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(prepared.any_key(&f.history).is_err(), "{field}");
+        assert!(
+            prepared
+                .admit(
+                    &batch,
+                    &batch,
+                    0,
+                    &f.ticket.source.as_ref().unwrap().target,
+                    &f.history,
+                    &shared
+                )
+                .await
+                .is_err(),
+            "{field}"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[tokio::test]
+async fn native_8148_s2_persistence_error_keeps_row_and_wake_debt() {
+    use super::super::super::{inflight, runtime_store};
+    use crate::services::turn_orchestrator::{Intervention, InterventionMode};
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::at(
+        runtime.path().join("runtime/persistence.json"),
+        8148976,
+        true,
+    );
+    let shared = b2b_shared(None);
+    let (key, actor, cleanup) = s2_primary(&f, &shared).await;
+    let persistence = super::super::super::queue_persistence_context(
+        &shared,
+        &ProviderKind::Claude,
+        key.channel_id,
+    );
+    let item = Intervention {
+        author_id: serenity::UserId::new(7),
+        author_is_bot: false,
+        message_id: serenity::MessageId::new(8149999),
+        queued_generation: 1,
+        source_message_ids: vec![],
+        source_message_queued_generations: vec![],
+        source_text_segments: vec![],
+        text: "next".into(),
+        mode: InterventionMode::Soft,
+        created_at: Instant::now(),
+        reply_context: None,
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: vec![],
+    };
+    assert!(
+        shared
+            .mailbox(key.channel_id)
+            .enqueue(item, persistence.clone())
+            .await
+            .enqueued
+    );
+    let queue = runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("claude")
+        .join(&persistence.token_hash)
+        .join(format!("{}.json", f.ticket.channel_id));
+    let bytes = std::fs::read(&queue).unwrap();
+    std::fs::remove_file(&queue).unwrap();
+    std::fs::create_dir(&queue).unwrap();
+    let row = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Claude,
+        f.ticket.channel_id,
+    );
+    let before = std::fs::read(&row).unwrap();
+    let mut events =
+        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+    assert!(
+        !b2b_submit(&shared, cleanup.clone(), &f.history)
+            .await
+            .unwrap()
+    );
+    assert!(
+        shared
+            .mailbox(key.channel_id)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none()
+    );
+    assert!(actor.completion_cleanup_applied());
+    assert_eq!(
+        shared
+            .restart
+            .global_active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(std::fs::read(&row).unwrap(), before);
+    assert!(events.try_recv().is_err());
+    assert!(
+        !f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .cleanup_complete
+    );
+    std::fs::remove_dir(&queue).unwrap();
+    std::fs::write(&queue, bytes).unwrap();
+    assert!(b2b_submit(&shared, cleanup, &f.history).await.unwrap());
+    assert!(!row.exists());
+    assert!(events.try_recv().unwrap().queue_is_eligible());
+}
+
+#[tokio::test]
+async fn native_8148_s2_transfer_closes_debt_without_successor_row_or_wake() {
+    use super::super::super::inflight;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    for (n, (successor_lease, missing_row)) in [(false, false), (true, false), (true, true)]
+        .into_iter()
+        .enumerate()
+    {
+        let f = Fixture::at(
+            runtime.path().join(format!("runtime/transfer-{n}.json")),
+            8148977 + n as u64,
+            true,
+        );
+        let shared = b2b_shared(None);
+        let (key, actor, cleanup) = s2_primary(&f, &shared).await;
+        assert!(
+            cleanup.drive(&f.history, &shared).await.is_err(),
+            "result must already be durable"
+        );
+        let released = shared.mailbox(key.channel_id).finish_cancelled_turn().await;
+        assert!(released.removed_token.is_some());
+        let successor = Arc::new(CancelToken::new());
+        if successor_lease {
+            shared
+                .mailbox(key.channel_id)
+                .restore_active_turn(
+                    successor.clone(),
+                    serenity::UserId::new(7),
+                    serenity::MessageId::new(key.user_msg_id + 1),
+                )
+                .await;
+        }
+        let path = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &ProviderKind::Claude,
+            f.ticket.channel_id,
+        );
+        let mut foreign = serde_json::to_value(
+            inflight::load_inflight_state(&ProviderKind::Claude, f.ticket.channel_id).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&path, b"{unreadable").unwrap();
+        assert!(
+            b2b_submit(&shared, cleanup.clone(), &f.history)
+                .await
+                .is_err()
+        );
+        assert!(
+            !f.history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .cleanup_complete
+        );
+
+        foreign["turn_nonce"] = "successor".into();
+        let bytes = serde_json::to_vec(&foreign).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        if missing_row {
+            std::fs::remove_file(&path).unwrap();
+        }
+        let mut events =
+            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        let active = shared
+            .restart
+            .global_active
+            .load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..2 {
+            assert!(
+                b2b_submit(&shared, cleanup.clone(), &f.history)
+                    .await
+                    .unwrap()
+            );
+        }
+        if missing_row {
+            assert!(!path.exists());
+        } else {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        assert!(events.try_recv().is_err());
+        assert_eq!(
+            shared
+                .restart
+                .global_active
+                .load(std::sync::atomic::Ordering::SeqCst),
+            active
+        );
+        assert!(!actor.completion_cleanup_applied());
+        let snapshot = shared.mailbox(key.channel_id).snapshot().await;
+        if successor_lease {
+            assert!(Arc::ptr_eq(
+                snapshot.cancel_token.as_ref().unwrap(),
+                &successor
+            ));
+        } else {
+            assert!(snapshot.cancel_token.is_none());
+        }
+        assert!(
+            f.history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .cleanup_complete
+        );
+        assert!(
+            crate::services::tui_input::human_frame::history::v2::native::boot_records(
+                &f.ticket
+                    .source
+                    .as_ref()
+                    .unwrap()
+                    .transcript
+                    .with_extension("json"),
+                "claude"
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_8148_s2_panic_payload_is_contained_and_native_actor_still_replies() {
+    for owned in [false, true] {
+        let result: Result<(), String> = super::super::actor_state::contain_panic(async move {
+            if owned {
+                std::panic::panic_any(String::from("native-owned-payload"));
+            } else {
+                panic!("native-borrowed-payload");
+            }
+        })
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            if owned {
+                "native-owned-payload"
+            } else {
+                "native-borrowed-payload"
+            }
+        );
+    }
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::at(runtime.path().join("runtime/panic.json"), 8148980, true);
+    let shared = b2b_shared(None);
+    let (_, _, cleanup) = s2_primary(&f, &shared).await;
+    assert!(b2b_submit(&shared, cleanup, &f.history).await.unwrap());
+}
+
+#[tokio::test]
+async fn native_8148_s2_withdrawal_preseed_same_and_different_ticket_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::message_outbox::{
+        OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe,
+    };
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let shared = b2b_shared(Some(pool.clone()));
+    for (n, same) in [true, false].into_iter().enumerate() {
+        let f = Fixture::at(
+            runtime.path().join(format!("runtime/preseed-{n}.json")),
+            8148981 + n as u64,
+            false,
+        );
+        let cleanup = s2_withdraw(&f, &shared).await;
+        let mut ticket = f.ticket.clone();
+        if !same {
+            ticket.extra.insert("other-ticket".into(), true.into());
+        }
+        let stable = serde_json::to_vec(&("native-fixture", &ticket)).unwrap();
+        let dedupe = format!("native-withdrawal:{}", blake3::hash(&stable));
+        let target = format!("channel:{}", f.ticket.channel_id);
+        enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+            &pool,
+            OutboxMessage {
+                target: &target,
+                content: "preseed",
+                bot: "claude",
+                source: "retained_input_notice",
+                reason_code: None,
+                session_key: Some(&dedupe),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(b2b_submit(&shared, cleanup, &f.history).await.unwrap());
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox WHERE target=$1 AND source='retained_input_notice'").bind(&target).fetch_one(&pool).await.unwrap();
+        assert_eq!(count, if same { 1 } else { 2 });
+        assert!(
+            f.history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .withdrawal_notice
+        );
+    }
+    drop(shared);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_8148_s2_blocked_pg_does_not_hold_finalizer_actor() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(1).await;
+    let shared = b2b_shared(Some(pool.clone()));
+    let f = Fixture::at(runtime.path().join("runtime/blocked.json"), 8148983, false);
+    let cleanup = s2_withdraw(&f, &shared).await;
+    let held = pool.acquire().await.unwrap();
+    let submit = tokio::spawn({
+        let shared = shared.clone();
+        let history = f.history.clone();
+        async move { b2b_submit(&shared, cleanup, &history).await }
+    });
+    crate::test_support::wait::await_within(
+        async {
+            while f
+                .history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .outcome
+                .is_none()
+            {
+                tokio::task::yield_now().await;
+            }
+        },
+        crate::test_support::wait::WAIT_CAP,
+    )
+    .await;
+    let key = TurnKey::new(ChannelId::new(8148984), 8148985, 1);
+    shared
+        .turn_finalizer
+        .register_start(key, ProviderKind::Claude, RelayOwnerKind::None, &shared);
+    let actor = CancelToken::new();
+    assert!(
+        !crate::test_support::wait::await_within(
+            shared.turn_finalizer.native_scope(key, &actor),
+            std::time::Duration::from_millis(500)
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !submit.is_finished(),
+        "Start must be answered before PG timeout"
+    );
+    let error =
+        crate::test_support::wait::await_within(submit, crate::test_support::wait::WAIT_CAP)
+            .await
+            .unwrap()
+            .unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
+    let pending = f
+        .history
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    assert!(pending.outcome.is_some());
+    assert!(!pending.withdrawal_notice && !pending.cleanup_complete);
+    drop(held);
+    drop(shared);
+    pool.close().await;
+    db.drop().await;
+}

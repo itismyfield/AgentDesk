@@ -294,6 +294,7 @@ impl TurnFinalizer {
         history: crate::services::tui_input::human_frame::history::v2::Registry,
         shared: Arc<SharedData>,
     ) -> Result<bool, String> {
+        contain_panic(work.prepare_notice(&history, &shared)).await??;
         let (ack, result) = oneshot::channel();
         self.tx
             .send(FinalizeMsg::Native {
@@ -318,10 +319,9 @@ pub(super) async fn handle_native(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
 ) {
     let key = work.primary_key();
-    let result = std::panic::AssertUnwindSafe(work.drive(&history, &shared))
-        .catch_unwind()
+    let result = contain_panic(work.drive(&history, &shared))
         .await
-        .unwrap_or_else(|_| Err("native finalizer panicked; durable debt retained".into()));
+        .and_then(|result| result);
     if result.as_ref() == Ok(&true)
         && let Some(entry) = key.and_then(|key| ledger.get_mut(&key.exact_key()))
     {
@@ -342,4 +342,14 @@ pub(super) fn panic_payload_summary(payload: &(dyn std::any::Any + Send)) -> Str
         return message.clone();
     }
     "non-string panic payload".to_string()
+}
+
+pub(super) async fn contain_panic<T>(
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    std::panic::AssertUnwindSafe(future).catch_unwind().await.map_err(|payload| {
+        let message = panic_payload_summary(payload.as_ref());
+        tracing::error!(panic = %message, "TurnFinalizer handler panicked; durable work retained");
+        message
+    })
 }

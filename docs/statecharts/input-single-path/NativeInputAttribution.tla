@@ -13,7 +13,7 @@ vars == <<pc, native, members, nativeQueue, stage, lease, rows, pending,
 
 ReviewModes == {"FollowerBefore", "FollowerFixed", "BootBefore", "BootFixed",
                 "BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
-                "PreflightBefore", "PreflightFixed", "TransferBefore", "TransferFixed", "TransferDeletes"}
+                "PreflightBefore", "PreflightFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed"}
 ReviewBoot == Mode \in {"BootBefore", "BootFixed", "BootFailureFixed", "BootIgnoreFailure"}
 
 Init == /\ pc = 0 /\ native = "Idle" /\ members = {} /\ nativeQueue = <<>>
@@ -27,10 +27,10 @@ Init == /\ pc = 0 /\ native = "Idle" /\ members = {} /\ nativeQueue = <<>>
         /\ proofInc = [i \in Ids |-> 0] /\ replaced = FALSE /\ staleSeen = FALSE /\ outsideQueued = FALSE
         /\ review \in [phase : {IF ReviewBoot THEN "Prepare" ELSE IF Mode \in ReviewModes THEN "Registered" ELSE "Dormant"},
              outcome : {"Executed", "Withdrawn"}, commits : {0, 1}, result : {"None", "Executed"},
-             row : {Mode \notin {"TransferBefore", "TransferFixed", "TransferDeletes"}}, preserved : {FALSE}, prepared : {FALSE}, head : {FALSE},
+             row : {Mode \notin {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed"}}, preserved : {FALSE}, prepared : {FALSE}, head : {FALSE},
              failed : {Mode \in {"BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
                 "PreflightBefore", "PreflightFixed"}}, notice : {0},
-             parentLease : {IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {FALSE}, neutral : {FALSE}]
+             parentLease : {IF Mode \in {"TransferAbsentBefore", "TransferAbsentFixed"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {FALSE}, neutral : {FALSE}]
         /\ review.commits = IF review.result = "Executed" THEN 1 ELSE 0
         /\ ~ReviewBoot => review.result = "None"
         /\ Mode \notin ReviewModes => review.outcome = "Executed"
@@ -320,8 +320,8 @@ PortRepair == /\ review.phase = "Blocked" /\ review.parentLease = 1
 PortRow == /\ review.phase = "Released" /\ ~review.failed
            /\ review' = [review EXCEPT !.phase = "Done", !.row = FALSE, !.nativeAck = TRUE, !.head = TRUE]
            /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
-PortTransferred == /\ review.phase = "Result" /\ review.parentLease = 2 /\ ~review.row /\ ~review.failed
-                   /\ Mode # "TransferBefore"
+PortTransferred == /\ review.phase = "Result" /\ review.parentLease \in {0, 2} /\ ~review.row /\ ~review.failed
+                   /\ Mode \notin {"TransferBefore", "TransferAbsentBefore"}
                    /\ review' = [review EXCEPT !.phase = "Done", !.nativeAck = TRUE,
                         !.parentRow = IF Mode = "TransferDeletes" THEN FALSE ELSE review.parentRow]
                    /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
@@ -335,7 +335,7 @@ PortSpec == Init /\ [][PortNext]_vars /\ WF_vars(PortRegister) /\ WF_vars(PortRe
 FailedPreflightKeepsLease == review.failed => review.parentLease # 0
 NativePortBarrier == review.head => review.result = "Executed" /\ ~review.row /\ review.nativeAck
 NativePortRegistered == review.result # "None" => review.prepared
-NativeTransferKeepsSuccessor == Mode \notin {"TransferBefore", "TransferFixed", "TransferDeletes"}
-                                \/ (review.parentLease = 2 /\ review.parentRow /\ ~review.head)
+NativeTransferKeepsSuccessor == Mode \notin {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed"}
+                                \/ (review.parentLease \in {0, 2} /\ review.parentRow /\ ~review.head)
 NativePortEventuallyDone == <>(review.phase = "Done" /\ review.neutral)
 =============================================================================

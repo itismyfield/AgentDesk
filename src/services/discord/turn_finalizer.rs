@@ -660,7 +660,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // resolves the ack as `AlreadyFinalized` so the submitter
                         // does not hang, and the loop survives to finalize the next
                         // turn.
-                        let outcome = match AssertUnwindSafe(handle_terminal(
+                        let outcome = match actor_state::contain_panic(handle_terminal(
                             &mut ledger,
                             &mut pending_admission,
                             key,
@@ -670,18 +670,10 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             evidence,
                             &shared,
                         ))
-                        .catch_unwind()
                         .await
                         {
                             Ok(outcome) => outcome,
-                            Err(payload) => {
-                                tracing::error!(
-                                    panic = %panic_payload_summary(payload.as_ref()),
-                                    "TurnFinalizer handle_terminal panicked; actor loop \
-                                     contained the panic and stays alive (#3866)"
-                                );
-                                FinalizeOutcome::AlreadyFinalized
-                            }
+                            Err(_) => FinalizeOutcome::AlreadyFinalized,
                         };
                         let _ = ack.send(outcome);
                     }
