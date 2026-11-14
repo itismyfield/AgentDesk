@@ -800,7 +800,7 @@ async fn queued_codex_unknown_restart_waits_for_complete_receipt_without_retypin
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn queued_codex_v2_compat_clear_keeps_original_and_marker_pg() {
+async fn queued_codex_v2_explicit_clear_discards_retained_input_and_marker_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = QueuedCodex::new(7_272_201).await;
     let original = f.disk()[0].clone();
@@ -819,7 +819,16 @@ async fn queued_codex_v2_compat_clear_keeps_original_and_marker_pg() {
     let bytes = serde_json::to_vec_pretty(&snapshot).unwrap();
     fs::write(f.disk_path(), &bytes).unwrap();
     let marker = f.disk_path().with_extension("dispatch");
-    fs::write(&marker, b"held dispatch bytes").unwrap();
+    let persistence = f.persistence();
+    crate::services::turn_orchestrator::save_channel_pending_dispatch_marker(
+        &persistence.provider,
+        &persistence.token_hash,
+        ChannelId::new(f.pane.channel),
+        &f.head,
+        None,
+    )
+    .unwrap();
+    let marker_bytes = fs::read(&marker).unwrap();
     let calls = f.pane.tmux_calls();
     let _ = f.attempt().await;
     assert_eq!(
@@ -828,23 +837,21 @@ async fn queued_codex_v2_compat_clear_keeps_original_and_marker_pg() {
         "V2 read-only entry must not type"
     );
     assert_eq!(fs::read(f.disk_path()).unwrap(), bytes);
+    assert_eq!(fs::read(&marker).unwrap(), marker_bytes);
     let cleared = f
         .shared
         .mailbox(ChannelId::new(f.pane.channel))
         .clear(f.persistence())
         .await;
-    assert_eq!(
-        fs::read(f.disk_path()).unwrap(),
-        bytes,
-        "A24: compatibility clear must preserve retained original bytes"
-    );
-    assert_eq!(
-        fs::read(marker).unwrap(),
-        b"held dispatch bytes",
-        "A24: read-only refusal precedes dispatch marker removal"
-    );
-    assert!(cleared.persistence.count_unknown);
-    assert!(cleared.discarded_message_ids.is_empty());
+    let after = f.disk();
+    assert_eq!(after["version"], 2);
+    assert_eq!(after["items"], serde_json::json!([]));
+    assert_eq!(after["retained_inputs"], serde_json::json!([]));
+    assert!(after["head_injection"].is_null());
+    assert!(!marker.exists());
+    assert!(cleared.persistence.failed.is_empty());
+    assert!(!cleared.persistence.count_unknown);
+    assert_eq!(cleared.discarded_message_ids, [f.head.message_id]);
 }
 
 #[tokio::test(flavor = "current_thread")]

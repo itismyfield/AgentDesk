@@ -219,11 +219,15 @@ fn v2_queue_arms_reach_the_owner_or_refuse_without_a_v1_writer() {
             .map(|id| id.get())
             .collect();
         discarded.sort_unstable();
-        assert_eq!(discarded, [200, 400], "only untried items are discarded");
+        assert_eq!(
+            discarded,
+            [100, 200, 400],
+            "the attempted head is discarded too"
+        );
         assert!(cleared.persistence.failed.is_empty());
         let after = single_writer(&handle, &path, "clear").await;
-        assert_eq!(ids(&after), [100]);
-        assert!(held(&after), "the attempted head stays in custody");
+        assert!(ids(&after).is_empty());
+        assert!(after["head_injection"].is_null());
         let bytes = std::fs::read_to_string(&path).unwrap();
         assert!(matches!(
             compat::inspect(&bytes),
@@ -302,13 +306,9 @@ async fn running(
     assert!(idle.try_start_turn(token, owner, MessageId::new(900)).await);
     let (handle, path) = seeded(registry, channel, &[200]).await;
     if fault {
-        handle
-            .v2_request(|slot| {
-                slot.as_mut().ok_or("no owner")?.fault = super::super::Fault::Before;
-                Ok(())
-            })
-            .await
-            .unwrap();
+        // A directory at the file path makes both the original commit and readoption fail.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
     }
     let signal = crate::services::turn_orchestrator::turn_finished_signal(ChannelId::new(channel));
     (handle, path, signal)
@@ -332,7 +332,7 @@ fn a_v2_clear_still_releases_the_running_turn_when_asked() {
             "the running turn is released"
         );
         assert!(handle.snapshot().await.cancel_token.is_none());
-        assert_eq!(ids(&single_writer(&handle, &path, "clear").await), [100]);
+        assert!(ids(&single_writer(&handle, &path, "clear").await).is_empty());
         assert!(
             finished(&signal).await,
             "a waiter that subscribes after the clear still wakes"
@@ -341,6 +341,10 @@ fn a_v2_clear_still_releases_the_running_turn_when_asked() {
         let (kept, _, signal) = running(&registry, 7_272_405, false).await;
         let waiting = kept.discard_waiting_or_refused(ctx()).await.unwrap();
         assert!(waiting.removed_token.is_none());
+        assert!(kept.snapshot().await.cancel_token.is_some());
+        let emptied = v2(&kept).await;
+        assert!(ids(&emptied).is_empty());
+        assert!(emptied["head_injection"].is_null());
         assert!(
             !finished(&signal).await,
             "a clear that keeps the turn signals nothing"
@@ -353,6 +357,138 @@ fn a_v2_clear_still_releases_the_running_turn_when_asked() {
         assert!(
             finished(&signal).await,
             "a released turn signals even when the queue did not publish"
+        );
+    });
+}
+
+#[test]
+fn v2_clear_preserves_delivery_history_and_accepts_the_next_ticket() {
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let (handle, path) = seeded(&registry, 7_272_407, &[]).await;
+        let stale = handle
+            .v2_request(|slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                owner.settle(&owner.active_attempt()?, true, 1)?;
+                let mut stale = Vec::new();
+                for id in [101, 201, 301, 401] {
+                    let ticket = Ticket::new(&format!("clear-{id}"))?;
+                    Custody::with_ticket(&item(id), ticket)
+                        .advance(owner)
+                        .map_err(String::from)?;
+                    if id == 401 {
+                        continue;
+                    }
+                    let payload = PreparedPayload {
+                        frame: "frame".into(),
+                        digest: "digest".into(),
+                        attribution: json!({}),
+                        followers: Vec::new(),
+                    };
+                    let key = owner.reserve(attempt(id), payload)?;
+                    drop(owner.arm(&key, 2)?);
+                    if id == 101 {
+                        owner.settle(&key, true, 3)?;
+                    } else {
+                        if id == 201 {
+                            owner.tick(owner.settle_due().ok_or("no settlement due")?)?;
+                        }
+                        stale.push(key);
+                    }
+                }
+                Ok(stale)
+            })
+            .await
+            .unwrap();
+        let before = single_writer(&handle, &path, "before clear").await;
+        assert_eq!(before["retained_inputs"].as_array().unwrap().len(), 1);
+        assert!(!before["head_injection"].is_null());
+
+        let cleared = handle.clear(ctx()).await;
+
+        assert!(cleared.persistence.failed.is_empty());
+        assert!(!cleared.persistence.count_unknown);
+        let mut discarded: Vec<_> = cleared
+            .discarded_message_ids
+            .iter()
+            .map(|id| id.get())
+            .collect();
+        discarded.sort_unstable();
+        assert_eq!(discarded, [201, 301, 401]);
+        let after = single_writer(&handle, &path, "after clear").await;
+        assert!(ids(&after).is_empty());
+        assert_eq!(after["retained_inputs"], json!([]));
+        assert!(after["head_injection"].is_null());
+        for field in [
+            "admission_sequence",
+            "admission_receipts",
+            "terminal_identities",
+        ] {
+            assert_eq!(
+                after[field], before[field],
+                "{field}: delivered history stays"
+            );
+        }
+        let history: Vec<_> = before["admission_binds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|bind| matches!(bind["at"]["kind"].as_str(), Some("settled" | "queued")))
+            .cloned()
+            .collect();
+        assert!(history.iter().any(|bind| bind["at"]["kind"] == "settled"));
+        assert!(history.iter().any(|bind| bind["at"]["kind"] == "queued"));
+        assert_eq!(after["admission_binds"], json!(history));
+        handle
+            .v2_request(move |slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                for key in stale {
+                    assert!(
+                        owner.settle(&key, true, 4).is_err(),
+                        "a late callback is stale"
+                    );
+                }
+                let done = Ticket::new("clear-101")?;
+                assert_eq!(
+                    Custody::with_ticket(&item(101), done).advance(owner),
+                    Ok(Admitted::Duplicate)
+                );
+                let replay = Ticket::new("clear-delivered-again")?;
+                assert_eq!(
+                    Custody::with_ticket(&item(101), replay).advance(owner),
+                    Err(AdmitError::SourceAlreadyKnown)
+                );
+                let fresh = Ticket::new("clear-fresh")?;
+                assert_eq!(
+                    Custody::with_ticket(&item(501), fresh).advance(owner),
+                    Ok(Admitted::Queued)
+                );
+                let payload = PreparedPayload {
+                    frame: "fresh".into(),
+                    digest: "fresh".into(),
+                    attribution: json!({}),
+                    followers: Vec::new(),
+                };
+                let key = owner.reserve(attempt(501), payload)?;
+                drop(owner.arm(&key, 5)?);
+                owner.settle(&key, true, 6)
+            })
+            .await
+            .unwrap();
+        let fresh = single_writer(&handle, &path, "fresh delivery").await;
+        assert!(ids(&fresh).is_empty());
+        assert_eq!(fresh["retained_inputs"], json!([]));
+        assert_eq!(
+            fresh["admission_sequence"].as_u64(),
+            after["admission_sequence"].as_u64().map(|n| n + 1)
+        );
+        assert!(
+            fresh["terminal_identities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|terminal| terminal["identity"]["primary"] == 501)
         );
     });
 }
@@ -483,4 +619,110 @@ fn synthetic_inputs_sharing_an_id_are_separate_admissions() {
         assert!(after.enqueued, "{:?}", after.refusal_reason);
         assert_eq!(texts(&v2(&handle).await), ["B", "C"]);
     });
+}
+
+#[test]
+fn a_clear_readopts_a_valid_snapshot_changed_outside_the_owner_once() {
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let (handle, path) = seeded(&registry, 7_272_408, &[200]).await;
+        let mut external = v2(&handle).await;
+        external["admission_sequence"] = json!(77);
+        external["admission_receipts"] = json!(["outside-receipt"]);
+        external["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::to_value(item(300)).unwrap());
+        std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();
+        let cleared = handle.clear(ctx()).await;
+        assert!(cleared.persistence.failed.is_empty());
+        assert!(!cleared.persistence.count_unknown);
+        assert_eq!(cleared.persistence.retried, ["queue_publish"]);
+        assert_eq!(
+            cleared.discarded_message_ids,
+            [100, 200, 300].map(MessageId::new)
+        );
+        let after = single_writer(&handle, &path, "readopt and clear").await;
+        assert!(ids(&after).is_empty());
+        assert!(after["head_injection"].is_null());
+        for field in [
+            "admission_sequence",
+            "admission_receipts",
+            "terminal_identities",
+        ] {
+            assert_eq!(after[field], external[field]);
+        }
+        assert!(handle.enqueue(intervention(400), ctx()).await.enqueued);
+        assert_eq!(
+            ids(&single_writer(&handle, &path, "next admission").await),
+            [400]
+        );
+    });
+}
+
+#[test]
+fn a_preserving_clear_keeps_every_protected_member_of_an_armed_head() {
+    let _root = TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(7_272_409);
+    let (path, namespace) = actor::v2_queue(&ctx(), channel).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut owner = Owner::adopt(path, namespace).unwrap();
+    for id in [100, 200, 300] {
+        Custody::with_ticket(&item(id), Ticket::new(&format!("group-{id}")).unwrap())
+            .advance(&mut owner)
+            .unwrap();
+    }
+    let key = owner
+        .reserve(
+            attempt(100),
+            PreparedPayload {
+                frame: "group".into(),
+                digest: "digest".into(),
+                attribution: json!({}),
+                followers: vec![item(200)],
+            },
+        )
+        .unwrap();
+    drop(owner.arm(&key, 0).unwrap());
+    let mut state = ChannelMailboxState::default();
+    state.active_user_message_id = Some(MessageId::new(100));
+    state.active_absorbed_source_ids = vec![MessageId::new(200)];
+    state.queued_head.v2 = Some(owner);
+    let cleared = crate::services::turn_orchestrator::clear_channel::clear_channel_state(
+        &mut state,
+        channel,
+        ctx(),
+        crate::services::turn_orchestrator::clear_channel::ActivePolicy::Preserve,
+    );
+    assert!(cleared.persistence.failed.is_empty());
+    assert_eq!(cleared.discarded_message_ids, [MessageId::new(300)]);
+    let owner = state.queued_head.v2.as_mut().unwrap();
+    assert_eq!(
+        owner
+            .snapshot
+            .items
+            .iter()
+            .map(|item| item.message_id)
+            .collect::<Vec<_>>(),
+        [100, 200]
+    );
+    assert_eq!(owner.snapshot.admission_binds.len(), 2);
+    owner.settle(&key, true, 1).unwrap();
+    assert_eq!(
+        owner
+            .snapshot
+            .terminal_identities
+            .iter()
+            .map(|t| t.identity.primary)
+            .collect::<Vec<_>>(),
+        [100, 200]
+    );
+    assert!(
+        owner
+            .snapshot
+            .admission_binds
+            .iter()
+            .all(|bind| matches!(bind.at, BindAt::Settled { .. }))
+    );
 }

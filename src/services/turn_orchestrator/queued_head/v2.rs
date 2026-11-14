@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub(crate) mod actor;
 mod attempt;
 pub(crate) mod claude_handoff;
+pub(crate) mod clear;
 mod commit;
 pub(crate) mod control;
 mod effort_continue;

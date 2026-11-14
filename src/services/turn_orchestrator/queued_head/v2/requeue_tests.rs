@@ -3,7 +3,10 @@
 
 use super::*;
 use crate::config::TestRuntimeRootGuard;
-use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
+use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::{
+    ChannelMailboxHandle, ChannelMailboxRegistry, QueuePersistenceContext,
+};
 use serde_json::json;
 
 fn item(channel: u64, id: u64) -> PendingQueueItem {
@@ -252,8 +255,7 @@ async fn a_cancel_moves_only_the_input_it_names() {
     assert_eq!(requeue(&handle).await, 0, "nothing comes back");
 }
 
-/// A clear takes every untold proven-unsent input with the queue in one commit and leaves an input
-/// whose resend ask went out retained.
+/// An explicit clear discards queued and retained originals whether their notice was sent or not.
 #[tokio::test(flavor = "current_thread")]
 async fn a_clear_takes_untold_inputs_and_leaves_told_ones_retained() {
     let _root = TestRuntimeRootGuard::new();
@@ -262,12 +264,17 @@ async fn a_clear_takes_untold_inputs_and_leaves_told_ones_retained() {
     admit(&handle, channel, &[10, 11, 20, 30]).await;
     retain(&handle, &[10, 11], vec![20, 30], false).await;
     retain(&handle, &[20], vec![30], true).await;
-    let cleared = handle.v2_request(|s| Ok(clear(s.as_mut().unwrap())));
-    let mut discarded: Vec<u64> = (cleared.await.unwrap().discarded_message_ids.iter())
+    let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, "v2-requeue", None);
+    let cleared = handle.clear(persistence).await;
+    assert!(cleared.persistence.failed.is_empty());
+    assert!(!cleared.persistence.count_unknown);
+    let mut discarded: Vec<u64> = cleared
+        .discarded_message_ids
+        .iter()
         .map(|m| m.get())
         .collect();
     discarded.sort();
-    assert_eq!(discarded, [10, 11, 30]);
+    assert_eq!(discarded, [10, 11, 20, 30]);
     let left = handle.v2_request(|s| {
         let owner = s.as_ref().unwrap();
         let retained = owner.snapshot.retained_inputs.iter();
@@ -278,6 +285,6 @@ async fn a_clear_takes_untold_inputs_and_leaves_told_ones_retained() {
                 .collect::<Vec<_>>(),
         ))
     });
-    assert_eq!(left.await.unwrap(), (0, vec![20]));
+    assert_eq!(left.await.unwrap(), (0, Vec::<u64>::new()));
     assert_eq!(requeue(&handle).await, 0);
 }

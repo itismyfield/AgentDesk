@@ -4613,6 +4613,7 @@ src/
 │   │   │   │   ├── actor.rs
 │   │   │   │   ├── attempt.rs
 │   │   │   │   ├── claude_handoff.rs
+│   │   │   │   ├── clear.rs
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── control_tests.rs
