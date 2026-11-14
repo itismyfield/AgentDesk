@@ -190,3 +190,21 @@ per-run exact1 모델의 소스와18cfg는 변경하지 않았다. 연속 실패
 
 모델 밖: 완료 timeout 의 기준 시각(claim 대 실제 시작)은 `Expire` 한 걸음으로 추상화돼 있어 구별하지 못한다. `primary_busy` 종결의 provider spawn 0 은 `FailBeforeSubmit` 이 `input = "none"` 에서만 가능해 모델에서는 자명하고, 구현 시험이 본다. `HumanInputsConserved` 를 깨는 mutant 는 두지 않았다(queue 가 남은 actor 를 내리지 않는 기존 가드는 이 조각에서 바뀌지 않는다).
 
+## PR3b-2: per-run 세션 행 종료, 구현이 thread GREEN cfg 로 옴
+
+코드 기준 `8752805029e9dfded84791b0a9a79b6a22d511a3` 위 PR3b-2 조각, 2026-11-14 KST. 갱신 전 SHA256 `ccc0ad4c…`, 갱신 후 `8f0b7404a01ef767b10aeddb88c75aee770e1eba9392e94d10c0512799c1e7a7`. 24cfg 가 expected.tsv 와 일치한다(공식 checker, GREEN 8 + 기대 RED 16).
+
+- null-mode 실패 전이(fallback 0·5xx 보류·제출 뒤 재실행 0·`primary_busy` 종결)는 앞 조각에서 목표 동작으로 넣은 그대로다. 이 조각에서 구현이 `RoutineRunThreadPrimaryFallback`·`RoutineRunBeforeRetry`(RED) 쪽에서 `RoutineRunThread`(GREEN) 쪽으로 왔다.
+- 더한 것: headless run 의 세션 행 `runRow`(none → active → removed)와 `primaryRow`, action `CloseRunRow`. 턴의 완료 경로가 run 자신의 행만 종료·삭제한다. 재시작으로 `interrupted` 가 된 run 은 완료 경로에 닿지 않아 행이 남는다(stale 세션 GC 몫, 구현 그대로).
+
+| 규칙 | 뜻 |
+|---|---|
+| `PrimaryRowKept` | run 의 행을 닫을 때 primary 행은 그대로다 |
+| `RunRowRemoved` (liveness) | 끝난 run(interrupted 제외)의 행은 결국 지워진다 |
+
+| cfg | 뜻 | 결과 |
+|---|---|---|
+| `RoutineRunHeadless` | 수정 후 | GREEN |
+| `RoutineRunHeadlessNoRowClose` | 수정 전: 완료가 행을 닫지 않아 `turn_active` 로 남음 | liveness RED `RunRowRemoved` |
+| `RoutineRunHeadlessWideRowClose` | 닫는 대상에 primary 행이 섞임 | RED `PrimaryRowKept` |
+
