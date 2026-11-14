@@ -56,8 +56,11 @@ impl ChildEntry {
             return Some(Err(ChildHeld));
         };
         let candidate = self.candidate.clone()?;
-        if let Some(surface) = self.surface {
-            candidate.bind_child(surface);
+        // An adoption already bound under another parent never initializes under this one.
+        if let Some(surface) = self.surface
+            && (surface.parent() != parent || !candidate.bind_child(surface))
+        {
+            return Some(Err(ChildHeld));
         }
         Some(self.kind.map_or(Err(ChildHeld), |kind| {
             Ok(Child {

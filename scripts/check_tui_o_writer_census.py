@@ -1070,6 +1070,13 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
         reasons.append(f"child tests for unknown funnels: {', '.join(stray)}")
     child_names = sorted({n for tests in CHILD_FLIP_READY_TESTS.values() for n in tests})
     funnel_names = names
+    reused = sorted(set(child_names) & set(funnel_names))
+    if reused:
+        reasons.append(f"child rows name funnel tests: {', '.join(reused)}")
+    rows = Counter(n for tests in CHILD_FLIP_READY_TESTS.values() for n in tests)
+    repeated = sorted(n for n, count in rows.items() if count > 1)
+    if repeated:
+        reasons.append(f"child tests repeated across rows: {', '.join(repeated)}")
     names = sorted(set(names) | set(child_names))
     defined: set[str] = set()
     src = root / "src"

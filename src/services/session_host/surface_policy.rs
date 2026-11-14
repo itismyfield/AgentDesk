@@ -2,7 +2,7 @@
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VerifiedSurface {
     destination: u64,
     parent: u64,

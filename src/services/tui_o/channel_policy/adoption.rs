@@ -179,12 +179,12 @@ impl Candidate {
         }
     }
 
-    /// Records the child's verified relationship for every clone; the first one stays.
+    /// Records the child's verified relationship for every clone; false when another one is bound.
     pub(crate) fn bind_child(
         &self,
         surface: crate::services::session_host::surface_policy::VerifiedSurface,
-    ) {
-        let _ = self.child.set(surface);
+    ) -> bool {
+        *self.child.get_or_init(|| surface) == surface
     }
 
     pub(crate) fn child_surface(

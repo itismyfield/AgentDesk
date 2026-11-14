@@ -507,14 +507,15 @@ fn thread_children_codex_turn_selection_follows_the_parents_policy() {
     assert_eq!(cutover::policy_channel(46), 46);
 }
 
-#[test]
-fn thread_child_first_init_waits_for_the_legacy_send_and_records_nothing_before_activation() {
+#[tokio::test]
+async fn thread_child_first_init_waits_for_the_legacy_send_and_records_nothing_before_activation() {
     use crate::services::tui_o::store::StoreConfig;
+    const CHILD: u64 = 4_801;
     use crate::services::tui_o::writer::activation::{ActivationFacts, activate_with};
     let boot = BootChannels::validate(&config())
         .unwrap()
         .adopted(Adoption::Committed);
-    unresolved(&boot, 48, true);
+    unresolved(&boot, CHILD, true);
     boot.children
         .resolve_legacy(&boot, |channel| Ok(thread(channel, 42)));
     let root = tempfile::tempdir().unwrap();
@@ -523,17 +524,17 @@ fn thread_child_first_init_waits_for_the_legacy_send_and_records_nothing_before_
         .unwrap();
     let floor = root.path().join("o_store/thread_children.floor");
     // Legacy and the writer host each read their own clone of the child's one adoption.
-    let legacy = boot.child(48).unwrap().unwrap().candidate;
-    let host = boot.output_candidate(48).unwrap();
+    let legacy = boot.child(CHILD).unwrap().unwrap().candidate;
+    let host = boot.output_candidate(CHILD).unwrap();
     let activate = || {
         let facts = Ok(ActivationFacts::default());
-        activate_with(&store, 48, facts, || Ok(false), &host, || Ok(Vec::new()))
+        activate_with(&store, CHILD, facts, || Ok(false), &host, || Ok(Vec::new()))
     };
-    let sending = legacy.claim_body(48);
+    let sending = legacy.claim_body(CHILD);
     assert!(!sending.owned && sending.send.is_some());
     assert_eq!(activate(), Err("Legacy body send in flight".into()));
     assert_eq!(host.peek(), Adoption::Deferred);
-    assert!(!store.has_channel_dir(48) && !floor.exists());
+    assert!(!store.has_channel_dir(CHILD) && !floor.exists());
     drop(sending);
     // Past the send the init carries the verified parent, and this build still refuses it.
     let refused = activate().unwrap_err();
@@ -541,7 +542,39 @@ fn thread_child_first_init_waits_for_the_legacy_send_and_records_nothing_before_
         refused.contains("child output requires verified surface and complete activation"),
         "{refused}"
     );
-    assert!(!store.has_channel_dir(48) && !floor.exists());
+    assert!(!store.has_channel_dir(CHILD) && !floor.exists());
     assert_eq!(host.peek(), Adoption::Released);
     assert_eq!(legacy.peek(), Adoption::Released);
+    // A refused child is held visibly at the gate, never handed back to Legacy.
+    let _forced = test_override::force_boot(boot.clone());
+    assert_eq!(
+        legacy_sent(CHILD, RuntimeHandoffKind::ClaudeTui).await,
+        Err(crate::services::tui_o::cutover::IdentityError::ChildHeld)
+    );
+    let halted = format!("tui_o:halted:{CHILD}");
+    assert!(crate::services::tui_o::alarm::health_reasons().contains(&halted));
+}
+
+#[test]
+fn thread_child_rebound_to_another_parent_is_held_and_offers_no_init() {
+    const CHILD: u64 = 4_802;
+    let boot = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Committed);
+    unresolved(&boot, CHILD, true);
+    boot.children
+        .resolve_legacy(&boot, |channel| Ok(thread(channel, 42)));
+    let first = boot.child(CHILD).unwrap().unwrap().candidate;
+    assert_eq!(first.child_surface().map(|s| s.parent()), Some(42));
+    // The entry is resolved again under another parent while its one adoption is kept.
+    {
+        let mut entries = boot.children.entries.lock().unwrap();
+        let entry = entries.get_mut(&CHILD).unwrap();
+        entry.parent = Some(44);
+        entry.kind = Some(RuntimeHandoffKind::CodexTui);
+        entry.surface = Some(thread(CHILD, 44));
+    }
+    assert!(matches!(boot.child(CHILD), Some(Err(ChildHeld))));
+    assert!(boot.output_candidate(CHILD).is_none());
+    assert_eq!(first.child_surface().map(|s| s.parent()), Some(42));
 }

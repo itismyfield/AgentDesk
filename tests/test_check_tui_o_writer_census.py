@@ -380,6 +380,9 @@ class FlipReadinessTests(unittest.TestCase):
             "funnel tests missing from src/: child_gone": (
                 "CHILD_FLIP_READY_TESTS", {"W20": ("child_gone",)}
             ),
+            "child rows name funnel tests: o_delegated_funnel_cut": (
+                "CHILD_FLIP_READY_TESTS", {"W20": ("o_delegated_funnel_cut",)}
+            ),
             "child tests for unknown funnels: W99": (
                 "CHILD_FLIP_READY_TESTS", {"W20": ("child_funnel_cut",), "W99": ("child_funnel_cut",)}
             ),
@@ -389,6 +392,14 @@ class FlipReadinessTests(unittest.TestCase):
                 ready, verdict = self.readiness(**{key: value})
                 self.assertFalse(ready, verdict)
                 self.assertIn(reason, verdict)
+
+    def test_one_child_test_cannot_vouch_for_two_funnels(self) -> None:
+        ready, verdict = self.readiness(
+            FLIP_READY_TESTS={"W20": ("o_delegated_funnel_cut",), "W33": ("o_delegated_funnel_cut",)},
+            CHILD_FLIP_READY_TESTS={"W20": ("child_funnel_cut",), "W33": ("child_funnel_cut",)},
+        )
+        self.assertFalse(ready, verdict)
+        self.assertIn("child tests repeated across rows: child_funnel_cut", verdict)
 
     def test_empty_funnel_blocks_readiness_with_another_funnel_present(self) -> None:
         ready, verdict = self.readiness(FLIP_READY_TESTS={

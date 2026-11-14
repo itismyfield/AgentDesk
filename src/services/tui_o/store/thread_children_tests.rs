@@ -353,3 +353,21 @@ fn thread_children_floor_only_does_not_enter_the_old_init_enumeration() {
     std::fs::write(dir.path().join("o_store/thread_children.floor"), b"1\n").unwrap();
     assert!(store.channels_with_init().unwrap().is_empty());
 }
+
+#[test]
+fn thread_children_store_admission_and_build_info_switch_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, dir.path())
+        .unwrap()
+        .unwrap();
+    let mut init = fixture(43);
+    init.policy_parent = Some(42);
+    let verified = surface(poise::serenity_prelude::ChannelType::PublicThread).unwrap();
+    let scope = boot().init_scope_view();
+    let admitted = store
+        .begin_era_as(&init, InitOrigin::Fresh, &scope, Some(&verified))
+        .is_ok();
+    let reported = crate::cli::build_info::build_info_json()["o_store_thread_children"] == true;
+    // The deploy guard trusts build-info, so it must say exactly what the store admits.
+    assert_eq!(admitted, reported);
+}
