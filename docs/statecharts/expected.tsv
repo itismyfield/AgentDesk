@@ -278,6 +278,10 @@ input-single-path/InputPathReadyCompactNoCompletion.cfg	InputPath	ReadySelfCompa
 input-single-path/InputPathReadyDraft.cfg	InputPath	-	-
 input-single-path/InputPathReadyDraftBypass.cfg	InputPath	ReadyNoHumanDraftExecution	-
 input-single-path/InputPathReadyFresh.cfg	InputPath	-	-
+input-single-path/InputPathReadyIdleRestartAfter.cfg	InputPath	-	-
+input-single-path/InputPathReadyIdleRestartBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyRestartedIdleEventuallyReceives
+input-single-path/InputPathReadyIdleRestartContinuing.cfg	InputPath	-	-
+input-single-path/InputPathReadyIdleRestartTerminalOnly.cfg	InputPath	ReadyNoContinuationEarlyInput,ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyLateDialog.cfg	InputPath	-	-
 input-single-path/InputPathReadyLostStop.cfg	InputPath	-	-
 input-single-path/InputPathReadyManagedStashAfter.cfg	InputPath	-	-
@@ -306,6 +310,7 @@ input-single-path/InputPathReadyResumeRestartAfter.cfg	InputPath	-	-
 input-single-path/InputPathReadyResumeRestartAnyTimeout.cfg	InputPath	ReadyExpiryOnlyUnproven	-
 input-single-path/InputPathReadyResumeRestartBefore.cfg	InputPath	-	ReadyPendingEventuallySettles
 input-single-path/InputPathReadyResumeRestartCut.cfg	InputPath	-	ReadyPendingEventuallySettles
+input-single-path/InputPathReadyResumeRestartDurable.cfg	InputPath	-	-
 input-single-path/InputPathReadyResumeRestartGap.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyResumedIdleEventuallyReceives
 input-single-path/InputPathReadyResumeRestartPerson.cfg	InputPath	-	-
 input-single-path/InputPathReadySuppressedCompact.cfg	InputPath	-	-

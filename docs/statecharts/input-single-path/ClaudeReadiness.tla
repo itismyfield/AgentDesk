@@ -11,10 +11,24 @@ ClearPreSource == ClearHeld \/ Mode \in {"ready-clear-pending-before", "ready-cl
 \* A resumed run starts over its old transcript: a finished turn under exit metadata, or a turn cut short.
 \* The daemon restarts over the resumed session and attaches the same transcript again: the start is
 \* gone and a recovery floor stands at the transcript's end. Only the retaining modes end that wait.
-RetainsUnproven == Mode \in {"ready-resume-restart-after", "ready-resume-restart-person",
+\* An idle session whose turn ended before the restart: the code puts the same floor at its end.
+\* The restored modes rebuild readiness from what the earlier incarnation recorded durably: a
+\* closed, non-continuing turn of this execution, or this execution's resume start with no turn yet.
+\* The terminal-only mutant trusts the transcript's last terminal alone.
+IdleRestartFloor == Mode = "ready-idle-restart-before"
+IdleRestartRestored == Mode \in {"ready-idle-restart-after", "ready-idle-restart-continuing",
+                                 "ready-idle-restart-terminal-only"}
+IdleRestart == IdleRestartFloor \/ IdleRestartRestored
+ResumeRestartRestored == Mode = "ready-resume-restart-durable"
+Restored == IdleRestartRestored \/ ResumeRestartRestored
+RetainsUnproven == IdleRestart \/ ResumeRestartRestored \/
+                   Mode \in {"ready-resume-restart-after", "ready-resume-restart-person",
                              "ready-resume-restart-any-timeout", "ready-resume-restart-cut"}
-ResumeRestart == RetainsUnproven \/ Mode = "ready-resume-restart-before"
-ResumeAfter == ResumeRestart \/ Mode \in {"ready-resume-meta-after", "ready-resume-cut-after", "ready-resume-person-after"}
+ResumeRestart == Mode \in {"ready-resume-restart-after", "ready-resume-restart-person",
+                           "ready-resume-restart-any-timeout", "ready-resume-restart-cut",
+                           "ready-resume-restart-before"}
+ResumeAfter == ResumeRestart \/ ResumeRestartRestored \/
+               Mode \in {"ready-resume-meta-after", "ready-resume-cut-after", "ready-resume-person-after"}
 ResumeNoQuiet == Mode = "ready-resume-no-quiet"
 ResumeCut == Mode \in {"ready-resume-cut-before", "ready-resume-cut-after", "ready-resume-restart-cut"}
 ResumeHistory == ResumeAfter \/ ResumeNoQuiet \/ ResumeCut \/ Mode = "ready-resume-meta-before"
@@ -33,7 +47,8 @@ ModalWatch == Mode \in {"ready-modal-watch-before", "ready-modal-watch-after"}
 Busy == Mode \in {"ready-busy-active", "ready-busy-native", "ready-block-busy", "ready-busy-finish-before",
                   "ready-busy-finish-after", "ready-busy-reexpose"}
 Suppressed == Mode \in {"ready-suppressed-stop", "ready-no-latch",
-                        "ready-suppressed-compact", "ready-no-latch-compact"}
+                        "ready-suppressed-compact", "ready-no-latch-compact",
+                        "ready-idle-restart-continuing", "ready-idle-restart-terminal-only"}
 NoLatch == Mode \in {"ready-no-latch", "ready-no-latch-compact"}
 CompactCompletion == Mode \in {"ready-compact-completion", "ready-compact-no-completion"}
 Compact == CompactCompletion \/ Mode \in {"ready-compact", "ready-busy-compact",
@@ -58,7 +73,9 @@ Initial ==
      route |-> [i \in Ids |-> IF Busy /\ i = 1 THEN "busy" ELSE "idle"],
      head |-> 0, proofEpoch |-> 0, proofTurn |-> 0,
      nativeStarts |-> IF Race THEN 1 ELSE 0,
-     restarts |-> IF Mode = "ready-restart" \/ ResumeRestart THEN 1 ELSE 0,
+     restarts |-> IF Mode = "ready-restart" \/ ResumeRestart \/ IdleRestart \/ ResumeRestartRestored
+                  THEN 1 ELSE 0,
+     durable |-> 0,
      restored |-> "no", notices |-> [i \in Ids |-> 0], badExpire |-> FALSE,
      compactPending |-> Compact, compacts |-> 0,
      compactFence |-> FALSE, compactEvidence |-> FALSE, compactReady |-> FALSE,
@@ -112,7 +129,7 @@ Finish ==
     /\ Mode # "ready-busy-finish-after" \/ r.writes[1] > 0
     /\ ~Suppressed \/ r.softStage >= 4
     /\ ~Permission \/ r.permissionStage = 3
-    /\ r' = [r EXCEPT !.phase = "Idle", !.terminal = r.turn, !.tail = "hard",
+    /\ r' = [r EXCEPT !.phase = "Idle", !.terminal = r.turn, !.tail = "hard", !.durable = r.turn,
                      !.restored = IF @ = "floor" THEN "passed" ELSE @,
                      !.continuing = FALSE, !.softStage = IF Suppressed THEN 5 ELSE @]
 \* A raw matching Stop boundary is recorded together with continuation disposition.
@@ -250,12 +267,23 @@ PersonTurn ==
 Receipt(i) ==
     /\ r.q[i] = "sent"
     /\ r' = [r EXCEPT !.q[i] = "done"]
+\* What a restored restart may rebuild from: the closed turn the transcript still ends on, recorded
+\* as this execution's final Stop, or this execution's resume start while no turn followed it.
+RestoreProof ==
+    IF Mode = "ready-idle-restart-terminal-only" THEN r.terminal = r.turn /\ r.turn > 0
+    ELSE (r.durable = r.turn /\ r.terminal = r.turn /\ r.turn > 0) \/
+         (ResumeRestartRestored /\ r.started /\ r.turn = 0)
 \* Only pre-key daemon restart is refined here; post-key Unknown is never replayed.
+\* The in-memory continuation latch does not survive the restart in the idle-restart modes.
 Restart ==
     /\ r.restarts > 0 /\ r.head = 0
     /\ r' = [r EXCEPT !.epoch = @ + 1, !.observed = "Unknown",
-                     !.restored = IF ResumeRestart THEN "floor" ELSE @,
-                     !.started = FALSE, !.awake = FALSE, !.restarts = 0]
+                     !.restored = IF ResumeRestart \/ IdleRestartFloor THEN "floor"
+                                  ELSE IF Restored THEN (IF RestoreProof THEN "passed" ELSE "floor")
+                                  ELSE @,
+                     !.started = ResumeRestartRestored /\ RestoreProof /\ r.turn = 0,
+                     !.continuing = IF IdleRestart THEN FALSE ELSE @,
+                     !.awake = FALSE, !.restarts = 0]
 Replay(i) ==
     /\ Mode = "ready-replay" /\ r.q[i] = "done" /\ r.effects[i] = 1
     /\ r' = [r EXCEPT !.q[i] = "queued", !.awake = TRUE]
@@ -316,6 +344,9 @@ RetainedOnce == \A i \in Ids : r.notices[i] <= 1 /\ (r.notices[i] = 1 <=> r.q[i]
     /\ (r.q[i] = "retained" => r.writes[i] = 0 /\ r.effects[i] = 0)
 ExpiryOnlyUnproven == ~r.badExpire
 PendingEventuallySettles == \A i \in Ids : (r.q[i] \in {"queued", "held", "prepared"}) ~> (r.effects[i] >= 1 \/ r.q[i] = "retained")
+\* After a daemon restart an idle session with an empty composer still takes an input.
+RestartedIdleEventuallyReceives == (IdleRestart \/ ResumeRestartRestored) =>
+    ((r.epoch > 1 /\ r.phase = "Idle" /\ r.draft = "Empty") ~> (\E i \in Ids : r.effects[i] >= 1))
 ResumedIdleEventuallyReceives == ResumeHistory =>
     ((r.started /\ r.phase = "Idle" /\ r.draft = "Empty") ~> (\E i \in Ids : r.effects[i] >= 1))
 =============================================================================
