@@ -259,7 +259,7 @@ EffortInit(mode) ==
         admittedC |-> [r \in EffortRoots |-> 0], debt |-> 1, debtPosts |-> 0,
         late |-> 0, crashes |-> 0, durable |-> FALSE, cancelled |-> {}, discarded |-> {},
         clears |-> 0, resetPending |-> (mode \in {"reset", "reset-kept", "reset-c", "reset-newer", "reset-newer-lost"}),
-        sessionResets |-> 0, newerChanges |-> 0]
+        sessionResets |-> 0, newerChanges |-> 0, unsynced |-> FALSE]
 EffortOriginalNeverFinishes == effort.mode \in
     {"nonfinishing", "nonfinishing-failure", "no-interrupt", "no-close"}
 EffortRebooting == effort.phase \in {"requested", "prepared", "interrupted", "stopped", "booting"}
@@ -290,8 +290,20 @@ EffortPrepare ==
     /\ UNCHANGED vars
     /\ effort.phase = "requested" /\ effort.active # "none" /\ effort.root < 2
     /\ effort.mode # "no-interrupt"
-    /\ effort' = [effort EXCEPT !.phase = "prepared", !.pending = effort.root + 1,
-        !.barrier = effort.root + 1, !.durable = effort.mode # "late-intent"]
+    /\ effort' = IF effort.mode \in {"prepare-unsynced", "prepare-unsynced-blind"}
+                 \* The commit published but its sync is unconfirmed: the barrier holds, the
+                 \* restart answers Kept and nothing ends.
+                 THEN [effort EXCEPT !.phase = "kept", !.pending = effort.root + 1,
+                       !.barrier = effort.root + 1, !.unsynced = TRUE, !.wake = TRUE]
+                 ELSE [effort EXCEPT !.phase = "prepared", !.pending = effort.root + 1,
+                       !.barrier = effort.root + 1, !.durable = effort.mode # "late-intent"]
+\* Once the store recovers, the resolver confirms the unsynced intent, finds its TUI still running
+\* and cancels it; the blind mutant (S4b repair 2) reads only the committed snapshot.
+EffortResolveUnsynced ==
+    /\ UNCHANGED vars
+    /\ effort.mode = "prepare-unsynced" /\ effort.unsynced
+    /\ effort' = [effort EXCEPT !.unsynced = FALSE, !.pending = 0, !.barrier = 0,
+        !.cancelled = @ \cup {effort.pending}, !.wake = TRUE]
 \* The exact captured token/TurnKey decides whether a natural completion or interruption wins.
 EffortInterrupt ==
     /\ UNCHANGED vars
@@ -491,6 +503,7 @@ EffortRest ==
     /\ UNCHANGED allVars
 EffortNext == EffortRequest \/ EffortSecondRequest \/ EffortInputArrives \/ EffortPrepare \/ EffortInterrupt
     \/ EffortKillFails \/ EffortClear \/ EffortNewerChange \/ EffortCStartFails \/ EffortBootResolve
+    \/ EffortResolveUnsynced
     \/ EffortNoticeFails \/ EffortTellInterrupted \/ EffortDuplicateNotice \/ EffortCloseInterrupted
     \/ EffortNoActiveTurn \/ EffortCurrentHerdrApply \/ EffortCurrentNextTurn \/ EffortStopTui \/ EffortLaunchFails
     \/ EffortRetryFailed \/ EffortResume \/ EffortContinue \/ EffortSubmitContinuation \/ EffortAdmitUser \/ EffortFinish \/ EffortRepost \/ EffortDeliverOldDebt \/ EffortRest
@@ -502,6 +515,7 @@ EffortFair ==
     /\ WF_allVars(EffortKillFails)
     /\ WF_allVars(EffortCStartFails)
     /\ WF_allVars(EffortBootResolve)
+    /\ WF_allVars(EffortResolveUnsynced)
     /\ WF_allVars(EffortTellInterrupted)
     /\ WF_allVars(EffortCloseInterrupted)
     /\ WF_allVars(EffortNoActiveTurn)
@@ -553,6 +567,8 @@ EffortResetNewerLostSpec == EffortInit("reset-newer-lost") /\ [][EffortNext]_all
 EffortStartFailsSpec == EffortInit("start-fails") /\ [][EffortNext]_allVars /\ EffortFair
 EffortStartFailsKeepsSpec == EffortInit("start-fails-keeps") /\ [][EffortNext]_allVars /\ EffortFair
 EffortCrashNoWakeSpec == EffortInit("crash-no-wake") /\ [][EffortNext]_allVars /\ EffortFair
+EffortPrepareUnsyncedSpec == EffortInit("prepare-unsynced") /\ [][EffortNext]_allVars /\ EffortFair
+EffortPrepareUnsyncedBlindSpec == EffortInit("prepare-unsynced-blind") /\ [][EffortNext]_allVars /\ EffortFair
 \* One request restarts the TUI at most once; a request that resolved ready restarted it once.
 EffortOneRestartPerRequest == effort.binding <= effort.changes
 \* A running successor keeps its row, placeholder and presence whatever arrives for the old turn.

@@ -54,11 +54,17 @@ pub(super) async fn stored(shared: &Arc<SharedData>, channel: ChannelId) -> Opti
     read.await.ok().flatten()
 }
 
-/// The channel's intent while it still owes a step its restart did not finish.
-pub(super) async fn owed(shared: &Arc<SharedData>, channel: ChannelId) -> Option<Intent> {
-    let mailbox = shared.mailbox_peek(channel)?;
-    let read = mailbox.v2_request(|slot| Ok(slot.as_ref().and_then(|owner| owner.effort_owed())));
-    read.await.ok().flatten()
+/// The intent still owing a step its restart did not finish, read after an unconfirmed commit is
+/// settled (its barrier can hold an intent the committed snapshot lacks); `true` if that released it.
+pub(super) async fn owed(shared: &Arc<SharedData>, channel: ChannelId) -> (Option<Intent>, bool) {
+    let Some(mailbox) = shared.mailbox_peek(channel) else {
+        return (None, false);
+    };
+    let read = mailbox.v2_request(|slot| match slot.as_mut() {
+        Some(owner) => owner.effort_owed_settled(),
+        None => Ok((None, false)),
+    });
+    read.await.unwrap_or((None, false))
 }
 
 /// Ends the channel's live TUI now and settles only the turn captured on it. A captured turn
@@ -228,8 +234,9 @@ async fn record(
         .await
 }
 
-/// Closes `operation`'s continuation and barrier; a commit that fails leaves it to the next wake.
-pub(super) async fn cancel(shared: &Arc<SharedData>, channel: ChannelId, operation: &str) {
+/// Closes `operation`'s continuation and barrier; `true` once that commit is confirmed. A commit
+/// that fails leaves it to the next wake.
+pub(super) async fn cancel(shared: &Arc<SharedData>, channel: ChannelId, operation: &str) -> bool {
     let operation = operation.to_string();
     let mailbox = shared.mailbox(channel);
     let cancelled = mailbox.v2_request(move |slot| {
@@ -237,8 +244,12 @@ pub(super) async fn cancel(shared: &Arc<SharedData>, channel: ChannelId, operati
             .ok_or("owner not adopted")?
             .cancel_effort(&operation)
     });
-    if let Err(error) = cancelled.await {
-        tracing::warn!(channel_id = channel.get(), %error, "effort intent not cancelled");
+    match cancelled.await {
+        Ok(cancelled) => cancelled,
+        Err(error) => {
+            tracing::warn!(channel_id = channel.get(), %error, "effort intent not cancelled");
+            false
+        }
     }
 }
 

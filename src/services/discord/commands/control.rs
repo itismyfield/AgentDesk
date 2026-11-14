@@ -448,8 +448,8 @@ async fn relaunch_pending_for(shared: &SharedData, channel_id: serenity::Channel
         .contains(&channel_id.get().to_string())
 }
 
-/// Drops the pendings an ended TUI's next launch reflects: the relaunch, the channel's own fast
-/// reset and its model reset, under one settings lock, so a save after this keeps its own pending.
+/// Drops the pendings an ended TUI's next launch reflects: relaunch, fast reset of the settings it
+/// reads and model reset, under one settings lock, so a save after this keeps its own pending.
 #[cfg(unix)]
 pub(super) async fn consume_reflected(
     shared: &Arc<SharedData>,
@@ -459,17 +459,25 @@ pub(super) async fn consume_reflected(
     let mut settings = shared.settings.write().await;
     let key = channel_id.get().to_string();
     let mut removed = settings.channel_relaunch_pending.remove(&key);
-    if clear_fast_mode_reset_pending_for_provider(shared, channel_id, provider) {
-        let marker = fast_mode_reset_pending_key(channel_id, provider);
+    // The launch reads fast mode from the channel's own setting, else from its thread parent's.
+    let own = settings.channel_fast_modes.contains_key(&key)
+        || settings.channel_codex_goals.contains_key(&key);
+    let parent = SharedData::feature_settings_parent(channel_id).filter(|_| !own);
+    let fast_channel = parent.unwrap_or(channel_id);
+    let fast = clear_fast_mode_reset_pending_for_provider(shared, fast_channel, provider);
+    if fast {
+        let marker = fast_mode_reset_pending_key(fast_channel, provider);
         removed |= settings.channel_fast_mode_reset_pending.remove(&marker);
-        removed |= settings.channel_fast_mode_reset_pending.remove(&key);
+        let legacy = fast_channel.get().to_string();
+        removed |= settings.channel_fast_mode_reset_pending.remove(&legacy);
     }
     let model = shared
         .overrides
         .model_session_reset_pending
         .remove(&channel_id);
-    if model.is_some() || removed {
+    if fast || model.is_some() || removed {
         sync_session_reset_pending(shared, channel_id);
+        sync_session_reset_pending(shared, fast_channel);
     }
     if let Some(token) = shared.http.cached_bot_token.get().filter(|_| removed) {
         save_bot_settings(token, &settings);

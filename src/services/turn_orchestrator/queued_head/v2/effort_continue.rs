@@ -129,9 +129,23 @@ impl Owner {
         Ok(true)
     }
 
+    /// Settles an unconfirmed commit, then reads the intent still owing a step; `true` when the
+    /// settle dropped a candidate whose barrier held the queue.
+    pub(crate) fn effort_owed_settled(
+        &mut self,
+    ) -> Result<(Option<EffortRestart<PendingQueueItem>>, bool), String> {
+        let blocked = self.effort_blocks(None);
+        if let Err(error) = self.recover()
+            && self.pending.is_some()
+        {
+            return Err(error);
+        }
+        Ok((self.effort_owed(), blocked && !self.effort_blocks(None)))
+    }
+
     /// The stored intent while it still owes a step: not ready yet, or ready with its continuation
     /// never admitted.
-    pub(crate) fn effort_owed(&self) -> Option<EffortRestart<PendingQueueItem>> {
+    fn effort_owed(&self) -> Option<EffortRestart<PendingQueueItem>> {
         let intent = self.snapshot.effort_restart.as_ref()?;
         let c = intent.pending()?;
         let ticket = Ticket::new(&c.ticket).ok()?;

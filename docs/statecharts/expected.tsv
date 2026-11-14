@@ -436,6 +436,8 @@ session-lifecycle/EffortRestartNoNotice.cfg	TmuxSession	EffortInterruptedNoticeE
 session-lifecycle/EffortRestartNoWake.cfg	TmuxSession	-	EffortContinuationEventuallyInjected,EffortPendingEventuallyProcessed
 session-lifecycle/EffortRestartNonFinishing.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartNonFinishingFailure.cfg	TmuxSession	-	-
+session-lifecycle/EffortRestartPrepareUnsynced.cfg	TmuxSession	-	-
+session-lifecycle/EffortRestartPrepareUnsyncedBlind.cfg	TmuxSession	-	EffortBarrierEventuallyReleased,EffortPendingEventuallyProcessed
 session-lifecycle/EffortRestartRecover.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartRecoverTwice.cfg	TmuxSession	EffortContinuationAtMostOnce,EffortContinuationCustody,EffortLateKeepsSuccessor,EffortOneRestartPerRequest,EffortReplyOnce	EffortContinuationEventuallyInjected,EffortSubmitReleasesBarrier
 session-lifecycle/EffortRestartRepost.cfg	TmuxSession	EffortReplyOnce	-

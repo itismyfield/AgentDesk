@@ -175,17 +175,7 @@ fn an_unproven_end_waits_and_continues_on_the_next_wake_pg() {
         return;
     }
     let _root = crate::config::TestRuntimeRootGuard::new();
-    // Test builds read the binding log only on threads given its root; the drive's wake runs on
-    // any worker.
-    let root = crate::config::runtime_root().unwrap();
-    let bind = crate::services::tui_prompt_dedupe::binding_events::set_test_root;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .on_thread_start(move || bind(Some(&root)))
-        .build()
-        .unwrap();
-    runtime.block_on(async {
+    bound_runtime().block_on(async {
         let fx = Fixture::new(49, RuntimeHandoffKind::ClaudeTui).await;
         ingress::ADOPTS
             .scope(true, async {
@@ -291,6 +281,133 @@ async fn a_restart_spends_the_pending_resets_its_launch_reflects_pg() {
                 overrides.model_session_reset_pending.contains(&fx.channel),
                 "a later change keeps its pending"
             );
+        })
+        .await;
+    tc::cleanup_session_temp_files(&fx.name);
+}
+
+/// A runtime whose workers read the binding log, as the drive's wake does on any worker.
+fn bound_runtime() -> tokio::runtime::Runtime {
+    let root = crate::config::runtime_root().unwrap();
+    let bind = crate::services::tui_prompt_dedupe::binding_events::set_test_root;
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .on_thread_start(move || bind(Some(&root)))
+        .build()
+        .unwrap()
+}
+
+// A prepared intent whose save is unconfirmed holds the queue without a committed intent; once the
+// store recovers, the owner's next wake alone finds it, cancels it and wakes the drive for the user.
+#[test]
+fn an_unconfirmed_prepared_intent_is_cancelled_on_the_next_wake_pg() {
+    let test = "services::discord::commands::control::relaunch_tests::restart_tests::recovery_tests::an_unconfirmed_prepared_intent_is_cancelled_on_the_next_wake_pg";
+    if !api_child(test) {
+        return;
+    }
+    use crate::services::discord::queue_io::cancel_backstop_test_support::owner_wakes;
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    bound_runtime().block_on(async {
+        let fx = Fixture::new(52, RuntimeHandoffKind::ClaudeTui).await;
+        ingress::ADOPTS
+            .scope(true, async {
+                fx.busy().await;
+                fx.tmux.take_calls();
+                let queues = crate::services::discord::runtime_store::discord_pending_queue_root();
+                let plan = Plan {
+                    fail: vec![Step::ParentSync],
+                    ..Default::default()
+                };
+                let watch = Watch::new(&queues.unwrap(), plan);
+                let said = fx.effort_now("high").await;
+                assert!(said.contains("미리 기록하지 못했습니다"), "{said}");
+                assert!(!called(&fx.tmux.take_calls(), "kill-session"));
+                let owner = fx.owner().await;
+                assert!(owner["effort_restart"].is_null(), "uncommitted: {owner}");
+                assert_eq!(fx.front().await, None, "its barrier holds the user");
+                drop(watch);
+
+                let woken = owner_wakes(fx.channel);
+                let wake = crate::services::discord::router::message_handler::owner_wake;
+                wake(&fx.shared, fx.channel);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let owner = loop {
+                    let owner = fx.owner().await;
+                    let closed = owner["effort_restart"]["cancelled"] == true;
+                    if closed && owner_wakes(fx.channel) >= woken + 2 {
+                        break owner;
+                    }
+                    let late = std::time::Instant::now() > deadline;
+                    assert!(!late, "never released: {owner}");
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                };
+                assert_eq!(continuations(&owner), 0, "{owner}");
+                assert!(owner.to_string().contains("user-101"), "{owner}");
+                assert!(!called(&fx.tmux.take_calls(), "kill-session"));
+            })
+            .await;
+        tc::cleanup_session_temp_files(&fx.name);
+    });
+}
+
+// In a thread that reads its parent's fast setting, the restart spends the parent's pending its
+// launch reflects; another provider's pending and one saved after the restart stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thread_restart_spends_its_parents_fast_pending_pg() {
+    let test = "services::discord::commands::control::relaunch_tests::restart_tests::recovery_tests::a_thread_restart_spends_its_parents_fast_pending_pg";
+    if !api_child(test) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fx = Fixture::new(53, RuntimeHandoffKind::ClaudeTui).await;
+    ingress::ADOPTS
+        .scope(true, async {
+            fx.busy().await;
+            let parent = ChannelId::new(fx.channel.get() + 777);
+            let (claude, codex) = (&ProviderKind::Claude, &ProviderKind::Codex);
+            let pending = &fx.shared.overrides.fast_mode_session_reset_pending;
+            pending.clear();
+            {
+                let mut settings = fx.shared.settings.write().await;
+                let thread = fx.channel.get().to_string();
+                settings.channel_fast_modes.remove(&thread);
+                let parent_key = parent.get().to_string();
+                settings.channel_fast_modes.insert(parent_key, true);
+                let marker = fast_mode_reset_pending_key(parent, claude);
+                settings.channel_fast_mode_reset_pending.insert(marker);
+            }
+            let read = fx
+                .shared
+                .feature_settings_channel_id(claude, fx.channel, Some(parent));
+            assert_eq!(
+                read.await,
+                parent,
+                "the thread reads its parent's fast setting"
+            );
+            let (on_parent, other) = (
+                fast_mode_reset_pending_key(parent, claude),
+                fast_mode_reset_pending_key(parent, codex),
+            );
+            pending.insert(on_parent.clone());
+            pending.insert(other.clone());
+
+            let owner = fx.own(None).await;
+            let _ = fx.shared.http.cached_bot_token.set(TOKEN.to_string());
+            let said = effort_save_notice(&fx.shared, TOKEN, fx.channel, claude, "high").await;
+            fx.own(Some(owner)).await;
+            assert!(said.contains("지금 다시 시작"), "{said}");
+            assert!(!pending.contains(&on_parent), "the launch reflects it");
+            let markers = fx.shared.settings.read().await;
+            let kept = markers.channel_fast_mode_reset_pending.contains(&on_parent);
+            assert!(!kept, "its saved marker goes too");
+            drop(markers);
+            assert!(pending.contains(&other), "another provider's stays");
+
+            pending.insert(on_parent.clone());
+            resume_owed(&fx.shared, fx.channel).await;
+            assert!(pending.contains(&on_parent), "a later save stays");
         })
         .await;
     tc::cleanup_session_temp_files(&fx.name);

@@ -38,6 +38,7 @@ stateDiagram-v2
 | 접수 미확정 | `tmux.rs` `admit`(같은 ticket 3회) → `Restart::Admitting` | `EffortContinue`의 `wake` |
 | C 턴의 세션 초기화 생략 | `discord/router/message_handler/headless_turn/replay_start.rs` `pending_reset` | `EffortSubmitContinuation`의 `sameSession` |
 | 서버 재시작 복구 | `discord/router/message_handler/provider_dispatch/owner_input.rs` `recover` → `effort_restart/recovery.rs` `resume_owed`(pane 생존·bind nonce로 kill 여부 판정) | `EffortDaemonRestart`·`EffortBootResolve` |
+| 저장 미확정 intent | `tmux.rs` `owed` → `v2/effort_continue.rs` `Owner::effort_owed_settled`(미확정 commit을 먼저 확정·폐기). 취소나 폐기로 큐가 열리면 `resume_owed`가 guard 해제 뒤 owner를 깨운다 | `EffortResolveUnsynced` |
 | owner drive 한 바퀴 끝 | `owner_input.rs` `owner_drive`의 `settled` → `recovery.rs` `kick` | `EffortBootResolve`(wake) |
 | 재기동 뒤 새 `/fast`·`/model` | `discord/commands/config/provider_settings.rs` `update_channel_fast_mode`·`update_channel_model_override` | `EffortNewerChange` |
 
@@ -86,7 +87,7 @@ stateDiagram-v2
 
 ## 전/후
 
-기존 24 cfg는 결과가 그대로다. 새 cfg 15개:
+기존 24 cfg는 결과가 그대로다. 새 cfg 17개:
 
 | cfg(`EffortRestart` 접두사) | 결과 | 뜻 |
 |---|---|---|
@@ -104,6 +105,8 @@ stateDiagram-v2
 | `ResetKept` | RED: `EffortNoSecondRestart` | C는 건너뛰지만 소비하지 않음 |
 | `ResetNewer` | GREEN | 재기동 뒤 새 `/fast`는 자기 pending을 유지하고 다음 사용자 턴에서 한 번 적용 |
 | `ResetNewerLost` | RED: `EffortNewerChangeKept` | C 턴이 새 pending을 지움 |
+| `PrepareUnsynced` | GREEN | Prepared 저장이 미확정이면 restart는 Kept. 저장소가 회복되면 resolver가 그 intent를 찾아 취소하고 깨운다 |
+| `PrepareUnsyncedBlind` | RED: 진행 `EffortBarrierEventuallyReleased`, `EffortPendingEventuallyProcessed` | S4b 수리 2 head: resolver가 확정 snapshot만 읽어 미확정 Prepared를 못 찾음 |
 
 ## 모델과 코드가 다른 곳
 
@@ -121,4 +124,4 @@ cp docs/statecharts/session-lifecycle/TmuxSession.tla $R/session-lifecycle/
 python3 scripts/ci/statecharts_tlc.py --root $R --jar ~/.local/share/tla2tools/tla2tools-1.7.4.jar --timeout 200 --jobs 4
 ```
 
-39 cfg, 약 142초, 기대와 전부 일치.
+41 cfg, 약 127초, 기대와 전부 일치.
