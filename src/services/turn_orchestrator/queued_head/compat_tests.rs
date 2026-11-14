@@ -77,7 +77,6 @@ fn v2_reader_keeps_retained_outside_the_thirty_executable_items() {
     assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
-#[cfg(unix)]
 #[test]
 fn v2_clear_purge_drain_and_restore_preserve_originals_and_marker() {
     let _root = TestRuntimeRootGuard::new();
@@ -114,14 +113,27 @@ fn v2_clear_purge_drain_and_restore_preserve_originals_and_marker() {
 
             let clear = handle.clear(context()).await;
 
-            assert!(clear.persistence.failed.is_empty());
-            assert!(!clear.persistence.count_unknown);
-            assert_eq!(clear.discarded_message_ids.len(), waiting + 1);
             let after: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(after["version"], 2);
-            assert_eq!(after["items"], json!([]));
-            assert_eq!(after["retained_inputs"], json!([]));
-            assert!(after["head_injection"].is_null());
+            if cfg!(unix) {
+                assert!(clear.persistence.failed.is_empty());
+                assert!(!clear.persistence.count_unknown);
+                assert_eq!(clear.discarded_message_ids.len(), waiting + 1);
+                assert_eq!(after["items"], json!([]));
+                assert_eq!(after["retained_inputs"], json!([]));
+                assert!(after["head_injection"].is_null());
+            } else {
+                assert!(
+                    !clear.persistence.failed.is_empty(),
+                    "unconfirmed V2 durability is a failure"
+                );
+                assert!(clear.persistence.count_unknown);
+                assert_eq!(after["items"], fixture(channel.get(), waiting)["items"]);
+                assert_eq!(
+                    after["retained_inputs"],
+                    fixture(channel.get(), waiting)["retained_inputs"]
+                );
+            }
             assert_eq!(
                 after["terminal_identities"],
                 fixture(channel.get(), waiting)["terminal_identities"]
