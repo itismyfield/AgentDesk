@@ -15,8 +15,8 @@
 //!
 //! # Isolation invariant (single source of truth)
 //!
-//! `run_completion_postlude` combines scheduled-snapshot isolation with a fresh
-//! `ChannelEpisodeScope` decision. A turn whose session key is isolated, whose
+//! `run_completion_postlude` combines scheduled-snapshot isolation and the per-run
+//! pin of a headless routine run with a fresh `ChannelEpisodeScope` decision. A turn whose session key is isolated, whose
 //! mailbox is foreign, whose ownership is unprovable, or whose protected request
 //! is held or unclassified by the replay policy must produce ZERO
 //! channel-scoped side-effects that a LATER LIVE TURN can observe. Every such

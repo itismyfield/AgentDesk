@@ -1,5 +1,6 @@
 //! The scheduled-delivery mark of an inflight turn: one channel-effects decision
-//! for every completer, and settlement of the delivery before the row is dropped.
+//! for every completer, which also honours a per-run routine pin, and settlement
+//! of the delivery before the row is dropped.
 
 use std::time::Duration;
 

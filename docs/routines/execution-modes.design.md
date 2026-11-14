@@ -202,6 +202,8 @@ QuickJS agent action → 기존 provider 준비 확인 → thread/DM resolver를
 
 완료 writeback도 격리한다. 기존 `scheduled_turn::ChannelEffects` 판정(`scheduled_turn.rs:100-143`)에 persisted routine-isolation 관측을 연결해 completion postlude의 같은 suppress 결정을 재사용한다(`turn_bridge/completion_postlude/channel_writeback.rs:84-105,198`, `completion_postlude.rs:322,406,609`). routine을 ScheduledTurnMark로 사칭하지 않고 inflight의 routine run-spec/presentation에 isolation을 pin한다. 복구·provider 재시도·memory/feedback postlude도 이 관측으로 같은 결정을 내린다. process cancel은 기존 exact episode/token을 쓴다. actor retirement는 아래 소유 surface 가드를 추가한다. D0의 RED는 primary session id/history/uploads/clear boundary/runtime binding이 시작·완료·재시작 뒤 보존되고 별도 per-run key에만 새 provider 세션이 기록되는 것이다.
 
+D0 구현 계약(PR3a): launcher는 turn metadata에 `routine_run_mode=headless`를 넣고, 기존 `execution_mode=process`·fresh·agent_id·per-run synthetic label을 함께 준다. 표식이 있는데 process/fresh가 아니거나 label·workspace가 없거나 per-run key가 채널 key와 같으면 claim 전에 거절하며 shared 경로로 내려가지 않는다. 격리 여부는 시작 때 inflight `routine_presentation`에 pin하고 완료·provider 재시도·복구가 그 pin만 읽는다. per-run key의 세션 상태 기록은 채널 소유가 아닌 기존 격리 identity(`scheduled_snapshot` 종류)로 보내 primary의 canonical 세션 행으로 해석되지 않게 한다. 전용 identity 종류를 따로 둘지는 PR3b 전 결정 항목이다. 격리 run은 worktree 분리·pending reset·retry context를 쓰지 않고 `/goal` 명령 prompt를 거절한다.
+
 백엔드 미지원은 명시 실패이며 tmux/채널로 조용히 fallback하지 않는다. 새 headless는 Claude/Codex process 지원 범위부터 제공한다. 기존 thread는 현 지원 provider를 유지한다. 외부 업무 전송은 routine의 명시 도구 호출 범위이며 이 게시 억제가 업무 iMessage 발송까지 막지 않는다. 실패1..N은 primary에 알림만 보내고 정확히N+1에서 기존 명령봇을 통해 별도 대응 턴을 요청한다. paused·stale-paused·classification 알림 자체는 턴을 만들지 않는다. 아래 사건표와 전송 계약을 따른다. 어느 경우에도 routine thread 생성 경로는 호출하지 않는다.
 
 
@@ -519,7 +521,7 @@ PR1은 P2-C/H의 새 mode/incident 기능을 선행 구현하지 않는다. 현�
 - 기존 결함 범위: 이름 기반 orphan reaper(`fresh_session_reaper.rs:25-153`)와 best-effort session ownership stamp(`launch.rs:273-285`)를 더 넓히지 않는다. channel에는 reset/kill/reap 권한을 주지 않으며 process cancel은 기존 exact turn만 사용한다.
 - 임의 셸 내부 side effect/group을 이탈한 하위 daemon의 exactly-once, 전역 relay replacement-safe 내구성은 이 모델의 보장 밖이다. 사용자의 데이터/세션 삭제·kill 권한을 성공률 명목으로 추가하지 않는다.
 
-<!-- doc-path-refs: proposed src/services/discord/router/message_handler/headless_turn/isolated_context.rs src/services/routines/agent_executor/channel.rs src/services/routines/agent_executor/settlement.rs scripts/report.sh -->
+<!-- doc-path-refs: proposed src/services/routines/agent_executor/channel.rs src/services/routines/agent_executor/settlement.rs scripts/report.sh -->
 <!-- doc-path-refs: proposed src/services/routines/store/diagnostics.rs -->
 <!-- doc-path-refs: proposed src/services/routines/agent_executor/surface.rs src/services/routines/agent_executor/run_policy.rs src/services/routines/store/recovery.rs src/services/routines/agent_executor/channel_settlement.rs src/services/routines/command_runner.rs src/services/routines/command_runner/output.rs src/services/routines/runner_spec.rs -->
 

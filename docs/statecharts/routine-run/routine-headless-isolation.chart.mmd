@@ -1,0 +1,20 @@
+---
+title: "headless run 의 per-run 격리 컨텍스트"
+---
+stateDiagram-v2
+    [*] --> 판독: claim 된 headless run
+    판독 --> 거절: 표식 판독 불가 · per-run 키 없음
+    판독 --> 격리시작: 표식·label·workspace 확인
+    거절: 실행 0 · primary 불변
+    격리시작: per-run 키 · pin 저장 · cold start
+    격리시작 --> 응답: provider 응답
+    격리시작 --> 재시작: 프로세스 재시작
+    응답 --> 완료정산: pin 을 읽어 primary writeback 0
+    응답 --> 재시작: 프로세스 재시작
+    완료정산 --> 성공: run 자신의 transcript 기록
+    재시작 --> 중단: pin 을 읽어 primary seed 0 · 재실행 0
+    격리시작 --> 공유경로: 수정 전 · 뮤턴트
+    공유경로: primary clear·writeback·seed — 규칙 위반
+    완료정산 --> 기한실패: 완료 계획이 primary 를 읽음 — liveness 위반
+    classDef breaks fill:#fdd,stroke:#b00
+    class 공유경로,기한실패 breaks

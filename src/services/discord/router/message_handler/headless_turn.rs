@@ -527,6 +527,7 @@ async fn start_reserved_headless_turn_admitted(
     // writeback is keyed by session_key, so it never touches the channel row.
     // Its cold start + live-context suppression are handled separately below,
     // WITHOUT disturbing the channel (F1: non-disruption is the design contract).
+    // An isolated run is already cold under its own key and severs nothing on the channel.
     let fresh_context_severance = (goal_fresh || fresh_routine) && shares_channel_session;
     let fresh_context_severance = fresh_context_severance && !replay_start::retrying();
     // Fresh routines use the same provider-severance machinery as `/goal fresh`:

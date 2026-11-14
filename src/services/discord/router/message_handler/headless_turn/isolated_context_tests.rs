@@ -39,7 +39,8 @@ struct Fixture {
     _workdir: tempfile::TempDir,
 }
 
-/// The provider CLI is pinned to a stub that holds its turn open until `release` and then fails.
+/// The provider CLI is pinned to a stub that holds its turn open until `release`, or until its
+/// directory goes away with a failed test, and then fails.
 async fn fixture() -> Fixture {
     let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
     let workdir = tempfile::tempdir().unwrap();
@@ -60,9 +61,9 @@ async fn fixture() -> Fixture {
     let paths = std::env::var_os("PATH").unwrap();
     let stubs = std::env::split_paths(&paths).next().unwrap();
     let hold = concat!(
-        "#!/bin/sh\n",
+        "#!/bin/sh\nd=\"$(dirname \"$0\")\"\n",
         "case \"$*\" in *--version*) echo 0.0.0-stub; exit 0 ;; esac\n",
-        "while [ ! -e \"$(dirname \"$0\")/release\" ]; do sleep 0.05; done\nexit 1\n"
+        "while [ -d \"$d\" ] && [ ! -e \"$d/release\" ]; do sleep 0.05; done\nexit 1\n"
     );
     for cli in ["claude", "codex"] {
         std::fs::write(stubs.join(cli), hold).unwrap();
