@@ -863,9 +863,8 @@ fn restart_common_queues_the_greeting_for_a_missing_or_legacy_row_without_a_clos
     });
 }
 
-// The daemon died after the greeting's commit and before the close: at boot the owner's drive
-// reaches the greeting, its permit finds the execution it was queued against still running, and
-// the greeting ends retained with a notice. It is never handed to a launch and nothing is closed.
+// A daemon death after the greeting's commit and before the close: at boot the permit finds the
+// old execution running, retains the greeting with a notice, launches nothing and closes nothing.
 #[test]
 fn restart_seed_left_before_the_close_is_refused_at_boot_and_never_reaches_the_live_session_pg() {
     let Some((rig, runtime)) = rig_child_with(
@@ -919,9 +918,8 @@ fn restart_seed_left_before_the_close_is_refused_at_boot_and_never_reaches_the_l
     });
 }
 
-// The daemon died after the close and before the retirement: at boot the greeting's permit pins
-// the end of the execution it was queued against, retires and detaches it without a new close,
-// and only then is the greeting handed to its launch.
+// A daemon death after the close and before the retirement: at boot the permit retires and
+// detaches the ended execution without a new close, and only then is the greeting launched.
 #[test]
 fn restart_seed_left_after_the_close_finishes_the_retirement_at_boot_then_launches_pg() {
     let Some((rig, runtime)) = rig_child(

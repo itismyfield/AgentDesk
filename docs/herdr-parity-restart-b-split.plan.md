@@ -74,8 +74,8 @@ B2 실행 중 공식 파서 실측에서 재추정이 +1052~1248로 올라 추�
   idle close-crash 복구, seed-only headless 권한, Codex A resume 요청, dispatch·Ready 응답.
 - B1의 followers 고정과 clear 효과 허가를 그대로 소비한다. 새 serde variant·V2 필드·새 Core/trait는 0이다.
 
-queue child 후보는 새 `src/services/turn_orchestrator/queued_head/v2/source_admission/restart_seed.rs` (proposed),
-서비스 gate 후보는 새 `src/services/discord/queue_io/input_owner/restart_seed.rs` (proposed)다.
+queue child 후보는 새 `src/services/turn_orchestrator/queued_head/v2/source_admission/restart_seed.rs`,
+서비스 gate 후보는 새 `src/services/discord/queue_io/input_owner/restart_seed.rs`다.
 명령 orchestration과 idle 복구는 작은 child에 두고 `restart.rs`·`headless_turn.rs`·`owner_input.rs`·`herdr_terminate.rs`에는 typed 연결·거절만 둔다.
 
 operation의 기존 receipt/context를 **현재 row로 새 context를 만들기 전에** 읽는다. Existing/Joined/Expired/Conflict는 재종료하지 않는다.

@@ -330,9 +330,8 @@ async fn terminate(
     }
 }
 
-/// The greeting's permit at its start: it runs only once the execution it was queued against is
-/// retired and detached, and finishes that itself when the daemon died in between. No close is
-/// ever sent from here.
+/// The greeting starts only once the execution it was queued against is retired and detached;
+/// after a daemon death the permit finishes that itself and never sends a close.
 pub(in crate::services::discord) async fn seed_permit(
     shared: &Arc<SharedData>,
     channel: ChannelId,

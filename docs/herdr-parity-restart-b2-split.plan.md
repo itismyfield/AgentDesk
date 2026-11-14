@@ -136,4 +136,3 @@ checkout의 source는 main 병합 기준으로 복원했다. review ref에 제�
 stash나 다른 worktree를 쓰지 않았으며 아카이브와 복원 결과를 각각 manifest로 남겼다.
 첫 B2 생산 커밋은 이월 P2의 해당 계약·시험이 함께 들어가는 시점에 만든다.
 
-<!-- doc-path-refs: proposed src/services/turn_orchestrator/queued_head/v2/source_admission/restart_seed.rs -->

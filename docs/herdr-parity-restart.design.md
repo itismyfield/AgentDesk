@@ -591,4 +591,4 @@ r1 보고서는 [`session-lifecycle/herdr-restart.report.md`](statecharts/sessio
 - r2 (2026-11-13, `f3c745ebc9`): 리뷰 d1의 방향 제안을 판정해 owner 큐 seed 방향을 채택(적재 → 종료 순서). P2-1·P2-3·P2-4·P2-6 반영, P2-2·P2-5는 A 접점만 기록, 사용자 결정 항목 U1~U4, B 크기 재추정, `HerdrRestartOwner` 모델 42 cfg.
 - r3 (2026-11-13): 사용자 결정 4건 반영(dispatch 중 재시작, clear 우선, 인사말 순서는 불가피 차이, seed 불가 시에도 재시작)과 리뷰 d2의 P2 5건(전송 중 단위 뒤 적재, ticket 상태와 clear epoch, seed 제출 세 단계, 옛 pane 전달 기준, tmux 차이 전수). B를 B-clear·B-main으로 분할, 모델 63 cfg.
 
-<!-- doc-path-refs: proposed herdr_turn/restart_resume.rs src/services/discord/herdr_terminate/restart.rs src/services/discord/queue_io/input_owner/restart_seed.rs src/services/turn_orchestrator/queued_head/v2/source_admission/restart_seed.rs -->
+<!-- doc-path-refs: proposed herdr_turn/restart_resume.rs src/services/discord/herdr_terminate/restart.rs -->
