@@ -544,7 +544,7 @@ fn log_commit_outcome(outcome: &IntakeQueueCommitOutcome) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     struct EnvRootGuard {
@@ -682,6 +682,26 @@ mod tests {
             },
             options,
         }
+    }
+
+    #[cfg(unix)]
+    pub(in crate::services::discord::router) async fn committed_pending_ops(
+        options: IntakeQueueCommitOptions,
+    ) -> Vec<(char, bool)> {
+        let mut effects = FakeEffects {
+            enqueue_outcome: MailboxEnqueueOutcome {
+                enqueued: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let outcome = commit_soft_intervention_transaction(&mut effects, request(options)).await;
+        assert!(outcome.accepted());
+        effects
+            .reactions
+            .into_iter()
+            .map(|(_, _, emoji)| (emoji, true))
+            .collect()
     }
 
     #[tokio::test]

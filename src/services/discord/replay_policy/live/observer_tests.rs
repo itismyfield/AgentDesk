@@ -846,6 +846,7 @@ async fn recovery_codex_stderr_descendant_is_cancelled_and_joined_pg() {
     });
     case.wait("ready");
     assert_eq!(case.starts().len(), 1);
+    #[cfg(target_os = "linux")]
     let workers = || {
         std::fs::read_dir("/proc/self/task")
             .unwrap()
@@ -856,6 +857,7 @@ async fn recovery_codex_stderr_descendant_is_cancelled_and_joined_pg() {
             })
             .count()
     };
+    #[cfg(target_os = "linux")]
     assert_eq!(
         workers(),
         1,
@@ -870,6 +872,7 @@ async fn recovery_codex_stderr_descendant_is_cancelled_and_joined_pg() {
         .unwrap();
     reader.join().unwrap();
     assert!(started.elapsed() < Duration::from_secs(8));
+    #[cfg(target_os = "linux")]
     assert_eq!(workers(), 0, "timed out pipe reader must be joined");
     case.release("stderr_go");
     case.wait("stderr_closed");

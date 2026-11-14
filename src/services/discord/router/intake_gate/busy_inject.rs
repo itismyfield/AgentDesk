@@ -108,6 +108,28 @@ pub(in crate::services::discord::router) fn defer_owned_busy_view(
         && queued_head_covers(channel, parent)
 }
 
+fn confirmed_owner_adoption(result: Result<bool, String>) -> bool {
+    result == Ok(true)
+}
+
+async fn next_owned_input(shared: &SharedData, channel: ChannelId) -> bool {
+    if !confirmed_owner_adoption(
+        crate::services::discord::queue_io::input_ingress::adopt(shared, &shared.provider, channel)
+            .await,
+    ) {
+        return false;
+    }
+    shared
+        .mailbox(channel)
+        .v2_request(|slot| {
+            Ok(slot.as_ref().is_some_and(|owner| {
+                owner.snapshot.items.is_empty() && owner.snapshot.head_injection.is_none()
+            }))
+        })
+        .await
+        .unwrap_or(false)
+}
+
 pub(super) async fn queue_commit_options(
     data: &Data,
     live: &LiveText<'_>,
@@ -116,7 +138,7 @@ pub(super) async fn queue_commit_options(
         defer_pending_reaction: !live.message.author.bot
             && !live.author_is_allowed_automation
             && defer_owned_busy_view(
-                owner_takes(&data.shared, live.channel_id).await,
+                next_owned_input(&data.shared, live.channel_id).await,
                 &data.provider,
                 live.channel_id,
                 live.parent,
@@ -423,6 +445,62 @@ pub(crate) mod test_support;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_confirmed_adoption_may_defer_pending_view() {
+        assert!(confirmed_owner_adoption(Ok(true)));
+        assert!(!confirmed_owner_adoption(Ok(false)));
+        assert!(!confirmed_owner_adoption(Err("queue unreadable".into())));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn adopt_error_keeps_busy_commit_mailbox() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(8_113_114);
+        let _gate = test_support::open_gate(channel.get());
+        shared
+            .mailbox(channel)
+            .v2_adopt(
+                crate::services::discord::runtime_store::discord_pending_queue_root()
+                    .unwrap()
+                    .join("foreign-queue.json"),
+                "foreign".into(),
+            )
+            .await
+            .unwrap();
+        let data = Data {
+            shared,
+            provider: ProviderKind::Claude,
+            token: "test-token".into(),
+        };
+        let mut message = serenity::Message::default();
+        message.id = MessageId::new(8_113_114_001);
+        message.channel_id = channel;
+        message.content = "accepted seam fixture".into();
+        let live = LiveText {
+            channel_id: channel,
+            parent: None,
+            message: &message,
+            author_is_allowed_automation: false,
+            text: &message.content,
+            reply_context: None,
+            has_reply_boundary: false,
+            uploads: &[],
+            merge_consecutive: false,
+        };
+        use crate::services::discord::queue_io::input_ingress::{ADOPTS, adopt};
+        let result = ADOPTS
+            .scope(true, adopt(&data.shared, &data.provider, channel))
+            .await;
+        assert!(result.is_err(), "{result:?}");
+        let options = ADOPTS.scope(true, queue_commit_options(&data, &live)).await;
+        let ops =
+            super::super::super::intake_queue_transaction::tests::committed_pending_ops(options)
+                .await;
+        assert_eq!(ops, [('📬', true)]);
+    }
 
     /// Only `*` or a list of channel ids opens the gate; anything unreadable keeps it shut.
     #[test]

@@ -88,6 +88,9 @@ pub(super) async fn run_rollover_loop(
         turn_id,
         ..
     } = *ctx;
+    if tick.inflight_state.routine_presentation.holds_body() {
+        return ControlFlow::Continue(false);
+    }
     let provider = ProviderRef(provider);
     let turn_id = TurnIdRef(turn_id);
     // #3805 P2 (PR-D): track whether an answer rollover created a fresh
@@ -354,6 +357,9 @@ pub(super) async fn refresh_streaming_response(
         status_panel_started_at,
         ..
     } = *ctx;
+    if tick.inflight_state.routine_presentation.holds_body() {
+        return ControlFlow::Continue(());
+    }
     let provider = ProviderRef(provider);
     // #3805 P2 (PR-D): after a mid-turn answer rollover the live status
     // panel is now stranded ABOVE the new tail answer chunk. Under the
@@ -478,3 +484,7 @@ pub(super) async fn refresh_streaming_response(
 #[cfg(test)]
 #[path = "footer_retirement_raw_history_tests.rs"]
 mod footer_retirement_raw_history_tests;
+
+#[cfg(test)]
+#[path = "routine_stream_tests.rs"]
+mod routine_stream_tests;

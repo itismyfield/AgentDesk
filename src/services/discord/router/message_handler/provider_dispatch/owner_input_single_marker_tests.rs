@@ -183,6 +183,112 @@ async fn busy_active_handback_has_only_one_mailbox_op() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_active_held_front_marks_non_merging_follower() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::single_marker::",
+        "busy_active_held_front_marks_non_merging_follower"
+    )) {
+        return;
+    }
+    let _root = active_root();
+    let rig = IntakeRig::busy_with_screen(
+        8_113_113,
+        "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel\n".into(),
+    )
+    .await;
+    let _gate = discord::router::busy_inject_support::open_gate(rig.channel.get());
+    let first = busy_active_arrival(&rig, false).await;
+    let (drive, mut settled) = rig.drive();
+    discord::queue_io::input_owner::drive::wake(drive.clone());
+    assert_eq!(
+        await_within(settled.recv(), WAIT_CAP).await.unwrap(),
+        Err("NotSent(\"Modal\")".into())
+    );
+    let second = MessageId::new(first.get() + 1);
+    let mut message = discord_mock::user_message(second.get(), "non merging follower");
+    message.channel_id = rig.channel;
+    message.guild_id = Some(serenity::GuildId::new(96_326_000_999));
+    message.author.id = UserId::new(8);
+    message.message_reference = Some(serenity::MessageReference::from((rig.channel, first)));
+    message.referenced_message = Some(Box::new(discord_mock::user_message(first.get(), PROMPT)));
+    let data = Arc::new(discord::Data {
+        shared: rig.shared.clone(),
+        token: "test-token".into(),
+        provider: rig.shared.provider.clone(),
+    });
+    let event = serenity::FullEvent::Message {
+        new_message: message,
+    };
+    let ctx = rig.shared.http.cached_serenity_ctx.get().unwrap();
+    await_within(
+        Box::pin(discord::router::handle_event(ctx, &event, &data)),
+        WAIT_CAP,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rig.state().await["items"].as_array().unwrap().len(), 2);
+    rig.mailbox
+        .v2_request(|slot| {
+            assert!(slot.as_ref().unwrap().followers().is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    discord::queue_io::input_owner::drive::wake(drive);
+    assert_eq!(
+        await_within(settled.recv(), WAIT_CAP).await.unwrap(),
+        Err("NotSent(\"Modal\")".into())
+    );
+    assert_eq!(active_message_ops(&rig, first), [('📬', true)]);
+    assert_eq!(active_message_ops(&rig, second), [('📬', true)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_active_reserved_sources_self_heal_skips_head_keeps_follower() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::single_marker::",
+        "busy_active_reserved_sources_self_heal_skips_head_keeps_follower"
+    )) {
+        return;
+    }
+    let _root = active_root();
+    let rig = IntakeRig::new(8_113_115, true).await;
+    let first = busy_active_arrival(&rig, false).await;
+    let second = MessageId::new(first.get() + 1);
+    rig.mailbox.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("owner")?;
+        let mut follower = owner.snapshot.items[0].clone();
+        follower.message_id = second.get();
+        follower.author_id = 8;
+        follower.source_message_ids = vec![second.get()];
+        follower.source_message_queued_generations.clear();
+        follower.source_text_segments.clear();
+        let attempt = serde_json::from_value(json!({"nonce":"self-heal-reserved", "provider":"claude",
+            "target":{"host":"tmux","owner":"fixture","root":"/test","execution_nonce":"fixture"},
+            "source":{"kind":"existing","session_id":"fixture","transcript":"/test/fixture","file":[1,2],"offset":0}})).unwrap();
+        let payload = serde_json::from_value(json!({"frame":"frame","digest":"digest","attribution":{}})).unwrap();
+        owner.reserve(attempt, payload)?;
+        assert!(owner.enqueue_fixture(&follower).map_err(String::from)?);
+        assert_eq!(owner.snapshot.items.len(), 2);
+        assert_eq!(owner.snapshot.head_injection.as_ref().unwrap().members().count(), 1);
+        Ok(())
+    }).await.unwrap();
+    let data = discord::Data {
+        shared: rig.shared.clone(),
+        token: "test-token".into(),
+        provider: rig.shared.provider.clone(),
+    };
+    let ctx = rig.shared.http.cached_serenity_ctx.get().unwrap();
+    discord::router::busy_inject_support::self_heal_pending(ctx, &data, rig.channel, first).await;
+    discord::router::busy_inject_support::self_heal_pending(ctx, &data, rig.channel, second).await;
+    assert_eq!(
+        active_message_ops(&rig, first),
+        [('📬', true), ('📬', false)]
+    );
+    assert_eq!(active_message_ops(&rig, second), [('📬', true)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn busy_active_merged_handback_marks_each_generation_once() {
     if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::single_marker::",
@@ -273,6 +379,18 @@ async fn busy_active_closed_gate_keeps_mailbox_op() {
     let _root = active_root();
     let rig = IntakeRig::new(8_113_104, true).await;
     let message = busy_active_arrival(&rig, false).await;
+    assert_eq!(active_message_ops(&rig, message), [('📬', true)]);
+    let _transition = rig
+        .shared
+        .session_transition_lock(rig.channel)
+        .lock_owned()
+        .await;
+    let (drive, mut settled) = rig.drive();
+    discord::queue_io::input_owner::drive::wake(drive);
+    assert_eq!(
+        await_within(settled.recv(), WAIT_CAP).await.unwrap(),
+        Err("NotSent(\"session_transition_busy\")".into())
+    );
     assert_eq!(active_message_ops(&rig, message), [('📬', true)]);
 }
 
@@ -835,4 +953,38 @@ async fn gated_idle_start_restores_pending_and_delivers_native_answer() {
             .iter()
             .all(|(emoji, _)| ['⏳', '✅'].contains(emoji))
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parent_gate_pre_injection_handback_without_route_keeps_mailbox_op() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::single_marker::",
+        "parent_gate_pre_injection_handback_without_route_keeps_mailbox_op"
+    )) {
+        return;
+    }
+    let _root = active_root();
+    let rig = IntakeRig::new(8_113_121, true).await;
+    let parent = rig.channel.get() + 100;
+    rig.mock.unname_channel(rig.channel.get());
+    rig.mock.name_channel(parent, "parent-gate");
+    rig.mock.add_thread(rig.channel.get(), parent);
+    let _gate = discord::router::busy_inject_support::open_gate(parent);
+    rig.shared
+        .restart
+        .reconcile_done
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let _transition = rig
+        .shared
+        .session_transition_lock(rig.channel)
+        .lock_owned()
+        .await;
+    let (drive, mut settled) = rig.drive();
+    discord::queue_io::input_owner::drive::wake(drive);
+    assert_eq!(
+        await_within(settled.recv(), WAIT_CAP).await.unwrap(),
+        Err("NotSent(\"queued intake transition busy\")".into())
+    );
+    assert_eq!(rig.state().await["items"].as_array().unwrap().len(), 1);
+    assert_eq!(reaction_ops(&rig), [('📬', true)]);
 }

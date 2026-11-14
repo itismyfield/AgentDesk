@@ -625,3 +625,247 @@ fn legacy_import_rejects_any_noncanonical_or_conflicting_same_key_evidence() {
         }
     }
 }
+
+fn owned_settlement(input: &NoticeEvidence) -> NoticeEntry {
+    NoticeEntry::Settled {
+        record: input.record.clone(),
+        settlement: Box::new(Settlement {
+            proof: Settled::Owned {
+                origin: input.origin.clone().unwrap(),
+                native_key: input.unit_key.as_ref().unwrap().native_key.clone(),
+                prompt_sha256: input.prompt_sha256.clone().unwrap(),
+                owner: "legacy:source-bound-fixture".into(),
+            },
+            expired_after: None,
+        }),
+    }
+}
+
+#[test]
+fn settled_ownership_rejects_changed_uuid_source_digest_and_boundary() {
+    for change in ["uuid", "source", "digest", "boundary"] {
+        let input = evidence("owned", "registered frame", 0);
+        let mut state = LedgerState::starting_at(0);
+        apply(
+            &mut state,
+            NoticeEntry::Materialized {
+                evidence: Box::new(input.clone()),
+            },
+        );
+        let mut entry = owned_settlement(&input);
+        if let NoticeEntry::Settled { settlement, .. } = &mut entry {
+            if let Settled::Owned {
+                origin,
+                native_key,
+                prompt_sha256,
+                ..
+            } = &mut settlement.proof
+            {
+                match change {
+                    "uuid" => *native_key = "another-row".into(),
+                    "source" => origin.record.source.ino += 1,
+                    "digest" => *prompt_sha256 = "0".repeat(64),
+                    "boundary" => settlement.expired_after = Some(origin.binding_seq),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        apply(&mut state, entry);
+        assert!(state.violation().is_some(), "{change}");
+        assert!(state.input_notices().settled.is_empty());
+        assert!(state.excluded.is_empty());
+    }
+}
+
+#[test]
+fn settled_ownership_never_overrides_prepared_or_uncertain_send() {
+    for not_found in [false, true] {
+        let input = evidence("owned", "registered frame", 0);
+        let mut state = LedgerState::starting_at(0);
+        apply(
+            &mut state,
+            NoticeEntry::Materialized {
+                evidence: Box::new(input.clone()),
+            },
+        );
+        state.apply(
+            Utc::now(),
+            LedgerEntry::Prepared {
+                serial: 0,
+                unit_key: input.unit_key.clone().unwrap(),
+                piece_index: 0,
+                payload: input.payload.clone().unwrap(),
+                anchor_id: 0,
+                epoch: 1,
+                local_retry: None,
+                notice_origin: input.origin.clone(),
+            },
+        );
+        if not_found {
+            state.apply(Utc::now(), LedgerEntry::NotFound { serial: 0 });
+        }
+        assert!(state.violation().is_none());
+        apply(&mut state, owned_settlement(&input));
+        assert!(state.violation().is_some());
+        assert!(state.input_notices().settled.is_empty());
+        assert!(state.piece(0).is_some());
+    }
+}
+
+#[test]
+fn settled_policy_replays_without_origin_and_never_accepts_a_human_header() {
+    for (prompt, nonhuman) in [
+        ("<command-name>/clear</command-name>", true),
+        ("<task-notification>machine event</task-notification>", true),
+        (
+            "<subagent_notification>machine event</subagent_notification>",
+            true,
+        ),
+        (
+            "This session is being continued from a previous conversation",
+            true,
+        ),
+        ("/context", true),
+        ("[User: ann (ID: 7)]\ndirect twin", false),
+        (
+            "<local-command-caveat>text</local-command-caveat><task-notification>quoted</task-notification>",
+            false,
+        ),
+    ] {
+        assert_eq!(
+            crate::services::discord::input_notice_content(prompt).is_none(),
+            nonhuman
+        );
+        let mut input = evidence("policy", prompt, 0);
+        input.origin = None;
+        input.unit_key = None;
+        input.payload = None;
+        let mut state = LedgerState::starting_at(0);
+        apply(
+            &mut state,
+            NoticeEntry::Materialized {
+                evidence: Box::new(input.clone()),
+            },
+        );
+        apply(
+            &mut state,
+            NoticeEntry::Settled {
+                record: input.record.clone(),
+                settlement: Box::new(Settlement {
+                    proof: Settled::Policy {
+                        prompt_sha256: input.prompt_sha256.clone().unwrap(),
+                    },
+                    expired_after: None,
+                }),
+            },
+        );
+        if !nonhuman {
+            assert!(state.violation().is_some());
+            assert!(state.input_notices().settled.is_empty());
+        } else {
+            assert!(crate::services::discord::input_notice_content(prompt).is_none());
+            assert!(state.violation().is_none());
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("ledger.jsonl");
+            std::fs::File::create(&path).unwrap();
+            for entry in [
+                NoticeEntry::Materialized {
+                    evidence: Box::new(input.clone()),
+                },
+                NoticeEntry::Settled {
+                    record: input.record.clone(),
+                    settlement: Box::new(
+                        state
+                            .input_notices()
+                            .settled
+                            .values()
+                            .next()
+                            .unwrap()
+                            .clone(),
+                    ),
+                },
+            ] {
+                super::super::append(
+                    &path,
+                    Utc::now(),
+                    &LedgerEntry::InputNotice {
+                        entry: Box::new(entry),
+                    },
+                )
+                .unwrap();
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let replay = super::super::recover(&path, 0).unwrap();
+            assert_eq!(replay.input_notices(), state.input_notices());
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+    }
+}
+
+#[test]
+fn unknown_complete_notice_entry_is_rejected_without_cutting_ledger_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.jsonl");
+    std::fs::File::create(&path).unwrap();
+    let input = evidence("old", "retained", 0);
+    super::super::append(
+        &path,
+        Utc::now(),
+        &LedgerEntry::InputNotice {
+            entry: Box::new(NoticeEntry::Materialized {
+                evidence: Box::new(input),
+            }),
+        },
+    )
+    .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let mut line: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    line["entry"]["entry"]["kind"] = "future_notice_variant".into();
+    let mut unsupported = serde_json::to_vec(&line).unwrap();
+    unsupported.push(b'\n');
+    std::fs::write(&path, &unsupported).unwrap();
+    assert!(super::super::recover(&path, 0).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), unsupported);
+}
+
+#[test]
+fn terminal_partial_evidence_stays_excluded_when_its_native_key_is_enriched() {
+    let prompt = "<command-name>/clear</command-name>";
+    let full = evidence("policy", prompt, 0);
+    let mut partial = full.clone();
+    partial.unit_key = None;
+    partial.payload = None;
+    partial.origin = None;
+    let mut state = LedgerState::starting_at(0);
+    apply(
+        &mut state,
+        NoticeEntry::Materialized {
+            evidence: Box::new(partial.clone()),
+        },
+    );
+    apply(
+        &mut state,
+        NoticeEntry::Settled {
+            record: partial.record,
+            settlement: Box::new(Settlement {
+                proof: Settled::Policy {
+                    prompt_sha256: partial.prompt_sha256.unwrap(),
+                },
+                expired_after: None,
+            }),
+        },
+    );
+    assert!(state.violation().is_none());
+    apply(
+        &mut state,
+        NoticeEntry::Materialized {
+            evidence: Box::new(full.clone()),
+        },
+    );
+    assert!(state.violation().is_none());
+    assert_eq!(
+        state.excluded(full.unit_key.as_ref().unwrap()),
+        Some("input_notice_source")
+    );
+    assert_eq!(state.input_notices().settled.len(), 1);
+}
