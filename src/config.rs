@@ -15,6 +15,7 @@ pub use agent_memory::{AgentDef, SharedKnowledgeInjection};
 mod agent_channels;
 pub use agent_channels::AgentChannels;
 pub(crate) mod runtime_profile;
+pub(crate) mod test_instance;
 pub use runtime_profile::{ClusterConfig, ClusterIntakeRoutingConfig, RuntimeProfile};
 mod cluster_role;
 pub use cluster_role::ClusterRole;
@@ -2332,18 +2333,20 @@ fn env_var_is_present(name: &str) -> bool {
 }
 
 fn default_memento_mcp_server() -> Option<(String, McpServerConfig)> {
-    env_var_is_present(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR).then(|| {
-        (
-            DEFAULT_MEMENTO_MCP_SERVER_NAME.to_string(),
-            McpServerConfig {
-                url: DEFAULT_MEMENTO_MCP_URL.to_string(),
-                auth: Some(McpServerAuthConfig {
-                    auth_type: McpServerAuthType::Bearer,
-                    token_env_var: Some(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR.to_string()),
-                }),
-            },
-        )
-    })
+    (!test_instance::requested() && env_var_is_present(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR)).then(
+        || {
+            (
+                DEFAULT_MEMENTO_MCP_SERVER_NAME.to_string(),
+                McpServerConfig {
+                    url: DEFAULT_MEMENTO_MCP_URL.to_string(),
+                    auth: Some(McpServerAuthConfig {
+                        auth_type: McpServerAuthType::Bearer,
+                        token_env_var: Some(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR.to_string()),
+                    }),
+                },
+            )
+        },
+    )
 }
 
 impl Config {
@@ -2483,6 +2486,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 }
 
 pub(crate) fn validate_config(config: &Config) -> Result<()> {
+    test_instance::environment::validate_config(config).map_err(anyhow::Error::msg)?;
     runtime_validation::validate(config)?;
     config.decision_gate.validate()?;
     crate::services::tui_o::channel_policy::BootChannels::validate(config)?;

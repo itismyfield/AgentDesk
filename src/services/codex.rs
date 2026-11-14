@@ -1,5 +1,6 @@
 mod command_streaming;
 mod effort;
+use crate::services::process::reaping::CommandReapExt;
 #[cfg(unix)]
 use effort::from_env as codex_reasoning_effort_from_env;
 mod direct_reader;
@@ -1182,14 +1183,15 @@ fn execute_streaming_direct(
         ProviderKind::Codex,
         report_channel_id,
     )?;
-    crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay);
+    crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay)?;
     crate::services::process::configure_child_process_group(&mut command);
 
     let mut child = command
-        .spawn()
+        .spawn_reaping()
         .map_err(|e| format!("Failed to start Codex: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
+    child.track_cancel_token(cancel_token.as_ref());
     let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "codex-direct-stream");
     if cancel_requested(cancel_token.as_deref()) {
         kill_child_tree(&mut child);
@@ -1438,7 +1440,7 @@ fn execute_streaming_local_tmux(
         tmux_session_name,
     )?;
     let auth_env_lines =
-        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay)?;
     let session_exists = tmux_present_bool(tmux_session_name);
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
@@ -1567,6 +1569,10 @@ fn execute_streaming_local_tmux(
 
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
+    #[cfg(test)]
+    let exe = std::env::var_os("ADK_TEST_PROCESS_WRAPPER_EXE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(exe);
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path

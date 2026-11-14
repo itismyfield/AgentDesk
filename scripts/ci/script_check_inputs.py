@@ -30,6 +30,8 @@ USER_FEATURE_MAP_INPUTS = (
     "scripts/generate_user_feature_map.py",
     "tests/test_generate_user_feature_map.py",
     "tests/test_user_feature_map_static.py",
+    "*.py",
+    "*.rs",
 )
 
 # Broad script/test roots cover imported helpers and fixture-copy dependencies.
@@ -47,6 +49,9 @@ SELF_TEST_INPUTS: dict[str, tuple[str, ...]] = {
     "Isolated instance credential binary tests": (
         "Cargo.toml",
         "Cargo.lock",
+        "src/lib.rs",
+        "src/config/test_instance*",
+        "src/services/claude_tui/hook_relay*",
         "scripts/dev-instance.sh",
         "scripts/dev_instance/**",
         "src/cli/args.rs",

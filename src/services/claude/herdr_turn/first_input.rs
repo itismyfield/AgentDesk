@@ -49,8 +49,9 @@ pub(super) fn submit_owned(
     let submit = Box::new(move |frame: String| {
         guarded_outcome::capture_preparation(|| {
             let written = write(&logical, cancel.as_deref(), attached, &frame, &sender)?;
-            let submitted = written
-                .ok_or_else(|| before_payload(&logical, "input cancelled before first key"))?;
+            let submitted = written.ok_or_else(|| {
+                before_payload(&logical, "input cancelled before first key", false)
+            })?;
             *ticket.lock().unwrap_or_else(|e| e.into_inner()) = Some(submitted);
             Ok(())
         })
@@ -129,9 +130,14 @@ fn write(
                     } else { Screen::Unknown }
                 },
             ));
+            let unproven = matches!(
+                stopped,
+                InputRun::Refused(crate::services::claude_tui::host_input::InputRefusal::Unproven)
+            );
             return Err(before_payload(
                 logical,
                 &format!("Claude composer held before first key: {stopped:?}"),
+                unproven,
             ));
         }
         stopped => return Err(SubmissionError::Guarded(stopped)),
@@ -144,7 +150,7 @@ fn write(
     }))
 }
 
-fn before_payload(logical: &str, detail: &str) -> SubmissionError {
+fn before_payload(logical: &str, detail: &str, unproven: bool) -> SubmissionError {
     crate::services::claude_tui::owner_input::vetoed(detail);
     SubmissionError::Held(crate::services::claude_tui::input::PreparationHold {
         target: logical.into(),
@@ -152,6 +158,7 @@ fn before_payload(logical: &str, detail: &str) -> SubmissionError {
         phase: crate::services::claude_tui::input::EffectPhase::BeforePayload,
         detail: detail.into(),
         modal: false,
+        unproven,
     })
 }
 
@@ -265,6 +272,8 @@ pub(super) fn observe(
 mod clear_held_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod unproven_tests;
 
 #[cfg(test)]
 #[test]

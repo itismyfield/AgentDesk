@@ -560,6 +560,15 @@ impl SocketHerdrLaunchHost {
             &ServerWitness,
         ) -> Result<(), String>,
     ) -> HerdrCreateOutcome {
+        let mut ownership = match crate::config::test_instance::begin_herdr_create(
+            request.endpoint,
+            request.witness,
+            request.label,
+            request.cwd,
+        ) {
+            Ok(ownership) => ownership,
+            Err(detail) => return HerdrCreateOutcome::NotSent(detail),
+        };
         let Some(configured) = self.endpoint(request.endpoint) else {
             return HerdrCreateOutcome::NotSent("endpoint is not configured".into());
         };
@@ -583,6 +592,11 @@ impl SocketHerdrLaunchHost {
             pane_id: pane.pane_id.clone(),
             detail,
         };
+        if let Some(ownership) = &mut ownership
+            && let Err(detail) = ownership.record_created(&pane.workspace_id, &pane.pane_id)
+        {
+            return unconfirmed(detail);
+        }
         if !same_dir(request.cwd, pane.cwd.as_deref()) {
             return unconfirmed(format!("pane opened in {:?}", pane.cwd));
         }
@@ -760,6 +774,9 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
         logical_key: &str,
         witness: &ServerWitness,
     ) -> Result<Vec<ChannelPane>, String> {
+        if crate::config::test_instance::requested() {
+            return Err("test Herdr workspace adoption is not admitted".into());
+        }
         let (_, transport) = self.endpoint(launch).ok_or("endpoint is not configured")?;
         let snapshot = residue::snapshot_on(transport.as_ref(), witness, &self.next_id)?;
         let workspaces = snapshot.workspaces.as_deref().unwrap_or_default();
@@ -793,6 +810,9 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
         nonce: &str,
         residue: &Residue,
     ) -> Result<(), String> {
+        if crate::config::test_instance::requested() {
+            return Err("test Herdr residue disposal is not admitted".into());
+        }
         let (_, transport) = self.endpoint(launch).ok_or("endpoint is not configured")?;
         if self.unplaced_witness(launch, nonce)? != residue.witness {
             return Err("the endpoint's server changed".into());

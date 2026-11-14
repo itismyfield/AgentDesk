@@ -146,6 +146,15 @@ src/
 │   │   └── user_default_validator_tests.rs
 │   ├── test_env/
 │   │   └── teardown_probe.rs
+│   ├── test_instance/
+│   │   ├── api_boundary_tests.rs
+│   │   ├── bound_health_tests.rs
+│   │   ├── environment.rs
+│   │   ├── environment_tests.rs
+│   │   ├── host_scope_tests.rs
+│   │   ├── lifecycle.rs
+│   │   ├── lifecycle_tests.rs
+│   │   └── run_identity_tests.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
 │   ├── cluster_role.rs
@@ -170,6 +179,7 @@ src/
 │   ├── session_hosts_tests.rs
 │   ├── snapshot_reader_tests.rs
 │   ├── test_env.rs
+│   ├── test_instance.rs
 │   ├── tool_activity_display.rs
 │   └── writer_channels_tests.rs
 ├── db/
@@ -673,6 +683,8 @@ src/
 │   │   │   ├── response.rs
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
+│   │   │   ├── test_instance_projection_tests.rs
+│   │   │   ├── test_instance_response_tests.rs
 │   │   │   ├── tui_output_readiness_tests.rs
 │   │   │   ├── unread_tail_attribution_tests.rs
 │   │   │   └── writer_readiness.rs
@@ -992,7 +1004,8 @@ src/
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
 │   │   │   │   ├── clear_held_tests.rs
-│   │   │   │   └── tests.rs
+│   │   │   │   ├── tests.rs
+│   │   │   │   └── unproven_tests.rs
 │   │   │   ├── boot_host_tests.rs
 │   │   │   ├── coldstop_input_tests.rs
 │   │   │   ├── composer.rs
@@ -1058,6 +1071,7 @@ src/
 │   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
+│   │   │   ├── reaping_tests.rs
 │   │   │   ├── response_window.rs
 │   │   │   ├── too_early.rs
 │   │   │   └── transport_retry.rs
@@ -1270,6 +1284,8 @@ src/
 │   ├── codex/
 │   │   ├── actual_submit_tests/
 │   │   │   └── source_io_tests.rs
+│   │   ├── direct_reader/
+│   │   │   └── reaping_tests.rs
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
 │   │   │   │   └── pg_tests.rs
@@ -2494,7 +2510,8 @@ src/
 │   │   │   │   │   │   ├── missing_halt_tests.rs
 │   │   │   │   │   │   ├── park_missing_tests.rs
 │   │   │   │   │   │   ├── park_reply_tests.rs
-│   │   │   │   │   │   └── refresh_tests.rs
+│   │   │   │   │   │   ├── refresh_tests.rs
+│   │   │   │   │   │   └── unbound_gateway_tests.rs
 │   │   │   │   │   └── owner_execution.rs
 │   │   │   │   └── owner_port.rs
 │   │   │   ├── owner_execution/
@@ -3647,6 +3664,7 @@ src/
 │   │   ├── memento.rs
 │   │   ├── memento_anchor.rs
 │   │   ├── memento_endpoint.rs
+│   │   ├── memento_instance_tests.rs
 │   │   ├── memento_scope.rs
 │   │   ├── memento_scope_tests.rs
 │   │   ├── memento_throttle.rs
@@ -3710,6 +3728,8 @@ src/
 │   │   │   ├── production_probe_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── tmux/
+│   │   │   ├── instance_scope/
+│   │   │   │   └── host_command_tests.rs
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
 │   │   │   ├── session_inventory/
@@ -3717,6 +3737,7 @@ src/
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
+│   │   │   ├── instance_scope.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── session_identity.rs
 │   │   │   ├── session_identity_tests.rs
@@ -3730,12 +3751,15 @@ src/
 │   │   ├── tmux.rs
 │   │   └── windows_job.rs
 │   ├── process/
+│   │   ├── reaping/
+│   │   │   └── tests.rs
 │   │   ├── stream_child/
 │   │   │   ├── stream_queue/
 │   │   │   │   ├── test_delay.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── stream_queue.rs
 │   │   │   └── test_fixture.rs
+│   │   ├── reaping.rs
 │   │   └── stream_child.rs
 │   ├── provider/
 │   │   ├── cancel_token_cleanup/
@@ -3757,6 +3781,7 @@ src/
 │   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
+│   │   ├── reaping_tests.rs
 │   │   ├── registry.rs
 │   │   ├── runtime.rs
 │   │   ├── session_probe.rs
@@ -3769,6 +3794,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── direct_spawn_tests.rs
 │   │   ├── fallback.rs
+│   │   ├── instance_env_tests.rs
 │   │   ├── queries.rs
 │   │   └── repository.rs
 │   ├── provider_cli/
@@ -3937,6 +3963,7 @@ src/
 │   │   │   │   ├── loaded_image_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── peer.rs
+│   │   │   │   ├── peer_current_image_tests.rs
 │   │   │   │   ├── peer_tests.rs
 │   │   │   │   ├── permit.rs
 │   │   │   │   ├── proof_tests.rs
@@ -4596,6 +4623,7 @@ src/
 │   │   │   │   ├── actor.rs
 │   │   │   │   ├── attempt.rs
 │   │   │   │   ├── claude_handoff.rs
+│   │   │   │   ├── clear.rs
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── control_tests.rs

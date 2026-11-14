@@ -14,6 +14,8 @@ use crate::utils::format::expand_tilde_string as expand_tilde;
 #[cfg(all(test, unix))]
 mod direct_spawn_tests;
 pub mod fallback;
+#[cfg(all(test, unix))]
+pub(crate) mod instance_env_tests;
 
 use crate::domain::provider_auth_profile::ProfileOverrides;
 pub use crate::domain::provider_auth_profile::{
@@ -325,6 +327,15 @@ pub fn resolve(
     agent_auth_profile: Option<&str>,
     catalog: &HashMap<String, ProviderAuthProfileDef>,
 ) -> Result<ProviderAuthOverlay, AuthProfileError> {
+    if crate::config::test_instance::requested() {
+        crate::config::test_instance::environment::provider_home(provider.as_str())
+            .map_err(AuthProfileError::Io)?;
+        if selected_profile_id(channel_auth_profile, agent_auth_profile).is_none() {
+            return Err(AuthProfileError::Io(
+                "test instance requires a named provider profile".into(),
+            ));
+        }
+    }
     if selected_profile_id(channel_auth_profile, agent_auth_profile).is_none() {
         return Ok(ProviderAuthOverlay::default_for(provider));
     }
@@ -408,13 +419,15 @@ fn resolve_at(
         }
     }
 
-    Ok(ProviderAuthOverlay {
+    let overlay = ProviderAuthOverlay {
         profile_id: profile_id.to_string(),
         provider,
         env,
         unset,
         home,
-    })
+    };
+    validate_instance_overlay(&overlay).map_err(AuthProfileError::Io)?;
+    Ok(overlay)
 }
 
 pub fn merge_overlay_env(
@@ -431,13 +444,27 @@ pub fn merge_overlay_env(
     map.into_iter().collect()
 }
 
-pub fn apply_overlay_to_command(command: &mut Command, overlay: &ProviderAuthOverlay) {
+pub fn apply_overlay_to_command(
+    command: &mut Command,
+    overlay: &ProviderAuthOverlay,
+) -> Result<(), String> {
+    validate_instance_overlay(overlay)?;
     for key in &overlay.unset {
         command.env_remove(key);
     }
     for (key, value) in &overlay.env {
         command.env(key, value);
     }
+    crate::config::test_instance::environment::configure_child_command(command)
+}
+
+fn validate_instance_overlay(overlay: &ProviderAuthOverlay) -> Result<(), String> {
+    crate::config::test_instance::environment::validate_overlay(
+        overlay.provider.as_str(),
+        &overlay.profile_id,
+        overlay.home.as_deref(),
+        &overlay.env,
+    )
 }
 
 pub fn overlay_env_pairs(overlay: &ProviderAuthOverlay) -> Vec<(String, String)> {
@@ -478,6 +505,11 @@ pub fn default_home_path(provider: &ProviderKind) -> Option<PathBuf> {
 }
 
 pub fn extra_accounts_root() -> Result<PathBuf, AuthProfileError> {
+    if let Some(root) = crate::config::test_instance::environment::managed_profiles_root()
+        .map_err(AuthProfileError::Io)?
+    {
+        return Ok(root);
+    }
     // Test fixtures isolate managed homes through HOME, including on Windows.
     #[cfg(test)]
     let home = std::env::var_os("HOME")
@@ -521,6 +553,8 @@ pub fn validate_managed_profile_home_at(
     home: &Path,
     mode: ManagedHomeValidationMode,
 ) -> Result<PathBuf, AuthProfileError> {
+    crate::config::test_instance::environment::validate_provider_home(provider.as_str(), home)
+        .map_err(AuthProfileError::Io)?;
     validate_profile_id(profile_id)?;
     let expected = extra_account_home_at(root, provider, profile_id);
     if home != expected {
@@ -799,7 +833,8 @@ pub fn login_script_contents(overlay: &ProviderAuthOverlay, argv: &[&str]) -> St
 /// scripts.  Unsets are intentionally emitted before exports so a named
 /// profile cannot inherit a service-level API key while still being able to
 /// supply an explicitly configured key of its own.
-pub fn overlay_shell_env_lines(overlay: &ProviderAuthOverlay) -> String {
+pub fn overlay_shell_env_lines(overlay: &ProviderAuthOverlay) -> Result<String, String> {
+    validate_instance_overlay(overlay)?;
     let mut body = String::new();
     for key in &overlay.unset {
         body.push_str("unset ");
@@ -813,7 +848,8 @@ pub fn overlay_shell_env_lines(overlay: &ProviderAuthOverlay) -> String {
         body.push_str(&crate::services::process::shell_escape(value));
         body.push('\n');
     }
-    body
+    body.push_str(&crate::config::test_instance::environment::shell_environment()?);
+    Ok(body)
 }
 
 pub fn write_login_script(
@@ -1220,7 +1256,7 @@ mod tests {
         overlay.env.insert("CODEX_HOME".into(), "/tmp/x".into());
         overlay.unset.insert("OPENAI_API_KEY".into());
         let mut command = Command::new("true");
-        apply_overlay_to_command(&mut command, &overlay);
+        apply_overlay_to_command(&mut command, &overlay).unwrap();
         let debug = format!("{overlay:?}");
         assert!(debug.contains("CODEX_HOME"));
         assert!(!debug.contains("/tmp/x"));
@@ -1236,7 +1272,7 @@ mod tests {
             .env
             .insert("CODEX_HOME".to_string(), "/tmp/work home".to_string());
 
-        let lines = overlay_shell_env_lines(&overlay);
+        let lines = overlay_shell_env_lines(&overlay).unwrap();
         assert!(lines.starts_with("unset OPENAI_API_KEY\n"));
         assert!(lines.contains("export CODEX_HOME='/tmp/work home'\n"));
     }
