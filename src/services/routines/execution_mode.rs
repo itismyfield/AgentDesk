@@ -250,7 +250,8 @@ pub struct ClaimDefinitionRow {
 }
 
 impl ClaimDefinitionRow {
-    /// `execution_backend` stays null until the first provider start pins it.
+    /// `execution_backend` stays null until the first provider start pins it. An explicit-mode
+    /// run never starts a second turn once its first was submitted; a null-mode run still may.
     pub fn run_spec(&self) -> Value {
         let projection = self.definition.projection();
         json!({
@@ -267,6 +268,7 @@ impl ClaimDefinitionRow {
             "timeout_secs": self.timeout_secs,
             "headless_failure_notice_limit": projection.headless_failure_notice_limit,
             "execution_backend": Value::Null,
+            "retry_after_start": projection.execution_mode.is_none(),
         })
     }
 }

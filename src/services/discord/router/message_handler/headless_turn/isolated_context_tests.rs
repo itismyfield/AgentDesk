@@ -11,6 +11,9 @@ use crate::services::discord::host_teardown_gate::test_support::{channel_key, ru
 use crate::services::discord::inflight::load_inflight_state_read_only;
 use crate::services::discord::router::message_handler::headless_turn::STARTS_RESOLVED;
 use crate::services::provider::ProviderKind;
+use crate::services::routines::agent_executor::RoutineAgentExecutor;
+use crate::services::routines::execution_mode::{ExecutionDefinition, RoutineExecutionMode};
+use crate::services::routines::store::{ClaimedRoutineRun, NewRoutine, RoutineStore};
 use crate::test_support::wait::{WAIT_CAP, await_within};
 use crate::ui::ai_screen::{HistoryItem, HistoryType};
 use poise::serenity_prelude::ChannelId;
@@ -68,6 +71,7 @@ async fn fixture() -> Fixture {
     let hold = concat!(
         "#!/bin/sh\nd=\"$(dirname \"$0\")\"\n",
         "case \"$*\" in *--version*) echo 0.0.0-stub; exit 0 ;; esac\n",
+        "echo run >> \"$d/spawned\"\n",
         "while [ -d \"$d\" ] && [ ! -e \"$d/release\" ]; do sleep 0.05; done\n",
         "[ -e \"$d/answer\" ] || exit 1\n",
         "printf '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"%s\",",
@@ -421,26 +425,22 @@ async fn a_headless_mark_that_cannot_be_isolated_is_refused_without_a_shared_fal
     fixture.db.drop().await;
 }
 
-#[tokio::test]
-async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context_pg() {
-    use crate::db::session_transcripts as transcripts;
-    use crate::services::routines::agent_executor::RoutineAgentExecutor;
-    use crate::services::routines::execution_mode::{ExecutionDefinition, RoutineExecutionMode};
-    use crate::services::routines::store::{NewRoutine, RoutineStore};
-    if !api_child(&format!(
-        "{TEST}a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context_pg"
-    )) {
-        return;
-    }
-    const ANSWER: &str = "isolated-run-answer-8117";
-    let fixture = fixture().await;
-    let api = real_api(&fixture).await;
-    let (pool, primary) = (&fixture.pool, PRIMARY.get().to_string());
+/// A headless routine of the fixture's agent, claimed for the real launcher:
+/// `(store, executor, claimed run, routine id)`.
+async fn headless_claim(
+    fixture: &Fixture,
+) -> (
+    RoutineStore,
+    RoutineAgentExecutor,
+    ClaimedRoutineRun,
+    String,
+) {
+    let pool = &fixture.pool;
     sqlx::query(
         "INSERT INTO agents (id, name, provider, discord_channel_cc)
          VALUES ('agent8117', 'A', 'claude', $1)",
     )
-    .bind(&primary)
+    .bind(PRIMARY.get().to_string())
     .execute(pool)
     .await
     .unwrap();
@@ -470,12 +470,30 @@ async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context
     let attached = store.attach_routine_with_execution(routine_row, Some(&headless), 3);
     let routine_id = attached.await.unwrap().id;
     let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
+    let registry = Some(fixture.registry.clone());
+    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60);
+    (store, executor, claimed, routine_id)
+}
+
+#[tokio::test]
+async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context_pg() {
+    use crate::db::session_transcripts as transcripts;
+    if !api_child(&format!(
+        "{TEST}a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context_pg"
+    )) {
+        return;
+    }
+    const ANSWER: &str = "isolated-run-answer-8117";
+    // No channel is cut over to the O writer, as on a production boot that decided so.
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let fixture = fixture().await;
+    let api = real_api(&fixture).await;
+    let (pool, primary) = (&fixture.pool, PRIMARY.get().to_string());
+    let (store, executor, claimed, routine_id) = headless_claim(&fixture).await;
     let (run, since) = (claimed.run_id.clone(), chrono::Utc::now());
     let before = channel_state(&fixture, PRIMARY).await;
 
     // The real launcher starts the run it claimed as headless on the agent's primary channel.
-    let registry = Some(fixture.registry.clone());
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60);
     let prompt = "nightly report".to_string();
     let started = executor.start_agent_run(&store, claimed, prompt, None, None, None, None, false);
     let started = started.await.unwrap();
@@ -615,5 +633,60 @@ async fn a_successful_headless_run_keeps_its_evidence_out_of_the_primary_context
     .unwrap();
     eprintln!("PER_RUN_ROW status/claude_session_id/thread_channel_id/agent_id = {observed:?}");
     api.abort();
+    fixture.db.drop().await;
+}
+
+#[tokio::test]
+async fn a_headless_run_waits_behind_a_busy_primary_and_starts_no_provider_pg() {
+    use crate::services::provider::CancelToken;
+    use poise::serenity_prelude::{MessageId, UserId};
+    if !api_child(&format!(
+        "{TEST}a_headless_run_waits_behind_a_busy_primary_and_starts_no_provider_pg"
+    )) {
+        return;
+    }
+    let fixture = fixture().await;
+    let (store, executor, claimed, _) = headless_claim(&fixture).await;
+    let run = claimed.run_id.clone();
+    // A person's turn holds the primary mailbox.
+    let human = Arc::new(CancelToken::new());
+    let mailbox = fixture.shared.mailbox(PRIMARY);
+    let claim = mailbox.try_start_turn(human.clone(), UserId::new(7), MessageId::new(77));
+    assert!(claim.await);
+    let before = channel_state(&fixture, PRIMARY).await;
+
+    let prompt = "nightly report".to_string();
+    let start = executor.start_agent_run(&store, claimed, prompt, None, None, None, None, false);
+    let deferred = start.await.unwrap();
+    assert_eq!(deferred.status, "deferred", "{deferred:?}");
+    assert_eq!(
+        deferred.result_json.unwrap()["deferred_reason"],
+        "mailbox_busy"
+    );
+
+    // The deferral window closes with the person still at work: the run fails unstarted.
+    sqlx::query(
+        "UPDATE routine_runs
+         SET result_json = jsonb_set(result_json, '{deferred_since}', to_jsonb($2::text)),
+             next_retry_at = NOW() - INTERVAL '1 second'
+         WHERE id = $1",
+    )
+    .bind(&run)
+    .bind((chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339())
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    let polled = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    let closed: Vec<_> = polled.iter().map(|run| run.status.as_str()).collect();
+    assert_eq!(closed, ["failed"], "{polled:?}");
+
+    // No provider was spawned, and the person's turn was neither stopped nor replaced.
+    assert!(!fixture.stubs.join("spawned").exists());
+    assert!(load_inflight_state_read_only(&ProviderKind::Claude, PRIMARY.get()).is_none());
+    let active = crate::services::discord::mailbox_snapshot(&fixture.shared, PRIMARY).await;
+    let active = active.cancel_token.expect("the person's turn");
+    assert!(Arc::ptr_eq(&active, &human));
+    assert!(!human.cancelled.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(channel_state(&fixture, PRIMARY).await, before);
     fixture.db.drop().await;
 }

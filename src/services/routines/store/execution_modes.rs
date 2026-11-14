@@ -82,6 +82,20 @@ impl RoutineStore {
         mode.ok_or_else(|| anyhow!("routine run {run_id} not found while reading its mode"))
     }
 
+    /// Whether the claim pinned "no second turn after a submitted one"; a run claimed before the
+    /// pin existed keeps its retries.
+    pub async fn run_forbids_retry_after_start(&self, run_id: &str) -> Result<bool> {
+        let forbidden: Option<bool> = sqlx::query_scalar(
+            "SELECT COALESCE(run_spec ->> 'retry_after_start' = 'false', FALSE)
+             FROM routine_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("read routine run {run_id} retry policy: {e}"))?;
+        Ok(forbidden.unwrap_or(false))
+    }
+
     /// Explicit-mode runs refuse the legacy dynamic DM override; null-mode runs keep it.
     pub async fn run_forbids_dm_override(&self, run_id: &str) -> Result<bool> {
         let explicit: Option<bool> = sqlx::query_scalar(

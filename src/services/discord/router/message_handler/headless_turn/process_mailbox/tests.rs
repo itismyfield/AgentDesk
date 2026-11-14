@@ -766,12 +766,19 @@ async fn a_shared_primary_actor_serves_inputs_queued_behind_a_routine_turn_and_n
         assert!(same_actor());
         let persistence = QueuePersistenceContext::new(&shared.provider, &shared.token_hash, None);
         let mut served = Vec::new();
-        while let Some(next) = mailbox
-            .take_next_soft(persistence.clone())
-            .await
-            .intervention
-        {
-            served.push(next.text);
+        loop {
+            let taken = mailbox.take_next_soft(persistence.clone()).await;
+            let Some(next) = taken.intervention.as_ref() else {
+                break;
+            };
+            // Each input runs as its own turn on the same actor.
+            let token = Arc::new(CancelToken::new());
+            let claimed = mailbox.try_start_turn(token.clone(), next.author_id, next.message_id);
+            assert!(claimed.await);
+            served.push(next.text.clone());
+            drop(taken);
+            let finished = mailbox.finish_turn_if_token(Some(token), persistence.clone());
+            assert!(matches!(finished.await, TokenFinish::Finished(_)));
         }
         assert_eq!(served, ["human 124", "human 125"]);
 

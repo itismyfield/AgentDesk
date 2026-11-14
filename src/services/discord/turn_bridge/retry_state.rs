@@ -243,6 +243,8 @@ pub(super) fn handle_gemini_retry_boundary(
 pub(super) enum RetryReset {
     Cleared,
     KeptByHostGuard,
+    /// An isolated routine run reset its own session; its request is never rerun on the channel.
+    NoRerun,
 }
 
 /// What the auto-retry resets of one turn did. Only the scheduling point records it,
@@ -266,6 +268,7 @@ impl AutoRetry {
                 self.kept_by_host_guard = true;
                 None
             }
+            RetryReset::NoRerun => None,
             RetryReset::Cleared => {
                 self.queued |= user_msg_id.is_some();
                 user_msg_id
@@ -350,7 +353,10 @@ pub(super) async fn reset_session_for_auto_retry(
     if let Some(session) = cleared {
         kill_session_before_retry(&session, reason);
     }
-    RetryReset::Cleared
+    match shares_channel_session {
+        true => RetryReset::Cleared,
+        false => RetryReset::NoRerun,
+    }
 }
 
 /// Kills the turn's tmux session the host guard admitted, for a fresh retry.
@@ -431,7 +437,10 @@ mod tests {
     async fn auto_retry_reset_clears_the_channel_session_only_for_a_run_that_shares_it() {
         let _root = crate::config::TestRuntimeRootGuard::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
-        for (channel, isolated) in [(8_117_301, true), (8_117_302, false)] {
+        for (channel, isolated, expected) in [
+            (8_117_301, true, RetryReset::NoRerun),
+            (8_117_302, false, RetryReset::Cleared),
+        ] {
             let channel_id = ChannelId::new(channel);
             let mut state = inflight("", 0);
             (state.channel_id, state.tmux_session_name) = (channel, None);
@@ -469,7 +478,9 @@ mod tests {
                 "test",
             )
             .await;
-            assert!(matches!(reset, RetryReset::Cleared));
+            // Only the shared turn's request may be rerun with history as a channel turn.
+            let rerun = AutoRetry::default().queue(reset, Some(MessageId::new(9)));
+            assert_eq!((reset, rerun.is_some()), (expected, !isolated));
             assert_eq!(run_sid, None, "the run's own session is reset either way");
             let core = shared.core.lock().await;
             let kept = &core.sessions[&channel_id];

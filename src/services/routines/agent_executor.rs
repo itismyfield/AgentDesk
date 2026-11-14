@@ -666,7 +666,12 @@ impl RoutineAgentExecutor {
         pause_on_terminal_failure: bool,
     ) -> Result<Option<RoutineRunOutcome>> {
         let fresh_context_guaranteed = fresh_context_guaranteed_from_result(result_json.as_ref());
-        match running_failure_recovery_plan(&run, failed_agent_id, attempt_kind) {
+        // Every caller reports a turn that was already submitted.
+        let plan = match store.run_forbids_retry_after_start(&run.run_id).await? {
+            true => AgentFailureRecoveryPlan::Fail,
+            false => running_failure_recovery_plan(&run, failed_agent_id, attempt_kind),
+        };
+        match plan {
             AgentFailureRecoveryPlan::Retry {
                 retry_count_after_increment: retry_count,
                 next_retry_at,

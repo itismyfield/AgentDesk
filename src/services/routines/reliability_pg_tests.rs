@@ -6,6 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 
+use super::execution_mode::{ExecutionDefinition, RoutineExecutionMode};
 use super::store::{ClaimedRoutineRun, NewRoutine, RoutineStore};
 use super::{
     RoutineAgentExecutor, RoutineDiscordLogger, RoutineScriptLoader, after_startup_grace,
@@ -461,7 +462,19 @@ async fn started_agent_run(
 ) -> String {
     let mut routine = new_routine(name, None, None);
     routine.execution_strategy = strategy.to_string();
-    store.attach_routine(routine).await.unwrap();
+    started_run_of(pool, store, routine, None, turn).await
+}
+
+/// A claimed run of `routine` whose turn was submitted ten minutes ago.
+async fn started_run_of(
+    pool: &PgPool,
+    store: &RoutineStore,
+    routine: NewRoutine,
+    definition: Option<&ExecutionDefinition>,
+    turn: &str,
+) -> String {
+    let attached = store.attach_routine_with_execution(routine, definition, 3);
+    attached.await.unwrap();
     let claimed = store
         .claim_due_runs(1)
         .await
@@ -555,6 +568,78 @@ async fn fresh_terminal_turn_error_ends_run_as_failure_before_timeout_pg() {
     ];
     expected.sort();
     assert_eq!(done, expected);
+
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_headless_run_whose_turn_was_submitted_never_starts_a_second_turn_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let store = store(&pool);
+    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1800);
+    let headless = ExecutionDefinition {
+        mode: RoutineExecutionMode::Headless,
+        runner: serde_json::json!({"kind": "quickjs", "script_ref": "x.js"}),
+    };
+    sqlx::query("INSERT INTO agents (id, name, provider) VALUES ('spare', 'spare', 'claude')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Each routine has a retry budget and a fallback agent to spend.
+    let routine = |name: &str, retries: i32| {
+        let mut routine = new_routine(name, None, None);
+        routine.execution_strategy = "fresh".to_string();
+        (routine.max_retries, routine.fallback_agent_id) = (Some(retries), Some("spare".into()));
+        routine
+    };
+    let mut runs = Vec::new();
+    for (name, retries, definition, turn) in [
+        ("headless-retry", 2, Some(&headless), "discord:7101:1"),
+        ("headless-fallback", 0, Some(&headless), "discord:7102:1"),
+        ("legacy-retry", 2, None, "discord:7103:1"),
+    ] {
+        let run = started_run_of(&pool, &store, routine(name, retries), definition, turn).await;
+        quality_event(&pool, turn, "turn_error", "cancelled", 60).await;
+        runs.push(run);
+    }
+
+    let outcomes = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    let outcome = |run: &str| {
+        let outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.run_id == run)
+            .unwrap();
+        (outcome.status.clone(), outcome.error.clone().unwrap())
+    };
+    let pending_turn = |run: String| {
+        let pool = pool.clone();
+        async move {
+            let turn: (Option<String>, Option<DateTime<Utc>>) =
+                sqlx::query_as("SELECT turn_id, next_retry_at FROM routine_runs WHERE id = $1")
+                    .bind(run)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            turn
+        }
+    };
+    for run in &runs[..2] {
+        let (status, error) = outcome(run);
+        assert_eq!(status, "failed", "{error}");
+        assert!(!error.contains("fallback agent"), "{error}");
+        let (status, retries, _) = run_row(&pool, run).await;
+        assert_eq!((status.as_str(), retries), ("failed", 0));
+        let (turn, next_retry_at) = pending_turn(run.clone()).await;
+        assert!(turn.is_some() && next_retry_at.is_none());
+    }
+    // A null-mode run still schedules its retry: its claim pinned no such policy.
+    assert_eq!(outcome(&runs[2]).0, "running");
+    let (status, retries, _) = run_row(&pool, &runs[2]).await;
+    assert_eq!((status.as_str(), retries), ("running", 1));
+    let (turn, next_retry_at) = pending_turn(runs[2].clone()).await;
+    assert!(turn.is_none() && next_retry_at.is_some());
 
     pool.close().await;
     db.drop().await;
