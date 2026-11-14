@@ -58,6 +58,33 @@ impl SnapshotV2 {
         self.owe(input.original.message_id, origins, outcome, at_ms);
     }
 
+    /// Owes receipts for opaque admissions before a clear removes their retained originals.
+    pub(super) fn owe_opaque(&mut self, outcome: TerminalOutcome, at_ms: u64) {
+        let mut removed = std::collections::BTreeMap::<u64, Vec<String>>::new();
+        for bind in &self.admission_binds {
+            if !matches!(bind.at, BindAt::Opaque) {
+                continue;
+            }
+            let Some(message_id) = bind
+                .context
+                .as_ref()
+                .and_then(|context| context.original.as_ref())
+                .and_then(|original| original["message_id"].as_u64())
+            else {
+                continue;
+            };
+            if let Some(origin) = origin_of(bind) {
+                let origins = removed.entry(message_id).or_default();
+                if !origins.contains(&origin) {
+                    origins.push(origin);
+                }
+            }
+        }
+        for (message_id, origins) in removed {
+            self.owe(message_id, origins, outcome, at_ms);
+        }
+    }
+
     fn owe(&mut self, message_id: u64, origins: Vec<String>, outcome: TerminalOutcome, at: u64) {
         let owed = (self.owed_drop_receipts.iter()).any(|o| o.message_id == message_id);
         if origins.is_empty() || owed {

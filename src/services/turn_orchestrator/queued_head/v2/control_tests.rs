@@ -219,11 +219,15 @@ fn v2_queue_arms_reach_the_owner_or_refuse_without_a_v1_writer() {
             .map(|id| id.get())
             .collect();
         discarded.sort_unstable();
-        assert_eq!(discarded, [200, 400], "only untried items are discarded");
+        assert_eq!(
+            discarded,
+            [100, 200, 400],
+            "the attempted head is discarded too"
+        );
         assert!(cleared.persistence.failed.is_empty());
         let after = single_writer(&handle, &path, "clear").await;
-        assert_eq!(ids(&after), [100]);
-        assert!(held(&after), "the attempted head stays in custody");
+        assert!(ids(&after).is_empty());
+        assert!(after["head_injection"].is_null());
         let bytes = std::fs::read_to_string(&path).unwrap();
         assert!(matches!(
             compat::inspect(&bytes),
@@ -332,7 +336,7 @@ fn a_v2_clear_still_releases_the_running_turn_when_asked() {
             "the running turn is released"
         );
         assert!(handle.snapshot().await.cancel_token.is_none());
-        assert_eq!(ids(&single_writer(&handle, &path, "clear").await), [100]);
+        assert!(ids(&single_writer(&handle, &path, "clear").await).is_empty());
         assert!(
             finished(&signal).await,
             "a waiter that subscribes after the clear still wakes"
@@ -341,6 +345,10 @@ fn a_v2_clear_still_releases_the_running_turn_when_asked() {
         let (kept, _, signal) = running(&registry, 7_272_405, false).await;
         let waiting = kept.discard_waiting_or_refused(ctx()).await.unwrap();
         assert!(waiting.removed_token.is_none());
+        assert!(kept.snapshot().await.cancel_token.is_some());
+        let emptied = v2(&kept).await;
+        assert!(ids(&emptied).is_empty());
+        assert!(emptied["head_injection"].is_null());
         assert!(
             !finished(&signal).await,
             "a clear that keeps the turn signals nothing"
@@ -353,6 +361,137 @@ fn a_v2_clear_still_releases_the_running_turn_when_asked() {
         assert!(
             finished(&signal).await,
             "a released turn signals even when the queue did not publish"
+        );
+    });
+}
+
+#[test]
+fn v2_clear_preserves_delivery_history_and_accepts_the_next_ticket() {
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let (handle, path) = seeded(&registry, 7_272_407, &[]).await;
+        let stale = handle
+            .v2_request(|slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                owner.settle(&owner.active_attempt()?, true, 1)?;
+                let mut stale = Vec::new();
+                for id in [101, 201, 301, 401] {
+                    let ticket = Ticket::new(&format!("clear-{id}"))?;
+                    Custody::with_ticket(&item(id), ticket)
+                        .advance(owner)
+                        .map_err(String::from)?;
+                    if id == 401 {
+                        continue;
+                    }
+                    let payload = PreparedPayload {
+                        frame: "frame".into(),
+                        digest: "digest".into(),
+                        attribution: json!({}),
+                        followers: Vec::new(),
+                    };
+                    let key = owner.reserve(attempt(id), payload)?;
+                    drop(owner.arm(&key, 2)?);
+                    if id == 101 {
+                        owner.settle(&key, true, 3)?;
+                    } else {
+                        if id == 201 {
+                            owner.tick(owner.settle_due().ok_or("no settlement due")?)?;
+                        }
+                        stale.push(key);
+                    }
+                }
+                Ok(stale)
+            })
+            .await
+            .unwrap();
+        let before = single_writer(&handle, &path, "before clear").await;
+        assert_eq!(before["retained_inputs"].as_array().unwrap().len(), 1);
+        assert!(!before["head_injection"].is_null());
+
+        let cleared = handle.clear(ctx()).await;
+
+        assert!(cleared.persistence.failed.is_empty());
+        assert!(!cleared.persistence.count_unknown);
+        let mut discarded: Vec<_> = cleared
+            .discarded_message_ids
+            .iter()
+            .map(|id| id.get())
+            .collect();
+        discarded.sort_unstable();
+        assert_eq!(discarded, [201, 301, 401]);
+        let after = single_writer(&handle, &path, "after clear").await;
+        assert!(ids(&after).is_empty());
+        assert_eq!(after["retained_inputs"], json!([]));
+        assert!(after["head_injection"].is_null());
+        for field in [
+            "admission_sequence",
+            "admission_receipts",
+            "terminal_identities",
+        ] {
+            assert_eq!(
+                after[field], before[field],
+                "{field}: delivered history stays"
+            );
+        }
+        let settled: Vec<_> = before["admission_binds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|bind| bind["at"]["kind"] == "settled")
+            .cloned()
+            .collect();
+        assert!(!settled.is_empty());
+        assert_eq!(after["admission_binds"], json!(settled));
+        handle
+            .v2_request(move |slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                for key in stale {
+                    assert!(
+                        owner.settle(&key, true, 4).is_err(),
+                        "a late callback is stale"
+                    );
+                }
+                let done = Ticket::new("clear-101")?;
+                assert_eq!(
+                    Custody::with_ticket(&item(101), done).advance(owner),
+                    Ok(Admitted::Duplicate)
+                );
+                let replay = Ticket::new("clear-delivered-again")?;
+                assert_eq!(
+                    Custody::with_ticket(&item(101), replay).advance(owner),
+                    Err(AdmitError::SourceAlreadyKnown)
+                );
+                let fresh = Ticket::new("clear-fresh")?;
+                assert_eq!(
+                    Custody::with_ticket(&item(501), fresh).advance(owner),
+                    Ok(Admitted::Queued)
+                );
+                let payload = PreparedPayload {
+                    frame: "fresh".into(),
+                    digest: "fresh".into(),
+                    attribution: json!({}),
+                    followers: Vec::new(),
+                };
+                let key = owner.reserve(attempt(501), payload)?;
+                drop(owner.arm(&key, 5)?);
+                owner.settle(&key, true, 6)
+            })
+            .await
+            .unwrap();
+        let fresh = single_writer(&handle, &path, "fresh delivery").await;
+        assert!(ids(&fresh).is_empty());
+        assert_eq!(fresh["retained_inputs"], json!([]));
+        assert_eq!(
+            fresh["admission_sequence"].as_u64(),
+            after["admission_sequence"].as_u64().map(|n| n + 1)
+        );
+        assert!(
+            fresh["terminal_identities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|terminal| terminal["identity"]["primary"] == 501)
         );
     });
 }

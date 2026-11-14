@@ -114,6 +114,99 @@ async fn removed_origins_are_owed_by_the_removing_commit_until_acked() {
     assert!(on_disk(&path).get("owed_drop_receipts").is_none());
 }
 
+#[tokio::test]
+async fn a_clear_owes_an_opaque_admission_before_removing_its_retained_original() {
+    let _root = TestRuntimeRootGuard::new();
+    let (registry, channel) = (ChannelMailboxRegistry::default(), 7_340_308);
+    let (handle, path) = owner(&registry, channel).await;
+    admit(&handle, channel, 81, None).await;
+    let mut opaque = original(channel, 82);
+    opaque.source_message_ids = vec![81, 82];
+    let admitted = handle
+        .v2_admit_ticket_with_context(opaque, "opaque-82".into(), provenance(Some("o-82")))
+        .await
+        .unwrap();
+    assert!(matches!(
+        admitted,
+        super::super::source_admission::Admitted::RetainedOpaque
+    ));
+    let before = on_disk(&path);
+    assert_eq!(before["retained_inputs"].as_array().unwrap().len(), 1);
+    assert_eq!(waiting(channel, "o-82"), Some(Waiting::Accepted));
+
+    let cleared = handle.clear(ctx()).await;
+    assert!(cleared.persistence.failed.is_empty());
+    assert!(!cleared.persistence.count_unknown);
+    let after = on_disk(&path);
+    assert!(after["items"].as_array().unwrap().is_empty());
+    assert!(after["retained_inputs"].as_array().unwrap().is_empty());
+    assert_eq!(
+        owed(&after),
+        [(82, "\"o-82\"".into(), "\"cancelled\"".into())]
+    );
+    let Some(Waiting::Owed(receipt)) = waiting(channel, "o-82") else {
+        panic!("the cleared opaque origin must keep its cancelled receipt");
+    };
+    assert_eq!(receipt.message_id, 82);
+    assert_eq!(receipt.outcome, TerminalOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn a_preserving_clear_keeps_the_running_origins_receipt_unsettled() {
+    let _root = TestRuntimeRootGuard::new();
+    let (registry, channel) = (ChannelMailboxRegistry::default(), 7_340_309);
+    let handle = registry.handle(ChannelId::new(channel));
+    let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+    assert!(
+        handle
+            .try_start_turn(
+                token.clone(),
+                poise::serenity_prelude::UserId::new(1),
+                MessageId::new(91),
+            )
+            .await
+    );
+    let (handle, path) = owner(&registry, channel).await;
+    admit(&handle, channel, 91, Some("o-running")).await;
+    admit(&handle, channel, 92, Some("o-waiting")).await;
+    handle
+        .v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let key = owner.reserve(
+                attempt("nonce-running"),
+                PreparedPayload {
+                    frame: "frame".into(),
+                    digest: "digest".into(),
+                    attribution: json!({}),
+                    followers: Vec::new(),
+                },
+            )?;
+            drop(owner.arm(&key, 0)?);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let cleared = handle.discard_waiting_or_refused(ctx()).await.unwrap();
+    assert!(cleared.persistence.failed.is_empty());
+    assert!(!cleared.persistence.count_unknown);
+    assert!(cleared.removed_token.is_none());
+    assert_eq!(cleared.discarded_message_ids, [MessageId::new(92)]);
+    assert!(std::sync::Arc::ptr_eq(
+        handle.snapshot().await.cancel_token.as_ref().unwrap(),
+        &token
+    ));
+    let after = on_disk(&path);
+    assert!(after["items"].as_array().unwrap().is_empty());
+    assert!(after["head_injection"].is_null());
+    assert!(after["retained_inputs"].as_array().unwrap().is_empty());
+    assert_eq!(
+        owed(&after),
+        [(92, "\"o-waiting\"".into(), "\"cancelled\"".into())]
+    );
+    assert_eq!(waiting(channel, "o-running"), None);
+}
+
 fn attempt(nonce: &str) -> AttemptIdentity {
     AttemptIdentity {
         nonce: nonce.into(),
