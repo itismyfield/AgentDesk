@@ -905,9 +905,9 @@ prefixLease∈{0,1}은 caller의 기존 scoped actor 소유 유무다. 영속 fl
 | `clear_channel.rs::clear_channel_state` | 지원하지 않는 parsed snapshot 거절 → Release native admission → 기존 V2 owner 위임 → V1 fallback. 읽기/parse 실패의 기존 Clear 대체 동작은 넓히지 않는다. |
 | `clear_channel.rs::clear_and_signal` | `queue_read_only` / `native_input` 거절은 완료 signal을 latch하지 않는다. |
 | `clear_channel.rs::ClearPersistence::attempt` | `pub(super)` visibility로 V2 clear의 기존 marker 제거 재시도를 공유한다. |
-| `queued_head/v2/control.rs::route` | 병합이 남긴 owner-present native precheck가 공통 snapshot guard보다 먼저 실행된다. native write 허용 + unsupported snapshot이면 공통 거절 전 intent가 저장되는 조합 반례다. 이 actor precheck의 이동/삭제는 별도 파일 범위 결정 대상이다. |
+| `queued_head/v2/control.rs::route` | mac-0659 승인으로 owner-present native precheck를 삭제했다. Clear는 공통 snapshot 거절 → native admission → V2 owner 위임 순서를 사용한다. |
 | `queued_head/v2/clear.rs::Owner::clear_all` | 기존 Release 대기 receipt/bind 유지, Preserve 대기 이력 제거·보호 attempt만 유지 계약을 변경하지 않는다. |
 
 `NativePreparationClearOwner*` / `ClearReadOnly*`는 공통 Clear 조합을,
 `NativePreparationClearRoute*`는 actor의 앞선 precheck를 별도로 모델링한다.
-RouteFixed는 제안한 순서의 모델이며 production 적용을 주장하지 않는다.
+RouteBefore는 삭제 전 반례이며 RouteFixed가 mac-0659에서 승인한 production 순서다.
