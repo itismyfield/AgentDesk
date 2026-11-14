@@ -17,7 +17,7 @@ Actual checker: Java21 + TLC1.7.4, repository `scripts/ci/statecharts_tlc.py`, 2
 | `AfterHumanDraft` | GREEN | GREEN | — | 3 |
 | `AfterJournalOnly` | GREEN | GREEN | — | 5 |
 | `AfterPaneReplacement` | GREEN | GREEN | — | 5 |
-| `AfterPersistentClose` | GREEN | GREEN | — | 3 |
+| `AfterPersistentClose` (superseded contract: NoRetained no longer checked, see [HerdrHandoffHeld](herdr-handoff-held.report.md)) | GREEN | GREEN | — | 3 |
 | `AfterReceiptGapCrash` | GREEN | GREEN | — | 5 |
 | `AfterSecondComposer` | GREEN | GREEN | — | 5 |
 | `AfterServerReplacement` | GREEN | GREEN | — | 5 |
@@ -37,7 +37,7 @@ Actual checker: Java21 + TLC1.7.4, repository `scripts/ci/statecharts_tlc.py`, 2
 | `StaleIntake` | RED | RED (expected) | NoOldKeys | 6 |
 | `UntypedHeld` | RED | RED (expected) | NoRetained | 6 |
 
-Only BeforeEffectCrash changed result: former progress RED becomes GREEN under the accepted terminal retention contract. Its NoRetained is explicitly crash-free; it is not a proof that Bootstrap crashes avoid main retention. Other cfg result/violation sets are unchanged. BeforeUnread and UntypedHeld remain RED for a crash-free retained leak. Persistent close failure checks custody/retry/old keys with no successful-close fairness. BlockedComposerBoundary remains progress RED because slice A preserves the screen gate. ReplayUnknown still detects duplicate execution; no Unknown replay is added.
+Only BeforeEffectCrash changed result: former progress RED becomes GREEN under the accepted terminal retention contract. Its NoRetained is explicitly crash-free; it is not a proof that Bootstrap crashes avoid main retention. Other cfg result/violation sets are unchanged. BeforeUnread and UntypedHeld remain RED for a crash-free retained leak. Persistent close failure checks custody/retry/old keys with no successful-close fairness; its no-retention rule is superseded by HerdrHandoffHeldPersistentClose, which retains the original once the handoff budget is spent. BlockedComposerBoundary remains progress RED because slice A preserves the screen gate. ReplayUnknown still detects duplicate execution; no Unknown replay is added.
 
 Run command:
 

@@ -1,14 +1,20 @@
 stateDiagram-v2
-    [*] --> Journal: restored unfinished_handoff, front queued
-    Journal --> Dropped: channel left Herdr AND old pane ended / drop journal, keep front
+    [*] --> Journal: unfinished_handoff, an input leads the queue
+    Journal --> Dropped: channel left Herdr AND (old pane ended OR original gone) / drop journal
     Dropped --> Submitted: ordinary path reserves the front once
-    Journal --> Backoff: channel left Herdr unended, or mapped host refuses an ended journal / persist failures + deadline
+    Journal --> Backoff: a refusal no later look clears / the front's count + deadline
     Backoff --> Journal: 2,4,8,16 seconds / timer wake
-    Journal --> Retained: fifth counted hold / original + notice intent, journal released
-    Retained --> NextHead: next front takes the ordinary path
-    Journal --> Custody: mapped host refuses, old pane standing / count as a close failure
-    Custody --> Journal: backoff up to 32 seconds
-    Journal --> Closing: mapped channel, Herdr host / close old pane first
-    Closing --> Submitted: ended journal consumed by one Herdr reserve
+    Journal --> Closing: mapped channel, Herdr host / any front continues the pinned close
+    Closing --> Backoff: close failed / the front's count, drive timer
+    Closing --> Ended: old pane confirmed ended
+    Ended --> Submitted: front of the journal's session / one Herdr reserve consumes the journal
+    Ended --> Finished: front of another session, original gone / finish journal
+    Finished --> Submitted: the front reserves on its own target
+    Backoff --> Retained: fifth counted hold / original + notice intent in one commit
+    Retained --> Custody: journal unended / id and pin kept, budget emptied, no timer
+    Retained --> NextHead: journal ended or channel left Herdr / journal dropped
+    Custody --> Journal: next input leads / it spends its own budget
+    Journal --> Custody: cancel or cancel-all removes the inputs / budget emptied
+    Custody --> [*]: session reset gives the custody up
     Submitted --> [*]
     NextHead --> [*]: deduplicated visible failure notice
