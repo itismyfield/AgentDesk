@@ -889,7 +889,7 @@ Control marker의 값은 위 코드에서만 가져온다: `any_key/not_sent` �
 | 코드 접점 | 모델 행동/값의 근거 |
 |---|---|
 | `shadow/capture.rs::hash_prefix_into`, `SourceCapture::reopen_with_prefix` | PrefixHashPass. 기존 FD/read 범위0..through 및 trailing guard, SourceId/저장 hash 검증. 추가 reader/open/read loop 없음 |
-| `writer/input_facts/native.rs::Projection::reopen`, `Decoder::write` | Absent→Ready/Unavailable. bytes는 단일 hash pass에서만 받고 incomplete coverage/record를 거절. 새 seed의 생성자는 이 reopen뿐 |
+| `writer/input_facts/native.rs::Projection::reopen`, `Decoder::prefix_bytes` | Absent→Ready/Unavailable. bytes는 단일 hash pass에서만 받고 incomplete coverage/record를 거절. 새 seed의 생성자는 이 reopen뿐 |
 | 같은 파일 `Projection::evidence`, `reduce` | PrefixTicketChange. namespace/full ticket/source/receipt를 같은 source facts에 적용. source I/O·result/lease mutation0 |
 | `NativeInputPreparation`/`NativeInputAttribution`의 PrefixScopeClose | 조각3b caller 합성 전제: 첫 key 이전 반환 뒤 기존 unstarted scope unwind. 3a 함수 자체의 lease 해제로 주장하지 않음 |
 
