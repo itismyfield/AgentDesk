@@ -366,3 +366,7 @@ impl TurnFinalizer {
         rx.await.unwrap_or(false)
     }
 }
+
+#[cfg(test)]
+#[path = "native_restore_gc_tests.rs"]
+mod gc_tests;

@@ -358,6 +358,7 @@ pub(super) async fn reconcile(
     // still waits to confirm a Codex channel's turn mode.
     ledger.retain(|_, entry| {
         !(entry.phase == Phase::Finalized
+            && !entry.native_debt_pending()
             && entry
                 .finalized_at
                 .is_some_and(|t| now.duration_since(t) >= COMPLETION_ADMISSION_TTL)

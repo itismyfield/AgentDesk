@@ -91,6 +91,23 @@ impl Drop for Handle {
 }
 
 impl TurnFinalizer {
+    pub(in crate::services::discord) async fn native_settled(
+        &self,
+        key: TurnKey,
+        actor: &CancelToken,
+    ) -> Result<bool, String> {
+        let (ack, rx) = oneshot::channel();
+        self.tx
+            .send(FinalizeMsg::NativeSettled {
+                key,
+                actor: actor as *const CancelToken as usize,
+                ack,
+            })
+            .map_err(|_| "native settlement actor unavailable")?;
+        rx.await
+            .map_err(|_| "native settlement acknowledgement lost".into())
+    }
+
     pub(in crate::services::discord) async fn native_scope(
         &self,
         key: TurnKey,
@@ -195,6 +212,18 @@ pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, Led
             })();
             let _ = ack.send(result);
         }
+        FinalizeMsg::NativeSettled { key, actor, ack } => {
+            let settled = ledger.get(&key.exact_key()).is_some_and(|entry| {
+                entry.phase == Phase::Finalized
+                    && entry.completion_admission.native_input == Some(true)
+                    && !entry.native_debt_pending()
+                    && entry
+                        .native_inputs
+                        .values()
+                        .any(|input| input.owns_bridge(key, actor))
+            });
+            let _ = ack.send(settled);
+        }
         FinalizeMsg::NativeScope { key, actor, ack } => {
             let owned = ledger.get(&key.exact_key()).is_some_and(|entry| {
                 entry
@@ -206,4 +235,11 @@ pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, Led
         }
         _ => unreachable!("native custody dispatcher received another message"),
     }
+}
+
+pub(super) fn boot_pending(entry: &LedgerEntry) -> bool {
+    entry
+        .native_boot_inputs
+        .values()
+        .any(|input| !input.settled)
 }

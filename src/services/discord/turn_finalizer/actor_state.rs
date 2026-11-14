@@ -77,6 +77,14 @@ pub(super) struct LedgerEntry {
 }
 
 impl LedgerEntry {
+    pub(super) fn native_debt_pending(&self) -> bool {
+        #[cfg(unix)]
+        return self.completion_admission.native_input == Some(false)
+            || super::native_prepare::boot_pending(self);
+        #[cfg(not(unix))]
+        false
+    }
+
     /// A fresh `Pending` entry, from `register_start` or a terminal that arrived first.
     pub(super) fn registered(
         key: TurnKey,
@@ -148,6 +156,12 @@ pub(super) enum FinalizeMsg {
     },
     #[cfg(unix)]
     NativeScope {
+        key: TurnKey,
+        actor: usize,
+        ack: oneshot::Sender<bool>,
+    },
+    #[cfg(unix)]
+    NativeSettled {
         key: TurnKey,
         actor: usize,
         ack: oneshot::Sender<bool>,

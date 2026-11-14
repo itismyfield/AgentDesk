@@ -1615,3 +1615,129 @@ async fn native_8148_s2_blocked_pg_does_not_hold_finalizer_actor() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_8148_p2_transfer_ledger_settlement_is_a_neutral_bridge_exit() {
+    use super::super::super::{inflight, turn_bridge::native_input};
+    use super::super::native_prepare::Handle;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::at(runtime.path().join("runtime/frames.json"), 81489951, true);
+    let shared = b2b_shared(None);
+    let (key, actor) = b2b_active(&f, &shared).await;
+    let row = b2b_row(&f);
+    shared.turn_finalizer.register_start(
+        key,
+        ProviderKind::Claude,
+        super::super::RelayOwnerKind::None,
+        &shared,
+    );
+    let handle = Handle::prepare(
+        &shared,
+        key,
+        Some(actor.clone()),
+        f.history.clone(),
+        "native-fixture".into(),
+        f.ticket.clone(),
+    )
+    .await
+    .unwrap();
+    let prepared = NativePrepared::capture(
+        &f.history,
+        "native-fixture",
+        f.ticket.clone(),
+        key,
+        Some(actor.clone()),
+        &shared,
+    )
+    .await
+    .unwrap();
+    prepared.any_key(&f.history).unwrap();
+    let batch = b2b_batch(&f);
+    let cleanup = prepared
+        .admit(
+            &batch,
+            &batch,
+            0,
+            &f.ticket.source.as_ref().unwrap().target,
+            &f.history,
+            &shared,
+        )
+        .await
+        .unwrap();
+    let successor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+        "next-episode".into(),
+    )));
+    shared
+        .mailbox(key.channel_id)
+        .restore_active_turn(
+            successor.clone(),
+            serenity::model::id::UserId::new(7),
+            serenity::model::id::MessageId::new(key.user_msg_id + 7),
+        )
+        .await;
+    shared
+        .restart
+        .global_active
+        .store(77, std::sync::atomic::Ordering::SeqCst);
+    let mut next = row.clone();
+    next.user_msg_id = key.user_msg_id + 7;
+    next.turn_nonce = Some("next-episode".into());
+    next.hosted_execution_nonce = Some("next-runtime".into());
+    let path = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Claude,
+        row.channel_id,
+    );
+    let bytes = serde_json::to_vec(&next).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let mut events =
+        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+    assert!(b2b_submit(&shared, cleanup, &f.history).await.unwrap());
+    assert!(!actor.is_completion_cleanup());
+    assert_eq!(
+        native_input::state(&shared, &ProviderKind::Claude, &row, &actor).await,
+        native_input::State::Settled
+    );
+    assert_eq!(
+        native_input::state(&shared, &ProviderKind::Claude, &row, &successor).await,
+        native_input::State::Legacy
+    );
+    for mut body in [
+        "external-after-close-1".to_string(),
+        "external-after-close-2".into(),
+        "external-after-close-3".into(),
+    ] {
+        assert!(
+            native_input::reject_legacy_body(
+                &shared,
+                &ProviderKind::Claude,
+                &row,
+                &actor,
+                &mut body
+            )
+            .await
+        );
+        assert!(body.is_empty());
+    }
+    assert!(native_input::neutral_exit(&shared, &ProviderKind::Claude, &row, &actor).await);
+    assert!(Arc::ptr_eq(
+        shared
+            .mailbox(key.channel_id)
+            .snapshot()
+            .await
+            .cancel_token
+            .as_ref()
+            .unwrap(),
+        &successor
+    ));
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    assert_eq!(
+        shared
+            .restart
+            .global_active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        77
+    );
+    assert!(events.try_recv().is_err());
+    drop(handle);
+}

@@ -8,7 +8,8 @@ stateDiagram-v2
     Result --> Transferred: durable result, no own lease, successor row proven
     Result --> TransferUnreadable: no own lease, row proof unreadable
     TransferUnreadable --> Result: repair proof, retain successor and debt
-    Transferred --> [*]: close debt, no row delete or wake
+    Transferred --> Neutral: exact key/actor ledger settled, no successor mutation
+    Neutral --> [*]: no row delete or wake
     Released --> Pending: row unreadable / changed / CAS miss
     Pending --> Released: repair and resubmit same durable result
     Released --> RowGone: exact snapshot CAS or proven absence
@@ -24,6 +25,7 @@ stateDiagram-v2
         BootPrepare --> BootAdopted: full registration + saved proof validated
         BootAdopted --> BootReaped: existing custody prepare then reaper
         BootReaped --> BootPending: outcome absent (no fabrication)
+        BootPending --> BootPending: generic terminal / GC preserves unsettled debt
         BootReaped --> BootRegistered: saved outcome / actor-local barrier
         BootRegistered --> BootSettle: notice enqueue outside actor
         BootSettle --> BootHeld: exact authority or terminal custody failed

@@ -518,3 +518,7 @@ input-single-path/NativeAttributionCustodyReceiptBefore.cfg	NativeInputAttributi
 input-single-path/NativeAttributionCustodyReceiptFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionCustodySourceBefore.cfg	NativeInputAttribution	-	NativeBootEventuallyDone
 input-single-path/NativeAttributionCustodySourceFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionNeutralTransferBefore.cfg	NativeInputAttribution	-	NativePortEventuallyDone
+input-single-path/NativeAttributionBootGcBefore.cfg	NativeInputAttribution	NativeBootNoFabrication,NativeBootPendingPreserved	-
+input-single-path/NativeAttributionNeutralTransferFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionBootGcFixed.cfg	NativeInputAttribution	-	-

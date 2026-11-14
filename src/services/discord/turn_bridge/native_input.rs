@@ -32,7 +32,13 @@ pub(in crate::services::discord) async fn state(
         .with_episode_nonce(row.turn_nonce.as_deref());
         match shared.turn_finalizer.native_scope(key, token).await {
             Ok(true) => {
-                return if token.is_completion_cleanup() {
+                return if token.is_completion_cleanup()
+                    || shared
+                        .turn_finalizer
+                        .native_settled(key, token)
+                        .await
+                        .unwrap_or(false)
+                {
                     State::Settled
                 } else {
                     State::Pending

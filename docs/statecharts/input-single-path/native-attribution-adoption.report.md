@@ -17,4 +17,20 @@ NativeInputAttribution의 기존 boot 소비 전이에 receipt 보존과 source 
 | CustodyReceiptBefore/Fixed | A cleanup 뒤 receipt가 없어 동일 frame B head가 진행하지 못함: NativeBootEventuallyDone | 실제 receipt 사실을 보존하여 B 진행 |
 | CustodySourceBefore/Fixed | 정상 None/Some 기록을 재채택할 때 충돌을 계속 재현: NativeBootEventuallyDone | 기대값을 만족하는 단조 source 채택 후 진행 |
 
-review.preserved는 현재 native facts 보존, known은 source/registration 채택을 추상화한다. UUID·namespace·full key·entry identity·범용 append의 충돌은 Rust fixture가 검증한다. 원래 결과 없는 PendingFixed에 종료를 요구하지 않으며, 시간으로 원본을 완료하지 않는다. control5종의 권한 commit/bridge/GC 확장은 별도 범위이며 이 표의 GREEN을 그 구현 증거로 쓰지 않는다.
+review.preserved는 현재 native facts 보존, known은 source/registration 채택을 추상화한다. UUID·namespace·full key·entry identity·범용 append의 충돌은 Rust fixture가 검증한다. 원래 결과 없는 PendingFixed에 종료를 요구하지 않으며, 시간으로 원본을 완료하지 않는다. control5종의 권한 commit은 아직 구현하지 않았다. 아래의 bridge/GC 계약은 별도로 검증하며 그 GREEN을 control 구현 증거로 쓰지 않는다.
+
+
+## 승계 종결과 GC 보존 경계
+
+`NativeSettled`는 exact TurnKey와 캡처한 actor 주소가 같은 ledger의 native registration에 속하는지 확인한다. native barrier가 종결되고 phase가 Finalized이며 미결 boot debt가 없을 때만 true다. bridge는 기존 completion-cleanup 토큰 또는 이 조회의 true를 Settled로 받는다. successor에게 권한을 넘긴 경우 토큰의 cleanup 플래그를 조작하지 않으며 successor lease·row·global_active·queue wake를 바꾸지 않는다. 불일치·actor 부재·조회 오류는 기존 Pending/Legacy 분류를 유지한다. 외부 턴의 body를 앞 episode 결과에 합치지 않는 기존 거절 경로를 사용한다.
+
+GC는 native barrier가 미결이거나 boot input이 아직 settled가 아니면 일반 Finalized 표시와 TTL만으로 entry를 지우지 않는다. 시간은 GC 기존 조건으로만 남으며 native result나 cleanup을 합성하지 않는다. 단순 admission bool이 true여도 실제 boot debt가 남으면 보존한다. 일반 native debt가 없는 finalized entry의 기존 GC는 유지한다.
+
+| cfg | 수정 전 | 수정 후 |
+|---|---|---|
+| NeutralTransferBefore/Fixed | 승계 종결 후 토큰 cleanup만 기다리는 bridge: NativePortEventuallyDone 위반 | exact ledger 종결로 중립 종료, successor 보존 |
+| BootGcBefore/Fixed | 일반 terminal+GC가 미결 boot debt를 지움: NativeBootNoFabrication·NativeBootPendingPreserved 위반 | debt 보존, 결과 없는 입력의 성공/철회 합성 0 |
+
+GC fixture는 실제 boot prepare→restore→reconcile→BootReady 입구를 실행한다. bridge fixture는 native registration→typed admission→finalizer drive→bridge state/body/neutral_exit를 실행하며 successor row/lease/counter를 그대로 확인한다. Cancel/Terminate/clear/stop/operator release의 실제 경쟁 및 직접 row 삭제 custody 접점은 이번 단계에서 실행하지 않았다. 이 경로에는 승인할 nonblocking native control commit leaf가 더 필요하다. 운영 enabled=false는 유지한다. native idle WARN·observer replay·lost wake는 사용자 범위 축소로 제외한다.
+
+`native-attribution-b2b.chart.mmd`에 승계 후 exact ledger 중립 종료와 미결 boot debt GC 보존을 표시한다. 그림은 receipt event별 병합/직렬화와 source None→Some 입력 순서 조합을 숨기며, 해당 경계는 위 cfg 및 Rust fixture로 검증한다.

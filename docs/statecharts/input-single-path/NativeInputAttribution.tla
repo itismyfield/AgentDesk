@@ -11,8 +11,8 @@ vars == <<pc, native, members, nativeQueue, stage, lease, rows, pending,
           result, count, proof, closed, ran, injected, wake, booted,
           generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
 
-ConsumerModes == {"CustodyReceiptBefore", "CustodyReceiptFixed", "CustodySourceBefore", "CustodySourceFixed", "BootSavedBefore", "BootSavedFixed", "BootCustodyBefore", "BootCustodyFixed", "BootCorruptBefore", "BootCorruptFixed", "BootOldGenerationBefore", "BootOldGenerationFixed", "BootQueueBefore", "BootQueueFixed", "BootPendingFixed"}
-ReviewModes == ConsumerModes \cup {"FollowerBefore", "FollowerFixed", "BootBefore", "BootFixed",
+ConsumerModes == {"BootGcBefore", "BootGcFixed", "CustodyReceiptBefore", "CustodyReceiptFixed", "CustodySourceBefore", "CustodySourceFixed", "BootSavedBefore", "BootSavedFixed", "BootCustodyBefore", "BootCustodyFixed", "BootCorruptBefore", "BootCorruptFixed", "BootOldGenerationBefore", "BootOldGenerationFixed", "BootQueueBefore", "BootQueueFixed", "BootPendingFixed"}
+ReviewModes == ConsumerModes \cup {"NeutralTransferBefore", "NeutralTransferFixed", "FollowerBefore", "FollowerFixed", "BootBefore", "BootFixed",
                 "BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
                 "PreflightBefore", "PreflightFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable"}
 ReviewBoot == Mode \in {"BootBefore", "BootFixed", "BootFailureFixed", "BootIgnoreFailure"}
@@ -29,13 +29,13 @@ Init == /\ pc = 0 /\ native = "Idle" /\ members = {} /\ nativeQueue = <<>>
         /\ proofInc = [i \in Ids |-> 0] /\ replaced = FALSE /\ staleSeen = FALSE /\ outsideQueued = FALSE
         /\ review \in [phase : {IF ReviewBoot \/ Mode \in ConsumerModes THEN "Prepare" ELSE IF Mode \in ReviewModes THEN "Registered" ELSE "Dormant"},
              outcome : {"Executed", "Withdrawn"}, commits : {0, 1}, result : {"None", "Executed"},
-             row : {Mode \notin {"BootQueueBefore", "BootQueueFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable"}}, preserved : {FALSE}, prepared : {FALSE}, head : {FALSE},
+             row : {Mode \notin {"BootQueueBefore", "BootQueueFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable", "NeutralTransferBefore", "NeutralTransferFixed"}}, preserved : {FALSE}, prepared : {FALSE}, head : {FALSE},
              failed : {Mode \in {"BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
                 "PreflightBefore", "PreflightFixed", "TransferUnreadable", "TransferAbsentUnreadable", "BootCorruptBefore", "BootCorruptFixed"}}, notice : {0},
-             parentLease : {IF Mode \in ConsumerModes \/ Mode \in {"TransferAbsentBefore", "TransferAbsentFixed", "TransferAbsentUnreadable"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferUnreadable"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {Mode \in {"BootQueueBefore", "BootQueueFixed"}}, neutral : {FALSE}]
+             parentLease : {IF Mode \in ConsumerModes \/ Mode \in {"TransferAbsentBefore", "TransferAbsentFixed", "TransferAbsentUnreadable"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferUnreadable", "NeutralTransferBefore", "NeutralTransferFixed"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {Mode \in {"BootQueueBefore", "BootQueueFixed"}}, neutral : {FALSE}]
         /\ review.commits = IF review.result = "Executed" THEN 1 ELSE 0
         /\ (~ReviewBoot /\ Mode \notin ConsumerModes) => review.result = "None"
-        /\ Mode \in ConsumerModes => review.result = IF Mode = "BootPendingFixed" THEN "None" ELSE "Executed"
+        /\ Mode \in ConsumerModes => review.result = IF Mode \in {"BootPendingFixed", "BootGcBefore", "BootGcFixed"} THEN "None" ELSE "Executed"
         /\ Mode \notin ReviewModes => review.outcome = "Executed"
 
 ExternalEnqueue == /\ booted /\ pc = 0 /\ ~outsideQueued
@@ -330,6 +330,7 @@ PortTransferred == /\ review.phase = "Result" /\ review.parentLease \in {0, 2} /
                         !.parentRow = IF Mode = "TransferDeletes" THEN FALSE ELSE review.parentRow]
                    /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
 PortNeutral == /\ review.phase = "Done" /\ review.nativeAck /\ ~review.neutral
+               /\ Mode # "NeutralTransferBefore"
                /\ review' = [review EXCEPT !.neutral = TRUE]
                /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
 PortNext == PortRegister \/ PortResult \/ PortPreflight \/ PortRepair \/ PortRow \/ PortTransferred \/ PortNeutral
@@ -340,7 +341,7 @@ FailedPreflightKeepsLease == Mode \in {"PreflightBefore", "PreflightFixed"} => (
 NativeAckReadable == review.nativeAck => ~review.failed
 NativePortBarrier == review.head => review.result = "Executed" /\ ~review.row /\ review.nativeAck
 NativePortRegistered == review.result # "None" => review.prepared
-NativeTransferKeepsSuccessor == Mode \notin {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable"}
+NativeTransferKeepsSuccessor == Mode \notin {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable", "NeutralTransferBefore", "NeutralTransferFixed"}
                                 \/ (review.parentLease \in {0, 2} /\ review.parentRow /\ ~review.head)
 NativePortEventuallyDone == <>(review.phase = "Done" /\ review.neutral)
 
@@ -369,7 +370,18 @@ ConsumerOwnerDrive == /\ review.phase \in {"Reaped", "Consumed"} /\ review.nativ
                      /\ Mode # "BootQueueBefore"
                      /\ review' = [review EXCEPT !.phase = "Done", !.head = TRUE]
                      /\ UNCHANGED <<ConsumerStable, known>>
+ConsumerGenericTerminal == /\ Mode \in {"BootGcBefore", "BootGcFixed"}
+                           /\ review.phase = "Reaped" /\ review.result = "None"
+                           /\ review' = [review EXCEPT !.phase = "Finalized"]
+                           /\ UNCHANGED <<ConsumerStable, known>>
+ConsumerGc == /\ review.phase = "Finalized"
+              /\ (Mode = "BootGcBefore" \/ review.nativeAck)
+              /\ review' = [review EXCEPT !.phase = "Collected", !.nativeAck = TRUE]
+              /\ known' = FALSE
+              /\ UNCHANGED ConsumerStable
+NativeBootPendingPreserved == review.result = "None" => known
 ConsumerNext == ConsumerAdopt \/ ConsumerRepair \/ ConsumerReap \/ ConsumerSettle \/ ConsumerOwnerDrive
+                \/ ConsumerGenericTerminal \/ ConsumerGc
 ConsumerSpec == Init /\ [][ConsumerNext]_vars
                 /\ WF_vars(ConsumerAdopt) /\ WF_vars(ConsumerRepair) /\ WF_vars(ConsumerReap)
                 /\ WF_vars(ConsumerSettle) /\ WF_vars(ConsumerOwnerDrive)

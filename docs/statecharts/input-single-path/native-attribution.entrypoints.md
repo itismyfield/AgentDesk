@@ -856,3 +856,13 @@ PortTransferred는 durable 결과+내 lease 없음+foreign row의 조합에서 d
 | `NativeAttributionCustodySource{Before,Fixed}.cfg` | 건강한 None/Some copy 재채택 충돌/단조 채택; 기존 bool/전이만 재사용 |
 
 이 보강은 lease/row/global_active 변경점을 추가하지 않는다. control의 실제 mutation cut point에 넣을 nonblocking storage commit 포트는 파일 승인 전이며, 기존 `Registry::transaction`의 blocking mutex/flock을 actor에 연결하지 않았다.
+
+
+### 조각2 독립 보호 경계
+
+| 진입점 | 모델 행동 | 실제 범위 |
+|---|---|---|
+| `turn_bridge/native_input.rs::state` → `turn_finalizer/native_prepare.rs::native_settled` → `handle(NativeSettled)` | PortNeutral | exact key·captured actor의 승계 종결 조회. successor row/lease/global_active 변경·wake 없음 |
+| `turn_finalizer/reconcile.rs::reconcile` → `actor_state.rs::native_debt_pending` | ConsumerGc | 일반 phase/TTL만으로 미확정 boot debt 삭제 금지. 미결 barrier 또는 unsettled boot registration이 있으면 보존 |
+
+이 두 입구는 Cancel/Terminate/clear/stop/operator release 권한 commit과 직접 row 삭제 custody를 대체하지 않는다. 해당 control 입구는 기존 전수표대로 남으며 아직 native policy 연결을 하지 않았다. 운영 활성화는 false다.
