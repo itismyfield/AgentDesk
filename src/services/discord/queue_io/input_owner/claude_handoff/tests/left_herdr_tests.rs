@@ -80,7 +80,9 @@ impl Rig {
     /// Admits a routine, scheduled or HTTP start with the context its seam keeps.
     pub(super) async fn admit_kept(&self, id: u64, context: Value) {
         let (item, ticket) = (original(self.channel.get(), id), format!("kept-{id}"));
-        let admitted = self.mailbox.v2_admit_ticket_with_context(item, ticket, context);
+        let admitted = self
+            .mailbox
+            .v2_admit_ticket_with_context(item, ticket, context);
         assert!(admitted.await.is_ok(), "the kept start is admitted");
     }
     /// Opens the queue front's handoff journal, ended when its old pane is known closed.
@@ -207,21 +209,4 @@ async fn recovery_drops_an_ended_journal_on_a_channel_that_left_herdr() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("recovery kept the journal of a channel that left Herdr");
-}
-
-#[tokio::test]
-async fn unended_journal_whose_mapped_host_refuses_keeps_custody_and_backs_off() {
-    let _host = refuse_host(8_146_105);
-    let rig = rig(8_146_105, &[8_000_000_008_146_501], false).await;
-    for failures in 1..=6u64 {
-        assert_eq!(rig.hand().await.unwrap_err(), HELD);
-        assert_eq!(
-            rig.state().await["unfinished_handoff"]["failures"],
-            failures
-        );
-    }
-    let state = rig.state().await;
-    assert_eq!(state["items"].as_array().unwrap().len(), 1);
-    assert!(state["retained_inputs"].as_array().unwrap().is_empty());
-    assert!(rig.started.lock().unwrap().is_empty());
 }

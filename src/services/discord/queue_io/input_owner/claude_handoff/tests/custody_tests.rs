@@ -28,7 +28,10 @@ fn routine() -> Value {
         "run_id":"run","agent_id":"agent8146","execution_strategy":"persistent","is_dm":false}})
 }
 fn waiting(rig: &Rig, journal: &Value) -> bool {
-    let key = (rig.channel.get(), journal["id"].as_str().unwrap().to_string());
+    let key = (
+        rig.channel.get(),
+        journal["id"].as_str().unwrap().to_string(),
+    );
     WAITING.lock().unwrap().contains(&key)
 }
 /// Pins the journal's old pane, as a first close attempt does.
@@ -79,7 +82,9 @@ async fn cancel(rig: &Rig, message: u64) {
     let token = &rig.shared.token_hash;
     let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, token, None);
     let target = SingleSelection(MessageId::new(message));
-    let cancelled = rig.mailbox.cancel_queued_primary_message(target, persistence);
+    let cancelled = rig
+        .mailbox
+        .cancel_queued_primary_message(target, persistence);
     assert!(cancelled.await.removed.is_some());
 }
 
@@ -214,16 +219,19 @@ async fn scheduled_front_with_its_own_session_is_delivered_once_after_the_old_pa
     assert!(state.get("unfinished_handoff").is_none(), "{state}");
     // The start keeps the snapshot's own session, and the owner reserves it there.
     let build = crate::services::discord::adk_session::build_adk_session_key;
-    let key = build(&rig.shared, rig.channel, &ProviderKind::Claude, Some("snap-8146")).await;
+    let key = build(
+        &rig.shared,
+        rig.channel,
+        &ProviderKind::Claude,
+        Some("snap-8146"),
+    )
+    .await;
     let own = crate::services::discord::session_identity::SessionIdentity::parse(&key.unwrap());
     let own = own.unwrap().tmux_name;
     assert_ne!(own, "left");
     assert_eq!(reserve(&rig, &own).await, Ok(()));
     let state = rig.state().await;
-    assert_eq!(
-        state["head_injection"]["original"]["message_id"],
-        scheduled
-    );
+    assert_eq!(state["head_injection"]["original"]["message_id"], scheduled);
     assert_eq!(state["retained_inputs"].as_array().unwrap().len(), 1);
 }
 
@@ -285,7 +293,11 @@ async fn every_refusal_an_unended_journal_cannot_pass_spends_one_budget() {
     // A Bound row stands while the old pane is not known ended.
     let owner = hosted::tests::owner("8146117");
     let record = hosted::tests::record(&owner, "bound-nonce", HostedState::Bound);
-    let bound = force_host(8_146_117, KEY.into(), HostedObservation::known_fixture(record));
+    let bound = force_host(
+        8_146_117,
+        KEY.into(),
+        HostedObservation::known_fixture(record),
+    );
     refusal_spends_one_budget(8_146_117, bound, pin()).await;
     // The old pane's close keeps failing.
     let closing = herdr_host(8_146_118, KEY, true);
@@ -364,14 +376,20 @@ async fn a_reboot_mid_backoff_resumes_the_same_budget() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(waiting(&rig, &journal), "the saved deadline is awaited again");
+    assert!(
+        waiting(&rig, &journal),
+        "the saved deadline is awaited again"
+    );
     // A look before that deadline neither starts nor spends.
     assert_eq!(rig.hand().await.unwrap_err(), HELD);
     assert_eq!(rig.state().await["unfinished_handoff"], saved);
     for failures in 3..=4u64 {
         rig.expire().await;
         assert_eq!(rig.hand().await.unwrap_err(), HELD);
-        assert_eq!(rig.state().await["unfinished_handoff"]["failures"], failures);
+        assert_eq!(
+            rig.state().await["unfinished_handoff"]["failures"],
+            failures
+        );
     }
     rig.expire().await;
     assert_eq!(rig.hand().await.unwrap_err(), RETAINED);
@@ -390,8 +408,8 @@ async fn cancelling_every_waiting_input_keeps_an_unended_handoff() {
     let rig = rig(8_146_122, &[first, second], false).await;
     let journal = pinned(&rig, pin()).await;
     assert_eq!(rig.hand().await.unwrap_err(), HELD);
-    let cleared = (rig.mailbox)
-        .v2_request(|slot| Ok(slot.as_mut().unwrap().clear_waiting()?.queued.len()));
+    let cleared =
+        (rig.mailbox).v2_request(|slot| Ok(slot.as_mut().unwrap().clear_waiting()?.queued.len()));
     assert_eq!(cleared.await, Ok(2));
     let state = rig.state().await;
     assert!(state["items"].as_array().unwrap().is_empty());

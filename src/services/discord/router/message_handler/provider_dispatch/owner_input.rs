@@ -190,11 +190,20 @@ pub(in crate::services::discord) fn owner_drive(
                 }
                 return Err(WRITER_HELD.into());
             }
-            let origin = front_origin(&mailbox, &front).await?;
+            let kept = front_context(&mailbox, &front).await?;
+            let origin = InputOrigin::from_context(kept.as_ref());
             let synthetic = !origin.is_person();
-            if !synthetic
-                && claude_handoff::prepare(runtime.as_ref(), &mailbox, &provider, channel, &front)
+            // Only a person's input opens a handoff; every other start except an effort
+            // continuation is still judged under one that stands, by the session it runs under.
+            let start = match &kept {
+                Some(context) if synthetic => claude_handoff::Start::Kept(context),
+                _ => claude_handoff::Start::Person,
+            };
+            let shared = runtime.as_ref();
+            if origin != InputOrigin::EffortContinue
+                && claude_handoff::prepare(shared, &mailbox, &provider, channel, &front, start)
                     .await?
+                && !synthetic
             {
                 return idle(front).await;
             }
@@ -311,19 +320,27 @@ pub(in crate::services::discord) fn owner_drive(
     })
 }
 
-/// Reads the shared person policy from the exact front's kept context; read failures stay unsent.
-async fn front_origin(
+/// The context kept with the exact front; read failures stay unsent.
+async fn front_context(
     mailbox: &ChannelMailboxHandle,
     (ticket, original): &Front,
-) -> Result<InputOrigin, String> {
-    let context = match ticket {
+) -> Result<Option<serde_json::Value>, String> {
+    match ticket {
         Some(ticket) => {
             mailbox
                 .v2_admission_context(original.clone(), ticket.clone())
-                .await?
+                .await
         }
-        None => None,
-    };
+        None => Ok(None),
+    }
+}
+
+/// Reads the shared person policy from the exact front's kept context.
+async fn front_origin(
+    mailbox: &ChannelMailboxHandle,
+    front: &Front,
+) -> Result<InputOrigin, String> {
+    let context = front_context(mailbox, front).await?;
     Ok(InputOrigin::from_context(context.as_ref()))
 }
 

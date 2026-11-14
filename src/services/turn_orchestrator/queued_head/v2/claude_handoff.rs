@@ -4,6 +4,59 @@ use super::*;
 use super::ClaudeHandoffJournal as Journal;
 #[cfg(unix)]
 pub(crate) const MAX_START_FAILURES: u32 = 5;
+/// Why a front is held under a journal: how it waits, and what its last hold leaves of the journal.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Held {
+    /// The channel left Herdr: the retained front takes the journal with it.
+    Left,
+    /// A refusal no later look clears, behind a persisted deadline.
+    Refused,
+    /// A failed close of the old pane, retried on the drive's own timer.
+    Close,
+}
+impl Journal {
+    /// The budget `front` has spent; another front's count is never inherited.
+    #[cfg(unix)]
+    pub(super) fn spent(&self, front: &QueueIdentity) -> u32 {
+        let spender = self.spender.as_ref().unwrap_or(&self.original);
+        if spender == front { self.failures } else { 0 }
+    }
+    #[cfg(unix)]
+    fn charge(&mut self, front: QueueIdentity, failures: u32, retry_after_ms: u64) {
+        (self.failures, self.retry_after_ms) = (failures, retry_after_ms);
+        self.spender = (front != self.original).then_some(front);
+    }
+}
+impl SnapshotV2 {
+    /// The waiting inputs left unsent: an ended journal has nothing left to carry and goes; an
+    /// unended one still owes its old pane's end, and keeps its id and pin without a budget.
+    pub(super) fn handoff_fronts_left(&mut self) {
+        match &mut self.unfinished_handoff {
+            Some(journal) if !journal.ended => {
+                (journal.failures, journal.retry_after_ms, journal.spender) = (0, 0, None);
+            }
+            journal => *journal = None,
+        }
+    }
+    /// One input left unsent: only the journal's original or the front spending its budget
+    /// changes the journal, and an ended one goes only once its original is no longer queued.
+    pub(super) fn handoff_input_left(&mut self, gone: &QueueIdentity) {
+        let Some(journal) = &self.unfinished_handoff else {
+            return;
+        };
+        if journal.original != *gone && journal.spender.as_ref() != Some(gone) {
+            return;
+        }
+        let queued = (self.items.iter()).any(|item| sources::identity(item) == journal.original);
+        if journal.ended && queued {
+            let journal = self.unfinished_handoff.as_mut().expect("checked journal");
+            (journal.failures, journal.retry_after_ms, journal.spender) = (0, 0, None);
+        } else {
+            self.handoff_fronts_left();
+        }
+    }
+}
 impl Owner {
     pub(crate) fn handoff(&self) -> Option<Journal> {
         self.snapshot.unfinished_handoff.clone()
@@ -41,6 +94,7 @@ impl Owner {
             failures: 0,
             notice_acked: false,
             retry_after_ms: 0,
+            spender: None,
         };
         let mut next = self.snapshot.clone();
         next.unfinished_handoff = Some(journal.clone());
@@ -83,16 +137,6 @@ impl Owner {
         self.commit(next)?;
         Ok(true)
     }
-    pub(crate) fn handoff_failed(&mut self, id: &str) -> Result<Option<Journal>, String> {
-        let mut next = self.snapshot.clone();
-        let Some(journal) = next.unfinished_handoff.as_mut().filter(|j| j.id == id) else {
-            return Ok(None);
-        };
-        journal.failures = journal.failures.saturating_add(1);
-        let journal = journal.clone();
-        self.commit(next)?;
-        Ok(Some(journal))
-    }
     pub(crate) fn handoff_notice_acked(&mut self, id: &str) -> Result<(), String> {
         let mut next = self.snapshot.clone();
         if let Some(journal) = next.unfinished_handoff.as_mut().filter(|j| j.id == id) {
@@ -101,19 +145,19 @@ impl Owner {
         }
         Ok(())
     }
-    pub(crate) fn finish_handoff(&mut self, id: &str) -> Result<(), String> {
+    /// Drops the journal `id` once its original is no longer queued; whether no journal is left.
+    pub(crate) fn finish_handoff(&mut self, id: &str) -> Result<bool, String> {
         let mut next = self.snapshot.clone();
-        if next.unfinished_handoff.as_ref().is_some_and(|j| {
-            j.id == id
-                && !next
-                    .items
-                    .iter()
-                    .any(|item| sources::identity(item) == j.original)
-        }) {
-            next.unfinished_handoff = None;
-            self.commit(next)?;
+        let Some(journal) = &next.unfinished_handoff else {
+            return Ok(true);
+        };
+        let queued = (next.items.iter()).any(|item| sources::identity(item) == journal.original);
+        if journal.id != id || queued {
+            return Ok(false);
         }
-        Ok(())
+        next.unfinished_handoff = None;
+        self.commit(next)?;
+        Ok(true)
     }
     /// A channel that left Herdr keeps no journal whose old pane ended or whose original is gone.
     #[cfg(unix)]
@@ -130,42 +174,68 @@ impl Owner {
         self.commit(next)?;
         Ok(true)
     }
-    /// A hold the journal's own target caused spends the launch budget and its backoff; the last
-    /// one retains the granted front as a start failure, `None`, instead of holding it again.
+    /// Retains the granted front as an opaque start failure; `false` while its start budget lasts.
+    #[cfg(unix)]
+    fn retain_held(&mut self, front: &Front, detail: &str) -> Result<bool, String> {
+        if self.claim_turn(front.1.message_id, front).is_none() {
+            return Err("handoff front no longer granted".into());
+        }
+        let (number, member) = (self.claim_number, std::slice::from_ref(&front.1));
+        let kind = StartFailureKind::Opaque;
+        match self.start_failed(front, number, member, None, kind, detail) {
+            Ok(Some(retained)) => Ok(retained),
+            failed => {
+                self.revoke_front();
+                Err(failed.err().unwrap_or("handoff front not retained".into()))
+            }
+        }
+    }
+    /// A hold the journal's own target caused spends the front's budget; its last one retains the
+    /// granted front as a start failure, `None`, instead of holding it again.
     #[cfg(unix)]
     pub(crate) fn handoff_held(
         &mut self,
         front: &Front,
         id: &str,
+        how: Held,
     ) -> Result<Option<Journal>, String> {
         let Some(journal) = self.handoff().filter(|j| j.id == id) else {
             return Err("handoff journal changed".into());
         };
-        let failures = journal.failures.saturating_add(1);
+        let me = sources::identity(&front.1);
+        let failures = journal.spent(&me).saturating_add(1);
         if failures >= MAX_START_FAILURES {
-            if self.claim_turn(front.1.message_id, front).is_none() {
-                return Err("handoff front no longer granted".into());
+            if !self.retain_held(front, "claude_handoff_held")? {
+                return Err("handoff front not retained".into());
             }
-            let (number, member) = (self.claim_number, std::slice::from_ref(&front.1));
-            let kind = StartFailureKind::Opaque;
-            let retained =
-                self.start_failed(front, number, member, None, kind, "claude_handoff_held");
-            if !matches!(retained, Ok(Some(true))) {
-                self.revoke_front();
-                return Err(retained
-                    .err()
-                    .unwrap_or("handoff front not retained".into()));
+            if how == Held::Left {
+                // A failed drop is repeated by the next look of the channel.
+                self.abandon_handoff(id).ok();
             }
             return Ok(None);
         }
         self.hold_front(front)?;
         let mut next = self.snapshot.clone();
         let journal = next.unfinished_handoff.as_mut().expect("checked journal");
-        journal.failures = failures;
-        journal.retry_after_ms = origin::now_ms().saturating_add(1_000u64 << failures.min(5));
+        let wait = 1_000u64 << failures.min(5);
+        let deadline = match how {
+            Held::Close => 0,
+            _ => origin::now_ms().saturating_add(wait),
+        };
+        journal.charge(me, failures, deadline);
         let journal = journal.clone();
         self.commit(next)?;
         Ok(Some(journal))
+    }
+    /// A front no journal covers whose host cannot be judged spends the ordinary start budget:
+    /// held once, `false`, then retained.
+    #[cfg(unix)]
+    pub(crate) fn unjudged_held(&mut self, front: &Front) -> Result<bool, String> {
+        if self.retain_held(front, "claude_handoff_unjudged")? {
+            return Ok(true);
+        }
+        self.hold_front(front)?;
+        Ok(false)
     }
     /// Persist the retry budget before releasing a failed wrapper; exhaustion uses start_failed.
     #[cfg(unix)]
@@ -182,18 +252,16 @@ impl Owner {
         {
             return Ok(false);
         }
-        let failures = self
-            .handoff()
-            .expect("checked journal")
-            .failures
-            .saturating_add(1);
+        let me = sources::identity(&front.1);
+        let journal = self.handoff().expect("checked journal");
+        let failures = journal.spent(&me).saturating_add(1);
         if failures >= MAX_START_FAILURES {
             return Ok(false);
         }
         let mut next = self.snapshot.clone();
         let journal = next.unfinished_handoff.as_mut().expect("checked journal");
-        journal.failures = failures;
-        journal.retry_after_ms = origin::now_ms().saturating_add(1_000u64 << failures.min(5));
+        let deadline = origin::now_ms().saturating_add(1_000u64 << failures.min(5));
+        journal.charge(me, failures, deadline);
         self.commit(next)?;
         self.revoke_front();
         self.held = Some(front.1.message_id);
@@ -224,20 +292,21 @@ mod tests {
         owner.grant_front(&front).unwrap();
         (root_guard, dir, owner, front)
     }
+    #[cfg(unix)]
     #[test]
-    fn persistent_close_failure_keeps_one_original_and_no_retained() {
+    fn close_failures_within_the_budget_keep_one_original_and_no_retained() {
         let (root_guard, dir, mut owner, front) = queued();
         let journal = owner
             .begin_handoff(&front, "owned".into(), "claude/t/h:owned".into())
             .unwrap();
-        for _ in 0..6 {
-            owner.handoff_failed(&journal.id).unwrap();
-            owner.hold_front(&front).unwrap();
+        for _ in 0..4 {
+            let held = owner.handoff_held(&front, &journal.id, Held::Close);
+            assert_eq!(held.unwrap().unwrap().retry_after_ms, 0);
             owner.grant_front(&front).unwrap();
         }
         assert_eq!(owner.snapshot.items.len(), 1);
         assert!(owner.snapshot.retained_inputs.is_empty());
-        assert_eq!(owner.handoff().unwrap().failures, 6);
+        assert_eq!(owner.handoff().unwrap().failures, 4);
         assert!(!owner.handoff().unwrap().notice_acked);
         owner.handoff_notice_acked(&journal.id).unwrap();
         let restored = Owner::adopt(dir.path().join("queue.json"), "handoff".into()).unwrap();
@@ -366,9 +435,7 @@ mod tests {
             .begin_handoff(&front, "owned".into(), "key".into())
             .unwrap();
         owner.handoff_ended(&journal.id).unwrap();
-        for _ in 0..4 {
-            owner.handoff_failed(&journal.id).unwrap();
-        }
+        owner.snapshot.unfinished_handoff.as_mut().unwrap().failures = 4;
         owner.claim_turn(front.1.message_id, &front).unwrap();
         let number = owner.claim_number();
         assert!(!owner.handoff_start_failed(&front, number, None).unwrap());
@@ -405,6 +472,32 @@ mod tests {
         assert_eq!(restored.snapshot.retained_inputs.len(), 1);
         assert!(restored.snapshot.items.is_empty());
         assert!(restored.handoff().is_none());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_front_never_inherits_the_count_another_front_spent_on_an_ended_journal() {
+        let (_root, _dir, mut owner, front) = queued();
+        let journal = owner
+            .begin_handoff(&front, "owned".into(), "key".into())
+            .unwrap();
+        owner.handoff_ended(&journal.id).unwrap();
+        let mut following = front.1.clone();
+        following.message_id += 1;
+        following.source_message_ids = vec![following.message_id];
+        owner.enqueue_fixture(&following).unwrap();
+        for failures in 1..=3 {
+            let held = owner.handoff_held(&front, &journal.id, Held::Refused);
+            assert_eq!(held.unwrap().unwrap().failures, failures);
+            owner.grant_front(&front).unwrap();
+        }
+        // The first front completes locally and leaves the ended journal to the next one.
+        owner.claim_turn(front.1.message_id, &front).unwrap();
+        let number = owner.claim_number();
+        owner.complete_claimed_locally((&front, number), 0).unwrap();
+        let next = owner.front().unwrap();
+        owner.grant_front(&next).unwrap();
+        let held = owner.handoff_held(&next, &journal.id, Held::Refused);
+        assert_eq!(held.unwrap().unwrap().failures, 1);
     }
     #[test]
     fn bootstrap_crash_retains_the_original_once_without_an_unfinished_journal() {

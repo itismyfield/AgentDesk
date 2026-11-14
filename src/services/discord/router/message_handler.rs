@@ -292,6 +292,8 @@ pub(super) use self::attachments::{
     prepare_admitted_local_attachment, prepare_busy_inject_uploads, prepare_portable_attachments,
 };
 pub(super) use self::control::handle_text_command;
+#[cfg(unix)]
+pub(in crate::services::discord) use self::headless_turn::owner_start_session_key;
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::headless_turn::{
     start_headless_turn, start_reserved_headless_turn, start_reserved_headless_turn_with_owner,
