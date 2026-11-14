@@ -426,5 +426,11 @@ fn authenticated_pending_after_restart_needs_no_volatile_binding_and_sends_once(
     assert_eq!(sent.get(), 1);
     assert!(tui_prompt_dedupe::runtime_binding_for_tmux_session(&r.rig.session).is_none());
     super::forget_session(&r.rig.session);
-    r.closed(&native);
+    let sent = Cell::new(0);
+    let result = r.run(&native, &sent);
+    assert_eq!(sent.get(), 0, "no payload or Enter for a consumed clear");
+    assert!(
+        matches!(result, InputRun::Refused(InputRefusal::Unproven)),
+        "{result:?}"
+    );
 }
