@@ -650,6 +650,41 @@ async fn a_run_whose_turn_was_submitted_never_starts_a_second_turn_pg() {
     db.drop().await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn a_run_times_out_from_its_actual_start_not_from_its_claim_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let store = store(&pool);
+    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1800);
+    // Claimed ten minutes ago with a five minute budget, but started only now.
+    let mut routine = new_routine("late-start", None, None);
+    routine.timeout_secs = Some(300);
+    let run = started_run_of(&pool, &store, routine, None, "discord:7201:1").await;
+    let outcomes = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    assert!(outcomes.is_empty(), "{outcomes:?}");
+    assert_eq!(run_row(&pool, &run).await.0, "running");
+
+    // Six minutes after that start the whole budget is spent.
+    sqlx::query(
+        "UPDATE routine_runs SET attempts = (
+             SELECT jsonb_agg(jsonb_set(attempt, '{at}',
+                        to_jsonb(NOW() - INTERVAL '6 minutes')))
+             FROM jsonb_array_elements(attempts) AS attempt)
+         WHERE id = $1",
+    )
+    .bind(&run)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let outcomes = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    let closed: Vec<_> = outcomes.iter().map(|run| run.status.as_str()).collect();
+    assert_eq!(closed, ["failed"], "{outcomes:?}");
+    assert!(outcomes[0].error.as_deref().unwrap().contains("timed out"));
+
+    pool.close().await;
+    db.drop().await;
+}
+
 #[tokio::test]
 async fn latest_runs_return_each_routines_newest_run_pg() {
     let db = TestPostgresDb::create().await;

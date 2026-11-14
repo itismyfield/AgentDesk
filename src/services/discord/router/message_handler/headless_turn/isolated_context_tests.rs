@@ -897,11 +897,12 @@ async fn an_unreachable_routine_thread_defers_the_run_and_never_runs_on_the_prim
     fixture.discord.add_thread(THREAD.get(), PRIMARY.get());
     let before = channel_state(&fixture, PRIMARY).await;
     let prompt = || "nightly report".to_string();
+    let pool = &fixture.pool;
     let thread_of = |routine: String| async move {
         let saved: Option<String> =
             sqlx::query_scalar("SELECT discord_thread_id FROM routines WHERE id = $1")
                 .bind(routine)
-                .fetch_one(&fixture.pool)
+                .fetch_one(pool)
                 .await
                 .unwrap();
         saved
