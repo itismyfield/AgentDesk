@@ -69,6 +69,7 @@ fn codex_tui_args_snapshot_preserves_common_launch_options() {
 
 #[test]
 fn codex_tui_script_snapshot_preserves_env_and_command_shape() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let env_lines = build_tmux_launch_env_lines(
         Some("/opt/codex/bin:/usr/bin"),
         Some(42),
@@ -465,4 +466,125 @@ fn codex_warm_submit_and_cold_launch_hold_a_discord_handoff_reservation() {
 #[test]
 fn codex_capacity_preflight_holds_when_rollout_advances_before_cold_launch() {
     assert_codex_capacity_cold_chain(true);
+}
+
+#[test]
+fn managed_project_trust_is_exact_and_tui_only() {
+    use crate::config::TestEnvVarGuard as Guard;
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().unwrap();
+    let _root = Guard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+    for tree in ["workspaces", "worktrees"] {
+        let name = if cfg!(unix) {
+            "project.with.dot \u{7f} '한글'"
+        } else {
+            "project.with.dot '한글'"
+        };
+        let cwd = root.path().join(tree).join(name);
+        std::fs::create_dir_all(&cwd).unwrap();
+        for resume in [None, Some("session-123")] {
+            let options = CodexLaunchOptions::new("prompt")
+                .with_cwd(cwd.to_str())
+                .with_resume_session_id(resume);
+            let args = build_codex_tui_args(&options);
+            let value = args
+                .windows(2)
+                .find(|pair| pair[0] == "-c" && pair[1].starts_with("projects="))
+                .expect("managed TUI launch must trust its exact cwd")[1]
+                .clone();
+            let doc: toml_edit::DocumentMut = value.parse().unwrap();
+            let projects = doc["projects"].as_inline_table().unwrap();
+            assert_eq!(projects.len(), 1);
+            assert_eq!(
+                projects[cwd.canonicalize().unwrap().to_str().unwrap()]
+                    .as_inline_table()
+                    .unwrap()["trust_level"]
+                    .as_str(),
+                Some("trusted")
+            );
+            let delimiter = args.iter().position(|arg| arg == "--").unwrap();
+            assert!(args[..delimiter].contains(&value));
+            assert!(
+                !build_codex_exec_args(&options)
+                    .iter()
+                    .any(|arg| arg.starts_with("projects="))
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_project_trust_rejects_escapes_and_external_git_root() {
+    use crate::config::TestEnvVarGuard as Guard;
+    use std::os::unix::fs::symlink;
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let _root = Guard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+    std::fs::create_dir(root.path().join("workspaces")).unwrap();
+    symlink(outside.path(), root.path().join("workspaces/escape")).unwrap();
+    symlink(outside.path(), root.path().join("worktrees")).unwrap();
+    std::fs::create_dir_all(root.path().join("workspaces-local/project")).unwrap();
+    std::fs::create_dir_all(root.path().join("workspaces/project")).unwrap();
+    std::fs::create_dir(root.path().join(".git")).unwrap();
+    for cwd in [
+        outside.path().to_path_buf(),
+        root.path().join("workspaces/escape"),
+        root.path().join("worktrees"),
+        root.path().join("workspaces-local/project"),
+        root.path().join("workspaces/project"),
+        root.path().join("workspaces/missing"),
+    ] {
+        let args = build_codex_tui_args(&CodexLaunchOptions::new("prompt").with_cwd(cwd.to_str()));
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("projects=")),
+            "{}",
+            cwd.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_project_trust_roundtrips_through_launch_script_without_config_writes() {
+    use crate::config::TestEnvVarGuard as Guard;
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().unwrap();
+    let _root = Guard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+    let cwd = root.path().join("workspaces/project.with.dot '한글'");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let fixture_codex_home = root.path().join("codex-home");
+    std::fs::create_dir(&fixture_codex_home).unwrap();
+    let _codex_home = Guard::set_path_after_shared_test_env_lock("CODEX_HOME", &fixture_codex_home);
+    let config = fixture_codex_home.join("config.toml");
+    let original_config =
+        "model = \"fixture\"\n[projects.\"/external\"]\ntrust_level = \"untrusted\"\n";
+    std::fs::write(&config, original_config).unwrap();
+    let cli = root.path().join("stub-cli");
+    std::fs::write(&cli, "#!/bin/sh\nprintf '%s\\0' \"$@\"\n").unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for resume in [None, Some("native-session")] {
+        let args = build_codex_tui_args(
+            &CodexLaunchOptions::new("--literal 'prompt'")
+                .with_cwd(cwd.to_str())
+                .with_resume_session_id(resume),
+        );
+        let script = render_codex_tui_tmux_script("", cli.to_str().unwrap(), &args);
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let received: Vec<_> = output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8(arg.to_vec()).unwrap())
+            .collect();
+        assert_eq!(received, args);
+    }
+    assert_eq!(std::fs::read_to_string(config).unwrap(), original_config);
 }

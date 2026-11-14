@@ -1370,6 +1370,9 @@ fn resolve_codex_tui_tail_result(
                 return Ok(None);
             }
             if verified_hold::existing_incarnation(tmux_session_name) {
+                if crate::services::codex_tui::is_startup_dialog_error(&error) {
+                    return Err(error);
+                }
                 verified_hold::wait_for_cancel(tmux_session_name, cancel_token_for_post_tail)?;
                 return Ok(None);
             }
@@ -2952,6 +2955,36 @@ mod verified_admission_tests {
             assert!(
                 rx.try_recv().is_err(),
                 "verified permission must suppress terminal handoff frames"
+            );
+        });
+    }
+
+    #[test]
+    fn verified_startup_dialog_error_returns_reason_without_teardown() {
+        verified(|tmux, _| {
+            let fake =
+                crate::services::provider_teardown::tests::test_support::FakeTmux::install(tmux);
+            let _ = fake.take_calls();
+            let nonce = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
+            let before = std::fs::read(&nonce).unwrap();
+            let token = Arc::new(CancelToken::new());
+            let delayed = token.clone();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                delayed
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
+            });
+            let error =
+                "Codex startup blocked by folder trust dialog in /fixture/work. Complete trust.";
+            let result = resolve_codex_tui_tail_result(Err(error.into()), Some(&token), tmux);
+            crate::test_support::wait::join_within(release, Duration::from_secs(2));
+            assert_eq!(result, Err(error.to_string()));
+            assert_eq!(std::fs::read(nonce).unwrap(), before);
+            assert!(
+                fake.take_calls()
+                    .iter()
+                    .all(|call| !call.starts_with("kill-session"))
             );
         });
     }

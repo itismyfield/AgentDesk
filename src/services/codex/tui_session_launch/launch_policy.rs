@@ -152,6 +152,11 @@ pub(in crate::services::codex) fn codex_tui_option_args(
         args.push("resume".to_string());
     }
     append_codex_common_launch_args(&mut args, options);
+    if let (Some(root), Some(cwd)) = (crate::config::runtime_root(), options.cwd.as_deref())
+        && let Some(value) = super::project_trust::override_for(&root, std::path::Path::new(cwd))
+    {
+        args.extend(["-c".to_string(), value]);
+    }
     // Startup menus must never turn a routed Enter into a global toolchain update.
     args.extend([
         "-c".to_string(),

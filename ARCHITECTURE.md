@@ -1284,7 +1284,8 @@ src/
 │   │   │   │   ├── fresh_tests.rs
 │   │   │   │   └── symlink_home_tests.rs
 │   │   │   ├── first_input.rs
-│   │   │   └── launch_policy.rs
+│   │   │   ├── launch_policy.rs
+│   │   │   └── project_trust.rs
 │   │   ├── absence_launch.rs
 │   │   ├── actual_submit_tests.rs
 │   │   ├── c1_teardown_tests.rs
@@ -1341,7 +1342,8 @@ src/
 │   │   │   ├── options.rs
 │   │   │   ├── parser.rs
 │   │   │   ├── provenance.rs
-│   │   │   └── provenance_tests.rs
+│   │   │   ├── provenance_tests.rs
+│   │   │   └── startup_dialog_tests.rs
 │   │   ├── session/
 │   │   │   ├── source_observation_tests/
 │   │   │   │   └── codex_launch_cause.rs
@@ -1361,6 +1363,7 @@ src/
 │   │   ├── rollout_index.rs
 │   │   ├── rollout_tail.rs
 │   │   ├── session.rs
+│   │   ├── startup_dialog.rs
 │   │   ├── tail_launch.rs
 │   │   ├── verified_hold.rs
 │   │   ├── verified_tail.rs

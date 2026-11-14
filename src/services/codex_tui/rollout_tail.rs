@@ -222,8 +222,7 @@ pub(crate) use following_source::{
 
 /// Strict idle reader completion carries the opened descriptor, never a later path stat.
 pub(crate) fn tail_idle_rollout_for_tmux<L: Into<PaneLiveness>>(
-    rollout_path: &Path,
-    start_offset: u64,
+    (rollout_path, start_offset): (&Path, u64),
     session_id: Option<String>,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
@@ -416,7 +415,9 @@ fn tail_resumed_rollout_for_session_with_handoff_options<L: Into<PaneLiveness>>(
         );
     }
     let mut death = ConfirmedDeadPane::default();
-    let rollout_path = wait_for_resumed_rollout_for_session(
+    let mut startup =
+        super::startup_dialog::StartupCheck::new(cwd, options.tmux_session_name.as_deref());
+    let discovered = wait_for_resumed_rollout_for_session(
         cwd,
         session_id,
         previous_rollout_path,
@@ -424,9 +425,16 @@ fn tail_resumed_rollout_for_session_with_handoff_options<L: Into<PaneLiveness>>(
         modified_since,
         sessions_dir,
         cancel_token.as_deref(),
-        &mut || !death.observe(is_alive().into(), None),
+        &mut || startup.alive(!death.observe(is_alive().into(), None)),
         options.wait_for_rollout,
-    )?;
+    );
+    let rollout_path = startup.finish(discovered, || {
+        if rollout_file_len(previous_rollout_path).is_some_and(|len| len > previous_start_offset) {
+            Some(previous_rollout_path.to_path_buf())
+        } else {
+            latest_rollout_for_cwd_and_session_since(cwd, session_id, modified_since, sessions_dir)
+        }
+    })?;
     let start_offset = if same_path(&rollout_path, previous_rollout_path) {
         previous_start_offset
     } else {
@@ -4614,3 +4622,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+mod startup_dialog_tests;

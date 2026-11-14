@@ -3,6 +3,7 @@
 #[cfg(unix)]
 pub(in crate::services::codex) mod first_input;
 pub(super) mod launch_policy;
+mod project_trust;
 #[cfg(unix)]
 pub(super) use launch_policy::{
     preflight_codex_tui_turn_with_policy, prepare_codex_herdr_launch,

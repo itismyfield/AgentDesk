@@ -24,13 +24,12 @@ pub(crate) fn is_verified(tmux: Option<&str>) -> bool {
 pub(crate) fn wait_for_binding(
     tmux: &str,
     cancel: Option<&CancelToken>,
+    cwd: &Path,
 ) -> Result<dedupe::TuiRuntimeBinding, String> {
     let nonce = binding_context::observe_spawn_nonce_marker(tmux);
     let mut polling = HoldPoll::new(tmux);
-    loop {
-        if cancel_requested(cancel) {
-            return Err("cancelled waiting for verified Codex source".into());
-        }
+    let mut startup = super::startup_dialog::StartupCheck::new(cwd, Some(tmux));
+    let ready = || {
         if matches!(&nonce, SpawnNonceMarker::Known(_))
             && binding_context::observe_spawn_nonce_marker(tmux) == nonce
             && let Some(binding) = dedupe::runtime_binding_for_tmux_session(tmux)
@@ -42,7 +41,26 @@ pub(crate) fn wait_for_binding(
             )
             .is_some_and(|pin| pin.allowed(None))
         {
+            Some(binding)
+        } else {
+            None
+        }
+    };
+    loop {
+        if cancel_requested(cancel) {
+            return Err("cancelled waiting for verified Codex source".into());
+        }
+        if let Some(binding) = ready() {
             return Ok(binding);
+        }
+        if let Some(error) = startup.check() {
+            if cancel_requested(cancel) {
+                return Err("cancelled waiting for verified Codex source".into());
+            }
+            if let Some(binding) = ready() {
+                return Ok(binding);
+            }
+            return Err(error);
         }
         polling.pause(None);
     }

@@ -43,6 +43,7 @@ pub(super) fn tail_latest_rollout_for_cwd_with_handoff_options<L: Into<PaneLiven
         let binding = super::super::verified_tail::wait_for_binding(
             options.tmux_session_name.as_deref().unwrap_or_default(),
             cancel_token.as_deref(),
+            cwd,
         )?;
         let rollout_path = PathBuf::from(&binding.output_path);
         return tail_rollout_file_until_assistant_response_with_pane_busy_probe(
@@ -64,14 +65,19 @@ pub(super) fn tail_latest_rollout_for_cwd_with_handoff_options<L: Into<PaneLiven
     let sessions_dir = default_codex_sessions_dir()
         .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
     let mut death = ConfirmedDeadPane::default();
-    let rollout_path = wait_for_latest_rollout_for_cwd(
+    let mut startup =
+        super::super::startup_dialog::StartupCheck::new(cwd, options.tmux_session_name.as_deref());
+    let discovered = wait_for_latest_rollout_for_cwd(
         cwd,
         modified_since,
         &sessions_dir,
         cancel_token.as_deref(),
-        &mut || !death.observe(is_alive().into(), None),
+        &mut || startup.alive(!death.observe(is_alive().into(), None)),
         options.wait_for_rollout,
-    )?;
+    );
+    let rollout_path = startup.finish(discovered, || {
+        latest_rollout_for_cwd_since(cwd, modified_since, &sessions_dir)
+    })?;
     let rollout_session_id = super::super::rollout_index::read_rollout_session_meta(&rollout_path)
         .and_then(|meta| meta.id);
     persist_codex_tui_rollout_marker(
