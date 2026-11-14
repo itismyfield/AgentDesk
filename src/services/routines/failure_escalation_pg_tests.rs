@@ -357,3 +357,44 @@ async fn a_headless_routine_logs_no_lifecycle_event_and_no_census_verdict_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_headless_run_recovered_after_a_restart_posts_nothing_in_a_saved_thread_pg() {
+    let (db, pool, store) = setup().await;
+    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let definition = ExecutionDefinition {
+        mode: RoutineExecutionMode::Headless,
+        runner: json!({"kind": "quickjs", "script_ref": "nightly.js"}),
+    };
+    let mut seen = Vec::new();
+    // Both routines kept a thread from before; the null-mode one is the control.
+    for (name, definition) in [("quiet", Some(&definition)), ("threaded", None)] {
+        let mut row = routine(name);
+        row.discord_thread_id = Some("1479671302387081999".to_string());
+        let attached = store.attach_routine_with_execution(row, definition, 3);
+        let attached = attached.await.unwrap();
+        let run_id = claim(&store).await;
+        // The process restarts mid-run: the lease runs out and recovery closes the run.
+        sqlx::query("UPDATE routine_runs SET lease_expires_at = NOW() - INTERVAL '1 minute'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let recovered = store.recover_stale_running_runs().await.unwrap();
+        assert_eq!(recovered.len(), 1, "{name}");
+        assert_eq!(recovered[0].run_id, run_id, "{name}");
+        let logged = logger.log_recovery(&store, &recovered[0]).await;
+        let posts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_outbox WHERE session_key LIKE 'routine:' || $1 || ':%'",
+        )
+        .bind(&attached.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        seen.push((logged.status, posts));
+    }
+    assert_eq!(seen[0], ("skipped".to_string(), 0), "headless");
+    assert_eq!(seen[1], ("ok".to_string(), 1), "null-mode");
+
+    pool.close().await;
+    db.drop().await;
+}

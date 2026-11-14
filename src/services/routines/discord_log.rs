@@ -135,6 +135,18 @@ impl RoutineDiscordLogger {
         store: &RoutineStore,
         recovered: &RecoveredRoutineRun,
     ) -> RoutineDiscordLogStatus {
+        // The claim decides: a headless run posts no recovery diagnostic, saved thread or not.
+        let headless = store.run_execution_mode(&recovered.run_id).await;
+        let headless = headless.map(|mode| mode.as_deref() == Some("headless"));
+        if !matches!(headless, Ok(false)) {
+            let status = match headless {
+                Err(error) => RoutineDiscordLogStatus::failed(error),
+                Ok(_) => RoutineDiscordLogStatus::skipped(),
+            };
+            self.persist_run_log_status(store, &recovered.run_id, &status)
+                .await;
+            return status;
+        }
         let message = recovery_message(recovered);
         let status = if recovered
             .discord_thread_id

@@ -469,6 +469,16 @@ async fn routine_claim(
     thread: Option<ChannelId>,
     retries: i32,
 ) -> Claim {
+    routine_claim_with(fixture, headless, thread, (retries, None)).await
+}
+
+/// The same claim with its failure policy: `(max retries, fallback agent)`.
+async fn routine_claim_with(
+    fixture: &Fixture,
+    headless: bool,
+    thread: Option<ChannelId>,
+    (retries, fallback): (i32, Option<&str>),
+) -> Claim {
     let pool = &fixture.pool;
     // Only the routine attached here is due, so the claim below is its run.
     sqlx::query("UPDATE routines SET status = 'paused'")
@@ -490,7 +500,7 @@ async fn routine_claim(
     );
     let routine_row = NewRoutine {
         agent_id: Some("agent8117".into()),
-        fallback_agent_id: None,
+        fallback_agent_id: fallback.map(str::to_string),
         max_retries: Some(retries),
         script_ref: "nightly.js".into(),
         name: "nightly".into(),
@@ -728,7 +738,8 @@ async fn a_headless_run_waits_behind_a_busy_primary_and_starts_no_provider_pg() 
         return;
     }
     let fixture = fixture().await;
-    let (store, executor, claimed, _) = headless_claim(&fixture).await;
+    // A retry budget is left over: the closed window still ends the run.
+    let (store, executor, claimed, _) = routine_claim(&fixture, true, None, 2).await;
     let run = claimed.run_id.clone();
     // A person's turn holds the primary mailbox.
     let human = Arc::new(CancelToken::new());
@@ -965,8 +976,11 @@ async fn an_unreachable_routine_thread_defers_the_run_and_never_runs_on_the_prim
         THREAD.get()
     ));
 
-    // The thread stays unreachable past the window: the run fails for that reason, unstarted.
-    let (store, executor, claimed, _) = routine_claim(&fixture, false, Some(THREAD), 0).await;
+    // The thread stays unreachable past the window: the run ends for that reason, unstarted,
+    // whatever retry budget and fallback agent it has left.
+    let spare = (2, Some("fallback8117"));
+    let (store, executor, claimed, _) =
+        routine_claim_with(&fixture, false, Some(THREAD), spare).await;
     let run = claimed.run_id.clone();
     fixture.discord.fail_channel(THREAD.get());
     let start = executor.start_agent_run(&store, claimed, prompt(), None, None, None, None, false);
@@ -976,24 +990,34 @@ async fn an_unreachable_routine_thread_defers_the_run_and_never_runs_on_the_prim
     let closed: Vec<_> = polled.iter().map(|run| run.status.as_str()).collect();
     assert_eq!(closed, ["failed"], "{polled:?}");
     let unavailable = Some("thread_unavailable".to_string());
-    assert_eq!(
-        run_state(&fixture, &run).await,
-        ("failed".into(), 0, unavailable)
-    );
-    assert!(nothing_ran(&fixture, &[PRIMARY, THREAD]));
+    let ended = ("failed".to_string(), 0, unavailable);
+    assert_eq!(run_state(&fixture, &run).await, ended);
+    // No second window opens: the thread answering again starts nothing for that run.
     fixture.discord.heal_channel(THREAD.get());
+    let polled = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    assert!(polled.is_empty(), "{polled:?}");
+    let retry_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT next_retry_at FROM routine_runs WHERE id = $1")
+            .bind(&run)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(retry_at, None);
+    assert_eq!(run_state(&fixture, &run).await, ended);
+    assert!(nothing_ran(&fixture, &[PRIMARY, THREAD]));
 
     // Discord refuses for good (the saved thread and the replacement both 404): the run fails
     // at once and still does not run on the primary.
     let gone = ChannelId::new(1_479_671_302_387_081_173);
-    let (store, executor, claimed, _) = routine_claim(&fixture, false, Some(gone), 0).await;
+    let (store, executor, claimed, _) =
+        routine_claim_with(&fixture, false, Some(gone), spare).await;
     let run = claimed.run_id.clone();
     let start = executor.start_agent_run(&store, claimed, prompt(), None, None, None, None, false);
     let failed = start.await.unwrap();
     assert_eq!(failed.status, "failed", "{failed:?}");
     let error = failed.error.unwrap();
     assert!(error.contains("create routine discord thread"), "{error}");
-    assert_eq!(run_state(&fixture, &run).await.0, "failed");
+    assert_eq!(run_state(&fixture, &run).await, ended);
     assert!(nothing_ran(&fixture, &[PRIMARY, THREAD]));
     assert_eq!(channel_state(&fixture, PRIMARY).await, before);
     fixture.db.drop().await;
@@ -1118,3 +1142,6 @@ async fn people_who_write_while_a_headless_run_holds_the_primary_wait_once_and_o
     assert!(current.is_some_and(|current| current.same_actor(&actor)));
     fixture.db.drop().await;
 }
+
+#[path = "isolated_context_thread_tests.rs"]
+mod thread_tests;
