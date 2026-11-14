@@ -1,0 +1,891 @@
+{
+  "schema_version": 1,
+  "kind": "continuous_e2e_planning_manifest",
+  "source_design": "docs/e2e-continuous.design.md",
+  "source_main": "79bebdd4eaa29b289bf88412825baa7d70a6ac77",
+  "evidence_status": "NOT_RUN",
+  "activation": {
+    "enabled": false,
+    "rotation_interval_s": null,
+    "daily_full_at": null,
+    "provider_daily_turn_limit": null,
+    "provider_daily_token_limit": null,
+    "provider_daily_time_limit_s": null,
+    "deployment_hold": false
+  },
+  "execution_contract": {
+    "requires": [
+      "instance_boot_receipt",
+      "actual_parent_pair_flock",
+      "actual_host_identity",
+      "expected_occurrence_set",
+      "provider_contact",
+      "complete_required_assertions",
+      "per_provider_budget_reservation"
+    ],
+    "unresolved_expected_occurrence": "PARTIAL",
+    "missing_precondition_witness": "UNEVALUABLE",
+    "zero_execution": "NO_DATA",
+    "missing_usage": null,
+    "controlled_ingress_counts_as_human_gateway": false,
+    "periodic_manual_operations": 0,
+    "human_acceptance": {
+      "scenarios": [
+        "R-marker",
+        "R-inject"
+      ],
+      "origin": "human_gateway",
+      "executor": "coordinator_agent_desktop_discord",
+      "scope": "one_RED_GREEN_acceptance_pair_per_scenario",
+      "periodic_coverage": 0
+    },
+    "occurrence_key_fields": [
+      "scenario",
+      "provider",
+      "host",
+      "surface",
+      "state",
+      "origin",
+      "busy_basis",
+      "placement",
+      "output_profile",
+      "operation",
+      "occurrence"
+    ],
+    "profiles": {
+      "E-60": "O",
+      "E-61": "O",
+      "E-62": "Legacy"
+    },
+    "profile_change_requires_new_boot": true
+  },
+  "bundles": {
+    "P": {
+      "occurrences": [
+        {
+          "scenario": "E-50",
+          "provider": "claude",
+          "host": "herdr",
+          "cell": "claude-herdr",
+          "surface": "channel",
+          "origin": "announce_bot",
+          "state": "sequential"
+        },
+        {
+          "scenario": "E-51",
+          "provider": "codex",
+          "host": "tmux",
+          "cell": "codex-tui",
+          "surface": "channel",
+          "origin": "announce_bot",
+          "state": "sequential"
+        },
+        {
+          "scenario": "R-marker",
+          "provider": "claude",
+          "host": "tmux",
+          "surface": "channel",
+          "state": "busy",
+          "busy_basis": "managed",
+          "origin": "controlled_ingress",
+          "operations": [
+            "reaction_history",
+            "host_identity"
+          ],
+          "preconditions": [
+            "observer_sequence_complete",
+            "managed_active_turn",
+            "human_branch_entered"
+          ]
+        },
+        {
+          "scenario": "R-inject",
+          "provider": "claude",
+          "host": "herdr",
+          "surface": "channel",
+          "state": "busy",
+          "busy_basis": "native",
+          "origin": "controlled_ingress",
+          "operations": [
+            "inject_before_turn_end",
+            "injection_latency",
+            "exactly_once",
+            "pre_submit_busy_witness"
+          ],
+          "preconditions": [
+            "native_busy_source",
+            "no_managed_claim_or_inflight_before_B",
+            "no_durable_external_holder_before_B",
+            "pre_submit_busy_branch_witness"
+          ]
+        },
+        {
+          "scenario": "R-fresh",
+          "provider": "claude",
+          "host": "tmux",
+          "surface": "thread",
+          "state": "idle_unowned",
+          "busy_basis": null,
+          "origin": "announce_bot",
+          "placement": "ready_primary_no_slots",
+          "operations": [
+            "fresh_session_started",
+            "execution_node"
+          ],
+          "preconditions": [
+            "no_owner_or_session_binding",
+            "ready_primary",
+            "execution_slots_unadvertised"
+          ]
+        },
+        {
+          "scenario": "R-host",
+          "provider": "claude",
+          "host": "herdr",
+          "surface": "thread",
+          "state": "idle_then_busy",
+          "busy_basis": "managed",
+          "origin": "announce_bot",
+          "placement": "ready_primary_no_slots",
+          "operations": [
+            "session_host",
+            "output_sink",
+            "busy_followup",
+            "cancel"
+          ],
+          "preconditions": [
+            "parent_only_herdr_configuration",
+            "exact_thread_parent_join",
+            "new_boot_on_profile_change"
+          ]
+        }
+      ],
+      "request_policy": "deduplicate_deploy_sha_request_id",
+      "planned_work_prompts": 13,
+      "planned_native_turns_if_busy_joins": 10,
+      "measured": {
+        "runs": 0,
+        "elapsed_s": null,
+        "native_turns": null,
+        "tokens": null
+      },
+      "enabled": false
+    },
+    "R1": {
+      "scenarios": [
+        "E-1",
+        "E-2",
+        "E-3",
+        "E-5",
+        "E-15"
+      ],
+      "selection": "one_cell_per_occurrence",
+      "host_policy": "alternate_tmux_herdr",
+      "measured": {
+        "runs": 0,
+        "elapsed_s": null,
+        "native_turns": null,
+        "tokens": null
+      },
+      "enabled": false,
+      "control_occurrences": []
+    },
+    "R2": {
+      "scenarios": [
+        "E-16",
+        "E-20",
+        "E-22",
+        "E-23",
+        "E-52",
+        "E-64"
+      ],
+      "selection": "one_cell_per_occurrence",
+      "host_policy": "yaml_cells_intersect_runtime_capabilities",
+      "measured": {
+        "runs": 0,
+        "elapsed_s": null,
+        "native_turns": null,
+        "tokens": null
+      },
+      "enabled": false,
+      "control_occurrences": [
+        "R-inject-managed"
+      ]
+    },
+    "R3": {
+      "scenarios": [
+        "E-4",
+        "E-6",
+        "E-7",
+        "E-10",
+        "E-21",
+        "E-37"
+      ],
+      "selection": "one_cell_per_occurrence",
+      "host_policy": "yaml_cells_intersect_runtime_capabilities",
+      "measured": {
+        "runs": 0,
+        "elapsed_s": null,
+        "native_turns": null,
+        "tokens": null
+      },
+      "enabled": false,
+      "control_occurrences": []
+    },
+    "R4": {
+      "scenarios": [
+        "E-8",
+        "E-9",
+        "E-12",
+        "E-14",
+        "E-17",
+        "E-18",
+        "E-19",
+        "E-30",
+        "E-31",
+        "E-54",
+        "E-63"
+      ],
+      "selection": "one_cell_per_occurrence",
+      "host_policy": "yaml_cells_intersect_runtime_capabilities",
+      "measured": {
+        "runs": 0,
+        "elapsed_s": null,
+        "native_turns": null,
+        "tokens": null
+      },
+      "enabled": false,
+      "control_occurrences": []
+    },
+    "R5": {
+      "scenarios": [
+        "E-35",
+        "E-53",
+        "E-60",
+        "E-61",
+        "E-62"
+      ],
+      "selection": "one_cell_per_occurrence",
+      "host_policy": "yaml_cells_intersect_runtime_capabilities",
+      "measured": {
+        "runs": 0,
+        "elapsed_s": null,
+        "native_turns": null,
+        "tokens": null
+      },
+      "enabled": false,
+      "control_occurrences": []
+    },
+    "F": {
+      "includes": [
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "R5"
+      ],
+      "additional_scenarios": [
+        "E-50",
+        "E-51",
+        "E-11",
+        "E-13",
+        "E-36"
+      ],
+      "new_scenarios": [
+        "R-marker",
+        "R-inject",
+        "R-fresh",
+        "R-host"
+      ],
+      "expected_existing_live_scenarios": 38,
+      "selection": "resolve_all_expected_occurrences_before_first_send",
+      "measured": {
+        "runs": 0,
+        "elapsed_s": null,
+        "native_turns": null,
+        "tokens": null
+      },
+      "enabled": false,
+      "control_occurrences": [
+        "R-inject-managed"
+      ],
+      "control_selection": "union_included_controls_once"
+    }
+  },
+  "new_scenarios": {
+    "R-marker": {
+      "provider": "claude",
+      "host": "tmux",
+      "surface": "channel",
+      "state": "busy",
+      "busy_basis": "managed",
+      "origin": "controlled_ingress",
+      "operations": [
+        "reaction_history",
+        "host_identity"
+      ],
+      "preconditions": [
+        "observer_sequence_complete",
+        "managed_active_turn",
+        "human_branch_entered"
+      ]
+    },
+    "R-inject": {
+      "provider": "claude",
+      "host": "herdr",
+      "surface": "channel",
+      "state": "busy",
+      "busy_basis": "native",
+      "origin": "controlled_ingress",
+      "operations": [
+        "inject_before_turn_end",
+        "injection_latency",
+        "exactly_once",
+        "pre_submit_busy_witness"
+      ],
+      "preconditions": [
+        "native_busy_source",
+        "no_managed_claim_or_inflight_before_B",
+        "no_durable_external_holder_before_B",
+        "pre_submit_busy_branch_witness"
+      ]
+    },
+    "R-fresh": {
+      "provider": "claude",
+      "host": "tmux",
+      "surface": "thread",
+      "state": "idle_unowned",
+      "busy_basis": null,
+      "origin": "announce_bot",
+      "placement": "ready_primary_no_slots",
+      "operations": [
+        "fresh_session_started",
+        "execution_node"
+      ],
+      "preconditions": [
+        "no_owner_or_session_binding",
+        "ready_primary",
+        "execution_slots_unadvertised"
+      ]
+    },
+    "R-host": {
+      "provider": "claude",
+      "host": "herdr",
+      "surface": "thread",
+      "state": "idle_then_busy",
+      "busy_basis": "managed",
+      "origin": "announce_bot",
+      "placement": "ready_primary_no_slots",
+      "operations": [
+        "session_host",
+        "output_sink",
+        "busy_followup",
+        "cancel"
+      ],
+      "preconditions": [
+        "parent_only_herdr_configuration",
+        "exact_thread_parent_join",
+        "new_boot_on_profile_change"
+      ]
+    }
+  },
+  "capability_gaps": {
+    "E-11": {
+      "status": "BLOCKED_CAPABILITY",
+      "reason": "requires_two_simultaneous_provider_turns_initial_limit_one"
+    },
+    "E-13": {
+      "status": "BLOCKED_CAPABILITY",
+      "reason": "claude_pipe_outside_initial_TUI_profile"
+    },
+    "E-17": {
+      "status": "BLOCKED_CAPABILITY",
+      "reason": "matrix_adapter_required"
+    },
+    "E-35/herdr": {
+      "status": "NOT_APPLICABLE",
+      "live_coverage": 0,
+      "reason": "no_durable_frontier_proof"
+    },
+    "E-36/herdr": {
+      "status": "NOT_APPLICABLE",
+      "live_coverage": 0,
+      "reason": "tmux_only_observation"
+    },
+    "codex/herdr": {
+      "status": "BLOCKED_CAPABILITY",
+      "reason": "requires_7335_real_create_followup_collect_cancel_evidence"
+    },
+    "human_gateway/periodic": {
+      "status": "NOT_RUN_HUMAN",
+      "live_coverage": 0,
+      "reason": "controlled_ingress_is_a_separate_provenance"
+    }
+  },
+  "special_invocations": {
+    "E-36": {
+      "exclusive_filter": true,
+      "phase_deadline_s": 3540,
+      "requires_intake_log": true
+    },
+    "E-11": {
+      "driver": "matrix"
+    },
+    "E-17": {
+      "driver": "matrix_adapter"
+    }
+  },
+  "excluded_from_live": {
+    "fixture": [
+      "E-24",
+      "E-25"
+    ],
+    "unsupported": [
+      "E-26",
+      "E-27",
+      "E-28"
+    ],
+    "retired": [
+      "E-32",
+      "E-33",
+      "E-34"
+    ]
+  },
+  "scenario_catalog": {
+    "E-1": {
+      "path": "tests/e2e/tui_relay/scenarios/E-1-single-prompt.yaml",
+      "sha256": "ad0707bb9c20b02b1603b091a90e1abe5bd1a8601c00923097e746dc8fc746aa",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "codex-pipe",
+        "codex-tui",
+        "claude-herdr",
+        "codex-herdr"
+      ]
+    },
+    "E-10": {
+      "path": "tests/e2e/tui_relay/scenarios/E-10-stranded-draft.yaml",
+      "sha256": "f271c1c52bfaddc4f489f1540932a2d2dd0b224f0cfbe1341961609ab85b966d",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui",
+        "codex-tui"
+      ]
+    },
+    "E-11": {
+      "path": "tests/e2e/tui_relay/scenarios/E-11-dual-channel-concurrency.yaml",
+      "sha256": "ab16e0787101399d6e27e87ec429aa7f42b5ba6e017f8c3aef50b007aa5218ab",
+      "coverage_class": "live",
+      "cells": []
+    },
+    "E-12": {
+      "path": "tests/e2e/tui_relay/scenarios/E-12-tmux-pane-kill.yaml",
+      "sha256": "98dfe2147508ad821a9d08bb313c166c664fd603571811cf37a6babddf538b50",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui",
+        "codex-tui",
+        "claude-herdr",
+        "codex-herdr"
+      ]
+    },
+    "E-13": {
+      "path": "tests/e2e/tui_relay/scenarios/E-13-claude-scheduled-wakeup-monitor.yaml",
+      "sha256": "33d7adf0e10a95882ed89e0c1e0a7d52153004da4f0bbc1432a4b2551e1c00e2",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe"
+      ]
+    },
+    "E-14": {
+      "path": "tests/e2e/tui_relay/scenarios/E-14-claude-tui-thread-stale-reattach.yaml",
+      "sha256": "8fda307bf9e8cb05cfbb917d2430a370545a15dbeae4bc33cf05e8375cbfe21b",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui"
+      ]
+    },
+    "E-15": {
+      "path": "tests/e2e/tui_relay/scenarios/E-15-long-response-chunk-completeness.yaml",
+      "sha256": "46e1d3ae0f2a19468e271f6b1fe5ead9b76646f8e30845c1d382d1eef271ce92",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "codex-pipe",
+        "codex-tui",
+        "claude-herdr",
+        "codex-herdr"
+      ]
+    },
+    "E-16": {
+      "path": "tests/e2e/tui_relay/scenarios/E-16-claude-tui-quiescence-timeout-release.yaml",
+      "sha256": "bfc4f18378061768ddb105be2a5444310e6048f9ab0def91a137bcc8070c6166",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui"
+      ]
+    },
+    "E-17": {
+      "path": "tests/e2e/tui_relay/scenarios/E-17-foreign-active-restart-guard.yaml",
+      "sha256": "870e3a1d83efb887811d7d3df94194194fa9c49eedbee023063282035998d9c3",
+      "coverage_class": "live",
+      "cells": []
+    },
+    "E-18": {
+      "path": "tests/e2e/tui_relay/scenarios/E-18-stop-mid-turn-cancel.yaml",
+      "sha256": "c367a085439f6ee6a1f692a6fa98d83135409e0fbf9e9752daf5a50f9c3622e3",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "codex-pipe",
+        "codex-tui",
+        "claude-herdr",
+        "codex-herdr"
+      ]
+    },
+    "E-19": {
+      "path": "tests/e2e/tui_relay/scenarios/E-19-session-continuity-after-restart.yaml",
+      "sha256": "e64d3b3753a007c9e61d03715a43dc8231e43c0f3f015dc5563c98c89ec19823",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui",
+        "codex-tui",
+        "claude-herdr",
+        "codex-herdr"
+      ]
+    },
+    "E-2": {
+      "path": "tests/e2e/tui_relay/scenarios/E-2-three-turns.yaml",
+      "sha256": "4e2c29bfdff0670e80d010bc5d276acbd1d70ca7d15afd81eb5597c9ef94bc62",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "codex-pipe",
+        "codex-tui",
+        "claude-herdr",
+        "codex-herdr"
+      ]
+    },
+    "E-20": {
+      "path": "tests/e2e/tui_relay/scenarios/E-20-same-session-concurrent-dispatch.yaml",
+      "sha256": "47adeec9ec27a9e185c9ae47e4e9344c5e1e2b9c7fa1764ecaeef453a032a935",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "codex-pipe",
+        "codex-tui"
+      ]
+    },
+    "E-21": {
+      "path": "tests/e2e/tui_relay/scenarios/E-21-direct-input-control-strip.yaml",
+      "sha256": "0a7f219cc07cdf814343412382c83baf38cad8a1273456e078feb6891c59dfc9",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui",
+        "codex-tui"
+      ]
+    },
+    "E-22": {
+      "path": "tests/e2e/tui_relay/scenarios/E-22-tool-use-text-completeness.yaml",
+      "sha256": "e091bf10500a0bba9a44f6f91a2c095c9474a5890d91f923f505f0ee52aa5e14",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "claude-herdr"
+      ]
+    },
+    "E-23": {
+      "path": "tests/e2e/tui_relay/scenarios/E-23-premature-completion-guard.yaml",
+      "sha256": "3d3a96df6c4439fa6d7771d2bdc5026f0296a96e4ba8df7fc2990aa817a89a39",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui"
+      ]
+    },
+    "E-24": {
+      "path": "tests/e2e/tui_relay/scenarios/E-24-croncreate-background-fixture.yaml",
+      "sha256": "9256c4e5bf179327b73b28a41ce8556de63e7b6a06f4c4ffe5f18e9c81d7ebe6",
+      "coverage_class": "fixture",
+      "cells": [
+        "claude-pipe"
+      ]
+    },
+    "E-25": {
+      "path": "tests/e2e/tui_relay/scenarios/E-25-codex-modern-schema-fixture.yaml",
+      "sha256": "e188daea52bd78fb72d83b9bc0b6d6c3ef2f7ad33fa2360f2d37ec8a63083b34",
+      "coverage_class": "fixture",
+      "cells": [
+        "codex-pipe",
+        "codex-tui"
+      ]
+    },
+    "E-26": {
+      "path": "tests/e2e/tui_relay/scenarios/E-26-croncreate-live-known-gap.yaml",
+      "sha256": "6c4f57098109f883b921abd293e10a17010875f0514964a17ced92b0be0d7170",
+      "coverage_class": "unsupported-known-gap",
+      "cells": [
+        "claude-pipe"
+      ]
+    },
+    "E-27": {
+      "path": "tests/e2e/tui_relay/scenarios/E-27-codex-modern-schema-live-known-gap.yaml",
+      "sha256": "b7c0554e48c9a544d4d72f642ff38a630285890230ac3f29c2b460f7c45bffc6",
+      "coverage_class": "unsupported-known-gap",
+      "cells": [
+        "codex-pipe",
+        "codex-tui"
+      ]
+    },
+    "E-28": {
+      "path": "tests/e2e/tui_relay/scenarios/E-28-codex-live-tool-command-known-gap.yaml",
+      "sha256": "002e1d27bd8ffb6379f660fbcba70de3011395d3dd8e588193ab6c08fccf25ab",
+      "coverage_class": "unsupported-known-gap",
+      "cells": [
+        "codex-pipe",
+        "codex-tui"
+      ]
+    },
+    "E-3": {
+      "path": "tests/e2e/tui_relay/scenarios/E-3-utf8-multiline.yaml",
+      "sha256": "0862988a3f49e3fc19525d52ad83ee5838f862e88bfe570fc6f69c3a99db2769",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "codex-pipe",
+        "codex-tui",
+        "claude-herdr",
+        "codex-herdr"
+      ]
+    },
+    "E-30": {
+      "path": "tests/e2e/tui_relay/scenarios/E-30-codex-warm-followup-pane-reuse.yaml",
+      "sha256": "9b3c3802721420dace4c36020371be883ab37913722808f74de4ea82c17e9563",
+      "coverage_class": "live",
+      "cells": [
+        "codex-tui",
+        "codex-herdr"
+      ]
+    },
+    "E-31": {
+      "path": "tests/e2e/tui_relay/scenarios/E-31-codex-warm-followup-forced-fallback.yaml",
+      "sha256": "73a58b9a56ceb87b1b2aede39ba3e3154fa90d874e89e2e2925bec5cfed23128",
+      "coverage_class": "live",
+      "cells": [
+        "codex-tui"
+      ]
+    },
+    "E-35": {
+      "path": "tests/e2e/tui_relay/scenarios/E-35-durable-delivery-record.yaml",
+      "sha256": "632cc0d0d22c5647ee4f8bdf5d85fa838c376c196b02feff11abe17480a45ccd",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "claude-herdr",
+        "codex-herdr"
+      ]
+    },
+    "E-36": {
+      "path": "tests/e2e/tui_relay/scenarios/E-36-normal-intake-sequential-ten.yaml",
+      "sha256": "2ddcb9752b38f8a5be0f1541b932395d306b92ecdc496d81aeb032fb45552e9d",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui",
+        "claude-herdr",
+        "codex-herdr"
+      ]
+    },
+    "E-37": {
+      "path": "tests/e2e/tui_relay/scenarios/E-37-codex-model-local-control.yaml",
+      "sha256": "73772953c99c3b1f7fd3ee2914d8f8f7c4fa2a5a528d86e8de03f121101a740a",
+      "coverage_class": "live",
+      "cells": [
+        "codex-pipe",
+        "codex-tui"
+      ]
+    },
+    "E-4": {
+      "path": "tests/e2e/tui_relay/scenarios/E-4-direct-input-relay.yaml",
+      "sha256": "f1202b837f85ccdeba575cae288abc5259635de4e15d217844a424620df8d661",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui",
+        "codex-tui"
+      ]
+    },
+    "E-5": {
+      "path": "tests/e2e/tui_relay/scenarios/E-5-turn-separation.yaml",
+      "sha256": "3e6e6bd91b4dc4cf132a74c61d1d01970ad7834cde077c1d38dd5e160fb2cf2a",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "codex-pipe",
+        "codex-tui",
+        "claude-herdr",
+        "codex-herdr"
+      ]
+    },
+    "E-50": {
+      "path": "tests/e2e/tui_relay/scenarios/E-50-claude-clear-and-turns.yaml",
+      "sha256": "cd0ea8d84cdbe39913a8b93671884debbaa7958ecebba869c1d4df4103f8006b",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui",
+        "claude-pipe",
+        "claude-herdr"
+      ]
+    },
+    "E-51": {
+      "path": "tests/e2e/tui_relay/scenarios/E-51-codex-clear-and-turns.yaml",
+      "sha256": "f66f150206fed9a46025b9071ea6671acd38b3bf12717b9865c51f5d534bf4fa",
+      "coverage_class": "live",
+      "cells": [
+        "codex-tui",
+        "codex-pipe",
+        "codex-herdr"
+      ]
+    },
+    "E-52": {
+      "path": "tests/e2e/tui_relay/scenarios/E-52-bulk-three-turns.yaml",
+      "sha256": "ae66346c2667abf8f8e2238e0944577d99f6ca663b9b95b9ad97778f6f38b16e",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "codex-pipe",
+        "codex-tui"
+      ]
+    },
+    "E-53": {
+      "path": "tests/e2e/tui_relay/scenarios/E-53-claude-autonomous-background-turn.yaml",
+      "sha256": "a79754e82179669f6233afb40734dafd938fb683f9bd50b617c23dcbb441473d",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui"
+      ]
+    },
+    "E-54": {
+      "path": "tests/e2e/tui_relay/scenarios/E-54-discord-stop-active-and-idle.yaml",
+      "sha256": "3c70f26ea423b5671fdcae36bf1f2e43e12f1545a07b6a3fdf022120bcf2a02c",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui"
+      ]
+    },
+    "E-6": {
+      "path": "tests/e2e/tui_relay/scenarios/E-6-compact-recap-once.yaml",
+      "sha256": "7d9d30b34bbe089f0e7e4f8a81b26ae36e6e705e9f8b0484391aae4ab30ea644",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui"
+      ]
+    },
+    "E-60": {
+      "path": "tests/e2e/tui_relay/scenarios/E-60-o-inline-tool-card-order.yaml",
+      "sha256": "76e45b24656936a6b346ad65c116d12c285ef56480a9d6b32acf5aed3f018cc6",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui"
+      ]
+    },
+    "E-61": {
+      "path": "tests/e2e/tui_relay/scenarios/E-61-o-restart-mid-turn-one-summary.yaml",
+      "sha256": "a0a3b6217e68a6bd62f1ef529306e4f7f6c58b17077ceeab2e1764e0df2cd1ac",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui"
+      ]
+    },
+    "E-62": {
+      "path": "tests/e2e/tui_relay/scenarios/E-62-legacy-no-footer-one-summary.yaml",
+      "sha256": "2a1350efdcaae4429f9af259336b4bd9f92bbf1963f1431b5c3f183198676208",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui"
+      ]
+    },
+    "E-63": {
+      "path": "tests/e2e/tui_relay/scenarios/E-63-input-order-across-restart.yaml",
+      "sha256": "02ad3a40f29d2f13a48a4f1fbbd06055e428a5de48cb569e7b61835e994423cc",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui"
+      ]
+    },
+    "E-64": {
+      "path": "tests/e2e/tui_relay/scenarios/E-64-claude-local-control-exactly-once.yaml",
+      "sha256": "2539a5e8a5c6d14ebf9cdbb5cafed981b391e17a12fa9ec1b3bd821b694df6c0",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui"
+      ]
+    },
+    "E-7": {
+      "path": "tests/e2e/tui_relay/scenarios/E-7-codex-compact-readiness.yaml",
+      "sha256": "f961b701855c372cea14ada9ec473a811123fe5c4fb2d252b3508f19bae4303b",
+      "coverage_class": "live",
+      "cells": [
+        "codex-pipe",
+        "codex-tui"
+      ]
+    },
+    "E-8": {
+      "path": "tests/e2e/tui_relay/scenarios/E-8-restart-between-turns.yaml",
+      "sha256": "c03b083e744c7f49836e503e253c64b6403f6183a75c4c9a46211c6798dbc0d0",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "codex-pipe",
+        "codex-tui",
+        "claude-herdr",
+        "codex-herdr"
+      ]
+    },
+    "E-9": {
+      "path": "tests/e2e/tui_relay/scenarios/E-9-restart-mid-stream.yaml",
+      "sha256": "743142faa1b4a5d5a7e44b849c67a2d8d11a7c6d1965071836c4581549daac28",
+      "coverage_class": "live",
+      "cells": [
+        "claude-pipe",
+        "claude-tui",
+        "codex-pipe",
+        "codex-tui"
+      ]
+    }
+  },
+  "control_occurrences": {
+    "R-inject-managed": {
+      "provider": "claude",
+      "host": "herdr",
+      "surface": "channel",
+      "state": "busy",
+      "busy_basis": "managed",
+      "origin": "controlled_ingress",
+      "coverage_scenario": "R-inject-managed",
+      "operations": [
+        "inject_before_turn_end",
+        "injection_latency",
+        "exactly_once"
+      ],
+      "preconditions": [
+        "managed_active_claim_or_inflight",
+        "human_branch_entered"
+      ]
+    }
+  }
+}

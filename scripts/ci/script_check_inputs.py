@@ -88,6 +88,7 @@ SELF_TEST_INPUTS: dict[str, tuple[str, ...]] = {
     ),
     "TUI relay e2e harness unit tests (#5065/#5997)": (
         *SCRIPT_TEST_INPUTS,
+        "docs/e2e-continuous/bundles.schema1.json",
         "src/services/discord/tui_prompt_relay/injected_prompt_policy.rs",
         "src/services/discord/commands/**",
     ),

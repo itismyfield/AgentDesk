@@ -474,7 +474,8 @@ class E4ProviderBodyWait(unittest.TestCase):
         driver.validate_scenario_schema(scenario)
         bot = assertions.provider_bot_id(driver.cell_provider(cell))
         warmup = [{"id": "11", "content": "[E2E:E4:WARMUP]", "author": {"id": bot, "bot": True}, "type": 0}]
-        direct = [{"id": "12", "content": "-# ⌨️ direct-input-echo (E-4) — please reply with the literal string DIRECT_E4_OK",
+        direct = [{"id": "12", "content": "-# ⌨️ tui direct input\n```\n"
+                   "direct-input-echo (E-4) — please reply with the literal string DIRECT_E4_OK\n```",
                    "author": {"id": self.NOTICE_BOT, "bot": True}, "type": 0}]
         direct += [{"id": str(20 + i), "content": "DIRECT_E4_OK", "author": {"id": author, "bot": True}, "type": 0}
                    for i, author in enumerate(bodies)]
