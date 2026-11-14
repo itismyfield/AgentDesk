@@ -152,7 +152,11 @@ impl Request<'_> {
         memento_context_loaded: &mut bool,
         session_strategy_reason: &mut &'static str,
     ) {
-        if !retrying() {
+        // The effort continuation resumes the session its restart already relaunched; a pending
+        // reset waits for the next input instead of starting it over.
+        let effort_continuation =
+            self.source == Some(crate::services::turn_orchestrator::effort_intent::SOURCE);
+        if !retrying() && !effort_continuation {
             super::super::super::super::commands::reset_provider_session_if_pending(
                 &self.ctx.http,
                 self.shared,

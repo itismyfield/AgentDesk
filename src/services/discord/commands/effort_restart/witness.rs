@@ -21,12 +21,24 @@ pub(super) struct Bound {
     seq: u64,
 }
 
-/// What `tmux` last bound on the channel, read from the binding log.
-pub(super) fn bound(provider: &ProviderKind, channel: u64, tmux: &str) -> Result<Bound, String> {
+impl Bound {
+    /// The bound process's execution nonce: a later bind on the same pane names another process.
+    pub(super) fn nonce(&self) -> &str {
+        &self.execution_nonce
+    }
+}
+
+/// What `tmux` last bound on the channel, read from the binding log; `None` when the pane bound no
+/// transcript, so no open turn of it can wait for an end record.
+pub(super) fn bound(
+    provider: &ProviderKind,
+    channel: u64,
+    tmux: &str,
+) -> Result<Option<Bound>, String> {
     let shadow = match provider {
         ProviderKind::Claude => ShadowProvider::Claude,
         ProviderKind::Codex => ShadowProvider::Codex,
-        _ => return Err("provider has no transcript source".into()),
+        _ => return Ok(None),
     };
     let history = BindingLog.binding_history(channel)?;
     let found = history.iter().rev().find_map(|event| {
@@ -40,8 +52,10 @@ pub(super) fn bound(provider: &ProviderKind, channel: u64, tmux: &str) -> Result
         };
         (event.tmux_session == tmux && event.provider == shadow).then_some((event, source))
     });
-    let (event, source) = found.ok_or("the pane has no bound transcript")?;
-    Ok(Bound {
+    let Some((event, source)) = found else {
+        return Ok(None);
+    };
+    Ok(Some(Bound {
         binding: SourceBinding {
             channel_id: channel,
             provider: shadow,
@@ -50,7 +64,7 @@ pub(super) fn bound(provider: &ProviderKind, channel: u64, tmux: &str) -> Result
         tmux_session: event.tmux_session.clone(),
         execution_nonce: event.execution_nonce.clone(),
         seq: event.seq,
-    })
+    }))
 }
 
 /// Records that the bound process ended where its transcript ends, when that leaves a turn open;

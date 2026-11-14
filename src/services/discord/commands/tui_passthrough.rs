@@ -139,6 +139,9 @@ async fn saved_effort_notice(
         } => format!(
             "{saved} 실행 중이던 TUI를 종료했고, 다음 입력부터 같은 세션에서 이 값으로 이어집니다(맥락 유지)."
         ),
+        Restart::Admitting { .. } => format!(
+            "{saved} 같은 세션으로 TUI를 다시 시작했고, 중단한 작업의 자동 이어하기는 접수를 확인하는 대로 이어갑니다."
+        ),
         Restart::NotRunning => format!("{saved} 실행 중인 TUI가 없어 다음 기동부터 적용합니다."),
         Restart::Kept(reason) => format!(
             "{saved} 지금은 재기동하지 않았습니다: {reason}. {}",

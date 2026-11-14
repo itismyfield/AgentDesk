@@ -159,6 +159,8 @@ pub(in crate::services::discord) fn owner_drive(
         (mailbox.clone(), provider.as_str().to_string()),
     );
     let drains = pool.clone();
+    #[cfg(unix)]
+    let restart = runtime.clone();
     let handoff: Handoff = std::sync::Arc::new(move |front| {
         let (mailbox, pool, provider, idle, runtime) = (
             busy.clone(),
@@ -272,6 +274,13 @@ pub(in crate::services::discord) fn owner_drive(
     let settled: Option<Owed> = drains.map(|pool| {
         let settled: Owed = std::sync::Arc::new(move || {
             let (pool, (mailbox, provider)) = (pool.clone(), owed.clone());
+            // A restart left unfinished (its end unproven, its continuation unconfirmed) is
+            // carried on whenever the drive runs out of fronts.
+            #[cfg(unix)]
+            if let Some(shared) = &restart {
+                let restart = crate::services::discord::commands::effort_restart::kick;
+                restart(shared, ChannelId::new(channel));
+            }
             Box::pin(async move {
                 let drain = crate::services::discord::queue_io::input_owner::notice::drain;
                 let drain = drain(&pool, &mailbox, &provider, channel).await;

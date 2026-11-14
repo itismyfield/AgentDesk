@@ -5,5 +5,5 @@ mod recovery;
 mod tmux;
 mod witness;
 
-pub(in crate::services::discord) use recovery::resume_owed;
+pub(in crate::services::discord) use recovery::{kick, resume_owed};
 pub(in crate::services::discord) use tmux::{Restart, restart};

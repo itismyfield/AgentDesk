@@ -245,6 +245,11 @@ fn cancel(
                 super::origin::now_ms(),
             );
             let item = next.items.remove(at + first);
+            let dropped = std::slice::from_ref(&item);
+            super::effort_continue::close_dropped(
+                &mut next,
+                super::effort_continue::Dropped::Only(dropped),
+            );
             if next
                 .unfinished_handoff
                 .as_ref()
@@ -294,6 +299,7 @@ fn clear(owner: &mut Owner) -> ClearChannelResult {
     if first == 0 && !discarded.is_empty() {
         owner.revoke_front();
     }
+    super::effort_continue::close_dropped(&mut next, super::effort_continue::Dropped::All);
     let mut result = ClearChannelResult::default();
     match owner.commit(next) {
         Ok(()) => {
@@ -443,6 +449,7 @@ impl Owner {
         for input in owed {
             next.owe_attempt(&input, TerminalOutcome::Cancelled, at);
         }
+        super::effort_continue::close_dropped(&mut next, super::effort_continue::Dropped::All);
         self.commit(next)?;
         self.project_slots();
         Ok(ClearedWaiting {

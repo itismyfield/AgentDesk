@@ -206,6 +206,7 @@ impl ChannelMailboxState {
         if first == 0 && !drained.is_empty() {
             owner.revoke_front();
         }
+        super::effort_continue::close_dropped(&mut next, super::effort_continue::Dropped::All);
         match owner.commit(next) {
             Ok(()) => Ok(drained),
             Err(error) if owner.pending.is_some() => Err(PurgeStop::SaveUnknown(error)),

@@ -258,7 +258,7 @@ EffortInit(mode) ==
         priorityBroken |-> FALSE, barrierBroken |-> FALSE, barrier |-> 0, queuedC |-> 0,
         admittedC |-> [r \in EffortRoots |-> 0], debt |-> 1, debtPosts |-> 0,
         late |-> 0, crashes |-> 0, durable |-> FALSE, cancelled |-> {}, discarded |-> {},
-        clears |-> 0, resetPending |-> (mode \in {"reset", "reset-kept", "reset-c", "reset-newer"}),
+        clears |-> 0, resetPending |-> (mode \in {"reset", "reset-kept", "reset-c", "reset-newer", "reset-newer-lost"}),
         sessionResets |-> 0, newerChanges |-> 0]
 EffortOriginalNeverFinishes == effort.mode \in
     {"nonfinishing", "nonfinishing-failure", "no-interrupt", "no-close"}
@@ -365,10 +365,21 @@ EffortStopTui ==
     /\ effort' = [effort EXCEPT !.phase = "booting", !.presence = "Unknown",
         !.users = IF effort.mode = "drop-queue" THEN <<>> ELSE @,
         !.resetPending = IF effort.mode \in {"reset-kept", "reset-c"} THEN @ ELSE FALSE]
+\* C's start fails before any key twice: the owner retains C as known-not-sent and drops it from the
+\* queue. The design closes the intent in that commit; start-fails-keeps (S4b head) leaves it.
+EffortCStartFails ==
+    /\ UNCHANGED vars
+    /\ effort.mode \in {"start-fails", "start-fails-keeps"} /\ effort.clears = 0
+    /\ effort.phase = "ready" /\ effort.active = "none" /\ effort.wake
+    /\ effort.pending > 0 /\ effort.queuedC = effort.pending
+    /\ LET keep == effort.mode = "start-fails-keeps" IN
+       effort' = [effort EXCEPT !.clears = 1, !.queuedC = 0,
+           !.pending = IF keep THEN @ ELSE 0, !.barrier = IF keep THEN @ ELSE 0,
+           !.cancelled = IF keep THEN @ ELSE @ \cup {effort.pending}]
 \* A /fast or /model saved after the restart consumed the pending its launch reflects.
 EffortNewerChange ==
     /\ UNCHANGED vars
-    /\ effort.mode = "reset-newer" /\ effort.newerChanges = 0
+    /\ effort.mode \in {"reset-newer", "reset-newer-lost"} /\ effort.newerChanges = 0
     /\ effort.phase \in {"booting", "ready"} /\ ~effort.resetPending
     /\ effort' = [effort EXCEPT !.newerChanges = 1, !.resetPending = TRUE]
 EffortLaunchFails ==
@@ -404,7 +415,7 @@ EffortSubmitContinuation ==
     /\ effort' = [effort EXCEPT !.continuations[effort.pending] = @ + 1, !.pending = 0,
         !.barrier = 0, !.queuedC = 0,
         !.sameSession = IF effort.mode = "reset-c" /\ effort.resetPending THEN FALSE ELSE @,
-        !.resetPending = IF effort.mode = "reset-c" THEN FALSE ELSE @,
+        !.resetPending = IF effort.mode \in {"reset-c", "reset-newer-lost"} THEN FALSE ELSE @,
         !.active = "continuation", !.row = TRUE, !.placeholder = TRUE, !.presence = "Busy"]
 EffortAdmitUser ==
     /\ UNCHANGED vars
@@ -450,8 +461,9 @@ EffortLateOldCompletion ==
 \* cancels the intent; after it a durable intent resumes, a lost one (late-intent) owes nothing.
 EffortDaemonRestart ==
     /\ UNCHANGED vars
-    /\ effort.mode \in {"recover", "recover-twice", "crash", "late-intent"} /\ effort.crashes = 0
-    /\ IF effort.mode \in {"crash", "late-intent"}
+    /\ effort.mode \in {"recover", "recover-twice", "crash", "late-intent", "crash-no-wake"}
+    /\ effort.crashes = 0
+    /\ IF effort.mode \in {"crash", "late-intent", "crash-no-wake"}
        THEN effort.phase \in {"prepared", "ready"} \cup EffortCutUnresolved
        ELSE effort.root > 0 /\ effort.phase \in {"stopped", "booting", "ready"}
     /\ effort' = IF effort.mode = "recover-twice"
@@ -463,14 +475,22 @@ EffortDaemonRestart ==
                                      !.cancelled = @ \cup {effort.pending}, !.wake = TRUE]
                  ELSE IF ~effort.durable
                  THEN [effort EXCEPT !.crashes = 1, !.pending = 0, !.barrier = 0, !.queuedC = 0]
-                 ELSE [effort EXCEPT !.crashes = 1, !.wake = (effort.phase = "ready") \/ @]
+                 ELSE IF effort.mode = "recover"
+                 THEN [effort EXCEPT !.crashes = 1, !.wake = (effort.phase = "ready") \/ @]
+                 \* A restarted server holds no wake: only boot recovery (the resolver) gives one.
+                 ELSE [effort EXCEPT !.crashes = 1, !.wake = FALSE]
+\* Owner recovery runs the resolver and wakes the drive; the crash-no-wake mutant never does.
+EffortBootResolve ==
+    /\ UNCHANGED vars
+    /\ effort.mode \in {"crash", "late-intent"} /\ effort.crashes = 1 /\ ~effort.wake
+    /\ effort' = [effort EXCEPT !.wake = TRUE]
 \* Only a physically idle provider or an explicit failed restart is a normal rest state.
 EffortRest ==
     /\ effort.phase = "failed"
        \/ (effort.phase \in {"running", "ready", "waiting", "waiting-herdr", "kept"} /\ effort.active = "none")
     /\ UNCHANGED allVars
 EffortNext == EffortRequest \/ EffortSecondRequest \/ EffortInputArrives \/ EffortPrepare \/ EffortInterrupt
-    \/ EffortKillFails \/ EffortClear \/ EffortNewerChange
+    \/ EffortKillFails \/ EffortClear \/ EffortNewerChange \/ EffortCStartFails \/ EffortBootResolve
     \/ EffortNoticeFails \/ EffortTellInterrupted \/ EffortDuplicateNotice \/ EffortCloseInterrupted
     \/ EffortNoActiveTurn \/ EffortCurrentHerdrApply \/ EffortCurrentNextTurn \/ EffortStopTui \/ EffortLaunchFails
     \/ EffortRetryFailed \/ EffortResume \/ EffortContinue \/ EffortSubmitContinuation \/ EffortAdmitUser \/ EffortFinish \/ EffortRepost \/ EffortDeliverOldDebt \/ EffortRest
@@ -480,6 +500,8 @@ EffortFair ==
     /\ WF_allVars(EffortPrepare)
     /\ WF_allVars(EffortInterrupt)
     /\ WF_allVars(EffortKillFails)
+    /\ WF_allVars(EffortCStartFails)
+    /\ WF_allVars(EffortBootResolve)
     /\ WF_allVars(EffortTellInterrupted)
     /\ WF_allVars(EffortCloseInterrupted)
     /\ WF_allVars(EffortNoActiveTurn)
@@ -527,6 +549,10 @@ EffortResetSpec == EffortInit("reset") /\ [][EffortNext]_allVars /\ EffortFair
 EffortResetKeptSpec == EffortInit("reset-kept") /\ [][EffortNext]_allVars /\ EffortFair
 EffortResetCSpec == EffortInit("reset-c") /\ [][EffortNext]_allVars /\ EffortFair
 EffortResetNewerSpec == EffortInit("reset-newer") /\ [][EffortNext]_allVars /\ EffortFair
+EffortResetNewerLostSpec == EffortInit("reset-newer-lost") /\ [][EffortNext]_allVars /\ EffortFair
+EffortStartFailsSpec == EffortInit("start-fails") /\ [][EffortNext]_allVars /\ EffortFair
+EffortStartFailsKeepsSpec == EffortInit("start-fails-keeps") /\ [][EffortNext]_allVars /\ EffortFair
+EffortCrashNoWakeSpec == EffortInit("crash-no-wake") /\ [][EffortNext]_allVars /\ EffortFair
 \* One request restarts the TUI at most once; a request that resolved ready restarted it once.
 EffortOneRestartPerRequest == effort.binding <= effort.changes
 \* A running successor keeps its row, placeholder and presence whatever arrives for the old turn.
@@ -576,5 +602,7 @@ EffortBarrierEventuallyReleased == \A r \in EffortRoots : (effort.barrier = r) ~
 \* A pending /fast or /model reset the restart's launch already reflects never resets the session
 \* again; only a change saved after that launch's cut may.
 EffortNoSecondRestart == effort.sessionResets <= effort.newerChanges
+\* A change saved after the restart's cut keeps its pending until a user turn applies it.
+EffortNewerChangeKept == (effort.newerChanges > effort.sessionResets) => effort.resetPending
 
 ====

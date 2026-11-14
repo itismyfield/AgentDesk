@@ -8,7 +8,7 @@ use crate::services::discord::SharedData;
 use crate::services::discord::queue_io::input_owner::ingress::Intake;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::PendingQueueItem;
-use crate::services::turn_orchestrator::effort_intent::{EffortRestart, PROMPT, Request};
+use crate::services::turn_orchestrator::effort_intent::{Cut, EffortRestart, PROMPT, Request};
 
 /// What `/effort` did to the channel's TUI after its level was saved.
 #[derive(Debug, PartialEq, Eq)]
@@ -16,6 +16,9 @@ pub(in crate::services::discord) enum Restart {
     /// The TUI ended. `continues`: a turn was cut and its continuation is admitted, so the owner
     /// resumes the session now, else the next input does. `told`: that turn's notice is staged.
     Restarted { continues: bool, told: bool },
+    /// The TUI ended and its turn was cut; the continuation's admission is not confirmed yet and
+    /// is asked again, under the same ticket, on the owner's next wake.
+    Admitting { told: bool },
     /// No TUI runs: the next launch takes the level.
     NotRunning,
     /// Nothing was ended, for this reason.
@@ -24,11 +27,18 @@ pub(in crate::services::discord) enum Restart {
     Unfinished(String),
 }
 
-/// A restart's cut turn: the session it resumes and the episode its continuation answers for.
-pub(super) struct Owed {
-    pub(super) operation: String,
-    pub(super) native_session: String,
-    pub(super) episode: String,
+/// Where a restart's intent stands after one pass of the steps left once its TUI ended.
+pub(super) enum Step {
+    Admitted {
+        told: bool,
+    },
+    Admitting {
+        told: bool,
+    },
+    /// The old process's end is not recorded yet: the intent stays prepared and is retried.
+    Unproven(String),
+    Cancelled,
+    Refused(String),
 }
 
 type Intent = EffortRestart<PendingQueueItem>;
@@ -41,6 +51,13 @@ pub(super) async fn stored(shared: &Arc<SharedData>, channel: ChannelId) -> Opti
         Some(owner) => Ok(owner.prepare_effort(None, channel.get(), generation).ok()),
         None => Ok(None),
     });
+    read.await.ok().flatten()
+}
+
+/// The channel's intent while it still owes a step its restart did not finish.
+pub(super) async fn owed(shared: &Arc<SharedData>, channel: ChannelId) -> Option<Intent> {
+    let mailbox = shared.mailbox_peek(channel)?;
+    let read = mailbox.v2_request(|slot| Ok(slot.as_ref().and_then(|owner| owner.effort_owed())));
     read.await.ok().flatten()
 }
 
@@ -96,22 +113,54 @@ pub(in crate::services::discord) async fn restart(
             "이 채널의 입력 경로는 진행 중 턴의 즉시 재기동을 지원하지 않습니다".into(),
         );
     }
+    // Before anything ends, the cut turn's continuation and the process ending are stored, so a
+    // server stopping at any later step still owes that continuation, or cancels it.
+    let operation = match (&turn, waiting) {
+        (Some(turn), _) => {
+            let Some(episode) = turn.nonce() else {
+                return Restart::Kept("진행 중인 턴의 식별자를 확인하지 못했습니다".into());
+            };
+            let operation = uuid::Uuid::new_v4().simple().to_string();
+            let request = prepared(
+                provider,
+                channel,
+                &tmux,
+                (operation.as_str(), native_session.as_str(), episode),
+            );
+            if let Err(reason) = record(shared, channel, request).await {
+                return Restart::Kept(format!(
+                    "자동 이어하기를 미리 기록하지 못했습니다({reason})"
+                ));
+            }
+            Some(operation)
+        }
+        (None, Some(intent)) => Some(intent.operation),
+        (None, None) => None,
+    };
     if turn.is_some() {
         // The watcher reads this death as a stop of ours, not as a crash to hand off.
         let record = crate::services::discord::record_turn_stop_tombstone;
         record(channel, Some(&tmux), "effort_restart").await;
     }
-    match end_channel_tmux_keeping_session(shared, provider, channel, &tmux, "effort restart").await
-    {
-        Relaunch::Relaunched => {}
-        Relaunch::Refused(reason) => return Restart::Kept(reason),
-        Relaunch::KillFailed | Relaunch::Deferred => {
-            return Restart::Kept("TUI를 종료하지 못했습니다".into());
+    let refused =
+        match end_channel_tmux_keeping_session(shared, provider, channel, &tmux, "effort restart")
+            .await
+        {
+            Relaunch::Relaunched => None,
+            Relaunch::Refused(reason) => Some(reason),
+            Relaunch::KillFailed | Relaunch::Deferred => Some("TUI를 종료하지 못했습니다".into()),
+        };
+    if let Some(reason) = refused {
+        // The prepared continuation of a turn that keeps running is owed nothing.
+        if turn.is_some()
+            && let Some(operation) = &operation
+        {
+            cancel(shared, channel, operation).await;
         }
+        return Restart::Kept(reason);
     }
-    // The level is applied by this end; the next turn has no relaunch left to do for it.
-    super::super::control::release_relaunch_pending(shared, channel).await;
-    let cut = turn.as_ref().map(|turn| turn.nonce().map(str::to_string));
+    // The ended TUI's next launch reads the settings now saved; the pendings they answer are spent.
+    super::super::control::consume_reflected(shared, provider, channel).await;
     if turn.is_some() {
         let settled = settle_captured(shared, provider, turn).await;
         tracing::info!(
@@ -120,52 +169,76 @@ pub(in crate::services::discord) async fn restart(
             "effort restart settled its turn"
         );
     }
-    let owed = match (cut, waiting) {
-        (Some(Some(episode)), _) => {
-            let operation = uuid::Uuid::new_v4().simple().to_string();
-            let at = (channel.get(), tmux.clone(), operation.clone());
-            // Unproven, the continuation is still owed; its start waits on the pane's own evidence.
-            if let Err(error) = end_record(provider, at).await {
-                tracing::warn!(channel_id = channel.get(), %error, "effort restart end unproven");
-            }
-            Owed {
-                operation,
-                native_session,
-                episode,
-            }
-        }
-        (Some(None), _) => {
-            return Restart::Unfinished(
-                "중단한 턴의 식별자가 없어 이어하기를 만들지 못했습니다".into(),
-            );
-        }
-        (None, Some(intent)) => Owed {
-            operation: intent.operation,
-            native_session,
-            episode: intent.interrupted_episode.unwrap_or_default(),
+    let Some(operation) = operation else {
+        return Restart::Restarted {
+            continues: false,
+            told: false,
+        };
+    };
+    match advance(shared, provider, channel, &operation).await {
+        Step::Admitted { told } => Restart::Restarted {
+            continues: true,
+            told,
         },
-        (None, None) => {
-            return Restart::Restarted {
-                continues: false,
-                told: false,
-            };
-        }
-    };
-    let episode = owed.episode.clone();
-    if let Err(reason) = admit(shared, provider, channel, owed).await {
-        return Restart::Unfinished(reason);
+        Step::Admitting { told } => Restart::Admitting { told },
+        Step::Unproven(reason) => Restart::Unfinished(format!(
+            "옛 TUI의 종료 지점을 아직 기록하지 못했습니다({reason}). 기록되는 대로 이어갑니다"
+        )),
+        Step::Cancelled => Restart::Unfinished("자동 이어하기가 취소되었습니다".into()),
+        Step::Refused(reason) => Restart::Unfinished(reason),
     }
-    // Staged only once the continuation it promises is admitted.
-    let told = match shared.pg_pool.as_ref() {
-        Some(pool) => {
-            let staged = notice::interrupted(pool, provider.as_str(), channel.get(), &episode);
-            staged.await.is_ok()
-        }
-        None => false,
-    };
-    Restart::Restarted {
-        continues: true,
-        told,
+}
+
+/// The not-ready intent a restart stores before it ends `tmux`: the cut episode's ticket and the
+/// process the pane last bound.
+fn prepared(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux: &str,
+    (operation, native_session, episode): (&str, &str, &str),
+) -> Request {
+    let bound = witness::bound(provider, channel.get(), tmux);
+    let bind_nonce = bound.ok().flatten().map(|bound| bound.nonce().to_string());
+    Request {
+        operation: operation.into(),
+        native_session: native_session.into(),
+        interrupted_episode: Some(episode.into()),
+        desired_revision: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        ready: false,
+        cut: Some(Cut {
+            tmux: tmux.into(),
+            bind_nonce,
+        }),
+    }
+}
+
+/// Stores `request` in the channel's owner snapshot.
+async fn record(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    request: Request,
+) -> Result<Intent, String> {
+    let generation = crate::services::discord::runtime_store::process_generation();
+    let mailbox = shared.mailbox(channel);
+    mailbox
+        .v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("owner not adopted")?;
+            owner.prepare_effort(Some(request), channel.get(), generation)
+        })
+        .await
+}
+
+/// Closes `operation`'s continuation and barrier; a commit that fails leaves it to the next wake.
+pub(super) async fn cancel(shared: &Arc<SharedData>, channel: ChannelId, operation: &str) {
+    let operation = operation.to_string();
+    let mailbox = shared.mailbox(channel);
+    let cancelled = mailbox.v2_request(move |slot| {
+        slot.as_mut()
+            .ok_or("owner not adopted")?
+            .cancel_effort(&operation)
+    });
+    if let Err(error) = cancelled.await {
+        tracing::warn!(channel_id = channel.get(), %error, "effort intent not cancelled");
     }
 }
 
@@ -180,51 +253,119 @@ async fn owner_takes(
         && matches!(ingress::adopt(shared, provider, channel).await, Ok(true))
 }
 
-/// Reads the ended process's transcript off the async workers.
+/// The steps left once the old TUI ended: end record, ready, notice and admission. Each repeats
+/// safely, so a later wake or a restarted server reruns them for the stored intent.
+pub(super) async fn advance(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    operation: &str,
+) -> Step {
+    let Some(intent) = stored(shared, channel).await else {
+        return Step::Refused("자동 이어하기 기록이 없습니다".into());
+    };
+    if intent.operation != operation {
+        return Step::Refused("다른 재기동이 자동 이어하기를 맡았습니다".into());
+    }
+    if intent.cancelled {
+        return Step::Cancelled;
+    }
+    let Some(episode) = intent.interrupted_episode.clone() else {
+        return Step::Refused("중단한 턴이 없습니다".into());
+    };
+    if !intent.ready {
+        if let Some(cut) = &intent.cut {
+            let at = (channel.get(), cut.tmux.clone(), intent.operation.clone());
+            if let Err(error) = end_record(provider, at).await {
+                tracing::warn!(channel_id = channel.get(), %error, "effort restart end unproven");
+                return Step::Unproven(error);
+            }
+        }
+        let request = Request {
+            ready: true,
+            cut: None,
+            ..request_of(&intent)
+        };
+        match record(shared, channel, request).await {
+            Ok(ready) if ready.cancelled => return Step::Cancelled,
+            Ok(_) => {}
+            Err(reason) if reason.contains("cancelled") => return Step::Cancelled,
+            Err(reason) => return Step::Refused(reason),
+        }
+    }
+    // Staged once the end is proven, keyed by the cut turn, however often this runs.
+    let told = match shared.pg_pool.as_ref() {
+        Some(pool) => {
+            let staged = notice::interrupted(pool, provider.as_str(), channel.get(), &episode);
+            staged.await.is_ok()
+        }
+        None => false,
+    };
+    match admit(shared, provider, channel, &intent).await {
+        Admission::Accepted => Step::Admitted { told },
+        Admission::Pending => Step::Admitting { told },
+        Admission::Rejected(reason) if reason.contains("cancelled") => Step::Cancelled,
+        Admission::Rejected(reason) => Step::Refused(reason),
+    }
+}
+
+fn request_of(intent: &Intent) -> Request {
+    Request {
+        operation: intent.operation.clone(),
+        native_session: intent.native_session.clone(),
+        interrupted_episode: intent.interrupted_episode.clone(),
+        desired_revision: intent.desired_revision,
+        ready: intent.ready,
+        cut: intent.cut.clone(),
+    }
+}
+
+/// Records where the ended process's transcript ends, read off the async workers. A pane that
+/// bound no transcript leaves no open turn to close.
 async fn end_record(
     provider: &ProviderKind,
     (channel, tmux, operation): (u64, String, String),
 ) -> Result<bool, String> {
+    let Some(bound) = witness::bound(provider, channel, &tmux)? else {
+        return Ok(false);
+    };
     let root = crate::config::runtime_root().ok_or("no runtime root")?;
-    let bound = witness::bound(provider, channel, &tmux)?;
     let read = move || witness::record(&root, bound, &operation);
     tokio::task::spawn_blocking(read)
         .await
         .map_err(|error| error.to_string())?
 }
 
-/// Records the cut episode's one continuation as ready and admits it at the owner's front, under
-/// the ticket the episode derives, so a repeat admits nothing new.
-pub(super) async fn admit(
+enum Admission {
+    Accepted,
+    Pending,
+    Rejected(String),
+}
+
+/// Admits the cut episode's one continuation at the owner's front under the ticket its intent
+/// holds, so a repeat admits nothing new. An unconfirmed admission is asked again under that ticket.
+async fn admit(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
-    owed: Owed,
-) -> Result<(), String> {
-    let generation = crate::services::discord::runtime_store::process_generation();
-    let request = Request {
-        operation: owed.operation,
-        native_session: owed.native_session.clone(),
-        interrupted_episode: Some(owed.episode),
-        desired_revision: chrono::Utc::now().timestamp_millis().max(0) as u64,
-        ready: true,
-    };
-    let intent = shared
-        .mailbox(channel)
-        .v2_request(move |slot| {
-            let owner = slot.as_mut().ok_or("owner not adopted")?;
-            owner.prepare_effort(Some(request), channel.get(), generation)
-        })
-        .await?;
+    intent: &Intent,
+) -> Admission {
     if matches!(provider, ProviderKind::Claude) {
         // The resumed CLI must not continue the cut turn itself: the continuation submits first.
-        crate::services::claude_tui::session::expect_owner_first_submit(&owed.native_session);
+        crate::services::claude_tui::session::expect_owner_first_submit(&intent.native_session);
     }
-    let admit = crate::services::discord::router::message_handler::owner_admit_start;
+    let start = crate::services::discord::router::message_handler::owner_admit_start;
     let turn = format!("effort:{}:{}", channel.get(), intent.operation);
-    match admit(shared, channel, (&turn, PROMPT), intent.context()).await {
-        Some(Intake::Accepted | Intake::Pending(_)) => Ok(()),
-        Some(Intake::Rejected(reason)) => Err(reason),
-        None => Err("owner does not take this start".into()),
+    for wait_ms in [200, 800, 0] {
+        match start(shared, channel, (&turn, PROMPT), intent.context()).await {
+            Some(Intake::Accepted) => return Admission::Accepted,
+            Some(Intake::Pending(_)) if wait_ms > 0 => {
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            }
+            Some(Intake::Pending(_)) => return Admission::Pending,
+            Some(Intake::Rejected(reason)) => return Admission::Rejected(reason),
+            None => return Admission::Rejected("owner does not take this start".into()),
+        }
     }
+    Admission::Pending
 }

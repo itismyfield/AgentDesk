@@ -1,31 +1,63 @@
-//! After a server restart, the continuation a finished restart still owes is admitted again.
+//! The steps a restart left unfinished, carried on by a restarted server or the owner's next wake.
 use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::SharedData;
+use crate::services::platform::tmux::PaneLiveness;
 
-/// Re-admits the channel's ready, unsubmitted continuation under its stored ticket: one that is
-/// already queued or already submitted stays single.
+/// Carries the channel's unfinished restart on: cancelled when its old TUI still runs, else its end
+/// is recorded and its continuation admitted under the stored ticket, so a repeat adds nothing.
 pub(in crate::services::discord) async fn resume_owed(
     shared: &Arc<SharedData>,
     channel: ChannelId,
 ) {
-    let Some(intent) = super::tmux::stored(shared, channel).await else {
-        return;
-    };
-    if intent.pending().is_none() || !intent.ready {
+    if super::tmux::owed(shared, channel).await.is_none() {
         return;
     }
-    let Some(episode) = intent.interrupted_episode else {
+    let Ok(_transition) = shared.acquire_session_transition(channel).await else {
         return;
     };
-    let owed = super::tmux::Owed {
-        operation: intent.operation,
-        native_session: intent.native_session,
-        episode,
+    let Some(intent) = super::tmux::owed(shared, channel).await else {
+        return;
     };
-    if let Err(error) = super::tmux::admit(shared, &shared.provider, channel, owed).await {
+    let provider = &shared.provider;
+    if !intent.ready {
+        // Without the process it was to end, nothing tells whether that end happened.
+        let Some(cut) = &intent.cut else {
+            return;
+        };
+        let liveness = crate::services::tmux_diagnostics::tmux_session_pane_liveness(&cut.tmux);
+        // A live pane still bound to the process the restart named, or to one it could not name.
+        let same = || {
+            let bound = super::witness::bound(provider, channel.get(), &cut.tmux);
+            let now = bound.ok().flatten().map(|bound| bound.nonce().to_string());
+            cut.bind_nonce.is_none() || now == cut.bind_nonce
+        };
+        match liveness {
+            PaneLiveness::ProbeError => return,
+            PaneLiveness::Live if same() => {
+                // The server stopped before the end: the cut turn still runs and owes nothing.
+                super::tmux::cancel(shared, channel, &intent.operation).await;
+                return;
+            }
+            PaneLiveness::Live | PaneLiveness::DeadOrAbsent => {}
+        }
+        super::super::control::consume_reflected(shared, provider, channel).await;
+    }
+    let step = super::tmux::advance(shared, provider, channel, &intent.operation).await;
+    if let super::tmux::Step::Unproven(error) | super::tmux::Step::Refused(error) = step {
         tracing::warn!(channel_id = channel.get(), %error, "owed effort continuation not admitted");
     }
+}
+
+/// Starts [`resume_owed`] off the caller's task when the channel's owner holds an unfinished
+/// restart; the owner drive calls this each time it runs out of fronts.
+pub(in crate::services::discord) fn kick(shared: &Arc<SharedData>, channel: ChannelId) {
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        if super::tmux::owed(&shared, channel).await.is_some() {
+            resume_owed(&shared, channel).await;
+        }
+    });
 }

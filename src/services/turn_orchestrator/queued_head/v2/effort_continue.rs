@@ -38,6 +38,10 @@ impl Owner {
             return Err("effort restart identity missing".into());
         }
         let current = self.snapshot.effort_restart.as_ref();
+        if current.is_some_and(|old| old.cancelled && old.operation == request.operation) {
+            return Err("effort continuation cancelled".into());
+        }
+        let current = current.filter(|old| !old.cancelled);
         let same_episode = current.filter(|old| {
             old.native_session == request.native_session
                 && old.interrupted_episode == request.interrupted_episode
@@ -48,6 +52,9 @@ impl Owner {
         }
         let intent = if let Some(old) = same_episode {
             let mut intent = old.clone();
+            if request.cut.is_some() {
+                intent.cut = request.cut.clone();
+            }
             if request.desired_revision > intent.desired_revision {
                 intent.desired_revision = request.desired_revision;
                 intent.ready = request.ready;
@@ -92,6 +99,8 @@ impl Owner {
                 desired_revision: request.desired_revision,
                 ready: request.ready,
                 continuation,
+                cancelled: false,
+                cut: request.cut,
             }
         };
         let mut next = self.snapshot.clone();
@@ -102,6 +111,35 @@ impl Owner {
             self.held = None;
         }
         Ok(intent)
+    }
+
+    /// Closes `operation`'s unsubmitted continuation and its barrier in one commit. `false` when
+    /// the stored intent is another operation's or has nothing left to close.
+    pub(crate) fn cancel_effort(&mut self, operation: &str) -> Result<bool, String> {
+        self.recover()?;
+        let mut next = self.snapshot.clone();
+        let Some(intent) = next.effort_restart.as_mut() else {
+            return Ok(false);
+        };
+        if intent.operation != operation || intent.pending().is_none() {
+            return Ok(false);
+        }
+        intent.cancelled = true;
+        self.commit(next)?;
+        Ok(true)
+    }
+
+    /// The stored intent while it still owes a step: not ready yet, or ready with its continuation
+    /// never admitted.
+    pub(crate) fn effort_owed(&self) -> Option<EffortRestart<PendingQueueItem>> {
+        let intent = self.snapshot.effort_restart.as_ref()?;
+        let c = intent.pending()?;
+        let ticket = Ticket::new(&c.ticket).ok()?;
+        let admitted = matches!(
+            self.admission_status(&ticket),
+            source_admission::TicketStatus::Committed
+        );
+        (!intent.ready || !admitted).then(|| intent.clone())
     }
 
     /// Older records may omit the flag; only an exact delivered receipt can restore it.
@@ -154,6 +192,9 @@ impl Owner {
             .continuation
             .as_ref()
             .ok_or_else(|| AdmitError::NotCommitted("no interrupted episode".into()))?;
+        if intent.cancelled {
+            return Err(AdmitError::Conflict("effort continuation cancelled".into()));
+        }
         if Ticket::new(&c.ticket).as_ref() != Ok(ticket)
             || !source_admission::same_original(original, &c.original)
             || *context != intent.context()
@@ -173,6 +214,48 @@ impl Owner {
             ));
         }
         Ok(None)
+    }
+}
+
+/// What a queue-removing commit dropped: everything waiting, or only these originals.
+pub(super) enum Dropped<'a> {
+    All,
+    Only(&'a [PendingQueueItem]),
+}
+
+/// Closes the unsubmitted continuation `next` no longer holds where it could still run, in the
+/// commit that dropped it. One still queued (an attempted head stays queued) or in doubt stays owned.
+pub(super) fn close_dropped(next: &mut SnapshotV2, dropped: Dropped<'_>) {
+    let Some(intent) = next.effort_restart.as_ref() else {
+        return;
+    };
+    let Some(c) = intent.pending() else {
+        return;
+    };
+    let named = match dropped {
+        Dropped::All => true,
+        Dropped::Only(items) => items
+            .iter()
+            .any(|item| source_admission::same_original(item, &c.original)),
+    };
+    let identity = sources::identity(&c.original);
+    let queued = next
+        .items
+        .iter()
+        .any(|item| sources::identity(item) == identity);
+    let in_doubt = (next.retained_inputs.iter()).any(|entry| {
+        matches!(entry.reason, RetainedReason::Unconfirmed)
+            && entry
+                .input
+                .members()
+                .any(|item| sources::identity(item) == identity)
+    });
+    if named
+        && !queued
+        && !in_doubt
+        && let Some(intent) = next.effort_restart.as_mut()
+    {
+        intent.cancelled = true;
     }
 }
 

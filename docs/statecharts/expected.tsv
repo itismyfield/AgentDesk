@@ -400,6 +400,7 @@ session-lifecycle/EffortRestartClear.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartClearKeeps.cfg	TmuxSession	EffortContinuationCustody	EffortBarrierEventuallyReleased,EffortContinuationEventuallyInjected,EffortCutEventuallyResolved,EffortPendingEventuallyProcessed,EffortSubmitReleasesBarrier
 session-lifecycle/EffortRestartCoalesce.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartCrash.cfg	TmuxSession	-	-
+session-lifecycle/EffortRestartCrashNoWake.cfg	TmuxSession	-	EffortBarrierEventuallyReleased,EffortContinuationEventuallyInjected,EffortCutEventuallyResolved,EffortPendingEventuallyProcessed,EffortSubmitReleasesBarrier
 session-lifecycle/EffortRestartCurrentHerdr.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartCurrentTmux.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartDesign.cfg	TmuxSession	-	-
@@ -426,8 +427,11 @@ session-lifecycle/EffortRestartReset.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartResetC.cfg	TmuxSession	EffortNoSecondRestart,EffortSameSession	-
 session-lifecycle/EffortRestartResetKept.cfg	TmuxSession	EffortNoSecondRestart	-
 session-lifecycle/EffortRestartResetNewer.cfg	TmuxSession	-	-
+session-lifecycle/EffortRestartResetNewerLost.cfg	TmuxSession	EffortNewerChangeKept	-
 session-lifecycle/EffortRestartRetry.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartSecond.cfg	TmuxSession	-	-
+session-lifecycle/EffortRestartStartFails.cfg	TmuxSession	-	-
+session-lifecycle/EffortRestartStartFailsKeeps.cfg	TmuxSession	EffortContinuationCustody	EffortBarrierEventuallyReleased,EffortContinuationEventuallyInjected,EffortCutEventuallyResolved,EffortPendingEventuallyProcessed,EffortSubmitReleasesBarrier
 session-lifecycle/EffortRestartUserFirst.cfg	TmuxSession	EffortContinuationFirst	-
 session-lifecycle/HerdrBusyHandoffAfterActiveEntry.cfg	HerdrBusyHandoff	-	-
 session-lifecycle/HerdrBusyHandoffAfterActiveRace.cfg	HerdrBusyHandoff	-	-

@@ -100,7 +100,7 @@ intent/witness는 이 명령의 미완료 작업과 기존 output 경계만 다�
 S4b 첫 리뷰의 P1 3건을 반영한 계약이다. 근거와 cutpoint별 표는 [effort-restart-s4b2.report.md](effort-restart-s4b2.report.md)에 있다.
 
 - intent는 kill 전에 owner snapshot에 `Prepared`(ready 아님, C ticket과 잘린 bind 포함)로 저장한다. kill 거절·실패는 같은 owner의 취소 commit으로 닫는다. kill 확인·정산·종료 witness 뒤에만 `Ready`가 되고, 그 뒤 C를 접수한다. 라이브, owner wake, 서버 재시작 복구는 같은 resolver로 이 단계를 이어 간다. 재시작 때 옛 TUI가 살아 있으면 취소, 없으면 같은 ticket으로 이어 간다.
-- `/clear`, 대기열 전체 취소, C 단일 취소, checked purge는 C를 지우는 owner commit 안에서 intent를 `Cancelled`로 닫는다. 시도 중이거나 전달 여부가 모호한 C는 기존 custody를 유지한다. 취소 표시는 늦게 도착한 ready가 같은 operation을 되살리지 못하게 남긴다.
+- `/clear`, 대기열 전체 취소, C 단일 취소, checked purge, 그리고 키 전송 전 시작 실패로 C를 보관하는 owner commit은 같은 commit 안에서 intent를 `Cancelled`로 닫는다. 시작 실패한 C의 보관 원본과 실패 안내는 그대로 남는다. 시도 중이거나 전달 여부가 모호한 C는 기존 custody를 유지한다. 취소 표시는 늦게 도착한 ready가 같은 operation을 되살리지 못하게 남긴다.
 - kill이 확인되면 전환 guard 아래 설정 write lock 한 번으로 그때까지 쌓인 relaunch·fast·model pending을 소비한다. 다음 launch가 그 값을 읽기 때문이다. 자동 이어하기 입력의 턴 시작은 세션을 초기화하지 않는다. 그 뒤에 저장된 변경은 다음 사용자 턴이 기존 규칙대로 적용한다.
 
 ## 명시적 중지의 선형화 지점

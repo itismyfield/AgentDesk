@@ -92,6 +92,16 @@ impl Fixture {
         read.await.unwrap()
     }
 
+    /// The owner's front, the input its drive may start next.
+    async fn front(&self) -> Option<u64> {
+        let mailbox = self.shared.mailbox(self.channel);
+        let read = mailbox.v2_request(|slot| {
+            let owner = slot.as_ref().ok_or("no owner")?;
+            Ok(owner.front().map(|front| front.1.message_id))
+        });
+        read.await.unwrap()
+    }
+
     fn ends(&self) -> Vec<restart_end::RestartEnd> {
         let root = crate::config::runtime_root().unwrap();
         restart_end::read(&root, self.channel.get()).unwrap()
@@ -285,12 +295,14 @@ async fn failed_end_keeps_turn_and_queue_and_owes_no_continuation_pg() {
                 "no end is recorded for a live process"
             );
             let owner = fx.owner().await;
-            assert!(owner["effort_restart"].is_null(), "{owner}");
+            let closed = &owner["effort_restart"]["cancelled"];
+            assert_eq!(closed, true, "the prepared continuation is closed: {owner}");
             assert_eq!(
                 queued(&owner, &[CONTINUE, "user-101"]),
                 [None, Some(0)],
                 "{owner}"
             );
+            assert_eq!(fx.front().await, Some(101), "no barrier is left behind");
             assert_eq!(fx.saved_level().await, (Some("high".to_string()), true));
             assert_eq!(notices(&fx).await, 0, "nothing was cut, nothing is told");
         })
