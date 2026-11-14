@@ -25,11 +25,8 @@ const TEST: &str =
     "services::discord::router::message_handler::headless_turn::isolated_context::tests::";
 
 struct Fixture {
-    _root: crate::config::TestRuntimeRootGuard,
-    _tmux: ModeTmux,
     /// Directory of the stub CLIs and their `release` file.
     stubs: std::path::PathBuf,
-    _clis: [crate::config::TestEnvVarGuard; 2],
     /// Records every runtime API call, the session status hook among them.
     api: Recorder,
     db: crate::db::auto_queue::test_support::TestPostgresDb,
@@ -37,12 +34,20 @@ struct Fixture {
     shared: Arc<SharedData>,
     registry: Arc<HealthRegistry>,
     _workdir: tempfile::TempDir,
+    // Environment guards restore in this order; the root guard holds the lock and goes last.
+    _clis: [crate::config::TestEnvVarGuard; 2],
+    _config: crate::config::TestEnvVarGuard,
+    _tmux: ModeTmux,
+    _root: crate::config::TestRuntimeRootGuard,
 }
 
 /// The provider CLI is pinned to a stub that holds its turn open until `release`, or until its
 /// directory goes away with a failed test, and then fails.
 async fn fixture() -> Fixture {
-    let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+    let root = crate::config::TestRuntimeRootGuard::new();
+    // A config override in the environment would hide the agent written under this root.
+    let unset = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock;
+    let config_override = unset("AGENTDESK_CONFIG");
     let workdir = tempfile::tempdir().unwrap();
     let mut config = crate::config::Config::default();
     config.agents.push(
@@ -116,16 +121,17 @@ async fn fixture() -> Fixture {
         .unwrap();
     }
     Fixture {
-        _root: root,
-        _tmux: tmux,
         stubs,
-        _clis: clis,
         api,
         db,
         pool,
         shared,
         registry,
         _workdir: workdir,
+        _clis: clis,
+        _config: config_override,
+        _tmux: tmux,
+        _root: root,
     }
 }
 
