@@ -1,3 +1,11 @@
+mod config {
+    pub mod test_instance {
+        pub fn requested() -> bool { false }
+        pub mod environment {
+            pub fn runtime_path() -> Result<Option<&'static str>, String> { Ok(None) }
+        }
+    }
+}
 mod services {
     #[path = "__ROOT__/src/services/claude_command.rs"]
     pub mod claude_command;

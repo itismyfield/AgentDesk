@@ -27,7 +27,6 @@ fn load_org_schema_for_auth()
     let Some(path) = org_schema_path() else {
         return Ok(None);
     };
-    crate::config::test_instance::environment::validate_path(&path)?;
     crate::services::org_catalog::read_auth_catalog_at(&path)
 }
 

@@ -39,7 +39,10 @@ impl Environment {
             ("CLAUDE_CONFIG_DIR", home_at(root, "claude")?),
             ("CODEX_HOME", home_at(root, "codex")?),
             ("AGENTDESK_ROOT_DIR", root.into()),
-            ("AGENTDESK_CONFIG", root.join("config/agentdesk.yaml")),
+            (
+                "AGENTDESK_CONFIG",
+                crate::config::config_path::canonical_config_path(root),
+            ),
             ("AGENTDESK_TEST_MANIFEST", root.join("manifest.json")),
             ("TMUX_TMPDIR", root.join("runtime/tmux")),
         ] {

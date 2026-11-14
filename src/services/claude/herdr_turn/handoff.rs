@@ -293,8 +293,11 @@ mod tests {
                     hook_endpoint: Some("http://127.0.0.1:9".into()),
                     cancel: None,
                 };
-                assert!(
-                    matches!(launched_source(&turn, runtime.handle(), &Ports), Err(error) if error == "test instance host declaration rejected")
+                assert_eq!(
+                    launched_source(&turn, runtime.handle(), &Ports)
+                        .err()
+                        .as_deref(),
+                    Some("herdr launch auth_overlay: test instance host declaration rejected")
                 );
             },
         );

@@ -299,7 +299,11 @@ fn test_instance_provider_rejects_default_unknown_foreign_and_linked_homes() {
             std::fs::copy(&org, &foreign).unwrap();
             std::fs::rename(&org, &saved).unwrap();
             symlink(&foreign, &org).unwrap();
+            assert!(crate::services::org_catalog::read_auth_catalog_at(&org).is_err());
             assert!(queries::provider_auth_catalog().is_empty());
+            assert!(queries::provider_auth_primary_profiles().is_empty());
+            assert!(queries::provider_auth_fallback_policies().is_empty());
+            assert!(queries::list_profile_bindings().is_empty());
             std::fs::remove_file(&org).unwrap();
             std::fs::rename(&saved, &org).unwrap();
             assert_eq!(queries::provider_auth_catalog().len(), 2);
