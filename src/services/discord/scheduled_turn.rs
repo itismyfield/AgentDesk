@@ -98,6 +98,10 @@ fn settle_turn_id(state: &InflightTurnState) -> Option<String> {
 }
 
 async fn row_effects(pool: Option<&PgPool>, state: &InflightTurnState) -> ChannelEffects {
+    // A per-run routine turn is isolated by its own pin, whatever its scheduled mark says.
+    if state.routine_presentation.isolated_run() {
+        return ChannelEffects::Suppressed;
+    }
     match &state.scheduled {
         ScheduledTurnMark::NotScheduled => ChannelEffects::Allowed,
         ScheduledTurnMark::Scheduled { isolated, .. } => {

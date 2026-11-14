@@ -76,6 +76,42 @@ fn only_a_scheduled_or_snapshot_headless_start_is_marked_scheduled() {
 }
 
 #[tokio::test]
+async fn a_per_run_routine_row_is_isolated_whatever_its_mark_and_an_unpinned_row_is_not() {
+    let per_run = |mark| {
+        let mut state = row(3, mark);
+        state.routine_presentation = state.routine_presentation.clone().isolate_run();
+        state
+    };
+    for mark in [
+        ScheduledTurnMark::NotScheduled,
+        ScheduledTurnMark::Legacy,
+        scheduled("t", false, None),
+    ] {
+        let stored = serde_json::to_string(&per_run(mark)).unwrap();
+        let state: InflightTurnState = serde_json::from_str(&stored).unwrap();
+        assert_eq!(
+            channel_effects(None, &[Some(&state)]).await,
+            ChannelEffects::Suppressed
+        );
+        // Restart recovery seeds no channel session from the run's provider session.
+        assert_eq!(channel_session_seed(None, &state).await, None);
+    }
+    // A row stored before the pin existed keeps its channel effects.
+    let mut old = serde_json::to_value(per_run(ScheduledTurnMark::NotScheduled)).unwrap();
+    let pin = old["routine_presentation"].as_object_mut().unwrap();
+    assert!(pin.remove("isolation").is_some());
+    let old: InflightTurnState = serde_json::from_value(old).unwrap();
+    assert_eq!(
+        channel_effects(None, &[Some(&old)]).await,
+        ChannelEffects::Allowed
+    );
+    assert_eq!(
+        channel_session_seed(None, &old).await.as_deref(),
+        Some("snapshot-provider-session")
+    );
+}
+
+#[tokio::test]
 async fn channel_effects_follow_the_mark_and_fail_closed_on_a_legacy_lookup_error() {
     let pool = unreachable_pool();
     let not_scheduled = row(11, ScheduledTurnMark::NotScheduled);

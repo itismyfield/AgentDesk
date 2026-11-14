@@ -306,9 +306,17 @@ pub(super) async fn run_completion_postlude(
     // tool_feedback analysis below, so the transcript is walked a single time.
     let memento_tool_call_observed =
         transcript_contains_explicit_memento_tool_call(&transcript_events);
+    let isolated_run_transcript = channel_writeback::isolated_run_transcript(
+        &inflight_state,
+        routine_attempt_owns_turn,
+        should_record_final_turn,
+    );
     let session_id_to_persist = {
         let mut data = shared_owned.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
+        if let Some(persist_transcript) = isolated_run_transcript {
+            should_persist_transcript = persist_transcript;
+            None
+        } else if let Some(session) = data.sessions.get_mut(&channel_id) {
             if let Some(memory_plan) = plan_turn_end_memory(
                 session,
                 capture_memory_settings.backend,

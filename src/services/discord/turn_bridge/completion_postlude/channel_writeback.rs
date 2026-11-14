@@ -108,6 +108,20 @@ pub(super) async fn resolve_completion_scope(
     (isolated, routine)
 }
 
+/// An isolated routine run plans nothing against the channel session: whether that session is
+/// live, cleared or absent, the run records only its own transcript, and only when its routine
+/// attempt owns the turn. `None` for every other turn, which plans against the channel session.
+pub(super) fn isolated_run_transcript(
+    inflight: &crate::services::discord::inflight::InflightTurnState,
+    routine_attempt_owns_turn: bool,
+    should_record_final_turn: bool,
+) -> Option<bool> {
+    inflight
+        .routine_presentation
+        .isolated_run()
+        .then_some(routine_attempt_owns_turn && should_record_final_turn)
+}
+
 /// What this completion proved about its turn, for the scheduled delivery.
 pub(in crate::services::discord::turn_bridge) struct ScheduledCompletion<'a> {
     /// The final answer was committed and recorded (not cancelled).
@@ -341,6 +355,39 @@ mod tests {
             .iter()
             .map(|item| (item.item_type, item.content.clone()))
             .collect()
+    }
+
+    #[test]
+    fn an_isolated_run_decides_its_transcript_without_the_channel_session() {
+        let shared_row = crate::services::discord::inflight::InflightTurnState::new(
+            crate::services::provider::ProviderKind::Claude,
+            8_117_401,
+            None,
+            7,
+            1,
+            2,
+            "routine prompt".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        let mut isolated_row = shared_row.clone();
+        isolated_row.routine_presentation = isolated_row.routine_presentation.isolate_run();
+        for (owns, record, persist) in [
+            (true, true, true),
+            (true, false, false),
+            (false, true, false),
+            (false, false, false),
+        ] {
+            // A shared turn is left to the channel session's own plan.
+            assert_eq!(isolated_run_transcript(&shared_row, owns, record), None);
+            assert_eq!(
+                isolated_run_transcript(&isolated_row, owns, record),
+                Some(persist)
+            );
+        }
     }
 
     #[test]

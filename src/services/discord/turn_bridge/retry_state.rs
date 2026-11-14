@@ -317,6 +317,7 @@ pub(super) async fn reset_session_for_auto_retry(
         None => None,
     };
 
+    let shares_channel_session = !inflight_state.routine_presentation.isolated_run();
     clear_local_session_state(new_session_id, new_raw_provider_session_id, inflight_state);
     let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
         inflight_state,
@@ -325,11 +326,13 @@ pub(super) async fn reset_session_for_auto_retry(
 
     let stale_sid = {
         let mut data = shared.core.lock().await;
-        let old = data
+        // An isolated routine run never held the channel's provider session.
+        let session = data
             .sessions
-            .get(&channel_id)
-            .and_then(|s| s.session_id.clone());
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            .get_mut(&channel_id)
+            .filter(|_| shares_channel_session);
+        let old = session.as_ref().and_then(|s| s.session_id.clone());
+        if let Some(session) = session {
             session.clear_provider_session();
         }
         old
@@ -422,6 +425,60 @@ mod tests {
         state.full_response = full_response.to_string();
         state.response_sent_offset = response_sent_offset;
         state
+    }
+
+    #[tokio::test]
+    async fn auto_retry_reset_clears_the_channel_session_only_for_a_run_that_shares_it() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        for (channel, isolated) in [(8_117_301, true), (8_117_302, false)] {
+            let channel_id = ChannelId::new(channel);
+            let mut state = inflight("", 0);
+            (state.channel_id, state.tmux_session_name) = (channel, None);
+            if isolated {
+                state.routine_presentation = state.routine_presentation.clone().isolate_run();
+            }
+            shared.core.lock().await.sessions.insert(
+                channel_id,
+                DiscordSession {
+                    session_id: Some("channel-sid".into()),
+                    memento_context_loaded: true,
+                    memento_reflected: false,
+                    current_path: None,
+                    history: Vec::new(),
+                    pending_uploads: Vec::new(),
+                    cleared: false,
+                    channel_id: Some(channel),
+                    channel_name: Some("primary".into()),
+                    category_name: None,
+                    last_active: tokio::time::Instant::now(),
+                    worktree: None,
+                    born_generation: shared.restart.current_generation,
+                },
+            );
+            let token = Arc::new(CancelToken::new());
+            let (mut run_sid, mut raw) = (Some("run-sid".to_string()), None);
+            let reset = reset_session_for_auto_retry(
+                &shared,
+                channel_id,
+                &token,
+                None,
+                &mut run_sid,
+                &mut raw,
+                &mut state,
+                "test",
+            )
+            .await;
+            assert!(matches!(reset, RetryReset::Cleared));
+            assert_eq!(run_sid, None, "the run's own session is reset either way");
+            let core = shared.core.lock().await;
+            let kept = &core.sessions[&channel_id];
+            assert_eq!(
+                (kept.session_id.is_some(), kept.memento_context_loaded),
+                (isolated, isolated),
+                "isolated={isolated}"
+            );
+        }
     }
 
     #[test]

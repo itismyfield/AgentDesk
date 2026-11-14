@@ -1,4 +1,5 @@
-//! Wire-only policy pinned at a routine start; terminal evidence never replaces the raw body.
+//! Policy pinned at a routine start: the wire-only presentation, whose terminal evidence never
+//! replaces the raw body, and whether the run is isolated from its channel's shared session.
 use crate::services::provider::ProviderKind;
 use serde::{Deserialize, Serialize};
 
@@ -7,6 +8,17 @@ use serde::{Deserialize, Serialize};
 pub(super) struct RoutinePresentation {
     policy: Policy,
     terminal: TerminalEvidence,
+    isolation: Isolation,
+}
+
+/// A per-run turn owns no channel state: every completer and recovery reads this pin, so a row
+/// written before the pin existed stays `Shared`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Isolation {
+    #[default]
+    Shared,
+    PerRun,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,7 +47,19 @@ pub(super) enum TerminalPresentation {
 
 impl RoutinePresentation {
     pub(super) fn is_legacy_default(&self) -> bool {
-        self.policy == Policy::Legacy && self.terminal == TerminalEvidence::Missing
+        self.policy == Policy::Legacy
+            && self.terminal == TerminalEvidence::Missing
+            && self.isolation == Isolation::Shared
+    }
+
+    /// Pins a headless routine run to its own per-run session.
+    pub(super) fn isolate_run(mut self) -> Self {
+        self.isolation = Isolation::PerRun;
+        self
+    }
+
+    pub(super) fn isolated_run(&self) -> bool {
+        self.isolation == Isolation::PerRun
     }
 
     pub(super) fn at_start(
@@ -53,6 +77,7 @@ impl RoutinePresentation {
                 Policy::Legacy
             },
             terminal: TerminalEvidence::Missing,
+            isolation: Isolation::Shared,
         }
     }
 
