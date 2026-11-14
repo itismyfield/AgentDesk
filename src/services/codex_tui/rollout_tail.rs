@@ -145,7 +145,6 @@ pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux<L: Into<PaneLiveness>>(
 }
 
 /// The launch retains its pinned sessions root until discovery and source publication finish.
-#[cfg(unix)]
 pub(crate) fn tail_fresh_launch<L: Into<PaneLiveness>>(
     context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
     cwd: &Path,
